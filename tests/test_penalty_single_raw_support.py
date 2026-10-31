@@ -3,9 +3,9 @@
 Discrete REML and EFS rebuild each smooth's SSP map ``C = R_inv`` whenever
 lambda moves. Because log pdet(C.T Omega C) = log pdet(Omega) +
 log det(U.T C C.T U) for an orthonormal range basis U of Omega, the raw support
-and its unit-weight summary are lambda-free and transfer between REML steps;
-the certified coordinate volume and the Weyl agreement with the stored solver
-penalty follow each map.
+is lambda-free and transfers between REML steps; the map's contribution and
+the Weyl agreement with the stored solver penalty follow each map.  The
+certified context, which the distributional smoother reads, encloses both.
 """
 
 import copy
@@ -49,19 +49,19 @@ def _fit(discrete):
     return SuperGLM(family="poisson", discrete=discrete, features=features).fit_reml(frame, y)
 
 
-def _solver_space(component):
+def _solver_space(component, *, certified=False):
     """The same component on its solver-space support, as before the raw path."""
     copied = replace(component)
-    algebra._attach_context_geometry([copied])
+    algebra._attach_context_geometry([copied], certified=certified)
     return copied
 
 
-def _context(omega, coordinate_map, source=None):
+def _context(omega, coordinate_map, source=None, *, certified=True):
     width = coordinate_map.shape[1]
     group = SimpleNamespace(name="s", sl=slice(0, width), size=width)
     matrix = SimpleNamespace(R_inv=coordinate_map, omega=omega)
     kwargs = {} if source is None else {"_reuse_raw_from": source}
-    return algebra.build_penalty_context([matrix], [(0, group)], **kwargs)[0]
+    return algebra.build_penalty_components([matrix], [(0, group)], certified=certified, **kwargs)
 
 
 def _second_differences(width):
@@ -134,7 +134,7 @@ def _weyl_bridge(stored, root):
 
 @pytest.mark.parametrize("discrete", [True, False])
 def test_fit_builds_each_penalty_support_once(monkeypatch, discrete):
-    counts = {"support": 0, "unit": 0}
+    counts = {"support": 0, "certified": 0}
     build_support = support_module._penalty_support
     summarize = kernel._evaluate_penalty_summary
 
@@ -142,64 +142,21 @@ def test_fit_builds_each_penalty_support_once(monkeypatch, discrete):
         counts["support"] += 1
         return build_support(*args, **kwargs)
 
-    def counted_summary(support, values, *args, **kwargs):
-        counts["unit"] += bool(np.all(np.asarray(values) == 1.0))
-        return summarize(support, values, *args, **kwargs)
+    def counted_summary(*args, **kwargs):
+        counts["certified"] += 1
+        return summarize(*args, **kwargs)
 
     monkeypatch.setattr(support_module, "_penalty_support", counted_support)
     monkeypatch.setattr(kernel, "_evaluate_penalty_summary", counted_summary)
     model = _fit(discrete)
     groups = {component.group_name for component in model._reml_penalties}
     assert len(groups) == 3
-    # Every REML step rebuilds the SSP maps; the raw selection must not follow.
-    assert counts["support"] <= len(groups)
-    assert counts["unit"] <= len(groups)
+    # Every REML step rebuilds the SSP maps; the raw selection must not follow,
+    # and the GLM path never runs the certified evaluation.
+    assert counts == {"support": len(groups), "certified": 0}
     geometries = [algebra._context_geometry([item]) for item in model._reml_penalties]
     assert all(geometry.coordinate_map is not None for geometry in geometries)
-    # The fitted model's terminal context hands nothing on, so it keeps no receipts.
-    assert all(
-        geometry.raw_family is None and geometry.raw_summary is None for geometry in geometries
-    )
-
-
-@pytest.mark.parametrize("path", ["direct", "scop"])
-def test_fitted_model_keeps_no_raw_receipts(monkeypatch, path):
-    from superglm import Constraint
-    from superglm.features.spline import PSpline
-    from superglm.reml.penalty_support import PenaltyNumericalError
-
-    # One spline is refused by the agreement and one admitted, so the final
-    # context holds a refusal and a family receipt until they are released.
-    agreement, refused = algebra._solver_penalty_agreement, []
-
-    def refuse_the_smaller_spline(support, stored, root, root_error):
-        if stored.shape[0] == 7:
-            refused.append(stored.shape)
-            raise PenaltyNumericalError("refused by the test")
-        return agreement(support, stored, root, root_error)
-
-    monkeypatch.setattr(algebra, "_solver_penalty_agreement", refuse_the_smaller_spline)
-    rng = np.random.default_rng(7)
-    x, z1, z2 = rng.uniform(size=(3, 400))
-    mean = np.exp(-0.2 + 0.8 * x + 0.4 * np.sin(5 * z1) + 0.3 * z2**2)
-    y = mean * rng.gamma(8.0, 1 / 8.0, size=400)
-    features = {"z1": Spline(kind="ps", k=8), "z2": Spline(kind="ps", k=10)}
-    if path == "scop":
-        features["x"] = PSpline(
-            n_knots=6, constraint=Constraint.fit.increasing, shape_engine="scop"
-        )
-    model = SuperGLM(family="gamma", selection_penalty=0.0, features=features)
-    model.fit_reml(pd.DataFrame({"x": x, "z1": z1, "z2": z2}), y, max_reml_iter=5)
-    geometries = {item.name: item._penalty_geometry for item in model._reml_penalties}
-    assert refused
-    assert geometries["z1"].coordinate_map is None
-    assert geometries["z2"].coordinate_map is not None
-    assert all(
-        geometry.raw_family is None
-        and geometry.raw_summary is None
-        and geometry.raw_refusal is None
-        for geometry in geometries.values()
-    )
+    assert not any(geometry.certified for geometry in geometries)
 
 
 def test_raw_support_has_the_solver_space_rank_and_log_lambda_derivatives():
@@ -210,11 +167,11 @@ def test_raw_support_has_the_solver_space_rank_and_log_lambda_derivatives():
     for component in model._reml_penalties:
         weights = {component.name: model._reml_lambdas[component.name]}
         geometry = algebra._context_geometry([component])
-        assert geometry.coordinate_map is not None and geometry.volume[0] != 0.0
-        raw = algebra._compute_penalty_logdet_evaluation(weights, [component])
+        assert geometry.coordinate_map is not None
+        raw = algebra.penalty_logdet(weights, [component])
         reference = _solver_space(component)
         assert algebra._context_geometry([reference]).coordinate_map is None
-        solver = algebra._compute_penalty_logdet_evaluation(weights, [reference])
+        solver = algebra.penalty_logdet(weights, [reference])
         assert raw.rank == solver.rank == component.rank
         assert raw.gradient == solver.gradient
         assert raw.hessian == solver.hessian
@@ -278,55 +235,6 @@ def test_stored_penalty_rounding_keeps_its_rank_and_log_determinant(small):
     assert evaluation.rank == (2 if a * d - b * c > 0 else 1)
 
 
-def test_later_context_reuses_the_support_gram_and_the_volume_products(monkeypatch):
-    _, omega = _second_differences(7)
-    coordinate_map = np.random.default_rng(5).normal(size=(7, 6))
-    first = _context(omega, coordinate_map)
-    support = algebra._context_geometry(first).support
-    evidence = support._basis_gram_evidence
-    assert evidence is not None
-    lefts, shared, factored, near_identity = [], [], [], []
-    originals = {
-        "_context_product": algebra._context_product,
-        "_shared_map_products": algebra._shared_map_products,
-        "_near_identity_logdet": algebra._near_identity_logdet,
-        "qr": algebra.scipy.linalg.qr,
-    }
-
-    def context_product(left, right, *, refine):
-        lefts.append(left)
-        return originals["_context_product"](left, right, refine=refine)
-
-    def shared_map_products(*args):
-        shared.append(originals["_shared_map_products"](*args))
-        return shared[-1]
-
-    def near_identity_logdet(gram, error):
-        near_identity.append(gram)
-        return originals["_near_identity_logdet"](gram, error)
-
-    def qr(matrix, *args, **kwargs):
-        factored.append(matrix)
-        return originals["qr"](matrix, *args, **kwargs)
-
-    # _matmul_enclosed stays unpatched: the receipts bind its identity.
-    monkeypatch.setattr(algebra, "_context_product", context_product)
-    monkeypatch.setattr(algebra, "_shared_map_products", shared_map_products)
-    monkeypatch.setattr(algebra, "_near_identity_logdet", near_identity_logdet)
-    monkeypatch.setattr(algebra.scipy.linalg, "qr", qr)
-    later = _context(omega, 2 * coordinate_map, source=first)
-    assert algebra._context_geometry(later).coordinate_map is not None
-    assert algebra._context_geometry(later).support is support
-    # Q.T Q depends only on the support, so the later context reuses its Gram.
-    # The volume factors the shared C.T Q and measures the shared Q.T Q, and
-    # the retained map takes both instead of forming either product again.
-    assert support._basis_gram_evidence is evidence
-    (products,) = shared
-    assert any(matrix is products[0] for matrix in factored)
-    assert any(gram is products[2] for gram in near_identity)
-    assert lefts and not any(np.shares_memory(left, support.Q_plus) for left in lefts)
-
-
 def test_admitted_rounded_map_certifies_the_stored_log_determinant():
     # S = [[1, 1], [1, fl(1 + 1e-6)]]: rounding moves ln det S from
     # ln det(C.T C) = ln 1e-6 by about 8e-11, far above the summary and volume
@@ -378,14 +286,12 @@ def test_scaled_contrast_fit_selects_the_solver_space_smoothing_parameter(monkey
 
     model = fit()
     # The solver-space support everywhere is the behaviour before the raw path.
-    monkeypatch.setattr(algebra, "_single_penalty_raw_family", lambda *args, **kwargs: None)
+    monkeypatch.setattr(algebra, "_plain_single_raw_route", lambda *args, **kwargs: None)
     reference = fit()
     assert model._reml_lambdas == reference._reml_lambdas
     assert model._reml_result.objective == reference._reml_result.objective
     ranks = [
-        algebra._compute_penalty_logdet_evaluation(
-            item._reml_lambdas, list(item._reml_penalties)
-        ).rank
+        algebra.penalty_logdet(item._reml_lambdas, list(item._reml_penalties)).rank
         for item in (model, reference)
     ]
     assert ranks[0] == ranks[1]
@@ -394,7 +300,7 @@ def test_scaled_contrast_fit_selects_the_solver_space_smoothing_parameter(monkey
 def _counted(monkeypatch, counts):
     for module, name in [
         (support_module, "_penalty_support"),
-        (algebra, "_support_coordinate_volume"),
+        (algebra, "_transported_roots"),
     ]:
         original = getattr(module, name)
 
@@ -413,23 +319,24 @@ def test_raw_rank_that_differs_from_the_declared_rank_keeps_the_solver_space_sup
     D = np.diff(np.eye(80), n=4, axis=0)
     omega = D.T @ D
     coordinate_map = np.linalg.inv(np.linalg.cholesky(np.eye(80) + omega).T)
-    counts = dict.fromkeys(["_penalty_support", "_support_coordinate_volume"], 0)
+    counts = dict.fromkeys(["_penalty_support", "_transported_roots"], 0)
     _counted(monkeypatch, counts)
-    components = _context(omega, coordinate_map)
+    components = _context(omega, coordinate_map, certified=False)
+    assert counts["_penalty_support"] == 1
     assert support_module._penalty_support([omega]).rank != components[0].rank
     geometry = algebra._context_geometry(components)
-    assert geometry.coordinate_map is None and geometry.raw_refusal is not None
-    evaluation = algebra._compute_penalty_logdet_evaluation({"s": 2.0}, components)
+    assert geometry.coordinate_map is None and geometry.raw_refused
+    evaluation = algebra.penalty_logdet({"s": 2.0}, components)
     reference = [_solver_space(components[0])]
-    assert evaluation == algebra._compute_penalty_logdet_evaluation({"s": 2.0}, reference)
+    assert evaluation == algebra.penalty_logdet({"s": 2.0}, reference)
     assert evaluation.rank == components[0].rank
-    # The rank check refuses before any map is certified, and a later context
-    # of the same fit carries the refusal instead of reselecting the support.
-    assert counts["_support_coordinate_volume"] == 0
+    # The rank check refuses before any map is used, and a later context of
+    # the same fit carries the refusal instead of reselecting the support.
+    assert counts["_transported_roots"] == 0
     counts["_penalty_support"] = 0
-    later = _context(omega, 2 * coordinate_map, source=components)
-    assert counts == {"_penalty_support": 0, "_support_coordinate_volume": 0}
-    assert algebra._context_geometry(later).raw_refusal is not None
+    later = _context(omega, 2 * coordinate_map, source=components, certified=False)
+    assert counts == {"_penalty_support": 0, "_transported_roots": 0}
+    assert algebra._context_geometry(later).raw_refused
 
 
 def _refused(case, monkeypatch):
@@ -471,12 +378,26 @@ def test_refused_raw_support_keeps_the_solver_space_rank_and_logdet(monkeypatch,
     components = _context(omega, coordinate_map)
     geometry = algebra._context_geometry(components)
     assert geometry.coordinate_map is None
+    evaluation = algebra._compute_penalty_logdet_evaluation({"s": 3.0}, components)
+    reference = [_solver_space(components[0], certified=True)]
+    assert evaluation == algebra._compute_penalty_logdet_evaluation({"s": 3.0}, reference)
+    assert evaluation.rank == components[0].rank
+
+
+@pytest.mark.parametrize(
+    "case", ["float32 map", "identity map", "truncating map", "asymmetric raw penalty"]
+)
+def test_plain_refusal_keeps_the_solver_space_rank_and_logdet(monkeypatch, case):
+    omega, coordinate_map = _refused(case, monkeypatch)
+    components = _context(omega, coordinate_map, certified=False)
+    geometry = algebra._context_geometry(components)
+    assert geometry.coordinate_map is None
     # Declined maps are cheap to recheck; refusals after raw work are carried.
     declined = case in {"float32 map", "identity map", "truncating map"}
-    assert (geometry.raw_refusal is None) is declined
-    evaluation = algebra._compute_penalty_logdet_evaluation({"s": 3.0}, components)
+    assert geometry.raw_refused is not declined
+    evaluation = algebra.penalty_logdet({"s": 3.0}, components)
     reference = [_solver_space(components[0])]
-    assert evaluation == algebra._compute_penalty_logdet_evaluation({"s": 3.0}, reference)
+    assert evaluation == algebra.penalty_logdet({"s": 3.0}, reference)
     assert evaluation.rank == components[0].rank
 
 
@@ -486,7 +407,10 @@ def test_unusable_maps_are_declined_before_any_raw_work():
     components = _context(omega, coordinate_map)
     for unusable in (np.where(np.eye(7, 6) > 0, np.nan, coordinate_map), coordinate_map[:, :5]):
         matrix = SimpleNamespace(R_inv=unusable, omega=omega)
-        assert algebra._single_penalty_raw_family(matrix, components, 5.0, None) is None
+        assert algebra._single_penalty_raw_family(matrix, components, 5.0) is None
+        assert (
+            algebra._plain_single_raw_route(matrix, components, 5.0, None, rank_rcond=None) is None
+        )
 
 
 @pytest.mark.parametrize("method", ["pickle protocol 4", "pickle protocol 5", "deepcopy"])
@@ -513,6 +437,7 @@ def test_reml_objective_moves_only_through_the_logdet():
     model = _fit(discrete=False)
     _, y = _data()
     penalties = list(model._reml_penalties)
+    assert not any(algebra._context_geometry([item]).certified for item in penalties)
     assert all(algebra._context_geometry([item]).coordinate_map is not None for item in penalties)
     solver_space = [_solver_space(component) for component in penalties]
     lambdas = model._reml_lambdas
@@ -536,7 +461,7 @@ def test_reml_objective_moves_only_through_the_logdet():
                 weight_semantics=model_weight_semantics(model),
             )
         )
-        logdets.append(algebra._compute_penalty_logdet_evaluation(lambdas, reml_penalties))
+        logdets.append(algebra.penalty_logdet(lambdas, reml_penalties))
     raw, solver = evaluations
     assert raw.penalty_quad == solver.penalty_quad
     # Poisson has a known scale, so the objective reports no nullity; compute

@@ -2,20 +2,24 @@
 
 Pre-computes per-term penalty eigenstructure (Wood 2011 Section 3.1) and
 provides log|S|₊ / ∂log|S|₊ / ∂²log|S|₊ for both single and multi-penalty
-groups.
+groups.  GLM REML evaluates them block by block (``penalty_logdet``); the
+distributional smoother's evaluator also bounds their rounding
+(``_compute_penalty_logdet_evaluation`` on a ``certified`` context).
 
 References
 ----------
 - Wood (2011): Fast stable restricted maximum likelihood and marginal
   likelihood estimation of semiparametric generalized linear models.
   JRSS-B 73(1), 3-36.
+- Wood, Pya and Saefken (2016): Smoothing parameter and model selection for
+  general smooth models. JASA 111, 1548-1563, section 3.1.1.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass, field, fields, is_dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import scipy.linalg
@@ -68,10 +72,17 @@ class TensorPairLogdetEvaluation:
     rank: float
     gradient: dict[str, float]
     hessian: dict[tuple[str, str], float]
-    logdet_error: float = 0.0
-    gradient_error: dict[str, float] = field(default_factory=dict)
-    hessian_error: dict[tuple[str, str], float] = field(default_factory=dict)
     support_rank: int | None = None
+
+
+@dataclass(frozen=True)
+class PenaltyLogdet:
+    """``log|S_lambda|_+``, its rank, and its gradient and Hessian in log weights."""
+
+    rank: int
+    logdet: float
+    gradient: dict[str, float]
+    hessian: dict[tuple[str, str], float]
 
 
 @dataclass(frozen=True)
@@ -463,350 +474,6 @@ def _component_geometry_key(component: PenaltyComponent) -> tuple:
     )
 
 
-def _raw_evidence_value(value, *, include_layout=False):
-    """Own exact static values for explicit fit-local handoffs."""
-    if isinstance(value, np.ndarray):
-        layout = (value.strides,) if include_layout else ()
-        return (np.ndarray, value.dtype.str, value.shape, *layout, value.tobytes())
-    if isinstance(value, tuple):
-        return (
-            tuple,
-            tuple(_raw_evidence_value(item, include_layout=include_layout) for item in value),
-        )
-    if is_dataclass(value):
-        return (
-            type(value),
-            tuple(
-                (
-                    item.name,
-                    _raw_evidence_value(getattr(value, item.name), include_layout=include_layout),
-                )
-                for item in fields(value)
-            ),
-        )
-    return (type(value), value)
-
-
-def _raw_evidence_readonly(value, *, include_bases=False) -> bool:
-    if isinstance(value, np.ndarray):
-        if not include_bases:
-            return not value.flags.writeable
-        backing = value
-        while isinstance(backing, np.ndarray | memoryview):
-            if isinstance(backing, np.ndarray):
-                if backing.flags.writeable:
-                    return False
-                backing = backing.base
-            else:
-                if not backing.readonly:
-                    return False
-                backing = backing.obj
-        return backing is None or isinstance(backing, bytes)
-    if isinstance(value, tuple):
-        return all(_raw_evidence_readonly(item, include_bases=include_bases) for item in value)
-    if is_dataclass(value):
-        return all(
-            _raw_evidence_readonly(getattr(value, item.name), include_bases=include_bases)
-            for item in fields(value)
-        )
-    return True
-
-
-def _raw_support_values(support) -> tuple:
-    # The basis-Gram memo is derived from these inputs and has its own token.
-    # It is not part of the selected mathematical support or its error ledger.
-    return tuple(
-        (item.name, getattr(support, item.name))
-        for item in fields(support)
-        if item.name != "_basis_gram_evidence"
-    )
-
-
-def _raw_penalty_arithmetic() -> tuple:
-    from superglm.reml import multi_penalty, penalty_support
-    from superglm.solvers import rank
-
-    return (
-        multi_penalty._EPS,
-        multi_penalty._UNIT_ROUNDOFF,
-        multi_penalty._SMALLEST_SUBNORMAL,
-        penalty_support._EPS,
-        _raw_evidence_value(rank.SHARED_RANK_POLICY),
-        _raw_evidence_value(multi_penalty.SHARED_RANK_POLICY),
-        _raw_evidence_value(penalty_support.SHARED_RANK_POLICY),
-        tuple(
-            getattr(multi_penalty, name, None)
-            for name in (
-                "_evaluate_penalty_summary",
-                "_evaluate_penalty_geometry",
-                "_matmul_enclosed",
-                "_reference_root_actions",
-                "_direct_candidate",
-                "_candidate_product",
-                "_native_product",
-                "_positive_product",
-                "_gamma",
-                "_upper",
-                "_finite_double",
-            )
-        ),
-        penalty_support._penalty_support,
-        penalty_support._penalty_support_from_roots,
-        penalty_support._component_root,
-        penalty_support.decompose_gram,
-    )
-
-
-def _raw_family_inputs(grouped: Sequence[PenaltyComponent], *, include_layout=False) -> tuple:
-    return tuple(
-        (
-            _component_geometry_key(component),
-            _raw_evidence_value(component.component_type),
-            _raw_evidence_value(component.lambda_policy),
-            _raw_evidence_value(np.asarray(component.omega_raw), include_layout=include_layout),
-        )
-        for component in grouped
-    )
-
-
-@dataclass(frozen=True)
-class _RawPenaltyFamilyReceipt:
-    support: object
-    inputs: tuple | _FixedPenaltyInputs
-    support_values: tuple
-    arithmetic: tuple
-    strict_arrays: bool = False
-
-    @classmethod
-    def capture(cls, support, grouped=None, *, inputs=None, arithmetic=None, strict_arrays=False):
-        return cls(
-            support,
-            _raw_family_inputs(grouped) if inputs is None else inputs,
-            _raw_evidence_value(_raw_support_values(support), include_layout=strict_arrays),
-            _raw_penalty_arithmetic() if arithmetic is None else arithmetic,
-            strict_arrays,
-        )
-
-    def matches_support(self, geometry) -> bool:
-        values = _raw_support_values(self.support)
-        return bool(
-            geometry.support is self.support
-            and self.arithmetic == _raw_penalty_arithmetic()
-            and _raw_evidence_readonly(values, include_bases=self.strict_arrays)
-            and self.support_values
-            == _raw_evidence_value(values, include_layout=self.strict_arrays)
-        )
-
-    def matches(self, geometry, source, target) -> bool:
-        return bool(
-            self.matches_support(geometry)
-            and self.inputs == _raw_family_inputs(source) == _raw_family_inputs(target)
-        )
-
-
-def _raw_summary_values(summary) -> tuple:
-    return tuple(
-        (item.name, getattr(summary, item.name))
-        for item in fields(summary)
-        if item.name != "_support"
-    )
-
-
-@dataclass(frozen=True)
-class _RawPenaltySummaryReceipt:
-    summary: object
-    support: object
-    weights: tuple[float, ...]
-    values: tuple
-    arithmetic: tuple
-
-    @classmethod
-    def capture(cls, summary, weights):
-        return cls(
-            summary,
-            summary._support,
-            weights,
-            _raw_evidence_value(_raw_summary_values(summary)),
-            _raw_penalty_arithmetic(),
-        )
-
-    def matches(self, geometry) -> bool:
-        values = _raw_summary_values(self.summary)
-        return bool(
-            geometry.last_weights == self.weights
-            and geometry.last_evaluation is not None
-            and geometry.last_evaluation[0] is self.summary
-            and geometry.support is self.support is self.summary._support
-            and all(value > 0 for value in self.weights)
-            and np.array_equal(self.summary._input_lambdas, self.weights)
-            and self.arithmetic == _raw_penalty_arithmetic()
-            and _raw_evidence_readonly(values)
-            and self.values == _raw_evidence_value(values)
-        )
-
-
-@dataclass(frozen=True)
-class _RawPenaltyRefusalReceipt:
-    """A refused single-penalty raw attempt that later contexts need not repeat.
-
-    It binds the same raw inputs and penalty arithmetic as the family receipt.
-    The group keeps its solver-space support for the rest of the fit, so each
-    later context costs the solver-space work plus this comparison.
-    """
-
-    inputs: tuple
-    arithmetic: tuple
-
-    @classmethod
-    def capture(cls, grouped):
-        return cls(_raw_family_inputs(grouped), _raw_penalty_arithmetic())
-
-    def matches(self, source, target) -> bool:
-        return bool(
-            self.arithmetic == _raw_penalty_arithmetic()
-            and self.inputs == _raw_family_inputs(source) == _raw_family_inputs(target)
-        )
-
-
-def _source_group_geometry(source, target):
-    if not source:
-        return None, []
-    indices = _group_penalties(list(source)).get(target[0].group_name, [])
-    originals = [source[index] for index in indices]
-    return (_context_geometry(originals) if originals else None), originals
-
-
-def _reusable_raw_refusal(source, target):
-    geometry, originals = _source_group_geometry(source, target)
-    if (
-        geometry is None
-        or geometry.raw_refusal is None
-        or not geometry.raw_refusal.matches(originals, target)
-    ):
-        return None
-    return geometry.raw_refusal
-
-
-def _reusable_raw_geometry(source, target):
-    geometry, originals = _source_group_geometry(source, target)
-    if (
-        geometry is None
-        or geometry.coordinate_map is None
-        or geometry.raw_family is None
-        or not geometry.raw_family.matches(geometry, originals, target)
-    ):
-        return None
-    return geometry
-
-
-def _fixed_tensor_target(index, group, gm) -> tuple:
-    # The unchanged GM and marginal-column identities bind the local tensor
-    # basis. Observation rows, bins and weights do not determine its penalty
-    # support and are deliberately not copied into this receipt.
-    return (
-        _penalty_group_cache_key(index, group, gm),
-        gm.tensor_id,
-        id(gm.B1_unique_t),
-        gm.B1_unique_t.shape[1],
-        id(gm.B2_unique_t),
-        gm.B2_unique_t.shape[1],
-        _raw_evidence_value(gm.R_inv, include_layout=True),
-    )
-
-
-def _fixed_component_summaries(grouped) -> tuple:
-    return _raw_evidence_value(
-        tuple((item.rank, item.log_det_omega_plus, item.eigvals_omega) for item in grouped),
-        include_layout=True,
-    )
-
-
-@dataclass(frozen=True)
-class _FixedPenaltyInputs:
-    """Construction-time inputs, before a fixed tensor needs its lazy support."""
-
-    target: tuple
-    family: tuple
-    matrices: tuple
-    summaries: tuple
-    arithmetic: tuple
-
-    @classmethod
-    def capture(cls, index, group, gm, grouped):
-        return cls(
-            _fixed_tensor_target(index, group, gm),
-            _raw_family_inputs(grouped, include_layout=True),
-            _raw_evidence_value(tuple(item.omega_ssp for item in grouped), include_layout=True),
-            _fixed_component_summaries(grouped),
-            _raw_penalty_arithmetic(),
-        )
-
-    def matches_support_inputs(self, geometry) -> bool:
-        return bool(
-            geometry.coordinate_map is None
-            and geometry.repeat == 1
-            and not geometry.matrix_error_bounds
-            and not geometry.ssp_roots
-            and not geometry.ssp_root_errors
-            and _raw_evidence_readonly(geometry.matrices, include_bases=True)
-            and self.matrices == _raw_evidence_value(geometry.matrices, include_layout=True)
-            and self.arithmetic == _raw_penalty_arithmetic()
-        )
-
-
-def _reuse_fixed_tensor_components(source, index, group, gm):
-    if not source or not _can_cache_penalty_group(gm):
-        return None
-    originals = [item for item in source if item.group_name == group.name]
-    if not originals:
-        return None
-    geometry = _context_geometry(originals)
-    if geometry is None or geometry.fixed_inputs is None or geometry.fixed_family is None:
-        return None
-    inputs = geometry.fixed_inputs
-    component_types = gm.component_types or {}
-    policies = gm.lambda_policies or {}
-    targets = [
-        PenaltyComponent(
-            name=f"{group.name}:{suffix}",
-            group_name=group.name,
-            group_index=index,
-            group_sl=group.sl,
-            omega_raw=omega,
-            component_type=component_types.get(suffix),
-            lambda_policy=policies.get(suffix),
-        )
-        for suffix, omega in gm.omega_components
-    ]
-    if not (
-        inputs.target == _fixed_tensor_target(index, group, gm)
-        and inputs.family
-        == _raw_family_inputs(originals, include_layout=True)
-        == _raw_family_inputs(targets, include_layout=True)
-        and inputs.summaries == _fixed_component_summaries(originals)
-        and _raw_evidence_readonly(
-            tuple(item.eigvals_omega for item in originals), include_bases=True
-        )
-        and inputs.matches_support_inputs(geometry)
-        and geometry.fixed_family.inputs is inputs
-        and geometry.fixed_family.matches_support(geometry)
-    ):
-        return None
-    # Copy descriptors and mutable owner state, but keep the admitted immutable
-    # solver matrices and selected support. The target consumes the receipt;
-    # no later handoff, weighted evaluation or face state inherits authority.
-    copied = [replace(item) for item in originals]
-    owner = _PenaltyGroupGeometry(
-        matrices=geometry.matrices,
-        keys=geometry.keys,
-        repeat=geometry.repeat,
-        support=geometry.support,
-    )
-    for item in copied:
-        item._penalty_geometry = owner
-    return copied
-
-
 @dataclass
 class _PenaltyGroupGeometry:
     """Immutable context inputs and one retained weight/volume evaluation."""
@@ -827,18 +494,21 @@ class _PenaltyGroupGeometry:
     last_evaluation: tuple | None = None
     volume_activity: tuple[bool, ...] | None = None
     volume: tuple[float, float] | None = None
-    raw_family: _RawPenaltyFamilyReceipt | None = None
-    raw_summary: _RawPenaltySummaryReceipt | None = None
-    raw_refusal: _RawPenaltyRefusalReceipt | None = None
-    fixed_inputs: _FixedPenaltyInputs | None = None
-    fixed_family: _RawPenaltyFamilyReceipt | None = None
+    # False for a context built for the plain block-wise evaluator, which
+    # carries no error ledgers; a model saved before that split is certified.
+    certified: bool = True
+    # Copies of the raw penalties the support was selected from, and whether
+    # this fit refused the raw route, for the next context of the same fit.
+    raw_inputs: tuple[NDArray, ...] | None = None
+    raw_refused: bool = False
+    # The plain evaluator's weight-independent pieces and last evaluation.
+    plain: _PlainBlock | None = None
 
     def __getstate__(self) -> dict:
-        # Function identities certify this fit's arithmetic. Pickle resolves
-        # names in the loading process, so it cannot retain that receipt.
+        # The plain block is derived from the support and map; a reloaded
+        # model rebuilds it on first use.
         state = self.__dict__.copy()
-        state["raw_family"] = state["raw_summary"] = state["raw_refusal"] = None
-        state["fixed_inputs"] = state["fixed_family"] = None
+        state["plain"] = None
         return state
 
     def __setstate__(self, state: dict) -> None:
@@ -861,16 +531,7 @@ class _PenaltyGroupGeometry:
         from superglm.reml.penalty_support import _penalty_support
 
         if self.support is None:
-            inputs = self.fixed_inputs
-            admitted = inputs is not None and inputs.matches_support_inputs(self)
             self.support = _penalty_support(self.matrices)
-            if admitted and inputs.matches_support_inputs(self):
-                self.fixed_family = _RawPenaltyFamilyReceipt.capture(
-                    self.support,
-                    inputs=inputs,
-                    arithmetic=inputs.arithmetic,
-                    strict_arrays=True,
-                )
         return self.support
 
     def evaluate(self, values: NDArray):
@@ -901,7 +562,6 @@ class _PenaltyGroupGeometry:
                 result = self._evaluate_face(values)
             evaluation = (result, 0.0, self.face_logdet_error)
             self.last_weights, self.last_evaluation = weights, evaluation
-            self.raw_summary = None
             return evaluation
         result = _evaluate_penalty_summary(self.get_support(), values)
         volume = (0.0, 0.0)
@@ -914,8 +574,6 @@ class _PenaltyGroupGeometry:
                 self.volume_activity, self.volume = activity, volume
         evaluation = (result, *volume)
         # A refused candidate never replaces the last complete evaluation.
-        if self.raw_family is not None:
-            self.raw_summary = _RawPenaltySummaryReceipt.capture(result, weights)
         self.last_weights, self.last_evaluation = weights, evaluation
         return evaluation
 
@@ -991,8 +649,11 @@ def _attach_context_geometry(
     matrix_errors=(),
     ssp_roots=(),
     ssp_errors=(),
-    raw_family=None,
     volume=None,
+    certified: bool = False,
+    raw_inputs: tuple[NDArray, ...] | None = None,
+    raw_refused: bool = False,
+    plain: _PlainBlock | None = None,
 ) -> None:
     if not grouped or any(component.omega_ssp is None for component in grouped):
         return
@@ -1013,9 +674,12 @@ def _attach_context_geometry(
         tuple(_frozen_array(bound) for bound in matrix_errors),
         ssp_roots,
         ssp_errors,
-        raw_family=raw_family,
+        certified=certified,
+        raw_inputs=raw_inputs,
+        raw_refused=raw_refused,
+        plain=plain,
     )
-    if coordinate_map is not None:
+    if coordinate_map is not None and certified:
         # Rank queries also rely on injectivity; certify it before exposing
         # the raw rank through this context, independently of positive weights.
         # A caller may pass the volume it already certified on this map.
@@ -1029,17 +693,203 @@ def _attach_context_geometry(
         component._penalty_geometry = geometry
 
 
-def _release_raw_reuse_receipts(components: Sequence[PenaltyComponent] | None) -> None:
-    """Drop raw handoff receipts from a context that no later context reuses.
+@dataclass
+class _PlainBlock:
+    """One group's weight-independent pieces for the plain block-wise evaluator.
 
-    Receipts carry byte copies of the raw support for the next REML context of
-    the same fit. A fitted model's final context keeps its geometry, map and
-    volume, but no handoff authority.
+    ``rank`` is the support rank of one repeat.  A single penalty keeps
+    ``constant``, its log-determinant at unit weight with the map's volume
+    included.  A multi-penalty group keeps its component ``roots`` in support
+    coordinates, the map's ``volume`` on that support, and, when its two
+    penalties are exactly ``A (x) I`` and ``I (x) B``, the margins' retained
+    eigenvalues in ``kronecker``.  ``faces`` holds each zero-weight pattern's
+    active support; ``last`` the last evaluation and its weights.
     """
-    for component in components or ():
-        geometry = getattr(component, "_penalty_geometry", None)
-        if geometry is not None:
-            geometry.raw_family = geometry.raw_summary = geometry.raw_refusal = None
+
+    rank: int
+    constant: float | None = None
+    roots: tuple[NDArray, ...] = ()
+    volume: float = 0.0
+    kronecker: tuple[NDArray, NDArray, bool] | None = None
+    faces: dict = field(default_factory=dict)
+    last: tuple | None = None
+
+
+def _support_roots(support) -> tuple[NDArray, ...]:
+    """Component roots in the coordinates of the support basis, ``R_j Q``."""
+    basis = np.ascontiguousarray(support.Q_plus)
+    return tuple(np.ascontiguousarray(root) @ basis for root in support.component_roots)
+
+
+def _transported_roots(support, coordinate_map: NDArray) -> tuple[NDArray, ...]:
+    """Each component root carried through the map, ``R_j Q (Q'Q)^-1 Q' C``.
+
+    The retained coordinates keep a root's residue off the support out of the
+    map's image; a full-width support needs no projection.
+    """
+    basis = support.Q_plus
+    if support.rank == basis.shape[0]:
+        return tuple(root @ coordinate_map for root in support.component_roots)
+    retained = scipy.linalg.solve(
+        basis.T @ basis, basis.T @ coordinate_map, assume_a="pos", check_finite=False
+    )
+    return tuple((root @ basis) @ retained for root in support.component_roots)
+
+
+def _map_volume(support, coordinate_map: NDArray | None) -> float:
+    from superglm.reml.penalty_blocks import map_volume
+    from superglm.reml.penalty_support import PenaltyNumericalError
+
+    if coordinate_map is None:
+        return 0.0
+    volume = map_volume(support.Q_plus, coordinate_map)
+    if volume is None:
+        raise PenaltyNumericalError("SSP coordinate map does not preserve penalty support")
+    return volume
+
+
+def _kronecker_margins(support, raw: Sequence[NDArray]) -> tuple[NDArray, NDArray, bool] | None:
+    """The margins' retained eigenvalues when the two raw penalties are a Kronecker pair.
+
+    Each margin keeps as many eigenvalues as its component's support root has
+    rows per repeat, so the rank decisions stay the support's; the pair is used
+    only when its cell count is the support rank.
+    """
+    from superglm.reml.penalty_blocks import kronecker_split
+
+    if len(raw) != 2 or any(matrix is None for matrix in raw):
+        return None
+    split = kronecker_split(raw[0], raw[1])
+    if split is None:
+        return None
+    p1, p2, left, right, swapped = split
+    rows = [len(root) for root in support.component_roots]
+    left_rows, right_rows = (rows[1], rows[0]) if swapped else (rows[0], rows[1])
+    if left_rows % p2 or right_rows % p1:
+        return None
+    left_rank, right_rank = left_rows // p2, right_rows // p1
+    margins = []
+    for matrix, rank in ((left, left_rank), (right, right_rank)):
+        values = np.linalg.eigvalsh(0.5 * (matrix + matrix.T))[::-1].copy()
+        if rank and not values[rank - 1] > 0:
+            return None
+        values[rank:] = 0.0
+        margins.append(values)
+    if p1 * p2 - (p1 - left_rank) * (p2 - right_rank) != support.rank:
+        return None
+    return margins[0], margins[1], swapped
+
+
+def _plain_multi_block(
+    support, coordinate_map: NDArray | None, raw: Sequence[NDArray] | None, previous=None
+) -> _PlainBlock:
+    """A multi-penalty block on its support; map-independent pieces come from ``previous``."""
+    if previous is not None:
+        roots, kronecker = previous.roots, previous.kronecker
+    else:
+        roots = _support_roots(support)
+        kronecker = None if raw is None else _kronecker_margins(support, raw)
+    return _PlainBlock(
+        support.rank,
+        roots=roots,
+        volume=_map_volume(support, coordinate_map),
+        kronecker=kronecker,
+    )
+
+
+def _plain_block(geometry, grouped: list[PenaltyComponent], matrices) -> _PlainBlock:
+    """The group's plain block, kept on its context when it has one."""
+    from superglm.reml.penalty_blocks import unit_logdet
+    from superglm.reml.penalty_support import _penalty_support
+
+    block = None if geometry is None else getattr(geometry, "plain", None)
+    if block is not None:
+        return block
+    if geometry is not None:
+        support, coordinate_map = geometry.get_support(), geometry.coordinate_map
+    else:
+        support, coordinate_map = _penalty_support(matrices), None
+    if len(grouped) == 1:
+        if coordinate_map is None:
+            constant = unit_logdet(_support_roots(support)) if support.rank else 0.0
+        else:
+            singular = scipy.linalg.svdvals(_transported_roots(support, coordinate_map)[0])
+            constant = 2.0 * math.fsum(np.log(singular).tolist())
+        block = _PlainBlock(support.rank, constant=constant)
+    else:
+        raw = (
+            tuple(component.omega_raw for component in grouped)
+            if coordinate_map is not None
+            else None
+        )
+        block = _plain_multi_block(support, coordinate_map, raw)
+    if geometry is not None:
+        geometry.plain = block
+    return block
+
+
+def _plain_block_evaluate(
+    block: _PlainBlock, geometry, matrices, values: NDArray
+) -> tuple[int, float, NDArray, NDArray]:
+    """Rank, ``log|S|_+``, gradient and Hessian of one multi-penalty block at ``values``."""
+    from superglm.reml.penalty_blocks import kronecker_sum_logdet, multi_penalty_logdet
+    from superglm.reml.penalty_support import _penalty_support, _penalty_support_from_roots
+
+    weights = tuple(map(float, values))
+    if block.last is not None and block.last[0] == weights:
+        return block.last[1]
+    count = len(weights)
+    active = np.asarray(values) > 0
+    if block.rank == 0:
+        result = (0, 0.0, np.zeros(count), np.zeros((count, count)))
+    elif np.all(active):
+        if block.kronecker is not None:
+            left, right, swapped = block.kronecker
+            left_weight, right_weight = (weights[1], weights[0]) if swapped else weights
+            with np.errstate(divide="ignore"):
+                logdet, gradient, hessian, _ = kronecker_sum_logdet(
+                    math.log(left_weight) + np.log(left), math.log(right_weight) + np.log(right)
+                )
+            if swapped:
+                gradient, hessian = gradient[::-1], hessian[::-1, ::-1]
+        else:
+            logdet, gradient, hessian = multi_penalty_logdet(block.roots, np.asarray(weights))
+        result = (block.rank, math.fsum([logdet, block.volume]), gradient, hessian)
+    else:
+        pattern = tuple(bool(item) for item in active)
+        face = block.faces.get(pattern)
+        if face is None:
+            support = geometry.get_support() if geometry is not None else _penalty_support(matrices)
+            width = support.Q_plus.shape[0]
+            roots = [
+                root if on else np.empty((0, width))
+                for root, on in zip(support.component_roots, pattern, strict=True)
+            ]
+            selected = _penalty_support_from_roots(
+                roots,
+                resolution_limited=support.component_resolution_limited,
+                input_error_bounds=[np.zeros_like(root) for root in roots],
+            )
+            coordinate_map = None if geometry is None else geometry.coordinate_map
+            face = (
+                selected.rank,
+                _support_roots(selected),
+                _map_volume(selected, coordinate_map) if selected.rank else 0.0,
+            )
+            block.faces[pattern] = face
+        rank, roots, volume = face
+        gradient, hessian = np.zeros(count), np.zeros((count, count))
+        logdet = 0.0
+        if rank:
+            indices = np.flatnonzero(active)
+            logdet, local_gradient, local_hessian = multi_penalty_logdet(
+                [roots[index] for index in indices], np.asarray(weights)[indices]
+            )
+            gradient[indices] = local_gradient
+            hessian[np.ix_(indices, indices)] = local_hessian
+        result = (rank, math.fsum([logdet, volume]), gradient, hessian)
+    block.last = (weights, result)
+    return result
 
 
 def _rebind_penalty_context(
@@ -1127,6 +977,7 @@ def _rebind_penalty_context(
             ssp_refined=geometry.ssp_refined,
             volume_activity=geometry.volume_activity,
             volume=geometry.volume,
+            certified=geometry.certified,
         )
         for component in targets:
             component._penalty_geometry = owner
@@ -1778,19 +1629,19 @@ def evaluate_tensor_pair_logdet_summaries(
     summaries: dict[str, TensorPairLogdetSummary],
     lambdas: dict[str, float],
 ) -> dict[str, TensorPairLogdetEvaluation]:
-    """Evaluate cached tensor summaries for one lambda dictionary."""
+    """Evaluate cached tensor summaries for one lambda dictionary (``kronecker_sum_logdet``)."""
+    from superglm.reml.penalty_blocks import kronecker_sum_logdet
+
     evaluations: dict[str, TensorPairLogdetEvaluation] = {}
-    unit = UNIT_ROUNDOFF
     eps_thresh = PENALTY_RANK_CUT
 
     def marginal_logs(
         values: NDArray, weight: float, structural_rank: int | None
-    ) -> tuple[NDArray, NDArray, NDArray]:
+    ) -> tuple[NDArray, NDArray]:
         values = np.asarray(values, dtype=float)
         if values.ndim != 1 or not np.all(np.isfinite(values)) or np.any(values < 0.0):
             raise ValueError("tensor marginal spectra must be finite and non-negative")
         logs = np.full(values.shape, -np.inf)
-        errors = np.zeros(values.shape)
         positive = values > eps_thresh * float(np.max(values, initial=0.0))
         if structural_rank is not None:
             positive = np.zeros(values.shape, dtype=bool)
@@ -1798,13 +1649,8 @@ def evaluate_tensor_pair_logdet_summaries(
         if weight > 0.0:
             # The unweighted marginal representative fixes support. No weighted
             # cutoff is allowed, including when a weighted eigenvalue overflows.
-            log_weight = math.log(weight)
-            log_values = np.log(values[positive])
-            logs[positive] = log_weight + log_values
-            errors[positive] = (
-                4 * unit * (1 + abs(log_weight) + np.abs(log_values) + np.abs(logs[positive]))
-            )
-        return logs, errors, positive
+            logs[positive] = math.log(weight) + np.log(values[positive])
+        return logs, positive
 
     for group_name, summary in summaries.items():
         left_name, right_name = summary.lambda_names
@@ -1812,82 +1658,23 @@ def evaluate_tensor_pair_logdet_summaries(
         lam_right = float(lambdas.get(right_name, 1.0))
         if any(not math.isfinite(value) or value < 0 for value in (lam_left, lam_right)):
             raise ValueError("smoothing parameters must be finite and non-negative")
-        left, left_error, left_positive = marginal_logs(
-            summary.eigvals_left, lam_left, summary.rank_left
-        )
-        right, right_error, right_positive = marginal_logs(
-            summary.eigvals_right, lam_right, summary.rank_right
-        )
-        cell_log = np.logaddexp(left[:, None], right[None, :])
-        active = np.isfinite(cell_log)
-        left_log = np.broadcast_to(left[:, None], cell_log.shape)[active]
-        right_log = np.broadcast_to(right[None, :], cell_log.shape)[active]
-        retained = cell_log[active]
-        left_bound = np.broadcast_to(left_error[:, None], cell_log.shape)[active]
-        right_bound = np.broadcast_to(right_error[None, :], cell_log.shape)[active]
-        cell_bound = np.maximum(left_bound, right_bound) + 4 * unit * (1 + np.abs(retained))
-        left_fraction = np.exp(left_log - retained)
-        right_fraction = np.exp(right_log - retained)
-        # A one-sided cell contributes exactly one to its active derivative.
-        left_fraction[~np.isfinite(right_log)] = 1.0
-        right_fraction[~np.isfinite(left_log)] = 1.0
-
-        def fraction_bound(logs, fractions, input_bound):
-            bound = np.zeros(fractions.shape)
-            finite = np.isfinite(logs)
-            perturbation = (
-                input_bound[finite]
-                + cell_bound[finite]
-                + unit * np.abs(logs[finite] - retained[finite])
-            )
-            bound[finite] = fractions[finite] * (np.expm1(perturbation) + 4 * unit)
-            bound[finite] += np.nextafter(0.0, 1.0)
-            return bound
-
-        left_fraction_bound = fraction_bound(left_log, left_fraction, left_bound)
-        right_fraction_bound = fraction_bound(right_log, right_fraction, right_bound)
-        cross_terms = left_fraction * right_fraction
-        cross = math.fsum(cross_terms)
-        logdet = math.fsum(retained)
-        grad = {left_name: math.fsum(left_fraction), right_name: math.fsum(right_fraction)}
-        hess = {
-            (left_name, left_name): cross,
-            (right_name, right_name): cross,
-            (left_name, right_name): -cross,
-            (right_name, left_name): -cross,
-        }
-        rank = int(np.count_nonzero(active))
-        # logaddexp is 1-Lipschitz in the infinity norm. Exp propagates an
-        # input perturbation d as expm1(d); the product bound expands both
-        # factors. The 4u elementary-function allowance is our float64 libm
-        # policy. These bounds concern the selected marginal spectra only.
-        inflation = 1.0 / (1.0 - (16 + 4 * rank) * unit)
-        logdet_error = inflation * (math.fsum(cell_bound) + 2 * unit * abs(logdet))
-        gradient_error = {
-            left_name: inflation * (math.fsum(left_fraction_bound) + 2 * unit * grad[left_name]),
-            right_name: inflation * (math.fsum(right_fraction_bound) + 2 * unit * grad[right_name]),
-        }
-        cross_error = inflation * (
-            math.fsum(
-                left_fraction * right_fraction_bound
-                + right_fraction * left_fraction_bound
-                + left_fraction_bound * right_fraction_bound
-                + 2 * unit * cross_terms
-            )
-            + 2 * unit * cross
-        )
-
+        left, left_positive = marginal_logs(summary.eigvals_left, lam_left, summary.rank_left)
+        right, right_positive = marginal_logs(summary.eigvals_right, lam_right, summary.rank_right)
+        logdet, gradient, hessian, rank = kronecker_sum_logdet(left, right)
+        cross = float(hessian[0, 0])
         evaluations[group_name] = TensorPairLogdetEvaluation(
             group_name=group_name,
             tensor_id=summary.tensor_id,
             lambda_names=summary.lambda_names,
             logdet_s_plus=logdet,
             rank=rank,
-            gradient=grad,
-            hessian=hess,
-            logdet_error=logdet_error,
-            gradient_error=gradient_error,
-            hessian_error={key: cross_error for key in hess},
+            gradient={left_name: float(gradient[0]), right_name: float(gradient[1])},
+            hessian={
+                (left_name, left_name): cross,
+                (right_name, right_name): cross,
+                (left_name, right_name): -cross,
+                (right_name, left_name): -cross,
+            },
             support_rank=int(np.count_nonzero(left_positive[:, None] | right_positive[None, :])),
         )
     return evaluations
@@ -2029,8 +1816,8 @@ def build_penalty_components(
     reml_groups: list[tuple[int, object]],
     cache: dict | None = None,
     *,
+    certified: bool = False,
     _reuse_raw_from: Sequence[PenaltyComponent] | None = None,
-    _reuse_fixed_from: Sequence[PenaltyComponent] | None = None,
 ) -> list[PenaltyComponent]:
     """Build PenaltyComponent list — the single source of penalty eigenstructure.
 
@@ -2045,6 +1832,14 @@ def build_penalty_components(
     ----------
     group_matrices : list of GroupMatrix
     reml_groups : list of (group_index, GroupSlice) tuples
+    certified : bool
+        Build the error ledgers the distributional smoother's certified
+        evaluator reads (``_compute_penalty_logdet_evaluation``).  Otherwise
+        the context serves the plain block-wise evaluator (``penalty_logdet``).
+    _reuse_raw_from : list of PenaltyComponent
+        The previous context of the same fit.  A plain context takes over a
+        group's selected support, and a refused raw route, whenever the
+        penalties it was selected from are unchanged.
 
     Returns
     -------
@@ -2053,6 +1848,7 @@ def build_penalty_components(
     components: list[PenaltyComponent] = []
     component_cache = None if cache is None else cache.setdefault("penalty_components", {})
     eps_thresh = PENALTY_RANK_CUT
+    previous = {} if certified else _plain_geometries(_reuse_raw_from)
 
     def _canonicalize_ssp_penalty(
         omega_ssp: NDArray,
@@ -2175,18 +1971,14 @@ def build_penalty_components(
         if cache_key is not None and cache_key in component_cache:
             components.extend(component_cache[cache_key])
             continue
-        fixed_components = _reuse_fixed_tensor_components(_reuse_fixed_from, idx, g, gm)
-        if fixed_components is not None:
-            if cache_key is not None:
-                component_cache[cache_key] = tuple(fixed_components)
-            components.extend(fixed_components)
-            continue
 
         group_components: list[PenaltyComponent] = []
         structural_ranks = getattr(gm, "structural_ranks", None) or {}
         raw_support = None
         raw_coordinate_map = None
-        raw_family = reused_geometry = raw_volume = raw_refusal = None
+        raw_volume = raw_inputs = plain_block = None
+        raw_refused = False
+        prior = previous.get(g.name)
         group_ssp_roots = group_ssp_errors = ()
         matrix_errors = []
 
@@ -2257,7 +2049,7 @@ def build_penalty_components(
                             block_width=gm.block_size,
                         )
                     )
-                _attach_context_geometry(group_components)
+                _attach_context_geometry(group_components, certified=certified)
                 components.extend(group_components)
                 continue
             for suffix, omega_j in gm.repeated_penalty_components:
@@ -2295,29 +2087,25 @@ def build_penalty_components(
 
                     if not np.all(np.isfinite(coordinate_map)):
                         raise ValueError("SSP coordinate map must be finite")
-                    raw_targets = [
-                        PenaltyComponent(
-                            name=f"{g.name}:{suffix}",
-                            group_name=g.name,
-                            group_index=idx,
-                            group_sl=g.sl,
-                            omega_raw=omega,
-                            component_type=ct_map.get(suffix),
-                            lambda_policy=lp_map.get(suffix),
-                        )
-                        for suffix, omega in gm.omega_components
-                    ]
-                    reused_geometry = _reusable_raw_geometry(_reuse_raw_from, raw_targets)
-                    if reused_geometry is None:
-                        raw_support = _penalty_support([omega for _, omega in gm.omega_components])
-                        raw_family = _RawPenaltyFamilyReceipt.capture(raw_support, raw_targets)
-                    else:
-                        raw_support = reused_geometry.support
-                        raw_family = reused_geometry.raw_family
                     raw_coordinate_map = coordinate_map
-                    group_ssp_roots, group_ssp_errors = _ssp_component_roots(
-                        raw_support, coordinate_map
-                    )
+                    if certified:
+                        raw_support = _penalty_support([omega for _, omega in gm.omega_components])
+                        group_ssp_roots, group_ssp_errors = _ssp_component_roots(
+                            raw_support, coordinate_map
+                        )
+                    else:
+                        raw_inputs = tuple(_frozen_array(omega) for _, omega in gm.omega_components)
+                        reused = _reusable_raw_context(prior, raw_inputs)
+                        raw_support = (
+                            _penalty_support(list(raw_inputs)) if reused is None else reused.support
+                        )
+                        group_ssp_roots = _transported_roots(raw_support, coordinate_map)
+                        plain_block = _plain_multi_block(
+                            raw_support,
+                            coordinate_map,
+                            raw_inputs,
+                            previous=None if reused is None else reused.plain,
+                        )
             for component_index, (suffix, omega_j) in enumerate(gm.omega_components):
                 tensor_summary = _tensor_marginal_rank_logdet(
                     gm,
@@ -2330,9 +2118,13 @@ def build_penalty_components(
                     # Independent eigen-truncations of transformed Grams can
                     # rotate their null spaces and invent a union direction.
                     root = group_ssp_roots[component_index]
-                    root_error = group_ssp_errors[component_index]
-                    omega_ssp_j, matrix_error = _enclosed_root_gram(root, root_error)
-                    matrix_errors.append(matrix_error)
+                    if certified:
+                        omega_ssp_j, matrix_error = _enclosed_root_gram(
+                            root, group_ssp_errors[component_index]
+                        )
+                        matrix_errors.append(matrix_error)
+                    else:
+                        omega_ssp_j = root.T @ root
                     singular = scipy.linalg.svdvals(root, check_finite=False)
                     rank = float(len(singular))
                     if np.any(singular <= 0):
@@ -2411,25 +2203,30 @@ def build_penalty_components(
                 )
                 < structural
             )
-            raw = (
-                None
-                if force_solver_rank or lifted
-                else _single_penalty_raw_family(
-                    gm, group_components, rank, _reuse_raw_from, rank_rcond=eps_thresh
+            if force_solver_rank or lifted:
+                pass
+            elif certified:
+                raw = _single_penalty_raw_family(gm, group_components, rank, rank_rcond=eps_thresh)
+                if raw:
+                    (
+                        raw_support,
+                        raw_coordinate_map,
+                        group_ssp_roots,
+                        group_ssp_errors,
+                        raw_volume,
+                    ) = raw
+            else:
+                route = _plain_single_raw_route(
+                    gm, group_components, rank, prior, rank_rcond=eps_thresh
                 )
-            )
-            if isinstance(raw, _RawPenaltyRefusalReceipt):
-                raw_refusal, raw = raw, None
-            if raw is not None:
-                (
-                    raw_support,
-                    raw_family,
-                    reused_geometry,
-                    raw_coordinate_map,
-                    group_ssp_roots,
-                    group_ssp_errors,
-                    raw_volume,
-                ) = raw
+                if route is not None:
+                    raw_inputs, raw_support, raw_coordinate_map, plain_block = route
+                    raw_refused = raw_support is None
+        if raw_support is None and plain_block is None and prior is not None:
+            # A solver-space support follows its matrices unchanged.
+            reused = _reusable_solver_context(prior, group_components)
+            if reused is not None:
+                raw_support, plain_block = reused.support, reused.plain
         _attach_context_geometry(
             group_components,
             support=raw_support,
@@ -2437,29 +2234,12 @@ def build_penalty_components(
             matrix_errors=matrix_errors,
             ssp_roots=group_ssp_roots,
             ssp_errors=group_ssp_errors,
-            raw_family=raw_family,
             volume=raw_volume,
+            certified=certified,
+            raw_inputs=raw_inputs,
+            raw_refused=raw_refused,
+            plain=plain_block,
         )
-        if raw_refusal is not None:
-            _context_geometry(group_components).raw_refusal = raw_refusal
-        if can_cache_group and _reuse_fixed_from is None:
-            # Only the cache-backed producer needs handoff authority. Entry
-            # descriptors and handoff destinations, including fresh fallbacks,
-            # must not retain these duplicate input snapshots.
-            for component in group_components:
-                if component.eigvals_omega is not None:
-                    component.eigvals_omega = _frozen_array(component.eigvals_omega)
-            geometry = _context_geometry(group_components)
-            geometry.fixed_inputs = _FixedPenaltyInputs.capture(idx, g, gm, group_components)
-        if reused_geometry is not None:
-            receipt = reused_geometry.raw_summary
-            if receipt is not None and receipt.matches(reused_geometry):
-                geometry = _context_geometry(group_components)
-                # The raw result is map-independent. Its new owner uses only
-                # the fresh map's admitted volume and starts with no face state.
-                geometry.last_weights = receipt.weights
-                geometry.last_evaluation = (receipt.summary, *geometry.volume)
-                geometry.raw_summary = receipt
         if cache_key is not None:
             component_cache[cache_key] = tuple(group_components)
         components.extend(group_components)
@@ -2554,7 +2334,6 @@ def build_penalty_context(
     cache: dict | None = None,
     *,
     _reuse_raw_from: Sequence[PenaltyComponent] | None = None,
-    _reuse_fixed_from: Sequence[PenaltyComponent] | None = None,
 ) -> tuple[list[PenaltyComponent], dict[str, PenaltyCache], dict[str, float]]:
     """Build penalty components, caches, and rank lookup in one pass."""
     components = build_penalty_components(
@@ -2562,7 +2341,6 @@ def build_penalty_context(
         reml_groups,
         cache=cache,
         _reuse_raw_from=_reuse_raw_from,
-        _reuse_fixed_from=_reuse_fixed_from,
     )
     caches = {
         c.name: PenaltyCache(
@@ -2611,7 +2389,7 @@ def cached_logdet_s_plus(
                 penalty_kind="identity" if identity else "dense",
             )
         )
-    return _compute_penalty_logdet_evaluation(lambdas, penalties).logdet
+    return penalty_logdet(lambdas, penalties).logdet
 
 
 def _group_penalty_matrices(grouped: list[PenaltyComponent]) -> tuple[list[NDArray], int]:
@@ -2782,8 +2560,8 @@ def compute_logdet_s_plus(
     penalties: list[PenaltyComponent],
     tensor_pair_evaluations: dict[str, TensorPairLogdetEvaluation] | None = None,
 ) -> float:
-    """Return the determinant of the common checked component representative."""
-    return _compute_penalty_logdet_evaluation(lambdas, penalties, tensor_pair_evaluations).logdet
+    """``log|S_lambda|_+``, block by block (``penalty_logdet``)."""
+    return penalty_logdet(lambdas, penalties, tensor_pair_evaluations).logdet
 
 
 def compute_logdet_s_derivatives(
@@ -2791,12 +2569,102 @@ def compute_logdet_s_derivatives(
     penalties: list[PenaltyComponent],
     tensor_pair_evaluations: dict[str, TensorPairLogdetEvaluation] | None = None,
 ) -> tuple[dict[str, float], dict[tuple[str, str], float]]:
-    """Return log-lambda determinant derivatives on the checked support."""
-    evaluation = _compute_penalty_logdet_evaluation(lambdas, penalties, tensor_pair_evaluations)
+    """Gradient and Hessian of ``log|S_lambda|_+`` in log weights (``penalty_logdet``)."""
+    evaluation = penalty_logdet(lambdas, penalties, tensor_pair_evaluations)
     return evaluation.gradient, evaluation.hessian
 
 
-def _single_penalty_raw_family(gm, grouped, declared_rank, source, *, rank_rcond=None):
+def penalty_logdet(
+    lambdas: dict[str, float],
+    penalties: list[PenaltyComponent],
+    tensor_pair_evaluations: dict[str, TensorPairLogdetEvaluation] | None = None,
+) -> PenaltyLogdet:
+    """``log|S_lambda|_+`` and its log-weight derivatives, one coefficient block at a time.
+
+    Wood, Pya and Saefken (2016), sec. 3.1.1: an identity or single-penalty
+    block adds ``rank log(lambda)`` to its unit-weight log-determinant, with
+    gradient ``rank`` and no Hessian; a multi-penalty block is evaluated at its
+    weights after the Wood (2011) Appendix B transform, or in closed form when
+    it is a Kronecker sum (``penalty_blocks``).  Ranks come from each group's
+    selected support, as in the context that built it; a supplied tensor-pair
+    evaluation stands in for its group.
+    """
+    values = np.asarray([lambdas.get(component.name, 1.0) for component in penalties], dtype=float)
+    if not np.all(np.isfinite(values)) or np.any(values < 0):
+        raise ValueError("smoothing parameters must be finite and non-negative")
+    names = [component.name for component in penalties]
+    if len(set(names)) != len(names):
+        raise ValueError("penalty component names must be unique")
+    gradient = dict.fromkeys(names, 0.0)
+    hessian: dict[tuple[str, str], float] = {}
+    log_terms = []
+    rank = 0
+    for group_name, indices in _group_penalties(penalties).items():
+        grouped = [penalties[index] for index in indices]
+        group_names = [component.name for component in grouped]
+        group_values = values[indices]
+        for name_i in group_names:
+            for name_j in group_names:
+                hessian[name_i, name_j] = 0.0
+        if not np.any(group_values > 0):
+            continue
+        if tensor_pair_evaluations is not None and group_name in tensor_pair_evaluations:
+            evaluation = tensor_pair_evaluations[group_name]
+            rank += int(evaluation.rank)
+            log_terms.append(evaluation.logdet_s_plus)
+            gradient.update(evaluation.gradient)
+            hessian.update(evaluation.hessian)
+            continue
+        component = grouped[0]
+        if len(grouped) == 1 and component.penalty_kind == "identity":
+            group_rank = component.group_sl.stop - component.group_sl.start
+            rank += group_rank
+            log_terms.append(group_rank * math.log(float(group_values[0])))
+            gradient[component.name] = float(group_rank)
+            continue
+        extra_volume = 0.0
+        geometry = _context_geometry(grouped)
+        if len(grouped) == 1 and component.penalty_kind == "sum_to_zero":
+            levels, _ = _sum_to_zero_penalty_geometry(component)
+            matrices = [_penalty_component_omega_ssp(component)]
+            repeat = levels - 1
+            extra_volume = math.log(levels)
+        elif geometry is not None:
+            matrices, repeat = geometry.matrices, geometry.repeat
+            if component.penalty_kind == "sum_to_zero":
+                # The local blocks repeat K - 1 times under (I + 1 1') kron P,
+                # whose determinant adds rank(P) log K.
+                extra_volume = math.log(_sum_to_zero_penalty_geometry(component)[0])
+        else:
+            matrices, repeat = _group_penalty_matrices(grouped)
+        block = _plain_block(geometry, grouped, matrices)
+        if len(grouped) == 1:
+            group_rank = repeat * block.rank
+            rank += group_rank
+            log_terms.append(
+                math.fsum(
+                    [
+                        repeat * block.constant,
+                        block.rank * extra_volume,
+                        group_rank * math.log(float(group_values[0])),
+                    ]
+                )
+            )
+            gradient[component.name] = float(group_rank)
+            continue
+        block_rank, block_logdet, block_gradient, block_hessian = _plain_block_evaluate(
+            block, geometry, matrices, group_values
+        )
+        rank += repeat * block_rank
+        log_terms.append(math.fsum([repeat * block_logdet, block_rank * extra_volume]))
+        for i, name_i in enumerate(group_names):
+            gradient[name_i] = float(repeat * block_gradient[i])
+            for j, name_j in enumerate(group_names):
+                hessian[name_i, name_j] = float(repeat * block_hessian[i, j])
+    return PenaltyLogdet(rank=rank, logdet=math.fsum(log_terms), gradient=gradient, hessian=hessian)
+
+
+def _single_penalty_raw_family(gm, grouped, declared_rank, *, rank_rcond=None):
     """Select one dense penalty on its raw basis, independently of the SSP map.
 
     The solver penalty is ``C.T @ Omega @ C`` for the group's SSP coordinate
@@ -2815,15 +2683,6 @@ def _single_penalty_raw_family(gm, grouped, declared_rank, source, *, rank_rcond
     and ``_solver_penalty_agreement`` certifies, for every map, a Weyl gap in
     the stored penalty at the raw rank (one-sided; see there) and adds the
     Weyl term between the log pseudo-determinants to the volume's error.
-
-    ``source`` is the previous context of the same fit (``_reuse_raw_from``).
-    Its raw support transfers only through ``_RawPenaltyFamilyReceipt``, and
-    its unit-weight summary only through ``_RawPenaltySummaryReceipt``. They
-    bind the raw penalty values, dtype and shape, the component descriptor and
-    lambda policy, the read-only support values and the penalty arithmetic
-    (rank policy, unit roundoff and kernel identities). The volume, transported
-    root and agreement are rebuilt for every map, so lambda, weights and basis
-    never transfer.
 
     The raw support is selected at ``rank_rcond``, the relative threshold
     that set ``declared_rank``, and only where the raw spectrum has a gap
@@ -2844,11 +2703,10 @@ def _single_penalty_raw_family(gm, grouped, declared_rank, source, *, rank_rcond
 
     Returns ``None`` when the cheap map checks decline (non-float64 inputs,
     inconsistent shapes, a non-finite map, or ``np.eye``, which is either the
-    raw basis or a coordinate truncation). Returns a
-    ``_RawPenaltyRefusalReceipt`` when the raw support cannot be selected, its
-    rank differs from the declared solver rank, or the volume or agreement
-    cannot be certified; later contexts of the fit then skip the attempt.
-    Either way the group keeps its solver-space support.
+    raw basis or a coordinate truncation), and ``False`` when the raw support
+    cannot be selected, its rank differs from the declared solver rank, or
+    the volume or agreement cannot be certified.  Either way the group keeps
+    its solver-space support.
     """
     from superglm.reml.penalty_support import PenaltyNumericalError, _penalty_support
 
@@ -2866,23 +2724,15 @@ def _single_penalty_raw_family(gm, grouped, declared_rank, source, *, rank_rcond
         or np.array_equal(coordinate_map, np.eye(*coordinate_map.shape))
     ):
         return None
-    reused = _reusable_raw_geometry(source, grouped)
-    if reused is None:
-        refusal = _reusable_raw_refusal(source, grouped)
-        if refusal is not None:
-            return refusal
-        try:
-            support = _penalty_support([omega], rcond=rank_rcond)
-        except (PenaltyNumericalError, ValueError):
-            # Its ValueErrors are the raw matrix's own admissibility checks
-            # (symmetry, semidefiniteness), which the solver-space path never
-            # applies to the raw penalty, so they refuse rather than fail.
-            return _RawPenaltyRefusalReceipt.capture(grouped)
-        family = _RawPenaltyFamilyReceipt.capture(support, grouped)
-    else:
-        support, family = reused.support, reused.raw_family
+    try:
+        support = _penalty_support([omega], rcond=rank_rcond)
+    except (PenaltyNumericalError, ValueError):
+        # Its ValueErrors are the raw matrix's own admissibility checks
+        # (symmetry, semidefiniteness), which the solver-space path never
+        # applies to the raw penalty, so they refuse rather than fail.
+        return False
     if support.rank != declared_rank:
-        return _RawPenaltyRefusalReceipt.capture(grouped)
+        return False
     try:
         products = _shared_map_products(support, coordinate_map)
         volume, volume_error = _support_coordinate_volume(
@@ -2891,9 +2741,124 @@ def _single_penalty_raw_family(gm, grouped, declared_rank, source, *, rank_rcond
         roots, errors = _ssp_component_roots(support, coordinate_map, products=products)
         agreement = _solver_penalty_agreement(support, stored, roots[0], errors[0])
     except PenaltyNumericalError:
-        return _RawPenaltyRefusalReceipt.capture(grouped)
+        return False
     volume_error = float(_enclosed_bound_sum(volume_error, agreement))
-    return support, family, reused, coordinate_map, roots, errors, (volume, volume_error)
+    return support, coordinate_map, roots, errors, (volume, volume_error)
+
+
+def _plain_geometries(
+    source: Sequence[PenaltyComponent] | None,
+) -> dict[str, _PenaltyGroupGeometry]:
+    """The plain contexts of a previous build, by group name."""
+    if not source:
+        return {}
+    found = {}
+    for name, indices in _group_penalties(list(source)).items():
+        geometry = _context_geometry([source[index] for index in indices])
+        if geometry is not None and not geometry.certified:
+            found[name] = geometry
+    return found
+
+
+def _same_arrays(left: Sequence[NDArray], right: Sequence[NDArray]) -> bool:
+    return len(left) == len(right) and all(
+        a is b
+        or (
+            np.shape(a) == np.shape(b)
+            and np.asarray(a).dtype == np.asarray(b).dtype
+            and np.array_equal(a, b)
+        )
+        for a, b in zip(left, right, strict=True)
+    )
+
+
+def _reusable_raw_context(prior, raw_inputs: tuple[NDArray, ...]):
+    """The previous raw context when it was selected from these same raw penalties."""
+    if prior is None or prior.raw_inputs is None or not _same_arrays(prior.raw_inputs, raw_inputs):
+        return None
+    if not prior.raw_refused and (prior.support is None or prior.coordinate_map is None):
+        return None
+    return prior
+
+
+def _reusable_solver_context(prior, grouped: list[PenaltyComponent]):
+    """The previous solver-space context when its stored matrices are these ones."""
+    if (
+        prior.coordinate_map is not None
+        or prior.support is None
+        or not _same_arrays(prior.matrices, [component.omega_ssp for component in grouped])
+    ):
+        return None
+    return prior
+
+
+def _plain_single_raw_route(gm, grouped, declared_rank, prior, *, rank_rcond):
+    """A single penalty's raw support and unit log-determinant under the SSP map.
+
+    The raw support is selected once per fit, on the raw penalty, at the
+    threshold that set the declared rank (``_single_penalty_raw_family``);
+    each map then contributes the transported root ``Y = R P C``, and
+    ``log pdet(C' Omega C) = 2 sum log sigma_i(Y)``.  The solver keeps its
+    stored penalty ``S``.  The raw route stands in for it when, with
+    ``X = Y' Y``, ``||S - X||_F <= sqrt(eps) sigma_min(Y)**2`` and
+    ``sigma_min(Y)**2 - ||S - X||_F`` clears the shared Gram rank bar
+    ``max(eps, p(n) eps) ||S||_F``: by Weyl's inequality ``S`` then has the
+    raw rank across a gap, and its log pseudo-determinant is within
+    ``r sqrt(eps)`` of the raw one.  These are the agreement test's bars
+    (``_solver_penalty_agreement``), applied to the computed norms.
+
+    Returns ``None`` when the map is declined before any raw work.  A refused
+    route returns the raw inputs with no support, and later contexts of the
+    fit refuse it at once; otherwise ``(inputs, support, map, block)``.
+    """
+    from superglm.reml.penalty_support import PenaltyNumericalError, _penalty_support
+    from superglm.solvers.rank import SHARED_RANK_POLICY, _eigensolver_relative_bar
+
+    omega = getattr(gm, "omega", None)
+    coordinate_map = getattr(gm, "R_inv", None)
+    if omega is None or coordinate_map is None or len(grouped) != 1:
+        return None
+    omega, coordinate_map = np.asarray(omega), np.asarray(coordinate_map)
+    stored = grouped[0].omega_ssp
+    if (
+        omega.dtype != np.float64
+        or coordinate_map.dtype != np.float64
+        or coordinate_map.shape != (omega.shape[0], stored.shape[0])
+        or not np.all(np.isfinite(coordinate_map))
+        or np.array_equal(coordinate_map, np.eye(*coordinate_map.shape))
+    ):
+        return None
+    inputs = (_frozen_array(omega),)
+    refused = (inputs, None, None, None)
+    reused = _reusable_raw_context(prior, inputs)
+    if reused is not None and reused.raw_refused:
+        return refused
+    if reused is not None:
+        support = reused.support
+    else:
+        try:
+            support = _penalty_support([omega], rcond=rank_rcond)
+        except (PenaltyNumericalError, ValueError):
+            # The raw matrix's own admissibility checks refuse the route; the
+            # solver-space path never applies them to the raw penalty.
+            return refused
+    if support.rank == 0 or support.rank != declared_rank:
+        return refused
+    root = _transported_roots(support, coordinate_map)[0]
+    singular = scipy.linalg.svdvals(root, check_finite=False)
+    if not np.all(np.isfinite(singular)) or singular[-1] == 0:
+        return refused
+    smallest = float(singular[-1]) ** 2
+    stored = np.asarray(stored, dtype=np.float64)
+    discrepancy = float(np.linalg.norm(stored - root.T @ root))
+    bar = max(SHARED_RANK_POLICY.gram_rcond, _eigensolver_relative_bar(len(stored)))
+    if (
+        discrepancy > SHARED_RANK_POLICY.factor_rcond * smallest
+        or smallest - discrepancy <= bar * float(np.linalg.norm(stored))
+    ):
+        return refused
+    block = _PlainBlock(support.rank, constant=2.0 * math.fsum(np.log(singular).tolist()))
+    return inputs, support, coordinate_map, block
 
 
 def _solver_penalty_agreement(support, stored: NDArray, root: NDArray, root_error: NDArray):
@@ -2990,13 +2955,14 @@ def _solver_penalty_agreement(support, stored: NDArray, root: NDArray, root_erro
 def _compute_penalty_logdet_evaluation(
     lambdas: dict[str, float],
     penalties: list[PenaltyComponent],
-    tensor_pair_evaluations: dict[str, TensorPairLogdetEvaluation] | None = None,
 ) -> _PenaltyLogdetEvaluation:
-    """Evaluate rank, determinant and derivatives from one representative per group.
+    """Evaluate rank, determinant and derivatives, with error bounds, per group.
 
-    Singleton and compact repeated identities follow Wood (2011), section
-    3.1. Their numerical ranks come from the shared root support, never stale
-    component metadata. Bounds concern that selected representative.
+    The distributional smoother's evaluator: it reads the bounds. Singleton
+    and compact repeated identities follow Wood (2011), section 3.1. Their
+    numerical ranks come from the shared root support, never stale component
+    metadata. Bounds concern that selected representative, so a context built
+    for the plain evaluator, which carries no error ledgers, is not reused.
     """
     from superglm.reml.multi_penalty import (
         _evaluate_penalty_support,
@@ -3029,16 +2995,6 @@ def _compute_penalty_logdet_evaluation(
                 hessian[name_i, name_j] = hessian_error[name_i, name_j] = 0.0
         if not np.any(group_values > 0):
             continue
-        if tensor_pair_evaluations is not None and group_name in tensor_pair_evaluations:
-            evaluation = tensor_pair_evaluations[group_name]
-            rank += int(evaluation.rank)
-            log_terms.append(evaluation.logdet_s_plus)
-            log_errors.append(evaluation.logdet_error)
-            gradient.update(evaluation.gradient)
-            hessian.update(evaluation.hessian)
-            gradient_error.update(evaluation.gradient_error)
-            hessian_error.update(evaluation.hessian_error)
-            continue
         component = grouped[0]
         if len(grouped) == 1 and component.penalty_kind == "identity":
             group_rank = component.group_sl.stop - component.group_sl.start
@@ -3050,6 +3006,8 @@ def _compute_penalty_logdet_evaluation(
             continue
         extra_volume = 0.0
         geometry = _context_geometry(grouped)
+        if geometry is not None and not geometry.certified:
+            geometry = None
         if len(grouped) == 1 and component.penalty_kind == "sum_to_zero":
             levels, _ = _sum_to_zero_penalty_geometry(component)
             matrices = [_penalty_component_omega_ssp(component)]

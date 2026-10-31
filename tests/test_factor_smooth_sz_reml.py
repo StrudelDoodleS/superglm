@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import superglm.reml.multi_penalty as multi_penalty
 import superglm.reml.penalty_algebra as penalty_algebra
+import superglm.reml.penalty_support as penalty_support
 import superglm.solvers.irls_direct as irls_direct
 from superglm import FactorSmooth, LambdaPolicy, Numeric, Spline, SuperGLM
 from superglm.group_matrix import FactorSmoothGroupMatrix
@@ -472,7 +472,7 @@ def test_sz_structured_fit_uses_tabmat_small_partition_without_dense_dominant(
     dense_penalty_shapes = set()
     support_dimensions = set()
     materialize_penalty = penalty_algebra.penalty_component_dense_matrix
-    evaluate_support = multi_penalty._evaluate_penalty_geometry
+    select_support = penalty_support._penalty_support
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("structured SZ path materialized dominant geometry")
@@ -485,14 +485,15 @@ def test_sz_structured_fit_uses_tabmat_small_partition_without_dense_dominant(
         assert matrix is component.omega_ssp
         return matrix
 
-    def checked_support(support, *args, **kwargs):
+    def checked_support(*args, **kwargs):
+        support = select_support(*args, **kwargs)
         support_dimensions.add((support.Q_plus.shape[0], support.rank))
-        return evaluate_support(support, *args, **kwargs)
+        return support
 
     monkeypatch.setattr(FactorSmoothGroupMatrix, "toarray", forbidden)
     monkeypatch.setattr(FactorSmoothGroupMatrix, "gram", forbidden)
     monkeypatch.setattr(penalty_algebra, "penalty_component_dense_matrix", checked_penalty)
-    monkeypatch.setattr(multi_penalty, "_evaluate_penalty_geometry", checked_support)
+    monkeypatch.setattr(penalty_support, "_penalty_support", checked_support)
     model = _model(
         family="gaussian",
         discrete=discrete,

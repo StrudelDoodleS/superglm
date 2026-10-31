@@ -47,20 +47,15 @@ def test_tensor_support_and_log_domain_derivatives(a, b, left, right):
         expected = float(x.ln() + y.ln() + (x + y).ln())
         gradient = np.array([float(1 + x / (x + y)), float(1 + y / (x + y))])
         cross = float(x * y / (x + y) ** 2)
+        # Each cell is summed in the log domain: its rounding scales with |log|.
+        scale = float(abs(x.ln()) + abs(y.ln()) + 1)
     assert result.rank == 3
-    reference_error = 2 * np.finfo(float).eps * max(abs(expected), 1.0)
-    assert abs(result.logdet_s_plus - expected) <= result.logdet_error + reference_error
+    tolerance = 16 * 3 * np.finfo(float).eps * scale
+    assert abs(result.logdet_s_plus - expected) <= tolerance
     for index, name in enumerate(("left", "right")):
-        assert abs(result.gradient[name] - gradient[index]) <= (
-            result.gradient_error[name] + 2 * np.finfo(float).eps * gradient[index]
-        )
-    assert abs(result.hessian["left", "left"] - cross) <= (
-        result.hessian_error["left", "left"] + 2 * np.finfo(float).eps * cross
-    )
+        assert abs(result.gradient[name] - gradient[index]) <= tolerance
+    assert abs(result.hessian["left", "left"] - cross) <= tolerance
     assert result.hessian["left", "right"] == -result.hessian["left", "left"]
-    # The local bounds must resolve the analytic observables.
-    assert result.logdet_error < 1e-10 * max(abs(expected), 1.0)
-    assert max(result.gradient_error.values()) < 1e-10
 
 
 @pytest.mark.parametrize("weights,rank", [((0.0, 0.0), 0), ((0.0, 3.0), 2), ((2.0, 0.0), 2)])
@@ -77,14 +72,11 @@ def test_tensor_exact_zero_activity(weights, rank):
 def test_tensor_inverse_component_unit_change():
     reference = _tensor(2.0, 3.0)
     changed = _tensor(2.0**-500 * 2.0, 3.0, 2.0**500)
+    tolerance = 16 * 3 * np.finfo(float).eps * (500 * np.log(2.0) + 1)
     assert changed.rank == reference.rank
-    assert abs(changed.logdet_s_plus - reference.logdet_s_plus) <= (
-        changed.logdet_error + reference.logdet_error
-    )
+    assert abs(changed.logdet_s_plus - reference.logdet_s_plus) <= tolerance
     for name in reference.gradient:
-        assert abs(changed.gradient[name] - reference.gradient[name]) <= (
-            changed.gradient_error[name] + reference.gradient_error[name]
-        )
+        assert abs(changed.gradient[name] - reference.gradient[name]) <= tolerance
 
 
 def test_total_rank_treats_supplied_tensor_components_as_active():
@@ -263,27 +255,27 @@ def test_public_discrete_tensor_only_factors_singleton_marginals(monkeypatch):
 
     import superglm.model.reml_finalize as finalize
     import superglm.reml.discrete as discrete
-    import superglm.reml.multi_penalty as kernel
+    import superglm.reml.penalty_support as support_module
     from superglm import SuperGLM
     from superglm.features import Spline
 
     singleton_dimensions = []
     tensor_dimensions = {}
-    evaluate_support = kernel._evaluate_penalty_geometry
+    select_support = support_module._penalty_support
     evaluate_tensor = algebra.evaluate_tensor_pair_logdet_summaries
 
-    def capture_support(support, *args, **kwargs):
-        singleton_dimensions.append(
-            (len(support.component_roots), support.Q_plus.shape[0], support.rank)
-        )
-        return evaluate_support(support, *args, **kwargs)
+    def capture_support(matrices, **kwargs):
+        support = select_support(matrices, **kwargs)
+        if len(matrices) == 1:
+            singleton_dimensions.append((matrices[0].shape[0], support.rank))
+        return support
 
     def capture_tensor(summaries, *args, **kwargs):
         for name, summary in summaries.items():
             tensor_dimensions[name] = (len(summary.eigvals_left), len(summary.eigvals_right))
         return evaluate_tensor(summaries, *args, **kwargs)
 
-    monkeypatch.setattr(kernel, "_evaluate_penalty_geometry", capture_support)
+    monkeypatch.setattr(support_module, "_penalty_support", capture_support)
     monkeypatch.setattr(discrete, "evaluate_tensor_pair_logdet_summaries", capture_tensor)
     monkeypatch.setattr(finalize, "evaluate_tensor_pair_logdet_summaries", capture_tensor)
     rng = np.random.default_rng(77)
@@ -297,16 +289,21 @@ def test_public_discrete_tensor_only_factors_singleton_marginals(monkeypatch):
         interactions=[("x1", "x2")],
     ).fit_reml(pd.DataFrame({"x1": x1, "x2": x2}), y, max_reml_iter=3, reml_tol=1e-12)
     assert tensor_dimensions and singleton_dimensions
-    # Singletons are selected once on their raw penalty basis; only the
-    # certified coordinate volume follows each lambda's SSP map.
-    singleton_widths = {
-        component.omega_raw.shape[0]
+    # Singletons are selected once on their raw penalty basis; only their
+    # transported root follows each lambda's SSP map.
+    singletons = [
+        component
         for component in model._reml_penalties
         if component.group_name not in tensor_dimensions
-    }
+    ]
+    singleton_widths = {component.omega_raw.shape[0] for component in singletons}
     tensor_widths = {left * right for left, right in tensor_dimensions.values()}
-    for count, width, rank in singleton_dimensions:
-        assert count == 1
+    assert len(singleton_dimensions) == len(singletons)
+    assert all(
+        algebra._context_geometry([component]).coordinate_map is not None
+        for component in singletons
+    )
+    for width, rank in singleton_dimensions:
         assert width in singleton_widths
         assert 0 < rank <= width < min(tensor_widths)
 

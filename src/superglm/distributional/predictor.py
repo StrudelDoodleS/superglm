@@ -597,6 +597,7 @@ def compile_predictors(
             build_penalty_components(
                 local_matrices,
                 cast(list[tuple[int, object]], reml_groups),
+                certified=True,
             )
         )
         built.append(
