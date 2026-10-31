@@ -202,26 +202,31 @@ def _coefficient_error_bound(shape: Decimal, channel: int) -> Decimal:
     return total
 
 
-@pytest.mark.parametrize(
-    ("helper_name", "scalar_name"),
-    [pair for pair in _ORIGIN_HELPERS if pair[1] not in _SCALAR_ORACLES],
-)
-def test_small_shape_batches_do_not_execute_python_scalar_series(
-    monkeypatch: pytest.MonkeyPatch, helper_name: str, scalar_name: str
+@pytest.mark.parametrize("helper_name", [helper for helper, _ in _ORIGIN_HELPERS])
+def test_small_shape_batches_make_a_row_independent_number_of_python_calls(
+    helper_name: str,
 ) -> None:
-    """The unfixed implementation executes one Python series per small row."""
-    scalar = getattr(gamma_kernel, scalar_name)
-    calls = 0
+    """A Python series per small row adds Python calls in proportion to the rows."""
+    helper = getattr(gamma_kernel, helper_name)
 
-    def counted(shape: float) -> float:
-        nonlocal calls
-        calls += 1
-        return scalar(shape)
+    def python_calls(rows: int) -> int:
+        shapes = np.linspace(0.001, np.nextafter(0.25, 0.0), rows)
+        calls = 0
 
-    monkeypatch.setattr(gamma_kernel, scalar_name, counted)
-    shapes = np.linspace(0.001, np.nextafter(0.25, 0.0), 257)
-    getattr(gamma_kernel, helper_name)(shapes)
-    assert calls == 0
+        def profile(frame, event, arg):
+            nonlocal calls
+            calls += event == "call"
+
+        previous = sys.getprofile()
+        sys.setprofile(profile)
+        try:
+            helper(shapes)
+        finally:
+            sys.setprofile(previous)
+        return calls
+
+    helper(np.linspace(0.001, np.nextafter(0.25, 0.0), 257))
+    assert python_calls(257) == python_calls(514)
 
 
 @pytest.mark.parametrize("channel", range(4))

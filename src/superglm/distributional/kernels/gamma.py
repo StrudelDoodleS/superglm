@@ -42,7 +42,8 @@ def _small_shape_series(values: NDArray, channel: int) -> NDArray[np.float64]:
     """Evaluate one origin combination in bounded, serial float64 arithmetic.
 
     Channels are A, J, dJ/dlog(a), and the log normalizer, respectively.
-    The multiplication and summation order matches the scalar references.
+    The multiplication and summation order matches the scalar references kept in
+    ``tests/test_gamma_series_execution.py``.
     For 0 < a < 1/4, every zeta coefficient is below zeta(2) < 2. Bounding
     the remaining absolute series geometrically gives the four tails below;
     the polynomial factors for J and its derivative come from differentiating
