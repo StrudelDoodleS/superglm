@@ -379,32 +379,73 @@ def test_an_offset_random_effect_seed_is_read_at_the_intercept_only_fit(monkeypa
     assert result.objective <= min(grid) + resolution, (result.objective, grid)
 
 
-def test_a_random_effect_seed_with_no_valid_null_mode_stays_cold(monkeypatch):
-    """Where the intercept-only fit's linear predictor or mean lies on a clip
-    on a weighted row, the curvature read there is the clip's, so the random
-    effect keeps the cold seed 1e-4.  Ten rows with an offset of -40 sit near
-    a logit ``eta`` of -40.5 at the intercept-only fit, past
-    ``stabilize_eta``'s -20.  Mutation: reading the information there anyway
-    seeds the effect at its levels' mean information.
-    """
+class _BootstrapReachedError(Exception):
+    """Stops a fit at its first bootstrap fit, carrying the smoothing parameters it is taken at."""
+
+
+def _bootstrap_lambdas(monkeypatch, model, X, y, **fit_kwargs) -> dict[str, float]:
+    """The smoothing parameters of the exact engine's first bootstrap fit, before it runs."""
     import superglm.reml.direct as direct
 
-    rng = np.random.default_rng(20261030)
-    codes = np.repeat(np.arange(12), 50)
-    offset = np.zeros(len(codes))
-    offset[::60] = -40.0
-    y = (rng.uniform(size=len(codes)) < 1.0 / (1.0 + np.exp(0.5 - offset))).astype(float)
-    X = pd.DataFrame({"broker": np.array([f"b{i}" for i in codes], dtype=object)})
-    bootstraps: list[float] = []
     real = direct.fit_irls_direct
 
-    def spy(*args, **kwargs):
+    def stop(*args, **kwargs):
         if (kwargs.get("debug_context") or {}).get("phase") == "bootstrap":
-            bootstraps.append(kwargs["lambda2"]["broker"])
+            raise _BootstrapReachedError(dict(kwargs["lambda2"]))
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(direct, "fit_irls_direct", spy)
-    model = SuperGLM(family="binomial", features={"broker": RandomEffect()}, selection_penalty=0)
-    model.fit_reml(X, y, offset=offset)
+    with monkeypatch.context() as patch:
+        patch.setattr(direct, "fit_irls_direct", stop)
+        with pytest.raises(_BootstrapReachedError) as reached:
+            model.fit_reml(X, y, **fit_kwargs)
+    return reached.value.args[0]
 
-    assert bootstraps[0] == 1e-4
+
+def test_a_random_effect_seed_with_no_valid_null_mode_stays_cold(monkeypatch):
+    """Where the intercept-only fit holds a weighted row at a clip past which
+    the Fisher weight grows, the curvature read there is the clip's, so the
+    random effect keeps the cold seed 1e-4.  A Gamma response of order 1e13
+    has the intercept-only ``eta = 1 / ybar`` below the inverse link's clip
+    at 1e-12, where the weight ``eta**-2`` is read as 1e24 and grows toward
+    zero.  Mutation: reading the information there anyway seeds the effect at
+    the box ceiling.
+    """
+    rng = np.random.default_rng(20261030)
+    codes = np.repeat(np.arange(12), 50)
+    y = 1e13 * rng.gamma(5.0, 0.2, len(codes))
+    X = pd.DataFrame({"broker": np.array([f"b{i}" for i in codes], dtype=object)})
+    model = SuperGLM(
+        family="gamma", link="inverse", features={"broker": RandomEffect()}, selection_penalty=0
+    )
+
+    assert _bootstrap_lambdas(monkeypatch, model, X, y)["broker"] == 1e-4
+
+
+def test_a_row_held_where_the_weight_falls_leaves_the_information_seed(monkeypatch):
+    """Ten rows whose log-exposure offset is 100 below the rest sit past the
+    log link's clip at -80, where the Poisson weight ``mu`` falls toward
+    zero, so the clip cannot raise it: they are read as the clip holds them,
+    and the seed is the levels' mean information at the intercept-only fit
+    given the offset.  The oracle is that fit's closed form, ``t = sum y /
+    sum e^o``, and the model's weights ``t e^o``, unclipped; the held rows'
+    weights, ``e^-80`` against ``t e^-100``, are below the rounding of every
+    sum, so the seed agrees to the sums' ``n eps``.  Mutation: a87b1ac4
+    refused every clipped row and seeded the effect at 1e-4.
+    """
+    rng = np.random.default_rng(20261031)
+    codes = np.repeat(np.arange(12), 50)
+    offset = np.log(rng.uniform(0.05, 1.0, len(codes)))
+    offset[::60] = -100.0
+    y = rng.poisson(np.exp(0.5 + rng.uniform(-0.5, 0.5, 12)[codes] + offset)).astype(float)
+    X = pd.DataFrame({"broker": np.array([f"b{i}" for i in codes], dtype=object)})
+    model = SuperGLM(family="poisson", features={"broker": RandomEffect()}, selection_penalty=0)
+
+    seed = _bootstrap_lambdas(monkeypatch, model, X, y, offset=offset)["broker"]
+
+    shifted = offset - offset.max()
+    eta = np.log(np.sum(y) / np.sum(np.exp(shifted))) + shifted
+    assert np.all(eta[::60] < -80.0)
+    information = np.exp(eta)
+    level = np.bincount(codes, weights=information)
+    oracle = float(np.sum(level * (1.0 - level / information.sum())) / 12)
+    assert seed == pytest.approx(oracle, rel=len(y) * np.finfo(float).eps)

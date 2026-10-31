@@ -468,3 +468,27 @@ def test_the_null_mode_given_an_offset_solves_the_intercept_score(family, link) 
     information = float(np.sum(weights * dmu**2 / variance))
     deviance = float(np.sum(weights * distribution.deviance_unit(y, mu)))
     assert abs(score) <= 2.0 * np.sqrt(1e-10 * deviance * information), (score, information)
+
+
+def test_a_null_mode_on_a_clip_that_cannot_raise_its_weight_is_returned() -> None:
+    """Poisson's Fisher weight under the square-root link is ``4 w`` at every
+    ``eta``.  An all-zero response has the intercept-only mode ``eta = 0``,
+    whose mean ``clip_mu`` floors at 1e-50; the floor cannot raise that
+    weight, so the mode is returned as it is.  The weight's slope bracket
+    there, ``2 mu'' - mu'**2 V' / V = 4 - 4``, cancels only to rounding.
+    Mutation: a87b1ac4 refused every clipped row, and deciding the bracket's
+    sign with no rounding band refuses this one.
+    """
+    from superglm.solvers.working_rows import null_fit_eta
+
+    eta = null_fit_eta(
+        distribution=Poisson(),
+        link=SqrtLink(),
+        y=np.zeros(50),
+        sample_weight=np.ones(50),
+        offset=np.zeros(50),
+        weight_semantics="prior",
+    )
+
+    assert eta is not None
+    assert np.array_equal(eta, np.zeros(50))

@@ -155,10 +155,12 @@ def null_fit_eta(
     moves nothing here.
 
     None where no valid mode is found: the fit does not converge, or on a
-    positive-weight row the mode's linear predictor or mean lies where
-    ``stabilize_eta`` or ``clip_mu`` moves it.  A curvature read there is the
-    clip's, not the model's: an inverse-link row clipped to ``eta = 1e-12``
-    has the Gamma Fisher weight ``1e24``.
+    positive-weight row ``stabilize_eta`` or ``clip_mu`` holds the mode at a
+    clip past which the Fisher weight grows (``_clip_raises_information``).
+    A curvature read there is the clip's, not the model's: an inverse-link row
+    clipped to ``eta = 1e-12`` has the Gamma Fisher weight ``1e24``.  A row
+    held at a clip past which the weight falls or is flat is read where the
+    clip holds it, as the fit's own working weights read it.
     """
     weights = np.asarray(sample_weight, dtype=np.float64)
     offset = np.asarray(offset, dtype=np.float64)
@@ -195,11 +197,52 @@ def null_fit_eta(
     eta = intercept + shifted
     stabilized = stabilize_eta(eta, link)
     mean = link.inverse(stabilized)
-    if np.any(stabilized[carried] != eta[carried]) or np.any(
-        clip_mu(mean, distribution)[carried] != mean[carried]
+    held = clip_mu(mean, distribution)
+    clipped = carried & ((stabilized != eta) | (held != mean))
+    if np.any(clipped) and _clip_raises_information(
+        distribution, link, eta[clipped], held[clipped]
     ):
         return None
     return stabilized
+
+
+def _clip_raises_information(
+    distribution: Distribution, link: Link, eta: NDArray, held_mean: NDArray
+) -> bool:
+    """Whether the Fisher weight grows past the clip that holds any of these rows.
+
+    ``eta`` are the rows' own linear predictors and ``held_mean`` the means
+    ``stabilize_eta`` and ``clip_mu`` hold them at, at the clip's edge
+    ``eta_e = link(held_mean)``.  The weight per unit prior weight, ``I(eta)
+    = mu'**2 / V(mu)``, has the slope ``(mu' / V) (2 mu'' - mu'**2 V' / V)``
+    (``compute_dW_deta``).  Where ``I`` falls or is flat from ``eta_e``
+    toward the row's own ``eta``, the edge is the band's least informative
+    point there: the row is read at no more than a represented row at the
+    edge carries, and its own weight lies between zero and that, so reading
+    it moves the weights by at most the edge's.  Where ``I`` grows, the edge
+    is the band's most informative point, and the weight read there is set
+    by where the clip sits, without bound: ``1 / eta**2`` for Gamma under the
+    inverse link held at ``eta = 1e-12``, ``1 / mu`` for Poisson under the
+    identity link held at ``mu = 1e-50``.  Each of the bracket's two terms is
+    a product of at most four evaluated factors, so a bracket within ``16
+    eps`` of their magnitudes is flat (Gamma/log and Poisson/sqrt cancel in
+    exact arithmetic).  A pair without ``deriv2_inverse`` or
+    ``variance_derivative`` cannot be decided, and its clips count as rising.
+    """
+    if not (hasattr(link, "deriv2_inverse") and hasattr(distribution, "variance_derivative")):
+        return True
+    with np.errstate(all="ignore"):
+        edge = np.asarray(link.link(held_mean), dtype=np.float64)
+        first = np.asarray(link.deriv_inverse(edge), dtype=np.float64)
+        second = 2.0 * np.asarray(link.deriv2_inverse(edge), dtype=np.float64)
+        variance = np.maximum(distribution.variance(held_mean), _VARIANCE_FLOOR)
+        curvature = first**2 * distribution.variance_derivative(held_mean) / variance
+        bracket = second - curvature
+        rounding = 16.0 * np.finfo(np.float64).eps * (np.abs(second) + np.abs(curvature))
+    if not np.all(np.isfinite(edge) & np.isfinite(first) & np.isfinite(rounding)):
+        return True
+    slope = np.sign(first) * np.sign(bracket) * (np.abs(bracket) > rounding)
+    return bool(np.any(slope * np.sign(eta - edge) > 0.0))
 
 
 def _fitted_null_intercept(
