@@ -1,0 +1,65 @@
+== complex-step gradient (scipy.special.loggamma on complex a) ==
+h=1e-08*x   d_mu                                     typ   1.4e-13  adv   2.9e-14
+h=1e-08*x   d_s                                      typ   2.1e-12  adv   6.4e-12
+h=1e-20*x   d_mu                                     typ   2.9e-14  adv   5.6e-14
+h=1e-20*x   d_s                                      typ   2.7e-12  adv   8.3e-12
+h=1e-100*x   d_mu                                    typ   8.3e-14  adv   1.2e-14
+h=1e-100*x   d_s                                     typ   5.1e-12  adv   1.0e-11
+h=1e-300*x   d_mu                                    typ   4.9e-14  adv   6.3e-14
+h=1e-300*x   d_s                                     typ   1.5e-12  adv   6.4e-12
+== second derivatives ==
+complex-step 2f''/h^2 d_mumu  best over h: worst-row err 3.9e-06 at h=1e-03*scale (typ 3.9e-06 adv 2.3e-06)
+complex-step 2f''/h^2 d_ss    best over h: worst-row err 9.8e-06 at h=1e-03*scale (typ 8.9e-06 adv 9.8e-06)
+FD of CS gradient (central, 2x2 grads=8 complex evals) d_mumu typ   3.2e-10  adv   3.5e-10
+FD of CS gradient (central)                       d_mus  typ   1.2e-08  adv   1.2e-07
+FD of CS gradient (central)                       d_ss   typ   1.5e-08  adv   4.2e-06
+FD of CS gradient (Richardson, 2x2 grads=16 complex evals) d_mumu typ   2.4e-12  adv   1.1e-11
+FD of CS gradient (Richardson)                       d_mus  typ   1.1e-10  adv   1.8e-09
+FD of CS gradient (Richardson)                       d_ss   typ   3.2e-10  adv   4.0e-08
+== hyper-dual numbers (Fike & Alonso 2011): exact second derivatives, 1 evaluation per Hessian entry ==
+hyper-dual d_mu  (e1 part)                           typ   1.3e-14  adv   6.9e-14
+hyper-dual d_s   (e1 part)                           typ   3.1e-12  adv   1.5e-11
+hyper-dual d_mumu                                    typ   5.4e-16  adv   1.6e-16
+hyper-dual d_mus                                     typ   8.6e-15  adv   2.6e-14
+hyper-dual d_ss                                      typ   2.5e-13  adv   4.7e-11
+   (hyper-dual lgamma needs psi and psi1 from a special-function library, the same two the closed form needs)
+== which special functions accept complex arguments in scipy ==
+  loggamma(z)                            accepts complex
+  gammaln(z)                             REJECTED: TypeError
+  digamma(z)                             accepts complex
+  polygamma(1, z)                        REJECTED: TypeError
+  zeta(2, z) (Hurwitz)                   REJECTED: TypeError
+  gammainc(z, 3.0) (complex shape)       REJECTED: TypeError
+  gammaincc(z, 3.0) (complex shape)      REJECTED: TypeError
+  gammainc(2.5, z) (complex x)           REJECTED: TypeError
+  log_ndtr(z)                            accepts complex
+  ndtr(z)                                accepts complex
+  erf(z)                                 accepts complex
+  erfc(z)                                accepts complex
+  erfcx(z)                               accepts complex
+  log1p(z)                               accepts complex
+  expm1(z)                               accepts complex
+  xlogy(z, 2.0)                          accepts complex
+  xlog1py(z, 2.0)                        accepts complex
+  betaln(z, 2.0)                         REJECTED: TypeError
+  gamma(z)                               accepts complex
+  complex-step d/da loggamma vs mp.digamma, rel err: [1.39249614e-16 0.00000000e+00 1.66055215e-16 1.13521971e-16]
+  complex-step d/dx log_ndtr vs mpmath, rel err: [0.00000000e+00 1.75910125e-16 2.91180210e-16 0.00000000e+00
+ 1.67993232e-10]
+== numba ==
+  math.lgamma(float)                           OK  -> 0.2846828704729192
+  math.lgamma(complex)                         FAILS (TypingError)
+  cmath.log(complex)                           OK  -> (0.9162907318741551+4e-31j)
+  np.log(complex)                              OK  -> (0.9162907318741551+4e-31j)
+  np.log1p(complex)                            OK  -> (1.252762968495368+2.857142857142857e-31j)
+  math.erfc(complex)                           FAILS (TypingError)
+  complex * complex, / complex                 OK  -> (1.7857142857142858+9.183673469387756e-31j)
+  hasattr(cmath, 'lgamma') = False ; hasattr(math, 'digamma') = False ; math.lgamma exists = True
+  cython_special has no loggamma
+  cython_special exports __pyx_fuse_0loggamma
+  cython_special exports __pyx_fuse_1loggamma
+  cython_special has no digamma
+  cython_special has no __pyx_fuse_1digamma
+  numba-scipy installed: False
+  python 3.13.14 ctypes complex type: False
+benchboard: peak RSS 174 MiB

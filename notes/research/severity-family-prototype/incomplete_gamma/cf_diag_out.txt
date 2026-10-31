@@ -1,0 +1,25 @@
+a=1000   x=1001     extra=0     n=92    relerr by order 7.6e-13 7.7e-15 1.7e-13 4.1e-12 1.2e-09
+a=1000   x=1001     extra=50    n=142   relerr by order 7.5e-13 7.3e-15 1.8e-13 4.5e-12 1.2e-09
+a=1000   x=1001     extra=500   n=592   relerr by order 7.4e-13 4.5e-15 1.8e-13 4.5e-12 1.2e-09
+a=1000   x=1001     extra=5000  n=5092  relerr by order 5.7e-13 3.9e-14 2.7e-13 4.3e-12 1.2e-09
+   series-complement n=298: 6.6e-13 9.1e-13 1.8e-12 9.1e-12 4.4e-11
+a=10000  x=10001    extra=0     n=200   relerr by order 2.4e-11 3.0e-15 5.0e-13 2.7e-10 1.5e-07
+a=10000  x=10001    extra=50    n=250   relerr by order 2.4e-11 1.9e-15 5.4e-13 2.7e-10 1.5e-07
+a=10000  x=10001    extra=500   n=700   relerr by order 2.4e-11 1.9e-15 5.5e-13 2.7e-10 1.5e-07
+a=10000  x=10001    extra=5000  n=5200  relerr by order 2.3e-11 3.0e-15 5.8e-13 2.7e-10 1.5e-07
+   series-complement n=902: 1.7e-11 2.3e-11 4.7e-11 2.4e-10 1.0e-09
+a=10000  x=10020    extra=0     n=179   relerr by order 1.3e-12 9.2e-14 7.5e-14 8.7e-12 2.9e-10
+a=10000  x=10020    extra=50    n=229   relerr by order 1.3e-12 9.0e-14 1.6e-14 8.2e-13 9.6e-11
+a=10000  x=10020    extra=500   n=679   relerr by order 1.3e-12 9.1e-14 2.1e-14 8.5e-13 9.6e-11
+a=10000  x=10020    extra=5000  n=5179  relerr by order 1.2e-12 9.6e-14 6.8e-14 1.2e-12 9.7e-11
+   series-complement n=918: 6.1e-12 9.0e-12 2.0e-11 1.3e-10 5.2e-10
+a=10000  x=10100    extra=0     n=117   relerr by order 4.1e-12 7.6e-14 3.8e-14 5.1e-12 1.7e-10
+a=10000  x=10100    extra=50    n=167   relerr by order 4.1e-12 7.5e-14 8.4e-16 4.5e-15 2.1e-13
+a=10000  x=10100    extra=500   n=617   relerr by order 4.1e-12 7.6e-14 2.0e-15 5.4e-15 2.2e-13
+a=10000  x=10100    extra=5000  n=5117  relerr by order 4.2e-12 8.9e-14 1.4e-14 1.1e-14 3.1e-13
+   series-complement n=988: 3.6e-11 7.9e-11 3.1e-10 4.6e-09 2.0e-08
+a=0.01   x=1.02     extra=0     n=92    relerr by order 1.4e-15 0.0e+00 1.8e-16 1.7e-16 3.0e-16
+a=0.01   x=1.02     extra=50    n=142   relerr by order 1.3e-15 0.0e+00 1.8e-16 1.7e-16 3.0e-16
+a=0.01   x=1.02     extra=500   n=592   relerr by order 4.3e-16 0.0e+00 1.8e-16 1.7e-16 3.0e-16
+a=0.01   x=1.02     extra=5000  n=5092  relerr by order 1.8e-14 1.4e-16 1.8e-16 1.7e-16 3.0e-16
+   series-complement n=19: 8.7e-16 4.9e-15 9.8e-15 1.5e-14 2.0e-14

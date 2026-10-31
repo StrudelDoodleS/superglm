@@ -1,0 +1,21 @@
+{
+ "gammaln": 5.865916446807294e-15,
+ "digamma": 6.1366658122725414e-12,
+ "polygamma(1)": 2.7325288592399147e-16,
+ "polygamma(2)": 1.4919385987000217e-15,
+ "grad(gammaln)=digamma": 6.1366658122725414e-12,
+ "grad(grad(gammaln))=trigamma": 2.7325288592399147e-16,
+ "log1p": 6.12402654821892e-17,
+ "expm1": 4.730238418993253e-17,
+ "xlog1py(2.5, x)": 7.384788108751136e-17,
+ "log_ndtr": 5.61397475814549e-08,
+ "grad(log_ndtr)": 4.0216940555678805e-09,
+ "grad(grad(log_ndtr))": 1.6247050945878776e-06,
+ "gammainc(a,x)": 8.817665257086702e-11,
+ "gammaincc(a,x)": 8.81655011443244e-11,
+ "d gammainc / dx (grad argnum 1)": 2.4352804853792754e-10,
+ "d gammainc / da (grad argnum 0)": 8.80730179144152e-11,
+ "d gammaincc / da": 8.80730179144152e-11,
+ "d2 gammainc / da2 (grad of grad)": NaN,
+ "d2 gammainc / da dx": NaN
+}

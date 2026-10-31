@@ -1,0 +1,29 @@
+benchboard: ad_alt-acc waiting (0 s): needs 1 core, 0 free
+max relative error (typical rows: 15, adversarial rows: 6)
+impl                         set       value      d_mu       d_s    d_mumu     d_mus      d_ss
+closed_naive                 typ     1.0e-14   8.6e-16   3.1e-12   9.9e-16   9.2e-16   3.7e-13
+closed_naive                 adv     1.2e-12   1.0e-16   1.8e-11   1.0e-16   1.0e-16   1.6e-10
+closed_stable                typ     2.0e-15   8.6e-16   1.7e-13   9.9e-16   9.2e-16   1.6e-14
+closed_stable                adv     2.2e-16   1.0e-16   1.0e-15   1.0e-16   1.0e-16   2.1e-15
+fd_generic_step              typ     1.0e-14   3.0e-08   2.0e-07   2.6e-06   9.2e-06   8.2e-06
+fd_generic_step              adv     1.2e-12   6.4e-07   4.3e-09   1.0e-06   3.9e-05   2.9e-03
+fd_scaled_step               typ     1.0e-14   2.9e-09   2.0e-07   1.5e-05   3.3e-06   8.2e-06
+fd_scaled_step               adv     1.2e-12   6.4e-07   4.3e-09   1.9e-05   3.9e-05   2.9e-03
+fd_scaled_stablevalue        typ     2.0e-15   2.4e-09   2.5e-09   2.6e-06   3.3e-06   1.9e-06
+fd_scaled_stablevalue        adv     2.2e-16   6.4e-07   8.7e-11   2.4e-04   3.9e-05   3.0e-08
+fd_richardson                typ     1.0e-14   3.9e-10   5.1e-09   1.0e-07   2.2e-08   2.9e-08
+fd_richardson                adv     1.2e-12   1.4e-08   2.8e-09   2.6e-06   6.4e-07   2.3e-05
+fd_richardson_stablevalue    typ     2.0e-15   3.1e-10   7.2e-11   2.7e-08   1.3e-09   2.9e-08
+fd_richardson_stablevalue    adv     2.2e-16   1.4e-08   4.9e-12   8.6e-06   6.4e-07   2.8e-09
+jax_ad_naive                 typ     1.1e-14   1.3e-14   3.1e-12   5.4e-16   8.6e-15   8.7e-13
+jax_ad_naive                 adv     1.2e-12   6.9e-14   5.7e-12   1.6e-16   2.6e-14   1.5e-11
+
+per adversarial row (rows: mu cv y/mu), score+Hessian max rel err per impl
+row                    closed_naive closed_stabl fd_generic_s fd_scaled_st fd_scaled_st fd_richardso fd_richardso jax_ad_naive
+1 0.02 1e-06                3.5e-16      3.5e-16      1.5e-07      2.0e-06      2.4e-04      2.6e-06      8.6e-06      2.3e-16
+1 0.02 1000                 1.9e-16      1.9e-16      4.5e-08      1.6e-07      1.6e-05      5.7e-08      1.5e-07      1.7e-16
+1 5 1e-06                   1.3e-15      1.5e-15      1.0e-06      1.0e-06      1.0e-06      1.2e-08      1.2e-08      3.0e-15
+1 5 1000                    2.2e-16      2.2e-16      4.6e-08      4.6e-08      4.6e-08      4.9e-11      4.9e-11      7.8e-17
+1 0.02 1.01                 1.6e-10      9.0e-16      2.9e-03      2.9e-03      3.7e-08      2.3e-05      1.1e-09      1.5e-11
+1 5 1.001                   1.6e-15      2.1e-15      3.9e-05      3.9e-05      3.9e-05      6.4e-07      6.4e-07      6.9e-14
+benchboard: peak RSS 420 MiB

@@ -1,0 +1,42 @@
+{
+ "closed_naive": {
+  "ns_row_min": 66.84658699668944,
+  "ns_row_median": 67.99129606224597,
+  "cpu_over_wall": 0.9994359095208092
+ },
+ "closed_stable": {
+  "ns_row_min": 98.29591796733439,
+  "ns_row_median": 100.08240095339715,
+  "cpu_over_wall": 0.9995209085683646
+ },
+ "fd_generic_step": {
+  "ns_row_min": 156.39525116421282,
+  "ns_row_median": 157.34803001396358,
+  "cpu_over_wall": 0.9986389342532941
+ },
+ "fd_scaled_step": {
+  "ns_row_min": 156.11012489534914,
+  "ns_row_median": 162.11497108452022,
+  "cpu_over_wall": 0.9995613561512119
+ },
+ "fd_scaled_stablevalue": {
+  "ns_row_min": 300.674500875175,
+  "ns_row_median": 321.1438371799886,
+  "cpu_over_wall": 0.9992679529706229
+ },
+ "fd_richardson": {
+  "ns_row_min": 297.9636830277741,
+  "ns_row_median": 306.44973716698587,
+  "cpu_over_wall": 0.9994637255410779
+ },
+ "fd_richardson_stablevalue": {
+  "ns_row_min": 566.5529668331146,
+  "ns_row_median": 570.9154959768057,
+  "cpu_over_wall": 0.9994133790741963
+ },
+ "value_only_floor": {
+  "ns_row_min": 28.188196010887623,
+  "ns_row_median": 28.387065045535564,
+  "cpu_over_wall": 0.9999500752432157
+ }
+}

@@ -1,0 +1,16 @@
+benchboard: ad_alt-speed-jax waiting (0 s): needs 16 cores, 8 free
+benchboard: ad_alt-speed-jax waiting (60 s): needs 16 cores, 8 free
+benchboard: ad_alt-speed-jax waiting (121 s): needs 16 cores, 8 free
+benchboard: ad_alt-speed-jax waiting (181 s): needs 16 cores, 0 free
+benchboard: ad_alt-speed-jax waiting (242 s): oldest request: holds the reservation for 16 cores at 20:37:22
+benchboard: ad_alt-speed-jax waiting (302 s): oldest request: holds the reservation for 16 cores at 20:38:22
+compile_first_call_n8_s 0.8058294961228967
+first_call_n1e6_s 1.1810228519607335
+new_shape_recompile_n1000_s 0.6731405809987336
+jax_full_incl_transfer {'ns_row_min': 257.8954428900033, 'ns_row_median': 261.63013093173504, 'cpu_over_wall': 0.9971829967400541}
+jax_device_only {'ns_row_min': 248.16503189504147, 'ns_row_median': 252.43777199648318, 'cpu_over_wall': 0.9979237379815757}
+transfer_out_np_asarray {'ns_row_min': 0.0012218952178955078, 'ns_row_median': 0.0016828998923301697, 'cpu_over_wall': 0.9921380744215719}
+transfer_in_3x_asarray {'ns_row_min': 8.798365015536547, 'ns_row_median': 9.36568109318614, 'cpu_over_wall': 1.0003397971317578}
+devices [CpuDevice(id=0)]
+jax 0.12.0.1
+benchboard: peak RSS 821 MiB

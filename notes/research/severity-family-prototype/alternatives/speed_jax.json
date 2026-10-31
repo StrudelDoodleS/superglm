@@ -1,0 +1,27 @@
+{
+ "compile_first_call_n8_s": 0.8058294961228967,
+ "first_call_n1e6_s": 1.1810228519607335,
+ "new_shape_recompile_n1000_s": 0.6731405809987336,
+ "jax_full_incl_transfer": {
+  "ns_row_min": 257.8954428900033,
+  "ns_row_median": 261.63013093173504,
+  "cpu_over_wall": 0.9971829967400541
+ },
+ "jax_device_only": {
+  "ns_row_min": 248.16503189504147,
+  "ns_row_median": 252.43777199648318,
+  "cpu_over_wall": 0.9979237379815757
+ },
+ "transfer_out_np_asarray": {
+  "ns_row_min": 0.0012218952178955078,
+  "ns_row_median": 0.0016828998923301697,
+  "cpu_over_wall": 0.9921380744215719
+ },
+ "transfer_in_3x_asarray": {
+  "ns_row_min": 8.798365015536547,
+  "ns_row_median": 9.36568109318614,
+  "cpu_over_wall": 1.0003397971317578
+ },
+ "devices": "[CpuDevice(id=0)]",
+ "jax": "0.12.0.1"
+}
