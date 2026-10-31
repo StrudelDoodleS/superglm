@@ -561,6 +561,10 @@ def test_resolution_takes_each_side_from_the_flag():
         (["right", None, "none"], ValueError, r"missing .*first at input row 1"),
         (np.array([1, 0, 0]), TypeError, "values, which do not say which rows are censored"),
         (np.array([1.0, 0.0, 0.0]), TypeError, "for example censored=\\(flag == 1\\)"),
+        # A numeric list stays numeric, so it gets the hint numeric arrays get.
+        ([0, 1, 0], TypeError, "for example censored=\\(flag == 1\\)"),
+        ([True, 0.5, False], TypeError, "for example censored=\\(flag == 1\\)"),
+        ([True, np.nan, False], ValueError, r"missing \(NaN, NA or None\) .*input row 1"),
     ],
 )
 def test_invalid_censored_flags_name_the_problem(censored, error, message):
@@ -1276,54 +1280,108 @@ def test_a_right_censored_mean_form_scale_level_below_its_limit_keeps_its_estima
     np.testing.assert_allclose(fitted["scale"], [scale_a, scale_b], rtol=1e-5)
 
 
-def _deductible_scale_levels(anchored):
+def _deductible_scale_levels(anchored, side="right"):
     # Group a: complete rows at -1 and 1.  Group b: five rows at 1, right-censored
     # above a lower truncation bound 0, so P(Y > 1 | Y > 0) nears one only as the
-    # scale grows; or, anchored, rows at -10 and 1 censored inside (-11, -9] and
-    # (0, 2], whose probabilities pull the scale in opposite directions.
+    # scale grows (mirrored: rows at -1 left-censored below an upper bound 0).
+    # Anchored, right: rows at -10 and 1 censored inside (-11, -9] and (0, 2],
+    # whose probabilities pull the scale in opposite directions.  Anchored, left:
+    # rows at -10 and 1 left-censored above lower bounds -11 and 0 only, whose
+    # P(a < Y <= c | Y > a) tends to zero as the scale grows.
     complete = np.tile([-1.0, 1.0], 10)
-    if anchored:
+    if anchored and side == "right":
         limits, lower, upper = np.array([-10.0, 1.0]), [-11.0, 0.0], [-9.0, 2.0]
-    else:
+    elif anchored:
+        limits, lower, upper = np.array([-10.0, 1.0]), [-11.0, 0.0], [np.inf] * 2
+    elif side == "right":
         limits, lower, upper = np.ones(5), [0.0] * 5, [np.inf] * 5
+    else:
+        limits, lower, upper = -np.ones(5), [-np.inf] * 5, [0.0] * 5
     n = len(complete)
     y = np.concatenate([complete, limits])
     truncation = (np.concatenate([np.full(n, -np.inf), lower]),
                   np.concatenate([np.full(n, np.inf), upper]))  # fmt: skip
     X = pd.DataFrame({"g": ["a"] * n + ["b"] * len(limits)})
-    return X, y, np.arange(len(y)) >= n, truncation, complete, limits, lower, upper
+    censored = np.where(np.arange(len(y)) >= n, side, "none")
+    return X, y, censored, truncation, complete, limits, np.array(lower), np.array(upper)
 
 
+@pytest.mark.parametrize("side", ["right", "left"])
 @pytest.mark.parametrize("family", [GaussianLS(), LogNormalLS(parametrisation="location")])
-def test_a_scale_level_censored_beyond_its_only_truncation_bound_is_separated(family):
+def test_a_scale_level_censored_beyond_its_only_truncation_bound_is_separated(family, side):
     log_scale = isinstance(family, LogNormalLS)
     lift = np.exp if log_scale else (lambda values: values)
-    X, y, censored, truncation, *_ = _deductible_scale_levels(anchored=False)
+    X, y, censored, truncation, *_ = _deductible_scale_levels(anchored=False, side=side)
     with pytest.warns(
-        SeparationWarning, match=r"'scale:g': 1 of 2 occupied levels have only right-censored"
+        SeparationWarning, match=rf"'scale:g': 1 of 2 occupied levels have only {side}-censored"
     ):
         SuperLSS(family, family.location(), family.scale(cat("g"))).fit(
             X, lift(y), censored=censored, truncation=tuple(lift(b) for b in truncation)
         )
 
-    # With both truncation bounds the probabilities tend to (b - c)/(b - a) < 1,
-    # and these two rows give the level a finite scale.
-    X, y, censored, truncation, complete, limits, lower, upper = _deductible_scale_levels(True)
+    # Right: with both truncation bounds the probabilities tend to
+    # (b - c)/(b - a) < 1.  Left: above a lower bound only they tend to zero.
+    # Either way these two rows give the level a finite scale.
+    X, y, censored, truncation, complete, limits, lower, upper = _deductible_scale_levels(
+        True, side
+    )
     model = SuperLSS(family, family.location(), family.scale(cat("g")), separation="error")
     model.fit(X, lift(y), censored=censored, truncation=tuple(lift(b) for b in truncation))
 
     def negative(point):
         mu, log_a, log_b = point
         window = stats.norm(mu, np.exp(log_b)).cdf
+        inside = (
+            window(upper) - window(limits) if side == "right" else window(limits) - window(lower)
+        )
         return -(
             stats.norm.logpdf(complete, mu, np.exp(log_a)).sum()
-            + np.log((window(upper) - window(limits)) / (window(upper) - window(lower))).sum()
+            + np.log(inside / (window(upper) - window(lower))).sum()
         )
 
     mu, log_a, log_b = _mle(negative, np.array([0.0, 0.0, 1.0]))
     fitted = model.predict_parameters(pd.DataFrame({"g": ["a", "b"]}))
     np.testing.assert_allclose(fitted["location"], [mu, mu], rtol=1e-5, atol=1e-7)
     np.testing.assert_allclose(fitted["scale"], np.exp([log_a, log_b]), rtol=1e-5)
+
+
+def test_a_bounded_scale_link_keeps_a_censored_level_its_estimate():
+    # Group b's rows are right-censored above their lower truncation bounds, so
+    # their probabilities near one only as the scale grows; a logit scale link
+    # stops at one, and inside (0, 1) the level's likelihood peaks at a finite
+    # scale.  The default log link reaches infinity, so there it is separated.
+    group_a = np.tile([-0.05, 0.05], 500)
+    limits, lower = np.array([-0.5, 0.001]), np.array([-1.0, 0.0])
+    n = len(group_a)
+    y = np.concatenate([group_a, limits])
+    X = pd.DataFrame({"g": ["a"] * n + ["b"] * len(limits)})
+    censored = np.arange(len(y)) >= n
+    truncation = (np.concatenate([np.full(n, -np.inf), lower]), None)
+    family = GaussianLS(scale_floor=0.0)
+    model = SuperLSS(
+        family, family.location(), family.scale(cat("g"), link="logit"), separation="error"
+    )
+    model.fit(X, y, censored=censored, truncation=truncation, inner_tol=1e-10)
+
+    def negative(point):
+        mu, scale_a, scale_b = point[0], *special.expit(point[1:])
+        return -(
+            stats.norm.logpdf(group_a, mu, scale_a).sum()
+            + (stats.norm.logsf(limits, mu, scale_b) - stats.norm.logsf(lower, mu, scale_b)).sum()
+        )
+
+    mu, logit_a, logit_b = _mle(negative, np.array([0.0, -2.0, -1.0]))
+    fitted = model.predict_parameters(pd.DataFrame({"g": ["a", "b"]}))
+    assert special.expit(logit_b) < 0.5
+    np.testing.assert_allclose(fitted["location"], [mu, mu], atol=1e-8)
+    np.testing.assert_allclose(fitted["scale"], special.expit([logit_a, logit_b]), rtol=1e-5)
+
+    with pytest.warns(
+        SeparationWarning, match=r"'scale:g': 1 of 2 occupied levels have only right-censored"
+    ):
+        SuperLSS(family, family.location(), family.scale(cat("g"))).fit(
+            X, y, censored=censored, truncation=truncation
+        )
 
 
 def test_a_left_censored_mean_form_scale_level_below_an_upper_bound_is_separated():
