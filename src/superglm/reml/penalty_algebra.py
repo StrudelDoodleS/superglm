@@ -497,18 +497,35 @@ class _PenaltyGroupGeometry:
     # False for a context built for the plain block-wise evaluator, which
     # carries no error ledgers; a model saved before that split is certified.
     certified: bool = True
-    # Copies of the raw penalties the support was selected from, and whether
-    # this fit refused the raw route, for the next context of the same fit.
+    # For the next context of the same fit: copies of the raw penalties, the
+    # raw support selected from them (kept when this map's agreement bars
+    # refused it, since the next map rechecks them), and whether the raw route
+    # was refused for reasons no map changes (selection or rank).
     raw_inputs: tuple[NDArray, ...] | None = None
+    raw_support: object | None = None
     raw_refused: bool = False
     # The plain evaluator's weight-independent pieces and last evaluation.
     plain: _PlainBlock | None = None
 
     def __getstate__(self) -> dict:
         # The plain block is derived from the support and map; a reloaded
-        # model rebuilds it on first use.
+        # model rebuilds it on first use.  The raw inputs and selection serve
+        # only the next context of the same fit.
         state = self.__dict__.copy()
         state["plain"] = None
+        state["raw_inputs"] = state["raw_support"] = None
+        if not self.certified and self.coordinate_map is not None and len(self.matrices) > 1:
+            # Releases before the plain evaluator read a mapped multi-penalty
+            # context's zero-weight faces from its enclosed SSP roots, which the
+            # plain evaluator does not keep.
+            from superglm.reml.penalty_support import PenaltyNumericalError
+
+            try:
+                state["ssp_roots"], state["ssp_root_errors"] = _ssp_component_roots(
+                    self.get_support(), self.coordinate_map
+                )
+            except PenaltyNumericalError:
+                pass
         return state
 
     def __setstate__(self, state: dict) -> None:
@@ -652,6 +669,7 @@ def _attach_context_geometry(
     volume=None,
     certified: bool = False,
     raw_inputs: tuple[NDArray, ...] | None = None,
+    raw_support=None,
     raw_refused: bool = False,
     plain: _PlainBlock | None = None,
 ) -> None:
@@ -676,6 +694,7 @@ def _attach_context_geometry(
         ssp_errors,
         certified=certified,
         raw_inputs=raw_inputs,
+        raw_support=raw_support,
         raw_refused=raw_refused,
         plain=plain,
     )
@@ -734,6 +753,15 @@ def _transported_roots(support, coordinate_map: NDArray) -> tuple[NDArray, ...]:
         basis.T @ basis, basis.T @ coordinate_map, assume_a="pos", check_finite=False
     )
     return tuple((root @ basis) @ retained for root in support.component_roots)
+
+
+def _transported_factor(support, coordinate_map: NDArray) -> tuple[NDArray, NDArray]:
+    """A single penalty's transported root ``Y`` and the triangular ``U`` of ``Y' = Q U``.
+
+    ``log pdet(C' Omega C) = log det(Y Y') = 2 sum log |U_ii|``.
+    """
+    root = _transported_roots(support, coordinate_map)[0]
+    return root, scipy.linalg.qr(root.T, mode="r", check_finite=False)[0][: len(root)]
 
 
 def _map_volume(support, coordinate_map: NDArray | None) -> float:
@@ -821,8 +849,8 @@ def _plain_block(geometry, grouped: list[PenaltyComponent], matrices) -> _PlainB
         if coordinate_map is None:
             constant = unit_logdet(_support_roots(support)) if support.rank else 0.0
         else:
-            singular = scipy.linalg.svdvals(_transported_roots(support, coordinate_map)[0])
-            constant = 2.0 * math.fsum(np.log(singular).tolist())
+            diagonal = np.abs(np.diag(_transported_factor(support, coordinate_map)[1]))
+            constant = 2.0 * math.fsum(np.log(diagonal).tolist())
         block = _PlainBlock(support.rank, constant=constant)
     else:
         raw = (
@@ -1984,7 +2012,7 @@ def build_penalty_components(
         structural_ranks = getattr(gm, "structural_ranks", None) or {}
         raw_support = None
         raw_coordinate_map = None
-        raw_volume = raw_inputs = plain_block = None
+        raw_volume = raw_inputs = raw_selected = plain_block = None
         raw_refused = False
         prior = previous.get(g.name)
         group_ssp_roots = group_ssp_errors = ()
@@ -2104,8 +2132,10 @@ def build_penalty_components(
                     else:
                         raw_inputs = tuple(_frozen_array(omega) for _, omega in gm.omega_components)
                         reused = _reusable_raw_context(prior, raw_inputs)
-                        raw_support = (
-                            _penalty_support(list(raw_inputs)) if reused is None else reused.support
+                        raw_support = raw_selected = (
+                            _penalty_support(list(raw_inputs))
+                            if reused is None
+                            else reused.raw_support
                         )
                         group_ssp_roots = _transported_roots(raw_support, coordinate_map)
                         plain_block = _plain_multi_block(
@@ -2228,8 +2258,10 @@ def build_penalty_components(
                     gm, group_components, rank, prior, rank_rcond=eps_thresh
                 )
                 if route is not None:
-                    raw_inputs, raw_support, raw_coordinate_map, plain_block = route
-                    raw_refused = raw_support is None
+                    raw_inputs, raw_selected, raw_coordinate_map, plain_block = route
+                    raw_refused = raw_selected is None
+                    if plain_block is not None:
+                        raw_support = raw_selected
         if raw_support is None and plain_block is None and prior is not None:
             # A solver-space support follows its matrices unchanged.
             reused = _reusable_solver_context(prior, group_components)
@@ -2240,11 +2272,12 @@ def build_penalty_components(
             support=raw_support,
             coordinate_map=raw_coordinate_map,
             matrix_errors=matrix_errors,
-            ssp_roots=group_ssp_roots,
+            ssp_roots=group_ssp_roots if certified else (),
             ssp_errors=group_ssp_errors,
             volume=raw_volume,
             certified=certified,
             raw_inputs=raw_inputs,
+            raw_support=raw_selected,
             raw_refused=raw_refused,
             plain=plain_block,
         )
@@ -2781,12 +2814,49 @@ def _same_arrays(left: Sequence[NDArray], right: Sequence[NDArray]) -> bool:
 
 
 def _reusable_raw_context(prior, raw_inputs: tuple[NDArray, ...]):
-    """The previous raw context when it was selected from these same raw penalties."""
+    """The previous context when it selected, or refused, a raw support from these raw penalties."""
     if prior is None or prior.raw_inputs is None or not _same_arrays(prior.raw_inputs, raw_inputs):
         return None
-    if not prior.raw_refused and (prior.support is None or prior.coordinate_map is None):
+    if not prior.raw_refused and prior.raw_support is None:
         return None
     return prior
+
+
+def _transport_rounding(support, coordinate_map: NDArray) -> NDArray:
+    """A componentwise bound on the rounding of ``_transported_roots``' single root.
+
+    A computed product ``fl(A B)`` is within ``gamma_k |A| |B|`` of ``A B`` for
+    inner dimension ``k`` (Higham 2002, sec. 3.5).  The full-width root is
+    ``R C``.  Otherwise it is ``K M`` with ``K = R Q`` and ``M = (Q' Q)^-1 Q' C``,
+    where ``Q' Q`` is the identity to working accuracy, so ``M`` carries the
+    rounding of ``Q' C``, of the Gram ``Q' Q`` it is solved against, and of the
+    solve, ``gamma_w (|Q|' |C| + |Q|' |Q| |M|) + gamma_2r |M|``; the product adds
+    ``gamma_r |K| |M|`` and ``K``'s own ``gamma_w |R| |Q| |M|``.
+    """
+    from superglm._roundoff import gamma
+
+    source = support.component_roots[0]
+    width, rank = support.Q_plus.shape
+    absolute_map = np.abs(coordinate_map)
+    if rank == width:
+        return gamma(width) * (np.abs(source) @ absolute_map)
+    basis = support.Q_plus
+    retained = np.abs(
+        scipy.linalg.solve(
+            basis.T @ basis, basis.T @ coordinate_map, assume_a="pos", check_finite=False
+        )
+    )
+    coordinates, absolute_basis = np.abs(source @ basis), np.abs(basis)
+    retained_rounding = (
+        gamma(width)
+        * (absolute_basis.T @ absolute_map + (absolute_basis.T @ absolute_basis) @ retained)
+        + gamma(2 * rank) * retained
+    )
+    return (
+        gamma(rank) * (coordinates @ retained)
+        + gamma(width) * ((np.abs(source) @ absolute_basis) @ retained)
+        + coordinates @ retained_rounding
+    )
 
 
 def _reusable_solver_context(prior, grouped: list[PenaltyComponent]):
@@ -2808,19 +2878,28 @@ def _plain_single_raw_route(gm, grouped, declared_rank, prior, *, rank_rcond):
     The raw support is selected once per fit, on the raw penalty, at the
     threshold that set the declared rank (``_single_penalty_raw_family``);
     each map then contributes the transported root ``Y = R P C``, and
-    ``log pdet(C' Omega C) = 2 sum log sigma_i(Y)``.  The solver keeps its
-    stored penalty ``S``.  The raw route stands in for it when, with
-    ``X = Y' Y``, ``||S - X||_F <= sqrt(eps) sigma_min(Y)**2`` and
-    ``sigma_min(Y)**2 - ||S - X||_F`` clears the shared Gram rank bar
-    ``max(eps, p(n) eps) ||S||_F``: by Weyl's inequality ``S`` then has the
-    raw rank across a gap, and its log pseudo-determinant is within
-    ``r sqrt(eps)`` of the raw one.  These are the agreement test's bars
-    (``_solver_penalty_agreement``), applied to the computed norms.
+    ``log pdet(C' Omega C) = log det(Y Y')``, from a QR factor of ``Y'``.  The
+    solver keeps its stored penalty ``S``.  The raw route stands in for it when, with
+    ``X = Y' Y`` for the exact ``Y`` and ``mu <= sigma_min(Y)**2``,
+    ``||S - X||_F <= sqrt(eps) mu`` and ``mu - ||S - X||_F`` clears the shared
+    Gram rank bar ``max(eps, p(n) eps) ||S||_F``: by Weyl's inequality ``S``
+    then has the raw rank across a gap, and its log pseudo-determinant is
+    within ``r sqrt(eps)`` of the raw one.  These are the agreement test's bars
+    and its lower bound ``mu`` from the inverse triangular factor of ``Y'``
+    (``_solver_penalty_agreement``).  ``||S - X||_F`` is bounded by
+    ``||S - G||_F`` for the computed Gram ``G``, plus ``gamma_r |Y|' |Y|``
+    for ``G``'s own rounding (Higham 2002, sec. 3.5) and ``2 |Y|' E + E' E``
+    for the rounding ``E`` of ``Y`` (``_transport_rounding``): ``S`` is itself a
+    rounded congruence, and the computed ``||S - G||_F`` alone can share its
+    rounding and read near zero where ``S`` has lost the raw spectrum.
 
-    Returns ``None`` when the map is declined before any raw work.  A refused
-    route returns the raw inputs with no support, and later contexts of the
-    fit refuse it at once; otherwise ``(inputs, support, map, block)``.
+    Returns ``None`` when the map is declined before any raw work, and
+    otherwise ``(inputs, support, map, block)``.  A refusal that no map can
+    change (the selection, or its rank) returns no support, and later
+    contexts of the fit refuse at once.  A map whose agreement bars refuse
+    returns the support without a map or block, so the next map rechecks them.
     """
+    from superglm._roundoff import gamma
     from superglm.reml.penalty_support import PenaltyNumericalError, _penalty_support
     from superglm.solvers.rank import SHARED_RANK_POLICY, _eigensolver_relative_bar
 
@@ -2839,35 +2918,40 @@ def _plain_single_raw_route(gm, grouped, declared_rank, prior, *, rank_rcond):
     ):
         return None
     inputs = (_frozen_array(omega),)
-    refused = (inputs, None, None, None)
     reused = _reusable_raw_context(prior, inputs)
     if reused is not None and reused.raw_refused:
-        return refused
+        return inputs, None, None, None
     if reused is not None:
-        support = reused.support
+        support = reused.raw_support
     else:
         try:
             support = _penalty_support([omega], rcond=rank_rcond)
         except (PenaltyNumericalError, ValueError):
             # The raw matrix's own admissibility checks refuse the route; the
             # solver-space path never applies them to the raw penalty.
-            return refused
+            return inputs, None, None, None
     if support.rank == 0 or support.rank != declared_rank:
-        return refused
-    root = _transported_roots(support, coordinate_map)[0]
-    singular = scipy.linalg.svdvals(root, check_finite=False)
-    if not np.all(np.isfinite(singular)) or singular[-1] == 0:
-        return refused
-    smallest = float(singular[-1]) ** 2
+        return inputs, None, None, None
+    unadmitted = (inputs, support, None, None)
+    root, upper = _transported_factor(support, coordinate_map)
+    diagonal = np.abs(np.diag(upper))
+    if not np.all(np.isfinite(diagonal)) or np.any(diagonal == 0):
+        return unadmitted
+    # With Y' = Q U and T = U^-1, sigma_min(Y)**2 = 1 / ||T||_2**2 >= 1 / || |T|' |T| ||_inf.
+    inverse = np.abs(scipy.linalg.solve_triangular(upper, np.eye(len(root)), check_finite=False))
+    smallest = 1.0 / float(np.max(np.sum(inverse.T @ inverse, axis=1)))
     stored = np.asarray(stored, dtype=np.float64)
-    discrepancy = float(np.linalg.norm(stored - root.T @ root))
+    magnitude, rounding = np.abs(root), _transport_rounding(support, coordinate_map)
+    allowance = gamma(len(root)) * (magnitude.T @ magnitude) + 2.0 * (magnitude.T @ rounding)
+    allowance += rounding.T @ rounding
+    discrepancy = float(np.linalg.norm(stored - root.T @ root)) + float(np.linalg.norm(allowance))
     bar = max(SHARED_RANK_POLICY.gram_rcond, _eigensolver_relative_bar(len(stored)))
-    if (
-        discrepancy > SHARED_RANK_POLICY.factor_rcond * smallest
-        or smallest - discrepancy <= bar * float(np.linalg.norm(stored))
+    if not (
+        discrepancy <= SHARED_RANK_POLICY.factor_rcond * smallest
+        and smallest - discrepancy > bar * float(np.linalg.norm(stored))
     ):
-        return refused
-    block = _PlainBlock(support.rank, constant=2.0 * math.fsum(np.log(singular).tolist()))
+        return unadmitted
+    block = _PlainBlock(support.rank, constant=2.0 * math.fsum(np.log(diagonal).tolist()))
     return inputs, support, coordinate_map, block
 
 

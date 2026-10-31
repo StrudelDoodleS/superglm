@@ -3,8 +3,11 @@
 Wood, Pya and Saefken (2016), sec. 3.1.1: single-penalty blocks add
 ``rank log(lambda)``; multi-lambda blocks use the Wood (2011) Appendix B
 similarity transform; Kronecker-sum tensors have eigenvalues
-``lambda_1 a_i + lambda_2 b_j``.  Tolerances are ``rank * width * eps`` times
-the conditioning the reference itself resolves.
+``lambda_1 a_i + lambda_2 b_j``.  A dense eigendecomposition moves every
+eigenvalue by at most about ``width * eps * lambda_max`` (Weyl), so it resolves
+``log|S|_+`` and its derivatives to ``rank * width * eps * condition``; the
+tolerances below are twice that, for the reference and the evaluator.  The
+exact references carry 60 decimal digits.
 """
 
 import copy
@@ -18,6 +21,7 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 
+from superglm.features._spline_penalties import build_integrated_derivative_penalty
 from superglm.group_matrix import FactorSmoothGroupMatrix
 from superglm.model.reml_setup import collect_reml_groups
 from superglm.reml import penalty_algebra as algebra
@@ -39,7 +43,9 @@ def _dense_reference(components, lambdas):
     matrices = [penalty_component_dense_matrix(item) for item in components]
     total = sum(lambdas[item.name] * matrix for item, matrix in zip(components, matrices))
     values, vectors = np.linalg.eigh(0.5 * (total + total.T))
-    keep = values > width * EPS * values[-1] * 1e3
+    # Computed null eigenvalues lie within width * eps * lambda_max of zero;
+    # every fixture's positive spectrum is above sqrt(width * eps) of the largest.
+    keep = values > math.sqrt(width * EPS) * values[-1]
     pinv = (vectors[:, keep] / values[keep]) @ vectors[:, keep].T
     scaled = [pinv @ (lambdas[item.name] * matrix) for item, matrix in zip(components, matrices)]
     gradient = np.array([np.trace(item) for item in scaled])
@@ -52,15 +58,113 @@ def _dense_reference(components, lambdas):
 def _assert_matches(components, lambdas, reference):
     rank, logdet, gradient, hessian, condition = reference
     evaluation = penalty_logdet(lambdas, components)
-    tolerance = 64 * rank * len(gradient) * EPS * condition
+    tolerance = _dense_tolerance(components, rank, condition)
     assert evaluation.rank == rank
-    assert abs(evaluation.logdet - logdet) <= tolerance * max(1.0, abs(logdet))
+    assert abs(evaluation.logdet - logdet) <= tolerance
     names = [item.name for item in components]
     computed = np.array([evaluation.gradient[name] for name in names])
     computed_hessian = np.array([[evaluation.hessian[a, b] for b in names] for a in names])
-    np.testing.assert_allclose(computed, gradient, rtol=0, atol=tolerance * rank)
-    np.testing.assert_allclose(computed_hessian, hessian, rtol=0, atol=tolerance * rank)
+    np.testing.assert_allclose(computed, gradient, rtol=0, atol=tolerance)
+    # Each Hessian entry is a trace of two products with S^+.
+    np.testing.assert_allclose(computed_hessian, hessian, rtol=0, atol=2 * tolerance)
     return evaluation
+
+
+def _dense_tolerance(components, rank, condition):
+    width = components[0].group_sl.stop - components[0].group_sl.start
+    return 2 * rank * width * EPS * condition
+
+
+def _exact_reference(roots, weights):
+    """``log det``, gradient and Hessian of ``sum_j w_j R_j' R_j`` from the given roots.
+
+    Decimal conversion of a binary64 value is exact, and 60-digit arithmetic
+    rounds each operation at ``1e-60`` relative, so for the fixtures'
+    condition numbers (below ``1e35``) this is the exact value for these
+    roots, far below binary64's resolution.  Also returns ``kappa = 2 sum_j
+    ||W_j||_F ||W_j S^-1||_F`` for ``W_j = sqrt(w_j) R_j``: ``d log det = 2 sum_j
+    tr(S^-1 W_j' dW_j)``, so a perturbation of each root by ``delta ||W_j||_F``
+    moves ``log det`` by at most ``delta kappa`` to first order.
+    """
+    with localcontext() as context:
+        context.prec = 60
+        width = roots[0].shape[1]
+        terms = []
+        for root, weight in zip(roots, weights, strict=True):
+            rows = [[Decimal(float(value)) for value in row] for row in np.asarray(root)]
+            scale = Decimal(float(weight))
+            terms.append(
+                [
+                    [
+                        scale * sum((row[i] * row[j] for row in rows), Decimal(0))
+                        for j in range(width)
+                    ]
+                    for i in range(width)
+                ]
+            )
+        total = [[sum(term[i][j] for term in terms) for j in range(width)] for i in range(width)]
+        work = [
+            row[:] + [Decimal(int(i == j)) for j in range(width)] for i, row in enumerate(total)
+        ]
+        logdet = Decimal(0)
+        for column in range(width):
+            pivot = work[column][column]
+            assert pivot > 0
+            logdet += pivot.ln()
+            work[column] = [value / pivot for value in work[column]]
+            for row in range(width):
+                if row != column and work[row][column]:
+                    factor = work[row][column]
+                    work[row] = [
+                        a - factor * b for a, b in zip(work[row], work[column], strict=True)
+                    ]
+        inverse = [row[width:] for row in work]
+        products = [
+            [
+                [sum(inverse[i][k] * term[k][j] for k in range(width)) for j in range(width)]
+                for i in range(width)
+            ]
+            for term in terms
+        ]
+        gradient = [sum(product[i][i] for i in range(width)) for product in products]
+        hessian = [
+            [-sum(a[i][k] * b[k][i] for i in range(width) for k in range(width)) for b in products]
+            for a in products
+        ]
+        for index, value in enumerate(gradient):
+            hessian[index][index] += value
+        kappa = Decimal(0)
+        for root, weight in zip(roots, weights, strict=True):
+            rows = [[Decimal(float(value)) for value in row] for row in np.asarray(root)]
+            scale = Decimal(float(weight)).sqrt()
+            acted = [
+                [sum(row[k] * inverse[k][j] for k in range(width)) for j in range(width)]
+                for row in rows
+            ]
+            norm = sum(value * value for row in rows for value in row).sqrt()
+            kappa += 2 * scale * norm * scale * sum(v * v for row in acted for v in row).sqrt()
+        return (
+            float(logdet),
+            np.array(gradient, dtype=float),
+            np.array(hessian, dtype=float),
+            float(kappa),
+        )
+
+
+def _assert_exact(computed, reference, width):
+    """Within ``width eps (kappa + |log det|)``: a normwise backward-stable evaluation's error.
+
+    The transform and the QR act on the stacked roots by orthogonal steps, so
+    the computed value is exact for roots moved by about ``width eps`` of
+    their norms (Higham 2002, Theorems 19.4 and 19.10), which ``kappa``
+    converts to ``log det``; the derivatives are traces of the same factors.
+    The sum of ``width`` rounded logarithms adds ``width eps |log det|``.
+    """
+    logdet, gradient, hessian = computed
+    tolerance = width * EPS * reference[3]
+    assert abs(logdet - reference[0]) <= tolerance + width * EPS * abs(reference[0])
+    np.testing.assert_allclose(gradient, reference[1], rtol=0, atol=tolerance)
+    np.testing.assert_allclose(hessian, reference[2], rtol=0, atol=2 * tolerance)
 
 
 def _rotated(values, seed):
@@ -128,14 +232,17 @@ def _kronecker_pair(p1=5, p2=4):
     return np.kron(left, np.eye(p2)), np.kron(np.eye(p1), right), left, right
 
 
+@pytest.mark.parametrize("swapped", [False, True])
 @pytest.mark.parametrize("weights", [(1.0, 1.0), (25.0, 0.04), (0.01, 3.0)])
-def test_tensor_closed_form_matches_the_dense_reference(weights):
+def test_tensor_closed_form_matches_the_dense_reference(weights, swapped):
     first, second, _, _ = _kronecker_pair()
-    components = _multi_context([first, second], _well_conditioned_map(20, 5))
+    pair = [second, first] if swapped else [first, second]
+    components = _multi_context(pair, _well_conditioned_map(20, 5))
     lambdas = {"g:c0": weights[0], "g:c1": weights[1]}
     evaluation = _assert_matches(components, lambdas, _dense_reference(components, lambdas))
     geometry = algebra._context_geometry(components)
     assert geometry.plain.kronecker is not None
+    assert geometry.plain.kronecker[2] is swapped
     # The closed form and the Appendix B route evaluate the same block.
     transformed = algebra._PlainBlock(
         geometry.plain.rank, roots=geometry.plain.roots, volume=geometry.plain.volume
@@ -143,9 +250,9 @@ def test_tensor_closed_form_matches_the_dense_reference(weights):
     rank, logdet, gradient, hessian = algebra._plain_block_evaluate(
         transformed, geometry, geometry.matrices, np.array(weights)
     )
-    tolerance = 64 * rank * 20 * EPS * _dense_reference(components, lambdas)[4]
+    tolerance = _dense_tolerance(components, rank, _dense_reference(components, lambdas)[4])
     assert rank == evaluation.rank
-    assert abs(logdet - evaluation.logdet) <= tolerance * abs(logdet)
+    assert abs(logdet - evaluation.logdet) <= tolerance
     np.testing.assert_allclose(gradient, list(evaluation.gradient.values()), atol=tolerance)
     assert abs(hessian[0, 1] - evaluation.hessian["g:c0", "g:c1"]) <= tolerance
 
@@ -191,6 +298,129 @@ def test_lambda_ratio_does_not_leak_the_dominant_rounding(ratio):
         assert abs(leaked - expected) > 1e4 * tolerance
 
 
+_COLUMN_SCALED = {
+    "dominant spectrum below the root cut": ([np.diag([1.0, 1e-16]), np.eye(2)], (1e10, 1e-6)),
+    "below the cut after the support's scaling": ([np.diag([1.0, 5e-17]), np.eye(2)], (1e10, 5e-7)),
+    "rank-deficient dominant": ([np.diag([1.0, 1e-16, 0.0]), np.eye(3)], (1e12, 1.0)),
+    "direction only the dominant spans": (
+        [np.diag([1.0, 1e-20, 0.0]), np.diag([1.0, 0.0, 1.0])],
+        (1e12, 1.0),
+    ),
+    "tiny trailing column": ([np.diag([1.0, 1.0, 1e-20]), np.eye(3)], (1.0, 1e-20)),
+    "trailing column only the dominant spans": (
+        [np.diag([1.0, 1.0, 1e-20]), np.diag([1.0, 0.0, 0.0])],
+        (1.0, 1e-7),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(_COLUMN_SCALED))
+def test_the_transform_keeps_what_column_scaled_components_set(case):
+    """The support's column scaling keeps directions a fixed relative cut of one root drops.
+
+    A dominant penalty's eigenvalues far below eps of its largest are exact
+    data here, and its weight lifts them to the smaller terms' level, so
+    discarding them changes ``log|S|`` by O(1) or loses a support direction.
+    """
+    matrices, weights = _COLUMN_SCALED[case]
+    support = support_module._penalty_support(matrices)
+    assert support.rank == len(matrices[0])
+    roots = algebra._support_roots(support)
+    reference = _exact_reference(roots, weights)
+    _assert_exact(blocks.multi_penalty_logdet(roots, np.array(weights)), reference, support.rank)
+
+
+def test_column_scaled_components_through_the_context():
+    """``diag(1, 1e-16)`` and ``I`` at ``(1e10, 1e-6)``: ``log(2e4)``, gradient ``(3/2, 1/2)``."""
+    components = _multi_context([np.diag([1.0, 1e-16]), np.eye(2)], np.eye(2))
+    weights = (1e10, 1e-6)
+    evaluation = penalty_logdet(dict(zip(("g:c0", "g:c1"), weights)), components)
+    block = algebra._context_geometry(components).plain
+    reference = _exact_reference(block.roots, weights)
+    exact = math.log(1e10 + 1e-6) + math.log(1e-6 + 1e-6)
+    gradient = np.array(list(evaluation.gradient.values()))
+    hessian = np.array(list(evaluation.hessian.values())).reshape(2, 2)
+    assert evaluation.rank == 2
+    _assert_exact((evaluation.logdet - block.volume, gradient, hessian), reference, 2)
+    tolerance = 2 * EPS * reference[3]
+    assert abs(evaluation.logdet - exact) <= tolerance + 4 * EPS * abs(exact)
+    np.testing.assert_allclose(gradient, [1.5, 0.5], rtol=0, atol=tolerance)
+
+
+@pytest.mark.parametrize("ratio", [1e-12, 1e12])
+def test_non_commuting_penalties_at_extreme_weight_ratios(ratio):
+    """A column-scaled dominant penalty against a rotated one, at lambda ratios 1e+-12.
+
+    At ``1e12`` the dominant term's ``1e-16`` direction contributes ``1e-4``
+    of the rotated term's eigenvalues there, so it is part of the answer.
+    """
+    first = np.diag([1.0, 1.0, 1e-16, 0.0, 0.0])
+    second, _ = _rotated(np.r_[0.0, np.geomspace(0.5, 4.0, 4)], 3)
+    support = support_module._penalty_support([first, second])
+    assert support.rank == 5
+    roots = algebra._support_roots(support)
+    weights = (ratio, 1.0)
+    reference = _exact_reference(roots, weights)
+    _assert_exact(blocks.multi_penalty_logdet(roots, np.array(weights)), reference, 5)
+
+
+def test_the_dominance_order_survives_grams_beyond_binary64():
+    """``1e155 I`` against a rank-two ``1e163`` root in three dimensions: both Grams overflow.
+
+    Householder QR without row sorting or pivoting is not row-wise stable when
+    row norms vary widely (Powell and Reid 1969; Cox and Higham 1998, Pitman
+    Res. Notes Math. 380), and here the large term is stacked last.  Ranked by
+    overflowed norms the two terms compare equal and stay unrotated, so the
+    QR's rounding of ``u 1e163`` reaches the large term's null direction, where
+    the small one sets ``1e155``: an error of order ``u 1e8``.  Ranked by their
+    logarithms the large term dominates and is rotated out.
+    """
+    rows = np.linalg.qr(np.random.default_rng(8).normal(size=(3, 3)))[0][:2]
+    roots = [1e150 * np.eye(3), 1e150 * rows]
+    weights = (1e10, 1e26)
+    reference = _exact_reference(roots, weights)
+    _assert_exact(blocks.multi_penalty_logdet(roots, np.array(weights)), reference, 3)
+
+
+def _skewed_tensor():
+    """A cubic B-spline curvature margin on lognormal(0, 3) quantile knots, by differences.
+
+    The integrated penalty scales with the knot intervals, so on these knots
+    its support root's singular values span about 4e16: the support keeps
+    directions that a fixed relative cut on that root drops.
+    """
+    sample = np.random.default_rng(3).lognormal(0.0, 3.0, 2000)
+    inner = np.quantile(sample, np.linspace(0.0, 1.0, 4))
+    knots = np.r_[[inner[0]] * 3, inner, [inner[-1]] * 3]
+    margin = build_integrated_derivative_penalty(knots, 3, 2)
+    differences = np.diff(np.eye(3), axis=0)
+    return np.kron(margin, np.eye(3)), np.kron(np.eye(len(margin)), differences.T @ differences)
+
+
+@pytest.mark.parametrize("weights", [(1.0, 1.0), (1e6, 1e-6), (1e12, 1.0), (1e-12, 1.0)])
+def test_skewed_integrated_penalty_margins_through_the_transform(weights):
+    support = support_module._penalty_support(list(_skewed_tensor()))
+    roots = algebra._support_roots(support)
+    reference = _exact_reference(roots, weights)
+    _assert_exact(blocks.multi_penalty_logdet(roots, np.array(weights)), reference, support.rank)
+
+
+def test_a_finite_solver_penalty_keeps_its_dominant_term_when_the_raw_gram_overflows():
+    """Raw ``1e300 I`` and ``I`` under the map ``1e-150 I``: stored as ``I`` and ``1e-300 I``.
+
+    The dominant weighted raw root is ``1e155 I``, whose Gram norm is beyond
+    binary64; at ``(1e10, 1)`` the answer is ``2 log(1e10 + 1e-300)``.
+    """
+    components = _multi_context([1e300 * np.eye(2), np.eye(2)], 1e-150 * np.eye(2))
+    np.testing.assert_array_equal(components[0].omega_ssp, np.eye(2))
+    evaluation = penalty_logdet({"g:c0": 1e10, "g:c1": 1.0}, components)
+    exact = 2 * math.log(1e10)
+    assert evaluation.rank == 2
+    assert abs(evaluation.logdet - exact) <= 8 * EPS * abs(exact)
+    assert abs(evaluation.gradient["g:c0"] - 2.0) <= 8 * EPS
+    assert 0.0 <= evaluation.gradient["g:c1"] <= 1e-300
+
+
 @pytest.mark.parametrize("ratio", [1e-12, 1e12])
 def test_tensor_closed_form_holds_at_extreme_weight_ratios(ratio):
     first, second, left, right = _kronecker_pair()
@@ -208,7 +438,10 @@ def test_tensor_closed_form_holds_at_extreme_weight_ratios(ratio):
     evaluation = penalty_logdet({"g:c0": ratio, "g:c1": 1.0}, components)
     assert geometry.plain.kronecker is not None
     assert evaluation.rank == int(active.sum()) == geometry.support.rank
-    assert abs(evaluation.logdet - expected) <= 64 * 20**2 * EPS * 1e3 * abs(expected)
+    # Each margin's eigenvalues move by width * eps of its largest, and the
+    # reference's normal-equation volume carries cond(mapped)**2 rounding.
+    condition = max(a.max() / a[a > 0].min(), b.max() / b[b > 0].min(), np.linalg.cond(mapped) ** 2)
+    assert abs(evaluation.logdet - expected) <= 2 * evaluation.rank * 20 * EPS * condition
 
 
 def test_a_kronecker_split_is_structural_not_approximate():
@@ -268,15 +501,16 @@ def test_zero_weight_face_uses_the_active_support():
     evaluation = penalty_logdet(lambdas, components)
     reference = _dense_reference(components[:1], lambdas)
     assert evaluation.rank == reference[0] == 6
-    assert abs(evaluation.logdet - reference[1]) <= 64 * 6 * 9 * EPS * reference[4]
+    assert abs(evaluation.logdet - reference[1]) <= _dense_tolerance(components, 6, reference[4])
     assert evaluation.gradient == {"g:c0": 6.0, "g:c1": 0.0}
 
 
 def test_stored_penalty_without_the_raw_rank_keeps_the_solver_space_support():
-    # C' C = [[1, 1], [1, 1 + 1e-16]] rounds to rank one in binary64.
+    # C' C = [[1, 1], [1, 1 + 1e-16]] rounds to rank one in binary64.  The
+    # agreement bars refuse this map; the next map rechecks them.
     components = _single_context(np.eye(2), np.array([[1.0, 1.0], [0.0, 1e-8]]))
     geometry = algebra._context_geometry(components)
-    assert geometry.coordinate_map is None and geometry.raw_refused
+    assert geometry.coordinate_map is None and not geometry.raw_refused
     solver = support_module._penalty_support([components[0].omega_ssp])
     assert penalty_logdet({"s": 1.0}, components).rank == solver.rank
 
@@ -332,13 +566,48 @@ def test_later_contexts_reuse_the_raw_support_and_a_refusal(monkeypatch):
     later = _single_context(omega, 2 * coordinate_map, source=first)
     assert counts["support"] == 1
     assert algebra._context_geometry(later).support is algebra._context_geometry(first).support
+    # Doubling the map doubles the transported root exactly, so the constants
+    # differ by 2 r log 2 up to the rounding of the r logarithms each sums.
     expected = penalty_logdet({"s": 3.0}, first).logdet + 2 * 5 * math.log(2.0)
-    assert abs(penalty_logdet({"s": 3.0}, later).logdet - expected) <= 64 * 5 * EPS * 1e3
-    refused = _single_context(np.eye(2), np.array([[1.0, 1.0], [0.0, 1e-8]]))
+    assert abs(penalty_logdet({"s": 3.0}, later).logdet - expected) <= 4 * 5 * EPS * abs(expected)
+    # A selection the raw penalty itself refuses is carried, not reselected.
+    asymmetric = omega.copy()
+    asymmetric[0, 1] += 1e-9
+    refused = _single_context(asymmetric, coordinate_map)
     counts["support"] = 0
-    carried = _single_context(np.eye(2), np.array([[1.0, 1.0], [0.0, 1e-3]]), source=refused)
+    carried = _single_context(asymmetric, 2 * coordinate_map, source=refused)
     assert counts["support"] == 0
     assert algebra._context_geometry(carried).raw_refused
+
+
+def test_a_map_the_agreement_bars_refuse_leaves_the_next_map_to_its_own_check(monkeypatch):
+    """Discrete REML and EFS rebuild ``C`` as lambda moves; only map-free refusals persist.
+
+    ``C = [[1, 1], [0, d]]`` on ``Omega = I`` stores ``C' C``, whose smallest
+    eigenvalue ``d**2 / 2`` the rounding of ``1 + d**2`` resolves to ``eps / d**2``
+    relative: the bars refuse ``d = 1e-5`` (``x`` about ``1800 sqrt(eps)``) and admit
+    ``d = 1e-3`` (``x`` about ``0.18 sqrt(eps)``).
+    """
+    counts = {"support": 0}
+    original = support_module._penalty_support
+
+    def counted(*args, **kwargs):
+        counts["support"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(support_module, "_penalty_support", counted)
+    refused = _single_context(np.eye(2), np.array([[1.0, 1.0], [0.0, 1e-5]]))
+    first = algebra._context_geometry(refused)
+    assert first.coordinate_map is None and not first.raw_refused
+    assert first.raw_support is not None and counts["support"] == 1
+    admitted = _single_context(np.eye(2), np.array([[1.0, 1.0], [0.0, 1e-3]]), source=refused)
+    later = algebra._context_geometry(admitted)
+    assert counts["support"] == 1
+    assert later.coordinate_map is not None and later.support is first.raw_support
+    expected = 2 * math.log(1e-3)
+    assert abs(penalty_logdet({"s": 1.0}, admitted).logdet - expected) <= 4 * 2 * EPS * abs(
+        expected
+    )
 
 
 @pytest.mark.parametrize("method", ["pickle protocol 4", "pickle protocol 5", "deepcopy"])
@@ -357,7 +626,30 @@ def test_a_reloaded_plain_context_evaluates_the_same(method):
             copied = pickle.loads(pickle.dumps(components, protocol=int(method[-1])))
         geometry = algebra._context_geometry(copied)
         assert geometry is not None and geometry.plain is None
+        assert geometry.raw_inputs is None and geometry.raw_support is None
         assert penalty_logdet(lambdas, copied) == expected
+
+
+def test_a_saved_plain_tensor_context_carries_the_enclosed_ssp_roots():
+    """A release before the plain evaluator evaluates a zero-weight face from enclosed SSP roots.
+
+    The certified evaluator stays in this module, so it stands in for that
+    release: the reloaded context's face agrees with the plain one within its
+    certified bound plus the plain evaluation's rounding.
+    """
+    first, second, _, _ = _kronecker_pair()
+    components = _multi_context([first, second], _well_conditioned_map(20, 5))
+    assert algebra._context_geometry(components).ssp_roots == ()
+    loaded = pickle.loads(pickle.dumps(components, protocol=5))
+    geometry = algebra._context_geometry(loaded)
+    assert [root.shape for root in geometry.ssp_roots] == [
+        error.shape for error in geometry.ssp_root_errors
+    ]
+    summary, _, bound = geometry.evaluate(np.array([2.0, 0.0]))
+    plain = penalty_logdet({"g:c0": 2.0, "g:c1": 0.0}, components)
+    assert summary.rank == plain.rank
+    rounding = 2 * plain.rank * 20 * EPS * max(1.0, abs(plain.logdet))
+    assert abs(summary.logdet_s_plus - plain.logdet) <= bound + rounding
 
 
 def test_a_certified_context_evaluates_under_the_plain_evaluator():
@@ -376,6 +668,7 @@ def test_a_certified_context_evaluates_under_the_plain_evaluator():
     lambdas = {"g:c0": 3.0, "g:c1": 0.2}
     old, new = penalty_logdet(lambdas, certified), penalty_logdet(lambdas, plain)
     assert old.rank == new.rank
-    assert abs(old.logdet - new.logdet) <= 64 * 20**2 * EPS * 1e3 * abs(new.logdet)
+    tolerance = _dense_tolerance(plain, new.rank, _dense_reference(plain, lambdas)[4])
+    assert abs(old.logdet - new.logdet) <= tolerance
     reference = algebra._compute_penalty_logdet_evaluation(lambdas, certified)
-    assert abs(reference.logdet - new.logdet) <= reference.logdet_error + 64 * 20**2 * EPS * 1e3
+    assert abs(reference.logdet - new.logdet) <= reference.logdet_error + tolerance

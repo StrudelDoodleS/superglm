@@ -41,21 +41,18 @@ from superglm.solvers.rank import SHARED_RANK_POLICY
 DOMINANCE = EPS ** (1.0 / 3.0)
 
 
-def _frobenius_of_gram(root: NDArray) -> float:
-    """``||R' R||_F``, from the smaller of ``R R'`` and ``R' R`` (same nonzero spectrum)."""
-    if root.shape[0] <= root.shape[1]:
-        return float(np.linalg.norm(root @ root.T))
-    return float(np.linalg.norm(root.T @ root))
+def _log_gram_norm(root: NDArray) -> float:
+    """``log ||R' R||_F`` from the smaller Gram of ``R`` over its largest entry; ``-inf`` at zero.
 
-
-def _span_rank(stacked: NDArray) -> int:
-    """Numerical rank of stacked roots, by the cut that selected the support."""
-    if stacked.size == 0:
-        return 0
-    singular = scipy.linalg.svdvals(stacked, check_finite=False)
-    if singular[0] == 0:
-        return 0
-    return int(np.count_nonzero(singular > SHARED_RANK_POLICY.factor_rcond * singular[0]))
+    A finite root can have a Gram beyond binary64 (``1e155 I`` has norm
+    ``1e310``); its logarithm stays finite.
+    """
+    scale = float(np.max(np.abs(root), initial=0.0))
+    if scale == 0:
+        return -math.inf
+    unit = root / scale
+    gram = unit @ unit.T if unit.shape[0] <= unit.shape[1] else unit.T @ unit
+    return 2.0 * math.log(scale) + math.log(float(np.linalg.norm(gram)))
 
 
 def similarity_transformed_roots(
@@ -63,49 +60,52 @@ def similarity_transformed_roots(
 ) -> list[NDArray]:
     """Weighted roots ``sqrt(lambda_j) R_j`` after Wood's (2011) Appendix B transform.
 
-    Each pass ranks the remaining terms by ``Omega_i = lambda_i ||S_i||_F`` on
-    the unprocessed trailing block, takes the dominant set ``alpha``, finds the
-    rank ``r`` of ``sum_alpha S_i / ||S_i||_F`` and stops when it fills the
-    block.  Otherwise the block is rotated onto the eigenvectors of
-    ``sum_alpha lambda_i S_i``, the dominant terms are set exactly to zero
-    beyond their ``r`` leading columns, and the pass repeats on the rest.  The
-    roots are balanced and cut as the support's were (each root over its
-    Frobenius norm, singular values above ``sqrt(eps)`` of the largest), so the
-    transform never discards a direction the support kept.
+    Each pass ranks the terms that still have content in the open trailing
+    block by ``Omega_i = lambda_i ||S_i||_F`` there and takes the dominant set
+    ``alpha``; it stops when every such term dominates.  Otherwise the block is
+    rotated onto the right singular vectors of the stacked dominant roots (the
+    eigenvectors of ``sum_alpha lambda_i S_i``), the leading columns whose
+    dominant singular values are at least ``sqrt(eps)`` of the largest are
+    closed, and the pass repeats on the rest.
+
+    Every step is an orthogonal rotation of the trailing columns, so the
+    transform discards no direction and the determinant is unchanged.  The
+    appendix sets the dominant terms to zero beyond their formal rank because
+    a formed ``lambda_i S_i`` carries rounding of order ``eps lambda_i ||S_i||``
+    in every entry, which is first order in the eigenvalues the smaller terms
+    set.  Stacked roots keep each term's rounding in that term's own rows: after
+    the rotation a dominant root's trailing columns hold its true content there
+    plus rounding of order ``u sqrt(lambda_i) ||R_i||``, which reaches the
+    trailing Gram only squared and through the closed block's Schur complement.
+    They are carried into the next pass, where they compete by their own norm,
+    rather than cut at a fixed rank: a penalty whose spectrum runs below any such
+    cut, as a column-equilibrated support keeps, still sets eigenvalues that the
+    smaller terms' weighted ones can match.
     """
     current = [
         math.sqrt(float(weight)) * np.array(root, dtype=np.float64)
         for root, weight in zip(roots, weights, strict=True)
     ]
     width = current[0].shape[1]
-    start, remaining = 0, list(range(len(current)))
-    while remaining:
-        norms = {index: _frobenius_of_gram(current[index][:, start:]) for index in remaining}
-        largest = max(norms.values())
-        if largest == 0:
+    log_dominance = math.log(dominance)
+    start = 0
+    while start < width:
+        norms = {index: _log_gram_norm(root[:, start:]) for index, root in enumerate(current)}
+        remaining = [index for index, value in norms.items() if value > -math.inf]
+        if not remaining:
             break
-        alpha = [index for index in remaining if norms[index] >= dominance * largest]
-        if start == 0 and len(alpha) == len(remaining):
-            # Every term dominates: their sum spans the support, which was
-            # selected from these roots, so the first pass terminates (step 4).
+        largest = max(norms[index] for index in remaining)
+        alpha = [index for index in remaining if norms[index] >= largest + log_dominance]
+        if len(alpha) == len(remaining):
+            # Comparable terms need no further separation (step 4).
             break
-        balanced = np.vstack(
-            [
-                current[index][:, start:] / np.linalg.norm(current[index][:, start:])
-                for index in alpha
-            ]
-        )
-        rank = _span_rank(balanced)
-        if rank >= width - start:
-            break
-        weighted = np.vstack([current[index][:, start:] for index in alpha])
-        rotation = np.linalg.svd(weighted, full_matrices=True)[2].T
+        dominant = np.vstack([current[index][:, start:] for index in alpha])
+        dominant /= np.max(np.abs(dominant))
+        _, singular, vh = scipy.linalg.svd(dominant, full_matrices=True, check_finite=False)
+        rotation = vh.T
         for index in remaining:
             current[index][:, start:] = current[index][:, start:] @ rotation
-        for index in alpha:
-            current[index][:, start + rank :] = 0.0
-        start += rank
-        remaining = [index for index in remaining if index not in alpha and norms[index] > 0]
+        start += int(np.count_nonzero(singular > SHARED_RANK_POLICY.factor_rcond * singular[0]))
     return current
 
 

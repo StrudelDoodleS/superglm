@@ -213,16 +213,20 @@ def test_full_rank_logdet_is_certified_against_the_stored_solver_penalty():
         assert error <= Decimal.from_float(float(evaluation.logdet_error))
 
 
-@pytest.mark.parametrize("small", [1e-6, 1e-8])
-def test_stored_penalty_rounding_keeps_its_rank_and_log_determinant(small):
-    # C.T C = [[1, 1], [1, 1 + small**2]]. Binary64 stores 1 + 1e-12 with a
-    # 1e-4 relative error in the smallest eigenvalue, and rounds 1 + 1e-16 to
-    # 1, so the stored solver penalty loses its second direction.
-    components = _context(np.eye(2), np.array([[1.0, 1.0], [0.0, small]]))
-    reference = [_solver_space(components[0])]
-    evaluation = algebra._compute_penalty_logdet_evaluation({"s": 1.0}, components)
+@pytest.mark.parametrize("certified", [True, False])
+@pytest.mark.parametrize("small", [1e-4, 1e-6, 1e-8])
+def test_stored_penalty_rounding_keeps_its_rank_and_log_determinant(small, certified):
+    # C.T C = [[1, 1], [1, 1 + small**2]]. Binary64 stores 1 + small**2 with a
+    # relative error of eps / small**2 in the smallest eigenvalue (2e-8 at
+    # 1e-4, 1e-4 at 1e-6), and rounds 1 + 1e-16 to 1, so the stored solver
+    # penalty loses its second direction. The stored S and fl(C.T C) share that
+    # rounding, so only the Gram's rounding allowance shows the loss.
+    components = _context(np.eye(2), np.array([[1.0, 1.0], [0.0, small]]), certified=certified)
+    reference = [_solver_space(components[0], certified=certified)]
+    evaluate = algebra._compute_penalty_logdet_evaluation if certified else algebra.penalty_logdet
+    evaluation = evaluate({"s": 1.0}, components)
     assert algebra._context_geometry(components).coordinate_map is None
-    assert evaluation == algebra._compute_penalty_logdet_evaluation({"s": 1.0}, reference)
+    assert evaluation == evaluate({"s": 1.0}, reference)
     nullity = [
         algebra.compute_penalty_nullity(
             hessian_rank=3, penalties=penalties, lambdas={"s": 1.0}, coefficient_width=2
@@ -233,6 +237,34 @@ def test_stored_penalty_rounding_keeps_its_rank_and_log_determinant(small):
     # The stored penalty's exact determinant decides its rank.
     (a, b), (c, d) = _decimal(components[0].omega_ssp)
     assert evaluation.rank == (2 if a * d - b * c > 0 else 1)
+
+
+def _random_map(condition, seed):
+    rng = np.random.default_rng(seed)
+    left = np.linalg.qr(rng.normal(size=(8, 8)))[0]
+    right = np.linalg.qr(rng.normal(size=(8, 8)))[0]
+    return left @ np.diag(np.geomspace(1.0, 1.0 / condition, 8)) @ right
+
+
+@pytest.mark.parametrize("condition", [1e1, 1e2, 1e3, 1e4])
+@pytest.mark.parametrize("seed", range(4))
+def test_plain_route_decisions_follow_the_certified_family(condition, seed):
+    """The plain bars decide the raw route as the certified agreement does on these maps.
+
+    Second differences on eight coefficients under ``C = U diag(1 .. 1/condition) V``:
+    the certified ratio ``x / sqrt(eps)`` runs from 1.5e-3 to 860 here, and the
+    plain one, from computed norms with the same Gram and transport allowances
+    and the same lower bound on ``sigma_min(Y)**2``, is 0.64 to 0.93 of it. The
+    maps nearest the bar (``1e3``, seeds 1 and 3, certified 0.69 and 1.53)
+    decide alike.
+    """
+    _, omega = _second_differences(8)
+    coordinate_map = _random_map(condition, seed)
+    plain = _context(omega, coordinate_map, certified=False)
+    certified = _context(omega, coordinate_map)
+    assert (algebra._context_geometry(plain).coordinate_map is None) is (
+        algebra._context_geometry(certified).coordinate_map is None
+    )
 
 
 def test_admitted_rounded_map_certifies_the_stored_log_determinant():
