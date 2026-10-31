@@ -74,6 +74,14 @@ _CAPABILITIES = FamilyCapabilities(
     random=False,
     response_mean=True,
 )
+# The shape's sampling standard deviation is of order 1/sqrt(n). Under an upper
+# wall of one, the default prediction reads a shape within _WALL_RESOLUTION of
+# one as one, where the mean diverges: no sample below about 1e12 rows tells the
+# two apart. A shape within _NEAR_WALL of a wall is within one standard deviation
+# of it for any sample below about 1e8 rows; fits pressed past a wall stop far
+# inside that distance (5e-6 and less, even at inner_tol=1e-5).
+_WALL_RESOLUTION = 1.0e-6
+_NEAR_WALL = 1.0e-4
 
 
 def _validated_wall(value: object, *, name: str) -> float:
@@ -180,7 +188,9 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     The current shape domain gives every row nonnegative, unbounded support
     and a finite mean. Negative shapes require response-dependent support
     and are not supported. ``predict`` returns the mean excess,
-    ``scale / (1 - shape)``. The threshold is not a fitted parameter.
+    ``scale / (1 - shape)``. Under an upper wall of one it returns ``inf``
+    where the shape is within ``1e-6`` of one, which no sample can tell from
+    one. A fit whose shape reaches a wall says so in ``result_.warnings``. The threshold is not a fitted parameter.
     """
 
     shape_lower: float = 0.0
@@ -401,8 +411,95 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         return expected_information(values[:, 0], values[:, 1], bound.multiplier)
 
     def default_prediction(self, theta) -> NDArray[np.float64]:
+        """The mean excess; under an upper wall of one, infinite at a shape that close to one."""
         values = self._theta(theta, None)
-        return generalized_pareto_mean(values[:, 0], values[:, 1])
+        mean = np.array(generalized_pareto_mean(values[:, 0], values[:, 1]))
+        if self.shape_upper == 1.0:
+            mean[1.0 - values[:, 1] <= _WALL_RESOLUTION] = np.inf
+        return readonly(mean)
+
+    def wall_disclosure(self, y, theta, plan) -> str | None:
+        """Name the rows whose fitted shape is at a wall, and what that does to them.
+
+        The logit link keeps the fitted shape strictly inside, so data that want
+        it beyond a wall leave it wherever the solver's tolerance stops it, close
+        to the wall with its score still pointing out. Only rows within
+        ``_NEAR_WALL`` of a wall are candidates; an interior fit, even one that
+        bends some rows towards a wall, keeps them further away. For the
+        candidates at each wall, the wall is active, as for a bound constraint,
+        when a Newton step in their shape would cross it. That step is their
+        summed shape score over their summed observed shape information, at the
+        fitted scale. The score is the profile score, since the fitted scale is
+        at its own optimum; the information leaves out the scale's share, so the
+        step is the shorter one. Without positive information the quadratic model
+        rises without limit along an outward score, so the wall is active. A
+        candidate is at its wall when its distance to it is shorter than the step.
+
+        At an upper wall of one the mean and expected shortfall diverge; at any
+        other wall the shape is set by the wall, not the data. The fit's curvature
+        along the shape vanishes at a wall, so the Gaussian approximation behind
+        standard errors and posterior draws fails there.
+        """
+        response = _validated_response(y)
+        values = self._theta(theta, len(response))
+        evaluated = self.evaluate_natural(response, values, plan, derivative_order=2)
+        score = evaluated.score[:, 1]
+        information = -evaluated.hessian_packed[:, 2]
+        shape = values[:, 1]
+        to_upper = self.shape_upper - shape
+        to_lower = shape - self.shape_lower
+
+        def rows_at_wall(near: NDArray[np.bool_], distance: NDArray, outward: float) -> int:
+            push = outward * float(np.sum(score[near]))
+            if not push > 0.0:
+                return 0
+            near_information = float(np.sum(information[near]))
+            step = push / near_information if near_information > 0.0 else np.inf
+            return int(np.count_nonzero(near & (distance < step)))
+
+        n_upper = rows_at_wall((to_upper <= _NEAR_WALL) & (to_upper <= to_lower), to_upper, 1.0)
+        n_lower = rows_at_wall((to_lower <= _NEAR_WALL) & (to_lower < to_upper), to_lower, -1.0)
+        n_rows = len(shape)
+        findings = []
+        if n_upper:
+            if self.shape_upper == 1.0:
+                consequence = (
+                    "the mean and the expected shortfall are infinite there, and predict() "
+                    "returns inf for a shape within 1e-6 of one; quantiles and the distribution "
+                    "function stay finite. Use quantiles or bounded expectations, or choose "
+                    "another threshold."
+                )
+            else:
+                consequence = (
+                    "the shape, and everything that depends on it, is set by the wall rather "
+                    "than the data. Raise shape_upper (it may go up to 1), or choose another "
+                    "threshold."
+                )
+            findings.append(
+                f"{n_upper} of {n_rows} rows have a tail shape at the upper wall "
+                f"{self.shape_upper:g}: the data put the shape at or beyond it, so "
+                f"{consequence}"
+            )
+        if n_lower:
+            remedy = (
+                "Lower shape_lower (it may go down to 0), or choose another threshold."
+                if self.shape_lower > 0.0
+                else "This family takes no negative shapes: choose another threshold, or a "
+                "lighter-tailed family for these excesses."
+            )
+            findings.append(
+                f"{n_lower} of {n_rows} rows have a tail shape at the lower wall "
+                f"{self.shape_lower:g}: the data put the shape at or below it, so the tail is "
+                f"set by the wall rather than the data. {remedy}"
+            )
+        if not findings:
+            return None
+        return (
+            "SuperLSS GeneralizedParetoLSS fit: "
+            + " ".join(findings)
+            + " Standard errors, intervals and posterior draws that involve the shape are not "
+            "reliable at a wall, where the fit has almost no curvature along the shape."
+        )
 
     def variance(self, theta) -> NDArray[np.float64]:
         """Population variance; infinite when the shape is at least one half."""

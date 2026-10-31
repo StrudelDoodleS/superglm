@@ -25,6 +25,7 @@ from superglm.distributional.family import (
     FamilyLikelihoodPlan,
     FitFailureDiagnosingFamily,
     LimitRowDisclosingFamily,
+    WallDisclosingFamily,
 )
 from superglm.distributional.inference import JointInference, compute_joint_inference
 from superglm.distributional.layout import StackedLayout
@@ -557,8 +558,9 @@ def _curvature_disclosures(
     refuse and is disclosed whether or not its diagnosis fires. A
     :class:`LimitRowDisclosingFamily` also reports its rows at a limit,
     converged or not, when the fit's terminal rank decision leaves one of that
-    parameter's coefficients not estimable (see ``_limit_row_disclosure``); a
-    failed disclosure never fails the finished fit.
+    parameter's coefficients not estimable (see ``_limit_row_disclosure``), and
+    a :class:`WallDisclosingFamily` names its rows fitted at a wall of a bounded
+    link; a failed disclosure never fails the finished fit.
     """
     telemetry = solver_result.terminal_curvature
     messages: list[str] = []
@@ -589,6 +591,13 @@ def _curvature_disclosures(
     ):
         try:
             message = _limit_row_disclosure(family, solver_result, likelihood_plan, layout)
+        except Exception:  # noqa: BLE001 - a failed disclosure must not fail the fit
+            message = None
+        if message:
+            messages.append(message)
+    if isinstance(family, WallDisclosingFamily) and solver_result.theta is not None:
+        try:
+            message = family.wall_disclosure(response, solver_result.theta, likelihood_plan)
         except Exception:  # noqa: BLE001 - a failed disclosure must not fail the fit
             message = None
         if message:
