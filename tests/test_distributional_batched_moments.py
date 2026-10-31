@@ -138,25 +138,35 @@ def test_accumulate_reads_fortran_and_strided_channels_in_place():
     """The workspace budget counts no copy of a chunk's channels, so the reducer makes none:
     Fortran and strided channel matrices are read where they are.
 
-    A copy would be made on every call, so the traced call is the second for its layout:
-    the first carries one-off process setup, such as the BLAS thread controller the
-    worker pool builds on its first section, which peaks near one column's bytes.
+    One-off process setup, such as the BLAS thread controller the worker pool builds on its
+    first section (which peaks near one column's bytes), runs on a throwaway reducer first.
+    The traced call is then each measured reducer's first, where a copy kept for later calls
+    would still be made.
     """
     import tracemalloc
 
     module = _module()
     module._warmup_batched_moments()
+    _, sizes, ordinary, bins, histograms, directions, buffers = _fixture()
+    bins.fill(0)
+    for panel in ordinary:
+        panel.fill(1.0)
+    warm = module._BatchedMomentReducers(
+        histograms, directions, ordinary, bins, support_sizes=sizes, n_channels=3, **buffers
+    )
+    with parallel_config(n_jobs=1):
+        for weights in (np.ones((11, 3), order="F"), np.ones((11, 6))[:, ::2]):
+            warm.accumulate(weights, 11)
     capacity = 1 << 14
     _, sizes, ordinary, bins, histograms, directions, buffers = _fixture(capacity=capacity)
     bins.fill(0)
     for panel in ordinary:
         panel.fill(1.0)
-    batch = module._BatchedMomentReducers(
-        histograms, directions, ordinary, bins, support_sizes=sizes, n_channels=3, **buffers
-    )
     for weights in (np.ones((capacity, 3), order="F"), np.ones((capacity, 6))[:, ::2]):
+        batch = module._BatchedMomentReducers(
+            histograms, directions, ordinary, bins, support_sizes=sizes, n_channels=3, **buffers
+        )
         with parallel_config(n_jobs=1):
-            batch.accumulate(weights, capacity)
             tracemalloc.start()
             try:
                 batch.accumulate(weights, capacity)
