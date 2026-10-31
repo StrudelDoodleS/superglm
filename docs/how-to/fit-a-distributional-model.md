@@ -654,8 +654,9 @@ they were complete keeps their mean but not their shape, so its law cut at `u`
 is wrong. On a gamma sample cut at its 90% point, a complete-row body's mean
 below `u` is 14% low in the split method, and its capped mean is 8% low in the
 layer method. `GammaLS` and `GeneralizedGammaLSS` do not take `censored=` or
-`truncation=` yet; use their body fits for the mean below `u` only, not as a
-distribution there.
+`truncation=` yet; use their body fits only for the mean they were fitted to,
+the mean below `u` in the split method and the capped mean `E[min(Y, u)]` in
+the layer method, not as a distribution there.
 
 Where a policy limit caps a large claim, record its excess at `limit - u` and
 pass `censored=` for the claims settled at their limit when fitting the tail.
@@ -829,8 +830,9 @@ arguments:
 - `censored=`: the row's recorded response is a bound, not the claim itself.
   `True` (or `"right"`) means the claim was at least the recorded value: a
   claim capped at the threshold, or settled at its policy limit. `"left"`
-  means it was at most the recorded value. Pass one entry per row; `False`,
-  `None` or `"none"` marks a complete row. Record the capped value itself,
+  means it was at most the recorded value. Pass one entry per row; `False` or
+  `"none"` marks a complete row, and a missing entry (`None`, NaN or `pd.NA`)
+  is refused rather than read as complete. Record the capped value itself,
   for example `np.minimum(loss, u)` with `censored=loss > u`. A censored row
   contributes the probability beyond its recorded value.
 - `truncation=(lower, upper)`: the row could only have been recorded inside
@@ -896,15 +898,21 @@ predictor that moves every such bound probability one way: the location or
 mean of `GaussianLS` and `LogNormalLS`, and both predictors of
 `GeneralizedParetoLSS`. A fit with censored rows scans every `Categorical`
 term and `CategoricalInteraction` on those predictors for such levels and
-cells, under the same `separation` policy.
+cells, under the same `separation` policy. When every row is censored on the
+same side, as with `censored=True` for all rows, the predictor's intercept has
+no finite estimate either, and the scan reports the predictor itself.
 
 The scan reads only what the data decide before the fit:
 - A generalized Pareto row with an upper truncation bound anchors its level
   along the shape, since its conditional probability can peak at a finite
   shape. Along the scale it does not, so the scale is still scanned.
-- The scale predictor of `GaussianLS` or `LogNormalLS` is scanned only for an
-  untruncated left-censored level in the mean form of `LogNormalLS`, whose
-  scale always runs off.
+- The scale predictor of `GaussianLS` or `LogNormalLS` is scanned where every
+  censored row's scale runs off:
+  - In the mean form of `LogNormalLS`, a left-censored level with no lower
+    truncation bound.
+  - In `GaussianLS` and the location form of `LogNormalLS`, a level
+    right-censored above a lower truncation bound with no upper one, such as
+    claims at their limit above a deductible, and the mirror case.
 - Elsewhere a scale level of those two families censored on one side may or
   may not have a finite estimate, and only the fit decides which, with no
   warning. Without truncation bounds, for `GaussianLS` and the location form of
@@ -914,9 +922,9 @@ The scan reads only what the data decide before the fit:
   one shared limit it has none. In the mean form it has one when its fitted
   mean is below at least one of its limits, and none when the mean is above all
   of them.
-- A truncation bound changes both rules. An upper bound can give a level below
-  its limit an estimate, and in the mean form a deductible can leave a level
-  below its limit without one.
+- Truncation bounds change both rules. A bound on the same side as the
+  censoring can give a level an estimate it would otherwise lack, and a bound
+  on the far side only, as in the scanned cases above, takes it away.
 
 Ordered-categorical smooths are not scanned. The scan does not cover all separation patterns, and
 `fit.curvature_indefinite` is a curvature diagnostic, not a separation detector.
