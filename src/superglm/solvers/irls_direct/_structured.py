@@ -13,6 +13,7 @@ from numpy.typing import NDArray
 
 from superglm._blas_threads import keep_narrow_cap
 from superglm.group_matrix import DesignMatrix
+from superglm.solvers._structured.assembly import profile_structured_factor
 from superglm.solvers._structured.block_leaves import factor_smooth_prior_statistics
 from superglm.solvers.hessian_factor import HessianFactor
 from superglm.solvers.irls_direct._finalise import _IRLSDirectFinalGeometry
@@ -21,18 +22,13 @@ from superglm.solvers.mode_score import centre_offset_mean, centred_data_score
 from superglm.solvers.structured import (
     BlockSymmetricOperator,
     CenteredBlockOperator,
-    FactorSmoothLeafFactor,
     FactorSmoothLeafLayout,
     FactorSmoothLeafSystem,
     FactorSmoothPenalizedOperator,
     NestedDataOperator,
     NestedPenalizedOperator,
-    NestedSchurFactor,
     NestedStructuredLayout,
     NestedStructuredSystem,
-    ProfiledFactorSmoothLeafFactor,
-    ProfiledNestedSchurFactor,
-    ProfiledSumToZeroTreeFactor,
     SumToZeroBlockOperator,
     SumToZeroLeafSystem,
     SumToZeroPenalizedOperator,
@@ -551,29 +547,9 @@ class _IRLSDirectStructuredStep(_IRLSDirectStep):
             augmented_factor, _ = build_augmented_structured_factor(
                 structured_final, penalized_operator
             )
-        if isinstance(augmented_factor, SumToZeroTreeFactor):
-            structured_factor = ProfiledSumToZeroTreeFactor(
-                augmented_factor=augmented_factor,
-                sum_w=sum_W,
-                xtw=XtW1,
-            )
-        elif isinstance(augmented_factor, FactorSmoothLeafFactor):
-            structured_factor = ProfiledFactorSmoothLeafFactor(
-                augmented_factor=augmented_factor,
-                sum_w=sum_W,
-                xtw=XtW1,
-            )
-        elif isinstance(augmented_factor, NestedSchurFactor) and isinstance(
-            structured_final, NestedStructuredSystem
-        ):
-            structured_factor = ProfiledNestedSchurFactor(
-                augmented_factor=augmented_factor,
-                sum_w=sum_W,
-                xtw=XtW1,
-                data_operator=XtWX_beta,
-            )
-        else:  # pragma: no cover - structured dispatch invariant
-            raise TypeError("Unsupported structured factor geometry.")
+        structured_factor = profile_structured_factor(
+            structured_final, augmented_factor, sum_W, XtW1
+        )
         if fit._compute_reml_geometry:
             XtWX_S_inv_beta: NDArray | HessianFactor = structured_factor
             with _structured_solver_errors():

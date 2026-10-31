@@ -13,8 +13,9 @@ from superglm import FactorSmooth, LambdaPolicy, Numeric, RandomEffect, Spline, 
 from superglm.group_matrix import FactorSmoothGroupMatrix
 from superglm.reml.penalty_algebra import build_penalty_matrix
 from superglm.solvers.structured import (
-    CachedBlockStructuredSolution,
     FactorSmoothLeafSystem,
+    FactorSmoothPenalizedOperator,
+    ProfiledFactorSmoothLeafFactor,
     materialize_compact_operator,
     solve_cached_structured,
 )
@@ -557,7 +558,8 @@ def test_cached_block_lambda_trial_uses_only_retained_moments(
         reml_penalties=model._reml_penalties,
     )
 
-    assert isinstance(solution, CachedBlockStructuredSolution)
+    assert isinstance(solution.factor, ProfiledFactorSmoothLeafFactor)
+    assert isinstance(solution.penalized_operator, FactorSmoothPenalizedOperator)
     np.testing.assert_allclose(solution.intercept, expected[0], atol=2e-9)
     np.testing.assert_allclose(solution.beta, expected[1:], atol=2e-9)
     assert solution.log_det_H == pytest.approx(

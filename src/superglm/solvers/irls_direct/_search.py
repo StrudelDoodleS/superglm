@@ -58,6 +58,43 @@ def trial_refusal(
     return refusal
 
 
+def extended_halving_budget(
+    fit: _IRLSDirectFit, committed: _IRLSState, proposal: _IRLSState, lowered: Callable | None
+) -> Callable[[], int]:
+    """The line search's extended halving budget: the Poisson/sqrt rule's, or a lowered start's if larger."""
+    max_halving = fit.max_halving
+    return lambda: max(
+        _poisson_sqrt_halving_budget(
+            committed=committed,
+            proposal=proposal,
+            y=fit.y,
+            weights=fit.weights,
+            family=fit.family,
+            link=fit.link,
+            default=max_halving,
+        ),
+        max_halving if lowered is None else lowered(),
+    )
+
+
+def retain_trial(
+    fit: _IRLSDirectFit, retained: _IRLSState, decision: _IRLSStepDecision, t0: float
+) -> None:
+    """Write the retained state's predictor, mean, coefficients and deviance to the fit.
+
+    The trial evaluations, timed from ``t0``, count as deviance time.
+    """
+    evaluation_elapsed = time.perf_counter() - t0
+    fit.recorder.t_deviance += evaluation_elapsed
+    fit.recorder.t_deviance_eval += evaluation_elapsed
+    fit.eta_unclipped = retained.eta_unclipped
+    fit.eta = retained.eta
+    fit.mu = retained.mu
+    fit.beta = retained.beta.copy()
+    fit.intercept, fit.dev = retained.intercept, retained.deviance
+    fit.n_halvings, fit.decision, fit.retained = decision.step_halvings, decision, retained
+
+
 def _refuses(
     outside: Callable[[NDArray, NDArray], bool], weights: NDArray, other: StateInvalid | None
 ) -> StateInvalid:
@@ -183,18 +220,7 @@ class _IRLSDirectTrialSearch:
             evaluate_state=evaluate_trial,
             invalid_state=trial_is_invalid,
             max_halving=max_halving,
-            extended_max_halving=lambda: max(
-                _poisson_sqrt_halving_budget(
-                    committed=committed,
-                    proposal=proposal,
-                    y=y,
-                    weights=weights,
-                    family=family,
-                    link=link,
-                    default=max_halving,
-                ),
-                max_halving if lowered_budget is None else lowered_budget(),
-            ),
+            extended_max_halving=extended_halving_budget(fit, committed, proposal, lowered_budget),
             merit_scale=fit.objective_merit_scale,
             merit_delta=lambda candidate, base: _stable_penalized_deviance_delta(
                 candidate,
@@ -304,30 +330,19 @@ class _IRLSDirectTrialSearch:
             qp.retained_converged = bool(
                 not decision.step_rejected and decision.alpha == 1.0 and qp.proposal_converged
             )
-        evaluation_elapsed = time.perf_counter() - _t0
-        recorder.t_deviance += evaluation_elapsed
-        recorder.t_deviance_eval += evaluation_elapsed
-        beta = retained.beta.copy()
-        intercept = retained.intercept
-        fit.eta_unclipped = retained.eta_unclipped
-        fit.eta = retained.eta
-        fit.mu = retained.mu
-        dev = retained.deviance
-        n_halvings = decision.step_halvings
+        retain_trial(fit, retained, decision, _t0)
         step_rejected = decision.step_rejected
         if step_rejected and qp is not None:
             # the rejected proposal's active set belongs to no retained state;
             # the finaliser reads the committed state's binding rows
             qp.active_set = qp.committed_active_set
-        if n_halvings and not step_rejected:
+        if decision.step_halvings and not step_rejected:
             logger.info(
                 "  irls_direct iter=%d: accepted step fraction %.5g after %d halvings, dev=%.2e",
                 it + 1,
                 decision.alpha,
-                n_halvings,
-                dev,
+                decision.step_halvings,
+                fit.dev,
             )
-        fit.proposal_state, fit.decision, fit.retained = proposal, decision, retained
-        fit.beta = beta
-        fit.intercept, fit.dev, fit.n_halvings = intercept, dev, n_halvings
+        fit.proposal_state = proposal
         fit.step_rejected = step_rejected

@@ -36,13 +36,16 @@ from superglm.solvers.centered_system import (
 )
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 from superglm.solvers.irls_direct._finalise import _finalise_centred
-from superglm.solvers.irls_direct._search import trial_refusal
+from superglm.solvers.irls_direct._search import (
+    extended_halving_budget,
+    retain_trial,
+    trial_refusal,
+)
 from superglm.solvers.irls_direct._step import _IRLSDirectStep, _note_svd_fallback
 from superglm.solvers.irls_state import (
     _evaluate_irls_state,
     _immutable_array,
     _IRLSState,
-    _poisson_sqrt_halving_budget,
     _select_irls_trial,
     interior_start_intercept,
     link_domain_violation,
@@ -1089,17 +1092,8 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
                 curvature.observed_rows_invalid if curvature.observed else None,
             ),
             max_halving=max_halving,
-            extended_max_halving=lambda: max(
-                _poisson_sqrt_halving_budget(
-                    committed=scop_committed.irls,
-                    proposal=search_proposal,
-                    y=y,
-                    weights=weights,
-                    family=family,
-                    link=link,
-                    default=max_halving,
-                ),
-                max_halving if lowered_budget is None else lowered_budget(),
+            extended_max_halving=extended_halving_budget(
+                fit, scop_committed.irls, search_proposal, lowered_budget
             ),
             merit_scale=0.0,
             merit_roundoff=lambda candidate, current: merit_error(candidate) + merit_error(current),
@@ -1121,17 +1115,7 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
         retained_scop = (
             scop_committed if decision.step_rejected else scop_trial_cache[decision.alpha]
         )
-        retained = retained_scop.irls
-        evaluation_elapsed = time.perf_counter() - _t0
-        recorder.t_deviance += evaluation_elapsed
-        recorder.t_deviance_eval += evaluation_elapsed
-        beta = retained.beta.copy()
-        intercept = retained.intercept
-        fit.eta_unclipped = retained.eta_unclipped
-        fit.eta = retained.eta
-        fit.mu = retained.mu
-        dev = retained.deviance
-        n_halvings = decision.step_halvings
+        retain_trial(fit, retained_scop.irls, decision, _t0)
         fit.step_rejected = decision.step_rejected
         committed_groups = {group.group_index: group for group in scop_committed.groups}
         for group_state in retained_scop.groups:
@@ -1151,17 +1135,16 @@ class _IRLSDirectSCOPStep(_IRLSDirectStep):
                 if group_state.discarded_directions is None
                 else group_state.discarded_directions.copy()
             )
-        if n_halvings:
+        if decision.step_halvings:
             logger.info(
                 "  irls_direct SCOP iter=%d: accepted latent step fraction %.5g after "
                 "%d halvings, dev=%.2e",
                 it + 1,
                 decision.alpha,
-                n_halvings,
-                dev,
+                decision.step_halvings,
+                fit.dev,
             )
-        fit.beta, fit.intercept, fit.dev, fit.n_halvings = beta, intercept, dev, n_halvings
-        fit.decision, fit.proposal_state, fit.retained = decision, proposal_scop.irls, retained
+        fit.proposal_state = proposal_scop.irls
         self._retained = retained_scop
 
     def latent_change(self) -> float:

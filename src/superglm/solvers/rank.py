@@ -1314,8 +1314,9 @@ def _validated_symmetric(matrix: NDArray) -> NDArray:
 
 
 def _equilibrate_gram(
-    matrix: NDArray, *, allow_indefinite: bool = False
-) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+    matrix: NDArray, *, allow_indefinite: bool = False, none_on_refusal: bool = False
+) -> tuple[NDArray, NDArray, NDArray, NDArray] | None:
+    """A Gram's equilibration; a refused diagonal raises, or returns ``None`` if ``none_on_refusal``."""
     symmetric = _validated_symmetric(matrix)
     diagonal = np.diag(symmetric)
     if allow_indefinite:
@@ -1325,6 +1326,8 @@ def _equilibrate_gram(
     else:
         refusal = _diagonal_refusal(symmetric)
         if refusal is not None:
+            if none_on_refusal:
+                return None
             raise ValueError(refusal)
         diagonal_scale = np.maximum(diagonal, 0.0)
     active_columns = np.flatnonzero(diagonal_scale > 0.0)
@@ -1429,13 +1432,35 @@ def _earliest_representatives(null_vectors: NDArray, rank: int) -> NDArray | Non
     then keeps whatever exact path it already had rather than proceeding on a
     selection this could not certify.
     """
+    floor = float(np.sqrt(np.finfo(float).eps)) ** 2
+
+    def latest_reachable(leverage: NDArray) -> int | None:
+        # the LATEST column the null space still reaches: the earliest-column
+        # convention, decided on a quantity the basis cannot move
+        reachable = np.flatnonzero(leverage > floor)
+        return int(reachable[-1]) if reachable.size else None
+
+    return _householder_null_selection(null_vectors, rank, latest_reachable)
+
+
+def _householder_null_selection(
+    null_vectors: NDArray, rank: int, choose: Callable[[NDArray], int | None]
+) -> NDArray | None:
+    """Reject one column per null direction, each the one ``choose`` picks from the null-space leverage.
+
+    ``choose`` reads the leverage of the columns not yet rejected and returns
+    the position of the one to reject among them, or ``None`` to stop.
+    Rejecting column ``c`` leaves ``{v in S : v_c = 0}``: a Householder
+    reflection maps ``Q[:, c]`` onto the first axis, which is dropped, so the
+    rows stay orthonormal and the next leverage is the column norms.  ``None``
+    when the scan cannot reject a column for every null direction.
+    """
     width, nullity = null_vectors.shape
     if nullity == 0:
         return np.arange(width, dtype=int)
     basis = np.array(null_vectors.T, dtype=float)
     if not np.all(np.isfinite(basis)):
         return None
-    floor = float(np.sqrt(np.finfo(float).eps)) ** 2
 
     rejected: list[int] = []
     remaining = np.ones(width, dtype=bool)
@@ -1445,13 +1470,10 @@ def _earliest_representatives(null_vectors: NDArray, rank: int) -> NDArray | Non
         columns = np.flatnonzero(remaining)
         if columns.size == 0:
             break
-        leverage = np.einsum("ij,ij->j", basis[:, columns], basis[:, columns])
-        reachable = np.flatnonzero(leverage > floor)
-        if reachable.size == 0:
+        position = choose(np.einsum("ij,ij->j", basis[:, columns], basis[:, columns]))
+        if position is None:
             break
-        # the LATEST column the null space still reaches: the earliest-column
-        # convention, decided on a quantity the basis cannot move
-        chosen = int(columns[int(reachable[-1])])
+        chosen = int(columns[position])
         rejected.append(chosen)
         remaining[chosen] = False
 
@@ -1539,51 +1561,17 @@ def _leverage_pivot_representatives(null_vectors: NDArray, rank: int) -> NDArray
     Cost is unchanged at ``O(k**2 m)`` in the nullity ``k``: the Householder is
     ``O(k m)`` per step, exactly what the elimination it replaces cost.
     """
-    width, nullity = null_vectors.shape
-    if nullity == 0:
-        return np.arange(width, dtype=int)
-    basis = np.array(null_vectors.T, dtype=float)
-    if not np.all(np.isfinite(basis)):
-        return None
 
-    rejected: list[int] = []
-    remaining = np.ones(width, dtype=bool)
-    for _step in range(nullity):
-        if basis.shape[0] == 0:
-            break
-        columns = np.flatnonzero(remaining)
-        if columns.size == 0:
-            break
-        leverage = np.einsum("ij,ij->j", basis[:, columns], basis[:, columns])
+    def largest_share(leverage: NDArray) -> int | None:
         # Leverage is a diagonal of a projector, so it lives in [0, 1] and a
         # column the null space does not reach at all sits at machine dust.
         leverage[leverage <= _EPS] = 0.0
         peak = float(leverage.max(initial=0.0))
         if peak <= 0.0:
-            break
-        qualifying = np.flatnonzero(leverage >= (_PIVOT_THRESHOLD**2) * peak)
-        chosen = int(columns[int(qualifying[-1])])
-        rejected.append(chosen)
-        remaining[chosen] = False
+            return None
+        return int(np.flatnonzero(leverage >= (_PIVOT_THRESHOLD**2) * peak)[-1])
 
-        # Householder onto {v in S : v_chosen = 0}: reflect Q[:, chosen] to the
-        # first axis, then drop that axis.  The result is orthonormal because a
-        # reflection is, so no re-orthogonalisation is needed.
-        direction = basis[:, chosen].copy()
-        norm = float(np.linalg.norm(direction))
-        if norm <= 0.0:
-            break
-        direction[0] += float(np.copysign(norm, direction[0] if direction[0] != 0.0 else 1.0))
-        reflector_norm = float(np.linalg.norm(direction))
-        if reflector_norm > 0.0:
-            direction /= reflector_norm
-            basis = basis - 2.0 * np.outer(direction, direction @ basis)
-        basis = basis[1:]
-
-    if len(rejected) != nullity:
-        return None
-    keep = np.setdiff1d(np.arange(width), np.asarray(rejected, dtype=int))
-    return keep if keep.size == rank else None
+    return _householder_null_selection(null_vectors, rank, largest_share)
 
 
 def _selection_amplification(null_vectors: NDArray, keep: NDArray) -> float:
@@ -1984,9 +1972,11 @@ def try_decompose_verified_spd_gram(
     ):
         raise ValueError("residual_tol must be finite and positive")
     try:
-        equilibrated, column_scale, active_columns, _ = _equilibrate_gram(matrix)
+        equilibration = _equilibrate_gram(matrix)
     except (ValueError, np.linalg.LinAlgError):
         return None
+    assert equilibration is not None  # a refusal raises unless none_on_refusal
+    equilibrated, column_scale, active_columns, _ = equilibration
     width = len(column_scale)
     if width == 0 or len(active_columns) != width:
         return None
@@ -2157,16 +2147,14 @@ def _decompose_gram(
     # e_k``, so the same rounding of a semidefinite Gram as a negative
     # eigenvalue past the eigensolver's resolution; so is a diagonal taken as
     # zero beside a row that is not.
-    if (
-        omit_uncertifiable
-        and psd_by_construction
-        and not allow_indefinite
-        and _diagonal_refusal(_validated_symmetric(matrix)) is not None
-    ):
-        return None
-    equilibrated, column_scale, active_columns, symmetric = _equilibrate_gram(
-        matrix, allow_indefinite=allow_indefinite
+    equilibration = _equilibrate_gram(
+        matrix,
+        allow_indefinite=allow_indefinite,
+        none_on_refusal=omit_uncertifiable and psd_by_construction,
     )
+    if equilibration is None:
+        return None
+    equilibrated, column_scale, active_columns, symmetric = equilibration
     width = len(column_scale)
     structural_aliases = column_scale == 0.0
     if active_columns.size == 0:

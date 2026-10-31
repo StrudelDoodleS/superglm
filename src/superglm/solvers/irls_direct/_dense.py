@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import math
 import time
 from typing import TYPE_CHECKING
 
-import numpy as np
-
-from superglm.solvers.irls_direct._centred import _system_offset_mean
+from superglm.solvers.irls_direct._centred import _commit_centred_slopes
 from superglm.solvers.irls_direct._finalise import _finalise_centred
 from superglm.solvers.irls_direct._step import _IRLSDirectStep, _note_svd_fallback
 from superglm.solvers.rank import RankDecomposition
@@ -45,8 +42,7 @@ class _IRLSDirectDenseStep(_IRLSDirectStep):
         # Gram path: form X'WX via per-group gram, solve (p+1)×(p+1).
         _t0 = time.perf_counter()
         z_off = fit.z - fit.offset
-        W, dm, newton_score, _state_center = fit.W, fit.dm, fit.newton_score, fit._state_center
-        proposal_centred_intercept = fit.proposal_centred_intercept
+        W, dm, newton_score = fit.W, fit.dm, fit.newton_score
         centered = fit.get_centered_system(W, z_off)
         if newton_score is not None:
             # the score in the right-hand side (the step itself is the
@@ -80,34 +76,8 @@ class _IRLSDirectDenseStep(_IRLSDirectStep):
                 if iteration_factor_rhs is None
                 else iteration_rank.solve_factor_rhs(iteration_factor_rhs)
             )
-        intercept = centered.mean_z - float(centered.mean_x @ beta)
-        _last_working_offset_mean = None
-        if _state_center is not None:
-            # the intercept about the state's centre, from the offset
-            # of the working mean to it, formed on centred rows (the
-            # system's pair, else ``centre_offset_mean``): no
-            # raw-scale cancellation
-            _last_working_offset_mean = _system_offset_mean(dm, W, centered, _state_center)
-            proposal_centred_intercept = centered.mean_z - math.fsum(
-                _last_working_offset_mean * beta
-            )
-            intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
-        fit._cond_est = iteration_rank.pre_truncation_condition
+        _commit_centred_slopes(fit, centered, beta, iteration_rank, _t0)
         self._held_rank = iteration_rank
-        fit._used_svd = iteration_rank.used_svd_fallback
-        fit.rank_truncated = iteration_rank.rank_truncated
-        if fit.convergence == "mode_score":
-            fit._score_centre = (
-                centered.mean_x,
-                centered.sum_w,
-                np.diag(centered.data_gram),
-                (),
-                _last_working_offset_mean,
-            )
-        fit.recorder.t_solve += time.perf_counter() - _t0
-        fit.beta, fit.intercept = beta, intercept
-        fit._last_working_offset_mean = _last_working_offset_mean
-        fit.proposal_centred_intercept = proposal_centred_intercept
         _note_svd_fallback(fit)
 
     def certificate_inputs(self) -> tuple:

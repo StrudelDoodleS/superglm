@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import math
 import weakref
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal, NamedTuple
 
 import numpy as np
 from numpy.typing import NDArray
@@ -32,6 +34,7 @@ from superglm.solvers._structured.nested import (
 )
 from superglm.solvers._structured.operators import (
     BlockSymmetricOperator,
+    SumToZeroBlockOperator,
 )
 from superglm.solvers._structured.overrides import (
     _factor_smooth_override_local_blocks,
@@ -42,13 +45,15 @@ from superglm.types import GroupSlice, PenaltyComponent
 
 
 @dataclass(frozen=True)
-class CachedBlockStructuredSolution:
-    """One lambda-only solve against a cached ``fs`` leaf system."""
+class CachedStructuredSolution:
+    """One lambda-only solve against a cached ``fs``, ``sz`` or nested-chain system."""
 
     beta: NDArray
     intercept: float
-    factor: ProfiledFactorSmoothLeafFactor
-    penalized_operator: FactorSmoothPenalizedOperator
+    factor: ProfiledFactorSmoothLeafFactor | ProfiledSumToZeroTreeFactor | ProfiledNestedSchurFactor
+    penalized_operator: (
+        FactorSmoothPenalizedOperator | SumToZeroPenalizedOperator | NestedPenalizedOperator
+    )
     log_det_H: float  # noqa: N815
     hessian_rank: int
     # the solve's centred state (one-engine design §3.8): ``alpha`` about the
@@ -58,38 +63,9 @@ class CachedBlockStructuredSolution:
     state_center: NDArray | None = None
 
 
-@dataclass(frozen=True)
-class CachedNestedStructuredSolution:
-    """One lambda-only solve against cached nested-chain working moments."""
-
-    beta: NDArray
-    intercept: float
-    factor: ProfiledNestedSchurFactor
-    penalized_operator: NestedPenalizedOperator
-    log_det_H: float  # noqa: N815
-    hessian_rank: int
-    # the solve's centred state (one-engine design §3.8): ``alpha`` about the
-    # factor's border centre ``c0``, written into slope coordinates (0 off
-    # the border); ``intercept = alpha - fsum(c * beta)``
-    centred_intercept: float | None = None
-    state_center: NDArray | None = None
-
-
-@dataclass(frozen=True)
-class CachedSumToZeroStructuredSolution:
-    """One lambda-only solve against cached constrained SZ moments."""
-
-    beta: NDArray
-    intercept: float
-    factor: ProfiledSumToZeroTreeFactor
-    penalized_operator: SumToZeroPenalizedOperator
-    log_det_H: float  # noqa: N815
-    hessian_rank: int
-    # the solve's centred state (one-engine design §3.8): ``alpha`` about the
-    # factor's border centre ``c0``, written into slope coordinates (0 off
-    # the border); ``intercept = alpha - fsum(c * beta)``
-    centred_intercept: float | None = None
-    state_center: NDArray | None = None
+CachedBlockStructuredSolution = CachedStructuredSolution
+CachedNestedStructuredSolution = CachedStructuredSolution
+CachedSumToZeroStructuredSolution = CachedStructuredSolution
 
 
 _PENALTIES_REQUIRED = (
@@ -119,6 +95,47 @@ def _dense_component_omega(
     )
 
 
+def _leaf_penalty_parts(
+    operator: BlockSymmetricOperator | SumToZeroBlockOperator,
+    S_override: NDArray | None,
+    n_structured: int,
+    geometry: Literal["factor_smooth", "sum_to_zero"],
+) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+    """``(A, D, small_position, structured_position)`` of an ``fs`` or ``sz`` operator.
+
+    ``A`` and ``D`` are its zero penalty parts, or an authoritative
+    ``S_override``'s parts once checked against the ``geometry``; a position
+    maps each public coordinate to its slot in the small or the structured
+    block (``-1`` outside it).
+    """
+    p = operator.shape[0]
+    A = np.zeros_like(operator.A)
+    D = np.zeros_like(operator.D)
+    small_position = np.full(p, -1, dtype=np.intp)
+    small_position[operator.small_indices] = np.arange(len(operator.small_indices))
+    structured_position = np.full(p, -1, dtype=np.intp)
+    structured_position[operator.structured_indices.ravel()] = np.arange(n_structured)
+    if S_override is not None:
+        penalty = np.asarray(S_override, dtype=np.float64)
+        if penalty.shape != (p, p):
+            raise ValueError(f"S_override must have shape ({p}, {p}).")
+        incompatibility = _structured_override_incompatibility(
+            penalty,
+            small_indices=operator.small_indices,
+            structured_indices=operator.structured_indices,
+            geometry=geometry,
+        )
+        if incompatibility is not None:
+            raise ValueError(incompatibility)
+        A += penalty[np.ix_(operator.small_indices, operator.small_indices)]
+        D += _factor_smooth_override_local_blocks(
+            penalty,
+            operator.structured_indices,
+            sum_to_zero=geometry == "sum_to_zero",
+        )
+    return A, D, small_position, structured_position
+
+
 def build_penalized_block_operator(
     system: FactorSmoothLeafSystem,
     group_matrices: list[GroupMatrix],
@@ -136,34 +153,11 @@ def build_penalized_block_operator(
     """
     operator = system.operator
     p = operator.shape[0]
-    A = np.zeros_like(operator.A)
-    D = np.zeros_like(operator.D)
-    small_position = np.full(p, -1, dtype=np.intp)
-    small_position[operator.small_indices] = np.arange(len(operator.small_indices))
-    structured_position = np.full(p, -1, dtype=np.intp)
-    structured_position[operator.structured_indices.ravel()] = np.arange(
-        operator.n_levels * operator.block_size
+    A, D, small_position, structured_position = _leaf_penalty_parts(
+        operator, S_override, operator.n_levels * operator.block_size, "factor_smooth"
     )
-
     if S_override is not None:
-        penalty = np.asarray(S_override, dtype=np.float64)
-        if penalty.shape != (p, p):
-            raise ValueError(f"S_override must have shape ({p}, {p}).")
-        incompatibility = _structured_override_incompatibility(
-            penalty,
-            small_indices=operator.small_indices,
-            structured_indices=operator.structured_indices,
-            geometry="factor_smooth",
-        )
-        if incompatibility is not None:
-            raise ValueError(incompatibility)
-        A += penalty[np.ix_(operator.small_indices, operator.small_indices)]
-        D += _factor_smooth_override_local_blocks(
-            penalty,
-            operator.structured_indices,
-            sum_to_zero=False,
-        )
-        return _penalized_leaf_operator(operator, A, D)
+        return FactorSmoothPenalizedOperator.with_penalties(operator, A, D)
 
     if reml_penalties is None:
         raise ValueError(_PENALTIES_REQUIRED)
@@ -230,13 +224,6 @@ def build_penalized_block_operator(
             )
         A[np.ix_(local_small, local_small)] += lam * omega
 
-    return _penalized_leaf_operator(operator, A, D)
-
-
-def _penalized_leaf_operator(
-    operator: BlockSymmetricOperator, A: NDArray, D: NDArray
-) -> FactorSmoothPenalizedOperator:
-    """The moments plus the penalty parts ``A``, ``D``, with the parts kept for the factor."""
     return FactorSmoothPenalizedOperator.with_penalties(operator, A, D)
 
 
@@ -258,33 +245,10 @@ def build_penalized_sum_to_zero_operator(
     """
     operator = system.operator
     p = operator.shape[0]
-    A = np.zeros_like(operator.A)
-    D = np.zeros_like(operator.D)
-    small_position = np.full(p, -1, dtype=np.intp)
-    small_position[operator.small_indices] = np.arange(len(operator.small_indices))
-    structured_position = np.full(p, -1, dtype=np.intp)
-    structured_position[operator.structured_indices.ravel()] = np.arange(
-        (operator.n_levels - 1) * operator.block_size
+    A, D, small_position, structured_position = _leaf_penalty_parts(
+        operator, S_override, (operator.n_levels - 1) * operator.block_size, "sum_to_zero"
     )
-
     if S_override is not None:
-        penalty = np.asarray(S_override, dtype=np.float64)
-        if penalty.shape != (p, p):
-            raise ValueError(f"S_override must have shape ({p}, {p}).")
-        incompatibility = _structured_override_incompatibility(
-            penalty,
-            small_indices=operator.small_indices,
-            structured_indices=operator.structured_indices,
-            geometry="sum_to_zero",
-        )
-        if incompatibility is not None:
-            raise ValueError(incompatibility)
-        A += penalty[np.ix_(operator.small_indices, operator.small_indices)]
-        D += _factor_smooth_override_local_blocks(
-            penalty,
-            operator.structured_indices,
-            sum_to_zero=True,
-        )
         return SumToZeroPenalizedOperator.with_penalties(operator, A, D)
 
     if reml_penalties is None:
@@ -441,34 +405,53 @@ def build_penalized_structured_operator(
     S_override: NDArray | None = None,
 ) -> FactorSmoothPenalizedOperator | SumToZeroPenalizedOperator | NestedPenalizedOperator:
     """Dispatch compact penalty assembly by structured-system geometry."""
-    if isinstance(system, NestedStructuredSystem):
-        return build_penalized_nested_operator(
-            system,
-            group_matrices,
-            groups,
-            lambda2,
-            reml_penalties=reml_penalties,
-            S_override=S_override,
-        )
-    if isinstance(system, SumToZeroLeafSystem):
-        return build_penalized_sum_to_zero_operator(
-            system,
-            group_matrices,
-            groups,
-            lambda2,
-            reml_penalties=reml_penalties,
-            S_override=S_override,
-        )
-    if isinstance(system, FactorSmoothLeafSystem):
-        return build_penalized_block_operator(
-            system,
-            group_matrices,
-            groups,
-            lambda2,
-            reml_penalties=reml_penalties,
-            S_override=S_override,
-        )
-    raise TypeError(f"Unsupported structured system {type(system).__name__}.")
+    return _kind(system).penalize(
+        system,
+        group_matrices,
+        groups,
+        lambda2,
+        reml_penalties=reml_penalties,
+        S_override=S_override,
+    )
+
+
+def _augmented_rhs(system) -> NDArray:
+    """The raw right-hand side ``[1 X]' W z`` of a structured system, intercept first."""
+    operator = system.operator
+    rhs = np.empty(operator.shape[0] + 1, dtype=np.float64)
+    rhs[0] = system.sum_wz
+    rhs[operator.small_indices + 1] = system.xtwz_small
+    rhs[operator.structured_indices + 1] = system.xtwz_structured
+    return rhs
+
+
+def _memoised_leaf_factor(system, penalized_operator, factor_type: type, name: str):
+    """Factor an ``fs`` or ``sz`` leaf system; return the factor and the raw RHS.
+
+    The last factor built on the system is reused for bitwise the same
+    penalty parts (perf F1); the memo holds it weakly, so a system and its
+    factor form no reference cycle (perf F17).
+    """
+    if not np.array_equal(penalized_operator.small_indices, system.operator.small_indices):
+        raise ValueError("Penalized and unpenalized operators must use identical partitions.")
+    if penalized_operator.penalty_small is None or penalized_operator.penalty_local is None:
+        raise ValueError(f"An {name} factor needs the penalized operator's penalty parts.")
+    factor = None
+    for small, local, held in system.factor_memo:
+        if np.array_equal(small, penalized_operator.penalty_small) and np.array_equal(
+            local, penalized_operator.penalty_local
+        ):
+            factor = held()
+    if factor is None:
+        factor = factor_type(system, penalized_operator)
+        system.factor_memo[:] = [
+            (
+                np.array(penalized_operator.penalty_small, copy=True),
+                np.array(penalized_operator.penalty_local, copy=True),
+                weakref.ref(factor),
+            )
+        ]
+    return factor, _augmented_rhs(system)
 
 
 def build_augmented_block_factor(
@@ -479,37 +462,9 @@ def build_augmented_block_factor(
 
     The factor solves the normal equations from the right-hand side inside its
     leaf factorization (``FactorSmoothLeafFactor.solve_data``); the raw RHS is
-    returned for callers that add a further right-hand side.  The last factor
-    built on the system is reused for bitwise the same penalty parts (perf
-    F1); the memo holds it weakly, so a system and its factor form no
-    reference cycle (perf F17).
+    returned for callers that add a further right-hand side.
     """
-    operator = system.operator
-    if not np.array_equal(penalized_operator.small_indices, operator.small_indices):
-        raise ValueError("Penalized and unpenalized operators must use identical partitions.")
-    factor = None
-    if penalized_operator.penalty_small is None or penalized_operator.penalty_local is None:
-        raise ValueError("An fs factor needs the penalized operator's penalty parts.")
-    for small, local, held in system.factor_memo:
-        if np.array_equal(small, penalized_operator.penalty_small) and np.array_equal(
-            local, penalized_operator.penalty_local
-        ):
-            factor = held()
-    if factor is None:
-        factor = FactorSmoothLeafFactor(system, penalized_operator)
-        system.factor_memo[:] = [
-            (
-                np.array(penalized_operator.penalty_small, copy=True),
-                np.array(penalized_operator.penalty_local, copy=True),
-                weakref.ref(factor),
-            )
-        ]
-    p = operator.shape[0]
-    rhs = np.empty(p + 1, dtype=np.float64)
-    rhs[0] = system.sum_wz
-    rhs[operator.small_indices + 1] = system.xtwz_small
-    rhs[operator.structured_indices + 1] = system.xtwz_structured
-    return factor, rhs
+    return _memoised_leaf_factor(system, penalized_operator, FactorSmoothLeafFactor, "fs")
 
 
 def build_augmented_sum_to_zero_factor(
@@ -520,37 +475,9 @@ def build_augmented_sum_to_zero_factor(
 
     The factor solves the normal equations from the right-hand side inside its
     leaf factorization (``SumToZeroTreeFactor.solve_data``); the raw RHS is
-    returned for callers that add a further right-hand side.  The last factor
-    built on the system is reused for bitwise the same penalty parts (as the
-    fs factor, perf F1); the memo holds it weakly, so a system and its factor
-    form no reference cycle (perf F17).
+    returned for callers that add a further right-hand side.
     """
-    operator = system.operator
-    if not np.array_equal(penalized_operator.small_indices, operator.small_indices):
-        raise ValueError("Penalized and unpenalized operators must use identical partitions.")
-    if penalized_operator.penalty_small is None or penalized_operator.penalty_local is None:
-        raise ValueError("An sz factor needs the penalized operator's penalty parts.")
-    factor = None
-    for small, local, held in system.factor_memo:
-        if np.array_equal(small, penalized_operator.penalty_small) and np.array_equal(
-            local, penalized_operator.penalty_local
-        ):
-            factor = held()
-    if factor is None:
-        factor = SumToZeroTreeFactor(system, penalized_operator)
-        system.factor_memo[:] = [
-            (
-                np.array(penalized_operator.penalty_small, copy=True),
-                np.array(penalized_operator.penalty_local, copy=True),
-                weakref.ref(factor),
-            )
-        ]
-    p = operator.shape[0]
-    rhs = np.empty(p + 1, dtype=np.float64)
-    rhs[0] = system.sum_wz
-    rhs[operator.small_indices + 1] = system.xtwz_small
-    rhs[operator.structured_indices + 1] = system.xtwz_structured
-    return factor, rhs
+    return _memoised_leaf_factor(system, penalized_operator, SumToZeroTreeFactor, "sz")
 
 
 def build_augmented_nested_factor(
@@ -564,18 +491,36 @@ def build_augmented_nested_factor(
     """
     if penalized.data is not system.operator:
         raise ValueError("The nested penalized operator must wrap the system's data operator.")
-    operator = system.operator
     factor = NestedSchurFactor(
         penalized.augmented(),
         chain_group_names=system.chain_group_names,
         chain_group_indices=system.chain_group_indices,
         intercept=True,
     )
-    rhs = np.empty(operator.shape[0] + 1, dtype=np.float64)
-    rhs[0] = system.sum_wz
-    rhs[operator.small_indices + 1] = system.xtwz_small
-    rhs[operator.structured_indices + 1] = system.xtwz_structured
-    return factor, rhs
+    return factor, _augmented_rhs(system)
+
+
+class _StructuredKind(NamedTuple):
+    """One structured geometry: its penalty assembly, factor and profiled factor."""
+
+    system: type
+    penalize: Callable
+    penalized: type
+    mismatch: str
+    factor: Callable
+    profile: Callable
+
+
+def _kind(system) -> _StructuredKind:
+    for kind in _KINDS:
+        if isinstance(system, kind.system):
+            return kind
+    raise TypeError(f"Unsupported structured system {type(system).__name__}.")
+
+
+def profile_structured_factor(system, augmented_factor, sum_w: float, xtw: NDArray):
+    """The intercept-profiled factor of a system's augmented factor, ``xtw = X' W 1``."""
+    return _kind(system).profile(system, augmented_factor=augmented_factor, sum_w=sum_w, xtw=xtw)
 
 
 def solve_augmented_normal_equations(
@@ -645,134 +590,10 @@ def build_augmented_structured_factor(
     ),
 ):
     """Dispatch intercept augmentation and Schur factorization."""
-    if isinstance(system, NestedStructuredSystem):
-        if not isinstance(penalized_operator, NestedPenalizedOperator):
-            raise TypeError("Nested structured systems require a nested penalized operator.")
-        return build_augmented_nested_factor(system, penalized_operator)
-    if isinstance(system, SumToZeroLeafSystem):
-        if not isinstance(penalized_operator, SumToZeroPenalizedOperator):
-            raise TypeError("sz leaf systems require the sz penalized operator.")
-        return build_augmented_sum_to_zero_factor(system, penalized_operator)
-    if isinstance(system, FactorSmoothLeafSystem):
-        if not isinstance(penalized_operator, FactorSmoothPenalizedOperator):
-            raise TypeError("fs leaf systems require the fs penalized operator.")
-        return build_augmented_block_factor(system, penalized_operator)
-    raise TypeError(f"Unsupported structured system {type(system).__name__}.")
-
-
-def solve_cached_block_structured(
-    system: FactorSmoothLeafSystem,
-    group_matrices: list[GroupMatrix],
-    groups: list[GroupSlice],
-    lambdas: float | dict[str, float],
-    *,
-    reml_penalties: list[PenaltyComponent] | None = None,
-) -> CachedBlockStructuredSolution:
-    """Solve a factor-smooth lambda trial from a cached ``fs`` leaf system (no data pass)."""
-    penalized = build_penalized_block_operator(
-        system,
-        group_matrices,
-        groups,
-        lambdas,
-        reml_penalties=reml_penalties,
-    )
-    augmented_factor, rhs = build_augmented_block_factor(system, penalized)
-    beta, intercept, alpha, centre = _cached_centred_solution(system, augmented_factor, rhs)
-    xtw = np.empty(system.operator.shape[0], dtype=np.float64)
-    xtw[system.operator.small_indices] = system.xtw_small
-    xtw[system.operator.structured_indices] = system.xtw_structured
-    factor = ProfiledFactorSmoothLeafFactor(
-        augmented_factor=augmented_factor,
-        sum_w=system.sum_w,
-        xtw=xtw,
-    )
-    return CachedBlockStructuredSolution(
-        beta=beta,
-        intercept=intercept,
-        factor=factor,
-        penalized_operator=penalized,
-        log_det_H=augmented_factor.logdet(),
-        hessian_rank=augmented_factor.rank,
-        centred_intercept=alpha,
-        state_center=centre,
-    )
-
-
-def solve_cached_sum_to_zero_structured(
-    system: SumToZeroLeafSystem,
-    group_matrices: list[GroupMatrix],
-    groups: list[GroupSlice],
-    lambdas: float | dict[str, float],
-    *,
-    reml_penalties: list[PenaltyComponent] | None = None,
-) -> CachedSumToZeroStructuredSolution:
-    """Solve an ``sz`` lambda trial from a cached leaf system on the balance tree (no data pass)."""
-    penalized = build_penalized_sum_to_zero_operator(
-        system,
-        group_matrices,
-        groups,
-        lambdas,
-        reml_penalties=reml_penalties,
-    )
-    augmented_factor, rhs = build_augmented_sum_to_zero_factor(system, penalized)
-    beta, intercept, alpha, centre = _cached_centred_solution(system, augmented_factor, rhs)
-    xtw = np.empty(system.operator.shape[0], dtype=np.float64)
-    xtw[system.operator.small_indices] = system.xtw_small
-    xtw[system.operator.structured_indices] = system.xtw_structured
-    factor = ProfiledSumToZeroTreeFactor(
-        augmented_factor=augmented_factor,
-        sum_w=system.sum_w,
-        xtw=xtw,
-    )
-    return CachedSumToZeroStructuredSolution(
-        beta=beta,
-        intercept=intercept,
-        factor=factor,
-        penalized_operator=penalized,
-        log_det_H=augmented_factor.logdet(),
-        hessian_rank=augmented_factor.rank,
-        centred_intercept=alpha,
-        state_center=centre,
-    )
-
-
-def solve_cached_nested_structured(
-    system: NestedStructuredSystem,
-    group_matrices: list[GroupMatrix],
-    groups: list[GroupSlice],
-    lambdas: float | dict[str, float],
-    *,
-    reml_penalties: list[PenaltyComponent] | None = None,
-) -> CachedNestedStructuredSolution:
-    """Solve a lambda trial from cached nested working moments (no data pass)."""
-    penalized = build_penalized_nested_operator(
-        system,
-        group_matrices,
-        groups,
-        lambdas,
-        reml_penalties=reml_penalties,
-    )
-    augmented_factor, rhs = build_augmented_nested_factor(system, penalized)
-    beta, intercept, alpha, centre = _cached_centred_solution(system, augmented_factor, rhs)
-    xtw = np.empty(system.operator.shape[0], dtype=np.float64)
-    xtw[system.operator.small_indices] = system.xtw_small
-    xtw[system.operator.structured_indices] = system.xtw_structured
-    factor = ProfiledNestedSchurFactor(
-        augmented_factor=augmented_factor,
-        sum_w=system.sum_w,
-        xtw=xtw,
-        data_operator=system.operator,
-    )
-    return CachedNestedStructuredSolution(
-        beta=beta,
-        intercept=intercept,
-        factor=factor,
-        penalized_operator=penalized,
-        log_det_H=augmented_factor.logdet(),
-        hessian_rank=augmented_factor.rank,
-        centred_intercept=alpha,
-        state_center=centre,
-    )
+    kind = _kind(system)
+    if not isinstance(penalized_operator, kind.penalized):
+        raise TypeError(kind.mismatch)
+    return kind.factor(system, penalized_operator)
 
 
 def solve_cached_structured(
@@ -782,38 +603,62 @@ def solve_cached_structured(
     lambdas: float | dict[str, float],
     *,
     reml_penalties: list[PenaltyComponent] | None = None,
-) -> (
-    CachedBlockStructuredSolution
-    | CachedSumToZeroStructuredSolution
-    | CachedNestedStructuredSolution
-):
-    """Dispatch a cached lambda-only solve by dominant structured geometry.
+) -> CachedStructuredSolution:
+    """Solve a lambda trial from a cached structured system (no data pass), by its geometry.
 
     The solution carries the factor's centred state (``centred_intercept``
     about ``state_center``, ``_cached_centred_solution``).
     """
-    if isinstance(system, NestedStructuredSystem):
-        return solve_cached_nested_structured(
-            system,
-            group_matrices,
-            groups,
-            lambdas,
-            reml_penalties=reml_penalties,
-        )
-    if isinstance(system, SumToZeroLeafSystem):
-        return solve_cached_sum_to_zero_structured(
-            system,
-            group_matrices,
-            groups,
-            lambdas,
-            reml_penalties=reml_penalties,
-        )
-    if isinstance(system, FactorSmoothLeafSystem):
-        return solve_cached_block_structured(
-            system,
-            group_matrices,
-            groups,
-            lambdas,
-            reml_penalties=reml_penalties,
-        )
-    raise TypeError(f"Unsupported structured system {type(system).__name__}.")
+    kind = _kind(system)
+    penalized = kind.penalize(
+        system, group_matrices, groups, lambdas, reml_penalties=reml_penalties
+    )
+    augmented_factor, rhs = kind.factor(system, penalized)
+    beta, intercept, alpha, centre = _cached_centred_solution(system, augmented_factor, rhs)
+    xtw = np.empty(system.operator.shape[0], dtype=np.float64)
+    xtw[system.operator.small_indices] = system.xtw_small
+    xtw[system.operator.structured_indices] = system.xtw_structured
+    return CachedStructuredSolution(
+        beta=beta,
+        intercept=intercept,
+        factor=profile_structured_factor(system, augmented_factor, system.sum_w, xtw),
+        penalized_operator=penalized,
+        log_det_H=augmented_factor.logdet(),
+        hessian_rank=augmented_factor.rank,
+        centred_intercept=alpha,
+        state_center=centre,
+    )
+
+
+solve_cached_block_structured = solve_cached_structured
+solve_cached_nested_structured = solve_cached_structured
+solve_cached_sum_to_zero_structured = solve_cached_structured
+
+_KINDS = (
+    _StructuredKind(
+        system=NestedStructuredSystem,
+        penalize=build_penalized_nested_operator,
+        penalized=NestedPenalizedOperator,
+        mismatch="Nested structured systems require a nested penalized operator.",
+        factor=build_augmented_nested_factor,
+        profile=lambda system, **parts: ProfiledNestedSchurFactor(
+            **parts, data_operator=system.operator
+        ),
+    ),
+    _StructuredKind(
+        system=SumToZeroLeafSystem,
+        penalize=build_penalized_sum_to_zero_operator,
+        penalized=SumToZeroPenalizedOperator,
+        mismatch="sz leaf systems require the sz penalized operator.",
+        factor=build_augmented_sum_to_zero_factor,
+        profile=lambda _system, **parts: ProfiledSumToZeroTreeFactor(**parts),
+    ),
+    _StructuredKind(
+        system=FactorSmoothLeafSystem,
+        penalize=build_penalized_block_operator,
+        penalized=FactorSmoothPenalizedOperator,
+        mismatch="fs leaf systems require the fs penalized operator.",
+        factor=build_augmented_block_factor,
+        profile=lambda _system, **parts: ProfiledFactorSmoothLeafFactor(**parts),
+    ),
+)
