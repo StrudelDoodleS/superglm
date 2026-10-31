@@ -11,7 +11,7 @@ import copy
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from functools import partial
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -25,6 +25,10 @@ from superglm.solvers._structured.operators import (
 from superglm.solvers._structured.retired import module_getattr
 from superglm.solvers.hessian_factor import _component_indices, _component_omega
 from superglm.types import PenaltyComponent
+
+if TYPE_CHECKING:
+    from superglm.solvers._structured.balance_tree import SumToZeroLeafSystem
+    from superglm.solvers._structured.block_leaves import FactorSmoothLeafSystem
 
 # One REML Hessian direction: the penalty component, its lambda and the
 # optional W-derivative operator, together ``lambda * Omega + dH``.
@@ -162,7 +166,7 @@ class _ProfiledLeafFactor(_ProfiledInterceptFactor):
         self.max_structured_inverse_block = augmented_factor.max_structured_inverse_block
         self.border_certificate = augmented_factor.border_certificate
 
-    def published(self, system=None):
+    def published(self, system: FactorSmoothLeafSystem | SumToZeroLeafSystem | None = None):
         """This factor with its augmented factor on the published ``system`` (its own, published, if ``None``)."""
         augmented = self.augmented_factor
         clone = copy.copy(self)

@@ -1314,9 +1314,9 @@ def _validated_symmetric(matrix: NDArray) -> NDArray:
 
 
 def _equilibrate_gram(
-    matrix: NDArray, *, allow_indefinite: bool = False, on_refusal: str = "raise"
+    matrix: NDArray, *, allow_indefinite: bool = False, none_on_refusal: bool = False
 ) -> tuple[NDArray, NDArray, NDArray, NDArray] | None:
-    """A Gram's equilibration; a refused diagonal raises, or returns ``None`` if ``on_refusal="none"``."""
+    """A Gram's equilibration; a refused diagonal raises, or returns ``None`` if ``none_on_refusal``."""
     symmetric = _validated_symmetric(matrix)
     diagonal = np.diag(symmetric)
     if allow_indefinite:
@@ -1326,7 +1326,7 @@ def _equilibrate_gram(
     else:
         refusal = _diagonal_refusal(symmetric)
         if refusal is not None:
-            if on_refusal == "none":
+            if none_on_refusal:
                 return None
             raise ValueError(refusal)
         diagonal_scale = np.maximum(diagonal, 0.0)
@@ -2148,7 +2148,7 @@ def _decompose_gram(
     equilibration = _equilibrate_gram(
         matrix,
         allow_indefinite=allow_indefinite,
-        on_refusal="none" if omit_uncertifiable and psd_by_construction else "raise",
+        none_on_refusal=omit_uncertifiable and psd_by_construction,
     )
     if equilibration is None:
         return None
