@@ -1,6 +1,7 @@
 """Structured operator, estimability and factor-protocol algebra tests."""
 
 import importlib.util
+import re
 from collections import Counter
 from dataclasses import FrozenInstanceError
 from importlib import import_module
@@ -24,8 +25,11 @@ from superglm.solvers.structured import (
     LowRankSymmetricOperator,
     SumBlockOperator,
     SymmetricBlockOperator,
+    build_augmented_structured_factor,
+    build_penalized_structured_operator,
     centered_operator_coefficient_estimable,
     materialize_compact_operator,
+    solve_cached_structured,
 )
 from superglm.types import PenaltyComponent
 from tests._leaf_systems import leaf_system_from_rows
@@ -907,3 +911,49 @@ def test_centered_independent_lifted_null_uses_design_column_scale(
         centered_operator_coefficient_estimable(operator),
         expected.coefficient_estimable(),
     )
+
+
+def _geometry_pairs() -> dict:
+    """A real ``(system, penalized operator)`` pair of each structured geometry."""
+    from tests.test_signed_rows import _centred_leaf_case, _chain_factor, _signed_case
+
+    case, weights, lambdas = _signed_case("fisher", 1, 1.0, 1.0, 0.0)
+    return {
+        "nested": _chain_factor(case, weights, lambdas),
+        "sz": _centred_leaf_case("sz")[:2],
+        "fs": _centred_leaf_case("fs")[:2],
+    }
+
+
+class _NotAStructuredSystem:
+    """Matches no geometry of the structured-kind table."""
+
+
+@pytest.mark.parametrize("dispatch", ["penalize", "factor", "solve", "profile"])
+def test_an_unknown_structured_system_is_refused_by_every_dispatch(dispatch) -> None:
+    from superglm.solvers._structured.assembly import profile_structured_factor
+
+    refuse = {
+        "penalize": lambda system: build_penalized_structured_operator(system, [], [], 1.0),
+        "factor": lambda system: build_augmented_structured_factor(system, None),
+        "solve": lambda system: solve_cached_structured(system, [], [], 1.0),
+        "profile": lambda system: profile_structured_factor(system, None, 1.0, np.ones(1)),
+    }[dispatch]
+    with pytest.raises(TypeError, match=r"^Unsupported structured system _NotAStructuredSystem\.$"):
+        refuse(_NotAStructuredSystem())
+
+
+@pytest.mark.parametrize(
+    ("geometry", "other", "message"),
+    [
+        ("nested", "fs", "Nested structured systems require a nested penalized operator."),
+        ("sz", "nested", "sz leaf systems require the sz penalized operator."),
+        ("fs", "sz", "fs leaf systems require the fs penalized operator."),
+    ],
+)
+def test_a_penalized_operator_of_another_geometry_is_refused_by_name(
+    geometry, other, message
+) -> None:
+    pairs = _geometry_pairs()
+    with pytest.raises(TypeError, match=f"^{re.escape(message)}$"):
+        build_augmented_structured_factor(pairs[geometry][0], pairs[other][1])
