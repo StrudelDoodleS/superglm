@@ -1972,9 +1972,11 @@ def try_decompose_verified_spd_gram(
     ):
         raise ValueError("residual_tol must be finite and positive")
     try:
-        equilibrated, column_scale, active_columns, _ = _equilibrate_gram(matrix)
+        equilibration = _equilibrate_gram(matrix)
     except (ValueError, np.linalg.LinAlgError):
         return None
+    assert equilibration is not None  # a refusal raises unless none_on_refusal
+    equilibrated, column_scale, active_columns, _ = equilibration
     width = len(column_scale)
     if width == 0 or len(active_columns) != width:
         return None

@@ -97,6 +97,9 @@ class _ProfiledInterceptFactor:
 
     backend = "structured"
     _solve_options: ClassVar[dict] = {"centred": True}
+    augmented_factor: Any
+    sum_w: float
+    shape: tuple[int, int]
 
     @staticmethod
     def _shift_component(component: PenaltyComponent) -> PenaltyComponent:

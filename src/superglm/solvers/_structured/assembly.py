@@ -6,7 +6,7 @@ import math
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import numpy as np
 from numpy.typing import NDArray
@@ -99,7 +99,7 @@ def _leaf_penalty_parts(
     operator: BlockSymmetricOperator | SumToZeroBlockOperator,
     S_override: NDArray | None,
     n_structured: int,
-    geometry: str,
+    geometry: Literal["factor_smooth", "sum_to_zero"],
 ) -> tuple[NDArray, NDArray, NDArray, NDArray]:
     """``(A, D, small_position, structured_position)`` of an ``fs`` or ``sz`` operator.
 
