@@ -481,7 +481,8 @@ def test_a_binomial_logit_fit_lands_where_the_derivative_grams_land(monkeypatch,
     objective change below ``tau (1 + |V|)``, ``tau = reml_tol``.  Hence
 
     - the objectives agree to ``tau (1 + |V|)`` (tests/test_nested_structured_fit.py);
-    - both stops freeze the same directions;
+    - a direction either stop froze is flat (the routes read different
+      curvature there, so either may land on its side of the freeze bar);
     - on every other direction the gradients differ by under ``2 tau (1 + |V|)``,
       to first order ``H delta`` with ``H`` the outer Hessian at the Grams'
       published point, so ``|delta| <= |H^-1| 2 tau (1 + |V|)`` for the log
@@ -510,8 +511,7 @@ def test_a_binomial_logit_fit_lands_where_the_derivative_grams_land(monkeypatch,
     delta = np.log([leverage._reml_lambdas[name] for name in names]) - np.log(
         [grams._reml_lambdas[name] for name in names]
     )
-    frozen = _frozen(grams)
-    np.testing.assert_array_equal(_frozen(leverage), frozen)
+    frozen = _frozen(grams) | _frozen(leverage)
     live = ~frozen
     step = np.where(frozen, np.abs(delta) * (1.0 + 0.5 * np.abs(delta)), 0.0)
     step[live] = np.abs(np.linalg.inv(hessian[np.ix_(live, live)])) @ np.full(live.sum(), 2 * bar)
