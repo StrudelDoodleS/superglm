@@ -432,7 +432,7 @@ def _design_summary(terms, n_rows) -> dict:
     }
 
 
-_INPUTS = ("self", "X", "y", "sample_weight", "offset", "offsets")
+_INPUTS = ("self", "X", "y", "sample_weight", "offset", "offsets", "truncation", "censored")
 
 
 def _options(params) -> dict:
@@ -601,6 +601,10 @@ def _lss(model, params, design=True) -> dict:
         "discrete": bool(model._discrete),
         "n_bins": _plain(model._n_bins),
         "options": _options(params),
+        "response_bounds": {
+            "truncation": params.get("truncation") is not None,
+            "censored": params.get("censored") is not None,
+        },
         "predictors": [
             {
                 "name": p.name,

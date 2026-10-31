@@ -562,18 +562,84 @@ claim-level excess rows and carry exposure through offsets.
 form; `predict()` is the conditional mean of the excess. Certified expected
 shortfall is available for the unit excess law.
 
-**Splice recipe.** A severity model for the whole book is three fits, not one:
+**Large-loss model: body plus tail.** A severity model for a book with large
+claims fits a body for the bulk of the claims and `GeneralizedParetoLSS` for
+the excess over a threshold `u`. There are two standard ways to share the
+claims between them. Both fit the same tail; they differ in what the body
+sees.
 
-1. a body model on `y` for the rows at or below `u` (`GammaLS`,
-   `GeneralizedGammaLSS`, or a log-scale Gaussian);
-2. the exceedance probability `P(Y > u | x)` from a binary GLM;
-3. `GeneralizedParetoLSS` on `y - u` for the rows above `u`.
+*Layer method.* Cap every claim at `u`. The body sees every claim, and a claim
+above `u` is recorded at `u` and marked censored: it was at least `u`. The
+tail sees the excess `y - u` of the claims above `u`.
 
-The spliced survival above the threshold is
-`P(Y > u | x) * (1 - predict_cdf(X, y - u))`, and a spliced quantile above `u`
-is `u + predict_quantile(X, 1 - q / P(Y > u | x))` for `q < P(Y > u | x)`.
-Choosing `u` is a modelling decision (mean-residual-life or stability plots),
-not a fitted parameter, and the tail fit is conditional on it.
+```python
+import numpy as np
+from superglm import GeneralizedParetoLSS, LogNormalLS, SuperLSS, s
+
+large = (claims["loss"] > u).to_numpy()
+body_family = LogNormalLS()
+body = SuperLSS(
+    body_family, body_family.mean(s("DrivAge", kind="cr", k=8)), body_family.scale()
+).fit_reml(claims, np.minimum(claims["loss"], u), censored=large)
+
+tail_family = GeneralizedParetoLSS()
+tail = SuperLSS(
+    tail_family, tail_family.scale(s("DrivAge", kind="cr", k=8)), tail_family.shape()
+).fit_reml(claims.loc[large], claims.loc[large, "loss"] - u)
+```
+
+The chance of a large claim is then the body's own `1 - predict_cdf(X, u)`.
+Check it against the observed share of claims above `u`, by segment: a body
+family that is wrong just below `u` misstates it, and the error grows as `u`
+rises. If it is off, model `P(Y > u | x)` separately, which is the split
+method.
+
+*Split method.* Share out the claims rather than their amounts. The body sees
+only the claims at or below `u` and is fitted as truncated there, a binary GLM
+gives `P(Y > u | x)`, and the tail is as above:
+
+```python
+body = SuperLSS(
+    body_family, body_family.mean(s("DrivAge", kind="cr", k=8)), body_family.scale()
+).fit_reml(claims.loc[~large], claims.loc[~large, "loss"], truncation=(None, u))
+```
+
+In either method the pieces share no parameters, so fitting each one
+separately, with its own smoothing selection, is the maximum-likelihood fit of
+the whole model.
+
+The body must be told about `u`. A body fitted to capped or cut claims as if
+they were complete keeps their mean but not their shape, so its law cut at `u`
+is wrong. On a gamma sample cut at its 90% point, a complete-row body's mean
+below `u` is 14% low in the split method, and its capped mean is 8% low in the
+layer method. `GammaLS` and `GeneralizedGammaLSS` do not take `censored=` or
+`truncation=` yet; use their body fits only for the mean they were fitted to,
+the mean below `u` in the split method and the capped mean `E[min(Y, u)]` in
+the layer method, not as a distribution there.
+
+Where a policy limit caps a large claim, record its excess at `limit - u` and
+pass `censored=` for the claims settled at their limit when fitting the tail.
+
+The fitted body and tail describe the uncut laws. Joining them:
+
+- Layer method: below `u` the spliced CDF is the body's `predict_cdf(X, y)`;
+  above `u` the spliced survival is
+  `(1 - body.predict_cdf(X, u)) * (1 - tail.predict_cdf(X, y - u))`.
+- Split method: below `u` the spliced CDF is
+  `(1 - P(Y > u | x)) * body.predict_cdf(X, y) / body.predict_cdf(X, u)`;
+  above `u` the spliced survival is
+  `P(Y > u | x) * (1 - tail.predict_cdf(X, y - u))`.
+- Either way, with `p` the chance of a large claim, a spliced quantile above
+  `u` for an exceedance probability `q < p` is
+  `u + tail.predict_quantile(X, 1 - q / p)`.
+
+Choosing `u` is a modelling decision, not a fitted parameter, and the tail fit
+is conditional on it. Compare candidate thresholds on the tail: mean-excess
+and shape-stability plots, and a held-out log score of the claims above a high
+fixed point, with every claim below it scored as censored there. A held-out
+log score of the whole model is dominated by the claims below `u` and favours
+low thresholds. Check how the quantities you price move with `u`, and price
+from a stretch where they are stable.
 
 **Oracles.** `scipy.stats.genpareto(c=shape, scale=scale)`; gamlss `GP` with
 `mu = scale/shape`, `sigma = 1/shape`.
@@ -712,6 +778,65 @@ model.fit(
 Offsets enter their named linear predictors. An ambiguous scalar `offset=` keyword
 is deliberately unavailable.
 
+## Truncated and censored rows
+
+Some rows are only part of an observation. The main use is the large-loss
+model (see "Large-loss model: body plus tail" under `GeneralizedParetoLSS`):
+its body is censored or truncated at the threshold, and its tail is censored
+where policy limits cap claims. `fit` and `fit_reml` take two optional
+arguments:
+
+- `censored=`: the row's recorded response is a bound, not the claim itself.
+  `True` (or `"right"`) means the claim was at least the recorded value: a
+  claim capped at the threshold, or settled at its policy limit. `"left"`
+  means it was at most the recorded value. Pass one entry per row; `False` or
+  `"none"` marks a complete row, and a missing entry (`None`, NaN or `pd.NA`)
+  is refused rather than read as complete. Record the capped value itself,
+  for example `np.minimum(loss, u)` with `censored=loss > u`. A censored row
+  contributes the probability beyond its recorded value.
+- `truncation=(lower, upper)`: the row could only have been recorded inside
+  this window. Each side is `None`, one number, or one number per row. The
+  split method's body is `truncation=(None, u)`. A deductible is
+  `truncation=(d, None)` only when claims under it never reach the data; if
+  they are recorded at their ground-up amount, no bound is needed. A
+  truncated row contributes its density divided by the probability of its
+  window.
+
+```python
+import numpy as np
+from superglm import LogNormalLS, SuperLSS, s
+
+family = LogNormalLS()
+capped_at_u = SuperLSS(family, family.mean(s("age")), family.scale())
+capped_at_u.fit_reml(X, np.minimum(loss, u), censored=loss > u)
+
+below_u = SuperLSS(family, family.mean(s("age")), family.scale())
+below_u.fit_reml(X_small, y_small, truncation=(None, u))
+```
+
+The fit estimates the uncut law, so `predict`, `predict_cdf` and
+`predict_quantile` describe it, not the law inside the bounds: after a body
+fit censored or truncated at `u`, `predict` is the mean of the uncut law. A
+response outside its truncation window is refused, as is a censored row whose
+window leaves nothing beyond its recorded value; the error names the first
+such row. Bounds that touch no row leave the fit an ordinary complete one.
+
+The diagnostics read the same bounds. `residual_set`, `residuals`, `check`,
+`check_2d`, `scores` and the diagnostic plots take `truncation=` and
+`censored=`: a truncated row's PIT is read inside its window, and a censored
+row's is drawn at random beyond its bound, so a well-fitted model's PIT is
+uniform again. `scores` gives the log score of a bounded row; the CRPS scores
+are for complete rows and refuse bounded ones, so ask for
+`scores(..., which=("log",))`. `actual_expected`, `calibration` and `compare`
+read every row as complete. Each of these warns when the model was fitted with
+bounds and is called without them.
+
+`GaussianLS`, `LogNormalLS` and `GeneralizedParetoLSS` take these bounds; the
+other families refuse them. Smoothing selection differences the curvature for
+these rows instead of using closed-form third and fourth derivatives, and
+`coefficient_curvature="fisher"` is refused for them, because expected
+information describes complete rows.
+
 ## Separated cells
 
 A categorical level that carries exposure but whose responses all sit on the
@@ -723,8 +848,53 @@ predictor the family says can escape (mean and dispersion for `TweedieLSS`,
 mean and theta for `NegativeBinomialLS`) before any coefficient is fitted and
 emits a `SeparationWarning` naming the levels and the remedies; `"error"`
 refuses the design; `"ignore"` skips the scan. `GaussianLS` and `GammaLS`
-have no reachable boundary and are never scanned. Ordered-categorical smooths
-are not scanned. The scan does not cover all separation patterns, and
+have no reachable boundary and are never scanned for it.
+
+Censoring has the same failure. A level whose rows are all censored on the
+same side, such as a policy type whose every claim was paid at its limit, has
+only a bound on its response, so its effect walks to infinity along any
+predictor that moves every such bound probability one way: the location or
+mean of `GaussianLS` and `LogNormalLS`, and both predictors of
+`GeneralizedParetoLSS`. A fit with censored rows scans every `Categorical`
+term and `CategoricalInteraction` on those predictors for such levels and
+cells, under the same `separation` policy. When every row is censored on the
+same side, as with `censored=True` for all rows, the predictor's intercept has
+no finite estimate either, and the scan reports the predictor itself. The scan
+reads a predictor only on its parameter's default link: the identity location,
+the log mean, the floored log scale, and the log scale and two-wall logit
+shape of `GeneralizedParetoLSS`. A predictor given another link, such as
+`link="logit"` on a scale, is not scanned, because a bounded link can stop
+short of the limit the effect runs to and leave the level a finite estimate.
+
+The scan reads only what the data decide before the fit:
+- A generalized Pareto row with an upper truncation bound anchors its level
+  along the shape, since its conditional probability can peak at a finite
+  shape. Along the scale it does not, so the scale is still scanned.
+- The scale predictor of `GaussianLS` or `LogNormalLS` is scanned where every
+  censored row's scale runs off:
+  - In the mean form of `LogNormalLS`, a left-censored level with no lower
+    truncation bound.
+  - In `GaussianLS` and the location form of `LogNormalLS`, a level
+    right-censored above a lower truncation bound with no upper one, such as
+    claims at their limit above a deductible, and the mirror case.
+  - Any finite truncation bound counts here, however far away. Pass `None` or
+    `inf` for a side with no bound, not a sentinel such as `-1e200`: the fit
+    reads a sentinel as no bound, but the scan reads it as a bound.
+- Elsewhere a scale level of those two families censored on one side may or
+  may not have a finite estimate, and only the fit decides which, with no
+  warning. Without truncation bounds, for `GaussianLS` and the location form of
+  `LogNormalLS` a right-censored level has one only when its fitted location
+  lies below at least one of its limits and above their average, both read on
+  the log scale for `LogNormalLS` (mirrored for left-censored rows), so with
+  one shared limit it has none. In the mean form it has one when its fitted
+  mean is below at least one of its limits, and none when the mean is above all
+  of them.
+- Truncation bounds change both rules. A bound on the same side as the
+  censoring can give a level an estimate it would otherwise lack, and a bound
+  on the far side only, as in the scanned cases above, takes it away.
+
+Ordered-categorical smooths, and predictors on a link other than their
+parameter's default, are not scanned. The scan does not cover all separation patterns, and
 `fit.curvature_indefinite` is a curvature diagnostic, not a separation detector.
 The absence of either warning does not rule out separation.
 
@@ -1372,6 +1542,12 @@ order you are likely to meet them.
   response you logged by hand returns the mean of the logged response;
   turning that into a mean of `y` is your modelling decision, and
   `LogNormalLS` is the supported way to make it.
+- **Truncation and censoring cover three families.** `GaussianLS`,
+  `LogNormalLS` and `GeneralizedParetoLSS` take `truncation=` and
+  `censored=`; the gamma, generalized gamma, two-piece, negative binomial and
+  Tweedie families refuse them.
+- **Bounded rows have no CRPS.** The log score covers truncated and censored
+  rows; the CRPS scores, `actual_expected`, `calibration` and `compare` do not.
 - **Negative binomial has no zero-inflated variant**, and its size parameter
   cannot run to infinity to become an exact Poisson.
 - **Tweedie has no Fisher approximation.** Dense, chunked and discrete

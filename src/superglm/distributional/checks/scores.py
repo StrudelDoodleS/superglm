@@ -42,11 +42,12 @@ from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
 from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
 from superglm.distributional.family import (
-    COMPLETE_OBSERVATION,
     DistributionFunctionFamily,
     PriorWeightedDistributionFunctionFamily,
     PriorWeightedVarianceFamily,
     VarianceFamily,
+    bounded_observation,
+    plan_observation,
     validated_parameter_matrix,
 )
 from superglm.distributional.kernels.generalized_gamma import (
@@ -61,6 +62,13 @@ from superglm.distributional.model import (
     _prediction_offsets,
     _take_unvalidated_offsets,
     _unvalidated_offset_shapes,
+)
+from superglm.distributional.observation import (
+    BoundPair,
+    CensoredRows,
+    ResponseBounds,
+    resolve_response_bounds,
+    unvalidated_bound_arrays,
 )
 from superglm.distributional.posterior import _row_index
 from superglm.distributional.weights import (
@@ -535,6 +543,7 @@ class _ScoringRows(NamedTuple):
     n_observations: int
     aggregation_mass: NDArray[np.float64]
     prior_law: NDArray[np.float64] | None
+    bounds: ResponseBounds | None = None
 
 
 class _PriorWeightedRowLaw:
@@ -560,8 +569,15 @@ def _scoring_rows(
     *,
     sample_weight: NDArray | None,
     offsets: Mapping[str, NDArray] | None,
+    truncation: BoundPair = None,
+    censored: CensoredRows = None,
 ) -> _ScoringRows:
-    """Resolve one scoring call and omit zero-weight rows before any prediction."""
+    """Resolve one scoring call and omit zero-weight rows before any prediction.
+
+    ``truncation`` and ``censored`` resolve as the fit resolves them: shape-checked on
+    the call's rows, then taken at the retained positions and checked against
+    the retained responses.
+    """
     frame = as_eager_frame(X)
     n_observations = len(frame)
     response = np.asarray(y, dtype=np.float64)
@@ -571,6 +587,7 @@ def _scoring_rows(
         raise ValueError("a score needs one response value per row of X")
 
     shaped_offsets = _unvalidated_offset_shapes(offsets, n_observations)
+    shaped_bounds = unvalidated_bound_arrays(truncation, censored, n_observations)
     resolved = resolve_likelihood_weights(
         sample_weight,
         n_observations=n_observations,
@@ -581,6 +598,17 @@ def _scoring_rows(
     retained_response = np.array(response[positions], copy=True)
     if not np.all(np.isfinite(retained_response)):
         raise ValueError("scoring responses must be finite")
+    bounds = resolve_response_bounds(
+        retained_response,
+        None if shaped_bounds is None else tuple(a[positions] for a in shaped_bounds),
+        positions,
+    )
+    if bounds is not None:
+        # The family reads the bounds on its support, as the fit does, and
+        # refuses them if it cannot take them; bounds left with no effect are none.
+        bounds = plan_observation(
+            fitted.family.bind_likelihood(retained_response, resolved, bounded_observation(bounds))
+        ).bounds
     predictor_names = tuple(state.name for state in fitted.layout.predictors)
     retained_offsets = _prediction_offsets(
         _take_unvalidated_offsets(shaped_offsets, positions),
@@ -607,6 +635,7 @@ def _scoring_rows(
         n_observations=n_observations,
         aggregation_mass=aggregation_mass,
         prior_law=prior_law,
+        bounds=bounds,
     )
 
 
@@ -624,7 +653,9 @@ def _row_law(fitted: Any, rows: _ScoringRows) -> DistributionFunctionFamily:
         # Let the family state its own likelihood-contract refusal when it has
         # one.  LogNormalLS, for example, explains why its non-unit prior law
         # does not exist rather than being reduced to a generic score error.
-        fitted.family.bind_likelihood(rows.response, rows.resolved, COMPLETE_OBSERVATION)
+        fitted.family.bind_likelihood(
+            rows.response, rows.resolved, bounded_observation(rows.bounds)
+        )
         raise UnsupportedLikelihoodContractError(
             f"{type(family).__name__} has no prior-weighted distribution function, so "
             "non-unit prior weights cannot be scored"
@@ -649,12 +680,18 @@ def _closed_form_parameters(
 
 def _retained_log_score(fitted: Any, rows: _ScoringRows) -> NDArray[np.float64]:
     """Return compressed likelihood contributions on retained physical rows."""
-    plan = fitted.family.bind_likelihood(rows.response, rows.resolved, COMPLETE_OBSERVATION)
+    observation = bounded_observation(rows.bounds)
+    plan = fitted.family.bind_likelihood(rows.response, rows.resolved, observation)
     theta = np.asarray(
         fitted.predict_parameters(rows.frame, offsets=rows.offsets), dtype=np.float64
     )
     evaluation = fitted.family.evaluate_natural(rows.response, theta, plan, derivative_order=0)
-    return -np.asarray(evaluation.reported_log_likelihood, dtype=np.float64)
+    scores = -np.asarray(evaluation.reported_log_likelihood, dtype=np.float64)
+    if rows.bounds is not None and evaluation.valid is not None:
+        # A bounded row whose observed window has no mass under the fitted
+        # law is impossible there, not certain: its negative log score is inf.
+        scores = np.where(evaluation.valid, scores, np.inf)
+    return scores
 
 
 def _retained_crps(
@@ -666,6 +703,12 @@ def _retained_crps(
     threshold: float | None = None,
 ) -> NDArray[np.float64]:
     """Return the unaggregated CRPS of each retained row's predictive law."""
+    if rows.bounds is not None:
+        raise NotImplementedError(
+            "the CRPS family of scores is for complete rows; some rows are truncated or "
+            "censored, and only the log score supports them (use which=('log',) in "
+            "score_table)"
+        )
     theta = np.asarray(
         fitted.predict_parameters(rows.frame, offsets=rows.offsets), dtype=np.float64
     )
@@ -718,6 +761,8 @@ def log_score(
     *,
     sample_weight: NDArray | None = None,
     offsets: Mapping[str, NDArray] | None = None,
+    truncation: BoundPair = None,
+    censored: CensoredRows = None,
 ) -> NDArray[np.float64]:
     """Return ``-log f(y | theta_hat)`` per row under the fit's weight contract.
 
@@ -725,6 +770,10 @@ def log_score(
     a row's dispersion, ``"frequency"`` semantics replicate it, and a zero weight
     drops the row from the likelihood altogether.  Dropped rows score ``nan``
     rather than silently disappearing, so the result always aligns with ``X``.
+
+    ``truncation`` and ``censored`` are read as ``SuperLSS.fit`` reads them: a
+    truncated row scores its density over the probability of its window and a
+    censored row the negative log probability of its observed interval.
     """
     rows = _scoring_rows(
         fitted,
@@ -732,6 +781,8 @@ def log_score(
         y,
         sample_weight=sample_weight,
         offsets=offsets,
+        truncation=truncation,
+        censored=censored,
     )
     scores = np.full(rows.n_observations, np.nan, dtype=np.float64)
     # The likelihood already reports count × unit log score under frequency
@@ -822,13 +873,17 @@ def score_table(
     offsets: Mapping[str, NDArray] | None = None,
     method: CrpsMethod = "auto",
     n_nodes: int = 64,
+    truncation: BoundPair = None,
+    censored: CensoredRows = None,
 ) -> pd.DataFrame:
     """Score every row into one frame under the fitted model's weight contract.
 
     Columns follow ``which`` in ``("log", "crps")`` order and then one
     ``twcrps_<threshold>`` column per entry of ``thresholds``.  A frequency row
     contains its compressed ``count × unit_score`` contribution; a zero-weight
-    row is ``nan`` in every column.
+    row is ``nan`` in every column.  With truncated or censored rows only the log
+    score is defined: asking for a CRPS column, which the default ``which`` does,
+    raises rather than dropping it.
     """
     names = tuple(which)
     if not names:
@@ -847,6 +902,8 @@ def score_table(
         y,
         sample_weight=sample_weight,
         offsets=offsets,
+        truncation=truncation,
+        censored=censored,
     )
     columns: dict[str, NDArray[np.float64]] = {}
     if "log" in names:

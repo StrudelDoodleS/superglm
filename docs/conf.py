@@ -124,12 +124,14 @@ nitpick_ignore_regex = [
     # docstring's annotations: ``Distribution`` (family base),
     # ``Link`` (link-function base), ``Penalty`` (penalty base),
     # ``PIRLSResult`` (solver return record), ``FeatureSpec`` (typing alias),
-    # and ``DiagnosticFinding`` / ``FitWorkProfile`` / ``JsonValue``
-    # (fit-report records and their JSON alias).
+    # ``DiagnosticFinding`` / ``FitWorkProfile`` / ``JsonValue``
+    # (fit-report records and their JSON alias), and ``ResponseBounds``
+    # (the bounded-row record a family's ``censored_recession`` reads).
     (
         "py:class",
         r"superglm\.(diagnostics\.fit_report\.(DiagnosticFinding|FitWorkProfile"
-        r"|JsonValue)|distributions\.Distribution|links\.Link"
+        r"|JsonValue)|distributional\.observation\.ResponseBounds"
+        r"|distributions\.Distribution|links\.Link"
         r"|penalties\.base\.Penalty|solvers\.pirls\.PIRLSResult"
         r"|types\.FeatureSpec)",
     ),

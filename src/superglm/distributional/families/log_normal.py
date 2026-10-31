@@ -25,8 +25,21 @@ from superglm.distributional.families._predictors import (
     MeanPredictor,
     ScalePredictor,
 )
+from superglm.distributional.families._response_bounds import (
+    LEFT_CENSORED,
+    ResponseBounds,
+    TailChannels,
+    bind_observation,
+    bounded_channels,
+    censored_carrier,
+    log_window_values,
+    refuse_bounded,
+)
 from superglm.distributional.families._variance import _variance_product
-from superglm.distributional.families.gaussian import LowerBoundedLogLink
+from superglm.distributional.families.gaussian import (
+    LowerBoundedLogLink,
+    _normal_censored_recession,
+)
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
     FamilyCapabilities,
@@ -47,6 +60,7 @@ from superglm.distributional.kernels.log_normal import (
     location_expected_information,
     location_of_mean,
     location_rows,
+    location_window,
     log_normal_cdf,
     log_normal_expected_shortfall,
     log_normal_expected_shortfall_from_mean,
@@ -55,6 +69,7 @@ from superglm.distributional.kernels.log_normal import (
     mean_expected_information,
     mean_of_location,
     mean_rows,
+    mean_window,
     predictor_fourth_derivatives,
 )
 from superglm.distributional.likelihood_identity import (
@@ -82,6 +97,7 @@ _CAPABILITIES = FamilyCapabilities(
     quantile=True,
     random=False,
     response_mean=True,
+    censored_response=True,
 )
 
 
@@ -155,6 +171,7 @@ class LogNormalLikelihoodPlan:
                 str(self.observation.schema_version),
                 self.weights.digest,
                 self.response_digest,
+                *(() if self.observation.bounds is None else (self.observation.bounds.digest,)),
             )
         ).encode("utf-8")
         return f"LogNormalLS/v2:{hashlib.sha256(payload).hexdigest()}"
@@ -175,7 +192,7 @@ class LogNormalLikelihoodPlan:
             weights=self.weights.take(indices),
             row_law=self.row_law,
             family_config=self.family_config,
-            observation=self.observation,
+            observation=self.observation.take(indices),
             exact_response=self.exact_response[indices],
             carrier=self.parameter_independent_carrier[indices],
         )
@@ -254,6 +271,27 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
     def capabilities(self) -> FamilyCapabilities:
         return _CAPABILITIES
 
+    def censored_recession(self, bounds: ResponseBounds) -> NDArray[np.bool_]:
+        """Every censored row escapes along the location or mean; some escape along the scale.
+
+        On ``log Y`` the law is normal, so the location (or the mean at fixed
+        ``sigma``) moves every bound probability one way within any truncation
+        window.  In the location form the scale is the normal one: a row
+        right-censored above a lower truncation bound with no upper bound, or
+        left-censored below an upper bound with no lower one, escapes along it.
+        In the mean form ``P(Y <= c) = Phi(sigma/2 - log(m/c)/sigma)`` nears one
+        only as ``sigma`` grows, whatever ``m``, and so does
+        ``P(Y <= c | Y <= b)``, so a left-censored row with no lower truncation
+        bound escapes along the scale.  ``P(Y > c)`` instead peaks at
+        ``sigma = sqrt(2 log(c/m))`` below a limit, a lower bound keeps a
+        left-censored row's probability below one as ``sigma`` grows, and
+        elsewhere the scale's direction depends on the fitted mean or location.
+        """
+        if self.parametrisation == "location":
+            return _normal_censored_recession(bounds)
+        scale = (bounds.side == LEFT_CENSORED) & ~np.isfinite(bounds.lower)
+        return np.column_stack((bounds.side != 0, scale))
+
     def to_config(self) -> dict[str, Any]:
         return {
             "type": _FAMILY_NAME,
@@ -276,10 +314,9 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
         observation: ObservationContract,
     ) -> LogNormalLikelihoodPlan:
         response = _validated_response(y)
-        if observation != COMPLETE_OBSERVATION:
-            raise UnsupportedLikelihoodContractError(
-                "LogNormalLS supports only the complete-observation contract"
-            )
+        observation = bind_observation(
+            observation, response, weights, support_lower=0.0, family_name=_FAMILY_NAME
+        )
         if not isinstance(weights, ResolvedLikelihoodWeights):
             raise UnsupportedLikelihoodContractError(
                 "LogNormalLS requires resolved likelihood weights"
@@ -306,7 +343,9 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
                 "LogNormalLS does not support the resolved likelihood-weight contract"
             )
         with np.errstate(over="ignore", invalid="ignore"):
-            carrier = -multiplier * (np.log(response) + _HALF_LOG_TWO_PI)
+            carrier = censored_carrier(
+                -multiplier * (np.log(response) + _HALF_LOG_TWO_PI), observation.bounds
+            )
         if not np.all(np.isfinite(carrier)):
             raise UnsupportedLikelihoodContractError(
                 "log-normal response carrier is not finite and representable"
@@ -335,7 +374,10 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
     ) -> NDArray[np.float64]:
         response = _validated_response(y)
         candidate = self._plan(plan, len(response))
-        if candidate.observation != COMPLETE_OBSERVATION:
+        observation = candidate.observation
+        if observation != COMPLETE_OBSERVATION and (
+            observation.bounds is None or observation.bounds.n_rows != len(response)
+        ):
             raise UnsupportedLikelihoodContractError(
                 "LogNormalLS likelihood has an unsupported observation contract"
             )
@@ -387,16 +429,47 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
         response = _validated_response(y)
         values = self._theta(theta, len(response))
         bound = self._plan(plan, len(response))
-        rows = mean_rows if self.parametrisation == "mean" else location_rows
+        mean_form = self.parametrisation == "mean"
+        rows = mean_rows if mean_form else location_rows
         evaluated = rows(
             response, values[:, 0], values[:, 1], bound.multiplier, derivative_order=order
         )
+        optimizing, score, hessian, valid = (
+            evaluated.optimizing_log_likelihood,
+            evaluated.score,
+            evaluated.hessian_packed,
+            evaluated.valid,
+        )
+        bounds = bound.observation.bounds
+        if bounds is not None:
+            window_rows = mean_window if mean_form else location_window
+
+            def window(lower: NDArray, upper: NDArray, selected: NDArray) -> TailChannels:
+                return window_rows(
+                    lower,
+                    upper,
+                    values[selected, 0],
+                    values[selected, 1],
+                    derivative_order=order,
+                )
+
+            optimizing, score, hessian, valid = bounded_channels(
+                optimizing,
+                score,
+                hessian,
+                valid,
+                response=response,
+                bounds=bounds,
+                multiplier=bound.multiplier,
+                window=window,
+                derivative_order=order,
+            )
         return NaturalLikelihoodEvaluation(
-            optimizing_log_likelihood=evaluated.optimizing_log_likelihood,
+            optimizing_log_likelihood=optimizing,
             parameter_independent_carrier=bound.parameter_independent_carrier,
-            score=evaluated.score,
-            hessian_packed=evaluated.hessian_packed,
-            valid=evaluated.valid,
+            score=score,
+            hessian_packed=hessian,
+            valid=valid,
         )
 
     def expected_information_natural(
@@ -404,6 +477,7 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
     ) -> NDArray[np.float64]:
         values = self._theta(theta, None)
         bound = self._plan(plan, len(values))
+        refuse_bounded(bound.observation, "LogNormalLS expected information")
         if self.parametrisation == "mean":
             return mean_expected_information(values[:, 0], values[:, 1], bound.multiplier)
         return location_expected_information(values[:, 1], bound.multiplier)
@@ -431,6 +505,7 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
                 "log-normal endpoint curvature derivatives require the built-in links"
             )
         bound = self._plan(plan, len(response))
+        refuse_bounded(bound.observation, "LogNormalLS analytic curvature derivatives")
         directional = (
             mean_curvature_directional
             if self.parametrisation == "mean"
@@ -464,6 +539,7 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
                 "log-normal endpoint curvature derivatives require the built-in links"
             )
         bound = self._plan(plan, len(response))
+        refuse_bounded(bound.observation, "LogNormalLS analytic curvature derivatives")
         single = np.ndim(direction_a) == 2
         predictors, first, second = second_direction_arrays(
             response, eta, direction_a, direction_b, 2
@@ -539,6 +615,27 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
                     log_variance = 2.0 * (values[index, 0] + scale_square[index])
                 result[index] = np.exp(log_variance)
         return readonly(result)
+
+    def log_window_probability(
+        self,
+        lower: NDArray,
+        upper: NDArray,
+        theta: NDArray,
+        weights: NDArray | None = None,
+    ) -> NDArray[np.float64]:
+        """``log P(lower < Y <= upper)`` under each row's law, from the tail-safe window kernel."""
+        if weights is not None and not np.all(np.asarray(weights, dtype=np.float64) == 1.0):
+            raise UnsupportedLikelihoodContractError(
+                "LogNormalLS has no prior-weighted row law, so its window probability takes no "
+                "non-unit prior weights"
+            )
+        values = self._theta(theta, None)
+        window_rows = mean_window if self.parametrisation == "mean" else location_window
+
+        def window(lo: NDArray, hi: NDArray, rows: NDArray) -> TailChannels:
+            return window_rows(lo, hi, values[rows, 0], values[rows, 1], derivative_order=0)
+
+        return readonly(log_window_values(lower, upper, len(values), window, support_lower=0.0))
 
     def cdf(self, y: NDArray, theta: NDArray) -> NDArray[np.float64]:
         values = self._theta(theta, None)

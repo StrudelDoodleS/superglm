@@ -25,6 +25,15 @@ from superglm.distributional.families._predictors import (
     LocationPredictor,
     ScalePredictor,
 )
+from superglm.distributional.families._response_bounds import (
+    ResponseBounds,
+    TailChannels,
+    bind_observation,
+    bounded_channels,
+    censored_carrier,
+    log_window_values,
+    refuse_bounded,
+)
 from superglm.distributional.families._variance import _variance_product
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
@@ -44,6 +53,7 @@ from superglm.distributional.kernels.gaussian import (
     gaussian_expected_information,
     gaussian_predictor_curvature_directional,
     gaussian_predictor_fourth_derivatives,
+    gaussian_window,
     initialize_gaussian,
 )
 from superglm.distributional.likelihood_identity import (
@@ -179,7 +189,23 @@ _CAPABILITIES = FamilyCapabilities(
     quantile=True,
     random=False,
     response_mean=True,
+    censored_response=True,
 )
+
+
+def _normal_censored_recession(bounds: ResponseBounds) -> NDArray[np.bool_]:
+    """Location and scale recession flags of a normal law's censored rows.
+
+    A row right-censored above a lower truncation bound with no upper one, or
+    left-censored below an upper bound with no lower one, nears its supremum
+    of one as the scale grows, whatever the location.
+    """
+    open_below = ~np.isfinite(bounds.lower)
+    open_above = ~np.isfinite(bounds.upper)
+    scale = ((bounds.side > 0) & ~open_below & open_above) | (
+        (bounds.side < 0) & open_below & ~open_above
+    )
+    return np.column_stack((bounds.side != 0, scale))
 
 
 GaussianRowLaw = Literal[
@@ -211,7 +237,7 @@ class GaussianLikelihoodPlan:
             if self.weights.provenance.contract.semantics == "prior"
             else np.zeros(len(self.weights.values), dtype=np.float64)
         )
-        self._set_prepared_carrier(carrier)
+        self._set_prepared_carrier(censored_carrier(carrier, self.observation.bounds))
 
     @classmethod
     def _chunked(
@@ -234,6 +260,10 @@ class GaussianLikelihoodPlan:
         ):
             object.__setattr__(plan, name, value)
         plan._validate_static_contract()
+        if not observation.is_complete:
+            raise UnsupportedLikelihoodContractError(
+                "censored or truncated Gaussian rows are bound eagerly, not chunk-prepared"
+            )
         object.__setattr__(plan, "parameter_independent_carrier", None)
         object.__setattr__(plan, "carrier_preparation", _DERIVED_CARRIER)
         object.__setattr__(plan, "carrier_digest", _derived_carrier_digest(weights))
@@ -266,7 +296,11 @@ class GaussianLikelihoodPlan:
             raise UnsupportedLikelihoodContractError(
                 "Gaussian likelihood plan has an invalid family configuration"
             )
-        if self.observation != COMPLETE_OBSERVATION:
+        if self.observation != COMPLETE_OBSERVATION and (
+            not isinstance(self.observation, ObservationContract)
+            or self.observation.bounds is None
+            or self.observation.bounds.n_rows != len(self.weights.values)
+        ):
             raise UnsupportedLikelihoodContractError(
                 "Gaussian likelihood plan has an unsupported observation contract"
             )
@@ -298,6 +332,7 @@ class GaussianLikelihoodPlan:
                 self.observation.kind,
                 str(self.observation.schema_version),
                 self.weights.digest,
+                *(() if self.observation.bounds is None else (self.observation.bounds.digest,)),
             )
         ).encode("utf-8")
         return f"GaussianLS/v2:{hashlib.sha256(payload).hexdigest()}"
@@ -322,7 +357,7 @@ class GaussianLikelihoodPlan:
             row_law=self.row_law,
             invariant=self.invariant,
             family_config=self.family_config,
-            observation=self.observation,
+            observation=self.observation.take(indices),
         )
 
 
@@ -393,6 +428,25 @@ class GaussianLS(LocationPredictor, ScalePredictor):
     def capabilities(self) -> FamilyCapabilities:
         return _CAPABILITIES
 
+    def censored_recession(self, bounds: ResponseBounds) -> NDArray[np.bool_]:
+        """Every censored row escapes along the location; a row truncated only on the
+        far side of its limit also escapes along the scale.
+
+        The normal density is log-concave, so its location family has a
+        monotone likelihood ratio: ``P(Y > c)`` rises and ``P(Y <= c)`` falls
+        with the location within any truncation window.  A row right-censored
+        at ``c`` above a lower truncation bound ``a`` with no upper bound has
+        ``P(Y > c | Y > a) < 1`` at every finite scale, tending to one as the
+        scale grows whatever the location, so a level of such rows has no
+        finite scale (mirrored for a left-censored row with only an upper
+        bound).  Elsewhere the scale is not decided before the fit: an
+        untruncated level right-censored at ``c_i`` has a finite estimate only
+        when ``sum (mu_i - c_i) > 0`` while some ``mu_i < c_i`` (mirrored for
+        left-censored rows), and with both truncation bounds the probability
+        tends to ``(b - c)/(b - a) < 1``.
+        """
+        return _normal_censored_recession(bounds)
+
     def to_config(self) -> dict[str, Any]:
         """Return JSON-safe complete family configuration."""
         return {"type": type(self).__name__, "scale_floor": self.scale_floor}
@@ -411,7 +465,7 @@ class GaussianLS(LocationPredictor, ScalePredictor):
         weights: ResolvedLikelihoodWeights,
         observation: ObservationContract,
     ) -> GaussianLikelihoodPlan:
-        if type(self) is not GaussianLS:
+        if type(self) is not GaussianLS or observation != COMPLETE_OBSERVATION:
             return self.bind_likelihood(y, weights, observation)
         return self._bind_likelihood(y, weights, observation, chunked=True)
 
@@ -424,10 +478,9 @@ class GaussianLS(LocationPredictor, ScalePredictor):
         chunked: bool,
     ) -> GaussianLikelihoodPlan:
         response = _validated_response(y)
-        if observation != COMPLETE_OBSERVATION:
-            raise UnsupportedLikelihoodContractError(
-                "GaussianLS supports only the complete-observation contract"
-            )
+        observation = bind_observation(
+            observation, response, weights, support_lower=-np.inf, family_name="GaussianLS"
+        )
         if not isinstance(weights, ResolvedLikelihoodWeights):
             raise UnsupportedLikelihoodContractError(
                 "GaussianLS requires resolved likelihood weights"
@@ -489,20 +542,53 @@ class GaussianLS(LocationPredictor, ScalePredictor):
             raise UnsupportedLikelihoodContractError(
                 "chunk-prepared Gaussian roots must be evaluated through owned row children"
             )
+        weights = gaussian_plan.weights.values
+        semantics = gaussian_plan.weights.provenance.contract.semantics
         evaluated = evaluate_gaussian_rows(
             response,
             parameters[:, 0],
             parameters[:, 1],
-            gaussian_plan.weights.values,
-            gaussian_plan.weights.provenance.contract.semantics,
+            weights,
+            semantics,
             derivative_order=order,
         )
+        optimizing, score, hessian, valid = (
+            evaluated.optimizing_log_likelihood,
+            evaluated.score,
+            evaluated.hessian_packed,
+            evaluated.valid,
+        )
+        bounds = gaussian_plan.observation.bounds
+        if bounds is not None:
+
+            def window(lower: NDArray, upper: NDArray, selected: NDArray) -> TailChannels:
+                return gaussian_window(
+                    lower,
+                    upper,
+                    parameters[selected, 0],
+                    parameters[selected, 1],
+                    weights[selected],
+                    semantics,
+                    derivative_order=order,
+                )
+
+            optimizing, score, hessian, valid = bounded_channels(
+                optimizing,
+                score,
+                hessian,
+                valid,
+                response=response,
+                bounds=bounds,
+                multiplier=weights if semantics == "frequency" else np.ones_like(weights),
+                window=window,
+                derivative_order=order,
+            )
         return NaturalLikelihoodEvaluation(
-            optimizing_log_likelihood=evaluated.optimizing_log_likelihood,
+            optimizing_log_likelihood=optimizing,
             parameter_independent_carrier=gaussian_plan.parameter_independent_carrier,
-            score=evaluated.score,
-            hessian_packed=evaluated.hessian_packed,
-            valid=evaluated.valid,
+            score=score,
+            hessian_packed=hessian,
+            valid=valid,
         )
 
     def expected_information_natural(
@@ -517,6 +603,7 @@ class GaussianLS(LocationPredictor, ScalePredictor):
             family_name="GaussianLS",
         )
         gaussian_plan = _validated_plan(plan, len(parameters), self.scale_floor)
+        refuse_bounded(gaussian_plan.observation, "GaussianLS expected information")
         return gaussian_expected_information(
             parameters[:, 1],
             gaussian_plan.weights.values,
@@ -546,6 +633,7 @@ class GaussianLS(LocationPredictor, ScalePredictor):
                 "configured lower-bounded log links"
             )
         gaussian_plan = _validated_plan(plan, len(response), self.scale_floor)
+        refuse_bounded(gaussian_plan.observation, "GaussianLS analytic curvature derivatives")
         return gaussian_predictor_curvature_directional(
             response,
             eta,
@@ -569,6 +657,7 @@ class GaussianLS(LocationPredictor, ScalePredictor):
         response = _validated_response(y)
         self._require_builtin_links(links)
         gaussian_plan = _validated_plan(plan, len(response), self.scale_floor)
+        refuse_bounded(gaussian_plan.observation, "GaussianLS analytic curvature derivatives")
         single = np.ndim(direction_a) == 2
         predictors, first, second = second_direction_arrays(
             response, eta, direction_a, direction_b, 2
@@ -604,6 +693,28 @@ class GaussianLS(LocationPredictor, ScalePredictor):
             family_name="GaussianLS",
         )
         return readonly(parameters[:, 0])
+
+    def log_window_probability(
+        self,
+        lower: NDArray,
+        upper: NDArray,
+        theta: NDArray,
+        weights: NDArray | None = None,
+    ) -> NDArray[np.float64]:
+        """``log P(lower < Y <= upper)`` under each row's law, from the tail-safe window kernel."""
+        values = _validated_parameter_matrix(
+            theta, n_observations=None, parameters=self.parameters, family_name="GaussianLS"
+        )
+        law = (
+            np.ones(len(values)) if weights is None else _prior_weight_vector(weights, len(values))
+        )
+
+        def window(lo: NDArray, hi: NDArray, rows: NDArray) -> TailChannels:
+            return gaussian_window(
+                lo, hi, values[rows, 0], values[rows, 1], law[rows], "prior", derivative_order=0
+            )
+
+        return readonly(log_window_values(lower, upper, len(values), window, support_lower=-np.inf))
 
     def cdf(self, y: NDArray, theta: NDArray) -> NDArray[np.float64]:
         """``P(Y <= y)`` per row from ``(location, scale)``."""
