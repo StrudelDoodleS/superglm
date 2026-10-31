@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from superglm._parallel import parallel_config
+from tests._traced_memory import own_traced_peak
 
 
 def _module():
@@ -140,11 +141,9 @@ def test_accumulate_reads_fortran_and_strided_channels_in_place():
 
     One-off process setup, such as the BLAS thread controller the worker pool builds on its
     first section (which peaks near one column's bytes), runs on a throwaway reducer first.
-    The traced call is then each measured reducer's first, where a copy kept for later calls
-    would still be made.
+    The traced window is then each measured reducer's construction and first call, where a
+    copy made then, or kept for later calls, would show.
     """
-    import tracemalloc
-
     module = _module()
     module._warmup_batched_moments()
     _, sizes, ordinary, bins, histograms, directions, buffers = _fixture()
@@ -162,17 +161,16 @@ def test_accumulate_reads_fortran_and_strided_channels_in_place():
     bins.fill(0)
     for panel in ordinary:
         panel.fill(1.0)
-    for weights in (np.ones((capacity, 3), order="F"), np.ones((capacity, 6))[:, ::2]):
+
+    def first_call(weights):
         batch = module._BatchedMomentReducers(
             histograms, directions, ordinary, bins, support_sizes=sizes, n_channels=3, **buffers
         )
+        return batch.accumulate(weights, capacity)
+
+    for weights in (np.ones((capacity, 3), order="F"), np.ones((capacity, 6))[:, ::2]):
         with parallel_config(n_jobs=1):
-            tracemalloc.start()
-            try:
-                batch.accumulate(weights, capacity)
-                _, peak = tracemalloc.get_traced_memory()
-            finally:
-                tracemalloc.stop()
+            peak, _ = own_traced_peak(first_call, weights)
         assert peak < weights[:, 0].nbytes, peak  # a copy holds all three columns
 
 
