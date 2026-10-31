@@ -799,46 +799,7 @@ def test_prebuilt_tabmat_storage_does_not_change_dense_only_auto_policy(split_fi
     assert plan._ordinary_split is None
 
 
-def test_legacy_weighted_moment_entry_points_delegate_to_one_execution_plan(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    rng, groups, _X = _mixed_groups(seed=177)
-    n = groups[0].shape[0]
-    starts = np.cumsum([0, *[group.shape[1] for group in groups]])
-    spans = [
-        SimpleNamespace(start=int(starts[i]), end=int(starts[i + 1])) for i in range(len(groups))
-    ]
-    W = rng.uniform(0.0, 2.0, size=n)
-    Wz = rng.normal(size=n)
-    signed_W = rng.normal(size=n)
-    calls: list[tuple[bool, bool, int]] = []
-    original = MatrixExecutionPlan.moments
-
-    def counted(self, weights, *, rhs=(), include_xtw=False, signed=False, **kwargs):
-        calls.append((signed, include_xtw, len(rhs)))
-        return original(
-            self,
-            weights,
-            rhs=rhs,
-            include_xtw=include_xtw,
-            signed=signed,
-            **kwargs,
-        )
-
-    monkeypatch.setattr(MatrixExecutionPlan, "moments", counted)
-
-    block_gram._block_xtwx(groups, spans, W)
-    block_gram._block_xtwx_rhs(groups, spans, W, Wz)
-    block_gram._block_xtwx_signed(groups, spans, signed_W)
-
-    assert calls == [
-        (False, False, 0),
-        (False, True, 1),
-        (True, False, 0),
-    ]
-
-
-def test_legacy_entry_points_keep_validation_and_span_contracts() -> None:
+def test_execution_plan_keeps_validation_and_span_contracts() -> None:
     rng = np.random.default_rng(180)
     n = 30
     group = DenseGroupMatrix(rng.normal(size=(n, 2)))
