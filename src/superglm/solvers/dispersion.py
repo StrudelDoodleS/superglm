@@ -175,6 +175,12 @@ def lazy_likelihood_size(sample_weight: NDArray, *, weight_semantics: str) -> Ca
     positive-row count under ``"prior"``.  The objective, its gradient and
     its Hessian all read it, so a row count in any one of them would make the
     Newton step inconsistent with the surface it steps on.
+
+    The memo's owner is the calling optimizer's frame and its lifetime is one
+    optimizer call.  Nothing invalidates it: ``sample_weight`` and
+    ``weight_semantics`` are captured, so the memo is not valid after an
+    in-place change to ``sample_weight``, and the caller must not make one
+    while the memo is alive.
     """
     return functools.cache(
         lambda: dispersion_likelihood_size(sample_weight, weight_semantics=weight_semantics)
