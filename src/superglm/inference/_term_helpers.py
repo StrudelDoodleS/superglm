@@ -201,7 +201,6 @@ def _active_spline_columns(name: Hashable, feature_groups: list, active_subs: li
 def _spline_se(
     spline_spec,
     name: Hashable,
-    beta: NDArray,
     feature_groups: list,
     active_groups: list,
     Cov_active: NDArray,

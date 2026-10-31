@@ -268,9 +268,7 @@ def _term_se_at(model: SuperGLM, name: str, x: NDArray) -> NDArray:
     x = np.asarray(x, dtype=np.float64)
     if isinstance(spec, _SplineBase):
         feature_groups = [g for g in model._groups if g.feature_name == name]
-        return _spline_se(
-            spec, name, model.result.beta, feature_groups, active_groups, cov_active, x_eval=x
-        )
+        return _spline_se(spec, name, feature_groups, active_groups, cov_active, x_eval=x)
     active = [g for g in active_groups if g.feature_name == name]
     if not active:
         return np.zeros(len(x), dtype=np.float64)

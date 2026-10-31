@@ -647,7 +647,6 @@ def _hessian_from_inverse(inverse_hessian: NDArray[np.float64]) -> NDArray[np.fl
 
 
 def _lambda_from_log(
-    name: str,
     value: float,
     *,
     lower_log: float,
@@ -1051,7 +1050,6 @@ def run_newton_endgame(
             for k, name in enumerate(names):
                 value = float(np.clip(rho[k] + step[k], lower_log, upper_logs[k]))
                 proposed_lambdas[name] = _lambda_from_log(
-                    name,
                     value,
                     lower_log=lower_log,
                     upper_log=upper_logs[k],
@@ -1070,7 +1068,6 @@ def run_newton_endgame(
                 for k, name in enumerate(names):
                     value = float(np.clip(rho[k] + scale * step[k], lower_log, upper_logs[k]))
                     trial_lambdas[name] = _lambda_from_log(
-                        name,
                         value,
                         lower_log=lower_log,
                         upper_log=upper_logs[k],

@@ -209,9 +209,6 @@ class StructuredCovarianceAccessor(_SelectedBlockAccess):
             result[slope_mask] = self.slope_selected_diagonal(selected[slope_mask] - 1)
         return result
 
-    def slope_selected_block(self, indices: NDArray) -> NDArray:
-        return self.slopes.selected_block(indices)
-
     def slope_selected_diagonal(self, indices: NDArray) -> NDArray:
         return self.slopes.selected_diagonal(indices)
 
