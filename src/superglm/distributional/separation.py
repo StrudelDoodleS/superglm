@@ -10,16 +10,20 @@ predictor.
 from __future__ import annotations
 
 import warnings
-from collections.abc import Sequence
-from typing import Literal, cast
+from collections.abc import Callable, Sequence
+from dataclasses import replace
+from typing import Any, Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._frame import EagerFrame
+from superglm._predictor_compiler import CompiledPredictorDesign
 from superglm.diagnostics.separation import (
     SeparatedTerm,
     SeparationError,
     SeparationWarning,
+    _format_labels,
     emit_curve_separation,
     emit_level_curve_separation,
     format_factor_smooth_canonical,
@@ -28,9 +32,34 @@ from superglm.diagnostics.separation import (
     scan_categorical_term,
     scan_interaction_term,
 )
-from superglm.distributional.family import DistributionalFamily, ResponseBoundaryFamily
+from superglm.distributional.family import (
+    CensoredSeparationFamily,
+    DistributionalFamily,
+    ParameterSpec,
+    ResponseBoundaryFamily,
+)
+from superglm.distributional.observation import LEFT_CENSORED, RIGHT_CENSORED, ResponseBounds
 from superglm.distributional.predictor import CompiledPredictor
-from superglm.links import Link
+from superglm.features.categorical import Categorical
+from superglm.features.interaction import CategoricalInteraction
+from superglm.features.ordered_categorical import resolve_interaction_parent_of
+from superglm.links import (
+    CauchitLink,
+    CloglogLink,
+    IdentityLink,
+    Link,
+    LogitLink,
+    LogLink,
+    ProbitLink,
+    resolve_link,
+)
+
+# Inverse links that map the whole line strictly monotonically onto an open
+# interval, so a parameter reaches an end of its range only as its linear
+# predictor walks off.  A link whose range is closed or clamped at an end,
+# such as sqrt (eta**2 >= 0) or a clamped power, reaches the end at a finite
+# coefficient.
+_OPEN_MONOTONE_LINKS = (IdentityLink, LogLink, LogitLink, ProbitLink, CloglogLink, CauchitLink)
 
 SeparationPolicy = Literal["warn", "error", "ignore"]
 SEPARATION_POLICIES: tuple[str, ...] = ("warn", "error", "ignore")
@@ -187,16 +216,187 @@ def record_factor_smooth_levels(
         share_group_levels(interactions[key] for key in predictor.compiled.interaction_order)
 
 
+def _without(findings: list[SeparatedTerm], pinned: object) -> list[SeparatedTerm]:
+    """``findings`` less the ``pinned`` label; a term left with none is dropped."""
+    kept = [replace(f, labels=[label for label in f.labels if label != pinned]) for f in findings]
+    return [f for f in kept if f.labels]
+
+
+def _scan_design_cells(
+    design: CompiledPredictorDesign,
+    frame: EagerFrame,
+    off_side: NDArray,
+    weights: NDArray,
+    *,
+    intercept: bool,
+) -> list[SeparatedTerm]:
+    """The response-boundary scan of one design's categorical terms, with ``off_side`` as response.
+
+    The scan walks a reference level along the intercept, so without one the
+    reference level, and the cell of two reference levels, are pinned at the
+    offset and not reported.
+    """
+    findings: list[SeparatedTerm] = []
+    for name, spec in design.specs.items():
+        if not isinstance(spec, Categorical):
+            continue
+        found = scan_categorical_term(
+            name, spec, frame.column_array(name), off_side, weights, ("zero",)
+        )
+        findings.extend(found if intercept else _without(found, spec._base_level))
+    for name in design.interaction_order:
+        ispec = design.interaction_specs[name]
+        if not isinstance(ispec, CategoricalInteraction):
+            continue
+        p1, p2 = ispec.parent_names
+        spec1, x1 = resolve_interaction_parent_of(
+            ispec, design.specs.get(p1), frame.column_array(p1)
+        )
+        spec2, x2 = resolve_interaction_parent_of(
+            ispec, design.specs.get(p2), frame.column_array(p2)
+        )
+        found = scan_interaction_term(
+            name, spec1, spec2, x1, x2, p1, p2, off_side, weights, ("zero",)
+        )
+        pinned = (getattr(spec1, "_base_level", None), getattr(spec2, "_base_level", None))
+        findings.extend(found if intercept else _without(found, pinned))
+    return findings
+
+
+def _default_link_class(parameter: ParameterSpec) -> type:
+    default = parameter.default_link
+    return type(default if isinstance(default, Link) else resolve_link(default, cast(Any, None)))
+
+
+def censored_recession(
+    family: DistributionalFamily, bounds: ResponseBounds, compiled: Sequence[CompiledPredictor]
+) -> NDArray[np.bool_]:
+    """One flag per row and predictor; all false without a declaration.
+
+    A flag that is monotone in its parameter holds under a link that maps the
+    line strictly monotonically onto an open interval: the level's likelihood
+    is monotone in its coefficient, so its supremum is reached only as the
+    predictor walks off.  Such flags are read on the parameter's default link
+    class and on those links; a link that reaches an end of its range at a
+    finite coefficient, such as sqrt, leaves the level a finite estimate there.
+    A parameter the family names in ``censored_recession_link_sensitive`` has
+    flags that are not monotone; there a bounded link, such as a logit on a
+    scale, can stop short of the limit, so those flags are read only on the
+    parameter's default link class.
+    """
+    compiled_tuple = tuple(compiled)
+    shape = (bounds.n_rows, len(compiled_tuple))
+    if not isinstance(family, CensoredSeparationFamily):
+        return np.zeros(shape, dtype=bool)
+    flags = np.asarray(family.censored_recession(bounds))
+    if flags.shape != shape or flags.dtype != np.bool_:
+        raise ValueError("family.censored_recession must return one boolean per row and predictor")
+    parameters = tuple(family.parameters)
+    sensitive = getattr(family, "censored_recession_link_sensitive", ())
+    if isinstance(sensitive, str) or not set(sensitive) <= {p.name for p in parameters}:
+        raise ValueError(
+            f"{type(family).__name__}.censored_recession_link_sensitive must be a tuple of "
+            f"the family's parameter names, got {sensitive!r}"
+        )
+    readable = [
+        type(predictor.link) is _default_link_class(parameters[predictor.parameter_index])
+        or (
+            parameters[predictor.parameter_index].name not in sensitive
+            and type(predictor.link) in _OPEN_MONOTONE_LINKS
+        )
+        for predictor in compiled_tuple
+    ]
+    return flags & np.asarray(readable, dtype=bool)
+
+
+def scan_censored_separation(
+    compiled: Sequence[CompiledPredictor],
+    frame: EagerFrame,
+    bounds: ResponseBounds,
+    weights: NDArray,
+    *,
+    recession: NDArray[np.bool_],
+) -> list[SeparatedTerm]:
+    """Levels and crossed cells whose rows are all censored on one side and flagged.
+
+    The data bound such a cell's response from one side only, so on a
+    predictor along which each of its rows' bound probabilities nears its
+    supremum only at infinity (``recession``, per row and predictor) its
+    likelihood keeps rising as its effect walks off, as a cell on a response
+    boundary does.  The scan is the response-boundary scan on the indicator of
+    rows that are not both censored on that side and flagged.  When every
+    weighted row is, a predictor's intercept is that level, holding every
+    row, and the predictor itself is reported in place of its cells.
+    """
+    findings: list[SeparatedTerm] = []
+    weighted = np.asarray(weights) > 0
+    for value, label in ((RIGHT_CENSORED, "right-censored"), (LEFT_CENSORED, "left-censored")):
+        censored = bounds.side == value
+        for index, predictor in enumerate(compiled):
+            on_side = censored & recession[:, index]
+            if not np.any(on_side):
+                continue
+            if predictor.intercept and np.all(on_side[weighted]):
+                findings.append(SeparatedTerm(predictor.name, "intercept", label, ["intercept"], 1))
+                continue
+            findings.extend(
+                replace(finding, term=f"{predictor.name}:{finding.term}", boundary=label)
+                for finding in _scan_design_cells(
+                    predictor.compiled,
+                    frame,
+                    np.where(on_side, 0.0, 1.0),
+                    weights,
+                    intercept=predictor.intercept,
+                )
+            )
+    return findings
+
+
+def format_censored_separation_message(findings: list[SeparatedTerm]) -> str:
+    """One actionable message naming every cell whose rows are all censored on one side."""
+    n_total = sum(len(f.labels) for f in findings)
+    what = (
+        "categorical cell(s) or intercept(s)"
+        if any(f.kind == "intercept" for f in findings)
+        else "categorical cell(s)"
+    )
+    lines = [
+        f"Censoring separation: {n_total} {what} have rows censored on one side "
+        "only, so the data bound their response from that side and their maximum-likelihood "
+        "effects on the predictors named below run to infinity. The fit stops at an arbitrary "
+        "value for them, and their predictions are not estimates."
+    ]
+    for f in findings:
+        if f.kind == "intercept":
+            lines.append(
+                f"  {f.term!r}: every row is {f.boundary}, so its intercept has no finite estimate"
+            )
+            continue
+        unit = "occupied cells" if f.kind == "cells" else "occupied levels"
+        lines.append(
+            f"  {f.term!r}: {len(f.labels)} of {f.n_occupied} {unit} have only {f.boundary} "
+            f"rows: {_format_labels(f.labels)}"
+        )
+    lines.append(
+        "Remedies: collapse the affected levels into neighbours "
+        "(collapse_levels / Categorical(grouping=...)), model the factor with RandomEffect "
+        "(its ridge bounds every level), or add rows whose response was observed. Pass "
+        "separation='error' to refuse such designs, or separation='ignore' to disable this check."
+    )
+    return "\n".join(lines)
+
+
 def apply_separation_policy(
     findings: Sequence[SeparatedTerm],
     policy: SeparationPolicy,
     *,
     stacklevel: int,
+    formatter: Callable[[list[SeparatedTerm]], str] = format_separation_message,
 ) -> None:
     """Warn, refuse, or do nothing, exactly as the scalar builder does."""
     if not findings or policy == "ignore":
         return
-    message = format_separation_message(list(findings))
+    message = formatter(list(findings))
     if policy == "error":
         raise SeparationError(message)
     warnings.warn(message, SeparationWarning, stacklevel=stacklevel)
@@ -206,8 +406,11 @@ __all__ = [
     "SEPARATION_POLICIES",
     "SeparationPolicy",
     "apply_separation_policy",
+    "censored_recession",
+    "format_censored_separation_message",
     "predictor_response_boundaries",
     "record_factor_smooth_levels",
+    "scan_censored_separation",
     "scan_predictor_separation",
     "validate_separation_policy",
 ]

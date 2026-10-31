@@ -22,11 +22,14 @@ from superglm.diagnostics.convergence import (
 )
 from superglm.distributional.families.gaussian import GaussianLikelihoodPlan, GaussianLS
 from superglm.distributional.family import (
+    COMPLETE_OBSERVATION,
     DistributionalFamily,
     FamilyLikelihoodPlan,
     FitFailureDiagnosingFamily,
     LimitRowDisclosingFamily,
+    ObservationContract,
     WallDisclosingFamily,
+    plan_observation,
 )
 from superglm.distributional.inference import JointInference, compute_joint_inference
 from superglm.distributional.layout import StackedLayout
@@ -126,6 +129,8 @@ class DistributionalRowState:
     fitted_parameters: NDArray[np.float64]
     null_eta: NDArray[np.float64]
     null_parameters: NDArray[np.float64]
+    # The class default reads a pickle from before response bounds as complete.
+    observation: ObservationContract = COMPLETE_OBSERVATION
 
     def __post_init__(self) -> None:
         response = _readonly(self.response, name="response")
@@ -171,6 +176,10 @@ class DistributionalRowState:
             offsets[name] = offset
         if len(offsets) != fitted_eta.shape[1]:
             raise ValueError("one retained offset is required per fitted parameter")
+        if not isinstance(self.observation, ObservationContract) or (
+            self.observation.bounds is not None and self.observation.bounds.n_rows != n_observations
+        ):
+            raise ValueError("retained response bounds must match the response row count")
         object.__setattr__(self, "response", response)
         object.__setattr__(self, "offsets", MappingProxyType(offsets))
         object.__setattr__(self, "fitted_eta", fitted_eta)
@@ -294,6 +303,9 @@ class DistributionalFitState:
     result: DistributionalFitResult
     retained_rows: DistributionalRowState | None
     exact_face_components: tuple[str, ...] = ()
+    # Rows read as truncated and as censored; class defaults read older pickles.
+    truncated_row_count: int = 0
+    censored_row_count: int = 0
 
     @property
     def requested_solver_config(self) -> DenseSolverConfig:
@@ -821,7 +833,9 @@ def prepare_distributional_fit_state(
             fitted_parameters=solver_result.theta,
             null_eta=null.result.eta,
             null_parameters=null.result.theta,
+            observation=plan_observation(likelihood_plan),
         )
+    bounds = plan_observation(likelihood_plan).bounds
     return DistributionalFitState(
         revision=revision,
         weight_contract=likelihood_plan.weights.provenance.contract,
@@ -841,6 +855,8 @@ def prepare_distributional_fit_state(
         result=result,
         retained_rows=rows,
         exact_face_components=exact_face_components,
+        truncated_row_count=0 if bounds is None else len(bounds.truncated_rows()),
+        censored_row_count=0 if bounds is None else len(bounds.censored_rows()),
     )
 
 

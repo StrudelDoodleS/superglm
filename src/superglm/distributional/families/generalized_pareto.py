@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import warnings
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -30,6 +31,14 @@ from superglm.distributional.families._predictors import (
     ScalePredictor,
     ShapePredictor,
 )
+from superglm.distributional.families._response_bounds import (
+    ResponseBounds,
+    TailChannels,
+    bind_observation,
+    bounded_channels,
+    log_window_values,
+    refuse_bounded,
+)
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
     FamilyCapabilities,
@@ -46,6 +55,7 @@ from superglm.distributional.kernels.generalized_pareto import (
     GeneralizedParetoDomainError as GeneralizedParetoDomainError,
 )
 from superglm.distributional.kernels.generalized_pareto import (
+    GeneralizedParetoInitializationWarning,
     expected_information,
     generalized_pareto_cdf,
     generalized_pareto_expected_shortfall,
@@ -55,6 +65,7 @@ from superglm.distributional.kernels.generalized_pareto import (
     scale_fourth,
     scale_hessian_direction,
     scale_rows,
+    window_rows,
 )
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
@@ -73,6 +84,7 @@ _CAPABILITIES = FamilyCapabilities(
     quantile=True,
     random=False,
     response_mean=True,
+    censored_response=True,
 )
 
 
@@ -136,6 +148,7 @@ class GeneralizedParetoLikelihoodPlan:
                 self.weights.digest,
                 self.response_digest,
                 self.carrier_digest,
+                *(() if self.observation.bounds is None else (self.observation.bounds.digest,)),
             )
         ).encode("utf-8")
         return f"GeneralizedParetoLSS/v1:{hashlib.sha256(payload).hexdigest()}"
@@ -145,7 +158,7 @@ class GeneralizedParetoLikelihoodPlan:
             weights=self.weights.take(indices),
             row_law=self.row_law,
             family_config=self.family_config,
-            observation=self.observation,
+            observation=self.observation.take(indices),
             exact_response=self.exact_response[indices],
             carrier=self.parameter_independent_carrier[indices],
         )
@@ -227,6 +240,23 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     def capabilities(self) -> FamilyCapabilities:
         return _CAPABILITIES
 
+    def censored_recession(self, bounds: ResponseBounds) -> NDArray[np.bool_]:
+        """Every censored row escapes along the scale; one with no upper
+        truncation also escapes along the shape.
+
+        At a fixed shape ``d^2 log f/(dy dpsi) = (1 + xi)/(psi + xi y)^2 > 0``, a
+        monotone likelihood ratio in ``psi``, so within any truncation window
+        ``P(Y > c)`` rises and ``P(Y <= c)`` falls strictly with ``psi``.
+        ``log S(c) = -log1p(xi c/psi)/xi`` rises with ``xi`` (``t^2 D(z) > 0``),
+        and so does ``S(c)/S(a)`` above a lower truncation bound ``a``: its
+        ``xi`` derivative is ``(L - (u - v))/xi^2 >= 0`` with ``u, v`` the
+        ``xi y/(psi + xi y)`` of ``c, a`` and ``L = log((1 - v)/(1 - u))``.  The
+        shape walks to its wall.  An upper truncation bound ``b`` breaks this
+        for the shape: ``(S(c) - S(b))/(1 - S(b))`` can peak at an interior shape.
+        """
+        censored = bounds.side != 0
+        return np.column_stack((censored, censored & ~np.isfinite(bounds.upper)))
+
     def to_config(self) -> dict[str, Any]:
         return {
             "type": "GeneralizedParetoLSS",
@@ -244,10 +274,9 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
 
     def bind_likelihood(self, y, weights, observation) -> GeneralizedParetoLikelihoodPlan:
         response = _validated_response(y)
-        if observation != COMPLETE_OBSERVATION:
-            raise UnsupportedLikelihoodContractError(
-                "GeneralizedParetoLSS supports only the complete-observation contract"
-            )
+        observation = bind_observation(
+            observation, response, weights, support_lower=0.0, family_name="GeneralizedParetoLSS"
+        )
         if not isinstance(weights, ResolvedLikelihoodWeights):
             raise UnsupportedLikelihoodContractError(
                 "GeneralizedParetoLSS requires resolved likelihood weights"
@@ -298,7 +327,10 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     def validate_likelihood_plan(self, y, plan) -> NDArray[np.float64]:
         response = _validated_response(y)
         candidate = self._plan(plan, len(response))
-        if candidate.observation != COMPLETE_OBSERVATION:
+        observation = candidate.observation
+        if observation != COMPLETE_OBSERVATION and (
+            observation.bounds is None or observation.bounds.n_rows != len(response)
+        ):
             raise UnsupportedLikelihoodContractError(
                 "GeneralizedParetoLSS likelihood has an unsupported observation contract"
             )
@@ -322,12 +354,17 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     def initialize(self, y, plan) -> InitialParameterState:
         response = _validated_response(y)
         bound = self._plan(plan, len(response))
-        theta = initialize_generalized_pareto(
-            response,
-            bound.multiplier,
-            shape_lower=self.shape_lower,
-            shape_upper=self.shape_upper,
-        )
+        with warnings.catch_warnings():
+            if not bound.observation.is_complete:
+                # Moments of capped or truncated responses miss the tail, so a
+                # start outside the shape walls is expected and not a finding.
+                warnings.simplefilter("ignore", GeneralizedParetoInitializationWarning)
+            theta = initialize_generalized_pareto(
+                response,
+                bound.multiplier,
+                shape_lower=self.shape_lower,
+                shape_upper=self.shape_upper,
+            )
         return InitialParameterState(theta=theta)
 
     def _theta(self, theta, n_observations):
@@ -348,12 +385,41 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         evaluated = scale_rows(
             response, values[:, 0], values[:, 1], bound.multiplier, derivative_order=order
         )
+        optimizing, score, hessian, valid = (
+            evaluated.optimizing_log_likelihood,
+            evaluated.score,
+            evaluated.hessian_packed,
+            evaluated.valid,
+        )
+        bounds = bound.observation.bounds
+        if bounds is not None:
+
+            def window(lower: NDArray, upper: NDArray, selected: NDArray) -> TailChannels:
+                return window_rows(
+                    lower,
+                    upper,
+                    values[selected, 0],
+                    values[selected, 1],
+                    derivative_order=order,
+                )
+
+            optimizing, score, hessian, valid = bounded_channels(
+                optimizing,
+                score,
+                hessian,
+                valid,
+                response=response,
+                bounds=bounds,
+                multiplier=bound.multiplier,
+                window=window,
+                derivative_order=order,
+            )
         return NaturalLikelihoodEvaluation(
-            optimizing_log_likelihood=evaluated.optimizing_log_likelihood,
+            optimizing_log_likelihood=optimizing,
             parameter_independent_carrier=bound.parameter_independent_carrier,
-            score=evaluated.score,
-            hessian_packed=evaluated.hessian_packed,
-            valid=evaluated.valid,
+            score=score,
+            hessian_packed=hessian,
+            valid=valid,
         )
 
     def predictor_curvature_directional_derivative(
@@ -363,6 +429,7 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
 
         response = _validated_response(y)
         bound = self._plan(plan, len(response))
+        refuse_bounded(bound.observation, "GeneralizedParetoLSS analytic curvature derivatives")
 
         def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
             return scale_hessian_direction(
@@ -380,6 +447,7 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
 
         response = _validated_response(y)
         bound = self._plan(plan, len(response))
+        refuse_bounded(bound.observation, "GeneralizedParetoLSS analytic curvature derivatives")
 
         def natural_derivatives(theta: NDArray, natural_a: NDArray, natural_b: NDArray):
             third = natural_third_from_direction(
@@ -399,6 +467,7 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     def expected_information_natural(self, theta, plan) -> NDArray[np.float64]:
         values = self._theta(theta, None)
         bound = self._plan(plan, len(values))
+        refuse_bounded(bound.observation, "GeneralizedParetoLSS expected information")
         return expected_information(values[:, 0], values[:, 1], bound.multiplier)
 
     def default_prediction(self, theta) -> NDArray[np.float64]:
@@ -509,6 +578,20 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         if np.any(~np.isfinite(result[finite]) | (result[finite] <= 0.0)):
             raise GeneralizedParetoDomainError(refusal)
         return readonly(result)
+
+    def log_window_probability(self, lower, upper, theta, weights=None) -> NDArray[np.float64]:
+        """``log P(lower < Y <= upper)`` under each row's law, from its log survival function."""
+        if weights is not None and not np.all(np.asarray(weights, dtype=np.float64) == 1.0):
+            raise UnsupportedLikelihoodContractError(
+                "GeneralizedParetoLSS has no prior-weighted row law, so its window probability takes no "
+                "non-unit prior weights"
+            )
+        values = self._theta(theta, None)
+
+        def window(lo: NDArray, hi: NDArray, rows: NDArray) -> TailChannels:
+            return window_rows(lo, hi, values[rows, 0], values[rows, 1], derivative_order=0)
+
+        return readonly(log_window_values(lower, upper, len(values), window, support_lower=0.0))
 
     def cdf(self, y, theta) -> NDArray[np.float64]:
         values = self._theta(theta, None)

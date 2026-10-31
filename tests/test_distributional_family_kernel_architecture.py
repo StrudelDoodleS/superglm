@@ -101,8 +101,9 @@ def test_kernels_import_no_distributional_module_or_contract() -> None:
     chain = {"kernels._curvature_direction", "kernels._fourth_generated"}
     allowed = {
         "_weighted.py": {"kernels.gamma"},
+        "_response_tails.py": {"kernels._common"},
         "_tweedie_numba.py": {"kernels._fourth_generated"},
-        "gaussian.py": {"kernels._common", "kernels._weighted", *chain},
+        "gaussian.py": {"kernels._common", "kernels._weighted", "kernels._response_tails", *chain},
         "gamma.py": {"kernels._common", *chain},
         "generalized_gamma.py": {
             "kernels._common",
@@ -110,8 +111,18 @@ def test_kernels_import_no_distributional_module_or_contract() -> None:
             "kernels.log_normal",
             *chain,
         },
-        "generalized_pareto.py": {"kernels._common", "kernels._weighted", *chain},
-        "log_normal.py": {"kernels._common", "kernels.gaussian", *chain},
+        "generalized_pareto.py": {
+            "kernels._common",
+            "kernels._weighted",
+            "kernels._response_tails",
+            *chain,
+        },
+        "log_normal.py": {
+            "kernels._common",
+            "kernels.gaussian",
+            "kernels._response_tails",
+            *chain,
+        },
         "negative_binomial.py": {"kernels._common", "kernels._negative_binomial_numba", *chain},
         "two_piece.py": {"kernels._common", "kernels._weighted", *chain},
         "tweedie.py": {"kernels._tweedie_numba", "kernels._common"},
@@ -156,14 +167,22 @@ def test_kernels_share_their_primitive_helpers() -> None:
 
 def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
     allowed = {
-        ROOT / "family.py": {"weights"},
+        ROOT / "family.py": {"weights", "observation"},
+        ROOT / "observation.py": set(),
         ROOT / "weights.py": set(),
         ROOT / "likelihood_identity.py": set(),
         ADAPTERS / "_base.py": {"weights", "kernels._curvature_direction"},
+        ADAPTERS / "_response_bounds.py": {
+            "family",
+            "observation",
+            "weights",
+            "kernels._response_tails",
+        },
         ADAPTERS / "_predictors.py": {"binding", "family"},
         ROOT / "binding.py": {"family", "predictor"},
         ADAPTERS / "gaussian.py": {
             "family",
+            "families._response_bounds",
             "weights",
             "likelihood_identity",
             "kernels.gaussian",
@@ -207,6 +226,7 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
         },
         ADAPTERS / "generalized_pareto.py": {
             "family",
+            "families._response_bounds",
             "weights",
             "kernels.generalized_pareto",
             "families._base",
@@ -225,6 +245,7 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
         },
         ADAPTERS / "log_normal.py": {
             "family",
+            "families._response_bounds",
             "weights",
             "likelihood_identity",
             "kernels.log_normal",

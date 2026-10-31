@@ -550,9 +550,10 @@ joint covariance is the dependency; neither C1 nor a general AD engine is needed
   neither guarantees the other pays. No core replacement without workload evidence.
 - **Transformation models and non-crossing quantiles (C6/C7):** first demonstrate
   persistent family misspecification. Monotonicity and a response-dependent design
-  need their own contracts; the current observation contract supports complete
-  observations only. Censoring/truncation needs an extension. Inverting a fitted
-  CDF does not reproduce calibrated quantile-loss regression automatically.
+  need their own contracts. The observation contract carries per-row truncation and
+  censoring bounds (issue 544) for the Gaussian, log-normal and generalized Pareto
+  families; the gamma families need incomplete-gamma shape derivatives first. Inverting
+  a fitted CDF does not reproduce calibrated quantile-loss regression automatically.
 - **Dependence-aware validation/NCV:** assess when ordinary held-out validation
   misrepresents the intended book. The dossier calls NCV already road-mapped, but
   the repository has no public NCV implementation; it is not an assumed prerequisite.

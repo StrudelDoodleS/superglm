@@ -19,6 +19,7 @@ from superglm.distributional.family import (
     WallDisclosingFamily,
     _likelihood_reuse_contract,
     _prepared_field_modes,
+    expected_information_provider,
 )
 from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.layout import StackedLayout
@@ -601,8 +602,13 @@ def _validated_context(
 ) -> _SolverContext:
     if not isinstance(family, DistributionalFamily):
         raise TypeError("family must implement DistributionalFamily")
-    fisher_family = family if isinstance(family, ExpectedInformationFamily) else None
+    fisher_family = expected_information_provider(family, likelihood_plan)
     if coefficient_curvature == "fisher" and fisher_family is None:
+        if isinstance(family, ExpectedInformationFamily):
+            raise ValueError(
+                "coefficient_curvature='fisher' uses complete-row expected information, which "
+                "truncated or censored rows do not have; use coefficient_curvature='observed'"
+            )
         raise ValueError("Fisher coefficient curvature requires expected information capability")
     if not isinstance(layout, StackedLayout) or layout.n_coefficients < 1:
         raise ValueError("layout must contain at least one global coefficient")

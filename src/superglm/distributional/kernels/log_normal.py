@@ -35,6 +35,7 @@ from scipy import special
 
 from superglm._roundoff import EPS as _EPS
 from superglm.distributional.kernels._common import readonly, readonly_bool
+from superglm.distributional.kernels._response_tails import TailChannels, normal_window_channels
 from superglm.distributional.kernels.gaussian import (
     evaluate_gaussian_rows,
     gaussian_expected_information,
@@ -310,29 +311,103 @@ def mean_rows(
         multiplier,
         derivative_order=derivative_order,
     )
-    score = None
-    hessian = None
-    if base.score is not None:
-        s_mu, s_sigma = base.score[:, 0], base.score[:, 1]
-        score = np.column_stack((s_mu / first, s_sigma - s_mu * c_sigma))
-        if base.hessian_packed is not None:
-            h_mumu, h_musigma, h_sigmasigma = (base.hessian_packed[:, i] for i in range(3))
-            hessian = np.column_stack(
-                (
-                    (h_mumu - s_mu) / (first * first),
-                    (h_musigma - h_mumu * c_sigma) / first,
-                    h_sigmasigma
-                    - 2.0 * h_musigma * c_sigma
-                    + h_mumu * c_sigma * c_sigma
-                    - s_mu * c_sigma_2,
-                )
-            )
+    score, hessian = _mean_form(base.score, base.hessian_packed, first, c_sigma, c_sigma_2)
     return LogNormalKernelEvaluation(
         optimizing_log_likelihood=base.optimizing_log_likelihood,
         score=score,
         hessian_packed=hessian,
         valid=base.valid,
     )
+
+
+def _mean_form(
+    score: NDArray | None,
+    hessian: NDArray | None,
+    first: NDArray,
+    c_sigma: NDArray,
+    c_sigma_2: NDArray,
+) -> tuple[NDArray | None, NDArray | None]:
+    """Chain ``(mu, sigma)`` score and packed Hessian to ``(m, sigma)``."""
+    if score is None:
+        return None, None
+    s_mu, s_sigma = score[:, 0], score[:, 1]
+    mean_score = np.column_stack((s_mu / first, s_sigma - s_mu * c_sigma))
+    if hessian is None:
+        return mean_score, None
+    h_mumu, h_musigma, h_sigmasigma = (hessian[:, i] for i in range(3))
+    mean_hessian = np.column_stack(
+        (
+            (h_mumu - s_mu) / (first * first),
+            (h_musigma - h_mumu * c_sigma) / first,
+            h_sigmasigma
+            - 2.0 * h_musigma * c_sigma
+            + h_mumu * c_sigma * c_sigma
+            - s_mu * c_sigma_2,
+        )
+    )
+    return mean_score, mean_hessian
+
+
+def location_window(
+    lower: NDArray,
+    upper: NDArray,
+    mu: NDArray,
+    sigma: NDArray,
+    *,
+    derivative_order: int,
+) -> TailChannels:
+    """``log P(lower < Y <= upper)`` and its derivatives in ``(mu, sigma)``, unit mass.
+
+    The normal window on ``log Y``; a lower end at or below zero is the
+    support's start and ``upper = +inf`` an open window.
+    """
+    lo = np.asarray(lower, dtype=_FLOAT)
+    hi = np.asarray(upper, dtype=_FLOAT)
+    with np.errstate(divide="ignore"):
+        log_lower = np.log(np.maximum(lo, 0.0))
+        log_upper = np.log(hi)
+    # The log-scale width of a two-sided window: log1p of the relative width
+    # where log(upper) - log(lower) would cancel, that difference where the
+    # ratio is large (or overflows); a one-sided window has none to keep.
+    width = None
+    two_sided = np.flatnonzero((lo > 0.0) & np.isfinite(hi))
+    if len(two_sided):
+        width = np.full(len(lo), np.inf)
+        with np.errstate(over="ignore"):
+            relative = (hi[two_sided] - lo[two_sided]) / lo[two_sided]
+        width[two_sided] = np.where(
+            relative <= 1.0,
+            np.log1p(np.minimum(relative, 1.0)),
+            log_upper[two_sided] - log_lower[two_sided],
+        )
+    return normal_window_channels(
+        log_lower,
+        log_upper,
+        mu,
+        sigma,
+        np.ones(len(np.asarray(mu))),
+        derivative_order=derivative_order,
+        width=width,
+    )
+
+
+def mean_window(
+    lower: NDArray,
+    upper: NDArray,
+    mean: NDArray,
+    sigma: NDArray,
+    *,
+    derivative_order: int,
+) -> TailChannels:
+    """The same window in ``(m, sigma)``, chained through ``mu = log m - sigma^2/2``."""
+    first = _positive_vector(mean, name="mean")
+    scale = _positive_vector(sigma, name="sigma")
+    _, c_sigma, c_sigma_2 = log_mean_loading(scale)
+    value, score, hessian = location_window(
+        lower, upper, location_of_mean(first, scale), scale, derivative_order=derivative_order
+    )
+    score, hessian = _mean_form(score, hessian, first, c_sigma, c_sigma_2)
+    return value, score, hessian
 
 
 def _predictor_arrays(
@@ -539,6 +614,7 @@ __all__ = [
     "location_expected_information",
     "location_of_mean",
     "location_rows",
+    "location_window",
     "log_mean_loading",
     "log_normal_cdf",
     "log_normal_expected_shortfall",
@@ -548,5 +624,6 @@ __all__ = [
     "mean_expected_information",
     "mean_of_location",
     "mean_rows",
+    "mean_window",
     "predictor_fourth_derivatives",
 ]

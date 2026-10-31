@@ -1,8 +1,8 @@
 """Primitive row numerics for the generalized Pareto distribution of excesses.
 
 Coordinates: ``(psi, xi)`` = (scale, shape), response the excess ``y >= 0`` over
-a threshold chosen outside the family (the splice recipe lives in
-``docs/how-to/fit-a-distributional-model.md``):
+a threshold chosen outside the family (the large-loss body-plus-tail recipe
+lives in ``docs/how-to/fit-a-distributional-model.md``):
 
     log f = -log psi - (1 + 1/xi) log1p(xi y / psi)
 
@@ -37,6 +37,13 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributional.kernels._common import readonly, readonly_bool
+from superglm.distributional.kernels._response_tails import (
+    NARROW_WINDOW,
+    TailChannels,
+    absent_tail,
+    log_window_channels,
+    quadrature_window_channels,
+)
 from superglm.distributional.kernels._weighted import weighted_natural_channel
 
 _FLOAT = np.float64
@@ -271,6 +278,143 @@ def scale_rows(
         None if hessian is None else readonly(hessian),
         readonly_bool(inside),
     )
+
+
+def log_survival_rows(
+    points: NDArray,
+    scale: NDArray,
+    shape: NDArray,
+    *,
+    derivative_order: int,
+) -> TailChannels:
+    """``log S(c) = -log1p(xi c/psi)/xi`` with its score and packed Hessian in ``(psi, xi)``.
+
+    Unit mass, for finite ``c >= 0`` (``log S(0) = 0``).  It is the density's
+    ``-t L1(z)`` term, so the channels are the density's less those of
+    ``-log psi - log1p(z)``::
+
+        log S    = -t L1(z)
+        s_psi    = t/(psi s),           s_xi    = t^2 D(z)
+        H_psipsi = -t (2 + z)/(psi^2 s^2)
+        H_psixi  = -t^2/(psi s^2),      H_xixi  = t^3 E(z)
+
+    and in the positive-shape tail, with the bounded ratios of
+    :func:`scale_rows` (``L = log1p(z)``, ``v = t/s``, ``a = 1/s``, ``u = xi v``),
+    ``s_psi = v/psi``, ``s_xi = (L - u)/xi^2``, ``H_psipsi = -v (1 + a)/psi^2``,
+    ``H_psixi = -v^2/psi`` and ``H_xixi = (u^2 + 2u - 2L)/xi^3``.
+    """
+    c = _nonnegative_vector(points, name="points")
+    psi = _positive_vector(scale, name="scale")
+    xi = _vector(shape, name="shape")
+    _matching(c, psi, xi)
+    with np.errstate(over="ignore", invalid="ignore"):
+        t = c / psi
+        z = xi * t
+    positive_tail = (xi > 0.0) & (z >= _Z_SERIES_RADIUS)
+    ordinary = ~positive_tail
+    n = len(c)
+    value = np.zeros(n, dtype=_FLOAT)
+    score = np.zeros((n, 2), dtype=_FLOAT) if derivative_order >= 1 else None
+    hessian = np.zeros((n, 3), dtype=_FLOAT) if derivative_order == 2 else None
+    if np.any(ordinary):
+        ti, zi, pi = t[ordinary], z[ordinary], psi[ordinary]
+        si = 1.0 + zi
+        l1, d, e = _series_l1_d_e(zi)
+        value[ordinary] = -ti * l1
+        if score is not None:
+            score[ordinary, 0] = ti / (pi * si)
+            score[ordinary, 1] = ti * ti * d
+        if hessian is not None:
+            s2 = si * si
+            hessian[ordinary, 0] = -ti * (2.0 + zi) / (pi * pi * s2)
+            hessian[ordinary, 1] = -ti * ti / (pi * s2)
+            hessian[ordinary, 2] = ti**3 * e
+    if np.any(positive_tail):
+        ci, pi, xi_i = c[positive_tail], psi[positive_tail], xi[positive_tail]
+        inverse_t = pi / ci
+        zi = z[positive_tail]
+        log_support = np.log1p(zi)
+        overflowed = ~np.isfinite(zi)
+        if np.any(overflowed):
+            log_support[overflowed] = (
+                np.log(xi_i[overflowed])
+                + np.log(ci[overflowed])
+                - np.log(pi[overflowed])
+                + np.log1p(inverse_t[overflowed] / xi_i[overflowed])
+            )
+        v = 1.0 / (xi_i + inverse_t)
+        a = inverse_t * v
+        u = xi_i * v
+        value[positive_tail] = -log_support / xi_i
+        if score is not None:
+            score[positive_tail, 0] = v / pi
+            score[positive_tail, 1] = ((log_support - u) / xi_i) / xi_i
+        if hessian is not None:
+            hessian[positive_tail, 0] = (-v * (1.0 + a) / pi) / pi
+            hessian[positive_tail, 1] = -v * v / pi
+            hessian[positive_tail, 2] = (
+                ((u * u + 2.0 * u - 2.0 * log_support) / xi_i) / xi_i
+            ) / xi_i
+    return value, score, hessian
+
+
+def window_rows(
+    lower: NDArray,
+    upper: NDArray,
+    scale: NDArray,
+    shape: NDArray,
+    *,
+    derivative_order: int,
+) -> TailChannels:
+    """``log P(lower < Y <= upper) = log(S(lower) - S(upper))`` per row, unit mass.
+
+    ``lower`` at or below zero means the support's start (``S = 1``) and
+    ``upper = +inf`` an open window.  Both ends come from the survival
+    function, which no window on ``y >= 0`` rounds to one at its far end.
+    The log density varies on the scale ``(psi + xi y)/(1 + |xi|)``; a window
+    at most :data:`NARROW_WINDOW` of that scale wide at its steeper end is
+    integrated by quadrature instead.
+    """
+    lo = np.maximum(np.asarray(lower, dtype=_FLOAT), 0.0)
+    hi = np.asarray(upper, dtype=_FLOAT)
+    psi = np.asarray(scale, dtype=_FLOAT)
+    xi = np.asarray(shape, dtype=_FLOAT)
+    near = log_survival_rows(lo, psi, xi, derivative_order=derivative_order)
+    far = absent_tail(len(psi), 2, derivative_order=derivative_order)
+    present = np.isfinite(hi)
+    if np.any(present):
+        channels = log_survival_rows(
+            hi[present], psi[present], xi[present], derivative_order=derivative_order
+        )
+        for target, source in zip(far, channels, strict=True):
+            if target is not None and source is not None:
+                target[present] = source
+    window = log_window_channels(near, far, derivative_order=derivative_order)
+    span = hi - lo
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        support = psi + xi * np.where(xi < 0.0, hi, lo)
+        reach = span * (1.0 + np.abs(xi)) / support
+    rows = np.flatnonzero((support > 0.0) & (reach <= NARROW_WINDOW))
+    if len(rows) == 0:
+        return window
+
+    def log_density(fraction: float) -> TailChannels:
+        evaluation = scale_rows(
+            lo[rows] + fraction * span[rows],
+            psi[rows],
+            xi[rows],
+            np.ones(len(rows)),
+            derivative_order=derivative_order,
+        )
+        return evaluation.optimizing_log_likelihood, evaluation.score, evaluation.hessian_packed
+
+    quadrature = quadrature_window_channels(
+        0.5 * span[rows], log_density, derivative_order=derivative_order
+    )
+    for target, source in zip(window, quadrature, strict=True):
+        if target is not None and source is not None:
+            target[rows] = source
+    return window
 
 
 def series_f(z: NDArray) -> NDArray[np.float64]:

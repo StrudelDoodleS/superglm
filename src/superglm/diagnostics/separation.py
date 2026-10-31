@@ -65,7 +65,7 @@ class SeparatedTerm:
     """Separated cells found in one categorical or crossed-categorical term."""
 
     term: str
-    kind: str  # "levels" (main effect) or "cells" (crossed)
+    kind: str  # "levels" (main effect), "cells" (crossed) or "intercept"
     boundary: str  # "zero" or "one"
     labels: list[Any]  # level names, or (level1, level2) pairs
     n_occupied: int  # occupied levels/cells scanned in this term

@@ -150,3 +150,13 @@ def test_custom_family_fit_predicts() -> None:
     model, frame, response = _fitted_four_parameter_model()
     parameters = model.predict_parameters(frame).to_numpy()
     np.testing.assert_allclose(parameters[:, 0], np.mean(response), rtol=0.0, atol=1.0e-8)
+
+
+def test_bounds_on_a_family_without_capabilities_are_refused_plainly() -> None:
+    frame = pd.DataFrame({"row": np.linspace(-1.0, 1.0, 12)})
+    model = model_from_templates(
+        family=_FourParameterFamily(),
+        predictors=tuple(Predictor(name, {}) for name in ("a", "b", "c", "d")),
+    )
+    with pytest.raises(UnsupportedLikelihoodContractError, match="does not fit truncated"):
+        model.fit(frame, np.linspace(-0.8, 1.2, 12), lambdas={}, truncation=(None, 2.0))

@@ -42,7 +42,6 @@ from superglm.diagnostics.convergence import (
 )
 from superglm.distributional._row_design import bounded_predictor_matrices
 from superglm.distributional.family import (
-    COMPLETE_OBSERVATION,
     DefaultPredictionFamily,
     DistributionFunctionFamily,
     ExpectedShortfallFamily,
@@ -410,7 +409,7 @@ def _replayed_smoothing_hessian(
         likelihood_plan = fitted.family.bind_likelihood(
             rows.response,
             weights,
-            COMPLETE_OBSERVATION,
+            rows.observation,
         )
         mismatch = rebound_plan_mismatch(
             likelihood_plan,

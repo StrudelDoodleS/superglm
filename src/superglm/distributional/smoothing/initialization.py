@@ -10,8 +10,8 @@ from numpy.typing import NDArray
 
 from superglm.distributional.family import (
     DistributionalFamily,
-    ExpectedInformationFamily,
     FamilyLikelihoodPlan,
+    expected_information_provider,
 )
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.result import DenseSolverConfig, DistributionalEFSConfig
@@ -132,11 +132,8 @@ def prepare_distributional_initialization(
         if (supplied is None or component.name not in supplied)
         and (component.lambda_policy is None or component.lambda_policy.mode != "fixed")
     }
-    if (
-        not automatic
-        or not isinstance(family, ExpectedInformationFamily)
-        or not getattr(family, "information_scaled_start", True)
-    ):
+    provider = expected_information_provider(family, likelihood_plan)
+    if not automatic or provider is None or not getattr(family, "information_scaled_start", True):
         return resolved, initial
     matrices = (
         reuse_session.dense_matrices(layout, phase_recorder=phase_recorder)
@@ -173,7 +170,7 @@ def prepare_distributional_initialization(
     for state in layout.predictors:
         theta[:, state.parameter_index] = state.link.inverse(eta[:, state.parameter_index])
     information = transform_natural_information(
-        family.expected_information_natural(theta, context.likelihood_plan), eta, context.links
+        provider.expected_information_natural(theta, context.likelihood_plan), eta, context.links
     )
     diagonal = {
         left: packed_index

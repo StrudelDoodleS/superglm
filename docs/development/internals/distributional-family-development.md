@@ -252,7 +252,39 @@ public family contracts, not import private kernel modules.
 This complete public-only example is the extensibility regression. It supplies
 four natural parameters and therefore ten packed Hessian channels, explicitly
 admits only the complete observation contract, and provides nonempty
-complete-fit configuration:
+complete-fit configuration. A family that also takes truncated and censored
+rows does the following; `GaussianLS` is the reference.
+
+- It declares `FamilyCapabilities(censored_response=True)` and binds the
+  `"censored_truncated"` contract, whose `bounds` are `ResponseBounds`.
+- It reads lower bounds at or below the start of its response support as
+  absent. A contract left with no bounded row binds as the complete one, so
+  `truncation=(0, None)` on a positive response is an ordinary fit.
+- Its plan exposes the bound contract as `plan.observation`, and its plan
+  identifier includes the bounds. The diagnostics, the corrected covariance
+  and the solver's curvature choice read `plan.observation`, and a fit with
+  bounds refuses a plan without it.
+- It refuses expected information and analytic third and fourth derivatives
+  for a bounded plan with `UnsupportedLikelihoodContractError`.
+- It supplies `log_window_probability(lower, upper, theta, weights=None)`
+  (`ResponseWindowFamily`), built from log tails rather than a difference of
+  CDF values. The residuals, the checks and the plots read bounded rows
+  through it, and refuse them from a family without it.
+- It may declare `censored_recession(bounds)` (`CensoredSeparationFamily`):
+  one flag per row and predictor, true where that censored row's bound
+  probability nears its supremum only as the predictor walks off one way. A
+  level whose rows are all censored on one side and all flagged is reported;
+  a family that declares nothing is not scanned. A flag that is monotone in
+  its parameter is read on the parameter's default link and on links that map
+  the line one-to-one onto an open interval (identity, log, logit, probit,
+  cloglog, cauchit); a link such as sqrt reaches an end of its range at a
+  finite coefficient and is not read. A parameter whose flags are not
+  monotone, such as the normal scale, where `P(Y > c | Y > a)` nears 1 both as
+  the scale grows and as it shrinks with the location above `c`, is named in
+  the class attribute `censored_recession_link_sensitive`, a tuple of
+  parameter names; its flags are then read only on the parameter's default
+  link, since a bounded link such as a logit can stop short of the limit and
+  leave the level a finite estimate.
 
 ```python
 from dataclasses import dataclass
