@@ -707,7 +707,7 @@ class _PlainBlock:
     """
 
     rank: int
-    constant: float | None = None
+    constant: float = 0.0
     roots: tuple[NDArray, ...] = ()
     volume: float = 0.0
     kronecker: tuple[NDArray, NDArray, bool] | None = None
@@ -748,7 +748,9 @@ def _map_volume(support, coordinate_map: NDArray | None) -> float:
     return volume
 
 
-def _kronecker_margins(support, raw: Sequence[NDArray]) -> tuple[NDArray, NDArray, bool] | None:
+def _kronecker_margins(
+    support, raw: Sequence[NDArray | None]
+) -> tuple[NDArray, NDArray, bool] | None:
     """The margins' retained eigenvalues when the two raw penalties are a Kronecker pair.
 
     Each margin keeps as many eigenvalues as its component's support root has
@@ -757,9 +759,12 @@ def _kronecker_margins(support, raw: Sequence[NDArray]) -> tuple[NDArray, NDArra
     """
     from superglm.reml.penalty_blocks import kronecker_split
 
-    if len(raw) != 2 or any(matrix is None for matrix in raw):
+    if len(raw) != 2:
         return None
-    split = kronecker_split(raw[0], raw[1])
+    first, second = raw
+    if first is None or second is None:
+        return None
+    split = kronecker_split(first, second)
     if split is None:
         return None
     p1, p2, left, right, swapped = split
@@ -781,7 +786,10 @@ def _kronecker_margins(support, raw: Sequence[NDArray]) -> tuple[NDArray, NDArra
 
 
 def _plain_multi_block(
-    support, coordinate_map: NDArray | None, raw: Sequence[NDArray] | None, previous=None
+    support,
+    coordinate_map: NDArray | None,
+    raw: Sequence[NDArray | None] | None,
+    previous=None,
 ) -> _PlainBlock:
     """A multi-penalty block on its support; map-independent pieces come from ``previous``."""
     if previous is not None:
@@ -2760,7 +2768,7 @@ def _plain_geometries(
     return found
 
 
-def _same_arrays(left: Sequence[NDArray], right: Sequence[NDArray]) -> bool:
+def _same_arrays(left: Sequence[NDArray | None], right: Sequence[NDArray | None]) -> bool:
     return len(left) == len(right) and all(
         a is b
         or (
