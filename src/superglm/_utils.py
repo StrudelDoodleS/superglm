@@ -43,6 +43,44 @@ def _validate_strict_prior_weights(weights, n: int) -> NDArray:
     return validated
 
 
+def contract_weights(
+    sample_weight,
+    n: int,
+    *,
+    family=None,
+    weight_semantics=None,
+    name: str = "sample_weight",
+    finite_sum: bool = False,
+) -> NDArray:
+    """Return ``sample_weight`` as float64 row weights under the weight contract.
+
+    ``None`` is unit weights. Strict positivity is a Tweedie density requirement
+    under the prior contract only: the compound-Poisson normalizer carries
+    ``log w``, so a zero prior weight is an unevaluable density. Read as a
+    replication count the weight never enters that normalizer, and zero means
+    what it means for every other family, a row that appears no times. Every
+    other weight is finite and nonnegative, with at least one positive.
+    ``finite_sum`` also requires the total to be finite.
+    """
+    from superglm.distributions import Tweedie
+    from superglm.model.input_validation import _finite_vector
+    from superglm.solvers.dispersion import PRIOR_WEIGHTS
+
+    if sample_weight is None:
+        weights = np.ones(n, dtype=np.float64)
+    elif isinstance(family, Tweedie) and weight_semantics == PRIOR_WEIGHTS:
+        weights = _validate_strict_prior_weights(sample_weight, n)
+    else:
+        weights = _finite_vector(name, sample_weight, n)
+        if np.any(weights < 0.0):
+            raise ValueError(f"{name} must be nonnegative")
+        if not np.any(weights > 0.0):
+            raise ValueError(f"{name} must not be all zero")
+    if finite_sum and not np.isfinite(np.sum(weights, dtype=np.float64)):
+        raise ValueError(f"{name} must have a finite sum")
+    return weights
+
+
 def weighted_row_sum(weights, row_term: Callable[..., NDArray], *rows) -> float:
     """Return ``sum(w * row_term(*rows))`` with each row of weight exactly 0 an exact 0.
 

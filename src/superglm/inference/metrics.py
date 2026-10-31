@@ -410,35 +410,15 @@ class ModelMetrics:
                 )
         self._uses_fit_rows = bool(same_fit_object and _fit_data_matches)
 
+        from superglm._utils import contract_weights
         from superglm.solvers.dispersion import model_weight_semantics
 
         self._weight_semantics = model_weight_semantics(model)
         self._y = np.asarray(y, dtype=np.float64)
         n = len(self._y)
-        if sample_weight is None:
-            self._weights = np.ones(n)
-        else:
-            from superglm.distributions import Tweedie
-
-            if isinstance(self._family, Tweedie) and self._weight_semantics == "prior":
-                from superglm._utils import _validate_strict_prior_weights
-
-                self._weights = _validate_strict_prior_weights(sample_weight, n)
-            else:
-                from superglm.model.input_validation import _finite_vector
-
-                self._weights = _finite_vector("sample_weight", sample_weight, n)
-                if np.any(self._weights < 0.0):
-                    raise ValueError("sample_weight must be nonnegative")
-                if not np.any(self._weights > 0.0):
-                    raise ValueError("sample_weight must not be all zero")
-            # Evaluation takes its OWN rows and weights, so the fit-time
-            # lattice check does not cover it: a clean fitted model can be
-            # scored on holdout rows whose `w * y` is not integral, and both
-            # the reported log-likelihood and the randomized quantile
-            # residuals would then be silently fabricated -- the residual
-            # rounds the impossible count onto a neighbouring lattice point
-            # and inverts the CDF there. Re-check at this boundary.
+        self._weights = contract_weights(
+            sample_weight, n, family=self._family, weight_semantics=self._weight_semantics
+        )
         self._offset = np.zeros(n) if offset is None else np.asarray(offset, dtype=np.float64)
         fit_offset = getattr(model, "_fit_offset", None)
         fit_offset_array = np.zeros(n) if fit_offset is None else np.asarray(fit_offset)
@@ -1265,34 +1245,7 @@ class ModelMetrics:
         penalized estimate. They do not account for model selection
         uncertainty (same convention as glmnet / mgcv).
         """
-        _, _, _, XtWX_inv_aug, active_groups = self._active_info
-        dispersion = self._coefficient_dispersion
-        selected_names = selected_group_name_set(
-            self._result,
-            self._groups,
-            penalty=fitted_penalty(self._model),
-        )
-
-        result: dict[str, NDArray] = {}
-        for g in self._groups:
-            if g.name not in selected_names:
-                result[g.name] = np.zeros(g.size)
-            else:
-                # Find corresponding active group
-                ag = next(ag for ag in active_groups if ag.name == g.name)
-                augmented_indices = np.arange(
-                    1 + ag.start,
-                    1 + ag.end,
-                    dtype=np.intp,
-                )
-                var_diag = dispersion * covariance_selected_diagonal(
-                    XtWX_inv_aug,
-                    augmented_indices,
-                )
-                values = np.sqrt(np.maximum(var_diag, 0.0))
-                values[~self._current_coefficient_estimable[g.sl]] = np.nan
-                result[g.name] = values
-        return result
+        return self._group_standard_errors(scaled=True)
 
     @cached_property
     def coefficient_se_raw(self) -> dict[str, NDArray]:
@@ -1306,7 +1259,12 @@ class ModelMetrics:
 
         Inactive groups get all-zero SEs.
         """
+        return self._group_standard_errors(scaled=False)
+
+    def _group_standard_errors(self, *, scaled: bool) -> dict[str, NDArray]:
+        """Per-group SEs of the augmented covariance, times the dispersion when ``scaled``."""
         _, _, _, XtWX_inv_aug, active_groups = self._active_info
+        dispersion = self._coefficient_dispersion if scaled else None
         selected_names = selected_group_name_set(
             self._result,
             self._groups,
@@ -1328,6 +1286,8 @@ class ModelMetrics:
                     XtWX_inv_aug,
                     augmented_indices,
                 )
+                if dispersion is not None:
+                    var_diag = dispersion * var_diag
                 values = np.sqrt(np.maximum(var_diag, 0.0))
                 values[~self._current_coefficient_estimable[g.sl]] = np.nan
                 result[g.name] = values

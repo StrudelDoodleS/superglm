@@ -8,7 +8,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.group_matrix import DesignMatrix
-from superglm.inference._metrics_design import MappedColumnFactor
+from superglm.inference._metrics_design import MappedColumnFactor, factor_from_gram
 from superglm.inference.covariance import (
     StructuredCovarianceAccessor,
     StructuredSlopeCovarianceAccessor,
@@ -522,9 +522,7 @@ def _structured_small_data_factor(operator: CenteredBlockOperator) -> MappedColu
         - np.outer(center, cross)
         + operator.total * np.outer(center, center)
     )
-    eigvals, eigvecs = np.linalg.eigh(0.5 * (data_gram + data_gram.T))
-    local_factor = (eigvecs * np.sqrt(np.maximum(eigvals, 0.0))).T
-    return MappedColumnFactor(local_factor, small_indices, operator.shape[0])
+    return MappedColumnFactor(factor_from_gram(data_gram), small_indices, operator.shape[0])
 
 
 def fit_inference_info(model):
@@ -578,9 +576,7 @@ def fit_inference_info(model):
         else:
             if data_gram is None:
                 data_gram = _rank_centered_data_gram(X_active, W)
-            eigvals, eigvecs = np.linalg.eigh(0.5 * (data_gram + data_gram.T))
-            eigvals = np.maximum(eigvals, 0.0)
-            R_a = (eigvecs * np.sqrt(eigvals)).T
+            R_a = factor_from_gram(data_gram)
         return {
             "W": W,
             "XtWX_inv": inverse,
@@ -647,9 +643,7 @@ def fit_inference_info(model):
             data_gram = _rank_centered_data_gram(X_active, W)
         edf = rank_info.feature_edf[rank_info.selected_columns].copy()
         edf1 = _rank_edf1(rank_info, data_gram, edf)
-        eigvals, eigvecs = np.linalg.eigh(0.5 * (data_gram + data_gram.T))
-        eigvals = np.maximum(eigvals, 0.0)
-        R_a = (eigvecs * np.sqrt(eigvals)).T
+        R_a = factor_from_gram(data_gram)
         return {
             "W": W,
             "XtWX_inv": inverse,
@@ -682,9 +676,7 @@ def fit_inference_info(model):
     edf = np.diag(F)
     edf1 = 2.0 * edf - diagonal_of_square(F)
 
-    eigvals, eigvecs = np.linalg.eigh(0.5 * (data_gram + data_gram.T))
-    eigvals = np.maximum(eigvals, 0.0)
-    R_a = (eigvecs * np.sqrt(eigvals)).T
+    R_a = factor_from_gram(data_gram)
 
     group_edf_map: dict[str, float] = {}
     for ag in active_groups:

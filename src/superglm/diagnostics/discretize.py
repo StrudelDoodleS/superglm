@@ -102,28 +102,17 @@ def _validated_discretization_weights(
     n_rows: int,
 ) -> tuple[NDArray, NDArray]:
     """Return likelihood/display weights and family-appropriate geometry mass."""
-    from superglm.distributions import Tweedie
+    from superglm._utils import contract_weights
     from superglm.solvers.dispersion import PRIOR_WEIGHTS, model_weight_semantics
 
     weight_semantics = model_weight_semantics(model)
-    if sample_weight is None:
-        weights = np.ones(n_rows, dtype=np.float64)
-    elif isinstance(model._distribution, Tweedie) and weight_semantics == PRIOR_WEIGHTS:
-        from superglm._utils import _validate_strict_prior_weights
-
-        weights = _validate_strict_prior_weights(sample_weight, n_rows)
-    else:
-        from superglm.model.input_validation import _finite_vector
-
-        weights = _finite_vector("sample_weight", sample_weight, n_rows)
-        if np.any(weights < 0.0):
-            raise ValueError("sample_weight must be nonnegative")
-        if not np.any(weights > 0.0):
-            raise ValueError("sample_weight must not be all zero")
-
-    weight_total = float(np.sum(weights, dtype=np.float64))
-    if not np.isfinite(weight_total):
-        raise ValueError("sample_weight must have a finite sum")
+    weights = contract_weights(
+        sample_weight,
+        n_rows,
+        family=model._distribution,
+        weight_semantics=weight_semantics,
+        finite_sum=True,
+    )
 
     # Frequency weights are replication mass and therefore shape the same
     # support as literal replicated rows.  Prior weights are precision:

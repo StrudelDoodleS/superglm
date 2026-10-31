@@ -56,7 +56,39 @@ def _selector_indices(selector, size: int) -> tuple[NDArray[np.intp], bool]:
     return values, scalar
 
 
-class StructuredSlopeCovarianceAccessor:
+class _SelectedBlockAccess:
+    """NumPy-style ``covariance[rows, columns]`` and ``np.asarray`` over ``selected_block``."""
+
+    shape: tuple[int, ...]
+
+    def selected_block(self, indices: NDArray) -> NDArray:
+        raise NotImplementedError
+
+    def __getitem__(self, key):
+        if not isinstance(key, tuple) or len(key) != 2:
+            raise IndexError("covariance access requires row and column selectors")
+        rows, row_scalar = _selector_indices(key[0], self.shape[0])
+        columns, column_scalar = _selector_indices(key[1], self.shape[1])
+        selected = np.unique(np.concatenate((rows, columns)))
+        block = self.selected_block(selected)
+        positions = np.full(self.shape[0], -1, dtype=np.intp)
+        positions[selected] = np.arange(len(selected))
+        result = block[np.ix_(positions[rows], positions[columns])]
+        if row_scalar and column_scalar:
+            return float(result[0, 0])
+        if row_scalar:
+            return result[0]
+        if column_scalar:
+            return result[:, 0]
+        return result
+
+    def __array__(self, dtype=None, copy=None) -> NDArray:
+        del copy
+        values = self.selected_block(np.arange(self.shape[0], dtype=np.intp))
+        return values.astype(dtype, copy=False) if dtype is not None else values
+
+
+class StructuredSlopeCovarianceAccessor(_SelectedBlockAccess):
     """Selected access to a compact profiled slope covariance."""
 
     backend = "structured"
@@ -87,31 +119,8 @@ class StructuredSlopeCovarianceAccessor:
         indices = np.arange(self.shape[0], dtype=np.intp)
         return float(np.sum(self.selected_diagonal(indices)))
 
-    def __getitem__(self, key):
-        if not isinstance(key, tuple) or len(key) != 2:
-            raise IndexError("covariance access requires row and column selectors")
-        rows, row_scalar = _selector_indices(key[0], self.shape[0])
-        columns, column_scalar = _selector_indices(key[1], self.shape[1])
-        selected = np.unique(np.concatenate((rows, columns)))
-        block = self.selected_block(selected)
-        positions = np.full(self.shape[0], -1, dtype=np.intp)
-        positions[selected] = np.arange(len(selected))
-        result = block[np.ix_(positions[rows], positions[columns])]
-        if row_scalar and column_scalar:
-            return float(result[0, 0])
-        if row_scalar:
-            return result[0]
-        if column_scalar:
-            return result[:, 0]
-        return result
 
-    def __array__(self, dtype=None, copy=None) -> NDArray:
-        del copy
-        values = self.selected_block(np.arange(self.shape[0], dtype=np.intp))
-        return values.astype(dtype, copy=False) if dtype is not None else values
-
-
-class StructuredCovarianceAccessor:
+class StructuredCovarianceAccessor(_SelectedBlockAccess):
     """Selected access to an augmented structured coefficient covariance.
 
     The retained factor lives in solver coordinates. ``intercept_shift`` maps
@@ -238,29 +247,6 @@ class StructuredCovarianceAccessor:
         if values.shape != (self.shape[0],):
             raise ValueError(f"contrast must have shape ({self.shape[0]},).")
         return float(values @ self.solve(values))
-
-    def __getitem__(self, key):
-        if not isinstance(key, tuple) or len(key) != 2:
-            raise IndexError("covariance access requires row and column selectors")
-        rows, row_scalar = _selector_indices(key[0], self.shape[0])
-        columns, column_scalar = _selector_indices(key[1], self.shape[1])
-        selected = np.unique(np.concatenate((rows, columns)))
-        block = self.selected_block(selected)
-        positions = np.full(self.shape[0], -1, dtype=np.intp)
-        positions[selected] = np.arange(len(selected))
-        result = block[np.ix_(positions[rows], positions[columns])]
-        if row_scalar and column_scalar:
-            return float(result[0, 0])
-        if row_scalar:
-            return result[0]
-        if column_scalar:
-            return result[:, 0]
-        return result
-
-    def __array__(self, dtype=None, copy=None) -> NDArray:
-        del copy
-        values = self.selected_block(np.arange(self.shape[0], dtype=np.intp))
-        return values.astype(dtype, copy=False) if dtype is not None else values
 
 
 def covariance_selected_block(covariance, indices: NDArray) -> NDArray:
