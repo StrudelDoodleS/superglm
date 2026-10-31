@@ -432,7 +432,7 @@ def _design_summary(terms, n_rows) -> dict:
     }
 
 
-_INPUTS = ("self", "X", "y", "sample_weight", "offset", "offsets", "truncation", "censoring")
+_INPUTS = ("self", "X", "y", "sample_weight", "offset", "offsets", "truncation", "censored")
 
 
 def _options(params) -> dict:
@@ -603,7 +603,7 @@ def _lss(model, params, design=True) -> dict:
         "options": _options(params),
         "response_bounds": {
             "truncation": params.get("truncation") is not None,
-            "censoring": params.get("censoring") is not None,
+            "censored": params.get("censored") is not None,
         },
         "predictors": [
             {

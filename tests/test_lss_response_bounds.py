@@ -40,7 +40,11 @@ from superglm.distributional.kernels.generalized_pareto import (
 )
 from superglm.distributional.kernels.log_normal import location_window, mean_window
 from superglm.distributional.model import refit_dense_distributional
-from superglm.distributional.observation import ResponseBounds, resolve_response_bounds
+from superglm.distributional.observation import (
+    ResponseBounds,
+    resolve_response_bounds,
+    unvalidated_bound_arrays,
+)
 from superglm.distributional.weights import (
     UnsupportedLikelihoodContractError,
     WeightContract,
@@ -177,10 +181,10 @@ def test_censored_log_normal_at_a_policy_limit_recovers_the_parent_law():
     y = np.exp(rng.normal(8.0, 1.2, 20_000))
     limit = float(np.quantile(y, 0.85))
     paid = np.minimum(y, limit)
-    hit = paid == limit
+    hit = y >= limit
     family = LogNormalLS(parametrisation="location")
 
-    fitted = _fit(family, paid, censoring=(None, limit))
+    fitted = _fit(family, paid, censored=hit)
     reference = _mle(
         lambda t: (
             -(
@@ -218,8 +222,8 @@ def test_left_censored_gaussian_is_tobit():
     rng = np.random.default_rng(547)
     latent = rng.normal(1.0, 2.0, 20_000)
     y = np.maximum(latent, 0.0)
-    low = y == 0.0
-    fitted = _fit(GaussianLS(), y, censoring=(0.0, None))
+    low = latent <= 0.0
+    fitted = _fit(GaussianLS(), y, censored=np.where(low, "left", "none"))
     reference = _mle(
         lambda t: (
             -(
@@ -238,8 +242,8 @@ def test_generalized_pareto_censored_at_a_limit_keeps_its_tail_shape():
     excess = stats.genpareto(c=0.3, scale=1000.0).rvs(20_000, random_state=rng)
     limit = 4000.0
     paid = np.minimum(excess, limit)
-    hit = paid == limit
-    fitted = _fit(GeneralizedParetoLSS(), paid, censoring=(None, limit))
+    hit = excess >= limit
+    fitted = _fit(GeneralizedParetoLSS(), paid, censored=hit)
     reference = _mle(
         lambda t: (
             -(
@@ -254,6 +258,38 @@ def test_generalized_pareto_censored_at_a_limit_keeps_its_tail_shape():
     assert _fit(GeneralizedParetoLSS(), paid)["shape"] < 0.5 * fitted["shape"]
 
 
+def test_the_flag_decides_which_rows_are_censored_not_equality():
+    # A capped payment computed as paid / share can land a rounding short of
+    # its limit, and a complete claim can sit exactly on a round limit.
+    rng = np.random.default_rng(572)
+    excess = stats.genpareto(c=0.3, scale=1000.0).rvs(6_000, random_state=rng)
+    limit = 4000.0
+    capped = excess >= limit
+    paid = np.minimum(excess, limit)
+    short = np.flatnonzero(capped)[::2]
+    paid[short] = np.nextafter(limit, 0.0)
+    at_limit = np.flatnonzero(~capped)[:5]
+    paid[at_limit] = limit
+    family = GeneralizedParetoLSS()
+    model = SuperLSS(family, family.scale(), family.shape())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(_intercepts(len(paid)), paid, censored=capped)
+    assert model._require_fitted().fit_state.censored_row_count == int(capped.sum())
+    reference = _mle(
+        lambda t: (
+            -(
+                stats.genpareto.logpdf(paid[~capped], t[1], scale=np.exp(t[0])).sum()
+                + stats.genpareto.logsf(paid[capped], t[1], scale=np.exp(t[0])).sum()
+            )
+        ),
+        [7.0, 0.2],
+    )
+    row = model.predict_parameters(_intercepts(1)).iloc[0]
+    assert row["scale"] == pytest.approx(np.exp(reference[0]), rel=1e-5)
+    assert row["shape"] == pytest.approx(reference[1], rel=1e-4)
+
+
 def test_frequency_weights_replicate_bounded_rows():
     rng = np.random.default_rng(549)
     y = np.exp(rng.normal(0.0, 1.0, 3_000))
@@ -264,10 +300,11 @@ def test_frequency_weights_replicate_bounded_rows():
     family = LogNormalLS(parametrisation="location")
     weighted = _fit(
         family, paid, weight_semantics="frequency", sample_weight=counts,
-        censoring=(None, limit), truncation=(0.05, None),
+        censored=y >= limit, truncation=(0.05, None),
     )  # fmt: skip
     expanded = np.repeat(paid, counts.astype(int))
-    repeated = _fit(family, expanded, censoring=(None, limit), truncation=(0.05, None))
+    expanded_flags = np.repeat(y >= limit, counts.astype(int))
+    repeated = _fit(family, expanded, censored=expanded_flags, truncation=(0.05, None))
     for name in ("location", "scale"):
         assert weighted[name] == pytest.approx(repeated[name], rel=1e-7)
 
@@ -279,12 +316,13 @@ def test_per_row_bounds_and_zero_weight_rows_follow_the_retained_rows():
     paid = np.minimum(y, limits)
     weights = np.ones(len(y))
     weights[:10] = 0.0
-    # Dropped rows may carry any bounds; their values are never read.
-    limits_with_junk = limits.copy()
-    limits_with_junk[:10] = 0.5
+    censored = np.where(y >= limits, "right", "none").astype(object)
+    # Dropped rows may carry any flags; their values are never read.
+    flags_with_junk = censored.copy()
+    flags_with_junk[:10] = "left"
     family = LogNormalLS(parametrisation="location")
-    dropped = _fit(family, paid, sample_weight=weights, censoring=(None, limits_with_junk))
-    reference = _fit(family, paid[10:], censoring=(None, limits[10:]))
+    dropped = _fit(family, paid, sample_weight=weights, censored=flags_with_junk)
+    reference = _fit(family, paid[10:], censored=censored[10:])
     assert dropped == pytest.approx(reference, rel=1e-10)
 
 
@@ -296,19 +334,19 @@ def _smooth_problem(n=6_000, seed=551):
     x = rng.uniform(0.0, 1.0, n)
     y = np.exp(rng.normal(1.0 + np.sin(5.0 * x), 0.6))
     limit = float(np.quantile(y, 0.9))
-    return pd.DataFrame({"x": x}), np.minimum(y, limit), limit
+    return pd.DataFrame({"x": x}), np.minimum(y, limit), y >= limit
 
 
 @pytest.mark.parametrize("outer", ["efs", "efs+newton"])
 def test_fit_reml_with_censored_rows_differences_the_laml_derivatives(outer):
-    X, paid, limit = _smooth_problem()
+    X, paid, censored = _smooth_problem()
     family = LogNormalLS(parametrisation="location")
     model = SuperLSS(family, family.location(s("x")), family.scale())
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit_reml(X, paid, censoring=(None, limit), outer=outer)
+        model.fit_reml(X, paid, censored=censored, outer=outer)
     state = model._require_fitted().fit_state
-    assert state.censored_row_count == int(np.count_nonzero(paid == limit))
+    assert state.censored_row_count == int(np.count_nonzero(censored))
     assert state.truncated_row_count == 0
     # The analytic third-derivative hook is complete-row only and refuses.
     rows = state.retained_rows
@@ -330,13 +368,47 @@ def test_fit_reml_with_censored_rows_differences_the_laml_derivatives(outer):
     )
 
 
+def test_a_censored_pareto_tail_with_a_smooth_scale_recovers_the_law_under_reml():
+    rng = np.random.default_rng(544)
+    n = 8_000
+    x = rng.uniform(0.0, 3.0, n)
+
+    def true_scale(values):
+        return 1000.0 * np.exp(0.5 * np.sin(2.0 * values))
+
+    excess = stats.genpareto(c=0.3, scale=true_scale(x)).rvs(n, random_state=rng)
+    paid = np.minimum(excess, 6000.0)
+    censored = excess > 6000.0
+    X, grid = pd.DataFrame({"x": x}), pd.DataFrame({"x": np.linspace(0.1, 2.9, 15)})
+
+    def fitted(flags):
+        family = GeneralizedParetoLSS()
+        model = SuperLSS(family, family.scale(s("x")), family.shape())
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit_reml(X, paid, censored=flags)
+        row = model.predict_parameters(grid)
+        error = np.abs(row["scale"].to_numpy() / true_scale(grid["x"].to_numpy()) - 1.0)
+        return float(row["shape"].iloc[0]), error
+
+    shape, error = fitted(censored)
+    # The shape's standard error here is about 0.017; 0.07 is about four of
+    # them.  The smooth's pointwise sampling error is a few percent.
+    assert abs(shape - 0.3) < 0.07
+    assert error.max() < 0.2 and error.mean() < 0.07
+    # Reading the capped rows as complete thins the tail well beyond that.
+    complete_shape, complete_error = fitted(None)
+    assert abs(complete_shape - 0.3) > 0.14
+    assert complete_error.mean() > 2.0 * error.mean()
+
+
 def test_bounded_fit_survives_pickling_and_replays_its_corrected_covariance():
-    X, paid, limit = _smooth_problem(n=3_000, seed=552)
+    X, paid, censored = _smooth_problem(n=3_000, seed=552)
     family = LogNormalLS(parametrisation="location")
     model = SuperLSS(family, family.location(s("x")), family.scale())
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit_reml(X, paid, censoring=(None, limit))
+        model.fit_reml(X, paid, censored=censored)
         restored = pickle.loads(pickle.dumps(model))
         draws = restored.posterior_draws(50, covariance="corrected")
     assert draws.covariance_kind == "corrected"
@@ -407,7 +479,7 @@ def test_bounds_that_change_no_row_leave_the_fit_complete():
     y = rng.normal(0.0, 1.0, 500)
     family = GaussianLS()
     open_fit = SuperLSS(family, family.location(), family.scale()).fit(
-        _intercepts(500), y, censoring=(None, 99.0), truncation=(None, None)
+        _intercepts(500), y, censored=np.zeros(500, dtype=bool), truncation=(None, None)
     )
     plain = SuperLSS(family, family.location(), family.scale()).fit(_intercepts(500), y)
     assert (
@@ -417,34 +489,64 @@ def test_bounds_that_change_no_row_leave_the_fit_complete():
 
 
 @pytest.mark.parametrize(
-    ("truncation", "censoring", "message"),
+    ("truncation", "censored", "message"),
     [
         ((None, 1.5), None, "outside the truncation bounds"),
         ((2.0, 1.0), None, "lower bound at or above"),
-        (None, (None, 1.5), "beyond a censoring bound"),
         ((None, np.nan), None, "missing"),
-        ((None, 3.0), (None, 3.0), "right-censored at or above"),
+        ((None, 3.0), [False, False, True], "right-censored at or above"),
         ((None, [3.0, 3.0]), None, "one number per row"),
         ((1.0,), None, "pair"),
     ],
 )
-def test_invalid_bounds_name_the_problem(truncation, censoring, message):
+def test_invalid_bounds_name_the_problem(truncation, censored, message):
     y = np.array([1.0, 2.0, 3.0])
     with pytest.raises((ValueError, TypeError), match=message):
-        _fit(GaussianLS(), y, truncation=truncation, censoring=censoring)
+        _fit(GaussianLS(), y, truncation=truncation, censored=censored)
 
 
-def test_resolution_reads_a_response_at_its_bound_as_censored():
+def test_resolution_takes_each_side_from_the_flag():
     y = np.array([1.0, 2.0, 5.0, 0.0])
-    arrays = (
-        np.full(4, -np.inf),
-        np.full(4, np.inf),
-        np.array([0.0, 0.0, 0.0, 0.0]),
-        np.array([5.0, 5.0, 5.0, 5.0]),
-    )
+    arrays = unvalidated_bound_arrays(None, ["none", None, "right", "left"], 4)
     bounds = resolve_response_bounds(y, arrays, np.arange(4))
     assert bounds is not None
     np.testing.assert_array_equal(bounds.side, [0, 0, 1, -1])
+    np.testing.assert_array_equal(bounds.lower, np.full(4, -np.inf))
+    np.testing.assert_array_equal(bounds.upper, np.full(4, np.inf))
+
+
+@pytest.mark.parametrize(
+    ("censored", "error", "message"),
+    [
+        ([True, False], ValueError, r"shape \(2,\) for 3 rows; pass one flag per row"),
+        (["right", "Right", None], ValueError, r"unknown flag 'Right' .*first at input row 1"),
+        (np.array([1.0, np.nan, 0.0]), ValueError, r"missing \(NaN\) .*first at input row 1"),
+        (pd.Series([True, None, False], dtype="boolean"), ValueError, r"missing \(NaN\)"),
+        (np.array([1, 0, 0]), TypeError, "values, which do not say which rows are censored"),
+        (np.array([1.0, 0.0, 0.0]), TypeError, "for example censored=\\(flag == 1\\)"),
+    ],
+)
+def test_invalid_censored_flags_name_the_problem(censored, error, message):
+    with pytest.raises(error, match=message):
+        _fit(GaussianLS(), np.array([1.0, 2.0, 3.0]), censored=censored)
+
+
+@pytest.mark.parametrize(
+    ("y", "truncation", "censored", "message"),
+    [
+        ([1.0, 2.0, 3.0], (1.0, None), ["left", "none", "none"], "are left-censored at or below"),
+        ([1.0, 2.0, 3.0], (None, 3.0), [False, False, True], "are right-censored at or above"),
+        (
+            [1.0, 2.0, np.inf],
+            None,
+            [False, False, True],
+            "are censored but have no finite response",
+        ),
+    ],
+)
+def test_censored_rows_that_observed_nothing_are_refused(y, truncation, censored, message):
+    with pytest.raises(ValueError, match=rf"1 row\(s\) {message}"):
+        _fit(GaussianLS(), np.array(y), truncation=truncation, censored=censored)
 
 
 # -- diagnostics read bounded rows ------------------------------------------
@@ -484,11 +586,11 @@ def test_censored_rows_are_randomised_within_their_interval():
     y = np.exp(rng.normal(8.0, 1.2, 4_000))
     limit = float(np.quantile(y, 0.8))
     paid = np.minimum(y, limit)
-    hit = paid == limit
-    model = _bounded_model(paid, censoring=(None, limit))
+    hit = y >= limit
+    model = _bounded_model(paid, censored=hit)
     X = _intercepts(len(paid))
 
-    payload = model.residual_set(X, paid, censoring=(None, limit))
+    payload = model.residual_set(X, paid, censored=hit)
     row = model.predict_parameters(_intercepts(1)).iloc[0]
     at_limit = stats.norm.cdf(np.log(limit), row["location"], row["scale"])
     assert payload.randomised_rows == hit.sum()
@@ -496,7 +598,7 @@ def test_censored_rows_are_randomised_within_their_interval():
     assert np.all(payload.pit[~hit] == payload.pit_upper[~hit])
     assert stats.kstest(payload.pit, "uniform").pvalue > 1e-3
     # The Q-Q envelope validates the same bounded evaluation.
-    qq = model.plot_data("qq", X=X, y=paid, censoring=(None, limit), n_sim=20)
+    qq = model.plot_data("qq", X=X, y=paid, censored=hit, n_sim=20)
     assert qq["n_rows"] == len(paid)
 
 
@@ -504,8 +606,8 @@ def test_bounded_log_score_is_the_bounded_log_likelihood():
     body, u = _truncated_body(3_000, seed=562)
     cap = float(np.quantile(body, 0.7))
     paid = np.minimum(body, cap)
-    capped = paid == cap
-    bounds = {"truncation": (None, u), "censoring": (None, cap)}
+    capped = body >= cap
+    bounds = {"truncation": (None, u), "censored": capped}
     model = _bounded_model(paid, **bounds)
     row = model.predict_parameters(_intercepts(1)).iloc[0]
     mu, sigma = row["location"], row["scale"]
@@ -595,19 +697,19 @@ def test_bounds_with_no_effect_on_the_support_leave_the_fit_complete():
 def test_rows_with_zero_probability_on_the_support_are_refused():
     excess = np.array([0.0, 0.5, 1.0, 2.0, 4.0, 8.0])
     with pytest.raises(ValueError, match="zero probability"):
-        _fit(GeneralizedParetoLSS(), excess, censoring=(0.0, None))
+        _fit(GeneralizedParetoLSS(), excess, censored=["left"] + ["none"] * 5)
 
 
 def test_parameter_uncertainty_envelope_refuses_bounded_rows():
-    X, paid, limit = _smooth_problem(n=1_500, seed=561)
+    X, paid, censored = _smooth_problem(n=1_500, seed=561)
     family = LogNormalLS(parametrisation="location")
     model = SuperLSS(family, family.location(s("x")), family.scale())
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit_reml(X, paid, censoring=(None, limit))
+        model.fit_reml(X, paid, censored=censored)
     with pytest.raises(NotImplementedError, match="parameter_uncertainty=True"):
-        model.plot_data("qq", X=X, y=paid, censoring=(None, limit), parameter_uncertainty=True)
-    payload = model.plot_data("qq", X=X, y=paid, censoring=(None, limit))
+        model.plot_data("qq", X=X, y=paid, censored=censored, parameter_uncertainty=True)
+    payload = model.plot_data("qq", X=X, y=paid, censored=censored)
     assert payload is not None
 
 
@@ -655,12 +757,12 @@ def test_censored_fit_standard_errors_are_the_inverse_observed_information():
     excess = stats.genpareto(c=0.3, scale=1000.0).rvs(8_000, random_state=rng)
     limit = 4000.0
     paid = np.minimum(excess, limit)
-    hit = paid == limit
+    hit = excess >= limit
     family = GeneralizedParetoLSS()
     model = SuperLSS(family, family.scale(), family.shape())
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit(_intercepts(len(paid)), paid, censoring=(None, limit))
+        model.fit(_intercepts(len(paid)), paid, censored=hit)
     links = [parameter.default_link for parameter in family.parameters]
     eta = np.asarray(model.predict_link(_intercepts(1)), dtype=np.float64)[0]
 
@@ -694,7 +796,11 @@ def test_pit_of_left_censored_and_prior_weighted_bounded_rows():
     y = np.array([-0.5, 0.2, 1.1])
     w = np.array([2.0, 0.5, 2.0])
     residuals = model.residual_set(
-        _intercepts(3), y, sample_weight=w, censoring=(-0.5, None), truncation=(-2.0, 1.5)
+        _intercepts(3),
+        y,
+        sample_weight=w,
+        censored=["left", "none", "none"],
+        truncation=(-2.0, 1.5),
     )
     law = [stats.norm(mu, sigma / np.sqrt(value)) for value in w]
     mass = [d.cdf(1.5) - d.cdf(-2.0) for d in law]
@@ -731,12 +837,13 @@ def test_log_normal_mean_form_window_derivatives_match_differences(lower, upper)
 
 def test_censored_generalized_pareto_fit_starts_without_a_warning():
     rng = np.random.default_rng(564)
-    paid = np.minimum(stats.genpareto(c=0.3, scale=1000.0).rvs(2_000, random_state=rng), 1500.0)
+    excess = stats.genpareto(c=0.3, scale=1000.0).rvs(2_000, random_state=rng)
+    paid = np.minimum(excess, 1500.0)
     family = GeneralizedParetoLSS()
     with warnings.catch_warnings():
         warnings.simplefilter("error", GeneralizedParetoInitializationWarning)
         SuperLSS(family, family.scale(), family.shape()).fit(
-            _intercepts(len(paid)), paid, censoring=(None, 1500.0)
+            _intercepts(len(paid)), paid, censored=excess >= 1500.0
         )
 
 
@@ -940,7 +1047,7 @@ def test_zero_probability_rows_are_refused_by_input_row_on_either_branch():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model.fit(_intercepts(4), np.array([0.5, 1.0, 2.0, 4.0]))
-    for bounds in ({"truncation": (None, 0.0)}, {"censoring": (0.0, None)}):
+    for bounds in ({"truncation": (None, 0.0)}, {"censored": "left"}):
         with pytest.raises(ValueError, match="zero probability"):
             model.scores(_intercepts(1), np.array([0.0]), which=("log",), **bounds)
 
@@ -959,7 +1066,7 @@ def test_a_bounded_row_whose_window_has_no_mass_scores_inf(monkeypatch):
     model, _, _ = _intercept_gaussian()
     monkeypatch.setattr(gaussian_family, "gaussian_window", massless)
     table = model.scores(
-        _intercepts(2), np.array([0.0, 3.0]), censoring=(None, 3.0), which=("log",)
+        _intercepts(2), np.array([0.0, 3.0]), censored=[False, True], which=("log",)
     )
     assert np.isfinite(table["log"].iloc[0])
     assert table["log"].iloc[1] == np.inf
@@ -969,37 +1076,35 @@ def _all_censored_level(n=1_500, seed=567, keep_one=False):
     rng = np.random.default_rng(seed)
     group = rng.choice(["a", "b", "c"], n)
     limit = 5000.0
-    paid = np.minimum(np.exp(rng.normal(8.0, 1.0, n)), limit)
-    paid[group == "c"] = limit
+    loss = np.exp(rng.normal(8.0, 1.0, n))
+    censored = (loss >= limit) | (group == "c")
+    paid = np.where(censored, limit, loss)
     if keep_one:
-        paid[np.flatnonzero(group == "c")[0]] = 0.5 * limit
-    return pd.DataFrame({"g": group}), paid, limit
+        first = np.flatnonzero(group == "c")[0]
+        paid[first], censored[first] = 0.5 * limit, False
+    return pd.DataFrame({"g": group}), paid, limit, censored
 
 
 def test_a_level_censored_on_one_side_only_is_disclosed_as_separated():
-    X, paid, limit = _all_censored_level()
+    X, paid, limit, censored = _all_censored_level()
     family = LogNormalLS(parametrisation="location")
     with pytest.warns(
         SeparationWarning, match=r"'location:g': 1 of 3 occupied levels have only right-censored"
     ):
-        SuperLSS(family, family.location(cat("g")), family.scale()).fit(
-            X, paid, censoring=(None, limit)
-        )
+        SuperLSS(family, family.location(cat("g")), family.scale()).fit(X, paid, censored=censored)
     strict = SuperLSS(family, family.location(cat("g")), family.scale(), separation="error")
     with pytest.raises(SeparationError, match="Censoring separation"):
-        strict.fit(X, paid, censoring=(None, limit))
+        strict.fit(X, paid, censored=censored)
     # Tobit: a level whose rows are all at the lower limit.
     gaussian = GaussianLS()
     with pytest.warns(SeparationWarning, match="only left-censored rows: 'c'"):
         SuperLSS(gaussian, gaussian.location(cat("g")), gaussian.scale()).fit(
-            X, limit - paid, censoring=(0.0, None)
+            X, limit - paid, censored=np.where(censored, "left", "none")
         )
-    X, paid, limit = _all_censored_level(keep_one=True)
+    X, paid, _, censored = _all_censored_level(keep_one=True)
     with warnings.catch_warnings():
         warnings.simplefilter("error", SeparationWarning)
-        SuperLSS(family, family.location(cat("g")), family.scale()).fit(
-            X, paid, censoring=(None, limit)
-        )
+        SuperLSS(family, family.location(cat("g")), family.scale()).fit(X, paid, censored=censored)
 
 
 def test_a_level_censored_on_one_side_of_a_scale_predictor_keeps_its_estimate():
@@ -1008,11 +1113,11 @@ def test_a_level_censored_on_one_side_of_a_scale_predictor_keeps_its_estimate():
     complete = np.tile([-1.0, 1.0], 10)
     limits = np.array([-10.0, 1.0])
     y = np.concatenate([complete, limits])
-    upper = np.concatenate([np.full(len(complete), np.inf), limits])
+    censored = np.arange(len(y)) >= len(complete)
     X = pd.DataFrame({"g": ["a"] * len(complete) + ["b"] * len(limits)})
     family = GaussianLS()
     model = SuperLSS(family, family.location(), family.scale(cat("g")), separation="error")
-    model.fit(X, y, censoring=(None, upper))
+    model.fit(X, y, censored=censored)
 
     def negative(point):
         mu, log_a, log_b = point
@@ -1033,24 +1138,24 @@ def _pareto_shape_levels(truncation_side):
     group_a = stats.genpareto.ppf((np.arange(1_000) + 0.5) / 1_000, 0.3)
     y = np.concatenate([group_a, np.ones(20)])
     in_b = np.arange(len(y)) >= len(group_a)
-    censoring = (None, np.where(in_b, 1.0, np.inf))
+    censored = in_b
     if truncation_side == "upper":
         truncation = (None, np.where(in_b, 3.0, np.inf))
     else:
         truncation = (np.where(in_b, 0.5, -np.inf), None)
     X = pd.DataFrame({"g": np.where(in_b, "b", "a")})
-    return X, y, group_a, censoring, truncation
+    return X, y, group_a, censored, truncation
 
 
 def test_upper_truncation_anchors_a_censored_pareto_level():
     # (S(1) - S(3))/(1 - S(3)) peaks at an interior shape, so the level has an
     # estimate; with only a lower truncation bound it walks to the wall.
-    X, y, group_a, censoring, truncation = _pareto_shape_levels("upper")
+    X, y, group_a, censored, truncation = _pareto_shape_levels("upper")
     family = GeneralizedParetoLSS()
     model = SuperLSS(family, family.scale(), family.shape(cat("g")), separation="error")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", GeneralizedParetoInitializationWarning)
-        model.fit(X, y, censoring=censoring, truncation=truncation)
+        model.fit(X, y, censored=censored, truncation=truncation)
 
     def negative(point):
         scale, xi_a, xi_b = np.exp(point[0]), point[1], point[2]
@@ -1069,12 +1174,12 @@ def test_upper_truncation_anchors_a_censored_pareto_level():
     # rises with psi towards 2/3.
     strict = SuperLSS(family, family.scale(cat("g")), family.shape(), separation="error")
     with pytest.raises(SeparationError, match=r"'scale:g': 1 of 2 occupied levels"):
-        strict.fit(X, y, censoring=censoring, truncation=truncation)
+        strict.fit(X, y, censored=censored, truncation=truncation)
 
-    X, y, _, censoring, truncation = _pareto_shape_levels("lower")
+    X, y, _, censored, truncation = _pareto_shape_levels("lower")
     with pytest.warns(SeparationWarning, match=r"'shape:g': 1 of 2 occupied levels"):
         SuperLSS(family, family.scale(), family.shape(cat("g"))).fit(
-            X, y, censoring=censoring, truncation=truncation
+            X, y, censored=censored, truncation=truncation
         )
 
 
@@ -1085,13 +1190,12 @@ def test_a_left_censored_mean_form_scale_level_is_separated():
     group = rng.choice(["a", "b", "c"], 900)
     y = np.exp(rng.normal(8.0, 1.0, 900))
     y[group == "c"] = 400.0
-    lower = np.where(group == "c", 400.0, -np.inf)
     family = LogNormalLS()
     with pytest.warns(
         SeparationWarning, match=r"'scale:g': 1 of 3 occupied levels have only left-censored"
     ):
         SuperLSS(family, family.mean(), family.scale(cat("g"))).fit(
-            pd.DataFrame({"g": group}), y, censoring=(lower, None)
+            pd.DataFrame({"g": group}), y, censored=np.where(group == "c", "left", "none")
         )
 
 
@@ -1104,9 +1208,7 @@ def test_a_right_censored_mean_form_scale_level_below_its_limit_keeps_its_estima
     group = np.array(["a"] * 200 + ["b"] * 20)
     family = LogNormalLS()
     model = SuperLSS(family, family.mean(), family.scale(cat("g")), separation="error")
-    model.fit(
-        pd.DataFrame({"g": group}), y, censoring=(None, np.where(group == "b", limit, np.inf))
-    )
+    model.fit(pd.DataFrame({"g": group}), y, censored=group == "b")
 
     def negative(point):
         mean, scale_a, scale_b = np.exp(point)
@@ -1128,7 +1230,6 @@ def test_a_reference_level_on_a_predictor_without_an_intercept_is_not_separated(
     y_a = np.exp(np.linspace(-1.0, 1.0, 20))
     y = np.concatenate([y_a, np.full(5, 0.5)])
     group = np.array(["a"] * 20 + ["b"] * 5)
-    lower = np.where(group == "b", 0.5, -np.inf)
     family = LogNormalLS()
     model = SuperLSS(
         family,
@@ -1136,7 +1237,7 @@ def test_a_reference_level_on_a_predictor_without_an_intercept_is_not_separated(
         family.scale(cat("g", base="b"), intercept=False),
         separation="error",
     )
-    model.fit(pd.DataFrame({"g": group}), y, censoring=(lower, None))
+    model.fit(pd.DataFrame({"g": group}), y, censored=np.where(group == "b", "left", "none"))
     fitted = model.predict_parameters(pd.DataFrame({"g": ["a", "b"]}))
     pinned = float(fitted["scale"].iloc[1])
 
@@ -1157,9 +1258,7 @@ def test_a_reference_level_on_a_predictor_without_an_intercept_is_not_separated(
     y = np.concatenate([y, np.full(5, 0.5)])
     group = np.concatenate([group, ["c"] * 5])
     with pytest.raises(SeparationError, match=r"only left-censored rows: 'c'") as raised:
-        model.fit(
-            pd.DataFrame({"g": group}), y, censoring=(np.where(group == "a", -np.inf, 0.5), None)
-        )
+        model.fit(pd.DataFrame({"g": group}), y, censored=np.where(group == "a", "none", "left"))
     assert "'b'" not in str(raised.value)
 
 
@@ -1172,11 +1271,12 @@ def test_an_intercept_free_interaction_pins_only_its_reference_cell():
     n = 800
     X = pd.DataFrame({"g": rng.choice(["a", "b"], n), "h": rng.choice(["x", "y"], n)})
     limit = 5000.0
-    clean = np.minimum(np.exp(rng.normal(8.0, 1.0, n)), limit)
+    loss = np.exp(rng.normal(8.0, 1.0, n))
 
     def fit(cell):
         g, h = cell
-        paid = np.where((X.g == g).to_numpy() & (X.h == h).to_numpy(), limit, clean)
+        censored = ((X.g == g).to_numpy() & (X.h == h).to_numpy()) | (loss >= limit)
+        paid = np.where(censored, limit, loss)
         model_from_templates(
             family=LogNormalLS(parametrisation="location"),
             predictors=(
@@ -1189,7 +1289,7 @@ def test_an_intercept_free_interaction_pins_only_its_reference_cell():
                 distributional.Predictor("scale", {}),
             ),
             separation="error",
-        ).fit(X, paid, censoring=(None, limit))
+        ).fit(X, paid, censored=censored)
 
     # Without an intercept only the (a, x) cell is pinned at the offset.
     fit(("a", "x"))
@@ -1216,8 +1316,9 @@ def test_a_crossed_cell_censored_on_one_side_is_separated():
     n = 1_600
     X = pd.DataFrame({"g": rng.choice(["a", "b"], n), "h": rng.choice(["x", "y"], n)})
     limit = 5000.0
-    paid = np.minimum(np.exp(rng.normal(8.0, 1.0, n)), limit)
-    paid[(X.g == "b").to_numpy() & (X.h == "y").to_numpy()] = limit
+    loss = np.exp(rng.normal(8.0, 1.0, n))
+    censored = ((X.g == "b").to_numpy() & (X.h == "y").to_numpy()) | (loss >= limit)
+    paid = np.where(censored, limit, loss)
     model = model_from_templates(
         family=LogNormalLS(parametrisation="location"),
         predictors=(
@@ -1231,7 +1332,7 @@ def test_a_crossed_cell_censored_on_one_side_is_separated():
     )
     # Only the (b, y) cell is all at the limit; its parents' levels are not.
     with pytest.warns(SeparationWarning, match=r"'location:g:h': 1 of 4 occupied cells") as seen:
-        model.fit(X, paid, censoring=(None, limit))
+        model.fit(X, paid, censored=censored)
     message = str(seen[0].message)
     assert "('b' x 'y')" in message and "'location:g'" not in message
 
@@ -1240,12 +1341,13 @@ def test_a_level_censored_on_one_side_of_a_pareto_shape_is_separated():
     # S(c) rises with the shape, so the level's shape walks to its wall.
     rng = np.random.default_rng(568)
     group = rng.choice(["a", "b"], 1_200)
-    paid = np.minimum(stats.genpareto(c=0.3, scale=1000.0).rvs(1_200, random_state=rng), 3000.0)
-    paid[group == "b"] = 3000.0
+    excess = stats.genpareto(c=0.3, scale=1000.0).rvs(1_200, random_state=rng)
+    censored = (excess >= 3000.0) | (group == "b")
+    paid = np.where(censored, 3000.0, excess)
     family = GeneralizedParetoLSS()
     model = SuperLSS(family, family.scale(), family.shape(cat("g")))
     with pytest.warns(SeparationWarning, match=r"'shape:g': 1 of 2 occupied levels"):
-        model.fit(pd.DataFrame({"g": group}), paid, censoring=(None, 3000.0))
+        model.fit(pd.DataFrame({"g": group}), paid, censored=censored)
 
 
 def test_window_probabilities_at_or_below_the_support_are_empty():

@@ -32,6 +32,7 @@ from superglm.distributional.layout import StackedLayout, build_stacked_layout
 from superglm.distributional.likelihood_identity import legacy_identifier_problem
 from superglm.distributional.observation import (
     BoundPair,
+    CensoredRows,
     resolve_response_bounds,
     unvalidated_bound_arrays,
 )
@@ -545,7 +546,7 @@ def _fit_candidate(
     phase_recorder: FitPhaseRecorder | None = None,
     separation: str = "warn",
     truncation: BoundPair = None,
-    censoring: BoundPair = None,
+    censored: CensoredRows = None,
 ) -> DistributionalFitState:
     if not isinstance(weight_contract, WeightContract):
         raise TypeError("weight_contract must be a WeightContract")
@@ -553,7 +554,7 @@ def _fit_candidate(
     original_n = len(frame)
     original_y = _unvalidated_response_shape(y, original_n)
     original_offsets = _unvalidated_offset_shapes(offsets, original_n)
-    original_bounds = unvalidated_bound_arrays(truncation, censoring, original_n)
+    original_bounds = unvalidated_bound_arrays(truncation, censored, original_n)
     resolved_weights = resolve_likelihood_weights(
         sample_weight,
         n_observations=original_n,
@@ -575,7 +576,7 @@ def _fit_candidate(
     ):
         raise UnsupportedLikelihoodContractError(
             f"{type(family).__name__} does not fit truncated or censored rows; GaussianLS, "
-            "LogNormalLS and GeneralizedParetoLSS do, or drop truncation= and censoring= to "
+            "LogNormalLS and GeneralizedParetoLSS do, or drop truncation= and censored= to "
             "read every row as complete"
         )
     # Inherited capability must not bypass a custom family's ordinary binder.
@@ -755,7 +756,7 @@ def fit_dense_distributional(
     separation: str = "warn",
     revision: int = 1,
     truncation: BoundPair = None,
-    censoring: BoundPair = None,
+    censored: CensoredRows = None,
 ) -> DenseDistributionalModel:
     """Compile every terminal artifact privately, then publish one fitted revision.
 
@@ -793,7 +794,7 @@ def fit_dense_distributional(
             phase_recorder=phase_recorder,
             separation=separation,
             truncation=truncation,
-            censoring=censoring,
+            censored=censored,
         )
         return DenseDistributionalModel(family=family, _fit_state=candidate)
 
@@ -813,12 +814,12 @@ def refit_dense_distributional(
     phase_recorder: FitPhaseRecorder | None = None,
     separation: str = "warn",
     truncation: BoundPair = None,
-    censoring: BoundPair = None,
+    censored: CensoredRows = None,
 ) -> DenseDistributionalModel:
     """Replace a fitted revision only after its complete candidate validates.
 
     Bounds describe the rows being fitted, so a refit takes the caller's
-    ``truncation`` and ``censoring`` as ``fit`` does; none are carried over.
+    ``truncation`` and ``censored`` as ``fit`` does; none are carried over.
     """
     if not isinstance(model, DenseDistributionalModel):
         raise TypeError("model must be a DenseDistributionalModel")
@@ -862,7 +863,7 @@ def refit_dense_distributional(
             # the caller's argument rather than re-stating a stored one.
             separation=separation,
             truncation=truncation,
-            censoring=censoring,
+            censored=censored,
         )
         model._publish(candidate)
         return model
