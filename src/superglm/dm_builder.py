@@ -450,8 +450,9 @@ def _shared_row_support(B_csr, supports: dict | None):
 def _build_ssp_group(B_csr, R_inv, supports: dict | None = None, row_support=None):
     """Cheapest exact representation of a factored SSP block.
 
-    ``row_support`` is the support its term found (``GroupInfo.row_support``),
-    stored without scanning when it describes ``B_csr`` itself.
+    ``row_support`` is what its term found (``GroupInfo.row_support``): a
+    support, stored in place of scanning ``B_csr``, which a tensor leaves
+    ``None``; or the gates' decline, which that scan would repeat.
 
     Compression is lossless deduplication of repeated rows; it never bins and is
     independent of ``discrete=True``.  Declines whenever the measured cost model
@@ -470,10 +471,10 @@ def _build_ssp_group(B_csr, R_inv, supports: dict | None = None, row_support=Non
         SupportCompressedSSPGroupMatrix,
     )
 
-    if row_support is not None and row_support[0] is B_csr:
-        detected = row_support[1:]
-    else:
+    if row_support is None:
         detected = _shared_row_support(B_csr, supports)
+    else:
+        detected = row_support if isinstance(row_support, tuple) else None
     if detected is None:
         return SparseSSPGroupMatrix(B_csr, R_inv)
     B_unique_rows, row_index = detected
@@ -945,13 +946,16 @@ def _process_info(
                     gm.component_types = info.component_types
                     if info.lambda_policies is not None:
                         gm.lambda_policies = info.lambda_policies
-            elif info.supports_row_compression:
-                gm = _build_unpenalized_sparse_group(info.columns, info.n_cols)
             else:
-                # cast, not a runtime check: the enclosing branch condition is
-                # sp.issparse(info.columns), which the checker cannot narrow by
-                # (a row support is found only for penalised blocks).
-                gm = SparseGroupMatrix(cast(sp.spmatrix, info.columns))
+                # Only a tensor leaves its columns to its row support, and a
+                # tensor block is penalised or projected: these are sparse.
+                assert info.columns is not None
+                if info.supports_row_compression:
+                    gm = _build_unpenalized_sparse_group(info.columns, info.n_cols)
+                else:
+                    # cast, not a runtime check: the checker cannot narrow by
+                    # the enclosing branch condition, sp.issparse(info.columns).
+                    gm = SparseGroupMatrix(cast(sp.spmatrix, info.columns))
         else:
             gm = DenseGroupMatrix(info.columns)
 

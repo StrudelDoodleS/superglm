@@ -554,7 +554,7 @@ class SplineCategorical:
         sample_weight: NDArray | None = None,
         separation: tuple | None = None,
     ) -> list[GroupInfo]:
-        from superglm._group_matrix._group_matrix_support import distinct_rows
+        from superglm._group_matrix._group_matrix_support import distinct_values
 
         spline_spec, x_spline, x_cat = self._resolve_build(
             x_spline, x_cat, parent_specs, sample_weight
@@ -563,14 +563,15 @@ class SplineCategorical:
         # Union of the non-base masks: exactly the rows some emitted block owns.
         active_rows = np.flatnonzero(np.isin(x_cat, self._non_base))
         # The basis once per distinct covariate value; its rows only on a decline.
-        distinct = distinct_rows(spline_spec._raw_basis_matrix, x_spline)
+        distinct = distinct_values(x_spline)
         if distinct is None:
             B = sp.csr_matrix(spline_spec._raw_basis_matrix(x_spline))
             compressed = _plan_spline_cat_support(
                 B, x_spline, active_rows, n_levels=len(self._non_base)
             )
         else:
-            values_basis, index = distinct
+            values, index = distinct
+            values_basis = spline_spec._raw_basis_matrix(values)
             compressed = _plan_spline_cat_support(
                 sp.csr_matrix(values_basis),
                 x_spline,
@@ -2015,50 +2016,62 @@ def _row_kron_index_dtype(nnz: int, n_cols: int) -> type:
     return np.int32 if max(nnz, n_cols) <= np.iinfo(np.int32).max else np.int64
 
 
-def _rows_repeat(basis: NDArray, index: NDArray) -> bool:
-    """Whether the rows of ``basis`` sharing an ``index`` value are bit for bit equal."""
+def _rows_repeat(basis: NDArray, index: NDArray, block_rows: int = 65_536) -> bool:
+    """Whether the rows of ``basis`` sharing an ``index`` value are bit for bit equal.
+
+    Compared ``block_rows`` rows at a time, so the check copies no more of
+    the basis than one block.
+    """
     first = np.empty(int(index.max()) + 1, dtype=np.intp)
     first[index[::-1]] = np.arange(index.size - 1, -1, -1, dtype=np.intp)
     bits = np.ascontiguousarray(basis, dtype=np.float64).view(np.uint64)
-    return bool(np.array_equal(bits[first[index]], bits))
+    return all(
+        np.array_equal(
+            bits[first[index[start : start + block_rows]]], bits[start : start + block_rows]
+        )
+        for start in range(0, index.size, block_rows)
+    )
 
 
-def _tensor_cell_support(
-    basis1: NDArray, x1: NDArray, basis2: NDArray, x2: NDArray
-) -> tuple[NDArray, NDArray] | None:
+def _tensor_cell_support(basis1: NDArray, distinct1, basis2: NDArray, distinct2):
     """The row support of ``_row_kron(basis1, basis2)``, formed on its occupied cells.
 
     A margin's row is a function of its covariate, so the row Kronecker
-    product's rows repeat by occupied cell, the distinct ``(x1, x2)`` pairs,
-    and each is formed once (Wood, Li, Shaddick & Augustin 2017; Li & Wood
-    2020).  The support is found on those rows (``detect_row_support``'s
-    ``cell_index``), and is the one scanning the full product finds.  ``None``
-    leaves that scan to the builder: values that cannot be grouped exactly, a
-    margin whose projected rows differ within one covariate value, or a
-    support the scan's gates decline.  Cells that do not repeat, or a dense
-    support over the byte budget holding more than half the rows, are the
-    gates' declines for these dense rows, and skip forming the cells.
+    product's rows repeat by occupied cell, the distinct ``(x1, x2)`` pairs
+    of the margins' groupings (``TensorMarginalInfo.distinct``), and each is
+    formed once (Wood, Li, Shaddick & Augustin 2017; Li & Wood 2020).  The
+    support is found on those rows (``detect_cell_support``) and is the one
+    scanning the full product finds; ``DECLINED`` when the gates decline
+    it, as they do below their row floor whatever the support.  ``None``
+    leaves the scan to the builder: a margin without a grouping, or whose
+    projected rows differ within one covariate value; cells that do not
+    repeat, or whose dense support over the byte budget would hold more
+    than half the rows, where only the scan's merging of bit-identical
+    cells can decide; and a hash collision.
     """
     from superglm._group_matrix import _group_matrix_support as support
 
-    d1, d2 = support.distinct_values(x1), support.distinct_values(x2)
     n = basis1.shape[0]
-    if n == 0 or d1 is None or d2 is None:
+    if n == 0 or distinct1 is None or distinct2 is None:
         return None
-    _, first, cell = np.unique(d1[1] * d2[0].size + d2[1], return_index=True, return_inverse=True)
+    if n < support._MIN_CALIBRATED_ROWS:
+        return support.DECLINED
+    _, first, cell = np.unique(
+        distinct1[1] * distinct2[0].size + distinct2[1], return_index=True, return_inverse=True
+    )
     support_bytes = 8 * first.size * basis1.shape[1] * basis2.shape[1]
     if first.size == n or (
         2 * first.size > n and support_bytes > support.DEFAULT_MAX_SUPPORT_BYTES
     ):
         return None
-    if not (_rows_repeat(basis1, d1[1]) and _rows_repeat(basis2, d2[1])):
+    if not (_rows_repeat(basis1, distinct1[1]) and _rows_repeat(basis2, distinct2[1])):
         return None
     rows = _row_kron(sp.csr_matrix(basis1[first]), sp.csr_matrix(basis2[first]))
     cell = np.asarray(cell, dtype=np.intp).ravel()
     nnz = int(np.bincount(cell, minlength=first.size) @ np.diff(rows.indptr))
     width = np.dtype(_row_kron_index_dtype(nnz, rows.shape[1])).itemsize
-    return support.detect_row_support(
-        rows, cell_index=cell, nnz=nnz, replaced_bytes=nnz * (8 + width) + (n + 1) * width
+    return support.detect_cell_support(
+        rows, cell, nnz=nnz, replaced_bytes=nnz * (8 + width) + (n + 1) * width
     )
 
 
@@ -2439,7 +2452,8 @@ class TensorInteraction:
         x2: NDArray,
         parent_specs: dict,
         geometry_weight: NDArray | None,
-    ) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+    ) -> tuple[NDArray, NDArray, NDArray, NDArray, Any, Any]:
+        """The centred margin bases on the rows, their penalties, and each margin's ``distinct``."""
         m1, m2 = self._prepare_marginal_infos(
             x1,
             x2,
@@ -2457,7 +2471,7 @@ class TensorInteraction:
         self._marginal2 = replace(m2, basis=np.empty((0, m2.K_eff)))
         S1 = _normalize_tensor_penalty(m1.penalty) if m1.normalize_penalty else m1.penalty
         S2 = _normalize_tensor_penalty(m2.penalty) if m2.normalize_penalty else m2.penalty
-        return B1, B2, S1, S2
+        return B1, B2, S1, S2, getattr(m1, "distinct", None), getattr(m2, "distinct", None)
 
     def _structural_tensor_penalty(self) -> NDArray | None:
         """The tensor penalty built from margins without knot-spacing spread, if any margin has one.
@@ -2610,15 +2624,32 @@ class TensorInteraction:
         parent_specs: dict,
         sample_weight: NDArray | None = None,
     ) -> GroupInfo | list[GroupInfo]:
-        B1, B2, S1, S2 = self._prepare_centered_marginals(
+        return self._build_exact(x1, x2, parent_specs, sample_weight, on_cells=False)
+
+    def _build_exact(
+        self,
+        x1: NDArray,
+        x2: NDArray,
+        parent_specs: dict,
+        sample_weight: NDArray | None = None,
+        *,
+        on_cells: bool,
+    ) -> GroupInfo | list[GroupInfo]:
+        """``build``; ``on_cells`` also finds the row support on the occupied cells.
+
+        That is the design builder's build (``GroupInfo.row_support``): with a
+        support found, ``columns`` stays ``None`` and the product over every
+        row is never formed.
+        """
+        B1, B2, S1, S2, distinct1, distinct2 = self._prepare_centered_marginals(
             x1,
             x2,
             parent_specs,
             sample_weight,
         )
-        # The row-wise Kronecker product, on its occupied cells when it repeats.
-        support = _tensor_cell_support(B1, x1, B2, x2)
-        T = None if support is not None else _row_kron(sp.csr_matrix(B1), sp.csr_matrix(B2))
+        support = _tensor_cell_support(B1, distinct1, B2, distinct2) if on_cells else None
+        # The row-wise Kronecker product, unless the support stands in for it.
+        T = None if isinstance(support, tuple) else _row_kron(sp.csr_matrix(B1), sp.csr_matrix(B2))
 
         # Tensor product penalty on the centered marginal spaces.
         omega_1 = np.kron(S1, np.eye(self._p2))
@@ -2626,7 +2657,7 @@ class TensorInteraction:
         infos = self._build_group_infos(omega_1, omega_2)
         for info in infos if isinstance(infos, list) else [infos]:
             info.columns = T
-            info.row_support = None if support is None else (None, *support)
+            info.row_support = support
         return infos
 
     def build_discrete(

@@ -490,6 +490,13 @@ def compile_predictor_design(
                         # one byte a row for the usual few levels, not eight.
                         scan_codes[name] = row_codes.astype(np.min_scalar_type(len(spec._levels)))
                         del row_codes
+                    elif getattr(spec.build, "__func__", None) is _SplineBase.build:
+                        # The design keeps the row support the build finds. A
+                        # subclass that overrides build() keeps its override,
+                        # and its basis is scanned.
+                        result = cast(_SplineBase, spec)._build_with_row_support(
+                            x_col, sample_weight=feature_build_weight
+                        )
                     else:
                         result = spec.build(x_col, sample_weight=feature_build_weight)
             except ValueError as err:
@@ -728,7 +735,15 @@ def compile_predictor_design(
                 build_kwargs["alias_prune"] = alias_prune
             if curve_separation is not None:
                 build_kwargs["separation"] = curve_separation
-            result = ispec.build(x1, x2, parent_specs, **build_kwargs)
+            if getattr(ispec.build, "__func__", None) is TensorInteraction.build:
+                # The product on its occupied cells, never over every row when
+                # it repeats. A subclass that overrides build() keeps its
+                # override, and its product is scanned.
+                result = cast(TensorInteraction, ispec)._build_exact(
+                    x1, x2, parent_specs, on_cells=True, **build_kwargs
+                )
+            else:
+                result = ispec.build(x1, x2, parent_specs, **build_kwargs)
         if isinstance(ispec, SplineCategorical) and ispec._separated_curves:
             records.append(("curve", iname, ispec._separated_curves))
         if isinstance(ispec, NumericCategorical | PolynomialCategorical):

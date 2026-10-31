@@ -8,7 +8,7 @@ The solver never sees feature types — only GroupInfo objects.
 from __future__ import annotations
 
 from collections.abc import Callable, Hashable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import numpy as np
@@ -155,13 +155,14 @@ class GroupInfo:
     # reporting; do not widen this flag to a producer merely because its rows
     # repeat.
     supports_row_compression: bool = False
-    # ``(basis, B_unique, row_index)``: the lossless row support of ``basis``,
-    # found by the term from the rows it formed per covariate value or cell
-    # (``detect_row_support``'s ``cell_index``); ``basis`` is ``None`` when the
-    # term never formed the full basis.  The builder stores it in place of
-    # scanning only while ``columns is basis``, so a caller that replaces
-    # ``columns`` is scanned afresh; ``None`` leaves the scan to the builder.
-    row_support: tuple[Any, NDArray, NDArray] | None = None
+    # The design builder's own spline and tensor builds find the row support
+    # of the basis on its rows per covariate value or occupied cell
+    # (``detect_cell_support``): ``(B_unique, row_index)``, or ``"declined"``
+    # when its gates decline it.  The builder stores either in place of
+    # scanning ``columns``, which a tensor with a support leaves ``None``;
+    # ``None`` here leaves the scan to the builder.  A public ``build()``
+    # never sets it.
+    row_support: tuple[NDArray, NDArray] | Literal["declined"] | None = None
     cat_codes: NDArray | None = None  # (n,) integer codes for categorical features
     # select=True subgroup support for double-penalty decomposition
     subgroup_name: str | None = None  # "linear" or "spline"
@@ -431,6 +432,11 @@ class TensorMarginalInfo:
     # (K_eff, K_eff) penalty with ``penalty``'s null space and no knot-spacing
     # spread, when the spec knows one (``_structural_penalty_for_order``)
     structural_penalty: NDArray | None = None
+    # ``(values, index)``: the distinct points the basis was evaluated on and
+    # each row's index into them (``distinct_values``).  Set only on a margin
+    # ``tensor_marginal_info`` evaluated so, and read with ``getattr``;
+    # ``replace`` drops it, so no derived or stored margin keeps it.
+    distinct: tuple[NDArray, NDArray] = field(init=False, repr=False, compare=False)
 
 
 # ── Tensor raw band ────────────────────────────────────────────
