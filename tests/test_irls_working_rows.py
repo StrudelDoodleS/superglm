@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 
 from superglm._tweedie import tweedie_logpdf
-from superglm.distributions import Gamma, Gaussian, Poisson, Tweedie
-from superglm.links import IdentityLink, LogLink, SqrtLink
+from superglm.distributions import Binomial, Gamma, Gaussian, Poisson, Tweedie
+from superglm.links import IdentityLink, LogitLink, LogLink, SqrtLink
 from superglm.solvers.working_rows import (
     _gamma_log_observed_rows,
     _tweedie_log_observed_rows,
@@ -478,6 +478,28 @@ def test_the_null_mode_given_an_offset_solves_the_intercept_score(family, link) 
     information = float(np.sum(weights * dmu**2 / variance))
     deviance = float(np.sum(weights * distribution.deviance_unit(y, mu)))
     assert abs(score) <= 2.0 * np.sqrt(1e-10 * deviance * information), (score, information)
+
+
+@pytest.mark.parametrize("y_value", [0.0, 1.0])
+def test_a_binomial_mean_of_zero_or_one_has_no_null_mode(y_value) -> None:
+    """An all-zero or all-one binomial response has no finite intercept, so
+    there is no mode to seed from, whatever the logit link's own clamp of the
+    mean to ``[1e-15, 1 - 1e-15]`` would make of it.  Mutation: reading the
+    link at the clamped mean returns a mode held at the tail, whose weight
+    seeds every random effect at the lambda floor.
+    """
+    from superglm.solvers.working_rows import null_fit_eta
+
+    eta = null_fit_eta(
+        distribution=Binomial(),
+        link=LogitLink(),
+        y=np.full(50, y_value),
+        sample_weight=np.ones(50),
+        offset=np.zeros(50),
+        weight_semantics="prior",
+    )
+
+    assert eta is None
 
 
 def test_a_null_mode_on_a_clip_that_cannot_raise_its_weight_is_returned() -> None:

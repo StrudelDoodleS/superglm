@@ -3304,13 +3304,16 @@ class TestColdBootstrapStart:
 
     @pytest.mark.parametrize("family", ["poisson", "gamma"])
     def test_a_row_held_where_the_weight_falls_still_scales_the_start(self, monkeypatch, family):
-        """A row whose offset is 100 below the rest sits past the log link's
-        clip at -80, where the Poisson weight ``mu`` falls toward zero and the
-        Gamma weight is flat, so the clip cannot raise it: the row is read as
-        the clip holds it, as master read it, and the retry is made.  Its
-        start is the start with that row's offset at -80, inside the band:
-        the Poisson weight of either is below the rounding of every sum it
-        enters, and the Gamma weight is the prior weight at any ``eta``.
+        """A row whose offset is 100 below the rest puts the null mode on a
+        log-link clip the weight cannot rise past.  Under Poisson the row sits
+        past the lower clip at -80, where the weight ``mu`` falls toward zero.
+        Under Gamma the closed-form intercept follows that row, so the other
+        rows are held at the upper clip, +80, where the weight is the prior
+        weight at any ``eta``.  Either way the rows are read as the clip holds
+        them, as master read them, and the retry is made.  Its start is the
+        start with that row's offset at -80: the Poisson weight of either is
+        below the rounding of every sum it enters, and the Gamma weight does
+        not depend on ``eta``.
         Mutation: a87b1ac4 refused every clipped row and left the cold start.
         """
         from superglm.distributions import Gamma
