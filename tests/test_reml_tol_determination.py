@@ -527,7 +527,8 @@ class TestFreezeDiagnostics:
 
 
 class TestFreezeRevalidation:
-    def test_the_tolerance_exit_revalidates_a_live_masked_gradient(self):
+    @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+    def test_the_tolerance_exit_revalidates_a_live_masked_gradient(self, discrete):
         """benign_3k's frozen x2 keeps a raw gradient far above the default
         reml_tol*scale, so the accepting iteration cannot trust the stale
         mask blindly: a coupled partner's update can re-activate a masked
@@ -535,7 +536,9 @@ class TestFreezeRevalidation:
         cannot see. The engine recomputes the freeze decision against the
         current Hessian before accepting, records that it did, and stops
         only because the mask survives -- with the calibrated behavior
-        unchanged."""
+        unchanged.  Both engines pass their stop mask to ``revalidate_stop``;
+        mutation check: passing ``None`` from either engine accepts the stop
+        unrevalidated, and the record below is never written."""
         rng = np.random.default_rng(5)
         n = 3_000
         frame = pd.DataFrame({"x1": rng.uniform(0, 1, n), "x2": rng.uniform(0, 1, n)})
@@ -543,6 +546,7 @@ class TestFreezeRevalidation:
         y = rng.poisson(np.exp(eta)).astype(float)
         model = SuperGLM(
             family="poisson",
+            discrete=discrete,
             features={
                 "x1": Spline(kind="cr", n_knots=8),
                 "x2": Spline(kind="cr", n_knots=8),
@@ -557,21 +561,24 @@ class TestFreezeRevalidation:
         # 0.0809 over x; the penalty is measured in knot intervals of about 1/9.
         assert float(r.lambdas["x1"]) == pytest.approx(58.9, rel=0.05)
 
-    def test_the_published_record_is_the_revalidation_itself(self, monkeypatch):
+    @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+    def test_the_published_record_is_the_revalidation_itself(self, monkeypatch, discrete):
         """The revalidation is the last freeze decision made -- the one
         that authorized score_objective_tolerance -- so the published
         record must carry ITS quantities, not iteration k-1's."""
         import superglm.reml.direct as direct_module
+        import superglm.reml.discrete as discrete_module
 
+        engine = discrete_module if discrete else direct_module
         captured = []
-        real = direct_module.freeze_flat_directions
+        real = engine.freeze_flat_directions
 
         def spy(*args, **kwargs):
             decision = real(*args, **kwargs)
             captured.append(decision)
             return decision
 
-        monkeypatch.setattr(direct_module, "freeze_flat_directions", spy)
+        monkeypatch.setattr(engine, "freeze_flat_directions", spy)
         rng = np.random.default_rng(5)
         n = 3_000
         frame = pd.DataFrame({"x1": rng.uniform(0, 1, n), "x2": rng.uniform(0, 1, n)})
@@ -579,6 +586,7 @@ class TestFreezeRevalidation:
         y = rng.poisson(np.exp(eta)).astype(float)
         model = SuperGLM(
             family="poisson",
+            discrete=discrete,
             features={
                 "x1": Spline(kind="cr", n_knots=8),
                 "x2": Spline(kind="cr", n_knots=8),
