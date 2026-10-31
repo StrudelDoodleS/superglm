@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import UNIT_ROUNDOFF
 from superglm.diagnostics.convergence import (
     lss_fisher_curvature_message,
     lss_no_ascent_direction_message,
@@ -30,7 +31,11 @@ from superglm.distributional.family import (
 from superglm.distributional.inference import JointInference, compute_joint_inference
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.null_model import JointNullModel, fit_joint_null_model
-from superglm.distributional.predictor import CompiledPredictor, Predictor
+from superglm.distributional.predictor import (
+    CompiledPredictor,
+    Predictor,
+    PredictorExecutionPlan,
+)
 from superglm.distributional.result import (
     ConvergenceReason,
     DenseSolverConfig,
@@ -539,6 +544,77 @@ def _limit_row_disclosure(
     )
 
 
+def _predictor_values(state, coefficients: NDArray) -> NDArray[np.float64]:
+    """``X c`` for one predictor's coefficients, its intercept implicit and no offset."""
+    intercept = state.intercept_index is not None
+    values = np.full(state.design.n, coefficients[0] if intercept else 0.0, dtype=np.float64)
+    if state.design.p:
+        values += state.design.matvec(coefficients[int(intercept) :])
+    return values
+
+
+def _wall_disclosure(
+    family: WallDisclosingFamily,
+    solver_result: DenseSolverResult,
+    response: NDArray,
+    likelihood_plan: FamilyLikelihoodPlan,
+    layout: StackedLayout,
+) -> str | None:
+    """Disclose the rows a fit pressed against a wall of a bounded parameter.
+
+    The family names the rows near a wall with the parameter's natural-scale
+    score and observed information there. A fit can press rows against a wall
+    only along a run-off direction of the parameter's own predictor: one that
+    moves rows near a wall and leaves every other row where it is, since those
+    rows hold any other direction at a finite optimum. The run-off directions
+    are the null space of the design rows away from the walls; a row no
+    coefficient moves, such as an offset-only row, neither moves nor steers
+    them. In them a wall is active, as for a bound constraint, when a Newton
+    step would cross it, on a model of the parameter that is linear in the
+    coefficients over the rows near a wall. The logit link that keeps the
+    parameter inside does not enter: at a wall its derivative vanishes, and the
+    step asks what the data want of the parameter itself. A direction with no
+    positive curvature but a slope rises without limit, so it carries rows out
+    of the walls too. Eigenvalues and slopes within ``u`` times the largest,
+    times the predictor's width, are round-off.
+    """
+    rows = family.wall_rows(response, solver_result.theta, likelihood_plan)
+    if rows is None:
+        return None
+    state = next(
+        state for state in layout.predictors if state.parameter_index == rows.parameter_index
+    )
+    execution = PredictorExecutionPlan(state.design, state.intercept_index is not None)
+    n_rows = state.design.n
+    resolution = execution.width * UNIT_ROUNDOFF
+    away = np.ones(n_rows, dtype=np.float64)
+    away[rows.index] = 0.0
+    held_values, held_vectors = np.linalg.eigh(execution.diagonal_moment(away))
+    free = held_vectors[:, held_values <= resolution * np.max(held_values, initial=0.0)]
+    if not free.shape[1]:
+        return None
+    score = np.zeros(n_rows, dtype=np.float64)
+    information = np.zeros(n_rows, dtype=np.float64)
+    score[rows.index] = rows.score
+    information[rows.index] = rows.information
+    gradient = free.T @ execution.score(score)
+    values, vectors = np.linalg.eigh(free.T @ execution.diagonal_moment(information) @ free)
+    along = vectors.T @ gradient
+    curved = values > resolution * np.max(np.abs(values), initial=0.0)
+    rising = ~curved & (np.abs(along) > resolution * np.linalg.norm(gradient))
+    step = free @ (vectors[:, curved] @ (along[curved] / values[curved]))
+    shift = _predictor_values(state, step)
+    drift = _predictor_values(state, free @ (vectors[:, rising] @ along[rising]))
+    shift = shift[rows.index] * rows.outward
+    drift = drift[rows.index] * rows.outward
+    pressed = (shift > rows.distance) | (drift > resolution * np.max(np.abs(drift), initial=0.0))
+    n_upper = int(np.count_nonzero(pressed & (rows.outward > 0.0)))
+    n_lower = int(np.count_nonzero(pressed & (rows.outward < 0.0)))
+    if not (n_upper or n_lower):
+        return None
+    return family.wall_disclosure(n_lower, n_upper, n_rows)
+
+
 def _curvature_disclosures(
     family: DistributionalFamily,
     solver_result: DenseSolverResult,
@@ -559,8 +635,9 @@ def _curvature_disclosures(
     :class:`LimitRowDisclosingFamily` also reports its rows at a limit,
     converged or not, when the fit's terminal rank decision leaves one of that
     parameter's coefficients not estimable (see ``_limit_row_disclosure``), and
-    a :class:`WallDisclosingFamily` names its rows fitted at a wall of a bounded
-    link; a failed disclosure never fails the finished fit.
+    a :class:`WallDisclosingFamily` names the rows the fit pressed against a
+    wall of a bounded link (see ``_wall_disclosure``); a failed disclosure never
+    fails the finished fit.
     """
     telemetry = solver_result.terminal_curvature
     messages: list[str] = []
@@ -595,9 +672,13 @@ def _curvature_disclosures(
             message = None
         if message:
             messages.append(message)
-    if isinstance(family, WallDisclosingFamily) and solver_result.theta is not None:
+    if (
+        isinstance(family, WallDisclosingFamily)
+        and solver_result.theta is not None
+        and layout is not None
+    ):
         try:
-            message = family.wall_disclosure(response, solver_result.theta, likelihood_plan)
+            message = _wall_disclosure(family, solver_result, response, likelihood_plan, layout)
         except Exception:  # noqa: BLE001 - a failed disclosure must not fail the fit
             message = None
         if message:

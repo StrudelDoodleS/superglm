@@ -38,6 +38,7 @@ from superglm.distributional.family import (
     ObservationContract,
     ParameterSpec,
     ParameterSupport,
+    WallRows,
     _register_likelihood_reuse_contract,
     _validated_derivative_order,
     _validated_parameter_matrix,
@@ -74,13 +75,10 @@ _CAPABILITIES = FamilyCapabilities(
     random=False,
     response_mean=True,
 )
-# The shape's sampling standard deviation is of order 1/sqrt(n). Under an upper
-# wall of one, the default prediction reads a shape within _WALL_RESOLUTION of
-# one as one, where the mean diverges: no sample below about 1e12 rows tells the
-# two apart. A shape within _NEAR_WALL of a wall is within one standard deviation
-# of it for any sample below about 1e8 rows; fits pressed past a wall stop far
-# inside that distance (5e-6 and less, even at inner_tol=1e-5).
-_WALL_RESOLUTION = 1.0e-6
+# A shape within _NEAR_WALL of a wall is within one sampling standard deviation
+# of it, of order 1/sqrt(n), for any sample below about 1e8 rows. Fits pressed
+# past a wall stop far inside that distance (5e-6 and less, even at
+# inner_tol=1e-5), so those rows are the candidates the fit's wall test reads.
 _NEAR_WALL = 1.0e-4
 
 
@@ -188,9 +186,8 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     The current shape domain gives every row nonnegative, unbounded support
     and a finite mean. Negative shapes require response-dependent support
     and are not supported. ``predict`` returns the mean excess,
-    ``scale / (1 - shape)``. Under an upper wall of one it returns ``inf``
-    where the shape is within ``1e-6`` of one, which no sample can tell from
-    one. A fit whose shape reaches a wall says so in ``result_.warnings``. The threshold is not a fitted parameter.
+    ``scale / (1 - shape)``. A fit whose shape reaches a wall says so in
+    ``result_.warnings``. The threshold is not a fitted parameter.
     """
 
     shape_lower: float = 0.0
@@ -411,63 +408,46 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         return expected_information(values[:, 0], values[:, 1], bound.multiplier)
 
     def default_prediction(self, theta) -> NDArray[np.float64]:
-        """The mean excess; under an upper wall of one, infinite at a shape that close to one."""
         values = self._theta(theta, None)
-        mean = np.array(generalized_pareto_mean(values[:, 0], values[:, 1]))
-        if self.shape_upper == 1.0:
-            mean[1.0 - values[:, 1] <= _WALL_RESOLUTION] = np.inf
-        return readonly(mean)
+        return generalized_pareto_mean(values[:, 0], values[:, 1])
 
-    def wall_disclosure(self, y, theta, plan) -> str | None:
-        """Name the rows whose fitted shape is at a wall, and what that does to them.
+    def wall_rows(self, y, theta, plan) -> WallRows | None:
+        """The fitted rows within ``_NEAR_WALL`` of a shape wall, with the shape's derivatives.
 
-        The logit link keeps the fitted shape strictly inside, so data that want
-        it beyond a wall leave it wherever the solver's tolerance stops it, close
-        to the wall with its score still pointing out. Only rows within
-        ``_NEAR_WALL`` of a wall are candidates; an interior fit, even one that
-        bends some rows towards a wall, keeps them further away. For the
-        candidates at each wall, the wall is active, as for a bound constraint,
-        when a Newton step in their shape would cross it. That step is their
-        summed shape score over their summed observed shape information, at the
-        fitted scale. The score is the profile score, since the fitted scale is
-        at its own optimum; the information leaves out the scale's share, so the
-        step is the shorter one. Without positive information the quadratic model
-        rises without limit along an outward score, so the wall is active. A
-        candidate is at its wall when its distance to it is shorter than the step.
-
-        At an upper wall of one the mean and expected shortfall diverge; at any
-        other wall the shape is set by the wall, not the data. The fit's curvature
-        along the shape vanishes at a wall, so the Gaussian approximation behind
-        standard errors and posterior draws fails there.
+        Only those rows are evaluated, through the plan's own row selection.
         """
         response = _validated_response(y)
         values = self._theta(theta, len(response))
-        evaluated = self.evaluate_natural(response, values, plan, derivative_order=2)
-        score = evaluated.score[:, 1]
-        information = -evaluated.hessian_packed[:, 2]
         shape = values[:, 1]
-        to_upper = self.shape_upper - shape
         to_lower = shape - self.shape_lower
+        to_upper = self.shape_upper - shape
+        upper = to_upper <= to_lower
+        distance = np.where(upper, to_upper, to_lower)
+        index = np.flatnonzero(distance <= _NEAR_WALL)
+        if not index.size:
+            return None
+        near = self._plan(plan, len(response)).take(index)
+        evaluated = self.evaluate_natural(response[index], values[index], near, derivative_order=2)
+        return WallRows(
+            parameter_index=1,
+            index=index,
+            score=np.asarray(evaluated.score[:, 1], dtype=np.float64),
+            information=-np.asarray(evaluated.hessian_packed[:, 2], dtype=np.float64),
+            distance=distance[index],
+            outward=np.where(upper[index], 1.0, -1.0),
+        )
 
-        def rows_at_wall(near: NDArray[np.bool_], distance: NDArray, outward: float) -> int:
-            push = outward * float(np.sum(score[near]))
-            if not push > 0.0:
-                return 0
-            near_information = float(np.sum(information[near]))
-            step = push / near_information if near_information > 0.0 else np.inf
-            return int(np.count_nonzero(near & (distance < step)))
-
-        n_upper = rows_at_wall((to_upper <= _NEAR_WALL) & (to_upper <= to_lower), to_upper, 1.0)
-        n_lower = rows_at_wall((to_lower <= _NEAR_WALL) & (to_lower < to_upper), to_lower, -1.0)
-        n_rows = len(shape)
+    def wall_disclosure(self, n_lower: int, n_upper: int, n_rows: int) -> str:
+        """Say what a tail shape pressed against each wall does to the fitted law."""
         findings = []
         if n_upper:
             if self.shape_upper == 1.0:
                 consequence = (
-                    "the mean and the expected shortfall are infinite there, and predict() "
-                    "returns inf for a shape within 1e-6 of one; quantiles and the distribution "
-                    "function stay finite. Use quantiles or bounded expectations, or choose "
-                    "another threshold."
+                    "the mean and the expected shortfall are infinite at a shape of one. "
+                    "predict() and expected_shortfall() still return their values at the shape "
+                    "where the fit stopped, which the solver's tolerance sets rather than the "
+                    "data; quantiles and the distribution function stay finite. Use quantiles or "
+                    "bounded expectations, or choose another threshold."
                 )
             else:
                 consequence = (
@@ -477,8 +457,7 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
                 )
             findings.append(
                 f"{n_upper} of {n_rows} rows have a tail shape at the upper wall "
-                f"{self.shape_upper:g}: the data put the shape at or beyond it, so "
-                f"{consequence}"
+                f"{self.shape_upper:g}: the data put the shape at or beyond it, so {consequence}"
             )
         if n_lower:
             remedy = (
@@ -492,8 +471,6 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
                 f"{self.shape_lower:g}: the data put the shape at or below it, so the tail is "
                 f"set by the wall rather than the data. {remedy}"
             )
-        if not findings:
-            return None
         return (
             "SuperLSS GeneralizedParetoLSS fit: "
             + " ".join(findings)
