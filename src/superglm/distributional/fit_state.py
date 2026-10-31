@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import UNIT_ROUNDOFF
 from superglm.diagnostics.convergence import (
     lss_fisher_curvature_message,
     lss_no_ascent_direction_message,
@@ -25,11 +26,16 @@ from superglm.distributional.family import (
     FamilyLikelihoodPlan,
     FitFailureDiagnosingFamily,
     LimitRowDisclosingFamily,
+    WallDisclosingFamily,
 )
 from superglm.distributional.inference import JointInference, compute_joint_inference
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.null_model import JointNullModel, fit_joint_null_model
-from superglm.distributional.predictor import CompiledPredictor, Predictor
+from superglm.distributional.predictor import (
+    CompiledPredictor,
+    Predictor,
+    PredictorExecutionPlan,
+)
 from superglm.distributional.result import (
     ConvergenceReason,
     DenseSolverConfig,
@@ -39,6 +45,7 @@ from superglm.distributional.result import (
 )
 from superglm.distributional.solver.chunks import ChunkSize
 from superglm.distributional.telemetry import CurvatureTelemetry
+from superglm.distributional.walls import PRESSED_STEP, outward_step, wall_rows
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     WeightContract,
@@ -538,6 +545,78 @@ def _limit_row_disclosure(
     )
 
 
+def _wall_disclosure(
+    family: WallDisclosingFamily,
+    solver_result: DenseSolverResult,
+    layout: StackedLayout,
+) -> str | None:
+    """Disclose the rows a fit pressed against a wall of a bounded parameter.
+
+    A bounded link reaches a wall only as its linear predictor runs to
+    infinity, so a fit pressed against one has no finite optimum: the
+    likelihood keeps rising along a direction of recession after the stopping
+    rule sees no progress, and more iterations keep moving the estimate
+    (Correia, Guimarães and Zylkin, arXiv:1903.01633; the refitting check for
+    infinite estimates of Kosmidis et al., described in arXiv:2610.09951). The
+    solver continues any fit stopped with a row near a wall still moving
+    towards it, and one more Newton step from the stop, in the fit's own
+    coefficient subspace, then tells the two apart: in the link's exponential
+    tail it carries a row the data press outward by ``PRESSED_STEP`` or more
+    however close the row already is, while at a finite optimum it vanishes.
+    A direction the terminal rank decision dropped has no resolved curvature,
+    so the step cannot move along it; such a direction presses the rows it
+    carries outward when the terminal score along it is resolved and points
+    that way, unless the shape design itself nearly cancels it. A row the link has clipped to its last float before a wall has
+    no derivative left for either test; the family says what that means for
+    its functionals, whatever put the row there.
+    """
+    rows = wall_rows(family, layout, solver_result.coefficients, solver_result.theta)
+    if rows is None:
+        return None
+    score = solver_result.terminal_score
+    pressed = outward_step(rows, solver_result.solve_terminal(score)) >= PRESSED_STEP
+    face = solver_result.coefficient_face
+    if face is None:
+        dropped = solver_result.terminal_rank.null_basis()
+    else:
+        dropped = face.null_basis @ solver_result.terminal_reduced_rank.null_basis()
+    resolution = len(score) * UNIT_ROUNDOFF
+    if dropped.shape[1]:
+        execution = PredictorExecutionPlan(
+            rows.state.design, rows.state.intercept_index is not None
+        )
+        column_norms = np.diag(execution.diagonal_moment(np.ones(rows.state.design.n)))
+    for direction in dropped.T:
+        slope = float(direction @ score)
+        if abs(slope) <= resolution * float(np.abs(direction) @ np.abs(score)):
+            continue
+        carried = np.sign(slope) * outward_step(rows, direction)
+        # a direction whose columns nearly cancel in the rows is a near-collinear design
+        # direction, dropped for the design's sake rather than the link's
+        spread = float(direction[rows.state.coefficient_slice] ** 2 @ column_norms)
+        if float(carried @ carried) <= np.sqrt(UNIT_ROUNDOFF) * spread:
+            continue
+        pressed |= carried > resolution * float(np.max(np.abs(carried)))
+    last = np.where(
+        rows.upper_side,
+        np.nextafter(rows.upper, rows.lower),
+        np.nextafter(rows.lower, rows.upper),
+    )
+    clipped = rows.near & (rows.values == last)
+    pressed &= rows.near & ~clipped
+    return family.wall_disclosure(
+        (
+            int(np.count_nonzero(pressed & ~rows.upper_side)),
+            int(np.count_nonzero(pressed & rows.upper_side)),
+        ),
+        (
+            int(np.count_nonzero(clipped & ~rows.upper_side)),
+            int(np.count_nonzero(clipped & rows.upper_side)),
+        ),
+        rows.state.design.n,
+    )
+
+
 def _curvature_disclosures(
     family: DistributionalFamily,
     solver_result: DenseSolverResult,
@@ -557,8 +636,10 @@ def _curvature_disclosures(
     refuse and is disclosed whether or not its diagnosis fires. A
     :class:`LimitRowDisclosingFamily` also reports its rows at a limit,
     converged or not, when the fit's terminal rank decision leaves one of that
-    parameter's coefficients not estimable (see ``_limit_row_disclosure``); a
-    failed disclosure never fails the finished fit.
+    parameter's coefficients not estimable (see ``_limit_row_disclosure``), and
+    a :class:`WallDisclosingFamily` names the rows the fit pressed against a
+    wall of a bounded link (see ``_wall_disclosure``); a failed disclosure never
+    fails the finished fit.
     """
     telemetry = solver_result.terminal_curvature
     messages: list[str] = []
@@ -589,6 +670,17 @@ def _curvature_disclosures(
     ):
         try:
             message = _limit_row_disclosure(family, solver_result, likelihood_plan, layout)
+        except Exception:  # noqa: BLE001 - a failed disclosure must not fail the fit
+            message = None
+        if message:
+            messages.append(message)
+    if (
+        isinstance(family, WallDisclosingFamily)
+        and solver_result.theta is not None
+        and layout is not None
+    ):
+        try:
+            message = _wall_disclosure(family, solver_result, layout)
         except Exception:  # noqa: BLE001 - a failed disclosure must not fail the fit
             message = None
         if message:

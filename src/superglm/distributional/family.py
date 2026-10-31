@@ -617,6 +617,35 @@ class LimitRowDisclosingFamily(Protocol):
 
 
 @runtime_checkable
+class WallDisclosingFamily(Protocol):
+    """Optional family disclosure of a parameter fitted at a wall of its bounded link.
+
+    A bounded link keeps the parameter strictly inside its walls, so data that
+    put the estimate at or beyond a wall drive its predictor without limit and
+    the fit stops wherever its tolerance does. The family names the parameter
+    and its walls (``walls``); the fit decides which rows it pressed there, and
+    the family says what that does to its functionals (``wall_disclosure``).
+    The text is appended to ``result_.warnings``, never raised; a hook that
+    raises is dropped.
+    """
+
+    def walls(self) -> tuple[int, float, float]:
+        """Return the bounded parameter's index and its lower and upper walls."""
+        ...
+
+    def wall_disclosure(
+        self, pressed: tuple[int, int], clipped: tuple[int, int], n_rows: int
+    ) -> str | None:
+        """Return the warning for ``n_rows`` rows, or ``None`` when there is nothing to say.
+
+        ``pressed`` counts the rows at the (lower, upper) wall that the data press
+        against it, and ``clipped`` the rows the link clipped to its last float
+        inside it, where no fit can resolve how close they are.
+        """
+        ...
+
+
+@runtime_checkable
 class ExpectedInformationFamily(Protocol):
     """Optional family capability for natural-scale Fisher information."""
 
