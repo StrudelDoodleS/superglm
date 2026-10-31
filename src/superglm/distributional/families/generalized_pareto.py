@@ -410,13 +410,19 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         return 1, self.shape_lower, self.shape_upper
 
     def wall_disclosure(
-        self, pressed: tuple[int, int], clipped: tuple[int, int], n_rows: int
+        self,
+        pressed: tuple[int, int],
+        clipped: tuple[int, int],
+        n_rows: int,
+        *,
+        unresolved: bool = False,
     ) -> str | None:
         """Say what a tail shape at each wall does to the fitted law.
 
         ``pressed`` counts the rows, at the (lower, upper) wall, that the data
         press against it; ``clipped`` counts the rows the link clipped to its
-        last float inside it, whatever put them there.
+        last float inside it, whatever put them there. ``unresolved`` says the
+        fit lost the shape's curvature at clipped rows.
         """
         n_lower, n_upper = pressed
         clipped_lower, clipped_upper = clipped
@@ -479,7 +485,7 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         if not findings:
             return None
         message = "SuperLSS GeneralizedParetoLSS fit: " + " ".join(findings)
-        if n_lower or n_upper:
+        if n_lower or n_upper or unresolved:
             message += (
                 " Standard errors, intervals and posterior draws that involve the shape are not "
                 "reliable at a wall, where the fit has almost no curvature along the shape."

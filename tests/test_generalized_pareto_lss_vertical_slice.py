@@ -417,7 +417,7 @@ def test_a_pressed_group_whose_direction_the_rank_decision_drops_is_disclosed(he
         model.fit_reml(frame, np.concatenate([pressed, interior]))
     assert model.result_.rank < len(model.result_.coefficients)
     (message,) = _wall_messages(model)
-    assert "1000 of 2000 rows" in message
+    assert "1000 of 2000 rows" in message and "the data put the shape" in message
 
 
 def test_near_collinear_shape_covariates_at_an_interior_optimum_are_not_disclosed():
@@ -434,6 +434,40 @@ def test_near_collinear_shape_covariates_at_an_interior_optimum_are_not_disclose
         predictors=(Predictor("scale", {}), Predictor("shape", {"x": Numeric(), "x2": Numeric()})),
     ).fit(frame, y)
     assert model.result_.rank < len(model.result_.coefficients)
+    assert not _wall_messages(model)
+
+
+def test_a_pressed_shape_run_to_the_last_float_keeps_the_standard_error_caveat():
+    # REML at a tight tolerance runs a heavy tail's shape to the last float below one, where
+    # the rank decision drops the shape and its standard errors carry no shape uncertainty
+    rng = np.random.default_rng(11)
+    y = stats.genpareto(3.0).rvs(2_000, random_state=rng)
+    frame = pd.DataFrame({"x": rng.uniform(size=2_000)})
+    model = model_from_templates(
+        family=GeneralizedParetoLSS(),
+        predictors=(Predictor("scale", {"x": Spline(kind="cr", k=6)}), Predictor("shape", {})),
+    )
+    with pytest.warns(ConvergenceWarning, match="float64 can represent"):
+        model.fit_reml(frame, y, inner_tol=1.0e-12)
+    shape = model.predict_parameters(frame)["shape"].to_numpy()
+    assert np.all(shape == np.nextafter(1.0, 0.0))
+    (message,) = _wall_messages(model)
+    assert "not reliable" in message
+
+
+def test_a_scale_alias_beside_an_interior_shape_near_a_wall_is_not_disclosed():
+    # the rank decision drops the direction in which two scale columns nearly cancel; it lies
+    # in the shape coefficients only on round-off
+    rng = np.random.default_rng(101)
+    x = rng.uniform(size=4_000)
+    y = stats.genpareto(0.008).rvs(4_000, random_state=rng) * np.exp(0.5 * x)
+    frame = pd.DataFrame({"x": x, "x2": x + 1.0e-10 * rng.standard_normal(4_000)})
+    model = model_from_templates(
+        family=GeneralizedParetoLSS(),
+        predictors=(Predictor("scale", {"x": Numeric(), "x2": Numeric()}), Predictor("shape", {})),
+    ).fit(frame, y)
+    assert model.result_.rank < len(model.result_.coefficients)
+    assert float(model.predict_parameters(frame.iloc[:1])["shape"].iloc[0]) < 1.0e-2
     assert not _wall_messages(model)
 
 

@@ -83,6 +83,8 @@ def test_rows_clipped_at_the_last_float_get_the_float64_statement_and_no_data_cl
     assert "the data put the shape" not in clipped and "not reliable" not in clipped
     narrow = GeneralizedParetoLSS(shape_upper=0.35).wall_disclosure((0, 0), (0, 4), 10)
     assert "tail is that of the wall" in narrow and "rounding" not in narrow
+    lost = GeneralizedParetoLSS().wall_disclosure((0, 0), (0, 4), 10, unresolved=True)
+    assert "not reliable" in lost and "the data put the shape" not in lost
 
 
 @pytest.mark.parametrize("scale", [1e-166, 1e200])

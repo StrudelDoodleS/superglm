@@ -634,13 +634,20 @@ class WallDisclosingFamily(Protocol):
         ...
 
     def wall_disclosure(
-        self, pressed: tuple[int, int], clipped: tuple[int, int], n_rows: int
+        self,
+        pressed: tuple[int, int],
+        clipped: tuple[int, int],
+        n_rows: int,
+        *,
+        unresolved: bool = False,
     ) -> str | None:
         """Return the warning for ``n_rows`` rows, or ``None`` when there is nothing to say.
 
         ``pressed`` counts the rows at the (lower, upper) wall that the data press
         against it, and ``clipped`` the rows the link clipped to its last float
-        inside it, where no fit can resolve how close they are.
+        inside it, where no fit can resolve how close they are. ``unresolved``
+        says a direction the fit's rank decision dropped moves clipped rows, so
+        the shape's curvature is lost there.
         """
         ...
 

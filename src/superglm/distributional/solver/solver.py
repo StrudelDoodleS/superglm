@@ -1912,15 +1912,16 @@ def _fit_dense_fixed_lambda_core(
             newton_decrement_tolerance=None,
         )
         try:
-            continued = _run_iterations(
-                context,
-                state,
-                continuation_config,
-                initial_geometry=(coefficient_geometry if state.derivatives is None else None),
-                stop_policy=stop_policy,
-                start_iteration=len(history),
-                phase_recorder=phase_recorder,
-            )
+            with measure_phase(phase_recorder, "terminal_observed_retry_fallback"):
+                continued = _run_iterations(
+                    context,
+                    state,
+                    continuation_config,
+                    initial_geometry=(coefficient_geometry if state.derivatives is None else None),
+                    stop_policy=stop_policy,
+                    start_iteration=len(history),
+                    phase_recorder=phase_recorder,
+                )
         except DenseSolverError:
             continued = None
         if continued is not None and continued.converged:

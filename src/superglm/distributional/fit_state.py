@@ -564,11 +564,13 @@ def _wall_disclosure(
     tail it carries a row the data press outward by ``PRESSED_STEP`` or more
     however close the row already is, while at a finite optimum it vanishes.
     A direction the terminal rank decision dropped has no resolved curvature,
-    so the step cannot move along it; such a direction presses the rows it
-    carries outward when the terminal score along it is resolved and points
-    that way, unless the shape design itself nearly cancels it. A row the link has clipped to its last float before a wall has
-    no derivative left for either test; the family says what that means for
-    its functionals, whatever put the row there.
+    so the step cannot move along it. Such a direction, unless it lies in the
+    shape only on round-off or the shape design itself nearly cancels it,
+    presses the rows it carries outward when the terminal score along it is
+    resolved and points that way. A row the link has clipped to its last
+    float before a wall has no derivative left for either test; the family
+    says what that means for its functionals, whatever put the row there, and
+    whether the shape's curvature is lost along a dropped direction there.
     """
     rows = wall_rows(family, layout, solver_result.coefficients, solver_result.theta)
     if rows is None:
@@ -580,29 +582,40 @@ def _wall_disclosure(
         dropped = solver_result.terminal_rank.null_basis()
     else:
         dropped = face.null_basis @ solver_result.terminal_reduced_rank.null_basis()
-    resolution = len(score) * UNIT_ROUNDOFF
-    if dropped.shape[1]:
-        execution = PredictorExecutionPlan(
-            rows.state.design, rows.state.intercept_index is not None
-        )
-        column_norms = np.diag(execution.diagonal_moment(np.ones(rows.state.design.n)))
-    for direction in dropped.T:
-        slope = float(direction @ score)
-        if abs(slope) <= resolution * float(np.abs(direction) @ np.abs(score)):
-            continue
-        carried = np.sign(slope) * outward_step(rows, direction)
-        # a direction whose columns nearly cancel in the rows is a near-collinear design
-        # direction, dropped for the design's sake rather than the link's
-        spread = float(direction[rows.state.coefficient_slice] ** 2 @ column_norms)
-        if float(carried @ carried) <= np.sqrt(UNIT_ROUNDOFF) * spread:
-            continue
-        pressed |= carried > resolution * float(np.max(np.abs(carried)))
     last = np.where(
         rows.upper_side,
         np.nextafter(rows.upper, rows.lower),
         np.nextafter(rows.lower, rows.upper),
     )
     clipped = rows.near & (rows.values == last)
+    unresolved = np.zeros_like(clipped)
+    resolution = len(score) * UNIT_ROUNDOFF
+    threshold = np.sqrt(UNIT_ROUNDOFF)
+    column_scale = solver_result.terminal_rank.column_scale
+    column_norms = None
+    for direction in dropped.T:
+        # the direction in the rank decision's equilibrated coordinates; a column with no
+        # curvature at all counts at face value
+        equilibrated = np.where(column_scale > 0.0, column_scale * direction, direction)
+        shape_part = equilibrated[rows.state.coefficient_slice]
+        if float(shape_part @ shape_part) <= threshold * float(equilibrated @ equilibrated):
+            continue  # another predictor's direction, in the shape only on round-off
+        move = outward_step(rows, direction)
+        if column_norms is None:
+            execution = PredictorExecutionPlan(
+                rows.state.design, rows.state.intercept_index is not None
+            )
+            column_norms = np.diag(execution.diagonal_moment(np.ones(rows.state.design.n)))
+        # a direction whose columns nearly cancel in the rows is a near-collinear design
+        # direction, dropped for the design's sake rather than the link's
+        spread = float(direction[rows.state.coefficient_slice] ** 2 @ column_norms)
+        if float(move @ move) <= threshold * spread:
+            continue
+        carried = np.abs(move) > resolution * float(np.max(np.abs(move)))
+        unresolved |= clipped & carried
+        slope = float(direction @ score)
+        if abs(slope) > resolution * float(np.abs(direction) @ np.abs(score)):
+            pressed |= carried & (np.sign(slope) * move > 0.0)
     pressed &= rows.near & ~clipped
     return family.wall_disclosure(
         (
@@ -614,6 +627,7 @@ def _wall_disclosure(
             int(np.count_nonzero(clipped & rows.upper_side)),
         ),
         rows.state.design.n,
+        unresolved=bool(np.any(unresolved)),
     )
 
 
