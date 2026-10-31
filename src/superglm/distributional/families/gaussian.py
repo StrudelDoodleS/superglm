@@ -446,7 +446,8 @@ class GaussianLS(LocationPredictor, ScalePredictor):
         untruncated level right-censored at ``c_i`` has a finite estimate only
         when ``sum (mu_i - c_i) > 0`` while some ``mu_i < c_i`` (mirrored for
         left-censored rows), and with both truncation bounds the probability
-        tends to ``(b - c)/(b - a) < 1``.
+        tends to ``(b - c)/(b - a)`` as the scale grows but to one as it
+        shrinks with the location above ``c``, so the location decides.
         """
         return _normal_censored_recession(bounds)
 
