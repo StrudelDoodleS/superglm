@@ -1160,14 +1160,13 @@ def test_numbas_thread_count_caps_a_pooled_section(monkeypatch, scoped):
 
 def test_the_chunked_row_route_releases_a_dense_fit(monkeypatch):
     """A dense design keeps the cap because its row passes run on the pool; every pass that runs
-    on the calling thread instead (the chunked solved-row route, the gradient-only pass and the
-    serial centred Grams) releases it for the rest of the fit, as before the dense threshold, while
-    the pooled support route keeps it."""
+    on the calling thread instead (the chunked solved-row route and the serial centred Grams)
+    releases it for the rest of the fit, as before the dense threshold, while the pooled support
+    route keeps it."""
     import pandas as pd
 
     import superglm._blas_threads as blas
     import superglm.reml._leverage_rows as leverage_rows
-    import superglm.reml.w_derivatives as w_derivatives
     from superglm import Categorical, Spline, SuperGLM
     from superglm._group_matrix._group_matrix_centered import (
         centered_gram_rhs,
@@ -1193,20 +1192,18 @@ def test_the_chunked_row_route_releases_a_dense_fit(monkeypatch):
     inverse, centre = np.eye(dm.p), np.zeros(dm.p)
     leverage_rows.solved_row_blocks(dm, inverse, centre, None, np.ones(dm.n, dtype=bool))
     assert released == [True]
-    w_derivatives._leverage_gradient_rhs(dm, inverse, centre, np.ones(dm.n), float(dm.n))
-    assert released == [True, True]
     ones = np.ones(dm.n)
     centered_gram_rhs(dm=dm, W=ones, mean_x=centre, z_centered=ones)
     centered_signed_grams(dm=dm, weights=[ones], mean_x=centre)
-    assert released == [True] * 4
+    assert released == [True] * 3
     # The pooled support route runs on the pool and keeps the cap.
     monkeypatch.setattr(leverage_rows, "_support_plan", real_plan)
     assert real_plan(ldm, np.eye(ldm.p), np.zeros(ldm.p), None) is not None
     leverage_rows.solved_row_blocks(
         ldm, np.eye(ldm.p), np.zeros(ldm.p), None, np.ones(ldm.n, dtype=bool)
     )
-    assert released == [True] * 4
+    assert released == [True] * 3
     monkeypatch.setattr(leverage_rows, "_support_plan", lambda *args, **kwargs: None)
     monkeypatch.setattr(blas, "_WIDE_DESIGN_THRESHOLD", 10**9)  # a narrow design keeps the cap
     leverage_rows.solved_row_blocks(dm, inverse, centre, None, np.ones(dm.n, dtype=bool))
-    assert released == [True] * 4
+    assert released == [True] * 3

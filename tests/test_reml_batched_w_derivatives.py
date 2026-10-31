@@ -315,7 +315,7 @@ def test_only_second_order_computes_mean_derivative_transposes(monkeypatch, orde
 
 @pytest.mark.parametrize("moments", ["split", "rows"])
 @pytest.mark.parametrize(
-    "route", ["first_order", "single", "second_order", "small_budget", "gradient_only"]
+    "route", ["first_order", "single", "second_order", "small_budget", "leverage_hessian"]
 )
 def test_only_the_first_order_route_batches_signed_grams(monkeypatch, route, moments):
     # Beside a dense column the Grams take the split's moments or centred
@@ -344,7 +344,7 @@ def test_only_the_first_order_route_batches_signed_grams(monkeypatch, route, mom
     result = w_derivatives.reml_w_correction(
         **kwargs,
         w_correction_order=2 if route == "second_order" else 1,
-        gradient_only=route == "gradient_only",
+        leverage_hessian=route == "leverage_hessian",
     )
     assert result is not None
     assert batches == ([(moments, 3)] if route == "first_order" else [])

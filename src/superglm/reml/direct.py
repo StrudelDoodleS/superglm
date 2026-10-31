@@ -81,7 +81,7 @@ from superglm.solvers.centered_system import (
     _InitialDataReuse,
 )
 from superglm.solvers.dispersion import lazy_likelihood_size
-from superglm.solvers.hessian_factor import DenseHessianFactor, as_hessian_factor
+from superglm.solvers.hessian_factor import as_hessian_factor
 from superglm.solvers.irls_direct import StructuredSolverError, fit_irls_direct
 from superglm.solvers.mode_score import centred_warm_start, mode_certification_bar
 from superglm.solvers.structured import (
@@ -96,10 +96,10 @@ from superglm.types import GroupSlice, PenaltyComponent
 # the two can never drift apart.
 _OBSERVED_PIRLS_TOL_CEILING = OBSERVED_PIRLS_TOL_CEILING
 
-# One dense leverage pass replaces one derivative Gram per penalty. Mixed
+# One leverage pass replaces one derivative Gram per penalty. Mixed
 # spline/categorical timings cross over at four penalties on the reference host;
 # below that, the specialized Gram route remains cheaper.
-_LEVERAGE_GRADIENT_MIN_PENALTIES = 4
+_LEVERAGE_MIN_PENALTIES = 4
 # The pre-solve (``presolve``) hands the exact loop a start, not a result: it
 # stops once a working-model update moves the objective by less than this
 # fraction of its scale.  On freMTPL2 (1 to 10 interaction pairs) the cached-W
@@ -1228,23 +1228,13 @@ def optimize_direct_reml(
 
         # W(rho) correction
         _t0 = _time.perf_counter()
-        leverage_gradient = False
         leverage_hessian = False
         w_correction_args: tuple = ()
         w_correction_kwargs: dict[str, Any] = {}
         if not discrete:
-            leverage_gradient = bool(
-                type(distribution) is Binomial
-                and type(link) is LogitLink
-                and w_correction_order == 1
-                and len(penalties) >= _LEVERAGE_GRADIENT_MIN_PENALTIES
-                and geometry is None
-                and isinstance(as_hessian_factor(reml_inverse), DenseHessianFactor)
-            )
             leverage_hessian = bool(
-                not leverage_gradient
-                and w_correction_order == 1
-                and len(penalties) >= _LEVERAGE_GRADIENT_MIN_PENALTIES
+                w_correction_order == 1
+                and len(penalties) >= _LEVERAGE_MIN_PENALTIES
                 and float(len(penalties)) * dm.n * dm.p * dm.p >= _LEVERAGE_HESSIAN_MIN_GRAM_WORK
                 and sparse_leverage
             )
@@ -1280,7 +1270,6 @@ def optimize_direct_reml(
                 "w_correction_order": w_correction_order,
                 "reml_penalties": penalties,
                 "geometry": geometry,
-                "gradient_only": leverage_gradient,
                 "leverage_hessian": leverage_hessian,
                 "gradient_terms_only": structured_alternative,
             }
@@ -1294,14 +1283,12 @@ def optimize_direct_reml(
             if w_corr is not None:
                 if w_corr[1] is not None:
                     correction_mode = "derivative_grams"
-                elif len(w_corr) > 2:
+                else:
                     # The leverage route's last entry: its cross terms, or None
                     # when its Newton model takes the gradient alone.
                     correction_mode = (
                         "leverage_hessian" if w_corr[-1] is not None else "leverage_tables"
                     )
-                else:
-                    correction_mode = "leverage_gradient"
             profile["reml_w_correction_mode"] = correction_mode
         _t_w_correction += _time.perf_counter() - _t0
         if w_corr is not None:

@@ -527,36 +527,39 @@ def test_the_weight_correction_centres_its_grams_and_leverage_rows(columns, rout
     """The W(rho) correction's signed Grams and leverage rows read the exact centre pair.
 
     Sol's reproduction: the same converged binomial/logit state, its columns
-    translated exactly by 1e16.  The derivative Grams and
-    ``_leverage_gradient_rhs`` centred rows about the rounded ``mean_x``: the
-    correction moved 9.2% (ordinary route) and 17.1% (leverage route, the
-    default for binomial/logit exact REML with four or more penalties).
-    Centred as ``(x - c) - d`` the two readings agree to the rounding of the
-    sums, ``4 gamma_{n+2p+5} M_j`` (``_correction_magnitude``).  Mutation:
-    ``d`` dropped from ``_dense_split_signed_gram`` or ``mean_lo`` from
-    ``_leverage_gradient_rhs``.
+    translated exactly by 1e16.  The derivative Grams and the leverage rows
+    centred about the rounded ``mean_x`` moved the correction 9.2% (ordinary
+    route) and 17.1% (leverage route).  Centred as ``(x - c) - d`` the two
+    readings agree to the rounding of the sums, ``4 gamma_{n+2p+5} M_j``
+    (``_correction_magnitude``).  Mutation: ``d`` dropped from
+    ``_dense_split_signed_gram`` or ``mean_lo`` from the solved rows
+    (``_leverage_rows.solved_row_blocks``).
     """
     from superglm.reml.w_derivatives import reml_w_correction
 
     state = _dense_binomial_state(columns)
     moved = _translated_state(state, 1e16)
     leverage = route == "leverage"
-    base = reml_w_correction(**state, gradient_only=leverage)
-    shifted = reml_w_correction(**moved, gradient_only=leverage)
+    base = reml_w_correction(**state, leverage_hessian=leverage)
+    shifted = reml_w_correction(**moved, leverage_hessian=leverage)
     assert base is not None and shifted is not None
     n, p = state["dm"].n, state["dm"].p
     bound = 4.0 * _gamma(n + 2 * p + 5) * _correction_magnitude(state)
     np.testing.assert_array_less(np.abs(shifted[0] - base[0]), bound)
 
 
-def test_exact_reml_leverage_route_is_translation_invariant():
-    """Binomial/logit exact REML with four penalties (the leverage route) at a 1e16 offset.
+def test_exact_reml_leverage_route_is_translation_invariant(monkeypatch):
+    """Binomial/logit exact REML with four penalties on the leverage route at a 1e16 offset.
 
     A numeric column on the even-integer grid beside four P-splines, no
-    random effect, so the gram backend's dense factor and ``gradient_only``
-    W-correction run.  Mutation: as the previous test, or the gram rows
-    centred about the rounded ``mean_x``.
+    random effect, so the gram backend's dense factor runs, and with the
+    leverage work bar lowered the W-correction takes the leverage route's
+    solved rows.  Mutation: as the previous test, or the gram rows centred
+    about the rounded ``mean_x``.
     """
+    import superglm.reml.direct as direct
+
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0)
     rng = np.random.default_rng(11)
     n = 2400
     z = 2.0 * rng.integers(-4, 5, n)
@@ -572,6 +575,7 @@ def test_exact_reml_leverage_route_is_translation_invariant():
 
     base, shifted = fit(0.0), fit(1e16)
     assert shifted._reml_profile["direct_backend"] == "gram"
+    assert shifted._reml_profile["reml_w_correction_mode"] == "leverage_hessian"
     _assert_same_reml(base, shifted)
 
 
