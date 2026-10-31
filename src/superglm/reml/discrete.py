@@ -39,10 +39,13 @@ from superglm.reml.convergence import (
     concave_live_directions,
     direction_penalty_ranks,
     evaluate_reml_candidate,
+    fixed_freeze_record,
     freeze_flat_directions,
+    freeze_record,
     mask_frozen_stop_gradient,
     newton_predicted_decrease,
     project_reml_gradient,
+    revalidate_stop,
     trial_counts_as_precision_evidence,
 )
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
@@ -74,6 +77,7 @@ from superglm.reml.scale import (
     profile_gaussian_reml_scale,
     profile_tweedie_reml_scale,
 )
+from superglm.solvers.dispersion import lazy_likelihood_size
 from superglm.solvers.hessian_factor import as_hessian_factor
 from superglm.solvers.irls_direct import (
     StructuredSolverError,
@@ -602,22 +606,8 @@ def optimize_discrete_reml_cached_w(
     typically <0.1% relative (guarded by test_wide_poisson_poi_quality).
     """
 
-    # The declared contract's likelihood size, computed once. Every dispersion
-    # denominator and the REML scale term's `0.5 * (n - M_p) * log(D)` must use
-    # THIS, not the physical row count: `sum(w)` under `"frequency"`, the
-    # positive-row count under `"prior"`. The objective, its gradient and its
-    # Hessian all read it, so a row count in any one of them makes the Newton
-    # step inconsistent with the surface it is stepping on.
-    _contract_size_cache: list[float] = []
-
-    def _contract_size() -> float:
-        if not _contract_size_cache:
-            from superglm.solvers.dispersion import dispersion_likelihood_size
-
-            _contract_size_cache.append(
-                dispersion_likelihood_size(sample_weight, weight_semantics=weight_semantics)
-            )
-        return _contract_size_cache[0]
+    # The declared contract's likelihood size (``lazy_likelihood_size``).
+    _contract_size = lazy_likelihood_size(sample_weight, weight_semantics=weight_semantics)
 
     input_group_matrices = dm.group_matrices
     penalties = coerce_reml_penalties(
@@ -1188,26 +1178,12 @@ def optimize_discrete_reml_cached_w(
         if all_lambdas_fixed:
             rho = rho_clipped
             if profile is not None:
-                # Fixed lambdas freeze definitionally -- the projection
-                # zeroes their scores -- so the public freeze record exists
-                # for this pre-Newton exit too. The zero derivatives are
-                # the projection's definition, not measurements.
-                profile["reml_freeze_decision"] = {
-                    "names": list(group_names),
-                    "proj_grad": [0.0] * m,
-                    "hess_diag": [0.0] * m,
-                    "row_curvature": [0.0] * m,
-                    "penalty_rank": [
-                        float(v) for v in direction_penalty_ranks(penalties, penalty_ranks)
-                    ],
-                    "normalized_curvature": [0.0] * m,
-                    "curvature_bar": 0.0,
-                    "score_scale": max(1.0 + abs(obj), 1.0),
-                    "estimated": [bool(v) for v in estimated_mask],
-                    "frozen": [True] * m,
-                    "shoulder": [False] * m,
-                    "proj_grad_signed": [0.0] * m,
-                }
+                profile["reml_freeze_decision"] = fixed_freeze_record(
+                    group_names,
+                    direction_penalty_ranks(penalties, penalty_ranks),
+                    objective=obj,
+                    estimated_mask=estimated_mask,
+                )
             converged = True
             termination_reason = "fixed_lambdas"
             break
@@ -1262,137 +1238,49 @@ def optimize_discrete_reml_cached_w(
                 f"  POI iter {poi_iter + 1}  obj={obj:.4f}  "
                 f"|grad|={proj_grad_norm:.6f}  delta_obj={obj_change:.6g}  [{lam_str}]"
             )
-        revalidated_hess = None
-        if candidate_convergence.converged:
-            # Same curvature-only re-activation hole as the exact path: the
-            # stop mask's gradient arm cannot see a masked direction whose
-            # coupled partner raised its row curvature past the bar while
-            # its gradient sits between reml_tol and the freeze floor.
-            # Recompute the freeze decision against the current Hessian
-            # before accepting; skipped when no masked direction holds a
-            # gradient above the tolerance.
-            masked_live = stop_criterion_frozen_d is not None and bool(
-                np.any(
-                    np.asarray(stop_criterion_frozen_d)
-                    & (np.abs(proj_grad_d) >= _tol * score_scale_d)
-                )
-            )
-            # The compound test is first order; the point must also pass
-            # the second-order necessary condition to the precision asked
-            # for (``concave_live_directions``), as on the exact engine.
-            revalidated_hess = reml_direct_hessian(
-                dm.group_matrices,
-                distribution,
-                XtWX_S_inv,
-                cand_lambdas,
-                gradient=grad,
-                penalty_caches=penalty_caches,
-                pirls_result=pirls_result,
-                n_obs=_contract_size(),
-                phi_hat=phi_hat,
-                inverse_phi=inverse_phi,
-                d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
-                penalty_nullity=penalty_nullity if not scale_known else None,
-                reml_penalties=penalties,
-                tensor_pair_evaluations=cand_tensor_pair_evals,
-            )
-            concave_live_d = concave_live_directions(
-                proj_grad_d,
-                revalidated_hess,
-                estimated_mask,
-                objective=obj,
-                tolerance=_tol,
-                step_bound=shoulder_step,
-            )
-            if bool(np.any(concave_live_d)):
-                # The score test passed but the second-order check did not:
-                # record which shoulders refused the stop (score-test exit only).
-                _n_concave_stop_refusals += 1
-                if profile is not None:
-                    live = np.flatnonzero(concave_live_d)
-                    profile["reml_concave_stop_refusal"] = {
-                        "iter": int(poi_iter + 1),
-                        "names": [group_names[i] for i in live],
-                        "gradient": [float(abs(proj_grad_d[i])) for i in live],
-                        "curvature": [float(revalidated_hess[i, i]) for i in live],
-                        "step_bound": float(shoulder_step),
-                    }
-            if not masked_live and not bool(np.any(concave_live_d)):
-                rho = rho_clipped
-                prev_obj = obj
-                converged = True
-                termination_reason = "score_objective_tolerance"
-                _t_newton += _time.perf_counter() - _t0
-                break
-            revalidation = freeze_flat_directions(
-                proj_grad_d,
-                revalidated_hess,
-                direction_penalty_ranks(penalties, penalty_ranks),
-                estimated_mask,
-                objective=obj,
-                tolerance=_tol,
-                step_bound=shoulder_step,
-            )
-            if profile is not None:
-                profile["reml_freeze_revalidated"] = True
-                # The revalidation IS the last freeze decision made: when
-                # it authorizes the exit below, the published record must
-                # describe it, not iteration k-1.
-                profile["reml_freeze_decision"] = {
-                    "names": list(group_names),
-                    "proj_grad": [float(abs(v)) for v in proj_grad_d],
-                    "hess_diag": [float(revalidated_hess[i, i]) for i in range(m)],
-                    "row_curvature": [float(v) for v in revalidation.row_curvature],
-                    "penalty_rank": [float(v) for v in revalidation.penalty_rank],
-                    "normalized_curvature": [float(v) for v in revalidation.normalized_curvature],
-                    "curvature_bar": float(revalidation.curvature_bar),
-                    "score_scale": float(score_scale_d),
-                    "estimated": [bool(v) for v in estimated_mask],
-                    "frozen": [bool(v) for v in revalidation.frozen],
-                    "shoulder": [bool(v) for v in np.asarray(revalidation.shoulder, dtype=bool)],
-                    # The shoulder arm reads the sign (``concave_live_directions``).
-                    "proj_grad_signed": [float(v) for v in proj_grad_d],
-                }
-            reactivated = concave_live_d | (
-                ~np.asarray(revalidation.frozen)
-                & (
-                    np.asarray(stop_criterion_frozen_d)
-                    if stop_criterion_frozen_d is not None
-                    else np.zeros(m, dtype=bool)
-                )
-                & (np.abs(proj_grad_d) >= _tol * score_scale_d)
-            )
-            if not bool(np.any(reactivated)):
-                rho = rho_clipped
-                prev_obj = obj
-                converged = True
-                termination_reason = "score_objective_tolerance"
-                _t_newton += _time.perf_counter() - _t0
-                break
-            # Re-activated with a live gradient: keep iterating, reusing
-            # the Hessian just computed.
-        prev_obj = obj
-
-        hess = (
-            revalidated_hess
-            if revalidated_hess is not None
-            else reml_direct_hessian(
-                dm.group_matrices,
-                distribution,
-                XtWX_S_inv,
-                cand_lambdas,
-                gradient=grad,
-                penalty_caches=penalty_caches,
-                pirls_result=pirls_result,
-                n_obs=_contract_size(),
-                phi_hat=phi_hat,
-                inverse_phi=inverse_phi,
-                d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
-                penalty_nullity=penalty_nullity if not scale_known else None,
-                reml_penalties=penalties,
-                tensor_pair_evaluations=cand_tensor_pair_evals,
-            )
+        hess = reml_direct_hessian(
+            dm.group_matrices,
+            distribution,
+            XtWX_S_inv,
+            cand_lambdas,
+            gradient=grad,
+            penalty_caches=penalty_caches,
+            pirls_result=pirls_result,
+            n_obs=_contract_size(),
+            phi_hat=phi_hat,
+            inverse_phi=inverse_phi,
+            d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
+            penalty_nullity=penalty_nullity if not scale_known else None,
+            reml_penalties=penalties,
+            tensor_pair_evaluations=cand_tensor_pair_evals,
         )
+        if candidate_convergence.converged:
+            # The first-order stop, rechecked against this Hessian (``revalidate_stop``).
+            stop, refused = revalidate_stop(
+                proj_grad_d,
+                hess,
+                stop_criterion_frozen_d,
+                estimated_mask,
+                objective=obj,
+                tolerance=_tol,
+                score_scale=score_scale_d,
+                step_bound=shoulder_step,
+                names=group_names,
+                iteration=poi_iter + 1,
+                profile=profile,
+                concave_live=concave_live_directions,
+                freeze=freeze_flat_directions,
+                ranks=lambda: direction_penalty_ranks(penalties, penalty_ranks),
+            )
+            _n_concave_stop_refusals += refused
+            if stop:
+                rho = rho_clipped
+                prev_obj = obj
+                converged = True
+                termination_reason = "score_objective_tolerance"
+                _t_newton += _time.perf_counter() - _t0
+                break
+        prev_obj = obj
 
         # Active-set: freeze components with negligible gradient and Hessian.
         # The gradient/curvature bars live with the classifier's calibration
@@ -1417,27 +1305,14 @@ def optimize_discrete_reml_cached_w(
         active_idx_d = np.where(~frozen_d & ~shoulder_d)[0]
         stop_criterion_frozen_d = frozen_d.copy()
         if profile is not None:
-            # The freeze decision separates informative directions from
-            # inferentially flat ones; the per-direction quantities it
-            # judged are the calibration evidence for its bar. Overwritten
-            # each iteration: what survives is the LAST decision MADE --
-            # on a tolerance exit that is iteration k-1's, because the
-            # freeze runs after the stop criterion that ended iteration k.
-            profile["reml_freeze_decision"] = {
-                "names": list(group_names),
-                "proj_grad": [float(abs(v)) for v in proj_grad_d],
-                "hess_diag": [float(hess[i, i]) for i in range(m)],
-                "row_curvature": [float(v) for v in freeze_decision.row_curvature],
-                "penalty_rank": [float(v) for v in freeze_decision.penalty_rank],
-                "normalized_curvature": [float(v) for v in freeze_decision.normalized_curvature],
-                "curvature_bar": float(freeze_decision.curvature_bar),
-                "score_scale": float(score_scale_d),
-                "estimated": [bool(v) for v in estimated_mask],
-                "frozen": [bool(v) for v in frozen_d],
-                "shoulder": [bool(v) for v in shoulder_d],
-                # The shoulder arm reads the sign (``concave_live_directions``).
-                "proj_grad_signed": [float(v) for v in proj_grad_d],
-            }
+            profile["reml_freeze_decision"] = freeze_record(
+                group_names,
+                proj_grad_d,
+                hess,
+                freeze_decision,
+                score_scale=score_scale_d,
+                estimated_mask=estimated_mask,
+            )
 
         # Modified Newton: eigendecompose, flip negatives, floor small eigenvalues
         if active_idx_d.size == 0 and not shoulder_d.any():

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -281,6 +282,161 @@ def freeze_flat_directions(
         curvature_bar=float(curvature_bar),
         shoulder=shoulder,
     )
+
+
+def freeze_record(
+    names: list[str],
+    projected_gradient: NDArray,
+    hessian: NDArray,
+    decision: FlatDirectionDecision,
+    *,
+    score_scale: float,
+    estimated_mask: NDArray,
+    frozen: NDArray | None = None,
+) -> dict:
+    """The public record of one freeze decision (``profile["reml_freeze_decision"]``).
+
+    It keeps the per-direction quantities the decision judged, the
+    calibration evidence for its bars.  The engines overwrite it at every
+    decision, so what survives is the last decision made: on a tolerance
+    exit that is iteration k-1's, because the freeze runs after the stop
+    criterion that ended iteration k, unless a stop revalidation decided
+    later (``revalidate_stop``).  ``frozen`` is the mask the engine steps on
+    when it is not the decision's own.
+    """
+    return {
+        "names": list(names),
+        "proj_grad": [float(abs(v)) for v in projected_gradient],
+        "hess_diag": [float(hessian[i, i]) for i in range(len(names))],
+        "row_curvature": [float(v) for v in decision.row_curvature],
+        "penalty_rank": [float(v) for v in decision.penalty_rank],
+        "normalized_curvature": [float(v) for v in decision.normalized_curvature],
+        "curvature_bar": float(decision.curvature_bar),
+        "score_scale": float(score_scale),
+        "estimated": [bool(v) for v in estimated_mask],
+        "frozen": [bool(v) for v in (decision.frozen if frozen is None else frozen)],
+        "shoulder": [bool(v) for v in np.asarray(decision.shoulder, dtype=bool)],
+        # The shoulder arm reads the sign (``concave_live_directions``).
+        "proj_grad_signed": [float(v) for v in projected_gradient],
+    }
+
+
+def fixed_freeze_record(
+    names: list[str], penalty_rank: NDArray, *, objective: float, estimated_mask: NDArray
+) -> dict:
+    """The freeze record of a fit whose every lambda is fixed.
+
+    Fixed lambdas freeze definitionally -- the projection zeroes their
+    scores -- so the public record exists for this pre-Newton exit too.  The
+    zero derivatives are the projection's definition, not measurements.
+    """
+    m = len(names)
+    return {
+        "names": list(names),
+        "proj_grad": [0.0] * m,
+        "hess_diag": [0.0] * m,
+        "row_curvature": [0.0] * m,
+        "penalty_rank": [float(v) for v in penalty_rank],
+        "normalized_curvature": [0.0] * m,
+        "curvature_bar": 0.0,
+        "score_scale": _score_scale(objective),
+        "estimated": [bool(v) for v in estimated_mask],
+        "frozen": [True] * m,
+        "shoulder": [False] * m,
+        "proj_grad_signed": [0.0] * m,
+    }
+
+
+def revalidate_stop(
+    projected_gradient: NDArray,
+    hessian: NDArray,
+    previously_frozen: NDArray | None,
+    estimated_mask: NDArray,
+    *,
+    objective: float,
+    tolerance: float,
+    score_scale: float,
+    step_bound: float,
+    names: list[str],
+    iteration: int,
+    profile: dict | None,
+    concave_live: Callable[..., NDArray],
+    freeze: Callable[..., FlatDirectionDecision],
+    ranks: Callable[[], NDArray],
+) -> tuple[bool, bool]:
+    """Whether a stop the first-order test accepted stands, and whether a shoulder refused it.
+
+    The compound stop test is first order.  A point it accepts must also
+    pass the second-order necessary condition to the precision asked for
+    (``concave_live_directions``): on a concave shoulder of a plateau the
+    gradient is small however far the optimum is.  Its stop mask is the
+    previous iteration's freeze decision intersected with the current
+    gradient arm, which cannot see a curvature-only re-activation: a masked
+    direction can hold a gradient below the freeze floor yet above the
+    tolerance while its coupled partner's update raised its row curvature
+    past the bar.  So when a shoulder refuses, or a masked direction's
+    gradient reaches the tolerance, the freeze decision is recomputed
+    against the current Hessian, and the stop stands only if that
+    reactivates nothing.  The revalidation is then the last freeze decision
+    made, and the published record describes it.
+
+    ``concave_live`` and ``freeze`` are the engine's own bindings of
+    ``concave_live_directions`` and ``freeze_flat_directions``; ``ranks``
+    resolves its penalty ranks from its current penalty context
+    (``direction_penalty_ranks``), only when the freeze decision is remade.
+    """
+    gradient_live = np.abs(projected_gradient) >= tolerance * score_scale
+    masked_live = previously_frozen is not None and bool(
+        np.any(np.asarray(previously_frozen) & gradient_live)
+    )
+    live = concave_live(
+        projected_gradient,
+        hessian,
+        estimated_mask,
+        objective=objective,
+        tolerance=tolerance,
+        step_bound=step_bound,
+    )
+    refused = bool(np.any(live))
+    if refused and profile is not None:
+        # The score test passed but the second-order check did not: record
+        # which shoulders refused the stop (score-test exit only).
+        idx = np.flatnonzero(live)
+        profile["reml_concave_stop_refusal"] = {
+            "iter": int(iteration),
+            "names": [names[i] for i in idx],
+            "gradient": [float(abs(projected_gradient[i])) for i in idx],
+            "curvature": [float(hessian[i, i]) for i in idx],
+            "step_bound": float(step_bound),
+        }
+    if not masked_live and not refused:
+        return True, refused
+    revalidation = freeze(
+        projected_gradient,
+        hessian,
+        ranks(),
+        estimated_mask,
+        objective=objective,
+        tolerance=tolerance,
+        step_bound=step_bound,
+    )
+    if profile is not None:
+        profile["reml_freeze_revalidated"] = True
+        profile["reml_freeze_decision"] = freeze_record(
+            names,
+            projected_gradient,
+            hessian,
+            revalidation,
+            score_scale=score_scale,
+            estimated_mask=estimated_mask,
+        )
+    held = (
+        np.asarray(previously_frozen)
+        if previously_frozen is not None
+        else np.zeros(len(names), dtype=bool)
+    )
+    reactivated = live | (~np.asarray(revalidation.frozen) & held & gradient_live)
+    return not bool(np.any(reactivated)), refused
 
 
 def mask_frozen_stop_gradient(

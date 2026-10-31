@@ -76,6 +76,9 @@ this rule changes nothing for it.
 
 from __future__ import annotations
 
+import functools
+from collections.abc import Callable
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -161,6 +164,27 @@ def dispersion_likelihood_size(
     if validate_weight_semantics(weight_semantics) == PRIOR_WEIGHTS:
         return float(np.count_nonzero(weights > 0.0))
     return float(np.sum(weights, dtype=np.float64))
+
+
+def lazy_likelihood_size(sample_weight: NDArray, *, weight_semantics: str) -> Callable[[], float]:
+    """``dispersion_likelihood_size``, computed at the first call and reused after it.
+
+    Every REML dispersion denominator and the scale term's
+    ``0.5 * (n - M_p) * log(D)`` read this, the declared contract's size,
+    never the physical row count: ``sum(w)`` under ``"frequency"``, the
+    positive-row count under ``"prior"``.  The objective, its gradient and
+    its Hessian all read it, so a row count in any one of them would make the
+    Newton step inconsistent with the surface it steps on.
+
+    The memo's owner is the calling optimizer's frame and its lifetime is one
+    optimizer call.  Nothing invalidates it: ``sample_weight`` and
+    ``weight_semantics`` are captured, so the memo is not valid after an
+    in-place change to ``sample_weight``, and the caller must not make one
+    while the memo is alive.
+    """
+    return functools.cache(
+        lambda: dispersion_likelihood_size(sample_weight, weight_semantics=weight_semantics)
+    )
 
 
 def pearson_residual_degrees_of_freedom(

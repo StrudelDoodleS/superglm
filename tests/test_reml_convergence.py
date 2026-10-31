@@ -17,6 +17,7 @@ from superglm.reml.convergence import (
     mask_frozen_stop_gradient,
     newton_predicted_decrease,
     project_reml_gradient,
+    revalidate_stop,
     trial_counts_as_precision_evidence,
 )
 
@@ -337,6 +338,112 @@ def test_stop_mask_passes_a_reactivated_direction_through() -> None:
     np.testing.assert_array_equal(still_flat, np.array([0.0, 2.0]))
     np.testing.assert_array_equal(reactivated, np.array([0.5, 2.0]))
     np.testing.assert_array_equal(unmasked, np.array([0.5, 2.0]))
+
+
+def _revalidate(gradient, hessian, previously_frozen, profile, *, freeze=freeze_flat_directions):
+    """``revalidate_stop`` as the engines call it: their own bindings, objective 1e3.
+
+    At ``tolerance=1e-9`` the live-gradient bar is 1e-6 * 1.001 and the freeze
+    bar is the 1e-7 floor times the same scale: 1.001e-4 -- a gradient between
+    the two is the live masked gradient the revalidation exists for.
+    """
+    gradient = np.asarray(gradient, dtype=np.float64)
+    size = len(gradient)
+    return revalidate_stop(
+        gradient,
+        np.asarray(hessian, dtype=np.float64),
+        previously_frozen,
+        np.ones(size, dtype=bool),
+        objective=1e3,
+        tolerance=1e-9,
+        score_scale=1001.0,
+        step_bound=5.0,
+        names=["x1", "x2"][:size],
+        iteration=7,
+        profile=profile,
+        concave_live=concave_live_directions,
+        freeze=freeze,
+        ranks=lambda: np.ones(size),
+    )
+
+
+def _forbidden(*args, **kwargs):
+    raise AssertionError("the stop was revalidated")
+
+
+@pytest.mark.parametrize(
+    ("gradient", "previously_frozen"),
+    [
+        ([1e-7, 1e-8], [True, False]),
+        ([5e-3, 1e-8], None),
+    ],
+    ids=["masked-below-the-bar", "no-mask"],
+)
+def test_a_stop_with_nothing_masked_live_and_no_shoulder_stands_unrevalidated(
+    gradient, previously_frozen
+) -> None:
+    """The freeze decision is not remade: the masked direction's gradient is
+    under the live bar, or there is no mask at all (``None`` is "nothing was
+    held", whatever the gradient), and no direction is a shoulder.  Nothing
+    is written to the profile."""
+    profile: dict = {}
+    stop, refused = _revalidate(
+        gradient,
+        np.diag([2.0, 3.0]),
+        None if previously_frozen is None else np.array(previously_frozen),
+        profile,
+        freeze=_forbidden,
+    )
+    assert (stop, refused) == (True, False)
+    assert profile == {}
+
+
+def test_a_live_masked_gradient_whose_mask_survives_revalidation_lets_the_stop_stand() -> None:
+    """x1's gradient, 1e-5, is ten times the live bar and a tenth of the freeze
+    bar, and its row of the Hessian is flat beside x2's: the freeze decision
+    is remade, holds x1, and the stop stands on it.  The revalidation is the
+    published freeze decision."""
+    profile: dict = {}
+    stop, refused = _revalidate(
+        [1e-5, 1e-8], np.diag([1e-5, 2.0]), np.array([True, False]), profile
+    )
+
+    assert (stop, refused) == (True, False)
+    assert profile["reml_freeze_revalidated"] is True
+    assert profile["reml_freeze_decision"]["frozen"] == [True, False]
+    assert profile["reml_freeze_decision"]["proj_grad"] == [1e-5, 1e-8]
+    assert "reml_concave_stop_refusal" not in profile
+
+
+def test_a_live_masked_gradient_reactivated_by_curvature_refuses_the_stop() -> None:
+    """The same gradient, but a coupled partner's update has raised x1's row
+    curvature past the freeze bar: revalidation releases x1, and the stop is
+    refused though no shoulder is involved (``refused`` is the shoulder's
+    flag alone).  Without a profile the verdict is the same."""
+    profile: dict = {}
+    hessian = np.diag([1.0, 2.0])
+    stop, refused = _revalidate([1e-5, 1e-8], hessian, np.array([True, False]), profile)
+
+    assert (stop, refused) == (False, False)
+    assert profile["reml_freeze_revalidated"] is True
+    assert profile["reml_freeze_decision"]["frozen"] == [False, False]
+    assert "reml_concave_stop_refusal" not in profile
+    assert _revalidate([1e-5, 1e-8], hessian, np.array([True, False]), None) == (False, False)
+
+
+def test_a_shoulder_refuses_the_stop_without_a_mask() -> None:
+    """x2 is flat by both bars and sits on a concave shoulder (g = 5e-5, H = -5e-5:
+    curvature equal to the gradient, and a step of 5 promises 8.75e-4 against
+    a resolution of 1e-6), with ``previously_frozen=None``: nothing was held,
+    so only the shoulder refuses, and it is recorded."""
+    profile: dict = {}
+    stop, refused = _revalidate([1e-8, 5e-5], np.diag([2.0, -5e-5]), None, profile)
+
+    assert (stop, refused) == (False, True)
+    record = profile["reml_concave_stop_refusal"]
+    assert record["names"] == ["x2"] and record["iter"] == 7 and record["step_bound"] == 5.0
+    assert profile["reml_freeze_revalidated"] is True
+    assert profile["reml_freeze_decision"]["shoulder"] == [False, True]
 
 
 def test_precision_evidence_needs_a_converged_finite_trial() -> None:

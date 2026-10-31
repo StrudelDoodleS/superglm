@@ -4733,6 +4733,15 @@ class TestSCOPNewtonOuterStep:
         assert result.lambdas == efs.lambdas
         assert result.n_reml_iter == 3 + efs.n_reml_iter
         assert result.termination_reason == efs.termination_reason
+        # The three Newton iterations come first: their step norms, and their
+        # lambda history -- the start, one entry per iteration, and the lambdas
+        # the failed third step held.  No Newton iteration used Fisher curvature.
+        assert len(result.scop_step_norms) == 3 + len(efs.scop_step_norms)
+        assert result.scop_step_norms[3:] == efs.scop_step_norms
+        assert len(result.lambda_history) == 4 + len(efs.lambda_history)
+        assert result.lambda_history[0] == efs.lambda_history[0]
+        assert result.lambda_history[4:] == efs.lambda_history
+        assert result.scop_fisher_fallbacks == efs.scop_fisher_fallbacks
 
     def test_an_overshooting_newton_fit_restarts_and_converges(self, monkeypatch):
         """A monotone term with no signal: Newton overshoots the EFS fixed point
@@ -7166,9 +7175,24 @@ class TestSCOPReferenceMode:
         """A better reference mode at iteration 2 restarts the search cold, once, in the
         iterations left; the published history is both searches', in order.
         Mutation check: dropping the ``n_reml_iter +`` or a history prefix in the
-        restart's ``replace`` fails the sums below."""
+        restart's ``replace`` fails the sums below.  Each search's first iteration is
+        marked as a Fisher fallback (that iteration takes an EFS step), so the
+        merged count is the first run's plus the restart's and not 0 + 0."""
         calls, check = forced_check
         monkeypatch.setattr(scop_efs_module, "_SCOP_REFERENCE_RESTART_ITERATIONS", 1)
+        real_fit = scop_efs_module._fit_scop_reml_mode
+
+        def fallback_fit(*args, **kwargs):
+            mode = real_fit(*args, **kwargs)
+            if mode is None or (kwargs["phase"], kwargs["reml_iteration"]) != ("candidate", 1):
+                return mode
+            states = {
+                index: {**state, "last_fisher_fallback": True}
+                for index, state in mode.scop_states.items()
+            }
+            return replace(mode, scop_states=states)
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", fallback_fit)
         check(False)
         plain = self._increasing_gaussian_fit(max_reml_iter=40)
         assert len(calls) == 1  # fires once, at iteration 2, and a False answer is inert
@@ -7195,6 +7219,18 @@ class TestSCOPReferenceMode:
         assert restarted.objective_history[2:] == list(inner.objective_history)
         assert len(restarted.inner_iter_history) == 2 + len(inner.inner_iter_history)
         assert len(restarted.scop_outer_steps) == 2 + len(inner.scop_outer_steps)
+        # The lambda history is the start and one entry per iteration.
+        assert len(restarted.lambda_history) == 3 + len(inner.lambda_history)
+        assert restarted.lambda_history[:3] == plain.lambda_history[:3]
+        assert restarted.lambda_history[3:] == list(inner.lambda_history)
+        assert len(restarted.scop_step_norms) == 2 + len(inner.scop_step_norms)
+        assert restarted.scop_step_norms[:2] == plain.scop_step_norms[:2]
+        assert restarted.scop_step_norms[2:] == list(inner.scop_step_norms)
+        # Only the first iteration is marked, so the first run's count is the plain run's.
+        assert 0 < plain.scop_fisher_fallbacks and 0 < inner.scop_fisher_fallbacks
+        assert restarted.scop_fisher_fallbacks == (
+            plain.scop_fisher_fallbacks + inner.scop_fisher_fallbacks
+        )
 
     def test_the_reference_check_runs_at_most_once_per_search(self, monkeypatch, forced_check):
         """A check that answers False leaves the search as it was, and a later run of small

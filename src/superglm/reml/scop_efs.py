@@ -287,6 +287,47 @@ class _SCOPREMLFitContext:
         default_factory=dict, init=False, repr=False, compare=False
     )
 
+    @classmethod
+    def prepare(
+        cls,
+        dm: DesignMatrix,
+        distribution: Any,
+        link: Any,
+        groups: list[GroupSlice],
+        y: NDArray,
+        sample_weight: NDArray,
+        offset_arr: NDArray,
+        *,
+        weight_semantics: str,
+        **settings: Any,
+    ) -> _SCOPREMLFitContext:
+        """One run's context: its family's scale data and the contract's likelihood size.
+
+        Every family reads that size, not only Gaussian (for which the scale
+        profiler prepares the same number): it is the denominator of the
+        Pearson-style dispersion published for a mode without an exact profile.
+        """
+        _, saturated_log_weight, gamma_scale_data, tweedie_scale_data = prepare_reml_scale_data(
+            distribution, y, sample_weight, weight_semantics=weight_semantics
+        )
+        return cls(
+            dm=dm,
+            distribution=distribution,
+            link=link,
+            groups=groups,
+            y=y,
+            sample_weight=sample_weight,
+            offset_arr=offset_arr,
+            likelihood_size=dispersion_likelihood_size(
+                sample_weight, weight_semantics=weight_semantics
+            ),
+            saturated_log_weight=saturated_log_weight,
+            weight_semantics=weight_semantics,
+            gamma_scale_data=gamma_scale_data,
+            tweedie_scale_data=tweedie_scale_data,
+            **settings,
+        )
+
 
 @dataclass(frozen=True)
 class _SCOPREMLMode:
@@ -1259,53 +1300,6 @@ def _scop_mode_from_fit(fit: _SCOPInnerFit, *, curvature: str | None = None) -> 
             fisher_mean_x,
         )
     centered_xtwx = np.asarray(centered_xtwx, dtype=np.float64)
-    penalty_components = _merge_scop_penalty_components(
-        context.reml_penalties,
-        build_scop_penalty_components(
-            scop_states, _cache=context._penalty_context_cache, _lambdas=lambdas
-        ),
-    )
-    penalty = build_penalty_matrix(
-        list(context.dm.group_matrices),
-        context.groups,
-        lambdas,
-        context.dm.p,
-        reml_penalties=penalty_components,
-    )
-    sum_w = fisher_sum_w
-    if scop_states:
-        try:
-            mode_score = scop_penalized_mode_score(
-                dm=context.dm,
-                distribution=context.distribution,
-                link=context.link,
-                y=context.y,
-                sample_weight=context.sample_weight,
-                offset_arr=context.offset_arr,
-                result=result,
-                latent_penalty=penalty,
-                scop_states=scop_states,
-                centered_fisher_gram=centered_xtwx,
-                fisher_mean_x=fisher_mean_x,
-                fisher_sum_w=sum_w,
-                eta_unclipped=working_cache.get("eta_unclipped"),
-            )
-        except ObservedGeometryInfeasibleError as exc:
-            # An unscoreable mode is one more infeasible point to a power
-            # search, not a dead search. Left untyped it escapes as a bare
-            # ValueError past every `except ObservedModeNotCertifiedError`
-            # handler, because that family is RuntimeError-derived.
-            raise ObservedModeNotConvergedError(
-                f"SCOP could not score its penalized coefficient mode at this point: {exc}",
-                infeasible_detail="SCOP mode score refused the penalized mode",
-            ) from exc
-    else:
-        mode_score = SCOPModeScore(
-            intercept=0.0,
-            slopes=np.zeros(context.dm.p, dtype=np.float64),
-            max_abs=0.0,
-            relative_max=0.0,
-        )
     return _evaluate_scop_reml_mode(
         context,
         lambdas,
@@ -1315,9 +1309,15 @@ def _scop_mode_from_fit(fit: _SCOPInnerFit, *, curvature: str | None = None) -> 
         fisher_mean_x=fisher_mean_x,
         fisher_sum_w=fisher_sum_w,
         scop_states=scop_states,
-        penalty_components=penalty_components,
-        penalty=penalty,
-        mode_score=mode_score,
+        # Without a SCOP block the mode has no latent score to certify.
+        mode_score=None
+        if scop_states
+        else SCOPModeScore(
+            intercept=0.0,
+            slopes=np.zeros(context.dm.p, dtype=np.float64),
+            max_abs=0.0,
+            relative_max=0.0,
+        ),
         eta_unclipped=working_cache.get("eta_unclipped"),
         curvature=curvature,
         fisher_centre=working_cache.get("centre_pair"),
@@ -1912,44 +1912,20 @@ def fit_fixed_scop_reml(
     debug_recorder=None,
 ) -> REMLResult:
     """Evaluate and publish one fixed-lambda SCOP coefficient mode."""
-    (
-        _gaussian_likelihood_size,
-        saturated_log_weight,
-        gamma_scale_data,
-        tweedie_scale_data,
-    ) = prepare_reml_scale_data(
+    context = _SCOPREMLFitContext.prepare(
+        dm,
         distribution,
+        link,
+        groups,
         y,
         sample_weight,
+        offset_arr,
         weight_semantics=weight_semantics,
-    )
-    # Every family needs the plain likelihood size here, not only Gaussian:
-    # the SCOP path publishes a Pearson-style fallback dispersion for modes
-    # whose exact profile is unavailable, and that denominator is the
-    # contract's size whatever the family.  For Gaussian it is the same number
-    # the scale profiler prepared.
-    likelihood_size = dispersion_likelihood_size(
-        sample_weight,
-        weight_semantics=weight_semantics,
-    )
-    context = _SCOPREMLFitContext(
-        dm=dm,
-        distribution=distribution,
-        link=link,
-        groups=groups,
-        y=y,
-        sample_weight=sample_weight,
-        offset_arr=offset_arr,
         pirls_tol=pirls_tol,
         max_pirls_iter=max_pirls_iter,
         reml_penalties=reml_penalties,
         convergence=convergence,
         debug_recorder=debug_recorder,
-        likelihood_size=likelihood_size,
-        saturated_log_weight=saturated_log_weight,
-        weight_semantics=weight_semantics,
-        gamma_scale_data=gamma_scale_data,
-        tweedie_scale_data=tweedie_scale_data,
     )
     mode = _fit_scop_reml_mode(
         context,
@@ -1985,7 +1961,7 @@ def fit_fixed_scop_reml(
         inner_iter_history=[int(result.n_iter)],
         objective_history=[float(mode.evaluation.value)],
         curvature_source=mode.curvature_source,
-        tweedie_scale_data=tweedie_scale_data,
+        tweedie_scale_data=context.tweedie_scale_data,
         termination_reason="fixed_lambdas",
         scop_step_norms=[step_norms] if step_norms else None,
         scop_fisher_fallbacks=int(fisher_fallbacks),
@@ -2875,44 +2851,20 @@ def optimize_scop_efs_reml(
         Result with estimated lambdas, final PIRLS result, convergence info.
     """
     scale_known = getattr(distribution, "scale_known", True)
-    (
-        _gaussian_likelihood_size,
-        saturated_log_weight,
-        gamma_scale_data,
-        tweedie_scale_data,
-    ) = prepare_reml_scale_data(
+    fit_context = _SCOPREMLFitContext.prepare(
+        dm,
         distribution,
+        link,
+        groups,
         y,
         sample_weight,
+        offset_arr,
         weight_semantics=weight_semantics,
-    )
-    # Every family needs the plain likelihood size here, not only Gaussian:
-    # the SCOP path publishes a Pearson-style fallback dispersion for modes
-    # whose exact profile is unavailable, and that denominator is the
-    # contract's size whatever the family.  For Gaussian it is the same number
-    # the scale profiler prepared.
-    likelihood_size = dispersion_likelihood_size(
-        sample_weight,
-        weight_semantics=weight_semantics,
-    )
-    fit_context = _SCOPREMLFitContext(
-        dm=dm,
-        distribution=distribution,
-        link=link,
-        groups=groups,
-        y=y,
-        sample_weight=sample_weight,
-        offset_arr=offset_arr,
         pirls_tol=pirls_tol,
         max_pirls_iter=max_pirls_iter,
         reml_penalties=reml_penalties,
         convergence=convergence,
         debug_recorder=debug_recorder,
-        likelihood_size=likelihood_size,
-        saturated_log_weight=saturated_log_weight,
-        weight_semantics=weight_semantics,
-        gamma_scale_data=gamma_scale_data,
-        tweedie_scale_data=tweedie_scale_data,
         cold_starts=_cold_starts,
     )
     # The caller's starting values, kept for a guard restart (see the docstring).
@@ -2999,7 +2951,7 @@ def optimize_scop_efs_reml(
             terminal_refit_termination=(
                 None if uncertified.result.converged else str(uncertified.result.termination_reason)
             ),
-            tweedie_scale_data=tweedie_scale_data,
+            tweedie_scale_data=fit_context.tweedie_scale_data,
             warm_start_components=warm_start_components,
         )
     last_fit.clear()
@@ -3592,19 +3544,8 @@ def optimize_scop_efs_reml(
         # but kept current so a future loop shape cannot inherit a stale origin.
         step_origin = retained_mode
 
-    if restart_with_efs:
-        # The guard fired: rerun the search from the bootstrap with EFS steps,
-        # in the iterations left. A fresh call reproduces the EFS search
-        # exactly (its own fit context and centring state), so the answer is
-        # the one ``_outer_step="efs"`` returns when the iterations left cover
-        # that search; with fewer it stops at its own cap, as ``max_reml_iter``,
-        # where the EFS search would have gone on. The Newton iterations cost
-        # at most one candidate and three trial fits each on top of it.
-        if verbose:
-            print(
-                f"  SCOP REML: Newton step rejected at iteration {n_reml_iter}; "
-                "restarting the search with EFS steps"
-            )
+    def restart(**search: Any) -> REMLResult:
+        """The search rerun from its starting values in the iterations left, after this run."""
         restarted = optimize_scop_efs_reml(
             dm,
             distribution,
@@ -3626,9 +3567,7 @@ def optimize_scop_efs_reml(
             debug_recorder=debug_recorder,
             warm_lambdas=warm_lambdas,
             _aitken=_aitken,
-            _outer_step="efs",
-            _reference_restarts=_reference_restarts,
-            _cold_starts=_cold_starts,
+            **search,
         )
         return replace(
             restarted,
@@ -3640,6 +3579,27 @@ def optimize_scop_efs_reml(
             or None,
             scop_fisher_fallbacks=total_fisher_fallbacks + restarted.scop_fisher_fallbacks,
             scop_outer_steps=outer_steps + list(restarted.scop_outer_steps or []),
+        )
+
+    if restart_with_efs:
+        # The guard fired: rerun the search from the bootstrap with EFS steps,
+        # in the iterations left. A fresh call reproduces the EFS search
+        # exactly (its own fit context and centring state), so the answer is
+        # the one ``_outer_step="efs"`` returns when the iterations left cover
+        # that search; with fewer it stops at its own cap, as ``max_reml_iter``,
+        # where the EFS search would have gone on. The Newton iterations cost
+        # at most one candidate and three trial fits each on top of it.
+        if verbose:
+            print(
+                f"  SCOP REML: Newton step rejected at iteration {n_reml_iter}; "
+                "restarting the search with EFS steps"
+            )
+        return replace(
+            restart(
+                _outer_step="efs",
+                _reference_restarts=_reference_restarts,
+                _cold_starts=_cold_starts,
+            ),
             scop_newton_fallback=newton_fallback,
             scop_newton_fallback_iter=newton_fallback_iter,
         )
@@ -3682,41 +3642,10 @@ def optimize_scop_efs_reml(
             "the search's warm-started one; restarting the search with cold coefficient fits",
             {name: f"{lambdas[name]:.4g}" for name in sorted(estimated_names)},
         )
-        restarted = optimize_scop_efs_reml(
-            dm,
-            distribution,
-            link,
-            groups,
-            y,
-            sample_weight,
-            offset_arr,
-            start_lambdas,
-            estimated_names,
-            weight_semantics=weight_semantics,
-            max_reml_iter=max_reml_iter - n_reml_iter,
-            reml_tol=reml_tol,
-            pirls_tol=pirls_tol,
-            max_pirls_iter=max_pirls_iter,
-            verbose=verbose,
-            reml_penalties=reml_penalties,
-            convergence=convergence,
-            debug_recorder=debug_recorder,
-            warm_lambdas=warm_lambdas,
-            _aitken=_aitken,
+        return restart(
             _outer_step=_outer_step,
             _reference_restarts=_reference_restarts - 1,
             _cold_starts=True,
-        )
-        return replace(
-            restarted,
-            n_reml_iter=n_reml_iter + restarted.n_reml_iter,
-            lambda_history=lambda_history + list(restarted.lambda_history),
-            inner_iter_history=inner_iter_history + list(restarted.inner_iter_history or []),
-            objective_history=objective_history + list(restarted.objective_history or []),
-            scop_step_norms=(scop_step_norms_history + list(restarted.scop_step_norms or []))
-            or None,
-            scop_fisher_fallbacks=total_fisher_fallbacks + restarted.scop_fisher_fallbacks,
-            scop_outer_steps=outer_steps + list(restarted.scop_outer_steps or []),
         )
 
     final_result = _finalize_scop_reml_mode(fit_context, final_mode)
@@ -3760,7 +3689,7 @@ def optimize_scop_efs_reml(
         managed_cleanup_frozen_history=(
             managed_cleanup_frozen_history if managed_cleanup_frozen_history else None
         ),
-        tweedie_scale_data=tweedie_scale_data,
+        tweedie_scale_data=fit_context.tweedie_scale_data,
         flat_components=flat_components,
         scop_outer_steps=outer_steps,
         scop_newton_fallback=newton_fallback,
