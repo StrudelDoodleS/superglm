@@ -215,7 +215,7 @@ def feature_se_from_cov(
     name: Hashable,
     Cov_active: NDArray,
     active_groups: list[GroupSlice],
-    result: PIRLSResult,
+    result: PIRLSResult,  # not read; kept for the exported signature
     groups: list[GroupSlice],
     specs: Mapping[Any, Any],
     interaction_specs: Mapping[Any, Any],
