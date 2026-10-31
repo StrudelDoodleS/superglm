@@ -548,18 +548,14 @@ def test_the_weight_correction_centres_its_grams_and_leverage_rows(columns, rout
     np.testing.assert_array_less(np.abs(shifted[0] - base[0]), bound)
 
 
-def test_exact_reml_leverage_route_is_translation_invariant(monkeypatch):
-    """Binomial/logit exact REML with four penalties on the leverage route at a 1e16 offset.
+def test_exact_reml_leverage_route_is_translation_invariant():
+    """Binomial/logit exact REML with four penalties (the leverage route) at a 1e16 offset.
 
     A numeric column on the even-integer grid beside four P-splines, no
-    random effect, so the gram backend's dense factor runs, and with the
-    leverage work bar lowered the W-correction takes the leverage route's
-    solved rows.  Mutation: the gram rows centred about the rounded
-    ``mean_x``.
+    random effect, so the gram backend's dense factor and the leverage
+    route's solved rows run.  Mutation: the gram rows centred about the
+    rounded ``mean_x``.
     """
-    import superglm.reml.direct as direct
-
-    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0)
     rng = np.random.default_rng(11)
     n = 2400
     z = 2.0 * rng.integers(-4, 5, n)

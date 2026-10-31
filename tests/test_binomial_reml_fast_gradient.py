@@ -1,10 +1,10 @@
-"""Binomial/logit REML takes the W(rho) correction routes every family takes.
+"""Binomial/logit REML takes the W(rho) leverage route every family takes above its work bar.
 
-Above the leverage work bar a design of lookups reads its leverages from
-term-pair tables (``_group_matrix/_lookup_tables.py``), below it the
-derivative Grams serve; the leverage route's solved rows serve a design of
-dense columns.  Pinned here on binomial/logit, whose weight derivative
-``W (1 - 2 mu)`` changes sign across the rows.
+On a dense factor binomial/logit takes it below the bar too: a design of
+lookups reads its leverages from term-pair tables
+(``_group_matrix/_lookup_tables.py``), any other design solves its rows
+(``reml/_leverage_rows.py``).  Pinned here on binomial/logit, whose weight
+derivative ``W (1 - 2 mu)`` changes sign across the rows.
 """
 
 import math
@@ -237,14 +237,12 @@ def _scalar_centered_correction(common) -> np.ndarray:
     )
 
 
-def test_binomial_logit_reml_reads_its_leverages_from_the_tables(monkeypatch) -> None:
-    """Above the leverage work bar (forced here) a lookup design takes the table route.
+def test_binomial_logit_reml_reads_its_leverages_from_the_tables() -> None:
+    """A lookup design takes the table route, far below the leverage work bar.
 
     Binomial/logit took a dense row pass of its own there, ahead of the table
     route every other family takes; restoring that gate fails this test.
     """
-    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0)
-
     model = _lookup_fit()
 
     assert model._reml_profile["reml_w_correction_mode"] == "leverage_tables"
@@ -259,7 +257,6 @@ def test_profile_reports_the_correction_geometry_that_actually_ran(monkeypatch) 
         kwargs["leverage_hessian"] = False
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0)
     monkeypatch.setattr(direct, "reml_w_correction", force_derivative_grams)
 
     model = _lookup_fit()
@@ -342,12 +339,18 @@ def test_one_smooth_with_many_categories_keeps_specialized_derivative_gram() -> 
     assert model._reml_profile["reml_w_correction_mode"] == "derivative_grams"
 
 
-@pytest.mark.parametrize("link", ["logit", "probit"])
-def test_below_the_leverage_work_bar_binomial_keeps_the_derivative_grams(link) -> None:
-    """Four smooths on 600 rows are far below the bar: every link keeps the derivative Grams."""
+@pytest.mark.parametrize(
+    ("link", "mode"), [("logit", "leverage_hessian"), ("probit", "derivative_grams")]
+)
+def test_below_the_leverage_work_bar_only_the_logit_link_keeps_one_pass(link, mode) -> None:
+    """Four continuous smooths on 600 rows, far below the bar and no lookups.
+
+    Binomial/logit solves its rows; probit, like every other pair, keeps the
+    derivative Grams.  Sending binomial/logit to the bar fails the logit case.
+    """
     model = _four_smooth_fit(link=link)
 
-    assert model._reml_profile["reml_w_correction_mode"] == "derivative_grams"
+    assert model._reml_profile["reml_w_correction_mode"] == mode
 
 
 def test_profile_reports_when_weight_correction_is_structurally_zero() -> None:

@@ -81,7 +81,7 @@ from superglm.solvers.centered_system import (
     _InitialDataReuse,
 )
 from superglm.solvers.dispersion import lazy_likelihood_size
-from superglm.solvers.hessian_factor import as_hessian_factor
+from superglm.solvers.hessian_factor import DenseHessianFactor, as_hessian_factor
 from superglm.solvers.irls_direct import StructuredSolverError, fit_irls_direct
 from superglm.solvers.mode_score import centred_warm_start, mode_certification_bar
 from superglm.solvers.structured import (
@@ -1232,11 +1232,25 @@ def optimize_direct_reml(
         w_correction_args: tuple = ()
         w_correction_kwargs: dict[str, Any] = {}
         if not discrete:
+            # Binomial/logit on a dense factor takes the leverage route below the
+            # work bar too, one pass an iteration as it always has: its
+            # derivative Grams there cost 3 to 5 times that pass on a design
+            # without lookups or with a factor smooth (single-threaded, freMTPL2
+            # and synthetic continuous designs).
+            binomial_logit = bool(
+                type(distribution) is Binomial
+                and type(link) is LogitLink
+                and geometry is None
+                and isinstance(as_hessian_factor(reml_inverse), DenseHessianFactor)
+            )
+            gram_work = float(len(penalties)) * dm.n * dm.p * dm.p
             leverage_hessian = bool(
                 w_correction_order == 1
                 and len(penalties) >= _LEVERAGE_MIN_PENALTIES
-                and float(len(penalties)) * dm.n * dm.p * dm.p >= _LEVERAGE_HESSIAN_MIN_GRAM_WORK
-                and sparse_leverage
+                and (
+                    binomial_logit
+                    or (gram_work >= _LEVERAGE_HESSIAN_MIN_GRAM_WORK and sparse_leverage)
+                )
             )
             # The correction is built from this iterate's weight derivatives, so
             # a LinAlgError out of it says the same thing the geometry seams do:
