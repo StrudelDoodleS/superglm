@@ -9,6 +9,7 @@ certified context, which the distributional smoother reads, encloses both.
 """
 
 import copy
+import math
 import pickle
 from dataclasses import replace
 from decimal import Decimal, localcontext
@@ -258,6 +259,22 @@ def test_a_map_scaled_by_1e_100_decides_as_the_unscaled_map(small):
         reference = [_solver_space(components[0])]
         assert evaluation == algebra.penalty_logdet({"s": 1.0}, reference)
         assert evaluation.rank == (1 if small == 1e-8 else 2)
+
+
+def test_a_stored_penalty_whose_norm_overflows_takes_the_solver_space_support():
+    """``Omega = I_6`` under ``C = 9e153 I`` is stored as the finite ``8.1e307 I``.
+
+    Its Frobenius norm is beyond binary64.  No bar admits an infinite norm, so
+    the raw route refuses this map and the solver-space support evaluates the
+    penalty: ``log det = 12 log(9e153)``.
+    """
+    components = _context(np.eye(6), 9e153 * np.eye(6), certified=False)
+    assert algebra._context_geometry(components).coordinate_map is None
+    evaluation = algebra.penalty_logdet({"s": 1.0}, components)
+    exact = 12 * math.log(9e153)
+    assert evaluation.rank == 6
+    assert abs(evaluation.logdet - exact) <= 12 * np.finfo(np.float64).eps * abs(exact)
+    assert evaluation.gradient == {"s": 6.0}
 
 
 def _random_map(condition, seed):

@@ -75,19 +75,19 @@ def _dense_tolerance(components, rank, condition):
     return 2 * rank * width * EPS * condition
 
 
-def _exact_reference(roots, weights):
+def _exact_reference(roots, weights, digits=60):
     """``log det``, gradient and Hessian of ``sum_j w_j R_j' R_j`` from the given roots.
 
-    Decimal conversion of a binary64 value is exact, and 60-digit arithmetic
-    rounds each operation at ``1e-60`` relative, so for the fixtures'
-    condition numbers (below ``1e35``) this is the exact value for these
-    roots, far below binary64's resolution.  Also returns ``kappa = 2 sum_j
+    Decimal conversion of a binary64 value is exact, and ``digits``-digit
+    arithmetic rounds each operation at ``10**-digits`` relative, so for
+    condition numbers below ``10**(digits - 25)`` this is the exact value for
+    these roots, far below binary64's resolution.  Also returns ``kappa = 2 sum_j
     ||W_j||_F ||W_j S^-1||_F`` for ``W_j = sqrt(w_j) R_j``: ``d log det = 2 sum_j
     tr(S^-1 W_j' dW_j)``, so a perturbation of each root by ``delta ||W_j||_F``
     moves ``log det`` by at most ``delta kappa`` to first order.
     """
     with localcontext() as context:
-        context.prec = 60
+        context.prec = digits
         width = roots[0].shape[1]
         terms = []
         for root, weight in zip(roots, weights, strict=True):
@@ -382,6 +382,25 @@ def test_the_dominance_order_survives_grams_beyond_binary64():
     _assert_exact(blocks.multi_penalty_logdet(roots, np.array(weights)), reference, 3)
 
 
+@pytest.mark.parametrize("small_first", [True, False])
+def test_the_stacked_root_factor_does_not_depend_on_the_component_order(small_first):
+    """``1e-64 I`` and the rank-two ``K``, so ``log det(K + 1e-64 I) = log 6 - 64 log 10``.
+
+    Stacked in component order, the small term's ``1e-32`` rows came first and
+    the QR took one as a pivot row, losing it in ``K``'s rows: ``-145.428`` and
+    gradient ``0.865`` against ``-145.574`` and ``1``.  The condition number is
+    about ``1e64``, so the reference carries 160 digits.
+    """
+    small = 1e-64 * np.eye(3)
+    rank_two = np.array([[2.0, 0.0, 1.0], [0.0, 2.0, -1.0], [1.0, -1.0, 1.0]])
+    raw = [small, rank_two] if small_first else [rank_two, small]
+    block = algebra._context_geometry(_multi_context(raw, np.eye(3))).plain
+    weights = (1.0, 1.0)
+    reference = _exact_reference(block.roots, weights, digits=160)
+    computed = blocks.multi_penalty_logdet(block.roots, np.array(weights))
+    _assert_exact(computed, reference, block.rank)
+
+
 def _skewed_tensor(seed=3):
     """A cubic B-spline curvature margin on lognormal(0, 3) quantile knots, by differences.
 
@@ -451,6 +470,41 @@ def test_a_finite_solver_penalty_keeps_its_dominant_term_when_the_raw_gram_overf
     assert evaluation.rank == 2
     assert abs(evaluation.logdet - exact) <= 8 * EPS * abs(exact)
     assert abs(evaluation.gradient["g:c0"] - 2.0) <= 8 * EPS
+    assert 0.0 <= evaluation.gradient["g:c1"] <= 1e-300
+
+
+def _failing_eigvalsh(matrix):
+    raise np.linalg.LinAlgError("Eigenvalues did not converge")
+
+
+@pytest.mark.parametrize("eigensolver_fails", [False, True])
+def test_a_kronecker_margin_near_the_top_of_binary64(monkeypatch, eigensolver_fails):
+    """``A = 1e308 (I + 0.02 J)`` and ``I_2``, as ``A (x) I_2`` and ``I_6``, under ``1e-154 I``.
+
+    ``A + A'`` overflows, so the margin is halved before the sum and the
+    closed form holds; a margin the eigensolver fails on leaves the block to
+    its support roots.  The cells are ``1e-308 (a_i + 1)`` for ``A``'s
+    eigenvalues ``d + 2o`` and ``d - o`` (twice), each repeated twice.
+    """
+    if eigensolver_fails:
+        margins = algebra._kronecker_margins
+
+        def failing_margins(support, raw):
+            with monkeypatch.context() as patch:
+                patch.setattr(np.linalg, "eigvalsh", _failing_eigvalsh)
+                return margins(support, raw)
+
+        monkeypatch.setattr(algebra, "_kronecker_margins", failing_margins)
+    margin = 1e308 * (np.eye(3) + 0.02 * np.ones((3, 3)))
+    components = _multi_context([np.kron(margin, np.eye(2)), np.eye(6)], 1e-154 * np.eye(6))
+    block = algebra._context_geometry(components).plain
+    assert (block.kronecker is None) == eigensolver_fails
+    evaluation = penalty_logdet({"g:c0": 1.0, "g:c1": 1.0}, components)
+    diagonal, off = margin[0, 0], margin[0, 1]
+    terms = [2 * math.log(diagonal + 2 * off), 4 * math.log(diagonal - off), 12 * math.log(1e-154)]
+    assert evaluation.rank == 6
+    assert abs(evaluation.logdet - math.fsum(terms)) <= 2 * 6 * EPS * math.fsum(map(abs, terms))
+    assert abs(evaluation.gradient["g:c0"] - 6.0) <= 12 * EPS
     assert 0.0 <= evaluation.gradient["g:c1"] <= 1e-300
 
 
@@ -536,6 +590,22 @@ def test_zero_weight_face_uses_the_active_support():
     assert evaluation.rank == reference[0] == 6
     assert abs(evaluation.logdet - reference[1]) <= _dense_tolerance(components, 6, reference[4])
     assert evaluation.gradient == {"g:c0": 6.0, "g:c1": 0.0}
+
+
+def test_a_face_whose_stored_penalty_loses_a_raw_direction_is_refused():
+    """``diag(1, 1, 0)`` and ``diag(0, 0, 1)`` under ``C = [[1, 1, 0], [0, 1e-8, 0], [0, 0, 1]]``.
+
+    With the second weight zero the raw face has rank 2, but the stored first
+    penalty ``C' diag(1, 1, 0) C`` rounds to rank 1, which the nullity counts.
+    The face is refused, as the certified context refuses it, rather than
+    pairing a rank-2 determinant with that nullity.
+    """
+    coordinate_map = np.array([[1.0, 1.0, 0.0], [0.0, 1e-8, 0.0], [0.0, 0.0, 1.0]])
+    raw = [np.diag([1.0, 1.0, 0.0]), np.diag([0.0, 0.0, 1.0])]
+    components = _multi_context(raw, coordinate_map)
+    np.testing.assert_array_equal(components[0].omega_ssp, [[1, 1, 0], [1, 1, 0], [0, 0, 0]])
+    with pytest.raises(support_module.PenaltyNumericalError, match="preserve the raw rank"):
+        penalty_logdet({"g:c0": 1.0, "g:c1": 0.0}, components)
 
 
 def test_stored_penalty_without_the_raw_rank_keeps_the_solver_space_support():

@@ -57,8 +57,8 @@ def _log_gram_norm(root: NDArray) -> float:
 
 def similarity_transformed_roots(
     roots: Sequence[NDArray], weights: NDArray, *, dominance: float = DOMINANCE
-) -> list[NDArray]:
-    """Weighted roots ``sqrt(lambda_j) R_j`` after Wood's (2011) Appendix B transform.
+) -> tuple[list[NDArray], list[float]]:
+    """Weighted roots ``sqrt(lambda_j) R_j`` after Wood's (2011) Appendix B transform, and ``log Omega_j``.
 
     Each pass ranks the terms that still have content in the open trailing
     block by ``Omega_i = lambda_i ||S_i||_F`` there and takes the dominant set
@@ -81,6 +81,9 @@ def similarity_transformed_roots(
     rather than cut at a fixed rank: a penalty whose spectrum runs below any such
     cut, as a column-equilibrated support keeps, still sets eigenvalues that the
     smaller terms' weighted ones can match.
+
+    ``log Omega_j`` is taken on the whole support, in the first pass; the
+    rotations leave it unchanged.
     """
     current = [
         math.sqrt(float(weight)) * np.array(root, dtype=np.float64)
@@ -89,8 +92,11 @@ def similarity_transformed_roots(
     width = current[0].shape[1]
     log_dominance = math.log(dominance)
     start = 0
+    magnitudes: dict[int, float] = {}
     while start < width:
         norms = {index: _log_gram_norm(root[:, start:]) for index, root in enumerate(current)}
+        if start == 0:
+            magnitudes = norms
         remaining = [index for index, value in norms.items() if value > -math.inf]
         if not remaining:
             break
@@ -106,7 +112,7 @@ def similarity_transformed_roots(
         for index in remaining:
             current[index][:, start:] = current[index][:, start:] @ rotation
         start += int(np.count_nonzero(singular > SHARED_RANK_POLICY.factor_rcond * singular[0]))
-    return current
+    return current, [magnitudes.get(index, -math.inf) for index in range(len(current))]
 
 
 def multi_penalty_logdet(
@@ -135,8 +141,16 @@ def multi_penalty_logdet(
             float(r * math.log(w)) for r, w in zip(rows, weights, strict=True)
         )
         return logdet, rows, np.zeros((count, count))
-    transformed = similarity_transformed_roots(roots, weights)
-    upper = scipy.linalg.qr(np.vstack(transformed), mode="r", check_finite=False)[0][:width]
+    transformed, magnitudes = similarity_transformed_roots(roots, weights)
+    # Householder QR is not row-wise backward stable without pivoting: a small
+    # pivot row is reflected into the larger rows below it and lost at their
+    # rounding.  With column pivoting, rows sorted by decreasing norm give the
+    # row-wise bound of row pivoting (Cox and Higham 1998, Lemma 4.2; Powell and
+    # Reid 1969).  The transform orders the columns by dominance, and the terms
+    # are stacked by decreasing Omega_j, so the factor is independent of their order.
+    order = sorted(range(count), key=lambda index: -magnitudes[index])
+    stacked = np.vstack([transformed[index] for index in order])
+    upper = scipy.linalg.qr(stacked, mode="r", check_finite=False)[0][:width]
     diagonal = np.abs(np.diag(upper))
     if not np.all(np.isfinite(diagonal)) or np.any(diagonal == 0):
         raise PenaltyNumericalError("weighted penalty roots do not span their support")

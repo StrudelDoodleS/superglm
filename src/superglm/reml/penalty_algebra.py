@@ -784,7 +784,8 @@ def _kronecker_margins(
     Each margin keeps as many eigenvalues as its component's support root has
     rows per repeat, so the rank decisions stay the support's; the pair is used
     only when its cell count is the support rank and ``eigvalsh`` resolves every
-    retained eigenvalue.
+    retained eigenvalue; otherwise, as for a non-finite margin or one the
+    eigensolver fails on, the support roots evaluate the block.
 
     ``eigvalsh`` moves each eigenvalue by up to ``p(n) eps ||A||_2`` (LAPACK
     Users' Guide, 3rd ed., sec. 4.7; ``_eigensolver_relative_bar``), however
@@ -815,7 +816,14 @@ def _kronecker_margins(
     left_rank, right_rank = left_rows // p2, right_rows // p1
     margins = []
     for matrix, rank in ((left, left_rank), (right, right_rank)):
-        values = np.linalg.eigvalsh(0.5 * (matrix + matrix.T))[::-1].copy()
+        # Halved before the sum, which can overflow on a finite margin.
+        symmetric = 0.5 * matrix + 0.5 * matrix.T
+        if not np.all(np.isfinite(symmetric)):
+            return None
+        try:
+            values = np.linalg.eigvalsh(symmetric)[::-1].copy()
+        except np.linalg.LinAlgError:
+            return None
         floor = _eigensolver_relative_bar(len(values)) * float(np.max(np.abs(values)))
         if rank and not values[rank - 1] * SHARED_RANK_POLICY.factor_rcond > floor:
             return None
@@ -882,7 +890,11 @@ def _plain_block_evaluate(
 ) -> tuple[int, float, NDArray, NDArray]:
     """Rank, ``log|S|_+``, gradient and Hessian of one multi-penalty block at ``values``."""
     from superglm.reml.penalty_blocks import kronecker_sum_logdet, multi_penalty_logdet
-    from superglm.reml.penalty_support import _penalty_support, _penalty_support_from_roots
+    from superglm.reml.penalty_support import (
+        PenaltyNumericalError,
+        _penalty_support,
+        _penalty_support_from_roots,
+    )
 
     weights = tuple(map(float, values))
     if block.last is not None and block.last[0] == weights:
@@ -909,17 +921,29 @@ def _plain_block_evaluate(
         face = block.faces.get(pattern)
         if face is None:
             support = geometry.get_support() if geometry is not None else _penalty_support(matrices)
-            width = support.Q_plus.shape[0]
-            roots = [
-                root if on else np.empty((0, width))
-                for root, on in zip(support.component_roots, pattern, strict=True)
-            ]
-            selected = _penalty_support_from_roots(
-                roots,
-                resolution_limited=support.component_resolution_limited,
-                input_error_bounds=[np.zeros_like(root) for root in roots],
-            )
+
+            def active_support(component_roots):
+                roots = [
+                    root if on else np.empty((0, root.shape[1]))
+                    for root, on in zip(component_roots, pattern, strict=True)
+                ]
+                return _penalty_support_from_roots(
+                    roots,
+                    resolution_limited=support.component_resolution_limited,
+                    input_error_bounds=[np.zeros_like(root) for root in roots],
+                )
+
+            selected = active_support(support.component_roots)
             coordinate_map = None if geometry is None else geometry.coordinate_map
+            # The solver stores the Grams of the transported roots, and the
+            # nullity ranks those; a face whose transported roots keep another
+            # rank than the raw ones is refused, as the certified context does.
+            if (
+                coordinate_map is not None
+                and active_support(_transported_roots(support, coordinate_map)).rank
+                != selected.rank
+            ):
+                raise PenaltyNumericalError("SSP active support cannot preserve the raw rank")
             face = (
                 selected.rank,
                 _support_roots(selected),
@@ -2889,14 +2913,18 @@ def _frobenius(values: NDArray) -> float:
     """``||A||_F`` of ``A`` scaled by the power of two at its largest entry.
 
     The scaling is exact, so this is the unscaled norm wherever that neither
-    underflows nor overflows, and it stays nonzero and finite wherever the
-    largest entry is: ``1e-200`` entries have squares below binary64.
+    underflows nor overflows, and it stays nonzero wherever the largest entry
+    is: ``1e-200`` entries have squares below binary64.  A norm beyond binary64
+    is infinite, which no agreement bar admits.
     """
     largest = float(np.max(np.abs(values), initial=0.0))
     if largest == 0 or not math.isfinite(largest):
         return largest
     exponent = math.frexp(largest)[1]
-    return math.ldexp(float(np.linalg.norm(np.ldexp(values, -exponent))), exponent)
+    try:
+        return math.ldexp(float(np.linalg.norm(np.ldexp(values, -exponent))), exponent)
+    except OverflowError:
+        return math.inf
 
 
 def _plain_single_raw_route(gm, grouped, declared_rank, prior, *, rank_rcond):
