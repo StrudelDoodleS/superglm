@@ -61,7 +61,6 @@ from superglm.distributional.likelihood_identity import (
     CarrierRounding,
     carrier_rounding_scale,
 )
-from superglm.distributional.observation import LEFT_CENSORED, RIGHT_CENSORED
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
@@ -203,8 +202,8 @@ def _normal_censored_recession(bounds: ResponseBounds) -> NDArray[np.bool_]:
     """
     open_below = ~np.isfinite(bounds.lower)
     open_above = ~np.isfinite(bounds.upper)
-    scale = ((bounds.side == RIGHT_CENSORED) & ~open_below & open_above) | (
-        (bounds.side == LEFT_CENSORED) & open_below & ~open_above
+    scale = ((bounds.side > 0) & ~open_below & open_above) | (
+        (bounds.side < 0) & open_below & ~open_above
     )
     return np.column_stack((bounds.side != 0, scale))
 
