@@ -570,7 +570,8 @@ def _wall_disclosure(
     resolved and points that way. A row the link has clipped to its last
     float before a wall has no derivative left for either test; the family
     says what that means for its functionals, whatever put the row there, and
-    whether the shape's curvature is lost along a dropped direction there.
+    whether the shape's curvature is lost there, along a dropped direction or
+    under a step that still presses the row.
     """
     rows = wall_rows(family, layout, solver_result.coefficients, solver_result.theta)
     if rows is None:
@@ -616,6 +617,9 @@ def _wall_disclosure(
         slope = float(direction @ score)
         if abs(slope) > resolution * float(np.abs(direction) @ np.abs(score)):
             pressed |= carried & (np.sign(slope) * move > 0.0)
+    # a clipped row the step still presses has a link derivative left but its shape is
+    # held by rounding, so the shape's standard errors are not reliable there either
+    unresolved |= pressed & clipped
     pressed &= rows.near & ~clipped
     return family.wall_disclosure(
         (

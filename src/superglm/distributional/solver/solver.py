@@ -1912,6 +1912,7 @@ def _fit_dense_fixed_lambda_core(
             newton_decrement_tolerance=None,
         )
         try:
+            # timed with the terminal retry, so a fit that runs both records the phase twice
             with measure_phase(phase_recorder, "terminal_observed_retry_fallback"):
                 continued = _run_iterations(
                     context,

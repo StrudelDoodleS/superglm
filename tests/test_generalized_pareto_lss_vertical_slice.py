@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import warnings
 
@@ -453,6 +454,23 @@ def test_a_pressed_shape_run_to_the_last_float_keeps_the_standard_error_caveat()
     assert np.all(shape == np.nextafter(1.0, 0.0))
     (message,) = _wall_messages(model)
     assert "not reliable" in message
+
+
+def test_a_pressed_row_clipped_below_a_narrow_wall_keeps_the_standard_error_caveat():
+    # below an upper wall of 0.35 the link reaches its last float while its derivative is
+    # still positive, so no direction is dropped; the clip is forced on the pressed fit
+    from superglm.distributional.fit_state import _wall_disclosure
+
+    frame, y, _ = _simulate(3_000, 8, shape=0.9)
+    family = GeneralizedParetoLSS(shape_lower=0.05, shape_upper=0.35)
+    with pytest.warns(ConvergenceWarning, match="at the upper wall 0.35"):
+        model = _constant_shape_fit(family, frame, y)
+    state = model._require_fitted().fit_state
+    theta = state.solver_result.theta.copy()
+    theta[:, 1] = np.nextafter(0.35, 0.0)
+    clipped = dataclasses.replace(state.solver_result, theta=theta)
+    message = _wall_disclosure(family, clipped, state.layout)
+    assert "float64 can represent" in message and "not reliable" in message
 
 
 def test_a_scale_alias_beside_an_interior_shape_near_a_wall_is_not_disclosed():

@@ -592,7 +592,8 @@ A row whose shape is the last value before a wall that float64 can represent
 is reported separately, whatever put it there: the data, the shape
 predictor reaching far towards the wall, or an offset. Below an upper wall of
 one, its mean and expected shortfall are set by that rounding rather than the
-data.
+data. Where the fit has pressed the shape there and lost its curvature, the
+warning says its standard errors are not reliable either.
 
 **Weights.** Frequency weights replicate rows. Non-unit prior weights are
 refused: the family is not reproductive, so there is no averaging law. Fit
