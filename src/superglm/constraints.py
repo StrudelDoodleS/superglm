@@ -408,12 +408,79 @@ def shape_slack_tolerance(beta: NDArray, curve_scale: float = 0.0) -> float:
     return float(gamma(_SLACK_STEPS * beta_arr.size)) * scale
 
 
-class _ShapeRepairer:
-    """Projects a fitted spline curve onto a shape cone, in the fitted basis."""
+def _repair_shape(
+    shape: str,
+    spec: _SplineBase,
+    beta_reparam: NDArray,
+    groups: list[GroupSlice],
+    weights: NDArray | None,
+    n_grid: int,
+) -> MonotoneRepairResult:
+    """Project a fitted spline curve onto the ``shape`` cone, in the fitted basis.
 
-    @property
-    def _shape(self) -> str:
-        raise NotImplementedError
+    The body behind ``MonotoneRepairer.repair`` and ``CurvatureRepairer.repair``.
+    """
+    beta_combined = np.concatenate([beta_reparam[g.sl] for g in groups])
+    recon = spec.reconstruct(beta_combined, n_points=n_grid)
+    x_grid = recon["x"]
+    log_rels = recon["log_relativity"]
+    certificate_before = shape_constraint_certificate(spec, beta_combined, shape)
+    viol_before = certificate_before.violation
+
+    if certificate_before.minimum_scaled_slack >= -shape_slack_tolerance(beta_combined):
+        return MonotoneRepairResult(
+            feature_name="",  # filled by caller
+            direction=shape,
+            grid=x_grid,
+            original_log_effect=log_rels.copy(),
+            repaired_log_effect=log_rels.copy(),
+            repaired_beta_reparam=beta_reparam.copy(),
+            max_violation_before=viol_before,
+            max_violation_after=0.0,
+            projection_residual=0.0,
+        )
+
+    w_grid = np.ones(n_grid) if weights is None else weights
+    beta_reparam_new, repaired_check, proj_residual = _project_shape_in_fitted_basis(
+        spec,
+        x_grid,
+        log_rels,
+        w_grid,
+        shape,
+    )
+    beta_out = beta_reparam.copy()
+    offset = 0
+    for g in groups:
+        g_size = g.size
+        beta_out[g.sl] = beta_reparam_new[offset : offset + g_size]
+        offset += g_size
+    certificate_after = shape_constraint_certificate(
+        spec,
+        beta_reparam_new,
+        shape,
+    )
+    viol_after = certificate_after.violation
+
+    return MonotoneRepairResult(
+        feature_name="",  # filled by caller
+        direction=shape,
+        grid=x_grid,
+        original_log_effect=log_rels.copy(),
+        repaired_log_effect=repaired_check.copy(),
+        repaired_beta_reparam=beta_out,
+        max_violation_before=viol_before,
+        max_violation_after=viol_after,
+        projection_residual=proj_residual,
+    )
+
+
+class MonotoneRepairer:
+    """Constrained fitted-basis projection for monotone spline curves."""
+
+    def __init__(self, direction: str = "increasing"):
+        if direction not in ("increasing", "decreasing"):
+            raise ValueError(f"direction must be 'increasing' or 'decreasing', got {direction!r}")
+        self.direction = direction
 
     def repair(
         self,
@@ -423,7 +490,7 @@ class _ShapeRepairer:
         weights: NDArray | None = None,
         n_grid: int = 500,
     ) -> MonotoneRepairResult:
-        """Project the fitted spline curve onto the requested shape cone.
+        """Project the fitted spline curve onto the requested monotone cone.
 
         Parameters
         ----------
@@ -443,71 +510,7 @@ class _ShapeRepairer:
         -------
         MonotoneRepairResult
         """
-        beta_combined = np.concatenate([beta_reparam[g.sl] for g in groups])
-        recon = spec.reconstruct(beta_combined, n_points=n_grid)
-        x_grid = recon["x"]
-        log_rels = recon["log_relativity"]
-        certificate_before = shape_constraint_certificate(spec, beta_combined, self._shape)
-        viol_before = certificate_before.violation
-
-        if certificate_before.minimum_scaled_slack >= -shape_slack_tolerance(beta_combined):
-            return MonotoneRepairResult(
-                feature_name="",  # filled by caller
-                direction=self._shape,
-                grid=x_grid,
-                original_log_effect=log_rels.copy(),
-                repaired_log_effect=log_rels.copy(),
-                repaired_beta_reparam=beta_reparam.copy(),
-                max_violation_before=viol_before,
-                max_violation_after=0.0,
-                projection_residual=0.0,
-            )
-
-        w_grid = np.ones(n_grid) if weights is None else weights
-        beta_reparam_new, repaired_check, proj_residual = _project_shape_in_fitted_basis(
-            spec,
-            x_grid,
-            log_rels,
-            w_grid,
-            self._shape,
-        )
-        beta_out = beta_reparam.copy()
-        offset = 0
-        for g in groups:
-            g_size = g.size
-            beta_out[g.sl] = beta_reparam_new[offset : offset + g_size]
-            offset += g_size
-        certificate_after = shape_constraint_certificate(
-            spec,
-            beta_reparam_new,
-            self._shape,
-        )
-        viol_after = certificate_after.violation
-
-        return MonotoneRepairResult(
-            feature_name="",  # filled by caller
-            direction=self._shape,
-            grid=x_grid,
-            original_log_effect=log_rels.copy(),
-            repaired_log_effect=repaired_check.copy(),
-            repaired_beta_reparam=beta_out,
-            max_violation_before=viol_before,
-            max_violation_after=viol_after,
-            projection_residual=proj_residual,
-        )
-
-
-class MonotoneRepairer(_ShapeRepairer):
-    """Constrained fitted-basis projection for monotone spline curves."""
-
-    def __init__(self, direction: str = "increasing"):
-        if direction not in ("increasing", "decreasing"):
-            raise ValueError(f"direction must be 'increasing' or 'decreasing', got {direction!r}")
-        self.direction = direction
-
-    @property
-    def _shape(self) -> str:
-        return self.direction
+        return _repair_shape(self.direction, spec, beta_reparam, groups, weights, n_grid)
 
 
 def _project_shape_in_fitted_basis(
@@ -645,7 +648,7 @@ def _project_shape_in_fitted_basis(
     return beta_projected, repaired_curve, max_curve_change
 
 
-class CurvatureRepairer(_ShapeRepairer):
+class CurvatureRepairer:
     """Convex/concave repair for spline curves on the linear predictor scale."""
 
     def __init__(self, kind: str = "convex"):
@@ -653,6 +656,12 @@ class CurvatureRepairer(_ShapeRepairer):
             raise ValueError(f"kind must be 'convex' or 'concave', got {kind!r}")
         self.kind = kind
 
-    @property
-    def _shape(self) -> str:
-        return self.kind
+    def repair(
+        self,
+        spec: _SplineBase,
+        beta_reparam: NDArray,
+        groups: list[GroupSlice],
+        weights: NDArray | None = None,
+        n_grid: int = 500,
+    ) -> MonotoneRepairResult:
+        return _repair_shape(self.kind, spec, beta_reparam, groups, weights, n_grid)
