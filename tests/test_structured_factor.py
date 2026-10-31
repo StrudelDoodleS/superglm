@@ -17,7 +17,12 @@ from superglm.solvers._structured.block_leaves import (
     FactorSmoothPenalizedOperator,
     ProfiledFactorSmoothLeafFactor,
 )
-from superglm.solvers.hessian_factor import DenseHessianFactor, HessianFactor, _component_omega
+from superglm.solvers.hessian_factor import (
+    DenseHessianFactor,
+    DerivativeCrossTraceFactor,
+    HessianFactor,
+    _component_omega,
+)
 from superglm.solvers.rank import decompose_factor, decompose_gram, needs_factor_certification
 from superglm.solvers.structured import (
     BlockSymmetricOperator,
@@ -571,6 +576,121 @@ def test_structured_reml_hessian_forms_each_inverse_product_once(
     dense_directions = [_dense_direction(*direction, width) for direction in directions]
     tolerance = 0.5 * _cross_trace_tolerance(factor, dense_directions)
     assert np.all(np.abs(hessian - dense_hessian) <= tolerance)
+
+
+def _counted(name):
+    def method(self, *args):
+        self.calls[name] += 1
+        return getattr(self._dense, name)(*args)
+
+    return method
+
+
+class _DelegatingFactor:
+    """A factor that is neither dense nor a derivative-cross-trace owner.
+
+    Every operation is a counted call on a dense inverse, so a Hessian built
+    on it takes the pairwise compact-trace loop, whatever ``dH_extra`` holds.
+    """
+
+    backend = "delegating"
+
+    def __init__(self, dense: DenseHessianFactor):
+        self._dense = dense
+        self.shape = dense.shape
+        self.calls: Counter = Counter()
+
+    solve = _counted("solve")
+    logdet = _counted("logdet")
+    selected_inverse_block = _counted("selected_inverse_block")
+    selected_inverse_diagonal = _counted("selected_inverse_diagonal")
+    trace_inverse_penalty = _counted("trace_inverse_penalty")
+    penalty_cross_trace = _counted("penalty_cross_trace")
+    trace_inverse_operator = _counted("trace_inverse_operator")
+    inverse_operator_diagonal = _counted("inverse_operator_diagonal")
+    inverse_operator_square_diagonal = _counted("inverse_operator_square_diagonal")
+    operator_cross_trace = _counted("operator_cross_trace")
+    penalty_operator_cross_trace = _counted("penalty_operator_cross_trace")
+
+
+@pytest.mark.parametrize(
+    "carriers",
+    [(0,), (3,), (0, 2), (0, 1, 2, 3)],
+    ids=["first", "last", "alternate", "all"],
+)
+def test_the_pairwise_hessian_traces_the_w_rho_operators_of_a_non_dense_factor(carriers):
+    """A factor with neither a dense inverse nor ``derivative_cross_traces`` takes the
+    pairwise compact loop, which adds ``tr(Z S_i Z E_j)`` for an operator ``E_j`` on a
+    pair's right, ``tr(Z S_j Z E_i)`` for one on its left and ``tr(Z E_i Z E_j)`` for
+    both.  The dense factor forms ``H^-1 dH`` instead and the structured factors own
+    their cross traces, so a stub delegating to a dense inverse forces the loop.
+    Mutation check: dropping the right operator, the left operator or the
+    operator-operator term fails the patterns that carry it.
+
+    The dense-inverse route forms the same ``tr(Z O_i Z O_j)``, ``O = S + E``.  Each
+    side is a chain of products of inner dimension ``p`` and a sum of ``p**2`` terms
+    over the pieces ``S`` and ``E``, within ``8 gamma_{p^2} ||Z||_F^2 (||S_i||_F +
+    ||E_i||_F) (||S_j||_F + ||E_j||_F)`` (Higham 2002, eq. 3.13); the Hessian's
+    factor -1/2 makes the coefficient 4.
+    """
+    rng = np.random.default_rng(5521)
+    width, m = 8, 4
+    root = rng.normal(size=(width, width))
+    inverse = np.linalg.inv(root @ root.T + width * np.eye(width))
+
+    def omega(size):
+        factor = rng.normal(size=(size, 2))
+        return factor @ factor.T
+
+    penalties = [
+        _penalty("a", slice(0, 3), omega(3)),
+        _penalty("a2", slice(0, 3), omega(3)),
+        _penalty("b", slice(3, 6), omega(3)),
+        _penalty("ridge", slice(5, 8), penalty_kind="identity"),
+    ]
+    lambdas = {"a": 1.3, "a2": 0.7, "b": 2.1, "ridge": 0.4}
+    operators = {
+        i: LowRankSymmetricOperator(basis=rng.normal(size=(width, 2)), core=_symmetric(rng, 2))
+        for i in carriers
+    }
+    common = {"gradient": rng.normal(size=m), "reml_penalties": penalties}
+
+    def stub():
+        return _DelegatingFactor(DenseHessianFactor(inverse=inverse, log_det=0.0))
+
+    factor = stub()
+    assert isinstance(factor, HessianFactor)
+    assert not isinstance(factor, (DenseHessianFactor, DerivativeCrossTraceFactor))
+    hessian = reml_direct_hessian([], Poisson(), factor, lambdas, dH_extra=operators, **common)
+
+    pairs = [(i, j) for i in range(m) for j in range(i, m)]
+    assert factor.calls["penalty_cross_trace"] == len(pairs)
+    assert factor.calls["penalty_operator_cross_trace"] == sum(
+        (i in operators) + (j in operators) for i, j in pairs
+    )
+    assert factor.calls["operator_cross_trace"] == sum(
+        i in operators and j in operators for i, j in pairs
+    )
+
+    dense_operators = {i: materialize_compact_operator(op) for i, op in operators.items()}
+    dense_hessian = reml_direct_hessian(
+        [], Poisson(), inverse, lambdas, dH_extra=dense_operators, **common
+    )
+    norms = np.array(
+        [
+            np.linalg.norm(_dense_direction(pc, lambdas[pc.name], None, width))
+            + (np.linalg.norm(dense_operators[i]) if i in operators else 0.0)
+            for i, pc in enumerate(penalties)
+        ]
+    )
+    n = width * width
+    gamma = n * np.finfo(np.float64).eps / (1.0 - n * np.finfo(np.float64).eps)
+    tolerance = 4.0 * gamma * np.linalg.norm(inverse) ** 2 * np.outer(norms, norms)
+    assert np.all(np.abs(hessian - dense_hessian) <= tolerance)
+
+    # The operators move the Hessian far beyond that bound.
+    without = reml_direct_hessian([], Poisson(), stub(), lambdas, dH_extra=None, **common)
+    assert np.max(np.abs(hessian - without)) > 1e3 * np.max(tolerance)
 
 
 def test_centered_independent_blocks_certify_local_factor_geometry(
