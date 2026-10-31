@@ -561,20 +561,23 @@ number of rows at it.
 
 The link reaches a wall only as the shape's linear predictor runs to
 infinity, so a fit pressed against one has no finite optimum, and more
-iterations would only move it further. The fit checks this with one more
-Newton step from where it stopped, on its own penalised objective. A row
-counts as at a wall when its shape lies within 1% of the distance between
+iterations only move it further. The fit checks this with one more Newton
+step from where it stopped, on its own penalised objective. A row counts as
+pressed against a wall when its shape lies within 1% of the distance between
 the walls of one of them, and either:
-- that step moves its linear predictor towards the wall by at least one
-  half. A pressed row moves by one unit per step however close it already
-  is, while at a finite optimum the step vanishes, so the test does not
-  depend on the solver's tolerance;
-- or its shape is the last value before the wall that the link can
-  represent, and the fitted coefficients, not its offset alone, put it there.
+- that step moves its linear predictor towards the wall by at least a
+  quarter. A pressed row moves by about one half to one unit per step however
+  close it already is, while at a finite optimum the step vanishes. A fit
+  that stops with such a step is first continued, at a hundredth of its
+  tolerance, so a loose `inner_tol` cannot pass off a fit still settling for
+  a pressed one;
+- or a direction of the shape predictor that the fit's rank decision dropped,
+  because the rows it moves have no curvature left, carries the row towards
+  the wall.
 
 Rows that a penalty or an offset holds near a wall are not counted: their
-shape is set by the model, not by where the solver stopped. The consequences
-for the rows that are counted:
+shape is set by the model, not by where the solver stopped. For the rows
+that are counted:
 - At an upper wall of one the mean excess and the expected shortfall are
   infinite. `predict()` and `expected_shortfall()` still return their values
   at the shape where the fit stopped, which the solver's tolerance sets rather
@@ -584,6 +587,12 @@ for the rows that are counted:
   the wall rather than the data.
 - Standard errors, intervals and posterior draws involving the shape are not
   reliable at a wall, where the fit has almost no curvature along the shape.
+
+A row whose shape is the last value before a wall that float64 can represent
+is reported separately, whatever put it there: the data, the shape
+predictor reaching far towards the wall, or an offset. Below an upper wall of
+one, its mean and expected shortfall are set by that rounding rather than the
+data.
 
 **Weights.** Frequency weights replicate rows. Non-unit prior weights are
 refused: the family is not reproductive, so there is no averaging law. Fit

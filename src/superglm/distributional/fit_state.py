@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import UNIT_ROUNDOFF
 from superglm.diagnostics.convergence import (
     lss_fisher_curvature_message,
     lss_no_ascent_direction_message,
@@ -30,7 +31,11 @@ from superglm.distributional.family import (
 from superglm.distributional.inference import JointInference, compute_joint_inference
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.null_model import JointNullModel, fit_joint_null_model
-from superglm.distributional.predictor import CompiledPredictor, Predictor
+from superglm.distributional.predictor import (
+    CompiledPredictor,
+    Predictor,
+    PredictorExecutionPlan,
+)
 from superglm.distributional.result import (
     ConvergenceReason,
     DenseSolverConfig,
@@ -40,6 +45,7 @@ from superglm.distributional.result import (
 )
 from superglm.distributional.solver.chunks import ChunkSize
 from superglm.distributional.telemetry import CurvatureTelemetry
+from superglm.distributional.walls import PRESSED_STEP, outward_step, wall_rows
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     WeightContract,
@@ -539,20 +545,6 @@ def _limit_row_disclosure(
     )
 
 
-def _predictor_values(state, coefficients: NDArray) -> NDArray[np.float64]:
-    """``X c`` for one predictor's coefficients, its intercept implicit and no offset."""
-    intercept = state.intercept_index is not None
-    values = np.full(state.design.n, coefficients[0] if intercept else 0.0, dtype=np.float64)
-    if state.design.p:
-        values += state.design.matvec(coefficients[int(intercept) :])
-    return values
-
-
-# Within this fraction of the distance between its walls, of either one, a
-# bounded logit is in its exponential tail.
-_LINK_TAIL = 1.0e-2
-
-
 def _wall_disclosure(
     family: WallDisclosingFamily,
     solver_result: DenseSolverResult,
@@ -563,41 +555,66 @@ def _wall_disclosure(
     A bounded link reaches a wall only as its linear predictor runs to
     infinity, so a fit pressed against one has no finite optimum: the
     likelihood keeps rising along a direction of recession after the stopping
-    rule sees no progress, and more iterations would keep moving the estimate
+    rule sees no progress, and more iterations keep moving the estimate
     (Correia, Guimarães and Zylkin, arXiv:1903.01633; the refitting check for
-    infinite estimates of Kosmidis et al., described in arXiv:2610.09951). One
-    more Newton step from the stop, on the fit's own penalised objective,
-    coefficient face and rank decision, shows this without iterating. In the
-    link's exponential tail, within ``_LINK_TAIL`` of a wall, an exact step
-    moves a row the data press outward by one unit of its linear predictor
-    however close it already is, while at a finite optimum the step vanishes
-    with the solver's tolerance; a row is at a wall when the step moves it
-    outward by at least one half. A row the link has clipped to its last float
-    before a wall has no derivative left for the step to read, so it is at that
-    wall when the fitted coefficients, not its offset alone, push it there.
+    infinite estimates of Kosmidis et al., described in arXiv:2610.09951). The
+    solver continues any fit stopped with a row near a wall still moving
+    towards it, and one more Newton step from the stop, in the fit's own
+    coefficient subspace, then tells the two apart: in the link's exponential
+    tail it carries a row the data press outward by ``PRESSED_STEP`` or more
+    however close the row already is, while at a finite optimum it vanishes.
+    A direction the terminal rank decision dropped has no resolved curvature,
+    so the step cannot move along it; such a direction presses the rows it
+    carries outward when the terminal score along it is resolved and points
+    that way, unless the shape design itself nearly cancels it. A row the link has clipped to its last float before a wall has
+    no derivative left for either test; the family says what that means for
+    its functionals, whatever put the row there.
     """
-    parameter_index, lower, upper = family.walls()
-    values = solver_result.theta[:, parameter_index]
-    upper_side = upper - values <= values - lower
-    distance = np.where(upper_side, upper - values, values - lower) / (upper - lower)
-    near = distance <= _LINK_TAIL
-    if not np.any(near):
+    rows = wall_rows(family, layout, solver_result.coefficients, solver_result.theta)
+    if rows is None:
         return None
-    state = next(state for state in layout.predictors if state.parameter_index == parameter_index)
-    # the terminal rank decision is lifted from the coefficient face, so its solve keeps
-    # every direction REML fixed where it is
-    step = solver_result.terminal_rank.solve(solver_result.terminal_score)
-    outward = np.where(upper_side, 1.0, -1.0)
-    moved = outward * _predictor_values(state, step[state.coefficient_slice]) >= 0.5
-    last = np.where(upper_side, np.nextafter(upper, lower), np.nextafter(lower, upper))
-    coefficients = solver_result.coefficients[state.coefficient_slice]
-    pushed = outward * _predictor_values(state, coefficients) > 0.0
-    pressed = near & (moved | ((values == last) & pushed))
-    n_upper = int(np.count_nonzero(pressed & upper_side))
-    n_lower = int(np.count_nonzero(pressed & ~upper_side))
-    if not (n_upper or n_lower):
-        return None
-    return family.wall_disclosure(n_lower, n_upper, state.design.n)
+    score = solver_result.terminal_score
+    pressed = outward_step(rows, solver_result.solve_terminal(score)) >= PRESSED_STEP
+    face = solver_result.coefficient_face
+    if face is None:
+        dropped = solver_result.terminal_rank.null_basis()
+    else:
+        dropped = face.null_basis @ solver_result.terminal_reduced_rank.null_basis()
+    resolution = len(score) * UNIT_ROUNDOFF
+    if dropped.shape[1]:
+        execution = PredictorExecutionPlan(
+            rows.state.design, rows.state.intercept_index is not None
+        )
+        column_norms = np.diag(execution.diagonal_moment(np.ones(rows.state.design.n)))
+    for direction in dropped.T:
+        slope = float(direction @ score)
+        if abs(slope) <= resolution * float(np.abs(direction) @ np.abs(score)):
+            continue
+        carried = np.sign(slope) * outward_step(rows, direction)
+        # a direction whose columns nearly cancel in the rows is a near-collinear design
+        # direction, dropped for the design's sake rather than the link's
+        spread = float(direction[rows.state.coefficient_slice] ** 2 @ column_norms)
+        if float(carried @ carried) <= np.sqrt(UNIT_ROUNDOFF) * spread:
+            continue
+        pressed |= carried > resolution * float(np.max(np.abs(carried)))
+    last = np.where(
+        rows.upper_side,
+        np.nextafter(rows.upper, rows.lower),
+        np.nextafter(rows.lower, rows.upper),
+    )
+    clipped = rows.near & (rows.values == last)
+    pressed &= rows.near & ~clipped
+    return family.wall_disclosure(
+        (
+            int(np.count_nonzero(pressed & ~rows.upper_side)),
+            int(np.count_nonzero(pressed & rows.upper_side)),
+        ),
+        (
+            int(np.count_nonzero(clipped & ~rows.upper_side)),
+            int(np.count_nonzero(clipped & rows.upper_side)),
+        ),
+        rows.state.design.n,
+    )
 
 
 def _curvature_disclosures(

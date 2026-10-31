@@ -16,6 +16,7 @@ from superglm.distributional.family import (
     DistributionalFamily,
     ExpectedInformationFamily,
     FamilyLikelihoodPlan,
+    WallDisclosingFamily,
     _likelihood_reuse_contract,
     _prepared_field_modes,
 )
@@ -65,6 +66,7 @@ from superglm.distributional.solver.derivatives import (
 )
 from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.distributional.timing import FitPhaseRecorder, measure_phase
+from superglm.distributional.walls import PRESSED_STEP, outward_step, wall_rows
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
@@ -1245,6 +1247,32 @@ def _cap_predictor_step(
     return _readonly(scale * step), float(scale)
 
 
+def _wall_step_unsettled(
+    context: _SolverContext,
+    state: _AcceptedState,
+    geometry: DenseJointGeometry,
+    config: DenseSolverConfig,
+) -> bool:
+    """Whether the next Newton step still carries a row near a wall towards it.
+
+    A pressed fit keeps such a step however far it runs, while an interior fit
+    stopped at a loose tolerance can show one too and loses it within a few more
+    iterations; the wall disclosure needs the two apart.
+    """
+    if not isinstance(context.family, WallDisclosingFamily):
+        return False
+    rows = wall_rows(context.family, context.layout, state.coefficients, state.theta)
+    if rows is None:
+        return False
+    try:
+        direction = _solve_coefficient_direction(
+            context, geometry.penalized_curvature, geometry.score_penalized, config
+        )
+    except DenseSolverError:
+        return False
+    return bool(np.any(rows.near & (outward_step(rows, direction.step) >= PRESSED_STEP)))
+
+
 def _run_iterations(
     context: _SolverContext,
     initial_state: _AcceptedState,
@@ -1872,6 +1900,39 @@ def _fit_dense_fixed_lambda_core(
     step_relative = run.step_relative
     observed_geometry = run.observed_geometry
     del run
+
+    if converged and _wall_step_unsettled(context, state, coefficient_geometry, solver_config):
+        # Continue a fit stopped with a row still moving towards a wall, at a
+        # hundredth of the tolerance: a pressed fit keeps moving, an interior one
+        # settles. Only a continuation that converges replaces the stop.
+        continuation_config = replace(
+            solver_config,
+            max_iterations=solver_config.terminal_retry_iterations,
+            tolerance=max(0.01 * solver_config.tolerance, 10.0 * np.finfo(np.float64).eps),
+            newton_decrement_tolerance=None,
+        )
+        try:
+            continued = _run_iterations(
+                context,
+                state,
+                continuation_config,
+                initial_geometry=(coefficient_geometry if state.derivatives is None else None),
+                stop_policy=stop_policy,
+                start_iteration=len(history),
+                phase_recorder=phase_recorder,
+            )
+        except DenseSolverError:
+            continued = None
+        if continued is not None and continued.converged:
+            state = continued.state
+            coefficient_geometry = continued.geometry
+            history.extend(continued.history)
+            reason = continued.reason
+            score_relative = continued.score_relative
+            objective_relative_change = continued.objective_relative_change
+            step_relative = continued.step_relative
+            observed_geometry = continued.observed_geometry
+        del continued
 
     with measure_phase(phase_recorder, "terminal_observed_retry_fallback"):
         observed_geometry = (
