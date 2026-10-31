@@ -131,13 +131,9 @@ _FIRST_USE: dict[str, str] = {
         "a structured FactorSmooth fit's hat diagonal (Cook's distance, standardized "
         "residuals): diagnostics, not the fit",
     ),
-    **dict.fromkeys(
-        (
-            _STRUCTURED + "block_leaves._moment_segments",
-            _STRUCTURED + "block_leaves._close_levels",
-        ),
-        "the signed moment segments of a binned FactorSmooth term and the close of a stored "
-        "level stack: no census fit reaches them (fs or sz, Fisher or signed, exact or binned)",
+    _STRUCTURED + "block_leaves._moment_segments": (
+        "the signed moment segments of a binned FactorSmooth term: no census fit reaches "
+        "them (fs or sz, Fisher or signed, exact or binned)"
     ),
     _STRUCTURED + "leaf_kernels._sparse_rows": (
         "a RandomEffect leaf pass whose border has a row its tables cannot code: none in the census"

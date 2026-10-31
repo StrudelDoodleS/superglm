@@ -147,57 +147,6 @@ class GammaKernelEvaluation:
             object.__setattr__(self, name, readonly(array))
 
 
-def _small_a_residual(a: float) -> float:
-    """Evaluate a(psi(a)-log(a)) from its convergent origin expansion."""
-
-    total = -1.0 - a * (_EULER + math.log(a))
-    power = a * a
-    sign = 1.0
-    for n in range(1, 80):
-        term = sign * float(special.zeta(n + 1, 1.0)) * power
-        total += term
-        power *= a
-        sign = -sign
-        # Every remaining zeta coefficient is below zeta(2) < 2.
-        if 2.0 * abs(power) / (1.0 - a) <= _EPS * max(1.0, abs(total)) / 8.0:
-            return total
-    raise ValueError("small-shape digamma series did not reach float64 accuracy")
-
-
-def _small_j_residual(a: float) -> float:
-    """Evaluate a(a trigamma(a)-1) from its convergent origin expansion."""
-
-    total = 1.0 - a
-    power = a * a
-    sign = 1.0
-    for n in range(0, 80):
-        term = sign * (n + 1.0) * float(special.zeta(n + 2, 1.0)) * power
-        total += term
-        power *= a
-        sign = -sign
-        tail = 2.0 * (n + 2.0) * abs(power) / (1.0 - a) ** 2
-        if tail <= _EPS * max(1.0, abs(total)) / 8.0:
-            return total
-    raise ValueError("small-shape trigamma series did not reach float64 accuracy")
-
-
-def _small_log_normalizer(a: float) -> float:
-    """Evaluate a log(a)-a-log Gamma(a) from the log-Gamma origin series."""
-
-    total = (a + 1.0) * math.log(a) + (_EULER - 1.0) * a
-    power = a * a
-    sign = -1.0
-    for n in range(2, 80):
-        term = sign * float(special.zeta(n, 1.0)) * power / n
-        total += term
-        power *= a
-        sign = -sign
-        tail = 2.0 * abs(power) / ((n + 1.0) * (1.0 - a))
-        if tail <= _EPS * max(1.0, abs(total)) / 8.0:
-            return total
-    raise ValueError("small-shape log-normalizer series did not reach float64 accuracy")
-
-
 def _large_a_residual(a: NDArray) -> NDArray[np.float64]:
     inverse = 1.0 / a
     inverse2 = inverse * inverse

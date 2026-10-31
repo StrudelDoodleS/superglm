@@ -7,17 +7,48 @@ does (``block_leaves._assemble_compact``), without a design matrix or layout.
 
 from __future__ import annotations
 
+import numba
 import numpy as np
 from numpy.typing import NDArray
 
 from superglm.solvers._structured.block_leaves import (
     _assemble_compact,
-    _close_levels,
+    _close_level,
     _leaf_segments,
     _LeafParts,
-    _signed_parts,
+    _signed_block,
 )
 from superglm.solvers._structured.border import BorderGenerators
+
+
+@numba.njit
+def _close_levels(R_acc, k, top, tail_norms2, tail_gram, with_gram):
+    """``_close_level`` over every level of ``R_acc`` ``(K, p, p)``, in level order."""
+    no_root = np.zeros((0, 0))
+    for level in range(R_acc.shape[0]):
+        _close_level(R_acc[level], level, k, top, tail_norms2, tail_gram, with_gram, no_root)
+
+
+def _signed_parts(R: NDArray, M: NDArray, k: int) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+    """Signed rows' pseudo-rows and signatures, ``G_l[:k, :]`` and ``sum_l G_l[k:, k:]``.
+
+    ``_signed_block`` over blocks of about half a MiB of ``p x p`` matrices, so no
+    temporary is another ``(K, p, p)`` array beside the ones returned (Opus
+    review P1); each level's own numbers do not depend on the block.
+    """
+    K, p = R.shape[0], R.shape[2]
+    pseudo_rows = np.empty((K, p, p))
+    signature = np.empty((K, p))
+    level_rows = np.empty((K, k, p))
+    border = np.zeros((p - k, p - k))
+    step = max(1, (1 << 16) // (p * p))
+    for lo in range(0, K, step):
+        hi = min(lo + step, K)
+        pseudo_rows[lo:hi], signature[lo:hi], level_rows[lo:hi], piece = _signed_block(
+            R[lo:hi], M[lo:hi], k
+        )
+        border += piece
+    return pseudo_rows, signature, level_rows, border
 
 
 def leaf_system_from_rows(

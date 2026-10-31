@@ -427,14 +427,6 @@ def _close_level(
 
 
 @numba.njit(cache=True)
-def _close_levels(R_acc, k, top, tail_norms2, tail_gram, with_gram):  # pragma: no cover
-    """``_close_level`` over every level of ``R_acc`` ``(K, p, p)``, in level order."""
-    no_root = np.zeros((0, 0))
-    for level in range(R_acc.shape[0]):
-        _close_level(R_acc[level], level, k, top, tail_norms2, tail_gram, with_gram, no_root)
-
-
-@numba.njit(cache=True)
 def _fisher_leaf_segments(
     rows,
     weights,
@@ -1276,9 +1268,8 @@ def _warmup_factor_smooth() -> None:
     with their callers, and the balance tree (``sz``) with
     ``balance_tree._warmup_balance_tree``.  Left to first use: the hat
     diagonal's per-row forms (``_level_row_forms``, a fit's diagnostics),
-    and the moment segments of a binned term's signed weight derivatives and
-    the per-level close of a stored stack (``_moment_segments``,
-    ``_close_levels``), which no census fit reached.
+    and the moment segments of a binned term's signed weight derivatives
+    (``_moment_segments``), which no census fit reached.
     """
     from superglm.solvers._structured.balance_tree import _warmup_balance_tree
     from superglm.solvers._structured.leaf_kernels import (
@@ -1686,7 +1677,7 @@ class _LeafParts(NamedTuple):
     ``merges`` as ``FactorSmoothLeafData``; signed rows add the pseudo-rows,
     signatures and error Grams' leading rows and diagonals, and their level
     Grams' level-basis rows and
-    border sum (``_signed_parts``); ``triangles`` the whole triangles where a
+    border sum (``_signed_block``); ``triangles`` the whole triangles where a
     caller formed them (an ``sz`` leaf keeps them).
     """
 
@@ -1741,7 +1732,7 @@ def _assemble_compact(
     never formed whole (Opus review P1: ``(K, p, p)`` beside a wide border):
     the moment operator reads only their level-basis rows ``G_l[:k, :]`` and
     the border block summed over the levels (``_fisher_moments``; signed
-    rows bring theirs, ``_signed_parts``).  ``basis="sz"`` returns the
+    rows bring theirs, ``_signed_block``).  ``basis="sz"`` returns the
     ``SumToZeroLeafSystem`` of the balance tree: the same leaf data over all
     ``K`` levels, the level-space moment operator behind the public ``K - 1``
     coordinates and the public vectors ``[I; -1']' v`` of the level ones
@@ -1805,30 +1796,10 @@ def _fisher_moments(top: NDArray, tail_gram: NDArray, k: int) -> tuple[NDArray, 
     return level_rows, border
 
 
-def _signed_parts(R: NDArray, M: NDArray, k: int) -> tuple[NDArray, NDArray, NDArray, NDArray]:
-    """Signed rows' pseudo-rows and signatures, ``G_l[:k, :]`` and ``sum_l G_l[k:, k:]``.
-
-    ``_signed_block`` over blocks of about half a MiB of ``p x p`` matrices, so no
-    temporary is another ``(K, p, p)`` array beside the ones returned (Opus
-    review P1); each level's own numbers do not depend on the block.
-    """
-    K, p = R.shape[0], R.shape[2]
-    pseudo_rows = np.empty((K, p, p))
-    signature = np.empty((K, p))
-    level_rows = np.empty((K, k, p))
-    border = np.zeros((p - k, p - k))
-    step = max(1, (1 << 16) // (p * p))
-    for lo in range(0, K, step):
-        hi = min(lo + step, K)
-        pseudo_rows[lo:hi], signature[lo:hi], level_rows[lo:hi], piece = _signed_block(
-            R[lo:hi], M[lo:hi], k
-        )
-        border += piece
-    return pseudo_rows, signature, level_rows, border
-
-
 def _signed_block(R: NDArray, M: NDArray, k: int) -> tuple[NDArray, NDArray, NDArray, NDArray]:
-    """``_signed_parts`` of a block of levels ``R``, ``M`` ``(b, p, p)``.
+    """Pseudo-rows, signatures, ``G_l[:k, :]`` and ``sum_l G_l[k:, k:]`` of a block of levels.
+
+    ``R``, ``M`` are ``(b, p, p)``.
 
     ``M_l = V Lambda V'`` gives ``B_l = |Lambda|^1/2 V' R_l`` with signature
     ``sign Lambda`` (module docstring), and ``G_l = R_l' M_l R_l``: ``R_l[:, :k]``
