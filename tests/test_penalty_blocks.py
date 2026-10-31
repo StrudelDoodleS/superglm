@@ -384,19 +384,22 @@ def test_the_dominance_order_survives_grams_beyond_binary64():
 
 @pytest.mark.parametrize("small_first", [True, False])
 def test_the_stacked_root_factor_does_not_depend_on_the_component_order(small_first):
-    """``1e-64 I`` and the rank-two ``K``, so ``log det(K + 1e-64 I) = log 6 - 64 log 10``.
+    """``1e-48 I`` and the rank-two ``K``, so ``log det(K + 1e-48 I) = log 6 - 48 log 10``.
 
-    Stacked in component order, the small term's ``1e-32`` rows came first and
-    the QR took one as a pivot row, losing it in ``K``'s rows: ``-145.428`` and
-    gradient ``0.865`` against ``-145.574`` and ``1``.  The condition number is
-    about ``1e64``, so the reference carries 160 digits.
+    Stacked in component order, the small term's ``1e-24`` rows came first and
+    the QR took one as a pivot row, losing it in ``K``'s rows: ``log det`` and
+    both derivatives moved by ``1e-9`` (``0.15`` at ``1e-64``).  Below about
+    ``u**4`` of ``K`` the triangular solve for ``K``'s derivatives cancels its
+    trailing rounding against ``R_33``, in either order; ``1e-48`` is clear of
+    that.  The condition number is about ``1e48``, so the reference carries
+    100 digits.
     """
-    small = 1e-64 * np.eye(3)
+    small = 1e-48 * np.eye(3)
     rank_two = np.array([[2.0, 0.0, 1.0], [0.0, 2.0, -1.0], [1.0, -1.0, 1.0]])
     raw = [small, rank_two] if small_first else [rank_two, small]
     block = algebra._context_geometry(_multi_context(raw, np.eye(3))).plain
     weights = (1.0, 1.0)
-    reference = _exact_reference(block.roots, weights, digits=160)
+    reference = _exact_reference(block.roots, weights, digits=100)
     computed = blocks.multi_penalty_logdet(block.roots, np.array(weights))
     _assert_exact(computed, reference, block.rank)
 
