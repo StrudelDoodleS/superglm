@@ -391,6 +391,11 @@ def test_a_zero_weight_fisher_row_contributes_exact_zeros_at_a_sqrt_cusp() -> No
 def _null_mode_rows(family: str, link: str, n: int = 400):
     """A response, prior weights and an offset the pair's mean space accepts."""
     rng = np.random.default_rng(20261030)
+    if family == "rare binomial":
+        # Two events in 10,000 unit-weight rows and no offset: a mean of 2e-4.
+        y = np.zeros(10_000)
+        y[[17, 5003]] = 1.0
+        return y, np.ones(10_000), np.zeros(10_000)
     weights = rng.uniform(0.5, 2.0, n)
     if link in ("identity", "inverse"):
         offset = rng.uniform(0.0, 10.0, n)
@@ -426,6 +431,7 @@ def _null_mode_rows(family: str, link: str, n: int = 400):
         ("binomial", "probit"),
         ("binomial", "cloglog"),
         ("nb2", "log"),
+        ("rare binomial", "logit"),
     ],
 )
 def test_the_null_mode_given_an_offset_solves_the_intercept_score(family, link) -> None:
@@ -439,15 +445,19 @@ def test_the_null_mode_given_an_offset_solves_the_intercept_score(family, link) 
     4767b8a7 placed the offset-free intercept against the offset for every
     pair but a log link with a power variance: on the Gamma/inverse and
     Poisson/identity pairs rows fell on the clips, and the Gaussian/identity,
-    binomial and NB2 scores were of order ``sqrt(D I)``.
+    binomial and NB2 scores were of order ``sqrt(D I)``; a87b1ac4 placed a
+    binomial mean of 2e-4 with no offset at the start's clamp 1e-3, a score of
+    -8.
     """
-    from superglm.distributions import NegativeBinomial, resolve_distribution
+    from superglm.distributions import Binomial, NegativeBinomial, resolve_distribution
     from superglm.links import resolve_link
     from superglm.solvers.working_rows import null_fit_eta
 
-    distribution = {"tweedie": Tweedie(p=1.5), "nb2": NegativeBinomial(theta=2.0)}.get(
-        family
-    ) or resolve_distribution(family)
+    distribution = {
+        "tweedie": Tweedie(p=1.5),
+        "nb2": NegativeBinomial(theta=2.0),
+        "rare binomial": Binomial(),
+    }.get(family) or resolve_distribution(family)
     link_ = resolve_link(link, distribution)
     y, weights, offset = _null_mode_rows(family, link)
 

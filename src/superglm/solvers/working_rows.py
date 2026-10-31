@@ -138,11 +138,12 @@ def null_fit_eta(
     is the same float64 vector.  Where ``o~`` is zero on every weighted row
     the mean is constant, and the intercept-only score ``sum w (y - mu) mu' /
     V(mu)`` vanishes at the weighted mean of the response: the family's
-    initial intercept (up to its positive floor).  For a log link and
-    variance ``mu**p`` (Gaussian 0, Poisson 1, Tweedie p, Gamma 2) the score
-    equation given ``o~``, ``sum w (y - t e^o~) (t e^o~)**(1-p) = 0`` with
-    ``t = e^intercept``, solves to ``t = sum w y e^((1-p) o~) / sum w
-    e^((2-p) o~)``: the weighted mean of the response ``y e^-o~`` under the
+    initial intercept (up to its positive floor), and for a binomial the link
+    of the mean itself, which the binomial start clamps to ``[1e-3, 1 -
+    1e-3]``.  For a log link and variance ``mu**p`` (Gaussian 0, Poisson 1,
+    Tweedie p, Gamma 2) the score equation given ``o~``, ``sum w (y - t e^o~)
+    (t e^o~)**(1-p) = 0`` with ``t = e^intercept``, solves to ``t = sum w y
+    e^((1-p) o~) / sum w e^((2-p) o~)``: the weighted mean of the response ``y e^-o~`` under the
     weights ``w e^((2-p) o~)``, which is what the family's initial intercept
     of those rows computes (up to its positive floor).  Any other pair, or a
     row set whose rescaled response or weight is not finite, has no closed
@@ -154,13 +155,14 @@ def null_fit_eta(
     link's.  Only positive-weight rows are read: a zero-weight row's offset
     moves nothing here.
 
-    None where no valid mode is found: the fit does not converge, or on a
-    positive-weight row ``stabilize_eta`` or ``clip_mu`` holds the mode at a
-    clip past which the Fisher weight grows (``_clip_raises_information``).
-    A curvature read there is the clip's, not the model's: an inverse-link row
-    clipped to ``eta = 1e-12`` has the Gamma Fisher weight ``1e24``.  A row
-    held at a clip past which the weight falls or is flat is read where the
-    clip holds it, as the fit's own working weights read it.
+    None where no valid mode is found: the fit does not converge, the
+    intercept is infinite (a binomial mean of 0 or 1), or on a positive-weight
+    row ``stabilize_eta`` or ``clip_mu`` holds the mode at a clip past which
+    the Fisher weight grows (``_clip_raises_information``).  A curvature read
+    there is the clip's, not the model's: an inverse-link row clipped to
+    ``eta = 1e-12`` has the Gamma Fisher weight ``1e24``.  A row held at a
+    clip past which the weight falls or is flat is read where the clip holds
+    it, as the fit's own working weights read it.
     """
     weights = np.asarray(sample_weight, dtype=np.float64)
     offset = np.asarray(offset, dtype=np.float64)
@@ -179,7 +181,12 @@ def null_fit_eta(
             np.isfinite(rescaled_weights[carried])
         ):
             rows = (rescaled_y, rescaled_weights)
-    if rows is not None:
+    if rows is not None and isinstance(distribution, Binomial):
+        # ``initial_mean`` returns the weighted mean unclamped for an
+        # unbounded mean space.
+        with np.errstate(divide="ignore"):
+            intercept = float(link.link(np.atleast_1d(initial_mean(*rows, Gaussian())))[0])
+    elif rows is not None:
         intercept = coefficient_initial_intercept(
             distribution=distribution, link=link, y=rows[0], sample_weight=rows[1]
         )
@@ -194,6 +201,8 @@ def null_fit_eta(
         )
         if intercept is None:
             return None
+    if not np.isfinite(intercept):
+        return None
     eta = intercept + shifted
     stabilized = stabilize_eta(eta, link)
     mean = link.inverse(stabilized)
