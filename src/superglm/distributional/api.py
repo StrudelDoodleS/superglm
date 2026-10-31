@@ -60,7 +60,7 @@ from superglm.distributional.model import (
     _unvalidated_offset_shapes,
     fit_dense_distributional,
 )
-from superglm.distributional.observation import BoundPair
+from superglm.distributional.observation import BoundPair, CensoredRows
 from superglm.distributional.posterior import (
     CovarianceKind,
     PosteriorDraws,
@@ -569,7 +569,7 @@ class SuperLSS:
         retain_rows: bool,
         phase_recorder: FitPhaseRecorder | None = None,
         truncation: BoundPair = None,
-        censoring: BoundPair = None,
+        censored: CensoredRows = None,
     ) -> SuperLSS:
         next_revision = 1 if self._model is None else self._model.fit_state.revision + 1
         recorder = FitPhaseRecorder() if phase_recorder is None else phase_recorder
@@ -595,7 +595,7 @@ class SuperLSS:
                 separation=self._separation,
                 revision=next_revision,
                 truncation=truncation,
-                censoring=censoring,
+                censored=censored,
             )
         phase_snapshot = window.snapshot()
         self._model = candidate
@@ -636,7 +636,7 @@ class SuperLSS:
         inner_tol: float = 1.0e-7,
         retain_rows: bool = True,
         truncation: BoundPair = None,
-        censoring: BoundPair = None,
+        censored: CensoredRows = None,
     ) -> SuperLSS:
         """Fit coefficients while holding smoothing parameters fixed.
 
@@ -667,12 +667,16 @@ class SuperLSS:
             losses reported above a deductible, ``(d, None)``. Each side is
             ``None``, one number, or one number per row. A truncated row
             contributes its density divided by the probability of its window.
-        censoring : (lower, upper), optional
-            Bounds at which a response was capped. A response equal to its
-            upper bound, such as a claim paid at a policy limit, is read as
-            "at least this"; one equal to its lower bound as "at most this".
-            Record capped responses as the bound itself, for example
-            ``np.minimum(loss, limit)``.
+        censored : bool, label, or array-like of shape (n_observations,), optional
+            Which rows were censored, and on which side; the response of a
+            censored row is the limit it was censored at. ``True`` or
+            ``"right"`` reads a row as "at least this", such as a claim paid
+            at its policy limit, and ``"left"`` as "at most this"; ``False``,
+            ``"none"`` and ``None`` leave a row complete. Pass one flag per
+            row, for example ``censored=loss >= limit`` with
+            ``y=np.minimum(loss, limit)``, or one value for every row. A row
+            is censored only when flagged, never because its response equals
+            a limit.
 
         Returns
         -------
@@ -681,7 +685,7 @@ class SuperLSS:
 
         Notes
         -----
-        With ``truncation`` or ``censoring`` the fit estimates the parent law
+        With ``truncation`` or ``censored`` the fit estimates the parent law
         of the uncut response, so ``predict`` and the distribution functions
         describe that law, not the law within the bounds. ``GaussianLS``,
         ``LogNormalLS`` and ``GeneralizedParetoLSS`` support them.
@@ -705,7 +709,7 @@ class SuperLSS:
                 efs_config=None,
                 retain_rows=retain_rows,
                 truncation=truncation,
-                censoring=censoring,
+                censored=censored,
             )
 
     def fit_reml(
@@ -735,14 +739,14 @@ class SuperLSS:
         outer: Literal["efs", "efs+newton"] = "efs",
         phase_recorder: FitPhaseRecorder | None = None,
         truncation: BoundPair = None,
-        censoring: BoundPair = None,
+        censored: CensoredRows = None,
     ) -> SuperLSS:
         """Fit coefficients and estimate smoothing parameters jointly.
 
         ``X`` supplies the declared columns and ``y`` supplies the response
         in the same row order. ``sample_weight`` follows the model's
         ``weight_semantics``. ``offsets`` maps family parameter names to
-        known additions on the link scale. ``truncation`` and ``censoring``
+        known additions on the link scale. ``truncation`` and ``censored``
         are as in :meth:`fit`. This method updates the model and returns it.
 
         ``outer`` selects the smoothing optimiser.  The default ``"efs"`` runs
@@ -815,7 +819,7 @@ class SuperLSS:
                 retain_rows=retain_rows,
                 phase_recorder=phase_recorder,
                 truncation=truncation,
-                censoring=censoring,
+                censored=censored,
             )
 
     def _require_fitted(self) -> DenseDistributionalModel:
@@ -1147,7 +1151,7 @@ class SuperLSS:
         offsets: Mapping[str, NDArray] | None = None,
         seed: int = 42,
         truncation: BoundPair = None,
-        censoring: BoundPair = None,
+        censored: CensoredRows = None,
     ) -> ResidualSet:
         """Return the full residual payload of ``y`` under the fitted parameters.
 
@@ -1158,7 +1162,7 @@ class SuperLSS:
         under the model's declared contract: a prior weight is part of each
         row's law, so the transform is the prior-weighted one, while a
         frequency weight is replication that the checks expand.
-        ``truncation`` and ``censoring`` are the bounds the model was fitted
+        ``truncation`` and ``censored`` are the bounds the model was fitted
         with, read as in :meth:`fit`; pass them for rows recorded under them.
         """
         return self._residual_set(
@@ -1170,7 +1174,7 @@ class SuperLSS:
             offsets=offsets,
             seed=seed,
             truncation=truncation,
-            censoring=censoring,
+            censored=censored,
         )
 
     def _residual_set(
@@ -1184,10 +1188,10 @@ class SuperLSS:
         offsets: Mapping[str, NDArray] | None,
         seed: int,
         truncation: BoundPair,
-        censoring: BoundPair,
+        censored: CensoredRows,
     ) -> ResidualSet:
         """The residual payload for ``method``, which warns once if bounds go unread."""
-        self._warn_bounds_unread(method, truncation, censoring, stacklevel=4)
+        self._warn_bounds_unread(method, truncation, censored, stacklevel=4)
         return compute_residuals(
             self._require_fitted(),
             X,
@@ -1197,14 +1201,14 @@ class SuperLSS:
             offsets=offsets,
             seed=seed,
             truncation=truncation,
-            censoring=censoring,
+            censored=censored,
         )
 
     def _warn_bounds_unread(
         self,
         method: str,
         truncation: BoundPair,
-        censoring: BoundPair,
+        censored: CensoredRows,
         *,
         stacklevel: int = 3,
         takes_bounds: bool = True,
@@ -1215,15 +1219,15 @@ class SuperLSS:
 
         ``fitted`` is the model whose rows are read, this one by default.
         """
-        if truncation is not None or censoring is not None:
+        if truncation is not None or censored is not None:
             return
         state = (self._require_fitted() if fitted is None else fitted).fit_state
         if state.truncated_row_count + state.censored_row_count == 0:
             return
         remedy = (
-            "pass the same truncation= and censoring= for training rows"
+            "pass the same truncation= and censored= for training rows"
             if takes_bounds
-            else "it does not take truncation= or censoring= yet, so read its training-row "
+            else "it does not take truncation= or censored= yet, so read its training-row "
             "result with that in mind"
         )
         warnings.warn(
@@ -1244,14 +1248,14 @@ class SuperLSS:
         offsets: Mapping[str, NDArray] | None = None,
         seed: int = 42,
         truncation: BoundPair = None,
-        censoring: BoundPair = None,
+        censored: CensoredRows = None,
     ) -> NDArray[np.float64]:
         """Return one residual per row: ``"quantile"`` or the raw ``"pit"`` value.
 
         This is :meth:`residual_set` with everything but the array discarded.
         A correct family makes the PIT values uniform and the quantile
         residuals standard normal, so these are the values every distributional
-        diagnostic in the suite is drawn from.  ``truncation`` and ``censoring``
+        diagnostic in the suite is drawn from.  ``truncation`` and ``censored``
         are the bounds the model was fitted with, read as in :meth:`fit`; pass
         them for rows recorded under them.
         """
@@ -1264,7 +1268,7 @@ class SuperLSS:
             offsets=offsets,
             seed=seed,
             truncation=truncation,
-            censoring=censoring,
+            censored=censored,
         ).values(kind)
 
     def check(
@@ -1278,7 +1282,7 @@ class SuperLSS:
         offsets: Mapping[str, NDArray] | None = None,
         seed: int = 42,
         truncation: BoundPair = None,
-        censoring: BoundPair = None,
+        censored: CensoredRows = None,
         **kwargs: Any,
     ) -> BinnedCheck:
         """Return the mean, standard deviation and skewness of the residuals per bin.
@@ -1290,7 +1294,7 @@ class SuperLSS:
         region where the fit is wrong and in which moment.  ``sample_weight``
         is the aggregation weight of the residual payload; further keywords
         (``n_bins``, ``n_boot``) reach the builder.  ``truncation`` and
-        ``censoring`` are the bounds the model was fitted with, read as in
+        ``censored`` are the bounds the model was fitted with, read as in
         :meth:`fit`; pass them for rows recorded under them.
         """
         values, label = self._covariate_values(X, covariate, name=name)
@@ -1303,7 +1307,7 @@ class SuperLSS:
             offsets=offsets,
             seed=seed,
             truncation=truncation,
-            censoring=censoring,
+            censored=censored,
         )
         return binned_check(
             residuals,
@@ -1325,7 +1329,7 @@ class SuperLSS:
         offsets: Mapping[str, NDArray] | None = None,
         seed: int = 42,
         truncation: BoundPair = None,
-        censoring: BoundPair = None,
+        censored: CensoredRows = None,
         **kwargs: Any,
     ) -> BinnedCheck2D:
         """Return the mean residual on a two-dimensional grid of two covariates.
@@ -1333,7 +1337,7 @@ class SuperLSS:
         Each covariate is a column name of ``X`` or an array with one value per
         row.  The tile means say where in the joint region the fit drifts, which
         a pair of one-dimensional checks cannot show; ``n_bins`` is a pair, one
-        count per axis.  ``truncation`` and ``censoring`` are the bounds the
+        count per axis.  ``truncation`` and ``censored`` are the bounds the
         model was fitted with, read as in :meth:`fit`; pass them for rows
         recorded under them.
         """
@@ -1354,7 +1358,7 @@ class SuperLSS:
             offsets=offsets,
             seed=seed,
             truncation=truncation,
-            censoring=censoring,
+            censored=censored,
         )
         return binned_check_2d(residuals, first, second, names=(first_name, second_name), **kwargs)
 
@@ -1431,7 +1435,7 @@ class SuperLSS:
         sample_weight: NDArray | None = None,
         offsets: Mapping[str, NDArray] | None = None,
         truncation: BoundPair = None,
-        censoring: BoundPair = None,
+        censored: CensoredRows = None,
         **kwargs: Any,
     ) -> pd.DataFrame:
         """Return one column of proper scores per requested rule, one row per row.
@@ -1443,11 +1447,11 @@ class SuperLSS:
         column reads ``sample_weight`` under the fitted model's contract: prior
         weights select the row's weighted predictive law, while frequency
         weights return the compressed contribution of the repeated unit law.
-        ``truncation`` and ``censoring`` are the bounds the model was fitted
+        ``truncation`` and ``censored`` are the bounds the model was fitted
         with, read as in :meth:`fit`; only the log score supports truncated or
         censored rows, so pass ``which=("log",)`` with them.
         """
-        self._warn_bounds_unread("scores", truncation, censoring)
+        self._warn_bounds_unread("scores", truncation, censored)
         return score_table(
             self._require_fitted(),
             X,
@@ -1457,7 +1461,7 @@ class SuperLSS:
             sample_weight=sample_weight,
             offsets=offsets,
             truncation=truncation,
-            censoring=censoring,
+            censored=censored,
             **kwargs,
         )
 
@@ -1789,7 +1793,7 @@ class SuperLSS:
         sample_weight: NDArray | None = None,
         offsets: Mapping[str, NDArray] | None = None,
         truncation: BoundPair = None,
-        censoring: BoundPair = None,
+        censored: CensoredRows = None,
     ) -> Any:
         """Draw the six-panel distributional diagnostic.
 
@@ -1800,7 +1804,7 @@ class SuperLSS:
         last three where it is wrong.  ``sample_weight`` is the aggregation
         weight of the residuals underneath; ``engine`` selects matplotlib or
         plotly, and only the engine asked for is imported.  ``truncation`` and
-        ``censoring`` are the bounds the model was fitted with, read as in
+        ``censored`` are the bounds the model was fitted with, read as in
         :meth:`fit`; pass them for rows recorded under them.
         """
         render = _renderer(engine, "diagnostics")
@@ -1813,7 +1817,7 @@ class SuperLSS:
             offsets=offsets,
             seed=seed,
             truncation=truncation,
-            censoring=censoring,
+            censored=censored,
         )
         frame, resolved_offsets = self._retained_design(X, sample_weight, offsets)
         qq = qq_payload(
@@ -1970,7 +1974,7 @@ class SuperLSS:
         offsets: Mapping[str, NDArray] | None = None,
         seed: int = 42,
         truncation: BoundPair = None,
-        censoring: BoundPair = None,
+        censored: CensoredRows = None,
         **kwargs: Any,
     ) -> QQPayload:
         """The Q-Q payload with its simulated envelope, on the retained rows."""
@@ -1982,7 +1986,7 @@ class SuperLSS:
             offsets=offsets,
             seed=seed,
             truncation=truncation,
-            censoring=censoring,
+            censored=censored,
         )
         frame, resolved_offsets = self._retained_design(X, sample_weight, offsets)
         return qq_payload(
@@ -2005,7 +2009,7 @@ class SuperLSS:
         offsets: Mapping[str, NDArray] | None = None,
         seed: int = 42,
         truncation: BoundPair = None,
-        censoring: BoundPair = None,
+        censored: CensoredRows = None,
         **kwargs: Any,
     ) -> WormPayload:
         """The worm payload, one panel per interval of ``covariate`` when given."""
@@ -2017,7 +2021,7 @@ class SuperLSS:
             offsets=offsets,
             seed=seed,
             truncation=truncation,
-            censoring=censoring,
+            censored=censored,
         )
         values: NDArray | None = None
         label = covariate_name
@@ -2037,7 +2041,7 @@ class SuperLSS:
         offsets: Mapping[str, NDArray] | None = None,
         seed: int = 42,
         truncation: BoundPair = None,
-        censoring: BoundPair = None,
+        censored: CensoredRows = None,
         **kwargs: Any,
     ) -> PITPayload:
         """The PIT histogram payload with its binomial band."""
@@ -2049,7 +2053,7 @@ class SuperLSS:
             offsets=offsets,
             seed=seed,
             truncation=truncation,
-            censoring=censoring,
+            censored=censored,
         )
         return pit_payload(residuals, **kwargs)
 

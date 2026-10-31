@@ -59,6 +59,7 @@ from superglm.distributional.observation import (
     LEFT_CENSORED,
     RIGHT_CENSORED,
     BoundPair,
+    CensoredRows,
     ResponseBounds,
     resolve_response_bounds,
     unvalidated_bound_arrays,
@@ -218,7 +219,7 @@ def compute_residuals(
     seed: int = 42,
     kind: ResidualKind = "quantile",
     truncation: BoundPair = None,
-    censoring: BoundPair = None,
+    censored: CensoredRows = None,
 ) -> ResidualSet:
     """Return the residual payload of ``y`` under the fit's plug-in parameters.
 
@@ -235,7 +236,7 @@ def compute_residuals(
     distribution function.  A family without one refuses rather than quietly
     inverting the unit-weight distribution.
 
-    ``truncation`` and ``censoring`` are the bounds of the fit, read as
+    ``truncation`` and ``censored`` are the bounds of the fit, read as
     ``SuperLSS.fit`` reads them; the transform is then that of the row's
     truncated or censored observation, and a censored row is randomised.
     """
@@ -247,7 +248,7 @@ def compute_residuals(
         sample_weight=sample_weight,
         offsets=offsets,
         truncation=truncation,
-        censoring=censoring,
+        censored=censored,
     )
     lower, upper = evaluation.pit_lower, evaluation.pit_upper
     atoms = lower < upper
@@ -313,15 +314,15 @@ def _evaluate_residuals(
     sample_weight: NDArray | None = None,
     offsets: Mapping[str, NDArray] | None = None,
     truncation: BoundPair = None,
-    censoring: BoundPair = None,
+    censored: CensoredRows = None,
     bounds: ResponseBounds | None = None,
 ) -> _ResidualEvaluation:
     """Evaluate the retained row law without randomization or retained designs.
 
     Held-out responses must be finite after zero-weight selection. Frequency
     diagnostics otherwise use the CDF's scoring support; prior laws retain the
-    family's likelihood-binding validation and refusals. Truncation and
-    censoring resolve as the fit resolves them, on the retained rows; ``bounds``
+    family's likelihood-binding validation and refusals. ``truncation`` and
+    ``censored`` resolve as the fit resolves them, on the retained rows; ``bounds``
     are instead the retained rows' already resolved bounds, for rows the caller
     selected itself, and replace both.
     """
@@ -334,7 +335,7 @@ def _evaluate_residuals(
     frame = as_eager_frame(X)
     n_observations = len(frame)
     response = _unvalidated_response_shape(y, n_observations)
-    original_bounds = unvalidated_bound_arrays(truncation, censoring, n_observations)
+    original_bounds = unvalidated_bound_arrays(truncation, censored, n_observations)
     contract = fitted.fit_state.weight_contract
     resolved = resolve_likelihood_weights(
         sample_weight,
@@ -442,7 +443,7 @@ def _validate_residual_evaluation(
     sample_weight: NDArray | None = None,
     offsets: Mapping[str, NDArray] | None = None,
     truncation: BoundPair = None,
-    censoring: BoundPair = None,
+    censored: CensoredRows = None,
     bounds: ResponseBounds | None = None,
 ) -> None:
     """Allow reuse of an equivalent deterministic evaluation, independent of seed.
@@ -458,7 +459,7 @@ def _validate_residual_evaluation(
         sample_weight=sample_weight,
         offsets=offsets,
         truncation=truncation,
-        censoring=censoring,
+        censored=censored,
         bounds=bounds,
     )
     for name, expected in current._asdict().items():

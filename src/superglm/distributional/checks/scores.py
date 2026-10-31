@@ -65,6 +65,7 @@ from superglm.distributional.model import (
 )
 from superglm.distributional.observation import (
     BoundPair,
+    CensoredRows,
     ResponseBounds,
     resolve_response_bounds,
     unvalidated_bound_arrays,
@@ -569,11 +570,11 @@ def _scoring_rows(
     sample_weight: NDArray | None,
     offsets: Mapping[str, NDArray] | None,
     truncation: BoundPair = None,
-    censoring: BoundPair = None,
+    censored: CensoredRows = None,
 ) -> _ScoringRows:
     """Resolve one scoring call and omit zero-weight rows before any prediction.
 
-    Truncation and censoring resolve as the fit resolves them: shape-checked on
+    ``truncation`` and ``censored`` resolve as the fit resolves them: shape-checked on
     the call's rows, then taken at the retained positions and checked against
     the retained responses.
     """
@@ -586,7 +587,7 @@ def _scoring_rows(
         raise ValueError("a score needs one response value per row of X")
 
     shaped_offsets = _unvalidated_offset_shapes(offsets, n_observations)
-    shaped_bounds = unvalidated_bound_arrays(truncation, censoring, n_observations)
+    shaped_bounds = unvalidated_bound_arrays(truncation, censored, n_observations)
     resolved = resolve_likelihood_weights(
         sample_weight,
         n_observations=n_observations,
@@ -761,7 +762,7 @@ def log_score(
     sample_weight: NDArray | None = None,
     offsets: Mapping[str, NDArray] | None = None,
     truncation: BoundPair = None,
-    censoring: BoundPair = None,
+    censored: CensoredRows = None,
 ) -> NDArray[np.float64]:
     """Return ``-log f(y | theta_hat)`` per row under the fit's weight contract.
 
@@ -770,7 +771,7 @@ def log_score(
     drops the row from the likelihood altogether.  Dropped rows score ``nan``
     rather than silently disappearing, so the result always aligns with ``X``.
 
-    ``truncation`` and ``censoring`` are read as ``SuperLSS.fit`` reads them: a
+    ``truncation`` and ``censored`` are read as ``SuperLSS.fit`` reads them: a
     truncated row scores its density over the probability of its window and a
     censored row the negative log probability of its observed interval.
     """
@@ -781,7 +782,7 @@ def log_score(
         sample_weight=sample_weight,
         offsets=offsets,
         truncation=truncation,
-        censoring=censoring,
+        censored=censored,
     )
     scores = np.full(rows.n_observations, np.nan, dtype=np.float64)
     # The likelihood already reports count × unit log score under frequency
@@ -873,7 +874,7 @@ def score_table(
     method: CrpsMethod = "auto",
     n_nodes: int = 64,
     truncation: BoundPair = None,
-    censoring: BoundPair = None,
+    censored: CensoredRows = None,
 ) -> pd.DataFrame:
     """Score every row into one frame under the fitted model's weight contract.
 
@@ -902,7 +903,7 @@ def score_table(
         sample_weight=sample_weight,
         offsets=offsets,
         truncation=truncation,
-        censoring=censoring,
+        censored=censored,
     )
     columns: dict[str, NDArray[np.float64]] = {}
     if "log" in names:

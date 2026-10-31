@@ -1,16 +1,18 @@
-"""Per-row truncation and censoring bounds of a distributional response.
+"""Per-row truncation windows and censoring flags of a distributional response.
 
 A truncated row was recorded only because its response fell inside its window
 ``(lower, upper]``, so it contributes ``log f(y) - log P(lower < Y <= upper)``.
-A censored row's response is its censoring bound: right-censored at ``c`` means
-``Y > c`` and contributes ``log P(c < Y <= upper)``; left-censored at ``c``
-means ``Y <= c`` and contributes ``log P(lower < Y <= c)``, each divided by the
-row's truncation probability.  The bounds describe how rows were recorded, not
-the law: a fit with bounds estimates the parent, untruncated law.
+A censored row's recorded response is its limit: a row right-censored at ``c``
+means ``Y > c`` and contributes ``log P(c < Y <= upper)``; one left-censored at
+``c`` means ``Y <= c`` and contributes ``log P(lower < Y <= c)``, each divided
+by the row's truncation probability.  Which rows are censored, and on which
+side, is the caller's flag, never read from the value.  The bounds describe how
+rows were recorded, not the law: a fit with bounds estimates the parent,
+untruncated law.
 
 ``ResponseBounds`` holds the resolved per-row arrays; ``resolve_response_bounds``
-turns the public ``truncation=(lower, upper)`` and ``censoring=(lower, upper)``
-arguments into it, or into ``None`` when no row is truncated or censored.
+turns the public ``truncation=(lower, upper)`` and ``censored=`` arguments into
+it, or into ``None`` when no row is truncated or censored.
 """
 
 from __future__ import annotations
@@ -19,12 +21,20 @@ import hashlib
 from dataclasses import dataclass
 
 import numpy as np
-from numpy.typing import NDArray
+import pandas as pd
+from numpy.typing import ArrayLike, NDArray
 
 RIGHT_CENSORED = 1
 LEFT_CENSORED = -1
 
 BoundPair = tuple[object, object] | None
+CensoredRows = ArrayLike | None
+
+_CENSORED_LABELS = {"right": RIGHT_CENSORED, "left": LEFT_CENSORED, "none": 0}
+_CENSORED_FORMS = (
+    "pass True (right-censored) or False per row, or the labels 'right', 'left' and "
+    "'none' (or None)"
+)
 
 
 def _frozen(values: NDArray, dtype: type) -> NDArray:
@@ -133,23 +143,86 @@ def _side_array(value: object, n_rows: int, *, absent: float, name: str) -> NDAr
     return np.array(array, dtype=np.float64, copy=True)
 
 
+def _first_rows(mask: NDArray[np.bool_]) -> str:
+    return f"{int(np.count_nonzero(mask))} row(s), first at input row {int(np.argmax(mask))}"
+
+
+def _label_side(value: object) -> int | None:
+    """The side of one ``censored=`` entry, or ``None`` when it is not a censoring flag."""
+    if value is None:
+        return 0
+    if isinstance(value, bool | np.bool_):
+        return RIGHT_CENSORED if value else 0
+    if isinstance(value, str):
+        return _CENSORED_LABELS.get(value)
+    return None
+
+
+def _refuse_missing_flags(mask: NDArray[np.bool_]) -> None:
+    raise ValueError(
+        f"censored= is missing (NaN) for {_first_rows(mask)}; give every row a flag, "
+        "with False, 'none' or None for an uncensored row"
+    )
+
+
+def _censored_sides(censored: CensoredRows, n_rows: int) -> NDArray[np.intp]:
+    """One censoring side per row from the public ``censored=`` flag.
+
+    ``True`` and ``"right"`` mark a right-censored row, ``"left"`` a
+    left-censored one, and ``False``, ``"none"`` and ``None`` an uncensored
+    one.  A single value applies to every row.  Numbers other than booleans,
+    missing entries and unknown labels are refused rather than guessed at.
+    """
+    if censored is None:
+        return np.zeros(n_rows, dtype=np.intp)
+    try:
+        array = np.asarray(censored)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"censored= must be one flag per row; {_CENSORED_FORMS}") from exc
+    if array.ndim == 0:
+        array = np.full(n_rows, array.item(), dtype=array.dtype)
+    if array.shape != (n_rows,):
+        raise ValueError(
+            f"censored= has shape {array.shape} for {n_rows} rows; pass one flag per row "
+            "of X, or one value for every row"
+        )
+    if array.dtype == np.bool_:
+        return np.where(array, RIGHT_CENSORED, 0).astype(np.intp)
+    if array.dtype.kind in "fc" and np.any(np.isnan(array)):
+        _refuse_missing_flags(np.isnan(array))
+    if array.dtype.kind not in "OU":
+        raise TypeError(
+            f"censored= holds {array.dtype} values, which do not say which rows are censored; "
+            f"{_CENSORED_FORMS}, for example censored=(flag == 1)"
+        )
+    sides = [_label_side(value) for value in array.tolist()]
+    unknown = np.array([side is None for side in sides], dtype=bool)
+    if np.any(unknown):
+        missing = unknown & np.array([bool(pd.isna(value)) for value in array.tolist()], dtype=bool)
+        if np.any(missing):
+            _refuse_missing_flags(missing)
+        first = array.tolist()[int(np.argmax(unknown))]
+        raise ValueError(
+            f"censored= has an unknown flag {first!r} for {_first_rows(unknown)}; {_CENSORED_FORMS}"
+        )
+    return np.asarray(sides, dtype=np.intp)
+
+
 def unvalidated_bound_arrays(
-    truncation: BoundPair, censoring: BoundPair, n_rows: int
-) -> tuple[NDArray[np.float64], ...] | None:
+    truncation: BoundPair, censored: CensoredRows, n_rows: int
+) -> tuple[NDArray, NDArray, NDArray] | None:
     """Shape-check and broadcast the public bounds to ``n_rows``; ``None`` when both are absent.
 
-    Returns ``(truncation lower, truncation upper, censoring lower, censoring
-    upper)`` with infinite entries for open sides, before any row selection.
+    Returns ``(truncation lower, truncation upper, censoring side)``, with
+    infinite entries for open truncation sides, before any row selection.
     """
-    if truncation is None and censoring is None:
+    if truncation is None and censored is None:
         return None
     t_lower, t_upper = _pair(truncation, "truncation")
-    c_lower, c_upper = _pair(censoring, "censoring")
     return (
         _side_array(t_lower, n_rows, absent=-np.inf, name="truncation lower bound"),
         _side_array(t_upper, n_rows, absent=np.inf, name="truncation upper bound"),
-        _side_array(c_lower, n_rows, absent=-np.inf, name="censoring lower bound"),
-        _side_array(c_upper, n_rows, absent=np.inf, name="censoring upper bound"),
+        _censored_sides(censored, n_rows),
     )
 
 
@@ -162,21 +235,23 @@ def _refuse_rows(mask: NDArray[np.bool_], positions: NDArray, message: str) -> N
 
 def resolve_response_bounds(
     response: NDArray,
-    arrays: tuple[NDArray[np.float64], ...] | None,
+    arrays: tuple[NDArray, NDArray, NDArray] | None,
     positions: NDArray,
 ) -> ResponseBounds | None:
     """Validate retained-row bounds against the response; ``None`` when no row is bounded.
 
     ``arrays`` are :func:`unvalidated_bound_arrays` already taken at the
-    retained ``positions``, which only name rows in error messages.  A
-    response equal to a finite censoring bound is censored there; a response
-    beyond its censoring bound, or outside its truncation window, is refused.
+    retained ``positions``, which only name rows in error messages.  The
+    censoring side is the caller's flag; a censored row's response is the
+    limit it was censored at.  A response outside its truncation window, a
+    censored row without a finite response, and a censored row that observed
+    nothing inside its window are refused.
     """
     if arrays is None:
         return None
     values = np.asarray(response, dtype=np.float64)
-    t_lower, t_upper, c_lower, c_upper = arrays
-    for bound in arrays:
+    t_lower, t_upper, side = arrays
+    for bound in (t_lower, t_upper):
         _refuse_rows(np.isnan(bound), positions, "have a missing (NaN) bound; use None or inf")
     _refuse_rows(
         ~(t_lower < t_upper), positions, "have a truncation lower bound at or above the upper one"
@@ -188,17 +263,10 @@ def resolve_response_bounds(
         "within them",
     )
     _refuse_rows(
-        ~(c_lower < c_upper), positions, "have a censoring lower bound at or above the upper one"
-    )
-    _refuse_rows(
-        (values < c_lower) | (values > c_upper),
+        (side != 0) & ~np.isfinite(values),
         positions,
-        "have a response beyond a censoring bound; a censored row's response is its bound, "
-        "so record the capped value (for example np.minimum(y, limit))",
+        "are censored but have no finite response; record a censored row's limit as its response",
     )
-    side = np.zeros(len(values), dtype=np.intp)
-    side[np.isfinite(c_upper) & (values == c_upper)] = RIGHT_CENSORED
-    side[np.isfinite(c_lower) & (values == c_lower)] = LEFT_CENSORED
     _refuse_rows(
         (side == RIGHT_CENSORED) & (values >= t_upper),
         positions,
@@ -218,6 +286,7 @@ def resolve_response_bounds(
 __all__ = [
     "LEFT_CENSORED",
     "RIGHT_CENSORED",
+    "CensoredRows",
     "ResponseBounds",
     "resolve_response_bounds",
     "unvalidated_bound_arrays",
