@@ -671,9 +671,10 @@ class SuperLSS:
             Which rows were censored, and on which side; the response of a
             censored row is the limit it was censored at. ``True`` or
             ``"right"`` reads a row as "at least this", such as a claim paid
-            at its policy limit, and ``"left"`` as "at most this"; ``False``,
-            ``"none"`` and ``None`` leave a row complete. Pass one flag per
-            row, for example ``censored=loss >= limit`` with
+            at its policy limit, and ``"left"`` as "at most this"; ``False``
+            and ``"none"`` leave a row complete. A missing entry (``None``,
+            NaN or ``pd.NA``) is refused rather than read as complete. Pass
+            one flag per row, for example ``censored=loss >= limit`` with
             ``y=np.minimum(loss, limit)``, or one value for every row. A row
             is censored only when flagged, never because its response equals
             a limit.

@@ -12,7 +12,7 @@ from __future__ import annotations
 import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import replace
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -35,6 +35,7 @@ from superglm.diagnostics.separation import (
 from superglm.distributional.family import (
     CensoredSeparationFamily,
     DistributionalFamily,
+    ParameterSpec,
     ResponseBoundaryFamily,
 )
 from superglm.distributional.observation import LEFT_CENSORED, RIGHT_CENSORED, ResponseBounds
@@ -42,7 +43,7 @@ from superglm.distributional.predictor import CompiledPredictor
 from superglm.features.categorical import Categorical
 from superglm.features.interaction import CategoricalInteraction
 from superglm.features.ordered_categorical import resolve_interaction_parent_of
-from superglm.links import Link
+from superglm.links import Link, resolve_link
 
 SeparationPolicy = Literal["warn", "error", "ignore"]
 SEPARATION_POLICIES: tuple[str, ...] = ("warn", "error", "ignore")
@@ -246,17 +247,35 @@ def _scan_design_cells(
     return findings
 
 
+def _default_link_class(parameter: ParameterSpec) -> type:
+    default = parameter.default_link
+    return type(default if isinstance(default, Link) else resolve_link(default, cast(Any, None)))
+
+
 def censored_recession(
-    family: DistributionalFamily, bounds: ResponseBounds, n_predictors: int
+    family: DistributionalFamily, bounds: ResponseBounds, compiled: Sequence[CompiledPredictor]
 ) -> NDArray[np.bool_]:
-    """One flag per row and predictor; all false without a declaration."""
-    shape = (bounds.n_rows, n_predictors)
+    """One flag per row and predictor; all false without a declaration.
+
+    A family's flags hold under links of its parameters' default link
+    classes, each of which reaches the limit the recession runs to as the
+    predictor walks off.  A predictor on a link of another class is left
+    unflagged: a bounded link, such as a logit on a scale, can stop short of
+    that limit and leave the level a finite estimate.
+    """
+    compiled_tuple = tuple(compiled)
+    shape = (bounds.n_rows, len(compiled_tuple))
     if not isinstance(family, CensoredSeparationFamily):
         return np.zeros(shape, dtype=bool)
     flags = np.asarray(family.censored_recession(bounds))
     if flags.shape != shape or flags.dtype != np.bool_:
         raise ValueError("family.censored_recession must return one boolean per row and predictor")
-    return flags
+    parameters = tuple(family.parameters)
+    on_default_link = [
+        type(predictor.link) is _default_link_class(parameters[predictor.parameter_index])
+        for predictor in compiled_tuple
+    ]
+    return flags & np.asarray(on_default_link, dtype=bool)
 
 
 def scan_censored_separation(

@@ -816,7 +816,9 @@ class CensoredSeparationFamily(Protocol):
     censored on one side and all flagged on a predictor has no finite
     maximum-likelihood effect there.  Rows left unflagged anchor their level;
     whether such a level has a finite estimate can depend on the fit, so the
-    scan does not report it.
+    scan does not report it.  The scan reads a predictor's flags only when its
+    link is of its parameter's default link class, so a flag must hold for
+    every link of that class.
     """
 
     def censored_recession(self, bounds: ResponseBounds) -> NDArray[np.bool_]: ...

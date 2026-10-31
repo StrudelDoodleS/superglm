@@ -166,15 +166,16 @@ def _refuse_missing_flags(mask: NDArray[np.bool_], positions: NDArray) -> None:
 def _censored_flags(censored: CensoredRows, n_rows: int) -> NDArray:
     """The public ``censored=`` flag broadcast to ``n_rows`` and shape-checked, not yet read.
 
-    A list or tuple that is not all booleans is held entry by entry, so a
-    mixed list such as ``[False, "left"]`` keeps each entry's own type instead
-    of being promoted to strings.
+    A list or tuple that numpy would promote to strings is held entry by
+    entry, so a mixed list such as ``[False, "left"]`` keeps each entry's own
+    type; a numeric list such as ``[0, 1]`` stays numeric and is refused as
+    numbers are.
     """
     if censored is None:
         return np.zeros(n_rows, dtype=bool)
     try:
         array = np.asarray(censored)
-        if isinstance(censored, list | tuple) and array.dtype != np.bool_:
+        if isinstance(censored, list | tuple) and array.dtype.kind in "US":
             array = np.asarray(censored, dtype=object)
     except (TypeError, ValueError) as exc:
         raise TypeError(f"censored= must be one flag per row; {_CENSORED_FORMS}") from exc
