@@ -560,13 +560,16 @@ then warns and records it in `result_.warnings`, naming the wall and the
 number of rows at it. A row counts as at a wall when two things hold:
 - its shape lies within `1e-4` of the wall, closer than any sample below
   about 10⁸ rows can resolve;
-- a Newton step in the shape of the rows there would cross the wall.
+- a Newton step in the coefficients of the shape predictor, taken from where
+  the fit stopped, would carry it past the wall.
 
-That is the usual test for an active bound, and it does not depend on the
-solver's tolerance. Its consequences:
+That is the usual test for an active bound. It moves only in directions the
+fitted shape predictor offers, and it does not depend on the solver's
+tolerance. Its consequences:
 - At an upper wall of one the mean excess and the expected shortfall are
-  infinite. `predict()` returns `inf` wherever the shape is within `1e-6` of
-  one, since no sample can tell such a shape from one. Quantiles and the
+  infinite. `predict()` and `expected_shortfall()` still return their values
+  at the shape where the fit stopped, which the solver's tolerance sets rather
+  than the data, so read the warning before using them. Quantiles and the
   distribution function stay finite.
 - At any other wall the shape, and everything that depends on it, is set by
   the wall rather than the data.

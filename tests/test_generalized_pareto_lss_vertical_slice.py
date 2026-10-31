@@ -155,14 +155,14 @@ def _constant_shape_fit(family, frame, y):
     ).fit(frame, y)
 
 
-def test_a_shape_pressed_past_the_upper_wall_of_one_is_disclosed_with_an_infinite_mean():
+def test_a_shape_pressed_past_the_upper_wall_of_one_is_disclosed_as_having_no_finite_mean():
     # a true shape of 1.5 puts the maximum-likelihood shape far beyond the wall at one
     frame, y, _ = _simulate(3_000, 8, shape=1.5)
     with pytest.warns(ConvergenceWarning, match="at the upper wall 1"):
         model = _constant_shape_fit(GeneralizedParetoLSS(), frame, y)
     (message,) = _wall_messages(model)
     assert "3000 of 3000 rows" in message and "infinite" in message
-    assert np.all(np.isposinf(model.predict(frame)))
+    assert "solver's tolerance" in message
     assert np.all(np.isfinite(model.predict_quantile(frame, 0.99)))
 
 
@@ -210,6 +210,45 @@ def test_a_shape_that_varies_towards_a_wall_without_reaching_it_is_not_disclosed
     ).fit(frame, y)
     assert not _wall_messages(model)
     assert np.all(np.isfinite(model.predict(frame)))
+    # extrapolated to x = 4 the shape is within 1e-8 of one, and its mean stays the law's own
+    beyond = pd.DataFrame({"x": [4.0]})
+    shape_beyond = model.predict_parameters(beyond)["shape"].to_numpy()
+    assert 1.0 - shape_beyond[0] < 1.0e-8
+    assert np.isfinite(model.predict(beyond)[0])
+
+
+def test_a_linear_shape_reaching_near_both_walls_at_an_interior_optimum_is_not_disclosed():
+    # the fitted shape comes within 1e-4 of both walls, but no coefficient step crosses them
+    x = np.linspace(-1.0, 1.0, 5_000)
+    shape = expit(10.0 * x)
+    y = np.expm1(-shape * np.log(np.random.default_rng(4).random(5_000))) / shape
+    frame = pd.DataFrame({"x": x})
+    model = model_from_templates(
+        family=GeneralizedParetoLSS(),
+        predictors=(Predictor("scale", {}), Predictor("shape", {"x": Numeric()})),
+    ).fit(frame, y, inner_tol=1.0e-10)
+    fitted = model.predict_parameters(frame)["shape"].to_numpy()
+    assert fitted.min() < 1.0e-4 and 1.0 - fitted.max() < 1.0e-4
+    assert not _wall_messages(model)
+
+
+def test_rows_no_shape_coefficient_moves_do_not_hide_a_pressed_group():
+    # group 1 is pressed past the upper wall; group 2's shape is fixed near it by its offset
+    heavy = np.expm1(-1.5 * np.log(np.random.default_rng(8).random(1_000))) / 1.5
+    y = np.concatenate([heavy, np.ones(1_000)])
+    frame = pd.DataFrame({"g": np.repeat([1.0, 0.0], 1_000)})
+    offset = np.repeat([0.0, np.log(0.99995 / 0.00005)], 1_000)
+    model = model_from_templates(
+        family=GeneralizedParetoLSS(),
+        predictors=(
+            Predictor("scale", {"g": Numeric()}),
+            Predictor("shape", {"g": Numeric()}, intercept=False),
+        ),
+    )
+    with pytest.warns(ConvergenceWarning, match="at the upper wall 1"):
+        model.fit(frame, y, offsets={"shape": offset}, inner_tol=1.0e-10)
+    (message,) = _wall_messages(model)
+    assert "1000 of 2000 rows" in message
 
 
 def test_a_pressed_fit_without_positive_shape_information_is_still_disclosed():

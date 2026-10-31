@@ -40,17 +40,13 @@ def test_variance_has_the_exact_second_moment_domain_without_losing_finite_means
     assert np.all(np.isfinite(family.default_prediction(theta)))
 
 
-def test_the_default_prediction_reads_a_shape_within_a_millionth_of_one_as_one():
+def test_the_default_prediction_is_the_exact_mean_however_close_to_one():
+    # a shape this close to one need not be a pressed fit: a covariate can extrapolate there
     family = GeneralizedParetoLSS()
-    theta = np.array(
-        [[2.0, np.nextafter(1.0, 0.0)], [2.0, 1.0 - 5.0e-7], [2.0, 1.0 - 4.0e-6], [2.0, 0.5]]
-    )
-    mean = family.default_prediction(theta)
-    assert np.all(np.isposinf(mean[:2]))
-    assert mean[2] == 2.0 / (1.0 - theta[2, 1])
-    assert mean[3] == 4.0
-    # the law's own expected shortfall stays the exact functional of its parameters
-    assert np.isfinite(family.expected_shortfall(np.array([0.9]), theta[1:2])[0])
+    shapes = np.array([np.nextafter(1.0, 0.0), 1.0 - 5.0e-7, 1.0 - 1.3e-9, 0.5])
+    theta = np.column_stack([np.full(4, 2.0), shapes])
+    assert np.array_equal(family.default_prediction(theta), 2.0 / (1.0 - shapes))
+    assert np.all(np.isfinite(family.expected_shortfall(np.full(4, 0.9), theta)))
 
 
 def test_an_upper_wall_below_one_keeps_the_exact_mean_however_close_to_one():
@@ -59,37 +55,37 @@ def test_an_upper_wall_below_one_keeps_the_exact_mean_however_close_to_one():
     assert family.default_prediction(theta)[0] == 1.0e-6 / (1.0 - 0.9999995)
 
 
-def _disclosure_at(family, y, shape):
-    """The wall disclosure at a constant shape, with the scale at its optimum for that shape."""
-    scale = stats.genpareto.fit(y, fc=shape, floc=0.0)[2]
-    theta = np.column_stack([np.full(len(y), scale), np.full(len(y), shape)])
-    plan = family.bind_likelihood(y, _weights(np.ones(len(y)), "frequency"), COMPLETE_OBSERVATION)
-    return family.wall_disclosure(y, theta, plan)
-
-
-def test_a_wall_is_disclosed_when_a_newton_step_in_the_shape_would_cross_it():
-    rng = np.random.default_rng(5)
-    heavy = stats.genpareto(1.5).rvs(2_000, random_state=rng)
-    light = stats.genpareto(-0.3).rvs(2_000, random_state=rng)
-    moderate = stats.genpareto(0.3).rvs(2_000, random_state=rng)
+def test_wall_rows_are_the_rows_near_a_wall_with_their_shape_derivatives():
     family = GeneralizedParetoLSS()
+    y = stats.genpareto(0.3).rvs(6, random_state=np.random.default_rng(5))
+    shapes = np.array([1.0e-12, 5.0e-5, 2.0e-4, 0.5, 1.0 - 5.0e-5, 1.0 - 1.0e-12])
+    theta = np.column_stack([np.full(6, 1.5), shapes])
+    plan = family.bind_likelihood(y, _weights(np.ones(6), "frequency"), COMPLETE_OBSERVATION)
 
-    upper = _disclosure_at(family, heavy, 1.0 - 1.0e-12)
-    assert "2000 of 2000 rows have a tail shape at the upper wall 1" in upper
-    assert "infinite" in upper
-    lower = _disclosure_at(family, light, 1.0e-12)
-    assert "2000 of 2000 rows have a tail shape at the lower wall 0" in lower
-    assert "negative shapes" in lower
-    # the decision is the shape score, not the distance: these data pull it back inside
-    assert _disclosure_at(family, moderate, 1.0e-12) is None
-    assert _disclosure_at(family, moderate, 1.0 - 1.0e-12) is None
-    assert _disclosure_at(family, moderate, stats.genpareto.fit(moderate, floc=0.0)[0]) is None
+    rows = family.wall_rows(y, theta, plan)
+    assert rows.parameter_index == 1
+    assert rows.index.tolist() == [0, 1, 4, 5]
+    assert rows.outward.tolist() == [-1.0, -1.0, 1.0, 1.0]
+    full = family.evaluate_natural(y, theta, plan, derivative_order=2)
+    assert np.array_equal(rows.score, full.score[rows.index, 1])
+    assert np.array_equal(rows.information, -full.hessian_packed[rows.index, 2])
+    interior = family.bind_likelihood(
+        y[2:4], _weights(np.ones(2), "frequency"), COMPLETE_OBSERVATION
+    )
+    assert family.wall_rows(y[2:4], theta[2:4], interior) is None
 
-    narrow = GeneralizedParetoLSS(shape_lower=0.05, shape_upper=0.35)
-    heavier = stats.genpareto(0.9).rvs(2_000, random_state=rng)
-    pressed = _disclosure_at(narrow, heavier, 0.35 - 1.0e-12)
-    assert "upper wall 0.35" in pressed and "shape_upper" in pressed
-    assert "infinite" not in pressed
+
+def test_the_wall_disclosure_says_what_each_wall_does_to_the_law():
+    upper = GeneralizedParetoLSS().wall_disclosure(0, 7, 10)
+    assert "7 of 10 rows have a tail shape at the upper wall 1" in upper
+    assert "infinite" in upper and "solver's tolerance" in upper
+    lower = GeneralizedParetoLSS().wall_disclosure(3, 0, 10)
+    assert "3 of 10 rows have a tail shape at the lower wall 0" in lower
+    assert "negative shapes" in lower and "upper wall" not in lower
+    narrow = GeneralizedParetoLSS(shape_lower=0.05, shape_upper=0.35).wall_disclosure(1, 2, 10)
+    assert "upper wall 0.35" in narrow and "shape_upper" in narrow
+    assert "lower wall 0.05" in narrow and "Lower shape_lower" in narrow
+    assert "infinite" not in narrow
 
 
 @pytest.mark.parametrize("scale", [1e-166, 1e200])
