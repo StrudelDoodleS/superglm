@@ -181,13 +181,15 @@ def null_fit_eta(
             np.isfinite(rescaled_weights[carried])
         ):
             rows = (rescaled_y, rescaled_weights)
-    if rows is not None and isinstance(distribution, Binomial):
+    if isinstance(distribution, Binomial):
         # ``initial_mean`` returns the weighted mean unclamped for an
-        # unbounded mean space.  A mean of 0 or 1 has no finite intercept,
-        # whatever a binary link's own clamp at 1e-15 would make of it.
-        mean = initial_mean(*rows, Gaussian())
+        # unbounded mean space.  A mean of 0 or 1 has no finite intercept
+        # under any offset, whatever a binary link's own clamp at 1e-15 would
+        # make of it.
+        mean = initial_mean(y, weights, Gaussian())
         if not 0.0 < mean < 1.0:
             return None
+    if rows is not None and isinstance(distribution, Binomial):
         intercept = float(link.link(np.atleast_1d(mean))[0])
     elif rows is not None:
         intercept = coefficient_initial_intercept(

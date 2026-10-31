@@ -480,12 +480,14 @@ def test_the_null_mode_given_an_offset_solves_the_intercept_score(family, link) 
     assert abs(score) <= 2.0 * np.sqrt(1e-10 * deviance * information), (score, information)
 
 
+@pytest.mark.parametrize("varying_offset", [False, True])
 @pytest.mark.parametrize("y_value", [0.0, 1.0])
-def test_a_binomial_mean_of_zero_or_one_has_no_null_mode(y_value) -> None:
-    """An all-zero or all-one binomial response has no finite intercept, so
-    there is no mode to seed from, whatever the logit link's own clamp of the
-    mean to ``[1e-15, 1 - 1e-15]`` would make of it.  Mutation: reading the
-    link at the clamped mean returns a mode held at the tail, whose weight
+def test_a_binomial_mean_of_zero_or_one_has_no_null_mode(y_value, varying_offset) -> None:
+    """An all-zero or all-one binomial response has no finite intercept under
+    any offset, so there is no mode to seed from, whatever the logit link's
+    own clamp of the mean to ``[1e-15, 1 - 1e-15]`` would make of it.
+    Mutation: reading the link at the clamped mean, or fitting the intercept
+    given a varying offset, returns a mode held at the tail, whose weight
     seeds every random effect at the lambda floor.
     """
     from superglm.solvers.working_rows import null_fit_eta
@@ -495,7 +497,7 @@ def test_a_binomial_mean_of_zero_or_one_has_no_null_mode(y_value) -> None:
         link=LogitLink(),
         y=np.full(50, y_value),
         sample_weight=np.ones(50),
-        offset=np.zeros(50),
+        offset=np.linspace(-1.0, 0.0, 50) if varying_offset else np.zeros(50),
         weight_semantics="prior",
     )
 
