@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 
-import superglm._group_matrix._group_matrix_algebra as group_algebra
 import superglm.solvers._structured.moments as structured_moments
 from superglm.group_matrix import (
     DenseGroupMatrix,
@@ -232,10 +231,6 @@ def test_large_dominant_builder_never_requests_full_p_by_p_storage(monkeypatch):
     p = n_levels + 2
     layout = build_nested_structured_layout(group_matrices, groups, chain_group_indices=(1,))
 
-    def fail_full_block(*args, **kwargs):
-        raise AssertionError("full block Gram builder must not be used")
-
-    monkeypatch.setattr(group_algebra, "_block_xtwx", fail_full_block)
     original_zeros = np.zeros
 
     def guarded_zeros(shape, *args, **kwargs):

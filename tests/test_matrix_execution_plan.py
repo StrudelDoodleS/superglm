@@ -9,7 +9,6 @@ import pytest
 import scipy.sparse as sp
 import tabmat
 
-from superglm._group_matrix import _group_matrix_algebra as algebra
 from superglm._group_matrix._group_matrix_execution import GroupSpan, MatrixExecutionPlan
 from superglm._group_matrix._group_matrix_tabmat import _build_tabmat_split
 from superglm.distributions import Poisson
@@ -25,6 +24,7 @@ from superglm.group_matrix import (
 from superglm.links import LogLink
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.types import GroupSlice
+from tests import _block_gram as block_gram
 
 
 def _mixed_groups(seed: int = 170):
@@ -827,9 +827,9 @@ def test_legacy_weighted_moment_entry_points_delegate_to_one_execution_plan(
 
     monkeypatch.setattr(MatrixExecutionPlan, "moments", counted)
 
-    algebra._block_xtwx(groups, spans, W)
-    algebra._block_xtwx_rhs(groups, spans, W, Wz)
-    algebra._block_xtwx_signed(groups, spans, signed_W)
+    block_gram._block_xtwx(groups, spans, W)
+    block_gram._block_xtwx_rhs(groups, spans, W, Wz)
+    block_gram._block_xtwx_signed(groups, spans, signed_W)
 
     assert calls == [
         (False, False, 0),
@@ -847,34 +847,34 @@ def test_legacy_entry_points_keep_validation_and_span_contracts() -> None:
     Wz = rng.normal(size=n)
 
     with pytest.raises(ValueError, match="row count"):
-        algebra._block_xtwx([group], spans, W[:-1])
+        block_gram._block_xtwx([group], spans, W[:-1])
     with pytest.raises(ValueError, match="row count"):
-        algebra._block_xtwx_rhs([group], spans, W, Wz[:-1])
+        block_gram._block_xtwx_rhs([group], spans, W, Wz[:-1])
 
     nonfinite = W.copy()
     nonfinite[0] = np.inf
     with pytest.raises(ValueError, match="must be finite"):
-        algebra._block_xtwx([group], spans, nonfinite)
+        block_gram._block_xtwx([group], spans, nonfinite)
     with pytest.raises(ValueError, match="must be finite"):
-        algebra._block_xtwx_signed([group], spans, nonfinite)
+        block_gram._block_xtwx_signed([group], spans, nonfinite)
 
     negative = W.copy()
     negative[1] = -0.5
     with pytest.raises(ValueError, match="negative weights"):
-        algebra._block_xtwx([group], spans, negative)
+        block_gram._block_xtwx([group], spans, negative)
     np.testing.assert_allclose(
-        algebra._block_xtwx_signed([group], spans, negative),
+        block_gram._block_xtwx_signed([group], spans, negative),
         group.toarray().T @ (negative[:, None] * group.toarray()),
     )
 
     nonfinite_rhs = Wz.copy()
     nonfinite_rhs[2] = np.nan
     with pytest.raises(ValueError, match="must be finite"):
-        algebra._block_xtwx_rhs([group], spans, W, nonfinite_rhs)
+        block_gram._block_xtwx_rhs([group], spans, W, nonfinite_rhs)
 
     wrong_spans = [SimpleNamespace(start=1, end=3)]
     with pytest.raises(ValueError, match="group slices must be contiguous"):
-        algebra._block_xtwx([group], wrong_spans, W)
+        block_gram._block_xtwx([group], wrong_spans, W)
 
 
 def test_execution_plan_public_moments_reject_invalid_vectors() -> None:

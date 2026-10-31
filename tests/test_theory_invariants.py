@@ -12,10 +12,10 @@ from superglm.features.spline import CubicRegressionSpline, NaturalSpline, PSpli
 from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
-    _block_xtwx,
     _cross_gram,
 )
 from superglm.links import stabilize_eta
+from tests._block_gram import _block_xtwx, _block_xtwx_rhs, _block_xtwx_signed
 
 
 def _final_working_problem(model, y, sample_weight=None, offset=None):
@@ -265,7 +265,7 @@ class TestBackendLinearAlgebraInvariants:
         tabmat infers categories from the observed subset only, shrinking
         the sandwich output and breaking XtWX assembly.
         """
-        from superglm.group_matrix import CategoricalGroupMatrix, _block_xtwx, _build_tabmat_split
+        from superglm.group_matrix import CategoricalGroupMatrix, _build_tabmat_split
 
         rng = np.random.default_rng(42)
         n = 2000
@@ -323,9 +323,6 @@ class TestBackendLinearAlgebraInvariants:
     def test_tabmat_raw_block_products_normalize_compiled_vector_buffers(self, vector_layout):
         from superglm.group_matrix import (
             CategoricalGroupMatrix,
-            _block_xtwx,
-            _block_xtwx_rhs,
-            _block_xtwx_signed,
             _build_tabmat_split,
         )
         from superglm.types import GroupSlice
@@ -1053,13 +1050,12 @@ class TestBackendLinearAlgebraInvariants:
 
         monkeypatch.setattr(algebra, "_disc_disc_2d_hist", counting_hist)
 
-        algebra._block_xtwx_rhs([main1, main2, tensor], groups, W, Wz)
+        _block_xtwx_rhs([main1, main2, tensor], groups, W, Wz)
 
         assert calls == 1
 
     def test_block_xtwx_rhs_profiles_tensor_block_work(self):
         """Optional block profiling should attribute tensor diagonal and cross work."""
-        import superglm._group_matrix._group_matrix_algebra as algebra
         from superglm.types import GroupSlice
 
         rng = np.random.default_rng(126)
@@ -1096,10 +1092,8 @@ class TestBackendLinearAlgebraInvariants:
         Wz = rng.normal(size=n)
         profile: dict[str, float] = {}
 
-        profiled = algebra._block_xtwx_rhs(
-            [main_own, tensor, main_other], groups, W, Wz, profile=profile
-        )
-        plain = algebra._block_xtwx_rhs([main_own, tensor, main_other], groups, W, Wz)
+        profiled = _block_xtwx_rhs([main_own, tensor, main_other], groups, W, Wz, profile=profile)
+        plain = _block_xtwx_rhs([main_own, tensor, main_other], groups, W, Wz)
 
         for got, expected in zip(profiled, plain, strict=True):
             np.testing.assert_allclose(got, expected, rtol=1e-12, atol=1e-12)

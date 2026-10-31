@@ -118,65 +118,6 @@ def _cross_gram(
     return _group_matrix_algebra._cross_gram(gm_i, gm_j, W, profile=profile)
 
 
-def _block_xtwx(
-    gms: list[GroupMatrix],
-    groups: list,
-    W: NDArray,
-    *,
-    tabmat_split=None,
-    profile: dict | None = None,
-) -> NDArray:
-    """Compatibility wrapper for block XtWX assembly."""
-    return _group_matrix_algebra._block_xtwx(
-        gms,
-        groups,
-        W,
-        tabmat_split=tabmat_split,
-        profile=profile,
-    )
-
-
-def _block_xtwx_rhs(
-    gms: list[GroupMatrix],
-    groups: list,
-    W: NDArray,
-    Wz: NDArray,
-    *,
-    tabmat_split=None,
-    profile: dict | None = None,
-) -> tuple[NDArray, NDArray, NDArray]:
-    """Compatibility wrapper for block XtWX/XtW/XtWz assembly."""
-    return cast(
-        tuple[NDArray, NDArray, NDArray],
-        _group_matrix_algebra._block_xtwx_rhs(
-            gms,
-            groups,
-            W,
-            Wz,
-            tabmat_split=tabmat_split,
-            profile=profile,
-        ),
-    )
-
-
-def _block_xtwx_signed(
-    gms: list[GroupMatrix],
-    groups: list,
-    W: NDArray,
-    *,
-    tabmat_split=None,
-    profile: dict | None = None,
-) -> NDArray:
-    """Compatibility wrapper for arbitrary-sign block XtWX assembly."""
-    return _group_matrix_algebra._block_xtwx_signed(
-        gms,
-        groups,
-        W,
-        tabmat_split=tabmat_split,
-        profile=profile,
-    )
-
-
 class _LazyTabmatSplit:
     """One shared lazy split without a back-reference to its DesignMatrix."""
 

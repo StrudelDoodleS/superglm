@@ -6423,8 +6423,8 @@ class TestSCOPEFSRegression:
 
         # Reconstruct XtWX from stored model state (no rerunning solver)
         from superglm.distributions import _VARIANCE_FLOOR, clip_mu
-        from superglm.group_matrix import _block_xtwx
         from superglm.links import stabilize_eta
+        from tests._block_gram import _block_xtwx
 
         result = model._result
         eta = model._dm.matvec(result.beta) + result.intercept
@@ -6711,9 +6711,9 @@ class TestMultiSCOPIntegration:
         ``test_two_scop_terms_auto_lambda``.
         """
         from superglm.distributions import _VARIANCE_FLOOR, clip_mu
-        from superglm.group_matrix import _block_xtwx
         from superglm.links import stabilize_eta
         from superglm.reml.objective import reml_laml_objective
+        from tests._block_gram import _block_xtwx
 
         rng = np.random.default_rng(42)
         n = 500

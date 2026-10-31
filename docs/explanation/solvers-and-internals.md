@@ -1111,7 +1111,7 @@ This builds a 2D weighted histogram for two discretized groups.
 
 That lets the code compute cross-products between two discretized groups without reconstructing full observation-level matrices.
 
-#### 17.4.5 `_block_xtwx_rhs`
+#### 17.4.5 `MatrixExecutionPlan.moments`
 
 This is the main orchestration routine.
 
