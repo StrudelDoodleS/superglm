@@ -1441,6 +1441,19 @@ def test_every_row_censored_on_one_side_separates_the_intercept():
         )
 
 
+def test_every_row_censored_without_an_intercept_separates_only_its_free_levels():
+    # With no intercept no level holds every row: the reference level is pinned
+    # and the other levels run off, so the levels are reported, not an intercept.
+    y = np.linspace(-1.0, 1.0, 30)
+    X = pd.DataFrame({"g": np.repeat(["a", "b", "c"], 10)})
+    family = GaussianLS()
+    location = family.location(cat("g", base="a"), intercept=False)
+    strict = SuperLSS(family, location, family.scale(), separation="error")
+    with pytest.raises(SeparationError, match=r"only right-censored rows: 'b', 'c'") as raised:
+        strict.fit(X, y, censored=True)
+    assert "intercept" not in str(raised.value)
+
+
 def test_a_reference_level_on_a_predictor_without_an_intercept_is_not_separated():
     # Level b is the reference of a scale predictor with no intercept, so its
     # scale is pinned and cannot run off, however its rows are censored.
@@ -1727,8 +1740,8 @@ def test_a_bounded_plan_must_expose_its_observation():
 
 def test_a_monotone_recession_flag_holds_on_a_non_default_link():
     # A censored row's bound probability is monotone in the location, so a level
-    # whose rows are all right-censored runs off along any link onto the whole
-    # location range; only the normal scale's flags depend on the link.
+    # whose rows are all right-censored runs off along any monotone link onto an
+    # open range; only the normal scale's flags depend on the link.
     X, paid, _, censored = _all_censored_level()
     family = GaussianLS()
     strict = SuperLSS(
