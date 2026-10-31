@@ -274,14 +274,20 @@ def scan_censored_separation(
     supremum only at infinity (``recession``, per row and predictor) its
     likelihood keeps rising as its effect walks off, as a cell on a response
     boundary does.  The scan is the response-boundary scan on the indicator of
-    rows that are not both censored on that side and flagged.
+    rows that are not both censored on that side and flagged.  When every
+    weighted row is, a predictor's intercept is that level, holding every
+    row, and the predictor itself is reported in place of its cells.
     """
     findings: list[SeparatedTerm] = []
+    weighted = np.asarray(weights) > 0
     for value, label in ((RIGHT_CENSORED, "right-censored"), (LEFT_CENSORED, "left-censored")):
         censored = bounds.side == value
         for index, predictor in enumerate(compiled):
             on_side = censored & recession[:, index]
             if not np.any(on_side):
+                continue
+            if predictor.intercept and np.all(on_side[weighted]):
+                findings.append(SeparatedTerm(predictor.name, "intercept", label, ["intercept"], 1))
                 continue
             findings.extend(
                 replace(finding, term=f"{predictor.name}:{finding.term}", boundary=label)
@@ -299,13 +305,23 @@ def scan_censored_separation(
 def format_censored_separation_message(findings: list[SeparatedTerm]) -> str:
     """One actionable message naming every cell whose rows are all censored on one side."""
     n_total = sum(len(f.labels) for f in findings)
+    what = (
+        "categorical cell(s) or intercept(s)"
+        if any(f.kind == "intercept" for f in findings)
+        else "categorical cell(s)"
+    )
     lines = [
-        f"Censoring separation: {n_total} categorical cell(s) have rows censored on one side "
+        f"Censoring separation: {n_total} {what} have rows censored on one side "
         "only, so the data bound their response from that side and their maximum-likelihood "
         "effects on the predictors named below run to infinity. The fit stops at an arbitrary "
         "value for them, and their predictions are not estimates."
     ]
     for f in findings:
+        if f.kind == "intercept":
+            lines.append(
+                f"  {f.term!r}: every row is {f.boundary}, so its intercept has no finite estimate"
+            )
+            continue
         unit = "occupied cells" if f.kind == "cells" else "occupied levels"
         lines.append(
             f"  {f.term!r}: {len(f.labels)} of {f.n_occupied} {unit} have only {f.boundary} "

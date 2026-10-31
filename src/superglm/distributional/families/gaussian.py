@@ -61,6 +61,7 @@ from superglm.distributional.likelihood_identity import (
     CarrierRounding,
     carrier_rounding_scale,
 )
+from superglm.distributional.observation import LEFT_CENSORED, RIGHT_CENSORED
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
@@ -191,6 +192,21 @@ _CAPABILITIES = FamilyCapabilities(
     response_mean=True,
     censored_response=True,
 )
+
+
+def _normal_censored_recession(bounds: ResponseBounds) -> NDArray[np.bool_]:
+    """Location and scale recession flags of a normal law's censored rows.
+
+    A row right-censored above a lower truncation bound with no upper one, or
+    left-censored below an upper bound with no lower one, nears its supremum
+    of one as the scale grows, whatever the location.
+    """
+    open_below = ~np.isfinite(bounds.lower)
+    open_above = ~np.isfinite(bounds.upper)
+    scale = ((bounds.side == RIGHT_CENSORED) & ~open_below & open_above) | (
+        (bounds.side == LEFT_CENSORED) & open_below & ~open_above
+    )
+    return np.column_stack((bounds.side != 0, scale))
 
 
 GaussianRowLaw = Literal[
@@ -414,17 +430,23 @@ class GaussianLS(LocationPredictor, ScalePredictor):
         return _CAPABILITIES
 
     def censored_recession(self, bounds: ResponseBounds) -> NDArray[np.bool_]:
-        """Every censored row escapes along the location; none is decided along the scale.
+        """Every censored row escapes along the location; a row truncated only on the
+        far side of its limit also escapes along the scale.
 
         The normal density is log-concave, so its location family has a
         monotone likelihood ratio: ``P(Y > c)`` rises and ``P(Y <= c)`` falls
-        with the location within any truncation window.  Along the scale an
+        with the location within any truncation window.  A row right-censored
+        at ``c`` above a lower truncation bound ``a`` with no upper bound has
+        ``P(Y > c | Y > a) < 1`` at every finite scale, tending to one as the
+        scale grows whatever the location, so a level of such rows has no
+        finite scale (mirrored for a left-censored row with only an upper
+        bound).  Elsewhere the scale is not decided before the fit: an
         untruncated level right-censored at ``c_i`` has a finite estimate only
         when ``sum (mu_i - c_i) > 0`` while some ``mu_i < c_i`` (mirrored for
-        left-censored rows), which only the fit decides.
+        left-censored rows), and with both truncation bounds the probability
+        tends to ``(b - c)/(b - a) < 1``.
         """
-        censored = bounds.side != 0
-        return np.column_stack((censored, np.zeros_like(censored)))
+        return _normal_censored_recession(bounds)
 
     def to_config(self) -> dict[str, Any]:
         """Return JSON-safe complete family configuration."""
