@@ -435,7 +435,7 @@ def test_reml_ranks_a_skewed_integrated_penalty_at_its_structural_rank(
     if not select:
         geometry = _context_geometry([wiggle])
         assert geometry is not None
-        assert geometry.raw_family is None and geometry.raw_refusal is None
+        assert geometry.coordinate_map is None and geometry.raw_inputs is None
 
 
 @pytest.mark.parametrize("fit", ["fit", "fit_reml"])

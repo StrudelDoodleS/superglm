@@ -1,4 +1,4 @@
-"""Fixed latent SCOP penalties retain their checked target across mode fits."""
+"""Fixed latent SCOP penalties retain their target and unit log-determinant across mode fits."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import pytest
 
 import superglm.reml.multi_penalty as kernel
 import superglm.reml.penalty_algebra as algebra
+import superglm.reml.penalty_blocks as blocks
 import superglm.reml.penalty_support as support_module
 import superglm.reml.scop_efs as scop
 from superglm.types import PenaltyComponent
@@ -37,26 +38,26 @@ def _build(states, cache, weights=None):
 
 def test_fixed_two_group_geometry_is_built_once_for_all_three_consumers(monkeypatch):
     states, cache = _states(), {}
-    builds, summaries, full = [], [], []
+    builds, units, certified = [], [], []
     real_support = support_module._penalty_support
-    real_summary = kernel._evaluate_penalty_summary
-    real_full = kernel._evaluate_penalty_support
+    real_unit = blocks.unit_logdet
 
     def support(matrices):
         builds.append(tuple(matrix.shape for matrix in matrices))
         return real_support(matrices)
 
-    def summary(selected, weights, *args, **kwargs):
-        summaries.append((selected.Q_plus.shape, tuple(weights)))
-        return real_summary(selected, weights, *args, **kwargs)
+    def unit(roots):
+        units.append(tuple(root.shape for root in roots))
+        return real_unit(roots)
 
-    def full_result(*args, **kwargs):
-        full.append(True)
-        return real_full(*args, **kwargs)
+    def refused(*_args, **_kwargs):
+        certified.append(True)
+        raise AssertionError("the GLM path runs no certified evaluation")
 
     monkeypatch.setattr(support_module, "_penalty_support", support)
-    monkeypatch.setattr(kernel, "_evaluate_penalty_summary", summary)
-    monkeypatch.setattr(kernel, "_evaluate_penalty_support", full_result)
+    monkeypatch.setattr(blocks, "unit_logdet", unit)
+    monkeypatch.setattr(kernel, "_evaluate_penalty_summary", refused)
+    monkeypatch.setattr(kernel, "_evaluate_penalty_support", refused)
     previous = None
     for mode in range(42):
         states = {
@@ -66,7 +67,7 @@ def test_fixed_two_group_geometry_is_built_once_for_all_three_consumers(monkeypa
         if previous is not None:
             assert all(left is right for left, right in zip(components, previous, strict=True))
         values = {item.name: (mode + 1) / 100 for item in components}
-        evaluation = algebra._compute_penalty_logdet_evaluation(values, components)
+        evaluation = algebra.penalty_logdet(values, components)
         assert evaluation.rank == 18
         if mode < 41:
             gradient, hessian = algebra.compute_logdet_s_derivatives(values, components)
@@ -80,24 +81,20 @@ def test_fixed_two_group_geometry_is_built_once_for_all_three_consumers(monkeypa
         )
         previous = components
     assert builds == [((11, 11),), ((11, 11),)]
-    assert summaries == [((11, 9), (1.0,)), ((11, 9), (1.0,))]
-    assert full == []
+    assert units == [((9, 9),), ((9, 9),)]
+    assert certified == []
 
 
 @pytest.mark.parametrize("weights", [(2.0, 3.0), (0.0, 3.0), (2.0, 0.0), (0.0, 0.0)])
-def test_cached_latent_target_preserves_rank_values_derivatives_and_bounds(weights):
+def test_cached_latent_target_preserves_rank_values_and_derivatives(weights):
     states = _states(width=5)
     original = scop.build_scop_penalty_components(states)
     retained = _build(states, {})
     values = dict(zip((item.name for item in original), weights, strict=True))
-    before = algebra._compute_penalty_logdet_evaluation(values, original)
-    after = algebra._compute_penalty_logdet_evaluation(values, retained)
-    assert after.rank == before.rank == 3 * sum(value > 0 for value in weights)
-    assert abs(after.logdet - before.logdet) <= after.logdet_error + before.logdet_error
-    assert after.gradient == before.gradient
-    assert after.hessian == before.hessian
-    assert after.gradient_error == before.gradient_error
-    assert after.hessian_error == before.hessian_error
+    before = algebra.penalty_logdet(values, original)
+    after = algebra.penalty_logdet(values, retained)
+    assert after == before
+    assert after.rank == 3 * sum(value > 0 for value in weights)
     for old, new in zip(original, retained, strict=True):
         np.testing.assert_array_equal(new.omega_ssp, old.omega_ssp)
         assert algebra._context_geometry([new]) is not None
@@ -228,10 +225,10 @@ def test_an_unresolved_new_zero_target_is_not_evaluated_or_published(monkeypatch
     def refusal(*_args, **_kwargs):
         raise support_module.PenaltyNumericalError("unit geometry accuracy refusal")
 
-    monkeypatch.setattr(kernel, "_evaluate_penalty_summary", refusal)
+    monkeypatch.setattr(scop, "_plain_block", refusal)
     component = _build(states, cache, {"x0": 0.0})
     assert cache == {}
-    evaluation = algebra._compute_penalty_logdet_evaluation({"x0": 0.0}, component)
+    evaluation = algebra.penalty_logdet({"x0": 0.0}, component)
     assert evaluation.rank == 0 and evaluation.logdet == 0
     with pytest.raises(
         support_module.PenaltyNumericalError, match="unit geometry accuracy refusal"
@@ -249,7 +246,7 @@ def test_refused_changed_unit_geometry_does_not_replace_the_previous_entry(monke
     def refusal(*_args, **_kwargs):
         raise support_module.PenaltyNumericalError("unit geometry accuracy refusal")
 
-    monkeypatch.setattr(kernel, "_evaluate_penalty_summary", refusal)
+    monkeypatch.setattr(scop, "_plain_block", refusal)
     zero = _build(states, cache, {"x0": 0.0})[0]
     assert zero is not first and cache == previous
     with pytest.raises(
@@ -280,8 +277,8 @@ def test_mixed_ordinary_family_keeps_its_existing_complete_owner():
     assert all(left is right for left, right in zip(components[:3], ordinary, strict=True))
     assert algebra._context_geometry(components[:3]) is owner
     weights = {"ordinary:0": 2.0, "ordinary:1": 3.0, "ordinary:2": 5.0, "x0": 2.0, "x1": 3.0}
-    expected = algebra._compute_penalty_logdet_evaluation(weights, ordinary)
-    actual = algebra._compute_penalty_logdet_evaluation(weights, components)
+    expected = algebra.penalty_logdet(weights, ordinary)
+    actual = algebra.penalty_logdet(weights, components)
     assert actual.rank == expected.rank + 6
     for name in weights:
         if name.startswith("ordinary"):
@@ -339,14 +336,14 @@ def test_actual_mode_builders_share_one_latent_owner(monkeypatch):
         weight_semantics="frequency",
         gamma_scale_data=None,
     )
-    summaries = []
-    original = kernel._evaluate_penalty_summary
+    units = []
+    original = blocks.unit_logdet
 
-    def counted(support, values, *args, **kwargs):
-        summaries.append((support.Q_plus.shape, tuple(values)))
-        return original(support, values, *args, **kwargs)
+    def counted(roots):
+        units.append(tuple(root.shape for root in roots))
+        return original(roots)
 
-    monkeypatch.setattr(kernel, "_evaluate_penalty_summary", counted)
+    monkeypatch.setattr(blocks, "unit_logdet", counted)
     first = scop._fit_scop_reml_mode(
         context,
         {"x": 1.0},
@@ -383,7 +380,7 @@ def test_actual_mode_builders_share_one_latent_owner(monkeypatch):
     assert first.penalty_components[0] is second.penalty_components[0]
     assert fallback.penalty_components[0] is first.penalty_components[0]
     assert not np.array_equal(first.penalty, second.penalty)
-    assert len(summaries) == 1 and summaries[0][1] == (1.0,)
+    assert len(units) == 1
 
 
 def test_unused_inverse_overflow_does_not_block_a_finite_latent_summary():
@@ -397,10 +394,10 @@ def test_unused_inverse_overflow_does_not_block_a_finite_latent_summary():
         kernel.similarity_transform_logdet([states[0]["S_scop"]], np.ones(1))
     weighted = kernel.similarity_transform_logdet([states[0]["S_scop"]], np.array([weight]))
     components = _build(states, {})
-    result = algebra._compute_penalty_logdet_evaluation({"x0": weight}, components)
+    result = algebra.penalty_logdet({"x0": weight}, components)
     assert result.rank == weighted.rank == 2
     assert abs(result.logdet - weighted.logdet_s_plus) <= (
-        result.logdet_error + weighted._certificate.logdet_error
+        weighted._certificate.logdet_error + 8 * np.finfo(float).eps * abs(result.logdet)
     )
     assert result.gradient == {"x0": 2.0}
     assert result.hessian == {("x0", "x0"): 0.0}

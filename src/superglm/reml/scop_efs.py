@@ -37,6 +37,7 @@ from superglm.reml.penalty_algebra import (
     _attach_context_geometry,
     _context_geometry,
     _frozen_array,
+    _plain_block,
     build_penalty_matrix,
     compute_logdet_s_derivatives,
     penalty_component_dense_matrix,
@@ -585,7 +586,7 @@ def build_scop_penalty_components(
     No R_inv transform -- SCOP bypasses SSP reparameterization.
 
     The optimizer's private cache retains the exact fixed latent target and
-    its checked unit-weight summary. It owns no beta, Jacobian or fitted
+    its unit-weight log-determinant. It owns no beta, Jacobian or fitted
     Hessian. Standalone callers keep the uncached descriptor contract.
 
     Parameters
@@ -656,14 +657,14 @@ def build_scop_penalty_components(
                 raise ValueError("SCOP penalty context could not bind its local target")
             # Preserve the existing inactive-weight shortcut. Invalid weights
             # remain for the established consumer to reject; a new zero-only
-            # target must not request an unused unit-weight certificate.
+            # target forms no unit-weight log-determinant it will not use.
             value = 1.0 if _lambdas is None else _lambdas.get(pc.name, 1.0)
             try:
                 active = np.isfinite(float(value)) and float(value) > 0.0
             except (TypeError, ValueError, OverflowError):
                 active = False
             if active:
-                geometry.evaluate(np.ones(1))
+                _plain_block(geometry, [pc], geometry.matrices)
                 entry = _SCOPPenaltyContextEntry(
                     component=pc,
                     source_key=_scop_penalty_source_key(gi, st, matrix),

@@ -20,7 +20,7 @@ def _context(raw, coordinate_map):
         omega=sum(raw),
         omega_components=[(chr(ord("a") + index), matrix) for index, matrix in enumerate(raw)],
     )
-    components, _, _ = algebra.build_penalty_context([matrix], [(0, group)])
+    components = algebra.build_penalty_components([matrix], [(0, group)], certified=True)
     return components, matrix, group
 
 
@@ -247,12 +247,12 @@ def test_context_reuses_only_its_last_exact_weight_evaluation(monkeypatch):
     components, _, _ = _context(*_exact_geometry())
     weights = {"shared:a": 2.0, "shared:b": 3.0}
     algebra.compute_total_penalty_rank(components)
-    algebra.compute_logdet_s_plus(weights, components)
-    algebra.compute_logdet_s_derivatives(weights, components)
+    algebra._compute_penalty_logdet_evaluation(weights, components)
+    algebra._compute_penalty_logdet_evaluation(weights, components)
     assert len(calls) == 1
     changed = dict(weights, **{"shared:a": np.nextafter(2.0, np.inf)})
-    algebra.compute_logdet_s_plus(changed, components)
-    algebra.compute_logdet_s_plus(weights, components)
+    algebra._compute_penalty_logdet_evaluation(changed, components)
+    algebra._compute_penalty_logdet_evaluation(weights, components)
     assert len(calls) == 3
     assert all(call[0] is calls[0][0] for call in calls)
     assert constructions == [((3, 3), (3, 3))]
@@ -281,7 +281,7 @@ def test_context_does_not_reuse_an_old_basis_or_replaced_component():
     unchanged = algebra._compute_penalty_logdet_evaluation(weights, components)
     assert unchanged.logdet == original.logdet
 
-    rebuilt, _, _ = algebra.build_penalty_context([matrix], [(0, group)])
+    rebuilt = algebra.build_penalty_components([matrix], [(0, group)], certified=True)
     new = algebra._compute_penalty_logdet_evaluation(weights, rebuilt)
     expected = original.logdet + np.log(3) + 4 * np.log(2)
     assert abs(new.logdet - expected) <= original.logdet_error + new.logdet_error
@@ -341,6 +341,6 @@ def test_failed_weight_evaluation_does_not_replace_the_last_valid_state(monkeypa
 
     monkeypatch.setattr(multi_penalty, "_evaluate_penalty_summary", refuse)
     with pytest.raises(PenaltyNumericalError, match="injected current-state"):
-        algebra.compute_logdet_s_plus(dict(weights, **{"shared:a": 4.0}), components)
-    assert algebra.compute_logdet_s_plus(weights, components) == original.logdet
+        algebra._compute_penalty_logdet_evaluation(dict(weights, **{"shared:a": 4.0}), components)
+    assert algebra._compute_penalty_logdet_evaluation(weights, components) == original
     monkeypatch.setattr(multi_penalty, "_evaluate_penalty_summary", evaluate)

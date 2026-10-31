@@ -26,7 +26,7 @@ def _assessment_problem(weak=3.0):
         replace(item, omega_raw=matrix, omega_ssp=matrix, rank=1.0)
         for item, matrix in zip((left, right), matrices, strict=True)
     ]
-    algebra._attach_context_geometry(finite)
+    algebra._attach_context_geometry(finite, certified=True)
     layout = replace(layout, penalties=(selected, *finite))
     values = dict(zip(layout.penalty_names, (0.0, 1e12, weak), strict=True))
     terminal = SimpleNamespace(log_pdet=0.0)

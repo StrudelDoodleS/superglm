@@ -43,7 +43,7 @@ def _copy_problem(kind="shear", magnitude=1e8):
     matrix.omega = sum(raw)
     matrix.omega_components = [("a", raw[0]), ("b", raw[1])]
     group = GroupSlice("shared", 0, 5)
-    components, _, _ = algebra.build_penalty_context([matrix], [(0, group)])
+    components = algebra.build_penalty_components([matrix], [(0, group)], certified=True)
     first = _predictor("first", 0, DenseGroupMatrix(np.ones((5, 1))), GroupSlice("x", 0, 1), ())
     second = _predictor("second", 1, matrix, group, components)
     return components, coordinate_map, (first, second)
@@ -165,7 +165,9 @@ def test_layout_context_transfer_cannot_merge_distinct_source_families(collision
     _, _, predictors = _copy_problem()
     matrix = predictors[1].compiled.design.group_matrices[0]
     groups = (GroupSlice("left", 0, 5), GroupSlice("right", 5, 10))
-    source, _, _ = algebra.build_penalty_context([matrix, matrix], list(enumerate(groups)))
+    source = algebra.build_penalty_components(
+        [matrix, matrix], list(enumerate(groups)), certified=True
+    )
     copied = [
         layout_module._copy_component(
             component,
@@ -205,7 +207,7 @@ def test_layout_transfer_preserves_lazy_singleton_support(monkeypatch):
     matrix = SparseSSPGroupMatrix(sp.eye(3, format="csr"), np.eye(3))
     matrix.omega = np.diag([1.0, 2.0, 0.0])
     group = GroupSlice("single", 0, 3)
-    source, _, _ = algebra.build_penalty_context([matrix], [(0, group)])
+    source = algebra.build_penalty_components([matrix], [(0, group)], certified=True)
     owner = algebra._context_geometry(source)
     assert owner.support is None
     predictor = _predictor("location", 0, matrix, group, source)
