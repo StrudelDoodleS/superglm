@@ -900,7 +900,12 @@ mean of `GaussianLS` and `LogNormalLS`, and both predictors of
 term and `CategoricalInteraction` on those predictors for such levels and
 cells, under the same `separation` policy. When every row is censored on the
 same side, as with `censored=True` for all rows, the predictor's intercept has
-no finite estimate either, and the scan reports the predictor itself.
+no finite estimate either, and the scan reports the predictor itself. The scan
+reads a predictor only on its parameter's default link: the identity location,
+the log mean, the floored log scale, and the log scale and two-wall logit
+shape of `GeneralizedParetoLSS`. A predictor given another link, such as
+`link="logit"` on a scale, is not scanned, because a bounded link can stop
+short of the limit the effect runs to and leave the level a finite estimate.
 
 The scan reads only what the data decide before the fit:
 - A generalized Pareto row with an upper truncation bound anchors its level
@@ -913,6 +918,9 @@ The scan reads only what the data decide before the fit:
   - In `GaussianLS` and the location form of `LogNormalLS`, a level
     right-censored above a lower truncation bound with no upper one, such as
     claims at their limit above a deductible, and the mirror case.
+  - Any finite truncation bound counts here, however far away. Pass `None` or
+    `inf` for a side with no bound, not a sentinel such as `-1e200`: the fit
+    reads a sentinel as no bound, but the scan reads it as a bound.
 - Elsewhere a scale level of those two families censored on one side may or
   may not have a finite estimate, and only the fit decides which, with no
   warning. Without truncation bounds, for `GaussianLS` and the location form of
@@ -926,7 +934,8 @@ The scan reads only what the data decide before the fit:
   censoring can give a level an estimate it would otherwise lack, and a bound
   on the far side only, as in the scanned cases above, takes it away.
 
-Ordered-categorical smooths are not scanned. The scan does not cover all separation patterns, and
+Ordered-categorical smooths, and predictors on a link other than their
+parameter's default, are not scanned. The scan does not cover all separation patterns, and
 `fit.curvature_indefinite` is a curvature diagnostic, not a separation detector.
 The absence of either warning does not rule out separation.
 
