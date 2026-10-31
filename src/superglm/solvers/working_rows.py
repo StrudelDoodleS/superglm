@@ -143,17 +143,17 @@ def null_fit_eta(
     1e-3]``.  For a log link and variance ``mu**p`` (Gaussian 0, Poisson 1,
     Tweedie p, Gamma 2) the score equation given ``o~``, ``sum w (y - t e^o~)
     (t e^o~)**(1-p) = 0`` with ``t = e^intercept``, solves to ``t = sum w y
-    e^((1-p) o~) / sum w e^((2-p) o~)``: the weighted mean of the response ``y e^-o~`` under the
-    weights ``w e^((2-p) o~)``, which is what the family's initial intercept
-    of those rows computes (up to its positive floor).  Any other pair, or a
-    row set whose rescaled response or weight is not finite, has no closed
-    form: its intercept is fitted by the line-searched direct IRLS on an
-    empty design, Fisher scoring on the one coefficient with steps halved
-    back inside the link's domain and the family's mean space (McCullagh &
-    Nelder 1989, sec. 2.5; Marschner 2011, R Journal 3(2)), as R's ``glm``
-    fits the null model with its offset and ``_compute_null_mu`` the sqrt
-    link's.  Only positive-weight rows are read: a zero-weight row's offset
-    moves nothing here.
+    e^((1-p) o~) / sum w e^((2-p) o~)``: the weighted mean of the response
+    ``y e^-o~`` under the weights ``w e^((2-p) o~)``, which is what the
+    family's initial intercept of those rows computes (up to its positive
+    floor).  Any other pair, or a row set whose rescaled response or weight is
+    not finite, has no closed form: its intercept is fitted by the
+    line-searched direct IRLS on an empty design, Fisher scoring on the one
+    coefficient with steps halved back inside the link's domain and the
+    family's mean space (McCullagh & Nelder 1989, sec. 2.5; Marschner 2011, R
+    Journal 3(2)), as R's ``glm`` fits the null model with its offset and
+    ``_compute_null_mu`` the sqrt link's.  Only positive-weight rows are read:
+    a zero-weight row's offset moves nothing here.
 
     None where no valid mode is found: the fit does not converge, the
     intercept is infinite (a binomial mean of 0 or 1), or on a positive-weight
