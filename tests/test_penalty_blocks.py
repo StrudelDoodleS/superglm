@@ -382,14 +382,14 @@ def test_the_dominance_order_survives_grams_beyond_binary64():
     _assert_exact(blocks.multi_penalty_logdet(roots, np.array(weights)), reference, 3)
 
 
-def _skewed_tensor():
+def _skewed_tensor(seed=3):
     """A cubic B-spline curvature margin on lognormal(0, 3) quantile knots, by differences.
 
     The integrated penalty scales with the knot intervals, so on these knots
     its support root's singular values span about 4e16: the support keeps
     directions that a fixed relative cut on that root drops.
     """
-    sample = np.random.default_rng(3).lognormal(0.0, 3.0, 2000)
+    sample = np.random.default_rng(seed).lognormal(0.0, 3.0, 2000)
     inner = np.quantile(sample, np.linspace(0.0, 1.0, 4))
     knots = np.r_[[inner[0]] * 3, inner, [inner[-1]] * 3]
     margin = build_integrated_derivative_penalty(knots, 3, 2)
@@ -403,6 +403,39 @@ def test_skewed_integrated_penalty_margins_through_the_transform(weights):
     roots = algebra._support_roots(support)
     reference = _exact_reference(roots, weights)
     _assert_exact(blocks.multi_penalty_logdet(roots, np.array(weights)), reference, support.rank)
+
+
+@pytest.mark.parametrize("weights", [(1.0, 1.0), (1e6, 1e-6)])
+def test_a_margin_eigenvalue_below_the_eigensolver_floor_leaves_the_block_to_its_roots(
+    monkeypatch, weights
+):
+    """On seed 14 the support keeps four of the margin's six directions, and
+    ``eigvalsh`` puts the third and fourth near 2, below its floor ``p eps
+    ||A||_2`` of about 16: their values are rounding.  The margins' eigenvalues
+    are forced nonnegative here, so the closed form is on offer whatever signs
+    ``eigvalsh`` gives that tail.  The block is evaluated from its support
+    roots, exactly; the unguarded closed form gives 207.178 against 206.325 at
+    ``(1, 1)``.
+    """
+    eigvalsh, margins = np.linalg.eigvalsh, algebra._kronecker_margins
+
+    def nonnegative_margins(support, raw):
+        with monkeypatch.context() as patch:
+            patch.setattr(np.linalg, "eigvalsh", lambda a: np.sort(np.abs(eigvalsh(a))))
+            return margins(support, raw)
+
+    monkeypatch.setattr(algebra, "_kronecker_margins", nonnegative_margins)
+    components = _multi_context(list(_skewed_tensor(14)), np.eye(18))
+    block = algebra._context_geometry(components).plain
+    assert block.kronecker is None
+    lambdas = {"g:c0": weights[0], "g:c1": weights[1]}
+    evaluation = penalty_logdet(lambdas, components)
+    computed = (
+        evaluation.logdet - block.volume,
+        np.array([evaluation.gradient[name] for name in lambdas]),
+        np.array([[evaluation.hessian[a, b] for b in lambdas] for a in lambdas]),
+    )
+    _assert_exact(computed, _exact_reference(block.roots, weights), block.rank)
 
 
 def test_a_finite_solver_penalty_keeps_its_dominant_term_when_the_raw_gram_overflows():

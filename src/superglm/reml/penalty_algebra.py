@@ -783,9 +783,21 @@ def _kronecker_margins(
 
     Each margin keeps as many eigenvalues as its component's support root has
     rows per repeat, so the rank decisions stay the support's; the pair is used
-    only when its cell count is the support rank.
+    only when its cell count is the support rank and ``eigvalsh`` resolves every
+    retained eigenvalue.
+
+    ``eigvalsh`` moves each eigenvalue by up to ``p(n) eps ||A||_2`` (LAPACK
+    Users' Guide, 3rd ed., sec. 4.7; ``_eigensolver_relative_bar``), however
+    the margin is graded: relative accuracy for small eigenvalues needs a
+    Jacobi-type method on the scaled matrix (Demmel and Veselic, SIAM J.
+    Matrix Anal. Appl. 13(4), 1992).  The support's equilibrated roots can keep
+    a direction below that floor.  Each retained eigenvalue enters ``log|S|_+``
+    through its logarithm, so the closed form needs each one at least
+    ``1 / sqrt(eps)`` times the floor, a relative error of at most ``sqrt(eps)``;
+    otherwise the support roots evaluate the block.
     """
     from superglm.reml.penalty_blocks import kronecker_split
+    from superglm.solvers.rank import SHARED_RANK_POLICY, _eigensolver_relative_bar
 
     if len(raw) != 2:
         return None
@@ -804,7 +816,8 @@ def _kronecker_margins(
     margins = []
     for matrix, rank in ((left, left_rank), (right, right_rank)):
         values = np.linalg.eigvalsh(0.5 * (matrix + matrix.T))[::-1].copy()
-        if rank and not values[rank - 1] > 0:
+        floor = _eigensolver_relative_bar(len(values)) * float(np.max(np.abs(values)))
+        if rank and not values[rank - 1] * SHARED_RANK_POLICY.factor_rcond > floor:
             return None
         values[rank:] = 0.0
         margins.append(values)
@@ -2872,6 +2885,20 @@ def _reusable_solver_context(prior, grouped: list[PenaltyComponent]):
     return prior
 
 
+def _frobenius(values: NDArray) -> float:
+    """``||A||_F`` of ``A`` scaled by the power of two at its largest entry.
+
+    The scaling is exact, so this is the unscaled norm wherever that neither
+    underflows nor overflows, and it stays nonzero and finite wherever the
+    largest entry is: ``1e-200`` entries have squares below binary64.
+    """
+    largest = float(np.max(np.abs(values), initial=0.0))
+    if largest == 0 or not math.isfinite(largest):
+        return largest
+    exponent = math.frexp(largest)[1]
+    return math.ldexp(float(np.linalg.norm(np.ldexp(values, -exponent))), exponent)
+
+
 def _plain_single_raw_route(gm, grouped, declared_rank, prior, *, rank_rcond):
     """A single penalty's raw support and unit log-determinant under the SSP map.
 
@@ -2944,11 +2971,11 @@ def _plain_single_raw_route(gm, grouped, declared_rank, prior, *, rank_rcond):
     magnitude, rounding = np.abs(root), _transport_rounding(support, coordinate_map)
     allowance = gamma(len(root)) * (magnitude.T @ magnitude) + 2.0 * (magnitude.T @ rounding)
     allowance += rounding.T @ rounding
-    discrepancy = float(np.linalg.norm(stored - root.T @ root)) + float(np.linalg.norm(allowance))
+    discrepancy = _frobenius(stored - root.T @ root) + _frobenius(allowance)
     bar = max(SHARED_RANK_POLICY.gram_rcond, _eigensolver_relative_bar(len(stored)))
     if not (
         discrepancy <= SHARED_RANK_POLICY.factor_rcond * smallest
-        and smallest - discrepancy > bar * float(np.linalg.norm(stored))
+        and smallest - discrepancy > bar * _frobenius(stored)
     ):
         return unadmitted
     block = _PlainBlock(support.rank, constant=2.0 * math.fsum(np.log(diagonal).tolist()))

@@ -239,6 +239,27 @@ def test_stored_penalty_rounding_keeps_its_rank_and_log_determinant(small, certi
     assert evaluation.rank == (2 if a * d - b * c > 0 else 1)
 
 
+@pytest.mark.parametrize("small", [1e-3, 1e-5, 1e-8])
+def test_a_map_scaled_by_1e_100_decides_as_the_unscaled_map(small):
+    """``C = 1e-100 [[1, 1], [0, small]]`` against ``C / 1e-100``.
+
+    Every quantity the bars compare, ``S``, ``||S - G||_F``, the allowances and
+    ``mu``, carries ``C`` twice, so the scaled map decides as the unscaled one.
+    The norms are of ``1e-200`` entries, whose squares are below binary64.  A
+    refused map evaluates as its solver-space support.
+    """
+    base = np.array([[1.0, 1.0], [0.0, small]])
+    contexts = [_context(np.eye(2), scale * base, certified=False) for scale in (1.0, 1e-100)]
+    routes = [algebra._context_geometry(item).coordinate_map is not None for item in contexts]
+    assert routes == [small == 1e-3] * 2
+    refused = [] if small == 1e-3 else contexts
+    for components in refused:
+        evaluation = algebra.penalty_logdet({"s": 1.0}, components)
+        reference = [_solver_space(components[0])]
+        assert evaluation == algebra.penalty_logdet({"s": 1.0}, reference)
+        assert evaluation.rank == (1 if small == 1e-8 else 2)
+
+
 def _random_map(condition, seed):
     rng = np.random.default_rng(seed)
     left = np.linalg.qr(rng.normal(size=(8, 8)))[0]
@@ -246,17 +267,21 @@ def _random_map(condition, seed):
     return left @ np.diag(np.geomspace(1.0, 1.0 / condition, 8)) @ right
 
 
-@pytest.mark.parametrize("condition", [1e1, 1e2, 1e3, 1e4])
-@pytest.mark.parametrize("seed", range(4))
+@pytest.mark.parametrize(
+    ("condition", "seed"),
+    [(c, s) for c in (1e1, 1e2, 1e3, 1e4) for s in range(4) if (c, s) != (1e3, 1)],
+)
 def test_plain_route_decisions_follow_the_certified_family(condition, seed):
     """The plain bars decide the raw route as the certified agreement does on these maps.
 
-    Second differences on eight coefficients under ``C = U diag(1 .. 1/condition) V``:
-    the certified ratio ``x / sqrt(eps)`` runs from 1.5e-3 to 860 here, and the
-    plain one, from computed norms with the same Gram and transport allowances
-    and the same lower bound on ``sigma_min(Y)**2``, is 0.64 to 0.93 of it. The
-    maps nearest the bar (``1e3``, seeds 1 and 3, certified 0.69 and 1.53)
-    decide alike.
+    Second differences on eight coefficients under ``C = U diag(1 .. 1/condition) V``.
+    The plain ratio ``x / sqrt(eps)``, from computed norms with the Gram and
+    transport allowances and the lower bound on ``sigma_min(Y)**2``, runs from
+    1.7e-3 to 916 here. The nearest to the bar are 0.30 and 0.32 (``1e2``,
+    seeds 0 and 2) and 1.61 (``1e3``, seed 3, whose allowances alone are 1.45,
+    so the rounding of ``||S - G||_F`` cannot admit it). ``1e3``, seed 1, at
+    0.73, is left out: the forced maps ``d = 1e-3`` and ``d = 1e-5`` in
+    ``test_penalty_blocks.py`` pin both sides of the bar.
     """
     _, omega = _second_differences(8)
     coordinate_map = _random_map(condition, seed)
