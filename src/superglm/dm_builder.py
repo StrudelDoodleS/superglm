@@ -428,13 +428,6 @@ _INTERACTION_FACTORIES: dict[tuple[str, str], Any] = {
 }
 
 
-def _stored_csr_bytes(B_csr) -> int:
-    """Bytes of the arrays a CSR basis keeps; zero for any other storage."""
-    if getattr(B_csr, "format", None) != "csr":
-        return 0
-    return int(B_csr.data.nbytes + B_csr.indices.nbytes + B_csr.indptr.nbytes)
-
-
 def _shared_row_support(B_csr, supports: dict | None):
     """``detect_row_support`` once per basis object within one build.
 
@@ -443,19 +436,22 @@ def _shared_row_support(B_csr, supports: dict | None):
     one support block and one row index by reference.  Each entry keeps its
     basis alive, so the ``id`` key cannot be reused while ``supports`` lives.
     """
-    from superglm._group_matrix._group_matrix_support import detect_row_support
+    from superglm._group_matrix._group_matrix_support import detect_row_support, stored_csr_bytes
 
     entry = None if supports is None else supports.get(id(B_csr))
     if entry is not None and entry[0] is B_csr:
         return entry[1]
-    detected = detect_row_support(B_csr, replaced_bytes=_stored_csr_bytes(B_csr))
+    detected = detect_row_support(B_csr, replaced_bytes=stored_csr_bytes(B_csr))
     if supports is not None:
         supports[id(B_csr)] = (B_csr, detected)
     return detected
 
 
-def _build_ssp_group(B_csr, R_inv, supports: dict | None = None):
+def _build_ssp_group(B_csr, R_inv, supports: dict | None = None, row_support=None):
     """Cheapest exact representation of a factored SSP block.
+
+    ``row_support`` is the block's support when its term found it
+    (``GroupInfo.row_support``), and is stored without scanning ``B_csr``.
 
     Compression is lossless deduplication of repeated rows; it never bins and is
     independent of ``discrete=True``.  Declines whenever the measured cost model
@@ -474,7 +470,7 @@ def _build_ssp_group(B_csr, R_inv, supports: dict | None = None):
         SupportCompressedSSPGroupMatrix,
     )
 
-    detected = _shared_row_support(B_csr, supports)
+    detected = row_support if row_support is not None else _shared_row_support(B_csr, supports)
     if detected is None:
         return SparseSSPGroupMatrix(B_csr, R_inv)
     B_unique_rows, row_index = detected
@@ -503,9 +499,9 @@ def _build_unpenalized_sparse_group(B_csr, n_cols: int):
     from superglm._group_matrix._group_matrix_discretized import (
         SupportCompressedSSPGroupMatrix,
     )
-    from superglm._group_matrix._group_matrix_support import detect_row_support
+    from superglm._group_matrix._group_matrix_support import detect_row_support, stored_csr_bytes
 
-    detected = detect_row_support(B_csr, replaced_bytes=_stored_csr_bytes(B_csr))
+    detected = detect_row_support(B_csr, replaced_bytes=stored_csr_bytes(B_csr))
     if detected is None:
         return SparseGroupMatrix(B_csr)
     B_unique_rows, row_index = detected
@@ -830,8 +826,8 @@ def _process_info(
             )
         elif use_discrete:
             gm = DiscretizedSSPGroupMatrix(B_unique, R_inv, bin_idx)
-        elif sp.issparse(info.columns):
-            gm = _build_ssp_group(info.columns, R_inv, ssp_supports)
+        elif info.row_support is not None or sp.issparse(info.columns):
+            gm = _build_ssp_group(info.columns, R_inv, ssp_supports, info.row_support)
         else:
             gm = DenseGroupMatrix(info.columns @ R_inv)
         if omega_full is not None and hasattr(gm, "omega"):
@@ -869,8 +865,8 @@ def _process_info(
         elif use_discrete:
             gm = DiscretizedSSPGroupMatrix(B_unique, R_inv, bin_idx)
             gm.omega = info.penalty_matrix
-        elif sp.issparse(info.columns):
-            gm = _build_ssp_group(info.columns, R_inv, ssp_supports)
+        elif info.row_support is not None or sp.issparse(info.columns):
+            gm = _build_ssp_group(info.columns, R_inv, ssp_supports, info.row_support)
             gm.omega = info.penalty_matrix
         else:
             gm = DenseGroupMatrix(info.columns @ R_inv)
@@ -931,10 +927,13 @@ def _process_info(
             )
         elif info.cat_codes is not None:
             gm = CategoricalGroupMatrix(info.cat_codes, info.n_cols)
-        elif sp.issparse(info.columns):
+        elif info.row_support is not None or sp.issparse(info.columns):
             if info.penalty_matrix is not None or info.penalty_components is not None:
                 gm = _build_ssp_group(
-                    info.columns, np.eye(info.n_cols, dtype=np.float64), ssp_supports
+                    info.columns,
+                    np.eye(info.n_cols, dtype=np.float64),
+                    ssp_supports,
+                    info.row_support,
                 )
                 if info.penalty_matrix is not None:
                     gm.omega = info.penalty_matrix
@@ -947,7 +946,8 @@ def _process_info(
                 gm = _build_unpenalized_sparse_group(info.columns, info.n_cols)
             else:
                 # cast, not a runtime check: the enclosing branch condition is
-                # sp.issparse(info.columns), which the checker cannot narrow by.
+                # sp.issparse(info.columns), which the checker cannot narrow by
+                # (a row support is found only for penalised blocks).
                 gm = SparseGroupMatrix(cast(sp.spmatrix, info.columns))
         else:
             gm = DenseGroupMatrix(info.columns)

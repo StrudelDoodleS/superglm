@@ -7,6 +7,7 @@ from typing import Any, Literal, cast
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._group_matrix import _group_matrix_support as row_supports
 from superglm.features._spline_config import clear_scop_state
 from superglm.features._spline_identifiability import (
     apply_identifiability_for_spec,
@@ -75,12 +76,32 @@ def _is_unpenalised(omega: NDArray) -> bool:
     return not np.any(omega)
 
 
+def _with_row_support(info: GroupInfo, distinct, basis) -> GroupInfo:
+    """``info`` with the row support of ``basis`` found on ``distinct``'s rows, one per value.
+
+    Only while ``info`` still holds ``basis``, the rows that ``distinct``
+    gathers; a decline leaves the builder its own scan.
+    """
+    if distinct is not None and info.columns is basis:
+        info.row_support = row_supports.detect_row_support(
+            distinct[0],
+            cell_index=distinct[1],
+            nnz=int(basis.nnz),
+            replaced_bytes=row_supports.stored_csr_bytes(basis),
+        )
+    return info
+
+
 def build_group_info(
     spec: Any,
     x: NDArray,
     sample_weight: NDArray | None = None,
 ) -> GroupInfo | list[GroupInfo]:
-    """Build the main GroupInfo payload for a spline spec."""
+    """Build the main GroupInfo payload for a spline spec.
+
+    The basis is evaluated once per distinct value of ``x`` and gathered to
+    its rows (``distinct_rows``), and its row support is found on those rows.
+    """
     _raise_if_unsupported_fit_shape_constraint(spec)
     clear_scop_state(spec)
     engine = shape_engine(spec)
@@ -95,12 +116,14 @@ def build_group_info(
     x = np.asarray(x, dtype=np.float64).ravel()
     spec._place_knots(x, sample_weight)
     spec._validate_m_orders_build()
-    basis = spec._basis_matrix(x).tocsr()
+    distinct = row_supports.distinct_rows(lambda values: spec._basis_matrix(values).tocsr(), x)
+    basis = spec._basis_matrix(x).tocsr() if distinct is None else distinct[0][distinct[1]]
+    full = basis
 
     if spec.select:
         info = build_select(spec, x, basis, sample_weight)
         info.structural_ranks = structural_penalty_ranks(spec, info)
-        return info
+        return _with_row_support(info, distinct, full)
 
     omega = spec._build_penalty()
     if engine == "scop":
@@ -192,7 +215,7 @@ def build_group_info(
         info.component_types = {"wiggle": "difference"}
     info.lambda_policies = spec._resolve_lambda_policies(info)
     info.structural_ranks = structural_penalty_ranks(spec, info)
-    return info
+    return _with_row_support(info, distinct, full)
 
 
 def build_knots_and_penalty(
@@ -299,7 +322,12 @@ def tensor_marginal_info(
     if support_counts is not None and support_counts.shape != evaluation_points.shape:
         raise ValueError("counts must match the tensor marginal support")
 
-    basis_raw = spec._raw_basis_matrix(evaluation_points)
+    distinct = row_supports.distinct_rows(spec._raw_basis_matrix, evaluation_points)
+    basis_raw = (
+        spec._raw_basis_matrix(evaluation_points)
+        if distinct is None
+        else np.asarray(distinct[0])[distinct[1]]
+    )
     omega = spec._build_penalty()
     _, omega_constrained, _, projection_constraints = spec._apply_constraints(None, omega)
 

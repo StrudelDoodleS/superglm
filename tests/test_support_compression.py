@@ -2580,3 +2580,161 @@ def test_decomposed_exact_tensor_detects_and_stores_one_support(monkeypatch):
     assert widths.count(bilinear.B_unique.shape[1]) == 1
     # Null plus range space: the subgroups' Gram products total one block.
     assert bilinear.shape[1] + wiggly.shape[1] == bilinear.B_unique.shape[1]
+
+
+# ── exact build on distinct values and occupied cells ─────────────
+#
+# An exact spline basis is evaluated once per distinct covariate value and a
+# tensor's rows once per occupied cell, then indexed back to the rows (Wood,
+# Li, Shaddick & Augustin 2017; Li & Wood 2020).  ``distinct_values``
+# declining restores the build over every row, whose design and fit the
+# distinct build must reproduce bit for bit.
+
+
+def _distinct_build_case(seed=31, n=6000):
+    import pandas as pd
+
+    from superglm import Categorical, Spline, SuperGLM
+
+    gen = np.random.default_rng(seed)
+    frame = pd.DataFrame(
+        {
+            "a": gen.integers(18, 90, n).astype(float),
+            "b": gen.integers(0, 30, n).astype(float),
+            "c": np.round(gen.gamma(2.0, 3.0, n), 1),
+            # "s" is a declared level no training row carries.
+            "g": pd.Categorical(gen.choice(["p", "q", "r"], n), categories=["p", "q", "r", "s"]),
+        }
+    )
+    y = gen.poisson(np.exp(0.3 * np.sin(frame["a"].to_numpy() / 9.0))).astype(float)
+    weight = gen.uniform(0.5, 2.0, n)
+    offset = np.log(gen.uniform(0.2, 1.0, n))
+
+    def model():
+        built = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            discrete=False,
+            features={
+                # The boundary clips both tails, so distinct values share rows.
+                "a": Spline(kind="cr", n_knots=6, boundary=(25.0, 80.0)),
+                "b": Spline(kind="ps", n_knots=5),
+                "c": Spline(kind="bs", n_knots=5),
+                "g": Categorical(unseen="base"),
+            },
+            interactions=[("a", "b"), ("a", "g")],
+        )
+        built._add_interaction("c", "b", decompose=True)
+        return built
+
+    return frame, y, weight, offset, model
+
+
+def _assert_same_state(a, b, path="", depth=0):
+    """Equal types, and arrays equal in dtype, shape and bits, all the way down."""
+    assert type(a) is type(b), path
+    if isinstance(a, np.ndarray):
+        assert (a.dtype, a.shape) == (b.dtype, b.shape), path
+        if a.dtype == object:
+            assert a.tolist() == b.tolist(), path
+        else:
+            assert a.tobytes() == b.tobytes(), path
+    elif sp.issparse(a):
+        assert (a.format, a.shape) == (b.format, b.shape), path
+        for part in ("data", "indices", "indptr"):
+            _assert_same_state(getattr(a, part), getattr(b, part), f"{path}.{part}", depth)
+    elif isinstance(a, float):
+        assert a.hex() == b.hex(), path
+    elif isinstance(a, dict):
+        assert a.keys() == b.keys(), path
+        for key in a:
+            _assert_same_state(a[key], b[key], f"{path}[{key!r}]", depth + 1)
+    elif isinstance(a, list | tuple):
+        assert len(a) == len(b), path
+        for i, (x, z) in enumerate(zip(a, b, strict=True)):
+            _assert_same_state(x, z, f"{path}[{i}]", depth + 1)
+    elif callable(a):
+        return
+    elif depth < 6 and (state := _object_state(a)) is not None:
+        _assert_same_state(state, _object_state(b), path, depth + 1)
+    else:
+        assert a == b, path
+
+
+def _object_state(obj) -> dict | None:
+    """An object's attributes, from its ``__dict__`` and every class's ``__slots__``."""
+    state = dict(getattr(obj, "__dict__", {}))
+    for klass in type(obj).__mro__:
+        slots = getattr(klass, "__slots__", ())
+        for slot in (slots,) if isinstance(slots, str) else slots:
+            if slot not in ("__dict__", "__weakref__") and hasattr(obj, slot):
+                state[slot] = getattr(obj, slot)
+    return state or None
+
+
+def test_exact_build_on_distinct_values_is_the_row_build(monkeypatch):
+    from superglm._group_matrix import _group_matrix_support
+
+    frame, y, weight, offset, model = _distinct_build_case()
+    distinct, rows = model(), model()
+    distinct.fit_reml(frame, y, sample_weight=weight, offset=offset, max_reml_iter=3)
+    with monkeypatch.context() as patch:
+        patch.setattr(_group_matrix_support, "distinct_values", lambda x: None)
+        rows.fit_reml(frame, y, sample_weight=weight, offset=offset, max_reml_iter=3)
+
+    # Support rows, row index, R_inv and penalty of every group, and the specs.
+    _assert_same_state(distinct._dm.group_matrices, rows._dm.group_matrices, "groups")
+    _assert_same_state(dict(distinct._specs), dict(rows._specs), "specs")
+    _assert_same_state(
+        dict(distinct._interaction_specs), dict(rows._interaction_specs), "interactions"
+    )
+    np.testing.assert_array_equal(distinct.result.beta, rows.result.beta)
+    # New rows: a level unseen at fit, and covariates past every knot.
+    new = frame.iloc[:600].copy()
+    new["g"] = new["g"].cat.add_categories("t")
+    new.loc[new.index[::3], "g"] = "t"
+    new.loc[new.index[::4], "a"] = 150.0
+    new.loc[new.index[::5], "c"] = 90.0
+    new.loc[new.index[::7], "b"] = -10.0
+    np.testing.assert_array_equal(
+        distinct.predict(new, offset=offset[:600]), rows.predict(new, offset=offset[:600])
+    )
+
+
+def test_exact_build_never_forms_a_basis_over_every_row(monkeypatch):
+    from superglm._group_matrix import _group_matrix_support
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSplineCategoricalGroupMatrix,
+        SupportCompressedSSPGroupMatrix,
+    )
+    from superglm.features import _spline_cardinal_spec, _spline_runtime, interaction
+
+    frame, y, weight, offset, model = _distinct_build_case()
+    evaluated, kronecker_rows, scanned_rows = [], [], []
+
+    def spy(module, name, record, rows_of):
+        original = getattr(module, name)
+
+        def counted(*args, **kwargs):
+            record.append(rows_of(*args))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(module, name, counted)
+
+    for module in (_spline_runtime, _spline_cardinal_spec):
+        for name in ("basis_matrix", "raw_basis_matrix"):
+            spy(module, name, evaluated, lambda spec, x: np.size(x))
+    spy(interaction, "_row_kron", kronecker_rows, lambda b1, b2: b1.shape[0])
+    spy(_group_matrix_support, "detect_row_support", scanned_rows, lambda b: b.shape[0])
+    built = model()
+    built._build_design_matrix(frame, y, weight, offset)
+
+    n = len(frame)
+    assert evaluated and max(evaluated) < n
+    assert kronecker_rows and max(kronecker_rows) < n
+    assert scanned_rows and max(scanned_rows) < n
+    kinds = {group.name: type(gm) for group, gm in zip(built._groups, built._dm.group_matrices)}
+    assert {kinds[name] for name in ("a", "b", "c", "a:b", "c:b:bilinear", "c:b:wiggly")} == {
+        SupportCompressedSSPGroupMatrix
+    }
+    assert kinds["a:g[p]"] is SupportCompressedSplineCategoricalGroupMatrix

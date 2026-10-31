@@ -17,7 +17,9 @@ whether it is checked against the basis:
     rows merge; transients are bounded chunks plus one dense
     ``(n_support, p_b)`` representative block (which approaches the dense
     basis only when nothing repeats).  Needs no assumption that equal
-    covariate values produce bit-identical basis rows.
+    covariate values produce bit-identical basis rows.  Given ``cell_index``
+    it scans one row per cell of a basis whose rows repeat by cell, and
+    returns what scanning that basis would.
 
 ``plan_row_support``
     Core gate + materialisation for callers that already know the grouping --
@@ -72,6 +74,56 @@ _COMPRESSED_GRAM_BLOCKS = 3
 # measured on large blocks, and a gram over fewer rows than this is negligible
 # whichever path it takes.
 _MIN_CALIBRATED_ROWS = 1_000
+
+
+# Rows sampled to tell a mostly distinct column before sorting all of it.
+_DISTINCT_SAMPLE_ROWS = 4096
+
+
+def distinct_values(x: NDArray) -> tuple[NDArray, NDArray] | None:
+    """The distinct values of ``x`` in increasing order and each row's index into them.
+
+    ``values[index]`` is ``x`` bit for bit, so a basis evaluated pointwise at
+    ``values`` and gathered by ``index`` is, row for row, the basis evaluated
+    at ``x``.  ``None`` when the values cannot be grouped so: a NaN, or a
+    signed zero beside an unsigned one, which compare equal and would merge;
+    and when an even sample of the rows is mostly distinct, where grouping
+    costs more than it saves.
+    """
+    x = np.asarray(x, dtype=np.float64).ravel()
+    sample = x[:: max(1, x.size // _DISTINCT_SAMPLE_ROWS)][:_DISTINCT_SAMPLE_ROWS]
+    if 2 * np.unique(sample).size > max(sample.size, 1):
+        return None
+    values, index = np.unique(x, return_inverse=True)
+    if values.size and np.isnan(values[-1]):
+        return None
+    zero_signs = np.signbit(x[x == 0.0])
+    if zero_signs.any() and not zero_signs.all():
+        return None
+    return values, np.asarray(index, dtype=np.intp).ravel()
+
+
+def distinct_rows(evaluate, x: NDArray):
+    """``(evaluate(values), index)`` over the distinct values of ``x``, or ``None``.
+
+    ``evaluate`` must be pointwise, as a basis is: row ``r`` of
+    ``evaluate(x)`` depends on ``x[r]`` alone, so ``rows[index]`` is
+    ``evaluate(x)`` bit for bit.  ``None`` when the values cannot be grouped
+    exactly (``distinct_values``), or when more than half the rows hold
+    distinct values, where evaluating every row costs no more.
+    """
+    distinct = distinct_values(x)
+    if distinct is None or 2 * distinct[0].size > distinct[1].size:
+        return None
+    values, index = distinct
+    return evaluate(values), index
+
+
+def stored_csr_bytes(B_csr) -> int:
+    """Bytes of the arrays a CSR basis keeps; zero for any other storage."""
+    if getattr(B_csr, "format", None) != "csr":
+        return 0
+    return int(B_csr.data.nbytes + B_csr.indices.nbytes + B_csr.indptr.nbytes)
 
 
 def _estimated_speedup(
@@ -448,8 +500,19 @@ def detect_row_support(
     max_support_bytes: int | None = None,
     gram_repeats: int = 1,
     replaced_bytes: int = 0,
+    cell_index: NDArray | None = None,
+    nnz: int | None = None,
 ) -> tuple[NDArray, NDArray] | None:
     """Derive the row grouping from the basis itself, then plan compression.
+
+    ``cell_index`` reads ``B_csr`` as the distinct rows of a basis
+    ``B_csr[cell_index]`` that is never formed: its rows repeat by cell (a
+    covariate value, or an occupied pair of them), and ``nnz`` and
+    ``replaced_bytes`` are the full basis's stored entries and CSR bytes.  The
+    cells' rows hash and group exactly as their rows in the full basis would,
+    so the support, its order and the row index are the ones scanning the
+    full basis returns, and cells with bit-identical rows merge.  A hash
+    collision returns ``None`` there, for the caller to scan the full basis.
 
     Rows are grouped by a vectorized 64-bit mix of their raw float bits and the
     grouping is verified bitwise, falling back to byte keying on a collision.
@@ -485,10 +548,10 @@ def detect_row_support(
     _, first_occurrence, row_index = np.unique(hashes, return_index=True, return_inverse=True)
     row_index = np.asarray(row_index, dtype=np.intp).ravel()
     if not _passes_support_gates(
-        n_rows,
+        n_rows if cell_index is None else len(cell_index),
         len(first_occurrence),
         p_b,
-        int(B_csr.nnz),
+        int(B_csr.nnz) if nnz is None else nnz,
         min_speedup,
         max_support_bytes,
         gram_repeats,
@@ -496,6 +559,8 @@ def detect_row_support(
     ):
         return None
     representatives = _verified_representatives(B_csr, first_occurrence, row_index, chunk_rows)
+    if cell_index is not None:
+        return None if representatives is None else (representatives, row_index[cell_index])
     if representatives is None:
         # A true 64-bit collision: regroup byte-keyed and re-plan on the
         # correct grouping (the hash-based gates may have undercounted).
