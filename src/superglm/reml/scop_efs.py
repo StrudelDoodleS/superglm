@@ -1860,7 +1860,13 @@ def _is_scop_component(pc: PenaltyComponent, scop_states: dict[int, dict]) -> di
 
 
 def _scop_lambda_scale(
-    distribution, link, y: NDArray, sample_weight: NDArray, *, weight_semantics: str
+    distribution,
+    link,
+    y: NDArray,
+    sample_weight: NDArray,
+    *,
+    weight_semantics: str,
+    increments: bool = False,
 ) -> float:
     """The scale a SCOP block's smoothing-parameter box widens by (``scaled_lambda_box``).
 
@@ -1876,6 +1882,13 @@ def _scop_lambda_scale(
     parameter carries the dispersion's units, and the scale is one.  The data
     alone set it: no start and no fit moves it, and a term that goes flat
     leaves it where it was.
+
+    With ``increments`` it is instead the square of the response's own units,
+    ``sum w (y - ybar)**2`` over the same degrees of freedom, under the same
+    link and family (one otherwise): a SCOP block's latent Hessian at
+    increments of the response's size is that times its Hessian at unit
+    increments, whose curvature weights carry the variance function's units
+    (``_hessian_scaled_bootstrap_lambdas``).
     """
     if getattr(distribution, "scale_known", True) or not isinstance(link, IdentityLink):
         return 1.0
@@ -1888,7 +1901,7 @@ def _scop_lambda_scale(
     variance = float(np.asarray(distribution.variance(np.array([mean])))[0])
     if not variance > 0.0:
         return 1.0
-    pearson = float(np.sum(weights * (response - mean) ** 2)) / variance
+    pearson = float(np.sum(weights * (response - mean) ** 2)) / (1.0 if increments else variance)
     return pearson / pearson_residual_degrees_of_freedom(
         weights, 1.0, weight_semantics=weight_semantics
     )
@@ -2547,9 +2560,13 @@ def _hessian_scaled_bootstrap_lambdas(
     intercept-only fit given the offset (``null_fit_eta``), so a constant
     added to the offset moves no value.  ``lambda_j = sum A_ii / sum S_j,ii``
     over the coefficients ``S_j`` penalizes puts the typical one at 1/2.  A
-    SCOP block's ``A`` is its latent Hessian at unit increments (latent zero,
-    Jacobian one).  Only ``names`` move, clipped to the unit-increment box
-    [``LAMBDA_FLOOR``, ``LAMBDA_CEILING``]; a
+    SCOP block's ``A`` is its latent Hessian at increments of the response's
+    own size: at unit increments (latent zero, Jacobian one) times the square
+    of the response's units under the identity link with an estimated
+    dispersion (``_scop_lambda_scale``), so the start follows the units as the
+    box and the fixed point do.  Only ``names`` move, each clipped to its box (a SCOP
+    block's ``scaled_lambda_box``, otherwise [``LAMBDA_FLOOR``,
+    ``LAMBDA_CEILING``]); a
     component whose ratio is not a positive finite number keeps its value, and
     every component keeps it where the intercept-only fit has no valid mode
     (``null_fit_eta`` returns None), so no retry is made.
@@ -2607,12 +2624,20 @@ def _hessian_scaled_bootstrap_lambdas(
             np.diag(np.asarray(gm.gram(fisher), dtype=np.float64)) - sum_w * column_mean**2,
             0.0,
         )
+    scop_names = {group.name for group in groups if group.monotone_engine == "scop"}
+    response = (context.distribution, context.link, context.y, context.sample_weight)
+    semantics = context.weight_semantics
+    scop_box = scaled_lambda_box(_scop_lambda_scale(*response, weight_semantics=semantics))
+    scop_increments = _scop_lambda_scale(*response, weight_semantics=semantics, increments=True)
     scaled = dict(boot_lambdas)
     for name, diag in penalty_diags.items():
         support = diag > 0.0
         ratio = float(np.sum(gram_diag[support]) / np.sum(diag[support])) if support.any() else 0.0
+        if name in scop_names:
+            ratio *= scop_increments
         if np.isfinite(ratio) and ratio > 0.0:
-            scaled[name] = float(np.clip(ratio, LAMBDA_FLOOR, LAMBDA_CEILING))
+            box = scop_box if name in scop_names else (LAMBDA_FLOOR, LAMBDA_CEILING)
+            scaled[name] = float(np.clip(ratio, *box))
     return scaled
 
 

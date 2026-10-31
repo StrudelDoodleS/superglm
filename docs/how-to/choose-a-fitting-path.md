@@ -153,7 +153,8 @@ A model with a monotone (SCOP) term chooses its smoothing with Newton steps.
   begins with one coefficient fit at very light smoothing, or at the
   `lambda2_init` values you pass. If the solver cannot check that fit, it fits
   again with every smoothing value set from the data so that each term keeps
-  about half its flexibility, and the search starts from there. On the
+  about half its flexibility, in whatever units the response has, and the
+  search starts from there. On the
   678,000-row freMTPL2 pure-premium model (Tweedie, monotone BonusMalus curve)
   this is what lets the fit finish.
 - **Only the starting fit that is kept warns.** superglm's own warnings from

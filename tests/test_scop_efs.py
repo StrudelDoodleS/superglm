@@ -3282,6 +3282,102 @@ class TestColdBootstrapStart:
             moved = scop_efs_module._hessian_scaled_bootstrap_lambdas(shifted, lambdas, names)
             assert moved == base, family
 
+    @pytest.mark.parametrize("family, p", [("gaussian", 0), ("gamma", 2)])
+    def test_the_scaled_start_follows_the_response_units(self, monkeypatch, family, p):
+        """Under the identity link the retry's starts carry their fixed points' units.
+
+        A SCOP block penalizes the logs of its increments, so its smoothing
+        parameter carries the deviance's units, ``c**(2 - p)`` for a response
+        scaled by ``c`` under ``V(mu) = mu**p``; an ordinary spline's
+        coefficients carry ``c``, so its parameter carries ``c**-p``.  With
+        ``c`` a power of two every sum the start reads scales exactly, so the
+        starts scale exactly too, inside both boxes for ``c = 2**+-8``.
+        Mutation check: master formed the SCOP start at unit increments,
+        ``c**-p``, which left the Gaussian start unchanged and put the
+        response-in-nano-units fit of the tolerance sweep at an e.d.f. of 1.0
+        against 6.40.
+        """
+        from superglm import Spline
+        from superglm.links import IdentityLink
+
+        rng = np.random.default_rng(13)
+        n = 240
+        frame = pd.DataFrame({"s": rng.uniform(0.0, 1.0, n), "m": rng.uniform(0.0, 1.0, n)})
+        y = 2.0 + np.sin(3.0 * frame["s"]) + frame["m"] + rng.gamma(4.0, 0.1, n)
+        model = SuperGLM(
+            family=family,
+            link=IdentityLink(),
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "s": Spline(kind="ps", k=8),
+                "m": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
+            },
+        )
+        weights = rng.uniform(0.2, 2.0, n)
+        context, lambdas = _bootstrap_context(
+            monkeypatch, model, frame, y.to_numpy(), sample_weight=weights
+        )
+        names = set(lambdas)
+        assert names == {"s", "m"}
+        base = scop_efs_module._hessian_scaled_bootstrap_lambdas(context, lambdas, names)
+        assert all(base[name] != lambdas[name] for name in names)
+        for k in (-8, 8):
+            c = 2.0**k
+            moved = scop_efs_module._hessian_scaled_bootstrap_lambdas(
+                replace(context, y=context.y * c), lambdas, names
+            )
+            assert moved["m"] == base["m"] * c ** (2 - p), (k, moved, base)
+            assert moved["s"] == base["s"] * c ** (-p), (k, moved, base)
+
+    def test_a_retried_start_fits_the_same_model_in_any_units(self, monkeypatch):
+        """With the first start refused, the fit at ``c * y`` is the fit at ``y`` scaled.
+
+        A Gaussian identity monotone fit, its response in units ``c = 2**-30``
+        apart, both bootstraps' first starts refused: each search runs from
+        the retry's start and reaches the same smoothing parameter in its own
+        units (``lambda / c**2``) to within the search's step tolerance.
+        Mutation check: master started the small-unit search at its
+        unit-increment value, where the data's curvature in the SCOP block is
+        below the rounding of its penalty; here it raised
+        ``ObservedModeNotConvergedError`` ("SCOP REML candidate did not
+        converge"), and on the tolerance sweep's 4000 rows it stopped
+        converged at an e.d.f. of 1.0 with ``lambda / c**2`` 1e21 times too
+        large.
+        """
+        rng = np.random.default_rng(11)
+        n = 1000
+        x = np.sort(rng.uniform(0.0, 1.0, n))
+        y = 1.0 / (1.0 + np.exp(-12.0 * (x - 0.5))) + 0.15 * x + rng.normal(0.0, 0.35, n)
+        frame = pd.DataFrame({"x": x})
+        real_attempt = scop_efs_module._bootstrap_attempt
+        reml_tol = 1e-6
+        fits = {}
+        for c in (1.0, 2.0**-30):
+            calls: list[int] = []
+
+            def attempt(context, lambdas, last_fit, calls=calls):
+                calls.append(1)
+                if len(calls) == 1:
+                    return None, [], None
+                return real_attempt(context, lambdas, last_fit)
+
+            monkeypatch.setattr(scop_efs_module, "_bootstrap_attempt", attempt)
+            model = SuperGLM(
+                family="gaussian",
+                features={
+                    "x": PSpline(
+                        n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"
+                    )
+                },
+            )
+            model.fit_reml(frame, c * y, reml_tol=reml_tol)
+            assert len(calls) >= 2 and model.reml_diagnostics()["converged"]
+            fits[c] = (model._reml_lambdas["x"] / c**2, model.result.effective_df)
+        (lam_1, edf_1), (lam_c, edf_c) = fits[1.0], fits[2.0**-30]
+        assert abs(np.log(lam_c / lam_1)) <= reml_tol, fits
+        assert abs(edf_c - edf_1) <= reml_tol * edf_1, fits
+
     def test_a_start_with_no_valid_null_mode_is_not_scaled(self, monkeypatch):
         """Where the intercept-only fit holds a weighted row at a clip past
         which the Fisher weight grows, the curvature read there is the clip's,
