@@ -273,7 +273,10 @@ def test_binomial_logit_table_gradient_matches_the_derivative_grams_within_round
     Bound: ``_rounding_bounds`` in ``u``, the table route's row sums counted by
     ``_count_roundings`` (the leverage bound ``gamma_K eta_r`` of
     ``_lookup_tables``); it is below a millionth of the terms, so a dropped or
-    mis-weighted term fails it.
+    mis-weighted term fails it.  The weight derivative ``W (1 - 2 mu)`` is not
+    proportional to ``W``, so the profiled intercept's ``1 / sum W`` term does
+    not cancel against the centred rows as it does for Poisson/log: dropping
+    it from ``_leverage_table_gradient`` fails here.
     """
     model = _lookup_fit()
     plan = leverage_tables.lookup_plan(model._dm)

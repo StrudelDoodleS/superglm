@@ -527,13 +527,13 @@ def test_the_weight_correction_centres_its_grams_and_leverage_rows(columns, rout
     """The W(rho) correction's signed Grams and leverage rows read the exact centre pair.
 
     Sol's reproduction: the same converged binomial/logit state, its columns
-    translated exactly by 1e16.  The derivative Grams and the leverage rows
-    centred about the rounded ``mean_x`` moved the correction 9.2% (ordinary
-    route) and 17.1% (leverage route).  Centred as ``(x - c) - d`` the two
-    readings agree to the rounding of the sums, ``4 gamma_{n+2p+5} M_j``
-    (``_correction_magnitude``).  Mutation: ``d`` dropped from
-    ``_dense_split_signed_gram`` or ``mean_lo`` from the solved rows
-    (``_leverage_rows.solved_row_blocks``).
+    translated exactly by 1e16.  Centred about the rounded ``mean_x``, the
+    derivative Grams moved the correction 9.2%.  Centred as ``(x - c) - d``
+    the two readings agree to the rounding of the sums, ``4 gamma_{n+2p+5}
+    M_j`` (``_correction_magnitude``), on the Grams and on the leverage
+    route's solved rows.  Mutation: ``d`` dropped from
+    ``_dense_split_signed_gram`` or ``centre_lo`` from
+    ``_leverage_rows.solved_row_blocks``.
     """
     from superglm.reml.w_derivatives import reml_w_correction
 
@@ -554,8 +554,8 @@ def test_exact_reml_leverage_route_is_translation_invariant(monkeypatch):
     A numeric column on the even-integer grid beside four P-splines, no
     random effect, so the gram backend's dense factor runs, and with the
     leverage work bar lowered the W-correction takes the leverage route's
-    solved rows.  Mutation: as the previous test, or the gram rows centred
-    about the rounded ``mean_x``.
+    solved rows.  Mutation: the gram rows centred about the rounded
+    ``mean_x``.
     """
     import superglm.reml.direct as direct
 
