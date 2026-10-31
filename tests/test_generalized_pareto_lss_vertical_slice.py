@@ -18,7 +18,7 @@ from superglm.distributional.families.generalized_pareto import GeneralizedParet
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.kernels import generalized_pareto as gp
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
-from superglm.features import Numeric
+from superglm.features import Numeric, RandomEffect
 from tests._generalized_pareto_lss_oracles import fit_scale_regression, profile_shape
 from tests.bound_predictor_fixtures import model_from_templates
 
@@ -166,15 +166,16 @@ def test_a_shape_pressed_past_the_upper_wall_of_one_is_disclosed_as_having_no_fi
     assert np.all(np.isfinite(model.predict_quantile(frame, 0.99)))
 
 
-def test_the_wall_disclosure_does_not_depend_on_where_a_loose_tolerance_stops_the_fit():
-    # at inner_tol=1e-5 a pressed fit stops about 5e-6 short of the wall, not 1e-9
+@pytest.mark.parametrize("inner_tol", [1.0e-4, 1.0e-5])
+def test_the_wall_disclosure_does_not_depend_on_where_a_loose_tolerance_stops_the_fit(inner_tol):
+    # a loose tolerance stops a pressed fit up to about 6e-4 short of the wall, not 1e-9
     frame, y, _ = _simulate(3_000, 8, shape=1.5)
     model = model_from_templates(
         family=GeneralizedParetoLSS(),
         predictors=(Predictor("scale", {"x": Numeric()}), Predictor("shape", {})),
     )
     with pytest.warns(ConvergenceWarning, match="at the upper wall 1"):
-        model.fit(frame, y, inner_tol=1.0e-5)
+        model.fit(frame, y, inner_tol=inner_tol)
     assert len(_wall_messages(model)) == 1
 
 
@@ -217,12 +218,16 @@ def test_a_shape_that_varies_towards_a_wall_without_reaching_it_is_not_disclosed
     assert np.isfinite(model.predict(beyond)[0])
 
 
-def test_a_linear_shape_reaching_near_both_walls_at_an_interior_optimum_is_not_disclosed():
-    # the fitted shape comes within 1e-4 of both walls, but no coefficient step crosses them
+@pytest.mark.parametrize("origin, unit", [(0.0, 1.0), (1.7e9, 3.0e7)], ids=["unit", "timestamp"])
+def test_a_linear_shape_reaching_near_both_walls_at_an_interior_optimum_is_not_disclosed(
+    origin, unit
+):
+    # the fitted shape comes within 1e-4 of both walls, but no Newton step moves it on; the
+    # same covariate in timestamp-sized units gives the same fit
     x = np.linspace(-1.0, 1.0, 5_000)
     shape = expit(10.0 * x)
     y = np.expm1(-shape * np.log(np.random.default_rng(4).random(5_000))) / shape
-    frame = pd.DataFrame({"x": x})
+    frame = pd.DataFrame({"x": origin + unit * x})
     model = model_from_templates(
         family=GeneralizedParetoLSS(),
         predictors=(Predictor("scale", {}), Predictor("shape", {"x": Numeric()})),
@@ -249,6 +254,99 @@ def test_rows_no_shape_coefficient_moves_do_not_hide_a_pressed_group():
         model.fit(frame, y, offsets={"shape": offset}, inner_tol=1.0e-10)
     (message,) = _wall_messages(model)
     assert "1000 of 2000 rows" in message
+
+
+@pytest.mark.parametrize("light", [0.0, 0.7])
+def test_a_pressed_group_beside_an_interior_group_is_disclosed(light):
+    # only the heavy group runs off, whatever code the interior group carries
+    rng = np.random.default_rng(8)
+    heavy = np.expm1(-1.5 * np.log(rng.random(1_000))) / 1.5
+    interior = np.expm1(-0.3 * np.log(rng.random(1_000))) / 0.3
+    frame = pd.DataFrame({"g": np.repeat([1.0, light], 1_000)})
+    model = model_from_templates(
+        family=GeneralizedParetoLSS(),
+        predictors=(Predictor("scale", {"g": Numeric()}), Predictor("shape", {"g": Numeric()})),
+    )
+    with pytest.warns(ConvergenceWarning, match="at the upper wall 1"):
+        model.fit(frame, np.concatenate([heavy, interior]), inner_tol=1.0e-10)
+    (message,) = _wall_messages(model)
+    assert "1000 of 2000 rows" in message
+
+
+def test_row_varying_offsets_at_an_interior_optimum_are_not_disclosed():
+    # the two rows' shape scores cancel through their link slopes, not in the natural scale
+    y = np.tile([0.36839766102977684, 4.428502209460899], 100)
+    offset = np.tile(np.log([1.0e-5 / (1.0 - 1.0e-5), 0.99995 / 0.00005]), 100)
+    model = model_from_templates(
+        family=GeneralizedParetoLSS(),
+        predictors=(Predictor("scale", {}), Predictor("shape", {})),
+    ).fit(pd.DataFrame({"x": np.zeros(200)}), y, offsets={"shape": offset}, inner_tol=1.0e-12)
+    assert not _wall_messages(model)
+
+
+def test_a_diverging_linear_shape_is_disclosed_at_both_walls():
+    # the slope runs off towards both walls while rows near x = 0 are still on their way
+    x = np.linspace(-1.0, 1.0, 1_000)
+    model = model_from_templates(
+        family=GeneralizedParetoLSS(),
+        predictors=(Predictor("scale", {}), Predictor("shape", {"x": Numeric()})),
+    )
+    with pytest.warns(ConvergenceWarning, match="tail shape at the"):
+        model.fit(pd.DataFrame({"x": x}), np.where(x < 0.0, 1.0, 100.0), inner_tol=1.0e-5)
+    (message,) = _wall_messages(model)
+    assert "lower wall 0" in message and "upper wall 1" in message
+
+
+def test_a_shape_held_on_a_reml_face_by_its_offset_is_not_disclosed():
+    # REML removes the group effect on an exact face, so only the offset sets the shape near one
+    y = np.expm1(-1.5 * np.log(np.random.default_rng(8).random(1_000))) / 1.5
+    model = model_from_templates(
+        family=GeneralizedParetoLSS(),
+        predictors=(
+            Predictor("scale", {}),
+            Predictor("shape", {"group": RandomEffect()}, intercept=False),
+        ),
+    ).fit_reml(
+        pd.DataFrame({"group": np.repeat(["a", "b"], 500)}),
+        y,
+        offsets={"shape": np.full(1_000, np.log(0.99995 / 0.00005))},
+        lambdas={"shape:group#wiggle": 1.0e10},
+    )
+    assert not _wall_messages(model)
+
+
+def test_a_shape_the_link_clipped_at_the_upper_wall_is_disclosed():
+    # a heavy tail at a tight tolerance runs the shape to the last float below one, where the
+    # link has no derivative left and the fit's rank decision drops the shape direction
+    rng = np.random.default_rng(11)
+    y = stats.genpareto(3.0).rvs(2_000, random_state=rng)
+    frame = pd.DataFrame({"x": rng.uniform(size=2_000)})
+    model = model_from_templates(
+        family=GeneralizedParetoLSS(),
+        predictors=(Predictor("scale", {"x": Spline(kind="cr", k=6)}), Predictor("shape", {})),
+    )
+    with pytest.warns(ConvergenceWarning, match="at the upper wall 1"):
+        model.fit_reml(frame, y, inner_tol=1.0e-12)
+    shape = model.predict_parameters(frame)["shape"].to_numpy()
+    assert np.all(shape == np.nextafter(1.0, 0.0))
+
+
+def test_a_shape_an_offset_alone_clips_at_the_wall_is_not_disclosed():
+    # the offset, not a fitted coefficient, puts the second group at the last float below one
+    interior = np.expm1(-0.3 * np.log(np.random.default_rng(8).random(1_000))) / 0.3
+    frame = pd.DataFrame({"g": np.repeat([1.0, 0.0], 1_000)})
+    model = model_from_templates(
+        family=GeneralizedParetoLSS(),
+        predictors=(
+            Predictor("scale", {"g": Numeric()}),
+            Predictor("shape", {"g": Numeric()}, intercept=False),
+        ),
+    ).fit(
+        frame,
+        np.concatenate([interior, np.ones(1_000)]),
+        offsets={"shape": np.repeat([0.0, 40.0], 1_000)},
+    )
+    assert not _wall_messages(model)
 
 
 def test_a_pressed_fit_without_positive_shape_information_is_still_disclosed():

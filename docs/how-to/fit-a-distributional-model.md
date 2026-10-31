@@ -557,15 +557,24 @@ known from elsewhere.
 **A shape at a wall.** Data whose tail is heavier than the upper wall, or
 lighter than the lower one, push the fitted shape against that wall. The fit
 then warns and records it in `result_.warnings`, naming the wall and the
-number of rows at it. A row counts as at a wall when two things hold:
-- its shape lies within `1e-4` of the wall, closer than any sample below
-  about 10⁸ rows can resolve;
-- a Newton step in the coefficients of the shape predictor, taken from where
-  the fit stopped, would carry it past the wall.
+number of rows at it.
 
-That is the usual test for an active bound. It moves only in directions the
-fitted shape predictor offers, and it does not depend on the solver's
-tolerance. Its consequences:
+The link reaches a wall only as the shape's linear predictor runs to
+infinity, so a fit pressed against one has no finite optimum, and more
+iterations would only move it further. The fit checks this with one more
+Newton step from where it stopped, on its own penalised objective. A row
+counts as at a wall when its shape lies within 1% of the distance between
+the walls of one of them, and either:
+- that step moves its linear predictor towards the wall by at least one
+  half. A pressed row moves by one unit per step however close it already
+  is, while at a finite optimum the step vanishes, so the test does not
+  depend on the solver's tolerance;
+- or its shape is the last value before the wall that the link can
+  represent, and the fitted coefficients, not its offset alone, put it there.
+
+Rows that a penalty or an offset holds near a wall are not counted: their
+shape is set by the model, not by where the solver stopped. The consequences
+for the rows that are counted:
 - At an upper wall of one the mean excess and the expected shortfall are
   infinite. `predict()` and `expected_shortfall()` still return their values
   at the shape where the fit stopped, which the solver's tolerance sets rather

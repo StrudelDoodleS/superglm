@@ -7,7 +7,7 @@ import keyword
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Literal, NamedTuple, Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -616,38 +616,21 @@ class LimitRowDisclosingFamily(Protocol):
         ...
 
 
-class WallRows(NamedTuple):
-    """Fitted rows near a wall of a bounded parameter, in the parameter's natural scale.
-
-    ``index`` names the rows; ``score`` and ``information`` are the parameter's
-    log-likelihood derivative and observed information there; ``distance`` is
-    each row's distance to its nearer wall, and ``outward`` is +1 towards the
-    upper wall and -1 towards the lower.
-    """
-
-    parameter_index: int
-    index: NDArray[np.intp]
-    score: NDArray[np.float64]
-    information: NDArray[np.float64]
-    distance: NDArray[np.float64]
-    outward: NDArray[np.float64]
-
-
 @runtime_checkable
 class WallDisclosingFamily(Protocol):
     """Optional family disclosure of a parameter fitted at a wall of its bounded link.
 
     A bounded link keeps the parameter strictly inside its walls, so data that
     put the estimate at or beyond a wall drive its predictor without limit and
-    the fit stops wherever its tolerance does. The family names the rows near
-    a wall (``wall_rows``); the fit decides which of them it pressed there, and
+    the fit stops wherever its tolerance does. The family names the parameter
+    and its walls (``walls``); the fit decides which rows it pressed there, and
     the family says what that does to its functionals (``wall_disclosure``).
     The text is appended to ``result_.warnings``, never raised; a hook that
     raises is dropped.
     """
 
-    def wall_rows(self, y: NDArray, theta: NDArray, plan: FamilyLikelihoodPlan) -> WallRows | None:
-        """Return the fitted rows near a wall, or ``None`` when there are none."""
+    def walls(self) -> tuple[int, float, float]:
+        """Return the bounded parameter's index and its lower and upper walls."""
         ...
 
     def wall_disclosure(self, n_lower: int, n_upper: int, n_rows: int) -> str:

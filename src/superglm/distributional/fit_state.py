@@ -13,7 +13,6 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._roundoff import UNIT_ROUNDOFF
 from superglm.diagnostics.convergence import (
     lss_fisher_curvature_message,
     lss_no_ascent_direction_message,
@@ -31,11 +30,7 @@ from superglm.distributional.family import (
 from superglm.distributional.inference import JointInference, compute_joint_inference
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.null_model import JointNullModel, fit_joint_null_model
-from superglm.distributional.predictor import (
-    CompiledPredictor,
-    Predictor,
-    PredictorExecutionPlan,
-)
+from superglm.distributional.predictor import CompiledPredictor, Predictor
 from superglm.distributional.result import (
     ConvergenceReason,
     DenseSolverConfig,
@@ -553,66 +548,56 @@ def _predictor_values(state, coefficients: NDArray) -> NDArray[np.float64]:
     return values
 
 
+# Within this fraction of the distance between its walls, of either one, a
+# bounded logit is in its exponential tail.
+_LINK_TAIL = 1.0e-2
+
+
 def _wall_disclosure(
     family: WallDisclosingFamily,
     solver_result: DenseSolverResult,
-    response: NDArray,
-    likelihood_plan: FamilyLikelihoodPlan,
     layout: StackedLayout,
 ) -> str | None:
     """Disclose the rows a fit pressed against a wall of a bounded parameter.
 
-    The family names the rows near a wall with the parameter's natural-scale
-    score and observed information there. A fit can press rows against a wall
-    only along a run-off direction of the parameter's own predictor: one that
-    moves rows near a wall and leaves every other row where it is, since those
-    rows hold any other direction at a finite optimum. The run-off directions
-    are the null space of the design rows away from the walls; a row no
-    coefficient moves, such as an offset-only row, neither moves nor steers
-    them. In them a wall is active, as for a bound constraint, when a Newton
-    step would cross it, on a model of the parameter that is linear in the
-    coefficients over the rows near a wall. The logit link that keeps the
-    parameter inside does not enter: at a wall its derivative vanishes, and the
-    step asks what the data want of the parameter itself. A direction with no
-    positive curvature but a slope rises without limit, so it carries rows out
-    of the walls too. Eigenvalues and slopes within ``u`` times the largest,
-    times the predictor's width, are round-off.
+    A bounded link reaches a wall only as its linear predictor runs to
+    infinity, so a fit pressed against one has no finite optimum: the
+    likelihood keeps rising along a direction of recession after the stopping
+    rule sees no progress, and more iterations would keep moving the estimate
+    (Correia, Guimarães and Zylkin, arXiv:1903.01633; the refitting check for
+    infinite estimates of Kosmidis et al., described in arXiv:2610.09951). One
+    more Newton step from the stop, on the fit's own penalised objective,
+    coefficient face and rank decision, shows this without iterating. In the
+    link's exponential tail, within ``_LINK_TAIL`` of a wall, an exact step
+    moves a row the data press outward by one unit of its linear predictor
+    however close it already is, while at a finite optimum the step vanishes
+    with the solver's tolerance; a row is at a wall when the step moves it
+    outward by at least one half. A row the link has clipped to its last float
+    before a wall has no derivative left for the step to read, so it is at that
+    wall when the fitted coefficients, not its offset alone, push it there.
     """
-    rows = family.wall_rows(response, solver_result.theta, likelihood_plan)
-    if rows is None:
+    parameter_index, lower, upper = family.walls()
+    values = solver_result.theta[:, parameter_index]
+    upper_side = upper - values <= values - lower
+    distance = np.where(upper_side, upper - values, values - lower) / (upper - lower)
+    near = distance <= _LINK_TAIL
+    if not np.any(near):
         return None
-    state = next(
-        state for state in layout.predictors if state.parameter_index == rows.parameter_index
-    )
-    execution = PredictorExecutionPlan(state.design, state.intercept_index is not None)
-    n_rows = state.design.n
-    resolution = execution.width * UNIT_ROUNDOFF
-    away = np.ones(n_rows, dtype=np.float64)
-    away[rows.index] = 0.0
-    held_values, held_vectors = np.linalg.eigh(execution.diagonal_moment(away))
-    free = held_vectors[:, held_values <= resolution * np.max(held_values, initial=0.0)]
-    if not free.shape[1]:
-        return None
-    score = np.zeros(n_rows, dtype=np.float64)
-    information = np.zeros(n_rows, dtype=np.float64)
-    score[rows.index] = rows.score
-    information[rows.index] = rows.information
-    gradient = free.T @ execution.score(score)
-    values, vectors = np.linalg.eigh(free.T @ execution.diagonal_moment(information) @ free)
-    along = vectors.T @ gradient
-    curved = values > resolution * np.max(np.abs(values), initial=0.0)
-    rising = ~curved & (np.abs(along) > resolution * np.linalg.norm(gradient))
-    step = free @ (vectors[:, curved] @ (along[curved] / values[curved]))
-    shift = _predictor_values(state, step)
-    drift = _predictor_values(state, free @ (vectors[:, rising] @ along[rising]))
-    shift = shift[rows.index] * rows.outward
-    drift = drift[rows.index] * rows.outward
-    pressed = (shift > rows.distance) | (drift > resolution * np.max(np.abs(drift), initial=0.0))
-    n_upper = int(np.count_nonzero(pressed & (rows.outward > 0.0)))
-    n_lower = int(np.count_nonzero(pressed & (rows.outward < 0.0)))
+    state = next(state for state in layout.predictors if state.parameter_index == parameter_index)
+    # the terminal rank decision is lifted from the coefficient face, so its solve keeps
+    # every direction REML fixed where it is
+    step = solver_result.terminal_rank.solve(solver_result.terminal_score)
+    outward = np.where(upper_side, 1.0, -1.0)
+    moved = outward * _predictor_values(state, step[state.coefficient_slice]) >= 0.5
+    last = np.where(upper_side, np.nextafter(upper, lower), np.nextafter(lower, upper))
+    coefficients = solver_result.coefficients[state.coefficient_slice]
+    pushed = outward * _predictor_values(state, coefficients) > 0.0
+    pressed = near & (moved | ((values == last) & pushed))
+    n_upper = int(np.count_nonzero(pressed & upper_side))
+    n_lower = int(np.count_nonzero(pressed & ~upper_side))
     if not (n_upper or n_lower):
         return None
-    return family.wall_disclosure(n_lower, n_upper, n_rows)
+    return family.wall_disclosure(n_lower, n_upper, state.design.n)
 
 
 def _curvature_disclosures(
@@ -678,7 +663,7 @@ def _curvature_disclosures(
         and layout is not None
     ):
         try:
-            message = _wall_disclosure(family, solver_result, response, likelihood_plan, layout)
+            message = _wall_disclosure(family, solver_result, layout)
         except Exception:  # noqa: BLE001 - a failed disclosure must not fail the fit
             message = None
         if message:
