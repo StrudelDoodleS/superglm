@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import math
 import sys
 from decimal import Decimal, localcontext
@@ -217,12 +218,16 @@ def test_small_shape_batches_make_a_row_independent_number_of_python_calls(
             nonlocal calls
             calls += event == "call"
 
-        previous = sys.getprofile()
+        previous, collecting = sys.getprofile(), gc.isenabled()
+        gc.collect()
+        gc.disable()  # a collection's finalizers would be Python calls in one window only
         sys.setprofile(profile)
         try:
             helper(shapes)
         finally:
             sys.setprofile(previous)
+            if collecting:
+                gc.enable()
         return calls
 
     helper(np.linspace(0.001, np.nextafter(0.25, 0.0), 257))
