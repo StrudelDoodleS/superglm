@@ -617,6 +617,23 @@ class LimitRowDisclosingFamily(Protocol):
 
 
 @runtime_checkable
+class WallDisclosingFamily(Protocol):
+    """Optional family disclosure of a parameter fitted at a wall of its bounded link.
+
+    A bounded link keeps the parameter strictly inside its walls, so data that
+    put the estimate at or beyond a wall drive its predictor without limit and
+    the fit stops wherever its tolerance does. The family names the rows whose
+    fitted parameter is at a wall and what that does to its functionals. The
+    text is appended to ``result_.warnings``, never raised; a hook that raises
+    is dropped.
+    """
+
+    def wall_disclosure(self, y: NDArray, theta: NDArray, plan: FamilyLikelihoodPlan) -> str | None:
+        """Return the warning for the fitted rows at a wall, or ``None``."""
+        ...
+
+
+@runtime_checkable
 class ExpectedInformationFamily(Protocol):
     """Optional family capability for natural-scale Fisher information."""
 

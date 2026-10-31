@@ -554,6 +554,25 @@ engine does not have yet. Narrow the walls with
 `GeneralizedParetoLSS(shape_lower=..., shape_upper=...)` when the tail index is
 known from elsewhere.
 
+**A shape at a wall.** Data whose tail is heavier than the upper wall, or
+lighter than the lower one, push the fitted shape against that wall. The fit
+then warns and records it in `result_.warnings`, naming the wall and the
+number of rows at it. A row counts as at a wall when two things hold:
+- its shape lies within `1e-4` of the wall, closer than any sample below
+  about 10⁸ rows can resolve;
+- a Newton step in the shape of the rows there would cross the wall.
+
+That is the usual test for an active bound, and it does not depend on the
+solver's tolerance. Its consequences:
+- At an upper wall of one the mean excess and the expected shortfall are
+  infinite. `predict()` returns `inf` wherever the shape is within `1e-6` of
+  one, since no sample can tell such a shape from one. Quantiles and the
+  distribution function stay finite.
+- At any other wall the shape, and everything that depends on it, is set by
+  the wall rather than the data.
+- Standard errors, intervals and posterior draws involving the shape are not
+  reliable at a wall, where the fit has almost no curvature along the shape.
+
 **Weights.** Frequency weights replicate rows. Non-unit prior weights are
 refused: the family is not reproductive, so there is no averaging law. Fit
 claim-level excess rows and carry exposure through offsets.

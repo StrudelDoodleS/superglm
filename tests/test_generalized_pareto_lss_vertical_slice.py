@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import math
+import warnings
 
 import numpy as np
 import pandas as pd
 import pytest
 from scipy import stats
+from scipy.special import expit
 
 from superglm import Spline
+from superglm.diagnostics.convergence import ConvergenceWarning
 from superglm.distributional import Predictor
 from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
 from superglm.distributional.family import COMPLETE_OBSERVATION
@@ -140,6 +143,95 @@ def test_data_beyond_the_upper_wall_presses_against_it_or_stops():
     shape = float(model.predict_parameters(frame)["shape"].iloc[0])
     assert 0.05 < shape < 0.35
     assert shape > 0.3, "data generated above the upper wall must press against it"
+
+
+def _wall_messages(model):
+    return [message for message in model.result_.warnings if "tail shape at the" in message]
+
+
+def _constant_shape_fit(family, frame, y):
+    return model_from_templates(
+        family=family, predictors=(Predictor("scale", {"x": Numeric()}), Predictor("shape", {}))
+    ).fit(frame, y)
+
+
+def test_a_shape_pressed_past_the_upper_wall_of_one_is_disclosed_with_an_infinite_mean():
+    # a true shape of 1.5 puts the maximum-likelihood shape far beyond the wall at one
+    frame, y, _ = _simulate(3_000, 8, shape=1.5)
+    with pytest.warns(ConvergenceWarning, match="at the upper wall 1"):
+        model = _constant_shape_fit(GeneralizedParetoLSS(), frame, y)
+    (message,) = _wall_messages(model)
+    assert "3000 of 3000 rows" in message and "infinite" in message
+    assert np.all(np.isposinf(model.predict(frame)))
+    assert np.all(np.isfinite(model.predict_quantile(frame, 0.99)))
+
+
+def test_the_wall_disclosure_does_not_depend_on_where_a_loose_tolerance_stops_the_fit():
+    # at inner_tol=1e-5 a pressed fit stops about 5e-6 short of the wall, not 1e-9
+    frame, y, _ = _simulate(3_000, 8, shape=1.5)
+    model = model_from_templates(
+        family=GeneralizedParetoLSS(),
+        predictors=(Predictor("scale", {"x": Numeric()}), Predictor("shape", {})),
+    )
+    with pytest.warns(ConvergenceWarning, match="at the upper wall 1"):
+        model.fit(frame, y, inner_tol=1.0e-5)
+    assert len(_wall_messages(model)) == 1
+
+
+def test_a_shape_pressed_below_the_lower_wall_is_disclosed_with_a_finite_mean():
+    # a bounded tail, true shape -0.3, puts the maximum-likelihood shape below zero
+    frame, y, _ = _simulate(3_000, 8, shape=-0.3)
+    with pytest.warns(ConvergenceWarning, match="at the lower wall 0"):
+        model = _constant_shape_fit(GeneralizedParetoLSS(), frame, y)
+    (message,) = _wall_messages(model)
+    assert "negative shapes" in message
+    assert np.all(np.isfinite(model.predict(frame)))
+
+
+def test_a_shape_pressed_past_a_narrow_upper_wall_names_its_remedy_and_keeps_the_mean():
+    frame, y, _ = _simulate(3_000, 8, shape=0.9)
+    family = GeneralizedParetoLSS(shape_lower=0.05, shape_upper=0.35)
+    with pytest.warns(ConvergenceWarning, match="at the upper wall 0.35"):
+        model = _constant_shape_fit(family, frame, y)
+    (message,) = _wall_messages(model)
+    assert "shape_upper" in message
+    assert np.all(np.isfinite(model.predict(frame)))
+
+
+def test_a_shape_that_varies_towards_a_wall_without_reaching_it_is_not_disclosed():
+    # an interior fit whose shape runs from about 0.007 to 0.994 across x
+    x = np.linspace(-1.0, 1.0, 500)
+    shape = expit(4.0 * x)
+    y = np.expm1(-shape * np.log(np.random.default_rng(3).random(500))) / shape
+    frame = pd.DataFrame({"x": x})
+    model = model_from_templates(
+        family=GeneralizedParetoLSS(),
+        predictors=(Predictor("scale", {}), Predictor("shape", {"x": Numeric()})),
+    ).fit(frame, y)
+    assert not _wall_messages(model)
+    assert np.all(np.isfinite(model.predict(frame)))
+
+
+def test_a_pressed_fit_without_positive_shape_information_is_still_disclosed():
+    # near-constant excesses: the likelihood falls across the whole positive shape range,
+    # and the observed shape information at the wall is negative
+    y = np.random.default_rng(0).uniform(0.9, 1.1, 100)
+    frame = pd.DataFrame({"x": np.zeros(100)})
+    with pytest.warns(ConvergenceWarning, match="at the lower wall 0"):
+        model = model_from_templates(
+            family=GeneralizedParetoLSS(),
+            predictors=(Predictor("scale", {}), Predictor("shape", {})),
+        ).fit(frame, y)
+    assert len(_wall_messages(model)) == 1
+
+
+def test_an_interior_shape_records_no_wall_disclosure():
+    frame, y, _ = _simulate(3_000, 8)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = _constant_shape_fit(GeneralizedParetoLSS(), frame, y)
+    assert not _wall_messages(model)
+    assert not any("tail shape at the" in str(warning.message) for warning in caught)
 
 
 def test_the_density_agrees_with_scipy_genpareto_at_the_fitted_parameters():
