@@ -108,7 +108,7 @@ def special_feature_spec(
         raise EditorValueError(_NO_LEVELS.format(action=action))
     grouping = getattr(spec, "_grouping", None)
     for label in chosen:
-        _require_alone(spec, grouping, term, label)
+        _require_alone(grouping, term, label)
     declared, kept, level = _reference_to_keep(fitted, spec, term)
     frame = as_eager_frame(X)
     frame.require_columns((term.name,))
@@ -175,7 +175,7 @@ def returnable_levels(spec) -> list[str]:
     return [str(level) for level in spec._special_display if str(level) in freed]
 
 
-def _require_alone(spec, grouping, term: EditableTerm, label: str) -> None:
+def _require_alone(grouping, term: EditableTerm, label: str) -> None:
     """Refuse a label that is not one of the term's levels, or stands in a group.
 
     A group of one renamed is a group too: the term would carry the level

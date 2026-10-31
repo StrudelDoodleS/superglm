@@ -12,6 +12,14 @@ from superglm.features._spline_subclass_ops import build_scop_reparameterization
 from superglm.solvers.scop import build_scop_reparam
 
 
+def _beta_from_gamma(reparam, gamma, floor: float = 1e-6):
+    """Recover beta from gamma, clamping infeasible shape differences."""
+    beta = np.linalg.solve(reparam.Sigma, np.asarray(gamma, dtype=np.float64))
+    if reparam.shape_dim:
+        beta[reparam.null_dim :] = np.log(np.maximum(beta[reparam.null_dim :], floor))
+    return beta
+
+
 def _padded_irregular_knots(q: int, degree: int = 3) -> np.ndarray:
     n_interior = q - degree - 1
     interior = np.linspace(0.0, 1.0, n_interior + 2)[1:-1] ** 1.7
@@ -232,7 +240,7 @@ class TestSCOPRoundTrip:
         reparam = build_scop_reparam(q, direction="increasing")
         beta_orig = np.array([1.0, 0.5, 0.3, 0.8, -0.2, 0.1, 0.4, 0.6])
         gamma = reparam.forward(beta_orig)
-        beta_recovered = reparam.initialize_from_gamma(gamma)
+        beta_recovered = _beta_from_gamma(reparam, gamma)
         np.testing.assert_allclose(beta_recovered, beta_orig, atol=1e-10)
 
     def test_initialize_from_nonmonotone_gamma(self):
@@ -240,7 +248,7 @@ class TestSCOPRoundTrip:
         q = 5
         reparam = build_scop_reparam(q, direction="increasing")
         gamma_bad = np.array([1.0, 3.0, 2.0, 4.0, 3.5])  # not monotone
-        beta = reparam.initialize_from_gamma(gamma_bad)
+        beta = _beta_from_gamma(reparam, gamma_bad)
         gamma_repaired = reparam.forward(beta)
         # Repaired gamma should be monotone
         assert np.all(np.diff(gamma_repaired) >= 0)

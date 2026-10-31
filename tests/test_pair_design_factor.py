@@ -48,10 +48,6 @@ import pytest
 import scipy.linalg
 
 from superglm.screening._factor_kernels import _factor_rank_floor
-from superglm.screening._numeric_margin import (
-    numeric_numeric_moments,
-    numeric_pair_moments,
-)
 from superglm.screening._pair_factor import (
     PairFactor,
     _pair_scale,
@@ -60,12 +56,17 @@ from superglm.screening._pair_factor import (
     numeric_numeric_factor,
     pair_design_factor,
 )
-from superglm.screening._pair_moments import pair_cell_moments, pair_score_curvature
+from superglm.screening._pair_moments import pair_cell_moments
 from superglm.screening._score_stat import (
     _pair_pencil,
     penalized_score_statistic_ladder,
 )
 from tests._overlap_oracle import pair_overlap_moments, tensor_penalty
+from tests._screening_oracle import (
+    numeric_numeric_moments,
+    numeric_pair_moments,
+    pair_score_curvature,
+)
 
 
 def _gram_blocks(factor: PairFactor):
@@ -387,9 +388,9 @@ def test_the_numeric_cat_cell_gram_is_not_what_limits_the_pair(thin):
 # The producers that assembled the dense route's Grams.  Every test above grades
 # the factor against them, and
 # ``test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic`` cannot
-# make its point without them.  ``pair_overlap_moments`` and ``tensor_penalty``
-# now live in ``tests/_overlap_oracle.py``; none of the five may regain a
-# production caller, which is what this list is for.
+# make its point without them.  They live in ``tests/_overlap_oracle.py`` and
+# ``tests/_screening_oracle.py``; none of the five may regain a production
+# caller, which is what this list is for.
 _RETIRED_GRAM_PRODUCERS = frozenset(
     {
         "pair_score_curvature",
@@ -400,18 +401,6 @@ _RETIRED_GRAM_PRODUCERS = frozenset(
     }
 )
 
-# The three of them ``screening/__init__.py`` names in ``__all__``, which IS the
-# arbiter's public surface.  It is neither all five nor a pattern:
-# ``pair_overlap_moments`` and ``tensor_penalty`` are not in ``src`` at all, so
-# re-exporting either would be a new decision.
-_RE_EXPORTED_PRODUCERS = frozenset(
-    {
-        "numeric_numeric_moments",
-        "numeric_pair_moments",
-        "pair_score_curvature",
-    }
-)
-
 
 def test_no_production_module_imports_a_retired_gram_producer():
     """The fingerprint of the rule issue #257 replaced, enforced by import.
@@ -419,48 +408,31 @@ def test_no_production_module_imports_a_retired_gram_producer():
     #322's precedent is to delete what nothing calls.  These five are kept
     instead, and the reason is that they still have real callers -- as this
     suite's arbiter, which is a use rather than dead code, and the same
-    standing ``_reference_edf`` has in the structured suite.  Two of the five,
-    ``pair_overlap_moments`` and ``tensor_penalty``, now live in
-    ``tests/_overlap_oracle.py``, which this file imports; the other three live
-    in ``superglm.screening``.  What must not
-    happen is one of them quietly becoming the production route again for a
-    pair some future branch adds, because the moment route's accuracy ceiling
-    is architectural and a new caller would inherit it without being told.
+    standing ``_reference_edf`` has in the structured suite.  They live in
+    ``tests/_overlap_oracle.py`` and ``tests/_screening_oracle.py``, which this
+    file imports.  What must not happen is one of them quietly becoming the
+    production route again for a pair some future branch adds, because the
+    moment route's accuracy ceiling is architectural and a new caller would
+    inherit it without being told.
 
     An AST scan rather than a grep: a name reached through
     ``superglm.screening.pair_score_curvature`` is the same defect as an
     ``import``, and both are import statements.
 
-    **THE SCAN COVERS ALL OF ``src/superglm/``, NOT JUST ``model/``.**  It used
-    to stop at ``src/superglm/model/`` because that is where every screening
-    CALLER lives -- but a producer re-adopted from inside
-    ``src/superglm/screening/`` would inherit the same accuracy ceiling and
-    slip past, and that is the plausible route rather than an exotic one:
-    ``_structured.py`` is a production module that already imports from its
-    siblings.  Widening costs one exemption, ``screening/__init__.py``.
-
-    **THE EXEMPTION IS THREE NAMES, NOT THE FILE, AND IT USED TO SAY FIVE.**
-    ``__init__.py`` imports ``_numeric_margin`` and ``_pair_moments`` and
-    re-exports ``numeric_numeric_moments``, ``numeric_pair_moments`` and
-    ``pair_score_curvature``; it never imports ``_overlap``, so
-    ``pair_overlap_moments`` and ``tensor_penalty`` are re-exported by nothing
-    -- consistent with ``_overlap``'s own header calling them not-live, and not
-    with the sentence that used to stand here.  Exempting the FILE would also
-    have hidden a re-adoption inside it, which is a production edit like any
-    other.  Exempting the three NAMES leaves the other two guarded there and
-    makes re-exporting a sixth producer a deliberate edit to
-    ``_RE_EXPORTED_PRODUCERS`` rather than a silent one.
+    **THE SCAN COVERS ALL OF ``src/superglm/``, NOT JUST ``model/``.**  A
+    producer re-adopted from inside ``src/superglm/screening/`` would inherit
+    the same accuracy ceiling, and that is the plausible route rather than an
+    exotic one: ``_structured.py`` is a production module that already imports
+    from its siblings.  No file is exempt: re-exporting a producer from
+    ``screening/__init__.py`` is a production edit like any other.
 
     **A RELATIVE IMPORT IS AN IMPORT.**  Matching only modules that start with
     ``superglm.screening`` misses ``from ._overlap import tensor_penalty``,
     where ``node.module`` is ``"_overlap"`` and ``node.level`` is 1 -- and a
     sibling is exactly where the re-adoption this scan was widened for would
-    appear.  ``node.level > 0`` closes it with no module test needed: three of
-    the five names live in ``superglm.screening``, so a relative import that
-    binds one of them resolved into that package whatever its dots say.  The
-    other two live in ``tests/_overlap_oracle.py``, outside ``src``, so a
-    production import of either is wrong in any form, and the same
-    ``node.level`` check catches a relative one.
+    appear.  ``node.level > 0`` closes it with no module test needed: all five
+    live outside ``src``, so a production import of any of them is wrong in any
+    form, and the same ``node.level`` check catches a relative one.
     The ``ast.Attribute`` fallback does not cover the case, because ``from X
     import name`` binds a bare ``Name``.
 
@@ -476,12 +448,9 @@ def test_no_production_module_imports_a_retired_gram_producer():
     import pathlib
 
     root = pathlib.Path(__file__).resolve().parents[1] / "src" / "superglm"
-    re_export = root / "screening" / "__init__.py"
+    watched = _RETIRED_GRAM_PRODUCERS
     offenders = []
     for path in sorted(root.rglob("*.py")):
-        watched = _RETIRED_GRAM_PRODUCERS
-        if path == re_export:
-            watched = watched - _RE_EXPORTED_PRODUCERS
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and (

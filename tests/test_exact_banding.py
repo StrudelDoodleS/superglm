@@ -22,8 +22,8 @@ from superglm.diagnostics.exact_banding import (
 )
 from superglm.export.rating_tables import build_rating_table_payload
 from superglm.features import _spline_runtime
+from superglm.inference._term_covariance import feature_se_from_cov
 from superglm.model import base
-from superglm.model.explain_ops import model_feature_se_from_cov
 
 _UNIT_ROUNDOFF = 2.0**-53
 
@@ -873,7 +873,16 @@ def test_term_se_at_matches_the_library_grid(banded_model, one_basis_per_value):
     for name in ("age", "density"):
         spec = model._specs[name]
         grid = np.linspace(spec._lo, spec._hi, 50)
-        expected = model_feature_se_from_cov(model, name, cov, active, n_points=50)
+        expected = feature_se_from_cov(
+            name,
+            cov,
+            active,
+            model.result,
+            model._groups,
+            model._specs,
+            model._interaction_specs,
+            n_points=50,
+        )
         actual = _term_se_at(model, name, grid)
         # Both evaluate sqrt(diag(M Cov M')) as the row sums of (M @ Cov) * M on
         # one basis.  Bit equality would also need the BLAS to repeat M @ Cov

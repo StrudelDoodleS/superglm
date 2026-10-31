@@ -952,7 +952,7 @@ def penalized_score_statistic_ladder(
 ) -> list[ScreenedPair]:
     """Score one pair at every budget in ``budgets``, sharing one decomposition.
 
-    Equivalent to calling :func:`penalized_score_statistic` once per budget,
+    Equivalent to scoring the pair once per budget,
     but the pencil that makes ``edf`` and ``T`` closed forms depends on neither
     ``lambda`` nor ``edf0`` — so an entire ladder costs one decomposition
     instead of one per rung, each of which previously also paid for its own
@@ -1042,25 +1042,3 @@ def penalized_score_statistic_ladder(
             )
         )
     return out
-
-
-def penalized_score_statistic(
-    pair: PairFactor,
-    penalty_root: NDArray | None,
-    *,
-    edf0: float = 4.0,
-) -> ScreenedPair:
-    """Rank one candidate pair by its penalized efficient-score statistic.
-
-    ``pair`` carries the overlap span the mains model already explains as the
-    leading block of its own factor, so the profiling that used to need ``C``,
-    ``M`` and the overlap's own score is a slice of a triangular matrix here
-    rather than a difference of two Grams.  With ``penalty_root`` absent or
-    empty the statistic reduces to the unpenalized ``U_eff' V_eff^+ U_eff`` and
-    ``lambda0`` is reported as 0.
-
-    Scoring a ladder of budgets? Use
-    :func:`penalized_score_statistic_ladder`, which shares one decomposition
-    across every rung instead of rebuilding it per call.
-    """
-    return penalized_score_statistic_ladder(pair, penalty_root, budgets=(float(edf0),))[0]

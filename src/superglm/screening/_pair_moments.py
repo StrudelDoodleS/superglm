@@ -13,20 +13,9 @@ release pin lives in tests/test_interaction_screening.py.
 
 ``pair_cell_moments`` and ``working_score`` are live: the factor builders of
 :mod:`superglm.screening._pair_factor` consume exactly the cell tables the
-first produces.  ``pair_score_curvature`` is not.
-
-**NO LONGER THE PRODUCTION ROUTE, AND KEPT DELIBERATELY.**  Issue #257 moved
-the dense screening path onto design factors -- ``_pair_factor`` reduces the
-same cell tables to one triangular factor and the ladder reads ``V_eff`` off a
-block of it, so no Gram is formed and the spectrum the statistic works in is
-the design's rather than its square.  What is below is the DEFINITION that
-factor is graded against: every exactness pin in
-``tests/test_pair_design_factor.py`` compares the two, and
-``test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic`` counts the
-directions the Gram cannot resolve, which needs the Gram.  Precedent for
-keeping a live-tested non-caller is ``_reference_edf`` in the structured suite.
-An import guard keeps it from becoming production again by accident:
-``test_no_production_module_imports_a_retired_gram_producer``.
+first produces.  The Gram producers the dense route used to assemble from them
+are the definition those factors are graded against, and live in
+``tests/_screening_oracle.py`` and ``tests/_overlap_oracle.py``.
 """
 
 from __future__ import annotations
@@ -102,31 +91,3 @@ def pair_cell_moments(
     joint = codes_a * np.intp(n_b) + codes_b
     w_flat, s_flat = _fused_bincount_2(joint, _native(working_weights), _native(score), n_cells)
     return s_flat.reshape(n_a, n_b), w_flat.reshape(n_a, n_b)
-
-
-def pair_score_curvature(
-    B_a: NDArray,
-    B_b: NDArray,
-    S_cell: NDArray,
-    W_cell: NDArray,
-) -> tuple[NDArray, NDArray]:
-    """Score vector and unadjusted curvature of the pair's tensor block.
-
-    With ``X_T`` the row-Kronecker design ``kron(B_a[i_a[r]], B_b[i_b[r]])``:
-
-    ``U = X_T' s  = vec(B_a' S_cell B_b)``
-    ``V = X_T' diag(W) X_T``, assembled from ``W_cell`` without forming rows:
-    ``V[(p,q),(r,s)] = sum_i B_a[i,p] B_a[i,r] * (sum_j W[i,j] B_b[j,q] B_b[j,s])``
-
-    Flattening is C-order, matching ``np.kron`` column ordering.
-
-    Not on the production path since issue #257 -- see the module docstring for
-    what it is for now and why it stays.
-    """
-    B_a = np.asarray(B_a, dtype=np.float64)
-    B_b = np.asarray(B_b, dtype=np.float64)
-    k_a, k_b = B_a.shape[1], B_b.shape[1]
-    U = (B_a.T @ S_cell @ B_b).reshape(k_a * k_b)
-    inner = np.einsum("ij,jq,js->iqs", W_cell, B_b, B_b, optimize=True)
-    V = np.einsum("ip,ir,iqs->pqrs", B_a, B_a, inner, optimize=True)
-    return U, V.reshape(k_a * k_b, k_a * k_b)
