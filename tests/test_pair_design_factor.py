@@ -8,8 +8,9 @@ every Gram the old route assembled is recovered from ``PairFactor.joint`` to
 round-off, and the tensor block comes back in the same C-order the tensor
 penalty is assembled in.
 
-The four moment producers are still here as the arbiter — see the disposition
-note in :mod:`superglm.screening._pair_moments`.  They are the reference this
+The four moment producers live in ``tests/_screening_oracle.py`` and
+``tests/_overlap_oracle.py`` as the arbiter — see the disposition note in
+:mod:`superglm.screening._pair_moments`.  They are the reference this
 file grades the factor against; they are no longer the production route.
 
 **WHERE EVERY MAGNITUDE CONSTANT IN THIS FILE COMES FROM.**  Each assertion
@@ -43,15 +44,14 @@ two orders looser than its siblings for no stated reason and is now at theirs.
 
 from __future__ import annotations
 
+import ast
+import pathlib
+
 import numpy as np
 import pytest
 import scipy.linalg
 
 from superglm.screening._factor_kernels import _factor_rank_floor
-from superglm.screening._numeric_margin import (
-    numeric_numeric_moments,
-    numeric_pair_moments,
-)
 from superglm.screening._pair_factor import (
     PairFactor,
     _pair_scale,
@@ -60,12 +60,17 @@ from superglm.screening._pair_factor import (
     numeric_numeric_factor,
     pair_design_factor,
 )
-from superglm.screening._pair_moments import pair_cell_moments, pair_score_curvature
+from superglm.screening._pair_moments import pair_cell_moments
 from superglm.screening._score_stat import (
     _pair_pencil,
     penalized_score_statistic_ladder,
 )
 from tests._overlap_oracle import pair_overlap_moments, tensor_penalty
+from tests._screening_oracle import (
+    numeric_numeric_moments,
+    numeric_pair_moments,
+    pair_score_curvature,
+)
 
 
 def _gram_blocks(factor: PairFactor):
@@ -384,12 +389,12 @@ def test_the_numeric_cat_cell_gram_is_not_what_limits_the_pair(thin):
     assert np.abs(U_cell - U_rows).max() / max(np.abs(U_rows).max(), 1e-300) < 1e-10, thin
 
 
-# The producers that assembled the dense route's Grams.  Every test above grades
-# the factor against them, and
+# The producers that assembled the dense route's Grams, and the ranker that reads
+# them.  Every test above grades the factor against them, and
 # ``test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic`` cannot
-# make its point without them.  ``pair_overlap_moments`` and ``tensor_penalty``
-# now live in ``tests/_overlap_oracle.py``; none of the five may regain a
-# production caller, which is what this list is for.
+# make its point without them.  They live in ``tests/_overlap_oracle.py`` and
+# ``tests/_screening_oracle.py``; none of the six may regain a production
+# caller, which is what this list is for.
 _RETIRED_GRAM_PRODUCERS = frozenset(
     {
         "pair_score_curvature",
@@ -397,101 +402,76 @@ _RETIRED_GRAM_PRODUCERS = frozenset(
         "numeric_pair_moments",
         "numeric_numeric_moments",
         "tensor_penalty",
+        "penalized_score_statistic",
     }
 )
 
-# The three of them ``screening/__init__.py`` names in ``__all__``, which IS the
-# arbiter's public surface.  It is neither all five nor a pattern:
-# ``pair_overlap_moments`` and ``tensor_penalty`` are not in ``src`` at all, so
-# re-exporting either would be a new decision.
-_RE_EXPORTED_PRODUCERS = frozenset(
-    {
-        "numeric_numeric_moments",
-        "numeric_pair_moments",
-        "pair_score_curvature",
-    }
-)
+
+def _in_tests(module: str) -> bool:
+    return module.split(".")[0] == "tests"
+
+
+def _retired_producer_uses(tree: ast.AST) -> list[str]:
+    """Each way ``tree`` reaches the oracles, as ``"<line> <what>"``."""
+    uses = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            uses += [f"{node.lineno} import {a.name}" for a in node.names if _in_tests(a.name)]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0 and _in_tests(node.module or ""):
+                uses.append(f"{node.lineno} from {node.module} import ...")
+            uses += [
+                f"{node.lineno} {a.name}" for a in node.names if a.name in _RETIRED_GRAM_PRODUCERS
+            ]
+        elif (
+            isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            and node.name in _RETIRED_GRAM_PRODUCERS
+        ):
+            uses.append(f"{node.lineno} def {node.name}")
+        elif isinstance(node, ast.Attribute) and node.attr in _RETIRED_GRAM_PRODUCERS:
+            uses.append(f"{node.lineno} .{node.attr}")
+    return uses
 
 
 def test_no_production_module_imports_a_retired_gram_producer():
     """The fingerprint of the rule issue #257 replaced, enforced by import.
 
-    #322's precedent is to delete what nothing calls.  These five are kept
+    #322's precedent is to delete what nothing calls.  These six are kept
     instead, and the reason is that they still have real callers -- as this
     suite's arbiter, which is a use rather than dead code, and the same
-    standing ``_reference_edf`` has in the structured suite.  Two of the five,
-    ``pair_overlap_moments`` and ``tensor_penalty``, now live in
-    ``tests/_overlap_oracle.py``, which this file imports; the other three live
-    in ``superglm.screening``.  What must not
-    happen is one of them quietly becoming the production route again for a
-    pair some future branch adds, because the moment route's accuracy ceiling
-    is architectural and a new caller would inherit it without being told.
+    standing ``_reference_edf`` has in the structured suite.  They live in
+    ``tests/_overlap_oracle.py`` and ``tests/_screening_oracle.py``, which this
+    file imports.  What must not happen is one of them quietly becoming the
+    production route again for a pair some future branch adds, because the
+    moment route's accuracy ceiling is architectural and a new caller would
+    inherit it without being told.
 
-    An AST scan rather than a grep: a name reached through
-    ``superglm.screening.pair_score_curvature`` is the same defect as an
-    ``import``, and both are import statements.
+    An AST scan rather than a grep, over every file under ``src/superglm/``.
+    No file is exempt: re-exporting an oracle from ``screening/__init__.py`` is
+    a production edit like any other, and a production module that already
+    imports from its siblings, as ``_structured.py`` does, is the plausible
+    place for one to come back.  Each of these is an offender on its own:
 
-    **THE SCAN COVERS ALL OF ``src/superglm/``, NOT JUST ``model/``.**  It used
-    to stop at ``src/superglm/model/`` because that is where every screening
-    CALLER lives -- but a producer re-adopted from inside
-    ``src/superglm/screening/`` would inherit the same accuracy ceiling and
-    slip past, and that is the plausible route rather than an exotic one:
-    ``_structured.py`` is a production module that already imports from its
-    siblings.  Widening costs one exemption, ``screening/__init__.py``.
+    * an ``import`` or ``from ... import`` of any module in the ``tests``
+      package.  Under pytest the repository root is on ``sys.path``, so such an
+      import resolves and the whole suite stays green, while the installed
+      wheel fails with ``ModuleNotFoundError``.
+    * a ``from ... import`` that binds a watched name, from any module and at
+      any relative depth.  Nothing under ``src`` defines one, so every such
+      import is a re-adoption.
+    * a ``def`` of a watched name, which is a copy of an oracle that no import
+      scan would see.
 
-    **THE EXEMPTION IS THREE NAMES, NOT THE FILE, AND IT USED TO SAY FIVE.**
-    ``__init__.py`` imports ``_numeric_margin`` and ``_pair_moments`` and
-    re-exports ``numeric_numeric_moments``, ``numeric_pair_moments`` and
-    ``pair_score_curvature``; it never imports ``_overlap``, so
-    ``pair_overlap_moments`` and ``tensor_penalty`` are re-exported by nothing
-    -- consistent with ``_overlap``'s own header calling them not-live, and not
-    with the sentence that used to stand here.  Exempting the FILE would also
-    have hidden a re-adoption inside it, which is a production edit like any
-    other.  Exempting the three NAMES leaves the other two guarded there and
-    makes re-exporting a sixth producer a deliberate edit to
-    ``_RE_EXPORTED_PRODUCERS`` rather than a silent one.
-
-    **A RELATIVE IMPORT IS AN IMPORT.**  Matching only modules that start with
-    ``superglm.screening`` misses ``from ._overlap import tensor_penalty``,
-    where ``node.module`` is ``"_overlap"`` and ``node.level`` is 1 -- and a
-    sibling is exactly where the re-adoption this scan was widened for would
-    appear.  ``node.level > 0`` closes it with no module test needed: three of
-    the five names live in ``superglm.screening``, so a relative import that
-    binds one of them resolved into that package whatever its dots say.  The
-    other two live in ``tests/_overlap_oracle.py``, outside ``src``, so a
-    production import of either is wrong in any form, and the same
-    ``node.level`` check catches a relative one.
-    The ``ast.Attribute`` fallback does not cover the case, because ``from X
-    import name`` binds a bare ``Name``.
-
-    Shown to bite on both widenings rather than only on the original scope.
-    Adding ``from superglm.screening._overlap import tensor_penalty`` to
-    ``_structured.py`` -- a screening module, so invisible to the old
-    ``model/``-only scan -- reds this test naming the file and line; so does
-    the relative form ``from ._overlap import tensor_penalty`` in the same
-    file, which the module test alone let through.  And nothing else under
-    ``src/superglm/`` reaches any of the five, so both arrive green.
+    A watched name read as an attribute (``module.pair_score_curvature``) is
+    flagged too.  It is the same defect as an import, and ``from X import
+    name`` binds a bare ``Name``, so the import branches above are what catch
+    that spelling.
     """
-    import ast
-    import pathlib
-
     root = pathlib.Path(__file__).resolve().parents[1] / "src" / "superglm"
-    re_export = root / "screening" / "__init__.py"
     offenders = []
     for path in sorted(root.rglob("*.py")):
-        watched = _RETIRED_GRAM_PRODUCERS
-        if path == re_export:
-            watched = watched - _RE_EXPORTED_PRODUCERS
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and (
-                (node.module or "").startswith("superglm.screening") or node.level > 0
-            ):
-                for alias in node.names:
-                    if alias.name in watched:
-                        offenders.append(f"{path.name}:{node.lineno} {alias.name}")
-            elif isinstance(node, ast.Attribute) and node.attr in watched:
-                offenders.append(f"{path.name}:{node.lineno} .{node.attr}")
+        offenders += [f"{path.name}:{use}" for use in _retired_producer_uses(tree)]
     assert offenders == [], (
         "the dense screening path reads design factors since issue #257; these "
         f"reach for the moments it replaced: {offenders}"

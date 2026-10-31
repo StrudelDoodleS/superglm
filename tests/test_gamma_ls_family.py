@@ -1099,9 +1099,6 @@ def test_ordinary_gamma_rows_do_not_enter_scalar_fallbacks(
     names = (
         "_binary_product_divide",
         "_channel",
-        "_small_a_residual",
-        "_small_j_residual",
-        "_small_log_normalizer",
         "_log_ratio",
         "_deviance_from_t",
     )
@@ -1132,9 +1129,6 @@ def test_gamma_scalar_fallback_work_depends_only_on_extreme_rows(
     names = (
         "_binary_product_divide",
         "_channel",
-        "_small_a_residual",
-        "_small_j_residual",
-        "_small_log_normalizer",
         "_log_ratio",
         "_deviance_from_t",
     )

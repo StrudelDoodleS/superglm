@@ -1,39 +1,25 @@
-"""Numeric-margin sufficient statistics for mixed-type screening.
+"""Reference producers of the dense screening route, kept as this suite's arbiter.
 
-A numeric covariate enters every v1 probe LINEARLY (``z * contrast`` slopes,
-``z1 * z2`` products), so the pair needs no joint grid: z-weighted moments
-accumulated over the other margin's cells are the complete sufficient
-statistics, at any support size of the numeric side.  Channels: ``s``,
-``s*z``, ``w``, ``w*z``, ``w*z**2`` (and the symmetric set for two numerics).
-These moments never approximate — but they are not free of the OTHER margin:
-an ``(n_g, k)`` menu makes every block here scale with ``k``, so the caller
-budgets ``n_g`` and refuses a pair whose blocks it cannot afford rather than
-compressing anything.  Exactness is pinned against the dense assembly in
-tests/test_interaction_screening.py.
-
-**NO LONGER THE PRODUCTION ROUTE, AND KEPT DELIBERATELY.**  Issue #257 moved
-the dense screening path onto design factors -- ``_pair_factor`` reduces the
-same cell tables to one triangular factor and the ladder reads ``V_eff`` off a
-block of it, so no Gram is formed and the spectrum the statistic works in is
-the design's rather than its square.  What is below is the DEFINITION that
-factor is graded against: every exactness pin in
-``tests/test_pair_design_factor.py`` compares the two, and
-``test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic`` counts the
-directions the Gram cannot resolve, which needs the Gram.  Precedent for
-keeping a live-tested non-caller is ``_reference_edf`` in the structured suite.
-An import guard keeps it from becoming production again by accident:
-``test_no_production_module_imports_a_retired_gram_producer``.
-
-The channels themselves are unchanged on the live route:
-``numeric_cat_factor`` accumulates the same ``s``, ``s*z``, ``w``, ``w*z``
-sweep and one centered pass beside it, and emits a per-level FACTOR instead of
-a per-level moment block.
+Issue #257 moved the dense screening path onto design factors: ``_pair_factor``
+reduces the pair's cell tables to one triangular factor and the ladder reads
+``V_eff`` off a block of it, so no Gram is formed.  What is below is the
+DEFINITION that factor is graded against: ``numeric_pair_moments`` and
+``numeric_numeric_moments`` accumulate the numeric margins' z-weighted moments
+over the other margin's cells (channels ``s``, ``s*z``, ``w``, ``w*z``,
+``w*z**2``; exact, with blocks scaling with the other margin's menu width),
+``pair_score_curvature`` assembles the tensor block's score and Gram from the
+cell tables, and ``penalized_score_statistic`` ranks one pair on the first rung
+of the ladder.  Nothing in ``src`` calls them; an import guard keeps it so
+(``test_no_production_module_imports_a_retired_gram_producer``).
 """
 
 from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
+
+from superglm.screening._pair_factor import PairFactor
+from superglm.screening._score_stat import ScreenedPair, penalized_score_statistic_ladder
 
 
 def numeric_pair_moments(
@@ -121,3 +107,53 @@ def numeric_numeric_moments(
     C = np.array([[(a * p) @ w] for a in span])
     u_m = np.array([a @ score for a in span])
     return U, V, C, M, u_m
+
+
+def pair_score_curvature(
+    B_a: NDArray,
+    B_b: NDArray,
+    S_cell: NDArray,
+    W_cell: NDArray,
+) -> tuple[NDArray, NDArray]:
+    """Score vector and unadjusted curvature of the pair's tensor block.
+
+    With ``X_T`` the row-Kronecker design ``kron(B_a[i_a[r]], B_b[i_b[r]])``:
+
+    ``U = X_T' s  = vec(B_a' S_cell B_b)``
+    ``V = X_T' diag(W) X_T``, assembled from ``W_cell`` without forming rows:
+    ``V[(p,q),(r,s)] = sum_i B_a[i,p] B_a[i,r] * (sum_j W[i,j] B_b[j,q] B_b[j,s])``
+
+    Flattening is C-order, matching ``np.kron`` column ordering.
+
+    Not on the production path since issue #257 -- see the module docstring for
+    what it is for now and why it stays.
+    """
+    B_a = np.asarray(B_a, dtype=np.float64)
+    B_b = np.asarray(B_b, dtype=np.float64)
+    k_a, k_b = B_a.shape[1], B_b.shape[1]
+    U = (B_a.T @ S_cell @ B_b).reshape(k_a * k_b)
+    inner = np.einsum("ij,jq,js->iqs", W_cell, B_b, B_b, optimize=True)
+    V = np.einsum("ip,ir,iqs->pqrs", B_a, B_a, inner, optimize=True)
+    return U, V.reshape(k_a * k_b, k_a * k_b)
+
+
+def penalized_score_statistic(
+    pair: PairFactor,
+    penalty_root: NDArray | None,
+    *,
+    edf0: float = 4.0,
+) -> ScreenedPair:
+    """Rank one candidate pair by its penalized efficient-score statistic.
+
+    ``pair`` carries the overlap span the mains model already explains as the
+    leading block of its own factor, so the profiling that used to need ``C``,
+    ``M`` and the overlap's own score is a slice of a triangular matrix here
+    rather than a difference of two Grams.  With ``penalty_root`` absent or
+    empty the statistic reduces to the unpenalized ``U_eff' V_eff^+ U_eff`` and
+    ``lambda0`` is reported as 0.
+
+    Scoring a ladder of budgets? Use
+    :func:`penalized_score_statistic_ladder`, which shares one decomposition
+    across every rung instead of rebuilding it per call.
+    """
+    return penalized_score_statistic_ladder(pair, penalty_root, budgets=(float(edf0),))[0]

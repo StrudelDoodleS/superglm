@@ -29,7 +29,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from superglm.screening import penalized_score_statistic
+from tests._screening_oracle import penalized_score_statistic
 
 from .test_interaction_screening import _factor_from_moments
 

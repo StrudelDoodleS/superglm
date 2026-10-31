@@ -115,7 +115,6 @@ class _Predictor:
     width: int
     ordinary_columns: np.ndarray
     groups: tuple
-    support_slots: tuple[int, ...]
 
 
 def _array(values, shape, dtype, label):
@@ -492,8 +491,7 @@ class GlobalMomentPlan:
         compile_closed(*_ORDINARY_WRITERS, _CHANNEL_CHECK)
         self._n, self._width, self._chunk_size = n, width, chunk_size
         self._predictors = tuple(
-            _Predictor(m[0], m[1], np.array(m[2], dtype=np.intp), m[3], m[4])
-            for m in predictor_meta
+            _Predictor(m[0], m[1], np.array(m[2], dtype=np.intp), m[3]) for m in predictor_meta
         )
         supports = []
         for m in support_meta:

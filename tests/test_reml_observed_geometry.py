@@ -33,7 +33,6 @@ from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.observed_geometry import (
     _compute_observed_row_bundle,
     build_observed_reml_geometry,
-    compute_observed_dW_deta,
     compute_observed_information_weights,
     observed_penalized_mode_score,
     schur_curvature_is_negative,
@@ -250,6 +249,15 @@ def test_gamma_log_observed_rows_match_glum_and_likelihood_finite_difference() -
     nll_minus = -sample_weight * (np.log(y / mu_minus) - y / mu_minus - np.log(y))
     fd_hessian = (nll_plus - 2.0 * nll_base + nll_minus) / eps**2
     np.testing.assert_allclose(observed, fd_hessian, rtol=3e-6, atol=2e-6)
+
+
+def compute_observed_dW_deta(distribution, link, y, mu, eta, sample_weight):
+    """The observed-information row weights' derivative w.r.t. ``eta``."""
+    _, derivative, _ = _compute_observed_row_bundle(
+        distribution, link, y, mu, eta, sample_weight, derivative_order=1
+    )
+    assert derivative is not None
+    return derivative
 
 
 def _observed_d2W_deta2(distribution, link, y, mu, eta, sample_weight):

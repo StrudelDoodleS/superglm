@@ -215,7 +215,7 @@ def feature_se_from_cov(
     name: Hashable,
     Cov_active: NDArray,
     active_groups: list[GroupSlice],
-    result: PIRLSResult,
+    result: PIRLSResult,  # not read; kept for the exported signature
     groups: list[GroupSlice],
     specs: Mapping[Any, Any],
     interaction_specs: Mapping[Any, Any],
@@ -240,7 +240,6 @@ def feature_se_from_cov(
     from superglm.features.random_effect import RandomEffect
     from superglm.features.spline import _SplineBase
 
-    beta = result.beta
     feature_groups = [g for g in groups if g.feature_name == name]
     spec = specs.get(name) or interaction_specs.get(name)
     held = _held_level_se(
@@ -253,7 +252,6 @@ def feature_se_from_cov(
             return _spline_se(
                 spec,
                 name,
-                beta,
                 feature_groups,
                 active_groups,
                 Cov_active,
@@ -339,7 +337,6 @@ def feature_se_from_cov(
         return _spline_se(
             spec,
             name,
-            beta,
             feature_groups,
             active_groups,
             Cov_active,

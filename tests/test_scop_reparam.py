@@ -223,29 +223,6 @@ class TestSCOPJacobian:
         np.testing.assert_allclose(J_analytic, J_fd, atol=1e-6)
 
 
-class TestSCOPRoundTrip:
-    """Feasible initialization: gamma -> beta via log recovery."""
-
-    def test_roundtrip_monotone_sequence(self):
-        """Forward then inverse recovers original beta."""
-        q = 8
-        reparam = build_scop_reparam(q, direction="increasing")
-        beta_orig = np.array([1.0, 0.5, 0.3, 0.8, -0.2, 0.1, 0.4, 0.6])
-        gamma = reparam.forward(beta_orig)
-        beta_recovered = reparam.initialize_from_gamma(gamma)
-        np.testing.assert_allclose(beta_recovered, beta_orig, atol=1e-10)
-
-    def test_initialize_from_nonmonotone_gamma(self):
-        """Non-monotone gamma gets clamped, producing a feasible beta."""
-        q = 5
-        reparam = build_scop_reparam(q, direction="increasing")
-        gamma_bad = np.array([1.0, 3.0, 2.0, 4.0, 3.5])  # not monotone
-        beta = reparam.initialize_from_gamma(gamma_bad)
-        gamma_repaired = reparam.forward(beta)
-        # Repaired gamma should be monotone
-        assert np.all(np.diff(gamma_repaired) >= 0)
-
-
 class TestSCOPPenalty:
     """SCOP-specific penalty on beta parameters."""
 

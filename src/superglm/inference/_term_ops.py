@@ -337,7 +337,6 @@ def term_inference(
                     curve_se = _spline_se(
                         inner,
                         name,
-                        result.beta,
                         smooth_feature_groups,
                         smooth_active_cov,
                         Cov_active,

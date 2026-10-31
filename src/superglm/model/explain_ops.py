@@ -6,9 +6,6 @@ import dataclasses
 import warnings
 
 from superglm.inference._term_covariance import (
-    feature_se_from_cov,
-)
-from superglm.inference._term_covariance import (
     simultaneous_bands as _simultaneous_bands,
 )
 from superglm.inference._term_model_ops import (
@@ -197,20 +194,6 @@ def relativities(model, with_se=False, centering="native"):
                 warnings.warn(_SHAPE_REPAIRED_INFERENCE_MESSAGE, UserWarning, stacklevel=2)
                 frames[name] = frame.drop(columns=["se_log_relativity"])
     return frames
-
-
-def model_feature_se_from_cov(model, name, Cov_active, active_groups, n_points=200):
-    """Compute feature-level SEs from the precomputed covariance matrix."""
-    return feature_se_from_cov(
-        name,
-        Cov_active,
-        active_groups,
-        model.result,
-        model._groups,
-        model._specs,
-        model._interaction_specs,
-        n_points=n_points,
-    )
 
 
 def simultaneous_bands(model, feature, *, alpha=0.05, n_sim=10_000, n_points=200, seed=42):

@@ -686,7 +686,6 @@ def _try_pattern_tensor_centering(
     *,
     dm,
     W: NDArray,
-    z_centered: NDArray,
     weighted_z: NDArray,
     sum_w: float,
     rejected: RawMomentRejection | None = None,
@@ -885,7 +884,6 @@ def packed_centered_gram_rhs(
         pattern_attempted, patterned = _try_pattern_tensor_centering(
             dm=dm,
             W=W,
-            z_centered=z_centered,
             weighted_z=weighted_z,
             sum_w=sum_w,
             rejected=rejected,

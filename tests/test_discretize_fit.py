@@ -1723,7 +1723,7 @@ def test_a_pattern_key_past_two_to_the_53_decodes_every_row():
     z = rng.normal(size=dm.n)
     z_centered = z - (w @ z) / w.sum()
     attempted, centred = centered._try_pattern_tensor_centering(
-        dm=dm, W=w, z_centered=z_centered, weighted_z=w * z_centered, sum_w=float(w.sum())
+        dm=dm, W=w, weighted_z=w * z_centered, sum_w=float(w.sum())
     )
     assert attempted and centred is not None
     _mean, gram, rhs = centred

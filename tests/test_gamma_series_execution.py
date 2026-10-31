@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import math
 import sys
 from decimal import Decimal, localcontext
@@ -15,6 +16,58 @@ from superglm.distributional.kernels import gamma as gamma_kernel
 
 _EPS = np.finfo(np.float64).eps
 _MIN_FLOAT = np.nextafter(0.0, 1.0)
+_EULER = float(np.euler_gamma)
+
+
+def _small_a_residual(a: float) -> float:
+    """Evaluate a(psi(a)-log(a)) from its convergent origin expansion."""
+
+    total = -1.0 - a * (_EULER + math.log(a))
+    power = a * a
+    sign = 1.0
+    for n in range(1, 80):
+        term = sign * float(special.zeta(n + 1, 1.0)) * power
+        total += term
+        power *= a
+        sign = -sign
+        # Every remaining zeta coefficient is below zeta(2) < 2.
+        if 2.0 * abs(power) / (1.0 - a) <= _EPS * max(1.0, abs(total)) / 8.0:
+            return total
+    raise ValueError("small-shape digamma series did not reach float64 accuracy")
+
+
+def _small_j_residual(a: float) -> float:
+    """Evaluate a(a trigamma(a)-1) from its convergent origin expansion."""
+
+    total = 1.0 - a
+    power = a * a
+    sign = 1.0
+    for n in range(0, 80):
+        term = sign * (n + 1.0) * float(special.zeta(n + 2, 1.0)) * power
+        total += term
+        power *= a
+        sign = -sign
+        tail = 2.0 * (n + 2.0) * abs(power) / (1.0 - a) ** 2
+        if tail <= _EPS * max(1.0, abs(total)) / 8.0:
+            return total
+    raise ValueError("small-shape trigamma series did not reach float64 accuracy")
+
+
+def _small_log_normalizer(a: float) -> float:
+    """Evaluate a log(a)-a-log Gamma(a) from the log-Gamma origin series."""
+
+    total = (a + 1.0) * math.log(a) + (_EULER - 1.0) * a
+    power = a * a
+    sign = -1.0
+    for n in range(2, 80):
+        term = sign * float(special.zeta(n, 1.0)) * power / n
+        total += term
+        power *= a
+        sign = -sign
+        tail = 2.0 * abs(power) / ((n + 1.0) * (1.0 - a))
+        if tail <= _EPS * max(1.0, abs(total)) / 8.0:
+            return total
+    raise ValueError("small-shape log-normalizer series did not reach float64 accuracy")
 
 
 def _small_j_log_derivative(a: float) -> float:
@@ -33,7 +86,12 @@ def _small_j_log_derivative(a: float) -> float:
     raise ValueError("small-shape tetragamma combination did not reach float64 accuracy")
 
 
-_SCALAR_ORACLES = {"_small_j_log_derivative": _small_j_log_derivative}
+_SCALAR_ORACLES = {
+    "_small_a_residual": _small_a_residual,
+    "_small_j_residual": _small_j_residual,
+    "_small_log_normalizer": _small_log_normalizer,
+    "_small_j_log_derivative": _small_j_log_derivative,
+}
 
 
 def _scalar_series(name: str):
@@ -145,26 +203,35 @@ def _coefficient_error_bound(shape: Decimal, channel: int) -> Decimal:
     return total
 
 
-@pytest.mark.parametrize(
-    ("helper_name", "scalar_name"),
-    [pair for pair in _ORIGIN_HELPERS if pair[1] not in _SCALAR_ORACLES],
-)
-def test_small_shape_batches_do_not_execute_python_scalar_series(
-    monkeypatch: pytest.MonkeyPatch, helper_name: str, scalar_name: str
+@pytest.mark.parametrize("helper_name", [helper for helper, _ in _ORIGIN_HELPERS])
+def test_small_shape_batches_make_a_row_independent_number_of_python_calls(
+    helper_name: str,
 ) -> None:
-    """The unfixed implementation executes one Python series per small row."""
-    scalar = getattr(gamma_kernel, scalar_name)
-    calls = 0
+    """A Python series per small row adds Python calls in proportion to the rows."""
+    helper = getattr(gamma_kernel, helper_name)
 
-    def counted(shape: float) -> float:
-        nonlocal calls
-        calls += 1
-        return scalar(shape)
+    def python_calls(rows: int) -> int:
+        shapes = np.linspace(0.001, np.nextafter(0.25, 0.0), rows)
+        calls = 0
 
-    monkeypatch.setattr(gamma_kernel, scalar_name, counted)
-    shapes = np.linspace(0.001, np.nextafter(0.25, 0.0), 257)
-    getattr(gamma_kernel, helper_name)(shapes)
-    assert calls == 0
+        def profile(frame, event, arg):
+            nonlocal calls
+            calls += event == "call"
+
+        previous, collecting = sys.getprofile(), gc.isenabled()
+        gc.collect()
+        gc.disable()  # a collection's finalizers would be Python calls in one window only
+        sys.setprofile(profile)
+        try:
+            helper(shapes)
+        finally:
+            sys.setprofile(previous)
+            if collecting:
+                gc.enable()
+        return calls
+
+    helper(np.linspace(0.001, np.nextafter(0.25, 0.0), 257))
+    assert python_calls(257) == python_calls(514)
 
 
 @pytest.mark.parametrize("channel", range(4))

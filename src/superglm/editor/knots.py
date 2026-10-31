@@ -298,7 +298,7 @@ def knots_feature_spec(
     if form == "reset":
         basis, marked = _reset_basis(reference_model, name, source)
     elif form == "rule":
-        basis, marked = _rule_basis(name, spec, source, axis, params), True
+        basis, marked = _rule_basis(name, source, axis, params), True
     else:
         shown = {*_in_force_chart(fitted, axis), *map(float, waiting_positions)}
         basis = _positions_basis(name, fitted, source, axis, params["positions"], shown)
@@ -350,7 +350,7 @@ def _form(params: dict[str, Any]) -> str:
     raise EditorValueError(_FORMS)
 
 
-def _rule_basis(name: str, spec, source: _SplineBase, axis: _Axis, params) -> _SplineBase:
+def _rule_basis(name: str, source: _SplineBase, axis: _Axis, params) -> _SplineBase:
     count, strategy = params["count"], params["strategy"]
     if not _is_integer(count) or count < 1:
         raise EditorValueError(_COUNT)

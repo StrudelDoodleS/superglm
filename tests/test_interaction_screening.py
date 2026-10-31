@@ -13,9 +13,10 @@ import scipy.linalg
 
 from superglm.distributions import Gamma, Poisson
 from superglm.links import LogLink
-from superglm.screening import pair_cell_moments, pair_score_curvature, working_score
+from superglm.screening import pair_cell_moments, working_score
 from superglm.screening._pair_factor import PairFactor
 from superglm.screening._score_stat import penalized_score_statistic_ladder
+from tests._screening_oracle import pair_score_curvature
 
 
 def _solve_psd(A, B):
@@ -276,7 +277,7 @@ def _pd_matrix(rng, p, strength=1.0):
 
 
 def test_statistic_reduces_to_unpenalized_without_penalty():
-    from superglm.screening import penalized_score_statistic
+    from tests._screening_oracle import penalized_score_statistic
 
     rng = np.random.default_rng(5)
     p = 6
@@ -302,7 +303,7 @@ def test_whitening_keeps_an_identifiable_mode_that_is_merely_small():
     The direct pseudo-inverse ladder is the reference: solving
     ``(V + lam S)`` at ``lam = 1`` gives edf 1.0 and T 0.5.
     """
-    from superglm.screening import penalized_score_statistic
+    from tests._screening_oracle import penalized_score_statistic
 
     V = np.diag([1.0, 1e-13, 0.0])
     S = np.diag([1.0, 1e-13, 0.0])
@@ -376,7 +377,7 @@ def test_a_wholly_absorbed_probe_is_scored_rather_than_discarded():
 
     from superglm import Categorical, SuperGLM
     from superglm.features.numeric import Numeric
-    from superglm.screening._numeric_margin import numeric_pair_moments
+    from tests._screening_oracle import numeric_pair_moments
 
     L, n = 5, 4000
     values = np.array([0.5, 1.5, 2.5, 3.5, 4.5])
@@ -610,7 +611,7 @@ def test_a_probe_exactly_nested_in_the_overlap_reports_only_its_free_directions(
     1.7347e-18, 1e-12, 2e-12 -- all NONNEGATIVE, so no PSD violation is visible
     and any rule that needs one counts three.
     """
-    from superglm.screening import penalized_score_statistic
+    from tests._screening_oracle import penalized_score_statistic
 
     M = np.array([[float.fromhex("0x1.c60ae65c20699p-2")]])
     C = np.array([[float.fromhex("0x1.7d086fd7cd3a2p-5"), 0.0, 0.0]])
@@ -640,7 +641,7 @@ def test_a_curvature_that_dwarfs_its_penalty_keeps_the_penalty():
     scales, which is a different defect at a different line.  Reverting the
     balancing fails it; there is no revert of the parameterisation that does.
     """
-    from superglm.screening import penalized_score_statistic
+    from tests._screening_oracle import penalized_score_statistic
 
     V = 1e20 * np.eye(4)
     S = np.eye(4)
@@ -684,7 +685,7 @@ def test_a_weakly_identified_block_is_scored_not_discarded():
     ``_score_stat``: a docstring crediting a threshold that is not there makes
     a property look guarded when nothing guards it.
     """
-    from superglm.screening import penalized_score_statistic
+    from tests._screening_oracle import penalized_score_statistic
 
     for k in (2, 4, 12):
         eye = np.eye(k)
@@ -712,7 +713,7 @@ def test_unpenalized_edf_is_a_rank_not_a_cholesky_trace():
     """
     import scipy.linalg
 
-    from superglm.screening import penalized_score_statistic
+    from tests._screening_oracle import penalized_score_statistic
 
     V = np.diag([3.0, 2.0, 1e-18])
     scipy.linalg.cho_factor(V, check_finite=False)  # accepts it; that is the trap
@@ -749,8 +750,7 @@ def test_unpenalized_edf_matches_the_dense_rank_on_a_profiled_block():
     bit seed 16.  Anything narrow enough to miss a 0.5% failure is not a
     regression test for it.
     """
-    from superglm.screening import penalized_score_statistic
-    from superglm.screening._numeric_margin import numeric_pair_moments
+    from tests._screening_oracle import numeric_pair_moments, penalized_score_statistic
 
     L, n = 40, 8000
     menu = np.eye(L)[:, 1:]
@@ -787,7 +787,7 @@ def test_singular_pencil_answer_does_not_depend_on_the_units():
     statistic at zero df, which makes the screening table depend on whether
     a covariate is carried in metres or kilometres.
     """
-    from superglm.screening import penalized_score_statistic
+    from tests._screening_oracle import penalized_score_statistic
 
     answers = []
     for s in (1e-10, 1e-12, 1e-13, 1e-16):
@@ -804,7 +804,7 @@ def test_singular_pencil_answer_does_not_depend_on_the_units():
 
 
 def test_edf_solver_hits_target():
-    from superglm.screening import penalized_score_statistic
+    from tests._screening_oracle import penalized_score_statistic
 
     rng = np.random.default_rng(6)
     p = 8
@@ -821,7 +821,7 @@ def test_edf_solver_hits_target():
 
 def test_profiling_removes_overlap_explained_score():
     """A purely additive signal must screen at the null level."""
-    from superglm.screening import penalized_score_statistic
+    from tests._screening_oracle import penalized_score_statistic
 
     rng = np.random.default_rng(7)
     p, q = 6, 4
@@ -841,7 +841,7 @@ def test_profiling_removes_overlap_explained_score():
 
 def test_infinite_penalty_limit_restricts_to_null_space():
     """With edf0 = penalty null dimension, T approaches the null-space statistic."""
-    from superglm.screening import penalized_score_statistic
+    from tests._screening_oracle import penalized_score_statistic
 
     rng = np.random.default_rng(8)
     p, null_dim = 6, 2
@@ -918,12 +918,9 @@ def test_tensor_penalty_matches_interaction_convention():
 
 def test_full_chain_zeroes_an_additive_signal():
     """End-to-end: a score generated by the overlap span screens at exactly zero."""
-    from superglm.screening import (
-        pair_cell_moments,
-        pair_score_curvature,
-        penalized_score_statistic,
-    )
+    from superglm.screening import pair_cell_moments
     from tests._overlap_oracle import pair_overlap_moments, tensor_penalty
+    from tests._screening_oracle import pair_score_curvature, penalized_score_statistic
 
     rng = np.random.default_rng(11)
     n, n_a, n_b, k_a, k_b = 4000, 12, 9, 4, 3
@@ -1814,7 +1811,7 @@ def test_cell_assembly_exact_for_contrast_menus():
 
 
 def test_numeric_pair_moments_match_dense_assembly():
-    from superglm.screening import numeric_pair_moments
+    from tests._screening_oracle import numeric_pair_moments
 
     rng = np.random.default_rng(11)
     n, L = 600, 5
@@ -1842,7 +1839,7 @@ def test_numeric_pair_moments_reject_a_menu_that_is_not_the_grid():
     surfaced as a numpy broadcast error instead of this module's contract."""
     import pytest
 
-    from superglm.screening import numeric_pair_moments
+    from tests._screening_oracle import numeric_pair_moments
 
     rng = np.random.default_rng(11)
     n, L = 200, 5
@@ -1862,7 +1859,7 @@ def test_numeric_pair_moments_reject_a_menu_that_is_not_the_grid():
 
 
 def test_numeric_numeric_moments_match_dense_assembly():
-    from superglm.screening import numeric_numeric_moments
+    from tests._screening_oracle import numeric_numeric_moments
 
     rng = np.random.default_rng(12)
     n = 500

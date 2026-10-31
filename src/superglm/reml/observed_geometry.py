@@ -632,28 +632,6 @@ def compute_scop_observed_information_weights(
     return observed
 
 
-def compute_observed_dW_deta(
-    distribution: Any,
-    link: Any,
-    y: NDArray,
-    mu: NDArray,
-    eta: NDArray,
-    sample_weight: NDArray,
-) -> NDArray:
-    """Differentiate the observed-information row weights w.r.t. ``eta``."""
-    _, derivative, _ = _compute_observed_row_bundle(
-        distribution,
-        link,
-        y,
-        mu,
-        eta,
-        sample_weight,
-        derivative_order=1,
-    )
-    assert derivative is not None
-    return derivative
-
-
 @dataclass(frozen=True)
 class ObservedREMLGeometry:
     """Observed slope geometry after stable profiling of the intercept."""

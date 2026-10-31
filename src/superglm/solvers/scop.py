@@ -205,13 +205,6 @@ class SCOPReparameterization:
         S[self.null_dim :, self.null_dim :] = D.T @ D
         return S
 
-    def initialize_from_gamma(self, gamma: NDArray, floor: float = 1e-6) -> NDArray:
-        """Recover beta from gamma, clamping infeasible shape differences."""
-        beta = np.linalg.solve(self.Sigma, np.asarray(gamma, dtype=np.float64))
-        if self.shape_dim:
-            beta[self.null_dim :] = np.log(np.maximum(beta[self.null_dim :], floor))
-        return beta
-
     def qp_initialize(
         self,
         B: NDArray,
