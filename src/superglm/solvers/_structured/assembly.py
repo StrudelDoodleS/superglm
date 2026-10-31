@@ -508,7 +508,7 @@ class _StructuredKind(NamedTuple):
     penalized: type
     mismatch: str
     factor: Callable
-    profiled: type
+    profile: Callable
 
 
 def _kind(system) -> _StructuredKind:
@@ -520,15 +520,7 @@ def _kind(system) -> _StructuredKind:
 
 def profile_structured_factor(system, augmented_factor, sum_w: float, xtw: NDArray):
     """The intercept-profiled factor of a system's augmented factor, ``xtw = X' W 1``."""
-    profiled = _kind(system).profiled
-    if profiled is ProfiledNestedSchurFactor:
-        return profiled(
-            augmented_factor=augmented_factor,
-            sum_w=sum_w,
-            xtw=xtw,
-            data_operator=system.operator,
-        )
-    return profiled(augmented_factor=augmented_factor, sum_w=sum_w, xtw=xtw)
+    return _kind(system).profile(system, augmented_factor=augmented_factor, sum_w=sum_w, xtw=xtw)
 
 
 def solve_augmented_normal_equations(
@@ -649,7 +641,9 @@ _KINDS = (
         penalized=NestedPenalizedOperator,
         mismatch="Nested structured systems require a nested penalized operator.",
         factor=build_augmented_nested_factor,
-        profiled=ProfiledNestedSchurFactor,
+        profile=lambda system, **parts: ProfiledNestedSchurFactor(
+            **parts, data_operator=system.operator
+        ),
     ),
     _StructuredKind(
         system=SumToZeroLeafSystem,
@@ -657,7 +651,7 @@ _KINDS = (
         penalized=SumToZeroPenalizedOperator,
         mismatch="sz leaf systems require the sz penalized operator.",
         factor=build_augmented_sum_to_zero_factor,
-        profiled=ProfiledSumToZeroTreeFactor,
+        profile=lambda _system, **parts: ProfiledSumToZeroTreeFactor(**parts),
     ),
     _StructuredKind(
         system=FactorSmoothLeafSystem,
@@ -665,6 +659,6 @@ _KINDS = (
         penalized=FactorSmoothPenalizedOperator,
         mismatch="fs leaf systems require the fs penalized operator.",
         factor=build_augmented_block_factor,
-        profiled=ProfiledFactorSmoothLeafFactor,
+        profile=lambda _system, **parts: ProfiledFactorSmoothLeafFactor(**parts),
     ),
 )
