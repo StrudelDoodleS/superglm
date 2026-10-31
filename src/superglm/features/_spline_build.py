@@ -83,12 +83,13 @@ def _with_row_support(info: GroupInfo, distinct, basis) -> GroupInfo:
     gathers; a decline leaves the builder its own scan.
     """
     if distinct is not None and info.columns is basis:
-        info.row_support = row_supports.detect_row_support(
+        found = row_supports.detect_row_support(
             distinct[0],
             cell_index=distinct[1],
             nnz=int(basis.nnz),
             replaced_bytes=row_supports.stored_csr_bytes(basis),
         )
+        info.row_support = None if found is None else (basis, *found)
     return info
 
 

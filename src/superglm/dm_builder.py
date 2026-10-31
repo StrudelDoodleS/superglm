@@ -450,8 +450,8 @@ def _shared_row_support(B_csr, supports: dict | None):
 def _build_ssp_group(B_csr, R_inv, supports: dict | None = None, row_support=None):
     """Cheapest exact representation of a factored SSP block.
 
-    ``row_support`` is the block's support when its term found it
-    (``GroupInfo.row_support``), and is stored without scanning ``B_csr``.
+    ``row_support`` is the support its term found (``GroupInfo.row_support``),
+    stored without scanning when it describes ``B_csr`` itself.
 
     Compression is lossless deduplication of repeated rows; it never bins and is
     independent of ``discrete=True``.  Declines whenever the measured cost model
@@ -470,7 +470,10 @@ def _build_ssp_group(B_csr, R_inv, supports: dict | None = None, row_support=Non
         SupportCompressedSSPGroupMatrix,
     )
 
-    detected = row_support if row_support is not None else _shared_row_support(B_csr, supports)
+    if row_support is not None and row_support[0] is B_csr:
+        detected = row_support[1:]
+    else:
+        detected = _shared_row_support(B_csr, supports)
     if detected is None:
         return SparseSSPGroupMatrix(B_csr, R_inv)
     B_unique_rows, row_index = detected

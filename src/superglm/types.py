@@ -155,12 +155,13 @@ class GroupInfo:
     # reporting; do not widen this flag to a producer merely because its rows
     # repeat.
     supports_row_compression: bool = False
-    # A factored SSP block's lossless row support ``(B_unique, row_index)``,
+    # ``(basis, B_unique, row_index)``: the lossless row support of ``basis``,
     # found by the term from the rows it formed per covariate value or cell
-    # (``detect_row_support``'s ``cell_index``).  The builder stores it in
-    # place of scanning ``columns``, which is then ``None`` when the term never
-    # formed the full basis; ``None`` here leaves the scan to the builder.
-    row_support: tuple[NDArray, NDArray] | None = None
+    # (``detect_row_support``'s ``cell_index``); ``basis`` is ``None`` when the
+    # term never formed the full basis.  The builder stores it in place of
+    # scanning only while ``columns is basis``, so a caller that replaces
+    # ``columns`` is scanned afresh; ``None`` leaves the scan to the builder.
+    row_support: tuple[Any, NDArray, NDArray] | None = None
     cat_codes: NDArray | None = None  # (n,) integer codes for categorical features
     # select=True subgroup support for double-penalty decomposition
     subgroup_name: str | None = None  # "linear" or "spline"

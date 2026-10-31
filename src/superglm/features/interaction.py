@@ -2626,7 +2626,7 @@ class TensorInteraction:
         infos = self._build_group_infos(omega_1, omega_2)
         for info in infos if isinstance(infos, list) else [infos]:
             info.columns = T
-            info.row_support = support
+            info.row_support = None if support is None else (None, *support)
         return infos
 
     def build_discrete(
