@@ -77,6 +77,7 @@ from superglm.reml.scale import (
     profile_gaussian_reml_scale,
     profile_tweedie_reml_scale,
 )
+from superglm.solvers.dispersion import lazy_likelihood_size
 from superglm.solvers.hessian_factor import as_hessian_factor
 from superglm.solvers.irls_direct import (
     StructuredSolverError,
@@ -605,22 +606,8 @@ def optimize_discrete_reml_cached_w(
     typically <0.1% relative (guarded by test_wide_poisson_poi_quality).
     """
 
-    # The declared contract's likelihood size, computed once. Every dispersion
-    # denominator and the REML scale term's `0.5 * (n - M_p) * log(D)` must use
-    # THIS, not the physical row count: `sum(w)` under `"frequency"`, the
-    # positive-row count under `"prior"`. The objective, its gradient and its
-    # Hessian all read it, so a row count in any one of them makes the Newton
-    # step inconsistent with the surface it is stepping on.
-    _contract_size_cache: list[float] = []
-
-    def _contract_size() -> float:
-        if not _contract_size_cache:
-            from superglm.solvers.dispersion import dispersion_likelihood_size
-
-            _contract_size_cache.append(
-                dispersion_likelihood_size(sample_weight, weight_semantics=weight_semantics)
-            )
-        return _contract_size_cache[0]
+    # The declared contract's likelihood size (``lazy_likelihood_size``).
+    _contract_size = lazy_likelihood_size(sample_weight, weight_semantics=weight_semantics)
 
     input_group_matrices = dm.group_matrices
     penalties = coerce_reml_penalties(

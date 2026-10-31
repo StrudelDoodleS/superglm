@@ -211,70 +211,31 @@ def reml_direct_hessian(
         if use_compact_trace:
             pc_i, lam_i, gm_i = compact_dS[i]
             pc_j, lam_j, gm_j = compact_dS[j]
-            if _same_slice(pc_i.group_sl, pc_j.group_sl):
+            if _same_slice(pc_i.group_sl, pc_j.group_sl) and dense_inverse is not None:
                 key_i = (
                     pc_i.group_sl.start,
                     pc_i.group_sl.stop,
                     pc_i.group_sl.step,
                 )
-                if dense_inverse is not None:
-                    H_block = same_slice_H_blocks.get(key_i)
-                    if H_block is None:
-                        H_block = dense_inverse[pc_i.group_sl, pc_i.group_sl]
-                        same_slice_H_blocks[key_i] = H_block
-                    A_i = same_slice_products.get(i)
-                    if A_i is None:
-                        if pc_i.penalty_kind == "identity":
-                            A_i = lam_i * H_block
-                        else:
-                            A_i = H_block @ (lam_i * penalty_component_dense_matrix(pc_i, gm_i))
-                        same_slice_products[i] = A_i
-                    A_j = same_slice_products.get(j)
-                    if A_j is None:
-                        if pc_j.penalty_kind == "identity":
-                            A_j = lam_j * H_block
-                        else:
-                            A_j = H_block @ (lam_j * penalty_component_dense_matrix(pc_j, gm_j))
-                        same_slice_products[j] = A_j
-                    trace_value = float(np.sum(A_i * A_j.T))
-                else:
-                    trace_value = factor.penalty_cross_trace(
-                        pc_i,
-                        pc_j,
-                        lam_i,
-                        lam_j,
-                    )
-                if dH_extra is not None:
-                    left_extra = dH_extra.get(i)
-                    right_extra = dH_extra.get(j)
-                    if left_extra is not None:
-                        if isinstance(left_extra, np.ndarray):
-                            raise TypeError(
-                                "Structured Hessian correction received a dense operator."
-                            )
-                        trace_value += factor.penalty_operator_cross_trace(
-                            pc_j,
-                            lam_j,
-                            left_extra,
-                        )
-                    if right_extra is not None:
-                        if isinstance(right_extra, np.ndarray):
-                            raise TypeError(
-                                "Structured Hessian correction received a dense operator."
-                            )
-                        trace_value += factor.penalty_operator_cross_trace(
-                            pc_i,
-                            lam_i,
-                            right_extra,
-                        )
-                    if left_extra is not None and right_extra is not None:
-                        assert not isinstance(left_extra, np.ndarray)
-                        assert not isinstance(right_extra, np.ndarray)
-                        trace_value += factor.operator_cross_trace(
-                            left_extra,
-                            right_extra,
-                        )
-                h = -0.5 * trace_value
+                H_block = same_slice_H_blocks.get(key_i)
+                if H_block is None:
+                    H_block = dense_inverse[pc_i.group_sl, pc_i.group_sl]
+                    same_slice_H_blocks[key_i] = H_block
+                A_i = same_slice_products.get(i)
+                if A_i is None:
+                    if pc_i.penalty_kind == "identity":
+                        A_i = lam_i * H_block
+                    else:
+                        A_i = H_block @ (lam_i * penalty_component_dense_matrix(pc_i, gm_i))
+                    same_slice_products[i] = A_i
+                A_j = same_slice_products.get(j)
+                if A_j is None:
+                    if pc_j.penalty_kind == "identity":
+                        A_j = lam_j * H_block
+                    else:
+                        A_j = H_block @ (lam_j * penalty_component_dense_matrix(pc_j, gm_j))
+                    same_slice_products[j] = A_j
+                trace_value = float(np.sum(A_i * A_j.T))
             else:
                 trace_value = factor.penalty_cross_trace(
                     pc_i,
@@ -282,37 +243,33 @@ def reml_direct_hessian(
                     lam_i,
                     lam_j,
                 )
-                if dH_extra is not None:
-                    left_extra = dH_extra.get(i)
-                    right_extra = dH_extra.get(j)
-                    if left_extra is not None:
-                        if isinstance(left_extra, np.ndarray):
-                            raise TypeError(
-                                "Structured Hessian correction received a dense operator."
-                            )
-                        trace_value += factor.penalty_operator_cross_trace(
-                            pc_j,
-                            lam_j,
-                            left_extra,
-                        )
-                    if right_extra is not None:
-                        if isinstance(right_extra, np.ndarray):
-                            raise TypeError(
-                                "Structured Hessian correction received a dense operator."
-                            )
-                        trace_value += factor.penalty_operator_cross_trace(
-                            pc_i,
-                            lam_i,
-                            right_extra,
-                        )
-                    if left_extra is not None and right_extra is not None:
-                        assert not isinstance(left_extra, np.ndarray)
-                        assert not isinstance(right_extra, np.ndarray)
-                        trace_value += factor.operator_cross_trace(
-                            left_extra,
-                            right_extra,
-                        )
-                h = -0.5 * trace_value
+            if dH_extra is not None:
+                left_extra = dH_extra.get(i)
+                right_extra = dH_extra.get(j)
+                if left_extra is not None:
+                    if isinstance(left_extra, np.ndarray):
+                        raise TypeError("Structured Hessian correction received a dense operator.")
+                    trace_value += factor.penalty_operator_cross_trace(
+                        pc_j,
+                        lam_j,
+                        left_extra,
+                    )
+                if right_extra is not None:
+                    if isinstance(right_extra, np.ndarray):
+                        raise TypeError("Structured Hessian correction received a dense operator.")
+                    trace_value += factor.penalty_operator_cross_trace(
+                        pc_i,
+                        lam_i,
+                        right_extra,
+                    )
+                if left_extra is not None and right_extra is not None:
+                    assert not isinstance(left_extra, np.ndarray)
+                    assert not isinstance(right_extra, np.ndarray)
+                    trace_value += factor.operator_cross_trace(
+                        left_extra,
+                        right_extra,
+                    )
+            h = -0.5 * trace_value
         else:
             h = -0.5 * float(np.sum(full_HdHj[i] * full_HdHj[j].T))
         hess[i, j] = h

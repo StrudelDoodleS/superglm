@@ -80,6 +80,7 @@ from superglm.solvers.centered_system import (
     _FisherDataReuse,
     _InitialDataReuse,
 )
+from superglm.solvers.dispersion import lazy_likelihood_size
 from superglm.solvers.hessian_factor import DenseHessianFactor, as_hessian_factor
 from superglm.solvers.irls_direct import StructuredSolverError, fit_irls_direct
 from superglm.solvers.mode_score import centred_warm_start, mode_certification_bar
@@ -354,22 +355,8 @@ def optimize_direct_reml(
         ordinary observed-Hessian LAML for noncanonical links.
     """
 
-    # The declared contract's likelihood size, computed once. Every dispersion
-    # denominator and the REML scale term's `0.5 * (n - M_p) * log(D)` must use
-    # THIS, not the physical row count: `sum(w)` under `"frequency"`, the
-    # positive-row count under `"prior"`. The objective, its gradient and its
-    # Hessian all read it, so a row count in any one of them makes the Newton
-    # step inconsistent with the surface it is stepping on.
-    _contract_size_cache: list[float] = []
-
-    def _contract_size() -> float:
-        if not _contract_size_cache:
-            from superglm.solvers.dispersion import dispersion_likelihood_size
-
-            _contract_size_cache.append(
-                dispersion_likelihood_size(sample_weight, weight_semantics=weight_semantics)
-            )
-        return _contract_size_cache[0]
+    # The declared contract's likelihood size (``lazy_likelihood_size``).
+    _contract_size = lazy_likelihood_size(sample_weight, weight_semantics=weight_semantics)
 
     penalties = coerce_reml_penalties(
         reml_groups=reml_groups,
