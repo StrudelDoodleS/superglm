@@ -300,6 +300,7 @@ def _leverage_cross_batches(
     penalties: list[PenaltyComponent],
     lambdas: dict[str, float],
     group_matrices,
+    dense_matrices: bool = True,
 ) -> list[_PenaltyBatch]:
     """The penalties by coefficient block, lambda-scaled, blocks of one shape batched together.
 
@@ -309,6 +310,8 @@ def _leverage_cross_batches(
     one width and one count of dense and identity penalties (a
     spline-by-category term's levels) share a batch, read as one view of the
     solved rows, so a row block costs a few products per term, not per level.
+    ``dense_matrices=False`` leaves ``stacked`` unset: only the cross traces
+    read it, and a factor smooth's member is a dense ``kron(I_L, Omega)``.
     """
     members: dict[tuple[int, int], list[int]] = {}
     for index, pc in enumerate(penalties):
@@ -328,7 +331,7 @@ def _leverage_cross_batches(
     batches = []
     for (start, width, n_dense, _), blocks in runs:
         stacked = None
-        if n_dense:
+        if n_dense and dense_matrices:
             stacked = np.stack(
                 [
                     np.hstack(
@@ -1021,16 +1024,17 @@ def reml_w_correction(
                 plan, factor, centre_hi, centre_lo, dW_deta, sum_w, penalty_rhs
             )
             return grad_correction, None, None
+        cross_terms = not (gradient_terms_only and lookup_tables)
         grad_correction[:], penalty_weight_cross = _leverage_derivative_terms(
             dm,
             factor.inverse,
             centre_hi,
             dW_deta,
             sum_w,
-            _leverage_cross_batches(penalties, lambdas, gms),
+            _leverage_cross_batches(penalties, lambdas, gms, dense_matrices=cross_terms),
             penalty_rhs,
             mean_lo=centre_lo,
-            cross_terms=not (gradient_terms_only and lookup_tables),
+            cross_terms=cross_terms,
         )
         if penalty_weight_cross is None:
             return grad_correction, None, None
