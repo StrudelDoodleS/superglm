@@ -182,8 +182,9 @@ def pair_design_factor(
     """Reduce a gridded pair's weighted joint design to one triangular factor.
 
     Serves ``ti``, ``spline_cat`` and ``cat_cat`` -- every kind whose margins
-    both grid, and whose moments the test oracles ``pair_score_curvature`` and ``pair_overlap_moments`` (in
-    ``tests/_screening_oracle.py`` and ``tests/_overlap_oracle.py``) used to assemble.  ``B_a`` is ``(n_a, k_a)``, ``B_b``
+    both grid, and whose moments the dense route used to assemble (the test oracles
+    ``pair_score_curvature`` and ``pair_overlap_moments`` in ``tests/_screening_oracle.py``
+    and ``tests/_overlap_oracle.py`` still do).  ``B_a`` is ``(n_a, k_a)``, ``B_b``
     is ``(n_b, k_b)``, and the cell tables are ``(n_a, n_b)``.
 
     **THE REDUCTION IS ONE ORTHOGONAL TRANSFORMATION PER OUTER SUPPORT POINT,
