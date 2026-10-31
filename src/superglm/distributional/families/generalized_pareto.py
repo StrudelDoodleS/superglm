@@ -180,7 +180,8 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     The current shape domain gives every row nonnegative, unbounded support
     and a finite mean. Negative shapes require response-dependent support
     and are not supported. ``predict`` returns the mean excess,
-    ``scale / (1 - shape)``. The threshold is not a fitted parameter.
+    ``scale / (1 - shape)``. A fit whose shape reaches a wall says so in
+    ``result_.warnings``. The threshold is not a fitted parameter.
     """
 
     shape_lower: float = 0.0
@@ -403,6 +404,93 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     def default_prediction(self, theta) -> NDArray[np.float64]:
         values = self._theta(theta, None)
         return generalized_pareto_mean(values[:, 0], values[:, 1])
+
+    def walls(self) -> tuple[int, float, float]:
+        """The shape's index and its two walls."""
+        return 1, self.shape_lower, self.shape_upper
+
+    def wall_disclosure(
+        self,
+        pressed: tuple[int, int],
+        clipped: tuple[int, int],
+        n_rows: int,
+        *,
+        unresolved: bool = False,
+    ) -> str | None:
+        """Say what a tail shape at each wall does to the fitted law.
+
+        ``pressed`` counts the rows, at the (lower, upper) wall, that the data
+        press against it; ``clipped`` counts the rows the link clipped to its
+        last float inside it, whatever put them there. ``unresolved`` says the
+        fit lost the shape's curvature at clipped rows.
+        """
+        n_lower, n_upper = pressed
+        clipped_lower, clipped_upper = clipped
+        lower_remedy = (
+            "Lower shape_lower (it may go down to 0), or choose another threshold."
+            if self.shape_lower > 0.0
+            else "This family takes no negative shapes: choose another threshold, or a "
+            "lighter-tailed family for these excesses."
+        )
+        upper_remedy = "Raise shape_upper (it may go up to 1), or choose another threshold."
+        findings = []
+        if n_upper:
+            if self.shape_upper == 1.0:
+                consequence = (
+                    "the mean and the expected shortfall are infinite at a shape of one. "
+                    "predict() and expected_shortfall() still return their values at the shape "
+                    "where the fit stopped, which the solver's tolerance sets rather than the "
+                    "data; quantiles and the distribution function stay finite. Use quantiles or "
+                    "bounded expectations, or choose another threshold."
+                )
+            else:
+                consequence = (
+                    "the shape, and everything that depends on it, is set by the wall rather "
+                    f"than the data. {upper_remedy}"
+                )
+            findings.append(
+                f"{n_upper} of {n_rows} rows have a tail shape at the upper wall "
+                f"{self.shape_upper:g}: the data put the shape at or beyond it, so {consequence}"
+            )
+        if clipped_upper:
+            if self.shape_upper == 1.0:
+                consequence = (
+                    "Their mean and expected shortfall, which grow without bound towards a shape "
+                    "of one, are set by that rounding rather than the data: predict() and "
+                    "expected_shortfall() still return them, while quantiles and the "
+                    "distribution function stay finite. Use quantiles or bounded expectations, "
+                    "or choose another threshold."
+                )
+            else:
+                consequence = f"Their tail is that of the wall. {upper_remedy}"
+            findings.append(
+                f"{clipped_upper} of {n_rows} rows have a tail shape at the last value below the "
+                f"upper wall {self.shape_upper:g} that float64 can represent: the data press the "
+                "shape against the wall there, or the shape predictor reaches far towards it. "
+                f"{consequence}"
+            )
+        if n_lower:
+            findings.append(
+                f"{n_lower} of {n_rows} rows have a tail shape at the lower wall "
+                f"{self.shape_lower:g}: the data put the shape at or below it, so the tail is "
+                f"set by the wall rather than the data. {lower_remedy}"
+            )
+        if clipped_lower:
+            findings.append(
+                f"{clipped_lower} of {n_rows} rows have a tail shape at the last value above the "
+                f"lower wall {self.shape_lower:g} that float64 can represent: the data press the "
+                "shape against the wall there, or the shape predictor reaches far towards it. "
+                f"Their tail is that of the wall. {lower_remedy}"
+            )
+        if not findings:
+            return None
+        message = "SuperLSS GeneralizedParetoLSS fit: " + " ".join(findings)
+        if n_lower or n_upper or unresolved:
+            message += (
+                " Standard errors, intervals and posterior draws that involve the shape are not "
+                "reliable at a wall, where the fit has almost no curvature along the shape."
+            )
+        return message
 
     def variance(self, theta) -> NDArray[np.float64]:
         """Population variance; infinite when the shape is at least one half."""
