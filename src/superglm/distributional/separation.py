@@ -257,11 +257,13 @@ def censored_recession(
 ) -> NDArray[np.bool_]:
     """One flag per row and predictor; all false without a declaration.
 
-    A family's flags hold under links of its parameters' default link
-    classes, each of which reaches the limit the recession runs to as the
-    predictor walks off.  A predictor on a link of another class is left
-    unflagged: a bounded link, such as a logit on a scale, can stop short of
-    that limit and leave the level a finite estimate.
+    A flag that is monotone in its parameter holds under any link onto the
+    parameter's range: the level's likelihood is monotone in its coefficient,
+    so its supremum is reached only as the predictor walks off.  A parameter
+    the family names in ``censored_recession_link_sensitive`` has flags that
+    are not monotone; there a bounded link, such as a logit on a scale, can
+    stop short of the limit and leave the level a finite estimate, so those
+    flags are read only on the parameter's default link class.
     """
     compiled_tuple = tuple(compiled)
     shape = (bounds.n_rows, len(compiled_tuple))
@@ -271,11 +273,13 @@ def censored_recession(
     if flags.shape != shape or flags.dtype != np.bool_:
         raise ValueError("family.censored_recession must return one boolean per row and predictor")
     parameters = tuple(family.parameters)
-    on_default_link = [
-        type(predictor.link) is _default_link_class(parameters[predictor.parameter_index])
+    sensitive = set(getattr(family, "censored_recession_link_sensitive", ()))
+    readable = [
+        parameters[predictor.parameter_index].name not in sensitive
+        or type(predictor.link) is _default_link_class(parameters[predictor.parameter_index])
         for predictor in compiled_tuple
     ]
-    return flags & np.asarray(on_default_link, dtype=bool)
+    return flags & np.asarray(readable, dtype=bool)
 
 
 def scan_censored_separation(

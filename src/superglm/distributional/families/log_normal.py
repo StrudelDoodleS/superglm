@@ -271,6 +271,9 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
     def capabilities(self) -> FamilyCapabilities:
         return _CAPABILITIES
 
+    # The scale's flags are not monotone in the scale; see censored_recession.
+    censored_recession_link_sensitive = ("scale",)
+
     def censored_recession(self, bounds: ResponseBounds) -> NDArray[np.bool_]:
         """Every censored row escapes along the location or mean; some escape along the scale.
 

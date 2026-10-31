@@ -900,12 +900,12 @@ mean of `GaussianLS` and `LogNormalLS`, and both predictors of
 term and `CategoricalInteraction` on those predictors for such levels and
 cells, under the same `separation` policy. When every row is censored on the
 same side, as with `censored=True` for all rows, the predictor's intercept has
-no finite estimate either, and the scan reports the predictor itself. The scan
-reads a predictor only on its parameter's default link: the identity location,
-the log mean, the floored log scale, and the log scale and two-wall logit
-shape of `GeneralizedParetoLSS`. A predictor given another link, such as
-`link="logit"` on a scale, is not scanned, because a bounded link can stop
-short of the limit the effect runs to and leave the level a finite estimate.
+no finite estimate either, and the scan reports the predictor itself. The scale
+of `GaussianLS` and `LogNormalLS` is scanned only on its default floored log
+link: given another link, such as `link="logit"`, it is not scanned, because a
+bounded link can stop short of the limit the scale runs to and leave the level
+a finite estimate. The other predictors are scanned on any link, since a
+censored row's probability moves one way along them whatever the link.
 
 The scan reads only what the data decide before the fit:
 - A generalized Pareto row with an upper truncation bound anchors its level
@@ -934,8 +934,8 @@ The scan reads only what the data decide before the fit:
   censoring can give a level an estimate it would otherwise lack, and a bound
   on the far side only, as in the scanned cases above, takes it away.
 
-Ordered-categorical smooths, and predictors on a link other than their
-parameter's default, are not scanned. The scan does not cover all separation patterns, and
+Ordered-categorical smooths, and a normal or log-normal scale on a link other
+than its default, are not scanned. The scan does not cover all separation patterns, and
 `fit.curvature_indefinite` is a curvature diagnostic, not a separation detector.
 The absence of either warning does not rule out separation.
 

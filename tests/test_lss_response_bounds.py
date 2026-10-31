@@ -1723,3 +1723,16 @@ def test_a_bounded_plan_must_expose_its_observation():
     model = SuperLSS(family, family.location(), family.scale())
     with pytest.raises(UnsupportedLikelihoodContractError, match="plan.observation"):
         model.fit(_intercepts(30), np.linspace(-1.0, 1.0, 30), truncation=(None, 2.0))
+
+
+def test_a_monotone_recession_flag_holds_on_a_non_default_link():
+    # A censored row's bound probability is monotone in the location, so a level
+    # whose rows are all right-censored runs off along any link onto the whole
+    # location range; only the normal scale's flags depend on the link.
+    X, paid, _, censored = _all_censored_level()
+    family = GaussianLS()
+    strict = SuperLSS(
+        family, family.location(cat("g"), link="log"), family.scale(), separation="error"
+    )
+    with pytest.raises(SeparationError, match=r"'location:g': 1 of 3 occupied levels"):
+        strict.fit(X, paid, censored=censored)

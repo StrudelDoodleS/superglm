@@ -428,6 +428,9 @@ class GaussianLS(LocationPredictor, ScalePredictor):
     def capabilities(self) -> FamilyCapabilities:
         return _CAPABILITIES
 
+    # The scale's flags are not monotone in the scale; see censored_recession.
+    censored_recession_link_sensitive = ("scale",)
+
     def censored_recession(self, bounds: ResponseBounds) -> NDArray[np.bool_]:
         """Every censored row escapes along the location; a row truncated only on the
         far side of its limit also escapes along the scale.
