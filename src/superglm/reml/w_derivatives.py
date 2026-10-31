@@ -55,7 +55,6 @@ from superglm.solvers.centered_system import (
     dense_split_cross,
     dense_split_gram,
     grouped_augmented_row_quadratic_forms,
-    iter_grouped_design_chunks,
     two_pass_centred_gram,
 )
 from superglm.solvers.hessian_factor import (
@@ -128,48 +127,6 @@ def _structured_weight_cross(
     directions += [(None, 0.0, operator) for operator in compact]
     cross = factor.derivative_cross_traces(directions)[:m, m:]
     return -0.5 * (cross + cross.T)
-
-
-def _leverage_gradient_rhs(
-    dm: DesignMatrix,
-    inverse: NDArray,
-    mean_x: NDArray,
-    row_weights: NDArray,
-    sum_w: float,
-    mean_lo: NDArray | None = None,
-) -> NDArray:
-    """Accumulate X_c' times the exact leverage-gradient row channel.
-
-    Rows are centred as ``(x - mean_x) - mean_lo`` when the centre is an exact
-    pair (``centered_system.weighted_mean_pair``): a dense column at an offset
-    centred about its rounded mean carried ``u |c|`` into every row.
-    """
-    release_for_serial_row_passes(dm.p)
-    result = np.zeros(dm.p, dtype=np.float64)
-    compensation = np.zeros(dm.p, dtype=np.float64)
-    for start, stop, design in iter_grouped_design_chunks(dm):
-        weights = row_weights[start:stop]
-        active = weights != 0.0
-        if not np.any(active):
-            continue
-        centered = design[active]
-        centered -= mean_x
-        if mean_lo is not None:
-            centered -= mean_lo
-        scaled = centered * np.sqrt(np.abs(weights[active]))[:, None]
-        weighted_leverage = np.sign(weights[active]) * np.einsum(
-            "ij,ij->i",
-            scaled @ inverse,
-            scaled,
-            optimize=True,
-        )
-        row_channel = 0.5 * (weighted_leverage + weights[active] / sum_w)
-        contribution = centered.T @ row_channel
-        corrected = contribution - compensation
-        updated = result + corrected
-        compensation = (updated - result) - corrected
-        result = updated
-    return result
 
 
 def _leverage_table_gradient(
@@ -343,6 +300,7 @@ def _leverage_cross_batches(
     penalties: list[PenaltyComponent],
     lambdas: dict[str, float],
     group_matrices,
+    dense_matrices: bool = True,
 ) -> list[_PenaltyBatch]:
     """The penalties by coefficient block, lambda-scaled, blocks of one shape batched together.
 
@@ -352,6 +310,8 @@ def _leverage_cross_batches(
     one width and one count of dense and identity penalties (a
     spline-by-category term's levels) share a batch, read as one view of the
     solved rows, so a row block costs a few products per term, not per level.
+    ``dense_matrices=False`` leaves ``stacked`` unset: only the cross traces
+    read it, and a factor smooth's member is a dense ``kron(I_L, Omega)``.
     """
     members: dict[tuple[int, int], list[int]] = {}
     for index, pc in enumerate(penalties):
@@ -371,7 +331,7 @@ def _leverage_cross_batches(
     batches = []
     for (start, width, n_dense, _), blocks in runs:
         stacked = None
-        if n_dense:
+        if n_dense and dense_matrices:
             stacked = np.stack(
                 [
                     np.hstack(
@@ -770,12 +730,11 @@ def reml_w_correction(
     *,
     reml_penalties: list[PenaltyComponent] | None = None,
     geometry: ObservedREMLGeometry | None = None,
-    gradient_only: bool = False,
     leverage_hessian: bool = False,
     lookup_tables: bool = True,
     gradient_terms_only: bool = False,
 ) -> (
-    tuple[NDArray, dict[int, NDArray | CompactSymmetricOperator] | None]
+    tuple[NDArray, dict[int, NDArray | CompactSymmetricOperator]]
     | tuple[NDArray, dict[int, NDArray | CompactSymmetricOperator] | None, NDArray | None]
     | None
 ):
@@ -819,11 +778,6 @@ def reml_w_correction(
     a working-model criterion.  The inverse passed as ``XtWX_S_inv`` must
     correspond to the same geometry.
 
-    ``gradient_only`` uses the exact leverage identity for the first derivative
-    and returns no Hessian correction. It is available only for a
-    dense inverse and first-order modified Newton; callers retain responsibility
-    for safeguarding the resulting simpler outer Hessian.
-
     ``dH2_cross`` is an ``(m, m)`` array of second-order Hessian
     corrections.  It includes the second derivative of the profiled data
     Hessian ``X_c' W X_c`` (including both weighted-mean outer terms) and the
@@ -862,14 +816,15 @@ def reml_w_correction(
     ``gradient_terms_only`` (read only with ``leverage_hessian``) returns
     ``(grad_correction, None, None)`` from the solved rows too, forming no
     ``P_ij``, while ``lookup_tables`` is on.  The REML loop sets it for a model
-    the structured solvers can fit, so the dense solver builds the Newton
-    model a structured factor does, whichever groups the design holds.
+    the structured solvers can fit, so above the leverage work bar the dense
+    solver builds the Newton model a structured factor does, whichever groups
+    the design holds; and for binomial/logit on a dense factor at any work,
+    which keeps the Newton model and the stop of the pass it took before
+    (``reml/direct.py``).
     """
     w_correction_order = validate_w_correction_order(w_correction_order)
-    if gradient_only and w_correction_order != 1:
-        raise ValueError("gradient_only requires w_correction_order=1")
-    if leverage_hessian and (gradient_only or w_correction_order != 1):
-        raise ValueError("leverage_hessian requires w_correction_order=1 without gradient_only")
+    if leverage_hessian and w_correction_order != 1:
+        raise ValueError("leverage_hessian requires w_correction_order=1")
     penalties = coerce_reml_penalties(
         reml_groups=reml_groups,
         reml_penalties=reml_penalties,
@@ -1058,31 +1013,6 @@ def reml_w_correction(
             dominant_group_index=structured_group_index,
         )
 
-    if gradient_only:
-        if not isinstance(factor, DenseHessianFactor):
-            raise ValueError("gradient_only requires a dense Hessian inverse")
-        if sum_w is None:
-            raise ValueError("gradient_only requires profiled-intercept weight metadata")
-        rhs = _leverage_gradient_rhs(
-            dm,
-            factor.inverse,
-            centre_hi,
-            dW_deta,
-            sum_w,
-            mean_lo=centre_lo,
-        )
-        penalty_rhs = np.zeros((p, m), dtype=np.float64)
-        for i, pc in enumerate(penalties):
-            gm = gms[pc.group_index]
-            beta_g = pirls_result.beta[pc.group_sl]
-            penalty_rhs[pc.group_sl, i] = lambdas[pc.name] * penalty_component_matvec(
-                pc,
-                beta_g,
-                gm,
-            )
-        grad_correction[:] = rhs @ -factor.solve(penalty_rhs)
-        return grad_correction, None
-
     leverage_route = leverage_hessian and sum_w is not None
     if leverage_route and isinstance(factor, DenseHessianFactor):
         penalty_rhs = _penalty_rhs(penalties, lambdas, pirls_result.beta, gms, p)
@@ -1094,16 +1024,17 @@ def reml_w_correction(
                 plan, factor, centre_hi, centre_lo, dW_deta, sum_w, penalty_rhs
             )
             return grad_correction, None, None
+        cross_terms = not (gradient_terms_only and lookup_tables)
         grad_correction[:], penalty_weight_cross = _leverage_derivative_terms(
             dm,
             factor.inverse,
             centre_hi,
             dW_deta,
             sum_w,
-            _leverage_cross_batches(penalties, lambdas, gms),
+            _leverage_cross_batches(penalties, lambdas, gms, dense_matrices=cross_terms),
             penalty_rhs,
             mean_lo=centre_lo,
-            cross_terms=not (gradient_terms_only and lookup_tables),
+            cross_terms=cross_terms,
         )
         if penalty_weight_cross is None:
             return grad_correction, None, None

@@ -96,10 +96,10 @@ from superglm.types import GroupSlice, PenaltyComponent
 # the two can never drift apart.
 _OBSERVED_PIRLS_TOL_CEILING = OBSERVED_PIRLS_TOL_CEILING
 
-# One dense leverage pass replaces one derivative Gram per penalty. Mixed
+# One leverage pass replaces one derivative Gram per penalty. Mixed
 # spline/categorical timings cross over at four penalties on the reference host;
 # below that, the specialized Gram route remains cheaper.
-_LEVERAGE_GRADIENT_MIN_PENALTIES = 4
+_LEVERAGE_MIN_PENALTIES = 4
 # The pre-solve (``presolve``) hands the exact loop a start, not a result: it
 # stops once a working-model update moves the objective by less than this
 # fraction of its scale.  On freMTPL2 (1 to 10 interaction pairs) the cached-W
@@ -172,6 +172,13 @@ _PRESOLVE_PAIRS = frozenset(
 # decision on both: above it a structured factor forms the same exact gradient
 # from its augmented factor's row quadratic forms, and both backends leave the
 # W(rho) cross terms out of the Newton model (``gradient_terms_only``).
+# Binomial/logit is the exception: on the dense factor it takes the leverage
+# route at any work and never forms the cross terms, while a structured factor
+# keeps its Grams below the bar and forms the cross terms at its candidate stop
+# above it.  Its two backends then build different Newton models, the dense one
+# chosen for cost and to keep the model of the pass it took before, not to
+# match the structured one; they meet at the REML optimum (the W(rho)
+# correction in ``optimize_direct_reml``).
 # Wood's prices hold for a dense design.  A random effect's or factor smooth's
 # Grams are block-sparse, a few columns a row, so a model the structured
 # solvers can fit (``structured_alternative``) takes the leverage route only
@@ -436,7 +443,9 @@ def optimize_direct_reml(
     # W(rho) cross terms (``gradient_terms_only``), which both form at a
     # candidate stop, where its design reads row supports.  Both backends then
     # take the same REML path (tests/test_factor_smooth_structured_parity.py,
-    # tests/test_nested_structured_fit.py).
+    # tests/test_nested_structured_fit.py), except for binomial/logit, whose
+    # dense solver takes the leverage route at any work and forms no cross term
+    # (``_LEVERAGE_HESSIAN_MIN_GRAM_WORK``).
     structured_alternative = (
         select_structured_group(list(dm.group_matrices), groups, mode="auto").group_index
         is not None
@@ -1228,25 +1237,40 @@ def optimize_direct_reml(
 
         # W(rho) correction
         _t0 = _time.perf_counter()
-        leverage_gradient = False
         leverage_hessian = False
+        binomial_logit = False
         w_correction_args: tuple = ()
         w_correction_kwargs: dict[str, Any] = {}
         if not discrete:
-            leverage_gradient = bool(
-                type(distribution) is Binomial
+            # Binomial/logit on a dense factor takes the leverage route at any
+            # work and keeps the Newton model and the stop of the pass it took
+            # before: the exact gradient without the W(rho) cross terms
+            # (``gradient_terms_only``), at every iteration and at a candidate
+            # stop (``table_route``).  Its derivative Grams cost 3 to 5 times one
+            # leverage pass on a design without lookups or with a factor smooth
+            # (single-threaded, freMTPL2 and synthetic continuous designs), so it
+            # does not keep them below the bar as every other family does.  A
+            # different Newton model moves where its fits stop along flat
+            # directions, where a smoothing parameter heads to working infinity
+            # (Wood, Pya & Saefken 2016, sec. 3.1), by more than the stop's
+            # objective tolerance, and the cross terms at the stop cost one more
+            # solved-row pass, about one iteration's W(rho) work.
+            leverage_ready = w_correction_order == 1 and len(penalties) >= _LEVERAGE_MIN_PENALTIES
+            binomial_logit = bool(
+                leverage_ready
+                and type(distribution) is Binomial
                 and type(link) is LogitLink
-                and w_correction_order == 1
-                and len(penalties) >= _LEVERAGE_GRADIENT_MIN_PENALTIES
                 and geometry is None
                 and isinstance(as_hessian_factor(reml_inverse), DenseHessianFactor)
             )
             leverage_hessian = bool(
-                not leverage_gradient
-                and w_correction_order == 1
-                and len(penalties) >= _LEVERAGE_GRADIENT_MIN_PENALTIES
-                and float(len(penalties)) * dm.n * dm.p * dm.p >= _LEVERAGE_HESSIAN_MIN_GRAM_WORK
-                and sparse_leverage
+                binomial_logit
+                or (
+                    leverage_ready
+                    and float(len(penalties)) * dm.n * dm.p * dm.p
+                    >= _LEVERAGE_HESSIAN_MIN_GRAM_WORK
+                    and sparse_leverage
+                )
             )
             # The correction is built from this iterate's weight derivatives, so
             # a LinAlgError out of it says the same thing the geometry seams do:
@@ -1280,9 +1304,8 @@ def optimize_direct_reml(
                 "w_correction_order": w_correction_order,
                 "reml_penalties": penalties,
                 "geometry": geometry,
-                "gradient_only": leverage_gradient,
                 "leverage_hessian": leverage_hessian,
-                "gradient_terms_only": structured_alternative,
+                "gradient_terms_only": structured_alternative or binomial_logit,
             }
             w_corr = _usable_w_correction(
                 reml_w_correction, w_correction_args, w_correction_kwargs, distribution
@@ -1294,14 +1317,12 @@ def optimize_direct_reml(
             if w_corr is not None:
                 if w_corr[1] is not None:
                     correction_mode = "derivative_grams"
-                elif len(w_corr) > 2:
+                else:
                     # The leverage route's last entry: its cross terms, or None
                     # when its Newton model takes the gradient alone.
                     correction_mode = (
                         "leverage_hessian" if w_corr[-1] is not None else "leverage_tables"
                     )
-                else:
-                    correction_mode = "leverage_gradient"
             profile["reml_w_correction_mode"] = correction_mode
         _t_w_correction += _time.perf_counter() - _t0
         if w_corr is not None:
@@ -1319,9 +1340,12 @@ def optimize_direct_reml(
             dH2_cross = None
         # The leverage route's gradient-only Newton model (term-pair tables, a
         # structured factor's row forms, or ``gradient_terms_only``): an exact
-        # gradient and no W(rho) cross terms (``reml_w_correction``).
+        # gradient and no W(rho) cross terms (``reml_w_correction``), which its
+        # candidate stop forms below; binomial/logit's stop reads its Newton
+        # model's Hessian, as before.
         table_route = (
             leverage_hessian
+            and not binomial_logit
             and w_corr is not None
             and len(w_corr) > 2
             and w_corr[1] is None
