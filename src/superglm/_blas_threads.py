@@ -182,7 +182,8 @@ def release_for_serial_row_passes(p: int) -> None:
     solved-row route (``reml._leverage_rows``, a design whose groups are not
     all lookups or whose tables exceed the budget) and the serial centred
     Grams (``centered_gram_rhs``, ``centered_signed_grams``: signed observed
-    weights, the stable derivative Grams, PIRLS's last rung).  A design takes such a pass on every iteration.
+    weights, the stable derivative Grams, PIRLS's last rung).  A fit on one of
+    these routes takes such a pass on every iteration.
     On a pool worker there is no fit scope, and this does nothing.  From
     ``_WIDE_DESIGN_THRESHOLD`` such a fit is released for its remaining work,
     as before the dense threshold: the 10-pair freMTPL2 fit (1,535

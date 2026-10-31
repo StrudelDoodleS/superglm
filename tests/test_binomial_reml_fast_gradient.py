@@ -3,8 +3,10 @@
 On a dense factor binomial/logit takes it below the bar too: a design of
 lookups reads its leverages from term-pair tables
 (``_group_matrix/_lookup_tables.py``), any other design solves its rows
-(``reml/_leverage_rows.py``).  Pinned here on binomial/logit, whose weight
-derivative ``W (1 - 2 mu)`` changes sign across the rows.
+(``reml/_leverage_rows.py``).  On either, its Newton model and its stop's
+second-order check leave out the W(rho) cross terms, as the pass it took
+before did.  Pinned here on binomial/logit, whose weight derivative
+``W (1 - 2 mu)`` changes sign across the rows.
 """
 
 import math
@@ -24,8 +26,13 @@ from superglm.reml.observed_geometry import ObservedREMLGeometry
 from superglm.reml.w_derivatives import reml_w_correction
 from superglm.solvers.pirls import PIRLSResult, REMLGeometrySummary
 from superglm.types import GroupSlice, PenaltyComponent
-from tests.test_reml_leverage_hessian import _correction_inputs, _poisson_frame, _rounding_bounds
-from tests.test_reml_leverage_tables import _count_roundings
+from tests.test_reml_leverage_hessian import (
+    _correction_inputs,
+    _penalty_operands,
+    _poisson_frame,
+    _rounding_bounds,
+)
+from tests.test_reml_leverage_tables import _count_roundings, _force_candidate_stops
 
 
 def _four_smooth_fit(*, link: str = "logit") -> SuperGLM:
@@ -297,8 +304,9 @@ def test_leverage_route_ignores_zero_weight_outlier_geometry() -> None:
     full = reml_w_correction(**common)
     leverage = reml_w_correction(**common, leverage_hessian=True)
 
-    assert full is not None
-    assert leverage is not None
+    assert full is not None and full[1] is not None
+    # the leverage route ran: it forms no derivative Gram (a declined request returns them)
+    assert leverage is not None and len(leverage) == 3 and leverage[1] is None
     assert np.all(np.isfinite(full[0]))
     np.testing.assert_allclose(leverage[0], full[0], rtol=2e-13, atol=2e-15)
 
@@ -310,7 +318,7 @@ def test_leverage_route_is_stable_for_translated_columns() -> None:
 
     leverage = reml_w_correction(**common, leverage_hessian=True)
 
-    assert leverage is not None
+    assert leverage is not None and len(leverage) == 3 and leverage[1] is None
     expected = _scalar_centered_correction(common)
     scale = max(float(np.linalg.norm(expected, ord=np.inf)), 1.0)
     tolerance = 512.0 * np.finfo(np.float64).eps * 4.0 * scale
@@ -340,17 +348,181 @@ def test_one_smooth_with_many_categories_keeps_specialized_derivative_gram() -> 
 
 
 @pytest.mark.parametrize(
-    ("link", "mode"), [("logit", "leverage_hessian"), ("probit", "derivative_grams")]
+    ("link", "mode"), [("logit", "leverage_tables"), ("probit", "derivative_grams")]
 )
 def test_below_the_leverage_work_bar_only_the_logit_link_keeps_one_pass(link, mode) -> None:
     """Four continuous smooths on 600 rows, far below the bar and no lookups.
 
-    Binomial/logit solves its rows; probit, like every other pair, keeps the
-    derivative Grams.  Sending binomial/logit to the bar fails the logit case.
+    Binomial/logit solves its rows and keeps the gradient alone in its Newton
+    model (``leverage_tables`` labels the leverage route's gradient-only model;
+    there is no table here); probit, like every other pair, keeps the
+    derivative Grams.  Sending binomial/logit to the bar fails the logit case,
+    and so does adding the W(rho) cross terms to its Newton model (the label
+    is then ``leverage_hessian``).
     """
     model = _four_smooth_fit(link=link)
 
+    assert leverage_tables.lookup_plan(model._dm) is None
     assert model._reml_profile["reml_w_correction_mode"] == mode
+
+
+@pytest.mark.parametrize("design", ["lookups", "continuous"])
+def test_a_binomial_logit_stop_reads_the_hessian_of_its_newton_model(monkeypatch, design) -> None:
+    """Every iteration's correction is the gradient alone, and a candidate stop solves no row.
+
+    Binomial/logit keeps the Newton model and the stop of the pass it took
+    before: both read the fixed-W outer Hessian, without the W(rho) cross
+    terms, on the lookup design and on the continuous one.  The stops are
+    forced (``_force_candidate_stops``), so the check does not wait on the
+    fit's own exit.  Mutations: a stop pass for binomial/logit (``table_route``)
+    fails both cases; the cross terms in the solved-row Newton model
+    (``gradient_terms_only`` for structured models alone) fails the
+    continuous one.
+    """
+    _force_candidate_stops(monkeypatch)
+    correction, hessian = direct.reml_w_correction, direct.reml_direct_hessian
+    concave = direct.concave_live_directions
+    corrections, hessians, reads = [], [], []
+
+    def recorded_correction(*args, **kwargs):
+        corrections.append((kwargs.get("lookup_tables", True), correction(*args, **kwargs)))
+        return corrections[-1][1]
+
+    def recorded_hessian(*args, **kwargs):
+        hessians.append(hessian(*args, **kwargs))
+        return hessians[-1]
+
+    def read(gradient, hess, estimated, **kwargs):
+        reads.append((np.array(hess, copy=True), hessians[-1]))
+        return concave(gradient, hess, estimated, **kwargs)
+
+    monkeypatch.setattr(direct, "reml_w_correction", recorded_correction)
+    monkeypatch.setattr(direct, "reml_direct_hessian", recorded_hessian)
+    monkeypatch.setattr(direct, "concave_live_directions", read)
+
+    model = _lookup_fit() if design == "lookups" else _four_smooth_fit(link="logit")
+
+    assert (leverage_tables.lookup_plan(model._dm) is not None) == (design == "lookups")
+    assert corrections and reads
+    for lookup_tables, result in corrections:
+        assert lookup_tables  # no solved-row pass for a stop
+        assert result is not None and len(result) == 3
+        assert result[1] is None and result[2] is None
+    for hess, fixed_w in reads:
+        assert np.array_equal(hess, fixed_w)
+    assert model._reml_profile["reml_n_stop_cross_passes"] == 0
+
+
+def _fit_and_outer_hessian(monkeypatch, fit, *, grams: bool):
+    """``fit()``, on the derivative Grams when ``grams``, and the last outer Hessian it formed."""
+    correction, hessian = direct.reml_w_correction, direct.reml_direct_hessian
+    last = {}
+
+    def routed(*args, **kwargs):
+        if grams:
+            kwargs["leverage_hessian"] = False
+        return correction(*args, **kwargs)
+
+    def recorded(*args, **kwargs):
+        last["hessian"] = hessian(*args, **kwargs)
+        return last["hessian"]
+
+    with monkeypatch.context() as patch:
+        patch.setattr(direct, "reml_w_correction", routed)
+        patch.setattr(direct, "reml_direct_hessian", recorded)
+        model = fit()
+    return model, last["hessian"]
+
+
+def _frozen(model) -> np.ndarray:
+    decision = model._reml_profile.get("reml_freeze_decision") or {}
+    return np.asarray(decision.get("frozen", np.zeros(len(model._reml_penalties), dtype=bool)))
+
+
+def _fit_sensitivities(model) -> tuple[np.ndarray, np.ndarray]:
+    """``d eta / d rho`` on the fitted rows and ``d tr(H^-1 A) / d rho`` at a binomial/logit fit.
+
+    By the implicit function theorem ``dbeta_j = -H^-1 S_j beta`` and ``J_j =
+    X_c dbeta_j``.  With ``A = X_c' W X_c``, ``S`` the summed penalties and
+    ``C_j = X_c' diag(W' J_j) X_c``, which is ``dA/drho_j`` exactly to first
+    order (the weighted means move with ``W``), ``tr(H^-1 A)`` moves by
+    ``tr(H^-1 C_j H^-1 S) - tr(H^-1 S_j H^-1 A)``.
+    """
+    inverse = np.asarray(model._fit_inference_info["XtWX_inv"], dtype=np.float64)
+    X = model._dm.toarray()
+    centred = X - np.asarray(model.result.reml_geometry.mean_x)
+    offset = 0.0 if model._fit_offset is None else np.asarray(model._fit_offset)
+    mu = 1.0 / (1.0 + np.exp(-(X @ model.result.beta + model.result.intercept + offset)))
+    weights = np.asarray(model._fit_weights) * mu * (1.0 - mu)
+    smoothing, penalty_rhs = _penalty_operands(
+        model._dm, model._reml_penalties, model._reml_lambdas, model.result.beta
+    )
+    J = centred @ (-inverse @ penalty_rhs)
+    data = inverse @ (centred.T @ (weights[:, None] * centred))
+    penalty = inverse @ smoothing.sum(axis=2)
+    derivative = weights * (1.0 - 2.0 * mu)
+    edf = np.array(
+        [
+            np.trace(inverse @ (centred.T @ ((derivative * J[:, j])[:, None] * centred)) @ penalty)
+            - np.trace(inverse @ smoothing[:, :, j] @ data)
+            for j in range(J.shape[1])
+        ]
+    )
+    return J, edf
+
+
+@pytest.mark.parametrize("design", ["lookups", "continuous"])
+def test_a_binomial_logit_fit_lands_where_the_derivative_grams_land(monkeypatch, design) -> None:
+    """The leverage route's fit is the derivative Grams' fit, to what the REML stop certifies.
+
+    The two routes form one exact gradient of one objective; the Grams' Newton
+    model also carries the first-order weight terms, so the iterates differ and
+    each fit stops on the compound test, the projected gradient and the
+    objective change below ``tau (1 + |V|)``, ``tau = reml_tol``.  Hence
+
+    - the objectives agree to ``tau (1 + |V|)`` (tests/test_nested_structured_fit.py);
+    - both stops freeze the same directions;
+    - on every other direction the gradients differ by under ``2 tau (1 + |V|)``,
+      to first order ``H delta`` with ``H`` the outer Hessian at the Grams'
+      published point, so ``|delta| <= |H^-1| 2 tau (1 + |V|)`` for the log
+      smoothing parameters;
+    - a frozen direction is at working infinity, where no stop test resolves
+      its smoothing parameter (Wood, Pya & Saefken 2016, sec. 3.1); it is
+      compared through the fit it moves, its own ``|delta|`` plus the
+      second-order remainder of an exponential approach, ``|delta|^2 / 2``;
+    - the linear predictor on the fitted rows and the EDF move by the
+      first-order images of those steps (``_fit_sensitivities``).
+
+    Mutation: the leverage route's gradient correction halved (its stationary
+    point moves).
+    """
+    fit = _lookup_fit if design == "lookups" else lambda: _four_smooth_fit(link="logit")
+    leverage, _ = _fit_and_outer_hessian(monkeypatch, fit, grams=False)
+    grams, hessian = _fit_and_outer_hessian(monkeypatch, fit, grams=True)
+    assert leverage._reml_profile["reml_w_correction_mode"] == "leverage_tables"
+    assert grams._reml_profile["reml_w_correction_mode"] == "derivative_grams"
+    assert leverage._reml_result.converged and grams._reml_result.converged
+    objective = grams._reml_result.objective
+    bar = grams._reml_profile["reml_tol_resolved"] * (1.0 + abs(objective))
+    assert abs(leverage._reml_result.objective - objective) <= bar
+
+    names = [pc.name for pc in grams._reml_penalties]
+    delta = np.log([leverage._reml_lambdas[name] for name in names]) - np.log(
+        [grams._reml_lambdas[name] for name in names]
+    )
+    frozen = _frozen(grams)
+    np.testing.assert_array_equal(_frozen(leverage), frozen)
+    live = ~frozen
+    step = np.where(frozen, np.abs(delta) * (1.0 + 0.5 * np.abs(delta)), 0.0)
+    step[live] = np.abs(np.linalg.inv(hessian[np.ix_(live, live)])) @ np.full(live.sum(), 2 * bar)
+    assert np.all(np.abs(delta[live]) <= step[live])
+
+    J, edf = _fit_sensitivities(grams)
+    eta = [
+        model._dm.matvec(model.result.beta) + model.result.intercept for model in (leverage, grams)
+    ]
+    assert np.all(np.abs(eta[0] - eta[1]) <= np.abs(J) @ step)
+    assert abs(leverage.result.effective_df - grams.result.effective_df) <= np.abs(edf) @ step
 
 
 def test_profile_reports_when_weight_correction_is_structurally_zero() -> None:

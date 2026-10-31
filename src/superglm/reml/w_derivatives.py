@@ -813,8 +813,11 @@ def reml_w_correction(
     ``gradient_terms_only`` (read only with ``leverage_hessian``) returns
     ``(grad_correction, None, None)`` from the solved rows too, forming no
     ``P_ij``, while ``lookup_tables`` is on.  The REML loop sets it for a model
-    the structured solvers can fit, so the dense solver builds the Newton
-    model a structured factor does, whichever groups the design holds.
+    the structured solvers can fit, so above the leverage work bar the dense
+    solver builds the Newton model a structured factor does, whichever groups
+    the design holds; and for binomial/logit on a dense factor at any work,
+    which keeps the Newton model and the stop of the pass it took before
+    (``reml/direct.py``).
     """
     w_correction_order = validate_w_correction_order(w_correction_order)
     if leverage_hessian and w_correction_order != 1:

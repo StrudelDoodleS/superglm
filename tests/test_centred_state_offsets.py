@@ -543,6 +543,10 @@ def test_the_weight_correction_centres_its_grams_and_leverage_rows(columns, rout
     base = reml_w_correction(**state, leverage_hessian=leverage)
     shifted = reml_w_correction(**moved, leverage_hessian=leverage)
     assert base is not None and shifted is not None
+    # the route asked for ran: the leverage route forms no derivative Gram, and
+    # a request it declines returns the Grams
+    for result in (base, shifted):
+        assert (len(result) == 3 and result[1] is None) if leverage else result[1] is not None
     n, p = state["dm"].n, state["dm"].p
     bound = 4.0 * _gamma(n + 2 * p + 5) * _correction_magnitude(state)
     np.testing.assert_array_less(np.abs(shifted[0] - base[0]), bound)
@@ -553,9 +557,12 @@ def test_exact_reml_leverage_route_is_translation_invariant():
 
     A numeric column on the even-integer grid beside four P-splines, no
     random effect, so the gram backend's dense factor and the leverage
-    route's solved rows run.  Mutation: the gram rows centred about the
-    rounded ``mean_x``.
+    route's solved rows run, its Newton model the gradient alone (the
+    ``leverage_tables`` label; no lookup plan, so no table).  Mutation: the
+    gram rows centred about the rounded ``mean_x``.
     """
+    from superglm._group_matrix._lookup_tables import lookup_plan
+
     rng = np.random.default_rng(11)
     n = 2400
     z = 2.0 * rng.integers(-4, 5, n)
@@ -571,7 +578,8 @@ def test_exact_reml_leverage_route_is_translation_invariant():
 
     base, shifted = fit(0.0), fit(1e16)
     assert shifted._reml_profile["direct_backend"] == "gram"
-    assert shifted._reml_profile["reml_w_correction_mode"] == "leverage_hessian"
+    assert shifted._reml_profile["reml_w_correction_mode"] == "leverage_tables"
+    assert lookup_plan(shifted._dm) is None
     _assert_same_reml(base, shifted)
 
 
