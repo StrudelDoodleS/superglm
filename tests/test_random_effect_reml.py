@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from superglm import LambdaPolicy, RandomEffect, SuperGLM
 
@@ -194,3 +195,257 @@ def test_gamma_structured_observed_reml_matches_dense():
         dense._reml_result.objective,
         atol=2e-8,
     )
+
+
+def test_a_nested_chain_starts_within_a_newton_step_of_its_optimum(monkeypatch):
+    """A random effect's bootstrap fit is penalized at its levels' mean
+    information, so the Fellner-Schall step from it places every level of a
+    nested chain within one Newton step bound (5 in log lambda) of its REML
+    optimum.  Here the intercept-only fit's working weight is the mean
+    response on every row, so a level's information is that mean times its
+    rows, less its share of the intercept.
+
+    Almost unpenalized, a parent's indicators lie in the span of its
+    children's, so along each parent-minus-children direction the curvature
+    is the penalties alone and the posterior variance is of order 1/lambda.
+    The step's trace term then outweighs the squared coefficients and returns
+    about lambda times a constant for parent and child alike: from a 1e-4
+    seed the first iterate sits 8.7 to 10 log units below the optimum here
+    (on the 1M-row make/model/year chain, which then held the parent
+    alternating by the step cap for twenty iterations, 11.6 units).
+    Mutation: seeding random effects at 1e-4 again fails both asserts.
+    """
+    import superglm.reml.direct as direct
+
+    rng = np.random.default_rng(20261030)
+    n_parent, children, rows = 8, 6, 40
+    child = np.repeat(np.arange(n_parent * children), rows)
+    parent = child // children
+    eta = (
+        1.0 + rng.normal(0.0, 0.5, n_parent)[parent] + rng.normal(0.0, 0.3, child.max() + 1)[child]
+    )
+    y = rng.poisson(np.exp(eta)).astype(float)
+    X = pd.DataFrame(
+        {
+            "make": np.array([f"m{p}" for p in parent], dtype=object),
+            "make_model": np.array([f"m{p}|{c}" for p, c in zip(parent, child)], dtype=object),
+        }
+    )
+    fits: list[tuple[str | None, dict[str, float]]] = []
+    real = direct.fit_irls_direct
+
+    def spy(*args, **kwargs):
+        fits.append(((kwargs.get("debug_context") or {}).get("phase"), dict(kwargs["lambda2"])))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(direct, "fit_irls_direct", spy)
+    model = SuperGLM(
+        family="poisson",
+        features={"make": RandomEffect(), "make_model": RandomEffect(nested_in="make")},
+        selection_penalty=0,
+    )
+    model.fit_reml(X, y)
+
+    assert model._reml_result.converged, model._reml_result.termination_reason
+    bootstrap = next(lambdas for phase, lambdas in fits if phase == "bootstrap")
+    first = next(lambdas for phase, lambdas in fits if phase == "candidate")
+    optimum = model._reml_lambdas
+    information = {
+        name: y.mean() * np.sum(counts * (1.0 - counts / len(y))) / len(counts)
+        for name, counts in (("make", np.bincount(parent)), ("make_model", np.bincount(child)))
+    }
+    assert bootstrap == pytest.approx(information, rel=len(y) * np.finfo(float).eps)
+    assert all(abs(np.log(first[name] / optimum[name])) < 5.0 for name in optimum), (first, optimum)
+
+
+def test_a_random_effect_seed_moves_with_constant_weights(monkeypatch):
+    """Gaussian identity with prior weights ``c`` multiplies the REML
+    criterion's information and its optimum ``phi / sigma_b**2`` by ``c``, and
+    the random effect's bootstrap seed, its levels' mean information, moves
+    with them: the seed, every Newton iterate and the estimate are ``c``
+    times the unit-weight fit's, in as many iterations.  ``c`` is a power of
+    two, so the weights scale exactly and the fits differ by rounding alone,
+    at most ``n u`` relative in each of the iterations taken.  Mutation: a
+    fixed seed (1e-4 or 1.0) bootstraps every ``c`` alike and fails the first
+    assert; with it removed, the iteration counts differ.
+    """
+    import superglm.reml.direct as direct
+
+    rng = np.random.default_rng(20260724)
+    codes = np.repeat(np.arange(12), 20)
+    y = 1.5 + rng.normal(scale=0.7, size=12)[codes] + rng.normal(scale=0.4, size=len(codes))
+    X = pd.DataFrame({"broker": np.array([f"b{i}" for i in codes], dtype=object)})
+    bootstraps: list[float] = []
+    real = direct.fit_irls_direct
+
+    def spy(*args, **kwargs):
+        if (kwargs.get("debug_context") or {}).get("phase") == "bootstrap":
+            bootstraps.append(kwargs["lambda2"]["broker"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(direct, "fit_irls_direct", spy)
+    fits = {}
+    for c in (1.0, 2.0**-8, 2.0**8):
+        model = SuperGLM(
+            family="gaussian",
+            features={"broker": RandomEffect()},
+            selection_penalty=0,
+            direct_solve="gram",
+        )
+        model.fit_reml(X, y, sample_weight=np.full(len(y), c))
+        assert model._reml_result.converged, model._reml_result.termination_reason
+        fits[c] = (bootstraps[-1], model._reml_result.n_reml_iter, model._reml_lambdas["broker"])
+
+    seed, iterations, estimate = fits[1.0]
+    rounding = iterations * len(y) * np.finfo(float).eps
+    for c, (c_seed, c_iterations, c_estimate) in fits.items():
+        assert c_seed == pytest.approx(c * seed, rel=len(y) * np.finfo(float).eps), c
+        assert c_iterations == iterations, (c, fits)
+        assert c_estimate == pytest.approx(c * estimate, rel=rounding), c
+
+
+def test_an_offset_random_effect_seed_is_read_at_the_intercept_only_fit(monkeypatch):
+    """Under an inverse link the intercept-only fit given the offset has no
+    closed form, so its mode is fitted, and the random effect's seed is its
+    levels' mean information there.  Gamma's Fisher weight under the inverse
+    link is ``mu**2 = eta**-2``; the oracle solves the intercept's score
+    equation ``sum (1 / eta - y) = 0`` by bisection.  The null fit stops on a
+    relative deviance change ``r = 1e-10``, after a step of at most ``sqrt(r
+    D / I)`` (``D`` its deviance, ``I`` the intercept's information), which
+    bounds the intercept's error; each weight moves by ``2 / eta`` times that,
+    relative, and the seed, quadratic in them, by at most twice as much.  The
+    cold fit's criterion is then no worse than the criterion at any fixed
+    lambda of a half-decade grid, within the stop resolution ``reml_tol (1 +
+    |V|)``.
+
+    Mutation: 4767b8a7 placed the offset-free intercept against the offset,
+    so 271 of the 600 linear predictors fell below zero and were clipped to
+    1e-12, with Fisher weights of 1e24.  The seed went to the box ceiling
+    1e10 and the search stopped there after 2 iterations, 19.9 above the
+    grid's best, with 1 effective degree of freedom against 10.35.
+    """
+    from scipy.optimize import brentq
+
+    import superglm.reml.direct as direct
+    from superglm.distributions import Gamma
+
+    rng = np.random.default_rng(1234)
+    codes = np.repeat(np.arange(12), 50)
+    effect = rng.uniform(-0.5, 0.5, 12)[codes]
+    offset = rng.uniform(0.0, 10.0, len(codes))
+    y = rng.gamma(20.0, (1.0 / (2.0 + effect + offset)) / 20.0)
+    X = pd.DataFrame({"broker": np.array([f"b{i}" for i in codes], dtype=object)})
+    bootstraps: list[float] = []
+    real = direct.fit_irls_direct
+
+    def spy(*args, **kwargs):
+        if (kwargs.get("debug_context") or {}).get("phase") == "bootstrap":
+            bootstraps.append(kwargs["lambda2"]["broker"])
+        return real(*args, **kwargs)
+
+    def fit(effect_spec):
+        model = SuperGLM(
+            family="gamma", link="inverse", features={"broker": effect_spec}, selection_penalty=0
+        )
+        model.fit_reml(X, y, offset=offset)
+        return model
+
+    monkeypatch.setattr(direct, "fit_irls_direct", spy)
+    cold = fit(RandomEffect())
+    result = cold._reml_result
+    assert result.converged, result.termination_reason
+
+    shifted = offset - offset.max()
+    intercept = brentq(
+        lambda b: float(np.sum(1.0 / (b + shifted) - y)),
+        -shifted.min() + 1e-9,
+        1e3,
+        xtol=1e-14,
+    )
+    eta = intercept + shifted
+    weights = eta**-2.0
+    level = np.bincount(codes, weights=weights)
+    seed = float(np.sum(level * (1.0 - level / weights.sum())) / 12)
+    deviance = float(np.sum(Gamma().deviance_unit(y, 1.0 / eta)))
+    step = np.sqrt(1e-10 * deviance / weights.sum())
+    bound = 4.0 * step / eta.min() + len(y) * np.finfo(float).eps
+    assert bootstraps[0] == pytest.approx(seed, rel=bound)
+
+    grid = [
+        fit(RandomEffect(lambda_policy=LambdaPolicy.fixed(10.0 ** (k / 2))))._reml_result.objective
+        for k in range(-4, 5)
+    ]
+    resolution = cold._reml_profile["reml_tol_resolved"] * (1.0 + abs(min(grid)))
+    assert result.objective <= min(grid) + resolution, (result.objective, grid)
+
+
+class _BootstrapReachedError(Exception):
+    """Stops a fit at its first bootstrap fit, carrying the smoothing parameters it is taken at."""
+
+
+def _bootstrap_lambdas(monkeypatch, model, X, y, **fit_kwargs) -> dict[str, float]:
+    """The smoothing parameters of the exact engine's first bootstrap fit, before it runs."""
+    import superglm.reml.direct as direct
+
+    real = direct.fit_irls_direct
+
+    def stop(*args, **kwargs):
+        if (kwargs.get("debug_context") or {}).get("phase") == "bootstrap":
+            raise _BootstrapReachedError(dict(kwargs["lambda2"]))
+        return real(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(direct, "fit_irls_direct", stop)
+        with pytest.raises(_BootstrapReachedError) as reached:
+            model.fit_reml(X, y, **fit_kwargs)
+    return reached.value.args[0]
+
+
+def test_a_random_effect_seed_with_no_valid_null_mode_stays_cold(monkeypatch):
+    """Where the intercept-only fit holds a weighted row at a clip past which
+    the Fisher weight grows, the curvature read there is the clip's, so the
+    random effect keeps the cold seed 1e-4.  A Gamma response of order 1e13
+    has the intercept-only ``eta = 1 / ybar`` below the inverse link's clip
+    at 1e-12, where the weight ``eta**-2`` is read as 1e24 and grows toward
+    zero.  Mutation: reading the information there anyway seeds the effect at
+    the box ceiling.
+    """
+    rng = np.random.default_rng(20261030)
+    codes = np.repeat(np.arange(12), 50)
+    y = 1e13 * rng.gamma(5.0, 0.2, len(codes))
+    X = pd.DataFrame({"broker": np.array([f"b{i}" for i in codes], dtype=object)})
+    model = SuperGLM(
+        family="gamma", link="inverse", features={"broker": RandomEffect()}, selection_penalty=0
+    )
+
+    assert _bootstrap_lambdas(monkeypatch, model, X, y)["broker"] == 1e-4
+
+
+def test_a_row_held_where_the_weight_falls_leaves_the_information_seed(monkeypatch):
+    """Ten rows whose log-exposure offset is 100 below the rest sit past the
+    log link's clip at -80, where the Poisson weight ``mu`` falls toward
+    zero, so the clip cannot raise it: they are read as the clip holds them,
+    and the seed is the levels' mean information at the intercept-only fit
+    given the offset.  The oracle is that fit's closed form, ``t = sum y /
+    sum e^o``, and the model's weights ``t e^o``, unclipped; the held rows'
+    weights, ``e^-80`` against ``t e^-100``, are below the rounding of every
+    sum, so the seed agrees to the sums' ``n eps``.  Mutation: a87b1ac4
+    refused every clipped row and seeded the effect at 1e-4.
+    """
+    rng = np.random.default_rng(20261031)
+    codes = np.repeat(np.arange(12), 50)
+    offset = np.log(rng.uniform(0.05, 1.0, len(codes)))
+    offset[::60] = -100.0
+    y = rng.poisson(np.exp(0.5 + rng.uniform(-0.5, 0.5, 12)[codes] + offset)).astype(float)
+    X = pd.DataFrame({"broker": np.array([f"b{i}" for i in codes], dtype=object)})
+    model = SuperGLM(family="poisson", features={"broker": RandomEffect()}, selection_penalty=0)
+
+    seed = _bootstrap_lambdas(monkeypatch, model, X, y, offset=offset)["broker"]
+
+    shifted = offset - offset.max()
+    eta = np.log(np.sum(y) / np.sum(np.exp(shifted))) + shifted
+    assert np.all(eta[::60] < -80.0)
+    information = np.exp(eta)
+    level = np.bincount(codes, weights=information)
+    oracle = float(np.sum(level * (1.0 - level / information.sum())) / 12)
+    assert seed == pytest.approx(oracle, rel=len(y) * np.finfo(float).eps)

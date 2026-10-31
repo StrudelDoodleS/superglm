@@ -830,8 +830,12 @@ class SuperGLM:
             line search is where that limit surfaces, and on the discrete
             engine's shared-tensor line search -- as
             ``termination_reason="converged_at_precision"`` (at least one
-            evaluated trial rejected, none left, and either every active
-            gradient under ``max(1e-7, reml_tol) * (1 + |objective|)`` or,
+            evaluated trial rejected and none left, or the accepted one
+            discarded: its decrease within the evaluations' rounding, or,
+            after a rejected full step, more than a quadratic criterion
+            allows and within ``reml_tol * (1 + |objective|)``; and either
+            every active gradient under ``max(1e-7, reml_tol) * (1 +
+            |objective|)`` or,
             with every active gradient under ten times that bar, the
             decrease the active set's Newton model still predicts, half of
             ``g' H^-1 g`` for a positive definite Hessian whose Newton step

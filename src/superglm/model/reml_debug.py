@@ -8,7 +8,11 @@ bootstrap state in the stream either; its first candidate starts from the
 pre-solve's mode.  Where such a fit stops on a decrease within the
 evaluations' rounding, a ``step_decision`` event (purpose
 ``reml_rounding_stall``: the decrease and its rounding bound) records that
-the last accepted trial was discarded.
+the last accepted trial was discarded.  A search that discards an accepted
+shorter step whose decrease no quadratic criterion rejecting the full step
+allows records the same, as a ``step_decision`` event of purpose
+``reml_inconsistent_decrease`` (the decrease, the trial's step and the
+predicted decrease).
 """
 
 from __future__ import annotations

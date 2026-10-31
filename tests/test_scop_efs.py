@@ -3282,6 +3282,59 @@ class TestColdBootstrapStart:
             moved = scop_efs_module._hessian_scaled_bootstrap_lambdas(shifted, lambdas, names)
             assert moved == base, family
 
+    def test_a_start_with_no_valid_null_mode_is_not_scaled(self, monkeypatch):
+        """Where the intercept-only fit holds a weighted row at a clip past
+        which the Fisher weight grows, the curvature read there is the clip's,
+        so no component moves and the retry is not made.  A Gamma response of
+        order 1e13 has the intercept-only ``eta = 1 / ybar`` below the inverse
+        link's clip at 1e-12, where the weight ``eta**-2`` is read as 1e24 and
+        grows toward zero.  Mutation: reading the Fisher weights there anyway
+        moves every component.
+        """
+        from superglm.distributions import Gamma
+        from superglm.links import InverseLink
+
+        model, frame, y, weights = _three_kind_fixture(family="poisson")
+        context, lambdas = _bootstrap_context(monkeypatch, model, frame, y, sample_weight=weights)
+        clipped = replace(context, distribution=Gamma(), link=InverseLink(), y=1e13 * (1.0 + y))
+        assert (
+            scop_efs_module._hessian_scaled_bootstrap_lambdas(clipped, lambdas, set(lambdas))
+            == lambdas
+        )
+
+    @pytest.mark.parametrize("family", ["poisson", "gamma"])
+    def test_a_row_held_where_the_weight_falls_still_scales_the_start(self, monkeypatch, family):
+        """A row whose offset is 100 below the rest puts the null mode on a
+        log-link clip the weight cannot rise past.  Under Poisson the row sits
+        past the lower clip at -80, where the weight ``mu`` falls toward zero.
+        Under Gamma the closed-form intercept follows that row, so the other
+        rows are held at the upper clip, +80, where the weight is the prior
+        weight at any ``eta``.  Either way the rows are read as the clip holds
+        them, as master read them, and the retry is made.  Its start is the
+        start with that row's offset at -80: the Poisson weight of either is
+        below the rounding of every sum it enters, and the Gamma weight does
+        not depend on ``eta``.
+        Mutation: a87b1ac4 refused every clipped row and left the cold start.
+        """
+        from superglm.distributions import Gamma
+
+        model, frame, y, weights = _three_kind_fixture(family="poisson")
+        context, lambdas = _bootstrap_context(monkeypatch, model, frame, y, sample_weight=weights)
+        if family == "gamma":
+            context = replace(context, distribution=Gamma(), y=1.0 + y)
+        names = set(lambdas)
+        offset = np.zeros(len(y))
+        offset[0] = -100.0
+        clipped = scop_efs_module._hessian_scaled_bootstrap_lambdas(
+            replace(context, offset_arr=offset), lambdas, names
+        )
+        offset[0] = -80.0
+        inside = scop_efs_module._hessian_scaled_bootstrap_lambdas(
+            replace(context, offset_arr=offset), lambdas, names
+        )
+        assert clipped != lambdas
+        assert clipped == inside
+
     def test_the_scaled_start_keeps_no_dense_penalty_alive(self, monkeypatch):
         """Each component's p x p penalty is released once its diagonal is read.
 

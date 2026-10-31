@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 import time as _time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -27,7 +27,11 @@ from superglm._roundoff import gamma as _gamma
 from superglm._utils import weighted_row_sum
 from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
 from superglm.dm_builder import rebuild_design_matrix_with_lambdas
-from superglm.group_matrix import DesignMatrix, DiscretizedTensorGroupMatrix
+from superglm.group_matrix import (
+    DesignMatrix,
+    DiscretizedTensorGroupMatrix,
+    RandomEffectGroupMatrix,
+)
 from superglm.links import stabilize_eta
 from superglm.reml.convergence import (
     FLAT_DIRECTION_FREEZE_FLOOR,
@@ -92,6 +96,7 @@ from superglm.solvers.structured import (
     resolve_structured_backend,
     solve_cached_structured,
 )
+from superglm.solvers.working_rows import fisher_working_weights, null_fit_eta
 from superglm.types import GroupSlice, PenaltyComponent
 
 
@@ -426,23 +431,106 @@ def _damped_tensor_newton_step(
     return delta, mu_hi, binding(delta)
 
 
+def random_effect_seed_lambda(
+    group_matrix: RandomEffectGroupMatrix, information: NDArray
+) -> float | None:
+    """A random effect's bootstrap smoothing parameter: its levels' mean information.
+
+    Wood, Pya & Saefken (2016, JASA 111, sec. 3.1, outer step 1) start the
+    search where each term's effective degrees of freedom lie away from their
+    extremes; mgcv's ``initial.sp`` documentation states the same goal per
+    penalized coefficient, reached by a crude e.d.f. approximation, and
+    targets an average of 1/2.  The approximation is the diagonal one,
+    ``edf_g = A_gg / (A_gg + lambda)`` for the identity penalty, with ``A``
+    the intercept-centred Fisher Gram at the intercept-only fit given the
+    offset (``information``, its working weights): a level's own rows give
+    ``A_gg = d_g (1 - d_g / sum W)``, ``d_g`` their summed weight.  ``lambda
+    = tr(A) / q``, the mean over the ``q`` levels, puts the typical level at
+    1/2.  ``A`` carries the units of the prior weights, and of the response
+    to the power ``2 - p`` under a log link with variance ``mu**p``, as the
+    REML optimum ``phi / sigma_b**2`` does, so the seed moves with them, as
+    ``_hessian_scaled_bootstrap_lambdas`` reasons for a SCOP block.
+    Returns None where the mean is not a positive finite number.
+    """
+    level_weight = np.asarray(group_matrix.rmatvec(information), dtype=np.float64)
+    total = float(np.sum(information))
+    seed = float(np.sum(level_weight * (1.0 - level_weight / total))) / group_matrix.n_levels
+    if not (math.isfinite(seed) and seed > 0.0):
+        return None
+    return float(np.clip(seed, LAMBDA_FLOOR, LAMBDA_CEILING))
+
+
 def bootstrap_seed_lambdas(
     penalties: list[PenaltyComponent],
     warm_lambdas: Mapping[str, float] | None,
     lambdas: Mapping[str, float],
     estimated_mask: NDArray,
+    group_matrices: Sequence[Any],
+    *,
+    distribution: Any,
+    link: Any,
+    y: NDArray,
+    sample_weight: NDArray,
+    offset: NDArray,
+    weight_semantics: str,
 ) -> dict[str, float]:
     """The smoothing parameters the Newton engines' bootstrap fit is taken at.
 
-    Cold, these are fixed seeds: a strong 1.0 for interaction components, whose
-    rich tensor bases can explode under an almost-unpenalized fit, and 1e-4 for
-    everything else, followed by one Fellner-Schall step from that fit.  A warm
-    start (``warm_lambdas``, a previous fit's estimates) replaces the seed of
-    each component it names, and, when present, fixed-policy components are
-    bootstrapped at their fixed value, so the bootstrap fit is the warm start's
-    own coefficient mode and the first Newton step is taken from there.
+    Cold, these are seeds, followed by one Fellner-Schall step from that fit:
+    1e-4, an almost-unpenalized fit, except for
+
+    - interaction components, a strong 1.0, as their rich tensor bases can
+      explode under an almost-unpenalized fit;
+    - random effects (``RandomEffectGroupMatrix``), their levels' mean
+      information (``random_effect_seed_lambda``), which puts the typical
+      level's effective degrees of freedom at 1/2 in any units.  Unpenalized,
+      a level its own rows do not identify has a posterior variance of order
+      ``1 / lambda`` -- a parent of a nested effect, aliased with its
+      children's indicators, or a level its responses separate (all zero
+      under a log link) -- so the step's trace term outweighs the squared
+      coefficients and it returns about ``lambda`` times a constant, still at
+      the unpenalized end the Newton step then has to leave.  Where the
+      intercept-only fit has no valid mode (``null_fit_eta`` returns None),
+      they keep the cold 1e-4.
+
+    A warm start (``warm_lambdas``, a previous fit's estimates) replaces the
+    seed of each component it names, and, when present, fixed-policy
+    components are bootstrapped at their fixed value, so the bootstrap fit is
+    the warm start's own coefficient mode and the first Newton step is taken
+    from there.
     """
     seeds = {pc.name: (1.0 if ":" in pc.group_name else 1e-4) for pc in penalties}
+    cold_random_effects = [
+        pc
+        for index, pc in enumerate(penalties)
+        if estimated_mask[index]
+        and pc.name not in (warm_lambdas or {})
+        and isinstance(group_matrices[pc.group_index], RandomEffectGroupMatrix)
+    ]
+    eta = (
+        null_fit_eta(
+            distribution=distribution,
+            link=link,
+            y=y,
+            sample_weight=sample_weight,
+            offset=offset,
+            weight_semantics=weight_semantics,
+        )
+        if cold_random_effects
+        else None
+    )
+    if eta is not None:
+        information = fisher_working_weights(
+            distribution=distribution,
+            link=link,
+            mu=clip_mu(link.inverse(eta), distribution),
+            eta=eta,
+            sample_weight=np.asarray(sample_weight, dtype=np.float64),
+        )
+        for pc in cold_random_effects:
+            seed = random_effect_seed_lambda(group_matrices[pc.group_index], information)
+            if seed is not None:
+                seeds[pc.name] = seed
     if not warm_lambdas:
         return seeds
     for index, pc in enumerate(penalties):
@@ -656,12 +744,24 @@ def optimize_discrete_reml_cached_w(
     _outer_step_stats: list[dict[str, Any]] = []
     _tensor_post_stall_unlocked = False
     _prev_tensor_v: float | None = None
-    # === Bootstrap: one FP step from conservative interaction penalties ===
-    # Rich tensor interactions can explode under an almost-unpenalized
-    # bootstrap fit. Keep main-effect bootstrap lambdas tiny, but start
-    # interaction penalty components from a materially stronger seed. A warm
-    # start bootstraps at its own lambdas instead (``bootstrap_seed_lambdas``).
-    boot_lambdas = bootstrap_seed_lambdas(penalties, warm_lambdas, lambdas, estimated_mask)
+    # === Bootstrap: one FP step from the seeds ===
+    # Main effects bootstrap almost unpenalized, interaction components from a
+    # materially stronger seed, random effects at their levels' mean
+    # information, and a warm start at its own lambdas
+    # (``bootstrap_seed_lambdas``).
+    boot_lambdas = bootstrap_seed_lambdas(
+        penalties,
+        warm_lambdas,
+        lambdas,
+        estimated_mask,
+        dm.group_matrices,
+        distribution=distribution,
+        link=link,
+        y=y,
+        sample_weight=sample_weight,
+        offset=offset_arr,
+        weight_semantics=weight_semantics,
+    )
     _t0 = _time.perf_counter()
     dm_boot = rebuild_design_matrix_with_lambdas(
         dm,

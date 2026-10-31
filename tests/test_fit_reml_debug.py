@@ -556,3 +556,35 @@ def test_debug_trace_records_a_stop_on_rounding(tmp_path: Path, monkeypatch):
         if event["purpose"] == "reml_line_search" and event["payload"].get("accepted")
     ]
     assert accepted and accepted[-1] < stalls[0]["sequence"]
+
+
+def test_debug_trace_records_a_discarded_shorter_step(tmp_path: Path, monkeypatch):
+    """A search that discards an accepted shorter step whose decrease no
+    quadratic criterion rejecting the full step allows ends with that trial's
+    line-search event reading accepted.  One step_decision event, purpose
+    reml_inconsistent_decrease, records the discard, after that evaluation,
+    with the step and the decrease the profile reports (mutation check:
+    without the emit the stream has none).  The stop is forced as in
+    TestDeadSearchNewtonDecrement._forced_endgame."""
+    from superglm._debug import set_debug_level
+    from superglm.model.reml_debug import load_reml_debug_run
+    from tests.test_reml_tol_determination import TestDeadSearchNewtonDecrement
+
+    monkeypatch.setenv("SUPERGLM_DEBUG_DIR", str(tmp_path))
+    set_debug_level(2)
+    model, _ = TestDeadSearchNewtonDecrement._forced_endgame(monkeypatch)
+
+    run_file = next(tmp_path.glob("*run.json"))
+    run = load_reml_debug_run(tmp_path, run_file.name.removesuffix("_run.json"))
+    stops = [event for event in run.events if event["purpose"] == "reml_inconsistent_decrease"]
+    assert len(stops) == 1
+    payload = stops[0]["payload"]
+    dead = model._reml_profile["reml_dead_line_search"]
+    assert payload["inconsistent_decrease"] == dead["inconsistent_decrease"] > 0.0
+    assert payload["trial_alpha"] == 0.25
+    accepted = [
+        event["sequence"]
+        for event in run.events
+        if event["purpose"] == "reml_line_search" and event["payload"].get("accepted")
+    ]
+    assert accepted and accepted[-1] < stops[0]["sequence"]

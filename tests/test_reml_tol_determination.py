@@ -1427,6 +1427,186 @@ class TestDeadSearchNewtonDecrement:
         assert classified[0]["predicted_decrease"] is None
         assert model._reml_result.termination_reason == "line_search_failed"
 
+    @staticmethod
+    def _forced_endgame(
+        monkeypatch,
+        *,
+        quarter=None,
+        inflate=False,
+        certified=False,
+        full_step_evidence=True,
+        max_reml_iter=20,
+    ):
+        """A fit whose line search ends on a discarded quarter step, unless a case stops it.
+
+        Every trial of at least half the Newton step has its evaluated
+        objective raised by the stop resolution ``tau = reml_tol (1 + |V|)``,
+        an evaluation error of the size the inner solves are certified to,
+        while candidates are evaluated exactly.  The quarter step then
+        decreases the objective by about ``7 P / 16`` (exact) against the
+        bound ``2 P alpha (1 - (1 - c) alpha)``, about ``3 P / 8``, for the
+        Newton model's predicted decrease ``P``, and leaves a quarter of the
+        gradient less an iteration.  An early full step decreases the
+        objective by far more and is accepted.  The cases move one input of
+        the rule: ``quarter(P, tau)`` sets the quarter step's decrease,
+        ``inflate`` raises ``P`` to ``1.5 tau``, ``certified`` has the
+        dead-search certificate hold wherever it is asked (its own decrement
+        arm reads ``P`` too), ``full_step_evidence=False`` has the full-step
+        trial count as no precision evidence, as an exhausted inner solve's
+        does, and ``max_reml_iter`` sets the budget.
+        Returns the model and each iteration's trial steps.
+        """
+        import dataclasses
+
+        import superglm.reml.direct as direct
+
+        rng = np.random.default_rng(20260727)
+        x = rng.uniform(0.0, 1.0, 240)
+        y = rng.poisson(np.exp(0.2 + np.sin(2.0 * np.pi * x))).astype(float)
+        tol = 1e-9
+        state: dict[str, float | None] = {"alpha": None, "pending": None, "obj": None, "P": None}
+        trials: list[tuple[int, float]] = []
+        real_fit, real_objective = direct.fit_irls_direct, direct.reml_laml_objective
+        real_decrease = direct.newton_predicted_decrease
+        real_evidence = direct.trial_counts_as_precision_evidence
+
+        def resolution() -> float:
+            return tol * (1.0 + abs(state["obj"]))
+
+        def fit(*args, **kwargs):
+            context = kwargs.get("debug_context") or {}
+            state["alpha"] = None
+            if context.get("phase") == "line_search":
+                state["alpha"] = state["pending"] = context["trial_alpha"]
+                trials.append((context["reml_iteration"], context["trial_alpha"]))
+            return real_fit(*args, **kwargs)
+
+        def objective(*args, **kwargs):
+            evaluation = real_objective(*args, **kwargs)
+            alpha, state["pending"] = state["pending"], None
+            if alpha is None:
+                state["obj"] = evaluation.value
+                return evaluation
+            if alpha >= 0.5:
+                value = evaluation.value + tol * (1.0 + abs(evaluation.value))
+            elif alpha == 0.25 and quarter is not None:
+                value = state["obj"] - quarter(state["P"], resolution())
+            else:
+                return evaluation
+            return dataclasses.replace(evaluation, value=value)
+
+        def decrease(*args, **kwargs):
+            predicted = real_decrease(*args, **kwargs)
+            if inflate and predicted is not None:
+                predicted = max(predicted, 1.5 * resolution())
+            state["P"] = predicted
+            return predicted
+
+        def evidence(converged, value):
+            return real_evidence(converged, value) and (full_step_evidence or state["alpha"] != 1.0)
+
+        monkeypatch.setattr(direct, "fit_irls_direct", fit)
+        monkeypatch.setattr(direct, "reml_laml_objective", objective)
+        monkeypatch.setattr(direct, "newton_predicted_decrease", decrease)
+        monkeypatch.setattr(direct, "trial_counts_as_precision_evidence", evidence)
+        if certified:
+            monkeypatch.setattr(
+                direct, "classify_dead_feasible_exit", lambda *a, **k: "converged_at_precision"
+            )
+        model = SuperGLM(
+            family="poisson", features={"x": Spline(kind="ps", k=7)}, selection_penalty=0
+        )
+        model.fit_reml(
+            pd.DataFrame({"x": x}),
+            y,
+            reml_tol=tol,
+            max_reml_iter=max_reml_iter,
+            runtime_validation="skip",
+        )
+        by_iteration: dict[int, list[float]] = {}
+        for iteration, alpha in trials:
+            by_iteration.setdefault(iteration, []).append(alpha)
+        return model, by_iteration
+
+    def test_a_decrease_no_quadratic_criterion_allows_ends_the_search(self, monkeypatch):
+        """After a stationary trial rejects the full step, a shorter step whose
+        decrease exceeds what any quadratic criterion rejecting the full step
+        allows, ``2 P alpha (1 - (1 - c) alpha)``, and is within the stop
+        resolution is discarded where ``P`` is below that resolution, the
+        dead-search certificate holds and steps at that fraction cannot reach
+        the score bar in the iterations left: the search ends there,
+        ``converged_at_precision`` (event forced by ``_forced_endgame``).  With
+        ``max_reml_iter=20`` it ends at iteration 5, its gradient 433 times the
+        score bar: steps at a quarter need 21.1 iterations against 15 left, a
+        margin each crawling iteration keeps, as it takes one from both.
+        Mutation: without the rule the search accepts the quarter step, and
+        crawls at a rate of 3/4 to ``max_reml_iter``.
+        """
+        model, by_iteration = self._forced_endgame(monkeypatch, max_reml_iter=20)
+
+        result = model._reml_result
+        assert result.converged, result.termination_reason
+        assert result.termination_reason == "converged_at_precision"
+        assert model._reml_profile["reml_dead_line_search"]["inconsistent_decrease"] is not None
+        # an earlier iteration took its full step; the last discarded its quarter step
+        assert any(
+            alphas == [1.0] for it, alphas in by_iteration.items() if it < result.n_reml_iter
+        )
+        assert by_iteration[result.n_reml_iter] == [1.0, 0.5, 0.25]
+
+    @pytest.mark.parametrize(
+        "case",
+        [
+            # a decrease below the bound: what a quadratic criterion allows
+            dict(quarter=lambda P, tau: 0.3 * P),
+            # a decrease past the stop resolution: more than a stop may discard
+            dict(quarter=lambda P, tau: 1.2 * tau),
+            # a predicted decrease at the stop resolution: progress is left, and
+            # with the certificate held the guard on P alone keeps the rule off
+            dict(quarter=lambda P, tau: 0.8 * tau, inflate=True, certified=True),
+            # iterations to spare: steps at a quarter reach the score bar in time
+            dict(max_reml_iter=200),
+            # a full-step trial that is no precision evidence rejected nothing
+            dict(full_step_evidence=False),
+        ],
+        ids=["below_bound", "past_resolution", "progress_left", "budget_left", "no_evidence"],
+    )
+    @pytest.mark.filterwarnings("ignore:fit_reml did not converge")
+    def test_the_shorter_step_is_taken_outside_the_rule(self, monkeypatch, case):
+        """Each case moves one input of the rule outside it, all else forced as
+        in ``test_a_decrease_no_quadratic_criterion_allows_ends_the_search``:
+        the quarter step is taken, never discarded, and some iteration that
+        tried it is followed by another.  Which exit then ends the search (the
+        score test, a dead search at precision, or the iteration cap) turns on
+        the evaluations' rounding, so only the rule's own record is read: a
+        discard always ends the search as a dead one, whose profile carries
+        it.  Mutation: the bound replaced by ``> 0`` fails ``below_bound``; the
+        cap on the discarded decrease removed fails ``past_resolution``; ``P``
+        below the resolution removed fails ``progress_left``; the
+        iterations-left test removed fails ``budget_left``; any rejected full
+        step counted fails ``no_evidence``.
+        """
+        model, by_iteration = self._forced_endgame(monkeypatch, **case)
+
+        dead = model._reml_profile.get("reml_dead_line_search") or {}
+        assert dead.get("inconsistent_decrease") is None
+        quarter_steps = [it for it, alphas in by_iteration.items() if alphas[-1:] == [0.25]]
+        assert quarter_steps and min(quarter_steps) < model._reml_result.n_reml_iter, by_iteration
+
+    def test_a_backtracked_rate_finishes_only_within_its_budget(self):
+        """Steps at a fraction ``alpha`` of the Newton step leave ``1 - alpha``
+        of the gradient, so the score bar is ``ln(bar / |g|) / ln(1 - alpha)``
+        iterations away: 16.0 for a gradient 100 times the bar at a quarter
+        step.  A gradient at the bar, or a full or empty step, has no crawl."""
+        from superglm.reml.direct import _backtracked_rate_cannot_finish
+
+        needed = np.log(0.01) / np.log(0.75)
+        assert _backtracked_rate_cannot_finish(100.0, 1.0, 0.25, int(np.floor(needed)))
+        assert not _backtracked_rate_cannot_finish(100.0, 1.0, 0.25, int(np.ceil(needed)))
+        assert not _backtracked_rate_cannot_finish(1.0, 1.0, 0.25, 0)
+        assert not _backtracked_rate_cannot_finish(100.0, 1.0, 1.0, 0)
+        assert not _backtracked_rate_cannot_finish(100.0, 1.0, 0.0, 0)
+
     def test_an_undetermined_dead_search_still_reports_not_converged(self):
         """#439's documented undetermined model: the panel book under a
         noncanonical sqrt link. Its search dies at the first iteration with

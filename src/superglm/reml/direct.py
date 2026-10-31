@@ -243,6 +243,22 @@ def _escalates_to_exact_hessian(
     return steps > iterations_left
 
 
+def _backtracked_rate_cannot_finish(
+    gradient_norm: float, score_bar: float, step: float, iterations_left: int
+) -> bool:
+    """Whether Newton steps taken at fraction ``step`` cannot reach the score bar in time.
+
+    A Newton step taken at ``step`` leaves about ``1 - step`` of the gradient,
+    a linear rate; the score bar is then ``ln(bar / |g|) / ln(1 - step)``
+    iterations away, as ``_escalates_to_exact_hessian`` reasons from a measured
+    rate.  A rate that finishes within the iterations left is left to the
+    score test.
+    """
+    if gradient_norm <= score_bar or not 0.0 < step < 1.0:
+        return False
+    return math.log(score_bar / gradient_norm) / math.log(1.0 - step) > iterations_left
+
+
 def _mean_space_boundary_message(rows: int, *, estimated: bool, unresolved: bool = False) -> str:
     """Why a fit whose maximum stays at the mean-space boundary has no REML criterion.
 
@@ -623,12 +639,24 @@ def optimize_direct_reml(
                 if key.startswith(("irls_", "reml_", "dm_")) and isinstance(value, int | float):
                     profile[f"presolve_{key}"] = value
 
-    # === Bootstrap: one FP step from conservative interaction penalties ===
-    # Rich tensor interactions can explode under an almost-unpenalized
-    # bootstrap fit. Keep main-effect bootstrap lambdas tiny, but start
-    # interaction penalty components from a materially stronger seed. A warm
-    # start bootstraps at its own lambdas instead (``bootstrap_seed_lambdas``).
-    boot_lambdas = bootstrap_seed_lambdas(penalties, warm_lambdas, lambdas, estimated_mask)
+    # === Bootstrap: one FP step from the seeds ===
+    # Main effects bootstrap almost unpenalized, interaction components from a
+    # materially stronger seed, random effects at their levels' mean
+    # information, and a warm start at its own lambdas
+    # (``bootstrap_seed_lambdas``).
+    boot_lambdas = bootstrap_seed_lambdas(
+        penalties,
+        warm_lambdas,
+        lambdas,
+        estimated_mask,
+        dm.group_matrices,
+        distribution=distribution,
+        link=link,
+        y=y,
+        sample_weight=sample_weight,
+        offset=offset_arr,
+        weight_semantics=weight_semantics,
+    )
     # After the pre-solve every estimated component starts warm, so the
     # bootstrap would fit the mode the first candidate fits again at the same
     # lambdas: the candidate starts from the pre-solve's mode instead.
@@ -1746,6 +1774,11 @@ def optimize_direct_reml(
         # and that rounding
         unresolved_decrease: float | None = None
         stall_roundoff: float | None = None
+        # whether a stationary full-step trial was rejected, and an accepted
+        # shorter step's decrease that no quadratic criterion rejecting it
+        # allows
+        full_step_rejected = False
+        inconsistent_decrease: float | None = None
         # The synchronous search owns fixed design coordinates and warm state.
         # Its rejected trials may share initial data, never their penalties.
         _initial_data_reuse = (
@@ -2010,6 +2043,71 @@ def optimize_direct_reml(
                 else 0.0
             )
             if (
+                not trial_accepted
+                and step == 1.0
+                and trial_counts_as_precision_evidence(trial_mode_stationary, trial_obj)
+            ):
+                full_step_rejected = True
+            if (
+                trial_accepted
+                and full_step_rejected
+                and dead_predicted_decrease is not None
+                and dead_predicted_decrease < _tol * score_scale
+                and 2.0 * dead_predicted_decrease * step * (1.0 - (1.0 - armijo_c) * step)
+                < obj - trial_obj
+                <= _tol * score_scale
+                and _backtracked_rate_cannot_finish(
+                    active_grad_norm, _tol * score_scale, step, max_reml_iter - n_iter
+                )
+                and classify_dead_feasible_exit(
+                    active_grad_norm,
+                    objective=obj,
+                    tolerance=_tol,
+                    evaluated_trial=evaluated_feasible_trial
+                    and trial_counts_as_precision_evidence(candidate_mode_stationary, obj),
+                    predicted_decrease=dead_predicted_decrease,
+                )
+                == "converged_at_precision"
+            ):
+                # Along the Newton step, ``g' delta = -2 P`` with ``P`` the
+                # model's predicted decrease, so a quadratic criterion whose
+                # stationary trial rejected the full step has curvature above
+                # ``4 P (1 - c)`` and decreases by at most ``2 P alpha (1 - (1 -
+                # c) alpha)`` at step ``alpha``.  A shorter step accepted with
+                # a larger decrease is then taken as the evaluations' error, as
+                # a warm-started inner solve's error in the objective grows
+                # with its step.  A criterion that is not quadratic along the
+                # step can decrease by more, so the decrease discarded is at
+                # most the stop resolution, which the score test treats as no
+                # change.  Where ``P`` is below that resolution too and the
+                # dead-search certificate holds, the step is discarded and the
+                # search ends as a dead one does, when taking it -- a fraction
+                # of the Newton step an iteration, a linear rate -- cannot
+                # reach the score bar in the iterations left (Shi, Xie, Byrd &
+                # Nocedal 2022, SIAM J. Optim. 32(1), sec. 4.1: where errors
+                # are large relative to the gradient the line search is
+                # expected to fail).
+                inconsistent_decrease = float(obj - trial_obj)
+                if trace_run is not None and trace_run.enabled:
+                    # The trial's evaluation event above reads accepted; this
+                    # records that the stop discarded it.
+                    trace_run.emit_lazy(
+                        "step_decision",
+                        lambda: {
+                            "solver": "direct_reml",
+                            "phase": "line_search",
+                            "outer_iteration": n_iter,
+                            "line_search_iteration": _ls + 1,
+                            "trial_alpha": float(step),
+                            "inconsistent_decrease": inconsistent_decrease,
+                            "predicted_decrease": dead_predicted_decrease,
+                        },
+                        channel="reml",
+                        purpose="reml_inconsistent_decrease",
+                        authoritative=False,
+                    )
+                break
+            if (
                 trial_accepted
                 and presolve_beta is not None
                 and obj - trial_obj <= obj_roundoff + trial_roundoff
@@ -2169,6 +2267,10 @@ def optimize_direct_reml(
                     "objective_roundoff": (
                         float(obj_roundoff) if stall_roundoff is None else stall_roundoff
                     ),
+                    # a discarded shorter step's decrease, past what the rejected
+                    # full step leaves a quadratic criterion and within the
+                    # stop resolution
+                    "inconsistent_decrease": inconsistent_decrease,
                 }
             # The second-order check (``concave_live_directions``) gates the
             # score-test exit only.  A shoulder here is flat by construction,
