@@ -1441,6 +1441,30 @@ def test_every_row_censored_on_one_side_separates_the_intercept():
         )
 
 
+def test_a_link_that_reaches_its_range_end_keeps_a_censored_level_its_estimate():
+    # A sqrt link's mean eta**2 reaches 0 at eta = 0, so level b, left-censored
+    # at 1, peaks at a finite coefficient on the edge of the link's range
+    # rather than running off it, and is not reported.
+    X = pd.DataFrame({"g": ["a"] * 40 + ["b"] * 10})
+    y = np.r_[np.tile([1.0, 3.0], 20), np.ones(10)]
+    censored = ["none"] * 40 + ["left"] * 10
+    family = GaussianLS()
+    location = family.location(cat("g", base="a"), link="sqrt")
+    model = SuperLSS(family, location, family.scale(), separation="error")
+    model.fit(X, y, censored=censored)
+
+    def negative(point):
+        mu_a, mu_b, scale = point[0] ** 2, point[1] ** 2, np.exp(point[2])
+        return -(
+            stats.norm.logpdf(y[:40], mu_a, scale).sum() + 10 * stats.norm.logcdf(1.0, mu_b, scale)
+        )
+
+    eta_a, eta_b, log_scale = _mle(negative, np.array([1.0, 0.5, 0.0]))
+    fitted = model.predict_parameters(pd.DataFrame({"g": ["a", "b"]}))
+    np.testing.assert_allclose(fitted["location"], [eta_a**2, eta_b**2], atol=1e-6)
+    np.testing.assert_allclose(fitted["scale"], np.exp(log_scale), rtol=1e-5)
+
+
 def test_every_row_censored_without_an_intercept_separates_only_its_free_levels():
     # With no intercept no level holds every row: the reference level is pinned
     # and the other levels run off, so the levels are reported, not an intercept.

@@ -904,8 +904,12 @@ no finite estimate either, and the scan reports the predictor itself. The scale
 of `GaussianLS` and `LogNormalLS` is scanned only on its default floored log
 link: given another link, such as `link="logit"`, it is not scanned, because a
 bounded link can stop short of the limit the scale runs to and leave the level
-a finite estimate. The other predictors are scanned on any link, since a
-censored row's probability moves one way along them whatever the link.
+a finite estimate. The other predictors are scanned on their default link and
+on the identity, log, logit, probit, cloglog and cauchit links: a censored
+row's probability moves one way along them, and these links reach the end of
+their range only as the predictor runs off. A link that reaches an end at a
+finite value, such as `link="sqrt"`, whose mean `eta**2` stops at 0, can give
+the level its estimate there, so it is not scanned.
 
 The scan reads only what the data decide before the fit:
 - A generalized Pareto row with an upper truncation bound anchors its level
@@ -934,8 +938,9 @@ The scan reads only what the data decide before the fit:
   censoring can give a level an estimate it would otherwise lack, and a bound
   on the far side only, as in the scanned cases above, takes it away.
 
-Ordered-categorical smooths, and a normal or log-normal scale on a link other
-than its default, are not scanned. The scan does not cover all separation patterns, and
+Ordered-categorical smooths, a normal or log-normal scale on a link other
+than its default, and predictors on links such as sqrt, inverse or power are
+not scanned. The scan does not cover all separation patterns, and
 `fit.curvature_indefinite` is a curvature diagnostic, not a separation detector.
 The absence of either warning does not rule out separation.
 

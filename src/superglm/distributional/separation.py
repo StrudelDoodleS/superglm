@@ -43,7 +43,23 @@ from superglm.distributional.predictor import CompiledPredictor
 from superglm.features.categorical import Categorical
 from superglm.features.interaction import CategoricalInteraction
 from superglm.features.ordered_categorical import resolve_interaction_parent_of
-from superglm.links import Link, resolve_link
+from superglm.links import (
+    CauchitLink,
+    CloglogLink,
+    IdentityLink,
+    Link,
+    LogitLink,
+    LogLink,
+    ProbitLink,
+    resolve_link,
+)
+
+# Inverse links that map the whole line strictly monotonically onto an open
+# interval, so a parameter reaches an end of its range only as its linear
+# predictor walks off.  A link whose range is closed or clamped at an end,
+# such as sqrt (eta**2 >= 0) or a clamped power, reaches the end at a finite
+# coefficient.
+_OPEN_MONOTONE_LINKS = (IdentityLink, LogLink, LogitLink, ProbitLink, CloglogLink, CauchitLink)
 
 SeparationPolicy = Literal["warn", "error", "ignore"]
 SEPARATION_POLICIES: tuple[str, ...] = ("warn", "error", "ignore")
@@ -257,13 +273,16 @@ def censored_recession(
 ) -> NDArray[np.bool_]:
     """One flag per row and predictor; all false without a declaration.
 
-    A flag that is monotone in its parameter holds under any link onto the
-    parameter's range: the level's likelihood is monotone in its coefficient,
-    so its supremum is reached only as the predictor walks off.  A parameter
-    the family names in ``censored_recession_link_sensitive`` has flags that
-    are not monotone; there a bounded link, such as a logit on a scale, can
-    stop short of the limit and leave the level a finite estimate, so those
-    flags are read only on the parameter's default link class.
+    A flag that is monotone in its parameter holds under a link that maps the
+    line strictly monotonically onto an open interval: the level's likelihood
+    is monotone in its coefficient, so its supremum is reached only as the
+    predictor walks off.  Such flags are read on the parameter's default link
+    class and on those links; a link that reaches an end of its range at a
+    finite coefficient, such as sqrt, leaves the level a finite estimate there.
+    A parameter the family names in ``censored_recession_link_sensitive`` has
+    flags that are not monotone; there a bounded link, such as a logit on a
+    scale, can stop short of the limit, so those flags are read only on the
+    parameter's default link class.
     """
     compiled_tuple = tuple(compiled)
     shape = (bounds.n_rows, len(compiled_tuple))
@@ -280,8 +299,11 @@ def censored_recession(
             f"the family's parameter names, got {sensitive!r}"
         )
     readable = [
-        parameters[predictor.parameter_index].name not in sensitive
-        or type(predictor.link) is _default_link_class(parameters[predictor.parameter_index])
+        type(predictor.link) is _default_link_class(parameters[predictor.parameter_index])
+        or (
+            parameters[predictor.parameter_index].name not in sensitive
+            and type(predictor.link) in _OPEN_MONOTONE_LINKS
+        )
         for predictor in compiled_tuple
     ]
     return flags & np.asarray(readable, dtype=bool)

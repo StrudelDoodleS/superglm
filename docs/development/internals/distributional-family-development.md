@@ -275,7 +275,10 @@ rows does the following; `GaussianLS` is the reference.
   probability nears its supremum only as the predictor walks off one way. A
   level whose rows are all censored on one side and all flagged is reported;
   a family that declares nothing is not scanned. A flag that is monotone in
-  its parameter is read on every link. A parameter whose flags are not
+  its parameter is read on the parameter's default link and on links that map
+  the line one-to-one onto an open interval (identity, log, logit, probit,
+  cloglog, cauchit); a link such as sqrt reaches an end of its range at a
+  finite coefficient and is not read. A parameter whose flags are not
   monotone, such as the normal scale, where `P(Y > c | Y > a)` nears 1 both as
   the scale grows and as it shrinks with the location above `c`, is named in
   the class attribute `censored_recession_link_sensitive`, a tuple of
