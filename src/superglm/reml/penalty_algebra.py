@@ -2768,7 +2768,7 @@ def _plain_geometries(
     return found
 
 
-def _same_arrays(left: Sequence[NDArray | None], right: Sequence[NDArray | None]) -> bool:
+def _same_arrays(left: Sequence[NDArray], right: Sequence[NDArray]) -> bool:
     return len(left) == len(right) and all(
         a is b
         or (
@@ -2791,10 +2791,12 @@ def _reusable_raw_context(prior, raw_inputs: tuple[NDArray, ...]):
 
 def _reusable_solver_context(prior, grouped: list[PenaltyComponent]):
     """The previous solver-space context when its stored matrices are these ones."""
+    stored = [component.omega_ssp for component in grouped if component.omega_ssp is not None]
     if (
         prior.coordinate_map is not None
         or prior.support is None
-        or not _same_arrays(prior.matrices, [component.omega_ssp for component in grouped])
+        or len(stored) != len(grouped)
+        or not _same_arrays(prior.matrices, stored)
     ):
         return None
     return prior
