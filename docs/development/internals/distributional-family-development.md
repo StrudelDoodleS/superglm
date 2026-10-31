@@ -274,7 +274,14 @@ rows does the following; `GaussianLS` is the reference.
   one flag per row and predictor, true where that censored row's bound
   probability nears its supremum only as the predictor walks off one way. A
   level whose rows are all censored on one side and all flagged is reported;
-  a family that declares nothing is not scanned.
+  a family that declares nothing is not scanned. A flag that is monotone in
+  its parameter is read on every link. A parameter whose flags are not
+  monotone, such as the normal scale, where `P(Y > c | Y > a)` nears 1 both as
+  the scale grows and as it shrinks with the location above `c`, is named in
+  the class attribute `censored_recession_link_sensitive`, a tuple of
+  parameter names; its flags are then read only on the parameter's default
+  link, since a bounded link such as a logit can stop short of the limit and
+  leave the level a finite estimate.
 
 ```python
 from dataclasses import dataclass

@@ -273,7 +273,12 @@ def censored_recession(
     if flags.shape != shape or flags.dtype != np.bool_:
         raise ValueError("family.censored_recession must return one boolean per row and predictor")
     parameters = tuple(family.parameters)
-    sensitive = set(getattr(family, "censored_recession_link_sensitive", ()))
+    sensitive = getattr(family, "censored_recession_link_sensitive", ())
+    if isinstance(sensitive, str) or not set(sensitive) <= {p.name for p in parameters}:
+        raise ValueError(
+            f"{type(family).__name__}.censored_recession_link_sensitive must be a tuple of "
+            f"the family's parameter names, got {sensitive!r}"
+        )
     readable = [
         parameters[predictor.parameter_index].name not in sensitive
         or type(predictor.link) is _default_link_class(parameters[predictor.parameter_index])

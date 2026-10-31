@@ -1736,3 +1736,17 @@ def test_a_monotone_recession_flag_holds_on_a_non_default_link():
     )
     with pytest.raises(SeparationError, match=r"'location:g': 1 of 3 occupied levels"):
         strict.fit(X, paid, censored=censored)
+
+
+@pytest.mark.parametrize("names", ["scale", ("sigma",)])
+def test_a_link_sensitive_declaration_names_the_familys_parameters(names):
+    # A bare string or an unknown name would silently read every link's flags.
+    X, paid, _, censored = _all_censored_level()
+
+    class Declared(GaussianLS):
+        censored_recession_link_sensitive = names
+
+    family = Declared()
+    model = SuperLSS(family, family.location(cat("g")), family.scale())
+    with pytest.raises(ValueError, match="censored_recession_link_sensitive must be a tuple"):
+        model.fit(X, paid, censored=censored)
