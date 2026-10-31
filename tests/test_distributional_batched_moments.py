@@ -136,7 +136,12 @@ def test_last_worker_count_is_the_threads_that_ran_a_target(monkeypatch):
 
 def test_accumulate_reads_fortran_and_strided_channels_in_place():
     """The workspace budget counts no copy of a chunk's channels, so the reducer makes none:
-    Fortran and strided channel matrices are read where they are."""
+    Fortran and strided channel matrices are read where they are.
+
+    A copy would be made on every call, so the traced call is the second for its layout:
+    the first carries one-off process setup, such as the BLAS thread controller the
+    worker pool builds on its first section, which peaks near one column's bytes.
+    """
     import tracemalloc
 
     module = _module()
@@ -151,6 +156,7 @@ def test_accumulate_reads_fortran_and_strided_channels_in_place():
     )
     for weights in (np.ones((capacity, 3), order="F"), np.ones((capacity, 6))[:, ::2]):
         with parallel_config(n_jobs=1):
+            batch.accumulate(weights, capacity)
             tracemalloc.start()
             try:
                 batch.accumulate(weights, capacity)
