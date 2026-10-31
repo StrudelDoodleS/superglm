@@ -12,13 +12,16 @@ from scipy import stats
 
 from superglm import Numeric, SuperGLM, tweedie_logpdf
 from superglm._frame import as_eager_frame
+from superglm.diagnostics.discretize import _validated_discretization_weights
+from superglm.diagnostics.spline_checks import _redundancy_geometry_weights
 from superglm.diagnostics.term_diagnostics import (
     _drop_term_holdout,
     _drop_term_refit,
     term_importance,
 )
 from superglm.distributions import Gaussian, NegativeBinomial, Tweedie
-from superglm.stats.model_tests import vuong_test, zero_inflation_index
+from superglm.plotting.interactions import _validated_density_weights
+from superglm.stats.model_tests import _frequency_weights, vuong_test, zero_inflation_index
 
 
 @pytest.mark.parametrize(
@@ -337,3 +340,30 @@ def test_tweedie_term_diagnostics_reject_nonpositive_prior_weights() -> None:
             np.array([0.0, 0.5, 1.0]),
             sample_weight_val=invalid_weights,
         )
+
+
+_GAUSSIAN_MODEL = SimpleNamespace(
+    _result=object(),
+    _distribution=Gaussian(),
+    result=SimpleNamespace(beta=np.array([], dtype=np.float64)),
+)
+
+
+@pytest.mark.parametrize(
+    "check",
+    [
+        lambda w: _validated_density_weights(_GAUSSIAN_MODEL, w, len(w)),
+        lambda w: _validated_discretization_weights(_GAUSSIAN_MODEL, w, len(w)),
+        lambda w: _redundancy_geometry_weights(_GAUSSIAN_MODEL, w, len(w)),
+        lambda w: term_importance(_GAUSSIAN_MODEL, pd.DataFrame(index=np.arange(len(w))), w),
+        lambda w: _frequency_weights(w, len(w)),
+    ],
+    ids=["density", "discretization", "spline_checks", "term_importance", "vuong"],
+)
+@pytest.mark.filterwarnings("ignore:overflow encountered in reduce:RuntimeWarning")
+def test_weight_sites_refuse_finite_weights_whose_sum_overflows(check) -> None:
+    weights = np.full(4, 1e308)
+    assert np.all(np.isfinite(weights)) and not np.isfinite(np.sum(weights))
+
+    with pytest.raises(ValueError, match="must have a finite sum"):
+        check(weights)
