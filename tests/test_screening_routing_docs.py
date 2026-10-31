@@ -61,11 +61,11 @@ def _route(pair, model, df, y, **kw):
     def spy_factor(B_a, B_b, S_cell, W_cell):
         # THE DENSE ROUTE'S ALLOCATOR SINCE ISSUE #257.  This spy watched
         # ``pair_score_curvature`` until that change moved the dense path onto
-        # design factors; the old name is still importable as the screening
-        # suites' arbiter, so a spy left on it would have gone quiet rather
-        # than red and every "dense" reading below would have become
-        # "refused".  Shown to bite: re-keyed back, three of this file's five
-        # tests fail.
+        # design factors; the old name is now importable only from
+        # ``tests/_screening_oracle.py``, so a spy left on it would have gone
+        # quiet rather than red and every "dense" reading below would have
+        # become "refused".  Shown to bite: re-keyed back, three of this file's
+        # five tests fail.
         seen.update(route="dense", k_s=int(B_a.shape[1]), levels=int(B_b.shape[1]))
         return real_factor(B_a, B_b, S_cell, W_cell)
 

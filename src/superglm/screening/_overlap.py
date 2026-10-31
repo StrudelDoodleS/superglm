@@ -4,7 +4,7 @@ The overlap span is what the candidate pair's own mains already cover:
 ``[intercept | A | B]`` with ``A``/``B`` the centered marginal menus evaluated
 on each covariate's support.  Column order of the tensor block is C-order
 ``p * k_b + q``, matching ``features/interaction.py``'s row-Kronecker and
-``pair_score_curvature``.
+the test oracle ``pair_score_curvature``.
 
 Issue #257 moved the dense screening path onto design factors: ``_pair_factor``
 reduces the pair's cell tables to one triangular factor and the ladder reads

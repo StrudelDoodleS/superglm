@@ -1080,7 +1080,7 @@ $k = 178$ directions are checked against the rows.
 
 ### 17.4 Kernels: what are they really doing?
 
-The kernels in `src/superglm/group_matrix.py` look intimidating because they are low-level and optimized, but conceptually they are mostly just "fast weighted aggregation."
+The kernels in `src/superglm/_group_matrix/_group_matrix_kernels.py` look intimidating because they are low-level and optimized, but conceptually they are mostly just "fast weighted aggregation." `MatrixExecutionPlan.moments`, in `src/superglm/_group_matrix/_group_matrix_execution.py`, chooses which kernel builds each block.
 
 #### 17.4.1 `_fused_bincount_2`
 
