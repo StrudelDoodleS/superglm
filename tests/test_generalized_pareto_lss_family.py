@@ -61,16 +61,28 @@ def test_the_walls_are_the_shape_and_its_configured_bounds():
 
 
 def test_the_wall_disclosure_says_what_each_wall_does_to_the_law():
-    upper = GeneralizedParetoLSS().wall_disclosure(0, 7, 10)
+    upper = GeneralizedParetoLSS().wall_disclosure((0, 7), (0, 0), 10)
     assert "7 of 10 rows have a tail shape at the upper wall 1" in upper
     assert "infinite" in upper and "solver's tolerance" in upper
-    lower = GeneralizedParetoLSS().wall_disclosure(3, 0, 10)
+    lower = GeneralizedParetoLSS().wall_disclosure((3, 0), (0, 0), 10)
     assert "3 of 10 rows have a tail shape at the lower wall 0" in lower
     assert "negative shapes" in lower and "upper wall" not in lower
-    narrow = GeneralizedParetoLSS(shape_lower=0.05, shape_upper=0.35).wall_disclosure(1, 2, 10)
+    narrow = GeneralizedParetoLSS(shape_lower=0.05, shape_upper=0.35).wall_disclosure(
+        (1, 2), (0, 0), 10
+    )
     assert "upper wall 0.35" in narrow and "shape_upper" in narrow
     assert "lower wall 0.05" in narrow and "Lower shape_lower" in narrow
     assert "infinite" not in narrow
+    assert GeneralizedParetoLSS().wall_disclosure((0, 0), (0, 0), 10) is None
+
+
+def test_rows_clipped_at_the_last_float_get_the_float64_statement_and_no_data_claim():
+    clipped = GeneralizedParetoLSS().wall_disclosure((0, 0), (0, 4), 10)
+    assert "4 of 10 rows have a tail shape at the last value below the upper wall 1" in clipped
+    assert "set by that rounding" in clipped
+    assert "the data put the shape" not in clipped and "not reliable" not in clipped
+    narrow = GeneralizedParetoLSS(shape_upper=0.35).wall_disclosure((0, 0), (0, 4), 10)
+    assert "tail is that of the wall" in narrow and "rounding" not in narrow
 
 
 @pytest.mark.parametrize("scale", [1e-166, 1e200])

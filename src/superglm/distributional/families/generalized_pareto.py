@@ -409,8 +409,24 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         """The shape's index and its two walls."""
         return 1, self.shape_lower, self.shape_upper
 
-    def wall_disclosure(self, n_lower: int, n_upper: int, n_rows: int) -> str:
-        """Say what a tail shape pressed against each wall does to the fitted law."""
+    def wall_disclosure(
+        self, pressed: tuple[int, int], clipped: tuple[int, int], n_rows: int
+    ) -> str | None:
+        """Say what a tail shape at each wall does to the fitted law.
+
+        ``pressed`` counts the rows, at the (lower, upper) wall, that the data
+        press against it; ``clipped`` counts the rows the link clipped to its
+        last float inside it, whatever put them there.
+        """
+        n_lower, n_upper = pressed
+        clipped_lower, clipped_upper = clipped
+        lower_remedy = (
+            "Lower shape_lower (it may go down to 0), or choose another threshold."
+            if self.shape_lower > 0.0
+            else "This family takes no negative shapes: choose another threshold, or a "
+            "lighter-tailed family for these excesses."
+        )
+        upper_remedy = "Raise shape_upper (it may go up to 1), or choose another threshold."
         findings = []
         if n_upper:
             if self.shape_upper == 1.0:
@@ -424,31 +440,51 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
             else:
                 consequence = (
                     "the shape, and everything that depends on it, is set by the wall rather "
-                    "than the data. Raise shape_upper (it may go up to 1), or choose another "
-                    "threshold."
+                    f"than the data. {upper_remedy}"
                 )
             findings.append(
                 f"{n_upper} of {n_rows} rows have a tail shape at the upper wall "
                 f"{self.shape_upper:g}: the data put the shape at or beyond it, so {consequence}"
             )
-        if n_lower:
-            remedy = (
-                "Lower shape_lower (it may go down to 0), or choose another threshold."
-                if self.shape_lower > 0.0
-                else "This family takes no negative shapes: choose another threshold, or a "
-                "lighter-tailed family for these excesses."
+        if clipped_upper:
+            if self.shape_upper == 1.0:
+                consequence = (
+                    "Their mean and expected shortfall, which grow without bound towards a shape "
+                    "of one, are set by that rounding rather than the data: predict() and "
+                    "expected_shortfall() still return them, while quantiles and the "
+                    "distribution function stay finite. Use quantiles or bounded expectations, "
+                    "or choose another threshold."
+                )
+            else:
+                consequence = f"Their tail is that of the wall. {upper_remedy}"
+            findings.append(
+                f"{clipped_upper} of {n_rows} rows have a tail shape at the last value below the "
+                f"upper wall {self.shape_upper:g} that float64 can represent: the data press the "
+                "shape against the wall there, or the shape predictor reaches far towards it. "
+                f"{consequence}"
             )
+        if n_lower:
             findings.append(
                 f"{n_lower} of {n_rows} rows have a tail shape at the lower wall "
                 f"{self.shape_lower:g}: the data put the shape at or below it, so the tail is "
-                f"set by the wall rather than the data. {remedy}"
+                f"set by the wall rather than the data. {lower_remedy}"
             )
-        return (
-            "SuperLSS GeneralizedParetoLSS fit: "
-            + " ".join(findings)
-            + " Standard errors, intervals and posterior draws that involve the shape are not "
-            "reliable at a wall, where the fit has almost no curvature along the shape."
-        )
+        if clipped_lower:
+            findings.append(
+                f"{clipped_lower} of {n_rows} rows have a tail shape at the last value above the "
+                f"lower wall {self.shape_lower:g} that float64 can represent: the data press the "
+                "shape against the wall there, or the shape predictor reaches far towards it. "
+                f"Their tail is that of the wall. {lower_remedy}"
+            )
+        if not findings:
+            return None
+        message = "SuperLSS GeneralizedParetoLSS fit: " + " ".join(findings)
+        if n_lower or n_upper:
+            message += (
+                " Standard errors, intervals and posterior draws that involve the shape are not "
+                "reliable at a wall, where the fit has almost no curvature along the shape."
+            )
+        return message
 
     def variance(self, theta) -> NDArray[np.float64]:
         """Population variance; infinite when the shape is at least one half."""

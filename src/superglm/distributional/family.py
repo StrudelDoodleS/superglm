@@ -633,8 +633,15 @@ class WallDisclosingFamily(Protocol):
         """Return the bounded parameter's index and its lower and upper walls."""
         ...
 
-    def wall_disclosure(self, n_lower: int, n_upper: int, n_rows: int) -> str:
-        """Return the warning for ``n_lower`` and ``n_upper`` of ``n_rows`` rows at a wall."""
+    def wall_disclosure(
+        self, pressed: tuple[int, int], clipped: tuple[int, int], n_rows: int
+    ) -> str | None:
+        """Return the warning for ``n_rows`` rows, or ``None`` when there is nothing to say.
+
+        ``pressed`` counts the rows at the (lower, upper) wall that the data press
+        against it, and ``clipped`` the rows the link clipped to its last float
+        inside it, where no fit can resolve how close they are.
+        """
         ...
 
 
