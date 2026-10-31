@@ -38,7 +38,6 @@ from superglm.distributional.family import (
     ObservationContract,
     ParameterSpec,
     ParameterSupport,
-    WallRows,
     _register_likelihood_reuse_contract,
     _validated_derivative_order,
     _validated_parameter_matrix,
@@ -75,11 +74,6 @@ _CAPABILITIES = FamilyCapabilities(
     random=False,
     response_mean=True,
 )
-# A shape within _NEAR_WALL of a wall is within one sampling standard deviation
-# of it, of order 1/sqrt(n), for any sample below about 1e8 rows. Fits pressed
-# past a wall stop far inside that distance (5e-6 and less, even at
-# inner_tol=1e-5), so those rows are the candidates the fit's wall test reads.
-_NEAR_WALL = 1.0e-4
 
 
 def _validated_wall(value: object, *, name: str) -> float:
@@ -411,31 +405,9 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         values = self._theta(theta, None)
         return generalized_pareto_mean(values[:, 0], values[:, 1])
 
-    def wall_rows(self, y, theta, plan) -> WallRows | None:
-        """The fitted rows within ``_NEAR_WALL`` of a shape wall, with the shape's derivatives.
-
-        Only those rows are evaluated, through the plan's own row selection.
-        """
-        response = _validated_response(y)
-        values = self._theta(theta, len(response))
-        shape = values[:, 1]
-        to_lower = shape - self.shape_lower
-        to_upper = self.shape_upper - shape
-        upper = to_upper <= to_lower
-        distance = np.where(upper, to_upper, to_lower)
-        index = np.flatnonzero(distance <= _NEAR_WALL)
-        if not index.size:
-            return None
-        near = self._plan(plan, len(response)).take(index)
-        evaluated = self.evaluate_natural(response[index], values[index], near, derivative_order=2)
-        return WallRows(
-            parameter_index=1,
-            index=index,
-            score=np.asarray(evaluated.score[:, 1], dtype=np.float64),
-            information=-np.asarray(evaluated.hessian_packed[:, 2], dtype=np.float64),
-            distance=distance[index],
-            outward=np.where(upper[index], 1.0, -1.0),
-        )
+    def walls(self) -> tuple[int, float, float]:
+        """The shape's index and its two walls."""
+        return 1, self.shape_lower, self.shape_upper
 
     def wall_disclosure(self, n_lower: int, n_upper: int, n_rows: int) -> str:
         """Say what a tail shape pressed against each wall does to the fitted law."""

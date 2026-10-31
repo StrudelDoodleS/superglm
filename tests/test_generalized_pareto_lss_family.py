@@ -55,24 +55,9 @@ def test_an_upper_wall_below_one_keeps_the_exact_mean_however_close_to_one():
     assert family.default_prediction(theta)[0] == 1.0e-6 / (1.0 - 0.9999995)
 
 
-def test_wall_rows_are_the_rows_near_a_wall_with_their_shape_derivatives():
-    family = GeneralizedParetoLSS()
-    y = stats.genpareto(0.3).rvs(6, random_state=np.random.default_rng(5))
-    shapes = np.array([1.0e-12, 5.0e-5, 2.0e-4, 0.5, 1.0 - 5.0e-5, 1.0 - 1.0e-12])
-    theta = np.column_stack([np.full(6, 1.5), shapes])
-    plan = family.bind_likelihood(y, _weights(np.ones(6), "frequency"), COMPLETE_OBSERVATION)
-
-    rows = family.wall_rows(y, theta, plan)
-    assert rows.parameter_index == 1
-    assert rows.index.tolist() == [0, 1, 4, 5]
-    assert rows.outward.tolist() == [-1.0, -1.0, 1.0, 1.0]
-    full = family.evaluate_natural(y, theta, plan, derivative_order=2)
-    assert np.array_equal(rows.score, full.score[rows.index, 1])
-    assert np.array_equal(rows.information, -full.hessian_packed[rows.index, 2])
-    interior = family.bind_likelihood(
-        y[2:4], _weights(np.ones(2), "frequency"), COMPLETE_OBSERVATION
-    )
-    assert family.wall_rows(y[2:4], theta[2:4], interior) is None
+def test_the_walls_are_the_shape_and_its_configured_bounds():
+    assert GeneralizedParetoLSS().walls() == (1, 0.0, 1.0)
+    assert GeneralizedParetoLSS(shape_upper=0.35).walls() == (1, 0.0, 0.35)
 
 
 def test_the_wall_disclosure_says_what_each_wall_does_to_the_law():
