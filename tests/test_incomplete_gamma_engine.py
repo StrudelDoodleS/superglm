@@ -66,6 +66,7 @@ from superglm.distributional.kernels._incomplete_gamma import (  # noqa: E402
     log_gamma_tail,
     log_gamma_tail_jet_into,
     log_gamma_tail_jets,
+    log_gamma_tail_scaled_into,
     output_size,
 )
 
@@ -202,8 +203,25 @@ def test_every_partial_matches_the_mpmath_oracle(a: float) -> None:
     The order-4 jet along fixed ``x/a`` is checked on the same rows, and at
     fixed ``x`` the jet entry is the engine's partials before scaling.
     """
+    assert _oracle_failures(a, _points(a)) == []
+
+
+@pytest.mark.parametrize("a", [1e-16, 1e-12, 1e-8, 1e-4, 3e-3, 9.99e-3])
+def test_small_shapes_meet_the_oracle_beside_the_series(a: float) -> None:
+    """Below ``SMALL_SHAPE`` both tails beside the series come from ``Q = u + v``.
+
+    Read as ``1 - P``, ``Q`` loses ``u/Q`` (``Q ~ a E1(x)``); here a row at
+    ``a = 1e-14``, ``x = 1`` read ``-33.646`` for ``log Q = -33.753``.  The
+    in-range tolerances hold; measured worst 177 ``u`` (fixed ``x``) and
+    483 ``u`` (along ``x/a``) of the row's scale.
+    """
+    points = {label: x for label, x in _points(a).items() if x <= 1.5}
+    assert _oracle_failures(a, points) == []
+
+
+def _oracle_failures(a: float, points: dict[str, float]) -> list[str]:
     failures = []
-    for label, x in _points(a).items():
+    for label, x in points.items():
         oracle = _oracle(a, x)
         for upper in (False, True):
             reference = np.array([float(v) for v in oracle[upper]])
@@ -236,7 +254,7 @@ def test_every_partial_matches_the_mpmath_oracle(a: float) -> None:
                 if not error <= bound:
                     tail = "Q" if upper else "P"
                     failures.append(f"x={x:.17g} ({label}) log {tail} order {order}: {error:.2e}")
-    assert failures == []
+    return failures
 
 
 @pytest.mark.parametrize("a", (*_SHAPES, 1e5))
@@ -309,6 +327,22 @@ def test_rows_outside_the_domain_write_nan(a: float, x: float, order: int, upper
     out = np.zeros(output_size(MAX_ORDER))
     log_gamma_tail(a, x, upper, order, out)
     assert np.all(np.isnan(out))
+
+
+def test_a_tiny_point_keeps_its_partials_finite() -> None:
+    """``log Q(1, x) = -x``: at ``x = 1e-160`` the plain partials stay finite, the scaled ones exact.
+
+    ``x^-j`` overflows from ``j = 2`` while the partials themselves do not.
+    The scaled partials ``x^j d^j/dx^j`` are ``-x`` and 0, to rounding.
+    """
+    x = 1e-160
+    jets = log_gamma_tail_jets(1.0, x, True, 2)
+    assert all(np.all(np.isfinite(jet)) for jet in jets)
+    assert jets[1][0, 1] == pytest.approx(-1.0, rel=1e-14)
+    scaled = np.zeros(output_size(2))
+    log_gamma_tail_scaled_into(1.0, x, True, 2, scaled, np.empty(WORK_SIZE))
+    assert scaled[2] == pytest.approx(-x, rel=1e-14)
+    assert abs(scaled[5]) <= 1e-15 * x
 
 
 def test_jets_wrapper_packs_the_scalar_engine_rows() -> None:

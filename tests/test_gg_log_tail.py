@@ -294,6 +294,53 @@ def test_composed_route_matches_the_oracle_in_far_tails_at_small_shape(q):
     assert not found, "\n".join(found)
 
 
+def _leading_term_reference(w, q):
+    """``(log F, log S)`` partials where ``x = a e^(q w)`` is below the normal range.
+
+    There ``log P = a log x - ln Gamma(1 + a) + O(x)`` (DLMF 8.7.1), and ``x``
+    is below ``1e-300``, so the leading term is exact at 40 digits; each value
+    is checked against ``mpmath.gammainc`` too.
+    """
+
+    def tail(w_value, q_value, upper):
+        a = 1 / (q_value * q_value)
+        log_p = a * (mp.log(a) + q_value * w_value) - mp.loggamma(1 + a)
+        return log_p if upper != (q_value > 0) else mp.log(-mp.expm1(log_p))
+
+    with mp.workdps(DIGITS):
+        point = (mp.mpf(w), mp.mpf(q))
+        a = 1 / point[1] ** 2
+        x = a * mp.exp(point[0] * point[1])
+        lower = mp.gammainc(a, 0, x, regularized=True)
+        if q < 0:
+            lower = 1 - lower
+        assert abs(mp.log(lower) - tail(*point, False)) < mp.mpf(10) ** -30
+        return tuple(
+            np.array([float(mp.diff(lambda u, v: tail(u, v, side), point, key)) for key in KEYS])
+            for side in (False, True)
+        )
+
+
+@pytest.mark.parametrize(
+    ("w", "q"),
+    [(-40.0, 20.0), (40.0, -20.0), (-36.0, 20.0), (-0.0069, 1e5), (-2000.0, 0.5)],
+)
+def test_a_point_below_the_normal_range_keeps_log_x(w, q):
+    """``x = a e^(q w)`` underflows or is subnormal while both tails are substantial.
+
+    At ``(-40, 20)`` ``x = e^-800/400``: ``log F = -2.0135`` and ``log S =
+    -0.1433``.  ``(-0.0069, 1e5)`` has a normal ``e^(q w)`` and a subnormal
+    ``x``; ``(-2000, 0.5)`` a subnormal ``e^(q w)``.  The route keeps ``log x``
+    and its error is the composition's (``composed_bound``).
+    """
+    expected = _leading_term_reference(w, q)
+    for side in (False, True):
+        actual, coefficients = composed_partials(w, q, side)
+        assert np.all(np.isfinite(actual))
+        assert not failures(w, q, side, actual, expected[side], composed_bound(w, q, coefficients))
+        np.testing.assert_array_equal(partials(w, q, side), actual)
+
+
 @pytest.mark.parametrize(
     ("w", "q", "along_w"),
     [

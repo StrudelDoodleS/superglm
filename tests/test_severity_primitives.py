@@ -121,7 +121,10 @@ def _relative_cases():
     yield "invexpm1", prims.invexpm1, [(t,) for t in _T], lambda t: 1 / mp.expm1(t)
     gdev_inputs = [(float(r * m), m) for r in _RATIOS if 0.0 < r * m < 1e308]
     gdev_inputs += [(float(r), 1.0) for r in _RATIOS]
+    # Near the top of the range, where ``m + y`` overflows.
+    gdev_inputs += [(float(r * 1e308), 1e308) for r in _RATIOS if r < 1.7]
     yield "gdev", prims.gdev, gdev_inputs, lambda y, m: y / m - 1 - mp.log(y / m)
+    yield "logratio", prims.logratio, gdev_inputs, lambda y, m: mp.log(y / m)
 
 
 def _relative_worst(name, function, inputs, reference) -> float:

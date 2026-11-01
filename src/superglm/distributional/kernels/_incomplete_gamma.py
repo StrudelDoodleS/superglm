@@ -5,7 +5,9 @@
 functions, then every partial in ``(a, x)`` by total order ``1..order``
 (``order <= 4``), each block in ``combinations_with_replacement(range(2), k)``
 order: ``(a, x)``, then ``(aa, ax, xx)``, and so on.  Entries are plain
-partials, not divided by factorials.  A row outside the domain (``a`` or ``x``
+partials, not divided by factorials; :func:`log_gamma_tail_scaled_into`
+writes them times ``x^j`` (``j`` the order in ``x``), the form the generated
+kernels compose.  A row outside the domain (``a`` or ``x``
 not finite and positive), or one whose series or continued fraction does not
 converge within :data:`MAX_TERMS`, writes NaN everywhere.
 
@@ -28,6 +30,13 @@ and Temme 2012, sections 2-3):
   diagonal the continued fraction's order-4 coefficients are ill-conditioned
   at large ``a``, so the line sits ``sqrt(a)`` above the diagonal rather than
   at ``a + 1``;
+- below shape :data:`SMALL_SHAPE`, on the series side, ``Q = u + v`` (Gil,
+  Segura and Temme 2012, section 2.3; Gautschi 1979), ``u = 1 -
+  x^a/Gamma(1 + a)`` by ``expm1`` and ``v`` the series of ``P``'s DLMF
+  8.7.1 form without its first term, so a ``Q`` far below one is not read
+  as ``1 - P`` (which costs ``u/Q``).  While ``Q <= 1/2`` it is the primary
+  tail and ``log P`` its complement; above, ``P`` is, by the series.
+  ``ln Gamma(1 + a)`` there comes from DLMF 5.7.3, since ``1 + a`` rounds;
 - the other tail is ``log(1 - T)`` on the jet, its value by Maechler's (2012)
   switch at ``-log 2``.  The factor ``a`` of ``1/Gamma(a)`` stays outside the
   exponent there, because the Taylor coefficients ``~ a^-k`` of ``log a``
@@ -51,6 +60,7 @@ import math
 import numpy as np
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import ArrayLike, NDArray
+from scipy import special
 
 from superglm.distributional.kernels._severity_primitives import (
     gdev,
@@ -61,7 +71,7 @@ from superglm.distributional.kernels._severity_primitives import (
 
 # Digest of the primitives above, stamped by ``tools/generate_severity_families.py``:
 # Numba's on-disk cache keys a compiled caller on its own file only.
-_CALLEE_DIGEST = "227d1c9dfbdf44354932f27cdf490f28180aa1d26ec1810ab10374c70e932013"
+_CALLEE_DIGEST = "04ce6ff309fc6fbe824e44571ea52924fd40f50736954b9b21a411bb05af84fb"
 
 MAX_ORDER = 4
 MAX_TERMS = 100_000
@@ -73,6 +83,14 @@ _FACTORIAL = (1.0, 1.0, 2.0, 6.0, 24.0)
 _STIRLING_FROM = 10.0
 # Per-iteration relative change at which the continued fraction along x/a stops.
 _ALONG_RATIO_STOP = 16.0 * _U
+# Below this shape the upper tail beside the series is Q = u + v (Gil, Segura
+# and Temme 2012, section 2.3), not 1 - P: complementing a P within u of one
+# costs u/Q.  It is the bottom of the measured envelope.
+SMALL_SHAPE = 1e-2
+_EULER = 0.5772156649015329
+# zeta(k) - 1, k = 2..41, for ln Gamma(1 + a) below a = 1/2 (DLMF 5.7.3): the
+# terms fall like (a/2)^k, under u of the sum by k = 41.
+_ZETA_MINUS_ONE = tuple(float(z) for z in special.zetac(np.arange(2, 42)))
 
 
 def output_size(order: int) -> int:
@@ -428,6 +446,153 @@ def _fill_nan(out):
 
 
 @njit(cache=True)
+def _lgamma1p(a):
+    """``ln Gamma(1 + a)``, relative-accurate as ``a`` goes to zero, where ``1 + a`` rounds."""
+    if a >= 0.5:
+        return math.lgamma(1.0 + a)
+    # DLMF 5.7.3: -log1p(a) + a (1 - gamma) + sum_k (-1)^k (zeta(k) - 1) a^k/k.
+    total = 0.0
+    for index in range(len(_ZETA_MINUS_ONE) - 1, -1, -1):
+        k = index + 2.0
+        sign = 1.0 if index % 2 == 0 else -1.0
+        total = (total + sign * _ZETA_MINUS_ONE[index] / k) * a
+    return a * total + a * (1.0 - _EULER) - math.log1p(a)
+
+
+@njit(cache=True)
+def _log_power_jet(a, log_x, k_max, n, w, f, along_ratio):
+    """Jet of ``L = a log x - ln Gamma(a + 1)`` into ``w[f:]``.
+
+    ``x -> x (1 + e)``, or along ``x/a`` ``x -> (a + da)(x/a)(1 + e)``, which
+    adds ``(a + da) log(1 + da/a)``, whose ``da^k`` coefficient is ``1`` at
+    ``k = 1`` and ``(-1)^k/(k (k - 1) a^(k - 1))`` above.  ``L`` is ``log P``
+    to leading order in ``x`` (DLMF 8.7.1), ``log D + x``.
+    """
+    for r in range(n):
+        w[f + r] = 0.0
+    w[f] = a * log_x - _lgamma1p(a)
+    if k_max == 0:
+        return
+    p0, p1, p2, p3 = polygamma_0123(a + 1.0)
+    polygamma = (p1, p2, p3)
+    w[f + 1] = log_x - p0 + (1.0 if along_ratio else 0.0)
+    power = 1.0
+    for k in range(2, k_max + 1):
+        power /= a
+        coefficient = -polygamma[k - 2] / _FACTORIAL[k]
+        if along_ratio:
+            coefficient += (1.0 if k % 2 == 0 else -1.0) * power / (k * (k - 1.0))
+        w[f + k * (k + 1) // 2] = coefficient
+    # (a + da) log(1 + e): e^j has a (-1)^(j+1)/j, da e^j has (-1)^(j+1)/j.
+    for j in range(1, k_max + 1):
+        log_coefficient = (1.0 if j % 2 == 1 else -1.0) / j
+        w[f + j * (j + 1) // 2 + j] = a * log_coefficient
+        if j < k_max:
+            w[f + (j + 1) * (j + 2) // 2 + j] = log_coefficient
+
+
+@njit(cache=True)
+def _small_shape_log_q(a, x, k_max, n, w, along_ratio):
+    """``log Q`` into ``w[_LOG]``, and ``Q`` into ``w[_TMP1]``, by ``Q = u + v`` for small ``a``.
+
+    ``False`` if the series does not settle or ``Q`` is not positive.
+
+    Gil, Segura and Temme (2012), eqs. (2.20)-(2.24), after Gautschi (1979)
+    and DiDonato and Morris (1986): with ``E = x^a/Gamma(1 + a) = exp(L)``,
+    ``u = -expm1(L)`` and ``v = -E a V``, ``V = sum_{n>=1} (-x)^n/(n! (a +
+    n))``.  ``u`` and ``v`` cancel only mildly for ``x <= 1.5`` (by about
+    ``(|log x| + gamma + Ein(x))/E1(x)``, under 7 at ``x = 1``), where the
+    series alternates with terms falling from ``n = 1``.  Every quantity is a
+    jet, as in the series and the continued fraction; ``x`` is ``X``'s jet.
+    """
+    _log_power_jet(a, math.log(x), k_max, n, w, _PRE, along_ratio)
+    log_power = w[_PRE]
+    _jet_exp(w, _PRE, _SMOOTH, n)
+    point = _LENTZ_C
+    for r in range(n):
+        w[point + r] = 0.0
+        w[_SUM + r] = 0.0
+        w[_TMP2 + r] = 0.0
+    w[point] = x
+    if n > 1:
+        w[point + 2] = x
+        if along_ratio:
+            w[point + 1] = x / a
+            if n > 4:
+                w[point + 4] = x / a
+    settled = False
+    for n_term in range(1, MAX_TERMS + 1):
+        # t_n = (-x)^n/n! on the jet, into _TERM.
+        if n_term == 1:
+            for r in range(n):
+                w[_TERM + r] = -w[point + r]
+        else:
+            _jet_mul(w, _TERM, point, _TMP1, n)
+            for r in range(n):
+                w[_TERM + r] = -w[_TMP1 + r] / n_term
+        # t_n/(a + n + da): the da^k coefficient of the inverse is (-1)^k/(a + n)^(k + 1).
+        inverse = 1.0 / (a + n_term)
+        done = n_term > k_max and n_term > x
+        for r in range(n):
+            i = _A_DEG[r]
+            j = _X_DEG[r]
+            total = 0.0
+            power = inverse
+            for k in range(i + 1):
+                source = (i - k + j) * (i - k + j + 1) // 2 + j
+                total += w[_TERM + source] * power
+                power *= -inverse
+            w[_SUM + r] += total
+            w[_TMP2 + r] += abs(total)
+            if abs(total) > _U * w[_TMP2 + r]:
+                done = False
+        if done:
+            settled = True
+            break
+    if not settled:
+        return False
+    _jet_linear(w, _SUM, _TMP1, a, 1.0, 0.0, n)
+    _jet_mul(w, _SMOOTH, _TMP1, _TMP2, n)
+    for r in range(1, n):
+        w[_TMP1 + r] = -w[_SMOOTH + r] - w[_TMP2 + r]
+    w[_TMP1] = -math.expm1(log_power) - w[_TMP2]
+    if not w[_TMP1] > 0.0:
+        return False
+    _jet_log(w, _TMP1, _LOG, n)
+    return True
+
+
+@njit(cache=True)
+def log_gamma_tail_small_x_jet_into(a, log_x, upper, order, along_ratio, jet, w):
+    """:func:`log_gamma_tail_jet_into` at ``x = exp(log_x)`` too small to form, from ``log x``.
+
+    ``log P = L + log(e^-x S) = L - a x/(a + 1) + O(x^2)``, ``L = a log x -
+    ln Gamma(a + 1)`` (DLMF 8.7.1); every jet coefficient of the remainder is
+    at most ``x``, or ``x/a`` along ``x/a``, so where those are below ``u``
+    the jet is ``L``'s, and ``log Q`` its complement.  The caller holds the
+    remainder below ``u`` of the row's scale; ``False`` (and NaN) off the
+    domain.
+    """
+    if not (0 <= order <= MAX_ORDER and jet.shape[0] >= (order + 1) * (order + 2) // 2):
+        _fill_nan(jet)
+        return False
+    if not (0.0 < a < math.inf and -math.inf < log_x < math.inf):
+        _fill_nan(jet)
+        return False
+    n = (order + 1) * (order + 2) // 2
+    _log_power_jet(a, log_x, order, n, w, _SMOOTH, along_ratio)
+    for r in range(n):
+        w[_LOG + r] = w[_SMOOTH + r]
+    if upper:
+        _jet_complement(w, a, False, n)
+        for r in range(n):
+            w[_LOG + r] = w[_TMP2 + r]
+    for r in range(n):
+        jet[r] = w[_LOG + r]
+    return True
+
+
+@njit(cache=True)
 def log_gamma_tail_jet_into(a, x, upper, order, along_ratio, jet, w):
     """Taylor coefficients of the log tail into ``jet``; ``False`` (and NaN) off the domain.
 
@@ -446,8 +611,27 @@ def log_gamma_tail_jet_into(a, x, upper, order, along_ratio, jet, w):
         return False
     k_max = order
     n = (k_max + 1) * (k_max + 2) // 2
-    _log_prefactor(a, x, k_max, n, w, along_ratio)
     series = x <= a + max(1.0, math.sqrt(a))
+    if series and a < SMALL_SHAPE:
+        # Q is the primary tail while Q <= 1/2; past that P is, by its own series.
+        if not _small_shape_log_q(a, x, k_max, n, w, along_ratio):
+            _fill_nan(jet)
+            return False
+        if upper or w[_LOG] <= _LOG_HALF:
+            if not upper:
+                # log(1 - Q) from Q's own jet: rebuilding Q as exp(log Q) would
+                # cancel log a's da coefficients, of order a^-k.
+                for r in range(1, n):
+                    w[_TMP2 + r] = -w[_TMP1 + r]
+                w[_TMP2] = 1.0 - w[_TMP1]
+                _jet_log(w, _TMP2, _SMOOTH, n)
+                w[_SMOOTH] = _log1mexp(w[_LOG])
+                for r in range(n):
+                    w[_LOG + r] = w[_SMOOTH + r]
+            for r in range(n):
+                jet[r] = w[_LOG + r]
+            return True
+    _log_prefactor(a, x, k_max, n, w, along_ratio)
     if series:
         status = _series_log_sum(a, x, k_max, n, w, along_ratio)
     else:
@@ -475,14 +659,31 @@ def log_gamma_tail_jet_into(a, x, upper, order, along_ratio, jet, w):
 
 
 @njit(cache=True)
+def log_gamma_tail_scaled_into(a, x, upper, order, out, w):
+    """The scaled partials ``x^j d^(i+j) log T/(da^i dx^j)`` into ``out``, packed as the output.
+
+    They are the jet's coefficients times ``i! j!``, with no power of ``x``:
+    a kernel that composes them through ``x = a y/mean`` meets the factor
+    ``x^j`` in the chain rule's own ``x``-derivatives, so neither ``x^-j``
+    nor ``x^j`` is ever formed.  ``w`` is caller-owned work of :data:`WORK_SIZE`.
+    Returns ``False`` (and NaN) off the domain.
+    """
+    if not log_gamma_tail_jet_into(a, x, upper, order, False, out, w):
+        return False
+    for r in range((order + 1) * (order + 2) // 2):
+        out[r] *= _FACTORIAL[_A_DEG[r]] * _FACTORIAL[_X_DEG[r]]
+    return True
+
+
+@njit(cache=True)
 def log_gamma_tail_into(a, x, upper, order, out, w):
     """:func:`log_gamma_tail` with caller-owned work of :data:`WORK_SIZE`."""
-    if not log_gamma_tail_jet_into(a, x, upper, order, False, out, w):
+    if not log_gamma_tail_scaled_into(a, x, upper, order, out, w):
         return
-    inverse_x = 1.0 / x
+    # One division per power of x: it overflows only where the partial itself does.
     for r in range((order + 1) * (order + 2) // 2):
-        j = _X_DEG[r]
-        out[r] = _FACTORIAL[_A_DEG[r]] * _FACTORIAL[j] * out[r] * inverse_x**j
+        for _ in range(_X_DEG[r]):
+            out[r] /= x
 
 
 @njit(cache=True)

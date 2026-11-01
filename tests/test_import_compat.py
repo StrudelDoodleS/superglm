@@ -135,18 +135,25 @@ _FIRST_USE: dict[str, str] = {
     ),
     **dict.fromkeys(
         (
-            _DECLARED + f"{module}.{law}_uniform"
-            for module in ("gamma", "gamma_log")
-            for law in ("logsf", "logcdf")
+            *(
+                _DECLARED + f"{module}.{law}_uniform"
+                for module in ("gamma", "gamma_log")
+                for law in ("logsf", "logcdf")
+            ),
+            _PRIMITIVES + "logratio",
         ),
         "GammaLS reads a bounded row's tail by the uniform expansion only above shape 1e4 "
         "(cv below 0.01 at unit weight), a response nearly constant in its cell: no census fit "
-        "reaches it",
+        "reaches it (logratio is its centred log(y/mean))",
     ),
     **dict.fromkeys(
-        (_ENGINE + "log_gamma_tail", _ENGINE + "_log_gamma_tail_rows"),
-        "the incomplete-gamma engine's scalar and array entry points, for tests: fits call "
-        "log_gamma_tail_into from the declared kernels",
+        (
+            _ENGINE + "log_gamma_tail",
+            _ENGINE + "log_gamma_tail_into",
+            _ENGINE + "_log_gamma_tail_rows",
+        ),
+        "the incomplete-gamma engine's plain-partial entry points, for tests: fits call "
+        "log_gamma_tail_scaled_into from the declared kernels",
     ),
     **dict.fromkeys(
         (_PRIMITIVES + name for name in ("softplus", "expit", "log1mexp", "invexpm1")),

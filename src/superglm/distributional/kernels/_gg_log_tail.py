@@ -41,12 +41,17 @@ composition keeps the engine's accuracy.  The error is the incomplete-gamma
 engine's, carried through the terms' absolute values;
 ``tests/test_gg_log_tail.py`` states the bound.
 
+Where ``x = a e^(q w)`` or ``e^(q w)`` would leave the normal range below,
+the route keeps ``log x = log a + q w`` and reads the leading term of the
+series, ``log P = a log x - ln Gamma(a + 1)`` (DLMF 8.7.1), exact to ``u``
+of the row's scale there because ``x/a <= 2^-60``.
+
 Rows neither engine evaluates write NaN everywhere: a non-finite ``w`` or
 ``q``, ``q`` so small that ``1/q^2`` overflows outside the first route,
-``x = a e^(q w)`` that overflows or underflows to zero, or an ``order``
-outside ``0..4``.
-For ``|q| > 10`` (``a < 0.01``) the incomplete-gamma engine's error grows like
-``u/a`` (its documented envelope).
+``x = a e^(q w)`` that overflows, a subnormal ``x`` with ``e^(q w)`` above
+``2^-60``, or an ``order`` outside ``0..4``.
+For ``|q| > 10`` (``a < 0.01``) the incomplete-gamma engine reads the tail
+beside its series as ``Q = u + v`` (its ``SMALL_SHAPE`` route).
 
 Imports only numpy and numba.
 """
@@ -70,13 +75,16 @@ from superglm.distributional.kernels._incomplete_gamma import (
     WORK_SIZE,
     jet_mul,
     log_gamma_tail_jet_into,
+    log_gamma_tail_small_x_jet_into,
 )
 
 # Digest of the compiled callees above, stamped by ``tools/generate_severity_families.py``:
 # Numba's on-disk cache keys a compiled caller on its own file only.
-_CALLEE_DIGEST = "b60441c1792b0d1ae62f665c09ca5500f977b59084d9025d3d740c8680ccb3dd"
+_CALLEE_DIGEST = "37e116a41422cd7da703b0e3fb51cb921abfabea68e7a28004ed3f8da14adf0b"
 
 ORDER_MAX = 4
+_LOG_MIN_NORMAL = math.log(2.0**-1022)
+_LOG_SMALL_RATIO = -60.0 * math.log(2.0)
 _N = (ORDER_MAX + 1) * (ORDER_MAX + 2) // 2
 _FACTORIAL = (1.0, 1.0, 2.0, 6.0, 24.0)
 
@@ -137,9 +145,21 @@ def _map_jets(flat, w, q, a, order, n):
 def _composed_log_tail(w, q, upper, order, out, flat):
     """The incomplete-gamma route for any row, its ``(da, e)`` jet composed into ``(w, q)``."""
     a = 1.0 / (q * q)
-    x = a * math.exp(q * w)
+    log_ratio = q * w
     jet = flat[_JET : _JET + _N]
-    if not log_gamma_tail_jet_into(a, x, upper == (q > 0.0), order, True, jet, flat):
+    primary = upper == (q > 0.0)
+    if log_ratio < _LOG_MIN_NORMAL or log_ratio + math.log(a) < _LOG_MIN_NORMAL:
+        # x = a e^(q w) would underflow or lose bits: keep log x.  There
+        # x/a <= 2^-60 and the jet is L's (log_gamma_tail_small_x_jet_into).
+        if not (
+            log_ratio <= _LOG_SMALL_RATIO
+            and log_gamma_tail_small_x_jet_into(
+                a, math.log(a) + log_ratio, primary, order, True, jet, flat
+            )
+        ):
+            _fill_nan(out)
+            return
+    elif not log_gamma_tail_jet_into(a, a * math.exp(log_ratio), primary, order, True, jet, flat):
         _fill_nan(out)
         return
     if not math.isfinite(jet[0]):
