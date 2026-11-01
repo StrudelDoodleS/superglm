@@ -20,6 +20,10 @@ quantities that a primitive resolves:
   ``y/m`` in ``(1/2, 2)``, where ``y - m`` is exact (both halved where ``m + y``
   overflows), and directly outside,
   where ``|y/m - 1| <= 3.3 gdev``: relative-accurate for exact inputs;
+- ``logratio(y, m) = log(y/m)``, centred: ``log1p((y - m)/m)`` for ``y/m`` in
+  ``[1/2, 2]``, where ``y - m`` is exact, so a ratio near one keeps its
+  digits; ``log(y/m)`` outside, or ``log y - log m`` where ``y/m`` leaves the
+  normal range;
 - ``gnorm(a) = a log a - a - log Gamma(a)``, by Stirling's series for
   ``a >= 10`` (DLMF 5.11.1);
 - ``psires_0123(a)``: ``psi^(n)(a)`` less the ``n``-th derivative of
@@ -161,6 +165,17 @@ def gdev(y, m):
 
 
 @njit(cache=True)
+def logratio(y, m):
+    """``log(y/m)``, relative-accurate for exact inputs, and exactly 0 at ``y = m``."""
+    if 0.5 * m <= y <= 2.0 * m:
+        return math.log1p((y - m) / m)
+    r = y / m
+    if _MIN_NORMAL <= r < math.inf:
+        return math.log(r)
+    return math.log(y) - math.log(m)
+
+
+@njit(cache=True)
 def _series(coefficients, x):
     """``sum_k c_k x^k``, ``k = 1..len(c)``, by Horner's rule."""
     total = 0.0
@@ -273,6 +288,7 @@ __all__ = [
     "gnorm",
     "invexpm1",
     "log1mexp",
+    "logratio",
     "polygamma_0123",
     "psires_0123",
     "softplus",

@@ -135,13 +135,16 @@ _FIRST_USE: dict[str, str] = {
     ),
     **dict.fromkeys(
         (
-            _DECLARED + f"{module}.{law}_uniform"
-            for module in ("gamma", "gamma_log")
-            for law in ("logsf", "logcdf")
+            *(
+                _DECLARED + f"{module}.{law}_uniform"
+                for module in ("gamma", "gamma_log")
+                for law in ("logsf", "logcdf")
+            ),
+            _PRIMITIVES + "logratio",
         ),
         "GammaLS reads a bounded row's tail by the uniform expansion only above shape 1e4 "
         "(cv below 0.01 at unit weight), a response nearly constant in its cell: no census fit "
-        "reaches it",
+        "reaches it (logratio is its centred log(y/mean))",
     ),
     **dict.fromkeys(
         (

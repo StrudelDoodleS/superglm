@@ -27,7 +27,7 @@ invalid, and never raises.
 
 Primitives (SymPy rule here, Numba body in ``_severity_primitives``):
 ``softplus``, ``expit``, ``log1mexp``, ``invexpm1``, ``gdev``, ``gnorm``,
-``ratio`` (``y/m`` as one division, printed inline),
+``ratio`` (``y/m`` as one division, printed inline), ``logratio``,
 ``psires``, ``sres`` (``gnorm``'s derivatives), and SymPy's ``loggamma`` and
 ``polygamma``.  ``polygamma``, ``psires`` and ``sres`` of orders ``n <= 3``
 at one argument share one call of the jet functions ``polygamma_0123``,
@@ -119,6 +119,16 @@ class ratio(sp.Function):  # noqa: N801
         return 1 / m if argindex == 1 else -self / m
 
 
+class logratio(sp.Function):  # noqa: N801
+    """``log(y/m)``, centred where ``y`` is near ``m``."""
+
+    nargs = 2
+
+    def fdiff(self, argindex=1):
+        y, m = self.args
+        return 1 / y if argindex == 1 else -1 / m
+
+
 class gnorm(sp.Function):  # noqa: N801
     nargs = 1
 
@@ -163,6 +173,7 @@ MPMATH = {
     "invexpm1": lambda t: 1 / mp.expm1(t),
     "gdev": lambda y, m: y / m - 1 - mp.log(y / m),
     "ratio": lambda y, m: y / m,
+    "logratio": lambda y, m: mp.log(y / m),
     "gnorm": lambda a: a * mp.log(a) - a - mp.loggamma(a),
     "psires": _mp_psires,
     "sres": lambda n, a: a ** (int(n) + 1) * _mp_psires(n, a),
@@ -297,7 +308,8 @@ GG_UNIFORM_TAIL = Engine(
 def _gamma_uniform_tail(upper: bool):
     def tail(y, mean, cv, weight):
         q = cv / sp.sqrt(weight)
-        return GG_UNIFORM_TAIL(sp.log(y / mean) / q, q, upper=upper)
+        # Centred: at a collapsing CV, w = log(y/mean)/q divides log's rounding by q.
+        return GG_UNIFORM_TAIL(logratio(y, mean) / q, q, upper=upper)
 
     return tail
 
@@ -410,7 +422,7 @@ class _Printer(PythonCodePrinter):
         return f"{name}({', '.join(self._print(argument) for argument in expr.args)})"
 
 
-_PRIMITIVE_NAMES = ("softplus", "expit", "log1mexp", "invexpm1", "gdev", "gnorm")
+_PRIMITIVE_NAMES = ("softplus", "expit", "log1mexp", "invexpm1", "gdev", "logratio", "gnorm")
 _JETS = {sp.polygamma: "polygamma_0123", psires: "psires_0123", sres: "sres_0123"}
 _PRINTER = _Printer({"fully_qualified_modules": False})
 

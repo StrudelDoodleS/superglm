@@ -17,7 +17,7 @@ from math import exp, expm1, lgamma, log, log1p, sqrt
 import numpy as np
 from numba import njit
 
-from superglm.distributional.kernels._severity_primitives import gdev, gnorm, sres_0123
+from superglm.distributional.kernels._severity_primitives import gdev, gnorm, logratio, sres_0123
 from superglm.distributional.kernels._gg_uniform_tail import gg_uniform_log_tail_with_scratch
 from superglm.distributional.kernels._incomplete_gamma import log_gamma_tail_scaled_into
 
@@ -26,7 +26,7 @@ DATA = ('weight',)
 COORDINATES = 'natural'
 LAWS = ('density', 'logsf', 'logcdf', 'logsf_uniform', 'logcdf_uniform')
 MAX_ORDER = 4
-PRIMITIVES_DIGEST = "997019cb417440d4356556083ac6e5858de1002c98ddd6c404465c1ff1d5781f"
+PRIMITIVES_DIGEST = "97d6a10485b8e2c80d06559c0759f55bb6ac750ff00631021fe44ad494630e2a"
 ENGINES_DIGEST = "a700644dce3da3aeac7b8cf8e63715118faa418bcd33962156d33d015b4cf568"
 
 @njit(cache=True, error_model='numpy')
@@ -254,39 +254,39 @@ def logsf_uniform(Y, P0, P1, D0, order, J0, J1, J2, J3, J4):
         d0 = D0[i]
         t0 = (1.0 / (p1))
         t1 = sqrt(d0)
-        t2 = (1.0 / (p0))
-        t3 = log(t2*y)
-        t4 = t1*t3
-        t5 = (1.0 / (t1))
-        gg_uniform_log_tail_with_scratch(t0*t4, p1*t5, np.bool_(True), order, out0, work)
+        t2 = logratio(y, p0)
+        t3 = t1*t2
+        t4 = (1.0 / (t1))
+        gg_uniform_log_tail_with_scratch(t0*t3, p1*t4, np.bool_(True), order, out0, work)
         c0_0 = out0[0]
         J0[i] = c0_0
         if order >= 1:
+            t5 = (1.0 / (p0))
             c0_1 = out0[1]
             t6 = c0_1*t1
             t7 = t0*t6
             t8 = (1.0 / (p1 * p1))
-            t9 = t3*t8
+            t9 = t2*t8
             c0_2 = out0[2]
-            J1[i, 0] = -t2*t7
-            J1[i, 1] = c0_2*t5 - t6*t9
+            J1[i, 0] = -t5*t7
+            J1[i, 1] = c0_2*t4 - t6*t9
             if order >= 2:
                 t10 = d0*t0
                 c0_3 = out0[3]
                 t11 = c0_3*t10
                 t12 = t0/(p0 * p0)
-                t13 = t4*t8
+                t13 = t3*t8
                 c0_4 = out0[4]
-                t14 = c0_3*t13 - c0_4*t5
-                t15 = t0*t1*t2
+                t14 = c0_3*t13 - c0_4*t4
+                t15 = t0*t1*t5
                 t16 = 2.0*t6
                 t17 = (1.0 / (p1 * p1 * p1))
-                t18 = t17*t3
+                t18 = t17*t2
                 t19 = t1*t14
                 c0_5 = out0[5]
                 J2[i, 0] = t12*(t11 + t6)
                 J2[i, 1] = t15*(c0_1*t0 + t14)
-                J2[i, 2] = t16*t18 + t19*t9 - t5*(c0_4*t13 - c0_5*t5)
+                J2[i, 2] = t16*t18 + t19*t9 - t4*(c0_4*t13 - c0_5*t4)
                 if order >= 3:
                     t20 = (d0 ** ((3.0 / 2.0)))
                     t21 = t20*t8
@@ -296,46 +296,46 @@ def logsf_uniform(Y, P0, P1, D0, order, J0, J1, J2, J3, J4):
                     t24 = 2.0*t8
                     t25 = c0_3*d0
                     c0_7 = out0[7]
-                    t26 = c0_6*t13 - c0_7*t5
+                    t26 = c0_6*t13 - c0_7*t4
                     t27 = t10*t26
                     t28 = 2.0*t0
-                    t29 = 2.0*t4
+                    t29 = 2.0*t3
                     t30 = t17*t29
                     c0_8 = out0[8]
-                    t31 = c0_7*t13 - c0_8*t5
-                    t32 = c0_3*t30 + t13*t26 - t31*t5
+                    t31 = c0_7*t13 - c0_8*t4
+                    t32 = c0_3*t30 + t13*t26 - t31*t4
                     t33 = 6.0*t6
                     t34 = (1.0 / (p1 * p1 * p1 * p1))
-                    t35 = t3*t34
+                    t35 = t2*t34
                     t36 = t1*t32
                     c0_9 = out0[9]
                     J3[i, 0] = -t23*(3.0*t11 + t16 + t22)
                     J3[i, 1] = -t12*(t19 + t24*t25 + t27 + t7)
                     J3[i, 2] = -t15*(c0_1*t24 + t14*t28 + t32)
-                    J3[i, 3] = -4.0*t18*t19 - t33*t35 - t36*t9 + t5*(c0_4*t30 + t13*t31 - t5*(c0_8*t13 - c0_9*t5))
+                    J3[i, 3] = -4.0*t18*t19 - t33*t35 - t36*t9 + t4*(c0_4*t30 + t13*t31 - t4*(c0_8*t13 - c0_9*t4))
                     if order >= 4:
                         t37 = 6.0*t8
                         t38 = c0_6*t17
                         c0_10 = out0[10]
                         c0_11 = out0[11]
-                        t39 = c0_10*t13 - c0_11*t5
+                        t39 = c0_10*t13 - c0_11*t4
                         t40 = 6.0*t17
                         t41 = 4.0*t26
                         c0_12 = out0[12]
-                        t42 = c0_11*t13 - c0_12*t5
-                        t43 = t13*t39 + t29*t38 - t42*t5
-                        t44 = 6.0*t34*t4
-                        t45 = t17*t4
+                        t42 = c0_11*t13 - c0_12*t4
+                        t43 = t13*t39 + t29*t38 - t4*t42
+                        t44 = 6.0*t3*t34
+                        t45 = t17*t3
                         c0_13 = out0[13]
-                        t46 = c0_12*t13 - c0_13*t5
-                        t47 = c0_7*t30 + t13*t42 - t46*t5
-                        t48 = c0_3*t44 + t13*t43 + t41*t45 - t47*t5
+                        t46 = c0_12*t13 - c0_13*t4
+                        t47 = c0_7*t30 + t13*t42 - t4*t46
+                        t48 = c0_3*t44 + t13*t43 - t4*t47 + t41*t45
                         c0_14 = out0[14]
                         J4[i, 0] = t0*(c0_10*(d0 * d0)*t17 + 11.0*t11 + 6.0*t22 + t33)/(p0 * p0 * p0 * p0)
                         J4[i, 1] = t23*(t0*t16 + 2.0*t19 + 3.0*t20*t38 + t21*t39 + t25*t37 + 3.0*t27)
                         J4[i, 2] = t12*(d0*t41*t8 + t10*t43 + t16*t8 + t19*t28 + t25*t40 + t36)
                         J4[i, 3] = t15*(c0_1*t40 + 3.0*t0*t32 + t14*t37 + t48)
-                        J4[i, 4] = t13*t48 + 18.0*t19*t35 + t3*t36*t40 - t5*(c0_4*t44 + t13*t47 + 4.0*t31*t45 - t5*(c0_8*t30 + t13*t46 - t5*(c0_13*t13 - c0_14*t5))) + 24.0*t3*t6/(p1 * p1 * p1 * p1 * p1)
+                        J4[i, 4] = t13*t48 + 18.0*t19*t35 + t2*t36*t40 - t4*(c0_4*t44 + t13*t47 + 4.0*t31*t45 - t4*(c0_8*t30 + t13*t46 - t4*(c0_13*t13 - c0_14*t4))) + 24.0*t2*t6/(p1 * p1 * p1 * p1 * p1)
 
 
 @njit(cache=True, error_model='numpy')
@@ -349,39 +349,39 @@ def logcdf_uniform(Y, P0, P1, D0, order, J0, J1, J2, J3, J4):
         d0 = D0[i]
         t0 = (1.0 / (p1))
         t1 = sqrt(d0)
-        t2 = (1.0 / (p0))
-        t3 = log(t2*y)
-        t4 = t1*t3
-        t5 = (1.0 / (t1))
-        gg_uniform_log_tail_with_scratch(t0*t4, p1*t5, np.bool_(False), order, out0, work)
+        t2 = logratio(y, p0)
+        t3 = t1*t2
+        t4 = (1.0 / (t1))
+        gg_uniform_log_tail_with_scratch(t0*t3, p1*t4, np.bool_(False), order, out0, work)
         c0_0 = out0[0]
         J0[i] = c0_0
         if order >= 1:
+            t5 = (1.0 / (p0))
             c0_1 = out0[1]
             t6 = c0_1*t1
             t7 = t0*t6
             t8 = (1.0 / (p1 * p1))
-            t9 = t3*t8
+            t9 = t2*t8
             c0_2 = out0[2]
-            J1[i, 0] = -t2*t7
-            J1[i, 1] = c0_2*t5 - t6*t9
+            J1[i, 0] = -t5*t7
+            J1[i, 1] = c0_2*t4 - t6*t9
             if order >= 2:
                 t10 = d0*t0
                 c0_3 = out0[3]
                 t11 = c0_3*t10
                 t12 = t0/(p0 * p0)
-                t13 = t4*t8
+                t13 = t3*t8
                 c0_4 = out0[4]
-                t14 = c0_3*t13 - c0_4*t5
-                t15 = t0*t1*t2
+                t14 = c0_3*t13 - c0_4*t4
+                t15 = t0*t1*t5
                 t16 = 2.0*t6
                 t17 = (1.0 / (p1 * p1 * p1))
-                t18 = t17*t3
+                t18 = t17*t2
                 t19 = t1*t14
                 c0_5 = out0[5]
                 J2[i, 0] = t12*(t11 + t6)
                 J2[i, 1] = t15*(c0_1*t0 + t14)
-                J2[i, 2] = t16*t18 + t19*t9 - t5*(c0_4*t13 - c0_5*t5)
+                J2[i, 2] = t16*t18 + t19*t9 - t4*(c0_4*t13 - c0_5*t4)
                 if order >= 3:
                     t20 = (d0 ** ((3.0 / 2.0)))
                     t21 = t20*t8
@@ -391,46 +391,46 @@ def logcdf_uniform(Y, P0, P1, D0, order, J0, J1, J2, J3, J4):
                     t24 = 2.0*t8
                     t25 = c0_3*d0
                     c0_7 = out0[7]
-                    t26 = c0_6*t13 - c0_7*t5
+                    t26 = c0_6*t13 - c0_7*t4
                     t27 = t10*t26
                     t28 = 2.0*t0
-                    t29 = 2.0*t4
+                    t29 = 2.0*t3
                     t30 = t17*t29
                     c0_8 = out0[8]
-                    t31 = c0_7*t13 - c0_8*t5
-                    t32 = c0_3*t30 + t13*t26 - t31*t5
+                    t31 = c0_7*t13 - c0_8*t4
+                    t32 = c0_3*t30 + t13*t26 - t31*t4
                     t33 = 6.0*t6
                     t34 = (1.0 / (p1 * p1 * p1 * p1))
-                    t35 = t3*t34
+                    t35 = t2*t34
                     t36 = t1*t32
                     c0_9 = out0[9]
                     J3[i, 0] = -t23*(3.0*t11 + t16 + t22)
                     J3[i, 1] = -t12*(t19 + t24*t25 + t27 + t7)
                     J3[i, 2] = -t15*(c0_1*t24 + t14*t28 + t32)
-                    J3[i, 3] = -4.0*t18*t19 - t33*t35 - t36*t9 + t5*(c0_4*t30 + t13*t31 - t5*(c0_8*t13 - c0_9*t5))
+                    J3[i, 3] = -4.0*t18*t19 - t33*t35 - t36*t9 + t4*(c0_4*t30 + t13*t31 - t4*(c0_8*t13 - c0_9*t4))
                     if order >= 4:
                         t37 = 6.0*t8
                         t38 = c0_6*t17
                         c0_10 = out0[10]
                         c0_11 = out0[11]
-                        t39 = c0_10*t13 - c0_11*t5
+                        t39 = c0_10*t13 - c0_11*t4
                         t40 = 6.0*t17
                         t41 = 4.0*t26
                         c0_12 = out0[12]
-                        t42 = c0_11*t13 - c0_12*t5
-                        t43 = t13*t39 + t29*t38 - t42*t5
-                        t44 = 6.0*t34*t4
-                        t45 = t17*t4
+                        t42 = c0_11*t13 - c0_12*t4
+                        t43 = t13*t39 + t29*t38 - t4*t42
+                        t44 = 6.0*t3*t34
+                        t45 = t17*t3
                         c0_13 = out0[13]
-                        t46 = c0_12*t13 - c0_13*t5
-                        t47 = c0_7*t30 + t13*t42 - t46*t5
-                        t48 = c0_3*t44 + t13*t43 + t41*t45 - t47*t5
+                        t46 = c0_12*t13 - c0_13*t4
+                        t47 = c0_7*t30 + t13*t42 - t4*t46
+                        t48 = c0_3*t44 + t13*t43 - t4*t47 + t41*t45
                         c0_14 = out0[14]
                         J4[i, 0] = t0*(c0_10*(d0 * d0)*t17 + 11.0*t11 + 6.0*t22 + t33)/(p0 * p0 * p0 * p0)
                         J4[i, 1] = t23*(t0*t16 + 2.0*t19 + 3.0*t20*t38 + t21*t39 + t25*t37 + 3.0*t27)
                         J4[i, 2] = t12*(d0*t41*t8 + t10*t43 + t16*t8 + t19*t28 + t25*t40 + t36)
                         J4[i, 3] = t15*(c0_1*t40 + 3.0*t0*t32 + t14*t37 + t48)
-                        J4[i, 4] = t13*t48 + 18.0*t19*t35 + t3*t36*t40 - t5*(c0_4*t44 + t13*t47 + 4.0*t31*t45 - t5*(c0_8*t30 + t13*t46 - t5*(c0_13*t13 - c0_14*t5))) + 24.0*t3*t6/(p1 * p1 * p1 * p1 * p1)
+                        J4[i, 4] = t13*t48 + 18.0*t19*t35 + t2*t36*t40 - t4*(c0_4*t44 + t13*t47 + 4.0*t31*t45 - t4*(c0_8*t30 + t13*t46 - t4*(c0_13*t13 - c0_14*t4))) + 24.0*t2*t6/(p1 * p1 * p1 * p1 * p1)
 
 
 @njit(cache=True, error_model='numpy')

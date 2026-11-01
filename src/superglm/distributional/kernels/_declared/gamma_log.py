@@ -18,7 +18,7 @@ from math import exp, expm1, lgamma, log, log1p, sqrt
 import numpy as np
 from numba import njit
 
-from superglm.distributional.kernels._severity_primitives import gdev, gnorm, sres_0123
+from superglm.distributional.kernels._severity_primitives import gdev, gnorm, logratio, sres_0123
 from superglm.distributional.kernels._gg_uniform_tail import gg_uniform_log_tail_with_scratch
 from superglm.distributional.kernels._incomplete_gamma import log_gamma_tail_scaled_into
 
@@ -27,7 +27,7 @@ DATA = ('weight',)
 COORDINATES = 'log'
 LAWS = ('density', 'logsf', 'logcdf', 'logsf_uniform', 'logcdf_uniform')
 MAX_ORDER = 4
-PRIMITIVES_DIGEST = "997019cb417440d4356556083ac6e5858de1002c98ddd6c404465c1ff1d5781f"
+PRIMITIVES_DIGEST = "97d6a10485b8e2c80d06559c0759f55bb6ac750ff00631021fe44ad494630e2a"
 ENGINES_DIGEST = "a700644dce3da3aeac7b8cf8e63715118faa418bcd33962156d33d015b4cf568"
 
 @njit(cache=True, error_model='numpy')
@@ -228,7 +228,7 @@ def logsf_uniform(Y, P0, P1, D0, order, J0, J1, J2, J3, J4):
         d0 = D0[i]
         t0 = sqrt(d0)
         t1 = t0*exp(-p1)
-        t2 = t1*log(y*exp(-p0))
+        t2 = t1*logratio(y, exp(p0))
         t3 = exp(p1)
         t4 = (1.0 / (t0))
         t5 = t3*t4
@@ -317,7 +317,7 @@ def logcdf_uniform(Y, P0, P1, D0, order, J0, J1, J2, J3, J4):
         d0 = D0[i]
         t0 = sqrt(d0)
         t1 = t0*exp(-p1)
-        t2 = t1*log(y*exp(-p0))
+        t2 = t1*logratio(y, exp(p0))
         t3 = exp(p1)
         t4 = (1.0 / (t0))
         t5 = t3*t4

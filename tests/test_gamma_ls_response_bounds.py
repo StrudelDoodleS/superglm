@@ -756,3 +756,37 @@ def test_a_tiny_left_censoring_threshold_keeps_a_representable_hessian():
         [natural[0][0], natural[1][0, 0], natural[2][0, 0]], [-c, c, -2 * c], rtol=1e-13
     )
     np.testing.assert_allclose([log[k][0, 0] for k in range(1, 5)], [c, -c, c, -c], rtol=1e-13)
+
+
+@pytest.mark.parametrize("coordinates", ["natural", "log"])
+@pytest.mark.parametrize("steps", [0, 1, 7])
+def test_a_censored_row_near_a_non_unit_mean_keeps_its_standardized_distance(coordinates, steps):
+    """At CV ``1e-12`` the uniform tail reads ``w = log(y/mean)/q``: the log must be centred.
+
+    Mean 49 and ``y`` that many float steps above it.  ``log((1/mean) y)``
+    carries an absolute ``u``, which ``1/q`` turns into a displacement of
+    order ``u/q = 1e-4``; at ``y = mean`` the survival is one half.  Shape
+    ``1e24`` is the log-normal limit, ``log S = log Phi(-w) (1 + O(q))``.
+    """
+    q, mean = 1e-12, 49.0
+    y = mean
+    for _ in range(steps):
+        y = np.nextafter(y, _INF)
+    theta = np.array([[mean, q]])
+    theta = np.log(theta) if coordinates == "log" else theta
+    jets = _declared_bounds.gamma_window_jets(
+        np.array([y]), np.array([_INF]), theta, np.ones(1), order=0, coordinates=coordinates
+    )
+    exact_mean = mp.exp(mp.mpf(theta[0, 0])) if coordinates == "log" else mp.mpf(mean)
+    w = float(mp.log(mp.mpf(y) / exact_mean) / mp.mpf(q))
+    # log coordinates round log 49 itself: exp of it moves the mean by about 4u.
+    allowance = 1e-9 if coordinates == "natural" else 4 * _U / q
+    assert abs(jets[0][0] - stats.norm.logsf(w)) <= allowance + 1e-9
+
+
+def test_a_collapsing_cv_at_the_mean_survives_with_probability_one_half():
+    """The review's row: mean = y = 49, CV ``1e-16``, right-censored."""
+    got = GammaLS().log_window_probability(
+        np.array([49.0]), np.array([_INF]), np.array([[49.0, 1e-16]])
+    )
+    np.testing.assert_allclose(got, [np.log(0.5)], rtol=1e-12)

@@ -245,15 +245,18 @@ def gamma_window_jets(
     log_coordinates = coordinates == "log"
 
     def uniform(points, row_theta, columns):
-        log_mean = row_theta[:, 0] if log_coordinates else np.log(row_theta[:, 0])
+        row_mean = np.exp(row_theta[:, 0]) if log_coordinates else row_theta[:, 0]
         row_cv = np.exp(row_theta[:, 1]) if log_coordinates else row_theta[:, 1]
         with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
             routed = columns[0] / (row_cv * row_cv) > UNIFORM_SHAPE
             if routed.any():
                 rows = np.flatnonzero(routed)
                 q = row_cv[rows] / np.sqrt(columns[0][rows])
-                w = (np.log(points[rows]) - log_mean[rows]) / q
-                routed[rows] = gg_uniform_domain(w, q)
+                # The kernels' centred log(y/mean), so the route sees their w.
+                y, mean = points[rows], row_mean[rows]
+                near = (0.5 * mean <= y) & (y <= 2.0 * mean)
+                log_ratio = np.where(near, np.log1p((y - mean) / mean), np.log(y) - np.log(mean))
+                routed[rows] = gg_uniform_domain(log_ratio / q, q)
         return routed
 
     return declared_window_jets(
