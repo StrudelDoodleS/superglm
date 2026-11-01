@@ -1030,6 +1030,27 @@ def _run_iterations(
         else initial_geometry
     )
 
+    def finish(
+        converged: bool,
+        reason: ConvergenceReason,
+        score_relative: float,
+        *,
+        no_step: bool = False,
+    ) -> _OptimizationRun:
+        # Reads the loop's current state; ``no_step`` records an exit that made no
+        # movement, instead of the last accepted step's relative changes.
+        return _OptimizationRun(
+            state=state,
+            geometry=geometry,
+            observed_geometry=observed_geometry,
+            history=tuple(history),
+            converged=converged,
+            reason=reason,
+            score_relative=score_relative,
+            objective_relative_change=0.0 if no_step else objective_relative_change,
+            step_relative=0.0 if no_step else step_relative,
+        )
+
     for local_iteration in range(config.max_iterations):
         score_relative = _optimization_score_relative(
             context,
@@ -1052,17 +1073,7 @@ def _run_iterations(
                 tolerance=config.tolerance,
             )
         ):
-            return _OptimizationRun(
-                state=state,
-                geometry=geometry,
-                observed_geometry=observed_geometry,
-                history=tuple(history),
-                converged=True,
-                reason="score",
-                score_relative=score_relative,
-                objective_relative_change=objective_relative_change,
-                step_relative=step_relative,
-            )
+            return finish(True, "score", score_relative)
 
         try:
             with measure_phase(phase_recorder, "coefficient_decomposition_solve"):
@@ -1076,17 +1087,7 @@ def _run_iterations(
             # No Levenberg damping of the curvature gives a certified ascent
             # direction. The accepted state is the best one reached: stop there,
             # unconverged, and let the fit disclose why instead of raising.
-            return _OptimizationRun(
-                state=state,
-                geometry=geometry,
-                observed_geometry=observed_geometry,
-                history=tuple(history),
-                converged=False,
-                reason="no_ascent_direction",
-                score_relative=score_relative,
-                objective_relative_change=objective_relative_change,
-                step_relative=step_relative,
-            )
+            return finish(False, "no_ascent_direction", score_relative)
         optimization_score = _optimization_score(context, geometry.score_penalized)
         with measure_phase(phase_recorder, "likelihood_evaluation"):
             capped_step, step_scale = _cap_predictor_step(
@@ -1211,17 +1212,7 @@ def _run_iterations(
                     observed_geometry = measured_observed
                 del measured_observed
                 if certified:
-                    return _OptimizationRun(
-                        state=state,
-                        geometry=geometry,
-                        observed_geometry=observed_geometry,
-                        history=tuple(history),
-                        converged=True,
-                        reason="objective_and_step",
-                        score_relative=score_relative,
-                        objective_relative_change=0.0,
-                        step_relative=0.0,
-                    )
+                    return finish(True, "objective_and_step", score_relative, no_step=True)
             retained_correction: NDArray[np.float64] | None = None
             if direction.decomposition.rank == len(optimization_score):
                 try:
@@ -1249,20 +1240,10 @@ def _run_iterations(
                 and not distinct_trial_improved
                 and reached_identical_candidate
             )
-            return _OptimizationRun(
-                state=state,
-                geometry=geometry,
-                observed_geometry=observed_geometry,
-                history=tuple(history),
-                converged=resolution_limited,
-                reason=(
-                    "resolution_limited_stationarity"
-                    if resolution_limited
-                    else "line_search_failed"
-                ),
-                score_relative=score_relative,
-                objective_relative_change=objective_relative_change,
-                step_relative=step_relative,
+            return finish(
+                resolution_limited,
+                ("resolution_limited_stationarity" if resolution_limited else "line_search_failed"),
+                score_relative,
             )
 
         if accepted_geometry is None:
@@ -1310,17 +1291,7 @@ def _run_iterations(
         geometry = accepted_geometry
         if stop_policy == "score_only":
             if accepted_score_relative <= config.tolerance:
-                return _OptimizationRun(
-                    state=state,
-                    geometry=geometry,
-                    observed_geometry=observed_geometry,
-                    history=tuple(history),
-                    converged=True,
-                    reason="score",
-                    score_relative=accepted_score_relative,
-                    objective_relative_change=objective_relative_change,
-                    step_relative=step_relative,
-                )
+                return finish(True, "score", accepted_score_relative)
             continue
         if objective_relative_change <= config.tolerance and step_relative <= config.tolerance:
             certified, measured_observed = _objective_and_step_is_certified(
@@ -1336,17 +1307,7 @@ def _run_iterations(
                 observed_geometry = measured_observed
             del measured_observed
             if certified:
-                return _OptimizationRun(
-                    state=state,
-                    geometry=geometry,
-                    observed_geometry=observed_geometry,
-                    history=tuple(history),
-                    converged=True,
-                    reason="objective_and_step",
-                    score_relative=accepted_score_relative,
-                    objective_relative_change=objective_relative_change,
-                    step_relative=step_relative,
-                )
+                return finish(True, "objective_and_step", accepted_score_relative)
             # A distinct tiny step is still a valid state transition.  Keep
             # the remaining iteration budget so a fresh direction can recover
             # stationarity; only an identical candidate has no progress to
@@ -1355,32 +1316,16 @@ def _run_iterations(
             objective_relative_change <= config.tolerance
             and accepted_score_relative <= config.tolerance
         ):
-            return _OptimizationRun(
-                state=state,
-                geometry=geometry,
-                observed_geometry=observed_geometry,
-                history=tuple(history),
-                converged=True,
-                reason="objective_and_score",
-                score_relative=accepted_score_relative,
-                objective_relative_change=objective_relative_change,
-                step_relative=step_relative,
-            )
+            return finish(True, "objective_and_score", accepted_score_relative)
 
-    return _OptimizationRun(
-        state=state,
-        geometry=geometry,
-        observed_geometry=observed_geometry,
-        history=tuple(history),
-        converged=False,
-        reason="max_iterations",
-        score_relative=_optimization_score_relative(
+    return finish(
+        False,
+        "max_iterations",
+        _optimization_score_relative(
             context,
             geometry.score_penalized,
             state.penalized_optimizing_log_likelihood,
         ),
-        objective_relative_change=objective_relative_change,
-        step_relative=step_relative,
     )
 
 
@@ -1481,6 +1426,24 @@ def _reuse_observed_initial_result(
         penalized_curvature=_readonly(penalized_curvature),
     )
     return state, geometry
+
+
+def _geometry_from(
+    context: _SolverContext,
+    state: _AcceptedState,
+    source: chunking.CurvatureSource,
+    config: DenseSolverConfig,
+    coefficient_geometry: DenseJointGeometry,
+    held: DenseJointGeometry | None,
+    phase_recorder: FitPhaseRecorder | None,
+) -> DenseJointGeometry:
+    """The geometry for ``source``: the run's own, else one already held, else measured."""
+
+    if config.coefficient_curvature == source:
+        return coefficient_geometry
+    if held is not None:
+        return held
+    return _measured_geometry(context, state, source, phase_recorder)
 
 
 def _fit_dense_fixed_lambda_core(
@@ -1602,6 +1565,19 @@ def _fit_dense_fixed_lambda_core(
     observed_geometry = run.observed_geometry
     del run
 
+    def adopt(run: _OptimizationRun) -> None:
+        nonlocal state, coefficient_geometry, converged, reason, score_relative
+        nonlocal objective_relative_change, step_relative, observed_geometry
+        state = run.state
+        coefficient_geometry = run.geometry
+        history.extend(run.history)
+        converged = run.converged
+        reason = run.reason
+        score_relative = run.score_relative
+        objective_relative_change = run.objective_relative_change
+        step_relative = run.step_relative
+        observed_geometry = run.observed_geometry
+
     if converged and _wall_step_unsettled(context, state, coefficient_geometry, solver_config):
         # Continue a fit stopped with a row still moving towards a wall, at a
         # hundredth of the tolerance: a pressed fit keeps moving, an interior one
@@ -1626,28 +1602,18 @@ def _fit_dense_fixed_lambda_core(
         except DenseSolverError:
             continued = None
         if continued is not None and continued.converged:
-            state = continued.state
-            coefficient_geometry = continued.geometry
-            history.extend(continued.history)
-            reason = continued.reason
-            score_relative = continued.score_relative
-            objective_relative_change = continued.objective_relative_change
-            step_relative = continued.step_relative
-            observed_geometry = continued.observed_geometry
+            adopt(continued)
         del continued
 
     with measure_phase(phase_recorder, "terminal_observed_retry_fallback"):
-        observed_geometry = (
-            coefficient_geometry
-            if solver_config.coefficient_curvature == "observed"
-            else observed_geometry
-            if observed_geometry is not None
-            else _measured_geometry(
-                context,
-                state,
-                "observed",
-                phase_recorder,
-            )
+        observed_geometry = _geometry_from(
+            context,
+            state,
+            "observed",
+            solver_config,
+            coefficient_geometry,
+            observed_geometry,
+            phase_recorder,
         )
         fisher_available = context.fisher_family is not None
         requested_terminal_curvature = observed_geometry.penalized_curvature
@@ -1710,27 +1676,17 @@ def _fit_dense_fixed_lambda_core(
                 # too, handled as one: the main run's state and verdict stand.
                 retry = None
             if retry is not None:
-                state = retry.state
-                coefficient_geometry = retry.geometry
-                history.extend(retry.history)
-                converged = retry.converged
-                reason = retry.reason
-                score_relative = retry.score_relative
-                objective_relative_change = retry.objective_relative_change
-                step_relative = retry.step_relative
-                observed_geometry = (
-                    coefficient_geometry
-                    if retry_config.coefficient_curvature == "observed"
-                    else retry.observed_geometry
-                    if retry.observed_geometry is not None
-                    else _measured_geometry(
-                        context,
-                        state,
-                        "observed",
-                        phase_recorder,
-                    )
-                )
+                adopt(retry)
                 del retry
+                observed_geometry = _geometry_from(
+                    context,
+                    state,
+                    "observed",
+                    retry_config,
+                    coefficient_geometry,
+                    observed_geometry,
+                    phase_recorder,
+                )
             fisher_matrix = None
             # A dense reused endpoint carries no row derivatives (see
             # _reuse_observed_initial_result), and a failed retry keeps that
@@ -1748,15 +1704,14 @@ def _fit_dense_fixed_lambda_core(
                     fallback_state = evaluated
             if fisher_available:
                 try:
-                    fisher_geometry = (
-                        coefficient_geometry
-                        if retry_config.coefficient_curvature == "fisher"
-                        else _measured_geometry(
-                            context,
-                            fallback_state,
-                            "fisher",
-                            phase_recorder,
-                        )
+                    fisher_geometry = _geometry_from(
+                        context,
+                        fallback_state,
+                        "fisher",
+                        retry_config,
+                        coefficient_geometry,
+                        None,
+                        phase_recorder,
                     )
                 except (_NumericalEvaluationError, FloatingPointError, OverflowError):
                     # Expected information the family cannot represent at this
