@@ -554,6 +554,9 @@ def test_a_label_the_grouping_does_not_cover_is_never_the_reference() -> None:
     )
     frame = as_eager_frame(pd.DataFrame({"g": ["d"] * 100 + ["a"] * 10 + ["b"] * 20}))
     assert _reference_value(fitted, frame, "g") == "b"
+    # With no fitted level present, each label stands for itself.
+    only_uncovered = as_eager_frame(pd.DataFrame({"g": ["d"] * 3 + ["e"]}))
+    assert _reference_value(fitted, only_uncovered, "g") == "d"
 
 
 @pytest.fixture(scope="module")

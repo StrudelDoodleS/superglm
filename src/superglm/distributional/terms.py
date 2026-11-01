@@ -439,9 +439,9 @@ def _level_inputs(spec: Any | None, levels: Sequence[Any], values: Any) -> list[
 
     A grouped term's levels are its group labels, but it reads original
     labels. Each group is swept through the first of the frame's labels, in
-    sorted order, that the term reads at it, so every other term reading the
-    column has seen that label too. A group with no label in the frame is
-    swept through its first member.
+    sorted order, that the term reads at it, so on the training frame every
+    other term reading the column has seen that label too. A group with no
+    label in the frame is swept through its first member.
     """
     grouping = None if spec is None else getattr(spec, "_grouping", None)
     if grouping is None:
@@ -485,9 +485,9 @@ def _reference_value(fitted: Any, frame: EagerFrame, name: Hashable) -> Any:
     A numeric column without levels is held at its median.  Any other column is
     held at its most frequent fitted level, counted over the labels the term reads
     at it; a tie goes to the level that comes first in :func:`_column_levels` order.
-    A label the fit never saw is held only if no fitted level is present.  The
-    value returned is the chosen level's most frequent label, so a grouped term is
-    held at one of its members.
+    A label the term reads at no fitted level is held only if no fitted level is
+    present.  The value returned is the chosen level's most frequent label, so a
+    grouped term is held at one of its members.
     """
     values = frame.column_array(name)
     empty = (
@@ -515,7 +515,7 @@ def _reference_value(fitted: Any, frame: EagerFrame, name: Hashable) -> Any:
     level_counts: dict[Any, int] = {}
     for level, count in zip(read, counts.tolist(), strict=True):
         level_counts[level] = level_counts.get(level, 0) + count
-    # A label the fit never saw is held only when no fitted level is present.
+    # A label read at no fitted level is held only when no fitted level is present.
     candidates = {level: count for level, count in level_counts.items() if level in rank}
     candidates = candidates or level_counts
     top = max(candidates.values())
