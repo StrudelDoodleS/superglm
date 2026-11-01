@@ -3,6 +3,7 @@
 import math
 import weakref
 from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -19,6 +20,7 @@ from superglm.distributional.predictor import Predictor, compile_predictors
 from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.solver import chunks
 from superglm.distributional.solver import solver as solver_api
+from superglm.distributional.solver._global_moments import GlobalMomentRefusalError
 from superglm.distributional.weights import UnsupportedLikelihoodContractError
 from superglm.features import Numeric, Spline
 from superglm.group_matrix import (
@@ -133,6 +135,55 @@ def _combined(context, coefficients, **kwargs):
         curvature_source=context.coefficient_curvature,
         likelihood_cache=context.likelihood_cache,
         **kwargs,
+    )
+
+
+@pytest.mark.parametrize("failure", ["add", "finish"])
+def test_partial_global_fallback_resets_likelihood_sums_and_closes_workspace(monkeypatch, failure):
+    context, coefficients = _context()
+    monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: None)
+    expected_geometry, expected_sums = _combined(context, coefficients)
+    events, refs = [], []
+
+    class Plan:
+        def reset(self, **kwargs):
+            self.buffer = np.empty((4, 4))
+            refs.append(weakref.ref(self.buffer))
+            self.count = 0
+
+        def add_chunk(self, *args):
+            self.count += 1
+            if self.count == 2 and failure == "add":
+                raise GlobalMomentRefusalError("numerical refusal", recoverable=True)
+
+        def finish(self):
+            raise GlobalMomentRefusalError("numerical refusal", recoverable=True)
+
+        def close(self):
+            self.buffer = None
+            events.append("closed")
+
+    original = chunks._assemble_grouped_pass_geometry
+
+    def replay(*args, **kwargs):
+        assert events == ["closed"]
+        assert all(ref() is None for ref in refs)
+        assert kwargs["_likelihood_sums"] == [0.0, 0.0]
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: 64 << 20)
+    monkeypatch.setattr(
+        chunks, "build_global_moment_plan", lambda *args, **kwargs: SimpleNamespace(plan=Plan())
+    )
+    monkeypatch.setattr(chunks, "_assemble_grouped_pass_geometry", replay)
+    geometry, sums = _combined(context, coefficients)
+    # Exact on purpose: the replay runs the same per-pass assembly, in the same order, as the
+    # run it is compared with. What the test guards is a likelihood sum that was not reset, an
+    # error of a whole chunk, so no rounding allowance is needed or wanted.
+    assert sums == expected_sums
+    np.testing.assert_allclose(geometry.score_data, expected_geometry.score_data, rtol=0, atol=0)
+    np.testing.assert_allclose(
+        geometry.data_curvature, expected_geometry.data_curvature, rtol=0, atol=0
     )
 
 
@@ -402,7 +453,8 @@ def test_gamma_unrepresentable_derivative_keeps_its_finite_value_screen():
     assert np.isfinite(screened.penalized_optimizing_log_likelihood)
 
 
-def test_fused_gaussian_cancellation_obeys_independent_backward_bounds():
+@pytest.mark.parametrize("global_moments", [False, True])
+def test_fused_gaussian_cancellation_obeys_independent_backward_bounds(monkeypatch, global_moments):
     context, coefficients = _context()
     location, scale = context.layout.predictors
     coefficients[scale.coefficient_slice] = 0
@@ -412,6 +464,8 @@ def test_fused_gaussian_cancellation_obeys_independent_backward_bounds():
     penalty = context.penalty.copy()
     penalty[0, 0] = 0
     context = replace(context, layout=layout, penalty=penalty)
+    if global_moments:
+        monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: 64 << 20)
     matrices = _literal_design(layout)
     # Correctly rounded [X, offset] @ [beta; 1] for each predictor.
     eta = np.column_stack(

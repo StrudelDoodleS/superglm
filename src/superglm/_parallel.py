@@ -30,7 +30,7 @@ lookup tables' sweeps, block products and leverages
 (``_group_matrix._lookup_tables``), the solved-row stop passes
 (``reml.w_derivatives``), the interaction terms' builds
 (``_predictor_compiler``), and SuperLSS's row kernels (the Tweedie and
-negative binomial rows).  :func:`pooled_map`
+negative binomial rows) and batched global moments.  :func:`pooled_map`
 serves the solved-row stop passes and the interaction builds; the SuperLSS
 kernels run on :func:`pooled_for` (through :func:`pooled_row_blocks` for the
 rows), whose tasks are too short for an executor's dispatch; the others start
@@ -197,7 +197,7 @@ def fit_pool() -> Iterator[None]:
 
     Starting and joining a pool costs about the same as a few milliseconds of
     kernel, which a SuperLSS fit pays hundreds of times (a Tweedie or negative
-    binomial row kernel per iteration).
+    binomial row kernel per iteration, a batched moment pass per chunk).
     Inside this scope :func:`pooled_map` runs on one executor and
     :func:`pooled_for` on one crew of threads, each started by its first
     section and shut down when the scope ends, instead of starting one per

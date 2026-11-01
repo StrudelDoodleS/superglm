@@ -212,7 +212,7 @@ parameters and every reported number are the same, bit for bit, at any
 `SUPERGLM_MAX_MEMORY` set the defaults for every model in a process.
 
 `SuperLSS` has no `n_jobs`. Its row kernels (Tweedie and negative binomial)
-run on at most `SUPERGLM_N_JOBS` threads, and no
+and its batched moments run on at most `SUPERGLM_N_JOBS` threads, and no
 more than Numba's thread count, which `NUMBA_NUM_THREADS` or
 `numba.set_num_threads()` sets. Numba's count is per
 thread, so call `numba.set_num_threads()` on the thread that runs the fit.

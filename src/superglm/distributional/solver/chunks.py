@@ -23,6 +23,7 @@ from superglm._group_matrix._group_matrix_discretized import (
     SupportCompressedSSPGroupMatrix,
 )
 from superglm._group_matrix._group_matrix_range import group_range_matvec, group_row_range
+from superglm.distributional._global_moment_policy import automatic_global_moment_budget
 from superglm.distributional.family import (
     DistributionalFamily,
     ExpectedInformationFamily,
@@ -32,6 +33,11 @@ from superglm.distributional.family import (
 from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
+from superglm.distributional.solver._global_moments import (
+    GlobalMomentRefusalError,
+    build_global_moment_plan,
+    global_moment_chunk_size,
+)
 from superglm.distributional.solver.assembly import (
     DenseJointGeometry,
     GroupedGeometryAccumulator,
@@ -204,15 +210,26 @@ def resolve_chunk_size(
 
 
 def _resolve_fitting_chunk_size(family, layout, likelihood_plan, chunk_size):
-    """Resolve one row bound for all phases of a chunked fit."""
+    """Resolve one row bound for all phases of an admitted global fit.
+
+    Larger batches amortize native scheduling and likelihood preparation. The
+    global assembler's shared estimate limits its additional workspace; the
+    caller's likelihood arrays remain separately bounded by the returned rows.
+    Explicit requests and unsupported models retain the ordinary selector.
+    """
     if chunk_size is None:
         return None
-    return resolve_chunk_size(
+    resolved = resolve_chunk_size(
         layout.predictors[0].design.n,
         len(layout.predictors),
         chunk_size,
         p_coefficients=layout.n_coefficients,
     )
+    if type(chunk_size) is str and chunk_size == "auto":
+        budget = automatic_global_moment_budget(family, likelihood_plan, layout)
+        if budget is not None:
+            return global_moment_chunk_size(layout, byte_budget=budget, minimum_chunk_size=resolved)
+    return resolved
 
 
 @dataclass(frozen=True)
@@ -484,10 +501,15 @@ def iter_likelihood_chunks(
     *,
     chunk_size: ChunkSize,
     curvature_source: CurvatureSource,
+    _range_geometry: bool = False,
     _recover_derivative_failure: bool = False,
     likelihood_cache=None,
 ):
-    """Yield bounded predictor derivatives and curvature for each row chunk."""
+    """Yield bounded predictor derivatives and curvature for each row chunk.
+
+    Private global assembly may retain original plans and consume their row
+    ranges directly. The default stream continues to supply owned child plans.
+    """
     if curvature_source == "fisher" and not isinstance(family, ExpectedInformationFamily):
         raise ValueError("Fisher chunking requires expected_information_natural")
     response, plan, coefficient_values = _validate_chunk_inputs(
@@ -500,19 +522,41 @@ def iter_likelihood_chunks(
     links = tuple(state.link for state in layout.predictors)
     k_parameters = len(links)
     support_predictions = _SupportPredictions()
+    range_plans = None
+    if _range_geometry and all(
+        type(state.design) is DesignMatrix
+        and not (
+            state.design._tabmat_vector_candidate and state.design._tabmat_holder.split is not None
+        )
+        for state in layout.predictors
+    ):
+        range_plans = tuple(
+            PredictorExecutionPlan(state.design, state.intercept_index is not None)
+            for state in layout.predictors
+        )
     for rows in iter_row_chunks(
         len(response),
         chunk_size,
         k_parameters=k_parameters,
         p_coefficients=layout.n_coefficients,
     ):
-        eta, plans = _predictor_chunk(
-            layout,
-            coefficient_values,
-            rows,
-            include_offsets=True,
-            support_predictions=support_predictions,
-        )
+        if range_plans is None:
+            eta, plans = _predictor_chunk(
+                layout,
+                coefficient_values,
+                rows,
+                include_offsets=True,
+                support_predictions=support_predictions,
+            )
+        else:
+            eta = _predictor_values(
+                layout,
+                coefficient_values,
+                rows,
+                include_offsets=True,
+                support_predictions=support_predictions,
+            )
+            plans = range_plans
         try:
             theta = _theta_chunk(
                 layout, eta, _recover_derivative_failure=_recover_derivative_failure
@@ -746,12 +790,178 @@ def assemble_chunked_geometry(
 ) -> DenseJointGeometry:
     """Stream likelihood chunks into one coefficient-space geometry.
 
-    Binned crossproducts amortise only when each bin-pair weight table is
-    contracted once over many rows (Li and Wood 2020, Algorithm 1). The chunks
-    stream score and packed curvature channels into a bounded buffer, and the
-    group plans contract each block of chunks once; one block covers every row
-    up to the buffer budget.
+    The admitted large mixed-layout scope accumulates support moments across
+    chunks in one global pass, within an additional 64 MiB allowance. A
+    recoverable global numerical refusal releases the partial state before
+    the per-pass contraction replays the complete chunk stream.
     """
+    global_budget = automatic_global_moment_budget(family, likelihood_plan, layout)
+    if global_budget is not None:
+        built = build_global_moment_plan(
+            layout,
+            byte_budget=global_budget,
+            chunk_size=resolve_chunk_size(
+                layout.predictors[0].design.n,
+                len(layout.predictors),
+                chunk_size,
+                p_coefficients=layout.n_coefficients,
+            ),
+        )
+        if built.plan is not None:
+            result = _try_global_geometry(
+                built.plan,
+                family,
+                layout,
+                y,
+                likelihood_plan,
+                coefficients,
+                penalty=penalty,
+                chunk_size=chunk_size,
+                curvature_source=curvature_source,
+                likelihood_cache=likelihood_cache,
+                _likelihood_sums=_likelihood_sums,
+            )
+            if result is not None:
+                return result
+            if _likelihood_sums is not None:
+                _likelihood_sums[:] = [0.0, 0.0]
+    return _assemble_grouped_pass_geometry(
+        family,
+        layout,
+        y,
+        likelihood_plan,
+        coefficients,
+        penalty=penalty,
+        chunk_size=chunk_size,
+        curvature_source=curvature_source,
+        likelihood_cache=likelihood_cache,
+        _likelihood_sums=_likelihood_sums,
+    )
+
+
+def _try_global_geometry(
+    plan,
+    family,
+    layout,
+    y,
+    likelihood_plan,
+    coefficients,
+    *,
+    penalty,
+    chunk_size,
+    curvature_source,
+    likelihood_cache=None,
+    _likelihood_sums=None,
+) -> DenseJointGeometry | None:
+    """Own one attempt; no exception/stream frame survives into fallback."""
+    iterator = None
+    chunk = None
+    try:
+        plan.reset(coefficients=coefficients, penalty=penalty)
+        iterator = iter_likelihood_chunks(
+            family,
+            layout,
+            y,
+            likelihood_plan,
+            coefficients,
+            chunk_size=chunk_size,
+            curvature_source=curvature_source,
+            _range_geometry=hasattr(plan, "add_row_range"),
+            **({"_recover_derivative_failure": True} if _likelihood_sums is not None else {}),
+            **({"likelihood_cache": likelihood_cache} if likelihood_cache is not None else {}),
+        )
+        expected_start = 0
+        n = layout.predictors[0].design.n
+        for chunk in iterator:
+            # The built-in iterator supplies contiguous positional ranges. Do
+            # not accept a repeated, skipped or malformed stream as a numerical
+            # refusal that could hide a source/iterator contract violation.
+            rows = chunk.rows
+            if (
+                type(rows) is not RowChunk
+                or rows.start != expected_start
+                or not rows.start < rows.stop <= n
+                or rows.stop - rows.start != len(chunk.score_eta)
+            ):
+                raise ValueError("global moment stream has inconsistent row ranges")
+            if hasattr(plan, "add_row_range") and all(
+                predictor.design is state.design
+                for predictor, state in zip(chunk.plans, layout.predictors, strict=True)
+            ):
+                plan.add_row_range(
+                    chunk.plans, rows.start, rows.stop, chunk.score_eta, chunk.curvature_packed
+                )
+            else:
+                # Preserve streams supplied by callers which own child plans.
+                plan.add_chunk(chunk.plans, chunk.score_eta, chunk.curvature_packed)
+            if _likelihood_sums is not None:
+                _likelihood_sums[0] += float(
+                    np.sum(chunk.optimizing_log_likelihood, dtype=np.float64)
+                )
+                _likelihood_sums[1] += float(
+                    np.sum(chunk.parameter_independent_carrier, dtype=np.float64)
+                )
+            expected_start = rows.stop
+            chunk = None
+        if expected_start != n:
+            raise ValueError("global moment stream does not cover all observations")
+        return plan.finish()
+    except _TrialDerivativeError as exc:
+        if exc.rows is not None and exc.plans is not None and hasattr(plan, "_prepare_chunk"):
+            # A derivative can fail before add_row_range has checked live
+            # indices and metadata. Preserve hard-source priority on this rare
+            # path using the same preparation checks, without updating moments.
+            rows = exc.rows
+            k = len(layout.predictors)
+            zero = np.zeros(())
+            score = np.broadcast_to(zero, (rows.stop - rows.start, k))
+            curvature = np.broadcast_to(zero, (len(score), k * (k + 1) // 2))
+            row_range = (
+                (rows.start, rows.stop)
+                if all(
+                    p.design is s.design for p, s in zip(exc.plans, layout.predictors, strict=True)
+                )
+                else None
+            )
+            try:
+                plan._prepare_chunk(exc.plans, score, curvature, row_range=row_range)
+            except GlobalMomentRefusalError as refusal:
+                if not refusal.recoverable:
+                    raise
+        raise
+    except GlobalMomentRefusalError as exc:
+        if not exc.recoverable:
+            raise
+        return None
+    finally:
+        try:
+            if iterator is not None:
+                close = getattr(iterator, "close", None)
+                if close is not None:
+                    close()
+        finally:
+            chunk = None
+            plan.close()
+
+
+def _assemble_grouped_pass_geometry(
+    family,
+    layout,
+    y,
+    likelihood_plan,
+    coefficients,
+    *,
+    penalty,
+    chunk_size,
+    curvature_source,
+    likelihood_cache=None,
+    _likelihood_sums=None,
+) -> DenseJointGeometry:
+    # Binned crossproducts amortise only when each bin-pair weight table is
+    # contracted once over many rows (Li and Wood 2020, Algorithm 1). The
+    # chunks stream score and packed curvature channels into a bounded buffer,
+    # and the group plans contract each block of chunks once; one block covers
+    # every row up to the buffer budget.
     n_observations = layout.predictors[0].design.n
     k_parameters = len(layout.predictors)
     chunk_rows = resolve_chunk_size(

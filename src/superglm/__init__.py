@@ -211,6 +211,7 @@ def warmup() -> None:
     from superglm.distributional.kernels.gamma import _warmup_gamma
     from superglm.distributional.kernels.negative_binomial import _warmup_negative_binomial
     from superglm.distributional.kernels.tweedie import _warmup_tweedie
+    from superglm.distributional.solver._global_moments import _warmup_global_moments
     from superglm.features.interaction import _warmup_row_kron
     from superglm.reml._compensated import _warmup_compensated
     from superglm.reml._leverage_rows import _warmup_leverage_rows
@@ -224,6 +225,7 @@ def warmup() -> None:
     _warmup_group_matrix_kernels()
     _warmup_compensated()
     _warmup_exact_sums()
+    _warmup_global_moments()
     _warmup_support_scans()
     _warmup_row_kron()
     _warmup_lookup_tables()
