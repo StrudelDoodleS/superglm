@@ -563,7 +563,7 @@ def test_bounded_gamma_plans_hash_their_bounds_slice_them_and_refuse_fisher():
 def test_a_mean_level_with_only_right_censored_rows_is_disclosed_as_separated():
     rng = np.random.default_rng(550)
     group = rng.choice(["a", "b", "c"], 1_500)
-    loss = rng.gamma(1.5, 3_000.0 / 1.5)
+    loss = rng.gamma(1.5, 3_000.0 / 1.5, 1_500)
     limit = 5_000.0
     censored = (loss >= limit) | (group == "c")
     paid = np.where(censored, limit, loss)
