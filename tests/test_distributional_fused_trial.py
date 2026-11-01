@@ -3,7 +3,6 @@
 import math
 import weakref
 from dataclasses import replace
-from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -20,13 +19,19 @@ from superglm.distributional.predictor import Predictor, compile_predictors
 from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.solver import chunks
 from superglm.distributional.solver import solver as solver_api
-from superglm.distributional.solver._global_moments import GlobalMomentRefusalError
 from superglm.distributional.weights import UnsupportedLikelihoodContractError
 from superglm.features import Numeric, Spline
+from superglm.group_matrix import (
+    CategoricalGroupMatrix,
+    DenseGroupMatrix,
+    DiscretizedSplineCategoricalGroupMatrix,
+    DiscretizedSSPGroupMatrix,
+    SupportCompressedSplineCategoricalGroupMatrix,
+    SupportCompressedSSPGroupMatrix,
+)
 
 from ._exact_reference import exact_matmul, exact_weighted_gram
 from ._gaussian_lss_oracles import gamma, gaussian_row_oracle
-from .test_distributional_automatic_panels import _literal_design
 from .test_distributional_chunk_execution import _problem
 
 
@@ -43,6 +48,32 @@ def _context(problem=None, *, source="observed"):
         coefficient_face=None,
     )
     return context, coefficients
+
+
+def _literal_design(layout):
+    matrices = []
+    for state in layout.predictors:
+        pieces = [np.ones((state.design.n, 1))] if state.intercept_index is not None else []
+        for group in state.design.group_matrices:
+            if type(group) is DenseGroupMatrix:
+                values = group.M.copy()
+            elif type(group) is CategoricalGroupMatrix:
+                values = np.zeros(group.shape)
+                for row, code in enumerate(group.codes):
+                    if code < group.n_levels:
+                        values[row, code] = 1
+            elif type(group) in (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix):
+                values = group.B_unique[group.bin_idx] @ group.R_inv
+            else:
+                assert type(group) in (
+                    DiscretizedSplineCategoricalGroupMatrix,
+                    SupportCompressedSplineCategoricalGroupMatrix,
+                )
+                values = np.zeros(group.shape)
+                values[group.row_idx] = group.B_unique[group.bin_idx_level] @ group.R_inv
+            pieces.append(values)
+        matrices.append(np.column_stack(pieces))
+    return tuple(matrices)
 
 
 def test_a_replaced_penalty_rebuilds_the_penalty_entries():
@@ -102,56 +133,6 @@ def _combined(context, coefficients, **kwargs):
         curvature_source=context.coefficient_curvature,
         likelihood_cache=context.likelihood_cache,
         **kwargs,
-    )
-
-
-@pytest.mark.parametrize("failure", ["add", "finish"])
-def test_partial_global_fallback_resets_likelihood_sums_and_closes_workspace(monkeypatch, failure):
-    context, coefficients = _context()
-    expected_geometry, expected_sums = _combined(
-        context, coefficients, small_group_panel_byte_budget=None
-    )
-    events, refs = [], []
-
-    class Plan:
-        def reset(self, **kwargs):
-            self.buffer = np.empty((4, 4))
-            refs.append(weakref.ref(self.buffer))
-            self.count = 0
-
-        def add_chunk(self, *args):
-            self.count += 1
-            if self.count == 2 and failure == "add":
-                raise GlobalMomentRefusalError("numerical refusal", recoverable=True)
-
-        def finish(self):
-            raise GlobalMomentRefusalError("numerical refusal", recoverable=True)
-
-        def close(self):
-            self.buffer = None
-            events.append("closed")
-
-    original = chunks._assemble_grouped_chunk_geometry
-
-    def replay(*args, **kwargs):
-        assert events == ["closed"]
-        assert all(ref() is None for ref in refs)
-        assert kwargs["_likelihood_sums"] == [0.0, 0.0]
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: 64 << 20)
-    monkeypatch.setattr(
-        chunks, "build_global_moment_plan", lambda *args, **kwargs: SimpleNamespace(plan=Plan())
-    )
-    monkeypatch.setattr(chunks, "_assemble_grouped_chunk_geometry", replay)
-    geometry, sums = _combined(context, coefficients)
-    # Exact on purpose: the replay runs the same per-chunk assembly, in the same order, as the
-    # run it is compared with. What the test guards is a likelihood sum that was not reset, an
-    # error of a whole chunk, so no rounding allowance is needed or wanted.
-    assert sums == expected_sums
-    np.testing.assert_allclose(geometry.score_data, expected_geometry.score_data, rtol=0, atol=0)
-    np.testing.assert_allclose(
-        geometry.data_curvature, expected_geometry.data_curvature, rtol=0, atol=0
     )
 
 
@@ -390,8 +371,7 @@ def test_gamma_unrepresentable_derivative_keeps_its_finite_value_screen():
     assert np.isfinite(screened.penalized_optimizing_log_likelihood)
 
 
-@pytest.mark.parametrize("global_moments", [False, True])
-def test_fused_gaussian_cancellation_obeys_independent_backward_bounds(monkeypatch, global_moments):
+def test_fused_gaussian_cancellation_obeys_independent_backward_bounds():
     context, coefficients = _context()
     location, scale = context.layout.predictors
     coefficients[scale.coefficient_slice] = 0
@@ -401,8 +381,6 @@ def test_fused_gaussian_cancellation_obeys_independent_backward_bounds(monkeypat
     penalty = context.penalty.copy()
     penalty[0, 0] = 0
     context = replace(context, layout=layout, penalty=penalty)
-    if global_moments:
-        monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: 64 << 20)
     matrices = _literal_design(layout)
     # Correctly rounded [X, offset] @ [beta; 1] for each predictor.
     eta = np.column_stack(

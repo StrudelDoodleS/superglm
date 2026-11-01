@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
@@ -12,9 +11,6 @@ from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.solver.packing import packed_pairs
 from superglm.solvers.rank import _symmetric_part
-
-if TYPE_CHECKING:
-    from superglm.distributional.solver._small_group_panels import SmallGroupPanelWorkspace
 
 
 def _readonly(values: NDArray) -> NDArray[np.float64]:
@@ -328,8 +324,6 @@ class GroupedGeometryAccumulator:
         plans: tuple[PredictorExecutionPlan, ...],
         channel_index: int,
         weights: NDArray,
-        *,
-        panel_workspace: SmallGroupPanelWorkspace | None = None,
     ) -> None:
         """Accumulate one canonical packed curvature channel for one row chunk."""
         plan_tuple = self._validated_plans(plans)
@@ -350,30 +344,10 @@ class GroupedGeometryAccumulator:
         left_index, right_index = self._pairs[channel_index]
         left_state = self._layout.predictors[left_index]
         right_state = self._layout.predictors[right_index]
-        block = None
-        if panel_workspace is not None:
-            # This integration consumes complete predictor panels. Partial-group
-            # workspaces need explicit remainder-pair assembly before use here.
-            if tuple(panel.shape for panel in panel_workspace.panels) != tuple(
-                (plan.design.n, plan.width) for plan in plan_tuple
-            ):
-                raise ValueError("curvature panels must cover the complete chunk predictors")
-            block = panel_workspace.cross_moment(left_index, right_index, weight_values)
-            if block is not None and left_index == right_index:
-                # The workspace returns an owned matrix. Copy the upper triangle
-                # in place, preserving exact symmetry without another p-by-p array.
-                for column in range(len(block)):
-                    block[column + 1 :, column] = block[column, column + 1 :]
-        if block is None:
-            # A numerical-domain refusal must happen before accumulation. Reuse
-            # earlier channels and evaluate this entire block exactly once.
-            if left_index == right_index:
-                block = plan_tuple[left_index].diagonal_moment(weight_values)
-            else:
-                block = plan_tuple[left_index].cross_moment(
-                    plan_tuple[right_index],
-                    weight_values,
-                )
+        if left_index == right_index:
+            block = plan_tuple[left_index].diagonal_moment(weight_values)
+        else:
+            block = plan_tuple[left_index].cross_moment(plan_tuple[right_index], weight_values)
         self._curvature[left_state.coefficient_slice, right_state.coefficient_slice] += block
         if left_index != right_index:
             self._curvature[right_state.coefficient_slice, left_state.coefficient_slice] += block.T

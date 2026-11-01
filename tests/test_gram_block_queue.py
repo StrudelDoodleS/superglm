@@ -365,7 +365,6 @@ def test_categorical_blocks_sum_their_levels_without_np_bincount(monkeypatch):
 def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
     from superglm._group_matrix import _group_matrix_support
     from superglm.distributional.kernels import _negative_binomial_numba, _tweedie_numba
-    from superglm.distributional.solver import _batched_moments
     from superglm.features import interaction
     from superglm.reml import _leverage_rows
 
@@ -378,7 +377,6 @@ def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
         + _group_matrix_support._POOLED_SUPPORT_KERNELS
         + _tweedie_numba._POOLED_ROW_KERNELS
         + _negative_binomial_numba._POOLED_ROW_KERNELS
-        + _batched_moments._POOLED_TARGET_KERNELS
     )
     pooled = {id(kernel) for kernel in pooled_kernels}
     for kernel in pooled_kernels:

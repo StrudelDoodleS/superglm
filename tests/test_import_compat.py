@@ -189,9 +189,6 @@ _FIRST_USE: dict[str, str] = {
         "the overflow fallback: only a sum whose products or partials leave float64's range "
         "reaches it (0.6 s)"
     ),
-    "superglm.distributional.solver._small_group_panels._checked_factor_scatter": (
-        "only an explicit panel budget renders a FactorSmooth group; no public fit sets one (0.4 s)"
-    ),
     "superglm.plotting.diagnostics._lowess_core": "a diagnostic plot's smoother, not a fit (2.2 s)",
     **dict.fromkeys(
         (

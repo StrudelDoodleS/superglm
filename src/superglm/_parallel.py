@@ -30,7 +30,7 @@ lookup tables' sweeps, block products and leverages
 (``_group_matrix._lookup_tables``), the solved-row stop passes
 (``reml.w_derivatives``), the interaction terms' builds
 (``_predictor_compiler``), and SuperLSS's row kernels (the Tweedie and
-negative binomial rows) and batched global moments.  :func:`pooled_map`
+negative binomial rows).  :func:`pooled_map`
 serves the solved-row stop passes and the interaction builds; the SuperLSS
 kernels run on :func:`pooled_for` (through :func:`pooled_row_blocks` for the
 rows), whose tasks are too short for an executor's dispatch; the others start

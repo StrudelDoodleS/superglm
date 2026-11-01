@@ -1,4 +1,4 @@
-"""One predictor addition order across admitted fitting and publication paths."""
+"""One predictor addition order across chunked fitting and publication paths."""
 
 from dataclasses import replace
 from types import SimpleNamespace
@@ -8,26 +8,39 @@ import pandas as pd
 import pytest
 
 from superglm._frame import as_eager_frame
-from superglm.distributional._global_moment_policy import automatic_global_moment_budget
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.model import _predict_one_eta
-from superglm.distributional.predictor import compile_predictors
-from superglm.distributional.results.solver import DenseSolverConfig
-from superglm.distributional.solver import chunks, fit_dense_fixed_lambda
-from superglm.distributional.solver._global_moments import build_global_moment_plan
+from superglm.distributional.predictor import Predictor, compile_predictors
+from superglm.distributional.solver import chunks
+from superglm.features import Categorical, Numeric, Spline
 from superglm.group_matrix import CategoricalGroupMatrix
 
 from ._distributional_weights import resolved_prior
 from ._exact_reference import exact_sum
-from .test_distributional_automatic_panels import _predictor
+
+
+def _predictor(name, mode):
+    features = {}
+    if mode in ("mixed", "numeric", "numeric_spline"):
+        features["x"] = Numeric()
+    if mode in ("mixed", "support", "support_category", "numeric_spline"):
+        features["s"] = Spline(kind="cr", k=4)
+    if mode in ("mixed", "category", "support_category"):
+        features["g"] = Categorical()
+    # Different intercept choices give rectangular curvature blocks without
+    # relying on tiny, roundoff-sensitive raw spline values for dispatch.
+    return Predictor(
+        name,
+        features,
+        interactions=(("s", "g"),) if mode == "mixed" else (),
+        intercept=not (name == "scale" and mode == "mixed"),
+    )
 
 
 @pytest.fixture(scope="module")
-def admitted_problem():
-    # Real rows cross the unmodified automatic threshold; paired responses
-    # keep the complete-fit comparison well conditioned and inexpensive.
+def mixed_problem():
     small = pd.DataFrame(
         {
             "x": np.linspace(-1, 1, 37),
@@ -45,7 +58,7 @@ def admitted_problem():
         n_bins_config=9,
     )
     layout = build_stacked_layout(compiled)
-    indices = np.tile(np.repeat(np.arange(37, dtype=np.intp), 2), 3543)
+    indices = np.tile(np.repeat(np.arange(37, dtype=np.intp), 2), 3)
     n = len(indices)
     layout = replace(
         layout,
@@ -60,7 +73,6 @@ def admitted_problem():
     )
     y = 0.125 + np.tile([-1.0, 1.0], n // 2)
     plan = family.bind_likelihood(y, resolved_prior(np.ones(n)), COMPLETE_OBSERVATION)
-    assert automatic_global_moment_budget(family, plan, layout) == 64 << 20
     return SimpleNamespace(
         family=family,
         layout=layout,
@@ -72,8 +84,8 @@ def admitted_problem():
 
 
 @pytest.mark.parametrize("route", ["value", "terminal", "public"])
-def test_cancellation_uses_the_same_admitted_state_for_every_route(admitted_problem, route):
-    problem = admitted_problem
+def test_cancellation_uses_the_same_chunk_state_for_every_route(mixed_problem, route):
+    problem = mixed_problem
     layout = problem.layout
     beta = np.zeros(layout.n_coefficients)
     beta[0] = 2.0**53
@@ -91,20 +103,9 @@ def test_cancellation_uses_the_same_admitted_state_for_every_route(admitted_prob
         beta,
         chunk_size=7,
         curvature_source="observed",
-        _range_geometry=True,
     )
     try:
         chunk = next(stream)
-        built = build_global_moment_plan(layout, byte_budget=64 << 20, chunk_size=7)
-        assert built.plan is not None, built.reason
-        plan = built.plan
-        try:
-            plan.reset(coefficients=beta, penalty=np.zeros((len(beta), len(beta))))
-            plan.add_row_range(chunk.plans, 0, 7, chunk.score_eta, chunk.curvature_packed)
-            assert plan.stats["rows"] == 7
-            assert plan.stats["batched_moment_calls"] == 1
-        finally:
-            plan.close()
         if route == "value":
             actual = chunks._predictor_values(layout, beta, chunk.rows, include_offsets=True)
         elif route == "terminal":
@@ -159,66 +160,3 @@ def test_cancellation_uses_the_same_admitted_state_for_every_route(admitted_prob
         assert np.all(np.abs(actual[:, 0] - exact) <= bound)
     finally:
         stream.close()
-
-
-def test_complete_admitted_fit_matches_grouped_stationarity(admitted_problem, monkeypatch):
-    problem = admitted_problem
-    q = problem.layout.n_coefficients
-    initial = np.zeros(q)
-    initial[0] = 0.01
-    initial[-1] = 0.05
-    penalty = np.eye(q)
-    finished = []
-    original = chunks.build_global_moment_plan
-
-    def tracked(*args, **kwargs):
-        built = original(*args, **kwargs)
-        assert built.plan is not None, built.reason
-        finish = built.plan.finish
-
-        def record():
-            result = finish()
-            finished.append(built.plan.stats["rows"])
-            return result
-
-        built.plan.finish = record
-        return built
-
-    def fit():
-        return fit_dense_fixed_lambda(
-            problem.family,
-            problem.layout,
-            problem.y,
-            problem.plan,
-            penalty,
-            initial=initial,
-            chunk_size=8192,
-            config=DenseSolverConfig(tolerance=1e-7, max_iterations=12),
-        )
-
-    monkeypatch.setattr(chunks, "build_global_moment_plan", tracked)
-    actual = fit()
-    assert finished and set(finished) == {len(problem.y)}
-    monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: None)
-    monkeypatch.setattr(chunks, "automatic_small_group_panel_budget", lambda *args: None)
-    grouped = fit()
-    assert actual.converged and grouped.converged
-    gap = min(
-        np.linalg.eigvalsh(result.terminal_penalized_curvature)[0] for result in (actual, grouped)
-    )
-    assert gap > 0
-    epsilon = np.finfo(np.float64).eps
-    arithmetic = 128 * len(problem.y) * q * epsilon
-    bound = 4 * sum(np.linalg.norm(result.terminal_score) for result in (actual, grouped)) / gap
-    bound += arithmetic / (1 - arithmetic) * (1 + np.linalg.norm(initial))
-    assert np.linalg.norm(actual.coefficients - grouped.coefficients) <= bound
-    # These 74 rows contain every repeated design row. Propagate coefficient
-    # error through their actual predictor Jacobian without materializing N×q.
-    row_norm = 0.0
-    for state in problem.layout.predictors:
-        pieces = [np.ones((74, 1))] if state.intercept_index is not None else []
-        pieces.extend(
-            group.row_subset(np.arange(74)).toarray() for group in state.design.group_matrices
-        )
-        row_norm = max(row_norm, float(np.max(np.linalg.norm(np.column_stack(pieces), axis=1))))
-    np.testing.assert_allclose(actual.eta, grouped.eta, rtol=0, atol=row_norm * bound)
