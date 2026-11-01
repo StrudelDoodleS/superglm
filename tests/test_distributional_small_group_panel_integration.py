@@ -274,7 +274,10 @@ def test_real_likelihood_chunk_geometry_preserves_score_and_signed_curvature():
         * np.finfo(float).eps
         * max(1, np.linalg.norm(expected.data_curvature, ord=np.inf))
     )
-    np.testing.assert_array_equal(actual.score_data, expected.score_data)
+    score_tolerance = (
+        32 * len(response) * np.finfo(float).eps * max(1, np.max(np.abs(expected.score_data)))
+    )
+    np.testing.assert_allclose(actual.score_data, expected.score_data, rtol=0, atol=score_tolerance)
     np.testing.assert_allclose(
         actual.data_curvature, expected.data_curvature, rtol=0, atol=tolerance
     )

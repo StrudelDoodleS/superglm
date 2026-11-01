@@ -32,7 +32,11 @@ from superglm.distributional.solver._global_moments import (
     global_moment_chunk_size,
 )
 from superglm.distributional.solver._small_group_panels import build_small_group_panels
-from superglm.distributional.solver.assembly import DenseJointGeometry, GroupedGeometryAccumulator
+from superglm.distributional.solver.assembly import (
+    DenseJointGeometry,
+    GroupedGeometryAccumulator,
+    _grouped_predictor_plans,
+)
 from superglm.distributional.solver.derivatives import (
     nearest_semidefinite_curvature,
     transform_natural_derivatives,
@@ -53,6 +57,7 @@ CurvatureSource = Literal["observed", "fisher", "nearest_semidefinite"]
 # It is a deterministic bound selector, not a claim about exact allocator RSS.
 AUTO_CHUNK_SELECTOR = "distributional-auto-v1"
 AUTO_CHUNK_MEMORY_BYTES = 8 * 1024 * 1024
+AUTO_CONTRACTION_MEMORY_BYTES = 64 * 1024 * 1024
 
 # Retained snapshots plus support vectors per pass; refresh uses bounded scratch.
 # No observation-sized predictions are retained here.
@@ -356,6 +361,17 @@ def _predictor_values(
     return eta
 
 
+def _row_design(state, rows: RowChunk):
+    """One predictor's design restricted to a contiguous row range."""
+    if type(state.design) is DesignMatrix:
+        groups = []
+        for group in state.design.group_matrices:
+            child = group_row_range(group, rows.start, rows.stop)
+            groups.append(group.row_subset(rows.indices) if child is None else child)
+        return DesignMatrix(groups, len(rows.indices), state.design.p)
+    return state.design.row_subset(rows.indices)
+
+
 def _predictor_chunk(
     layout: StackedLayout,
     coefficients: NDArray[np.float64],
@@ -368,14 +384,7 @@ def _predictor_chunk(
     eta = np.empty((len(rows.indices), k_parameters), dtype=np.float64)
     plans: list[PredictorExecutionPlan] = []
     for state in layout.predictors:
-        if type(state.design) is DesignMatrix:
-            groups = []
-            for group in state.design.group_matrices:
-                child = group_row_range(group, rows.start, rows.stop)
-                groups.append(group.row_subset(rows.indices) if child is None else child)
-            design = DesignMatrix(groups, len(rows.indices), state.design.p)
-        else:
-            design = state.design.row_subset(rows.indices)
+        design = _row_design(state, rows)
         intercept = state.intercept_index is not None
         plan = PredictorExecutionPlan(design, intercept)
         local = coefficients[state.coefficient_slice]
@@ -918,6 +927,24 @@ def _assemble_grouped_chunk_geometry(
     likelihood_cache=None,
     _likelihood_sums=None,
 ) -> DenseJointGeometry:
+    # Binned crossproducts amortise only when each bin-pair weight table is
+    # contracted once over many rows (Li and Wood 2020, Algorithm 1). Without
+    # panels, the chunks stream likelihood derivatives into a bounded buffer
+    # and the group plans contract each block of chunks once; one block covers
+    # every row up to the buffer budget.
+    if panel_byte_budget is None:
+        return _assemble_grouped_pass_geometry(
+            family,
+            layout,
+            y,
+            likelihood_plan,
+            coefficients,
+            penalty=penalty,
+            chunk_size=chunk_size,
+            curvature_source=curvature_source,
+            likelihood_cache=likelihood_cache,
+            _likelihood_sums=_likelihood_sums,
+        )
     accumulator = GroupedGeometryAccumulator(
         layout,
         penalty=penalty,
@@ -970,6 +997,102 @@ def _assemble_grouped_chunk_geometry(
         close = getattr(iterator, "close", None)
         if close is not None:
             close()
+    return accumulator.finish()
+
+
+def contraction_block_rows(n_observations: int, k_parameters: int, chunk_rows: int) -> int:
+    """Rows contracted at once: whole likelihood chunks within a fixed buffer budget.
+
+    The buffer holds the score and packed curvature channels, ``K + K(K+1)/2``
+    floats per row, so its memory is bounded independently of the row count.
+    """
+    row_bytes = np.dtype(np.float64).itemsize * (
+        k_parameters + k_parameters * (k_parameters + 1) // 2
+    )
+    chunks_per_block = max(1, AUTO_CONTRACTION_MEMORY_BYTES // (row_bytes * chunk_rows))
+    return min(n_observations, chunks_per_block * chunk_rows)
+
+
+def _assemble_grouped_pass_geometry(
+    family,
+    layout,
+    y,
+    likelihood_plan,
+    coefficients,
+    *,
+    penalty,
+    chunk_size,
+    curvature_source,
+    likelihood_cache=None,
+    _likelihood_sums=None,
+) -> DenseJointGeometry:
+    n_observations = layout.predictors[0].design.n
+    k_parameters = len(layout.predictors)
+    chunk_rows = resolve_chunk_size(
+        n_observations, k_parameters, chunk_size, p_coefficients=layout.n_coefficients
+    )
+    block_rows = contraction_block_rows(n_observations, k_parameters, chunk_rows)
+    score = np.empty((block_rows, k_parameters), dtype=np.float64)
+    # Channel-major, so each contracted channel is one contiguous row vector.
+    curvature = np.empty((k_parameters * (k_parameters + 1) // 2, block_rows), dtype=np.float64)
+    accumulator = GroupedGeometryAccumulator(layout, penalty=penalty, coefficients=coefficients)
+
+    def contract(start: int, stop: int) -> None:
+        if start == 0 and stop == n_observations:
+            plans = _grouped_predictor_plans(layout)
+        else:
+            indices = np.arange(start, stop, dtype=np.intp)
+            indices.setflags(write=False)
+            rows = RowChunk(start=start, stop=stop, indices=indices)
+            plans = tuple(
+                PredictorExecutionPlan(_row_design(state, rows), state.intercept_index is not None)
+                for state in layout.predictors
+            )
+        filled = stop - start
+        accumulator.add_score(plans, score[:filled])
+        for channel_index in range(len(curvature)):
+            accumulator.add_curvature_channel(
+                plans, channel_index, curvature[channel_index, :filled]
+            )
+
+    iterator = iter_likelihood_chunks(
+        family,
+        layout,
+        y,
+        likelihood_plan,
+        coefficients,
+        chunk_size=chunk_size,
+        curvature_source=curvature_source,
+        **({"_recover_derivative_failure": True} if _likelihood_sums is not None else {}),
+        **({"likelihood_cache": likelihood_cache} if likelihood_cache is not None else {}),
+    )
+    # Chunks arrive in row order and cover every row once.
+    block_start = position = 0
+    try:
+        for chunk in iterator:
+            length = len(chunk.score_eta)
+            if position + length - block_start > block_rows:
+                contract(block_start, position)
+                block_start = position
+            rows = slice(position - block_start, position + length - block_start)
+            position += length
+            score[rows] = chunk.score_eta
+            curvature[:, rows] = chunk.curvature_packed.T
+            if _likelihood_sums is not None:
+                _likelihood_sums[0] += float(
+                    np.sum(chunk.optimizing_log_likelihood, dtype=np.float64)
+                )
+                _likelihood_sums[1] += float(
+                    np.sum(chunk.parameter_independent_carrier, dtype=np.float64)
+                )
+            chunk = None
+    finally:
+        close = getattr(iterator, "close", None)
+        if close is not None:
+            close()
+    if position != n_observations:
+        raise RuntimeError("likelihood chunks must cover every row exactly once")
+    contract(block_start, position)
     return accumulator.finish()
 
 

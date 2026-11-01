@@ -25,7 +25,11 @@ from superglm.distributional.family import (
 from superglm.distributional.inference import compute_joint_inference
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.packing import packed_pairs
-from superglm.distributional.predictor import Predictor, compile_predictors
+from superglm.distributional.predictor import (
+    Predictor,
+    PredictorExecutionPlan,
+    compile_predictors,
+)
 from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.solver import fit_dense_fixed_lambda
 from superglm.distributional.weights import (
@@ -349,6 +353,55 @@ def test_row_chunk_iterator_covers_rows_once_and_validates_sizes(
         tuple(chunking.iter_row_chunks(8, 0))
     with pytest.raises(TypeError, match="chunk_size"):
         tuple(chunking.iter_row_chunks(8, True))
+
+
+def test_contraction_blocks_hold_whole_chunks_within_the_buffer_budget() -> None:
+    row_bytes = 8 * (2 + 3)
+    rows = chunking.contraction_block_rows(10**9, 2, 4_000)
+    assert rows % 4_000 == 0
+    assert rows * row_bytes <= chunking.AUTO_CONTRACTION_MEMORY_BYTES < (rows + 4_000) * row_bytes
+    assert chunking.contraction_block_rows(100, 3, 100) == 100
+    assert chunking.contraction_block_rows(10**9, 2, 10**8) == 10**8
+
+
+@pytest.mark.parametrize("chunks_per_block", [None, 3, 1])
+def test_grouped_geometry_contracts_each_channel_once_per_block(
+    monkeypatch: pytest.MonkeyPatch,
+    chunks_per_block: int | None,
+) -> None:
+    family, layout, response, weights, _, _, _ = _problem(n=137)
+    coefficients = np.linspace(-0.2, 0.3, layout.n_coefficients)
+    arguments = (family, layout, response, _plan(family, response, weights), coefficients)
+    options = {
+        "penalty": np.zeros((layout.n_coefficients, layout.n_coefficients)),
+        "curvature_source": "observed",
+    }
+    reference = chunking.assemble_chunked_geometry(*arguments, chunk_size=137, **options)
+    if chunks_per_block is not None:
+        monkeypatch.setattr(
+            chunking,
+            "contraction_block_rows",
+            lambda n, k, rows: min(n, chunks_per_block * rows),
+        )
+    contracted = []
+    for name in ("diagonal_moment", "cross_moment"):
+        original = getattr(PredictorExecutionPlan, name)
+
+        def counted(self, *args, _original=original, **kwargs):
+            contracted.append(self.design.n)
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(PredictorExecutionPlan, name, counted)
+    actual = chunking.assemble_chunked_geometry(*arguments, chunk_size=19, **options)
+
+    # Eight 19-row chunks; each block contracts the three packed channels once.
+    block = 137 if chunks_per_block is None else 19 * chunks_per_block
+    assert contracted == [min(block, 137 - start) for start in range(0, 137, block) for _ in "abc"]
+    eps = np.finfo(np.float64).eps
+    for name in ("score_data", "data_curvature"):
+        expected = getattr(reference, name)
+        tolerance = 32 * 137 * eps * max(1.0, float(np.max(np.abs(expected))))
+        np.testing.assert_allclose(getattr(actual, name), expected, rtol=0, atol=tolerance)
 
 
 def test_public_superlss_admits_a_structural_gaussian_subclass_without_eager_binding() -> None:
