@@ -384,8 +384,9 @@ prediction arrays are reduced to scalars and released.
 Every split, the training split included, is scored through the model's predictions, so the
 training split matches `SuperGLM.metrics` on the same data. The fit's own statistics belong to its
 fitting design, which on a discrete fit is the binned one. When the training split holds the
-objects used for fitting, only the weight-contract check is skipped, because the fit already ran
-it. The splits share their cached scalar dictionaries between the metric strip and reports.
+objects used for fitting and the unchanged-data guard still matches, scoring skips the
+weight-contract check, custom-family report and prediction warnings already emitted during
+fitting. The splits share their cached scalar dictionaries between the metric strip and reports.
 
 ## Run Frontend Checks
 

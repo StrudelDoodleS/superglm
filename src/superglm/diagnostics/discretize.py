@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from inspect import signature
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pandas as pd
@@ -1138,6 +1138,15 @@ def _weighted_correlation(x: NDArray, y: NDArray, weights: NDArray) -> float:
     positive = weights > 0.0
     x_active = np.asarray(x[positive], dtype=np.float64)
     y_active = np.asarray(y[positive], dtype=np.float64)
+    # Correlation is unchanged by a positive scale. The unbounded approximated
+    # mean can be finite while its square overflows, so normalize before the
+    # centered products rather than letting the variance turn into infinity.
+    x_scale = float(np.max(np.abs(x_active)))
+    y_scale = float(np.max(np.abs(y_active)))
+    if x_scale == 0.0 or y_scale == 0.0:
+        return float("nan")
+    x_active = x_active / x_scale
+    y_active = y_active / y_scale
     mass = np.asarray(weights[positive], dtype=np.float64)
     mass /= np.sum(mass, dtype=np.float64)
     x_centered = x_active - float(np.sum(mass * x_active))
@@ -1162,6 +1171,7 @@ def discretization_impact(
     features: list[str] | None = None,
     band_se: float = 1.0,
     band_max_error: float = 0.10,
+    _offset_delta: NDArray | None = None,
 ) -> DiscretizationResult:
     """Analyse the impact of discretizing the smooth terms of a fit.
 
@@ -1171,7 +1181,10 @@ def discretization_impact(
     nearest node of the ``n_bins``-per-axis grid the rating-table export ships
     -- a SAMPLING rather than an averaging, because that block is keyed on axis
     values and a consumer's only available lookup is the nearest one.
-    Predictions are recomputed and compared to the originals.
+    Predictions are recomputed and compared to the originals. Under a log
+    link the approximated predictor and means are not clipped: the workbook
+    multiplies the exported factors without a fitted-predictor safety bound.
+    An approximation with non-finite predictions is refused explicitly.
 
     Both are covered because both are approximations the exported workbook
     carries, and reporting one without the other understates how far the table
@@ -1262,6 +1275,11 @@ def discretization_impact(
     )
     if offset is not None:
         offset = _finite_vector("offset", offset, n)
+    if _offset_delta is not None:
+        # The rating-table exporter owns the offset's binning and supplies the
+        # change in its log factor, so these metrics can include that block
+        # jointly without treating an offset as an estimated model term.
+        _offset_delta = _finite_vector("offset approximation delta", _offset_delta, n)
     if isinstance(n_bins, bool) or not isinstance(n_bins, int | np.integer) or n_bins < 1:
         raise ValueError(f"n_bins must be a positive integer, got {n_bins!r}")
     n_bins = int(n_bins)
@@ -1271,7 +1289,7 @@ def discretization_impact(
 
     beta = result.beta
     from superglm.distributions import clip_mu
-    from superglm.links import stabilize_eta
+    from superglm.links import LogLink, stabilize_eta
     from superglm.model import base
 
     plan = base._prediction_plan(model)
@@ -1365,7 +1383,7 @@ def discretization_impact(
     # For each target feature, compute the delta (binned - smooth)
     tables: dict[str, pd.DataFrame] = {}
     band_diagnostics: dict[str, dict[str, float]] = {}
-    total_delta = np.zeros(n)
+    total_delta = np.zeros(n) if _offset_delta is None else _offset_delta.copy()
     # Under "exact" a covariate's main effect and the spline-by-categorical
     # interactions on it are read on ONE set of bands, so the table keys them
     # alike and every curve it approximates keeps its limit (_joint_exact_bands).
@@ -1641,9 +1659,22 @@ def discretization_impact(
             }
         )
 
-    # Discretized predictions
-    eta_disc = stabilize_eta(eta_orig + total_delta, model._link)
-    predictions = clip_mu(model._link.inverse(eta_disc), model._distribution)
+    # A log-link workbook applies the factors' product without clipping eta or
+    # the resulting mean. Clipping either here can understate its error by many
+    # orders of magnitude when approximation removes cancelling contributions.
+    eta_disc = eta_orig + total_delta
+    link = cast(Any, model)._link
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        if isinstance(link, LogLink):
+            predictions = link.inverse(eta_disc)
+        else:
+            predictions = clip_mu(link.inverse(stabilize_eta(eta_disc, link)), model._distribution)
+    if not np.all(np.isfinite(predictions)):
+        raise OverflowError(
+            "The discretized approximation produces non-finite predictions without "
+            "clipping. Increase n_bins or change the approximated terms; no impact "
+            "metrics or rating-table payload were produced."
+        )
 
     # Compute metrics
     dist = model._distribution

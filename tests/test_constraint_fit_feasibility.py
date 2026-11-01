@@ -1175,17 +1175,17 @@ def test_qp_reml_discloses_a_feasible_terminal_state_without_a_kkt_certificate(
         ),
         pytest.param(
             "constraint_kkt_incomplete",
-            "fixed-lambda constrained REML fit ended without a complete inner-QP KKT certificate",
+            None,
             id="kkt-incomplete",
         ),
     ],
 )
-def test_fixed_lambda_qp_reml_refuses_uncertified_result_before_publication(
+def test_fixed_lambda_qp_reml_refuses_infeasibility_and_discloses_incomplete_kkt(
     monkeypatch: pytest.MonkeyPatch,
     failure_reason: str,
-    error_pattern: str,
+    error_pattern: str | None,
 ) -> None:
-    """The fixed-lambda route gates an uncertified result before installing fit state."""
+    """Infeasible coefficients are refused; feasible uncertified fits are disclosed."""
     import superglm.model.reml_execute as reml_execute
     from superglm import LambdaPolicy
 
@@ -1228,6 +1228,22 @@ def test_fixed_lambda_qp_reml_refuses_uncertified_result_before_publication(
         "fit_irls_direct",
         force_uncertified_fixed_result,
     )
+    if failure_reason == "constraint_kkt_incomplete":
+        from superglm import ConvergenceWarning
+        from superglm.solvers.irls_direct._qp import _QP_FEASIBILITY_TOL
+
+        with pytest.warns(ConvergenceWarning, match="KKT certificate"):
+            model.fit_reml(frame, y, runtime_validation="skip")
+        assert not model.result.converged
+        assert model.result.termination_reason == failure_reason
+        assert model.diagnostics()["_model"]["termination_reason"] == failure_reason
+        assert np.all(np.isfinite(model.predict(frame)))
+        for group in model._groups:
+            if group.constraints is not None:
+                slack = group.constraints.A @ model.result.beta[group.sl] - group.constraints.b
+                assert np.min(slack) >= -_QP_FEASIBILITY_TOL
+        assert fixed_route_calls == [{"phase": "fixed_constraint"}]
+        return
     with pytest.raises(
         RuntimeError,
         match=error_pattern,

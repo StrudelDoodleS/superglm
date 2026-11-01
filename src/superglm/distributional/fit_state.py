@@ -534,7 +534,7 @@ def _wall_disclosure(
     """Disclose the rows a fit pressed against a wall of a bounded parameter.
 
     A bounded link reaches a wall only as its linear predictor runs to
-    infinity, so a fit pressed against one has no finite optimum: the
+    infinity, so a settled fit still pressed against one has no finite optimum: the
     likelihood keeps rising along a direction of recession after the stopping
     rule sees no progress, and more iterations keep moving the estimate
     (Correia, Guimarães and Zylkin, arXiv:1903.01633; the refitting check for
@@ -552,7 +552,8 @@ def _wall_disclosure(
     float before a wall has no derivative left for either test; the family
     says what that means for its functionals, whatever put the row there, and
     whether the shape's curvature is lost there, along a dropped direction or
-    under a step that still presses the row.
+    under a step that still presses the row. At an unfinished iterate, outward
+    movement alone does not establish that the optimum lies beyond a wall.
     """
     rows = wall_rows(family, layout, solver_result.coefficients, solver_result.theta)
     if rows is None:
@@ -602,15 +603,31 @@ def _wall_disclosure(
     # held by rounding, so the shape's standard errors are not reliable there either
     unresolved |= pressed & clipped
     pressed &= rows.near & ~clipped
+    pressed_counts = (
+        int(np.count_nonzero(pressed & ~rows.upper_side)),
+        int(np.count_nonzero(pressed & rows.upper_side)),
+    )
+    clipped_counts = (
+        int(np.count_nonzero(clipped & ~rows.upper_side)),
+        int(np.count_nonzero(clipped & rows.upper_side)),
+    )
+    from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
+
+    # Keep the optional built-in context off custom hooks, including a
+    # subclass that overrides the historical protocol signature.
+    if isinstance(family, GeneralizedParetoLSS) and (
+        type(family).wall_disclosure is GeneralizedParetoLSS.wall_disclosure
+    ):
+        return family.wall_disclosure(
+            pressed_counts,
+            clipped_counts,
+            rows.state.design.n,
+            unresolved=bool(np.any(unresolved)),
+            settled=solver_result.converged,
+        )
     return family.wall_disclosure(
-        (
-            int(np.count_nonzero(pressed & ~rows.upper_side)),
-            int(np.count_nonzero(pressed & rows.upper_side)),
-        ),
-        (
-            int(np.count_nonzero(clipped & ~rows.upper_side)),
-            int(np.count_nonzero(clipped & rows.upper_side)),
-        ),
+        pressed_counts,
+        clipped_counts,
         rows.state.design.n,
         unresolved=bool(np.any(unresolved)),
     )

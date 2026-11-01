@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable
 from dataclasses import KW_ONLY, dataclass, replace
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -82,6 +82,7 @@ from superglm.solvers.mode_score import (
     MODE_CERTIFICATION_BAR,
     MODE_RESOLVE_CAP,
     ModeResidual,
+    centred_data_score,
     centred_intercept_remainder,
     centred_matvec,
     penalized_mode_residual,
@@ -163,6 +164,190 @@ def _separation_weight_ratio(
         distribution=family, link=link, mu=mu, eta=eta, sample_weight=weights
     )
     return _positive_working_weight_stats(fisher)[2]
+
+
+def _binomial_identity_start(
+    dm: DesignMatrix,
+    offset: NDArray,
+    weights: NDArray,
+    beta: NDArray,
+    intercept: float,
+    center: NDArray,
+) -> tuple[NDArray, float]:
+    """Restore an identity-binomial start without clipping its probabilities.
+
+    An intercept shift suffices when the predictor spans less than one.  If
+    a warm slope or the offset spans more, first project the offset onto the
+    affine model: any offset in the design's span is then cancelled.  LSQR
+    only needs design products, so a sparse or structured model is never
+    expanded into an n-by-p array just to choose its start.  A least-squares
+    projection need not be feasible even when the model is: check its actual
+    probabilities before retaining it.  Only a failed projection needs the
+    phase-one linear program below.  All operations use the center at which
+    the fit will retain this state; the intercept argument and return value
+    are its centered intercept, so a translated column cannot destroy the
+    feasible residual by cancellation against a raw intercept.
+    """
+    from scipy.sparse.linalg import LinearOperator, lsqr
+
+    family, link = Binomial(), IdentityLink()
+    outside = cast(Callable[[NDArray, NDArray], bool], mean_space_violation(family, link))
+    eta = centred_matvec(dm, beta, center) + intercept + offset
+    shifted = interior_start_intercept(family, link, eta, weights, intercept, level=0.5)
+    if not outside(centred_matvec(dm, beta, center) + shifted + offset, weights):
+        return beta, shifted
+    positive = weights > 0.0
+
+    def matvec(values: NDArray) -> NDArray:
+        return (values[0] + centred_matvec(dm, values[1:], center))[positive]
+
+    def rmatvec(values: NDArray) -> NDArray:
+        carried = np.zeros(dm.n)
+        carried[positive] = values
+        return np.concatenate(([np.sum(values)], centred_data_score(dm, carried, center)))
+
+    design = cast(Any, LinearOperator)(
+        (int(np.count_nonzero(positive)), dm.p + 1),
+        matvec=matvec,
+        rmatvec=rmatvec,
+        dtype=np.float64,
+    )
+    projected = lsqr(design, 0.5 - offset[positive], atol=1e-12, btol=1e-12)[0]
+    start_beta, start_intercept = projected[1:], float(projected[0])
+    eta = centred_matvec(dm, start_beta, center) + start_intercept + offset
+    start_intercept = interior_start_intercept(
+        family, link, eta, weights, start_intercept, level=0.5
+    )
+    eta = centred_matvec(dm, start_beta, center) + start_intercept + offset
+    if np.all((eta[positive] > 0.0) & (eta[positive] < 1.0)):
+        return start_beta, start_intercept
+    return _binomial_identity_phase_one(
+        dm, offset, positive, start_beta, start_intercept, eta, center
+    )
+
+
+def _binomial_identity_phase_one(
+    dm: DesignMatrix,
+    offset: NDArray,
+    positive: NDArray,
+    beta: NDArray,
+    intercept: float,
+    eta: NDArray,
+    center: NDArray,
+) -> tuple[NDArray, float]:
+    """Find a verified probability start with bounded working-row LPs.
+
+    Maximise the common probability margin ``t`` subject to
+    ``t <= eta + [1, X-centered] delta <= 1-t``.  The full model is consulted through
+    matrix products; each restricted LP adds the worst omitted rows.  At
+    most ``max(64, 4*(p+2))`` source rows are materialised at once.  If that
+    budget fills, retain the simplex solution's nonzero dual support before
+    adding rows: these constraints preserve its objective bound.  The
+    workspace is O(n+p^2), with no retained cache and no n-by-p expansion.
+
+    Solver status never certifies a returned start: its probabilities are
+    recomputed on every original positive-weight row.  A zero optimal margin
+    permits a closed-boundary model; a materially negative optimal margin
+    proves the restricted rows, hence the whole model, are infeasible.
+    Failure to find either is a numerical initialization failure, not a
+    claim of infeasibility or of fitted-mode convergence.
+    """
+    from scipy.optimize import linprog
+
+    source_rows = np.flatnonzero(positive)
+    count = min(16, source_rows.size)
+    row_budget = max(64, 4 * (dm.p + 2))
+    solver_tol = 1e-9
+    closed_start: tuple[NDArray, float] | None = None
+    source_eta = eta[source_rows]
+    if np.all((source_eta >= 0.0) & (source_eta <= 1.0)):
+        closed_start = (beta, intercept)
+    margins = np.minimum(source_eta, 1.0 - source_eta)
+    rows = np.sort(source_rows[np.argpartition(margins, count - 1)[:count]])
+
+    for _ in range(200):
+        # Read only the working rows; a structured or sparse source remains
+        # in its own representation for all full-data products.
+        design = np.ones((rows.size, dm.p + 1))
+        if dm.p:
+            design[:, 1:] = dm.row_subset(rows).toarray() - center
+        column_scale = np.max(np.abs(design), axis=0)
+        column_scale[column_scale == 0.0] = 1.0
+        design /= column_scale
+        nonzero_columns = np.any(design != 0.0, axis=0)
+        left, singular, right = np.linalg.svd(design[:, nonzero_columns], full_matrices=False)
+        # HiGHS's absolute pivot tests must not discard a small but genuine
+        # predictor direction. Solve in the working design's orthonormal
+        # range, then map back and verify the original grouped products.
+        rank_tol = np.finfo(float).eps * max(design.shape) * singular[0]
+        resolved = singular > rank_tol
+        basis = left[:, resolved]
+        objective = np.zeros(basis.shape[1] + 1)
+        objective[-1] = -1.0
+        bounds = [(None, None)] * objective.size
+        lhs = np.vstack(
+            (
+                np.column_stack((-basis, np.ones(rows.size))),
+                np.column_stack((basis, np.ones(rows.size))),
+            )
+        )
+        rhs = np.concatenate((eta[rows], 1.0 - eta[rows]))
+        phase = linprog(
+            objective,
+            A_ub=lhs,
+            b_ub=rhs,
+            bounds=bounds,
+            method="highs-ds",
+            options={
+                "primal_feasibility_tolerance": solver_tol,
+                "dual_feasibility_tolerance": solver_tol,
+            },
+        )
+        if not phase.success:
+            break
+        delta = np.zeros(dm.p + 1)
+        delta[nonzero_columns] = right[resolved].T @ (phase.x[:-1] / singular[resolved])
+        delta /= column_scale
+        trial_beta = beta + delta[1:]
+        trial_intercept = intercept + float(delta[0])
+        trial_eta = centred_matvec(dm, trial_beta, center) + trial_intercept + offset
+        source_eta = trial_eta[source_rows]
+        if np.all((source_eta > 0.0) & (source_eta < 1.0)):
+            return trial_beta, trial_intercept
+        if np.all((source_eta >= 0.0) & (source_eta <= 1.0)):
+            closed_start = (trial_beta, trial_intercept)
+            if phase.x[-1] <= solver_tol:
+                return closed_start
+        # Do not call a near-zero LP margin infeasibility: a legitimate
+        # model can live entirely on a closed face of the probability box.
+        if phase.x[-1] < -solver_tol and closed_start is None:
+            # A negative margin in a numerically truncated or nearly aliased
+            # working geometry is not evidence of input infeasibility.
+            well_conditioned = bool(
+                np.all(resolved) and singular[-1] > np.sqrt(np.finfo(float).eps) * singular[0]
+            )
+            if well_conditioned:
+                raise ValueError(
+                    "Binomial/identity mean domain is infeasible: the design and offset "
+                    "cannot give probabilities in [0, 1] on all positive-weight rows."
+                )
+            break
+        margins = np.minimum(source_eta, 1.0 - source_eta)
+        additions = source_rows[np.argpartition(margins, count - 1)[:count]]
+        if rows.size + additions.size > row_budget:
+            supporting = np.any(phase.ineqlin.marginals.reshape(2, -1) != 0.0, axis=0)
+            rows = rows[supporting]
+        enlarged = np.union1d(rows, additions)
+        if np.array_equal(rows, enlarged):
+            break
+        rows = enlarged
+
+    if closed_start is not None:
+        return closed_start
+    raise RuntimeError(
+        "Binomial/identity initialization could not verify a feasible probability start; "
+        "the phase-one numerical solve did not establish model infeasibility."
+    )
 
 
 def _build_penalty_matrix(
@@ -610,7 +795,7 @@ class _IRLSDirectFitFields:
         # _setup_design
         " dm n p gms objective_merit_scale structured_decision _use_structured step"
         " _direct_fallback_reason _state_center beta intercept _start_lowered S"
-        " _penalty_curvature"
+        " _penalty_curvature _identity_start"
         # _setup_routes
         " qp _scop_run _has_scop curvature"
         # _setup_systems
@@ -1017,6 +1202,39 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     ),
                 )
                 self._deviance_init = None
+
+        self._identity_start = None
+        if isinstance(family, Binomial) and type(link) is IdentityLink:
+            outside = cast(Callable[[NDArray, NDArray], bool], mean_space_violation(family, link))
+            # Choose the center the solve will retain before testing its
+            # probabilities. A raw warm predictor may be inside [0, 1] only
+            # because cancellation rounded it differently from that state.
+            # _setup_routes reuses this center instead of forming it again.
+            if _state_center is None and not any(g.monotone_engine == "scop" for g in groups):
+                _state_center = prior_weighted_centre(dm, weights)
+            center = np.zeros(p) if _state_center is None else _state_center
+            if (
+                self._centred_init is not None
+                and np.shape(self._centred_init[1]) == beta.shape
+                and intercept == intercept_init
+            ):
+                # Use the state the next solve will retain: raw coordinates
+                # can cancel a feasible mean to zero on a translated design.
+                warm_alpha, warm_centre = self._centred_init
+                alpha = float(warm_alpha) + math.fsum(
+                    (center - np.asarray(warm_centre, dtype=np.float64)) * beta
+                )
+            else:
+                alpha = intercept + math.fsum(center * beta)
+            start_eta = alpha + centred_matvec(dm, beta, center) + offset
+            if outside(start_eta, weights):
+                beta, alpha = _binomial_identity_start(dm, offset, weights, beta, alpha, center)
+                intercept = alpha - math.fsum(center * beta)
+                if _state_center is not None:
+                    self._identity_start = alpha
+                self._centred_init = None
+                self._deviance_init = None
+                _start_lowered = True
 
         # Dense paths retain the existing p x p penalty oracle. Structured paths
         # add each penalty directly to A or d, unless a caller already supplied a
@@ -1562,9 +1780,10 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         # gives alpha_c = alpha + fsum((c - c_warm) beta), exact on every column
         # the two centres share.  Taken back from the raw intercept instead it
         # errs by u |c' beta| in every row's eta, ~0.25 at a 1e16 offset.
-        centred_start: float | None = None
+        centred_start: float | None = self._identity_start
         if (
-            self._centred_init is not None
+            centred_start is None
+            and self._centred_init is not None
             and _state_center is not None
             and self.beta_init is not None
             and self.intercept_init is not None

@@ -324,7 +324,7 @@ def reml_laml_objective(
     if getattr(result, "mean_space_true_mode", False):
         eta_unclipped = linear_predictor(dm, result, offset_arr)
         mu_clipped = clip_mu(link.inverse(stabilize_eta(eta_unclipped, link)), distribution)
-        true_rows = mean_space_log_likelihood_rows(y, sample_weight, eta_unclipped)
+        true_rows = mean_space_log_likelihood_rows(y, sample_weight, eta_unclipped, link)
         clipped_rows = np.asarray(sample_weight, dtype=np.float64) * (
             y * np.log(mu_clipped) + (1.0 - y) * np.log1p(-mu_clipped)
         )

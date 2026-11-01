@@ -78,8 +78,10 @@ def metrics(model, X, y, sample_weight=None, offset=None):
     fit they come from a different evaluation than ``predict``, so reusing
     them for identical objects only made the result depend on object identity
     and on whether the model had been saved (#441).  What the fit's own
-    objects still keep is the cached result object, the fit geometry that
-    leverage reads, and skipping the weight-contract check the fit already ran.
+    objects still keep is the cached result object and the fit geometry that
+    leverage reads. When the unchanged-data guard also matches, scoring skips
+    the weight-contract check, custom-family report and prediction warnings
+    that the fit already emitted.
     """
     from superglm.inference.metrics import ModelMetrics
 

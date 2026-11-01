@@ -1,4 +1,4 @@
-"""The binomial/log mean space's overlay on the direct IRLS fit: Newton steps and the true-score certificate.
+"""The binomial mean-space overlay: Newton steps and the true-score certificate.
 
 PR #437's machinery for the binomial/log pair, whose log link can leave the
 probability space and whose clipped deviance is flat where ``clip_mu`` holds
@@ -7,6 +7,8 @@ replace it whole (the constrained-QP method on ``eta <= 0`` for the event
 rows, stopped by its KKT conditions; design ``2026-10-23-irls-direct-split``).
 The mean-space and link-domain trial predicates (#425's guard, #498) are the
 shared line search's, not this overlay's.
+Identity-binomial uses this overlay too, with its own score, curvature,
+likelihood and two-sided predictor domain supplied to the shared helpers.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from numpy.typing import NDArray
 from superglm._roundoff import EPS as _EPS_FLOAT
 from superglm._roundoff import UNIT_ROUNDOFF as _UNIT_ROUNDOFF_FLOAT
 from superglm._roundoff import gamma as _gamma
+from superglm.links import IdentityLink
 from superglm.solvers.irls_state import (
     _IRLSState,
     _mean_space_halving_budget,
@@ -93,7 +96,7 @@ def _column_shift(penalty_size: NDArray, weight_exponent: int) -> NDArray:
 
 
 class _IRLSDirectMeanSpaceOverlay:
-    """The binomial/log mean space on every route: #437's Newton steps and the true-score certificate.
+    """The binomial log/identity mean space: Newton steps and the true-score certificate.
 
     The fit holds one (``mean_space``) when its family and link can leave
     their mean space (``irls_state.mean_space_violation``), else ``None``, and
@@ -185,12 +188,12 @@ class _IRLSDirectMeanSpaceOverlay:
         self._committed_rows = None
         if mean_space_boundary_rows(family, link, eta, weights):
             return None
-        newton_rows = mean_space_newton_rows(y, weights, eta)
+        newton_rows = mean_space_newton_rows(y, weights, eta, link)
         if newton_rows is None:
             return None
         W, newton_score = newton_rows
         z = np.array(eta, dtype=np.float64)
-        self._committed_rows = mean_space_log_likelihood_rows(y, weights, eta)
+        self._committed_rows = mean_space_log_likelihood_rows(y, weights, eta, link)
         fit.recorder.count("irls_mean_space_newton_iters")
         return W, newton_score, z
 
@@ -289,7 +292,9 @@ class _IRLSDirectMeanSpaceOverlay:
                 return newton_committed_rows
             if _trial_rows[0] is not state:
                 _trial_rows[0] = state
-                _trial_rows[1] = mean_space_log_likelihood_rows(y, weights, state.eta_unclipped)
+                _trial_rows[1] = mean_space_log_likelihood_rows(
+                    y, weights, state.eta_unclipped, link
+                )
             return _trial_rows[1]
 
         def _newton_deviance_delta(candidate: _IRLSState, base: _IRLSState) -> float:
@@ -481,7 +486,9 @@ class _IRLSDirectMeanSpaceOverlay:
         positive = weights > 0.0
         largest_weight = float(np.max(weights[positive], initial=0.0)) if np.any(positive) else 0.0
         weight_exponent = _even_exponent(largest_weight)
-        score, fisher = mean_space_score_rows(y, np.ldexp(weights, -weight_exponent), eta_values)
+        score, fisher = mean_space_score_rows(
+            y, np.ldexp(weights, -weight_exponent), eta_values, fit.link
+        )
         if not (np.all(np.isfinite(score)) and np.all(np.isfinite(fisher))):
             return math.inf, False
         if not _penalty_curvature:
@@ -546,7 +553,7 @@ class _IRLSDirectMeanSpaceOverlay:
                 likelihood_rows.append(
                     np.abs(
                         mean_space_log_likelihood_rows(
-                            y, np.ldexp(weights, -weight_exponent), eta_values
+                            y, np.ldexp(weights, -weight_exponent), eta_values, fit.link
                         )
                     )
                 )
@@ -660,6 +667,7 @@ class _IRLSDirectMeanSpaceOverlay:
                         penalty_matvec(v, magnitude=True), -weight_exponent
                     ),
                     penalty_rounding=penalty_rounding(),
+                    eta_bounds=(0.0, 1.0) if type(fit.link) is IdentityLink else (None, 0.0),
                 )
             ratio = max(ratio, truncated_ratio)
             self._judged_truncated = (eta_values, truncated)

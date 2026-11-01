@@ -1,0 +1,484 @@
+{
+  "audit_base": "6e092c9dc3434b4ba0247083352407a78503aa6d",
+  "excluded": [
+    {
+      "number": 544,
+      "reason": "Independently being solved; unchanged by this audit."
+    }
+  ],
+  "issues": [
+    {
+      "number": 197,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/197",
+      "title": "spline_cat blocks are excluded from tabmat model-wide, capping what the storage levers recover",
+      "verdict": "partial",
+      "labels": [
+        "enhancement",
+        "performance",
+        "p3",
+        "triage:partial"
+      ],
+      "evidence": "Dense Gram dispatch and support compression shipped; model-wide tabmat exclusion and retained storage remain performance work.",
+      "github_state": "open"
+    },
+    {
+      "number": 198,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/198",
+      "title": "Make kind=\"cr\" mean the cardinal cubic regression spline",
+      "verdict": "partial",
+      "labels": [
+        "enhancement",
+        "bug",
+        "p2",
+        "triage:partial"
+      ],
+      "evidence": "Naming proposal remains; public cr_cardinal m=1 silently uses the m=2 penalty. Constructor/order guard fix underway.",
+      "proposed_fix": "Reject unsupported cardinal penalty orders at construction and structural-penalty entry; accepted m=2 fit retained bitwise.",
+      "github_state": "open"
+    },
+    {
+      "number": 269,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/269",
+      "title": "The delivered pencil is not always definite: poles of the exact edf sit inside the ladder's own bracket",
+      "verdict": "stale",
+      "labels": [
+        "research",
+        "p3",
+        "triage:stale"
+      ],
+      "evidence": "Delivered-moment premise superseded by design-factor routes; alleged old stacked-QR oracle violates independently resolved rank ceiling. Any remaining deflation policy needs a new valid case.",
+      "github_state": "closed"
+    },
+    {
+      "number": 299,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/299",
+      "title": "The near-absorbed pair's low bracket edge is refused: the range guard's allowance carries no deflation term",
+      "verdict": "stale",
+      "labels": [
+        "bug",
+        "triage:stale"
+      ],
+      "evidence": "Fixed by 23fedf04 (#407); current half-EDF and crossover regressions pass against closed forms.",
+      "github_state": "closed"
+    },
+    {
+      "number": 313,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/313",
+      "title": "The impact sheet stabilizes the discretized predictor; the workbook it describes does not",
+      "verdict": "confirmed",
+      "labels": [
+        "bug",
+        "p2",
+        "triage:confirmed"
+      ],
+      "evidence": "Actual fitted/exported cancellation case understates maximum workbook error by 1.79e12 because impact stabilizes the approximation.",
+      "proposed_fix": "Measure unbounded workbook-equivalent approximations, reject nonfinite selected-resolution outputs, and stabilize diagnostic correlation arithmetic.",
+      "github_state": "open"
+    },
+    {
+      "number": 314,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/314",
+      "title": "The binned offset multiplier block is not covered by the discretization impact sweep",
+      "verdict": "partial",
+      "labels": [
+        "bug",
+        "p2",
+        "triage:partial"
+      ],
+      "evidence": "Default offset export is now exact; explicitly requested binned-offset summary omits its error from joint impact.",
+      "proposed_fix": "Share offset bins between exported factors and joint impact; categorical-only binned-offset exports now disclose their approximation.",
+      "github_state": "open"
+    },
+    {
+      "number": 329,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/329",
+      "title": "The penalty-root cut is eigh's error bar, but the negativity it now refuses on is made by the assembly",
+      "verdict": "needs-evidence",
+      "labels": [
+        "research",
+        "p3",
+        "triage:needs-evidence"
+      ],
+      "evidence": "Guard exists, but current QR projection bases are orthonormal; 36 constructor configurations produce no refusal. Proposed unbounded-conditioning premise is unproved.",
+      "github_state": "open"
+    },
+    {
+      "number": 339,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/339",
+      "title": "REML under-shrinks a crossed RandomEffect when neighbouring unpenalised levels separate",
+      "verdict": "stale",
+      "labels": [
+        "bug",
+        "triage:stale"
+      ],
+      "evidence": "Exact Tweedie scale criterion fixed; independent fixtures pass. Remaining reference disagreement was explained by weight conventions.",
+      "github_state": "closed"
+    },
+    {
+      "number": 353,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/353",
+      "title": "The pre-commit ruff hook and the pinned ruff are two different versions, and nothing asserts they agree",
+      "verdict": "confirmed",
+      "labels": [
+        "bug",
+        "p3",
+        "triage:confirmed"
+      ],
+      "evidence": "Ruff hook v0.15.22 differs from project 0.16.3; pin synchronization and agreement regression implemented locally.",
+      "proposed_fix": "Synchronize Ruff hook with the project pin and guard agreement.",
+      "github_state": "open"
+    },
+    {
+      "number": 356,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/356",
+      "title": "The Gram rank cut sits below eigh's resolution, so the sign clip is what actually drops a direction",
+      "verdict": "partial",
+      "labels": [
+        "research",
+        "p3",
+        "triage:partial"
+      ],
+      "evidence": "Gram rank floor and public covariance paths fixed; old consumers deleted. Remaining direct-consumer audit is research without demonstrated current public error.",
+      "github_state": "open"
+    },
+    {
+      "number": 366,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/366",
+      "title": "SCOP's stall verdict rests on gates neither cited method supplies, and re-deciding them has cost forty commits",
+      "verdict": "stale",
+      "labels": [
+        "research",
+        "documentation",
+        "triage:stale"
+      ],
+      "evidence": "Requested literature assessment already supplied in maintainer comment; any remaining documentation/policy work needs concrete scope.",
+      "github_state": "closed"
+    },
+    {
+      "number": 370,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/370",
+      "title": "The factor route refuses a positively-weighted level whose covariate spread overflows the shift, where the moment route screened it",
+      "verdict": "confirmed",
+      "labels": [
+        "bug",
+        "p2",
+        "triage:confirmed"
+      ],
+      "evidence": "Raw within-level covariate shift overflows for finite weighted geometry; weighted-row QR gives finite reference statistic/EDF/variance.",
+      "proposed_fix": "Recover nonfinite raw-centered level factors through chunked weighted-row QR; preserve ordinary factor arithmetic.",
+      "github_state": "open"
+    },
+    {
+      "number": 374,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/374",
+      "title": "Anderson(1) acceleration stores the accelerated point in its history, not the map value",
+      "verdict": "confirmed",
+      "labels": [
+        "bug",
+        "p3",
+        "triage:confirmed"
+      ],
+      "evidence": "Anderson history defect remains in explicitly dead scalar EFS driver; public fit_reml rejects every route reaching it.",
+      "github_state": "open"
+    },
+    {
+      "number": 431,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/431",
+      "title": "Binomial/log mean space: remaining edge cases (positive offset, clip threshold, discrete, SCOP)",
+      "verdict": "partial",
+      "labels": [
+        "bug",
+        "p1",
+        "triage:partial"
+      ],
+      "evidence": "Ordinary 4-row binomial/identity fit falsely converges and clips raw means outside [0,1]; several original log-link items fixed, near-one log refusal remains.",
+      "proposed_fix": "Enforce binomial/identity probability domains with correct likelihood derivatives, verified centered starts and rare bounded working-row phase I; disclose boundary stops.",
+      "github_state": "open"
+    },
+    {
+      "number": 455,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/455",
+      "title": "Follow-up nits from #451 and #452 (phase timing, metrics docs)",
+      "verdict": "partial",
+      "labels": [
+        "bug",
+        "p2",
+        "documentation",
+        "triage:partial"
+      ],
+      "evidence": "Original overflow/absorb items fixed; per-fit window inclusive timing can be zero below positive exclusive time; documentation nits remain.",
+      "proposed_fix": "Include still-open caller phases in per-fit inclusive timings and correct verified-row metrics documentation.",
+      "github_state": "open"
+    },
+    {
+      "number": 456,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/456",
+      "title": "Follow-ups from #453: overflow warning, fallback replay, docs and tests",
+      "verdict": "confirmed",
+      "labels": [
+        "bug",
+        "p2",
+        "documentation",
+        "triage:confirmed"
+      ],
+      "evidence": "Dropping an overflowing edited term returns NaN deviance instead of independently finite value; fallback chunking, warning and documentation follow-ups remain.",
+      "proposed_fix": "Chunk compensated replay and rebuild overflowed drops after coordinate shifts, with exact Numeric product pieces for retained cancellations.",
+      "github_state": "open"
+    },
+    {
+      "number": 461,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/461",
+      "title": "Convergence report and actionable, domain-neutral convergence warnings",
+      "verdict": "partial",
+      "labels": [
+        "enhancement",
+        "bug",
+        "p3",
+        "triage:partial"
+      ],
+      "evidence": "Many row diagnostics and warnings exist; ordinary coefficient-only stop metadata missing, unified convergence report and extreme-boundary disclosure policy remain.",
+      "proposed_fix": "Surface coefficient-only termination metadata and suppress false solver-failure advice after editor revisions.",
+      "github_state": "open"
+    },
+    {
+      "number": 462,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/462",
+      "title": "Fit-time check that warns when weights or offsets put part of a fit beyond double precision",
+      "verdict": "planned",
+      "labels": [
+        "enhancement",
+        "triage:planned"
+      ],
+      "evidence": "Proposed informational input precision-risk scan is absent; no incorrect-fit reproduction is established by this feature request.",
+      "github_state": "open"
+    },
+    {
+      "number": 463,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/463",
+      "title": "0.37: work carried over from the 0.36 releases",
+      "verdict": "partial",
+      "labels": [
+        "documentation",
+        "tracking",
+        "triage:partial"
+      ],
+      "evidence": "Historical 0.37 tracker contains delivered select=True and precision work plus still-open features and optional performance follow-ups.",
+      "github_state": "open"
+    },
+    {
+      "number": 466,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/466",
+      "title": "SCOP REML search: estimator decision and search refinements (#465 follow-ups)",
+      "verdict": "planned",
+      "labels": [
+        "enhancement",
+        "research",
+        "triage:planned"
+      ],
+      "evidence": "Estimator choice and search refinements; current nonconvergence is disclosed, no new wrong-output case. Historical halving count stale.",
+      "github_state": "open"
+    },
+    {
+      "number": 467,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/467",
+      "title": "Remaining fit-time costs after #465: bootstrap, centring, diagonals",
+      "verdict": "partial",
+      "labels": [
+        "enhancement",
+        "performance",
+        "p3",
+        "triage:partial"
+      ],
+      "evidence": "TSQR chunking, some duplicate centring and later SuperLSS timing delivered; bootstrap, dense diagonal extraction and SCOP geometry reuse remain.",
+      "github_state": "open"
+    },
+    {
+      "number": 468,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/468",
+      "title": "Numerical policy and test adequacy follow-ups from #465",
+      "verdict": "partial",
+      "labels": [
+        "bug",
+        "research",
+        "p3",
+        "triage:partial"
+      ],
+      "evidence": "Finite range quadratic overflows and Python3.13 cross-thread warning capture reproduced. Other items are test hygiene/policy; logdet reference currently invalid.",
+      "proposed_fix": "Evaluate overflowing range projections with individual eigenvalue exponents while preserving every finite original projection.",
+      "github_state": "open"
+    },
+    {
+      "number": 469,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/469",
+      "title": "Convergence messages and small API gaps from #465",
+      "verdict": "partial",
+      "labels": [
+        "bug",
+        "enhancement",
+        "p3",
+        "triage:partial"
+      ],
+      "evidence": "Budget wording, tiny negative EDF, warning attribution and theta budget knob gaps remain; bootstrap-caution and partial-warm test items already addressed.",
+      "proposed_fix": "Use terminal budget evidence in LSS advice, reconcile tiny display EDF residuals and attribute convergence warnings to external callers.",
+      "github_state": "open"
+    },
+    {
+      "number": 472,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/472",
+      "title": "Constrained QP: follow-ups from #471's review (test bounds, fixed-lambda refusal, KKT equilibration)",
+      "verdict": "partial",
+      "labels": [
+        "bug",
+        "p2",
+        "triage:partial"
+      ],
+      "evidence": "Saved degenerate QP fixed; feasible fixed-lambda KKT-incomplete fit still raises while estimated-lambda path returns disclosed unconverged fit.",
+      "proposed_fix": "Return feasible fixed-lambda KKT-incomplete fits unconverged, preserving infeasible refusal and internal candidate routing.",
+      "github_state": "open"
+    },
+    {
+      "number": 541,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/541",
+      "title": "Follow-ups from #540: tracemalloc tests and other threads, Numeric relativity overflow, face lost on repair",
+      "verdict": "partial",
+      "labels": [
+        "bug",
+        "p2",
+        "triage:partial"
+      ],
+      "evidence": "Original memory/overflow/repair items fixed by #543; Numeric confidence bounds clip incorrectly and recorded-face editor restriction can use wrong subspace.",
+      "proposed_fix": "Remove Numeric interval clipping, tolerate rounded exponential underflow, and retain the editor's saved face rank/subspace.",
+      "github_state": "open"
+    },
+    {
+      "number": 560,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/560",
+      "title": "GPD wall disclosure: deferred review follow-ups from #558",
+      "verdict": "partial",
+      "labels": [
+        "bug",
+        "p2",
+        "triage:partial"
+      ],
+      "evidence": "Unsettled GPD fit can falsely attribute transient near-wall shape to the data; true unsettled pressed fits still need conditional disclosure. Test/documentation follow-ups remain.",
+      "proposed_fix": "Qualify unsettled GPD wall attribution while retaining clipping facts, pressure disclosures and custom-hook compatibility.",
+      "github_state": "open"
+    },
+    {
+      "number": 561,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/561",
+      "title": "Truncation bounds: read pd.NA as a missing bound, and only on retained rows",
+      "verdict": "confirmed",
+      "labels": [
+        "bug",
+        "p2",
+        "triage:confirmed"
+      ],
+      "evidence": "pd.NA in list/object truncation bounds converts before dropped-row filtering and raises generic TypeError; retained entries need original-row diagnostics.",
+      "proposed_fix": "Convert nullable truncation bounds only after retained-row selection and report retained original positions.",
+      "github_state": "open"
+    },
+    {
+      "number": 562,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/562",
+      "title": "Censoring separation scan: gate links per censoring side",
+      "verdict": "confirmed",
+      "labels": [
+        "bug",
+        "p2",
+        "triage:confirmed"
+      ],
+      "evidence": "Censor separation scan gates entire links rather than individual endpoints, missing sqrt/right recession despite correctly accepting sqrt/left.",
+      "proposed_fix": "Apply built-in censoring recession flags to each link endpoint, retaining conservative custom-family behavior.",
+      "github_state": "open"
+    },
+    {
+      "number": 564,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/564",
+      "title": "Severity-family framework (C2): set the stage gates from the error analysis",
+      "verdict": "partial",
+      "labels": [
+        "research",
+        "documentation",
+        "triage:partial"
+      ],
+      "evidence": "Stage1/2 numerical gates and native coverage landed in #565; research note and future family-fit gate still need synchronization.",
+      "proposed_fix": "Synchronize research-note gates with landed analyses, measurements, scale qualifications and common-likelihood fit comparisons.",
+      "github_state": "open"
+    },
+    {
+      "number": 567,
+      "url": "https://github.com/StrudelDoodleS/superglm/issues/567",
+      "title": "Bounded GammaLS and GeneralizedGammaLSS rows cost 17-20x LogNormalLS per likelihood call",
+      "verdict": "confirmed",
+      "labels": [
+        "enhancement",
+        "performance",
+        "triage:confirmed"
+      ],
+      "evidence": "Repeated bounded rows and directional jet passes miss reuse; current performance opportunity, measured complete-fit evidence needed before optimization.",
+      "github_state": "open"
+    }
+  ],
+  "scope": "Severity and verdicts describe the published audit base; proposed fixes are recorded separately and mixed issues retain their remaining scope.",
+  "label_application": {
+    "method": "gh api",
+    "issues_tagged": 30,
+    "excluded": [
+      544
+    ],
+    "issue_states_changed": [
+      269,
+      299,
+      339,
+      366
+    ]
+  },
+  "work": {
+    "implemented": [
+      198,
+      313,
+      314,
+      353,
+      370,
+      431,
+      455,
+      456,
+      461,
+      468,
+      469,
+      472,
+      541,
+      560,
+      561,
+      562,
+      564
+    ],
+    "verification": "Local full suite and required checks passed; see validation.json. Native CI will run on the draft PR.",
+    "remaining": [
+      "197: backend admission and retained-storage performance work.",
+      "198: public cr/cardinal naming and migration proposal.",
+      "269/329/356: valid remaining numerical research cases, if any, need their own current reproductions.",
+      "374: Anderson history defect is confined to an explicitly dormant scalar driver.",
+      "431: near-one log-link and float64-limit cases remain; probability phase I does not jointly solve coefficient inequalities.",
+      "461: unified convergence report and the invalid-objective boundary-refusal policy remain.",
+      "462: upfront informational precision-risk scan remains a feature.",
+      "463: historical tracker cleanup and optional capacity optimizations remain.",
+      "466: estimator policy and measured search refinements remain.",
+      "467: measured bootstrap, diagonal and geometry-reuse performance opportunities remain.",
+      "468: warning-capture thread race, legacy dense penalty path, valid logdet reference and coverage gaps remain.",
+      "469: theta smoothing-budget argument and additional publication/warm-start coverage remain.",
+      "541: extreme-range restrictions can still disclose inability to measure.",
+      "560: deterministic portability/test-event follow-ups remain.",
+      "564: future public-family stages retain the documented common-likelihood fit gate.",
+      "567: bounded likelihood reuse requires representative complete-fit evidence."
+    ],
+    "known_limits": [
+      "Identity probability initialization may report a numerical initialization failure on sufficiently ill-conditioned geometry; it does not mislabel that as model infeasibility.",
+      "Probability-only initialization can retain a valid-probability state marked constraint_infeasible when recovery does not find a joint coefficient/probability feasible point.",
+      "Export guards cover the supplied frame; multiplication order of several individually representable factors can still overflow before later cancellation.",
+      "Compensated replay bounds expansion scratch, while holding failed-row totals and a mask so zero-argument scorer sources are recomputed once.",
+      "Existing Lean libraries establish their documented exact identities and do not certify the floating-point implementation changes."
+    ]
+  }
+}

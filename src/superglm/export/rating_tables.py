@@ -5,7 +5,7 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pandas as pd
@@ -1119,6 +1119,33 @@ def _require_usable_relativities_export(
         )
 
 
+def _require_representable_numeric_factors_export(
+    blocks: list[RatingTableBlock], frame: EagerFrame
+) -> None:
+    """Check the per-row powers that a Numeric block asks a consumer to apply.
+
+    A usable per-unit relativity alone does not guarantee a usable row factor.
+    Other terms may cancel a large numeric contribution in the fitted predictor,
+    but multiplication cannot recover a factor already lost to infinity or zero.
+    """
+    for block in blocks:
+        if block.kind != "numeric":
+            continue
+        per_unit = float(block.table["Relativity"].iloc[0])
+        values = frame.column_array(block.name, dtype=np.float64)
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            factors = np.power(per_unit, values)
+        unusable = ~np.isfinite(factors) | (factors == 0.0)
+        if np.any(unusable):
+            raise OverflowError(
+                f"Numeric rating-table block {block.name!r} produces non-finite or zero "
+                f"factors on {np.count_nonzero(unusable)} export rows when its per-unit "
+                "relativity is raised to the input value. Cancellation by other terms "
+                "cannot recover those factors in a workbook product; rescale the "
+                "numeric input before exporting."
+            )
+
+
 def _require_usable_offset_multipliers(multiplier: NDArray) -> None:
     """The factors a per-unit offset row asks for, checked before it hides them.
 
@@ -1382,6 +1409,20 @@ def _offset_multiplier_block(
             return RatingTableBlock(name="Offset Multiplier", kind="offset", table=table)
         return _offset_per_unit_block_from_multiplier(multiplier, sample_weight)
 
+    return _binned_offset_multiplier_block(multiplier, weights, n_bins, bin_strategy)[0]
+
+
+def _binned_offset_multiplier_block(
+    multiplier: NDArray,
+    weights: NDArray,
+    n_bins: int,
+    bin_strategy: str,
+) -> tuple[RatingTableBlock, NDArray]:
+    """Build the offset summary and the factor its interval lookup applies.
+
+    Shared by the emitted block and the impact sweep, so both use the same
+    exposure-weighted arithmetic averages, edges and empty-bin representatives.
+    """
     from superglm.diagnostics.discretize import _compute_edges
 
     edges = _compute_edges(multiplier, weights, n_bins, bin_strategy)
@@ -1432,11 +1473,8 @@ def _offset_multiplier_block(
                 "Weight": exposure,
             }
         )
-    return RatingTableBlock(
-        name="Offset Multiplier",
-        kind="offset",
-        table=pd.DataFrame(rows),
-    )
+    block = RatingTableBlock(name="Offset Multiplier", kind="offset", table=pd.DataFrame(rows))
+    return block, block.table["Relativity"].to_numpy(dtype=np.float64)[bin_idx]
 
 
 class OffsetRelationError(ValueError):
@@ -1959,6 +1997,7 @@ def _impact_sweep(
     impact_bins: tuple[int, ...],
     bin_strategy: str,
     features: list[str],
+    binned_offset: bool,
     exported_n_bins: int,
     band_se: float,
     band_max_error: float,
@@ -1976,18 +2015,28 @@ def _impact_sweep(
     The ``exported`` column says which row is theirs, and it is the one to
     read.
 
-    An empty ``impact_bins`` still means NO SWEEP, and the fold-in does not
-    override it.  That is the documented opt-out for a caller who wants the
-    tables without paying for the analysis, and turning it into "one sweep at
-    ``n_bins``" would have been a silent cost -- the fold-in exists so the
-    ladder describes the shipped table, not so a caller who declined the ladder
-    gets one anyway.
+    An empty ``impact_bins`` skips the comparison ladder and leaves the sheet
+    empty. The selected resolution is still checked for non-finite joint
+    predictions: turning off disclosure cannot make an unusable approximation
+    exportable.
     """
     rows: list[dict[str, float | int | str]] = []
-    if not features or not impact_bins:
+    if not features and not binned_offset:
         return _empty_impact_frame()
 
     for n_bins in sorted(dict.fromkeys((*impact_bins, exported_n_bins))):
+        offset_kwargs = {}
+        offset_block = None
+        if binned_offset:
+            with np.errstate(over="ignore", under="ignore"):
+                multiplier = np.exp(cast(NDArray, offset))
+            offset_block, applied_multiplier = _binned_offset_multiplier_block(
+                multiplier,
+                _weights_array(len(X), sample_weight),
+                int(n_bins),
+                bin_strategy,
+            )
+            offset_kwargs["_offset_delta"] = np.log(applied_multiplier) - offset
         result = model.discretization_impact(
             X,
             y,
@@ -1998,7 +2047,10 @@ def _impact_sweep(
             features=features,
             band_se=band_se,
             band_max_error=band_max_error,
+            **offset_kwargs,
         )
+        if not impact_bins:
+            return _empty_impact_frame()
         for feature, table in result.tables.items():
             row: dict[str, float | int | str] = {
                 "n_bins": int(n_bins),
@@ -2012,6 +2064,15 @@ def _impact_sweep(
                 row.update(
                     {f"band_{key}": value for key, value in diagnostics.items() if key != "bands"}
                 )
+            rows.append(row)
+        if offset_block is not None:
+            row = {
+                "n_bins": int(n_bins),
+                "exported": int(n_bins) == exported_n_bins,
+                "feature": offset_block.name,
+                "actual_bins": int(len(offset_block.table)),
+            }
+            row.update(result.metrics)
             rows.append(row)
         # Beside the main-effect rows and in the same columns, because a
         # reader has to be able to see every block the workbook approximates
@@ -2091,6 +2152,11 @@ def build_rating_table_payload(
       frame-independence applies -- a ``Numeric`` block is one per-unit
       relativity a consumer raises to whatever value it holds -- and no guard
       can inspect a row that is not here.
+
+    A ``Numeric`` block's per-unit factor is also raised to the values in the
+    export frame and refused if any row factor is non-finite or zero. A later
+    factor cannot recover a value already lost to exponentiation range, even
+    when the fitted predictor's contributions cancel.
 
     So the contract above is exactly: it reproduces ``model.predict`` on every
     row whose predictor stays inside ``[-80, 80]``, and that is now the only
@@ -2264,7 +2330,7 @@ def build_rating_table_payload(
     level of that parent, each cell the level's curve at the parent level's
     score: exact, nothing binned, and not on the sheet.
 
-    Lossy, by construction, for the approximated FITTED TERMS -- ``Spline``,
+    Lossy, by construction, for the approximated fitted terms -- ``Spline``,
     ``Polynomial``, the continuous-by-continuous interaction grid, and the
     spline-by-categorical block.  Two
     distinct errors ride on those, and the sheet reports the first for all
@@ -2273,11 +2339,13 @@ def build_rating_table_payload(
     blocks that were actually built, so the sheet names every one of those
     four and its metrics are joint over them.
 
-    "Fitted terms" is the scope, not "every factor the workbook carries": an
-    OFFSET MULTIPLIER block requested as ``offset_kind="binned"`` is
-    approximated too, is measured above at 8.86e-02, and is not swept, because
-    it is not a fitted term and has no prediction-plan entry.  See the paragraph
-    on issue #314 further down.
+    An offset multiplier block requested as ``offset_kind="binned"`` is also
+    swept. Its interval lookup replaces the exact offset multiplier with the
+    emitted exposure-weighted arithmetic mean, and the change in log factor
+    joins the fitted terms' changes before predictions and metrics are
+    evaluated. It contributes an ``Offset Multiplier`` row even when every
+    fitted term is categorical. Exact lookup and per-unit offset blocks have
+    no approximation to measure and contribute no row.
 
     The interaction's share is a SAMPLING rather than a binning, and it is the
     larger of the two differences between the sheet's two row kinds.  A binned
@@ -2305,23 +2373,19 @@ def build_rating_table_payload(
     binning, not the interaction's own.  That is what makes it the bound a
     consumer of the whole table needs, and it is stated because this issue
     exists precisely because one number on this sheet was read as more than it
-    was.  ``impact_bins`` sweeps that ladder; an empty one skips the sweep
-    entirely, and the worksheet is still created with its column headers and
-    no rows -- ``write_rating_table_workbook`` creates it unconditionally.
+    was. ``impact_bins`` sweeps that ladder; an empty one skips the comparison
+    ladder, and the worksheet is still created with its column headers and
+    no rows. The selected resolution is checked for non-finite joint
+    predictions even when the ladder is disabled.
 
-    The bound is over the TERMS the sheet lists, not over every factor the
-    workbook carries, and three limits on it are tracked rather than fixed
-    here.  A binned OFFSET MULTIPLIER block -- reachable now only by asking for
-    ``offset_kind="binned"``, and measured above at 8.86e-02 -- is not swept at
-    all, and the sweep passes the exact offset into every call, so a
-    categorical-only model exported that way gets an empty sheet beside a binned
-    offset block (issue #314).  Under the default the empty sheet is CORRECT for
-    the offset: there is no offset approximation left in the workbook to
-    measure.  The sheet's
-    discretised prediction goes through ``stabilize_eta`` and the workbook's
-    product does not, so an approximation that pushes a row out of the link's
-    range is clipped on the sheet and not in the table (issue #313).  And for a
-    grid whose parent is a spline-mode ``OrderedCategorical``, the block is a
+    Approximated predictions use the unbounded log-link mean, matching the
+    workbook's product. Neither predictor stabilization nor the positive
+    family's mean clamp is applied to them: clipping would hide the error
+    when binning removes cancellation between terms (issue #313). A
+    non-finite approximated prediction stops export instead of being clipped
+    into a finite impact figure.
+
+    For a grid whose parent is a spline-mode ``OrderedCategorical``, the block is a
     DISCLOSURE rather than a lookup: ``_continuous_interaction_block`` prints
     the axis in mapped-score space while a consumer holds the level label, and
     no block carries the map between them -- the same keying gap as issue #286.
@@ -2781,6 +2845,7 @@ def build_rating_table_payload(
     # After the blocks are built, because it is the emitted values it checks
     # rather than the coefficients they came from.
     _require_usable_relativities_export(main_effects, interactions)
+    _require_representable_numeric_factors_export(main_effects, frame)
 
     impact = _impact_sweep(
         model,
@@ -2788,6 +2853,9 @@ def build_rating_table_payload(
         y_arr,
         sample_weight,
         offset=export_offset,
+        binned_offset=(
+            export_offset is not None and offset_source is None and offset_kind == "binned"
+        ),
         impact_bins=impact_bins,
         bin_strategy=bin_strategy,
         exported_n_bins=int(n_bins),

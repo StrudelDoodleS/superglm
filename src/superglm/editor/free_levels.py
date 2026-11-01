@@ -45,11 +45,12 @@ term covers exactly has no free value of its own: both are left out and named.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
 import scipy.linalg.lapack
+from numpy.typing import NDArray
 from scipy.stats import norm
 
 from superglm._frame import as_eager_frame
@@ -72,7 +73,7 @@ from superglm.model.state_ops import (
     _legacy_active_state,
     _rank_centered_data_gram,
 )
-from superglm.solvers.irls_direct import _binding_rank, _binding_rows
+from superglm.solvers.irls_direct import _active_face_basis, _binding_rows
 from superglm.solvers.mode_score import linear_predictor
 from superglm.solvers.working_rows import (
     coefficient_working_rows,
@@ -549,8 +550,8 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
     its face under any small change of the response, so the fit moves with
     ``F - F A'(A F A')^+ A F``, the restricted estimator's form, rather than
     ``F``; a curve held flat by its monotone constraint does not move at all.
-    The rows held are the ones the fit held (``RankInfo.face_rows``), an
-    independent set of them in their own units, none where it held none; a
+    The rows held are the ones the fit held (``RankInfo.face_rows``), on its
+    retained subspace (``RankInfo.face``), none where it held none; a
     post-fit repair keeps them (``state_ops.face_record_at``). A record
     without them, pickled before fits kept them (0.41 and earlier), has its
     rows read as the fit reads them (``irls_direct._binding_rows``), all of them,
@@ -561,14 +562,28 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
     formed to a relative accuracy of 1e-6.
     """
     full = {group.name: group for group in model._groups}
-    recorded = getattr(model._solver_pirls_result().rank_info, "face_rows", None)
+    record = model._solver_pirls_result().rank_info
+    recorded = getattr(record, "face_rows", None)
+    face = getattr(record, "face", None)
     width = X.p
     if recorded is not None:
         # Over the active columns; an inactive term's coefficients are zero,
         # so its rows drop.
-        columns = [np.arange(full[group.name].start, full[group.name].end) for group in active]
-        R = recorded[:, np.concatenate(columns)]
+        columns = np.concatenate(
+            [np.arange(full[group.name].start, full[group.name].end) for group in active]
+        )
+        R = recorded[:, columns]
         R = R[np.any(R != 0.0, axis=1)]
+        if face is not None:
+            rank = face.shape[0] - face.shape[1]
+            if width != face.shape[0]:
+                # Constraints belong to whole groups, and selection removes
+                # whole groups. The restricted free-space projector therefore
+                # has eigenvalues 0 and 1: count those directions, not a fresh
+                # rank decision on the original nearly dependent rows.
+                face = face[columns]
+                singular = np.linalg.svd(face, compute_uv=False)
+                rank = width - int(np.count_nonzero(singular > 0.5))
     else:
         beta = np.asarray(model.result.beta, dtype=np.float64)
         theta = np.zeros(width)
@@ -588,11 +603,41 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
         gram = _rank_centered_data_gram(X, curvature) if data_gram is None else data_gram
         column_scale = np.sqrt(np.maximum(np.diag(gram), 0.0))
         R = _binding_rows(np.vstack(rows), np.concatenate(bounds), theta, column_scale)
+        face = None
     if not R.shape[0]:
         return apply
-    # The fit's rank rule (``irls_direct._binding_rank``) on the rows as
-    # recorded, so it decides as the fit's face did.
-    rank = _binding_rank(R)[2]
+    if face is None:
+        face = cast(NDArray, _active_face_basis(R))
+        rank = width - face.shape[1]
+    if not rank:
+        return apply
+    if R.shape[0] > rank:
+        # Keeping an original row can reintroduce a direction discarded by
+        # the fit's rank cut. Project redundant rows onto its retained row
+        # space first. Independent rows keep their original small entries:
+        # an orthogonal complement can lose them in the SVD's rounding.
+        R = R - (R @ face) @ face.T
+    restricted = _restriction_from_rows(R, rank, apply)
+    if restricted is not None:
+        return restricted
+    # Express the retained row space with identity pivot columns. Rotating
+    # rows into singular vectors can mix coordinates with very different
+    # curvature and make an otherwise resolved restriction ill-conditioned.
+    # This interpolatory basis preserves the small entries of a single row,
+    # and, for example, holds e0 and e1 directly when both are constrained.
+    row_pivots = scipy.linalg.qr(R.T, mode="economic", pivoting=True)[2][:rank]
+    R = R[row_pivots]
+    column_pivots = scipy.linalg.qr(R, mode="economic", pivoting=True)[2][:rank]
+    try:
+        R = np.linalg.solve(R[:, column_pivots], R)
+    except np.linalg.LinAlgError:
+        return None
+    R[:, column_pivots] = np.eye(rank)
+    return _restriction_from_rows(R, rank, apply)
+
+
+def _restriction_from_rows(R, rank, apply):
+    """Restrict to ``rank`` independent rows, or disclose an unresolved solve."""
     moves = np.column_stack([apply(row) for row in R])
     # Scaled to a unit diagonal, R F R' has within a factor of its size the
     # least condition any diagonal scaling gives it (van der Sluis 1969;
@@ -603,13 +648,8 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
         return None
     R, moves = R / scale[:, None], moves / scale
     gram = 0.5 * (R @ moves + (R @ moves).T)
-    # That many rows, the most independent in the curvature metric first:
-    # pivoted Cholesky of R F R' (LAPACK ``dpstrf``; Higham 2002, sec. 10.3),
-    # so the basis is as well conditioned there as the rows allow. Its
-    # diagonal is 1 exactly for the pivot choice, which otherwise turns on
-    # the last bit of each scaled product. Rows equal to within rounding tie,
-    # and which is kept moves a contrast by about d sqrt(cond F) of its
-    # variance, for rows d apart.
+    # Choose the most independent rows in the curvature metric. Equal
+    # diagonal entries tie exactly, rather than on the product's last bit.
     pivoting = gram.copy()
     np.fill_diagonal(pivoting, 1.0)
     pivots = scipy.linalg.lapack.dpstrf(pivoting)[1][:rank] - 1

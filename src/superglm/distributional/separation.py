@@ -47,10 +47,14 @@ from superglm.links import (
     CauchitLink,
     CloglogLink,
     IdentityLink,
+    InverseLink,
+    InverseSquaredLink,
     Link,
     LogitLink,
     LogLink,
+    PowerLink,
     ProbitLink,
+    SqrtLink,
     resolve_link,
 )
 
@@ -268,6 +272,46 @@ def _default_link_class(parameter: ParameterSpec) -> type:
     return type(default if isinstance(default, Link) else resolve_link(default, cast(Any, None)))
 
 
+def _has_builtin_censor_direction(family: DistributionalFamily) -> bool:
+    """Built-in monotone flags increase right-tail probabilities with the parameter.
+
+    A custom declaration can point the other way.  Keep its existing link
+    contract rather than inferring a direction from its boolean flags.
+    """
+    from superglm.distributional.families.gamma import GammaLS
+    from superglm.distributional.families.gaussian import GaussianLS
+    from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
+    from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
+    from superglm.distributional.families.log_normal import LogNormalLS
+
+    return type(family) in (
+        GammaLS,
+        GaussianLS,
+        GeneralizedGammaLSS,
+        GeneralizedParetoLSS,
+        LogNormalLS,
+    )
+
+
+def _infinite_range_ends(link: Link) -> tuple[bool, bool]:
+    """Whether the lower and upper ends require an infinite linear predictor.
+
+    Sqrt reaches zero at eta=0, but grows without bound only as |eta| grows.
+    A positive power behaves likewise, except p=1 is the unclamped identity.
+    Reciprocals approach zero at infinite eta and reach their upper end at
+    eta=0; the power link clamps that end at a finite eta instead.
+    """
+    if type(link) is SqrtLink:
+        return False, True
+    if type(link) in (InverseLink, InverseSquaredLink):
+        return True, False
+    if type(link) is PowerLink and np.isfinite(link.power):
+        if link.power == 1.0:
+            return True, True
+        return link.power < 0.0, link.power > 0.0
+    return False, False
+
+
 def censored_recession(
     family: DistributionalFamily, bounds: ResponseBounds, compiled: Sequence[CompiledPredictor]
 ) -> NDArray[np.bool_]:
@@ -277,8 +321,11 @@ def censored_recession(
     line strictly monotonically onto an open interval: the level's likelihood
     is monotone in its coefficient, so its supremum is reached only as the
     predictor walks off.  Such flags are read on the parameter's default link
-    class and on those links; a link that reaches an end of its range at a
-    finite coefficient, such as sqrt, leaves the level a finite estimate there.
+    class and on those links.  Built-in monotone flags also apply per side
+    when that end of the link's range requires an infinite coefficient: sqrt
+    leaves a left-censored level a finite estimate at zero, while a
+    right-censored level still runs toward infinity.  Custom declarations
+    keep the existing contract because their direction is not declared.
     A parameter the family names in ``censored_recession_link_sensitive`` has
     flags that are not monotone; there a bounded link, such as a logit on a
     scale, can stop short of the limit, so those flags are read only on the
@@ -306,7 +353,17 @@ def censored_recession(
         )
         for predictor in compiled_tuple
     ]
-    return flags & np.asarray(readable, dtype=bool)
+    result = flags & np.asarray(readable, dtype=bool)
+    for index, predictor in enumerate(compiled_tuple):
+        parameter = parameters[predictor.parameter_index]
+        if readable[index] or parameter.name in sensitive:
+            continue
+        lower, upper = _infinite_range_ends(predictor.link)
+        if (lower or upper) and _has_builtin_censor_direction(family):
+            result[:, index] = flags[:, index] & (
+                ((bounds.side == LEFT_CENSORED) & lower) | ((bounds.side == RIGHT_CENSORED) & upper)
+            )
+    return result
 
 
 def scan_censored_separation(

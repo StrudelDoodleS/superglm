@@ -6,6 +6,7 @@ import tomllib
 from datetime import datetime
 from pathlib import Path
 
+import yaml
 from packaging.version import Version
 
 from tests.test_ci_contracts import _check_run_names, _compatibility_cases, _jobs
@@ -56,6 +57,24 @@ def _required_uv_version() -> str:
     match = re.fullmatch(r"==(\d+\.\d+\.\d+)", required)
     assert match, f"expected an exact uv pin in pyproject, got {required!r}"
     return match.group(1)
+
+
+def test_pre_commit_ruff_matches_the_project_pin():
+    project = tomllib.loads(_read("pyproject.toml"))
+    pins = [
+        requirement.removeprefix("ruff==")
+        for requirement in project["project"]["optional-dependencies"]["dev"]
+        if requirement.startswith("ruff==")
+    ]
+    assert len(pins) == 1, "the development environment must pin one Ruff version"
+    config = yaml.safe_load(_read(".pre-commit-config.yaml"))
+    hooks = [
+        repository
+        for repository in config["repos"]
+        if repository["repo"] == "https://github.com/astral-sh/ruff-pre-commit"
+    ]
+    assert len(hooks) == 1, "expected one Ruff pre-commit repository"
+    assert hooks[0]["rev"] == f"v{pins[0]}", "Ruff hooks and the project must use one version"
 
 
 def test_security_workflow_runs_on_master_prs_and_schedule():

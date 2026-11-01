@@ -7,7 +7,10 @@ from typing import Any, cast
 
 import numpy as np
 
-from superglm.diagnostics.convergence import reml_nonconvergence_message
+from superglm.diagnostics.convergence import (
+    coefficient_nonconvergence_message,
+    reml_nonconvergence_message,
+)
 from superglm.inference._term_helpers import (
     ordered_level_fit,
     spline_group_enrichment,
@@ -41,6 +44,14 @@ def diagnostics(model) -> dict[str, Any]:
     penalty = fitted_penalty(model)
     lambda2 = fitted_lambda2(model)
     selected_names = selected_group_name_set(res, model._groups, penalty=penalty)
+    reml = getattr(model, "_reml_result", None)
+    convergence_note = (
+        reml_nonconvergence_message(reml)
+        if reml is not None
+        else coefficient_nonconvergence_message(
+            res, fit_method=(getattr(model, "_last_fit_meta", None) or {}).get("method", "fit")
+        )
+    )
 
     out = {}
     for g in model._groups:
@@ -73,9 +84,9 @@ def diagnostics(model) -> dict[str, Any]:
             else res.converged
         ),
         "termination_reason": getattr(
-            getattr(model, "_reml_result", None), "termination_reason", None
+            reml if reml is not None else res, "termination_reason", None
         ),
-        "convergence_note": reml_nonconvergence_message(getattr(model, "_reml_result", None)),
+        "convergence_note": convergence_note,
         "lambda1": penalty.lambda1,
         "weakly_identified": list(reml_profile.get("reml_weakly_identified_labels", ()) or ()),
         "excluded_from_smoothing_selection": list(
@@ -285,9 +296,18 @@ def summary(
             else res.n_iter
         ),
     }
-    convergence_note = reml_nonconvergence_message(getattr(model, "_reml_result", None))
+    reml = getattr(model, "_reml_result", None)
+    convergence_note = (
+        reml_nonconvergence_message(reml)
+        if reml is not None
+        else coefficient_nonconvergence_message(
+            res, fit_method=(getattr(model, "_last_fit_meta", None) or {}).get("method", "fit")
+        )
+    )
     if convergence_note is not None:
-        model_info["termination_reason"] = model._reml_result.termination_reason
+        model_info["termination_reason"] = getattr(
+            reml if reml is not None else res, "termination_reason", None
+        )
         model_info["convergence_note"] = convergence_note
     editor_meta = getattr(model, "_editor_edits", None)
     if getattr(model, "_editor_inference_stale", False):

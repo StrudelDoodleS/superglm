@@ -1539,16 +1539,12 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         with pytest.raises(ValueError, match="not a usable factor"):
             model.discretization_impact(df, y, n_bins=3, features=["a:b"])
 
-    def test_a_finite_log_surface_survives_an_unrepresentable_factor(self):
-        """``exp`` of a finite log surface can leave float64; the fit does not.
+    def test_an_unrepresentable_grid_prediction_is_refused(self):
+        """A finite log surface cannot justify a clipped impact disclosure.
 
-        Both built-ins return ``relativity = exp(log_relativity)``, so a finite
-        log surface outside the exponential range comes back as ``0`` or
-        ``inf`` while the fit's own predictor stays perfectly representable.
-        Validating the printed factor would then refuse a diagnostic with
-        nothing wrong with it -- so the log field is taken wherever ``exp`` of
-        it reproduces the factor cell for cell, which an overflowed cell does
-        exactly.
+        The log field still recovers the surface where its exponential is
+        unrepresentable, but a joint approximated prediction that overflows is
+        refused. Clipping it would report an error smaller than the workbook's.
         """
         stub = self._Stub()
         base = stub.reconstruct
@@ -1565,10 +1561,11 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         model, df, y = self._model_with(stub)
         assert not np.all(np.isfinite(_huge(np.zeros(1), n_points=3)["relativity"]))
 
-        result = model.discretization_impact(df, y, n_bins=3, features=["a:b"])
-        grid = result.interaction_tables["a:b"]
-        assert np.all(np.isfinite(grid["log_relativity"].to_numpy()))
-        assert int(grid["n_obs"].sum()) == len(df)
+        with (
+            np.errstate(over="ignore"),
+            pytest.raises(OverflowError, match="discretized.*non-finite"),
+        ):
+            model.discretization_impact(df, y, n_bins=3, features=["a:b"])
 
     def test_a_malformed_log_field_falls_through_to_the_printed_factor(self):
         """``log_relativity`` is not part of the grid contract, so it cannot refuse.
@@ -1679,20 +1676,19 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         assert lost.any(), "the lost cell must be reached"
         assert (~lost).any(), "surviving cells must be reached"
 
-        delta = np.log(result.predictions / result.original_predictions)
+        delta = np.log(result.predictions[~lost] / result.original_predictions[~lost])
         # The surviving cells read the factor the workbook prints, exactly --
         # the near-miss log field never touches them.
         np.testing.assert_allclose(
-            delta[~lost],
+            delta,
             (nodes_a[i] + 0.01 * nodes_b[j])[~lost],
             rtol=_NODE_EXACT_RTOL,
             atol=0.0,
         )
-        # The lost cell took the log field rather than ``log(0) == -inf``, so
-        # it stays finite and far below every surviving cell.  Stabilization
-        # clips how far, which is why the bound is an inequality.
-        assert np.all(np.isfinite(delta[lost]))
-        assert delta[lost].max() < delta[~lost].min() - 1.0
+        # The lost cell retains its finite log factor in the analysis, while
+        # its raw mean underflows to the zero the unclipped product produces.
+        assert result.interaction_tables["a:b"].log_relativity.iloc[0] == -800.0
+        assert np.all(result.predictions[lost] == 0.0)
 
     def test_a_grid_reconstructor_without_n_points_is_still_a_grid(self):
         from superglm.diagnostics.discretize import _grid_reconstruction
