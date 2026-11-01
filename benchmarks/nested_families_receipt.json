@@ -1,13 +1,13 @@
 {
  "superglm": "0.41.0",
- "commit": "ff2ed52dc81eb55d73349a07f0989d9db53c3c59",
+ "commit": "31b78262da60ec540afe8de80aefb7290e8cfe65",
  "python": "3.13.14",
  "machine": "x86_64",
  "rows": 20000,
  "seed": 20261101,
  "gamma_constant_cv": {
   "GammaLS": {
-   "wall_s": 0.387,
+   "wall_s": 0.441,
    "status": "ok",
    "held_out_log_score": 8.038545710702843,
    "mean_rel_error_vs_truth_max": 0.07212487224385122,
@@ -17,7 +17,7 @@
    }
   },
   "GG_shape_free": {
-   "wall_s": 0.392,
+   "wall_s": 0.447,
    "status": "ok",
    "held_out_log_score": 8.03865370068653,
    "mean_rel_error_vs_truth_max": 0.06962483073763082,
@@ -37,7 +37,7 @@
  },
  "gamma_cv_varies_with_x2": {
   "GammaLS": {
-   "wall_s": 0.395,
+   "wall_s": 0.392,
    "status": "ok",
    "held_out_log_score": 7.980292951856626,
    "mean_rel_error_vs_truth_max": 0.0695003677456022,
@@ -47,7 +47,7 @@
    }
   },
   "GG_shape_free": {
-   "wall_s": 0.673,
+   "wall_s": 0.744,
    "status": "ok",
    "held_out_log_score": 7.98770845950183,
    "mean_rel_error_vs_truth_max": 0.07449371924673276,
@@ -65,7 +65,7 @@
    "mean_rel_diff_vs_GammaLS_max": 0.01642612278151434
   },
   "GG_shape_on_x2": {
-   "wall_s": 0.741,
+   "wall_s": 0.776,
    "status": "ok",
    "held_out_log_score": 7.980497759341716,
    "mean_rel_error_vs_truth_max": 0.0701570854132848,
@@ -85,7 +85,7 @@
  },
  "lognormal": {
   "LogNormalLS": {
-   "wall_s": 0.117,
+   "wall_s": 0.149,
    "status": "ok",
    "held_out_log_score": 7.981114853807472,
    "mean_rel_error_vs_truth_max": 0.07700782195219946,
@@ -95,11 +95,11 @@
    }
   },
   "GG_shape_fixed_0": {
-   "wall_s": 0.285,
+   "wall_s": 0.323,
    "status": "ValueError: predictor 'shape' has an invalid global slice"
   },
   "GG_shape_free": {
-   "wall_s": 0.361,
+   "wall_s": 0.408,
    "status": "ok",
    "held_out_log_score": 7.981163481589724,
    "mean_rel_error_vs_truth_max": 0.07819179957352174,
@@ -119,7 +119,7 @@
  },
  "gaussian": {
   "GaussianLS": {
-   "wall_s": 0.11,
+   "wall_s": 0.125,
    "status": "ok",
    "held_out_log_score": 1.3142755548399383,
    "mean_rel_error_vs_truth_max": 0.009921558443238832,
@@ -129,11 +129,11 @@
    }
   },
   "TwoPieceNormal_skew_fixed_0": {
-   "wall_s": 0.176,
+   "wall_s": 0.169,
    "status": "ValueError: predictor 'skew' has an invalid global slice"
   },
   "TwoPieceNormal_skew_free": {
-   "wall_s": 0.195,
+   "wall_s": 0.203,
    "status": "ok",
    "held_out_log_score": 1.314274166376591,
    "mean_rel_error_vs_truth_max": 0.009941646964334305,
@@ -153,14 +153,14 @@
  },
  "prior_weights": {
   "GammaLS_claim_rows": {
-   "wall_s": 0.506,
+   "wall_s": 0.519,
    "status": "ok",
    "rows": 25155,
    "mean_rel_error_vs_truth_max": 0.09364474447377769,
    "cv_at_first_policy": 1.197317745406472
   },
   "GammaLS_averages_prior_weight": {
-   "wall_s": 0.231,
+   "wall_s": 0.251,
    "status": "ok",
    "rows": 10000,
    "mean_rel_error_vs_truth_max": 0.09363521627081073,
@@ -168,12 +168,12 @@
    "mean_rel_diff_vs_claim_rows_max": 5.6113657066703126e-05
   },
   "GG_averages_prior_weight": {
-   "wall_s": 0.006,
+   "wall_s": 0.005,
    "status": "UnsupportedLikelihoodContractError: GeneralizedGammaLSS is not a reproductive family, so non-unit prior weights have no likelihood law; fit claim-level rows, carry exposure through offsets, or use weight_semantics='frequency' for integer replication",
    "rows": 10000
   },
   "LogNormalLS_averages_prior_weight": {
-   "wall_s": 0.006,
+   "wall_s": 0.004,
    "status": "UnsupportedLikelihoodContractError: LogNormalLS is not a reproductive family, so non-unit prior weights have no likelihood law; fit claim-level rows, carry exposure through offsets, or use weight_semantics='frequency' for integer replication",
    "rows": 10000
   }
@@ -205,6 +205,48 @@
    "mean_rms_rel_error": {
     "LogNormalLS": 0.12441258457504537,
     "GG_shape_free": 0.1253190683792332
+   }
+  }
+ },
+ "censored": {
+  "lognormal_censored": {
+   "limit": 2146.8666057325145,
+   "censored_fraction": 0.15,
+   "LogNormalLS": {
+    "wall_s": 0.143,
+    "status": "ok",
+    "held_out_log_score": 7.9756955197212305
+   },
+   "GG_shape_free": {
+    "wall_s": 0.551,
+    "status": "ok",
+    "held_out_log_score": 7.975678659478083,
+    "vs_LogNormalLS": {
+     "mean_diff": -1.686024314684157e-05,
+     "se": 1.6776225396577792e-05,
+     "t": -1.0050081438629763,
+     "n": 20000.0
+    }
+   }
+  },
+  "gamma_censored": {
+   "limit": 2488.8516330265597,
+   "censored_fraction": 0.15,
+   "GammaLS": {
+    "wall_s": 0.456,
+    "status": "ok",
+    "held_out_log_score": 8.052879735184726
+   },
+   "GG_shape_free": {
+    "wall_s": 0.546,
+    "status": "ok",
+    "held_out_log_score": 8.052917204559702,
+    "vs_GammaLS": {
+     "mean_diff": 3.74693749749841e-05,
+     "se": 3.140952050968132e-05,
+     "t": 1.1929304990006122,
+     "n": 20000.0
+    }
    }
   }
  }

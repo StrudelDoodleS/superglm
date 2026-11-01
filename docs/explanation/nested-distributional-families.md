@@ -79,8 +79,8 @@ Measured on 25,155 gamma claims (CV 1.2) from 10,000 policies:
 
 | Fit | Rows | Mean table against the claim-level fit | CV | Wall s |
 |---|---|---|---|---|
-| `GammaLS`, claim-level rows | 25,155 | (reference) | 1.197 | 0.51 |
-| `GammaLS`, policy averages, claim counts as prior weights | 10,000 | within 5.6e-5 relative | 1.204 | 0.23 |
+| `GammaLS`, claim-level rows | 25,155 | (reference) | 1.197 | 0.52 |
+| `GammaLS`, policy averages, claim counts as prior weights | 10,000 | within 5.6e-5 relative | 1.204 | 0.25 |
 | `GeneralizedGammaLSS`, policy averages, prior weights | 10,000 | refused | | |
 | `LogNormalLS`, policy averages, prior weights | 10,000 | refused | | |
 
@@ -102,12 +102,12 @@ from 0.6 to 1.6 with a covariate `x2`:
 
 | Fit | Held-out log score, minus `GammaLS` | Wall s |
 |---|---|---|
-| `GammaLS`, CV on `x2` | (reference) | 0.40 |
-| `GeneralizedGammaLSS`, scale on `x2`, constant shape | +0.0074 ± 0.0009 (worse) | 0.67 |
-| `GeneralizedGammaLSS`, scale and shape both on `x2` | +0.0002 ± 0.0001 | 0.74 |
+| `GammaLS`, CV on `x2` | (reference) | 0.39 |
+| `GeneralizedGammaLSS`, scale on `x2`, constant shape | +0.0074 ± 0.0009 (worse) | 0.74 |
+| `GeneralizedGammaLSS`, scale and shape both on `x2` | +0.0002 ± 0.0001 | 0.78 |
 
 Giving the shape its own model recovers the fit only approximately, and at
-almost twice the time. It also spends coefficients estimating a relationship
+twice the time. It also spends coefficients estimating a relationship
 the gamma fixes exactly.
 
 The other restrictions cannot be declared either. A `SuperLSS` predictor
@@ -122,12 +122,22 @@ On 20,000 training and 20,000 held-out rows from each special case's own law:
 
 | Data | Special case, wall s | General family, wall s | Held-out log score, general minus special |
 |---|---|---|---|
-| gamma, CV 1.2 | `GammaLS` 0.39 | `GeneralizedGammaLSS` 0.39 | +0.0001 ± 0.0001 |
-| log-normal, scale on `x2` | `LogNormalLS` 0.12 | `GeneralizedGammaLSS` 0.36 | +0.00005 ± 0.00003 |
-| Gaussian, scale on `x2` | `GaussianLS` 0.11 | `TwoPieceNormalLSS` 0.20 | −0.000001 ± 0.000002 |
+| gamma, CV 1.2 | `GammaLS` 0.44 | `GeneralizedGammaLSS` 0.45 | +0.0001 ± 0.0001 |
+| log-normal, scale on `x2` | `LogNormalLS` 0.15 | `GeneralizedGammaLSS` 0.41 | +0.00005 ± 0.00003 |
+| Gaussian, scale on `x2` | `GaussianLS` 0.13 | `TwoPieceNormalLSS` 0.20 | −0.000001 ± 0.000002 |
 
 At this size the extra parameter costs nothing in prediction, but it can cost
-up to three times the fitting time. The fitted shapes sat where the special
+nearly three times the fitting time.
+
+Censoring the same kind of claims at a policy limit, the 85th percentile of the
+training claims, widens the log-normal's lead. Its censored rows need only the
+normal distribution function, while the generalized gamma's need the incomplete
+gamma or its uniform expansion:
+
+| Data, 15% censored | Special case, wall s | General family, wall s | Held-out log score, general minus special |
+|---|---|---|---|
+| log-normal, scale on `x2` | `LogNormalLS` 0.14 | `GeneralizedGammaLSS` 0.55 | −0.00002 ± 0.00002 |
+| gamma, CV 1.2 | `GammaLS` 0.46 | `GeneralizedGammaLSS` 0.55 | +0.00004 ± 0.00003 | The fitted shapes sat where the special
 case puts them: generalized-gamma shape 1.22 against a fitted scale of 1.18,
 shape −0.011 against 0, and skew −0.0003 against 0.
 
