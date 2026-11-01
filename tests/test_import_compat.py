@@ -134,27 +134,10 @@ _FIRST_USE: dict[str, str] = {
         "residuals): diagnostics, not the fit",
     ),
     **dict.fromkeys(
-        [
-            *(
-                _DECLARED + f"gamma.{law}_{p}"
-                for law in ("density", "logsf", "logcdf")
-                for p in (3, 4)
-            ),
-            *(
-                _DECLARED + f"gamma_log.{law}_{p}"
-                for law in ("density", "logsf", "logcdf")
-                for p in (0, 1, 2)
-            ),
-        ],
-        "GammaLS reads a bounded row's window to order 2 in its own parameters and at orders "
-        "3-4 on its predictor scale, so no fit reaches the other orders of either",
-    ),
-    **dict.fromkeys(
         (
-            _DECLARED + f"{module}.{law}_uniform_{p}"
+            _DECLARED + f"{module}.{law}_uniform"
             for module in ("gamma", "gamma_log")
             for law in ("logsf", "logcdf")
-            for p in range(5)
         ),
         "GammaLS reads a bounded row's tail by the uniform expansion only above shape 1e4 "
         "(cv below 0.01 at unit weight), a response nearly constant in its cell: no census fit "
