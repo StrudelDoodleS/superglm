@@ -777,8 +777,9 @@ def test_a_censored_row_near_a_non_unit_mean_keeps_its_standardized_distance(coo
     jets = _declared_bounds.gamma_window_jets(
         np.array([y]), np.array([_INF]), theta, np.ones(1), order=0, coordinates=coordinates
     )
-    exact_mean = mp.exp(mp.mpf(theta[0, 0])) if coordinates == "log" else mp.mpf(mean)
-    w = float(mp.log(mp.mpf(y) / exact_mean) / mp.mpf(q))
+    with mp.workdps(40):
+        exact_mean = mp.exp(mp.mpf(theta[0, 0])) if coordinates == "log" else mp.mpf(mean)
+        w = float(mp.log(mp.mpf(y) / exact_mean) / mp.mpf(q))
     # log coordinates round log 49 itself: exp of it moves the mean by about 4u.
     allowance = 1e-9 if coordinates == "natural" else 4 * _U / q
     assert abs(jets[0][0] - stats.norm.logsf(w)) <= allowance + 1e-9
