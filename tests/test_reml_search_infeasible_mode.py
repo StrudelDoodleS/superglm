@@ -432,6 +432,10 @@ class TestQPModeFailuresAreRoutable:
         lambdas = {k: float(v) for k, v in model._reml_result.lambdas.items()}
 
         for reason in ("constraint_infeasible", "constraint_kkt_incomplete"):
+            # An internal power-search candidate needs a certified mode to
+            # compare objectives. A public fixed-lambda fit instead returns a
+            # feasible KKT-incomplete iterate with a convergence disclosure.
+            model._suppress_convergence_warning = True
             monkeypatch.setattr(
                 reml_execute,
                 "fit_irls_direct",

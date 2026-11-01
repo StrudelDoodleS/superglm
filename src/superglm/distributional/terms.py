@@ -864,13 +864,19 @@ def _convergence_note(fitted: Any) -> str:
     why = lss_nonconvergence_reason(
         getattr(fitted, "fitted_result", None),
         None if smoothing is None else smoothing.convergence_reason,
+        coefficient_reason=getattr(getattr(fitted, "result", None), "convergence_reason", None),
     )
     return "" if why is None else f"fit not converged: {why}"
 
 
-def _negative_edf_note(edf: float) -> str:
-    """A negative EDF is no degree of freedom; the row must not read as one."""
-    return f"negative EDF ({float(edf):.3g}) is not interpretable" if float(edf) < 0.0 else ""
+def _negative_edf_note(edf: float, tolerance: float) -> str:
+    """Call out material negatives using the fit's EDF reconciliation tolerance."""
+    return f"negative EDF ({float(edf):.3g}) is not interpretable" if edf < -tolerance else ""
+
+
+def _display_edf(edf: float, tolerance: float) -> float:
+    """Display a roundoff-scale negative residual as zero without changing inference."""
+    return 0.0 if -tolerance <= edf < 0.0 else float(edf)
 
 
 def _covariance_note(requested: CovarianceKind, resolved: CovarianceKind) -> str:
@@ -907,7 +913,9 @@ def summary_table(
     it; ``"fit not converged: ..."`` on every row of a fit that stopped before
     its convergence test passed (``result_.converged`` is False); and
     ``"negative EDF (...) is not interpretable"`` where a term's EDF is below
-    zero. Where ``covariance="corrected"`` could not be formed, every row says
+    zero beyond the fit's reconciliation tolerance. Smaller negative residuals
+    display as zero; the underlying inference retains their value.
+    Where ``covariance="corrected"`` could not be formed, every row says
     ``"corrected covariance unavailable: fixed shown"``, because its ``se``,
     statistic and p-value are then the conditional ones. Notes join with
     ``"; "``, and a row with none reads ``""``.
@@ -915,6 +923,7 @@ def summary_table(
     beta = np.asarray(fitted.coefficients, dtype=np.float64)
     frame = as_eager_frame(X_train)
     convergence_note = _convergence_note(fitted)
+    edf_tolerance = float(fitted.inference.reconciliation_tolerance)
     prepared_tests: dict[str, _PreparedTermTest] = {}
     has_intercept = False
     for state in fitted.layout.predictors:
@@ -946,7 +955,13 @@ def summary_table(
                 matrix,
                 fitted.inference.intercept_edf,
             )
-            row["note"] = _join_notes(row["note"], convergence_note, covariance_note)
+            row["note"] = _join_notes(
+                row["note"],
+                convergence_note,
+                covariance_note,
+                _negative_edf_note(row["edf"], edf_tolerance),
+            )
+            row["edf"] = _display_edf(row["edf"], edf_tolerance)
             rows.append(row)
         for qualified, term_slice in fitted.layout.term_slices.items():
             namespace, _, term = qualified.partition(":")
@@ -963,7 +978,7 @@ def summary_table(
                 {
                     "parameter": state.name,
                     "term": _summary_label(term),
-                    "edf": outcome.edf,
+                    "edf": _display_edf(outcome.edf, edf_tolerance),
                     "lambda": (
                         float(next(iter(lambdas.values()))) if len(lambdas) == 1 else float("nan")
                     ),
@@ -980,7 +995,7 @@ def summary_table(
                         _absorption_note(fitted, state.name, term, outcome.edf, beta[term_slice]),
                         convergence_note,
                         covariance_note,
-                        _negative_edf_note(outcome.edf),
+                        _negative_edf_note(outcome.edf, edf_tolerance),
                     ),
                 }
             )

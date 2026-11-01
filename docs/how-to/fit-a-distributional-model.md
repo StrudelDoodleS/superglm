@@ -844,7 +844,10 @@ arguments:
   `truncation=(d, None)` only when claims under it never reach the data; if
   they are recorded at their ground-up amount, no bound is needed. A
   truncated row contributes its density divided by the probability of its
-  window.
+  window. `None` as a whole side leaves it open; a missing per-row bound
+  (`None`, NaN or `pd.NA`) is refused, naming its original input row. Bounds
+  and censoring flags are read only after zero-weight rows are dropped, so
+  missing entries on those rows are ignored.
 
 ```python
 import numpy as np
@@ -920,9 +923,16 @@ bounded link can stop short of the limit the scale runs to and leave the level
 a finite estimate. The other predictors are scanned on their default link and
 on the identity, log, logit, probit, cloglog and cauchit links: a censored
 row's probability moves one way along them, and these links reach the end of
-their range only as the predictor runs off. A link that reaches an end at a
-finite value, such as `link="sqrt"`, whose mean `eta**2` stops at 0, can give
-the level its estimate there, so it is not scanned.
+their range only as the predictor runs off. For these built-in families,
+sqrt, inverse and power links are scanned per censoring side when that end
+of their range requires an infinite predictor. A sqrt-linked location
+`eta**2` reaches zero at a finite coefficient, giving a left-censored level
+its estimate there; a right-censored level still runs toward infinity and
+is scanned. Positive power links behave likewise, while inverse and negative
+power links approach their lower end only at infinity and are scanned for
+left-censored levels. `PowerLink(1)` is the identity and is scanned on both
+sides. Custom family declarations keep the default-link and open-monotone-link
+rules above; the scan does not infer a direction for their other links.
 
 The scan reads only what the data decide before the fit:
 - A generalized Pareto row with an upper truncation bound anchors its level
@@ -959,9 +969,9 @@ The scan reads only what the data decide before the fit:
   censored claim's probability runs along either depends on the fitted
   location and on the other one.
 
-Ordered-categorical smooths, a normal or log-normal scale on a link other
-than its default, and predictors on links such as sqrt, inverse or power are
-not scanned. The scan does not cover all separation patterns, and
+Ordered-categorical smooths and a normal or log-normal scale on a link other
+than its default are not scanned. Links outside those listed above are not
+scanned either. The scan does not cover all separation patterns, and
 `fit.curvature_indefinite` is a curvature diagnostic, not a separation detector.
 The absence of either warning does not rule out separation.
 

@@ -627,9 +627,9 @@ def _read_solver_state_from_public(model) -> None:
     and it adds nothing.  The solver's pair is evaluated as the public one is
     (``centred_sum_compensated``).  Left at its pre-revision
     values, the solver predictor, which a post-fit shape repair profiles its
-    intercept from and metrics read on the training rows, read the old
-    coefficients' shift ``m' beta_old`` after an editor edit, and the repair
-    published the difference (#447).  With no published pair the public
+    intercept from, read the old coefficients' shift ``m' beta_old`` after an
+    editor edit, and the repair published the difference (#447).  With no
+    published pair the public
     predictor is raw, and so is the solver's.
     """
     public = getattr(model, "_result", None)
@@ -768,10 +768,11 @@ def publish_revised_coefficients(model, beta_before) -> None:
     c_pub') beta`` predicts the same rows; every other column carries no centre
     and nothing moves.  The solver state is then read from the published one
     (``_read_solver_state_from_public``) and the fitted mode's identity is
-    cleared.  The pair is carried, never dropped: clearing it dropped every
-    dense column's centring (Sol's review of #445, P2), and keeping the
-    solver's pre-revision pair beside it left the solver predictor at the old
-    coefficients (#447).
+    cleared.  The pair is carried while its change is representable; a change
+    past the float range falls back to the raw intercept.  Unconditionally
+    clearing it dropped every dense column's centring (Sol's review of #445,
+    P2); keeping the solver's pre-revision pair beside it left the solver
+    predictor at the old coefficients (#447).
     """
     _carry_revised_columns(model, beta_before)
     _read_solver_state_from_public(model)

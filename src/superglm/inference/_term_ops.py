@@ -671,8 +671,11 @@ def term_inference(
                 specs,
                 interaction_specs,
             )
-            ci_lo = _safe_exp(log_rel - z_alpha * se)
-            ci_hi = _safe_exp(log_rel + z_alpha * se)
+            # Match reconstruct's exponential, including zero/infinity at the
+            # float64 range limits, so the interval still contains its point.
+            with np.errstate(over="ignore", under="ignore"):
+                ci_lo = np.exp(log_rel - z_alpha * se)
+                ci_hi = np.exp(log_rel + z_alpha * se)
 
         return _recenter_term(
             TermInference(

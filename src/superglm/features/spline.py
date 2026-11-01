@@ -973,6 +973,9 @@ class CardinalCRSpline(_SplineBase):
         If True, decompose into linear + wiggly subgroups (double penalty).
     knots : array-like or None
         Explicit interior knot positions.
+    m : int or tuple of int
+        Only ``2`` (or ``(2,)``) is supported: the cardinal penalty is the
+        integrated squared second derivative.
     constraint : ConstraintSpec or None
         Public shape-constraint token. Cardinal CR splines support
         ``Constraint.postfit.increasing``, ``Constraint.postfit.decreasing``,
@@ -1024,6 +1027,8 @@ class CardinalCRSpline(_SplineBase):
             m=m,
             lambda_policy=lambda_policy,
         )
+        if self._m_orders != (2,):
+            raise ValueError("CardinalCRSpline only supports the second-derivative penalty, m=2.")
         self._cr_knots: NDArray | None = None
         self._cr_M: NDArray | None = None
         self._cr_S: NDArray | None = None
@@ -1045,7 +1050,8 @@ class CardinalCRSpline(_SplineBase):
 
     def _structural_penalty_for_order(self, order: int) -> NDArray:
         """The fixed penalty's null space without its spread (``structural_cr_penalty``)."""
-        del order
+        if order != 2:
+            raise ValueError("CardinalCRSpline only supports the second-derivative penalty, m=2.")
         return _spline_cardinal_spec.structural_penalty(self)
 
     def _basis_matrix(self, x: NDArray):
@@ -1106,9 +1112,10 @@ def Spline(
 
     With no ``kind`` the spline is a cubic regression spline, ``"cr"`` (a
     P-spline, ``"ps"``, before 0.40). ``"cr"`` and ``"cr_cardinal"`` are always
-    cubic and refuse a ``degree`` other than 3, and take penalty orders ``m`` up
-    to 3 and 2; pass ``kind="ps"`` (or ``"bs"`` for another degree) beyond
-    those. A spline with no kind that ``cr`` cannot serve (a ``degree`` other
+    cubic and refuse a ``degree`` other than 3. ``"cr"`` takes penalty orders
+    ``m`` up to 3, and ``"cr_cardinal"`` supports only ``m=2``; pass
+    ``kind="ps"`` (or ``"bs"`` for another degree) beyond those. A spline
+    with no kind that ``cr`` cannot serve (a ``degree`` other
     than 3, a penalty order above 3, or a shape constraint beside a ``ps``
     one on SCOP) builds as ``"ps"``, as before 0.40, with a ``UserWarning``;
     pass ``kind=`` to choose and silence it.

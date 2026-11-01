@@ -161,6 +161,11 @@ def mean_space_violation(
     the log-likelihood concave, so a line search from a feasible state finds
     a feasible step by halving, as R's ``glm`` and ``glm2`` do (Donoghoe &
     Marschner 2018, J. Stat. Softw. 86(9), sections 2 and 3.2).
+
+    The built-in binomial/identity pair instead needs ``0 < eta < 1``:
+    both bounds constrain the coefficients.  The exact identity type is
+    intentional; a subclass may change its inverse or derivatives and does
+    not inherit this affine domain or the identity likelihood rows below.
     """
     if isinstance(family, Binomial) and isinstance(link, LogLink):
 
@@ -168,6 +173,12 @@ def mean_space_violation(
             return bool(np.any((eta_unclipped >= 0.0) & (weights > 0.0)))
 
         return violates
+    if isinstance(family, Binomial) and type(link) is IdentityLink:
+
+        def identity_violates(eta_unclipped: NDArray, weights: NDArray) -> bool:
+            return bool(np.any(((eta_unclipped <= 0.0) | (eta_unclipped >= 1.0)) & (weights > 0.0)))
+
+        return identity_violates
     return None
 
 
@@ -236,9 +247,21 @@ def mean_space_boundary_rows(
     parameter space ``{beta : X beta + offset < 0}``, where the maximum is
     not a stationary point (Donoghoe & Marschner 2018, J. Stat. Softw.
     86(9), sections 2 and 4.1).
+    Identity-binomial also has a finite lower boundary, where ``mu = eta``
+    reaches the probability floor, so both ends of the clip band count.
     """
     if mean_space_violation(family, link) is None:
         return 0
+    if type(link) is IdentityLink:
+        return int(
+            np.count_nonzero(
+                (
+                    (eta_unclipped <= _BINOMIAL_CLIP_MU_EPS)
+                    | (eta_unclipped >= 1.0 - _BINOMIAL_CLIP_MU_EPS)
+                )
+                & (weights > 0.0)
+            )
+        )
     return int(np.count_nonzero((eta_unclipped >= _BINOMIAL_LOG_CAP_ETA) & (weights > 0.0)))
 
 
@@ -262,9 +285,13 @@ def mean_space_clipped_rows(
 
 
 def mean_space_score_rows(
-    y: NDArray, weights: NDArray, eta_unclipped: NDArray
+    y: NDArray, weights: NDArray, eta_unclipped: NDArray, link: Link | None = None
 ) -> tuple[NDArray, NDArray]:
-    """The binomial/log row score and Fisher weight in ``eta``, from the unclipped ``eta``.
+    """Binomial log/identity score and Fisher weight, from the unclipped ``eta``.
+
+    The omitted link retains the log-link convention of existing callers.
+    Identity has score ``w [y / eta - (1-y) / (1-eta)]`` and Fisher weight
+    ``w / [eta (1-eta)]``; its mean is the predictor itself.
 
     With ``mu = exp(eta)`` and ``1 - mu = -expm1(eta)``, exact near ``eta =
     0``, the row log-likelihood ``w [y log mu + (1 - y) log(1 - mu)]`` has
@@ -280,6 +307,19 @@ def mean_space_score_rows(
     eta = np.asarray(eta_unclipped, dtype=np.float64)
     response = np.asarray(y, dtype=np.float64)
     prior = np.asarray(weights, dtype=np.float64)
+    if type(link) is IdentityLink:
+        # Identity: dmu/deta = 1, so the score is w[y/mu - (1-y)/(1-mu)]
+        # and Fisher information is w/[mu(1-mu)].  Keep the two score terms
+        # separate: y - mu loses an event's score as mu approaches one.
+        carried = prior > 0.0
+        score = np.zeros_like(eta)
+        fisher = np.zeros_like(eta)
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            score[carried] = prior[carried] * (
+                response[carried] / eta[carried] - (1.0 - response[carried]) / (1.0 - eta[carried])
+            )
+            fisher[carried] = prior[carried] / eta[carried] / (1.0 - eta[carried])
+        return score, fisher
     with np.errstate(under="ignore", over="ignore", divide="ignore", invalid="ignore"):
         odds = np.exp(eta) / -np.expm1(eta)
         odds = np.where(eta < 0.0, odds, np.inf)
@@ -291,9 +331,13 @@ def mean_space_score_rows(
 
 
 def mean_space_newton_rows(
-    y: NDArray, weights: NDArray, eta_unclipped: NDArray
+    y: NDArray, weights: NDArray, eta_unclipped: NDArray, link: Link | None = None
 ) -> tuple[NDArray, NDArray] | None:
-    """Newton rows for binomial/log: ``(observed curvature, score)`` in ``eta``, or ``None``.
+    """Binomial log/identity Newton ``(observed curvature, score)`` rows, or ``None``.
+
+    Identity's observed curvature is ``w [y / eta^2 + (1-y) / (1-eta)^2]``:
+    positive on every positive-weight row, including the finite-curvature
+    limits of a non-event approaching zero or an event approaching one.
 
     The row log-likelihood is concave in ``eta``, with observed information
     ``-d2l/deta2 = w (1 - y) mu / (1 - mu)^2``: never negative, and zero on
@@ -311,11 +355,17 @@ def mean_space_newton_rows(
     """
     eta = np.asarray(eta_unclipped, dtype=np.float64)
     prior = np.asarray(weights, dtype=np.float64)
-    score, _ = mean_space_score_rows(y, weights, eta)
+    score, _ = mean_space_score_rows(y, weights, eta, link)
     with np.errstate(under="ignore", over="ignore", divide="ignore", invalid="ignore"):
-        complement = -np.expm1(eta)
-        curvature = prior * (1.0 - np.asarray(y, dtype=np.float64)) * (np.exp(eta) / complement)
-        curvature = curvature / complement
+        if type(link) is IdentityLink:
+            response = np.asarray(y, dtype=np.float64)
+            curvature = prior * (
+                (response / eta) / eta + ((1.0 - response) / (1.0 - eta)) / (1.0 - eta)
+            )
+        else:
+            complement = -np.expm1(eta)
+            curvature = prior * (1.0 - np.asarray(y, dtype=np.float64)) * (np.exp(eta) / complement)
+            curvature = curvature / complement
     curvature = np.where(prior > 0.0, curvature, 0.0)
     total = float(np.sum(curvature))
     finite = bool(np.all(np.isfinite(curvature)) and np.all(np.isfinite(score)))
@@ -324,8 +374,13 @@ def mean_space_newton_rows(
     return curvature, score
 
 
-def mean_space_log_likelihood_rows(y: NDArray, weights: NDArray, eta_unclipped: NDArray) -> NDArray:
-    """Each row's binomial/log log-likelihood ``w [y eta + (1 - y) log(1 - e^eta)]`` at the unclipped eta.
+def mean_space_log_likelihood_rows(
+    y: NDArray, weights: NDArray, eta_unclipped: NDArray, link: Link | None = None
+) -> NDArray:
+    """Binomial log/identity log-likelihood rows at the unclipped predictor.
+
+    Identity reads ``w [y log eta + (1-y) log(1-eta)]``; the log link, also
+    the default for existing callers, reads ``w [y eta + (1-y) log(1-e^eta)]``.
 
     The model's own likelihood, up to the saturated term: ``clip_mu``'s band
     does not enter, so a row below its floor still counts.  ``log(1 -
@@ -338,6 +393,15 @@ def mean_space_log_likelihood_rows(y: NDArray, weights: NDArray, eta_unclipped: 
     prior = np.asarray(weights, dtype=np.float64)
     rows = np.zeros_like(eta)
     carried = prior > 0.0
+    if type(link) is IdentityLink:
+        events = carried & (response > 0.0)
+        nonevents = carried & (response < 1.0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rows[events] = prior[events] * response[events] * np.log(eta[events])
+            rows[nonevents] += (
+                prior[nonevents] * (1.0 - response[nonevents]) * np.log1p(-eta[nonevents])
+            )
+        return rows
     near = carried & (response < 1.0) & (eta > -math.log(2.0))
     far = carried & (response < 1.0) & ~near
     complement = np.zeros_like(eta)
@@ -378,10 +442,22 @@ def interior_start_intercept(
     constant offset ``c`` then starts at ``intercept - c``, the no-offset start shifted with the
     optimum.  A start already inside is left alone, so a fit without an
     offset starts exactly as before.
+    For identity-binomial, shift into the midpoint of the intercept's
+    feasible interval when it exists.  When the predictor spans at least
+    one, changing the intercept cannot restore feasibility; the direct fit
+    then constructs a new coefficient start.
     """
     eta = np.asarray(eta_unclipped, dtype=float)
     violates = mean_space_violation(family, link)
     if violates is not None and violates(eta, weights):
+        if type(link) is IdentityLink:
+            held = eta[weights > 0.0]
+            lower, upper = -float(np.min(held)), 1.0 - float(np.max(held))
+            # A two-sided domain permits an intercept shift only if its
+            # interval is nonempty.  Centre it without changing any slopes.
+            if math.isfinite(lower) and math.isfinite(upper) and lower < upper:
+                return float(intercept) + 0.5 * lower + 0.5 * upper
+            return float(intercept)
         top = float(np.max(eta[weights > 0.0]))
         if not math.isfinite(top):
             return float(intercept)
@@ -646,6 +722,8 @@ def _mean_space_halving_budget(
     depth.  ``_select_irls_trial`` reads it only after the ordinary budget
     has failed, and ``fit_irls_direct`` asks for it only in a fit whose start
     ``interior_start_intercept`` lowered, so every other fit is unchanged.
+    For identity-binomial the fraction is the minimum of ``(1-eta)/d``
+    over rising rows and ``-eta/d`` over falling rows.
     """
     violates = mean_space_violation(family, link)
     if violates is None or violates(committed.eta_unclipped, weights):
@@ -653,10 +731,17 @@ def _mean_space_halving_budget(
     eta = np.asarray(committed.eta_unclipped, dtype=np.float64)
     step = np.asarray(proposal.eta_unclipped, dtype=np.float64) - eta
     rising = (weights > 0.0) & (step > 0.0)
-    if not np.any(rising):
-        return default
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-        fraction = float(np.min(-eta[rising] / step[rising]))
+        if type(link) is IdentityLink:
+            falling = (weights > 0.0) & (step < 0.0)
+            fraction = min(
+                float(np.min((1.0 - eta[rising]) / step[rising], initial=np.inf)),
+                float(np.min(-eta[falling] / step[falling], initial=np.inf)),
+            )
+        else:
+            if not np.any(rising):
+                return default
+            fraction = float(np.min(-eta[rising] / step[rising]))
     if not (math.isfinite(fraction) and 0.0 < fraction <= 2.0**-default):
         return default
     depth = math.floor(-math.log2(fraction)) + 1
@@ -696,6 +781,8 @@ def mean_space_first_halving(
     refused evaluations go.  Backing off by a fixed fraction ``tau t`` instead
     moves the iterate's path, and on #437's extreme sweep that path left 20
     light levels the halving certified short of the bar (``score_stagnated``).
+    Identity-binomial uses the same ratio test against both ``eta = 0``
+    and ``eta = 1``, and the scalar scan tests that two-sided interval.
     """
     violates = mean_space_violation(family, link)
     if violates is None or violates(committed.eta_unclipped, weights):
@@ -708,18 +795,25 @@ def mean_space_first_halving(
     step = np.asarray(proposal.eta_unclipped, dtype=np.float64) - eta
     if not np.all(np.isfinite(step[positive])):
         return 1
-    rising = np.flatnonzero(positive & (step > 0.0))
+    identity = type(link) is IdentityLink
+    rising = np.flatnonzero(positive & ((step != 0.0) if identity else (step > 0.0)))
     if rising.size == 0:
         return 1
     with np.errstate(divide="ignore", invalid="ignore", over="ignore", under="ignore"):
-        quotient = -eta[rising] / step[rising]
+        distance = (
+            np.where(step[rising] > 0.0, 1.0 - eta[rising], -eta[rising])
+            if identity
+            else -eta[rising]
+        )
+        quotient = distance / step[rising]
     row = int(rising[int(np.argmin(quotient))])
     base, direction = eta[row], step[row]
     fraction = float(np.min(quotient))
 
     def inside(depth: int) -> bool:
         with np.errstate(under="ignore"):
-            return bool(base + 2.0**-depth * direction < 0.0)
+            trial = base + 2.0**-depth * direction
+            return bool(0.0 < trial < 1.0) if identity else bool(trial < 0.0)
 
     limit = _MAX_FLOAT64_HALVING_DEPTH
     depth = 1

@@ -1187,8 +1187,30 @@ def penalty_component_quadratic(
     rank = int(round(float(component.rank)))
     if omega is not None and 0 < rank < omega.shape[0]:
         values, vectors = _penalty_range_basis(component, omega, rank)
-        projection = vectors.T @ beta
-        return float(np.sum(values * projection * projection))
+        with np.errstate(over="ignore", invalid="ignore"):
+            projection = vectors.T @ beta
+        if np.all(np.isfinite(projection)):
+            return float(np.sum(values * projection * projection))
+        # As in _range_product, exact powers of two keep the projection
+        # from overflowing before a small eigenvalue brings it into range.
+        # The quadratic has two coefficient factors, hence 2 * beta_exponent.
+        # Retain a finite unscaled projection above: normalizing a large
+        # null-space coefficient could underflow a small range coefficient.
+        beta_exponent = _binary_exponent(beta)
+        finite = np.isfinite(projection)
+        terms = np.empty_like(values)
+        terms[finite] = values[finite] * projection[finite] * projection[finite]
+        scaled_projection = vectors[:, ~finite].T @ np.ldexp(beta, -beta_exponent)
+        # A single scale for all eigenvalues can erase a small eigenvalue
+        # whose overflowing projection still contributes a large finite
+        # energy. Scale each affected mode independently; keep every finite
+        # original projection, including small coefficients beside the
+        # overflowing mode.
+        mantissa, exponent = np.frexp(values[~finite])
+        terms[~finite] = np.ldexp(
+            mantissa * scaled_projection * scaled_projection, 2 * beta_exponent + exponent
+        )
+        return float(np.sum(terms))
     return float(beta @ omega @ beta)
 
 

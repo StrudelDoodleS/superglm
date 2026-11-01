@@ -419,6 +419,16 @@ def numeric_cat_factor(
     suite's own ``_numeric_cat_case`` arms: 0 of 308 differing in any bit,
     against the body before either half of this fix.
 
+    **FINITE WEIGHTED ROWS NEED NOT HAVE A FINITE RAW SPREAD.**  Opposite
+    values near ``max_float`` overflow in ``z - reference`` even when tiny
+    positive weights keep ``sqrt(w) * z`` and the entire weighted Gram finite
+    (issue #370).  The centered moments remain the ordinary path, with their
+    arithmetic unchanged.  A non-finite per-level factor is instead reduced
+    directly from its weighted ``[1, z, yhat]`` rows by chunked QR before the
+    level is emitted.  This is the same factor representation, without an
+    unweighted subtraction or a squared geometry.  Only the affected levels
+    pay for the row reduction, and rows of zero weight stay outside it.
+
     **THE ROW-LENGTH TEMPORARIES HERE ARE NOT CHUNKED, UNLIKE THE ONES BESIDE
     THEM.**  ``reference[codes_g]``, ``shifted``, ``offset[codes_g]``,
     ``centered``, ``root_w``, ``residual`` and the two products inside it are
@@ -510,38 +520,52 @@ def numeric_cat_factor(
     reference = np.zeros(n_g, dtype=np.float64)
     weighted = w > 0.0
     reference[codes_g[weighted]] = z[weighted]
-    shifted = np.zeros_like(z)
-    np.subtract(z, reference[codes_g], out=shifted, where=weighted)
-    offset = np.divide(cell(w * shifted), w0, out=np.zeros_like(w0), where=positive)
-    centered = np.zeros_like(z)
-    np.subtract(shifted, offset[codes_g], out=centered, where=weighted)
-    m2 = cell(w * centered * centered)
-    c1 = cell(score * centered)
-    zbar = reference + offset
+    # A raw centered intermediate can exceed float64 while the weighted rows
+    # do not.  Such a level is rebuilt below; no non-finite factor is emitted.
+    with np.errstate(over="ignore", invalid="ignore"):
+        shifted = np.zeros_like(z)
+        np.subtract(z, reference[codes_g], out=shifted, where=weighted)
+        offset = np.divide(cell(w * shifted), w0, out=np.zeros_like(w0), where=positive)
+        centered = np.zeros_like(z)
+        np.subtract(shifted, offset[codes_g], out=centered, where=weighted)
+        m2 = cell(w * centered * centered)
+        c1 = cell(score * centered)
+        zbar = reference + offset
 
-    root_w0 = np.sqrt(w0)
-    root_m2 = np.sqrt(m2)
-    spread = m2 > 0.0
-    factors = np.zeros((n_g, 3, 3), dtype=np.float64)
-    factors[:, 0, 0] = root_w0
-    factors[:, 0, 1] = root_w0 * zbar
-    factors[:, 0, 2] = np.divide(s0, root_w0, out=np.zeros_like(s0), where=positive)
-    factors[:, 1, 1] = root_m2
-    factors[:, 1, 2] = np.divide(c1, root_m2, out=np.zeros_like(c1), where=spread)
-    # THE RESIDUAL, ACCUMULATED RATHER THAN SUBTRACTED, AND IT COSTS NO EXTRA
-    # PASS.  ``rho`` closes the level's factor: the level's response energy
-    # splits by Pythagoras into the two projected terms above and this one.
-    # Taking it as ``q0 - (s0**2 / w0) - (c1**2 / m2)`` needs one bincount
-    # channel too -- ``q0 = sum s**2 / w`` -- and CANCELS, where accumulating
-    # the residual is a sum of squares.  The fit is evaluated in the SHIFTED
-    # coordinate for the same reason the moments are.
-    slope = np.divide(c1, m2, out=np.zeros_like(c1), where=spread)
-    level_mean = np.divide(s0, w0, out=np.zeros_like(s0), where=positive)
-    root_w = np.sqrt(w)
-    residual = np.divide(score, root_w, out=np.zeros_like(score), where=root_w > 0.0) - root_w * (
-        level_mean[codes_g] + slope[codes_g] * centered
-    )
-    factors[:, 2, 2] = np.sqrt(cell(residual * residual))
+        root_w0 = np.sqrt(w0)
+        root_m2 = np.sqrt(m2)
+        spread = m2 > 0.0
+        factors = np.zeros((n_g, 3, 3), dtype=np.float64)
+        factors[:, 0, 0] = root_w0
+        factors[:, 0, 1] = root_w0 * zbar
+        factors[:, 0, 2] = np.divide(s0, root_w0, out=np.zeros_like(s0), where=positive)
+        factors[:, 1, 1] = root_m2
+        factors[:, 1, 2] = np.divide(c1, root_m2, out=np.zeros_like(c1), where=spread)
+        # THE RESIDUAL, ACCUMULATED RATHER THAN SUBTRACTED, AND IT COSTS NO EXTRA
+        # PASS.  ``rho`` closes the level's factor: the level's response energy
+        # splits by Pythagoras into the two projected terms above and this one.
+        # Taking it as ``q0 - (s0**2 / w0) - (c1**2 / m2)`` needs one bincount
+        # channel too -- ``q0 = sum s**2 / w`` -- and CANCELS, where accumulating
+        # the residual is a sum of squares.  The fit is evaluated in the SHIFTED
+        # coordinate for the same reason the moments are.
+        slope = np.divide(c1, m2, out=np.zeros_like(c1), where=spread)
+        level_mean = np.divide(s0, w0, out=np.zeros_like(s0), where=positive)
+        root_w = np.sqrt(w)
+        residual = np.divide(
+            score, root_w, out=np.zeros_like(score), where=root_w > 0.0
+        ) - root_w * (level_mean[codes_g] + slope[codes_g] * centered)
+        factors[:, 2, 2] = np.sqrt(cell(residual * residual))
+
+    for g in np.flatnonzero(~np.isfinite(factors).all(axis=(1, 2))):
+        indices = np.flatnonzero((codes_g == g) & (w != 0.0))
+        level_factor = np.zeros((0, 3), dtype=np.float64)
+        chunk = _FACTOR_CHUNK_DOUBLES // 3
+        for start in range(0, indices.size, chunk):
+            rows = indices[start : start + chunk]
+            root = root_w[rows]
+            local = np.column_stack((root, root * z[rows], score[rows] / root))
+            level_factor = _combine_row_factors(level_factor, local)
+        factors[g] = _square(level_factor, 3)
 
     k = menu_g.shape[1]
     overlap_width, tensor_width = 2 + k, k

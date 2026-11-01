@@ -602,6 +602,7 @@ class SuperLSS:
             message = lss_nonconvergence_message(
                 getattr(candidate, "fitted_result", None),
                 None if smoothing is None else smoothing.convergence_reason,
+                coefficient_reason=candidate.result.convergence_reason,
             )
             if message is not None:
                 warnings.warn(message, ConvergenceWarning, stacklevel=3)

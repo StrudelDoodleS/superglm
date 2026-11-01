@@ -8,6 +8,10 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+import numpy as np
+
+from superglm.distributions import Binomial
+from superglm.links import IdentityLink
 from superglm.solvers.constrained_qp import _homogeneous_feasible_start
 from superglm.solvers.irls_direct._qp import _QP_FEASIBILITY_TOL
 from superglm.solvers.irls_state import (
@@ -55,6 +59,15 @@ def trial_refusal(
     for outside in (mean_space_violation(family, link), link_domain_violation(link, family)):
         if outside is not None and not outside(committed.eta_unclipped, weights):
             refusal = _refuses(outside, weights, refusal)
+    if isinstance(family, Binomial) and type(link) is IdentityLink:
+        # A model may have no strictly interior point: e.g. an offset spans
+        # exactly one on rows with identical predictors.  Its boundary start
+        # still constrains every subsequent trial to valid probabilities.
+        def outside_closed(eta: NDArray, prior: NDArray) -> bool:
+            carried = eta[prior > 0.0]
+            return not bool(np.all((carried >= 0.0) & (carried <= 1.0)))
+
+        refusal = _refuses(outside_closed, weights, refusal)
     return refusal
 
 
@@ -268,6 +281,12 @@ class _IRLSDirectTrialSearch:
             and not committed_constraints_feasible
             and proposal_constraints_feasible
             and _state_is_finite(proposal)
+            and not (
+                isinstance(family, Binomial)
+                and type(link) is IdentityLink
+                and trial_is_invalid is not None
+                and trial_is_invalid(proposal)
+            )
         ):
             # The objective comparison is not allowed to prefer an
             # inadmissible state over a finite feasible QP proposal. Once

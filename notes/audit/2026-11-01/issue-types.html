@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root { font-family: var(--font-sans); color: var(--foreground); }
+html, body { margin: 0; }
+main { padding: 4px 0; }
+h2 { margin: 0 0 6px; font-size: 18px; font-weight: 500; }
+.scope, .foot { color: var(--muted-foreground); font-size: 12px; }
+.scope { margin-bottom: 20px; }
+.rows { display: grid; gap: 14px; }
+.row { display: grid; grid-template-columns: minmax(125px, 170px) minmax(40px, 1fr) 28px; align-items: center; gap: 12px; font-size: 13px; }
+.track { height: 18px; background: color-mix(in srgb, var(--muted) 45%, transparent); border-radius: 3px; overflow: hidden; }
+.fill { height: 18px; width: var(--width); background: var(--chart-1); border-radius: 3px; }
+.value { text-align: right; font-variant-numeric: tabular-nums; font-weight: 500; }
+.stale { margin-top: 5px; }
+.stale .fill { background: var(--muted-foreground); opacity: .45; }
+.foot { margin-top: 18px; line-height: 1.6; }
+@media (max-width: 420px) { .row { grid-template-columns: 130px minmax(35px, 1fr) 22px; gap: 8px; } }
+</style>
+</head>
+<body>
+<main id="superglm-open-issue-types">
+<h2>Open issue types</h2>
+<div class="scope">30 audited tickets · 26 active, 4 stale · #544 excluded</div>
+<div class="rows" role="img" aria-label="Confirmed defects 17; performance work 3; research and documentation 3; features and policy 2; historical tracker 1; stale or already addressed 4. Each ticket is counted once.">
+<div class="row"><span>Confirmed defects</span><div class="track"><div class="fill" style="--width:100%"></div></div><span class="value">17</span></div>
+<div class="row"><span>Performance work</span><div class="track"><div class="fill" style="--width:17.647%"></div></div><span class="value">3</span></div>
+<div class="row"><span>Research / docs</span><div class="track"><div class="fill" style="--width:17.647%"></div></div><span class="value">3</span></div>
+<div class="row"><span>Features / policy</span><div class="track"><div class="fill" style="--width:11.765%"></div></div><span class="value">2</span></div>
+<div class="row"><span>Historical tracker</span><div class="track"><div class="fill" style="--width:5.882%"></div></div><span class="value">1</span></div>
+<div class="row stale"><span>Stale / addressed</span><div class="track"><div class="fill" style="--width:23.529%"></div></div><span class="value">4</span></div>
+</div>
+<div class="foot">Defect tickets: 1 P1 · 11 P2 · 5 P3<br>Primary type per ticket; mixed issues keep their remaining scope. Fixes await PR review.</div>
+</main>
+</body>
+</html>

@@ -336,8 +336,8 @@ def _drop_term_holdout(
     # The public predictor (``base._predict_eta``): the fit's centred intercept,
     # a term whose dense columns keep a centre scored about it, a compensated
     # intercept's remainder added at the rows' scale and the offset last, so
-    # the full model's deviance is the one predict() and metrics() read.  From
-    # the raw intercept, X beta cancels against it at a column's offset.
+    # the full model's deviance is the one predict() reads.  From the raw
+    # intercept, X beta cancels against it at a column's offset.
     intercept, centre, intercept_lo = base.prediction_centred_state(model.result)
     accumulated = base.EtaSum(
         n_val,
@@ -401,14 +401,60 @@ def _drop_term_holdout(
     mu_full = clip_mu(model._link.inverse(eta_full), dist)
     dev_full = float(np.sum(w * dist.deviance_unit(y_arr, mu_full)))
 
+    def rebuild_drop(dropped: str, row_indices: NDArray) -> NDArray:
+        """The remaining raw public predictor where subtraction could not finish.
+
+        A removed term's product may overflow, and its carried centre may
+        dwarf the intercept beyond even the centred pair's two floats.  The
+        raw intercept retains that value and already excludes the removed
+        term's centred constant.  Only failed rows take this path; the usual
+        compensated cancellation is kept for every finite drop.
+        """
+        frame = as_eager_frame(X_val.take_rows(row_indices))
+        eta = base.EtaSum(len(row_indices), float(model.result.intercept), None, compensated=True)
+        for kept in terms:
+            if kept["name"] == dropped:
+                continue
+            spec = kept["spec"]
+            centred = base.scores_centred(spec)
+            if centred:
+                base._add_centred_term(eta, kept, frame, beta, np.zeros(len(kept["beta_idx"])))
+            elif isinstance(spec, FactorSmooth) and spec._has_population_offset:
+                contribution, _ = base._score_unidentified_factor_smooth(
+                    kept, frame, beta, population=False, features=features
+                )
+            else:
+                contribution = base._score_prediction_term_exact(kept, frame, beta)
+            if not centred:
+                eta += contribution
+            if kept["name"] in main_names:
+                eta += base._held_level_shift(
+                    kept,
+                    frame,
+                    lambda labels, kept=kept: base._score_prediction_term_exact(
+                        kept, as_eager_frame(pd.DataFrame({kept["name"]: labels})), beta
+                    ),
+                    model._interaction_specs,
+                )
+        return eta.finish(consume=True)
+
+    from superglm.solvers.mode_score import _CHUNK
+
     rows = []
     for term in terms:
-        eta_drop = stabilize_eta(
-            accumulated.finish(without=contributions[term["name"]])
-            - centre_shifts[term["name"]]
-            + offset_arr,
-            model._link,
-        )
+        # Complete the centred-coordinate subtraction first. Rebuilt rows
+        # already contain the raw intercept, so their dropped centre must
+        # not be removed a second time.
+        with np.errstate(over="ignore", invalid="ignore"):
+            eta_drop = (
+                accumulated.finish(without=contributions[term["name"]])
+                - centre_shifts[term["name"]]
+            )
+            for lo in range(0, n_val, _CHUNK):
+                failed = np.flatnonzero(~np.isfinite(eta_drop[lo : lo + _CHUNK])) + lo
+                if failed.size:
+                    eta_drop[failed] = rebuild_drop(term["name"], failed)
+        eta_drop = stabilize_eta(eta_drop + offset_arr, model._link)
         mu_drop = clip_mu(model._link.inverse(eta_drop), dist)
         dev_drop = float(np.sum(w * dist.deviance_unit(y_arr, mu_drop)))
 

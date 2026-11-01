@@ -390,22 +390,28 @@ That row is the one that describes the table in hand. Take it rather than the sm
 sheet: each row is an independently measured error at its own resolution, not a point on a curve
 guaranteed to fall — a finer grid shrinks the worst-case bound, but successive nearest-node grids are
 not nested, so a nearer node can carry a value further from a given row. Passing `impact_bins=()`
-skips the sweep, leaving the worksheet present with its headers and no rows.
+skips the comparison ladder, leaving the worksheet present with its headers and no rows. The selected
+resolution is still checked for non-finite joint predictions before export.
 
 The sweep covers the binned and sampled model terms: main-effect spline and polynomial terms, and a
 continuous-by-continuous interaction, which is sampled onto an `n_bins`-per-axis grid rather than
 binned into intervals. Its row is keyed on the interaction's name and its `actual_bins` counts the
-grid's *cells*, so an interaction swept at 20 reports 400 where a main effect reports 20. The metric
+grid's *cells*, so an interaction swept at 20 reports 400 where a main effect reports 20. An offset
+requested as `offset_kind="binned"` adds an `Offset Multiplier` row, including for a categorical-only
+model. That row measures the exposure-weighted average multiplier the offset table actually emits;
+exact lookup and `per_unit` offset blocks add no row. The metric
 columns are **joint** over everything discretized at that resolution — within one `n_bins` group only
 `feature` and `actual_bins` vary.
 
-Two approximations the workbook can carry are outside that measurement, so the sheet is a bound on
-the terms it lists rather than on every factor in the book. An **offset multiplier** block asked for
-as `offset_kind="binned"` is not swept
-([#314](https://github.com/StrudelDoodleS/superglm/issues/314)) — under the default there is no
-offset approximation left to sweep — and the sheet's own discretized
-predictor is stabilized where the workbook's product is not
-([#313](https://github.com/StrudelDoodleS/superglm/issues/313)).
+Approximated predictions use the unbounded log-link mean, matching the workbook's product. The sheet
+does not clip the approximated predictor or clamp its mean to the fitted model's safety bounds: doing
+so would hide the error when approximation removes cancellation between terms. If the joint
+approximation produces a non-finite prediction, export stops with an error instead of reporting a
+clipped impact figure. This check also applies when `impact_bins=()`.
+
+A `Numeric` block is also checked after raising its per-unit relativity to each supplied input value.
+Export refuses a row factor that becomes infinity or zero, because later multiplication cannot
+recover it even when other terms cancel its contribution in the fitted model.
 
 The `ModelOverview` and
 `TermInference` Excel tables use typed cells for metrics, estimates, intervals, and p-values instead

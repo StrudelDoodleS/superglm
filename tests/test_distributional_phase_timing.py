@@ -142,6 +142,30 @@ def test_a_manual_sample_inside_an_open_phase_stays_out_of_the_partition() -> No
     assert snapshot.counts["serialization"] == 1
 
 
+@pytest.mark.parametrize("phase", ["fit_total", "predictor_compilation", "serialization"])
+@pytest.mark.parametrize("manual", [0.0, 0.25])
+def test_fit_window_includes_enclosing_caller_phases_once(phase, manual) -> None:
+    readings = iter((0.0, 1.0, 2.0, 3.0, 4.0, 5.0))
+    recorder = FitPhaseRecorder(clock=lambda: next(readings))
+    with recorder.measure(phase):
+        with recorder._fit_window() as window:
+            with recorder.measure("fit_total"):
+                with recorder.measure(phase):
+                    if manual:
+                        recorder.add(phase, manual)
+        snapshot = window.snapshot()
+
+    # Only [1, 4] belongs to this fit. Recursion counts its elapsed time once;
+    # the caller's intervals before and after the fit are excluded.
+    assert snapshot.seconds[phase] == 3.0 + manual
+    assert snapshot.manual_seconds[phase] == manual
+    assert snapshot.seconds["fit_total"] == 3.0 + (manual if phase == "fit_total" else 0.0)
+    assert sum(snapshot.exclusive_seconds.values()) == 3.0
+    assert all(
+        snapshot.seconds[name] >= snapshot.exclusive_seconds[name] for name in timing.PHASE_NAMES
+    )
+
+
 def test_snapshot_is_immutable_owned_and_records_manual_samples() -> None:
     recorder = FitPhaseRecorder(clock=lambda: 0.0)
     recorder.add("serialization", 0.25)

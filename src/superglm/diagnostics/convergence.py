@@ -7,8 +7,11 @@ summary and diagnostics of the model it publishes.
 
 from __future__ import annotations
 
+import os
 import warnings
 from typing import Any
+
+_PACKAGE_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + os.sep
 
 
 class ConvergenceWarning(UserWarning):
@@ -191,27 +194,54 @@ def _bootstrap_reason(reml_result: Any) -> str:
     )
 
 
-def lss_nonconvergence_reason(fitted_result: Any, smoothing_reason: str | None) -> str | None:
+def lss_nonconvergence_reason(
+    fitted_result: Any,
+    smoothing_reason: str | None,
+    *,
+    coefficient_reason: str | None = None,
+) -> str | None:
     """Why a SuperLSS fit did not converge, in a few words, or None when it did."""
     if fitted_result is None or bool(getattr(fitted_result, "converged", True)):
         return None
     if not bool(getattr(fitted_result, "coefficient_converged", True)):
-        return "the coefficient fit did not converge"
+        return "the coefficient fit did not converge" + (
+            f" (reason {coefficient_reason!r})" if coefficient_reason is not None else ""
+        )
     return f"smoothing selection stopped with reason {smoothing_reason!r}"
 
 
-def lss_nonconvergence_message(fitted_result: Any, smoothing_reason: str | None) -> str | None:
+def lss_nonconvergence_message(
+    fitted_result: Any,
+    smoothing_reason: str | None,
+    *,
+    coefficient_reason: str | None = None,
+) -> str | None:
     """The statement a SuperLSS fit that did not converge publishes, or None."""
-    why = lss_nonconvergence_reason(fitted_result, smoothing_reason)
+    why = lss_nonconvergence_reason(
+        fitted_result, smoothing_reason, coefficient_reason=coefficient_reason
+    )
     if why is None:
         return None
+    budgets = []
+    if not bool(getattr(fitted_result, "coefficient_converged", True)) and (
+        coefficient_reason == "max_iterations"
+    ):
+        budgets.append("max_inner_iter")
+    if smoothing_reason == "max_iterations":
+        budgets.append("max_reml_iter")
+    remedy = (
+        "Refit with a larger "
+        + " and a larger ".join(budgets)
+        + (" to let that loop finish." if len(budgets) == 1 else " to let those loops finish.")
+        if budgets
+        else "Refit with other starting smoothing parameters (initial_lambda or lambdas), "
+        "or simplify the terms it names, before reading the summary."
+    )
     return (
         f"SuperLSS fit did not converge: {why}. The model is returned, but its "
         "coefficients, smoothing parameters, effective degrees of freedom and standard "
         "errors are those of the last accepted iterate; an effective degree of freedom "
-        "can then be negative. model.diagnose() explains the stop. Refit with other "
-        "starting smoothing parameters (initial_lambda or lambdas), or simplify the "
-        "terms it names, before reading the summary."
+        f"can then be negative. model.diagnose() explains the stop. {remedy}"
     )
 
 
@@ -315,33 +345,61 @@ def lss_corrected_covariance_unavailable_message(cause: str) -> str:
     )
 
 
-def coefficient_nonconvergence_message(fit_result: Any) -> str | None:
+def coefficient_nonconvergence_message(
+    fit_result: Any, *, fit_method: str = "fit_reml"
+) -> str | None:
     """The statement for an unconverged coefficient fit with no smoothing selection."""
     if fit_result is None or bool(getattr(fit_result, "converged", True)):
         return None
     reason = getattr(fit_result, "termination_reason", None)
+    if reason == "coefficients_revised":
+        return None
     n_iter = getattr(fit_result, "n_iter", None)
+    if reason == "constraint_kkt_incomplete":
+        return (
+            "SuperGLM coefficient fit did not converge: the last iterate keeps every shape "
+            "constraint, yet could not certify that its coefficients are the constrained "
+            "optimum because the inner quadratic program did not complete its KKT certificate "
+            "(termination_reason='constraint_kkt_incomplete'). The model is returned with "
+            "the coefficients, effective degrees of freedom and standard errors of that "
+            "last iterate. model.diagnostics() records the stop."
+        )
+    if reason == "mean_space_boundary":
+        return (
+            "SuperGLM coefficient fit did not converge: fitted means are on the boundary "
+            "of the family's mean space (termination_reason='mean_space_boundary'). "
+            "The model is returned with its last accepted coefficients and standard "
+            "errors. More iterations do not establish an interior optimum there; "
+            "consider a link whose means stay inside (0, 1), such as logit. "
+            "model.diagnostics() records the stop."
+        )
+    stage = (
+        " This model has no smoothing selection to run, so fit_reml fitted the coefficients "
+        "directly."
+        if fit_method == "fit_reml"
+        else ""
+    )
+    budget = "max_pirls_iter" if fit_method == "fit_reml" else "max_iter"
     return (
         "SuperGLM coefficient fit did not converge"
         + (f" after {n_iter} iterations" if n_iter is not None else "")
         + (f" (termination_reason={reason!r})" if reason else "")
-        + ". This model has no smoothing selection to run, so fit_reml fitted the "
-        "coefficients directly. The model is returned, but its coefficients and "
-        "standard errors may be inaccurate. Refit with a larger max_pirls_iter."
+        + f".{stage} The model is returned, but its coefficients and standard errors may "
+        f"be inaccurate. Refit with a larger {budget}."
     )
 
 
 def warn_coefficient_nonconvergence(fit_result: Any, *, stacklevel: int = 2) -> str | None:
-    """Emit the coefficient non-convergence statement as a ConvergenceWarning; return it."""
+    """Warn at the first external caller; ``stacklevel`` remains accepted for compatibility."""
     message = coefficient_nonconvergence_message(fit_result)
     if message is not None:
-        warnings.warn(message, ConvergenceWarning, stacklevel=stacklevel + 1)
+        warnings.warn(message, ConvergenceWarning, skip_file_prefixes=(_PACKAGE_DIRECTORY,))
     return message
 
 
 def warn_reml_nonconvergence(reml_result: Any, *, stacklevel: int = 2) -> str | None:
-    """Emit the REML non-convergence statement as a ConvergenceWarning; return it."""
+    """Warn at the first external caller; ``stacklevel`` remains accepted for compatibility."""
     message = reml_nonconvergence_message(reml_result)
     if message is not None:
-        warnings.warn(message, ConvergenceWarning, stacklevel=stacklevel + 1)
+        warnings.warn(message, ConvergenceWarning, skip_file_prefixes=(_PACKAGE_DIRECTORY,))
     return message

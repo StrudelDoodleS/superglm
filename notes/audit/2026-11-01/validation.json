@@ -1,0 +1,144 @@
+{
+  "baseline_commit": "6e092c9dc3434b4ba0247083352407a78503aa6d",
+  "full_suite": {
+    "command": [
+      "/home/max/.t3/worktrees/superglm/t3-58e3b20f/.venv/bin/python3",
+      "scripts/run_test_suite.py",
+      "-n",
+      "8",
+      "--junitxml=/tmp/superglm-issue-audit-final-suite.xml",
+      "-o",
+      "addopts=-q --tb=short"
+    ],
+    "exit_code": 0,
+    "seconds": 481.0559691840317,
+    "log": "/tmp/superglm-issue-audit-final-suite.log",
+    "real_data_required": true,
+    "data_directory": "/home/max/projects/superglm/data",
+    "extras": [
+      "dev",
+      "bench",
+      "plotting"
+    ],
+    "stages": [
+      {
+        "cases": 22009,
+        "outcomes": {
+          "skipped": 12,
+          "passed_or_xpassed": 21987,
+          "xfail": 10
+        }
+      },
+      {
+        "cases": 56,
+        "outcomes": {
+          "skipped": 1,
+          "passed_or_xpassed": 55
+        }
+      }
+    ]
+  },
+  "ruff_check": "passed",
+  "ruff_format": "passed",
+  "uv_lock_check": "passed",
+  "uv_pip_check": "passed",
+  "run_test": "passed",
+  "ty": {
+    "diagnostics": 883,
+    "accepted_cap": 903,
+    "gate": "passed",
+    "note": "Accepted existing backlog; no introduced diagnostics after type-only corrections."
+  },
+  "documentation": {
+    "exit_code": 0,
+    "seconds": 36.29063317901455,
+    "log": "/tmp/superglm-issue-audit-docs-static.log",
+    "command": [
+      "sphinx-build",
+      "-b",
+      "html",
+      "-n",
+      "-W",
+      "--keep-going",
+      "-d",
+      "/tmp/superglm-issue-audit-static-doctrees",
+      "docs",
+      "/tmp/superglm-issue-audit-static-html"
+    ],
+    "notebook_execution": "off"
+  },
+  "lean": {
+    "compiler": "Lean 4.33.1 / Lake 5.0.0-src+819816b",
+    "scope": "Existing exact identities; no new floating-point certificate claimed.",
+    "libraries": [
+      {
+        "name": "Certificate",
+        "exit_code": 0
+      },
+      {
+        "name": "ProofTour",
+        "exit_code": 0
+      },
+      {
+        "name": "InteractionOperator",
+        "exit_code": 0
+      },
+      {
+        "name": "NestedElimination",
+        "exit_code": 0
+      },
+      {
+        "name": "WindowCombiner",
+        "exit_code": 0
+      },
+      {
+        "name": "GGChangeOfVariables",
+        "exit_code": 0
+      },
+      {
+        "name": "TemmeCoefficients",
+        "exit_code": 0
+      },
+      {
+        "name": "SeverityPrimitives",
+        "exit_code": 0
+      },
+      {
+        "name": "NodeMixture",
+        "exit_code": 0
+      }
+    ]
+  },
+  "performance_receipt": "fit-comparison.json",
+  "native_platform_ci": "pending on draft PR",
+  "production_source_sha256": {
+    "src/superglm/diagnostics/convergence.py": "44b6130612797cc1535c766021e1175b279621584c9e265c197b6c7c2fbf1028",
+    "src/superglm/diagnostics/discretize.py": "0bd444474f1852c5e2a29acaa56172d23c8fb88cbfada62d04d1854ad3ae69c7",
+    "src/superglm/diagnostics/term_diagnostics.py": "c96f18bc3db2fbeb323f2d7318747533e828f1305ae242778a6cb917d5a0ca44",
+    "src/superglm/distributional/api.py": "300df5927bb994cadbb30ab4edbea66ce038105ccbe69a9d62ae51da545c5704",
+    "src/superglm/distributional/families/generalized_pareto.py": "7e360421357b325611d6334647f98555e24c8c2daea1154b4d82eb418998480f",
+    "src/superglm/distributional/family.py": "75c8d47223d3fbb4b437cf682d1568dbb164a8d5db874c378721bdd06a66e738",
+    "src/superglm/distributional/fit_state.py": "99c70642d8cca55f999a041376583de931e00557e955d6d7bd42e71582b264f4",
+    "src/superglm/distributional/observation.py": "abe8d9c587ac9f85f41fb3ce0ae7959aa7db0c8c0088d17f28133800affb3c25",
+    "src/superglm/distributional/separation.py": "e807b4a2deab2573f4873f5139637f1d19642d6cf8f9f52666430edbe66a55c6",
+    "src/superglm/distributional/terms.py": "728cc24fe005b36daa53b8dd9a588c1d7771be210a4ea0d069511d32f572ae58",
+    "src/superglm/distributional/timing.py": "1beba46230423182dbcd19d59a5e78ebb49bcefca69a59c4854194e30a946e76",
+    "src/superglm/editor/free_levels.py": "b7b52cd518a5a56e7284ff6620aaa59e1e35bd6e4d28f276fbb18a45ac60ea7a",
+    "src/superglm/export/rating_tables.py": "519b55aeeb0e1e7be24e453bc71106f2bef954c2e39ea1e013cbef0ef2c7a00e",
+    "src/superglm/features/numeric.py": "0225c7a039e51b8c0539132bf2d6f2d4ba0cc5471743cb778b829a222c9f8f97",
+    "src/superglm/features/spline.py": "d5d8b39c69d8d9f7bb901509d336ae32f3ccd292057f6e745d92393e02235787",
+    "src/superglm/inference/_term_ops.py": "e84d024fd00af9f603fd7df4ae01bec78587a255db1e14f14b5700843be891a1",
+    "src/superglm/model/explain_ops.py": "6a1c392eea04c04d9978598a9b0852149a691b83fbdacba3ab8516f43a1a1bf7",
+    "src/superglm/model/fit_state.py": "39e40c572350a87b24e68223d00013c9731f20e1f20456f332277deae67a74e2",
+    "src/superglm/model/reml_execute.py": "98d785504d01281ed542f68db4cc8e6e12e9c8ff8e21b871d5f17459abe5643b",
+    "src/superglm/model/report_ops.py": "398cd12aae22d112d2fb564253c562acadbe7b275faca06ec58f9fd34453c34f",
+    "src/superglm/reml/objective.py": "da814a19c58053ddaab440ea4af8e4f78a0bd6ebba859abb01440a9ebb21aee1",
+    "src/superglm/reml/penalty_algebra.py": "d63c4d0a053c60fecfffd4d0c67e4bc027fb1e2c21aa5ba8058e5e84d4d11534",
+    "src/superglm/screening/_pair_factor.py": "ae41079ca7caf5fed68f6f94a1e4997659e95af38f56950a8a427a5fadfae6c4",
+    "src/superglm/solvers/irls_direct/_fit.py": "83d296d3fa94057929e512c5ac57f19e1b2f56b8900a74e852ec5c39e40fdfd3",
+    "src/superglm/solvers/irls_direct/_mean_space.py": "60ea9c56b9ea4fb8380e49577c46472e2e65e4c610d4c7b170372115ce2d7f10",
+    "src/superglm/solvers/irls_direct/_search.py": "defae4c2a7bc7fc880318a7fb0824c1d7be140afb30c839b4ee9c317f62f7aed",
+    "src/superglm/solvers/irls_state.py": "998194c06403dc307d9706a491cc0ed38e9062355873153dd0e3f4dd9b4c21b9",
+    "src/superglm/solvers/mode_score.py": "2e40fae02f5246d74cc64aafd8aa32e7ac508035aadae524544739bdd14c0cd6"
+  }
+}

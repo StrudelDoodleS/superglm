@@ -89,6 +89,7 @@ class.
 from __future__ import annotations
 
 import math
+import warnings
 from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -684,7 +685,7 @@ def two_product(a, b):
 
 
 def centred_column_expansion(
-    values, centre: float, beta: float
+    values, centre: float, beta: float, *, warn: bool = True
 ) -> tuple[tuple[NDArray, NDArray, NDArray], NDArray]:
     """``(v - c) beta`` as three addends whose exact sum it is, with its plain product.
 
@@ -695,13 +696,16 @@ def centred_column_expansion(
     ``|p| < 2^-969`` the product's tail lies under ``2^-1074`` and each addend
     loses at most ``2^-1075`` (``two_product``).  The plain product ``fl(d
     beta)``, the term as the fitted predictor scores it (``_score_centred``),
-    is returned beside them for ``CompensatedSum``'s guard.
+    is returned beside them for ``CompensatedSum``'s guard.  Its overflow is
+    reported as by the ordinary predictor; a replay sets ``warn=False``.
     """
     with np.errstate(over="ignore", invalid="ignore"):
         difference, difference_error = two_sum(np.asarray(values, dtype=np.float64), -float(centre))
         product, product_error = two_product(difference, float(beta))
         pieces = (product, product_error, difference_error * float(beta))
-        return pieces, difference * float(beta)
+        if not warn:
+            return pieces, difference * float(beta)
+    return pieces, difference * float(beta)
 
 
 @dataclass(frozen=True)
@@ -731,7 +735,9 @@ class _Addend:
         """The addend's rows, recomputed when only their recipe is held."""
         return self.source() if callable(self.source) else self.source
 
-    def expand(self, data: NDArray | None, rows) -> tuple[tuple[NDArray, ...], NDArray]:
+    def expand(
+        self, data: NDArray | None, rows, *, warn: bool = True
+    ) -> tuple[tuple[NDArray, ...], NDArray]:
         """``(pieces, original)`` on ``rows`` of ``data`` (``data()``): exact pieces, plain value."""
         if self.source is None:
             pieces = tuple(np.asarray(value, dtype=np.float64) for value in self.constants)
@@ -740,7 +746,9 @@ class _Addend:
             original = np.asarray(data[rows], dtype=np.float64)
             pieces = (original,)
         else:
-            pieces, original = centred_column_expansion(data[rows], self.centre, self.beta)
+            pieces, original = centred_column_expansion(
+                data[rows], self.centre, self.beta, warn=warn
+            )
         if self.sign < 0.0:
             return tuple(-piece for piece in pieces), -original
         return pieces, original
@@ -778,7 +786,9 @@ class CompensatedSum:
     (Claude's review of #453).  Every operation is elementwise and the rows
     independent, so ``value`` replays the addends on just the rows whose
     fallback it needs, recomputing a recomputable source once, and every row
-    reads what a whole-array evaluation gives, bit for bit.
+    reads what a whole-array evaluation gives, bit for bit.  Replay retains
+    its two failed-row totals and a finite-piece mask while expanding at most
+    ``_CHUNK`` failed rows at once.  Re-scoring a source repeats no warning.
     """
 
     __slots__ = ("addends", "error", "remainder", "start", "total")
@@ -790,13 +800,18 @@ class CompensatedSum:
         self.error = np.zeros_like(self.total)
         self.addends: list[_Addend] = []
 
-    def _join(self, addend: _Addend) -> _Addend:
+    def _join(self, addend: _Addend, *, replay: bool = False) -> _Addend:
         data = addend.data()
         n = self.total.shape[0]
-        with np.errstate(over="ignore", invalid="ignore"):
-            for lo in range(0, n, _CHUNK):
-                rows = slice(lo, min(lo + _CHUNK, n))
-                pieces, _ = addend.expand(data, rows)
+        overflowed = replay
+        for lo in range(0, n, _CHUNK):
+            rows = slice(lo, min(lo + _CHUNK, n))
+            pieces, original = addend.expand(data, rows, warn=not overflowed)
+            if addend.centre is not None and not overflowed:
+                # The ordinary scorer forms this product once over all rows.
+                # Its chunked equivalent reports overflow once too.
+                overflowed = not np.all(np.isfinite(original))
+            with np.errstate(over="ignore", invalid="ignore"):
                 for piece in pieces:
                     self.total[rows], error = two_sum(self.total[rows], piece)
                     self.error[rows] += error
@@ -813,7 +828,9 @@ class CompensatedSum:
 
     def subtract(self, addend: _Addend) -> None:
         """Add ``addend`` negated: a term an earlier ``add`` returned, or a ``constant_addend``."""
-        self._join(addend.negated())
+        with warnings.catch_warnings(), np.errstate(over="ignore", invalid="ignore"):
+            warnings.simplefilter("ignore")
+            self._join(addend.negated(), replay=True)
 
     def copy(self) -> CompensatedSum:
         twin = CompensatedSum.__new__(CompensatedSum)
@@ -847,13 +864,17 @@ class CompensatedSum:
         plain = np.zeros(rows.size)
         original = np.full(rows.size, self.remainder)
         expanded = np.ones(rows.size, dtype=bool)
-        with np.errstate(over="ignore", invalid="ignore"):
+        with warnings.catch_warnings(), np.errstate(over="ignore", invalid="ignore"):
+            warnings.simplefilter("ignore")
             for addend in self.addends:
-                pieces, value = addend.expand(addend.data(), rows)
-                for piece in pieces:
-                    plain = plain + piece
-                    expanded &= np.isfinite(piece)
-                original = original + value
+                data = addend.data()
+                for lo in range(0, rows.size, _CHUNK):
+                    chunk = slice(lo, min(lo + _CHUNK, rows.size))
+                    pieces, value = addend.expand(data, rows[chunk], warn=False)
+                    for piece in pieces:
+                        plain[chunk] += piece
+                        expanded[chunk] &= np.isfinite(piece)
+                    original[chunk] += value
             start = self.start if self.start.ndim == 0 else self.start[rows]
             return np.where(expanded, start + (self.remainder + plain), start + original)
 
@@ -2104,6 +2125,7 @@ def truncated_direction_ratio(
     column_scale: NDArray | None = None,
     eta: NDArray | None = None,
     penalty_rounding: int | None = None,
+    eta_bounds: tuple[float | None, float] = (None, 0.0),
 ) -> tuple[float, tuple[TruncatedDirection, ...]]:
     """The directions the factorization truncates, each judged on the rows it moves.
 
@@ -2171,6 +2193,11 @@ def truncated_direction_ratio(
     score, scores and weights that vanish, or a scaled system that overflows)
     refuses (``inf``) with a record that names no rows (``unresolved_basis``).
 
+    ``eta_bounds`` defaults to the binomial/log domain, with no finite
+    lower bound and upper bound zero.  Identity-binomial supplies ``(0, 1)``:
+    an all-zero set then reaches a finite boundary too, and a penalized
+    step is checked against both probability bounds.
+
     The penalty's bend ``d' S d`` is judged against its error: the basis's,
     ``2 r ||d||_2 ||S d||_2 + ||S||_inf (r ||d||_2)^2`` with ``r = 4 (angle +
     gamma_{p+2})`` (``||S||_inf`` from ``penalty_size_apply``, ``|S| |v|``,
@@ -2202,6 +2229,7 @@ def truncated_direction_ratio(
     log-likelihood any of them reaches): this detects it and refuses.
     """
     basis = np.asarray(null_basis, dtype=np.float64)
+    lower_bound, upper_bound = eta_bounds
     if basis.ndim != 2 or basis.shape[1] == 0:
         return 0.0, ()
     basis = basis[:, ~_structural_columns(basis, column_scale)]
@@ -2260,7 +2288,7 @@ def truncated_direction_ratio(
         largest_move = float(np.max(np.abs(movement[support, k])))
         if not math.isfinite(weighted) or weighted > bar * largest_move * total:
             continue  # seen by the relative score
-        if np.all(observed[support] == 0.0):
+        if lower_bound is None and np.all(observed[support] == 0.0):
             # a separated set, read off its responses as ``row_set_residual``
             # does: no interior maximum.  Not off its scores' or its step's
             # signs: at means near 0 the rows' scores and curvature vanish,
@@ -2374,9 +2402,10 @@ def truncated_direction_ratio(
     determined = np.abs(steps) > floor
     ratio = float(np.max(np.abs(steps) / limit))
     rising = improving & determined & (y_moved == 1.0)
+    falling = improving & determined & (y_moved == 0.0)
     if np.all(improving | ~determined):
         if not np.any(bent):
-            if not np.any(rising):
+            if lower_bound is None and not np.any(rising):
                 return 0.0, ()  # a separation: no interior maximum
             # events rising: under the log link their supremum is the boundary
             # eta = 0 at finite coefficients, not a separation
@@ -2384,9 +2413,11 @@ def truncated_direction_ratio(
             return ratio, (record,)
         # the penalty bends a direction: the penalized maximum along the step
         # is finite, on the boundary only if the step carries a row past it
-        if eta is not None and np.any(rising):
+        if eta is not None and (np.any(rising) or (lower_bound is not None and np.any(falling))):
             reached = np.asarray(eta, dtype=np.float64)[rows] + steps
-            if np.any(reached[rising] >= 0.0):
+            if np.any(reached[rising] >= upper_bound) or (
+                lower_bound is not None and np.any(reached[falling] <= lower_bound)
+            ):
                 record = TruncatedDirection(runs, int(rows.size), columns, information, False, True)
                 return ratio, (record,)
     record = TruncatedDirection(runs, int(rows.size), columns, information, False)

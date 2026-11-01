@@ -1,11 +1,19 @@
 # Severity families: declared laws with generated derivatives, and incomplete-gamma bounds
 
 2026-10-31, against master `084cc96d` and PR 545 at `90b0eb46` (unmerged, held). Design
-note only: no production code changes. The prototype behind every measurement is in
-[`severity-family-prototype/`](severity-family-prototype/), and the commands that produced
-the numbers are listed at the end.
+note only: no production code changes. The original prototype measurements come from
+[`severity-family-prototype/`](severity-family-prototype/), with commands listed at
+the end. The status update and source-linked gates below also record the tests landed
+since that research.
 
-**Status, 2026-11-01.** PR #545 has merged (`9d0b2de3`). It takes a per-row flag, `censored=`, in place of the `censoring=(lower, upper)` pairs described here.
+**Status, 2026-11-01, after PR #565 (`6e092c9d`).** PR #545 has merged
+(`9d0b2de3`); its public API takes the per-row flag `censored=`. PR #565 landed the
+generator, primitive and declared-fixture oracle gates, the incomplete-gamma engine,
+and bounded `GammaLS` and `GeneralizedGammaLSS` with analytic orders 3-4. The Weibull,
+Burr XII, log-logistic and Lomax declarations remain test fixtures, not public
+families. Sections 2 and 3 retain the original prototype measurements, explicitly
+qualified below; section 4 records the landed gates and remaining work, incorporating
+[issue #564's corrections](https://github.com/StrudelDoodleS/superglm/issues/564).
 
 ## Recommendation
 
@@ -19,10 +27,11 @@ the numbers are listed at the end.
    family.** Examples are `softplus`, `log1mexp` and the gamma normaliser. Each primitive
    has a derivative rule, a numba body that handles its own tails, and an mpmath oracle.
    Declarations must be written in log space with these primitives.
-   - Written that way, every generated derivative of four test families and the gamma
-     (orders 0 to 4, plus log survival and log CDF to order 2) is within 15 u of a
-     60-digit reference, in the body and out to 1e-100 tails. The one exception is
-     benign (section 2.4).
+   - In the prototype, the generated density and log-survival channels of the test
+     families and gamma are within 15 u of a 60-digit reference, in the body and out
+     to 1e-100 tails. Log-CDF derivatives need the scale-dependent cancellation model
+     in section 2.4; 280 u is the link-scale Hessian measurement, not a bound on the
+     natural-scale Hessian or higher derivatives.
    - The same laws written in textbook form lose up to 1e4 u in the body, or return
      ±inf in the tails.
    - The generated oracle grid flags the difference with no hand-written test.
@@ -39,9 +48,10 @@ the numbers are listed at the end.
    its series and continued fraction. The sweep's float64 version of this
    (section 3.4) is accurate to about 1e-13 typically at every order to 4, and to
    2.5e-10 at worst for orders 1 and 2. Build it as one jet primitive, so the gamma
-   and generalized-gamma bounds also come through the generator. The generalized gamma
-   additionally needs Temme's uniform expansion. That part is standard but untested in
-   the shape.
+   and generalized-gamma bounds also come through the generator. PR #565 has since
+   landed the generic series/continued-fraction engine with a stable prefactor, and
+   Temme's uniform expansion in the generalized gamma's own coordinates near its
+   log-normal limit. Their committed measurements and gates are in section 4.
 
 **Measured speed.** The comparison is `GammaLS` with only its order-0-2 row kernel
 swapped for the generated one; plan, links, orders 3-4 and every protocol stay
@@ -185,8 +195,27 @@ generated derivative is again a product of primitives.
 | `psires(n, a)` | `psi^(n)(a)` less the n-th derivative of `log a` | `psires(n + 1, a)` | asymptotic residual for `a >= 10` |
 | `polygamma`, `digamma`, `lgamma` | — | SymPy's own rules | scipy `psi` via its Cython entry point; recurrence plus asymptotic series |
 
-Against mpmath, every primitive is within 6e-15 relative error for `a` from 0.01 to 1e6
-and `t` from -0.9 to 5.
+The prototype's quoted 6e-15 relative error (and at most 25 u at the `a = 10` switch)
+had no committed measuring script. It is superseded by
+[`tests/test_severity_primitives.py`](../../tests/test_severity_primitives.py): for
+exact float64 inputs, `|err| <= 16 u E_f + 2^-1074`. The absolute scale
+`E_f = Σ_i |x_i ∂f/∂x_i| + |f|` stays finite at roots; the elementary primitives and
+`gdev` satisfy the stronger `E_f = |f|` bound. The direct gamma-function evaluations
+below `a = 10` get the separate allowance in stage 1, rather than a floor on the
+primitive's value. The grid includes `gdev`'s exact root, the neighbourhood of
+`gnorm`'s root, both sides of the switch, shapes from 1e-3 to 1e6, and extreme
+elementary-function inputs.
+
+The test records the following worst `err / (u E_f)` measurements on x86-64 Linux,
+glibc, AMD EPYC 9645; it asserts the analysed constant 16, not these measurements:
+
+| Primitive | Measured worst |
+|---|---|
+| `softplus`, `expit`, `log1mexp`, `invexpm1`, `gdev` | 1.34, 2.68, 0.88, 0.88, 2.83 |
+| `gnorm` | 2.38 |
+| `psires`, orders 0-3 | 4.48, 1.19, 1.76, 1.23 |
+| `sres`, orders 0-3 | 6.30, 3.41, 3.26, 3.32 |
+| `polygamma`, orders 0-3 | 3.62, 1.57, 2.11, 1.54 |
 
 The rule each primitive follows is the one the hand-written kernels already follow:
 take the singular or cancelling part out analytically, and evaluate the regular
@@ -209,7 +238,8 @@ below. Primitives with derivative rules can.
 
 ### 2.4 Accuracy, measured
 
-Worst error over the grid, in units of `u = 2^-53`.
+Original prototype measurements over the grid, in units of `u = 2^-53`. The landed
+oracle's composed error model and measurements follow the table.
 - **Log-likelihood values:** absolute below one and relative above, which is what a fit
   sums.
 - **Derivative channels:** relative to the larger of the row's own largest entry and
@@ -232,11 +262,36 @@ Hessian to 1.2e-9 to 5.7e-7, with the gamma at CV 0.02 the loosest. That is the
 differencing error itself, so it confirms the formulas without being able to resolve
 them to `u`.
 
-**The bold entries are the one cancellation the primitives do not remove.** In the far
-left tail, `d^2 log F/dk d(scale)` contains `1 - t(1 + 1/expm1(t))`, which is about
-`-t/2` as `t -> 0`. It costs at most 280 u, or 3e-14 relative, on rows whose `F` is
-1e-100. Nothing a user reads moves. A primitive for `t/(1 - e^-t) - 1` (a Bernoulli
-series) would remove it, if a stricter gate ever wants that.
+**The bold entries measure cancellation on the link scale.** In the far left tail,
+`d^2 log F/dk d(scale)` contains `1 - t(1 + 1/expm1(t))`, which is about `-t/2` as
+`t -> 0`. The subtraction carries an absolute error of about `u` times its
+prefactor. This gives `|log F| u` growth on the link scale and `(log F)^2` growth
+for the natural-scale log-CDF Hessian. The at-most-280-u (about 3e-14) figure above
+applies to the link-scale Hessian. The same prototype output,
+[`results/oracle_results.json`](severity-family-prototype/results/oracle_results.json),
+gives these natural-scale Hessian errors (body / tail):
+
+| Family | Natural-scale log-CDF Hessian, u |
+|---|---|
+| Weibull | 201 / 1.9e5 |
+| Weibull, mean form | 78 / 8.9e4 |
+| Burr XII | 125 / 3.4e4 |
+
+The committed
+[`tests/test_declared_severity_families.py`](../../tests/test_declared_severity_families.py)
+and [`tests/_severity_fixtures.py`](../../tests/_severity_fixtures.py) propagate the
+primitive bounds through every generated operation, including this subtraction, on
+both scales. Except for the two recorded range failures below, each entry meets
+`|err| <= 2 u A + 1e-300`, where `A` is that propagated magnitude.
+Recorded `err / (u A)` is at most 0.65. Density and
+log-survival channels additionally meet `A <= 1,024 S`, with `S` the row/body channel
+scale; the measured maximum is 623. A textbook gamma declaration passes the rounding
+bound but fails this quality gate. Outside the log CDF, measured error stays within
+15 u of `S`. Higher log-CDF derivatives have larger losses: the Weibull reaches
+4.9e11 u at order 4, and the Burr XII and Lomax fourth derivatives at `F = 1e-100`
+have strict expected-failure tests for evaluations that leave the float64 range.
+A Bernoulli-series primitive for `t/(1 - e^-t) - 1` remains a possible way to remove
+the subtraction's cancellation on both scales.
 
 **The same laws in textbook form**, through the same generator and the same oracle,
 with the mpmath reference at 400 digits so it resolves its own cancellation:
@@ -504,7 +559,8 @@ No package offers a float64 shape derivative beyond order 2.
 
 ### 3.4 Accuracy and cost, measured by the sweep
 
-The sweep carried order-4 Taylor jets in `a` through the series and the Legendre
+These are historical prototype measurements, not the landed engine's acceptance
+limits. The sweep carried order-4 Taylor jets in `a` through the series and the Legendre
 continued fraction, on the log scale. The prefactor `a log x - x - lgamma(a)` stays
 analytic, and its jet uses polygamma. The complement uses Mächler's `log1mexp`
 switch. It was tested at 42 points against mpmath, with `a` from 1e-2 to 1e4 and points
@@ -518,8 +574,16 @@ in both tails, on the series/continued-fraction switch line and on the diagonal.
   within `a ± sqrt(a)`, which is a coefficient of variation of 0.01.
 - **Far tails are exact to rounding.** At `a = 10`, `x = 800`, `log Q = -752.63` is right
   to 2e-16 at every order. `scipy.stats.gamma.logsf` returns `-inf` there.
-- **At large `a` the value error grows like `a u`**, from cancellation in the
-  prefactor. GST's `eta`/`Gamma*` form removes it.
+- **The prototype's value error comes from the prefactor and complement.** Its
+  relative error in `log T` is modelled by
+  `c u a |log x| κ / |log T|`, where `κ = P/Q` for log Q read by complement,
+  `Q/P` for log P read by complement, and 1 otherwise. A constant up to about 1.5
+  covers the printed order-0 rows in `v2_out.txt`. Complementation multiplies the
+  primary log tail's absolute error by that ratio; it does not add `u/Q`.
+  Orders 1-2 need their own error terms: one printed row reaches 1.9e-12 at order 2
+  against 2.3e-13 at order 0. The landed engine's stable prefactor removes this
+  `u a |log x|` cancellation near the diagonal; its separate value and derivative
+  measurements are in stage 4a.
 - **Two failure modes were found and fixed:**
   - stopping the continued fraction on a per-coefficient change of `u` stops too early
     for orders 3 and 4. Stopping on each jet coefficient's own relative change fixes it,
@@ -537,11 +601,14 @@ in both tails, on the series/continued-fraction switch line and on the diagonal.
 
 ### 3.5 Regime map and recommendation
 
+The table records the original sweep's algorithm map. The implementation status
+following it supersedes the prototype's untested regions and measurements.
+
 | Region | Method | Status |
 |---|---|---|
 | `x <= a + max(1, sqrt(a))` | series for log P on jets; log Q by `log1mexp` | measured: at most 2.5e-10 at orders up to 2 |
 | `x > a + max(1, sqrt(a))` | Legendre continued fraction for log Q on jets, stopped on each coefficient's relative change; log P by complement | measured: tails to 1e-16 |
-| `a >= 12`, `0.30 a <= x <= 2.35 a` | GST uniform expansion (their eq. 5.1) on jets, with the prefactor in the `eta`/`Gamma*` form | standard for values; **not built or tested in the shape**. Cuts about `9 sqrt(a)` terms to 25, and should remove the `a u` value loss and the order-3 and order-4 loss near the diagonal |
+| `a >= 12`, `0.30 a <= x <= 2.35 a` | GST uniform expansion (their eq. 5.1) on jets, with the prefactor in the `eta`/`Gamma*` form | untested in the original sweep; 25 terms is the value-only count, not the landed order-4 count |
 | windows | pick the tail, then `log T_big + log1mexp(log T_big - log T_small)` on jets: PR 545's combiner | not measured; Gauss-Legendre for narrow windows, as PR 545 already does |
 | `a < 1e-2` | Gautschi's `u + v` | only if the shape range widens (coefficient of variation above 10) |
 
@@ -557,13 +624,25 @@ term is `erfc(eta sqrt(a/2))/2`, which tends to the normal tail. So the uniform 
 is also how the truncated likelihood reaches the log-normal limit smoothly. PR 545's risk
 list names that limit, and this is the standard tool for it.
 
-The sweep found nothing published or tested for four things:
+At the time of the sweep, it found nothing published or tested for four things:
 - a float64 routine for orders 3 and 4;
 - the uniform expansion differentiated in `a`;
 - shape derivatives of a narrow window `log(P(x_hi) - P(x_lo))`;
 - `a < 1e-2` with small `x`.
 
-Those four are where superglm would be first. Everything else is adoption.
+PR #565 subsequently landed order-4 tails, narrow-window derivatives and a
+small-shape route. The generic
+[`_incomplete_gamma.py`](../../src/superglm/distributional/kernels/_incomplete_gamma.py)
+keeps the series and continued fraction, uses `gnorm(a) - log a - a gdev(x, a)` for
+the stable prefactor from `a = 10`, and evaluates small-shape Q by Gautschi's `u + v`
+on the series side below `a = 1e-2`. The uniform expansion is implemented separately
+in [`_gg_uniform_tail.py`](../../src/superglm/distributional/kernels/_gg_uniform_tail.py),
+in the generalized gamma's `(w, q)` coordinates, analytic through `q = 0`.
+It uses 35 terms for order-4 jets, within `|q| <= 0.2887`, `|eta| <= 1`,
+`|q w| <= 1.25` and `|w| <= 2^100`. The bounded-family oracle tests include narrow
+windows and derivatives through order 4. These are committed float64 implementations
+with independent high-precision test oracles; they do not establish a literature
+priority claim.
 
 ### 3.6 How it joins the generator
 
@@ -586,35 +665,39 @@ expected shortfall, `scale Gamma(1 + 1/k, s^k)/S`, uses the same engine.
 Every stage meets the AGENTS.md performance-evidence rule. Fit time must be equal to or
 faster than master, on a complete fit, with held-out metrics through `predict()`.
 
-**Stage 0: PR 545 merges.** The bounds API is held by Max. Stages 1 and 2 do not need
-it; stage 3 onwards does.
+**Stage 0: PR 545 merges — landed at `9d0b2de3`.** The public bounds API uses
+`truncation=` and `censored=`. Stages 1 and 2 did not depend on it; stage 3 onwards do.
 
 **Stage 1: the generator and primitives in the repository, with no family switched.**
-- `tools/generate_severity_families.py` holds the declarations and SymPy. It writes
+- **Landed in PR #565.** `tools/generate_severity_families.py` holds declarations and
+  SymPy. It writes
   checked-in numba modules under `src/superglm/distributional/kernels/`, with a
   `--check` mode and a test that the output is current, exactly as the
   fourth-derivative generator works.
-- The primitives become one kernel module. Each has an mpmath test over its range.
+- The primitives are in `_severity_primitives.py`, with the committed mpmath grid in
+  [`tests/test_severity_primitives.py`](../../tests/test_severity_primitives.py).
 - **Gate:**
-  - every primitive `f` has `|err| <= c · u · κ_f · max(|f|, 1)` against mpmath. Here
-    `κ_f = |x f'(x) / f(x)|` is the function's own condition number, `c` is a small
-    constant set from the error analysis, and the floor is the oracle's
-    absolute-below-one rule. The function is well conditioned: `κ` is about 2.3 for
-    `gnorm` at `a = 10` and below 1 above it, and about 1 for `psires(0, ·)`. The
-    cancellation factor of the direct formula, such as `|a log a| / |gnorm(a)|`, is
-    not this `κ`. It grows like `2a` and is infinite at `gnorm`'s root near
-    `a = 6.45`, so a gate built on it would pass the textbook forms these primitives
-    replace;
-  - the direct-evaluation window below `a = 10`, where `a log a - a - lgamma(a)` and
-    `psi(a) - log a` amplify libm's error by about 100 and 45, gets a separate,
-    bounded allowance;
+  - `|err| <= 16 u E_f + 2^-1074` for exact float64 inputs, with
+    `E_f = Σ_i |x_i ∂f/∂x_i| + |f|`. This stays finite at roots. For `gdev`,
+    `E_f = 2 |(y - m)/m| + |gdev|`; for `gnorm`,
+    `E_f = a |psires(0, a)| + |gnorm|`, about 0.51 at its root near `a = 6.45`.
+    The committed test uses the stronger `E_f = |f|` bound for the elementary
+    primitives and `gdev`, and checks `gdev(y, y) = 0` exactly;
+  - direct evaluation below `a = 10` adds `a |log a| + a + |lgamma(a)|` to
+    `gnorm`'s scale, and `|psi^(n)(a)| + |d^n log(a)/da^n|` to `psires(n, a)`'s.
+    The scaled residual `sres(n, a) = a^(n+1) psires(n, a)` adds the latter times
+    `a^(n+1)` in its direct range `1/4 <= a < 10`. These are bounded absolute
+    allowances, not relative tolerances at a root;
+  - the constant 16 follows the test's error analysis: one-ulp `exp`, `log`,
+    `log1p` and `expm1`, two-ulp `lgamma`, the stable series and recurrence costs.
+    Section 2.3 records the committed grid's measured constants separately.
+    The absolute-below-one floor belongs on the row's log density, which a fit sums,
+    not on a primitive that can later be multiplied by `1/cv^2 = 2,500`;
   - a mutation check: the gate fails when the `a >= 10` Stirling and asymptotic
     branches are replaced by the direct formula, for example at `a = 2,500`;
-  - the figures quoted for the prototype's primitives (at most 25 u at the `a = 10`
-    switch, and section 2.3's 6e-15, which is 54 u) come from a check that is not
-    among the committed scripts. Stage 1 re-measures every primitive with this
-    metric before setting `c`;
-  - the gate runs on the native Windows and macOS ARM64 runners. The primitives call
+  - the gate is included in the CI matrix's native Windows and macOS ARM64 suites.
+    The recorded measurements in section 2.3 are from Linux, not native-run evidence.
+    The primitives call
     the platform libm (`lgamma`, `log1p`, `expm1`, `exp`, `log`), which can differ by
     an ulp or more between glibc, Apple libm and the Windows UCRT, and `gnorm` and
     `psires` amplify that near their switch. Where the amplified error could change
@@ -627,6 +710,9 @@ it; stage 3 onwards does.
 
 **Stage 2: the generic adapter and the first new families.** These are Weibull (scale
 and mean forms), log-logistic, Lomax and Burr XII.
+- **Partly landed.** PR #565 landed the generator's oracle tests for these fixture
+  declarations and the gamma. The public adapter, new public families and their
+  public-fit, protocol and pickle gates remain future work.
 - **Tests:**
   - one parametrised oracle test over every declaration, as in `oracle_check.py`;
   - one public-fit test per family: intercept-only against scipy's maximum likelihood,
@@ -640,14 +726,22 @@ and mean forms), log-logistic, Lomax and Burr XII.
   refusals, the public fit and pickling stay per family, but are one line each in a
   parametrised test.
 - **Gate:**
-  - the oracle grid is within the error model's bound everywhere: the primitives'
-    bounds composed through the declaration, with the left-tail log-CDF entries'
-    `|log F| · u` cancellation (section 2.4) part of that model. The prototype
-    measured at most 15 u outside those entries. Like stage 1, the grid runs on the
-    native Windows and macOS ARM64 runners;
-  - intercept-only fits reach at least scipy's maximum log-likelihood, less a few
-    `u · Σ|l_i|`. The parameter gap is below 1e-3 of a standard error. A flat
-    parameter tolerance would measure where scipy's optimiser stops: Burr XII's `c`
+  - the committed fixture oracle holds each natural- and link-scale entry, except
+    for the two recorded range failures, to `|err| <= 2 u A + 1e-300`, with the
+    primitive bounds composed through
+    the declaration. `A` includes the generated subtraction `1 - t(1 + r)` itself,
+    hence both the `|log F| u` link-scale law and the natural-scale Hessian's
+    `(log F)^2` growth. Density and log-survival channels also meet `A <= 1,024 S`;
+    the textbook gamma mutation fails this quality gate. Section 2.4 records the
+    measurements and two strict expected failures for fourth log-CDF derivatives
+    outside the generated evaluation's float64 range. Like stage 1, the tests are
+    included in the native Windows and macOS ARM64 CI suites;
+  - future intercept-only fits reach at least scipy's maximum log-likelihood, less
+    a few `u · Σ|l_i|`. Evaluate both fitted parameter vectors with the same declared
+    likelihood, summed with `math.fsum`, so scipy's own row-rounding differences do
+    not consume the comparison tolerance. The parameter gap is below 1e-3 of a
+    standard error. A flat parameter tolerance would measure where scipy's optimiser
+    stops: Burr XII's `c`
     and `k` are strongly correlated, its optimum is flat along one direction, and
     the prototype's 4.2e-7 gap sits only 2.4× inside a 1e-6 gate;
   - `warmup()` covers the new kernels, and first-fit compile time is reported;
@@ -658,7 +752,9 @@ and mean forms), log-logistic, Lomax and Burr XII.
   `LogLogisticLS`, `LomaxLS`, `BurrLSS`), and whether the scale or the mean form is
   each family's default.
 
-**Stage 3: bounds for declared families,** after PR 545 merges.
+**Stage 3: bounds for the new declared families — future work.** PR #545 has merged;
+the new public families still need stage 2. Gamma-family bounds landed separately in
+stage 4.
 - Declared `log_survival` and `log_cdf` give `ResponseWindowFamily` through
   `log_window_channels` and its narrow-window quadrature.
 - Bounded plans refuse analytic orders 3 and 4 and expected information, as PR 545's
@@ -682,32 +778,60 @@ and mean forms), log-logistic, Lomax and Burr XII.
   - a regression test fails on the complete-observation path;
   - the PIT of bounded rows is uniform.
 
-**Stage 4: issue 544 stage 2, the incomplete-gamma jet engine.**
+**Stage 4: issue 544 stage 2 — landed in PR #565.** The engine, both bounded gamma
+families and their analytic orders 3-4 are in production. The source-linked gates
+below supersede the historical prototype limits in section 3.
 - **4a. Series and continued fraction on order-4 jets** (sections 3.4-3.5), in numba,
-  as the `logq_jet`/`logp_jet` primitive.
-  - **Gate:** an mpmath grid over `a` from 1e-2 to 1e4, with `x` across both tails and
-    the diagonal. Orders 0-2 within 1e-12 relative for `a <= 12`. That covers
-    `GammaLS` CVs from 0.3 to 3, and `v2_out.txt` already passes it.
-  - **Above `a = 12`,** the bound follows section 3.4's two losses, times a small
-    constant set from the analysis:
-    - the `a u` prefactor loss, which grows with `a` until 4c's `eta`/`Gamma*` form
-      removes it;
-    - the complement just below the switch line `x = a + sqrt(a)`, where Q is read
-      through `log1mexp` of P's jet and loses about `u / Q`.
-  - **Worst measured** in `v2_out.txt`: 4.2e-12 at `a = 1e3`, and 2.5e-10 at `a = 1e4`.
-    A flat 1e-12 up to `a = 1e3` would fail on the method itself. Orders 3 and 4
-    within 1e-7.
+  as `log_gamma_tail` and its scaled/jet interfaces.
+  - **Gate:**
+    [`tests/test_incomplete_gamma_engine.py`](../../tests/test_incomplete_gamma_engine.py)
+    checks both tails and the diagonal over `1e-2 <= a <= 1e4`. Each order is relative
+    to the row's largest same-order oracle entry, with an absolute comparison below
+    `1e-280`. The limits are 1e-12 at orders 0-2 across this entire range, 1e-11 at
+    order 3 and 1e-10 at order 4.
+  - **Error model:** value rounding is a few `u` times the terms forming the primary
+    `log T`; reading its complement multiplies that absolute error by `T/(1 - T)`.
+    A complement of a very small tail inherits that tail's relative error, the
+    absolute error of its log (`u |log T|` scale). Derivatives have a separate loss:
+    orders 3-4 near the diagonal cancel in the log's Taylor coefficients, growing
+    like `sqrt(a)`. The generic engine's stable `eta`/`Gamma*` prefactor removes the
+    prototype's `u a |log x|` value cancellation; it does not use the generalized
+    gamma's separate uniform expansion.
+  - **Recorded worst errors, orders 0-4:** 7.3e-14, 7.3e-14, 1.3e-13, 1.2e-12,
+    9.7e-12 on x86-64 Linux. Thus the orders 0-2 gate has about eightfold margin.
+    The tests also check switch continuity and jets along fixed `x/a`, whose
+    coefficient/formation scale and separate tolerances are documented there.
+    Below `a = 1e-2`, the landed small-shape `u + v` route avoids reading tiny Q as
+    `1 - P`; its dedicated oracle grid records worst errors of 177 u at fixed `x`
+    and 483 u along `x/a`.
   - **Cost** is per row at orders 0 and 2 on 10^6 rows, against PR 545's estimate of
     1-3 µs per row.
 - **4b. `GammaLS` bounds.** Its log tails are declared through the jet primitive.
+  - **Landed evidence:**
+    [`tests/test_gamma_ls_response_bounds.py`](../../tests/test_gamma_ls_response_bounds.py)
+    checks recovery, independent maximum likelihood, bounded channels to order 4,
+    narrow windows, PIT, weights and analytic LAML dispatch. Channel tolerances
+    propagate 4a's order-specific engine error through the chain rule and the
+    window factor `1 + 2 κ`, with quadrature for narrow windows.
   - **Acceptance:** issue 544's own criteria, a fitted mean of 5,000 and CV of 1.2
     within sampling error. Also the issue's 200,000-row truncated fit time against the
     complete fit.
 - **4c. Temme's uniform expansion on jets,** for `a >= 12` near the diagonal.
-  - **Gate:** the regions agree to 1e-12 across their boundaries, and the
-    generalized-gamma `q -> 0` window matches `LogNormalLS`'s to 1e-10.
+  - **Landed in generalized-gamma coordinates:**
+    [`tests/test_gg_uniform_tail.py`](../../tests/test_gg_uniform_tail.py) checks the
+    35-term expansion against independent density-series and incomplete-gamma
+    references, with separate rounding and truncation terms. This is the
+    `(w, q)` implementation and domain in section 3.5, not a uniform-expansion
+    replacement for every `(a, x)` jet.
+  - **Gate:** region continuity and the generalized-gamma `q -> 0` limit are checked
+    by [`tests/test_gg_log_tail.py`](../../tests/test_gg_log_tail.py) and the bounded
+    family tests. Continuity uses the two engines' combined error models; at `q = 0`
+    the bounded law is checked against `LogNormalLS` to 1e-10.
 - **4d. `GeneralizedGammaLSS` bounds:** the `q` sign switch, and `q = 0` as a
-  removable point. The gate is 4b's plus the `q`-limit tests.
+  removable point. The gate is 4b's plus the `q`-limit tests, landed in
+  [`tests/test_generalized_gamma_response_bounds.py`](../../tests/test_generalized_gamma_response_bounds.py)
+  for location and mean forms, with the tail engines' error propagated through the
+  chain rule and window factor.
 
 **Stage 5: optimisation, after the methods are in.**
 - Value-only evaluation when only order 0 is asked for.
@@ -728,21 +852,27 @@ reproductive prior-weight law as a substitution, `cv -> cv/sqrt(w)` for the gamm
 
 ## 5. Discrepancies and follow-ups
 
-- **The task brief says censoring is "an explicit `censored=` flag".** PR 545 at
-  `90b0eb46` takes `censoring=(lower, upper)` pairs. A row equal to its bound is
-  censored on that side (`observation.resolve_response_bounds`). If a flag is planned,
-  it is not on that head.
-- **"The Research section's note on the gamma families"** exists only in PR 545's edit
-  of `notes/ROADMAP.md`. Master's roadmap has no such note.
+- **Historical bounds-API discrepancy, resolved.** The research used PR #545 at
+  `90b0eb46`, with `censoring=(lower, upper)` pairs. The merged API uses `censored=`
+  as the task brief requested; the old pair-based description is not the public API.
+- **Historical roadmap discrepancy.** The research originally found the gamma-family
+  note only on PR #545's roadmap edit. That observation was about the pre-merge
+  master, not current project status.
 - **scipy's log tails fail in places** (section 2.4). Any code that censors through
   scipy's `logsf` or `logcdf` would have to refuse those rows or silently mis-weight
   them.
-- **`GammaLS`'s hand-written row kernel is the slowest part of its fit.** Its
+- **In the prototype comparison, `GammaLS`'s hand-written row kernel was the slowest
+  part of its fit.** Its
   likelihood evaluation took 2.0 s of a 4.6 s fit above. The generated equivalent,
   which has none of the hand-written kernel's input checks, fsum fallback or
   refusals, takes 0.87 s with the same iterations and the same predictions, so the
   saving is an upper bound. That is stage 6. It
   is a separate change, and it needs the every-route gate there before it could land.
+- **Bounded gamma-family cost remains follow-up work.**
+  [Issue #567](https://github.com/StrudelDoodleS/superglm/issues/567) records the
+  bounded-row cost after PR #565 and calls for phase attribution with
+  `SuperLSS.diagnose()` plus complete-fit comparisons. The prototype's complete-row
+  speedup is not evidence that the landed bounded fits meet that performance goal.
 - **Both gamma kernels recompute digamma and trigamma on every row,** even when the
   shape is constant. PR 545's note found this for the hand-written kernel. It is
   stage 5's distinct-shape item, and it applies to either kernel.
@@ -752,8 +882,14 @@ reproductive prior-weight law as a substitution, `cv -> cv/sqrt(w)` for the gamm
 
 ## Runs behind this note
 
-Everything runs from `notes/research/severity-family-prototype/` with the dev
-environment (`uv sync --python 3.13 --extra dev`). `OUT` is any scratch directory.
+The original prototype commands below run from
+`notes/research/severity-family-prototype/` with the dev environment
+(`uv sync --python 3.13 --extra dev`). `OUT` is any scratch directory. The landed
+gate measurements come from the source-linked test grids in sections 2.3, 2.4 and 4;
+run those with `uv run python -m pytest tests/test_severity_primitives.py`,
+`tests/test_declared_severity_families.py` or `tests/test_incomplete_gamma_engine.py`
+from the repository root. Their docstrings record the measurement platform and
+analysed tolerances; the CI matrix supplies native platform coverage.
 
 | Script | What it measures | How it ran |
 |---|---|---|

@@ -687,9 +687,11 @@ class WallDisclosingFamily(Protocol):
     ) -> str | None:
         """Return the warning for ``n_rows`` rows, or ``None`` when there is nothing to say.
 
-        ``pressed`` counts the rows at the (lower, upper) wall that the data press
-        against it, and ``clipped`` the rows the link clipped to its last float
-        inside it, where no fit can resolve how close they are. ``unresolved``
+        ``pressed`` counts the rows at the (lower, upper) wall that the terminal
+        coefficient step presses outward. At an unfinished iterate that movement
+        does not establish where the optimum lies. ``clipped`` counts the rows
+        the link clipped to its last float inside it, where no fit can resolve
+        how close they are. ``unresolved``
         says a direction the fit's rank decision dropped moves clipped rows, so
         the shape's curvature is lost there.
         """

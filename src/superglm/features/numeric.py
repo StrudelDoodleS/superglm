@@ -68,6 +68,6 @@ class Numeric:
         below it. ``coef`` is the log relativity.
         """
         b = float(beta[0])
-        with np.errstate(over="ignore"):
+        with np.errstate(over="ignore", under="ignore"):
             relativity = float(np.exp(b))
         return {"coef": b, "relativity_per_unit": relativity}

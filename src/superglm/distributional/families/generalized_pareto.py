@@ -485,13 +485,17 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         n_rows: int,
         *,
         unresolved: bool = False,
+        settled: bool = True,
     ) -> str | None:
         """Say what a tail shape at each wall does to the fitted law.
 
-        ``pressed`` counts the rows, at the (lower, upper) wall, that the data
-        press against it; ``clipped`` counts the rows the link clipped to its
-        last float inside it, whatever put them there. ``unresolved`` says the
-        fit lost the shape's curvature at clipped rows.
+        ``pressed`` counts the rows, at the (lower, upper) wall, that the
+        terminal coefficient step presses outward; ``clipped`` counts the rows
+        the link clipped to its last float inside it, whatever put them there.
+        ``unresolved`` says the
+        fit lost the shape's curvature at clipped rows. An unsettled fit's
+        outward step does not establish where the optimum lies, so its
+        consequences are conditional until the coefficient fit finishes.
         """
         n_lower, n_upper = pressed
         clipped_lower, clipped_upper = clipped
@@ -517,10 +521,18 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
                     "the shape, and everything that depends on it, is set by the wall rather "
                     f"than the data. {upper_remedy}"
                 )
-            findings.append(
-                f"{n_upper} of {n_rows} rows have a tail shape at the upper wall "
-                f"{self.shape_upper:g}: the data put the shape at or beyond it, so {consequence}"
-            )
+            if settled:
+                findings.append(
+                    f"{n_upper} of {n_rows} rows have a tail shape at the upper wall "
+                    f"{self.shape_upper:g}: the data put the shape at or beyond it, so {consequence}"
+                )
+            else:
+                findings.append(
+                    f"{n_upper} of {n_rows} rows have a tail shape at the upper wall "
+                    f"{self.shape_upper:g} that the current coefficient step still presses "
+                    "outward. This does not establish that the optimum lies at or beyond "
+                    f"the wall. If it does, {consequence}"
+                )
         if clipped_upper:
             if self.shape_upper == 1.0:
                 consequence = (
@@ -539,11 +551,20 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
                 f"{consequence}"
             )
         if n_lower:
-            findings.append(
-                f"{n_lower} of {n_rows} rows have a tail shape at the lower wall "
-                f"{self.shape_lower:g}: the data put the shape at or below it, so the tail is "
-                f"set by the wall rather than the data. {lower_remedy}"
-            )
+            if settled:
+                findings.append(
+                    f"{n_lower} of {n_rows} rows have a tail shape at the lower wall "
+                    f"{self.shape_lower:g}: the data put the shape at or below it, so the tail is "
+                    f"set by the wall rather than the data. {lower_remedy}"
+                )
+            else:
+                findings.append(
+                    f"{n_lower} of {n_rows} rows have a tail shape at the lower wall "
+                    f"{self.shape_lower:g} that the current coefficient step still presses "
+                    "outward. This does not establish that the optimum lies at or below "
+                    "the wall. If it does, the tail is set by the wall rather than the data. "
+                    f"{lower_remedy}"
+                )
         if clipped_lower:
             findings.append(
                 f"{clipped_lower} of {n_rows} rows have a tail shape at the last value above the "
@@ -554,6 +575,11 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         if not findings:
             return None
         message = "SuperLSS GeneralizedParetoLSS fit: " + " ".join(findings)
+        if not settled:
+            message += (
+                " The coefficient fit has not converged; near-wall movement may change as "
+                "it settles. model.diagnose() reports its stop."
+            )
         if n_lower or n_upper or unresolved:
             message += (
                 " Standard errors, intervals and posterior draws that involve the shape are not "
