@@ -161,7 +161,9 @@ def _composed_log_tail(w, q, upper, order, out, flat):
         ):
             _fill_nan(out)
             return
-    elif not log_gamma_tail_jet_into(a, a * math.exp(log_ratio), primary, order, np.bool_(True), jet, flat):
+    elif not log_gamma_tail_jet_into(
+        a, a * math.exp(log_ratio), primary, order, np.bool_(True), jet, flat
+    ):
         _fill_nan(out)
         return
     if jet[0] == -math.inf:
