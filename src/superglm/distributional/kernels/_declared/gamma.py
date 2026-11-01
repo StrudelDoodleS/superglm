@@ -2,8 +2,9 @@
 
 ``GammaLS``'s row law in its own parameters: mean ``mean``, shape
 ``weight/cv^2`` (prior weights reweight the law; pass ones and the
-weights as ``M`` for frequency weights).  Its log tails need the
-incomplete-gamma engine and come with the gamma bounds.
+weights as ``M`` for frequency weights).  The log tails are
+``log Q`` and ``log P`` of the incomplete-gamma engine at shape
+``weight/cv^2`` and point ``weight y/(mean cv^2)``.
 """
 
 # ruff: noqa
@@ -15,14 +16,15 @@ import numpy as np
 from numba import njit
 
 from superglm.distributional.kernels._severity_primitives import gdev, gnorm, sres_0123
+from superglm.distributional.kernels._incomplete_gamma import log_gamma_tail_into
 
 PARAMETERS = ('mean', 'cv')
 DATA = ('weight',)
 COORDINATES = 'natural'
-LAWS = ('density',)
+LAWS = ('density', 'logsf', 'logcdf')
 MAX_ORDER = 4
-PRIMITIVES_DIGEST = "1a3b8128066d7b06b9796951e6ced8ae071522af4f2ced303e3ab9bc953fb39e"
-ENGINES_DIGEST = ""
+PRIMITIVES_DIGEST = "7139a2b537094ec4616a1b45afc889977e859c59786c0efbe16b55454abe7f64"
+ENGINES_DIGEST = "921811603b9a58794156f0740368ad5f3ca3225324e23082922ba65ad48e2651"
 
 @njit(cache=True, nogil=True, error_model='numpy')
 def density_0(Y, P0, P1, D0, M, J0):
@@ -149,6 +151,450 @@ def density_4(Y, P0, P1, D0, M, J0, J1, J2, J3, J4):
         J4[i, 2] = m * (t16*t8*t9)
         J4[i, 3] = m * (24.0*t10/(p1 * p1 * p1 * p1 * p1))
         J4[i, 4] = m * (-4.0*t15*(30.0*c0_0 + 75.0*c0_1 + 36.0*c0_2 + 4.0*c0_3 + 30.0*t2))
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logsf_0(Y, P0, P1, D0, J0):
+    out0 = np.empty(1)
+    work = np.empty(120)
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = d0/(p1 * p1)
+        log_gamma_tail_into(t0, t0*y/p0, True, 0, out0, work)
+        c0_0 = out0[0]
+        J0[i] = c0_0
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logsf_1(Y, P0, P1, D0, J0, J1):
+    out0 = np.empty(3)
+    work = np.empty(120)
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = d0/(p1 * p1)
+        t1 = y/p0
+        log_gamma_tail_into(t0, t0*t1, True, 1, out0, work)
+        c0_0 = out0[0]
+        c0_1 = out0[1]
+        c0_2 = out0[2]
+        J0[i] = c0_0
+        J1[i, 0] = -c0_2*t0*y/(p0 * p0)
+        J1[i, 1] = -2.0*d0*(c0_1 + c0_2*t1)/(p1 * p1 * p1)
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logsf_2(Y, P0, P1, D0, J0, J1, J2):
+    out0 = np.empty(6)
+    work = np.empty(120)
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = d0/(p1 * p1)
+        t1 = y/p0
+        t2 = (1.0 / (p0 * p0))
+        t3 = t0*y
+        log_gamma_tail_into(t0, t0*t1, True, 2, out0, work)
+        c0_0 = out0[0]
+        c0_1 = out0[1]
+        c0_2 = out0[2]
+        c0_3 = out0[3]
+        c0_4 = out0[4]
+        c0_5 = out0[5]
+        t4 = c0_2*t1
+        t5 = 2.0*d0
+        t6 = t5/(p1 * p1 * p1)
+        t7 = c0_5*t1
+        t8 = t0*(c0_4 + t7)
+        J0[i] = c0_0
+        J1[i, 0] = -c0_2*t2*t3
+        J1[i, 1] = -t6*(c0_1 + t4)
+        J2[i, 0] = t3*(2.0*c0_2 + t0*t7)/(p0 * p0 * p0)
+        J2[i, 1] = t2*t6*y*(c0_2 + t8)
+        J2[i, 2] = t5*(3.0*c0_1 + 2.0*t0*(c0_3 + c0_4*t1) + 2.0*t1*t8 + 3.0*t4)/(p1 * p1 * p1 * p1)
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logsf_3(Y, P0, P1, D0, J0, J1, J2, J3):
+    out0 = np.empty(10)
+    work = np.empty(120)
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = d0/(p1 * p1)
+        t1 = y/p0
+        t2 = t0*t1
+        t3 = (1.0 / (p0 * p0))
+        t4 = t0*y
+        t5 = 2.0*d0
+        t6 = t5/(p1 * p1 * p1)
+        t7 = (1.0 / (p0 * p0 * p0))
+        log_gamma_tail_into(t0, t2, True, 3, out0, work)
+        c0_0 = out0[0]
+        c0_1 = out0[1]
+        c0_2 = out0[2]
+        c0_3 = out0[3]
+        c0_4 = out0[4]
+        c0_5 = out0[5]
+        c0_6 = out0[6]
+        c0_7 = out0[7]
+        c0_8 = out0[8]
+        c0_9 = out0[9]
+        t8 = 2.0*c0_2
+        t9 = c0_5*t1
+        t10 = t0*(c0_4 + t9)
+        t11 = t6*y
+        t12 = 3.0*c0_2
+        t13 = c0_3 + c0_4*t1
+        t14 = 2.0*t0
+        t15 = 2.0*t10
+        t16 = (1.0 / (p1 * p1 * p1 * p1))
+        t17 = t16*t5
+        t18 = 6.0*c0_2
+        t19 = 6.0*t0
+        t20 = (d0 * d0)*t16
+        t21 = c0_8 + c0_9*t1
+        t22 = 3.0*c0_4
+        t23 = c0_7 + c0_8*t1
+        t24 = 2.0*t2
+        t25 = t0*(t14*t23 + t21*t24 + t22 + 3.0*t9)
+        J0[i] = c0_0
+        J1[i, 0] = -c0_2*t3*t4
+        J1[i, 1] = -t6*(c0_1 + c0_2*t1)
+        J2[i, 0] = t4*t7*(t0*t9 + t8)
+        J2[i, 1] = t11*t3*(c0_2 + t10)
+        J2[i, 2] = t17*(3.0*c0_1 + t1*t12 + t1*t15 + t13*t14)
+        J3[i, 0] = -t4*(c0_9*t20*t3*(y * y) + t18 + t19*t9)/(p0 * p0 * p0 * p0)
+        J3[i, 1] = -t11*t7*(t1*t20*t21 + t14*t9 + t15 + t8)
+        J3[i, 2] = -t17*t3*y*(4.0*t10 + t12 + t25)
+        J3[i, 3] = -4.0*d0*(6.0*c0_1 + t0*(3.0*c0_3 + t1*t22 + t14*(c0_6 + c0_7*t1) + t23*t24) + 6.0*t1*t10 + t1*t18 + t1*t25 + t13*t19)/(p1 * p1 * p1 * p1 * p1)
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logsf_4(Y, P0, P1, D0, J0, J1, J2, J3, J4):
+    out0 = np.empty(15)
+    work = np.empty(120)
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = d0/(p1 * p1)
+        t1 = y/p0
+        t2 = t0*t1
+        t3 = (1.0 / (p0 * p0))
+        t4 = t0*y
+        log_gamma_tail_into(t0, t2, True, 4, out0, work)
+        c0_0 = out0[0]
+        c0_1 = out0[1]
+        c0_2 = out0[2]
+        c0_3 = out0[3]
+        c0_4 = out0[4]
+        c0_5 = out0[5]
+        c0_6 = out0[6]
+        c0_7 = out0[7]
+        c0_8 = out0[8]
+        c0_9 = out0[9]
+        c0_10 = out0[10]
+        c0_11 = out0[11]
+        c0_12 = out0[12]
+        c0_13 = out0[13]
+        c0_14 = out0[14]
+        t5 = c0_2*t1
+        t6 = 2.0*d0
+        t7 = t6/(p1 * p1 * p1)
+        t8 = (1.0 / (p0 * p0 * p0))
+        t9 = 2.0*c0_2
+        t10 = c0_5*t1
+        t11 = t0*t10
+        t12 = t0*(c0_4 + t10)
+        t13 = t7*y
+        t14 = 3.0*c0_2
+        t15 = c0_3 + c0_4*t1
+        t16 = 2.0*t0
+        t17 = 2.0*t12
+        t18 = (1.0 / (p1 * p1 * p1 * p1))
+        t19 = t18*t6
+        t20 = (1.0 / (p0 * p0 * p0 * p0))
+        t21 = 6.0*c0_2
+        t22 = 6.0*t0
+        t23 = (d0 * d0)*t18
+        t24 = t3*(y * y)
+        t25 = c0_9*t23*t24
+        t26 = c0_9*t1
+        t27 = c0_8 + t26
+        t28 = t1*t23
+        t29 = t27*t28
+        t30 = 3.0*c0_4
+        t31 = c0_7 + c0_8*t1
+        t32 = 2.0*t2
+        t33 = t0*(3.0*t10 + t16*t31 + t27*t32 + t30)
+        t34 = t19*y
+        t35 = 6.0*t12
+        t36 = c0_6 + c0_7*t1
+        t37 = t0*(3.0*c0_3 + t1*t30 + t16*t36 + t31*t32)
+        t38 = t1*t33
+        t39 = 4.0*d0
+        t40 = t39/(p1 * p1 * p1 * p1 * p1)
+        t41 = 36.0*t0
+        t42 = (1.0 / (p1 * p1 * p1 * p1 * p1 * p1))
+        t43 = (d0 * d0 * d0)*t42
+        t44 = c0_13 + c0_14*t1
+        t45 = 3.0*c0_8
+        t46 = c0_12 + c0_13*t1
+        t47 = t16*t46 + 3.0*t26 + t32*t44 + t45
+        t48 = 6.0*c0_4
+        t49 = 6.0*t2
+        t50 = 3.0*c0_7
+        t51 = c0_11 + c0_12*t1
+        t52 = t0*(t1*t45 + t16*t51 + t32*t46 + t50)
+        t53 = t0*(6.0*t10 + t2*t47 + t22*t31 + t27*t49 + t48 + t52)
+        J0[i] = c0_0
+        J1[i, 0] = -c0_2*t3*t4
+        J1[i, 1] = -t7*(c0_1 + t5)
+        J2[i, 0] = t4*t8*(t11 + t9)
+        J2[i, 1] = t13*t3*(c0_2 + t12)
+        J2[i, 2] = t19*(3.0*c0_1 + t1*t14 + t1*t17 + t15*t16)
+        J3[i, 0] = -t20*t4*(t10*t22 + t21 + t25)
+        J3[i, 1] = -t13*t8*(t10*t16 + t17 + t29 + t9)
+        J3[i, 2] = -t3*t34*(4.0*t12 + t14 + t33)
+        J3[i, 3] = -t40*(6.0*c0_1 + t1*t21 + t1*t35 + t15*t22 + t37 + t38)
+        J4[i, 0] = t4*(c0_14*t43*t8*(y * y * y) + 24.0*c0_2 + t10*t41 + 12.0*t25)/(p0 * p0 * p0 * p0 * p0)
+        J4[i, 1] = t13*t20*(12.0*t11 + t21 + t24*t43*t44 + 3.0*t25 + 6.0*t29 + t35)
+        J4[i, 2] = t34*t8*(10.0*t11 + 8.0*t12 + t21 + t28*t47 + 8.0*t29 + 2.0*t33)
+        J4[i, 3] = t3*t40*y*(9.0*t12 + t21 + 3.0*t33 + t53)
+        J4[i, 4] = t39*t42*(30.0*c0_1 + 36.0*t1*t12 + 2.0*t1*t53 + t15*t41 + t16*(6.0*c0_3 + t0*(3.0*c0_6 + t1*t50 + t16*(c0_10 + c0_11*t1) + t32*t51) + t1*t48 + t1*t52 + t22*t36 + t31*t49) + 9.0*t37 + 9.0*t38 + 30.0*t5)
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logcdf_0(Y, P0, P1, D0, J0):
+    out0 = np.empty(1)
+    work = np.empty(120)
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = d0/(p1 * p1)
+        log_gamma_tail_into(t0, t0*y/p0, False, 0, out0, work)
+        c0_0 = out0[0]
+        J0[i] = c0_0
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logcdf_1(Y, P0, P1, D0, J0, J1):
+    out0 = np.empty(3)
+    work = np.empty(120)
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = d0/(p1 * p1)
+        t1 = y/p0
+        log_gamma_tail_into(t0, t0*t1, False, 1, out0, work)
+        c0_0 = out0[0]
+        c0_1 = out0[1]
+        c0_2 = out0[2]
+        J0[i] = c0_0
+        J1[i, 0] = -c0_2*t0*y/(p0 * p0)
+        J1[i, 1] = -2.0*d0*(c0_1 + c0_2*t1)/(p1 * p1 * p1)
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logcdf_2(Y, P0, P1, D0, J0, J1, J2):
+    out0 = np.empty(6)
+    work = np.empty(120)
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = d0/(p1 * p1)
+        t1 = y/p0
+        t2 = (1.0 / (p0 * p0))
+        t3 = t0*y
+        log_gamma_tail_into(t0, t0*t1, False, 2, out0, work)
+        c0_0 = out0[0]
+        c0_1 = out0[1]
+        c0_2 = out0[2]
+        c0_3 = out0[3]
+        c0_4 = out0[4]
+        c0_5 = out0[5]
+        t4 = c0_2*t1
+        t5 = 2.0*d0
+        t6 = t5/(p1 * p1 * p1)
+        t7 = c0_5*t1
+        t8 = t0*(c0_4 + t7)
+        J0[i] = c0_0
+        J1[i, 0] = -c0_2*t2*t3
+        J1[i, 1] = -t6*(c0_1 + t4)
+        J2[i, 0] = t3*(2.0*c0_2 + t0*t7)/(p0 * p0 * p0)
+        J2[i, 1] = t2*t6*y*(c0_2 + t8)
+        J2[i, 2] = t5*(3.0*c0_1 + 2.0*t0*(c0_3 + c0_4*t1) + 2.0*t1*t8 + 3.0*t4)/(p1 * p1 * p1 * p1)
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logcdf_3(Y, P0, P1, D0, J0, J1, J2, J3):
+    out0 = np.empty(10)
+    work = np.empty(120)
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = d0/(p1 * p1)
+        t1 = y/p0
+        t2 = t0*t1
+        t3 = (1.0 / (p0 * p0))
+        t4 = t0*y
+        t5 = 2.0*d0
+        t6 = t5/(p1 * p1 * p1)
+        t7 = (1.0 / (p0 * p0 * p0))
+        log_gamma_tail_into(t0, t2, False, 3, out0, work)
+        c0_0 = out0[0]
+        c0_1 = out0[1]
+        c0_2 = out0[2]
+        c0_3 = out0[3]
+        c0_4 = out0[4]
+        c0_5 = out0[5]
+        c0_6 = out0[6]
+        c0_7 = out0[7]
+        c0_8 = out0[8]
+        c0_9 = out0[9]
+        t8 = 2.0*c0_2
+        t9 = c0_5*t1
+        t10 = t0*(c0_4 + t9)
+        t11 = t6*y
+        t12 = 3.0*c0_2
+        t13 = c0_3 + c0_4*t1
+        t14 = 2.0*t0
+        t15 = 2.0*t10
+        t16 = (1.0 / (p1 * p1 * p1 * p1))
+        t17 = t16*t5
+        t18 = 6.0*c0_2
+        t19 = 6.0*t0
+        t20 = (d0 * d0)*t16
+        t21 = c0_8 + c0_9*t1
+        t22 = 3.0*c0_4
+        t23 = c0_7 + c0_8*t1
+        t24 = 2.0*t2
+        t25 = t0*(t14*t23 + t21*t24 + t22 + 3.0*t9)
+        J0[i] = c0_0
+        J1[i, 0] = -c0_2*t3*t4
+        J1[i, 1] = -t6*(c0_1 + c0_2*t1)
+        J2[i, 0] = t4*t7*(t0*t9 + t8)
+        J2[i, 1] = t11*t3*(c0_2 + t10)
+        J2[i, 2] = t17*(3.0*c0_1 + t1*t12 + t1*t15 + t13*t14)
+        J3[i, 0] = -t4*(c0_9*t20*t3*(y * y) + t18 + t19*t9)/(p0 * p0 * p0 * p0)
+        J3[i, 1] = -t11*t7*(t1*t20*t21 + t14*t9 + t15 + t8)
+        J3[i, 2] = -t17*t3*y*(4.0*t10 + t12 + t25)
+        J3[i, 3] = -4.0*d0*(6.0*c0_1 + t0*(3.0*c0_3 + t1*t22 + t14*(c0_6 + c0_7*t1) + t23*t24) + 6.0*t1*t10 + t1*t18 + t1*t25 + t13*t19)/(p1 * p1 * p1 * p1 * p1)
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logcdf_4(Y, P0, P1, D0, J0, J1, J2, J3, J4):
+    out0 = np.empty(15)
+    work = np.empty(120)
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = d0/(p1 * p1)
+        t1 = y/p0
+        t2 = t0*t1
+        t3 = (1.0 / (p0 * p0))
+        t4 = t0*y
+        log_gamma_tail_into(t0, t2, False, 4, out0, work)
+        c0_0 = out0[0]
+        c0_1 = out0[1]
+        c0_2 = out0[2]
+        c0_3 = out0[3]
+        c0_4 = out0[4]
+        c0_5 = out0[5]
+        c0_6 = out0[6]
+        c0_7 = out0[7]
+        c0_8 = out0[8]
+        c0_9 = out0[9]
+        c0_10 = out0[10]
+        c0_11 = out0[11]
+        c0_12 = out0[12]
+        c0_13 = out0[13]
+        c0_14 = out0[14]
+        t5 = c0_2*t1
+        t6 = 2.0*d0
+        t7 = t6/(p1 * p1 * p1)
+        t8 = (1.0 / (p0 * p0 * p0))
+        t9 = 2.0*c0_2
+        t10 = c0_5*t1
+        t11 = t0*t10
+        t12 = t0*(c0_4 + t10)
+        t13 = t7*y
+        t14 = 3.0*c0_2
+        t15 = c0_3 + c0_4*t1
+        t16 = 2.0*t0
+        t17 = 2.0*t12
+        t18 = (1.0 / (p1 * p1 * p1 * p1))
+        t19 = t18*t6
+        t20 = (1.0 / (p0 * p0 * p0 * p0))
+        t21 = 6.0*c0_2
+        t22 = 6.0*t0
+        t23 = (d0 * d0)*t18
+        t24 = t3*(y * y)
+        t25 = c0_9*t23*t24
+        t26 = c0_9*t1
+        t27 = c0_8 + t26
+        t28 = t1*t23
+        t29 = t27*t28
+        t30 = 3.0*c0_4
+        t31 = c0_7 + c0_8*t1
+        t32 = 2.0*t2
+        t33 = t0*(3.0*t10 + t16*t31 + t27*t32 + t30)
+        t34 = t19*y
+        t35 = 6.0*t12
+        t36 = c0_6 + c0_7*t1
+        t37 = t0*(3.0*c0_3 + t1*t30 + t16*t36 + t31*t32)
+        t38 = t1*t33
+        t39 = 4.0*d0
+        t40 = t39/(p1 * p1 * p1 * p1 * p1)
+        t41 = 36.0*t0
+        t42 = (1.0 / (p1 * p1 * p1 * p1 * p1 * p1))
+        t43 = (d0 * d0 * d0)*t42
+        t44 = c0_13 + c0_14*t1
+        t45 = 3.0*c0_8
+        t46 = c0_12 + c0_13*t1
+        t47 = t16*t46 + 3.0*t26 + t32*t44 + t45
+        t48 = 6.0*c0_4
+        t49 = 6.0*t2
+        t50 = 3.0*c0_7
+        t51 = c0_11 + c0_12*t1
+        t52 = t0*(t1*t45 + t16*t51 + t32*t46 + t50)
+        t53 = t0*(6.0*t10 + t2*t47 + t22*t31 + t27*t49 + t48 + t52)
+        J0[i] = c0_0
+        J1[i, 0] = -c0_2*t3*t4
+        J1[i, 1] = -t7*(c0_1 + t5)
+        J2[i, 0] = t4*t8*(t11 + t9)
+        J2[i, 1] = t13*t3*(c0_2 + t12)
+        J2[i, 2] = t19*(3.0*c0_1 + t1*t14 + t1*t17 + t15*t16)
+        J3[i, 0] = -t20*t4*(t10*t22 + t21 + t25)
+        J3[i, 1] = -t13*t8*(t10*t16 + t17 + t29 + t9)
+        J3[i, 2] = -t3*t34*(4.0*t12 + t14 + t33)
+        J3[i, 3] = -t40*(6.0*c0_1 + t1*t21 + t1*t35 + t15*t22 + t37 + t38)
+        J4[i, 0] = t4*(c0_14*t43*t8*(y * y * y) + 24.0*c0_2 + t10*t41 + 12.0*t25)/(p0 * p0 * p0 * p0 * p0)
+        J4[i, 1] = t13*t20*(12.0*t11 + t21 + t24*t43*t44 + 3.0*t25 + 6.0*t29 + t35)
+        J4[i, 2] = t34*t8*(10.0*t11 + 8.0*t12 + t21 + t28*t47 + 8.0*t29 + 2.0*t33)
+        J4[i, 3] = t3*t40*y*(9.0*t12 + t21 + 3.0*t33 + t53)
+        J4[i, 4] = t39*t42*(30.0*c0_1 + 36.0*t1*t12 + 2.0*t1*t53 + t15*t41 + t16*(6.0*c0_3 + t0*(3.0*c0_6 + t1*t50 + t16*(c0_10 + c0_11*t1) + t32*t51) + t1*t48 + t1*t52 + t22*t36 + t31*t49) + 9.0*t37 + 9.0*t38 + 30.0*t5)
 
 
 @njit(cache=True, nogil=True, error_model='numpy')

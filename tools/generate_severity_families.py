@@ -165,11 +165,14 @@ class Engine:
     in ``(u, v)`` of total order ``1..order`` (each block in
     ``combinations_with_replacement`` order) to ``out``, and NaN on rows outside
     its domain.  ``reference(u, v, upper)`` is its mpmath value, for oracles.
+    An engine with ``work``, the name of a size constant in ``module``, takes a
+    trailing scratch array of that size, allocated once per kernel call.
     """
 
     name: str
     module: str
     reference: Callable | None = None
+    work: str | None = None
 
     def __call__(self, u, v, *, upper: bool):
         return engine_partial(self, upper, 0, 0)(u, v)
@@ -221,16 +224,41 @@ def _gamma_log_density(y, mean, cv, weight):
     return gnorm(shape) - shape * gdev(y, mean) - sp.log(y)
 
 
+def _mp_log_gamma_tail(a, x, upper):
+    if upper:
+        return mp.log(mp.gammainc(a, x, mp.inf, regularized=True))
+    return mp.log(mp.gammainc(a, 0, x, regularized=True))
+
+
+GAMMA_TAIL = Engine(
+    "log_gamma_tail_into",
+    "superglm.distributional.kernels._incomplete_gamma",
+    reference=_mp_log_gamma_tail,
+    work="WORK_SIZE",
+)
+
+
+def _gamma_tail(upper: bool):
+    def tail(y, mean, cv, weight):
+        shape = weight / cv**2
+        return GAMMA_TAIL(shape, shape * y / mean, upper=upper)
+
+    return tail
+
+
 GAMMA = Declaration(
     name="gamma",
     parameters=("mean", "cv"),
     data=("weight",),
     log_density=_gamma_log_density,
+    log_survival=_gamma_tail(True),
+    log_cdf=_gamma_tail(False),
     doc=(
         "``GammaLS``'s row law in its own parameters: mean ``mean``, shape\n"
         "``weight/cv^2`` (prior weights reweight the law; pass ones and the\n"
-        "weights as ``M`` for frequency weights).  Its log tails need the\n"
-        "incomplete-gamma engine and come with the gamma bounds."
+        "weights as ``M`` for frequency weights).  The log tails are\n"
+        "``log Q`` and ``log P`` of the incomplete-gamma engine at shape\n"
+        "``weight/cv^2`` and point ``weight y/(mean cv^2)``."
     ),
 )
 
@@ -377,6 +405,9 @@ def emit_kernel(
             engines.add(callee)
             order = max(sum(type(atom).orders) for atom in atoms)
             preamble.append(f"    out{g} = np.empty({(order + 1) * (order + 2) // 2})")
+            if callee.work is not None and "    work = " not in "".join(preamble):
+                size = getattr(importlib.import_module(callee.module), callee.work)
+                preamble.append(f"    work = np.empty({int(size)})")
     expressions = [expression.xreplace(outputs) for expression in expressions]
     replacements, reduced = sp.cse(
         arguments + expressions, symbols=sp.numbered_symbols("t"), optimizations="basic"
@@ -397,7 +428,8 @@ def emit_kernel(
         position += len(args)
         if isinstance(callee, Engine):
             order = max(sum(type(atom).orders) for atom in atoms)
-            lines = [f"{callee.name}({', '.join(printed)}, {upper}, {order}, out{g})"]
+            scratch = ", work" if callee.work is not None else ""
+            lines = [f"{callee.name}({', '.join(printed)}, {upper}, {order}, out{g}{scratch})"]
             lines += [f"c{g}_{index} = out{g}[{index}]" for index in sorted(set(atoms.values()))]
             defines = tuple(sp.Symbol(f"c{g}_{index}") for index in sorted(set(atoms.values())))
         else:
@@ -473,16 +505,27 @@ def _callee_digest(dispatchers) -> str:
 
 
 _CALLEE_LINE = re.compile(r'^_CALLEE_DIGEST = "[^"]*"$', re.MULTILINE)
+# Kernel modules outside ``_declared`` that call compiled primitives: each
+# carries the digest of the primitives it imports, so editing one recompiles it.
+PRIMITIVE_CALLERS = ("_incomplete_gamma", "_tweedie_numba")
 
 
-def stamped_primitives() -> str:
-    """``_severity_primitives.py`` with the digest of its imported compiled callees brought up to date."""
-    from superglm.distributional.kernels._tweedie_numba import _polygamma_0123
-
-    text = PRIMITIVES.read_text()
-    if not _CALLEE_LINE.search(text):
-        raise RuntimeError(f"{PRIMITIVES} has no _CALLEE_DIGEST line")
-    return _CALLEE_LINE.sub(f'_CALLEE_DIGEST = "{_callee_digest([_polygamma_0123])}"', text)
+def stamped_callers() -> dict[Path, str]:
+    """Each primitive caller's text with its ``_CALLEE_DIGEST`` brought up to date."""
+    files = {}
+    for name in PRIMITIVE_CALLERS:
+        module = importlib.import_module(f"superglm.distributional.kernels.{name}")
+        callees = [
+            value
+            for _, value in sorted(vars(module).items())
+            if hasattr(value, "py_func") and value.py_func.__module__ == PRIMITIVES_MODULE
+        ]
+        path = KERNELS / f"{name}.py"
+        text = path.read_text()
+        if not _CALLEE_LINE.search(text):
+            raise RuntimeError(f"{path} has no _CALLEE_DIGEST line")
+        files[path] = _CALLEE_LINE.sub(f'_CALLEE_DIGEST = "{_callee_digest(callees)}"', text)
+    return files
 
 
 def render(derived: Derived, primitives_text: str) -> str:
@@ -549,8 +592,8 @@ def render(derived: Derived, primitives_text: str) -> str:
 
 def outputs() -> dict[Path, str]:
     """Every file the generator owns, with its current text."""
-    primitives = stamped_primitives()
-    files = {PRIMITIVES: primitives}
+    primitives = PRIMITIVES.read_text()
+    files = stamped_callers()
     for declaration in DECLARATIONS:
         files[OUTPUT / f"{declaration.name}.py"] = render(derive(declaration), primitives)
     return files

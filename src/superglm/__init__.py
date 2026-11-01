@@ -207,6 +207,7 @@ def warmup() -> None:
     from superglm._group_matrix._group_matrix_support import _warmup_support_scans
     from superglm._group_matrix._lookup_tables import _warmup_lookup_tables
     from superglm._tweedie_series import warmup as _warmup_tweedie_series
+    from superglm.distributional.kernels._declared_bounds import _warmup_declared_bounds
     from superglm.distributional.kernels.gamma import _warmup_gamma
     from superglm.distributional.kernels.negative_binomial import _warmup_negative_binomial
     from superglm.distributional.kernels.tweedie import _warmup_tweedie
@@ -232,6 +233,7 @@ def warmup() -> None:
     _warmup_lookup_tables()
     _warmup_leverage_rows()
     _warmup_gamma()
+    _warmup_declared_bounds()
     _warmup_negative_binomial()
     _warmup_scop()
     _warmup_leaf_kernels()

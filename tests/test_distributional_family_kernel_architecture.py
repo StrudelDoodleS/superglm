@@ -102,9 +102,9 @@ def test_kernels_import_no_distributional_module_or_contract() -> None:
     allowed = {
         "_weighted.py": {"kernels.gamma"},
         "_response_tails.py": {"kernels._common", "kernels._curvature_direction"},
-        "_incomplete_gamma.py": {"kernels._tweedie_numba"},
-        "_severity_primitives.py": {"kernels._tweedie_numba"},
-        "_tweedie_numba.py": {"kernels._fourth_generated"},
+        "_declared_bounds.py": {"kernels._declared", "kernels._response_tails"},
+        "_incomplete_gamma.py": {"kernels._severity_primitives"},
+        "_tweedie_numba.py": {"kernels._fourth_generated", "kernels._severity_primitives"},
         "gaussian.py": {"kernels._common", "kernels._weighted", "kernels._response_tails", *chain},
         "gamma.py": {"kernels._common", *chain},
         "generalized_gamma.py": {
@@ -194,6 +194,8 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
         },
         ADAPTERS / "gamma.py": {
             "family",
+            "families._response_bounds",
+            "kernels._declared_bounds",
             "weights",
             "likelihood_identity",
             "kernels.gamma",

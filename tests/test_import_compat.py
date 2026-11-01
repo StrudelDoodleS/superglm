@@ -75,6 +75,9 @@ _STRUCTURED = "superglm.solvers._structured."
 _GROUP = "superglm._group_matrix._group_matrix_kernels."
 _TWEEDIE = "superglm.distributional.kernels._tweedie_numba."
 _NB = "superglm.distributional.kernels._negative_binomial_numba."
+_DECLARED = "superglm.distributional.kernels._declared."
+_ENGINE = "superglm.distributional.kernels._incomplete_gamma."
+_PRIMITIVES = "superglm.distributional.kernels._severity_primitives."
 _FIRST_USE: dict[str, str] = {
     # Measured over cold first fits on the freMTPL2 book: 71 on 2026-10-20
     # (every family and link, SuperGLM and SuperLSS, exact and binned,
@@ -93,7 +96,6 @@ _FIRST_USE: dict[str, str] = {
                     "_series_third_cumulants",
                     "_tweedie_third_row",
                     "_tweedie_hessian_direction_rows",
-                    "_polygamma_0123",
                     "_fourth_term_channels",
                     "_series_fourth_cumulants",
                     "_tweedie_fourth_row",
@@ -130,6 +132,32 @@ _FIRST_USE: dict[str, str] = {
         ),
         "a structured FactorSmooth fit's hat diagonal (Cook's distance, standardized "
         "residuals): diagnostics, not the fit",
+    ),
+    **dict.fromkeys(
+        [
+            *(
+                _DECLARED + f"gamma.{law}_{p}"
+                for law in ("density", "logsf", "logcdf")
+                for p in (3, 4)
+            ),
+            *(
+                _DECLARED + f"gamma_log.{law}_{p}"
+                for law in ("density", "logsf", "logcdf")
+                for p in (0, 1, 2)
+            ),
+        ],
+        "GammaLS reads a bounded row's window to order 2 in its own parameters and at orders "
+        "3-4 on its predictor scale, so no fit reaches the other orders of either",
+    ),
+    **dict.fromkeys(
+        (_ENGINE + "log_gamma_tail", _ENGINE + "_log_gamma_tail_rows"),
+        "the incomplete-gamma engine's scalar and array entry points, for tests: fits call "
+        "log_gamma_tail_into from the declared kernels",
+    ),
+    **dict.fromkeys(
+        (_PRIMITIVES + name for name in ("softplus", "expit", "log1mexp", "invexpm1")),
+        "primitives of the declared test laws (Weibull, Burr XII, log-logistic, Lomax); no "
+        "public family calls them",
     ),
     _STRUCTURED + "block_leaves._moment_segments": (
         "the signed moment segments of a binned FactorSmooth term: no census fit reaches "

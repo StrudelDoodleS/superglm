@@ -24,6 +24,16 @@ from superglm.distributional.families._predictors import (
     MeanPredictor,
     ScalePredictor,
 )
+from superglm.distributional.families._response_bounds import (
+    ResponseBounds,
+    TailChannels,
+    bind_observation,
+    bounded_channels,
+    bounded_higher_derivatives,
+    censored_carrier,
+    log_window_values,
+    refuse_bounded,
+)
 from superglm.distributional.families._variance import _variance_product
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
@@ -38,6 +48,7 @@ from superglm.distributional.family import (
     _validated_derivative_order,
     _validated_parameter_matrix,
 )
+from superglm.distributional.kernels._declared_bounds import gamma_window_jets
 from superglm.distributional.kernels.gamma import (
     GammaInitializationError as GammaInitializationError,
 )
@@ -76,6 +87,7 @@ _CAPABILITIES = FamilyCapabilities(
     quantile=True,
     random=False,
     response_mean=True,
+    censored_response=True,
 )
 
 GammaRowLaw = Literal[
@@ -156,6 +168,7 @@ class GammaLikelihoodPlan:
                 str(self.observation.schema_version),
                 self.weights.digest,
                 self.response_digest,
+                *(() if self.observation.bounds is None else (self.observation.bounds.digest,)),
             )
         ).encode("utf-8")
         return f"GammaLS/v2:{hashlib.sha256(payload).hexdigest()}"
@@ -171,7 +184,7 @@ class GammaLikelihoodPlan:
             row_law=self.row_law,
             invariant=self.invariant,
             family_config=self.family_config,
-            observation=self.observation,
+            observation=self.observation.take(indices),
             exact_response=self.exact_response[indices],
             carrier=self.parameter_independent_carrier[indices],
         )
@@ -183,6 +196,48 @@ def _validated_plan(
     n_observations: int,
 ) -> GammaLikelihoodPlan:
     return typed_plan(plan, GammaLikelihoodPlan, n_observations, family_name="GammaLS")
+
+
+def _row_law(plan: GammaLikelihoodPlan) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Per row, the prior weight in the shape ``w/cv^2`` and the replication mass."""
+    weights = plan.weights.values
+    if plan.weights.provenance.contract.semantics == "frequency":
+        return np.ones_like(weights), weights
+    return weights, np.ones_like(weights)
+
+
+def _bounded_predictor_share(
+    plan: GammaLikelihoodPlan, eta: NDArray, order: int
+) -> tuple[NDArray[np.float64], NDArray[np.bool_], NDArray[np.bool_]]:
+    """Bounded rows' packed predictor derivatives of ``order`` (3 or 4).
+
+    Returns the derivatives a bounded row adds to its complete-row ones, the
+    rows whose complete-row derivatives stay (all but the censored), and the
+    rows whose window is representable.  Each window's jets are formed once.
+    """
+    bounds = plan.observation.bounds
+    assert bounds is not None
+    prior, multiplier = _row_law(plan)
+    predictors = np.asarray(eta, dtype=np.float64)
+    zeros = np.zeros((len(prior), order + 1))
+
+    def window_jets(lower: NDArray, upper: NDArray, rows: NDArray, jet_order: int):
+        return gamma_window_jets(
+            lower, upper, predictors[rows], prior[rows], order=jet_order, coordinates="log"
+        )
+
+    third, fourth, valid = bounded_higher_derivatives(
+        zeros if order == 3 else None,
+        zeros if order == 4 else None,
+        np.ones(len(prior), dtype=bool),
+        response=plan.exact_response,
+        bounds=bounds,
+        multiplier=multiplier,
+        window_jets=window_jets,
+    )
+    share = third if order == 3 else fourth
+    assert share is not None
+    return share, (bounds.side == 0) & valid, valid
 
 
 @dataclass(frozen=True)
@@ -218,6 +273,21 @@ class GammaLS(MeanPredictor, ScalePredictor):
     def capabilities(self) -> FamilyCapabilities:
         return _CAPABILITIES
 
+    def censored_recession(self, bounds: ResponseBounds) -> NDArray[np.bool_]:
+        """Every censored row escapes along the mean; none is flagged on the scale.
+
+        At a fixed coefficient of variation the mean is a scale parameter, and
+        ``d^2 log f/(dy dm) = a/m^2 > 0`` is a monotone likelihood ratio in
+        ``m``, so within any truncation window ``P(Y > c)`` rises and
+        ``P(Y <= c)`` falls strictly with the mean.  Along the coefficient of
+        variation, at a fixed mean, ``P(Y <= c)`` nears one both as ``cv``
+        grows and, for ``c`` above the mean, as it shrinks, and ``P(Y > c)``
+        nears its supremum as ``cv`` shrinks only for ``c`` below the mean and
+        peaks at an interior ``cv`` above it, so the direction depends on the
+        fitted mean.
+        """
+        return np.column_stack((bounds.side != 0, np.zeros(bounds.n_rows, dtype=bool)))
+
     def to_config(self) -> dict[str, Any]:
         return {"type": "GammaLS", "parameterization": "mean_cv"}
 
@@ -228,10 +298,9 @@ class GammaLS(MeanPredictor, ScalePredictor):
         observation: ObservationContract,
     ) -> GammaLikelihoodPlan:
         response = _validated_response(y)
-        if observation != COMPLETE_OBSERVATION:
-            raise UnsupportedLikelihoodContractError(
-                "GammaLS supports only the complete-observation contract"
-            )
+        observation = bind_observation(
+            observation, response, weights, support_lower=0.0, family_name="GammaLS"
+        )
         if not isinstance(weights, ResolvedLikelihoodWeights):
             raise UnsupportedLikelihoodContractError("GammaLS requires resolved likelihood weights")
         if len(weights.values) != len(response):
@@ -243,6 +312,7 @@ class GammaLS(MeanPredictor, ScalePredictor):
             carrier = -np.log(response)
             if semantics == "frequency":
                 carrier = weights.values * carrier
+        carrier = censored_carrier(carrier, observation.bounds)
         if not np.all(np.isfinite(carrier)):
             raise UnsupportedLikelihoodContractError(
                 "Gamma response carrier is not finite and representable"
@@ -288,7 +358,10 @@ class GammaLS(MeanPredictor, ScalePredictor):
             raise UnsupportedLikelihoodContractError(
                 "GammaLS likelihood has an invalid family configuration"
             )
-        if candidate.observation != COMPLETE_OBSERVATION:
+        observation = candidate.observation
+        if observation != COMPLETE_OBSERVATION and (
+            observation.bounds is None or observation.bounds.n_rows != len(response)
+        ):
             raise UnsupportedLikelihoodContractError(
                 "GammaLS likelihood has an unsupported observation contract"
             )
@@ -345,12 +418,37 @@ class GammaLS(MeanPredictor, ScalePredictor):
             gamma_plan.weights.provenance.contract.semantics,
             derivative_order=order,
         )
+        optimizing, score, hessian, valid = (
+            evaluated.optimizing_log_likelihood,
+            evaluated.score,
+            evaluated.hessian_packed,
+            evaluated.valid,
+        )
+        bounds = gamma_plan.observation.bounds
+        if bounds is not None:
+            prior, multiplier = _row_law(gamma_plan)
+
+            def window(lower: NDArray, upper: NDArray, rows: NDArray) -> TailChannels:
+                jets = gamma_window_jets(lower, upper, parameters[rows], prior[rows], order=order)
+                return jets[0], *(jets[k] if order >= k else None for k in (1, 2))
+
+            optimizing, score, hessian, valid = bounded_channels(
+                optimizing,
+                score,
+                hessian,
+                valid,
+                response=response,
+                bounds=bounds,
+                multiplier=multiplier,
+                window=window,
+                derivative_order=order,
+            )
         return NaturalLikelihoodEvaluation(
-            optimizing_log_likelihood=evaluated.optimizing_log_likelihood,
+            optimizing_log_likelihood=optimizing,
             parameter_independent_carrier=gamma_plan.parameter_independent_carrier,
-            score=evaluated.score,
-            hessian_packed=evaluated.hessian_packed,
-            valid=evaluated.valid,
+            score=score,
+            hessian_packed=hessian,
+            valid=valid,
         )
 
     def expected_information_natural(
@@ -365,6 +463,7 @@ class GammaLS(MeanPredictor, ScalePredictor):
             family_name="GammaLS",
         )
         gamma_plan = _validated_plan(plan, n_observations=len(parameters))
+        refuse_bounded(gamma_plan.observation, "GammaLS expected information")
         return gamma_expected_information(
             parameters[:, 0],
             parameters[:, 1],
@@ -389,13 +488,22 @@ class GammaLS(MeanPredictor, ScalePredictor):
                 "Gamma endpoint curvature derivatives require the built-in log links"
             )
         gamma_plan = _validated_plan(plan, n_observations=len(response))
-        return gamma_predictor_curvature_directional(
+        complete = gamma_predictor_curvature_directional(
             gamma_plan.exact_response,
             eta,
             eta_direction,
             gamma_plan.weights.values,
             gamma_plan.weights.provenance.contract.semantics,
         )
+        if gamma_plan.observation.bounds is None:
+            return complete
+        third, kept, valid = _bounded_predictor_share(gamma_plan, eta, 3)
+        v = np.asarray(eta_direction, dtype=np.float64)
+        result = np.where(kept[:, None], complete, 0.0) - np.column_stack(
+            [third[:, j] * v[:, 0] + third[:, j + 1] * v[:, 1] for j in range(3)]
+        )
+        result[~valid] = 0.0
+        return readonly(result)
 
     def predictor_curvature_second_directional_derivative(
         self,
@@ -425,7 +533,13 @@ class GammaLS(MeanPredictor, ScalePredictor):
             gamma_plan.weights.values,
             gamma_plan.weights.provenance.contract.semantics,
         )
+        valid = None
+        if gamma_plan.observation.bounds is not None:
+            share, kept, valid = _bounded_predictor_share(gamma_plan, predictors, 4)
+            fourth = np.where(kept[:, None], fourth, 0.0) + share
         result = contract_second_direction(fourth, first, second)
+        if valid is not None:
+            result[..., ~valid, :] = 0.0
         return readonly(result[0] if single else result)
 
     def default_prediction(self, theta: NDArray) -> NDArray[np.float64]:
@@ -436,6 +550,26 @@ class GammaLS(MeanPredictor, ScalePredictor):
             family_name="GammaLS",
         )
         return readonly(parameters[:, 0])
+
+    def log_window_probability(
+        self,
+        lower: NDArray,
+        upper: NDArray,
+        theta: NDArray,
+        weights: NDArray | None = None,
+    ) -> NDArray[np.float64]:
+        """``log P(lower < Y <= upper)`` per row, shape ``w/cv^2`` with prior weights ``w``."""
+        values = _validated_parameter_matrix(
+            theta, n_observations=None, parameters=self.parameters, family_name="GammaLS"
+        )
+        prior = (
+            np.ones(len(values)) if weights is None else _prior_weight_vector(weights, len(values))
+        )
+
+        def window(lo: NDArray, hi: NDArray, rows: NDArray) -> TailChannels:
+            return gamma_window_jets(lo, hi, values[rows], prior[rows], order=0)[0], None, None
+
+        return readonly(log_window_values(lower, upper, len(values), window, support_lower=0.0))
 
     def cdf(self, y: NDArray, theta: NDArray) -> NDArray[np.float64]:
         """``P(Y <= y)`` per row: shape ``1/cv^2`` and scale ``mean cv^2``."""
