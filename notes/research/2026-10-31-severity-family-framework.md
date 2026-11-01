@@ -144,8 +144,8 @@ gamma functions work too, which matters because actuarial relativities sit on th
 - the parameter-independent carrier. These are the additive terms free of every
   parameter (`-log y`), split off as the hand-written families split them.
 
-Common subexpressions are shared within each kernel. Generation takes 0.03-0.2 s per
-family for derivation and 0.04-0.22 s for printing, and produces 113-248 lines.
+Common subexpressions are shared within each kernel. Generation takes 0.03-0.17 s per
+family for derivation and 0.03-0.13 s for printing, and produces 104-248 lines.
 
 **A generic adapter** ([`declared_family.py`](severity-family-prototype/declared_family.py),
 142 lines, written once):
@@ -596,11 +596,24 @@ it; stage 3 onwards does.
   fourth-derivative generator works.
 - The primitives become one kernel module. Each has an mpmath test over its range.
 - **Gate:**
-  - every primitive is within `c · u · κ` relative of mpmath, where `κ` is its
-    condition number at the point and `c` a small constant set from the error
-    analysis. For `gnorm`, `κ = max(1, |a log a| / |gnorm(a)|)`, about 100 just below
-    `a = 10`; for `psires(0, a)`, `κ = max(1, |psi(a)| / |psi(a) - log a|)`, about 45
-    there. The prototype measured at most 25 u, at the `a = 10` series switch.
+  - every primitive `f` has `|err| <= c · u · κ_f · max(|f|, 1)` against mpmath. Here
+    `κ_f = |x f'(x) / f(x)|` is the function's own condition number, `c` is a small
+    constant set from the error analysis, and the floor is the oracle's
+    absolute-below-one rule. The function is well conditioned: `κ` is about 2.3 for
+    `gnorm` at `a = 10` and below 1 above it, and about 1 for `psires(0, ·)`. The
+    cancellation factor of the direct formula, such as `|a log a| / |gnorm(a)|`, is
+    not this `κ`. It grows like `2a` and is infinite at `gnorm`'s root near
+    `a = 6.45`, so a gate built on it would pass the textbook forms these primitives
+    replace;
+  - the direct-evaluation window below `a = 10`, where `a log a - a - lgamma(a)` and
+    `psi(a) - log a` amplify libm's error by about 100 and 45, gets a separate,
+    bounded allowance;
+  - a mutation check: the gate fails when the `a >= 10` Stirling and asymptotic
+    branches are replaced by the direct formula, for example at `a = 2,500`;
+  - the figures quoted for the prototype's primitives (at most 25 u at the `a = 10`
+    switch, and section 2.3's 6e-15, which is 54 u) come from a check that is not
+    among the committed scripts. Stage 1 re-measures every primitive with this
+    metric before setting `c`;
   - the gate runs on the native Windows and macOS ARM64 runners. The primitives call
     the platform libm (`lgamma`, `log1p`, `expm1`, `exp`, `log`), which can differ by
     an ulp or more between glibc, Apple libm and the Windows UCRT, and `gnorm` and
@@ -632,7 +645,11 @@ and mean forms), log-logistic, Lomax and Burr XII.
     `|log F| · u` cancellation (section 2.4) part of that model. The prototype
     measured at most 15 u outside those entries. Like stage 1, the grid runs on the
     native Windows and macOS ARM64 runners;
-  - intercept-only fits match scipy's maximum likelihood to 1e-6 in the parameters;
+  - intercept-only fits reach at least scipy's maximum log-likelihood, less a few
+    `u · Σ|l_i|`. The parameter gap is below 1e-3 of a standard error. A flat
+    parameter tolerance would measure where scipy's optimiser stops: Burr XII's `c`
+    and `k` are strongly correlated, its optimum is flat along one direction, and
+    the prototype's 4.2e-7 gap sits only 2.4× inside a 1e-6 gate;
   - `warmup()` covers the new kernels, and first-fit compile time is reported;
   - held-out log score and CRPS through `predict()` on the freMTPL2 severity rerun,
     against `GammaLS`, `LogNormalLS` and `GeneralizedGammaLSS`. This is evidence for
@@ -647,8 +664,19 @@ and mean forms), log-logistic, Lomax and Burr XII.
 - Bounded plans refuse analytic orders 3 and 4 and expected information, as PR 545's
   contract requires.
 - **Gate:**
-  - the window oracle (`window_check.py`) holds on the PR 545 code rather than on the
-    prototype's copy of its formula;
+  - the window oracle runs on the merged `log_window_channels` and its quadrature,
+    measured on the link scale against the body floor, as `oracle_check.py` measures.
+    Measured relative to a window's own largest natural-scale entry, a (1e-9, 1e-3)
+    window's Hessian follows a `u / F` law (1,653 u in `results/window_check.json`),
+    because that entry is the cancelled quantity itself;
+  - the bound is stated for each route:
+    - the end channels' bounds propagated through `kappa`;
+    - about `u / |Delta|` above the quadrature switch;
+    - the quadrature's own error below it, where the prototype's narrow-row 1e4 u
+      never reaches the combiner;
+  - declared families need a family-free narrowness test, since master computes
+    `reach` from each family's own scale. `|Delta|` from the two generated log tails
+    is one option, and it is the quantity the combiner's loss scales with;
   - an issue-544-style recovery test passes: a truncated body and claims censored at a
     limit recover the truth within sampling error;
   - a regression test fails on the complete-observation path;
