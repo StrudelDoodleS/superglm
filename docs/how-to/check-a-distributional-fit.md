@@ -232,12 +232,13 @@ effect = model.term_inference("scale", "x")
 `term_inference` sweeps one term over its training range with every other
 covariate held at its training centre, and reports the effect on that
 predictor's own link scale. The training centre is the median of a numeric
-column and the most frequent level of any other, both ignoring missing values;
-a tie goes to the level listed first in the fitted level order. A grouped
-categorical counts its rows by group and is held at the group's most frequent
-label. The surfaces in
-section 4 fill any column the reference leaves out by the same rule, and sweep a
-categorical covariate over the same fitted levels.
+column that no term reads with levels, and otherwise the most frequent fitted
+level, both ignoring missing values. So an integer-coded categorical or random
+effect takes its mode, not its median. A tie goes to the level listed first in
+the fitted level order. A grouped categorical counts its rows by group and is
+held at the group's most frequent label. The surfaces in section 4 fill any
+column the reference leaves out by the same rule, and sweep a categorical
+covariate over the same fitted levels.
 
 The model keeps an owned copy of the positive-weight training rows for these
 defaults. Excluded outliers and later edits to the caller's training frame do
