@@ -9,6 +9,9 @@ from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 import superglm.distributional.kernels._fourth_generated as _generated
+from superglm.distributional.kernels._severity_primitives import (
+    polygamma_0123 as _polygamma_0123,
+)
 
 # Status codes are int64 values, not Python ints: Numba types a Python int
 # constant passed to a compiled helper as its own literal type and compiles
@@ -1449,61 +1452,15 @@ def _tweedie_hessian_direction_rows(
 # its own file only, so the generator rewrites this digest of its output
 # whenever it writes the module, which invalidates these cached callers too.
 _FOURTH_GENERATED_DIGEST = "94dfd057670ec60498fdf6535ea203284de57f7d483f0c697493ae031f821c6a"
+# The same for the shared primitives these kernels call, which
+# ``tools/generate_severity_families.py`` stamps.
+_CALLEE_DIGEST = "c00d75067378aa297beb11a12050034393bd8c09ae735a59ff7b9a22df0adf6d"
 
 _positive_closed = njit(cache=True)(_generated.tweedie_positive_closed)
 _zero_closed = njit(cache=True)(_generated.tweedie_zero_closed)
 _zeta_derivatives = njit(cache=True)(_generated.tweedie_zeta_derivatives)
 _term_derivatives = njit(cache=True)(_generated.tweedie_term_derivatives)
 _series_cumulants = njit(cache=True)(_generated.tweedie_series_cumulants)
-
-
-@njit(cache=True)
-def _polygamma_0123(value: float) -> tuple[float, float, float, float]:
-    """Digamma, trigamma, tetragamma and pentagamma of a finite positive scalar.
-
-    The recurrence lifts the argument to at least 16, where the asymptotic
-    expansions through ``B_14`` (DLMF 5.11.2 and 5.15.8, differentiated) leave
-    a relative remainder below ``1e-16`` in every channel.
-    """
-    shifted_digamma = 0.0
-    shifted_trigamma = 0.0
-    shifted_tetragamma = 0.0
-    shifted_pentagamma = 0.0
-    x = value
-    while x < 16.0:
-        inverse = 1.0 / x
-        inverse2 = inverse * inverse
-        shifted_digamma -= inverse
-        shifted_trigamma += inverse2
-        shifted_tetragamma -= 2.0 * inverse2 * inverse
-        shifted_pentagamma += 6.0 * inverse2 * inverse2
-        x += 1.0
-    inverse = 1.0 / x
-    i2 = inverse * inverse
-    digamma = 0.0
-    trigamma = 0.0
-    tetragamma = 0.0
-    pentagamma = 0.0
-    power = i2
-    for k in range(_POLYGAMMA_TERMS):
-        b = _POLYGAMMA_BERNOULLI[k]
-        order = 2.0 * (k + 1)
-        digamma -= b / order * power
-        trigamma += b * power * inverse
-        tetragamma -= (order + 1.0) * b * power * i2
-        pentagamma += (order + 1.0) * (order + 2.0) * b * power * i2 * inverse
-        power *= i2
-    digamma += shifted_digamma + math.log(x) - 0.5 * inverse
-    trigamma += shifted_trigamma + inverse + 0.5 * i2
-    tetragamma += shifted_tetragamma - i2 - i2 * inverse
-    pentagamma += shifted_pentagamma + 2.0 * i2 * inverse + 3.0 * i2 * i2
-    return digamma, trigamma, tetragamma, pentagamma
-
-
-_POLYGAMMA_TERMS = 7
-_POLYGAMMA_BERNOULLI = np.array(
-    [1.0 / 6.0, -1.0 / 30.0, 1.0 / 42.0, -1.0 / 30.0, 5.0 / 66.0, -691.0 / 2730.0, 7.0 / 6.0]
-)
 
 
 @njit(cache=True)

@@ -121,6 +121,10 @@ def _grid(name, built):
         theta = np.tile(cell, (len(y), 1))
         data = tuple(np.ones(len(y)) for _ in derived.data)
         for law, channels in derived.laws.items():
+            if name == "gamma" and law != "density":
+                # The gamma's tails are the incomplete-gamma engine's, gated with
+                # their window in tests/test_gamma_ls_response_bounds.py.
+                continue
             kernels = [law_jets(module, law, p, y, theta, data)[0] for p in range(5)]
             rows = []
             for i, (label, value) in enumerate(points):

@@ -653,10 +653,11 @@ The body must be told about `u`. A body fitted to capped or cut claims as if
 they were complete keeps their mean but not their shape, so its law cut at `u`
 is wrong. On a gamma sample cut at its 90% point, a complete-row body's mean
 below `u` is 14% low in the split method, and its capped mean is 8% low in the
-layer method. `GammaLS` and `GeneralizedGammaLSS` do not take `censored=` or
-`truncation=` yet; use their body fits only for the mean they were fitted to,
-the mean below `u` in the split method and the capped mean `E[min(Y, u)]` in
-the layer method, not as a distribution there.
+layer method. `GammaLS` takes `censored=` and `truncation=` like
+`LogNormalLS`. `GeneralizedGammaLSS` does not take them yet; use its body fits
+only for the mean they were fitted to, the mean below `u` in the split method
+and the capped mean `E[min(Y, u)]` in the layer method, not as a distribution
+there.
 
 Where a policy limit caps a large claim, record its excess at `limit - u` and
 pass `censored=` for the claims settled at their limit when fitting the tail.
@@ -872,10 +873,11 @@ are for complete rows and refuse bounded ones, so ask for
 read every row as complete. Each of these warns when the model was fitted with
 bounds and is called without them.
 
-`GaussianLS`, `LogNormalLS` and `GeneralizedParetoLSS` take these bounds; the
-other families refuse them. Smoothing selection differences the curvature for
-these rows instead of using closed-form third and fourth derivatives, and
-`coefficient_curvature="fisher"` is refused for them, because expected
+`GaussianLS`, `LogNormalLS`, `GammaLS` and `GeneralizedParetoLSS` take these
+bounds; the other families refuse them. For `GammaLS`, smoothing selection
+uses closed-form third and fourth derivatives of these rows, as it does for
+complete rows; for the other three it differences the curvature instead.
+`coefficient_curvature="fisher"` is refused for these rows, because expected
 information describes complete rows.
 
 ## Separated cells
@@ -895,7 +897,7 @@ Censoring has the same failure. A level whose rows are all censored on the
 same side, such as a policy type whose every claim was paid at its limit, has
 only a bound on its response, so its effect walks to infinity along any
 predictor that moves every such bound probability one way: the location or
-mean of `GaussianLS` and `LogNormalLS`, and both predictors of
+mean of `GaussianLS`, `LogNormalLS` and `GammaLS`, and both predictors of
 `GeneralizedParetoLSS`. A fit with censored rows scans every `Categorical`
 term and `CategoricalInteraction` on those predictors for such levels and
 cells, under the same `separation` policy. When every row is censored on the
@@ -937,6 +939,11 @@ The scan reads only what the data decide before the fit:
 - Truncation bounds change both rules. A bound on the same side as the
   censoring can give a level an estimate it would otherwise lack, and a bound
   on the far side only, as in the scanned cases above, takes it away.
+- The scale of `GammaLS` (its coefficient of variation) is not scanned. At a
+  fixed mean, a right-censored claim's probability rises as the scale shrinks
+  when its limit is below the mean, and peaks at a finite scale when the limit
+  is above it, so whether a level censored on one side has a finite scale
+  depends on its fitted mean.
 
 Ordered-categorical smooths, a normal or log-normal scale on a link other
 than its default, and predictors on links such as sqrt, inverse or power are

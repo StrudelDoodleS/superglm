@@ -28,8 +28,9 @@ quantities that a primitive resolves:
   bounded at both ends where ``psires`` grows like ``a^-(n+1)``: the origin's
   zeta series below ``a = 1/4``, the asymptotic series from ``a = 10``, and
   ``psires_0123`` between (``GammaLS``'s ``A`` and ``J`` are ``n = 0, 1``);
-- ``polygamma_0123(x)``: digamma to pentagamma, the Tweedie kernel's
-  recurrence and asymptotic series, shared rather than duplicated.
+- ``polygamma_0123(x)``: digamma to pentagamma by the shift recurrence to
+  ``x >= 16`` and the asymptotic series through ``B_14``; the Tweedie series
+  kernel and the incomplete-gamma engine call this one copy.
 
 Error form, for exact float64 inputs ``x_i`` (issue #564, stage 1):
 ``|err| <= c u (sum_i |x_i df/dx_i| + |f|)``, the input and output rounding of
@@ -40,8 +41,9 @@ terms.  ``tests/test_severity_primitives.py`` states ``c`` from the error
 analysis and holds every primitive to it against mpmath.
 
 Numba's on-disk cache keys a compiled caller on its own file only, so the
-generator stamps a digest of every compiled callee imported here into
-``_CALLEE_DIGEST``, and a digest of this file into every generated module.
+generator stamps a digest of this file into every generated module, and a
+digest of the primitives each other kernel module imports into that module's
+``_CALLEE_DIGEST``.
 """
 
 from __future__ import annotations
@@ -50,10 +52,6 @@ import math
 
 from numba import njit
 from scipy import special
-
-from superglm.distributional.kernels._tweedie_numba import _polygamma_0123 as polygamma_0123
-
-_CALLEE_DIGEST = "5fab68a067248e186626861d073797554c24a49ed4b3714ba9267eaf0b2e1c5e"
 
 _LOG_TWO = math.log(2.0)
 _HALF_LOG_TWO_PI = 0.5 * math.log(2.0 * math.pi)
@@ -103,6 +101,9 @@ _SRES = tuple(
 _ORIGIN = 0.25
 _ZETA = tuple(float(z) for z in special.zeta(range(2, 62), 1.0))
 _EULER = 0.5772156649015329
+# Above x = 16 the polygamma series through B_14 leave a relative remainder below 1e-16.
+_POLYGAMMA_FROM = 16.0
+_POLYGAMMA_BERNOULLI = tuple(p / q for p, q in _BERNOULLI[:7])
 
 
 @njit(cache=True)
@@ -171,6 +172,49 @@ def gnorm(a):
         inverse = 1.0 / a
         return 0.5 * math.log(a) - _HALF_LOG_TWO_PI - a * _series(_GNORM, inverse * inverse)
     return a * math.log(a) - a - math.lgamma(a)
+
+
+@njit(cache=True)
+def polygamma_0123(value):
+    """Digamma, trigamma, tetragamma and pentagamma of a finite positive scalar.
+
+    The recurrence lifts the argument to at least 16, where the asymptotic
+    expansions through ``B_14`` (DLMF 5.11.2 and 5.15.8, differentiated) leave
+    a relative remainder below ``1e-16`` in every channel.
+    """
+    shifted_digamma = 0.0
+    shifted_trigamma = 0.0
+    shifted_tetragamma = 0.0
+    shifted_pentagamma = 0.0
+    x = value
+    while x < _POLYGAMMA_FROM:
+        inverse = 1.0 / x
+        inverse2 = inverse * inverse
+        shifted_digamma -= inverse
+        shifted_trigamma += inverse2
+        shifted_tetragamma -= 2.0 * inverse2 * inverse
+        shifted_pentagamma += 6.0 * inverse2 * inverse2
+        x += 1.0
+    inverse = 1.0 / x
+    i2 = inverse * inverse
+    digamma = 0.0
+    trigamma = 0.0
+    tetragamma = 0.0
+    pentagamma = 0.0
+    power = i2
+    for k in range(len(_POLYGAMMA_BERNOULLI)):
+        b = _POLYGAMMA_BERNOULLI[k]
+        order = 2.0 * (k + 1)
+        digamma -= b / order * power
+        trigamma += b * power * inverse
+        tetragamma -= (order + 1.0) * b * power * i2
+        pentagamma += (order + 1.0) * (order + 2.0) * b * power * i2 * inverse
+        power *= i2
+    digamma += shifted_digamma + math.log(x) - 0.5 * inverse
+    trigamma += shifted_trigamma + inverse + 0.5 * i2
+    tetragamma += shifted_tetragamma - i2 - i2 * inverse
+    pentagamma += shifted_pentagamma + 2.0 * i2 * inverse + 3.0 * i2 * i2
+    return digamma, trigamma, tetragamma, pentagamma
 
 
 @njit(cache=True)

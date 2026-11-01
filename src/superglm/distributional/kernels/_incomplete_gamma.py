@@ -34,10 +34,11 @@ and Temme 2012, sections 2-3):
   cancel in ``exp``.
 
 ``log D`` stays on the log scale, so ``log Q`` near ``-750`` and below is exact
-to rounding where ``Q`` underflows.  For ``a >= 10`` it is formed as ``a
-log1pmx((x - a)/a) - log(2 pi a)/2 - stirling(a)`` (the ``eta``/``Gamma*``
-form of Gil, Segura and Temme, section 2.2), which removes the ``u a |log x|``
-cancellation of ``a log x - lgamma(a + 1)`` near the diagonal.  The jet of
+to rounding where ``Q`` underflows.  For ``a >= 10`` it is formed as ``gnorm(a)
+- log a - a gdev(x, a)``, that is ``a log1pmx((x - a)/a) - log(2 pi a)/2 -
+stirling(a)`` (the ``eta``/``Gamma*`` form of Gil, Segura and Temme, section
+2.2), from the shared primitives; it removes the ``u a |log x|`` cancellation
+of ``a log x - lgamma(a + 1)`` near the diagonal.  The jet of
 ``lgamma`` uses polygamma at ``a + 1`` and ``lgamma(a) = lgamma(a + 1) - log
 a``.  The measured error envelope is stated with the tests in
 ``tests/test_incomplete_gamma_engine.py``.
@@ -51,7 +52,16 @@ import numpy as np
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import ArrayLike, NDArray
 
-from superglm.distributional.kernels._tweedie_numba import _polygamma_0123
+from superglm.distributional.kernels._severity_primitives import (
+    gdev,
+    gnorm,
+    polygamma_0123,
+    psires_0123,
+)
+
+# Digest of the primitives above, stamped by ``tools/generate_severity_families.py``:
+# Numba's on-disk cache keys a compiled caller on its own file only.
+_CALLEE_DIGEST = "227d1c9dfbdf44354932f27cdf490f28180aa1d26ec1810ab10374c70e932013"
 
 MAX_ORDER = 4
 MAX_TERMS = 100_000
@@ -59,18 +69,8 @@ MAX_TERMS = 100_000
 _U = 2.0**-53
 _LOG_HALF = -math.log(2.0)
 _FACTORIAL = (1.0, 1.0, 2.0, 6.0, 24.0)
-# Bernoulli numbers B_2..B_14; the Stirling series below run through B_14,
-# whose next terms at a = 10 are below 1e-16 relative (DLMF 5.11.1, 5.11.2).
+# From here log D takes the Stirling forms of the primitives gnorm and psires.
 _STIRLING_FROM = 10.0
-_BERNOULLI = (
-    1.0 / 6.0,
-    -1.0 / 30.0,
-    1.0 / 42.0,
-    -1.0 / 30.0,
-    5.0 / 66.0,
-    -691.0 / 2730.0,
-    7.0 / 6.0,
-)
 
 
 def output_size(order: int) -> int:
@@ -203,72 +203,29 @@ def _log1mexp(value):
 
 
 @njit(cache=True)
-def _log1pmx_small(t):
-    """``log(1 + t) - t`` for ``|t| <= 1/2``.
-
-    With ``r = t/(2 + t)`` it is ``2 (atanh r - r) - r t``: the leading
-    ``-r t`` carries no cancellation and the series in ``r^2 <= 1/9`` adds
-    terms of one sign.
-    """
-    r = t / (2.0 + t)
-    r2 = r * r
-    power = r * r2
-    series = 0.0
-    for k in range(1, 18):
-        series += power / (2 * k + 1)
-        power *= r2
-    return 2.0 * series - r * t
-
-
-@njit(cache=True)
-def _stirling_remainder(a):
-    """``lgamma(a + 1) - (a + 1/2) log a + a - log(2 pi)/2`` for ``a >= 10``."""
-    inverse2 = 1.0 / (a * a)
-    power = 1.0 / a
-    total = 0.0
-    for k in range(1, len(_BERNOULLI) + 1):
-        total += _BERNOULLI[k - 1] / (2 * k * (2 * k - 1)) * power
-        power *= inverse2
-    return total
-
-
-@njit(cache=True)
-def _digamma_above_log(a):
-    """``psi(a + 1) - log a`` for ``a >= 10``."""
-    inverse = 1.0 / a
-    inverse2 = inverse * inverse
-    power = inverse2
-    total = 0.5 * inverse
-    for k in range(1, len(_BERNOULLI) + 1):
-        total -= _BERNOULLI[k - 1] / (2 * k) * power
-        power *= inverse2
-    return total
-
-
-@njit(cache=True)
 def _log_prefactor(a, x, k_max, n, w):
     """``log D = a log x - x - lgamma(a + 1)`` on the jet, into ``w[_PRE]``."""
     for r in range(n):
         w[_PRE + r] = 0.0
-    # Above _STIRLING_FROM, log D = a (log(x/a) - t) - log(2 pi a)/2 - stirling(a)
-    # with t = (x - a)/a, which keeps the a log x cancellation out of it.
-    # log(x/a) is log1p(t) near the diagonal and log x - log a away from it,
-    # where log1p of the rounded t would carry u/(1 + t).
+    # log(x/a), with t = (x - a)/a, is log1p(t) near the diagonal and
+    # log x - log a away from it, where log1p of the rounded t would carry u/(1 + t).
     t = (x - a) / a
     near = abs(t) <= 0.5
     log_ratio = math.log1p(t) if near else math.log(x) - math.log(a)
     if a < _STIRLING_FROM:
         w[_PRE] = a * math.log(x) - x - math.lgamma(a + 1.0)
     else:
-        log1pmx = _log1pmx_small(t) if near else log_ratio - t
-        w[_PRE] = a * log1pmx - 0.5 * math.log(2.0 * math.pi * a) - _stirling_remainder(a)
+        # a (log(x/a) - t) is -a gdev(x, a), and -log(2 pi a)/2 - stirling(a)
+        # is gnorm(a) - log a.
+        w[_PRE] = gnorm(a) - math.log(a) - a * gdev(x, a)
     if k_max == 0:
         return
-    p0, p1, p2, p3 = _polygamma_0123(a + 1.0)
+    p0, p1, p2, p3 = polygamma_0123(a + 1.0)
     if a < _STIRLING_FROM:
         w[_PRE + 1] = math.log(x) - p0
     else:
-        w[_PRE + 1] = log_ratio - _digamma_above_log(a)
+        # psi(a + 1) - log a = psires(0, a) + 1/a.
+        w[_PRE + 1] = log_ratio - (psires_0123(a)[0] + 1.0 / a)
     polygamma = (p1, p2, p3)
     for k in range(2, k_max + 1):
         w[_PRE + k * (k + 1) // 2] = -polygamma[k - 2] / _FACTORIAL[k]
