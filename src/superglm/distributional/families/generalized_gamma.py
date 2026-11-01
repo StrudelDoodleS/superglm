@@ -26,6 +26,16 @@ from superglm.distributional.families._predictors import (
     ScalePredictor,
     ShapePredictor,
 )
+from superglm.distributional.families._response_bounds import (
+    ResponseBounds,
+    TailChannels,
+    bind_observation,
+    bounded_channels,
+    bounded_higher_derivatives,
+    censored_carrier,
+    log_window_values,
+    refuse_bounded,
+)
 from superglm.distributional.families.gaussian import LowerBoundedLogLink
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
@@ -40,6 +50,8 @@ from superglm.distributional.family import (
     _validated_derivative_order,
     _validated_parameter_matrix,
 )
+from superglm.distributional.kernels._curvature_direction import packed_tuples
+from superglm.distributional.kernels._declared_bounds import gg_window_jets
 from superglm.distributional.kernels.generalized_gamma import (
     GeneralizedGammaDomainError as GeneralizedGammaDomainError,
 )
@@ -87,6 +99,7 @@ _CAPABILITIES = FamilyCapabilities(
     quantile=True,
     random=False,
     response_mean=True,
+    censored_response=True,
 )
 
 
@@ -160,6 +173,7 @@ class GeneralizedGammaLikelihoodPlan:
                 str(self.observation.schema_version),
                 self.weights.digest,
                 self.response_digest,
+                *(() if self.observation.bounds is None else (self.observation.bounds.digest,)),
             )
         ).encode("utf-8")
         return f"GeneralizedGammaLSS/v2:{hashlib.sha256(payload).hexdigest()}"
@@ -180,7 +194,7 @@ class GeneralizedGammaLikelihoodPlan:
             weights=self.weights.take(indices),
             row_law=self.row_law,
             family_config=self.family_config,
-            observation=self.observation,
+            observation=self.observation.take(indices),
             exact_response=self.exact_response[indices],
             carrier=self.parameter_independent_carrier[indices],
         )
@@ -191,6 +205,17 @@ class GeneralizedGammaLikelihoodPlan:
         if self.row_law == "gg-prentice-literal-replication/v1":
             return self.weights.values
         return np.ones_like(self.weights.values)
+
+
+def _contract_third(third: NDArray, direction: NDArray) -> NDArray[np.float64]:
+    """Packed ``sum_k T_ijk v_k`` from packed third derivatives of three parameters."""
+    column = {key: index for index, key in enumerate(packed_tuples(3, 3))}
+    return np.column_stack(
+        [
+            sum(third[:, column[tuple(sorted((i, j, k)))]] * direction[:, k] for k in range(3))
+            for i, j in packed_tuples(3, 2)
+        ]
+    )
 
 
 @dataclass(frozen=True)
@@ -261,6 +286,20 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
     def capabilities(self) -> FamilyCapabilities:
         return _CAPABILITIES
 
+    def censored_recession(self, bounds: ResponseBounds) -> NDArray[np.bool_]:
+        """Every censored row escapes along the location or mean; none along scale or shape.
+
+        At a fixed scale and shape ``log Y = mu + sigma W`` is a location
+        family in ``mu``, and the mean form's ``mu = log m - log C(sigma, Q)``
+        is a strictly increasing shift.  ``W``'s density is log-concave (``d^2
+        log f/dw^2 = -e^(Q w)``), so the family has a monotone likelihood
+        ratio in ``mu``, and within any truncation window ``P(Y > c)`` rises
+        and ``P(Y <= c)`` falls strictly with ``mu``.  Along the scale or the
+        shape a bound probability's limit depends on the fitted location and
+        the other parameter, so those predictors are not flagged.
+        """
+        return np.column_stack((bounds.side != 0, np.zeros((bounds.n_rows, 2), dtype=bool)))
+
     def to_config(self) -> dict[str, Any]:
         return {
             "type": _FAMILY_NAME,
@@ -283,10 +322,9 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
         observation: ObservationContract,
     ) -> GeneralizedGammaLikelihoodPlan:
         response = _validated_response(y)
-        if observation != COMPLETE_OBSERVATION:
-            raise UnsupportedLikelihoodContractError(
-                "GeneralizedGammaLSS supports only the complete-observation contract"
-            )
+        observation = bind_observation(
+            observation, response, weights, support_lower=0.0, family_name=_FAMILY_NAME
+        )
         if not isinstance(weights, ResolvedLikelihoodWeights):
             raise UnsupportedLikelihoodContractError(
                 "GeneralizedGammaLSS requires resolved likelihood weights"
@@ -315,6 +353,7 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
             )
         with np.errstate(over="ignore", invalid="ignore"):
             carrier = -multiplier * (np.log(response) + _HALF_LOG_TWO_PI)
+        carrier = censored_carrier(carrier, observation.bounds)
         if not np.all(np.isfinite(carrier)):
             raise UnsupportedLikelihoodContractError(
                 "generalized gamma response carrier is not finite and representable"
@@ -347,7 +386,10 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
     ) -> NDArray[np.float64]:
         response = _validated_response(y)
         candidate = self._plan(plan, len(response))
-        if candidate.observation != COMPLETE_OBSERVATION:
+        observation = candidate.observation
+        if observation != COMPLETE_OBSERVATION and (
+            observation.bounds is None or observation.bounds.n_rows != len(response)
+        ):
             raise UnsupportedLikelihoodContractError(
                 "GeneralizedGammaLSS likelihood has an unsupported observation contract"
             )
@@ -408,12 +450,65 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
             bound.multiplier,
             derivative_order=order,
         )
+        optimizing, score, hessian, valid = (
+            evaluated.optimizing_log_likelihood,
+            evaluated.score,
+            evaluated.hessian_packed,
+            evaluated.valid,
+        )
+        if bound.observation.bounds is not None:
+
+            def window(lower: NDArray, upper: NDArray, at: NDArray) -> TailChannels:
+                jets = self._window_jets(lower, upper, values[at], order)
+                return jets[0], *(jets[k] if order >= k else None for k in (1, 2))
+
+            optimizing, score, hessian, valid = bounded_channels(
+                optimizing,
+                score,
+                hessian,
+                valid,
+                response=response,
+                bounds=bound.observation.bounds,
+                multiplier=bound.multiplier,
+                window=window,
+                derivative_order=order,
+            )
         return NaturalLikelihoodEvaluation(
-            optimizing_log_likelihood=evaluated.optimizing_log_likelihood,
+            optimizing_log_likelihood=optimizing,
             parameter_independent_carrier=bound.parameter_independent_carrier,
-            score=evaluated.score,
-            hessian_packed=evaluated.hessian_packed,
-            valid=evaluated.valid,
+            score=score,
+            hessian_packed=hessian,
+            valid=valid,
+        )
+
+    def _window_jets(self, lower: NDArray, upper: NDArray, theta: NDArray, order: int):
+        return gg_window_jets(
+            lower, upper, theta, order=order, mean_form=self.parametrisation == "mean"
+        )
+
+    def _bounded_higher(
+        self,
+        plan: GeneralizedGammaLikelihoodPlan,
+        response: NDArray,
+        theta: NDArray,
+        third: NDArray | None,
+        fourth: NDArray | None,
+    ):
+        """:func:`bounded_higher_derivatives` with each bounded row's window formed once."""
+        bounds = plan.observation.bounds
+        assert bounds is not None
+
+        def window_jets(lower: NDArray, upper: NDArray, at: NDArray, order: int):
+            return self._window_jets(lower, upper, theta[at], order)
+
+        return bounded_higher_derivatives(
+            third,
+            fourth,
+            np.ones(len(response), dtype=bool),
+            response=response,
+            bounds=bounds,
+            multiplier=plan.multiplier,
+            window_jets=window_jets,
         )
 
     def predictor_curvature_directional_derivative(
@@ -432,12 +527,29 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
             mean_hessian_direction if self.parametrisation == "mean" else location_hessian_direction
         )
 
-        def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
-            return rows(response, theta[:, 0], theta[:, 1], theta[:, 2], natural, bound.multiplier)
+        windows_valid = np.ones(len(response), dtype=bool)
 
-        return natural_curvature_direction(
+        def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
+            complete = rows(
+                response, theta[:, 0], theta[:, 1], theta[:, 2], natural, bound.multiplier
+            )
+            if bound.observation.bounds is None:
+                return complete
+            share, _, valid = self._bounded_higher(
+                bound, response, theta, np.zeros((len(response), 10)), None
+            )
+            windows_valid[:] = valid
+            kept = (bound.observation.bounds.side == 0)[:, None]
+            return np.where(kept, complete, 0.0) + _contract_third(share, natural)
+
+        result = natural_curvature_direction(
             self, response, eta, eta_direction, links, plan, hessian_direction
         )
+        if np.all(windows_valid):
+            return result
+        result = result.copy()
+        result[~windows_valid] = 0.0
+        return readonly(result)
 
     def predictor_curvature_second_directional_derivative(
         self,
@@ -454,12 +566,24 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
         bound = self._plan(plan, len(response))
         rows = mean_third_fourth if self.parametrisation == "mean" else location_third_fourth
 
-        def natural_derivatives(theta: NDArray, natural_a: NDArray, natural_b: NDArray):
-            return rows(response, theta[:, 0], theta[:, 1], theta[:, 2], bound.multiplier)
+        windows_valid = np.ones(len(response), dtype=bool)
 
-        return natural_curvature_second_direction(
+        def natural_derivatives(theta: NDArray, natural_a: NDArray, natural_b: NDArray):
+            third, fourth = rows(response, theta[:, 0], theta[:, 1], theta[:, 2], bound.multiplier)
+            if bound.observation.bounds is None:
+                return third, fourth
+            third, fourth, valid = self._bounded_higher(bound, response, theta, third, fourth)
+            windows_valid[:] = valid
+            return third, fourth
+
+        result = natural_curvature_second_direction(
             self, response, eta, direction_a, direction_b, links, plan, natural_derivatives
         )
+        if np.all(windows_valid):
+            return result
+        result = result.copy()
+        result[..., ~windows_valid, :] = 0.0
+        return readonly(result)
 
     def expected_information_natural(
         self,
@@ -468,6 +592,7 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
     ) -> NDArray[np.float64]:
         values = self._theta(theta, None)
         bound = self._plan(plan, len(values))
+        refuse_bounded(bound.observation, "GeneralizedGammaLSS expected information")
         if self.parametrisation == "mean":
             return mean_expected_information(
                 values[:, 0], values[:, 1], values[:, 2], bound.multiplier
@@ -491,6 +616,26 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
         return generalized_gamma_variance(
             values[:, 0], values[:, 1], values[:, 2], parametrisation=self.parametrisation
         )
+
+    def log_window_probability(
+        self,
+        lower: NDArray,
+        upper: NDArray,
+        theta: NDArray,
+        weights: NDArray | None = None,
+    ) -> NDArray[np.float64]:
+        """``log P(lower < Y <= upper)`` per row; NaN where the mean form's mean does not exist."""
+        if weights is not None and not np.all(np.asarray(weights, dtype=np.float64) == 1.0):
+            raise UnsupportedLikelihoodContractError(
+                "GeneralizedGammaLSS has no prior-weighted row law, so its window probability "
+                "takes no non-unit prior weights"
+            )
+        values = self._theta(theta, None)
+
+        def window(lo: NDArray, hi: NDArray, at: NDArray) -> TailChannels:
+            return self._window_jets(lo, hi, values[at], 0)[0], None, None
+
+        return readonly(log_window_values(lower, upper, len(values), window, support_lower=0.0))
 
     def cdf(self, y: NDArray, theta: NDArray) -> NDArray[np.float64]:
         values = self._theta(theta, None)
