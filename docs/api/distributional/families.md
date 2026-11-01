@@ -23,6 +23,11 @@ the predictor for that parameter.
 - {py:class}`~superglm.TwoPieceNormalLSS`: location, scale and skew of a
   two-piece normal on the real line.
 
+`GammaLS` and `LogNormalLS` are special cases of `GeneralizedGammaLSS`, and
+`GaussianLS` of `TwoPieceNormalLSS`. [Why nested families have their own
+class](../../explanation/nested-distributional-families.md) says why each keeps
+a class and gives the evidence.
+
 ```{eval-rst}
 .. autosummary::
    :toctree: ../generated

@@ -8,9 +8,11 @@ rows)``: the unit-mass log window probability with its natural-parameter
 score and packed Hessian at those rows' parameters.
 
 A censored row has no density, so its parameter-independent carrier is zero
-(:func:`censored_carrier`).  Third and fourth derivatives are not formed here:
-a family refuses its analytic hooks for a bounded plan, and the LAML ladder
-differences these analytic Hessians instead.
+(:func:`censored_carrier`).  A family whose window supplies packed jets to
+order four adjusts its complete-row third and fourth derivatives the same way
+with :func:`bounded_higher_derivatives`; one that does not refuses its
+analytic hooks for a bounded plan, and the LAML ladder differences these
+analytic Hessians instead.
 """
 
 from __future__ import annotations
@@ -25,11 +27,14 @@ from superglm.distributional.family import (
     ObservationContract,
     bounded_observation,
 )
-from superglm.distributional.kernels._response_tails import TailChannels
+from superglm.distributional.kernels._response_tails import Jet, TailChannels
 from superglm.distributional.observation import LEFT_CENSORED, ResponseBounds
 from superglm.distributional.weights import UnsupportedLikelihoodContractError
 
 WindowFunction = Callable[[NDArray, NDArray, NDArray[np.intp]], TailChannels]
+#: ``window_jets(lower, upper, rows, order)``: the unit-mass log window
+#: probability's packed jet to ``order`` at those rows' parameters.
+WindowJetFunction = Callable[[NDArray, NDArray, NDArray[np.intp], int], Jet]
 
 
 def bind_observation(
@@ -194,13 +199,69 @@ def bounded_channels(
     return optimizing, score, hessian, valid
 
 
+def bounded_higher_derivatives(
+    third: NDArray | None,
+    fourth: NDArray | None,
+    valid: NDArray,
+    *,
+    response: NDArray,
+    bounds: ResponseBounds,
+    multiplier: NDArray,
+    window_jets: WindowJetFunction,
+) -> tuple[NDArray | None, NDArray | None, NDArray[np.bool_]]:
+    """Complete-row packed third and fourth derivatives adjusted for bounded rows.
+
+    The adjustment is :func:`bounded_channels`' one order up: a censored row's
+    derivatives become ``m`` times the observed window's, and a truncated row
+    loses ``m`` times its truncation window's.  The window jets must be in the
+    coordinates of ``third`` and ``fourth``.  A row whose adjusted derivatives
+    are not finite is zeroed and marked invalid.
+    """
+    arrays = [
+        None if a is None else np.array(a, dtype=np.float64, copy=True) for a in (third, fourth)
+    ]
+    valid = np.array(valid, dtype=bool, copy=True)
+    present = [index for index, values in enumerate(arrays) if values is not None]
+    if not present:
+        return None, None, valid
+    order = 3 + max(present)
+    mass = np.asarray(multiplier, dtype=np.float64)
+
+    censored = bounds.censored_rows()
+    if len(censored):
+        low, high = bounds.observed_window(response, censored)
+        jets = window_jets(low, high, censored, order)
+        m = mass[censored][:, None]
+        for index in present:
+            arrays[index][censored] = m * jets[3 + index]
+
+    truncated = bounds.truncated_rows()
+    if len(truncated):
+        jets = window_jets(bounds.lower[truncated], bounds.upper[truncated], truncated, order)
+        m = mass[truncated][:, None]
+        for index in present:
+            arrays[index][truncated] -= m * jets[3 + index]
+
+    finite = np.ones(len(valid), dtype=bool)
+    for index in present:
+        finite &= np.all(np.isfinite(arrays[index]), axis=1)
+    if not np.all(finite):
+        valid &= finite
+        for index in present:
+            arrays[index][~finite] = 0.0
+    return arrays[0], arrays[1], valid
+
+
 __all__ = [
     "LEFT_CENSORED",
+    "Jet",
     "ResponseBounds",
     "TailChannels",
     "WindowFunction",
+    "WindowJetFunction",
     "bind_observation",
     "bounded_channels",
+    "bounded_higher_derivatives",
     "censored_carrier",
     "log_window_values",
     "refuse_bounded",

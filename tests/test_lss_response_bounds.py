@@ -17,13 +17,13 @@ import pytest
 from scipy import optimize, special, stats
 
 from superglm import (
-    GammaLS,
     GaussianLS,
     GeneralizedParetoLSS,
     LogNormalLS,
     SeparationError,
     SeparationWarning,
     SuperLSS,
+    TwoPieceLogNormalLSS,
     cat,
     distributional,
     s,
@@ -496,7 +496,7 @@ def test_bounded_plans_hash_their_bounds_and_slice_them():
 
 def test_families_without_bounds_refuse_them_plainly():
     with pytest.raises(UnsupportedLikelihoodContractError, match="does not fit truncated"):
-        _fit(GammaLS(), np.array([1.0, 2.0, 3.0, 4.0]), truncation=(None, 5.0))
+        _fit(TwoPieceLogNormalLSS(), np.array([1.0, 2.0, 3.0, 4.0]), truncation=(None, 5.0))
 
 
 def test_fisher_coefficient_curvature_is_refused_for_bounded_rows():

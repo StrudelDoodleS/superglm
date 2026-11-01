@@ -172,7 +172,9 @@ def test_generalized_gamma_kernel_masks_mixed_rows_at_the_lower_support_endpoint
     with np.errstate(divide="raise", invalid="raise"):
         result = generalized_gamma_cdf(_MIXED_THRESHOLD, np.zeros(3), np.ones(3), np.zeros(3))
 
-    np.testing.assert_array_equal(result, [0.0, 0.0, 0.5])
+    np.testing.assert_array_equal(result[:2], [0.0, 0.0])
+    # Near Q = 0 the cdf is exp(log F) from the uniform tail: within roundings of the median.
+    assert result[2] == pytest.approx(0.5, rel=4 * np.finfo(np.float64).eps, abs=0)
     assert not result.flags.writeable
 
 

@@ -75,6 +75,9 @@ _STRUCTURED = "superglm.solvers._structured."
 _GROUP = "superglm._group_matrix._group_matrix_kernels."
 _TWEEDIE = "superglm.distributional.kernels._tweedie_numba."
 _NB = "superglm.distributional.kernels._negative_binomial_numba."
+_DECLARED = "superglm.distributional.kernels._declared."
+_ENGINE = "superglm.distributional.kernels._incomplete_gamma."
+_PRIMITIVES = "superglm.distributional.kernels._severity_primitives."
 _FIRST_USE: dict[str, str] = {
     # Measured over cold first fits on the freMTPL2 book: 71 on 2026-10-20
     # (every family and link, SuperGLM and SuperLSS, exact and binned,
@@ -93,7 +96,6 @@ _FIRST_USE: dict[str, str] = {
                     "_series_third_cumulants",
                     "_tweedie_third_row",
                     "_tweedie_hessian_direction_rows",
-                    "_polygamma_0123",
                     "_fourth_term_channels",
                     "_series_fourth_cumulants",
                     "_tweedie_fourth_row",
@@ -131,6 +133,33 @@ _FIRST_USE: dict[str, str] = {
         "a structured FactorSmooth fit's hat diagonal (Cook's distance, standardized "
         "residuals): diagnostics, not the fit",
     ),
+    **dict.fromkeys(
+        (
+            *(
+                _DECLARED + f"{module}.{law}_uniform"
+                for module in ("gamma", "gamma_log")
+                for law in ("logsf", "logcdf")
+            ),
+            _PRIMITIVES + "logratio",
+        ),
+        "GammaLS reads a bounded row's tail by the uniform expansion only above shape 1e4 "
+        "(cv below 0.01 at unit weight), a response nearly constant in its cell: no census fit "
+        "reaches it (logratio is its centred log(y/mean))",
+    ),
+    **dict.fromkeys(
+        (
+            _ENGINE + "log_gamma_tail",
+            _ENGINE + "log_gamma_tail_into",
+            _ENGINE + "_log_gamma_tail_rows",
+        ),
+        "the incomplete-gamma engine's plain-partial entry points, for tests: fits call "
+        "log_gamma_tail_scaled_into from the declared kernels",
+    ),
+    **dict.fromkeys(
+        (_PRIMITIVES + name for name in ("softplus", "expit", "log1mexp", "invexpm1")),
+        "primitives of the declared test laws (Weibull, Burr XII, log-logistic, Lomax); no "
+        "public family calls them",
+    ),
     _STRUCTURED + "block_leaves._moment_segments": (
         "the signed moment segments of a binned FactorSmooth term: no census fit reaches "
         "them (fs or sz, Fisher or signed, exact or binned)"
@@ -164,6 +193,17 @@ _FIRST_USE: dict[str, str] = {
         "only an explicit panel budget renders a FactorSmooth group; no public fit sets one (0.4 s)"
     ),
     "superglm.plotting.diagnostics._lowess_core": "a diagnostic plot's smoother, not a fit (2.2 s)",
+    **dict.fromkeys(
+        (
+            *(
+                "superglm.distributional.kernels._gg_uniform_tail." + name
+                for name in ("gg_uniform_log_tail", "_log_tail_rows", "_domain_rows")
+            ),
+            "superglm.distributional.kernels._gg_log_tail._composed_rows",
+        ),
+        "the generalized gamma tails' own scalar and array entry points, for tests: bounded "
+        "fits reach both engines through gg_log_tail's row kernel",
+    ),
 }
 
 _WARMUP_CENSUS = r"""

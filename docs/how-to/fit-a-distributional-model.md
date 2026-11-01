@@ -399,7 +399,9 @@ scale=exp(location − scale·log(shape⁻²)/shape))`; gamlss `GG` with
 link with a floor, default 0.01). It is the `shape = 0` member of
 `GeneralizedGammaLSS` and the `skew = 0` member of `TwoPieceLogNormalLSS`, and
 the tests pin both identities to 1e-14, so it is the right choice when the
-extra shape parameter is not paying for itself.
+extra shape parameter is not paying for itself. [Why nested families have
+their own class](../explanation/nested-distributional-families.md) measures
+what that parameter costs.
 
 ```python
 from superglm import LogNormalLS, SuperLSS, cat, s
@@ -653,10 +655,11 @@ The body must be told about `u`. A body fitted to capped or cut claims as if
 they were complete keeps their mean but not their shape, so its law cut at `u`
 is wrong. On a gamma sample cut at its 90% point, a complete-row body's mean
 below `u` is 14% low in the split method, and its capped mean is 8% low in the
-layer method. `GammaLS` and `GeneralizedGammaLSS` do not take `censored=` or
-`truncation=` yet; use their body fits only for the mean they were fitted to,
-the mean below `u` in the split method and the capped mean `E[min(Y, u)]` in
-the layer method, not as a distribution there.
+layer method. `GammaLS` and `GeneralizedGammaLSS` take `censored=` and
+`truncation=` like `LogNormalLS`. The generalized gamma's extra shape can
+matter here: on 20,000 Burr XII claims with a heavy tail, censored at their
+85% point, a log-normal body put `P(Y > u)` 11% too high and a generalized
+gamma body 2.6% too low.
 
 Where a policy limit caps a large claim, record its excess at `limit - u` and
 pass `censored=` for the claims settled at their limit when fitting the tail.
@@ -872,10 +875,20 @@ are for complete rows and refuse bounded ones, so ask for
 read every row as complete. Each of these warns when the model was fitted with
 bounds and is called without them.
 
-`GaussianLS`, `LogNormalLS` and `GeneralizedParetoLSS` take these bounds; the
-other families refuse them. Smoothing selection differences the curvature for
-these rows instead of using closed-form third and fourth derivatives, and
-`coefficient_curvature="fisher"` is refused for them, because expected
+`GaussianLS`, `LogNormalLS`, `GammaLS`, `GeneralizedGammaLSS` and
+`GeneralizedParetoLSS` take these bounds; the other families refuse them. When
+the Newton endgame of smoothing selection runs (`outer="efs+newton"`), it uses
+closed-form third and fourth derivatives of these rows for `GammaLS` and
+`GeneralizedGammaLSS`, as it does for complete rows; for the other three it
+differences the curvature instead. The default `outer="efs"` needs neither.
+
+A window that keeps only a small share of the law, such as a body truncated
+above at its own 5% point, says little about the law beyond the bound: the fit
+can be correct and still have a very wide mean. Check the mean's standard
+error before reading `predict()` on such a fit. `GeneralizedGammaLSS` takes
+frequency weights with bounds, as it does without them, and still refuses
+non-unit prior weights.
+`coefficient_curvature="fisher"` is refused for these rows, because expected
 information describes complete rows.
 
 ## Separated cells
@@ -895,8 +908,8 @@ Censoring has the same failure. A level whose rows are all censored on the
 same side, such as a policy type whose every claim was paid at its limit, has
 only a bound on its response, so its effect walks to infinity along any
 predictor that moves every such bound probability one way: the location or
-mean of `GaussianLS` and `LogNormalLS`, and both predictors of
-`GeneralizedParetoLSS`. A fit with censored rows scans every `Categorical`
+mean of `GaussianLS`, `LogNormalLS`, `GammaLS` and `GeneralizedGammaLSS`, and
+both predictors of `GeneralizedParetoLSS`. A fit with censored rows scans every `Categorical`
 term and `CategoricalInteraction` on those predictors for such levels and
 cells, under the same `separation` policy. When every row is censored on the
 same side, as with `censored=True` for all rows, the predictor's intercept has
@@ -937,6 +950,14 @@ The scan reads only what the data decide before the fit:
 - Truncation bounds change both rules. A bound on the same side as the
   censoring can give a level an estimate it would otherwise lack, and a bound
   on the far side only, as in the scanned cases above, takes it away.
+- The scale of `GammaLS` (its coefficient of variation) is not scanned. At a
+  fixed mean, a right-censored claim's probability rises as the scale shrinks
+  when its limit is below the mean, and peaks at a finite scale when the limit
+  is above it, so whether a level censored on one side has a finite scale
+  depends on its fitted mean.
+- The scale and shape of `GeneralizedGammaLSS` are not scanned. Where a
+  censored claim's probability runs along either depends on the fitted
+  location and on the other one.
 
 Ordered-categorical smooths, a normal or log-normal scale on a link other
 than its default, and predictors on links such as sqrt, inverse or power are
@@ -1588,9 +1609,9 @@ order you are likely to meet them.
   response you logged by hand returns the mean of the logged response;
   turning that into a mean of `y` is your modelling decision, and
   `LogNormalLS` is the supported way to make it.
-- **Truncation and censoring cover three families.** `GaussianLS`,
-  `LogNormalLS` and `GeneralizedParetoLSS` take `truncation=` and
-  `censored=`; the gamma, generalized gamma, two-piece, negative binomial and
+- **Truncation and censoring cover five families.** `GaussianLS`,
+  `LogNormalLS`, `GammaLS`, `GeneralizedGammaLSS` and `GeneralizedParetoLSS`
+  take `truncation=` and `censored=`; the two-piece, negative binomial and
   Tweedie families refuse them.
 - **Bounded rows have no CRPS.** The log score covers truncated and censored
   rows; the CRPS scores, `actual_expected`, `calibration` and `compare` do not.

@@ -101,12 +101,23 @@ def test_kernels_import_no_distributional_module_or_contract() -> None:
     chain = {"kernels._curvature_direction", "kernels._fourth_generated"}
     allowed = {
         "_weighted.py": {"kernels.gamma"},
-        "_response_tails.py": {"kernels._common"},
-        "_tweedie_numba.py": {"kernels._fourth_generated"},
+        "_response_tails.py": {"kernels._common", "kernels._curvature_direction"},
+        "_declared_bounds.py": {
+            "kernels._curvature_direction",
+            "kernels._declared",
+            "kernels._gg_log_tail",
+            "kernels._gg_uniform_tail",
+            "kernels._response_tails",
+            "kernels.generalized_gamma",
+        },
+        "_gg_log_tail.py": {"kernels._gg_uniform_tail", "kernels._incomplete_gamma"},
+        "_incomplete_gamma.py": {"kernels._severity_primitives"},
+        "_tweedie_numba.py": {"kernels._fourth_generated", "kernels._severity_primitives"},
         "gaussian.py": {"kernels._common", "kernels._weighted", "kernels._response_tails", *chain},
         "gamma.py": {"kernels._common", *chain},
         "generalized_gamma.py": {
             "kernels._common",
+            "kernels._gg_log_tail",
             "kernels.gamma",
             "kernels.log_normal",
             *chain,
@@ -192,6 +203,8 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
         },
         ADAPTERS / "gamma.py": {
             "family",
+            "families._response_bounds",
+            "kernels._declared_bounds",
             "weights",
             "likelihood_identity",
             "kernels.gamma",
@@ -202,6 +215,9 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
         ADAPTERS / "_variance.py": {"kernels._common", "kernels.gamma"},
         ADAPTERS / "generalized_gamma.py": {
             "family",
+            "families._response_bounds",
+            "kernels._curvature_direction",
+            "kernels._declared_bounds",
             "weights",
             "likelihood_identity",
             "kernels.generalized_gamma",

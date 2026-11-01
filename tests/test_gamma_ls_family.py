@@ -1397,7 +1397,7 @@ def test_gamma_metadata_configuration_prediction_and_ownership() -> None:
     assert family.capabilities.cdf is True
     assert family.capabilities.quantile is True
     assert family.capabilities.random is False
-    assert family.capabilities.censored_response is False
+    assert family.capabilities.censored_response is True
     assert isinstance(family, ExpectedInformationFamily)
     theta = np.array([[1.0, 0.4], [2.0, 0.8]])
     prediction = family.default_prediction(theta)
