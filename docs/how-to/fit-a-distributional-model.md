@@ -1603,9 +1603,9 @@ order you are likely to meet them.
   response you logged by hand returns the mean of the logged response;
   turning that into a mean of `y` is your modelling decision, and
   `LogNormalLS` is the supported way to make it.
-- **Truncation and censoring cover three families.** `GaussianLS`,
-  `LogNormalLS` and `GeneralizedParetoLSS` take `truncation=` and
-  `censored=`; the gamma, generalized gamma, two-piece, negative binomial and
+- **Truncation and censoring cover five families.** `GaussianLS`,
+  `LogNormalLS`, `GammaLS`, `GeneralizedGammaLSS` and `GeneralizedParetoLSS`
+  take `truncation=` and `censored=`; the two-piece, negative binomial and
   Tweedie families refuse them.
 - **Bounded rows have no CRPS.** The log score covers truncated and censored
   rows; the CRPS scores, `actual_expected`, `calibration` and `compare` do not.
