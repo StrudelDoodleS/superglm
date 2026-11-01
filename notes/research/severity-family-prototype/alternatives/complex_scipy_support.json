@@ -1,0 +1,21 @@
+{
+ "loggamma(z)": "accepts complex",
+ "gammaln(z)": "REJECTED: TypeError",
+ "digamma(z)": "accepts complex",
+ "polygamma(1, z)": "REJECTED: TypeError",
+ "zeta(2, z) (Hurwitz)": "REJECTED: TypeError",
+ "gammainc(z, 3.0) (complex shape)": "REJECTED: TypeError",
+ "gammaincc(z, 3.0) (complex shape)": "REJECTED: TypeError",
+ "gammainc(2.5, z) (complex x)": "REJECTED: TypeError",
+ "log_ndtr(z)": "accepts complex",
+ "ndtr(z)": "accepts complex",
+ "erf(z)": "accepts complex",
+ "erfc(z)": "accepts complex",
+ "erfcx(z)": "accepts complex",
+ "log1p(z)": "accepts complex",
+ "expm1(z)": "accepts complex",
+ "xlogy(z, 2.0)": "accepts complex",
+ "xlog1py(z, 2.0)": "accepts complex",
+ "betaln(z, 2.0)": "REJECTED: TypeError",
+ "gamma(z)": "accepts complex"
+}

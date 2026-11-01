@@ -1,0 +1,357 @@
+{
+ "runs": {
+  "GammaLS": [
+   {
+    "wall_seconds": 4.756066128844395,
+    "log_likelihood": -1927989.3619740775,
+    "total_edf": 13.986938329305135,
+    "converged": true,
+    "n_inner_iter": 13,
+    "n_smoothing_iter": 6,
+    "smoothing_parameters": {
+     "mean:x1#wiggle": 132.1657582695839,
+     "mean:x2#wiggle": 555846.3874000576,
+     "scale:x3#wiggle": 91897582.17901878
+    },
+    "phases": {
+     "frame_normalization": [
+      2.6080990210175514e-05,
+      1
+     ],
+     "predictor_compilation": [
+      0.41020117281004786,
+      1
+     ],
+     "layout_penalty_assembly": [
+      0.7026729164645076,
+      8
+     ],
+     "dense_predictor_matrices": [
+      0.07026871899142861,
+      1
+     ],
+     "likelihood_evaluation": [
+      2.0661424244754016,
+      27
+     ],
+     "curvature_gradient_assembly": [
+      0.5771209243685007,
+      14
+     ],
+     "coefficient_decomposition_solve": [
+      0.009775039739906788,
+      13
+     ],
+     "efs_update_backtracking": [
+      0.01790463854558766,
+      26
+     ],
+     "terminal_inference_and_null_fit": [
+      0.7227411582134664,
+      1
+     ],
+     "orchestration_and_unmeasured": [
+      0.12071154336445034,
+      0
+     ]
+    },
+    "outer_iterations": 6,
+    "coefficient_fits": 7,
+    "warnings": []
+   },
+   {
+    "wall_seconds": 4.53573267091997,
+    "log_likelihood": -1927989.3619740775,
+    "total_edf": 13.986938329305135,
+    "converged": true,
+    "n_inner_iter": 13,
+    "n_smoothing_iter": 6,
+    "smoothing_parameters": {
+     "mean:x1#wiggle": 132.1657582695839,
+     "mean:x2#wiggle": 555846.3874000576,
+     "scale:x3#wiggle": 91897582.17901878
+    },
+    "phases": {
+     "frame_normalization": [
+      1.4482997357845306e-05,
+      1
+     ],
+     "predictor_compilation": [
+      0.30505817010998726,
+      1
+     ],
+     "layout_penalty_assembly": [
+      0.7036821390502155,
+      8
+     ],
+     "dense_predictor_matrices": [
+      0.026994033018127084,
+      1
+     ],
+     "likelihood_evaluation": [
+      1.9983361093327403,
+      27
+     ],
+     "curvature_gradient_assembly": [
+      0.5748132588341832,
+      14
+     ],
+     "coefficient_decomposition_solve": [
+      0.010007345816120505,
+      13
+     ],
+     "efs_update_backtracking": [
+      0.017371909227222204,
+      26
+     ],
+     "terminal_inference_and_null_fit": [
+      0.7265759939327836,
+      1
+     ],
+     "orchestration_and_unmeasured": [
+      0.11868563364259899,
+      0
+     ]
+    },
+    "outer_iterations": 6,
+    "coefficient_fits": 7,
+    "warnings": []
+   },
+   {
+    "wall_seconds": 4.462034903932363,
+    "log_likelihood": -1927989.3619740775,
+    "total_edf": 13.986938329305135,
+    "converged": true,
+    "n_inner_iter": 13,
+    "n_smoothing_iter": 6,
+    "smoothing_parameters": {
+     "mean:x1#wiggle": 132.1657582695839,
+     "mean:x2#wiggle": 555846.3874000576,
+     "scale:x3#wiggle": 91897582.17901878
+    },
+    "phases": {
+     "frame_normalization": [
+      1.8859049305319786e-05,
+      1
+     ],
+     "predictor_compilation": [
+      0.3118389109149575,
+      1
+     ],
+     "layout_penalty_assembly": [
+      0.6889524303842336,
+      8
+     ],
+     "dense_predictor_matrices": [
+      0.03583365282975137,
+      1
+     ],
+     "likelihood_evaluation": [
+      1.957675881916657,
+      27
+     ],
+     "curvature_gradient_assembly": [
+      0.56653832946904,
+      14
+     ],
+     "coefficient_decomposition_solve": [
+      0.008862742688506842,
+      13
+     ],
+     "efs_update_backtracking": [
+      0.015446826815605164,
+      26
+     ],
+     "terminal_inference_and_null_fit": [
+      0.7172324629500508,
+      1
+     ],
+     "orchestration_and_unmeasured": [
+      0.10348514304496348,
+      0
+     ]
+    },
+    "outer_iterations": 6,
+    "coefficient_fits": 7,
+    "warnings": []
+   }
+  ],
+  "GeneratedGammaLS": [
+   {
+    "wall_seconds": 3.3762114429846406,
+    "log_likelihood": -1927989.3619740775,
+    "total_edf": 13.986938329321477,
+    "converged": true,
+    "n_inner_iter": 13,
+    "n_smoothing_iter": 6,
+    "smoothing_parameters": {
+     "mean:x1#wiggle": 132.16575826958422,
+     "mean:x2#wiggle": 555846.3874011595,
+     "scale:x3#wiggle": 91897582.09385954
+    },
+    "phases": {
+     "frame_normalization": [
+      1.800782047212124e-05,
+      1
+     ],
+     "predictor_compilation": [
+      0.34567557205446064,
+      1
+     ],
+     "layout_penalty_assembly": [
+      0.6840582499280572,
+      8
+     ],
+     "dense_predictor_matrices": [
+      0.03675787919200957,
+      1
+     ],
+     "likelihood_evaluation": [
+      0.8935299017466605,
+      27
+     ],
+     "curvature_gradient_assembly": [
+      0.5946942395530641,
+      14
+     ],
+     "coefficient_decomposition_solve": [
+      0.009142481023445725,
+      13
+     ],
+     "efs_update_backtracking": [
+      0.019301032181829214,
+      26
+     ],
+     "terminal_inference_and_null_fit": [
+      0.6295239219907671,
+      1
+     ],
+     "orchestration_and_unmeasured": [
+      0.10857726354151964,
+      0
+     ]
+    },
+    "outer_iterations": 6,
+    "coefficient_fits": 7,
+    "warnings": []
+   },
+   {
+    "wall_seconds": 3.289349535945803,
+    "log_likelihood": -1927989.3619740775,
+    "total_edf": 13.986938329321477,
+    "converged": true,
+    "n_inner_iter": 13,
+    "n_smoothing_iter": 6,
+    "smoothing_parameters": {
+     "mean:x1#wiggle": 132.16575826958422,
+     "mean:x2#wiggle": 555846.3874011595,
+     "scale:x3#wiggle": 91897582.09385954
+    },
+    "phases": {
+     "frame_normalization": [
+      1.791701652109623e-05,
+      1
+     ],
+     "predictor_compilation": [
+      0.3190289509948343,
+      1
+     ],
+     "layout_penalty_assembly": [
+      0.6924278675578535,
+      8
+     ],
+     "dense_predictor_matrices": [
+      0.027798930881544948,
+      1
+     ],
+     "likelihood_evaluation": [
+      0.8548065884970129,
+      27
+     ],
+     "curvature_gradient_assembly": [
+      0.5697783567011356,
+      14
+     ],
+     "coefficient_decomposition_solve": [
+      0.009033913258463144,
+      13
+     ],
+     "efs_update_backtracking": [
+      0.015423997305333614,
+      26
+     ],
+     "terminal_inference_and_null_fit": [
+      0.6423787579406053,
+      1
+     ],
+     "orchestration_and_unmeasured": [
+      0.1050975148100406,
+      0
+     ]
+    },
+    "outer_iterations": 6,
+    "coefficient_fits": 7,
+    "warnings": []
+   },
+   {
+    "wall_seconds": 3.303933270042762,
+    "log_likelihood": -1927989.3619740775,
+    "total_edf": 13.986938329321477,
+    "converged": true,
+    "n_inner_iter": 13,
+    "n_smoothing_iter": 6,
+    "smoothing_parameters": {
+     "mean:x1#wiggle": 132.16575826958422,
+     "mean:x2#wiggle": 555846.3874011595,
+     "scale:x3#wiggle": 91897582.09385954
+    },
+    "phases": {
+     "frame_normalization": [
+      1.8277904018759727e-05,
+      1
+     ],
+     "predictor_compilation": [
+      0.30887626903131604,
+      1
+     ],
+     "layout_penalty_assembly": [
+      0.7034438461996615,
+      8
+     ],
+     "dense_predictor_matrices": [
+      0.025893482845276594,
+      1
+     ],
+     "likelihood_evaluation": [
+      0.8625349688809365,
+      27
+     ],
+     "curvature_gradient_assembly": [
+      0.5734747324604541,
+      14
+     ],
+     "coefficient_decomposition_solve": [
+      0.009098910726606846,
+      13
+     ],
+     "efs_update_backtracking": [
+      0.017879302380606532,
+      26
+     ],
+     "terminal_inference_and_null_fit": [
+      0.6385403159074485,
+      1
+     ],
+     "orchestration_and_unmeasured": [
+      0.11029058578424156,
+      0
+     ]
+    },
+    "outer_iterations": 6,
+    "coefficient_fits": 7,
+    "warnings": []
+   }
+  ]
+ },
+ "max_rel_diff_predicted_parameters": 3.685068600016677e-14
+}

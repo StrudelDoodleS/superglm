@@ -1,0 +1,36 @@
+  a=0.01    x=5         cf     n=32   P relerr 4.3e-16 1.8e-16 7.7e-15 6.7e-13 2.0e-10
+  a=0.01    x=50        cf     n=10   P relerr 1.0e-15 1.1e-15 1.1e-15 1.3e-13 4.0e-12
+  a=0.1     x=3         cf     n=43   P relerr 1.1e-15 9.4e-16 1.2e-16 1.4e-15 9.6e-12
+  a=100     x=100       series n=103  Q relerr 6.1e-14 8.7e-14 1.8e-13 7.8e-13 8.2e-12
+  a=100     x=110       series n=116  Q relerr 2.3e-13 5.1e-13 1.9e-12 1.9e-11 2.8e-10
+  a=1000    x=1000      series n=297  P relerr 1.5e-12 1.7e-14 3.3e-15 1.8e-14 5.2e-14
+  a=1000    x=1000      series n=297  Q relerr 1.5e-12 2.1e-12 4.2e-12 2.0e-11 1.0e-10
+  a=1000    x=1050      cf     n=71   P relerr 4.5e-13 4.6e-13 5.0e-13 6.1e-13 1.5e-12
+  a=10000   x=9800      series n=745  Q relerr 6.7e-13 6.8e-13 7.0e-13 7.7e-13 1.0e-12
+  a=10000   x=10000     series n=901  Q relerr 1.6e-13 2.0e-13 3.6e-13 1.7e-12 6.5e-12
+  a=10000   x=10150     cf     n=128  P relerr 1.2e-11 1.3e-11 1.4e-11 1.8e-11 5.2e-11
+  a=10000   x=10150     cf     n=128  Q relerr 4.4e-12 8.5e-14 1.6e-16 1.3e-15 1.3e-14
+  a=0.01    x=1.02      cf     n=101  P relerr 8.5e-15 8.3e-15 2.2e-14 1.6e-10 1.9e-09
+  a=30      x=30.99     series n=63   Q relerr 1.9e-14 3.0e-14 6.8e-14 3.1e-13 2.3e-11
+  a=1000    x=1001      series n=298  Q relerr 6.6e-13 9.1e-13 1.8e-12 9.1e-12 4.4e-11
+  a=1000    x=1032      cf     n=85   P relerr 6.6e-13 7.2e-13 8.8e-13 1.6e-12 4.1e-11
+  a=1000    x=1033      cf     n=83   P relerr 7.6e-13 8.3e-13 1.0e-12 1.7e-12 8.3e-11
+  a=10000   x=10001     series n=902  P relerr 1.7e-11 2.6e-14 2.8e-15 2.0e-15 2.8e-14
+  a=10000   x=10001     series n=902  Q relerr 1.7e-11 2.3e-11 4.7e-11 2.4e-10 1.0e-09
+  a=10000   x=10020     series n=918  P relerr 7.0e-12 8.9e-14 3.6e-15 8.8e-15 4.1e-14
+  a=10000   x=10020     series n=918  Q relerr 6.1e-12 9.0e-12 2.0e-11 1.3e-10 5.2e-10
+  a=10000   x=10099     series n=987  P relerr 5.9e-11 4.0e-13 1.4e-14 8.2e-15 6.5e-12
+  a=10000   x=10099     series n=987  Q relerr 3.0e-11 6.4e-11 2.5e-10 3.7e-09 1.6e-08
+  a=10000   x=10101     cf     n=159  P relerr 8.2e-12 8.9e-12 1.1e-11 1.9e-11 2.0e-09
+  a=10000   x=10101     cf     n=159  Q relerr 4.1e-12 3.6e-14 3.4e-16 2.7e-14 4.2e-14
+v2 worst relerr by order over 42 points x {P,Q}: 5.9e-11 6.4e-11 2.5e-10 3.7e-09 1.6e-08
+term counts value-only K=0 / K=2 / K=4:
+  a=0.1     x=3         cf       38   42   43
+  a=10      x=8         series   32   35   36
+  a=10      x=12        series   41   43   44
+  a=100     x=100       series   93   99  103
+  a=100     x=111       cf       32   38   41
+  a=1000    x=1000      series  268  285  297
+  a=1000    x=1050      cf       55   65   71
+  a=10000   x=10000     series  809  862  901
+  a=10000   x=10150     cf       90  112  128
