@@ -24,21 +24,21 @@ from superglm.distributional.family import (
 from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
-from superglm.distributional.result import (
+from superglm.distributional.results.endpoint_evidence import (
     CHUNKED_EXECUTION_BACKEND_IDENTIFIER,
     DENSE_EXECUTION_BACKEND_IDENTIFIER,
     CoefficientCurvature,
     ConvergenceReason,
-    DenseSolverConfig,
-    DenseSolverResult,
     ExecutionBackendIdentifier,
-    SolverIteration,
-    _resolution_limited_decrement_is_within_objective_ulp,
-    _validate_resolution_limited_stationarity,
 )
 from superglm.distributional.results.solver import (
+    DenseSolverConfig,
+    DenseSolverResult,
+    SolverIteration,
     _newton_decrement_is_certified,
+    _resolution_limited_decrement_is_within_objective_ulp,
     _score_within_rounding_floor,
+    _validate_resolution_limited_stationarity,
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.solver._likelihood_cache import (

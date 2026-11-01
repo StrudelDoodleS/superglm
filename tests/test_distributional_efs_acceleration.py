@@ -5,7 +5,7 @@ from decimal import Decimal, localcontext
 import numpy as np
 import pytest
 
-from superglm.distributional.efs_acceleration import (
+from superglm.distributional.smoothing.acceleration import (
     WindowedTypeIIAnderson,
     _common_scaled_step,
     _model_reduction_bound,

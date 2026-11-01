@@ -9,13 +9,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import superglm.distributional.efs as efs_module
 from superglm.distributional import GaussianLS, Predictor
 from superglm.distributional import fit_diagnostics as diagnostics_module
 from superglm.distributional.fit_diagnostics import diagnose_distributional_fit
-from superglm.distributional.result import DistributionalEFSConfig
+from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.serialization import pickle_state
+from superglm.distributional.smoothing.evidence import _FreshRawEvidence, _lower_bound_pressure
 from superglm.distributional.smoothing.objective import _stable_isolated_gfs_update
+from superglm.distributional.smoothing.proposals import _accelerated_proposal, _scaled_proposal
 from superglm.features import RandomEffect, Spline
 from superglm.reml.efs_update import EFSComponentState, wood_fasiolo_update
 from superglm.types import LambdaPolicy
@@ -114,7 +115,7 @@ def test_scaled_proposal_lands_exactly_on_the_maximum(old_value: float) -> None:
     cap = config.maximum_lambda if old_value > 1.0 else 50.0
     config = DistributionalEFSConfig(maximum_lambda=cap, minimum_lambda=1.0e-6)
     step = math.log(cap) - math.log(old_value)
-    lambdas, log_steps = efs_module._scaled_proposal(
+    lambdas, log_steps = _scaled_proposal(
         {"a": old_value},
         {"a": step},
         ("a",),
@@ -129,14 +130,14 @@ def test_scaled_proposal_lands_exactly_on_the_minimum() -> None:
     config = DistributionalEFSConfig(maximum_lambda=1.0e10, minimum_lambda=1.0e-6)
     old_value = 2.5e-6
     step = math.log(config.minimum_lambda) - math.log(old_value)
-    lambdas, _ = efs_module._scaled_proposal({"a": old_value}, {"a": step}, ("a",), 1.0, config)
+    lambdas, _ = _scaled_proposal({"a": old_value}, {"a": step}, ("a",), 1.0, config)
     assert lambdas["a"] == config.minimum_lambda
 
 
 def test_accelerated_proposal_snaps_a_near_cap_log_value() -> None:
     config = DistributionalEFSConfig(maximum_lambda=50.0, minimum_lambda=1.0e-6)
     log_value = math.log(50.0) - 1.0e-15
-    result = efs_module._accelerated_proposal(
+    result = _accelerated_proposal(
         {"a": 40.0},
         ("a",),
         np.array([log_value]),
@@ -176,7 +177,7 @@ def test_practical_window_replays_non_increasing_steps() -> None:
 
 def test_lower_bound_pressure_names_components_pinned_at_the_minimum() -> None:
     config = DistributionalEFSConfig(minimum_lambda=1.0e-6, tolerance=1.0e-6)
-    evidence = efs_module._FreshRawEvidence(
+    evidence = _FreshRawEvidence(
         components=(),
         estimated_names=("a", "b"),
         update=None,
@@ -186,9 +187,9 @@ def test_lower_bound_pressure_names_components_pinned_at_the_minimum() -> None:
     )
     lambdas = {"a": 1.0e-6, "b": 0.5}
     raw = {"a": -0.3, "b": -0.3}
-    assert efs_module._lower_bound_pressure(evidence, lambdas, raw, config) == ("a",)
+    assert _lower_bound_pressure(evidence, lambdas, raw, config) == ("a",)
     raw_inward = {"a": 0.2, "b": -0.3}
-    assert efs_module._lower_bound_pressure(evidence, lambdas, raw_inward, config) == ()
+    assert _lower_bound_pressure(evidence, lambdas, raw_inward, config) == ()
 
 
 def _preempt_fixture():

@@ -17,7 +17,7 @@ from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.model import fit_dense_distributional, refit_dense_distributional
 from superglm.distributional.prediction_design import build_joint_prediction_design
 from superglm.distributional.predictor import compile_predictors
-from superglm.distributional.result import DenseSolverConfig
+from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.weights import (
     LikelihoodWeightError,
     WeightContract,

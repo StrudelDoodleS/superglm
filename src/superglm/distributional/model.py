@@ -50,13 +50,10 @@ from superglm.distributional.predictor import (
     compile_predictors,
     resolve_predictor_links,
 )
-from superglm.distributional.result import (
-    DenseSolverConfig,
-    DenseSolverResult,
-    DistributionalEFSConfig,
-    DistributionalEFSResult,
-    DistributionalFitResult,
-)
+from superglm.distributional.results.fit import DistributionalFitResult
+from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.smoothing import DistributionalEFSResult
+from superglm.distributional.results.solver import DenseSolverConfig, DenseSolverResult
 from superglm.distributional.separation import (
     apply_separation_policy,
     censored_recession,

@@ -10,19 +10,19 @@ import pytest
 
 from superglm.distributional import GammaLS, Predictor, TweedieLSS
 from superglm.distributional.derivatives import transform_natural_derivatives
-from superglm.distributional.endpoint_direction import (
-    DEFAULT_STEP,
-    FiniteDifferenceDirection,
-    finite_difference_curvature_direction,
-)
-from superglm.distributional.endpoint_laml import EndpointLaplaceDerivative
 from superglm.distributional.families.gamma import GammaLS as _GammaLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
-from superglm.distributional.result import (
+from superglm.distributional.results.endpoint_evidence import (
     EndpointDirectionEvidence,
     JointEndpointDirectionEvidence,
 )
 from superglm.distributional.smoothing.authority import _endpoint_retained_kkt_relative
+from superglm.distributional.smoothing.endpoint_direction import (
+    DEFAULT_STEP,
+    FiniteDifferenceDirection,
+    finite_difference_curvature_direction,
+)
+from superglm.distributional.smoothing.endpoint_laml import EndpointLaplaceDerivative
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.features import Spline
 from superglm.links import LogLink

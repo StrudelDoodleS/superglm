@@ -40,7 +40,8 @@ from superglm.distributional import GammaLS, Predictor
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.model import fit_dense_distributional
-from superglm.distributional.result import DenseSolverConfig, DistributionalEFSConfig
+from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.smoothing.derivatives import (
     LamlDerivativeError,
     _cross_all,

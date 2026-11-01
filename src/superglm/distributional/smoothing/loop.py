@@ -10,20 +10,24 @@ from numpy.typing import NDArray
 
 from superglm.distributional.family import DistributionalFamily, FamilyLikelihoodPlan
 from superglm.distributional.layout import StackedLayout
-from superglm.distributional.result import (
-    DenseSolverConfig,
-    DenseSolverResult,
-    DistributionalEFSConfig,
-    DistributionalEFSIteration,
-    DistributionalEFSResult,
+from superglm.distributional.results.endpoint_evidence import (
     EFSConvergenceReason,
     JointEndpointDirectionEvidence,
-    _assessment_is_numerically_stationary,
-    _dense_penalty_fingerprint,
+)
+from superglm.distributional.results.iteration import (
+    DistributionalEFSConfig,
+    DistributionalEFSIteration,
     _maximum_relative_natural_parameter_change,
 )
-from superglm.distributional.results.smoothing import _practical_outward_window
+from superglm.distributional.results.smoothing import (
+    DistributionalEFSResult,
+    _practical_outward_window,
+)
 from superglm.distributional.results.solver import (
+    DenseSolverConfig,
+    DenseSolverResult,
+    _assessment_is_numerically_stationary,
+    _dense_penalty_fingerprint,
     _PenaltyAssessmentContext,
     fit_time_face_geometry,
 )

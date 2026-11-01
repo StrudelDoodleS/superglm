@@ -111,7 +111,7 @@ from superglm.distributional.kernels.two_piece import (
     log_mean_loading as two_piece_log_mean_loading,
 )
 from superglm.distributional.kernels.two_piece import two_piece_quantile
-from superglm.distributional.result import DistributionalEFSConfig
+from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.features import Categorical, CubicRegressionSpline, Spline
 from tests.bound_predictor_fixtures import model_from_templates
 

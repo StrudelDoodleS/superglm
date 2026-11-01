@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import superglm.distributional.efs as efs_module
 import superglm.distributional.smoothing.authority as smoothing_authority
 import superglm.distributional.smoothing.evidence as smoothing_evidence
 import superglm.distributional.smoothing.faces as smoothing_faces
@@ -20,13 +19,13 @@ from superglm import Spline, SuperLSS
 from superglm.distributional import GammaLS, Predictor
 from superglm.distributional.inference import compute_joint_inference
 from superglm.distributional.model import DenseDistributionalModel
-from superglm.distributional.penalty_face import PenaltyFace, build_penalty_face
-from superglm.distributional.result import (
+from superglm.distributional.results.endpoint_evidence import JointEndpointDirectionEvidence
+from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.solver import (
     DenseSolverResult,
-    DistributionalEFSConfig,
-    JointEndpointDirectionEvidence,
     _assessment_is_numerically_stationary,
 )
+from superglm.distributional.smoothing.penalty_face import PenaltyFace, build_penalty_face
 from superglm.reml.penalty_algebra import penalty_component_dense_matrix
 from tests.bound_predictor_fixtures import model_from_templates
 from tests.test_distributional_endpoint_laml import _forge_nonstationary_scalar_caps
@@ -369,7 +368,6 @@ def test_scalar_first_counterfactual_refuses_the_finite_companion(
         return None, None
 
     monkeypatch.setattr(smoothing_loop, "_try_joint_exact_face", disable_joint_activation)
-    monkeypatch.setattr(efs_module, "_try_joint_exact_face", disable_joint_activation)
     _forge_nonstationary_scalar_caps(monkeypatch)
     case = gamma_joint_face_case
     scalar_first = _fit_public_gamma_joint_face(case.frame, case.response, case.weights)

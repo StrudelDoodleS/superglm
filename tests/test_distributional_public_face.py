@@ -12,7 +12,7 @@ import superglm.distributional.fit_state as fit_state_module
 from superglm import Spline
 from superglm.distributional import GammaLS, Predictor
 from superglm.distributional.families.negative_binomial import NegativeBinomialLS
-from superglm.distributional.result import DistributionalEFSConfig
+from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.features import RandomEffect
 from tests._matched_certified import assert_matched_certified
 from tests.bound_predictor_fixtures import model_from_templates

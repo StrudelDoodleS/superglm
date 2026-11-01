@@ -10,7 +10,6 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 
-import superglm.distributional.efs as efs_module
 import superglm.distributional.smoothing.authority as smoothing_authority
 import superglm.distributional.smoothing.evidence as smoothing_evidence
 import superglm.distributional.smoothing.loop as smoothing_loop
@@ -18,11 +17,6 @@ import superglm.distributional.smoothing.objective as smoothing_objective
 import superglm.reml.efs as scalar_efs
 import superglm.solvers.rank as rank_module
 from superglm._predictor_compiler import CompiledPredictorDesign
-from superglm.distributional.efs_acceleration import (
-    MultisecantDecision,
-    MultisecantProposal,
-    WindowedTypeIIAnderson,
-)
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import (
     FamilyLikelihoodPlan,
@@ -32,12 +26,18 @@ from superglm.distributional.family import (
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.model import fit_dense_distributional
 from superglm.distributional.predictor import CompiledPredictor, Predictor
-from superglm.distributional.result import (
-    DenseSolverConfig,
-    DistributionalEFSConfig,
-    DistributionalEFSResult,
-    EndpointDirectionEvidence,
+from superglm.distributional.results.endpoint_evidence import EndpointDirectionEvidence
+from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.smoothing import DistributionalEFSResult
+from superglm.distributional.results.solver import DenseSolverConfig
+from superglm.distributional.smoothing.acceleration import (
+    MultisecantDecision,
+    MultisecantProposal,
+    WindowedTypeIIAnderson,
 )
+from superglm.distributional.smoothing.evidence import _fresh_raw_evidence, _saturated_names
+from superglm.distributional.smoothing.objective import _component_states, _estimated_names
+from superglm.distributional.smoothing.proposals import _accelerated_proposal
 from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.distributional.weights import ResolvedLikelihoodWeights, WeightContract
 from superglm.features import Numeric, RandomEffect, Spline
@@ -358,7 +358,7 @@ def test_fresh_efs_evidence_reuses_one_terminal_inverse(monkeypatch) -> None:
         return original(decomposition)
 
     monkeypatch.setattr(rank_module.RankDecomposition, "pseudo_inverse", counted)
-    evidence = efs_module._fresh_raw_evidence(
+    evidence = _fresh_raw_evidence(
         model.layout,
         model.lambdas,
         model.result,
@@ -1146,7 +1146,7 @@ def _certify_efs_state(
         full_rank=True,
         label="penalized curvature",
     )
-    production_objective = efs_module.joint_laplace_objective(
+    production_objective = smoothing_objective.joint_laplace_objective(
         fit,
         layout=model.layout,
         lambdas={_EFS_LAMBDA_NAME: lambda_value},
@@ -1469,12 +1469,12 @@ def _assert_carrier_noninterference(reference, shifted) -> None:
     np.testing.assert_array_equal(shifted.covariance, reference.covariance)
     assert shifted.inference.total_edf == reference.inference.total_edf
     for fit_index, lambda_value in _accepted_lambda_states(left).items():
-        left_objective = efs_module.joint_laplace_objective(
+        left_objective = smoothing_objective.joint_laplace_objective(
             left.coefficient_fits[fit_index],
             layout=reference.layout,
             lambdas={_EFS_LAMBDA_NAME: lambda_value},
         )
-        right_objective = efs_module.joint_laplace_objective(
+        right_objective = smoothing_objective.joint_laplace_objective(
             right.coefficient_fits[fit_index],
             layout=shifted.layout,
             lambdas={_EFS_LAMBDA_NAME: lambda_value},
@@ -1714,7 +1714,7 @@ def test_prior_efs_reconstructs_every_accepted_state_and_ignores_fixed_carrier(
             ),
         )
 
-    original_objective = efs_module.joint_laplace_objective
+    original_objective = smoothing_objective.joint_laplace_objective
 
     def reported_likelihood_mutation(result, *, layout, lambdas):
         return original_objective(result, layout=layout, lambdas=lambdas) - (
@@ -1725,7 +1725,6 @@ def test_prior_efs_reconstructs_every_accepted_state_and_ignores_fixed_carrier(
         mutation.setattr(
             smoothing_objective, "joint_laplace_objective", reported_likelihood_mutation
         )
-        mutation.setattr(efs_module, "joint_laplace_objective", reported_likelihood_mutation)
         with pytest.raises(
             AssertionError,
             match="authoritative outer objective changed with a fixed carrier",
@@ -2519,7 +2518,6 @@ def _decreasing_objective(monkeypatch: pytest.MonkeyPatch) -> None:
         return -float(calls)
 
     monkeypatch.setattr(smoothing_objective, "joint_laplace_objective", objective)
-    monkeypatch.setattr(efs_module, "joint_laplace_objective", objective)
 
 
 def _patch_second_iteration_acceleration(
@@ -2565,7 +2563,7 @@ def _patch_raw_residual_sequence(
 ) -> list[dict[str, float]]:
     """Script equal proposal and stationarity residuals for chronology tests."""
 
-    original_update = efs_module.wood_fasiolo_update
+    original_update = smoothing_evidence.wood_fasiolo_update
     remaining = iter(residuals)
     observed: list[dict[str, float]] = []
 
@@ -2585,7 +2583,6 @@ def _patch_raw_residual_sequence(
         )
 
     monkeypatch.setattr(smoothing_evidence, "wood_fasiolo_update", sequenced_update)
-    monkeypatch.setattr(efs_module, "wood_fasiolo_update", sequenced_update)
     return observed
 
 
@@ -2629,7 +2626,7 @@ def test_non_gfs_fallback_refuses_and_resets_multisecant(
 ) -> None:
     frame, response, predictors = _smooth_fixture()
     _decreasing_objective(monkeypatch)
-    original_update = efs_module.wood_fasiolo_update
+    original_update = smoothing_evidence.wood_fasiolo_update
     update_calls = 0
 
     def fallback_update(*args, **kwargs):
@@ -2646,7 +2643,6 @@ def test_non_gfs_fallback_refuses_and_resets_multisecant(
         )
 
     monkeypatch.setattr(smoothing_evidence, "wood_fasiolo_update", fallback_update)
-    monkeypatch.setattr(efs_module, "wood_fasiolo_update", fallback_update)
     model = fit_dense_distributional(
         frame,
         response,
@@ -2673,7 +2669,7 @@ def test_working_infinity_direction_cannot_certify_from_a_small_finite_residual(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     frame, response, predictors = _smooth_fixture()
-    original_update = efs_module.wood_fasiolo_update
+    original_update = smoothing_evidence.wood_fasiolo_update
 
     def working_infinity_update(*args, **kwargs):
         update = original_update(*args, **kwargs)
@@ -2686,7 +2682,6 @@ def test_working_infinity_direction_cannot_certify_from_a_small_finite_residual(
         )
 
     monkeypatch.setattr(smoothing_evidence, "wood_fasiolo_update", working_infinity_update)
-    monkeypatch.setattr(efs_module, "wood_fasiolo_update", working_infinity_update)
     model = fit_dense_distributional(
         frame,
         response,
@@ -2721,7 +2716,7 @@ def test_accelerated_log_endpoint_preserves_the_exact_lambda_box() -> None:
     names = ("smooth",)
     upper_log = math.log(config.maximum_lambda)
 
-    proposal = efs_module._accelerated_proposal(
+    proposal = _accelerated_proposal(
         current,
         names,
         np.array([upper_log]),
@@ -2736,7 +2731,7 @@ def test_accelerated_log_endpoint_preserves_the_exact_lambda_box() -> None:
     assert config.minimum_lambda <= lambdas["smooth"] <= config.maximum_lambda
     assert steps == {"smooth": upper_log}
     assert (
-        efs_module._accelerated_proposal(
+        _accelerated_proposal(
             current,
             names,
             np.array([np.nextafter(upper_log, math.inf)]),
@@ -2841,7 +2836,7 @@ def test_rejected_acceleration_falls_back_to_raw_scale_one_from_same_source(
         original_reject(self)
 
     warm_starts: list[np.ndarray | None] = []
-    original_solver = efs_module.fit_dense_fixed_lambda
+    original_solver = smoothing_authority.fit_dense_fixed_lambda
 
     def solver_spy(*args, **kwargs):
         initial = kwargs.get("initial")
@@ -2849,12 +2844,10 @@ def test_rejected_acceleration_falls_back_to_raw_scale_one_from_same_source(
         return original_solver(*args, **kwargs)
 
     monkeypatch.setattr(smoothing_objective, "joint_laplace_objective", objective)
-    monkeypatch.setattr(efs_module, "joint_laplace_objective", objective)
     monkeypatch.setattr(WindowedTypeIIAnderson, "record_accepted", record_spy)
     monkeypatch.setattr(WindowedTypeIIAnderson, "reject", reject_spy)
     monkeypatch.setattr(smoothing_authority, "fit_dense_fixed_lambda", solver_spy)
     monkeypatch.setattr(smoothing_loop, "fit_dense_fixed_lambda", solver_spy)
-    monkeypatch.setattr(efs_module, "fit_dense_fixed_lambda", solver_spy)
 
     model = fit_dense_distributional(
         frame,
@@ -2899,9 +2892,6 @@ def test_admissible_acceleration_is_the_only_trial_when_objective_accepts(
     monkeypatch.setattr(
         smoothing_objective, "joint_laplace_objective", lambda *args, **kwargs: next(objectives)
     )
-    monkeypatch.setattr(
-        efs_module, "joint_laplace_objective", lambda *args, **kwargs: next(objectives)
-    )
     decisions = _patch_second_iteration_acceleration(monkeypatch)
 
     model = fit_dense_distributional(
@@ -2942,12 +2932,9 @@ def test_acceleration_with_changed_fit_provenance_falls_back_to_raw(
     monkeypatch.setattr(
         smoothing_objective, "joint_laplace_objective", lambda *args, **kwargs: next(objectives)
     )
-    monkeypatch.setattr(
-        efs_module, "joint_laplace_objective", lambda *args, **kwargs: next(objectives)
-    )
     _patch_second_iteration_acceleration(monkeypatch)
     solver_calls = 0
-    original_solver = efs_module.fit_dense_fixed_lambda
+    original_solver = smoothing_authority.fit_dense_fixed_lambda
 
     def changed_accelerated_provenance(*args, **kwargs):
         nonlocal solver_calls
@@ -2973,7 +2960,6 @@ def test_acceleration_with_changed_fit_provenance_falls_back_to_raw(
         smoothing_authority, "fit_dense_fixed_lambda", changed_accelerated_provenance
     )
     monkeypatch.setattr(smoothing_loop, "fit_dense_fixed_lambda", changed_accelerated_provenance)
-    monkeypatch.setattr(efs_module, "fit_dense_fixed_lambda", changed_accelerated_provenance)
     model = fit_dense_distributional(
         frame,
         response,
@@ -3083,11 +3069,10 @@ def test_rejected_acceleration_is_not_backtracked_before_raw_trials_all_fail(
         return -1.0 if calls == 2 else 0.0
 
     monkeypatch.setattr(smoothing_objective, "joint_laplace_objective", objective)
-    monkeypatch.setattr(efs_module, "joint_laplace_objective", objective)
     decisions = _patch_second_iteration_acceleration(monkeypatch)
     max_backtracks = 2
     raw_scales: list[float] = []
-    original_scaled_proposal = efs_module._scaled_proposal
+    original_scaled_proposal = smoothing_loop._scaled_proposal
 
     def scaled_proposal_spy(current, steps, estimated_names, scale, config):
         raw_scales.append(scale)
@@ -3095,7 +3080,6 @@ def test_rejected_acceleration_is_not_backtracked_before_raw_trials_all_fail(
 
     monkeypatch.setattr(smoothing_loop, "_scaled_proposal", scaled_proposal_spy)
     monkeypatch.setattr(smoothing_objective, "_scaled_proposal", scaled_proposal_spy)
-    monkeypatch.setattr(efs_module, "_scaled_proposal", scaled_proposal_spy)
     model = fit_dense_distributional(
         frame,
         response,
@@ -3134,9 +3118,6 @@ def test_small_accepted_acceleration_does_not_supply_terminal_step_evidence(
     objectives = iter((0.0, -1.0, -2.0))
     monkeypatch.setattr(
         smoothing_objective, "joint_laplace_objective", lambda *args, **kwargs: next(objectives)
-    )
-    monkeypatch.setattr(
-        efs_module, "joint_laplace_objective", lambda *args, **kwargs: next(objectives)
     )
     _patch_second_iteration_acceleration(monkeypatch, step=1.0e-7)
     model = fit_dense_distributional(
@@ -3206,7 +3187,6 @@ def test_last_acceleration_with_zero_fresh_raw_residual_converges_without_anothe
 
     frame, response, predictors = _smooth_fixture()
     monkeypatch.setattr(smoothing_objective, "joint_laplace_objective", lambda *args, **kwargs: 0.0)
-    monkeypatch.setattr(efs_module, "joint_laplace_objective", lambda *args, **kwargs: 0.0)
     decisions = _patch_second_iteration_acceleration(monkeypatch, step=1.0e-7)
     raw_updates = _patch_raw_residual_sequence(monkeypatch, (0.25, 0.25, 0.0))
 
@@ -3276,12 +3256,9 @@ def test_accepted_acceleration_with_unsettled_raw_residual_is_not_a_plateau(
     monkeypatch.setattr(
         smoothing_objective, "joint_laplace_objective", lambda *args, **kwargs: next(objectives)
     )
-    monkeypatch.setattr(
-        efs_module, "joint_laplace_objective", lambda *args, **kwargs: next(objectives)
-    )
     _patch_second_iteration_acceleration(monkeypatch, step=1.0e-7)
     raw_residual_norms: list[float] = []
-    original_update = efs_module.wood_fasiolo_update
+    original_update = smoothing_evidence.wood_fasiolo_update
 
     def update_spy(*args, **kwargs):
         update = original_update(*args, **kwargs)
@@ -3289,7 +3266,6 @@ def test_accepted_acceleration_with_unsettled_raw_residual_is_not_a_plateau(
         return update
 
     monkeypatch.setattr(smoothing_evidence, "wood_fasiolo_update", update_spy)
-    monkeypatch.setattr(efs_module, "wood_fasiolo_update", update_spy)
     model = fit_dense_distributional(
         frame,
         response,
@@ -3322,7 +3298,6 @@ def test_flat_objective_with_unsettled_fresh_raw_residual_is_not_a_plateau(
 
     frame, response, predictors = _smooth_fixture()
     monkeypatch.setattr(smoothing_objective, "joint_laplace_objective", lambda *args, **kwargs: 0.0)
-    monkeypatch.setattr(efs_module, "joint_laplace_objective", lambda *args, **kwargs: 0.0)
     raw_updates = _patch_raw_residual_sequence(monkeypatch, (0.25, 0.25, 0.25))
 
     model = fit_dense_distributional(
@@ -3355,7 +3330,6 @@ def test_flat_objective_may_retain_plateau_reason_after_fresh_raw_convergence(
 ) -> None:
     frame, response, predictors = _smooth_fixture()
     monkeypatch.setattr(smoothing_objective, "joint_laplace_objective", lambda *args, **kwargs: 0.0)
-    monkeypatch.setattr(efs_module, "joint_laplace_objective", lambda *args, **kwargs: 0.0)
     raw_updates = _patch_raw_residual_sequence(monkeypatch, (0.25, 0.0))
 
     model = fit_dense_distributional(
@@ -3500,7 +3474,7 @@ def _upper_cap_refusal_result(
         synthetic_update,
         trace_terms={"location:x#wiggle": 0.0, target: 0.099},
     )
-    assert efs_module._saturated_names(
+    assert _saturated_names(
         synthetic_components,
         saturation_update,
         (target,),
@@ -3509,7 +3483,6 @@ def _upper_cap_refusal_result(
     monkeypatch.setattr(
         smoothing_evidence, "wood_fasiolo_update", lambda *args, **kwargs: synthetic_update
     )
-    monkeypatch.setattr(efs_module, "wood_fasiolo_update", lambda *args, **kwargs: synthetic_update)
 
     model = fit_dense_distributional(
         frame,
@@ -3860,7 +3833,7 @@ def test_each_accepted_lambda_update_refits_and_uses_fresh_observed_geometry(
 
     monkeypatch.setattr(scalar_efs, "optimize_efs_reml", forbid_scalar_efs)
     solver_calls: list[tuple[np.ndarray | None, object | None, object | None, object]] = []
-    original_solver = efs_module.fit_dense_fixed_lambda
+    original_solver = smoothing_authority.fit_dense_fixed_lambda
 
     def solver_spy(*args, **kwargs):
         initial = kwargs.get("initial")
@@ -3878,7 +3851,7 @@ def test_each_accepted_lambda_update_refits_and_uses_fresh_observed_geometry(
         return result
 
     inverse_inputs: list[np.ndarray] = []
-    original_update = efs_module.wood_fasiolo_update
+    original_update = smoothing_evidence.wood_fasiolo_update
 
     def update_spy(*args, **kwargs):
         inverse_inputs.append(np.array(args[2], copy=True))
@@ -3887,9 +3860,7 @@ def test_each_accepted_lambda_update_refits_and_uses_fresh_observed_geometry(
 
     monkeypatch.setattr(smoothing_authority, "fit_dense_fixed_lambda", solver_spy)
     monkeypatch.setattr(smoothing_loop, "fit_dense_fixed_lambda", solver_spy)
-    monkeypatch.setattr(efs_module, "fit_dense_fixed_lambda", solver_spy)
     monkeypatch.setattr(smoothing_evidence, "wood_fasiolo_update", update_spy)
-    monkeypatch.setattr(efs_module, "wood_fasiolo_update", update_spy)
 
     model = fit_dense_distributional(
         frame,
@@ -3968,7 +3939,7 @@ def test_shared_block_efs_components_use_effective_logdet_ranks() -> None:
         list(model.layout.penalties),
     )
 
-    states = efs_module._component_states(model.layout, model.lambdas)
+    states = _component_states(model.layout, model.lambdas)
 
     assert {state.name: state.rank for state in states} == pytest.approx(effective_ranks)
     tensor_states = [state for state in states if "#margin_" in state.name]
@@ -4033,7 +4004,7 @@ def test_joint_objective_matches_the_laplace_criterion_over_the_penalty_spectrum
         model.result.terminal_rank.log_pdet - _spectral_log_pdet(model.result.penalty)
     )
 
-    assert efs_module.joint_laplace_objective(
+    assert smoothing_objective.joint_laplace_objective(
         model.result,
         layout=model.layout,
         lambdas=model.lambdas,
@@ -4067,7 +4038,7 @@ def test_joint_objective_uses_structural_penalty_logdet_not_a_fresh_matrix_rank(
 
     monkeypatch.setattr(rank_module, "decompose_gram", unstable_full_matrix_rank)
 
-    actual = efs_module.joint_laplace_objective(
+    actual = smoothing_objective.joint_laplace_objective(
         model.result,
         layout=model.layout,
         lambdas=model.lambdas,
@@ -4088,7 +4059,7 @@ def test_joint_objective_requires_structural_penalty_metadata() -> None:
     )
 
     with pytest.raises(TypeError, match="layout"):
-        efs_module.joint_laplace_objective(model.result)
+        smoothing_objective.joint_laplace_objective(model.result)
 
 
 @pytest.mark.slow
@@ -4122,7 +4093,7 @@ def test_live_joint_laplace_safeguard_never_accepts_a_worse_outer_state() -> Non
             assert iteration.objective_after == iteration.objective_before
             assert iteration.lambdas_after == iteration.lambdas_before
     assert smoothing.objective == pytest.approx(
-        efs_module.joint_laplace_objective(
+        smoothing_objective.joint_laplace_objective(
             model.result,
             layout=model.layout,
             lambdas=model.lambdas,
@@ -4143,7 +4114,6 @@ def test_rejected_outer_step_rolls_back_lambda_and_coefficient_state_together(
         return 0.0 if calls == 1 else 1.0
 
     monkeypatch.setattr(smoothing_objective, "joint_laplace_objective", rejecting_objective)
-    monkeypatch.setattr(efs_module, "joint_laplace_objective", rejecting_objective)
     model = fit_dense_distributional(
         frame,
         response,
@@ -4181,7 +4151,7 @@ def test_curvature_fallback_is_auditable_and_blocks_matched_certification(
 ) -> None:
     frame, response, predictors = _smooth_fixture()
     _decreasing_objective(monkeypatch)
-    original_solver = efs_module.fit_dense_fixed_lambda
+    original_solver = smoothing_authority.fit_dense_fixed_lambda
 
     def fallback_solver(*args, **kwargs):
         result = original_solver(*args, **kwargs)
@@ -4199,7 +4169,6 @@ def test_curvature_fallback_is_auditable_and_blocks_matched_certification(
 
     monkeypatch.setattr(smoothing_authority, "fit_dense_fixed_lambda", fallback_solver)
     monkeypatch.setattr(smoothing_loop, "fit_dense_fixed_lambda", fallback_solver)
-    monkeypatch.setattr(efs_module, "fit_dense_fixed_lambda", fallback_solver)
     model = fit_dense_distributional(
         frame,
         response,
@@ -4223,8 +4192,8 @@ def test_inner_and_smoothing_convergence_are_reported_separately(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     frame, response, predictors = _smooth_fixture()
-    original_solver = efs_module.fit_dense_fixed_lambda
-    original_update = efs_module.wood_fasiolo_update
+    original_solver = smoothing_authority.fit_dense_fixed_lambda
+    original_update = smoothing_evidence.wood_fasiolo_update
     diagnostic_raw_maxima: list[float] = []
 
     def unconverged_solver(*args, **kwargs):
@@ -4240,9 +4209,7 @@ def test_inner_and_smoothing_convergence_are_reported_separately(
 
     monkeypatch.setattr(smoothing_authority, "fit_dense_fixed_lambda", unconverged_solver)
     monkeypatch.setattr(smoothing_loop, "fit_dense_fixed_lambda", unconverged_solver)
-    monkeypatch.setattr(efs_module, "fit_dense_fixed_lambda", unconverged_solver)
     monkeypatch.setattr(smoothing_evidence, "wood_fasiolo_update", diagnostic_update)
-    monkeypatch.setattr(efs_module, "wood_fasiolo_update", diagnostic_update)
     model = fit_dense_distributional(
         frame,
         response,
@@ -4410,7 +4377,7 @@ def test_efs_component_penalty_matches_each_kinds_own_definition(
     assert {component.penalty_kind for component in layout.penalties} == {kind}
 
     lambdas = {name: 1.0 for name in layout.penalty_names}
-    states = efs_module._component_states(layout, lambdas)
+    states = _component_states(layout, lambdas)
     assert len(states) == len(layout.penalties)
 
     expected = _efs_expected_block_from_definition(kind, n_levels, group_matrix, width)
@@ -4555,8 +4522,8 @@ def test_boundary_nomination_is_telemetry_only_and_preserves_the_numerical_route
         == right.history
     )
 
-    terminal_components = efs_module._component_states(nominated.layout, left.lambdas)
-    estimated_names = efs_module._estimated_names(terminal_components)
+    terminal_components = _component_states(nominated.layout, left.lambdas)
+    estimated_names = _estimated_names(terminal_components)
     terminal_update = wood_fasiolo_update(
         terminal_components,
         left.terminal_fit.coefficients,

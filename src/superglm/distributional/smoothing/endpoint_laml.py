@@ -17,15 +17,14 @@ from superglm.distributional.family import (
     FamilyLikelihoodPlan,
 )
 from superglm.distributional.layout import StackedLayout
-from superglm.distributional.result import (
+from superglm.distributional.results.endpoint_evidence import (
     ANALYTIC_DIRECTION_AUTHORITY,
     DIRECTION_AUTHORITIES,
     FINITE_DIFFERENCE_DIRECTION_AUTHORITY,
-    DenseSolverResult,
     EndpointDirectionDecision,
     EndpointDirectionEvidence,
 )
-from superglm.distributional.results.solver import _record_penalty_objective
+from superglm.distributional.results.solver import DenseSolverResult, _record_penalty_objective
 from superglm.distributional.smoothing.endpoint_direction import (
     FiniteDifferenceDirection,
     analytic_curvature_direction,

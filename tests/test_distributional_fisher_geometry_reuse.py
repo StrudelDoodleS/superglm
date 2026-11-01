@@ -11,7 +11,7 @@ from superglm._frame import as_eager_frame
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import Predictor, compile_predictors
-from superglm.distributional.result import DenseSolverConfig
+from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.features import Numeric
 
 from ._distributional_weights import resolved_prior

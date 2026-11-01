@@ -7,14 +7,14 @@ import pytest
 from superglm._frame import as_eager_frame
 from superglm._group_matrix._cross_matrix_execution import CrossMatrixExecutionPlan
 from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
-from superglm.distributional.assembly import (
+from superglm.distributional.family import ParameterSpec, ParameterSupport
+from superglm.distributional.layout import build_stacked_layout
+from superglm.distributional.predictor import Predictor, compile_predictors
+from superglm.distributional.solver.assembly import (
     _assemble_dense_geometry_from_matrices,
     assemble_grouped_geometry,
     dense_predictor_matrices,
 )
-from superglm.distributional.family import ParameterSpec, ParameterSupport
-from superglm.distributional.layout import build_stacked_layout
-from superglm.distributional.predictor import Predictor, compile_predictors
 from superglm.features import Categorical, Numeric, Spline, SplineCategorical
 from superglm.features.grouping import collapse_levels
 from superglm.group_matrix import DiscretizedSSPGroupMatrix

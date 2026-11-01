@@ -12,10 +12,9 @@ import superglm.distributional.solver.solver as solver_module
 from superglm._frame import as_eager_frame
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.layout import build_stacked_layout
-from superglm.distributional.penalty_face import build_penalty_face
 from superglm.distributional.predictor import Predictor, compile_predictors
-from superglm.distributional.result import DenseSolverConfig
-from superglm.distributional.results.solver import _newton_decrement_is_certified
+from superglm.distributional.results.solver import DenseSolverConfig, _newton_decrement_is_certified
+from superglm.distributional.smoothing.penalty_face import build_penalty_face
 from superglm.distributional.solver import fit_dense_fixed_lambda
 from superglm.distributional.solver.curvature import CurvaturePolicyState
 from superglm.features import Numeric, RandomEffect

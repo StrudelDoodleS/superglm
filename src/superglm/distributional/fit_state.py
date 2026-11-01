@@ -39,13 +39,10 @@ from superglm.distributional.predictor import (
     Predictor,
     PredictorExecutionPlan,
 )
-from superglm.distributional.result import (
-    ConvergenceReason,
-    DenseSolverConfig,
-    DenseSolverResult,
-    DistributionalEFSResult,
-    DistributionalFitResult,
-)
+from superglm.distributional.results.endpoint_evidence import ConvergenceReason
+from superglm.distributional.results.fit import DistributionalFitResult
+from superglm.distributional.results.smoothing import DistributionalEFSResult
+from superglm.distributional.results.solver import DenseSolverConfig, DenseSolverResult
 from superglm.distributional.solver.chunks import ChunkSize
 from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.distributional.walls import PRESSED_STEP, outward_step, wall_rows

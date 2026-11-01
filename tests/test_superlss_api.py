@@ -24,7 +24,7 @@ from superglm.distributional.families.negative_binomial import (
 from superglm.distributional.family import DistributionalFamily, ObservationContract
 from superglm.distributional.fit_diagnostics import diagnose_distributional_fit
 from superglm.distributional.model import fit_dense_distributional, refit_dense_distributional
-from superglm.distributional.result import DistributionalFitResult
+from superglm.distributional.results.fit import DistributionalFitResult
 from superglm.distributional.timing import FitPhaseRecorder
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,

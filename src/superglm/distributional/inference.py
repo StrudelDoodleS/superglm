@@ -11,7 +11,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributional.layout import StackedLayout
-from superglm.distributional.result import DenseSolverResult
+from superglm.distributional.results.solver import DenseSolverResult
 from superglm.distributional.telemetry import AcceptedCurvatureKind, CurvatureTelemetry
 
 

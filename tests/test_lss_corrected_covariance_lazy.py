@@ -28,11 +28,11 @@ from superglm.distributional import Predictor
 from superglm.distributional import api as api_module
 from superglm.distributional import posterior as posterior_module
 from superglm.distributional import terms as terms_module
-from superglm.distributional.efs import DistributionalEFSConfig
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.model import DenseDistributionalModel, fit_dense_distributional
 from superglm.distributional.posterior import posterior_covariance, posterior_draws
+from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.smoothing.derivatives import (
     LamlDerivativeError,
     LamlDerivatives,

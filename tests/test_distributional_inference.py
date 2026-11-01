@@ -12,9 +12,9 @@ from superglm._frame import as_eager_frame
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.inference import compute_joint_inference
 from superglm.distributional.layout import StackedLayout, build_stacked_layout
-from superglm.distributional.penalty_face import build_penalty_face
 from superglm.distributional.predictor import Predictor, compile_predictors
-from superglm.distributional.result import DenseSolverConfig, DenseSolverResult
+from superglm.distributional.results.solver import DenseSolverConfig, DenseSolverResult
+from superglm.distributional.smoothing.penalty_face import build_penalty_face
 from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.features import Numeric
 from superglm.solvers.rank import decompose_gram

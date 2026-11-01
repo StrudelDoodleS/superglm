@@ -17,7 +17,7 @@ from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import Predictor, compile_predictors
-from superglm.distributional.result import DenseSolverConfig
+from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.solver import chunks
 from superglm.distributional.solver import solver as solver_api
 from superglm.distributional.solver._global_moments import GlobalMomentRefusalError

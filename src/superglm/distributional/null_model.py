@@ -14,11 +14,8 @@ from numpy.typing import NDArray
 
 from superglm.distributional.family import DistributionalFamily, FamilyLikelihoodPlan
 from superglm.distributional.layout import PredictorState, StackedLayout
-from superglm.distributional.result import (
-    ConvergenceReason,
-    DenseSolverConfig,
-    DenseSolverResult,
-)
+from superglm.distributional.results.endpoint_evidence import ConvergenceReason
+from superglm.distributional.results.solver import DenseSolverConfig, DenseSolverResult
 from superglm.distributional.solver.solver import fit_dense_fixed_lambda
 from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.distributional.weights import (

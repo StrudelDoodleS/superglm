@@ -132,7 +132,8 @@ def test_failed_terminal_retry_on_a_reused_endpoint_skips_fisher_geometry(monkey
     import dataclasses
 
     from superglm.distributional.model import fit_dense_distributional
-    from superglm.distributional.result import DenseSolverConfig, DistributionalEFSConfig
+    from superglm.distributional.results.iteration import DistributionalEFSConfig
+    from superglm.distributional.results.solver import DenseSolverConfig
     from superglm.distributional.weights import WeightContract
     from superglm.types import LambdaPolicy
 

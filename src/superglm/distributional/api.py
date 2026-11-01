@@ -72,12 +72,10 @@ from superglm.distributional.posterior import (
 )
 from superglm.distributional.predictor import Predictor
 from superglm.distributional.residuals import ResidualKind, ResidualSet, compute_residuals
-from superglm.distributional.result import (
-    DenseSolverConfig,
-    DistributionalEFSConfig,
-    DistributionalFitResult,
-    EFSConvergenceReason,
-)
+from superglm.distributional.results.endpoint_evidence import EFSConvergenceReason
+from superglm.distributional.results.fit import DistributionalFitResult
+from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.separation import validate_separation_policy
 from superglm.distributional.surfaces import (
     DensityFan,

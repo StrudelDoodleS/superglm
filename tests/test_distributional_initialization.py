@@ -202,7 +202,8 @@ def test_start_fisher_uses_backend_predictor_arithmetic_under_cancellation(chunk
     from superglm.distributional.family import COMPLETE_OBSERVATION
     from superglm.distributional.layout import build_stacked_layout
     from superglm.distributional.predictor import compile_predictors
-    from superglm.distributional.result import DenseSolverConfig, DistributionalEFSConfig
+    from superglm.distributional.results.iteration import DistributionalEFSConfig
+    from superglm.distributional.results.solver import DenseSolverConfig
     from superglm.distributional.smoothing.initialization import (
         prepare_distributional_initialization,
     )

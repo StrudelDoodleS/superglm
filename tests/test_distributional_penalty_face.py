@@ -11,9 +11,9 @@ from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.inference import compute_joint_inference
 from superglm.distributional.layout import StackedLayout, build_stacked_layout
-from superglm.distributional.penalty_face import PenaltyFaceError, build_penalty_face
 from superglm.distributional.predictor import Predictor, compile_predictors
-from superglm.distributional.result import DenseSolverConfig
+from superglm.distributional.results.solver import DenseSolverConfig
+from superglm.distributional.smoothing.penalty_face import PenaltyFaceError, build_penalty_face
 from superglm.distributional.solver import fit_dense_fixed_lambda
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.features import Numeric, RandomEffect, Spline
