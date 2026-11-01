@@ -563,6 +563,36 @@ def _small_shape_log_q(a, x, k_max, n, w, along_ratio):
 
 
 @njit(cache=True)
+def log_gamma_tail_small_x_jet_into(a, log_x, upper, order, along_ratio, jet, w):
+    """:func:`log_gamma_tail_jet_into` at ``x = exp(log_x)`` too small to form, from ``log x``.
+
+    ``log P = L + log(e^-x S) = L - a x/(a + 1) + O(x^2)``, ``L = a log x -
+    ln Gamma(a + 1)`` (DLMF 8.7.1); every jet coefficient of the remainder is
+    at most ``x``, or ``x/a`` along ``x/a``, so where those are below ``u``
+    the jet is ``L``'s, and ``log Q`` its complement.  The caller holds the
+    remainder below ``u`` of the row's scale; ``False`` (and NaN) off the
+    domain.
+    """
+    if not (0 <= order <= MAX_ORDER and jet.shape[0] >= (order + 1) * (order + 2) // 2):
+        _fill_nan(jet)
+        return False
+    if not (0.0 < a < math.inf and -math.inf < log_x < math.inf):
+        _fill_nan(jet)
+        return False
+    n = (order + 1) * (order + 2) // 2
+    _log_power_jet(a, log_x, order, n, w, _SMOOTH, along_ratio)
+    for r in range(n):
+        w[_LOG + r] = w[_SMOOTH + r]
+    if upper:
+        _jet_complement(w, a, False, n)
+        for r in range(n):
+            w[_LOG + r] = w[_TMP2 + r]
+    for r in range(n):
+        jet[r] = w[_LOG + r]
+    return True
+
+
+@njit(cache=True)
 def log_gamma_tail_jet_into(a, x, upper, order, along_ratio, jet, w):
     """Taylor coefficients of the log tail into ``jet``; ``False`` (and NaN) off the domain.
 
