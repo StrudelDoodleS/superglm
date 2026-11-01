@@ -1434,7 +1434,6 @@ def _endpoint_polish_fixture(
         max_iterations=150,
         tolerance=1.0e-12,
         coefficient_curvature="observed",
-        newton_decrement_tolerance=None,
     )
     penalty = np.zeros((layout.n_coefficients, layout.n_coefficients), dtype=np.float64)
     base = fit_dense_fixed_lambda(
@@ -1836,7 +1835,6 @@ def test_gamma_efs_selects_an_exact_irrelevant_face_and_keeps_a_finite_smooth(
                 authority_config = smoothing.coefficient_fits[fit_index].config
                 assert authority_config.coefficient_curvature == "observed"
                 assert authority_config.tolerance == 1.0e-12
-                assert authority_config.newton_decrement_tolerance is None
     null_residual = np.linalg.norm(face.constraint_matrix @ terminal.coefficients, ord=2)
     coefficient_scale = max(1.0, float(np.linalg.norm(terminal.coefficients, ord=2)))
     assert null_residual <= face.null_residual_bound * coefficient_scale

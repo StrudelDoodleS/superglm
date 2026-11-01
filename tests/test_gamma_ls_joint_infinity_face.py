@@ -278,7 +278,6 @@ def test_public_gamma_reml_accepts_the_strict_joint_infinity_face(
     assert face.component_names == _FACE_COMPONENTS
     assert terminal.config.coefficient_curvature == "observed"
     assert terminal.config.tolerance <= 1.0e-12
-    assert terminal.config.newton_decrement_tolerance is None
     assert terminal.terminal_curvature.actual_source == "observed"
     assert terminal.terminal_curvature.fallback_count == 0
     terminal_kkt = _retained_kkt_relative(terminal)

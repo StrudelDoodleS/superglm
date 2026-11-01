@@ -113,7 +113,6 @@ def _face_authority_config(config: DenseSolverConfig) -> DenseSolverConfig:
         config,
         max_iterations=max(config.max_iterations, 150),
         tolerance=min(config.tolerance, 1.0e-12),
-        newton_decrement_tolerance=None,
         coefficient_curvature="observed",
     )
 

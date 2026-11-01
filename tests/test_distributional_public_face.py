@@ -189,7 +189,6 @@ def test_public_gamma_reml_exposes_an_exact_face_at_the_default_lambda_cap(
             config = fitted.smoothing.coefficient_fits[fit_index].config
             assert config.coefficient_curvature == "observed"
             assert config.tolerance == 1.0e-12
-            assert config.newton_decrement_tolerance is None
     terminal_recheck = face_events[1]
     assert terminal_recheck.accepted_fit_index is not None
     source = fitted.smoothing.coefficient_fits[terminal_recheck.source_fit_index]

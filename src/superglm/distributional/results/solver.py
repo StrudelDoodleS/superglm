@@ -860,7 +860,6 @@ class DenseSolverConfig:
     max_levenberg_attempts: int = 20
     terminal_retry_iterations: int = 25
     terminal_retry_tolerance_factor: float = 0.1
-    newton_decrement_tolerance: float | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -881,15 +880,6 @@ class DenseSolverConfig:
             "terminal_retry_tolerance_factor",
         ):
             object.__setattr__(self, name, _finite_positive(getattr(self, name), name=name))
-        if self.newton_decrement_tolerance is not None:
-            object.__setattr__(
-                self,
-                "newton_decrement_tolerance",
-                _finite_positive(
-                    self.newton_decrement_tolerance,
-                    name="newton_decrement_tolerance",
-                ),
-            )
         if self.coefficient_curvature not in ("fisher", "observed"):
             raise ValueError("coefficient_curvature must be 'fisher' or 'observed'")
         if not math.isfinite(self.backtrack_factor) or not 0.0 < self.backtrack_factor < 1.0:
@@ -925,44 +915,6 @@ def _readonly_finite(values: NDArray, *, name: str) -> NDArray[np.float64]:
     if not np.all(np.isfinite(result)):
         raise ValueError(f"{name} must contain only finite values")
     return np.frombuffer(result.tobytes(order="C"), dtype=result.dtype).reshape(result.shape)
-
-
-def _validate_newton_decrement_certificate(
-    *,
-    config: DenseSolverConfig,
-    converged: bool,
-    terminal_curvature: CurvatureTelemetry,
-    score: NDArray[np.float64],
-    penalized_curvature: NDArray[np.float64],
-    penalized_objective: float,
-    face: PenaltyFace | None,
-) -> None:
-    if not converged:
-        raise ValueError("a Newton decrement certificate requires converged=True")
-    if config.coefficient_curvature != "observed":
-        raise ValueError("a Newton decrement certificate requires observed curvature")
-    if config.newton_decrement_tolerance is None:
-        raise ValueError("a Newton decrement certificate was not enabled for this fit")
-    if (
-        not isinstance(terminal_curvature, CurvatureTelemetry)
-        or terminal_curvature.requested_source != "observed"
-        or terminal_curvature.actual_source != "observed"
-        or terminal_curvature.fallback_count != 0
-    ):
-        raise ValueError(
-            "a Newton decrement certificate requires unfallbacked observed terminal curvature"
-        )
-    if not _newton_decrement_is_certified(
-        config=config,
-        score=score,
-        penalized_curvature=penalized_curvature,
-        penalized_objective=penalized_objective,
-        face=face,
-        tolerance=config.newton_decrement_tolerance,
-    ):
-        raise ValueError(
-            "terminal score and curvature do not satisfy the Newton decrement certificate"
-        )
 
 
 def _newton_decrement_is_certified(
@@ -1508,16 +1460,6 @@ class DenseSolverResult:
             )
         if self.convergence_reason == "objective_and_step":
             _validate_objective_and_step_certificate(
-                config=self.config,
-                converged=self.converged,
-                terminal_curvature=self.terminal_curvature,
-                score=score,
-                penalized_curvature=penalized_curvature,
-                penalized_objective=penalized_optimizing,
-                face=self.coefficient_face,
-            )
-        if self.convergence_reason == "newton_decrement":
-            _validate_newton_decrement_certificate(
                 config=self.config,
                 converged=self.converged,
                 terminal_curvature=self.terminal_curvature,

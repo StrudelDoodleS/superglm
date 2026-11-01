@@ -350,50 +350,6 @@ def test_newton_certificate_is_invariant_to_feature_units(scale: float) -> None:
     assert result is True
 
 
-def test_public_solver_keeps_a_resolved_near_collinear_newton_stop() -> None:
-    """A resolved, ill-conditioned SPD fit remains a valid decrement stop."""
-    rho = 1.0 - 1.0e-9
-    design = np.array(
-        [[1.0, rho], [0.0, np.sqrt(1.0 - rho**2)]],
-        dtype=np.float64,
-    )
-    target = np.array([1.0e-5, 1.0e-5], dtype=np.float64)
-    response = design @ target
-    family = _UnitGaussian()
-    weights = resolved_prior(np.ones(response.size, dtype=np.float64))
-    frame = as_eager_frame(pd.DataFrame({"x1": design[:, 0], "x2": design[:, 1]}))
-    layout = build_stacked_layout(
-        compile_predictors(
-            frame,
-            weights,
-            family.parameters,
-            (Predictor("mean", {"x1": Numeric(), "x2": Numeric()}, intercept=False),),
-        )
-    )
-    likelihood_plan = family.bind_likelihood(response, weights, COMPLETE_OBSERVATION)
-    result = fit_dense_fixed_lambda(
-        family,  # type: ignore[arg-type]
-        layout,
-        response,
-        likelihood_plan,  # type: ignore[arg-type]
-        np.zeros((2, 2), dtype=np.float64),
-        initial=np.zeros(2, dtype=np.float64),
-        config=DenseSolverConfig(
-            max_iterations=4,
-            tolerance=1.0e-8,
-            newton_decrement_tolerance=1.0e-8,
-            coefficient_curvature="observed",
-        ),
-    )
-
-    assert result.converged is True
-    assert result.convergence_reason == "newton_decrement"
-    assert result.iterations == 0
-    assert result.terminal_rank.rank == 2
-    assert result.terminal_curvature.fallback_count == 0
-    assert result.score_relative > result.config.tolerance
-
-
 def test_retry_failure_replaces_the_prior_convergence_verdict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

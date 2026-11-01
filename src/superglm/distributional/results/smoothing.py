@@ -568,7 +568,6 @@ class DistributionalEFSResult:
                 or rollback_fit.terminal_curvature.actual_source != "observed"
                 or rollback_fit.terminal_curvature.fallback_count != 0
                 or rollback_fit.config.max_iterations < 150
-                or rollback_fit.config.newton_decrement_tolerance is not None
                 or not rollback_fit.converged
                 or not numerically_stationary(
                     rollback_fit,
@@ -908,7 +907,6 @@ class DistributionalEFSResult:
                         or endpoint_fit.terminal_curvature.fallback_count != 0
                         or rollback_fit.terminal_curvature.fallback_count != 0
                         or rollback_fit.config.max_iterations < 150
-                        or rollback_fit.config.newton_decrement_tolerance is not None
                         or item.accepted_curvature != rollback_fit.terminal_curvature
                     ):
                         raise ValueError("endpoint state-change deactivation used uncertified fits")

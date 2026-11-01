@@ -1088,35 +1088,6 @@ def _run_iterations(
                 step_relative=step_relative,
             )
         optimization_score = _optimization_score(context, geometry.score_penalized)
-        if (
-            stop_policy == "ordinary"
-            and config.newton_decrement_tolerance is not None
-            and config.coefficient_curvature == "observed"
-            and direction.levenberg_shift == 0.0
-            and direction.decomposition.rank == len(optimization_score)
-        ):
-            if _newton_decrement_is_certified(
-                config=config,
-                score=geometry.score_penalized,
-                penalized_curvature=geometry.penalized_curvature,
-                penalized_objective=state.penalized_optimizing_log_likelihood,
-                face=context.coefficient_face,
-                tolerance=config.newton_decrement_tolerance,
-            ):
-                return _OptimizationRun(
-                    state=state,
-                    geometry=geometry,
-                    observed_geometry=observed_geometry,
-                    history=tuple(history),
-                    converged=True,
-                    reason="newton_decrement",
-                    score_relative=score_relative,
-                    objective_relative_change=objective_relative_change,
-                    step_relative=float(
-                        np.linalg.norm(direction.step, ord=np.inf)
-                        / (1.0 + np.linalg.norm(state.coefficients, ord=np.inf))
-                    ),
-                )
         with measure_phase(phase_recorder, "likelihood_evaluation"):
             capped_step, step_scale = _cap_predictor_step(
                 context,
@@ -1639,7 +1610,6 @@ def _fit_dense_fixed_lambda_core(
             solver_config,
             max_iterations=solver_config.terminal_retry_iterations,
             tolerance=max(0.01 * solver_config.tolerance, 10.0 * np.finfo(np.float64).eps),
-            newton_decrement_tolerance=None,
         )
         try:
             # timed with the terminal retry, so a fit that runs both records the phase twice
@@ -1719,7 +1689,6 @@ def _fit_dense_fixed_lambda_core(
                 solver_config,
                 max_iterations=solver_config.terminal_retry_iterations,
                 tolerance=retry_tolerance,
-                newton_decrement_tolerance=None,
             )
             try:
                 retry = _run_iterations(

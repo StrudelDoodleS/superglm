@@ -2632,7 +2632,7 @@ def test_exact_face_check_differences_a_family_that_refuses_its_links(case: str)
     assert evidence.decision == "endpoint"
 
 
-def _resolved_quadratic_gap_fit() -> DenseSolverResult:
+def _single_coefficient_fit() -> DenseSolverResult:
     family = _UnitGaussian()
     response = np.array([1.0])
     weights = resolved_prior(np.ones(1))
@@ -2660,28 +2660,19 @@ def _resolved_quadratic_gap_fit() -> DenseSolverResult:
         config=DenseSolverConfig(
             max_iterations=10,
             tolerance=1.0e-8,
-            newton_decrement_tolerance=1.0e-8,
             coefficient_curvature="observed",
         ),
     )
 
     assert result.converged is True
-    assert result.convergence_reason == "newton_decrement"
-    assert result.iterations == 0
-    np.testing.assert_array_equal(result.coefficients, initial)
     return result
 
 
-def test_observed_newton_decrement_stops_at_a_resolved_quadratic_gap() -> None:
-    """Kills requiring a raw score after the remaining objective gap is certified."""
-    _resolved_quadratic_gap_fit()
-
-
-def test_history_compaction_reuses_validated_newton_certificate(monkeypatch) -> None:
+def test_history_compaction_reuses_the_validated_certificate(monkeypatch) -> None:
     from superglm.distributional.results import solver as solver_results
     from superglm.distributional.smoothing.history import compact_coefficient_history
 
-    source = _resolved_quadratic_gap_fit()
+    source = _single_coefficient_fit()
     fits = [source, source]
     decompositions = []
     original = solver_results.decompose_gram
@@ -2708,130 +2699,6 @@ def test_history_compaction_reuses_validated_newton_certificate(monkeypatch) -> 
                 value.setflags(write=True)
     compact_coefficient_history(fits, (), terminal_fit_index=1, config=DistributionalEFSConfig())
     assert fits[0] is compact
-    # Public construction still revalidates a certificate with changed evidence.
-    with pytest.raises(ValueError, match="Newton decrement certificate"):
-        replace(compact, terminal_score=compact.terminal_score * 1.0e8)
-
-
-def test_newton_decrement_result_revalidates_its_terminal_certificate() -> None:
-    """Kills publishing the reason after its score or curvature provenance changed."""
-    family = _UnitGaussian()
-    response = np.array([1.0])
-    weights = resolved_prior(np.ones(1))
-    frame = as_eager_frame(pd.DataFrame({"effect": ["only"]}))
-    layout = build_stacked_layout(
-        compile_predictors(
-            frame,
-            weights,
-            family.parameters,
-            (Predictor("mean", {"effect": RandomEffect()}, intercept=False),),
-        )
-    )
-    component_name = layout.penalty_names[0]
-    lambda_value = 1.0e8
-    optimum = 1.0 / (1.0 + lambda_value)
-    result = fit_dense_fixed_lambda(
-        family,  # type: ignore[arg-type]
-        layout,
-        response,
-        family.bind_likelihood(response, weights, COMPLETE_OBSERVATION),  # type: ignore[arg-type]
-        layout.penalty_matrix({component_name: lambda_value}),
-        initial=np.array([optimum + 1.0e-8]),
-        config=DenseSolverConfig(
-            max_iterations=10,
-            tolerance=1.0e-8,
-            newton_decrement_tolerance=1.0e-8,
-            coefficient_curvature="observed",
-        ),
-    )
-    assert result.convergence_reason == "newton_decrement"
-
-    with pytest.raises(ValueError, match="Newton decrement certificate"):
-        replace(result, terminal_score=1.0e8 * result.terminal_score)
-
-    fallback = replace(
-        result.terminal_curvature,
-        actual_source="fisher",
-        reason="test mutation",
-        fallback_count=1,
-    )
-    with pytest.raises(ValueError, match="observed terminal curvature"):
-        replace(result, terminal_curvature=fallback)
-
-
-def test_endpoint_authority_refits_after_a_loose_newton_decrement_stop() -> None:
-    """A parent decrement-only stop cannot supply endpoint direction authority."""
-    family = _UnitGaussian()
-    response = np.array([0.5], dtype=np.float64)
-    weights = resolved_prior(np.ones(1, dtype=np.float64))
-    frame = as_eager_frame(pd.DataFrame({"effect": ["only"]}))
-    layout = build_stacked_layout(
-        compile_predictors(
-            frame,
-            weights,
-            family.parameters,
-            (Predictor("mean", {"effect": RandomEffect()}, intercept=False),),
-        )
-    )
-    component_name = layout.penalty_names[0]
-    endpoint_face = build_penalty_face(layout, (component_name,))
-    lambdas = {component_name: 10.0}
-    initial = np.array([0.25], dtype=np.float64)
-    parent_config = DenseSolverConfig(
-        max_iterations=10,
-        tolerance=1.0e-4,
-        newton_decrement_tolerance=1.0,
-        coefficient_curvature="observed",
-    )
-    likelihood_plan = family.bind_likelihood(
-        response,
-        weights,
-        COMPLETE_OBSERVATION,
-    )
-
-    loose_fit = fit_dense_fixed_lambda(
-        family,  # type: ignore[arg-type]
-        layout,
-        response,
-        likelihood_plan,  # type: ignore[arg-type]
-        layout.penalty_matrix(lambdas),
-        initial=initial,
-        config=parent_config,
-    )
-    assert loose_fit.convergence_reason == "newton_decrement"
-    assert loose_fit.iterations == 0
-    np.testing.assert_array_equal(loose_fit.coefficients, initial)
-
-    attempt = smoothing_faces._check_face_direction(
-        family,  # type: ignore[arg-type]
-        layout,
-        response,
-        likelihood_plan,  # type: ignore[arg-type]
-        lambdas=lambdas,
-        component_name=component_name,
-        finite_face=None,
-        endpoint_face=endpoint_face,
-        initial=loose_fit.coefficients,
-        solver_config=parent_config,
-        chunk_size=None,
-        phase_recorder=None,
-    )
-
-    assert attempt.check is not None
-    assert attempt.check.direction.decision == "endpoint"
-    assert all(
-        fit.config.coefficient_curvature == "observed"
-        and fit.config.tolerance == 1.0e-12
-        and fit.config.newton_decrement_tolerance is None
-        and fit.convergence_reason != "newton_decrement"
-        for fit in attempt.assessment_fits
-    )
-    np.testing.assert_allclose(
-        attempt.assessment_fits[0].coefficients,
-        np.array([0.5 / 11.0]),
-        rtol=0.0,
-        atol=64.0 * np.finfo(np.float64).eps,
-    )
 
 
 def _dense_component(
@@ -3007,7 +2874,6 @@ def test_efs_revalidates_a_joint_face_from_one_fresh_common_fit(
     )
     assert common_fit.config.tolerance == 1.0e-12
     assert common_fit.config.coefficient_curvature == "observed"
-    assert common_fit.config.newton_decrement_tolerance is None
     assert common_fit.terminal_curvature.actual_source == "observed"
     assert common_fit.terminal_curvature.fallback_count == 0
     direction = revalidation.endpoint_direction_evidence
@@ -5141,7 +5007,6 @@ def test_terminal_face_revalidation_failure_stays_nonconverged_without_upper_pre
     assert smoothing.terminal_fit.converged is True
     assert smoothing.terminal_fit.config.tolerance == 1.0e-12
     assert smoothing.terminal_fit.config.coefficient_curvature == "observed"
-    assert smoothing.terminal_fit.config.newton_decrement_tolerance is None
     assert np.all(np.isfinite(smoothing.terminal_fit.coefficients))
     assert smoothing.terminal_endpoint_directions == {}
     assert smoothing.history[-1].deactivated_face_components == (component_name,)
