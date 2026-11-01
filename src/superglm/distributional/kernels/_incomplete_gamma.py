@@ -477,7 +477,7 @@ def log_gamma_tail_jet_into(a, x, upper, order, along_ratio, jet, w):
 @njit(cache=True)
 def log_gamma_tail_into(a, x, upper, order, out, w):
     """:func:`log_gamma_tail` with caller-owned work of :data:`WORK_SIZE`."""
-    if not log_gamma_tail_jet_into(a, x, upper, order, False, out, w):
+    if not log_gamma_tail_jet_into(a, x, upper, order, np.bool_(False), out, w):
         return
     inverse_x = 1.0 / x
     for r in range((order + 1) * (order + 2) // 2):
