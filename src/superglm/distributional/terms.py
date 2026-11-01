@@ -91,6 +91,7 @@ from scipy import stats
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.diagnostics.convergence import lss_nonconvergence_reason
+from superglm.distributional._common import json_floats, json_number
 from superglm.distributional.posterior import (
     CovarianceKind,
     _posterior_draw_count,
@@ -134,16 +135,8 @@ _SPECIAL_SUFFIX = ":special"
 _ABSORBED_EDF = 1.0e-10
 
 
-def _json_number(value: Any) -> float | None:
-    """Return a JSON-safe float, mapping a non-finite value to ``None``."""
-    number = float(value)
-    return number if math.isfinite(number) else None
-
-
 def _json_array(values: NDArray | None) -> list[float | None] | None:
-    if values is None:
-        return None
-    return [_json_number(value) for value in np.asarray(values, dtype=np.float64)]
+    return None if values is None else json_floats(values)
 
 
 @dataclass(frozen=True)
@@ -198,10 +191,10 @@ class ParameterTermEffect:
             "lower_simultaneous": _json_array(self.lower_simultaneous),
             "upper_simultaneous": _json_array(self.upper_simultaneous),
             "critical_value": (
-                None if self.critical_value is None else _json_number(self.critical_value)
+                None if self.critical_value is None else json_number(self.critical_value)
             ),
             "multiplier": _json_array(self.multiplier),
-            "edf": _json_number(self.edf),
+            "edf": json_number(self.edf),
             "lambdas": {name: float(value) for name, value in self.lambdas.items()},
             "covariance_kind": self.covariance_kind,
             "alpha": float(self.alpha),
@@ -231,10 +224,10 @@ class TermTest:
             "schema_version": int(self.schema_version),
             "parameter": self.parameter,
             "term": self.term,
-            "statistic": _json_number(self.statistic),
-            "rank": _json_number(self.rank),
-            "p_value": _json_number(self.p_value),
-            "edf": _json_number(self.edf),
+            "statistic": json_number(self.statistic),
+            "rank": json_number(self.rank),
+            "p_value": json_number(self.p_value),
+            "edf": json_number(self.edf),
             "note": self.note,
         }
 

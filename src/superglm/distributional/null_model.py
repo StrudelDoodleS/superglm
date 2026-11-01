@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.distributional._common import readonly_finite
 from superglm.distributional.family import DistributionalFamily, FamilyLikelihoodPlan
 from superglm.distributional.layout import PredictorState, StackedLayout
 from superglm.distributional.results.endpoint_evidence import ConvergenceReason
@@ -25,17 +26,6 @@ from superglm.distributional.weights import (
 )
 from superglm.group_matrix import DesignMatrix
 from superglm.links import Link
-
-
-def _readonly(values: NDArray, *, name: str) -> NDArray[np.float64]:
-    try:
-        result = np.array(values, dtype=np.float64, copy=True)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(f"{name} must contain finite numeric values") from exc
-    if not np.all(np.isfinite(result)):
-        raise ValueError(f"{name} must contain finite numeric values")
-    result.setflags(write=False)
-    return result
 
 
 def _family_config(family: DistributionalFamily) -> Mapping[str, Any]:
@@ -55,7 +45,7 @@ def _null_layout(source: StackedLayout, n_observations: int) -> StackedLayout:
     predictors: list[PredictorState] = []
     coefficient_names: list[str] = []
     for index, state in enumerate(source.predictors):
-        offset = _readonly(state.offset, name=f"offset for {state.name!r}")
+        offset = readonly_finite(state.offset, name=f"offset for {state.name!r}")
         if offset.shape != (n_observations,):
             raise ValueError("source predictor offsets must match the response row count")
         predictors.append(
@@ -180,7 +170,7 @@ class JointNullModel:
             raise ValueError("offsets must follow family parameter order")
         offsets: dict[str, NDArray[np.float64]] = {}
         for state in self.layout.predictors:
-            offset = _readonly(self.offsets[state.name], name=f"offset for {state.name!r}")
+            offset = readonly_finite(self.offsets[state.name], name=f"offset for {state.name!r}")
             if offset.shape != (self.n_observations,) or not np.array_equal(offset, state.offset):
                 raise ValueError("retained offsets must match the null layout")
             offsets[state.name] = offset

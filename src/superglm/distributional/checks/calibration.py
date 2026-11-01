@@ -67,6 +67,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm.distributional._common import readonly
 from superglm.distributional.checks._aggregate import grouped_ratio
 
 # One binning rule for the whole suite: an actual-versus-expected table and a
@@ -107,7 +108,6 @@ from superglm.distributional.surfaces import (
     _equal_count_bins,
     _json_frame,
     _json_vector,
-    _readonly,
 )
 from superglm.distributional.weights import resolve_likelihood_weights
 
@@ -369,11 +369,11 @@ def reliability_curve(
     lower, upper = np.quantile(resampled, _BAND_PERCENTILES, axis=0)
 
     return ReliabilityCurve(
-        x=_readonly(unique.astype(np.float64)),
-        calibrated=_readonly(calibrated),
-        count=_readonly(counts.astype(np.int64)),
-        lower=_readonly(lower),
-        upper=_readonly(upper),
+        x=readonly(unique.astype(np.float64)),
+        calibrated=readonly(calibrated),
+        count=readonly(counts.astype(np.int64)),
+        lower=readonly(lower),
+        upper=readonly(upper),
         n_boot=boot,
         seed=int(seed),
     )
@@ -603,15 +603,15 @@ def actual_expected_check(
 
     return ActualExpected(
         covariate=str(name),
-        edges=None if binning.edges is None else _readonly(binning.edges),
+        edges=None if binning.edges is None else readonly(binning.edges),
         levels=binning.levels,
-        centers=_readonly(binning.centers),
-        n=_readonly(np.bincount(binning.codes, minlength=width).astype(np.int64)),
-        weight=_readonly(exposure),
-        actual=_readonly(actual),
-        expected=_readonly(expected),
-        ratio=_readonly(ratio),
-        ratio_se=_readonly(error),
+        centers=readonly(binning.centers),
+        n=readonly(np.bincount(binning.codes, minlength=width).astype(np.int64)),
+        weight=readonly(exposure),
+        actual=readonly(actual),
+        expected=readonly(expected),
+        ratio=readonly(ratio),
+        ratio_se=readonly(error),
         variance_law=variance_law,
         weight_semantics=rows.semantics,
     )

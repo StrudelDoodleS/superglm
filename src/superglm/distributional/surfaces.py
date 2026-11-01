@@ -31,6 +31,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm.distributional._common import json_number, readonly
 from superglm.distributional.checks._aggregate import _replicated_quantiles, grouped_ratio
 from superglm.distributional.family import (
     AtomFamily,
@@ -76,12 +77,6 @@ _DENSITY_NEGATIVE_TOLERANCE = 1.0e-9
 # --------------------------------------------------------------------------- #
 
 
-def _readonly(values: NDArray) -> NDArray:
-    array = np.array(values, copy=True)
-    array.setflags(write=False)
-    return array
-
-
 def _json_scalar(value: Any) -> float | int | bool | str | None:
     """Return one payload value as a JSON leaf; non-finite numbers become null."""
     if value is None or value is pd.NA:
@@ -92,8 +87,7 @@ def _json_scalar(value: Any) -> float | int | bool | str | None:
         return str(value)
     if isinstance(value, int | np.integer):
         return int(value)
-    number = float(value)
-    return number if np.isfinite(number) else None
+    return json_number(value)
 
 
 def _json_vector(values: Any) -> list[Any]:
@@ -439,12 +433,12 @@ def risk_curves(
 
     return RiskCurves(
         covariate=str(covariate),
-        x=_readonly(positions),
+        x=readonly(positions),
         levels=levels,
         quantiles=asked,
-        values=_readonly(np.vstack(estimates)),
-        lower=_readonly(np.vstack(lower)),
-        upper=_readonly(np.vstack(upper)),
+        values=readonly(np.vstack(estimates)),
+        lower=readonly(np.vstack(lower)),
+        upper=readonly(np.vstack(upper)),
         reference=MappingProxyType(dict(resolved)),
         level=float(level),
         n_draws=int(draws.n_draws),
@@ -537,12 +531,12 @@ def density_fan(
         )
     return DensityFan(
         covariate=str(covariate),
-        x=_readonly(positions),
+        x=readonly(positions),
         levels=levels,
-        y_grid=_readonly(y_grid),
-        density=_readonly(density),
+        y_grid=readonly(y_grid),
+        density=readonly(density),
         quantile_levels=quantile_levels,
-        quantiles=None if quantile_curves is None else _readonly(quantile_curves),
+        quantiles=None if quantile_curves is None else readonly(quantile_curves),
         reference=MappingProxyType(dict(resolved)),
     )
 
@@ -556,7 +550,7 @@ def _histogram(values: NDArray, counts: NDArray | None = None) -> Histogram:
     counts, edges = np.histogram(
         np.asarray(values, dtype=np.float64), bins=_HISTOGRAM_BINS, weights=counts
     )
-    return Histogram(edges=_readonly(edges), counts=_readonly(counts.astype(np.int64)))
+    return Histogram(edges=readonly(edges), counts=readonly(counts.astype(np.int64)))
 
 
 def _resolved_weights(
@@ -972,7 +966,7 @@ def portfolio(
         ),
         total_mean=total_mean,
         total_sd=total_sd,
-        total_draws=_readonly(totals) if return_draws else None,
+        total_draws=readonly(totals) if return_draws else None,
         by_segment=table,
         by=None if segmentation is None else segmentation.name,
         n_draws=draws,

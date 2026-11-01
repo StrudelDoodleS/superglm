@@ -803,31 +803,6 @@ def _assessment_penalty_direction_matches(
     return decomposition
 
 
-def _frozen_float_mapping(
-    values: Mapping[str, float],
-    *,
-    name: str,
-    nonnegative: bool = False,
-) -> Mapping[str, float]:
-    if not isinstance(values, Mapping):
-        raise TypeError(f"{name} must be a mapping")
-    result: dict[str, float] = {}
-    for key, value in values.items():
-        if not isinstance(key, str) or not key:
-            raise ValueError(f"{name} keys must be non-empty strings")
-        if isinstance(value, bool):
-            raise ValueError(f"{name} values must be numeric, not bool")
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError(f"{name} values must be finite numeric values") from exc
-        if not math.isfinite(numeric) or (nonnegative and numeric < 0.0):
-            qualification = " finite non-negative" if nonnegative else " finite"
-            raise ValueError(f"{name} values must be{qualification}")
-        result[key] = numeric
-    return MappingProxyType(result)
-
-
 def _frozen_endpoint_mapping(
     values: Mapping[str, EndpointDirectionEvidence],
 ) -> Mapping[str, EndpointDirectionEvidence]:

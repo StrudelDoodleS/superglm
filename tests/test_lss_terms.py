@@ -534,7 +534,7 @@ def test_helper_guards_hold_their_edges(fit_case, absorbed_case, specials_case) 
     with pytest.raises(ValueError, match="materially negative"):
         module._band_variance(np.eye(2), -np.eye(2))
     assert module._block_wald(np.zeros(2), np.zeros((2, 2)), 1e-6) == (0.0, 0.0, 1.0)
-    assert module._json_number(float("nan")) is None
+    assert module.json_number(float("nan")) is None
     assert module._json_array(None) is None
     assert module._special_domain(_Unlinked()) == ()
     assert module._summary_label("band") == "band"

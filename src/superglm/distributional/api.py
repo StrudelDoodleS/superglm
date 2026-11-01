@@ -23,6 +23,7 @@ from superglm._lambda_box import LAMBDA_CEILING
 from superglm._parallel import fit_pool
 from superglm.diagnostics.convergence import ConvergenceWarning, lss_nonconvergence_message
 from superglm.diagnostics.fit_report import FitDiagnosticReport
+from superglm.distributional._common import json_number, row_index
 from superglm.distributional.binding import (
     BoundPredictor,
     _snapshot_family,
@@ -280,14 +281,6 @@ def _owned_n_bins(value: int | Mapping[str, int]) -> int | Mapping[str, int]:
     return _positive_n_bins(value, name="n_bins")
 
 
-def _prediction_index(X: FrameLike | EagerFrame, n_observations: int) -> pd.Index:
-    if isinstance(X, pd.DataFrame):
-        return X.index.copy()
-    if isinstance(X, EagerFrame) and isinstance(X.native, pd.DataFrame):
-        return X.native.index.copy()
-    return pd.RangeIndex(n_observations)
-
-
 #: Renderer module and figure names of each engine, imported only when asked
 #: for, so ``plotly`` is never a requirement of importing this module.
 _RENDERERS = {
@@ -325,12 +318,6 @@ def _renderer(engine: str, figure: str) -> Any:
         raise ValueError(f"engine must be 'matplotlib' or 'plotly', not {engine!r}")
     module_name, names = _RENDERERS[engine]
     return getattr(importlib.import_module(module_name), names[figure])
-
-
-def _json_number(value: Any) -> float | None:
-    """One number of a JSON payload: a float, or ``None`` where it is not finite."""
-    number = float(value)
-    return number if math.isfinite(number) else None
 
 
 class _RemovedMethod:
@@ -919,7 +906,7 @@ class SuperLSS:
         return pd.DataFrame(
             values,
             columns=self.parameter_names_,
-            index=_prediction_index(X, len(values)),
+            index=row_index(X, len(values)),
         )
 
     def predict_parameters(
@@ -942,7 +929,7 @@ class SuperLSS:
         return pd.DataFrame(
             values,
             columns=self.parameter_names_,
-            index=_prediction_index(X, len(values)),
+            index=row_index(X, len(values)),
         )
 
     def predict(
@@ -1943,7 +1930,7 @@ class SuperLSS:
             raise ValueError(f"kind must be one of {_PLOT_DATA_KINDS}, not {kind!r}")
         if kind == "scores":
             return [
-                {name: _json_number(value) for name, value in row.items()}
+                {name: json_number(value) for name, value in row.items()}
                 for row in self.scores(**kwargs).to_dict(orient="records")
             ]
         builders: Mapping[str, Any] = {

@@ -9,6 +9,7 @@ from types import MappingProxyType
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.distributional._common import readonly_float
 from superglm.distributional.predictor import CompiledPredictor
 from superglm.group_matrix import DesignMatrix
 from superglm.links import Link
@@ -17,11 +18,7 @@ from superglm.types import GroupSlice, PenaltyComponent
 
 
 def _readonly_array(value: NDArray | None) -> NDArray | None:
-    if value is None:
-        return None
-    owned = np.array(value, dtype=np.float64, copy=True)
-    owned.setflags(write=False)
-    return owned
+    return None if value is None else readonly_float(value)
 
 
 def _qualified_term(name: str, predictors: set[str]) -> bool:

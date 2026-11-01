@@ -39,7 +39,9 @@ import pandas as pd
 from numpy.typing import NDArray
 from scipy import special, stats
 
+from superglm.distributional._common import json_floats, json_number, readonly_float
 from superglm.distributional.checks.qq import order_statistic_grid
+from superglm.distributional.checks.scores import _standard_normal_pdf
 from superglm.distributional.residuals import ResidualSet, _sample_residuals
 
 #: Pointwise band multiplier: the two-sided 95 % normal critical value.
@@ -53,25 +55,6 @@ _REPLICATION_SEED = 42
 #: The overall row of a Q-statistics table.
 _OVERALL_LABEL = "all"
 _Q_COLUMNS = ("group", "n", "mean_z", "variance_z", "skewness_z", "kurtosis_z", "flagged")
-
-
-def _readonly(values: NDArray) -> NDArray[np.float64]:
-    array = np.array(values, dtype=np.float64, copy=True)
-    array.setflags(write=False)
-    return array
-
-
-def _json_numbers(values: NDArray) -> list[float | None]:
-    """Emit a float list with every non-finite entry as ``null``."""
-    return [None if not np.isfinite(value) else float(value) for value in np.asarray(values)]
-
-
-def _json_number(value: float) -> float | None:
-    return None if not np.isfinite(value) else float(value)
-
-
-def _standard_normal_pdf(values: NDArray[np.float64]) -> NDArray[np.float64]:
-    return np.exp(-0.5 * values * values) / np.sqrt(2.0 * np.pi)
 
 
 @dataclass(frozen=True)
@@ -93,12 +76,12 @@ class WormPanel:
     interval: tuple[float, float] | None
 
     def __post_init__(self) -> None:
-        positions = _readonly(self.z)
-        deviation = _readonly(self.deviation)
+        positions = readonly_float(self.z)
+        deviation = readonly_float(self.deviation)
         if deviation.shape != positions.shape:
             raise ValueError("deviation must carry one value per order statistic")
-        grid = _readonly(self.band_z)
-        band = _readonly(self.band)
+        grid = readonly_float(self.band_z)
+        band = readonly_float(self.band)
         if band.shape != grid.shape:
             raise ValueError("band must carry one half-width per band grid point")
         object.__setattr__(self, "z", positions)
@@ -117,10 +100,10 @@ class WormPanel:
             "label": self.label,
             "n": self.n,
             "interval": None if self.interval is None else [self.interval[0], self.interval[1]],
-            "z": _json_numbers(self.z),
-            "deviation": _json_numbers(self.deviation),
-            "band_z": _json_numbers(self.band_z),
-            "band": _json_numbers(self.band),
+            "z": json_floats(self.z),
+            "deviation": json_floats(self.deviation),
+            "band_z": json_floats(self.band_z),
+            "band": json_floats(self.band),
         }
 
 
@@ -150,10 +133,10 @@ class WormPayload:
                 {
                     "group": str(row["group"]),
                     "n": int(row["n"]),
-                    "mean_z": _json_number(row["mean_z"]),
-                    "variance_z": _json_number(row["variance_z"]),
-                    "skewness_z": _json_number(row["skewness_z"]),
-                    "kurtosis_z": _json_number(row["kurtosis_z"]),
+                    "mean_z": json_number(row["mean_z"]),
+                    "variance_z": json_number(row["variance_z"]),
+                    "skewness_z": json_number(row["skewness_z"]),
+                    "kurtosis_z": json_number(row["kurtosis_z"]),
                     "flagged": bool(row["flagged"]),
                 }
                 for _, row in self.q_statistics.iterrows()

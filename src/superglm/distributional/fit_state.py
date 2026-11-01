@@ -20,6 +20,7 @@ from superglm.diagnostics.convergence import (
     lss_null_model_nonconvergence_message,
     lss_semidefinite_curvature_message,
 )
+from superglm.distributional._common import frozen_float_mapping, readonly_finite
 from superglm.distributional.families.gaussian import GaussianLikelihoodPlan, GaussianLS
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
@@ -51,35 +52,6 @@ from superglm.distributional.weights import (
     WeightContract,
     WeightProvenance,
 )
-
-
-def _readonly(values: NDArray, *, name: str) -> NDArray[np.float64]:
-    try:
-        result = np.array(values, dtype=np.float64, copy=True)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(f"{name} must contain finite numeric values") from exc
-    if not np.all(np.isfinite(result)):
-        raise ValueError(f"{name} must contain finite numeric values")
-    result.setflags(write=False)
-    return result
-
-
-def _frozen_float_mapping(
-    values: Mapping[str, float],
-    *,
-    name: str,
-) -> Mapping[str, float]:
-    if not isinstance(values, Mapping):
-        raise TypeError(f"{name} must be a mapping")
-    result: dict[str, float] = {}
-    for key, value in values.items():
-        if not isinstance(key, str) or not key or isinstance(value, bool):
-            raise ValueError(f"{name} must map non-empty names to finite numbers")
-        number = float(value)
-        if not math.isfinite(number):
-            raise ValueError(f"{name} must map non-empty names to finite numbers")
-        result[key] = number
-    return MappingProxyType(result)
 
 
 def _positive_integer(value: Any, *, name: str) -> int:
@@ -130,14 +102,14 @@ class DistributionalRowState:
     observation: ObservationContract = COMPLETE_OBSERVATION
 
     def __post_init__(self) -> None:
-        response = _readonly(self.response, name="response")
+        response = readonly_finite(self.response, name="response")
         if not isinstance(self.likelihood_weights, ResolvedLikelihoodWeights):
             raise TypeError("likelihood_weights must be ResolvedLikelihoodWeights")
         weights = self.likelihood_weights.values
-        fitted_eta = _readonly(self.fitted_eta, name="fitted_eta")
-        fitted_parameters = _readonly(self.fitted_parameters, name="fitted_parameters")
-        null_eta = _readonly(self.null_eta, name="null_eta")
-        null_parameters = _readonly(self.null_parameters, name="null_parameters")
+        fitted_eta = readonly_finite(self.fitted_eta, name="fitted_eta")
+        fitted_parameters = readonly_finite(self.fitted_parameters, name="fitted_parameters")
+        null_eta = readonly_finite(self.null_eta, name="null_eta")
+        null_parameters = readonly_finite(self.null_parameters, name="null_parameters")
         n_observations = len(response)
         if response.ndim != 1 or weights.shape != (n_observations,) or np.any(weights <= 0.0):
             raise ValueError(
@@ -167,7 +139,7 @@ class DistributionalRowState:
         for name, values in self.offsets.items():
             if not isinstance(name, str) or not name:
                 raise ValueError("offset names must be non-empty strings")
-            offset = _readonly(values, name=f"offset for {name!r}")
+            offset = readonly_finite(values, name=f"offset for {name!r}")
             if offset.shape != (n_observations,):
                 raise ValueError("retained offsets must match the response row count")
             offsets[name] = offset
@@ -241,7 +213,7 @@ class CompactNullModel:
         if self.n_observations != self.weight_provenance.retained_count:
             raise ValueError("null row count must agree with weight provenance")
         weight_sum = float(self.weight_sum)
-        coefficients = _readonly(self.coefficients, name="null coefficients")
+        coefficients = readonly_finite(self.coefficients, name="null coefficients")
         if (
             not math.isfinite(weight_sum)
             or weight_sum <= 0.0
@@ -349,7 +321,7 @@ class DistributionalFitState:
         layout_names = tuple(value.name for value in self.layout.predictors)
         if template_names != compiled_names or compiled_names != layout_names:
             raise ValueError("predictor ordering must remain stable through fitted state")
-        lambdas = _frozen_float_mapping(self.lambdas, name="lambdas")
+        lambdas = frozen_float_mapping(self.lambdas, name="lambdas")
         if tuple(lambdas) != self.layout.penalty_names:
             raise ValueError("lambda order must match the stacked layout")
         if not isinstance(self.solver_result, DenseSolverResult):

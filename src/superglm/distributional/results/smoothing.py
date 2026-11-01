@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.distributional._common import frozen_float_mapping
 from superglm.distributional.results.endpoint_evidence import (
     EFSConvergenceReason,
     EndpointDirectionEvidence,
@@ -38,7 +39,6 @@ from superglm.distributional.results.solver import (
     _dense_penalty_fingerprint,
     _endpoint_revalidation_projection_bound,
     _frozen_endpoint_mapping,
-    _frozen_float_mapping,
     _PenaltyAssessmentContext,
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
@@ -209,12 +209,12 @@ class DistributionalEFSResult:
             if not isinstance(self._penalty_assessment_context, _PenaltyAssessmentContext):
                 raise TypeError("penalty assessment context has an invalid type")
             self._penalty_assessment_context._validate()
-        initial = _frozen_float_mapping(
+        initial = frozen_float_mapping(
             self.initial_lambdas,
             name="initial_lambdas",
             nonnegative=True,
         )
-        terminal = _frozen_float_mapping(self.lambdas, name="lambdas", nonnegative=True)
+        terminal = frozen_float_mapping(self.lambdas, name="lambdas", nonnegative=True)
         endpoint_directions = _frozen_endpoint_mapping(self.terminal_endpoint_directions)
         if tuple(initial) != tuple(terminal):
             raise ValueError("initial and terminal lambdas must share deterministic key order")
@@ -1327,7 +1327,7 @@ class DistributionalEFSResult:
             raise ValueError("terminal EFS state does not match the smoothing history")
         raw_steps = None
         if self.terminal_raw_log_steps is not None:
-            raw_steps = _frozen_float_mapping(
+            raw_steps = frozen_float_mapping(
                 self.terminal_raw_log_steps, name="terminal_raw_log_steps"
             )
             if tuple(raw_steps) != tuple(terminal):
@@ -1429,7 +1429,7 @@ class DistributionalEFSResult:
             raise ValueError("terminal gradient and certificate must be present together")
         names: tuple[str, ...] = ()
         if gradient is not None:
-            frozen = _frozen_float_mapping(gradient, name="terminal_gradient")
+            frozen = frozen_float_mapping(gradient, name="terminal_gradient")
             names = tuple(frozen)
             if (
                 not names
@@ -1438,7 +1438,7 @@ class DistributionalEFSResult:
             ):
                 raise ValueError("terminal gradient names must follow terminal lambda order")
             assert certificate is not None
-            frozen_certificate = _frozen_float_mapping(
+            frozen_certificate = frozen_float_mapping(
                 certificate, name="terminal_gradient_certificate", nonnegative=True
             )
             if tuple(frozen_certificate) != names:

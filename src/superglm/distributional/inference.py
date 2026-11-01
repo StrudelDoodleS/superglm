@@ -10,39 +10,10 @@ from types import MappingProxyType
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.distributional._common import frozen_float_mapping, readonly_finite
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.results.solver import DenseSolverResult
 from superglm.distributional.telemetry import AcceptedCurvatureKind, CurvatureTelemetry
-
-
-def _readonly(values: NDArray, *, name: str) -> NDArray[np.float64]:
-    try:
-        result = np.array(values, dtype=np.float64, copy=True)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(f"{name} must contain finite numeric values") from exc
-    if not np.all(np.isfinite(result)):
-        raise ValueError(f"{name} must contain finite numeric values")
-    result.setflags(write=False)
-    return result
-
-
-def _frozen_mapping(values: Mapping[str, float], *, name: str) -> Mapping[str, float]:
-    if not isinstance(values, Mapping):
-        raise TypeError(f"{name} must be a mapping")
-    frozen: dict[str, float] = {}
-    for key, value in values.items():
-        if not isinstance(key, str) or not key:
-            raise ValueError(f"{name} keys must be non-empty strings")
-        if isinstance(value, bool):
-            raise ValueError(f"{name} values must be finite numbers")
-        try:
-            number = float(value)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError(f"{name} values must be finite numbers") from exc
-        if not math.isfinite(number):
-            raise ValueError(f"{name} values must be finite numbers")
-        frozen[key] = number
-    return MappingProxyType(frozen)
 
 
 @dataclass(frozen=True)
@@ -66,9 +37,9 @@ class JointInference:
     predictor_reconciliation_error: float
 
     def __post_init__(self) -> None:
-        covariance = _readonly(self.covariance, name="covariance")
-        influence = _readonly(self.influence, name="influence")
-        coefficient_edf = _readonly(self.coefficient_edf, name="coefficient_edf")
+        covariance = readonly_finite(self.covariance, name="covariance")
+        influence = readonly_finite(self.influence, name="influence")
+        coefficient_edf = readonly_finite(self.coefficient_edf, name="coefficient_edf")
         if covariance.ndim != 2 or covariance.shape[0] != covariance.shape[1]:
             raise ValueError("covariance must be square")
         width = covariance.shape[0]
@@ -135,12 +106,12 @@ class JointInference:
         object.__setattr__(self, "coefficient_names", coefficient_names)
         object.__setattr__(self, "total_edf", total_edf)
         object.__setattr__(
-            self, "predictor_edf", _frozen_mapping(self.predictor_edf, name="predictor_edf")
+            self, "predictor_edf", frozen_float_mapping(self.predictor_edf, name="predictor_edf")
         )
         object.__setattr__(
-            self, "intercept_edf", _frozen_mapping(self.intercept_edf, name="intercept_edf")
+            self, "intercept_edf", frozen_float_mapping(self.intercept_edf, name="intercept_edf")
         )
-        object.__setattr__(self, "term_edf", _frozen_mapping(self.term_edf, name="term_edf"))
+        object.__setattr__(self, "term_edf", frozen_float_mapping(self.term_edf, name="term_edf"))
         object.__setattr__(self, "reconciliation_tolerance", tolerance)
         object.__setattr__(self, "slice_reconciliation_error", slice_error)
         object.__setattr__(self, "predictor_reconciliation_error", predictor_error)
