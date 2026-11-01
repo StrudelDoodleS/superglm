@@ -222,11 +222,16 @@ def test_derivative_failure_releases_the_contraction_buffer_before_value_retry(m
     initial, geometry, config = _run(context, coefficients)
     original = type(context.family).evaluate_natural
     add_channel = chunks.GroupedGeometryAccumulator.add_curvature_channel
+    add_score = chunks.GroupedGeometryAccumulator.add_score
     orders, buffers = [], []
 
     def channel(self, plans, channel_index, weights):
         buffers.append(weakref.ref(weights.base))
         return add_channel(self, plans, channel_index, weights)
+
+    def score(self, plans, score_eta):
+        buffers.append(weakref.ref(score_eta.base))
+        return add_score(self, plans, score_eta)
 
     def evaluate(self, *args, **kwargs):
         order = kwargs.get("derivative_order", 2)
@@ -240,6 +245,7 @@ def test_derivative_failure_releases_the_contraction_buffer_before_value_retry(m
     # One-chunk blocks: the first block is contracted before the third chunk fails.
     monkeypatch.setattr(chunks, "contraction_block_rows", lambda n, row_bytes, rows: rows)
     monkeypatch.setattr(chunks.GroupedGeometryAccumulator, "add_curvature_channel", channel)
+    monkeypatch.setattr(chunks.GroupedGeometryAccumulator, "add_score", score)
     monkeypatch.setattr(type(context.family), "evaluate_natural", evaluate)
     solver_api._run_iterations(
         context, initial, config, initial_geometry=geometry, stop_policy="ordinary"
