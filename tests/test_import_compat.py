@@ -164,6 +164,21 @@ _FIRST_USE: dict[str, str] = {
         "only an explicit panel budget renders a FactorSmooth group; no public fit sets one (0.4 s)"
     ),
     "superglm.plotting.diagnostics._lowess_core": "a diagnostic plot's smoother, not a fit (2.2 s)",
+    **dict.fromkeys(
+        (
+            "superglm.distributional.kernels._gg_uniform_tail." + name
+            for name in (
+                "gg_uniform_in_domain",
+                "_log_tail_into",
+                "gg_uniform_log_tail",
+                "gg_uniform_log_tail_with_scratch",
+                "_log_tail_rows",
+                "_domain_rows",
+            )
+        ),
+        "the generalized gamma's uniform log tail for bounded rows: no family calls it yet "
+        "(4.4 s to compile the row kernel, 0.1 s from cache)",
+    ),
 }
 
 _WARMUP_CENSUS = r"""
