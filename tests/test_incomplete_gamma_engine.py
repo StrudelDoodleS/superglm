@@ -26,12 +26,13 @@ Error model.  Inside ``1e-2 <= a <= 1e4`` the error has three sources:
   log of the series tail is ``O(a)`` but is formed from ``O(x)`` terms, so
   its relative error grows like ``u/a``.
 
-Measured worst errors over the grid below, in ``u`` of the row scale, on
-x86-64 Linux: 330, 330, 580, 5.4e3 and 4.4e4 at orders 0-4 (the last two at
-``a = 1e4`` on the switch line).  The tolerances are ``1e-12`` (about
-4,500 ``u``) at orders 0-2, the stage gate of issue 564 stage 4a, which the
-measurement meets with a margin of eight; and ``1e-11`` and ``1e-10`` at
-orders 3 and 4, about twice and ten times the measurement.  Outside the
+Measured worst errors over the grid below, relative to the row scale, on
+x86-64 Linux: 7.3e-14, 7.3e-14, 1.3e-13, 1.2e-12 and 9.7e-12 at orders 0-4
+(about 660, 660, 1,200, 1.1e4 and 8.8e4 ``u``; the last two at ``a = 1e4`` on
+the switch line).  The tolerances are ``1e-12`` (about 9,000 ``u``) at
+orders 0-2, the stage gate of issue 564 stage 4a, which the measurement meets
+with a margin of about eight; and ``1e-11`` and ``1e-10`` at orders 3 and 4,
+about eight and ten times the measurement.  Outside the
 range the same measurement gives up to ``6e-9`` at ``a = 1e-6`` (the
 ``u/a`` term, at every order) and ``3e-10`` at order 4 for ``a = 1e6`` (the
 ``sqrt(a)`` term).
