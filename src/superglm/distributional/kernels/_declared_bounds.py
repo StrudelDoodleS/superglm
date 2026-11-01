@@ -388,7 +388,8 @@ def _warmup_declared_bounds() -> None:
     for order in (3, 4):
         gamma_window_jets(lower, upper, np.zeros((3, 2)), weight, order=order, coordinates="log")
     # GeneralizedGammaLSS: one row kernel for every order, on both tail routes.
-    theta = np.array([[0.0, 1.0, 0.0], [0.0, 1.0, 1.0], [0.0, 1.0, -0.5]])
+    # A positive first column is a valid mean and a valid location.
+    theta = np.array([[1.0, 1.0, 0.0], [1.0, 1.0, 1.0], [1.0, 1.0, -0.5]])
     for mean_form in (False, True):
         gg_window_jets(lower, upper, theta, order=4, mean_form=mean_form)
 

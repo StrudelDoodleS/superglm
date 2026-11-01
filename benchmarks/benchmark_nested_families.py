@@ -312,6 +312,61 @@ def small_sample_case(rng, n_train, replicates):
     return {"small_sample": out}
 
 
+def censored_case(rng, n):
+    """Claims capped at a policy limit: the special case and the generalized gamma, censored."""
+    import warnings
+
+    train, test = _frame(rng, n), _frame(rng, n)
+    sigma = {
+        k: np.exp(np.log(0.9) + 0.3 * f["x2"].to_numpy())
+        for k, f in (("train", train), ("test", test))
+    }
+    laws = {
+        "lognormal_censored": lambda f, k: np.exp(
+            _log_mean(f) - sigma[k] ** 2 / 2 + sigma[k] * rng.standard_normal(len(f))
+        ),
+        "gamma_censored": lambda f, k: rng.gamma(1 / 1.44, np.exp(_log_mean(f)) * 1.44),
+    }
+    ln, gamma, gg = LogNormalLS(), GammaLS(), GeneralizedGammaLSS()
+    specialists = {
+        "lognormal_censored": (
+            "LogNormalLS",
+            lambda: SuperLSS(ln, _mean_terms(ln), ln.scale("x2")),
+        ),
+        "gamma_censored": ("GammaLS", lambda: SuperLSS(gamma, _mean_terms(gamma), gamma.scale())),
+    }
+    general = {
+        "lognormal_censored": lambda: SuperLSS(gg, _mean_terms(gg), gg.scale("x2"), gg.shape()),
+        "gamma_censored": lambda: SuperLSS(gg, _mean_terms(gg), gg.scale(), gg.shape()),
+    }
+    out = {}
+    for law, draw in laws.items():
+        y_train, y_test = draw(train, "train"), draw(test, "test")
+        limit = float(np.quantile(y_train, 0.85))
+        censored = y_train >= limit
+        paid = np.minimum(y_train, limit)
+        name, special = specialists[law]
+        rows, fitted = {"limit": limit, "censored_fraction": float(censored.mean())}, {}
+        for label, build in ((name, special), ("GG_shape_free", general[law])):
+            _fit(build, train.iloc[:400], paid[:400], censored=censored[:400])
+            model, seconds, status = _fit(build, train, paid, censored=censored)
+            rows[label] = {"wall_s": round(seconds, 3), "status": status}
+            if model is not None:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    rows[label]["held_out_log_score"] = _held_out(model, test, y_test)
+                fitted[label] = model
+        if len(fitted) == 2:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                rows["GG_shape_free"]["vs_" + name] = _compare(
+                    fitted["GG_shape_free"], fitted[name], test, y_test
+                )
+        out[law] = rows
+    print("censored", json.dumps(out, indent=1), flush=True)
+    return {"censored": out}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--rows", type=int, default=20_000)
@@ -335,6 +390,7 @@ def main() -> None:
         receipt.update(build(rng, args.rows))
     receipt.update(prior_weight_case(rng, args.rows // 2))
     receipt.update(small_sample_case(rng, args.small_rows, args.replicates))
+    receipt.update(censored_case(rng, args.rows))
     if args.out:
         with open(args.out, "w") as handle:
             json.dump(receipt, handle, indent=1, default=str)
