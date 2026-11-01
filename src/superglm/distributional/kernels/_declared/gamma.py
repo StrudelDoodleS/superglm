@@ -26,8 +26,8 @@ DATA = ('weight',)
 COORDINATES = 'natural'
 LAWS = ('density', 'logsf', 'logcdf', 'logsf_uniform', 'logcdf_uniform')
 MAX_ORDER = 4
-PRIMITIVES_DIGEST = "af81517d78358a8ea9aca4ad7d05db9389684d6e98831c15d0c5fd97111a0616"
-ENGINES_DIGEST = "787e48648f7a34fab4edfb5dcb34292cc9169d0623589566254b92fe27f7f211"
+PRIMITIVES_DIGEST = "cb808cedae0b1fe702c3ef6bc4a9ccbc9053541714ce04ee3de9ca566bf00965"
+ENGINES_DIGEST = "7c18b487b3adc9e8c37a2f9883388117ead12cd1188f5beedf8140e8b6a7313a"
 
 @njit(cache=True, error_model='numpy')
 def density(Y, P0, P1, D0, M, order, J0, J1, J2, J3, J4):

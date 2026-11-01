@@ -35,7 +35,23 @@ quantities that a primitive resolves:
   ``psires_0123`` between (``GammaLS``'s ``A`` and ``J`` are ``n = 0, 1``);
 - ``polygamma_0123(x)``: digamma to pentagamma by the shift recurrence to
   ``x >= 16`` and the asymptotic series through ``B_14``; the Tweedie series
-  kernel and the incomplete-gamma engine call this one copy.
+  kernel and the incomplete-gamma engine call this one copy;
+- ``log_ndtr_01234(x)``: ``log Phi(x)`` and its first four derivatives.  For
+  ``k >= 2`` they are the cumulants of ``N(x, 1)`` truncated to ``(0, inf)``
+  (``-1`` added at ``k = 2``), whose moment ratios ``rho_n = M_n/M_(n-1)``,
+  ``M_n = int_0^inf s^n e^(x s - s^2/2) ds``, are the minimal solution of the
+  repeated-erfc recurrence ``M_(n+1) = n M_(n-1) + x M_n`` (DLMF 7.18.2,
+  7.18.7).  Below ``x = -1`` they come from its continued fraction
+  ``rho_n = n/(t + rho_(n+1))``, ``t = -x``, summed backward (Gautschi,
+  *Computational aspects of three-term recurrence relations*, SIAM Rev. 9,
+  1967), with the differences ``delta_n = rho_(n+1) - rho_n = (1 - rho_(n+1)
+  delta_(n+1))/(t + rho_(n+1))`` carried so no cumulant subtracts raw
+  moments of nearly equal size: every term is positive and each level damps
+  the error below it.  ``r = t + rho_1`` is the inverse Mills ratio.  From
+  ``x = -1`` up the derivatives are the polynomials in ``r = phi/Phi`` and
+  ``g = x + r`` that ``r' = -r g`` gives, with ``Phi`` from ``erfc``.  It
+  takes the run-time order: below order 3 it reads only ``r`` and ``g``,
+  directly from ``x = -3`` and from the continued fraction below.
 
 Error form, for exact float64 inputs ``x_i`` (issue #564, stage 1):
 ``|err| <= c u (sum_i |x_i df/dx_i| + |f|)``, the input and output rounding of
@@ -112,6 +128,15 @@ _ZETA = tuple(float(z) for z in special.zeta(range(2, 62), 1.0))
 _EULER = 0.5772156649015329
 # Above x = 16 the polygamma series through B_14 leave a relative remainder below 1e-16.
 _POLYGAMMA_FROM = 16.0
+_SQRT_HALF = math.sqrt(0.5)
+# log Phi reads the continued fraction below -1 for orders 3-4 and below -3
+# (the gap only) for orders 0-2.  From its fixed-point start it converges to
+# 2u at t = -x in 331 levels at t = 1, 208 at 1.3, 60 at 3 and 9 at 38;
+# 32 + 320/t^2 covers each.
+_NDTR_FRACTION = -1.0
+_NDTR_GAP = -3.0
+_NDTR_DEPTH = 320.0
+_NDTR_ASYMPTOTIC = 2.0**64
 _POLYGAMMA_BERNOULLI = tuple(p / q for p, q in _BERNOULLI[:7])
 
 
@@ -288,12 +313,100 @@ def sres_0123(a):
     return a * r0, a2 * r1, a2 * a * r2, a2 * a2 * r3
 
 
+@njit(cache=True)
+def _mills_fraction(t, scaled_depth):
+    """Scaled ratios ``q_n = t rho_n`` and ``e_n = t delta_n``, ``n = 1..4``, by the backward sweep.
+
+    ``q_n = n/(1 + q_(n+1)/t^2)`` and ``e_n = (1 - q_(n+1) e_(n+1)/t^2)/(1 + q_(n+1)/t^2)``,
+    so nothing over- or underflows for any finite ``t``.  The sweep starts at
+    the recurrence's fixed point ``rho = (sqrt(t^2 + 4n) - t)/2`` and runs
+    ``32 + scaled_depth/t^2`` levels.
+    """
+    tau = 1.0 / (t * t)
+    depth = 32 + int(scaled_depth * tau)
+    top = depth + 1.0
+    q = 0.5 * t * (math.sqrt(t * t + 4.0 * top) - t)
+    e = t / math.sqrt(t * t + 4.0 * top + 2.0)
+    q1 = q2 = q3 = q4 = e1 = e2 = 0.0
+    for n in range(depth, 0, -1):
+        denominator = 1.0 + q * tau
+        e = (1.0 - q * e * tau) / denominator
+        q = n / denominator
+        if n == 4:
+            q4 = q
+        elif n == 3:
+            q3 = q
+        elif n == 2:
+            q2, e2 = q, e
+        elif n == 1:
+            q1, e1 = q, e
+    return q1, q2, q3, q4, e1, e2
+
+
+@njit(cache=True)
+def log_ndtr_01234(x, order):
+    """``log Phi(x)`` and its derivatives of orders 1-4, for finite ``x``.
+
+    Below order 3 only ``r`` and ``g = x + r`` are read: ``r`` directly and the
+    gap from the continued fraction below ``x = -3``, the old order-2 rule
+    (``h'' = -r g`` is a product), with orders 3-4 returned as NaN.  From order
+    3 the continued fraction runs below ``x = -1`` and gives every order.
+    Beyond ``-x = 2^64`` the asymptotic series ``r = t + 1/t``, ``h'' = 1/t^2 - 1``,
+    ``h''' = 2/t^3``, ``h'''' = 6/t^4`` (``t = -x``) is exact to rounding, its
+    next terms ``2^-128`` smaller, and keeps ``t^2`` from overflowing.
+    """
+    switch = _NDTR_FRACTION if order >= 3 else _NDTR_GAP
+    if x >= switch:
+        if x >= 0.0:
+            value = math.log1p(-0.5 * math.erfc(x * _SQRT_HALF))
+        else:
+            value = math.log(0.5 * math.erfc(-x * _SQRT_HALF))
+        r = math.exp(-0.5 * x * x - _HALF_LOG_TWO_PI - value)
+        if r == 0.0:
+            # Phi rounds to one: the tail is flat in float64.
+            return value, 0.0, 0.0, 0.0, 0.0
+        g = x + r
+        if order < 3:
+            return value, r, -r * g, math.nan, math.nan
+        return (
+            value,
+            r,
+            -r * g,
+            r * (g * (g + r) - 1.0),
+            r * (r + 3.0 * g - g * g * g - 4.0 * r * g * g - r * r * g),
+        )
+    t = -x
+    if t > _NDTR_ASYMPTOTIC:
+        inverse = 1.0 / t
+        value = -(0.5 * t) * t - _HALF_LOG_TWO_PI - math.log(t)
+        curvature = inverse * inverse - 1.0
+        if order < 3:
+            return value, t + inverse, curvature, math.nan, math.nan
+        return value, t + inverse, curvature, 2.0 * inverse**3, 6.0 * inverse**4
+    q1, q2, q3, q4, e1, e2 = _mills_fraction(t, _NDTR_DEPTH)
+    r = t + q1 / t
+    value = -0.5 * x * x - _HALF_LOG_TWO_PI - math.log(r)
+    if order < 3:
+        return value, r, -r * (q1 / t), math.nan, math.nan
+    m2 = q1 * q2
+    m3 = m2 * q3
+    fourth = m3 * q4 - 4.0 * m3 * q1 - 3.0 * m2 * m2 + 12.0 * m2 * q1 * q1 - 6.0 * q1**4
+    return (
+        value,
+        r,
+        q1 * e1 / t / t - 1.0,
+        q1 * (q2 * e2 - q1 * e1 + e1 * e1) / t / t / t,
+        fourth / t / t / t / t,
+    )
+
+
 __all__ = [
     "expit",
     "gdev",
     "gnorm",
     "invexpm1",
     "log1mexp",
+    "log_ndtr_01234",
     "logratio",
     "polygamma_0123",
     "psires_0123",

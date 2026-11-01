@@ -34,6 +34,18 @@ with ``u = 2**-53``, the subnormal spacing covering gradual underflow, and
   zeta or Bernoulli series onto a leading constant that dominates the sum,
   a few ``u`` relative.
 
+``log_ndtr_01234`` (``log Phi`` and its derivatives to order 4) is held to
+``E = |f^(k)| + |x f^(k+1)|``, the input-conditioned form, with a bound per
+order: its direct branch from ``x = -1`` forms orders 3-4 as polynomials in
+the inverse Mills ratio ``r`` and ``g = x + r`` that cancel by about ``10^2``
+just above the switch (measured 117 and 478; ``C`` is 256 and 1,024 there).
+Called at order 2 it reads orders 0-2 by the old order-2 rule, whose direct
+gap ``x + r`` cancels by about ``x^2`` just above its switch at ``x = -3``
+(``C`` 256 for the Hessian).
+The generalized Pareto survival engine (``kernels._pareto_tail``) is held to
+``64 u`` of each order's largest partial, through ``xi = 0`` and on both sides
+of its series radius ``z = 1/2`` (measured at most 12).
+
 The measured worst values of ``err / (u E)`` on this grid (x86-64 Linux,
 glibc, AMD EPYC 9645) are pinned in ``_MEASURED``.  The test asserts ``C``,
 never the measurement.
@@ -231,3 +243,91 @@ def test_the_direct_forms_above_ten_fail_the_gate(monkeypatch: pytest.MonkeyPatc
     # sres0-3 3.8e4, 2.5e3, 1.2e3, 9.9e2.
     for key in ("gnorm", *(f"{name}{n}" for name in ("psires", "sres") for n in range(4))):
         assert worst[key] > C, (key, worst)
+
+
+def _mp_log_ndtr(x):
+    return mp.log(mp.ncdf(x)) if x < 0 else mp.log1p(-mp.ncdf(-x))
+
+
+_NDTR_POINTS = sorted(
+    {
+        *np.linspace(-38.5, 12.0, 205).tolist(),
+        -1.0,
+        float(np.nextafter(-1.0, -2.0)),
+        -0.75,
+        30.0,
+        37.0,
+        -1e3,
+        -1e8,
+        # Either side of the asymptotic switch at -2^64.
+        -(2.0**64),
+        -(2.0**64) * (1.0 + 2.0**-40),
+        -1e20,
+    }
+)
+# Per order, for calls at order 4 and at order 2 (which returns orders 0-2 only).
+_NDTR_BOUND = {4: (C, C, 2.0 * C, 256.0, 1024.0), 2: (C, C, 256.0)}
+
+
+@pytest.mark.parametrize("order", [4, 2])
+def test_log_ndtr_jet_holds_its_conditioned_error_form(order: int) -> None:
+    bound = _NDTR_BOUND[order]
+    worst = [0.0] * len(bound)
+    for x in _NDTR_POINTS:
+        got = prims.log_ndtr_01234(x, order)
+        exact = list(mp.diffs(_mp_log_ndtr, mp.mpf(x), 5))
+        for k in range(len(bound)):
+            scale = abs(exact[k]) + abs(x * exact[k + 1])
+            worst[k] = max(worst[k], float(abs(got[k] - exact[k]) / scale) / U)
+    assert all(w <= b for w, b in zip(worst, bound, strict=True)), worst
+
+
+@pytest.mark.parametrize(("order", "switch"), [(4, -1.0), (2, -3.0)])
+def test_log_ndtr_jet_meets_itself_across_its_switch(order: int, switch: float) -> None:
+    above = prims.log_ndtr_01234(switch, order)
+    below = prims.log_ndtr_01234(np.nextafter(switch, -10.0), order)
+    for k in range(order + 1):
+        assert abs(above[k] - below[k]) <= 1e-12 * abs(above[k]), k
+
+
+def test_log_ndtr_jet_is_flat_where_phi_rounds_to_one() -> None:
+    assert prims.log_ndtr_01234(40.0, 4) == (0.0, 0.0, 0.0, 0.0, 0.0)
+
+
+def _mp_pareto_log_survival(t, xi):
+    if xi == 0:
+        return -t
+    return -mp.log1p(xi * t) / xi
+
+
+def test_pareto_survival_engine_is_analytic_through_zero_shape() -> None:
+    from superglm.distributional.kernels._pareto_tail import gpd_log_survival_into
+
+    keys = [(k - j, j) for k in range(5) for j in range(k + 1)]
+    out = np.empty(15)
+    worst = 0.0
+    for t in (0.0, 1e-8, 0.3, 1.0, 3.0, 10.0, 1e3, 1e8):
+        for xi in (0.0, 1e-12, 1e-6, 1e-3, 0.05, 0.3, 0.9, 0.999, 0.49 / max(t, 1.0)):
+            gpd_log_survival_into(t, xi, True, 4, out)
+            point = (mp.mpf(t), mp.mpf(xi))
+            if xi == 0:
+                # Its Taylor series in xi, which converges for |xi t| < 1.
+                exact = {
+                    key: mp.diff(
+                        lambda a, b: -mp.fsum((-b) ** n * a ** (n + 1) / (n + 1) for n in range(8)),
+                        point,
+                        key,
+                    )
+                    for key in keys
+                }
+            else:
+                exact = {key: mp.diff(_mp_pareto_log_survival, point, key) for key in keys}
+            for k in range(5):
+                block = [key for key in keys if sum(key) == k]
+                scale = max(abs(exact[key]) for key in block) or 1
+                for index, key in enumerate(keys):
+                    if key in block:
+                        worst = max(worst, float(abs(out[index] - exact[key]) / scale) / U)
+    assert worst <= 64.0, worst
+    gpd_log_survival_into(np.inf, 0.3, True, 2, out)
+    assert out[0] == -np.inf and np.all(out[1:6] == 0.0)

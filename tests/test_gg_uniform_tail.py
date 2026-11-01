@@ -61,8 +61,8 @@ import pytest
 mp = pytest.importorskip("mpmath")
 
 from superglm.distributional.kernels import _gg_uniform_tail as engine  # noqa: E402
-from superglm.distributional.kernels._response_tails import (  # noqa: E402
-    normal_log_cdf_channels,
+from superglm.distributional.kernels._severity_primitives import (  # noqa: E402
+    log_ndtr_01234,
 )
 
 U = 2.0**-53
@@ -591,10 +591,7 @@ def test_q_zero_is_the_log_normal(w):
             scale = max(abs(expected[d]), float(np.max(np.abs(partials[BLOCKS[d]]))))
             bound = rounding_bound(d, w) * widen * scale + TINY
             assert abs(actual[d] - expected[d]) <= bound, (w, upper, d, actual[d], expected[d])
-        value, score, hessian = normal_log_cdf_channels(
-            np.array([sign * w]), np.array([[sign]]), np.zeros((1, 1)), derivative_order=2
-        )
-        kernel = np.array([value[0], score[0, 0], hessian[0, 0]])
+        kernel = np.array(log_ndtr_01234(sign * w, 2)[:3]) * np.array([1.0, sign, 1.0])
         np.testing.assert_allclose(actual[:3], kernel, rtol=64 * U * widen, atol=TINY)
 
 

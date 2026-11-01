@@ -204,6 +204,10 @@ _FIRST_USE: dict[str, str] = {
         "the generalized gamma tails' own scalar and array entry points, for tests: bounded "
         "fits reach both engines through gg_log_tail's row kernel",
     ),
+    "superglm.distributional.kernels._declared.generalized_pareto.carrier": (
+        "generated with every declaration, but the generalized Pareto density has no "
+        "parameter-free part, so its windows never read the carrier"
+    ),
 }
 
 _WARMUP_CENSUS = r"""

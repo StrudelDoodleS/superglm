@@ -29,8 +29,9 @@ from superglm.distributional.families._response_bounds import (
     TailChannels,
     bind_observation,
     bounded_channels,
-    bounded_higher_derivatives,
+    bounded_share,
     censored_carrier,
+    contract_third,
     log_window_values,
     refuse_bounded,
 )
@@ -209,35 +210,25 @@ def _row_law(plan: GammaLikelihoodPlan) -> tuple[NDArray[np.float64], NDArray[np
 def _bounded_predictor_share(
     plan: GammaLikelihoodPlan, eta: NDArray, order: int
 ) -> tuple[NDArray[np.float64], NDArray[np.bool_], NDArray[np.bool_]]:
-    """Bounded rows' packed predictor derivatives of ``order`` (3 or 4).
-
-    Returns the derivatives a bounded row adds to its complete-row ones, the
-    rows whose complete-row derivatives stay (all but the censored), and the
-    rows whose window is representable.  Each window's jets are formed once.
-    """
+    """Bounded rows' packed predictor derivatives of ``order``; see ``bounded_share``."""
     bounds = plan.observation.bounds
     assert bounds is not None
     prior, multiplier = _row_law(plan)
     predictors = np.asarray(eta, dtype=np.float64)
-    zeros = np.zeros((len(prior), order + 1))
 
     def window_jets(lower: NDArray, upper: NDArray, rows: NDArray, jet_order: int):
         return gamma_window_jets(
             lower, upper, predictors[rows], prior[rows], order=jet_order, coordinates="log"
         )
 
-    third, fourth, valid = bounded_higher_derivatives(
-        zeros if order == 3 else None,
-        zeros if order == 4 else None,
-        np.ones(len(prior), dtype=bool),
+    return bounded_share(
+        order,
+        2,
         response=plan.exact_response,
         bounds=bounds,
         multiplier=multiplier,
         window_jets=window_jets,
     )
-    share = third if order == 3 else fourth
-    assert share is not None
-    return share, (bounds.side == 0) & valid, valid
 
 
 @dataclass(frozen=True)
@@ -498,10 +489,8 @@ class GammaLS(MeanPredictor, ScalePredictor):
         if gamma_plan.observation.bounds is None:
             return complete
         third, kept, valid = _bounded_predictor_share(gamma_plan, eta, 3)
-        v = np.asarray(eta_direction, dtype=np.float64)
-        result = np.where(kept[:, None], complete, 0.0) - np.column_stack(
-            [third[:, j] * v[:, 0] + third[:, j + 1] * v[:, 1] for j in range(3)]
-        )
+        direction = np.asarray(eta_direction, dtype=np.float64)
+        result = np.where(kept[:, None], complete, 0.0) - contract_third(third, direction)
         result[~valid] = 0.0
         return readonly(result)
 

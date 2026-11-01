@@ -28,10 +28,12 @@ invalid, and never raises.
 Primitives (SymPy rule here, Numba body in ``_severity_primitives``):
 ``softplus``, ``expit``, ``log1mexp``, ``invexpm1``, ``gdev``, ``gnorm``,
 ``ratio`` (``y/m`` as one division, printed inline), ``logratio``,
-``psires``, ``sres`` (``gnorm``'s derivatives), and SymPy's ``loggamma`` and
-``polygamma``.  ``polygamma``, ``psires`` and ``sres`` of orders ``n <= 3``
-at one argument share one call of the jet functions ``polygamma_0123``,
-``psires_0123`` and ``sres_0123``.  An :class:`Engine` (plan
+``psires``, ``sres`` (``gnorm``'s derivatives), ``lphi`` (``d^n log Phi``),
+and SymPy's ``loggamma`` and ``polygamma``.  ``polygamma``,
+``psires`` and ``sres`` of orders ``n <= 3``, and ``lphi`` of ``n <= 4``, at one
+argument share one call of the jet functions ``polygamma_0123``,
+``psires_0123``, ``sres_0123`` and ``log_ndtr_01234``, the last with the
+kernel's run-time order, below which it skips its orders 3-4.  An :class:`Engine` (plan
 interface I2) is a two-argument primitive ``engine(u, v, upper, order, out)``:
 each generated row calls it once per argument pair, with the kernel's
 run-time ``order`` and a non-literal tail so Numba compiles one copy of the
@@ -159,6 +161,22 @@ class psires(sp.Function):  # noqa: N801
         return psires(n + 1, a)
 
 
+class lphi(sp.Function):  # noqa: N801
+    """``d^n log Phi(x) / dx^n``, the standard normal log CDF's derivatives."""
+
+    nargs = 2
+
+    def fdiff(self, argindex=2):
+        if argindex != 2:
+            raise ArgumentIndexError(self, argindex)
+        n, x = self.args
+        return lphi(n + 1, x)
+
+
+def _mp_log_ndtr(x):
+    return mp.log(mp.ncdf(x)) if x < 0 else mp.log1p(-mp.ncdf(-x))
+
+
 def _mp_psires(n, a):
     n = int(n)
     if n == 0:
@@ -179,6 +197,7 @@ MPMATH = {
     "sres": lambda n, a: a ** (int(n) + 1) * _mp_psires(n, a),
     "loggamma": mp.loggamma,
     "polygamma": lambda n, x: mp.polygamma(int(n), x),
+    "lphi": lambda n, x: mp.diff(_mp_log_ndtr, x, int(n)),
 }
 """mpmath references of the primitives, by SymPy function name, for the oracles."""
 
@@ -258,6 +277,8 @@ class Declaration:
     data: tuple[str, ...] = ()
     real: tuple[str, ...] = ()
     coordinates: str = "natural"
+    # The response's support: "positive", or "real" for a location family.
+    support: str = "positive"
     doc: str = ""
 
 
@@ -344,7 +365,58 @@ GAMMA_LOG = replace(
     doc=GAMMA.doc + "\nKernels in ``(log mean, log cv)``: ``GammaLS``'s predictor jets.",
 )
 
-DECLARATIONS = (GAMMA, GAMMA_LOG)
+
+def _normal_log_density(y, location, scale, root):
+    """Without the constant ``-log(2 pi)/2``, which the caller adds to the carrier."""
+    return sp.log(root) - sp.log(scale) - (root * (y - location) / scale) ** 2 / 2
+
+
+NORMAL = Declaration(
+    name="normal",
+    parameters=("location", "scale"),
+    real=("location",),
+    support="real",
+    data=("root",),
+    log_density=_normal_log_density,
+    log_survival=lambda y, location, scale, root: lphi(0, root * (location - y) / scale),
+    log_cdf=lambda y, location, scale, root: lphi(0, root * (y - location) / scale),
+    doc=(
+        "The normal law ``N(location, (scale/root)^2)``: ``GaussianLS``'s row law\n"
+        "(``root`` the square root of a prior weight, one under frequency\n"
+        "weights) and ``LogNormalLS``'s on ``log y``.  The log tails are\n"
+        "``log Phi`` of the standardised point, from ``log_ndtr_01234``.  The law\n"
+        "depends on ``y - location`` alone, so a caller may pass that\n"
+        "difference as ``y`` with location zero to keep it exact."
+    ),
+)
+
+PARETO_TAIL = Engine(
+    "gpd_log_survival_into",
+    "superglm.distributional.kernels._pareto_tail",
+    reference=lambda t, xi, upper: -mp.log1p(xi * t) / xi if xi != 0 else -t,
+)
+
+
+def _pareto_log_density(y, scale, shape):
+    return -sp.log(scale + shape * y) + PARETO_TAIL(y / scale, shape, upper=True)
+
+
+GENERALIZED_PARETO = Declaration(
+    name="generalized_pareto",
+    parameters=("scale", "shape"),
+    real=("shape",),
+    log_density=_pareto_log_density,
+    log_survival=lambda y, scale, shape: PARETO_TAIL(y / scale, shape, upper=True),
+    doc=(
+        "``GeneralizedParetoLSS``'s row law in ``(scale, shape)``: ``log S =\n"
+        "-log1p(shape t)/shape`` at ``t = y/scale``, from the survival engine\n"
+        "``kernels._pareto_tail``, which is analytic through ``shape = 0``; the\n"
+        "log density is ``-log(scale + shape y) + log S``.  Every window\n"
+        "reads the survival function, so there is no log-CDF law."
+    ),
+)
+
+DECLARATIONS = (GAMMA, GAMMA_LOG, NORMAL, GENERALIZED_PARETO)
 
 
 @dataclass
@@ -375,7 +447,11 @@ def jet(expression: sp.Expr, theta, max_order: int = MAX_ORDER) -> list[list[sp.
 
 def derive(declaration: Declaration) -> Derived:
     start = time.perf_counter()
-    y = sp.Symbol("y", positive=True)
+    y = (
+        sp.Symbol("y", positive=True)
+        if declaration.support == "positive"
+        else sp.Symbol("y", real=True)
+    )
     theta = tuple(
         sp.Symbol(name, real=True) if name in declaration.real else sp.Symbol(name, positive=True)
         for name in declaration.parameters
@@ -424,7 +500,16 @@ class _Printer(PythonCodePrinter):
 
 
 _PRIMITIVE_NAMES = ("softplus", "expit", "log1mexp", "invexpm1", "gdev", "logratio", "gnorm")
-_JETS = {sp.polygamma: "polygamma_0123", psires: "psires_0123", sres: "sres_0123"}
+# Jet functions: callee and the number of derivatives ``n = 0..count-1`` it returns.
+_JETS = {
+    sp.polygamma: ("polygamma_0123", 4),
+    psires: ("psires_0123", 4),
+    sres: ("sres_0123", 4),
+    lphi: ("log_ndtr_01234", 5),
+}
+_JET_COUNT = dict(_JETS.values())
+# Jet functions that also take the kernel's run-time order, and may skip work above it.
+_ORDERED_JETS = frozenset({"log_ndtr_01234"})
 _PRINTER = _Printer({"fully_qualified_modules": False})
 
 
@@ -447,9 +532,10 @@ def _calls(expressions: list[sp.Expr]):
         for atom in expression.atoms(sp.Function):
             if type(atom) in _JETS:
                 n, argument = atom.args
-                if not (n.is_Integer and 0 <= n <= 3):
-                    raise ValueError(f"{atom}: the jet functions stop at n = 3")
-                key = (_JETS[type(atom)], None, (argument,))
+                callee, count = _JETS[type(atom)]
+                if not (n.is_Integer and 0 <= n < count):
+                    raise ValueError(f"{atom}: {callee} stops at n = {count - 1}")
+                key = (callee, None, (argument,))
                 groups.setdefault(key, {})[atom] = int(n)
             elif hasattr(type(atom), "engine"):
                 key = (type(atom).engine, type(atom).upper, atom.args)
@@ -531,8 +617,9 @@ def emit_kernel(
                 for index in sorted(set(atoms.values()))
             ]
         else:
-            defines = tuple(sp.Symbol(f"c{g}_{n}") for n in range(4))
-            lines = [f"{', '.join(map(str, defines))} = {callee}({printed[0]})"]
+            defines = tuple(sp.Symbol(f"c{g}_{n}") for n in range(_JET_COUNT[callee]))
+            ordered = ", order" if callee in _ORDERED_JETS and parametrised else ""
+            lines = [f"{', '.join(map(str, defines))} = {callee}({printed[0]}{ordered})"]
             statements.append(_Statement(defines, uses, lines))
     writes: list[list[str]] = [[] for _ in range(levels)]
     wanted: list[set] = [set() for _ in range(levels)]
@@ -669,7 +756,7 @@ def render(derived: Derived, primitives_text: str) -> str:
     chunks.append(carrier)
     body = "\n\n".join(chunks)
     primitives = sorted(
-        name for name in (*_PRIMITIVE_NAMES, *_JETS.values()) if re.search(rf"\b{name}\(", body)
+        name for name in (*_PRIMITIVE_NAMES, *_JET_COUNT) if re.search(rf"\b{name}\(", body)
     )
     declaration = derived.declaration
     engine_digest = (
