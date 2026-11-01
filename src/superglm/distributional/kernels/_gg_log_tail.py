@@ -15,12 +15,13 @@ Routing, by the domain of each engine:
   at ``a = 1/q^2``, ``x = a e^(q w)``.  For ``q > 0``, ``F = P(a, x)`` and
   ``S = Q(a, x)``; for ``q < 0`` they swap, ``F = Q`` and ``S = P``.
 
-The second route is a composition.  The incomplete-gamma engine leaves the
-Taylor jet of ``log T`` in ``(da, e)``, ``x -> x (1 + e)``, in its work
-(``work[_LOG:]``).  With ``r = dq/q`` and ``q, w`` the row's values::
+The second route is a composition.  The incomplete-gamma engine's
+:func:`log_gamma_tail_jet_into` gives the Taylor jet of ``log T`` in ``(da,
+e)`` along fixed ``lambda = x/a = e^(q w)``, ``x -> (a + da) lambda (1 + e)``.
+With ``r = dq/q`` and ``q, w`` the row's values::
 
     da    = a ((1 + r)^-2 - 1)                       (a function of dq alone)
-    1 + e = (1 + r)^-2 exp(q dw + w dq + dq dw)
+    1 + e = exp(q dw + w dq + dq dw)
 
 and both are truncated bivariate Taylor jets in ``(dw, dq)`` with zero
 constant term, so ``log T(w + dw, q + dq) = sum_{i+j <= order} c_ij da^i e^j``
@@ -30,19 +31,15 @@ Derivatives*, 2nd ed., 2008, ch. 13), here by Horner in ``e`` then in ``da``.
 Reading the ``e``-jet rather than the ``x`` partials keeps ``x^-k`` out of the
 arithmetic, so a far lower tail with ``x`` below ``1e-77`` does not overflow.
 
-Conditioning.  ``da``'s coefficients grow like ``a |q|^-k`` and ``e``'s like
-``|q|^-k``.  Near the diagonal (``|eta| < 1``, ``eta = q zeta`` Temme's
-variable) the tail depends on ``(x - a)/sqrt(a)``, the ``da`` and ``e`` terms
-cancel, and the terms of the order-``k`` composition exceed its result by
-about ``a^k``; at ``|eta| > 1`` they do not.  The first route takes
-``|eta| <= 1`` at ``a >= 12``, so the composition meets the cancellation only
-at ``4 < a < 12`` (``0.2887 < |q| < 0.5``) in the body, where its order-4
-partials are good to about ``1e-8`` of their scale, order 3 to ``1e-10`` and
-order 2 to ``1e-12``.  Composing the exact ``(da, e)`` coefficients rounded
-once already loses ``2e-9`` at order 4: the loss is the coordinates', and a
-jet taken along fixed ``x/a`` instead of fixed ``x`` would remove it.  The
-error is the incomplete-gamma engine's, carried through the terms' absolute
-values; ``tests/test_gg_log_tail.py`` states the bound.
+Conditioning.  Near the diagonal (``|eta| < 1``, ``eta = q zeta`` Temme's
+variable) the tail depends on ``(x - a)/sqrt(a)``.  At fixed ``x`` the
+``da`` and ``e`` terms of the composition then cancel, by about ``a^k`` at
+order ``k``; along fixed ``x/a`` the ``da`` coefficients are of the size of
+the result and nothing cancels, so in the body at ``0.2887 < |q| < 0.5``
+(``4 < a < 12``), the part of the diagonal the first route leaves, the
+composition keeps the engine's accuracy.  The error is the incomplete-gamma
+engine's, carried through the terms' absolute values;
+``tests/test_gg_log_tail.py`` states the bound.
 
 Rows neither engine evaluates write NaN everywhere: a non-finite ``w`` or
 ``q``, ``q`` so small that ``1/q^2`` overflows outside the first route,
@@ -70,27 +67,29 @@ from superglm.distributional.kernels._gg_uniform_tail import (
     gg_uniform_log_tail_with_scratch,
 )
 from superglm.distributional.kernels._incomplete_gamma import (
-    _A_DEG,
-    _LOG,
-    _X_DEG,
     WORK_SIZE,
-    _jet_mul,
-    log_gamma_tail_into,
+    jet_mul,
+    log_gamma_tail_jet_into,
 )
+
+# Digest of the compiled callees above, stamped by ``tools/generate_severity_families.py``:
+# Numba's on-disk cache keys a compiled caller on its own file only.
+_CALLEE_DIGEST = "191dcecca26ef137398caad5c2d59a038580c866e4a028cd754a9e1cd2274c9d"
 
 ORDER_MAX = 4
 _N = (ORDER_MAX + 1) * (ORDER_MAX + 2) // 2
 _FACTORIAL = (1.0, 1.0, 2.0, 6.0, 24.0)
 
 # Flat scratch layout for the composition route: the incomplete-gamma work,
-# then five jets of _N entries.
+# then six jets of _N entries.
 _GAMMA_ROWS = -(-WORK_SIZE // _N)
 _DA = _GAMMA_ROWS * _N
 _E = _DA + _N
 _INNER = _E + _N
 _OUTER = _INNER + _N
 _TMP = _OUTER + _N
-_ROWS = max(_UNIFORM_SCRATCH_SHAPE[0], _GAMMA_ROWS + 5)
+_JET = _TMP + _N
+_ROWS = max(_UNIFORM_SCRATCH_SHAPE[0], _GAMMA_ROWS + 6)
 SCRATCH_SHAPE = (_ROWS, _N)
 if _UNIFORM_SCRATCH_SHAPE[1] != _N:
     raise ImportError("the uniform engine's scratch rows must hold one order-4 jet")
@@ -119,7 +118,7 @@ def _map_jets(flat, w, q, a, order, n):
     for k in range(1, order + 1):
         power *= minus_inverse_q
         flat[_DA + _index(0, k)] = a * (k + 1) * power
-    # exp(q dw + w dq + dq dw): the (i, j) coefficient is
+    # e = exp(q dw + w dq + dq dw) - 1: the (i, j) coefficient is
     # sum_m q^(i-m) w^(j-m) / ((i-m)! (j-m)! m!).
     for i in range(order + 1):
         for j in range(order + 1 - i):
@@ -130,14 +129,6 @@ def _map_jets(flat, w, q, a, order, n):
                     * w ** (j - m)
                     / (_FACTORIAL[i - m] * _FACTORIAL[j - m] * _FACTORIAL[m])
                 )
-            flat[_TMP + _index(i, j)] = total
-    for i in range(order + 1):
-        for j in range(order + 1 - i):
-            total = 0.0
-            power = 1.0
-            for k in range(j + 1):
-                total += (k + 1) * power * flat[_TMP + _index(i, j - k)]
-                power *= minus_inverse_q
             flat[_E + _index(i, j)] = total
     flat[_E] = 0.0
 
@@ -147,8 +138,11 @@ def _composed_log_tail(w, q, upper, order, out, flat):
     """The incomplete-gamma route for any row, its ``(da, e)`` jet composed into ``(w, q)``."""
     a = 1.0 / (q * q)
     x = a * math.exp(q * w)
-    log_gamma_tail_into(a, x, upper == (q > 0.0), order, out, flat)
-    if not math.isfinite(out[0]):
+    jet = flat[_JET : _JET + _N]
+    if not log_gamma_tail_jet_into(a, x, upper == (q > 0.0), order, True, jet, flat):
+        _fill_nan(out)
+        return
+    if not math.isfinite(jet[0]):
         _fill_nan(out)
         return
     _compose_into(flat, w, q, a, order, out)
@@ -156,28 +150,30 @@ def _composed_log_tail(w, q, upper, order, out, flat):
 
 @njit(cache=True, nogil=True)
 def _compose_into(flat, w, q, a, order, out):
-    """Compose the ``(da, e)`` jet in ``flat[_LOG:]`` into plain ``(w, q)`` partials in ``out``."""
+    """Compose the ``(da, e)`` jet in ``flat[_JET:]`` into plain ``(w, q)`` partials in ``out``."""
     n = (order + 1) * (order + 2) // 2
     _map_jets(flat, w, q, a, order, n)
     # Horner: P_i = sum_j c_ij e^j, then sum_i P_i da^i.
     for i in range(order, -1, -1):
         for r in range(n):
             flat[_INNER + r] = 0.0
-        flat[_INNER] = flat[_LOG + _index(i, order - i)]
+        flat[_INNER] = flat[_JET + _index(i, order - i)]
         for j in range(order - i - 1, -1, -1):
-            _jet_mul(flat, _INNER, _E, _TMP, n)
+            jet_mul(flat, _INNER, _E, _TMP, n)
             for r in range(n):
                 flat[_INNER + r] = flat[_TMP + r]
-            flat[_INNER] += flat[_LOG + _index(i, j)]
+            flat[_INNER] += flat[_JET + _index(i, j)]
         if i == order:
             for r in range(n):
                 flat[_OUTER + r] = flat[_INNER + r]
         else:
-            _jet_mul(flat, _OUTER, _DA, _TMP, n)
+            jet_mul(flat, _OUTER, _DA, _TMP, n)
             for r in range(n):
                 flat[_OUTER + r] = flat[_TMP + r] + flat[_INNER + r]
-    for r in range(n):
-        out[r] = flat[_OUTER + r] * _FACTORIAL[_A_DEG[r]] * _FACTORIAL[_X_DEG[r]]
+    for k in range(order + 1):
+        for j in range(k + 1):
+            r = k * (k + 1) // 2 + j
+            out[r] = flat[_OUTER + r] * _FACTORIAL[k - j] * _FACTORIAL[j]
 
 
 @njit(cache=True, nogil=True)

@@ -1454,7 +1454,7 @@ def _tweedie_hessian_direction_rows(
 _FOURTH_GENERATED_DIGEST = "94dfd057670ec60498fdf6535ea203284de57f7d483f0c697493ae031f821c6a"
 # The same for the shared primitives these kernels call, which
 # ``tools/generate_severity_families.py`` stamps.
-_CALLEE_DIGEST = "c00d75067378aa297beb11a12050034393bd8c09ae735a59ff7b9a22df0adf6d"
+_CALLEE_DIGEST = "07075ab812071e5ff3c85dccae9b91cf41ddfe7556e5daf9f0dd6da98f803123"
 
 _positive_closed = njit(cache=True)(_generated.tweedie_positive_closed)
 _zero_closed = njit(cache=True)(_generated.tweedie_zero_closed)

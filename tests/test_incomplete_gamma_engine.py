@@ -35,6 +35,17 @@ orders 3 and 4, about twice and ten times the measurement.  Outside the
 range the same measurement gives up to ``6e-9`` at ``a = 1e-6`` (the
 ``u/a`` term, at every order) and ``3e-10`` at order 4 for ``a = 1e6`` (the
 ``sqrt(a)`` term).
+
+Along fixed ``x/a``.  ``log_gamma_tail_jet_into(..., along_ratio=True, ...)``
+gives the Taylor coefficients ``c_ij`` of ``log T(a + da, (a + da) (x/a) (1 +
+e))``; the oracle is the fixed-``x`` one above, composed exactly with ``dx = x
+(da/a + e + da e/a)``.  Coefficients of mixed sign can vanish, so each is
+measured against ``max(|c_ij|, F_ij, M_k/a^i)``: ``F_ij`` the largest ``|c_p
+c_r|`` with ``p + r = (i, j)`` (its scale in the log), ``M_k`` the row's
+largest ``|c| a^i`` of order ``k`` (``a^i`` puts ``da`` in units of ``a``).
+Measured worst over the grid: 1.65e3 ``u`` at orders 0-2 (the value's rounding
+at ``a = 1e3``, far upper tail) and 6.7e3 ``u`` at orders 3-4 (``a = 0.01``,
+the ``u/a`` term); the tolerances are 8e3 and 3e4 ``u``.
 """
 
 from __future__ import annotations
@@ -51,7 +62,9 @@ from scipy.stats import gamma as gamma_law  # noqa: E402
 
 from superglm.distributional.kernels._incomplete_gamma import (  # noqa: E402
     MAX_ORDER,
+    WORK_SIZE,
     log_gamma_tail,
+    log_gamma_tail_jet_into,
     log_gamma_tail_jets,
     output_size,
 )
@@ -59,6 +72,8 @@ from superglm.distributional.kernels._incomplete_gamma import (  # noqa: E402
 _DIGITS = 60
 _TOLERANCE = (1e-12, 1e-12, 1e-12, 1e-11, 1e-10)
 _BLOCKS = tuple((k * (k + 1) // 2, (k + 1) * (k + 2) // 2) for k in range(MAX_ORDER + 1))
+_ALONG_TOLERANCE = np.array([8e3, 8e3, 8e3, 3e4, 3e4]) * 2.0**-53
+_KEYS = tuple((k - j, j) for k in range(MAX_ORDER + 1) for j in range(k + 1))
 _SHAPES = (0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 12.0, 30.0, 100.0, 300.0, 1000.0, 3000.0, 1e4)
 
 
@@ -144,6 +159,36 @@ def _oracle(a: float, x: float) -> dict[bool, list]:
         return result
 
 
+def _along_ratio(plain: list, a: float, x: float) -> np.ndarray:
+    """Fixed-``x`` plain partials to Taylor coefficients along fixed ``x/a``."""
+    with mp.workdps(_DIGITS):
+        dx = {(1, 0): mp.mpf(x) / a, (0, 1): mp.mpf(x), (1, 1): mp.mpf(x) / a}
+        powers = [{(0, 0): mp.mpf(1)}]
+        for _ in range(MAX_ORDER):
+            powers.append(_times(powers[-1], dx))
+        taylor: dict = {}
+        for value, (i, j) in zip(plain, _KEYS, strict=True):
+            coefficient = value / (mp.factorial(i) * mp.factorial(j))
+            for (k, m), v in powers[j].items():
+                if k + i + m <= MAX_ORDER:
+                    taylor[(k + i, m)] = taylor.get((k + i, m), 0) + coefficient * v
+        return np.array([float(taylor.get(key, 0)) for key in _KEYS])
+
+
+def _along_scale(c: np.ndarray, a: float) -> np.ndarray:
+    """``max(|c_ij|, F_ij, M_k/a^i)`` (module docstring)."""
+    weight = np.array([a**i for i, _ in _KEYS])
+    scale = np.abs(c)
+    for r, (i, j) in enumerate(_KEYS):
+        for p, (ip, jp) in enumerate(_KEYS):
+            if 0 < p != r and ip <= i and jp <= j:
+                scale[r] = max(scale[r], abs(c[p] * c[_KEYS.index((i - ip, j - jp))]))
+    for start, stop in _BLOCKS:
+        order_scale = np.max(np.abs(c[start:stop] * weight[start:stop]))
+        scale[start:stop] = np.maximum(scale[start:stop], order_scale / weight[start:stop])
+    return scale
+
+
 def _engine(a: float, x: float, upper: bool, order: int) -> np.ndarray:
     out = np.empty(output_size(order))
     log_gamma_tail(a, x, upper, order, out)
@@ -152,12 +197,31 @@ def _engine(a: float, x: float, upper: bool, order: int) -> np.ndarray:
 
 @pytest.mark.parametrize("a", _SHAPES)
 def test_every_partial_matches_the_mpmath_oracle(a: float) -> None:
-    """Each order of each call, both tails, across both far tails and the diagonal."""
+    """Each order of each call, both tails, across both far tails and the diagonal.
+
+    The order-4 jet along fixed ``x/a`` is checked on the same rows, and at
+    fixed ``x`` the jet entry is the engine's partials before scaling.
+    """
     failures = []
     for label, x in _points(a).items():
         oracle = _oracle(a, x)
         for upper in (False, True):
             reference = np.array([float(v) for v in oracle[upper]])
+            work = np.empty(WORK_SIZE)
+            jet = np.empty(output_size(MAX_ORDER))
+            assert log_gamma_tail_jet_into(a, x, upper, MAX_ORDER, False, jet, work)
+            factor = np.array([math.factorial(i) * math.factorial(j) / x**j for i, j in _KEYS])
+            np.testing.assert_allclose(factor * jet, _engine(a, x, upper, MAX_ORDER), rtol=1e-15)
+            along = _along_ratio(oracle[upper], a, x)
+            if np.all(np.isfinite(along)):
+                assert log_gamma_tail_jet_into(a, x, upper, MAX_ORDER, True, jet, work)
+                scale = _along_scale(along, a)
+                for order, (start, stop) in enumerate(_BLOCKS):
+                    usable = scale[start:stop] > 1e-280
+                    error = np.abs(jet[start:stop] - along[start:stop])[usable]
+                    if not np.all(error <= _ALONG_TOLERANCE[order] * scale[start:stop][usable]):
+                        tail = "Q" if upper else "P"
+                        failures.append(f"x={x:.17g} ({label}) along x/a log {tail} order {order}")
             for order in range(MAX_ORDER + 1):
                 start, stop = _BLOCKS[order]
                 got = _engine(a, x, upper, order)[start:stop]

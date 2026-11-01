@@ -205,33 +205,14 @@ _FIRST_USE: dict[str, str] = {
     "superglm.plotting.diagnostics._lowess_core": "a diagnostic plot's smoother, not a fit (2.2 s)",
     **dict.fromkeys(
         (
-            "superglm.distributional.kernels._gg_uniform_tail." + name
-            for name in (
-                "gg_uniform_in_domain",
-                "_log_tail_into",
-                "gg_uniform_log_tail",
-                "gg_uniform_log_tail_with_scratch",
-                "_log_tail_rows",
-                "_domain_rows",
-            )
+            *(
+                "superglm.distributional.kernels._gg_uniform_tail." + name
+                for name in ("gg_uniform_log_tail", "_log_tail_rows", "_domain_rows")
+            ),
+            "superglm.distributional.kernels._gg_log_tail._composed_rows",
         ),
-        "the generalized gamma's uniform log tail for bounded rows: GammaLS calls it only "
-        "above shape 1e4 (4.4 s to compile the row kernel, 0.1 s from cache)",
-    ),
-    **dict.fromkeys(
-        (
-            "superglm.distributional.kernels._gg_log_tail." + name
-            for name in (
-                "_fill_nan",
-                "_map_jets",
-                "_composed_log_tail",
-                "_compose_into",
-                "gg_log_tail",
-                "_composed_rows",
-                "_log_tail_rows",
-            )
-        ),
-        "the generalized gamma's log tail at every shape for bounded rows: no family calls it yet",
+        "the generalized gamma tails' own scalar and array entry points, for tests: bounded "
+        "fits reach both engines through gg_log_tail's row kernel",
     ),
 }
 

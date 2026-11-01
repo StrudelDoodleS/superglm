@@ -538,9 +538,9 @@ def _callee_digest(dispatchers) -> str:
 
 
 _CALLEE_LINE = re.compile(r'^_CALLEE_DIGEST = "[^"]*"$', re.MULTILINE)
-# Kernel modules outside ``_declared`` that call compiled primitives: each
-# carries the digest of the primitives it imports, so editing one recompiles it.
-PRIMITIVE_CALLERS = ("_incomplete_gamma", "_tweedie_numba")
+# Kernel modules outside ``_declared`` that call compiled functions of another
+# file: each carries the digest of those it imports, so editing one recompiles it.
+PRIMITIVE_CALLERS = ("_incomplete_gamma", "_tweedie_numba", "_gg_log_tail")
 
 
 def stamped_callers() -> dict[Path, str]:
@@ -551,7 +551,7 @@ def stamped_callers() -> dict[Path, str]:
         callees = [
             value
             for _, value in sorted(vars(module).items())
-            if hasattr(value, "py_func") and value.py_func.__module__ == PRIMITIVES_MODULE
+            if hasattr(value, "py_func") and value.py_func.__module__ != module.__name__
         ]
         path = KERNELS / f"{name}.py"
         text = path.read_text()

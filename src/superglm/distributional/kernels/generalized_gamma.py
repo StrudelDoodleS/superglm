@@ -34,6 +34,7 @@ from superglm.distributional.kernels._common import (
     validated_derivative_order,
 )
 from superglm.distributional.kernels._curvature_direction import mean_form_hessian_direction
+from superglm.distributional.kernels._gg_log_tail import gg_log_tail_jets
 from superglm.distributional.kernels.gamma import gamma_shape_plus_one_log_increment
 from superglm.distributional.kernels.log_normal import log_normal_tail_log_factors
 
@@ -1480,6 +1481,35 @@ def _log_mean_loading_fourth(
     return result
 
 
+def mean_location_map(
+    mean: NDArray[np.float64], sigma: NDArray[np.float64], shape: NDArray[np.float64], order: int
+) -> tuple[NDArray[np.float64], dict, tuple[NDArray[np.float64], ...]]:
+    """``mu = log m - log C(sigma, Q)``, its derivatives to ``order`` and the Stirling triplet.
+
+    The derivatives are ``compose_derivatives``' structural nonzeros of the
+    map ``(m, sigma, Q) -> (mu, sigma, Q)``; the caller guarantees ``mean_exists``.
+    """
+    from superglm.distributional.kernels._curvature_direction import packed_tuples
+
+    loading, stirling = _log_mean_loading_and_stirling(sigma, shape)
+    logc, c_s, c_q, c_ss, c_sq, c_qq = loading
+    orders = {1: np.column_stack((c_s, c_q)), 2: np.column_stack((c_ss, c_sq, c_qq))}
+    if order >= 3:
+        orders[3] = np.column_stack(_log_mean_loading_third(sigma, shape))
+    if order >= 4:
+        orders[4] = _log_mean_loading_fourth(sigma, shape)
+    inner: dict[int, dict[tuple[int, tuple[int, ...]], NDArray[np.float64] | float]] = {
+        1: {(0, (0,)): 1.0 / mean, (1, (1,)): 1.0, (2, (2,)): 1.0},
+        2: {(0, (0, 0)): -1.0 / (mean * mean)},
+        3: {(0, (0, 0, 0)): 2.0 / (mean * mean * mean)},
+        4: {(0, (0, 0, 0, 0)): -6.0 / (mean * mean * mean * mean)},
+    }
+    for level, values in orders.items():
+        for column, key in enumerate(packed_tuples(2, level)):
+            inner[level][(0, tuple(index + 1 for index in key))] = -values[:, column]
+    return np.log(mean) - logc, inner, stirling
+
+
 def mean_third_fourth(
     response: NDArray,
     mean: NDArray,
@@ -1493,10 +1523,7 @@ def mean_third_fourth(
     by the set-partition chain rule (``compose_derivatives``).  Rows whose
     mean does not exist, or whose Hessian is invalid, return zero.
     """
-    from superglm.distributional.kernels._curvature_direction import (
-        compose_derivatives,
-        packed_tuples,
-    )
+    from superglm.distributional.kernels._curvature_direction import compose_derivatives
 
     y = _positive_vector(response, name="response")
     m = _positive_vector(mean, name="mean")
@@ -1511,28 +1538,11 @@ def mean_third_fourth(
     if not np.any(exists):
         return third, fourth
     ye, me, se, qe, we = (values[exists] for values in (y, m, sigma_values, q, weight))
-    loading, stirling = _log_mean_loading_and_stirling(se, qe)
-    logc, c_s, c_q, c_ss, c_sq, c_qq = loading
-    location = np.log(me) - logc
+    location, inner, stirling = mean_location_map(me, se, qe, 4)
     unit = np.ones_like(we)
     base = _location_rows(ye, location, se, qe, unit, derivative_order=2, stirling=stirling)
     assert base.score is not None and base.hessian_packed is not None
     location_third, location_fourth = location_third_fourth(ye, location, se, qe, unit)
-    orders = {
-        1: np.column_stack((c_s, c_q)),
-        2: np.column_stack((c_ss, c_sq, c_qq)),
-        3: np.column_stack(_log_mean_loading_third(se, qe)),
-        4: _log_mean_loading_fourth(se, qe),
-    }
-    inner: dict[int, dict[tuple[int, tuple[int, ...]], NDArray[np.float64] | float]] = {
-        1: {(0, (0,)): 1.0 / me, (1, (1,)): 1.0, (2, (2,)): 1.0},
-        2: {(0, (0, 0)): -1.0 / (me * me)},
-        3: {(0, (0, 0, 0)): 2.0 / (me * me * me)},
-        4: {(0, (0, 0, 0, 0)): -6.0 / (me * me * me * me)},
-    }
-    for order, values in orders.items():
-        for column, key in enumerate(packed_tuples(2, order)):
-            inner[order][(0, tuple(index + 1 for index in key))] = -values[:, column]
     outer = {
         1: np.asarray(base.score),
         2: np.asarray(base.hessian_packed),
@@ -1597,7 +1607,9 @@ def generalized_gamma_cdf(
     """``P(Y <= y)`` in location coordinates.
 
     ``P(k, k e^(Q w))`` for ``Q > 0``, ``Q(k, k e^(Q w))`` for ``Q < 0`` (``W``
-    decreases in the gamma variate there) and ``Phi(w)`` at ``Q = 0``.
+    decreases in the gamma variate there).  Below ``|Q| = 1e-8``, where ``k``
+    passes ``1e16``, it is the fitted law's uniform expansion through ``Q = 0``
+    (``gg_log_tail``), ``Phi(w)`` at ``Q = 0``.
     """
     y_values = _vector(y, name="y")
     mu_values, sigma_values, q = _location_arguments(mu, sigma, shape)
@@ -1619,7 +1631,10 @@ def generalized_gamma_cdf(
             lower = special.gammainc(k, argument)
             upper = special.gammaincc(k, argument)
         inside_cdf = np.where(safe > 0.0, lower, upper)
-        out[interior] = np.where(zero, special.ndtr(w), inside_cdf)
+        if np.any(zero):
+            log_cdf = gg_log_tail_jets(w[zero], q_inside[zero], upper=False, order=0)[0]
+            inside_cdf[zero] = np.where(np.isnan(log_cdf), special.ndtr(w[zero]), np.exp(log_cdf))
+        out[interior] = inside_cdf
     _finite_or_raise("cdf", out)
     return readonly(out)
 
@@ -1627,7 +1642,11 @@ def generalized_gamma_cdf(
 def generalized_gamma_quantile(
     p: NDArray, mu: NDArray, sigma: NDArray, shape: NDArray
 ) -> NDArray[np.float64]:
-    """Quantile function in location coordinates for ``p`` strictly inside ``(0, 1)``."""
+    """Quantile function in location coordinates for ``p`` strictly inside ``(0, 1)``.
+
+    Below ``|Q| = 1e-8`` it is ``w = z - Q (z^2 + 2)/6``, ``z = Phi^-1(p)``, from
+    ``dF/dQ = phi(w) (w^2 + 2)/6`` at ``Q = 0``; the ``O(Q^2)`` remainder is below rounding.
+    """
     probabilities = np.asarray(p, dtype=_FLOAT)
     if (
         np.any(~np.isfinite(probabilities))
@@ -1647,7 +1666,8 @@ def generalized_gamma_quantile(
         special.gammainccinv(k, probabilities),
     )
     with np.errstate(divide="ignore", invalid="ignore"):
-        w = np.where(zero, special.ndtri(probabilities), np.log(gamma_quantile / k) / safe)
+        z = special.ndtri(probabilities)
+        w = np.where(zero, z - q * (z * z + 2.0) / 6.0, np.log(gamma_quantile / k) / safe)
         out = np.exp(mu_values + sigma_values * w)
     _finite_or_raise("quantile", out)
     return readonly(out)
@@ -2047,6 +2067,7 @@ __all__ = [
     "mean_expected_information",
     "mean_of_location",
     "mean_rows",
+    "mean_location_map",
     "mean_third_fourth",
     "Parametrisation",
     "series_e1",

@@ -71,6 +71,8 @@ _LOG_HALF = -math.log(2.0)
 _FACTORIAL = (1.0, 1.0, 2.0, 6.0, 24.0)
 # From here log D takes the Stirling forms of the primitives gnorm and psires.
 _STIRLING_FROM = 10.0
+# Per-iteration relative change at which the continued fraction along x/a stops.
+_ALONG_RATIO_STOP = 16.0 * _U
 
 
 def output_size(order: int) -> int:
@@ -145,6 +147,11 @@ def _jet_mul(w, f, g, h, n):
         w[h + r] = total
 
 
+# The packed jet product ``h = f g`` (offsets into one flat array), public for
+# callers composing :func:`log_gamma_tail_jet_into`'s jet.
+jet_mul = _jet_mul
+
+
 @njit(cache=True)
 def _jet_inv(w, f, g, n):
     inverse = 1.0 / w[f]
@@ -203,7 +210,19 @@ def _log1mexp(value):
 
 
 @njit(cache=True)
-def _log_prefactor(a, x, k_max, n, w):
+def _log_scale(w, f, r):
+    """``max |f_p f_q|/|f_0|`` over ``p + q = r``, ``p, q != 0``: the scale of ``r`` in ``log f``."""
+    best = 0.0
+    for t in range(_START[r], _START[r + 1]):
+        p = _FIRST[t]
+        q = _SECOND[t]
+        if p != 0 and q != 0:
+            best = max(best, abs(w[f + p] * w[f + q]))
+    return best / abs(w[f])
+
+
+@njit(cache=True)
+def _log_prefactor(a, x, k_max, n, w, along_ratio):
     """``log D = a log x - x - lgamma(a + 1)`` on the jet, into ``w[_PRE]``."""
     for r in range(n):
         w[_PRE + r] = 0.0
@@ -229,6 +248,8 @@ def _log_prefactor(a, x, k_max, n, w):
     polygamma = (p1, p2, p3)
     for k in range(2, k_max + 1):
         w[_PRE + k * (k + 1) // 2] = -polygamma[k - 2] / _FACTORIAL[k]
+    if along_ratio:
+        _along_ratio_prefactor(a, x, p0, polygamma, k_max, w)
     # a log(1 + e) - x e: e coefficient j is (a + da) (-1)^(j+1)/j, less x at j = 1.
     for j in range(1, k_max + 1):
         log_coefficient = (1.0 if j % 2 == 1 else -1.0) / j
@@ -236,12 +257,50 @@ def _log_prefactor(a, x, k_max, n, w):
         if j < k_max:
             w[_PRE + (j + 1) * (j + 2) // 2 + j] = log_coefficient
     w[_PRE + 2] = a - x
+    if along_ratio and k_max >= 2:
+        w[_PRE + 4] = -t
 
 
 @njit(cache=True)
-def _series_log_sum(a, x, k_max, n, w):
-    """``log S`` into ``w[_TMP2]``; returns the term count, or -1 at the cap."""
+def _along_ratio_prefactor(a, x, p0, polygamma, k_max, w):
+    """The ``da^k`` coefficients of ``log D`` at fixed ``x/a``.
+
+    ``a log x - lgamma(a + 1)`` at ``x = a lambda`` is ``g(a) = a log a + a log
+    lambda - lgamma(a + 1)``, with ``g' = -gdev(x, a) - (psi(a + 1) - log a)``
+    and ``g^(k) = (-1)^k (k - 2)!/a^(k - 1) - psi^(k - 1)(a + 1)`` for ``k >= 2``,
+    which for ``a >= 10`` is ``-psires(k - 1, a) + (-1)^k (k - 1)!/a^k``.
+    """
+    if a < _STIRLING_FROM:
+        w[_PRE + 1] = -gdev(x, a) - (p0 - math.log(a))
+        power = 1.0
+        for k in range(2, k_max + 1):
+            power /= a
+            w[_PRE + k * (k + 1) // 2] = (
+                (1.0 if k % 2 == 0 else -1.0) * _FACTORIAL[k - 2] * power - polygamma[k - 2]
+            ) / _FACTORIAL[k]
+        return
+    residual = psires_0123(a)
+    w[_PRE + 1] = -gdev(x, a) - (residual[0] + 1.0 / a)
+    power = 1.0
+    for k in range(1, k_max + 1):
+        power /= a
+        if k >= 2:
+            w[_PRE + k * (k + 1) // 2] = (
+                -residual[k - 1] + (1.0 if k % 2 == 0 else -1.0) * _FACTORIAL[k - 1] * power
+            ) / _FACTORIAL[k]
+
+
+@njit(cache=True)
+def _series_log_sum(a, x, k_max, n, w, along_ratio):
+    """``log S`` into ``w[_TMP2]``; returns the term count, or -1 at the cap.
+
+    Along ``x/a`` the term ratio is ``lambda (a + da)/(a + n + da)`` and the
+    ``da`` coefficients of a term grow by up to ``(1 + 2/n)^k``, so the tail
+    estimate squares the growth factor; coefficients of mixed sign may sum to
+    near zero, so each is held to ``u`` times its scale in ``log S`` too.
+    """
     binomial = _TMP1
+    ratio_x = x / a
     for r in range(n):
         w[_SUM + r] = 0.0
     for k in range(k_max + 1):
@@ -254,21 +313,22 @@ def _series_log_sum(a, x, k_max, n, w):
         previous = 0.0
         for k in range(k_max + 1):
             quotient = (w[_TERM + k] - previous) / denominator
+            w[_TERM + k] = x * quotient + ratio_x * previous if along_ratio else x * quotient
             previous = quotient
-            w[_TERM + k] = x * quotient
         for j in range(1, k_max + 1):
             w[binomial + j] = (w[binomial + j - 1] * (n_term - j + 1)) / j
         # Successive terms C(n, j) t_n shrink by (n + 1)/(n + 1 - j) x/(a + n + 1).
         ratio = 2.0
         if n_term + 1 > k_max:
-            ratio = x / (denominator + 1.0) * ((n_term + 1.0) / (n_term + 1.0 - k_max))
+            growth = (n_term + 1.0) / (n_term + 1.0 - k_max)
+            ratio = x / (denominator + 1.0) * (growth * growth if along_ratio else growth)
         done = ratio < 1.0
         tail = max(1.0, ratio / (1.0 - ratio)) if done else 0.0
         for r in range(n):
             term = w[binomial + _X_DEG[r]] * w[_TERM + _A_DEG[r]]
             w[_SUM + r] += term
             if done and abs(term) * tail > _U * abs(w[_SUM + r]):
-                done = False
+                done = along_ratio and abs(term) * tail <= _U * _log_scale(w, _SUM, r)
         if done:
             _jet_log(w, _SUM, _TMP2, n)
             return n_term
@@ -276,19 +336,31 @@ def _series_log_sum(a, x, k_max, n, w):
 
 
 @njit(cache=True)
-def _continued_fraction_log_h(a, x, n, w):
-    """``log h`` into ``w[_TMP2]``; returns the iteration count, or -1 at the cap."""
+def _continued_fraction_log_h(a, x, n, w, along_ratio):
+    """``log h`` into ``w[_TMP2]``; returns the iteration count, or -1 at the cap.
+
+    Along ``x/a`` mixed coefficients of ``h`` change sign, so each is held to
+    its scale in ``log h`` as well as its own size, and the fixed point keeps
+    a few ``u`` of rounding noise in every coefficient (``b``'s ``da``
+    coefficient is ``x/a - 1``), so the change allowed is
+    :data:`_ALONG_RATIO_STOP`.
+    """
     d = _TERM
     c = _LENTZ_C
     h = _SUM
-    # b_i = x (1 + e) + 1 + 2 i - a and a_i = -i (i - a), linear in (da, e).
+    # b_i = x (1 + e) + 1 + 2 i - a and a_i = -i (i - a), linear in (da, e); along
+    # x/a, x = (a + da) lambda (1 + e) adds lambda - 1 to da and lambda to da e.
+    b_da = (x - a) / a if along_ratio else -1.0
+    b_mixed = x / a if along_ratio else 0.0
     for r in range(n):
         w[_TMP1 + r] = 0.0
     b0 = x + 1.0 - a
     w[_TMP1] = b0
     if n > 1:
-        w[_TMP1 + 1] = -1.0
+        w[_TMP1 + 1] = b_da
         w[_TMP1 + 2] = x
+    if along_ratio and n > 4:
+        w[_TMP1 + 4] = b_mixed
     _jet_inv(w, _TMP1, d, n)
     for r in range(n):
         w[h + r] = w[d + r]
@@ -299,8 +371,10 @@ def _continued_fraction_log_h(a, x, n, w):
         _jet_linear(w, d, d, an0, an1, 0.0, n)
         w[d] += b0
         if n > 1:
-            w[d + 1] -= 1.0
+            w[d + 1] += b_da
             w[d + 2] += x
+        if along_ratio and n > 4:
+            w[d + 4] += b_mixed
         if i == 1:
             for r in range(n):
                 w[c + r] = 0.0
@@ -309,8 +383,10 @@ def _continued_fraction_log_h(a, x, n, w):
             _jet_linear(w, _TMP1, c, an0, an1, 0.0, n)
         w[c] += b0
         if n > 1:
-            w[c + 1] -= 1.0
+            w[c + 1] += b_da
             w[c + 2] += x
+        if along_ratio and n > 4:
+            w[c + 4] += b_mixed
         _jet_inv(w, d, _TMP1, n)
         for r in range(n):
             w[d + r] = w[_TMP1 + r]
@@ -318,8 +394,10 @@ def _continued_fraction_log_h(a, x, n, w):
         _jet_mul(w, h, _TMP1, _TMP2, n)
         done = i > 2
         for r in range(n):
-            if done and abs(w[_TMP2 + r] - w[h + r]) > _U * abs(w[_TMP2 + r]):
-                done = False
+            change = abs(w[_TMP2 + r] - w[h + r])
+            if done and change > _U * abs(w[_TMP2 + r]):
+                limit = max(abs(w[_TMP2 + r]), _log_scale(w, _TMP2, r))
+                done = along_ratio and change <= _ALONG_RATIO_STOP * limit
             w[h + r] = w[_TMP2 + r]
         if done:
             _jet_log(w, h, _TMP2, n)
@@ -350,25 +428,33 @@ def _fill_nan(out):
 
 
 @njit(cache=True)
-def log_gamma_tail_into(a, x, upper, order, out, w):
-    """:func:`log_gamma_tail` with caller-owned work of :data:`WORK_SIZE`."""
-    if not (0 <= order <= MAX_ORDER and out.shape[0] >= (order + 1) * (order + 2) // 2):
-        _fill_nan(out)
-        return
+def log_gamma_tail_jet_into(a, x, upper, order, along_ratio, jet, w):
+    """Taylor coefficients of the log tail into ``jet``; ``False`` (and NaN) off the domain.
+
+    ``jet[r]`` is the coefficient of ``da^i e^j`` (``d^(i+j) log T/(da^i de^j)/(i! j!)``),
+    packed as the output.  With ``along_ratio`` false ``x -> x (1 + e)`` at fixed
+    ``x``; with it true ``x -> (a + da) (x/a) (1 + e)``, along fixed ``x/a``,
+    where near the diagonal the tail depends on ``(x - a)/sqrt(a)`` and the
+    ``da`` coefficients stay of the size of the result.  ``w`` is caller-owned
+    work of :data:`WORK_SIZE`.
+    """
+    if not (0 <= order <= MAX_ORDER and jet.shape[0] >= (order + 1) * (order + 2) // 2):
+        _fill_nan(jet)
+        return False
     if not (0.0 < a < math.inf and 0.0 < x < math.inf):
-        _fill_nan(out)
-        return
+        _fill_nan(jet)
+        return False
     k_max = order
     n = (k_max + 1) * (k_max + 2) // 2
-    _log_prefactor(a, x, k_max, n, w)
+    _log_prefactor(a, x, k_max, n, w, along_ratio)
     series = x <= a + max(1.0, math.sqrt(a))
     if series:
-        status = _series_log_sum(a, x, k_max, n, w)
+        status = _series_log_sum(a, x, k_max, n, w, along_ratio)
     else:
-        status = _continued_fraction_log_h(a, x, n, w)
+        status = _continued_fraction_log_h(a, x, n, w, along_ratio)
     if status < 0:
-        _fill_nan(out)
-        return
+        _fill_nan(jet)
+        return False
     for r in range(n):
         w[_SMOOTH + r] = w[_PRE + r] + w[_TMP2 + r]
         w[_LOG + r] = w[_SMOOTH + r]
@@ -383,10 +469,20 @@ def log_gamma_tail_into(a, x, upper, order, out, w):
         _jet_complement(w, a, not series, n)
         for r in range(n):
             w[_LOG + r] = w[_TMP2 + r]
-    inverse_x = 1.0 / x
     for r in range(n):
+        jet[r] = w[_LOG + r]
+    return True
+
+
+@njit(cache=True)
+def log_gamma_tail_into(a, x, upper, order, out, w):
+    """:func:`log_gamma_tail` with caller-owned work of :data:`WORK_SIZE`."""
+    if not log_gamma_tail_jet_into(a, x, upper, order, False, out, w):
+        return
+    inverse_x = 1.0 / x
+    for r in range((order + 1) * (order + 2) // 2):
         j = _X_DEG[r]
-        out[r] = _FACTORIAL[_A_DEG[r]] * _FACTORIAL[j] * w[_LOG + r] * inverse_x**j
+        out[r] = _FACTORIAL[_A_DEG[r]] * _FACTORIAL[j] * out[r] * inverse_x**j
 
 
 @njit(cache=True)

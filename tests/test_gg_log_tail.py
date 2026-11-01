@@ -3,7 +3,8 @@
 ``kernels/_gg_log_tail.py`` routes each row to the uniform expansion
 (``_gg_uniform_tail``, tested in ``tests/test_gg_uniform_tail.py``) inside
 ``gg_uniform_in_domain`` and to the incomplete gamma at ``a = 1/q^2``,
-``x = a e^(q w)`` with its ``(da, e)`` jet composed into ``(w, q)`` elsewhere.
+``x = a e^(q w)`` with its ``(da, e)`` jet along fixed ``x/a`` composed into
+``(w, q)`` elsewhere.
 
 Oracle.  ``mpmath.diff`` of ``log gammainc`` as a function of ``(w, q)``, at 40
 digits (``mp.diff`` raises the working precision for its own stencil), with the
@@ -14,24 +15,26 @@ below against the uniform tail's ``q``-stencil reference.
 
 Error model of the composed route.  Order ``d`` is compared relative to the
 row's largest same-order oracle entry ``scale_d``.  The incomplete-gamma engine's
-order-``k`` partials in ``(a, x)`` carry at most ``rho_k`` times their row scale
-``s_k`` (its measured envelope inside ``1e-2 <= a <= 1e4``: 330, 332, 578, 5.4e3
-and 4.4e4 ``u``, stated in ``tests/test_incomplete_gamma_engine.py``), so its
-``(da, e)`` coefficient ``c_ij`` carries ``rho_k s_k x^j/(i! j!) + 4 u |c_ij|``.
-Linearised through the composition ``sum c_ij da^i e^j``, each error enters with
-the jet ``|da|^i |e|^j`` of absolute coefficients.  The rounding of ``a = 1/q^2``
-(``2 u a``) and of ``x`` (``(3 + |q w|) u`` relative) shifts the expansion
-point, which enters as ``sum |c_ij| ((|da| + 2 u a)^i (|e| + delta)^j - |da|^i |e|^j)``.
-The bound is that sum's order-``d`` partials, times 4 for libm variation.
-Over the grids below the largest error is 0.08 of the bound at order 0 and
-below 0.011 at orders 1-4, where the envelope ``rho_k``, taken at its worst
-(``a = 1e4``), is loose.  The terms of the composition exceed its result by
-about ``a^d`` near the diagonal (``|eta| < 1``) and do not at ``|eta| > 1``,
-so the body at ``0.2887 < |q| < 0.5`` (``4 < a < 12``) is the composed route's
-least accurate region: measured worst 1.2e-12, 5.7e-11 and 1.2e-8 of the scale
-at orders 2, 3 and 4.  Composing the exact ``c_ij`` rounded once to float64
-already loses 2e-9 at order 4: the loss is the coordinates', not either
-engine's.
+coefficient ``c_ij`` along fixed ``x/a`` carries at most ``rho_k`` times its
+scale ``max(|c_ij|, F_ij, M_k/a^i)`` (``F_ij`` the largest ``|c_p c_r|`` with
+``p + r = (i, j)``, ``M_k`` the row's largest ``|c| a^i`` of order ``k``; the
+envelope is stated in ``tests/test_incomplete_gamma_engine.py``), plus ``4 u
+|c_ij|``.  Linearised through the composition ``sum c_ij da^i e^j``, each error
+enters with the jet ``|da|^i |e|^j`` of absolute coefficients.  The rounding of
+``a = 1/q^2`` (``2 u a``) and of ``x`` (``(3 + |q w|) u`` relative, so ``(5 + |q
+w|) u`` in ``x/a``) shifts the expansion point, which enters as ``sum |c_ij|
+((|da| + 2 u a)^i (|e| + delta)^j - |da|^i |e|^j)``.  The bound is that sum's
+order-``d`` partials, times 4 for libm variation.
+
+Near the diagonal (``|eta| < 1``) the composition's terms still exceed its
+result by about ``a^(d/2)`` (at fixed ``x`` it was ``a^d``), so the body at
+``0.2887 < |q| < 0.5`` (``4 < a < 12``) is the composed route's least accurate
+region: measured worst 1.6e-13, 6.2e-12 and 6.4e-11 of the scale at orders 2,
+3 and 4 (1.2e-12, 5.7e-11 and 1.2e-8 at fixed ``x``).  Composing the exact
+``c_ij`` rounded once to float64 gives up to 6.5e-12 at order 4; the rest is
+the engine's coefficient error of a few tens of ``u``, amplified by the same
+terms.  ``test_body_between_the_engines_keeps_order_four_within_2e_10`` holds
+the region to about three times the measurement.
 
 Continuity.  At adjacent floats either side of the uniform domain's edge (one
 row per engine), every partial agrees within the sum of the two error models.
@@ -52,7 +55,6 @@ from scipy.special import gammainc, gammaincc  # noqa: E402
 
 from superglm.distributional.kernels import _gg_log_tail as engine  # noqa: E402
 from superglm.distributional.kernels import _gg_uniform_tail as uniform  # noqa: E402
-from superglm.distributional.kernels._incomplete_gamma import _LOG  # noqa: E402
 from superglm.distributional.kernels.generalized_gamma import (  # noqa: E402
     generalized_gamma_cdf,
 )
@@ -74,7 +76,7 @@ KEYS = tuple((d - j, j) for d in range(ORDER + 1) for j in range(d + 1))
 INDEX = {key: r for r, key in enumerate(KEYS)}
 BLOCKS = tuple(slice(d * (d + 1) // 2, (d + 1) * (d + 2) // 2) for d in range(ORDER + 1))
 FACTORIALS = np.array([math.factorial(i) * math.factorial(j) for i, j in KEYS], dtype=float)
-RHO_INCOMPLETE_GAMMA = np.array([330.0, 332.0, 578.0, 5.4e3, 4.4e4]) * U
+RHO_ALONG_RATIO = np.array([4e3, 4e3, 4e3, 3e4, 3e4]) * U
 LIBM_SLACK = 4.0
 
 
@@ -119,7 +121,7 @@ def composed_partials(w, q, upper):
     out = np.empty(len(KEYS))
     flat = np.empty(engine.SCRATCH_SHAPE[0] * engine.SCRATCH_SHAPE[1])
     engine._composed_log_tail(w, q, upper, ORDER, out, flat)
-    return out, flat[_LOG : _LOG + len(KEYS)].copy()
+    return out, flat[engine._JET : engine._JET + len(KEYS)].copy()
 
 
 # --- error models -------------------------------------------------------------------
@@ -132,24 +134,31 @@ def _powers(jet):
     return powers
 
 
+def coefficient_scale(a, coefficients):
+    """``max(|c_ij|, F_ij, M_k/a^i)``, the scale of the engine's envelope (module docstring)."""
+    weight = np.array([a**i for i, _ in KEYS])
+    products = np.zeros(len(KEYS))
+    for r, (i, j) in enumerate(KEYS):
+        for p, (ip, jp) in enumerate(KEYS):
+            if 0 < p != r and ip <= i and jp <= j:
+                partner = coefficients[INDEX[(i - ip, j - jp)]]
+                products[r] = max(products[r], abs(coefficients[p] * partner))
+    order_scale = np.empty(len(KEYS))
+    for block in BLOCKS:
+        order_scale[block] = np.max(np.abs(coefficients[block] * weight[block]))
+    return np.maximum(np.maximum(np.abs(coefficients), products), order_scale / weight)
+
+
 def composed_bound(w, q, coefficients):
     """Majorant of the composed route's error, plain ``(w, q)`` partials (module docstring)."""
     a = 1.0 / (q * q)
-    x = a * math.exp(q * w)
-    plain = coefficients * FACTORIALS / np.array([x**j for _, j in KEYS])
-    scale = [float(np.max(np.abs(plain[block]))) for block in BLOCKS]
-    carried = np.array(
-        [
-            RHO_INCOMPLETE_GAMMA[i + j] * scale[i + j] * x**j / FACTORIALS[r]
-            + 4 * U * abs(coefficients[r])
-            for r, (i, j) in enumerate(KEYS)
-        ]
-    )
-    da, growth, inverse = (np.zeros(len(KEYS)) for _ in range(3))
+    rho = np.array([RHO_ALONG_RATIO[i + j] for i, j in KEYS])
+    carried = rho * coefficient_scale(a, coefficients) + 4 * U * np.abs(coefficients)
+    da, e = np.zeros(len(KEYS)), np.zeros(len(KEYS))
     for k in range(1, ORDER + 1):
         da[INDEX[(0, k)]] = a * (k + 1) / abs(q) ** k
     for i, j in KEYS:
-        growth[INDEX[(i, j)]] = sum(
+        e[INDEX[(i, j)]] = sum(
             abs(q) ** (i - m)
             * abs(w) ** (j - m)
             / FACTORIALS[INDEX[(i - m, 0)]]
@@ -157,12 +166,9 @@ def composed_bound(w, q, coefficients):
             / math.factorial(m)
             for m in range(min(i, j) + 1)
         )
-    for k in range(ORDER + 1):
-        inverse[INDEX[(0, k)]] = (k + 1) / abs(q) ** k
-    e = _float_mul(inverse, growth)
     e[0] = 0.0
     da_shifted, e_shifted = da.copy(), e.copy()
-    da_shifted[0], e_shifted[0] = 2 * U * a, (3 + abs(q * w)) * U
+    da_shifted[0], e_shifted[0] = 2 * U * a, (5 + abs(q * w)) * U
     p_da, p_e, s_da, s_e = _powers(da), _powers(e), _powers(da_shifted), _powers(e_shifted)
     total = np.zeros(len(KEYS))
     for r, (i, j) in enumerate(KEYS):
@@ -256,6 +262,24 @@ def test_composed_route_matches_the_oracle_in_the_body_and_tails(q):
             assert np.array_equal(actual, partials(w, q, side))
             found += failures(w, q, side, actual, expected, composed_bound(w, q, coefficients))
     assert not found, "\n".join(found)
+
+
+BETWEEN_Q = (0.2888, 0.32, 0.4, 0.5, -0.2888, -0.45)
+BETWEEN_W = (-2.0, -1.0, -0.5, 0.0, 0.3, 0.5, 1.0, 1.5, 2.0)
+BETWEEN_BUDGET = (1e-13, 1e-13, 5e-13, 2e-11, 2e-10)
+
+
+def test_body_between_the_engines_keeps_order_four_within_2e_10():
+    """``0.2887 < |q| <= 0.5`` across the diagonal, relative to the row's same-order scale."""
+    worst = np.zeros(ORDER + 1)
+    for q in BETWEEN_Q:
+        for w in BETWEEN_W:
+            for side, expected in zip((False, True), reference(w, q), strict=True):
+                actual = partials(w, q, side)
+                for order, block in enumerate(BLOCKS):
+                    error = np.max(np.abs(actual[block] - expected[block]))
+                    worst[order] = max(worst[order], error / np.max(np.abs(expected[block])))
+    assert np.all(worst <= BETWEEN_BUDGET), worst
 
 
 @pytest.mark.parametrize("q", FAR_Q)
