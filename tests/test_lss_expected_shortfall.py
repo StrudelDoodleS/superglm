@@ -376,10 +376,45 @@ _NEAR_ZERO_SHAPES = [
         1.0e-8,
         np.nextafter(1.0e-8, np.inf),
         1.0e-6,
+        1.0e-3,
+        3.0e-3,
+        1.0e-2,
+        0.1,
         0.2887,
     )
     for sign in (1.0, -1.0)
 ]
+
+
+@pytest.mark.parametrize(("shape", "sigma"), [(-0.2, 4.9), (-0.01, 99.0)])
+def test_expected_shortfall_where_sigma_q_nears_minus_one(shape, sigma):
+    """The size-biased law's shape ``Q/sqrt(1 + sigma Q)`` grows as ``sigma Q -> -1``.
+
+    In the first case it leaves the uniform domain; in the second it stays inside.
+    Both read the fitted law.
+
+    The reference is closed form. With ``G ~ Gamma(k, 1)``, ``k = Q^-2`` and
+    ``s = sigma/Q < 0``, the variable is ``Y = e^mu (Q^2 G)^s``. Then
+    ``E[Y 1{Y > y_p}] = e^mu Q^(2s) Gamma(k + s)/Gamma(k) P(k + s, g_p)``, where
+    ``g_p`` is ``G``'s upper ``p`` point. A density quadrature loses this tail:
+    it read 6.8% low at ``sigma Q = -0.98``.
+    """
+    mp = pytest.importorskip("mpmath")
+    mu = 0.2
+    p = np.array([0.5, 0.9])
+    with mp.workdps(60):
+        k, s = 1 / mp.mpf(shape) ** 2, mp.mpf(sigma) / mp.mpf(shape)
+        scale = mp.e ** mp.mpf(mu) * (1 / k) ** s * mp.gamma(k + s) / mp.gamma(k)
+        reference = []
+        for level in p:
+            upper = mp.findroot(lambda t: mp.gammainc(k, t, mp.inf, regularized=True) - level, k)
+            tail = scale * mp.gammainc(k + s, 0, upper, regularized=True)
+            reference.append(float(tail / (1 - mp.mpf(level))))
+    reference = np.array(reference)
+    family = GeneralizedGammaLSS(parametrisation="location")
+    theta = np.column_stack([np.full(2, mu), np.full(2, sigma), np.full(2, shape)])
+    got = family.expected_shortfall(p, theta)
+    np.testing.assert_allclose(got, reference, rtol=256.0 * _EPS, atol=0.0)
 
 
 @pytest.mark.parametrize("shape", _NEAR_ZERO_SHAPES)

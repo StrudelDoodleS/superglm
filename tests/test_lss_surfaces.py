@@ -451,6 +451,48 @@ def test_term_effect_and_surfaces_hold_and_sweep_one_reference_row(gaussian_case
     assert swept.reference == {"x": 0.3}  # the median of the three present values
 
 
+def test_a_tie_goes_to_the_first_fitted_level_not_the_first_sorted() -> None:
+    from superglm._frame import as_eager_frame
+    from superglm.distributional.terms import _reference_value
+
+    spec = SimpleNamespace(_levels=("c", "b", "a"))
+    fitted = SimpleNamespace(
+        compiled_predictors=(SimpleNamespace(compiled=SimpleNamespace(specs={"g": spec})),)
+    )
+    frame = as_eager_frame(pd.DataFrame({"g": ["a", "b", "a", "b"]}))
+    assert _reference_value(fitted, frame, "g") == "b"
+
+
+@pytest.fixture(scope="module")
+def grouped_case() -> tuple[DenseDistributionalModel, pd.DataFrame]:
+    from superglm.features.grouping import collapse_levels
+
+    X, y = _gaussian_sample()
+    grouping = collapse_levels(X["g"], groups={"ac": ["a", "c"]})
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=[
+            Predictor("location", {"x": Spline("cr", k=6), "g": Categorical(grouping=grouping)}),
+            Predictor("scale", {}),
+        ],
+    ).fit_reml(X, y)
+    return model._require_fitted(), X
+
+
+def test_a_grouped_level_is_swept_through_one_of_its_original_labels(grouped_case) -> None:
+    """A grouped term reads original labels, so its groups sweep through their members."""
+    from superglm.distributional import terms
+
+    fitted, X = grouped_case
+    effect = terms.term_effect(fitted, X, "location", "g", simultaneous=False)
+    curves = risk_curves(fitted, X, {}, "g", n_draws=60, seed=1)
+    fan = density_fan(fitted, X, {}, "g")
+    assert set(effect.levels) == set(curves.levels) == set(fan.levels) == {"ac", "b"}
+    # The group reads its own effect, not the base level's: a = +0.3, c = 0 against b = -0.2.
+    estimate = dict(zip(effect.levels, effect.effect, strict=True))
+    assert estimate["ac"] - estimate["b"] > 0.2
+
+
 def test_json_scalars_are_plain_values_and_nothing_unrepresentable() -> None:
     assert _json_scalar(None) is None
     assert _json_scalar(np.nan) is None

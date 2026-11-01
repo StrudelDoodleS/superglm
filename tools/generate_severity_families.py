@@ -380,8 +380,8 @@ NORMAL = Declaration(
     support="real",
     data=("root",),
     log_density=_normal_log_density,
-    log_survival=lambda y, location, scale, root: lphi(0, root * (location - y) / scale),
-    log_cdf=lambda y, location, scale, root: lphi(0, root * (y - location) / scale),
+    log_survival=lambda y, location, scale, root: lphi(0, ratio(root * (location - y), scale)),
+    log_cdf=lambda y, location, scale, root: lphi(0, ratio(root * (y - location), scale)),
     doc=(
         "The normal law ``N(location, (scale/root)^2)``: ``GaussianLS``'s row law\n"
         "(``root`` the square root of a prior weight, one under frequency\n"

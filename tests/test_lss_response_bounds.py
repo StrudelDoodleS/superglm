@@ -165,8 +165,8 @@ def test_generalized_pareto_window_matches_scipy_and_its_exponential_limit():
 # combiner or the quadrature.  Errors are in ``u`` of the row's term scale, the
 # largest oracle entry of that order of either term (density or censored
 # window, and truncation window), as in ``tests/test_gamma_ls_response_bounds.py``;
-# each order is held to four times its worst measured error on this grid
-# (x86-64 Linux, AMD EPYC 9645).  The rows cover the body and the far tails
+# each order is held to a stated multiple of ``u``, ``_ORACLE_GATE``, the
+# measured worst errors kept beside it as evidence.  The rows cover the body and the far tails
 # (``z = -38`` and ``+30``, both sides of ``log_ndtr_01234``'s switch at
 # ``z = -1``; the Pareto at ``xi = 1e-9``, both sides of its series radius and
 # far in its tail), narrow windows on both routes and one-sided windows.
@@ -199,7 +199,12 @@ _PARETO_ROWS = (
     (151.0, 10.0, _OR_INF, 1, 120.0, 0.4),
 )
 _ORACLE_WEIGHTS = np.array([1.0, 1.0, 1.0, 2.0, 4.0, 1.0, 3.0, 1.0, 2.0, 1.0, 1.0])
-# Worst measured error per order (value, score, Hessian, third, fourth), in u.
+# Per-order gates (value, score, Hessian, third, fourth), in u of the term scale: a
+# few u for each of the primitives' and the chain rule's roundings, growing with the
+# order as more terms enter, as tests/test_severity_primitives.py states for the
+# primitives themselves.
+_ORACLE_GATE = (64.0, 64.0, 128.0, 256.0, 1024.0)
+# Worst measured error per order on this grid (x86-64 Linux), in u: evidence, not the gate.
 _ORACLE_MEASURED = {
     "gaussian-prior": (2.17, 3.67, 7.19, 14.5, 109.0),
     "gaussian-frequency": (2.17, 3.67, 7.13, 12.1, 109.0),
@@ -392,8 +397,8 @@ def test_bounded_rows_match_the_mpmath_oracle_to_order_four(case):
         for order, (got, want) in enumerate(zip(computed, exact, strict=True)):
             error = max(abs(float(g) - float(mass[i] * e)) for g, e in zip(got, want, strict=True))
             worst[order] = max(worst[order], error / float(mass[i] * scales[order]) / _U)
-    for order, (error, measured) in enumerate(zip(worst, _ORACLE_MEASURED[case], strict=True)):
-        assert error <= 4 * max(measured, 1.0), (order, error)
+    for order, (error, gate) in enumerate(zip(worst, _ORACLE_GATE, strict=True)):
+        assert error <= gate, (order, error)
 
 
 # -- fits against direct maximum likelihood ---------------------------------
@@ -1234,6 +1239,28 @@ def test_narrow_normal_windows_keep_their_mass_on_both_sides_of_the_switch(centr
     # Above the switch the difference of the two log tails keeps the mass to
     # about 10 u centre^2; below it the quadrature's error is under 2e-13.
     np.testing.assert_allclose(value, expected, rtol=0.0, atol=2e-13 + 40 * _U * centre**2)
+
+
+def test_a_censored_normal_row_keeps_its_hessian_at_a_tiny_scale():
+    """``log Phi(-(y - mu)/sigma)`` depends on the standardized residual alone.
+
+    So at ``y = mu`` the natural Hessian scales as ``1/sigma^2`` exactly. Forming
+    ``sigma^-3`` apart underflowed it at ``sigma ~ 1e-110``, and the row was
+    marked invalid.
+    """
+    family = GaussianLS(scale_floor=0.0)
+    y = np.zeros(1)
+    bounds = ResponseBounds.from_arrays(np.array([-np.inf]), np.array([np.inf]), np.array([1]))
+    resolved = resolve_likelihood_weights(None, n_observations=1, contract=WeightContract("prior"))
+    plan = family.bind_likelihood(y, resolved, bounded_observation(bounds))
+    tiny = 2.0**-360
+    unit = family.evaluate_natural(y, np.array([[0.0, 1.0]]), plan, derivative_order=2)
+    small = family.evaluate_natural(y, np.array([[0.0, tiny]]), plan, derivative_order=2)
+    assert np.all(small.valid)
+    np.testing.assert_allclose(
+        small.optimizing_log_likelihood, unit.optimizing_log_likelihood, rtol=1e-15
+    )
+    np.testing.assert_allclose(small.hessian_packed * tiny**2, unit.hessian_packed, rtol=1e-12)
 
 
 @pytest.mark.parametrize("scale", [2.0**540, 2.0**700])

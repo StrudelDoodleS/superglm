@@ -52,7 +52,13 @@ from superglm.distributional.posterior import (
 # needs; a sweep frame that restated the rule would drift from the design it is
 # built to feed.
 from superglm.distributional.prediction_design import _required_columns
-from superglm.distributional.terms import _column_levels, _numeric_range, _reference_value
+from superglm.distributional.terms import (
+    _column_levels,
+    _fitted_level_spec,
+    _level_inputs,
+    _numeric_range,
+    _reference_value,
+)
 from superglm.distributional.weights import (
     LikelihoodWeightError,
     ResolvedLikelihoodWeights,
@@ -284,7 +290,7 @@ def _covariate_grid(
         grid = _numeric_range(frame, covariate, points)
         return grid, None, grid
     return (
-        np.array(labels, dtype=object),
+        np.array(_level_inputs(_fitted_level_spec(fitted, covariate), labels), dtype=object),
         tuple(str(label) for label in labels),
         np.arange(len(labels), dtype=float),
     )

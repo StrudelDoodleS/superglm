@@ -79,7 +79,7 @@ rather than leaving a reader to price off it.
 from __future__ import annotations
 
 import math
-from collections.abc import Hashable, Mapping
+from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal
@@ -382,15 +382,33 @@ def _interaction_on(fitted: Any, parameter: str, feature: Hashable) -> str | Non
     return None
 
 
-def _fitted_levels(fitted: Any, name: Hashable) -> tuple[Any, ...] | None:
-    """Return the level domain of the first term, in predictor order, that reads
-    column ``name`` with levels, or ``None`` if no term does."""
+def _fitted_level_spec(fitted: Any, name: Hashable) -> Any | None:
+    """Return the first term, in predictor order, that reads column ``name`` with
+    levels, or ``None`` if no term does."""
     for predictor in fitted.compiled_predictors:
         spec = predictor.compiled.specs.get(name)
-        levels = None if spec is None else _level_domain(spec)
-        if levels is not None:
-            return levels
+        if spec is not None and _level_domain(spec) is not None:
+            return spec
     return None
+
+
+def _fitted_levels(fitted: Any, name: Hashable) -> tuple[Any, ...] | None:
+    """Return the level domain of the first term that reads column ``name`` with levels."""
+    spec = _fitted_level_spec(fitted, name)
+    return None if spec is None else _level_domain(spec)
+
+
+def _level_inputs(spec: Any | None, levels: Sequence[Any]) -> list[Any]:
+    """Return the input label that reads each fitted level.
+
+    A grouped term's levels are its group labels, but it reads original
+    labels, so each group is swept through one of its members.
+    """
+    grouping = None if spec is None else getattr(spec, "_grouping", None)
+    if grouping is None:
+        return list(levels)
+    members = grouping.group_to_originals
+    return [members.get(str(level), [level])[0] for level in levels]
 
 
 def _column_levels(fitted: Any, frame: EagerFrame, name: Hashable) -> list[Any] | None:
@@ -446,7 +464,10 @@ def _reference_value(fitted: Any, frame: EagerFrame, name: Hashable) -> Any:
     rank = {
         level: position for position, level in enumerate(_column_levels(fitted, frame, name) or ())
     }
-    return min(tied, key=lambda label: rank.get(label, len(rank)))
+    spec = _fitted_level_spec(fitted, name)
+    grouping = None if spec is None else getattr(spec, "_grouping", None)
+    to_group = {} if grouping is None else grouping.original_to_group
+    return min(tied, key=lambda label: rank.get(to_group.get(str(label), label), len(rank)))
 
 
 def _sweep(
@@ -468,7 +489,7 @@ def _sweep(
 
     levels = _level_domain(spec)
     if levels is not None:
-        swept: Any = list(levels)
+        swept: Any = _level_inputs(spec, levels)
         grid = None
         names = tuple(str(level) for level in levels)
     else:
