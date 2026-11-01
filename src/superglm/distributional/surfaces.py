@@ -290,7 +290,12 @@ def _covariate_grid(
         grid = _numeric_range(frame, covariate, points)
         return grid, None, grid
     return (
-        np.array(_level_inputs(_fitted_level_spec(fitted, covariate), labels), dtype=object),
+        np.array(
+            _level_inputs(
+                _fitted_level_spec(fitted, covariate), labels, frame.column_array(covariate)
+            ),
+            dtype=object,
+        ),
         tuple(str(label) for label in labels),
         np.arange(len(labels), dtype=float),
     )

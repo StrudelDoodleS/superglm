@@ -455,7 +455,8 @@ def test_a_tie_goes_to_the_first_fitted_level_not_the_first_sorted() -> None:
     from superglm._frame import as_eager_frame
     from superglm.distributional.terms import _reference_value
 
-    spec = SimpleNamespace(_levels=("c", "b", "a"))
+    # A term whose raw labels are already its fitted levels.
+    spec = SimpleNamespace(_levels=("c", "b", "a"), _resolve_predict_labels=lambda labels: labels)
     fitted = SimpleNamespace(
         compiled_predictors=(SimpleNamespace(compiled=SimpleNamespace(specs={"g": spec})),)
     )
@@ -491,6 +492,61 @@ def test_a_grouped_level_is_swept_through_one_of_its_original_labels(grouped_cas
     # The group reads its own effect, not the base level's: a = +0.3, c = 0 against b = -0.2.
     estimate = dict(zip(effect.levels, effect.effect, strict=True))
     assert estimate["ac"] - estimate["b"] > 0.2
+
+
+def test_a_grouped_level_is_swept_through_a_label_every_term_has_seen() -> None:
+    """A grouping built on more labels than the fit saw sweeps each group through a
+    label in the frame, so an ungrouped term on the same column accepts it too."""
+    from superglm.distributional import terms
+    from superglm.features.grouping import collapse_levels
+
+    X, y = _gaussian_sample()
+    grouping = collapse_levels(X["g"], groups={"ac": ["a", "c"]})
+    seen = (X["g"] != "a").to_numpy()
+    X, y = X[seen].reset_index(drop=True), y[seen]
+    fitted = (
+        model_from_templates(
+            family=GaussianLS(),
+            predictors=[
+                Predictor(
+                    "location", {"x": Spline("cr", k=6), "g": Categorical(grouping=grouping)}
+                ),
+                Predictor("scale", {"g": Categorical()}),
+            ],
+        )
+        .fit_reml(X, y)
+        ._require_fitted()
+    )
+    effect = terms.term_effect(fitted, X, "location", "g", simultaneous=False)
+    curves = risk_curves(fitted, X, {}, "g", n_draws=60, seed=1)
+    fan = density_fan(fitted, X, {}, "g")
+    assert set(effect.levels) == set(curves.levels) == set(fan.levels) == {"ac", "b"}
+
+
+def test_a_tie_reads_raw_labels_in_the_terms_own_spelling() -> None:
+    """Float labels 4.0 .. 1.0 are the ordered term's levels "4" .. "1"; the tie goes
+    to the first fitted level, 4, not to the first sorted label."""
+    from superglm import OrderedCategorical
+    from superglm._frame import as_eager_frame
+    from superglm.distributional.terms import _reference_value
+    from superglm.features.grouping import collapse_levels
+
+    band = np.repeat([4.0, 3.0, 2.0, 1.0], 250)
+    X = pd.DataFrame({"band": band})
+    y = 0.1 * band + np.random.default_rng(7).standard_normal(band.size)
+    grouping = collapse_levels(
+        X["band"], groups={"23": ["2.0", "3.0"]}, order=["4.0", "3.0", "2.0", "1.0"]
+    )
+    term = OrderedCategorical(order=[4, 3, 2, 1], grouping=grouping)
+    fitted = (
+        model_from_templates(
+            family=GaussianLS(),
+            predictors=[Predictor("location", {"band": term}), Predictor("scale", {})],
+        )
+        .fit_reml(X, y)
+        ._require_fitted()
+    )
+    assert _reference_value(fitted, as_eager_frame(X), "band") == 4.0
 
 
 def test_json_scalars_are_plain_values_and_nothing_unrepresentable() -> None:
