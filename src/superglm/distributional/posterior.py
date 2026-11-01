@@ -40,6 +40,7 @@ from superglm.diagnostics.convergence import (
     lss_corrected_covariance_substitute_message,
     lss_corrected_covariance_unavailable_message,
 )
+from superglm.distributional._common import row_index
 from superglm.distributional._row_design import bounded_predictor_matrices
 from superglm.distributional.family import (
     DefaultPredictionFamily,
@@ -114,14 +115,6 @@ def _prior_weight_law(
     if not shaped or not np.all(np.isfinite(values)) or np.any(values <= 0.0):
         raise ValueError("weights must give one positive prior weight per row of X")
     return None if bool(np.all(values == 1.0)) else values
-
-
-def _row_index(X: FrameLike | EagerFrame, n_observations: int) -> pd.Index:
-    if isinstance(X, pd.DataFrame):
-        return X.index.copy()
-    if isinstance(X, EagerFrame) and isinstance(X.native, pd.DataFrame):
-        return X.native.index.copy()
-    return pd.RangeIndex(n_observations)
 
 
 @dataclass(frozen=True)
@@ -1134,7 +1127,7 @@ def posterior_bounds(
         if quantity_draws is not None:
             quantity_draws[:, rows] = values
 
-    bounds = pd.DataFrame({"estimate": estimate, **summaries}, index=_row_index(X, n_observations))
+    bounds = pd.DataFrame({"estimate": estimate, **summaries}, index=row_index(X, n_observations))
     if return_draws:
         assert quantity_draws is not None
         return bounds, quantity_draws

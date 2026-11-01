@@ -9,14 +9,14 @@ import pytest
 
 import superglm.distributional.solver.assembly as assembly_module
 from superglm._frame import as_eager_frame
-from superglm.distributional.assembly import (
-    assemble_grouped_geometry,
-    dense_predictor_matrices,
-)
 from superglm.distributional.family import ParameterSpec, ParameterSupport
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import Predictor, compile_predictors
-from superglm.distributional.solver.assembly import _evaluate_predictors_from_matrices
+from superglm.distributional.solver.assembly import (
+    _evaluate_predictors_from_matrices,
+    assemble_grouped_geometry,
+    dense_predictor_matrices,
+)
 from superglm.features import Numeric
 
 from ._distributional_weights import resolved_prior

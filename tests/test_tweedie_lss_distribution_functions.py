@@ -34,7 +34,7 @@ from superglm.distributional.families.tweedie import (
 )
 from superglm.distributional.model import DenseDistributionalModel, fit_dense_distributional
 from superglm.distributional.predictor import Predictor
-from superglm.distributional.result import DenseSolverConfig
+from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.weights import WeightContract
 from superglm.features import Spline
 from tests._distributional_family_kernels import tweedie as tweedie_kernel

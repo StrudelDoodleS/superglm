@@ -14,7 +14,8 @@ from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.model import DenseDistributionalModel, fit_dense_distributional
 from superglm.distributional.posterior import posterior_covariance
 from superglm.distributional.predictor import compile_predictors
-from superglm.distributional.result import DenseSolverConfig, DistributionalEFSConfig
+from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.smoothing.derivatives import LamlDerivativeWorkspace, laml_derivatives
 from superglm.distributional.smoothing.endpoint_direction import _curvature_packed
 from superglm.distributional.smoothing.penalty_face import build_penalty_face

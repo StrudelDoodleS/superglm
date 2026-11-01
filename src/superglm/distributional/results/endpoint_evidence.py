@@ -27,7 +27,6 @@ CHUNKED_EXECUTION_BACKEND_IDENTIFIER: ExecutionBackendIdentifier = "distribution
 
 ConvergenceReason = Literal[
     "score",
-    "newton_decrement",
     "objective_and_step",
     "objective_and_score",
     "resolution_limited_stationarity",

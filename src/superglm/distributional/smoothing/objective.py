@@ -11,8 +11,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributional.layout import StackedLayout
-from superglm.distributional.result import DenseSolverResult, DistributionalEFSConfig
-from superglm.distributional.results.solver import _record_penalty_objective
+from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.solver import DenseSolverResult, _record_penalty_objective
 from superglm.distributional.smoothing.endpoint_laml import evaluate_endpoint_laplace
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.smoothing.proposals import _scaled_proposal

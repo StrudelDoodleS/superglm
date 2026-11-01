@@ -27,7 +27,7 @@ from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.families.tweedie import TweedieLSS
 from superglm.distributional.model import fit_dense_distributional
 from superglm.distributional.residuals import ResidualSet, _sample_residuals, compute_residuals
-from superglm.distributional.result import DenseSolverConfig
+from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.weights import WeightContract
 from tests.bound_predictor_fixtures import model_from_templates
 

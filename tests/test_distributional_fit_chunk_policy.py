@@ -41,7 +41,7 @@ def test_explicit_request_stays_explicit_even_when_global_is_admitted(monkeypatc
     assert chunks._resolve_fitting_chunk_size(family, layout, plan, 7) == 7
 
 
-def test_admitted_auto_resolution_reaches_every_phase_and_reuse_certificate(monkeypatch):
+def test_admitted_auto_resolution_reaches_every_phase(monkeypatch):
     family, layout, response, plan, initial = _support_problem(False)
     monkeypatch.setattr(chunks, "AUTO_CHUNK_MEMORY_BYTES", 128)
     monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: 64 << 20)
@@ -60,14 +60,7 @@ def test_admitted_auto_resolution_reaches_every_phase_and_reuse_certificate(monk
     context = solver._validated_context(
         family, layout, response, plan, penalty, chunk_size="auto", **kwargs
     )
-    old_context = solver._validated_context(
-        family, layout, response, plan, penalty, chunk_size=7, **kwargs
-    )
     assert context.chunk_size == 17
-    assert solver._chunk_reuse_data_certificate(context) is not None
-    assert solver._chunk_reuse_data_certificate(context) != solver._chunk_reuse_data_certificate(
-        old_context
-    )
     observed = {}
     for name in (
         "assemble_chunked_geometry",

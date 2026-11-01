@@ -23,6 +23,7 @@ from superglm._lambda_box import LAMBDA_CEILING
 from superglm._parallel import fit_pool
 from superglm.diagnostics.convergence import ConvergenceWarning, lss_nonconvergence_message
 from superglm.diagnostics.fit_report import FitDiagnosticReport
+from superglm.distributional._common import json_number, row_index
 from superglm.distributional.binding import (
     BoundPredictor,
     _snapshot_family,
@@ -72,12 +73,10 @@ from superglm.distributional.posterior import (
 )
 from superglm.distributional.predictor import Predictor
 from superglm.distributional.residuals import ResidualKind, ResidualSet, compute_residuals
-from superglm.distributional.result import (
-    DenseSolverConfig,
-    DistributionalEFSConfig,
-    DistributionalFitResult,
-    EFSConvergenceReason,
-)
+from superglm.distributional.results.endpoint_evidence import EFSConvergenceReason
+from superglm.distributional.results.fit import DistributionalFitResult
+from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.separation import validate_separation_policy
 from superglm.distributional.surfaces import (
     DensityFan,
@@ -282,14 +281,6 @@ def _owned_n_bins(value: int | Mapping[str, int]) -> int | Mapping[str, int]:
     return _positive_n_bins(value, name="n_bins")
 
 
-def _prediction_index(X: FrameLike | EagerFrame, n_observations: int) -> pd.Index:
-    if isinstance(X, pd.DataFrame):
-        return X.index.copy()
-    if isinstance(X, EagerFrame) and isinstance(X.native, pd.DataFrame):
-        return X.native.index.copy()
-    return pd.RangeIndex(n_observations)
-
-
 #: Renderer module and figure names of each engine, imported only when asked
 #: for, so ``plotly`` is never a requirement of importing this module.
 _RENDERERS = {
@@ -327,12 +318,6 @@ def _renderer(engine: str, figure: str) -> Any:
         raise ValueError(f"engine must be 'matplotlib' or 'plotly', not {engine!r}")
     module_name, names = _RENDERERS[engine]
     return getattr(importlib.import_module(module_name), names[figure])
-
-
-def _json_number(value: Any) -> float | None:
-    """One number of a JSON payload: a float, or ``None`` where it is not finite."""
-    number = float(value)
-    return number if math.isfinite(number) else None
 
 
 class _RemovedMethod:
@@ -575,6 +560,7 @@ class SuperLSS:
         recorder = FitPhaseRecorder() if phase_recorder is None else phase_recorder
         # The profile is the fit's own stretch of the recorder: a caller's
         # phases open around it stay out, and its measurements during it count once.
+        positions: list[np.ndarray] = []
         with solver_blas_threads(), fit_pool(), recorder._fit_window() as window:
             candidate = fit_dense_distributional(
                 X,
@@ -596,16 +582,13 @@ class SuperLSS:
                 revision=next_revision,
                 truncation=truncation,
                 censored=censored,
+                _input_positions=positions,
             )
         phase_snapshot = window.snapshot()
         self._model = candidate
         self._fit_phase_snapshot = phase_snapshot
-        frame = as_eager_frame(X)
-        positions = resolve_likelihood_weights(
-            sample_weight, n_observations=len(frame), contract=self._weight_contract
-        ).input_positions
         # Positional selection owns the retained rows and preserves pandas indices.
-        self._training_frame = frame.take_rows(positions)
+        self._training_frame = as_eager_frame(X).take_rows(positions[0])
         # A fit whose final curvature fell back, or whose size has rows at the
         # Poisson limit it cannot estimate, records why in result_.warnings and
         # warns the same text, whichever method fitted it.
@@ -924,7 +907,7 @@ class SuperLSS:
         return pd.DataFrame(
             values,
             columns=self.parameter_names_,
-            index=_prediction_index(X, len(values)),
+            index=row_index(X, len(values)),
         )
 
     def predict_parameters(
@@ -947,7 +930,7 @@ class SuperLSS:
         return pd.DataFrame(
             values,
             columns=self.parameter_names_,
-            index=_prediction_index(X, len(values)),
+            index=row_index(X, len(values)),
         )
 
     def predict(
@@ -1948,7 +1931,7 @@ class SuperLSS:
             raise ValueError(f"kind must be one of {_PLOT_DATA_KINDS}, not {kind!r}")
         if kind == "scores":
             return [
-                {name: _json_number(value) for name, value in row.items()}
+                {name: json_number(value) for name, value in row.items()}
                 for row in self.scores(**kwargs).to_dict(orient="records")
             ]
         builders: Mapping[str, Any] = {

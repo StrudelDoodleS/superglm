@@ -8,22 +8,20 @@ import pandas as pd
 import pytest
 from numpy.typing import NDArray
 
-import superglm.distributional.efs as efs_module
 import superglm.distributional.smoothing.authority as smoothing_authority
 import superglm.distributional.smoothing.evidence as smoothing_evidence
 import superglm.distributional.smoothing.loop as smoothing_loop
 import superglm.distributional.smoothing.objective as smoothing_objective
-from superglm.distributional.assembly import dense_predictor_matrices
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.families.tweedie import TweedieLSS
 from superglm.distributional.model import DenseDistributionalModel, fit_dense_distributional
 from superglm.distributional.prediction_design import build_joint_prediction_design
 from superglm.distributional.predictor import Predictor
-from superglm.distributional.result import (
-    DenseSolverConfig,
-    DistributionalEFSConfig,
-    DistributionalEFSResult,
-)
+from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.smoothing import DistributionalEFSResult
+from superglm.distributional.results.solver import DenseSolverConfig
+from superglm.distributional.smoothing.objective import _component_states
+from superglm.distributional.solver.assembly import dense_predictor_matrices
 from superglm.distributional.weights import WeightContract
 from superglm.features import Spline
 from superglm.reml.efs_update import wood_fasiolo_update
@@ -1049,8 +1047,8 @@ def _iteration_cap_status(
     assert terminal_fit_index is not None
     terminal_lambdas = history[-1].lambdas_after
     terminal_fit = smoothing.coefficient_fits[terminal_fit_index]
-    components = efs_module._component_states(model.layout, terminal_lambdas)
-    estimated_names = efs_module._estimated_names(components)
+    components = _component_states(model.layout, terminal_lambdas)
+    estimated_names = smoothing_evidence._estimated_names(components)
     update = wood_fasiolo_update(
         components,
         terminal_fit.coefficients,
@@ -1155,7 +1153,7 @@ def test_nonconverged_efs_trial_is_never_compared_as_laml(
         ),
         Predictor("scale", {}),
     )
-    original_solver = efs_module.fit_dense_fixed_lambda
+    original_solver = smoothing_authority.fit_dense_fixed_lambda
     solver_calls = 0
 
     def nonconverged_first_trial(*args, **kwargs):
@@ -1166,7 +1164,7 @@ def test_nonconverged_efs_trial_is_never_compared_as_laml(
             return replace(result, converged=False, convergence_reason="max_iterations")
         return result
 
-    original_objective = efs_module.joint_laplace_objective
+    original_objective = smoothing_objective.joint_laplace_objective
     objective_fits = []
 
     def guarded_objective(fit, *args, **kwargs):
@@ -1177,9 +1175,7 @@ def test_nonconverged_efs_trial_is_never_compared_as_laml(
 
     monkeypatch.setattr(smoothing_authority, "fit_dense_fixed_lambda", nonconverged_first_trial)
     monkeypatch.setattr(smoothing_loop, "fit_dense_fixed_lambda", nonconverged_first_trial)
-    monkeypatch.setattr(efs_module, "fit_dense_fixed_lambda", nonconverged_first_trial)
     monkeypatch.setattr(smoothing_objective, "joint_laplace_objective", guarded_objective)
-    monkeypatch.setattr(efs_module, "joint_laplace_objective", guarded_objective)
 
     model = fit_dense_distributional(
         frame,
@@ -1331,28 +1327,23 @@ def test_automatic_smoothing_tweedie_lss_fit(
         and smoothing.config.minimum_lambda <= value <= smoothing.config.maximum_lambda
         for value in smoothing.lambdas.values()
     )
-    component_states = efs_module._component_states(
+    component_states = _component_states(
         model.layout,
         smoothing.initial_lambdas,
     )
-    estimated_names = efs_module._estimated_names(component_states)
+    estimated_names = smoothing_evidence._estimated_names(component_states)
     _assert_estimated_lambda_movement(smoothing, estimated_names)
-    original_estimated_names = efs_module._estimated_names
+    original_estimated_names = smoothing_evidence._estimated_names
     with monkeypatch.context() as mutation:
         mutation.setattr(
             smoothing_evidence,
             "_estimated_names",
             lambda components: original_estimated_names(components)[:1],
         )
-        mutation.setattr(
-            efs_module,
-            "_estimated_names",
-            lambda components: original_estimated_names(components)[:1],
-        )
         with pytest.raises(AssertionError, match="estimated smoothing name coverage"):
             _assert_estimated_lambda_movement(
                 smoothing,
-                efs_module._estimated_names(component_states),
+                smoothing_evidence._estimated_names(component_states),
             )
 
     attempted, accepted, backtracks = _assert_complete_efs_history(smoothing)
@@ -1389,8 +1380,8 @@ def test_automatic_smoothing_tweedie_lss_fit(
     assert smoothing.matched_certified is True
     assert_matched_certified(smoothing)
 
-    terminal_components = efs_module._component_states(model.layout, smoothing.lambdas)
-    terminal_estimated_names = efs_module._estimated_names(terminal_components)
+    terminal_components = _component_states(model.layout, smoothing.lambdas)
+    terminal_estimated_names = smoothing_evidence._estimated_names(terminal_components)
     terminal_update = wood_fasiolo_update(
         terminal_components,
         smoothing.terminal_fit.coefficients,

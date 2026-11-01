@@ -691,34 +691,6 @@ def evaluate_chunked_log_likelihood(
     )
 
 
-def assemble_chunked_geometry(
-    family: DistributionalFamily,
-    layout: StackedLayout,
-    y: NDArray,
-    likelihood_plan: FamilyLikelihoodPlan,
-    coefficients: NDArray,
-    *,
-    penalty: NDArray,
-    chunk_size: ChunkSize,
-    curvature_source: CurvatureSource,
-    small_group_panel_byte_budget: int | Literal["auto"] | None = "auto",
-    likelihood_cache=None,
-) -> DenseJointGeometry:
-    """Stream one geometry, retaining the existing geometry-only entry point."""
-    return _assemble_chunked_geometry(
-        family,
-        layout,
-        y,
-        likelihood_plan,
-        coefficients,
-        penalty=penalty,
-        chunk_size=chunk_size,
-        curvature_source=curvature_source,
-        small_group_panel_byte_budget=small_group_panel_byte_budget,
-        likelihood_cache=likelihood_cache,
-    )
-
-
 def _evaluate_chunked_geometry(
     family,
     layout,
@@ -734,7 +706,7 @@ def _evaluate_chunked_geometry(
 ) -> tuple[DenseJointGeometry, ChunkedLikelihoodSums]:
     """Return owned geometry and scalar likelihood sums from the same stream."""
     sums = [0.0, 0.0]
-    geometry = _assemble_chunked_geometry(
+    geometry = assemble_chunked_geometry(
         family,
         layout,
         y,
@@ -752,19 +724,19 @@ def _evaluate_chunked_geometry(
     return geometry, ChunkedLikelihoodSums(*sums)
 
 
-def _assemble_chunked_geometry(
-    family,
-    layout,
-    y,
-    likelihood_plan,
-    coefficients,
+def assemble_chunked_geometry(
+    family: DistributionalFamily,
+    layout: StackedLayout,
+    y: NDArray,
+    likelihood_plan: FamilyLikelihoodPlan,
+    coefficients: NDArray,
     *,
-    penalty,
-    chunk_size,
-    curvature_source,
-    small_group_panel_byte_budget="auto",
+    penalty: NDArray,
+    chunk_size: ChunkSize,
+    curvature_source: CurvatureSource,
+    small_group_panel_byte_budget: int | Literal["auto"] | None = "auto",
     likelihood_cache=None,
-    _likelihood_sums=None,
+    _likelihood_sums: list[float] | None = None,
 ) -> DenseJointGeometry:
     """Stream likelihood chunks into one coefficient-space geometry.
 
@@ -896,7 +868,7 @@ def _try_global_geometry(
         return plan.finish()
     except _TrialDerivativeError as exc:
         if exc.rows is not None and exc.plans is not None and hasattr(plan, "_prepare_chunk"):
-            # A derivative can fail before add_row_range has checked live B/R,
+            # A derivative can fail before add_row_range has checked live
             # indices and metadata. Preserve hard-source priority on this rare
             # path using the same preparation checks, without updating moments.
             rows = exc.rows

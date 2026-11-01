@@ -8,8 +8,6 @@ import pandas as pd
 import pytest
 import scipy.linalg
 
-import superglm.distributional.efs as efs_module
-import superglm.distributional.result as result_module
 import superglm.distributional.smoothing.authority as smoothing_authority
 import superglm.distributional.smoothing.endpoint_laml as endpoint_laml_module
 import superglm.distributional.smoothing.faces as smoothing_faces
@@ -19,20 +17,6 @@ import superglm.distributional.solver.solver as solver_module
 import superglm.reml.multi_penalty as penalty_kernel
 import superglm.reml.penalty_support as penalty_support
 from superglm._frame import as_eager_frame
-from superglm.distributional.efs import fit_distributional_efs
-from superglm.distributional.endpoint_laml import (
-    EndpointDirectionEvidence,
-    EndpointLaplaceDerivative,
-    EndpointLaplaceError,
-    EndpointLaplaceEvaluation,
-    ProjectedPenaltyLogDet,
-    evaluate_endpoint_laplace,
-    evaluate_endpoint_laplace_derivative,
-)
-from superglm.distributional.face_efs import (
-    _bounded_effective_rank,
-    projected_component_states,
-)
 from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
@@ -47,15 +31,47 @@ from superglm.distributional.family import (
     ParameterSupport,
 )
 from superglm.distributional.layout import StackedLayout, build_stacked_layout
-from superglm.distributional.penalty_face import PenaltyFace, build_penalty_face
 from superglm.distributional.predictor import Predictor, compile_predictors
-from superglm.distributional.result import (
-    DenseSolverConfig,
-    DenseSolverResult,
-    DistributionalEFSConfig,
-    DistributionalEFSResult,
+from superglm.distributional.results.endpoint_evidence import (
+    EndpointDirectionEvidence,
     JointEndpointDirectionEvidence,
 )
+from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.smoothing import DistributionalEFSResult
+from superglm.distributional.results.solver import (
+    DenseSolverConfig,
+    DenseSolverResult,
+    _assessment_coefficient_refit_bound,
+    _assessment_is_numerically_stationary,
+    _resolution_limited_decrement_is_within_objective_ulp,
+)
+from superglm.distributional.smoothing.authority import (
+    _endpoint_candidate_refit_bound,
+    _endpoint_objective_accumulation_bound,
+    _endpoint_polish_provenance_matches,
+    _endpoint_positive_dot,
+    _endpoint_retained_curvature,
+    _endpoint_retained_kkt_relative,
+    _endpoint_retained_rank,
+    _endpoint_retained_rank_provenance,
+    _endpoint_retained_score,
+    _face_authority_config,
+)
+from superglm.distributional.smoothing.endpoint_laml import (
+    EndpointLaplaceDerivative,
+    EndpointLaplaceError,
+    EndpointLaplaceEvaluation,
+    ProjectedPenaltyLogDet,
+    evaluate_endpoint_laplace,
+    evaluate_endpoint_laplace_derivative,
+)
+from superglm.distributional.smoothing.face_efs import (
+    _bounded_effective_rank,
+    projected_component_states,
+)
+from superglm.distributional.smoothing.loop import fit_distributional_efs
+from superglm.distributional.smoothing.objective import _penalty_lambdas
+from superglm.distributional.smoothing.penalty_face import PenaltyFace, build_penalty_face
 from superglm.distributional.solver import fit_dense_fixed_lambda
 from superglm.distributional.weights import ResolvedLikelihoodWeights
 from superglm.features import Numeric, RandomEffect, Spline
@@ -704,7 +720,7 @@ def _zero_step_strict_armijo_face_problem() -> tuple[
         weights,
         COMPLETE_OBSERVATION,
     )
-    authority_config = efs_module._face_authority_config(
+    authority_config = _face_authority_config(
         DenseSolverConfig(max_iterations=10, tolerance=1.0e-9)
     )
     # On this exact quadratic, gain(alpha) / (alpha * score.T @ step) is
@@ -905,6 +921,53 @@ def test_ordinary_noop_preserves_composite_stop_without_publishing_an_iteration(
     np.testing.assert_array_equal(evaluated_coefficients[0], initial)
 
 
+def test_a_composite_stop_after_an_accepted_step_records_no_movement() -> None:
+    """Kills publishing the previous step's relative changes on a stop that made no move."""
+    family = _UnitGaussian()
+    response = np.array([1.0, 1.0, np.nextafter(1.0, np.inf)], dtype=np.float64)
+    weights = resolved_prior(np.ones(response.size, dtype=np.float64))
+    frame = as_eager_frame(
+        pd.DataFrame(
+            {
+                "x": np.ones(response.size, dtype=np.float64),
+                "effect": ["left", "middle", "right"],
+            }
+        )
+    )
+    layout = build_stacked_layout(
+        compile_predictors(
+            frame,
+            weights,
+            family.parameters,
+            (Predictor("mean", {"x": Numeric(), "effect": RandomEffect()}, intercept=False),),
+        )
+    )
+    component_name = layout.penalty_names[0]
+    face = build_penalty_face(layout, (component_name,))
+    lambdas = {component_name: 0.0}
+    result = fit_dense_fixed_lambda(
+        family,  # type: ignore[arg-type]
+        layout,
+        response,
+        family.bind_likelihood(response, weights, COMPLETE_OBSERVATION),  # type: ignore[arg-type]
+        layout.penalty_matrix(lambdas),
+        initial=face.project(np.array([0.5, 0.0, 0.0, 0.0], dtype=np.float64)),
+        config=DenseSolverConfig(
+            max_iterations=8, tolerance=1.0e-20, coefficient_curvature="observed"
+        ),
+        coefficient_face=face,
+    )
+
+    # One accepted step moves the mean from 0.5 to the optimum; the next line
+    # search finds no finite improvement and the composite stop is certified.
+    assert result.converged is True
+    assert result.convergence_reason == "objective_and_step"
+    assert result.iterations >= 1
+    assert result.history[-1].step_relative > 0.0
+    assert result.objective_relative_change == 0.0
+    assert result.step_relative == 0.0
+
+
 def test_private_score_only_solver_reports_resolution_limited_stationarity_honestly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -957,7 +1020,7 @@ def test_private_score_only_solver_reports_resolution_limited_stationarity_hones
     assert result.iterations == 0
     assert result.history == ()
     np.testing.assert_array_equal(retained_score, np.array([np.spacing(2.0)]))
-    assert efs_module._endpoint_retained_kkt_relative(result) > config.tolerance
+    assert _endpoint_retained_kkt_relative(result) > config.tolerance
     assert 0.0 < predicted_gain < objective_ulp
     assert len(evaluated) >= 2
     assert all(not np.array_equal(coefficients, initial) for coefficients, _ in evaluated[1:])
@@ -1068,7 +1131,7 @@ def test_private_resolution_limited_stationarity_refuses_each_missing_gate(
         assert len(original_decompositions) == 1
         retained_score = face.reduce_vector(result.terminal_score)
         retained_correction = original_decompositions[0].solve(retained_score)
-        assert result_module._resolution_limited_decrement_is_within_objective_ulp(
+        assert _resolution_limited_decrement_is_within_objective_ulp(
             retained_score,
             retained_correction,
             result.penalized_optimizing_log_likelihood,
@@ -1090,14 +1153,14 @@ def test_resolution_limited_decrement_encloses_subnormal_dot_underflow() -> None
     np.testing.assert_array_equal(diagonal * correction, score)
     assert np.all(diagonal > 0.0)
     assert np.nextafter(objective, np.inf) - objective == 4.0 * tiny
-    assert not result_module._resolution_limited_decrement_is_within_objective_ulp(
+    assert not _resolution_limited_decrement_is_within_objective_ulp(
         score,
         correction,
         objective,
     )
     assert (
         solver_module._resolution_limited_decrement_is_within_objective_ulp
-        is result_module._resolution_limited_decrement_is_within_objective_ulp
+        is _resolution_limited_decrement_is_within_objective_ulp
     )
 
     objective_ulp = np.spacing(1.0)
@@ -1106,12 +1169,12 @@ def test_resolution_limited_decrement_encloses_subnormal_dot_underflow() -> None
         immediately_below = np.nextafter(immediately_below, 0.0)
     nearest_refused = np.nextafter(immediately_below, np.inf)
     assert 0.5 * immediately_below < objective_ulp
-    assert result_module._resolution_limited_decrement_is_within_objective_ulp(
+    assert _resolution_limited_decrement_is_within_objective_ulp(
         np.array([immediately_below]),
         np.array([1.0]),
         1.0,
     )
-    assert not result_module._resolution_limited_decrement_is_within_objective_ulp(
+    assert not _resolution_limited_decrement_is_within_objective_ulp(
         np.array([nearest_refused]),
         np.array([1.0]),
         1.0,
@@ -1177,7 +1240,7 @@ def test_private_resolution_limited_stationarity_refuses_a_rejected_distinct_imp
     assert result.history == ()
     assert result.converged is False
     assert result.convergence_reason == "line_search_failed"
-    assert result_module._resolution_limited_decrement_is_within_objective_ulp(
+    assert _resolution_limited_decrement_is_within_objective_ulp(
         retained_score,
         retained_correction,
         result.penalized_optimizing_log_likelihood,
@@ -1239,7 +1302,7 @@ def test_endpoint_authority_routes_an_ordinary_plateau_through_private_resolutio
         config=config,
         coefficient_face=face,
     )
-    result = efs_module._fit_endpoint_authority_stationary(
+    result = smoothing_faces._fit_endpoint_authority_stationary(
         family,  # type: ignore[arg-type]
         layout,
         response,
@@ -1254,15 +1317,13 @@ def test_endpoint_authority_routes_an_ordinary_plateau_through_private_resolutio
 
     assert ordinary.converged is True
     assert ordinary.convergence_reason == "objective_and_step"
-    assert efs_module._endpoint_retained_kkt_relative(ordinary) > config.tolerance
+    assert _endpoint_retained_kkt_relative(ordinary) > config.tolerance
     assert result.converged is True
     assert result.convergence_reason == "score"
     assert result.coefficient_face is face
     assert result.history == ()
-    assert efs_module._endpoint_retained_kkt_relative(result) <= config.tolerance
-    assert efs_module._endpoint_retained_kkt_relative(result) < (
-        efs_module._endpoint_retained_kkt_relative(ordinary)
-    )
+    assert _endpoint_retained_kkt_relative(result) <= config.tolerance
+    assert _endpoint_retained_kkt_relative(result) < (_endpoint_retained_kkt_relative(ordinary))
 
 
 @pytest.mark.parametrize(
@@ -1465,8 +1526,8 @@ def test_endpoint_authority_polishes_a_zero_step_strict_armijo_failure() -> None
         strict_line_search_config,
         source,
     ) = _zero_step_strict_armijo_face_problem()
-    source_kkt = efs_module._endpoint_retained_kkt_relative(source)
-    source_rank = efs_module._endpoint_retained_rank(source)
+    source_kkt = _endpoint_retained_kkt_relative(source)
+    source_rank = _endpoint_retained_rank(source)
     coefficient_scale = max(1.0, float(np.linalg.norm(source.coefficients, ord=2)))
     face_residual = float(np.linalg.norm(face.constraint_matrix @ source.coefficients, ord=2))
 
@@ -1486,8 +1547,8 @@ def test_endpoint_authority_polishes_a_zero_step_strict_armijo_failure() -> None
     assert source.terminal_curvature.fallback_count == 0
 
     terminal_correction = np.asarray(source.solve_terminal(source.terminal_score))
-    retained_score = efs_module._endpoint_retained_score(source)
-    retained_curvature = efs_module._endpoint_retained_curvature(source)
+    retained_score = _endpoint_retained_score(source)
+    retained_curvature = _endpoint_retained_curvature(source)
     retained_correction = face.reduce_vector(terminal_correction)
     relative_residual = float(
         np.linalg.norm(retained_curvature @ retained_correction - retained_score, ord=2)
@@ -1496,7 +1557,7 @@ def test_endpoint_authority_polishes_a_zero_step_strict_armijo_failure() -> None
     epsilon = float(np.finfo(source.coefficients.dtype).eps)
     candidate = face.project(source.coefficients + terminal_correction)
     assert relative_residual <= strict_line_search_config.residual_tolerance
-    assert efs_module._endpoint_positive_dot(
+    assert _endpoint_positive_dot(
         retained_score,
         retained_correction,
         epsilon=epsilon,
@@ -1505,7 +1566,7 @@ def test_endpoint_authority_polishes_a_zero_step_strict_armijo_failure() -> None
     source_objective = source.penalized_optimizing_log_likelihood
     assert source_objective == -5.0
     directional_derivative = float(source.terminal_score @ terminal_correction)
-    rejection_bound = efs_module._endpoint_objective_accumulation_bound(source, source)
+    rejection_bound = _endpoint_objective_accumulation_bound(source, source)
     assert rejection_bound is not None
     for alpha, trial_objective in ((1.0, -1.0), (0.5, -2.0)):
         required_objective = (
@@ -1514,7 +1575,7 @@ def test_endpoint_authority_polishes_a_zero_step_strict_armijo_failure() -> None
         )
         assert required_objective - trial_objective > rejection_bound
 
-    polished = efs_module._fit_endpoint_authority_stationary(
+    polished = smoothing_faces._fit_endpoint_authority_stationary(
         family,  # type: ignore[arg-type]
         layout,
         response,
@@ -1526,8 +1587,8 @@ def test_endpoint_authority_polishes_a_zero_step_strict_armijo_failure() -> None
         chunk_size=None,
         phase_recorder=None,
     )
-    polished_kkt = efs_module._endpoint_retained_kkt_relative(polished)
-    polished_rank = efs_module._endpoint_retained_rank(polished)
+    polished_kkt = _endpoint_retained_kkt_relative(polished)
+    polished_rank = _endpoint_retained_rank(polished)
 
     assert source.converged is False
     assert source.convergence_reason == "line_search_failed"
@@ -1550,9 +1611,9 @@ def test_endpoint_authority_polishes_a_zero_step_strict_armijo_failure() -> None
     assert polished.execution_backend_identifier == source.execution_backend_identifier
     assert polished_rank is not None
     assert polished_rank.rank == source_rank.rank == face.reduced_width
-    assert efs_module._endpoint_retained_rank_provenance(
-        polished
-    ) == efs_module._endpoint_retained_rank_provenance(source)
+    assert _endpoint_retained_rank_provenance(polished) == _endpoint_retained_rank_provenance(
+        source
+    )
     assert (
         polished.terminal_curvature.requested_source,
         polished.terminal_curvature.actual_source,
@@ -1563,7 +1624,7 @@ def test_endpoint_authority_polishes_a_zero_step_strict_armijo_failure() -> None
         source.terminal_curvature.fallback_count,
     )
 
-    coefficient_bound = efs_module._endpoint_candidate_refit_bound(
+    coefficient_bound = _endpoint_candidate_refit_bound(
         candidate,
         polished,
         tolerance=strict_line_search_config.tolerance,
@@ -1571,7 +1632,7 @@ def test_endpoint_authority_polishes_a_zero_step_strict_armijo_failure() -> None
     coefficient_movement = float(np.max(np.abs(polished.coefficients - candidate), initial=0.0))
     assert coefficient_bound is not None
     assert coefficient_movement <= coefficient_bound
-    objective_bound = efs_module._endpoint_objective_accumulation_bound(source, polished)
+    objective_bound = _endpoint_objective_accumulation_bound(source, polished)
     polished_objective = polished.penalized_optimizing_log_likelihood
     assert objective_bound is not None
     assert source_objective is not None and polished_objective is not None
@@ -1593,7 +1654,7 @@ def test_endpoint_authority_score_only_dispatch_has_exact_failure_metadata_scope
         strict_line_search_config,
         _source,
     ) = _zero_step_strict_armijo_face_problem()
-    real_fit_fixed_state = efs_module._fit_fixed_state
+    real_fit_fixed_state = smoothing_authority._fit_fixed_state
     source_overrides = {
         "eligible": {},
         "wrong_reason": {"convergence_reason": "max_iterations"},
@@ -1634,8 +1695,7 @@ def test_endpoint_authority_score_only_dispatch_has_exact_failure_metadata_scope
 
         monkeypatch.setattr(smoothing_authority, "_fit_fixed_state", record_mode)
         monkeypatch.setattr(smoothing_loop, "_fit_fixed_state", record_mode)
-        monkeypatch.setattr(efs_module, "_fit_fixed_state", record_mode)
-        result = efs_module._fit_endpoint_authority_stationary(
+        result = smoothing_faces._fit_endpoint_authority_stationary(
             family,  # type: ignore[arg-type]
             layout,
             response,
@@ -1657,12 +1717,12 @@ def test_endpoint_authority_score_only_dispatch_has_exact_failure_metadata_scope
         )
 
         if result is not source:
-            source_kkt = efs_module._endpoint_retained_kkt_relative(source)
-            result_kkt = efs_module._endpoint_retained_kkt_relative(result)
+            source_kkt = _endpoint_retained_kkt_relative(source)
+            result_kkt = _endpoint_retained_kkt_relative(result)
             assert result.converged is True
             assert result_kkt <= strict_line_search_config.tolerance
             assert result_kkt < source_kkt
-            assert efs_module._endpoint_polish_provenance_matches(
+            assert _endpoint_polish_provenance_matches(
                 source,
                 result,
                 config=strict_line_search_config,
@@ -1732,8 +1792,7 @@ def test_endpoint_authority_polish_requires_exact_zero_step_failure_metadata(
 
     monkeypatch.setattr(smoothing_authority, "_fit_fixed_state", return_only_source)
     monkeypatch.setattr(smoothing_loop, "_fit_fixed_state", return_only_source)
-    monkeypatch.setattr(efs_module, "_fit_fixed_state", return_only_source)
-    result = efs_module._fit_endpoint_authority_stationary(
+    result = smoothing_faces._fit_endpoint_authority_stationary(
         family,  # type: ignore[arg-type]
         layout,
         response,
@@ -1747,10 +1806,7 @@ def test_endpoint_authority_polish_requires_exact_zero_step_failure_metadata(
     )
 
     assert ineligible_source.converged is False
-    assert (
-        efs_module._endpoint_retained_kkt_relative(ineligible_source)
-        > strict_line_search_config.tolerance
-    )
+    assert _endpoint_retained_kkt_relative(ineligible_source) > strict_line_search_config.tolerance
     assert result is ineligible_source
     assert fit_calls == 1
 
@@ -1776,7 +1832,7 @@ def test_endpoint_authority_polish_skips_a_stationary_source(
         layout,
         response,
         likelihood_plan,  # type: ignore[arg-type]
-        layout.penalty_matrix(efs_module._penalty_lambdas(lambdas, face)),
+        layout.penalty_matrix(_penalty_lambdas(lambdas, face)),
         initial=candidate,
         config=strict_line_search_config,
         coefficient_face=face,
@@ -1801,9 +1857,8 @@ def test_endpoint_authority_polish_skips_a_stationary_source(
 
     monkeypatch.setattr(smoothing_authority, "_fit_fixed_state", return_stationary)
     monkeypatch.setattr(smoothing_loop, "_fit_fixed_state", return_stationary)
-    monkeypatch.setattr(efs_module, "_fit_fixed_state", return_stationary)
     monkeypatch.setattr(DenseSolverResult, "solve_terminal", forbid_stationary_solve)
-    result = efs_module._fit_endpoint_authority_stationary(
+    result = smoothing_faces._fit_endpoint_authority_stationary(
         family,  # type: ignore[arg-type]
         layout,
         response,
@@ -1817,9 +1872,7 @@ def test_endpoint_authority_polish_skips_a_stationary_source(
     )
 
     assert stationary.converged is True
-    assert efs_module._endpoint_retained_kkt_relative(stationary) <= (
-        strict_line_search_config.tolerance
-    )
+    assert _endpoint_retained_kkt_relative(stationary) <= (strict_line_search_config.tolerance)
     assert result is stationary
     assert fit_calls == 1
 
@@ -1846,7 +1899,7 @@ def test_endpoint_authority_polish_refuses_a_nonconverged_fresh_refit(
         layout,
         response,
         likelihood_plan,  # type: ignore[arg-type]
-        layout.penalty_matrix(efs_module._penalty_lambdas(lambdas, face)),
+        layout.penalty_matrix(_penalty_lambdas(lambdas, face)),
         initial=candidate,
         config=strict_line_search_config,
         coefficient_face=face,
@@ -1867,8 +1920,7 @@ def test_endpoint_authority_polish_refuses_a_nonconverged_fresh_refit(
 
     monkeypatch.setattr(smoothing_authority, "_fit_fixed_state", return_results)
     monkeypatch.setattr(smoothing_loop, "_fit_fixed_state", return_results)
-    monkeypatch.setattr(efs_module, "_fit_fixed_state", return_results)
-    result = efs_module._fit_endpoint_authority_stationary(
+    result = smoothing_faces._fit_endpoint_authority_stationary(
         family,  # type: ignore[arg-type]
         layout,
         response,
@@ -1883,7 +1935,7 @@ def test_endpoint_authority_polish_refuses_a_nonconverged_fresh_refit(
 
     assert real_polished.converged is True
     assert refused_polished.converged is False
-    assert efs_module._endpoint_retained_kkt_relative(refused_polished) <= (
+    assert _endpoint_retained_kkt_relative(refused_polished) <= (
         strict_line_search_config.tolerance
     )
     assert result is source
@@ -1948,9 +2000,7 @@ def test_unchanged_failed_cap_is_not_endpoint_authority(
         assert cap.iterations == 0
         np.testing.assert_array_equal(cap.coefficients, source.coefficients)
         assert endpoint.converged
-        assert efs_module._assessment_is_numerically_stationary(
-            endpoint, item.coefficient_tolerances[-1]
-        )
+        assert _assessment_is_numerically_stationary(endpoint, item.coefficient_tolerances[-1])
         assert item.endpoint_direction_evidence.lower_bound > 0.0
         assert (
             item.objective_after
@@ -1968,7 +2018,7 @@ def _score_above_rounding_floor(fit: DenseSolverResult) -> DenseSolverResult:
     assert objective is not None
     score[unpenalized[0]] = 100.0 * fit.config.tolerance * (1.0 + abs(objective))
     forged = replace(fit, terminal_score=score, convergence_reason="objective_and_step")
-    assert not result_module._assessment_is_numerically_stationary(forged, fit.config.tolerance)
+    assert not _assessment_is_numerically_stationary(forged, fit.config.tolerance)
     return forged
 
 
@@ -2001,18 +2051,16 @@ def test_nonstationary_sole_cap_can_continue_to_a_strict_exact_face(
     ) = _gamma_isolated_cap_face_problem()
     assessment = smoothing.history[0]
     cap_fit = smoothing.coefficient_fits[assessment.coefficient_fit_indices[0]]
-    cap_kkt = efs_module._endpoint_retained_kkt_relative(cap_fit)
+    cap_kkt = _endpoint_retained_kkt_relative(cap_fit)
     assert cap_fit.converged is True
     assert cap_fit.convergence_reason == "objective_and_step"
     assert cap_kkt > cap_fit.config.tolerance
-    assert not result_module._assessment_is_numerically_stationary(
-        cap_fit, cap_fit.config.tolerance
-    )
+    assert not _assessment_is_numerically_stationary(cap_fit, cap_fit.config.tolerance)
     assert lambdas[finite_name] < smoothing.config.maximum_lambda
 
     face = build_penalty_face(layout, (capped_name,))
-    authority_config = efs_module._face_authority_config(solver_config)
-    endpoint_fit = efs_module._fit_endpoint_authority_stationary(
+    authority_config = _face_authority_config(solver_config)
+    endpoint_fit = smoothing_faces._fit_endpoint_authority_stationary(
         family,
         layout,
         response,
@@ -2026,14 +2074,14 @@ def test_nonstationary_sole_cap_can_continue_to_a_strict_exact_face(
     )
     endpoint_rank = endpoint_fit.terminal_reduced_rank
     assert endpoint_fit.converged is True
-    assert efs_module._endpoint_retained_kkt_relative(endpoint_fit) <= authority_config.tolerance
+    assert _endpoint_retained_kkt_relative(endpoint_fit) <= authority_config.tolerance
     assert endpoint_rank is not None
     assert endpoint_rank.rank == face.reduced_width
     assert endpoint_fit.terminal_curvature.requested_source == "observed"
     assert endpoint_fit.terminal_curvature.actual_source == "observed"
     assert endpoint_fit.terminal_curvature.fallback_count == 0
-    assert efs_module._endpoint_shared_provenance(endpoint_fit) == (
-        efs_module._endpoint_shared_provenance(cap_fit)
+    assert smoothing_faces._endpoint_shared_provenance(endpoint_fit) == (
+        smoothing_faces._endpoint_shared_provenance(cap_fit)
     )
     endpoint_objective = evaluate_endpoint_laplace(
         endpoint_fit,
@@ -2082,15 +2130,9 @@ def test_nonstationary_sole_cap_can_continue_to_a_strict_exact_face(
         recorded_endpoint = smoothing.coefficient_fits[endpoint_index]
         recorded_rank = recorded_endpoint.terminal_reduced_rank
         assert recorded_cap.converged is True
-        assert (
-            efs_module._endpoint_retained_kkt_relative(recorded_cap)
-            > item.coefficient_tolerances[0]
-        )
+        assert _endpoint_retained_kkt_relative(recorded_cap) > item.coefficient_tolerances[0]
         assert recorded_endpoint.converged is True
-        assert (
-            efs_module._endpoint_retained_kkt_relative(recorded_endpoint)
-            <= item.coefficient_tolerances[1]
-        )
+        assert _endpoint_retained_kkt_relative(recorded_endpoint) <= item.coefficient_tolerances[1]
         assert recorded_rank is not None
         assert recorded_rank.rank == face.reduced_width
         assert recorded_endpoint.terminal_curvature.actual_source == "observed"
@@ -2637,7 +2679,7 @@ def test_exact_face_check_differences_a_family_that_refuses_its_links(case: str)
     assert evidence.decision == "endpoint"
 
 
-def _resolved_quadratic_gap_fit() -> DenseSolverResult:
+def _single_coefficient_fit() -> DenseSolverResult:
     family = _UnitGaussian()
     response = np.array([1.0])
     weights = resolved_prior(np.ones(1))
@@ -2665,28 +2707,19 @@ def _resolved_quadratic_gap_fit() -> DenseSolverResult:
         config=DenseSolverConfig(
             max_iterations=10,
             tolerance=1.0e-8,
-            newton_decrement_tolerance=1.0e-8,
             coefficient_curvature="observed",
         ),
     )
 
     assert result.converged is True
-    assert result.convergence_reason == "newton_decrement"
-    assert result.iterations == 0
-    np.testing.assert_array_equal(result.coefficients, initial)
     return result
 
 
-def test_observed_newton_decrement_stops_at_a_resolved_quadratic_gap() -> None:
-    """Kills requiring a raw score after the remaining objective gap is certified."""
-    _resolved_quadratic_gap_fit()
-
-
-def test_history_compaction_reuses_validated_newton_certificate(monkeypatch) -> None:
+def test_history_compaction_reuses_the_validated_certificate(monkeypatch) -> None:
     from superglm.distributional.results import solver as solver_results
     from superglm.distributional.smoothing.history import compact_coefficient_history
 
-    source = _resolved_quadratic_gap_fit()
+    source = _single_coefficient_fit()
     fits = [source, source]
     decompositions = []
     original = solver_results.decompose_gram
@@ -2713,130 +2746,6 @@ def test_history_compaction_reuses_validated_newton_certificate(monkeypatch) -> 
                 value.setflags(write=True)
     compact_coefficient_history(fits, (), terminal_fit_index=1, config=DistributionalEFSConfig())
     assert fits[0] is compact
-    # Public construction still revalidates a certificate with changed evidence.
-    with pytest.raises(ValueError, match="Newton decrement certificate"):
-        replace(compact, terminal_score=compact.terminal_score * 1.0e8)
-
-
-def test_newton_decrement_result_revalidates_its_terminal_certificate() -> None:
-    """Kills publishing the reason after its score or curvature provenance changed."""
-    family = _UnitGaussian()
-    response = np.array([1.0])
-    weights = resolved_prior(np.ones(1))
-    frame = as_eager_frame(pd.DataFrame({"effect": ["only"]}))
-    layout = build_stacked_layout(
-        compile_predictors(
-            frame,
-            weights,
-            family.parameters,
-            (Predictor("mean", {"effect": RandomEffect()}, intercept=False),),
-        )
-    )
-    component_name = layout.penalty_names[0]
-    lambda_value = 1.0e8
-    optimum = 1.0 / (1.0 + lambda_value)
-    result = fit_dense_fixed_lambda(
-        family,  # type: ignore[arg-type]
-        layout,
-        response,
-        family.bind_likelihood(response, weights, COMPLETE_OBSERVATION),  # type: ignore[arg-type]
-        layout.penalty_matrix({component_name: lambda_value}),
-        initial=np.array([optimum + 1.0e-8]),
-        config=DenseSolverConfig(
-            max_iterations=10,
-            tolerance=1.0e-8,
-            newton_decrement_tolerance=1.0e-8,
-            coefficient_curvature="observed",
-        ),
-    )
-    assert result.convergence_reason == "newton_decrement"
-
-    with pytest.raises(ValueError, match="Newton decrement certificate"):
-        replace(result, terminal_score=1.0e8 * result.terminal_score)
-
-    fallback = replace(
-        result.terminal_curvature,
-        actual_source="fisher",
-        reason="test mutation",
-        fallback_count=1,
-    )
-    with pytest.raises(ValueError, match="observed terminal curvature"):
-        replace(result, terminal_curvature=fallback)
-
-
-def test_endpoint_authority_refits_after_a_loose_newton_decrement_stop() -> None:
-    """A parent decrement-only stop cannot supply endpoint direction authority."""
-    family = _UnitGaussian()
-    response = np.array([0.5], dtype=np.float64)
-    weights = resolved_prior(np.ones(1, dtype=np.float64))
-    frame = as_eager_frame(pd.DataFrame({"effect": ["only"]}))
-    layout = build_stacked_layout(
-        compile_predictors(
-            frame,
-            weights,
-            family.parameters,
-            (Predictor("mean", {"effect": RandomEffect()}, intercept=False),),
-        )
-    )
-    component_name = layout.penalty_names[0]
-    endpoint_face = build_penalty_face(layout, (component_name,))
-    lambdas = {component_name: 10.0}
-    initial = np.array([0.25], dtype=np.float64)
-    parent_config = DenseSolverConfig(
-        max_iterations=10,
-        tolerance=1.0e-4,
-        newton_decrement_tolerance=1.0,
-        coefficient_curvature="observed",
-    )
-    likelihood_plan = family.bind_likelihood(
-        response,
-        weights,
-        COMPLETE_OBSERVATION,
-    )
-
-    loose_fit = fit_dense_fixed_lambda(
-        family,  # type: ignore[arg-type]
-        layout,
-        response,
-        likelihood_plan,  # type: ignore[arg-type]
-        layout.penalty_matrix(lambdas),
-        initial=initial,
-        config=parent_config,
-    )
-    assert loose_fit.convergence_reason == "newton_decrement"
-    assert loose_fit.iterations == 0
-    np.testing.assert_array_equal(loose_fit.coefficients, initial)
-
-    attempt = efs_module._check_face_direction(
-        family,  # type: ignore[arg-type]
-        layout,
-        response,
-        likelihood_plan,  # type: ignore[arg-type]
-        lambdas=lambdas,
-        component_name=component_name,
-        finite_face=None,
-        endpoint_face=endpoint_face,
-        initial=loose_fit.coefficients,
-        solver_config=parent_config,
-        chunk_size=None,
-        phase_recorder=None,
-    )
-
-    assert attempt.check is not None
-    assert attempt.check.direction.decision == "endpoint"
-    assert all(
-        fit.config.coefficient_curvature == "observed"
-        and fit.config.tolerance == 1.0e-12
-        and fit.config.newton_decrement_tolerance is None
-        and fit.convergence_reason != "newton_decrement"
-        for fit in attempt.assessment_fits
-    )
-    np.testing.assert_allclose(
-        attempt.assessment_fits[0].coefficients,
-        np.array([0.5 / 11.0]),
-        rtol=0.0,
-        atol=64.0 * np.finfo(np.float64).eps,
-    )
 
 
 def _dense_component(
@@ -2915,7 +2824,7 @@ def _independent_penalty_efs_fit(
         else starting_lambdas
     )
     authority_faces: dict[int, tuple[str, ...]] = {}
-    real_fit = efs_module._fit_endpoint_authority_stationary
+    real_fit = smoothing_faces._fit_endpoint_authority_stationary
 
     def record_authority_face(*args: object, **kwargs: object) -> DenseSolverResult:
         fit = real_fit(*args, **kwargs)  # type: ignore[arg-type]
@@ -2932,7 +2841,6 @@ def _independent_penalty_efs_fit(
         smoothing_faces, "_fit_endpoint_authority_stationary", record_authority_face
     )
     monkeypatch.setattr(smoothing_loop, "_fit_endpoint_authority_stationary", record_authority_face)
-    monkeypatch.setattr(efs_module, "_fit_endpoint_authority_stationary", record_authority_face)
     smoothing = fit_distributional_efs(
         family,  # type: ignore[arg-type]
         layout,
@@ -3013,7 +2921,6 @@ def test_efs_revalidates_a_joint_face_from_one_fresh_common_fit(
     )
     assert common_fit.config.tolerance == 1.0e-12
     assert common_fit.config.coefficient_curvature == "observed"
-    assert common_fit.config.newton_decrement_tolerance is None
     assert common_fit.terminal_curvature.actual_source == "observed"
     assert common_fit.terminal_curvature.fallback_count == 0
     direction = revalidation.endpoint_direction_evidence
@@ -3048,7 +2955,7 @@ def test_efs_rolls_back_the_complete_joint_face_when_the_second_recheck_is_finit
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     direction_calls = 0
-    real_resolve = efs_module.resolve_endpoint_direction
+    real_resolve = smoothing_faces.resolve_endpoint_direction
 
     def make_second_terminal_direction_finite(*args: object, **kwargs: object):
         nonlocal direction_calls
@@ -3070,9 +2977,6 @@ def test_efs_rolls_back_the_complete_joint_face_when_the_second_recheck_is_finit
 
     monkeypatch.setattr(
         smoothing_faces, "resolve_endpoint_direction", make_second_terminal_direction_finite
-    )
-    monkeypatch.setattr(
-        efs_module, "resolve_endpoint_direction", make_second_terminal_direction_finite
     )
     layout, smoothing, authority_faces = _independent_penalty_efs_fit(
         monkeypatch,
@@ -3265,7 +3169,7 @@ def test_efs_records_typed_joint_failures_with_their_one_fitted_face(
 ) -> None:
     response = (0.5, 2.0) if failure_mode == "objective_rejected" else (0.5, 0.5)
     if failure_mode in {"not_converged", "not_stationary"}:
-        real_fit = efs_module._fit_endpoint_authority_stationary
+        real_fit = smoothing_faces._fit_endpoint_authority_stationary
 
         def fail_joint_fit(*args: object, **kwargs: object) -> DenseSolverResult:
             fit = real_fit(*args, **kwargs)  # type: ignore[arg-type]
@@ -3284,7 +3188,6 @@ def test_efs_records_typed_joint_failures_with_their_one_fitted_face(
 
         monkeypatch.setattr(smoothing_faces, "_fit_endpoint_authority_stationary", fail_joint_fit)
         monkeypatch.setattr(smoothing_loop, "_fit_endpoint_authority_stationary", fail_joint_fit)
-        monkeypatch.setattr(efs_module, "_fit_endpoint_authority_stationary", fail_joint_fit)
     elif failure_mode == "analytic_unavailable":
 
         def unavailable_direction(*args: object, **kwargs: object) -> None:
@@ -3293,9 +3196,6 @@ def test_efs_records_typed_joint_failures_with_their_one_fitted_face(
 
         monkeypatch.setattr(
             smoothing_faces, "evaluate_endpoint_laplace_derivative", unavailable_direction
-        )
-        monkeypatch.setattr(
-            efs_module, "evaluate_endpoint_laplace_derivative", unavailable_direction
         )
 
     layout, smoothing, _authority_faces = _independent_penalty_efs_fit(
@@ -3883,7 +3783,7 @@ def test_efs_rechecks_a_true_infinity_optimum_before_reporting_convergence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     decisions: list[EndpointDirectionEvidence] = []
-    real_resolve = efs_module.resolve_endpoint_direction
+    real_resolve = smoothing_faces.resolve_endpoint_direction
 
     def capture_direction(*args: object, **kwargs: object) -> EndpointDirectionEvidence:
         evidence = real_resolve(*args, **kwargs)  # type: ignore[arg-type]
@@ -3891,7 +3791,6 @@ def test_efs_rechecks_a_true_infinity_optimum_before_reporting_convergence(
         return evidence
 
     monkeypatch.setattr(smoothing_faces, "resolve_endpoint_direction", capture_direction)
-    monkeypatch.setattr(efs_module, "resolve_endpoint_direction", capture_direction)
     component_name, smoothing = _scalar_efs_fit(0.5)
 
     assert len(decisions) == 2
@@ -3947,7 +3846,7 @@ def test_terminal_face_recheck_preserves_the_canonical_endpoint_start(
 ) -> None:
     """The finite-cap comparison must not perturb the face state being certified."""
     calls: list[tuple[np.ndarray, np.ndarray | None]] = []
-    real_check = efs_module._check_face_direction
+    real_check = smoothing_faces._check_face_direction
 
     def record_endpoint_start(*args: object, **kwargs: object):
         initial = np.array(kwargs["initial"], copy=True)
@@ -3959,7 +3858,6 @@ def test_terminal_face_recheck_preserves_the_canonical_endpoint_start(
         return real_check(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(smoothing_faces, "_check_face_direction", record_endpoint_start)
-    monkeypatch.setattr(efs_module, "_check_face_direction", record_endpoint_start)
     _component_name, smoothing = _scalar_efs_fit(0.5)
 
     assert smoothing.converged is True
@@ -3990,7 +3888,7 @@ def test_terminal_face_recheck_refuses_a_moving_endpoint_state(
     calls = 0
     inject_endpoint_result = False
     injected = False
-    real_check = efs_module._check_face_direction
+    real_check = smoothing_faces._check_face_direction
     real_fit = smoothing_faces._fit_endpoint_authority_stationary
     real_run = solver_module._run_iterations
 
@@ -4037,7 +3935,6 @@ def test_terminal_face_recheck_refuses_a_moving_endpoint_state(
     monkeypatch.setattr(solver_module, "_run_iterations", stall_recheck_cap)
     monkeypatch.setattr(smoothing_faces, "_fit_endpoint_authority_stationary", inject_solver_result)
     monkeypatch.setattr(smoothing_faces, "_check_face_direction", perturb_revalidation_start)
-    monkeypatch.setattr(efs_module, "_check_face_direction", perturb_revalidation_start)
     component_name, smoothing = _scalar_efs_fit(0.5)
 
     assert calls == 2
@@ -4087,7 +3984,7 @@ def test_stationary_cap_recheck_refuses_tiny_endpoint_state_movement(
     calls = 0
     inject_endpoint_result = False
     injected = False
-    real_check = efs_module._check_face_direction
+    real_check = smoothing_faces._check_face_direction
     real_fit = smoothing_faces._fit_endpoint_authority_stationary
 
     def inject_solver_result(*args: object, **kwargs: object):
@@ -4115,7 +4012,6 @@ def test_stationary_cap_recheck_refuses_tiny_endpoint_state_movement(
 
     monkeypatch.setattr(smoothing_faces, "_fit_endpoint_authority_stationary", inject_solver_result)
     monkeypatch.setattr(smoothing_faces, "_check_face_direction", perturb_revalidation_start)
-    monkeypatch.setattr(efs_module, "_check_face_direction", perturb_revalidation_start)
     component_name, smoothing = _scalar_efs_fit(0.5)
 
     assert calls == 2
@@ -4351,7 +4247,7 @@ def test_analytic_endpoint_direction_resolves_anisotropic_penalty_geometry() -> 
     layout = replace(layout, penalties=(component,))
     face = build_penalty_face(layout, (component.name,))
     plan = family.bind_likelihood(response, weights, COMPLETE_OBSERVATION)
-    attempt = efs_module._check_face_direction(
+    attempt = smoothing_faces._check_face_direction(
         family,  # type: ignore[arg-type]
         layout,
         response,
@@ -4504,13 +4400,13 @@ def test_resolution_limited_stationary_cap_rejects_revalidation_movement_forgery
     source = smoothing.coefficient_fits[source_index]
     tolerance = revalidation.coefficient_tolerances[0]
     assert cap.convergence_reason == "resolution_limited_stationarity"
-    assert efs_module._endpoint_retained_kkt_relative(cap) > tolerance
-    assert result_module._assessment_is_numerically_stationary(cap, tolerance)
+    assert _endpoint_retained_kkt_relative(cap) > tolerance
+    assert _assessment_is_numerically_stationary(cap, tolerance)
 
     moved_coefficients = np.array(endpoint.coefficients, copy=True)
     moved_coefficients[0] = 1.0e-14
     moved_endpoint = replace(endpoint, coefficients=moved_coefficients)
-    movement_bound = result_module._assessment_coefficient_refit_bound(
+    movement_bound = _assessment_coefficient_refit_bound(
         source.coefficients,
         moved_endpoint.coefficients,
         tolerance=tolerance,
@@ -4536,8 +4432,8 @@ def test_resolution_limited_stationary_cap_enforces_cap_objective_ceiling() -> N
     direction = revalidation.endpoint_direction_evidence
     assert direction is not None
     assert cap.convergence_reason == "resolution_limited_stationarity"
-    assert efs_module._endpoint_retained_kkt_relative(cap) > tolerance
-    assert result_module._assessment_is_numerically_stationary(cap, tolerance)
+    assert _endpoint_retained_kkt_relative(cap) > tolerance
+    assert _assessment_is_numerically_stationary(cap, tolerance)
     assert direction.endpoint_objective <= revalidation.objective_before
 
     cap_face = cap.coefficient_face
@@ -4572,9 +4468,7 @@ def test_stationary_scalar_face_refuses_multi_cap_runtime_and_result_forgery(
     assessed_name = activation.activated_face_components[0]
     companion_name = next(name for name in names if name != assessed_name)
     cap_fit = scalar_smoothing.coefficient_fits[activation.coefficient_fit_indices[0]]
-    assert (
-        efs_module._endpoint_retained_kkt_relative(cap_fit) <= activation.coefficient_tolerances[0]
-    )
+    assert _endpoint_retained_kkt_relative(cap_fit) <= activation.coefficient_tolerances[0]
     maximum_lambda = scalar_smoothing.config.maximum_lambda
 
     def forge_companion(values):
@@ -4609,7 +4503,6 @@ def test_stationary_scalar_face_refuses_multi_cap_runtime_and_result_forgery(
         return None, None
 
     monkeypatch.setattr(smoothing_loop, "_try_joint_exact_face", disable_joint_activation)
-    monkeypatch.setattr(efs_module, "_try_joint_exact_face", disable_joint_activation)
     layout, runtime_result, _authority_faces = _independent_penalty_efs_fit(
         monkeypatch,
         (0.5, 0.5),
@@ -4617,8 +4510,7 @@ def test_stationary_scalar_face_refuses_multi_cap_runtime_and_result_forgery(
     runtime_event = runtime_result.history[-1]
     runtime_cap_fit = runtime_result.coefficient_fits[runtime_event.coefficient_fit_indices[0]]
     assert (
-        efs_module._endpoint_retained_kkt_relative(runtime_cap_fit)
-        <= runtime_event.coefficient_tolerances[0]
+        _endpoint_retained_kkt_relative(runtime_cap_fit) <= runtime_event.coefficient_tolerances[0]
     )
     runtime_refused = bool(
         not runtime_result.converged
@@ -4637,7 +4529,7 @@ def _joint_terminal_analytic_failure(
     retain_history_rows: bool = False,
 ) -> tuple[tuple[str, str], DistributionalEFSResult]:
     calls = 0
-    real_derivative = efs_module.evaluate_endpoint_laplace_derivative
+    real_derivative = smoothing_faces.evaluate_endpoint_laplace_derivative
 
     def fail_second_terminal_direction(*args: object, **kwargs: object):
         nonlocal calls
@@ -4648,9 +4540,6 @@ def _joint_terminal_analytic_failure(
 
     monkeypatch.setattr(
         smoothing_faces, "evaluate_endpoint_laplace_derivative", fail_second_terminal_direction
-    )
-    monkeypatch.setattr(
-        efs_module, "evaluate_endpoint_laplace_derivative", fail_second_terminal_direction
     )
     names, smoothing = _two_face_efs_fit(retain_history_rows=retain_history_rows)
     assert calls == 4
@@ -5057,7 +4946,7 @@ def test_efs_retracts_a_face_when_terminal_endpoint_assessment_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = 0
-    real_check = efs_module._check_face_direction
+    real_check = smoothing_faces._check_face_direction
 
     def make_terminal_recheck_unavailable(*args: object, **kwargs: object):
         nonlocal calls
@@ -5067,7 +4956,6 @@ def test_efs_retracts_a_face_when_terminal_endpoint_assessment_is_unavailable(
         return real_check(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(smoothing_faces, "_check_face_direction", make_terminal_recheck_unavailable)
-    monkeypatch.setattr(efs_module, "_check_face_direction", make_terminal_recheck_unavailable)
     component_name, smoothing = _scalar_efs_fit(0.5)
 
     assert calls == 2
@@ -5093,8 +4981,8 @@ def test_terminal_face_revalidation_failure_stays_nonconverged_without_upper_pre
     """Kills recovering from a failed terminal face certificate after rollback."""
     check_calls = 0
     saw_exact_face = False
-    real_check = efs_module._check_face_direction
-    real_fresh = efs_module._fresh_raw_evidence
+    real_check = smoothing_faces._check_face_direction
+    real_fresh = smoothing_loop._fresh_raw_evidence
 
     def fail_terminal_recheck(*args: object, **kwargs: object):
         nonlocal check_calls
@@ -5155,9 +5043,7 @@ def test_terminal_face_revalidation_failure_stays_nonconverged_without_upper_pre
         return evidence
 
     monkeypatch.setattr(smoothing_faces, "_check_face_direction", fail_terminal_recheck)
-    monkeypatch.setattr(efs_module, "_check_face_direction", fail_terminal_recheck)
     monkeypatch.setattr(smoothing_loop, "_fresh_raw_evidence", clear_pressure_after_rollback)
-    monkeypatch.setattr(efs_module, "_fresh_raw_evidence", clear_pressure_after_rollback)
     component_name, smoothing = _scalar_efs_fit(0.5)
 
     assert check_calls == 2
@@ -5168,7 +5054,6 @@ def test_terminal_face_revalidation_failure_stays_nonconverged_without_upper_pre
     assert smoothing.terminal_fit.converged is True
     assert smoothing.terminal_fit.config.tolerance == 1.0e-12
     assert smoothing.terminal_fit.config.coefficient_curvature == "observed"
-    assert smoothing.terminal_fit.config.newton_decrement_tolerance is None
     assert np.all(np.isfinite(smoothing.terminal_fit.coefficients))
     assert smoothing.terminal_endpoint_directions == {}
     assert smoothing.history[-1].deactivated_face_components == (component_name,)
@@ -5196,7 +5081,7 @@ def test_efs_retracts_a_face_when_the_fresh_cap_has_a_better_objective(
 ) -> None:
     """Kills revalidating from derivative sign without the fresh cap comparison."""
     calls = 0
-    real_check = efs_module._check_face_direction
+    real_check = smoothing_faces._check_face_direction
 
     def make_terminal_cap_better(*args: object, **kwargs: object):
         nonlocal calls
@@ -5213,7 +5098,6 @@ def test_efs_retracts_a_face_when_the_fresh_cap_has_a_better_objective(
         return attempt
 
     monkeypatch.setattr(smoothing_faces, "_check_face_direction", make_terminal_cap_better)
-    monkeypatch.setattr(efs_module, "_check_face_direction", make_terminal_cap_better)
     component_name, smoothing = _scalar_efs_fit(0.5)
 
     assert calls == 2
@@ -5228,7 +5112,7 @@ def test_efs_retracts_a_face_when_terminal_direction_resolves_finite(
 ) -> None:
     """A two-fit finite direction must coexist with the separate rollback fit."""
     calls = 0
-    real_check = efs_module._check_face_direction
+    real_check = smoothing_faces._check_face_direction
 
     def make_terminal_direction_finite(*args: object, **kwargs: object):
         nonlocal calls
@@ -5252,7 +5136,6 @@ def test_efs_retracts_a_face_when_terminal_direction_resolves_finite(
         return replace(attempt, check=replace(attempt.check, direction=finite))
 
     monkeypatch.setattr(smoothing_faces, "_check_face_direction", make_terminal_direction_finite)
-    monkeypatch.setattr(efs_module, "_check_face_direction", make_terminal_direction_finite)
     component_name, smoothing = _scalar_efs_fit(0.5)
 
     assert calls == 2
@@ -5273,8 +5156,8 @@ def test_efs_retracts_a_face_when_terminal_assessment_provenance_changes(
 ) -> None:
     provenance_calls = 0
     fit_calls = 0
-    real_provenance = efs_module._endpoint_shared_provenance
-    real_fit = efs_module._fit_fixed_state
+    real_provenance = smoothing_faces._endpoint_shared_provenance
+    real_fit = smoothing_authority._fit_fixed_state
 
     def change_terminal_assessment_provenance(result: DenseSolverResult) -> tuple[object, ...]:
         nonlocal provenance_calls
@@ -5292,12 +5175,8 @@ def test_efs_retracts_a_face_when_terminal_assessment_provenance_changes(
     monkeypatch.setattr(
         smoothing_faces, "_endpoint_shared_provenance", change_terminal_assessment_provenance
     )
-    monkeypatch.setattr(
-        efs_module, "_endpoint_shared_provenance", change_terminal_assessment_provenance
-    )
     monkeypatch.setattr(smoothing_authority, "_fit_fixed_state", count_fit)
     monkeypatch.setattr(smoothing_loop, "_fit_fixed_state", count_fit)
-    monkeypatch.setattr(efs_module, "_fit_fixed_state", count_fit)
     component_name, smoothing = _scalar_efs_fit(0.5)
 
     assert provenance_calls == 4
@@ -5569,134 +5448,7 @@ def test_endpoint_refuses_penalty_from_stale_retained_lambdas() -> None:
         )
 
 
-def test_endpoint_refuses_forged_reduced_terminal_decomposition() -> None:
-    (
-        family,
-        layout,
-        face,
-        lambdas,
-        response,
-        weights,
-        _first_matrix,
-        _second_matrix,
-    ) = _gaussian_endpoint_problem()
-    result = _fit_gaussian_endpoint(family, layout, face, lambdas, response, weights)
-    stored = result.terminal_reduced_rank
-    assert stored is not None
-    assert stored.cholesky_factor is not None
-    wrong_inverse = replace(
-        stored,
-        cholesky_factor=np.sqrt(2.0) * stored.cholesky_factor,
-    )
-    for forged_rank in (
-        decompose_gram(2.0 * np.eye(face.reduced_width)),
-        replace(stored, policy_version=stored.policy_version + 1),
-        replace(stored, resolution_limited=not stored.resolution_limited),
-        wrong_inverse,
-    ):
-        forged = replace(result, terminal_reduced_rank=forged_rank)
-        with pytest.raises(
-            endpoint_laml_module.EndpointLaplaceError,
-            match="reduced terminal decomposition",
-        ):
-            evaluate_endpoint_laplace(
-                forged,
-                layout=layout,
-                lambdas=lambdas,
-                face=face,
-            )
-
-
-def test_endpoint_contains_out_of_range_active_column_as_provenance_refusal() -> None:
-    (
-        family,
-        layout,
-        face,
-        lambdas,
-        response,
-        weights,
-        _first_matrix,
-        _second_matrix,
-    ) = _gaussian_endpoint_problem()
-    result = _fit_gaussian_endpoint(family, layout, face, lambdas, response, weights)
-    stored = result.terminal_reduced_rank
-    assert stored is not None
-    assert stored.cholesky_factor is not None
-    active_columns = np.array(stored.active_columns, copy=True)
-    active_columns[0] = stored.width + 3
-    forged_rank = replace(stored, active_columns=active_columns)
-    forged = replace(result, terminal_reduced_rank=forged_rank)
-
-    with pytest.raises(
-        endpoint_laml_module.EndpointLaplaceError,
-        match="reduced terminal decomposition",
-    ) as error:
-        evaluate_endpoint_laplace(
-            forged,
-            layout=layout,
-            lambdas=lambdas,
-            face=face,
-        )
-
-    assert isinstance(error.value.__cause__, IndexError)
-
-
-@pytest.mark.parametrize(
-    ("field_name", "malformed_kind", "cause_type"),
-    [
-        pytest.param("log_pdet", "numeric-string", TypeError, id="log-numeric-string"),
-        pytest.param("log_pdet", "text-string", TypeError, id="log-text-string"),
-        pytest.param("log_pdet", "bool", TypeError, id="log-bool"),
-        pytest.param("log_pdet", "nan", ValueError, id="log-nan"),
-        pytest.param("log_pdet", "inf", ValueError, id="log-inf"),
-        pytest.param("rank", "numeric-string", TypeError, id="rank-numeric-string"),
-        pytest.param("rank", "bool", TypeError, id="rank-bool"),
-        pytest.param("rank", "nan", TypeError, id="rank-nan"),
-    ],
-)
-def test_endpoint_refuses_malformed_stored_rank_and_log_scalars(
-    field_name: str,
-    malformed_kind: str,
-    cause_type: type[Exception],
-) -> None:
-    (
-        family,
-        layout,
-        face,
-        lambdas,
-        response,
-        weights,
-        _first_matrix,
-        _second_matrix,
-    ) = _gaussian_endpoint_problem()
-    result = _fit_gaussian_endpoint(family, layout, face, lambdas, response, weights)
-    stored = result.terminal_reduced_rank
-    assert stored is not None
-    malformed = {
-        "numeric-string": str(getattr(stored, field_name)),
-        "text-string": "not-a-number",
-        "bool": True,
-        "nan": np.nan,
-        "inf": np.inf,
-    }[malformed_kind]
-    forged_rank = replace(stored, **{field_name: malformed})
-    forged = replace(result, terminal_reduced_rank=forged_rank)
-
-    with pytest.raises(
-        endpoint_laml_module.EndpointLaplaceError,
-        match="reduced terminal decomposition",
-    ) as error:
-        evaluate_endpoint_laplace(
-            forged,
-            layout=layout,
-            lambdas=lambdas,
-            face=face,
-        )
-
-    assert isinstance(error.value.__cause__, cause_type)
-
-
-def test_endpoint_objective_uses_the_validated_stored_terminal_log_pdet() -> None:
+def test_endpoint_objective_uses_the_stored_terminal_log_pdet() -> None:
     (
         family,
         layout,

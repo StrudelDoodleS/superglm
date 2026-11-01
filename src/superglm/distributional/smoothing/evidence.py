@@ -6,7 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from superglm.distributional.layout import StackedLayout
-from superglm.distributional.result import DenseSolverResult, DistributionalEFSConfig
+from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.solver import DenseSolverResult
 from superglm.distributional.smoothing.face_efs import projected_component_states
 from superglm.distributional.smoothing.objective import (
     _component_states,

@@ -9,7 +9,6 @@ import pandas as pd
 import pytest
 from scipy import optimize, special
 
-import superglm.distributional.efs as efs_module
 import superglm.distributional.smoothing.authority as smoothing_authority
 import superglm.distributional.smoothing.loop as smoothing_loop
 import superglm.distributional.solver.chunks as chunking
@@ -32,11 +31,17 @@ from superglm.distributional.family import (
 from superglm.distributional.layout import StackedLayout, build_stacked_layout
 from superglm.distributional.model import fit_dense_distributional
 from superglm.distributional.predictor import Predictor, compile_predictors
-from superglm.distributional.result import (
+from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.solver import (
     DenseSolverConfig,
     DenseSolverResult,
-    DistributionalEFSConfig,
+    _assessment_is_numerically_stationary,
 )
+from superglm.distributional.smoothing.authority import (
+    _endpoint_retained_kkt_relative,
+    _fit_endpoint_authority_stationary,
+)
+from superglm.distributional.solver.solver import fit_dense_fixed_lambda
 from superglm.distributional.weights import (
     LikelihoodWeightError,
     UnsupportedLikelihoodContractError,
@@ -1429,10 +1434,9 @@ def _endpoint_polish_fixture(
         max_iterations=150,
         tolerance=1.0e-12,
         coefficient_curvature="observed",
-        newton_decrement_tolerance=None,
     )
     penalty = np.zeros((layout.n_coefficients, layout.n_coefficients), dtype=np.float64)
-    base = efs_module.fit_dense_fixed_lambda(
+    base = fit_dense_fixed_lambda(
         family,
         layout,
         Y,
@@ -1494,7 +1498,6 @@ def _invoke_endpoint_polish(
 
     monkeypatch.setattr(smoothing_authority, "_fit_fixed_state", fixed_state)
     monkeypatch.setattr(smoothing_loop, "_fit_fixed_state", fixed_state)
-    monkeypatch.setattr(efs_module, "_fit_fixed_state", fixed_state)
     if correction is not None:
         real_solve = DenseSolverResult.solve_terminal
 
@@ -1504,7 +1507,7 @@ def _invoke_endpoint_polish(
             return real_solve(result, rhs)
 
         monkeypatch.setattr(DenseSolverResult, "solve_terminal", terminal_solve)
-    result = efs_module._fit_endpoint_authority_stationary(
+    result = _fit_endpoint_authority_stationary(
         fixture.family,
         fixture.layout,
         Y,
@@ -1818,7 +1821,7 @@ def test_gamma_efs_selects_an_exact_irrelevant_face_and_keeps_a_finite_smooth(
     assert smoothing.unresolved_upper_bound == ()
 
     terminal = smoothing.terminal_fit
-    assert efs_module._endpoint_retained_kkt_relative(terminal) <= terminal.config.tolerance
+    assert _endpoint_retained_kkt_relative(terminal) <= terminal.config.tolerance
     assert terminal.resolved_chunk_size == chunk_size
     face = terminal.coefficient_face
     assert face is not None
@@ -1832,7 +1835,6 @@ def test_gamma_efs_selects_an_exact_irrelevant_face_and_keeps_a_finite_smooth(
                 authority_config = smoothing.coefficient_fits[fit_index].config
                 assert authority_config.coefficient_curvature == "observed"
                 assert authority_config.tolerance == 1.0e-12
-                assert authority_config.newton_decrement_tolerance is None
     null_residual = np.linalg.norm(face.constraint_matrix @ terminal.coefficients, ord=2)
     coefficient_scale = max(1.0, float(np.linalg.norm(terminal.coefficients, ord=2)))
     assert null_residual <= face.null_residual_bound * coefficient_scale
@@ -1866,7 +1868,7 @@ def test_gamma_endpoint_polish_reversal_never_certifies_a_nonstationary_fit(
             result.config.coefficient_curvature == "observed"
             and result.config.tolerance == 1.0e-12
             and np.array_equal(rhs, result.terminal_score)
-            and efs_module._endpoint_retained_kkt_relative(result) > result.config.tolerance
+            and _endpoint_retained_kkt_relative(result) > result.config.tolerance
         ):
             reversed_fits.append(result)
             return -correction
@@ -1918,14 +1920,14 @@ def test_gamma_endpoint_polish_reversal_never_certifies_a_nonstationary_fit(
                 item.coefficient_fit_indices.index(item.accepted_fit_index)
             ]
             assert all(endpoint is not rejected for rejected in reversed_fits)
-            assert efs_module._assessment_is_numerically_stationary(endpoint, tolerance)
+            assert _assessment_is_numerically_stationary(endpoint, tolerance)
     if smoothing.converged:
         # The endpoint's ordinary fit can reach its mode without needing polish.
         terminal = smoothing.terminal_fit
         assert terminal.coefficient_face is not None
         assert terminal.coefficient_face.component_names == ("scale:group#wiggle",)
         assert smoothing.terminal_raw_max_log_step <= smoothing.config.tolerance
-        assert efs_module._assessment_is_numerically_stationary(terminal, terminal.config.tolerance)
+        assert _assessment_is_numerically_stationary(terminal, terminal.config.tolerance)
         return
 
     assert smoothing.convergence_reason == "lambda_cap_unresolved"
@@ -1947,8 +1949,8 @@ def test_gamma_endpoint_polish_reversal_never_certifies_a_nonstationary_fit(
         ):
             assessment_fit = smoothing.coefficient_fits[fit_index]
             assert assessment_fit.converged
-            assert efs_module._endpoint_retained_kkt_relative(assessment_fit) > tolerance
-            assert not efs_module._assessment_is_numerically_stationary(
+            assert _endpoint_retained_kkt_relative(assessment_fit) > tolerance
+            assert not _assessment_is_numerically_stationary(
                 assessment_fit,
                 tolerance,
             )

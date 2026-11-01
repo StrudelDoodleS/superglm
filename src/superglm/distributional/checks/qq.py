@@ -44,6 +44,7 @@ from numpy.typing import NDArray
 from scipy import special
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm.distributional._common import json_floats, readonly_float
 from superglm.distributional.family import AtomFamily, DistributionFunctionFamily
 
 # ``_unvalidated_offset_shapes`` and ``_take_unvalidated_offsets`` are the fit's
@@ -71,17 +72,6 @@ _PROBABILITY_CEILING = 1.0 - _PROBABILITY_FLOOR
 _BLOCK_CELLS = 4_000_000
 
 
-def _readonly(values: NDArray) -> NDArray[np.float64]:
-    array = np.array(values, dtype=np.float64, copy=True)
-    array.setflags(write=False)
-    return array
-
-
-def _json_numbers(values: NDArray) -> list[float | None]:
-    """Emit a float list with every non-finite entry as ``null``."""
-    return [None if not np.isfinite(value) else float(value) for value in np.asarray(values)]
-
-
 def order_statistic_grid(n: int) -> NDArray[np.float64]:
     """Return the ``n`` standard-normal plotting positions ``Phi^{-1}((i - 0.5) / n)``."""
     count = int(n)
@@ -106,11 +96,11 @@ class QQPayload:
     schema_version: int = 1
 
     def __post_init__(self) -> None:
-        grid = _readonly(self.theoretical)
+        grid = readonly_float(self.theoretical)
         if grid.ndim != 1 or len(grid) < 1:
             raise ValueError("theoretical must be a non-empty one-dimensional grid")
         for name in ("observed", "envelope_lower", "envelope_upper"):
-            curve = _readonly(getattr(self, name))
+            curve = readonly_float(getattr(self, name))
             if curve.shape != grid.shape:
                 raise ValueError(f"{name} must carry one value per theoretical grid point")
             object.__setattr__(self, name, curve)
@@ -129,10 +119,10 @@ class QQPayload:
             "n_sim": self.n_sim,
             "seed": self.seed,
             "subsampled": self.subsampled,
-            "theoretical": _json_numbers(self.theoretical),
-            "observed": _json_numbers(self.observed),
-            "envelope_lower": _json_numbers(self.envelope_lower),
-            "envelope_upper": _json_numbers(self.envelope_upper),
+            "theoretical": json_floats(self.theoretical),
+            "observed": json_floats(self.observed),
+            "envelope_lower": json_floats(self.envelope_lower),
+            "envelope_upper": json_floats(self.envelope_upper),
         }
 
 

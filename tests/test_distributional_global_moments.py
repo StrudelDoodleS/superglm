@@ -469,26 +469,6 @@ def test_signed_cancellation_does_not_apply_input_cutoff_to_moments(api):
     assert result.data_curvature[intercept, intercept] == residual
 
 
-@pytest.mark.parametrize("field", ["B_unique", "R_inv"])
-def test_live_support_authority_change_discards_partial_state(api, field):
-    fixture = make_fixture()
-    with accepted_plan(api, fixture) as plan:
-        plan.reset(coefficients=fixture.coefficients, penalty=fixture.penalty)
-        stream = iter(chunks(fixture, 8))
-        plan.add_chunk(*next(stream))
-        group = fixture.layout.predictors[0].design.group_matrices[2]
-        source = getattr(group, field)
-        original = source.copy()
-        source[0, 0] += 0.125
-        with pytest.raises(api.GlobalMomentRefusalError) as caught:
-            plan.add_chunk(*next(stream))
-        assert not caught.value.recoverable
-        with pytest.raises(api.GlobalMomentRefusalError):
-            plan.finish()
-        source[:] = original
-        assert_geometry(accumulate(plan, fixture, 8), fixture)
-
-
 @pytest.mark.parametrize("failure", ["out_of_domain", "bad_index", "oversized_chunk"])
 def test_midstream_refusal_invalidates_geometry_and_reset_recovers(api, failure):
     fixture = make_fixture()
@@ -581,8 +561,6 @@ def test_borrowed_source_array_subclass_refuses_before_hooks(api, field):
         "codes",
         "bin_idx_level",
         "row_idx",
-        "B_unique",
-        "R_inv",
         "M",
         "score",
         "curvature",
@@ -647,10 +625,7 @@ def test_group_metadata_cap_applies_to_zero_width_groups(api):
     assert build.plan is None and build.reason
 
 
-@pytest.mark.parametrize("combination", ["channel_and_source", "ordinary_and_later_index"])
-def test_structural_failure_takes_precedence_over_same_chunk_domain_refusal(
-    api, monkeypatch, combination
-):
+def test_structural_failure_takes_precedence_over_same_chunk_domain_refusal(api, monkeypatch):
     fixture = make_fixture()
 
     def forbidden(*args, **kwargs):
@@ -661,15 +636,8 @@ def test_structural_failure_takes_precedence_over_same_chunk_domain_refusal(
         stream = iter(chunks(fixture, 8))
         plan.add_chunk(*next(stream))
         supplied, score, curvature = next(stream)
-        if combination == "channel_and_source":
-            curvature = curvature.copy()
-            curvature[0, 0] = 2.0**129
-            support = supplied[1].design.group_matrices[3]
-            support.B_unique = support.B_unique.copy()
-            support.B_unique[0, 0] += 0.125
-        else:
-            supplied[0].design.group_matrices[0].M[0, 0] = 2.0**129
-            supplied[1].design.group_matrices[3].bin_idx[-1] = 999
+        supplied[0].design.group_matrices[0].M[0, 0] = 2.0**129
+        supplied[1].design.group_matrices[3].bin_idx[-1] = 999
         monkeypatch.setattr(api._BatchedMomentReducers, "accumulate", forbidden)
         with pytest.raises(api.GlobalMomentRefusalError) as caught:
             plan.add_chunk(supplied, score, curvature)

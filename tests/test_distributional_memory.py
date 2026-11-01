@@ -11,7 +11,7 @@ from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import Predictor, compile_predictors
-from superglm.distributional.result import DenseSolverConfig
+from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.solver import fit_dense_fixed_lambda
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.features import Numeric, Spline

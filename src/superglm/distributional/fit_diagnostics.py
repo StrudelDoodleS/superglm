@@ -24,12 +24,10 @@ from superglm.diagnostics.fit_report import (
 from superglm.distributional.family import ExpectedInformationFamily
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.model import DenseDistributionalModel
-from superglm.distributional.result import (
-    DenseSolverResult,
-    DistributionalEFSIteration,
-    DistributionalEFSResult,
-    DistributionalFitResult,
-)
+from superglm.distributional.results.fit import DistributionalFitResult
+from superglm.distributional.results.iteration import DistributionalEFSIteration
+from superglm.distributional.results.smoothing import DistributionalEFSResult
+from superglm.distributional.results.solver import DenseSolverResult
 from superglm.distributional.timing import FitPhaseSnapshot
 from superglm.features.spline import CubicRegressionSpline
 from superglm.solvers.rank import SHARED_RANK_POLICY, _eigensolver_relative_bar

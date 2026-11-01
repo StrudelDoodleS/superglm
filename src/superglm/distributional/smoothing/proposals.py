@@ -8,7 +8,8 @@ from collections.abc import Mapping
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributional.result import DenseSolverResult, DistributionalEFSConfig
+from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.solver import DenseSolverResult
 
 
 def _ordered_log_lambdas(

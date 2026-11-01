@@ -17,7 +17,7 @@ from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import Predictor, compile_predictors
-from superglm.distributional.result import DenseSolverConfig
+from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.solver import chunks
 from superglm.distributional.solver import solver as solver_api
 from superglm.distributional.solver._global_moments import GlobalMomentRefusalError
@@ -330,14 +330,14 @@ def test_fused_admission_keeps_exact_builtin_scope_with_other_replay_contracts(
 
 def test_nonfinite_completed_likelihood_sums_refuse_only_the_fused_trial(monkeypatch):
     context, coefficients = _context()
-    original = chunks._assemble_chunked_geometry
+    original = chunks.assemble_chunked_geometry
 
     def nonfinite(*args, **kwargs):
         geometry = original(*args, **kwargs)
         kwargs["_likelihood_sums"][0] = -np.inf
         return geometry
 
-    monkeypatch.setattr(chunks, "_assemble_chunked_geometry", nonfinite)
+    monkeypatch.setattr(chunks, "assemble_chunked_geometry", nonfinite)
     assert solver_api._evaluate_fused_trial(context, coefficients, "observed", None) is None
 
 
@@ -388,33 +388,6 @@ def test_gamma_unrepresentable_derivative_keeps_its_finite_value_screen():
     screened = solver_api._evaluate_state(context, coefficients)
     assert screened is not None
     assert np.isfinite(screened.penalized_optimizing_log_likelihood)
-
-
-def test_same_chunk_authority_mutation_wins_over_numerical_derivative_failure(monkeypatch):
-    context, coefficients = _context()
-    group = next(
-        group
-        for state in context.layout.predictors
-        for group in state.design.group_matrices
-        if hasattr(group, "B_unique")
-    )
-    original = type(context.family).evaluate_natural
-    calls = []
-
-    def mutate(self, *args, **kwargs):
-        calls.append(kwargs.get("derivative_order", 2))
-        if len(calls) == 2:
-            group.B_unique = group.B_unique.copy()
-            group.B_unique[0, 0] += 0.5
-            raise FloatingPointError("numeric derivative failure after live mutation")
-        return original(self, *args, **kwargs)
-
-    monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: 64 << 20)
-    monkeypatch.setattr(type(context.family), "evaluate_natural", mutate)
-    with pytest.raises(GlobalMomentRefusalError, match="authority") as error:
-        solver_api._evaluate_fused_trial(context, coefficients, "observed", None)
-    assert not error.value.recoverable
-    assert calls == [2, 2]
 
 
 @pytest.mark.parametrize("global_moments", [False, True])
