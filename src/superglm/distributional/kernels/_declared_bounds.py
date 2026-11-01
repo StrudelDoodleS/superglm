@@ -23,7 +23,13 @@ of shape ``a`` and mean ``m`` has ``l(s) = a s - a e^s/m + const``, so ``l' =
 a (1 - r)`` and every higher derivative is ``-a r``, ``r = y/m``; its ``rate``
 is ``max(1, sqrt(a r_upper), a max(|1 - r_lower|, |1 - r_upper|))``, the
 largest of each over the window.  It reads a two-ended window from the lower
-tail when the window's midpoint is below the mean.
+tail when the window's midpoint is below the mean.  A tail point of a row whose
+shape exceeds :data:`UNIFORM_SHAPE` (``1e4``, the top of the incomplete-gamma
+engine's measured envelope, ``tests/test_incomplete_gamma_engine.py``) and
+lies in Temme's uniform domain is read from the declaration's ``*_uniform``
+laws: that expansion costs the same at every shape and is analytic through
+the log-normal limit (``kernels/_gg_uniform_tail.py``), where the engine's
+series and continued fraction take ``O(sqrt(a))`` terms near ``y = mean``.
 """
 
 from __future__ import annotations
@@ -35,12 +41,49 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributional.kernels._declared import gamma, gamma_log, law_jets
+from superglm.distributional.kernels._gg_uniform_tail import gg_uniform_domain
 from superglm.distributional.kernels._response_tails import (
     NARROW_WINDOW,
     Jet,
     log_window_jets,
     quadrature_window_jets,
 )
+
+UNIFORM_SHAPE = 1e4
+
+
+def _tail_jets(module, law, order, points, theta, columns, uniform):
+    """``law``'s jets at ``points``; the entries ``uniform`` flags read ``<law>_uniform``."""
+    flagged = (
+        np.zeros(len(points), dtype=bool) if uniform is None else uniform(points, theta, columns)
+    )
+    if not flagged.any():
+        return law_jets(module, law, order, points, theta, columns)[0]
+    jets = (np.empty(len(points)),) + tuple(
+        np.empty((len(points), comb(theta.shape[1] + level - 1, level)))
+        for level in range(1, order + 1)
+    )
+    routed = np.flatnonzero(flagged)
+    sub, valid = law_jets(
+        module,
+        f"{law}_uniform",
+        order,
+        points[routed],
+        theta[routed],
+        tuple(c[routed] for c in columns),
+    )
+    for target, source in zip(jets, sub, strict=True):
+        target[routed] = source
+    # A point the kernel's own domain test rejects is read by the engine.
+    flagged[routed[~valid]] = False
+    rest = np.flatnonzero(~flagged)
+    if len(rest):
+        sub, _ = law_jets(
+            module, law, order, points[rest], theta[rest], tuple(c[rest] for c in columns)
+        )
+        for target, source in zip(jets, sub, strict=True):
+            target[rest] = source
+    return jets
 
 
 def declared_window_jets(
@@ -53,12 +96,15 @@ def declared_window_jets(
     order: int,
     from_lower: NDArray,
     rate: NDArray,
+    uniform=None,
 ) -> Jet:
     """``log P(lower < Y <= upper)`` and its packed jet to ``order`` under ``module``'s law.
 
     ``lower`` at or below zero is the support's start and ``upper = inf`` an
     open end, not both on one row; ``parameters`` are ``(n, K)`` in the
-    module's coordinates and ``data`` its per-row data columns.
+    module's coordinates and ``data`` its per-row data columns.  ``uniform``,
+    given, maps ``(points, parameters, data)`` to the tail points read from the
+    module's ``<law>_uniform`` laws.
     """
     lo = np.asarray(lower, dtype=np.float64)
     hi = np.asarray(upper, dtype=np.float64)
@@ -85,7 +131,9 @@ def declared_window_jets(
         if len(rows) == 0:
             continue
         points = np.concatenate((near_point[near_rows], far_point[far_rows]))
-        jets, _ = law_jets(module, law, order, points, theta[rows], tuple(c[rows] for c in columns))
+        jets = _tail_jets(
+            module, law, order, points, theta[rows], tuple(c[rows] for c in columns), uniform
+        )
         split = len(near_rows)
         for level, values in enumerate(jets):
             near[level][near_rows] = values[:split]
@@ -150,8 +198,22 @@ def gamma_window_jets(
             shape * np.maximum(np.abs(1.0 - r_lower), np.abs(1.0 - r_upper)),
         )
         from_lower = lo + hi < 2.0 * mean
+    log_coordinates = coordinates == "log"
+
+    def uniform(points, row_theta, columns):
+        log_mean = row_theta[:, 0] if log_coordinates else np.log(row_theta[:, 0])
+        row_cv = np.exp(row_theta[:, 1]) if log_coordinates else row_theta[:, 1]
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            routed = columns[0] / (row_cv * row_cv) > UNIFORM_SHAPE
+            if routed.any():
+                rows = np.flatnonzero(routed)
+                q = row_cv[rows] / np.sqrt(columns[0][rows])
+                w = (np.log(points[rows]) - log_mean[rows]) / q
+                routed[rows] = gg_uniform_domain(w, q)
+        return routed
+
     return declared_window_jets(
-        gamma_log if coordinates == "log" else gamma,
+        gamma_log if log_coordinates else gamma,
         lower,
         upper,
         theta,
@@ -159,6 +221,7 @@ def gamma_window_jets(
         order=order,
         from_lower=from_lower,
         rate=rate,
+        uniform=uniform,
     )
 
 

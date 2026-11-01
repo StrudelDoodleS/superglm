@@ -102,7 +102,11 @@ def test_kernels_import_no_distributional_module_or_contract() -> None:
     allowed = {
         "_weighted.py": {"kernels.gamma"},
         "_response_tails.py": {"kernels._common", "kernels._curvature_direction"},
-        "_declared_bounds.py": {"kernels._declared", "kernels._response_tails"},
+        "_declared_bounds.py": {
+            "kernels._declared",
+            "kernels._gg_uniform_tail",
+            "kernels._response_tails",
+        },
         "_gg_log_tail.py": {"kernels._gg_uniform_tail", "kernels._incomplete_gamma"},
         "_incomplete_gamma.py": {"kernels._severity_primitives"},
         "_tweedie_numba.py": {"kernels._fourth_generated", "kernels._severity_primitives"},

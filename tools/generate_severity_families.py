@@ -165,8 +165,9 @@ class Engine:
     in ``(u, v)`` of total order ``1..order`` (each block in
     ``combinations_with_replacement`` order) to ``out``, and NaN on rows outside
     its domain.  ``reference(u, v, upper)`` is its mpmath value, for oracles.
-    An engine with ``work``, the name of a size constant in ``module``, takes a
-    trailing scratch array of that size, allocated once per kernel call.
+    An engine with ``work``, the name of a size constant in ``module`` (an
+    integer, or a shape tuple), takes a trailing scratch array of that size,
+    allocated once per kernel call.
     """
 
     name: str
@@ -213,6 +214,8 @@ class Declaration:
     log_density: Callable[..., sp.Expr]
     log_survival: Callable[..., sp.Expr] | None = None
     log_cdf: Callable[..., sp.Expr] | None = None
+    # Further laws by name, such as a tail through a second engine for another domain.
+    extra_laws: tuple[tuple[str, Callable[..., sp.Expr]], ...] = ()
     data: tuple[str, ...] = ()
     real: tuple[str, ...] = ()
     coordinates: str = "natural"
@@ -246,6 +249,28 @@ def _gamma_tail(upper: bool):
     return tail
 
 
+def _mp_gg_log_tail(w, q, upper):
+    a = 1 / q**2
+    return _mp_log_gamma_tail(a, a * mp.exp(q * w), upper)
+
+
+# The gamma at shape ``a`` is the Prentice GG at ``q = a^(-1/2)``, ``w = log(y/mean)/q``.
+GG_UNIFORM_TAIL = Engine(
+    "gg_uniform_log_tail_with_scratch",
+    "superglm.distributional.kernels._gg_uniform_tail",
+    reference=_mp_gg_log_tail,
+    work="SCRATCH_SHAPE",
+)
+
+
+def _gamma_uniform_tail(upper: bool):
+    def tail(y, mean, cv, weight):
+        q = cv / sp.sqrt(weight)
+        return GG_UNIFORM_TAIL(sp.log(y / mean) / q, q, upper=upper)
+
+    return tail
+
+
 GAMMA = Declaration(
     name="gamma",
     parameters=("mean", "cv"),
@@ -253,12 +278,18 @@ GAMMA = Declaration(
     log_density=_gamma_log_density,
     log_survival=_gamma_tail(True),
     log_cdf=_gamma_tail(False),
+    extra_laws=(
+        ("logsf_uniform", _gamma_uniform_tail(True)),
+        ("logcdf_uniform", _gamma_uniform_tail(False)),
+    ),
     doc=(
         "``GammaLS``'s row law in its own parameters: mean ``mean``, shape\n"
         "``weight/cv^2`` (prior weights reweight the law; pass ones and the\n"
         "weights as ``M`` for frequency weights).  The log tails are\n"
         "``log Q`` and ``log P`` of the incomplete-gamma engine at shape\n"
-        "``weight/cv^2`` and point ``weight y/(mean cv^2)``."
+        "``weight/cv^2`` and point ``weight y/(mean cv^2)``; ``logsf_uniform`` and\n"
+        "``logcdf_uniform`` are the same tails by Temme's uniform expansion at\n"
+        "``q = cv/sqrt(weight)``, ``w = log(y/mean)/q``, on its domain."
     ),
 )
 
@@ -313,7 +344,8 @@ def derive(declaration: Declaration) -> Derived:
     terms = sp.Add.make_args(density)
     free = [term for term in terms if not term.free_symbols & set(theta)]
     laws = {"density": jet(sp.Add(*[term for term in terms if term not in free]), theta)}
-    for kind, function in (("logsf", declaration.log_survival), ("logcdf", declaration.log_cdf)):
+    tails = (("logsf", declaration.log_survival), ("logcdf", declaration.log_cdf))
+    for kind, function in (*tails, *declaration.extra_laws):
         if function is not None:
             laws[kind] = jet(function(y, *law, *data), theta)
     return Derived(declaration, y, theta, data, sp.Add(*free), laws, time.perf_counter() - start)
@@ -407,7 +439,8 @@ def emit_kernel(
             preamble.append(f"    out{g} = np.empty({(order + 1) * (order + 2) // 2})")
             if callee.work is not None and "    work = " not in "".join(preamble):
                 size = getattr(importlib.import_module(callee.module), callee.work)
-                preamble.append(f"    work = np.empty({int(size)})")
+                shape = tuple(map(int, size)) if isinstance(size, tuple) else int(size)
+                preamble.append(f"    work = np.empty({shape})")
     expressions = [expression.xreplace(outputs) for expression in expressions]
     replacements, reduced = sp.cse(
         arguments + expressions, symbols=sp.numbered_symbols("t"), optimizations="basic"
@@ -551,7 +584,12 @@ def render(derived: Derived, primitives_text: str) -> str:
     )
     declaration = derived.declaration
     engine_digest = (
-        _callee_digest([getattr(importlib.import_module(e.module), e.name) for e in engines])
+        _callee_digest(
+            [
+                getattr(importlib.import_module(e.module), e.name)
+                for e in sorted(engines, key=lambda e: (e.module, e.name))
+            ]
+        )
         if engines
         else ""
     )

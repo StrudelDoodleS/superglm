@@ -150,6 +150,17 @@ _FIRST_USE: dict[str, str] = {
         "3-4 on its predictor scale, so no fit reaches the other orders of either",
     ),
     **dict.fromkeys(
+        (
+            _DECLARED + f"{module}.{law}_uniform_{p}"
+            for module in ("gamma", "gamma_log")
+            for law in ("logsf", "logcdf")
+            for p in range(5)
+        ),
+        "GammaLS reads a bounded row's tail by the uniform expansion only above shape 1e4 "
+        "(cv below 0.01 at unit weight), a response nearly constant in its cell: no census fit "
+        "reaches it",
+    ),
+    **dict.fromkeys(
         (_ENGINE + "log_gamma_tail", _ENGINE + "_log_gamma_tail_rows"),
         "the incomplete-gamma engine's scalar and array entry points, for tests: fits call "
         "log_gamma_tail_into from the declared kernels",
@@ -204,8 +215,8 @@ _FIRST_USE: dict[str, str] = {
                 "_domain_rows",
             )
         ),
-        "the generalized gamma's uniform log tail for bounded rows: no family calls it yet "
-        "(4.4 s to compile the row kernel, 0.1 s from cache)",
+        "the generalized gamma's uniform log tail for bounded rows: GammaLS calls it only "
+        "above shape 1e4 (4.4 s to compile the row kernel, 0.1 s from cache)",
     ),
     **dict.fromkeys(
         (
