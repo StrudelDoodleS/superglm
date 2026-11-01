@@ -921,6 +921,53 @@ def test_ordinary_noop_preserves_composite_stop_without_publishing_an_iteration(
     np.testing.assert_array_equal(evaluated_coefficients[0], initial)
 
 
+def test_a_composite_stop_after_an_accepted_step_records_no_movement() -> None:
+    """Kills publishing the previous step's relative changes on a stop that made no move."""
+    family = _UnitGaussian()
+    response = np.array([1.0, 1.0, np.nextafter(1.0, np.inf)], dtype=np.float64)
+    weights = resolved_prior(np.ones(response.size, dtype=np.float64))
+    frame = as_eager_frame(
+        pd.DataFrame(
+            {
+                "x": np.ones(response.size, dtype=np.float64),
+                "effect": ["left", "middle", "right"],
+            }
+        )
+    )
+    layout = build_stacked_layout(
+        compile_predictors(
+            frame,
+            weights,
+            family.parameters,
+            (Predictor("mean", {"x": Numeric(), "effect": RandomEffect()}, intercept=False),),
+        )
+    )
+    component_name = layout.penalty_names[0]
+    face = build_penalty_face(layout, (component_name,))
+    lambdas = {component_name: 0.0}
+    result = fit_dense_fixed_lambda(
+        family,  # type: ignore[arg-type]
+        layout,
+        response,
+        family.bind_likelihood(response, weights, COMPLETE_OBSERVATION),  # type: ignore[arg-type]
+        layout.penalty_matrix(lambdas),
+        initial=face.project(np.array([0.5, 0.0, 0.0, 0.0], dtype=np.float64)),
+        config=DenseSolverConfig(
+            max_iterations=8, tolerance=1.0e-20, coefficient_curvature="observed"
+        ),
+        coefficient_face=face,
+    )
+
+    # One accepted step moves the mean from 0.5 to the optimum; the next line
+    # search finds no finite improvement and the composite stop is certified.
+    assert result.converged is True
+    assert result.convergence_reason == "objective_and_step"
+    assert result.iterations >= 1
+    assert result.history[-1].step_relative > 0.0
+    assert result.objective_relative_change == 0.0
+    assert result.step_relative == 0.0
+
+
 def test_private_score_only_solver_reports_resolution_limited_stationarity_honestly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

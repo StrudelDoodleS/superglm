@@ -868,7 +868,7 @@ def _try_global_geometry(
         return plan.finish()
     except _TrialDerivativeError as exc:
         if exc.rows is not None and exc.plans is not None and hasattr(plan, "_prepare_chunk"):
-            # A derivative can fail before add_row_range has checked live B/R,
+            # A derivative can fail before add_row_range has checked live
             # indices and metadata. Preserve hard-source priority on this rare
             # path using the same preparation checks, without updating moments.
             rows = exc.rows

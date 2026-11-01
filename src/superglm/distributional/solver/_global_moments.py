@@ -816,10 +816,10 @@ class GlobalMomentPlan:
     def add_row_range(self, plans, start, stop, score_eta, curvature_packed):
         """Ingest contiguous original-design rows using the owned chunk buffers.
 
-        Live numeric arrays are checked before slicing. Small B/R authority
-        tables are compared exactly on each call; source-sized row lookup
-        caches retain the ordinary row_subset contract and belong to the
-        caller's groups. The usual certified path constructs no child designs.
+        Live numeric arrays are checked before slicing. The support basis and
+        solver map are the copies the plan took when it was built; source-sized
+        row lookup caches retain the ordinary row_subset contract and belong to
+        the caller's groups. The usual certified path constructs no child designs.
         """
         if self._state != "accumulating":
             self._refuse("add_row_range requires a reset and an unrefused, unfinished geometry")

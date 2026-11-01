@@ -1,4 +1,4 @@
-"""Chunked endpoint reuse retains aggregate geometry and certifies fixed data."""
+"""Chunked endpoint reuse retains aggregate geometry and refuses a changed owner or predictor rows."""
 
 from __future__ import annotations
 
@@ -155,22 +155,16 @@ def test_chunked_reuse_refuses_changed_provenance(change, monkeypatch):
     assert evaluations > 0
 
 
-@pytest.mark.parametrize("change", ["offset"])
-def test_chunked_reuse_refuses_in_place_data_changes_at_fixed_point(change, monkeypatch):
+def test_chunked_reuse_refuses_an_in_place_offset_change_at_fixed_point(monkeypatch):
     family, layout, y, plan, _, config = _problem()
     config = replace(config, tolerance=1e20)
     problem = (family, layout, y, plan, np.eye(layout.n_coefficients) * 100.0, config)
     session = solver._DenseObservedReuseSession()
     first = _fit(problem, session=session, initial=np.zeros(layout.n_coefficients))
     assert first.converged
-    if change == "response":
-        y[0] += 0.5
-    elif change == "design":
-        # Slope coefficients are zero, so this changes curvature without changing eta.
-        layout.predictors[0].design.group_matrices[0].M[0] += 0.5
-    else:
-        layout.predictors[0].offset.setflags(write=True)
-        layout.predictors[0].offset[0] += 0.5
+    # An offset change moves eta, which the reuse recomputes bitwise and refuses.
+    layout.predictors[0].offset.setflags(write=True)
+    layout.predictors[0].offset[0] += 0.5
     evaluations = 0
     original = GaussianLS.evaluate_natural
 
