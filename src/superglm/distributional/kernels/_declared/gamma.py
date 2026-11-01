@@ -24,7 +24,7 @@ COORDINATES = 'natural'
 LAWS = ('density', 'logsf', 'logcdf')
 MAX_ORDER = 4
 PRIMITIVES_DIGEST = "7139a2b537094ec4616a1b45afc889977e859c59786c0efbe16b55454abe7f64"
-ENGINES_DIGEST = "921811603b9a58794156f0740368ad5f3ca3225324e23082922ba65ad48e2651"
+ENGINES_DIGEST = "b9b81f9f463fc8b5180fe0be98f368359c9b9caa167c24e785470402ac0cb826"
 
 @njit(cache=True, nogil=True, error_model='numpy')
 def density_0(Y, P0, P1, D0, M, J0):
