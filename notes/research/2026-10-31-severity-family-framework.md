@@ -5,6 +5,8 @@ note only: no production code changes. The prototype behind every measurement is
 [`severity-family-prototype/`](severity-family-prototype/), and the commands that produced
 the numbers are listed at the end.
 
+**Status, 2026-11-01.** PR #545 has merged (`9d0b2de3`). It takes a per-row flag, `censored=`, in place of the `censoring=(lower, upper)` pairs described here.
+
 ## Recommendation
 
 1. **Generate severity families from a declared log density, at build time.** SymPy

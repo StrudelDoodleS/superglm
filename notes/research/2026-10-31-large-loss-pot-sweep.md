@@ -6,6 +6,8 @@ layer method, was added the same day. PR #545 (per-row `truncation=` and
 of the code. This note is research input for the roadmap (C11, C12, C13 and
 the generalized Pareto shape note). It changes no code.
 
+**Status, 2026-11-01.** PR #545 has merged (`9d0b2de3`). It takes a per-row flag, `censored=`, in place of the `censoring=(lower, upper)` pairs described here; the GPD shape-wall disclosure merged as #558 (`5d89809b`).
+
 ## Verdict
 
 - **The core method is already here.** superglm fits the generalized Pareto
