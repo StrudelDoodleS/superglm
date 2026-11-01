@@ -179,6 +179,21 @@ _FIRST_USE: dict[str, str] = {
         "the generalized gamma's uniform log tail for bounded rows: no family calls it yet "
         "(4.4 s to compile the row kernel, 0.1 s from cache)",
     ),
+    **dict.fromkeys(
+        (
+            "superglm.distributional.kernels._gg_log_tail." + name
+            for name in (
+                "_fill_nan",
+                "_map_jets",
+                "_composed_log_tail",
+                "_compose_into",
+                "gg_log_tail",
+                "_composed_rows",
+                "_log_tail_rows",
+            )
+        ),
+        "the generalized gamma's log tail at every shape for bounded rows: no family calls it yet",
+    ),
 }
 
 _WARMUP_CENSUS = r"""
