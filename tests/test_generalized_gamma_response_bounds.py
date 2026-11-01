@@ -619,8 +619,13 @@ def test_predictions_near_zero_shape_read_the_fitted_law():
     for q in (5e-9, -5e-9, 0.0):
         shape = np.full(len(w), q)
         cdf = generalized_gamma_cdf(np.exp(w), np.zeros(len(w)), np.ones(len(w)), shape)
+        log_exact = np.array([float(expansion_reference(v, q)[0][(0, 0)]) for v in w])
         exact = np.array([float(mp.exp(expansion_reference(v, q)[0][(0, 0)])) for v in w])
-        np.testing.assert_allclose(cdf, exact, rtol=1e-15)
+        # The cdf is exp(log F): an absolute error of a few u |log F| in log F becomes
+        # the same relative error in F, so the tolerance scales with |log F|.
+        unit_roundoff = np.finfo(np.float64).eps / 2
+        tolerance = 16 * unit_roundoff * (1.0 + np.abs(log_exact))
+        assert np.all(np.abs(cdf - exact) <= tolerance * exact)
         # The log-normal it replaces is within 1e-8 of it.
         assert np.max(np.abs(cdf - stats.norm.cdf(w))) < 1e-8
         p = np.array([1e-6, 0.1, 0.5, 0.9, 1 - 1e-6])
