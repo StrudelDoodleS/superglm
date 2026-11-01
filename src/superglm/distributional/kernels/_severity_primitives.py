@@ -17,7 +17,8 @@ quantities that a primitive resolves:
 - ``gdev(y, m) = y/m - 1 - log(y/m)``, half the gamma unit deviance, which is
   Loader's ``bd0(m, y)/m``, by his series in ``v = (m - y)/(m + y)`` (Loader,
   *Fast and accurate computation of binomial probabilities*, 2000) for
-  ``y/m`` in ``(1/2, 2)``, where ``y - m`` is exact, and directly outside,
+  ``y/m`` in ``(1/2, 2)``, where ``y - m`` is exact (both halved where ``m + y``
+  overflows), and directly outside,
   where ``|y/m - 1| <= 3.3 gdev``: relative-accurate for exact inputs;
 - ``gnorm(a) = a log a - a - log Gamma(a)``, by Stirling's series for
   ``a >= 10`` (DLMF 5.11.1);
@@ -139,7 +140,9 @@ def invexpm1(t):
 @njit(cache=True)
 def gdev(y, m):
     d = m - y
-    v = d / (m + y)
+    total = m + y
+    # Halving is exact here; it keeps a sum near the top of the range finite.
+    v = d / total if total < math.inf else (0.5 * d) / (0.5 * m + 0.5 * y)
     if abs(v) < _GDEV_SERIES:
         # bd0(m, y)/m = (m - y) v/m + 2 sum_j v^(2j+1)/(2j+1).
         total = d * v / m

@@ -61,7 +61,7 @@ from superglm.distributional.kernels._severity_primitives import (
 
 # Digest of the primitives above, stamped by ``tools/generate_severity_families.py``:
 # Numba's on-disk cache keys a compiled caller on its own file only.
-_CALLEE_DIGEST = "227d1c9dfbdf44354932f27cdf490f28180aa1d26ec1810ab10374c70e932013"
+_CALLEE_DIGEST = "04ce6ff309fc6fbe824e44571ea52924fd40f50736954b9b21a411bb05af84fb"
 
 MAX_ORDER = 4
 MAX_TERMS = 100_000
