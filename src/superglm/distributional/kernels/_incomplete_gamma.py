@@ -7,9 +7,11 @@ functions, then every partial in ``(a, x)`` by total order ``1..order``
 order: ``(a, x)``, then ``(aa, ax, xx)``, and so on.  Entries are plain
 partials, not divided by factorials; :func:`log_gamma_tail_scaled_into`
 writes them times ``x^j`` (``j`` the order in ``x``), the form the generated
-kernels compose.  A row outside the domain (``a`` or ``x``
-not finite and positive), or one whose series or continued fraction does not
-converge within :data:`MAX_TERMS`, writes NaN everywhere.
+kernels compose.  At ``x = inf`` it writes the tails' limits, ``log Q = -inf``
+and ``log P = 0`` with every partial zero.  A row otherwise outside the domain
+(``a`` not finite and positive, ``x`` not positive), or one whose series or
+continued fraction does not converge within :data:`MAX_TERMS`, writes NaN
+everywhere.
 
 Every quantity is a truncated bivariate Taylor jet in ``(da, e)`` with
 ``x -> x (1 + e)``, coefficients ``d^(i+j) f/(da^i de^j)/(i! j!)``, packed in

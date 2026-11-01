@@ -48,8 +48,10 @@ of the row's scale there because ``x/a <= 2^-60``.
 
 Rows neither engine evaluates write NaN everywhere: a non-finite ``w`` or
 ``q``, ``q`` so small that ``1/q^2`` overflows outside the first route,
-``x = a e^(q w)`` that overflows, a subnormal ``x`` with ``e^(q w)`` above
-``2^-60``, or an ``order`` outside ``0..4``.
+a subnormal ``x`` with ``e^(q w)`` above ``2^-60``, or an ``order`` outside
+``0..4``.  Where ``x = a e^(q w)`` overflows, the tail that vanishes there is
+``-inf`` and the other ``0``, every partial zero: a window's far end there is
+absent, not unknown.
 For ``|q| > 10`` (``a < 0.01``) the incomplete-gamma engine reads the tail
 beside its series as ``Q = u + v`` (its ``SMALL_SHAPE`` route).
 
