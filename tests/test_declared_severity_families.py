@@ -437,8 +437,9 @@ def test_each_tail_kernel_calls_its_engine_once_per_row(built) -> None:
         kernels = dict(re.findall(r"def (\w+)\(.*?\n(.*?)(?=\n@njit|\Z)", handle.read(), re.S))
     calls = {name: body.count("lse_engine(") for name, body in kernels.items()}
     assert calls == {
-        **{f"density_{p}": 0 for p in range(5)},
-        **{f"{law}_{p}": 1 for law in ("logsf", "logcdf") for p in range(5)},
+        "density": 0,
+        "logsf": 1,
+        "logcdf": 1,
         "carrier": 0,
     }
 

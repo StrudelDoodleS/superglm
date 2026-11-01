@@ -1,10 +1,10 @@
 """Generated row kernels of declared severity laws, and the array-level call into them.
 
 Each module here is written by ``tools/generate_severity_families.py``; see its
-docstring for the kernel signatures.  :func:`law_jets` returns the packed jet
-``(J0, ..., Jp)`` (plan interface I1) and the rows whose channels are all
-finite: a generated kernel marks a row it cannot represent with a non-finite
-entry instead of raising.
+docstring for the kernel signatures: one kernel per law, taking the order at
+run time.  :func:`law_jets` returns the packed jet ``(J0, ..., Jp)`` (plan
+interface I1) and the rows whose channels are all finite: a generated kernel
+marks a row it cannot represent with a non-finite entry instead of raising.
 """
 
 from __future__ import annotations
@@ -48,10 +48,13 @@ def law_jets(
     arguments += [_column(column, n_rows) for column in data]
     if law == "density":
         arguments.append(np.ones(n_rows) if multiplier is None else _column(multiplier, n_rows))
+    # Levels above ``order`` are unread: empty rows keep the kernel's one signature.
     jets = (np.empty(n_rows),) + tuple(
-        np.empty((n_rows, comb(k + level - 1, level))) for level in range(1, order + 1)
+        np.empty((n_rows if level <= order else 0, comb(k + level - 1, level)))
+        for level in range(1, module.MAX_ORDER + 1)
     )
-    getattr(module, f"{law}_{order}")(*arguments, *jets)
+    getattr(module, law)(*arguments, order, *jets)
+    jets = jets[: order + 1]
     valid = np.isfinite(jets[0])
     for channel in jets[1:]:
         valid &= np.isfinite(channel).all(axis=1)

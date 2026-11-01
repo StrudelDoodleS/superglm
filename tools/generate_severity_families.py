@@ -7,16 +7,18 @@ A :class:`Declaration` gives a family's log density in its natural parameters,
 and its log survival and log CDF where they are closed form, written with the
 primitives below.  Each law is differentiated to order 4, every packed entry
 once from its parent (no expansion, which would reopen cancellations the
-primitives closed), and printed as one ``@njit`` row loop per law and order
-writing the plan's packed jet ``(J0, ..., Jp)`` (``Jk`` columns in
-``itertools.combinations_with_replacement`` order), common subexpressions
-shared.  Additive terms of the log density free of every parameter become the
+primitives closed), and printed as one ``@njit`` row loop per law writing
+the plan's packed jet ``(J0, ..., Jp)`` (``Jk`` columns in
+``itertools.combinations_with_replacement`` order) to a run-time order ``p``,
+common subexpressions shared and each placed in the lowest level that reads
+it, so a call at order ``p`` skips the levels above.  Additive terms of the log density free of every parameter become the
 ``carrier`` kernel, as the hand-written families split them.  The output,
 ``src/superglm/distributional/kernels/_declared/<name>.py``, imports only Numba,
 NumPy, ``math`` and ``kernels._severity_primitives``; SymPy runs here only.
 
-Kernel signatures: ``<law>_<p>(Y, P0..PK-1, D0..Dd-1[, M], J0..Jp)`` with
-``law`` one of ``density``, ``logsf``, ``logcdf``; ``P`` the natural
+Kernel signatures: ``<law>(Y, P0..PK-1, D0..Dd-1[, M], order, J0..J4)`` with
+``law`` one of ``density``, ``logsf``, ``logcdf`` (or a declaration's extra
+law), ``Jk`` for ``k > order`` unread (pass ``(0, width)`` arrays); ``P`` the natural
 parameters, ``D`` the declaration's per-row data (not differentiated; the
 gamma's prior weight), ``M`` the density's row multiplier (frequency weights);
 ``carrier(Y, D.., M, J0)``.  The loops use ``error_model="numpy"``: a row whose
@@ -30,7 +32,9 @@ Primitives (SymPy rule here, Numba body in ``_severity_primitives``):
 at one argument share one call of the jet functions ``polygamma_0123``,
 ``psires_0123`` and ``sres_0123``.  An :class:`Engine` (plan
 interface I2) is a two-argument primitive ``engine(u, v, upper, order, out)``:
-each generated row calls it once per argument pair, and SymPy treats its
+each generated row calls it once per argument pair, with the kernel's
+run-time ``order`` and a non-literal tail so Numba compiles one copy of the
+engine, not one per order and tail, and SymPy treats its
 partials as functions whose derivatives are the next partials.
 """
 
@@ -452,6 +456,7 @@ def emit_kernel(
         )
         for symbol, value in replacements
     ]
+    levels = 1 + max(_level(target) for target, _ in targets)
     position = 0
     for g, ((callee, upper, args), atoms) in enumerate(groups.items()):
         printed = [_PRINTER.doprint(a) for a in reduced_arguments[position : position + len(args)]]
@@ -460,18 +465,49 @@ def emit_kernel(
         )
         position += len(args)
         if isinstance(callee, Engine):
-            order = max(sum(type(atom).orders) for atom in atoms)
+            # A run-time order and tail (``np.bool_``, not a literal) compile one engine copy.
+            top = max(sum(type(atom).orders) for atom in atoms)
+            order = "order" if top >= levels - 1 else f"min(order, {top})"
+            order = order if parametrised else str(top)
             scratch = ", work" if callee.work is not None else ""
-            lines = [f"{callee.name}({', '.join(printed)}, {upper}, {order}, out{g}{scratch})"]
-            lines += [f"c{g}_{index} = out{g}[{index}]" for index in sorted(set(atoms.values()))]
-            defines = tuple(sp.Symbol(f"c{g}_{index}") for index in sorted(set(atoms.values())))
+            call = sp.Symbol(f"call{g}")
+            statements.append(
+                _Statement(
+                    (call,),
+                    uses,
+                    [
+                        f"{callee.name}({', '.join(printed)}, np.bool_({upper}), {order}, out{g}{scratch})"
+                    ],
+                )
+            )
+            statements += [
+                _Statement(
+                    (sp.Symbol(f"c{g}_{index}"),),
+                    frozenset({call}),
+                    [f"c{g}_{index} = out{g}[{index}]"],
+                )
+                for index in sorted(set(atoms.values()))
+            ]
         else:
             defines = tuple(sp.Symbol(f"c{g}_{n}") for n in range(4))
             lines = [f"{', '.join(map(str, defines))} = {callee}({printed[0]})"]
-        statements.append(_Statement(defines, uses, lines))
-    body = _ordered(statements)
+            statements.append(_Statement(defines, uses, lines))
+    writes: list[list[str]] = [[] for _ in range(levels)]
+    wanted: list[set] = [set() for _ in range(levels)]
+    for (target, _), expression in zip(targets, reduced, strict=True):
+        printed = _PRINTER.doprint(expression)
+        writes[_level(target)].append(
+            f"{target} = m * ({printed})" if multiplied else f"{target} = {printed}"
+        )
+        wanted[_level(target)] |= expression.free_symbols
     parameters = [f"P{j}" for j in range(k)] + [f"D{j}" for j in range(d)]
-    signature = ["Y", *parameters, *(["M"] if multiplied else []), *_outputs(targets)]
+    signature = [
+        "Y",
+        *parameters,
+        *(["M"] if multiplied else []),
+        *(["order"] if parametrised else []),
+        *_outputs(targets),
+    ]
     lines = [
         "@njit(cache=True, error_model='numpy')",
         f"def {name}({', '.join(signature)}):",
@@ -481,13 +517,11 @@ def emit_kernel(
         *[f"        p{j} = P{j}[i]" for j in range(k)],
         *[f"        d{j} = D{j}[i]" for j in range(d)],
         *(["        m = M[i]"] if multiplied else []),
-        *[f"        {line}" for line in body],
     ]
-    for (target, _), expression in zip(targets, reduced, strict=True):
-        printed = _PRINTER.doprint(expression)
-        lines.append(
-            f"        {target} = m * ({printed})" if multiplied else f"        {target} = {printed}"
-        )
+    for level, block in enumerate(_ordered(statements, wanted)):
+        if level:
+            lines.append(f"{'    ' * (level + 1)}if order >= {level}:")
+        lines += [f"{'    ' * (level + 2)}{line}" for line in (*block, *writes[level])]
     return "\n".join(lines) + "\n", engines
 
 
@@ -495,24 +529,41 @@ def _outputs(targets) -> list[str]:
     return list(dict.fromkeys(target.split("[", 1)[0] for target, _ in targets))
 
 
-def _ordered(statements: list[_Statement]) -> list[str]:
-    """Statement lines with every definition before its first use, else in CSE order."""
+def _level(target: str) -> int:
+    """Jet level of an output target ``J<level>[...]``."""
+    return int(target[1 : target.index("[")])
+
+
+def _ordered(statements: list[_Statement], wanted: list[set]) -> list[list[str]]:
+    """Statement lines by jet level, every definition before its first use, else in CSE order.
+
+    ``wanted[level]`` holds the symbols that level's targets read; a statement
+    goes in the lowest level that needs it, so a lower-order call skips the rest.
+    """
     defined_by = {symbol: index for index, s in enumerate(statements) for symbol in s.defines}
+    level_of: dict[int, int] = {}
+    for level, symbols in enumerate(wanted):
+        stack = [defined_by[symbol] for symbol in symbols if symbol in defined_by]
+        while stack:
+            index = stack.pop()
+            if index not in level_of:
+                level_of[index] = level
+                stack += [defined_by[s] for s in statements[index].uses if s in defined_by]
     done: set[int] = set()
-    lines: list[str] = []
+    blocks: list[list[str]] = [[] for _ in wanted]
 
     def visit(index: int) -> None:
         if index in done:
             return
         done.add(index)
-        for symbol in statements[index].uses:
-            if symbol in defined_by:
-                visit(defined_by[symbol])
-        lines.extend(statements[index].lines)
+        # In index order, not set order, so the text is the same under every hash seed.
+        for dependency in sorted(defined_by[s] for s in statements[index].uses if s in defined_by):
+            visit(dependency)
+        blocks[level_of[index]].extend(statements[index].lines)
 
-    for index in range(len(statements)):
+    for index in sorted(level_of):
         visit(index)
-    return lines
+    return blocks
 
 
 def _jet_targets(channels: list[list[sp.Expr]], order: int) -> list[tuple[str, sp.Expr]]:
@@ -562,18 +613,14 @@ def stamped_callers() -> dict[Path, str]:
 
 
 def render(derived: Derived, primitives_text: str) -> str:
-    """The module text: every law at orders ``0..MAX_ORDER`` and the carrier."""
+    """The module text: one kernel per law, to a run-time order ``<= MAX_ORDER``, and the carrier."""
     chunks, engines = [], set()
     for law, channels in derived.laws.items():
-        for order in range(MAX_ORDER + 1):
-            text, used = emit_kernel(
-                f"{law}_{order}",
-                derived,
-                _jet_targets(channels, order),
-                multiplied=law == "density",
-            )
-            chunks.append(text)
-            engines |= used
+        text, used = emit_kernel(
+            law, derived, _jet_targets(channels, MAX_ORDER), multiplied=law == "density"
+        )
+        chunks.append(text)
+        engines |= used
     carrier, _ = emit_kernel(
         "carrier", derived, [("J0[i]", derived.carrier)], multiplied=True, parametrised=False
     )
