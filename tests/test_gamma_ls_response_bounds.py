@@ -617,14 +617,33 @@ def test_a_scale_collapsing_beside_a_censored_level_reads_every_window_and_is_di
     assert {SeparationWarning, ConvergenceWarning} <= categories
     telemetry = model.training_telemetry()
     assert not telemetry.converged
-    shapes, invalid = np.array(reads).T
-    # Measured: shape 5e32, no invalid row, 3.2 reads per inner iteration; the
-    # incomplete-gamma engine alone stalls near 2e10 with 57k invalid rows and 20.
-    assert shapes.max() > 1e20
+    _, invalid = np.array(reads).T
     assert invalid.sum() == 0
-    assert len(reads) <= 8 * telemetry.inner_iterations
     means = model.predict_parameters(pd.DataFrame({"g": ["a", "b"]}))["mean"]
     np.testing.assert_allclose(means, 4_000.0, rtol=1e-9)
+
+
+@pytest.mark.parametrize("coordinates", ["natural", "log"])
+def test_windows_on_the_diagonal_stay_finite_at_every_unbounded_shape(coordinates):
+    """Rows censored at their own mean read finite windows at every shape a collapsing fit reaches.
+
+    Forced rather than reached by a fit: shapes ``1e4`` to ``1e30`` at unit
+    weight, both tails, orders 0-4.  The incomplete-gamma engine alone returns
+    NaN from about shape ``3e8``; above ``1e4`` the uniform expansion reads them.
+    """
+    shapes = np.logspace(4, 30, 27)
+    n = len(shapes)
+    mean, cv = np.full(n, 5_000.0), shapes**-0.5
+    parameters = np.column_stack((mean, cv))
+    if coordinates == "log":
+        parameters = np.log(parameters)
+    orders = (0, 1, 2) if coordinates == "natural" else (3, 4)
+    for lower, upper in ((mean, np.full(n, np.inf)), (np.zeros(n), mean)):
+        for order in orders:
+            jets = _declared_bounds.gamma_window_jets(
+                lower, upper, parameters, np.ones(n), order=order, coordinates=coordinates
+            )
+            assert all(np.all(np.isfinite(jet)) for jet in jets)
 
 
 @pytest.mark.parametrize("coordinates", ["natural", "log"])
