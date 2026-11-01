@@ -335,6 +335,16 @@ versus 3,893.99 MiB exact. Same-discrete outputs agree at roundoff scale;
 discretization error remains separately measured. Global moments execute without
 refusal on the two large mixed cases; smaller controls retain existing routes.
 
+[PR #569](https://github.com/StrudelDoodleS/superglm/pull/569) makes the
+remaining binned route contract each block of likelihood chunks once per pass
+(Li and Wood 2020, Algorithm 1) instead of once per chunk, and retires the
+automatic small-group panels, which that route beats on every layout they
+admitted. Global moments stays: on the million-row C1 fixture the per-pass
+route takes 22.9 s against 11.1 s, because pair-by-pair contraction rescans
+the rows once for each of its 465 group pairs. Retiring global moments needs
+the per-pass route to match it there first; pooling the group pairs on threads
+alone takes one assembly from 1.40 to 0.72 s on 8 cores, against 0.48 s.
+
 The user judged the 8% one-thread time advantage over exact insufficient and
 explicitly selected further latency reduction on 2026-09-09. Single-fit wall
 time is the objective; using more CPU is acceptable when it saves time. The C1
