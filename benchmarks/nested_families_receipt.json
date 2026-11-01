@@ -1,0 +1,211 @@
+{
+ "superglm": "0.41.0",
+ "commit": "ff2ed52dc81eb55d73349a07f0989d9db53c3c59",
+ "python": "3.13.14",
+ "machine": "x86_64",
+ "rows": 20000,
+ "seed": 20261101,
+ "gamma_constant_cv": {
+  "GammaLS": {
+   "wall_s": 0.387,
+   "status": "ok",
+   "held_out_log_score": 8.038545710702843,
+   "mean_rel_error_vs_truth_max": 0.07212487224385122,
+   "parameters_at_first_test_row": {
+    "mean": 1612.4367842439988,
+    "scale": 1.1935427721422178
+   }
+  },
+  "GG_shape_free": {
+   "wall_s": 0.392,
+   "status": "ok",
+   "held_out_log_score": 8.03865370068653,
+   "mean_rel_error_vs_truth_max": 0.06962483073763082,
+   "parameters_at_first_test_row": {
+    "mean": 1612.4248298636653,
+    "scale": 1.1831417220972609,
+    "shape": 1.2209978908948345
+   },
+   "vs_GammaLS": {
+    "mean_diff": 0.00010798998368672295,
+    "se": 7.801924429730844e-05,
+    "t": 1.384145471535264,
+    "n": 20000.0
+   },
+   "mean_rel_diff_vs_GammaLS_max": 0.0023698122140615174
+  }
+ },
+ "gamma_cv_varies_with_x2": {
+  "GammaLS": {
+   "wall_s": 0.395,
+   "status": "ok",
+   "held_out_log_score": 7.980292951856626,
+   "mean_rel_error_vs_truth_max": 0.0695003677456022,
+   "parameters_at_first_test_row": {
+    "mean": 1561.3248784056268,
+    "scale": 0.7622909039387185
+   }
+  },
+  "GG_shape_free": {
+   "wall_s": 0.673,
+   "status": "ok",
+   "held_out_log_score": 7.98770845950183,
+   "mean_rel_error_vs_truth_max": 0.07449371924673276,
+   "parameters_at_first_test_row": {
+    "mean": 1563.7205518470141,
+    "scale": 0.7277108745030978,
+    "shape": 1.027155002215335
+   },
+   "vs_GammaLS": {
+    "mean_diff": 0.007415507645204873,
+    "se": 0.0008578932907088712,
+    "t": 8.643857838167134,
+    "n": 20000.0
+   },
+   "mean_rel_diff_vs_GammaLS_max": 0.01642612278151434
+  },
+  "GG_shape_on_x2": {
+   "wall_s": 0.741,
+   "status": "ok",
+   "held_out_log_score": 7.980497759341716,
+   "mean_rel_error_vs_truth_max": 0.0701570854132848,
+   "parameters_at_first_test_row": {
+    "mean": 1561.2146354367649,
+    "scale": 0.7601436137604617,
+    "shape": 0.7722104168545172
+   },
+   "vs_GammaLS": {
+    "mean_diff": 0.00020480748509054355,
+    "se": 0.00012715548003664636,
+    "t": 1.6106854775863202,
+    "n": 20000.0
+   },
+   "mean_rel_diff_vs_GammaLS_max": 0.0012020710739971685
+  }
+ },
+ "lognormal": {
+  "LogNormalLS": {
+   "wall_s": 0.117,
+   "status": "ok",
+   "held_out_log_score": 7.981114853807472,
+   "mean_rel_error_vs_truth_max": 0.07700782195219946,
+   "parameters_at_first_test_row": {
+    "mean": 1399.786389554277,
+    "scale": 0.8166812229086894
+   }
+  },
+  "GG_shape_fixed_0": {
+   "wall_s": 0.285,
+   "status": "ValueError: predictor 'shape' has an invalid global slice"
+  },
+  "GG_shape_free": {
+   "wall_s": 0.361,
+   "status": "ok",
+   "held_out_log_score": 7.981163481589724,
+   "mean_rel_error_vs_truth_max": 0.07819179957352174,
+   "parameters_at_first_test_row": {
+    "mean": 1401.910919956749,
+    "scale": 0.8167086491707101,
+    "shape": -0.011338333454893516
+   },
+   "vs_LogNormalLS": {
+    "mean_diff": 4.8627782254043354e-05,
+    "se": 3.341256043370162e-05,
+    "t": 1.4553743150134306,
+    "n": 20000.0
+   },
+   "mean_rel_diff_vs_LogNormalLS_max": 0.0016244900590880462
+  }
+ },
+ "gaussian": {
+  "GaussianLS": {
+   "wall_s": 0.11,
+   "status": "ok",
+   "held_out_log_score": 1.3142755548399383,
+   "mean_rel_error_vs_truth_max": 0.009921558443238832,
+   "parameters_at_first_test_row": {
+    "location": 6.79194357908255,
+    "scale": 0.8868699174389905
+   }
+  },
+  "TwoPieceNormal_skew_fixed_0": {
+   "wall_s": 0.176,
+   "status": "ValueError: predictor 'skew' has an invalid global slice"
+  },
+  "TwoPieceNormal_skew_free": {
+   "wall_s": 0.195,
+   "status": "ok",
+   "held_out_log_score": 1.314274166376591,
+   "mean_rel_error_vs_truth_max": 0.009941646964334305,
+   "parameters_at_first_test_row": {
+    "location": 6.7924149116663495,
+    "scale": 0.8868699676624859,
+    "skew": -0.0003428811778670715
+   },
+   "vs_GaussianLS": {
+    "mean_diff": -1.3884633476190388e-06,
+    "se": 1.7869185112126812e-06,
+    "t": -0.7770154816275123,
+    "n": 20000.0
+   },
+   "mean_rel_diff_vs_GaussianLS_max": 3.1583007416124964e-05
+  }
+ },
+ "prior_weights": {
+  "GammaLS_claim_rows": {
+   "wall_s": 0.506,
+   "status": "ok",
+   "rows": 25155,
+   "mean_rel_error_vs_truth_max": 0.09364474447377769,
+   "cv_at_first_policy": 1.197317745406472
+  },
+  "GammaLS_averages_prior_weight": {
+   "wall_s": 0.231,
+   "status": "ok",
+   "rows": 10000,
+   "mean_rel_error_vs_truth_max": 0.09363521627081073,
+   "cv_at_first_policy": 1.2038709724197851,
+   "mean_rel_diff_vs_claim_rows_max": 5.6113657066703126e-05
+  },
+  "GG_averages_prior_weight": {
+   "wall_s": 0.006,
+   "status": "UnsupportedLikelihoodContractError: GeneralizedGammaLSS is not a reproductive family, so non-unit prior weights have no likelihood law; fit claim-level rows, carry exposure through offsets, or use weight_semantics='frequency' for integer replication",
+   "rows": 10000
+  },
+  "LogNormalLS_averages_prior_weight": {
+   "wall_s": 0.006,
+   "status": "UnsupportedLikelihoodContractError: LogNormalLS is not a reproductive family, so non-unit prior weights have no likelihood law; fit claim-level rows, carry exposure through offsets, or use weight_semantics='frequency' for integer replication",
+   "rows": 10000
+  }
+ },
+ "small_sample": {
+  "gamma_cv_1.2": {
+   "train_rows": 300,
+   "replicates": 40,
+   "failed_fits": 0,
+   "held_out_log_score_gg_minus_specialist_mean": 0.004245592591309585,
+   "held_out_log_score_gg_minus_specialist_se": 0.0010553618627970184,
+   "gg_worse_in_fraction_of_replicates": 0.825,
+   "gg_shape_estimate_mean": 1.2757178257426502,
+   "gg_shape_estimate_sd": 0.2167114813711822,
+   "mean_rms_rel_error": {
+    "GammaLS": 0.16462493266676134,
+    "GG_shape_free": 0.16415573583208642
+   }
+  },
+  "lognormal_sigma_0.9": {
+   "train_rows": 300,
+   "replicates": 40,
+   "failed_fits": 0,
+   "held_out_log_score_gg_minus_specialist_mean": 0.002284970458808807,
+   "held_out_log_score_gg_minus_specialist_se": 0.0005211904379646617,
+   "gg_worse_in_fraction_of_replicates": 0.875,
+   "gg_shape_estimate_mean": 0.02360141000729473,
+   "gg_shape_estimate_sd": 0.1550551661307238,
+   "mean_rms_rel_error": {
+    "LogNormalLS": 0.12441258457504537,
+    "GG_shape_free": 0.1253190683792332
+   }
+  }
+ }
+}

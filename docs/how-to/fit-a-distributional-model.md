@@ -399,7 +399,9 @@ scale=exp(location − scale·log(shape⁻²)/shape))`; gamlss `GG` with
 link with a floor, default 0.01). It is the `shape = 0` member of
 `GeneralizedGammaLSS` and the `skew = 0` member of `TwoPieceLogNormalLSS`, and
 the tests pin both identities to 1e-14, so it is the right choice when the
-extra shape parameter is not paying for itself.
+extra shape parameter is not paying for itself. [Why nested families have
+their own class](../explanation/nested-distributional-families.md) measures
+what that parameter costs.
 
 ```python
 from superglm import LogNormalLS, SuperLSS, cat, s
