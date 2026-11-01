@@ -485,8 +485,9 @@ def _reference_value(fitted: Any, frame: EagerFrame, name: Hashable) -> Any:
     A numeric column without levels is held at its median.  Any other column is
     held at its most frequent fitted level, counted over the labels the term reads
     at it; a tie goes to the level that comes first in :func:`_column_levels` order.
-    A label the fit never saw is held only if no fitted level is present.  The value returned is that
-    level's most frequent label, so a grouped term is held at one of its members.
+    A label the fit never saw is held only if no fitted level is present.  The
+    value returned is the chosen level's most frequent label, so a grouped term is
+    held at one of its members.
     """
     values = frame.column_array(name)
     empty = (
@@ -664,8 +665,9 @@ def term_effect(
     A one-variable term is swept over ``n_points`` points spanning its training
     range with every other covariate held at its training median or mode
     (:func:`_reference_value`: missing values ignored, a tied mode going to the
-    level first in the fitted level order); a term with levels reports one row per fitted level, the reference level (and
-    any level pinned to it) reading back as an exact zero.  Bands are the
+    level first in the fitted level order); a term with levels reports one row per
+    fitted level, the reference level (and any level pinned to it) reading back as
+    an exact zero.  Bands are the
     Bayesian pointwise interval and, unless ``simultaneous=False``, the
     max-deviation simultaneous band of Ruppert, Wand and Carroll (2003),
     section 6.5, over ``n_sim`` posterior draws.  ``multiplier`` is

@@ -531,7 +531,29 @@ def test_a_label_unseen_at_fit_does_not_stop_the_reference_row(unseen_rows) -> N
     )
     curves = risk_curves(fitted, X, {}, "x", n_draws=60, seed=1)
     term_effect(fitted, X, "location", "x", simultaneous=False)
-    assert curves.reference["g"] in {"a", "b", "c"}
+    # The commonest label among the rows the fit saw; a tie goes to the first fitted
+    # level, which for an inferred universe is the first sorted.
+    assert curves.reference["g"] == X.loc[weight > 0, "g"].mode()[0]
+
+
+def test_a_label_the_grouping_does_not_cover_is_never_the_reference() -> None:
+    """A grouped unseen="base" term reads a label its grouping does not cover as NaN;
+    that NaN holds the most rows but is no fitted level, so b is the reference."""
+    from superglm._frame import as_eager_frame
+    from superglm.distributional.terms import _reference_value
+
+    to_group = {"a": "ac", "c": "ac", "b": "b"}
+    spec = SimpleNamespace(
+        _levels=("ac", "b"),
+        _resolve_predict_labels=lambda labels: np.array(
+            [to_group.get(label, np.nan) for label in labels], dtype=object
+        ),
+    )
+    fitted = SimpleNamespace(
+        compiled_predictors=(SimpleNamespace(compiled=SimpleNamespace(specs={"g": spec})),)
+    )
+    frame = as_eager_frame(pd.DataFrame({"g": ["d"] * 100 + ["a"] * 10 + ["b"] * 20}))
+    assert _reference_value(fitted, frame, "g") == "b"
 
 
 @pytest.fixture(scope="module")
