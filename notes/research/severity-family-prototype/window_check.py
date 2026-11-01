@@ -5,7 +5,8 @@ Prototype for notes/research/2026-10-31-severity-family-framework.md; not produc
     uv run python window_check.py OUT_DIR
 
 ``combine`` is the combination documented in PR 545's ``_response_tails.py``
-(written here from its stated formulas): with ``Delta = log T(far) - log T(near)``,
+(written here from its stated formulas while it was unmerged; master's
+``log_window_channels`` uses the same formula since #545): with ``Delta = log T(far) - log T(near)``,
 ``kappa = 1/expm1(-Delta)`` and ``d = g_near - g_far``, the window's log
 probability is ``log T(near) + log(-expm1(Delta))``, its score
 ``g_near + kappa d`` and its Hessian

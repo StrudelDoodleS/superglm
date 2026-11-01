@@ -1,0 +1,76 @@
+{
+ "weibull": {
+  "intercept_only": {
+   "superglm_theta": [
+    3037.3889874683828,
+    0.7762315281849907
+   ],
+   "scipy_mle_theta": [
+    3037.3888528782722,
+    0.7762315198133992
+   ],
+   "max_rel_diff_theta": 4.4311122822518925e-08,
+   "superglm_loglik": -910722.9714437132,
+   "scipy_mle_loglik": -910722.9714437132,
+   "wall_seconds": 1.1005087438970804
+  },
+  "smooth_scale": {
+   "wall_seconds": 0.5132344891317189,
+   "converged": true,
+   "smoothing_converged": true,
+   "total_edf": 11.15925382263803,
+   "shape_truth": [
+    0.8
+   ],
+   "shape_fitted": [
+    0.8004243626436708
+   ],
+   "scale_curve_max_rel_error": 0.016813188713420635,
+   "warnings": [],
+   "mean_prediction_first_rows": [
+    4657.891137931933,
+    2827.4934343007594,
+    4555.10240936657
+   ]
+  }
+ },
+ "burr12": {
+  "intercept_only": {
+   "superglm_theta": [
+    2929.3790803628212,
+    1.4449593581560225,
+    1.9143868408566918
+   ],
+   "scipy_mle_theta": [
+    2929.380290096153,
+    1.444959297483896,
+    1.9143876409163232
+   ],
+   "max_rel_diff_theta": 4.1791934628818203e-07,
+   "superglm_loglik": -877741.6229305915,
+   "scipy_mle_loglik": -877741.6229305919,
+   "wall_seconds": 0.9068452890496701
+  },
+  "smooth_scale": {
+   "wall_seconds": 0.8145402900408953,
+   "converged": true,
+   "smoothing_converged": true,
+   "total_edf": 12.58543463896939,
+   "shape_truth": [
+    1.5,
+    2.0
+   ],
+   "shape_fitted": [
+    1.4901229060561283,
+    2.023995072531652
+   ],
+   "scale_curve_max_rel_error": 0.02681746938370244,
+   "warnings": [],
+   "mean_prediction_first_rows": [
+    2765.00189810645,
+    2018.7527171029226,
+    3035.3467426155144
+   ]
+  }
+ }
+}

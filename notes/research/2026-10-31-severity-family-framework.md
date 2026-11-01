@@ -56,6 +56,10 @@ hand-written.
 | outer iterations, coefficient fits, inner iterations | 6, 7, 13 | 6, 7, 13 |
 | log-likelihood, EDF | -1,927,989.361974, 13.986938 | identical to the printed digits |
 
+- **This compares a guarded kernel with an unguarded one.**
+  - The hand-written arm checks its inputs for finite positive values (four scans) and resolves positive weights. It re-sums with `math.fsum` near cancellation, falls back per row when a channel is not representable, and refuses unrepresentable normalisers. The generated loop does none of this.
+  - Section 2.6's hand-written fused numba closed form runs at 98 ns/row. So most of the drop from 628 to 153 ns/row comes from fusing the loop and leaving out the guards, not from generating the code.
+  - Read the 1.2 s fit-time saving as an upper bound until a generated kernel with the same guards is timed (stage 6).
 - **Predicted parameters agree to 3.7e-14.** The row kernels agree to 6e-16 (value),
   5e-12 (score) and 3e-11 (Hessian), relative to each row's largest entry.
 - **Neither kernel is the more accurate on the rows where they differ most.** Those
@@ -265,7 +269,8 @@ directly.
 [`window_check.py`](severity-family-prototype/window_check.py) feeds the generated
 `log S` or `log F` channels at a window's two ends through PR 545's documented
 combination. That combination is reproduced from its stated formulas, because the code
-is unmerged. It compares the result with SymPy's derivatives of `log(S(a) - S(b))`
+was unmerged when this ran; master's `kernels/_response_tails.log_window_channels`,
+merged with #545, uses the same formula. It compares the result with SymPy's derivatives of `log(S(a) - S(b))`
 evaluated at 100 digits. Errors are relative to each window's own largest entry:
 
 | Window (probabilities) | Weibull | Burr XII | log-logistic | Lomax |
@@ -333,7 +338,7 @@ with section 2.4's.
 | numba closed form, with stable helpers | 98 | 1.6e-14 / 2.1e-15 |
 | JAX `jit(vmap(grad + hessian))`, including transfer | 258 | 8.7e-13 / 1.5e-11 |
 | central differences (13 evaluations) | 156 | 1.5e-5 / 2.9e-3 |
-| Richardson differences (25 evaluations) | 298 | 1.0e-7 / 2.6e-6 |
+| Richardson differences (25 evaluations) | 298 | 1.0e-7 / 2.3e-5 |
 | complex step for the score, then differences (16 complex evaluations) | — | 3.2e-10 / 4.0e-8 |
 | hyper-dual numbers | not timed | 2.5e-13 / 4.7e-11 |
 
@@ -591,8 +596,17 @@ it; stage 3 onwards does.
   fourth-derivative generator works.
 - The primitives become one kernel module. Each has an mpmath test over its range.
 - **Gate:**
-  - every primitive is within 32 u relative of mpmath (the prototype measured at most
-    25 u, at the `a = 10` series switch);
+  - every primitive is within `c · u · κ` relative of mpmath, where `κ` is its
+    condition number at the point and `c` a small constant set from the error
+    analysis. For `gnorm`, `κ = max(1, |a log a| / |gnorm(a)|)`, about 100 just below
+    `a = 10`; for `psires(0, a)`, `κ = max(1, |psi(a)| / |psi(a) - log a|)`, about 45
+    there. The prototype measured at most 25 u, at the `a = 10` series switch.
+  - the gate runs on the native Windows and macOS ARM64 runners. The primitives call
+    the platform libm (`lgamma`, `log1p`, `expm1`, `exp`, `log`), which can differ by
+    an ulp or more between glibc, Apple libm and the Windows UCRT, and `gnorm` and
+    `psires` amplify that near their switch. Where the amplified error could change
+    a decision, the primitive needs an evaluation that is the same on every platform,
+    as today's `GammaLS` gets from `scipy.special.gammaln`;
   - the 8-line gamma declaration regenerates `GammaLS`'s orders 0-2;
   - `tests/test_family_derivatives_symbolic.py`'s existing tolerances hold on the
     regenerated kernel;
@@ -613,8 +627,11 @@ and mean forms), log-logistic, Lomax and Burr XII.
   refusals, the public fit and pickling stay per family, but are one line each in a
   parametrised test.
 - **Gate:**
-  - the oracle grid is within 16 u everywhere outside the documented left-tail log-CDF
-    entries;
+  - the oracle grid is within the error model's bound everywhere: the primitives'
+    bounds composed through the declaration, with the left-tail log-CDF entries'
+    `|log F| · u` cancellation (section 2.4) part of that model. The prototype
+    measured at most 15 u outside those entries. Like stage 1, the grid runs on the
+    native Windows and macOS ARM64 runners;
   - intercept-only fits match scipy's maximum likelihood to 1e-6 in the parameters;
   - `warmup()` covers the new kernels, and first-fit compile time is reported;
   - held-out log score and CRPS through `predict()` on the freMTPL2 severity rerun,
@@ -641,8 +658,17 @@ and mean forms), log-logistic, Lomax and Burr XII.
 - **4a. Series and continued fraction on order-4 jets** (sections 3.4-3.5), in numba,
   as the `logq_jet`/`logp_jet` primitive.
   - **Gate:** an mpmath grid over `a` from 1e-2 to 1e4, with `x` across both tails and
-    the diagonal. Orders 0-2 within 1e-12 relative for `a <= 1e3`, and within 5e-10
-    up to 1e4. Orders 3 and 4 within 1e-7.
+    the diagonal. Orders 0-2 within 1e-12 relative for `a <= 12`. That covers
+    `GammaLS` CVs from 0.3 to 3, and `v2_out.txt` already passes it.
+  - **Above `a = 12`,** the bound follows section 3.4's two losses, times a small
+    constant set from the analysis:
+    - the `a u` prefactor loss, which grows with `a` until 4c's `eta`/`Gamma*` form
+      removes it;
+    - the complement just below the switch line `x = a + sqrt(a)`, where Q is read
+      through `log1mexp` of P's jet and loses about `u / Q`.
+  - **Worst measured** in `v2_out.txt`: 4.2e-12 at `a = 1e3`, and 2.5e-10 at `a = 1e4`.
+    A flat 1e-12 up to `a = 1e3` would fail on the method itself. Orders 3 and 4
+    within 1e-7.
   - **Cost** is per row at orders 0 and 2 on 10^6 rows, against PR 545's estimate of
     1-3 µs per row.
 - **4b. `GammaLS` bounds.** Its log tails are declared through the jet primitive.
@@ -684,8 +710,10 @@ reproductive prior-weight law as a substitution, `cv -> cv/sqrt(w)` for the gamm
   scipy's `logsf` or `logcdf` would have to refuse those rows or silently mis-weight
   them.
 - **`GammaLS`'s hand-written row kernel is the slowest part of its fit.** Its
-  likelihood evaluation took 2.0 s of a 4.6 s fit above. The generated equivalent
-  takes 0.87 s with the same iterations and the same predictions. That is stage 6. It
+  likelihood evaluation took 2.0 s of a 4.6 s fit above. The generated equivalent,
+  which has none of the hand-written kernel's input checks, fsum fallback or
+  refusals, takes 0.87 s with the same iterations and the same predictions, so the
+  saving is an upper bound. That is stage 6. It
   is a separate change, and it needs the every-route gate there before it could land.
 - **Both gamma kernels recompute digamma and trigamma on every row,** even when the
   shape is constant. PR 545's note found this for the hand-written kernel. It is
@@ -708,6 +736,10 @@ environment (`uv sync --python 3.13 --extra dev`). `OUT` is any scratch director
 | `window_check.py OUT` | generated log tails through PR 545's documented combiner, against 100-digit mpmath | `benchboard heavy`, one core |
 | `compile_time.py OUT` | SymPy and numba compile seconds per family | `benchboard heavy`, one core |
 | `alternatives/` (`speed.py`, `accuracy.py`, `complex_step.py`, `jax_facts.py`, `pypi_wheels.py`, with their JSON and logs) | section 2.6: JAX, differences, complex step and hyper-dual against a numba closed form | timing through `benchboard run-timed` on one pinned core; JAX 0.12.0.1 in a separate venv, never in the project lock |
+
+The outputs of the six scripts above, from the runs quoted in this note, are in
+[`results/`](severity-family-prototype/results/), without the generated `kernels/`
+directory; `oracle_results.json` names each kernel file relative to `OUT`.
 
 The incomplete-gamma measurements in section 3.4 come from the literature sweep's own
 scripts, committed with their outputs in

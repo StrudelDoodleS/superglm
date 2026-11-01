@@ -6,7 +6,7 @@ layer method, was added the same day. PR #545 (per-row `truncation=` and
 of the code. This note is research input for the roadmap (C11, C12, C13 and
 the generalized Pareto shape note). It changes no code.
 
-**Status, 2026-11-01.** PR #545 has merged (`9d0b2de3`). It takes a per-row flag, `censored=`, in place of the `censoring=(lower, upper)` pairs described here; the GPD shape-wall disclosure merged as #558 (`5d89809b`).
+**Status, 2026-11-01.** PR #545 has merged (`9d0b2de3`). It takes a per-row flag, `censored=`, in place of the `censoring=(lower, upper)` pairs described here. That flag takes left and right only: interval censoring, the per-row kind section 4 asks for, is still Stage D. The GPD shape-wall disclosure merged as #558 (`5d89809b`).
 
 ## Verdict
 
@@ -433,7 +433,10 @@ E[min((Y − a)+, b − a)] = σ / (1 − ξ) · [ (1 + ξa/σ)^(1 − 1/ξ) −
 ```
 
 with limits `σ log((σ + b)/(σ + a))` at ξ = 1 and
-`σ (exp(−a/σ) − exp(−b/σ))` at ξ = 0. Its gradient in (σ, ξ) is analytic. The ξ = 1 branch needs
+`σ (exp(−a/σ) − exp(−b/σ))` at ξ = 0. For ξ < 0 the support ends at `−σ/ξ`.
+Beyond it, `1 + ξb/σ` is negative, while the layer cost stops growing. So once Stage F
+allows ξ < 0, `a` and `b` are clipped to `min(a, −σ/ξ)` and `min(b, −σ/ξ)`. The term
+is 0 at the endpoint, since `1 − 1/ξ > 1`. Its gradient in (σ, ξ) is analytic. The ξ = 1 branch needs
 the same series treatment the kernel already gives ξ → 0.
 
 **Uncertainty is available today for tail-only layers.**
@@ -765,7 +768,9 @@ Independent of Stage 0.
 - **Gate.**
   - A real or public book whose shape estimate sits at a wall, where moving
     the wall changes a layer price or a held-out tail score.
-  - The existence of every functional is checked at the new shapes.
+  - The existence of every functional is checked at the new shapes. For
+    ξ < 0 that includes clipping the layer bounds at the endpoint `−σ/ξ`
+    (section 4).
   - Negative shapes also need feasible steps and an inference contract
     below −1/2, scoped separately.
 
@@ -831,7 +836,7 @@ compared across thresholds.
 **superglm with PR #545 fits the layer method directly:**
 
 - the body is `LogNormalLS` or `GaussianLS` on `np.minimum(y, u)` with
-  `censoring=(None, u)`;
+  `censored=y > u` (a censored row's response is the limit it was cut at);
 - the tail is `GeneralizedParetoLSS` on `y − u` above `u`;
 - the exceedance probability is `1 − body.predict_cdf(X, u)`.
 
