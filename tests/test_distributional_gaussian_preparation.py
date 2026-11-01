@@ -3,7 +3,7 @@
 import math
 import pickle
 import weakref
-from dataclasses import fields, replace
+from dataclasses import fields
 
 import numpy as np
 import pandas as pd
@@ -13,7 +13,6 @@ from superglm.distributional.families import gaussian
 from superglm.distributional.families.gaussian import GaussianLikelihoodPlan, GaussianLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.predictor import Predictor
-from superglm.distributional.solver import solver
 from superglm.distributional.solver._likelihood_cache import build_likelihood_cache
 from superglm.distributional.weights import (
     LikelihoodWeightError,
@@ -303,30 +302,16 @@ def test_derived_cache_revokes_changed_source_or_child(monkeypatch, target, muta
     assert cache.entry_count == 0
 
 
-def test_derived_source_certificate_preserves_live_inputs_and_storage_authority():
+def test_stored_carrier_preparation_builds_no_likelihood_cache():
     from .test_distributional_likelihood_cache_integration import _context
     from .test_distributional_support_predictions import _support_problem
 
-    problem = _support_problem(False)
-    context = _context(problem)
-    eager = context.likelihood_plan
+    context = _context(_support_problem(False))
     root = context.family.bind_chunked_likelihood(
-        context.response, eager.weights, COMPLETE_OBSERVATION
+        context.response, context.likelihood_plan.weights, COMPLETE_OBSERVATION
     )
-    derived = replace(context, likelihood_plan=root)
-    certificate = solver._chunk_reuse_data_certificate(derived)
-    assert certificate is not None
-    assert root.plan_identifier == eager.plan_identifier
-    assert certificate != solver._chunk_reuse_data_certificate(context)
-    values = root.weights.values.copy()
-    values[0] *= 2
-    object.__setattr__(root.weights, "values", np.frombuffer(values.tobytes(), dtype=float))
-    assert solver._chunk_reuse_data_certificate(derived) != certificate
     object.__setattr__(root, "carrier_preparation", "stored")
-    assert solver._chunk_reuse_data_certificate(derived) is None
     assert build_likelihood_cache(context.family, root) is None
-    object.__setattr__(root, "carrier_preparation", np.array([1]))
-    assert solver._chunk_reuse_data_certificate(derived) is None
 
 
 @pytest.mark.parametrize("semantics", ["prior", "frequency"])

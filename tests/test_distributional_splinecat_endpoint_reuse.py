@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import gc
-import hashlib
-import pickle
-import tracemalloc
 import weakref
 from dataclasses import fields, replace
 
@@ -20,7 +17,7 @@ from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import Predictor, compile_predictors
-from superglm.distributional.solver import DenseSolverConfig, _reuse_digest, fit_dense_fixed_lambda
+from superglm.distributional.solver import DenseSolverConfig, fit_dense_fixed_lambda
 from superglm.features import Numeric
 from superglm.group_matrix import (
     DesignMatrix,
@@ -185,148 +182,6 @@ def _mutate(group, path):
     setattr(owner, name, values)
 
 
-@pytest.mark.parametrize("kind,path", _ARRAY_CASES)
-def test_each_live_array_mutation_refuses_endpoint_reuse(kind, path, monkeypatch):
-    problem = _problem(kind)
-    problem = (*problem[:5], replace(problem[5], tolerance=1e20))
-    group = _group(problem)
-    _warm(group)
-    session = solver._DenseObservedReuseSession()
-    source = _fit(problem, session=session, initial=np.zeros(problem[1].n_coefficients))
-    assert id(source) in session._chunk_results
-    context = _context(problem)
-    before = solver._chunk_reuse_data_certificate(context)
-    _mutate(group, path)
-    assert solver._chunk_reuse_data_certificate(context) != before
-    # A zero predictor cannot certify the changed design or its curvature.
-    np.testing.assert_array_equal(group.matvec(np.zeros(2)), np.zeros(group.n_rows))
-
-    def fresh_evaluation(*args, **kwargs):
-        raise RuntimeError("fresh likelihood required")
-
-    monkeypatch.setattr(GaussianLS, "evaluate_natural", fresh_evaluation)
-    with pytest.raises(RuntimeError, match="fresh likelihood required"):
-        _fit(problem, session=session, source=source)
-
-
-@pytest.mark.parametrize("kind,path", _ARRAY_CASES)
-def test_identical_bytes_custom_array_semantics_are_refused(kind, path):
-    problem = _problem(kind)
-    group = _group(problem)
-    _warm(group)
-    owner, name = _owner(group, path)
-
-    class CustomArray(np.ndarray):
-        def __matmul__(self, other):
-            return super().__matmul__(other) + 1.0
-
-    original = getattr(owner, name)
-    custom = original.view(CustomArray)
-    np.testing.assert_array_equal(custom, original)
-    setattr(owner, name, custom)
-    assert solver._chunk_reuse_data_certificate(_context(problem)) is None
-
-
-@pytest.mark.parametrize("matrix_name", ["B", "B_level"])
-@pytest.mark.parametrize("replacement", ["csc", "csr_array", "subclass"])
-def test_unknown_nested_sparse_semantics_are_refused(matrix_name, replacement):
-    problem = _problem(SplineCategoricalGroupMatrix)
-    group = _group(problem)
-    matrix = getattr(group, matrix_name)
-    if replacement == "csc":
-        matrix = matrix.tocsc()
-    elif replacement == "csr_array":
-        matrix = sp.csr_array(matrix)
-    else:
-
-        class CustomCSR(sp.csr_matrix):
-            pass
-
-        matrix = CustomCSR(matrix)
-    setattr(group, matrix_name, matrix)
-    assert solver._chunk_reuse_data_certificate(_context(problem)) is None
-
-
-@pytest.mark.parametrize("matrix_name", ["B", "B_level"])
-@pytest.mark.parametrize("flag", ["_has_sorted_indices", "_has_canonical_format"])
-def test_csr_flags_are_live_and_not_populated(matrix_name, flag):
-    problem = _problem(SplineCategoricalGroupMatrix)
-    context = _context(problem)
-    matrix = getattr(_group(problem), matrix_name)
-    matrix.__dict__.pop(flag, None)
-    before = solver._chunk_reuse_data_certificate(context)
-    assert before is not None
-    assert flag not in matrix.__dict__
-    setattr(matrix, flag, True)
-    assert solver._chunk_reuse_data_certificate(context) != before
-    setattr(matrix, flag, "custom truth value")
-    assert solver._chunk_reuse_data_certificate(context) is None
-
-
-@pytest.mark.parametrize("kind", KINDS)
-@pytest.mark.parametrize("name", ["n_rows", "_p_b", "shape", "spline_cat_feature", "n_bins"])
-def test_structural_state_changes_invalidate_certificate(kind, name):
-    if kind is SplineCategoricalGroupMatrix and name == "n_bins":
-        return
-    problem = _problem(kind)
-    context = _context(problem)
-    before = solver._chunk_reuse_data_certificate(context)
-    assert before is not None
-    group = _group(problem)
-    value = getattr(group, name)
-    changed = (
-        (value[0], value[1] + 1)
-        if name == "shape"
-        else value + ("changed" if isinstance(value, str) else 1)
-    )
-    setattr(group, name, changed)
-    assert solver._chunk_reuse_data_certificate(context) != before
-
-
-@pytest.mark.parametrize("kind", KINDS)
-def test_unknown_group_subclasses_are_refused(kind):
-    class CustomGroup(kind):
-        pass
-
-    problem = _problem(kind)
-    original = _group(problem)
-    replacement = CustomGroup.__new__(CustomGroup)
-    for name in (
-        SplineCategoricalGroupMatrix.__slots__
-        if kind is SplineCategoricalGroupMatrix
-        else DiscretizedSplineCategoricalGroupMatrix.__slots__
-    ):
-        setattr(replacement, name, getattr(original, name))
-    problem = _with_group(problem, replacement)
-    assert solver._chunk_reuse_data_certificate(_context(problem)) is None
-
-
-@pytest.mark.parametrize("kind", KINDS)
-def test_certificate_leaves_lazy_caches_unpopulated_and_tracks_transitions(kind):
-    problem = _problem(kind)
-    group = _group(problem)
-    context = _context(problem)
-    before = solver._chunk_reuse_data_certificate(context)
-    assert before is not None
-    assert group._sorted_rows is None
-    if kind is SplineCategoricalGroupMatrix:
-        assert group._dense_level is False
-        group._dense_level = None
-        sparse = solver._chunk_reuse_data_certificate(context)
-        assert sparse is not None and sparse != before
-        group._dense_level = False
-    else:
-        assert group._row_order is None
-    _warm(group)
-    warm = solver._chunk_reuse_data_certificate(context)
-    assert warm is not None and warm != before
-    assert solver._chunk_reuse_data_certificate(context) == warm
-    restored = pickle.loads(pickle.dumps(group))
-    assert restored._sorted_rows is None
-    restored_problem = _with_group(problem, restored)
-    assert solver._chunk_reuse_data_certificate(_context(restored_problem)) is not None
-
-
 @pytest.mark.parametrize("kind", KINDS)
 def test_reuse_record_retains_only_coefficient_aggregates_and_expires(kind):
     problem = _problem(kind)
@@ -346,71 +201,3 @@ def test_reuse_record_retains_only_coefficient_aggregates_and_expires(kind):
     gc.collect()
     assert source_ref() is None
     assert not session._chunk_results
-
-
-@pytest.mark.parametrize("kind", KINDS)
-def test_certificate_hashes_bounded_buffers_without_expansion_or_cache_creation(kind, monkeypatch):
-    problem = _problem(kind, n=100_000)
-    group = _group(problem)
-    if kind is not SplineCategoricalGroupMatrix:
-        # Exercise bounded iteration over a genuinely noncontiguous live basis.
-        group.B_unique = group.B_unique[::-1, ::-1]
-        assert not group.B_unique.flags.c_contiguous
-    context = _context(problem)
-    real_sha256 = hashlib.sha256
-    real_leaf = _reuse_digest._array_digest
-    current_source = None
-    updates = []
-
-    def observed_leaf(values):
-        nonlocal current_source
-        current_source = values
-        return real_leaf(values)
-
-    class BoundedDigest:
-        def __init__(self, data=b""):
-            self._hash = real_sha256()
-            self.update(data)
-
-        def update(self, data):
-            if isinstance(data, memoryview) and not np.shares_memory(data.obj, current_source):
-                assert isinstance(data.obj.base, np.nditer)
-                assert not data.obj.flags.owndata
-                assert data.obj.nbytes <= 64 * 1024
-                updates.append(data.obj.nbytes)
-            self._hash.update(data)
-
-        def digest(self):
-            return self._hash.digest()
-
-        def hexdigest(self):
-            return self._hash.hexdigest()
-
-    def forbid_expansion(*args, **kwargs):
-        raise AssertionError("certificate materialized or subsetted the design")
-
-    # Keep this allocation/no-materialization regression serial; parallel
-    # scratch ownership and worker bounds are checked in reuse_digest tests.
-    monkeypatch.setattr(_reuse_digest, "get_num_threads", lambda: 1)
-    monkeypatch.setattr(_reuse_digest, "_array_digest", observed_leaf)
-    monkeypatch.setattr(hashlib, "sha256", BoundedDigest)
-    monkeypatch.setattr(kind, "toarray", forbid_expansion)
-    monkeypatch.setattr(kind, "row_subset", forbid_expansion)
-    if kind is SplineCategoricalGroupMatrix:
-        monkeypatch.setattr(sp.csr_matrix, "toarray", forbid_expansion)
-    tracemalloc.start()
-    try:
-        before = solver._chunk_reuse_data_certificate(context)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-    assert before is not None
-    if kind is SplineCategoricalGroupMatrix:
-        assert not updates
-    else:
-        assert updates and max(updates) <= 64 * 1024
-    # Four digest buffers allow iterator/contiguity workspace and Python
-    # metadata; one observation-length float64 copy alone exceeds this bound.
-    assert peak < 4 * 64 * 1024
-    assert group._sorted_rows is None
-    assert solver._chunk_reuse_data_certificate(context) == before

@@ -2,23 +2,20 @@
 
 from __future__ import annotations
 
-import json
 import weakref
 from dataclasses import dataclass, field, replace
-from typing import Literal, cast
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
 
 import superglm.distributional.solver.chunks as chunking
 from superglm.distributional.family import (
-    ConfigurableDistributionalFamily,
     DistributionalFamily,
     ExpectedInformationFamily,
     FamilyLikelihoodPlan,
     WallDisclosingFamily,
     _likelihood_reuse_contract,
-    _prepared_field_modes,
     expected_information_provider,
 )
 from superglm.distributional.kernels._common import _NumericalEvaluationError
@@ -46,7 +43,6 @@ from superglm.distributional.solver._likelihood_cache import (
     _LikelihoodCache,
     build_likelihood_cache,
 )
-from superglm.distributional.solver._reuse_digest import _ReuseDigest
 from superglm.distributional.solver.assembly import (
     DenseJointGeometry,
     _assemble_dense_geometry_from_matrices,
@@ -244,17 +240,13 @@ class _DenseObservedReuseSession:
             and curvature.actual_source == "observed"
             and curvature.fallback_count == 0
         ):
-            certificate = _chunk_reuse_data_certificate(context)
-            if certificate is not None:
-                key = id(result)
-                self._chunk_results[key] = _ChunkObservedReuseRecord(
-                    source=self._source_reference(result, chunked=True),
-                    owner=owner,
-                    coefficients=_readonly(result.coefficients),
-                    score_data=_readonly(score_data),
-                    data_curvature=_readonly(result.terminal_data_curvature),
-                    certificate=certificate,
-                )
+            self._chunk_results[id(result)] = _ChunkObservedReuseRecord(
+                source=self._source_reference(result, chunked=True),
+                owner=owner,
+                coefficients=_readonly(result.coefficients),
+                score_data=_readonly(score_data),
+                data_curvature=_readonly(result.terminal_data_curvature),
+            )
 
     def _source_reference(
         self, result: DenseSolverResult, *, chunked: bool
@@ -281,273 +273,6 @@ class _ChunkObservedReuseRecord:
     coefficients: NDArray[np.float64]
     score_data: NDArray[np.float64]
     data_curvature: NDArray[np.float64]
-    certificate: str
-
-
-def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
-    """Certify supported fixed designs without materializing observation rows.
-
-    Public design arrays can be mutable. Identity and equal predictors alone do
-    not certify curvature: a design edit can leave the current predictor fixed.
-    Unknown representations conservatively retain fresh likelihood evaluation.
-    """
-    with _ReuseDigest() as digest:
-        return _build_chunk_reuse_data_certificate(context, digest)
-
-
-def _build_chunk_reuse_data_certificate(
-    context: _SolverContext, digest: _ReuseDigest
-) -> str | None:
-    from scipy.sparse import csr_matrix
-
-    from superglm.distributional.weights import ResolvedLikelihoodWeights
-    from superglm.group_matrix import (
-        CategoricalGroupMatrix,
-        DenseGroupMatrix,
-        DiscretizedSCOPGroupMatrix,
-        DiscretizedSplineCategoricalGroupMatrix,
-        DiscretizedSSPGroupMatrix,
-        DiscretizedTensorGroupMatrix,
-        FactorSmoothGroupMatrix,
-        RandomEffectGroupMatrix,
-        SparseGroupMatrix,
-        SplineCategoricalGroupMatrix,
-        SupportCompressedSplineCategoricalGroupMatrix,
-        SupportCompressedSSPGroupMatrix,
-    )
-    from superglm.links import IdentityLink, LogLink
-
-    contract = _likelihood_reuse_contract(context.family)
-    weights = context.likelihood_plan.weights
-    if (
-        contract is None
-        or type(context.likelihood_plan) is not contract.plan_type
-        or type(weights) is not ResolvedLikelihoodWeights
-    ):
-        return None
-    prepared_modes = _prepared_field_modes(context.likelihood_plan, contract)
-    if prepared_modes is None:
-        return None
-    field = digest.field
-    array = digest.array
-
-    def builtin_array(values: object) -> bool:
-        # An ndarray subclass can change arithmetic at identical bytes. Limit
-        # this schema to ordinary real buffers, with at most 64 KiB per digest
-        # block under array()'s 8192-element iterator.
-        return bool(
-            type(values) is np.ndarray
-            and values.dtype.kind in "biuf"
-            and values.dtype.itemsize <= 8
-        )
-
-    def splinecat_csr(matrix: object) -> bool:
-        if type(matrix) is not csr_matrix:
-            return False
-        buffers = (matrix.data, matrix.indices, matrix.indptr)
-        if not all(builtin_array(values) for values in buffers):
-            return False
-        # Read raw flags: the public properties can populate caches. Their
-        # values affect SciPy dispatch even when the CSR bytes are unchanged.
-        flags = (
-            getattr(matrix, "_has_sorted_indices", None),
-            getattr(matrix, "_has_canonical_format", None),
-        )
-        if any(value is not None and type(value) not in (bool, np.bool_) for value in flags):
-            return False
-        field((matrix.shape, matrix.dtype.str, flags))
-        for values in buffers:
-            array(values)
-        return True
-
-    field(
-        json.dumps(
-            cast(ConfigurableDistributionalFamily, context.family).to_config(), sort_keys=True
-        )
-    )
-    field(context.likelihood_plan.plan_identifier)
-    # Some built-in identifiers contain stored weight digests. The evaluator
-    # consumes the live contract, so certify it independently of those digests.
-    field(weights.provenance.contract.semantics)
-    field((context.chunk_size, context.layout.n_coefficients))
-    array(context.response)
-    # Logical IDs intentionally agree between eager and derived roots. Their
-    # storage authority does not: certify the explicit audited transform too.
-    field(("prepared-field-storage/v1", prepared_modes))
-    for name, mode in prepared_modes:
-        if mode == "stored":
-            array(getattr(context.likelihood_plan, name))
-    for name in ("values", "geometry_values", "root_take_map", "input_positions"):
-        array(getattr(weights, name))
-    for state in context.layout.predictors:
-        if type(state.link) not in (IdentityLink, LogLink, *contract.link_types):
-            return None
-        field((type(state.link).__name__, vars(state.link)))
-        field(
-            (
-                state.name,
-                state.parameter_index,
-                state.coefficient_slice,
-                state.intercept_index,
-                state.design.shape,
-            )
-        )
-        array(state.offset)
-        for group in state.design.group_matrices:
-            kind = type(group)
-            field((kind.__name__, group.shape))
-            if kind is DenseGroupMatrix:
-                names = ("M",)
-            elif kind in (CategoricalGroupMatrix, RandomEffectGroupMatrix):
-                group = cast(CategoricalGroupMatrix | RandomEffectGroupMatrix, group)
-                names = ("codes",)
-                field(group.n_levels)
-            elif kind is SparseGroupMatrix:
-                group = cast(SparseGroupMatrix, group)
-                matrix = group.M
-                if type(matrix) is not csr_matrix:
-                    return None
-                field((matrix.shape, matrix.dtype.str))
-                field(
-                    (
-                        getattr(matrix, "_has_sorted_indices", None),
-                        getattr(matrix, "_has_canonical_format", None),
-                    )
-                )
-                for values in (matrix.data, matrix.indices, matrix.indptr):
-                    if type(values) is not np.ndarray:
-                        return None
-                    array(values)
-                continue
-            elif kind is FactorSmoothGroupMatrix:
-                group = cast(FactorSmoothGroupMatrix, group)
-                field(
-                    (
-                        group.n_levels,
-                        group.coefficient_levels,
-                        group.block_size,
-                        group.raw_width,
-                        group.factor_basis,
-                        group.is_discrete,
-                    )
-                )
-                # Row subsetting reconstructs the group from B, while exact
-                # matvec and moments read the separately stored CSR buffers.
-                # Certify both: public attributes can be replaced independently.
-                if group.is_discrete:
-                    if any(
-                        value is not None
-                        for value in (group.B, group._data, group._indices, group._indptr)
-                    ):
-                        return None
-                    names = ("codes", "natural_map", "B_unique", "bin_idx")
-                else:
-                    matrix = group.B
-                    if (
-                        type(matrix) is not csr_matrix
-                        or group.B_unique is not None
-                        or group.bin_idx is not None
-                    ):
-                        return None
-                    field((matrix.shape, matrix.dtype.str))
-                    field(
-                        (
-                            getattr(matrix, "_has_sorted_indices", None),
-                            getattr(matrix, "_has_canonical_format", None),
-                        )
-                    )
-                    for values in (matrix.data, matrix.indices, matrix.indptr):
-                        if type(values) is not np.ndarray:
-                            return None
-                        array(values)
-                    names = ("codes", "natural_map", "_data", "_indices", "_indptr")
-                if any(type(getattr(group, name)) is not np.ndarray for name in names):
-                    return None
-            elif kind in (
-                SplineCategoricalGroupMatrix,
-                DiscretizedSplineCategoricalGroupMatrix,
-                SupportCompressedSplineCategoricalGroupMatrix,
-            ):
-                group = cast(
-                    SplineCategoricalGroupMatrix
-                    | DiscretizedSplineCategoricalGroupMatrix
-                    | SupportCompressedSplineCategoricalGroupMatrix,
-                    group,
-                )
-                if (
-                    type(group.n_rows) is not int
-                    or type(group._p_b) is not int
-                    or (
-                        group.spline_cat_feature is not None
-                        and type(group.spline_cat_feature) is not str
-                    )
-                ):
-                    return None
-                # The feature selects a same-parent cross-Gram route.
-                field((group.n_rows, group._p_b, group.spline_cat_feature))
-                names = ("R_inv", "row_idx")
-                if kind is SplineCategoricalGroupMatrix:
-                    group = cast(SplineCategoricalGroupMatrix, group)
-                    # Subsetting reads full B; matvec reads B_level; sparse
-                    # moments read independent buffers. A saturated Gram can
-                    # instead read its lazy dense copy. All remain live.
-                    if not splinecat_csr(group.B) or not splinecat_csr(group.B_level):
-                        return None
-                    names += ("_data", "_indices", "_indptr")
-                    dense = group._dense_level
-                    if dense is None or dense is False:
-                        field(("_dense_level", dense))
-                    elif builtin_array(dense):
-                        names += ("_dense_level",)
-                    else:
-                        return None
-                    cache_names = ("_sorted_rows",)
-                else:
-                    group = cast(
-                        DiscretizedSplineCategoricalGroupMatrix
-                        | SupportCompressedSplineCategoricalGroupMatrix,
-                        group,
-                    )
-                    if type(group.n_bins) is not int:
-                        return None
-                    field(group.n_bins)
-                    names += ("B_unique", "bin_idx_level")
-                    cache_names = ("_row_order", "_sorted_rows")
-                # Do not sort, materialize, or populate a lookup to certify it.
-                # Cache creation, replacement and mutation each change the
-                # certificate, including independently replaced alignment maps.
-                for name in cache_names:
-                    value = getattr(group, name)
-                    field((name, value is None))
-                    if value is not None:
-                        names += (name,)
-                if any(not builtin_array(getattr(group, name)) for name in names):
-                    return None
-            elif kind in (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix):
-                group = cast(DiscretizedSSPGroupMatrix | SupportCompressedSSPGroupMatrix, group)
-                names = ("B_unique", "R_inv", "bin_idx")
-                field(group.n_bins)
-            elif kind is DiscretizedSCOPGroupMatrix:
-                group = cast(DiscretizedSCOPGroupMatrix, group)
-                names = ("B_scop_unique", "bin_idx")
-                field(group.n_bins)
-            elif kind is DiscretizedTensorGroupMatrix:
-                group = cast(DiscretizedTensorGroupMatrix, group)
-                names = (
-                    "B_unique",
-                    "R_inv",
-                    "bin_idx",
-                    "B1_unique_t",
-                    "B2_unique_t",
-                    "idx1",
-                    "idx2",
-                )
-                field((group.tensor_id, group.n_bins, group.n_bins1, group.n_bins2))
-            else:
-                return None
-            for name in names:
-                array(getattr(group, name))
-    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -1733,7 +1458,6 @@ def _reuse_observed_initial_result(
             or source.resolved_chunk_size != context.chunk_size
             or source.execution_backend_identifier != CHUNKED_EXECUTION_BACKEND_IDENTIFIER
             or not np.array_equal(coefficients, record.coefficients)
-            or _chunk_reuse_data_certificate(context) != record.certificate
         ):
             return None
         support_predictions = chunking._SupportPredictions()
