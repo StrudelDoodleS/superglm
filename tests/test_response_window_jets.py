@@ -425,7 +425,6 @@ def test_absent_negligible_and_equal_ends_keep_the_order_two_semantics():
         log_window_jets(near, far, order=5)
 
 
-
 def test_a_nan_far_end_is_a_failed_window_not_an_absent_one():
     """Only ``-inf`` marks an absent end; an engine's NaN far tail must leave the row NaN."""
     rng = np.random.default_rng(565)
@@ -440,6 +439,7 @@ def test_a_nan_far_end_is_a_failed_window_not_an_absent_one():
     )
     assert np.isnan(channels[0][0])
     assert channels[0][1] == near[0][1]
+
 
 # --- the quadrature route -----------------------------------------------------
 
