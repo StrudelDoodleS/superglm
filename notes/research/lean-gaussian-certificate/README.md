@@ -12,6 +12,11 @@ accumulation preserves cross-interaction contributions, including unequal group
 widths. It does not establish a runtime bound or a floating-point certificate.
 All three proof libraries are included in `lake build`.
 
+The [issue 544 stage 2 proofs](../2026-11-01-issue-544-proofs.md) add five libraries,
+also in the default build: `WindowCombiner`, `GGChangeOfVariables`,
+`TemmeCoefficients`, `SeverityPrimitives` and `NodeMixture`. They cover the real-valued
+formulas behind the bounded-row derivatives.
+
 ## Reading a proof
 
 This example is in [ProofTour.lean](ProofTour.lean):

@@ -1,6 +1,7 @@
 name = "superglm_adaptive_proofs"
 version = "0.1.0"
-defaultTargets = ["Certificate", "ProofTour", "InteractionOperator", "NestedElimination"]
+defaultTargets = ["Certificate", "ProofTour", "InteractionOperator", "NestedElimination",
+  "WindowCombiner", "GGChangeOfVariables", "TemmeCoefficients", "SeverityPrimitives", "NodeMixture"]
 
 [[require]]
 name = "mathlib"
@@ -18,3 +19,18 @@ name = "InteractionOperator"
 
 [[lean_lib]]
 name = "NestedElimination"
+
+[[lean_lib]]
+name = "WindowCombiner"
+
+[[lean_lib]]
+name = "GGChangeOfVariables"
+
+[[lean_lib]]
+name = "TemmeCoefficients"
+
+[[lean_lib]]
+name = "SeverityPrimitives"
+
+[[lean_lib]]
+name = "NodeMixture"
