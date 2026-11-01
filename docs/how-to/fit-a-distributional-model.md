@@ -876,10 +876,16 @@ read every row as complete. Each of these warns when the model was fitted with
 bounds and is called without them.
 
 `GaussianLS`, `LogNormalLS`, `GammaLS`, `GeneralizedGammaLSS` and
-`GeneralizedParetoLSS` take these bounds; the other families refuse them. For
-`GammaLS` and `GeneralizedGammaLSS`, smoothing selection uses closed-form third
-and fourth derivatives of these rows, as it does for complete rows; for the
-other three it differences the curvature instead. `GeneralizedGammaLSS` takes
+`GeneralizedParetoLSS` take these bounds; the other families refuse them. When
+the Newton endgame of smoothing selection runs (`outer="efs+newton"`), it uses
+closed-form third and fourth derivatives of these rows for `GammaLS` and
+`GeneralizedGammaLSS`, as it does for complete rows; for the other three it
+differences the curvature instead. The default `outer="efs"` needs neither.
+
+A window that keeps only a small share of the law, such as a body truncated
+above at its own 5% point, says little about the law beyond the bound: the fit
+can be correct and still have a very wide mean. Check the mean's standard
+error before reading `predict()` on such a fit. `GeneralizedGammaLSS` takes
 frequency weights with bounds, as it does without them, and still refuses
 non-unit prior weights.
 `coefficient_curvature="fisher"` is refused for these rows, because expected

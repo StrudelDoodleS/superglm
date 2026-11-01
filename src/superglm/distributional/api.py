@@ -689,7 +689,8 @@ class SuperLSS:
         With ``truncation`` or ``censored`` the fit estimates the parent law
         of the uncut response, so ``predict`` and the distribution functions
         describe that law, not the law within the bounds. ``GaussianLS``,
-        ``LogNormalLS`` and ``GeneralizedParetoLSS`` support them.
+        ``LogNormalLS``, ``GammaLS``, ``GeneralizedGammaLSS`` and
+        ``GeneralizedParetoLSS`` support them.
 
         See Also
         --------
