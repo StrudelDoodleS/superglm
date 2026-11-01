@@ -970,6 +970,7 @@ def test_superlss_fit_uses_the_shared_solver_blas_scope(
 
     def fit_spy(*args, **kwargs):
         assert events == ["enter"]
+        kwargs["_input_positions"].append(np.arange(len(frame)))
         return fitted
 
     monkeypatch.setattr(api_module, "solver_blas_threads", recorded_scope)

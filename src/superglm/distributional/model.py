@@ -544,6 +544,7 @@ def _fit_candidate(
     separation: str = "warn",
     truncation: BoundPair = None,
     censored: CensoredRows = None,
+    _input_positions: list[NDArray] | None = None,
 ) -> DistributionalFitState:
     if not isinstance(weight_contract, WeightContract):
         raise TypeError("weight_contract must be a WeightContract")
@@ -558,6 +559,8 @@ def _fit_candidate(
         contract=weight_contract,
     )
     positions = resolved_weights.input_positions
+    if _input_positions is not None:
+        _input_positions.append(positions)
     retained_frame = as_eager_frame(frame.take_rows(positions))
     retained_y = np.array(original_y[positions], copy=True)
     retained_offsets = _take_unvalidated_offsets(original_offsets, positions)
@@ -754,11 +757,14 @@ def fit_dense_distributional(
     revision: int = 1,
     truncation: BoundPair = None,
     censored: CensoredRows = None,
+    _input_positions: list[NDArray] | None = None,
 ) -> DenseDistributionalModel:
     """Compile every terminal artifact privately, then publish one fitted revision.
 
     ``revision`` numbers the published fitted state; a facade that refits in
     place passes its next revision so successive fits stay distinguishable.
+    ``_input_positions``, when given, receives the input positions of the
+    retained rows.
     """
     if not isinstance(family, DistributionalFamily):
         raise TypeError("family must implement DistributionalFamily")
@@ -792,6 +798,7 @@ def fit_dense_distributional(
             separation=separation,
             truncation=truncation,
             censored=censored,
+            _input_positions=_input_positions,
         )
         return DenseDistributionalModel(family=family, _fit_state=candidate)
 

@@ -573,6 +573,7 @@ class SuperLSS:
         recorder = FitPhaseRecorder() if phase_recorder is None else phase_recorder
         # The profile is the fit's own stretch of the recorder: a caller's
         # phases open around it stay out, and its measurements during it count once.
+        positions: list[np.ndarray] = []
         with solver_blas_threads(), fit_pool(), recorder._fit_window() as window:
             candidate = fit_dense_distributional(
                 X,
@@ -594,16 +595,13 @@ class SuperLSS:
                 revision=next_revision,
                 truncation=truncation,
                 censored=censored,
+                _input_positions=positions,
             )
         phase_snapshot = window.snapshot()
         self._model = candidate
         self._fit_phase_snapshot = phase_snapshot
-        frame = as_eager_frame(X)
-        positions = resolve_likelihood_weights(
-            sample_weight, n_observations=len(frame), contract=self._weight_contract
-        ).input_positions
         # Positional selection owns the retained rows and preserves pandas indices.
-        self._training_frame = frame.take_rows(positions)
+        self._training_frame = as_eager_frame(X).take_rows(positions[0])
         # A fit whose final curvature fell back, or whose size has rows at the
         # Poisson limit it cannot estimate, records why in result_.warnings and
         # warns the same text, whichever method fitted it.
