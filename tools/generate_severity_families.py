@@ -368,7 +368,9 @@ GAMMA_LOG = replace(
 
 def _normal_log_density(y, location, scale, root):
     """Without the constant ``-log(2 pi)/2``, which the caller adds to the carrier."""
-    return sp.log(root) - sp.log(scale) - (root * (y - location) / scale) ** 2 / 2
+    # The residual is standardized as one division before squaring: (y - location)^2
+    # and scale^-2 can each leave the range where their quotient does not.
+    return sp.log(root) - sp.log(scale) - ratio(root * (y - location), scale) ** 2 / 2
 
 
 NORMAL = Declaration(

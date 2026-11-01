@@ -1236,6 +1236,24 @@ def test_narrow_normal_windows_keep_their_mass_on_both_sides_of_the_switch(centr
     np.testing.assert_allclose(value, expected, rtol=0.0, atol=2e-13 + 40 * _U * centre**2)
 
 
+@pytest.mark.parametrize("scale", [2.0**540, 2.0**700])
+def test_a_narrow_normal_window_keeps_its_probability_at_a_huge_scale(scale):
+    """The window's probability reads ``(y - location)/scale`` alone, so it survives any scale.
+
+    Squaring ``y - location`` and ``scale`` separately overflowed, and their
+    quotient read ``inf * 0``: NaN.
+    """
+    family = GaussianLS()
+    unit = family.log_window_probability(
+        np.array([1.0]), np.array([1.00001]), np.array([[0.0, 1.0]])
+    )
+    huge = family.log_window_probability(
+        np.array([scale]), np.array([1.00001 * scale]), np.array([[0.0, scale]])
+    )
+    assert np.isfinite(unit[0])
+    np.testing.assert_allclose(huge, unit, rtol=1e-12)
+
+
 @pytest.mark.parametrize("relative_width", [1e-14, 1e-10, 1e-6])
 def test_narrow_log_normal_windows_keep_their_width(relative_width):
     # log(upper) - log(lower) would lose the width to the rounding of log(lower).
