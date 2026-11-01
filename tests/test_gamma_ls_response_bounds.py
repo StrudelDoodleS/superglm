@@ -828,6 +828,18 @@ def test_a_subnormal_prior_weight_keeps_its_weighted_shape():
         np.testing.assert_allclose(jets[0], [expected], rtol=1e-12)
 
 
+def test_a_sentinel_upper_bound_reads_as_no_bound():
+    """An upper bound of ``1e308`` puts ``x = shape y/mean`` past float64's range.
+
+    ``S(1e308)`` is zero in float64, so the window is ``S(lower)`` alone.
+    """
+    shape = 1.0 / 0.5**2
+    got = GammaLS().log_window_probability(
+        np.array([2.0]), np.array([1e308]), np.array([[1.0, 0.5]])
+    )
+    np.testing.assert_allclose(got, [np.log(special.gammaincc(shape, 2.0 * shape))], rtol=1e-12)
+
+
 def test_a_narrow_window_keeps_its_probability_in_tiny_response_units():
     """A window's probability reads ``y/mean`` alone, so it survives an exact change of units.
 

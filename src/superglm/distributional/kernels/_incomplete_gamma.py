@@ -606,9 +606,16 @@ def log_gamma_tail_jet_into(a, x, upper, order, along_ratio, jet, w):
     if not (0 <= order <= MAX_ORDER and jet.shape[0] >= (order + 1) * (order + 2) // 2):
         _fill_nan(jet)
         return False
-    if not (0.0 < a < math.inf and 0.0 < x < math.inf):
+    if not (0.0 < a < math.inf and 0.0 < x <= math.inf):
         _fill_nan(jet)
         return False
+    if x == math.inf:
+        # Past the top of the range log Q is below float64's and log P is 0, every
+        # partial zero: a window's far end there is absent, not unknown.
+        for r in range((order + 1) * (order + 2) // 2):
+            jet[r] = 0.0
+        jet[0] = -math.inf if upper else 0.0
+        return True
     k_max = order
     n = (k_max + 1) * (k_max + 2) // 2
     series = x <= a + max(1.0, math.sqrt(a))

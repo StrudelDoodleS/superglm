@@ -432,8 +432,6 @@ def test_cdf_matches_the_generalized_gamma_cdf():
         (1.0, -math.inf, 2),
         (2.0**101, 0.0, 4),
         (1e200, 1e-160, 4),
-        (200.0, 5.0, 4),
-        (-200.0, -5.0, 4),
         (1.0, 0.5, 5),
         (1.0, 0.5, -1),
     ],
@@ -443,6 +441,20 @@ def test_rows_neither_engine_evaluates_write_nan(w, q, order):
         out = np.zeros(15)
         engine.gg_log_tail(w, q, upper, order, out, np.empty(engine.SCRATCH_SHAPE))
         assert np.all(np.isnan(out))
+
+
+@pytest.mark.parametrize(("w", "q"), [(200.0, 5.0), (-200.0, -5.0)])
+def test_a_point_past_the_top_of_the_range_reads_the_tails_limits(w, q):
+    """Where ``x = a e^(q w)`` overflows, the tail on that side is zero in float64 and the other one.
+
+    A window's far end there is absent, not unknown, so it must not read NaN.
+    """
+    for upper in (False, True):
+        out = np.full(15, np.nan)
+        engine.gg_log_tail(w, q, upper, 4, out, np.empty(engine.SCRATCH_SHAPE))
+        vanishing = upper == (w > 0)
+        assert out[0] == (-np.inf if vanishing else 0.0), upper
+        assert np.all(out[1:] == 0.0), upper
 
 
 def test_vector_wrapper_is_an_i1_jet_of_the_scalar_engine():

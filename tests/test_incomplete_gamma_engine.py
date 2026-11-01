@@ -316,7 +316,6 @@ def test_far_tails_stay_finite_where_scipy_underflows(a, x, upper, scipy_log) ->
         (2.0, 0.0, 4),
         (2.0, -1.0, 4),
         (2.0, np.nan, 4),
-        (2.0, np.inf, 4),
         (1e12, 1e12, 0),  # the series needs about 9 sqrt(a) terms, past MAX_TERMS
         (2.0, 1.0, 5),
         (2.0, 1.0, -1),
@@ -327,6 +326,15 @@ def test_rows_outside_the_domain_write_nan(a: float, x: float, order: int, upper
     out = np.zeros(output_size(MAX_ORDER))
     log_gamma_tail(a, x, upper, order, out)
     assert np.all(np.isnan(out))
+
+
+@pytest.mark.parametrize("upper", [False, True])
+def test_a_point_past_the_top_of_the_range_reads_the_tails_limits(upper: bool) -> None:
+    """At ``x = inf`` ``log Q`` is below float64's range and ``log P`` is 0, every partial zero."""
+    out = np.full(output_size(MAX_ORDER), np.nan)
+    log_gamma_tail(2.0, np.inf, upper, MAX_ORDER, out)
+    assert out[0] == (-np.inf if upper else 0.0)
+    assert np.all(out[1:] == 0.0)
 
 
 def test_a_tiny_point_keeps_its_partials_finite() -> None:

@@ -80,7 +80,7 @@ from superglm.distributional.kernels._incomplete_gamma import (
 
 # Digest of the compiled callees above, stamped by ``tools/generate_severity_families.py``:
 # Numba's on-disk cache keys a compiled caller on its own file only.
-_CALLEE_DIGEST = "c1adedf02527f70bead41dc184b7ef6efa13dcc1e27910a70cb2a814ee39bf12"
+_CALLEE_DIGEST = "607cc50297276ef15872159536bbc1f1a89995890aa311d8514bcf19105b47b7"
 
 ORDER_MAX = 4
 _LOG_MIN_NORMAL = math.log(2.0**-1022)
@@ -161,6 +161,12 @@ def _composed_log_tail(w, q, upper, order, out, flat):
             return
     elif not log_gamma_tail_jet_into(a, a * math.exp(log_ratio), primary, order, True, jet, flat):
         _fill_nan(out)
+        return
+    if jet[0] == -math.inf:
+        # x overflowed: the engine's limit, a tail zero in float64 with zero partials.
+        for r in range((order + 1) * (order + 2) // 2):
+            out[r] = 0.0
+        out[0] = -math.inf
         return
     if not math.isfinite(jet[0]):
         _fill_nan(out)

@@ -747,6 +747,20 @@ def test_a_location_level_with_only_right_censored_rows_is_disclosed_as_separate
     )
 
 
+def test_a_far_end_past_the_top_of_the_range_is_absent():
+    """At ``Q = 5``, ``sigma = 0.1`` the bound ``1e7`` puts ``x = a e^(Q w)`` past float64's range.
+
+    ``S(1e7)`` is zero in float64, so the window ``(0.5, 1e7]`` has the
+    probability ``S(0.5)``.
+    """
+    theta = np.array([[0.0, 0.1, 5.0]])
+    got = GeneralizedGammaLSS(parametrisation="location").log_window_probability(
+        np.array([0.5]), np.array([1e7]), theta
+    )
+    expected = np.log(_gg_tails(math.log(0.5) / 0.1, 5.0)[1])
+    np.testing.assert_allclose(got, [expected], rtol=1e-12)
+
+
 def test_a_window_deep_in_the_lower_tail_is_read_from_the_lower_tail():
     """Read by reflection, ``kappa ~ 1/P`` and its fourth power overflows below ``P ~ 1e-77``."""
     theta = np.array([[0.0, 0.3, 0.5]])
