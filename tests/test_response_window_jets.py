@@ -425,6 +425,22 @@ def test_absent_negligible_and_equal_ends_keep_the_order_two_semantics():
         log_window_jets(near, far, order=5)
 
 
+
+def test_a_nan_far_end_is_a_failed_window_not_an_absent_one():
+    """Only ``-inf`` marks an absent end; an engine's NaN far tail must leave the row NaN."""
+    rng = np.random.default_rng(565)
+    near = _synthetic_jets(rng, [-1.0, -1.0])
+    far = _synthetic_jets(rng, [np.nan, -np.inf])
+    jets = log_window_jets(near, far, order=_ORDER)
+    assert np.isnan(jets[0][0])
+    for got, want in zip(jets, near, strict=True):
+        np.testing.assert_array_equal(got[1], want[1])
+    channels = log_window_channels(
+        (near[0], near[1], near[2]), (far[0], far[1], far[2]), derivative_order=2
+    )
+    assert np.isnan(channels[0][0])
+    assert channels[0][1] == near[0][1]
+
 # --- the quadrature route -----------------------------------------------------
 
 _NARROW = [

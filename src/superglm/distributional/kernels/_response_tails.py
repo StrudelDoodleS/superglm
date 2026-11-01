@@ -164,7 +164,8 @@ def log_window_channels(
     # Elsewhere the window is the near end's tail exactly: log(-expm1(delta))
     # rounds to zero wherever kappa does.  Tails that round equal (kappa
     # infinite) leave the window unresolved, -inf, unless a caller integrates it.
-    rows = np.flatnonzero((far_value > -np.inf) & (np.abs(kappa) > 0.0))
+    # Only -inf marks an absent end; a NaN far end (an engine failure) stays NaN.
+    rows = np.flatnonzero(~(far_value == -np.inf) & ~(np.abs(kappa) == 0.0))
     if len(rows) == 0:
         return near_value, near_score, near_hessian
     value = np.array(near_value, dtype=FLOAT, copy=True)
@@ -272,7 +273,8 @@ def log_window_jets(near: Jet, far: Jet, *, order: int) -> Jet:
         delta = far_value - near_value
         kappa = 1.0 / np.expm1(-delta)
     result = [np.array(entry, dtype=FLOAT, copy=True) for entry in near[: order + 1]]
-    rows = np.flatnonzero((far_value > -np.inf) & (np.abs(kappa) > 0.0))
+    # Only -inf marks an absent end; a NaN far end (an engine failure) stays NaN.
+    rows = np.flatnonzero(~(far_value == -np.inf) & ~(np.abs(kappa) == 0.0))
     if len(rows) == 0:
         return tuple(result)
     with np.errstate(divide="ignore", invalid="ignore"):
