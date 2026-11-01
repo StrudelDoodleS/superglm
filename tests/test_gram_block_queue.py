@@ -393,7 +393,7 @@ def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
     }
     assert not released
     # One parallelism level: no kernel starts numba's own threads (SuperLSS's
-    # row kernels and batched moments run on the worker pool).
+    # row kernels run on the worker pool).
     parallel = {
         f"{module.__name__}.{name}"
         for module in list(sys.modules.values())

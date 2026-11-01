@@ -166,6 +166,37 @@ def test_derivative_failure_releases_partial_trial_before_value_retry(monkeypatc
     assert orders == [2, 2] + [0] * 4 + [2] * 4
 
 
+def test_derivative_failure_releases_the_contraction_buffer_before_value_retry(monkeypatch):
+    context, coefficients = _context()
+    initial, geometry, config = _run(context, coefficients)
+    original = type(context.family).evaluate_natural
+    add_channel = chunks.GroupedGeometryAccumulator.add_curvature_channel
+    orders, buffers = [], []
+
+    def channel(self, plans, channel_index, weights):
+        buffers.append(weakref.ref(weights.base))
+        return add_channel(self, plans, channel_index, weights)
+
+    def evaluate(self, *args, **kwargs):
+        order = kwargs.get("derivative_order", 2)
+        orders.append(order)
+        if len(orders) == 3:
+            raise FloatingPointError("temporary derivative domain failure")
+        if order == 0:
+            assert buffers and all(ref() is None for ref in buffers)
+        return original(self, *args, **kwargs)
+
+    # One-chunk blocks: the first block is contracted before the third chunk fails.
+    monkeypatch.setattr(chunks, "contraction_block_rows", lambda n, row_bytes, rows: rows)
+    monkeypatch.setattr(chunks.GroupedGeometryAccumulator, "add_curvature_channel", channel)
+    monkeypatch.setattr(type(context.family), "evaluate_natural", evaluate)
+    solver_api._run_iterations(
+        context, initial, config, initial_geometry=geometry, stop_policy="ordinary"
+    )
+    assert orders[:3] == [2, 2, 2]
+    assert 0 in orders
+
+
 @pytest.mark.parametrize("error", [UnsupportedLikelihoodContractError, ValueError])
 def test_hard_source_failure_never_retries_a_value_screen(monkeypatch, error):
     context, coefficients = _context()

@@ -135,13 +135,18 @@ def group_range_matvec(group, start: int, stop: int, beta, support_prediction=No
     return out
 
 
-def group_row_range(group, start: int, stop: int):
-    """Build owned chunk rows with bounded copies and certified category lookup."""
+def group_row_range(group, start: int, stop: int, *, copy: bool = True):
+    """Build chunk rows with certified category lookup.
+
+    By default the rows are owned copies, so the child never retains its
+    parent's arrays. ``copy=False`` gives row views for a transient consumer.
+    """
     if not _supported(group, start, stop):
         return None
     kind = type(group)
     if kind is DenseGroupMatrix:
-        return DenseGroupMatrix(group.M[start:stop].copy(order="C"))
+        rows = group.M[start:stop]
+        return DenseGroupMatrix(rows.copy(order="C") if copy else np.ascontiguousarray(rows))
     if kind in _CATEGORICAL:
         if kind is RandomEffectGroupMatrix:
             return RandomEffectGroupMatrix(
@@ -149,7 +154,8 @@ def group_row_range(group, start: int, stop: int):
             )
         return CategoricalGroupMatrix(group.codes[start:stop], group.n_levels)
     if kind in _SUPPORT:
-        sub = kind(group.B_unique, group.R_inv, group.bin_idx[start:stop].copy())
+        bins = group.bin_idx[start:stop]
+        sub = kind(group.B_unique, group.R_inv, bins.copy() if copy else bins)
         metadata = _METADATA
     else:
         rows = _category_rows(group, start, stop)

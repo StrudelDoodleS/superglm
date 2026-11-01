@@ -10,9 +10,17 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._group_matrix._group_matrix_core import (
+    CategoricalGroupMatrix,
+    RandomEffectGroupMatrix,
+)
 from superglm._group_matrix._group_matrix_discretized import (
+    DiscretizedSCOPGroupMatrix,
     DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
+    DiscretizedTensorGroupMatrix,
+    SupportCompressedSplineCategoricalGroupMatrix,
+    SupportCompressedSSPGroupMatrix,
 )
 from superglm._group_matrix._group_matrix_range import group_range_matvec, group_row_range
 from superglm.distributional.family import (
@@ -342,12 +350,12 @@ def _predictor_values(
     return eta
 
 
-def _row_design(state, rows: RowChunk):
+def _row_design(state, rows: RowChunk, *, copy: bool = True):
     """One predictor's design restricted to a contiguous row range."""
     if type(state.design) is DesignMatrix:
         groups = []
         for group in state.design.group_matrices:
-            child = group_row_range(group, rows.start, rows.stop)
+            child = group_row_range(group, rows.start, rows.stop, copy=copy)
             groups.append(group.row_subset(rows.indices) if child is None else child)
         return DesignMatrix(groups, len(rows.indices), state.design.p)
     return state.design.row_subset(rows.indices)
@@ -685,15 +693,40 @@ def _evaluate_chunked_geometry(
     return geometry, ChunkedLikelihoodSums(*sums)
 
 
-def contraction_block_rows(n_observations: int, k_parameters: int, chunk_rows: int) -> int:
-    """Rows contracted at once: whole likelihood chunks within a fixed buffer budget.
+# Owned row arrays a contraction block's design adds per row, by group type.
+# Exact supports and categories are row views; spline-by-category ranges own
+# their local rows and level bins; tensors and SCOP take the generic subset.
+_BLOCK_ROW_ARRAYS = {
+    DiscretizedSSPGroupMatrix: 0,
+    SupportCompressedSSPGroupMatrix: 0,
+    CategoricalGroupMatrix: 0,
+    RandomEffectGroupMatrix: 0,
+    DiscretizedSplineCategoricalGroupMatrix: 2,
+    SupportCompressedSplineCategoricalGroupMatrix: 2,
+    DiscretizedTensorGroupMatrix: 3,
+    DiscretizedSCOPGroupMatrix: 1,
+}
+# Transient per-row gathers while one group pair is contracted.
+_BLOCK_GATHER_FLOATS = 4
 
-    The buffer holds the score and packed curvature channels, ``K + K(K+1)/2``
-    floats per row, so its memory is bounded independently of the row count.
+
+def contraction_row_bytes(layout: StackedLayout) -> int:
+    """Bytes one row adds to a contraction block.
+
+    The buffer holds ``K + K(K+1)/2`` channels. Each group adds its owned row
+    arrays; any other group may form a weighted copy of its rows, so it counts
+    its full width.
     """
-    row_bytes = np.dtype(np.float64).itemsize * (
-        k_parameters + k_parameters * (k_parameters + 1) // 2
-    )
+    k_parameters = len(layout.predictors)
+    floats = k_parameters + k_parameters * (k_parameters + 1) // 2 + _BLOCK_GATHER_FLOATS
+    for state in layout.predictors:
+        for group in state.design.group_matrices:
+            floats += _BLOCK_ROW_ARRAYS.get(type(group), group.shape[1])
+    return np.dtype(np.float64).itemsize * floats
+
+
+def contraction_block_rows(n_observations: int, row_bytes: int, chunk_rows: int) -> int:
+    """Rows contracted at once: whole likelihood chunks within a fixed byte budget."""
     chunks_per_block = max(1, AUTO_CONTRACTION_MEMORY_BYTES // (row_bytes * chunk_rows))
     return min(n_observations, chunks_per_block * chunk_rows)
 
@@ -724,7 +757,7 @@ def assemble_chunked_geometry(
     chunk_rows = resolve_chunk_size(
         n_observations, k_parameters, chunk_size, p_coefficients=layout.n_coefficients
     )
-    block_rows = contraction_block_rows(n_observations, k_parameters, chunk_rows)
+    block_rows = contraction_block_rows(n_observations, contraction_row_bytes(layout), chunk_rows)
     score = np.empty((block_rows, k_parameters), dtype=np.float64)
     # Channel-major, so each contracted channel is one contiguous row vector.
     curvature = np.empty((k_parameters * (k_parameters + 1) // 2, block_rows), dtype=np.float64)
@@ -738,7 +771,9 @@ def assemble_chunked_geometry(
             indices.setflags(write=False)
             rows = RowChunk(start=start, stop=stop, indices=indices)
             plans = tuple(
-                PredictorExecutionPlan(_row_design(state, rows), state.intercept_index is not None)
+                PredictorExecutionPlan(
+                    _row_design(state, rows, copy=False), state.intercept_index is not None
+                )
                 for state in layout.predictors
             )
         filled = stop - start

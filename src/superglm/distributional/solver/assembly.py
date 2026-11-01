@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -11,6 +12,25 @@ from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.solver.packing import packed_pairs
 from superglm.solvers.rank import _symmetric_part
+
+# A row sum of values below 2**_AGGREGATE_EXPONENT stays finite after the
+# design multiplies it by entries up to about 2**23.
+_AGGREGATE_EXPONENT = 1000
+
+
+def _aggregate_exponent(values: NDArray[np.float64]) -> int:
+    """Power-of-two exponent that keeps a row sum of ``values`` finite.
+
+    Zero unless ``len(values) * max|values|`` could leave float64's range.
+    Scaling by a power of two is exact apart from entries far below the sum's
+    own rounding, and the caller scales the contraction back once.
+    """
+    if not len(values):
+        return 0
+    peak = max(float(np.max(values)), -float(np.min(values)))
+    if peak == 0.0:
+        return 0
+    return max(0, math.frexp(peak)[1] + math.frexp(len(values))[1] - _AGGREGATE_EXPONENT)
 
 
 def _readonly(values: NDArray) -> NDArray[np.float64]:
@@ -258,7 +278,7 @@ def _grouped_predictor_plans(
 
 
 class GroupedGeometryAccumulator:
-    """Accumulate row-chunk score and curvature into coefficient space."""
+    """Accumulate row-block score and curvature into coefficient space."""
 
     def __init__(
         self,
@@ -305,7 +325,7 @@ class GroupedGeometryAccumulator:
         plans: tuple[PredictorExecutionPlan, ...],
         score_eta: NDArray,
     ) -> None:
-        """Accumulate all predictor score channels for one row chunk."""
+        """Accumulate all predictor score channels for one row block."""
         plan_tuple = self._validated_plans(plans)
         n_observations = plan_tuple[0].design.n
         try:
@@ -316,7 +336,13 @@ class GroupedGeometryAccumulator:
         if score.shape != expected or not np.all(np.isfinite(score)):
             raise ValueError(f"chunk score must be finite with shape {expected}")
         for state, plan in zip(self._layout.predictors, plan_tuple, strict=True):
-            self._score[state.coefficient_slice] += plan.score(score[:, state.parameter_index])
+            column = score[:, state.parameter_index]
+            exponent = _aggregate_exponent(column)
+            self._score[state.coefficient_slice] += (
+                np.ldexp(plan.score(np.ldexp(column, -exponent)), exponent)
+                if exponent
+                else plan.score(column)
+            )
         self._score_chunks += 1
 
     def add_curvature_channel(
@@ -325,7 +351,7 @@ class GroupedGeometryAccumulator:
         channel_index: int,
         weights: NDArray,
     ) -> None:
-        """Accumulate one canonical packed curvature channel for one row chunk."""
+        """Accumulate one canonical packed curvature channel for one row block."""
         plan_tuple = self._validated_plans(plans)
         if (
             isinstance(channel_index, bool)
@@ -344,10 +370,15 @@ class GroupedGeometryAccumulator:
         left_index, right_index = self._pairs[channel_index]
         left_state = self._layout.predictors[left_index]
         right_state = self._layout.predictors[right_index]
+        exponent = _aggregate_exponent(weight_values)
+        if exponent:
+            weight_values = np.ldexp(weight_values, -exponent)
         if left_index == right_index:
             block = plan_tuple[left_index].diagonal_moment(weight_values)
         else:
             block = plan_tuple[left_index].cross_moment(plan_tuple[right_index], weight_values)
+        if exponent:
+            block = np.ldexp(block, exponent)
         self._curvature[left_state.coefficient_slice, right_state.coefficient_slice] += block
         if left_index != right_index:
             self._curvature[right_state.coefficient_slice, left_state.coefficient_slice] += block.T

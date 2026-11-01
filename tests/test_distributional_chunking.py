@@ -356,12 +356,25 @@ def test_row_chunk_iterator_covers_rows_once_and_validates_sizes(
 
 
 def test_contraction_blocks_hold_whole_chunks_within_the_buffer_budget() -> None:
-    row_bytes = 8 * (2 + 3)
-    rows = chunking.contraction_block_rows(10**9, 2, 4_000)
+    row_bytes = 8 * 40
+    rows = chunking.contraction_block_rows(10**9, row_bytes, 4_000)
     assert rows % 4_000 == 0
     assert rows * row_bytes <= chunking.AUTO_CONTRACTION_MEMORY_BYTES < (rows + 4_000) * row_bytes
-    assert chunking.contraction_block_rows(100, 3, 100) == 100
-    assert chunking.contraction_block_rows(10**9, 2, 10**8) == 10**8
+    assert chunking.contraction_block_rows(100, row_bytes, 100) == 100
+    assert chunking.contraction_block_rows(10**9, row_bytes, 10**8) == 10**8
+
+
+def test_contraction_row_bytes_count_the_buffer_and_each_groups_owned_rows() -> None:
+    _, layout, _, _, _, _, _ = _problem()
+    # Location: a numeric column and a discretised spline; scale: one spline.
+    location, scale = layout.predictors
+    assert [type(g).__name__ for g in location.design.group_matrices] == [
+        "DenseGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+    ]
+    assert [type(g).__name__ for g in scale.design.group_matrices] == ["DiscretizedSSPGroupMatrix"]
+    # Five channels, four gathers, the dense column's weighted copy, row views for splines.
+    assert chunking.contraction_row_bytes(layout) == 8 * (2 + 3 + 4 + 1)
 
 
 @pytest.mark.parametrize("chunks_per_block", [None, 3, 1])

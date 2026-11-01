@@ -195,9 +195,8 @@ class PredictorExecutionPlan:
         weights: NDArray,
     ) -> NDArray[np.float64]:
         """Return one symmetric ``X.T @ diag(weights) @ X`` predictor block."""
-        # Serial Gram blocks: SuperLSS takes no ``n_jobs``, and its chunked
-        # assembly calls this once per row chunk, too small for a pool to pay
-        # for itself beside the family kernels' own threads.
+        # Serial Gram blocks: SuperLSS takes no ``n_jobs``, so its assembly
+        # starts no pool beside the family kernels' own threads.
         with parallel_config(n_jobs=1):
             moments = self.design.execution_plan.moments(
                 weights,
