@@ -403,9 +403,14 @@ def _read_levels(spec: Any, labels: Sequence[Any]) -> NDArray:
     """Return the fitted level a categorical term reads each raw label at.
 
     This is the term's own predict-time resolution, so its spelling, grouping
-    and unseen policy decide, as they do in ``predict``.
+    and unseen policy decide, as they do in ``predict``.  A term without one,
+    such as a ``RandomEffect``, reads its raw labels as its levels.
     """
-    resolve = getattr(spec, "_resolved_labels", None) or spec._resolve_predict_labels
+    resolve = getattr(spec, "_resolved_labels", None) or getattr(
+        spec, "_resolve_predict_labels", None
+    )
+    if resolve is None:
+        return np.asarray(labels, dtype=object)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         return np.asarray(resolve(np.asarray(labels, dtype=object)), dtype=object)

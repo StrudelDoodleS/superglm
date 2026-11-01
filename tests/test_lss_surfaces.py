@@ -484,6 +484,30 @@ def test_a_grouped_column_is_held_at_its_most_frequent_group() -> None:
     assert _reference_value(fitted, frame, "g") == "c"
 
 
+def test_a_random_effect_column_is_held_at_its_first_tied_level() -> None:
+    """A RandomEffect reads its raw labels as its levels, so a balanced panel's tie
+    goes to its first fitted level and the surfaces still build a reference row."""
+    from superglm import RandomEffect
+    from superglm.distributional.terms import term_effect
+
+    X, y = _gaussian_sample()
+    X = X.assign(panel=np.tile(["s", "r", "q", "p"], len(X) // 4))
+    fitted = (
+        model_from_templates(
+            family=GaussianLS(),
+            predictors=[
+                Predictor("location", {"x": Spline("cr", k=6)}),
+                Predictor("scale", {"panel": RandomEffect()}),
+            ],
+        )
+        .fit_reml(X, y)
+        ._require_fitted()
+    )
+    curves = risk_curves(fitted, X, {}, "x", n_draws=60, seed=1)
+    term_effect(fitted, X, "location", "x", simultaneous=False)
+    assert curves.reference["panel"] == "p"
+
+
 @pytest.fixture(scope="module")
 def grouped_case() -> tuple[DenseDistributionalModel, pd.DataFrame]:
     from superglm.features.grouping import collapse_levels
