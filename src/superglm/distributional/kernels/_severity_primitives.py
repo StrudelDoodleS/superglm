@@ -63,6 +63,10 @@ _HALF_LOG_TWO_PI = 0.5 * math.log(2.0 * math.pi)
 _MIN_NORMAL = 2.2250738585072014e-308
 # |v| < 1/3 is y/m in (1/2, 2); there v^2 < 1/9 and 17 terms leave under u of the sum.
 _GDEV_SERIES = 1.0 / 3.0
+# gdev depends on y/m alone; below _GDEV_TINY both operands lift by _GDEV_LIFT (exact).
+# m - y is exact even when subnormal, but the series' product (m - y) v would underflow.
+_GDEV_TINY = 2.0**-900
+_GDEV_LIFT = 2.0**600
 _ODD_RECIPROCALS = tuple(1.0 / (2 * j + 1) for j in range(1, 18))
 # The asymptotic branches of gnorm and psires_0123 start here.
 _ASYMPTOTIC = 10.0
@@ -143,6 +147,8 @@ def invexpm1(t):
 
 @njit(cache=True)
 def gdev(y, m):
+    if m < _GDEV_TINY:
+        y, m = y * _GDEV_LIFT, m * _GDEV_LIFT
     d = m - y
     total = m + y
     # Halving is exact here; it keeps a sum near the top of the range finite.

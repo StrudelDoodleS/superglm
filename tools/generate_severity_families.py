@@ -285,7 +285,8 @@ GAMMA_TAIL = Engine(
 
 def _gamma_tail(upper: bool):
     def tail(y, mean, cv, weight):
-        shape = weight / cv**2
+        # One division: 1/cv^2 alone can overflow where the weighted shape is finite.
+        shape = ratio(weight, cv**2)
         return GAMMA_TAIL(shape, shape * ratio(y, mean), upper=upper)
 
     return tail

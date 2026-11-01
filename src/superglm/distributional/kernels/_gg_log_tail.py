@@ -80,7 +80,7 @@ from superglm.distributional.kernels._incomplete_gamma import (
 
 # Digest of the compiled callees above, stamped by ``tools/generate_severity_families.py``:
 # Numba's on-disk cache keys a compiled caller on its own file only.
-_CALLEE_DIGEST = "37e116a41422cd7da703b0e3fb51cb921abfabea68e7a28004ed3f8da14adf0b"
+_CALLEE_DIGEST = "c1adedf02527f70bead41dc184b7ef6efa13dcc1e27910a70cb2a814ee39bf12"
 
 ORDER_MAX = 4
 _LOG_MIN_NORMAL = math.log(2.0**-1022)

@@ -809,6 +809,44 @@ def test_a_tiny_left_censoring_threshold_keeps_a_representable_hessian():
     np.testing.assert_allclose([log[k][0, 0] for k in range(1, 5)], [c, -c, c, -c], rtol=1e-13)
 
 
+def test_a_subnormal_prior_weight_keeps_its_weighted_shape():
+    """``weight/cv^2`` is finite where ``1/cv^2`` alone overflows.
+
+    At ``weight = 1e-310`` and ``cv = 1e-155`` the shape rounds to about one, so
+    the row at mean one is (nearly) exponential and ``log S(1)`` is about -1.
+    """
+    weight, cv = np.array([1e-310]), 1e-155
+    shape = weight[0] / (cv * cv)
+    expected = np.log(special.gammaincc(shape, shape))
+    lower, upper = np.array([1.0]), np.array([_INF])
+    got = GammaLS().log_window_probability(lower, upper, np.array([[1.0, cv]]), weight)
+    np.testing.assert_allclose(got, [expected], rtol=1e-12)
+    for theta, coordinates in (([[1.0, cv]], "natural"), ([[0.0, np.log(cv)]], "log")):
+        jets = _declared_bounds.gamma_window_jets(
+            lower, upper, np.array(theta), weight, order=0, coordinates=coordinates
+        )
+        np.testing.assert_allclose(jets[0], [expected], rtol=1e-12)
+
+
+def test_a_narrow_window_keeps_its_probability_in_tiny_response_units():
+    """A window's probability reads ``y/mean`` alone, so it survives an exact change of units.
+
+    At ``cv = 1e-12`` a window ``1e-14`` wide sits beside the mean and is integrated
+    by quadrature on the density.  Scaling the row by ``2^-997`` is exact, and
+    the window must keep its probability: forming ``(m - y)^2/m`` in those
+    units underflows, which read the window 66% too likely.
+    """
+    lo = 1.0 + 1e-12
+    hi, scale = lo * (1.0 + 1e-14), 2.0**-997
+    family = GammaLS()
+    unit = family.log_window_probability(np.array([lo]), np.array([hi]), np.array([[1.0, 1e-12]]))
+    tiny = family.log_window_probability(
+        np.array([lo * scale]), np.array([hi * scale]), np.array([[scale, 1e-12]])
+    )
+    assert np.isfinite(unit[0])
+    np.testing.assert_allclose(tiny, unit, rtol=1e-12)
+
+
 @pytest.mark.parametrize("coordinates", ["natural", "log"])
 @pytest.mark.parametrize("steps", [0, 1, 7])
 def test_a_censored_row_near_a_non_unit_mean_keeps_its_standardized_distance(coordinates, steps):

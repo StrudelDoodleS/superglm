@@ -27,8 +27,8 @@ DATA = ('weight',)
 COORDINATES = 'log'
 LAWS = ('density', 'logsf', 'logcdf', 'logsf_uniform', 'logcdf_uniform')
 MAX_ORDER = 4
-PRIMITIVES_DIGEST = "97d6a10485b8e2c80d06559c0759f55bb6ac750ff00631021fe44ad494630e2a"
-ENGINES_DIGEST = "763a818884d4050d115045386b8c91445c2a2d70c0baa51820faa96262746cdd"
+PRIMITIVES_DIGEST = "af81517d78358a8ea9aca4ad7d05db9389684d6e98831c15d0c5fd97111a0616"
+ENGINES_DIGEST = "6c989aa95859ba2d06c3a189510ba79e20ea8c88a4573a00c59fef9f000c154f"
 
 @njit(cache=True, error_model='numpy')
 def density(Y, P0, P1, D0, M, order, J0, J1, J2, J3, J4):
@@ -78,7 +78,7 @@ def logsf(Y, P0, P1, D0, order, J0, J1, J2, J3, J4):
         p0 = P0[i]
         p1 = P1[i]
         d0 = D0[i]
-        t0 = d0*exp(-2.0*p1)
+        t0 = (d0/exp(2.0*p1))
         log_gamma_tail_scaled_into(t0, t0*(y/exp(p0)), np.bool_(True), order, out0, work)
         c0_0 = out0[0]
         J0[i] = c0_0
@@ -123,24 +123,23 @@ def logsf(Y, P0, P1, D0, order, J0, J1, J2, J3, J4):
                         c0_14 = out0[14]
                         t17 = c0_14 + 7.0*c0_5 + 6.0*c0_9
                         t18 = c0_2 + t17
-                        t19 = 3.0*c0_8
                         c0_13 = out0[13]
-                        t20 = c0_13*t0
-                        t21 = t18 + t20
+                        t19 = c0_13*t0
+                        t20 = t18 + t19
                         c0_12 = out0[12]
-                        t22 = c0_12*t0 + c0_13
-                        t23 = t0*(2.0*c0_8 + t22) + 4.0*t8
-                        t24 = t21 + t23
+                        t21 = c0_12*t0 + c0_13
+                        t22 = t0*(2.0*c0_8 + t21) + 4.0*t8
+                        t23 = t20 + t22
                         c0_11 = out0[11]
-                        t25 = c0_11*t0 + c0_12
-                        t26 = t0*(c0_7 + t25) + 2.0*t10 + t19 + t22
-                        t27 = t0*(c0_4 + t26) + 3.0*t12 + 3.0*t3
+                        t24 = c0_11*t0 + c0_12
+                        t25 = 3.0*c0_8 + t0*(c0_7 + t24) + 2.0*t10 + t21
+                        t26 = t0*(c0_4 + t25) + 3.0*t12 + 3.0*t3
                         c0_10 = out0[10]
                         J4[i, 0] = t18
-                        J4[i, 1] = 2.0*t0*t19 + 2.0*t21 + 2.0*t3
-                        J4[i, 2] = 4.0*t13 + 4.0*t24
-                        J4[i, 3] = 8.0*t24 + 8.0*t27
-                        J4[i, 4] = 16.0*t0*(t0*(t0*(c0_10*t0 + c0_11) + t14 + t25) + 2.0*t15 + t26 + t4) + 16.0*t1 + 48.0*t16 + 16.0*t17 + 16.0*t20 + 16.0*t23 + 16.0*t27 + 48.0*t5
+                        J4[i, 1] = 2.0*t20 + 2.0*t3 + 6.0*t8
+                        J4[i, 2] = 4.0*t13 + 4.0*t23
+                        J4[i, 3] = 8.0*t23 + 8.0*t26
+                        J4[i, 4] = 16.0*t0*(t0*(t0*(c0_10*t0 + c0_11) + t14 + t24) + 2.0*t15 + t25 + t4) + 16.0*t1 + 48.0*t16 + 16.0*t17 + 16.0*t19 + 16.0*t22 + 16.0*t26 + 48.0*t5
 
 
 @njit(cache=True, error_model='numpy')
@@ -152,7 +151,7 @@ def logcdf(Y, P0, P1, D0, order, J0, J1, J2, J3, J4):
         p0 = P0[i]
         p1 = P1[i]
         d0 = D0[i]
-        t0 = d0*exp(-2.0*p1)
+        t0 = (d0/exp(2.0*p1))
         log_gamma_tail_scaled_into(t0, t0*(y/exp(p0)), np.bool_(False), order, out0, work)
         c0_0 = out0[0]
         J0[i] = c0_0
@@ -197,24 +196,23 @@ def logcdf(Y, P0, P1, D0, order, J0, J1, J2, J3, J4):
                         c0_14 = out0[14]
                         t17 = c0_14 + 7.0*c0_5 + 6.0*c0_9
                         t18 = c0_2 + t17
-                        t19 = 3.0*c0_8
                         c0_13 = out0[13]
-                        t20 = c0_13*t0
-                        t21 = t18 + t20
+                        t19 = c0_13*t0
+                        t20 = t18 + t19
                         c0_12 = out0[12]
-                        t22 = c0_12*t0 + c0_13
-                        t23 = t0*(2.0*c0_8 + t22) + 4.0*t8
-                        t24 = t21 + t23
+                        t21 = c0_12*t0 + c0_13
+                        t22 = t0*(2.0*c0_8 + t21) + 4.0*t8
+                        t23 = t20 + t22
                         c0_11 = out0[11]
-                        t25 = c0_11*t0 + c0_12
-                        t26 = t0*(c0_7 + t25) + 2.0*t10 + t19 + t22
-                        t27 = t0*(c0_4 + t26) + 3.0*t12 + 3.0*t3
+                        t24 = c0_11*t0 + c0_12
+                        t25 = 3.0*c0_8 + t0*(c0_7 + t24) + 2.0*t10 + t21
+                        t26 = t0*(c0_4 + t25) + 3.0*t12 + 3.0*t3
                         c0_10 = out0[10]
                         J4[i, 0] = t18
-                        J4[i, 1] = 2.0*t0*t19 + 2.0*t21 + 2.0*t3
-                        J4[i, 2] = 4.0*t13 + 4.0*t24
-                        J4[i, 3] = 8.0*t24 + 8.0*t27
-                        J4[i, 4] = 16.0*t0*(t0*(t0*(c0_10*t0 + c0_11) + t14 + t25) + 2.0*t15 + t26 + t4) + 16.0*t1 + 48.0*t16 + 16.0*t17 + 16.0*t20 + 16.0*t23 + 16.0*t27 + 48.0*t5
+                        J4[i, 1] = 2.0*t20 + 2.0*t3 + 6.0*t8
+                        J4[i, 2] = 4.0*t13 + 4.0*t23
+                        J4[i, 3] = 8.0*t23 + 8.0*t26
+                        J4[i, 4] = 16.0*t0*(t0*(t0*(c0_10*t0 + c0_11) + t14 + t24) + 2.0*t15 + t25 + t4) + 16.0*t1 + 48.0*t16 + 16.0*t17 + 16.0*t19 + 16.0*t22 + 16.0*t26 + 48.0*t5
 
 
 @njit(cache=True, error_model='numpy')
