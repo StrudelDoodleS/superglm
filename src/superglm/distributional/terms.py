@@ -382,16 +382,71 @@ def _interaction_on(fitted: Any, parameter: str, feature: Hashable) -> str | Non
     return None
 
 
-def _reference_row(frame: EagerFrame, columns: tuple[str, ...]) -> dict[str, Any]:
-    """Hold every covariate at its training median (numeric) or mode (otherwise)."""
-    row: dict[str, Any] = {}
-    for name in columns:
-        values = np.asarray(frame.column_array(name))
-        if frame.column_kind(name) == "numeric":
-            row[name] = float(np.nanmedian(values.astype(np.float64)))
-        else:
-            row[name] = pd.Series(values).value_counts().index[0]
-    return row
+def _fitted_levels(fitted: Any, name: Hashable) -> tuple[Any, ...] | None:
+    """Return the level domain of the first term, in predictor order, that reads
+    column ``name`` with levels, or ``None`` if no term does."""
+    for predictor in fitted.compiled_predictors:
+        spec = predictor.compiled.specs.get(name)
+        levels = None if spec is None else _level_domain(spec)
+        if levels is not None:
+            return levels
+    return None
+
+
+def _column_levels(fitted: Any, frame: EagerFrame, name: Hashable) -> list[Any] | None:
+    """Return a column's level order, or ``None`` for a numeric column without levels.
+
+    The fitted level domain (:func:`_fitted_levels`) when a term reads the column
+    with levels; otherwise, for a non-numeric column, its declared categories or
+    else its observed labels sorted.  Term effects and the surfaces sweep this
+    domain and break a tied mode by it.
+    """
+    levels = _fitted_levels(fitted, name)
+    if levels is not None:
+        return list(levels)
+    if frame.column_kind(name) == "numeric":
+        return None
+    declared = frame.column_declared_categories(name)
+    if declared is not None:
+        return list(declared)
+    return list(pd.factorize(frame.column_array(name), sort=True)[1])
+
+
+def _numeric_range(frame: EagerFrame, name: Hashable, n_points: int) -> NDArray[np.float64]:
+    """Return ``n_points`` points spanning a numeric column's range, missing values ignored."""
+    values = np.asarray(frame.column_array(name), dtype=np.float64)
+    return np.linspace(float(np.nanmin(values)), float(np.nanmax(values)), n_points)
+
+
+def _reference_value(fitted: Any, frame: EagerFrame, name: Hashable) -> Any:
+    """Return a column's training centre, missing values ignored.
+
+    A numeric column without levels is held at its median.  Any other column is
+    held at its most frequent value; a tie goes to the level that comes first in
+    :func:`_column_levels` order (labels outside that domain after it, sorted).
+    """
+    values = frame.column_array(name)
+    empty = (
+        f"column {name!r} has no non-missing values to take a training centre from; "
+        "pass rows that have values for it, or name its value in a surface's reference"
+    )
+    if _fitted_levels(fitted, name) is None and frame.column_kind(name) == "numeric":
+        numeric = np.asarray(values, dtype=np.float64)
+        if np.all(np.isnan(numeric)):
+            raise ValueError(empty)
+        return float(np.nanmedian(numeric))
+    codes, labels = pd.factorize(values, sort=True)
+    present = codes[codes >= 0]
+    if present.size == 0:
+        raise ValueError(empty)
+    counts = np.bincount(present, minlength=len(labels))
+    tied = [labels[int(code)] for code in np.flatnonzero(counts == counts.max())]
+    if len(tied) == 1:
+        return tied[0]
+    rank = {
+        level: position for position, level in enumerate(_column_levels(fitted, frame, name) or ())
+    }
+    return min(tied, key=lambda label: rank.get(label, len(rank)))
 
 
 def _sweep(
@@ -410,7 +465,6 @@ def _sweep(
         )
     column = _feature_label(fitted, parameter, term)
     columns = _required_columns(fitted.compiled_predictors)
-    reference = _reference_row(frame, columns)
 
     levels = _level_domain(spec)
     if levels is not None:
@@ -418,16 +472,17 @@ def _sweep(
         grid = None
         names = tuple(str(level) for level in levels)
     else:
-        values = np.asarray(frame.column_array(column), dtype=np.float64)
-        grid = np.linspace(float(np.nanmin(values)), float(np.nanmax(values)), n_points)
+        grid = _numeric_range(frame, column, n_points)
         swept = grid
         names = None
 
     rows = len(swept)
     data: dict[Hashable, pd.Series] = {
-        name: pd.Series([reference[name]] * rows) for name in columns
+        name: pd.Series(swept)
+        if name == column
+        else pd.Series([_reference_value(fitted, frame, name)] * rows)
+        for name in columns
     }
-    data[column] = pd.Series(swept)
     return pd.DataFrame(data), grid, names
 
 
@@ -530,8 +585,9 @@ def term_effect(
     """Report one term of one predictor on that predictor's link scale.
 
     A one-variable term is swept over ``n_points`` points spanning its training
-    range with every other covariate held at its training median or mode; a
-    term with levels reports one row per fitted level, the reference level (and
+    range with every other covariate held at its training median or mode
+    (:func:`_reference_value`: missing values ignored, a tied mode going to the
+    level first in the fitted level order); a term with levels reports one row per fitted level, the reference level (and
     any level pinned to it) reading back as an exact zero.  Bands are the
     Bayesian pointwise interval and, unless ``simultaneous=False``, the
     max-deviation simultaneous band of Ruppert, Wand and Carroll (2003),

@@ -416,13 +416,39 @@ def test_review_nonfinite_density_refuses():
 
 def test_review_sweep_and_reference_accept_mixed_categories():
     from superglm._frame import as_eager_frame
-    from superglm.distributional.surfaces import _covariate_grid, _default_value
+    from superglm.distributional.surfaces import _covariate_grid
+    from superglm.distributional.terms import _reference_value
 
+    unfitted = SimpleNamespace(compiled_predictors=())  # no term reads g with levels
     frame = as_eager_frame(pd.DataFrame({"g": [1, "b", 1, "a"]}))
-    values, levels, positions = _covariate_grid(frame, "g", 10)
+    values, levels, positions = _covariate_grid(unfitted, frame, "g", 10)
     assert set(values) == {1, "a", "b"}
     assert len(levels) == len(positions) == 3
-    assert _default_value(frame, "g") == 1
+    assert _reference_value(unfitted, frame, "g") == 1
+
+
+def test_term_effect_and_surfaces_hold_and_sweep_one_reference_row(gaussian_case) -> None:
+    """A tied mode, a missing numeric value and a fitted level absent from the
+    frame: ``term_effect`` and the surfaces hold and sweep the same values."""
+    from superglm._frame import as_eager_frame
+    from superglm.distributional import terms
+
+    fitted, _, _ = gaussian_case
+    # "b" comes first and ties "a"; "c" is a fitted level the frame lacks.
+    X = pd.DataFrame({"x": [0.3, np.nan, -0.6, 0.8], "g": ["b", "a", "b", "a"]})
+
+    term_frame, grid, _ = terms._sweep(fitted, as_eager_frame(X), "location", "x", 5)
+    curves = risk_curves(fitted, X, {}, "x", n_points=5, n_draws=60, seed=1)
+    # A tie goes to the level first in the fitted order; the range ignores the NaN.
+    assert curves.reference == {"g": "a"}
+    assert list(term_frame["g"]) == ["a"] * 5
+    np.testing.assert_array_equal(grid, np.linspace(-0.6, 0.8, 5))
+    np.testing.assert_array_equal(curves.x, grid)
+
+    effect = terms.term_effect(fitted, X, "location", "g", simultaneous=False)
+    swept = risk_curves(fitted, X, {}, "g", n_draws=60, seed=1)
+    assert effect.levels == swept.levels == ("a", "b", "c")
+    assert swept.reference == {"x": 0.3}  # the median of the three present values
 
 
 def test_json_scalars_are_plain_values_and_nothing_unrepresentable() -> None:
