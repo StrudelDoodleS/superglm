@@ -5,7 +5,9 @@
 functions, then every partial in ``(a, x)`` by total order ``1..order``
 (``order <= 4``), each block in ``combinations_with_replacement(range(2), k)``
 order: ``(a, x)``, then ``(aa, ax, xx)``, and so on.  Entries are plain
-partials, not divided by factorials.  A row outside the domain (``a`` or ``x``
+partials, not divided by factorials; :func:`log_gamma_tail_scaled_into`
+writes them times ``x^j`` (``j`` the order in ``x``), the form the generated
+kernels compose.  A row outside the domain (``a`` or ``x``
 not finite and positive), or one whose series or continued fraction does not
 converge within :data:`MAX_TERMS`, writes NaN everywhere.
 
@@ -475,14 +477,31 @@ def log_gamma_tail_jet_into(a, x, upper, order, along_ratio, jet, w):
 
 
 @njit(cache=True)
+def log_gamma_tail_scaled_into(a, x, upper, order, out, w):
+    """The scaled partials ``x^j d^(i+j) log T/(da^i dx^j)`` into ``out``, packed as the output.
+
+    They are the jet's coefficients times ``i! j!``, with no power of ``x``:
+    a kernel that composes them through ``x = a y/mean`` meets the factor
+    ``x^j`` in the chain rule's own ``x``-derivatives, so neither ``x^-j``
+    nor ``x^j`` is ever formed.  ``w`` is caller-owned work of :data:`WORK_SIZE`.
+    Returns ``False`` (and NaN) off the domain.
+    """
+    if not log_gamma_tail_jet_into(a, x, upper, order, False, out, w):
+        return False
+    for r in range((order + 1) * (order + 2) // 2):
+        out[r] *= _FACTORIAL[_A_DEG[r]] * _FACTORIAL[_X_DEG[r]]
+    return True
+
+
+@njit(cache=True)
 def log_gamma_tail_into(a, x, upper, order, out, w):
     """:func:`log_gamma_tail` with caller-owned work of :data:`WORK_SIZE`."""
-    if not log_gamma_tail_jet_into(a, x, upper, order, False, out, w):
+    if not log_gamma_tail_scaled_into(a, x, upper, order, out, w):
         return
-    inverse_x = 1.0 / x
+    # One division per power of x: it overflows only where the partial itself does.
     for r in range((order + 1) * (order + 2) // 2):
-        j = _X_DEG[r]
-        out[r] = _FACTORIAL[_A_DEG[r]] * _FACTORIAL[j] * out[r] * inverse_x**j
+        for _ in range(_X_DEG[r]):
+            out[r] /= x
 
 
 @njit(cache=True)

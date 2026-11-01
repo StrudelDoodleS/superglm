@@ -243,7 +243,7 @@ CLOSED_LAW = _engine_declaration(
 # libm's one-ulp bound, in u; lgamma is allowed two ulps.
 PRIMITIVE_C = 16.0
 LIBM_C = 2.0
-RELATIVE = ("softplus", "expit", "log1mexp", "invexpm1", "gdev")
+RELATIVE = ("softplus", "expit", "log1mexp", "invexpm1", "gdev", "ratio")
 
 
 def own_error(name: str, args, value, partials):

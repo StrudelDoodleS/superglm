@@ -144,9 +144,13 @@ _FIRST_USE: dict[str, str] = {
         "reaches it",
     ),
     **dict.fromkeys(
-        (_ENGINE + "log_gamma_tail", _ENGINE + "_log_gamma_tail_rows"),
-        "the incomplete-gamma engine's scalar and array entry points, for tests: fits call "
-        "log_gamma_tail_into from the declared kernels",
+        (
+            _ENGINE + "log_gamma_tail",
+            _ENGINE + "log_gamma_tail_into",
+            _ENGINE + "_log_gamma_tail_rows",
+        ),
+        "the incomplete-gamma engine's plain-partial entry points, for tests: fits call "
+        "log_gamma_tail_scaled_into from the declared kernels",
     ),
     **dict.fromkeys(
         (_PRIMITIVES + name for name in ("softplus", "expit", "log1mexp", "invexpm1")),

@@ -27,6 +27,7 @@ invalid, and never raises.
 
 Primitives (SymPy rule here, Numba body in ``_severity_primitives``):
 ``softplus``, ``expit``, ``log1mexp``, ``invexpm1``, ``gdev``, ``gnorm``,
+``ratio`` (``y/m`` as one division, printed inline),
 ``psires``, ``sres`` (``gnorm``'s derivatives), and SymPy's ``loggamma`` and
 ``polygamma``.  ``polygamma``, ``psires`` and ``sres`` of orders ``n <= 3``
 at one argument share one call of the jet functions ``polygamma_0123``,
@@ -108,6 +109,16 @@ class gdev(sp.Function):  # noqa: N801
         return (y - m) / (y * m) if argindex == 1 else (m - y) / m**2
 
 
+class ratio(sp.Function):  # noqa: N801
+    """``y/m``, printed as one division; ``m``-derivatives keep the quotient, ``-ratio/m``."""
+
+    nargs = 2
+
+    def fdiff(self, argindex=1):
+        y, m = self.args
+        return 1 / m if argindex == 1 else -self / m
+
+
 class gnorm(sp.Function):  # noqa: N801
     nargs = 1
 
@@ -151,6 +162,7 @@ MPMATH = {
     "log1mexp": lambda t: mp.log(-mp.expm1(-t)) if t < 1 else mp.log1p(-mp.exp(-t)),
     "invexpm1": lambda t: 1 / mp.expm1(t),
     "gdev": lambda y, m: y / m - 1 - mp.log(y / m),
+    "ratio": lambda y, m: y / m,
     "gnorm": lambda a: a * mp.log(a) - a - mp.loggamma(a),
     "psires": _mp_psires,
     "sres": lambda n, a: a ** (int(n) + 1) * _mp_psires(n, a),
@@ -171,13 +183,18 @@ class Engine:
     its domain.  ``reference(u, v, upper)`` is its mpmath value, for oracles.
     An engine with ``work``, the name of a size constant in ``module`` (an
     integer, or a shape tuple), takes a trailing scratch array of that size,
-    allocated once per kernel call.
+    allocated once per kernel call.  A ``scaled`` engine writes
+    ``v^q d^(p+q) engine/du^p dv^q`` in place of the plain partial: for a
+    ``v`` whose every derivative is ``v`` times a factor, the chain rule then
+    cancels ``v^q`` symbolically, and a kernel never forms ``v^-q`` (which
+    overflows for small ``v``) or the powers of the parameters inside ``v``.
     """
 
     name: str
     module: str
     reference: Callable | None = None
     work: str | None = None
+    scaled: bool = False
 
     def __call__(self, u, v, *, upper: bool):
         return engine_partial(self, upper, 0, 0)(u, v)
@@ -185,10 +202,14 @@ class Engine:
 
 @functools.cache
 def engine_partial(engine: Engine, upper: bool, p: int, q: int) -> type[sp.Function]:
-    """SymPy function for ``d^(p+q) engine / du^p dv^q`` on one tail."""
+    """SymPy function for ``d^(p+q) engine / du^p dv^q`` on one tail (times ``v^q`` if scaled)."""
 
     def fdiff(self, argindex=1):
-        return engine_partial(engine, upper, p + (argindex == 1), q + (argindex == 2))(*self.args)
+        following = engine_partial(engine, upper, p + (argindex == 1), q + (argindex == 2))
+        if engine.scaled and argindex == 2:
+            # d(v^q T_q)/dv = (q v^q T_q + v^(q+1) T_(q+1))/v.
+            return (q * self + following(*self.args)) / self.args[1]
+        return following(*self.args)
 
     side = "upper" if upper else "lower"
     attributes = {"nargs": 2, "fdiff": fdiff, "engine": engine, "upper": upper, "orders": (p, q)}
@@ -198,7 +219,10 @@ def engine_partial(engine: Engine, upper: bool, p: int, q: int) -> type[sp.Funct
 def engine_mpmath(function: type[sp.Function]) -> Callable:
     """mpmath value of an engine partial, by differentiating its reference."""
     reference, upper = function.engine.reference, function.upper
-    return lambda u, v: mp.diff(lambda a, b: reference(a, b, upper), (u, v), function.orders)
+    power = function.orders[1] if function.engine.scaled else 0
+    return lambda u, v: (
+        v**power * mp.diff(lambda a, b: reference(a, b, upper), (u, v), function.orders)
+    )
 
 
 # ---------------------------------------------------------------- declarations
@@ -237,18 +261,21 @@ def _mp_log_gamma_tail(a, x, upper):
     return mp.log(mp.gammainc(a, 0, x, regularized=True))
 
 
+# Scaled: the gamma's x = shape y/mean has x-derivatives x/mean, x/cv, ..., so the
+# kernels' mean derivatives carry 1/mean^k alone, never y/mean^(k+1).
 GAMMA_TAIL = Engine(
-    "log_gamma_tail_into",
+    "log_gamma_tail_scaled_into",
     "superglm.distributional.kernels._incomplete_gamma",
     reference=_mp_log_gamma_tail,
     work="WORK_SIZE",
+    scaled=True,
 )
 
 
 def _gamma_tail(upper: bool):
     def tail(y, mean, cv, weight):
         shape = weight / cv**2
-        return GAMMA_TAIL(shape, shape * y / mean, upper=upper)
+        return GAMMA_TAIL(shape, shape * ratio(y, mean), upper=upper)
 
     return tail
 
@@ -376,6 +403,8 @@ class _Printer(PythonCodePrinter):
 
     def _print_Function(self, expr):
         name = type(expr).__name__
+        if name == "ratio":
+            return f"({self.parenthesize(expr.args[0], 50)}/{self.parenthesize(expr.args[1], 50)})"
         if name not in _PRIMITIVE_NAMES:
             raise ValueError(f"no Numba rule for {name}")
         return f"{name}({', '.join(self._print(argument) for argument in expr.args)})"

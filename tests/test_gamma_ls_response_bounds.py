@@ -708,3 +708,51 @@ def test_a_window_deep_in_the_lower_tail_is_read_from_the_lower_tail():
         exact = [mp.diff(window, point, (4 - j, j)) for j in range(5)]
     scale = max(abs(e) for e in exact)
     assert max(abs(mp.mpf(float(g)) - e) for g, e in zip(jets[4][0], exact)) <= 1e-9 * scale
+
+
+def test_a_censored_rows_curvature_does_not_depend_on_the_response_units():
+    """The gamma depends on ``y`` and the mean only through ``y/mean``: rescaling both keeps every jet.
+
+    A right-censored row at ``y = mean``, CV 0.5, in units 1, ``1e110`` and
+    ``1e-110``.  The log-mean jet is unit-free, and the natural-mean Hessian
+    scales by ``mean^-2``; a kernel forming ``y/mean^3`` underflows or
+    overflows there while the Hessian stays representable.
+    """
+    reference = None
+    for unit in (1.0, 1e110, 1e-110):
+        y, theta = np.array([unit]), np.array([[unit, 0.5]])
+        natural = _declared_bounds.gamma_window_jets(
+            y, np.array([_INF]), theta, np.ones(1), order=2
+        )
+        log_mean_hessian = unit**2 * natural[2][0, 0] + unit * natural[1][0, 0]
+        log = _declared_bounds.gamma_window_jets(
+            y, np.array([_INF]), np.log(theta), np.ones(1), order=4, coordinates="log"
+        )
+        row = (log_mean_hessian, *(np.atleast_1d(level[0]) for level in log))
+        assert all(np.all(np.isfinite(level)) for level in row), unit
+        if reference is None:
+            reference = row
+        # log(1e110) is rounded, so log coordinates move x by about 250u.
+        for got, expected in zip(row, reference, strict=True):
+            scale = np.max(np.abs(expected))
+            assert np.max(np.abs(np.subtract(got, expected))) <= 1e-12 * scale, unit
+
+
+def test_a_tiny_left_censoring_threshold_keeps_a_representable_hessian():
+    """At mean = CV = 1 the law is exponential: ``log S(c) = -c/mean``, every mean derivative exact.
+
+    ``c = 1e-160`` puts the engine's point at ``x = 1e-160``, where
+    ``x^-j`` overflows from ``j = 2``.  ``d^2 log S/dmean^2 = -2c`` and the
+    log-mean derivatives alternate ``c, -c, c, -c``.
+    """
+    c = 1e-160
+    lower, upper = np.array([c]), np.array([_INF])
+    natural = _declared_bounds.gamma_window_jets(lower, upper, np.ones((1, 2)), np.ones(1), order=2)
+    log = _declared_bounds.gamma_window_jets(
+        lower, upper, np.zeros((1, 2)), np.ones(1), order=4, coordinates="log"
+    )
+    assert all(np.all(np.isfinite(level)) for level in (*natural, *log))
+    np.testing.assert_allclose(
+        [natural[0][0], natural[1][0, 0], natural[2][0, 0]], [-c, c, -2 * c], rtol=1e-13
+    )
+    np.testing.assert_allclose([log[k][0, 0] for k in range(1, 5)], [c, -c, c, -c], rtol=1e-13)

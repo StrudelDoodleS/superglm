@@ -122,7 +122,7 @@ def _relative_cases():
     gdev_inputs = [(float(r * m), m) for r in _RATIOS if 0.0 < r * m < 1e308]
     gdev_inputs += [(float(r), 1.0) for r in _RATIOS]
     # Near the top of the range, where ``m + y`` overflows.
-    gdev_inputs += [(float(r * 1e308), 1e308) for r in _RATIOS if r * 1e308 < 1.7e308]
+    gdev_inputs += [(float(r * 1e308), 1e308) for r in _RATIOS if r < 1.7]
     yield "gdev", prims.gdev, gdev_inputs, lambda y, m: y / m - 1 - mp.log(y / m)
 
 

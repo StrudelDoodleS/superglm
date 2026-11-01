@@ -66,6 +66,7 @@ from superglm.distributional.kernels._incomplete_gamma import (  # noqa: E402
     log_gamma_tail,
     log_gamma_tail_jet_into,
     log_gamma_tail_jets,
+    log_gamma_tail_scaled_into,
     output_size,
 )
 
@@ -309,6 +310,22 @@ def test_rows_outside_the_domain_write_nan(a: float, x: float, order: int, upper
     out = np.zeros(output_size(MAX_ORDER))
     log_gamma_tail(a, x, upper, order, out)
     assert np.all(np.isnan(out))
+
+
+def test_a_tiny_point_keeps_its_partials_finite() -> None:
+    """``log Q(1, x) = -x``: at ``x = 1e-160`` the plain partials stay finite, the scaled ones exact.
+
+    ``x^-j`` overflows from ``j = 2`` while the partials themselves do not.
+    The scaled partials ``x^j d^j/dx^j`` are ``-x`` and 0, to rounding.
+    """
+    x = 1e-160
+    jets = log_gamma_tail_jets(1.0, x, True, 2)
+    assert all(np.all(np.isfinite(jet)) for jet in jets)
+    assert jets[1][0, 1] == pytest.approx(-1.0, rel=1e-14)
+    scaled = np.zeros(output_size(2))
+    log_gamma_tail_scaled_into(1.0, x, True, 2, scaled, np.empty(WORK_SIZE))
+    assert scaled[2] == pytest.approx(-x, rel=1e-14)
+    assert abs(scaled[5]) <= 1e-15 * x
 
 
 def test_jets_wrapper_packs_the_scalar_engine_rows() -> None:
