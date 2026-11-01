@@ -484,8 +484,8 @@ def _reference_value(fitted: Any, frame: EagerFrame, name: Hashable) -> Any:
 
     A numeric column without levels is held at its median.  Any other column is
     held at its most frequent fitted level, counted over the labels the term reads
-    at it; a tie goes to the level that comes first in :func:`_column_levels` order
-    (labels outside that domain after it, sorted).  The value returned is that
+    at it; a tie goes to the level that comes first in :func:`_column_levels` order.
+    A label the fit never saw is held only if no fitted level is present.  The value returned is that
     level's most frequent label, so a grouped term is held at one of its members.
     """
     values = frame.column_array(name)
@@ -505,15 +505,21 @@ def _reference_value(fitted: Any, frame: EagerFrame, name: Hashable) -> Any:
     counts = np.bincount(present, minlength=len(labels))
     spec = _fitted_level_spec(fitted, name)
     read = list(labels) if spec is None else list(_read_levels(spec, labels))
-    level_counts: dict[Any, int] = {}
-    for level, count in zip(read, counts.tolist(), strict=True):
-        level_counts[level] = level_counts.get(level, 0) + count
     rank = {
         level: position for position, level in enumerate(_column_levels(fitted, frame, name) or ())
     }
-    top = max(level_counts.values())
+    if not any(level in rank for level in read):
+        # No fitted level is present, so each label stands for itself.
+        read = list(labels)
+    level_counts: dict[Any, int] = {}
+    for level, count in zip(read, counts.tolist(), strict=True):
+        level_counts[level] = level_counts.get(level, 0) + count
+    # A label the fit never saw is held only when no fitted level is present.
+    candidates = {level: count for level, count in level_counts.items() if level in rank}
+    candidates = candidates or level_counts
+    top = max(candidates.values())
     level = min(
-        (level for level, count in level_counts.items() if count == top),
+        (level for level, count in candidates.items() if count == top),
         key=lambda level: rank.get(level, len(rank)),
     )
     members = [code for code, read_at in enumerate(read) if read_at == level]
