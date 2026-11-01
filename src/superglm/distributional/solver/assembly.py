@@ -22,8 +22,6 @@ def _aggregate_exponent(values: NDArray[np.float64]) -> int:
     """Power-of-two exponent that keeps a row sum of ``values`` finite.
 
     Zero unless ``len(values) * max|values|`` could leave float64's range.
-    Scaling by a power of two is exact apart from entries far below the sum's
-    own rounding, and the caller scales the contraction back once.
     """
     if not len(values):
         return 0
@@ -31,6 +29,24 @@ def _aggregate_exponent(values: NDArray[np.float64]) -> int:
     if peak == 0.0:
         return 0
     return max(0, math.frexp(peak)[1] + math.frexp(len(values))[1] - _AGGREGATE_EXPONENT)
+
+
+def _range_safe(contract, values: NDArray[np.float64]):
+    """``contract(values)`` for a linear contraction whose row sums could overflow.
+
+    Entries that stay normal after scaling by ``2**-e`` are scaled exactly and
+    contracted, and the result is scaled back once. Entries that would turn
+    subnormal are contracted unscaled; their sums stay far inside the range.
+    In range (``e == 0``) this is ``contract(values)``.
+    """
+    exponent = _aggregate_exponent(values)
+    if not exponent:
+        return contract(values)
+    small = np.abs(values) < np.ldexp(1.0, exponent - 1022)
+    result = np.ldexp(contract(np.ldexp(np.where(small, 0.0, values), -exponent)), exponent)
+    if np.any(small & (values != 0.0)):
+        result = result + contract(np.where(small, values, 0.0))
+    return result
 
 
 def _readonly(values: NDArray) -> NDArray[np.float64]:
@@ -336,12 +352,8 @@ class GroupedGeometryAccumulator:
         if score.shape != expected or not np.all(np.isfinite(score)):
             raise ValueError(f"chunk score must be finite with shape {expected}")
         for state, plan in zip(self._layout.predictors, plan_tuple, strict=True):
-            column = score[:, state.parameter_index]
-            exponent = _aggregate_exponent(column)
-            self._score[state.coefficient_slice] += (
-                np.ldexp(plan.score(np.ldexp(column, -exponent)), exponent)
-                if exponent
-                else plan.score(column)
+            self._score[state.coefficient_slice] += _range_safe(
+                plan.score, score[:, state.parameter_index]
             )
         self._score_chunks += 1
 
@@ -370,15 +382,13 @@ class GroupedGeometryAccumulator:
         left_index, right_index = self._pairs[channel_index]
         left_state = self._layout.predictors[left_index]
         right_state = self._layout.predictors[right_index]
-        exponent = _aggregate_exponent(weight_values)
-        if exponent:
-            weight_values = np.ldexp(weight_values, -exponent)
         if left_index == right_index:
-            block = plan_tuple[left_index].diagonal_moment(weight_values)
+            block = _range_safe(plan_tuple[left_index].diagonal_moment, weight_values)
         else:
-            block = plan_tuple[left_index].cross_moment(plan_tuple[right_index], weight_values)
-        if exponent:
-            block = np.ldexp(block, exponent)
+            block = _range_safe(
+                lambda values: plan_tuple[left_index].cross_moment(plan_tuple[right_index], values),
+                weight_values,
+            )
         self._curvature[left_state.coefficient_slice, right_state.coefficient_slice] += block
         if left_index != right_index:
             self._curvature[right_state.coefficient_slice, left_state.coefficient_slice] += block.T

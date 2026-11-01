@@ -738,18 +738,23 @@ def _evaluate_chunked_geometry(
 
 
 # Owned row arrays a contraction block's design adds per row, by group type.
-# Exact supports and categories are row views; spline-by-category ranges own
-# their local rows and level bins; tensors and SCOP take the generic subset.
+# Exact supports are row views; categories rebuild their codes; tensors and
+# SCOP take the generic subset.
 _BLOCK_ROW_ARRAYS = {
     DiscretizedSSPGroupMatrix: 0,
     SupportCompressedSSPGroupMatrix: 0,
-    CategoricalGroupMatrix: 0,
-    RandomEffectGroupMatrix: 0,
-    DiscretizedSplineCategoricalGroupMatrix: 2,
-    SupportCompressedSplineCategoricalGroupMatrix: 2,
+    CategoricalGroupMatrix: 1,
+    RandomEffectGroupMatrix: 1,
     DiscretizedTensorGroupMatrix: 3,
     DiscretizedSCOPGroupMatrix: 1,
 }
+# A spline-by-category term's level groups own their rows and level bins; the
+# levels' rows are disjoint, so the term owns two arrays per block row.
+_SPLINE_CATEGORY_GROUPS = (
+    DiscretizedSplineCategoricalGroupMatrix,
+    SupportCompressedSplineCategoricalGroupMatrix,
+)
+_SPLINE_CATEGORY_ROW_ARRAYS = 2
 # Transient per-row gathers while one group pair is contracted.
 _BLOCK_GATHER_FLOATS = 4
 
@@ -758,14 +763,20 @@ def contraction_row_bytes(layout: StackedLayout) -> int:
     """Bytes one row adds to a contraction block.
 
     The buffer holds ``K + K(K+1)/2`` channels. Each group adds its owned row
-    arrays; any other group may form a weighted copy of its rows, so it counts
-    its full width.
+    arrays, a spline-by-category term once for all its levels; any other group
+    may form a weighted copy of its rows, so it counts its full width.
     """
     k_parameters = len(layout.predictors)
     floats = k_parameters + k_parameters * (k_parameters + 1) // 2 + _BLOCK_GATHER_FLOATS
     for state in layout.predictors:
+        terms = set()
         for group in state.design.group_matrices:
-            floats += _BLOCK_ROW_ARRAYS.get(type(group), group.shape[1])
+            if type(group) in _SPLINE_CATEGORY_GROUPS:
+                feature = group.spline_cat_feature
+                terms.add(id(group) if feature is None else feature)
+            else:
+                floats += _BLOCK_ROW_ARRAYS.get(type(group), group.shape[1])
+        floats += _SPLINE_CATEGORY_ROW_ARRAYS * len(terms)
     return np.dtype(np.float64).itemsize * floats
 
 

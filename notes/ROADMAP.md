@@ -293,9 +293,9 @@ the resulting bounded range and renderer changes reduce complete-fit medians by
 The constructor-inclusive raw-basis tabmat pilot is slower than those panels,
 so the existing signed matrix-product architecture is retained.
 
-Automatic panels now admit a narrow mixed ordinary layout supported by those
-measurements, with a separate 64 MiB workspace allowance and existing numerical
-refusal. Automatic dense selection remains deferred. Full non-browser validation
+Automatic panels (retired by #569) then admitted a narrow mixed ordinary layout
+supported by those measurements, with a separate 64 MiB workspace allowance
+and existing numerical refusal. Automatic dense selection remains deferred. Full non-browser validation
 passes 12,350 tests, including all 84 required real-data checks, with 109 other
 skips. Final actual-default validation completes 28 timed public fits and three
 separate dispatch witnesses. Discrete medians improve by 58.5% for fragmented

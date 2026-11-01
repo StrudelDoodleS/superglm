@@ -12,7 +12,7 @@ from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import Predictor, PredictorExecutionPlan, compile_predictors
 from superglm.distributional.solver import chunks
-from superglm.features import Categorical, Numeric, Spline
+from superglm.features import Categorical, Numeric, RandomEffect, Spline
 
 from ._distributional_weights import resolved_prior
 from .test_distributional_fused_trial import _literal_design
@@ -143,7 +143,7 @@ def test_tiny_signed_cross_channel_matches_the_literal_design(monkeypatch):
     assert contracted_rows == [len(curvature)]
 
 
-def _mixed_problem():
+def _mixed_problem(*, random_effect=False):
     n = 29
     rows = np.arange(n)
     frame = pd.DataFrame(
@@ -151,19 +151,19 @@ def _mixed_problem():
             "x": np.linspace(-1.1, 0.8, n),
             "s": np.cos(rows * 0.7),
             "g": np.resize(list("abc"), n),
+            "h": np.resize(list("pqrst"), n),
         }
     )
+    location = {"x": Numeric(), "s": Spline(kind="cr", k=4), "g": Categorical()}
+    if random_effect:
+        location["h"] = RandomEffect()
     family = GaussianLS()
     compiled = compile_predictors(
         as_eager_frame(frame),
         resolved_prior(np.ones(n)),
         family.parameters,
         (
-            Predictor(
-                "location",
-                {"x": Numeric(), "s": Spline(kind="cr", k=4), "g": Categorical()},
-                interactions=(("s", "g"),),
-            ),
+            Predictor("location", location, interactions=(("s", "g"),)),
             Predictor("scale", {"s": Spline(kind="cr", k=4)}),
         ),
         model_discrete=True,
@@ -174,7 +174,8 @@ def _mixed_problem():
     curvature = np.column_stack(
         (np.linspace(-0.7, 1.1, n), np.cos(rows), np.linspace(1.3, -0.2, n))
     )
-    return layout, _literal_design(layout), score, curvature
+    literal = None if random_effect else _literal_design(layout)
+    return layout, literal, score, curvature
 
 
 def test_two_chunk_blocks_match_the_literal_mixed_design(monkeypatch):
@@ -211,3 +212,57 @@ def test_cancelling_scores_beyond_the_float_range_aggregate_finitely(monkeypatch
     tolerance = 32 * n * np.finfo(float).eps * (np.abs(literal[0]).T @ np.abs(score[:, 0] * scaled))
     actual = result.score_data[layout.predictors[0].coefficient_slice] * scaled
     assert np.all(np.abs(actual - expected) <= tolerance), (actual, expected, tolerance)
+
+
+def _arrays(group):
+    names = {name for kind in type(group).__mro__ for name in getattr(kind, "__slots__", ())}
+    names |= set(getattr(group, "__dict__", {}))
+    return [value for name in names if isinstance(value := getattr(group, name, None), np.ndarray)]
+
+
+def test_block_design_rows_own_no_more_than_the_budget_counts():
+    layout = _mixed_problem(random_effect=True)[0]
+    rows = chunks.RowChunk(start=5, stop=21, indices=np.arange(5, 21, dtype=np.intp))
+    length = len(rows.indices)
+    kinds = set()
+    for state in layout.predictors:
+        block = chunks._row_design(state, rows, copy=False)
+        # Contract once, so arrays a group builds lazily are counted too.
+        PredictorExecutionPlan(block, state.intercept_index is not None).diagonal_moment(
+            np.linspace(0.5, 1.5, length)
+        )
+        terms = {}
+        for parent, child in zip(state.design.group_matrices, block.group_matrices, strict=True):
+            parents = _arrays(parent)
+            # A level group's row arrays cover only its level's rows.
+            child_rows = len(getattr(child, "row_idx", rows.indices))
+            owned = sum(
+                array.nbytes
+                for array in _arrays(child)
+                if array.shape[:1] == (child_rows,)
+                and not any(np.shares_memory(array, source) for source in parents)
+            )
+            kinds.add(type(child).__name__)
+            if type(parent) in chunks._SPLINE_CATEGORY_GROUPS:
+                assert parent.spline_cat_feature is not None
+                terms[parent.spline_cat_feature] = terms.get(parent.spline_cat_feature, 0) + owned
+                continue
+            counted = chunks._BLOCK_ROW_ARRAYS.get(type(child), child.shape[1])
+            assert owned <= 8 * length * counted, (type(child).__name__, owned, counted)
+        for feature, owned in terms.items():
+            assert owned <= 8 * length * chunks._SPLINE_CATEGORY_ROW_ARRAYS, (feature, owned)
+    assert {"CategoricalGroupMatrix", "RandomEffectGroupMatrix"} <= kinds
+    assert {"DiscretizedSSPGroupMatrix", "DiscretizedSplineCategoricalGroupMatrix"} <= kinds
+
+
+def test_scaled_curvature_keeps_weights_that_would_turn_subnormal(monkeypatch):
+    layout, literal, score, curvature = _problem()
+    level_b = literal[0][:, 3] == 1
+    # One huge weight forces scaling; level b's rows carry only tiny weights.
+    curvature[:, 0] = 2.0**-1050
+    curvature[0, 0] = 2.0**1022
+    assert not level_b[0]
+    result, *_ = _assemble(monkeypatch, problem=(layout, literal, score, curvature))
+    b = layout.predictors[0].coefficient_slice.start + 3
+    expected = np.count_nonzero(level_b) * 2.0**-1050
+    np.testing.assert_allclose(result.data_curvature[b, b], expected, rtol=1e-12, atol=0)

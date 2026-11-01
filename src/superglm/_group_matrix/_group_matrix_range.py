@@ -139,7 +139,8 @@ def group_row_range(group, start: int, stop: int, *, copy: bool = True):
     """Build chunk rows with certified category lookup.
 
     By default the rows are owned copies, so the child never retains its
-    parent's arrays. ``copy=False`` gives row views for a transient consumer.
+    parent's arrays. ``copy=False`` keeps row views wherever the group's
+    constructor does, for a transient consumer.
     """
     if not _supported(group, start, stop):
         return None
