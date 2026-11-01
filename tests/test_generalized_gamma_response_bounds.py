@@ -23,14 +23,18 @@ combiner or the quadrature.
 Error model.  A bounded row's channels carry ``gg_log_tail``'s error in its
 ``(w, Q)`` partials (``tests/test_gg_log_tail.py``, ``tests/test_gg_uniform_tail.py``:
 below ``1e-12`` of the row's same-order scale at orders 0-2 and ``2e-10`` at
-order 4 on these rows' shapes), mapped by the chain rule through ``w``, which
-rounds each product once, and divided by the window's tail probability, which
-multiplies it by ``1 + kappa`` on two-ended windows.  Errors are in ``u`` of
-the row's term scale, the largest oracle entry of that order of either term
-(density or censored window, and truncation window), as in
-``tests/test_gamma_ls_response_bounds.py``; each order is held to its worst
-measured error on this grid times four (``_MARGIN``).  Measured on x86-64
-Linux (AMD EPYC 9645, Zen 5).
+order 4 on these rows' shapes; ``_TAIL_TOLERANCE``), mapped by the chain rule
+through ``w``, which rounds each product once, and divided by the window's
+probability ``T(near) - T(far)``, which multiplies the tails' relative error by
+``1 + 2 kappa`` (``kappa = T(far)/(T(near) - T(far))``, zero on a one-ended
+window; a narrow window is integrated by quadrature with no tail difference).
+Errors are in ``u`` of the row's term scale, the largest oracle entry of that
+order of either term (density or censored window, and truncation window), as
+in ``tests/test_gamma_ls_response_bounds.py``; each row is held to the tails'
+tolerance times ``1 + 2 kappa`` at its largest kappa.  The worst
+errors measured on this grid (x86-64 Linux) are 22, 180, 462, 2.0e3 and 8.2e3
+``u`` at orders 0-4, against gates of at least 9.0e3, 9.0e3, 9.0e3, 1.8e6 and
+1.8e6 ``u``.
 """
 
 from __future__ import annotations
@@ -43,7 +47,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import pytest
-from scipy import optimize, stats
+from scipy import optimize, special, stats
 
 from superglm import (
     GeneralizedGammaLSS,
@@ -75,7 +79,6 @@ mp = pytest.importorskip("mpmath")
 from tests.test_gg_uniform_tail import expansion_reference, reference  # noqa: E402
 
 _U = 2.0**-53
-_MARGIN = 4
 _INF = np.inf
 _FORMS = ("location", "mean")
 
@@ -281,11 +284,44 @@ _ORACLE_ROWS = (
     (2.0, -_INF, 2.0 * (1.0 + 1e-4), 1, 0.5, 0.6, 0.1),
 )
 _FREQUENCY = np.array([1.0, 2.0, 1.0, 3.0, 1.0, 2.0, 1.0, 1.0, 3.0, 2.0, 1.0, 2.0])
-# Worst measured error per order (value, score, Hessian, third, fourth), in u.
-_MEASURED = {
-    "location": (21.7, 180.0, 462.0, 859.0, 1.79e3),
-    "mean": (21.7, 148.0, 412.0, 2.04e3, 8.24e3),
-}
+# The oracle rows that the narrow-window quadrature integrates.
+_NARROW = (10, 11)
+# The tail engines' error on these rows' shapes, relative to the row's same-order
+# scale (tests/test_gg_log_tail.py, tests/test_gg_uniform_tail.py).
+_TAIL_TOLERANCE = (1e-12, 1e-12, 1e-12, 2e-10, 2e-10)
+
+
+def _gg_tails(w: float, q: float) -> tuple[float, float]:
+    """``(F, S)`` of Prentice's standardised generalized gamma at ``w``, from scipy."""
+    if q == 0.0:
+        return special.ndtr(w), special.ndtr(-w)
+    a = 1.0 / q**2
+    point = a * math.exp(q * w)
+    lower, upper = special.gammainc(a, point), special.gammaincc(a, point)
+    return (lower, upper) if q > 0 else (upper, lower)
+
+
+def _kappa(row) -> float:
+    """The largest ``kappa`` of a row's two-ended windows, read from the tail the combiner takes.
+
+    A two-ended window is read from the lower tail when its midpoint in ``w`` is
+    below ``-Q/3`` (``kernels/_declared_bounds.py``), otherwise from the upper tail.
+    """
+    y, lower, upper, side, mu, sigma, q = row
+    windows = [(y, upper) if side > 0 else (lower, y)] if side else []
+    if lower > -_INF or upper < _INF:
+        windows.append((lower, upper))
+    kappa = 0.0
+    for lo, hi in windows:
+        if not (lo > 0 and hi < _INF):
+            continue
+        w_lo, w_hi = ((math.log(v) - mu) / sigma for v in (lo, hi))
+        (f_lo, s_lo), (f_hi, s_hi) = _gg_tails(w_lo, q), _gg_tails(w_hi, q)
+        near, far = (f_hi, f_lo) if 0.5 * (w_lo + w_hi) < -q / 3.0 else (s_lo, s_hi)
+        kappa = max(kappa, far / (near - far))
+    return kappa
+
+
 _KEYS = tuple(
     (a, b, c)
     for t in range(5)
@@ -459,7 +495,8 @@ def _oracle(form):
     return tuple(rows)
 
 
-def _channel_errors(form: str, semantics: str) -> list[float]:
+def _channel_errors(form: str, semantics: str) -> list[list[float]]:
+    """Each oracle row's error in u per order, for one form and weight semantics."""
     family = GeneralizedGammaLSS(parametrisation=form)
     y = np.array([row[0] for row in _ORACLE_ROWS])
     bounds = ResponseBounds.from_arrays(
@@ -494,7 +531,7 @@ def _channel_errors(form: str, semantics: str) -> list[float]:
     assert np.all(evaluation.valid)
     column3 = {key: c for c, key in enumerate(itertools.combinations_with_replacement(range(3), 3))}
     column4 = {key: c for c, key in enumerate(itertools.combinations_with_replacement(range(3), 4))}
-    worst = [0.0] * 5
+    per_row = []
     for i, (partials, scales) in enumerate(_oracle(form)):
         mass = 1.0 if weights is None else weights[i]
         value = (
@@ -516,18 +553,27 @@ def _channel_errors(form: str, semantics: str) -> list[float]:
             ],
             [-partials[4][column4[tuple(sorted((*p, *r)))]] for r in pairs for p in pairs],
         )
-        for order, (got, want) in enumerate(zip(computed, exact, strict=True)):
-            error = max(abs(mp.mpf(float(g)) - mass * e) for g, e in zip(got, want, strict=True))
-            worst[order] = max(worst[order], float(error / (mass * scales[order])) / _U)
-    return worst
+        per_row.append(
+            [
+                float(
+                    max(abs(mp.mpf(float(g)) - mass * e) for g, e in zip(got, want, strict=True))
+                    / (mass * scales[order])
+                )
+                / _U
+                for order, (got, want) in enumerate(zip(computed, exact, strict=True))
+            ]
+        )
+    return per_row
 
 
 @pytest.mark.parametrize("form", _FORMS)
 @pytest.mark.parametrize("semantics", ["prior", "frequency"])
 def test_bounded_channels_match_the_mpmath_oracle_to_order_four(form, semantics):
-    worst = _channel_errors(form, semantics)
-    for order, (error, measured) in enumerate(zip(worst, _MEASURED[form], strict=True)):
-        assert error <= _MARGIN * max(measured, 1.0), (order, error)
+    errors = _channel_errors(form, semantics)
+    for i, (row, row_errors) in enumerate(zip(_ORACLE_ROWS, errors, strict=True)):
+        conditioning = 1.0 if i in _NARROW else 1.0 + 2.0 * _kappa(row)
+        for order, error in enumerate(row_errors):
+            assert error <= _TAIL_TOLERANCE[order] * conditioning / _U, (i, order, error)
 
 
 # -- smoothing parameters -----------------------------------------------------
