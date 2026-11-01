@@ -1567,7 +1567,7 @@ def _fit_dense_fixed_lambda_core(
 
     def adopt(run: _OptimizationRun) -> None:
         nonlocal state, coefficient_geometry, converged, reason, score_relative
-        nonlocal objective_relative_change, step_relative, observed_geometry
+        nonlocal objective_relative_change, step_relative
         state = run.state
         coefficient_geometry = run.geometry
         history.extend(run.history)
@@ -1576,7 +1576,6 @@ def _fit_dense_fixed_lambda_core(
         score_relative = run.score_relative
         objective_relative_change = run.objective_relative_change
         step_relative = run.step_relative
-        observed_geometry = run.observed_geometry
 
     if converged and _wall_step_unsettled(context, state, coefficient_geometry, solver_config):
         # Continue a fit stopped with a row still moving towards a wall, at a
@@ -1603,6 +1602,7 @@ def _fit_dense_fixed_lambda_core(
             continued = None
         if continued is not None and continued.converged:
             adopt(continued)
+            observed_geometry = continued.observed_geometry
         del continued
 
     with measure_phase(phase_recorder, "terminal_observed_retry_fallback"):
@@ -1677,16 +1677,16 @@ def _fit_dense_fixed_lambda_core(
                 retry = None
             if retry is not None:
                 adopt(retry)
-                del retry
                 observed_geometry = _geometry_from(
                     context,
                     state,
                     "observed",
                     retry_config,
                     coefficient_geometry,
-                    observed_geometry,
+                    retry.observed_geometry,
                     phase_recorder,
                 )
+                del retry
             fisher_matrix = None
             # A dense reused endpoint carries no row derivatives (see
             # _reuse_observed_initial_result), and a failed retry keeps that
