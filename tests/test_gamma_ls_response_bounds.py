@@ -791,3 +791,12 @@ def test_a_collapsing_cv_at_the_mean_survives_with_probability_one_half():
         np.array([49.0]), np.array([_INF]), np.array([[49.0, 1e-16]])
     )
     np.testing.assert_allclose(got, [np.log(0.5)], rtol=1e-12)
+
+
+@pytest.mark.parametrize(("y", "cv"), [(1e14, 1e7), (1e16, 1e8)])
+def test_a_right_censored_row_at_a_vanishing_shape_reads_its_small_upper_tail(y, cv):
+    """Shape ``cv^-2`` (``1e-14``, ``1e-16``) at ``x = 1``: ``Q ~ a E1(1)`` is not read as ``1 - P``."""
+    got = GammaLS().log_window_probability(np.array([y]), np.array([_INF]), np.array([[1.0, cv]]))
+    with mp.workdps(40):
+        exact = mp.log(mp.gammainc(1 / mp.mpf(cv) ** 2, 1, mp.inf, regularized=True))
+    np.testing.assert_allclose(got, [float(exact)], rtol=1e-13)

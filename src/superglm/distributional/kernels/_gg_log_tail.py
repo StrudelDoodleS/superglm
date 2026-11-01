@@ -45,8 +45,8 @@ Rows neither engine evaluates write NaN everywhere: a non-finite ``w`` or
 ``q``, ``q`` so small that ``1/q^2`` overflows outside the first route,
 ``x = a e^(q w)`` that overflows or underflows to zero, or an ``order``
 outside ``0..4``.
-For ``|q| > 10`` (``a < 0.01``) the incomplete-gamma engine's error grows like
-``u/a`` (its documented envelope).
+For ``|q| > 10`` (``a < 0.01``) the incomplete-gamma engine reads the tail
+beside its series as ``Q = u + v`` (its ``SMALL_SHAPE`` route).
 
 Imports only numpy and numba.
 """
@@ -74,7 +74,7 @@ from superglm.distributional.kernels._incomplete_gamma import (
 
 # Digest of the compiled callees above, stamped by ``tools/generate_severity_families.py``:
 # Numba's on-disk cache keys a compiled caller on its own file only.
-_CALLEE_DIGEST = "da0462331d91c38ccf2fbbb85a76dcadca2fe510d8485e3fbd075b2def06e5e5"
+_CALLEE_DIGEST = "a741b02b6f1f327625c081214f7775e566d1a46c95577b3f9747bc4b383b18a0"
 
 ORDER_MAX = 4
 _N = (ORDER_MAX + 1) * (ORDER_MAX + 2) // 2
