@@ -8,7 +8,7 @@ import pytest
 import superglm.distributional.smoothing.loop as smoothing_loop
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.model import fit_dense_distributional
-from superglm.distributional.result import DistributionalEFSConfig
+from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.smoothing.endpoint_laml import EndpointLaplaceError
 from superglm.distributional.weights import WeightContract
 from superglm.reml.penalty_support import PenaltyNumericalError

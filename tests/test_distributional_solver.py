@@ -10,7 +10,6 @@ import pytest
 import superglm.distributional.solver.assembly as assembly_module
 import superglm.distributional.solver.solver as solver_module
 from superglm._frame import as_eager_frame
-from superglm.distributional.efs import joint_laplace_objective
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
@@ -19,8 +18,9 @@ from superglm.distributional.family import (
     ObservationContract,
 )
 from superglm.distributional.layout import build_stacked_layout
-from superglm.distributional.penalty_face import build_penalty_face
 from superglm.distributional.predictor import Predictor, compile_predictors
+from superglm.distributional.smoothing.objective import joint_laplace_objective
+from superglm.distributional.smoothing.penalty_face import build_penalty_face
 from superglm.distributional.solver import DenseSolverConfig, fit_dense_fixed_lambda
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,

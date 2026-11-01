@@ -50,7 +50,8 @@ from superglm.distributional.family import (
     PredictorCurvatureSecondDirectionalFamily,
 )
 from superglm.distributional.layout import StackedLayout
-from superglm.distributional.result import ANALYTIC_DIRECTION_AUTHORITY, DenseSolverResult
+from superglm.distributional.results.endpoint_evidence import ANALYTIC_DIRECTION_AUTHORITY
+from superglm.distributional.results.solver import DenseSolverResult
 from superglm.distributional.smoothing.endpoint_direction import (
     DEFAULT_STEP,
     FINITE_DIFFERENCE_AUTHORITY,

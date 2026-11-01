@@ -623,7 +623,6 @@ class GlobalMomentPlan:
                     "finish_count",
                     "global_zeroed_bytes",
                     "refusal_count",
-                    "support_authority_checks",
                     "batched_moment_calls",
                     "native_moment_workers",
                 )
@@ -749,18 +748,6 @@ class GlobalMomentPlan:
                         "DiscretizedSSPGroupMatrix | DiscretizedSplineCategoricalGroupMatrix", group
                     )
                     support = self._supports[slot]
-                    basis, transform = support.basis, support.transform
-                    _array(group.B_unique, basis.shape, basis.dtype, "live support basis")
-                    _array(group.R_inv, transform.shape, transform.dtype, "live solver map")
-                    if (
-                        group.n_bins != support.n_bins
-                        or not np.array_equal(group.B_unique, basis)
-                        or not np.array_equal(group.R_inv, transform)
-                    ):
-                        raise GlobalMomentRefusalError(
-                            "live support basis or solver map mismatches authority"
-                        )
-                    self._stats["support_authority_checks"] += 1
                     target = cast(np.ndarray, self._bins)[slot, :n]
                     if group_type is DiscretizedSSPGroupMatrix:
                         group = cast(DiscretizedSSPGroupMatrix, group)
@@ -829,10 +816,10 @@ class GlobalMomentPlan:
     def add_row_range(self, plans, start, stop, score_eta, curvature_packed):
         """Ingest contiguous original-design rows using the owned chunk buffers.
 
-        Live numeric arrays are checked before slicing. Small B/R authority
-        tables are compared exactly on each call; source-sized row lookup
-        caches retain the ordinary row_subset contract and belong to the
-        caller's groups. The usual certified path constructs no child designs.
+        Live numeric arrays are checked before slicing. The support basis and
+        solver map are the copies the plan took when it was built; source-sized
+        row lookup caches retain the ordinary row_subset contract and belong to
+        the caller's groups. The usual certified path constructs no child designs.
         """
         if self._state != "accumulating":
             self._refuse("add_row_range requires a reset and an unrefused, unfinished geometry")

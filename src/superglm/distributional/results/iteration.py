@@ -11,6 +11,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR
+from superglm.distributional._common import frozen_float_mapping
 from superglm.distributional.results.endpoint_evidence import (
     EFSAccelerationOutcome,
     EndpointAssessmentFailureReason,
@@ -19,7 +20,6 @@ from superglm.distributional.results.endpoint_evidence import (
     _finite_nonnegative,
     _finite_positive,
 )
-from superglm.distributional.results.solver import _frozen_float_mapping
 from superglm.distributional.smoothing.acceleration import AccelerationRefusalReason
 from superglm.distributional.telemetry import CurvatureTelemetry
 
@@ -272,36 +272,36 @@ class DistributionalEFSIteration:
             or self.source_fit_index < 0
         ):
             raise ValueError("source_fit_index must be a non-negative integer")
-        before = _frozen_float_mapping(
+        before = frozen_float_mapping(
             self.lambdas_before,
             name="lambdas_before",
             nonnegative=True,
         )
         names = tuple(before)
         mappings = {
-            "proposed_lambdas": _frozen_float_mapping(
+            "proposed_lambdas": frozen_float_mapping(
                 self.proposed_lambdas,
                 name="proposed_lambdas",
                 nonnegative=True,
             ),
-            "lambdas_after": _frozen_float_mapping(
+            "lambdas_after": frozen_float_mapping(
                 self.lambdas_after,
                 name="lambdas_after",
                 nonnegative=True,
             ),
-            "proposed_log_steps": _frozen_float_mapping(
+            "proposed_log_steps": frozen_float_mapping(
                 self.proposed_log_steps,
                 name="proposed_log_steps",
             ),
-            "accepted_log_steps": _frozen_float_mapping(
+            "accepted_log_steps": frozen_float_mapping(
                 self.accepted_log_steps,
                 name="accepted_log_steps",
             ),
-            "quadratic_forms": _frozen_float_mapping(
+            "quadratic_forms": frozen_float_mapping(
                 self.quadratic_forms,
                 name="quadratic_forms",
             ),
-            "trace_terms": _frozen_float_mapping(self.trace_terms, name="trace_terms"),
+            "trace_terms": frozen_float_mapping(self.trace_terms, name="trace_terms"),
         }
         if any(tuple(mapping) != names for mapping in mappings.values()):
             raise ValueError("EFS iteration mappings must share one deterministic key order")
@@ -638,7 +638,7 @@ class DistributionalEFSIteration:
                 raise ValueError(
                     "a Newton iteration must carry its gradient and projected gradient norm"
                 )
-            gradient = _frozen_float_mapping(self.gradient, name="gradient")
+            gradient = frozen_float_mapping(self.gradient, name="gradient")
             gradient_names = tuple(gradient)
             if (
                 any(name not in names for name in gradient_names)
@@ -647,7 +647,7 @@ class DistributionalEFSIteration:
                 raise ValueError("gradient names must follow the iteration's lambda order")
             object.__setattr__(self, "gradient", gradient)
             if self.gradient_certificate is not None:
-                certificate = _frozen_float_mapping(
+                certificate = frozen_float_mapping(
                     self.gradient_certificate, name="gradient_certificate", nonnegative=True
                 )
                 if tuple(certificate) != gradient_names:

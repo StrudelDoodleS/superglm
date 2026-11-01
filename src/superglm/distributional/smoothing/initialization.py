@@ -14,7 +14,8 @@ from superglm.distributional.family import (
     expected_information_provider,
 )
 from superglm.distributional.layout import StackedLayout
-from superglm.distributional.result import DenseSolverConfig, DistributionalEFSConfig
+from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.smoothing.objective import initialize_distributional_lambdas
 from superglm.distributional.solver.assembly import _evaluate_predictors_from_matrices
 from superglm.distributional.solver.chunks import ChunkSize, _predictor_values, iter_row_chunks

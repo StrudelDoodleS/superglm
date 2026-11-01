@@ -39,6 +39,7 @@ from numpy.typing import NDArray
 from scipy import special
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm.distributional._common import row_index
 from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
 from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
 from superglm.distributional.family import (
@@ -57,7 +58,6 @@ from superglm.distributional.kernels.log_normal import location_of_mean
 
 # These helpers preserve the model boundary's shape-only-then-slice rule, so a
 # row omitted by zero likelihood weight never reaches offset value validation.
-# ``_row_index`` is the posterior primitive's rule for naming payload rows.
 from superglm.distributional.model import (
     _prediction_offsets,
     _take_unvalidated_offsets,
@@ -70,7 +70,6 @@ from superglm.distributional.observation import (
     resolve_response_bounds,
     unvalidated_bound_arrays,
 )
-from superglm.distributional.posterior import _row_index
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
@@ -929,7 +928,7 @@ def score_table(
                 threshold=value,
             ),
         )
-    return pd.DataFrame(columns, index=_row_index(X, rows.n_observations))
+    return pd.DataFrame(columns, index=row_index(X, rows.n_observations))
 
 
 __all__ = [

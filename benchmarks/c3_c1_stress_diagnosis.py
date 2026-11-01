@@ -232,7 +232,7 @@ def main():
 
     import superglm
     from superglm.distributional import GeneralizedParetoLSS
-    from superglm.distributional.assembly import dense_predictor_matrices
+    from superglm.distributional.solver.assembly import dense_predictor_matrices
 
     imported = Path(superglm.__file__).resolve()
     if not imported.is_relative_to(source_root / "src"):

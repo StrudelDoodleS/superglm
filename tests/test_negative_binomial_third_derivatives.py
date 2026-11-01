@@ -208,7 +208,7 @@ def test_gradient_certificate_carries_the_theta_third_bound() -> None:
     from superglm._frame import as_eager_frame
     from superglm.distributional.layout import build_stacked_layout
     from superglm.distributional.predictor import Predictor, compile_predictors
-    from superglm.distributional.result import DenseSolverConfig
+    from superglm.distributional.results.solver import DenseSolverConfig
     from superglm.distributional.smoothing.derivatives import laml_derivatives
     from superglm.distributional.solver import fit_dense_fixed_lambda
     from superglm.distributional.solver.solver import _DenseObservedReuseSession

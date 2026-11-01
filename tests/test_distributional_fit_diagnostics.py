@@ -22,8 +22,11 @@ from superglm.distributional.fit_diagnostics import (
 )
 from superglm.distributional.model import DenseDistributionalModel, fit_dense_distributional
 from superglm.distributional.predictor import Predictor
-from superglm.distributional.result import DenseSolverConfig, DistributionalEFSConfig
-from superglm.distributional.results.solver import _validate_objective_and_step_certificate
+from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.solver import (
+    DenseSolverConfig,
+    _validate_objective_and_step_certificate,
+)
 from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.distributional.weights import WeightContract
 from superglm.features import Numeric, RandomEffect, Spline

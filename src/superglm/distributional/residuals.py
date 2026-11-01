@@ -38,6 +38,7 @@ from numpy.typing import NDArray
 from scipy import special
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm.distributional._common import json_floats, readonly_float
 from superglm.distributional.family import (
     AtomFamily,
     DistributionFunctionFamily,
@@ -82,20 +83,6 @@ def _validated_kind(kind: str) -> ResidualKind:
     return kind
 
 
-def _readonly(values: NDArray, *, dtype: type = np.float64) -> NDArray:
-    array = np.array(values, dtype=dtype, copy=True)
-    array.setflags(write=False)
-    return array
-
-
-def _json_values(values: NDArray) -> list[Any]:
-    """Return nested lists of floats in which every non-finite value is ``None``."""
-    array = np.asarray(values, dtype=np.float64)
-    if array.ndim > 1:
-        return [_json_values(row) for row in array]
-    return [None if not np.isfinite(value) else float(value) for value in array]
-
-
 @dataclass(frozen=True)
 class ResidualSet:
     """The transform, its normal inverse, and everything a check needs beside them.
@@ -131,7 +118,7 @@ class ResidualSet:
     bounds: ResponseBounds | None = None
 
     def __post_init__(self) -> None:
-        pit = _readonly(self.pit)
+        pit = readonly_float(self.pit)
         if pit.ndim != 1 or len(pit) < 1:
             raise ValueError("pit, quantile, y and both weight vectors give one value per row")
         n_rows = len(pit)
@@ -142,12 +129,12 @@ class ResidualSet:
             "prior_weights": self.prior_weights,
         }
         for name, values in rowwise.items():
-            array = _readonly(values)
+            array = readonly_float(values)
             if array.shape != (n_rows,):
                 raise ValueError("pit, quantile, y and both weight vectors give one value per row")
             object.__setattr__(self, name, array)
         for name in ("theta", "eta"):
-            array = _readonly(getattr(self, name))
+            array = readonly_float(getattr(self, name))
             if array.ndim != 2 or array.shape[0] != n_rows or array.shape[1] < 1:
                 raise ValueError(f"{name} must be a (rows, parameters) parameter matrix")
             object.__setattr__(self, name, array)
@@ -165,7 +152,7 @@ class ResidualSet:
         if (self.pit_lower is None) != (self.pit_upper is None):
             raise ValueError("pit_lower and pit_upper must be supplied together")
         if self.pit_lower is not None:
-            lower, upper = _readonly(self.pit_lower), _readonly(self.pit_upper)
+            lower, upper = readonly_float(self.pit_lower), readonly_float(self.pit_upper)
             if (
                 lower.shape != (n_rows,)
                 or upper.shape != (n_rows,)
@@ -194,18 +181,18 @@ class ResidualSet:
         return {
             "n_rows": int(self.n_rows),
             "n_parameters": int(self.theta.shape[1]),
-            "pit": _json_values(self.pit),
-            "quantile": _json_values(self.quantile),
-            "theta": _json_values(self.theta),
-            "eta": _json_values(self.eta),
-            "y": _json_values(self.y),
-            "weights": _json_values(self.weights),
-            "prior_weights": _json_values(self.prior_weights),
+            "pit": json_floats(self.pit),
+            "quantile": json_floats(self.quantile),
+            "theta": json_floats(self.theta),
+            "eta": json_floats(self.eta),
+            "y": json_floats(self.y),
+            "weights": json_floats(self.weights),
+            "prior_weights": json_floats(self.prior_weights),
             "clipped_rows": int(self.clipped_rows),
             "randomised_rows": int(self.randomised_rows),
             "weight_semantics": str(self.weight_semantics),
-            "pit_lower": None if self.pit_lower is None else _json_values(self.pit_lower),
-            "pit_upper": None if self.pit_upper is None else _json_values(self.pit_upper),
+            "pit_lower": None if self.pit_lower is None else json_floats(self.pit_lower),
+            "pit_upper": None if self.pit_upper is None else json_floats(self.pit_upper),
         }
 
 

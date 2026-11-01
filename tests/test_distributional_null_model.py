@@ -14,7 +14,7 @@ from superglm.distributional.inference import compute_joint_inference
 from superglm.distributional.layout import StackedLayout, build_stacked_layout
 from superglm.distributional.null_model import NullModelFitError, fit_joint_null_model
 from superglm.distributional.predictor import Predictor, compile_predictors
-from superglm.distributional.result import DenseSolverConfig
+from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.solver import DenseSolverError
 from superglm.distributional.weights import (
     UnsupportedLikelihoodContractError,

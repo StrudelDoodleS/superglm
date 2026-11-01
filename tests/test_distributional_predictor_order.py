@@ -14,7 +14,7 @@ from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.model import _predict_one_eta
 from superglm.distributional.predictor import compile_predictors
-from superglm.distributional.result import DenseSolverConfig
+from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.solver import chunks, fit_dense_fixed_lambda
 from superglm.distributional.solver._global_moments import build_global_moment_plan
 from superglm.group_matrix import CategoricalGroupMatrix

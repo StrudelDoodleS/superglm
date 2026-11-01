@@ -24,11 +24,13 @@ from scipy.optimize import brentq
 from superglm.distributional._row_design import bounded_predictor_matrices
 from superglm.distributional.family import DistributionalFamily, FamilyLikelihoodPlan
 from superglm.distributional.layout import StackedLayout
-from superglm.distributional.result import (
-    DenseSolverConfig,
-    DenseSolverResult,
+from superglm.distributional.results.iteration import (
     DistributionalEFSConfig,
     DistributionalEFSIteration,
+)
+from superglm.distributional.results.solver import (
+    DenseSolverConfig,
+    DenseSolverResult,
     _assessment_is_numerically_stationary,
 )
 from superglm.distributional.smoothing.authority import (

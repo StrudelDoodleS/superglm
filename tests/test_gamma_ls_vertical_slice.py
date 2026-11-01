@@ -13,11 +13,6 @@ from scipy import optimize, special
 
 from superglm import Spline, SuperLSS
 from superglm.distributional import GammaLS, Predictor
-from superglm.distributional.assembly import dense_predictor_matrices
-from superglm.distributional.efs_acceleration import (
-    MultisecantDecision,
-    WindowedTypeIIAnderson,
-)
 from superglm.distributional.family import COMPLETE_OBSERVATION, InitialParameterState
 from superglm.distributional.model import (
     DenseDistributionalModel,
@@ -25,11 +20,13 @@ from superglm.distributional.model import (
     refit_dense_distributional,
 )
 from superglm.distributional.prediction_design import build_joint_prediction_design
-from superglm.distributional.result import (
-    DenseSolverConfig,
-    DenseSolverResult,
-    DistributionalEFSConfig,
+from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.solver import DenseSolverConfig, DenseSolverResult
+from superglm.distributional.smoothing.acceleration import (
+    MultisecantDecision,
+    WindowedTypeIIAnderson,
 )
+from superglm.distributional.solver.assembly import dense_predictor_matrices
 from superglm.distributional.weights import (
     LikelihoodWeightError,
     WeightContract,

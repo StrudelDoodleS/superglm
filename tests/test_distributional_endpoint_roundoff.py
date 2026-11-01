@@ -8,8 +8,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import superglm.distributional.efs as efs_module
-import superglm.distributional.result as result_module
 import superglm.distributional.smoothing.authority as smoothing_authority
 import superglm.distributional.smoothing.faces as smoothing_faces
 import superglm.distributional.solver.solver as solver_module
@@ -30,7 +28,12 @@ from superglm._frame import as_eager_frame
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import compile_predictors
-from superglm.distributional.result import DenseSolverConfig, DenseSolverResult
+from superglm.distributional.results.solver import (
+    DenseSolverConfig,
+    DenseSolverResult,
+    _assessment_is_numerically_stationary,
+    _assessment_retained_kkt_ratio,
+)
 from superglm.distributional.smoothing.penalty_face import build_penalty_face
 from superglm.distributional.solver import fit_dense_fixed_lambda
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
@@ -109,7 +112,7 @@ def test_stationary_endpoint_revalidation_accepts_a_subnormal_projection_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = 0
-    real_check = efs_module._check_face_direction
+    real_check = smoothing_faces._check_face_direction
 
     def perturb_revalidation_start(*args: object, **kwargs: object):
         nonlocal calls
@@ -121,7 +124,6 @@ def test_stationary_endpoint_revalidation_accepts_a_subnormal_projection_replay(
         return real_check(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(smoothing_faces, "_check_face_direction", perturb_revalidation_start)
-    monkeypatch.setattr(efs_module, "_check_face_direction", perturb_revalidation_start)
     component_name, smoothing = endpoint_tests._scalar_efs_fit(0.5)
 
     assert calls == 2
@@ -134,7 +136,7 @@ def test_endpoint_revalidation_records_material_state_refusal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = 0
-    real_check = efs_module._check_face_direction
+    real_check = smoothing_faces._check_face_direction
     real_fit = smoothing_faces._fit_endpoint_authority_stationary
     inject_result = False
     injected = False
@@ -168,7 +170,6 @@ def test_endpoint_revalidation_records_material_state_refusal(
         smoothing_faces, "_fit_endpoint_authority_stationary", inject_endpoint_result
     )
     monkeypatch.setattr(smoothing_faces, "_check_face_direction", perturb_revalidation_start)
-    monkeypatch.setattr(efs_module, "_check_face_direction", perturb_revalidation_start)
     (
         _family,
         _layout,
@@ -192,7 +193,7 @@ def test_result_rejects_a_within_bound_state_change_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = 0
-    real_check = efs_module._check_face_direction
+    real_check = smoothing_faces._check_face_direction
     real_fit = smoothing_faces._fit_endpoint_authority_stationary
     inject_result = False
     injected = False
@@ -226,7 +227,6 @@ def test_result_rejects_a_within_bound_state_change_receipt(
         smoothing_faces, "_fit_endpoint_authority_stationary", inject_endpoint_result
     )
     monkeypatch.setattr(smoothing_faces, "_check_face_direction", material_refusal)
-    monkeypatch.setattr(efs_module, "_check_face_direction", material_refusal)
     _values = endpoint_tests._gamma_isolated_cap_face_problem()
     smoothing = _values[-1]
     retraction = next(item for item in smoothing.history if item.deactivated_face_components)
@@ -244,9 +244,7 @@ def test_result_rejects_a_within_bound_state_change_receipt(
 
     # Beside a numerically stationary cap, a replay that stepped changed the
     # endpoint state only beyond the refit envelope.
-    assert result_module._assessment_is_numerically_stationary(
-        cap_fit, retraction.coefficient_tolerances[0]
-    )
+    assert _assessment_is_numerically_stationary(cap_fit, retraction.coefficient_tolerances[0])
     fits[endpoint_index] = replace(within_bound, iterations=within_bound.iterations + 1)
     with pytest.raises(ValueError, match="within the refit envelope"):
         replace(smoothing, coefficient_fits=tuple(fits))
@@ -342,8 +340,8 @@ def test_a_capped_fit_stops_at_its_rounding_floor() -> None:
     assert replay.iterations == 0
     np.testing.assert_array_equal(replay.coefficients, start)
     # One ulp of a penalized coefficient moves the score beyond the bare tolerance.
-    assert result_module._assessment_retained_kkt_ratio(replay) > tolerance
-    assert result_module._assessment_is_numerically_stationary(replay, tolerance)
+    assert _assessment_retained_kkt_ratio(replay) > tolerance
+    assert _assessment_is_numerically_stationary(replay, tolerance)
 
 
 def test_endpoint_authority_does_not_polish_a_score_within_its_rounding_floor(
@@ -376,8 +374,8 @@ def test_endpoint_authority_does_not_polish_a_score_within_its_rounding_floor(
     )
 
     assert calls == 1
-    assert result_module._assessment_retained_kkt_ratio(fit) > config.tolerance
-    assert result_module._assessment_is_numerically_stationary(fit, config.tolerance)
+    assert _assessment_retained_kkt_ratio(fit) > config.tolerance
+    assert _assessment_is_numerically_stationary(fit, config.tolerance)
 
 
 def test_numerical_stationarity_admits_a_score_within_its_rounding_floor() -> None:
@@ -403,16 +401,16 @@ def test_numerical_stationarity_admits_a_score_within_its_rounding_floor() -> No
         )
 
     within_floor = with_score(stiff, 0.5 * rounding[stiff])
-    assert result_module._assessment_retained_kkt_ratio(within_floor) > tolerance
-    assert result_module._assessment_is_numerically_stationary(within_floor, tolerance)
+    assert _assessment_retained_kkt_ratio(within_floor) > tolerance
+    assert _assessment_is_numerically_stationary(within_floor, tolerance)
 
     unpenalized = int(np.flatnonzero(nonzeros == 0)[0])
     above_floor = with_score(unpenalized, 2.0 * tolerance * scale)
-    assert not result_module._assessment_is_numerically_stationary(above_floor, tolerance)
+    assert not _assessment_is_numerically_stationary(above_floor, tolerance)
 
     trial = _capped_spline_fit(max_iterations=1)
     assert trial.converged is False
-    assert not result_module._assessment_is_numerically_stationary(trial, tolerance)
+    assert not _assessment_is_numerically_stationary(trial, tolerance)
 
 
 def test_endpoint_revalidation_accepts_a_stepped_replay_within_the_refit_envelope(
@@ -422,7 +420,7 @@ def test_endpoint_revalidation_accepts_a_stepped_replay_within_the_refit_envelop
     accepting one beside a strictly stationary cap in a result saved before the
     rounding-floor rule."""
     calls = 0
-    real_check = efs_module._check_face_direction
+    real_check = smoothing_faces._check_face_direction
     real_fit = smoothing_faces._fit_endpoint_authority_stationary
     inject_result = False
     injected = False
@@ -452,7 +450,6 @@ def test_endpoint_revalidation_accepts_a_stepped_replay_within_the_refit_envelop
 
     monkeypatch.setattr(smoothing_faces, "_fit_endpoint_authority_stationary", step_endpoint_replay)
     monkeypatch.setattr(smoothing_faces, "_check_face_direction", replay_revalidation)
-    monkeypatch.setattr(efs_module, "_check_face_direction", replay_revalidation)
     values = endpoint_tests._gamma_isolated_cap_face_problem()
     component_name, smoothing = values[5], values[-1]
 
@@ -465,7 +462,7 @@ def test_endpoint_revalidation_accepts_a_stepped_replay_within_the_refit_envelop
     )
     source_fit = smoothing.coefficient_fits[revalidation.source_fit_index]
     tolerance = revalidation.coefficient_tolerances[0]
-    assert result_module._assessment_is_numerically_stationary(cap_fit, tolerance)
+    assert _assessment_is_numerically_stationary(cap_fit, tolerance)
     assert endpoint_fit.iterations > 0
     assert not np.array_equal(endpoint_fit.coefficients, source_fit.coefficients)
     assert smoothing.terminal_fit is endpoint_fit
@@ -623,7 +620,7 @@ def test_a_score_inside_its_floor_that_a_newton_step_removes_is_not_stationary()
     unconverged = replace(
         fit, terminal_score=score, converged=False, convergence_reason="max_iterations"
     )
-    assert not result_module._assessment_is_numerically_stationary(unconverged, tolerance)
+    assert not _assessment_is_numerically_stationary(unconverged, tolerance)
     with pytest.raises(ValueError, match="rounding floor"):
         replace(fit, terminal_score=score, convergence_reason="score")
 
@@ -733,8 +730,8 @@ def test_a_floor_stop_holds_for_every_score_its_rounding_admits(
     unconverged = replace(
         fit, terminal_score=score, converged=False, convergence_reason="max_iterations"
     )
-    assert result_module._assessment_retained_kkt_ratio(unconverged) > tolerance
-    assert not result_module._assessment_is_numerically_stationary(unconverged, tolerance)
+    assert _assessment_retained_kkt_ratio(unconverged) > tolerance
+    assert not _assessment_is_numerically_stationary(unconverged, tolerance)
     with pytest.raises(ValueError, match="rounding floor"):
         replace(fit, terminal_score=score, convergence_reason="score")
 
@@ -759,12 +756,12 @@ def test_a_rounding_floor_stop_needs_unfallbacked_observed_curvature() -> None:
     # its floor.
     score = np.array([1.0e-6, -1.0e-6, 0.0])
     within = replace(fit, terminal_score=score, convergence_reason="score")
-    assert result_module._assessment_retained_kkt_ratio(within) > tolerance
-    assert result_module._assessment_is_numerically_stationary(within, tolerance)
+    assert _assessment_retained_kkt_ratio(within) > tolerance
+    assert _assessment_is_numerically_stationary(within, tolerance)
 
     fallback = replace(fit.terminal_curvature, actual_source="fisher", fallback_count=1)
     unconverged = replace(within, converged=False, convergence_reason="max_iterations")
-    assert not result_module._assessment_is_numerically_stationary(
+    assert not _assessment_is_numerically_stationary(
         replace(unconverged, terminal_curvature=fallback), tolerance
     )
     with pytest.raises(ValueError, match="rounding floor"):

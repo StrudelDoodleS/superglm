@@ -36,7 +36,8 @@ from superglm.distributional.families.tweedie import TweedieLSS
 from superglm.distributional.family import ParameterSpec, ParameterSupport
 from superglm.distributional.model import fit_dense_distributional
 from superglm.distributional.predictor import compile_predictors
-from superglm.distributional.result import DenseSolverConfig, DistributionalEFSConfig
+from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.links import IdentityLink
 from tests.test_bound_predictors import _FourParameterFamily

@@ -30,6 +30,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm.distributional._common import json_floats, json_number, readonly_float
 from superglm.distributional.checks._aggregate import _replicated_quantiles
 from superglm.distributional.checks.scores import (
     _retained_crps,
@@ -55,21 +56,6 @@ _DEFAULT_MURPHY_POINTS = 101
 _MURPHY_BLOCK_CELLS = 4_000_000
 
 
-def _json_numbers(values: NDArray) -> list[float | None]:
-    """Emit a float list with every non-finite entry as ``null``."""
-    return [None if not np.isfinite(value) else float(value) for value in np.asarray(values)]
-
-
-def _json_number(value: float) -> float | None:
-    return None if not np.isfinite(value) else float(value)
-
-
-def _readonly(values: NDArray) -> NDArray[np.float64]:
-    array = np.array(values, dtype=np.float64, copy=True)
-    array.setflags(write=False)
-    return array
-
-
 @dataclass(frozen=True)
 class MurphyPayload:
     """Mean elementary quantile scores of two models over a threshold grid."""
@@ -85,9 +71,9 @@ class MurphyPayload:
     schema_version: int = 1
 
     def __post_init__(self) -> None:
-        grid = _readonly(self.thresholds)
+        grid = readonly_float(self.thresholds)
         for name in ("a", "b", "difference", "difference_se"):
-            curve = _readonly(getattr(self, name))
+            curve = readonly_float(getattr(self, name))
             if curve.shape != grid.shape:
                 raise ValueError(f"{name} must carry one value per threshold")
             object.__setattr__(self, name, curve)
@@ -101,11 +87,11 @@ class MurphyPayload:
             "schema_version": self.schema_version,
             "level": self.level,
             "n_observations": self.n_observations,
-            "thresholds": _json_numbers(self.thresholds),
-            "a": _json_numbers(self.a),
-            "b": _json_numbers(self.b),
-            "difference": _json_numbers(self.difference),
-            "difference_se": _json_numbers(self.difference_se),
+            "thresholds": json_floats(self.thresholds),
+            "a": json_floats(self.a),
+            "b": json_floats(self.b),
+            "difference": json_floats(self.difference),
+            "difference_se": json_floats(self.difference_se),
         }
 
 
@@ -127,9 +113,9 @@ class Comparison:
                 {
                     "segment": str(label),
                     "n": int(row["n"]),
-                    "mean_diff": _json_number(row["mean_diff"]),
-                    "se": _json_number(row["se"]),
-                    "t": _json_number(row["t"]),
+                    "mean_diff": json_number(row["mean_diff"]),
+                    "se": json_number(row["se"]),
+                    "t": json_number(row["t"]),
                 }
                 for label, row in self.by_segment.iterrows()
             ]
@@ -138,9 +124,9 @@ class Comparison:
             "schema_version": self.schema_version,
             "score": self.score,
             "overall": {
-                "mean_diff": _json_number(self.overall["mean_diff"]),
-                "se": _json_number(self.overall["se"]),
-                "t": _json_number(self.overall["t"]),
+                "mean_diff": json_number(self.overall["mean_diff"]),
+                "se": json_number(self.overall["se"]),
+                "t": json_number(self.overall["t"]),
                 "n": int(self.overall["n"]),
             },
             "by_segment": segments,

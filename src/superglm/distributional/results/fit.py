@@ -11,7 +11,8 @@ from uuid import uuid4
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributional.results.solver import _frozen_float_mapping, _readonly_finite
+from superglm.distributional._common import frozen_float_mapping
+from superglm.distributional.results.solver import _readonly_finite
 from superglm.distributional.telemetry import CurvatureTelemetry
 
 
@@ -102,7 +103,7 @@ class DistributionalFitResult:
         if not np.array_equal(concatenated, coefficients):
             raise ValueError("predictor coefficient views must partition coefficients")
 
-        smoothing = _frozen_float_mapping(
+        smoothing = frozen_float_mapping(
             self.smoothing_parameters,
             name="smoothing_parameters",
             nonnegative=True,
@@ -117,11 +118,11 @@ class DistributionalFitResult:
             or tuple(name for name in smoothing if name in exact_face_set) != exact_face_components
         ):
             raise ValueError("exact_face_components must be unique smoothing names in fitted order")
-        predictor_edf = _frozen_float_mapping(self.predictor_edf, name="predictor_edf")
+        predictor_edf = frozen_float_mapping(self.predictor_edf, name="predictor_edf")
         if tuple(predictor_edf) != parameter_names:
             raise ValueError("predictor EDF must follow parameter order")
-        intercept_edf = _frozen_float_mapping(self.intercept_edf, name="intercept_edf")
-        term_edf = _frozen_float_mapping(self.term_edf, name="term_edf")
+        intercept_edf = frozen_float_mapping(self.intercept_edf, name="intercept_edf")
+        term_edf = frozen_float_mapping(self.term_edf, name="term_edf")
 
         for name in (
             "total_effective_df",

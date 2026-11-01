@@ -30,22 +30,11 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import stats
 
+from superglm.distributional._common import readonly, readonly_float
 from superglm.distributional.residuals import ResidualSet, _sample_residuals
 
 #: Row set for a check without a seed of its own: the replication default.
 _REPLICATION_SEED = 42
-
-
-def _readonly(values: NDArray) -> NDArray[np.float64]:
-    array = np.array(values, dtype=np.float64, copy=True)
-    array.setflags(write=False)
-    return array
-
-
-def _readonly_counts(values: NDArray) -> NDArray[np.int64]:
-    array = np.array(values, dtype=np.int64, copy=True)
-    array.setflags(write=False)
-    return array
 
 
 @dataclass(frozen=True)
@@ -66,8 +55,8 @@ class PITPayload:
         bins = int(self.n_bins)
         if bins < 1:
             raise ValueError("n_bins must be at least one bin")
-        counts = _readonly_counts(self.counts)
-        edges = _readonly(self.edges)
+        counts = readonly(self.counts, np.int64)
+        edges = readonly_float(self.edges)
         if counts.shape != (bins,) or edges.shape != (bins + 1,):
             raise ValueError("counts must hold one count per bin and edges one more edge")
         object.__setattr__(self, "counts", counts)

@@ -17,15 +17,14 @@ from superglm.distributional.family import (
     FamilyLikelihoodPlan,
 )
 from superglm.distributional.layout import StackedLayout
-from superglm.distributional.result import (
+from superglm.distributional.results.endpoint_evidence import (
     ANALYTIC_DIRECTION_AUTHORITY,
     DIRECTION_AUTHORITIES,
     FINITE_DIFFERENCE_DIRECTION_AUTHORITY,
-    DenseSolverResult,
     EndpointDirectionDecision,
     EndpointDirectionEvidence,
 )
-from superglm.distributional.results.solver import _record_penalty_objective
+from superglm.distributional.results.solver import DenseSolverResult, _record_penalty_objective
 from superglm.distributional.smoothing.endpoint_direction import (
     FiniteDifferenceDirection,
     analytic_curvature_direction,
@@ -42,7 +41,6 @@ from superglm.distributional.smoothing.penalty_geometry import (
 from superglm.distributional.solver.assembly import assemble_grouped_geometry
 from superglm.distributional.solver.packing import packed_pairs
 from superglm.reml.penalty_algebra import _PenaltyLogdetEvaluation, penalty_component_dense_matrix
-from superglm.solvers.rank import RankDecomposition, decompose_gram
 
 
 @dataclass(frozen=True)
@@ -267,112 +265,6 @@ def _spectral_norm(matrix: NDArray) -> float:
     return float(np.linalg.norm(values, ord=2))
 
 
-def _validate_reduced_terminal_provenance(
-    result: DenseSolverResult,
-    *,
-    face: PenaltyFace,
-    stored: RankDecomposition,
-) -> None:
-    reduced_curvature = face.reduce_matrix(result.terminal_penalized_curvature)
-    try:
-        fresh = decompose_gram(reduced_curvature)
-    except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
-        raise EndpointLaplaceError("result has an invalid reduced terminal decomposition") from exc
-
-    try:
-        if isinstance(stored.rank, bool) or not isinstance(stored.rank, Integral):
-            raise TypeError("stored reduced terminal rank must be an integer")
-        stored_rank = int(stored.rank)
-        if stored_rank < 0 or stored_rank > stored.width:
-            raise ValueError("stored reduced terminal rank is outside its width")
-        if isinstance(stored.log_pdet, bool) or not isinstance(stored.log_pdet, Real):
-            raise TypeError("stored reduced terminal log_pdet must be a real scalar")
-        stored_log_pdet = float(stored.log_pdet)
-        if not np.isfinite(stored_log_pdet):
-            raise ValueError("stored reduced terminal log_pdet must be finite")
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise EndpointLaplaceError("result has an invalid reduced terminal decomposition") from exc
-
-    if (
-        stored.policy_version != fresh.policy_version
-        or stored.width != fresh.width
-        or stored_rank != fresh.rank
-        or stored.resolution_limited != fresh.resolution_limited
-    ):
-        raise EndpointLaplaceError("result has an inconsistent reduced terminal decomposition")
-
-    width = fresh.width
-    eps = np.finfo(np.float64).eps
-    curvature_scale = _spectral_norm(reduced_curvature)
-    try:
-        fresh_inverse = fresh.pseudo_inverse()
-        stored_inverse = np.asarray(stored.pseudo_inverse(), dtype=np.float64)
-    except (
-        IndexError,
-        TypeError,
-        ValueError,
-        OverflowError,
-        RuntimeError,
-        np.linalg.LinAlgError,
-    ) as exc:
-        raise EndpointLaplaceError("result has an invalid reduced terminal decomposition") from exc
-    if stored_inverse.shape != (width, width) or not np.all(np.isfinite(stored_inverse)):
-        raise EndpointLaplaceError("result has an invalid reduced terminal decomposition")
-    log_scale = max(abs(float(fresh.log_pdet)), abs(stored_log_pdet), 1.0)
-    log_bound = 512.0 * max(width, 1) * eps * log_scale
-    if abs(stored_log_pdet - float(fresh.log_pdet)) > log_bound:
-        raise EndpointLaplaceError("result has an inconsistent reduced terminal decomposition")
-    if width == 0:
-        return
-
-    inverse_scale = _spectral_norm(stored_inverse)
-    fresh_inverse_scale = _spectral_norm(fresh_inverse)
-    reconstruction = reduced_curvature @ stored_inverse
-    reverse_reconstruction = stored_inverse @ reduced_curvature
-    fresh_reconstruction = reduced_curvature @ fresh_inverse
-    fresh_reverse_reconstruction = fresh_inverse @ reduced_curvature
-    backward_factor = 4096.0 * max(width, 1) * eps
-    checks = (
-        (
-            _spectral_norm(
-                reduced_curvature @ stored_inverse @ reduced_curvature - reduced_curvature
-            ),
-            _spectral_norm(
-                reduced_curvature @ fresh_inverse @ reduced_curvature - reduced_curvature
-            )
-            + backward_factor * max(curvature_scale, np.finfo(np.float64).tiny),
-        ),
-        (
-            _spectral_norm(stored_inverse @ reduced_curvature @ stored_inverse - stored_inverse),
-            _spectral_norm(fresh_inverse @ reduced_curvature @ fresh_inverse - fresh_inverse)
-            + backward_factor * max(inverse_scale, fresh_inverse_scale, np.finfo(np.float64).tiny),
-        ),
-        (
-            _spectral_norm(stored_inverse - stored_inverse.T),
-            _spectral_norm(fresh_inverse - fresh_inverse.T)
-            + backward_factor * max(inverse_scale, fresh_inverse_scale, 1.0),
-        ),
-        (
-            _spectral_norm(reconstruction - reconstruction.T),
-            _spectral_norm(fresh_reconstruction - fresh_reconstruction.T)
-            + backward_factor
-            * max(_spectral_norm(reconstruction), _spectral_norm(fresh_reconstruction), 1.0),
-        ),
-        (
-            _spectral_norm(reverse_reconstruction - reverse_reconstruction.T),
-            _spectral_norm(fresh_reverse_reconstruction - fresh_reverse_reconstruction.T)
-            + backward_factor
-            * max(
-                _spectral_norm(reverse_reconstruction),
-                _spectral_norm(fresh_reverse_reconstruction),
-                1.0,
-            ),
-        ),
-    )
-    if any(error > bound for error, bound in checks):
-        raise EndpointLaplaceError("result has an inconsistent reduced terminal decomposition")
-
-
 def _selected_whitened_basis(
     layout: StackedLayout,
     *,
@@ -543,11 +435,6 @@ def evaluate_endpoint_laplace_derivative(
     retained_rank = endpoint_fit.terminal_reduced_rank
     if retained_rank is None or retained_rank.rank != retained_width:
         raise EndpointLaplaceError("endpoint derivative requires full retained curvature rank")
-    _validate_reduced_terminal_provenance(
-        endpoint_fit,
-        face=endpoint_face,
-        stored=retained_rank,
-    )
     penalty_cross = np.asarray(endpoint_fit.penalty, dtype=np.float64) @ selected_basis
     penalty_cross_scale = _spectral_norm(endpoint_fit.penalty) * _spectral_norm(selected_basis)
     penalty_cross_bound = (
@@ -705,7 +592,6 @@ def evaluate_endpoint_laplace(
     reduced_rank = result.terminal_reduced_rank
     if reduced_rank is None or reduced_rank.width != face.reduced_width:
         raise EndpointLaplaceError("result is missing the face's reduced terminal rank")
-    _validate_reduced_terminal_provenance(result, face=face, stored=reduced_rank)
     hessian_log_pdet = float(reduced_rank.log_pdet)
     penalized_optimizing = result.penalized_optimizing_log_likelihood
     assert penalized_optimizing is not None

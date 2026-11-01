@@ -33,6 +33,7 @@ import pandas as pd
 from numpy.typing import NDArray
 from scipy import stats
 
+from superglm.distributional._common import readonly
 from superglm.distributional.residuals import ResidualSet, _residual_rng, _sample_residuals
 
 # One JSON convention and one schema version for every payload in the suite;
@@ -41,7 +42,6 @@ from superglm.distributional.surfaces import (
     SCHEMA_VERSION,
     _json_matrix,
     _json_vector,
-    _readonly,
 )
 
 #: Percentiles of the bootstrap distribution reported as a band.
@@ -259,19 +259,19 @@ def binned_check(
 
     return BinnedCheck(
         covariate=str(name),
-        edges=None if binning.edges is None else _readonly(binning.edges),
+        edges=None if binning.edges is None else readonly(binning.edges),
         levels=binning.levels,
-        centers=_readonly(binning.centers),
-        n=_readonly(counts),
-        mean=_readonly(moments["mean"]),
-        mean_lower=_readonly(bands["mean"][:, 0]),
-        mean_upper=_readonly(bands["mean"][:, 1]),
-        sd=_readonly(moments["sd"]),
-        sd_lower=_readonly(bands["sd"][:, 0]),
-        sd_upper=_readonly(bands["sd"][:, 1]),
-        skew=_readonly(moments["skew"]),
-        skew_lower=_readonly(bands["skew"][:, 0]),
-        skew_upper=_readonly(bands["skew"][:, 1]),
+        centers=readonly(binning.centers),
+        n=readonly(counts),
+        mean=readonly(moments["mean"]),
+        mean_lower=readonly(bands["mean"][:, 0]),
+        mean_upper=readonly(bands["mean"][:, 1]),
+        sd=readonly(moments["sd"]),
+        sd_lower=readonly(bands["sd"][:, 0]),
+        sd_upper=readonly(bands["sd"][:, 1]),
+        skew=readonly(moments["skew"]),
+        skew_lower=readonly(bands["skew"][:, 0]),
+        skew_upper=readonly(bands["skew"][:, 1]),
         n_boot=boot,
         seed=int(seed),
     )
@@ -310,10 +310,10 @@ def binned_check_2d(
     shape = (x_bins.n_groups, y_bins.n_groups)
     return BinnedCheck2D(
         covariates=(str(names[0]), str(names[1])),
-        x_edges=_readonly(x_bins.edges),
-        y_edges=_readonly(y_bins.edges),
-        mean=_readonly(mean.reshape(shape)),
-        count=_readonly(count.reshape(shape)),
+        x_edges=readonly(x_bins.edges),
+        y_edges=readonly(y_bins.edges),
+        mean=readonly(mean.reshape(shape)),
+        count=readonly(count.reshape(shape)),
     )
 
 

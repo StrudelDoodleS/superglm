@@ -2,43 +2,40 @@
 
 from __future__ import annotations
 
-import json
 import weakref
 from dataclasses import dataclass, field, replace
-from typing import Literal, cast
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
 
 import superglm.distributional.solver.chunks as chunking
 from superglm.distributional.family import (
-    ConfigurableDistributionalFamily,
     DistributionalFamily,
     ExpectedInformationFamily,
     FamilyLikelihoodPlan,
     WallDisclosingFamily,
     _likelihood_reuse_contract,
-    _prepared_field_modes,
     expected_information_provider,
 )
 from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
-from superglm.distributional.result import (
+from superglm.distributional.results.endpoint_evidence import (
     CHUNKED_EXECUTION_BACKEND_IDENTIFIER,
     DENSE_EXECUTION_BACKEND_IDENTIFIER,
     CoefficientCurvature,
     ConvergenceReason,
-    DenseSolverConfig,
-    DenseSolverResult,
     ExecutionBackendIdentifier,
-    SolverIteration,
-    _resolution_limited_decrement_is_within_objective_ulp,
-    _validate_resolution_limited_stationarity,
 )
 from superglm.distributional.results.solver import (
+    DenseSolverConfig,
+    DenseSolverResult,
+    SolverIteration,
     _newton_decrement_is_certified,
+    _resolution_limited_decrement_is_within_objective_ulp,
     _score_within_rounding_floor,
+    _validate_resolution_limited_stationarity,
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.solver._likelihood_cache import (
@@ -46,7 +43,6 @@ from superglm.distributional.solver._likelihood_cache import (
     _LikelihoodCache,
     build_likelihood_cache,
 )
-from superglm.distributional.solver._reuse_digest import _ReuseDigest
 from superglm.distributional.solver.assembly import (
     DenseJointGeometry,
     _assemble_dense_geometry_from_matrices,
@@ -244,17 +240,13 @@ class _DenseObservedReuseSession:
             and curvature.actual_source == "observed"
             and curvature.fallback_count == 0
         ):
-            certificate = _chunk_reuse_data_certificate(context)
-            if certificate is not None:
-                key = id(result)
-                self._chunk_results[key] = _ChunkObservedReuseRecord(
-                    source=self._source_reference(result, chunked=True),
-                    owner=owner,
-                    coefficients=_readonly(result.coefficients),
-                    score_data=_readonly(score_data),
-                    data_curvature=_readonly(result.terminal_data_curvature),
-                    certificate=certificate,
-                )
+            self._chunk_results[id(result)] = _ChunkObservedReuseRecord(
+                source=self._source_reference(result, chunked=True),
+                owner=owner,
+                coefficients=_readonly(result.coefficients),
+                score_data=_readonly(score_data),
+                data_curvature=_readonly(result.terminal_data_curvature),
+            )
 
     def _source_reference(
         self, result: DenseSolverResult, *, chunked: bool
@@ -281,273 +273,6 @@ class _ChunkObservedReuseRecord:
     coefficients: NDArray[np.float64]
     score_data: NDArray[np.float64]
     data_curvature: NDArray[np.float64]
-    certificate: str
-
-
-def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
-    """Certify supported fixed designs without materializing observation rows.
-
-    Public design arrays can be mutable. Identity and equal predictors alone do
-    not certify curvature: a design edit can leave the current predictor fixed.
-    Unknown representations conservatively retain fresh likelihood evaluation.
-    """
-    with _ReuseDigest() as digest:
-        return _build_chunk_reuse_data_certificate(context, digest)
-
-
-def _build_chunk_reuse_data_certificate(
-    context: _SolverContext, digest: _ReuseDigest
-) -> str | None:
-    from scipy.sparse import csr_matrix
-
-    from superglm.distributional.weights import ResolvedLikelihoodWeights
-    from superglm.group_matrix import (
-        CategoricalGroupMatrix,
-        DenseGroupMatrix,
-        DiscretizedSCOPGroupMatrix,
-        DiscretizedSplineCategoricalGroupMatrix,
-        DiscretizedSSPGroupMatrix,
-        DiscretizedTensorGroupMatrix,
-        FactorSmoothGroupMatrix,
-        RandomEffectGroupMatrix,
-        SparseGroupMatrix,
-        SplineCategoricalGroupMatrix,
-        SupportCompressedSplineCategoricalGroupMatrix,
-        SupportCompressedSSPGroupMatrix,
-    )
-    from superglm.links import IdentityLink, LogLink
-
-    contract = _likelihood_reuse_contract(context.family)
-    weights = context.likelihood_plan.weights
-    if (
-        contract is None
-        or type(context.likelihood_plan) is not contract.plan_type
-        or type(weights) is not ResolvedLikelihoodWeights
-    ):
-        return None
-    prepared_modes = _prepared_field_modes(context.likelihood_plan, contract)
-    if prepared_modes is None:
-        return None
-    field = digest.field
-    array = digest.array
-
-    def builtin_array(values: object) -> bool:
-        # An ndarray subclass can change arithmetic at identical bytes. Limit
-        # this schema to ordinary real buffers, with at most 64 KiB per digest
-        # block under array()'s 8192-element iterator.
-        return bool(
-            type(values) is np.ndarray
-            and values.dtype.kind in "biuf"
-            and values.dtype.itemsize <= 8
-        )
-
-    def splinecat_csr(matrix: object) -> bool:
-        if type(matrix) is not csr_matrix:
-            return False
-        buffers = (matrix.data, matrix.indices, matrix.indptr)
-        if not all(builtin_array(values) for values in buffers):
-            return False
-        # Read raw flags: the public properties can populate caches. Their
-        # values affect SciPy dispatch even when the CSR bytes are unchanged.
-        flags = (
-            getattr(matrix, "_has_sorted_indices", None),
-            getattr(matrix, "_has_canonical_format", None),
-        )
-        if any(value is not None and type(value) not in (bool, np.bool_) for value in flags):
-            return False
-        field((matrix.shape, matrix.dtype.str, flags))
-        for values in buffers:
-            array(values)
-        return True
-
-    field(
-        json.dumps(
-            cast(ConfigurableDistributionalFamily, context.family).to_config(), sort_keys=True
-        )
-    )
-    field(context.likelihood_plan.plan_identifier)
-    # Some built-in identifiers contain stored weight digests. The evaluator
-    # consumes the live contract, so certify it independently of those digests.
-    field(weights.provenance.contract.semantics)
-    field((context.chunk_size, context.layout.n_coefficients))
-    array(context.response)
-    # Logical IDs intentionally agree between eager and derived roots. Their
-    # storage authority does not: certify the explicit audited transform too.
-    field(("prepared-field-storage/v1", prepared_modes))
-    for name, mode in prepared_modes:
-        if mode == "stored":
-            array(getattr(context.likelihood_plan, name))
-    for name in ("values", "geometry_values", "root_take_map", "input_positions"):
-        array(getattr(weights, name))
-    for state in context.layout.predictors:
-        if type(state.link) not in (IdentityLink, LogLink, *contract.link_types):
-            return None
-        field((type(state.link).__name__, vars(state.link)))
-        field(
-            (
-                state.name,
-                state.parameter_index,
-                state.coefficient_slice,
-                state.intercept_index,
-                state.design.shape,
-            )
-        )
-        array(state.offset)
-        for group in state.design.group_matrices:
-            kind = type(group)
-            field((kind.__name__, group.shape))
-            if kind is DenseGroupMatrix:
-                names = ("M",)
-            elif kind in (CategoricalGroupMatrix, RandomEffectGroupMatrix):
-                group = cast(CategoricalGroupMatrix | RandomEffectGroupMatrix, group)
-                names = ("codes",)
-                field(group.n_levels)
-            elif kind is SparseGroupMatrix:
-                group = cast(SparseGroupMatrix, group)
-                matrix = group.M
-                if type(matrix) is not csr_matrix:
-                    return None
-                field((matrix.shape, matrix.dtype.str))
-                field(
-                    (
-                        getattr(matrix, "_has_sorted_indices", None),
-                        getattr(matrix, "_has_canonical_format", None),
-                    )
-                )
-                for values in (matrix.data, matrix.indices, matrix.indptr):
-                    if type(values) is not np.ndarray:
-                        return None
-                    array(values)
-                continue
-            elif kind is FactorSmoothGroupMatrix:
-                group = cast(FactorSmoothGroupMatrix, group)
-                field(
-                    (
-                        group.n_levels,
-                        group.coefficient_levels,
-                        group.block_size,
-                        group.raw_width,
-                        group.factor_basis,
-                        group.is_discrete,
-                    )
-                )
-                # Row subsetting reconstructs the group from B, while exact
-                # matvec and moments read the separately stored CSR buffers.
-                # Certify both: public attributes can be replaced independently.
-                if group.is_discrete:
-                    if any(
-                        value is not None
-                        for value in (group.B, group._data, group._indices, group._indptr)
-                    ):
-                        return None
-                    names = ("codes", "natural_map", "B_unique", "bin_idx")
-                else:
-                    matrix = group.B
-                    if (
-                        type(matrix) is not csr_matrix
-                        or group.B_unique is not None
-                        or group.bin_idx is not None
-                    ):
-                        return None
-                    field((matrix.shape, matrix.dtype.str))
-                    field(
-                        (
-                            getattr(matrix, "_has_sorted_indices", None),
-                            getattr(matrix, "_has_canonical_format", None),
-                        )
-                    )
-                    for values in (matrix.data, matrix.indices, matrix.indptr):
-                        if type(values) is not np.ndarray:
-                            return None
-                        array(values)
-                    names = ("codes", "natural_map", "_data", "_indices", "_indptr")
-                if any(type(getattr(group, name)) is not np.ndarray for name in names):
-                    return None
-            elif kind in (
-                SplineCategoricalGroupMatrix,
-                DiscretizedSplineCategoricalGroupMatrix,
-                SupportCompressedSplineCategoricalGroupMatrix,
-            ):
-                group = cast(
-                    SplineCategoricalGroupMatrix
-                    | DiscretizedSplineCategoricalGroupMatrix
-                    | SupportCompressedSplineCategoricalGroupMatrix,
-                    group,
-                )
-                if (
-                    type(group.n_rows) is not int
-                    or type(group._p_b) is not int
-                    or (
-                        group.spline_cat_feature is not None
-                        and type(group.spline_cat_feature) is not str
-                    )
-                ):
-                    return None
-                # The feature selects a same-parent cross-Gram route.
-                field((group.n_rows, group._p_b, group.spline_cat_feature))
-                names = ("R_inv", "row_idx")
-                if kind is SplineCategoricalGroupMatrix:
-                    group = cast(SplineCategoricalGroupMatrix, group)
-                    # Subsetting reads full B; matvec reads B_level; sparse
-                    # moments read independent buffers. A saturated Gram can
-                    # instead read its lazy dense copy. All remain live.
-                    if not splinecat_csr(group.B) or not splinecat_csr(group.B_level):
-                        return None
-                    names += ("_data", "_indices", "_indptr")
-                    dense = group._dense_level
-                    if dense is None or dense is False:
-                        field(("_dense_level", dense))
-                    elif builtin_array(dense):
-                        names += ("_dense_level",)
-                    else:
-                        return None
-                    cache_names = ("_sorted_rows",)
-                else:
-                    group = cast(
-                        DiscretizedSplineCategoricalGroupMatrix
-                        | SupportCompressedSplineCategoricalGroupMatrix,
-                        group,
-                    )
-                    if type(group.n_bins) is not int:
-                        return None
-                    field(group.n_bins)
-                    names += ("B_unique", "bin_idx_level")
-                    cache_names = ("_row_order", "_sorted_rows")
-                # Do not sort, materialize, or populate a lookup to certify it.
-                # Cache creation, replacement and mutation each change the
-                # certificate, including independently replaced alignment maps.
-                for name in cache_names:
-                    value = getattr(group, name)
-                    field((name, value is None))
-                    if value is not None:
-                        names += (name,)
-                if any(not builtin_array(getattr(group, name)) for name in names):
-                    return None
-            elif kind in (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix):
-                group = cast(DiscretizedSSPGroupMatrix | SupportCompressedSSPGroupMatrix, group)
-                names = ("B_unique", "R_inv", "bin_idx")
-                field(group.n_bins)
-            elif kind is DiscretizedSCOPGroupMatrix:
-                group = cast(DiscretizedSCOPGroupMatrix, group)
-                names = ("B_scop_unique", "bin_idx")
-                field(group.n_bins)
-            elif kind is DiscretizedTensorGroupMatrix:
-                group = cast(DiscretizedTensorGroupMatrix, group)
-                names = (
-                    "B_unique",
-                    "R_inv",
-                    "bin_idx",
-                    "B1_unique_t",
-                    "B2_unique_t",
-                    "idx1",
-                    "idx2",
-                )
-                field((group.tensor_id, group.n_bins, group.n_bins1, group.n_bins2))
-            else:
-                return None
-            for name in names:
-                array(getattr(group, name))
-    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -1305,6 +1030,27 @@ def _run_iterations(
         else initial_geometry
     )
 
+    def finish(
+        converged: bool,
+        reason: ConvergenceReason,
+        score_relative: float,
+        *,
+        no_step: bool = False,
+    ) -> _OptimizationRun:
+        # Reads the loop's current state; ``no_step`` records an exit that made no
+        # movement, instead of the last accepted step's relative changes.
+        return _OptimizationRun(
+            state=state,
+            geometry=geometry,
+            observed_geometry=observed_geometry,
+            history=tuple(history),
+            converged=converged,
+            reason=reason,
+            score_relative=score_relative,
+            objective_relative_change=0.0 if no_step else objective_relative_change,
+            step_relative=0.0 if no_step else step_relative,
+        )
+
     for local_iteration in range(config.max_iterations):
         score_relative = _optimization_score_relative(
             context,
@@ -1327,17 +1073,7 @@ def _run_iterations(
                 tolerance=config.tolerance,
             )
         ):
-            return _OptimizationRun(
-                state=state,
-                geometry=geometry,
-                observed_geometry=observed_geometry,
-                history=tuple(history),
-                converged=True,
-                reason="score",
-                score_relative=score_relative,
-                objective_relative_change=objective_relative_change,
-                step_relative=step_relative,
-            )
+            return finish(True, "score", score_relative)
 
         try:
             with measure_phase(phase_recorder, "coefficient_decomposition_solve"):
@@ -1351,47 +1087,8 @@ def _run_iterations(
             # No Levenberg damping of the curvature gives a certified ascent
             # direction. The accepted state is the best one reached: stop there,
             # unconverged, and let the fit disclose why instead of raising.
-            return _OptimizationRun(
-                state=state,
-                geometry=geometry,
-                observed_geometry=observed_geometry,
-                history=tuple(history),
-                converged=False,
-                reason="no_ascent_direction",
-                score_relative=score_relative,
-                objective_relative_change=objective_relative_change,
-                step_relative=step_relative,
-            )
+            return finish(False, "no_ascent_direction", score_relative)
         optimization_score = _optimization_score(context, geometry.score_penalized)
-        if (
-            stop_policy == "ordinary"
-            and config.newton_decrement_tolerance is not None
-            and config.coefficient_curvature == "observed"
-            and direction.levenberg_shift == 0.0
-            and direction.decomposition.rank == len(optimization_score)
-        ):
-            if _newton_decrement_is_certified(
-                config=config,
-                score=geometry.score_penalized,
-                penalized_curvature=geometry.penalized_curvature,
-                penalized_objective=state.penalized_optimizing_log_likelihood,
-                face=context.coefficient_face,
-                tolerance=config.newton_decrement_tolerance,
-            ):
-                return _OptimizationRun(
-                    state=state,
-                    geometry=geometry,
-                    observed_geometry=observed_geometry,
-                    history=tuple(history),
-                    converged=True,
-                    reason="newton_decrement",
-                    score_relative=score_relative,
-                    objective_relative_change=objective_relative_change,
-                    step_relative=float(
-                        np.linalg.norm(direction.step, ord=np.inf)
-                        / (1.0 + np.linalg.norm(state.coefficients, ord=np.inf))
-                    ),
-                )
         with measure_phase(phase_recorder, "likelihood_evaluation"):
             capped_step, step_scale = _cap_predictor_step(
                 context,
@@ -1515,17 +1212,7 @@ def _run_iterations(
                     observed_geometry = measured_observed
                 del measured_observed
                 if certified:
-                    return _OptimizationRun(
-                        state=state,
-                        geometry=geometry,
-                        observed_geometry=observed_geometry,
-                        history=tuple(history),
-                        converged=True,
-                        reason="objective_and_step",
-                        score_relative=score_relative,
-                        objective_relative_change=0.0,
-                        step_relative=0.0,
-                    )
+                    return finish(True, "objective_and_step", score_relative, no_step=True)
             retained_correction: NDArray[np.float64] | None = None
             if direction.decomposition.rank == len(optimization_score):
                 try:
@@ -1553,20 +1240,10 @@ def _run_iterations(
                 and not distinct_trial_improved
                 and reached_identical_candidate
             )
-            return _OptimizationRun(
-                state=state,
-                geometry=geometry,
-                observed_geometry=observed_geometry,
-                history=tuple(history),
-                converged=resolution_limited,
-                reason=(
-                    "resolution_limited_stationarity"
-                    if resolution_limited
-                    else "line_search_failed"
-                ),
-                score_relative=score_relative,
-                objective_relative_change=objective_relative_change,
-                step_relative=step_relative,
+            return finish(
+                resolution_limited,
+                ("resolution_limited_stationarity" if resolution_limited else "line_search_failed"),
+                score_relative,
             )
 
         if accepted_geometry is None:
@@ -1614,17 +1291,7 @@ def _run_iterations(
         geometry = accepted_geometry
         if stop_policy == "score_only":
             if accepted_score_relative <= config.tolerance:
-                return _OptimizationRun(
-                    state=state,
-                    geometry=geometry,
-                    observed_geometry=observed_geometry,
-                    history=tuple(history),
-                    converged=True,
-                    reason="score",
-                    score_relative=accepted_score_relative,
-                    objective_relative_change=objective_relative_change,
-                    step_relative=step_relative,
-                )
+                return finish(True, "score", accepted_score_relative)
             continue
         if objective_relative_change <= config.tolerance and step_relative <= config.tolerance:
             certified, measured_observed = _objective_and_step_is_certified(
@@ -1640,17 +1307,7 @@ def _run_iterations(
                 observed_geometry = measured_observed
             del measured_observed
             if certified:
-                return _OptimizationRun(
-                    state=state,
-                    geometry=geometry,
-                    observed_geometry=observed_geometry,
-                    history=tuple(history),
-                    converged=True,
-                    reason="objective_and_step",
-                    score_relative=accepted_score_relative,
-                    objective_relative_change=objective_relative_change,
-                    step_relative=step_relative,
-                )
+                return finish(True, "objective_and_step", accepted_score_relative)
             # A distinct tiny step is still a valid state transition.  Keep
             # the remaining iteration budget so a fresh direction can recover
             # stationarity; only an identical candidate has no progress to
@@ -1659,32 +1316,16 @@ def _run_iterations(
             objective_relative_change <= config.tolerance
             and accepted_score_relative <= config.tolerance
         ):
-            return _OptimizationRun(
-                state=state,
-                geometry=geometry,
-                observed_geometry=observed_geometry,
-                history=tuple(history),
-                converged=True,
-                reason="objective_and_score",
-                score_relative=accepted_score_relative,
-                objective_relative_change=objective_relative_change,
-                step_relative=step_relative,
-            )
+            return finish(True, "objective_and_score", accepted_score_relative)
 
-    return _OptimizationRun(
-        state=state,
-        geometry=geometry,
-        observed_geometry=observed_geometry,
-        history=tuple(history),
-        converged=False,
-        reason="max_iterations",
-        score_relative=_optimization_score_relative(
+    return finish(
+        False,
+        "max_iterations",
+        _optimization_score_relative(
             context,
             geometry.score_penalized,
             state.penalized_optimizing_log_likelihood,
         ),
-        objective_relative_change=objective_relative_change,
-        step_relative=step_relative,
     )
 
 
@@ -1733,7 +1374,6 @@ def _reuse_observed_initial_result(
             or source.resolved_chunk_size != context.chunk_size
             or source.execution_backend_identifier != CHUNKED_EXECUTION_BACKEND_IDENTIFIER
             or not np.array_equal(coefficients, record.coefficients)
-            or _chunk_reuse_data_certificate(context) != record.certificate
         ):
             return None
         support_predictions = chunking._SupportPredictions()
@@ -1786,6 +1426,24 @@ def _reuse_observed_initial_result(
         penalized_curvature=_readonly(penalized_curvature),
     )
     return state, geometry
+
+
+def _geometry_from(
+    context: _SolverContext,
+    state: _AcceptedState,
+    source: chunking.CurvatureSource,
+    config: DenseSolverConfig,
+    coefficient_geometry: DenseJointGeometry,
+    held: DenseJointGeometry | None,
+    phase_recorder: FitPhaseRecorder | None,
+) -> DenseJointGeometry:
+    """The geometry for ``source``: the run's own, else one already held, else measured."""
+
+    if config.coefficient_curvature == source:
+        return coefficient_geometry
+    if held is not None:
+        return held
+    return _measured_geometry(context, state, source, phase_recorder)
 
 
 def _fit_dense_fixed_lambda_core(
@@ -1907,6 +1565,18 @@ def _fit_dense_fixed_lambda_core(
     observed_geometry = run.observed_geometry
     del run
 
+    def adopt(run: _OptimizationRun) -> None:
+        nonlocal state, coefficient_geometry, converged, reason, score_relative
+        nonlocal objective_relative_change, step_relative
+        state = run.state
+        coefficient_geometry = run.geometry
+        history.extend(run.history)
+        converged = run.converged
+        reason = run.reason
+        score_relative = run.score_relative
+        objective_relative_change = run.objective_relative_change
+        step_relative = run.step_relative
+
     if converged and _wall_step_unsettled(context, state, coefficient_geometry, solver_config):
         # Continue a fit stopped with a row still moving towards a wall, at a
         # hundredth of the tolerance: a pressed fit keeps moving, an interior one
@@ -1915,7 +1585,6 @@ def _fit_dense_fixed_lambda_core(
             solver_config,
             max_iterations=solver_config.terminal_retry_iterations,
             tolerance=max(0.01 * solver_config.tolerance, 10.0 * np.finfo(np.float64).eps),
-            newton_decrement_tolerance=None,
         )
         try:
             # timed with the terminal retry, so a fit that runs both records the phase twice
@@ -1932,28 +1601,19 @@ def _fit_dense_fixed_lambda_core(
         except DenseSolverError:
             continued = None
         if continued is not None and continued.converged:
-            state = continued.state
-            coefficient_geometry = continued.geometry
-            history.extend(continued.history)
-            reason = continued.reason
-            score_relative = continued.score_relative
-            objective_relative_change = continued.objective_relative_change
-            step_relative = continued.step_relative
+            adopt(continued)
             observed_geometry = continued.observed_geometry
         del continued
 
     with measure_phase(phase_recorder, "terminal_observed_retry_fallback"):
-        observed_geometry = (
-            coefficient_geometry
-            if solver_config.coefficient_curvature == "observed"
-            else observed_geometry
-            if observed_geometry is not None
-            else _measured_geometry(
-                context,
-                state,
-                "observed",
-                phase_recorder,
-            )
+        observed_geometry = _geometry_from(
+            context,
+            state,
+            "observed",
+            solver_config,
+            coefficient_geometry,
+            observed_geometry,
+            phase_recorder,
         )
         fisher_available = context.fisher_family is not None
         requested_terminal_curvature = observed_geometry.penalized_curvature
@@ -1995,7 +1655,6 @@ def _fit_dense_fixed_lambda_core(
                 solver_config,
                 max_iterations=solver_config.terminal_retry_iterations,
                 tolerance=retry_tolerance,
-                newton_decrement_tolerance=None,
             )
             try:
                 retry = _run_iterations(
@@ -2017,25 +1676,15 @@ def _fit_dense_fixed_lambda_core(
                 # too, handled as one: the main run's state and verdict stand.
                 retry = None
             if retry is not None:
-                state = retry.state
-                coefficient_geometry = retry.geometry
-                history.extend(retry.history)
-                converged = retry.converged
-                reason = retry.reason
-                score_relative = retry.score_relative
-                objective_relative_change = retry.objective_relative_change
-                step_relative = retry.step_relative
-                observed_geometry = (
-                    coefficient_geometry
-                    if retry_config.coefficient_curvature == "observed"
-                    else retry.observed_geometry
-                    if retry.observed_geometry is not None
-                    else _measured_geometry(
-                        context,
-                        state,
-                        "observed",
-                        phase_recorder,
-                    )
+                adopt(retry)
+                observed_geometry = _geometry_from(
+                    context,
+                    state,
+                    "observed",
+                    retry_config,
+                    coefficient_geometry,
+                    retry.observed_geometry,
+                    phase_recorder,
                 )
                 del retry
             fisher_matrix = None
@@ -2055,15 +1704,14 @@ def _fit_dense_fixed_lambda_core(
                     fallback_state = evaluated
             if fisher_available:
                 try:
-                    fisher_geometry = (
-                        coefficient_geometry
-                        if retry_config.coefficient_curvature == "fisher"
-                        else _measured_geometry(
-                            context,
-                            fallback_state,
-                            "fisher",
-                            phase_recorder,
-                        )
+                    fisher_geometry = _geometry_from(
+                        context,
+                        fallback_state,
+                        "fisher",
+                        retry_config,
+                        coefficient_geometry,
+                        None,
+                        phase_recorder,
                     )
                 except (_NumericalEvaluationError, FloatingPointError, OverflowError):
                     # Expected information the family cannot represent at this

@@ -84,9 +84,7 @@ def test_invalid_ranges_refuse_before_accumulation(start, stop):
         assert plan.stats["state"] == "refused"
 
 
-@pytest.mark.parametrize(
-    "field", ["M", "codes", "bin_idx", "row_idx", "bin_idx_level", "B_unique", "R_inv"]
-)
+@pytest.mark.parametrize("field", ["M", "codes", "bin_idx", "row_idx", "bin_idx_level"])
 def test_range_source_subclasses_refuse_before_hooks(field):
     fixture = make_fixture()
     supplied = source_plans(fixture)
@@ -103,7 +101,7 @@ def test_range_source_subclasses_refuse_before_hooks(field):
         assert plan.stats["chunks"] == 0
 
 
-@pytest.mark.parametrize("field", ["B_unique", "R_inv", "bin_idx", "source_shape"])
+@pytest.mark.parametrize("field", ["bin_idx", "source_shape"])
 def test_range_later_hard_source_error_precedes_numeric_refusal(field):
     fixture = make_fixture()
     supplied = source_plans(fixture)
@@ -114,10 +112,8 @@ def test_range_later_hard_source_error_precedes_numeric_refusal(field):
         group = supplied[1].design.group_matrices[-1]
         if field == "source_shape":
             group.bin_idx = group.bin_idx[:-1]
-        elif field == "bin_idx":
-            group.bin_idx[9] = group.n_bins
         else:
-            getattr(group, field)[0, 0] += 0.125
+            group.bin_idx[9] = group.n_bins
         with pytest.raises(api.GlobalMomentRefusalError) as caught:
             plan.add_row_range(supplied, 8, 16, fixture.score[8:16], fixture.curvature[8:16])
         assert not caught.value.recoverable

@@ -23,7 +23,8 @@ from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.fit_diagnostics import diagnose_distributional_fit
 from superglm.distributional.model import fit_dense_distributional
 from superglm.distributional.predictor import Predictor
-from superglm.distributional.result import DenseSolverConfig, DistributionalEFSConfig
+from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.timing import FitPhaseRecorder, FitPhaseSnapshot
 from superglm.distributional.weights import WeightContract
 from superglm.features import Numeric, RandomEffect, Spline

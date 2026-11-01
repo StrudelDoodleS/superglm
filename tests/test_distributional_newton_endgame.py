@@ -17,8 +17,8 @@ from scipy.optimize import minimize
 
 from superglm.distributional import NegativeBinomialLS, Predictor, TweedieLSS
 from superglm.distributional.model import fit_dense_distributional
-from superglm.distributional.result import DenseSolverConfig
 from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.serialization import pickle_state
 from superglm.distributional.smoothing.newton import (
     bfgs_direction,

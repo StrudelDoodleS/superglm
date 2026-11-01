@@ -12,20 +12,24 @@ from numpy.typing import NDArray
 
 from superglm.distributional.family import DistributionalFamily, FamilyLikelihoodPlan
 from superglm.distributional.layout import StackedLayout
-from superglm.distributional.result import (
+from superglm.distributional.results.endpoint_evidence import (
     ANALYTIC_DIRECTION_AUTHORITY,
     JOINT_ANALYTIC_DIRECTION_AUTHORITY,
     JOINT_FINITE_DIFFERENCE_DIRECTION_AUTHORITY,
-    DenseSolverConfig,
-    DenseSolverResult,
-    DistributionalEFSConfig,
-    DistributionalEFSIteration,
     EndpointAssessmentFailureReason,
     JointEndpointDirectionEvidence,
+)
+from superglm.distributional.results.iteration import (
+    DistributionalEFSConfig,
+    DistributionalEFSIteration,
+)
+from superglm.distributional.results.solver import (
+    DenseSolverConfig,
+    DenseSolverResult,
     _assessment_is_numerically_stationary,
+    _assessment_unchanged_failed_cap,
     _endpoint_revalidation_projection_bound,
 )
-from superglm.distributional.results.solver import _assessment_unchanged_failed_cap
 from superglm.distributional.smoothing.authority import (
     _endpoint_candidate_refit_bound,
     _endpoint_retained_rank,

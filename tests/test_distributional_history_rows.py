@@ -13,11 +13,8 @@ import pytest
 from superglm.distributional import GaussianLS, Predictor
 from superglm.distributional.fit_diagnostics import diagnose_distributional_fit
 from superglm.distributional.model import fit_dense_distributional
-from superglm.distributional.result import (
-    DenseSolverConfig,
-    DenseSolverResult,
-    DistributionalEFSConfig,
-)
+from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.solver import DenseSolverConfig, DenseSolverResult
 from superglm.distributional.serialization import pickle_state
 from superglm.distributional.weights import WeightContract
 from superglm.features import RandomEffect, Spline
