@@ -35,13 +35,16 @@ import pytest
 from scipy import optimize, special, stats
 
 from superglm import (
+    ConvergenceWarning,
     GammaLS,
     SeparationError,
+    SeparationWarning,
     SuperLSS,
     cat,
     distributional,
     s,
 )
+from superglm.distributional.families import gamma as gamma_family
 from superglm.distributional.family import COMPLETE_OBSERVATION, bounded_observation
 from superglm.distributional.kernels import _declared_bounds
 from superglm.distributional.observation import ResponseBounds
@@ -575,6 +578,113 @@ def test_a_mean_level_with_only_right_censored_rows_is_disclosed_as_separated():
         ResponseBounds.from_arrays(np.full(3, -_INF), np.full(3, _INF), np.array([1, -1, 0]))
     )
     np.testing.assert_array_equal(flags, [[True, False], [True, False], [False, False]])
+
+
+def test_a_scale_collapsing_beside_a_censored_level_reads_every_window_and_is_disclosed(
+    monkeypatch,
+):
+    """Complete rows sharing one response send the cv to zero beside a level censored at its mean.
+
+    The likelihood rises without bound as the shape ``1/cv^2`` grows, so the
+    fit walks it to the rounding limit with level ``c``'s rows on the window's
+    diagonal.  Above shape 1e4 those rows are read by the uniform expansion,
+    whose cost does not grow with the shape, so every window stays finite and
+    no trial is lost to an invalid row; the fit discloses that it stopped
+    unconverged, and the identified levels keep their shared response.
+    """
+    rng = np.random.default_rng(550)
+    group = rng.choice(["a", "b", "c"], 600)
+    censored = group == "c"
+    paid = np.where(censored, 5_000.0, 4_000.0)
+    X = pd.DataFrame({"g": group})
+    window = gamma_family.gamma_window_jets
+    reads = []
+
+    def counted(lower, upper, parameters, weight, *, order, coordinates="natural"):
+        jets = window(lower, upper, parameters, weight, order=order, coordinates=coordinates)
+        cv = np.exp(parameters[:, 1]) if coordinates == "log" else parameters[:, 1]
+        finite = np.isfinite(jets[0]) & np.all([np.isfinite(j).all(axis=1) for j in jets[1:]], 0)
+        reads.append((float(np.max(weight / cv**2)), len(finite) - int(finite.sum())))
+        return jets
+
+    monkeypatch.setattr(gamma_family, "gamma_window_jets", counted)
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(cat("g")), family.scale())
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(X, paid, censored=censored)
+    categories = {type(w.message) for w in caught}
+    assert {SeparationWarning, ConvergenceWarning} <= categories
+    telemetry = model.training_telemetry()
+    assert not telemetry.converged
+    shapes, invalid = np.array(reads).T
+    # Measured: shape 5e32, no invalid row, 3.2 reads per inner iteration; the
+    # incomplete-gamma engine alone stalls near 2e10 with 57k invalid rows and 20.
+    assert shapes.max() > 1e20
+    assert invalid.sum() == 0
+    assert len(reads) <= 8 * telemetry.inner_iterations
+    means = model.predict_parameters(pd.DataFrame({"g": ["a", "b"]}))["mean"]
+    np.testing.assert_allclose(means, 4_000.0, rtol=1e-9)
+
+
+@pytest.mark.parametrize("coordinates", ["natural", "log"])
+def test_a_censored_row_at_an_unbounded_shape_reads_the_log_normal_limit(coordinates):
+    """At shape ``1e20`` a right-censored row has ``log S = log Phi(-w) (1 + O(q))``.
+
+    ``q = cv = 1e-10`` and ``w = log(y/mean)/q`` (mean one, so ``log(y/mean)``
+    is formed without loss).  The uniform expansion is analytic through
+    ``q = 0`` (``kernels/_gg_uniform_tail.py``); the incomplete-gamma engine
+    would need ``O(sqrt(a)) = 1e10`` terms here.  With ``h`` the normal hazard
+    at ``w``, ``d/dlog mean = h/q`` and ``d^2/dlog mean^2 = -h (h - w)/q^2``.
+    """
+    q, w = 1e-10, 0.3
+    y = np.array([np.exp(w * q)])
+    log_theta = np.array([[0.0, np.log(q)]])
+    theta = log_theta if coordinates == "log" else np.exp(log_theta)
+    jets = _declared_bounds.gamma_window_jets(
+        y, np.array([_INF]), theta, np.ones(1), order=2, coordinates=coordinates
+    )
+    w_exact = float(mp.log(mp.mpf(y[0])) / mp.exp(mp.mpf(log_theta[0, 1])))
+    log_sf = stats.norm.logsf(w_exact)
+    hazard = np.exp(stats.norm.logpdf(w_exact) - log_sf)
+    d1, d2 = hazard / q, -hazard * (hazard - w_exact) / q**2
+    # The natural coordinate is the mean itself, here one: d^2/dmean^2 = d2 - d1.
+    expected = (log_sf, d1, d2 if coordinates == "log" else d2 - d1)
+    got = (jets[0][0], jets[1][0, 0], jets[2][0, 0])
+    np.testing.assert_allclose(got, expected, rtol=1e-8)
+
+
+@pytest.mark.parametrize(("z", "upper"), [(0.7, True), (-0.7, False)])
+def test_a_censored_row_above_the_engines_shapes_meets_the_oracle_to_order_four(z, upper):
+    """At shape ``1e5``, ``z/sqrt(a)`` from the mean, a censored row's log-scale jet meets mpmath.
+
+    Above shape 1e4 the row is read by the uniform expansion.  Mean one, so the
+    point enters without rounding; errors in ``u`` of the order's largest entry,
+    held to four times the measured (1.1, 2.6, 6.4, 57, 262).
+    """
+    a = 1e5
+    y = np.array([np.exp(z / np.sqrt(a))])
+    theta = np.array([[0.0, -0.5 * np.log(a)]])
+    lower, upper_end = (y, np.array([_INF])) if upper else (np.zeros(1), y)
+    jets = _declared_bounds.gamma_window_jets(
+        lower, upper_end, theta, np.ones(1), order=4, coordinates="log"
+    )
+
+    def tail(p0, p1):
+        shape = 1 / mp.exp(p1) ** 2
+        x = shape * mp.mpf(y[0]) / mp.exp(p0)
+        ends = (x, mp.inf) if upper else (0, x)
+        return mp.log(mp.gammainc(shape, *ends, regularized=True))
+
+    measured = (1.12, 2.56, 6.35, 56.9, 262.0)
+    with mp.workdps(80):
+        point = (mp.mpf(0), mp.mpf(theta[0, 1]))
+        for k, worst in enumerate(measured):
+            exact = [mp.diff(tail, point, (k - j, j)) for j in range(k + 1)]
+            got = [jets[0][0]] if k == 0 else list(jets[k][0])
+            scale = max(abs(e) for e in exact)
+            error = max(abs(mp.mpf(float(g)) - e) for g, e in zip(got, exact, strict=True))
+            assert error <= _MARGIN * max(worst, 1.0) * _U * scale, k
 
 
 def test_a_window_deep_in_the_lower_tail_is_read_from_the_lower_tail():

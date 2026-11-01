@@ -4,7 +4,9 @@
 ``weight/cv^2`` (prior weights reweight the law; pass ones and the
 weights as ``M`` for frequency weights).  The log tails are
 ``log Q`` and ``log P`` of the incomplete-gamma engine at shape
-``weight/cv^2`` and point ``weight y/(mean cv^2)``.
+``weight/cv^2`` and point ``weight y/(mean cv^2)``; ``logsf_uniform`` and
+``logcdf_uniform`` are the same tails by Temme's uniform expansion at
+``q = cv/sqrt(weight)``, ``w = log(y/mean)/q``, on its domain.
 """
 
 # ruff: noqa
@@ -16,15 +18,16 @@ import numpy as np
 from numba import njit
 
 from superglm.distributional.kernels._severity_primitives import gdev, gnorm, sres_0123
+from superglm.distributional.kernels._gg_uniform_tail import gg_uniform_log_tail_with_scratch
 from superglm.distributional.kernels._incomplete_gamma import log_gamma_tail_into
 
 PARAMETERS = ('mean', 'cv')
 DATA = ('weight',)
 COORDINATES = 'natural'
-LAWS = ('density', 'logsf', 'logcdf')
+LAWS = ('density', 'logsf', 'logcdf', 'logsf_uniform', 'logcdf_uniform')
 MAX_ORDER = 4
 PRIMITIVES_DIGEST = "7139a2b537094ec4616a1b45afc889977e859c59786c0efbe16b55454abe7f64"
-ENGINES_DIGEST = "921811603b9a58794156f0740368ad5f3ca3225324e23082922ba65ad48e2651"
+ENGINES_DIGEST = "2b6530cc4777cfc096a5e5336bc5c2212a274161a9c6bda5c274e885b8757cd1"
 
 @njit(cache=True, nogil=True, error_model='numpy')
 def density_0(Y, P0, P1, D0, M, J0):
@@ -595,6 +598,452 @@ def logcdf_4(Y, P0, P1, D0, J0, J1, J2, J3, J4):
         J4[i, 2] = t34*t8*(10.0*t11 + 8.0*t12 + t21 + t28*t47 + 8.0*t29 + 2.0*t33)
         J4[i, 3] = t3*t40*y*(9.0*t12 + t21 + 3.0*t33 + t53)
         J4[i, 4] = t39*t42*(30.0*c0_1 + 36.0*t1*t12 + 2.0*t1*t53 + t15*t41 + t16*(6.0*c0_3 + t0*(3.0*c0_6 + t1*t50 + t16*(c0_10 + c0_11*t1) + t32*t51) + t1*t48 + t1*t52 + t22*t36 + t31*t49) + 9.0*t37 + 9.0*t38 + 30.0*t5)
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logsf_uniform_0(Y, P0, P1, D0, J0):
+    out0 = np.empty(1)
+    work = np.empty((20, 15))
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = sqrt(d0)
+        gg_uniform_log_tail_with_scratch(t0*log(y/p0)/p1, p1/t0, True, 0, out0, work)
+        c0_0 = out0[0]
+        J0[i] = c0_0
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logsf_uniform_1(Y, P0, P1, D0, J0, J1):
+    out0 = np.empty(3)
+    work = np.empty((20, 15))
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = (1.0 / (p0))
+        t1 = log(t0*y)
+        t2 = sqrt(d0)
+        t3 = t2/p1
+        t4 = (1.0 / (t2))
+        gg_uniform_log_tail_with_scratch(t1*t3, p1*t4, True, 1, out0, work)
+        c0_0 = out0[0]
+        c0_1 = out0[1]
+        c0_2 = out0[2]
+        J0[i] = c0_0
+        J1[i, 0] = -c0_1*t0*t3
+        J1[i, 1] = -c0_1*t1*t2/(p1 * p1) + c0_2*t4
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logsf_uniform_2(Y, P0, P1, D0, J0, J1, J2):
+    out0 = np.empty(6)
+    work = np.empty((20, 15))
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = (1.0 / (p1))
+        t1 = sqrt(d0)
+        t2 = (1.0 / (p0))
+        t3 = log(t2*y)
+        t4 = t1*t3
+        t5 = (1.0 / (t1))
+        gg_uniform_log_tail_with_scratch(t0*t4, p1*t5, True, 2, out0, work)
+        c0_0 = out0[0]
+        c0_1 = out0[1]
+        c0_2 = out0[2]
+        c0_3 = out0[3]
+        c0_4 = out0[4]
+        c0_5 = out0[5]
+        t6 = c0_1*t1
+        t7 = t0*t2
+        t8 = (1.0 / (p1 * p1))
+        t9 = t3*t6
+        t10 = t4*t8
+        t11 = c0_3*t10 - c0_4*t5
+        J0[i] = c0_0
+        J1[i, 0] = -t6*t7
+        J1[i, 1] = c0_2*t5 - t8*t9
+        J2[i, 0] = t0*(c0_3*d0*t0 + t6)/(p0 * p0)
+        J2[i, 1] = t1*t7*(c0_1*t0 + t11)
+        J2[i, 2] = t10*t11 - t5*(c0_4*t10 - c0_5*t5) + 2.0*t9/(p1 * p1 * p1)
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logsf_uniform_3(Y, P0, P1, D0, J0, J1, J2, J3):
+    out0 = np.empty(10)
+    work = np.empty((20, 15))
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = (1.0 / (p1))
+        t1 = sqrt(d0)
+        t2 = (1.0 / (p0))
+        t3 = log(t2*y)
+        t4 = t1*t3
+        t5 = (1.0 / (t1))
+        gg_uniform_log_tail_with_scratch(t0*t4, p1*t5, True, 3, out0, work)
+        c0_0 = out0[0]
+        c0_1 = out0[1]
+        c0_2 = out0[2]
+        c0_3 = out0[3]
+        c0_4 = out0[4]
+        c0_5 = out0[5]
+        c0_6 = out0[6]
+        c0_7 = out0[7]
+        c0_8 = out0[8]
+        c0_9 = out0[9]
+        t6 = c0_1*t1
+        t7 = t0*t6
+        t8 = (1.0 / (p1 * p1))
+        t9 = t3*t8
+        t10 = d0*t0
+        t11 = c0_3*t10
+        t12 = t0/(p0 * p0)
+        t13 = t4*t8
+        t14 = c0_3*t13 - c0_4*t5
+        t15 = t0*t1*t2
+        t16 = 2.0*t6
+        t17 = (1.0 / (p1 * p1 * p1))
+        t18 = t17*t3
+        t19 = t1*t14
+        t20 = c0_6*t8
+        t21 = 2.0*t8
+        t22 = -c0_7*t5 + t20*t4
+        t23 = 2.0*t17*t4
+        t24 = c0_7*t13 - c0_8*t5
+        t25 = c0_3*t23 + t13*t22 - t24*t5
+        J0[i] = c0_0
+        J1[i, 0] = -t2*t7
+        J1[i, 1] = c0_2*t5 - t6*t9
+        J2[i, 0] = t12*(t11 + t6)
+        J2[i, 1] = t15*(c0_1*t0 + t14)
+        J2[i, 2] = t16*t18 + t19*t9 - t5*(c0_4*t13 - c0_5*t5)
+        J3[i, 0] = -t0*((d0 ** ((3.0 / 2.0)))*t20 + 3.0*t11 + t16)/(p0 * p0 * p0)
+        J3[i, 1] = -t12*(c0_3*d0*t21 + t10*t22 + t19 + t7)
+        J3[i, 2] = -t15*(c0_1*t21 + 2.0*t0*t14 + t25)
+        J3[i, 3] = -t13*t25 - 4.0*t18*t19 + t5*(c0_4*t23 + t13*t24 - t5*(c0_8*t13 - c0_9*t5)) - 6.0*t3*t6/(p1 * p1 * p1 * p1)
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logsf_uniform_4(Y, P0, P1, D0, J0, J1, J2, J3, J4):
+    out0 = np.empty(15)
+    work = np.empty((20, 15))
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = (1.0 / (p1))
+        t1 = sqrt(d0)
+        t2 = (1.0 / (p0))
+        t3 = log(t2*y)
+        t4 = t1*t3
+        t5 = (1.0 / (t1))
+        gg_uniform_log_tail_with_scratch(t0*t4, p1*t5, True, 4, out0, work)
+        c0_0 = out0[0]
+        c0_1 = out0[1]
+        c0_2 = out0[2]
+        c0_3 = out0[3]
+        c0_4 = out0[4]
+        c0_5 = out0[5]
+        c0_6 = out0[6]
+        c0_7 = out0[7]
+        c0_8 = out0[8]
+        c0_9 = out0[9]
+        c0_10 = out0[10]
+        c0_11 = out0[11]
+        c0_12 = out0[12]
+        c0_13 = out0[13]
+        c0_14 = out0[14]
+        t6 = c0_1*t1
+        t7 = t0*t6
+        t8 = (1.0 / (p1 * p1))
+        t9 = t3*t8
+        t10 = d0*t0
+        t11 = c0_3*t10
+        t12 = t0/(p0 * p0)
+        t13 = t4*t8
+        t14 = c0_3*t13 - c0_4*t5
+        t15 = t0*t1*t2
+        t16 = 2.0*t6
+        t17 = (1.0 / (p1 * p1 * p1))
+        t18 = t17*t3
+        t19 = t1*t14
+        t20 = (d0 ** ((3.0 / 2.0)))
+        t21 = t20*t8
+        t22 = c0_6*t21
+        t23 = t0/(p0 * p0 * p0)
+        t24 = 2.0*t8
+        t25 = c0_3*d0
+        t26 = c0_6*t13 - c0_7*t5
+        t27 = t10*t26
+        t28 = 2.0*t0
+        t29 = 2.0*t4
+        t30 = t17*t29
+        t31 = c0_7*t13 - c0_8*t5
+        t32 = c0_3*t30 + t13*t26 - t31*t5
+        t33 = 6.0*t6
+        t34 = (1.0 / (p1 * p1 * p1 * p1))
+        t35 = t3*t34
+        t36 = t1*t32
+        t37 = 6.0*t8
+        t38 = c0_6*t17
+        t39 = c0_10*t13 - c0_11*t5
+        t40 = 6.0*t17
+        t41 = 4.0*t26
+        t42 = c0_11*t13 - c0_12*t5
+        t43 = t13*t39 + t29*t38 - t42*t5
+        t44 = 6.0*t34*t4
+        t45 = t17*t4
+        t46 = c0_12*t13 - c0_13*t5
+        t47 = c0_7*t30 + t13*t42 - t46*t5
+        t48 = c0_3*t44 + t13*t43 + t41*t45 - t47*t5
+        J0[i] = c0_0
+        J1[i, 0] = -t2*t7
+        J1[i, 1] = c0_2*t5 - t6*t9
+        J2[i, 0] = t12*(t11 + t6)
+        J2[i, 1] = t15*(c0_1*t0 + t14)
+        J2[i, 2] = t16*t18 + t19*t9 - t5*(c0_4*t13 - c0_5*t5)
+        J3[i, 0] = -t23*(3.0*t11 + t16 + t22)
+        J3[i, 1] = -t12*(t19 + t24*t25 + t27 + t7)
+        J3[i, 2] = -t15*(c0_1*t24 + t14*t28 + t32)
+        J3[i, 3] = -4.0*t18*t19 - t33*t35 - t36*t9 + t5*(c0_4*t30 + t13*t31 - t5*(c0_8*t13 - c0_9*t5))
+        J4[i, 0] = t0*(c0_10*(d0 * d0)*t17 + 11.0*t11 + 6.0*t22 + t33)/(p0 * p0 * p0 * p0)
+        J4[i, 1] = t23*(t0*t16 + 2.0*t19 + 3.0*t20*t38 + t21*t39 + t25*t37 + 3.0*t27)
+        J4[i, 2] = t12*(d0*t41*t8 + t10*t43 + t16*t8 + t19*t28 + t25*t40 + t36)
+        J4[i, 3] = t15*(c0_1*t40 + 3.0*t0*t32 + t14*t37 + t48)
+        J4[i, 4] = t13*t48 + 18.0*t19*t35 + t3*t36*t40 - t5*(c0_4*t44 + t13*t47 + 4.0*t31*t45 - t5*(c0_8*t30 + t13*t46 - t5*(c0_13*t13 - c0_14*t5))) + 24.0*t3*t6/(p1 * p1 * p1 * p1 * p1)
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logcdf_uniform_0(Y, P0, P1, D0, J0):
+    out0 = np.empty(1)
+    work = np.empty((20, 15))
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = sqrt(d0)
+        gg_uniform_log_tail_with_scratch(t0*log(y/p0)/p1, p1/t0, False, 0, out0, work)
+        c0_0 = out0[0]
+        J0[i] = c0_0
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logcdf_uniform_1(Y, P0, P1, D0, J0, J1):
+    out0 = np.empty(3)
+    work = np.empty((20, 15))
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = (1.0 / (p0))
+        t1 = log(t0*y)
+        t2 = sqrt(d0)
+        t3 = t2/p1
+        t4 = (1.0 / (t2))
+        gg_uniform_log_tail_with_scratch(t1*t3, p1*t4, False, 1, out0, work)
+        c0_0 = out0[0]
+        c0_1 = out0[1]
+        c0_2 = out0[2]
+        J0[i] = c0_0
+        J1[i, 0] = -c0_1*t0*t3
+        J1[i, 1] = -c0_1*t1*t2/(p1 * p1) + c0_2*t4
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logcdf_uniform_2(Y, P0, P1, D0, J0, J1, J2):
+    out0 = np.empty(6)
+    work = np.empty((20, 15))
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = (1.0 / (p1))
+        t1 = sqrt(d0)
+        t2 = (1.0 / (p0))
+        t3 = log(t2*y)
+        t4 = t1*t3
+        t5 = (1.0 / (t1))
+        gg_uniform_log_tail_with_scratch(t0*t4, p1*t5, False, 2, out0, work)
+        c0_0 = out0[0]
+        c0_1 = out0[1]
+        c0_2 = out0[2]
+        c0_3 = out0[3]
+        c0_4 = out0[4]
+        c0_5 = out0[5]
+        t6 = c0_1*t1
+        t7 = t0*t2
+        t8 = (1.0 / (p1 * p1))
+        t9 = t3*t6
+        t10 = t4*t8
+        t11 = c0_3*t10 - c0_4*t5
+        J0[i] = c0_0
+        J1[i, 0] = -t6*t7
+        J1[i, 1] = c0_2*t5 - t8*t9
+        J2[i, 0] = t0*(c0_3*d0*t0 + t6)/(p0 * p0)
+        J2[i, 1] = t1*t7*(c0_1*t0 + t11)
+        J2[i, 2] = t10*t11 - t5*(c0_4*t10 - c0_5*t5) + 2.0*t9/(p1 * p1 * p1)
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logcdf_uniform_3(Y, P0, P1, D0, J0, J1, J2, J3):
+    out0 = np.empty(10)
+    work = np.empty((20, 15))
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = (1.0 / (p1))
+        t1 = sqrt(d0)
+        t2 = (1.0 / (p0))
+        t3 = log(t2*y)
+        t4 = t1*t3
+        t5 = (1.0 / (t1))
+        gg_uniform_log_tail_with_scratch(t0*t4, p1*t5, False, 3, out0, work)
+        c0_0 = out0[0]
+        c0_1 = out0[1]
+        c0_2 = out0[2]
+        c0_3 = out0[3]
+        c0_4 = out0[4]
+        c0_5 = out0[5]
+        c0_6 = out0[6]
+        c0_7 = out0[7]
+        c0_8 = out0[8]
+        c0_9 = out0[9]
+        t6 = c0_1*t1
+        t7 = t0*t6
+        t8 = (1.0 / (p1 * p1))
+        t9 = t3*t8
+        t10 = d0*t0
+        t11 = c0_3*t10
+        t12 = t0/(p0 * p0)
+        t13 = t4*t8
+        t14 = c0_3*t13 - c0_4*t5
+        t15 = t0*t1*t2
+        t16 = 2.0*t6
+        t17 = (1.0 / (p1 * p1 * p1))
+        t18 = t17*t3
+        t19 = t1*t14
+        t20 = c0_6*t8
+        t21 = 2.0*t8
+        t22 = -c0_7*t5 + t20*t4
+        t23 = 2.0*t17*t4
+        t24 = c0_7*t13 - c0_8*t5
+        t25 = c0_3*t23 + t13*t22 - t24*t5
+        J0[i] = c0_0
+        J1[i, 0] = -t2*t7
+        J1[i, 1] = c0_2*t5 - t6*t9
+        J2[i, 0] = t12*(t11 + t6)
+        J2[i, 1] = t15*(c0_1*t0 + t14)
+        J2[i, 2] = t16*t18 + t19*t9 - t5*(c0_4*t13 - c0_5*t5)
+        J3[i, 0] = -t0*((d0 ** ((3.0 / 2.0)))*t20 + 3.0*t11 + t16)/(p0 * p0 * p0)
+        J3[i, 1] = -t12*(c0_3*d0*t21 + t10*t22 + t19 + t7)
+        J3[i, 2] = -t15*(c0_1*t21 + 2.0*t0*t14 + t25)
+        J3[i, 3] = -t13*t25 - 4.0*t18*t19 + t5*(c0_4*t23 + t13*t24 - t5*(c0_8*t13 - c0_9*t5)) - 6.0*t3*t6/(p1 * p1 * p1 * p1)
+
+
+@njit(cache=True, nogil=True, error_model='numpy')
+def logcdf_uniform_4(Y, P0, P1, D0, J0, J1, J2, J3, J4):
+    out0 = np.empty(15)
+    work = np.empty((20, 15))
+    for i in range(Y.shape[0]):
+        y = Y[i]
+        p0 = P0[i]
+        p1 = P1[i]
+        d0 = D0[i]
+        t0 = (1.0 / (p1))
+        t1 = sqrt(d0)
+        t2 = (1.0 / (p0))
+        t3 = log(t2*y)
+        t4 = t1*t3
+        t5 = (1.0 / (t1))
+        gg_uniform_log_tail_with_scratch(t0*t4, p1*t5, False, 4, out0, work)
+        c0_0 = out0[0]
+        c0_1 = out0[1]
+        c0_2 = out0[2]
+        c0_3 = out0[3]
+        c0_4 = out0[4]
+        c0_5 = out0[5]
+        c0_6 = out0[6]
+        c0_7 = out0[7]
+        c0_8 = out0[8]
+        c0_9 = out0[9]
+        c0_10 = out0[10]
+        c0_11 = out0[11]
+        c0_12 = out0[12]
+        c0_13 = out0[13]
+        c0_14 = out0[14]
+        t6 = c0_1*t1
+        t7 = t0*t6
+        t8 = (1.0 / (p1 * p1))
+        t9 = t3*t8
+        t10 = d0*t0
+        t11 = c0_3*t10
+        t12 = t0/(p0 * p0)
+        t13 = t4*t8
+        t14 = c0_3*t13 - c0_4*t5
+        t15 = t0*t1*t2
+        t16 = 2.0*t6
+        t17 = (1.0 / (p1 * p1 * p1))
+        t18 = t17*t3
+        t19 = t1*t14
+        t20 = (d0 ** ((3.0 / 2.0)))
+        t21 = t20*t8
+        t22 = c0_6*t21
+        t23 = t0/(p0 * p0 * p0)
+        t24 = 2.0*t8
+        t25 = c0_3*d0
+        t26 = c0_6*t13 - c0_7*t5
+        t27 = t10*t26
+        t28 = 2.0*t0
+        t29 = 2.0*t4
+        t30 = t17*t29
+        t31 = c0_7*t13 - c0_8*t5
+        t32 = c0_3*t30 + t13*t26 - t31*t5
+        t33 = 6.0*t6
+        t34 = (1.0 / (p1 * p1 * p1 * p1))
+        t35 = t3*t34
+        t36 = t1*t32
+        t37 = 6.0*t8
+        t38 = c0_6*t17
+        t39 = c0_10*t13 - c0_11*t5
+        t40 = 6.0*t17
+        t41 = 4.0*t26
+        t42 = c0_11*t13 - c0_12*t5
+        t43 = t13*t39 + t29*t38 - t42*t5
+        t44 = 6.0*t34*t4
+        t45 = t17*t4
+        t46 = c0_12*t13 - c0_13*t5
+        t47 = c0_7*t30 + t13*t42 - t46*t5
+        t48 = c0_3*t44 + t13*t43 + t41*t45 - t47*t5
+        J0[i] = c0_0
+        J1[i, 0] = -t2*t7
+        J1[i, 1] = c0_2*t5 - t6*t9
+        J2[i, 0] = t12*(t11 + t6)
+        J2[i, 1] = t15*(c0_1*t0 + t14)
+        J2[i, 2] = t16*t18 + t19*t9 - t5*(c0_4*t13 - c0_5*t5)
+        J3[i, 0] = -t23*(3.0*t11 + t16 + t22)
+        J3[i, 1] = -t12*(t19 + t24*t25 + t27 + t7)
+        J3[i, 2] = -t15*(c0_1*t24 + t14*t28 + t32)
+        J3[i, 3] = -4.0*t18*t19 - t33*t35 - t36*t9 + t5*(c0_4*t30 + t13*t31 - t5*(c0_8*t13 - c0_9*t5))
+        J4[i, 0] = t0*(c0_10*(d0 * d0)*t17 + 11.0*t11 + 6.0*t22 + t33)/(p0 * p0 * p0 * p0)
+        J4[i, 1] = t23*(t0*t16 + 2.0*t19 + 3.0*t20*t38 + t21*t39 + t25*t37 + 3.0*t27)
+        J4[i, 2] = t12*(d0*t41*t8 + t10*t43 + t16*t8 + t19*t28 + t25*t40 + t36)
+        J4[i, 3] = t15*(c0_1*t40 + 3.0*t0*t32 + t14*t37 + t48)
+        J4[i, 4] = t13*t48 + 18.0*t19*t35 + t3*t36*t40 - t5*(c0_4*t44 + t13*t47 + 4.0*t31*t45 - t5*(c0_8*t30 + t13*t46 - t5*(c0_13*t13 - c0_14*t5))) + 24.0*t3*t6/(p1 * p1 * p1 * p1 * p1)
 
 
 @njit(cache=True, nogil=True, error_model='numpy')
