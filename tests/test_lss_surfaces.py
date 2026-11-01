@@ -508,6 +508,30 @@ def test_a_random_effect_column_is_held_at_its_first_tied_level() -> None:
     assert curves.reference["panel"] == "p"
 
 
+def test_a_label_unseen_at_fit_does_not_stop_the_reference_row() -> None:
+    """Rows of "d" carry zero weight, so the fit never sees that level; a frame that
+    still holds them takes its reference from the fitted levels, as documented."""
+    from superglm.distributional.terms import term_effect
+
+    X, y = _gaussian_sample()
+    X.loc[:49, "g"] = "d"
+    weight = np.where(X["g"] == "d", 0.0, 1.0)
+    fitted = (
+        model_from_templates(
+            family=GaussianLS(),
+            predictors=[
+                Predictor("location", {"x": Spline("cr", k=6), "g": Categorical()}),
+                Predictor("scale", {}),
+            ],
+        )
+        .fit_reml(X, y, sample_weight=weight)
+        ._require_fitted()
+    )
+    curves = risk_curves(fitted, X, {}, "x", n_draws=60, seed=1)
+    term_effect(fitted, X, "location", "x", simultaneous=False)
+    assert curves.reference["g"] in {"a", "b", "c"}
+
+
 @pytest.fixture(scope="module")
 def grouped_case() -> tuple[DenseDistributionalModel, pd.DataFrame]:
     from superglm.features.grouping import collapse_levels

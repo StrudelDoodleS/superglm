@@ -403,17 +403,35 @@ def _read_levels(spec: Any, labels: Sequence[Any]) -> NDArray:
     """Return the fitted level a categorical term reads each raw label at.
 
     This is the term's own predict-time resolution, so its spelling, grouping
-    and unseen policy decide, as they do in ``predict``.  A term without one,
-    such as a ``RandomEffect``, reads its raw labels as its levels.
+    and unseen policy decide, as they do in ``predict``.  A label the term
+    refuses as unseen at fit keeps its raw spelling, so it matches no fitted
+    level.  A term without a resolver, such as a ``RandomEffect``, reads its
+    raw labels as its levels.
     """
     resolve = getattr(spec, "_resolved_labels", None) or getattr(
         spec, "_resolve_predict_labels", None
     )
     if resolve is None:
         return np.asarray(labels, dtype=object)
+    try:
+        return _resolve_quietly(resolve, labels)
+    except ValueError:
+        return np.array([_read_one_level(resolve, label) for label in labels], dtype=object)
+
+
+def _resolve_quietly(resolve: Any, labels: Sequence[Any]) -> NDArray:
+    """Resolve raw labels without the routing warnings ``predict`` reports."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         return np.asarray(resolve(np.asarray(labels, dtype=object)), dtype=object)
+
+
+def _read_one_level(resolve: Any, label: Any) -> Any:
+    """Return the fitted level one raw label is read at, or the label if refused."""
+    try:
+        return _resolve_quietly(resolve, [label])[0]
+    except ValueError:
+        return label
 
 
 def _level_inputs(spec: Any | None, levels: Sequence[Any], values: Any) -> list[Any]:
