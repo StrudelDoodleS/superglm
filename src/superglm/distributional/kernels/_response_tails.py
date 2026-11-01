@@ -1,55 +1,39 @@
-"""Log probabilities of response windows, for truncated and censored rows.
+"""Log probabilities of response windows, for truncated and censored rows, on packed jets.
 
 A truncated row divides its density by ``P(a < Y <= b)``, and a censored row
 contributes ``log P(l < Y <= r)`` alone.  Both are ``log(T(near) - T(far))``
 for one tail function ``T`` (the CDF, or the survival function under
 reflection) taken at the window's two ends, with ``T(far) <= T(near)``.  The
-family supplies ``log T`` at each end with its score and packed Hessian in the
-natural parameters; :func:`log_window_channels` combines them.
-
-With ``Delta = log T(far) - log T(near) <= 0``, ``kappa = 1/expm1(-Delta)``
-and ``d = g_near - g_far``::
+family supplies ``log T`` at each end as a packed jet in its parameters;
+:func:`log_window_jets` combines them.  With ``Delta = log T(far) - log
+T(near) <= 0`` and ``kappa = 1/expm1(-Delta)``::
 
     log D = log T(near) + log(-expm1(Delta))
     grad  = g_near + kappa d
     hess  = H_near + kappa (H_near - H_far) - kappa (1 + kappa) d d^T
 
-An absent far end (``Delta = -inf``), or one whose tail is negligible beside
-the near end's (``kappa`` rounds to zero), returns the near end's channels
-unchanged, so a one-sided window is exactly its tail.  The difference of two
-log tails keeps only about ``u/Delta`` of relative accuracy as the window
-narrows, so a window narrower than :data:`NARROW_WINDOW` on its density's own
-scale is integrated instead by three-point Gauss-Legendre quadrature of the
-density (:func:`quadrature_window_channels`).  The quadrature's relative error
-there is about ``5e-7`` times the sixth power of that width (Abramowitz and
-Stegun 25.4.30), below ``1e-13``.
+with ``d = g_near - g_far``, and every higher derivative of ``log(-expm1(Delta))``
+a polynomial in ``kappa``, composed with ``Delta``'s derivatives by the
+set-partition chain rule.  An absent far end (``Delta = -inf``), or one whose
+tail is negligible beside the near end's (``kappa`` rounds to zero), returns
+the near end's jet unchanged, so a one-sided window is exactly its tail.  The
+difference of two log tails keeps only about ``u/Delta`` of relative accuracy
+as the window narrows, so a window narrower than :data:`NARROW_WINDOW` on its
+density's own scale is integrated instead by three-point Gauss-Legendre
+quadrature of the density (:func:`quadrature_window_jets`).  The quadrature's
+relative error there is about ``5e-7`` times the sixth power of that width
+(Abramowitz and Stegun 25.4.30), below ``1e-13``.
 
-The normal tail, :func:`normal_log_cdf_channels`, differentiates
-``log Phi(x)`` through the inverse Mills ratio ``r = phi(x)/Phi(x)``:
-``d log Phi/dx = r`` and ``d2 log Phi/dx2 = -r (x + r)``.  Below ``x = -3``
-the gap ``x + r`` cancels (``r`` tends to ``-x``), so it comes from the
-Laplace continued fraction ``x + r = 1/(t + 2/(t + 3/(t + ...)))`` with
-``t = -x``, which has no subtraction (DLMF 7.9.2 for the complementary error
-function).  Values come from ``scipy.special.log_ndtr``.
-
-For third and fourth derivatives the same combination runs on packed jets
-(:func:`log_window_jets`, :func:`quadrature_window_jets`): every derivative of
-``log(-expm1(Delta))`` is a polynomial in ``kappa``, composed with ``Delta``'s
-derivatives by the set-partition chain rule.
-
-Imports only numpy, scipy and the shared primitive helpers.
+Imports only numpy and the shared chain-rule helpers.
 """
 
 from __future__ import annotations
 
 import functools
-import math
 from collections.abc import Callable
-from itertools import combinations_with_replacement
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy import special
 
 from superglm.distributional.kernels._common import FLOAT
 from superglm.distributional.kernels._curvature_direction import (
@@ -58,11 +42,6 @@ from superglm.distributional.kernels._curvature_direction import (
     packed_tuples,
 )
 
-_HALF_LOG_TWO_PI = 0.5 * math.log(2.0 * math.pi)
-# Below this the Mills-ratio gap comes from the continued fraction; its
-# convergence at t = 3 needs about 80 levels for float64, so 120 has margin.
-_MILLS_SWITCH = -3.0
-_MILLS_DEPTH = 120
 NARROW_WINDOW = 0.05
 _LEGENDRE_NODES, _LEGENDRE_WEIGHTS = np.polynomial.legendre.leggauss(3)
 
@@ -70,159 +49,6 @@ TailChannels = tuple[NDArray[np.float64], NDArray[np.float64] | None, NDArray[np
 #: A packed jet ``(J0, J1, ..., Jp)``: ``J0`` per row, ``Jk`` the ``k``-th partial
 #: derivatives ``(n, C(K + k - 1, k))`` in :func:`packed_tuples` order.
 Jet = tuple[NDArray[np.float64], ...]
-
-
-def packed_pairs(k_parameters: int) -> tuple[tuple[int, int], ...]:
-    """Packed Hessian column order: ``combinations_with_replacement`` of the parameters."""
-    return tuple(combinations_with_replacement(range(k_parameters), 2))
-
-
-def _outer_packed(left: NDArray, right: NDArray) -> NDArray[np.float64]:
-    """Packed symmetric ``(left right^T + right left^T)/2`` per row."""
-    pairs = packed_pairs(left.shape[1])
-    return np.column_stack(
-        [0.5 * (left[:, a] * right[:, b] + left[:, b] * right[:, a]) for a, b in pairs]
-    )
-
-
-def inverse_mills(x: NDArray) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray]:
-    """``(log Phi(x), r, x + r)`` with ``r = phi(x)/Phi(x)``, tail-safe for finite ``x``."""
-    values = np.asarray(x, dtype=FLOAT)
-    log_cdf = special.log_ndtr(values)
-    ratio = np.empty_like(values)
-    gap = np.empty_like(values)
-    lower = values < _MILLS_SWITCH
-    direct = ~lower
-    if np.any(direct):
-        upper_values = values[direct]
-        with np.errstate(under="ignore", over="ignore"):
-            ratio[direct] = np.exp(
-                -0.5 * upper_values * upper_values - _HALF_LOG_TWO_PI - log_cdf[direct]
-            )
-        gap[direct] = upper_values + ratio[direct]
-    if np.any(lower):
-        t = -values[lower]
-        level = t.copy()
-        for k in range(_MILLS_DEPTH - 1, 0, -1):
-            level = t + (k + 1.0) / level
-        fraction = 1.0 / level
-        ratio[lower] = t + fraction
-        gap[lower] = fraction
-    return log_cdf, ratio, gap
-
-
-def normal_log_cdf_channels(
-    x: NDArray,
-    x_score: NDArray,
-    x_hessian: NDArray,
-    *,
-    derivative_order: int,
-) -> TailChannels:
-    """``log Phi(x(theta))`` with its score and packed Hessian in ``theta``.
-
-    ``x_score`` is ``dx/dtheta`` per row and ``x_hessian`` the packed second
-    derivatives of ``x``.
-    """
-    log_cdf, ratio, gap = inverse_mills(x)
-    if derivative_order == 0:
-        return log_cdf, None, None
-    # Where Phi(x) rounds to one the tail is flat in float64 and its
-    # derivatives are zero, though x's own derivatives may have overflowed.
-    flat = np.flatnonzero(ratio == 0.0)
-    with np.errstate(over="ignore", invalid="ignore"):
-        score = ratio[:, None] * x_score
-        hessian = (
-            ratio[:, None] * x_hessian - (ratio * gap)[:, None] * _outer_packed(x_score, x_score)
-            if derivative_order == 2
-            else None
-        )
-    if len(flat):
-        score[flat] = 0.0
-        if hessian is not None:
-            hessian[flat] = 0.0
-    return log_cdf, score, hessian
-
-
-def log_window_channels(
-    near: TailChannels,
-    far: TailChannels,
-    *,
-    derivative_order: int,
-) -> TailChannels:
-    """``log(T(near) - T(far))`` and its derivatives from the two ends' log tails.
-
-    A far end with value ``-inf`` is absent, and one with ``kappa`` rounding
-    to zero is negligible; their score and Hessian rows, which may have
-    overflowed, are then ignored.  A window of zero probability returns
-    ``-inf``.
-    """
-    near_value, near_score, near_hessian = near
-    far_value, far_score, far_hessian = far
-    with np.errstate(invalid="ignore", over="ignore", divide="ignore"):
-        delta = far_value - near_value
-        kappa = 1.0 / np.expm1(-delta)
-    # Elsewhere the window is the near end's tail exactly: log(-expm1(delta))
-    # rounds to zero wherever kappa does.  Tails that round equal (kappa
-    # infinite) leave the window unresolved, -inf, unless a caller integrates it.
-    rows = np.flatnonzero((far_value > -np.inf) & (np.abs(kappa) > 0.0))
-    if len(rows) == 0:
-        return near_value, near_score, near_hessian
-    value = np.array(near_value, dtype=FLOAT, copy=True)
-    with np.errstate(divide="ignore"):
-        value[rows] += np.log(-np.expm1(delta[rows]))
-    if derivative_order == 0:
-        return value, None, None
-    assert near_score is not None and far_score is not None
-    weight = kappa[rows][:, None]
-    difference = near_score[rows] - far_score[rows]
-    score = np.array(near_score, dtype=FLOAT, copy=True)
-    with np.errstate(invalid="ignore", over="ignore"):
-        score[rows] += weight * difference
-    if derivative_order == 1:
-        return value, score, None
-    assert near_hessian is not None and far_hessian is not None
-    hessian = np.array(near_hessian, dtype=FLOAT, copy=True)
-    with np.errstate(invalid="ignore", over="ignore"):
-        hessian[rows] += weight * (near_hessian[rows] - far_hessian[rows]) - (
-            weight * (1.0 + weight)
-        ) * _outer_packed(difference, difference)
-    return value, score, hessian
-
-
-def quadrature_window_channels(
-    half_width: NDArray,
-    log_density: Callable[[float], TailChannels],
-    *,
-    derivative_order: int,
-) -> TailChannels:
-    """``log P`` of a window ``2 half_width`` wide by Gauss-Legendre quadrature.
-
-    ``log_density(fraction)`` gives the log density with its score and packed
-    Hessian at the point that far across each row's window, ``0 < fraction <
-    1``; the caller forms that point in coordinates where it does not round
-    away.  With node weights ``p_i`` proportional to ``omega_i f(y_i)``, the
-    score is ``sum p_i g_i`` and the Hessian ``sum p_i (H_i + (g_i - g)(g_i - g)^T)``.
-    """
-    nodes = [log_density(0.5 * (1.0 + float(t))) for t in _LEGENDRE_NODES]
-    logs = np.column_stack(
-        [np.log(omega) + node[0] for omega, node in zip(_LEGENDRE_WEIGHTS, nodes, strict=True)]
-    )
-    top = np.max(logs, axis=1)
-    share = np.exp(logs - np.where(np.isfinite(top), top, 0.0)[:, None])
-    total = np.sum(share, axis=1)
-    share /= np.where(total > 0.0, total, 1.0)[:, None]
-    with np.errstate(divide="ignore"):
-        value = np.log(half_width) + top + np.log(total)
-    if derivative_order == 0:
-        return value, None, None
-    score = sum(share[:, [i]] * node[1] for i, node in enumerate(nodes))
-    if derivative_order == 1:
-        return value, score, None
-    hessian = sum(
-        share[:, [i]] * (node[2] + _outer_packed(node[1] - score, node[1] - score))
-        for i, node in enumerate(nodes)
-    )
-    return value, score, hessian
 
 
 def _window_log_derivatives(kappa: NDArray, order: int) -> dict[int, NDArray[np.float64]]:
@@ -260,11 +86,10 @@ def log_window_jets(near: Jet, far: Jet, *, order: int) -> Jet:
     the derivatives of ``phi(Delta(theta))`` follow from the set-partition
     chain rule (Constantine and Savits, *A multivariate Faa di Bruno formula
     with applications*, Trans. AMS 348, 1996; Hardy 2006) with the far-minus-
-    near jets as ``Delta``'s derivatives.  Orders 0-2 are the arithmetic of
-    :func:`log_window_channels`, so the semantics match: a far end with value
-    ``-inf`` is absent, one with ``kappa`` rounding to zero is negligible, and
-    both return the near jets with the far entries ignored; ends whose tails
-    round equal give ``-inf`` with non-finite derivatives.
+    near jets as ``Delta``'s derivatives.  A far end with value ``-inf`` is
+    absent, one with ``kappa`` rounding to zero is negligible, and both return
+    the near jets with the far entries ignored; ends whose tails round equal
+    give ``-inf`` with non-finite derivatives.
     """
     order = _checked_order(order)
     near_value, far_value = near[0], far[0]
@@ -346,8 +171,8 @@ def quadrature_window_jets(
 
     ``log_density_jets(fraction)`` gives the log density's jet (at least
     ``order + 1`` entries) at the point that far across each row's window,
-    as for :func:`quadrature_window_channels`, whose value and orders 1-2 this
-    reproduces.  ``F = log sum_i omega_i exp(l_i(theta))`` has, with node
+    ``0 < fraction < 1``; the caller forms that point in coordinates where it
+    does not round away.  ``F = log sum_i omega_i exp(l_i(theta))`` has, with node
     weights ``p_i`` proportional to ``omega_i f(y_i)``, the derivatives
 
         F_I = sum over set partitions pi of I of kappa_p(l_B : B in pi),
@@ -395,132 +220,3 @@ def quadrature_window_jets(
                 derivative[:, column] += _node_cumulant(share, factors)
         jet.append(derivative)
     return tuple(jet)
-
-
-def absent_tail(n_rows: int, k_parameters: int, *, derivative_order: int) -> TailChannels:
-    """Channels of an absent far end: ``-inf`` with zero derivatives."""
-    n_pairs = k_parameters * (k_parameters + 1) // 2
-    return (
-        np.full(n_rows, -np.inf, dtype=FLOAT),
-        np.zeros((n_rows, k_parameters), dtype=FLOAT) if derivative_order >= 1 else None,
-        np.zeros((n_rows, n_pairs), dtype=FLOAT) if derivative_order == 2 else None,
-    )
-
-
-def normal_window_channels(
-    lower: NDArray,
-    upper: NDArray,
-    location: NDArray,
-    scale: NDArray,
-    precision_root: NDArray,
-    *,
-    derivative_order: int,
-    width: NDArray | None = None,
-) -> TailChannels:
-    """``log P(lower < X <= upper)`` for ``X ~ N(location, (scale/precision_root)^2)``.
-
-    Score and packed Hessian are in ``(location, scale)``.  ``lower`` may be
-    ``-inf`` and ``upper`` ``+inf``, not both.  The window is read from the
-    lower tail (``Phi``) when its midpoint is below the location, else from
-    the upper tail by reflection, so neither end's tail rounds to one.  A
-    window whose standardised width, times ``max(1, |midpoint|)``, is at most
-    :data:`NARROW_WINDOW` is integrated by quadrature.  ``width`` is
-    ``upper - lower`` when the caller has it more accurately than that
-    difference.
-    """
-    lo = np.asarray(lower, dtype=FLOAT)
-    hi = np.asarray(upper, dtype=FLOAT)
-    mu = np.asarray(location, dtype=FLOAT)
-    sigma = np.asarray(scale, dtype=FLOAT)
-    root = np.asarray(precision_root, dtype=FLOAT)
-    inverse = 1.0 / sigma
-    with np.errstate(invalid="ignore", over="ignore"):
-        z_lo = (lo - mu) * root * inverse
-        z_hi = (hi - mu) * root * inverse
-        from_lower_tail = z_lo + z_hi < 0.0
-    sign = np.where(from_lower_tail, 1.0, -1.0)
-    near_z = np.where(from_lower_tail, z_hi, z_lo)
-    far_z = np.where(from_lower_tail, z_lo, z_hi)
-    near = normal_log_cdf_channels(
-        *_standardized(near_z, sign, root, inverse), derivative_order=derivative_order
-    )
-    far_present = np.isfinite(far_z)
-    far = absent_tail(len(mu), 2, derivative_order=derivative_order)
-    if np.any(far_present):
-        present_channels = normal_log_cdf_channels(
-            *_standardized(
-                far_z[far_present], sign[far_present], root[far_present], inverse[far_present]
-            ),
-            derivative_order=derivative_order,
-        )
-        for target, source in zip(far, present_channels, strict=True):
-            if target is not None and source is not None:
-                target[far_present] = source
-    channels = log_window_channels(near, far, derivative_order=derivative_order)
-    # Only a window with two finite ends can be narrow; an infinite end is
-    # always the far one.
-    rows = np.flatnonzero(far_present)
-    rows = rows[np.isfinite(near_z[rows])]
-    if len(rows) == 0:
-        return channels
-    span = (hi - lo if width is None else np.asarray(width, dtype=FLOAT))[rows]
-    with np.errstate(invalid="ignore", over="ignore"):
-        reach = span * (root * inverse * np.maximum(1.0, 0.5 * np.abs(z_lo + z_hi)))[rows]
-    narrow = reach <= NARROW_WINDOW
-    rows, span = rows[narrow], span[narrow]
-    if len(rows) == 0:
-        return channels
-
-    # Nodes are placed in standardised coordinates, where a large common
-    # offset of the window and the location has already cancelled.
-    start, extent = z_lo[rows], span * (root * inverse)[rows]
-
-    def log_density(fraction: float) -> TailChannels:
-        return _normal_log_density(
-            start + fraction * extent, root[rows], inverse[rows], derivative_order=derivative_order
-        )
-
-    quadrature = quadrature_window_channels(
-        0.5 * span, log_density, derivative_order=derivative_order
-    )
-    for target, source in zip(channels, quadrature, strict=True):
-        if target is not None and source is not None:
-            target[rows] = source
-    return channels
-
-
-def _standardized(
-    z: NDArray, sign: NDArray, root: NDArray, inverse: NDArray
-) -> tuple[NDArray, NDArray, NDArray]:
-    """``x = sign z`` and its derivatives in ``(mu, sigma)`` for ``z = (c - mu) k/sigma``.
-
-    ``x_mu = -sign k/sigma``, ``x_sigma = -x/sigma``, ``x_mumu = 0``,
-    ``x_musigma = sign k/sigma^2`` and ``x_sigmasigma = 2 x/sigma^2``.
-    """
-    x = sign * z
-    with np.errstate(over="ignore", invalid="ignore"):
-        x_score = np.column_stack((-sign * root * inverse, -x * inverse))
-        x_hessian = np.column_stack(
-            (np.zeros(len(x)), sign * root * inverse * inverse, 2.0 * x * inverse * inverse)
-        )
-    return x, x_score, x_hessian
-
-
-def _normal_log_density(
-    z: NDArray, root: NDArray, inverse: NDArray, *, derivative_order: int
-) -> TailChannels:
-    """``log`` of the ``N(location, (scale/root)^2)`` density, in ``(location, scale)``.
-
-    ``z = (y - location) root/scale`` is the point, standardised.
-    """
-    value = np.log(root * inverse) - _HALF_LOG_TWO_PI - 0.5 * z * z
-    if derivative_order == 0:
-        return value, None, None
-    _, z_score, z_hessian = _standardized(z, np.ones_like(z), root, inverse)
-    score = -z[:, None] * z_score
-    score[:, 1] -= inverse
-    if derivative_order == 1:
-        return value, score, None
-    hessian = -z[:, None] * z_hessian - _outer_packed(z_score, z_score)
-    hessian[:, 2] += inverse * inverse
-    return value, score, hessian

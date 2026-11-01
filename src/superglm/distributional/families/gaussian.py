@@ -30,7 +30,9 @@ from superglm.distributional.families._response_bounds import (
     TailChannels,
     bind_observation,
     bounded_channels,
+    bounded_share,
     censored_carrier,
+    contract_third,
     log_window_values,
     refuse_bounded,
 )
@@ -48,12 +50,15 @@ from superglm.distributional.family import (
     _validated_derivative_order,
     _validated_parameter_matrix,
 )
+from superglm.distributional.kernels._declared_bounds import (
+    normal_predictor_jets,
+    normal_window_jets,
+)
 from superglm.distributional.kernels.gaussian import (
     evaluate_gaussian_rows,
     gaussian_expected_information,
     gaussian_predictor_curvature_directional,
     gaussian_predictor_fourth_derivatives,
-    gaussian_window,
     initialize_gaussian,
 )
 from superglm.distributional.likelihood_identity import (
@@ -163,6 +168,41 @@ def _prior_weight_vector(weights: NDArray, n_observations: int) -> NDArray[np.fl
     if not np.all(np.isfinite(values)) or np.any(values <= 0.0):
         raise ValueError("prior weights must be finite and strictly positive")
     return values
+
+
+def _row_law(weights: NDArray, semantics: str) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Per row, the square root of the prior weight in the law's precision and the replication mass."""
+    if semantics == "frequency":
+        return np.ones_like(weights), weights
+    return np.sqrt(weights), np.ones_like(weights)
+
+
+def _bounded_predictor_share(
+    plan: GaussianLikelihoodPlan, response: NDArray, eta: NDArray, order: int, floor: float
+) -> tuple[NDArray[np.float64], NDArray[np.bool_], NDArray[np.bool_]]:
+    """Bounded rows' packed predictor derivatives of ``order`` (3 or 4); see ``bounded_share``."""
+    bounds = plan.observation.bounds
+    assert bounds is not None
+    root, multiplier = _row_law(plan.weights.values, plan.weights.provenance.contract.semantics)
+    predictors = np.asarray(eta, dtype=np.float64)
+
+    def window_jets(lower: NDArray, upper: NDArray, rows: NDArray, jet_order: int):
+        with np.errstate(over="ignore", under="ignore"):
+            increment = np.exp(predictors[rows, 1])
+        scale = floor + increment
+        jets = normal_window_jets(
+            lower, upper, predictors[rows, 0], scale, root[rows], order=jet_order
+        )
+        return normal_predictor_jets(jets, scale, increment)
+
+    return bounded_share(
+        order,
+        2,
+        response=response,
+        bounds=bounds,
+        multiplier=multiplier,
+        window_jets=window_jets,
+    )
 
 
 def _normal_expected_shortfall(
@@ -564,17 +604,18 @@ class GaussianLS(LocationPredictor, ScalePredictor):
         )
         bounds = gaussian_plan.observation.bounds
         if bounds is not None:
+            root, multiplier = _row_law(weights, semantics)
 
             def window(lower: NDArray, upper: NDArray, selected: NDArray) -> TailChannels:
-                return gaussian_window(
+                jets = normal_window_jets(
                     lower,
                     upper,
                     parameters[selected, 0],
                     parameters[selected, 1],
-                    weights[selected],
-                    semantics,
-                    derivative_order=order,
+                    root[selected],
+                    order=order,
                 )
+                return jets[0], *(jets[k] if order >= k else None for k in (1, 2))
 
             optimizing, score, hessian, valid = bounded_channels(
                 optimizing,
@@ -583,7 +624,7 @@ class GaussianLS(LocationPredictor, ScalePredictor):
                 valid,
                 response=response,
                 bounds=bounds,
-                multiplier=weights if semantics == "frequency" else np.ones_like(weights),
+                multiplier=multiplier,
                 window=window,
                 derivative_order=order,
             )
@@ -637,8 +678,7 @@ class GaussianLS(LocationPredictor, ScalePredictor):
                 "configured lower-bounded log links"
             )
         gaussian_plan = _validated_plan(plan, len(response), self.scale_floor)
-        refuse_bounded(gaussian_plan.observation, "GaussianLS analytic curvature derivatives")
-        return gaussian_predictor_curvature_directional(
+        complete = gaussian_predictor_curvature_directional(
             response,
             eta,
             eta_direction,
@@ -646,6 +686,15 @@ class GaussianLS(LocationPredictor, ScalePredictor):
             gaussian_plan.weights.provenance.contract.semantics,
             scale_floor=self.scale_floor,
         )
+        if gaussian_plan.observation.bounds is None:
+            return complete
+        third, kept, valid = _bounded_predictor_share(
+            gaussian_plan, response, eta, 3, self.scale_floor
+        )
+        direction = np.asarray(eta_direction, dtype=np.float64)
+        result = np.where(kept[:, None], complete, 0.0) - contract_third(third, direction)
+        result[~valid] = 0.0
+        return readonly(result)
 
     def predictor_curvature_second_directional_derivative(
         self,
@@ -661,7 +710,6 @@ class GaussianLS(LocationPredictor, ScalePredictor):
         response = _validated_response(y)
         self._require_builtin_links(links)
         gaussian_plan = _validated_plan(plan, len(response), self.scale_floor)
-        refuse_bounded(gaussian_plan.observation, "GaussianLS analytic curvature derivatives")
         single = np.ndim(direction_a) == 2
         predictors, first, second = second_direction_arrays(
             response, eta, direction_a, direction_b, 2
@@ -673,7 +721,15 @@ class GaussianLS(LocationPredictor, ScalePredictor):
             gaussian_plan.weights.provenance.contract.semantics,
             scale_floor=self.scale_floor,
         )
+        valid = None
+        if gaussian_plan.observation.bounds is not None:
+            share, kept, valid = _bounded_predictor_share(
+                gaussian_plan, response, predictors, 4, self.scale_floor
+            )
+            fourth = np.where(kept[:, None], fourth, 0.0) + share
         result = contract_second_direction(fourth, first, second)
+        if valid is not None:
+            result[..., ~valid, :] = 0.0
         return readonly(result[0] if single else result)
 
     def _require_builtin_links(self, links: Sequence[Link]) -> None:
@@ -714,9 +770,10 @@ class GaussianLS(LocationPredictor, ScalePredictor):
         )
 
         def window(lo: NDArray, hi: NDArray, rows: NDArray) -> TailChannels:
-            return gaussian_window(
-                lo, hi, values[rows, 0], values[rows, 1], law[rows], "prior", derivative_order=0
+            jets = normal_window_jets(
+                lo, hi, values[rows, 0], values[rows, 1], np.sqrt(law[rows]), order=0
             )
+            return jets[0], None, None
 
         return readonly(log_window_values(lower, upper, len(values), window, support_lower=-np.inf))
 

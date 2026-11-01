@@ -33,6 +33,7 @@ from superglm.distributional.families._response_bounds import (
     bounded_channels,
     bounded_higher_derivatives,
     censored_carrier,
+    contract_third,
     log_window_values,
     refuse_bounded,
 )
@@ -50,7 +51,6 @@ from superglm.distributional.family import (
     _validated_derivative_order,
     _validated_parameter_matrix,
 )
-from superglm.distributional.kernels._curvature_direction import packed_tuples
 from superglm.distributional.kernels._declared_bounds import gg_window_jets
 from superglm.distributional.kernels.generalized_gamma import (
     GeneralizedGammaDomainError as GeneralizedGammaDomainError,
@@ -205,17 +205,6 @@ class GeneralizedGammaLikelihoodPlan:
         if self.row_law == "gg-prentice-literal-replication/v1":
             return self.weights.values
         return np.ones_like(self.weights.values)
-
-
-def _contract_third(third: NDArray, direction: NDArray) -> NDArray[np.float64]:
-    """Packed ``sum_k T_ijk v_k`` from packed third derivatives of three parameters."""
-    column = {key: index for index, key in enumerate(packed_tuples(3, 3))}
-    return np.column_stack(
-        [
-            sum(third[:, column[tuple(sorted((i, j, k)))]] * direction[:, k] for k in range(3))
-            for i, j in packed_tuples(3, 2)
-        ]
-    )
 
 
 @dataclass(frozen=True)
@@ -540,7 +529,7 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
             )
             windows_valid[:] = valid
             kept = (bound.observation.bounds.side == 0)[:, None]
-            return np.where(kept, complete, 0.0) + _contract_third(share, natural)
+            return np.where(kept, complete, 0.0) + contract_third(share, natural)
 
         result = natural_curvature_direction(
             self, response, eta, eta_direction, links, plan, hessian_direction

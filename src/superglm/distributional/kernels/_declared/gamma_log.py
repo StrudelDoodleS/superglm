@@ -27,7 +27,7 @@ DATA = ('weight',)
 COORDINATES = 'log'
 LAWS = ('density', 'logsf', 'logcdf', 'logsf_uniform', 'logcdf_uniform')
 MAX_ORDER = 4
-PRIMITIVES_DIGEST = "7139a2b537094ec4616a1b45afc889977e859c59786c0efbe16b55454abe7f64"
+PRIMITIVES_DIGEST = "4c7fe4804b626b181d4ae1191b72b663a34a5a2e89fdc8175af63a88416b77fc"
 ENGINES_DIGEST = "8bd37b2f4ed58a28696555a1077131db6c1d1196dc9925f6e17555e3c41be6b4"
 
 @njit(cache=True, error_model='numpy')

@@ -8,16 +8,16 @@ rows)``: the unit-mass log window probability with its natural-parameter
 score and packed Hessian at those rows' parameters.
 
 A censored row has no density, so its parameter-independent carrier is zero
-(:func:`censored_carrier`).  A family whose window supplies packed jets to
-order four adjusts its complete-row third and fourth derivatives the same way
-with :func:`bounded_higher_derivatives`; one that does not refuses its
-analytic hooks for a bounded plan, and the LAML ladder differences these
-analytic Hessians instead.
+(:func:`censored_carrier`).  Each family's window supplies packed jets to
+order four, and its complete-row third and fourth derivatives are adjusted
+the same way with :func:`bounded_higher_derivatives` (or
+:func:`bounded_share` with :func:`contract_third` for a directional hook).
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from math import comb
 
 import numpy as np
 from numpy.typing import NDArray
@@ -27,6 +27,7 @@ from superglm.distributional.family import (
     ObservationContract,
     bounded_observation,
 )
+from superglm.distributional.kernels._curvature_direction import packed_tuples
 from superglm.distributional.kernels._response_tails import Jet, TailChannels
 from superglm.distributional.observation import LEFT_CENSORED, ResponseBounds
 from superglm.distributional.weights import UnsupportedLikelihoodContractError
@@ -252,6 +253,52 @@ def bounded_higher_derivatives(
     return arrays[0], arrays[1], valid
 
 
+def bounded_share(
+    order: int,
+    k_parameters: int,
+    *,
+    response: NDArray,
+    bounds: ResponseBounds,
+    multiplier: NDArray,
+    window_jets: WindowJetFunction,
+) -> tuple[NDArray[np.float64], NDArray[np.bool_], NDArray[np.bool_]]:
+    """Bounded rows' packed derivatives of ``order`` (3 or 4), each window formed once.
+
+    Returns what :func:`bounded_higher_derivatives` adds to complete-row
+    derivatives of zero, the rows whose complete-row derivatives stay (all but
+    the censored), and the rows whose window is representable.
+    """
+    n_rows = len(response)
+    zeros = np.zeros((n_rows, comb(k_parameters + order - 1, order)))
+    third, fourth, valid = bounded_higher_derivatives(
+        zeros if order == 3 else None,
+        zeros if order == 4 else None,
+        np.ones(n_rows, dtype=bool),
+        response=response,
+        bounds=bounds,
+        multiplier=multiplier,
+        window_jets=window_jets,
+    )
+    share = third if order == 3 else fourth
+    assert share is not None
+    return share, (bounds.side == 0) & valid, valid
+
+
+def contract_third(third: NDArray, direction: NDArray) -> NDArray[np.float64]:
+    """Packed ``sum_k T_ijk v_k`` from packed third derivatives and a direction ``(n, K)``."""
+    k_parameters = direction.shape[1]
+    column = {key: index for index, key in enumerate(packed_tuples(k_parameters, 3))}
+    return np.column_stack(
+        [
+            sum(
+                third[:, column[tuple(sorted((i, j, k)))]] * direction[:, k]
+                for k in range(k_parameters)
+            )
+            for i, j in packed_tuples(k_parameters, 2)
+        ]
+    )
+
+
 __all__ = [
     "LEFT_CENSORED",
     "Jet",
@@ -262,7 +309,9 @@ __all__ = [
     "bind_observation",
     "bounded_channels",
     "bounded_higher_derivatives",
+    "bounded_share",
     "censored_carrier",
+    "contract_third",
     "log_window_values",
     "refuse_bounded",
 ]

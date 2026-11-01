@@ -78,9 +78,7 @@ from superglm.distributional.families._response_bounds import (  # noqa: E402
     bounded_higher_derivatives,
 )
 from superglm.distributional.kernels._response_tails import (  # noqa: E402
-    log_window_channels,
     log_window_jets,
-    quadrature_window_channels,
     quadrature_window_jets,
 )
 from superglm.distributional.observation import (  # noqa: E402
@@ -388,12 +386,9 @@ def test_window_jets_match_the_oracle_to_order_four(law_name, lo, hi, reading):
     ("law_name", "lo", "hi", "reading"),
     [case[:1] + case[2:] for case in _WINDOWS if np.isfinite(case[2]) and np.isfinite(case[3])],
 )
-def test_window_jets_agree_with_the_order_two_combiner(law_name, lo, hi, reading):
+def test_window_jets_of_a_lower_order_are_the_prefix(law_name, lo, hi, reading):
     near, far, _ = _window_inputs(law_name, lo, hi, reading)
     jets = log_window_jets(near, far, order=_ORDER)
-    channels = log_window_channels(near[:3], far[:3], derivative_order=2)
-    for order, scale in enumerate(_combiner_scales(near, far)[:3]):
-        assert np.all(np.abs(np.ravel(jets[order] - channels[order])) <= 8 * _U * scale + _TINY)
     for order in range(_ORDER):
         prefix = log_window_jets(near, far, order=order)
         assert len(prefix) == order + 1
@@ -469,15 +464,9 @@ _NARROW_CASES = [(*case, width) for case in _NARROW for width in (1e-3, 1e-8)]
 def test_quadrature_jets_match_the_oracle_to_order_four(law_name, where, scale, reading, width):
     half_width, density, nodes, oracle = _narrow_inputs(law_name, where, scale, width, reading)
     computed = quadrature_window_jets(half_width, density, order=_ORDER)
-    tols, scales = _quadrature_scales(nodes, float(half_width[0]))
+    tols, _ = _quadrature_scales(nodes, float(half_width[0]))
     for order, (error, tol) in enumerate(zip(_errors(computed, oracle), tols, strict=True)):
         assert np.all(error <= tol), (order, error, tol)
-    channels = quadrature_window_channels(
-        half_width, lambda fraction: density(fraction)[:3], derivative_order=2
-    )
-    for order in range(3):
-        difference = np.abs(np.ravel(computed[order] - channels[order]))
-        assert np.all(difference <= 8 * _U * scales[order] + _TINY)
     for order in range(_ORDER):
         prefix = quadrature_window_jets(half_width, density, order=order)
         for got, want in zip(prefix, computed, strict=False):

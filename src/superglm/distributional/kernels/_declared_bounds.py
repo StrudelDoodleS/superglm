@@ -42,7 +42,13 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributional.kernels._curvature_direction import compose_derivatives
-from superglm.distributional.kernels._declared import gamma, gamma_log, law_jets
+from superglm.distributional.kernels._declared import (
+    gamma,
+    gamma_log,
+    generalized_pareto,
+    law_jets,
+    normal,
+)
 from superglm.distributional.kernels._gg_log_tail import gg_log_tail_jets
 from superglm.distributional.kernels._gg_uniform_tail import gg_uniform_domain
 from superglm.distributional.kernels._response_tails import (
@@ -98,6 +104,69 @@ def _tail_jets(module, law, order, points, theta, columns, uniform):
     return jets
 
 
+def tail_window_jets(
+    lower: NDArray,
+    upper: NDArray,
+    n_parameters: int,
+    *,
+    order: int,
+    from_lower: NDArray,
+    tail_jets: Callable[[str, NDArray, NDArray], Jet],
+    support_start: float = 0.0,
+) -> Jet:
+    """``log P(lower < Y <= upper)`` and its packed jet from the two ends' log tails.
+
+    ``lower`` at or below ``support_start`` is the support's start and
+    ``upper = inf`` an open end, not both on one row.  A window open below is
+    read from the lower tail, one open above from the upper tail, and a
+    two-ended one from the lower tail where ``from_lower``.
+    ``tail_jets(law, points, rows)`` is the ``"logcdf"`` or ``"logsf"`` jet at
+    ``points`` under those rows' laws.
+    """
+    lo = np.asarray(lower, dtype=np.float64)
+    hi = np.asarray(upper, dtype=np.float64)
+    n_rows = len(lo)
+    open_below = ~(lo > support_start)
+    open_above = ~(hi < np.inf)
+    lower_tail = open_below | (np.asarray(from_lower, dtype=bool) & ~open_above)
+    near_point = np.where(lower_tail, hi, lo)
+    far_point = np.where(lower_tail, lo, hi)
+    far_present = np.where(lower_tail, ~open_below, ~open_above)
+    one_sided = not far_present.any()
+    laws = [("logcdf", np.flatnonzero(lower_tail)), ("logsf", np.flatnonzero(~lower_tail))]
+    if one_sided and n_rows and len(laws[1][1]) in (0, n_rows):
+        # Every row is one tail under one law: the window is that tail's jet.
+        law, rows = laws[0] if len(laws[1][1]) == 0 else laws[1]
+        return tuple(tail_jets(law, near_point, rows)[: order + 1])
+
+    widths = [comb(n_parameters + level - 1, level) for level in range(1, order + 1)]
+    near = [np.zeros(n_rows), *(np.zeros((n_rows, width)) for width in widths)]
+    far = None if one_sided else [np.full(n_rows, -np.inf), *(np.zeros_like(a) for a in near[1:])]
+    for law, near_rows in laws:
+        far_rows = near_rows[far_present[near_rows]]
+        rows = np.concatenate((near_rows, far_rows))
+        if len(rows) == 0:
+            continue
+        points = np.concatenate((near_point[near_rows], far_point[far_rows]))
+        jets = tail_jets(law, points, rows)
+        split = len(near_rows)
+        for level, values in enumerate(jets[: order + 1]):
+            near[level][near_rows] = values[:split]
+            if far is not None:
+                far[level][far_rows] = values[split:]
+    if far is None:
+        return tuple(near)
+    return log_window_jets(tuple(near), tuple(far), order=order)
+
+
+def _integrated(result: Jet, rows: NDArray, half_width: NDArray, node_jets, order: int) -> Jet:
+    """``result`` with ``rows`` replaced by the narrow-window quadrature of ``node_jets``."""
+    quadrature = quadrature_window_jets(half_width, node_jets, order=order)
+    for target, source in zip(result, quadrature, strict=True):
+        target[rows] = source
+    return result
+
+
 def window_jets(
     lower: NDArray,
     upper: NDArray,
@@ -109,44 +178,17 @@ def window_jets(
     tail_jets: Callable[[str, NDArray, NDArray], Jet],
     log_density_jets: Callable[[NDArray, NDArray], Jet],
 ) -> Jet:
-    """``log P(lower < Y <= upper)`` and its packed jet to ``order`` from a law's tails.
+    """:func:`tail_window_jets` on positive support, narrow windows integrated on ``log y``.
 
-    ``lower`` at or below zero is the support's start and ``upper = inf`` an
-    open end, not both on one row.  ``tail_jets(law, points, rows)`` is the
-    ``"logcdf"`` or ``"logsf"`` jet at ``points`` under those rows' laws, and
-    ``log_density_jets(y, rows)`` the jet of the density of ``log Y`` there.
+    ``log_density_jets(y, rows)`` is the jet of the density of ``log Y`` at
+    ``y`` under those rows' laws.
     """
     lo = np.asarray(lower, dtype=np.float64)
     hi = np.asarray(upper, dtype=np.float64)
-    n_rows = len(lo)
-    open_below = ~(lo > 0.0)
-    open_above = ~(hi < np.inf)
-    lower_tail = open_below | (np.asarray(from_lower, dtype=bool) & ~open_above)
-    near_point = np.where(lower_tail, hi, lo)
-    far_point = np.where(lower_tail, lo, hi)
-    far_present = np.where(lower_tail, ~open_below, ~open_above)
-
-    near = [np.zeros(n_rows)]
-    far = [np.full(n_rows, -np.inf)]
-    for level in range(1, order + 1):
-        width = comb(n_parameters + level - 1, level)
-        near.append(np.zeros((n_rows, width)))
-        far.append(np.zeros((n_rows, width)))
-    for law, tail in (("logcdf", lower_tail), ("logsf", ~lower_tail)):
-        near_rows = np.flatnonzero(tail)
-        far_rows = np.flatnonzero(tail & far_present)
-        rows = np.concatenate((near_rows, far_rows))
-        if len(rows) == 0:
-            continue
-        points = np.concatenate((near_point[near_rows], far_point[far_rows]))
-        jets = tail_jets(law, points, rows)
-        split = len(near_rows)
-        for level, values in enumerate(jets[: order + 1]):
-            near[level][near_rows] = values[:split]
-            far[level][far_rows] = values[split:]
-    result = log_window_jets(tuple(near), tuple(far), order=order)
-
-    two_ended = np.flatnonzero(~open_below & ~open_above)
+    result = tail_window_jets(
+        lo, hi, n_parameters, order=order, from_lower=from_lower, tail_jets=tail_jets
+    )
+    two_ended = np.flatnonzero((lo > 0.0) & (hi < np.inf))
     if len(two_ended) == 0:
         return result
     with np.errstate(over="ignore", invalid="ignore"):
@@ -165,10 +207,7 @@ def window_jets(
     def node_jets(fraction: float) -> Jet:
         return log_density_jets(start + start * np.expm1(fraction * width), rows)
 
-    quadrature = quadrature_window_jets(0.5 * width, node_jets, order=order)
-    for target, source in zip(result, quadrature, strict=True):
-        target[rows] = source
-    return result
+    return _integrated(result, rows, 0.5 * width, node_jets, order)
 
 
 def declared_window_jets(
@@ -267,6 +306,216 @@ def gamma_window_jets(
         rate=rate,
         uniform=uniform,
     )
+
+
+def normal_window_jets(
+    lower: NDArray,
+    upper: NDArray,
+    location: NDArray,
+    scale: NDArray,
+    root: NDArray,
+    *,
+    order: int,
+    width: NDArray | None = None,
+) -> Jet:
+    """``log P(lower < X <= upper)`` for ``X ~ N(location, (scale/root)^2)``, in ``(location, scale)``.
+
+    ``lower`` may be ``-inf`` and ``upper`` ``+inf``, not both.  The tails are
+    the ``normal`` declaration's at the end's residual ``c - location`` with
+    location zero, the law being translation invariant, so a large common
+    offset of the window and the location cancels before the kernels see it.
+    A two-ended window is read from the lower tail when its midpoint is below
+    the location, so neither end's tail rounds to one.  A window whose
+    standardised width, times ``max(1, |midpoint|)``, is at most
+    :data:`NARROW_WINDOW` is integrated by quadrature on nodes placed in
+    standardised coordinates.  ``width`` is ``upper - lower`` when the caller
+    has it more accurately than that difference.
+    """
+    lo = np.asarray(lower, dtype=np.float64)
+    hi = np.asarray(upper, dtype=np.float64)
+    mu = np.asarray(location, dtype=np.float64)
+    sigma = np.asarray(scale, dtype=np.float64)
+    k = np.asarray(root, dtype=np.float64)
+    inverse = 1.0 / sigma
+    with np.errstate(invalid="ignore", over="ignore"):
+        z_lo = (lo - mu) * k * inverse
+        z_hi = (hi - mu) * k * inverse
+        from_lower = z_lo + z_hi < 0.0
+
+    def law(name: str, residual: NDArray, rows: NDArray) -> Jet:
+        theta = np.column_stack((np.zeros(len(rows)), sigma[rows]))
+        return law_jets(normal, name, order, residual, theta, (k[rows],))[0]
+
+    def tail_jets(name: str, points: NDArray, rows: NDArray) -> Jet:
+        jets = law(name, points - mu[rows], rows)
+        # Where Phi rounds to one the tail is flat in float64 and its
+        # derivatives are zero, though the point's own derivatives may overflow.
+        flat = jets[1][:, 0] == 0.0 if order >= 1 else ()
+        for level in jets[1:]:
+            level[flat] = 0.0
+        return jets
+
+    result = tail_window_jets(
+        lo,
+        hi,
+        2,
+        order=order,
+        from_lower=from_lower,
+        tail_jets=tail_jets,
+        support_start=-np.inf,
+    )
+    two_ended = np.flatnonzero(np.isfinite(z_lo) & np.isfinite(z_hi))
+    if len(two_ended) == 0:
+        return result
+    span = (hi - lo if width is None else np.asarray(width, dtype=np.float64))[two_ended]
+    with np.errstate(invalid="ignore", over="ignore"):
+        extent = span * (k * inverse)[two_ended]
+        reach = extent * np.maximum(1.0, 0.5 * np.abs(z_lo + z_hi)[two_ended])
+    narrow = reach <= NARROW_WINDOW
+    rows, span, extent = two_ended[narrow], span[narrow], extent[narrow]
+    if len(rows) == 0:
+        return result
+    start, spread = z_lo[rows], sigma[rows] / k[rows]
+    carrier = np.empty(len(rows))
+    normal.carrier(np.zeros(len(rows)), np.ascontiguousarray(k[rows]), np.ones(len(rows)), carrier)
+    carrier -= _HALF_LOG_TWO_PI
+
+    def node_jets(fraction: float) -> Jet:
+        jets = law("density", (start + fraction * extent) * spread, rows)
+        return (jets[0] + carrier, *jets[1:])
+
+    return _integrated(result, rows, 0.5 * span, node_jets, order)
+
+
+def log_normal_window_jets(
+    lower: NDArray,
+    upper: NDArray,
+    parameters: NDArray,
+    *,
+    order: int,
+    mean_form: bool,
+) -> Jet:
+    """``LogNormalLS``'s window jets: the normal window on ``log y``.
+
+    ``parameters`` are ``(mu, sigma)``, or ``(m, sigma)`` with ``mean_form``,
+    composed through ``mu = log m - sigma^2/2`` to order two; higher orders are
+    composed in predictor coordinates by :func:`normal_predictor_jets`.  A lower
+    end at or below zero is the support's start.  A two-ended window's log-scale width is
+    ``log1p`` of its relative width where ``log(upper) - log(lower)`` would
+    cancel, and that difference where the ratio is large.
+    """
+    if mean_form and order > 2:
+        raise ValueError(
+            "mean-form window jets are formed to order two; compose higher orders "
+            "from the location form with normal_predictor_jets"
+        )
+    theta = np.asarray(parameters, dtype=np.float64)
+    lo = np.asarray(lower, dtype=np.float64)
+    hi = np.asarray(upper, dtype=np.float64)
+    sigma = theta[:, 1]
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        log_lower = np.log(np.maximum(lo, 0.0))
+        log_upper = np.log(hi)
+        relative = (hi - lo) / lo
+        width = np.where(
+            relative <= 1.0, np.log1p(np.minimum(relative, 1.0)), log_upper - log_lower
+        )
+        mu = np.log(theta[:, 0]) - 0.5 * sigma * sigma if mean_form else theta[:, 0]
+    location = normal_window_jets(
+        log_lower, log_upper, mu, sigma, np.ones(len(mu)), order=order, width=width
+    )
+    if not mean_form or order == 0:
+        return location
+    # mu_m = 1/m, mu_s = -sigma, mu_mm = -1/m^2, mu_ss = -1, mu_ms = 0.
+    inverse = 1.0 / theta[:, 0]
+    l_mu, l_sigma = location[1][:, 0], location[1][:, 1]
+    score = np.column_stack((l_mu * inverse, l_sigma - sigma * l_mu))
+    if order == 1:
+        return location[0], score
+    h_mm, h_ms, h_ss = location[2][:, 0], location[2][:, 1], location[2][:, 2]
+    hessian = np.column_stack(
+        (
+            (h_mm - l_mu) * inverse * inverse,
+            (h_ms - sigma * h_mm) * inverse,
+            h_ss - 2.0 * sigma * h_ms + sigma * sigma * h_mm - l_mu,
+        )
+    )
+    return location[0], score, hessian
+
+
+def normal_predictor_jets(
+    jets: Jet, scale: NDArray, increment: NDArray, *, mean_form: bool = False
+) -> Jet:
+    """``(mu, sigma)`` jets to the predictors ``(a, b)``, ``sigma = floor + kappa``, ``kappa = e^b``.
+
+    ``mu = a``, or ``mu = a - sigma^2/2`` in the log-normal mean form (``a =
+    log m``).  Every derivative of ``sigma`` in ``b`` is ``kappa`` and ``d^j
+    mu/d b^j = -((2^(j-1) - 1) kappa^2 + sigma kappa)``, sums of positive
+    terms, so the inner map rounds each factor once.
+    """
+    sigma = np.asarray(scale, dtype=np.float64)
+    kappa = np.asarray(increment, dtype=np.float64)
+    order = len(jets) - 1
+    inner: dict = {level: {(1, (1,) * level): kappa} for level in range(1, order + 1)}
+    inner.setdefault(1, {})[(0, (0,))] = 1.0
+    if mean_form:
+        for level in range(1, order + 1):
+            inner[level][(0, (1,) * level)] = -(
+                (2 ** (level - 1) - 1) * kappa * kappa + sigma * kappa
+            )
+    outer = dict(enumerate(jets[1:], start=1))
+    return (jets[0], *(compose_derivatives(outer, inner, level, 2) for level in outer))
+
+
+def gpd_window_jets(
+    lower: NDArray,
+    upper: NDArray,
+    scale: NDArray,
+    shape: NDArray,
+    *,
+    order: int,
+) -> Jet:
+    """``log(S(lower) - S(upper))`` of ``GeneralizedParetoLSS``'s law, in ``(scale, shape)``.
+
+    ``lower`` at or below zero means the support's start (``S = 1``) and
+    ``upper = +inf`` an open window.  Both ends come from the survival
+    function (the ``generalized_pareto`` declaration's ``logsf``), which no
+    window on ``y >= 0`` rounds to one at its far end.  The log density varies
+    on the scale ``(psi + xi y)/(1 + |xi|)``; a window at most
+    :data:`NARROW_WINDOW` of that scale wide at its steeper end is integrated
+    by quadrature on nodes in ``y``.
+    """
+    lo = np.maximum(np.asarray(lower, dtype=np.float64), 0.0)
+    hi = np.asarray(upper, dtype=np.float64)
+    psi = np.asarray(scale, dtype=np.float64)
+    xi = np.asarray(shape, dtype=np.float64)
+    theta = np.column_stack((psi, xi))
+
+    def tail_jets(name: str, points: NDArray, rows: NDArray) -> Jet:
+        return law_jets(generalized_pareto, name, order, points, theta[rows])[0]
+
+    result = tail_window_jets(
+        lo,
+        hi,
+        2,
+        order=order,
+        from_lower=np.zeros(len(lo), dtype=bool),
+        tail_jets=tail_jets,
+        support_start=-np.inf,
+    )
+    span = hi - lo
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        support = psi + xi * np.where(xi < 0.0, hi, lo)
+        reach = span * (1.0 + np.abs(xi)) / support
+    rows = np.flatnonzero((support > 0.0) & (reach <= NARROW_WINDOW))
+    if len(rows) == 0:
+        return result
+
+    def node_jets(fraction: float) -> Jet:
+        points = lo[rows] + fraction * span[rows]
+        return law_jets(generalized_pareto, "density", order, points, theta[rows])[0]
+
+    return _integrated(result, rows, 0.5 * span[rows], node_jets, order)
 
 
 def _through_w(jets: Jet, w: NDArray, sigma: NDArray, order: int) -> Jet:
@@ -373,12 +622,14 @@ def gg_window_jets(
 
 
 def _warmup_declared_bounds() -> None:
-    """Compile the window kernels a bounded ``GammaLS`` or ``GeneralizedGammaLSS`` fit calls.
+    """Compile the window kernels a bounded fit of a declared-bounds family calls.
 
-    Orders 0-2 in ``(mean, cv)`` for the fit and 3-4 in ``(log mean, log cv)``
-    for its smoothing-parameter derivatives, each with both tails, the
-    narrow-window density and the carrier, and the incomplete-gamma engine
-    under them.
+    ``GammaLS``: orders 0-2 in ``(mean, cv)`` for the fit and 3-4 in ``(log
+    mean, log cv)`` for its smoothing-parameter derivatives, each with both
+    tails, the narrow-window density and the carrier, and the incomplete-gamma
+    engine under them.  ``GeneralizedGammaLSS``, ``GaussianLS``,
+    ``LogNormalLS`` and ``GeneralizedParetoLSS``: each kernel once, the order
+    being a run-time argument, on both tail routes and a narrow window.
     """
     lower = np.array([1.0, 0.0, 1.0])
     upper = np.array([np.inf, 1.0, 1.0 + 1e-6])
@@ -392,6 +643,26 @@ def _warmup_declared_bounds() -> None:
     theta = np.array([[1.0, 1.0, 0.0], [1.0, 1.0, 1.0], [1.0, 1.0, -0.5]])
     for mean_form in (False, True):
         gg_window_jets(lower, upper, theta, order=4, mean_form=mean_form)
+    ones = np.ones(3)
+    normal_window_jets(
+        np.array([-np.inf, 1.0, 0.0]),
+        np.array([0.0, np.inf, 1e-6]),
+        np.zeros(3),
+        ones,
+        ones,
+        order=4,
+    )
+    gpd_window_jets(lower, upper, ones, np.array([0.0, 0.5, 0.2]), order=4)
 
 
-__all__ = ["declared_window_jets", "gamma_window_jets", "gg_window_jets", "window_jets"]
+__all__ = [
+    "declared_window_jets",
+    "gamma_window_jets",
+    "gg_window_jets",
+    "gpd_window_jets",
+    "log_normal_window_jets",
+    "normal_predictor_jets",
+    "normal_window_jets",
+    "tail_window_jets",
+    "window_jets",
+]
