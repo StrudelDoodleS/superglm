@@ -460,8 +460,10 @@ def _reference_value(fitted: Any, frame: EagerFrame, name: Hashable) -> Any:
     """Return a column's training centre, missing values ignored.
 
     A numeric column without levels is held at its median.  Any other column is
-    held at its most frequent value; a tie goes to the level that comes first in
-    :func:`_column_levels` order (labels outside that domain after it, sorted).
+    held at its most frequent fitted level, counted over the labels the term reads
+    at it; a tie goes to the level that comes first in :func:`_column_levels` order
+    (labels outside that domain after it, sorted).  The value returned is that
+    level's most frequent label, so a grouped term is held at one of its members.
     """
     values = frame.column_array(name)
     empty = (
@@ -478,15 +480,21 @@ def _reference_value(fitted: Any, frame: EagerFrame, name: Hashable) -> Any:
     if present.size == 0:
         raise ValueError(empty)
     counts = np.bincount(present, minlength=len(labels))
-    tied = [labels[int(code)] for code in np.flatnonzero(counts == counts.max())]
-    if len(tied) == 1:
-        return tied[0]
+    spec = _fitted_level_spec(fitted, name)
+    read = list(labels) if spec is None else list(_read_levels(spec, labels))
+    level_counts: dict[Any, int] = {}
+    for level, count in zip(read, counts.tolist(), strict=True):
+        level_counts[level] = level_counts.get(level, 0) + count
     rank = {
         level: position for position, level in enumerate(_column_levels(fitted, frame, name) or ())
     }
-    spec = _fitted_level_spec(fitted, name)
-    read = tied if spec is None else _read_levels(spec, tied)
-    return tied[int(np.argmin([rank.get(level, len(rank)) for level in read]))]
+    top = max(level_counts.values())
+    level = min(
+        (level for level, count in level_counts.items() if count == top),
+        key=lambda level: rank.get(level, len(rank)),
+    )
+    members = [code for code, read_at in enumerate(read) if read_at == level]
+    return labels[max(members, key=lambda code: counts[code])]
 
 
 def _sweep(

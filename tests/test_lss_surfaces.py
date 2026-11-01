@@ -464,6 +464,26 @@ def test_a_tie_goes_to_the_first_fitted_level_not_the_first_sorted() -> None:
     assert _reference_value(fitted, frame, "g") == "b"
 
 
+def test_a_grouped_column_is_held_at_its_most_frequent_group() -> None:
+    """a, c and b hold 30, 35 and 40 rows; the group "ac" holds 65, so it is the
+    reference, held at its most frequent member, although b is the commonest label."""
+    from superglm._frame import as_eager_frame
+    from superglm.distributional.terms import _reference_value
+
+    to_group = {"a": "ac", "c": "ac"}
+    spec = SimpleNamespace(
+        _levels=("ac", "b"),
+        _resolve_predict_labels=lambda labels: np.array(
+            [to_group.get(label, label) for label in labels], dtype=object
+        ),
+    )
+    fitted = SimpleNamespace(
+        compiled_predictors=(SimpleNamespace(compiled=SimpleNamespace(specs={"g": spec})),)
+    )
+    frame = as_eager_frame(pd.DataFrame({"g": ["a"] * 30 + ["c"] * 35 + ["b"] * 40}))
+    assert _reference_value(fitted, frame, "g") == "c"
+
+
 @pytest.fixture(scope="module")
 def grouped_case() -> tuple[DenseDistributionalModel, pd.DataFrame]:
     from superglm.features.grouping import collapse_levels
@@ -524,14 +544,15 @@ def test_a_grouped_level_is_swept_through_a_label_every_term_has_seen() -> None:
 
 
 def test_a_tie_reads_raw_labels_in_the_terms_own_spelling() -> None:
-    """Float labels 4.0 .. 1.0 are the ordered term's levels "4" .. "1"; the tie goes
-    to the first fitted level, 4, not to the first sorted label."""
+    """Float labels 4.0 .. 1.0 are read as the ordered term's levels "4", "23" and "1",
+    which hold 300 rows each; the tie goes to the first fitted level, 4, not to the
+    first sorted label."""
     from superglm import OrderedCategorical
     from superglm._frame import as_eager_frame
-    from superglm.distributional.terms import _reference_value
+    from superglm.distributional.terms import _reference_value, term_effect
     from superglm.features.grouping import collapse_levels
 
-    band = np.repeat([4.0, 3.0, 2.0, 1.0], 250)
+    band = np.repeat([4.0, 3.0, 2.0, 1.0], [300, 150, 150, 300])
     X = pd.DataFrame({"band": band})
     y = 0.1 * band + np.random.default_rng(7).standard_normal(band.size)
     grouping = collapse_levels(
@@ -547,6 +568,10 @@ def test_a_tie_reads_raw_labels_in_the_terms_own_spelling() -> None:
         ._require_fitted()
     )
     assert _reference_value(fitted, as_eager_frame(X), "band") == 4.0
+    # The sweep reads the frame's float labels through the term, one per fitted level.
+    effect = term_effect(fitted, X, "location", "band", simultaneous=False)
+    curves = risk_curves(fitted, X, {}, "band", n_draws=60, seed=1)
+    assert list(effect.levels) == list(curves.levels) == ["4", "23", "1"]
 
 
 def test_json_scalars_are_plain_values_and_nothing_unrepresentable() -> None:
