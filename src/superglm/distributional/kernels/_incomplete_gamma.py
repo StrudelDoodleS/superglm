@@ -491,7 +491,7 @@ def log_gamma_tail(a, x, upper, order, out):
     log_gamma_tail_into(a, x, upper, order, out, np.empty(WORK_SIZE))
 
 
-@njit(cache=True, nogil=True)
+@njit(cache=True)
 def _log_gamma_tail_rows(a, x, upper, order, packed):
     w = np.empty(WORK_SIZE)
     for row in range(a.shape[0]):

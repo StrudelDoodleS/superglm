@@ -473,7 +473,7 @@ def emit_kernel(
     parameters = [f"P{j}" for j in range(k)] + [f"D{j}" for j in range(d)]
     signature = ["Y", *parameters, *(["M"] if multiplied else []), *_outputs(targets)]
     lines = [
-        "@njit(cache=True, nogil=True, error_model='numpy')",
+        "@njit(cache=True, error_model='numpy')",
         f"def {name}({', '.join(signature)}):",
         *preamble,
         "    for i in range(Y.shape[0]):",

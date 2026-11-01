@@ -27,9 +27,9 @@ COORDINATES = 'natural'
 LAWS = ('density', 'logsf', 'logcdf', 'logsf_uniform', 'logcdf_uniform')
 MAX_ORDER = 4
 PRIMITIVES_DIGEST = "7139a2b537094ec4616a1b45afc889977e859c59786c0efbe16b55454abe7f64"
-ENGINES_DIGEST = "3e0c897cdcbbd51c990b9ec8d9b2aa25cb461ce144f2cb37fdf9269839b47347"
+ENGINES_DIGEST = "8bd37b2f4ed58a28696555a1077131db6c1d1196dc9925f6e17555e3c41be6b4"
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def density_0(Y, P0, P1, D0, M, J0):
     for i in range(Y.shape[0]):
         y = Y[i]
@@ -41,7 +41,7 @@ def density_0(Y, P0, P1, D0, M, J0):
         J0[i] = m * (-t0*gdev(y, p0) + gnorm(t0))
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def density_1(Y, P0, P1, D0, M, J0, J1):
     for i in range(Y.shape[0]):
         y = Y[i]
@@ -57,7 +57,7 @@ def density_1(Y, P0, P1, D0, M, J0, J1):
         J1[i, 1] = m * (2.0*(c0_0 + t1)/p1)
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def density_2(Y, P0, P1, D0, M, J0, J1, J2):
     for i in range(Y.shape[0]):
         y = Y[i]
@@ -80,7 +80,7 @@ def density_2(Y, P0, P1, D0, M, J0, J1, J2):
         J2[i, 2] = m * (-2.0*t0*(3.0*c0_0 + 2.0*c0_1 + 3.0*t2))
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def density_3(Y, P0, P1, D0, M, J0, J1, J2, J3):
     for i in range(Y.shape[0]):
         y = Y[i]
@@ -112,7 +112,7 @@ def density_3(Y, P0, P1, D0, M, J0, J1, J2, J3):
         J3[i, 3] = m * (4.0*t9*(6.0*c0_0 + 9.0*c0_1 + 2.0*c0_2 + 6.0*t2))
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def density_4(Y, P0, P1, D0, M, J0, J1, J2, J3, J4):
     for i in range(Y.shape[0]):
         y = Y[i]
@@ -156,7 +156,7 @@ def density_4(Y, P0, P1, D0, M, J0, J1, J2, J3, J4):
         J4[i, 4] = m * (-4.0*t15*(30.0*c0_0 + 75.0*c0_1 + 36.0*c0_2 + 4.0*c0_3 + 30.0*t2))
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logsf_0(Y, P0, P1, D0, J0):
     out0 = np.empty(1)
     work = np.empty(120)
@@ -171,7 +171,7 @@ def logsf_0(Y, P0, P1, D0, J0):
         J0[i] = c0_0
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logsf_1(Y, P0, P1, D0, J0, J1):
     out0 = np.empty(3)
     work = np.empty(120)
@@ -191,7 +191,7 @@ def logsf_1(Y, P0, P1, D0, J0, J1):
         J1[i, 1] = -2.0*d0*(c0_1 + c0_2*t1)/(p1 * p1 * p1)
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logsf_2(Y, P0, P1, D0, J0, J1, J2):
     out0 = np.empty(6)
     work = np.empty(120)
@@ -224,7 +224,7 @@ def logsf_2(Y, P0, P1, D0, J0, J1, J2):
         J2[i, 2] = t5*(3.0*c0_1 + 2.0*t0*(c0_3 + c0_4*t1) + 2.0*t1*t8 + 3.0*t4)/(p1 * p1 * p1 * p1)
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logsf_3(Y, P0, P1, D0, J0, J1, J2, J3):
     out0 = np.empty(10)
     work = np.empty(120)
@@ -282,7 +282,7 @@ def logsf_3(Y, P0, P1, D0, J0, J1, J2, J3):
         J3[i, 3] = -4.0*d0*(6.0*c0_1 + t0*(3.0*c0_3 + t1*t22 + t14*(c0_6 + c0_7*t1) + t23*t24) + 6.0*t1*t10 + t1*t18 + t1*t25 + t13*t19)/(p1 * p1 * p1 * p1 * p1)
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logsf_4(Y, P0, P1, D0, J0, J1, J2, J3, J4):
     out0 = np.empty(15)
     work = np.empty(120)
@@ -378,7 +378,7 @@ def logsf_4(Y, P0, P1, D0, J0, J1, J2, J3, J4):
         J4[i, 4] = t39*t42*(30.0*c0_1 + 36.0*t1*t12 + 2.0*t1*t53 + t15*t41 + t16*(6.0*c0_3 + t0*(3.0*c0_6 + t1*t50 + t16*(c0_10 + c0_11*t1) + t32*t51) + t1*t48 + t1*t52 + t22*t36 + t31*t49) + 9.0*t37 + 9.0*t38 + 30.0*t5)
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logcdf_0(Y, P0, P1, D0, J0):
     out0 = np.empty(1)
     work = np.empty(120)
@@ -393,7 +393,7 @@ def logcdf_0(Y, P0, P1, D0, J0):
         J0[i] = c0_0
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logcdf_1(Y, P0, P1, D0, J0, J1):
     out0 = np.empty(3)
     work = np.empty(120)
@@ -413,7 +413,7 @@ def logcdf_1(Y, P0, P1, D0, J0, J1):
         J1[i, 1] = -2.0*d0*(c0_1 + c0_2*t1)/(p1 * p1 * p1)
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logcdf_2(Y, P0, P1, D0, J0, J1, J2):
     out0 = np.empty(6)
     work = np.empty(120)
@@ -446,7 +446,7 @@ def logcdf_2(Y, P0, P1, D0, J0, J1, J2):
         J2[i, 2] = t5*(3.0*c0_1 + 2.0*t0*(c0_3 + c0_4*t1) + 2.0*t1*t8 + 3.0*t4)/(p1 * p1 * p1 * p1)
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logcdf_3(Y, P0, P1, D0, J0, J1, J2, J3):
     out0 = np.empty(10)
     work = np.empty(120)
@@ -504,7 +504,7 @@ def logcdf_3(Y, P0, P1, D0, J0, J1, J2, J3):
         J3[i, 3] = -4.0*d0*(6.0*c0_1 + t0*(3.0*c0_3 + t1*t22 + t14*(c0_6 + c0_7*t1) + t23*t24) + 6.0*t1*t10 + t1*t18 + t1*t25 + t13*t19)/(p1 * p1 * p1 * p1 * p1)
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logcdf_4(Y, P0, P1, D0, J0, J1, J2, J3, J4):
     out0 = np.empty(15)
     work = np.empty(120)
@@ -600,7 +600,7 @@ def logcdf_4(Y, P0, P1, D0, J0, J1, J2, J3, J4):
         J4[i, 4] = t39*t42*(30.0*c0_1 + 36.0*t1*t12 + 2.0*t1*t53 + t15*t41 + t16*(6.0*c0_3 + t0*(3.0*c0_6 + t1*t50 + t16*(c0_10 + c0_11*t1) + t32*t51) + t1*t48 + t1*t52 + t22*t36 + t31*t49) + 9.0*t37 + 9.0*t38 + 30.0*t5)
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logsf_uniform_0(Y, P0, P1, D0, J0):
     out0 = np.empty(1)
     work = np.empty((20, 15))
@@ -615,7 +615,7 @@ def logsf_uniform_0(Y, P0, P1, D0, J0):
         J0[i] = c0_0
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logsf_uniform_1(Y, P0, P1, D0, J0, J1):
     out0 = np.empty(3)
     work = np.empty((20, 15))
@@ -638,7 +638,7 @@ def logsf_uniform_1(Y, P0, P1, D0, J0, J1):
         J1[i, 1] = -c0_1*t1*t2/(p1 * p1) + c0_2*t4
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logsf_uniform_2(Y, P0, P1, D0, J0, J1, J2):
     out0 = np.empty(6)
     work = np.empty((20, 15))
@@ -674,7 +674,7 @@ def logsf_uniform_2(Y, P0, P1, D0, J0, J1, J2):
         J2[i, 2] = t10*t11 - t5*(c0_4*t10 - c0_5*t5) + 2.0*t9/(p1 * p1 * p1)
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logsf_uniform_3(Y, P0, P1, D0, J0, J1, J2, J3):
     out0 = np.empty(10)
     work = np.empty((20, 15))
@@ -732,7 +732,7 @@ def logsf_uniform_3(Y, P0, P1, D0, J0, J1, J2, J3):
         J3[i, 3] = -t13*t25 - 4.0*t18*t19 + t5*(c0_4*t23 + t13*t24 - t5*(c0_8*t13 - c0_9*t5)) - 6.0*t3*t6/(p1 * p1 * p1 * p1)
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logsf_uniform_4(Y, P0, P1, D0, J0, J1, J2, J3, J4):
     out0 = np.empty(15)
     work = np.empty((20, 15))
@@ -823,7 +823,7 @@ def logsf_uniform_4(Y, P0, P1, D0, J0, J1, J2, J3, J4):
         J4[i, 4] = t13*t48 + 18.0*t19*t35 + t3*t36*t40 - t5*(c0_4*t44 + t13*t47 + 4.0*t31*t45 - t5*(c0_8*t30 + t13*t46 - t5*(c0_13*t13 - c0_14*t5))) + 24.0*t3*t6/(p1 * p1 * p1 * p1 * p1)
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logcdf_uniform_0(Y, P0, P1, D0, J0):
     out0 = np.empty(1)
     work = np.empty((20, 15))
@@ -838,7 +838,7 @@ def logcdf_uniform_0(Y, P0, P1, D0, J0):
         J0[i] = c0_0
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logcdf_uniform_1(Y, P0, P1, D0, J0, J1):
     out0 = np.empty(3)
     work = np.empty((20, 15))
@@ -861,7 +861,7 @@ def logcdf_uniform_1(Y, P0, P1, D0, J0, J1):
         J1[i, 1] = -c0_1*t1*t2/(p1 * p1) + c0_2*t4
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logcdf_uniform_2(Y, P0, P1, D0, J0, J1, J2):
     out0 = np.empty(6)
     work = np.empty((20, 15))
@@ -897,7 +897,7 @@ def logcdf_uniform_2(Y, P0, P1, D0, J0, J1, J2):
         J2[i, 2] = t10*t11 - t5*(c0_4*t10 - c0_5*t5) + 2.0*t9/(p1 * p1 * p1)
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logcdf_uniform_3(Y, P0, P1, D0, J0, J1, J2, J3):
     out0 = np.empty(10)
     work = np.empty((20, 15))
@@ -955,7 +955,7 @@ def logcdf_uniform_3(Y, P0, P1, D0, J0, J1, J2, J3):
         J3[i, 3] = -t13*t25 - 4.0*t18*t19 + t5*(c0_4*t23 + t13*t24 - t5*(c0_8*t13 - c0_9*t5)) - 6.0*t3*t6/(p1 * p1 * p1 * p1)
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def logcdf_uniform_4(Y, P0, P1, D0, J0, J1, J2, J3, J4):
     out0 = np.empty(15)
     work = np.empty((20, 15))
@@ -1046,7 +1046,7 @@ def logcdf_uniform_4(Y, P0, P1, D0, J0, J1, J2, J3, J4):
         J4[i, 4] = t13*t48 + 18.0*t19*t35 + t3*t36*t40 - t5*(c0_4*t44 + t13*t47 + 4.0*t31*t45 - t5*(c0_8*t30 + t13*t46 - t5*(c0_13*t13 - c0_14*t5))) + 24.0*t3*t6/(p1 * p1 * p1 * p1 * p1)
 
 
-@njit(cache=True, nogil=True, error_model='numpy')
+@njit(cache=True, error_model='numpy')
 def carrier(Y, D0, M, J0):
     for i in range(Y.shape[0]):
         y = Y[i]

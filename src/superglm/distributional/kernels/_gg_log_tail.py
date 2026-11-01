@@ -74,7 +74,7 @@ from superglm.distributional.kernels._incomplete_gamma import (
 
 # Digest of the compiled callees above, stamped by ``tools/generate_severity_families.py``:
 # Numba's on-disk cache keys a compiled caller on its own file only.
-_CALLEE_DIGEST = "191dcecca26ef137398caad5c2d59a038580c866e4a028cd754a9e1cd2274c9d"
+_CALLEE_DIGEST = "b60441c1792b0d1ae62f665c09ca5500f977b59084d9025d3d740c8680ccb3dd"
 
 ORDER_MAX = 4
 _N = (ORDER_MAX + 1) * (ORDER_MAX + 2) // 2
@@ -95,18 +95,18 @@ if _UNIFORM_SCRATCH_SHAPE[1] != _N:
     raise ImportError("the uniform engine's scratch rows must hold one order-4 jet")
 
 
-@njit(cache=True, nogil=True, inline="always")
+@njit(cache=True, inline="always")
 def _index(i, j):
     return (i + j) * (i + j + 1) // 2 + j
 
 
-@njit(cache=True, nogil=True)
+@njit(cache=True)
 def _fill_nan(out):
     for r in range(out.shape[0]):
         out[r] = np.nan
 
 
-@njit(cache=True, nogil=True)
+@njit(cache=True)
 def _map_jets(flat, w, q, a, order, n):
     """Jets of ``da`` and ``e`` in ``(dw, dq)`` into ``flat[_DA]`` and ``flat[_E]``."""
     for r in range(n):
@@ -133,7 +133,7 @@ def _map_jets(flat, w, q, a, order, n):
     flat[_E] = 0.0
 
 
-@njit(cache=True, nogil=True)
+@njit(cache=True)
 def _composed_log_tail(w, q, upper, order, out, flat):
     """The incomplete-gamma route for any row, its ``(da, e)`` jet composed into ``(w, q)``."""
     a = 1.0 / (q * q)
@@ -148,7 +148,7 @@ def _composed_log_tail(w, q, upper, order, out, flat):
     _compose_into(flat, w, q, a, order, out)
 
 
-@njit(cache=True, nogil=True)
+@njit(cache=True)
 def _compose_into(flat, w, q, a, order, out):
     """Compose the ``(da, e)`` jet in ``flat[_JET:]`` into plain ``(w, q)`` partials in ``out``."""
     n = (order + 1) * (order + 2) // 2
@@ -176,7 +176,7 @@ def _compose_into(flat, w, q, a, order, out):
             out[r] = flat[_OUTER + r] * _FACTORIAL[k - j] * _FACTORIAL[j]
 
 
-@njit(cache=True, nogil=True)
+@njit(cache=True)
 def gg_log_tail(w, q, upper, order, out, scratch):
     """``log S`` (``upper``) or ``log F`` of the Prentice GG at ``(w, q)``, then its partials.
 
@@ -198,7 +198,7 @@ def gg_log_tail(w, q, upper, order, out, scratch):
     _composed_log_tail(w, q, upper, order, out, scratch.reshape(_ROWS * _N))
 
 
-@njit(cache=True, nogil=True)
+@njit(cache=True)
 def _composed_rows(w, q, upper, order, out):
     scratch = np.empty((_ROWS, _N))
     flat = scratch.reshape(_ROWS * _N)
@@ -209,7 +209,7 @@ def _composed_rows(w, q, upper, order, out):
             _fill_nan(out[row])
 
 
-@njit(cache=True, nogil=True)
+@njit(cache=True)
 def _log_tail_rows(w, q, upper, order, out):
     scratch = np.empty((_ROWS, _N))
     for row in range(w.shape[0]):

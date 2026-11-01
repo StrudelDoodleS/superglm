@@ -234,7 +234,7 @@ _SCRATCH_ROWS = 20
 SCRATCH_SHAPE = (_SCRATCH_ROWS, _N_COEF)
 
 
-@njit(cache=True, nogil=True, inline="always")
+@njit(cache=True, inline="always")
 def _shift(work, row, x0, along_y, order):
     """Row ``row`` times ``(x0 + dx)``, ``x`` the second coordinate if ``along_y``, in place."""
     for d in range(order, -1, -1):
@@ -249,7 +249,7 @@ def _shift(work, row, x0, along_y, order):
             work[row, base + j] = value
 
 
-@njit(cache=True, nogil=True, inline="always")
+@njit(cache=True, inline="always")
 def _powers(work, row, order):
     """Rows ``1..order`` = ``(u - u_0)^k`` for the jet ``u`` in row ``row``."""
     n_coef = (order + 1) * (order + 2) // 2
@@ -264,7 +264,7 @@ def _powers(work, row, order):
             work[k, o] = total
 
 
-@njit(cache=True, nogil=True, inline="always")
+@njit(cache=True, inline="always")
 def _series(work, out, order):
     """Row ``out`` = ``c_0 + sum_k c_k (u - u_0)^k``, ``c`` in row ``_COEF``, powers in rows 1..4."""
     work[out, 0] = work[_COEF, 0]
@@ -275,7 +275,7 @@ def _series(work, out, order):
         work[out, i] = total
 
 
-@njit(cache=True, nogil=True, inline="always")
+@njit(cache=True, inline="always")
 def _sqrt_g(t):
     value = 0.0
     for n in range(_G.shape[0] - 1, -1, -1):
@@ -283,7 +283,7 @@ def _sqrt_g(t):
     return value
 
 
-@njit(cache=True, nogil=True, inline="always")
+@njit(cache=True, inline="always")
 def _sqrt_g_taylor(work, t, order):
     """Row ``_COEF`` = ``G^(k)(t)/k!``, ``k <= order``, by Horner shifts of ``G``'s series."""
     for k in range(order + 1):
@@ -294,7 +294,7 @@ def _sqrt_g_taylor(work, t, order):
         work[_COEF, 0] = work[_COEF, 0] * t + _G[n]
 
 
-@njit(cache=True, nogil=True, inline="always")
+@njit(cache=True, inline="always")
 def _mills_taylor(work, t, order):
     """Row ``_COEF`` = ``M^(k)(-t)/k!``, ``k <= order``, for ``t >= 0``, ``M = Phi/phi``."""
     if t <= _MILLS_SERIES_SWITCH:
@@ -317,7 +317,7 @@ def _mills_taylor(work, t, order):
         work[_COEF, k] /= _FACTORIAL[k]
 
 
-@njit(cache=True, nogil=True)
+@njit(cache=True)
 def gg_uniform_in_domain(w, q):
     """Whether ``(w, q)`` lies in the uniform expansion's domain (NaN and infinities do not)."""
     if not (abs(q) <= Q_MAX and abs(w) <= W_MAX):
@@ -328,7 +328,7 @@ def gg_uniform_in_domain(w, q):
     return abs(t * _sqrt_g(t)) <= ETA_MAX
 
 
-@njit(cache=True, nogil=True, inline="always")
+@njit(cache=True, inline="always")
 def _gst_series(work, s0, eta0, order, terms):
     """Row ``_V`` = ``S(s, eta)`` as a jet in ``(ds, d eta)``, ``s = q^2``.
 
@@ -370,7 +370,7 @@ def _gst_series(work, s0, eta0, order, terms):
             work[_V, base + b] = total
 
 
-@njit(cache=True, nogil=True, inline="always")
+@njit(cache=True, inline="always")
 def _compose_in_w_q(work, q, order):
     """Row ``_R`` = row ``_V`` (a jet in ``(ds, d eta)``) at ``s = q^2``, ``eta = q zeta``.
 
@@ -396,13 +396,13 @@ def _compose_in_w_q(work, q, order):
                 work[_R, base + j] = value
 
 
-@njit(cache=True, nogil=True, inline="always")
+@njit(cache=True, inline="always")
 def _fill_nan(out, n_out):
     for i in range(min(n_out, out.shape[0])):
         out[i] = np.nan
 
 
-@njit(cache=True, nogil=True)
+@njit(cache=True)
 def _log_tail_into(w, q, upper, order, out, work, terms):
     """The engine of :func:`gg_uniform_log_tail` with scratch ``work`` and ``terms = N``."""
     valid_order = 0 <= order <= ORDER_MAX
@@ -500,13 +500,13 @@ def _log_tail_into(w, q, upper, order, out, work, terms):
             out[base + j] = work[result, base + j] * _FACTORIAL[d - j] * _FACTORIAL[j]
 
 
-@njit(cache=True, nogil=True)
+@njit(cache=True)
 def gg_uniform_log_tail_with_scratch(w, q, upper, order, out, scratch):
     """:func:`gg_uniform_log_tail` with caller-owned ``scratch`` of :data:`SCRATCH_SHAPE`."""
     _log_tail_into(w, q, upper, order, out, scratch, TERMS)
 
 
-@njit(cache=True, nogil=True)
+@njit(cache=True)
 def gg_uniform_log_tail(w, q, upper, order, out):
     """``log S`` (``upper``) or ``log F`` of the Prentice GG at ``(w, q)``, then its partials.
 
@@ -519,14 +519,14 @@ def gg_uniform_log_tail(w, q, upper, order, out):
     _log_tail_into(w, q, upper, order, out, scratch, TERMS)
 
 
-@njit(cache=True, nogil=True)
+@njit(cache=True)
 def _log_tail_rows(w, q, upper, order, out):
     scratch = np.empty((_SCRATCH_ROWS, _N_COEF))
     for row in range(w.shape[0]):
         _log_tail_into(w[row], q[row], upper[row], order, out[row], scratch, TERMS)
 
 
-@njit(cache=True, nogil=True)
+@njit(cache=True)
 def _domain_rows(w, q, out):
     for row in range(w.shape[0]):
         out[row] = gg_uniform_in_domain(w[row], q[row])
