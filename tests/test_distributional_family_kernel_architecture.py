@@ -118,6 +118,7 @@ def test_kernels_import_no_distributional_module_or_contract() -> None:
         "generalized_gamma.py": {
             "kernels._common",
             "kernels._gg_log_tail",
+            "kernels._gg_uniform_tail",
             "kernels.gamma",
             "kernels.log_normal",
             *chain,
