@@ -64,6 +64,65 @@ def mp_log_mean_loading(sigma, q, dps=60):
         return c * mp.log(q**2) + mp.loggamma(k + c) - mp.loggamma(k)
 
 
+def mp_expected_shortfall(p, mu, sigma, q, dps=30):
+    """``E[Y | Y > y_p]`` and its ratio to ``E[Y]``, by quadrature of the density.
+
+    ``W`` has log density ``log|q| + k log k - log Gamma(k) + k (q w - e^(q w))``,
+    ``k = q^-2``, which is exactly ``-log(2 pi)/2 - R(k) - (e^t - 1 - t)/q^2`` with
+    ``t = q w`` and ``R`` the Stirling remainder of ``log Gamma`` (the standard
+    normal at ``q = 0``).  That form cancels nothing at large ``k``, so a modest
+    ``dps`` suffices.  The quantile ``w_p`` solves ``int_w^inf f = 1 - p`` by
+    Newton's method, and the shortfall is
+    ``e^mu int_(w_p)^inf e^(sigma w) f(w) dw / (1 - p)``, the limits cut where the
+    integrand is below ``e^-800``.  Shares no formula with
+    the incomplete-gamma or uniform engines.
+    """
+    import mpmath as mp
+
+    with mp.workdps(max(dps, mp.mp.dps)):
+        p, mu, sigma, q = (mp.mpf(a) for a in (p, mu, sigma, q))
+        half_log_two_pi = mp.log(2 * mp.pi) / 2
+        if q == 0:
+            remainder = mp.mpf(0)
+        else:
+            k = 1 / q**2
+            if k > 1e8:
+                remainder = 1 / (12 * k) - 1 / (360 * k**3) + 1 / (1260 * k**5)
+            else:
+                remainder = mp.loggamma(k) - ((k - 0.5) * mp.log(k) - k + half_log_two_pi)
+        guard = 2 * int(mp.log10(1 / abs(q))) if q != 0 else 0
+
+        def log_f(w):
+            if q == 0:
+                excess = w * w / 2
+            else:
+                with mp.workdps(mp.mp.dps + guard):
+                    t = q * w
+                    excess = (mp.expm1(t) - t) / q**2
+            return -half_log_two_pi - remainder - excess
+
+        def integral(lower, tilt):
+            # The integrand is below e^-800 beyond 40 of the tilted centre on either
+            # side, and an infinite limit makes the quadrature sample e^t at huge t.
+            centre = mp.mpf(tilt)
+            lower = centre - 40 if lower is None else lower
+            points = [lower, lower + 1, lower + 4, centre, centre + 4, centre + 12]
+            points = sorted({b for b in points if b >= lower} | {max(lower, centre) + 40})
+            return mp.quad(lambda t: mp.exp(log_f(t) + tilt * t), points)
+
+        survival = 1 - p
+        z = -mp.sqrt(2) * mp.erfinv(2 * survival - 1)
+        w_p = mp.findroot(
+            lambda w: integral(w, 0) - survival,
+            z - q * (z * z + 2) / 6,
+            solver="newton",
+            df=lambda w: -mp.exp(log_f(w)),
+        )
+        moment = integral(w_p, sigma)
+        mean = integral(None, sigma)
+        return mp.exp(mu) * moment / survival, moment / (survival * mean)
+
+
 def _information_dps(q):
     """Working digits for the cross-entropy reference.
 

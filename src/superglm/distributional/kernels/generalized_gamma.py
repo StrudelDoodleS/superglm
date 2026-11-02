@@ -35,6 +35,7 @@ from superglm.distributional.kernels._common import (
 )
 from superglm.distributional.kernels._curvature_direction import mean_form_hessian_direction
 from superglm.distributional.kernels._gg_log_tail import gg_log_tail_jets
+from superglm.distributional.kernels._gg_uniform_tail import Q_MAX as _UNIFORM_SHAPE
 from superglm.distributional.kernels.gamma import gamma_shape_plus_one_log_increment
 from superglm.distributional.kernels.log_normal import log_normal_tail_log_factors
 
@@ -50,6 +51,8 @@ _V_SERIES_TERMS = 40
 _M3_SERIES_RADIUS = 0.8
 _M3_SERIES_TERMS = 48
 _ZERO_SHAPE = 1.0e-8
+_QUANTILE_NEWTON_STEPS = 40
+_QUANTILE_NEWTON_STEP_RTOL = 2.0**-40
 _TAIL_INVERSE_RTOL = 64.0 * math.sqrt(_EPS)
 _SHIFT_INCREMENT_RTOL = 16.0 * _EPS
 _M3_A_COEFFICIENTS = tuple(1.0 / (2 * j + 3) for j in range(_M3_SERIES_TERMS))
@@ -1681,7 +1684,10 @@ def generalized_gamma_expected_shortfall(
     With ``kappa = Q^-2``, ``r = sigma / Q`` and ``a = kappa + r``, the
     truncated first moment uses the upper regularized gamma tail for ``Q > 0``
     and the lower tail for ``Q < 0``.  The latter is positive infinity when
-    ``a <= 0`` because the upper tail of ``Y`` then has no first moment.
+    ``a <= 0`` because the upper tail of ``Y`` then has no first moment.  For
+    ``0 < |Q| <= 0.2887`` it is read through the fitted law's uniform tail instead
+    (:func:`_size_biased_log_tail_ratio`), which is analytic through ``Q = 0``;
+    ``Q = 0`` is the log-normal's closed form.
     """
     probabilities = np.asarray(p, dtype=_FLOAT)
     if (
@@ -1771,6 +1777,52 @@ def _log_positive_ratio(
     return result
 
 
+def _size_biased_log_tail_ratio(
+    probabilities: NDArray[np.float64],
+    sigma: NDArray[np.float64],
+    shape: NDArray[np.float64],
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Log ``E[Y; Y > y_p] / ((1 - p) E[Y])`` and ``w_p``, through the uniform tail.
+
+    The size-biased law ``y f(y) / E[Y]`` is the generalized gamma at gamma shape
+    ``kappa + sigma/Q`` (Stacy 1962; the truncated first moment is the
+    incomplete gamma at that shifted shape), which in Prentice coordinates is
+    shape ``Q' = Q / sqrt(1 + sigma Q)`` with
+    ``{Y > y_p} = {W' > (w_p - log1p(sigma Q)/Q) sqrt(1 + sigma Q)}``.  Both
+    tails are read by :func:`gg_log_tail_jets`, Temme's uniform expansion near
+    ``Q = 0``, so nothing divides by ``Q`` or forms ``kappa = Q^-2``.
+
+    ``w_p`` solves ``log S(w) = log(1 - p)`` (``log F(w) = log p`` below the
+    median, the smaller tail) by Newton's method from ``z - Q (z^2 + 2)/6``.  The
+    GG density is log-concave in ``w``, so both log tails are concave and the
+    iteration converges monotonically after its first step; once a step is below
+    ``2^-40`` relative, quadratic convergence leaves an error below rounding.
+    Rows that do not resolve are NaN.
+    """
+    z = special.ndtri(probabilities)
+    w = z - shape * (z * z + 2.0) / 6.0
+    upper = probabilities > 0.5
+    target = np.where(upper, np.log1p(-probabilities), np.log(probabilities))
+    converged = np.zeros(w.shape, dtype=np.bool_)
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        for _ in range(_QUANTILE_NEWTON_STEPS):
+            log_tail, gradient = gg_log_tail_jets(w, shape, upper=upper, order=1)
+            step = (log_tail - target) / gradient[:, 0]
+            w = w - step
+            converged = np.abs(step) <= _QUANTILE_NEWTON_STEP_RTOL * np.maximum(1.0, np.abs(w))
+            if np.all(converged):
+                break
+        w = np.where(converged, w, np.nan)
+        x = sigma * shape
+        root = np.sqrt(1.0 + x)
+        log_ratio_over_x = np.ones_like(x)
+        nonzero = x != 0.0
+        log_ratio_over_x[nonzero] = np.log1p(x[nonzero]) / x[nonzero]
+        tilted_w = (w - sigma * log_ratio_over_x) * root
+        log_share = gg_log_tail_jets(tilted_w, shape / root, upper=True, order=0)[0]
+    return log_share - np.log1p(-probabilities), w
+
+
 def _expected_shortfall_factors(
     probabilities: NDArray[np.float64],
     sigma: NDArray[np.float64],
@@ -1781,16 +1833,29 @@ def _expected_shortfall_factors(
     log_tail_ratio = np.empty_like(probabilities)
     log_quantile_ratio = np.empty_like(probabilities)
     log_survival = np.log1p(-probabilities)
-    zero = np.abs(shape) < _ZERO_SHAPE
+    pending = np.ones(probabilities.shape, dtype=np.bool_)
+    # Q = 0 is the log-normal itself, whose closed form below is exact.
+    uniform_rows = np.flatnonzero((np.abs(shape) <= _UNIFORM_SHAPE) & (shape != 0.0))
+    if uniform_rows.size:
+        uniform_log_tail_ratio, uniform_w = _size_biased_log_tail_ratio(
+            probabilities[uniform_rows], sigma[uniform_rows], shape[uniform_rows]
+        )
+        resolved = np.isfinite(uniform_log_tail_ratio) & np.isfinite(uniform_w)
+        rows = uniform_rows[resolved]
+        log_tail_ratio[rows] = uniform_log_tail_ratio[resolved]
+        log_quantile_ratio[rows] = sigma[rows] * uniform_w[resolved] - log_loading[rows]
+        pending[rows] = False
+    zero = pending & (np.abs(shape) < _ZERO_SHAPE)
     if np.any(zero):
         _, zero_log_tail_ratio, zero_log_quantile_ratio = log_normal_tail_log_factors(
             probabilities[zero], sigma[zero]
         )
         log_tail_ratio[zero] = zero_log_tail_ratio
         log_quantile_ratio[zero] = zero_log_quantile_ratio
+    pending &= ~zero
 
     survival_all = 1.0 - probabilities
-    survival_one = (~zero) & (survival_all == 1.0)
+    survival_one = pending & (survival_all == 1.0)
     log_tail_ratio[survival_one] = 0.0
     boundary_rows = np.flatnonzero(survival_one)
     if boundary_rows.size:
@@ -1831,7 +1896,7 @@ def _expected_shortfall_factors(
                 - log_loading[interior_rows]
             )
 
-    active_rows = np.flatnonzero((~zero) & (~survival_one))
+    active_rows = np.flatnonzero(pending & (~survival_one))
     if active_rows.size:
         active_shape = shape[active_rows]
         active_sigma = sigma[active_rows]

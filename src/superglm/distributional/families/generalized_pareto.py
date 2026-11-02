@@ -36,6 +36,9 @@ from superglm.distributional.families._response_bounds import (
     TailChannels,
     bind_observation,
     bounded_channels,
+    bounded_higher_derivatives,
+    bounded_share,
+    contract_third,
     log_window_values,
     refuse_bounded,
 )
@@ -51,6 +54,7 @@ from superglm.distributional.family import (
     _validated_derivative_order,
     _validated_parameter_matrix,
 )
+from superglm.distributional.kernels._declared_bounds import gpd_window_jets
 from superglm.distributional.kernels.generalized_pareto import (
     GeneralizedParetoDomainError as GeneralizedParetoDomainError,
 )
@@ -65,7 +69,6 @@ from superglm.distributional.kernels.generalized_pareto import (
     scale_fourth,
     scale_hessian_direction,
     scale_rows,
-    window_rows,
 )
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
@@ -169,6 +172,15 @@ class GeneralizedParetoLikelihoodPlan:
         if self.row_law == "gpd-excess-literal-replication/v1":
             return self.weights.values
         return np.ones_like(self.weights.values)
+
+
+def _window_jets(theta: NDArray):
+    """``window_jets(lower, upper, rows, order)`` at ``theta``'s rows, in ``(scale, shape)``."""
+
+    def window_jets(lower: NDArray, upper: NDArray, rows: NDArray, order: int):
+        return gpd_window_jets(lower, upper, theta[rows, 0], theta[rows, 1], order=order)
+
+    return window_jets
 
 
 @dataclass(frozen=True)
@@ -395,13 +407,10 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         if bounds is not None:
 
             def window(lower: NDArray, upper: NDArray, selected: NDArray) -> TailChannels:
-                return window_rows(
-                    lower,
-                    upper,
-                    values[selected, 0],
-                    values[selected, 1],
-                    derivative_order=order,
+                jets = gpd_window_jets(
+                    lower, upper, values[selected, 0], values[selected, 1], order=order
                 )
+                return jets[0], *(jets[k] if order >= k else None for k in (1, 2))
 
             optimizing, score, hessian, valid = bounded_channels(
                 optimizing,
@@ -429,16 +438,34 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
 
         response = _validated_response(y)
         bound = self._plan(plan, len(response))
-        refuse_bounded(bound.observation, "GeneralizedParetoLSS analytic curvature derivatives")
+        bounds = bound.observation.bounds
+        windows_valid = np.ones(len(response), dtype=bool)
 
         def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
-            return scale_hessian_direction(
+            complete = scale_hessian_direction(
                 response, theta[:, 0], theta[:, 1], natural, bound.multiplier
             )
+            if bounds is None:
+                return complete
+            share, kept, valid = bounded_share(
+                3,
+                2,
+                response=response,
+                bounds=bounds,
+                multiplier=bound.multiplier,
+                window_jets=_window_jets(theta),
+            )
+            windows_valid[:] = valid
+            return np.where(kept[:, None], complete, 0.0) + contract_third(share, natural)
 
-        return natural_curvature_direction(
+        result = natural_curvature_direction(
             self, response, eta, eta_direction, links, plan, hessian_direction
         )
+        if np.all(windows_valid):
+            return result
+        result = result.copy()
+        result[~windows_valid] = 0.0
+        return readonly(result)
 
     def predictor_curvature_second_directional_derivative(
         self, y, eta, direction_a, direction_b, links, plan
@@ -447,7 +474,8 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
 
         response = _validated_response(y)
         bound = self._plan(plan, len(response))
-        refuse_bounded(bound.observation, "GeneralizedParetoLSS analytic curvature derivatives")
+        bounds = bound.observation.bounds
+        windows_valid = np.ones(len(response), dtype=bool)
 
         def natural_derivatives(theta: NDArray, natural_a: NDArray, natural_b: NDArray):
             third = natural_third_from_direction(
@@ -458,11 +486,28 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
                 2,
             )
             fourth = scale_fourth(response, theta[:, 0], theta[:, 1], bound.multiplier)
+            if bounds is None:
+                return third, fourth
+            third, fourth, valid = bounded_higher_derivatives(
+                third,
+                fourth,
+                windows_valid,
+                response=response,
+                bounds=bounds,
+                multiplier=bound.multiplier,
+                window_jets=_window_jets(theta),
+            )
+            windows_valid[:] = valid
             return third, fourth
 
-        return natural_curvature_second_direction(
+        result = natural_curvature_second_direction(
             self, response, eta, direction_a, direction_b, links, plan, natural_derivatives
         )
+        if np.all(windows_valid):
+            return result
+        result = result.copy()
+        result[..., ~windows_valid, :] = 0.0
+        return readonly(result)
 
     def expected_information_natural(self, theta, plan) -> NDArray[np.float64]:
         values = self._theta(theta, None)
@@ -589,7 +634,7 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         values = self._theta(theta, None)
 
         def window(lo: NDArray, hi: NDArray, rows: NDArray) -> TailChannels:
-            return window_rows(lo, hi, values[rows, 0], values[rows, 1], derivative_order=0)
+            return gpd_window_jets(lo, hi, values[rows, 0], values[rows, 1], order=0)[0], None, None
 
         return readonly(log_window_values(lower, upper, len(values), window, support_lower=0.0))
 

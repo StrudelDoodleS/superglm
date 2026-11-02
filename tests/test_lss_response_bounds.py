@@ -7,6 +7,7 @@ same rows is the unfixed behaviour each fit test also rejects.
 
 from __future__ import annotations
 
+import functools
 import math
 import pickle
 import warnings
@@ -28,17 +29,15 @@ from superglm import (
     distributional,
     s,
 )
-from superglm.distributional.families.gaussian import LowerBoundedLogLink
 from superglm.distributional.family import COMPLETE_OBSERVATION, bounded_observation
-from superglm.distributional.kernels._response_tails import (
-    inverse_mills,
-    normal_window_channels,
+from superglm.distributional.kernels._declared_bounds import (
+    gpd_window_jets,
+    log_normal_window_jets,
+    normal_window_jets,
 )
 from superglm.distributional.kernels.generalized_pareto import (
     GeneralizedParetoInitializationWarning,
-    window_rows,
 )
-from superglm.distributional.kernels.log_normal import location_window, mean_window
 from superglm.distributional.model import refit_dense_distributional
 from superglm.distributional.observation import (
     ResponseBounds,
@@ -53,6 +52,35 @@ from superglm.distributional.weights import (
 from superglm.links import IdentityLink
 
 _U = 2.0**-53
+
+
+def _channels(jets) -> tuple:
+    """A window jet as ``(value, score, hessian)``, ``None`` above its order."""
+    return (*jets, *(None,) * (3 - len(jets)))
+
+
+def normal_window_channels(lower, upper, location, scale, root, *, derivative_order):
+    return _channels(
+        normal_window_jets(lower, upper, location, scale, root, order=derivative_order)
+    )
+
+
+def window_rows(lower, upper, scale, shape, *, derivative_order):
+    return _channels(gpd_window_jets(lower, upper, scale, shape, order=derivative_order))
+
+
+def location_window(lower, upper, mu, sigma, *, derivative_order):
+    theta = np.column_stack((mu, sigma))
+    return _channels(
+        log_normal_window_jets(lower, upper, theta, order=derivative_order, mean_form=False)
+    )
+
+
+def mean_window(lower, upper, mean, sigma, *, derivative_order):
+    theta = np.column_stack((mean, sigma))
+    return _channels(
+        log_normal_window_jets(lower, upper, theta, order=derivative_order, mean_form=True)
+    )
 
 
 def _intercepts(n: int) -> pd.DataFrame:
@@ -84,25 +112,6 @@ def _mle(negative_log_likelihood, start) -> np.ndarray:
 
 
 # -- kernels ------------------------------------------------------------------
-
-
-def test_mills_gap_is_continuous_across_the_continued_fraction_switch():
-    # The differenced LAML derivatives difference this Hessian, so the two
-    # evaluation branches must meet without a step.
-    x = np.array([-3.0 - 1e-12, -3.0, -3.0 + 1e-12])
-    _, ratio, gap = inverse_mills(x)
-    assert np.all(np.abs(np.diff(gap)) <= 1e-11 * np.abs(gap[1]))
-    assert np.all(np.abs(np.diff(ratio)) <= 1e-11 * np.abs(ratio[1]))
-
-
-def test_mills_gap_keeps_relative_accuracy_in_the_far_lower_tail():
-    t = np.array([40.0, 1.0e4])
-    _, ratio, gap = inverse_mills(-t)
-    # x + r = 1/t - 2/t^3 + 10/t^5 - 74/t^7 + 706/t^9 - ...; at t = 40 the
-    # first omitted term is below 1e-12 of the value.
-    asymptotic = 1.0 / t - 2.0 / t**3 + 10.0 / t**5 - 74.0 / t**7 + 706.0 / t**9
-    np.testing.assert_allclose(gap, asymptotic, rtol=1e-12)
-    np.testing.assert_allclose(ratio, t + gap, rtol=1e-15)
 
 
 @pytest.mark.parametrize(
@@ -142,6 +151,254 @@ def test_generalized_pareto_window_matches_scipy_and_its_exponential_limit():
     law = [stats.genpareto(c=c, scale=120.0) for c in shape]
     expected = [np.log(d.sf(lo) - d.sf(hi)) for d, lo, hi in zip(law, lower, upper, strict=True)]
     np.testing.assert_allclose(value, expected, rtol=1e-12)
+
+
+# -- bounded rows to order four against an mpmath oracle ---------------------
+#
+# Each row's bounded log-likelihood is written in closed form in mpmath (normal
+# tails by ``ncdf`` read from the smaller tail, the Pareto survival
+# ``(1 + xi y/psi)^(-1/xi)``) at 60 digits and differentiated by ``mp.diff``:
+# orders 0-2 in the natural parameters, against ``evaluate_natural``, and 3-4 in
+# the coordinates the curvature hooks take (``(mu | log m, log(sigma - floor))``
+# for the normal families, natural for the Pareto under identity links).  None
+# of it shares a formula with the primitives, the generated kernels, the window
+# combiner or the quadrature.  Errors are in ``u`` of the row's term scale, the
+# largest oracle entry of that order of either term (density or censored
+# window, and truncation window), as in ``tests/test_gamma_ls_response_bounds.py``;
+# each order is held to a stated multiple of ``u``, ``_ORACLE_GATE``, the
+# measured worst errors kept beside it as evidence.  The rows cover the body and the far tails
+# (``z = -38`` and ``+30``, both sides of ``log_ndtr_01234``'s switch at
+# ``z = -1``; the Pareto at ``xi = 1e-9``, both sides of its series radius and
+# far in its tail), narrow windows on both routes and one-sided windows.
+
+_OR_INF = np.inf
+# (z of y, z of lower, z of upper, side), standardised: y = mu + z sigma/root.
+_NORMAL_ROWS = (
+    (0.5, -_OR_INF, _OR_INF, 1),
+    (-38.0, -_OR_INF, _OR_INF, -1),
+    (30.0, -_OR_INF, _OR_INF, 1),
+    (0.1, -0.9, 1.2, 0),
+    (1.6, 1.0, _OR_INF, 0),
+    (0.15 + 5e-7, 0.15, 0.15 + 1e-6, 0),
+    (1.2, -_OR_INF, 1.2 + 1e-4, 1),
+    (-20.01, -20.03, -20.0, 0),
+    (-20.0005, -20.001, -20.0, 0),
+    (-1.0, -_OR_INF, _OR_INF, -1),
+    (-1.0 - 1e-7, -_OR_INF, 2.0, -1),
+)
+# (y, lower, upper, side, psi, xi)
+_PARETO_ROWS = (
+    (50.0, -_OR_INF, _OR_INF, 1, 120.0, 1e-9),
+    (5000.0, -_OR_INF, _OR_INF, 1, 120.0, 0.3),
+    (300.0, 100.0, _OR_INF, 0, 120.0, 0.95),
+    (80.0, 20.0, 2000.0, -1, 120.0, 1e-4),
+    (50.0005, 50.0, 50.001, 0, 120.0, 0.3),
+    (900.0, -_OR_INF, 900.0 * (1.0 + 1e-6), 1, 120.0, 0.35),
+    (1e6, -_OR_INF, _OR_INF, 1, 120.0, 0.6),
+    (149.0, -_OR_INF, _OR_INF, 1, 120.0, 0.4),
+    (151.0, 10.0, _OR_INF, 1, 120.0, 0.4),
+)
+_ORACLE_WEIGHTS = np.array([1.0, 1.0, 1.0, 2.0, 4.0, 1.0, 3.0, 1.0, 2.0, 1.0, 1.0])
+# Per-order gates (value, score, Hessian, third, fourth), in u of the term scale: a
+# few u for each of the primitives' and the chain rule's roundings, growing with the
+# order as more terms enter, as tests/test_severity_primitives.py states for the
+# primitives themselves.
+_ORACLE_GATE = (64.0, 64.0, 128.0, 256.0, 1024.0)
+# Worst measured error per order on this grid (x86-64 Linux), in u: evidence, not the gate.
+_ORACLE_MEASURED = {
+    "gaussian-prior": (2.17, 3.67, 7.19, 14.5, 109.0),
+    "gaussian-frequency": (2.17, 3.67, 7.13, 12.1, 109.0),
+    "log_normal-location": (1.19, 5.77, 5.09, 22.0, 143.0),
+    "log_normal-mean": (1.7, 10.4, 8.23, 19.4, 146.0),
+    "pareto": (5.95, 20.3, 51.5, 34.3, 32.9),
+}
+
+
+def _mp_normal_window(mp, za, zb):
+    """``log(Phi(zb) - Phi(za))``, each difference taken in the smaller tail."""
+    lower = mp.ncdf(za) if mp.isfinite(za) else 0
+    upper = mp.ncdf(-zb) if mp.isfinite(zb) else 0
+    if mp.isfinite(zb) and zb <= 0:
+        return mp.log(mp.ncdf(zb) - lower)
+    if mp.isfinite(za) and za >= 0:
+        return mp.log(mp.ncdf(-za) - upper)
+    return mp.log1p(-(lower + upper))
+
+
+def _oracle_case(case: str):
+    """Family, plan inputs, natural parameters, predictors and the oracle's terms per row."""
+    mp = pytest.importorskip("mpmath")
+    if case == "pareto":
+        family = GeneralizedParetoLSS()
+        rows = _PARETO_ROWS
+        y, lower, upper, side = (np.array([r[k] for r in rows]) for k in range(4))
+        theta = np.array([r[4:] for r in rows])
+        weights, eta = np.array([1.0, 2.0, 1.0, 1.0, 3.0, 1.0, 1.0, 2.0, 1.0]), theta
+
+        def terms(i, coordinates):
+            yi, lo, hi, sd = (mp.mpf(float(v)) for v in (y[i], lower[i], upper[i], side[i]))
+
+            def log_s(c, psi, xi):
+                if c == mp.inf:
+                    return -mp.inf
+                return -mp.log1p(xi * max(c, 0) / psi) / xi
+
+            def window(a, b, psi, xi):
+                head, tail = log_s(a, psi, xi), log_s(b, psi, xi)
+                return head + mp.log(-mp.expm1(tail - head)) if mp.isfinite(tail) else head
+
+            def first(psi, xi):
+                if sd == 0:
+                    return -mp.log(psi) - (1 + 1 / xi) * mp.log1p(xi * yi / psi)
+                return window(yi, hi, psi, xi) if sd > 0 else window(lo, yi, psi, xi)
+
+            out = [first]
+            if mp.isfinite(lo) or mp.isfinite(hi):
+                out.append(lambda psi, xi: -window(lo, hi, psi, xi))
+            return out, [first]
+
+        return family, y, (lower, upper, side), weights, "frequency", theta, eta, terms
+    name, form = case.split("-")
+    rows = _NORMAL_ROWS
+    z, z_lo, z_hi, side = (np.array([r[k] for r in rows]) for k in range(4))
+    weights = _ORACLE_WEIGHTS
+    if name == "gaussian":
+        family, mu, sigma = GaussianLS(), 0.3, 1.4
+        semantics = form
+        root = np.sqrt(weights) if form == "prior" else np.ones_like(weights)
+        y, lower, upper = (mu + v * sigma / root for v in (z, z_lo, z_hi))
+        theta = np.column_stack((np.full(len(z), mu), np.full(len(z), sigma)))
+    else:
+        family, mu, sigma = LogNormalLS(parametrisation=form), 0.4, 0.7
+        semantics, root = "frequency", np.ones_like(weights)
+        with np.errstate(over="ignore"):
+            y, lower, upper = (np.exp(mu + v * sigma) for v in (z, z_lo, z_hi))
+        first = np.exp(mu + 0.5 * sigma**2) if form == "mean" else mu
+        theta = np.column_stack((np.full(len(z), first), np.full(len(z), sigma)))
+    floor = family.scale_floor
+    eta = theta.copy()
+    eta[:, 1] = np.log(sigma - floor)
+    if form == "mean":
+        eta[:, 0] = np.log(theta[:, 0])
+    log_y = name == "log_normal"
+
+    def terms(i, coordinates):
+        yi, lo, hi = (mp.mpf(float(v)) for v in (y[i], lower[i], upper[i]))
+        k, sd = mp.mpf(float(root[i])), int(side[i])
+        if log_y:
+            yi, lo, hi = mp.log(yi), (mp.log(lo) if lo > 0 else -mp.inf), mp.log(hi)
+
+        def law(p0, p1):
+            if coordinates == "natural":
+                s_ = p1
+                m_ = mp.log(p0) - s_**2 / 2 if form == "mean" else p0
+            else:
+                s_ = floor + mp.exp(p1)
+                m_ = p0 - s_**2 / 2 if form == "mean" else p0
+            return m_, s_
+
+        def window(a, b, p0, p1):
+            m_, s_ = law(p0, p1)
+            return _mp_normal_window(mp, (a - m_) * k / s_, (b - m_) * k / s_)
+
+        def first(p0, p1):
+            if sd == 0:
+                m_, s_ = law(p0, p1)
+                w = (yi - m_) * k / s_
+                return mp.log(k / s_) - mp.log(2 * mp.pi) / 2 - w * w / 2 - (yi if log_y else 0)
+            return window(yi, hi, p0, p1) if sd > 0 else window(lo, yi, p0, p1)
+
+        out = [first]
+        if mp.isfinite(lo) or mp.isfinite(hi):
+            out.append(lambda p0, p1: -window(lo, hi, p0, p1))
+        return out, [first]
+
+    return family, y, (lower, upper, side), weights, semantics, theta, eta, terms
+
+
+@functools.cache
+def _oracle_partials(case: str):
+    """Per row and coordinate system, the bounded row's packed partials and term scales."""
+    mp = pytest.importorskip("mpmath")
+    *_, theta, eta, terms = _oracle_case(case)
+    out = []
+    with mp.workdps(60):
+        for i in range(len(theta)):
+            row = {}
+            systems = (("natural", theta[i]),) + (
+                (("predictor", eta[i]),) if case != "pareto" else ()
+            )
+            for coordinates, point in systems:
+                at = tuple(mp.mpf(float(v)) for v in point)
+                pieces, _ = terms(i, coordinates)
+                per_term = [
+                    [[mp.diff(f, at, (k - j, j)) for j in range(k + 1)] for k in range(5)]
+                    for f in pieces
+                ]
+                total = [[sum(t[k][j] for t in per_term) for j in range(k + 1)] for k in range(5)]
+                scales = [max(abs(v) for t in per_term for v in t[k]) for k in range(5)]
+                row[coordinates] = (total, scales)
+            out.append(row)
+    return out
+
+
+@pytest.mark.parametrize("case", list(_ORACLE_MEASURED))
+def test_bounded_rows_match_the_mpmath_oracle_to_order_four(case):
+    family, y, (lower, upper, side), weights, semantics, theta, eta, _ = _oracle_case(case)
+    resolved = resolve_likelihood_weights(
+        weights, n_observations=len(y), contract=WeightContract(semantics)
+    )
+    bounds = ResponseBounds.from_arrays(lower, upper, side)
+    plan = family.bind_likelihood(y, resolved, bounded_observation(bounds))
+    evaluation = family.evaluate_natural(y, theta, plan, derivative_order=2)
+    assert np.all(evaluation.valid)
+    links = (
+        (IdentityLink(), IdentityLink())
+        if case == "pareto"
+        else tuple(parameter.default_link for parameter in family.parameters)
+    )
+    third = [
+        family.predictor_curvature_directional_derivative(
+            y, eta, np.tile(np.eye(2)[axis], (len(y), 1)), links, plan
+        )
+        for axis in range(2)
+    ]
+    pairs = ((0, 0), (0, 1), (1, 1))
+    first, second = np.zeros((3, len(y), 2)), np.zeros((3, len(y), 2))
+    for index, (a, b) in enumerate(pairs):
+        first[index, :, a] = 1.0
+        second[index, :, b] = 1.0
+    fourth = family.predictor_curvature_second_directional_derivative(
+        y, eta, first, second, links, plan
+    )
+    mass = weights if semantics == "frequency" else np.ones_like(weights)
+    worst = [0.0] * 5
+    for i, row in enumerate(_oracle_partials(case)):
+        natural, natural_scales = row["natural"]
+        higher, higher_scales = row["predictor" if case != "pareto" else "natural"]
+        value = (
+            evaluation.optimizing_log_likelihood[i] + evaluation.parameter_independent_carrier[i]
+        )
+        computed = (
+            [value],
+            evaluation.score[i],
+            evaluation.hessian_packed[i],
+            [third[axis][i, c] for axis in range(2) for c in range(3)],
+            [fourth[r, i, c] for r in range(3) for c in range(3)],
+        )
+        exact = (
+            natural[0],
+            natural[1],
+            natural[2],
+            [-higher[3][sum((*pair, axis))] for axis in range(2) for pair in pairs],
+            [-higher[4][sum((*p, *r))] for r in pairs for p in pairs],
+        )
+        scales = (*natural_scales[:3], *higher_scales[3:])
+        for order, (got, want) in enumerate(zip(computed, exact, strict=True)):
+            error = max(abs(float(g) - float(mass[i] * e)) for g, e in zip(got, want, strict=True))
+            worst[order] = max(worst[order], error / float(mass[i] * scales[order]) / _U)
+    for order, (error, gate) in enumerate(zip(worst, _ORACLE_GATE, strict=True)):
+        assert error <= gate, (order, error)
 
 
 # -- fits against direct maximum likelihood ---------------------------------
@@ -371,7 +628,7 @@ def _smooth_problem(n=6_000, seed=551):
 
 
 @pytest.mark.parametrize("outer", ["efs", "efs+newton"])
-def test_fit_reml_with_censored_rows_differences_the_laml_derivatives(outer):
+def test_fit_reml_with_censored_rows_lifts_the_curve_where_the_limit_bites(outer):
     X, paid, censored = _smooth_problem()
     family = LogNormalLS(parametrisation="location")
     model = SuperLSS(family, family.location(s("x")), family.scale())
@@ -381,14 +638,6 @@ def test_fit_reml_with_censored_rows_differences_the_laml_derivatives(outer):
     state = model._require_fitted().fit_state
     assert state.censored_row_count == int(np.count_nonzero(censored))
     assert state.truncated_row_count == 0
-    # The analytic third-derivative hook is complete-row only and refuses.
-    rows = state.retained_rows
-    plan = family.bind_likelihood(rows.response, rows.likelihood_weights, rows.observation)
-    links = (IdentityLink(), LowerBoundedLogLink(family.scale_floor))
-    with pytest.raises(UnsupportedLikelihoodContractError):
-        family.predictor_curvature_directional_derivative(
-            rows.response, rows.fitted_eta, rows.fitted_eta, links, plan
-        )
     complete = SuperLSS(family, family.location(s("x")), family.scale())
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -399,6 +648,74 @@ def test_fit_reml_with_censored_rows_differences_the_laml_derivatives(outer):
         model.predict_parameters(grid)["scale"].to_numpy()
         > complete.predict_parameters(grid)["scale"].to_numpy()
     )
+
+
+_HOOKS = (
+    "predictor_curvature_directional_derivative",
+    "predictor_curvature_second_directional_derivative",
+)
+
+
+def _censored_smooth_case(case: str):
+    """A smooth fit with its top decile censored, for each bounded family and form."""
+    if case == "pareto":
+        rng = np.random.default_rng(565)
+        x = rng.uniform(0.0, 3.0, 4_000)
+        y = stats.genpareto(c=0.3, scale=1000.0 * np.exp(0.5 * np.sin(2.0 * x))).rvs(
+            len(x), random_state=rng
+        )
+        family = GeneralizedParetoLSS()
+        predictors = (family.scale(s("x")), family.shape())
+    else:
+        X, y, _ = _smooth_problem(n=4_000, seed=565)
+        x = X["x"].to_numpy()
+        if case == "gaussian":
+            family = GaussianLS()
+            y = np.log(y)
+        else:
+            family = LogNormalLS(parametrisation=case.removeprefix("log_normal_"))
+        first = family.mean if case == "log_normal_mean" else family.location
+        predictors = (first(s("x")), family.scale())
+    limit = float(np.quantile(y, 0.9))
+    return pd.DataFrame({"x": x}), np.minimum(y, limit), y >= limit, family, predictors
+
+
+@pytest.mark.parametrize("case", ["gaussian", "log_normal_location", "log_normal_mean", "pareto"])
+def test_fit_reml_with_censored_rows_takes_the_analytic_laml_derivatives(case, monkeypatch):
+    X, paid, censored, family, predictors = _censored_smooth_case(case)
+    calls = {name: [] for name in _HOOKS}
+
+    def counted(name):
+        hook = getattr(type(family), name)
+
+        def wrapper(self, *args, **kwargs):
+            result = hook(self, *args, **kwargs)
+            calls[name].append(args[-1].observation.is_complete)
+            return result
+
+        return wrapper
+
+    def fitted():
+        model = SuperLSS(family, *predictors)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit_reml(X, paid, censored=censored, outer="efs+newton")
+        grid = pd.DataFrame({"x": np.linspace(0.1, 0.9 * X["x"].max(), 7)})
+        return model.predict_parameters(grid).to_numpy()
+
+    with monkeypatch.context() as patch:
+        for name in _HOOKS:
+            patch.setattr(type(family), name, counted(name))
+        analytic = fitted()
+    # Each analytic hook returned on the bounded plan; none was refused.
+    assert all(made and not any(made) for made in calls.values()), calls
+
+    def refuse(*args, **kwargs):
+        raise UnsupportedLikelihoodContractError("differenced route")
+
+    for name in _HOOKS:
+        monkeypatch.setattr(type(family), name, refuse)
+    np.testing.assert_allclose(analytic, fitted(), rtol=1e-5)
 
 
 def test_a_censored_pareto_tail_with_a_smooth_scale_recovers_the_law_under_reml():
@@ -769,17 +1086,6 @@ def test_parameter_uncertainty_envelope_refuses_bounded_rows():
     assert payload is not None
 
 
-def test_mills_gap_agrees_with_an_erfcx_reference_between_three_and_forty():
-    # Below -3 the gap comes from the continued fraction.  The reference forms
-    # r = sqrt(2/pi)/erfcx(t/sqrt(2)) to a few u, and its gap r - t cancels by
-    # a factor of t^2, so it is good to a small multiple of u t^2.
-    t = np.linspace(3.0 + 1e-9, 40.0, 200)
-    _, ratio, gap = inverse_mills(-t)
-    reference = np.sqrt(2.0 / np.pi) / special.erfcx(t / np.sqrt(2.0))
-    np.testing.assert_allclose(ratio, reference, rtol=16 * _U)
-    assert np.all(np.abs(gap - (reference - t)) <= 16 * _U * t * t * np.abs(reference - t))
-
-
 @pytest.mark.parametrize(
     ("lower", "upper", "shape"),
     [(50.0, np.inf, 0.2), (900.0, np.inf, 0.35), (50.0, 400.0, 0.2), (0.0, 700.0, 0.6)],
@@ -933,6 +1239,46 @@ def test_narrow_normal_windows_keep_their_mass_on_both_sides_of_the_switch(centr
     # Above the switch the difference of the two log tails keeps the mass to
     # about 10 u centre^2; below it the quadrature's error is under 2e-13.
     np.testing.assert_allclose(value, expected, rtol=0.0, atol=2e-13 + 40 * _U * centre**2)
+
+
+def test_a_censored_normal_row_keeps_its_hessian_at_a_tiny_scale():
+    """``log Phi(-(y - mu)/sigma)`` depends on the standardized residual alone.
+
+    So at ``y = mu`` the natural Hessian scales as ``1/sigma^2`` exactly. Forming
+    ``sigma^-3`` apart underflowed it at ``sigma ~ 1e-110``, and the row was
+    marked invalid.
+    """
+    family = GaussianLS(scale_floor=0.0)
+    y = np.zeros(1)
+    bounds = ResponseBounds.from_arrays(np.array([-np.inf]), np.array([np.inf]), np.array([1]))
+    resolved = resolve_likelihood_weights(None, n_observations=1, contract=WeightContract("prior"))
+    plan = family.bind_likelihood(y, resolved, bounded_observation(bounds))
+    tiny = 2.0**-360
+    unit = family.evaluate_natural(y, np.array([[0.0, 1.0]]), plan, derivative_order=2)
+    small = family.evaluate_natural(y, np.array([[0.0, tiny]]), plan, derivative_order=2)
+    assert np.all(small.valid)
+    np.testing.assert_allclose(
+        small.optimizing_log_likelihood, unit.optimizing_log_likelihood, rtol=1e-15
+    )
+    np.testing.assert_allclose(small.hessian_packed * tiny**2, unit.hessian_packed, rtol=1e-12)
+
+
+@pytest.mark.parametrize("scale", [2.0**540, 2.0**700])
+def test_a_narrow_normal_window_keeps_its_probability_at_a_huge_scale(scale):
+    """The window's probability reads ``(y - location)/scale`` alone, so it survives any scale.
+
+    Squaring ``y - location`` and ``scale`` separately overflowed, and their
+    quotient read ``inf * 0``: NaN.
+    """
+    family = GaussianLS()
+    unit = family.log_window_probability(
+        np.array([1.0]), np.array([1.00001]), np.array([[0.0, 1.0]])
+    )
+    huge = family.log_window_probability(
+        np.array([scale]), np.array([1.00001 * scale]), np.array([[0.0, scale]])
+    )
+    assert np.isfinite(unit[0])
+    np.testing.assert_allclose(huge, unit, rtol=1e-12)
 
 
 @pytest.mark.parametrize("relative_width", [1e-14, 1e-10, 1e-6])
@@ -1113,14 +1459,14 @@ def test_a_bounded_row_whose_window_has_no_mass_scores_inf(monkeypatch):
     # overflows first.  The event is forced on the window kernel instead.
     from superglm.distributional.families import gaussian as gaussian_family
 
-    real = gaussian_family.gaussian_window
+    real = gaussian_family.normal_window_jets
 
     def massless(*args, **kwargs):
-        value, score, hessian = real(*args, **kwargs)
-        return np.full_like(value, -np.inf), score, hessian
+        value, *derivatives = real(*args, **kwargs)
+        return np.full_like(value, -np.inf), *derivatives
 
     model, _, _ = _intercept_gaussian()
-    monkeypatch.setattr(gaussian_family, "gaussian_window", massless)
+    monkeypatch.setattr(gaussian_family, "normal_window_jets", massless)
     table = model.scores(
         _intercepts(2), np.array([0.0, 3.0]), censored=[False, True], which=("log",)
     )

@@ -12,7 +12,6 @@ from scipy import special
 from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.families.generalized_gamma import (
-    GeneralizedGammaDomainError,
     GeneralizedGammaLSS,
 )
 from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
@@ -24,6 +23,7 @@ from superglm.distributional.families.two_piece import (
     TwoPieceNormalLSS,
 )
 from superglm.distributional.posterior import resolve_quantity
+from tests._generalized_gamma_lss_oracles import mp_expected_shortfall
 
 _EPS = np.finfo(np.float64).eps
 _DECIMAL_PI = Decimal("3.1415926535897932384626433832795028841971693993751")
@@ -367,15 +367,101 @@ def test_generalized_gamma_checks_moment_existence_before_the_zero_shape_limit()
     assert np.isposinf(got[0])
 
 
-def test_generalized_gamma_refuses_an_uncertified_extreme_negative_near_zero_tail():
+_NEAR_ZERO_SHAPES = [
+    sign * magnitude
+    for magnitude in (
+        1.0e-12,
+        1.0e-10,
+        1.0e-9,
+        1.0e-8,
+        np.nextafter(1.0e-8, np.inf),
+        1.0e-6,
+        1.0e-3,
+        3.0e-3,
+        1.0e-2,
+        0.1,
+        0.2887,
+    )
+    for sign in (1.0, -1.0)
+]
+
+
+@pytest.mark.parametrize(("shape", "sigma"), [(-0.2, 4.9), (-0.01, 99.0)])
+def test_expected_shortfall_where_sigma_q_nears_minus_one(shape, sigma):
+    """The size-biased law's shape ``Q/sqrt(1 + sigma Q)`` grows as ``sigma Q -> -1``.
+
+    In the first case it leaves the uniform domain; in the second it stays inside.
+    Both read the fitted law.
+
+    The reference is closed form. With ``G ~ Gamma(k, 1)``, ``k = Q^-2`` and
+    ``s = sigma/Q < 0``, the variable is ``Y = e^mu (Q^2 G)^s``. Then
+    ``E[Y 1{Y > y_p}] = e^mu Q^(2s) Gamma(k + s)/Gamma(k) P(k + s, g_p)``, where
+    ``g_p`` is ``G``'s upper ``p`` point. A density quadrature loses this tail:
+    it read 6.8% low at ``sigma Q = -0.98``.
+    """
+    mp = pytest.importorskip("mpmath")
+    mu = 0.2
+    p = np.array([0.5, 0.9])
+    with mp.workdps(60):
+        k, s = 1 / mp.mpf(shape) ** 2, mp.mpf(sigma) / mp.mpf(shape)
+        scale = mp.e ** mp.mpf(mu) * (1 / k) ** s * mp.gamma(k + s) / mp.gamma(k)
+        reference = []
+        for level in p:
+            upper = mp.findroot(lambda t: mp.gammainc(k, t, mp.inf, regularized=True) - level, k)
+            tail = scale * mp.gammainc(k + s, 0, upper, regularized=True)
+            reference.append(float(tail / (1 - mp.mpf(level))))
+    reference = np.array(reference)
+    family = GeneralizedGammaLSS(parametrisation="location")
+    theta = np.column_stack([np.full(2, mu), np.full(2, sigma), np.full(2, shape)])
+    got = family.expected_shortfall(p, theta)
+    np.testing.assert_allclose(got, reference, rtol=256.0 * _EPS, atol=0.0)
+
+
+@pytest.mark.parametrize("shape", _NEAR_ZERO_SHAPES)
+def test_generalized_gamma_expected_shortfall_reads_the_fitted_law_near_zero_shape(shape):
+    """Both forms agree with the density quadrature to float64 accuracy through
+    ``Q = 0``, on both sides of the ``1e-8`` switch and the uniform domain's edge.
+
+    The log-normal limit below ``|Q| = 1e-8`` drops the ``O(Q)`` term, about
+    ``1e-7`` relative at ``|Q| = 1e-8``, and the incomplete gamma at
+    ``kappa = Q^-2`` loses about ``u/|Q|`` just above it, where it also refused.
+    """
+    pytest.importorskip("mpmath")
+    mu, mean = 0.2, 3.0
+    rows = [(0.01, 2.0), (0.5, 0.3), (0.999999, 2.0)]
+    p = np.array([row[0] for row in rows])
+    sigma = np.array([row[1] for row in rows])
+    q = np.full(len(rows), shape)
+    reference = np.array(
+        [[float(v) for v in mp_expected_shortfall(*row[:1], mu, row[1], shape)] for row in rows]
+    )
+
+    location = GeneralizedGammaLSS(parametrisation="location")
+    location_theta = np.column_stack([np.full(len(rows), mu), sigma, q])
+    got = location.expected_shortfall(p, location_theta)
+    np.testing.assert_allclose(got, reference[:, 0], rtol=256.0 * _EPS, atol=0.0)
+    assert np.all(got >= location.quantile(p, location_theta))
+
+    mean_family = GeneralizedGammaLSS(parametrisation="mean")
+    mean_theta = np.column_stack([np.full(len(rows), mean), sigma, q])
+    got = mean_family.expected_shortfall(p, mean_theta)
+    np.testing.assert_allclose(got, mean * reference[:, 1], rtol=256.0 * _EPS, atol=0.0)
+    assert np.all(got >= mean_family.quantile(p, mean_theta))
+
+
+def test_generalized_gamma_resolves_an_extreme_negative_near_zero_tail():
     family = GeneralizedGammaLSS(parametrisation="location")
     p = np.nextafter(1.0, 0.0)
     theta = np.array([[0.2, 0.8, -1.0e-6]])
     quantile = family.quantile(np.array([p]), theta)[0]
     assert quantile == pytest.approx(763.0580930009103, rel=64.0 * _EPS)
+    pytest.importorskip("mpmath")
+    want = float(mp_expected_shortfall(p, 0.2, 0.8, -1.0e-6)[0])
 
-    with pytest.raises(GeneralizedGammaDomainError, match="expected shortfall cannot be certified"):
-        family.expected_shortfall(np.array([p]), theta)
+    got = family.expected_shortfall(np.array([p]), theta)[0]
+
+    assert got == pytest.approx(want, rel=256.0 * _EPS)
+    assert got >= quantile
 
 
 @pytest.mark.parametrize("shape", [1.0e-8, np.nextafter(1.0e-8, np.inf)])
@@ -393,22 +479,21 @@ def test_generalized_gamma_unit_shift_uses_the_exact_recurrence_across_float_par
     assert got == pytest.approx(want, rel=16.0 * _EPS)
 
 
-def test_generalized_gamma_refuses_an_unrepresented_generic_shape_increment():
+def test_generalized_gamma_reads_an_unrepresented_shape_increment_through_the_uniform_tail():
+    """``kappa + sigma/Q`` does not represent the increment here, which the
+    incomplete-gamma route refuses; the uniform tail never forms ``kappa``."""
     family = GeneralizedGammaLSS(parametrisation="mean", scale_floor=0.0)
     shape = 1.0e-8
     sigma = 1.5e-8
     kappa = 1.0 / (shape * shape)
     shift = sigma / shape
     assert (kappa + shift) - kappa != shift
+    pytest.importorskip("mpmath")
+    want = float(mp_expected_shortfall(0.9, 0.0, sigma, shape)[1])
 
-    with pytest.raises(
-        GeneralizedGammaDomainError,
-        match="shifted gamma shape increment is unresolved",
-    ):
-        family.expected_shortfall(
-            np.array([0.9]),
-            np.array([[1.0, sigma, shape]]),
-        )
+    got = family.expected_shortfall(np.array([0.9]), np.array([[1.0, sigma, shape]]))[0]
+
+    assert got == pytest.approx(want, rel=64.0 * _EPS)
 
 
 def test_generalized_gamma_far_negative_tail_uses_a_resolved_log_quantile_ratio():

@@ -677,7 +677,7 @@ def log_gamma_tail_scaled_into(a, x, upper, order, out, w):
     nor ``x^j`` is ever formed.  ``w`` is caller-owned work of :data:`WORK_SIZE`.
     Returns ``False`` (and NaN) off the domain.
     """
-    if not log_gamma_tail_jet_into(a, x, upper, order, False, out, w):
+    if not log_gamma_tail_jet_into(a, x, upper, order, np.bool_(False), out, w):
         return False
     for r in range((order + 1) * (order + 2) // 2):
         out[r] *= _FACTORIAL[_A_DEG[r]] * _FACTORIAL[_X_DEG[r]]
