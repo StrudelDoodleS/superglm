@@ -23,7 +23,9 @@ one these releases share, so ``data`` and the records stay identical in form.
 Run with v0.41.0 (``git worktree add <dir> v0.41.0``) and
 ``tests/fixtures/saved_v0_41_0`` as the output, it writes a spline declared
 with no kind beside a constrained ``PSpline``, which 0.40.0 and 0.41.0 fitted
-as a ``ps`` on SCOP while the model kept the kindless declaration.
+as a ``ps`` on SCOP while the model kept the kindless declaration, and the
+same two cases inside an ``OrderedCategorical``: a ``ps`` basis 0.41.0 fitted
+on SCOP, and a basis declared with no kind that it fitted as one.
 """
 
 from __future__ import annotations
@@ -139,7 +141,7 @@ LEGACY_SAVERS = {
     "0.17.0": ("spline_cat",),
     "0.18.0": ("ordered_cat",),
     "0.25.0": ("spline_cat",),
-    "0.41.0": ("kindless_beside_scop",),
+    "0.41.0": ("kindless_beside_scop", "ordered_ps_on_scop", "ordered_kindless_beside_scop"),
 }
 BANDS = list("ABCDE")
 LEGACY_ROWS = 60
@@ -152,6 +154,20 @@ def _legacy_case(name: str):
         increasing = sg.Constraint.fit.increasing
         return {
             "x": sg.Spline(constraint=increasing),
+            "z": sg.PSpline(n_knots=6, constraint=increasing),
+        }, None
+    if name == "ordered_ps_on_scop":
+        increasing = sg.Constraint.fit.increasing
+        basis = sg.Spline(kind="ps", k=5, constraint=increasing)
+        return {
+            "x": sg.Spline(constraint=increasing),
+            "band": sg.OrderedCategorical(order=BANDS, basis=basis),
+        }, None
+    if name == "ordered_kindless_beside_scop":
+        increasing = sg.Constraint.fit.increasing
+        basis = sg.Spline(constraint=increasing)
+        return {
+            "band": sg.OrderedCategorical(order=BANDS, basis=basis),
             "z": sg.PSpline(n_knots=6, constraint=increasing),
         }, None
     if name == "ordered_cat":

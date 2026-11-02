@@ -1070,17 +1070,21 @@ def _scop_templates_marked_qp(
     A P-spline saved on SCOP warns when it is built (``_warn_if_saved_on_scop``),
     which marks the attempt's copy.  Its template is marked once the fit
     commits, so later refits, and the model saved again, build it as the QP
-    P-spline it now is and warn no more.  A failed fit publishes nothing and
+    P-spline it now is and warn no more.  An ordered term holds its basis
+    twice (``held_splines``); both are marked, in the template and in the
+    fitted spec the editor clones.  A failed fit publishes nothing and
     leaves the template unmarked.
     """
-    from superglm.features._spline_build import saved_on_scop
+    from superglm.features._spline_build import held_splines, saved_on_scop
 
     specs = getattr(work_model, "_specs", {})
     templates = publication.config.feature_templates
     built = {
         name
         for name, template in templates
-        if saved_on_scop(template) and getattr(specs.get(name), "shape_engine", None) == "qp"
+        if any(saved_on_scop(spline) for spline in held_splines(template))
+        and name in specs
+        and getattr(held_splines(specs[name])[-1], "shape_engine", None) == "qp"
     }
     if not built:
         return publication
@@ -1088,7 +1092,9 @@ def _scop_templates_marked_qp(
     for name, template in templates:
         if name in built:
             template = copy.deepcopy(template)
-            template.shape_engine = "qp"
+            for spline in [*held_splines(template), *held_splines(specs[name])]:
+                if saved_on_scop(spline):
+                    spline.shape_engine = "qp"
         marked.append((name, template))
     return replace(
         publication,

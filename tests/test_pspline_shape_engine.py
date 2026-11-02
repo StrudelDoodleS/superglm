@@ -40,6 +40,7 @@ SAVED_SCOP = Path(__file__).parent / "fixtures" / "saved_v0_40_0" / "glm_poisson
 SAVED_KINDLESS_SCOP = (
     Path(__file__).parent / "fixtures" / "saved_v0_41_0" / "kindless_beside_scop.pkl"
 )
+SAVED_V041 = Path(__file__).parent / "fixtures" / "saved_v0_41_0"
 FAMILIES = {
     "gaussian": families.gaussian,
     "poisson": families.poisson,
@@ -327,6 +328,101 @@ def test_saved_kindless_spline_beside_scop_refits_as_the_cr_it_declares_and_warn
         warnings.simplefilter("error", SCOPRetiredWarning)
         model.fit_reml(frame, y)
         assert type(declared_spline(model, "x")) is CubicRegressionSpline
+
+
+def _ordered_case(name: str) -> dict:
+    """The features ``scripts/make_saved_v040_fixtures.py`` declares for ``name``."""
+    from superglm import OrderedCategorical
+
+    inc, bands = Constraint.fit.increasing, list("ABCDE")
+    if name == "ordered_ps_on_scop":
+        return {
+            "x": Spline(constraint=inc),
+            "band": OrderedCategorical(order=bands, basis=Spline(kind="ps", k=5, constraint=inc)),
+        }
+    return {
+        "band": OrderedCategorical(order=bands, basis=Spline(constraint=inc)),
+        "z": PSpline(n_knots=6, constraint=inc),
+    }
+
+
+def _scop_warnings(fn) -> list[str]:
+    """The SCOP warnings ``fn()`` raises, each as the feature it names."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fn()
+    messages = [str(w.message) for w in caught if issubclass(w.category, SCOPRetiredWarning)]
+    assert all("fitted on the SCOP shape engine" in message for message in messages), messages
+    return sorted(message.split("'")[1] for message in messages)
+
+
+@pytest.mark.parametrize(
+    ("name", "kind", "on_scop"),
+    [
+        ("ordered_ps_on_scop", PSpline, ["band", "x"]),
+        ("ordered_kindless_beside_scop", "cr", ["band", "z"]),
+    ],
+    ids=["ps-basis", "kindless-basis-beside-ps"],
+)
+def test_saved_ordered_term_on_scop_refits_as_its_declaration_and_warns_once(
+    name, kind, on_scop
+) -> None:
+    """0.41.0 fitted an ordered term's constrained ``ps`` basis on SCOP, and a basis
+    declared with no kind beside a SCOP term as that ``ps``, keeping the kindless
+    declaration.  A refit and the editor's knot edit both build the basis the
+    declaration reads, and each term warns that its SCOP fit moved, once per saved
+    model: not on a second refit, nor once saved again.  Mutation checks: with
+    ``_scop_templates_marked_qp`` reading only the wrapper, the second refit warns;
+    with ``mark_kindless_saved_on_scop`` skipping ordered terms, the refit builds the
+    ``cr`` unwarned; without its ``_spline_obj`` taking the declaration back, the knot
+    edit builds the ``ps``; without the fitted spec's basis marked, a knot edit after
+    the refit warns again.
+    """
+    from superglm.editor import EditorSession
+    from superglm.features.spline import CubicRegressionSpline
+
+    kind = CubicRegressionSpline if kind == "cr" else kind
+
+    def load():
+        with open(SAVED_V041 / f"{name}.pkl", "rb") as handle:
+            record = pickle.load(handle)
+        assert record["version"] == "0.41.0"
+        return record["model"], record["frame"], record["y"], record
+
+    def edit(model):
+        session = EditorSession.from_model(
+            copy.deepcopy(model), train_data=(frame, y, np.ones(len(y)))
+        )
+        knots = {"count": 3, "strategy": "uniform"}
+        return session, _scop_warnings(lambda: session.replace_with_knots("band", knots))
+
+    model, frame, y, record = load()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SCOPRetiredWarning)  # loading and reading never warn
+        assert_predicts_as_saved(model, frame, record["prediction"])
+
+    # The editor's knot edit builds the declared kind, and the term warns once.
+    session, warned = edit(model)
+    assert warned.count("band") == 1
+    assert type(session.model._specs["band"]._spline) is kind
+
+    # A plain refit: every term 0.41.0 fitted on SCOP warns, each once.
+    model, frame, y, _ = load()
+    assert _scop_warnings(lambda: model.fit_reml(frame, y)) == on_scop
+    assert type(model._specs["band"]._spline) is kind
+    fresh = SuperGLM(family="poisson", features=_ordered_case(name)).fit_reml(frame, y)
+    assert type(fresh._specs["band"]._spline) is kind
+    np.testing.assert_allclose(model.predict(frame), fresh.predict(frame), rtol=1e-10)
+
+    # Fitted on the QP now, the model warns no more: not in the editor, nor on a refit.
+    session, warned = edit(model)
+    assert warned == [] and type(session.model._specs["band"]._spline) is kind
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SCOPRetiredWarning)
+        model.fit_reml(frame, y)
+        reloaded = pickle.loads(pickle.dumps(model))
+        reloaded.fit_reml(frame, y)
+    np.testing.assert_allclose(reloaded.predict(frame), fresh.predict(frame), rtol=1e-10)
 
 
 @pytest.mark.parametrize(

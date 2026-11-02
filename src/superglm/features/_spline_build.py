@@ -58,6 +58,21 @@ def saved_on_scop(spec: Any) -> bool:
     return _uses_fit_time_shape_constraints(spec) and getattr(spec, "shape_engine", "qp") is None
 
 
+def held_splines(spec: Any) -> list[Any]:
+    """The splines ``spec`` holds: itself, or an ordered term's declared basis and its built copy.
+
+    An ordered term builds its ``_spline``, a copy of the declared
+    ``_spline_obj`` clamped to its levels, which the editor clones again;
+    both carry the basis's ``shape_engine``.
+    """
+    from superglm.features.ordered_categorical import OrderedCategorical
+
+    if not isinstance(spec, OrderedCategorical):
+        return [spec]
+    held = (getattr(spec, "_spline_obj", None), getattr(spec, "_spline", None))
+    return [spline for spline in held if spline is not None]
+
+
 def mark_kindless_saved_on_scop(model) -> None:
     """Mark each kindless declaration that ``model``'s saved fit built as a SCOP P-spline.
 
@@ -65,22 +80,38 @@ def mark_kindless_saved_on_scop(model) -> None:
     constrained P-spline as a ``ps`` on SCOP, and kept the kindless
     declaration as the model's template.  Every refit now builds that
     declaration as it reads, a ``cr`` on the QP, as a fresh fit of the same
-    spec does, so its first build warns as a saved SCOP P-spline does.
+    spec does, so its first build warns as a saved SCOP P-spline does.  An
+    ordered term's declared basis is marked alike, and its fitted spec takes
+    the declaration back as its ``_spline_obj``, which 0.41.0 replaced by the
+    ``ps``, so the editor clones the ``cr`` too.  Its built ``_spline`` stays
+    the ``ps``, which predicts as saved.
     """
+    import copy
+
+    from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.spline import PSpline
 
     specs = getattr(model, "_specs", None) or {}
     templates = getattr(getattr(model, "_config", None), "feature_templates", ())
     for name, template in templates:
         fitted = specs.get(name)
-        if (
-            isinstance(fitted, PSpline)
-            and saved_on_scop(fitted)
-            and not isinstance(template, PSpline)
-            and getattr(template, "_kindless_args", None) is not None
-            and _uses_fit_time_shape_constraints(template)
+        ordered = isinstance(fitted, OrderedCategorical) and isinstance(
+            template, OrderedCategorical
+        )
+        fitted_basis = getattr(fitted, "_spline_obj", None) if ordered else fitted
+        declared = getattr(template, "_spline_obj", None) if ordered else template
+        if not (
+            isinstance(fitted_basis, PSpline)
+            and saved_on_scop(fitted_basis)
+            and not isinstance(declared, PSpline)
+            and getattr(declared, "_kindless_args", None) is not None
+            and _uses_fit_time_shape_constraints(declared)
         ):
-            template.shape_engine = None
+            continue
+        for spline in held_splines(template):
+            spline.shape_engine = None
+        if ordered:
+            fitted._spline_obj = copy.deepcopy(declared)
 
 
 def _warn_if_saved_on_scop(spec: Any) -> None:
