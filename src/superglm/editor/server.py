@@ -519,8 +519,7 @@ def _stage_params(payload: dict[str, Any]) -> dict[str, Any]:
     """A /stage body's ``params``, each field checked for its JSON type.
 
     The session checks the rest. ``degree`` and ``join`` pass through
-    unparsed, as on /shape_range: the builder refuses them with its fixed
-    sentences.
+    unparsed: the shape builder refuses them with its fixed sentences.
     """
     params = payload.get("params", {})
     if not isinstance(params, dict):
