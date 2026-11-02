@@ -236,8 +236,6 @@ class _PowerProfile:
     def _fit_reml(self, p: float) -> tuple[NDArray, bool, Any]:
         clone = self.clone
         clone.family = Tweedie(p)
-        # The post-fit runtime parity check certifies published state; candidate
-        # fits are never published, and it cost 42% of every candidate on master.
         # No lambda warm start. The REML engines now honour a mapping
         # lambda2_init, so a previous candidate's lambdas would change where
         # this fit starts; adopting it here needs its own measurement of the
@@ -247,7 +245,6 @@ class _PowerProfile:
             self.y,
             sample_weight=self.w,
             offset=self.offset,
-            runtime_validation="skip",
             reml_tol=_SEARCH_REML_TOL,
         )
         if getattr(clone._reml_result, "terminal_refit_termination", None) == (

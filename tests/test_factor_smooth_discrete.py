@@ -99,7 +99,6 @@ def _fit(model: SuperGLM, X, y, weights, offset) -> SuperGLM:
         max_reml_iter=12,
         reml_tol=1e-5,
         pirls_tol=1e-9,
-        runtime_validation="skip",
     )
 
 
@@ -429,7 +428,6 @@ def test_factor_smooth_marginal_backend_preserves_exact_discrete_fit(
         y,
         sample_weight=weights,
         offset=offset,
-        runtime_validation="skip",
     )
     discrete = _fixed_policy_model(
         discrete=True,
@@ -439,7 +437,6 @@ def test_factor_smooth_marginal_backend_preserves_exact_discrete_fit(
         y,
         sample_weight=weights,
         offset=offset,
-        runtime_validation="skip",
     )
 
     assert exact._interaction_specs["x:segment:fs"]._marginal_build_backend == backend

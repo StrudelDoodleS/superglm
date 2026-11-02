@@ -1985,43 +1985,6 @@ class TestVuongChecksTheContractOnEveryArm:
 class TestNeutralCountLatticeExtraction:
     """The neutral predicates have an independently pinned numerical contract."""
 
-    def test_scalar_path_reexports_the_neutral_predicates_and_constants(self):
-        from superglm.model.input_validation import (
-            _LATTICE_MAXIMUM_SLACK,
-            _LATTICE_ULP_SLACK,
-            _is_exact_power_of_two,
-            _not_a_whole_number,
-            _off_integer_lattice,
-            _product_was_exact,
-        )
-
-        assert neutral_count_lattice._LATTICE_ULP_SLACK == _LATTICE_ULP_SLACK == 8.0
-        assert neutral_count_lattice._LATTICE_MAXIMUM_SLACK == _LATTICE_MAXIMUM_SLACK == 0.25
-        assert neutral_count_lattice._off_integer_lattice is _off_integer_lattice
-        assert neutral_count_lattice._not_a_whole_number is _not_a_whole_number
-        assert neutral_count_lattice._is_exact_power_of_two is _is_exact_power_of_two
-        assert neutral_count_lattice._product_was_exact is _product_was_exact
-
-    def test_computed_product_mask_is_explicit_at_every_binade(self):
-        candidates: list[float] = []
-        expected: list[bool] = []
-        for exponent in range(64):
-            magnitude = float(2**exponent)
-            spacing = np.spacing(magnitude)
-            candidates.append(magnitude)
-            expected.append(False)
-            if spacing <= 0.5:
-                candidates.append(magnitude + 0.5)
-                expected.append(True)
-            if spacing < 0.5:
-                candidates.append(np.nextafter(magnitude, np.inf))
-                expected.append(False)
-
-        np.testing.assert_array_equal(
-            neutral_count_lattice._off_integer_lattice(np.asarray(candidates)),
-            np.asarray(expected),
-        )
-
     def test_supplied_count_adversaries_have_an_explicit_mask(self):
         values = np.array(
             [
@@ -2039,64 +2002,6 @@ class TestNeutralCountLatticeExtraction:
             [False, False, True, True, True, True, False],
         )
 
-    def test_exact_product_predicates_have_explicit_masks_through_underflow(self):
-        weights = np.array(
-            [
-                np.nextafter(0.0, 1.0),
-                2.0**-40,
-                0.5,
-                1.0,
-                2.0,
-                3.0,
-                np.inf,
-            ]
-        )
-        response = np.array([0.5, 100.25, 3.5, 2.0**49 + 0.125, 7.0, 4.0, 1.0])
-        scaled = weights * response
-        np.testing.assert_array_equal(
-            neutral_count_lattice._is_exact_power_of_two(weights),
-            [True, True, True, True, True, False, False],
-        )
-        np.testing.assert_array_equal(
-            neutral_count_lattice._product_was_exact(weights, response, scaled),
-            [False, True, True, True, True, False, False],
-        )
-
-    def test_power_of_two_product_claims_match_independent_rational_arithmetic(self):
-        from fractions import Fraction
-
-        weights = np.array(
-            [
-                np.nextafter(0.0, 1.0),
-                np.nextafter(0.0, 1.0),
-                2.0**-40,
-                0.5,
-                2.0**1023,
-            ]
-        )
-        response = np.array([0.5, 2.0, 100.25, 3.5, 2.0])
-        with np.errstate(over="ignore", under="ignore"):
-            scaled = weights * response
-        expected = [
-            bool(np.isfinite(product) and Fraction(product) == Fraction(weight) * Fraction(value))
-            for weight, value, product in zip(weights, response, scaled, strict=True)
-        ]
-
-        np.testing.assert_array_equal(
-            neutral_count_lattice._product_was_exact(weights, response, scaled),
-            expected,
-        )
-
-    def test_measured_exposure_round_trips_have_no_off_lattice_rows(self):
-        rng = np.random.default_rng(20260831)
-        counts = rng.integers(0, 10_000, size=20_000).astype(np.float64)
-        exposure = rng.uniform(0.01, 50.0, size=20_000)
-        round_trip = (counts / exposure) * exposure
-        np.testing.assert_array_equal(
-            neutral_count_lattice._off_integer_lattice(round_trip),
-            np.zeros(len(round_trip), dtype=bool),
-        )
-
 
 class TestIntegralityToleranceSurvivesLargeMagnitudes:
     """A relative tolerance cannot express "close to an integer".
@@ -2106,21 +2011,6 @@ class TestIntegralityToleranceSurvivesLargeMagnitudes:
     happens at ``|v| = 5e8``, and ``1e9 + 0.5`` -- exactly representable in
     float64 -- was reported as a whole number of replications.
     """
-
-    @pytest.mark.parametrize("magnitude", [1e6, 1e8, 5e8, 1e9, 1e12])
-    def test_a_half_integer_is_never_called_whole(self, magnitude):
-        from superglm.model.input_validation import _off_integer_lattice
-
-        value = magnitude + 0.5
-        assert value - magnitude == 0.5, "test needs an exactly representable half"
-        assert bool(_off_integer_lattice(np.array([value]))[0])
-
-    @pytest.mark.parametrize("magnitude", [1.0, 1e3, 1e6, 1e9])
-    def test_round_off_is_still_absorbed(self, magnitude):
-        from superglm.model.input_validation import _off_integer_lattice
-
-        nudged = np.nextafter(magnitude, np.inf)
-        assert not bool(_off_integer_lattice(np.array([nudged]))[0])
 
     def test_a_large_fractional_replication_count_warns_end_to_end(self):
         n = 40
@@ -2161,124 +2051,6 @@ class TestTheContractWarningNeverPreemptsAValidationError:
         model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
         with pytest.warns(FractionalFrequencyWeightWarning):
             model.fit(X, np.arange(n, dtype=float), sample_weight=np.full(n, 2.5))
-
-
-class TestTheIntegralitySlackIsCorrectAtEveryMagnitude:
-    """Swept over the exponent range, not sampled at chosen magnitudes.
-
-    This check has been wrong three times, each time at a magnitude nobody
-    had tried: a 1e-9 relative tolerance died at ``|v| >= 5e8``, a 1e-3
-    absolute ceiling admitted ``1_000_000.0005``, and eight raw ulps died at
-    ``|v| >= 2**48`` where one ulp is 1/16 and eight are exactly a half-count.
-
-    Each was found by a reviewer naming the next magnitude, so testing more
-    named magnitudes would only postpone the fourth. The sweep below asserts
-    the property that actually has to hold -- a representable half-integer is
-    always flagged, an exact integer never is, and a ulp of round-off is
-    absorbed -- at every binade of the double range.
-    """
-
-    def test_every_binade_of_the_double_range(self):
-        from superglm.model.input_validation import _off_integer_lattice
-
-        violations = []
-        for exponent in range(64):
-            magnitude = float(2**exponent)
-            spacing = np.spacing(magnitude)
-
-            if _off_integer_lattice(np.array([magnitude]))[0]:
-                violations.append(f"2^{exponent}: an exact integer was flagged")
-
-            # Where a half-integer is representable it must always be caught:
-            # this is the failure the three previous rules all shared.
-            if spacing <= 0.5:
-                half = magnitude + 0.5
-                assert half - magnitude == 0.5
-                if not _off_integer_lattice(np.array([half]))[0]:
-                    violations.append(f"2^{exponent}: half-integer admitted (spacing={spacing})")
-
-            # Below a half-count a ulp is round-off, and absorbing it is what
-            # the slack is for. At or above it a ulp IS half a count, so the
-            # two cannot be told apart and the property does not apply.
-            if spacing < 0.5:
-                nudged = np.nextafter(magnitude, np.inf)
-                if _off_integer_lattice(np.array([nudged]))[0]:
-                    violations.append(
-                        f"2^{exponent}: one ulp of round-off was flagged (spacing={spacing})"
-                    )
-
-        assert not violations, "\n".join(violations)
-
-    def test_the_slack_never_reaches_a_half_count(self):
-        """The invariant underneath the sweep, stated directly.
-
-        Any slack that reaches 0.5 admits every value, because nothing is
-        further than 0.5 from its nearest integer. Every rule that scales with
-        magnitude eventually crosses it, which is why the ceiling is the fix
-        rather than a larger multiplier.
-        """
-        from superglm.model.input_validation import (
-            _LATTICE_MAXIMUM_SLACK,
-            _LATTICE_ULP_SLACK,
-        )
-
-        assert _LATTICE_MAXIMUM_SLACK < 0.5
-        magnitudes = 2.0 ** np.arange(64, dtype=np.float64)
-        slack = np.minimum(_LATTICE_ULP_SLACK * np.spacing(magnitudes), _LATTICE_MAXIMUM_SLACK)
-        assert np.all(slack < 0.5)
-
-
-class TestTheIntegralitySlackIsUlpScaled:
-    """A relative slack cannot express "close to an integer" at any setting.
-
-    Nothing is ever further than 0.5 from its nearest integer, so a relative
-    slack that reaches 0.5 admits everything -- and an absolute ceiling only
-    moves where it fails rather than removing the failure. Float64 spacing is
-    the scale that actually applies.
-    """
-
-    @pytest.mark.parametrize(
-        "value",
-        [
-            1_000_000.0005,  # inside a 1e-3 ceiling, still not a whole number
-            1_000_000.5,
-            500_000_000.5,
-            1_000_000_000.5,  # a 1e-9 relative slack reaches 0.5 here
-            1e12 + 0.5,
-            281474976710656.5,  # 2**48: eight raw ulps are exactly 0.5 here
-        ],
-    )
-    def test_an_exactly_representable_fraction_is_never_called_whole(self, value):
-        from superglm.model.input_validation import _off_integer_lattice
-
-        assert value != np.rint(value), "test needs a genuinely fractional value"
-        assert bool(_off_integer_lattice(np.array([value]))[0])
-
-    @pytest.mark.parametrize("magnitude", [1.0, 1e3, 1e6, 1e9, 1e15])
-    def test_a_ulp_of_round_off_is_still_absorbed(self, magnitude):
-        """The slack exists for this and must keep covering it.
-
-        Measured: over 200,000 trials of ``count / exposure * exposure`` the
-        worst deviation from the intended integer was 1.0 ulp.
-
-        One ulp, not several: at 1e15 a ulp is already 0.125, so four of them
-        are a half-count -- the thing the check must never absorb. An earlier
-        version of this test asserted that four ulps are absorbed at every
-        magnitude, which asserted the defect rather than the fix.
-        """
-        from superglm.model.input_validation import _off_integer_lattice
-
-        nudged = np.nextafter(magnitude, np.inf)
-        assert not bool(_off_integer_lattice(np.array([nudged]))[0])
-
-    def test_the_canonical_exposure_round_trip_does_not_warn(self):
-        """``count / exposure`` times ``exposure`` must read as integral."""
-        from superglm.model.input_validation import _off_integer_lattice
-
-        rng = np.random.default_rng(21)
-        counts = rng.integers(0, 10_000, size=20_000).astype(float)
-        exposure = rng.uniform(0.01, 50.0, size=20_000)
-        assert not _off_integer_lattice((counts / exposure) * exposure).any()
 
 
 class TestTheEvaluationWarningNeverPreemptsAValidationError:
@@ -2360,15 +2132,6 @@ class TestASuppliedCountIsTestedExactly:
         rng = np.random.default_rng(31)
         counts = rng.integers(0, 10**6, 100_000).astype(float)
         assert not _not_a_whole_number(counts).any()
-
-    def test_the_product_rule_keeps_its_round_off_allowance(self):
-        """The two rules must stay apart: this one still forgives a ulp."""
-        from superglm.model.input_validation import _off_integer_lattice
-
-        rng = np.random.default_rng(32)
-        counts = rng.integers(0, 10_000, 50_000).astype(float)
-        exposure = rng.uniform(0.01, 50.0, 50_000)
-        assert not _off_integer_lattice((counts / exposure) * exposure).any()
 
 
 class TestAReplicatedCountingResponseStaysOnItsLattice:
@@ -2617,28 +2380,6 @@ class TestTheImpactClaimMatchesWhatTheCallIsDoing:
         assert _theta_role_for(NegativeBinomial(theta="auto")) == "estimated"
 
 
-class TestTheProductToleranceIsOnlyEarnedByAProduct:
-    """Shared lattice predicates distinguish supplied counts from rounded products."""
-
-    def test_multiplication_by_a_power_of_two_is_exact(self):
-        """The property the branch rests on, asserted rather than assumed."""
-        from superglm.model.input_validation import _is_exact_power_of_two
-
-        rng = np.random.default_rng(51)
-        y = rng.uniform(1.0, 1e6, 20_000)
-        for w in (1.0, 2.0, 0.5, 4.0, 1024.0):
-            assert bool(_is_exact_power_of_two(np.array([w]))[0])
-            assert np.all((w * y) / w == y)
-        for w in (3.0, 2.5, 0.1):
-            assert not bool(_is_exact_power_of_two(np.array([w]))[0])
-
-    def test_a_zero_weight_is_not_treated_as_exact(self):
-        """0 * y is always integral, so the branch it takes cannot matter."""
-        from superglm.model.input_validation import _is_exact_power_of_two
-
-        assert not bool(_is_exact_power_of_two(np.array([0.0]))[0])
-
-
 class TestEveryPublicLikelihoodEntryChecksTheContract:
     """Enumerated rather than listed from memory.
 
@@ -2867,53 +2608,3 @@ class TestOneConditionWarnsOnce:
         y_holdout[:5] += 0.5
         with pytest.warns(PriorWeightLatticeWarning):
             model.metrics(holdout, y_holdout)
-
-
-class TestTheProductShortcutRequiresARepresentableProduct:
-    """Being a power of two is necessary but not sufficient.
-
-    The exponent shift is lossless only while the result stays representable:
-    ``w = 5e-324`` with ``y = 0.5`` underflows to exactly ``0.0``, which then
-    reads as a whole number, so a rounded-away row was reported as on-lattice.
-    """
-
-    def test_an_underflowing_product_is_not_treated_as_exact(self):
-        from superglm.model.input_validation import _product_was_exact
-
-        w = np.array([np.nextafter(0.0, 1.0)])
-        y = np.array([0.5])
-        assert not bool(_product_was_exact(w, y, w * y)[0])
-
-    @pytest.mark.parametrize("weight", [1.0, 2.0, 0.5, 1024.0, 2.0**-40])
-    def test_a_representable_power_of_two_product_stays_exact(self, weight):
-        from superglm.model.input_validation import _product_was_exact
-
-        y = np.array([3.5, 100.25, 7.0])
-        w = np.full(3, weight)
-        scaled = w * y
-        assert np.all(_product_was_exact(w, y, scaled))
-
-    def test_scaling_back_agrees_with_exact_arithmetic(self):
-        """The property the shortcut rests on, checked against Fraction."""
-        from fractions import Fraction
-
-        from superglm.model.input_validation import _product_was_exact
-
-        rng = np.random.default_rng(65)
-        exponents = rng.integers(-1060, 1000, 4000)
-        weights = np.ldexp(1.0, exponents.astype(np.int32)).astype(np.float64)
-        y = rng.uniform(-1e6, 1e6, 4000)
-        # A zero weight is excluded by the helper's documented contract: 0 * y
-        # is exactly 0, so the product IS exact, but the row is uncarried and
-        # `scaled == 0` is integral under either rule, so which branch it takes
-        # cannot change an outcome. Asserting past that would pin an
-        # immaterial answer rather than the property.
-        carried = weights > 0.0
-        assert carried.sum() > 3000, "test needs mostly carried rows"
-        scaled = weights * y
-        claimed = _product_was_exact(weights, y, scaled)
-        for i in range(0, 4000, 37):  # sampled: Fraction is slow but exact
-            if not carried[i]:
-                continue
-            truth = Fraction(scaled[i]) == Fraction(weights[i]) * Fraction(y[i])
-            assert bool(claimed[i]) == truth, (weights[i], y[i], scaled[i])

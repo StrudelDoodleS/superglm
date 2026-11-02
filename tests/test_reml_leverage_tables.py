@@ -381,7 +381,7 @@ def test_an_aliased_spline_by_category_stop_decides_as_the_leverage_route(monkey
         interactions=[("a", "b"), ("e", "c")],
         weight_semantics="frequency",
         discrete=False,
-    ).fit_reml(frame, y, sample_weight=weights, runtime_validation="skip")
+    ).fit_reml(frame, y, sample_weight=weights)
 
     assert model._reml_profile["reml_w_correction_mode"] == "leverage_tables"
     assert reads and ranks
@@ -417,7 +417,7 @@ def _continuous_model() -> SuperGLM:
         features={"a": Spline(n_knots=6), "b": Spline(n_knots=6), "d": Numeric(), "e": Numeric()},
         interactions=[("a", "b")],
         discrete=False,
-    ).fit_reml(frame, y, runtime_validation="skip")
+    ).fit_reml(frame, y)
 
 
 def test_a_design_without_lookups_keeps_the_solved_row_route(monkeypatch):
@@ -796,7 +796,7 @@ def test_the_plan_is_released_when_the_fit_publishes_its_state():
     assert np.all(np.isfinite(model.predict(frame)))
     assert model.reml_diagnostics()["converged"]
     assert np.isfinite(model.metrics(frame, y, sample_weight=weights).deviance)
-    refit = model.fit_reml(frame, y, sample_weight=weights, runtime_validation="skip")
+    refit = model.fit_reml(frame, y, sample_weight=weights)
     assert refit._reml_result.converged
     assert leverage_tables._CACHE_KEY not in refit._dm._structured_layout_cache
 

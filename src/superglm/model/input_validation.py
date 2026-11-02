@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from superglm import _count_lattice as _count_lattice_module
+from superglm._count_lattice import _not_a_whole_number
 from superglm._frame import EagerFrame, as_eager_frame
 from superglm._utils import contract_weights
 from superglm.distributions import (
@@ -21,13 +21,6 @@ from superglm.distributions import (
     validate_response,
 )
 from superglm.solvers.dispersion import FREQUENCY_WEIGHTS, PRIOR_WEIGHTS
-
-_LATTICE_MAXIMUM_SLACK = _count_lattice_module._LATTICE_MAXIMUM_SLACK
-_LATTICE_ULP_SLACK = _count_lattice_module._LATTICE_ULP_SLACK
-_is_exact_power_of_two = _count_lattice_module._is_exact_power_of_two
-_not_a_whole_number = _count_lattice_module._not_a_whole_number
-_off_integer_lattice = _count_lattice_module._off_integer_lattice
-_product_was_exact = _count_lattice_module._product_was_exact
 
 
 class PriorWeightLatticeWarning(UserWarning):

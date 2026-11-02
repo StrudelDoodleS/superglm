@@ -25,7 +25,6 @@ from . import (
     base,
     explain_ops,
     fit_ops,
-    monotone_ops,
     plot_ops,
     profile_ops,
     report_ops,
@@ -730,7 +729,7 @@ class SuperGLM:
         max_pirls_iter: int | None = None,
         lambda2_init: float | Mapping[str, float] | None = None,
         interaction_mode: str = "full",
-        runtime_validation: str | bool = "auto",
+        runtime_validation: str | bool | None = None,
         verbose: bool = False,
         w_correction_order: int = 1,
     ) -> SuperGLM:
@@ -893,12 +892,10 @@ class SuperGLM:
             outer updates for interaction models and then runs the normal final
             refit, intended for screening candidate interactions before a full
             final model fit.
-        runtime_validation : {"auto", "full", "skip"} or bool
-            Controls the post-fit public-runtime parity diagnostic.
-            ``"auto"`` validates small fits and skips the full training-row
-            diagnostic for large fits or fast candidate interaction fits.
-            ``"full"`` always validates; ``"skip"`` skips validation while
-            still canonicalizing the public prediction state.
+        runtime_validation : optional
+            Deprecated and ignored. It controlled a post-fit check that
+            re-scored the training rows; the check has been retired, so any
+            value only raises a ``FutureWarning``. Remove the argument.
         verbose : bool
             Print progress.
         w_correction_order : int
@@ -913,6 +910,16 @@ class SuperGLM:
         SuperGLM
             The fitted model (self).
         """
+        if runtime_validation is not None:
+            import warnings
+
+            warnings.warn(
+                "fit_reml(runtime_validation=...) has no effect: the post-fit check it "
+                "controlled has been retired. Remove the argument; it will be removed "
+                "in a future release.",
+                FutureWarning,
+                stacklevel=2,
+            )
         with fit_record(self, "fit_reml", locals()):
             # Resolve PIRLS controls: explicit kwargs > constructor fallback
             resolved_pirls_tol = pirls_tol if pirls_tol is not None else self._tol
@@ -935,7 +942,6 @@ class SuperGLM:
                     max_pirls_iter=resolved_max_pirls_iter,
                     lambda2_init=lambda2_init,
                     interaction_mode=interaction_mode,
-                    runtime_validation=runtime_validation,
                     verbose=verbose,
                     w_correction_order=w_correction_order,
                 )
@@ -2086,7 +2092,9 @@ class SuperGLM:
             The model (self), with post-fit shape repairs stored.
         """
         with self._parallel_scope():
-            return monotone_ops.monotonize(self, X, sample_weight, offset, n_grid=n_grid)
+            from superglm.model import shape_ops
+
+            return shape_ops.apply_shape_postfit(self, X, sample_weight, offset, n_grid=n_grid)
 
     def apply_shape_postfit(
         self,

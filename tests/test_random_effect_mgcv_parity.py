@@ -49,7 +49,6 @@ def fitted_cases(mgcv_fixture: dict) -> dict[str, tuple[SuperGLM, pd.DataFrame, 
             reml_tol=1e-10,
             pirls_tol=1e-10,
             max_pirls_iter=200,
-            runtime_validation="skip",
         )
         fitted[name] = (model, X, offset)
     return fitted

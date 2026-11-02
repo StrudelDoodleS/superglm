@@ -69,16 +69,13 @@ class TestPublishedFitDetermination:
         frame, y, weights, offset, features = _flat_lambda_fixture()
 
         default_fit = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        default_fit.fit_reml(
-            frame, y, sample_weight=weights, offset=offset, runtime_validation="skip"
-        )
+        default_fit.fit_reml(frame, y, sample_weight=weights, offset=offset)
         tight = SuperGLM(family=families.tweedie(p=1.5), features=features)
         tight.fit_reml(
             frame,
             y,
             sample_weight=weights,
             offset=offset,
-            runtime_validation="skip",
             reml_tol=1e-11,
         )
 
@@ -103,7 +100,7 @@ class TestEngineScopedTolerance:
         frame, y, features = _small_search_fixture()
 
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
 
         assert seen == [1e-9]
 
@@ -129,7 +126,7 @@ class TestEngineScopedTolerance:
                     "x2": _Spline(kind="cr", n_knots=6),
                 },
             )
-            model.fit_reml(frame, y, runtime_validation="skip", reml_tol=tol)
+            model.fit_reml(frame, y, reml_tol=tol)
             return model._reml_result
 
         floored = fit(1e-15)
@@ -143,7 +140,7 @@ class TestEngineScopedTolerance:
         frame, y, features = _small_search_fixture()
 
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        model.fit_reml(frame, y, runtime_validation="skip", reml_tol=2.5e-7)
+        model.fit_reml(frame, y, reml_tol=2.5e-7)
 
         assert seen == [2.5e-7]
 
@@ -176,7 +173,7 @@ class TestCandidateGradePaths:
             features={"x1": _Spline(kind="cr", n_knots=6), "x2": _Spline(kind="cr", n_knots=6)},
             interactions=[("x1", "x2")],
         )
-        model.fit_reml(frame, y, interaction_mode="fast_candidate", runtime_validation="skip")
+        model.fit_reml(frame, y, interaction_mode="fast_candidate")
 
         assert seen == [1e-6]
 
@@ -191,9 +188,7 @@ class TestCandidateGradePaths:
             features={"x1": _Spline(kind="cr", n_knots=6), "x2": _Spline(kind="cr", n_knots=6)},
             interactions=[("x1", "x2")],
         )
-        model.fit_reml(
-            frame, y, interaction_mode="fast_candidate", runtime_validation="skip", reml_tol=3e-8
-        )
+        model.fit_reml(frame, y, interaction_mode="fast_candidate", reml_tol=3e-8)
 
         assert seen == [3e-8]
 
@@ -440,7 +435,7 @@ class TestFreezeDiagnostics:
         profile the way the resolved tolerance already is."""
         frame, y, features = _small_search_fixture()
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
 
         profile = model._reml_profile
         freeze = profile["reml_freeze_decision"]
@@ -512,7 +507,7 @@ class TestFreezeRevalidation:
                 "x2": Spline(kind="cr", n_knots=8),
             },
         )
-        model.fit_reml(frame, y, runtime_validation="skip", max_reml_iter=200)
+        model.fit_reml(frame, y, max_reml_iter=200)
 
         r = model._reml_result
         assert r.converged
@@ -552,7 +547,7 @@ class TestFreezeRevalidation:
                 "x2": Spline(kind="cr", n_knots=8),
             },
         )
-        model.fit_reml(frame, y, runtime_validation="skip", max_reml_iter=200)
+        model.fit_reml(frame, y, max_reml_iter=200)
 
         assert model._reml_profile.get("reml_freeze_revalidated") is True
         freeze = model._reml_profile["reml_freeze_decision"]
@@ -586,7 +581,7 @@ class TestFreezeRevalidation:
                 "x2": Spline(kind="cr", n_knots=8),
             },
         )
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
 
         r = model._reml_result
         assert r.converged
@@ -615,7 +610,7 @@ class TestFreezeRevalidation:
                 },
                 **kwargs,
             )
-            model.fit_reml(frame, y, runtime_validation="skip")
+            model.fit_reml(frame, y)
             return model._reml_result
 
         exhausted = fit(max_iter=1)
@@ -665,7 +660,7 @@ class TestFreezeRevalidation:
                     "x2": Spline(kind="cr", n_knots=8),
                 },
             )
-            model.fit_reml(frame, y, runtime_validation="skip", **kwargs)
+            model.fit_reml(frame, y, **kwargs)
             return model._reml_result
 
         reference = fit()
@@ -676,9 +671,7 @@ class TestFreezeRevalidation:
                 "x2": Spline(kind="cr", n_knots=8),
             },
         )
-        starved_model.fit_reml(
-            frame, y, runtime_validation="skip", reml_tol=1e-5, max_pirls_iter=1, pirls_tol=1e-15
-        )
+        starved_model.fit_reml(frame, y, reml_tol=1e-5, max_pirls_iter=1, pirls_tol=1e-15)
         starved = starved_model._reml_result
 
         assert starved.converged and reference.converged
@@ -711,7 +704,7 @@ class TestFreezeRevalidation:
                 "x2": Spline(kind="cr", n_knots=6),
             },
         )
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
 
         freeze = model._reml_profile["reml_freeze_decision"]
         status = dict(zip(freeze["names"], zip(freeze["estimated"], freeze["frozen"])))
@@ -744,7 +737,7 @@ class TestAllFixedLambdaDiagnostics:
             },
             **kwargs,
         )
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
 
         assert model._reml_result.termination_reason == "fixed_lambdas"
         freeze = model._reml_profile["reml_freeze_decision"]
@@ -797,7 +790,7 @@ class TestFlatDirectionFloor:
                 "x2": Spline(kind="cr", n_knots=8),
             },
         )
-        model.fit_reml(frame, y, runtime_validation="skip", max_reml_iter=200)
+        model.fit_reml(frame, y, max_reml_iter=200)
 
         r = model._reml_result
         freeze = model._reml_profile["reml_freeze_decision"]
@@ -844,7 +837,6 @@ class TestFlatDirectionFloor:
             frame,
             y,
             sample_weight=np.ones(n),
-            runtime_validation="skip",
             reml_tol=1e-11,
             max_reml_iter=200,
         )
@@ -878,7 +870,7 @@ class TestFlatDirectionFloor:
             400_000, informative_smooths=True
         )
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        model.fit_reml(frame, y, sample_weight=weights, offset=offset, runtime_validation="skip")
+        model.fit_reml(frame, y, sample_weight=weights, offset=offset)
 
         r = model._reml_result
         freeze = model._reml_profile["reml_freeze_decision"]
@@ -919,7 +911,7 @@ class TestFlatDirectionFloor:
             family="poisson",
             features={"g": RandomEffect(), "x": Spline(kind="cr", n_knots=5)},
         )
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
 
         r = model._reml_result
         freeze = model._reml_profile["reml_freeze_decision"]
@@ -942,7 +934,7 @@ class TestFlatDirectionFloor:
         real signal — and f7 5.5e-2."""
         frame, y, weights, offset, features = _flat_lambda_fixture(informative_smooths=True)
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        model.fit_reml(frame, y, sample_weight=weights, offset=offset, runtime_validation="skip")
+        model.fit_reml(frame, y, sample_weight=weights, offset=offset)
 
         r = model._reml_result
         freeze = model._reml_profile["reml_freeze_decision"]
@@ -1200,7 +1192,6 @@ class TestDeadSearchNewtonDecrement:
                 y,
                 lambda2_init={"x": 1e-3},
                 max_reml_iter=5,
-                runtime_validation="skip",
             )
 
         first_trial = max(abs(np.log(evaluated[1][k] / evaluated[0][k])) for k in evaluated[0])
@@ -1304,7 +1295,6 @@ class TestDeadSearchNewtonDecrement:
             y,
             reml_tol=tol,
             max_reml_iter=max_reml_iter,
-            runtime_validation="skip",
         )
         by_iteration: dict[int, list[float]] = {}
         for iteration, alpha in trials:

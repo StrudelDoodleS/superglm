@@ -120,9 +120,9 @@ class TestCacheMechanism:
 
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
         model._profile_design_cache = {}
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
         assert len(calls) == 1
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
         assert len(calls) == 1
 
     def test_a_tampered_cache_is_dropped_and_rebuilt(self, monkeypatch):
@@ -132,13 +132,13 @@ class TestCacheMechanism:
 
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
         model._profile_design_cache = {}
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
         assert len(calls) == 1
 
         model._profile_design_cache["expected_probe"] = (
             model._profile_design_cache["expected_probe"] + 1.0
         )
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
         assert len(calls) == 2
 
     def test_the_cache_recomputes_the_family_per_fit(self, monkeypatch):
@@ -147,11 +147,11 @@ class TestCacheMechanism:
 
         model = SuperGLM(family=families.tweedie(p=1.3), features=features)
         model._profile_design_cache = {}
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
         assert float(model._distribution.p) == pytest.approx(1.3)
 
         model.family = families.tweedie(p=1.7)
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
         assert float(model._distribution.p) == pytest.approx(1.7)
 
 
@@ -172,12 +172,12 @@ class TestCacheScope:
         assert not hasattr(model, "_profile_design_cache")
 
         frame2, y2, _ = _search_fixture(n=1_300, seed=11)
-        model.fit_reml(frame2, y2, runtime_validation="skip")
+        model.fit_reml(frame2, y2)
         assert len(model._fit_weights) == len(y2)
 
         # The model now carries the published power.
         reference = SuperGLM(family=families.tweedie(p=result.p_hat), features=features)
-        reference.fit_reml(frame2, y2, runtime_validation="skip")
+        reference.fit_reml(frame2, y2)
         np.testing.assert_allclose(
             np.asarray(model.result.beta, dtype=float),
             np.asarray(reference.result.beta, dtype=float),

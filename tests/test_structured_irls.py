@@ -1377,7 +1377,7 @@ def test_reml_driver_emits_one_info_line_per_structured_auto_pick(caplog, discre
         discrete=discrete,
     )
     with caplog.at_level(logging.INFO, logger="superglm.solvers._structured.selection"):
-        model.fit_reml(frame, y, max_reml_iter=3, runtime_validation="skip")
+        model.fit_reml(frame, y, max_reml_iter=3)
 
     profile = model.reml_diagnostics()["profile"]
     assert profile["direct_backend"] == "structured"

@@ -1832,7 +1832,7 @@ def test_random_effect_feature_se_uses_the_selected_diagonal() -> None:
         selection_penalty=0.0,
         direct_solve="structured",
     )
-    model.fit_reml(X, y, max_reml_iter=2, runtime_validation="skip")
+    model.fit_reml(X, y, max_reml_iter=2)
     metrics = model.metrics(X, y)
     # More levels than the compact covariance will materialize as one block.
     assert n_levels > 256

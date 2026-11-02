@@ -109,7 +109,6 @@ def test_discrete_gamma_prepares_once_and_forwards_fd_profile_curvature(
         y,
         sample_weight=weights,
         max_reml_iter=6,
-        runtime_validation="skip",
     )
 
     assert prepare_calls == 1
@@ -162,7 +161,7 @@ def test_discrete_line_search_refuses_a_trial_outside_the_links_domain(
         discrete=True,
         features={"x": Spline(n_knots=6, penalty="ssp")},
     )
-    model.fit_reml(X, y, sample_weight=weights, max_reml_iter=6, runtime_validation="skip")
+    model.fit_reml(X, y, sample_weight=weights, max_reml_iter=6)
 
     assert crossed["n"] == 1
     assert scored_outside and not any(scored_outside)

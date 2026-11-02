@@ -127,7 +127,6 @@ def test_polars_spline_fit_publishes_same_runtime_canonical_state_as_pandas() ->
     assert polars_model.result.intercept == pandas_model.result.intercept
     polars_state = polars_model._runtime_canonical_state
     pandas_state = pandas_model._runtime_canonical_state
-    assert polars_state["diagnostics"] == pandas_state["diagnostics"]
     assert polars_state["intercept_shift"] == pandas_state["intercept_shift"]
     assert polars_state["solver_to_public_complete"] is pandas_state["solver_to_public_complete"]
     np.testing.assert_allclose(
@@ -141,14 +140,6 @@ def test_polars_spline_fit_publishes_same_runtime_canonical_state_as_pandas() ->
 def _feature_beta(model: SuperGLM, feature_name: str) -> np.ndarray:
     groups = model._feature_groups(feature_name)
     return np.concatenate([model.result.beta[g.sl] for g in groups])
-
-
-def _runtime_canonicalization_diagnostics(model: SuperGLM) -> dict:
-    state = getattr(model, "_runtime_canonical_state", None)
-    assert state is not None
-    diagnostics = state.get("diagnostics")
-    assert diagnostics is not None
-    return diagnostics
 
 
 def _recompute_live_public_runtime_state(model: SuperGLM) -> dict[str, object]:
@@ -207,12 +198,9 @@ def _assert_zero_mean_and_before_after_parity(
     contribution = spec.score(x, beta)
     assert abs(np.mean(contribution)) < 1e-10
 
-    diagnostics = _runtime_canonicalization_diagnostics(model)
     recomputed = _recompute_live_public_runtime_state(model)
-    assert diagnostics["max_abs_eta_delta"] < 1e-10
-    assert diagnostics["max_abs_mu_delta"] < 1e-10
-    assert abs(diagnostics["max_abs_eta_delta"] - recomputed["max_abs_eta_delta"]) < 1e-12
-    assert abs(diagnostics["max_abs_mu_delta"] - recomputed["max_abs_mu_delta"]) < 1e-12
+    assert recomputed["max_abs_eta_delta"] < 1e-10
+    assert recomputed["max_abs_mu_delta"] < 1e-10
 
 
 def _manual_public_curve_se(
@@ -328,14 +316,9 @@ class TestRuntimeCanonicalization:
             dtype=np.float64,
         )
         recomputed = _recompute_live_public_runtime_state(model)
-        diagnostics = _runtime_canonicalization_diagnostics(model)
 
         assert abs(np.mean(contribution)) < 1e-10
         assert abs(recomputed["term_means_after"]["x"]) < 1e-10
-        assert diagnostics["term_means_after"]["x"] == pytest.approx(
-            recomputed["term_means_after"]["x"],
-            abs=1e-12,
-        )
 
     def test_qp_monotone_fit_spline_uses_affine_runtime_state(self):
         X, y, sample_weight = _make_monotone_poisson_data(seed=2)
@@ -404,16 +387,10 @@ class TestRuntimeCanonicalization:
         assert state["applied_to_public_model"] is False
         assert len(state["group_indices"]) == 2
         assert abs(state["term_mean_before"]) > 1e-6
-        assert state["term_mean_after"] is None
         assert model._runtime_canonical_state["solver_to_public"] is None
         assert model._runtime_canonical_state["solver_to_public_complete"] is False
 
-        diagnostics = _runtime_canonicalization_diagnostics(model)
         recomputed = _recompute_live_public_runtime_state(model)
-        assert (
-            diagnostics["term_means_after"][interaction_name]
-            == recomputed["term_means_after"][interaction_name]
-        )
-        assert abs(diagnostics["term_means_after"][interaction_name]) > 1e-6
-        assert abs(diagnostics["max_abs_eta_delta"] - recomputed["max_abs_eta_delta"]) < 1e-12
-        assert abs(diagnostics["max_abs_mu_delta"] - recomputed["max_abs_mu_delta"]) < 1e-12
+        assert abs(recomputed["term_means_after"][interaction_name]) > 1e-6
+        assert recomputed["max_abs_eta_delta"] < 1e-10
+        assert recomputed["max_abs_mu_delta"] < 1e-10

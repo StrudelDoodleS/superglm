@@ -1185,7 +1185,6 @@ def _structured_shape_model(structured_kind: str):
         X,
         y,
         max_reml_iter=2,
-        runtime_validation="skip",
     )
     return model, X
 

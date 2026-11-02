@@ -157,7 +157,7 @@ def test_released_random_effect_report_is_backend_neutral(direct_solve: str):
         selection_penalty=0.0,
         direct_solve=direct_solve,
         retain_fit_state=False,
-    ).fit_reml(X, y, runtime_validation="skip")
+    ).fit_reml(X, y)
 
     assert model.result.direct_backend == "gram"
     report = model.random_effects("group")
@@ -380,12 +380,10 @@ def test_structured_summary_retains_ordinary_smooth_test_geometry():
     dense = SuperGLM(**common, direct_solve="gram").fit_reml(
         X,
         y,
-        runtime_validation="skip",
     )
     structured = SuperGLM(**common, direct_solve="structured").fit_reml(
         X,
         y,
-        runtime_validation="skip",
     )
 
     dense_row = next(row for row in dense.summary()._coef_rows if row.name == "x")
@@ -416,7 +414,7 @@ def test_structured_summary_marks_dense_small_aliases_nonestimable():
         },
         selection_penalty=0.0,
         direct_solve="structured",
-    ).fit_reml(X, y, runtime_validation="skip")
+    ).fit_reml(X, y)
 
     state = model._linear_system_state
     assert isinstance(state, StructuredLinearSystemState)
@@ -450,12 +448,10 @@ def test_structured_estimability_uses_centered_data_geometry():
     dense = SuperGLM(**common, direct_solve="gram").fit_reml(
         X,
         y,
-        runtime_validation="skip",
     )
     structured = SuperGLM(**common, direct_solve="structured").fit_reml(
         X,
         y,
-        runtime_validation="skip",
     )
 
     dense_mask = dense._fit_inference_info["coefficient_estimable"]
@@ -739,7 +735,6 @@ def test_auto_takes_gram_for_an_unpenalized_random_effect_whatever_its_weights(d
             X,
             y,
             sample_weight=sample_weight,
-            runtime_validation="skip",
         )
         assert model.result.direct_backend == "gram"
         reasons.append(model.result.direct_fallback_reason)
@@ -764,7 +759,6 @@ def test_unpenalized_random_effect_intercept_alias_falls_back_or_rejects():
     automatic = SuperGLM(**common, direct_solve="auto").fit_reml(
         X,
         y,
-        runtime_validation="skip",
     )
 
     assert automatic.result.direct_backend == "gram"
@@ -777,7 +771,6 @@ def test_unpenalized_random_effect_intercept_alias_falls_back_or_rejects():
         SuperGLM(**common, direct_solve="structured").fit_reml(
             X,
             y,
-            runtime_validation="skip",
         )
 
 
@@ -801,12 +794,10 @@ def test_near_zero_positive_random_effect_penalty_remains_structured():
     automatic = SuperGLM(**common, direct_solve="auto").fit_reml(
         X,
         y,
-        runtime_validation="skip",
     )
     gram = SuperGLM(**common, direct_solve="gram").fit_reml(
         X,
         y,
-        runtime_validation="skip",
     )
 
     assert automatic.result.direct_backend == "structured"
@@ -827,7 +818,7 @@ def test_unpenalized_random_effect_reports_infinite_variance_component():
         features={"group": RandomEffect(lambda_policy=LambdaPolicy.off())},
         selection_penalty=0.0,
         direct_solve="gram",
-    ).fit_reml(X, y, runtime_validation="skip")
+    ).fit_reml(X, y)
 
     report = model.random_effects("group")
 

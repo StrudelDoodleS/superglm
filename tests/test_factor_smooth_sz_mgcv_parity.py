@@ -166,7 +166,6 @@ def fitted_sz_cases(mgcv_sz_fixture: dict) -> dict[str, SuperGLM]:
             reml_tol=1e-9,
             pirls_tol=1e-10,
             max_pirls_iter=200,
-            runtime_validation="skip",
         )
         fitted[name] = model
     return fitted
@@ -396,7 +395,6 @@ def test_discrete_sz_terminal_lambdas_are_the_evaluated_candidate(
         reml_tol=1e-9,
         pirls_tol=1e-10,
         max_pirls_iter=200,
-        runtime_validation="skip",
     )
 
     result = model._reml_result
