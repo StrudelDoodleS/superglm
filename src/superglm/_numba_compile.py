@@ -1,33 +1,21 @@
 """Free a numba compile's reference cycles at the next ``fs`` leaf build.
 
-Numba's type inference tries overloads and keeps the failures it meets
-(``TypingError``, ``RequireLiteralValue``) with their tracebacks: reference
-cycles of exceptions, tracebacks and frames.  A frame reaches its caller
-through ``f_back``, and a frame object that outlives its call keeps the
-locals it returned with, so every frame on the stack when a kernel compiles
-keeps its locals alive until the cyclic collector reaches the oldest
-generation.  CPython defers that collection while the long-lived objects
-pending collection are fewer than a quarter of those already long-lived
-(CPython's garbage-collector design notes, ``InternalDocs/garbage_collector.md``),
-and the compiles of a fit leave on the order of 10^5 long-lived objects
-behind.  On an ``fs`` term the pinned locals include ``K p^2`` stacks of
-signed pseudo-rows: a first fit on an empty numba cache (400 levels beside a
-120-level categorical, Tweedie) peaked at 1046 MiB, against 611 MiB once its
-kernels were cached and 625 MiB for the cold master it was gated on (#432).
+Numba's type inference keeps the failures it meets (``TypingError``,
+``RequireLiteralValue``) with their tracebacks: cycles of exceptions, tracebacks
+and frames.  Every frame on the stack when a kernel compiles keeps its locals
+alive until the cyclic collector reaches the oldest generation, which CPython
+defers while pending long-lived objects are fewer than a quarter of those
+already long-lived (``InternalDocs/garbage_collector.md``).  On an ``fs`` term
+the pinned locals include ``K p^2`` stacks of signed pseudo-rows.
 
-``_MarkCompile`` listens to numba's ``"numba:compile"`` event (the event API
-of ``numba.core.event``) and only records that the outermost compile of a
-superglm kernel has ended.  ``collect_after_compile``, called by the ``fs``
-leaf build before it forms a new system, then runs one full collection,
-unless the application has disabled the collector: the frames the cycles
-reach have returned by then, and the dead stacks go before the next one is
-allocated.  The event fires only on a disk-cache miss (a cached kernel loads
-without compiling), so a warm cache never collects; ``superglm.warmup``,
-which compiles outside any fit, drops its own mark (``forget_compiles``).
-Measured on that cold first fit: 1.4 s of collection and a 773 MiB peak
-(1.24x).  Collecting at every compile's end instead reached 1.20x for 3.5 s
-per cold fit and about 9 s per CI worker; the owner chose the ``fs``
-checkpoint (2026-10-01).  Other packages' kernels are left alone.
+``_MarkCompile`` listens to numba's ``"numba:compile"`` event
+(``numba.core.event``) and only records that the outermost compile of a superglm
+kernel has ended.  ``collect_after_compile``, called by the ``fs`` leaf build
+before it forms a new system, then runs one full collection unless the
+application has disabled the collector.  The event fires only on a disk-cache
+miss, so a warm cache never collects; ``superglm.warmup`` drops its own mark
+(``forget_compiles``).  Collecting at every compile's end was costlier; other
+packages' kernels are left alone.
 """
 
 from __future__ import annotations

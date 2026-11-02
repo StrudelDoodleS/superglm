@@ -292,18 +292,13 @@ def _refined_local_solves(D: NDArray, inverses: NDArray, cross: NDArray) -> tupl
     """``X_k`` with ``D_k X_k = -C_k`` on each level's range, and the residual ``D_k X_k + C_k``.
 
     Multiplying by a formed inverse is not backward stable (Higham 2002,
-    §14.1): on a level whose data block is near singular -- a level of a few
-    rows whose basis columns its rows barely separate -- the residual grows
-    like ``kappa(D_k) u |C_k|`` instead of ``u (|D_k||X_k| + |C_k|)``.  The
-    reduced Schur complement's a posteriori bound ``|X|'|R|``
-    (``_certified_reduced_schur_null_basis``) carries that residual, so it
-    would declare every small coordinate null and blank every standard error.
-    Fixed-precision iterative refinement with the same inverses restores a
-    componentwise backward-stable residual (Skeel 1980; Higham 2002 §12.2);
-    it stops as LAPACK's ``DPORFS`` does: once the componentwise backward error
-    (Oettli & Prager 1964) is at most ``eps``, once it fails to halve, or after
-    ``ITMAX = 5`` corrections.  Every residual it returns is the computed one,
-    so the certificate stays an a posteriori bound whatever the refinement did.
+    §14.1): on a near-singular level the residual grows like
+    ``kappa(D_k) u |C_k|``, which the reduced Schur bound would read as null
+    everywhere. Fixed-precision iterative refinement restores a componentwise
+    backward-stable residual (Skeel 1980; Higham 2002 §12.2), stopping as
+    LAPACK's ``DPORFS`` does: componentwise backward error (Oettli & Prager
+    1964) at most ``eps``, a failure to halve, or ``ITMAX = 5`` corrections.
+    The returned residual is always the computed one.
     """
     eps = np.finfo(np.float64).eps
     solution = -np.einsum("kij,kjq->kiq", inverses, cross, optimize=True)
@@ -337,14 +332,9 @@ def _nested_centered_estimability(
     """
     q, leaves = len(raw.small_indices), raw.tree.sizes[-1]
     leaf_indices = raw.structured_indices[raw.tree.offsets[-2] :]
-    # Reduce on the rows x - c the leaf statistics were accumulated on (§3.4).
-    # The intercept shear [1, X] -> [1, X - 1 c'] changes neither the slope
-    # part of a null vector nor a centred column norm, so the decision is the
-    # same, but raw moments of a column with |mean| >> sd cancel to nothing in
-    # the Schur complement; the shift replaces that condition number
-    # |mean| / sd with |mean - c| / sd (Chan, Golub & LeVeque 1983, §3).  The
-    # border's X'w - (sum w) c is the sum of the shifted leaf crosses, and its
-    # centre is that over sum w, as the operator's own centre is xtw / sum_w.
+    # Reduce on the rows x - c the leaf statistics were accumulated on (§3.4):
+    # the intercept shear leaves the decision unchanged but replaces the
+    # cancellation |mean| / sd by |mean - c| / sd (Chan, Golub & LeVeque 1983).
     shifted = replace(raw, leaf=replace(raw.leaf, center=np.zeros(q)))
     border_cross = shifted.leaf.cross.sum(axis=0)
     leaf_operator = CenteredBlockOperator(

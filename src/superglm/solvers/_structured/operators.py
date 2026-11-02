@@ -112,18 +112,14 @@ class BlockSymmetricOperator:
         if self.structured_indices.shape != (n_levels, block_size):
             raise ValueError("structured_indices shape does not match C and D.")
         if not all(np.all(np.isfinite(values)) for values in (self.A, self.C, self.D)):
-            # Above the symmetry check for the reason SumToZeroBlockOperator and
-            # both Schur factors put it there: a NaN fails `np.allclose` against
-            # its own transpose, so without this a NaN local block is refused as
-            # an ASYMMETRIC one -- a structural verdict for a condition the
-            # iterate's weights caused. This is the `fs` operator, and `fs` is
-            # the default basis, so it is the path most likely to reach here.
+            # Before the symmetry check: a NaN fails ``np.allclose`` against its
+            # transpose and would be misreported as an asymmetric block.
             raise np.linalg.LinAlgError("Block operator blocks must be finite.")
         if not np.allclose(self.D, self.D.transpose(0, 2, 1), rtol=0.0, atol=1e-13):
             raise ValueError("Every local D block must be symmetric.")
         all_indices = np.concatenate([self.small_indices, self.structured_indices.ravel()])
         size = len(all_indices)
-        # O(p) partition test (perf F6), in the order and with the verdicts of a
+        # O(p) partition test, in the order and with the verdicts of a
         # unique count then a sort: duplicates first, then coverage of 0..p-1.
         if size:
             low = int(all_indices.min())
@@ -199,12 +195,9 @@ class SumToZeroBlockOperator:
         if self.structured_indices.shape != (n_levels - 1, block_size):
             raise ValueError("SZ public indices must have shape (K - 1, k).")
         if not all(np.all(np.isfinite(values)) for values in (self.A, self.C, self.D)):
-            # Non-finite blocks are what THIS iterate's weights produced, not a
-            # malformed call, and callers separate the two by type: the
-            # observed-geometry build scores a LinAlgError as a point with no
-            # usable penalized mode and routes around it, while a ValueError
-            # stops the fit. The shape and partition checks around this one stay
-            # ValueError for exactly that reason -- no iterate can cause them.
+            # Non-finite blocks come from this iterate's weights, so they raise
+            # LinAlgError (callers route around it); malformed calls stay
+            # ValueError, which stops the fit.
             raise np.linalg.LinAlgError("SZ operator blocks must be finite.")
         if not np.allclose(self.A, self.A.T, rtol=0.0, atol=1e-13):
             raise ValueError("SZ ordinary block must be symmetric.")
@@ -342,15 +335,8 @@ class LowRankSymmetricOperator:
         if basis.ndim != 2 or core.shape != (basis.shape[1], basis.shape[1]):
             raise ValueError("Low-rank operator basis and core shapes are inconsistent.")
         if not np.all(np.isfinite(basis)) or not np.all(np.isfinite(core)):
-            # Above the symmetry check, as everywhere else here, and the basis
-            # is the half that carries it. At this class's one construction site
-            # (`reml_w_correction`) the basis is column_stack(dmean_i, dmean_j)
-            # and had no check of any kind -- not finiteness, not symmetry. The
-            # core there is [[0, -sum_w], [-sum_w, 0]], symmetric by
-            # construction and built from a sum_w already certified finite and
-            # positive upstream, so it is close to unreachable; a NaN in it
-            # would have failed the check below under the wrong name, and an inf
-            # would have passed it and been accepted outright.
+            # Before the symmetry check, as elsewhere here: a NaN would fail it
+            # under the wrong name and an inf would pass it.
             raise np.linalg.LinAlgError("Low-rank operator basis and core must be finite.")
         if not np.allclose(core, core.T, rtol=0.0, atol=1e-14):
             raise ValueError("Low-rank operator core must be symmetric.")
@@ -884,7 +870,7 @@ def compact_operator_diagonal(
             diagonal - 2.0 * operator.cross * operator.center + operator.total * operator.center**2
         )
         if isinstance(raw, NestedDataOperator):
-            # The border rows' own centre c (design §3.2) keeps the offsets out:
+            # The border rows' own centre c keeps the offsets out:
             # sum a (x - m)^2 = sum a (x - c)^2 - 2 (m - c) sum a (x - c) + (m - c)^2 sum a,
             # every term free of the columns' offsets, where the raw identity
             # above subtracts moments of size |x|^2.
@@ -900,7 +886,6 @@ def compact_operator_diagonal(
     return diagonal
 
 
-# Retired by the one engine (design §3.12): the scalar factor's diagonal-plus-
-# low-rank inverse, which a model saved by v0.35.0 pickles.  Importable at its
-# pickled path as an inert stand-in; a later minor release may drop it.
+# Inert stand-in for the retired scalar factor's diagonal-plus-low-rank
+# inverse, importable at its pickled path so v0.35.0 models load.
 __getattr__ = module_getattr(__name__, frozenset({"_DiagonalLowRank"}))

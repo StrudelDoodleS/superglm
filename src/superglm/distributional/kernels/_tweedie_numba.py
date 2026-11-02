@@ -13,10 +13,8 @@ from superglm.distributional.kernels._severity_primitives import (
     polygamma_0123 as _polygamma_0123,
 )
 
-# Status codes are int64 values, not Python ints: Numba types a Python int
-# constant passed to a compiled helper as its own literal type and compiles
-# the helper once per code (``_row_failure`` and ``_series_failure`` compiled
-# 16 specialisations on a first SuperLSS Tweedie fit).
+# Status codes are int64 values, not Python ints: numba would type each Python
+# int constant as its own literal and compile a helper specialisation per code.
 KERNEL_OK = np.int64(0)
 KERNEL_MODE_RATIO = np.int64(1)
 KERNEL_MODE_RANGE = np.int64(2)
@@ -970,10 +968,8 @@ def _complete_batch_status(
     return KERNEL_OK
 
 
-# The row kernels below are serial and release the GIL: the Python side runs
-# them over fixed blocks of rows on the worker pool
-# (``superglm._parallel.pooled_row_blocks``).  Every row writes only its own
-# outputs, so every worker count gives the same bits.
+# Row kernels below are serial and release the GIL; ``pooled_row_blocks`` runs
+# them over fixed row blocks, and each row writes only its own outputs.
 @njit(cache=True, nogil=True)
 def _evaluate_tweedie_batch_rows(
     y: NDArray[np.float64],
@@ -1447,10 +1443,8 @@ def _tweedie_hessian_direction_rows(
 
 # ---------------------------------------------------------------- fourth order
 #
-# The fourth-order kernel calls the generated closed forms of
-# ``_fourth_generated`` compiled here.  Numba's on-disk cache keys a caller on
-# its own file only, so the generator rewrites this digest of its output
-# whenever it writes the module, which invalidates these cached callers too.
+# Calls the generated closed forms of ``_fourth_generated``. Numba's disk cache
+# keys a caller on its own file only, so the generator rewrites the digest below.
 _FOURTH_GENERATED_DIGEST = "94dfd057670ec60498fdf6535ea203284de57f7d483f0c697493ae031f821c6a"
 # The same for the shared primitives these kernels call, which
 # ``tools/generate_severity_families.py`` stamps.

@@ -1,4 +1,4 @@
-"""Carry hand-edited curves onto a refitted model (spec D2, D5).
+"""Carry hand-edited curves onto a refitted model.
 
 A Refit re-specifies some terms and refits all of them. A term it left alone
 keeps its rows and ``n_points``, so its display grid and level labels are the
@@ -7,7 +7,7 @@ same, and its hand-edited curve can go back onto the refitted model exactly
 
 Run CV refits the in-force structure on each fold and Final fit refits it on
 train and validation rows together; both then put the hand edits back as
-set (D5). Each of those refits draws its own grid: a fold's numeric range is
+set. Each of those refits draws its own grid: a fold's numeric range is
 its own training range and its level universe is its own.
 :func:`model_with_edited_curves` carries every edited curve onto that grid
 and patches the refit with the same code an editor export uses
@@ -75,10 +75,8 @@ def model_with_edited_curves(
 
     The carried curve keeps the edited shape exactly and moves by one
     constant: the exposure-weighted mean of the refit curve minus the
-    editor's original curve. That constant is the difference between the
-    two fits' centring, a fold's own centring or a reference level that
-    re-resolved on more rows, so it does not move predictions; an edit that
-    shifted the whole curve keeps its shift.
+    editor's original curve, the two fits' centring difference. It does not
+    move predictions; an edit that shifted the whole curve keeps its shift.
 
     ``X``, ``y``, ``sample_weight`` and ``offset`` are the rows ``model`` was
     fitted on. They weight the projection onto the refit's basis and refresh

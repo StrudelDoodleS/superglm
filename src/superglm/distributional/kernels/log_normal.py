@@ -1,26 +1,14 @@
 """Primitive row numerics for the two-parameter log-normal.
 
-Coordinates: location form ``(mu, sigma)`` with ``log Y ~ N(mu, sigma^2)`` on
-``y > 0``; the mean form replaces ``mu`` by ``m = E[Y] = exp(mu) C(sigma)``
-with the mean loading ``log C(sigma) = sigma^2 / 2``.  The mean always exists,
-so this family has no invalid region and no validity mask beyond ``y > 0``,
-which the adapter refuses at ``bind_likelihood``.
-
-The optimising log-likelihood is ``-log sigma - w^2 / 2`` with
-``w = (log y - mu)/sigma``; the carrier ``-log y - log(2 pi)/2`` is the
-caller's.  That split is the generalized gamma's, not the Gaussian's, so the
-two families' optimising channels coincide exactly at shape zero.
-
-In ``(mu, sigma)`` the score and Hessian are the Gaussian kernel's at
-``z = log y``, so ``location_rows`` delegates to the Gaussian sibling (the one
-package-internal dependency the primitive-kernel rule permits) and moves the
-constant.  ``multiplier`` is a replication mass and must be exact positive
-integers, which the sibling validates.
-
-Overflow: ``sigma`` is floored and its link is stabilised, so every channel
-here stays inside float64 for any state the solver can reach, and the Gaussian
-sibling's finiteness check never fires.  The family therefore carries exactly
-``GaussianLS``'s numerical risk profile, on the log scale.
+Location form ``(mu, sigma)`` with ``log Y ~ N(mu, sigma^2)`` on ``y > 0``; the
+mean form replaces ``mu`` by ``m = E[Y] = exp(mu) C(sigma)``,
+``log C = sigma^2 / 2``. The mean always exists, so there is no invalid region.
+The optimising log-likelihood is ``-log sigma - w^2 / 2``,
+``w = (log y - mu)/sigma``, with the carrier ``-log y - log(2 pi)/2`` left to
+the caller, matching the generalized gamma at shape zero. In ``(mu, sigma)``
+the rows are the Gaussian kernel's at ``z = log y``, so ``location_rows``
+delegates to that sibling (which validates the integer ``multiplier``); the
+floored, stabilised ``sigma`` keeps every channel finite.
 """
 
 from __future__ import annotations

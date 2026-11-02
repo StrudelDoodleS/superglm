@@ -1,122 +1,69 @@
-"""FactorSmooth ``sz`` on the one engine: the balance tree (one-engine design §3.5).
+"""FactorSmooth ``sz``: the balance-tree factorization.
 
 An ``sz`` term is a least-squares problem with ``k`` dense equality constraints
-(``sum_l beta_l = 0``).  Its range-space block elimination (multipliers in the
-border) needs every level block ``D_l`` positive definite and well conditioned,
-which ``sz`` breaks by construction: a level with fewer distinct ``x`` values
-than the penalty's null space is exactly singular (block-factor note §1).  The
-stable method is the null-space method (Nocedal & Wright 2006, §16.2; Scott &
-Tuma, arXiv 2106.13142) in an orthonormal basis of the zero-sum subspace with
-tree sparsity: the sequential-binary-partition balance (Haar) basis (Egozcue &
-Pawlowsky-Glahn 2005).  Internal node ``v`` of a balanced binary partition of
-the ``K`` levels carries ``k`` coefficients ``z_v``; a level's coefficients are
-``beta_l = sum_{v in anc(l)} h_v(l) z_v`` with ``h_v = +sqrt(nR / (nL n))`` on
-the left half and ``-sqrt(nL / (nR n))`` on the right, so ``N = [h_v] (x) I_k``
-is orthonormal and ``N'1 = 0``.  Elimination runs up the tree by stacked
-Householder QR (square-root information smoothing on a tree: Paige & Saunders
-1977; Chou, Willsky & Benveniste 1994; TSQR, Demmel, Grigori, Hoemmen & Langou,
-arXiv 0808.2664, "just as stable as Householder QR").  Each pivot is a Schur
-complement of ``H_z`` on a subtree, so ``lambda_min(pivot) >= lambda_min(H_z)``
-(interlacing): no pivot is ever worse conditioned than the problem.
+(``sum_l beta_l = 0``). Range-space elimination needs every level block
+positive definite, which ``sz`` breaks (a level with fewer distinct ``x``
+values than the penalty's null space is exactly singular), so this uses the
+null-space method (Nocedal & Wright 2006, §16.2; Scott & Tuma, arXiv
+2106.13142) in the sequential-binary-partition balance (Haar) basis (Egozcue &
+Pawlowsky-Glahn 2005): internal node ``v`` carries ``k`` coefficients ``z_v``,
+``beta_l = sum_{v in anc(l)} h_v(l) z_v`` with ``h_v = +sqrt(nR / (nL n))``
+left and ``-sqrt(nL / (nR n))`` right, so ``N = [h_v] (x) I_k`` is orthonormal
+and ``N'1 = 0``. Elimination runs up the tree by stacked Householder QR
+(Paige & Saunders 1977; Chou, Willsky & Benveniste 1994; TSQR, Demmel et al.,
+arXiv 0808.2664). Each pivot is a Schur complement of ``H_z``, so no pivot is
+worse conditioned than the problem (interlacing).
 
-**The leaves** carry data only.  Level ``l`` exports the information of its rows
-and of its penalty on its shift ``s_l = beta_l``: one QR of
-``[[R_l,top], [sqrt(P_l), 0]]`` per level (the ``fs`` trial of
-``block_leaves``), whose leading ``k`` rows ``[E^s | E^x]`` go up and whose
-trailing rows (border only) go to the border Gram.  The penalty sits at the
-leaves, in level coordinates, so a per-level penalty (an ``S_override``) needs
-nothing new; with one ``P`` for every level it equals the per-node form
-``sum_v z_v' P z_v`` of the note (orthonormal ``N``).
-
-**A merge** at node ``v`` with children ``L`` (``h = +a``) and ``R`` (``h = -b``)
-stacks their exports on the columns ``[z_v | s_v | ext]``::
+**Leaves** carry data and penalty in level coordinates: one QR of
+``[[R_l,top], [sqrt(P_l), 0]]`` per level exports ``[E^s | E^x]`` up and its
+trailing rows to the border Gram. **A merge** at ``v`` stacks the children's
+exports on ``[z_v | s_v | ext]``::
 
     [[ a E_L^s, E_L^s, E_L^x],
      [-b E_R^s, E_R^s, E_R^x]]                (2k rows; the root has no s_v)
 
-and reduces them by Householder QR: the pivot rows ``[R_zz | R_zs | R_zx]``, the
-export ``[E_v^s | E_v^x]`` and, under deferral, border rows for the border Gram.
+and reduces them by Householder QR. **Deferral:** a ``z_v`` column whose
+scaled pivot squared is at most ``20 k eps`` of its unreduced column norm
+squared joins the border as a carried coordinate, where certified rank rules
+decide it; deferral is exact algebra and changes cost, never accuracy. A first
+pass over ``[z | s]`` alone takes the decisions and the second applies them.
+**The border** ``[alpha | carried | border | rhs]`` eliminates the intercept as
+super-root and ``border.factor_border`` factors the rest.
 
-**Deferral** (design decision 3, a pivoting decision inside one path): a ``z_v``
-column whose scaled pivot squared ``rho_j^2 / ||a_j||^2`` is at most ``20 k eps``
-is not eliminated, ``a_j`` the column in the unreduced problem (the subtree's
-leaf rows and penalty roots; ``_decide``); it joins the border (``ext``) as a
-*carried* coordinate, and the border's certified rank rules decide it.
-Deferring a well-determined direction is exact algebra that only enlarges the
-border, so the threshold moves cost, never accuracy (Paige & Saunders' flat
-blocks; delayed pivoting in the multifrontal sense).  The decisions come from
-a first pass over the ``[z | s]`` columns alone (the pivots never read the
-border columns), and the second pass applies them with every column present.
-
-**The border** ``ext = [alpha | carried | border | rhs]`` is the fs border plus
-the carried coordinates: the super-root (the intercept) is eliminated next and
-``border.factor_border`` factors the rest (structural deflation, pivoted
-Cholesky, Rump's verification, disclosure; design §3.6).
-
-**The published log-determinant** is gram's weighted-mean-centred convention,
-``log sum w + log pdet(H_c)`` in the public coordinates (design decision 2),
-exactly, coupled nulls included::
+**Log-determinant**, in gram's weighted-mean-centred convention, coupled
+nulls included::
 
     log|H| = sum_v log|R_zz,v|^2 + k log K + log D_0 + log pdet(Q_rest)
              + log det(n' n),
 
-``log|H_pub| = log|H_z| + k log K`` being the orthonormal basis' identity (the
-public coordinates are ``N[:K-1] (x) I`` of ``z``, ``det(M'M) = K^-k``) and
-``n`` the public-coordinate null vectors of ``H_c`` generated by an orthonormal
-null basis ``Z`` of ``Q_rest`` (tree part by back-substitution, carried
-coordinates mapped through the basis, the intercept component dropped).  With
-``H~ = W'H W`` the engine coordinates, ``pdet(H) = pdet(H~) det(N'W'WN) /
-det(W)^2`` for an orthonormal null basis ``N`` of ``H~`` (pseudo-determinant of
-a congruence), and ``pdet(H~) = det(T) pdet(Q) det(I + (FZ)'(FZ))`` for a block
-elimination; the two ``det(G_n)`` factors cancel to leave ``det(n'n)``.  When
-every null has a zero tree part (a fully penalized tree, the ``fs`` case)
-``n'n = I`` and the term vanishes; ``sz``'s unpenalized polynomial coordinates
-make coupled nulls routine (a level attribute, a thin level), and there it is
-what keeps the determinant exact.
+with ``n`` the public-coordinate null vectors generated by an orthonormal null
+basis of ``Q_rest`` (the pseudo-determinant of a congruence); ``n'n = I``
+when every null has a zero tree part.
 
-**Thin levels** (fewer than ``m`` distinct weighted ``x`` values beside the
-required global Spline, decision 4) make exact data nulls of the main-effect
-polynomial with that level's deviation.  They are flagged and kept, and
-``thin_levels`` names them.  The data part of the border vanishes along every
-one of them, so their curvature is the border penalty's alone: where the main
-effect's penalty does not annihilate the polynomial (the default ``Spline``
-gives ``x`` a curvature of about ``1e-5`` of its squared norm), the
-combination it penalizes is deflated structurally with its exact curvature
-(``_penalized_aliases``), and the combinations no penalty touches are exact
-nulls of ``H``, truncated like any other.
+**Thin levels** (fewer than ``m`` distinct weighted ``x`` values) make exact
+data nulls of the main-effect polynomial with that level's deviation; they are
+kept and named in ``thin_levels``. Combinations the border penalty curves are
+deflated structurally (``_penalized_aliases``); the rest are exact nulls.
 
-**Inference.**  With the whitened innovations ``xi_v`` (``z_v = g_v - G_v s_v -
-F_v x + y_v xi_v``, ``y_v = P_v^e R_zz,v^-1``) independent of the border ``x ~
-Q^+``, every level is ``beta_l = sigma_l + Phi_l x + sum_{v in anc(l)} T_lv
-xi_v``.  ``Phi`` comes from one down-sweep; the tree covariance ``Psi_l =
-sum_v T_lv T_lv'`` from ``Psi_c = A_c Psi_v A_c' + h_c^2 y_v y_v'`` with ``A_c =
-I - h_c G_v``.  A level-space operator ``O`` (block diagonal plus border
-coupling) enters traces through ``X_O = W'OW`` in innovation coordinates, whose
-blocks between an ancestor ``a`` and ``b`` are ``M_ba' Lambda_b y_b`` with
-``Lambda_b = sum_c h_c A_c' Omega_c`` and ``Omega`` aggregated upward; a pair
-sum over ancestors then collapses to ``Psi_b``.  Every trace, cross trace and
-diagonal is ``O(K k^3 + K k^2 n_x)`` with no pair enumeration and no dense
-level-by-level matrix.  Public coordinates are the first ``K - 1`` levels:
-``H_pub^-1 C' = Sigma_lev[public, :]`` with ``C = [I; -1'] (x) I``, so a public
-diagonal is a level-space one less its cross with the last level.
+**Inference.** With whitened innovations ``xi_v`` independent of the border
+``x ~ Q^+``, ``beta_l = sigma_l + Phi_l x + sum_{v in anc(l)} T_lv xi_v``.
+``Phi`` comes from one down-sweep and ``Psi_l = sum_v T_lv T_lv'`` from
+``Psi_c = A_c Psi_v A_c' + h_c^2 y_v y_v'``, ``A_c = I - h_c G_v``, so every
+trace and diagonal is ``O(K k^3 + K k^2 n_x)`` with no pair enumeration.
+Public coordinates are the first ``K - 1`` levels.
 
-Caches (AGENTS.md):
+Caches:
 
-* ``SumToZeroTreeFactor`` forms its inference state on first read: the cached
-  properties ``_Q_inverse_centred``,
-  ``_level_diagonal_blocks``, ``_last_level_cross``, ``_penalty_total_form``
-  and ``_retained_own`` (which also sets ``_projector_parts``), and the
-  attributes ``_scaled_eigenvalues_cache`` and ``_data_estimable``.  Owner the
-  factor, lifetime the factor, invalidation none (every input is fixed at
-  construction).  They are pickled with a retained model as they stand, so a
-  loaded model does not form them again.  No rank decision or bound reads
+* ``SumToZeroTreeFactor``'s inference state (``_Q_inverse_centred``,
+  ``_level_diagonal_blocks``, ``_last_level_cross``, ``_penalty_total_form``,
+  ``_retained_own``/``_projector_parts``, ``_scaled_eigenvalues_cache``,
+  ``_data_estimable``), formed on first read. Owner and lifetime: the factor;
+  invalidation: none. Pickled as they stand; no rank decision or bound reads
   them.
-* ``balance_tree(K)`` is a module ``lru_cache(maxsize=16)``: owner the module,
-  lifetime the process, keyed by ``K``, invalidation none (the tree is a pure
-  function of ``K`` and its arrays are read-only).
-* ``SumToZeroLeafSystem`` keeps a weak memo of the last factor built on it
-  (described there) and forms ``centred_data_operator`` on first read: owner
-  the system, lifetime the system, invalidation none.
+* ``balance_tree(K)``: module ``lru_cache(maxsize=16)`` keyed by ``K``, a pure
+  function with read-only arrays.
+* ``SumToZeroLeafSystem``'s weak factor memo and ``centred_data_operator``:
+  owner and lifetime the system, invalidation none.
 """
 
 from __future__ import annotations
@@ -160,8 +107,8 @@ if TYPE_CHECKING:
     from superglm.solvers._structured.block_leaves import FactorSmoothLeafData
     from superglm.solvers._structured.factors import DerivativeDirection
 
-# Block-factor note §4.3: a pivot direction whose scaled pivot squared is below
-# 20 k eps is deferred to the border (cost only).
+# A pivot direction whose scaled pivot squared is below 20 k eps is deferred
+# to the border (cost only).
 _DEFERRAL_FACTOR = 20.0
 
 
@@ -442,16 +389,11 @@ def _decide(Es, child, h, k, sqrt_tau, node_scale, deferred, Es_internal):  # pr
     """First pass: the deferral decisions from the ``[z | s]`` columns alone.
 
     Column ``j`` of ``z_v`` is deferred when its remaining norm is at most
-    ``sqrt_tau`` times ``node_scale[v, j]``, the norm of that column in the
-    unreduced problem (the subtree's leaf rows and penalty roots in node
-    coordinates, ``_node_column_norms``).  The stacked matrix's own column is
-    the wrong yardstick: its entries are the children's exports after their
-    subtrees were eliminated, so when a subtree is exhausted (one-row or
-    weightless levels) that column is itself rounding noise and a
-    rounding-level remainder never looks small against it.  Householder QR's
-    rounding in column ``j`` is bounded by ``gamma`` times the unreduced
-    column's norm (Higham 2002, Theorem 19.4), so a remainder below
-    ``sqrt_tau`` of it is not a pivot.  ``Es`` holds the leaves' ``E^s``;
+    ``sqrt_tau`` times ``node_scale[v, j]``, its norm in the unreduced problem
+    (``_node_column_norms``): Householder QR's rounding in a column is bounded
+    by ``gamma`` times that norm (Higham 2002, Theorem 19.4). The stacked
+    matrix's own column is the wrong yardstick, since an exhausted subtree
+    leaves it at rounding level. ``Es`` holds the leaves' ``E^s``;
     ``Es_internal`` receives the nodes'.
     """
     n_int = child.shape[0]
@@ -884,10 +826,8 @@ def _node_column_norms(child, h, level_a2):  # pragma: no cover - compiled
 
 
 # ------------------------------------------------------ inference kernels --
-# Every kernel below is a fixed-order recursion over the tree (children before
-# parents on the way up, the reverse on the way down), with the node transfer
-# A_c = I - h_c G_v of a shift from node v to its child c and the whitened
-# innovation map h_c y_v (module docstring).
+# Fixed-order recursions over the tree with the node transfer A_c = I - h_c G_v
+# and the whitened innovation map h_c y_v (module docstring).
 @numba.njit(cache=True)
 def _transfer(G, factor, k):  # pragma: no cover - compiled
     A = np.eye(k)
@@ -1151,7 +1091,7 @@ class SumToZeroLeafSystem:
     leaf Grams by products; it serves traces and inference, never a
     factorization.  ``xtw_structured`` is public (``[I; -1']'`` of the level
     vector ``raw_xtw_structured``).  ``thin_levels`` names the levels with fewer
-    than ``m`` distinct weighted ``x`` values (design decision 4).
+    than ``m`` distinct weighted ``x`` values.
     """
 
     operator: SumToZeroBlockOperator
@@ -1175,10 +1115,8 @@ class SumToZeroLeafSystem:
     shifted_gram_small: NDArray | None = None
     shifted_xtw_small: NDArray | None = None
     shifted_level_cross: NDArray | None = None
-    # The last factor built on this system (perf F1, as FactorSmoothLeafSystem),
-    # held weakly (``assembly.build_augmented_sum_to_zero_factor``).  Owner: this
-    # system; lifetime: the system, one slot; never pickled (a weak reference
-    # has no state to save, and a restored system rebuilds on first use).
+    # The last factor built on this system, held weakly. Owner: this system;
+    # lifetime: the system, one slot; never pickled.
     factor_memo: list = field(default_factory=list, repr=False, compare=False)
 
     def __getstate__(self) -> dict:
@@ -1357,9 +1295,8 @@ class SumToZeroTreeFactor:
             M_leaf = np.zeros((K, size_e, size_e))
             R_leaf[:, position[:, None], position[None, :]] = R0
             M_leaf[:, position[:, None], position[None, :]] = M0
-            # the bound reads each leaf middle factor's largest entry alone: keep
-            # that (K,) and free the (K, p, p) exports before the sweep (Opus
-            # review P1: a factor held a stack of middle factors for its lifetime)
+            # the bound reads each leaf middle factor's largest entry alone:
+            # keep that and free the (K, p, p) exports before the sweep
             leaf_middle_max = np.max(np.abs(M0), axis=(1, 2))
             del R0, M0
             kappa = np.ones(n_int)
@@ -1455,15 +1392,10 @@ class SumToZeroTreeFactor:
         Qx = 0.5 * (Qx + Qx.T)
         Q_xx = Qx[:n_x, :n_x]
         self._q_xz = Qx[:n_x, n_x].copy()
-        # The super-root: the intercept, eliminated last in the tree (design §3.1).
-        # sz leaves the polynomial coordinates unpenalized, so a level with no
-        # weight lets the observed levels' constants reproduce the intercept
-        # exactly (D_0 = 0): the super-root pivot is then deferred like a tree
-        # pivot (decision 3), and the intercept joins the border's certified
-        # rank decision.  Otherwise the path is fs's.  Each valid bound
-        # (``_border_bound``) is factored, and the one that certifies the
-        # higher rank is kept (the first on a tie): a choice of majorant, so
-        # the certificate holds either way.
+        # The super-root: the intercept, eliminated last in the tree. A level
+        # with no weight can make D_0 = 0 (sz leaves the polynomial
+        # unpenalized); the pivot is then deferred like a tree pivot. Each
+        # valid bound is factored and the one certifying the higher rank kept.
         D0 = float(Q_xx[0, 0])
         self.excluded = tuple(int(index) for index in excluded)
         self._alias_x = self._penalized_aliases(system, P, penalized)
@@ -1486,7 +1418,7 @@ class SumToZeroTreeFactor:
             self._null_x = np.vstack((-(center_star @ null)[None, :], null))  # (n_x, t)
         coupled, weak_columns, named = self._null_disclosure(P)
         # every column a weak direction moves: the mode certificate leaves their
-        # scores ungated (design §3.9); the disclosure names the level that is free
+        # scores ungated; the disclosure names the level that is free
         self.weakly_identified_coefficients: tuple[int, ...] = weak_columns
         self.weakly_identified_named: tuple[int, ...] = named
         self._logdet = float(
@@ -1562,41 +1494,17 @@ class SumToZeroTreeFactor:
     def _penalized_aliases(self, system, P: NDArray, penalized) -> NDArray | None:
         """The thin levels' data-null directions the border penalty identifies, ``(n_x, g)``.
 
-        A thin level ``t`` (``d_t`` distinct weighted ``x`` values, fewer than
-        the dimension ``m`` of the level penalty's null space ``N_P``) has the
-        exact data nulls ``beta_t += N_P f (K - 1) / K``, ``beta_l -= N_P f / K``
-        for every other level, and the border taking ``+g(x)' f / K``, for
-        every ``f`` with ``g(x)' f = 0`` on the level's ``x`` values (``g =
-        N_P' z``, the null-space functions; design §3.5, the alias with the
-        required global Spline).  In ``x = [alpha | carried | border]`` their
-        tree part is ``z_v = h_v(t) N_P f`` on the deferred ``(v, j)``
-        (``sum_l h_v(l) = 0``).  The data part of the border Schur complement
-        vanishes along every one of them for every working weight (they are
-        nulls of ``[1, X]`` on the weighted rows, and the tree penalty
-        vanishes on their tree part), so their curvature is the border
-        penalty's alone: smoothing-parameter-scaled, never a rounding
-        decision.  Truncated as data, as before, it crossed the certified
-        tolerance with lambda and the published ``log|H|`` jumped by the log
-        of the tolerance between nearby evaluations (REML's line search then
-        failed).  They are therefore deflated structurally (design §3.6
-        step 1: data part zero by construction, curvature from ``S``).  Only
-        the combinations the penalty certifies (curvature above the
-        rounding of the quadratic form; a test invariant to rescaling the
-        penalty, so the same at every lambda: Wood, Pya & Safken 2016,
-        §3.1.2, an identifiability test that does not depend on the
-        smoothing parameters) are returned; the exact nulls stay with the
-        pivoted factorization, which truncates them as before.
-
-        ``N_P`` is the shared null space of the level blocks, each scaled to
-        unit norm; ``f`` spans the null space of the level's ``sqrt|w|``
-        triangle on ``N_P`` beyond its ``d_t`` distinct rows (a level with no
-        weight frees all of ``N_P``); the border part is the least-squares
-        representation of the null-space functions over every level's
-        triangle, off the structural generators' columns (so the deflated
-        block is ``diag(G'SG, A'SA)``, below), kept only when it reproduces
-        them to within ``sqrt(eps)`` (else the border cannot represent them
-        and there is no alias).
-        ``None`` without thin levels or penalty.
+        A thin level ``t`` (fewer distinct weighted ``x`` values than the
+        dimension ``m`` of the level penalty's null space ``N_P``) has exact
+        data nulls ``beta_t += N_P f (K - 1) / K``, ``beta_l -= N_P f / K``
+        elsewhere, the border taking ``+g(x)' f / K``, for every ``f`` with
+        ``g(x)' f = 0`` on the level's ``x`` values. Their curvature is the
+        border penalty's alone, so they are deflated structurally rather than
+        truncated as data, which would make ``log|H|`` jump with lambda. Only
+        combinations the penalty certifies above the quadratic form's rounding
+        are returned, a test invariant to rescaling the penalty (Wood, Pya &
+        Safken 2016, §3.1.2). The border part must reproduce the null-space
+        functions to ``sqrt(eps)``. ``None`` without thin levels or penalty.
         """
         counts = getattr(system, "thin_counts", None)
         if counts is None or not len(counts[0]):
@@ -1619,14 +1527,9 @@ class SumToZeroTreeFactor:
         m = N_P.shape[1]
         if not m:
             return None
-        # The leaf keeps no whole triangles (Opus review P1): each level's is
-        # upper triangular, so its rows below the leading ``k`` are zero on the
-        # level basis.  The null-space functions' rows are the leading rows'
-        # alone, and the intercept and border rows are the leading rows' and the
-        # trailing rows', read through their triangular factor (``trailing_root``,
-        # an orthogonal map of the stacked trailing rows, which keeps every Gram
-        # and every product's norm; not their Gram, whose rounding would swamp
-        # the cancelling residual below).
+        # Each level's triangle is upper triangular, so the null-space rows are
+        # the leading rows' alone; intercept and border rows are read through
+        # ``trailing_root``, an orthogonal map, never a Gram.
         leaf = system.leaf
         top = np.asarray(leaf.top, dtype=np.float64)
         RZ = np.matmul(top[:, :, :k], N_P)  # (K, k, m): the null-space functions' rows
@@ -1642,23 +1545,14 @@ class SumToZeroTreeFactor:
         diagonal = np.diag(G_BB)
         scale = np.zeros_like(diagonal)
         scale[diagonal > 0.0] = 1.0 / np.sqrt(diagonal[diagonal > 0.0])
-        # A structural generator's columns (a random effect's exposed levels,
-        # which sum to the intercept) stay out of the representation (scale 0,
-        # so U is exactly zero there).  With them the Gram is singular along the
-        # generator and the minimum-norm solution spread the constant onto the
-        # random effect, whose ridge then read as alias curvature that the
-        # deflation's reduction against the generator cancelled: an exactly
-        # singular ``a_NN`` deflated as identified (rank +1, log|H| off by 60).
+        # A structural generator's columns stay out of the representation
+        # (scale 0): with them the minimum-norm solution would spread the
+        # constant onto the random effect and fake alias curvature.
         generators = leaf.generators
         if generators is not None:
             scale[1:][np.any(generators.matrix != 0.0, axis=1)] = 0.0
-        # The border columns the Laplace term leaves out (``excluded``) stay out
-        # too: ``_factor_border`` zeroes them and keeps only the aliases exactly
-        # zero there, and a least-squares coefficient the alias does not need
-        # is rounding, never 0.0, so every alias went back to the pivoted
-        # factorization whenever a column was excluded (#432).  Without them
-        # the misfit test below decides whether the rest still represent the
-        # null-space functions.
+        # Excluded border columns stay out too: ``_factor_border`` keeps only
+        # aliases exactly zero there, and least squares never gives 0.0 (#432).
         if self.excluded:
             scale[self._small_position[np.asarray(self.excluded, dtype=np.intp)]] = 0.0
         scaled = scipy.linalg.lstsq(
@@ -1709,14 +1603,10 @@ class SumToZeroTreeFactor:
             return None
         aliases = np.column_stack(columns)
         border = aliases[1 + c :]
-        # The certificate must hold for the block the deflation factors, the
-        # generators and these aliases together: a_NN = [G A]' S [G A].  A is
-        # exactly zero on G's columns (above) and the penalty is block diagonal
-        # by term, so G' S A is exactly zero, a_NN = diag(G'SG, A'SA), and the
-        # reduction against G (``_append_generators``) leaves A as it is: the
-        # test below on A'SA certifies the joint block.  A penalty that couples
-        # them would void that, and the aliases then stay with the pivoted
-        # factorization (truncated as data, as before the deflation existed).
+        # The certificate covers the joint block a_NN = [G A]' S [G A]. A is
+        # zero on G's columns and S is block diagonal by term, so a_NN =
+        # diag(G'SG, A'SA); a penalty coupling them leaves the aliases with
+        # the pivoted factorization.
         if generators is not None and np.any(generators.matrix.T @ (S_b @ border) != 0.0):
             return None
         curvature = border.T @ S_b @ border
@@ -1754,24 +1644,15 @@ class SumToZeroTreeFactor:
     ) -> list[NDArray]:
         """Majorants ``U`` ``(n_x,)``, each with ``|dQ_ij| <= sqrt(U_i U_j)`` on the Gram.
 
-        The Gram is the intercept-and-border one; the majorants differ only in
-        their free ``t`` (below).
-
         Every rounding is a columnwise backward error of a Householder stage on
-        disjoint row sets (Higham 2002, Theorem 19.4; the tree and TSQR, Demmel
-        et al., arXiv 0808.2664): the leaf pass (per level, as block_leaves),
-        the leaf trial, and at most ``depth`` merges on any row's path, each
-        also carrying the balance multiplier's own rounding.  In node
-        coordinates it gives ``||dA v_j|| <= eta_j``; the Schur complement
-        then moves by ``eta_i r_j + r_i eta_j`` at first order (the elimination
-        vector is the least-squares one, so its own change is second order) and
-        by ``s_i s_j`` beyond, ``s_j = 2 eta_j + sqrt(omega)(r_j + 2 eta_j)``,
-        ``omega >= ||dA_T H_T^-1/2||^2``.  Majorised by ``sqrt(U_i U_j)`` with
-        ``U_j = t r_j^2 + eta_j^2 / t + s_j^2`` (Cauchy-Schwarz, one global
-        ``t`` as block_leaves), plus the Gram sums' own rounding.  Signed rows
-        add the sandwiched errors of block_leaves' signed bound per leaf and,
-        per merge, the middle factor's product and Schur step on the subtree's
-        rows.
+        disjoint row sets (Higham 2002, Theorem 19.4; TSQR, Demmel et al.,
+        arXiv 0808.2664): leaf pass, leaf trial and at most ``depth`` merges,
+        giving ``||dA v_j|| <= eta_j``. The Schur complement then moves by
+        ``eta_i r_j + r_i eta_j + s_i s_j``, ``s_j = 2 eta_j +
+        sqrt(omega)(r_j + 2 eta_j)``, majorized with
+        ``U_j = t r_j^2 + eta_j^2 / t + s_j^2`` (Cauchy-Schwarz, one free
+        ``t``), plus the Gram sums' rounding and, for signed rows, the middle
+        factors' errors. The majorants differ only in ``t``.
         """
         top = leaf.top
         K, p = top.shape[0], top.shape[2]
@@ -1843,22 +1724,12 @@ class SumToZeroTreeFactor:
         if omega >= 0.25:
             omega = float("inf")
         second = (2.0 * eta + math.sqrt(omega) * (r + 2.0 * eta)) ** 2
-        # t is free (the majorant holds for every t > 0); it minimises the
-        # Jacobi-scaled sum over the columns resolved above their rounding.  A
-        # column whose Schur diagonal is within 4 eta (r + eta) of zero is an
-        # exact null whatever t is (U_j >= 2 eta_j r_j at the best t), and its
-        # eta^2 / d_j would otherwise decide t: an sz term with a weightless
-        # level or no penalty aliases the super-root or a main effect with the
-        # tree, and both hold only rounding in d_j and r_j.  An eps-level pivot
-        # can decide it too: a column whose Schur diagonal is at most 20 k eps
-        # of its unreduced column's norm squared, the deferral's own yardstick
-        # (decision 3; a carried coordinate always is one, and so is a
-        # super-root aliased with the levels).  Its rounding can be a large
-        # share of its diagonal, and at its t every column's bound grows to that
-        # share (border rank 0 on one-row levels under a log link).  So a
-        # second majorant takes t from the other columns, at which such a
-        # pivot is resolved or an exact null by its own bound; the caller
-        # keeps the one that certifies the higher rank.
+        # t is free; it minimises the Jacobi-scaled sum over columns resolved
+        # above their rounding. Exact-null columns (Schur diagonal within
+        # 4 eta (r + eta) of zero) are excluded. A second majorant also excludes
+        # eps-level pivots (at most 20 k eps of the unreduced norm squared),
+        # which could otherwise inflate every bound; the caller keeps the
+        # majorant that certifies the higher rank.
         d = np.abs(np.diag(Q_xx))
         alive = d > 4.0 * eta * (np.sqrt(np.maximum(r2, 0.0)) + eta)
         resolved = alive & (d > _DEFERRAL_FACTOR * self.block_size * _EPS * a_x**2)
@@ -1923,30 +1794,13 @@ class SumToZeroTreeFactor:
     def _null_disclosure(self, P: NDArray) -> tuple[float, tuple[int, ...], tuple[int, ...]]:
         """``log det(n'n)``, the weakly identified columns, and those a weak direction names.
 
-        The null vectors of ``H_c`` in public coordinates are generated by an
-        orthonormal basis ``Z`` of ``Q_rest``'s null space (unscaled): the
-        border rows of ``Z``, and the levels ``Phi_l [alpha; Z]`` with the
-        intercept component dropped (module docstring).
-
-        Each null direction is then classified and disclosed on its resolved
-        entries (``_resolved_null_directions``, and the rounding of the
-        direction's own computation, ``sqrt(eps)`` of its largest entry, as
-        ``border.factor_border``).  A direction whose penalty curvature
-        ``sum_l beta_l' P_l beta_l + x_b' S_b x_b`` exceeds the rounding of the
-        quadratic form is not an exact null of ``H`` (Fisher rows' data part
-        is positive semidefinite): weakly identified (design §3.6 step 5).
-        The others are the exact aliases.  A weak direction leaves the score
-        of every column it moves ungated (each entry above ``sqrt(eps)`` of
-        its largest), and it names the columns it moves in its own right: the
-        border entries it resolves (``_resolved_null_directions``), so the
-        noise a truncated direction carries on unrelated columns is not
-        named, and on the levels the entries that stand above the shift it
-        gives every level alike.  The sum-to-zero constraint spreads a free
-        level deviation ``d`` over all levels as ``-d / K`` and the main
-        effect takes ``+d / K``: that shared shift is the per-coordinate
-        median across levels whenever fewer than half the levels are free,
-        and what stands above it, beyond the resolution, is the level whose
-        data cannot place it.
+        The null vectors of ``H_c`` in public coordinates come from an
+        orthonormal null basis ``Z`` of ``Q_rest``. A direction whose penalty
+        curvature exceeds the quadratic form's rounding is weakly identified,
+        not an exact null (Fisher rows' data part is PSD); the others are exact
+        aliases. A weak direction leaves every column it moves ungated, and
+        names its resolved border entries and the levels standing above the
+        shared ``-d / K`` shift (the per-coordinate median across levels).
         """
         null = self._border.null
         t = null.shape[1]
@@ -2019,24 +1873,14 @@ class SumToZeroTreeFactor:
     def _resolved_null_directions(self) -> tuple[NDArray, NDArray]:
         """The border null directions over ``x`` ``(n_x, t)``, with each entry's resolution.
 
-        ``factor_border`` returns exact nulls (unit columns, by their own
-        bound) and an orthonormal basis ``Z`` of the truncated subspace of the
-        scaled live matrix ``Q_s``.  Only that subspace carries an error: with
-        ``||dQ_s||_2 <= u_s`` (the certificate), Ritz values ``Theta`` and
-        residual ``R = Q_s Z - Z Theta``, the Davis-Kahan sin-theta theorem in
-        its residual form (Davis & Kahan 1970; Stewart & Sun 1990, Theorem
-        V.3.6) bounds the angle to the true subspace by ``sin <= (||R|| + u_s)
-        / delta``, ``delta = lambda_{r+1}(Q_s) - u_s - max Theta`` the
-        separation from the retained spectrum (Weyl).  ``Z`` then lies within
-        ``sqrt(2) sin`` of an orthonormal basis of the true subspace (the step
-        from angles to bases in Yu, Wang & Samworth 2015, proof of Theorem 2),
-        so each entry is known to ``sqrt(2) sin`` in the scaled coordinates,
-        and to ``sqrt(2) sin ||E_j||`` in ``x``, ``E`` the map from the scaled
-        coordinates to ``x`` (the unscaling, the structural elimination and,
-        with the super-root eliminated, ``alpha = -c*' x_rest``).  Entries
-        within it are set to zero; without a separation below one nothing is
-        resolved, and the directions are returned whole with no allowance
-        (every entry counts).
+        Exact nulls are unit columns; the truncated subspace basis ``Z`` of the
+        scaled matrix ``Q_s`` carries an error. With ``||dQ_s||_2 <= u_s`` the
+        residual-form Davis-Kahan theorem (Davis & Kahan 1970; Stewart & Sun
+        1990, Theorem V.3.6) gives ``sin <= (||R|| + u_s) / delta``, ``delta``
+        the separation from the retained spectrum (Weyl), so each entry is
+        known to ``sqrt(2) sin ||E_j||`` in ``x`` (Yu, Wang & Samworth 2015,
+        Theorem 2). Entries within it are zeroed; without a separation below
+        one the directions are returned whole.
         """
         border = self._border
         source = border.source
@@ -2329,16 +2173,11 @@ class SumToZeroTreeFactor:
         """Per-coefficient data estimability in raw coordinates (the package's rule).
 
         A coefficient is estimable when no null vector of the data ``[1, X]``
-        over the weighted rows moves it: the definition the dense solver, the
-        other structured factors and the exact reference read, from the data
-        alone, so a direction only the penalty pins (a thin or weightless
-        level's, a random effect's sum against the intercept) is not
-        estimable.  The null space is the balance tree's own, the null-space
-        method on the data: the tree on the same leaf triangles (``sqrt|w|``
-        rows, so signed curvature never enters, stage-3 verifier finding 2)
-        with no penalty, its certified nulls confirmed on the rows
-        (``_verified_data_estimable``).  Owner: this factor; lifetime: the
-        factor; nothing invalidates it (the leaf data are immutable).
+        over the weighted rows moves it, so a direction only the penalty pins
+        is not estimable. The null space comes from the balance tree on the
+        same ``sqrt|w|`` leaf triangles with no penalty, confirmed on the rows
+        (``_verified_data_estimable``). Owner and lifetime: this factor;
+        nothing invalidates it.
         """
         estimable = self.__dict__.get("_data_estimable")
         if estimable is None:
@@ -2400,20 +2239,12 @@ class SumToZeroTreeFactor:
     def _verified_data_estimable(self) -> NDArray:
         """Data estimability on this (unpenalized) tree: its certified nulls, confirmed on the rows.
 
-        The border certificate may leave a direction it cannot place in the
-        null space; its majorant is on a Gram, so a direction the elimination
-        has cancelled down to its rounding is a candidate, not a null.  Each
-        candidate is therefore measured on the data: the residual ``A n`` per
-        level from the leaf triangles (``R_l [beta_l; alpha; b]``, square-root
-        form), on the candidates' span equilibrated to unit public columns
-        (the Jacobi scale of the data Gram) and orthonormal there.  The
-        singular values of the stacked residual (Rayleigh-Ritz on the span)
-        whose value is at most ``factor_rcond``, the shared policy's cutoff
-        on the singular values of the equilibrated data with its largest one
-        taken at its lower bound one, give the null directions; a coordinate
-        that the orthonormal null basis touches above ``factor_rcond`` is not
-        estimable (``geometry._coefficient_estimable_from_null_basis``, the
-        package's rule).
+        A direction the border certificate cannot place is a candidate, not a
+        null, so each candidate is measured on the data: the per-level residual
+        ``R_l [beta_l; alpha; b]`` on the candidates' span, equilibrated to unit
+        public columns. Singular values at most ``factor_rcond`` give the null
+        directions; a coordinate the null basis touches above ``factor_rcond``
+        is not estimable (``geometry._coefficient_estimable_from_null_basis``).
         """
         width = self.shape[0]
         N_x = self._null_x
@@ -2467,23 +2298,13 @@ class SumToZeroTreeFactor:
     def row_quadratic_forms(self, rows) -> NDArray:
         """``a_i' H^+ a_i`` per augmented public row ``a_i = [1, x_i]`` of ``rows`` ``(m, p)``.
 
-        In level space (module docstring) a row of level ``l`` with basis row
-        ``b`` is ``b' beta_l + a' x``, ``beta_l = sigma_l + Phi_l x + sum_{v in
-        anc(l)} T_lv xi_v`` with the whitened innovations ``xi`` independent of
-        the border ``x``, so the form is ``sum_v ||T_lv' b||^2 + y' Cov(x) y``,
-        ``y = Phi_l' b + a`` (``R'`` applied to ``a``: ``[1, x - c0]``): the
-        random-effect and fixed-effect halves of the hat diagonal (Bates et
-        al. 2015, eqs. 63-65), as ``FactorSmoothLeafFactor.row_quadratic_forms``.
-        The tree half is a sum of squares up the row's path
-        (``_leaf_path_row_forms``); ``y' Cov(x) y`` takes the super-root, then
-        the data side of the border (``BorderFactor.quadratic_data``).  A
-        public row holds ``b`` in its level's block, or ``-b`` in every block
-        for the last level (whose coefficients are minus the others' sum); a
-        functional equal on every level vanishes (``sum_l beta_l = 0``), so
-        that row is ``b`` on the last level.  A row of any other pattern takes
-        the whole-tree pass (``_up_vectors``).  No ``p x p`` block is formed:
-        ``O(nnz + m (depth k^2 + n_x^2))``.  Leverage (design §3.10,
-        definition A) is ``w_i`` times this.
+        A row of level ``l`` with basis row ``b`` gives
+        ``sum_v ||T_lv' b||^2 + y' Cov(x) y``, ``y = Phi_l' b + a``: the
+        random- and fixed-effect halves of the hat diagonal (Bates et al. 2015,
+        eqs. 63-65). The tree half sums squares up the row's path
+        (``_leaf_path_row_forms``); a last-level row is ``-b`` in every block;
+        other patterns take the whole-tree pass (``_up_vectors``). No ``p x p``
+        block is formed. Leverage is ``w_i`` times this.
         """
         import scipy.sparse
 
@@ -3049,18 +2870,11 @@ class ProfiledSumToZeroTreeFactor(_ProfiledLeafFactor):
     def _trace_form(self, operator) -> _LevelForm:
         """A centred weight-derivative operator for traces, in the augmented coordinates.
 
-        A thin level's penalized alias ``(a_0, v)`` (``_penalized_aliases``) is
-        a null of ``[1, X]`` on the weighted rows, so a centred operator ``O_c =
-        J' O~ J`` (``O~ = [1 X]' diag(a) [1 X]`` on the ``c0``-shifted rows,
-        ``J = [-c'; I]``) vanishes along ``v``; its variance is ``1 / (lambda
-        a'Sa)``.  The profiled form holds ``O_c`` as the slopes' raw moments
-        plus a rank-two centring, which do not vanish along ``v`` one by one
-        (``raw v = -a_0 X'a``): both meet that variance and their traces cancel
-        to its rounding.  ``K' O~ K`` with ``K = I - e_0 g'``, ``g = [1; c]``,
-        is zero on ``alpha`` and ``O_c`` on the slopes, so every trace is the
-        same; it is ``O~`` less ``g r' + r g' - (1'a) g g'``, ``r = O~ e_0``, and
-        with the intercept column held per level (``Z_l' a_l``) each part
-        annihilates ``(a_0, v)`` row by row, to its own rounding.  Any other
+        A thin level's penalized alias is a null of ``[1, X]``, so ``O_c``
+        vanishes along it, but the profiled form (raw moments plus a rank-two
+        centring) does not term by term and its traces cancel only to
+        rounding. ``K' O~ K`` with ``K = I - e_0 g'``, ``g = [1; c]``, gives
+        the same traces and annihilates the alias row by row. Any other
         operator keeps the profiled form.
         """
         augmented = self.augmented_factor

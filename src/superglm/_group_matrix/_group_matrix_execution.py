@@ -184,11 +184,9 @@ class MatrixExecutionPlan:
         if self._ordinary_tabmat_policy is True:
             return OrdinaryPartitionDecision(candidates, "policy-forced")
 
-        # The measured automatic crossover is deliberately narrow.  Multiple
-        # categoricals (especially a <=100-level block materialized dense), one
-        # dense column, sparse blocks, and smaller row counts all have measured
-        # counterexamples.  Compressed designs likewise favor their specialized
-        # grouped assembler over a partial Tabmat partition.
+        # The automatic crossover is deliberately narrow: multiple categoricals, one
+        # dense column, sparse blocks and smaller row counts all have counterexamples, and
+        # compressed designs favor their grouped assembler over a partial Tabmat partition.
         if len(candidates) != len(self.group_matrices):
             return OrdinaryPartitionDecision((), "contains-compressed-group")
         categorical_groups = tuple(

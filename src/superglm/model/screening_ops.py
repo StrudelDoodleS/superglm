@@ -1,80 +1,43 @@
 """PSST interaction screening over a fitted mains model.
 
-PSST — Penalized Smooth Score Test — ranks every candidate pair by how much
-of the fitted model's leftover working signal the interaction block the pair
-would actually refit as could absorb at a fixed screening complexity.  One
-fused O(n) cell pass per pair, no refits; the confirmatory ``fit_reml``
-refit of the top-ranked pairs is the gate.  Ranking-only: the statistic is
-not a calibrated p-value and must not be reported as one.
+PSST (Penalized Smooth Score Test) ranks every candidate pair by how much of
+the fitted model's leftover working signal the interaction block the pair
+would refit as could absorb at a fixed screening complexity.  One fused O(n)
+cell pass per pair, no refits; the confirmatory ``fit_reml`` refit of the
+top-ranked pairs is the gate.  The statistic is a ranking score, not a
+calibrated p-value.
 
-The sweep is not spline-only.  The ``kind`` column names the interaction
-class each pair would refit as — ``ti`` (spline x spline), ``spline_cat``,
-``cat_cat``, ``numeric_cat`` and ``numeric_numeric``.  The gridded kinds run
-through the same cell kernels on a per-margin ``(codes, support size, menu,
-penalty)`` description: a categorical margin is a gridded margin over its
-fitted levels whose menu is the (L, L-1) treatment-contrast block and whose
-penalty is absent, so ``kron`` of two such menus reproduces the cross-product
-indicator columns and ``kron`` of a spline menu with one reproduces the
-per-level curve blocks, column for column.  A NUMERIC margin never grids: it
-enters its probe linearly (a per-level slope, or a product of two numerics),
-so z-weighted moments accumulated over the other margin's cells are the exact
-sufficient statistics, and one centered pass beside them turns each level's
-into a FACTOR — see ``screening/_pair_factor``.  Such a pair is
-therefore exact whenever it is computed at all: it has no binning fallback,
-so a factor margin too wide for the pair's blocks is REFUSED with a NaN row
-rather than approximated.
-A spline-mode ``OrderedCategorical`` margin rides the spline arm on its
-MAPPED level scores — the geometry its own refit builds — so its pairs are
-``ti`` and ``spline_cat`` like any other spline margin's, gridded on at most
-``n_levels`` support points.
-``z`` centers and scales the score using its fixed Gaussian reference mean
-and variance. The variance is twice the sum of the candidate's squared
-shrinkage factors. This does not give candidates
-identical null tails or account for estimating the baseline model and
-selecting the best complexity budget. A maximum also grows with the number
-of candidates. Consult the measured floors in the screening guide before
-choosing candidate refits.
-A pair with no penalty anywhere
-in its block has
-no bandwidth to scan and is evaluated at a single rung: ``edf0`` then reports
-the block's achieved rank and ``lambda0`` is 0.
+The ``kind`` column names the interaction class each pair would refit as:
+``ti`` (spline x spline), ``spline_cat``, ``cat_cat``, ``numeric_cat`` and
+``numeric_numeric``.  Gridded kinds run through the same cell kernels on a
+per-margin ``(codes, support size, menu, penalty)`` description; a categorical
+margin is a gridded margin whose menu is the (L, L-1) treatment-contrast block
+and whose penalty is absent.  A numeric margin never grids: it enters its probe
+linearly and becomes a factor (``screening/_pair_factor``), so such a pair is
+exact whenever it is computed and a factor too wide for the pair's blocks is
+refused with a NaN row.  A spline-mode ``OrderedCategorical`` margin rides the
+spline arm on its mapped level scores.
 
-``max_cells`` bounds two different resources.  It is an ALLOCATION ceiling
-for the cell tables, the curvature intermediates and a numeric-margin pair's
-blocks; through ``_within_cubic_budget`` it is also a TIME ceiling, because
-the probe's block dimension ``k`` enters every rung as a ``(k, k)``
-decomposition — a pivoted QR of the pair's design factor with one SVD beside
-it.  Per-pair time therefore grows as ``k^3`` where every allocation here
-grows as ``k^2``.  For the gridded kinds a probe column collinear with the
-overlap span is routine rather than exceptional — one empty ``cat_cat`` cell
-or one singleton factor level does it — and it is now settled by a rank cut
-taken on the factor.  **THE CHOLESKY-WITH-A-PSEUDO-INVERSE-FALLBACK THIS
-PARAGRAPH USED TO DESCRIBE IS GONE AND THE SENTENCE IS PAST TENSE**: issue
-#257 removed it with the rest of the moment route, and nothing under
-``superglm/screening`` calls ``pinv``, ``cho_factor`` or ``cho_solve`` on the
-dense path any more.  The cost class is what it was, so the gate below is
-unchanged.  A block too wide to SOLVE inside the budget is refused with a NaN
-row exactly as an unaffordable allocation is, and refused immediately:
-binning cannot shrink a basis dimension, so no fallback is attempted first.
+``z`` centres and scales the score with the fixed Gaussian reference mean and
+variance (twice the sum of squared shrinkage factors); it does not give
+candidates identical null tails.  See the screening guide for measured floors.
+A pair with no penalty in its block is evaluated at a single rung: ``edf0``
+reports the block's achieved rank and ``lambda0`` is 0.
+
+``max_cells`` bounds allocation, and through ``_within_cubic_budget`` also
+time: the probe block's dimension ``k`` enters every rung as a ``(k, k)``
+decomposition (pivoted QR plus SVD), so per-pair time grows as ``k^3`` where
+allocations grow as ``k^2``.  A block too wide to solve inside the budget is
+refused with a NaN row, immediately, since binning cannot shrink a basis.
 
 The statistic is reported on the ``T / phi`` scale, with ``phi`` the mains
-fit's Pearson dispersion estimate by default. Under the fixed Gaussian
-reference, ``E[T] = phi * edf0``. The estimated dispersion supplies the same
-scale correction across families, without establishing a fitted-model null law.
-The Pearson denominator follows the fitted model's declared weight contract:
-``sum(w) - edf`` under ``"frequency"``, the positive-weight row count minus
-``edf`` under ``"prior"``.  Keeping the screen and published fit on one scale
-is essential because ``T / phi`` drives the ranking.
+fit's Pearson dispersion estimate by default (denominator ``sum(w) - edf``
+under ``"frequency"`` weights, positive-weight rows minus ``edf`` under
+``"prior"``), so the screen and the published fit share one scale.
 
-Per-feature work (unique support, codes, marginal basis menus, marginal
-penalties — level codes and the contrast menu for a categorical margin, the
-mapped level scores for an ordered-categorical one) is
-cached across the sweep, so an all-pairs screen over P screened features
-builds each feature's marginal exactly once.  The caches trade
-memory for time and live for the whole sweep: roughly the raw covariates
-plus codes plus menus per screened feature (plus binned variants where the
-fallback fires, and the mapped scores beside the labels for an
-ordered-categorical margin), instead of per-pair transients.
+Per-feature work (unique support, codes, marginal menus and penalties) is
+cached for the whole sweep, so an all-pairs screen builds each feature's
+marginal once, at the cost of holding those arrays in memory.
 """
 
 from __future__ import annotations
@@ -132,123 +95,36 @@ _RESULT_COLUMNS = [
 ]
 
 # A class of allocation max_cells alone does not bound: one scaling with a
-# margin's SUPPORT times the other margin's basis dimension SQUARED, or with a
-# tensor width squared.  A lopsided 1e6 x 5 pair passes the cell budget while
-# such an intermediate is 40x larger.  Three gates charge against this factor
-# and two of them still bound something the code allocates -- the arrow
-# kernel's (n_a, k_s, k_s) stack of the spline menu's outer products, in
-# _within_structured_cells, and the dense (k_l*k_r, k_l*k_r) block a gridded
-# pair reduces to.
-#
-# THE THIRD NO LONGER DOES, AND THE CONSTANT IS HELD ANYWAY.  _within_budget's
-# term was fitted to pair_score_curvature's V-assembly einsum, which carried
-# (n_a, k_b, k_b) and (n_b, k_a, k_a) intermediates.  Issue #257 retired that
-# route: pair_design_factor reduces the same cell tables through temporaries
-# whose size this package chooses -- one bounded by _FACTOR_CHUNK_DOUBLES, the
-# rest at the accumulator's own (width, width) -- so nothing on the dense path
-# allocates the shape that term measures.  It is kept at 4 because it decides
-# ADMISSIONS: a pair it refuses gets a NaN row, and holding every admission
-# identical is what keeps #257 an accuracy change rather than a scope change,
-# the same reason no constant in the cubic block below moves.  Re-deriving it
-# from what the factor route actually allocates belongs to that block's
-# recorded follow-up.  Either way the marginal dimension is estimated from the
-# parent spec's k, which is a guard-grade bound, not an exact count.
+# margin's SUPPORT times the other margin's basis dimension squared, or with a
+# tensor width squared.  Two gates charge against this factor: the arrow kernel's
+# (n_a, k_s, k_s) stack in _within_structured_cells and the dense
+# (k_l*k_r, k_l*k_r) block a gridded pair reduces to.  _within_budget keeps its
+# term at 4 only because it decides admissions.  The marginal dimension is
+# estimated from the parent spec's k, a guard-grade bound.
 _INTERMEDIATE_BUDGET_FACTOR = 4
 
-# Every budget above bounds an ALLOCATION.  Per-pair TIME is cubic in the
-# probe block's dimension k, because each rung takes a (k, k) decomposition,
-# and the allocation budgets alone admit blocks whose solve costs minutes: at
-# the default they let a cat_cat pair reach k = 4472.  Measured end to end
-# through screen_interactions on the reference box with a single BLAS thread,
-# per k^3 of block dimension.  The two paths NAMED in these rates are the
-# moment route's -- a Cholesky that fell back to a pseudo-inverse -- which is
-# what the pair took when they were measured; the paragraph below says what
-# replaced it and what the replacement costs:
-#   2.9e-10 s  unpenalized block, pseudo-inverse path (cat_cat with an empty
-#              cell or a singleton level -- the routine case: 24 s and 1.3 GB
-#              at two 67-level factors, k = 4290)
-#   2.0e-10 s  unpenalized block, Cholesky path (numeric_cat, full rank:
-#              2.1 s at the widest factor the allocation gate admits)
-#   2.7e-10 s  penalized block, WHOLE four-rung ladder
-# The two UNPENALIZED figures, and the 1.6e-10 s/k^3 (0.81 s at k = 1709)
-# below, are the cost before issue #199 replaced that rung's edf -- a Cholesky
-# trace, which reports k rather than the rank whenever cho_factor accepts a
-# barely definite block -- with a rank COUNT.  Counting is an eigenvalue
-# decomposition where the trace was a k-right-hand-side solve, so it is not
-# free.  Measured as an interleaved A/B in ONE process, single BLAS thread, so
-# that load drift cannot be mistaken for the change: 1.056x at the numeric_cat
-# corner the budget below actually admits (k = 1709, one singleton level:
-# 1.037 s -> 1.095 s, and the reported edf0 1709 -> 1708, which is the point)
-# and 1.209x on the pseudo-inverse path at two 67-level factors (k = 4356, one
-# empty cell: 14.0 s -> 16.9 s, 1.48 GB either way).  Carry the figures above
-# forward by those multipliers and the budget ceiling landed near 1.1 s per
-# unpenalized pair, inside the ~1.5 s target the constants were fitted to.
-# Holding the worst path of each class to ~1.5 s per pair gives k^3 <=
-# _CUBIC_BUDGET_FACTOR * max_cells for an unpenalized block, and the same
-# budget against _PENALIZED_LADDER_COST times the work for a penalized one.
-#
-# THAT TARGET IS NO LONGER MET AT THE CEILING, AND EVERY SECOND QUOTED ABOVE
-# IS A MOMENT-ROUTE SECOND.  Issue #257 moved the dense route off assembled
-# Grams onto a design factor, for accuracy, and the A/B recorded in
-# screening/_pair_factor's module docstring measures what that costs: 4.09x
-# on the ladder and 4.17x end to end at 1349 tensor columns, which is the
-# widest geometry measured and the nearest one to these ceilings.  Carried
-# forward at 4.09x the unpenalized ceiling lands near 4.5 s per pair and the
-# 0.81 s / 0.67 s below near 3.3 s / 2.7 s -- two to three times the target,
-# not inside it.  Nothing here moves on that account and that is deliberate:
-# admissions are DIMENSIONAL, so holding these constants is what keeps the
-# accuracy change from also being a scope change, and every published ceiling
-# is unchanged.  Re-fitting _CUBIC_BUDGET_FACTOR and _PENALIZED_LADDER_COST
-# to the factor route's own cost is the follow-up, and it needs the same
-# exclusive machine the multipliers above were taken on.
-#
-# That multiplier used to be 16.  A penalized ladder re-solved the (k, k)
-# system ~27 times PER RUNG to bisect for its edf target -- 109 solves per
-# pair, 5.0e-09 s/k^3, 29 s at k = 1849 -- and since whether a rung bisects is
-# not knowable before the solve, the budget had to assume it did.  The ladder
-# now brackets once for the whole ladder and, only when some rung genuinely
-# has to search, shares ONE simultaneous diagonalization of the pencil
-# (V_eff, S) across every rung that does, which makes edf(lambda) and
-# T(lambda) closed forms and reduces the search to O(k) arithmetic on them.
-# Measured after that change, at k = 1709, one BLAS thread: 1.6e-10 s/k^3
-# unpenalized against 2.7e-10 for the entire four-rung penalized ladder --
-# a ratio of 1.65, not 25.  End to end on a bisecting 28x28-knot ti the same
-# change is 4.20 s -> 0.54 s. The multiplier of 2 included the cost of the
-# pseudo-inverse branch, which either path could take. That branch is gone
-# with the moment route. A rank-deficient overlap now adds rows to the
-# stacked-back block within the same pivoted QR. The multiplier remains 2
-# because changing it changes admissions; recalibrating it against the factor
-# route's measured spread is part of the refit above.
-#
-# At the default max_cells this admits k <= 1709 unpenalized and k <= 1357
-# penalized, measured there at 0.81 s and 0.67 s ON THE MOMENT ROUTE -- both
-# inside the 1.5 s target the old constants were chosen against, and neither
-# inside it since #257: at the factor route's 4.09x those ceilings read about
-# 3.3 s and 2.7 s.  The ceilings themselves do not move, because they are
-# dimensional; what moved is the second per pair behind them.  Raising
-# max_cells lifts both, as it lifts every other budget here.  The remaining
-# ceiling is an artifact of densifying a block that is structurally
-# block-diagonal; see issue #188.
+# Every budget above bounds an ALLOCATION.  Per-pair TIME is cubic in the probe
+# block's dimension k (each rung takes a (k, k) decomposition), and the
+# allocation budgets alone admit blocks whose solve costs minutes.  The
+# ceilings are k^3 <= _CUBIC_BUDGET_FACTOR * max_cells for an unpenalized block
+# and the same budget against _PENALIZED_LADDER_COST times the work for a
+# penalized one.  The penalized ladder shares ONE simultaneous diagonalization
+# of the pencil (V_eff, S) across its rungs, so edf(lambda) and T(lambda) are
+# closed forms and its cost is close to an unpenalized block's.  At the default
+# max_cells this admits k <= 1709 unpenalized and k <= 1357 penalized.  Raising
+# max_cells lifts both.  The constants are dimensional, so they decide which
+# pairs are admitted; changing them changes scope.
 _CUBIC_BUDGET_FACTOR = 1000
 _PENALIZED_LADDER_COST = 2
 
 # Every constant above budgets a DENSE block.  A spline x categorical pair
-# refused by them is retried through the arrow kernel, whose cost is linear in
-# the level count rather than cubic; see screening/_structured.py.  It needs
-# the same two KINDS of budget the dense path needs and for the same reasons:
-# _within_structured_budget and _within_structured_cells bound allocations,
-# which grow as k_s^2, and _structured_evaluation_budget limits factor passes
-# using a cubic work proxy. Each pass runs block-angular QR and local inverse
-# factors; a ladder that has to bisect runs tens of passes. Variance passes
-# also build the cross-level QR tree, so the passes are not equal-cost units.
-# The cubic factor retains the original arrow-factorization calibration.  The
-# stable profiled-trace setup introduced for issue #204 is now deducted from
-# that same work ceiling before any endpoint evaluations are admitted.
-# Two level-sized stacks coexist while the stable profiled trace is assembled:
-# the pair's persistent curvature blocks and one additive suffix stack.  The
-# factor is written as two because _within_structured_budget charges both
-# explicitly; the resulting admission ceiling is the same one-stack ceiling
-# used before issue #204 rather than an unaccounted doubling.
+# refused by them is retried through the arrow kernel (screening/_structured.py),
+# whose cost is linear in the level count.  _within_structured_budget and
+# _within_structured_cells bound allocations, which grow as k_s^2, and
+# _structured_evaluation_budget limits factor passes using a cubic work proxy.
+# The stable profiled-trace setup is deducted from that work ceiling before any
+# endpoint evaluations are admitted, and two level-sized stacks (the persistent
+# curvature blocks and one additive suffix stack) are charged explicitly.
 _STRUCTURED_BUDGET_FACTOR = 2
 _STRUCTURED_CUBIC_BUDGET_FACTOR = 50
 
@@ -309,27 +185,20 @@ def _margin_kind(spec) -> str | None:
     if isinstance(spec, _SplineBase):
         return "spline"
     if isinstance(spec, OrderedCategorical):
-        # A term with specials= is refused HERE, ahead of the basis test and
-        # before any column is read.  A special is a free level with no
-        # position on the spline axis, so ``resolve_interaction_parent``
-        # refuses it -- and that resolver runs inside the eager pre-read
-        # below, which would abort the WHOLE sweep on the first specials term
-        # rather than skipping it.  Screening one needs composite margins.
+        # A term with specials= is refused here, before any column is read: a special
+        # is a free level with no position on the spline axis, so
+        # ``resolve_interaction_parent`` refuses it and would abort the whole sweep.
         if spec.has_specials:
             return None
-        # A spline-mode OC is a spline through the level values, so it screens
-        # (and refits) exactly like one; step mode has no interaction target,
-        # and a Piecewise/Polynomial inner basis is an unpenalized parametric
-        # block the interaction classes cannot host (the same refusal
-        # add_interaction raises at registration).
+        # A spline-mode OC is a spline through the level values and screens like one.
+        # Step mode has no interaction target, and a Piecewise/Polynomial inner basis is
+        # an unpenalized parametric block the interaction classes cannot host.
         if spec.basis == "spline" and spec._spline is not None and spec.basis_kind == "spline":
             return "spline"
         return None
     if isinstance(spec, Categorical):
-        # KEPT as a guard, not a live case: Categorical.build raises below two
-        # levels, so a FITTED spec always clears this and the None branch is
-        # unreachable from screen_interactions.  Left in place because the
-        # alternative is a (1, 0) contrast menu reaching the cell kernels.
+        # Guard: Categorical.build raises below two levels, so this is unreachable from
+        # screen_interactions; it keeps a (1, 0) contrast menu from reaching the kernels.
         return "categorical" if len(spec._levels) >= 2 else None
     if isinstance(spec, Numeric):
         return "numeric"
@@ -339,11 +208,8 @@ def _margin_kind(spec) -> str | None:
 def _deferral_reason(spec) -> str:
     """Why a fitted main effect has no screenable margin.
 
-    Called only for names ``_margin_kind`` refused, so every branch is a
-    deferral rather than an error, and the reason is REPORTED --- on
-    ``table.attrs["deferred_features"]`` and in the candidates error --- rather
-    than dropped on the floor.  Polynomial and step-mode OrderedCategorical
-    were silently skipped before this existed, which is the same defect.
+    Called only for names ``_margin_kind`` refused; the reason is reported on
+    ``table.attrs["deferred_features"]`` and in the candidates error.
     """
     if isinstance(spec, OrderedCategorical):
         if spec.has_specials:
@@ -352,10 +218,8 @@ def _deferral_reason(spec) -> str:
                 "level with no position on the spline axis, so the margin has no "
                 "score to grid on; screening the pair needs composite margins"
             )
-        # Mirror ``_margin_kind``'s disjunction rather than assuming its
-        # complement: it refuses on ``basis != "spline" OR _spline is None``,
-        # so naming every survivor "step-mode" would mislabel a spline-mode
-        # term that reached here without an inner spline.
+        # Mirror ``_margin_kind``'s disjunction (``basis != "spline" OR _spline is
+        # None``) rather than assuming its complement.
         if spec.basis != "spline":
             return (
                 "step-mode OrderedCategorical is deferred: the one-hot geometry, "
@@ -404,10 +268,8 @@ def _pair_kind(kind_a: str, kind_b: str) -> str | None:
 
 def _validated_pairs(candidates, margin_kinds, fitted_pairs, deferred_features):
     if candidates is None:
-        # A pair the model already fits as an interaction is not a candidate:
-        # the screen profiles only the parent mains, so it would re-surface
-        # the fitted interaction and the confirmation workflow would then
-        # fail with "interaction already added".
+        # A pair the model already fits as an interaction is not a candidate: the
+        # confirmation workflow would fail with "interaction already added".
         return [
             pair
             for pair in combinations(margin_kinds, 2)
@@ -418,11 +280,8 @@ def _validated_pairs(candidates, margin_kinds, fitted_pairs, deferred_features):
     for raw in candidates:
         pair = tuple(raw)
         if len(pair) == 2 and pair[0] != pair[1]:
-            # A name the model DID fit but cannot screen (Polynomial, step-mode
-            # or specials OrderedCategorical) is deferred, not a typo; listing
-            # the screenable features would send the caller hunting for a
-            # misspelling that isn't there.  The reason quoted here is the same
-            # string the result table reports.
+            # A name the model fitted but cannot screen is deferred, not a typo; the reason
+            # quoted is the one the result table reports.
             deferred_names = sorted((name for name in pair if name in deferred_features), key=repr)
             if deferred_names:
                 detail = "; ".join(f"{n} — {deferred_features[n]}" for n in deferred_names)
@@ -454,11 +313,8 @@ def _validated_pairs(candidates, margin_kinds, fitted_pairs, deferred_features):
 def _categorical_codes(spec, x_raw) -> tuple[np.ndarray, int]:
     """Dense 0-based codes over the whole level UNIVERSE, in ``spec._levels`` order.
 
-    Applies the same grouping collapse and out-of-universe validation the
-    fitted spec's ``transform`` applies, so the screen sees exactly the mains'
-    level geometry — including the BASE level, which the main effect absorbs
-    into the intercept but the screen needs a grid row for, and any level
-    pinned to base for want of training rows.
+    Applies the fitted spec's grouping collapse and out-of-universe validation,
+    so the grid includes the base level and any level pinned to base.
     """
     x = _resolve_categorical_labels(
         x_raw,
@@ -467,10 +323,7 @@ def _categorical_codes(spec, x_raw) -> tuple[np.ndarray, int]:
     )
     codes = _codes_against(x, spec._levels)
     if codes.size and codes.min() < 0:
-        # Defensive: label resolution above already rejects anything the
-        # universe does not admit.  It stays because screening runs at FIT
-        # time, where out-of-universe data is an error under every unseen
-        # policy -- a pinned level is in the universe and codes fine.
+        # Defensive: label resolution already rejects anything outside the universe.
         raise ValueError(
             "screen_interactions found categorical values outside the declared "
             f"level universe {list(spec._levels)}"
@@ -482,10 +335,7 @@ def _contrast_menu(spec) -> np.ndarray:
     """Treatment-contrast menu; base and pinned levels' rows are all zeros.
 
     Column ``j`` indicates ``spec._non_base[j]``, matching the main effect's
-    column order, so the interaction block this menu generates is exactly the
-    one the confirmatory refit would build. Width follows ``_non_base``, not
-    ``L - 1`` — a pinned level (declared, no effective rows) has no main-effect
-    column and must not contribute an all-zero contrast column here.
+    column order.  Width follows ``_non_base``, not ``L - 1``.
     """
     position = {lev: i for i, lev in enumerate(spec._levels)}
     menu = np.zeros((len(position), len(spec._non_base)), dtype=np.float64)
@@ -495,13 +345,10 @@ def _contrast_menu(spec) -> np.ndarray:
 
 
 def _contrast_rows(spec) -> np.ndarray:
-    """The one row each contrast column indicates — the menu, without the menu.
+    """The one row each contrast column indicates (the one-hot menu as indices).
 
-    ``_contrast_menu`` is one-hot by construction, so multiplying by it is
-    selecting ``L - 1`` columns of whatever it multiplies.  The structured
-    kernel takes these indices instead of the menu, which is the difference
-    between ``L - 1`` integers and an ``(L, L - 1)`` block of doubles: 20 GB
-    at fifty thousand levels, holding 49,999 nonzeros.
+    Gives the structured kernel ``L - 1`` integers instead of an ``(L, L - 1)``
+    block of doubles.
     """
     position = {lev: i for i, lev in enumerate(spec._levels)}
     return np.fromiter(
@@ -512,18 +359,11 @@ def _contrast_rows(spec) -> np.ndarray:
 def _marginal_width_estimate(spec) -> int:
     """Guard-grade marginal width from the parent spline's geometry.
 
-    Takes the margin's EFFECTIVE spec — the caller resolves an
-    OrderedCategorical margin to its inner spline first, because the wrapper's
-    own ``n_knots`` can predate the level-count clamp and would over-estimate.
-
-    Deliberately biased LOW: an under-estimate self-heals (menus get built
-    and the authoritative post-menu recheck re-runs the gates with true
-    dimensions), while an over-estimate would bin or skip a pair that fits
-    the budget with no correction possible.  ``n_knots`` floors the centered
-    marginal width of every built-in kind, including degree-0 ps/bs
-    (``n_knots + degree``) and cr via the CardinalCR substitution
-    (``n_knots + 1``).  Categorical and numeric widths are exact, not
-    estimates: a contrast menu is (L - 1) wide and a numeric margin is 1.
+    Takes the margin's effective spec (an OrderedCategorical resolves to its inner
+    spline first).  Biased low on purpose: an under-estimate self-heals through the
+    post-menu recheck, an over-estimate would wrongly bin or skip a pair.
+    ``n_knots`` floors the centred marginal width of every built-in kind.
+    Categorical and numeric widths are exact.
     """
     if isinstance(spec, Categorical):
         # _non_base, not L - 1: pinned levels carry no main-effect column, and
@@ -555,123 +395,62 @@ def screen_interactions(
 ) -> pd.DataFrame:
     """Rank candidate pair interactions of a fitted model by PSST.
 
-    Each pair is screened as the interaction class it would refit as, named
-    in the ``kind`` column: ``ti`` for spline x spline, ``spline_cat`` for a
-    spline crossed with a factor, ``cat_cat`` for two factors, ``numeric_cat``
-    for a per-level numeric slope and ``numeric_numeric`` for a product of two
-    numerics.  A spline-mode ``OrderedCategorical`` margin screens as a spline
-    on its mapped level scores, so its pairs carry the spline kinds.
-    ``z`` uses the candidate's fixed Gaussian reference mean and variance.
-    The resulting ranking does not provide calibrated p-values: estimating
-    the baseline, selecting a complexity budget and comparing many pairs
-    affect the sampling distribution. See the screening guide for measured
-    null behavior and evaluate promising candidate refits on held-out data.
-    A kind whose block carries no penalty
-    (``cat_cat``, ``numeric_cat``, ``numeric_numeric``) has no bandwidth to
-    scan and is evaluated at a single rung — ``edf0`` then reports the block's
-    achieved rank and ``lambda0`` is 0, so the ``edf0`` argument does not
-    apply to it.
+    Each pair is screened as the interaction class it would refit as, named in
+    the ``kind`` column: ``ti`` (spline x spline), ``spline_cat``, ``cat_cat``,
+    ``numeric_cat`` (per-level numeric slope) and ``numeric_numeric``.  A
+    spline-mode ``OrderedCategorical`` margin screens as a spline on its mapped
+    level scores.  A kind whose block carries no penalty is evaluated at a single
+    rung, so the ``edf0`` argument does not apply to it.  The ranking does not
+    provide calibrated p-values; see the screening guide for measured null
+    behaviour and evaluate promising candidates by refit on held-out data.
 
-    ``edf0`` specifies screening complexity. The default ladder probes both
-    simple and more flexible shapes. For candidate shrinkage factors ``a``,
-    each rung uses ``z = (T / phi - sum(a)) / sqrt(2 * sum(a**2))``;
-    ``sum(a)`` is its achieved EDF. The pair reports the rung with the largest
-    ``z``. Pass a single float to probe one budget. Cell assembly and
-    profiling are shared across the ladder; the dense route also shares one
-    decomposition. The structured route evaluates its block factors at each
-    trial penalty and computes the variance at the emitted penalties.
+    ``edf0`` specifies screening complexity.  For candidate shrinkage factors
+    ``a`` each rung uses ``z = (T / phi - sum(a)) / sqrt(2 * sum(a**2))``, with
+    ``sum(a)`` its achieved EDF, and the pair reports the rung with the largest
+    ``z``.  Pass a single float to probe one budget.
 
-    ``offset`` and ``sample_weight`` both default to the values the model
-    was fitted with (weights only when the fit's were non-unit), so the
-    screen linearizes at the fitted likelihood.  Inherited arrays are in
-    training row order, so inheriting requires ``X``/``y`` to BE the
-    retained training data — screening a holdout, subsample, or reordered
-    frame must pass ``sample_weight`` (and ``offset``) explicitly.  ``T``
-    is scaled by the fit's
-    Pearson dispersion estimate before normalization (see module docstring);
-    the value used is attached as ``table.attrs["phi"]`` and can be
-    overridden with ``phi=`` for a deliberately different calibration study.
+    ``offset`` and ``sample_weight`` default to the values the model was fitted
+    with (weights only when non-unit).  Inherited arrays are in training row
+    order, so inheriting requires ``X``/``y`` to be the retained training data;
+    screening a holdout, subsample or reordered frame must pass them explicitly.
+    ``T`` is scaled by the fit's Pearson dispersion estimate (module docstring);
+    the value used is ``table.attrs["phi"]`` and ``phi=`` overrides it.
 
-    Fitted mains with no screenable margin — ``Polynomial``, ``RandomEffect``,
-    step-mode ``OrderedCategorical`` and any ``OrderedCategorical`` carrying
-    ``specials=`` — are excluded from the sweep and reported in
-    ``table.attrs["deferred_features"]``, a ``{feature: reason}`` mapping that
-    is empty when everything fitted was screened.  Naming one of them in
-    ``candidates`` raises with the same reason.
+    Fitted mains with no screenable margin (``Polynomial``, ``RandomEffect``,
+    step-mode ``OrderedCategorical``, any ``OrderedCategorical`` with
+    ``specials=``) are excluded and reported in ``table.attrs["deferred_features"]``,
+    a ``{feature: reason}`` mapping.  Naming one in ``candidates`` raises with the
+    same reason.
 
-    Returns a frame sorted by ``z`` (descending) with one row per screened
-    pair: ``feature_a, feature_b, kind, statistic, z, edf0, lambda0, n_cells,
-    approx``, where ``kind`` names the interaction class the pair would refit
-    as and ``statistic``/``edf0``/``lambda0`` describe the winning rung.
-    ``statistic`` is therefore NOT comparable across rows (rungs
-    differ) — rank by ``z``.  At a clamped rung ``edf0`` holds the achieved
-    value and ``lambda0`` is a bracket edge, not an interpretable smoothing
-    parameter.
+    Returns a frame sorted by ``z`` (descending) with columns ``feature_a,
+    feature_b, kind, statistic, z, edf0, lambda0, n_cells, approx``;
+    ``statistic``/``edf0``/``lambda0`` describe the winning rung, so
+    ``statistic`` is not comparable across rows: rank by ``z``.  At a clamped rung
+    ``lambda0`` is a bracket edge, not an interpretable smoothing parameter.
 
-    Pairs whose support exceeds the cell or intermediate budgets fall back
-    to quantile binning, largest margin first: a margin with more than
-    ``screen_bins`` unique values is compressed to ``screen_bins``
-    empirical-quantile bins (basis evaluated at within-bin means) and the
-    row is flagged ``approx=True``.  Pairs within budget are always computed
-    exactly — the fallback never touches them — though ``approx`` can still
-    be True for such a pair when its refit would discretize lossily.
-    A pair still over budget after binning is skipped with a NaN row
-    (``n_cells`` reports the grid that was attempted and ``approx`` whether
-    binning was applied), as is a pair whose statistic degenerates.  A pair
-    whose tensor curvature block ``(k_a*k_b)^2`` alone exceeds the budget is
-    skipped immediately — binning cannot shrink basis dimensions, so such
-    rows may report the raw grid with no binning attempted.
+    Pairs whose support exceeds the cell or intermediate budgets fall back to
+    quantile binning, largest margin first (a margin with more than
+    ``screen_bins`` unique values is compressed to ``screen_bins`` quantile bins)
+    and the row is flagged ``approx=True``.  Pairs within budget are computed
+    exactly, though ``approx`` is also True when the confirmatory refit would
+    discretize lossily (a ``ti`` refit bins only when both parents discretize, a
+    ``spline_cat`` refit when its spline parent does, and only when a margin's
+    cardinality exceeds its bin count).  A pair still over budget after binning,
+    or whose statistic degenerates, gets a NaN row (``n_cells`` reports the grid
+    attempted); a pair whose tensor curvature block ``(k_a*k_b)^2`` alone exceeds
+    the budget is skipped without binning.
 
-    ``max_cells`` bounds allocation AND time.  The probe block's dimension
-    ``k`` enters every rung as a ``(k, k)`` decomposition — a pivoted QR of
-    the pair's design factor with one SVD beside it — so per-pair time grows
-    as ``k^3`` where the allocations grow as ``k^2``.  For the gridded kinds
-    a probe column collinear with the overlap span is the routine case rather
-    than the exception (one empty ``cat_cat`` cell or one singleton level does
-    it), and it is settled by a rank cut on that factor: the Cholesky and its
-    pseudo-inverse fallback went with the assembled Grams in issue #257, and
-    the cost class did not move with them.  ``_within_cubic_budget``
-    therefore refuses a pair whose block is too wide to solve inside the
-    budget: ``k^3 <= 1000 * max_cells`` for an unpenalized block, and the
-    same budget against twice the work for a penalized one whose ladder can
-    bisect.  At the default that admits ``k <= 1709`` and ``k <= 1357``
-    respectively; the times measured at those ceilings are in this module's
-    docstring, and raising ``max_cells`` lifts both.  Binning cannot shrink a
-    basis dimension, so the refusal is immediate and no fallback is
-    attempted.  A ``spline_cat`` pair refused here is retried through the
-    arrow kernel, which has no block-dimension ceiling but budgets of its
-    own: the level blocks must fit ``max_cells``, the spline menu's outer
-    products must fit the same intermediate budget the dense path uses (and
-    are quantile-binned first if they do not), and the ladder must be able to
-    afford its arrow factorizations — a pair whose rungs have to bisect costs
-    tens of them and is refused with a NaN row when that does not fit.
-    ``approx`` is also True for any pair whose confirmatory refit would
-    discretize LOSSILY, applying the gate that refit itself uses — which
-    differs by kind.  A ``ti`` refit bins its marginal supports only when
-    BOTH parents resolve to fit-time discretization (per-spec ``discrete``
-    overriding the model flag); a ``spline_cat`` refit bins its spline margin
-    whenever that ONE parent does.  Either way the row is flagged only when
-    some margin the refit would bin has a cardinality exceeding its resolved
-    bin count: lossless binning returns the exact unique support, so those
-    refits match the probe basis and stay ``approx=False``.  A categorical
-    margin never bins and never discretizes — its support is the fitted level
-    set — so it never contributes to the flag, and a ``cat_cat`` row is
-    always ``approx=False``.  A numeric margin never contributes either: it
-    enters its probe linearly, with no grid to build, no support to compress
-    and no basis a refit could discretize, so ``numeric_cat`` and
-    ``numeric_numeric`` rows never reach the binning fallback and are always
-    ``approx=False``.  Every such row that carries a statistic is exact; the
-    only degradation available to these kinds is REFUSAL, since there is
-    nothing to approximate.  A ``numeric_cat`` pair is refused with a NaN row
-    when the factor is too wide for the pair's blocks to fit ``max_cells``
-    (the ``(L+1)``-wide overlap curvature is the largest of them, admitting
-    factors up to 2235 levels at the default) or too wide for them to be
-    SOLVED inside it (``(L-1)^3 <= 1000 * max_cells``, which binds first at
-    the default and admits 1710 levels); raising ``max_cells``
-    lifts the refusal and the pair is then computed exactly.  A
-    ``numeric_numeric`` pair contracts to 3x3 blocks and is never refused.
-    Their ``n_cells`` counts the OTHER margin's cells alone — the factor's
-    fitted levels, or 1 when both margins are numeric.
+    ``max_cells`` bounds allocation and time: ``_within_cubic_budget`` refuses a
+    pair whose block is too wide to solve, ``k^3 <= 1000 * max_cells`` unpenalized
+    and twice the work penalized (``k <= 1709`` and ``k <= 1357`` at the default).
+    A ``spline_cat`` pair refused there is retried through the arrow kernel under
+    its own budgets.  Categorical and numeric margins never bin, so ``cat_cat``,
+    ``numeric_cat`` and ``numeric_numeric`` rows are always ``approx=False`` and
+    their only degradation is refusal: a ``numeric_cat`` pair whose factor is too
+    wide to fit ``max_cells`` (2235 levels at the default) or to be solved within
+    it (1710 levels) gets a NaN row until ``max_cells`` is raised;
+    ``numeric_numeric`` is never refused.  Their ``n_cells`` counts the other
+    margin's cells alone (1 when both are numeric).
     """
     if getattr(model, "_result", None) is None:
         raise RuntimeError("screen_interactions requires a fitted model; call fit_reml first")
@@ -682,13 +461,10 @@ def screen_interactions(
     y = np.asarray(y, dtype=np.float64)
     weights_inherited = False
     if sample_weight is None:
-        # Only a genuinely non-unit fitted weight vector is worth inheriting:
-        # a unit-weight fit screens any frame without arguments (ones cannot
-        # mispair rows), and inheriting them anyway would needlessly pin X/y
-        # to the training data via the fit-data guard below.  Non-unitness is
-        # derived from the STORED array, not the _fit_used_weights stamp: the
-        # editor may rewrite _fit_weights without touching the stamp, and the
-        # array is the ground truth of the published fit state.
+        # Inherit only a genuinely non-unit fitted weight vector: unit weights cannot
+        # mispair rows and inheriting them would pin X/y to the training data.
+        # Non-unitness is read from the stored array, not the _fit_used_weights stamp,
+        # because the editor may rewrite _fit_weights without touching the stamp.
         stored_weights = getattr(model, "_fit_weights", None)
         if stored_weights is not None:
             if np.any(np.asarray(stored_weights) != 1.0):
@@ -760,11 +536,9 @@ def screen_interactions(
     pairs = _validated_pairs(candidates, margin_kinds, fitted_pairs, deferred_features)
 
     def _select_flag(name):
-        # Only spline margins carry a double-penalty flag; an OC margin's
-        # lives on its inner spline.  Unwrapped rather than resolved through
-        # ``_margin_spec``: this gate runs before any column is read, so that
-        # an unbuildable parent is named upfront rather than after the sweep
-        # has paid for (and possibly failed on) the covariates.
+        # Only spline margins carry a double-penalty flag; an OC margin's lives on its
+        # inner spline.  Unwrapped rather than resolved, so an unbuildable parent is
+        # named before any covariate is read.
         spec = model._specs[name]
         if isinstance(spec, OrderedCategorical):
             spec = spec._spline
@@ -806,11 +580,8 @@ def screen_interactions(
     def _margin_source(name):
         """(effective spec, x values) for a margin that grids on a spline.
 
-        A spline-mode OrderedCategorical margin contributes its INNER spline
-        on the mapped level scores — the same resolution the confirmatory
-        refit applies, with the same grouping collapse and level validation —
-        so its label column is read as labels and never float-cast.  Every
-        other spec contributes itself on its own numeric column.
+        A spline-mode OrderedCategorical contributes its inner spline on the mapped
+        level scores, as its refit does; every other spec contributes itself.
         """
         if name not in margin_source_cache:
             spec = model._specs[name]
@@ -829,21 +600,16 @@ def screen_interactions(
     def _margin_spec(name):
         """The spec whose geometry this margin's block is built from.
 
-        A categorical margin is its own spec — its block is the contrast menu
-        over the fitted levels, and resolving it would read the label column
-        as numbers.  Any other margin is its EFFECTIVE spec, which for an
-        OrderedCategorical is the inner spline that carries the menu, the
-        marginal width and the penalty.
+        A categorical margin is its own spec (resolving it would read labels as
+        numbers); any other margin is its effective spec.
         """
         if margin_kinds[name] == "categorical":
             return model._specs[name]
         return _margin_source(name)[0]
 
     for name in sorted({name for pair in pairs for name in pair}, key=repr):
-        # A categorical margin is read through its level labels; every other
-        # margin through its resolved source, which maps an OrderedCategorical's
-        # labels to scores rather than casting them.  Reading them all here
-        # keeps input validation ahead of every statistic.
+        # Categorical margins are read through their level labels, others through their
+        # resolved source; reading all here keeps validation ahead of every statistic.
         if margin_kinds[name] == "categorical":
             _raw_object(name)
         else:
@@ -881,12 +647,9 @@ def screen_interactions(
             )
         if not np.all(np.isfinite(offset)):
             raise ValueError("offset must contain only finite values")
-    # The stabilized predictor directly, NOT link(predict(X)): for a
-    # non-injective link (sqrt) the round trip maps eta to |eta| and flips
-    # the sign of every negative-eta row's score.
-    # predict's predictor, without its warning: on the training rows it is the
-    # fit's own (a thin sz level keeps its fit there), and on new rows it
-    # scores thin and unseen sz levels as predict does (#440 review)
+    # Use the stabilized predictor directly, not link(predict(X)): for a
+    # non-injective link (sqrt) the round trip flips the sign of negative-eta rows.
+    # It is predict's predictor without its warning.
     from superglm.model import base
 
     eta = np.asarray(base.predict_eta_exact(model, X, offset, warn=False), dtype=np.float64)
@@ -944,14 +707,8 @@ def screen_interactions(
     def _one_marginal(name, binned):
         """Build (menu, penalty) for a single feature; each side independently.
 
-        Built from the margin's EFFECTIVE spec on its resolved values, so an
-        OrderedCategorical margin contributes its inner spline over the mapped
-        level scores — column for column the marginal its refit would build.
-
-        Evaluated directly on the compact support via the same
-        ``support=``/``counts=`` path the discrete builder uses (centering
-        direction ``counts @ basis`` equals the full-row column sums), so a
-        million-row feature with a few dozen distinct values never
+        Built from the margin's effective spec on the compact support (``support=``/
+        ``counts=``), so a million-row feature with few distinct values never
         materializes an (n, K) basis.
         """
         key = (name, binned)
@@ -986,10 +743,8 @@ def screen_interactions(
     def _margin_support(name, binned):
         """(codes, support size) for one margin, WITHOUT building its menu.
 
-        Allocation gates run before menu construction. In particular, a wide
-        factor need not allocate its dense (L, L-1) contrast block. Structured
-        search admission also depends on the fitted marginal penalty, so it
-        can build and cache a spline menu before deciding to bin its support.
+        Allocation gates run before menu construction, so a wide factor need not
+        allocate its dense (L, L-1) contrast block.
         """
         if margin_kinds[name] == "categorical":
             return _levels_of(name)
@@ -999,10 +754,8 @@ def screen_interactions(
     def _margin(name, binned):
         """(codes, support size, menu, penalty) for one margin.
 
-        ``binned`` applies to spline margins only — a categorical margin's
-        support IS its fitted level set, which quantile binning cannot and
-        must not compress.  Its penalty is None: the contrast block is
-        unpenalized, so there is nothing to smooth along that direction.
+        ``binned`` applies to spline margins only.  A categorical margin's penalty is
+        None: its contrast block is unpenalized.
         """
         codes, n = _margin_support(name, binned)
         if margin_kinds[name] == "categorical":
@@ -1011,16 +764,12 @@ def screen_interactions(
         return codes, n, menu, S
 
     def _pair_penalty(S_a, S_b, k_a, k_b):
-        """A FACTOR of the pair's block penalty, or None when it has none.
+        """A factor of the pair's block penalty, or None when it has none.
 
-        ``tensor_penalty_root(S, 0)`` factors ``kron(S, I)``, which is exactly
-        the block-diagonal per-level penalty a varying-coefficient refit
-        applies (up to the column permutation the statistic is invariant to).
-        The root rather than the assembly, because the ladder's high edge
-        multiplies the penalty's smallest resolved direction by ``1e10`` and an
-        eigendecomposition of the ASSEMBLY resolves an exactly-null direction
-        only to the assembled dimension's round-off -- six orders, measured at
-        the builder.
+        ``tensor_penalty_root(S, 0)`` factors ``kron(S, I)``, the per-level penalty a
+        varying-coefficient refit applies.  The root is used rather than the assembly
+        because an eigendecomposition of the assembly resolves an exactly-null
+        direction only to the assembled dimension's round-off.
         """
         if S_a is None and S_b is None:
             return None
@@ -1037,86 +786,32 @@ def screen_interactions(
     def _numeric_margin_within_budget(k_g):
         """Budget a numeric x gridded pair BEFORE its menu is built.
 
-        A z-moment pair allocates no cell grid, but everything it does
-        allocate scales with the GRIDDED margin's width, so holding the
-        ``(k_g + 2)^2`` overlap block to ``max_cells`` bounds the pair.  Runs
-        on the level count alone, so an over-budget pair never allocates the
-        dense ``(L, L-1)`` menu it was refused for.
-
-        **WHAT IT BOUNDS IS NO LONGER FOUR MOMENT BLOCKS, AND THE FIGURE IT
-        WAS CALIBRATED TO IS THE ONE THAT MOVED.**  It used to hold four
-        blocks that each fit inside the ceiling -- the menu, the ``(L-1)^2``
-        curvature, the ``(L+1)^2`` overlap curvature and the cross block --
-        and measured ~160 MB at the threshold.  Issue #257 moved the pair onto
-        ``numeric_cat_factor``, which allocates instead ONE joint factor of
-        width ``2L + 1`` (``2 k_g + 3``), the per-chunk emission block beside
-        it, and the merge temporaries of
-        :func:`superglm.screening._factor_kernels._combine_row_factors` -- a
-        Fortran-ordered stack of the accumulator and the new rows, and the
-        leading square of the ``R`` it returns.  Squaring the width squares
-        the block, so the same ceiling now buys four times the area.
-
-        Re-measured on this branch, one BLAS thread, as ``VmHWM`` minus the
-        resident set with the imports already paid, so the figure is the
-        pair's own allocation.  At this gate's own threshold (``k_g = 2234``,
-        2235 levels) the moment route reads 161.9 MB, which is the ~160 MB
-        above; the factor route reads 616.2 MB there.  At ``k_g = 1709`` --
-        1710 levels, which is where the pair is ACTUALLY refused, because
-        ``_within_cubic_budget`` binds first for every ``max_cells`` above 1e6
-        -- the moment route reads 118.4 MB and the factor route 384.5 MB.
-
-        So the widest ``numeric_cat`` pair admitted at the default allocates
-        about 385 MB where it used to allocate about 120 MB.  ``max_cells``
-        is documented as an allocation ceiling and that multiplier is
-        published rather than absorbed; re-fitting these constants to it is
-        the follow-up recorded at the top of this module, and no constant
-        here moves on this branch, so which pairs are admitted is unchanged.
+        A z-moment pair allocates no cell grid; what it allocates scales with the
+        gridded margin's width (one joint factor of width ``2 k_g + 3`` plus merge
+        temporaries), so holding the ``(k_g + 2)^2`` overlap block to ``max_cells``
+        bounds it.  Runs on the level count alone.
         """
         return (k_g + 2) ** 2 <= max_cells
 
     def _within_cubic_budget(k, penalized):
         """Budget the pair's SOLVE TIME, which the allocation gates do not.
 
-        Scoring a pair decomposes a ``(k, k)`` system, so per-pair time grows
-        as ``k^3`` while the gates above grow as ``k^2`` — a block that fits
-        memory comfortably can still take minutes.  A penalized block is
-        charged ``_PENALIZED_LADDER_COST`` times the work: its ladder shares
-        ONE decomposition across every rung, so it now costs barely more than
-        an unpenalized block rather than the 25x a per-rung bisection did.
-        Runs on the block dimension alone, before any menu or cell table is
-        built, so a refused pair pays for nothing; the constants and the
-        ~1.5 s per-pair target they were fitted to are documented at the top
-        of this module.
+        Scoring decomposes a ``(k, k)`` system, so time grows as ``k^3`` where the
+        gates above grow as ``k^2``.  A penalized block is charged
+        ``_PENALIZED_LADDER_COST`` times the work.  Runs on the block dimension alone;
+        the constants are documented at the top of this module.
         """
         work = (_PENALIZED_LADDER_COST if penalized else 1) * int(k) ** 3
         return work <= _CUBIC_BUDGET_FACTOR * max_cells
 
     def _within_structured_budget(k_s, n_levels):
-        """Budget the BLOCK STACKS of a spline_cat pair scored through the
-        arrow kernel.
+        """Budget the block stacks of a spline_cat pair scored through the arrow kernel.
 
-        Nothing here is cubic in the level count and nothing is quadratic in
-        it either, so this gate is linear where every gate above is not.  The
-        pair allocates a handful of ``(n_levels, k_s + 1, k_s + 1)`` stacks.
-        During issue #204's stable profiled-trace assembly, the persistent
-        curvature stack coexists with one additive suffix stack; both are
-        charged here.  The trace's centered-row temporaries are chunked and
-        remain under the support intermediate gate below.  The suffix is
-        discarded before the ladder allocates its blocks, inverses, border
-        coupling and inverse diagonal blocks, so the two phases do not add
-        their level stacks together.
-
-        Charging two padded stack units against a factor of two retains the
-        existing ``max_cells / (k_s + 1)^2`` level ceiling while making the
-        extra live stack explicit instead of silently invalidating the
-        advertised footprint.
-
-        This bounds neither of the pair's other two costs.  The moment
-        assembly's ``(n_a, k_s, k_s)`` intermediate is bounded by
-        ``_within_structured_cells``, because it scales with the SUPPORT and
-        binning can shrink it. ``_structured_evaluation_budget`` separately
-        limits factor passes using cubic work in ``k_s``, where this
-        allocation gate is quadratic.
+        The pair allocates a handful of ``(n_levels, k_s + 1, k_s + 1)`` stacks; the
+        persistent curvature stack and one additive suffix stack coexist during the
+        profiled-trace assembly and both are charged.  The cell intermediate is
+        bounded by ``_within_structured_cells`` and factor passes by
+        ``_structured_evaluation_budget``.
         """
         live_stack_cells = 2 * int(n_levels) * (int(k_s) + 1) ** 2
         return live_stack_cells <= _STRUCTURED_BUDGET_FACTOR * max_cells
@@ -1124,22 +819,10 @@ def screen_interactions(
     def _within_structured_cells(n_a, n_levels, k_s):
         """Budget a structured pair's cell table and its curvature intermediate.
 
-        The structured counterpart of ``_within_budget``, and the same two
-        terms.  The kernel forms one ``(n_a, k_s, k_s)`` stack of the spline
-        menu's outer products and contracts it against every level's weights
-        — the TRANSPOSE of the intermediate the dense path is gated on, which
-        no gate above bounds: ``_within_structured_budget`` holds
-        ``n_levels * k_s^2`` and the cell term holds ``n_a * n_levels``, and
-        neither is ``n_a * k_s^2``.  Measured on a width-45 spline over
-        147,000 support points against a 34-level factor — a pair that passes
-        both of those, the block-stack gate at 1/69th of its budget —
-        ``screen_interactions`` peaked at 2,545 MB on that one pair, of which
-        2,271 MB was this one array.
-
-        Both terms scale with the SUPPORT, so failing either bins the spline
-        margin first and refuses only when binning runs out, exactly as the
-        dense path does; that same pair binned to 256 points peaks at 27 MB
-        and is still scored, flagged ``approx``.
+        The structured counterpart of ``_within_budget``.  The kernel forms one
+        ``(n_a, k_s, k_s)`` stack of the spline menu's outer products, which scales
+        with the support and which no other gate bounds.  Failing either term bins the
+        spline margin first and refuses only when binning runs out.
         """
         cells_ok = int(n_a) * int(n_levels) <= max_cells
         inter_ok = int(n_a) * int(k_s) ** 2 <= _INTERMEDIATE_BUDGET_FACTOR * max_cells
@@ -1148,48 +831,30 @@ def screen_interactions(
     def _structured_evaluation_budget(n_a, k_s, n_levels):
         """Factor-pass allowance after paying for structured setup.
 
-        Allocation gates scale quadratically in spline width; each arrow
-        factorization scales cubically. The work estimate first deducts
-        compressed-cell QR setup and per-level merges, then converts the
-        remaining work to a factor-pass count.
-
-        The kernel evaluates two bracket endpoints before it knows which
-        EDF targets require bisection. It reserves the worst-case search
-        cost plus a final variance pass for each distinct emitted lambda.
-        A ladder clamped to one edge therefore needs three passes. Final
-        variance passes also add linear-in-levels QR-tree work. Passes have
-        different costs: this count is neither a bound on floating-point
-        operations nor a wall-clock guarantee. The width-45, 34-level review
-        measurement and its profiler breakdown are recorded in
+        Each arrow factorization scales cubically in spline width.  The work estimate
+        deducts compressed-cell QR setup and per-level merges, then converts the
+        remainder to a factor-pass count, reserving the worst-case search cost plus a
+        final variance pass per distinct emitted lambda (three for a ladder clamped to
+        one edge).  The count is neither a flop bound nor a wall-clock guarantee; see
         ``notes/research/2026-09-psst-reference-variance.md``.
-
-        Exact support that cannot afford setup may be retried after spline
-        binning. The kernel makes the final admission decision once it knows
-        which targets need a search and which share a clamp.
         """
         return _structured_evaluation_allowance(max_cells, n_a, k_s, n_levels)
 
     rows = []
     from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
 
-    # Discretization is decided per SPEC, not per model: spec.discrete
-    # overrides the model flag.  Discretization is LOSSLESS when a margin's
-    # cardinality fits its resolved bin count (the binner returns the exact
-    # unique support), so approx flags only a refit whose basis genuinely
-    # differs from the probe: some margin the refit would bin, binned lossily.
+    # Discretization is decided per SPEC (spec.discrete overrides the model flag)
+    # and is lossless when a margin's cardinality fits its bin count, so approx
+    # flags only a refit whose basis differs from the probe.
     model_discrete = bool(getattr(model, "_discrete", False))
     n_bins_config = getattr(model, "_n_bins", 256)
 
     def _refit_binned_margins(kind, feat_a, feat_b):
         """The margins whose basis the confirmatory refit would discretize.
 
-        Mirrors the gates the builder itself applies, which differ by class: a
-        ti() refit bins its marginal supports only when BOTH parents
-        discretize, while a SplineCategorical refit bins its spline margin
-        whenever that ONE parent does.  A categorical margin has nothing to
-        compress and never appears here: only a margin that grids on a spline
-        can put a refit out of step with the probe, and the OC-parented pairs
-        that could are already short-circuited by the caller.
+        Mirrors the builder's gates: ti() bins only when BOTH parents discretize, a
+        SplineCategorical refit when its ONE spline parent does.  Categorical margins
+        never appear.
         """
         # By design: a numeric margin has no basis to bin, so numeric_cat and
         # numeric_numeric can never contribute a binned margin.
@@ -1206,12 +871,8 @@ def screen_interactions(
         return splines
 
     def _pair_refits_discrete(kind, feat_a, feat_b):
-        # An OrderedCategorical parent refuses fit-time discretization outright,
-        # whatever the model flag says and whatever its inner spline would say
-        # alone (should_discretize_tensor_interaction and its spline_cat sibling
-        # both gate on the parent spec): an OC margin already lives on at most
-        # n_levels score points, so the refit has nothing to compress and always
-        # sees the probe's own basis.
+        # An OrderedCategorical parent refuses fit-time discretization: it already lives
+        # on at most n_levels score points, so the refit sees the probe's own basis.
         if any(isinstance(model._specs[name], OrderedCategorical) for name in (feat_a, feat_b)):
             return False
         return any(
@@ -1228,14 +889,10 @@ def screen_interactions(
         # it None and is scored from its own design factor.
         structured_results = None
         if kind in ("numeric_cat", "numeric_numeric"):
-            # A numeric margin enters the probe LINEARLY, so the pair has no
-            # joint grid to assemble: z-weighted moments over the other
-            # margin's cells are the exact sufficient statistics, with nothing
-            # to bin and no cell grid to budget.  The block carries no penalty
-            # either, so one rung is the ladder.  What is left to budget is the
-            # OTHER margin's own blocks, which is why a factor too wide for
-            # them is refused below — refusal is the only degradation a
-            # z-moment pair has, since it cannot approximate.
+            # A numeric margin enters the probe linearly: z-weighted moments over the other
+            # margin's cells are exact sufficient statistics, with no grid to bin or budget
+            # and no penalty, so one rung is the ladder.  Refusal (a factor too wide for its
+            # own blocks) is the only degradation.
             S_root, approx = None, False
             if kind == "numeric_numeric":
                 factor = numeric_numeric_factor(
@@ -1271,10 +928,9 @@ def screen_interactions(
                     codes_g, n_g, menu_g, _raw_numeric(num_name), score, working_weights
                 )
         else:
-            # Assemble with the categorical margin LAST, so a mixed pair's penalty
-            # is kron(S_spline, I) — the varying-coefficient block layout.  The
-            # reported feature_a/feature_b keep the caller's order; the statistic
-            # is invariant to the column permutation the swap amounts to.
+            # Assemble with the categorical margin LAST so a mixed pair's penalty is
+            # kron(S_spline, I), the varying-coefficient layout.  The statistic is invariant
+            # to the column permutation; reported feature_a/feature_b keep the caller's order.
             left, right = feat_a, feat_b
             if margin_kinds[left] == "categorical" and margin_kinds[right] != "categorical":
                 left, right = right, left
@@ -1288,10 +944,9 @@ def screen_interactions(
             # score EXACTLY changes.  Cleared when it runs out of exact moves,
             # which hands a spline_cat pair to the arrow kernel below.
             allow_dense = True
-            # Set when that handoff was taken speculatively, on a width
-            # estimate that is biased low: if the true width then puts the
-            # pair outside the arrow budgets, the dense path gets its binning
-            # fallback back rather than the pair becoming a NaN row.
+            # Set when the handoff was taken speculatively on a width estimate biased low:
+            # if the true width falls outside the arrow budgets, the dense path regains its
+            # binning fallback instead of the pair becoming a NaN row.
             arrow_lookahead = False
             # A failed handoff cannot repeat on the same support. Keep
             # numerical certification refusals latched for the whole pair.
@@ -1309,22 +964,18 @@ def screen_interactions(
                     (k_l * k_r) ** 2 <= _INTERMEDIATE_BUDGET_FACTOR * max_cells
                     and _within_cubic_budget(k_l * k_r, kind in ("ti", "spline_cat"))
                 )
-                # But a spline x categorical pair never has to form that block.
-                # Grouped by level its bordered system is an arrow matrix — the
-                # levels touch each other nowhere, only the intercept and the
-                # spline main — which factorizes in time and memory LINEAR in
-                # the level count.  So a pair the dense gates refuse gets
-                # retried against the structured gate instead of skipped.
+                # A spline x categorical pair never has to form the dense block: grouped by
+                # level its bordered system is an arrow matrix, factorized in time and memory
+                # linear in the level count.  A pair the dense gates refuse is retried against
+                # the structured gate.
                 structured = kind == "spline_cat" and not dense_ok
                 structured_setup_ok = True
                 if not (dense_ok or structured):
                     break
                 if structured:
-                    # The block stacks do not depend on support, so binning
-                    # cannot rescue them.  The profiled-trace setup now DOES:
-                    # its two centered-geometry passes scale with n_l, so an
-                    # unaffordable exact support must reach the ordinary
-                    # spline-binning fallback below rather than terminate.
+                    # The block stacks do not depend on support, but the profiled-trace setup does
+                    # scale with n_l, so an unaffordable exact support must reach the spline-binning
+                    # fallback below.
                     arrow_budget = _structured_evaluation_budget(n_l, k_l, n_r)
                     if not _within_structured_budget(k_l, n_r):
                         if arrow_lookahead:
@@ -1355,21 +1006,12 @@ def screen_interactions(
                         if (menu_l.shape[1], level_rows.size) != (k_l, k_r):
                             k_l, k_r = menu_l.shape[1], int(level_rows.size)
                             continue
-                        # The ladder is run HERE, inside the routing loop,
-                        # because whether the arrow path can score this pair is
-                        # a routing question and not merely a scoring one.  Its
-                        # cost turns on the penalty's null space rather than on
-                        # any dimension, so no gate above can predict it and it
-                        # can only refuse once tried -- and a speculative
-                        # handoff that is refused must hand the dense track
-                        # back, exactly as the width and support exits already
-                        # do, rather than deleting a pair the dense path could
-                        # still score.
+                        # The ladder runs here because whether the arrow path can score a pair is a
+                        # routing question: its cost depends on the penalty's null space, so no gate can
+                        # predict it.  A refused speculative handoff hands the dense track back.
                         try:
-                            # Two endpoints and a final variance pass are a
-                            # lower bound for any penalized ladder. Reject
-                            # this case before allocating its cell tables;
-                            # other budget refusals come from the ladder.
+                            # Two endpoints and a final variance pass are a lower bound for any penalized
+                            # ladder; reject before allocating cell tables.
                             if arrow_budget < 3 and np.any(S_l):
                                 raise _StructuredBudgetExceededError
                             S_cell, W_cell = pair_cell_moments(
@@ -1388,10 +1030,8 @@ def screen_interactions(
                                 raise_on_budget=True,
                             )
                         except _StructuredBudgetExceededError:
-                            # Binning can free work for search and variance
-                            # passes. A speculative refusal must also latch,
-                            # or the unchanged dense state immediately tries
-                            # the same unaffordable handoff again.
+                            # Binning can free work for search and variance passes.  A speculative refusal
+                            # must latch, or the unchanged dense state retries the same handoff.
                             if arrow_lookahead:
                                 allow_dense, arrow_lookahead = True, False
                                 arrow_budget_refused = True
@@ -1428,26 +1068,13 @@ def screen_interactions(
                     )
                 if not binnable:
                     if arrow_lookahead:
-                        # The speculative handoff has now run out of support
-                        # fallback too, so the arrow path cannot score this
-                        # pair either.  Hand the dense track back rather than
-                        # dropping the pair: the handoff was taken to try for
-                        # an EXACT score in place of an approximate one, and
-                        # giving up the approximate one as well trades a
-                        # scored row for a NaN.  Measured on a 10-level factor
-                        # against a 6,000-point ps(8) support at
-                        # max_cells=100_000, screen_bins=4_000: NaN here,
-                        # against z=1.1374404130844136 once the dense track is
-                        # restored.  The same restore the width recheck above
-                        # already performs, at the other exit.
+                        # The speculative handoff has run out of support fallback too.  Hand the dense
+                        # track back rather than trading a scored (approximate) row for a NaN; the same
+                        # restore the width recheck above performs.
                         allow_dense, arrow_lookahead = True, False
                         continue
-                    # The dense path has no moves left.  Hand a spline_cat
-                    # pair to the arrow kernel before giving up: the width
-                    # estimate that kept it on the dense track is biased LOW
-                    # by design, so a pair whose true dimension would have
-                    # routed it structurally can reach here still believing
-                    # it was dense-affordable.
+                    # The dense path has no moves left.  Try the arrow kernel for a spline_cat pair
+                    # before giving up: the dense-track width estimate is biased low by design.
                     if (
                         allow_dense
                         and not structured
@@ -1458,14 +1085,10 @@ def screen_interactions(
                         continue
                     break
                 if allow_dense and not structured and kind == "spline_cat":
-                    # About to compress the spline margin, which means the
-                    # dense path can no longer score this pair EXACTLY.  The
-                    # arrow path may still be able to, on the support as it
-                    # stands — its intermediate is the transpose of the one
-                    # that just failed, so failing that one says nothing about
-                    # this one.  An exact score beats an approximate one, so
-                    # try it before binning rather than after.  `left` is the
-                    # spline margin for spline_cat, by the swap above.
+                    # About to compress the spline margin, after which the dense path can no longer
+                    # score the pair exactly.  The arrow path may still: its intermediate is the
+                    # transpose of the one that failed.  Prefer an exact score to an approximate one.
+                    # `left` is the spline margin for spline_cat, by the swap above.
                     if (
                         not (arrow_refused or arrow_budget_refused)
                         and _within_structured_budget(k_l, n_r)
@@ -1503,30 +1126,15 @@ def screen_interactions(
                 )
                 factor = pair_design_factor(menu_l, menu_r, S_cell, W_cell)
                 S_root = _pair_penalty(S_l, S_r, menu_l.shape[1], menu_r.shape[1])
-        # An unpenalized block has no bandwidth to scan: every rung returns the
-        # same achieved rank, statistic and lambda0=0, so one rung is the ladder.
-        # A penalty whose every direction is round-off reaches here as an EMPTY
-        # root, which is the same predicate the assembled ``np.any(S_ti)`` made.
+        # An unpenalized block has no bandwidth to scan: every rung returns the same
+        # rank, statistic and lambda0=0, so one rung is the ladder.  A penalty whose
+        # directions are all round-off arrives as an empty root.
         penalized = structured_results is None and S_root is not None and S_root.size > 0
-        # The whole ladder shares ONE decomposition, and since issue #257 that
-        # is true of the CLAMPED rungs too.  The pencil that turns edf(lambda)
-        # and T(lambda) into closed forms depends on neither lambda nor edf0,
-        # so every rung after the first costs O(k) instead of a fresh O(k^3)
-        # solve — and the bisection that used to re-solve ~27 times per rung
-        # now runs on the closed form.
-        #
-        # This also retires the clamped-rung skip that used to guard the same
-        # cost.  Its own justification was that a rung clamping UPWARD returns
-        # an identical (statistic, edf0, lambda0) triple for every strictly
-        # lower budget; an identical triple gives an identical z, and the
-        # comparison below is STRICT, so recomputing those rungs cannot
-        # displace the incumbent.  Same output, one less special case.
-        #
-        # AND IT RETIRES THE SECOND ESTIMATOR THE BRACKET USED TO CARRY.  A
-        # clamped rung used to be answered from the bracket's own
-        # factorization of V_eff + lambda S while a searching rung read the
-        # pencil, so two rungs landing on one lambda could publish two
-        # different degrees of freedom for it.  Both read the pencil now.
+        # The whole ladder shares ONE decomposition, clamped rungs included.  The pencil
+        # that turns edf(lambda) and T(lambda) into closed forms depends on neither
+        # lambda nor edf0, so every rung after the first costs O(k).  Recomputing rungs
+        # that clamp to an identical triple cannot displace the incumbent, since the
+        # comparison below is strict.
         results = structured_results
         if results is None:
             results = penalized_score_statistic_ladder(
@@ -1537,19 +1145,9 @@ def screen_interactions(
         best_z, best = -np.inf, None
         for result in results:
             if not result.edf0 > 0.0 or not result.reference_variance > 0.0:
-                # A rung that resolved NO direction at all has no test to run,
-                # and the normalization divides by its reference deviation -- so scoring
-                # it would report z = inf and sort a pair carrying no
-                # information to the TOP of the table.  Skipped, and if no rung
-                # survives the pair falls through to the NaN row every other
-                # refusal takes.
-                #
-                # A pure arithmetic guard, deliberately: rank 0 means the
-                # kernel resolved nothing, not that the interaction looked
-                # weak.  Nothing upstream discards a pair for being weakly
-                # identified -- see the THRESHOLD TYPES note in
-                # superglm.screening._score_stat -- so this fires only on a
-                # block with no resolvable direction whatsoever.
+                # A rung that resolved no direction has no test to run, and the normalization
+                # would report z = inf and sort an uninformative pair to the top.  This is a
+                # pure arithmetic guard (rank 0), not a weak-identification threshold.
                 continue
             statistic = result.statistic / phi_hat
             z = (statistic - result.edf0) / np.sqrt(result.reference_variance)

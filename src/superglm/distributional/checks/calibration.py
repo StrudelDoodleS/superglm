@@ -1,58 +1,25 @@
 """Calibration tables for a fitted distributional model.
 
-Four questions a pricing or forecasting review asks of a predictive
-distribution, and one table each.
-
-* **Does the interval hold?**  The realised coverage of the central predictive
-  interval at each level, overall and by decile of each predicted parameter.
-  Calibration in the sense of Gneiting, Balabdaoui and Raftery (2007), *Journal
-  of the Royal Statistical Society: Series B* 69(2), 243-268.
-* **Does the tail hold?**  Expected ``sum P(Y > t)`` against the realised count
-  of exceedances, with the Poisson-binomial standard error and the log score of
-  the binary event, overall and by decile of the predicted exceedance
-  probability.
-* **Do the quantiles hold?**  The realised exceedance rate of each predicted
+* **Interval coverage:** realised coverage of the central predictive interval
+  per level, overall and by decile of each predicted parameter (Gneiting,
+  Balabdaoui and Raftery 2007, *JRSS B* 69(2)).
+* **Tail exceedance:** expected ``sum P(Y > t)`` against the realised count,
+  with the Poisson-binomial standard error and the binary log score.
+* **Quantile calibration:** realised exceedance rate of each predicted
   ``p``-quantile against ``1 - p``.
-* **Does the total hold?**  :func:`actual_expected_check` reports, per bin or
-  level of a covariate, the realised total ``sum w y`` against the predicted
-  total ``sum w mu_hat`` and their ratio.  This is a **ratio of sums**, computed
-  through :func:`~superglm.distributional.checks._aggregate.grouped_ratio`: for a
-  burn-cost target with exposure weights it is total cost over total expected
-  cost, never the mean of per-row ratios.
+* **Actual versus expected:** :func:`actual_expected_check`, a ratio of sums
+  ``sum w y / sum w mu_hat`` per bin (see
+  :func:`~superglm.distributional.checks._aggregate.grouped_ratio`).
+* **Reliability:** :func:`reliability_curve`, the CORP diagram with
+  consistency bands (Dimitriadis, Gneiting and Jordan 2021, *PNAS* 118(8)),
+  via PAV isotonic regression (Ayer et al. 1955; de Leeuw, Hornik and Mair 2009).
 
-Where a threshold is given, :func:`reliability_curve` adds the CORP reliability
-diagram of Dimitriadis, Gneiting and Jordan (2021), *Proceedings of the National
-Academy of Sciences* 118(8), e2016191118: the exceedance forecast is
-(re)calibrated by isotonic regression through the pool-adjacent-violators
-algorithm (Ayer, Brunk, Ewing, Reid and Silverman 1955, *Annals of Mathematical
-Statistics* 26(4), 641-647; de Leeuw, Hornik and Mair 2009, *Journal of
-Statistical Software* 32(5)), which chooses the binning rather than taking one
-from the analyst.  The bands are the paper's **consistency** bands: each
-resample draws fresh events from the original forecast probabilities, so the
-band shows how far a diagram can stray while the forecast is in fact calibrated,
-and is positioned about the diagonal.
-
-**Interval coverage and quantile calibration read the randomised PIT whenever
-the family has an atom.**  On the response, a point mass makes both tables
-answer the wrong question: every central interval whose lower quantile has
-landed on the atom contains the atom, so a zero response counts as covered, and
-every predicted ``p``-quantile below the mass is zero, so the realised
-exceedance is flat at ``1 - P(Y = 0)`` for each such ``p`` however large ``p``
-is.  On an 83 per cent zero book that reads 0.85 at the nominal 50 per cent
-level.  The randomised probability integral transform
-``u ~ U(F(y-), F(y))`` of Dunn and Smyth (1996) is uniform under the model
-whatever the atom does, so "covered at level ``l``" becomes
-``(1 - l) / 2 <= u <= 1 - (1 - l) / 2`` and "exceeds the ``p``-quantile"
-becomes ``u > p``, both exact.  ``CalibrationPayload.calibration_law`` names
-which of the two a table was built on; tail exceedance and actual-versus-
-expected compare totals rather than positions and are unaffected.
-
-Weights are read under the model's declared contract exactly as the fit reads
-them.  A prior weight is part of the row's own law, so every distribution
-function and quantile here is the prior-weighted one; a family that cannot
-express its weighted law refuses rather than quietly inverting the unit-weight
-distribution.  A frequency weight is replication, so it multiplies each row's
-contribution to a total and its variance.
+When the family has an atom, coverage and quantile calibration read the
+randomised PIT ``u ~ U(F(y-), F(y))`` (Dunn and Smyth 1996), which stays
+uniform under the model; on the response every interval touching the atom
+would count it as covered. Weights follow the fit's contract: prior weights
+enter each row's law (a family without a weighted law refuses), frequency
+weights replicate rows.
 """
 
 from __future__ import annotations
@@ -99,10 +66,8 @@ from superglm.distributional.residuals import (
     compute_residuals,
 )
 
-# ``_equal_count_bins`` splits rows by rank rather than by value, which is what
-# keeps a decile table ten rows wide even for a parameter the model holds
-# constant; ``SCHEMA_VERSION`` and the JSON helpers are the suite's payload
-# conventions.
+# ``_equal_count_bins`` splits by rank, so a decile table stays ten rows wide
+# even for a constant parameter.
 from superglm.distributional.surfaces import (
     SCHEMA_VERSION,
     _equal_count_bins,
@@ -234,19 +199,11 @@ class CalibrationPayload:
     """Interval coverage, tail exceedance, quantile calibration and reliability.
 
     ``calibration_law`` names the law the ``coverage`` and ``quantiles`` tables
-    were read on:
-
-    ``"response"``
-        the response against the predicted quantiles, which is exact for a
-        family with no point mass.
-    ``"randomised_pit"``
-        the randomised probability integral transform of ``residuals``, which
-        is what a family with an atom needs -- see the module docstring.
-
-    ``tails`` and :class:`ActualExpected` compare totals and are the same under
-    either law. Randomised coverage/quantile ``n``, ``weight`` and errors count
-    sampled occurrences (capped at 100,000); response-law tables retain full
-    weighted totals. ``n_rows`` always counts retained physical input rows.
+    were read on: ``"response"`` (exact without a point mass) or
+    ``"randomised_pit"`` (the randomised PIT of ``residuals``, for a family
+    with an atom). ``tails`` and :class:`ActualExpected` compare totals and are
+    the same under either. Randomised tables count sampled occurrences (capped
+    at 100,000); ``n_rows`` counts retained physical input rows.
     """
 
     coverage: pd.DataFrame
@@ -340,13 +297,10 @@ def reliability_curve(
 ) -> ReliabilityCurve:
     """Return the CORP reliability diagram of a binary forecast.
 
-    The conditional event probability is estimated by isotonic regression of the
-    events on the forecast values, which pools tied forecasts and then chooses
-    its own bins through the PAV algorithm (Dimitriadis, Gneiting and Jordan
-    2021).  The consistency band resamples ``n_boot`` sets of events drawn from
-    the original forecast probabilities and reads the 2.5th and 97.5th
-    percentiles of the resampled diagrams, so it answers "how far would a
-    calibrated forecast's diagram wander here".
+    The conditional event probability is the isotonic (PAV) regression of the
+    events on the forecasts (Dimitriadis, Gneiting and Jordan 2021). The
+    consistency band is the 2.5th–97.5th percentiles of ``n_boot`` diagrams
+    resampled from events drawn at the forecast probabilities.
     """
     boot = int(n_boot)
     if boot < 1:
@@ -492,10 +446,8 @@ def _row_variance(
 ) -> tuple[NDArray[np.float64], str]:
     """Return each row's predictive variance and the law it was read from.
 
-    Under non-unit prior weights the weight is inside the row's law, so the
-    order of preference is the family's own weighted variance, then simulation
-    on the weighted law, and only then the unit-weight variance -- which
-    ignores the weight altogether and is reported as such.
+    Under non-unit prior weights: the family's weighted variance, then
+    simulation on the weighted law, then the unit-weight variance (reported).
     """
     family = fitted.family
     prior_law = rows.prior_law
@@ -543,15 +495,11 @@ def actual_expected_check(
 ) -> ActualExpected:
     """Return realised against predicted totals per bin or level of ``covariate``.
 
-    ``covariate`` gives one value per row of ``X``.  Every group's number is a
-    ratio of weighted sums: ``sum w y`` over ``sum w mu_hat``, so with exposure
-    weights on a rate target the table reads as total cost over total expected
-    cost.  The standard error is that of the realised total under the fitted
-    law -- ``sum w^2 Var(Y)`` under prior weights, where the weight sits inside
-    each row's law, and ``sum w Var(Y)`` under frequency weights, where a weight
-    of ``w`` is ``w`` independent rows -- over the magnitude of the predicted
-    total, so ``|ratio - 1| <= 3 ratio_se`` is exactly ``|actual - expected|``
-    within three standard deviations whatever sign the total carries.
+    ``covariate`` gives one value per row of ``X``. Each group's ratio is
+    ``sum w y`` over ``sum w mu_hat``. The standard error is the realised
+    total's under the fitted law (``sum w^2 Var(Y)`` under prior weights,
+    ``sum w Var(Y)`` under frequency weights) over ``|expected|``, so
+    ``|ratio - 1| <= 3 ratio_se`` means within three standard deviations.
     """
     family = fitted.family
     if not isinstance(family, DefaultPredictionFamily):
@@ -657,18 +605,13 @@ def calibration_payload(
 ) -> CalibrationPayload:
     """Return the coverage, tail, quantile-calibration and reliability tables.
 
-    ``by_parameter_deciles`` adds, beside the overall row, one row per decile of
-    each predicted parameter to the coverage table and one per decile of the
-    predicted exceedance probability to the tail table.  Passing ``residuals``
-    reuses its randomised values after checking the current deterministic
-    evaluation, including parameters, CDF intervals and weights, because
-    residuals from another model or another sample would silently make every
-    table below a statement about the wrong fit.
-
-    Coverage and quantile calibration are read on the randomised PIT of
-    ``residuals`` when the family declares an atom (or when the residuals
-    carry randomised rows), and on the response otherwise; the payload's
-    ``calibration_law`` says which, and the module docstring says why.
+    ``by_parameter_deciles`` adds one row per decile of each predicted
+    parameter to the coverage table and per decile of the predicted
+    exceedance probability to the tail table. Passed ``residuals`` are reused
+    after checking they match this model, sample and weights. Coverage and
+    quantile calibration read the randomised PIT when the family declares an
+    atom (or the residuals are randomised), else the response;
+    ``calibration_law`` records which.
     """
     asked_levels = tuple(_validated_probability("level", value) for value in levels)
     asked_grid = tuple(_validated_probability("p", value) for value in quantile_grid)
@@ -689,12 +632,8 @@ def calibration_payload(
         )
     theta = residuals.theta
     response = rows.response
-    # A family with a point mass answers "is the response inside this interval"
-    # and "does it exceed this quantile" on the randomised PIT, which is uniform
-    # under the model whatever the atom does; anything else reads the atom as
-    # covered by every interval that touches it.  The declared atom decides,
-    # not the sample, so a book that happens to carry no atom row still reads
-    # the same law -- there the two agree row for row anyway.
+    # A family that declares a point mass reads coverage and quantile
+    # exceedance on the randomised PIT; the declared atom decides, not the sample.
     randomised = isinstance(family, AtomFamily) or residuals.randomised_rows > 0
     law: CalibrationLaw = "randomised_pit" if randomised else "response"
     sample = _sample_residuals(residuals, seed=seed)

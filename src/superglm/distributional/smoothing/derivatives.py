@@ -1,28 +1,16 @@
 """Exact gradient and Hessian of the negative LAML in log smoothing parameters.
 
-Wood, Pya and Säfken (2016) §3.1.3–3.2 with the third and fourth derivatives of
-the row log-likelihood along the K parameter directions, recombined by
-linearity: from the family's analytic curvature directions where it has them
-(``predictor_curvature_directional_derivative`` and
-``predictor_curvature_second_directional_derivative``), otherwise by finite
-differences of the packed row curvature (``endpoint_direction``).  Every
-quantity is for ``F(rho) = joint_laplace_objective`` at the
-fit's own penalised curvature ``H``, and the packed curvature is the negated
-row Hessian in the linear predictors.
-
-The dense coefficient solver publishes the observed penalised Hessian as its
-terminal curvature whatever step policy it ran (``coefficient_curvature`` only
-chooses the inner iteration's geometry), so ``H = -grad^2 l(beta_hat) + S`` is
-the matrix inside ``F`` and the one the implicit derivative of the mode goes
-through; a fit whose terminal curvature fell back to Fisher had a materially
-indefinite observed Hessian, where that derivative does not exist, and is
-refused by default.  ``curvature="terminal"`` differentiates the curvature the
-fit accepted instead: the expected information, or the observed curvature with
-each row's block projected onto the semidefinite cone, as Wood, Pya and Saefken
-(2016, section 3.3.1) and Wood and Fasiolo (2017, section 3) substitute for an
-observed Hessian that is not positive definite.  ``F`` is then the Laplace
-objective of that substitute and every implicit derivative of the mode goes
-through it, a first-order approximation to the true one.
+Wood, Pya and Säfken (2016) §3.1.3–3.2, with the third and fourth derivatives
+of the row log-likelihood along the K parameter directions taken from the
+family's analytic curvature directions where it has them, otherwise by finite
+differences of the packed row curvature (``endpoint_direction``). ``F(rho)``
+is ``joint_laplace_objective`` at the fit's penalised curvature
+``H = -grad^2 l(beta_hat) + S``, through which the implicit derivative of the
+mode goes; a fit whose terminal curvature fell back to Fisher is refused by
+default. ``curvature="terminal"`` differentiates the accepted substitute
+instead (expected information, or each row block projected onto the
+semidefinite cone; Wood, Pya and Säfken 2016 §3.3.1, Wood and Fasiolo 2017 §3),
+a first-order approximation to the true derivative.
 """
 
 from __future__ import annotations
@@ -112,19 +100,11 @@ def _readonly(values: NDArray, *, name: str, shape: tuple[int, ...]) -> NDArray[
 class LamlDerivatives:
     """Gradient and Hessian of the negative LAML in log lambda at one fit.
 
-    ``hessian`` and ``hessian_certificate`` are ``None`` when the caller asked
-    for the gradient only.  ``fs_gradient`` holds the three Fellner–Schall
-    terms alone, ``gradient`` minus the trace of ``H^-1`` against the
-    third-derivative correction that the FS update omits.  ``penalty_hessian``
-    is the Hessian with the likelihood's third and fourth derivatives dropped:
-    every term of ``h_kl`` that the fit's factor and the penalties alone
-    determine (exact for a Gaussian identity link), which a gradient-only pass
-    freezes and judges its stopping test with; it vanishes at a working
-    infinity as the exact Hessian does, where the Fellner–Schall diagonal
-    ``1/2 lambda_k beta' S_k beta + 1/2 lambda_k tr(H^-1 S_k)`` tends to half
-    the penalty rank.  ``evaluations`` counts the packed-curvature evaluations
-    this call made (a Hessian pass reusing a gradient pass's stencils counts
-    only its own).
+    ``hessian`` and ``hessian_certificate`` are ``None`` for a gradient-only
+    call. ``fs_gradient`` holds the three Fellner–Schall terms alone.
+    ``penalty_hessian`` drops the likelihood's third and fourth derivatives
+    (exact for a Gaussian identity link); a gradient-only pass judges its stop
+    with it. ``evaluations`` counts this call's packed-curvature evaluations.
     """
 
     names: tuple[str, ...]
@@ -236,12 +216,9 @@ def _first_derivatives(
 ) -> tuple[list[NDArray[np.float64]], list[NDArray[np.float64]], list[_Stencil | None], int]:
     """First derivatives of the packed rows along the parameter axes.
 
-    Returns ``(D1, C1, stencils, evaluations)``: ``D1[q]`` is ``d rows / d eta_q``
-    with certificate ``C1[q]`` (for an analytic derivative, the family's
-    certified error, zero for closed forms, evaluated once when admitted) and
-    ``stencils[q]`` the four-point axis stencil it was differenced on, which
-    the second-derivative stage shares (``None`` for an analytic derivative,
-    which evaluates nothing).
+    Returns ``(D1, C1, stencils, evaluations)``; ``stencils[q]`` is the
+    four-point axis stencil the second-derivative stage reuses (``None`` for
+    an analytic derivative, whose certificate is the family's).
     """
     n_observations, k_parameters = eta.shape
     first: list[NDArray[np.float64]] = []
@@ -279,17 +256,10 @@ def _second_derivatives(
 ]:
     """Second derivatives of the packed rows along the axes and the mixed pairs.
 
-    Returns ``(D2, C2, evaluations)``: ``D2[(q, r)]`` for ``q <= r`` is
-    ``d^2 rows / d eta_q d eta_r`` with certificate ``C2[(q, r)]``.  A diagonal
-    pair is the five-point stencil on the axis stencil (evaluated here when
-    the first-derivative stage was analytic and left none) and the centre
-    value, which every pair shares; a mixed pair is the single-direction
-    polarisation ``D4[e_q, e_r] = (D4[e_q + e_r, e_q + e_r] - D4[e_q, e_q]
-    - D4[e_r, e_r]) / 2`` on one extra stencil along ``(e_q + e_r) / sqrt 2``,
-    reusing the diagonal second differences, with half the sum of the three
-    certificates as its own: ``1 + 4K + 4K(K - 1)/2`` evaluations in all
-    (25 at K = 3), the axis stencils reused from the gradient pass when it
-    differenced them.
+    Returns ``(D2, C2, evaluations)`` for pairs ``q <= r``. Diagonal pairs use
+    the five-point axis stencil; a mixed pair uses polarisation
+    ``(D[e_q + e_r] - D[e_q] - D[e_r]) / 2`` on one extra stencil, with half
+    the three certificates' sum: ``1 + 4K + 4K(K - 1)/2`` evaluations in all.
     """
     n_observations, k_parameters = eta.shape
     center = rows(eta)
@@ -334,12 +304,8 @@ def _cross_all(
 ) -> NDArray[np.float64]:
     """``X^T diag-blocks(packed[:, k, :]) X`` for every ``k`` at once, as ``(m, P, P)``.
 
-    ``packed`` is ``(n, m, K(K+1)/2)``, the packed row weights of ``m``
-    components.  For each packed channel ``(l, r)`` the ``m`` products
-    ``X_l^T diag(w_k) X_r`` are one GEMM per chunk of rows,
-    ``X_l[c]^T @ (w[c, :, channel][:, :, None] * X_r[c][:, None, :]).reshape(b, m P_r)``,
-    with at most ``chunk * m * P_r`` doubles of scratch (15 MB at the retained
-    cell's ``m = 15``, ``P_r = 31`` and the default chunk).
+    ``packed`` is ``(n, m, K(K+1)/2)``. Each channel is one GEMM per row chunk,
+    with at most ``chunk * m * P_r`` doubles of scratch.
     """
     n_observations, count, channels = packed.shape
     pairs = packed_pairs(len(matrices))
@@ -428,10 +394,8 @@ _CertifiedRows = tuple[NDArray[np.float64], NDArray[np.float64]]
 class _AnalyticFirst:
     """A family's analytic derivatives along every parameter axis.
 
-    ``axes[q]`` is ``(values, certificate)`` along ``e_q``, the certificate the
-    family's certified absolute error (zero for closed-form channels).  All
-    ``K`` axes are evaluated before any is used, so a family that refuses one
-    axis (the two-piece join) sends the whole pass to differences.
+    ``axes[q]`` is ``(values, certificate)`` along ``e_q``. All axes are
+    evaluated first, so one refused axis sends the whole pass to differences.
     """
 
     axes: tuple[_CertifiedRows, ...]
@@ -510,14 +474,10 @@ def _analytic_second_derivatives(
 ):
     """The family's analytic second derivatives of the curvature along every axis pair.
 
-    One call with the ``K(K+1)/2`` axis pairs stacked, so the family evaluates
-    its fourth derivatives once; ``step`` is the derivative step the
-    differenced pass would use, which a certified family's near-kink
-    certificate takes as its reach.  Returns ``(D2, C2)`` as
-    :func:`_second_derivatives` does, the certificate the family's certified
-    error (zero for closed forms), or ``None`` when the family does not
-    implement the protocol, refuses these links or a row (a two-piece join),
-    or returns something unusable; the caller then differences.
+    One stacked call over the ``K(K+1)/2`` pairs; ``step`` is the differenced
+    pass's step, used as a near-kink certificate's reach. Returns
+    ``(D2, C2)`` like :func:`_second_derivatives`, or ``None`` (the caller
+    then differences) when the family cannot supply them.
     """
     if not isinstance(
         family,
@@ -594,14 +554,10 @@ def _substitute_rows(
 class _GradientPass:
     """Everything one gradient pass computed, for a Hessian pass at the same fit.
 
-    With ``G_i`` the row leverage blocks and ``w`` the packed weights (two on
-    an off-diagonal channel): ``coefficient_directions[:, k]`` is ``beta_k``;
-    predictor directions are evaluated in row chunks. ``weighted_blocks`` is
-    ``G_i w`` row by row, ``third_vector`` is ``sum_q X_q' P_q`` with
-    ``P_q[i] = <D1_q[i], G_i>_w``, ``certificate_leverage[:, q]`` is
-    ``<C1_q[i], |G_i|>_w`` and ``leverage_trace[i]`` is ``tr(G_i)``, the
-    squared Frobenius norm of ``X_i H^-1/2`` over the ``K`` design rows of
-    observation ``i``.
+    With ``G_i`` the row leverage blocks and ``w`` the packed weights:
+    ``weighted_blocks`` is ``G_i w``, ``third_vector`` is ``sum_q X_q' P_q``
+    (``P_q[i] = <D1_q[i], G_i>_w``), ``certificate_leverage[:, q]`` is
+    ``<C1_q[i], |G_i|>_w`` and ``leverage_trace[i]`` is ``tr(G_i)``.
     """
 
     family: DistributionalFamily
@@ -667,12 +623,9 @@ class _GradientPass:
 class LamlDerivativeWorkspace:
     """Carries a gradient pass's stencils and leverage blocks to a Hessian pass at the same fit.
 
-    Pass one instance to ``laml_derivatives(..., want_hessian=False, reuse=ws)``
-    and then to ``laml_derivatives(..., want_hessian=True, reuse=ws)`` at the
-    same fit, lambdas, step and dense matrices: the Hessian pass then adds
-    only the centre and mixed-pair evaluations to the gradient pass's axis
-    stencils.  A pass at anything else is ignored and recomputed.  The held
-    arrays are ``O(n K^2)`` each; ``clear`` releases them.
+    Pass the same instance as ``reuse=`` to a gradient-only and then a Hessian
+    call at the same fit, lambdas, step and matrices; anything else is
+    recomputed. Held arrays are ``O(n K^2)``; ``clear`` releases them.
     """
 
     __slots__ = ("_pass",)
@@ -802,10 +755,8 @@ def _gradient_pass(
         channel for channel, (left, right) in enumerate(packed_pairs(k_parameters)) if left == right
     ]
     leverage_trace = np.sum(weighted_blocks[:, diagonal_channels], axis=1)
-    # The third-derivative term of g_k is sum_i <D3_i[eta_k[i]], G_i>_w
-    # = sum_q sum_i eta_k[i, q] P_q[i] = beta_k . v with v = sum_q X_q' P_q, and
-    # its certificate sum_q sum_i |eta_k[i, q]| N_q[i] with N_q = <C1_q, |G|>_w:
-    # no per-component row array is ever formed.
+    # The third-derivative term of g_k is beta_k . v with v = sum_q X_q' P_q;
+    # its certificate is sum_q sum_i |eta_k[i, q]| N_q[i], N_q = <C1_q, |G|>_w.
     first_leverage = np.column_stack(
         [np.sum(weighted_blocks * first[q], axis=1) for q in range(k_parameters)]
     )
@@ -831,13 +782,9 @@ def _gradient_pass(
     gradient_certificate += 0.5 * np.asarray(
         [penalty_evaluation.gradient_error[name] for name in names]
     )
-    # Every term of h_kl that needs no third or fourth derivative of the
-    # likelihood, from the factor and the penalties alone:
-    #   1/2 delta_kl lambda_k beta'S_k beta + lambda_k beta'S_k beta_l
-    #   + 1/2 delta_kl lambda_k tr(H^-1 S_k) - 1/2 lambda_k lambda_l tr(H^-1 S_l H^-1 S_k)
-    #   - 1/2 d^2 log|S|_+ / d rho_k d rho_l
-    # with tr(H^-1 S_l H^-1 S_k) over the (k, l) block pair only, since S_k
-    # lives on block k.
+    # Every term of h_kl that needs no third or fourth likelihood derivative:
+    #   1/2 delta_kl lambda_k (beta'S_k beta + tr(H^-1 S_k)) + lambda_k beta'S_k beta_l
+    #   - 1/2 lambda_k lambda_l tr(H^-1 S_l H^-1 S_k) - 1/2 d^2 log|S|_+ / d rho_k d rho_l
     penalty_hessian = np.empty((count, count))
     for k, component_k in enumerate(estimated):
         block_k = component_k.coefficient_slice
@@ -916,35 +863,10 @@ def _gradient_pass(
 def _hessian_pass(gradient_pass: _GradientPass, *, reused: bool) -> LamlDerivatives:
     """The Hessian on top of a gradient pass; ``reused`` means its stencils came from an earlier call.
 
-    The fourth derivatives come from one stacked call of the family's
-    analytic second curvature direction when it implements one and accepts
-    these links and rows (``_analytic_second_derivatives``), which evaluates
-    no packed curvature; otherwise from the second differences.
-
-    The certificate is a norm bound from scalars, taken in the ``H`` metric so
-    the row leverage survives: with ``Y_i = X_i H^-1/2`` (``||Y_i||_F^2 =
-    tr(G_i)``, the leverage blocks' diagonal) and ``C_k[i]`` the
-    finite-difference certificate of ``V_k[i]``, ``e_k = sum_i tr(G_i)
-    <C_k[i], w>`` bounds ``||H^-1/2 delta H_k H^-1/2||`` for ``delta H_k =
-    X' diag-blocks(delta V_k) X``; then
-
-    * ``|delta tr(H^-1 H_l H^-1 H_k)| <= ||H^-1/2 H_l H^-1/2||_2 e_k + ||H^-1/2 H_k H^-1/2||_2 e_l``
-      (``tr(H^-1 H_l H^-1 delta H_k) = sum_i <Y_i M_l Y_i', delta V_k[i]>``),
-    * ``||H^1/2 delta beta_kl|| <= e_l ||H^1/2 beta_k||`` through the solve
-      against ``H_l beta_k``, reaching ``eta_kl`` by ``sqrt(tr G_i)`` and
-      ``V_kl`` through ``||D1[i, c, :]||_2``, so its contraction against
-      ``|G|`` is that scalar times one row sum formed once,
-    * the fourth-derivative certificate contraction ``sum_i <|eta_k| C2 |eta_l|, |G|>_w``
-      and the ``eta_kl`` contraction against ``C1`` are the exact entrywise
-      sums, as before, but for every pair at once (``K^2`` GEMMs of the
-      ``(n, m)`` direction matrices, and one row-chunked GEMM of the pair
-      directions).
-
-    The Euclidean form of the same bound (``||X_i||^2`` for ``tr(G_i)``,
-    ``||H^-1||_2`` and ``||H^-1 H_l H^-1||_2`` for the relative norms) was
-    2.5e5 times the entrywise certificate on the Gamma finite-difference
-    fixture and distrusted the Hessian at the default step.  Every quantity is
-    one pass over the rows or ``O(m P^3)`` once.
+    Fourth derivatives come from the family's analytic second curvature
+    direction when available, else from second differences. The certificate
+    is a norm bound in the ``H`` metric so row leverage survives (derivation
+    in the comments below); every quantity is one row pass or ``O(m P^3)``.
     """
     p = gradient_pass
     analytic_second = (
@@ -1024,14 +946,9 @@ def _hessian_pass(gradient_pass: _GradientPass, *, reused: bool) -> LamlDerivati
     hessians = [embedded[k] + crosses[k] for k in range(count)]
     products = [inverse @ hessians[k] for k in range(count)]
 
-    # The scalar certificate ingredients, in the H metric so the row leverage
-    # survives.  With Y_i = X_i H^-1/2 (||Y_i||_F^2 = tr(G_i)) and C_k[i] the
-    # certificate of V_k[i]:
-    #   e_k = sum_i tr(G_i) <C_k[i], w>  >=  ||H^-1/2 delta H_k H^-1/2||_2,
-    # since delta H_k = sum_i X_i' delta V_k[i] X_i and ||Y_i' M Y_i|| <= ||Y_i||_F^2 ||M||_F.
-    # ||H^-1/2 H_k H^-1/2||_2 from the symmetric square root of the pseudo-inverse:
-    # tr(H^-1 H_l H^-1 delta H_k) = sum_i <Y_i (H^-1/2 H_l H^-1/2) Y_i', delta V_k[i]>
-    # is bounded by that norm times e_k.
+    # Certificate in the H metric (Y_i = X_i H^-1/2, ||Y_i||_F^2 = tr G_i):
+    # e_k = sum_i tr(G_i) <C_k[i], w> >= ||H^-1/2 delta H_k H^-1/2||_2, and
+    # |tr(H^-1 H_l H^-1 delta H_k)| <= ||H^-1/2 H_l H^-1/2||_2 e_k.
     values, vectors = np.linalg.eigh(inverse)
     root = (vectors * np.sqrt(np.maximum(values, 0.0))) @ vectors.T
     relative_norm = np.array(
@@ -1040,10 +957,8 @@ def _hessian_pass(gradient_pass: _GradientPass, *, reused: bool) -> LamlDerivati
             for matrix in hessians
         ]
     )
-    # eta_kl's drift through H_l's error: ||X_i delta beta_kl|| <= sqrt(tr G_i)
-    # ||H^1/2 delta beta_kl|| <= sqrt(tr G_i) e_l ||H^1/2 beta_k||, and
-    # ||H^1/2 beta_k||^2 = -lambda_k (S_k beta) . beta_k; against |D1| and |G|
-    # that is the scalar times one row sum.
+    # eta_kl drift through H_l's error: ||X_i delta beta_kl|| <= sqrt(tr G_i) e_l
+    # ||H^1/2 beta_k||, with ||H^1/2 beta_k||^2 = -lambda_k (S_k beta) . beta_k.
     first_norm = np.sqrt(sum(first[q] * first[q] for q in range(k_parameters)))
     drift_base = float(
         np.sum(
@@ -1057,13 +972,9 @@ def _hessian_pass(gradient_pass: _GradientPass, *, reused: bool) -> LamlDerivati
         )
     )
 
-    # The value and certificate contractions of the fourth-derivative term for
-    # every pair at once: sum_i <V_kl[i], G_i>_w splits into
-    #   sum_q sum_i eta_kl[i, q] P_q[i]  +  sum_{q, r} sum_i eta_k[i, q] Q_qr[i] eta_l[i, r]
-    # with P_q[i] = <D1_q[i], G_i>_w and Q_qr[i] = <D2_qr[i], G_i>_w; the first is
-    # beta_kl . v for v = sum_q X_q' P_q, the second K^2 GEMMs of the (n, m)
-    # direction matrices; the certificate follows the same split with absolute
-    # values, so no pair touches the rows on its own.
+    # Fourth-derivative contractions for every pair at once: sum_i <V_kl[i], G_i>_w
+    # = beta_kl . v (v = sum_q X_q' P_q) + K^2 GEMMs of eta_k Q_qr eta_l, with
+    # Q_qr[i] = <D2_qr[i], G_i>_w; the certificate splits the same way in |.|.
     flat = np.stack([product.ravel() for product in products])
     flat_transposed = np.stack([product.T.ravel() for product in products])
     product_trace = flat_transposed @ flat.T
@@ -1147,21 +1058,14 @@ def laml_derivatives(
 
     ``fit`` must be the converged penalised-likelihood fit at ``lambdas`` whose
     published curvature defines ``joint_laplace_objective``; ``dense_matrices``
-    are the layout's dense predictor matrices or bounded grouped row adapters. With a
-    ``reuse`` workspace, a gradient-only call stores its stencils and leverage
-    blocks there and a later Hessian call at the same fit adds only the centre
-    and mixed-pair evaluations.
+    are the layout's dense predictor matrices or bounded grouped row adapters.
+    With a ``reuse`` workspace, a gradient-only call stores its stencils and
+    leverage blocks there and a later Hessian call at the same fit adds only
+    the centre and mixed-pair evaluations. Row-sized work is chunked.
 
-    Family stencils and derivative channels retain ``O(n K^2 C)`` values, with
-    ``C = K(K+1)/2``. Smoothing-component directions and contractions use row
-    chunks; coefficient-space Hessians and pair directions retain ``O(m P^2 +
-    P m^2)`` values. The bounded design path does not retain an ``n by P`` design
-    or an ``n by m`` smoothing-direction array.
-
-    ``curvature="observed"`` refuses a fit whose terminal curvature fell back.
-    ``curvature="terminal"`` differentiates the substitute it accepted (Fisher
-    or nearest semidefinite) by finite differences of its rows; the module
-    docstring says what the result then means.
+    ``curvature="observed"`` refuses a fit whose terminal curvature fell back;
+    ``curvature="terminal"`` differentiates the accepted substitute (see the
+    module docstring).
     """
     if not isinstance(fit, DenseSolverResult):
         raise TypeError("fit must be a DenseSolverResult")

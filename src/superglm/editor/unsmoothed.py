@@ -2,17 +2,14 @@
 
 The line is the model refitted with the term's smoothing parameter at 0, on
 the same basis and knots, and every other term's smoothing parameter held
-where the fit in force put it: a plain penalised fit at fixed smoothing
-parameters, so nothing is selected again. With its penalty at 0 a P-spline is
-B-spline regression (Eilers and Marx, "Flexible smoothing with B-splines and
-penalties", Statistical Science 11(2), 1996), whose coefficients the rows
-determine only when the design has full column rank: the Schoenberg-Whitney
-condition, that some rows can be matched one to each basis function, inside
-its support, as ``scipy.interpolate.make_lsq_spline`` documents. Across a gap
-in the data it fails, the penalty was all that held the curve there, and the
-line is refused rather than drawn; the refit's own rank decision on its
-penalised system decides. A selection penalty is lifted from the term, as
-Free levels lifts it, so the line is not shrunk.
+where the fit in force put it: nothing is selected again. With its penalty at
+0 a P-spline is B-spline regression (Eilers and Marx, Statistical Science
+11(2), 1996), whose coefficients the rows determine only when the design has
+full column rank (the Schoenberg-Whitney condition, as
+``scipy.interpolate.make_lsq_spline`` documents). Across a gap in the data it
+fails and the line is refused, by the refit's own rank decision on its
+penalised system. A selection penalty is lifted from the term, as Free levels
+lifts it, so the line is not shrunk.
 
 The line is drawn under the same centring rule as the curve. Hand edits are
 not part of it: it is a fit. An ordered term's levels fitted free, joined by

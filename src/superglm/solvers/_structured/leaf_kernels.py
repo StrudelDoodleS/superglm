@@ -247,13 +247,9 @@ def _distinct_level_rows(data, indices, indptr, starts, weights, cap):  # pragma
     return out
 
 
-# Entry-by-entry updates of a 2-D block, for the FactorSmooth kernels
-# (``block_leaves``, ``balance_tree``).  The kernels write their matrix sums
-# through these rather than as array expressions (``X += f * Y``, ``T[v] =
-# X + Y``): numba compiles each array expression into a broadcasting loop and
-# each sliced assignment with its shape-check message, which together cost
-# seconds of a cold compile.  Each entry sees the same operations in the same
-# order as the expression did, so the results are the same to the bit.
+# Entry-by-entry updates of a 2-D block for the FactorSmooth kernels: numba
+# compiles array expressions and sliced assignments into costly broadcasting
+# loops, and these give the same operations in the same order, bit for bit.
 @njit(cache=True)
 def _assign(target, source):  # pragma: no cover - compiled
     """``target[:] = source``."""

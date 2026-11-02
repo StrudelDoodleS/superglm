@@ -1,32 +1,17 @@
 """Worm plot and its Q-statistics table.
 
-The worm plot of van Buuren and Fredriks (2001), *Statistics in Medicine* 20(8),
-1259-1277, is the Q-Q plot with the line taken out: against the theoretical
-quantile ``z`` of each order statistic it plots the deviation
-``observed - z``, so a departure that a Q-Q plot hides inside the diagonal
-becomes a shape.  A worm that sits above the axis says the residuals are
-shifted, one that runs at a slope says they are over- or under-dispersed, a
-U says they are skewed and an S says the tails are wrong -- which, in a
-distributional model, names the predictor at fault rather than merely the fit.
-The pointwise 95 per cent band is theirs too,
+The worm plot (van Buuren and Fredriks 2001, *Statist. Med.* 20(8)) is the Q-Q
+plot with the line removed: deviation ``observed - z`` against the theoretical
+quantile ``z``. A shifted worm flags location, a sloped one dispersion, a U
+skewness and an S the tails. Its pointwise (not simultaneous) 95 per cent band
+is
 
-    +/- 1.96 sqrt(p (1 - p) / n) / phi(z),   p = Phi(z),
+    +/- 1.96 sqrt(p (1 - p) / n) / phi(z),   p = Phi(z).
 
-the standard error of the empirical quantile at ``z`` mapped onto the deviation
-scale.  It is pointwise, not simultaneous: it says where one point is
-surprising, not where the whole worm is.
-
-With a covariate the rows are cut into equal-count intervals -- one worm per
-interval, which is where a misfit's location shows -- or one worm per level of a
-categorical covariate.  The companion table is the Q-statistics of Royston and
-Wright (2000), *Statistics in Medicine* 19(21), 2943-2962: per group the
-standardised mean, variance, skewness and kurtosis of the residuals.  The
-constants are the asymptotic null standard deviations of those four sample
-moments for standard normal residuals -- ``sqrt(1/n)``, ``sqrt(2/n)``,
-``sqrt(6/n)`` and ``sqrt(24/n)`` -- so each statistic is standard normal under a
-correct fit and ``|z| > 2`` is the flag.  Reading them names the predictor: a
-mean ``z`` flags the location model, a variance ``z`` the scale model, and a
-skewness or kurtosis ``z`` the shape model.
+With a covariate there is one worm per equal-count interval or per level. The
+companion table is the Q-statistics of Royston and Wright (2000), *Statist.
+Med.* 19(21): standardised mean, variance, skewness and kurtosis per group,
+flagging the location, scale and shape models respectively.
 """
 
 from __future__ import annotations
@@ -171,21 +156,14 @@ def _moment_row(label: Any, values: NDArray[np.float64]) -> tuple[Any, ...]:
 def q_statistics(residual_quantiles: NDArray, groups: NDArray) -> pd.DataFrame:
     """Return the Q-statistics of Royston and Wright (2000) per group.
 
-    Each column is one of the four sample moments of the residuals, divided by
-    its asymptotic null standard deviation for standard normal residuals, so
-    every entry is standard normal under a correct fit:
-
+    Each column is a sample moment of the residuals over its asymptotic null
+    standard deviation, so every entry is standard normal under a correct fit:
     ``mean_z = sqrt(n) mean(r)``, ``variance_z = sqrt(n / 2) (var(r) - 1)``,
     ``skewness_z = sqrt(n / 6) skew(r)`` and
-    ``kurtosis_z = sqrt(n / 24) (kurtosis(r) - 3)``,
-
-    with the sample skewness and excess kurtosis in their plain moment-ratio
-    form and ``var`` the unbiased estimate.  ``flagged`` is ``True`` where any
-    of the four exceeds two in absolute value.  Groups appear in order of first
-    appearance; an overall ``"all"`` row is appended whenever there is more than
-    one, where a single group would only repeat itself.  A statistic a group is
-    too thin to support -- a variance from one row, a skewness or kurtosis from
-    a group with no spread -- is ``NaN`` rather than a fabricated number.
+    ``kurtosis_z = sqrt(n / 24) (kurtosis(r) - 3)`` (moment-ratio skewness and
+    kurtosis, unbiased ``var``). ``flagged`` is any ``|z| > 2``. Groups are in
+    order of first appearance, plus an ``"all"`` row when there is more than
+    one; a statistic a group is too thin to support is ``NaN``.
     """
     values = np.asarray(residual_quantiles, dtype=np.float64)
     if values.ndim != 1 or len(values) < 1:

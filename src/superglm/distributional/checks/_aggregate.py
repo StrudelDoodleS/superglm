@@ -1,11 +1,9 @@
 """One grouped aggregation for every table in the suite.
 
 A grouped mean of a rate is a **ratio of sums**, ``sum(w y) / sum(w)``, never
-the mean of the per-row ratios ``y_i``: with exposure weights the first is total
-cost over total exposure and the second gives a one-day policy the same say as a
-one-year policy.  Every decile, bin, level, band and segment mean in the
-inference suite goes through :func:`grouped_ratio`, so no table can take the
-wrong mean by accident.
+the mean of per-row ratios, which would give a one-day policy the say of a
+one-year one. Every table mean in the inference suite goes through
+:func:`grouped_ratio`.
 """
 
 from __future__ import annotations
@@ -66,13 +64,9 @@ def grouped_ratio(
     ``numerator`` and ``denominator`` are the already-weighted row
     contributions -- ``w * y`` and ``w`` for a weighted mean of ``y``, or
     ``w * y`` and ``w * mu_hat`` for an actual-over-expected ratio.  ``groups``
-    holds non-negative integer codes as ``pandas.factorize`` and
-    ``numpy.digitize`` produce them; ``n_groups`` declares the width of the
-    result when the codes do not visit every group, which keeps a table's row
-    count equal to its bin count.
-
-    The ratio is ``NaN`` wherever the summed denominator is zero: an empty bin
-    has no mean, and reporting one as zero would put a false number in a table.
+    holds non-negative integer codes; ``n_groups`` fixes the result width when
+    some groups are empty. The ratio is ``NaN`` where the summed denominator
+    is zero.
     """
     values = _weight_vector(numerator, name="numerator")
     weights = _weight_vector(denominator, name="denominator")

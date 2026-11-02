@@ -208,12 +208,8 @@ def _compact_summary_row(row) -> dict[str, Any]:
         "name": str(row.name),
         "group": str(row.group or ""),
         "level_group": str(getattr(row, "level_group", "") or ""),
-        # A group row's kind comes from `subgroup_type`, not from `is_spline`.
-        # `is_spline` only says the row is a group-level Wald test rendered
-        # without a coefficient cell; on the one term type where the smooth /
-        # not-smooth distinction is the whole point of the feature, reading it as
-        # the term's kind made this payload contradict the console renderer,
-        # which was fixed to say "piecewise" in the same change that added it.
+        # Kind comes from `subgroup_type`: `is_spline` only marks a group-level
+        # Wald row, and would mislabel a piecewise term as a smooth.
         "kind": (
             "reference"
             if is_reference
@@ -284,13 +280,10 @@ def _finite_float(value: Any) -> float | None:
 
 
 def _summary_sig_code(p_value: float | None) -> str:
-    """The p-value's own code.
+    """The p-value's own significance code.
 
-    The low-credibility advisory used to be returned from here, and its class
-    from ``_summary_sig_class``, so the editor's Sig column and its SE-cell
-    colour both stopped reporting significance for a flagged row.  The rule
-    behind the advisory never reads the p-value, so it cannot speak for it; it
-    now travels in its own column (issue #239).
+    The low-credibility advisory never reads the p-value, so it travels in its
+    own column and does not replace this code.
     """
     if p_value is None:
         return ""
@@ -313,26 +306,16 @@ def _summary_advisory_code(quasi_separated: bool) -> str:
 def _summary_advisory_kind(row, quasi_separated: bool) -> str:
     """Which of the two disjoint triggers fired on this row.
 
-    The browser renders a per-row tooltip, which is a row-level statement, and
-    the two license different ones: a thin level really is short of experience,
-    while an outsized standard error can be a predictor on a much smaller scale
-    with the whole sample behind it.
-
-    Read off ``advisory_trigger``, recorded where the flag is set.  Re-deriving
-    it from ``level_n_obs`` is wrong HERE specifically: this payload is built
-    from ``_display_rows``, and the expanded level display strips the per-level
-    diagnostics from all but the first member of a grouped level so the
-    footnote does not double-count -- so every later member of a pooled thin
-    level would be labelled an outsized standard error, on a row with no units
-    whose standard error was never tested, while the workbook (which reads
-    ``_coef_rows``) called the same coefficient thin.
+    A thin level is short of experience; an outsized standard error can be a
+    predictor on a much smaller scale with the whole sample behind it, so the
+    tooltip differs. Read off ``advisory_trigger``, recorded where the flag is
+    set: ``_display_rows`` strips per-level diagnostics from all but the first
+    member of a grouped level, so ``level_n_obs`` cannot be re-derived here.
     """
     if not quasi_separated:
         return ""
-    # Read directly, like every other field here: a defaulting ``getattr``
-    # fails OPEN under the rename issue #304 is scheduled to do, silently
-    # relabelling every flagged row as thin.  An unrecognised value gets the
-    # neutral third kind rather than either claim.
+    # Read directly, not through a defaulting ``getattr``, which would fail open
+    # and label every flagged row thin. An unrecognised value gets "unknown".
     kind = str(row.advisory_trigger or "")
     return kind if kind in {"thin_level", "outsized_se"} else "unknown"
 

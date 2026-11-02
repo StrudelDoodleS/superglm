@@ -1,35 +1,21 @@
 """Window jets of declared severity laws, for truncated and censored rows.
 
-:func:`declared_window_jets` gives ``log P(lower < Y <= upper)`` and its packed
-derivatives to order 4, unit mass, in a generated module's own coordinates
-(natural or log), from that module's log survival, log CDF and log density
-kernels.  A window is read from the lower tail, ``log F``, where the caller
-asks and always when its lower end is the support's start, otherwise from the
-upper tail by reflection; :func:`log_window_jets` combines the two ends.
+:func:`declared_window_jets` gives ``log P(lower < Y <= upper)`` and its
+packed derivatives to order 4 from a generated module's log survival, log CDF
+and log density kernels: from ``log F`` where asked and whenever the lower end
+is the support's start, otherwise from the upper tail by reflection.
 
-A window with two finite ends whose log-width ``w = log(upper/lower)`` times
-the row's ``rate`` is at most :data:`NARROW_WINDOW` is integrated instead by
-:func:`quadrature_window_jets` on ``s = log y``, where ``log Y`` has density
-``f(y) y``; its nodes are ``y = lower e^(fraction w)``, formed as ``lower +
-lower expm1(fraction w)`` so they keep their place in the window.  ``rate`` is
-the scale of the density of ``log Y`` across the window and is at least one,
-so a narrow window is also narrow in relative width: with ``l(s) = log f_s``,
-``w max(1, sqrt(|l''|), |l'|) <= NARROW_WINDOW`` holds every term of the
-three-point rule's sixth-derivative error (Abramowitz and Stegun 25.4.30) to
-about ``5e-7 NARROW_WINDOW^6`` relative, as for the normal window.
+A two-ended window with ``log(upper/lower) * rate <= NARROW_WINDOW`` uses
+:func:`quadrature_window_jets` on ``s = log y`` (nodes
+``lower + lower expm1(fraction w)``), where ``rate >= max(1, sqrt(|l''|), |l'|)``
+for ``l(s) = log f_s`` holds the three-point rule's error to about
+``5e-7 NARROW_WINDOW^6`` (Abramowitz and Stegun 25.4.30).
 
-:func:`gamma_window_jets` is ``GammaLS``'s window.  On ``s = log y`` the gamma
-of shape ``a`` and mean ``m`` has ``l(s) = a s - a e^s/m + const``, so ``l' =
-a (1 - r)`` and every higher derivative is ``-a r``, ``r = y/m``; its ``rate``
-is ``max(1, sqrt(a r_upper), a max(|1 - r_lower|, |1 - r_upper|))``, the
-largest of each over the window.  It reads a two-ended window from the lower
-tail when the window's midpoint is below the mean.  A tail point of a row whose
-shape exceeds :data:`UNIFORM_SHAPE` (``1e4``, the top of the incomplete-gamma
-engine's measured envelope, ``tests/test_incomplete_gamma_engine.py``) and
-lies in Temme's uniform domain is read from the declaration's ``*_uniform``
-laws: that expansion costs the same at every shape and is analytic through
-the log-normal limit (``kernels/_gg_uniform_tail.py``), where the engine's
-series and continued fraction take ``O(sqrt(a))`` terms near ``y = mean``.
+:func:`gamma_window_jets` is ``GammaLS``'s window: ``l' = a (1 - r)`` and
+higher derivatives ``-a r``, ``r = y/m``. Tail points with shape above
+:data:`UNIFORM_SHAPE` (``1e4``, the incomplete-gamma engine's tested
+envelope) inside Temme's uniform domain use the ``*_uniform`` laws, whose cost
+does not grow with shape (``kernels/_gg_uniform_tail.py``).
 """
 
 from __future__ import annotations
@@ -323,16 +309,12 @@ def normal_window_jets(
 ) -> Jet:
     """``log P(lower < X <= upper)`` for ``X ~ N(location, (scale/root)^2)``, in ``(location, scale)``.
 
-    ``lower`` may be ``-inf`` and ``upper`` ``+inf``, not both.  The tails are
-    the ``normal`` declaration's at the end's residual ``c - location`` with
-    location zero, the law being translation invariant, so a large common
-    offset of the window and the location cancels before the kernels see it.
-    A two-ended window is read from the lower tail when its midpoint is below
-    the location, so neither end's tail rounds to one.  A window whose
-    standardised width, times ``max(1, |midpoint|)``, is at most
-    :data:`NARROW_WINDOW` is integrated by quadrature on nodes placed in
-    standardised coordinates.  ``width`` is ``upper - lower`` when the caller
-    has it more accurately than that difference.
+    ``lower`` may be ``-inf`` or ``upper`` ``+inf``, not both. Tails are taken
+    at the residual ``c - location`` (translation invariance cancels a common
+    offset). A two-ended window reads the lower tail when its midpoint is below
+    the location; one whose standardised width times ``max(1, |midpoint|)`` is
+    at most :data:`NARROW_WINDOW` uses quadrature. ``width`` overrides
+    ``upper - lower`` when known more accurately.
     """
     lo = np.asarray(lower, dtype=np.float64)
     hi = np.asarray(upper, dtype=np.float64)
@@ -400,12 +382,11 @@ def log_normal_window_jets(
 ) -> Jet:
     """``LogNormalLS``'s window jets: the normal window on ``log y``.
 
-    ``parameters`` are ``(mu, sigma)``, or ``(m, sigma)`` with ``mean_form``,
-    composed through ``mu = log m - sigma^2/2`` to order two; higher orders are
-    composed in predictor coordinates by :func:`normal_predictor_jets`.  A lower
-    end at or below zero is the support's start.  A two-ended window's log-scale width is
-    ``log1p`` of its relative width where ``log(upper) - log(lower)`` would
-    cancel, and that difference where the ratio is large.
+    ``parameters`` are ``(mu, sigma)``, or ``(m, sigma)`` with ``mean_form``
+    (``mu = log m - sigma^2/2`` to order two; higher orders via
+    :func:`normal_predictor_jets`). A lower end ``<= 0`` is the support's
+    start. The log width is ``log1p`` of the relative width where
+    ``log(upper) - log(lower)`` would cancel.
     """
     if mean_form and order > 2:
         raise ValueError(
@@ -480,13 +461,10 @@ def gpd_window_jets(
 ) -> Jet:
     """``log(S(lower) - S(upper))`` of ``GeneralizedParetoLSS``'s law, in ``(scale, shape)``.
 
-    ``lower`` at or below zero means the support's start (``S = 1``) and
-    ``upper = +inf`` an open window.  Both ends come from the survival
-    function (the ``generalized_pareto`` declaration's ``logsf``), which no
-    window on ``y >= 0`` rounds to one at its far end.  The log density varies
-    on the scale ``(psi + xi y)/(1 + |xi|)``; a window at most
-    :data:`NARROW_WINDOW` of that scale wide at its steeper end is integrated
-    by quadrature on nodes in ``y``.
+    ``lower <= 0`` is the support's start and ``upper = +inf`` open. Both ends
+    use ``logsf``, which never rounds to one at the far end on ``y >= 0``. A
+    window at most :data:`NARROW_WINDOW` of the scale ``(psi + xi y)/(1 + |xi|)``
+    wide at its steeper end uses quadrature in ``y``.
     """
     lo = np.maximum(np.asarray(lower, dtype=np.float64), 0.0)
     hi = np.asarray(upper, dtype=np.float64)
@@ -553,16 +531,13 @@ def gg_window_jets(
 ) -> Jet:
     """``GeneralizedGammaLSS``'s window jets in ``(mean | mu, sigma, Q)``.
 
-    The tails are :func:`gg_log_tail_jets` at ``w = (log y - mu)/sigma``,
-    composed through ``w``; a two-ended window is read from the lower tail
-    when its midpoint lies below ``w = -Q/3``, the median of ``W`` to first
-    order in ``Q``.  On ``s = log y`` the law has ``l(s) = -log sigma + G(w,
-    Q)``, so ``l' = -expm1(Q w)/(Q sigma)`` and ``l^(k) = -Q^(k-2) e^(Q
-    w)/sigma^k`` for ``k >= 2``, each ``|l^(k)|^(1/k)`` at most ``max(|Q|,
-    e^(Q w/2))/sigma``; the narrow-window ``rate`` is ``max(1, |l'|, max(|Q|,
-    e^(Q w/2))/sigma)``, largest at an end.  The mean form composes the
-    location form's jets through ``mu = log m - log C(sigma, Q)``; rows whose
-    mean does not exist are NaN.
+    Tails are :func:`gg_log_tail_jets` at ``w = (log y - mu)/sigma``; a
+    two-ended window reads the lower tail when its midpoint lies below
+    ``w = -Q/3`` (the first-order median of ``W``). On ``s = log y``,
+    ``l' = -expm1(Q w)/(Q sigma)`` and ``l^(k) = -Q^(k-2) e^(Q w)/sigma^k``, so
+    the narrow-window ``rate`` is ``max(1, |l'|, max(|Q|, e^(Q w/2))/sigma)``
+    at an end. The mean form composes through ``mu = log m - log C(sigma, Q)``;
+    rows without a mean are NaN.
     """
     theta = np.asarray(parameters, dtype=np.float64)
     n_rows = len(theta)
@@ -627,12 +602,10 @@ def gg_window_jets(
 def _warmup_declared_bounds() -> None:
     """Compile the window kernels a bounded fit of a declared-bounds family calls.
 
-    ``GammaLS``: orders 0-2 in ``(mean, cv)`` for the fit and 3-4 in ``(log
-    mean, log cv)`` for its smoothing-parameter derivatives, each with both
-    tails, the narrow-window density and the carrier, and the incomplete-gamma
-    engine under them.  ``GeneralizedGammaLSS``, ``GaussianLS``,
-    ``LogNormalLS`` and ``GeneralizedParetoLSS``: each kernel once, the order
-    being a run-time argument, on both tail routes and a narrow window.
+    ``GammaLS``: orders 0-2 in ``(mean, cv)`` and 3-4 in ``(log mean, log cv)``
+    on both tails, the narrow window and the carrier. The other declared
+    families: each kernel once (order is a run-time argument) on both tail
+    routes and a narrow window.
     """
     lower = np.array([1.0, 0.0, 1.0])
     upper = np.array([np.inf, 1.0, 1.0 + 1e-6])

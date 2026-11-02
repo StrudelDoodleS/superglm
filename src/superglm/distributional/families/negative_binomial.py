@@ -244,16 +244,11 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
     parameters = _PARAMETERS
     default_prediction_name = "conditional_mean"
     capabilities = _CAPABILITIES
-    # The expected information arrived as the terminal curvature fallback; the
-    # starting penalties stay at the 0.1 start NB2 fits were calibrated on.
-    # Measured on freMTPL lss_nb: the information-scaled start halves the
-    # full-book EFS iterations (17 -> 8) at the same held-out fit, but leaves
-    # the 20k sample unconverged at a smoothing cap where the 0.1 start
-    # converges, so it stays off.
+    # The expected information is only the terminal curvature fallback; starting
+    # penalties stay at the 0.1 start, which converges where a scaled start may not.
     information_scaled_start: ClassVar[bool] = False
-    # Every fit whose final curvature fell back used to refuse with this
-    # family's Poisson-boundary diagnosis, which checks the data itself; a
-    # Fisher fallback keeps disclosing it.
+    # Any curvature fallback gets this family's Poisson-boundary diagnosis,
+    # which checks the data itself.
     diagnoses_any_curvature_fallback: ClassVar[bool] = True
 
     def to_config(self) -> dict[str, object]:
@@ -345,14 +340,9 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
     def limit_row_count(self, theta: NDArray, plan: FamilyLikelihoodPlan) -> tuple[int, int]:
         """The size's parameter index and how many rows the kernel treats as Poisson.
 
-        The rows are those with ``max(mean, count - 1)`` below ``2**-52`` times
-        the size, in effective units, whether the size ran off or the mean is
-        negligible; the expected information of the size is zero there. That
-        alone does not make the size unidentified (the other rows may still
-        identify it), so the count is a figure for the disclosure, not its test
-        (the fit's terminal rank decision is); rows just short of the threshold
-        are not counted. A derived family may change the likelihood, so as with
-        ``diagnose_repeated_curvature_failure`` it reports no rows.
+        Rows with ``max(mean, count - 1)`` below ``2**-52`` times the size, in
+        effective units. The count informs the disclosure only; the terminal
+        rank decision is the test. A derived family reports no rows.
         """
         if type(self) is not NegativeBinomialLS:
             return 1, 0
@@ -372,14 +362,9 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
     ) -> str:
         """Say that the size is not identified, with ``n_limit`` rows at the Poisson limit.
 
-        The fit's terminal rank decision has left a size coefficient not estimable.
-        ``constant_offered`` is true when a constant size is offered (see
-        ``LimitRowDisclosingFamily``; without a size intercept the offer is
-        unchecked) and the size has terms to drop: it is then offered, with a
-        varying offset dropped too; otherwise (every row at the limit, no
-        curvature on the intercept, or a size already constant) only the
-        Poisson family remains. A derived family gets no text
-        (see ``limit_row_count``).
+        ``constant_offered`` (see ``LimitRowDisclosingFamily``) is true when a
+        constant size can be offered and the size has terms to drop; otherwise
+        only the Poisson family is suggested. A derived family gets no text.
         """
         if type(self) is not NegativeBinomialLS:
             return ""

@@ -1,24 +1,12 @@
 """Histogram of the probability-integral transform with its consistency band.
 
-The probability-integral transform ``u = F(y | theta_hat)`` is uniform when the
-predictive distribution is calibrated, so its histogram is the calibration
-picture of Gneiting, Balabdaoui and Raftery (2007), *Journal of the Royal
-Statistical Society: Series B* 69(2), 243-268.  The shape is the reading:
-
-- flat -- calibrated, nothing to say;
-- a U -- too little spread, the model is under-dispersed and its intervals are
-  too narrow, which in a distributional model means the scale predictor is low;
-- a hump in the middle -- too much spread, over-dispersed intervals;
-- a slope -- biased, the location predictor is off in the direction the
-  histogram leans;
-- one end alone -- a tail failure, which is the shape predictor's business.
-
-The band is the pointwise consistency band the same paper's calibration reading
-needs: under a uniform transform each bin count is ``Binomial(n, 1 / n_bins)``,
-so the ``alpha``-level band is that distribution's ``alpha / 2`` and
-``1 - alpha / 2`` quantiles.  It is pointwise, so on a calibrated model about
-``alpha`` of the bins are expected to leave it; a *shape* across neighbouring
-bins is the evidence, not one bin on its own.
+``u = F(y | theta_hat)`` is uniform under a calibrated forecast (Gneiting,
+Balabdaoui and Raftery 2007, *JRSS B* 69(2)). Flat is calibrated; a U means
+too little spread (scale predictor low); a central hump too much; a slope a
+biased location; one end alone a tail (shape) failure. The pointwise band is
+the ``alpha / 2`` and ``1 - alpha / 2`` quantiles of
+``Binomial(n, 1 / n_bins)``, so about ``alpha`` of bins leave it on a
+calibrated model; a shape across bins is the evidence.
 """
 
 from __future__ import annotations

@@ -1,17 +1,15 @@
 """Polynomial ranges on a spline: edge knots, pinning rows and their null space.
 
-A range pins the spline to a polynomial of ``degree`` on ``[lo, hi]``. Its
-edges become knots, repeated to set how the curve joins the range there: a
-knot of multiplicity m leaves C^(spline_degree - m) (the Curry-Schoenberg
-theorem; de Boor, *A Practical Guide to Splines*), so ``spline_degree``
-copies give a kink (C0), one fewer a tangent join (C1), and one copy the
-spline's own continuity. An edge two ranges share is always a kink: two
-pinned pieces joined any more smoothly would be forced into one. The spline's other knots
-inside the range are dropped, so the range is ONE polynomial piece, and
-pinning that piece to degree d means its (d+1)-th derivative -- a polynomial of
-degree ``spline_degree - d - 1`` -- vanishes: ``spline_degree - d`` rows at
-distinct points of the piece. The rows are absorbed as ``beta = Z theta`` with
-Z from the QR of C' (Wood 2017, *Generalized Additive Models*, section 1.8.1).
+A range pins the spline to a polynomial of ``degree`` on ``[lo, hi]``.  Its
+edges become knots, repeated to set how the curve joins the range there: a knot
+of multiplicity m leaves C^(spline_degree - m) (Curry-Schoenberg; de Boor, *A
+Practical Guide to Splines*), so ``spline_degree`` copies give a kink (C0), one
+fewer a tangent join (C1), and one copy the spline's own continuity.  An edge
+two ranges share is always a kink.  The spline's other knots inside the range
+are dropped, so the range is one polynomial piece; pinning it to degree d means
+its (d+1)-th derivative vanishes: ``spline_degree - d`` rows at distinct points.
+The rows are absorbed as ``beta = Z theta`` with Z from the QR of C' (Wood 2017,
+*Generalized Additive Models*, section 1.8.1).
 """
 
 from __future__ import annotations
@@ -50,12 +48,11 @@ class NarrowGapError(RangeError):
     """A range edge sits too close to an end, another edge or a knot for the penalty's rank."""
 
 
-# REML ranks a penalty at eps**(2/3) of its largest eigenvalue, and a free
-# piece of width h adds eigenvalues growing like h**-3, so a gap narrower than
-# eps**(2/9) of the span costs the smooth part rank on any knot count
-# (measured on 12 knots: rank kept at 1e-3 of the span, lost at 1e-4). More
-# knots lower the smallest genuine eigenvalue, so wider gaps can cost rank
-# too: certify_penalty_rank checks the penalty itself.
+# REML ranks a penalty at eps**(2/3) of its largest eigenvalue and a free piece
+# of width h adds eigenvalues growing like h**-3, so a gap narrower than eps**(2/9)
+# of the span costs the smooth part rank on any knot count.  More knots lower the
+# smallest genuine eigenvalue, so wider gaps can cost rank too:
+# certify_penalty_rank checks the penalty itself.
 NARROWEST_GAP = float(np.finfo(np.float64).eps) ** (2.0 / 9.0)
 
 

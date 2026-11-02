@@ -4,11 +4,11 @@
 The tab shows its fold scores and, when it kept its fold models, each
 term's relativities by fold, least stable first. Run CV replays the
 result's own folds on the in-force structure with the hand edits put back
-on every fold (D5): :class:`StoredFolds` feeds ``cross_validate`` the
+on every fold: :class:`StoredFolds` feeds ``cross_validate`` the
 recorded indices, and its per-fold hook is where progress is reported and a
 cancel is honoured. Final fit refits the in-force structure on train and
 validation rows together, puts the hand edits back, and is offered by
-Export (D6).
+Export.
 
 Every refusal is a fixed sentence (``editor/errors.py``).
 """
@@ -304,7 +304,7 @@ def check_cv_data(
 
 
 def run_cv_reason(session) -> str | None:
-    """Why Run CV is disabled now, or None (D7: it waits for Refit)."""
+    """Why Run CV is disabled now, or None (it waits for Refit)."""
     if session.cv_check.reason is not None:
         return session.cv_check.reason
     builtin = session.cv.builtin_scores
@@ -318,7 +318,7 @@ def run_cv_reason(session) -> str | None:
 
 
 def final_fit_datasets(session) -> tuple[EvaluationDataset, ...]:
-    """Train and validation rows (D6); the test split stays held out."""
+    """Train and validation rows; the test split stays held out."""
     train = training_export_dataset(session)
     if train is None:
         return ()
@@ -458,15 +458,12 @@ def fold_term_items(
     a relativity. A term's ``spread`` is the mean over folds of
     ``rmse_to_mean`` on that scale, and ``min_correlation`` the lowest
     ``correlation_to_mean`` (``plotting.curve_similarity``), or NaN when a
-    fold has none: a fold that dropped the term has a flat curve, and the
-    other folds' agreement must not stand in for it. A level a fold never
-    saw is a gap (NaN) in that fold's curve, and its distances skip it.
-    Each fold's curve keeps its fold number, so a fold missing from a term
-    keeps its colour and its place in the tab's charts.
+    fold has none (a fold that dropped the term has a flat curve). A level a
+    fold never saw is a gap (NaN) that distances skip. Each curve keeps its
+    fold number.
 
-    A term ``held`` is a hand edit Run CV put back on every fold: the same
-    curve on each, so its spread and min r measure nothing. It is marked
-    ``held``, carries neither, and follows the measured terms.
+    A ``held`` term is a hand edit Run CV put back on every fold: the same
+    curve on each, so it carries neither measure and follows the measured terms.
     """
     items = []
     for name, term in terms.items():
@@ -839,20 +836,14 @@ def _declared_template(session):
 def _covering_template(template, X, job: str):
     """``template`` with each grouped categorical covering the levels ``X`` holds.
 
-    ``X`` holds the rows ``job`` fits. A grouping built on the train rows
-    does not cover a level only the CV data or the validation rows hold, and
-    the fit refuses a level its grouping does not cover. Such a level goes
-    where the term sends new levels: into the group its ``unseen`` names, as
-    the in-force model predicts it and as ``Structure.apply(model, X=...)``
-    places it. A term
-    with no group for new levels (``"error"`` or ``"base"``), or one whose
-    ``levels=`` leaves the level out, refuses ``job`` in one sentence. So
-    does a term with no group to take a level its universe leaves out: an
-    ungrouped categorical or a random effect whose universe, declared or
-    bound by ``bind_levels``, leaves it out, and an ordered term, grouped or
-    not, whose ``order=``, ``values=`` and ``specials=`` leave it out or
-    whose groups do not cover it. Any of these terms refuses a missing value,
-    and so does a factor smooth's group.
+    A grouping built on the train rows does not cover a level only the CV or
+    validation rows hold. Such a level goes into the group the term's
+    ``unseen`` names, as the in-force model predicts it and as
+    ``Structure.apply(model, X=...)`` places it. A term with no group for new
+    levels (``"error"`` or ``"base"``), or whose universe (``levels=``,
+    ``bind_levels``, or an ordered term's ``order=``, ``values=`` and
+    ``specials=``) leaves the level out, refuses ``job`` in one sentence. Every
+    such term, and a factor smooth's group, also refuses a missing value.
     """
     frame = as_eager_frame(X)
     _require_valued_labels(template, frame, job)
@@ -969,10 +960,9 @@ def _uncovered_labels(values, grouping) -> list[str]:
 
 def run_cv(plan: CVRunPlan, context) -> CVRun:
     """Replay the stored folds on the in-force structure with the hand edits put back."""
-    # A level outside a term's universe is checked on the rows some fold
-    # trains on: a test-only row is scored as the term predicts new levels,
-    # and a row in no fold is never read. A missing label is refused when a
-    # term scores a row too, so those are checked on every row a fold reads.
+    # A level outside a term's universe is checked on the rows some fold trains
+    # on (a test-only row is scored as new levels); a missing label is refused
+    # when scoring too, so those are checked on every row a fold reads.
     frame = as_eager_frame(plan.rows.X)
     read = np.unique(np.concatenate([np.concatenate(fold) for fold in plan.folds]))
     _require_valued_labels(plan.template, frame.take_rows(read), "Run CV")
@@ -1026,7 +1016,7 @@ class _FoldRecorder:
     """Run CV's per-fold hooks: progress and cancel between folds, edits before scoring.
 
     ``cross_validate`` fits each fold and hands the fitted model to
-    :meth:`score`, which puts the hand edits back (D5) and computes the
+    :meth:`score`, which puts the hand edits back and computes the
     built-in scores on that edited model. A callable scorer's dict is not
     pooled by ``cross_validate``, so the pooled deviance and NLL are summed
     here from the same numerator and denominator parts it pools.
@@ -1143,10 +1133,9 @@ def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
         )
     except (ValueError, *_SOLVER_FAILURES) as exc:
         # Separation and a solver failure say what they are. Any other
-        # ValueError is a row the fit refuses, which the checks above do not
-        # name: a validation row's missing or non-finite number, a level
-        # outside an interaction's universe, or a response the family does
-        # not allow.
+        # ValueError is a row the checks above do not name (a missing or
+        # non-finite number, a level outside an interaction's universe, a
+        # response the family disallows).
         if isinstance(exc, EditorClientError):
             raise
         _LOGGER.warning("Final fit failed.", exc_info=True)
@@ -1201,10 +1190,9 @@ def _union_rows(datasets: Sequence[EvaluationDataset], template):
         X = frames[0].native
     elif backends == {"pandas"}:
         names, casts = _stacked_columns(frames, template)
-        # Splits that declare one set of categories for a column read as
-        # labels stack as one categorical: pandas stacks two whose ordered
-        # flags differ as object, which drops a category no row holds from
-        # the universe. A column read as numbers takes its cast instead.
+        # Splits declaring one set of categories for a label column stack as one
+        # categorical (pandas would stack differing ordered flags as object and
+        # drop a category no row holds). A numeric column takes its cast.
         first = cast(pd.DataFrame, frames[0].native)
         labelled = _label_columns(template)
         categorical = {
@@ -1241,19 +1229,14 @@ def _stacked_columns(frames, template) -> tuple[list[str], dict[str, str]]:
     """The columns ``template`` reads, and the dtype to stack some as; refused if a split differs.
 
     The fit reads a column as its NumPy array and the categories its dtype
-    declares (a pandas categorical, a Polars Enum), so splits that agree on
-    those stack without changing a value, however their libraries name the
-    dtype or order the columns. So do numbers of other kinds or widths, and
-    bools, in a column a term reads as a number, which the fit reads as
-    float64 (True as 1), whatever categories their dtype declares. A column
-    read as labels follows stricter rules. A level term reads a number's
-    text: integers of any width spell a level alike, so they stack as int64,
-    but 1 and 1.0, or True and 1, are two levels. A factor smooth reads its
-    group by value, but the kept model reports and matches the levels it
-    fitted, so a cast would relabel them (1 as 1.0), and a bool group cast to
-    numbers stops matching bool rows; it follows the level rule. uint64 is
-    left alone, since beside a signed integer pandas would stack it as
-    float64.
+    declares, so splits that agree on those stack without changing a value.
+    So do numbers of other kinds or widths, and bools, in a column a term reads
+    as a number (read as float64, True as 1). A column read as labels is
+    stricter: a level term reads a number's text, so integers of any width
+    stack as int64 but 1 and 1.0, or True and 1, are two levels; a factor
+    smooth's group follows the same rule, since a cast would relabel the
+    levels the kept model matches. uint64 is left alone (pandas would stack it
+    beside a signed integer as float64).
     """
     names = list(_fingerprint_columns(template, frames[0]))
     levels = _label_columns(template)

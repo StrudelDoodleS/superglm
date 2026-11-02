@@ -82,10 +82,9 @@ def _natural_parameterization_from_r(
 
     R_inv = la.solve_triangular(R_array, np.eye(k), lower=False)
     transformed_penalty = R_inv.T @ S @ R_inv
-    # The zero-eigenvalue eigenspace can rotate freely.  Each FS null
-    # coordinate has its own smoothing parameter, so explicitly select the
-    # MRRR driver to keep that coordinate system deterministic under the
-    # tested numerical contract.
+    # The zero-eigenvalue eigenspace can rotate freely and each FS null coordinate
+    # has its own smoothing parameter, so the MRRR driver is selected explicitly to
+    # keep the coordinate system deterministic.
     eigenvalues, eigenvectors = la.eigh(
         0.5 * (transformed_penalty + transformed_penalty.T),
         driver="evr",
@@ -130,20 +129,16 @@ def check_terms_on_factor_smooth_groups(
 ) -> None:
     """Refuse or warn about a main term on a factor smooth's group column.
 
-    Both bases give every level its own intercept: with the model intercept,
-    the per-level indicator columns lie in the factor smooth's column space
-    (``fs`` keeps each level's constant in its penalized null space; ``sz``
-    leaves each level's polynomial part uncentered and sums it to zero across
-    levels). Any term on the group column is a function of the level alone,
-    so its columns lie in that span too and the design is structurally rank
-    deficient, whatever the term's type. mgcv documents the same for ``sz``:
-    adding the factor's main effect "will lead to a rank deficient model".
+    Both bases give every level its own intercept, so with the model intercept the
+    per-level indicator columns lie in the factor smooth's column space (``fs``
+    keeps each level's constant in its penalized null space; ``sz`` leaves it
+    uncentered and sums it to zero across levels).  Any term on the group column
+    is a function of the level alone, so the design is rank deficient whatever the
+    term's type (mgcv documents the same for ``sz``).
 
-    A term of a ``refused`` type is refused, as the caller always refused it;
-    any other term fits as it always has, with a warning, so a model that used
-    to fit keeps fitting. ``where(group, spec)`` names the declaration to drop
-    in the form the model was declared in; ``note(group, spec, smooth)`` adds
-    a caller's sentence.
+    A term of a ``refused`` type is refused; any other fits with a warning.
+    ``where(group, spec)`` names the declaration to drop in the form the model was
+    declared in; ``note(group, spec, smooth)`` adds a caller's sentence.
     """
     for smooth in smooths:
         if smooth.group not in features:
@@ -189,41 +184,63 @@ def _fixed_at_zero(policy: LambdaPolicy | None) -> bool:
 
 
 class FactorSmooth:
-    """A factor-by-P-spline interaction.
-
-    ``basis="fs"`` is fully penalized and retains independent level curves.
-    ``basis="sz"`` represents centered sum-to-zero deviations; its specialized
-    geometry is populated by the design-matrix builder.
+    """A factor-by-P-spline interaction: one smooth curve of ``variable`` per level of ``group``.
 
     Both bases store each level's curve in the natural parameterization of the
-    marginal P-spline: per level, the coordinates in which the wiggle penalty
-    is diagonal, followed by the unpenalized polynomial coordinates.  The
-    coefficients are therefore neither the B-spline coefficients nor mgcv's
-    ``s(x, g, bs="sz")`` coordinates; read a level's curve through
-    ``SuperGLM.factor_smooth`` instead.  (An ``sz`` model saved by 0.35.0 or
-    earlier keeps the marginal-basis coordinates it was fitted in.)
+    marginal P-spline: per level, the coordinates in which the wiggle penalty is
+    diagonal, then the unpenalized polynomial coordinates.  The coefficients are
+    neither the B-spline coefficients nor mgcv's ``s(x, g, bs="sz")`` coordinates;
+    read a level's curve through ``SuperGLM.factor_smooth``.  (An ``sz`` model
+    saved by 0.35.0 or earlier keeps the marginal-basis coordinates.)
 
-    ``levels=`` binds the grouping column's level universe (spec 2026-08-11,
-    §3.1).  Under ``basis="fs"`` a declared level with no training rows keeps
-    its own curve block and shrinks to zero through the penalty.  ``basis="sz"``
-    rejects one unless the term has ``select=True``: its sum-to-zero contrast is
-    what identifies the deviations, and an empty level makes that constraint
-    vacuous.  With ``select=True`` every level's line is penalized, so the
-    empty level is proper and is predicted at the population curve.
-
-    ``basis="sz"`` leaves each level's polynomial part (its line, with
-    ``m=2``) unpenalized, as mgcv's ``sz`` does.  ``select=True`` adds a
-    second penalty component, ``"null"``, on every level's line: Marra &
-    Wood's (2011) null-space penalty (mgcv's ``select=TRUE``), with its own
-    smoothing parameter, which reads the lines as random effects shrunk
-    toward the population curve, as ``basis="fs"`` does with its ``null_j``
-    components.  It gives a level whose line separates the response, or a
-    term whose every level holds fewer distinct ``x`` values than the line
-    has coefficients, finite and unique curves (#444).  ``lambda_policy`` may
-    then name ``"null"``; one policy for the whole term applies to both
-    components.  The option is the term's, never the data's: without it the
-    lines stay unpenalized whatever the data, and such levels are named in a
-    warning at fit.
+    Parameters
+    ----------
+    variable : hashable
+        The numeric column each level's curve is a function of.
+    group : hashable
+        The grouping column; one curve per level.
+    basis : {"fs", "sz"}, default "fs"
+        ``"fs"`` penalizes every level's curve fully, its polynomial part through
+        one ``null_j`` component per coordinate.  ``"sz"`` fits sum-to-zero
+        deviations from a population curve and leaves each level's polynomial part
+        (its line, with ``m=2``) unpenalized, as mgcv's ``sz`` does.
+    kind : {"ps"}, default "ps"
+        The marginal basis, a cubic P-spline.
+    k : int, default 6
+        Basis functions per level, at least 5.
+    m : int, default 2
+        Difference order of the wiggle penalty, between 1 and ``k - 1``; each
+        level's polynomial part has ``m`` coordinates.
+    levels : list | tuple | Series | ndarray | CategoricalDtype, optional
+        The grouping column's level universe.  Under ``basis="fs"`` a declared
+        level with no training rows keeps its curve block and shrinks to zero
+        through the penalty.  ``basis="sz"`` rejects one unless ``select=True``,
+        since the sum-to-zero contrast cannot identify the deviations with an empty
+        level; with ``select=True`` the empty level is predicted at the population
+        curve.
+    unseen : {"population", "error"}, default "population"
+        Predict-time policy for group levels outside the universe.
+        ``"population"`` predicts those rows at the population curve; ``"error"``
+        raises.
+    missing : {"error"}, default "error"
+        Missing values in either column, or a non-finite ``variable``, raise.
+    lambda_policy : LambdaPolicy, dict of str to LambdaPolicy, or None
+        Control of the smoothing parameters.  One ``LambdaPolicy`` applies to every
+        component; a mapping names components, ``"wiggle"`` and
+        ``"null_0"`` ... ``"null_{m-1}"`` under ``basis="fs"``, ``"wiggle"`` (and
+        ``"null"`` with ``select=True``) under ``basis="sz"``, and estimates the
+        ones it does not name.  None estimates every component by REML.
+    name : str or None
+        The term's name; defaults to ``"{variable}:{group}:{basis}"``.
+    select : bool, default False
+        ``basis="sz"`` only.  Adds a second penalty component ``"null"`` on every
+        level's line (Marra & Wood 2011, as mgcv's ``select=TRUE``) with its own
+        smoothing parameter, reading the lines as random effects shrunk toward the
+        population curve as ``fs`` does with its ``null_j`` components.  It makes
+        curves finite and unique for a level whose line separates the response or a
+        term whose levels hold fewer distinct ``x`` values than the line has
+        coefficients.  Without it the lines stay unpenalized whatever the
+        data, and such levels are named in a fit warning.
     """
 
     structured_kind = "factor_smooth"
@@ -346,11 +363,10 @@ class FactorSmooth:
         self._natural_map = None
         self._base_penalty_components: tuple[tuple[str, Any], ...] = ()
         self._marginal_build_backend: _MarginalBuildBackend | None = None
-        # What the fit's data identify of each sz level (#432), by code
-        # (``_record_unidentified_levels``; ``_free_directions`` None until a
-        # fit records it): the thin levels, the directions of the penalty's null
-        # space each leaves free, the weightless ones, and the levels whose
-        # unpenalized line separates the response.
+        # What the fit's data identify of each sz level (``_record_unidentified_levels``;
+        # ``_free_directions`` None until a fit records it): thin levels, the null-space
+        # directions each leaves free, weightless levels, and levels whose unpenalized
+        # line separates the response.
         self._unidentified_levels: tuple[int, ...] = ()
         self._free_directions: tuple[NDArray, ...] | None = None
         self._weightless_levels: tuple[int, ...] = ()
@@ -426,12 +442,9 @@ class FactorSmooth:
     ) -> NDArray[np.intp]:
         """Code group values against the bound universe, rejecting anything outside it.
 
-        Missing values are already rejected by the caller, so a -1 here can only
-        mean data the declaration does not admit.
-
-        ``sample_weight`` is read for the ``sz`` empty-level guard alone, which
-        asks whether a declared level has any EFFECTIVE rows; ``None`` keeps the
-        physical-row count. Nothing else here is weighted.
+        Missing values are rejected by the caller, so a -1 here means data the
+        declaration does not admit.  ``sample_weight`` is read only for the ``sz``
+        empty-level guard, which asks whether a declared level has any effective rows.
         """
         codes = pd.Index(self._levels).get_indexer(group_values).astype(np.intp, copy=False)
         if np.any(codes < 0):
@@ -442,27 +455,13 @@ class FactorSmooth:
                 f"{sorted(self._levels, key=str)}. Widen levels= or fix the column."
             )
         if self.basis == "sz" and not self._selects_lines:
-            # select=True penalizes every level's line beside its wiggle, so an
-            # empty block is proper there: it is recorded as weightless and
-            # predicted at the population curve (``_record_unidentified_levels``).
-            #
-            # Without it, an empty level does not shrink under sz, it breaks it: the
-            # sum-to-zero constraint is what identifies these deviations
-            # against the population smooth, and a level with no rows absorbs
-            # any common curve, so the constraint stops binding.  Measured on
-            # a three-level fit, adding one empty declared level moved the
-            # penalized system's smallest eigenvalue 5.9e-1 -> 4.4e-10 and
-            # max|beta| 1.8 -> 4.9e3.  fs has no such gap: every coordinate
-            # carries a penalty, so an empty block sits at its own lambda and
-            # the observed levels' coefficients do not move.
-            #
-            # Effective rows, not physical ones. A level whose every row carries
-            # weight 0 contributes exactly nothing to the fitted system, so it
-            # is as empty as a level with no rows at all and recreates the same
-            # near-singularity -- but a physical `bincount` counts it as
-            # present and waves it through. This mirrors `Categorical.build`,
-            # which has always measured occupancy as total weight when weights
-            # are supplied.
+            # select=True penalizes every level's line beside its wiggle, so an empty block
+            # is proper there: recorded as weightless and predicted at the population curve.
+            # Without it, an empty level breaks sz: the sum-to-zero constraint identifies
+            # the deviations against the population smooth, and a level with no rows absorbs
+            # any common curve.  fs has no such gap since every coordinate carries a penalty.
+            # Effective rows, not physical ones: a level whose every row has weight 0 is as
+            # empty as one with no rows (as in `Categorical.build`).
             if sample_weight is None:
                 effective = np.bincount(codes, minlength=len(self._levels)).astype(np.float64)
             else:
@@ -547,10 +546,9 @@ class FactorSmooth:
 
         spline = cast(PSpline, Spline(kind="ps", k=self.k, penalty="none", m=self.m))
         spline._place_knots(x, geometry_weight)
-        # Factor-smooth marginals place one equally spaced knot sequence
-        # across boundaries expanded by 0.1% of the data range. Ordinary
-        # SuperGLM P-splines preserve their pre-expansion interior knots for
-        # backwards compatibility, so align this owned marginal explicitly.
+        # Factor-smooth marginals place one equally spaced knot sequence across
+        # boundaries expanded by 0.1% of the data range; ordinary P-splines keep their
+        # pre-expansion interior knots for compatibility, so align this marginal.
         boundary = spline.fitted_boundary
         if boundary is None:  # pragma: no cover - populated by _place_knots
             raise RuntimeError("FactorSmooth marginal spline has no fitted boundary.")
@@ -642,20 +640,14 @@ class FactorSmooth:
             normalization_mass=normalization_mass,
         )
         if self.basis == "sz":
-            # One-engine design §3.5, decision 5: sz takes fs's natural
-            # parameterization.  Its sum-to-zero constraint is coefficientwise,
-            # so the same per-level change of basis preserves it; the wiggle
-            # penalty becomes diagonal (its square root exact) and the
-            # polynomial null coordinates separate.  sz penalizes the wiggle
-            # component alone, as before: the null coordinates stay unpenalized,
-            # unless the term selects its lines (#444).  Then one ``"null"``
-            # component penalizes them all: Marra & Wood's (2011) null-space
-            # penalty, the wiggle's eigenvectors with its zero eigenvalues set
-            # to one and the rest to zero, which here is the indicator of the
-            # null coordinates, exactly (the sum of fs's ``null_j``).  Those
-            # coordinates are orthonormal over the term's weighted rows, so
-            # ``beta_l' S* beta_l`` is the mean square of level ``l``'s line
-            # over the data, whatever rotation of them the streamed QR chose.
+            # sz takes fs's natural parameterization: its sum-to-zero constraint is
+            # coefficientwise, so the per-level change of basis preserves it, the wiggle
+            # penalty becomes diagonal and the polynomial null coordinates separate.  sz
+            # penalizes the wiggle alone, unless the term selects its lines (#444): then one
+            # ``"null"`` component, the indicator of the null coordinates (Marra & Wood 2011
+            # null-space penalty; the sum of fs's ``null_j``), penalizes them all.  Those
+            # coordinates are orthonormal over the weighted rows, so ``beta_l' S* beta_l`` is
+            # the mean square of level ``l``'s line over the data.
             lines = [component for _, component in components[1:]]
             components = components[:1]
             if self._selects_lines:
@@ -825,21 +817,17 @@ class FactorSmooth:
     ) -> tuple[int, ...]:
         """Record what the fit's data identify of each ``sz`` level (#432); return the separated.
 
-        A level whose rows of positive weight hold fewer distinct ``x`` values
-        than the penalty's null space ``N_P`` has directions of its polynomial
-        deviation the data cannot tell from the main effect
-        (``layout.sz_level_identification``).  A level whose unpenalized line
-        separates the response (``boundaries``, the family's response
-        boundaries reached at infinite ``eta``) has no finite line
-        (``diagnostics.separation.separated_factor_smooth_spans``), along the
-        span of its directions of recession, recorded with it.  Both stay out
-        of the population curve (``_population_map``).
+        A level whose positive-weight rows hold fewer distinct ``x`` values than the
+        penalty's null space ``N_P`` has polynomial-deviation directions the data
+        cannot tell from the main effect (``layout.sz_level_identification``).  A level
+        whose unpenalized line separates the response (``boundaries``: the family's
+        response boundaries at infinite ``eta``) has no finite line along the span of
+        its directions of recession (``diagnostics.separation.separated_factor_smooth_spans``).
+        Both stay out of the population curve (``_population_map``).
 
-        A design whose lines carry their ``"null"`` penalty (``select=True``,
-        #444) has neither: the penalty bounds every line and identifies every
-        level, so the population curve is the main effect.  Only a level
-        without weight is recorded there; it has no data term, so it is
-        predicted at the population curve.
+        With the ``"null"`` penalty (``select=True``, #444) every level is identified
+        and the population curve is the main effect; only a weightless level is
+        recorded, and it is predicted at the population curve.
         """
         from superglm.diagnostics.separation import separated_factor_smooth_spans
         from superglm.solvers._structured.layout import sz_level_identification
@@ -937,12 +925,10 @@ class FactorSmooth:
     def _population_convention(self) -> str:
         """How the population curve is fixed (``_population_map``).
 
-        ``"main"`` (no level left out: the main effect, as the sum-to-zero
-        constraint makes it), ``"mean"`` (the mean of the levels the data
-        identify) or ``"canonical"`` (every level thin or separated).  A term
-        that selects its lines (``select=True``, #444) penalizes them
-        instead: ``"main"``, unless another sz term on its group leaves a
-        level out (``share_group_levels``).
+        ``"main"`` (no level left out), ``"mean"`` (the mean of the levels the data
+        identify) or ``"canonical"`` (every level thin or separated).  A term that
+        selects its lines (#444) is ``"main"`` unless another sz term on its group
+        leaves a level out (``share_group_levels``).
         """
         excluded = self._left_out
         if not excluded:
@@ -967,13 +953,10 @@ class FactorSmooth:
     def _unidentified_directions(self) -> dict[int, NDArray]:
         """Each level left out of the population and the directions of its line the data leave free.
 
-        A thin level's ``_free_directions``, which its rows do not see; a
-        separated level's span of directions of recession, along which its
-        line has no finite estimate (``_record_unidentified_levels``).  That
-        span holds a thin level's free directions, which every one of its
-        rows holds at zero, so it replaces them for a level that is both.  A
-        model saved before the spans were recorded (``_spans_recorded``)
-        has none for its separated levels.
+        A thin level's ``_free_directions``; a separated level's span of directions of
+        recession (``_record_unidentified_levels``), which replaces a thin level's free
+        directions when it is both.  A model saved before the spans were recorded
+        (``_spans_recorded``) has none for its separated levels.
         """
         directions = dict(zip(self._unidentified_levels, self._free_directions, strict=True))
         if self._spans_recorded:
@@ -1007,13 +990,11 @@ class FactorSmooth:
     def _lowest_order_null_space(self, order: int) -> NDArray:
         """``(k, order)``: the coefficient sequences polynomial below degree ``order``, natural basis.
 
-        The null space of an ``order``-th difference penalty, inside ``N_P``
-        for ``order <= m``.  Order 1 is the constant curve (the basis is a
-        partition of unity) and order 2 adds the coefficient-index line, the
-        straight line in ``x`` between the boundary knots.  A nonzero element
-        has at most ``order - 1`` zeros (Schoenberg's variation diminishing
-        property), so it meets the directions a level's ``order`` identified
-        values leave free only at zero.
+        The null space of an ``order``-th difference penalty, inside ``N_P`` for
+        ``order <= m``: order 1 is the constant curve, order 2 adds the straight line
+        in ``x``.  A nonzero element has at most ``order - 1`` zeros (Schoenberg's
+        variation diminishing property), so it meets the directions a level's ``order``
+        identified values leave free only at zero.
         """
         index = np.arange(self.k, dtype=np.float64) / (self.k - 1)
         raw = np.vander(index, order, increasing=True)
@@ -1022,19 +1003,13 @@ class FactorSmooth:
     def _free_projectors(self) -> dict[int, NDArray]:
         """Each level left out of the population and its projector ``P_t`` onto its free directions.
 
-        ``P_t`` projects onto the span of ``F_t = _unidentified_directions()[t]``
-        along the wiggle and the lowest-order part of ``N_P`` that the level's
-        ``d = m - r`` identified values fix (``_lowest_order_null_space``), so
-        the polynomial part of the level's deviation from the population is
-        the lowest-order curve through what its rows identify: with ``m = 2``
-        and one identified value, a constant, and the level follows the shape
-        of the population curve.  ``P_t r = r`` along the free directions and
-        ``b(x)' P_t = 0`` at the level's own rows, whichever complement, which
-        is what keeps ``predict`` off the fit's point along the family and on
-        the fit at those rows.  A model saved before this rule keeps the
-        orthogonal projector ``F_t F_t'`` it was saved with
-        (``_free_complement``), whose complement depends on where the book's
-        rows lie and tilts the deviation away from the level's own ``x``.
+        ``P_t`` projects onto the span of ``F_t = _unidentified_directions()[t]`` along
+        the wiggle and the lowest-order part of ``N_P`` that the level's ``d = m - r``
+        identified values fix (``_lowest_order_null_space``), so the level's polynomial
+        deviation is the lowest-order curve through what its rows identify.  ``P_t r =
+        r`` along the free directions and ``b(x)' P_t = 0`` at the level's own rows,
+        which keeps ``predict`` on the fit at those rows.  A model saved before this
+        rule keeps the orthogonal projector ``F_t F_t'`` (``_free_complement``).
         """
         directions = self._unidentified_directions()
         if not directions:
@@ -1055,40 +1030,27 @@ class FactorSmooth:
     def _population_map(self) -> tuple[NDArray, NDArray] | None:
         """``(levels, V)``: the population offset ``c = sum_i V_i beta_{levels_i}`` (natural basis).
 
-        A thin level ``t`` leaves a part ``r_t`` of its polynomial deviation
-        free (``r_t`` in the span of ``_free_directions[t]``): shifting it,
-        every level by ``-R / K`` and the main effect by ``+R / K`` (``R =
-        sum_t r_t``) keeps the sum-to-zero constraint, every other level's
-        curve and every level's fit at its own rows.  A separated level's
-        line walks the same way without bound.  The fit's coefficients are
-        one point of that family, and the main effect, so the population
-        curve, moved with it.  The population curve is therefore
-        ``main + b(x)' c`` with ``c`` the polynomial part of the mean of the
-        levels the data identify, ``c = P_N sum_{l in I} beta_l / |I|``
-        (``P_N = N_P N_P'``): along the family each of them moves by
-        ``-R / K``, so ``c`` does as well and ``main + b(x)' c`` does not
-        depend on the fit's point.  This is the constraint without the levels
-        left out, as mgcv drops unused factor levels before it fits and lme4
-        predicts the population for a level it did not see.  ``V`` is one
-        ``(k, k)`` matrix shared by the levels, or one per level.
+        A thin level ``t`` leaves a part ``r_t`` of its polynomial deviation free:
+        shifting every level by ``-R / K`` and the main effect by ``+R / K`` (``R =
+        sum_t r_t``) keeps the sum-to-zero constraint, every other level's curve and
+        every level's fit at its own rows; a separated level's line walks the same way
+        without bound.  The population curve is therefore ``main + b(x)' c`` with ``c``
+        the polynomial part of the mean of the levels the data identify, ``c = P_N
+        sum_{l in I} beta_l / |I|`` (``P_N = N_P N_P'``), which does not depend on the
+        fit's point along the family.  This is the constraint without the levels left
+        out, as mgcv drops unused factor levels and lme4 predicts the population for an
+        unseen level.  ``V`` is one ``(k, k)`` matrix shared by the levels, or one per
+        level.
 
-        A separated level's line walks the same family along the span of its
-        directions of recession (``_unidentified_directions``).  With every
-        level separated or thin there is no such mean, and the population is
-        the canonical point of the family, where each level's free part is
-        zero, ``Pi_t (beta_t + s_t - S / K) = 0`` (``Pi_t`` the orthogonal
-        projector on ``_unidentified_directions()[t]``, ``S = sum_t s_t``):
-        ``S = -(I - M / K)^+ sum_t Pi_t beta_t`` with ``M = sum_t Pi_t``, unique when no
-        direction of ``N_P`` is free in every level, and ``c = S / K``.  It
-        does not follow how far the fit walked a separated line.  The
-        orthogonal projectors pin it: with every level seen at fewer values
-        than ``N_P`` has dimensions, no data separate the population's
-        polynomial part from a part every level shares, and the minimum-norm
-        point is the convention.  Each level is then predicted by its own
-        projector (``_free_projectors``) about that population.  A model
-        saved before the spans were recorded keeps its separated levels'
-        mean there (``_spans_recorded``).  ``None`` when no level is left
-        out.
+        With every level separated or thin there is no such mean, and the population is
+        the canonical point of the family where each level's free part is zero,
+        ``Pi_t (beta_t + s_t - S / K) = 0`` (``Pi_t`` the orthogonal projector on
+        ``_unidentified_directions()[t]``, ``S = sum_t s_t``): ``S = -(I - M / K)^+
+        sum_t Pi_t beta_t`` with ``M = sum_t Pi_t``, unique when no direction of
+        ``N_P`` is free in every level, and ``c = S / K``.  Each level is then predicted
+        by its own projector (``_free_projectors``) about that population.  A model
+        saved before the spans were recorded keeps its separated levels' mean there
+        (``_spans_recorded``).  ``None`` when no level is left out.
         """
         if not self._has_population_offset:
             return None
@@ -1149,23 +1111,16 @@ class FactorSmooth:
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         """``(blocks', c)``: each level's coefficients as predicted, and the population offset.
 
-        A thin level keeps what its rows identify and takes the population's
-        part in the directions they leave free, ``beta_t - P_t (beta_t -
-        c)`` (``P_t`` the projector onto ``_free_directions[t]`` along the
-        lowest-order part they leave fixed, ``_free_projectors``): along the
-        family ``beta_t - c`` moves by ``r_t``, which ``P_t`` removes, so the
-        level's prediction moves by ``-R / K`` exactly as the main effect
-        moves by ``+R / K``, and at its own rows ``b(x)' P_t = 0`` keeps the
-        fit.  A separated level takes the population's part along the span
-        of its directions of recession, by the same rule
-        (``_unidentified_directions``): the fit's coefficients there are where
-        its walk stopped, not an estimate, and the part of its line they leave
-        is what the limiting conditional model identifies (Correia, Guimaraes
-        & Zylkin 2021, Proposition 3).  Its rows at the response boundary are
-        then predicted on the population's line there rather than at the
-        boundary.  A level without weight, or whose every row separates
-        (``_levels_at_population``), is predicted at the population value.
-        Every other level keeps its coefficients.
+        A thin level keeps what its rows identify and takes the population's part in
+        the directions they leave free, ``beta_t - P_t (beta_t - c)`` (``P_t`` from
+        ``_free_projectors``): along the family this moves the level's prediction by
+        ``-R / K`` as the main effect moves by ``+R / K``, and ``b(x)' P_t = 0`` keeps
+        the fit at its own rows.  A separated level takes the population's part along
+        its directions of recession by the same rule: the fit's coefficients there are
+        where the walk stopped, and the rest of its line is what the limiting
+        conditional model identifies (Correia, Guimaraes & Zylkin 2021, Proposition 3).
+        A level without weight, or whose every row separates (``_levels_at_population``),
+        is predicted at the population value.  Every other level keeps its coefficients.
         """
         coefficients = np.array(blocks, dtype=np.float64, copy=True)
         offset = self._population_offset(coefficients)
@@ -1189,24 +1144,20 @@ class FactorSmooth:
     ) -> tuple[NDArray[np.float64], tuple]:
         """Score the term as predicted when some level stays out of the population (#432).
 
-        Returns the term's contribution and the levels among the rows that
-        are thin, separated or without weight.  Each level takes its
-        ``_identified_blocks`` coefficients; an unseen
-        level, and every row under ``population``, the population offset
-        ``b(x)' c``.
+        Returns the term's contribution and the levels among the rows that are thin,
+        separated or without weight.  Each level takes its ``_identified_blocks``
+        coefficients; an unseen level, and every row under ``population``, the
+        population offset ``b(x)' c``.
 
-        ``level_constants`` is a redundant unpenalized term's contribution at
-        each level of the group (a SuperLSS predictor's ``Categorical`` on
-        it), which the term's own per-level constant aliases: a separated
-        level's walk splits between them however the solver chose.  The rule
-        then reads each level's line with its constant, ``beta_l + a_l 1``,
-        and the contribution returned is that level's predicted line less
-        ``a_l``, so the two terms together predict as the term would alone.
-        A level the rule leaves alone is scored from its own coefficients.
-        A term that does not fold its group's main term (``_folds_group_term``:
-        one per group, none in a model saved before 0.41) ignores
-        ``level_constants``.  Under ``population`` a row of a known level gives ``a_l`` back too:
-        the population is the term's alone, as without the redundant term.
+        ``level_constants`` is a redundant unpenalized term's contribution at each
+        level of the group (a SuperLSS predictor's ``Categorical``), which the term's
+        own per-level constant aliases.  The rule reads each level's line with its
+        constant, ``beta_l + a_l 1``, and the contribution returned is the predicted
+        line less ``a_l``, so the two terms together predict as this term would alone;
+        under ``population`` a known level's row gives ``a_l`` back too.  A level the
+        rule leaves alone is scored from its own coefficients.  A term that does not
+        fold its group's main term (``_folds_group_term``; none in a model saved before
+        0.41) ignores ``level_constants``.
         """
         if not self._folds_group_term:
             level_constants = None
@@ -1223,11 +1174,10 @@ class FactorSmooth:
             constants = np.asarray(level_constants, dtype=np.float64)
             mean = float(np.mean(constants))
             constant = self._lowest_order_null_space(1)[:, 0]
-            # The rule folds the constants' deviations from their mean, so the
-            # lines it reads still sum to zero across levels, as the term's do:
-            # trading the mean against the intercept (every constant + d,
-            # intercept - d) then cannot move the population.  The mean is the
-            # group term's common level, carried in the offset.
+            # The rule folds the constants' deviations from their mean, so the lines it
+            # reads still sum to zero across levels and trading the mean against the
+            # intercept cannot move the population.  The mean is the group term's common
+            # level, carried in the offset.
             folded, offset = self._identified_blocks(raw + np.outer(constants - mean, constant))
             offset = offset + mean * constant
             moved = np.asarray(
@@ -1330,29 +1280,23 @@ def population_curve_terms(name: Any, interaction_specs: Any) -> list[tuple[Any,
 def share_group_levels(specs: Any) -> None:
     """Decide once, for the ``sz`` terms on each group, which levels they treat alike, and who folds.
 
-    ``specs`` are one model's (or one SuperLSS predictor's) interaction specs
-    in interaction order, each with its own record
-    (``FactorSmooth._record_unidentified_levels``).  Every level's constant
-    in each ``sz`` term on a group aliases its constant in every other, and
-    in a redundant main term on the group, so what one term decides about a
+    ``specs`` are one model's (or one SuperLSS predictor's) interaction specs in
+    interaction order, each with its record (``FactorSmooth._record_unidentified_levels``).
+    Every level's constant in each ``sz`` term on a group aliases its constant in
+    every other and in a redundant main term, so what one term decides about a
     level binds all of them:
 
-    - a level one term holds at the population (``_levels_at_population``:
-      without weight, or every row separated) has no row in the limiting
-      conditional model, so none of its coefficients in any term on the
-      group is identified (Correia, Guimaraes & Zylkin 2021, Proposition
-      3(b)): every term holds it there (``_group_held``);
-    - a level one term leaves out of its population mean (``_left_out``),
-      or does not know (a ``levels=`` level with no rows), is left out by
-      every term (``_group_left_out``): the terms average the same levels,
-      so moving a constant between two terms, or between a term and the
-      main term, moves no population;
-    - one term per group, the first with a population offset, folds the
-      redundant main term's values into its levels (``_folds_group_term``),
-      so they are taken back once per held level.
+    - a level one term holds at the population (``_levels_at_population``) has no
+      row in the limiting conditional model, so none of its coefficients is
+      identified there (Correia, Guimaraes & Zylkin 2021, Proposition 3(b)): every
+      term holds it (``_group_held``);
+    - a level one term leaves out of its population mean (``_left_out``), or does
+      not know, is left out by every term (``_group_left_out``);
+    - one term per group, the first with a population offset, folds the redundant
+      main term's values into its levels (``_folds_group_term``).
 
-    Only terms with the 0.41 lowest-order projector (``_free_complement``)
-    take part; any other is cleared, as a model saved before records none of it.
+    Only terms with the 0.41 lowest-order projector (``_free_complement``) take
+    part; any other is cleared.
     """
     terms = [spec for spec in specs if isinstance(spec, FactorSmooth) and spec.basis == "sz"]
     for spec in terms:

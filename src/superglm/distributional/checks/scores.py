@@ -1,31 +1,19 @@
 """Proper scores for a fitted distributional (location-scale-shape) model.
 
-Two scores carry the checking story.  The **log score** ``-log f(y | theta_hat)``
-is the local proper score the fit already optimises, read back per row.  The
-**continuous ranked probability score** is the global one: it compares the whole
-predictive distribution against the realised value, is reported in the units of
-the response, and is the score of Gneiting and Raftery (2007), *Journal of the
-American Statistical Association* 102(477), 359-378.
-
-Two routes compute the CRPS and the tests hold them against each other.  The
-closed forms are the catalogue of Jordan, Krueger and Lerch (2019), *Journal of
-Statistical Software* 90(12) -- Gaussian from Gneiting and Raftery (2007), gamma
-from Scheuerer and Moeller (2015), *Annals of Applied Statistics* 9(3),
-1328-1349, log-normal from Baran and Lerch (2015), *Quarterly Journal of the
-Royal Meteorological Society* 141(691), 2289-2299.  The general route is the
-quantile-score integral of Laio and Tamea (2007), *Hydrology and Earth System
-Sciences* 11(4), 1267-1277,
+The **log score** ``-log f(y | theta_hat)`` is the local proper score the fit
+optimises; the **CRPS** (Gneiting and Raftery 2007, *JASA* 102(477)) is the
+global one, in response units. Closed forms follow Jordan, Krueger and Lerch
+(2019), *J. Stat. Softw.* 90(12) (Gaussian: Gneiting and Raftery 2007; gamma:
+Scheuerer and Moeller 2015; log-normal: Baran and Lerch 2015); the general
+route is the quantile-score integral of Laio and Tamea (2007),
 
     CRPS = 2 * integral_0^1 (1{y < Q(p)} - p) (Q(p) - y) dp,
 
-with an established bound or correction for the omitted tails. Clamping both
-``y`` and ``Q(p)`` to ``t`` gives the threshold-weighted CRPS with indicator
-weight, ``integral_t^infinity (F(z) - 1{y <= z})^2 dz`` (Gneiting and Ranjan,
-2011; Allen, Ginsbourger and Ziegel, 2023, Proposition 1).
-
-The closed forms live here rather than on the families: a family owns its
-likelihood and its distribution functions, and a score catalogue keyed by family
-name keeps a scoring convention out of the fitting boundary.
+with a bound or correction for the omitted tails. Clamping ``y`` and ``Q(p)``
+to ``t`` gives the threshold-weighted CRPS
+``integral_t^infinity (F(z) - 1{y <= z})^2 dz`` (Gneiting and Ranjan 2011;
+Allen, Ginsbourger and Ziegel 2023, Proposition 1). The closed forms are keyed
+by family name here, keeping scoring conventions out of the families.
 """
 
 from __future__ import annotations
@@ -365,20 +353,17 @@ def crps_numeric(
 ) -> NDArray[np.float64]:
     """Integrate CRPS, optionally with CDF weight ``1{z > threshold}``.
 
-    Both response and quantiles are clamped to a finite threshold. Minus
-    infinity is exactly the unweighted path; plus infinity scores zero.
-    Finite probit panels split at F(y) and F(threshold), with up to three
-    doublings of ``n_nodes``. Successive estimates are a convergence diagnostic,
-    not a rigorous quadrature enclosure. Independent omitted-tail bounds use
-    finite predictive variance, or explicit GPD/negative-Q generalized-gamma
-    formulas. Tail and panel budgets are respectively 1/4 and 1/2 of sqrt(eps)
-    times max(IQR, distance from the clamped median, current score).
+    Response and quantiles are clamped to a finite threshold; ``-inf`` is the
+    unweighted path and ``+inf`` scores zero. Probit panels split at ``F(y)``
+    and ``F(threshold)``, with up to three doublings of ``n_nodes`` as a
+    convergence diagnostic (not a rigorous enclosure). Omitted tails are
+    bounded from finite predictive variance or explicit GPD and negative-Q GG
+    formulas; tail and panel budgets are 1/4 and 1/2 of ``sqrt(eps)`` times
+    ``max(IQR, distance from the clamped median, current score)``.
 
-    A law without an established tail bound raises NotImplementedError; an
-    unresolved finite numerical evaluation raises ValueError. Negative-Q
-    generalized gamma has infinite CRPS exactly when sigma*abs(Q)>=2, even
-    though its mean already diverges at one. Extreme finite rows outside the
-    compact tail evaluator's domain can refuse explicitly.
+    A law without an established tail bound raises ``NotImplementedError``;
+    an unresolved evaluation raises ``ValueError``. Negative-Q GG has infinite
+    CRPS exactly when ``sigma*abs(Q) >= 2``.
     """
     if not isinstance(family, DistributionFunctionFamily):
         raise NotImplementedError(

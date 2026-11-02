@@ -21,14 +21,9 @@ largest power of two and streams the rows twice: a floating-point overflow
 fallback, not a value gate.  IEEE rounding must hold for every operation:
 ``fastmath`` would break the error-free transformations.
 
-Compile time.  A row stages its pieces (at most four floats, each tagged
-with its set) and then adds them in the order it formed them, so each kernel
-holds one inlined expansion step per set.  Adding each piece where it was
-formed inlined the step ten times into ``unscaled_exact_sum`` and doubled its
-cold compile (2.4 s against 1.1 s) for the same throughput on the freMTPL2
-books; leaving the step to LLVM instead of Numba's inliner kept a call per
-piece and cost 30-40% of the throughput.  The partials see the same additions
-in the same order either way, so the results are the same to the bit.
+Each row stages its pieces (at most four floats, tagged by set) and adds them
+in formation order, so each kernel inlines one expansion step per set, which
+keeps cold compiles short; the additions and results are the same to the bit.
 """
 
 from __future__ import annotations

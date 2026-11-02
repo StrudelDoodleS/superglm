@@ -437,13 +437,10 @@ class ModelMetrics:
                 own_frame=self._X is fit_X,
             )
         else:
-            # Identity misses the training rows after a pickle round trip or when
-            # the caller passes equal copies; the guard's fingerprint of X, y,
-            # weights and offset recognises them by content.  Only a fit whose
-            # metrics always read its retained covariance (structured or
-            # shape-constrained) then reads the fit design and weights with it;
-            # a dense fit re-forms every quantity on the supplied rows, since a
-            # discrete fit's weights and edf belong to its binned design.
+            # Equal copies of the training rows (after a pickle round trip) are recognised by a
+            # content fingerprint of X, y, weights and offset. Only a fit whose metrics always read
+            # its retained covariance (structured or shape-constrained) then reads the fit design;
+            # a dense fit re-forms everything on the supplied rows.
             keeps_fit_covariance = (
                 retained_linear_state(model) is not None
                 or getattr(self._result, "scop_inference", None) is not None
@@ -477,40 +474,20 @@ class ModelMetrics:
             # ``predict``'s values without its warning: a library evaluation
             self._mu = base.predict_exact(model, self._X, offset=offset, warn=False)
 
-        # Evaluation takes its OWN rows and weights, so the fit-time check does
-        # not cover it: a clean fitted model can be scored on holdout rows whose
-        # `w * y` is not integral, and both the reported log-likelihood and the
-        # randomized quantile residuals would then be silently fabricated -- the
-        # residual rounds the impossible count onto a neighbouring lattice point
-        # and inverts the CDF there.
-        #
-        # Not inside a `sample_weight is not None` branch: synthesized all-ones
-        # weights still define a counting lattice, so a fractional response on
-        # an unweighted holdout is just as off it.
-        #
-        # After predict(), not before: predict is what validates the evaluation
-        # frame and the offset, and this warning describes a likelihood about to
-        # be computed. Ahead of that validation it fires on input that will never
-        # reach one, and under `-W error` it surfaces instead of the frame or
-        # offset error the caller needs to see.
-        # `predict` validates the frame and the offset but never looks at `y`,
-        # so a length mismatch is still outstanding at this point and would
-        # otherwise be pre-empted by the contract warning under `-W error` --
-        # the same ordering defect as the offset, one argument over.
+        # Evaluation takes its own rows and weights, so the fit-time check does not cover it: a
+        # holdout whose `w * y` is not integral would silently fabricate the log-likelihood and
+        # quantile residuals. This also applies to unweighted holdouts (all-ones weights still
+        # define a lattice). It runs after predict(), which validates the frame and offset, so
+        # `-W error` surfaces those errors first; predict never looks at `y`, so check its length.
         if len(self._y) != len(self._mu):
             raise ValueError(
                 f"y has {len(self._y)} rows but X predicts {len(self._mu)}; "
                 "they must describe the same observations"
             )
 
-        # `explain_ops.metrics` sets `_contract_checked` when the caller passed
-        # the training arrays themselves, verified unchanged: the fit already
-        # checked these rows, so checking again reports one condition twice
-        # for one fit.  The likelihoods below leave out the custom-family
-        # contract report for the same reason.
-        #
-        # Holdout evaluation is unaffected: its rows were never checked, which
-        # is exactly the case the check exists for.
+        # `explain_ops.metrics` sets `_contract_checked` when the caller passed the verified
+        # training arrays: the fit already checked them, so do not report the condition twice.
+        # Holdout rows were never checked, which is the case the check exists for.
         if not _contract_checked:
             from superglm.model.input_validation import check_weight_contract
 
@@ -690,25 +667,19 @@ class ModelMetrics:
     def residuals(self, kind: str = "deviance", *, seed: int | None = 42) -> NDArray:
         """Compute residuals of the specified type.
 
-        Deviance and Pearson residuals use a compressed-row aggregate
-        representation: a weighted row is multiplied by ``sqrt(sample_weight)``
-        so its squared residual equals the sum of the squared residuals from
-        literal replicated rows. Response, working, and quantile residuals
-        retain per-row semantics and are not multiplied by the weight. Under
-        ``weight_semantics="prior"`` the weight is part of the row's own
-        distribution and therefore stays in every diagnostic that depends on
-        it.
-        Influence diagnostics combine the aggregate residual with compressed
-        leverage and therefore describe deletion of the whole weighted cell,
-        not deletion of one literal expanded copy.
+        Deviance and Pearson residuals are multiplied by ``sqrt(sample_weight)`` so a weighted
+        row's squared residual equals the sum over literal replicated rows; response, working
+        and quantile residuals keep per-row semantics. Under ``weight_semantics="prior"`` the
+        weight is part of the row's distribution and stays in every diagnostic that depends on
+        it. Influence diagnostics describe deletion of the whole weighted cell.
 
         Parameters
         ----------
         kind : str
             One of "deviance", "pearson", "response", "working", "quantile".
         seed : int or None
-            Random seed for quantile residuals (discrete families only).
-            Default 42 for reproducibility. Ignored for non-quantile types.
+            Random seed for quantile residuals (discrete families only). Default 42.
+            Ignored for other types.
         """
         y, mu, w = self._y, self._mu, self._weights
         family = self._family
@@ -739,21 +710,10 @@ class ModelMetrics:
     def _quantile_residuals(self, seed: int | None = 42) -> NDArray:
         """Randomized quantile residuals (Dunn & Smyth 1996).
 
-        A replication weight does not change an observation's family CDF:
-        integer weights represent repeated copies of that same response. A
-        prior weight does change the per-row distribution -- through
-        ``phi / w``, or the equivalent scaling of the family's own parameters
-        -- and therefore stays in the CDF construction.
-
-        For discrete families (Poisson, NB2, Binomial), uses jittered
-        uniform on the CDF interval [F(y-1), F(y)]. For continuous
-        families (Gamma, Gaussian), uses the CDF directly.
-
-        Parameters
-        ----------
-        seed : int or None
-            Random seed for the jitter in discrete families. Default 42
-            for reproducibility. Pass None for non-deterministic.
+        Discrete families (Poisson, NB2, Binomial) use a jittered uniform on the CDF interval
+        [F(y-1), F(y)]; continuous families use the CDF directly. A replication weight does not
+        change the family CDF; a prior weight does (through ``phi / w`` or the family's
+        parameters) and stays in the construction. ``seed=None`` is non-deterministic.
         """
         from scipy.stats import gamma as gamma_dist
         from scipy.stats import nbinom, norm, poisson
@@ -769,33 +729,17 @@ class ModelMetrics:
 
         y, mu, w = self._y, self._mu, self._weights
         rng = np.random.default_rng(seed)
-        # A randomized quantile residual is a probability-integral transform, so
-        # it needs the row's own marginal distribution.  A replicated row has the
-        # unit-weight marginal -- copies of a draw are draws -- so the frequency
-        # contract evaluates every CDF below at w = 1.  A prior weight is part of
-        # the row's distribution: it scales the Gaussian's variance, the Gamma's
-        # shape, the Poisson's and negative binomial's lattice, and the
-        # binomial's trial count, and the transform is wrong without it.
+        # A randomized quantile residual is a probability-integral transform of the row's own
+        # marginal. A replicated row has the unit-weight marginal (CDFs below use w = 1); a prior
+        # weight is part of the distribution (Gaussian variance, Gamma shape, count lattice).
         prior = self._weight_semantics == "prior"
         if isinstance(self._family, Binomial):
-            # Binomial is deliberately CONTRACT-INVARIANT here, and it is the
-            # one family that has to be.
-            #
-            # A randomized quantile residual is only a probability-integral
-            # transform if the masses it splits sum to one. The prior
-            # construction `w Y ~ Binomial(w, mu)` lives on {0, 1/w, ..., 1},
-            # but `validate_response` pins y to {0, 1} -- so the reported
-            # likelihood's two reachable masses are (1-mu)**w and mu**w, which
-            # sum to one ONLY at w == 1 (0.378 at mu=0.71, w=3, measured).
-            # There is therefore no {0,1}-supported distribution whose masses
-            # are the reported likelihood's, and no PIT of it exists to build.
-            #
-            # Splitting [0, 1] at 1 - mu instead keeps the transform exactly
-            # uniform, which is the property the Q-Q envelope is a reference
-            # band for. What it costs is that the residual inverts the
-            # unit-weight marginal rather than the reported likelihood -- said
-            # here rather than left for a reader to discover, and already
-            # warned about at fit time by PriorWeightLatticeWarning.
+            # Binomial is contract-invariant here by necessity. The prior construction
+            # `w Y ~ Binomial(w, mu)` lives on {0, 1/w, ..., 1}, but y is pinned to {0, 1}, so the
+            # reported likelihood's two masses (1-mu)**w and mu**w sum to one only at w == 1 and no
+            # PIT of it exists. Splitting [0, 1] at 1 - mu keeps the transform exactly uniform,
+            # at the cost of inverting the unit-weight marginal (warned at fit time by
+            # PriorWeightLatticeWarning).
             a = np.where(y == 0, 0.0, 1.0 - mu)
             b = np.where(y == 0, 1.0 - mu, 1.0)
             u = rng.uniform(a, b)
@@ -1109,19 +1053,12 @@ class ModelMetrics:
     def _hat_diag(self) -> NDArray:
         """Hat matrix diagonal: the influence-matrix diagonal with the intercept.
 
-        One-engine design §3.10, definition (A): ``h_i = w_i a_i' H_aug^+ a_i``
-        with ``a_i = [1, x_i]``, which is exactly ``w_i / sum w + w_i x~_i'
-        M_ss x~_i`` for ``x~`` centred on the working-weighted mean and
-        ``M_ss`` the slope block of ``H_aug^+``, the inverse of the intercept's
-        Schur complement.  It is invariant to a shift of any column, its sum
-        is the model's edf, and it is the ``h`` of the residual variance
-        ``phi (1 - h_i)`` that Cook's distance and the standardized residuals
-        assume.  A structured fit whose augmented factor has row quadratic
-        forms evaluates ``a_i' H_aug^+ a_i`` in the factor's centred
-        coordinates, sparse rows at a time; every other covariance takes
-        ``M_ss`` on rows centred on the shifted working-weighted mean
-        (``weighted_center``), so the centring rounds at the columns' spread,
-        not their offset.
+        ``h_i = w_i a_i' H_aug^+ a_i`` with ``a_i = [1, x_i]``, equal to ``w_i / sum w +
+        w_i x~_i' M_ss x~_i`` for ``x~`` centred on the working-weighted mean. It is invariant
+        to a column shift, sums to the model's edf, and is the ``h`` in ``phi (1 - h_i)`` for
+        Cook's distance and standardized residuals. A structured fit evaluates the quadratic
+        forms in the augmented factor's centred coordinates; other covariances centre rows on
+        the shifted working-weighted mean (``weighted_center``).
         """
         X_a, W, _, augmented, _ = self._active_info
         W = np.asarray(W, dtype=np.float64)
@@ -1448,12 +1385,9 @@ class ModelMetrics:
             }
 
         elif isinstance(spec, Piecewise):
-            # One SE per KNOT with a hard zero at the base -- the same shape,
-            # order and labelling as `term_inference(...).se_log_relativity` and
-            # the workbook's knot rows.  The unlabelled `{"se": diag}` fallback
-            # below returns the J+1 per-coefficient values with no knot vector
-            # beside them, so a caller zipping them against the term's knots
-            # pairs every knot from the base onward with the wrong SE.
+            # One SE per knot with a hard zero at the base, matching
+            # `term_inference(...).se_log_relativity`; the unlabelled `{"se": diag}` fallback has
+            # no knot vector, so zipping it against knots misaligns every SE from the base onward.
             M = np.asarray(spec._raw_basis_matrix(spec._knots), dtype=np.float64)[
                 :, spec._non_base_indices
             ]
@@ -1471,16 +1405,10 @@ class ModelMetrics:
     def feature_se(self, name: str, n_points: int = 200) -> dict[str, Any]:
         """Quasi-likelihood SE of a feature curve, levels, or coefficient.
 
-        Uses the same dispersion convention as :attr:`coefficient_se`,
-        including Pearson dispersion for known-scale families. Rendered
-        coefficient tables retain fitted-family scale.
-
-        Refuses for a term carrying a post-fit shape repair: the band would be
-        propagated from the unconstrained fit's covariance around constrained
-        coefficients, which is the quantity ``summary()`` withholds for that
-        term. A per-feature accessor can say so exactly, so it does -- unlike
-        :attr:`coefficient_se`, which is one dict over every group and already
-        spends the all-zeros array on "not selected".
+        Uses the same dispersion convention as :attr:`coefficient_se`. Refuses for a term
+        carrying a post-fit shape repair, since the band would be propagated from the
+        unconstrained fit's covariance around constrained coefficients (``summary()`` withholds
+        the same quantity).
         """
         from superglm.model.explain_ops import _shape_repaired
 
@@ -1571,36 +1499,27 @@ class ModelMetrics:
     ) -> ModelSummary:
         """Formatted model summary with coefficient table.
 
-        The rendered coefficient table uses fitted-family covariance:
-        known-scale families retain ``phi=1`` and estimated-scale families
-        use their fitted ``phi``. It deliberately does not reuse the explicit
-        Pearson quasi-likelihood accessors :attr:`coefficient_se`,
-        :attr:`intercept_se`, or :attr:`feature_se`.
-
-        The dict-like ``standard_errors`` payload retains the historical
-        ``coefficient_se`` key for the explicit quasi-likelihood accessor and
-        labels its scale separately from the rendered fitted-family table.
+        The rendered table uses fitted-family covariance (``phi=1`` for known-scale families,
+        the fitted ``phi`` otherwise), not the Pearson quasi-likelihood accessors
+        :attr:`coefficient_se`, :attr:`intercept_se` or :attr:`feature_se`. The dict-like
+        ``standard_errors`` payload keeps the historical ``coefficient_se`` key for the
+        explicit quasi-likelihood accessor.
 
         Parameters
         ----------
         alpha : float
             Significance level for confidence intervals (default 0.05 → 95% CI).
         detail : str
-            Level of detail for spline terms. ``"compact"`` (default) shows
-            one row per spline group. ``"full"`` adds per-coefficient
-            detail rows (ASCII: printed inline; HTML: pre-expanded
-            ``<details>`` disclosure). Default ``"compact"`` still shows
-            closed disclosures in HTML.
+            ``"compact"`` (default) shows one row per spline group; ``"full"`` adds
+            per-coefficient rows (ASCII inline; HTML as a pre-expanded ``<details>``).
         level_display : str
-            Categorical level presentation. ``"expanded"`` (default) shows
-            exact original levels; ``"grouped"`` shows one row per fitted
-            group with a membership legend.
+            ``"expanded"`` (default) shows exact original levels; ``"grouped"`` shows one
+            row per fitted group with a membership legend.
 
         Returns
         -------
         ModelSummary
-            Object with ``__str__`` (ASCII), ``_repr_html_`` (HTML),
-            and dict-like access for backward compatibility.
+            Object with ``__str__`` (ASCII), ``_repr_html_`` (HTML), and dict-like access.
         """
         from superglm.inference.summary_levels import (
             build_level_universes,
@@ -1713,12 +1632,8 @@ class ModelMetrics:
             coefficient_estimable_override=self._current_coefficient_estimable,
             selected_group_names={group.name for group in active_groups},
         )
-        # The other half of the withholding, and it does not come with the
-        # rows: `build_basis_detail` is an independent pass, so `summary()`
-        # here would otherwise print a term row reading "inference withheld"
-        # above a per-coefficient disclosure of exactly the withheld
-        # quantities -- which the HTML renderer emits unconditionally, so it
-        # reaches a notebook at the default `detail="compact"`.
+        # `build_basis_detail` is an independent pass, so without this `summary()` would print
+        # per-coefficient detail for exactly the quantities a term row withholds.
         _drop_repaired_basis_detail(
             basis_detail, self._groups, shape_repaired_feature_names(self._model)
         )

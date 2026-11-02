@@ -77,7 +77,7 @@ def final_fit_report_payload(
 
 
 def _final_fit_section(widget, final_fit, *, model_revision: int) -> dict[str, Any]:
-    """The Final fit on train and validation rows, once one has run (D6)."""
+    """The Final fit on train and validation rows, once one has run."""
     if final_fit is None:
         return {"available": False, "note": FINAL_NOT_RUN}
     summary = summary_payload(widget, "in_force", model_override=final_fit.model)

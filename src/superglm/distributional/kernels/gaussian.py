@@ -287,10 +287,8 @@ def _gaussian_predictor_curvature_channels(
     semantics: WeightSemantics,
     floor: float,
 ) -> NDArray[np.float64]:
-    # With u = (scale - floor)/scale, the factors 1 - u, 1 - 2u and 1 - 3u are
-    # formed from the exact floor/increment difference, never as 1 - u: near
-    # u = 1 (scale far above its floor) 1 - u cancels to floor/scale and would
-    # carry an absolute rounding error of u's size.
+    # 1 - u, 1 - 2u and 1 - 3u (u = (scale - floor)/scale) come from the exact
+    # floor/increment difference: near u = 1, 1 - u would cancel.
     if semantics == "prior":
         normalizer_mass = np.ones(len(response), dtype=np.float64)
     else:

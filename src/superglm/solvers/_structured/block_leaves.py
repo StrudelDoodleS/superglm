@@ -1,83 +1,52 @@
-"""FactorSmooth ``fs`` block leaves on the one engine (one-engine design §3.4, §3.6, §3.12).
+"""FactorSmooth ``fs`` block leaves.
 
 An ``fs`` term is a depth-1 block tree under the super-root: level ``l`` is a
-leaf with ``k`` coefficients (its basis rows ``z_r``), the intercept is the
-super-root and every other column is the border.  Every border column that is
-not one-hot is centred on the §3.2 prior-weighted centre ``c0``
-(``factor_smooth_prior_statistics``); the factor works in the centred
-coordinates ``[1, X - 1 c0']`` and maps its public results to raw ones with
-``R = I - e_0 c'`` (as ``NestedSchurFactor``).
+leaf with ``k`` coefficients, the intercept is the super-root and every other
+column is the border. Border columns that are not one-hot are centred on the
+prior-weighted centre ``c0`` (``factor_smooth_prior_statistics``); results map
+back to raw coordinates with ``R = I - e_0 c'`` (as ``NestedSchurFactor``).
 
-**Per PIRLS iterate** (``build_factor_smooth_leaf_system``), one pass over the
-rows in level order, in fixed chunks and a fixed order (``_leaf_pass``):
-each level's rows ``g_r = sqrt|w_r| [z_r, 1, x_r - c0, zeta_r]`` (``zeta`` the
-working response, so the right-hand side travels inside the factorization)
-are reduced by Householder QR, a level cut by a chunk edge merging its pieces
-by one more QR of the stacked triangles (TSQR).  Fisher rows (``w >= 0`` by
-type) keep the triangle ``R_l``'s leading ``k`` rows; its trailing rows, the
-within-level residual of the border on the level basis, go straight into the
-border Gram ``W_r``.  A level is closed into that compact form as the pass
-leaves it, so no ``(K, p, p)`` stack of triangles is formed
-(``FactorSmoothLeafData``).
-Signed rows (observed curvature, by type) follow Chandrasekaran, Gu and Sayed
-as Bojanczyk, Higham and Patel (2003, SIMAX 24) state it: the middle factor
-``M_l = Q_l' J Q_l`` (a merge maps it by the merge's orthogonal factor), its
-eigendecomposition ``M_l = V Lambda V'``, and the signed pseudo-rows ``B_l =
-|Lambda|^1/2 V' R_l`` with signature ``sign Lambda``, so ``B_l' J B_l = R_l'
-M_l R_l = G_l' J G_l`` with every error sitting between the triangular factors.
+**Per PIRLS iterate** (``build_factor_smooth_leaf_system``), one fixed-order
+pass over the rows in level order (``_leaf_pass``) reduces each level's rows
+``g_r = sqrt|w_r| [z_r, 1, x_r - c0, zeta_r]`` by Householder QR, merging
+chunk pieces by TSQR. Fisher rows keep ``R_l``'s leading ``k`` rows and send
+the trailing rows to the border Gram; no ``(K, p, p)`` stack is formed.
+Signed rows follow Chandrasekaran, Gu and Sayed as stated by Bojanczyk, Higham
+and Patel (2003, SIMAX 24): the middle factor ``M_l = Q_l' J Q_l = V Lambda V'``
+and pseudo-rows ``B_l = |Lambda|^1/2 V' R_l`` with signature ``sign Lambda``,
+so every error sits between the triangular factors.
 
 **Per lambda trial** (``FactorSmoothLeafFactor``), one small QR per level with
 the penalty's square root inside, never a subtraction of data-sized moments:
-Fisher ``QR([[R_l,top], [sqrt(P_l), 0]]) = [[U_l, V_l], [0, T_l]]``, so ``D_l =
-U_l'U_l``, ``F_l = U_l^-1 V_l`` and the level's border piece is ``T_l'T_l``;
-signed ``QR([[B_l], [sqrt(P_l), 0]])`` with the middle factor ``M~`` of the
-stacked signature, ``U_l = chol(M~_zz)' R~_zz`` (a failed Cholesky is the tree
-pivot certificate refusing the iterate: ``D_l`` is not positive definite), the
-border piece ``R~_bb' (M~ / M~_zz) R~_bb``, a Schur complement inside the
-bounded middle factor.  The intercept-and-border Gram ``Q_x = W_r + sum_l
-T_l'T_l`` (Fisher) or ``sum_l R~_bb'(M~/M~_zz)R~_bb`` (signed) then loses the
-super-root (``D_0 = Q_x[0, 0]``, ``c* = Q_x[1:, 0] / D_0``), and the
-intercept-profiled rest goes to ``border.factor_border``: structural deflation
-(the complete random-effect blocks' sums), complete pivoting, Rump's
-verification and disclosure (§3.6).  ``log|H| = sum_l log|D_l| + log D_0 + log
-pdet(Q_rest)``.
+Fisher ``QR([[R_l,top], [sqrt(P_l), 0]]) = [[U_l, V_l], [0, T_l]]`` gives
+``D_l = U_l'U_l``, ``F_l = U_l^-1 V_l`` and border piece ``T_l'T_l``; signed
+rows take ``U_l = chol(M~_zz)' R~_zz`` (a failed Cholesky refuses the iterate)
+and border piece ``R~_bb' (M~ / M~_zz) R~_bb``. The super-root is then
+eliminated and ``border.factor_border`` factors the intercept-profiled rest.
+``log|H| = sum_l log|D_l| + log D_0 + log pdet(Q_rest)``.
 
-**The border bound** (``_border_bound``).  Every rounding of the route is of
-one of two kinds.  Row-level: the rows of a QR perturbed columnwise,
-``||dA_m|| <= g ||A_m||`` (Householder QR, Higham 2002 Theorem 19.4 with its
-constant taken as 2; the rows' own formation; the pseudo-rows), so projected on
-``v_j = [-F_j; e_j]`` it is at most ``eta_j = g |v_j|' a``; sandwiched: an
-error of a middle factor or of a product between the triangular factors, at
-most ``sigma ||R v_i|| ||R v_j||``.  With ``r_j`` the augmented unsigned
-residual ``||A v_j||`` and the rows' weight-error scale ``e_r`` (``r^e``),
+**The border bound** (``_border_bound``). Row-level roundings perturb a QR's
+rows columnwise, ``||dA_m|| <= g ||A_m||`` (Higham 2002, Theorem 19.4), so
+``eta_j = g |v_j|' a`` along ``v_j = [-F_j; e_j]``; sandwiched errors are at
+most ``sigma ||R v_i|| ||R v_j||``. To second order
 
     |dQ_ij| <= sum_l [r_i eta_j + eta_i r_j + (1 + kappa) eta_i eta_j
                       + sigma rbar_i rbar_j + g_16 r^e_i r^e_j + second order]
 
-to second order, ``kappa = ||M~_zz^-1||`` (1 for Fisher rows) and ``rbar = r +
-eta``.  It is majorised by ``sqrt(U_i U_j)`` with ``U_j = sum_l [t r_j^2 +
-eta_j^2 / t + ...]`` (Cauchy-Schwarz with one global ``t``, chosen as
-``sqrt(nu / rho)`` on the Jacobi scale, where the Perron-Frobenius sum ``sum_j
-U_j / Q_jj`` equals the normwise ``2 sqrt(rho nu)``), the form
-``factor_border`` takes.  A Gram-level majorant ``eps a a'`` would charge a
-border column in (or near) a level's span, such as the intercept or a
-level-constant attribute, its whole mass against a Schur piece only the
-penalty pins: measured on the stage-2 entry gate it gave ``u_s`` up to 1.6e5
-where this bound gives 1.5e-3, with every measured error within it.
+with ``kappa = ||M~_zz^-1||`` (1 for Fisher rows), majorized by
+``sqrt(U_i U_j)``, ``U_j = sum_l [t r_j^2 + eta_j^2 / t + ...]``, one global
+``t = sqrt(nu / rho)`` on the Jacobi scale. A Gram-level majorant would charge
+a column near a level's span its whole mass and is far looser.
 
 **Discrete terms** read their basis rows from the support table
 (``B_unique @ natural_map``) in the same row pass.
 
-Caches: ``FactorSmoothLeafFactor`` forms ``Q^+`` in raw coordinates on first
-read (owner: the factor; lifetime: the factor; invalidation: none, since every
-input is fixed at construction); its ``(K, k, q)``-sized products
-(``_REBUILT_ON_USE``) are dropped from a pickle and formed again on first use.
-The leaf data of an iterate belong to its system and are never modified.  The
-lineage's leaf memo (``build_factor_smooth_leaf_system``) holds the last
-system until the fit publishes its state (``release_leaf_memo``); the
-published state holds copies of the terminal system and factor
-(``published_leaf_system``), whose leaf keeps what a factor build reads and no
-way back to the rows.
+Caches: ``FactorSmoothLeafFactor`` forms ``Q^+`` on first read (owner and
+lifetime: the factor; invalidation: none); its ``(K, k, q)`` products
+(``_REBUILT_ON_USE``) are dropped from a pickle and re-formed on use. The
+lineage's leaf memo holds the last system until the fit publishes
+(``release_leaf_memo``); the published state holds copies
+(``published_leaf_system``) with no way back to the rows.
 """
 
 from __future__ import annotations
@@ -395,7 +364,7 @@ def _close_level(
     becomes ``R`` of ``QR([tail_root; T])`` (a TSQR merge, ``_merge_level``):
     over the pass, in level order, the triangular factor of every level's
     trailing rows stacked, which an ``sz`` term's thin-level aliases and data
-    estimability read (#432; no level's triangle is kept for it).  Fixed
+    estimability read (no level's triangle is kept for it).  Fixed
     order; the merge's LAPACK runs on the pass's own thread.
     """
     p = R.shape[0]
@@ -756,16 +725,10 @@ def _signed_trials(
 class _TrailingRowsSource:
     """An ``sz`` leaf's trailing rows' triangular factor, formed again by its own leaf pass.
 
-    An ``sz`` leaf keeps no ``(K, p, p)`` triangles during the fit (Opus
-    review P1): its data estimability reads the trailing rows only through
-    their triangular factor.  A leaf whose pass did not merge it (no thin
-    level: nothing reads it before publication) forms it here once, by the
-    same compact pass with the merge (``_close_level``): the same rows,
-    kernel and order, so the same level triangles bit for bit, and no
-    ``(K, p, p)`` stack (#432; the pass formerly kept every level's triangle
-    to read their trailing rows).  It holds the layout and the read-only rows
-    the leaf was formed from (the lineage memo's copies).  Never pickled: a
-    restored in-fit leaf has no source (``trailing_root`` then says so).
+    For a leaf whose pass did not merge it (no thin level), by the same
+    compact pass, rows, kernel and order, so the level triangles match bit for
+    bit. Holds the layout and the read-only rows the leaf was formed from.
+    Never pickled: a restored in-fit leaf has no source.
     """
 
     def __init__(self, layout, weights, weighted_rhs, center, error, signed: bool) -> None:
@@ -803,31 +766,17 @@ class _TrailingRowsSource:
 class FactorSmoothLeafData:
     """One iterate's leaf statistics of an ``fs`` term (module docstring).
 
-    Each level's triangle ``R_l`` of ``sqrt|w| [z, 1, x - c0, zeta]`` (``p = k
-    + q + 2``) is upper triangular, so every row below its leading ``k`` is
-    zero on the level basis: ``top`` ``(K, k, p)`` holds those leading rows,
-    all a per-lambda step reads; ``tail_norms2`` ``(K, q + 2)`` the squared
-    column norms of the trailing rows (the border bound's residuals and
-    column scales) and ``tail_gram`` ``(q + 2, q + 2)`` their Gram summed over
-    the levels, which for Fisher rows is the within-level residual Gram
-    ``within``.  For signed rows ``pseudo_rows`` and ``signature`` are ``B_l``
-    and ``sign Lambda_l``, and of each level's error Gram ``sum_r e_r x_r
-    x_r'`` (``x = [z, 1, x - c0]``) the border bound and the Levenberg scale
-    read only its leading ``k`` rows ``error_rows`` ``(K, k, p - 1)`` and its
-    diagonal ``error_diagonal`` ``(K, p - 1)``.  ``counts`` and ``merges`` are
-    each level's live rows and TSQR merges (the bound's constants).
-    ``center`` is ``c0`` ``(q,)`` and ``generators`` the structural nulls of
-    the border (``factor_smooth_prior_statistics``).
-
-    Memory (Opus review P1): nothing here is ``K p^2`` except the signed
-    pseudo-rows a step reads.  An ``sz`` leaf's data estimability and
-    thin-level aliases read the trailing rows through their triangular factor
-    ``tail_root`` (``trailing_root``, ``(q + 1)^2``): a pass beside thin
-    levels merges it level by level (``_close_level``); any other ``sz``
-    leaf forms it by one more compact pass on first read
-    (``trailing_source``), and the published leaf keeps it (``published``).
-    No pass keeps a ``(K, p, p)`` stack for it (#432).  ``triangles`` holds
-    the whole triangles only where a caller formed them.
+    ``R_l`` of ``sqrt|w| [z, 1, x - c0, zeta]`` (``p = k + q + 2``) is upper
+    triangular, so ``top`` ``(K, k, p)`` holds all a per-lambda step reads;
+    ``tail_norms2`` ``(K, q + 2)`` the trailing rows' squared column norms and
+    ``tail_gram`` their Gram summed over levels. For signed rows,
+    ``pseudo_rows``/``signature`` are ``B_l``/``sign Lambda_l`` and
+    ``error_rows``/``error_diagonal`` the parts of each level's error Gram the
+    bound reads. ``counts`` and ``merges`` are the bound's constants;
+    ``center`` is ``c0`` and ``generators`` the border's structural nulls.
+    Nothing is ``K p^2`` except the signed pseudo-rows; an ``sz`` leaf reads
+    its trailing rows through ``tail_root`` (``trailing_root``).
+    ``triangles`` holds whole triangles only where a caller formed them.
     """
 
     top: NDArray
@@ -941,14 +890,11 @@ def factor_smooth_prior_statistics(
 ) -> tuple[NDArray, BorderGenerators | None]:
     """The border centre ``c0`` and the structural null generators for these prior weights.
 
-    One-engine design §3.2 by type, as ``moments.nested_prior_statistics``:
-    every border column outside a one-hot block is centred on its shifted
+    Every border column outside a one-hot block is centred on its shifted
     prior-weighted mean ``c0_j = x_ref,j + sum_r omega_r (x_rj - x_ref,j) /
-    sum_r omega_r`` (``x_ref`` the first row in level order with ``omega >
-    0``), formed from the rows the leaf pass itself forms; one-hot columns
-    keep 0.  Cache contract: the lineage slot ``_lineage_slot(layout,
-    "prior")``, keyed by the layout's sources and the prior weights themselves
-    (held as a read-only copy), at most two entries.
+    sum_r omega_r`` (``x_ref`` the first weighted row in level order); one-hot
+    columns keep 0. Cache: the lineage slot ``_lineage_slot(layout, "prior")``,
+    keyed by the layout's sources and the prior weights, at most two entries.
     """
     n = len(layout.leaf_order)
     weights = np.ones(n) if prior_weights is None else np.asarray(prior_weights, dtype=np.float64)
@@ -993,13 +939,10 @@ def factor_smooth_prior_statistics(
 
 
 def release_leaf_memo(layout_cache: dict | None) -> None:
-    """Empty the lineage's leaf memo once a fit has published its state (Opus review P1).
+    """Empty the lineage's leaf memo once a fit has published its state.
 
-    The memo (``build_factor_smooth_leaf_system``) serves a repeated build
-    within a fit.  Its last system would otherwise stay alive with the
-    design: on signed rows its pseudo-rows and error Grams, on an ``sz`` term
-    its whole triangles, ``K p^2`` each.  A later fit on the lineage fills it
-    again.
+    Otherwise its last system (pseudo-rows, error Grams, or an ``sz`` term's
+    triangles, ``K p^2`` each) stays alive with the design.
     """
     from superglm.solvers._structured.selection import shared_nesting_cache
 
@@ -1011,16 +954,12 @@ def release_leaf_memo(layout_cache: dict | None) -> None:
 
 
 def _lineage_slot(layout: FactorSmoothLeafLayout, name: str) -> list:
-    """A bounded list in the layout's lineage cache, one per ``name`` (perf F15).
+    """A bounded list in the layout's lineage cache, one per ``name``.
 
-    Owner: the lineage's nesting cache (``selection.shared_nesting_cache``),
-    shared by the layouts of every lambda rebuild of the design.  Each entry
-    carries the ``lineage_sources`` it was formed from and matches only a
-    layout whose sources are those same objects (``_same_sources``): a rebuild
-    that passes the term's arrays and border matrices through shares it, and
-    one that re-creates a border matrix misses and replaces it.  The callers
-    keep at most two entries, so no sequence of rebuilds accumulates entries
-    or keeps retired border matrices alive.
+    Owner: the lineage's nesting cache (``selection.shared_nesting_cache``).
+    Each entry matches only a layout with the very same ``lineage_sources``
+    objects; callers keep at most two entries, so rebuilds never accumulate
+    entries or keep retired border matrices alive.
     """
     return layout.lineage_cache.setdefault(("fs_slot", name), [])
 
@@ -1045,7 +984,7 @@ def _leaf_pass(
 
     Returns ``(R_acc, M_acc, E_acc, counts, merges)``.  ``compact`` closes
     each level into the compact leaf data as the pass leaves it and forms no
-    ``(K, p, p)`` triangle or middle factor (Opus review P1): Fisher rows in
+    ``(K, p, p)`` triangle or middle factor: Fisher rows in
     the kernel itself (``_fisher_leaf_segments``), signed rows a few levels at
     a time (``_SignedWindow``); it returns their ``_LeafParts``, with the
     trailing rows' triangular factor over ``[1, x - c0]`` when ``tail_root``
@@ -1217,7 +1156,7 @@ def _raw_moment_segments(
     ``G[t, l]`` (lower triangle), ``C[t, l]`` and ``zs[t, l]`` are in the raw
     basis columns; the caller maps them to the natural basis once
     (``M' G M``, ``M' C``, ``zs M``), so a row costs its few stored entries
-    rather than ``k`` dense ones (perf finding F16).
+    rather than ``k`` dense ones.
     """
     m, q = border.shape
     nw = weights.shape[0]
@@ -1316,12 +1255,10 @@ def factor_smooth_moment_operators(
 ) -> list[tuple]:
     """``(moment operator, X'a, sum a)`` for every signed weight vector, in one row pass.
 
-    The REML weight-derivative operators (perf finding F5): they only enter
-    traces, so they stay on moments (design §3.4), formed for all directions
-    together from the rows the leaf pass forms (the level-sorted basis and the
-    border rows).  With ``center`` (the border's ``c0``, ``(q,)``) the border
-    rows are ``x - c0`` and the moments and ``X'a`` are those of the shifted
-    rows, as the leaf pass forms them (design §3.2); without it, raw.  With
+    The REML weight-derivative operators enter only traces, so they stay on
+    moments, formed for all directions together from the rows the leaf pass
+    forms. With ``center`` (the border's ``c0``) the border rows are
+    ``x - c0``; without it, raw. With
     ``level_cross`` each tuple also carries the per-level ``Z_l' a_l``
     ``(K, k)`` of an ``sz`` term (``None`` for ``fs``), whose public part is
     ``X'a``'s level block.
@@ -1399,7 +1336,7 @@ def factor_smooth_moment_operators(
         )
         cross = np.empty(p)
         cross[layout.small_indices] = xs[t]
-        # sz: the public vector [I; -1']' of the level one (one-engine design §3.5)
+        # sz: the public vector [I; -1']' of the level one
         cross[layout.structured_indices] = zs[t][:-1] - zs[t][-1:] if sum_to_zero else zs[t]
         entry = (operator, cross, float(ws[t]))
         if level_cross:
@@ -1434,14 +1371,9 @@ class FactorSmoothLeafSystem:
     shifted_gram_small: NDArray
     shifted_xtw_small: NDArray
     shifted_level_cross: NDArray
-    # The last factor built on this system (``assembly.build_augmented_block_factor``),
-    # reused when the next has bitwise the same penalty parts (perf F1).  Owner:
-    # this system; lifetime: the system, one slot; key: ``penalty_small`` and
-    # ``penalty_local`` compared exactly (a Levenberg shift enters them); the
-    # leaf data are the system's own, so nothing else invalidates it.  The slot
-    # holds the factor through a weak reference (perf F17): the factor holds
-    # this system, so a strong slot made a cycle that kept every iterate's
-    # system and factor alive until the cyclic collector ran.
+    # The last factor built on this system, reused when the next has bitwise
+    # the same ``penalty_small`` and ``penalty_local``. Owner and lifetime: this
+    # system, one slot. Held weakly, since the factor holds this system.
     factor_memo: list = field(default_factory=list, repr=False, compare=False)
 
     def __getstate__(self) -> dict:
@@ -1461,21 +1393,16 @@ class FactorSmoothLeafSystem:
     def centred_data_operator(self) -> CenteredBlockOperator:
         """``X~' W X~`` centred on the working-weighted mean, formed on the rows shifted by ``c0``.
 
-        Centring is shift-invariant: ``X - 1 m' = (X - 1 c0') - 1 (m - c0)'``,
-        so the operator of the shifted moments, the shifted cross ``sum w (x -
-        c0)`` and the centre ``m - c0`` is the same matrix as the raw one
-        centred on ``m``.  The raw form subtracts ``sum w m m'`` from ``X' W X``
-        and loses ``eps |c0|^2 / var`` of each large-offset column to
-        cancellation (all of it at an offset near ``1e8``); the shifted form
-        rounds at the columns' spread about ``c0`` (Chan, Golub & LeVeque
-        1983, §3; one-engine design §3.2).  Cache owner: this system (it is
-        immutable); lifetime: the system.
+        Centring is shift-invariant, so this equals the raw operator centred on
+        ``m``, but rounds at the columns' spread about ``c0`` instead of losing
+        ``eps |c0|^2 / var`` to cancellation (Chan, Golub & LeVeque 1983, §3).
+        Cache owner and lifetime: this immutable system.
         """
         return _shifted_centred_operator(self, BlockSymmetricOperator, None)
 
 
 def published_leaf_system(system):
-    """A copy of an ``fs`` or ``sz`` leaf system for a published state (Opus review P1).
+    """A copy of an ``fs`` or ``sz`` leaf system for a published state.
 
     The same moments, the same centred data operator (formed once, before the
     copy, so a published factor still recognises it as its own data) and the
@@ -1512,7 +1439,7 @@ def _is_own_centred_data(operator, system, xtw: NDArray, sum_w: float) -> bool:
 
 
 def share_cross_block(operator, cross: NDArray):
-    """``operator`` keeping ``cross`` itself as its cross block, not the copy it made (Opus review P1).
+    """``operator`` keeping ``cross`` itself as its cross block, not the copy it made.
 
     The block operators copy every block they are given.  A penalty never
     touches the level-by-border cross block, so the penalized operators of a
@@ -1621,10 +1548,8 @@ def build_factor_smooth_leaf_system(
         None if values is None else _read_only_copy(values)
         for values in (weights, weighted_rhs, held_error)
     )
-    # no (K, p, p) triangle or middle factor is formed.  Beside thin levels an
-    # sz leaf's aliases read its trailing rows' factor at every factor build,
-    # so the pass merges it; any other sz leaf forms it by one more compact
-    # pass when its estimability reads it (#432)
+    # no (K, p, p) triangle or middle factor is formed. Beside thin levels an
+    # sz leaf's pass merges its trailing rows' factor, which its aliases read.
     thin_levels = layout.thin_levels(prior_weights) if basis == "sz" else ()
     with narrow_kernel_blas_threads(layout.block_size + layout.width + 2):
         parts = _leaf_pass(
@@ -1728,17 +1653,10 @@ def _assemble_compact(
 ):
     """The system of one iterate from its compact leaf data (``FactorSmoothLeafData``).
 
-    The level Grams ``G_l = R_l' M_l R_l`` (``M_l = I`` for Fisher rows) are
-    never formed whole (Opus review P1: ``(K, p, p)`` beside a wide border):
-    the moment operator reads only their level-basis rows ``G_l[:k, :]`` and
-    the border block summed over the levels (``_fisher_moments``; signed
-    rows bring theirs, ``_signed_block``).  ``basis="sz"`` returns the
-    ``SumToZeroLeafSystem`` of the balance tree: the same leaf data over all
-    ``K`` levels, the level-space moment operator behind the public ``K - 1``
-    coordinates and the public vectors ``[I; -1']' v`` of the level ones
-    (one-engine design §3.5); its leaf reaches its trailing rows through
-    ``trailing_source`` (or the triangles a caller formed) until it is
-    published (``FactorSmoothLeafData.published``).
+    The level Grams ``G_l = R_l' M_l R_l`` are never formed whole: the moment
+    operator reads only ``G_l[:k, :]`` and the border block summed over the
+    levels. ``basis="sz"`` returns the balance tree's ``SumToZeroLeafSystem``
+    over all ``K`` levels, with public vectors ``[I; -1']' v``.
     """
     k = block_size
     top, tail_norms2, tail_gram = parts.top, parts.tail_norms2, parts.tail_gram
@@ -1818,21 +1736,14 @@ def _signed_block(R: NDArray, M: NDArray, k: int) -> tuple[NDArray, NDArray, NDA
 
 
 class _SignedWindow:
-    """The signed rows of an ``fs`` pass, a few levels at a time (Opus review P1).
+    """The signed rows of an ``fs`` pass, a few levels at a time.
 
-    The rows come in level order, so a level is finished once the pass leaves
-    it.  ``fold`` runs the leaf kernel (``_leaf_segments``) over at most
-    ``size`` levels at a time in window slots, closes every finished level
-    into its pseudo-rows, signature, level Gram rows, border sum, leading
-    rows, trailing norms and error Gram rows and diagonal (``_signed_block``,
-    ``_close_level``), and carries the open one in slot 0; ``finish`` closes
-    the last.  Each level's triangle, middle factor and error Gram are the
-    kernel's on the whole pass, bit for bit, and no ``(K, p, p)`` triangle,
-    middle factor or error Gram is formed: the pseudo-rows the per-lambda
-    step reads are all that is ``K p^2``.  ``with_gram`` (an ``sz`` term) also
-    sums the trailing rows' Gram, which its data estimability's Fisher system
-    reads.  A level with no rows keeps zeros and signature one, as the whole
-    pass gives it.
+    ``fold`` runs the leaf kernel over at most ``size`` levels in window slots,
+    closes each finished level (``_signed_block``, ``_close_level``) and
+    carries the open one in slot 0; ``finish`` closes the last. Results match
+    the whole-pass kernel bit for bit, and only the pseudo-rows are
+    ``K p^2``. ``with_gram`` (``sz``) also sums the trailing rows' Gram. A
+    level with no rows keeps zeros and signature one.
     """
 
     def __init__(
@@ -2190,7 +2101,7 @@ class FactorSmoothLeafFactor:
         # The border bound (module docstring) on the intercept-and-border Gram.
         bound = self._border_bound(leaf, roots, P, F[:, :, : q + 1], Dinv, Q_xx, kappa, sigma_extra)
 
-        # The super-root: the intercept, eliminated last (design §3.1).
+        # The super-root: the intercept, eliminated last.
         D0 = float(Q_xx[0, 0])
         super_floor = bound[0] + 4.0 * _EPS * abs(D0)
         if D0 < -super_floor:
@@ -2277,11 +2188,9 @@ class FactorSmoothLeafFactor:
         """
         return self._F_centred + self._F_centred[:, :, :1] * self._c_full[None, None, :]
 
-    # The (K, k, q)-sized products formed on first read from the factor's own
-    # numbers (Opus review P1): dropped from a pickle and formed again, by the
-    # same arithmetic, on first use after loading.  Owner: the factor; lifetime:
-    # the factor in memory; nothing invalidates them.  The small caches (the
-    # border inverse, the retained projector, the scaled eigenvalues) are kept.
+    # (K, k, q)-sized products formed on first read; dropped from a pickle and
+    # re-formed by the same arithmetic. Owner and lifetime: the factor in
+    # memory. The small caches are kept.
     _REBUILT_ON_USE = ("_F", "_inverse_bdlr_centred", "_penalty_total", "_penalty_product")
 
     def __getstate__(self) -> dict:
@@ -2464,7 +2373,7 @@ class FactorSmoothLeafFactor:
         The border part is solved through the data-side border inverse
         (``BorderFactor.apply_data``), the super-root first; the level part is
         ``D_l^-1 c_zl - F_l x_b``.  With ``centred`` the intercept entry stays
-        the centred ``alpha`` about ``c0`` (one-engine design §3.8).
+        the centred ``alpha`` about ``c0``.
         """
         q_xz = self._q_xz
         rest = q_xz[1:] - self._center_star * q_xz[0]
@@ -2491,18 +2400,12 @@ class FactorSmoothLeafFactor:
     def row_quadratic_forms(self, rows) -> NDArray:
         """``a_i' H^+ a_i`` per augmented data row ``a_i = [1, x_i]`` of ``rows`` ``(m, p)``.
 
-        In the centred coordinates ``H^+ = [[D^-1 + F Q^+ F', -F Q^+], [-Q^+ F',
-        Q^+]]`` (``D = blockdiag(D_l)``), so a row with level part ``z`` in its
-        level ``l`` and border part ``a`` (``R'`` applied: ``[1, x - c0]``)
-        gives ``||U_l^-T z||^2 + y' Q^+ y`` with ``y = a - F_l' z``, ``D_l = U_l'
-        U_l``: the random-effect and fixed-effect halves of the hat diagonal of
-        Bates et al. (2015, eqs. 63-65), as ``NestedSchurFactor``.  The level
-        half is the squared norm of a row of the level's orthogonal factor, a
-        sum of squares with no cancellation; ``y' Q^+ y`` takes the super-root,
-        then the data side of the border (a data row has no component along
-        the deflated structural nulls, ``BorderFactor.quadratic_data``).  No
-        ``p x p`` block is formed: O(nnz k + m q^2).  Leverage (design §3.10,
-        definition A) is ``w_i`` times this.
+        A row with level part ``z`` and border part ``a`` gives
+        ``||U_l^-T z||^2 + y' Q^+ y``, ``y = a - F_l' z``: the random- and
+        fixed-effect halves of the hat diagonal (Bates et al. 2015, eqs.
+        63-65). The level half has no cancellation; ``y' Q^+ y`` reads the data
+        side of the border (``BorderFactor.quadratic_data``). O(nnz k + m q^2).
+        Leverage is ``w_i`` times this.
         """
         import scipy.sparse
 

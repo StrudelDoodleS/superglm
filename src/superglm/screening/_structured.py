@@ -1,595 +1,86 @@
 """Structured screening kernel for a spline x categorical candidate pair.
 
-The dense path assembles the pair's ``(k, k)`` curvature with ``k = k_a * L``
-and factorizes it, which is cubic in the level count and quadratic in memory.
-Both are pure waste here, because with the categorical margin's treatment
-menu the pair's bordered system
+The dense path factorizes the pair's ``(k, k)`` curvature with ``k = k_a * L``,
+cubic in the level count. With the categorical margin's treatment menu the
+bordered system ``K(lambda) = [[V + lambda S, C'], [C, M]]`` is exactly
+block-arrow once grouped by level: ``V`` and ``S = kron(S_a, I)`` are
+block-diagonal (levels have disjoint row support), ``M``'s categorical-main
+block is diagonal, and ``C``'s rows are level-local. Only the intercept and the
+spline main couple the levels, a border of ``1 + k_a`` columns independent of
+``L``, so :func:`_profile` and :func:`_evaluate` work in time and memory linear
+in ``L``.
 
-    K(lambda) = [[V + lambda S, C'],
-                 [C,            M ]]
+The ladder needs ``T(lambda) = U_eff' A(lambda)^-1 U_eff`` and
+``edf(lambda) = tr(A(lambda)^-1 V_eff)``, both read off one row-space
+factorization built from the design, never from the pair's moments (forming
+those in float64 destroys the quantity before any rule runs). The edf is a sum
+of Tikhonov filter factors ``a_j / (a_j + lambda s_j)``, each in ``[0, 1]``, not
+a difference of traces; this is the standard form (Wood, *JRSS-B* 73:3-36,
+2011, sec. 3.6; Hansen, *Regularization Tools* v4.1, 2008, sec. 2.4; Golub,
+Heath and Wahba, *Technometrics* 21:215-223, 1979). With ``Zc_q`` level
+``q``'s centered weighted spline rows, ``J = blockdiag(Zc_q)`` and ``P`` the
+projector onto the residualized overlap span, ``V_eff = J'(I - P)J`` (Frisch-
+Waugh-Lovell absorption) is the Gram of a residualized design. Everything is
+built from QRs of ``[R_q ; sqrt(lambda) rootS]``-style stacks and never from a
+sum or difference of Grams (Gill, Golub, Murray and Saunders, *Math. Comp.*
+28:505-535, 1974, sec. 5.2); the block-angular structure is standard (Golub and
+Plemmons, *LAA* 34:3-28, 1980; Scott and Tuma, *Numer. Algorithms* 79, 2018).
 
-is EXACTLY a block-arrow matrix once its variables are grouped by level:
+Those references assume a nonsingular pencil. Here ``S`` is only semidefinite,
+and ``null(V_eff) & null(S)`` is nonempty on starved pairs (one direction of 78
+on the suite's starved ``bs`` pair), while both operands are individually rank
+deficient on most fixtures, so singularity cannot be decided reliably.
 
-  * ``V`` is block-diagonal — levels have disjoint row support, so no tensor
-    column of one level meets any column of another;
-  * ``S = kron(S_a, I)`` is block-diagonal on the same grouping — one copy of
-    the spline penalty per level, which is the varying-coefficient layout;
-  * ``M``'s categorical-main block is diagonal, and ``C``'s categorical-main
-    rows are level-local: level q's indicator meets level q's tensor columns
-    and nothing else.
+The singular-pencil policy:
 
-What is left coupling the levels is only the intercept and the spline main —
-a border of ``1 + k_a`` columns, independent of ``L``.  So the pair is
-``L`` blocks of size ``k_a + 1`` around a border of size ``1 + k_a``, and
-the row-space factorization built by :func:`_profile` and evaluated by
-:func:`_evaluate` handles that in time and memory LINEAR in ``L``.  The dense
-path's ``V`` alone is 2.4 TB at fifty thousand levels; the same pair's blocks
-are 48 MB.
+1. On the common null space the generalized eigenvalue is 0/0 and the pencil is
+   singular (Cao, *LAA* 92:187-196, 1987, for ``B`` semidefinite; the converse
+   fails without semidefiniteness). Such a direction contributes zero to
+   ``edf``, as ``tr(A^+ V_eff)`` with the Moore-Penrose inverse does, and the
+   pair is scored. This is a choice about an undefined quantity, with no error
+   bound and no published convention to adopt (LAPACK Users' Guide, 3rd ed.,
+   sec. 2.3.5.3, calls the values undefined).
+2. Only a broken evaluation is refused (:class:`_UnstableStructuredEDFError`:
+   the delivered number is not a filter-factor sum), never a singular pencil.
+   :func:`structured_ladder` also returns ``None`` where
+   :func:`_representative_projection` cannot place the centered-row rank, and
+   where the monotone-ordering guards fail on an indefinite delivered
+   ``V_eff``.
+3. Never deflate where the pencil is not singular. Cuts that decide a
+   direction's side are documented bounds, not chosen tolerances:
+   :func:`_penalty_root`, :func:`_psd_clip_allowance`, and
+   :func:`_orthonormality_bound` (which only refuses, never cuts). Four more
+   are conventions, which a new cut must say it is: :func:`_profile`'s
+   ``max(shape) eps s_max``, :func:`_block_inverse_factors`' cut at the same
+   convention, :func:`_absorption_floor`'s ``sqrt(d eps)`` and
+   :func:`_representative_projection`'s ``sqrt(k eps)``, the dense path's own
+   cutoff. A reproducible cut need not be derivable.
+4. Where the cut itself is undecidable, say so. A penalty residue below
+   ``eigh``'s error bar is taken at its magnitude; where ``eigh`` returns an
+   exact ``0.0`` the direction leaves the penalty, is reported free (filter
+   factor one, the opposite end from clause 1) and ``edf`` is too high. On
+   ``_rank_one_penalty_pair(2, 10, 20, 1e-4, 3)`` this publishes 9.000000
+   against a 40-digit oracle's 5.720073; every float64 route does the same,
+   because ``eigh`` destroys the information.
+5. The dense route follows the same policy: its pencil is a pivoted QR of
+   ``[R_eff ; rootS]`` truncated at ``sqrt(k eps)``, so the common null space
+   is discarded on every pair, and both routes root the penalty through
+   ``superglm.screening._factor_kernels._penalty_root``.
 
-The two quantities the ladder needs both read off one such factorization:
+Range guard: every term of the edf sum is a squared norm, so ``edf >= 0`` by
+construction; the upper end ``L k_a`` still guards a deflation that misfires.
+The two clips behind "by construction" are bounded, not trusted:
+:func:`_psd_factor`'s ``max(w, 0)`` is held to :func:`_psd_clip_allowance`, and
+:func:`_penalty_root`'s drop branch is refused at ``n eps ||S||_2`` and its
+magnitude branch at ``2 n^2 eps |tr S|``.
 
-    T(lambda)   = U_eff' A(lambda)^-1 U_eff
-    edf(lambda) = tr(A(lambda)^-1 V_eff)
-
-**THE SECOND IS A SUM, NOT A DIFFERENCE, AND THAT IS THE WHOLE POINT.**
-Diagonalize the pencil and ``tr(A^+ V_eff)`` is ``sum_j a_j / (a_j + lambda
-s_j)`` — one Tikhonov filter factor per direction, every term in ``[0, 1]``,
-bounded and cancellation-free.  That is the standard form for the effective
-degrees of freedom of a regularized fit: Wood, *JRSS-B* 73(1):3-36 (2011),
-§3.6 and Appendix H define ``edf = tr(F)`` with ``F = (X'WX + S)^-1 X'WX`` and
-evaluate it as ``||K||_F^2``; Golub, Heath & Wahba, *Technometrics*
-21:215-223 (1979); Eldén, *BIT* 17:134-145 (1977) and 22:487-502 (1982) for
-the standard-form transformation, and *BIT* 24:467-472 (1984) for computing
-the trace in O(n) by bidiagonalization; Hansen, *Regularization Tools* manual
-v4.1 (March 2008, Technical University of Denmark), §2.4 — Eq. (2.19) for the
-filter-factor expansion, (2.30) for the unregularized ``null(L)`` component
-and (2.63) for the trace itself, ``trace(I_m - A A^I) = m - (n - p) -
-sum_i f_i``, with the general-form ``f_i = gamma_i^2 / (gamma_i^2 +
-lambda^2)`` stated as prose in the same section; journal versions *Numer.
-Algorithms* 6:1-35 (1994) and 46:189-194 (2007).  (Hansen, Nagy & O'Leary,
-*Deblurring Images* (SIAM 2006) is cited for spectral filtering in the
-STANDARD form only — its ch. 6 has no general form; ch. 7 §7.3, Eq. (7.9) is
-the general one and uses no GSVD.)
-
-**WE ARE OUTSIDE EVERY ONE OF THOSE PAPERS' STATED ASSUMPTIONS, AND THIS SAYS
-SO WHERE THE BOUND IS CLAIMED RATHER THAN IN AN ASIDE.**  Wood 2011 assumes
-Fisher weights, which make both ``X'WX + S`` and ``X'WX`` positive definite
-and the edf well defined; Hansen assumes ``rank(L) = p`` and ``N(A) & N(L) =
-{0}`` -- his GSVD is stated with ``X`` NONSINGULAR and ``mu_p > 0``, so the
-degenerate case is assumed away and not handled.  Here ``S`` is semidefinite
-by construction, and the intersection is genuinely nonempty on the starved
-family.  **THE AUTHORITATIVE COUNT IS THE ONE AT THE LAPACK CUT**: there,
-across this suite's twelve fixtures the intersection is nonempty on that
-family and NOWHERE ELSE, at ONE direction of 78 on ``_starved_bs_pair``
-(6 emitted levels x a 13-column ``bs(10)`` margin).  An earlier probe reported
-6 of 77 -- a different ambient dimension, so a different starved pair, taken
-at a cut this docstring does not record.  It is superseded here and kept only
-so the two numbers are not read as one drifting.  Either way the condition is
-rare; what is not rare is being unable to decide it, which is clause 2 below.
-
-============================== THE SINGULAR-PENCIL POLICY ====================
-
-On a direction in ``null(V_eff) & null(S)`` the generalized eigenvalue is
-``0/0`` and the filter factor with it.  SOMETHING has to be decided there, the
-decision is not derivable, and until it is written down every guard in this
-module is a boundary moving underneath an unstated choice.  It is:
-
-  1. **CONTRIBUTE ZERO ON THE COMMON NULL SPACE, AND PUBLISH.**  Such a
-     direction adds nothing to ``edf`` and the pair is scored anyway.  That is
-     what ``tr(A^+ V_eff)`` computes with ``A^+`` the Moore-Penrose inverse,
-     and it is what every deflation site here already did before it was
-     stated: :func:`_filter_factor_sum`'s ``keep``, and the one in
-     :func:`_block_inverse_factors`.  It is a CHOICE about an undefined
-     quantity, not an approximation to a defined one, so no error bound
-     attaches to it and none is claimed.
-  2. **REFUSE ONLY A BROKEN EVALUATION, NEVER A SINGULAR PENCIL.**
-     :class:`_UnstableStructuredEDFError` means the delivered number is not a
-     filter-factor sum.  Singularity is NOT one of its conditions and must not
-     become one -- and the reason is that it is not a DECIDABLE one, which is
-     a better reason than frequency and was measured rather than assumed.
-     Counting the intersection at the LAPACK cut across the twelve fixtures
-     this suite builds, ``null(V_eff) & null(S) != {0}`` on exactly ONE of
-     them -- the starved ``bs`` pair, one direction of 78.  So a common null
-     space is NOT the ordinary case, and any claim here that it is should be
-     read as refuted.  What IS ordinary is being unable to tell: BOTH operands
-     are individually rank deficient on 10 of the 12 (``null(V_eff)`` 1 to 73
-     directions, ``null(S)`` 5 to 19), and ``kappa(V_eff + balance S)`` runs
-     3.0e+03 to 2.0e+307 over the same bank.  A refusal keyed to singularity
-     would therefore be keyed to which side of a round-off cut two nearly
-     dependent subspaces landed on -- the same coin flip clause 4 exists to
-     keep out of a published ``edf0``.
-     **AND CLAUSE 2 IS ABOUT THE EXCEPTION, NOT ABOUT THE WHOLE KERNEL.**
-     :func:`structured_ladder` has refusal paths that raise nothing and ARE
-     keyed to the geometry: ``p.profiled_trace is None``, where
-     :func:`_representative_projection` could not place the centered-row rank
-     outside its own ambiguity band, and the monotone-ordering guards at the
-     endpoints and inside the bisection.  The second is reachable by a
-     property of the PENCIL -- the measured ``+0.014141 df`` rise on an
-     indefinite delivered ``V_eff`` is 14000x ``_EDF_TOL`` -- so a singular
-     and indefinite pencil CAN lose a rung with no clause here violated.  What
-     clause 2 forbids is adding singularity to the EXCEPTION's conditions; it
-     does not claim the ladder publishes on every singular pencil, and reading
-     it that way would overstate what #262 was closed on.
-  3. **NEVER DEFLATE WHERE THE PENCIL IS NOT SINGULAR.**  Clause 1 is free
-     only on directions the pencil genuinely does not resolve; applied to one
-     it does, the same line drops a direction that was carrying a filter
-     factor, and the error is a whole degree of freedom per direction rather
-     than a rounding.  So the cuts that decide which side a direction is on
-     are DOCUMENTED ERROR BOUNDS and not chosen tolerances:
-     :func:`_penalty_root`, :func:`_psd_clip_allowance`, and
-     :func:`_orthonormality_bound` -- which is a bound that only ever REFUSES
-     and never cuts, and that distinction is the subject of #280.
-     **THAT LIST IS THE DERIVED ONES AND IT IS NOT ALL OF THEM.**  Four more
-     cuts decide which directions ever reach ``keep``, and they are
-     CONVENTIONS rather than bounds: :func:`_profile`'s ``max(shape) eps
-     s_max`` (the ``matrix_rank`` convention, which fixes ``r`` and hence the
-     size of ``H``), :func:`_block_inverse_factors`' cut at the same
-     convention, :func:`_absorption_floor`'s ``sqrt(d eps)``, which is that
-     same convention carried onto the Gram scale, and
-     :func:`_representative_projection`'s ``sqrt(k eps)``, which its own
-     docstring describes as carried from the DENSE path for cross-path
-     agreement -- and which since issue #257 is not a borrowing at all but ONE
-     policy at two sites, since the dense pencil takes its rank on a factor at
-     exactly that cutoff.  Anyone extending clause 3 has to say
-     which of the two kinds a new cut is.
-     **AND #280 MOVED ONE BETWEEN THE TWO LISTS, WHICH IS WHY THE DISTINCTION
-     EARNS ITS PLACE HERE.**  :func:`_absorption_floor` was in the derived
-     list, on the strength of ``sqrt`` of a MEASURED orthonormality residual.
-     A measured residual is a random variable and not a bound: across seven
-     ``OPENBLAS_CORETYPE`` microkernels it spans 1.81x and the cut built from
-     it 1.344x, and on the starved pair it decided a deflation between
-     singular values that agreed to ten digits.  Replacing it with its own a
-     priori bound was implemented and MEASURED and is worse -- 4e+06x loose on
-     ``_near_absorbed_cells``, where it deflates that pair's only direction --
-     so the cut is a stated convention and the bound refuses instead.  A cut
-     that has to be reproducible across machines is not automatically a cut
-     that can be derived, and this module now says which of the two it has.
-  4. **WHERE THE CUT ITSELF IS UNDECIDABLE, SAY SO RATHER THAN PICK.**  A
-     penalty residue below ``eigh``'s own error bar has no float64 answer at
-     all; :func:`_penalty_root` takes it at its MAGNITUDE, which is the only
-     choice that is a function of the data rather than of the rounding.  Where
-     the eigensolver returns a bit-exact ``0.0`` there is not even a magnitude
-     to take and the direction leaves the penalty entirely -- so WHERE THE
-     LEVEL'S OWN BLOCK STILL CARRIES CURVATURE THERE it is reported FREE and
-     its filter factor is ONE, the opposite end from clause 1 and the more
-     expensive one.  Where the block carries no mass either,
-     :func:`_block_inverse_factors` zeroes it and it contributes zero, which
-     IS clause 1.  Measured under "WHAT CLAUSE 4 COSTS" below.
-  5. **THIS POLICY WAS ROUTE-LOCAL AND SINCE ISSUE #257 IT IS NOT.**  The
-     DENSE route used to INTEND the same zero contribution without having a
-     place where that intent was guaranteed to be REACHED: its fallback
-     whitening discarded the common null space exactly as clause 1 does, but
-     it was entered only when the definite driver raised, so a numerically
-     singular pencil the driver accepted was never cut at all.  That driver
-     and that fallback are gone: the dense pencil is a pivoted QR of
-     ``[R_eff ; rootS]`` truncated at ``sqrt(k eps)``, so the common null
-     space is discarded on EVERY pair rather than on the ones a Cholesky
-     happened to refuse.  See "THE WITNESS" below for what that did to the
-     measurement this clause used to point at.  **THAT IS A
-     DEFECT IN THE OTHER ROUTE AND NOT A SECOND LEGITIMATE CONVENTION**, and
-     saying otherwise would dress a user-visible instability up as a design
-     choice.  The clause is that a policy stated in one module is not a
-     property of the pair, so a cross-arm assertion on a singular pencil is
-     evidence about the fixtures until the other route has a stated policy
-     too.
-
-**WHAT THE LITERATURE SETTLES AND WHAT IT DOES NOT, CHECKED RATHER THAN
-RECALLED.**  Three citations this module carried were re-verified against the
-sources in 2026-08; two were being overstated and are corrected here.
-
-* For a symmetric pencil with ``B`` POSITIVE SEMIDEFINITE, singular iff
-  ``null(A) & null(B) != {0}`` -- Z.-h. Cao, "On a deflation method for the
-  symmetric generalized eigenvalue problem", *LAA* 92:187-196 (1987),
-  doi:10.1016/0024-3795(87)90256-4, whose subject is the deflation and whose
-  abstract states the special Kronecker form precisely "if ``B`` is positive
-  semidefinite".  The direction this module uses is ELEMENTARY and needs no
-  citation: ``x`` in both null spaces gives ``(A - lambda B) x = 0`` for every
-  lambda, so the determinant vanishes identically.
-  **THE CONVERSE NEEDS THE SEMIDEFINITENESS AND NOT MERELY THE SYMMETRY, AND
-  AN EARLIER DRAFT HERE DROPPED THAT HYPOTHESIS.**  ``A = [[0,1,0],[1,0,0],
-  [0,0,0]]`` and ``B = [[0,0,1],[0,0,0],[1,0,0]]`` are both symmetric with
-  ``null(A) = span(e3)``, ``null(B) = span(e2)`` and an intersection of
-  ``{0}``, yet ``det(A - lambda B) = 0`` identically -- checked, at seven
-  lambdas from -3 to 1e6.  ``B`` there has eigenvalues ``-1, 0, 1``, so it is
-  the cone that the counterexample leaves.
-  **AND THAT HYPOTHESIS IS NOT ALWAYS SATISFIED HERE EITHER.**  The delivered
-  ``V_eff`` is measured materially outside the cone on the starved pair
-  ("WHERE THE ARITHMETIC IS BEYOND EVERY FORM"), so on exactly the geometry
-  where the intersection is nonempty, the iff is not available and only the
-  elementary direction is.  That is enough for clause 1, which needs a common
-  null vector to imply singularity and never the reverse.
-* The values on that intersection are UNDEFINED, and undefined is all LAPACK
-  says.  *LAPACK Users' Guide*, 3rd ed. (SIAM 1999), sec. 2.3.5.3, "Generalized
-  Singular Value Decomposition (GSVD)": the trivial eigenvalues, "those
-  corresponding to the leading ``n - r`` columns of ``X``, which span the
-  common null space of ``A^T A`` and ``B^T B``", "are not well defined", with
-  footnote 2.1 giving the reason -- taken as ratios of the corresponding
-  diagonal entries "we would get 0/0".  It does not license a zero.  (The
-  section number carried here before was 2.3.5, which is the parent; the GSVD
-  is its third subsection.)
-* Fix & Heiberger, *SIAM J. Numer. Anal.* 9(1):78-88 (1972),
-  doi:10.1137/0709009, deflate the INFINITE structure of a semidefinite
-  pencil.  The common null space is not what their reduction removes: Cao's
-  abstract says so, since it took a GENERALIZATION of that reduction to deflate
-  the singular structure as well.  What refuses is the FH-based LAPACK-style
-  implementation -- Jiang & Bai, "Working notes on the Fix-Heiberger reduction
-  algorithm" (UC Davis, 2015), which terminates with a singular-pencil flag at
-  seven distinct branches rather than assigning a value.  This module's earlier
-  claim that the 1972 paper refuses "outright" was never checked against the
-  paper and is WITHDRAWN.
-* **THERE IS NO PUBLISHED CONVENTION TO ADOPT FOR CLAUSE 1, AND THE NEAREST
-  ONE GOES THE OTHER WAY.**  Hansen's general-form expansion (*Regularization
-  Tools* v4.1, sec. 2.4, Eq. (2.19) -- the containing expansion, of which
-  Eq. (2.30) cited above is the ``null(L)`` term) carries that component with
-  coefficient ONE, unfiltered -- but it is stated for a pencil with
-  ``null(A) & null(L) = {0}``, so it is the non-degenerate case and not a
-  convention for this one.  Clause 1 is a LOCAL choice made in the open, not a
-  standard being followed, and it is the reverse of the only nearby published
-  formula.  Worth noticing that clause 4's OUTCOME on the fixture below is
-  Hansen's coefficient of one, reached by a different route and by accident
-  rather than by adoption -- the two clauses land at opposite ends and only
-  one of them was chosen.  Searched: Cao 1987, the LAPACK guide's GSEP/GNEP/GSVD sections,
-  Fix & Heiberger 1972 and its modern implementations, Hansen 1994/1998/2007,
-  Stewart arXiv:2411.03534 (2024).  Nothing names it.
-
-**WHAT CLAUSE 4 COSTS, MEASURED, AND WHY NO FLOAT64 METHOD DOES BETTER.**  On
-``_rank_one_penalty_pair(2, 10, 20, 1e-4, 3)`` at the ladder's own high edge
-this publishes ``edf = 9.000000`` against a 40-digit oracle's ``5.720073``.
-**THE SIGN IS THE WHOLE POINT AND AN EARLIER DRAFT OF THIS SECTION HAD IT
-BACKWARDS.**  It is 3.28 df ABOVE the oracle, so it cannot be clause 1, which
-can only subtract: the pair has 9 levels and one free direction each, the
-delivered value is 9.000000318, and those are NINE FILTER FACTORS OF ONE.
-This is clause 4 at the far end -- the penalty residue is not merely
-unresolved but gone, so the direction is reported free and contributes the
-maximum rather than nothing.  The exact pencil gives the same nine directions
-factors below one, summing to 5.720073.  ``S_a``'s smallest eigenvalue is
-bracketed
-EXACTLY, by rational arithmetic over the float entries, in
-``[3.269e-17, 6.538e-17]`` -- against ``n eps ||S||_2 = 4.441e-16``, so it is
-under one ulp of the largest eigenvalue and ``eigh`` returns a bit-exact
-``0.0``.  The information is destroyed by the eigensolver, not by the policy.
-And the textbook O(L^3) stacked-QR reference in the suite -- Wood's own method,
-a different computation of the same identity -- reads ``9.000000`` on that
-point too.  So the gap is not this kernel's organization of the arithmetic and
-not something a better factorization reaches; it is the price of deciding an
-undecidable direction, paid the same way by every float64 route.  The
-rank-differencing form this replaced read 5.405 there and was NEARER, which is
-a coincidence of where its own arbitrary cut landed and not a method to go
-back to.
-
-**THE WITNESS THIS SECTION USED TO CALL "THE SHARPEST EVIDENCE" IS GONE, AND
-IT WAS RETIRED RATHER THAN DISPROVED.**  It was the dense route's ``edf``
-moving with THREAD COUNT at a bit-identical lambda -- 2.7e-04 on
-``_thin_level_pair(.001)`` and 2.4e-05 on ``_vanishing_mass(1e-12)``, measured
-2026-08-16 with all six pools pinned -- and its mechanism was that route's
-``G = V_eff + balance * S``, whose ``kappa(G)`` reached 1.99e+307 on the starved
-pair and which was handed to the generalized symmetric-DEFINITE driver.  Issue
-#257 removed that ``G``: the dense pencil now stacks a design factor under a
-penalty root and takes a pivoted QR, and the same comparison on this branch
-puts the worst ``edf`` move at **5.58e-13** across 1 and 8 threads on the same
-fixture family -- nine orders below what the paragraph was built on.  A witness
-whose mechanism no longer exists cannot be quoted as if it does.
-
-**WHAT REPLACES IT IS STRONGER FOR CLAUSE 5 AND WEAKER FOR THE PROSE.**  Both
-float64 routes now land on the SAME high-edge value -- the dense arm and this
-one agree to 3.7e-11, 2.0e-10 and 1.4e-12 at ``low_weight`` 1.0, 0.01 and
-0.001, where they used to differ by 9.8e-05, 2.5e-04 and 2.1e-03 -- and both
-sit 8.1e-05, 2.8e-04 and 2.1e-03 from the 640-bit arb-certified value of the
-same quantity.  Two independent implementations agreeing with each other and
-not with the truth is not a reduction-order artefact; it is a shared
-information limit, and the shared thing is the penalty root.  ``S_a``'s
-smallest eigenvalue reads 1.4476e-15 against an ``eigh`` bar of 3.7592e-14, so
-it is 26x INSIDE what the eigensolver resolves and no float64 factorization of
-``S_a`` recovers it.  That is the same statement clause 5 was making -- a
-direction whose sign and size the arithmetic cannot decide -- reached by an
-oracle instead of by a thread count, which is the better instrument.
-
-**WHAT THE SUITE PRICED IN IS THEREFORE STALE IN THE LOOSE DIRECTION, AND
-SAYING SO IS PART OF THE RECORD.**
-``test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom``'s ``abs=1e-2``
-on the dense arm was placed against that arm's own 4.05e-04 thread move; the
-move is now 5.58e-13 and what the bound has left to carry is the penalty-root
-distance of 2.1e-03 at ``0.001``, which it clears by 4.7x.  The number is
-unchanged and its justification is not.
-
-Nothing about the penalty root is fixed here, and it is not the dense route's
-alone any more: both arms take it through
-``superglm.screening._factor_kernels._penalty_root``, which is the point of
-there being one policy.  THIS
-ROUTE is bit-identical across thread settings on every one of these fixtures,
-which is the property clause 3's derived cuts buy and a clipped
-symmetric-definite driver does not.
-
-=============================================================================
-
-**THE ONE SUBTRACTION LEFT WAS THE WHOLE DEFECT, AND ITS CAUSE WAS ONE
-MATRIX.**  This used to be evaluated as ``edf = local - border``, a difference
-of two nonnegative traces, because ``V_eff`` was carried as ``blockdiag(D_q) -
-D' Omega D`` with ``Omega = Sigma_M^-1[1:, 1:]`` — a pseudo-inverse of a GRAM.
-That carries ``kappa(Abar)^2`` where the row-space factor carries
-``kappa(Abar)``, measured at 1e+12 against 1e+6 on the starved family, and
-squaring the condition number is the entire story.  On an 8-level ``ps``-like
-pair with 3 rows per level against an 11-column margin, at ``lambda = 1e-4``,
-that form published **4.950 against a certified 6.000** — a ``-1.05`` df error
-that sits INSIDE the range guard and was not refused.  Both halves are
-``tr(A^-1 . PSD)`` and hence exactly nonnegative, so ``local = edf + border``
-is an identity and the cancellation ratio is exactly ``border / edf``; on that
-point it is 5.7.
-
-``V_eff`` is dense, so evaluating the trace against it needs its structure
-rather than the matrix — but it is the Gram of a RESIDUALIZED design, not a
-difference.  With ``Zc_q`` level ``q``'s centered weighted spline rows,
-``J = blockdiag(Zc_q)`` and ``P`` the projector onto the residualized overlap
-span ``Abar``,
-
-    V_eff = J' (I - P) J = G' G,      G = (I - P) J,
-
-which is Frisch-Waugh-Lovell absorption.  With ``Abar = Q R`` thin and
-``Psi_q = Q_q' Zc_q`` bounded by the data scale,
-
-    V_eff = blockdiag(D_q) - Psi' Psi,   A(lambda) = blockdiag(N_q) - Psi' Psi.
-
-Everything below is built from ``[R_q ; sqrt(lambda) rootS]``-style QRs and
-never from a sum or a difference of Grams: Gill, Golub, Murray & Saunders,
-*Math. Comp.* 28(126):505-535 (1974) §5.2 is the authority — computing a Schur
-complement via a triangular solve is "numerically less satisfactory than
-computing R using orthogonal matrices" — and (p. 516) downdating is stable
-only when the result's smallest eigenvalue is large relative to the norm of
-the removed term, which is this module's documented failure mode rather than
-its exception.  The block-angular structure is standard: Golub & Plemmons,
-*LAA* 34:3-28 (1980); Golub, Manneback & Toint, *SIAM J. Sci. Stat. Comput.*
-7(3):799-816 (1986); Scott & Tuma, *Numer. Algorithms* 79(4):1147-1168 (2018).
-Golub & Van Loan, *Matrix Computations* 4th ed. is the reference for block
-Cholesky — with the border eliminated first the trailing factor IS the
-Cholesky factor of the Schur complement — and for the stacked least-squares
-form.  Kaufman & Rosset, *Biometrika* 101(4):771-784 (2014) stays where it
-sits, for monotonicity under a DEFINITE pencil.
-
-**A NEGATIVE RESULT, RECORDED BECAUSE IT IS ONE.**  A sweep for
-``tr(A^-1 V)`` where ``V`` is an explicitly formed Schur complement found
-nothing.  The literature's move is to never form it; there is no published
-stabilization of the difference because the difference is not what anyone
-computes.  Holding a factor of ``V_eff`` directly does not work here either
-and that was verified rather than assumed: ``V_eff`` is block-diagonal minus
-rank ``k_a``, hence dense, so any factor of it is dense — O(L^2) memory and
-O(L^3) time, which is the cost this module exists to avoid.
-
-**WHAT THE MOMENTS COST, AND WHY NEITHER HALF READS THEM.**  Both ``edf`` and
-the statistic are computed from the row-space factors ``p.R``, the compacted
-overlap rows and the centered per-level scores, all of which come from the
-DESIGN.  ``V``, ``c``, ``m`` and ``border`` are read by nothing the ladder
-publishes.  The statistic was the last holdout and issue #298 is that gap: it
-went through a second, moment-space arrow factorization and ``M^+``, both
-pseudo-inverses of those Grams,
-so a 1e-8 perturbation of them left ``edf`` bit-identical and moved the
-statistic by up to 1.5e-05 relative -- on two numbers then used in
-``z = (T/phi - edf0)/sqrt(2 edf0)`` (the earlier normalization). Forming the
-pair's moments in float64 destroys the quantity before any screening rule
-runs.  Measured on the starved family, three defensible exact-arithmetic
-policies for ``M^+`` applied to the SAME delivered float64 moments -- invert
-everything above 1e-38, drop the negative directions, cut at 1e-14 -- return
-10.0, 10.0 and 11.0 on one 8-level pair and 8.0, 8.0 and 9.0 on another, where
-the exact DESIGN gives 6.000000 under every one of those cuts and under 1e-30,
-1e-25 and 1e-20 as well.  So the moment-formed answer is ambiguous by up to a
-degree of freedom and wrong by four, and the design-formed one is not
-ambiguous at all.  On a healthy pair all three policies agree to six digits
-and the gap to the design is 5.4e-03.  **The factored route does not RESOLVE
-that ambiguity, it avoids INCURRING it**, which is the same defect as issue
-#268 and is why this route reaches 1.1e-06 median where a moment-based one
-cannot.
-
-**WHAT IT IS WORTH, MEASURED AGAINST AN EXACT-DESIGN ORACLE.**  Seven
-geometries -- one healthy, three starved (3 rows per level against 9 to 12
-columns), one with more columns than rows per level, one thin-level and one
-with a level at 1e-8 weight -- at eight lambdas each, against mpmath at 50
-digits on each pair's exact float64 design.  Of the 56 points, the old form
-published 54 and refused 2; this publishes all 56.  Median error falls
-**3.06e-03 -> 1.10e-06**, worst **22.01 -> 1.00 df**, and points worse than
-0.1 df fall 19 -> 13.  Every one of the 13 is on a geometry where the oracle
-itself is policy-dependent -- ``null(V_eff) & null(S)`` is nonempty -- and the
-error is exactly ``+1.00`` df, the irreducible singular-pencil offset below.
-On the two starved pairs where the pencil is NOT singular the error is at
-round-off: 6.000000 against 6.000000 to 5e-15 and 3e-13 at every lambda in the
-bracket, where the old form ranged from -1.05 to +22.2 df and refused twice.
-
-**THE +1.00 df ON SINGULAR-PENCIL GEOMETRIES IS IRREDUCIBLE IN FLOAT64.**  It
-is shared by this form, by the form it replaces, and by the textbook O(L^3)
-Wood stacked-QR method; it is the same statement as the LAPACK sentence above.
-Do not read the range guard as implying exactness.
-
-**WHERE THIS IS WORSE, STATED RATHER THAN AVERAGED AWAY.**  On the
-near-absorbed 1-column pair, whose ``V_eff`` is 1e-12 of its own level block,
-the relative error is 4e-16 at ten of eleven lambdas across the bracket
-against the old form's 1e-10 to 1.3e-04 -- but at the two lambdas where the
-0.5 rung sits it is 2.4e-04, against 5e-13 for the old form.  The cause is
-located: ``H``'s small eigenvalue is 2e-12 there and ``1/h`` multiplies an
-``eps``-level residue, so the error is ``eps ||H^+|| = 1.1e-04`` and the
-measured excursions are 2^-13 and 2^-12 of the answer.  Writing the level's
-contribution in the shifted coordinates ``[K_q | K_q Y_q - Phi_q]``, and
-separately equilibrating ``W_q`` before its PSD factorization, each fix that
-rung and each break three others; both were measured and neither is adopted.
-
-**AND THE REFUSAL ON THAT PAIR IS NOT THE BISECTION, WHICH THIS PARAGRAPH USED
-TO SAY.**  Re-measured 2026-08-16: ``structured_ladder`` returns ``None`` there
-for EVERY budget, including ones that clamp and never search, because the LOW
-bracket edge alone refuses -- the sum reads ``1.0001220702125002`` against a
-ceiling of ``1.0``, an excess of 1.22e-04, which is that same ``eps ||H^+||``
-and 4.3e+09 times the range guard's own ``64 eps`` allowance.  The curve
-through the 0.5 crossover is monotone and a bisection over it would converge;
-it is never reached.  The guard is doing exactly what clause 2 says -- refusing
-a number that is not a filter-factor sum -- and the allowance it refuses
-against carries no term for the deflation's amplification, where
-:func:`_psd_clip_allowance` beside it does.  Widening it to ``n eps ||H^+||``
-was measured and is NOT adopted: it covers this excess 5.5x over, but
-``||H^+||`` is unbounded, and on ``_multi_null_pair(3)`` the same expression is
-already an allowance of 0.18 df -- so the guard would stop being able to refuse
-the 2237-against-77 breakdown it exists for.  A bounded form of that term is
-the open question, and it is issue #299's.
-
-**WHAT THE RANGE GUARD IS FOR NOW.**  Every term of the sum is a squared norm,
-so ``edf >= 0`` holds by construction rather than by luck, and on the suite's
-own starved ``bs(10)`` pair -- where the old form left ``[0, L k_a]`` at 101
-of 200 lambdas and the whole ladder returned ``None`` -- this leaves it at
-NONE of them.  The upper end is still a guard: ``A^+`` rests on a deflation
-decision, and a deflation that misfires inverts a direction the pencil does
-not resolve.  Measured once, at 2237 against a ceiling of 77.
-
-**AND "BY CONSTRUCTION" IS ONLY WORTH SOMETHING IF THE CONSTRUCTION IS
-CERTIFIED.**  Two clips are what make it true, and each is now bounded rather
-than trusted, because a clip that silences roundoff silences a breakdown just
-as well and leaves a plausible number inside ``[0, ceiling]`` either way.
-:func:`_psd_factor`'s ``max(w, 0)`` is held to :func:`_psd_clip_allowance` --
-``eigh``'s documented ``n eps ||M||`` plus the measured closure residual over
-the deflation, the second dominating three orders on the starved family --
-and what it removes beyond that is carried into DEGREES OF FREEDOM by
-``||F_q||_F^2`` and refused against the same dust allowance the range guard
-takes.  :func:`_penalty_root`'s projection is held on BOTH of its branches,
-and holding only one of them was issue #323: the DROP branch is refused at the
-eigensolver's own ``n eps ||S||_2``, the same cut that decided to drop, and
-the MAGNITUDE branch at ``2 n^2 eps`` of the penalty's trace, which is the
-aggregate that branch's derivation actually bounds.  Together they are what
-separates a penalty the two halves can share from one where the statistic and
-the edf would be scoring different pencils.  None fires on data: over the five
-screening suites, 86 pair geometries and 767 evaluations, there are ZERO
-refusals from any, and the worst approach is 0.25 of the first allowance and
-0.1875 of the trace one.  The drop branch is never REACHED -- across the twelve
-pair geometries here, fifteen ``bs`` / ``cr`` / ``ps`` margin shapes and ten
-structured-route factorizations on the public ``freMTPL2freq`` screen, no
-penalty carries a negative eigenvalue outside the bar.  "Not APPROACHED" would
-be the stronger claim and it is not made: the closest constructor-built margin
-is 22x inside, and the suite's reconstructed vanishing-mass fixture comes to
-10.0x on one kernel of the fourteen swept.  See :func:`_penalty_root`, which
-records what does and does not move with the kernel.
-
-**WHAT IS NOT A TRADE: REPRODUCIBILITY.**  Permuting the level coordinates
-leaves ``edf`` unchanged in exact arithmetic and changes only the order of
-every reduction — which is what a different BLAS kernel or thread count does.
-Over 40 such relabelings of ``_thin_level_pair`` the OLD form's HIGH-edge value
-spreads 1.54e-04, 6.30e-04 and 3.07e-03 df across the three weights; the last
-is LARGER than the 3e-3 parity bound the suite asserts there, so that assertion
-was sitting on its own noise floor and would have gone red on a machine that
-reduced in a different order.  This form spreads 1.44e-12, 1.29e-12 and
-8.24e-13.  Its low-edge spread moves the other way, 0.0 -> 2.8e-09, which is
-3600x inside the bound asserted there.
-
-**WHAT IT IS NOT WORTH: MONOTONICITY, AND WHAT IS LEFT OF THAT IS THE POLICY'S
-OPERAND AND NOT THE LADDER.**  ``edf`` is decreasing in lambda for a DEFINITE
-pencil (Kaufman & Rosset, *Biometrika* 101:771-784, 2014); this one is not
-always definite, and evaluating the right identity does not make it so.
-
-Re-measured 2026-08-16 on twelve draws of issue #263's own geometry --
-``ps(8)``, 20 levels, 30 rows each, four squeezed into a narrow band, seeds 3-8
-at widths 1e-3 and 1e-4, 81 lambdas across each bracket.  ``edf`` INCREASES at
-**3 of 960 steps**, worst **+0.014141 df** on a value of 169, i.e. 8.4e-05
-relative.  Six of the twelve draws have no increase at all and every one of the
-three sits at width 1e-4.  Against the +47.36 df over 14 of 80 that #263 was
-filed on, that is 3350x smaller.
-
-**AND THE FILED MECHANISM IS REFUTED.**  #263 attributes it to the rank count
-stepping, and proposes counting consistently across the bracket as the fix.
-There is no count left to step, and the deflation that replaced it does NOT
-move: over both draws that rise, ``keep`` retains **12 of 12** directions at
-every one of the 81 lambdas, so clause 1 of the policy is INERT at both ends
-of every rising step -- nothing is dropped, so nothing a deflation did can be
-what changed.  Every rise instead sits within four steps of the
-bracket's LOW edge, where ``A -> V_eff`` and ``V_eff``'s own extreme
-eigenvalues are at ``+-1e-16`` of its norm, so ``A`` is numerically singular
-and the sum is evaluated with an amplified residue.  What is left of #263 is
-the low-edge conditioning of an indefinite delivered operand -- issue #269's
-subject, not this one's -- and not a search over a non-monotone curve.
-Monotonicity would follow from delivering NONNEGATIVE per-direction shares,
-which this route does not.
-
-**AND THE FIXTURE THE SUITE SAYS LOSES RUNGS TO IT NO LONGER DOES.**
-``test_the_pair_geometry_is_built_once_and_carries_no_lambda``'s docstring
-records ``_vanishing_mass_pair(1e-12)`` increasing at 10 of 400 steps with
-only 5 of 11 interior budgets attainable, and permits a refusal there for that
-reason.  Re-measured 2026-08-16 on the same fixture and the same 400-step
-walk: **0 rises of 400**, and **11 of 11** interior budgets from 16.5 to 60
-attained, each to 1e-6 of its target.  That docstring is stale rather than
-wrong -- it was written before the last commits of #285 -- and the permissive
-branch it justifies is now unnecessary on this pair.  The ASSERTIONS are left
-alone: attainment there was flaky across machines once, and re-tightening it
-on one machine's reading is how that flake was introduced.
-
-**WHERE THE ARITHMETIC IS BEYOND EVERY FORM.**  Give a pair 8 levels with 3
-rows in each against an eleven-column margin and the overlap arrow's border
-Schur complement is nearly singular; its inverse then runs to 1e+10-1e+12 and
-every organization of this quantity loses eleven digits.  It is also the ONE
-fixture of twelve whose delivered ``V_eff`` is materially outside the PSD cone
--- ``min eig / max eig = -1.95e-11``, where the other eleven sit between
-``-1.2e-16`` and ``+1.0`` -- so the pencil handed to clause 1 is not merely
-singular there but indefinite, and two poles of the exact ``edf`` fall inside
-the ladder's own bracket.  That is issue #269, and it is a property of the
-OPERANDS: no reading of the identity removes it, and it is what the low-edge
-rises under "WHAT IT IS NOT WORTH" are made of.  The three traces the
-old form summed measure 6.7e+10, -1.3e+11 and 6.7e+10 against an answer of 8.1.
-Both forms are wrong there — the old by up to 53.08 df, the new by up to
-22.01 — and what the new one buys is that its worst cases leave ``[0, L k_a]``
-and are refused instead of published.  That is a defect in the FACTORIZATION's
-border cut rather than in the edf form, and it is not fixed here.
-
-**HOW FAR BEYOND: ONE ULP OF LAMBDA USED TO DECIDE IT.**  On a 7-level
-``bs(10)`` pair with 3 rows per level the OLD difference form measured
-``local`` and ``border`` both at 9.654e+07 at the ladder's high edge, with a
-difference of ``-13.61`` — outside ``[0, 78]``, so refused — while moving
-lambda by a SINGLE ulp, 594.8079378729931 against ...32, which is just the
-difference between ``1e10 * a / b`` and ``1e10 * (a / b)``, returned
-``edf = 0.8229`` instead.  ``edf`` was not a continuous function of lambda at
-float64 resolution on that family.  **THE SUM DOES NOT DO THIS AND THE SAME
-FIXTURE IS THE EVIDENCE**: the two sides of that ulp now read 0.99999632699
-and 0.99999632618, agreeing to 8.1e-10, the sum leaves ``[0, L k_a]`` at NONE
-of 200 log-spaced lambdas where the difference left it at 101, and the ladder
-scores the pair at 1.0000 on every budget instead of handing it back.
-``tests/test_structured_screening.py`` scans the whole bracket rather than
-asserting at either lambda, because what is portable here is the width of the
-region and not a value at one point.
-
-**WHAT A DROPPED DIRECTION COSTS NOW.**  The pair's relative cut still
-drops directions, and where one carries a filter factor near 1 the STATISTIC
-loses it.  ``_mixed_rank_cells`` in the suite is built to sit exactly there —
-its only ``V_eff`` direction is ``1e-16`` RELATIVE to its own level block,
-under the relative cut.  **The edf half no longer pays that**, and
-the reason is the whole point of working on the factor: ``N_q`` is ``T_q' T_q``
-from a QR of ``[R_q ; sqrt(lambda) rootS]`` and ``R_q``'s smallest direction
-sits at ``d``, not at ``d^2``, so the cut is applied to a square root.  Against
-a 50-digit oracle of 1.000000 / 0.500000 / 0.000000 across the bracket this
-reads 0.9999999999 / 0.5000000000 / 5.7e-10, and the ladder attains the 0.5
-rung the form it replaces answered with a single rung at 0.0.
-
-The dense path used to carry its own version of the same failure -- on one of
-four wide pairs of the shape this kernel exists for it reported 1.03 df BELOW a
-high-precision oracle at the high edge, where ``numpy.linalg.pinv``'s inherited
-default ``rcond`` dropped a direction the penalty leaves free.  **THAT
-MECHANISM IS GONE AND THE SENTENCE IS PAST TENSE**: issue #257 removed the
-``pinv`` fallback with the rest of the moment route, and the dense pencil takes
-its one rank decision on a FACTOR at a stated ``sqrt(k eps)``.  The four-pair
-figure is not re-measured because its fixture measured that fallback; what is
-measured on this branch is the two arms' agreement at the same rung, 3.7e-11,
-2.0e-10 and 1.4e-12 of ``edf`` on ``_thin_level_pair`` at 1.0, 0.01 and 0.001,
-against 9.8e-05, 2.5e-04 and 2.1e-03 before.  #298 scope item 3 is closed by
-that rather than deferred.
-
-**WHAT THIS SETTLES AND WHAT IT DOES NOT.**  #249, #258, #265 and #271 are all
-statements about ``block_ranks`` -- an unconditional contrast term, a
-disagreement with what the inverse resolves, a global-versus-per-block
-reference scale, and that disagreement turning out to be two-signed.  There is
-no rank here to make any of those statements about, so they go with it; #271
-in particular asked whether the invariant was one-signed, and an invariant
-between a count and an inverse cannot be violated in either direction once
-there is no count.
-
-#263 and #262 are SETTLED BY THE POLICY ABOVE rather than by a further change
-of arithmetic, and the measurements that settle them are stated where the
-claim is: #263's residue under "WHAT IT IS NOT WORTH", #262's here.  #262 is
-that a value which was returned is now refused, filed at -0.18 and -0.34 df.
-Both are impossible under this form -- ``edf >= 0`` holds by construction --
-and re-measured 2026-08-16 on all three of its geometries at 20 levels x 30
-rows, four in the band, the ladder publishes **4 rungs of 4** on each of
-``bs(6)``/1e-5, ``bs(8)``/2.15e-4 and ``cr(4)``/4.64e-5, with ``edf`` never
-below 15.00 anywhere in the bracket (81 lambdas).  What #262 was actually
-asking -- "whether the REFUSAL is the right response" -- is clause 2, and it
-is now answered in writing instead of being a boundary that moves.
+Reproducibility: permuting level coordinates, or changing BLAS kernel or thread
+count, moves ``edf`` by about 1e-12. Monotonicity in lambda holds for a
+definite pencil (Kaufman and Rosset, *Biometrika* 101:771-784, 2014) and can
+fail on this route when the delivered ``V_eff`` is indefinite (issues #263,
+#269); the ladder guards for it. When the border Schur complement is nearly
+singular (8 levels of 3 rows against an 11-column margin) no organization of
+the arithmetic recovers the lost digits and the ladder refuses.
 """
 
 from __future__ import annotations
@@ -611,115 +102,32 @@ _EDF_ABSOLUTE_DUST = np.finfo(np.float64).eps ** 2
 _MAX_BISECT = 200
 _TRACE_CHUNK_DOUBLES = 262_144
 
-# Safety factor in :func:`_orthonormality_bound`.  Set from a SWEEP and not
-# from one run: 1382 ``_profile`` calls over this suite's whole fixture bank,
-# repeated across 7 ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings, put
-# the measured residual between 0 and 0.408 of ``n eps kappa``. The 2.0 bound
-# is 4.90 times the largest measured residual. The literature's
-# dimensional factor for the ROUTE THIS IS NOT is ``m rank^(3/2)``; folding
-# ``rank^(3/2)`` into this constant is checked past the ranks the bank reaches
-# -- see :func:`_orthonormality_bound`.
+# Safety factor in :func:`_orthonormality_bound`: 4.9x the largest residual measured
+# over the fixture bank, across 7 OPENBLAS_CORETYPE microkernels and 2 thread settings.
 _ORTHONORMALITY_FACTOR = 2.0
 
-# Smallest ratio between a singular value and the absorption floor at which
-# the deflation count is reported as decided.  Inside it the two sides of the
-# cut are not separated and :func:`_evaluate` refuses rather than publishing an
-# ``edf`` that a backward error of its own size would have changed.  Foster &
-# Davis, *ACM TOMS* 40(1), Article 7 (2013), sec. 1: a numerical rank is
-# "well defined" only when the tolerance "lies between ``sigma_(r+1)`` and
-# ``sigma_r``, and is near neither"; sec. 2 is their certify-or-warn shape.
-#
-# **SET FROM A SWEEP AND FROM BOTH DIRECTIONS, NOT FROM ONE RUN.**  It has to
-# clear what the singular values themselves do across machines -- measured at
-# 4.6e-11 relative over 7 ``OPENBLAS_CORETYPE`` microkernels x 2 thread
-# settings on #280's starved pair -- and it has to stay below what would
-# refuse pairs this module scores today.  1.01 is 2e+08x the first.  Against
-# the second, over the bracket: on that pair it refuses 2 of 601 lambdas and
-# cuts the worst surviving upward step in ``edf`` from 0.597 to 0.057 df, and
-# on ``_starved_bs_pair`` it refuses **1 of 200 on four of the fourteen
-# configurations and 2 on the other ten** -- which is what the test that pins
-# it records, and what this comment said was zero until review caught the
-# disagreement.  IT IS NOT FREE ON THE FIXTURE THE FLOOR CHANGE MOVES MOST,
-# and quoting a zero here would have let the next reader conclude it was.
-# 1.5 -- this file's dense-path count margin -- was measured first and refuses
-# 73 of 601 and 34 of 200, which reds three of this module's own
-# publish-don't-refuse fixtures.
+# Smallest ratio of a singular value to the absorption floor at which the deflation
+# count is reported as decided; inside it :func:`_evaluate` refuses (Foster and Davis,
+# *ACM TOMS* 40(1), 2013, secs. 1-2: certify or warn). 1.01 clears the 4.6e-11
+# cross-kernel spread of singular values; 1.5 refuses 73 of 601 lambdas.
 _ABSORPTION_MARGIN = 1.01
 
-# The most steps one rung's bisection can take.  It halves the log of a
-# bracket spanning 1e20 and stops when the two ends are within 1e-12 of each
-# other relatively, so it exhausts at ceil(log2(ln(1e20) / ln(1 + 1e-12)))
-# steps whatever the data does -- _EDF_TOL usually stops it sooner (measured
-# 26 to 28 on the pairs that search), but nothing guarantees that, and a
-# ceiling is what lets a caller decide BEFORE the search whether to pay for
-# it rather than after.
+# Most steps one rung's bisection can take (a 1e20 bracket halved in log to 1e-12
+# relative width), so a caller can price a search before paying for it.
 _MAX_STEPS_PER_RUNG = min(_MAX_BISECT, 46)
 
 
 class _UnstableStructuredEDFError(FloatingPointError):
     """A filter-factor sum came back outside ``[0, k]``, so it is not one.
 
-    **THIS IS CLAUSE 2 OF THE SINGULAR-PENCIL POLICY AND ITS SCOPE IS THE
-    POINT.**  Raising this says the delivered NUMBER is not a filter-factor
-    sum: outside ``[0, ceiling]``, non-finite, or resting on a projection
-    larger than the backward error that would explain it.  It does NOT say the
-    pencil is singular, and singularity must never be added to its conditions
-    -- **NOT because it is common, which was measured and is false**, but
-    because it is not DECIDABLE.  The intersection is nonempty on 1 of this
-    suite's 12 fixtures, and on NONE of the three thin-level pairs an earlier
-    draft of this docstring named as the family where it is ordinary; what IS
-    ordinary is that both operands are individually rank deficient (10 of 12)
-    with ``kappa(V_eff + balance S)`` from 3.0e+03 to 2.0e+307, so a refusal
-    keyed to singularity would be keyed to which side of a round-off cut two
-    nearly dependent subspaces landed on.  Where the intersection is
-    identified, clause 1 scores it by contributing zero.
-
-    **TWO OF THE FOUR RAISE SITES ARE STATEMENTS ABOUT ARITHMETIC; THE OTHER
-    TWO ARE NOT, AND THE ASYMMETRY IS THE THING TO UNDERSTAND.**  The range
-    guard and the uncertified-clip guard in :func:`_evaluate` each judge a
-    computed sum against its own derived bound.  :func:`_profile`'s two
-    penalty guards do not -- the drop guard and the projection guard alike are
-    computed from ``S_a`` ALONE, in the lambda-independent half, before any sum
-    exists, and each fires or does not fire identically at every lambda.  Their
-    condition is a property of an OPERAND.
-
-    This count read "two of the three" until the drop guard was added beside
-    the projection guard, and the singular naming it carried has been made
-    plural with it.  Recorded rather than silently renumbered because this is
-    the file's only enumeration of its own raise sites, so nothing else
-    contradicts it into visibility -- and because a guard's enumeration has to
-    be stated where a reader will find it for the same reason its scale does,
-    which is the whole argument of the change that added the fourth.
-
-    That is admissible where a refusal keyed to singularity is not, and the
-    reason is which operand.  ``S_a`` is the CALLER'S SPECIFICATION -- the
-    model that was asked for -- so a projection that moves it materially means
-    this route is scoring a different model from the one specified, and from
-    the one the DENSE route scores, which since issue #257 roots the same
-    margin penalties through the same :func:`_penalty_root`.
-    ``V_eff`` is DERIVED, by this kernel's own residualization of the data;
-    its going materially outside the cone (measured at ``-1.95e-11`` on 1 of
-    12 fixtures) is arithmetic, not specification, and NO RAISE SITE HERE IS
-    KEYED TO IT.  The pencil is evaluated, and it publishes if it passes the
-    ordinary numerical and ordering guards -- which it may also FAIL, since
-    that same indefiniteness is what makes ``edf`` rise by ``+0.014141`` and
-    the monotone guards refuse.  **It is not "published under clause 1", and
-    saying so would repeat the overbroad promise clause 2 was corrected to
-    avoid**: clause 1 governs an IDENTIFIED ``null(V_eff) & null(S)``
-    direction, where an otherwise undefined ``0/0`` factor is assigned zero.
-    Indefiniteness is neither that condition nor sufficient to reach it.
-    Refuse a changed MODEL, evaluate a hard PENCIL.
-
-    So what clause 2 forbids is a raise site keyed to the pencil's
-    SINGULARITY, which is the undecidable predicate above -- not any condition
-    on an operand whatsoever.
-
-    **AND THIS CLASS IS NOT THE ONLY WAY THE KERNEL DECLINES.**
-    :func:`structured_ladder` also returns ``None`` without raising -- on
-    ``profiled_trace is None`` and on the monotone-ordering guards -- and the
-    second of those IS reachable from a property of the pencil.  Clause 2
-    governs what may be added HERE; it does not promise the ladder publishes
-    on every singular pencil.
+    Raised only when the delivered number is not a filter-factor sum: outside the
+    range, non-finite, or resting on a projection larger than the backward error that
+    would explain it. Never raised for a singular pencil (clause 2 of the module
+    policy). The two guards in :func:`_evaluate` judge a computed sum against its
+    bound; the two penalty guards in :func:`_profile` judge ``S_a`` alone, the
+    caller's specification, and fire identically at every lambda. An indefinite
+    derived ``V_eff`` is not a raise condition: refuse a changed model, evaluate a
+    hard pencil. :func:`structured_ladder` also declines without raising.
     """
 
 
@@ -751,21 +159,13 @@ class SplineCatPair:
     # None means the global centered-row rank lies inside its certified
     # numerical ambiguity band; the structured route must be refused.
     profiled_trace: float | None
-    # THE ROW-SPACE FACTORS, NOT THE MOMENTS.  ``R[q]' R[q] == D_q`` exactly
-    # in the sense that both are Grams of the same centered weighted rows, but
-    # ``R`` is that geometry's FACTOR: it carries kappa where ``D_q`` carries
-    # kappa^2.  The ladder's edf AND its statistic are computed from these and
-    # from ``overlap_rows``/``score_rows``/``base_score`` alone, never from
-    # ``V``/``c``/``m``; see the module docstring's "WHAT THE MOMENTS COST".
+    # Row-space factors, not moments: the ladder's edf and statistic are computed from
+    # these and ``overlap_rows``/``score_rows``/``base_score``, never from ``V``/``c``/``m``.
     R: NDArray  # (L, k_a, k_a)     centered row factor of each emitted level
     overlap_rows: NDArray  # (., 1 + k_a)  compacted rows of the unemitted levels
-    # THE SCORE, RESIDUALIZED ON THE CATEGORICAL MAIN THE SAME WAY ``R`` IS.
-    # ``score_rows[q]`` is ``Zc_q' zw_q`` -- level q's centered design rows
-    # against its own score -- and ``base_score`` is ``[1' s ; B' s]`` over the
-    # levels the menu does not emit, which is the score against the SAME
-    # ``overlap_rows`` those levels contribute.  Together they are everything
-    # ``U_eff`` needs from the design, so the profiled score no longer goes
-    # through ``M^+``.
+    # score_rows[q] = Zc_q' zw_q (level q's centered rows against its score);
+    # base_score = [1' s ; B' s] over the unemitted levels. Together they are all U_eff
+    # needs from the design.
     score_rows: NDArray  # (L, k_a)      Zc_q' zw_q per emitted level
     base_score: NDArray  # (1 + k_a,)    unemitted levels' overlap score
 
@@ -775,15 +175,9 @@ class SplineCatPair:
 
 
 def _centered_level_means(shifted: NDArray, W: NDArray) -> NDArray:
-    """Weighted mean of the shifted basis rows inside each level.
+    """Weighted mean of the shifted basis rows inside each level (zero for a zero-mass level).
 
-    Shared by :func:`_centered_level_factors` and :func:`_centered_level_scores`
-    rather than written twice: the curvature factor and the score are the same
-    residualization on the categorical main applied to two different right-hand
-    sides, and if the two centerings ever differed the profiled score would be
-    residualized on one design and the profiled curvature on another.  A
-    zero-mass level keeps a mean of exactly zero, which sends its whole
-    contribution to zero on both sides.
+    Shared by the factor and score centerings so both use one residualization.
     """
     n_levels = W.shape[1]
     mass = W.sum(axis=0)
@@ -797,43 +191,11 @@ def _centered_level_scores(
 ) -> NDArray:
     """``Zc_q' zw_q`` per emitted level, from the design and not from ``M^+``.
 
-    The statistic profiles the score on the overlap span exactly as the
-    curvature is profiled on it, and Frisch-Waugh-Lovell splits that in the
-    same two stages: residualize on the categorical main first -- which is
-    level-local, so it is a within-level centering -- then on what is left of
-    ``[intercept | spline main]``.  This is the first stage, and it is the
-    score's counterpart of :func:`_centered_level_factors`.
-
-    Written out, level ``q``'s contribution is
-
-        Zc_q' zw_q = ((B - mean_q)' sqrt(W_q)) (S_q / sqrt(W_q))
-                   = (B - mean_q)' S_q,
-
-    so the weight cancels ALGEBRAICALLY and is never divided out: a level whose
-    weight is 1e-12 of the pair's does not have its score divided by 1e-6.  The
-    same shift by ``B[0]`` that :func:`_centered_level_factors` uses is applied
-    here, and it cancels for the same reason -- ``B - mean^B_q`` is invariant to
-    a common offset -- so the two sides are centered by one arithmetic.
-
-    **A NEGATIVE RESULT, RECORDED BECAUSE IT IS ONE.**  Review asked for the
-    rows to be centered BEFORE the contraction -- ``sum_i (shifted_i - mean_q)
-    S_i`` rather than ``shifted' S_q - mean_q (1' S_q)`` -- on the grounds that
-    the second is a difference of two accumulated dot products and can lose
-    every significant digit when a level's score is nearly explained by its own
-    categorical main.  That is the right instinct and it is the discipline the
-    curvature side follows, so it was implemented and measured against 60-digit
-    mpmath, and the two forms agree TO EVERY DIGIT in four regimes: the suite's
-    four fixtures; a score set exactly proportional to the weight, so the
-    centered result is pure cancellation (residual 1e-6, 1e-10 and 0, where
-    both forms degrade identically to 2.9e-09, 3.2e-05 and no correct digit);
-    and levels on disjoint x-ranges spaced 1e3 and 1e6 apart, where both read
-    3.4e-12 and 2.6e-09.  The reason is that ``mean_q`` is itself accumulated
-    from ``shifted``, so both arrangements carry the same
-    ``eps sum_i |shifted_i| |S_i|``: the cancellation is a property of the
-    QUANTITY and not of where the subtraction is written.  The centering that
-    does pay here is the ``B[0]`` shift above, which is already applied.  The
-    contract-first form costs a chunk loop and an ``(n_rows, chunk, k_a)``
-    temporary for no measured accuracy, so it is not adopted.
+    Level ``q``'s contribution is ``(B - mean_q)' S_q``: the weight cancels
+    algebraically, so a tiny-weight level's score is never divided by its weight.
+    The same ``B[0]`` shift as :func:`_centered_level_factors` is applied. Centering
+    the rows before the contraction was measured against 60-digit mpmath and agrees
+    to every digit, because ``mean_q`` is accumulated from the same terms.
     """
     B = np.asarray(B, dtype=np.float64)
     level_rows = np.asarray(level_rows, dtype=np.intp)
@@ -848,14 +210,10 @@ def _centered_level_scores(
 
 
 def _unemitted_overlap_score(B: NDArray, S_cell: NDArray, level_rows: NDArray) -> NDArray:
-    """``[1' s ; B' s]`` over the levels the contrast menu does not emit.
+    """``[1' s ; B' s]`` summed over the levels the contrast menu does not emit.
 
-    The counterpart of :func:`_unemitted_overlap_rows` on the right-hand side:
-    those levels carry no indicator of their own, so their overlap rows are
-    ``[sqrt(w) | sqrt(w) B]`` untouched and the score against them is
-    ``[1' s ; B' s]`` with the weight cancelling as it does above.  Only the
-    SUM over those levels is ever needed, which is one ``(1 + k_a)`` vector
-    however many of them there are.
+    The right-hand-side counterpart of :func:`_unemitted_overlap_rows`; the weight
+    cancels as in :func:`_centered_level_scores`.
     """
     B = np.asarray(B, dtype=np.float64)
     S_cell = np.asarray(S_cell, dtype=np.float64)
@@ -873,19 +231,12 @@ def _unemitted_overlap_score(B: NDArray, S_cell: NDArray, level_rows: NDArray) -
 
 
 def _centered_level_factors(B: NDArray, W: NDArray) -> NDArray:
-    """Return QR factors of each level's centered weighted spline rows.
+    """QR factors ``R_l`` of each level's centered weighted spline rows.
 
-    The raw-moment identity ``B' W B - (B' w)(B' w)' / sum(w)`` is unusable
-    here: the trace this module needs can be twelve or more orders below both
-    terms.  This two-pass form subtracts each level's mean from the basis
-    rows first.  It then returns a square ``R_l`` whose Gram is the centered
-    geometry, without forming that Gram:
-
-        R_l' R_l = (sqrt(W_l) D_l)' (sqrt(W_l) D_l).
-
-    Shifting every row by the first basis row before taking the mean makes the
-    centering invariant to a large common offset without subtracting that
-    offset twice.  Zero-mass levels contribute an exact zero matrix.
+    ``R_l' R_l = (sqrt(W_l) D_l)' (sqrt(W_l) D_l)`` without forming the Gram: the
+    raw-moment form ``B'WB - (B'w)(B'w)'/sum(w)`` cancels catastrophically. Rows are
+    shifted by the first basis row so centering is invariant to a common offset.
+    Zero-mass levels give an exact zero matrix.
     """
     B = np.asarray(B, dtype=np.float64)
     W = np.asarray(W, dtype=np.float64)
@@ -911,29 +262,12 @@ def _centered_level_factors(B: NDArray, W: NDArray) -> NDArray:
 def _reduce_row_factors(base: NDArray, blocks: NDArray) -> NDArray:
     """Compact ``base`` stacked under a batch of per-level row factors.
 
-    The reduction itself is forced: the levels' factors have to meet in one
-    ``w``-column factor and no Gram may be formed on the way, so what is left
-    to choose is the SHAPE OF THE OPERANDS, and stacking the whole batch into
-    one ``(n * h, w)`` matrix chooses badly.  Its row count is the level
-    count, which puts ``L`` inside a matrix dimension: the work stays linear,
-    but the temporary is ``L``-sized and the factorization is one long
-    sequential Householder chain.  ``tests/test_screening_cost_scaling.py``
-    asserts the opposite property -- that ``L`` appears only as a batch count
-    -- and it is right to.
-
-    This is instead the binary reduction tree of Demmel, Grigori, Hoemmen &
-    Langou, *SIAM J. Sci. Comput.* 34(1):A206-A239 (2012) (communication-
-    avoiding TSQR, their §2), on the ``R`` factors alone: pair the blocks,
-    factor every pair in ONE batched call, and repeat.  Every operand is
-    ``(2w, w)`` however many levels there are, the depth is ``log2(n)`` calls
-    instead of one, and the total work is the same ``n`` small factorizations.
-    TSQR is unconditionally backward stable -- each level of the tree is an
-    orthogonal transformation of a matrix whose norm it preserves -- so this
-    is a reorganization of the same reduction and not a relaxation of it.
-
-    Blocks shorter than ``w`` are zero-padded rather than factored, since
-    their ``R`` is themselves; blocks taller are reduced once, batched, before
-    entering the tree.
+    A binary reduction tree on the ``R`` factors alone (communication-avoiding TSQR,
+    Demmel, Grigori, Hoemmen and Langou, *SIAM J. Sci. Comput.* 34(1):A206-A239,
+    2012, sec. 2): pair the blocks, factor every pair in one batched call, repeat.
+    Operands stay ``(2w, w)`` for any level count, so ``L`` appears only as a batch
+    count; TSQR is backward stable. Blocks shorter than ``w`` are zero-padded and
+    taller ones are reduced once, batched, before entering the tree.
     """
     base = np.asarray(base, dtype=np.float64)
     blocks = np.asarray(blocks, dtype=np.float64)
@@ -961,33 +295,17 @@ def _representative_projection(
     n_rows: int,
     n_levels: int,
 ) -> tuple[NDArray, NDArray] | None:
-    """Return a stable representative span and its structural null action.
+    """A stable representative span and its structural null action, or ``None``.
 
-    Column-pivoted QR of the small global weighted-row factor chooses
-    representative basis columns ``active``.  In pivot order,
-
-        Z = Z_active [I, C],       R11 C = R12.
-
-    A coefficient action using only the active rows is therefore sufficient:
-    every other representative differs only by a null-space action and has
-    the same fitted rows and residual energies.  ``null_action`` is
-    ``I - P`` built structurally as active rows ``[0, -C]`` and inactive rows
-    ``[0, I]``.  No cancelling ``I - H^+ H`` is formed.
-
-    The cutoff is the square root of the Hermitian pseudo-inverse policy the
-    dense path used to apply to a Gram, and since issue #257 applies to a
-    factor at this same square root -- :func:`superglm.screening.
-    _factor_kernels._factor_rank_floor`, where the derivation lives now that
-    both paths take it.  One policy at two sites rather than one borrowed
-    from the other.  Rank is refused, rather than guessed, when a pivot
-    intersects its QR backward-error interval.  Each Householder reduction
-    contributes an additive ``O(eps * leading_scale)`` perturbation; the
-    conservative operation depth below covers one ``n_rows x k`` local QR per
-    level, the sequential ``2k x k`` suffix merges, and the final ``k x k``
-    pivoted QR.  Relative to a ``sqrt(k*eps)`` cutoff that uncertainty is
-    ``O(sqrt(eps))`` — the scale on which row/level order can otherwise flip
-    a retained direction.  Refusal lets routing fall back instead of making
-    that platform-specific rank choice observable.
+    Column-pivoted QR of the small global weighted-row factor picks representative
+    columns ``active`` (``Z = Z_active [I, C]``, ``R11 C = R12``); using only the
+    active rows is sufficient because the rest differ by a null-space action.
+    ``null_action`` is ``I - P`` built structurally (active rows ``[0, -C]``,
+    inactive rows ``[0, I]``), with no cancelling ``I - H^+ H``. The cutoff is
+    :func:`superglm.screening._factor_kernels._factor_rank_floor`, shared with the
+    dense path. Rank is refused (``None``) when a pivot lies within its QR
+    backward-error interval of the cutoff, so row or level order cannot flip a
+    retained direction.
     """
     k = row_factor.shape[1]
     _, pivoted, permutation = scipy.linalg.qr(
@@ -1016,19 +334,8 @@ def _representative_projection(
         + 2 * max(int(n_levels), 1) * max(k, 1) ** 2
         + max(k, 1) ** 2
     )
-    # Cap the band at half the cutoff.  ``reduction_depth`` grows with n_rows
-    # and n_levels while ``cutoff`` does not, so an uncapped band overtakes it
-    # at ``reduction_depth >= 2**22 * sqrt(k)`` -- ``sqrt(eps)`` is exactly
-    # ``2**-26`` -- and from there ``[cutoff - unc, cutoff + unc]`` contains
-    # zero, so EVERY pivot reads as ambiguous and the projection refuses a
-    # geometry it resolved perfectly well at a smaller budget.  That inverts
-    # the documented monotone budget behaviour: raising ``max_cells`` made a
-    # scored pair go dark.
-    #
-    # Half the cutoff is the largest band that cannot swallow zero, so the
-    # refusal keeps meaning "this pivot is genuinely too close to the cutoff to
-    # call" rather than "the flop count got large".  Below the crossover the
-    # min is inert and the band is bit-identical to before.
+    # The band is capped at half the cutoff: uncapped it grows with the reduction depth
+    # until it contains zero, and every pivot would read as ambiguous.
     uncertainty = min(16.0 * eps * reduction_depth, 0.5 * np.sqrt(max(k, 1) * eps))
     uncertainty *= leading_scale
     if np.any(np.abs(diagonal - cutoff) <= uncertainty):
@@ -1056,18 +363,9 @@ def _aligned_representative_actions(
 ) -> tuple[NDArray, NDArray]:
     """Project local and complementary rows in one aligned QR coordinate.
 
-    ``local`` and ``other`` are row factors for disjoint pieces of the same
-    global centered design.  Stacking their representative columns and
-    applying the resulting orthogonal coordinate to the aligned right-hand
-    sides gives both least-squares actions directly:
-
-        G = [local_active; other_active] = Q R
-        A_q(active)  = R^-1 Q_local' local
-        A_-q(active) = R^-1 Q_other' other.
-
-    This is algebraically the same representative fit as ``H^+ H_q`` and
-    ``H^+ H_-q``, but it never forms ``G'G`` or solves through ``R'R``.  The
-    two right-hand sides share one triangular solve.
+    With ``G = [local_active; other_active] = Q R``, the two least-squares actions are
+    ``A_q = R^-1 Q_local' local`` and ``A_-q = R^-1 Q_other' other``: the same fit as
+    ``H^+ H_q`` and ``H^+ H_-q`` without forming ``G'G``, sharing one triangular solve.
     """
     k = local.shape[1]
     projection = np.zeros((k, k), dtype=np.float64)
@@ -1104,40 +402,18 @@ def _profiled_curvature_trace(
     *,
     keep_factors: NDArray | None = None,
 ) -> float | None:
-    """Compute ``tr(V_eff)`` as an exact sum of squared residual norms.
+    """``tr(V_eff)`` as an exact sum of squared residual norms.
 
-    Profiling the intercept and categorical main centers the spline geometry
-    separately inside every level.  Write that weighted centered design as
-    ``Z_l = sqrt(W_l) D_l``.  A QR factor ``R_l`` has the same action norm:
-    ``||Z_l A||_F = ||R_l A||_F`` for every coefficient action ``A``.
+    For emitted level ``q`` the Schur-complement trace is
+    ``||R_q (N + A_-q)||_F^2 + ||R_-q A_q||_F^2``, with ``N`` the null action of
+    :func:`_representative_projection`. Summed over levels this is ``tr(V - C' M^+ C)``
+    as a sum of nonnegative terms, so it stays representable when the mains absorb all
+    but round-off of the interaction. ``R_-q`` is a QR compaction of a prefix and a
+    precomputed suffix of row factors, never a subtraction from a global Gram; work and
+    memory are linear in the level count.
 
-    A column-pivoted QR of the global row factor chooses a stable
-    representative span without ever forming the ill-conditioned normal
-    matrix ``H = sum_l Z_l' Z_l``.  For emitted interaction block ``q``, let
-    ``A_q`` be its representative projection coefficients, ``A_-q`` the
-    coefficients for all other levels, and ``N`` the structural null action
-    returned by :func:`_representative_projection`.  The residual action is
-    assembled additively as ``N + A_-q``.  The diagonal Schur-complement trace
-    is the exact nonnegative factor norm
-
-        ||R_q (N + A_-q)||_F^2 + ||R_-q A_q||_F^2.
-
-    Summing those nonnegative terms over emitted levels is exactly
-    ``tr(V - C' M^+ C)``.  Unlike that difference, it remains representable
-    when the mains absorb all but round-off of the interaction.
-
-    ``R_-q`` is a QR compaction of a prefix and precomputed suffix of actual
-    row factors.  It is never obtained by subtracting level ``q`` from a
-    global Gram.  Only that suffix is a level-sized trace scratch stack; the
-    centered factors are recomputed in bounded chunks on the forward pass,
-    then all trace scratch is discarded before the arrow ladder.  Work and
-    memory remain linear in the level count; no SVD, normal-matrix inverse, or
-    dense ``V_eff`` is formed.
-
-    ``keep_factors`` is an ``(len(level_rows), k, k)`` output array that
-    receives ``R_q`` for each emitted level as the forward pass forms it.  The
-    ladder needs exactly those factors and they are otherwise discarded here,
-    so keeping them costs one store rather than a third chunked QR pass.
+    ``keep_factors``, an ``(len(level_rows), k, k)`` output array, receives each ``R_q``
+    on the forward pass so the ladder does not need a third chunked QR.
     """
     B = np.asarray(B, dtype=np.float64)
     W_cell = np.asarray(W_cell, dtype=np.float64)
@@ -1204,15 +480,11 @@ def _unemitted_overlap_rows(
     W_cell: NDArray,
     level_rows: NDArray,
 ) -> NDArray:
-    """Compact the overlap rows of the levels the contrast menu does not emit.
+    """Compact the overlap rows of the levels the treatment-coded menu does not emit.
 
-    The menu is treatment coded, so the levels it emits carry their own
-    indicator and the base levels do not.  Residualizing the overlap span on
-    those indicators therefore centers an emitted level's rows inside the
-    level -- which is exactly :func:`_centered_level_factors`, and which sends
-    its intercept column to zero -- and leaves a base level's rows
-    ``[sqrt(w) | sqrt(w) B]`` untouched.  Only the COMBINED factor of the base
-    rows is ever needed, so they are compacted chunk by chunk and never held.
+    Base levels keep their rows ``[sqrt(w) | sqrt(w) B]`` uncentered, so only their
+    combined factor is needed; it is compacted chunk by chunk and never held. Emitted
+    levels are centered by :func:`_centered_level_factors`.
     """
     B = np.asarray(B, dtype=np.float64)
     W_cell = np.asarray(W_cell, dtype=np.float64)
@@ -1243,18 +515,10 @@ def spline_cat_moments(
 ) -> SplineCatPair:
     """Assemble the level-blocked moments straight from the pair's cell tables.
 
-    ``level_rows[q]`` is the cell-table column the q-th contrast indicates —
-    the treatment menu is one-hot with a zeroed base row, so selecting that
-    column IS multiplying by the menu, and the ``(L, L-1)`` menu is never
-    built.  Nor is the dense path's ``(n_a, L, L)`` curvature intermediate,
-    which is diagonal in its last two axes: measured at 380,880 doubles
-    carrying 690 nonzeros for a 24-level factor.
-
-    A missing ``S_a`` is carried as a zero penalty rather than refused, which
-    is what the dense path does with the same input: an unpenalized block has
-    no bandwidth to scan, and :func:`structured_ladder` reports it at a
-    single rung.  Refusing here would abort the whole sweep over one pair,
-    where the contract is a NaN row.
+    ``level_rows[q]`` is the cell-table column the q-th contrast indicates, so
+    selecting it multiplies by the treatment menu without building it. A missing
+    ``S_a`` is carried as a zero penalty: an unpenalized block has no bandwidth to
+    scan and :func:`structured_ladder` reports a single rung.
     """
     B_a = np.asarray(B_a, dtype=np.float64)
     n_a, k_a = B_a.shape
@@ -1262,26 +526,16 @@ def spline_cat_moments(
     Wq = W_cell[:, level_rows]
     Sq = S_cell[:, level_rows]
 
-    # THE TRACE PASS RUNS FIRST, AND THE ORDER IS THE MEMORY GATE.
-    # ``screening_ops._within_structured_budget`` admits a pair on TWO
-    # coexisting level-sized stacks, which is what this phase held before the
-    # row factors ``R`` were retained: the curvature ``V`` and the trace's
-    # additive suffix.  Keeping ``V``'s construction where it was would make
-    # that three -- ``V``, ``R`` and the suffix -- and admit the same maximum
-    # pair against a budget that never counted the third.  ``V`` is not read
-    # until the pair is assembled, so building it AFTER the suffix has been
-    # released keeps the phase at two stacks and the gate honest, at no cost:
-    # the two passes read ``W_cell`` and ``B_a`` and nothing of each other.
+    # The trace pass runs first: building ``V`` after the trace's suffix is released keeps
+    # the phase at two level-sized stacks, which is what ``_within_structured_budget`` counts.
     R = np.zeros((level_rows.size, k_a, k_a), dtype=np.float64)
     profiled_trace = _profiled_curvature_trace(B_a, W_cell, level_rows, keep_factors=R)
     overlap_rows = _unemitted_overlap_rows(B_a, W_cell, level_rows)
     score_rows = _centered_level_scores(B_a, W_cell, S_cell, level_rows)
     base_score = _unemitted_overlap_score(B_a, S_cell, level_rows)
 
-    # One GEMM for every level's k_a x k_a curvature: the outer products of
-    # the spline menu are level-independent, so they are formed once and
-    # contracted against each level's weights.  Its n_a*k_a^2 construction
-    # scratch is released before anything else level-sized is formed.
+    # One GEMM forms every level's k_a x k_a curvature from level-independent outer
+    # products; the n_a*k_a^2 scratch is released before anything else level-sized.
     AA = (B_a[:, :, None] * B_a[:, None, :]).reshape(n_a, k_a * k_a)
     V = (Wq.T @ AA).reshape(-1, k_a, k_a)
     del AA
@@ -1318,59 +572,25 @@ def spline_cat_moments(
 
 @dataclass(frozen=True)
 class _PairGeometry:
-    """Everything the ladder needs that does NOT depend on ``lambda``.
+    """Everything the ladder needs that does not depend on ``lambda``.
 
-    ``V_eff`` is dense, but it is the Gram of a RESIDUALIZED design and never
-    has to be written as a difference of two Grams.  Write level ``q``'s
-    centered weighted spline rows as ``Zc_q`` (``R_q' R_q = Zc_q' Zc_q``), let
-    ``J = blockdiag(Zc_q)`` over emitted levels and let ``P`` project onto the
-    span of the residualized overlap rows ``Abar``.  Then
+    ``V_eff`` is the Gram of a residualized design (Frisch-Waugh-Lovell): with
+    ``Zc_q`` level ``q``'s centered rows, ``J = blockdiag(Zc_q)``, ``P`` the projector
+    onto the residualized overlap span ``Abar = Q R`` and ``Psi_q = Q_q' Zc_q``,
 
-        V_eff = J' (I - P) J = G' G,       G = (I - P) J,
+        V_eff = J'(I - P)J = blockdiag(D_q) - Psi'Psi,
+        A(lambda) = blockdiag(N_q) - Psi'Psi,    N_q = D_q + lambda S_a.
 
-    which is Frisch-Waugh-Lovell absorption: the tensor block residualized on
-    the overlap span.  With ``Abar = Q R`` thin and ``Psi_q = Q_q' Zc_q``,
+    ``Psi`` is bounded by the data scale because ``Q`` is orthonormal; the
+    replaced form went through a pseudo-inverse of a Gram and carried
+    ``kappa(Abar)^2``. ``coupling`` is the ``(k_a, r)`` map from a level's row factor
+    into the shared overlap coordinates (``Psi_q = (R_q coupling)' R_q``) and
+    ``base_gram`` a factor of ``sum_b Q_b' Q_b`` over the unemitted levels.
 
-        V_eff = blockdiag(D_q) - Psi' Psi,      A(lambda) = blockdiag(N_q) - Psi' Psi
-
-    with ``N_q = D_q + lambda S_a``.  ``Psi`` is bounded by the data scale
-    because ``Q`` has orthonormal columns.
-
-    **THAT IS THE WHOLE CHANGE.**  The form this replaces coupled the levels
-    through ``Omega = Sigma_M^-1[1:, 1:]``, a pseudo-inverse of a GRAM: it
-    carries ``kappa(Abar)^2`` where this carries ``kappa(Abar)``, measured at
-    1e+12 against 1e+6 on the starved family.  Squaring the condition number
-    was the entire mechanism behind ``edf = local - border``; nothing else
-    about that difference had to be fixed once the squared inverse was gone.
-
-    ``coupling`` is the ``(k_a, r)`` map from a level's row factor into the
-    shared overlap coordinates -- ``Psi_q = (R_q coupling)' R_q`` -- and
-    ``base_gram`` is a factor of ``sum_b Q_b' Q_b`` over the levels the menu
-    does not emit.  Nothing here is ``L``-sized except ``p.R``, which the
-    trace pass already formed.
-
-    ``ceiling`` is ``L * k_a``: the number of Tikhonov filter factors summed,
-    each in ``[0, 1]``, hence a bound on ``edf`` that takes no rank decision.
-    **A TIGHTER BOUND WAS TRIED AND IS NOT SAFE.**  ``rank(V_eff)`` is the
-    mathematically right ceiling and is 10 to 65 df tighter here, but every way
-    of computing it in O(L) is a numerical rank, and a numerical rank that
-    comes out LOW refuses true values: counted by Guttman additivity off the
-    unpenalized arrow -- ``rank(K(0)) - rank(M)`` -- it reads 12 on a 7-level
-    ``cr(5)`` pair with 3 rows per level whose certified ``edf`` at the
-    ladder's low edge is 17.618, and 36 against a certified rank of 45 on a
-    5-level ``ps(8)`` pair.  Evaluating this module's own ``edf`` at
-    ``lambda = 0`` is no better: 30.014 on a pair whose low-edge ``edf`` is
-    30.072, so it refuses that pair's own bracket.
-
-    **A THIRD COUNTER WAS MEASURED AGAINST THAT SAME COUNTEREXAMPLE AND ALSO
-    FAILS IT.**  The factors this route now carries give a structurally exact
-    O(L) bound, ``sum_q rank(R_q) + rank(overlap_rows) - r``, which is a rank
-    count on FACTORS rather than on Grams and is 4x to 12x tighter -- it equals
-    the true ``rank(V_eff)`` on 6 of 7 synthetic geometries.  On the ``cr(5)``
-    pair above it reads 12, exactly as Guttman additivity does, against a
-    low-edge ``edf`` of 17.618: the pair's own bracket would be refused.  The
-    counterexample kills the tight ceiling on the factor route too, so the
-    loose bound that cannot lie is kept.
+    ``ceiling = L * k_a`` counts the filter factors summed, each in ``[0, 1]``, so it
+    bounds ``edf`` without a rank decision. The tighter ``rank(V_eff)`` was tried and
+    rejected: every O(L) numerical rank can come out low and refuse true values (12
+    against a low-edge ``edf`` of 17.618 on a 7-level ``cr(5)`` pair).
     """
 
     U_eff: NDArray  # (L, k_a)      the profiled score
@@ -1378,12 +598,9 @@ class _PairGeometry:
     base_gram: NDArray  # (., r)    factor of sum_b Q_b' Q_b, unemitted levels
     root_penalty: NDArray  # (., k_a)  rootS' rootS = the PSD part of S_a
     orthonormality: float  # ||sum_q Q_q' Q_q - I_r||_2, MEASURED; a diagnostic
-    # ``s_max / s_min`` over the RETAINED overlap basis.  Unlike every other
-    # field here this one is NOT load-bearing: :func:`_profile` spends it on
-    # :func:`_orthonormality_bound` before returning and nothing downstream
-    # reads it.  It is carried so the bound a pair was admitted under can be
-    # recomputed from the geometry alone, by a test or by a caller diagnosing
-    # a refusal, rather than only from inside the function that raised.
+    # ``s_max / s_min`` over the retained overlap basis. A diagnostic only: spent on
+    # :func:`_orthonormality_bound` in :func:`_profile` and kept so a caller can
+    # recompute that bound from the geometry.
     conditioning: float
     overlap_rank: int  # r
     ceiling: float  # L * k_a
@@ -1392,39 +609,17 @@ class _PairGeometry:
 def _profile(p: SplineCatPair) -> _PairGeometry:
     """The whole lambda-independent half of the work.
 
-    **NEITHER HALF READS THE MOMENTS ANY MORE, AND THE SCORE WAS THE LAST ONE
-    THAT DID.**  ``U_eff = U - C' M^+ u_m`` is the profiled score, and written
-    that way it is a difference of two moment-space quantities taken through a
-    pseudo-inverse of a GRAM -- the identical construction the ``edf`` half was
-    moved off, applied to the right-hand side instead of to the curvature, and
-    carrying ``kappa(Abar)^2`` for the same reason.  It is instead the
-    Frisch-Waugh-Lovell residual of the score on the residualized overlap span,
+    The profiled score is the Frisch-Waugh-Lovell residual on the overlap span,
+    ``U_eff = g - Psi'(Q'zw)``, with ``g_q = Zc_q' zw_q`` the within-level centered
+    score; no Gram is inverted and the weight is never a denominator. One orthonormal
+    basis for the residualized overlap span comes from a TSQR over the per-level row
+    factors (``[0 | R_q]`` per emitted level, ``overlap_rows`` for the rest),
+    rank-revealed by an SVD at the ``matrix_rank`` cut ``max(shape) eps s_max`` on the
+    factor's singular values (Wood, *JRSS-B* 73:3-36, 2011, sec. 3.3.1; Gill et al.,
+    *Math. Comp.* 28, 1974, sec. 5.2). Nothing is ``L``-sized.
 
-        U_eff = J' (I - P) zw = g - Psi' (Q' zw),
-
-    with ``g_q = Zc_q' zw_q`` the within-level centered score
-    (:func:`_centered_level_scores`), ``Q'zw`` the same score in the
-    orthonormal overlap coordinates this function already builds, and
-    ``Psi_q' = R_q' (R_q coupling)``.  Every piece is a product of factors; no
-    Gram is inverted and the weight never appears in a denominator.  ``M``
-    depends on no lambda, so this is computed once and every rung of the ladder
-    reuses it.
-
-    The ``edf`` half reads none of them either.  One orthonormal basis for the
-    residualized overlap span is built by TSQR over the per-level row factors
-    the trace pass already formed -- ``[0 | R_q]`` for an emitted level,
-    ``p.overlap_rows`` for the rest -- and rank-revealed by an SVD of that
-    single ``(1 + k_a)``-column factor, at the LAPACK / ``matrix_rank`` cut
-    ``max(shape) * eps * s_max``.  The cut lands on the FACTOR's singular
-    values, so it is the square root of what the same decision costs on a
-    Gram; that is the whole reason this route can see directions
-    ``Omega = (sum_q D_q)^+`` cannot.  Wood, *JRSS-B* 73(1):3-36 (2011)
-    §3.3.1 is the same move -- rank-reveal the balanced stack and drop --
-    and Gill, Golub, Murray & Saunders, *Math. Comp.* 28(126):505-535 (1974)
-    §5.2 is why the Gram route is the one that has to go.
-
-    Nothing here is ``L``-sized: the TSQR accumulates chunk by chunk into one
-    ``(1 + k_a, 1 + k_a)`` factor.
+    Raises :class:`_UnstableStructuredEDFError` if the penalty projection was not
+    round-off or the overlap basis does not close within its bound.
     """
     L, k_a = p.dims
 
@@ -1444,29 +639,19 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
         cut = max(row_factor.shape) * np.finfo(np.float64).eps * float(singular[0])
         rank = int(np.count_nonzero(singular > cut))
         basis = right[:rank].T / singular[:rank]
-        # The RETAINED basis's own conditioning, which is what every downstream
-        # bound on the closure identity is proportional to: ``basis`` divides
-        # column ``j`` by ``singular[j]``, so an ``eps``-sized error in
-        # ``row_factor`` reaches ``Q_q = R_q basis`` amplified by
-        # ``singular[0] / singular[rank - 1]``.  Both ends sit ABOVE the rank
-        # cut by construction, so this is not the ratio of a magnitude to the
-        # noise -- on #280's starved pair the smaller end clears the cut by
-        # 6.7e+08 -- and it is reproducible where the measured residual is not.
-        # See :func:`_orthonormality_bound`.
+        # Conditioning of the retained basis: an eps-sized error in ``row_factor`` reaches
+        # ``Q_q = R_q basis`` amplified by ``singular[0] / singular[rank - 1]``. Both ends sit
+        # above the rank cut, and unlike the measured residual this is reproducible. See
+        # :func:`_orthonormality_bound`.
         conditioning = float(singular[0] / singular[rank - 1]) if rank else 1.0
     else:
         rank = 0
         conditioning = 1.0
         basis = np.zeros((width, 0), dtype=np.float64)
 
-    # ``U_eff = g - Psi' (Q' zw)``, the score's Frisch-Waugh-Lovell residual on
-    # the same orthonormal overlap coordinates the curvature is residualized
-    # on.  ``Q' zw`` is one ``rank``-vector: the emitted levels reach the
-    # overlap span only through their spline columns, since their intercept
-    # column is what the within-level centering annihilates, so the whole
-    # right-hand side is ``base_score`` plus the emitted levels' centered
-    # scores in the spline slots.  ``Psi_q' theta`` is then two contractions
-    # against ``R_q`` and nothing L-sized is built.
+    # ``Q' zw`` is one ``rank``-vector: emitted levels reach the overlap span only through
+    # their spline columns (centering annihilates the intercept), so the right-hand side is
+    # ``base_score`` plus the emitted levels' centered scores in the spline slots.
     coupling = np.ascontiguousarray(basis[1:])
     overlap_score = np.array(p.base_score, dtype=np.float64)
     overlap_score[1:] += p.score_rows.sum(axis=0)
@@ -1477,53 +662,14 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
     trace_S = float(np.trace(p.S_a))
     kept_S = float(np.sum(np.square(root_penalty)))
     clip = abs(trace_S - kept_S) / max(abs(trace_S), np.finfo(np.float64).tiny)
-    # THE TWO HALVES SCORE ONE PENCIL AND THIS IS THE SECOND LINE, NOT THE
-    # FIRST.  Both are now read off ONE block-angular QR whose penalty rows are
-    # ``sqrt(lambda) root_penalty``, so they are built from ``rootS' rootS``
-    # together by construction; what is left to check is that the PROJECTION
-    # ITSELF is roundoff.  A projection that removed something material would
-    # mean the structured route was scoring a different model from the one the
-    # caller specified, and silently.  (This used to argue from cross-route
-    # comparability instead -- see the retraction below, which is what that
-    # argument was worth after issue #257.)
-    #
-    # The certification is the eigensolver's own documented error bound rather
-    # than a chosen tolerance.  A symmetric eigendecomposition returns
-    # eigenvalues within ``p(n) eps ||S||_2`` of the true ones, with
-    # ``p(n) = n`` in the LAPACK Users' Guide's bound (3rd ed., SIAM 1999,
-    # sec. 4.7), so a genuinely PSD ``S_a`` cannot show a negative eigenvalue
-    # below ``-n eps ||S||_2``.
-    #
-    # THAT CERTIFICATION IS PER-DIRECTION, SO THIS IS WHERE IT IS SPENT.
-    # ``dropped`` is the largest magnitude :func:`_penalty_root` removed
-    # OUTSIDE that bar, which is to say the largest one it certified is not
-    # backward error.  It is nonzero exactly when the answer to "was the
-    # projection roundoff?" is no, so the refusal keys to it directly and
-    # introduces no second constant -- issue #323, where the aggregate test
-    # below was the only guard and missed the event by a factor of
-    # ``2 n tr(S)/||S||_2``, between 85x and 160x on the public freMTPL2freq
-    # screen.  A SINGULAR penalty does not reach here: ``w = 0`` is inside the
-    # bar, so ``dropped`` stays 0 and the pair publishes, which clause 2
-    # requires.
-    #
-    # **THE REASON HAS CHANGED AND THE GUARD HAS NOT.**  This used to be
-    # justified by cross-route comparability -- the dense route assembled
-    # ``S_ti`` raw, so a direction dropped here would be penalized there and
-    # the two arms would score different penalties.  Since issue #257 both
-    # routes root the same margin penalties through the same
-    # :func:`_penalty_root`, so that reason is spent; what survives is the one
-    # stated above, which is intrinsic: a certified-negative eigenvalue means
-    # the penalty being scored is not the penalty specified.
-    #
-    # **AND IT LEAVES AN ASYMMETRY, WHICH IS RECORDED RATHER THAN CLOSED.**
-    # The dense route drops the same direction and does NOT refuse: it has no
-    # numerical-certificate refusal contract, only a budget one, and giving it
-    # one would delete rows the moment route published.  So on such a pair the
-    # structured route returns a NaN row and the dense route publishes.  It
-    # fires on nothing measured -- across the twelve pair geometries this
-    # suite builds and ten structured-route factorizations of the public
-    # freMTPL2freq screen, ZERO penalties carry a negative eigenvalue outside
-    # the bar -- so this is a stated seam and not an observed divergence.
+    # Both halves score one pencil (a single block-angular QR with penalty rows
+    # ``sqrt(lambda) root_penalty``); what remains is that the projection itself is round-off,
+    # otherwise the route scores a different model from the one specified. ``dropped`` is the
+    # largest magnitude :func:`_penalty_root` removed outside the eigensolver's bar
+    # ``n eps ||S||_2`` (LAPACK Users' Guide, 3rd ed., sec. 4.7), so the refusal keys to the
+    # drop itself with no second constant (issue #323). A singular penalty does not reach
+    # here: ``w = 0`` is inside the bar. The dense route drops the same direction and
+    # publishes, so on such a pair only this route returns a NaN row.
     if dropped > 0.0:
         raise _UnstableStructuredEDFError(
             f"the penalty has a negative eigenvalue of {dropped}, which is "
@@ -1531,16 +677,10 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
             "dropped from the penalty this route scores, so its edf would count "
             "a free direction the specified penalty does not leave free"
         )
-    # The aggregate test survives it, on the branch its derivation actually
-    # covers: the MAGNITUDE branch.  At most ``n`` eigenvalues sit inside the
-    # bar, each moves the trace by ``2 |w| <= 2 n eps ||S||_2`` when taken at
-    # its magnitude, and ``tr(S) >= ||S||_2`` in the cone, so a lift can move
-    # at most ``2 n^2 eps`` of relative trace mass.  With the drop branch
-    # refusing above, nothing else can reach this line, so it is now a
-    # self-check on the FACTOR rather than a second opinion on the spectrum --
-    # ``kept_S`` is read off ``root_penalty`` itself, so a wrong ``keep`` mask
-    # trips it where an eigenvalue test would not.  Measured across every
-    # geometry this suite exercises, the worst observed is 0.1875 of the bound.
+    # The aggregate test covers the magnitude branch: at most ``n`` eigenvalues sit inside
+    # the bar, each moves the trace by at most ``2 n eps ||S||_2``, and ``tr(S) >= ||S||_2``
+    # in the cone, so the lift moves at most ``2 n^2 eps`` of trace. ``kept_S`` is read off
+    # ``root_penalty``, so a wrong ``keep`` mask trips it.
     if clip > 2.0 * p.S_a.shape[0] ** 2 * np.finfo(np.float64).eps:
         raise _UnstableStructuredEDFError(
             f"the penalty's PSD projection removed {clip} of its trace, which is "
@@ -1548,12 +688,9 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
             "would be scoring different pencils"
         )
 
-    # ``sum over ALL levels of Q_q' Q_q`` is EXACTLY ``I_r``: that is what
-    # makes ``Q`` an orthonormal basis, and every bound the ladder rests on --
-    # ``Psi N^+ Psi' <= I``, hence ``H >= 0``, hence the deflation -- is that
-    # identity in disguise.  Its computed residual is the floor those bounds
-    # actually hold to, so it is measured here rather than assumed, in one
-    # chunked pass that touches nothing the trace pass has not already formed.
+    # ``sum_q Q_q' Q_q`` is exactly ``I_r`` in exact arithmetic, and every bound the ladder
+    # rests on (``Psi N^+ Psi' <= I``, hence ``H >= 0``) is that identity, so its computed
+    # residual is measured here.
     base_gram = combined_base @ basis
     closure = base_gram.T @ base_gram
     if L:
@@ -1562,26 +699,11 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
             carried = p.R[start : start + chunk] @ coupling
             closure += np.einsum("lkr,lks->rs", carried, carried, optimize=True)
     defect = float(np.linalg.norm(closure - np.eye(rank), 2)) if rank else 0.0
-    # **THE RESIDUAL IS NOW A DIAGNOSTIC AND NOT A CUT.**  Every bound this
-    # module rests on -- ``Psi N^+ Psi' <= I``, hence ``H >= 0``, hence the
-    # deflation -- is the closure identity in disguise, so the residual is
-    # still worth measuring: what changed with #280 is that the ANSWER no
-    # longer depends on its value, only on whether it stays inside the bound
-    # its own arithmetic predicts.  Outside that, the identity failed by more
-    # than round-off can explain and no floor derived from it means anything.
-    #
-    # This is not a singularity test and does not become one: clause 2 forbids
-    # that, and the bound is proportional to the retained basis's conditioning
-    # precisely so that a badly conditioned -- but correctly assembled -- pair
-    # widens the bar instead of tripping it.  Measured over 1382 profiles x 14
-    # microkernel/thread configurations, the worst observed residual is **0.204
-    # of the bound computed on the next line**, so
-    # nothing in this suite's bank reaches it.  DENOMINATOR NAMED ON PURPOSE:
-    # the 0.408 quoted elsewhere in this module is against the UNFACTORED
-    # ``n_terms eps kappa``, and the two differ by exactly
-    # :data:`_ORTHONORMALITY_FACTOR` -- which is the constant a reader would be
-    # weighing when they read this comment, so quoting the wrong one here
-    # understates the bound-to-residual ratio by a factor of two.
+    # The residual is a diagnostic, not a cut: the answer depends only on whether it stays
+    # inside the bound its own arithmetic predicts, which scales with the basis conditioning
+    # so a badly conditioned but correct pair widens the bar and is not refused (not a
+    # singularity test). Worst observed is 0.204 of this bound over 1382 profiles x 14
+    # kernel/thread configurations.
     bound = _orthonormality_bound(L * k_a, rank, conditioning)
     if defect > bound:
         raise _UnstableStructuredEDFError(
@@ -1606,20 +728,10 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
 def _block_inverse_factors(triangular: NDArray) -> NDArray:
     """Batched ``T^+`` for a stack of small triangular factors, at the LAPACK cut.
 
-    **THE SECOND SITE THAT DECIDES CLAUSE 1 OF THE SINGULAR-PENCIL POLICY.**
-    ``T_q' T_q = D_q + lambda S_a``, so a direction of that block inside the
-    cut is inverted to ZERO here and contributes nothing to ``edf`` -- the
-    same convention :func:`_filter_factor_sum`'s ``keep`` applies at the
-    border, applied to the per-level blocks.  The cut itself is the
-    ``matrix_rank`` CONVENTION and not a derived bound, which clause 3 says
-    out loud.
-
-    **THE TWO SITES SHARE THAT CONVENTION AND NOT A FORMULA, SO DO NOT MIRROR
-    AN EDIT BETWEEN THEM MECHANICALLY.**  Here the zero really is the whole
-    clause-1 decision, because it feeds ``K_q`` and nothing else.  At the
-    border the same ``keep`` also gates two ``1.0`` branches -- ``extended``
-    and ``xi`` -- which reach ``edf`` and must NOT move with it; read
-    :func:`_filter_factor_sum`'s comment before changing either.
+    ``T_q' T_q = D_q + lambda S_a``; a direction inside the ``matrix_rank`` cut is
+    inverted to zero (clause 1 of the module policy). The border's ``keep`` in
+    :func:`_filter_factor_sum` shares the convention but also gates two ``1.0``
+    branches that must not move with it, so do not mirror an edit between them.
     """
     u, singular, vt = np.linalg.svd(triangular)
     cut = max(triangular.shape[-2:]) * np.finfo(np.float64).eps
@@ -1632,50 +744,16 @@ def _block_inverse_factors(triangular: NDArray) -> NDArray:
 def _psd_clip_allowance(n: int, scale: float, closure: float) -> float:
     """Largest negative eigenvalue an exactly-PSD block can show at ``scale``.
 
-    **CLAUSE 3 OF THE SINGULAR-PENCIL POLICY, AND ONE OF ITS DERIVED CUTS.**
-
-    ``_psd_factor``'s ``max(w, 0)`` is the Euclidean projection onto the PSD
-    cone (Higham, *LAA* 103:103-118, 1988) and is the right thing to do to
-    roundoff -- but it does the same thing to a block that is materially
-    indefinite because a deflation misfired, and there the contribution is
-    still a squared norm and still lands inside ``[0, ceiling]``.  A clip
-    nobody bounds turns a numerical breakdown into a plausible published
-    ``edf``, so the two cases are separated here.
-
-    Both terms are documented error bounds rather than chosen tolerances:
-
-    * ``eigh`` returns eigenvalues within ``p(n) eps ||M||_2`` of the true
-      ones, with ``p(n) = n`` in the *LAPACK Users' Guide* (3rd ed., SIAM
-      1999, sec. 4.7) bound for the symmetric eigenproblem;
-    * ``W_q`` reaches it through at most three chained products in ``n``
-      dimensions, each contributing ``n eps`` relative (Higham, *ASNA* 2nd
-      ed., Thm 3.5).
-
-    So ``4 n eps ||M||_2``, taken at ``8 n eps`` to round the chain depth up
-    rather than fit it.
-
-    **THE SCALE IS NOT ALWAYS THE BLOCK'S OWN NORM, AND THAT IS THE WHOLE
-    SUBTLETY.**  ``What_q``'s leading block is ``I + Y H^+ Y'``, so its norm
-    is at least 1 and a relative test is well posed.  ``Xi`` alone is not:
-    its eigenvalues are ``(1 - s)(1 + s) / s^2`` for ``H``'s singular values
-    ``s``, which lie in ``[0, 1]`` EXACTLY, so a fully absorbed direction
-    gives ``s = 1 + eps`` and an eigenvalue of ``-2 eps / s^2`` while the
-    block's own norm is that same ``2 eps`` -- every relative bound passes
-    trivially and the test says nothing.  The reference there is what bounds
-    the block, ``||H^+||_2``, so ``scale`` is ``max(||M||_2, ||H^+||_2)``.
-
-    **AND ON THIS GEOMETRY eps IS NOT THE TERM THAT DOMINATES.**  ``W_q``'s
-    PSD-ness is a knife edge, not a margin.  In direction ``j`` its 2x2
-    section is ``[[1 + y^2/h, -y/h], [-y/h, (1 - h)/h]]`` with determinant
-    ``(1 - h - y^2)/h``, so it is PSD exactly to the extent that
-    ``sum_q y_qj^2 = 1 - h_j`` -- which is ``sum_q Q_q' Q_q = I_r`` again, the
-    identity everything here rests on, and whose computed residual
-    ``closure`` this module already measures.  A residual of ``d`` moves that
-    determinant by ``d/h``, hence an eigenvalue by ``d ||H^+||``, and on the
-    starved fixture that term is ``2.1e-11`` where ``n eps ||M||`` is
-    ``3.7e-14``: three orders larger, and it is the one that decides.  A
-    clip below their sum is roundoff on a quantity that is only determined
-    that far; above it, something other than arithmetic moved the block.
+    ``_psd_factor``'s ``max(w, 0)`` (Higham, *LAA* 103, 1988) is right for round-off
+    but equally clips a block made indefinite by a misfired deflation, so the caller
+    refuses beyond this allowance. It is ``8 n eps scale + closure``: ``eigh`` is
+    within ``n eps ||M||_2`` (*LAPACK Users' Guide*, 3rd ed., sec. 4.7), and ``W_q``
+    reaches it through three chained products (Higham, *ASNA* 2nd ed., Thm 3.5),
+    rounded up to 8. ``scale`` is ``max(||M||_2, ||H^+||_2)``: ``Xi``'s own norm can be
+    ``2 eps`` for a fully absorbed direction, so a relative test would pass trivially.
+    ``closure`` is the measured ``sum_q Q_q' Q_q - I`` residual; ``W_q`` is PSD only to
+    the extent it holds, moving an eigenvalue by ``closure * ||H^+||``, which dominates
+    ``eps`` terms by three orders on the starved fixture.
     """
     return _PSD_CLIP_FACTOR * max(int(n), 1) * float(np.finfo(np.float64).eps) * np.maximum(
         scale, 0.0
@@ -1685,18 +763,10 @@ def _psd_clip_allowance(n: int, scale: float, closure: float) -> float:
 def _psd_factor(M: NDArray) -> tuple[NDArray, NDArray, NDArray]:
     """Batched ``F`` with ``F F' = M`` for symmetric ``M``, negatives clipped.
 
-    Returns the factor, the size of what the clip threw away
-    (``max(-w_min, 0)``, which is exactly ``||M - M_+||_2``) and the block's
-    own norm, so the caller can decide whether the clip was roundoff.  See
-    :func:`_psd_clip_allowance` for why it is the caller and not this function
-    that owns the decision.
-
-    Equilibrating ``M`` to a unit diagonal before the eigendecomposition was
-    tried and is NOT adopted: on the near-absorbed pair it moves the
-    mid-bracket rung from 2.4e-04 relative to 1.1e-16 and the surrounding
-    three lambdas the other way, from 4.4e-16 to 2.2e-04, and it reds one more
-    of this module's own fixtures than it greens.  Recorded so the next reader
-    does not repeat it.
+    Returns the factor, the clipped magnitude ``max(-w_min, 0)`` (``||M - M_+||_2``) and
+    the block's norm; the caller decides whether the clip was round-off, see
+    :func:`_psd_clip_allowance`. Equilibrating ``M`` to a unit diagonal was tried and
+    rejected: it trades one rung's error for its neighbours'.
     """
     w, Q = np.linalg.eigh(0.5 * (M + np.swapaxes(M, -1, -2)))
     clipped = np.maximum(-np.min(w, axis=-1, initial=0.0), 0.0)
@@ -1705,94 +775,21 @@ def _psd_factor(M: NDArray) -> tuple[NDArray, NDArray, NDArray]:
 
 
 def _orthonormality_bound(n_terms: int, rank: int, conditioning: float) -> float:
-    """A priori bound on ``||sum_q Q_q' Q_q - I_r||_2``.
+    """A priori bound on ``||sum_q Q_q' Q_q - I_r||_2``, used only to refuse, never to cut.
 
-    **THIS EXISTS TO REFUSE, NEVER TO CUT.**  :func:`_absorption_floor` used
-    to be ``sqrt`` of the MEASURED residual, which is what let the CPU decide a
-    published ``edf`` (issue #280).  The fix is not to bound the residual and
-    cut at the bound -- that is measurably worse, see that function -- it is to
-    stop reading the residual in the answer at all.  What is left for the
-    residual to do is the job a round-off quantity can honestly do: say whether
-    the identity every bound in this module rests on held to the accuracy its
-    own arithmetic predicts.  Below the bound, nothing; above it, the closure
-    failed and no deflation reading ``H`` means anything.
-
-    **WHY THE BOUND CARRIES A CONDITION NUMBER, WHICH IS THE PART A READER
-    WILL WANT TO ARGUE WITH.**  Householder QR loses orthogonality at
-    ``O(m rank^(3/2) eps)`` with NO condition-number term -- Higham,
-    *Accuracy and Stability of Numerical Algorithms*, 2nd ed. (SIAM 2002),
-    Lemma 19.3 and eq. (19.13), put into the ``||Q' Q - I||_F`` form by
-    Yamamoto, Nakatsukasa, Yanagisawa & Fukaya, *ETNA* 44:306-326 (2015),
-    sec. 5.1.1.  **That bound assumes ``Q`` is a product of stored reflectors,
-    and these ``Q_q`` are not.**  They are ``R_q V Sigma^-1`` for the overlap
-    basis :func:`_profile` builds, i.e. the ``A R^-1`` route, whose
-    orthogonality error is ``O(eps kappa)`` instead.  Measured over the whole
-    fixture bank, 1382 profiles x 14 configurations:
-
-    * against ``n_terms eps`` -- the form a reader reaching for Higham would
-      write down -- the residual reaches **2077x the bound**;
-    * against ``n_terms eps kappa`` it reaches **0.408x**, and never exceeds it.
-
-    So the plain form is not a bound on this route and the conditioned one is.
-    Confirmed independently rather than only fitted: one Newton step of
-    re-orthonormalization on the basis moves the residual from 431 to 210 to
-    155 ``n_terms eps`` on the worst fixture and STALLS -- it cannot be driven
-    below ``n_terms eps kappa`` because that is the accuracy at which the
-    closure can be evaluated at all, so the measured residual on that pair sits
-    entirely inside its own error bar (measured 80-144 units, bar 8384).
-
-    **WHAT IS DERIVED AND WHAT IS A CONVENTION, SAID PLAINLY.**  The FORM is
-    derived: linear in the stacked row count, linear in ``kappa``.  The
-    CONSTANT is not available from the literature -- Higham writes it as "a
-    small integer constant whose exact value is unimportant" (sec. 3.4,
-    eq. (3.8)) and Yamamoto et al. as "a small positive constant" -- so
-    :data:`_ORTHONORMALITY_FACTOR` is calibrated against the measured population,
-    in the same spirit as LAPACK's ``RCOND`` default and
-    ``numpy.linalg.matrix_rank``'s ``max(shape) eps``, which are conventions
-    and not worst-case theorems.  ``rank^(3/2)`` is folded into it, which is
-    the part that would decay with size if it decayed at all, so it is checked
-    PAST the ranks this bank reaches -- with the caveats below, which are the
-    reason this paragraph is longer than its result:
-
-    * **``ps``, 60 profiles**, 5 to 50 knots x 8 to 40 levels, overlap ranks
-      **9 to 54**, ``conditioning`` 15 to 6.7e+11: worst residual **0.0108** of
-      this bound.
-    * **``bs`` STARVED, 22 profiles**, the family that binds -- 3 or 4 rows per
-      level against a 13 to 43 column margin, 7 to 60 levels, ranks **14 to
-      44**, ``conditioning`` 22 to 1.4e+05: worst **0.0047**.  Extending only
-      ``ps`` would have grown the size of the family that is already easy and
-      left the hard one at its original 7 levels.
-
-    Nothing refuses anywhere in either.  **WHAT THIS DOES AND DOES NOT
-    ESTABLISH.**  ``kappa`` is in the denominator of every ratio above, and
-    rank and ``kappa`` largely rose together, so these numbers cannot isolate
-    the ``rank^(3/2)`` fold from the ``kappa`` growth beside it -- the case
-    that would break the fold is high rank at LOW ``kappa``, where the bound is
-    smallest.  The sweeps do reach it: rank 34 at ``kappa`` 65 reads 0.0015,
-    rank 44 at ``kappa`` 94 reads 0.0010, and the worst ratio in the starved
-    sweep is at the LOW end of both -- rank 15 against a 14-to-44 range, and
-    ``kappa`` 22, its floor -- rather than at its highest.
-    So the ratio falls as rank grows here rather than rising, which is the
-    opposite of a fold running out -- but that is an observation over two
-    families and not a derivation, and the honest statement of it is "nothing
-    in either family refuses at these sizes", not "the fold is verified".
-    Neither sweep reaches the bank's own worst of 0.204 of this bound, which
-    comes from a different member than either family's largest.  Both are one
-    microkernel and one thread setting, so they say nothing about the
-    cross-machine spread the bank's fourteen configurations establish.
-
-    Ratios in the two bullets above and in this paragraph are against the bound
-    this function RETURNS, i.e. with :data:`_ORTHONORMALITY_FACTOR` included;
-    the 2077x and 0.408x further up are against the unfactored
-    ``n_terms eps`` and ``n_terms eps kappa``.  The two conventions differ by
-    exactly that factor and both appear here, so the denominator is named at
-    every figure rather than left to be inferred.
-
-    What this buys is REPRODUCIBILITY, not correctness: ``conditioning`` is
-    read off singular values that sit far above the rank cut, and over the same
-    14 configurations it varies by at most **1.7e-04 relative** against the
-    measured residual's 1.81x.  It is not bit-identical and this docstring does
-    not claim it is.
+    The residual answers one question: did the identity every bound here rests on hold
+    to the accuracy its arithmetic predicts? Householder QR loses orthogonality at
+    ``O(m rank^(3/2) eps)`` with no condition number (Higham, *ASNA* 2nd ed., Lemma 19.3
+    and eq. 19.13; Yamamoto et al., *ETNA* 44:306-326, 2015, sec. 5.1.1), but these
+    ``Q_q = R_q V Sigma^-1`` are not stored reflectors; this is the ``A R^-1`` route,
+    with error ``O(eps kappa)``. Over 1382 profiles x 14 configurations the residual
+    reaches 2077x ``n_terms eps`` and at most 0.408x ``n_terms eps kappa``, so the
+    bound is linear in the stacked row count and in the retained basis's
+    ``conditioning``. The constant :data:`_ORTHONORMALITY_FACTOR` is calibrated
+    (Higham calls it "a small integer constant"), with ``rank^(3/2)`` folded in; ``ps``
+    and starved ``bs`` sweeps to rank 54 stay under 0.011 of the bound. ``conditioning``
+    is read off singular values far above the rank cut and varies 1.7e-4 relative across
+    configurations, so the bound is reproducible, though not bit-identical.
     """
     eps = float(np.finfo(np.float64).eps)
     return (
@@ -1806,93 +803,21 @@ def _orthonormality_bound(n_terms: int, rank: int, conditioning: float) -> float
 def _absorption_floor(n_terms: int, rank: int) -> float:
     """Cut below which a singular value of ``H``'s factor is not resolvable.
 
-    **CLAUSE 3, AND IT IS A CONVENTION AND NOT A BOUND -- WHICH THAT CLAUSE
-    REQUIRES BE SAID OUT LOUD.**  This is what separates a direction the pencil
-    does not resolve, where clause 1 contributes zero, from one it does, where
-    dropping it costs a whole degree of freedom.  Until #280 it was
-    ``sqrt(measured ||sum_q Q_q' Q_q - I_r||_2)``, which made a published
-    ``edf`` a function of the CPU: measured on that issue's starved pair, all
-    six thread pools pinned and ``OPENBLAS_CORETYPE`` the only variable, the
-    residual spans a factor of **1.81** across seven microkernels and the cut
-    built from it a factor of **1.344**, while the singular value it is
-    compared against agrees to **ten significant digits**.  The quantity was
-    reproducible; the cut was not.  Every term below is now a DIMENSION, so
-    the cut is a function of integers and ``eps`` alone and is bit-identical on
-    all fourteen configurations swept.
+    A convention, not a bound (clause 3 of the module policy). It separates a direction
+    the pencil does not resolve (clause 1 contributes zero) from one it does (dropping
+    it costs a whole degree of freedom). It is a function of dimensions and ``eps``
+    alone, so it is identical on every kernel and thread setting; the residual it
+    replaced varied 1.81x across microkernels (issue #280).
 
-    ``H = I_r - Psi N^+ Psi'`` is delivered here as ``R_H' R_H`` with ``R_H``
-    assembled by orthogonal transformations only, so the quantity being cut is
-    a SINGULAR VALUE and not an eigenvalue of a difference.  The cut is
-    ABSOLUTE, and every source states a RELATIVE one -- LAPACK's
-    ``RCOND * sigma_max`` (*LAPACK Users' Guide*, 3rd ed., SIAM 1999, and
-    ``DGELSD``'s own documentation, where ``RCOND < 0`` means machine
-    precision), and Golub & Van Loan, *Matrix Computations*, 4th ed. (JHU
-    Press 2013), sec. 5.4.1: "the tolerance should be consistent with the
-    machine precision, e.g. ``delta = u ||A||_inf``".  Nothing in the
-    literature blesses an absolute cut on its own, so what connects them is
-    stated here rather than assumed.
-
-    **AND IT IS AN INEQUALITY, NOT AN EQUIVALENCE.**  ``H``'s exact spectrum
-    lies in ``[0, 1]``, so ``sigma_max(R_H) <= 1`` and this cut is never
-    LOOSER than the relative one -- it can only over-deflate, never
-    under-deflate.  The two coincide only where ``sigma_max(R_H)`` is near 1,
-    and that is not everywhere: on ``_near_absorbed_cells`` the border is
-    NEARLY absorbed -- one direction survives, which is the only reason this
-    paragraph has a counterexample at all -- and ``sigma_max(R_H)`` is about
-    1e-06 against a cut of 2.1e-08, so that one surviving direction clears the
-    absolute cut by just 48x.  The relative convention would put the cut at
-    ``max(shape) eps sigma_max``, and ``max(shape)`` is 2 here (which is what
-    pins the floor at 2.1e-08), so it would cut at about 4.4e-22 -- roughly
-    FOURTEEN orders looser, not the twelve an earlier draft of this paragraph
-    stated.  Nothing in the bank is red, but the price of the absolute cut is
-    over-deflation on a mostly-absorbed border and it is bounded by nothing
-    here.
-    :data:`_ABSORPTION_MARGIN` does NOT catch it: that guard measures
-    separation from the floor and never whether the floor is sensible against
-    ``sigma_max``, so ``singular = [3e-07, 1e-09]`` publishes at a margin of
-    2.7 having deflated a direction of relative magnitude 3e-03.  A cut
-    relative to ``sigma_max(R_H)`` would be data-dependent again, which is what
-    #280 exists to remove, so this is a known gap and not an oversight.
-
-    The dimensional factor is the one this module already uses at its other
-    two rank decisions -- ``max(shape) eps``, the ``matrix_rank`` convention
-    of :func:`_profile` and :func:`_block_inverse_factors` -- carried onto the
-    Gram scale: a floor of ``d eps`` on an eigenvalue of ``H`` is a floor of
-    ``sqrt(d eps)`` on a singular value of ``R_H`` (Weyl; Golub & Van Loan
-    4th ed., Cor. 2.4.4 and sec. 8.6.2).  **No new constant is introduced.**
-    The additive ``d eps`` is the TSQR's own term: those blocks DO come from
-    stored Householder reflectors -- ``numpy.linalg.qr`` and
-    :func:`_reduce_row_factors` -- so Higham, *Accuracy and Stability of
-    Numerical Algorithms*, 2nd ed. (SIAM 2002), eq. (19.13) applies to that
-    half with no condition number.
-
-    **THE HONEST PART: A DERIVED BOUND ON THE CLOSURE WAS TRIED HERE FIRST AND
-    IS NOT WHAT THIS RETURNS.**  The residual's a priori bound is
-    :func:`_orthonormality_bound`, and ``sqrt`` of it is the cut this position
-    would take if the closure's uncertainty were the only consideration.
-    Measured, it is 4e+06x looser than the residual on ``_near_absorbed_cells``
-    and deflates that pair's ONLY direction -- ``edf`` reads 1.0e-12 where a
-    closed form gives 0.0099 and the current code reproduces it to 2.2e-16.
-    A bound that publishes a wrong number is not an improvement on a
-    measurement that publishes a right one, so the bound stays where it can
-    only refuse (:func:`_profile`) and the cut is the convention above.
-
-    **WHAT THIS COSTS, MEASURED RATHER THAN ASSUMED.**  The convention is
-    TIGHTER than the residual it replaces -- 8.9x on #280's starved pair, 34.7x
-    on ``_starved_bs_pair`` -- so it keeps directions the old cut dropped, and
-    inverting a smaller singular value makes ``edf(lambda)`` rougher: over 200
-    log-spaced lambdas the ``bs`` pair's worst upward step goes from 6.9e-05 to
-    **4.604e-02 .. 7.963e-02 df**, that range being the spread over 7
-    ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings rather than one
-    run's reading.  That is the trade this change makes, and
-    :data:`_ABSORPTION_MARGIN` is what refuses where it bites.
-
-    The additive ``d eps`` is INERT at every ``d`` this module reaches: it is
-    ``sqrt(d eps)`` of the leading term, 1.1e-07 relative at ``d = 56``, seven
-    orders inside :data:`_ABSORPTION_MARGIN`'s own 1.01, so it can never decide
-    a ``keep``.  It is kept because the derivation has two terms and dropping
-    one would misstate which bound is doing the work, not because it moves an
-    answer.
+    ``H = I_r - Psi N^+ Psi'`` is delivered as ``R_H' R_H``, so the cut applies to a
+    singular value: ``sqrt(d eps)`` is the ``matrix_rank`` convention ``d eps`` carried
+    onto the Gram scale (Weyl; Golub and Van Loan, 4th ed., Cor. 2.4.4), plus the
+    TSQR's own additive ``d eps`` (Higham, *ASNA*, eq. 19.13), inert at the dimensions
+    reached. It is absolute where LAPACK's ``RCOND * sigma_max`` is relative. Since
+    ``sigma_max(R_H) <= 1`` it can over-deflate on a mostly-absorbed border and never
+    under-deflate; :data:`_ABSORPTION_MARGIN` does not catch that. A relative cut would
+    depend on the data again, and the a priori :func:`_orthonormality_bound` as a cut
+    deflates the only direction of ``_near_absorbed_cells``, so it stays a refusal.
     """
     eps = float(np.finfo(np.float64).eps)
     dimension = max(int(n_terms), int(rank), 1)
@@ -2014,10 +939,8 @@ class _ReferenceVariance:
                 "structured reference variance is not positive and finite"
             )
 
-        # A consistency allowance under the existing assembly-error model,
-        # not a complete forward-error certificate for the original pencil.
-        # QR depth, factor residual amplification and PSD assembly all enter;
-        # an eps*EDF-only check is too strict near an absorbed direction.
+        # A consistency allowance under the assembly-error model, not a forward-error
+        # certificate: QR depth, factor residual amplification and PSD assembly enter.
         width = max(2 * self.singular.size, 1)
         depth = max(self.leaves, 1).bit_length()
         rounding = _PSD_CLIP_FACTOR * width**2 * (depth + 1) * np.finfo(np.float64).eps
@@ -2050,103 +973,23 @@ def _filter_factor_sum(
     *,
     variance: _ReferenceVariance | None = None,
 ) -> tuple[float, float, float, float]:
-    """``(T, edf, clip bound, cut margin)`` at one lambda, all from ONE QR.
+    """``(T, edf, clip bound, cut margin)`` at one lambda, all from one QR per level.
 
-    ``T = U_eff' A(lambda)^+ U_eff`` and ``edf = tr(A(lambda)^+ V_eff)`` are
-    two readings of the same pseudo-inverse, so they are taken off the same
-    block-angular factorization rather than off two representations of the same
-    pencil.  Splitting them was the whole of issue #298: ``edf`` came off the
-    factors below and ``T`` off the moment-space arrow, which is a
-    pseudo-inverse of a GRAM, so a perturbation of ``V``/``c``/``m`` that left
-    ``edf`` bit-identical moved ``T`` by up to 1.5e-05 relative on the suite's
-    own thin-level pair.
+    ``T = U_eff' A^+ U_eff`` and ``edf = tr(A^+ V_eff)`` are read off the same block-angular
+    factorization (issue #298). With ``B = N^+ + N^+ Psi' H^+ Psi N^+`` (equal to ``A^+`` on
+    ``range(A)``) and ``z_q = T_q^+' u_q``, ``T = sum_q ||z_q||^2 + ||H^(+/2) v||^2``, and
+    ``edf = sum over ALL levels of ||F_q chol(W_q)||_F^2`` with ``F_q = [Zc_q | Q_q]``,
+    ``W_q = M_q' A^+ M_q`` (closing because ``sum_q Q_q' Q_q = I_r``): every term is a squared norm
+    (Wood's ``tr(F) = ||K||_F^2``, *JRSS-B* 73, 2011, sec. 3.6, App. H).
 
-    **THE STATISTIC IS THE SAME SUM OF SQUARED NORMS.**  With
-    ``B = N^+ + N^+ Psi' H^+ Psi N^+`` -- the same generalized inverse the
-    trace below contracts against, and equal to ``A^+`` on ``range(A)`` --
-    and ``u_q`` level ``q``'s profiled score,
-
-        z_q = T_q^+' u_q,      v = sum_q Phi_q' K_q z_q,
-        T   = sum_q ||z_q||^2 + ||H^(+/2) v||^2,
-
-    both terms nonnegative and neither a difference.  ``U_eff`` lies in
-    ``range(V_eff) <= range(A)`` because it IS ``G' zw`` for the same
-    residualized ``G`` whose Gram is ``V_eff``, which is what makes the
-    generalized inverse exact here rather than merely close.  Every factor is
-    one the trace already forms: ``T_q`` and ``Y_q`` from the level's QR,
-    ``K_q = R_q T_q^+`` from its contraction, ``H^+`` from the border's
-    singular values.  The statistic costs two contractions per level on top of
-    the trace and no extra factorization at all -- where it used to cost a
-    whole second one, of a DIFFERENT matrix.
-
-    What follows is the trace's own derivation.
-
-    **THIS IS THE SUM THE MODULE HEADLINE CLAIMS, AND NOW IT IS ONE.**  With
-    ``E_q`` the selector for level ``q``'s block, ``M_q = [E_q, -Psi']`` and
-    ``F_q = [Zc_q | Q_q]``,
-
-        C_q = F_q' F_q,   W_q = M_q' A^+ M_q,
-        edf = sum over ALL levels of tr(W_q C_q) = sum || F_q chol(W_q) ||_F^2,
-
-    which closes because ``sum_q Q_q' Q_q = I_r``.  ``W_q`` and ``C_q`` are
-    both Gram matrices, so every term is a squared norm: no difference of two
-    large numbers survives into the answer.  That is Wood's ``tr(F) =
-    ||K||_F^2`` (*JRSS-B* 73(1):3-36, 2011, §3.6 and App. H) carried onto a
-    block-angular structure instead of a dense ``X``.
-
-    **EVERY PIECE IS BUILT BY ORTHOGONAL TRANSFORMATIONS.**  Per emitted level
-    one QR delivers all three of them at once::
-
-        [[  R_q          ,  Phi_q ],        [[ T_q , Y_q ],
-         [ sqrt(lam) rootS,   0    ]]  =  Q  [[  0  , X_q ]]
-
-    with ``Phi_q = R_q coupling``, so ``T_q' T_q = D_q + lambda S_a`` is never
-    summed, ``Y_q = T_q^-T Psi_q'`` is never solved for, and
-
-        X_q' X_q = Gam_q - Psi_q N_q^+ Psi_q'
-
-    is never differenced.  Summing the trailing blocks over emitted levels and
-    adding the unemitted levels' ``Gb`` gives ``H = I_r - Psi N^+ Psi'``
-    itself, again with no subtraction, because ``sum_q Gam_q = I_r``.  That is
-    the block-angular QR of Golub & Plemmons, *LAA* 34:3-28 (1980) -- local
-    eliminations feeding one border -- and it is exactly what Gill, Golub,
-    Murray & Saunders, *Math. Comp.* 28(126):505-535 (1974) §5.2 prescribes
-    over forming a Schur complement and factoring it: "numerically less
-    satisfactory than computing R using orthogonal matrices", and (p. 516)
-    downdating is stable only when the result's smallest eigenvalue is large
-    relative to the norm of the removed term, which is this module's regime.
-
-    ``A^+`` IS NOT ASSEMBLED, and it does not have to be.  With
-
-        B = N^+ + N^+ Psi' H^+ Psi N^+
-
-    -- every term PSD, nothing indefinite, no Woodbury middle to invert --
-    ``B`` differs from ``A^+`` only on ``null(A)``, and ``range(V_eff) <=
-    range(A)`` because ``A = V_eff + lambda S`` with both summands PSD.  So
-    ``tr(B V_eff) = tr(A^+ V_eff)`` EXACTLY: if ``A x = A x'`` then
-    ``v'(x - x') = 0`` for every ``v`` in ``range(A)``, and both are solutions
-    of the same consistent system.  Where ``H`` is singular the deflation is
-    then just ``H^+``, taken at :func:`_absorption_floor`.
-
-    **THE CONTRACTION IS DONE BEFORE THE INVERSE, NOT AFTER.**  ``A^+``'s own
-    blocks run to ``||T_q^+||^2``, which is 1e+17 on a starved pair at the
-    bracket's low edge while the answer is 6.  Every appearance of ``T_q^+``
-    here is already contracted against ``R_q`` as ``K_q = R_q T_q^+``, whose
-    norm is bounded by 1 because ``R_q' R_q <= T_q' T_q``; the level's whole
-    contribution is then ``|| [K_q | Phi_q] chol(What_q) ||_F^2`` with
-
-        What_q = [[ I + Y_q H^+ Y_q' , -Y_q (H^+ + P_0) ],
-                  [        .          ,       Xi        ]]
-
-    bounded by ``||H^+||``.  Measured on the starved fixture, contracting
-    afterwards instead publishes 10.996 df against a certified 6.000.
-
-    Two chunked passes over the levels, each bounded by
-    ``_TRACE_CHUNK_DOUBLES``; ``K`` and ``Y`` are what they carry between them.
-
-    The second return value is ``sum_q ||F_q||_F^2 ||W_q - W_q+||_2``, a bound
-    IN DEGREES OF FREEDOM on everything :func:`_psd_factor`'s clip removed;
-    :func:`_evaluate` refuses the evaluation when it is not dust.
+    Per emitted level one QR of ``[[R_q, Phi_q], [sqrt(lam) rootS, 0]]`` gives ``T_q, Y_q, X_q``
+    with ``T_q' T_q = D_q + lam S_a``; summing ``X`` gives ``H = I_r - Psi N^+ Psi'`` without
+    subtraction (Golub and Plemmons, *LAA* 34, 1980; Gill et al., *Math. Comp.* 28, 1974, sec. 5.2).
+    The contraction ``K_q = R_q T_q^+`` is done before the inverse (``||K_q|| <= 1``, while
+    ``||T_q^+||^2`` reaches 1e17 on a starved pair). Two chunked passes, each bounded by
+    ``_TRACE_CHUNK_DOUBLES``. The third return value, ``sum_q ||F_q||_F^2 ||W_q - W_q+||_2``,
+    bounds in degrees of freedom what :func:`_psd_factor`'s clip removed; :func:`_evaluate` refuses
+    it beyond dust.
     """
     L, k_a = p.dims
     r = geometry.overlap_rank
@@ -2161,11 +1004,8 @@ def _filter_factor_sum(
     cross = np.empty((L, k_a, r), dtype=np.float64)
     border = np.asarray(geometry.base_gram, dtype=np.float64)
     local = np.zeros((min(chunk, max(L, 1)), height, width), dtype=np.float64)
-    # The statistic's two accumulators.  ``local_stat`` is ``sum_q u_q' N_q^+
-    # u_q`` and ``coupled_score`` is ``Psi N^+ U_eff``, the border's share
-    # BEFORE ``H^+`` is known -- it does not depend on the deflation, so it is
-    # taken here rather than in a third pass.  Nothing L-sized is retained:
-    # ``z_q`` is consumed inside the chunk that forms it.
+    # ``local_stat`` is ``sum_q u_q' N_q^+ u_q``; ``coupled_score`` is ``Psi N^+ U_eff``, the
+    # border's share before ``H^+`` is known. Nothing L-sized is retained.
     local_stat = 0.0
     stat_correction = 0.0
     coupled_score = np.zeros(r, dtype=np.float64)
@@ -2176,12 +1016,9 @@ def _filter_factor_sum(
         view[:, :k_a, :k_a] = rows
         view[:, :k_a, k_a:] = phi
         view[:, k_a:, :k_a] = root
-        # Scale the leading column block to unit norm.  The QR's backward
-        # error is relative to the WHOLE matrix, and ``X_q`` is bounded by 1
-        # while ``R_q`` carries the data scale, so without this the trailing
-        # block is delivered to ``eps ||R_q||`` rather than to ``eps``.  A
-        # column scaling leaves ``Y_q`` and ``X_q`` untouched and divides
-        # ``T_q`` by the same factor, which is undone below.
+        # Scaling the leading column block to unit norm makes the QR's backward error relative
+        # to ``X_q`` (bounded by 1) rather than ``R_q``; ``Y_q`` and ``X_q`` are untouched and
+        # ``T_q`` is divided by the same factor, undone below.
         scale = np.linalg.norm(view[:, :, :k_a], axis=(1, 2))
         scale = np.where(scale > 0.0, scale, 1.0)
         view[:, :, :k_a] /= scale[:, None, None]
@@ -2192,20 +1029,13 @@ def _filter_factor_sum(
         cross[start:stop] = factored[:, :k_a, k_a:]
         border = _reduce_row_factors(border, factored[:, k_a:, k_a:])
 
-        # ``z_q = T_q^+' u_q``, so ``||z_q||^2 = u_q' N_q^+ u_q`` -- the
-        # level's own share of the statistic as a SQUARED NORM, never as
-        # ``u' N^+ u`` through an assembled inverse.  ``inverse`` is
-        # ``(T_q / scale)^+``, so undoing the column scaling divides once.
+        # ``||z_q||^2 = u_q' N_q^+ u_q`` as a squared norm; ``inverse`` is ``(T_q / scale)^+``.
         whitened = (
             np.einsum("lij,li->lj", inverse, geometry.U_eff[start:stop], optimize=True)
             / scale[:, None]
         )
         term = float(np.sum(np.square(whitened)))
-        # Neumaier-style compensated accumulation across the CHUNK totals.
-        # ``term`` is already a pairwise sum over the whole chunk, so this
-        # bounds the error of adding the chunks together and does NOT make the
-        # scalar independent of where the chunk boundaries fall; ``chunk`` is a
-        # deterministic function of ``(height, width, L)``, so nothing is live.
+        # Neumaier-compensated accumulation across chunk totals (chunking is deterministic).
         updated = local_stat + term
         if abs(local_stat) >= abs(term):
             stat_correction += (local_stat - updated) + term
@@ -2223,58 +1053,21 @@ def _filter_factor_sum(
 
     # --- H's spectrum, from its factor's singular values -------------------
     if r:
-        # THIS ``keep`` IS CLAUSE 1 OF THE SINGULAR-PENCIL POLICY, AT THE
-        # BORDER.  What a dropped direction loses is its ``H^+`` COEFFICIENT
-        # and nothing else -- ``np.where(keep, 1 / safe, 0.0)`` in ``resolved``
-        # below -- which is the Moore-Penrose reading of a ``0/0`` filter
-        # factor: a choice about an undefined quantity, not an approximation
-        # to a defined one.
-        #
-        # **IT DOES NOT MAKE THE DIRECTION CONTRIBUTE ZERO TO ``edf``, AND
-        # READING IT THAT WAY IS THE EDIT THAT COSTS A DEGREE OF FREEDOM.**
-        # The same ``keep`` gates three coefficients, and the other two take
-        # the ``1.0`` branch: ``extended`` and ``xi`` both reach the answer,
-        # through ``crossed`` and ``coupled``.  Both are FORCED rather than
-        # chosen -- ``I + H^+ (I - H) = H^+ + P_null(H)``, and ``xi`` is
-        # ``1 - h`` exactly once ``H^+``'s null component is zero -- so they
-        # are the REST OF THE SAME Moore-Penrose expansion and must not be
-        # zeroed with it.  The next comment prices exactly that mistake.
-        #
-        # :func:`_block_inverse_factors` also decides clause 1, on the
-        # per-level blocks, and it is NOT the same: there a dropped direction
-        # really does contribute nothing, because its zero feeds ``K_q`` and
-        # nothing else.  The two sites share a convention, not a formula, so
-        # an edit is not to be mirrored between them mechanically.
-        #
-        # Clause 3 is why the cut beside it is :func:`_absorption_floor` and
-        # not a constant: dropping a direction the pencil DOES resolve is
-        # wrong by a whole degree of freedom.
+        # Clause 1 of the module policy, at the border. A dropped direction loses only its
+        # ``H^+`` coefficient (the Moore-Penrose reading of a 0/0 filter factor). The same
+        # ``keep`` gates ``extended`` and ``xi``, which take the ``1.0`` branch and reach
+        # ``edf`` (``I + H^+(I - H) = H^+ + P_null(H)``): they must not be zeroed with it.
+        # :func:`_block_inverse_factors` shares the convention, not the formula. The cut is
+        # :func:`_absorption_floor` because dropping a resolved direction costs a whole df.
         singular, right = np.linalg.svd(border)[1:]
         floor = _absorption_floor(L * k_a, r)
         keep = singular > floor
-        # BOTH SIDES OF THE CUT, REPORTED RATHER THAN ASSUMED.  The count is
-        # only a property of the pair where the tolerance "lies between
-        # ``sigma_(r+1)`` and ``sigma_r``, and is near neither" -- Foster &
-        # Davis, *ACM TOMS* 40(1), Article 7 (2013), sec. 1, whose whole
-        # subject is that a rank read at a tolerance near a singular value
-        # moves when the tolerance or the matrix does.  Golub & Van Loan,
-        # *Matrix Computations*, 4th ed. (JHU Press 2013), sec. 5.4.1 states
-        # the same as a warning: the confidence in a numerical rank "depends
-        # on the gap".  An empty side scores ``inf``, which is the safe
-        # direction; :func:`_evaluate` owns the refusal.
-        #
-        # THE ABSORBED SIDE'S RECIPROCAL IS GUARDED THE WAY ``safe`` IS BELOW,
-        # AND FOR THE SAME REASON.  ``singular`` is sorted descending, so
-        # ``absorbed_side.max()`` is the LARGEST dropped value -- exactly
-        # ``0.0`` whenever the border is exactly rank deficient, which is
-        # reachable at ``lam = 0`` on an unpenalized pair whose base level
-        # carries no mass, the case the comment forty lines below already
-        # names.  ``inf`` is the right answer there (a border that is exactly
-        # zero is cleanly absorbed, not undecided); what has to be avoided is
-        # producing it by dividing, because ``_UnstableStructuredEDFError``
-        # subclasses ``FloatingPointError`` and a BARE one raised under
-        # ``np.errstate(divide="raise")`` would escape the ladder's own except
-        # clause and abort the sweep instead of handing the pair back.
+        # Both sides of the cut are reported: a rank is a property of the pair only where the
+        # tolerance is near neither singular value (Foster and Davis, *ACM TOMS* 40(1), 2013,
+        # sec. 1; Golub and Van Loan, 4th ed., sec. 5.4.1). An empty side scores ``inf``;
+        # :func:`_evaluate` owns the refusal. The reciprocal is guarded rather than divided
+        # because ``_UnstableStructuredEDFError`` is a ``FloatingPointError`` and a bare one
+        # raised under ``errstate(divide="raise")`` would escape the ladder's except clause.
         resolved_side = singular[keep]
         absorbed_side = singular[~keep]
         largest_absorbed = float(absorbed_side.max()) if absorbed_side.size else 0.0
@@ -2285,13 +1078,9 @@ def _filter_factor_sum(
         occupied = singular * singular
         free = (1.0 - singular) * (1.0 + singular)
         safe = np.where(keep, occupied, 1.0)
-        # ``I + H^+ (I - H)`` is ``H^+`` PLUS the projector onto
-        # ``null(H)``: dropping the second term is wrong by a whole degree of
-        # freedom per deflated direction, and the sign is UPWARD -- measured,
-        # the counterfactual reads 22.0 against a certified 6.000 on the
-        # starved fixture, i.e. 16 df HIGH.  Stated rather than left to
-        # "loses", because the cross term has no sign guaranteed a priori and
-        # this is what was measured.
+        # ``I + H^+ (I - H)`` is ``H^+`` plus the projector onto ``null(H)``; dropping the
+        # projector is wrong by a whole df per deflated direction, upward (22.0 against a
+        # certified 6.000 on the starved fixture).
         resolved = (right.T * np.where(keep, 1.0 / safe, 0.0)) @ right
         extended = (right.T * np.where(keep, 1.0 / safe, 1.0)) @ right
         xi = np.where(keep, free / safe, free)
@@ -2309,23 +1098,12 @@ def _filter_factor_sum(
         else:
             variance.configure(np.empty(0), np.empty((0, 0)), np.empty(0, dtype=bool))
 
-    # ``||H^(+/2) v||^2`` for ``v = Psi N^+ U_eff``, taken through ``H^+``'s
-    # own spectral factor so the border's share of the statistic is a squared
-    # norm too.  ``resolved`` is exactly ``H^+``: a direction the absorption
-    # floor deflates carries no score, which is the same convention the trace
-    # takes on the common null space.
+    # ``||H^(+/2) v||^2`` for ``v = Psi N^+ U_eff``, a squared norm through ``H^+``'s
+    # spectral factor; a deflated direction carries no score.
     statistic = local_stat
     if r:
-        # The reciprocal is guarded the way ``safe`` is seventeen lines above,
-        # and for the same reason: numpy evaluates ``1.0 / singular`` over the
-        # whole array before ``where`` selects, so an exactly-zero singular
-        # value -- reachable at ``lam = 0`` on an unpenalized pair whose base
-        # level carries no mass, where ``base_gram`` is exactly zero -- would
-        # materialize an ``inf``.  The value would still be right, but
-        # ``_UnstableStructuredEDFError`` subclasses ``FloatingPointError``, so
-        # under ``np.errstate(divide="raise")`` the bare error would escape the
-        # ladder's own except clause and abort the sweep instead of handing the
-        # pair back to the dense path.
+        # The reciprocal is guarded as above: an exactly-zero singular value is reachable at
+        # ``lam = 0`` on an unpenalized pair whose base level carries no mass.
         inverse_singular = np.where(keep, 1.0 / np.where(keep, singular, 1.0), 0.0)
         whitened_border = (right * inverse_singular[:, None]) @ coupled_score
         statistic += float(np.dot(whitened_border, whitened_border))
@@ -2349,11 +1127,9 @@ def _filter_factor_sum(
         rows = np.concatenate((contract, carried), axis=2)
         original_mass = np.sum(np.square(rows), axis=(1, 2))
         if residual_coordinates:
-            # For h = sigma**2, the retained-direction contribution is
-            # ||K Y - Phi||**2 / h - ||Phi||**2. Use E=(K Y-Phi)/sigma
-            # before factoring: its congruent metric has top -Y Y', cross
-            # sigma Y, and bottom 1-h, all bounded when h < 1/2. Factoring
-            # the original 1/h entries loses the small contraction to eps/h.
+            # For h = sigma**2 the retained-direction contribution is ||K Y - Phi||**2 / h -
+            # ||Phi||**2. Using E = (K Y - Phi)/sigma keeps the congruent metric bounded when
+            # h < 1/2; factoring the 1/h entries loses the small contraction to eps/h.
             rotated = Y @ right.T
             overlap = carried @ right.T
             residual = contract @ rotated - overlap
@@ -2373,27 +1149,14 @@ def _filter_factor_sum(
         factor, negative, top = _psd_factor(view)
         carried_factor = rows @ factor
         term = float(np.sum(np.square(carried_factor)))
-        # What the clip removed BEYOND what roundoff explains, carried into
-        # the units of the answer: for the excess ``e_q``,
-        # ``|tr(F_q (W - W_+) F_q')| <= ||F_q||_F^2 e_q`` by Weyl plus the
-        # trace bound, so this is a bound in DEGREES OF FREEDOM and
-        # :func:`_evaluate` can hold it against the guard's own allowance.
-        # The scale is the largest INTERMEDIATE the block passed through,
-        # ``||H^+|| max(1, ||Y_q||)^2``, and not the block's own norm: the
-        # products that build it can cancel, and a bound taken on the result
-        # of a cancellation is not a bound on the cancellation.
+        # What the clip removed beyond round-off, in degrees of freedom: for the excess ``e_q``,
+        # ``|tr(F_q (W - W_+) F_q')| <= ||F_q||_F^2 e_q`` (Weyl plus the trace bound). The scale
+        # is the largest intermediate, ``||H^+|| max(1, ||Y_q||)^2``, since the products that
+        # build the block can cancel.
         scale = np.maximum(top, deflation * np.square(1.0 + np.linalg.norm(Y, axis=(1, 2))))
-        # ``deflation`` IS ``max(1 / sigma^2)`` OVER KEPT DIRECTIONS, SO A
-        # TIGHTER ABSORPTION FLOOR LOOSENS THIS ALLOWANCE QUADRATICALLY.  That
-        # coupling is real and #280's floor change is exactly the kind that
-        # exercises it, so it was re-measured rather than reasoned about: over
-        # 200 lambdas each on ``_starved_bs_pair`` and #280's starved pair --
-        # the two the floor change moves most -- ``uncertified`` is EXACTLY 0.0
-        # at all 400.  Every PSD clip on both is inside its own allowance, so
-        # the guard's numerator is zero. What the
-        # looser allowance would cost is therefore not measurable here, and
-        # this comment records that it was looked for rather than that it is
-        # absent in general.
+        # ``deflation`` is ``max(1/sigma^2)`` over kept directions, so a tighter absorption
+        # floor loosens this allowance quadratically; the clip is within allowance at all 400
+        # lambdas on the two pairs the floor moves most.
         allowance = _psd_clip_allowance(width, scale, geometry.orthonormality * deflation)
         # Keep the pre-congruence allowance in EDF units. The new metric's
         # clip is charged against its own rows, not against the old metric's
@@ -2449,23 +1212,10 @@ def _filter_factor_sum(
 
 
 def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[float, float]:
-    """``(T, edf)`` at one lambda, both off ONE factorization of the design.
+    """``(T, edf)`` at one lambda, both off one factorization of the design.
 
-    Neither reads ``V``, ``c``, ``m`` or ``border`` any more.  ``T`` used to,
-    through a moment-space arrow factorization of ``K(lambda)`` this module no
-    longer builds, and that asymmetry is issue #298: the ladder
-    published an ``edf`` decided by the row-space factors beside a statistic
-    decided by a pseudo-inverse of the pair's float64 moments, and
-    ``screen_interactions`` then ranked on ``z = (T/phi - edf)/sqrt(2 edf)``,
-    which mixed the two. What forming those moments costs is stated in the
-    module docstring under "WHAT THE MOMENTS COST" and it does not stop at the
-    trace: the same three defensible ``M^+`` policies that move ``edf`` by a
-    degree of freedom move ``T`` for the identical reason.
-
-    Merging them also removes a whole factorization per evaluation rather than
-    adding one -- the arrow was a second, DIFFERENT matrix -- and with it the
-    two level-sized stacks (``Ginv`` and ``Y``) it held while the filter pass
-    was allocating its own.
+    Neither reads ``V``, ``c``, ``m`` or ``border``: a statistic from a pseudo-inverse of
+    the float64 moments beside an edf from row-space factors was issue #298.
     """
     return _checked_evaluation(geometry, lam, _filter_factor_sum(p, geometry, lam))
 
@@ -2476,67 +1226,16 @@ def _checked_evaluation(
     """Apply the same EDF and rank guards to search and final evaluations."""
     T, edf, uncertified, margin = evaluated
 
-    # **THE DEFLATION COUNT IS ONLY AN ANSWER WHERE THE CUT SEPARATES.**  #280
-    # measured a direction sitting 1.00489x above the floor on one microkernel
-    # and 1.018x below it on the other six: the same pair, the same data, and
-    # the count decided by the instruction set.  Making the floor derived
-    # (:func:`_orthonormality_bound`) removes the floor's own variation, but it
-    # cannot move a singular value away from wherever the floor lands, and a
-    # cut this module cannot separate is a cut this module should not publish
-    # through.  Foster & Davis, *ACM TOMS* 40(1), Article 7 (2013) is the
-    # published shape: their routines "estimate upper and lower bounds on
-    # certain singular values to determine whether the numerical ranks ...
-    # appear to be correct", and where the bounds cannot confirm it they return
-    # a warning rather than a rank.  A refusal is the right ANSWER here and not
-    # a failure, and it is unconditional in lambda -- one rung of a ladder can
-    # refuse while the rest publish, which is exactly the contract
-    # :func:`structured_ladder` already has for an unstable rung.
-    #
-    # **WHAT A REFUSAL COSTS IS THREE DIFFERENT THINGS AND ONLY ONE OF THEM IS
-    # "THE DENSE TRACK SCORES IT INSTEAD".**  This comment said that flatly
-    # until review traced the caller, and on the route that carries the pairs
-    # this module exists for it is false:
-    #
-    # 1. **Speculative handoff -> the dense track.**  ``screening_ops`` sets
-    #    ``arrow_lookahead`` when it is about to compress a spline margin, and
-    #    a ``None`` there flips ``allow_dense`` back on and rescores the pair
-    #    densely.  This is the case the sentence used to describe.
-    # 2. **Ordinary structured route -> a NaN ROW, i.e. the pair leaves the
-    #    screen.**  A pair reaches the structured route because the DENSE gates
-    #    already refused it -- too many cells, or a cubic budget it blows.
-    #    ``arrow_lookahead`` is False there, so a ``None`` is appended as
-    #    ``nan`` and the pair is not scored at all.  ``screening_ops``' own
-    #    comment says so: "Reaching here means the dense track was already
-    #    exhausted."  There is no other algorithm to fall back to, because the
-    #    budget is what ruled it out.
-    # 3. **A one-rung ladder -> the pair, from an INTERIOR refusal.**  ``edf0``
-    #    accepts a scalar, and with one rung the bisection's break returns
-    #    ``None`` for the pair.  So "an interior refusal costs a rung" holds
-    #    for the default four-rung ladder and not for a scalar budget.
-    #
-    # None of the three is new machinery -- an unaffordable dense block already
-    # produced the NaN row -- but this guard adds new ways to reach them, and
-    # the price on (2) is a missing pair rather than a differently scored one.
-    #
-    # **SO WHERE THE GUARD FIRES MATTERS, AND IT WAS MEASURED RATHER THAN
-    # ARGUED.**  Over the whole fixture bank x 7 ``OPENBLAS_CORETYPE``
-    # microkernels x 2 thread settings, 2786 bracket-edge evaluations: the
-    # tightest edge margin anywhere is **1.0350** and NOTHING falls inside
-    # 1.01.  What fires is the interior -- 2 of 601 lambdas on #280's own pair,
-    # 1 or 2 of 200 on ``_starved_bs_pair``. At the binding edge, the excess
-    # over 1 is 3.5 times the cutoff's excess, less than at interior points. It is
-    # the number to re-measure if :data:`_ABSORPTION_MARGIN` is ever raised.
-    #
-    # The zero-penalty branch of :func:`structured_ladder` is a FOURTH site and
-    # is neither interior nor a bracket edge: it evaluates ``lam = 0`` once, so
-    # every refusal there costs the pair.  That is also the family most exposed
-    # to this guard, since a near-rank pair at ``lam = 0`` is where a direction
-    # sits closest to the cut -- ``test_the_zero_penalty_rung_on_a_near_rank_pair``
-    # records CI landing on different sides of it on different revisions.  Those
-    # evaluations are NOT among the 2786, so they were measured separately: the
-    # four near-rank fixtures and the control give margins 2.945, 3.491, 13.96,
-    # 22.47 and 4.7e+05, all publishing, the tightest at **194x** the excess
-    # over 1 that 1.01 asks for.  One microkernel, one thread setting.
+    # The deflation count is only an answer where the cut separates (issue #280: one
+    # direction sat 1.00489x above the floor on one microkernel and 1.018x below it on six
+    # others). Where the bounds cannot confirm the rank, refuse (Foster and Davis,
+    # *ACM TOMS* 40(1), 2013). A refusal costs the rung on a default ladder, the pair on a
+    # one-rung ladder or the zero-penalty branch, and on the ordinary structured route a
+    # NaN row, since the dense track was already ruled out by budget; only a speculative
+    # handoff rescores densely. Over the fixture bank x 7 kernels x 2 thread settings the
+    # tightest bracket-edge margin is 1.0350 and nothing falls inside 1.01; refusals are
+    # interior (2 of 601 lambdas, 1 or 2 of 200). Re-measure if :data:`_ABSORPTION_MARGIN`
+    # is raised.
     if margin < _ABSORPTION_MARGIN:
         raise _UnstableStructuredEDFError(
             f"the absorption floor separates the border's spectrum by only {margin}x "
@@ -2544,29 +1243,14 @@ def _checked_evaluation(
             "of a count: the deflated rank is not decided by the pair"
         )
 
-    # Every term of the sum is a filter factor ``a_j / (a_j + lambda s_j)``
-    # with both parts nonnegative, so the sum lies in ``[0, L * k_a]`` for
-    # every lambda and every pair -- a property of the identity, not a
-    # tolerance.  Every term COMPUTED above is a squared norm, so the lower
-    # end of that bound now holds by construction rather than by luck.
-    #
-    # THE UPPER END IS STILL A GUARD AND NOT AN ASSERTION.  ``A^+`` is
-    # assembled from a deflation decision, and a deflation that misfires can
-    # invert a direction the pencil does not resolve; measured once, at 2237
-    # against a ceiling of 77 on a starved pair at the bracket's low edge.
-    # That is exactly what the bound is here to refuse.  The allowance is
-    # taken on the answer and the ceiling because both terms are now
-    # nonnegative and there is no cancellation left to bound: pairwise
-    # summation of ``n`` nonnegative terms has error at most ``log2(n) eps``
-    # times their total, and ``_EDF_ROUNDOFF_FACTOR`` covers ``n`` up to
-    # ``2**64``.
+    # Every term is a filter factor, so the sum lies in ``[0, L * k_a]``; the lower end holds
+    # by construction (squared norms). The upper end is still a guard: a misfired
+    # deflation inverts an unresolved direction (2237 against a ceiling of 77 once). The
+    # terms are nonnegative, so pairwise-summation error is ``log2(n) eps`` of the total,
+    # covered by ``_EDF_ROUNDOFF_FACTOR`` up to ``n = 2**64``.
     roundoff = _edf_roundoff(edf, geometry.ceiling)
-    # ``uncertified`` is what made every term a squared norm in the first place.
-    # Being nonnegative BY CONSTRUCTION is only worth something if the
-    # construction is certified: ``max(w, 0)`` silences an indefinite block
-    # just as effectively as it silences roundoff, so the two are separated
-    # here, on the one scale where the question is decidable -- degrees of
-    # freedom, against the same allowance the range guard takes.
+    # ``uncertified`` is the clip beyond its allowance, in df: ``max(w, 0)`` silences an
+    # indefinite block as well as round-off, so the two are separated on a decidable scale.
     if not np.isfinite(edf) or edf < -roundoff or edf > geometry.ceiling + roundoff:
         raise _UnstableStructuredEDFError(
             f"structured EDF is not a filter-factor sum: {edf} (ceiling={geometry.ceiling})"
@@ -2576,16 +1260,9 @@ def _checked_evaluation(
             f"the PSD clip removed {uncertified} df beyond its backward error, on {edf} "
             f"(allowance={roundoff}, ceiling={geometry.ceiling})"
         )
-    # THE DUST BAND IS TWO-SIDED, SO THE COLLAPSE IS TOO.  Everything inside
-    # ``[-roundoff, roundoff]`` was just declared indistinguishable from zero;
-    # returning the positive half of it as a value would be the guard
-    # contradicting itself one line later, and the contradiction is not
-    # cosmetic. A numerical remnant must not supply a positive reference
-    # variance and a tiny denominator for a pair that resolved no direction.
-    # Under the earlier sqrt(2*edf0) normalization, publishing 3e-17 inflated
-    # z by about 1e8, while -3e-17 collapsed to zero and skipped the rung.
-    # Which side of zero a cancellation residue lands on is not something this
-    # module gets to decide, so it must not be what decides a ranking.
+    # The dust band is two-sided: a value inside ``[-roundoff, roundoff]`` is collapsed to
+    # zero, so a cancellation residue cannot supply a positive reference variance (3e-17
+    # inflated z by about 1e8 while -3e-17 skipped the rung).
     if abs(edf) <= roundoff:
         return T, 0.0
     return T, min(edf, geometry.ceiling)
@@ -2611,40 +1288,19 @@ def structured_ladder(
 ) -> list[ScreenedPair] | None:
     """Score one spline x categorical pair at every budget, structurally.
 
-    Mirrors :func:`penalized_score_statistic_ladder`'s contract — clamp a
-    budget outside the bracket to the nearest edge and report the edf
-    actually achieved — but every evaluation is an arrow factorization rather
-    than a dense one.
+    Mirrors :func:`penalized_score_statistic_ladder`'s contract (a budget outside the
+    bracket clamps to the nearest edge and reports the edf achieved), but every
+    evaluation is an arrow factorization. Search evaluations take the statistic and edf
+    from one factorization; each distinct final lambda adds one pass for its reference
+    variance, with O(L (k_a + r)^3) extra work and O(k_a r + r^2 log L) tree state.
 
-    Search evaluations compute the statistic and EDF from one block-angular
-    factorization. After a rung is selected, one additional factorization
-    computes its reference variance, including cross-level smoother blocks.
-    Repeated budgets and repeated final lambdas share their results.
-
-    ``max_evaluations`` bounds these factor passes. Two bracket evaluations
-    establish which targets need bisection. Before searching, the ladder
-    reserves the worst-case search cost and one variance pass per distinct
-    final lambda. A pair that cannot fit this budget returns ``None``.
-    With ``raise_on_budget=True`` it raises ``_StructuredBudgetExceededError``
-    instead, so the caller can try binning without treating a numerical
-    certification failure as a work-budget refusal.
-    ``None`` as the budget means unbounded work.
-
-    For example, if all targets clamp to one edge, there are three passes:
-    two bracket evaluations and one final variance evaluation. With zero
-    penalty there are two passes at lambda zero. Each final variance pass
-    adds local contractions and a QR tree, with O(L*(k_a+r)**3) total extra
-    work for L levels, spline width k_a and overlap rank r. Tree state is
-    O(k_a*r + r**2 * log(L)), beside the existing chunk buffers; no full
-    cross-level smoother matrix is formed.
-
-    A numerical failure reached while bisecting one target refuses that target,
-    not independent targets or already certified edge clamps.  The returned
-    list may therefore contain fewer entries than ``budgets``.  If no rung
-    survives, ``None`` preserves the pair-refusal signal and lets a speculative
-    structured route hand the dense path back.  A failure in the
-    lambda-INDEPENDENT half refuses the pair outright, since no lambda can
-    make it go away.
+    ``max_evaluations`` bounds factor passes (``None`` is unbounded): the ladder reserves
+    the worst-case search cost plus one variance pass per distinct final lambda, and a
+    pair that cannot fit returns ``None``, or raises ``_StructuredBudgetExceededError``
+    with ``raise_on_budget=True`` so the caller can bin instead. A numerical failure while
+    bisecting one target refuses that target only, so the list may be shorter than
+    ``budgets``; if no rung survives, or the lambda-independent half fails, the result
+    is ``None`` and a speculative route hands the pair back to the dense path.
     """
     if p.profiled_trace is None:
         return None
@@ -2678,18 +1334,9 @@ def structured_ladder(
         )
 
     if not np.any(p.S_a):
-        # No penalty to scan, exactly the predicate the dense ladder applies:
-        # one rung, at the block's own achieved edf, with lambda0 = 0.  That
-        # edf is `tr(V_eff^+ V_eff)`, which IS `rank(V_eff)` in exact
-        # arithmetic -- but it is not counted, and on a near-rank pair it is
-        # not an integer; see the module docstring, which measures how far
-        # that lands from the dense path's counted rank and why the trace is
-        # the better of the two.  That comparison's other side moved with
-        # issue #257: the dense count is now a rank of the profiled FACTOR
-        # against the joint design's scale, where it was Guttman additivity on
-        # two Grams.  A
-        # zero penalty would otherwise make the bracket below infinite and
-        # every rung NaN, since inf * 0 is not a number.
+        # No penalty to scan, as in the dense ladder: one rung at the block's achieved edf
+        # (``tr(V_eff^+ V_eff)``, uncounted, so not an integer on a near-rank pair), with
+        # lambda0 = 0; otherwise the bracket would be infinite (inf * 0).
         if max_evaluations is not None and max_evaluations < 2:
             if raise_on_budget:
                 raise _StructuredBudgetExceededError
@@ -2701,37 +1348,12 @@ def structured_ladder(
         result = screened(stat, edf, 0.0)
         return [result for _ in budgets] if result is not None else None
 
-    # Use the curvature the pencil actually turns on.  ``profiled_trace`` is
-    # assembled from nonnegative centered residual energies in
-    # ``spline_cat_moments``; neither a dense V_eff nor the catastrophic
-    # ``tr(V) - tr(C' M^+ C)`` difference is formed.  This direct scale fixes
-    # the bracket itself, so the reachable-rank contract proposed in issue
-    # #204 is unnecessary: there are no speculative endpoint evaluations to
-    # classify, and evaluation counts, duplicate caching and genuine
-    # unreachable clamps retain their existing contract.
-    #
-    # The 1e+-10 edges are the dense ladder's, kept identical so a pair the
-    # two paths can both score gets the same lambda0.  Since issue #257 the
-    # dense numerator is ``||R_eff||_F^2`` off its own design factor and the
-    # dense denominator ``||rootS||_F^2`` off the penalty's, where these are a
-    # trace of centered residual energies and ``tr(S_a) * L``.  Measured on
-    # every ``_thin_level_pair`` weight: the two numerators are BIT-IDENTICAL
-    # (relative 0.0e+00 at 1.0, 0.01 and 0.001), the two denominators agree to
-    # 3.99e-16, and the resulting lambdas agree to 3.0e-16 .. 4.5e-16 at both
-    # edges -- about two ulp, and 2000x inside the ``rel=1e-12`` the suite
-    # pins them at.
-    #
-    # WHAT THAT FIXTURE CANNOT SEE, STATED BECAUSE IT WAS ONCE MISSED.  Its
-    # overlap has FULL rank -- 31 of 31 at all three weights -- so the dense
-    # ``R_eff`` is the bare Frisch-Waugh slice and the two numerators are the
-    # same arithmetic.  Where the overlap is rank deficient the dense side
-    # residualizes only onto ``range(X_o)`` and its numerator picks up the
-    # directions outside it (:func:`superglm.screening._pair_factor.
-    # _profiled_factor`), which is what makes it ``tr(V_eff)`` rather than the
-    # slice's mass -- 18.06% apart on the mixed suite's ``band x power`` pair.
-    # That pair is dense-only, so no parity is at stake there; a future
-    # structured route over a rank-deficient overlap would have to re-take
-    # this measurement rather than inherit it.
+    # The bracket uses the profiled trace, a sum of nonnegative residual energies, so no
+    # dense V_eff or ``tr(V) - tr(C' M^+ C)`` difference is formed. The 1e+-10 edges are
+    # the dense ladder's, so a pair both paths score gets the same lambda0 (agreement to
+    # about two ulp on the thin-level fixture). That fixture has full-rank overlap; with a
+    # rank-deficient overlap the dense numerator also counts directions outside
+    # ``range(X_o)``, so a structured route there would need re-measuring.
     tr_S = float(np.trace(p.S_a)) * p.dims[0]
     scale = max(p.profiled_trace, 1e-300) / max(tr_S, 1e-300)
     lo, hi = _lambda_bracket(scale)
@@ -2748,11 +1370,8 @@ def structured_ladder(
     if edf_hi > edf_lo + max(_EDF_TOL, _edf_roundoff(edf_lo, edf_hi)):
         return None
 
-    # DISTINCT search targets, not rungs: the ladder's budgets are permitted to
-    # repeat, every copy of one bisects to the same lambda, and charging each
-    # copy separately would let repeating a budget decide whether the pair is
-    # screenable at all.  The same set drives the cache below, so a repeat
-    # costs nothing rather than a second bisection.
+    # Distinct targets, not rungs: repeated budgets bisect to the same lambda, so they are
+    # charged and cached once. Each distinct emitted lambda also needs one variance pass.
     searchable = {float(b) for b in budgets if edf_hi < float(b) < edf_lo}
     clamped = {lo if float(b) >= edf_lo else hi for b in budgets if float(b) not in searchable}
     # Each distinct emitted lambda also needs one variance factorization.
@@ -2787,10 +1406,8 @@ def structured_ladder(
                     refused = True
                     break
                 stat, achieved = evaluated
-                # Preserve the same monotone certificate inside the shrinking
-                # bracket; a finite in-range EDF can still be on a broken
-                # numerical branch.  As at the endpoints, noise below the
-                # ladder's own target tolerance is not a refusal.
+                # The same monotone certificate as at the endpoints; noise below the target tolerance
+                # is not a refusal.
                 ordering_tolerance = max(_EDF_TOL, _edf_roundoff(edf_a, achieved, edf_b))
                 if achieved > edf_a + ordering_tolerance or achieved < edf_b - ordering_tolerance:
                     refused = True
@@ -2814,8 +1431,6 @@ def structured_ladder(
         result = solved[edf0]
         if result is not None:
             out.append(result)
-    # A failure while searching one target says nothing about already certified
-    # edge clamps or independent targets.  Preserve those rungs; if none
-    # survive, retain the existing pair-refusal signal so a speculative
-    # structured route can hand the dense path back.
+    # A failure on one target leaves certified clamps and other targets standing; if none
+    # survive, ``None`` lets a speculative route hand the pair to the dense path.
     return out or None

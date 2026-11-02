@@ -1,64 +1,34 @@
 """Check that a rebound likelihood plan is the one a saved fit recorded.
 
-A built-in plan identifier hashes the plan's inputs as stored: its family
-and row-law tags, the resolved weight digest and, for every family except
-``GaussianLS``, the response digest (``NegativeBinomialLS`` also hashes the
-count digest). ``GaussianLS``'s plan stores no response, so its identifier
-binds the weights and not the response. Those inputs are exact on every
-platform, so a rebound plan reproduces the identifier bit for bit. The
-parameter-independent carrier (``-log y``, ``0.5 log w``,
-``-log(count!)`` and similar) is a transcendental function of those inputs.
-IEEE 754 recommends but does not require a correctly rounded ``log``, and
-NumPy dispatches different SIMD loops on different CPUs, so the carrier can
-move by an ulp per row between machines. It is checked against the fit's
-stored carrier sum within the bound below rather than hashed.
+A built-in plan identifier hashes the plan's exact inputs: family and row-law
+tags, the resolved weight digest and, except for ``GaussianLS`` (whose plan
+stores no response), the response digest (``NegativeBinomialLS`` also the
+count digest), so it reproduces bit for bit. The parameter-independent carrier
+(``-log y``, ``0.5 log w``, ``-log(count!)``, ...) is transcendental and may
+move by an ulp per row across CPUs and SIMD loops, so it is checked against
+the stored carrier sum within the bound below rather than hashed. Legacy
+``/v1`` identifiers also hashed the carrier and are never recomputed: they are
+accepted on a matching family tag plus the carrier-sum bound (the weights are
+still checked exactly against the stored weight root digest). Refits record
+``/v2``.
 
-Identifiers written before this rule (tag ``/v1``) also hashed the carrier.
-They cannot be recomputed portably, so they are never recomputed: such an
-identifier is accepted when its family tag matches the rebound plan's and the
-carrier sum passes the bound. The loader still checks the retained weights
-exactly against the stored weight root digest. The retained response is tied
-to such a fit only through the carrier sum: the artifact's response digest
-binds the stored response to the manifest, not to the fit. The sum does not
-change when response rows are reordered, does not depend on the response
-where the carrier depends only on weights or constants (``GaussianLS``'s
-``0.5 log w``, ``TwoPieceNormalLSS``'s ``-m 0.5 log(2 pi)``), and admits any
-change within the bound. Refitting records a ``/v2`` identifier, which binds
-the weights exactly and, for every family except ``GaussianLS``, the response
-exactly too; a ``GaussianLS`` identifier of either version never binds the
-response.
-
-Bound. Write ``u = 2**-53`` and ``gamma_k = k u / (1 - k u)`` (Higham,
-*Accuracy and Stability of Numerical Algorithms*, 2nd ed., 2002, sections 2.2
-and 3.1). Row ``i`` of a carrier is ``c_i = -m_i (F_i + h)``, where ``F_i`` is
-one transcendental evaluation of exact inputs, ``m_i`` an exact stored
-multiplier and ``h`` a library constant such as ``0.5 log(2 pi)``. If every
-platform's ``F_i`` and ``h`` lie within ``kappa u`` of the exact value
-(relative, or absolute below magnitude one where the plan says so), then two
-platforms' rows differ by at most ``gamma_{2 kappa + 8} a_i`` with
-``a_i = |c_i| + beta |m_i|``. The ``2 kappa`` covers the two evaluations, 4 the
-sum and product rounding on each platform, and 4 the conversion of
-``|m_i| (|F_i| + |h|)`` to the live row magnitude and second-order terms.
-``beta`` is ``2 |h|`` for a constant term, 1 for a function bounded in
-absolute error below one, and 0 otherwise. Any order of ``n - 1`` additions
-sums the rows with error at most ``gamma_{n-1} sum |c_i|`` (Higham, section
-4.2), on either platform. Hence
+Bound (Higham, *Accuracy and Stability*, 2nd ed., 2002, §§2.2, 3.1, 4.2).
+Row ``i`` is ``c_i = -m_i (F_i + h)`` with ``F_i`` one transcendental
+evaluation, ``m_i`` an exact multiplier and ``h`` a library constant. If every
+platform's ``F_i`` and ``h`` lie within ``kappa u`` of exact, two platforms'
+rows differ by at most ``gamma_{2 kappa + 8} a_i``, ``a_i = |c_i| + beta |m_i|``
+(``2 kappa`` for the two evaluations, 4 for each platform's sum and product,
+4 for the magnitude conversion), with ``beta`` ``2 |h|`` for a constant term,
+1 for a function bounded in absolute error below one, else 0. Summation adds
+``gamma_{n-1} sum |c_i|`` per platform, so
 
     |S_saved - S_live| <= gamma_k A + gamma_{n-1} (2 C + gamma_k A),
 
-with ``A >= sum a_i`` and ``C >= sum |c_i|`` taken from the live rows. Every
-quantity is accumulated upward.
-
-``kappa`` for ``log`` is 8: four ulps per implementation, at most ``2 u``
-relative each. NumPy's own validation set requires float64 ``log`` within one
-ulp of the correctly rounded value, NEP 38 lets a new SIMD loop lose at most
-1-3 ulps against its predecessor, and the largest known binary64 ``log``
-errors across thirteen libraries in Gladman, Innocente, Mather and
-Zimmermann, *Accuracy of Mathematical Functions in Single, Double, Double
-Extended, and Quadruple Precision* (2025), are below one ulp. ``kappa`` for
-``gammaln`` is 16, three times the Cephes ``lgam`` peak error of
-``5.4e-16`` (about ``4.9 u``) on ``[0, 3]``, relative above magnitude one and
-absolute below it (Moshier, *Cephes Mathematical Library* documentation).
+with ``A >= sum a_i`` and ``C >= sum |c_i|`` from the live rows, accumulated
+upward. ``kappa`` is 8 for ``log`` (two ulps per implementation against
+NumPy's one-ulp validation and NEP 38's 1-3 ulp allowance; Gladman et al.
+2025) and 16 for ``gammaln`` (three times Cephes ``lgam``'s ``4.9 u`` peak on
+``[0, 3]``, relative above magnitude one, absolute below; Moshier).
 """
 
 from __future__ import annotations
@@ -81,12 +51,9 @@ LGAMMA_ERROR_UNITS = 16
 class CarrierRounding(NamedTuple):
     """What a built-in plan certifies about its platform-dependent carrier.
 
-    The plan names the ``Family/v1`` tag whose stored identifiers hashed the
-    carrier in its own ``legacy_identifier_tag`` attribute, so the tag can be
-    checked without building the carrier. A plan without the attribute, or
-    with ``None``, never wrote such identifiers. A stored identifier under
-    that tag is accepted on its tag and carrier sum alone, so the tag must not
-    be one the plan's own identifiers carry.
+    ``legacy_identifier_tag`` names the plan's ``Family/v1`` tag (``None`` or
+    absent if it never wrote one); identifiers under it are accepted on tag
+    and carrier sum alone, so it must differ from the plan's own tags.
     """
 
     carrier: NDArray[np.float64]

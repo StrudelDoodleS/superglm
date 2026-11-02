@@ -624,15 +624,11 @@ def _evaluate_fused_trial(
 def _initial_coefficients(context: _SolverContext) -> NDArray[np.float64]:
     """Starting coefficients: the family's starting parameters, projected with the penalty.
 
-    Each predictor's link-scale starting values, less its offset, are fitted by
-    penalized weighted least squares with the starting penalty, as the first
-    working regression of penalized IRLS and of GAMLSS's RS algorithm fits them
-    (Stasinopoulos and Rigby, J. Statist. Softw. 23(7), 2007, section 1.5).
-    The starting values are constant per predictor, so without an offset this
-    is the intercept alone. An offset makes the target vary by row; projecting
-    it without the penalty let a spline basis with sparse tail data absorb
-    ``-log(exposure)`` with coefficients near 1e5, a penalty of 2e10 against a
-    log likelihood of 4e3, and fitted means the NB2 kernel cannot evaluate.
+    Each predictor's link-scale start, less its offset, is fitted by penalized
+    weighted least squares with the starting penalty, as the first working
+    regression of penalized IRLS and GAMLSS's RS algorithm (Stasinopoulos and
+    Rigby 2007, §1.5). The penalty stops a sparse-tailed spline from absorbing
+    a varying offset with huge coefficients.
     """
     initialized = context.family.initialize(context.response, context.likelihood_plan)
     initialized.validate_shape(
@@ -758,28 +754,17 @@ def _half_penalty_quadratic(
 ) -> float:
     """Return ``0.5 * b' P b`` without the naive form's cancellation noise.
 
-    ``entries`` are ``P``'s nonzero entries from ``_penalty_entries``; the
-    solver context builds them once per solve. Zero products and their sums
-    are exact, so the naive form's error, to first order, is
-    ``gamma_k |b|' |P| |b|``, with ``k`` the most nonzeros in a row of ``P``
-    plus the number of nonzero rows. With a smoothing parameter at its cap,
-    ``P`` scales a penalty whose null space holds O(1) coefficients, so the
-    terms reach ``1e11`` while ``b' P b`` is near ``1e-9``; that error then
-    exceeds the objective change of a Newton step, and whether the line search
-    accepts the step follows the sign of round-off, which differs between BLAS
-    kernels and platforms. Dot2 rows and a Dot2 outer product, over the nonzero entries of
-    ``P``, bound the error by ``u |b' P b| + u |b|' |P b|`` plus a
-    ``gamma_n**2`` term (see ``_dot2_quadratic_form``). An operand or product
-    outside the normal range falls back to the naive form.
+    ``entries`` are ``P``'s nonzero entries from ``_penalty_entries``. The
+    naive form errs by ``gamma_k |b|' |P| |b|`` (``k`` the most nonzeros in a
+    row plus the nonzero row count), which at a capped smoothing parameter can
+    exceed a Newton step's objective change and make line-search acceptance
+    platform-dependent. Dot2 rows and outer product (Ogita, Rump and Oishi
+    2005) bound it by ``u |b' P b| + u |b|' |P b|`` plus a ``gamma_n**2`` term;
+    operands outside the normal range fall back to the naive form.
 
-    The penalized score keeps the plain ``P @ b``. Its row ``i`` errs by at
-    most ``gamma_k_i (|P| |b|)_i``, ``k_i`` the nonzeros in that row (at most a
-    penalty block's width), which is the order of the change of up to
-    ``2u (|P| |b|)_i`` that one unit in the last place of each coefficient makes
-    to ``(P b)_i``. So at a cap the score of a representable ``b`` cannot in
-    general be resolved below that level, and stationarity there is certified
-    through the Newton decrement, with or without the score within that floor
-    (``_score_within_rounding_floor``).
+    The score keeps plain ``P @ b``, whose row error ``gamma_k_i (|P| |b|)_i``
+    matches one ulp of ``b``; so at a cap stationarity is certified through
+    the Newton decrement (``_score_within_rounding_floor``).
     """
     values = _native_operand(coefficients)
     matrix = np.asarray(penalty, dtype=np.float64)
@@ -1192,11 +1177,8 @@ def _run_iterations(
             ):
                 accepted_geometry = None if fused is None else fused[1]
                 if accepted_geometry is None and context.chunk_size is not None:
-                    # A chunked trial is screened on its value alone. Its
-                    # derivatives are part of its validity, as they are for a
-                    # dense trial (whose evaluation returns None when they
-                    # cannot be formed), so a trial whose geometry the family
-                    # refuses is backtracked from, not accepted and raised.
+                    # A chunked trial whose geometry the family refuses is
+                    # backtracked from, as a dense trial is, not accepted and raised.
                     try:
                         accepted_geometry = _measured_geometry(
                             context,
@@ -1331,10 +1313,8 @@ def _run_iterations(
             del measured_observed
             if certified:
                 return finish(True, "objective_and_step", accepted_score_relative)
-            # A distinct tiny step is still a valid state transition.  Keep
-            # the remaining iteration budget so a fresh direction can recover
-            # stationarity; only an identical candidate has no progress to
-            # retry and returns ``line_search_failed`` below.
+            # A distinct tiny step is still progress: keep the iteration budget;
+            # only an identical candidate returns ``line_search_failed`` below.
         if (
             objective_relative_change <= config.tolerance
             and accepted_score_relative <= config.tolerance
@@ -1774,11 +1754,8 @@ def _fit_dense_fixed_lambda_core(
                 )
                 del retry
             fisher_matrix = None
-            # A dense reused endpoint carries no row derivatives (see
-            # _reuse_observed_initial_result), and a failed retry keeps that
-            # state.  Both fallbacks are row geometry, so that state is
-            # evaluated once more, at the same coefficients, to measure them.
-            # Chunked geometry is assembled from rows and never needs this.
+            # A dense reused endpoint (or failed retry) carries no row derivatives,
+            # so evaluate it once more at the same coefficients for row geometry.
             fallback_state = state
             if context.chunk_size is None and state.derivatives is None:
                 evaluated = _evaluate_state(

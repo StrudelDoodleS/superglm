@@ -4,12 +4,7 @@
 with a logit, so a parameter that misbehaves at both edges of its support can
 carry an unconstrained linear predictor.  The inverse is strictly interior for
 every finite ``eta``, which is what ``_validate_link_support`` requires of a
-bounded link at its ``eta = +-20`` probe.
-
-``BoundedPowerLink`` (Tweedie) is deliberately left alone: it has a byte-identical
-golden fixture behind it and no reason to move.
-
-Imports only numpy, scipy and the standard library.
+bounded link at its ``eta = +-20`` probe. Imports only numpy, scipy and the standard library.
 """
 
 from __future__ import annotations

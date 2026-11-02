@@ -186,14 +186,10 @@ def _exact_runtime_design_block(
         if not projection:
             continue
         left_name, right_name = term["parent_names"]
-        # An interaction transform consumes the geometry its parents CONTRIBUTE,
-        # not their raw columns: an OrderedCategorical parent contributes its
-        # mapped level scores, and the transform would read its labels as
-        # float64.  Resolve exactly as the fit and exact-predict paths do --
-        # including the FactorSmooth exception, whose grouping parent stays as
-        # the fit factorized it.  A plan cached before parent specs were
-        # stashed carries no "parent_specs" key; ``None`` then resolves through
-        # the identity path.
+        # An interaction transform consumes the geometry its parents contribute (an
+        # OrderedCategorical parent contributes mapped level scores), resolved as the fit and
+        # exact-predict paths do, including the FactorSmooth exception. A plan cached before
+        # ``parent_specs`` was stashed lacks the key; ``None`` then resolves through identity.
         left_spec, right_spec = term.get("parent_specs", (None, None))
         ispec = term["spec"]
         _, left = resolve_interaction_parent_of(ispec, left_spec, X.column_array(left_name))
@@ -400,34 +396,18 @@ def _merge_weights(total: float, chunk_weight: float) -> tuple[float, float, flo
 def _anchored_weighted_moments(chunks, W: NDArray, p: int) -> tuple[NDArray, NDArray, NDArray]:
     """Raw Gram, ``X'W1`` and the centred Gram, the latter merged from chunk co-moments, in one traversal.
 
-    Each chunk that carries weight is centred about its own weighted mean as
-    an exact pair ``(hi, lo)`` (``mode_score.corrected_two_pass_pair`` on the
-    chunk in memory; Chan, Golub & LeVeque 1983), rows ``(x - hi) - lo``.  The
-    chunks' co-moments are merged by the pairwise update ``C = C_a + C_b + m d
-    d'``, ``m = w_a w_b / (w_a + w_b)``, ``d`` the difference of the two
-    means (Chan, Golub & LeVeque 1979; the weighted multivariate form in
-    Pebay, Terriberry, Kolla & Bennett 2016, Comput. Stat. 31:1305):
-
-    - ``d = (hi_b - hi_a) + (lo_b - lo_a)``: the leading difference is exact
-      where the two means lie within a factor two (Sterbenz) and otherwise
-      rounds at ``u |d|``, so ``d`` carries its own relative accuracy at any
-      column offset;
-    - the running mean stays an exact pair, moved from the heavier side's
-      pair by the lighter side's share of ``d`` (at most ``|d| / 2``, the new
-      mean's own distance from that side) and added to its head by TwoSum:
-      stepping from the lighter side cancelled, a chunk of weight 7e292
-      beside 2e164 moved a mean of -2.9e22 to -5.3e-23 by rounding at 3e6;
-    - ``m d d'`` is the outer product of ``sqrt(m) d`` with itself, ``sqrt(m)``
-      and ``f`` from ``_merge_weights``, so nothing over- or underflows that
-      the term's own value does not.
-
-    Every term is then a chunk co-moment or a merge term formed to a few
-    roundings of its own size, and a diagonal entry, a sum of non-negative
-    terms, is accurate to ``O(gamma_{n + K})`` relative, ``K`` the chunks; an
-    off-diagonal one to that times ``sqrt(C_ii C_jj)`` (Cauchy-Schwarz).  No
-    row is shifted by another chunk's mean: a global anchor rounded a chunk
-    far below it to nothing.  Working weights are Fisher weights, never
-    negative; a chunk without weight adds nothing.
+    Each weighted chunk is centred about its own weighted mean as an exact pair ``(hi, lo)``
+    (``mode_score.corrected_two_pass_pair``; Chan, Golub and LeVeque 1983), rows ``(x - hi) - lo``,
+    and co-moments merge by the pairwise update ``C = C_a + C_b + m d d'``, ``m = w_a w_b /
+    (w_a + w_b)`` (Chan et al. 1979; weighted multivariate form: Pebay, Terriberry, Kolla and
+    Bennett 2016, *Comput. Stat.* 31:1305). ``d = (hi_b - hi_a) + (lo_b - lo_a)`` is exact within
+    a factor two (Sterbenz) and otherwise rounds at ``u |d|``; the running mean stays an exact pair
+    moved from the heavier side by the lighter side's share of ``d`` and added by TwoSum;
+    ``m d d'`` is the outer product of ``sqrt(m) d`` (``_merge_weights``) so nothing over- or
+    underflows that the term's own value does not. A diagonal entry (non-negative terms) is
+    accurate to ``O(gamma_{n + K})`` relative, ``K`` the chunks; an off-diagonal one to that times
+    ``sqrt(C_ii C_jj)``. No row is shifted by another chunk's mean (a global anchor rounds a far
+    chunk to nothing). Working weights are non-negative; a weightless chunk adds nothing.
     """
     from superglm.solvers.mode_score import corrected_two_pass_pair
 

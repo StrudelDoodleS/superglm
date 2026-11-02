@@ -232,10 +232,8 @@ def _snapshot_family(family: DistributionalFamily) -> DistributionalFamily:
             return any(id(parameter.default_link) in source_links for parameter in owned.parameters)
 
         if shares_links():
-            # Class attributes are not part of deepcopy(instance). Shadow ordinary
-            # class metadata on the new copy, including frozen dataclasses. A
-            # read-only descriptor can still refuse the independent metadata.
-            # Reuse the memo to retain aliases with the copied instance state.
+            # deepcopy(instance) skips class attributes: shadow class metadata on
+            # the copy (frozen dataclasses too), reusing the memo to keep aliases.
             object.__setattr__(owned, "parameters", deepcopy(owned_parameters, memo))
             if shares_links():
                 raise TypeError("parameter metadata remains shared after copying")

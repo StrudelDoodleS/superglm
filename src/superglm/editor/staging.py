@@ -1,7 +1,7 @@
 """Structural changes that wait for one Refit, and the time order of the editor history.
 
 Each function takes the :class:`~superglm.editor.session.EditorSession` first;
-the session keeps one-line methods that delegate here (spec D1, D11). A
+the session keeps one-line methods that delegate here. A
 waiting change is built on its term's draft, the last waiting change's spec,
 so changes to one term compose, and nothing is fitted while it waits. Undo
 and Redo take edits, waiting changes and applied steps back in time order.
@@ -193,10 +193,10 @@ def stage_structural(
     (``levels``, put back on it), ``"knots"`` (``count`` and ``strategy``
     with an optional ``alpha``, ``positions`` in chart coordinates, or
     ``reset``) or ``"basis"`` (``kind``, or ``select``); levels are display
-    labels. A change its builder refuses is refused now, with
-    today's sentence. Nothing is fitted: the model, the curves and the model
-    revision stay as they are. ``X`` and ``sample_weight`` are the frame and
-    weights the refit will read (default: the session's refit data).
+    labels. A change its builder refuses is refused now. Nothing is fitted:
+    the model, curves and model revision stay as they are. ``X`` and
+    ``sample_weight`` are the frame and weights the refit will read (default:
+    the session's refit data).
     """
     editable = session._require_term(term)
     if operation not in _REFIT_AT_ONCE:
@@ -244,11 +244,11 @@ def stage_structural(
 def refit_pending(
     session: EditorSession, *, method: str = "auto", **refit_kwargs: Any
 ) -> StructuralStep:
-    """Apply every waiting change in one fit, as one structural step (spec D1).
+    """Apply every waiting change in one fit, as one structural step.
 
     Undo of the step brings the changes back as waiting; Redo puts the refit
     back without fitting. Hand edits on terms no change restructured are
-    carried over (spec D2) as one more entry. A fit-time refusal leaves the
+    carried over as one more entry. A fit-time refusal leaves the
     waiting changes and the model as they were and raises one fixed
     sentence; Python callers keep the library's error as its cause.
     ``refit_kwargs`` are ``X``, ``y``, ``sample_weight``, ``offset``,
@@ -276,7 +276,7 @@ def stage_and_refit(
     The step keeps the state from before the change was staged, so one Undo
     takes the whole call back and any earlier waiting changes wait again. A
     refusal leaves nothing staged; a library range refusal reads as the
-    operation's own fixed sentence, as it always has.
+    operation's own fixed sentence.
     """
     before = session._capture_state()
     future = (list(session.redo_stack), list(session.pending_redo), list(session.structure_redo))
@@ -482,18 +482,16 @@ def _apply_pending(
 def _carry_edits(
     session: EditorSession, edited: dict[str, EditableTerm], *, own_entry: bool = True
 ) -> None:
-    """Re-apply hand-edited curves over a refit, as one entry Undo takes back (spec D2).
+    """Re-apply hand-edited curves over a refit, as one entry Undo takes back.
 
     ``edited`` holds the edited terms the refit did not restructure. Each
-    keeps its rows and ``n_points``, so its grid and labels match and its
-    curve goes back exactly (``carried_curve``); a term whose grid moved
-    anyway is left at the refit. Undo of the entry returns the carried
-    terms to the refitted curves; Undo of the refit then puts back every
-    edit, those on restructured terms included.
+    keeps its rows and ``n_points``, so its curve goes back exactly
+    (``carried_curve``); a term whose grid moved anyway is left at the refit.
+    Undo of the entry returns the carried terms to the refitted curves; Undo
+    of the refit then puts back every edit, restructured terms' included.
 
-    Without ``own_entry`` the curves join the step just pushed: its state
-    is the one from before it, so the live terms are its own fresh ones,
-    and Undo of that step takes the carry-over back with the change.
+    Without ``own_entry`` the curves join the step just pushed, and Undo of
+    that step takes the carry-over back with the change.
     """
     carried = {}
     for name, term in edited.items():

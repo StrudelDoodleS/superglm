@@ -73,16 +73,11 @@ def _categorical_predict_labels(
 ) -> NDArray:
     """Resolve predict labels for a derived term under its PARENT's policy.
 
-    The known set is the parent's whole level universe, not the levels that
-    earned a design column: a level pinned to base for want of training rows is
-    a KNOWN level, and validating against the emitted columns would reject data
-    the parent itself accepts.
-
-    Routing needs no code of its own.  Every derived block indexes the emitted
-    levels, so a label matching none of them -- pinned or novel -- codes as
-    ``-1`` and already contributes zero, which is exactly base routing.  All
-    ``unseen="base"`` has to do is stop erroring and name what it let through.
-    A group policy routes those rows to the group's label, as the parent does.
+    The known set is the parent's whole level universe, not the levels that earned
+    a design column: a level pinned to base is known.  A label matching no emitted
+    level codes as ``-1`` and contributes zero, which is base routing, so
+    ``unseen="base"`` only has to stop erroring and name what it let through.  A
+    group policy routes those rows to the group's label, as the parent does.
     """
     if unseen not in _UNSEEN_POLICIES:
         return _route_unseen_to_group(x, grouping, universe, unseen)
@@ -103,15 +98,11 @@ def _categorical_predict_labels(
 
 
 def _restore_parent_policy(state: dict, prefix: str, non_base: str, base: str) -> None:
-    """Give a derived term pickled before it carried its parent's policy the policy it scored with.
+    """Give a derived term pickled before it carried its parent's policy that policy.
 
-    ``{prefix}_grouping`` arrived in 0.18 (#213), ``{prefix}_levels`` and
-    ``{prefix}_unseen`` in 0.26 (db2061d4).  Before them the term resolved
-    predict labels with no grouping (0.17 and earlier) or its stored grouping (0.18 to
-    0.25), against the levels its blocks were built on -- base and non-base --
-    and refused any other label.  These defaults reproduce exactly that:
-    ``_categorical_predict_labels`` with ``unseen="error"`` validates against
-    ``set(universe)``.
+    ``{prefix}_grouping`` arrived in 0.18, ``{prefix}_levels`` and
+    ``{prefix}_unseen`` in 0.26.  These defaults reproduce the older behaviour:
+    validate against ``set(universe)`` with ``unseen="error"``.
     """
     state.setdefault(f"{prefix}_grouping", None)
     if f"{prefix}_levels" not in state:
@@ -130,36 +121,20 @@ def interaction_spline_spec(
 ):
     """The spline spec an INTERACTION marginal is built from.
 
-    Cubic regression splines carry two implementations.  A main effect uses
-    ``CubicRegressionSpline`` -- a B-spline basis projected via Z.  Every
-    interaction marginal instead uses ``CardinalCRSpline``, which is much
-    closer to mgcv's ``bs="cr"`` geometry than the older projected path.
+    A main effect uses ``CubicRegressionSpline`` (a B-spline basis projected via
+    Z); every interaction marginal instead uses ``CardinalCRSpline``, which is much
+    closer to mgcv's ``bs="cr"`` geometry.  The routing belongs to interactions as
+    a class, so ``TensorInteraction``, ``SplineCategorical`` and the screening
+    probe share one basis and the probe cannot span directions the refit cannot
+    build.  A default ``knot_strategy="uniform"`` parent is re-placed on quantiles
+    (the placement the probe uses); an explicitly knotted or quantile parent is
+    left alone.
 
-    That routing belongs to *interactions as a class*, not to one interaction
-    type.  Applying it in ``TensorInteraction`` alone left ``SplineCategorical``
-    building a different basis from the ``ti`` beside it and, more sharply,
-    from the screening probe that names it as its refit target: the probe could
-    span directions the refit could not build at all.  How badly depends on the
-    margin -- containment of probe span in refit span measured 0.9996 on a
-    uniform margin but 0.675 on a skewed one at ``n_knots=16`` (issue #191).
-    Both go through here so the invariant holds by construction rather than by
-    coincidence.
-
-    The knots move too, not just the basis: a default ``knot_strategy="uniform"``
-    parent is re-placed on quantiles, because a cardinal basis on knots that
-    ignore the margin's density is the weaker half of the geometry this routing
-    exists to get right.  So a ``cr`` main effect and the interaction beside it
-    sit on DIFFERENT interior knots -- on a gamma margin at ``n_knots=8``, 1.92
-    to 15.22 for the main effect against 0.87 to 5.69 here.  That is the same
-    placement the screening probe uses, which is what keeps probe and refit
-    identical; an explicitly knotted or already-quantile parent is left alone.
-
-    Returns *spec* unchanged for every other spline kind, so ``ps`` is
-    untouched, and so are the cr configurations the cardinal basis cannot
-    express (below).  The returned spec has its knots already placed on
-    *x*; callers must STORE it and read the basis back from the stored copy,
-    since a predict-time basis rebuilt from the original spec would disagree
-    with the design that was fitted.
+    Returns *spec* unchanged for every other spline kind and for the cr
+    configurations the cardinal basis cannot express.  The returned spec has its
+    knots already placed on *x*; callers must store it and read the basis back from
+    the stored copy, since a predict-time basis rebuilt from the original spec
+    would disagree with the fitted design.
     """
     from superglm.features.spline import CubicRegressionSpline
 
@@ -167,25 +142,19 @@ def interaction_spline_spec(
         return spec
 
     # A select=True parent's double-penalty shrinkage lives in its own
-    # identifiability projection.  The cardinal spec below is built with
-    # select=False, so substituting drops that shrinkage, widening the
-    # interaction block and leaving the design rank-deficient.
+    # identifiability projection; the cardinal spec is built with select=False, so
+    # substituting would drop it and leave the design rank-deficient.
     if getattr(spec, "select", False):
         return spec
-    # ``CardinalCRSpline._build_penalty`` is the exact integrated squared
-    # SECOND derivative and nothing else -- the class advertises
-    # _penalty_semantics="fixed" and rejects m > 2 outright.  So any other
-    # requested order has to keep the parent's quadrature penalty: routing it
-    # here would raise for m=3 and silently swap m=1's first-derivative
-    # penalty for a second-derivative one.
+    # ``CardinalCRSpline`` penalises the integrated squared SECOND derivative only
+    # (``_penalty_semantics="fixed"``, m > 2 rejected), so any other penalty order
+    # keeps the parent's quadrature penalty.
     if getattr(spec, "_m_orders", (2,)) != (2,):
         return spec
     # Polynomial ranges are equality constraints on the parent's own basis
-    # (``_constraint_rows``); the cardinal basis has no such rows, so a margin
-    # rebuilt there dropped them and bent the interaction inside a declared
-    # range. The parent's constrained basis keeps them, as a bs margin does.
-    # The interaction screen passes ``keep_ranges=False`` and keeps its probe
-    # on the cardinal basis: SuperGLM refits no interaction on a ranged parent.
+    # (``_constraint_rows``) that the cardinal basis lacks, so a ranged parent keeps
+    # its constrained basis.  The interaction screen passes ``keep_ranges=False``
+    # and stays on the cardinal basis, since no interaction is refit on a ranged parent.
     if keep_ranges and getattr(spec, "polynomial_ranges", ()):
         return spec
 
@@ -231,19 +200,11 @@ def _varying_coefficient_spline_spec(
 ):
     """``interaction_spline_spec`` for a per-level masked block, centered.
 
-    A resolved spec is freshly constructed, so unlike a fitted parent it
-    carries no identifiability projection until something builds it.  A
-    varying-coefficient block cannot go without one: the cardinal basis
-    reproduces the constant function exactly -- its columns sum to 1 at every
-    x -- so masking the uncentered block to a level rebuilds that level's own
-    categorical main-effect indicator, and the combined design loses one rank
-    per non-base level.  ``build_knots_and_penalty()`` runs the same
-    constraint + identifiability steps a main effect runs and leaves the
-    projection on the spec.
-
-    ``tensor_marginal_ingredients()`` centers its own marginals over the
-    compressed support it is handed, so the tensor path resolves the spec
-    without paying for this one.
+    The cardinal basis reproduces the constant function (its columns sum to 1), so
+    masking an uncentered block to a level would rebuild that level's categorical
+    indicator and lose one rank per non-base level.  ``build_knots_and_penalty()``
+    runs the constraint and identifiability steps a main effect runs and leaves the
+    projection on the spec.  The tensor path centres its own marginals instead.
     """
     resolved = interaction_spline_spec(
         spec,
@@ -260,47 +221,25 @@ def _plan_spline_cat_support(
 ):
     """Lossless row-support compression for a shared ``spline_cat`` basis.
 
-    A varying-coefficient term stores one CSR basis shared by its levels plus a
-    row subset per level, and every level runs its own weighted gram over its
-    rows.  When the spline covariate repeats -- a rating factor recorded in
-    whole years, the common insurance case -- those rows repeat too, and one
-    dense block of distinct rows serves every level.
+    A varying-coefficient term stores one CSR basis shared by its levels plus a row
+    subset per level.  When the spline covariate repeats (a rating factor in whole
+    years), one dense block of distinct rows serves every level.  The gate is the
+    one ``_build_ssp_group`` applies to a main effect, with three differences: the
+    cost model is told how many grams (levels) share the support; the grouping is
+    offered (equal *x* gives equal rows) rather than detected, and
+    ``plan_verified_row_support`` still checks it; and only ``active`` rows count,
+    because the base level is absorbed into the main effect and its rows appear in
+    no emitted block.
 
-    This is the same deduplication ``_build_ssp_group`` applies to a main
-    effect, and the same gate decides it, with three differences.
-
-    The levels partition the rows between them but each reads the whole shared
-    support, so the cost model is told how many grams that is.
-
-    The grouping is offered rather than detected: the basis is a function of
-    *x* alone, so equal *x* should give equal rows, which makes the decline a
-    sort of one column instead of a scan of the whole basis.
-    ``plan_verified_row_support`` still checks that grouping against the basis
-    before using it, so the saving is on the detection scan and not exactness.
-
-    And only ``active`` rows count.  The base level of the categorical parent
-    is absorbed into the main effect, so its rows appear in NO emitted block --
-    and with the default ``base="most_exposed"`` that is the level carrying the
-    most exposure, routinely the majority of the book.  Charging the CSR side
-    for work it will never do overstates the win, and keeping support rows that
-    only a base-level observation ever reaches makes every level's dense gram
-    scan a support wider than it can use.  Both errors point the same way, so
-    the gate is derived from the union of the non-base masks.
-
-    ``index`` reads ``B`` as one row per distinct value of ``x``
-    (``distinct_values``) and each row's index into them.  The support is then
-    the rows of the values the active rows hold, in increasing order of value
-    as the codes above number them, and needs no check: each value has one row.
-
-    Returns ``None`` when the gate declines, leaving CSR in place.
+    ``index`` reads ``B`` as one row per distinct value of ``x`` plus each row's
+    index into them; the support is then the rows of the values the active rows
+    hold, in increasing order of value.  Returns ``None`` when the gate declines,
+    leaving CSR in place.
     """
-    # Function-local ON PURPOSE, not merely to dodge a circular import: these
-    # two are read fresh on every call, so a test that lowers the module global
-    # reaches the pre-gate below.  Hoisting this to module scope would bind them
-    # once at import and silently re-freeze that gate while the one inside
-    # plan_verified_row_support kept resolving -- the two disagreeing again, in
-    # the opposite direction.  The pass-through below is what keeps them equal;
-    # this comment is what stops the import being "tidied" upward.
+    # Function-local on purpose: these thresholds are read at call time so a test
+    # that lowers the module global reaches the pre-gate below.  Hoisting to module
+    # scope would freeze them at import and desynchronise this gate from the one
+    # inside plan_verified_row_support.
     from superglm._group_matrix._group_matrix_support import (
         DEFAULT_MAX_SUPPORT_BYTES,
         DEFAULT_MIN_SPEEDUP,
@@ -324,11 +263,8 @@ def _plan_spline_cat_support(
     # cheap on the DECLINED path, which is every continuous covariate, and
     # slicing the basis there would cost a copy of most of it.
     nnz_active = int(np.diff(B.indptr)[row_of].sum())
-    # One resolution feeds BOTH gates.  These are read here at call time, so
-    # without passing them through, the pre-gate below would see a patched
-    # threshold while the gate inside plan_verified_row_support saw the frozen
-    # default -- two gates documented as agreeing, disagreeing under a patch,
-    # with the block silently falling back to CSR and a test believing it.
+    # One resolution feeds both gates, so the pre-gate and the gate inside
+    # plan_verified_row_support cannot disagree under a patched threshold.
     min_speedup = DEFAULT_MIN_SPEEDUP
     max_support_bytes = DEFAULT_MAX_SUPPORT_BYTES
     if not _passes_support_gates(
@@ -415,12 +351,11 @@ def _separated_ranges(
 ) -> tuple:
     """A level's held covariate values, as runs of adjacent support points it uses.
 
-    ``idx``, ``x`` and ``weights`` are the level's rows and ``anchors`` its
-    first and last support points with a response off the boundary.  Past a
-    clipped anchor every point is held at ``clip`` -- the separated ones and
-    any the spline pins to them -- so that side is one run; between the
-    anchors each run of separated points is held at the interpolation of its
-    neighbours when ``n_held``.
+    ``idx``, ``x`` and ``weights`` are the level's rows and ``anchors`` its first
+    and last support points with a response off the boundary.  Past a clipped
+    anchor every point is held at ``clip`` (one run per side); between the anchors
+    each run of separated points is held at the interpolation of its neighbours
+    when ``n_held``.
     """
     from superglm.diagnostics.separation import SeparatedRange
 
@@ -583,10 +518,8 @@ class SplineCategorical:
 
         omega = spline_spec._build_penalty()
 
-        # Project penalty through the full constraint projection (natural
-        # constraints + identifiability).  The basis columns stay sparse —
-        # the projection is passed via GroupInfo so dm_builder folds it
-        # into R_inv (SparseSSPGroupMatrix keeps the factored form).
+        # Project the penalty through the full constraint projection; the basis columns
+        # stay sparse and dm_builder folds the projection into R_inv.
         if self._projection is not None:
             omega = self._projection.T @ omega @ self._projection
             n_cols = self._projection.shape[1]
@@ -596,11 +529,8 @@ class SplineCategorical:
         groups: list[GroupInfo] = []
         for level in self._non_base:
             mask = x_cat == level
-            # dict[str, Any]: a heterogeneous kwargs bag.  Left to inference
-            # the value type becomes a union, and splatting a union into
-            # GroupInfo makes the checker flag every parameter of the
-            # dataclass once per call site -- a diagnostic count that grows
-            # each time GroupInfo gains a field.
+            # dict[str, Any]: a heterogeneous kwargs bag; inference would make a union that
+            # the checker flags at every GroupInfo call site.
             shared: dict[str, Any] = dict(
                 columns=None,
                 n_cols=n_cols,
@@ -694,40 +624,27 @@ class SplineCategorical:
     ) -> list[GroupInfo]:
         """Hold each level's curve where its responses all sit on a boundary.
 
-        ``separation`` is ``(response, prior weights, boundaries, level
-        effect, main curve)``: whether the factor's main effect gives each
-        level its own constant, and the spline's main-effect spec, whose curve
-        is the factor base's (``None`` without one).  ``binned`` is the
-        discrete path's ``(support basis, bin index, bin values)``.  A level whose responses all sit on a boundary
-        over some covariate range, with curve directions only that range sees,
-        has a likelihood that keeps rising as its curve walks there toward a
-        zero (or certain) mean (``diagnostics.separation.separated_curve_support``).
-        Only the level's smoothing penalty bounds the walk, and the rest of
-        the curve chooses that penalty: a sharp feature elsewhere sets it
-        small, and the curve beyond the level's last nonzero response then
-        follows its own extrapolation down to the predictor's floor.
+        ``separation`` is ``(response, prior weights, boundaries, level effect, main
+        curve)``: whether the factor's main effect gives each level its own constant,
+        and the spline's main-effect spec whose curve is the factor base's (``None``
+        without one).  ``binned`` is the discrete path's ``(support basis, bin index,
+        bin values)``.  A level whose responses all sit on a boundary over a covariate
+        range has a likelihood that keeps rising as its curve walks toward a zero (or
+        certain) mean there (``diagnostics.separation.separated_curve_support``); only
+        the level's smoothing penalty bounds the walk.
 
-        Beyond the first and last covariate values where the level's
-        responses vary (its anchors), a separated range is outside what its
-        responses identify, and the curve is held at its value there -- the
-        rule a spline follows beyond its training range
-        (``extrapolation="clip"``): the level's rows past the anchor take the
-        anchor's basis row, here and at prediction (``_level_clip``).  A
-        separated range between anchors keeps its rows; the curve directions
-        only that range sees are held at the minimum-penalty interpolation of
-        the rest (``continuation_basis``), as the penalty sets a curve over a
-        range with no rows.  The group keeps its name and smoothing
-        parameter; its support, ``projection`` and ``penalty_matrix`` carry
-        the change, so the design, its REML rebuilds and prediction all read
-        it from the group.  Findings are kept on ``_separated_curves``, every
-        one found, held or not.
+        Beyond the level's anchors (first and last covariate values where its
+        responses vary) a separated range is outside what its responses identify, and
+        the curve is held at the anchor's value, as ``extrapolation="clip"`` does
+        (``_level_clip``).  A separated range between anchors keeps its rows, and the
+        curve directions only that range sees are held at the minimum-penalty
+        interpolation of the rest (``continuation_basis``).  The group keeps its name
+        and smoothing parameter; its support, ``projection`` and ``penalty_matrix``
+        carry the change.  Findings are kept on ``_separated_curves``.
 
-        The factor's base level has no group: its curve is the main effect's,
-        which every level shares, so it is scanned in the main effect's own
-        basis and its ranges named, not held.  That scan moves the main effect
-        alone; whether the other levels' curves could take up the move on
-        their rows is not checked, so a base range is reported as approximate
-        and never refuses the design.
+        The factor's base level has no group: its curve is the main effect's, so it is
+        scanned in the main effect's basis and its ranges named, not held, and
+        reported as approximate.
         """
         from superglm.diagnostics.separation import (
             SeparatedCurve,
@@ -1107,11 +1024,9 @@ def _held_to_level_ranges(spec: Any, x: NDArray, labels: NDArray) -> NDArray:
     """``x`` with each separated level's rows held to the range they covered at fit.
 
     A ``NumericCategorical`` or ``PolynomialCategorical`` level whose curve
-    separates has no finite estimate (``separation.separated_level_ranges``);
-    within its rows' range its walked curve gives fitted values toward the
-    boundary its responses sit on, and is held there beyond it, as
-    ``extrapolation="clip"`` holds a spline.  A model saved before 0.41 has no
-    such record and predicts as it did.
+    separates (``separation.separated_level_ranges``) is held beyond its rows'
+    range, as ``extrapolation="clip"`` holds a spline.  A model saved before 0.41
+    has no such record and predicts as it did.
     """
     ranges = getattr(spec, "_separated_ranges", None)
     if not ranges:
@@ -1424,13 +1339,9 @@ def _pair_codes(
 ) -> NDArray:
     """Row-wise index into the non-base level pairs, ``-1`` off the grid.
 
-    A two-categorical interaction is itself categorical: every row falls in
-    exactly one ``(level1, level2)`` cell, so the block of indicator columns
-    is one-hot and a row is fully described by one integer.  Rows at either
-    parent's base level have no column at all and take ``-1``.
-
-    The code is ``i1 * len(non_base2) + i2``, which is the order the pair
-    list is generated in, so codes and columns agree by construction.
+    A two-categorical interaction is one-hot, so one integer describes a row:
+    ``i1 * len(non_base2) + i2``, the order the pair list is generated in.  Rows at
+    either parent's base level take ``-1``.
     """
     from superglm.features.categorical import _codes_against
 
@@ -1460,10 +1371,9 @@ class CategoricalInteraction:
         self._base1: str = ""
         self._base2: str = ""
         self._pairs: list[tuple[str, str]] = []
-        # Build-time cell pruning: ``_pairs`` is the EMITTED (kept) cells, in
-        # fitted-coefficient order; ``_all_pairs`` is the full non-base grid in
-        # build order; ``_grid_to_col`` maps a full-grid cell index to its
-        # emitted column, -1 when the cell was pruned.
+        # ``_pairs`` is the emitted (kept) cells in fitted-coefficient order,
+        # ``_all_pairs`` the full non-base grid in build order, and ``_grid_to_col`` maps
+        # a full-grid cell to its emitted column (-1 when pruned).
         self._all_pairs: list[tuple[str, str]] = []
         self._pruned_pairs: list[tuple[str, str]] = []
         self._grid_to_col: NDArray | None = None
@@ -1529,35 +1439,22 @@ class CategoricalInteraction:
                 "produced 0 pairs — at least one parent has only 1 level."
             )
 
-        # One-hot over the occupied cells, carried as codes rather than a CSR
-        # block.  The builder turns cat_codes into a CategoricalGroupMatrix,
-        # which reaches the structured Gram kernels: a bincount for its own
-        # block and a weighted crosstab against every other categorical,
-        # instead of a sparse sandwich and a per-column rmatvec loop.
+        # One-hot over the occupied cells, carried as codes so the builder makes a
+        # CategoricalGroupMatrix and reaches the structured Gram kernels.
         codes = _pair_codes(x_cat1, x_cat2, self._non_base1, self._non_base2)
 
-        # Prune the cells this fit cannot identify, exactly as Categorical.build
-        # pins levels with no effective rows.  Two kinds of cell go:
-        #
-        # * Empty cells: no positive-weight training row occupies them.  Their
-        #   columns are identically zero in the weighted geometry, so their
-        #   coefficients are exactly zero under any penalty and the fitted
-        #   values cannot move -- but each one contributes a structural null
-        #   direction to X'WX.
-        # * One aliased cell per exactly nested parent level: when every
-        #   positive-weight row at a non-base level of one parent sits on the
-        #   other parent's non-base grid, that level's main-effect indicator
-        #   equals the sum of the level's occupied cells row for row -- an
-        #   identity in X, so it holds under EVERY working weight.  The rank
-        #   machinery's earliest-representative convention resolves that
-        #   circuit by zeroing its last column whenever Gram certification
-        #   succeeds; dropping the same cell at build time gives the identical
-        #   fit through a certifiably full-rank system, instead of forcing
-        #   every PIRLS iteration onto the dense streamed-QR fallback.
-        #
-        # Pruning degrades gracefully: a grid with no occupied cell, or one
-        # where the alias rule would empty the block, keeps its columns and
-        # leaves rank handling to the solver, exactly as before.
+        # Prune the cells this fit cannot identify, as Categorical.build pins levels
+        # with no effective rows:
+        # * empty cells (no positive-weight row): identically zero columns that each add
+        #   a null direction to X'WX;
+        # * one aliased cell per exactly nested parent level: when every positive-weight
+        #   row at a non-base level of one parent sits on the other parent's non-base
+        #   grid, that level's main-effect indicator equals the sum of its occupied
+        #   cells under every working weight.  Dropping the cell at build time matches
+        #   the rank machinery's earliest-representative zeroing without forcing the
+        #   dense streamed-QR fallback.
+        # A grid with no occupied cell, or where the alias rule would empty the block,
+        # keeps its columns and leaves rank handling to the solver.
         self._all_pairs = list(self._pairs)
         self._pruned_pairs = []
         self._grid_to_col = None
@@ -1604,15 +1501,10 @@ class CategoricalInteraction:
                 self._pairs = [self._pairs[i] for i in kept]
                 n_pairs = len(kept)
 
-        # Report the width this term SPANS alongside the emitted width.  A
-        # pruned cell is structurally unidentifiable -- its coefficient is
-        # exactly zero in the unpruned parametrisation -- so the emitted
-        # width is the block's identifiable rank.  The spec only REPORTS
-        # both; whether the group-lasso ``sqrt(p_g)`` weight and the df
-        # ledger price the rank (``group_pricing="rank"``, the default) or
-        # the spanned width (``"spanned"``, under which pruning is a pure
-        # reparametrisation of the fit) is the builder's decision in
-        # ``dm_builder._priced_group_dimension``.
+        # Report the width this term spans alongside the emitted width (the
+        # identifiable rank).  Whether the group-lasso ``sqrt(p_g)`` weight and the df
+        # ledger price the rank (``group_pricing="rank"``, default) or the spanned width
+        # is the builder's decision (``dm_builder._priced_group_dimension``).
         return GroupInfo(
             columns=None,
             n_cols=n_pairs,
@@ -1684,11 +1576,9 @@ class CategoricalInteraction:
 
     def reconstruct(self, beta: NDArray) -> dict[str, Any]:
         beta = np.asarray(beta, dtype=np.float64).ravel()
-        # Report the FULL non-base grid.  A pruned cell -- empty, or dropped to
-        # resolve an exact nesting -- carries exactly the coefficient the
-        # solver's rank truncation assigns its column in the unpruned
-        # parametrisation: zero.  Downstream table shapes therefore do not
-        # depend on which cells a particular training slice happened to occupy.
+        # Report the FULL non-base grid: a pruned cell carries the coefficient rank
+        # truncation would give it (zero), so table shapes do not depend on which cells
+        # a training slice occupied.
         all_pairs = getattr(self, "_all_pairs", None) or self._pairs
         grid_to_col = getattr(self, "_grid_to_col", None)
         log_rels = {}
@@ -1878,19 +1768,10 @@ class PolynomialInteraction:
     def reconstruct(self, beta: NDArray, n_points: int = 50) -> dict[str, Any]:
         """Evaluate the surface on a grid without materialising a cross design.
 
-        The cross design over a meshgrid is ``(n_points**2, n1*n2)``, so it
-        grows with the SQUARE of the requested resolution while carrying no
-        information the two marginal bases do not: the product structure means
-        ``f(x1_i, x2_j) = P1[i] C P2[j]``, which factors. At ``n_points=250``
-        with two degree-50 parents the dense form is about 1.25 GB against
-        4.8 MB for the fit's own design -- and the rating-table impact sweep
-        reconstructs at every rung of its ladder, so a model that exported
-        before could run out of memory once interactions joined the sweep.
-
-        Same value and same convention as before -- ``surface[j, i] =
-        f(x1[i], x2[j])``, which is what ``np.meshgrid``'s default ``"xy"``
-        indexing produced -- reached by the association ``TensorInteraction``
-        already uses.
+        The product structure gives ``f(x1_i, x2_j) = P1[i] C P2[j]``, so the
+        ``(n_points**2, n1*n2)`` meshgrid design is never formed.  ``surface[j, i] =
+        f(x1[i], x2[j])`` (``np.meshgrid``'s default ``"xy"`` indexing), reached by the
+        association ``TensorInteraction`` uses.
         """
         x1_grid = np.linspace(self._lo1, self._hi1, n_points)
         x2_grid = np.linspace(self._lo2, self._hi2, n_points)
@@ -1967,18 +1848,12 @@ _POOLED_BUILD_KERNELS = (_row_kron_counts, _row_kron_fill)
 def _row_kron(B1: sp.spmatrix, B2: sp.spmatrix) -> sp.csr_matrix:
     """Row-wise Kronecker product of two sparse matrices.
 
-    For B1 (n, k1) and B2 (n, k2), returns T (n, k1*k2) where
-    T[i, :] = B1[i, :] ⊗ B2[i, :].
-
-    Column ordering: column j1*k2 + j2 corresponds to B1[:,j1] * B2[:,j2].
-
-    One pass over each row's stored entries, in two compiled sweeps (count,
-    then fill).  It stores what SciPy's column-by-column ``multiply`` and
-    ``hstack`` stored: each product ``B1[i, j1] * B2[i, j2]`` of two stored
-    entries, rounded once, kept only when it is nonzero, in sorted column
-    order; so the matrix is entry for entry the one the column loop built.
-    A non-finite entry keeps the column loop (``_row_kron_columns``): SciPy
-    multiplies it by the other column's implicit zeros as well, storing NaN.
+    For B1 (n, k1) and B2 (n, k2), returns T (n, k1*k2) with T[i, :] = B1[i, :] ⊗
+    B2[i, :]; column j1*k2 + j2 is B1[:,j1] * B2[:,j2].  Two compiled sweeps
+    (count, then fill) store each product of two stored entries once, nonzeros
+    only, in sorted column order: entry for entry the matrix the column loop
+    built.  A non-finite entry keeps the column loop (``_row_kron_columns``),
+    since SciPy multiplies it by the other column's implicit zeros as well.
     """
     B1c = sp.csr_matrix(B1)
     B2c = sp.csr_matrix(B2)
@@ -2036,18 +1911,14 @@ def _rows_repeat(basis: NDArray, index: NDArray, block_rows: int = 65_536) -> bo
 def _tensor_cell_support(basis1: NDArray, distinct1, basis2: NDArray, distinct2):
     """The row support of ``_row_kron(basis1, basis2)``, formed on its occupied cells.
 
-    A margin's row is a function of its covariate, so the row Kronecker
-    product's rows repeat by occupied cell, the distinct ``(x1, x2)`` pairs
-    of the margins' groupings (``TensorMarginalInfo.distinct``), and each is
-    formed once (Wood, Li, Shaddick & Augustin 2017; Li & Wood 2020).  The
-    support is found on those rows (``detect_cell_support``) and is the one
-    scanning the full product finds; ``DECLINED`` when the gates decline
-    it, as they do below their row floor whatever the support.  ``None``
-    leaves the scan to the builder: a margin without a grouping, or whose
-    projected rows differ within one covariate value; cells that do not
-    repeat, or whose dense support over the byte budget would hold more
-    than half the rows, where only the scan's merging of bit-identical
-    cells can decide; and a hash collision.
+    The product's rows repeat by occupied cell, the distinct ``(x1, x2)`` pairs of
+    the margins' groupings (``TensorMarginalInfo.distinct``), and each is formed
+    once (Wood, Li, Shaddick & Augustin 2017; Li & Wood 2020).  The support found
+    on those rows is the one scanning the full product finds; ``DECLINED`` when the
+    gates decline it.  ``None`` leaves the scan to the builder: a margin without a
+    grouping or with projected rows differing within a covariate value, cells that
+    do not repeat or whose dense support would hold over half the rows, or a hash
+    collision.
     """
     from superglm._group_matrix import _group_matrix_support as support
 
@@ -2102,19 +1973,13 @@ def _require_one_tensor_null(null_mask: NDArray) -> None:
 def _normalize_tensor_penalty(S: NDArray) -> NDArray:
     """Scale a marginal tensor penalty to unit leading eigenvalue.
 
-    mgcv rescales marginal penalties before constructing tensor penalties.
-    Matching that convention keeps different
-    margins on comparable penalty scales.
-
-    A penalty is left as it is when its largest eigenvalue is not positive and
-    finite, or when its spectrum is not positive semidefinite to the
-    eigensolver's resolution: a computed eigenvalue of a semidefinite matrix
-    is at least ``-p(n) eps`` times the largest (``_eigensolver_relative_bar``,
-    widened by the shared rank policy's ``certification_band``), and one
-    further below is round-off of a zero penalty, not a penalty. Both tests
-    are relative, so a margin's units cannot trip them: the absolute floor of
-    1e-12 they replace left a margin whose knots were 3.6e4 apart unscaled
-    beside a unit one, and ``decompose=True`` then refused the tensor.
+    mgcv rescales marginal penalties before constructing tensor penalties; this
+    keeps margins on comparable scales.  A penalty is left as it is when its
+    largest eigenvalue is not positive and finite, or when its spectrum is not
+    positive semidefinite to the eigensolver's resolution
+    (``_eigensolver_relative_bar`` widened by the rank policy's
+    ``certification_band``).  Both tests are relative, so a margin's units cannot
+    trip them.
     """
     eigvals = np.linalg.eigvalsh(S)
     if not eigvals.size:
@@ -2153,12 +2018,10 @@ def _raw_band(raw: NDArray) -> tuple[NDArray, NDArray]:
     """Band-compress a raw spline support into ``(offsets, values)``.
 
     Row ``r`` of ``raw`` is ``values[r]`` at columns ``offsets[r]:offsets[r] +
-    width``, with ``width`` the widest span of non-zeros over the rows
-    (``degree + 1`` for a B-spline basis).  The window is clamped to the row,
-    ``offsets <= k - width``: a clamped knot vector puts a lone non-zero in
-    the LAST column at the upper boundary (a legacy ``cr`` margin whose exact
-    support includes ``max(x)``), and the kernel indexes the whole window
-    without a bounds check.
+    width``, with ``width`` the widest span of non-zeros.  The window is clamped to
+    ``offsets <= k - width`` because the kernel indexes it without a bounds check
+    (a clamped knot vector puts a lone non-zero in the last column at the upper
+    boundary).
     """
     nonzero = raw != 0.0
     first = np.argmax(nonzero, axis=1)
@@ -2176,16 +2039,11 @@ def _tensor_raw_channels(
 ) -> TensorRawChannels | None:
     """The raw band of both margins with the joint projection, or ``None``.
 
-    ``info.basis`` is ``raw @ info.projection`` on the clipped support --
-    ``tensor_marginal_info`` and ``compact_legacy`` both form it so -- hence
-    a cross-Gram block accumulated in the band and projected afterwards is
-    the same block up to round-off: bitwise for ``ps`` margins, round-off for
-    the Z-projected ``ns`` and legacy ``cr`` ones.  A pair keeps its stored
-    centred channels when the band is no narrower than the centred joint row
-    (the cardinal ``cr`` basis: every cardinal function is non-zero across
-    the range).  A custom spline whose ``raw_basis_eval`` disagrees with the
-    basis it returned would make the raw block silently wrong; the identity
-    is pinned by a test, not re-checked here.
+    ``info.basis`` is ``raw @ info.projection``, so a cross-Gram accumulated in the
+    band and projected afterwards is the same block up to round-off.  A pair keeps
+    its stored centred channels when the band is no narrower than the centred joint
+    row (the cardinal ``cr`` basis).  A custom spline whose ``raw_basis_eval``
+    disagrees with its basis is not re-checked here.
     """
     raw1 = np.asarray(info1.raw_basis_eval(np.clip(support1, info1.lo, info1.hi)), dtype=np.float64)
     raw2 = np.asarray(info2.raw_basis_eval(np.clip(support2, info2.lo, info2.hi)), dtype=np.float64)
@@ -2271,12 +2129,9 @@ class TensorInteraction:
     ) -> TensorMarginalInfo:
         """Get marginal ingredients from a parent spec, optionally overriding n_knots.
 
-        ``keep_ranges`` keeps a ranged parent's polynomial ranges in the margin
-        (see ``interaction_spline_spec``).
-
-        Enforces the mgcv te()/ti() contract on the original spec before
-        any cloning, so unsupported configurations (select, multi-m) can't
-        bypass the check via n_knots override reconstruction.
+        ``keep_ranges`` keeps a ranged parent's polynomial ranges in the margin (see
+        ``interaction_spline_spec``).  The mgcv te()/ti() contract (no select, no
+        multi-m) is enforced on the original spec before any cloning.
         """
         # Reject unsupported parent configs before cloning
         reasons: list[str] = []
@@ -2327,12 +2182,9 @@ class TensorInteraction:
                     return compact
                 return compact_legacy(compact)
 
-            # Compatibility for custom spline subclasses overriding the old
-            # one-argument method. Preserve their projection/penalty geometry,
-            # but retain only its evaluation on the discrete support.  Such a
-            # method can certify physical-row geometry only: without the
-            # support/count contract it has no way to center in non-unit
-            # replication mass.
+            # Compatibility for custom spline subclasses overriding the old one-argument
+            # method: keep their projection and penalty geometry but only its evaluation on
+            # the discrete support, since it cannot centre in non-unit replication mass.
             if geometry_weight is not None and not np.all(
                 np.asarray(geometry_weight, dtype=np.float64) == 1.0
             ):
@@ -2343,11 +2195,9 @@ class TensorInteraction:
                 )
             return compact_legacy(method(x))
 
-        # Route cubic regression splines through the cardinal CR
-        # implementation, which is much closer to mgcv's bs="cr" geometry than
-        # the older projected-B-spline CR path.  A cr parameterisation the
-        # cardinal basis cannot express comes back unchanged and takes the
-        # ordinary marginal path below, penalty order and all.
+        # Route cubic regression splines through the cardinal CR implementation; a cr
+        # parameterisation it cannot express comes back unchanged and takes the
+        # ordinary marginal path below.
         cardinal = interaction_spline_spec(
             spec,
             x,
@@ -2463,10 +2313,9 @@ class TensorInteraction:
 
         B1 = np.asarray(m1.basis, dtype=np.float64)
         B2 = np.asarray(m2.basis, dtype=np.float64)
-        # The training-row bases are now B1 and B2, and the design is built from
-        # them. Scoring evaluates new rows from ``raw_basis_eval`` and
-        # ``projection``, so the spec keeps no (n, K) copy of its own: it was
-        # 280 MB of a 10-pair freMTPL2 model's pickle, retained fit state or not.
+        # The design is built from B1 and B2.  Scoring evaluates new rows from
+        # ``raw_basis_eval`` and ``projection``, so the spec keeps no (n, K) copy of its
+        # own (it would dominate the pickle).
         self._marginal1 = replace(m1, basis=np.empty((0, m1.K_eff)))
         self._marginal2 = replace(m2, basis=np.empty((0, m2.K_eff)))
         S1 = _normalize_tensor_penalty(m1.penalty) if m1.normalize_penalty else m1.penalty
@@ -2548,10 +2397,9 @@ class TensorInteraction:
             # REML's rank rule, as select=True splits a spline: a margin's
             # general penalty spans more of float64 than a fixed 1e-8 allows.
             null_mask = _null_mask(eigvals)
-            # As select=True does (eigendecompose_select), a skewed cr or bs
-            # margin's spread can put range directions under that cut, so the
-            # structural penalty decides the nullity. Where the real spectrum
-            # agrees its eigenvectors are kept, and those fits are unchanged.
+            # As with select=True (eigendecompose_select), a skewed cr or bs margin's
+            # spread can put directions under the cut, so the structural penalty decides the
+            # nullity; where the real spectrum agrees its eigenvectors are kept.
             structural = self._structural_tensor_penalty()
             if structural is not None:
                 structural_values, structural_vectors = np.linalg.eigh(structural)

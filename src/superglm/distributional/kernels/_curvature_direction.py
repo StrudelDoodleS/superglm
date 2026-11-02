@@ -190,17 +190,11 @@ def compose_derivatives(
 ) -> NDArray[np.float64]:
     """Packed ``order``-th derivatives of ``L(phi(x))`` by the set-partition chain rule.
 
-    ``outer[m]`` (``m = 1..order``) holds the packed ``m``-th derivatives of
-    ``L`` at ``phi(x)``, ``(n, C(K + m - 1, m))`` in :func:`packed_tuples`
-    order, and ``inner`` the structurally nonzero derivatives of ``phi``.  For
-    each distinct entry ``(i_1..i_order)`` of the result and each partition of
-    its positions into blocks ``B``, the term is the outer derivative over one
-    component ``c_B`` per block times ``prod_B d^|B| phi_{c_B} / d x_B``
-    (Hardy, *Combinatorics of partial derivatives*, Electron. J. Combin. 13,
-    2006, R1; for one univariate link this is Wood, Pya and Saefken 2016,
-    Appendix A).  Only the structural nonzeros are visited, so a separable
-    link map costs at most one term per partition.  ``components`` is the
-    number of ``phi``'s components when it differs from its ``K`` inputs.
+    ``outer[m]`` holds the packed ``m``-th derivatives of ``L`` at ``phi(x)``
+    (``(n, C(K + m - 1, m))``, :func:`packed_tuples` order) and ``inner`` the
+    structurally nonzero derivatives of ``phi``; only those are visited (Hardy,
+    Electron. J. Combin. 13, 2006, R1; Wood, Pya and Saefken 2016, Appendix A).
+    ``components`` is ``phi``'s component count when it differs from ``K``.
     """
     n_components = k_parameters if components is None else components
     columns = {

@@ -190,16 +190,11 @@ def resolve_curvature(
 ) -> CurvatureDecision:
     """Apply the binding one-retry policy to a family-supplied curvature.
 
-    ``hybrid`` is already constructed and documented by the family.  Generic
-    policy code diagnoses that matrix as supplied; it does not invent a new
-    block combination.
-
-    After the retry, ``fisher_matrix`` is accepted when it is semidefinite.
-    Otherwise ``semidefinite_fallback`` is called, once, for the caller's
-    nearest positive semidefinite matrix to the requested one, which is then
-    accepted with ``actual_source="nearest_semidefinite"``. It is called only
-    on that path, so a caller can defer building the matrix until it is
-    needed. With neither fallback usable the policy raises, as before.
+    ``hybrid`` is diagnosed as the family supplied it. After the retry,
+    ``fisher_matrix`` is accepted when semidefinite; otherwise
+    ``semidefinite_fallback`` is called once, lazily, for the nearest positive
+    semidefinite matrix, accepted with ``actual_source="nearest_semidefinite"``.
+    With neither usable the policy raises.
     """
     if requested_source not in ("observed", "fisher", "hybrid"):
         raise ValueError(f"invalid curvature source: {requested_source!r}")

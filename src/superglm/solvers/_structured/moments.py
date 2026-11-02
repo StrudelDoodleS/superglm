@@ -55,9 +55,8 @@ class FactorSmoothMomentSystem:
     """Raw FactorSmooth moments and working sums, never factored.
 
     The moment kernel an ``fs`` fit keeps for operators that only enter traces
-    (the REML weight-derivative operators, one-engine design §3.4 and perf
-    finding F5); its factor comes from the leaf system instead
-    (``block_leaves.build_factor_smooth_leaf_system``).
+    (the REML weight-derivative operators); its factor comes from the leaf
+    system (``block_leaves.build_factor_smooth_leaf_system``).
     """
 
     operator: BlockSymmetricOperator
@@ -196,25 +195,19 @@ def nested_prior_statistics(
 ) -> tuple[NDArray, BorderGenerators | None]:
     """The border centre ``c0`` and the structural null generators for these prior weights.
 
-    One-engine design §3.2: every border column that is not one-hot is
-    centred on its shifted prior-weighted mean ``c0_j = x_ref,j + sum_r
-    omega_r (x_rj - x_ref,j) / sum_r omega_r`` (``omega`` the prior weights,
-    ``x_ref`` the first row in leaf order with ``omega > 0``), from the rows
-    the row pass itself forms (``_leaf_rows``) in its fixed chunks and serial
-    order (``_prior_center``).  The rule is chosen by type, never by the
-    column's values: it is equivariant to a shift of the column to one
-    rounding, and a column constant on its weighted rows centres to an exact
-    zero on them.  One-hot columns (``CategoricalGroupMatrix`` blocks, random
-    effects included) keep 0 by type, so their entries stay exact zeros and
-    ones.  §3.6 step 1: the exact null generators of the border's data part
-    (``_border_generators``).  ``None`` prior weights are unit weights.
+    Every border column that is not one-hot is centred on its shifted
+    prior-weighted mean ``c0_j = x_ref,j + sum_r omega_r (x_rj - x_ref,j) /
+    sum_r omega_r`` (``x_ref`` the first row in leaf order with ``omega > 0``),
+    from the row pass's own rows in fixed order (``_prior_center``). The rule
+    is chosen by type, never by value: it is shift-equivariant to one rounding
+    and a column constant on its weighted rows centres to exact zeros.
+    One-hot columns keep 0. Also returns the exact null generators of the
+    border's data part (``_border_generators``). ``None`` prior weights are
+    unit weights.
 
-    Cache contract (``NestedStructuredLayout.prior_cache``): owned by the
-    layout and living as long as it; keyed by the prior weights themselves,
-    held as a read-only copy beside the caller's array and matched by
-    identity with that array or by exact equality with the copy, at most two
-    entries.  The border matrices and codes never change, so nothing else
-    invalidates an entry; no working weight, lambda or penalty enters one.
+    Cache (``NestedStructuredLayout.prior_cache``): owner and lifetime the
+    layout; keyed by the prior weights (identity or exact equality with a
+    read-only copy), at most two entries; nothing else invalidates an entry.
     """
     n = len(layout.leaf_order)
     weights = np.ones(n) if prior_weights is None else np.asarray(prior_weights, dtype=np.float64)
@@ -233,21 +226,14 @@ def nested_prior_statistics(
 
 
 def _prior_center(layout: NestedStructuredLayout, weights: NDArray, chunk_size: int) -> NDArray:
-    """The §3.2 centre ``(q,)`` of the border columns (``nested_prior_statistics``).
+    """The centre ``c0`` ``(q,)`` of the border columns (``nested_prior_statistics``).
 
     A coded block (a discretized spline's support table) takes the shifted sum
-    on its compact form, by type (design §3.2: "computed once per design from
-    compact forms"; Li & Wood 2020, Algorithm 0): every row of bin ``b`` is
-    the table row ``T_b``, so ``sum_r omega_r (x_r - x_ref) = sum_b Omega_b
-    (T_b - T_ref)`` with ``Omega_b`` the bin's prior weight, ``x_ref = T_ref``
-    the first weighted row's table row.  The differences are the row pass's
-    own, so a column constant on the weighted rows still shifts by exact
-    zeros and centres to ``x_ref``; the sum has ``m`` terms instead of ``n``,
-    with ``Omega_b`` rounding at ``gamma_(n_b)`` (Higham 2002, Lemma 3.1), the
-    same ``gamma_n sum omega |x - x_ref|`` order of bound.  It costs ``O(n)``
-    for the bin weights and ``O(m k)`` per lambda rebuild of the table,
-    where the row pass cost ``O(n q)``.  Every other dense block keeps the
-    serial row pass in leaf order, column by column as before.
+    on its compact form (Li & Wood 2020, Algorithm 0): ``sum_r omega_r (x_r -
+    x_ref) = sum_b Omega_b (T_b - T_ref)``, ``m`` terms instead of ``n``, with
+    ``Omega_b`` rounding at ``gamma_(n_b)`` (Higham 2002, Lemma 3.1), the same
+    order of bound. Every other dense block takes the serial row pass in leaf
+    order.
     """
     center = np.zeros(len(layout.small_indices))
     dense_columns = np.flatnonzero(~layout.indicator_columns)
@@ -324,20 +310,14 @@ def _table_masses(
 def _border_generators(
     layout: NestedStructuredLayout | FactorSmoothLeafLayout, weights: NDArray
 ) -> BorderGenerators | None:
-    """The exact null generators of the border's data part (design §3.6 step 1), by term type.
+    """The exact null generators of the border's data part, by term type.
 
-    Every ``RandomEffectGroupMatrix`` border block is complete (a training row
-    with no level is refused at bind), so its block sum is the intercept
-    column; the super-root has eliminated the intercept, so that sum is an
-    exact null of the border's data part for any working weights.  Every
-    pair of border random-effect blocks whose level codes nest (each child
-    code meets a single parent code: the pattern, once per design, never a
-    value) adds, per parent level, the parent indicator minus its children's.
-    Both are exact nulls on every row of positive prior weight, restricted to
-    the levels with positive prior exposure (a choice of basis for the same
-    null space, like the reference level; see below).  ``reduce_generators``
-    keeps an independent set, reduced to the identity on reference columns
-    chosen by prior exposure.  ``None`` without a random-effect border block.
+    A ``RandomEffectGroupMatrix`` border block is complete, so its block sum is
+    the eliminated intercept column: an exact null for any working weights.
+    Each pair of border random-effect blocks whose codes nest adds, per parent
+    level, the parent indicator minus its children's. Both are restricted to
+    levels with positive prior exposure; ``reduce_generators`` keeps an
+    independent set. ``None`` without a random-effect border block.
     """
     blocks, offset = [], 0
     for block, matrix in enumerate(layout.small_matrices):
@@ -352,10 +332,8 @@ def _border_generators(
     exposure = np.zeros(offset)
     for _, columns, matrix in blocks:
         exposure[columns] = np.bincount(matrix.codes, weights=weights, minlength=len(columns))
-    # Every generator is supported on the levels with positive prior exposure:
-    # a level without any is an exactly zero column on the weighted rows, a
-    # data null by itself whose row of Q is exact zeros; left out of the
-    # generators it stays decoupled, and its coefficient an exact zero.
+    # Generators live on levels with positive prior exposure; a level without
+    # any is an exactly zero column, decoupled, with an exact-zero coefficient.
     exposed = exposure > 0.0
     candidates, labels = [], []
     for name, columns, _ in blocks:
@@ -396,49 +374,25 @@ def _centered_leaf_pass(
     """Return leaf means, the centred within-leaf scatter, the absolute mass, the deviations,
     with ``rhs`` ``sum_r rhs_r (x_r - c)``, and ``sum_r a_r (x_r - c)``, both on the dense columns.
 
-    The exact centred row pass of §3.4 and §3.6 (decision 1) in ONE pass over
-    the border rows: rows are taken in leaf order (``layout.leaf_order``)
-    in chunks of ``chunk_size`` rows, each chunk written once into a reused
-    buffer from the blocks' own arrays in leaf order (``layout.leaf_rows``)
-    and centred on the border centre ``c`` (``border_center``), so the pass holds a few
-    ``chunk_size x q`` buffers whatever the largest leaf.  Every row sum runs
-    in the compiled serial kernels of ``leaf_kernels``, in leaf order.
+    One exact centred row pass (nested note §3.4, §3.6) over the border rows in
+    leaf order, in chunks of ``chunk_size`` rows centred on ``border_center``;
+    every row sum runs in the serial kernels of ``leaf_kernels``.
 
-    Without ``mean`` (the data pass) it forms, for any sign pattern of the
-    rows (signed-rows note §4.1, one-engine design §3.3), the leaf centres on
-    the ABSOLUTE weights, ``mu_l = x_ref - c + sum_r |a_r| ((x_r - c) - (x_ref
-    - c)) / sum_r |a_r|`` about each leaf's first weighted row (0 where the
-    leaf has no weighted row; ``leaf_magnitude`` holds ``sum_{r in l} |a_r|``),
-    so a column constant on a leaf's weighted rows gives that constant
-    exactly, and the carried deviation about that centre,
-    ``delta_l = sum_r a_r (x_r - mu_l) = -2 sum_{r: a_r < 0} |a_r| (x_r -
-    mu_l)``, whose second form is an exact zero (an empty sum) for a leaf
-    without a negative row: rows ``a >= 0`` reproduce the non-negative
-    construction bit for bit, and the deviation is returned as ``None`` when
-    every entry is an exact zero.  A leaf cut by a chunk edge is centred piece
-    by piece on each piece's own centre and its pieces are combined after the
-    pass (``_combine_leaf_pieces``).  With ``mean`` (a signed operator about
-    its factor's data centres) it forms ``dev_l = sum_r a_r (x_r - m_l)``,
-    summed over a cut leaf's pieces.  The scatter ``sum_r a_r (x_r - m_l)(x_r
-    - m_l)'`` is ``P'P - N'N`` per chunk (``_root_scatter``), from the centred
-    rows of positive and negative weight, and never subtracts raw moments, so
-    such a column has an exactly zero row and column; chunks accumulate with
-    compensated addition and the result is symmetrized.  The absolute mass is
-    ``sum_r e_r (x_rj - m_lj)^2`` with ``e_r`` the scale of row ``r``'s weight
-    error (``error``, in row order; ``|a|`` when not given): the caller that
-    builds the rows supplies it, ``w`` for Fisher rows and ``w0 (|u^2/V| +
-    |(y - mu) factor|)`` for observed rows (design §3.3), chosen by the type of
-    rows, never by their values.
+    Without ``mean`` (the data pass) the leaf centres use the absolute weights,
+    ``mu_l = x_ref - c + sum_r |a_r| ((x_r - c) - (x_ref - c)) / sum_r |a_r|``,
+    and the carried deviation is ``delta_l = -2 sum_{r: a_r < 0} |a_r| (x_r -
+    mu_l)``, an exact zero (``None``) without negative rows. Cut leaves are
+    combined after the pass (``_combine_leaf_pieces``). With ``mean`` it forms
+    ``dev_l = sum_r a_r (x_r - m_l)``. The scatter is ``P'P - N'N`` per chunk
+    (``_root_scatter``), never a raw-moment subtraction, accumulated with
+    compensated addition and symmetrized. The absolute mass is
+    ``sum_r e_r (x_rj - m_lj)^2``, ``e_r`` the row's weight-error scale
+    (``error``, ``|a|`` by default), chosen by row type.
 
-    The layout's random-effect border blocks (``sparse_indicators``, by type)
-    are never materialized.  A row's centred entry of a one-hot column is exactly zero
-    on every level its leaf's rows never take, so each chunk forms those
-    blocks as sparse rows on the levels of each row's leaf
-    (``_indicator_entries``), their segment means in the same shifted form on
-    cells (``_indicator_means``); every product, sum and piece update then
-    reads the same nonzero terms as the dense pass.  The pass works on the
-    columns ``[dense | indicator]`` and returns the layout's order; a given
-    ``mean`` must vanish off each leaf's levels, as a data pass's means do.
+    Random-effect border blocks are never materialized: each chunk forms them
+    as sparse rows on its leaves' levels (``_indicator_entries``,
+    ``_indicator_means``), reading the same nonzero terms as the dense pass. A
+    given ``mean`` must vanish off each leaf's levels.
     """
     n = len(weights)
     order, starts = layout.leaf_order, layout.leaf_starts
@@ -588,16 +542,12 @@ def _centered_leaf_pass(
 def _root_scatter(positive: NDArray, negative: NDArray) -> NDArray:
     """``P'P - N'N`` ``(q, q)`` by BLAS ``syrk``, its upper triangle mirrored.
 
-    ``P`` and ``N`` hold ``sqrt(|a_r|) (x_r - m)`` for a chunk's rows of positive
-    and negative weight (``leaf_kernels._center_rows``).  Each product
-    ``fl(sqrt|a|) x_i fl(sqrt|a|) x_j`` is ``|a| x_i x_j (1 + theta_4)``, so the
-    entry is within ``gamma_(m+5) sum_r |a_r| |x_ri| |x_rj|`` of the exact
-    scatter (Higham 2002, Lemma 3.1 and eq. 3.4, one more rounding for the
-    difference): the form of the ``X' diag(a) X`` product it replaces, three
-    roundings more per term, at half its flops.  A column that is exactly zero
-    on every weighted row keeps an exactly zero row and column.  With no dense
-    column (a border of random-effect blocks alone) the block is empty and no
-    BLAS call is made: ``syrk`` rejects a zero leading dimension.
+    ``P`` and ``N`` hold ``sqrt(|a_r|) (x_r - m)`` for the rows of positive and
+    negative weight. Each entry is within ``gamma_(m+5) sum_r |a_r| |x_ri|
+    |x_rj|`` of the exact scatter (Higham 2002, Lemma 3.1 and eq. 3.4). A
+    column zero on every weighted row keeps an exactly zero row and column.
+    With no dense column no BLAS call is made (``syrk`` rejects a zero
+    leading dimension).
     """
     if not positive.shape[1]:
         return np.zeros((0, 0))
@@ -724,24 +674,17 @@ def _combine_leaf_pieces(
 ) -> None:
     """Combine the pieces of every leaf a chunk edge cut, in place (data pass).
 
-    Each piece ``p`` of leaf ``l`` was centred on its own ``|a|``-centre
-    ``mu_p`` (0 when its absolute weight ``A_p`` is 0), added ``sum a (x -
-    mu_p)(x - mu_p)'`` to ``within`` and ``sum e (x - mu_p)^2`` to ``absolute``,
-    and records its signed weight ``W_p``, ``A_p``, ``mu_p``, ``E_p = sum e``,
-    ``t_p = sum e (x - mu_p)``, its deviation ``delta_p = sum a (x - mu_p)`` and
-    its negative mass ``N_p = sum_{a < 0} |a|``.  The leaf centre is the
-    ``A``-weighted mean of the piece centres shifted about the heaviest piece,
-    ``mu_l = mu_h + sum_p A_p (mu_p - mu_h) / A_l``, so a column constant on the
-    leaf's weighted rows keeps that constant and a zero scatter row.  With
-    ``d_p = mu_p - mu_l`` the exact identities (Chan, Golub & LeVeque 1979, for
-    any centres; signed-rows note §4.1)
+    Each piece ``p`` was centred on its own ``|a|``-centre ``mu_p`` and records
+    ``W_p``, ``A_p``, ``mu_p``, ``E_p``, ``t_p``, ``delta_p`` and its negative
+    mass ``N_p``. The leaf centre is ``mu_l = mu_h + sum_p A_p (mu_p - mu_h) /
+    A_l`` about the heaviest piece; with ``d_p = mu_p - mu_l`` the exact
+    identities (Chan, Golub & LeVeque 1979)
 
         sum_{r in l} a (x - mu_l)(x - mu_l)' = sum_p [W_p-scatter + delta_p d_p' + d_p delta_p' + W_p d_p d_p'],
         sum_{r in l} a (x - mu_l) = sum_p [delta_p + W_p d_p] = sum_p [delta_p - 2 N_p d_p],
         sum_{r in l} e (x - mu_l)^2 = sum_p [U_p + 2 d_p t_p + E_p d_p^2]
 
-    update the scatter, the deviation (its second form uses ``sum_p A_p d_p =
-    0``, an exact zero for pieces without negative rows) and the absolute mass.
+    update the scatter, the deviation and the absolute mass.
     """
     leaf, weight, total, centre, error, error_residual, piece_deviation, negative = (
         np.concatenate(values) for values in zip(*pieces, strict=True)
@@ -781,31 +724,18 @@ def _nested_pass(
 ) -> tuple[NestedLeafStatistics, NDArray | None, NDArray]:
     """One row pass of a nested chain: per-leaf statistics of the row weights.
 
-    ``weight`` comes from the leaf kernel; ``mean``, ``within``, ``absolute``
-    and ``deviation`` from ``_centered_leaf_pass`` about the border centre.
-    ``mean=None`` is the data pass (``|w|``-centred data means and their
-    carried deviation, design §3.3) about the centre of ``prior_weights``
-    (``nested_prior_statistics``; the design's prior weights, ``None`` for
-    unit weights), and it carries the border's structural null generators for
-    the factor.  A given ``mean`` is a signed pass about those means and needs
-    the ``center`` of the factor it belongs to (``data_operator.leaf.center``);
-    it carries no generators.  ``error`` ``(n,)`` is the per-row scale of the
-    weights' rounding (``|weights|`` when not given; the caller passes it by
-    the type of its rows, design §3.3).  With ``rhs`` (the working right-hand
-    side ``Wz``) it also returns ``sum_r rhs_r (x_r - c)`` on the border's
-    dense columns (those outside the sparse random-effect blocks, in layout
-    order), from the pass's own centred rows: the sum rounds at ``|x - c|``
-    rather than at a column's offset.  It always returns ``sum_r weights_r
-    (x_r - c)`` on the same columns, from the same rows.
+    ``mean=None`` is the data pass about the centre of ``prior_weights``
+    (``nested_prior_statistics``), carrying the structural null generators; a
+    given ``mean`` is a signed pass about those means and needs the factor's
+    ``center``, with no generators. ``error`` ``(n,)`` is the per-row weight
+    rounding scale (``|weights|`` by default). With ``rhs`` it also returns
+    ``sum_r rhs_r (x_r - c)`` on the dense border columns; it always returns
+    ``sum_r weights_r (x_r - c)``, both from the centred rows.
 
-    The running error bound's inputs (signed-rows note §4.4): ``error_mass``
-    ``sum_{r in l} e_r`` per leaf and the two rounding constants of the pass,
-    ``gamma_weight = (n_leaf + 16) eps`` for the sequential leaf sums of
-    ``omega_l`` and ``delta_l`` (``n_leaf`` the largest leaf's rows; 16 the
-    roundings that form one observed row's weight) and ``gamma_scatter =
-    (n_chunk + 21) eps`` for the within scatter, a ``syrk`` over at most
-    ``n_chunk`` rows (Higham 2002, Lemma 3.1 and eq. 3.4, plus the row's own
-    roundings).
+    The bound's inputs: ``error_mass`` per leaf, ``gamma_weight = (n_leaf +
+    16) eps`` for the sequential leaf sums (16 roundings form one observed
+    weight) and ``gamma_scatter = (n_chunk + 21) eps`` for the within
+    ``syrk`` (Higham 2002, Lemma 3.1 and eq. 3.4).
     """
     leaf = group_matrices[layout.leaf_group_index]
     if not isinstance(leaf, RandomEffectGroupMatrix):
@@ -870,17 +800,12 @@ def build_nested_structured_system(
 ) -> NestedStructuredSystem:
     """Build the nested data operator and sufficient statistics from one set of rows.
 
-    ``mean=None`` is the data system of a PIRLS iterate, centred by the fit's
-    ``prior_weights`` (``nested_prior_statistics``); a signed W-derivative
-    operator passes its factor's ``data_operator.leaf.mean`` and ``.center`` (§6) and
-    ``Wz=None``: it has no right-hand side, so ``X'Wz`` is the exact zero,
-    formed without a row pass.  ``error`` is the rows' weight-error scale
-    (``_nested_pass``): the observed geometry passes its observed rows' scale,
-    every other caller's rows are charged at ``|W|``.  Only the leaf group touches rows: one centred
-    leaf pass, whose centred sums also give ``X_b'w`` and ``X_b'Wz`` on the
-    dense border columns (``sum a (x - c) + c sum a``; a random-effect block
-    through its own transpose).  Every parent level is a subtree sum; the
-    border Gram ``X_b'WX_b`` is never formed (decision 1).
+    ``mean=None`` is a PIRLS iterate's data system, centred by
+    ``prior_weights``; a signed W-derivative operator passes its factor's
+    ``leaf.mean`` and ``.center`` (§6) and ``Wz=None`` (``X'Wz`` is then the
+    exact zero). ``error`` is the rows' weight-error scale (``|W|`` by
+    default). One centred leaf pass also gives ``X_b'w`` and ``X_b'Wz``; the
+    border Gram ``X_b'WX_b`` is never formed (§12, decision 1).
     """
     weights, weighted_rhs, leaf = _validate_structured_inputs(
         group_matrices,
@@ -1058,8 +983,8 @@ def build_block_structured_system(
                 weights,
                 rhs=(weighted_rhs,),
                 include_xtw=True,
-                # the weight-derivative operators this kernel serves are signed
-                # by type (one-engine design §3.3): no row's sign picks the path
+                # the weight-derivative operators are signed by type: no row's
+                # sign picks the path
                 signed=True,
             )
             if small_moments.xtw is None:  # pragma: no cover - requested above
@@ -1182,9 +1107,9 @@ def build_structured_system(
     (its layout is built here for ``None``).  ``prior_weights`` (the fit's
     prior weights; ``None`` for unit weights) set the layout's border centre
     (``nested_prior_statistics``, ``block_leaves.factor_smooth_prior_statistics``),
-    and ``error`` is the rows' weight-error scale.  ``signed`` declares
-    observed-curvature rows by type (one-engine design §3.3), which the leaf
-    system factors by the J-orthogonal route.
+    and ``error`` is the rows' weight-error scale. ``signed`` declares
+    observed-curvature rows by type, which the leaf system factors by the
+    J-orthogonal route.
     """
     if isinstance(layout, NestedStructuredLayout):
         return build_nested_structured_system(
@@ -1206,10 +1131,8 @@ def build_structured_system(
     )
 
 
-# Retired by the one engine (design §3.12): the systems of the retired
-# block-Schur, range-space sz and scalar factors, importable at their pickled
-# path as inert stand-ins so that models saved by v0.35.0 load; a later minor
-# release may drop them.
+# Inert stand-ins for the systems of retired structured factors, importable
+# at their pickled path so that models saved by v0.35.0 load.
 __getattr__ = module_getattr(
     __name__,
     frozenset(

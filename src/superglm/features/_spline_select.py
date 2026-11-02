@@ -25,28 +25,23 @@ def eigendecompose_select(
 ) -> tuple[NDArray, NDArray, NDArray]:
     """Eigendecompose the constrained penalty for select=True splitting.
 
-    An eigenvalue is null when it is at most ``_REML_RANK_THRESHOLD`` of the
-    largest, the rule REML ranks the same penalty by, so the split agrees with
-    it. The cut is relative because a penalty scales with a power of the
-    feature's units (a cubic regression spline's with the inverse cube of its
-    range), and it sits far above the eigensolver's resolution of ``n * eps``
-    of the largest eigenvalue (*LAPACK Users' Guide*, 3rd ed., section 4.7).
+    An eigenvalue is null when it is at most ``_REML_RANK_THRESHOLD`` of the largest,
+    the rule REML ranks the same penalty by.  The cut is relative because a penalty
+    scales with a power of the feature's units, and it sits far above the
+    eigensolver's resolution of ``n * eps`` of the largest eigenvalue (*LAPACK
+    Users' Guide*, 3rd ed., section 4.7).
 
-    A relative cut fixes units but not the spread within a penalty: an
-    integrated derivative penalty (``cr``, ``bs``) gives a direction confined
-    to a knot interval of width ``w`` an eigenvalue of order ``w**-3``, so
-    quantile knots on a heavy-tailed column put the tail interval's direction
-    under the cut. For those kinds ``structural``, the constrained penalty with
-    each interval's block at unit norm, decides the split: a positive
-    reweighting of positive semidefinite blocks has their null space (the
-    polynomials of degree below ``m``) without the spread. That is Wood, Pya
-    and Saefken's balanced penalty (JASA 111, 2016, section 3.1.1), whose
-    penalised and unpenalised spaces are those of the penalty it balances. Where the real penalty's spectrum shows the same
-    nullity at the cut, its own eigenvectors are kept, so those fits are
-    unchanged; otherwise the null space is the structural one and the range is
-    the real penalty restricted to the structural range and diagonalised there,
-    which ``_certified_range`` refuses when the penalty no longer resolves a
-    range direction above round-off.
+    A relative cut fixes units but not the spread within a penalty: an integrated
+    derivative penalty (``cr``, ``bs``) gives a direction confined to a knot interval
+    of width ``w`` an eigenvalue of order ``w**-3``, so quantile knots on a
+    heavy-tailed column can put a tail direction under the cut.  For those kinds
+    ``structural``, the constrained penalty with each interval's block at unit norm,
+    decides the split: it has the penalty's null space (polynomials of degree below
+    ``m``) without the spread (Wood, Pya and Saefken, JASA 111, 2016, section
+    3.1.1).  Where the real penalty's spectrum shows the same nullity, its own
+    eigenvectors are kept; otherwise the range is the real penalty restricted to the
+    structural range and diagonalised there, which ``_certified_range`` refuses when
+    the penalty no longer resolves a range direction above round-off.
     """
     eigvals, eigvecs = np.linalg.eigh(omega_c)
     null_mask = _null_mask(eigvals)
@@ -94,19 +89,14 @@ def _certified_range(
 ) -> tuple[NDArray, NDArray]:
     """The penalty on the structural range, diagonalised, where binary64 certifies it definite.
 
-    In exact arithmetic ``M = basis' omega_c basis`` is positive definite, since
-    ``basis`` spans the complement of the penalty's null space, but an
-    integrated derivative penalty on skewed knots puts its tail direction at
-    a tiny fraction of the bulk. The split is refused only where the computed
-    ``M`` cannot certify that direction positive: Rump's test
-    (``reml.multi_penalty._certifies_positive_definite``) holds every
-    symmetric matrix within the formation enclosure of ``M`` positive
-    definite, so a refusal means binary64 cannot certify the direction
-    penalised at all. The bar it replaces, the eigensolver's ``p(n) eps``
-    times the shared ``certification_band``, refused directions 30 times
-    above that resolution (bs, lognormal(0, 2), 20 knots: 1.5e-13 of the
-    largest). The computed eigenvalues must also be positive for the
-    diagonal returned.
+    In exact arithmetic ``M = basis' omega_c basis`` is positive definite, but an
+    integrated derivative penalty on skewed knots puts its tail direction at a tiny
+    fraction of the bulk.  The split is refused only where the computed ``M`` cannot
+    certify that direction positive: Rump's test
+    (``reml.multi_penalty._certifies_positive_definite``) holds every symmetric
+    matrix within the formation enclosure of ``M`` positive definite, so a refusal
+    means binary64 cannot certify the direction penalised at all.  The computed
+    eigenvalues must also be positive for the diagonal returned.
     """
     from superglm.reml.multi_penalty import (
         _certified_congruence,

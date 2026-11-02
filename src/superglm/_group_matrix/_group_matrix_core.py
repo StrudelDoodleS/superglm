@@ -94,11 +94,10 @@ class SparseGroupMatrix:
 def _bincount_levels(codes: NDArray, weights: NDArray, length: int) -> NDArray:
     """``np.bincount(codes, weights, minlength=length)`` without holding the GIL.
 
-    Gram blocks run on worker threads (``_block_queue``), where
-    ``np.bincount`` held the GIL for its whole pass; ``_level_sums`` adds the
-    same rows in the same order, so the sums are bitwise ``np.bincount``'s.
-    Any input it does not take (a code outside ``[0, length)``, a length
-    mismatch, codes that are not integers) goes to ``np.bincount`` itself.
+    Gram blocks run on worker threads (``_block_queue``); ``_level_sums`` adds the
+    same rows in the same order, so the sums are bitwise ``np.bincount``'s.  Any
+    input it does not take (a code outside ``[0, length)``, a length mismatch,
+    non-integer codes) goes to ``np.bincount`` itself.
     """
     codes = np.asarray(codes)
     weights = np.asarray(weights, dtype=np.float64)
@@ -200,10 +199,8 @@ class RandomEffectGroupMatrix(CategoricalGroupMatrix):
 
 
 # The exact types whose rows are the one-hot rows of their codes (the sink code
-# ``n_levels`` an empty row).  A route that reads ``codes`` in place of the
-# group's own products admits these types only, never a subclass, whose algebra
-# may differ.  A random effect adds metadata, not algebra; its codes run ``0 ..
-# n_levels - 1``, so a table's sink row is simply never read.
+# ``n_levels`` an empty row).  Routes that read ``codes`` admit these types only,
+# never a subclass, whose algebra may differ.
 ONE_HOT_CODE_TYPES = (CategoricalGroupMatrix, RandomEffectGroupMatrix)
 
 
@@ -436,10 +433,9 @@ class FactorSmoothGroupMatrix:
             self.natural_map,
             optimize=True,
         )
-        # The raw kernels update symmetric entries identically.  BLAS
-        # contraction through the natural map can still leave round-off at
-        # opposite triangle entries, large enough to trip exact structured
-        # factor validation on production-sized data.
+        # The raw kernels update symmetric entries identically, but BLAS contraction
+        # through the natural map can leave round-off at opposite triangle entries, enough
+        # to trip exact structured factor validation.
         local_gram = 0.5 * (local_gram + local_gram.transpose(0, 2, 1))
         return (
             local_gram,
@@ -776,10 +772,9 @@ class SparseSSPGroupMatrix:
             and W.shape == (self.shape[0],)
             and W.dtype == self._data.dtype == self.R_inv.dtype == np.dtype(np.float64)
         ):
-            # A fresh view checks the current indices instead of trusting
-            # B's cached canonical-format flag after an in-place mutation.
-            # The sparse-object constructor also retains int64 indices;
-            # reconstructing from arrays can narrow and copy the full source.
+            # A fresh view checks the current indices instead of trusting B's cached
+            # canonical-format flag after an in-place mutation; the sparse-object constructor
+            # retains int64 indices where reconstructing from arrays can narrow and copy.
             raw_basis = sp.csr_matrix(
                 self.B,
                 shape=(self.shape[0], self._p_b),
@@ -799,10 +794,9 @@ class SparseSSPGroupMatrix:
             raw_gram, self.R_inv, gram
         ):
             if W.min(initial=0) < 0 < W.max(initial=0):
-                # A signed moment can vanish without basis cancellation.
-                # Its absolute error scale is X'|W|X, not |diag(X'WX)|.
-                # Only flagged mixed-sign calls need this companion pass;
-                # take abs per row rather than allocating another W vector.
+                # A signed moment can vanish without basis cancellation; its absolute error scale
+                # is X'|W|X, not |diag(X'WX)|.  Only flagged mixed-sign calls need this pass; take
+                # abs per row rather than allocating another W vector.
                 energy_raw = csr_gram(self._data, self._indices, self._indptr, W, self._p_b, True)
                 energy = self.R_inv.T @ energy_raw @ self.R_inv
                 if not _ssp_projection_cancels(energy_raw, self.R_inv, energy):
@@ -823,19 +817,12 @@ class SparseSSPGroupMatrix:
         return sub
 
 
-# A CSR block stores 12 bytes per entry (float64 + int32 index) against 8 for
-# the same matrix dense, so CSR stops paying for itself on memory alone above
-# 2/3 density.  The gram is the sharper argument: `_csr_weighted_gram` is a
-# scalar accumulation over nonzero PAIRS, so it costs (density * p)**2 per row
-# against a dense p**2 -- but BLAS runs its p**2 in a blocked kernel, and the
-# crossover in practice sits far below the flop-count crossover.
-#
-# The threshold is set at 0.9 rather than at either crossover deliberately.  The
-# shape this exists for is exact: an interaction marginal on a `cr` parent has a
-# GLOBALLY supported basis, and measures density 1.000 -- every row, every
-# column.  At 0.9 both memory and flops improve strictly, so the change cannot
-# make an ordinary sparse block worse; it only reclaims the case where the
-# sparse representation was storing no zeros at all.
+# A CSR block stores 12 bytes per entry (float64 + int32 index) against 8 dense,
+# so CSR stops paying on memory alone above 2/3 density, and `_csr_weighted_gram`
+# (a scalar loop over nonzero PAIRS) loses to BLAS well below the flop-count
+# crossover.  The threshold is 0.9: an interaction marginal on a `cr` parent has a
+# globally supported basis at density 1.000, and at 0.9 both memory and flops
+# improve strictly, so an ordinary sparse block cannot get worse.
 _DENSE_LEVEL_SATURATION = 0.9
 
 # Bound observation-dependent scratch, independently of the p-by-p products.
@@ -845,21 +832,13 @@ _MAX_SSP_GRAM_WORKSPACE_BYTES = 64 << 20
 def _ssp_projection_cancels(raw: NDArray, transform: NDArray, gram: NDArray) -> bool:
     """Screen cancellation in the two raw-moment projection products.
 
-    With unit roundoff u=eps/2, diagonal c of R' G R carries at most
-    gamma_(2*m_c) (|R|' |G| |R|)_cc, where gamma_m=m*u/(1-m*u) and m_c counts
-    the nonzeros of column c of R. Each of that diagonal's two inner
-    products sums m_c terms: a zero entry of R makes an exact zero product,
-    and adding a zero is exact in any summation order, so it rounds nothing
-    (Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., 2002,
-    section 3.1; the sparse matrix-vector bound of Graillat, Jezequel, Mary
-    and Molina, SIAM J. Sci. Comput. 46(1), 2024, counts nonzeros per row
-    the same way). Charging all k = R.shape[0] rows made the bound exceed
-    the budget below with no cancellation at all once k reached
-    max(100, p): an identity R, whose products are exact, screened as
-    cancelling.
-    If even a diagonal exceeds a dimension/epsilon resolution budget, form
-    projected rows instead. This is an arithmetic dispatch screen, not a
-    rank certificate; the solver's existing rank checks remain authoritative.
+    With unit roundoff u, diagonal c of R' G R carries at most gamma_(2*m_c)
+    (|R|' |G| |R|)_cc, where m_c counts the nonzeros of column c of R (a zero entry
+    makes an exact zero product and adding zero is exact; Higham 2002, section 3.1;
+    Graillat, Jezequel, Mary and Molina, SIAM J. Sci. Comput. 46(1), 2024).  Charging
+    all R.shape[0] rows would make an identity R screen as cancelling.  If even a
+    diagonal exceeds a dimension/epsilon resolution budget, form projected rows
+    instead.  This is an arithmetic dispatch screen, not a rank certificate.
     """
     absolute = np.abs(transform)
     envelope = np.sum((absolute.T @ np.abs(raw)) * absolute.T, axis=1)
@@ -1000,10 +979,9 @@ class SplineCategoricalGroupMatrix:
         self._indices = self.B_level.indices
         self._indptr = self.B_level.indptr
         self._p_b = self.B_level.shape[1]
-        # Deferred: a block that never grams -- one replaced by its
-        # support-compressed variant, say -- must not pay for a dense copy it
-        # will never read.  ``False`` means undecided, ``None`` means decided to
-        # stay sparse.
+        # Deferred: a block that never grams (one replaced by its support-compressed
+        # variant) must not pay for a dense copy.  ``False`` means undecided, ``None``
+        # means decided to stay sparse.
         self._dense_level = False
         self.R_inv = np.asarray(R_inv)
         self.shape = (self.n_rows, self.R_inv.shape[1])

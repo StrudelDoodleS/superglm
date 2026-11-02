@@ -27,9 +27,8 @@ switch to the log-normal is made.
 The coefficients are exact rationals rounded once to float64: ``d_n`` by
 Lagrange-Buermann inversion of ``eta = t G(t)``, since
 ``eta/(lambda - 1) = G(t) t/(e^t - 1)`` is a function of ``t`` alone, and
-``G_n`` as the square root of ``g``'s series.  ``d_2 = +1/12``, which is what
-``Gamma*(a) = 1 + beta_1/a = 1 + 1/(12 a) + ...`` requires (GST's printed
-``-1/12`` is a sign error).
+``G_n`` as the square root of ``g``'s series.  ``d_2 = +1/12``, as
+``Gamma*(a) = 1 + 1/(12 a) + ...`` requires (GST print ``-1/12``).
 
 Derivatives.  Every intermediate is a bivariate Taylor polynomial (a jet) of
 total degree ``order``, stored as coefficients
@@ -52,7 +51,7 @@ Cancellation.
   ``J_k(t) = int_0^inf x^k e^(-t x - x^2/2) dx``.  Up to ``t = 4``,
   ``J_0 = sqrt(pi/2) erfc(t/sqrt 2) e^(t^2/2)`` and the forward recurrence
   ``J_k = (k - 1) J_{k-2} - t J_{k-1}`` (``J_1 = 1 - t J_0``) loses at most a
-  factor ``t^(2k)/k!`` (about 3e3 for ``J_4`` at ``t = 4``).  Beyond, the
+  factor ``t^(2k)/k!``.  Beyond, the
   ratios ``rho_k = J_k/J_{k-1} = k/(t + rho_{k+1})`` are the tails of the
   Laplace continued fraction (DLMF 7.9.2), the minimal solution of the same
   recurrence (Gautschi 1967, SIAM Rev. 9), evaluated bottom-up from depth
@@ -64,11 +63,8 @@ Cancellation.
 Truncation.  ``T`` truncated after ``beta_N`` equals
 ``sum_{m <= N} d_{m+1} q^m H_m(zeta)`` with ``H_m = zeta^m + m H_{m-2}``, so the
 remainder is led by ``d_{N+2} q^{N+1} H_{N+1}(zeta)``, and a derivative of order
-``k`` amplifies it by about ``(N + 2)^k``.  With ``TERMS = N = 35``, measured
-against mpmath at the domain's worst corner (``|q| = 0.2887``, ``|eta| = 1``),
-orders 0-2 are within ``2e-14``, order 3 within ``1e-12`` and order 4 within
-``6e-11`` of their scale, and far better inside the domain; 25 terms (GST's
-count for values) leave ``9e-8`` at order 4.
+``k`` amplifies it by about ``(N + 2)^k``; ``TERMS = N = 35`` (more than
+GST's 25 for values) covers order 4 at the domain's corner.
 
 Domain: ``|q| <= 0.2887`` (``a >= 12`` to rounding, GST's bound), ``|eta| <= 1``
 (GST's bound), ``|t| <= 1.25`` (where 29 terms of ``G`` reach float64 accuracy

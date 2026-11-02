@@ -545,15 +545,13 @@ def _reference_to_keep(fitted, spec, term: EditableTerm) -> tuple[Any, list[str]
     """The reference a keep-reference step keeps, named in ``spec``'s own levels.
 
     ``spec`` is the term's draft, or ``fitted`` when nothing waits. A draft that
-    already names a level or group (a reference an earlier waiting step kept
-    or set) keeps it. Otherwise the fitted reference is kept while the draft
-    still has that level or group; a draft regrouped by a step staged with
-    keep-reference off keeps its own policy.
+    already names a level or group keeps it; otherwise the fitted reference is
+    kept while the draft still has it (a draft regrouped with keep-reference
+    off keeps its own policy).
 
-    Also returns the original levels the reference stands for: those an
-    earlier keep-reference step recorded, else all of its members; and
-    whether it is a level or group, which a level named "first" is, rather
-    than a base policy.
+    Also returns the original levels the reference stands for (those recorded
+    by an earlier keep-reference step, else all its members) and whether it is
+    a level or group rather than a base policy (a level named "first" is one).
     """
     in_force = _in_force_reference(fitted)
     if spec is fitted:

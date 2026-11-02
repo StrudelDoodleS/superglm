@@ -19,12 +19,8 @@ the identity ``z / xi = t``:
 
     L1(z) = log1p(z)/z, D(z) = (log1p(z) - z/(1+z))/z^2, E(z) = (1/(1+z)^2 - 2 D(z))/z
 
-``D`` and ``E`` lose everything in their direct form as ``z -> 0`` (``E`` is a
-total loss by ``z = 1e-10``), so both switch to an alternating power series
-inside ``|z| < 0.5``.  The switch and truncation are checked against
-high-precision references in the family kernel tests.
-
-Imports only numpy, scipy and the standard library (primitive-kernel rule).
+``D`` and ``E`` lose everything in their direct form as ``z -> 0``, so both
+switch to an alternating power series inside ``|z| < 0.5``. Imports only numpy, scipy and the standard library (primitive-kernel rule).
 """
 
 from __future__ import annotations
@@ -289,10 +285,8 @@ _TAIL_SERIES_TERMS = 200
 def _tail_third_numerator(log_support: NDArray, u: NDArray) -> NDArray[np.float64]:
     """``6L - 6u - 3u^2 - 2u^3`` with ``L = log1p(z) = -log(1 - u)``, ``u = z/(1 + z)``.
 
-    It equals ``6 sum_{k >= 4} u^k / k``, a sum of positive terms, which is
-    summed below ``u = 0.8`` (200 terms leave a tail under ``0.8^200``);
-    the direct form there would cancel by a factor near 100 at ``z = 1/2``.
-    Above, the direct form cancels by at most a factor of five.
+    Equal to ``6 sum_{k >= 4} u^k / k``, summed (positive terms, 200 of them)
+    below ``u = 0.8``; above, the direct form cancels by at most a factor of five.
     """
     result = 6.0 * log_support - 6.0 * u - 3.0 * u * u - 2.0 * u**3
     inner = u < _TAIL_SERIES_LIMIT

@@ -262,7 +262,7 @@ class EditorWidget:
                 # With the live edits, this says whether Revert has anything to
                 # change: a structural step or a re-profile each make it False.
                 "in_force_is_original": self.session.model is self.session.reference_model,
-                # Export offers the Final fit model while it is current (D6).
+                # Export offers the Final fit model while it is current.
                 "final_fit": {
                     "available": self._final_fit is not None,
                     "stale": self._final_fit is not None
@@ -1131,7 +1131,7 @@ class EditorWidget:
         return self._jobs.status(self._jobs.start(kind, work, publish))
 
     def _cv_job(self):
-        """Run CV on the in-force structure (D5, D7); the caller holds the lock."""
+        """Run CV on the in-force structure; the caller holds the lock."""
         plan = capture_cv_run(self.session)
 
         def publish(run: CVRun) -> dict[str, Any]:
@@ -1145,7 +1145,7 @@ class EditorWidget:
         return (lambda context: run_cv(plan, context)), publish
 
     def _final_fit_job(self):
-        """Final fit on train and validation rows (D6); the caller holds the lock."""
+        """Final fit on train and validation rows; the caller holds the lock."""
         plan = capture_final_fit(self.session)
 
         def publish(final: FinalFit) -> dict[str, Any]:
@@ -1382,7 +1382,7 @@ class EditorWidget:
         )
 
     def _set_unseen(self, term: str, unseen: str) -> dict[str, Any]:
-        """Choose where the term's new levels go; nothing is refit (spec addendum S6)."""
+        """Choose where the term's new levels go; nothing is refit."""
         with self._lock:
             self._select_term(term)
             self.session.set_unseen(term, unseen)
@@ -1473,8 +1473,8 @@ def _display_mode(mode: str | None) -> str:
 
     A Databricks notebook's browser never reaches the cluster's local
     addresses, so the local server's page cannot load there. Without
-    anywidget the automatic choice stays the local server, as before notebook
-    mode existed, and warns how to install it.
+    anywidget the automatic choice stays the local server and warns how to
+    install it.
     """
     if mode is None:
         if not os.environ.get("DATABRICKS_RUNTIME_VERSION"):

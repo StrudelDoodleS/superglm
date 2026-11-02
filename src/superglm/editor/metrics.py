@@ -108,11 +108,11 @@ def compute_dataset_metrics(model, dataset: EvaluationDataset) -> dict[str, floa
 
     A dataset holding the fit's own objects is scored the same way: the fit's
     own statistics belong to its fitting design, which on a discrete fit is
-    the binned one that ``predict`` does not reproduce (#441).  When those
-    objects are unchanged since the fit (its data guard), the reports the fit
-    already gave are not repeated: the weight-contract check, the
-    custom-family prior-weight report and ``predict``'s own warnings, as in
-    ``model.metrics``.  The predicted values are the same either way.
+    the binned one that ``predict`` does not reproduce.  When those objects
+    are unchanged since the fit (its data guard), the reports the fit already
+    gave are not repeated (weight-contract check, custom-family prior-weight
+    report, ``predict``'s warnings), as in ``model.metrics``.  The predicted
+    values are the same either way.
     """
     validated_weights = _validate_evaluation_weights(
         dataset.sample_weight,

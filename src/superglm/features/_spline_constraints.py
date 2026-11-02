@@ -19,27 +19,21 @@ def curvature_difference_operator(
 ) -> NDArray:
     """Return the linear operator controlling B-spline curvature.
 
-    The first-derivative B-spline coefficients are proportional to
-    ``(c[i + 1] - c[i]) / (t[i + degree + 1] - t[i + 1])``.  Their successive
-    differences control the represented spline's second derivative.
+    The first-derivative B-spline coefficients are proportional to ``(c[i + 1] -
+    c[i]) / (t[i + degree + 1] - t[i + 1])``; their successive differences control
+    the second derivative.  When ``domain`` is supplied the rows are exact for
+    convexity/concavity on that closed interval for degrees one through three
+    (slope jumps for degree one, one probe per constant-curvature span for degree
+    two, every endpoint of the piecewise-linear second derivative for cubics);
+    without it, the derivative-coefficient difference operator over the active knot
+    interval is returned.
 
-    When ``domain`` is supplied, the rows are exact for convexity/concavity on
-    that closed interval for degrees one through three: slope jumps for a
-    piecewise-linear spline, one probe per constant-curvature span for degree
-    two, and every endpoint of the piecewise-linear second derivative for
-    cubic splines.  Without ``domain``, the derivative-coefficient difference
-    operator over the complete active knot interval is returned.
-
-    A knot vector in which ``degree + 1`` knots coincide strictly inside the
-    active interval is rejected: the probe set de-duplicates the repeated
-    breakpoint and would silently under-constrain.  A coincidence *on* a
-    fitted boundary -- what a clamped vector makes of an interior knot that
-    lands on the boundary -- is accepted on the exact ``domain`` paths, which
-    do not divide by the derivative knot spans.
-
-    The knot geometry is normalized before differentiation, and each result
-    row is normalized with a max-first norm.  Both operations preserve signs
-    while avoiding overflow/underflow for valid extreme predictor scales.
+    A knot vector with ``degree + 1`` coincident knots strictly inside the active
+    interval is rejected, since the probe set would de-duplicate it and silently
+    under-constrain.  A coincidence on a fitted boundary is accepted on the exact
+    ``domain`` paths, which do not divide by the derivative knot spans.  Knot
+    geometry is normalized before differentiation and each row by a max-first norm,
+    preserving signs while avoiding overflow/underflow at extreme predictor scales.
     """
     knots = np.asarray(knots, dtype=np.float64)
     if knots.ndim != 1 or not np.all(np.isfinite(knots)):
@@ -60,20 +54,12 @@ def curvature_difference_operator(
     normalized_knots = (knots - active_lo) / active_span
 
     spans = normalized_knots[degree + 1 : degree + n_basis] - normalized_knots[1:n_basis]
-    # A zero span means ``degree + 1`` consecutive knots coincide.  Only the
-    # derivative-coefficient operator divides by the spans; the exact
-    # degree-two and cubic domain rows are second-derivative probes that never
-    # do.  That alone does not make every coincidence admissible:
-    #
-    # - Strictly inside the active interval, such a coincidence splits the
-    #   spline into independent pieces.  The probe set de-duplicates the
-    #   repeated breakpoint and so loses one row per live curvature direction,
-    #   with no rank check on the QP path to catch it.  Keep rejecting it.
-    # - On a fitted boundary -- what a clamped knot vector makes of an interior
-    #   knot that lands on the boundary -- the coincidence instead zeroes the
-    #   support of one basis function per repeat, exactly the directions whose
-    #   probe rows are dropped with it.  The exact rows stay complete and only
-    #   the division is unusable, so relax the guard there and nowhere else.
+    # A zero span means ``degree + 1`` consecutive knots coincide.  Strictly inside
+    # the active interval that splits the spline into independent pieces and loses a
+    # probe row per live curvature direction, with no rank check on the QP path, so
+    # keep rejecting it.  On a fitted boundary it only zeroes the support of basis
+    # functions whose probe rows are dropped with it; the exact rows stay complete
+    # and only the division is unusable, so relax the guard there and nowhere else.
     uses_derivative_coefficients = domain is None or degree == 1
     if spans.shape != (n_basis - 1,):
         raise ValueError("Curvature constraints require positive derivative knot spans")

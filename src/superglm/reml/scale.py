@@ -30,19 +30,11 @@ class ProfiledScaleTerm:
 class _LazyGammaScaleTerm(ProfiledScaleTerm):
     """Gamma prior-arm term computing ``d(1/phi)/d(Dp)`` on first read.
 
-    The derivative needs the profile curvature, whose trigamma pass over the
-    distinct weights is the single most expensive array operation in the
-    Gamma profiler -- and the outer loop never reads it for rejected
-    line-search trials, the boot evaluation, or the post-fit phi recompute,
-    all of which consume only ``phi`` and ``criterion``.  Deferring it skips
-    those passes entirely while leaving the value, and the
-    ``FloatingPointError`` contract on an unrepresentable derivative, exactly
-    as the eager path states them for every term actually read.
-
-    The subclass keeps the parent's frozen field surface (attribute reads,
-    dataclass ``repr``/``eq`` through the property) and reduces to a plain
-    eager ``ProfiledScaleTerm`` under pickle and ``deepcopy`` so the retained
-    weight arrays never travel with a serialized term.
+    The derivative's trigamma pass is the profiler's most expensive operation
+    and is unread for rejected trials, the boot evaluation and the post-fit
+    recompute. Values and the ``FloatingPointError`` contract match the eager
+    path; pickle and ``deepcopy`` reduce it to an eager ``ProfiledScaleTerm``
+    so the weight arrays never travel with a serialized term.
     """
 
     # Set through ``object.__setattr__`` below (the parent dataclass is
@@ -98,16 +90,11 @@ class _LazyGammaScaleTerm(ProfiledScaleTerm):
 class GammaScaleProfileData:
     """Fit-invariant sufficient statistics for saturated Gamma likelihoods.
 
-    Under ``"frequency"`` the saturated log-likelihood is ``sum(w)`` copies of
-    one scalar function of the shape, so two scalars are sufficient and the
-    root find never rescans rows.  Under ``"prior"`` row ``i`` has its own
-    shape ``w_i / phi``, and the saturated arm becomes ``sum_i G(w_i k)`` with
-    ``G(a) = a log a - a - log Gamma(a)`` -- the same function, evaluated at a
-    per-row argument.  The weights are therefore retained, collapsed onto
-    their distinct values with multiplicities: the collapse is exact (the
-    summand depends on the row only through its weight) and it makes the
-    unweighted case evaluate one scalar, reproducing the frequency arithmetic
-    to the bit rather than to a tolerance.
+    Under ``"frequency"`` two scalars are sufficient. Under ``"prior"`` row
+    ``i`` has shape ``w_i / phi`` and the saturated arm is
+    ``sum_i G(w_i k)``, ``G(a) = a log a - a - log Gamma(a)``, so the weights
+    are kept collapsed onto their distinct values with multiplicities (exact;
+    unit weights reproduce the frequency arithmetic bit for bit).
     """
 
     sum_weight: float
@@ -115,13 +102,9 @@ class GammaScaleProfileData:
     weight_semantics: str = FREQUENCY_WEIGHTS
     distinct_weight: NDArray | None = field(default=None, repr=False, compare=False)
     weight_multiplicity: NDArray | None = field(default=None, repr=False, compare=False)
-    # Per-fit solver state, prior arm only.  ``_profile_cache`` memoizes whole
-    # ``ProfiledScaleTerm`` results by exact ``(Dp, Mp)`` key: the outer loop
-    # re-evaluates accepted line-search points at bitwise-identical inputs, so
-    # a hit returns the identical object a recomputation would rebuild.
-    # ``_warm_history`` retains ``(Dp, Mp, log_shape_root)`` of recent solves
-    # so the next root find can start from a secant prediction instead of the
-    # fixed +-30 window.  Neither is consulted under ``"frequency"``.
+    # Per-fit prior-arm state: ``_profile_cache`` memoizes results by exact
+    # ``(Dp, Mp)`` key, and ``_warm_history`` keeps recent roots for a secant
+    # start. Neither is consulted under ``"frequency"``.
     _profile_cache: dict = field(default_factory=dict, repr=False, compare=False)
     _warm_history: list = field(default_factory=list, repr=False, compare=False)
     _uniform_multiplicity: bool = field(default=False, repr=False, compare=False)
@@ -197,14 +180,9 @@ class GammaScaleProfileData:
     def scaled_curvature(self, shape: float, penalty_nullity: float) -> float:
         """Return ``k**2 d2Q/dk2`` without squaring extreme shapes.
 
-        The profile curvature can overflow when ``shape**2`` underflows, even
-        though its reciprocal derivative is representable as signed zero.  Work
-        instead with ``shape**2 * curvature``, which stays near ``1`` as the
-        shape vanishes and near ``sum(w)/2`` as it grows.
-
-        The frequency arm keeps its own association of the three expansions
-        verbatim, so this refactor cannot move a number on the contract that
-        was already shipping.
+        The curvature can overflow when ``shape**2`` underflows; the product
+        stays near ``1`` as the shape vanishes and near ``sum(w)/2`` as it
+        grows. The frequency arm keeps its own association of the expansions.
         """
         if self.weight_semantics == FREQUENCY_WEIGHTS:
             sum_weight = self.sum_weight
@@ -265,15 +243,12 @@ def prepare_gamma_reml_scale_data(
             raise ValueError("Gamma scale profiling requires positive total weight")
         return GammaScaleProfileData(
             sum_weight=sum_weight,
-            # Elementwise reduction avoids BLAS thread-launch overhead for this
-            # one-vector sufficient statistic (materially slower in measured fits).
+            # Elementwise reduction avoids BLAS thread-launch overhead here.
             sum_weight_log_y=sum_weight_log_y,
             weight_semantics=FREQUENCY_WEIGHTS,
         )
-    # A zero prior weight is a row observed with infinite variance, so it
-    # leaves the likelihood entirely rather than contributing a saturated term
-    # of its own -- log Gamma(0) is not finite, and the row is not part of the
-    # size the residual d.f. corrects.
+    # A zero prior weight is a row of infinite variance: it leaves the
+    # likelihood and the residual d.f. (log Gamma(0) is not finite).
     carried = sample_weight > 0.0
     likelihood_size = float(np.count_nonzero(carried))
     if likelihood_size <= 0.0:
@@ -433,14 +408,9 @@ def _branch_selectors(
 ) -> tuple[Any, Any, Any]:
     """Return (small, middle, large) row selectors for the three expansions.
 
-    With ``assume_sorted`` the argument is ascending (the prior contract
-    evaluates ``w_i * k`` on ``np.unique``-sorted weights at ``k > 0``, and
-    multiplying by a positive scalar is monotone under round-to-nearest), so
-    the branch boundaries are two binary searches and the selectors are
-    slices -- views, not gather/scatter copies.  A boolean mask over a sorted
-    array selects the same elements in the same order as the slice, and the
-    per-branch arithmetic is elementwise, so both selector kinds produce
-    bitwise-identical results.  Empty selectors are returned as ``None``.
+    With ``assume_sorted`` (ascending argument) the boundaries are two binary
+    searches and the selectors are slices, bitwise equal to boolean masks.
+    Empty selectors are ``None``.
     """
     if assume_sorted:
         i_small = int(np.searchsorted(argument, 1.0e-4, side="left"))
@@ -536,20 +506,10 @@ def _scaled_trigamma_minus_inverse_array(
 ) -> NDArray:
     """Vectorized ``a**2 (trigamma(a) - 1/a)``.
 
-    The product is what the curvature needs, and forming it as a product would
-    overflow long before the shape itself does: ``trigamma(a) ~ a**-2``, so a
-    weight small enough to put ``a`` near ``1e-160`` sends the factor past the
-    representable range while their product is still exactly ``1``.  The three
-    branches are the same expansions the scalar curvature uses, lifted out of
-    it so that the per-row and the scalar path evaluate one function.
-
-    The middle branch calls ``zeta(2, a)`` where the scalar helper spells
-    ``polygamma(1, a)``.  These are the same numbers bit for bit: scipy's
-    ``polygamma`` computes ``(-1)**(n+1) * gamma(n+1) * zeta(n+1, x)`` and at
-    ``n = 1`` the prefactor is exactly ``1.0``, whose multiply is the IEEE
-    identity -- but ``polygamma`` also evaluates ``psi(x)`` over the whole
-    array only to discard it in a ``where``, and this branch runs at every
-    distinct weight, so the direct call skips two full-array passes.
+    Formed as one function because ``trigamma(a) ~ a**-2`` overflows long
+    before the product does. The branches are the scalar curvature's
+    expansions. The middle branch calls ``zeta(2, a)``, bitwise equal to
+    ``polygamma(1, a)`` without its discarded ``psi`` pass.
     """
     result = np.empty_like(argument)
     small, middle, large = _branch_selectors(argument, assume_sorted=assume_sorted)
@@ -659,10 +619,8 @@ def _solve_gamma_profile_root_cold(shape_score) -> float:
     )
 
 
-# Warm-start bracket policy: initial half-width floor, widening factor, and
-# attempts before falling back to the cold window.  The floor covers the
-# secant prediction's own error near convergence; the ladder covers early
-# iterations where the penalized deviance still moves the root materially.
+# Warm-start bracket policy: half-width floor (the secant prediction's error
+# near convergence), widening factor, and attempts before the cold window.
 _GAMMA_WARM_DELTA_FLOOR = 1.0e-5
 _GAMMA_WARM_DELTA_GROWTH = 64.0
 _GAMMA_WARM_ATTEMPTS = 3
@@ -722,26 +680,17 @@ def profile_gamma_reml_scale(
 ) -> ProfiledScaleTerm:
     """Profile Gamma dispersion while retaining Wood's saturated likelihood.
 
-    Under the frequency contract ``sum(weights)`` is the likelihood observation
-    count, the saturated arm is that many copies of one scalar function of the
-    shape, and the root find never rescans rows.  Under the prior contract row
-    ``i`` carries shape ``w_i / phi``, so the saturated arm is a sum over the
-    distinct weights; the deviance arm ``Dp k / 2`` is unchanged, because the
-    weighted deviance ``sum_i w_i d_i`` is already what both contracts put
-    there.
+    Under the frequency contract the saturated arm is ``sum(weights)`` copies
+    of one scalar function of the shape; under the prior contract row ``i``
+    has shape ``w_i / phi`` and the arm sums over the distinct weights. The
+    deviance arm ``Dp k / 2`` is the same in both.
 
-    The likelihood-size guard is the same statement in each: as ``k -> 0`` the
-    saturated arm behaves like ``N log k`` and the criterion's remaining
-    ``log k`` coefficient is ``Mp / 2``, so a finite interior optimum needs
-    ``2 N > Mp`` with ``N`` the contract's own likelihood size.
+    As ``k -> 0`` the saturated arm behaves like ``N log k`` against the
+    criterion's ``Mp / 2`` coefficient, so a finite interior optimum needs
+    ``2 N > Mp``, ``N`` the contract's likelihood size.
 
-    The prior arm's per-evaluation cost is a full pass over the distinct
-    weights, so it keeps two per-fit accelerations the scalar frequency arm
-    has no use for: an exact memo of whole results by ``(Dp, Mp)`` key (the
-    outer loop re-evaluates accepted line-search points bitwise-identically),
-    and a warm-started root find from the previous solves' roots with the
-    cold window as fallback.  The frequency arm runs the shipped code path
-    unconditionally.
+    The prior arm memoizes results by exact ``(Dp, Mp)`` key and warm-starts
+    its root find from previous roots, with the cold window as fallback.
     """
     if not isinstance(profile_data, GammaScaleProfileData):
         raise TypeError("profile_data must be GammaScaleProfileData")
@@ -794,11 +743,8 @@ def profile_gamma_reml_scale(
     if not np.isfinite(phi) or not np.isfinite(criterion):
         raise FloatingPointError("Gamma REML scale profile produced a non-finite result")
     if is_prior:
-        # The curvature behind ``d(1/phi)/d(Dp)`` is the profiler's most
-        # expensive array pass and is unread for rejected line-search trials,
-        # the boot evaluation, and the post-fit phi recompute; defer it to
-        # first read.  The memo hands every later hit the same term, so an
-        # accepted point's curvature is computed at most once per solve.
+        # Defer the curvature behind ``d(1/phi)/d(Dp)`` to first read; the memo
+        # computes it at most once per accepted point.
         lazy_term = _LazyGammaScaleTerm(
             phi=phi,
             inverse_phi=shape,
@@ -925,10 +871,8 @@ __all__ = [
     "profile_tweedie_reml_scale",
 ]
 
-# v0.35.0 kept its Tweedie saturated-density memo in this class, and a fitted
-# REML model pickles it (``REMLResult.tweedie_scale_data``).  The name stays
-# importable as an inert stand-in (PEP 562) so such a model loads;
-# ``SuperGLM.__setstate__`` drops it (``model.retired_state``).
+# Inert stand-in (PEP 562) so v0.35.0 REML models that pickled the Tweedie
+# saturated-density memo load; ``SuperGLM.__setstate__`` drops it.
 _RETIRED_V0_35 = frozenset({"TweedieScaleProfileData"})
 
 

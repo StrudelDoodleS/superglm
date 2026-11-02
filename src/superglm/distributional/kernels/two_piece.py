@@ -5,20 +5,13 @@ Location coordinates ``(mu, sigma, eps)`` with ``T = mu + sigma W`` and
     f_W(w) = phi(w / (1 - eps))   w <  0
              phi(w / (1 + eps))   w >= 0
 
-so the RIGHT piece is the wide one for ``eps > 0`` and positive ``eps`` is
-positive skew (Mudholkar and Hutson 2000; Arellano-Valle, Gomez and Quintana
-2005; Rubio and Steel 2014, whose Theorem 3 and Corollary 2 give the two
-orthogonal blocks of the information below).  ``T = log Y`` is
-``TwoPieceLogNormalLSS`` and ``T = Y`` is ``TwoPieceNormalLSS``: one kernel,
-two carriers.  The mean form replaces ``mu`` by ``m = E[Y] = exp(mu) K``.
-
-Every row formula is elementary; the only cancellation-sensitive object is the
-mean loading, which is evaluated as a log-sum-exp of its two log pieces.  The
-derivatives and limiting cases are checked against independent references in
-the family kernel tests.
-
-Imports only numpy, scipy, the standard library and the sibling primitive
-helpers (primitive-kernel rule).
+so positive ``eps`` widens the right piece (Mudholkar and Hutson 2000;
+Arellano-Valle, Gomez and Quintana 2005; Rubio and Steel 2014). ``T = log Y``
+is ``TwoPieceLogNormalLSS`` and ``T = Y`` is ``TwoPieceNormalLSS``; the mean
+form replaces ``mu`` by ``m = E[Y] = exp(mu) K``. The only
+cancellation-sensitive object is the mean loading, evaluated as a
+log-sum-exp of its two log pieces. Imports only numpy, scipy, the standard
+library and sibling primitive helpers.
 """
 
 from __future__ import annotations
@@ -266,13 +259,10 @@ def location_expected_information(
 ) -> NDArray[np.float64]:
     """Packed ``-E[H]`` in ``(mu, sigma, eps)`` per row (channel order as the Hessian).
 
-    ``U = W/s(W)`` has density ``(1-eps) phi(u)`` on ``u < 0`` and
-    ``(1+eps) phi(u)`` on ``u >= 0``, so each entry is a half-normal moment and
-    ``h = 1/(1-eps) + 1/(1+eps) = 2/(1-eps^2)`` collects all of them.  The two
-    zeros are exact: Rubio and Steel (2014) Theorem 3 gives ``mu _|_ sigma`` for
-    every two-piece parametrisation, and Corollary 2 gives ``sigma _|_ eps``
-    exactly when ``a(eps) + b(eps)`` is constant, which the epsilon-skew form
-    satisfies with ``a + b = 2``.
+    Each entry is a half-normal moment of ``U = W/s(W)``, collected by
+    ``h = 2/(1-eps^2)``. The zeros are exact: ``mu _|_ sigma`` (Rubio and
+    Steel 2014, Theorem 3) and ``sigma _|_ eps`` since ``a + b = 2``
+    (Corollary 2).
     """
     sigma = _positive_vector(scale, name="scale")
     eps = _skew_vector(skew)
@@ -299,19 +289,14 @@ def location_expected_information(
 def log_mean_loading(scale: NDArray, skew: NDArray) -> tuple[NDArray[np.float64], ...]:
     """``log K`` and its five derivatives in ``(sigma, eps)``; always finite.
 
-    ``K(sigma, eps) = E[e^(sigma W)]`` is the mean loading ``E[Y]/exp(mu)`` of
-    the log-normal variant.  Both pieces are evaluated in the log domain, where
-    ``a^2/2 + log Phi(-a)`` stays bounded instead of overflowing against an
-    underflowing tail; the derivatives then follow the log-sum-exp (cumulant)
-    rule over the two pieces, which is what keeps the mixture weights and the
-    per-piece derivatives separately well scaled.
+    ``K = E[e^(sigma W)] = E[Y]/exp(mu)``. Both pieces are evaluated in the log
+    domain (``a^2/2 + log Phi(-a)`` stays bounded) and combined by the
+    log-sum-exp (cumulant) rule.
 
     Returns ``(log K, K_sigma, K_eps, K_sigma_sigma, K_sigma_eps, K_eps_eps)``.
     At ``eps = 0``: ``log K = sigma^2/2``, ``K_sigma = sigma``,
     ``K_eps = (1 + sigma^2)(2 Phi(sigma) - 1) + 2 sigma phi(sigma)``,
-    ``K_sigma_sigma = 1``, and the two mixed limits, which have no shorter
-    closed form.  ``K_eps`` tends to ``2 sigma sqrt(2/pi)`` as ``sigma -> 0``,
-    not to ``sigma sqrt(2/pi)``: ``E[W] = 2 eps sqrt(2/pi)`` carries the two.
+    ``K_sigma_sigma = 1``; ``K_eps -> 2 sigma sqrt(2/pi)`` as ``sigma -> 0``.
     """
     sigma = _positive_vector(scale, name="scale")
     eps = _skew_vector(skew)
@@ -491,17 +476,11 @@ def join_crossing_rows(
 ) -> NDArray[np.bool_]:
     """Rows on the join ``z = 0`` whose Hessian has no derivative along the path.
 
-    With nonzero skew the Hessian jumps at ``z = 0`` (``s`` changes from
-    ``1 + eps`` to ``1 - eps``), and at zero skew its ``(mu, eps)`` entry
-    ``-2 (t - mu) e / (sigma^2 s^3)`` is ``-2 |t - mu| / sigma^2``, a kink:
-    ``T_mme = 2e/(sigma^2 s^3)`` changes sign across the join at every skew.
-    So a path that moves the location there has only one-sided derivatives,
-    the right piece's when ``mu`` falls and the left piece's when it rises,
-    whatever the skew; a path that keeps ``mu`` fixed keeps ``z = 0`` and the
-    right piece, and is differentiable.  ``moved`` is nonzero where
-    the path can move ``mu``; the caller decides that, since only a location
-    linear in the predictor is held fixed by a zero first-order change.  ``z``
-    is formed exactly as the Hessian's piece selection forms it.
+    ``T_mme = 2e/(sigma^2 s^3)`` changes sign across the join at every skew,
+    so a path that moves the location there has only one-sided derivatives; a
+    path that keeps ``mu`` fixed stays on the right piece. ``moved`` is
+    nonzero where the path can move ``mu`` (the caller's decision); ``z`` is
+    formed exactly as the Hessian's piece selection forms it.
     """
     t = _vector(variate, name="variate")
     mu = _vector(location, name="location")
@@ -517,27 +496,17 @@ def _log_mean_loading_third(
 ) -> tuple[NDArray[np.float64], ...]:
     """``log K``'s derivatives through third order in ``(sigma, eps)``.
 
-    The same two log pieces as :func:`log_mean_loading`; with
-    ``g = a -+ r`` (``r`` the inverse Mills ratio of the piece) the piece
-    derivatives use ``g'' = r + (a - 2r) r (r - a)`` (left) and
-    ``g'' = -r + (a + 2r) r (a + r)`` (right), from ``r' = r (r - a)`` and
-    ``r' = -r (a + r)``.
-
-    ``log K = log(e^L1 + e^L2)`` is a softplus of ``L1 - L2``, so with the
-    piece weights ``w_j = e^(L_j - log K)``, ``E[.]`` their average and
-    ``D = L2 - L1`` differentiated channel by channel:
+    Piece derivatives use ``g'' = r + (a - 2r) r (r - a)`` (left) and
+    ``g'' = -r + (a + 2r) r (a + r)`` (right), ``r`` the piece's inverse Mills
+    ratio. With weights ``w_j = e^(L_j - log K)`` and ``D = L2 - L1``:
 
     * ``K_ab = E[L_ab] + w1 w2 D_a D_b``,
     * ``K_abc = E[L_abc] + w1 w2 (D_ab D_c + D_ac D_b + D_bc D_a)
-      + w1 w2 (w1 - w2) D_a D_b D_c``.
+      + w1 w2 (w1 - w2) D_a D_b D_c``,
 
-    These are the mixture cumulants formed from centred piece derivatives,
-    since ``L_j,a - E[L_a]`` is ``-w2 D_a`` on the left piece and ``w1 D_a`` on
-    the right.  The raw-moment identity ``R_abc - 3 S M + 2 M^3`` cancels terms
-    of order ``E[L_a]^3`` when one piece dominates (16 against 0.305 at
-    ``sigma = 401.93``, ``eps = 0.8703``); here ``w1 w2`` vanishes there and
-    the one-piece limit is what remains.  ``w1 - w2`` is ``tanh((L1 - L2)/2)``,
-    accurate when the weights are equal.
+    the mixture cumulants from centred piece derivatives, which avoid the
+    cancellation of the raw-moment form when one piece dominates;
+    ``w1 - w2 = tanh((L1 - L2)/2)``.
 
     Returns ``(K_s, K_e, K_ss, K_se, K_ee, K_sss, K_sse, K_see, K_eee)``.
     """
@@ -716,15 +685,11 @@ def _log_mean_loading_fourth(
 ) -> dict[int, NDArray[np.float64]]:
     """``log K``'s derivatives of orders one to four in ``(sigma, eps)``, packed by order.
 
-    The pieces are those of :func:`_log_mean_loading_third`, now through
-    ``G4`` (each piece's derivatives generated from its inverse Mills ratio,
-    ``two_piece_left_mills`` and ``two_piece_right_mills``, and chained
-    through ``a = sigma s`` by ``two_piece_piece_loading``).  ``log K`` is
-    ``L2 + f(L1 - L2)`` with ``f`` the softplus, whose derivatives are
-    ``w1``, ``w1 w2``, ``w1 w2 (w2 - w1)`` and ``w1 w2 (1 - 6 w1 w2)``; order
-    ``m`` is the weighted piece average ``w1 L1 + w2 L2`` plus the softplus
-    chain rule over the partitions with at least two blocks, which carry the
-    factor ``w1 w2`` and vanish when one piece dominates.
+    Pieces as in :func:`_log_mean_loading_third`, through ``G4`` (generated
+    from each piece's inverse Mills ratio). ``log K = L2 + f(L1 - L2)`` with
+    ``f`` the softplus (derivatives ``w1``, ``w1 w2``, ``w1 w2 (w2 - w1)``,
+    ``w1 w2 (1 - 6 w1 w2)``): order ``m`` is ``w1 L1 + w2 L2`` plus the
+    chain-rule partitions with at least two blocks, which carry ``w1 w2``.
     """
     left_width, right_width = 1.0 - eps, 1.0 + eps
     a1, a2 = sigma * left_width, sigma * right_width
@@ -822,10 +787,8 @@ def mean_third_fourth(
     return mean_third, mean_fourth
 
 
-#: The reach of the analytic Hessian's local model near the join, in
-#: predictor units along a unit direction: the engine's derivative step
-#: (``smoothing.endpoint_direction.DEFAULT_STEP``), the span its second
-#: differences cover.
+#: Reach of the analytic Hessian's local model near the join, in predictor
+#: units: the engine's derivative step (``endpoint_direction.DEFAULT_STEP``).
 JOIN_REACH = 1.0e-3
 
 
@@ -892,28 +855,15 @@ def join_certificate(
 ) -> NDArray[np.float64]:
     """The analytic second curvature direction's trust signal on rows near the join.
 
-    The analytic fourth derivatives are exact on each piece, but the
-    curvature jumps at the join (``natural_jumps``, the Hessian and third
-    derivatives of :func:`location_join_jumps` or :func:`mean_join_jumps`),
-    so as a local model over a displacement ``r`` they are wrong by about
-    ``|jump of C| / r^2 + |jump of dC| / r`` on a row whose location the
-    displacement carries across the join.  A row is near when ``|t - mu|``
-    (``distance``) is at most ``reach`` times the location's rate along
-    either unit direction or their normalised sum, the direction a mixed
-    pair's second differences step along (``location_gradient`` is
-    ``d mu / d eta``); there its certificate is that error at ``r = reach``
-    times ``|a| |b|``, which is the size of what second differences over
-    ``reach`` record across a kink; elsewhere it is zero.  Directions as for the second direction,
-    ``(m, n, K)`` or ``(m, 1, K)``.  The jumps reach the predictors through
-    the links' first three derivatives.
-
-    ``location_hessian`` (``(n, K, K)``, ``d^2 mu / d eta^2``) adds the
-    second-order displacement ``reach |u' H u| / 2`` to each rate, so a row
-    the location's curvature carries across is near too.  A near row on
-    which a link is close to stationary (``|g''| reach > |g'|``) is refused
-    with ``ValueError``: the jumps composed through its derivatives at the
-    row miss what the step meets, so the caller differences instead, as for
-    a row on the join.
+    The analytic fourth derivatives are exact per piece, but the curvature
+    jumps at the join (``natural_jumps``), so over a displacement ``r`` they
+    err by about ``|jump of C| / r^2 + |jump of dC| / r``. A row is near when
+    ``|t - mu|`` (``distance``) is at most ``reach`` times the location's rate
+    along either unit direction or their normalised sum (plus
+    ``reach |u' H u| / 2`` from ``location_hessian``); its certificate is that
+    error at ``r = reach`` times ``|a| |b|``, elsewhere zero. A near row where
+    a link is close to stationary (``|g''| reach > |g'|``) raises
+    ``ValueError`` so the caller differences instead.
     """
     g1, g2, g3 = link_derivatives
     n_rows, k_parameters = g1.shape
@@ -1023,13 +973,10 @@ def initialize_two_piece(
 ) -> NDArray[np.float64]:
     """Constant start from the weighted moments of the variate.
 
-    ``variate`` is always the quantity the location parameter lives on:
-    ``log y`` for either form of the log-normal family, ``y`` for the real-line
-    family.  Taking the logarithm is the caller's job, so the kernel never has
-    to guess which family it is serving.  ``parametrisation`` decides only what
-    the first column carries: ``mu`` for the location form, ``m = exp(mu) K``
-    for the mean form.  Skewness fixes ``eps``, the variance then fixes
-    ``sigma``, and the mean fixes ``mu``.
+    ``variate`` is what the location lives on (``log y`` or ``y``; the caller
+    takes the log). Skewness fixes ``eps``, the variance ``sigma`` and the
+    mean ``mu``; ``parametrisation`` decides whether column 0 is ``mu`` or
+    ``m = exp(mu) K``.
     """
     if parametrisation not in ("mean", "location"):
         raise TwoPieceDomainError(f"unsupported parametrisation: {parametrisation!r}")

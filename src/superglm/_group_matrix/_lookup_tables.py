@@ -11,78 +11,56 @@ row pass reduces to sweeps over the term index columns:
   then ``A_t' T_tu A_u`` in coefficient space; a pair whose histogram would be
   too large is *accumulated* (their Algorithms 2/3), ``M[k_t] += W_r
   A_u[k_u(r)]`` over the nonzero window of ``A_u``'s row, then ``A_t' M``.
-- **Leverages** ``h_r = x_r' V x_r``, the transpose of the same tables:
-  ``G_tu = A_t V_tu A_u'`` gathered per row (the scattered-row form of GLAM's
-  ``diag(X S X')``, Currie, Durban & Eilers, *JRSS-B* 68:259, 2006, eq.
-  2.7; Wood, Li, Shaddick & Augustin, *JASA* 112:1199, 2017, App. A, form it
-  column by column), or ``Q_tu = A_t V_tu`` dotted with the window.
+- **Leverages** ``h_r = x_r' V x_r``: ``G_tu = A_t V_tu A_u'`` gathered per row
+  (the scattered-row form of GLAM's ``diag(X S X')``, Currie, Durban & Eilers,
+  *JRSS-B* 68:259, 2006, eq. 2.7), or ``Q_tu = A_t V_tu`` dotted with the window.
 - ``X_c' v``: one 1-D histogram per term.
 
 Consecutive spline-by-category levels with disjoint rows merge into one term
 (their table stacks the levels' rows; a row outside every level reads a zero
-row).  The structural plan (:func:`lookup_plan`: index columns, raw tables,
-pair forms) depends on the design only; it is held in the design's
-``_structured_layout_cache`` (owner: the ``DesignMatrix``; lifetime: one
-fit, released when the fit publishes its state, :func:`release_lookup_plan`; invalidated when any group matrix, its basis, transform or index
-array, or a dense group's values are replaced, which the plan checks by
-identity).  Weights, centre and
+row).  The structural plan (:func:`lookup_plan`) depends on the design only; it
+is held in the design's ``_structured_layout_cache`` (owner: the
+``DesignMatrix``; lifetime: one fit, released by :func:`release_lookup_plan`;
+invalidated, checked by identity, when any group matrix, its basis, transform
+or index array, or a dense group's values are replaced).  Weights, centre and
 inverse enter per call.
 
 **Centring.**  Rows are the profiled-intercept rows ``x_r = (raw_r - c) -
 c_lo``.  The Gram centres every table before its product (``A_t - c_t``; a
-zero row centres to ``-c_t``), which is exact for a histogram pair whatever
-the term; an accumulated pair reads a raw window of a term with a zero row,
-whose centre needs no term of its own because the row side is centred about
-the weighted mean (``A_t' m_t = 0``).  The leverage reads a term with a zero row raw and its centre ``z`` as
+zero row centres to ``-c_t``); an accumulated pair reads a raw window of a term
+with a zero row, since its row side is centred about the weighted mean
+(``A_t' m_t = 0``).  The leverage reads such a term raw with its centre ``z`` as
 constants, as the support route does (``reml/_leverage_rows.py``).  Dense
-columns are centred about the exact pair superglm uses everywhere: the Gram
-about the rounded anchor with Bjorck's two-pass correction
-(``centered_system.two_pass_centred_gram``), the leverage and ``X_c' v`` as
-``(x - c) - c_lo``.
+columns are centred about the pair used everywhere: the Gram about the rounded
+anchor with Bjorck's two-pass correction (``centered_system.two_pass_centred_gram``),
+the leverage and ``X_c' v`` as ``(x - c) - c_lo``.
 
 **Error** (``u = 2**-53``, ``gamma_k = k u / (1 - k u)``, Higham 2002, secs.
 3.1, 3.5, Lemma 3.3; ``|.|`` entrywise).
-- Gram: a histogram cell sums nonnegative weights, so it is within
-  ``gamma_n`` of its exact value relatively, and ``A_t' T A_u`` adds
-  ``gamma_(m_t + m_u)``; an entry is within ``gamma_(n + 2m + 2) sum_r W_r
-  (|x_r| + |c|)(|x_r| + |c|)'`` (``m`` the largest table, ``c`` the centre,
-  on every lookup column), the bound of a direct centred Gram plus the
-  centres: a raw window reads its centre, and an accumulated pair's row side
-  is centred about the computed mean, whose weighted residual ``e_x``
-  multiplies the window's centre (as it multiplies a dense remainder, whose
-  correction reads ``e`` as zero on the lookup columns).  ``e_x`` is within
-  ``gamma_(n + m + 2) sum_r W_r |a_x,r|`` of zero, ``a`` the table rows as
-  read: a whole support's table is anchored before ``R`` applies, ``(B -
-  B[a]) R`` with the shared row ``B[a] R`` kept apart (the established
-  support route's anchoring, ``_anchor_center_support``), so in the Gram
-  neither ``e_x`` nor any row of such a support carries a common component of
-  ``B``, whether ``R`` cancels it or not; a categorical's rows are
-  indicators.  Two reads keep ``u |B| |R|``-sized errors.  The leverage and
-  ``X_c' v`` read a whole support as ``raw - (c - B[a] R)``, where ``c -
-  B[a] R`` differs from the Gram's shift by up to ``u |c|`` (v0.40.0's
-  leverage read ``fl(B R) - c``, no better; a design whose offset dwarfs its
-  rows past ``_SEPARATION_LIMIT`` is declined).  A spline-by-category level
-  is projected unanchored, its zero row kept zero, in the leverage as in
-  v0.40.0 but in the Gram a narrowing against v0.40.0: its rung ladder
-  certified the raw moments and fell back to anchoring a level's ``B``
-  before ``R``, which the table Gram replaces, so a level whose ``B``
+- Gram: a histogram cell sums nonnegative weights, within ``gamma_n``
+  relatively, and ``A_t' T A_u`` adds ``gamma_(m_t + m_u)``; an entry is within
+  ``gamma_(n + 2m + 2) sum_r W_r (|x_r| + |c|)(|x_r| + |c|)'`` (``m`` the
+  largest table, ``c`` the centre, on every lookup column).  A whole support's
+  table is anchored before ``R`` applies, ``(B - B[a]) R`` with the shared row
+  ``B[a] R`` kept apart (``_anchor_center_support``), so a common component of
+  ``B`` that ``R`` cancels never enters a product; a categorical's rows are
+  indicators.  The leverage and ``X_c' v`` read a whole support as ``raw - (c -
+  B[a] R)``, which differs from the Gram's shift by up to ``u |c|`` (a design
+  whose offset dwarfs its rows past ``_SEPARATION_LIMIT`` is declined).  A
+  spline-by-category level is projected unanchored, so a level whose ``B``
   carries a common component that ``R`` cancels keeps a ``u C |R|`` error
-  there (at rounding level for B-spline levels, ``|B| <= 1``).  Applying Bjorck's correction for
-  ``e_x`` (Chan, Golub & LeVeque 1983) moved no entry beyond that rounding
-  on the common-component fixtures, so it is not applied.
+  (rounding level for B-spline levels, ``|B| <= 1``).
 - Leverage: with ``eta_r = (|a_r| + |z| + |d_r|)' |V| (|a_r| + |z| + |d_r|)``
-  (``a_r`` the table rows read, ``d_r`` the centred dense values) every table
-  entry is a bilinear form read through at most ``3p + 1`` roundings and a
-  row sums ``S <= 1 + T + P + n_d (T + n_d + 3)`` terms, so ``|h_r(computed)
-  - h_r| <= gamma_K eta_r`` with ``K = 3p + S + 2``.
+  (``a_r`` the table rows read, ``d_r`` the centred dense values), ``|h_r(computed)
+  - h_r| <= gamma_K eta_r`` with ``K = 3p + S + 2`` and ``S <= 1 + T + P + n_d (T
+  + n_d + 3)`` the terms summed in a row.
 - ``X_c' v``: compensated (Neumaier) sums per bin (Higham 2002, sec. 4.3),
-  within ``2u |s| + O(n u^2) sum |terms|``, then ``gamma_(m+1)`` in
-  coefficient space.
+  within ``2u |s| + O(n u^2) sum |terms|``, then ``gamma_(m+1)`` in coefficient
+  space.
 
 **Determinism.**  Every Gram table is filled by one owner, in row order; a
-leverage row is summed in one fixed order (terms, table pairs, accumulated
-pairs, dense columns) inside a fixed row block.  Results are bitwise
-identical for any worker count.
+leverage row is summed in one fixed order inside a fixed row block.  Results
+are bitwise identical for any worker count.
 """
 
 from __future__ import annotations
@@ -118,12 +96,9 @@ _FORCE_PAIR_FORM: str | None = None
 _MIN_TABLE_GRAM_ROWS = 20_000
 # ...and only while the design has at least this many columns per row sweep of
 # the tables (one per term, term pair, term and dense block, and dense pair).
-# The tables cost a sweep each, the chunked rungs about one pass per column:
-# per call on freMTPL2 (542,406 rows, one thread) 3.2-3.8 ns per row and
-# sweep against 0.56-0.77 ns per row and column at up to 340 columns.  Below
-# the crossover a main-effects design (67 columns, 21 sweeps) is 1.65 times
-# faster on the rungs; a spline-by-factor pair (197 columns, 28 sweeps) is
-# 1.65 times faster on the tables, a tensor pair (184, 28) the same on both.
+# The tables cost a sweep each, the chunked rungs about one pass per column;
+# below the crossover the rungs win for a main-effects design, the tables for a
+# spline-by-factor pair.
 _TABLE_GRAM_COLUMNS_PER_SWEEP = 6
 
 _gram_override: ContextVar[bool | None] = ContextVar("superglm_table_gram", default=None)
@@ -427,10 +402,8 @@ def _build_plan(dm) -> LookupPlan | None:
         else:
             raw = np.asarray(values, dtype=np.float64)
             if transform is not None and level is None:
-                # Anchored before projecting, as the established support route
-                # (``_anchor_center_support``): a common component of ``B``
-                # that ``R`` cancels never enters a product, and the anchor's
-                # row ``B[a] R`` is the offset every row shares.
+                # Anchored before projecting (``_anchor_center_support``): a common component of
+                # ``B`` that ``R`` cancels never enters a product; ``B[a] R`` is the shared row.
                 transform = np.asarray(transform, dtype=np.float64)
                 anchor = raw[int(np.argmax(np.bincount(codes, minlength=raw.shape[0])))]
                 offset = anchor @ transform
@@ -686,14 +659,10 @@ def _identity_gram(wm: NDArray, d: NDArray) -> NDArray:
     """A categorical's own block ``sum_k wm_k (e_k - d)(e_k - d)'`` (``e_K = 0``, the base level).
 
     ``diag(w) - d w' - w d' + (1' wm) d d'`` with ``w`` the levels' weights:
-    ``O(K^2)`` where the centred table's GEMM is ``O(K^3)``, and exactly
-    symmetric.  This is a raw-moment subtraction: level ``k`` with weight
-    share ``d_k`` loses about ``u * S / R_k`` of its curvature to
-    cancellation (``R_k`` the rest of the weight), where the chunked route
-    centres each row before multiplying.  ``_dominated`` keeps that factor
-    below ``2**26`` (about ``1e-8`` of the column's curvature), within
-    float64 accuracy for every fitted value and standard error; a more
-    dominant level sends the call to the chunked route.
+    ``O(K^2)`` where the centred table's GEMM is ``O(K^3)``, and exactly symmetric.
+    It is a raw-moment subtraction that loses about ``u * S / R_k`` of level ``k``'s
+    curvature to cancellation (``R_k`` the rest of the weight); ``_dominated`` keeps
+    that factor below ``2**26`` and a more dominant level goes to the chunked route.
     """
     w = wm[: d.shape[0]]
     cross = np.outer(d, w)
@@ -715,10 +684,9 @@ def _pair_table(ta: _Term, A: NDArray, tb: _Term, B: NDArray, X: NDArray) -> NDA
     return _rows_times(ta, A, _rows_times(tb, B, X.T).T)
 
 
-# Rows per range of the Gram's sweeps.  The ranges depend on the row count
-# alone, never on the worker count, so the summed tables are the same at
-# every worker count; a design of at most this many rows sweeps in one range,
-# exactly as a single pass.
+# Rows per range of the Gram's sweeps.  Ranges depend on the row count alone,
+# never the worker count, so the summed tables are identical at every worker
+# count; a design of at most this many rows sweeps in one range.
 _SWEEP_ROWS = 1 << 17
 # At most this many ranges: past 16 * _SWEEP_ROWS rows a range grows with the
 # design instead, so a split sweep holds at most 16 copies of its outputs at any
@@ -733,16 +701,13 @@ _SPLIT_MAX_ENTRIES = 1 << 14
 class _Sweeps:
     """Row sweeps over fixed row ranges, each range into its own partial outputs.
 
-    ``add(cost, outputs, run)`` registers one sweep: ``run(lo, hi, parts)``
-    sweeps rows ``lo:hi`` into ``parts``, arrays shaped as ``outputs``.  A
-    design of one range sweeps straight into ``outputs``; otherwise every
-    range sweeps into its own zeroed partials, and :meth:`run` sums them into
-    ``outputs`` in range order once the pool has run them (at most
-    ``_MAX_SWEEP_RANGES`` ranges, so at most that many copies), largest estimated
-    cost (``cost`` per row) first.  A sweep whose outputs exceed
-    ``_SPLIT_MAX_ENTRIES`` runs whole.  Each partial has one owner, and
-    whether a sweep splits depends on the design alone, so the sums are
-    bitwise the same at every worker count.
+    ``add(cost, outputs, run)`` registers a sweep; ``run(lo, hi, parts)`` sweeps rows
+    ``lo:hi`` into ``parts``, arrays shaped as ``outputs``.  A one-range design
+    sweeps straight into ``outputs``; otherwise each range sweeps into zeroed
+    partials that :meth:`run` sums in range order (at most ``_MAX_SWEEP_RANGES``
+    copies), largest ``cost`` per row first.  A sweep whose outputs exceed
+    ``_SPLIT_MAX_ENTRIES`` runs whole.  Whether a sweep splits depends on the design
+    alone, so sums are bitwise the same at every worker count.
     """
 
     def __init__(self, n: int) -> None:

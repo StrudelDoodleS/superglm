@@ -1,22 +1,11 @@
 """Active-set constrained penalized least-squares solver.
 
-Solves:
-    minimize   0.5 * beta^T H beta - g^T beta
-    subject to A @ beta >= b
-
-where H is positive semidefinite.  A rank-deficient H is rank-truncated through
-the shared rank policy rather than regularized; a materially indefinite one is
-rejected (see ``solve_constrained_qp``).
-
-Uses a primal active-set method:
-1. Start with a feasible point (project if needed).
-2. Solve the equality-constrained subproblem on the active set.
-3. If the step is feasible, check multipliers to drop constraints.
-4. If infeasible, find the blocking constraint and add it.
-
-Warm-starting: pass active_set_init from a previous solve to skip
-discovery iterations (the active set usually stabilizes after a few
-IRLS iterations).
+Solves ``min 0.5 beta' H beta - g' beta`` subject to ``A @ beta >= b`` with
+``H`` positive semidefinite, by a primal active-set method (Nocedal and
+Wright, *Numerical Optimization*, 2nd ed., 2006, Algorithm 16.3). A
+rank-deficient ``H`` is rank-truncated by the shared rank policy, never
+regularized; a materially indefinite one is refused. ``active_set_init``
+warm-starts the working set from a previous solve.
 """
 
 from __future__ import annotations
@@ -38,39 +27,22 @@ from superglm.solvers.rank import (
     decompose_gram,
 )
 
-# Multiplier on the normal-equation consistency floor (see ``_consistency_floor``).
-# The floor estimates the accuracy of the *computed null basis*, and this is the
-# safety factor above that estimate.  It is deliberately a constant of its own
-# rather than ``SHARED_RANK_POLICY.certification_band``, which happens to hold
-# the same value but governs factor certification: retuning that band for its
-# own purpose must not silently move this gate.  For the same reason the
-# structural floor below carries its own literal rather than deriving from
-# this one.
+# Safety factor on the spectral consistency floor (see ``_consistency_floor``).
+# Kept separate from ``SHARED_RANK_POLICY.certification_band`` and from the
+# structural floor below, so retuning either cannot move this gate.
 _NULL_BASIS_ACCURACY_SLACK = 32.0
 
 # The smallest action the coordinate-weighted certificate divides by.
 _SQRT_TINY = TINY**0.5
 
-# Dimension term for the spectral floor.  The retained-condition term above
-# models error amplification, but ``eigh``'s own backward error grows with the
-# problem's width and does not vanish as the retained block becomes perfectly
-# conditioned -- so at low condition the condition term bottoms out *below* the
-# eigensolver's own roundoff in the null basis and rejects consistent systems.
-# Measured worst case across widths 2..24 and ranks 1..width-1 is 17.3 * eps
-# per unit width; 512 leaves roughly 30x margin.  It is deliberately separate
-# from the condition slack: at any condition worth worrying about the condition
-# term dominates, so this cannot move detection at the high end.
+# Dimension term for the spectral floor: ``eigh``'s backward error grows with
+# the width even for a perfectly conditioned retained block (worst case seen
+# 17.3 eps per unit width; 512 leaves about 30x margin).
 _SPECTRAL_DIMENSION_SLACK = 512.0
 
-# Consistency floor for the *structural* half of the null space.  Those basis
-# vectors are exact unit vectors -- a structurally zero column gives ``H`` an
-# identically zero row -- so no conditioning term belongs here.  The two floors
-# model different errors and must move independently: the spectral slack above
-# covers ``eps * kappa`` amplification of a *computed* basis, this one covers
-# only rounding in the two vector norms that form the ratio.  They happen to
-# hold the same numeric value; that coincidence is not a dependency, and
-# deriving one from the other would re-create, one level down, exactly the
-# coupling ``_NULL_BASIS_ACCURACY_SLACK`` exists to avoid.
+# Floor for the structural half of the null space, whose basis vectors are
+# exact unit vectors: it covers only rounding in the two norms of the ratio.
+# Independent of the spectral slack, though the values coincide.
 _STRUCTURAL_NORM_ROUNDING_SLACK = 32.0
 _STRUCTURAL_CONSISTENCY_FLOOR = _STRUCTURAL_NORM_ROUNDING_SLACK * _EPS
 
@@ -80,29 +52,14 @@ class QPResult:
     """Result of a constrained QP solve.
 
     ``converged`` means the returned beta passed primal feasibility, dual
-    feasibility, stationarity and complementarity. A projection creates a new
-    candidate and requires the whole certificate again. Exhaustion or an
-    incomplete certificate returns ``False`` even if the point is feasible.
+    feasibility, stationarity and complementarity; exhaustion or an incomplete
+    certificate returns ``False`` even at a feasible point. A failed
+    feasibility check does not imply the constraints are mutually infeasible.
 
-    A mutually infeasible constraint system is one way for the candidate
-    feasibility check to fail, but not the only one and not the common one:
-    the loop can also stop at a stationary point on a *subset* active set with
-    another row materially violated, on a system that has a feasible point.
-    See the early return below for the measurement and projection.
-
-    ``rank``, ``width``, ``method``, ``condition`` and ``used_svd_fallback``
-    report the geometry of the ``H`` decomposition this solve actually ran on.
-    They are read straight off the decomposition computed below -- attribute
-    reads, no extra work -- and exist because the constrained branch of
-    :func:`~superglm.solvers.irls_direct.fit_irls_direct` previously reported
-    none of it, hardcoding a condition of ``0.0`` where the unconstrained
-    branch forty lines above reads the real number.  ``0.0`` reads as
-    "perfectly conditioned" to every consumer, so the one branch with the least
-    visible linear algebra was also the one claiming the most certainty.
-
-    ``condition`` is ``pre_truncation_condition`` -- deliberately the same
-    quantity the unconstrained branch publishes, so the two are comparable.
-    The defaults describe "no decomposition was reached".
+    ``rank``, ``width``, ``method``, ``condition`` (the factor-scale
+    ``pre_truncation_condition``, as the unconstrained branch reports) and
+    ``used_svd_fallback`` describe the ``H`` decomposition the solve ran on.
+    The defaults mean no decomposition was reached.
     """
 
     beta: NDArray
@@ -119,63 +76,16 @@ class QPResult:
 def _null_space_mass(decomposition: RankDecomposition, g: NDArray) -> tuple[float, float]:
     """Split ``g``'s share of ``null(H)`` into its structural and spectral parts.
 
-    ``g`` is in ``range(H)`` -- the normal equations are consistent -- exactly
-    when it is orthogonal to ``null(H)``, so project it onto the null basis the
-    decomposition already computed.  This measures the inconsistency directly
-    instead of inferring it from a solve residual: a residual is amplified by
-    the retained condition number, which at the conditions the rank policy
-    happily retains swamps the signal entirely.
+    The normal equations are consistent exactly when ``g`` is orthogonal to
+    ``null(H)``, so project ``g`` onto the decomposition's null basis rather
+    than read a solve residual, which the retained condition number amplifies.
+    The basis holds exact unit vectors on structurally zero columns and the
+    spectral directions ``D^-1 V_discarded`` on the scaled ones; their row
+    supports are disjoint, so the two masses are thresholded separately.
 
-    The two halves must not share a threshold, because they are not known to
-    the same accuracy.  ``rank._null_basis`` stacks
-
-    * one **exact unit vector** per structurally zero column (``column_scale``
-      is 0 there, so ``H`` has an identically zero row and column), and
-    * the **discarded spectral directions** ``D^-1 @ V_discarded``, whose
-      computed accuracy degrades as ``eps * retained condition``.
-
-    They have disjoint row supports -- the unit vectors live on the unscaled
-    columns, the spectral directions on the scaled ones -- so the split is an
-    orthogonal decomposition of ``null(H)`` and the two masses can be measured
-    and thresholded independently. Judging the exact half against the spectral
-    half's floor is what let an ill-conditioned retained block desensitize a
-    structural alias where detection is exact.
-
-    Both masses are ratios of two norms of the *same* vector, so they are
-    scale-free in exact arithmetic -- but not in floating point, because
-    ``np.linalg.norm`` forms ``sqrt(x.dot(x))`` and the squaring leaves the
-    representable range an octave early.  Measured on ``[0, x]``: ``x.dot(x)``
-    is exactly ``0`` from ``x = 1e-170`` down and exactly ``inf`` from
-    ``x = 1e155`` up, while ``np.hypot`` returns the true magnitude at both --
-    so the squaring is the site, not the ``sqrt``.  **Both** norms in the ratio
-    are affected, not just the denominator, and the two regimes bypass the
-    breach test differently:
-
-    * underflow -- numerator and denominator both ``0``, the denominator
-      clamped up to ``tiny``, so the ratio is ``0.0`` and ``mass > floor`` is
-      simply false;
-    * overflow -- both ``inf``, so the ratio is ``nan`` and ``nan > floor`` is
-      false as well.
-
-    An ``inf`` ratio is not reachable: the numerator is a norm of a subvector
-    of the same ``g``, so it can never exceed the denominator.  Measured
-    end-to-end, ``H = diag(1, 0)`` with ``g = (0, 1e-200)`` and with
-    ``g = (0, 1e200)`` both returned ``beta = [0, 0]`` with ``converged=True``
-    where ``g = (0, 1)`` correctly raises; the spectral half fails the same
-    way, returning ``max|beta| = 2.4e202`` at ``g`` scaled by ``1e200``.
-
-    Rescaling by the inf-norm first puts every norm in ``[0.5, sqrt(width)]``,
-    which no representable ``g`` can push out of range.  The rescaling is by a
-    **power of two** (``frexp``/``ldexp``) rather than by the inf-norm itself,
-    which makes it exact: every partial sum inside both norms is then exactly
-    the unscaled one times ``2**-exponent``, and a quotient of two exactly
-    scaled operands rounds identically to the unscaled quotient.  That is what
-    keeps this bitwise inert on everything that was already in range.
-
-    ``g == 0`` is handled before the rescaling -- there is no exponent to take
-    -- and returns zero mass, which is what the old ``max(norm, tiny)`` clamp
-    produced for it too.  With the exact-zero case split out, that clamp has no
-    remaining job: after rescaling the denominator is at least ``0.5``.
+    ``g`` is first scaled by a power of two (exact) so that both norms lie in
+    ``[0.5, sqrt(width)]``: ``x.dot(x)`` inside ``np.linalg.norm`` otherwise
+    underflows to 0 or overflows to inf and silently hides a breach.
 
     Returns ``(structural_mass, spectral_mass)``, each as a share of ``||g||``.
     """
@@ -191,11 +101,8 @@ def _null_space_mass(decomposition: RankDecomposition, g: NDArray) -> tuple[floa
     null_basis = decomposition.null_basis()
     scaled = ~structural
     spectral_mass = 0.0
-    # Restricting to the scaled rows annihilates the unit-vector columns and
-    # leaves exactly the spectral ones.  This also covers both empty cases on
-    # its own: with no null columns the column norms are an empty array, and
-    # with no scaled columns they are all zero, so ``retained_columns`` is
-    # all-False either way.
+    # Restricting to the scaled rows leaves exactly the spectral columns; with
+    # no null columns, or no scaled columns, ``retained_columns`` is all-False.
     spectral_basis = null_basis[scaled, :]
     retained_columns = np.linalg.norm(spectral_basis, axis=0) > 0.0
     if np.any(retained_columns):
@@ -205,65 +112,19 @@ def _null_space_mass(decomposition: RankDecomposition, g: NDArray) -> tuple[floa
 
 
 def _consistency_floor(decomposition: RankDecomposition) -> float:
-    """Largest *spectral* null mass the decomposition's own roundoff can manufacture.
+    """Largest spectral null mass the decomposition's own roundoff can manufacture.
 
-    This governs only the spectral half of the split in ``_null_space_mass``.
-    The structural half is measured against ``_STRUCTURAL_CONSISTENCY_FLOOR``,
-    because a structurally zero column's null vector is an exact unit vector
-    and carries none of the error this floor models.
+    The computed spectral null basis is accurate to about ``eps`` times the
+    retained condition number, so a consistent ``g`` still projects onto it by
+    that much; the floor scales with that condition so that a well-posed but
+    ill-conditioned rank-deficient system stays solvable. Sensitivity falls
+    gradually with the condition and is lost once the floor saturates at 1
+    (about ``1e14``); the test then fails open rather than refuse a solvable
+    system. The structural half uses ``_STRUCTURAL_CONSISTENCY_FLOOR``.
 
-    The computed spectral null basis is accurate only to about ``eps`` times
-    the retained condition number, so a genuinely consistent ``g`` still
-    projects onto it by roughly that much.  Scaling the threshold with the
-    retained conditioning -- rather than fixing it at ``factor_rcond`` -- is
-    what keeps a well-posed but ill-conditioned rank-deficient system solvable,
-    since the rank policy truncates at ``max(gram_rcond, n eps)`` -- version 3
-    floors it at the eigensolver's bar, issue #356 -- and so still retains
-    blocks far more ill-conditioned than ``factor_rcond`` would tolerate.  The
-    ceiling on a retained condition tightened by exactly ``n`` when that floor
-    landed, from ``1/eps`` to ``1/(n eps)``; the table below is unaffected
-    because its largest entry is ``1e12``.
-
-    Sensitivity degrades *gradually* as the retained conditioning grows; there
-    is no sharp cutoff.  Measured detection of an injected **spectral** null
-    component, by retained condition:
-
-    ==============  ============  ===============  =================
-    retained cond   median floor  1% mass caught   0.1% mass caught
-    ==============  ============  ===============  =================
-    ``1e9``         ``6.8e-06``   120/120          120/120
-    ``1e10``        ``6.8e-05``   120/120          120/120
-    ``1e11``        ``6.8e-04``   118/118          102/118
-    ``1e12``        ``6.9e-03``   103/119            8/119
-    ``1e13``        ``6.8e-02``     8/120            1/120
-    ==============  ============  ===============  =================
-
-    So a 0.1% spectral inconsistency is already partly missed at ``1e11`` and a
-    1% one at ``1e12``, well below the ``~1e14`` at which the floor saturates
-    at 1 and nothing spectral is detectable at all.  This is a real resolution
-    limit rather than a tuning choice: at those conditions the spectral null
-    basis is itself only accurate to the floor, and along such a direction the
-    objective moves only in the fifth significant figure over a coefficient
-    range of ``1e9``.  It fails open -- the solve proceeds rather than refusing
-    a system it cannot adjudicate -- which is the safe direction, since
-    refusing a solvable system is the defect this floor exists to prevent.
-
-    Two conventions from ``rank.py`` are load-bearing here and are easy to
-    confuse:
-
-    * The condition number computed below is on the **Gram** scale, a ratio of
-      eigenvalues of the equilibrated Gram matrix.  ``RankDecomposition``'s own
-      ``pre_truncation_condition`` is on the **factor** scale -- the square root
-      of that ratio.  Do not substitute one for the other; they differ by a
-      squaring, which at these magnitudes is the whole gate.
-    * ``retained_values is None`` is read as "nothing spectral was dropped".
-      That inference holds because only the eigen paths populate the field, but
-      it is *not* uniform across ``rank.py``'s two ``method="cholesky"``
-      branches: the fast pre-eigendecomposition branch leaves it ``None``,
-      while the post-eigendecomposition one sets it to the full spectrum.  Both
-      are full rank on the active columns, so both mean the same thing here --
-      but a future branch that leaves the field unset after truncating would
-      silently collapse this floor to ``32 * eps``.
+    The condition here is on the Gram scale (an eigenvalue ratio), not the
+    factor scale of ``pre_truncation_condition``. ``retained_values is None``
+    means nothing spectral was dropped (the Cholesky paths).
     """
     retained = decomposition.retained_values
     if retained is None or retained.size == 0:
@@ -600,150 +461,20 @@ def _complementarity_certificate(
 def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
     """Least-squares solve of a saddle system, symmetrically equilibrated first.
 
-    ``lstsq``'s rank cutoff is *relative to the largest singular value of the
-    matrix it is handed*, so on an unscaled saddle matrix it measures the
-    constraint block against the norm of ``H``.  When ``H`` dwarfs the
-    constraint rows, every constraint direction falls below the cutoff and is
-    discarded as noise -- the solve then returns a point that ignores the
-    constraints entirely.  Measured on ``H = diag(1e16, 0)`` with
-    ``A = [[1, 1]]``: singular values ``[1e16, 1, 1]``, cutoff
-    ``3 * eps * 1e16 = 6.66``, so **both** unit values are truncated and rank 1
-    of 3 is retained, for an infeasible answer.  The matrix is nonsingular; only
-    the tolerance was wrong.  (``np.linalg.matrix_rank`` reports 1 here too, for
-    the same reason -- it is not an independent check.)
+    ``lstsq``'s cutoff is relative to the largest singular value, so on an
+    unscaled saddle matrix a large ``H`` pushes every constraint direction
+    under it (``H = diag(1e16, 0)``, ``A = [[1, 1]]`` keeps rank 1 of 3).
+    One pass of symmetric equilibration ``D K D`` with
+    ``D = diag(1 / sqrt(row inf-norm))`` (the first Ruiz step; Ruiz 2001)
+    makes the cutoff separate directions by conditioning. ``|K|`` is symmetric,
+    so the scaling preserves the saddle structure. Every equilibrated entry
+    satisfies ``|K_ij| / sqrt(m_i m_j) <= 1``; the right-hand side and the
+    unscaled solution carry no such bound. A zero row keeps scale 1.
 
-    Equilibrating symmetrically -- ``D K D`` with ``D = diag(1 / sqrt(row
-    inf-norm))``, solving for ``y`` and returning ``D y`` -- puts every row and
-    column on a common scale first, so the cutoff separates directions by
-    *conditioning* rather than by which block they came from.  On the case
-    above it recovers singular values ``[1, 1, 1]``, rank 3 of 3, and the
-    feasible optimum.
-
-    Symmetry of the scaling is load-bearing rather than stylistic.  ``KKT`` is
-    only quasi-symmetric -- the off-diagonal blocks are ``-A^T`` and ``+A`` --
-    but ``|KKT|`` *is* symmetric, so a scaling built from row inf-norms is
-    automatically the same on both sides and ``D K D`` preserves the saddle
-    structure the multiplier block relies on.  A one-sided row scaling would
-    not, and would leave the returned multipliers on a different scale from the
-    step.
-
-    Two properties make the scaling safe on a degenerate block.  Scope them
-    carefully: the scale multiplies **three** quantities -- the matrix, the
-    right-hand side ``rhs * scale``, and the unscaling ``sol * scale`` -- and
-    what is proved below covers only the first.  The equilibrated *matrix
-    entries* cannot exceed 1; the other two products carry no such envelope and
-    can overflow.  Measured on ``K = diag(1, 1e-320, 1)`` with
-    ``rhs = (1, 1e200, 1)``: every equilibrated matrix entry is finite with
-    maximum exactly ``1.0``, ``rhs * scale`` overflows to ``inf``, and the
-    returned solution is all ``nan``.  That input is far outside anything this
-    module assembles -- ``decompose_gram`` refuses a non-finite ``H`` upstream,
-    and the smallest nonzero in-tree row inf-norm is of order the constraint
-    rows -- but the bound below is not what rules it out, and the Ruiz
-    comparison in the second bullet is closer than "provable versus empirical"
-    reads, because the provable side covers one product of three.
-
-    * **No zero divide.** A structurally empty row -- an ``H`` row that is zero
-      with a matching zero ``A`` column, or an all-zero constraint row -- has
-      inf-norm 0 and keeps scale ``1.0`` rather than being sent through
-      ``1 / sqrt(0)``.  Leaving it alone is
-      correct: there is nothing in that row to normalize, and because ``|KKT|``
-      is symmetric the matching column is zero as well, so the row and column
-      stay zero and ``lstsq`` discards the direction as it should.  Clamping to
-      ``tiny`` instead would manufacture a ``6.7e153`` scale for a row that
-      carries no information.
-    * **No overflow in the matrix.** For a nonzero row, ``|K[i, j]| <=
-      min(m_i, m_j) <= sqrt(m_i * m_j)``, so every equilibrated matrix entry
-      satisfies
-      ``|K[i, j]| / sqrt(m_i * m_j) <= 1`` by construction, whatever the
-      dynamic range of the input.  The bound is exact in real arithmetic and
-      holds to a couple of ulps once the two multiplies round, which is what
-      the overflow argument needs.  A single pass is what carries this
-      guarantee: iterating to the Ruiz fixed point bounds the accumulated
-      scale only by the input's dynamic range rather than by ``1/sqrt(m_min)``,
-      trading a provable envelope for an empirical one.  Measured over a
-      3950-case rank-deficient ensemble the extra passes repair 14 infeasible
-      answers against this pass's 7, for the same 2 regressions -- real, but
-      not worth the weaker guarantee on this path.  Those 2 are 2 *new
-      silently-infeasible answers* against 5 net repairs, inside a population
-      this branch created: on ``master`` a singular ``H`` raised
-      ``LinAlgError`` before the loop ever ran, so the baseline they regress
-      against is a loud refusal, not a feasible answer.
-
-    The solution is minimum-norm **in the equilibrated coordinates**, not in
-    the original ones, because that is where ``lstsq`` resolves the null
-    directions.  ``RankDecomposition.solve`` follows the same *convention* for
-    the pure-``H`` solve -- divide by a scale, solve, divide again -- but not
-    the same *scale*: it divides by ``sqrt(diag(H))`` while this divides by
-    ``sqrt(row inf-norm of K)``.  So the two solves do not structurally pick
-    the same representative on a flat optimal face, and nothing here makes them
-    agree; what is claimed is only that they have not been measured to
-    disagree in a way that matters.  Where the face is genuinely flat the point
-    moves but the objective does not: the rank-one regression below returns
-    ``max|beta| = 18.3`` rather than ``15.7`` for the same exact optimum of
-    ``-450``.
-
-    The 2 ensemble cases that regress from feasible to infeasible were read as
-    that same benign movement, on the strength of a neutral control: rescaling
-    ``K`` and ``rhs`` by a common constant rerouted 2607 answers without
-    flipping any feasibility outcome.  **The control cannot carry that
-    conclusion.**  ``sigma(cK) = c sigma(K)`` and ``rcond`` is relative, so the
-    control leaves the retained set identical *by construction* -- measured, it
-    changes ``lstsq``'s retained rank in **0 of 110725** rank-deficient KKT
-    solves.  It isolates bit noise and nothing else, and cannot tell a
-    different minimum-norm representative (benign) from a different retained
-    rank (not).  Equilibration changes exactly the latter: across the same
-    solves it moves the retained rank on **9.3%** of them.
-
-    Measured directly instead, on the arm-versus-arm rank rather than the
-    control: over a production-shaped reconstruction (``b = 0``, structured
-    ``A``) the feasibility regressions carry **0 of 2319** KKT solves with a
-    changed retained rank, which does support the benign reading there.  Over
-    an adversarial reconstruction **196 of 2455 (8.0%)** do.  So the benign
-    reading is a property of the in-tree-shaped population, not a structural
-    fact about equilibration, and it is the arm-versus-arm rank -- not the
-    control -- that establishes it.
-
-    ``rcond`` is deliberately left at ``None``.  The competing proposal is to
-    pass ``SHARED_RANK_POLICY.gram_rcond`` so that one rule decides what is
-    retained, since the policy keeps ``H`` eigenvalues down to
-    ``max(gram_rcond, n eps) * lambda_max`` while ``lstsq`` drops singular
-    values below ``max(M, N) * eps * sigma_max``.  **Version 3 (issue #356)
-    strengthens that proposal without settling it.**  It gave the two rules the
-    same shape -- both are now ``p(dimension) * eps * scale``, where the Gram
-    side used to be a bare ``eps`` -- so the constant is no longer the
-    difference between them.  What remains is that they are taken on different
-    matrices, the ``H`` Gram here and the KKT system there, and the second
-    bullet below measures exactly that difference.  Equilibration is *measured*
-    to settle it better -- there is no structural argument that it must,
-    and the two bullets below are the whole of the evidence, so weakening
-    either weakens the decline:
-
-    * A direction that is near-null for ``H`` but pinned by an active
-      constraint keeps a KKT singular value of order that constraint row's
-      norm, not of order its ``H`` eigenvalue -- a KKT singular value is not an
-      ``H`` eigenvalue.  Over a ``p = 180`` ensemble with 50-row active sets and
-      an ``H`` eigenvalue planted at ``50 * eps * lambda_max``, the smallest
-      retained equilibrated ratio measured ``1.3e-4`` and the largest truncated
-      one ``0``; nothing landed between ``eps`` and ``230 * eps``, so the two
-      candidate cutoffs cannot disagree there.  Under version 3 that plant sits
-      *below* the ``180 eps`` cutoff rather than inside the retention band, so
-      the policy now truncates the direction where it used to keep it.  The
-      measurement survives that: what the ensemble established is a property of
-      the KKT singular values -- an active constraint pins such a direction at
-      the constraint row's scale -- and that is unchanged by where the Gram
-      cuts.  The ensemble has not been re-run with the plant moved above
-      ``180 eps``, and nothing is claimed about that case.
-    * Where the active rows leave such a direction *free*, it really does fall
-      in the band -- and an explicit ``rcond`` is not enough to save it.  With
-      ``H = diag(1, eps, 0)`` and ``A_eq = [[1, 0, 0]]`` the raw ratio is
-      ``1.4e-16``, below ``gram_rcond`` as well as below ``4 * eps``, so
-      ``rcond=gram_rcond`` still discards it.  Equilibration lifts the same
-      ratio to ``0.38``.  See the regression test.
-
-    Lowering the cutoff would also narrow the margin protecting the genuine
-    null direction -- on the rank-one regression below it sits at ``2e-17``
-    against ``8.9e-16``, and retaining it instead is what produced the ``1e43``
-    drift this branch already fixed once.
+    The solution is minimum-norm in the equilibrated coordinates. ``rcond``
+    stays at ``lstsq``'s default: an active constraint pins a near-null ``H``
+    direction at the constraint's scale, so the policy's ``gram_rcond`` would
+    not change what is retained there.
     """
     row_norm = np.abs(KKT).max(axis=1)
     nonzero = row_norm > 0.0
@@ -833,25 +564,16 @@ def _raises_working_rank(
 ) -> bool:
     """Whether ``A[row]`` is numerically independent of the working rows.
 
-    The working-set rows of a primal active-set method must stay linearly
-    independent, which is what keeps the KKT matrix nonsingular (Nocedal and
-    Wright, *Numerical Optimization*, 2nd ed., 2006, section 16.5; Gill and
-    Wong, Math. Prog. Comp. 7, 2015, section 2). In exact arithmetic a row
-    ``a = A_w.T @ v`` cannot block: the face step satisfies ``A_w @ step = 0``,
-    so ``a @ step = 0``. Only rounding makes it read as blocking.
+    Working-set rows must stay linearly independent to keep the KKT matrix
+    nonsingular (Nocedal and Wright 2006, section 16.5; Gill and Wong, Math.
+    Prog. Comp. 7, 2015, section 2). In exact arithmetic a dependent row cannot
+    block, since ``A_w @ step = 0``; only rounding makes it appear to.
 
-    The decision is ``decompose_factor``'s rank rule. On unit-norm columns
-    ``[A_w.T, a]``, ``a`` is dependent when the rank does not increase:
-    ``sigma_(k+1) <= sqrt(eps) * sigma_1 = sqrt(2 u) * sigma_1``. This is the
-    normal-equation boundary, where a working-row Gram eigenvalue falls to
-    ``2 u * lambda_1``. The cut must clear the SVD's own error. The *LAPACK
-    Users' Guide*, 3rd ed., section 4.9, bounds that error by
-    ``p(m, n) * epsilon * sigma_1``. Its ``epsilon`` is the largest relative
-    error of one operation (section 4.1), which is ``u`` here. The factor is
-    ``p x (k + 1)``, so take ``p(m, n) = max(p, k + 1)``. The cut then clears
-    the bound whenever ``max(p, k + 1) < sqrt(2 u) / u = 2**27``, about
-    ``1.3e8``. ``working_rank`` caches the working set's own rank by its
-    index tuple.
+    The decision is ``decompose_factor``'s rank rule on unit-norm columns
+    ``[A_w.T, a]``: dependent when ``sigma_(k+1) <= sqrt(2 u) * sigma_1``. That
+    clears the SVD error bound ``p(m, n) u sigma_1`` (*LAPACK Users' Guide*,
+    3rd ed., section 4.9) while ``max(p, k + 1) < 2**27``. ``working_rank``
+    caches the working set's rank by its index tuple.
     """
     if not active:
         return True
@@ -915,14 +637,8 @@ def _emit_blocking_decision(
 ) -> None:
     """Record one blocking-constraint decision as a ``step_decision`` event.
 
-    Deliberately **re-derives** everything it records from the raw inputs
-    rather than echoing the loop's own booleans or reusing its scaled arrays.
-    A hook fed the loop's gating arithmetic would agree with that arithmetic by
-    construction and so could never witness the gate being wrong, which is the
-    whole reason the decision trace exists.  In particular ``considered_rows``
-    is computed from a scale this function derives itself, so a loop that
-    gated on the unscaled derivative records a ``blocking_row`` that is *not*
-    in its own considered set.
+    Every recorded value is re-derived from the raw inputs, never copied from
+    the loop's own arithmetic, so the trace can witness a wrong gate.
     """
     assert trace_run is not None  # narrowed by the caller's `tracing` guard
     products, magnitude, bounds, raw_step, direction_magnitude = _constraint_actions(
@@ -953,11 +669,8 @@ def _emit_blocking_decision(
             "row_b": tuple(float(bounds[i]) for i in considered),
             "row_raw_step": tuple(float(raw_step[i]) for i in considered),
             "row_scaled_slack": tuple(float(scaled_slack[i]) for i in considered),
-            # The per-row scale the slack was divided by.  Recorded because it
-            # is no longer recoverable from `row_products` and `row_b`: since
-            # it is `max(|b|, |A_i| @ |beta|)`, which depends on the
-            # row's inputs rather than on the product they produced, so a
-            # reader cannot rebuild it from the recorded output alone.
+            # Recorded because ``max(|b|, |A_i| @ |beta|)`` cannot be rebuilt
+            # from ``row_products`` and ``row_b``.
             "row_scale": tuple(float(derived_scale[i]) for i in considered),
             "direction_scale": tuple(float(direction_scale[i]) for i in considered),
             # These dimensionless actions remain representable even when the
@@ -973,9 +686,7 @@ def _emit_blocking_decision(
             "alpha": float(alpha_min),
         },
         channel=BLOCKING_TRACE_CHANNEL,
-        # Fixed rather than taking the caller's ``trace_purpose`` as the
-        # sibling emit sites do: this seam is test-only and no caller threads a
-        # purpose through yet.  Thread one here if that changes.
+        # Fixed: this seam is test-only and no caller passes a purpose.
         purpose="constrained_qp",
     )
 
@@ -1003,8 +714,7 @@ def solve_constrained_qp(
     tol must lie in (0, 1). Primal feasibility uses the row-action scale
     max(|b_i|, |A_i| @ |beta|), plus a dimension-dependent rounding allowance.
     Dual signs and stationarity use normalized constraint rows and objective
-    actions, so positive objective and constraint-unit changes preserve their
-    meaning. Short coefficient steps, and a full step on a full-rank H, trigger
+    actions. Short coefficient steps, and a full step on a full-rank H, trigger
     the complete certificate rather than establish it. An exhausted or
     uncertified candidate is not converged.
 
@@ -1012,15 +722,11 @@ def solve_constrained_qp(
     blocking decisions only when explicitly enabled. Result rank metadata
     describes the shared H decomposition; no ridge is added.
 
-    _degeneracy_safeguards changes two things at a degenerate vertex, where a
-    block's homogeneous active rows outnumber its coefficients. It skips a
-    blocking row that is linearly dependent on the working rows (see
-    _raises_working_rank). It also constructs the exact zero point of each
-    block whose homogeneous working rows have full column rank, as the
-    n_eq >= p branch does for the whole vector. It also fits the
-    certificate's multipliers in the certificate's own units (see
-    _stationarity_certificate); the test itself is unchanged. Callers use it
-    as a retry, so default solves stay unchanged.
+    _degeneracy_safeguards, used by callers as a retry at a degenerate vertex,
+    skips blocking rows dependent on the working rows (_raises_working_rank),
+    constructs the exact zero point of each block whose homogeneous working
+    rows have full column rank, and fits the certificate's multipliers in the
+    certificate's own units (_stationarity_certificate).
     """
     # Checked at the public boundary rather than at each use: every predicate
     # below reads ``tol``, and a vacuous one is not detectable from the result.
@@ -1038,28 +744,16 @@ def solve_constrained_qp(
     p = H.shape[0]
     m = A.shape[0]
 
-    # Materialize the symmetric part once and use it everywhere below; see the
-    # ``H`` parameter above for why.  The float cast is load-bearing rather
-    # than defensive: ``H + H.T`` evaluates in the input dtype, so an integer
-    # H silently wraps -- ``[[2**62]]`` as int64 sums to a negative number and
-    # a valid PSD problem is then rejected for a "materially negative
-    # diagonal".  The raw ``np.linalg.solve`` this replaced upcast internally,
-    # so the exposure arrived with the symmetrization.  Casting fixes only the
-    # integer half of that exposure; ``rank._symmetric_part`` covers the
-    # floating-point half, where a finite ``H`` above half the float range sums
-    # to ``inf`` instead of wrapping.  ``decompose_gram`` symmetrizes again on
-    # the way in and goes through the same helper, so both symmetrizations on
-    # this path carry the same envelope.
+    # Symmetrize once, in float: ``H + H.T`` in an integer dtype wraps.
+    # ``rank._symmetric_part`` keeps a finite float ``H`` from overflowing.
     H_asarray = np.asarray(H, dtype=float)
     H_sym = _symmetric_part(H_asarray)
     A = np.asarray(A, dtype=float)
     b = np.asarray(b, dtype=float)
     g = np.asarray(g, dtype=float)
 
-    # Route the pure-H solves through the shared rank policy so a singular or
-    # near-singular H is rank-truncated the way it is everywhere else in the
-    # solver subsystem, rather than raising LinAlgError.  H does not change
-    # during the solve, so one decomposition serves every pure-H solve below.
+    # One decomposition by the shared rank policy serves every pure-H solve;
+    # a singular H is rank-truncated rather than raising LinAlgError.
     try:
         decomposition = decompose_gram(H_sym)
     except ValueError as exc:
@@ -1091,13 +785,9 @@ def solve_constrained_qp(
     # --- Unconstrained solution ---
     beta_unc = decomposition.solve(g)
 
-    # decomposition.solve is a pseudo-inverse, so it answers even when the
-    # normal equations have no solution.  If H is rank-deficient and g has a
-    # component outside range(H), the quadratic decreases without bound along
-    # that null direction and H^+g is merely a projection, not a stationary
-    # point.  Returning it as converged would be a silent wrong answer, so
-    # detect the inconsistency before either early return.  Full rank means
-    # range(H) is everything, so the check is only needed after truncation.
+    # ``decomposition.solve`` is a pseudo-inverse: if g has a component outside
+    # range(H) the objective is unbounded below and H^+ g is not stationary, so
+    # refuse that before either early return. Only truncated H can have one.
     if decomposition.rank < decomposition.width:
         # The two halves of null(H) are known to different accuracies, so they
         # get their own floors; see _null_space_mass.
@@ -1151,113 +841,26 @@ def solve_constrained_qp(
     # attribute lookup for a seam that is off in every production call.
     tracing = _trace_run is not None and _trace_run.enabled
 
-    # Route rank-truncated systems to the least-squares solve.  This gate is
-    # deliberately narrow, and it is *not* the claim that the direct solve is
-    # safe on the other side of it.  That claim was made once and does not
-    # survive measurement:
-    #
-    # ``decompose_gram`` equilibrates by ``sqrt(diag(H))`` *before* deciding
-    # rank (``rank._equilibrate_gram``), so the rank decision reports
-    # **collinearity**, not scale.  ``H = diag(1, 1e-20)`` equilibrates to the
-    # identity and is reported full rank; across diagonal plantings from
-    # ``1e-20`` to ``1e-8`` at widths 2, 6 and 12, 0 of 21 dropped rank at all.
-    # Such an H takes ``np.linalg.solve`` on a saddle of raw condition ``1e20``
-    # without ever approaching the retention threshold -- and a sweep that
-    # plants its small eigenvalue diagonally therefore never leaves this side
-    # of the gate, whatever it scores.
-    #
-    # Measured on this side, with the small eigenvalue planted in the
-    # *equilibrated* spectrum and the direction it carries made tangent to the
-    # active set (``A_eq v = 0``, so no constraint row pins it), over 192 KKT
-    # systems the policy calls full rank:
-    #
-    # ==========================  ==============  ==============
-    # quantity                    np.linalg.solve  equilibrated lstsq
-    # ==========================  ==============  ==============
-    # ``max|step|`` median        ``5.2e2``       ``3.6``
-    # ``max|step|`` worst         ``6.6e6``       ``2.5e2``
-    # relative residual median    ``1.2e-21``     ``5.0e-21``
-    # relative residual worst     ``7.4e-16``     ``1.0e-15``
-    # ``|A_eq (beta + step)|``    ``8.4e-10``     ``3.6e-12``
-    # ==========================  ==============  ==============
-    #
-    # Both residuals are at rounding, so the direct solve is not wrong about
-    # the linear system: it *numerically succeeds* and picks a far larger
-    # representative on a near-flat line.  That is the round-6 drift mechanism
-    # -- the one that reached ``4.1e43`` -- and it is the opposite of a
-    # truncation artifact, so an objective gap, which is flat along exactly
-    # that direction, cannot see it.  Scored on ``max|beta|`` and worst slack
-    # instead: end to end with the eigenvalue at ``4 * eps``, 1 of 40 solves on
-    # this side of the gate returned a fully saturated ``-1.0`` slack, and
-    # ``max|beta|`` reached ``1.9e6`` where the optimum is ``O(1)``.
-    #
-    # Widening the gate is behaviour-changing for every near-singular fit, so
-    # it is filed rather than done here.  **The decline does not rest on
-    # byte-identity with master, and an earlier form of this note said it did.**
-    # That form cited 9657 of 10924 KKT direct solves as byte-identical; that
-    # corpus was measured for the equilibration commit against its *parent*,
-    # answering "did equilibration touch the full-rank path", and re-labelling
-    # it as a master comparison attaches the wrong baseline.  It is also
-    # self-refuting: admitting rank-deficient ``H`` moved fitted values
-    # ``2.9e-13`` relative to master on a monotone ``BSplineSmooth`` fit, and if
-    # those moved then ``beta_unc = decomposition.solve(g)`` moved, so the
-    # projected start moved, so ``rhs[:p] = g - H_sym @ beta`` moved -- the KKT
-    # systems on that fit cannot be master's byte for byte.  Measured directly
-    # against ``master`` over the 720-solve full-rank corpus, **49** betas are
-    # byte-identical and 671 are not.
-    #
-    # The decline survives on the **routing**, which is a stronger argument and
-    # does not decay as fixtures change:
-    #
-    # ==========================  ========================  ==================
-    # ``H`` after equilibration   master                    this branch
-    # ==========================  ========================  ==================
-    # full rank                   ``np.linalg.solve``       identical routing
-    # rank-deficient, LU-solvable ``np.linalg.solve``       equilibrated lstsq
-    #                             -- **the drift regime**
-    # exactly singular            ``LinAlgError`` before    equilibrated lstsq
-    #                             the loop
-    # ==========================  ========================  ==================
-    #
-    # Row 2 carries it.  ``np.linalg.solve`` does not raise on a merely
-    # *near*-singular matrix -- that is the whole mechanism of round 6's P1 --
-    # so on master an ``H`` whose smallest equilibrated eigenvalue sat just
-    # under the retention threshold went into the loop and took the direct KKT
-    # solve on a near-singular saddle.  This branch routes exactly that
-    # population away from it.  **The branch strictly shrinks the set of inputs
-    # reaching the drifting solve and adds none**, and for the set that remains
-    # the routing is master's by construction, since the gate keys on
-    # ``decomposition.rank < decomposition.width``, a property of ``H`` alone.
-    #
-    # What is *not* guaranteed is that the specific systems are unchanged, and
-    # it is measurably false rather than merely unproven: admitting the
-    # rank-deficient case perturbs the QP initialisation, so a fit can move onto
-    # or off the drift.  Over that same full-rank corpus 577 of 720 solves take
-    # master's iteration count *and* master's active set while only 49 land on
-    # master's bytes -- the route is preserved, the arithmetic along it is not.
+    # Route rank-truncated systems to the equilibrated least-squares solve.
+    # ``decompose_gram`` equilibrates before deciding rank, so it reports
+    # collinearity, not scale: a full-rank H can still give a near-singular
+    # KKT system, on which ``np.linalg.solve`` succeeds but can pick a far
+    # larger representative on a near-flat face. Widening the gate would change
+    # every near-singular fit and is a separate decision.
     kkt_may_be_singular = decomposition.rank < decomposition.width
 
-    # ``A`` is fixed for the whole solve, so the dot-product error scale
-    # ``|A| @ |beta|`` costs one elementwise pass here rather than one per
-    # iteration; only the ``|beta|`` matvec is per-iteration.  See
-    # ``_feasibility_slack``.
+    # ``|A|`` is loop-invariant; only the ``|beta|`` matvec is per iteration.
     abs_A = np.abs(A)
     zero_face_cache: dict[tuple[int, ...], bool] = {}
     blocks = _constraint_blocks(A) if _degeneracy_safeguards else []
     block_zero_face: dict[tuple[int, ...], bool] = {}
     working_rank: dict[tuple[int, ...], int] = {}
-    # Whether ``beta`` is the minimizer on the current face: the previous
-    # iteration took its full step and kept the active set.  In exact
-    # arithmetic the next step is then zero (Nocedal and Wright, *Numerical
-    # Optimization*, 2nd ed., 2006, Algorithm 16.3); in floating point it is
-    # the saddle solve's rounding, about u times the KKT system's condition
-    # number relative to ``beta``, which an ill-conditioned ``H`` (thin
-    # random-effect levels at a small penalty) lifts above the ``tol`` step
-    # gate below.  Without this the loop then steps along rounding until
-    # ``max_iter`` and never reaches its certificate.  Only a full-rank ``H``
-    # has one minimizer per face: on a rank-deficient one a face minimum is a
-    # whole flat set, and the loop keeps stepping to the representative its
-    # least-squares saddle solve picks (see ``kkt_may_be_singular``).
+    # Whether ``beta`` minimizes on the current face (previous iteration took
+    # its full step and kept the active set). The exact next step is then zero
+    # (Nocedal and Wright 2006, Algorithm 16.3); in floating point it is the
+    # saddle solve's rounding, which an ill-conditioned H can lift above the
+    # ``tol`` step gate, so the loop certifies directly instead. Full-rank H
+    # only: on a rank-deficient one a face minimum is a flat set.
     at_face_minimum = False
 
     for it in range(max_iter):
@@ -1307,42 +910,24 @@ def solve_constrained_qp(
                 rhs[p:] = b_eq - A_eq @ beta
 
                 if kkt_may_be_singular:
-                    # A truncated H can leave the KKT system with a
-                    # constraint-tangent null direction.  np.linalg.solve
-                    # *numerically succeeds* on such a system rather than raising,
-                    # so the LinAlgError fallback below never fires and the step
-                    # drifts along the flat direction -- measured reaching
-                    # |beta| ~ 4e43 while violating the constraint it was meant to
-                    # respect.  Take the minimum-norm solution directly instead of
-                    # waiting for an exception that does not come.
+                    # A truncated H can leave a constraint-tangent null
+                    # direction on which np.linalg.solve succeeds and drifts,
+                    # so take the minimum-norm solution directly.
                     sol = _solve_saddle_least_squares(KKT, rhs)
                 else:
                     try:
                         sol = np.linalg.solve(KKT, rhs)
                     except np.linalg.LinAlgError:
-                        # Singular KKT — use least-squares.  Same equilibration as
-                        # the branch above: this is the identical solve on an
-                        # identically scaled saddle matrix, and an unscaled cutoff
-                        # would discard the constraint block here for exactly the
-                        # reason it does there.  The direct solve above is
-                        # untouched, so the full-rank path still reaches this line
-                        # only after np.linalg.solve has already refused.
+                        # Singular KKT: the same equilibrated least-squares
+                        # solve as the branch above.
                         sol = _solve_saddle_least_squares(KKT, rhs)
 
                 step = sol[:p]
 
         # --- Check step feasibility ---
-        # Judge movement relative to the current coefficient scale, coordinate
-        # by coordinate.  An absolute step threshold is not invariant to
-        # scaling the response: at a genuine active-boundary KKT point,
-        # cancellation in ``g - H @ beta`` leaves an O(eps * |beta|)
-        # correction.  With a large response that correction can exceed an
-        # absolute tolerance forever, even after the active set, feasibility,
-        # stationarity, and multipliers have stabilized.
-        #
-        # Per-coordinate scaling avoids letting one large coefficient hide a
-        # material update to another.  It also preserves the previous absolute
-        # Euclidean test exactly while every ``|beta_i| <= 1``.
+        # Judge movement per coordinate, relative to ``max(1, |beta_i|)``: an
+        # absolute threshold is not scale-invariant, and at an active-boundary
+        # KKT point cancellation in ``g - H @ beta`` leaves O(eps |beta|) steps.
         relative_step = step / np.maximum(1.0, np.abs(beta))
         small_step = bool(np.linalg.norm(relative_step) < tol)
         if (
@@ -1387,11 +972,8 @@ def solve_constrained_qp(
             # blocking row; coefficient units cannot complete a dual solve.
 
         # --- Step ratio: find blocking constraint ---
-        # Both tests below go through the same per-row scale the convergence
-        # test uses.  Leaving them absolute while the boundaries went relative
-        # made the loop treat a row as violated that _is_feasible considers
-        # satisfied, so it would block on that row with a negative slack and
-        # take a backward step.
+        # Both tests use the per-row scale of the convergence test, so a row
+        # ``_is_feasible`` accepts is never treated as violated.
         beta_new = beta + step
 
         if _is_feasible(A, beta_new, b, tol, abs_A=abs_A):
@@ -1407,24 +989,15 @@ def solve_constrained_qp(
             # Same scale ``_is_feasible`` uses, which is what makes "does this
             # step move the row" agree with "is this row satisfied".
             scaled_step, _ = _scaled_constraint_step(A, beta, step, b, abs_A)
-            # Set membership, not ``i in active``: the list scan is O(|active|)
-            # per row and dominated the rest of this now-vectorized block.
-            # ``active`` is only mutated after this loop finishes.
+            # A set, not ``i in active``, for O(1) membership.
             active_lookup = set(active)
 
             for i in range(m):
                 if i in active_lookup:
                     continue
                 if scaled_step[i] < -tol:
-                    # Gate on the *scaled* derivative, so "does this step move
-                    # the row at all" agrees with _is_feasible.  Take the ratio
-                    # from the *raw* pair: dividing both by the row scale is
-                    # algebraically neutral but not neutral in floating point,
-                    # since it rounds twice where this rounds once.  On a row
-                    # with slack > 1 the scaled numerator is exactly 1.0 and
-                    # the two answers differ by up to an ulp, which would put
-                    # an ulp of drift into `beta += alpha_min * step` for no
-                    # gain -- the gate is what needed to change, not the ratio.
+                    # Gate on the scaled derivative, as _is_feasible does;
+                    # take the ratio from the raw pair, which rounds once.
                     alpha = float((products[i] - bounds[i]) / -raw_step[i])
                     if alpha < alpha_min and (
                         not _degeneracy_safeguards
@@ -1460,9 +1033,6 @@ def solve_constrained_qp(
                 beta = beta_new
                 at_face_minimum = True
 
-    # Exhaustion is unconditional non-convergence, feasible or not: the loop
-    # never reached its stationarity/multiplier test, so there is no KKT
-    # certificate to complete.  A merely feasible point is not a solution --
-    # any interior point is feasible -- so consulting feasibility here would
-    # report success for a search that was cut off mid-flight.
+    # Exhaustion is non-convergence even at a feasible point: the KKT
+    # certificate was never completed.
     return _result(beta, active, max_iter, converged=False)

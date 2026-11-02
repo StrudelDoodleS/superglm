@@ -179,12 +179,9 @@ class _ProfiledLeafFactor(_ProfiledInterceptFactor):
         return clone
 
 
-# The Schur-complement factor families retired by the one engine (design
-# §3.12): the block-Schur pair (stage 2) and the scalar pair (stage 4), whose
-# random effects every fit now factors as a nested chain (a lone level is a
-# chain of one).  The names stay importable at their pickled paths as inert
-# stand-ins so that models saved by v0.35.0 load; a later minor release may
-# drop them.
+# Inert stand-ins for the retired Schur-complement factor families, whose
+# random effects now factor as a nested chain; importable at their pickled
+# paths so v0.35.0 models load.
 __getattr__ = module_getattr(
     __name__,
     frozenset(

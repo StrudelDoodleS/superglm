@@ -19,13 +19,12 @@ from ._group_matrix_kernels import _fused_bincount_2, _native, _ssp_gram_needs_e
 
 # Support rows anchored at a time: bounds the (rows, raw width) transient.
 _SUPPORT_CHUNK_BYTES = 8 << 20
-# Ceiling on the centred support columns the repair holds at once, over every
-# failing column (128 columns of a 256 x 256 tensor grid), and on the weighted
-# rows of the failing columns it forms at once (at least one).  A categorical
-# or SCOP support's value copy and the own block's mass-weighted temporary
-# take the transient to about four times it, beside the kept projections
-# (``_MAX_KEPT_PROJECTION_BYTES``) and one more projected support the rejected
-# build did not form (``_admitted_products``), no larger than that group's
+# Ceiling on the centred support columns the repair holds at once over every
+# failing column, and on the weighted rows of the failing columns it forms at
+# once (at least one).  A categorical or SCOP support's value copy and the own
+# block's mass-weighted temporary take the transient to about four times it,
+# beside the kept projections (``_MAX_KEPT_PROJECTION_BYTES``) and one more
+# projected support (``_admitted_products``), no larger than that group's
 # ``B_unique``.
 _MAX_CENTRED_COLUMN_BYTES = 64 << 20
 # Ceiling on the projections the repair forms itself and keeps for later
@@ -70,16 +69,14 @@ def _project(gm) -> NDArray:
 def _admitted_readers(group_matrices, supports) -> list | None:
     """How the repair reads each group's admitted columns, so it multiplies their values alone.
 
-    A categorical, SCOP, sparse or dense group: ``None``, its ``rmatvec``
-    multiplying its values alone.  A discretized SSP group (tensors and
-    support-compressed groups included) or spline-by-category level:
-    ``(support, codes, rows)``, its support projected before any product,
-    where ``rmatvec`` would sum ``B_unique`` first and multiply the sum's
-    rounding by a projection that cancels.  ``support`` is the projection
-    the rejected build formed (``supports``), else ``None`` for
-    ``_admitted_products`` to form, from float64 factors in the range in
-    which the raw Gram projects (``_ssp_gram_needs_exact``).  ``None``
-    overall for any other group or factors.
+    A categorical, SCOP, sparse or dense group: ``None`` (its ``rmatvec`` multiplies
+    its values alone).  A discretized SSP group or spline-by-category level:
+    ``(support, codes, rows)``, its support projected before any product, because
+    ``rmatvec`` would sum ``B_unique`` first and multiply the sum's rounding by a
+    projection that cancels.  ``support`` is the projection the rejected build
+    formed (``supports``), else ``None`` for ``_admitted_products`` to form from
+    float64 factors in the range in which the raw Gram projects
+    (``_ssp_gram_needs_exact``).  ``None`` overall for any other group or factors.
     """
     from superglm.group_matrix import (
         CategoricalGroupMatrix,
@@ -157,21 +154,15 @@ def _anchor_centred_columns(
 ) -> tuple[NDArray, NDArray, tuple[NDArray, NDArray], NDArray, NDArray] | None:
     """``(centred, codes, (anchor, shift), mass, response)`` for ``gm``'s columns ``local``.
 
-    ``_anchor_center_support``'s anchoring on those columns alone: the
-    support rows less the heaviest one, less their weighted mean, then
-    projected, accumulated over chunks of support rows so a tensor grid's
-    raw rows are never copied at once.  A categorical's identity support is
-    formed on the failing levels only, so the heavy level is the anchor and
-    its column becomes the centred complement indicator, never a ``(K+1, K)``
-    array.  ``centred`` is ``(support rows, len(local))``.
-
-    The support and transform are read as float64, chunk by chunk, before any
-    arithmetic: every other reader of the column converts them so (exact for
-    float32 and for integers up to ``2**53``, which round alike in all of
-    them), and an integer difference would wrap.  ``None`` for a support or
-    transform ``_reads_as_float64`` declines (complex, object, and the extended
-    float on every platform).  The centre is the projected anchor and shift,
-    apart (``column_local_centering``, **Centre**): their sum is ``mu~``.
+    ``_anchor_center_support``'s anchoring on those columns alone: the support rows
+    less the heaviest one, less their weighted mean, then projected, accumulated
+    over chunks of support rows so a tensor grid's raw rows are never copied at
+    once.  A categorical's identity support is formed on the failing levels only
+    (the heavy level is the anchor), never as a ``(K+1, K)`` array.  ``centred`` is
+    ``(support rows, len(local))``.  Support and transform are read as float64 chunk
+    by chunk before any arithmetic (an integer difference would wrap); ``None`` for
+    one ``_reads_as_float64`` declines.  The centre is the projected anchor and
+    shift, apart (``column_local_centering``, **Centre**): their sum is ``mu~``.
     """
     from superglm.group_matrix import CategoricalGroupMatrix
 
@@ -215,91 +206,56 @@ def column_local_centering(
     """``(mean_x, data_gram, rhs, recentred)`` from rejected raw moments, recentring only the failing columns.
 
     The raw-moment certificate (``_raw_centering_admitted``) is per column:
-    subtracting raw moments keeps column ``j`` in the rounding envelope of a
-    Gram when ``kappa_j^2 = 1 + m_j^2 / s_j^2 <= 2``, ``m_j`` its weighted
-    mean and ``s_j`` its centred RMS (Chan, Golub & LeVeque 1983, eqs.
-    3.2-3.3).  A 0/1 indicator whose level carries a weight share ``p > 1/2``
-    fails it, ``kappa^2 = 1 / (1 - p)``, and one such column used to send
-    every column of the design to the chunked ``O(n p^2)`` pass.  Here each
-    failing column ``j`` alone is recentred inside its own group: its
-    compact support is anchored at the group's heaviest support row and
-    centred about its weighted mean before any product
-    (``_anchor_centred_columns``; an indicator becomes its centred
-    complement), giving centred rows ``c_j``, and its row of the Gram is
+    subtracting raw moments keeps column ``j`` in the rounding envelope of a Gram
+    when ``kappa_j^2 = 1 + m_j^2 / s_j^2 <= 2``, ``m_j`` its weighted mean and
+    ``s_j`` its centred RMS (Chan, Golub & LeVeque 1983, eqs. 3.2-3.3).  A 0/1
+    indicator whose level carries a weight share ``p > 1/2`` fails it, ``kappa^2 =
+    1 / (1 - p)``.  Each failing column alone is recentred inside its own group: its
+    compact support is anchored at the group's heaviest support row and centred
+    about its weighted mean before any product (``_anchor_centred_columns``),
+    giving centred rows ``c_j``, and its row of the Gram is
 
-    - against an admitted column ``k``, any group's: ``W c_j`` against
-      ``k``'s values ``x_k`` themselves, an SSP support projected before any
-      product (``_admitted_readers``), less ``k``'s raw mean times ``e_j =
-      sum W c_j``;
-    - against a failing column of its own group: ``sum_b mass_b c_j c_k``
-      over support rows; of another group: ``W c_j`` summed by that group's
-      codes against its centred support.
+    - against an admitted column ``k``: ``W c_j`` against ``k``'s values ``x_k``
+      themselves (an SSP support projected before any product,
+      ``_admitted_readers``), less ``k``'s raw mean times ``e_j = sum W c_j``;
+    - against a failing column of its own group: ``sum_b mass_b c_j c_k`` over
+      support rows; of another group: ``W c_j`` summed by that group's codes
+      against its centred support.
 
-    Every entry between two admitted columns, their means and their
-    right-hand sides are bitwise the raw rung's subtraction, which is what
-    the certificate would have returned for them on its own.  The cost is
-    one gather and one transpose product of the design per failing column,
-    ``O(n G)`` for ``G`` groups, and one projection of each SSP support the
-    rejected build did not project, against the chunked pass's ``O(n p^2)``;
-    a projection past ``_MAX_KEPT_PROJECTION_BYTES`` is formed once per chunk
-    of failing columns instead.
-    ``recentred`` holds each group's recentred columns and centred support
-    (``RecentredColumns``), so a caller that meets them with other rows does
-    so through ``recentred_products``, never through their raw values.
-    ``None`` when a failing column's group has no compact support or one
-    ``_reads_as_float64`` declines (``_anchor_centred_columns``), when
-    the failing columns' centred supports exceed ``_MAX_CENTRED_COLUMN_BYTES``,
-    when a group's admitted columns cannot be read as their own values
-    (``_admitted_readers``), or when an entry between admitted columns is
-    not finite (a rejection that is not column-local).
+    Entries between two admitted columns, their means and right-hand sides are
+    bitwise the raw rung's.  The cost is one gather and one transpose product of
+    the design per failing column, ``O(n G)`` for ``G`` groups, against the chunked
+    pass's ``O(n p^2)``.  ``recentred`` holds each group's recentred columns and
+    centred support (``RecentredColumns``); callers meet them with other rows
+    through ``recentred_products``.  ``None`` when a failing column's group has no
+    compact support or one ``_reads_as_float64`` declines, when the centred supports
+    exceed ``_MAX_CENTRED_COLUMN_BYTES``, when a group's admitted columns cannot be
+    read as their own values, or when an entry between admitted columns is not
+    finite.
 
-    **Error.**  Each recentred entry is a sum over rows of ``W_r c_j(r)
-    y_k(r)``: ``y_k`` is ``c_k`` (a failing partner), ``x_k - m^_k`` (an
-    admitted partner, ``m^_k`` its raw mean, applied to ``e_j``), ``x_k -
-    a_k`` (a ``DenseGroupMatrix`` column's anchored rows, which
-    ``_attach_dense_split`` meets with ``c_j`` through
-    ``recentred_products``: ``n_h = q_h = 0``) or ``z`` (the right-hand
-    side).  It is evaluated with at most ``K = n + n_g +
-    n_h + q_g + q_h + 5`` roundings a term (``n_g``, ``n_h`` the two
-    groups' support rows and ``q_g``, ``q_h`` their raw widths: the row
-    sums, the support sums, the two projections, the anchoring, the
-    weighting and the correction), so it lies within ``gamma_K sum_r W_r
-    A_j(r) (A_k(r) + |m^_k|)`` of the exact sum over the computed centre
-    (Higham 2002, sec. 3.1), ``A`` the absolute product of the factors each
-    kernel multiplies: ``(|v - v_h| + |shift|) |T_j|`` for a recentred
-    column, ``|c|`` itself for a categorical level, whose anchoring is
-    exact, and ``|x_k|`` itself for an admitted column read through its
-    projected support.  By Cauchy-Schwarz ``sum W A_j A_k <= S a_j a_k``
-    (``S = sum W``, ``a`` the weighted RMS of ``A``), and an admitted column
-    has ``a_k = kappa_k s_k <= sqrt(2) s_k`` and ``|m^_k| <= s_k``, so a
-    recentred entry lies within ``(1 + sqrt(2)) gamma_K S a_j s_k``.  That
-    holds where ``x_k`` is the projection the raw Gram reads: an exact
-    ``DiscretizedSSPGroupMatrix`` or ``SupportCompressedSSPGroupMatrix``.  A
-    tensor (its diagonal, tensor and main-effect crosses) and a
-    spline-by-category level apply ``R_inv`` after contracting ``B_unique``,
-    so their ``x_k`` is ``B_unique T_k`` and the projection's ``q_h``
-    roundings add ``gamma_(q_h) sum_r W_r |c_j(r)| (|B_unique|
-    |T_k|)(code_r)``, unbounded by ``s_k`` where the projection cancels;
-    summing ``B_unique`` first, as ``rmatvec`` does, would make that
-    ``gamma_(q_h)`` a ``gamma_(n + n_h + q_h)``.  Raw subtraction between
-    two admitted columns lies within ``gamma_K S s_k s_l (kappa_k kappa_l +
-    kappa_k + kappa_l + 1) <= (3 + 2 sqrt(2)) gamma_K S s_k s_l``.  Every
-    recentred entry is inside the envelope a certified column already has,
-    beside that projection term.
+    **Error.**  Each recentred entry is a sum over rows of ``W_r c_j(r) y_k(r)``
+    with ``y_k`` the partner's centred (or admitted-minus-raw-mean) values, evaluated
+    with at most ``K = n + n_g + n_h + q_g + q_h + 5`` roundings a term, so it lies
+    within ``gamma_K sum_r W_r A_j(r) (A_k(r) + |m^_k|)`` of the exact sum over the
+    computed centre (Higham 2002, sec. 3.1), ``A`` the absolute product of the
+    factors each kernel multiplies.  By Cauchy-Schwarz ``sum W A_j A_k <= S a_j a_k``
+    (``S = sum W``, ``a`` the weighted RMS of ``A``), and an admitted column has
+    ``a_k = kappa_k s_k <= sqrt(2) s_k`` and ``|m^_k| <= s_k``, so a recentred entry
+    lies within ``(1 + sqrt(2)) gamma_K S a_j s_k``.  That holds where ``x_k`` is
+    the projection the raw Gram reads (an exact ``DiscretizedSSPGroupMatrix`` or
+    ``SupportCompressedSSPGroupMatrix``).  A tensor and a spline-by-category level
+    apply ``R_inv`` after contracting ``B_unique``, so the projection's ``q_h``
+    roundings add ``gamma_(q_h) sum_r W_r |c_j(r)| (|B_unique| |T_k|)(code_r)``.
+    Raw subtraction between two admitted columns lies within ``(3 + 2 sqrt(2))
+    gamma_K S s_k s_l``.
 
-    **Centre.**  The returned centre ``mu~_j = fl(v_h T_j) + fl(shift
-    T_j)`` (``fl(v_h + shift)`` with no transform, ``q = 0``) is the
-    counterpart of ``c_j``: the projected support ``fl(v_b T_j)``, the
-    column every other reader centres about ``mu~_j`` (the factor
-    certificate among them), lies within ``gamma_q |v_b| |T_j| +
-    gamma_(q+1) (|v_h| + |shift|) |T_j| + gamma_(q+2) (|v_b - v_h| +
-    |shift|) |T_j|`` of ``mu~_j + c_j(b)``.  Its first two terms are the
-    projection's own rounding of rows ``b`` and ``h``, zero where they
-    project exactly; projecting ``fl(v_h + shift)`` instead rounds ``shift``
-    against ``v_h`` before a projection that may cancel, which erases it
-    where ``|shift| < u |v_h|``.  ``mu~_j`` differs from the exact weighted
-    mean by a constant ``d_j``, which enters an entry only as ``S d_j d_k``
-    or ``S d_j (m_k - m^_k)``: second order in ``u``.
+    **Centre.**  The returned centre ``mu~_j = fl(v_h T_j) + fl(shift T_j)`` is the
+    counterpart of ``c_j``: the projected support ``fl(v_b T_j)`` lies within
+    ``gamma_q |v_b| |T_j| + gamma_(q+1) (|v_h| + |shift|) |T_j| + gamma_(q+2)
+    (|v_b - v_h| + |shift|) |T_j|`` of ``mu~_j + c_j(b)``.  Projecting ``fl(v_h +
+    shift)`` instead would erase ``shift`` where ``|shift| < u |v_h|``.  ``mu~_j``
+    differs from the exact weighted mean by a constant ``d_j``, which enters an
+    entry only at second order in ``u``.
     """
     weighted_z = rejected.weighted_z
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
@@ -343,12 +299,10 @@ def _recentre_columns(
 ):
     """``(centred, readers)`` for the columns ``admitted`` rejects, else ``None``.
 
-    ``centred`` maps each group holding a failing column to ``(columns,
-    centred, codes, mean, mass, response)``, its failing columns anchored and
-    centred inside the group about the weights ``W``
-    (``_anchor_centred_columns``); ``readers`` reads every group's admitted
-    columns (``_admitted_readers``).  ``None`` where the repair declines (see
-    ``column_local_centering``).
+    ``centred`` maps each group holding a failing column to ``(columns, centred,
+    codes, mean, mass, response)``, anchored and centred inside the group about the
+    weights ``W`` (``_anchor_centred_columns``); ``readers`` reads every group's
+    admitted columns (``_admitted_readers``).  ``None`` where the repair declines.
     """
     widths = [gm.shape[1] for gm in dm.group_matrices]
     starts = np.concatenate([np.zeros(1, dtype=np.intp), np.cumsum(widths, dtype=np.intp)])
@@ -436,20 +390,15 @@ def recentred_about(
 ) -> tuple[tuple[RecentredColumns, ...], list] | None:
     """``(recentred, readers)``: the columns ``admitted`` rejects, centred about a given ``centre``.
 
-    The repair of ``column_local_centering`` for a caller that holds its
-    centre already, the weighted mean ``centre`` at the weights ``W`` (sum
-    ``sum_w``), and forms products with other weights from it
-    (``recentred_gram_rows``): each failing column anchored and centred inside
-    its group about ``W`` (``_anchor_centred_columns``, about ``mu~ = a +
-    s``, its projected anchor and shift), then moved to ``centre`` by the
-    difference of the two centres, ``c_j + ((a_j - centre_j) + s_j)``.
-    ``a_j - centre_j`` is exact where they lie within a factor two of each
-    other (Sterbenz), as they do for a rejected column, whose spread is
-    below its mean, so the move adds one rounding of ``c_j``'s own size;
-    adding the rounded ``mu~_j`` instead would carry its rounding, ``u
-    |mu~_j|``, into every row, an error ``kappa_j`` times the spread against
-    a signed sum that does not cancel it.  ``None`` where the repair
-    declines.
+    The repair of ``column_local_centering`` for a caller that holds its centre
+    already (the weighted mean at the weights ``W``, sum ``sum_w``) and forms
+    products with other weights from it (``recentred_gram_rows``): each failing
+    column is anchored and centred inside its group about ``W``, then moved to
+    ``centre`` by ``c_j + ((a_j - centre_j) + s_j)``.  ``a_j - centre_j`` is exact
+    within a factor two (Sterbenz), as for a rejected column whose spread is below
+    its mean, so the move adds one rounding of ``c_j``'s own size; adding the
+    rounded ``mu~_j`` instead would carry ``u |mu~_j|`` into every row.  ``None``
+    where the repair declines.
     """
     repair = _recentre_columns(dm, admitted, W, np.zeros_like(W), sum_w, None)
     if repair is None:

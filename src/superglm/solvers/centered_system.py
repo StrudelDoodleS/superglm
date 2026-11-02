@@ -425,21 +425,13 @@ def iter_grouped_design_leaves(dm: DesignMatrix) -> Iterator[tuple[int, int, _De
 class _DataFactorReuse:
     """The weighted data factors one fit has formed, keyed by the bits of their inputs.
 
-    Owner: one ``fit_reml`` call (:func:`reuse_data_factors`); lifetime: that
-    call.  A factor is a function of the design, the leaf partition
-    (``rank.tsqr_leaf_rows``), and the float64 bits of the weights, the
-    centre pair and the response: the penalty never enters it, the leaves
-    run with BLAS on one thread at any worker count, so the same inputs give
-    the same bits and an entry needs no other invalidation.  A REML fit asks
-    again for factors it has formed (the observed geometry of a line-search
-    trial and of the candidate it accepts; one PIRLS start shared by
-    successive smoothing states).  The ``_ENTRIES`` most recently used are
-    kept (a few factors of ``(p + 1)^2`` doubles and their ``n``-vectors); a
-    hit returns copies, so no caller can change an entry.  ``leaf_parts``
-    keeps the leaf parts (``_design_leaf_parts``, its support tables
-    included) of the design the fit factored last, a function of that design
-    alone, keyed by the design and its group matrices: at most one design's
-    tables are retained (``retained_bytes``).
+    Owner and lifetime: one ``fit_reml`` call (:func:`reuse_data_factors`). A
+    factor depends only on the design, the leaf partition and the float64 bits
+    of the weights, centre pair and response (never the penalty), and leaves
+    run single-threaded, so equal keys give equal bits and need no other
+    invalidation. The ``_ENTRIES`` most recently used are kept and a hit
+    returns copies. ``leaf_parts`` keeps one design's leaf parts
+    (``_design_leaf_parts``), keyed by the design and its group matrices.
     """
 
     _ENTRIES = 4
@@ -560,47 +552,22 @@ def grouped_weighted_factor_rhs(
 def penalty_factor(penalty: NDArray) -> NDArray:
     """Return a factor ``R`` with ``R'R`` the PSD penalty ``S`` to within its own resolution.
 
-    Every rank decision downstream counts a row of ``R`` along a data-null
-    direction as identifying it, so ``R`` keeps only the curvature ``S``
-    certifies.  An exactly zero row of ``S`` is an exact null and is left out.
-    The rest splits exactly into its contiguous diagonal blocks (no entry
-    couples them; a penalty is block diagonal by term).  Each block is
+    Downstream rank decisions count every row of ``R`` as identifying, so
+    ``R`` keeps only curvature ``S`` resolves. Exactly zero rows are left out
+    and the rest splits into its contiguous diagonal blocks. Each block is
     Jacobi-equilibrated, ``A_b = D S_b D`` with ``D = diag(S_b)^(-1/2)``, keeps
-    the eigenpairs of ``A_b`` above its eigensolver resolution ``n_b eps
-    ||A_b||_2`` (*LAPACK Users' Guide*, 3rd ed., sec. 4.7;
-    ``rank._eigensolver_relative_bar``, the floor of the Gram route's rank cut,
-    which equilibrates the same way; accumulated outward, ``_outward_cut``),
-    and maps the root back, ``R_b = W^(1/2) V' D^(-1)``.  ``R_b'R_b = D^(-1)
-    (A_b)_+ D^(-1)`` is the projection of
-    ``S_b`` onto the PSD cone in the norm ``||D X D||_F`` (Higham 2002, IMA J.
-    Numer. Anal. 22, Thm 3.2), less the eigenvalues below the bar.
+    the eigenpairs above the eigensolver resolution ``n_b eps ||A_b||_2``
+    (*LAPACK Users' Guide*, 3rd ed., sec. 4.7; accumulated outward,
+    ``_outward_cut``), and maps back, ``R_b = W^(1/2) V' D^(-1)``: the PSD
+    projection in the norm ``||D X D||_F`` (Higham 2002, IMA J. Numer. Anal.
+    22, Thm 3.2). Cutting on ``A_b`` makes the rank independent of coordinate
+    units; graded PSD sums keep relative eigenvalue accuracy under that scaling
+    (Demmel & Veselic 1992; Drmac 2020, arXiv:2006.02753, Thms 3.7, 3.11, 3.12).
 
-    Below the bar an eigenvalue's magnitude and sign are rounding; keeping it
-    (the former ``> 0.0`` test) invented curvature along an exact null.
-    Measured: an ``sz`` term's unpenalized natural coordinates (exactly zero
-    rows) came out of one ``eigh`` of the whole matrix at up to ``+5.3e-12``
-    against ``||S||_2 = 3.9e4``, which made a thin level's exact data-null
-    alias identified on gram (rank +1 against the structured solver).
-
-    The cut is on ``A_b``, not ``S_b``, so no coordinate's units decide its
-    rank.  A sum of PSD terms (``lambda_j D_j'D_j``, a natural
-    parameterization, a Kronecker sum) is rounded entrywise within ``gamma_n
-    sqrt(S_ii S_jj)`` (the dot-product bound and Cauchy-Schwarz), the scaled
-    perturbation under which ``S``'s eigenvalues are determined to relative
-    accuracy ``||A^-1||_2`` times its size, however graded ``S`` is (Demmel &
-    Veselic 1992, SIAM J. Matrix Anal. Appl. 13(4); Drmac 2020,
-    arXiv:2006.02753, Thms 3.7 and 3.11), and Jacobi scaling is within a
-    factor ``n`` of the best diagonal scaling (van der Sluis 1969, Numer.
-    Math. 14; Drmac, Thm 3.12).  The unscaled cut ``n_b eps ||S_b||_2``
-    dropped the ``1e-6`` mode of ``[[1e10, 1e-10], [1e-10, 1e-6]]`` (bar
-    ``4.4e-6``), whose ``A_b`` is the identity to ``1e-12``, and gram then
-    rejected every step of a fit with that penalty.
-
-    A block that is not PSD at its scaled resolution has no scaled model:
-    a nonzero row on a non-positive diagonal, or an eigenvalue of ``A_b``
-    below ``decompose_gram``'s materially-indefinite bar.  Its small entries
-    are not known to be data rather than rounding (Drmac, sec. 3.3), so it
-    keeps the eigenpairs above ``n_b eps ||S_b||_2`` of ``S_b`` itself.
+    A block that is not PSD at its scaled resolution (a nonzero row on a
+    non-positive diagonal, or an eigenvalue of ``A_b`` below
+    ``decompose_gram``'s materially-indefinite bar) keeps the eigenpairs above
+    ``n_b eps ||S_b||_2`` of ``S_b`` itself (Drmac 2020, sec. 3.3).
     """
     width = penalty.shape[0]
     symmetric = 0.5 * (penalty + penalty.T)
@@ -646,7 +613,7 @@ def _outward_cut(relative: float, norm: float) -> float:
     """``relative * norm`` rounded up: an upper bound on the exact product.
 
     ``relative`` (``n eps``) is exact, so the product is one rounding, and
-    one ``nextafter`` toward ``+inf`` covers it (Codex review of #440): an
+    one ``nextafter`` toward ``+inf`` covers it: an
     eigenvalue at the bar is never kept on the product's downward rounding.
     """
     return float(np.nextafter(relative * float(norm), np.inf))
@@ -656,28 +623,16 @@ def _equilibrated_block_root(block: NDArray) -> NDArray | None:
     """``penalty_factor``'s root of a coupled block, cut on its Jacobi equilibration.
 
     The cut is the eigensolver's resolution ``n_b eps ||A_b||_2``, accumulated
-    outward (``_outward_cut``).  The block's formation error is controlled
-    where the block is formed, not in the cut: every penalty this package
-    forms is a sum of ``lambda_t G_t`` with ``G_t`` the Gram of a root
-    (``ssp_penalty_matrix``, ``_enclosed_root_gram``), an eigen
-    reconstruction ``V Lambda V'`` (``_canonicalize_ssp_penalty``) or an exact
-    integer or Kronecker form, so an exact null of the construction is an
-    exact null of the rank-``r`` Gram and only rounding, entrywise within
-    ``gamma_m sqrt(S_ii S_jj)`` (Higham 2002, eq. 3.5 and Cauchy-Schwarz),
-    lifts it.  The worst case of that rounding, ``n_b gamma_m`` in ``||dA||_2``
-    (coherent rounding in every entry), is not what the arithmetic delivers:
-    across 7,000 random and structured Gram-form blocks the largest rounding
-    eigenvalue was 0.15 of the eigensolver's cut, while a cut at the worst
-    case dropped real curvature the eigensolver resolves (Opus review of
-    #440: a coupled second-difference block at ``1e10`` beside ``1e-2`` kept
-    58 of 60 rows, a 529-column REML tensor 507 of 528, ``D_3'D_3`` at
-    ``k = 300`` 296 of 297), and so did ``sqrt(n_b) gamma_m`` (137 of 138
-    on a Kronecker sum at ``1e11``).
+    outward (``_outward_cut``). Every penalty this package forms is a sum of
+    Gram, eigen-reconstruction or exact integer/Kronecker forms, so an exact
+    null of the construction is lifted only by rounding entrywise within
+    ``gamma_m sqrt(S_ii S_jj)`` (Higham 2002, eq. 3.5); the worst-case
+    ``n_b gamma_m`` cut would drop curvature the eigensolver resolves.
 
     ``None`` where the block is not PSD at that resolution: a non-positive
-    diagonal, or an eigenvalue of ``D S_b D`` below ``-max(100 eps ||D S_b
-    D||_2, cut)``, the bar ``rank.decompose_gram`` refuses as materially
-    indefinite.
+    diagonal, or an eigenvalue of ``D S_b D`` below
+    ``-max(100 eps ||D S_b D||_2, cut)``, the bar ``rank.decompose_gram``
+    refuses as materially indefinite.
     """
     from superglm.solvers.rank import _eigensolver_relative_bar
 
@@ -757,31 +712,16 @@ def grouped_structural_nulls(
 ) -> list[tuple[slice, NDArray, float]]:
     """Exact nulls of the weighted, centred design read off each group's occupied support rows.
 
-    A group whose rows are rows of a small support table ``S`` (an indexed
-    support, or a spline-by-level block, zero off its level) has ``X_g v = 0``
-    on every row for each ``v`` with ``S_occ v = 0``, ``S_occ`` the support
-    rows that carry weight; then ``c_g' v``, a weighted mean of those rows
-    times ``v``, is zero too, so ``A v = 0`` with no pass over the rows.  The
-    candidates are the right singular vectors of ``S_occ`` below ``n_s eps``
-    of its largest singular value, and a candidate is kept only when its
-    residual is exact to the rounding that measures it: the weighted
-    ``||(S - c) n||`` over the occupied rows and the rows off a level no
-    larger than ``gamma_(w + 3)`` of ``(|S| + |c|) |n|`` weighted the same
-    way.  That is a componentwise form of the rule LAPACK's symmetric
-    tridiagonal QR applies (``dsteqr`` splits only when an off-diagonal is
-    within ``eps sqrt(|d_i d_(i+1)|)``): drop only what is at the
-    algorithm's own rounding.  (``dlaed2``'s divide-and-conquer deflation is
-    normwise, ``8 eps max(|D|, |Z|)``; a normwise allowance is a recorded
-    follow-up.)  So the rotation a
-    deflated null causes in the null basis, ``||A n||`` over the weakest
-    retained singular value (Wedin, *BIT* 12, 1972), is the full factor's
-    own backward error over that value.  A near null, ``n_s eps`` small but
-    above its rounding, stays in the Gram, where the grey subspace resolves
-    its coupling to other weak directions at row resolution.  Each group
-    returns ``(columns, N_g, bound)`` with ``bound >= ||A N_g||_F``, formed
-    from the support rows' weight sums: the residual of every occupied row
-    and of the rows off a level, plus the rounding of forming them
-    (``gamma_(w + 3)`` of ``(|S| + |c|) |N_g|``, Higham 2002, sec. 3.5).
+    A group whose rows are rows of a small support table ``S`` has
+    ``A v = 0`` for each ``v`` with ``S_occ v = 0`` (``S_occ`` the weighted
+    support rows), found without a pass over the rows. Candidates are the
+    right singular vectors of ``S_occ`` below ``n_s eps`` of its largest
+    singular value, kept only when the weighted residual ``||(S - c) n||`` is
+    within ``gamma_(w + 3)`` of ``(|S| + |c|) |n|``: deflate only at the
+    algorithm's own rounding, as ``dsteqr`` does componentwise. Near nulls
+    above that rounding stay in the Gram. Each group returns
+    ``(columns, N_g, bound)`` with ``bound >= ||A N_g||_F`` (Higham 2002,
+    sec. 3.5).
     """
     from superglm._group_matrix._group_matrix_discretized import (
         DiscretizedSplineCategoricalGroupMatrix,
@@ -866,34 +806,16 @@ def grouped_projected_factor(
 ) -> tuple[NDArray, NDArray, int, NDArray]:
     """``R`` of ``B = A basis`` (a TSQR), ``A'B``, its rounding count and column magnitudes.
 
-    ``A = sqrt(W) ((X - c) - c_lo)``.
+    ``A = sqrt(W) ((X - c) - c_lo)`` and ``basis`` is ``p x k``. One pass over
+    the rows: each group writes its part of ``X basis`` from its compact form
+    (``_design_leaf_parts``), so a support group costs one ``k``-vector add per
+    row (``n T k`` in all, against ``2 n p^2`` for the TSQR of ``A``).
 
-    One pass over the rows.
-
-    ``basis`` is ``p x k``.  Each group block of the design writes its part of
-    ``X basis`` from its compact form (``_design_leaf_parts``): a categorical
-    and an indexed support form one table ``((S - c) - c_lo) basis_g`` of
-    their support rows ``S`` and add the row of it each observation indexes,
-    so a row costs one ``k``-vector add per group, ``n T k`` in all, against
-    ``2 n p^2`` for the TSQR of ``A`` itself; another group writes its dense
-    rows a block at a time, as a TSQR leaf does.  ``A'B`` sums each block's
-    weighted rows of ``B`` per support row, one span of rows at a time, and multiplies
-    the sums by the centred support once.  A spline-by-level block is zero
-    off its level: its raw support's table is added on the level's rows and
-    its centre on every row (``_leverage_rows``' support route), so its
-    entries are bounded by ``(|x| + |c|)' |basis|`` rather than ``|x - c|'
-    |basis|``.
-
-    **Error.**  A table entry is a centring and a dot product of length
-    ``w_g`` (``gamma_(w_g + 2)`` of ``|S - c|' |basis_g|``, Higham 2002,
-    secs. 3.1 and 3.5) and a row of ``B`` sums at most ``T`` groups and is
-    scaled once, so every entry of ``B`` lies within ``gamma_(p + T + 3)``
-    of ``|a_r|' |basis|``; the TSQR of ``B`` is columnwise backward stable
-    (``rank._tsqr_weighted_factor``).  ``A'B`` adds a sum over the rows of one
-    support row's sum over a span's rows, one add per span and a
-    product of length ``s_g``; the third value returned counts every rounding
-    an entry of ``A'B`` carries, so ``gamma`` of it times ``|A|' |B|`` bounds
-    its error (``rank.decompose_gram_deflated``).
+    **Error.** Every entry of ``B`` lies within ``gamma_(p + T + 3)`` of
+    ``|a_r|' |basis|`` (Higham 2002, secs. 3.1 and 3.5), and the TSQR of ``B``
+    is columnwise backward stable. The third value returned counts every
+    rounding an entry of ``A'B`` carries, so ``gamma`` of it times
+    ``|A|' |B|`` bounds its error (``rank.decompose_gram_deflated``).
     """
     from superglm._group_matrix._group_matrix_discretized import (
         DiscretizedSplineCategoricalGroupMatrix,
@@ -910,12 +832,9 @@ def grouped_projected_factor(
     n, p = dm.n, dm.p
     width = basis.shape[1]
     sqrt_weights = np.sqrt(np.asarray(W, dtype=np.float64))
-    # Each plan: (columns, kind, table, accumulator, a, b).  "full": every row
-    # indexes a centred support row (a: codes).  "level": a spline-by-level
-    # block, zero outside its level; its raw support table is added on the
-    # level's rows (a: rows, b: codes, both in row order) and its centre
-    # enters every row once through ``base``.  "rows": dense rows a block at
-    # a time (a: the group matrix).
+    # Each plan: (columns, kind, table, accumulator, a, b). "full": rows index
+    # a centred support (a: codes); "level": spline-by-level, raw table on the
+    # level's rows (a: rows, b: codes), centre via ``base``; "rows": dense.
     plans: list[tuple] = []
     supports: dict[int, NDArray] = {}
     magnitudes = np.zeros(p)
@@ -967,8 +886,7 @@ def grouped_projected_factor(
     cross = np.zeros((p, width))
     weighted_total = np.zeros(width)
     # Narrow blocks: a leaf of a few thousand rows keeps LAPACK's panel in
-    # cache (measured 1.5x to 2.6x faster than ``tsqr_leaf_rows`` at k = 55
-    # to 330, 540,000 rows); the reduction tree is the same TSQR's.
+    # cache; the reduction tree is the same TSQR's.
     block_rows = min(tsqr_leaf_rows(width), max(_GREY_LEAF_ROWS, 2 * width))
     span_rows = max(block_rows, _GREY_SPAN_ROWS)
     locals_ = {id(plan[3]): np.zeros_like(plan[3]) for plan in plans if plan[3] is not None}
@@ -1030,11 +948,8 @@ def grouped_projected_factor(
                 cross[columns] += centre.T @ weighted_total[None, :]
 
     factor = streamed_weighted_factor(blocks(), np.ones(n))
-    # Roundings an entry of ``A'B`` can carry beyond ``|A|' |B|``'s scale:
-    # the centring and table product (``p + 2``), at most ``T`` group adds and
-    # two scalings per row of ``B``, one span's rows plus one add per span
-    # (one add per block for the dense rows and the weighted total), and the
-    # product with the widest support.
+    # Roundings an entry of ``A'B`` carries beyond ``|A|' |B|``: centring and
+    # table product, group adds, scalings, span sums and the widest support.
     widest = max((plan[2].shape[0] for plan in plans if plan[2] is not None), default=0)
     roundings = (
         (p + 2) + len(plans) + 3 + span_rows + -(-n // span_rows) + -(-n // block_rows) + widest + 1
@@ -1181,15 +1096,9 @@ def build_centered_system(
         return _attach_centered_penalty(
             sum_w, mean_x, mean_z, data_gram, rhs, penalty, mean_hi=mean_hi, mean_lo=mean_lo
         )
-    # A ``DenseGroupMatrix`` column, the one type whose entries its type does
-    # not bound, never enters a raw-moment rung: each subtracts ``sum W x x'``
-    # and ``(X'W)(X'W)' / sum W`` under a value certificate
-    # (``_raw_centering_well_scaled``), so the arithmetic changed with the
-    # column's location (offset 0: the raw-moment rung; offset 10: the exact
-    # pair).  The rest of the design keeps the rungs: they run on its bounded
-    # columns, and the dense columns join them centred about their exact pair
-    # (``_attach_dense_split``).  A design with no bounded column, or whose
-    # bounded part every rung rejects, takes the exact pair throughout.
+    # A ``DenseGroupMatrix`` column, whose entries its type does not bound,
+    # never enters a raw-moment rung: it is centred about its exact pair
+    # (``_attach_dense_split``) while the bounded columns keep the rungs.
     if not np.any(dense_columns(dm)):
         packed = _raw_rung_system(
             dm=dm,
@@ -1237,13 +1146,9 @@ def build_centered_system(
         return _attach_centered_penalty(
             sum_w, mean_x, mean_z, data_gram, rhs, penalty, mean_hi=mean_x.copy()
         )
-    # Beside a dense column the whole design is centred in one pass of rows:
-    # every other column about its weighted mean, as above, and every dense
-    # column by the corrected two-pass algorithm, as in ``_attach_dense_split``
-    # -- rows about the rounded mean ``a`` (``dense_anchor``), its remainder
-    # from the same rows' first moments by Björck's correction.  A design of
-    # dense columns only has no other mean to read, so its raw ``X'W``, which
-    # would be discarded, is not formed.
+    # Beside a dense column, centre every column in one pass: dense columns by
+    # the corrected two-pass algorithm about ``dense_anchor``. A design of
+    # dense columns only skips forming its raw ``X'W``.
     anchor = dense_anchor(dm, W, sum_w)
     mean_hi = anchor if np.all(dense) else np.where(dense, anchor, dm.rmatvec(W) / sum_w)
     first = np.zeros(dm.p, dtype=np.float64)
@@ -1272,19 +1177,12 @@ def _raw_rung_system(
 ) -> tuple[NDArray, NDArray, NDArray, tuple] | None:
     """``(mean_x, data_gram, rhs, recentred)`` from the first raw rung that accepts ``dm``, else ``None``.
 
-    After the raw rungs, the compact anchor-support fallback, which subtracts
-    no raw moment, and then column-local centring of the last raw moments a
-    certificate rejected in this build (``column_local_centering``), which
-    recentres only the failing columns, each inside its own group.  A build
-    reaches that repair only where it used to take the chunked ``O(n p^2)``
-    pass, so every other route is unchanged.  The raw-moment rung's refusal
-    latches as before unless the repair served the build from that rung's
-    own moments, which the next build needs again; after a factored-rung
-    rejection it stays latched, which costs nothing, as the factored rung is
-    never latched and forms the moments at every build.  ``recentred`` is
-    the repair's recentred columns (``RecentredColumns``), empty on every
-    other route.  Called only with a design free of ``DenseGroupMatrix``
-    columns.
+    After the raw rungs come the compact anchor-support fallback, which
+    subtracts no raw moment, then column-local centring of the columns whose
+    raw-moment certificate rejected (``column_local_centering``). A raw-moment
+    rejection latches unless that repair served the build from the rung's own
+    moments. ``recentred`` is the repair's ``RecentredColumns``, empty on every
+    other route. Called only with a design free of ``DenseGroupMatrix``.
     """
     rejected = RawMomentRejection()
     packed = packed_centered_gram_rhs(
@@ -1346,31 +1244,22 @@ def _raw_rung_system(
             # change the centering ratio, but the stable path remains correct
             # and avoids repeating rejected raw work.
             tabmat_state.eligible = packed is not None
-    # General raw-moment rung: the rungs above each require particular group
-    # types, so ordinary spline designs reach the chunked pass below even though
-    # the per-block moment dispatch can produce the same quantities far more
-    # cheaply.  A rejected certificate latches for the fit, as the other
-    # accelerated rungs do, so the moments are not recomputed every iteration.
+    # General raw-moment rung for designs the type-specific rungs above do not
+    # take; a rejected certificate latches for the fit.
     if (
         packed is None
         and not force_chunked
         and (
             tabmat_state is None
-            # `eligible is False` means a preflight already certified this
-            # design's raw moments as unsafe.  That verdict is about raw-moment
-            # subtraction itself, not about tabmat, so this rung must honour it
-            # rather than re-attempting the route that was just locked out.
+            # ``eligible is False``: a preflight already certified raw-moment
+            # subtraction unsafe for this design.
             or (
                 tabmat_state.eligible is not False and tabmat_state.raw_moment_eligible is not False
             )
         )
     ):
-        # The factored tensor rung forms these very moments, by the same
-        # execution-plan call on the same vectors, and certifies them the same
-        # way: its rejection in this build is this rung's, and recomputing them
-        # cost every rejected build a second raw-moment pass.  (The pattern
-        # rung forms them by another summation, so its rejection does not
-        # decide this rung's certificate.)
+        # The factored tensor rung forms and certifies these same moments, so
+        # its rejection in this build is this rung's (the pattern rung's is not).
         packed = (
             None
             if rejected.source == "factored"
@@ -1386,11 +1275,8 @@ def _raw_rung_system(
             tabmat_state.raw_moment_eligible = packed is not None
         if packed is not None and profile is not None:
             profile["centered_raw_moment_hits"] = profile.get("centered_raw_moment_hits", 0) + 1
-    # Every raw rung declined: centre compact supports first rather than the
-    # chunked rows below.  Only a design ``packed_centered_gram_rhs`` turned
-    # away reaches it with something to do -- a discretized SCOP or
-    # spline-by-category group, which that rung's tensor stages do not handle
-    # -- and it subtracts no raw moment, so no certificate applies.
+    # Every raw rung declined: centre compact supports (discretized SCOP or
+    # spline-by-category groups) before the chunked rows. No certificate.
     if packed is None and not force_chunked:
         packed = anchor_support_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered)
         if packed is not None and profile is not None:
@@ -1430,14 +1316,10 @@ class _DenseSplit:
     bounded_index: NDArray
 
 
-# One split per design, built on first use.  The bounded design owns its own
-# rung caches (execution plan, Tabmat split, bin-space plan, raw-spline Tabmat
-# plan), so they persist across a fit's iterations.  Owner: the fit workspace
-# that holds the design.  Lifetime: until the fit is published, when
-# ``release_dense_split`` drops it with the full design's raw-spline plan
-# (``capture_fit_state``), or until the design itself is collected.  The split
-# depends only on the design's groups, never on weights, parameters, penalty or
-# precision, so nothing else invalidates it; a later fit rebuilds it on use.
+# One split per design, built on first use; the bounded design owns its rung
+# caches. Owner: the fit workspace holding the design. Lifetime: until
+# ``release_dense_split`` at publication or the design is collected. Depends
+# only on the design's groups, so nothing else invalidates it.
 _DENSE_SPLITS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 
@@ -1486,25 +1368,13 @@ def _attach_dense_split(
 ) -> CenteredSystem:
     """The centred system from a raw rung on the bounded columns and the corrected two-pass on the dense ones.
 
-    Every dense column takes the corrected two-pass algorithm (Chan, Golub &
-    LeVeque 1983, eq. 1.7: the textbook formula on rows shifted by the
-    computed mean, with Björck's correction) about its working-weighted mean:
-
-    - pass one rounds the mean, ``a``, from rows shifted by the first row that
-      carries weight (``dense_anchor``, as ``corrected_two_pass_pair``'s pass
-      one);
-    - pass two forms the rows ``x - a`` once and from them ``e = sum W (x -
-      a)``, ``G = sum W (x - a)(x - a)'`` and ``r = sum W z (x - a)``
-      (``anchored_dense_moments``).
-
-    The Gram is ``G - e l' - l e' + l l' sum W``, ``l = e / sum W``
-    (``two_pass_centred_gram``), and the right-hand side ``r - l sum W z``.
-    ``(a, l)`` is the exact pair of ``dense_mean_pair``, its remainder formed
-    in pass two instead of a pass of its own.  The cross block is ``N~' W D~
-    = N' (W (x - a)) - m_N e'`` (``dense_split_cross``); ``l``'s share, ``l
-    (N'W - m_N sum W)``, is a product of two roundings.  The bounded columns'
-    raw values never meet a dense column's offset, and the bounded block is
-    the rung's own.
+    Dense columns take the corrected two-pass algorithm (Chan, Golub & LeVeque
+    1983, eq. 1.7) about their working-weighted mean: pass one rounds the mean
+    ``a`` (``dense_anchor``); pass two forms ``x - a`` once and from it
+    ``e = sum W (x - a)``, ``G`` and ``r`` (``anchored_dense_moments``). The
+    Gram is ``G - e l' - l e' + l l' sum W`` with ``l = e / sum W``
+    (``two_pass_centred_gram``) and the right-hand side ``r - l sum W z``. The
+    cross block is ``dense_split_cross``; the bounded block is the rung's own.
     """
     mean_bounded, gram_bounded, rhs_bounded, recentred = packed
     anchor = dense_anchor(split.dense, W, sum_w)
@@ -1544,19 +1414,12 @@ def dense_split_cross(
 ) -> NDArray:
     """``(p_b, p_d)``: ``N' (W (x - a)) - m_N e'``, ``e = sum W (x - a)`` the dense pass's ``first``.
 
-    The bounded design ``N`` centred about ``mean_bounded`` against the dense
-    columns' rows about their ``anchor``; ``W`` may be signed.  The rows are
-    formed in blocks of columns of at most ``_FACTOR_CHUNK_BYTES``, and each
-    block meets every bounded group in one pass
-    (``_bounded_transpose_products``), O(n) per group and block, a support
-    group's projected support before any product.  A bounded column the raw
-    rung recentred (``column_local_centering``) failed the raw-moment
-    certificate, so its raw values would bring its ``kappa`` into the
-    product: it meets ``W (x - a)`` through its centred support instead,
-    ``sum_b c_j[b] sum_(r in b) W (x - a)``, the repair's own product with a
-    failing partner (``recentred_products``), within the repair's stated
-    envelope with ``A_k = |x - a|``.  ``formed`` holds the projected supports
-    for a caller that forms the block again with the same factors.
+    ``N`` is the bounded design centred about ``mean_bounded``; ``W`` may be
+    signed. Rows are formed in column blocks of at most
+    ``_FACTOR_CHUNK_BYTES``, each meeting every bounded group in one pass
+    (``_bounded_transpose_products``). A column the raw rung recentred meets
+    ``W (x - a)`` through its centred support (``recentred_products``).
+    ``formed`` caches projected supports for a caller that repeats the block.
     """
     formed = {} if formed is None else formed
     columns = list(_dense_columns_of(split.dense, anchor))
@@ -1583,15 +1446,10 @@ def _bounded_transpose_products(
 ) -> NDArray:
     """``X' diag(W) rows`` for an ``(n, k)`` block of rows, one pass of each group.
 
-    A discretized SSP group (``B_unique``, ``R_inv`` float64 and in range)
-    meets ``W rows`` summed by bin through its projected support ``B_unique
-    R_inv``, formed once into ``formed``, as its raw moments do: its
-    ``rmatvec`` sums ``B_unique`` first, so the projection multiplies that
-    sum's rounding, ``gamma_n |R_inv|' |B_unique|' |W rows|``, which cancels
-    where ``|B_unique| |R_inv|`` dwarfs the column (Higham 2002, eq. 3.13);
-    projected first, the rows' sums meet only the column's own values.  A
-    one-hot group sums by level, a SCOP group by bin against its support,
-    and a sparse group multiplies its sparse basis by the block; any other
+    A discretized SSP group meets ``W rows`` through its projected support
+    ``B_unique R_inv`` (formed once into ``formed``), so the rows' sums never
+    meet a projection that cancels (Higham 2002, eq. 3.13). One-hot groups sum
+    by level, SCOP groups by bin, sparse groups multiply their basis; any other
     group takes its ``rmatvec`` of each weighted column.
     """
     W = _native(W)
@@ -1747,16 +1605,12 @@ def two_pass_centred_gram(
 ) -> NDArray:
     """``sum W (x - a - l)(x - a - l)'`` from the moments about ``a``, symmetrized.
 
-    ``G - e l' - l e' + l l' sum W`` with ``e = sum W (x - a)`` and ``G = sum
-    W (x - a)(x - a)'`` (``anchored_dense_moments``, ``centered_gram_rhs``'s
-    ``first``) and ``l`` the remainder, ``e / sum W`` on a dense column and 0
-    on any other.  On the dense columns this is Björck's correction ``G - e e'
-    / sum W`` of the corrected two-pass algorithm (Chan, Golub & LeVeque 1983,
-    eq. 1.7); about the rounded mean ``a`` the remainder is pass one's
-    rounding, so the correction is a second-order term and the Gram keeps the
-    two-pass bound, ``n u (1 + n^2 u^2 kappa^2)`` relative (their Table 1).
-    The mass meets one remainder before the other, ``(l_j sum W) l_k``, so no
-    intermediate leaves float64's range ahead of the term itself.
+    ``G - e l' - l e' + l l' sum W`` with ``e = sum W (x - a)``, ``G`` the
+    moments about ``a`` and ``l`` the remainder (``e / sum W`` on a dense
+    column, 0 elsewhere): Björck's correction of the corrected two-pass
+    algorithm, which keeps the bound ``n u (1 + n^2 u^2 kappa^2)`` (Chan,
+    Golub & LeVeque 1983, eq. 1.7 and Table 1). ``(l_j sum W) l_k`` keeps
+    every intermediate in range.
     """
     centred = gram - np.outer(first, remainder) - np.outer(remainder, first)
     centred = centred + np.outer(sum_w * remainder, remainder)
@@ -1793,22 +1647,13 @@ def weighted_mean_pair(
 ) -> tuple[NDArray, NDArray, NDArray | None]:
     """``(mean_x, hi, lo)``: the weighted column mean and the exact pair it rounds.
 
-    One-engine design §3.2 applied to gram's centred system: a
-    ``DenseGroupMatrix`` column's mean is ``hi + lo`` (``dense_mean_pair``),
-    ``hi`` the rounded mean from a pass shifted by the first row that
-    carries weight and ``lo`` the remainder formed on rows differenced from
-    ``hi`` (Chan, Golub & LeVeque 1983).  A column constant on its weighted
-    rows centres to exact zeros (the unshifted ``sum W x / sum W`` left a
-    rounding-level centred diagonal whose rank decision moved the REML
-    objective by ~30 between iterates: stage-1 verifier, the Gamma/log
-    constant-column fit), and a far row of negligible weight no longer sets
-    the remainder's scale, as it did as the anchor.  Rows are centred as
-    ``(x - hi) - lo``, which rounds at the column's spread; ``x - mean_x``
-    with ``mean_x = fl(hi + lo)`` rounds at ``u |mean|`` and adds ``sum W d
-    d'`` (``d`` that rounding) to the profiled Gram, which at a 1e16 offset
-    moved a Gaussian fit's eta by 1e-3 (issue #430).  Every other column,
-    bounded by its type, has ``hi = mean_x = X'W / sum W`` and ``lo = 0``;
-    ``lo`` is ``None`` for a design without a dense column.
+    A ``DenseGroupMatrix`` column's mean is ``hi + lo`` (``dense_mean_pair``):
+    ``hi`` the rounded mean from rows shifted by the first weighted row, ``lo``
+    the remainder on rows differenced from ``hi`` (Chan, Golub & LeVeque 1983).
+    Rows are then centred as ``(x - hi) - lo``, which rounds at the column's
+    spread rather than at ``u |mean|``, and a column constant on its weighted
+    rows centres to exact zeros. Other columns have ``hi = mean_x`` and
+    ``lo = 0``; ``lo`` is ``None`` for a design without a dense column.
     """
     mean = dm.rmatvec(W) / sum_w
     pair = dense_mean_pair(dm, W, sum_w)
@@ -1826,12 +1671,9 @@ def _attach_centered_penalty(
     """Attach a fresh trial penalty using the same numerical checks on every path."""
     penalty_symmetric = 0.5 * (penalty + penalty.T)
     hessian = data_gram + penalty_symmetric
-    # Both terms are mathematically PSD. Degenerate spline
-    # reparameterizations can introduce visible negative round-off, so project
-    # only this declared-PSD system back onto its valid cone before rank work.
-    # Keep structurally empty coordinates outside the eigensolve: reconstructing
-    # the full matrix can scatter round-off into exact zero rows, manufacture
-    # numerical rank, and obscure an empty-support spline direction.
+    # Both terms are PSD; project this declared-PSD system onto its cone before
+    # rank work, keeping structurally empty coordinates out of the eigensolve
+    # so round-off cannot manufacture rank there.
     active = np.flatnonzero(np.any(hessian != 0.0, axis=0) | np.any(hessian != 0.0, axis=1))
     active_hessian = hessian[np.ix_(active, active)]
     try:

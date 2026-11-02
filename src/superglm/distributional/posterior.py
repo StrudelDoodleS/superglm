@@ -1,24 +1,14 @@
 """Posterior simulation for a fitted distributional (location-scale-shape) model.
 
-One primitive sits under every band, bound, envelope and predictive draw of the
-inference suite: draws from the Bayesian posterior of the coefficients, their
-pushforward through the fitted predictors to natural parameters, and the
-derived quantities the family supplies.
-
-The posterior is the Bayesian one at the fitted smoothing parameters,
-``N(beta_hat, V)`` with ``V`` the penalised covariance, whose across-the-function
-coverage is the subject of Marra and Wood (2012), *Scandinavian Journal of
-Statistics* 39(1), 53-74, and Wood (2017), *Generalized Additive Models: An
-Introduction with R*, 2nd ed., section 6.10.  ``kind="corrected"`` adds the
-first-order smoothing-parameter term of Wood, Pya and Saefken (2016), *Journal
-of the American Statistical Association* 111(516), 1548-1563, from a certified
-terminal smoothing Hessian, either published by the Newton endgame or replayed
-on demand from retained fit rows; where none can be formed the fixed covariance
-is returned and the cause disclosed.  The max-deviation critical value of
-:func:`simultaneous_critical_value` is Ruppert, Wand and Carroll (2003),
-*Semiparametric Regression*, section 6.5.  Expected shortfall is the quantile
-integral above the level, the representation of Acerbi and Tasche (2002),
-*Journal of Banking and Finance* 26(7), 1487-1503.
+One primitive sits under every band, bound, envelope and predictive draw:
+draws of the coefficients from ``N(beta_hat, V)`` at the fitted smoothing
+parameters (Marra and Wood 2012, *Scand. J. Statist.* 39(1); Wood 2017,
+*Generalized Additive Models*, 2nd ed., §6.10), pushed through the predictors
+to natural parameters and family quantities. ``kind="corrected"`` adds the
+smoothing-parameter term of Wood, Pya and Saefken (2016), *JASA* 111(516).
+The max-deviation critical value is Ruppert, Wand and Carroll (2003),
+*Semiparametric Regression*, §6.5; expected shortfall is the quantile
+integral above the level (Acerbi and Tasche 2002, *J. Banking Finance* 26(7)).
 """
 
 from __future__ import annotations
@@ -78,10 +68,8 @@ Quantity = str | tuple[Any, ...] | Callable[[NDArray], NDArray]
 
 #: Natural-parameter scratch per row chunk stays under this many bytes.
 _CHUNK_BYTES = 256_000_000
-#: What a replay of the fit's own derivatives can legitimately fail with: the
-#: numerical and derivative errors of this package (RuntimeError, ValueError,
-#: LinAlgError, FloatingPointError).  A TypeError, AttributeError or LookupError
-#: is a defect, and propagates rather than reading as a convergence condition.
+#: Errors a replay of the fit's own derivatives may legitimately raise; a
+#: TypeError, AttributeError or LookupError is a defect and propagates.
 _REPLAY_FAILURES = (RuntimeError, ValueError, ArithmeticError)
 #: Predictive uniforms are drawn strictly inside ``(0, 1)`` by this margin.
 _PROBABILITY_MARGIN = 1.0e-12
@@ -167,13 +155,9 @@ class PosteriorDraws:
 def _smoothing_gradient_names(smoothing: Any) -> tuple[str, ...]:
     """Return the authenticated smoothing row order from terminal evidence.
 
-    The endgame publishes the Hessian over the names of its ``LamlDerivatives``
-    -- the *estimated* smoothing components in penalty order -- and uses the
-    same names as the keys of ``terminal_gradient``.  Those names are an
-    order-preserving subsequence of ``lambdas`` rather than all of it: a
-    component with a fixed lambda policy, or one the search sent to a working
-    infinity, carries a lambda but contributes no derivative row.  Both
-    invariants are asserted here rather than assumed.
+    The endgame's names (estimated components in penalty order, also the keys
+    of ``terminal_gradient``) must be an order-preserving subsequence of
+    ``lambdas``: fixed or working-infinity components carry no derivative row.
     """
     gradient = smoothing.terminal_gradient
     if gradient is None:
@@ -371,11 +355,9 @@ def _replayed_smoothing_hessian(
 ) -> tuple[tuple[str, ...], NDArray[np.float64]]:
     """Replay terminal smoothing curvature once, without publishing or caching it.
 
-    ``names`` is the row order a stationary stop published with its terminal
-    gradient, which the replay must reproduce. A stop that is not stationary
-    published no gradient for its terminal point (an earlier endgame's, if
-    any, may describe an earlier iterate), so it passes ``None`` and the
-    replay's own names and curvature are used.
+    ``names`` is the row order a stationary stop published, which the replay
+    must reproduce; a non-stationary stop passes ``None`` and the replay's own
+    names are used.
     """
     rows = state.retained_rows
     if rows is None:
@@ -504,12 +486,10 @@ def _correction_inputs(
 ) -> tuple[tuple[str, ...], NDArray[np.float64], str | None]:
     """Return the smoothing names, the trusted LAML Hessian in log lambda, and any open stop.
 
-    A stationary stop uses the Hessian its Newton endgame published, or replays
-    it from retained rows against the stored terminal gradient. Any other stop
-    replays the Hessian at its own terminal point, because a Hessian an earlier
-    endgame published may describe an earlier iterate; its reason is returned
-    for the disclosure. Both are formed with the curvature the terminal fit
-    accepted, observed or substitute.
+    A stationary stop uses its endgame's Hessian, or replays it against the
+    stored terminal gradient. Any other stop replays at its own terminal point
+    and returns its reason for the disclosure. Both use the curvature the
+    terminal fit accepted.
     """
     state, terminal = _authenticated_terminal_fit(fitted, smoothing)
     if not smoothing.converged or smoothing.convergence_reason != "stationary":
@@ -534,11 +514,9 @@ def _correction_inputs(
 def _add_covariance_correction(covariance: NDArray, root: NDArray) -> NDArray:
     """Add a root Gram without losing a sum of tiny positive products.
 
-    Only uniformly tiny rows scale up; large rows keep every small operand.
-    Binary scaling up is exact, and each scaled row has maximum below one.
-    Affected Gram entries and fixed covariance are added at a common exponent
-    before final materialization. This also retains a half-minsub correction
-    which changes the correctly rounded sum with an existing minsub variance.
+    Only uniformly tiny rows are scaled up (by exact powers of two), and the
+    affected entries are added to the fixed covariance at a common exponent
+    before final materialization.
     """
     maximum = np.max(np.abs(root), axis=1, initial=0.0)
     tiny = (maximum > 0.0) & (maximum < np.sqrt(np.finfo(float).tiny))
@@ -570,35 +548,22 @@ def posterior_covariance(fitted: Any, *, kind: CovarianceKind = "fixed") -> NDAr
     """Return the posterior coefficient covariance in global coordinates.
 
     ``kind="fixed"`` is the Bayesian covariance at the fitted smoothing
-    parameters.  ``kind="corrected"`` adds the first-order smoothing-parameter
+    parameters. ``kind="corrected"`` adds the first-order smoothing-parameter
     term of Wood, Pya and Saefken (2016, section 4), ``V + J V_rho J'``, with
-    ``J = d beta_hat / d rho`` from the implicit function theorem applied to the
-    penalised score, and ``V_rho`` the inverse negative-LAML Hessian in
-    ``rho = log lambda``.  A stationary fit uses the Hessian its Newton endgame
-    published, or replays it once from retained training rows; the replay is
-    checked against the stored terminal gradient and never cached.
+    ``J = d beta_hat / d rho`` and ``V_rho`` the inverse negative-LAML Hessian
+    in ``rho = log lambda``, taken from the Newton endgame or replayed once
+    from retained training rows (checked against the stored terminal gradient,
+    never cached).
 
-    A fit whose smoothing did not stop at a certified stationary point (every
-    ``outer="efs"`` fit, and any unconverged one) has the Hessian replayed at
-    its fitted smoothing parameters from retained rows, and the correction is
-    computed about that point and disclosed with a ``ConvergenceWarning``: the
-    paper's normal approximation for ``rho`` is centred at the maximum. Where no
-    correction can be formed -- no retained rows and no Hessian for the fitted
-    point, an unconverged coefficient fit, a replay or Hessian that fails its
-    certificate, or a correction that cannot be represented -- the conditional
-    covariance is returned with a ``ConvergenceWarning`` naming the cause, as
-    mgcv's ``vcov(unconditional=TRUE)`` returns ``Vp`` when no corrected matrix
-    is available, but disclosed.  A fit with no estimated smoothing parameter
-    has no smoothing uncertainty, so its corrected covariance is the fixed one.
-
-    When the observed curvature at the final coefficients was materially
-    indefinite and the fit accepted a substitute (Fisher information, or the
-    nearest semidefinite curvature), the correction is formed with that
-    substitute throughout, as Wood, Pya and Saefken (2016, section 3.3.1) and
-    Wood and Fasiolo (2017, section 3) substitute it for inference: ``V``,
-    ``J`` and the smoothing Hessian behind ``V_rho`` all use it. That is
-    computed, not refused, and disclosed with a ``ConvergenceWarning`` saying
-    what the result means.
+    A fit not stopped at a certified stationary point (every ``outer="efs"``
+    fit) gets the correction about its fitted point, with a
+    ``ConvergenceWarning``. Where no correction can be formed, the fixed
+    covariance is returned with a ``ConvergenceWarning`` naming the cause (as
+    mgcv's ``vcov(unconditional=TRUE)`` falls back to ``Vp``). A fit with no
+    estimated smoothing parameter returns the fixed covariance. A fit that
+    accepted a substitute curvature (Fisher or nearest semidefinite) uses it
+    throughout (Wood, Pya and Saefken 2016 §3.3.1; Wood and Fasiolo 2017 §3),
+    disclosed with a ``ConvergenceWarning``.
     """
     return _resolved_posterior_covariance(fitted, kind)[0]
 
@@ -731,13 +696,10 @@ def _posterior_symmetric_matrix(matrix: NDArray) -> NDArray:
 def _posterior_covariance_factor(matrix: NDArray) -> NDArray:
     """A PSD root checked in diagonal power-of-two coordinates.
 
-    All positive computed eigenvalues are retained. A negative mode may be
-    clipped only if the resulting factor reconstructs the supplied covariance
-    at arithmetic resolution. The target gamma_(4n+8) times the larger of
-    ||G||_F and ||abs(F) abs(F.T)||_F counts two length-n products plus
-    root/bound formation at their actual operation scale. It is an admission
-    criterion, not an assumed guarantee from the eigensolver. The observed
-    defect and its product/scaling enclosures must both fit it.
+    Positive eigenvalues are kept; a negative mode is clipped only if the
+    factor reconstructs the covariance within ``gamma_(4n+8)`` times
+    ``max(||G||_F, || |F| |F.T| ||_F)`` (two length-n products plus root and
+    bound formation), an admission check rather than an eigensolver guarantee.
     """
     resolved = _posterior_symmetric_matrix(matrix)
     diagonal = np.diag(resolved)
@@ -818,14 +780,11 @@ def posterior_draws(
 ) -> PosteriorDraws:
     """Draw coefficients from ``N(beta_hat, V)`` with a checked eigen square root.
 
-    ``V`` may be rank deficient. Exact zero-variance rows stay zero; all
-    positive computed modes are retained after diagonal power-of-two scaling.
-    A negative mode is clipped only when a bounded reconstruction proves the
-    resulting covariance agrees at arithmetic resolution, otherwise it is an
-    error. This criterion preserves uncertainty under representable power-of-two
-    changes of coefficient units instead of using EDF reconciliation tolerance as a
-    variance cutoff. Every draw uses one ``default_rng(seed)`` stream, so the
-    result never depends on how a later pushforward chunks its rows.
+    ``V`` may be rank deficient: zero-variance rows stay zero, and a negative
+    mode is clipped only when a bounded reconstruction shows the covariance
+    agrees at arithmetic resolution, otherwise it is an error. One
+    ``default_rng(seed)`` stream serves every draw, so results never depend
+    on a later pushforward's row chunking.
     """
     count = _posterior_draw_count(n_draws)
     matrix, resolved = _resolved_posterior_covariance(fitted, covariance)
@@ -992,18 +951,13 @@ def resolve_quantity(
     ``"mean"`` is the family's default prediction; ``("parameter", name)`` one
     natural parameter; ``("quantile", p)``, ``("cdf", y)``, ``("exceedance", t)``
     and ``("expected_shortfall", p)`` come from the family's distribution
-    functions.  A callable passes through unchanged.  The threshold of ``cdf``
-    and ``exceedance`` is a scalar: a row-varying threshold is not expressible
-    through a map that sees only ``theta``, and belongs in a callable.
+    functions, with a scalar threshold (a row-varying one belongs in a
+    callable). A callable passes through unchanged.
 
-    ``weights`` are the rows' prior weights, which are part of each row's own
-    law -- a Gaussian variance ``sigma^2 / w``, a gamma shape and scale in
-    ``w``, a Tweedie rate and compound scale in ``w`` -- so the distribution
-    functions above read the prior-weighted pair instead, and a family without
-    one refuses.  They must give one weight per row of the ``theta`` the
-    returned map is called on.  ``"mean"`` and ``("parameter", name)`` do not
-    read them: the prior weight leaves the mean and the natural parameters of
-    the row law alone.
+    ``weights`` are the rows' prior weights, one per row of ``theta``. The
+    distribution functions then read the family's prior-weighted law, and a
+    family without one refuses; ``"mean"`` and ``("parameter", name)`` ignore
+    them.
     """
     if callable(quantity):
         return cast("Callable[[NDArray], NDArray[np.float64]]", quantity)
@@ -1183,20 +1137,16 @@ def posterior_predictive(
     """Simulate responses through the family's quantile function.
 
     ``parameter_uncertainty=True`` draws ``theta`` from the posterior per draw;
-    ``False`` repeats the plug-in ``theta_hat``, which is the envelope the
-    plug-in Q-Q construction uses.  ``reduce`` maps each ``(draws, rows)`` block
-    so a portfolio or segment aggregate never materialises ``(draws, rows)``
-    over all rows: it must be **additive across row chunks** -- sums and counts
-    qualify, means do not -- and ``reduce="sum"`` is the named convenience.  A
-    reduce returning ``(draws,)`` is summed across chunks; one returning
-    ``(draws, columns)`` is concatenated along the column axis. Callable reducers
-    must return finite, representable values, as must combined additive totals.
+    ``False`` repeats the plug-in ``theta_hat`` (the plug-in Q-Q envelope).
+    ``reduce`` maps each ``(draws, rows)`` block so an aggregate never
+    materialises all rows; it must be additive across row chunks (sums and
+    counts, not means) and return finite values. A ``(draws,)`` result is
+    summed across chunks, a ``(draws, columns)`` one concatenated;
+    ``reduce="sum"`` is the named convenience.
 
-    ``weights`` are one prior weight per row of ``X``.  A prior weight is part
-    of the row's own law, so where they are not all one the responses are drawn
-    through the family's ``quantile_prior_weighted`` -- a policy at a fifth of
-    a year's exposure is simulated on its own law, not on a full year's -- and
-    a family without that law refuses rather than simulating the unit one.
+    ``weights`` are one prior weight per row of ``X``. Where they are not all
+    one, responses are drawn through ``quantile_prior_weighted``, and a family
+    without that law refuses.
     """
     frame = as_eager_frame(X)
     row_weights = _prior_weight_law(weights, len(frame))

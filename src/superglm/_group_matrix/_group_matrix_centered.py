@@ -113,10 +113,9 @@ def _certify_raw_centering(
     sum_w: float,
     sum_weighted_z: float | None = None,
 ) -> tuple[NDArray, NDArray, NDArray] | None:
-    # Raw moments can overflow even when the anchor-centered fallback remains
-    # finite (for example, a large finite location plus modest variation).
-    # Keep that implementation detail independent of the caller's errstate and
-    # reject non-finite intermediates before they reach rank calculations.
+    # Raw moments can overflow even when the anchor-centered fallback stays finite.
+    # Keep that independent of the caller's errstate and reject non-finite
+    # intermediates before they reach rank calculations.
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         mean_x = xtw / sum_w
         centered_gram = raw_gram - np.outer(xtw, mean_x)
@@ -169,11 +168,10 @@ def _raw_centering_admitted(mean_x: NDArray, centered_scale: NDArray) -> NDArray
     mean_x = np.asarray(mean_x, dtype=np.float64)
     centered_scale = np.asarray(centered_scale, dtype=np.float64)
     finite = np.isfinite(mean_x) & np.isfinite(centered_scale)
-    # Keep intercept profiling within the ordinary rounding envelope of a
-    # Gram calculation.  Allowing a larger mean than centered RMS amplifies
-    # raw-moment subtraction error beyond that envelope and can erase a
-    # near-collinear direction that the shared normal-equation rank policy
-    # would otherwise retain.
+    # Keep intercept profiling within the ordinary rounding envelope of a Gram
+    # calculation: a mean larger than the centered RMS amplifies raw-moment
+    # subtraction error and can erase a near-collinear direction the shared rank
+    # policy would retain.
     with np.errstate(invalid="ignore"):
         return finite & (
             (np.abs(mean_x) <= centered_scale) | ((mean_x == 0.0) & (centered_scale == 0.0))
@@ -247,10 +245,9 @@ def _try_raw_spline_tabmat_centering(
         profile["centered_spline_tabmat_attempts"] = (
             profile.get("centered_spline_tabmat_attempts", 0) + 1
         )
-    # Raw SSP bases have compact support, while arbitrary solver transforms can
-    # still create unsafe locations.  The authoritative transformed-moment
-    # certificate below covers both cases, so a separate Tabmat standardize
-    # pass would only duplicate the weighted sparse traversal.
+    # Raw SSP bases have compact support; arbitrary solver transforms can still
+    # create unsafe locations.  The transformed-moment certificate below covers both,
+    # so a Tabmat standardize pass would only duplicate the sparse traversal.
     _ = preflight
     tabmat_weights = _tabmat_vector(W)
     result = None
@@ -356,12 +353,11 @@ def _try_factored_tensor_centering(
 ) -> tuple[NDArray, NDArray, NDArray] | None:
     """Retain factored tensor products when raw-moment centering is certified.
 
-    The specialized block assembler is substantially cheaper for tensor
-    products because it contracts the two marginal bases independently.  Raw
-    moment subtraction is used only when every solver column has enough
-    centered scale relative to its mean to keep cancellation below the shared
-    square-root-epsilon boundary.  Ill-scaled inputs fall through to the
-    anchor-centered support implementation below.
+    The specialized block assembler contracts the two marginal bases independently,
+    which is much cheaper.  Raw moment subtraction is used only when every solver
+    column has enough centered scale relative to its mean to keep cancellation below
+    the shared square-root-epsilon boundary; otherwise the anchor-centered support
+    implementation below is used.
     """
     with np.errstate(over="ignore", invalid="ignore"):
         sum_weighted_z = float(np.sum(weighted_z, dtype=np.float64))
@@ -862,13 +858,9 @@ def packed_centered_gram_rhs(
     )
 
     # isinstance, not `type(gm) in`: SupportCompressedSSPGroupMatrix is a
-    # DiscretizedSSPGroupMatrix that adds no state (`__slots__ = ()`) and is
-    # numerically identical over the same basis -- its bin_idx indexes exact
-    # distinct rows rather than bins, so the packed build is *more* justified
-    # for it than for its binned parent.  An exact-type test rejected it, and
-    # one such group sent the whole design to the chunked dense fallback.
-    # SCOP and SplineCategorical are separate hierarchies, so this widening
-    # admits nothing that lacks B_unique/bin_idx/R_inv.
+    # DiscretizedSSPGroupMatrix with no added state, numerically identical over the
+    # same basis, and an exact-type test sent the whole design to the chunked dense
+    # fallback.  SCOP and SplineCategorical are separate hierarchies.
     eligible_types = (DiscretizedSSPGroupMatrix, DiscretizedTensorGroupMatrix)
     if any(
         not isinstance(gm, eligible_types) and not isinstance(gm, CategoricalGroupMatrix)
@@ -904,16 +896,11 @@ def packed_centered_gram_rhs(
 
     anchored = _anchor_support_gram_rhs(dm=dm, W=W, weighted_z=weighted_z, sum_w=sum_w)
     if tensor_rejected and anchored is not None and state is not None:
-        # A rejection latches for the fit, as the other raw rungs' do: later
-        # weights could pass, but the anchor-centred route is at least as
-        # accurate, and repeating rejected raw moments doubled each
-        # iteration's centring cost.  It latches only when that route served
-        # the build.  The route declines on support sizes alone (a basis
-        # property), and the caller then falls to the chunked dense pass,
-        # which costs far more than retrying the tensor rungs, so a design it
-        # declines keeps retrying them: a later iterate's weights may pass
-        # (ten tensor pairs on the 678k-row book: 5 chunked builds latched
-        # against 2 retried).
+        # A rejection latches for the fit, as the other raw rungs' do: the
+        # anchor-centred route is at least as accurate and retrying rejected raw moments
+        # doubled each iteration's centring cost.  It latches only when that route served
+        # the build; when it declines on support sizes the caller falls to the costlier
+        # chunked pass, so those designs keep retrying the tensor rungs.
         state.tensor_raw_eligible = False
     return anchored
 
@@ -961,12 +948,11 @@ def _compact_supports_fit(group_matrices, cells) -> bool:
 def _compact_support(gm) -> tuple[NDArray, NDArray, NDArray | None] | None:
     """``(values, codes, transform)`` with rows ``values[codes] @ transform``, else ``None``.
 
-    Discretized SSP groups (tensor and support-compressed ones included) and
-    discretized SCOP groups index a dense support by bin; a categorical's
-    support is the identity with a zero row for its base level.  One level of
-    a discretized spline-by-category term is its spline support on that
-    level's rows and zero elsewhere: the support gains a zero row, which every
-    row outside the level is coded to.
+    Discretized SSP and SCOP groups index a dense support by bin; a categorical's
+    support is the identity with a zero row for its base level.  One level of a
+    discretized spline-by-category term is its spline support on that level's rows
+    and zero elsewhere: the support gains a zero row, to which every row outside the
+    level is coded.
     """
     from superglm.group_matrix import (
         CategoricalGroupMatrix,
@@ -1020,33 +1006,22 @@ def _anchor_support_gram_rhs(
     """Anchor-centred compact supports, their Grams and cross-Grams by joint histogram.
 
     One row pass (``_disc_disc_2d_hist``) per pair of groups, except within a
-    tensor's derived family (``_derived_support_family``): a group whose codes
-    are a function of the tensor's cell codes, as its own margins' are, takes
-    every cross-Gram from the tensor's tables (``_add_family_cross``), which
-    saves its passes against every other group, the tensor and each other.
+    tensor's derived family (``_derived_support_family``): a group whose codes are a
+    function of the tensor's cell codes takes every cross-Gram from the tensor's
+    tables (``_add_family_cross``).
 
-    **Error.**  Every cross entry is ``sum_r W_r s(r)_j t(r)_k`` over rows,
-    ``W >= 0``, of two computed centred supports ``s``, ``t``.  The per-pair
-    route sums rows into a joint table and then over the two supports' rows;
-    the derived route sums rows into the tensor's table and then over its
-    cells and the other support's rows.  Each term meets two multiplications
-    and at most ``n + n_t + n_c`` additions on either route (``n`` rows,
-    ``n_t`` the other support's rows, ``n_c`` the larger of the child's rows
-    and the tensor's cells), and a sum of products in any order and
-    association lies within ``gamma_K sum_r W_r |s(r)_j| |t(r)_k|`` of its
-    exact value with ``K`` that count plus two (Higham 2002, secs. 3.1 and
-    4.2).  The routes therefore differ by at most twice that.  The supports,
-    means, diagonal blocks, right-hand side and every block outside the family
-    are bitwise those of the per-pair route.
+    **Error.**  Each cross entry is ``sum_r W_r s(r)_j t(r)_k`` (``W >= 0``) of two
+    computed centred supports.  Either route meets two multiplications and at most
+    ``n + n_t + n_c`` additions per term, so it lies within ``gamma_K sum_r W_r
+    |s(r)_j| |t(r)_k|`` of the exact value with ``K`` that count plus two (Higham
+    2002, secs. 3.1 and 4.2), and the routes differ by at most twice that.  The
+    supports, means, diagonal blocks, right-hand side and every block outside the
+    family are bitwise those of the per-pair route.
     """
-    # Reject an oversized support BEFORE materialising it.  A categorical
-    # block's anchor support is a dense ``(K+1, K)`` identity and its Gram
-    # costs O(K^3); for a crossed interaction K is ``(L1-1)*(L2-1)``, so it
-    # grows multiplicatively in the parents' cardinalities.  Falling back here
-    # costs the chunked path, which is what this design got before.  The same
-    # bound covers every pair's joint table, ``n_i n_j <= max(n_i, n_j)^2``
-    # (a centred support keeps its compact support's rows), so no decline
-    # waits for a row pass.
+    # Reject an oversized support BEFORE materialising it.  A categorical block's
+    # anchor support is a dense ``(K+1, K)`` identity with an O(K^3) Gram, and for a
+    # crossed interaction K is ``(L1-1)*(L2-1)``.  The same bound covers every pair's
+    # joint table, ``n_i n_j <= max(n_i, n_j)^2``, so no decline waits for a row pass.
     if not _compact_supports_fit(dm.group_matrices, lambda rows, width: rows * rows):
         return None
     compact = [_compact_support(gm) for gm in dm.group_matrices]
@@ -1112,12 +1087,11 @@ def _anchor_support_gram_rhs(
 def _derived_support_family(dm, compact) -> tuple[int, dict[int, NDArray]] | None:
     """``(tensor, {group: tensor cell -> group code})`` for the groups that are functions of a tensor's cells.
 
-    A tensor's own margins (its marginal splines on the same bins) are the
-    case that arises: every row of a tensor cell lies in one margin bin.  It
-    depends on the basis only, so it is decided once per design and kept on
-    it, keyed by the identity of the design's group matrices (owner: the
-    design; invalidated with its groups).  A cell no row reaches maps to code
-    0, harmlessly: its tensor table rows and mass are exactly zero.
+    The case that arises is a tensor's own margins on the same bins.  It depends on
+    the basis only, so it is decided once per design and kept on it, keyed by the
+    identity of the group matrices (owner: the design; invalidated with its
+    groups).  A cell no row reaches maps to code 0, harmlessly: its table rows and
+    mass are exactly zero.
     """
     from superglm.group_matrix import DiscretizedTensorGroupMatrix
 
@@ -1155,14 +1129,12 @@ def _add_family_cross(
 ) -> None:
     """Every cross-Gram touching a tensor's derived family, one row pass per other group.
 
-    A child's codes are ``m(c)`` for tensor cell ``c``, so its joint table
-    with any group ``x`` is the tensor's summed over cells, ``H_ax = M' H_tx``
-    (``M`` the cell-to-code selection), and ``S_a' H_ax S_x = E' H_tx S_x``
-    with ``E = S_a[m]`` the child's centred support at each cell.  Against
-    the tensor and another child the table is the tensor's cell mass on the
-    map's pattern: ``S_a' H_at S_t = (E * mass_t)' S_t`` and ``(E_a *
-    mass_t)' E_b``.  A tensor block against another group is evaluated in the
-    per-pair route's order, so it is bitwise that route's.
+    A child's codes are ``m(c)`` for tensor cell ``c``, so its joint table with any
+    group ``x`` is the tensor's summed over cells, ``H_ax = M' H_tx``, and ``S_a'
+    H_ax S_x = E' H_tx S_x`` with ``E = S_a[m]``.  Against the tensor and another
+    child the table is the tensor's cell mass on the map's pattern.  A tensor block
+    against another group is evaluated in the per-pair route's order, so it is
+    bitwise that route's.
     """
 
     def put(left: int, right: int, block: NDArray) -> None:
@@ -1219,18 +1191,13 @@ def centered_gram_rhs(
 ) -> tuple[NDArray, NDArray]:
     """Return centered ``X'WX`` and ``X'Wz`` without raw-moment subtraction.
 
-    Rows are materialized only in bounded chunks. Centering happens before
-    multiplication, so large feature offsets cannot cancel two raw moments.
-    Group-specific ``row_subset`` implementations preserve sparse/discretized
-    storage and avoid materializing the full training design.
-    ``mean_lo``, when given, is the low half of the centre as an exact pair
-    ``(mean_x, mean_lo)`` (``centered_system.weighted_mean_pair``): rows are
-    centred as ``(x - mean_x) - mean_lo``, so a dense column at an offset is
-    centred about its anchor exactly and then by the small remainder.
-    ``first``, when given (``(p,)`` zeros), receives ``sum W (x - mean_x)``
-    from the same rows, compensated across chunks: the moment Björck's
-    correction of the corrected two-pass algorithm reads
-    (``centered_system.two_pass_centred_gram``).
+    Rows are materialized only in bounded chunks and centred before multiplication,
+    so large feature offsets cannot cancel two raw moments.  Group ``row_subset``
+    implementations preserve sparse/discretized storage.  ``mean_lo``, when given,
+    is the low half of the centre as an exact pair (``centered_system.weighted_mean_pair``):
+    rows are centred as ``(x - mean_x) - mean_lo``.  ``first``, when given (``(p,)``
+    zeros), receives ``sum W (x - mean_x)`` from the same rows, compensated across
+    chunks, for Björck's correction (``centered_system.two_pass_centred_gram``).
     """
     n, p = dm.shape
     release_for_serial_row_passes(p)  # a serial n·p² pass: nothing runs beside it
@@ -1322,14 +1289,12 @@ def _compact_centered_rmatvec(
 ) -> NDArray | None:
     """``(X - 1 c')' rows`` with each support row centred before its product; else ``None``.
 
-    For a compact group the rows are ``s_b`` (support row ``b``) on the rows
-    coded ``b``, so the product is ``sum_b (s_b - c) R_b`` with ``R_b`` the
-    sum of ``rows`` coded ``b``: every term is the centred row the chunked
-    pass forms, with the same rounding, and only the order of accumulation
-    differs (``np.bincount``, as ``rmatvec`` sums by bin).  A dense group is
-    centred row by row over its own columns.  ``None`` for any other group,
-    or a support of more than ``_MAX_PACKED_HIST_CELLS`` entries, refused from
-    metadata before any support is materialised (``_compact_supports_fit``).
+    For a compact group the product is ``sum_b (s_b - c) R_b`` with ``R_b`` the sum
+    of ``rows`` coded ``b``: every term is the centred row the chunked pass forms,
+    only the accumulation order differs (``np.bincount``).  A dense group is centred
+    row by row.  ``None`` for any other group, or a support of more than
+    ``_MAX_PACKED_HIST_CELLS`` entries (refused from metadata,
+    ``_compact_supports_fit``).
     """
     from superglm.group_matrix import DenseGroupMatrix
 

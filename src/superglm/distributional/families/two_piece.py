@@ -91,12 +91,9 @@ def _refuse_join_crossing(
 ) -> None:
     """Refuse the analytic direction when it can move a row's location off the join.
 
-    There the Hessian has only one-sided derivatives, so no analytic value
-    carries authority; the caller differences the published curvature, whose
-    certificate records the jump, as v0.40.0 did for every two-piece row.
-    ``moved`` is nonzero on a row whose location the path can move: ``v_mu``
-    in the location form, where the location is linear in the predictor, and
-    any nonzero direction in the mean form, where it is not.
+    There the Hessian has only one-sided derivatives, so the caller
+    differences instead. ``moved`` is ``v_mu`` in the location form (location
+    linear in the predictor) and any nonzero direction in the mean form.
     """
     crossing = join_crossing_rows(variate, location, scale, skew, moved)
     if np.any(crossing):
@@ -130,11 +127,9 @@ def _certified_second_direction(
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """The second curvature direction with its trust signal near the join.
 
-    The values are the analytic ones (a row on the join is refused, as
-    before); the certificate is ``join_certificate`` on rows a step of
-    ``reach`` (the engine's derivative step) would carry across the join,
-    scaled by the curvature's jump there, so the LAML endgame treats the Hessian as it
-    treated second differences across the kink.
+    Analytic values (join rows refused); the certificate is
+    ``join_certificate`` on rows a step of ``reach`` would carry across the
+    join, scaled by the curvature's jump there.
     """
     values = family.predictor_curvature_second_directional_derivative(
         response, eta, direction_a, direction_b, links, plan
@@ -575,10 +570,8 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
 
         def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
             if self.parametrisation == "mean":
-                # mu = log m - log K(sigma, eps) is not linear in the predictors:
-                # a direction whose first-order change v_m/m - K_s v_s - K_e v_e
-                # vanishes still moves mu at second order through log K, so a
-                # join row is refused whenever the direction moves it at all.
+                # mu = log m - log K(sigma, eps) is not linear in the predictors, so
+                # any nonzero direction can move a join row's mu at second order.
                 logk = log_mean_loading(theta[:, 1], theta[:, 2])[0]
                 _refuse_join_crossing(
                     np.log(response),

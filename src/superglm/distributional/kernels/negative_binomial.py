@@ -36,25 +36,16 @@ _DOMAIN_MIN = math.ldexp(1.0, -450)
 _DOMAIN_MAX = math.ldexp(1.0, 450)
 # The kernel is NB2 at every mean/theta ratio; no ratio is refused.
 #
-# Toward the Poisson limit (theta -> inf) NB2 is the Poisson law plus
-# ((y - mean)^2 - y)/(2 theta) + O(theta^-2) (the NB2 expansion in 1/theta).
-# Once max(mean, count - 1) < _POISSON_LIMIT_RATIO * theta, in effective
-# units, that correction, and with it every derivative in theta, is below one
-# unit roundoff of the row's own value and mean channels: the row has reached
-# its Poisson limit at working precision. It is evaluated there, at the
-# family's boundary theta = inf, as a likelihood whose maximum lies at
-# infinity is read in the limit model (Geyer, Electron. J. Statist. 3, 2009):
-# at one surrogate size, 2^_POISSON_SURROGATE_EXPONENT times that reach,
-# whatever theta is, with every theta channel exactly zero. Its value and mean
-# channels then agree with the Poisson row's to about 2^-60 relative, they are
-# flat in theta, and a size that has reached the limit is not pushed further
-# by derivatives below the precision of the fit. The ratio bound also keeps
-# every other row's natural theta channels in the normal range: their extreme
-# exponent, (weight/theta) (mean/theta)^2 at the +/-450 limits, is -1004.
+# Toward Poisson, NB2 = Poisson + ((y - mean)^2 - y)/(2 theta) + O(theta^-2).
+# Once max(mean, count - 1) < _POISSON_LIMIT_RATIO * theta (effective units),
+# that correction and every theta derivative is below the row's unit
+# roundoff, so the row is evaluated in its limit model (Geyer, Electron. J.
+# Statist. 3, 2009) at one surrogate size with theta channels exactly zero.
+# The ratio bound also keeps other rows' theta channels in the normal range.
 #
-# Toward the other limit (theta/mean -> 0) the value recurrence switches from
-# log1p((j - mean)/(mean + theta)), which approaches log1p(-1), to
-# log((theta + j)/(mean + theta)) once that argument is below -1/2.
+# Toward theta/mean -> 0 the value recurrence switches from
+# log1p((j - mean)/(mean + theta)) to log((theta + j)/(mean + theta)) once
+# that argument is below -1/2.
 _POISSON_LIMIT_RATIO = _EPS
 _POISSON_SURROGATE_EXPONENT = 60
 _POISSON_LIKE_INITIAL_THETA_FACTOR = 0.5 / math.sqrt(_EPS)
@@ -335,8 +326,7 @@ def _moment_theta_candidate(
     try:
         mean_square = mean * mean
         residual = response - mean
-        # Elementwise float64 terms as before, summed exactly: fsum of a list
-        # equals fsum of the same values from a generator.
+        # Elementwise float64 terms, summed exactly with fsum.
         if semantics == "frequency":
             numerator = math.fsum((weights * mean_square).tolist())
             terms = weights * (residual * residual - mean)
@@ -390,10 +380,8 @@ def _resolved_negative_sum(
 def poisson_limit_row_count(mean, theta, weights, semantics, counts) -> int:
     """Rows past their Poisson limit, by the mask the likelihood kernel itself applies.
 
-    This is where the kernel stops evaluating the size, not where the size stops
-    being identified: a size just short of the threshold is as flat in the
-    likelihood and is not counted, so the count is a lower bound that depends on
-    where the solver stopped as well as on the data.
+    A lower bound on unidentified sizes: a size just short of the threshold is
+    as flat but not counted.
     """
     return int(np.count_nonzero(_domain(mean, theta, weights, semantics, counts)[-1]))
 
@@ -611,13 +599,9 @@ def _recurrences(
         offsets = np.arange(start, start + width, dtype=_FLOAT)[None, :]
         row_mean, row_theta = mean[rows, None], theta[rows, None]
         total = row_mean + row_theta
-        # log1p((j - mean)/total) == log((theta + j)/total). Below -1/2 the
-        # log1p argument nears -1, where its rounding is amplified by
-        # 1/(1 + argument); the quotient form is then the well-conditioned one.
-        # A tile without such a cell (mean < theta + 2j throughout, the usual
-        # claim-frequency case) takes log1p alone. A tile with one evaluates
-        # both forms and selects: numpy's masked (where=) and gathered
-        # evaluations of the logarithm measured slower than the full one.
+        # log1p((j - mean)/total) == log((theta + j)/total); below -1/2 the log1p
+        # argument nears -1 and the quotient form is better conditioned. Only tiles
+        # with such a cell evaluate both (masked log measured slower than full).
         argument = (offsets - row_mean) / total
         quotient = argument < -0.5
         if quotient.any():
@@ -889,12 +873,9 @@ def _poisson_limit_theta_channels(
 ) -> None:
     """Zero a Poisson-limit row's log-theta derivatives, in place, keeping a true bound.
 
-    Column 0 is the pure log-mean derivative; every later column involves
-    log theta. The last, pure log-theta column is the certified one: its true
-    value at any size past the surrogate is smaller in magnitude than at the
-    surrogate (it falls like 1/theta there), so the bound grows by that
-    magnitude, rounded upward once. The mixed columns are below the row's
-    unit roundoff, as its theta score is.
+    The pure log-theta column falls like ``1/theta`` past the surrogate, so its
+    bound grows by its surrogate magnitude, rounded upward once; the mixed
+    columns are below the row's unit roundoff.
     """
 
     if not np.any(poisson):
@@ -913,15 +894,12 @@ def negative_binomial_log_third_derivatives(
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Third derivatives of the NB2 row log-likelihood in ``(log mean, log theta)``.
 
-    Returns ``(third, error)``: ``third[:, k]`` is ``l_aaa, l_aab, l_abb, l_bbb``
-    with ``a = log mean`` and ``b = log theta``, and ``error`` a certified
-    absolute bound on the rounding and truncation error of ``l_bbb``.  The
-    first three are closed forms with relative error at most ``gamma_11`` of
-    their absolute-term scale.  ``l_bbb`` cancels like the theta score as the
-    row approaches Poisson, so it is the near-Poisson series of the theta score
-    differentiated twice more in ``log theta`` (coefficients ``(n - 1)^2 c_n``)
-    or the count recurrence, whichever certifies the smaller error, as the
-    score and Hessian channels choose.  Inputs and domain are the row kernel's.
+    Returns ``(third, error)``: ``l_aaa, l_aab, l_abb, l_bbb`` (``a = log mean``,
+    ``b = log theta``) and a certified absolute bound on ``l_bbb``. The first
+    three are closed forms within ``gamma_11`` of their absolute-term scale;
+    ``l_bbb`` cancels near Poisson, so it is the near-Poisson series
+    (coefficients ``(n - 1)^2 c_n``) or the count recurrence, whichever
+    certifies the smaller error.
     """
 
     arrays, integer_counts, _ = _inputs(counts, mean, theta, weights, semantics, 2)
@@ -1013,14 +991,10 @@ def negative_binomial_log_fourth_derivatives(
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Fourth derivatives of the NB2 row log-likelihood in ``(log mean, log theta)``.
 
-    Returns ``(fourth, error)``: ``fourth[:, k]`` is ``l_aaaa, l_aaab, l_aabb,
-    l_abbb, l_bbbb`` and ``error`` a bound on the series truncation and
-    recurrence rounding of ``l_bbbb``.  The first four never touch the
-    log-gamma difference and are closed forms in ``q = mu/(mu + theta)`` and
-    ``p = theta/(mu + theta)`` (generated, homogenised in ``(q, p)``);
-    ``l_bbbb`` cancels like ``l_bbb`` near Poisson and takes the series or the
-    recurrence as ``l_bbb`` does, one log-theta derivative further.  Inputs
-    and domain are the row kernel's.
+    Returns ``(fourth, error)``: ``l_aaaa, l_aaab, l_aabb, l_abbb, l_bbbb`` and
+    a bound on ``l_bbbb``'s truncation and rounding. The first four are closed
+    forms in ``q = mu/(mu + theta)``, ``p = theta/(mu + theta)`` (generated);
+    ``l_bbbb`` takes the series or recurrence as ``l_bbb`` does.
     """
     from superglm.distributional.kernels._curvature_direction import stack_columns
     from superglm.distributional.kernels._fourth_generated import (
@@ -1152,10 +1126,8 @@ def negative_binomial_expected_information(
     )
     with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
         predicted = effective_mean + 37.0 / np.log1p(effective_theta / effective_mean) + 64.0
-    # Only the per-row cap applies: the series is row-local and allocates
-    # nothing per term, so the total work is what the rows need, and an
-    # aggregate cap on the prediction (64 terms or more a row) would refuse a
-    # call by its row count alone.
+    # Only the per-row cap applies: the series is row-local, so an aggregate
+    # cap would refuse a call by its row count alone.
     if not np.all(np.isfinite(predicted)) or float(np.max(predicted)) > (
         _MAX_INFORMATION_TERMS_PER_ROW
     ):
