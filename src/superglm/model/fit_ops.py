@@ -42,21 +42,16 @@ from superglm.model.reml_execute import (
     record_reml_terminal,
     resolve_max_reml_iter,
     run_fixed_monotone_reml,
-    run_scop_efs_reml,
 )
 from superglm.model.reml_finalize import (
     _build_reml_reporting_support_state,
     finalize_reml_fit,
 )
-from superglm.model.reml_ops import (
-    model_optimize_direct_reml,
-    model_optimize_efs_reml,
-)
+from superglm.model.reml_ops import model_optimize_direct_reml
 from superglm.model.reml_setup import (
     collect_reml_groups,
     constraint_engine_flags,
     initialize_component_lambdas,
-    inject_fixed_scop_lambdas,
     live_reml_lambdas,
     restore_qp_constraints,
     strip_qp_constraints,
@@ -86,7 +81,6 @@ __all__ = [
     "fit_path",
     "fit_reml",
     "model_optimize_direct_reml",
-    "model_optimize_efs_reml",
 ]
 
 
@@ -354,125 +348,6 @@ def _random_effect_separation_hazard(model, X, y, sample_weight) -> str | None:
     )
 
 
-def _reject_structured_fit_constraints(model) -> None:
-    """Refuse the one structured/constrained pairing that does not reach a mode.
-
-    This used to refuse every fit-time shape constraint that shared a model with
-    a ``RandomEffect`` or a ``FactorSmooth``. That was scope containment from the
-    release which introduced both terms, not a derived result, and it was far
-    wider than the algebra requires. A variance component and a smoothing
-    parameter are the same object to the extended Fellner-Schall update (Wood &
-    Fasiolo, 2017, Biometrics 73(4):1071-1081), whose founding case in Fellner
-    (1986) is a penalty assembled from identity blocks -- exactly what a random
-    effect contributes. Shape-constrained additive *mixed* models are the
-    documented, supported combination in the reference implementation (Pya
-    Arnqvist, 2024, arXiv:2403.09438 section 3).
-
-    What the refusal was really standing in for was a plumbing defect: the EFS
-    lambda step read ``PenaltyComponent.omega_ssp`` directly, which is ``None``
-    for an identity penalty, so a random effect arrived at a matmul as a 0-d
-    operand. That is fixed at the read: the EFS step now reduces through
-    ``penalty_algebra.penalty_component_quadratic`` and ``penalty_component_trace``,
-    which are kind-aware and never materialize a structured penalty.
-
-    What survives is one specification, not one pair of term types: a SCOP
-    constraint on a column that a ``basis="fs"`` factor smooth also spans. An
-    ``fs`` factor smooth carries its own main effect, so such a model states that
-    effect twice -- once confined to a shape cone and once free. The free copy
-    absorbs whatever the constrained copy is forbidden to do, the two compensate
-    for each other, and no coefficient mode is reached.
-
-    A factor smooth spans BOTH its parents, and the duplication is reachable on
-    either. Along ``variable`` the free copy is the marginal smooth (measured
-    0/7); along ``group`` it is the per-level null-space blocks, which are a
-    per-level effect of the grouping column, reachable when that column carries
-    an ``OrderedCategorical`` SCOP constraint (measured 0/6). Testing only
-    ``variable`` would let the second through. Declaration refuses only a
-    ``Categorical`` or ``RandomEffect`` on a factor smooth's group and warns
-    about any other term there, so an ``OrderedCategorical`` SCOP term on the
-    group reaches this branch from a new declaration, as well as from an older
-    pickle or ``clone_unfitted`` (``ModelConfig.materialize``).
-
-    Everything adjacent converges (7/7 each): ``basis="sz"``, which excludes the
-    main effect and so states it once; and an ``fs`` factor smooth sharing
-    neither parent with a constrained term. The unconstrained version of the
-    duplicated model converges too, which is what localises this to constrained
-    duplication rather than to duplication or to SCOP-with-FactorSmooth.
-
-    Selection stays on the DECLARATION rather than the spec's type, which is what
-    lets a constraint declared on a spline inside a wrapper such as
-    ``OrderedCategorical`` be seen at all.
-    """
-    from superglm.features._spline_build import (
-        _uses_fit_time_shape_constraints,
-        shape_engine,
-    )
-    from superglm.features.factor_smooth import FactorSmooth
-    from superglm.features.ordered_categorical import OrderedCategorical
-
-    def _engine_spec(spec):
-        """The spec that answers the engine question, not merely the declaration.
-
-        ``OrderedCategorical`` delegates its build to an inner spline, and it is
-        the inner basis that picks the engine: a ``ps`` declared with
-        ``shape_engine="scop"`` routes through SCOP. The wrapper defines
-        ``_build_monotone_constraints_raw`` unconditionally -- deliberately, so
-        the builder can find raw geometry through it -- and defines no SCOP
-        method, so asking the wrapper reports QP for every basis including the
-        SCOP ones. Resolve to the inner spline before asking.
-
-        A pre-0.24 step pickle never reaches this function: the declaration test
-        above reads ``constraint_kind`` through ``getattr(spec, name, default)``,
-        which is the one spelling that swallows the ``AttributeError``
-        ``_basis_spline`` raises, so such a spec answers ``None`` and is filtered
-        out before the engine question is asked. The direct read here is
-        therefore not what protects that case -- do not read it as a refusal of
-        step pickles, which the guard does not perform. It is written directly
-        only because there is no default that would be correct if one did arrive.
-        """
-        return spec._basis_spline if isinstance(spec, OrderedCategorical) else spec
-
-    scop_constrained = [
-        name
-        for name, spec in model._specs.items()
-        if _uses_fit_time_shape_constraints(spec) and shape_engine(_engine_spec(spec)) == "scop"
-    ]
-    if not scop_constrained:
-        return
-
-    # A main-effect-carrying factor smooth duplicates a constrained effect on
-    # EITHER of its two axes, so test both parents. Along ``variable`` the
-    # duplicate is the marginal smooth; along ``group`` it is the per-level
-    # null-space blocks, which are a per-level effect of the grouping column.
-    # Both were measured non-convergent (0/7 and 0/6). ``sz`` excludes the main
-    # effect, and a factor smooth sharing neither parent states nothing twice.
-    constrained_set = set(scop_constrained)
-    duplicated = [
-        (sorted(set(spec.parent_names) & constrained_set, key=repr), name)
-        for name, spec in model._interaction_specs.items()
-        if isinstance(spec, FactorSmooth)
-        and spec.basis == "fs"
-        and set(spec.parent_names) & constrained_set
-    ]
-    if not duplicated:
-        return
-
-    joined = ", ".join(
-        f"{iname!r} (sharing shape-constrained {', '.join(repr(p) for p in parents)})"
-        for parents, iname in duplicated
-    )
-    raise NotImplementedError(
-        f"fit-time SCOP shape constraints are not supported with FactorSmooth "
-        f"term(s) {joined}; a basis='fs' factor smooth carries its own main "
-        "effect, so the constrained variable's effect is stated twice -- once "
-        "confined to the shape cone and once free -- and no coefficient mode is "
-        "reached. Use basis='sz', which excludes the main effect, or the QP engine "
-        "(drop shape_engine='scop'), or a post-fit shape constraint. A factor "
-        "smooth of any other variable is unaffected, and a RandomEffect carries no "
-        "such restriction."
-    )
-
-
 def _compute_null_mu(
     y: NDArray,
     weights: NDArray,
@@ -514,7 +389,6 @@ def _compute_null_mu(
             _return_working_system=True,
             _compute_fit_statistics=False,
             _compute_reml_geometry=False,
-            _compute_scop_postfit_inference=False,
             weight_semantics=weight_semantics,
         )
         eta_null = stabilize_eta(null_result.intercept + offset, link)
@@ -863,7 +737,6 @@ def _make_reml_debug_recorder(
     reml_groups,
     has_constraints: bool,
     has_qp_constraints: bool,
-    has_scop_constraints: bool,
     max_reml_iter: int,
     reml_tol: float | None,
     pirls_tol: float,
@@ -894,7 +767,6 @@ def _make_reml_debug_recorder(
             "reml_group_names": [group.name for _, group in reml_groups],
             "has_constraints": bool(has_constraints),
             "has_qp_constraints": bool(has_qp_constraints),
-            "has_scop_constraints": bool(has_scop_constraints),
             "max_reml_iter": int(max_reml_iter),
             # None = engine default; the resolved value is an engine concern.
             "reml_tol": None if reml_tol is None else float(reml_tol),
@@ -949,7 +821,7 @@ def _fetch_or_build_design(model, X, y, sample_weight, offset, cache: dict):
         cache.clear()
 
     y_out, w_out, off_out = model_build_design_matrix(model, X, y, sample_weight, offset)
-    has_constrained_group, _, _ = constraint_engine_flags(model._groups)
+    has_constrained_group, _ = constraint_engine_flags(model._groups)
     if has_constrained_group:
         # The constrained REML path mutates GroupSlice objects in place
         # (strip_qp_constraints / restore_qp_constraints recompose against
@@ -1503,17 +1375,12 @@ def _reject_monotone_fit_conflicts(model, penalty, has_lambda1_targets) -> None:
             "Monotone fit-time constraints are not supported with selection_penalty > 0. "
             "Set selection_penalty=0 or fit unconstrained and call model.monotonize()."
         )
-    monotone_engines = {g.monotone_engine for g in model._groups if g.monotone_engine is not None}
-    if len(monotone_engines) > 1:
-        raise NotImplementedError("SCOP + QP monotone terms in the same model are not supported.")
 
 
 def _uses_direct_solver(model, penalty, has_lambda1_targets) -> bool:
     """Whether `_solve_coefficients` takes the direct IRLS route rather than BCD."""
-    return (
-        any(group.constraints is not None for group in model._groups)
-        or any(group.monotone_engine == "scop" for group in model._groups)
-        or (penalty.lambda1 is not None and (penalty.lambda1 == 0 or not has_lambda1_targets))
+    return any(group.constraints is not None for group in model._groups) or (
+        penalty.lambda1 is not None and (penalty.lambda1 == 0 or not has_lambda1_targets)
     )
 
 
@@ -2101,7 +1968,6 @@ def _fit_reml_in_workspace(
     model.__dict__.pop("_deferred_rank_info", None)
 
     _auto_detect_specs_if_needed(model, X, sample_weight_ref)
-    _reject_structured_fit_constraints(model)
     _maybe_estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
     configured_smoothing = configured_lambda2(model)
 
@@ -2111,7 +1977,7 @@ def _fit_reml_in_workspace(
     _profile: dict = {}
     _profile.update(
         _resolve_interaction_reml_mode(
-            model, interaction_mode, resolve_max_reml_iter(max_reml_iter, engine="newton")
+            model, interaction_mode, resolve_max_reml_iter(max_reml_iter)
         )
     )
     _validate_runtime_validation_mode(runtime_validation)
@@ -2133,17 +1999,7 @@ def _fit_reml_in_workspace(
     _clear_fit_inference_caches(model)
 
     reml_groups = collect_reml_groups(model._groups, model._dm.group_matrices)
-    _has_monotone, _has_qp_monotone, _has_scop_monotone = constraint_engine_flags(model._groups)
-    if _has_qp_monotone and _has_scop_monotone:
-        raise NotImplementedError("SCOP + QP monotone terms in the same model are not supported.")
-    if max_reml_iter is None and _has_scop_monotone:
-        # The SCOP engine steps by Fellner-Schall: its own, larger default cap.
-        _profile.update(
-            _resolve_interaction_reml_mode(
-                model, interaction_mode, resolve_max_reml_iter(None, engine="step")
-            )
-        )
-        effective_max_reml_iter = _profile["effective_max_reml_iter"]
+    _has_monotone, _has_qp_monotone = constraint_engine_flags(model._groups)
     _profile["max_reml_iter_defaulted"] = max_reml_iter is None
     debug_recorder = _make_reml_debug_recorder(
         model,
@@ -2151,7 +2007,6 @@ def _fit_reml_in_workspace(
         reml_groups=reml_groups,
         has_constraints=_has_monotone,
         has_qp_constraints=_has_qp_monotone,
-        has_scop_constraints=_has_scop_monotone,
         max_reml_iter=effective_max_reml_iter,
         reml_tol=reml_tol,
         pirls_tol=pirls_tol,
@@ -2221,7 +2076,6 @@ def _fit_reml_in_workspace(
         other_names=[group.name for group in model._groups],
     )
     lambdas.update(warm_lambdas)
-    _any_unfixed_scop = inject_fixed_scop_lambdas(model._groups, model._specs, lambdas)
 
     # QP monotone with auto lambda → two-stage passthrough heuristic:
     # Stage 1: run unconstrained REML (temporarily strip QP constraints)
@@ -2236,16 +2090,14 @@ def _fit_reml_in_workspace(
     if _qp_passthrough:
         _qp_saved_state = strip_qp_constraints(model._groups)
         _qp_stripped = True
-        _has_monotone, _has_qp_monotone, _has_scop_monotone = constraint_engine_flags(model._groups)
+        _has_monotone, _has_qp_monotone = constraint_engine_flags(model._groups)
 
     try:
-        # Direct IRLS when lambda1=0 or unset (no L1 penalty -> no BCD needed)
+        # ``resolve_selection_penalty_for_reml`` above refused any selection
+        # penalty, so every REML fit takes the direct IRLS route.
         offset_arr = offset if offset is not None else np.zeros(len(y))
-        lam1 = penalty.lambda1
-        use_direct = lam1 is None or lam1 == 0 or not model_has_lambda1_targets(model)
 
-        log_message = None
-        if _has_monotone and not _any_unfixed_scop and not estimated_names:
+        if _has_monotone and not estimated_names:
             run_fixed_monotone_reml(
                 model,
                 y=y,
@@ -2260,34 +2112,6 @@ def _fit_reml_in_workspace(
                 total_start=_t_total_start,
                 debug_recorder=debug_recorder,
             )
-            log_message = f"fit_reml (monotone, fixed lambdas): lambdas={lambdas}"
-        elif _any_unfixed_scop or (_has_scop_monotone and estimated_names):
-            best = run_scop_efs_reml(
-                model,
-                y=y,
-                sample_weight=sample_weight,
-                offset=offset,
-                offset_arr=offset_arr,
-                lambdas=lambdas,
-                estimated_names=estimated_names,
-                lam_init=lam_init,
-                warm_lambdas=warm_lambdas,
-                reml_penalties=reml_penalties,
-                max_reml_iter=effective_max_reml_iter,
-                reml_tol=reml_tol,
-                pirls_tol=pirls_tol,
-                max_pirls_iter=max_pirls_iter,
-                verbose=verbose,
-                profile=_profile,
-                total_start=_t_total_start,
-                compute_fit_stats=_compute_fit_stats,
-                debug_recorder=debug_recorder,
-            )
-            log_message = (
-                f"REML SCOP EFS converged={best.converged} in {best.n_reml_iter} iters, "
-                f"lambdas={best.lambdas}"
-            )
-        if log_message is not None:
             model._reporting_support_state = _build_reml_reporting_support_state(
                 model,
                 result=model._solver_result,
@@ -2310,15 +2134,14 @@ def _fit_reml_in_workspace(
                 runtime_validation=runtime_validation,
                 n_rows=len(y),
             )
-            logger.info(log_message)
+            logger.info(f"fit_reml (monotone, fixed lambdas): lambdas={lambdas}")
             _maybe_release_fit_state(model)
             return debug_recorder
 
-        if use_direct and estimated_names and not model._discrete:
+        if estimated_names and not model._discrete:
             _warn_slow_exact_reml(model, lambdas)
         best = optimize_reml_best(
             model,
-            use_direct=use_direct,
             y=y,
             sample_weight=sample_weight,
             offset_arr=offset_arr,
@@ -2336,14 +2159,12 @@ def _fit_reml_in_workspace(
             pirls_tol=pirls_tol,
             max_pirls_iter=max_pirls_iter,
             model_optimize_direct_reml=model_optimize_direct_reml,
-            model_optimize_efs_reml=model_optimize_efs_reml,
             debug_recorder=debug_recorder,
             warm_lambdas=warm_lambdas,
         )
         lambdas, n_reml_iter, converged = finalize_reml_fit(
             model,
             best=best,
-            use_direct=use_direct,
             reml_groups=reml_groups,
             reml_penalties=(
                 best.reml_penalties if best.reml_penalties is not None else reml_penalties

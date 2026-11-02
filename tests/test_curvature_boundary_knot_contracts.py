@@ -3,8 +3,8 @@
 Data-driven knot placement puts an interior knot exactly on the fitted
 boundary whenever a predictor carries a point mass at its minimum -- the
 bonus-malus / age-floor shape.  The exact fit-time curvature geometry has to
-keep working on that layout, in both the SCOP (PSpline) and QP
-(CubicRegressionSpline) engines.
+keep working on that layout on the QP engine, for a ``PSpline`` and a
+``CubicRegressionSpline``.
 """
 
 import numpy as np
@@ -17,7 +17,6 @@ from superglm.features._spline_constraints import (
     build_curvature_difference_constraints,
     curvature_difference_operator,
 )
-from superglm.solvers.scop import build_scop_reparam
 from tests._exact_reference import exact_matmul
 
 DEGREE = 3
@@ -74,31 +73,6 @@ def _minimum_second_difference(values: np.ndarray) -> float:
     return float(np.min(second) / max(1.0, float(np.max(np.abs(second)))))
 
 
-# --------------------------------------------------------------------------
-# SCOP engine (PSpline): a knot on the boundary must still build a square map
-# --------------------------------------------------------------------------
-
-
-def test_scop_curvature_map_is_built_when_a_knot_sits_on_the_fitted_boundary():
-    interior = np.concatenate(([0.0], np.linspace(0.0, 1.0, 11)[1:-1]))
-    knots = _padded_knots_with_boundary_knot(interior)
-    q = len(knots) - DEGREE - 1
-    grid = np.linspace(0.0, 1.0, 2001)
-    rng = np.random.default_rng(11)
-
-    reparam = build_scop_reparam(q, kind="convex", knots=knots, degree=DEGREE, domain=(0.0, 1.0))
-
-    assert reparam.Sigma.shape == (q, q)
-    affine = SciPyBSpline(knots, reparam.Sigma[:, :2], DEGREE)(grid, nu=2)
-    np.testing.assert_allclose(affine, 0.0, atol=1e-9)
-    for _ in range(5):
-        gamma = reparam.forward(rng.normal(size=q))
-        second_derivative = SciPyBSpline(knots, gamma, DEGREE)(grid, nu=2)
-        scale = max(1.0, float(np.max(np.abs(second_derivative))))
-        assert np.min(second_derivative) >= -1e-9 * scale
-        assert np.max(second_derivative) > 0.0
-
-
 @pytest.mark.parametrize("discrete", [False, True])
 def test_fit_time_convex_pspline_fits_a_point_mass_at_the_predictor_minimum(discrete):
     _assert_first_interior_knot_is_on_the_boundary(PSpline)
@@ -115,7 +89,6 @@ def test_fit_time_convex_pspline_fits_a_point_mass_at_the_predictor_minimum(disc
                 n_knots=N_KNOTS,
                 knot_strategy="quantile_rows",
                 constraint=Constraint.fit.convex,
-                shape_engine="scop",
             )
         },
     ).fit(frame, y)
@@ -130,7 +103,7 @@ def test_fit_time_convex_pspline_fits_a_point_mass_at_the_predictor_minimum(disc
 
 
 # --------------------------------------------------------------------------
-# QP engine (CubicRegressionSpline): the clamped vector repeats the knot
+# CubicRegressionSpline: the clamped vector repeats the knot
 # --------------------------------------------------------------------------
 
 

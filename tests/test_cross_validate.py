@@ -566,85 +566,30 @@ class TestFitModes:
             )
             assert abs(warm_info["objective"] - cold_info["objective"]) <= bar
 
-    def test_fit_reml_warm_start_never_leaves_a_tensor_half_warm(self, monkeypatch):
-        """A first fold that runs one tensor margin to a flat end starts the whole
-        tensor cold in later folds, and every fold converges.
+    def test_fit_reml_warm_start_never_leaves_a_tensor_half_warm(self):
+        """A tensor margin the fit froze as flat starts the whole tensor cold.
 
-        The data do not support the DrivAge x VehAge interaction: the first fold
-        (all rows) runs the VehAge margin to working infinity, which the warm
-        start leaves out. Started beside the DrivAge margin at its fitted value,
-        the cold margin's seed spreads the block's penalty past what the
-        bootstrap's log-determinant can certify. Mutation check: leaving only the
-        flat margin cold started the DrivAge margin warm, and both later folds
-        failed with PenaltyNumericalError and nan scores.
+        A half-warm block, one margin at the cold seed beside another at its
+        fitted value, spreads the block's penalty past what the bootstrap's
+        log-determinant can certify. The freeze decision is forced here rather
+        than reached through a fit. Mutation check: keeping the unfrozen margin
+        warm leaves ``DrivAge:VehAge:margin_DrivAge`` in the start.
         """
-        from superglm import Constraint
+        from superglm.model.reml_setup import live_reml_lambdas
 
-        rng = np.random.default_rng(3)
-        n = 3000
-        bm = rng.uniform(50.0, 150.0, n)
-        age = rng.uniform(18.0, 90.0, n)
-        vage = rng.uniform(0.0, 20.0, n)
-        gas = np.where(rng.uniform(size=n) < 0.3, "Diesel", "Regular")
-        eta = (
-            -1.4
-            + 0.9 * (1 - np.exp(-(bm - 50) / 25))
-            + 0.4 * np.exp(-(age - 18) / 8)
-            + 0.2 * np.sin(vage / 4)
-        )
-        exposure = rng.uniform(0.3, 1.0, n)
-        y = rng.poisson(exposure * np.exp(eta)).astype(float)
-        df = pd.DataFrame({"BonusMalus": bm, "DrivAge": age, "VehAge": vage, "VehGas": gas})
-        model = SuperGLM(
-            family="poisson",
-            selection_penalty=0.0,
-            discrete=True,
-            features={
-                "BonusMalus": Spline(
-                    kind="ps", k=10, constraint=Constraint.fit.increasing, shape_engine="scop"
-                ),
-                "DrivAge": Spline(kind="ps", k=8),
-                "VehAge": Spline(kind="ps", k=8),
-                "VehGas": Categorical(base="most_exposed"),
+        names = ["BonusMalus", "DrivAge:VehAge:margin_DrivAge", "DrivAge:VehAge:margin_VehAge"]
+        blocks = ["BonusMalus", "DrivAge:VehAge", "DrivAge:VehAge"]
+        model = SimpleNamespace(
+            _reml_result=SimpleNamespace(lambdas=dict(zip(names, [3.0, 5.0, 7.0], strict=True))),
+            _reml_profile={
+                "reml_freeze_decision": {"names": names, "frozen": [False, False, True]}
             },
-            interactions=[("DrivAge", "VehAge")],
+            _reml_penalties=[
+                SimpleNamespace(name=name, group_name=block)
+                for name, block in zip(names, blocks, strict=True)
+            ],
         )
-        rows = np.arange(n)
-
-        class WholeThenHalves:
-            def split(self, X, y=None, groups=None):
-                yield rows, rows[:50]
-                yield rows[: n // 2], rows[n // 2 :]
-                yield rows[n // 2 :], rows[: n // 2]
-
-            def get_n_splits(self, *args, **kwargs):
-                return 3
-
-        starts = []
-        real_fit_reml = SuperGLM.fit_reml
-
-        def spy(self, *args, **kwargs):
-            starts.append(kwargs.get("lambda2_init"))
-            return real_fit_reml(self, *args, **kwargs)
-
-        monkeypatch.setattr(SuperGLM, "fit_reml", spy)
-        result = cross_validate(
-            model,
-            df,
-            y,
-            cv=WholeThenHalves(),
-            offset=np.log(exposure),
-            fit_mode="fit_reml",
-            return_estimators=True,
-            error_score="raise",
-        )
-        first = result.estimators[0]._reml_result
-        assert first.flat_components == ["DrivAge:VehAge:margin_VehAge"]
-        assert starts[0] is None
-        for start in starts[1:]:
-            assert set(start) == {"BonusMalus", "DrivAge", "VehAge"}
-        assert list(result.fold_scores["warm_started"]) == [False, True, True]
-        assert all(result.fold_scores["converged"])
+        assert live_reml_lambdas(model) == {"BonusMalus": 3.0}
 
     def test_fit_reml_an_empty_warm_start_is_not_passed(self, poisson_data, monkeypatch):
         """When the first converged fold leaves every component on a flat

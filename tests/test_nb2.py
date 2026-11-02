@@ -134,7 +134,6 @@ class TestNB2DevianceUnit:
                 _return_working_system=True,
                 _compute_fit_statistics=False,
                 _compute_reml_geometry=False,
-                _compute_scop_postfit_inference=False,
                 weight_semantics="prior",
             )
         # The solver walks down from the overshoot on finite deviances.

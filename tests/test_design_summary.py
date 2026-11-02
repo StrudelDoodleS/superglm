@@ -6,9 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, Constraint, Numeric, PSpline, Spline, SuperGLM
+from superglm import Categorical, Numeric, Spline, SuperGLM
 from superglm.group_matrix import (
-    DiscretizedSCOPGroupMatrix,
     DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
@@ -74,20 +73,6 @@ def _fit_representation(case: str):
             features={"x": Spline(n_knots=6, penalty="ssp")},
         ).fit(X[["x"]], y)
         return model, DiscretizedSSPGroupMatrix, "discretized-ssp", True, "binned-ssp"
-    if case == "discretized-scop":
-        model = SuperGLM(
-            **common,
-            discrete=True,
-            n_bins=14,
-            features={
-                "x": PSpline(
-                    n_knots=6,
-                    constraint=Constraint.fit.increasing,
-                    shape_engine="scop",
-                )
-            },
-        ).fit(X[["x"]], y)
-        return model, DiscretizedSCOPGroupMatrix, "discretized-scop", True, "binned-scop"
     if case == "discretized-spline-categorical":
         model = SuperGLM(
             **common,
@@ -132,8 +117,6 @@ def _expected_storage_rows(group) -> int:
         return int(group.B.shape[0])
     if type(group) is SplineCategoricalGroupMatrix:
         return int(group.B_level.shape[0])
-    if type(group) is DiscretizedSCOPGroupMatrix:
-        return int(group.B_scop_unique.shape[0])
     return int(group.B_unique.shape[0])
 
 
@@ -213,7 +196,6 @@ def test_design_summary_numeric_and_categorical_is_lazy_and_read_only(monkeypatc
         "sparse-ssp",
         "spline-categorical",
         "discretized-ssp",
-        "discretized-scop",
         "discretized-spline-categorical",
         "discretized-tensor",
     ],

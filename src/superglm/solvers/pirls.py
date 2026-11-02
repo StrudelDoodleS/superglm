@@ -6,6 +6,7 @@ import copy
 import logging
 import math
 import time
+import warnings
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import Literal, cast, get_args
@@ -15,7 +16,6 @@ import scipy.linalg
 import scipy.optimize
 from numpy.typing import NDArray
 
-from superglm import _held_warnings as held_warnings
 from superglm._fit_trace import TraceRun
 from superglm._roundoff import EPS, gamma
 from superglm.distributions import Distribution
@@ -113,10 +113,6 @@ def _has_structural_smoothing_penalty(
                 continue
             lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
             if float(lam) != 0.0 and gm.omega is not None:
-                return True
-        elif group.scop_reparameterization is not None:
-            lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
-            if float(lam) != 0.0:
                 return True
     return False
 
@@ -1143,7 +1139,6 @@ def _fit_pirls_inner(
     lambda2: float | dict[str, float] = 0.0,
     record_diagnostics: bool = False,
     convergence: str = "deviance",
-    S_override: NDArray | None = None,
     trace_run: TraceRun | None = None,
     trace_basis_id: int | None = None,
     trace_purpose: str = "fit",
@@ -1205,16 +1200,12 @@ def _fit_pirls_inner(
     # Build S once so coefficient updates, line-search merit, and inference all
     # use the same matrix.  Keep a branch-free fast path for the common S=0
     # selection-only fit.
-    if S_override is None and not _has_structural_smoothing_penalty(gms, groups, lambda2):
+    if not _has_structural_smoothing_penalty(gms, groups, lambda2):
         S = None
-    elif S_override is None:
+    else:
         from superglm.reml.penalty_algebra import build_penalty_matrix
 
         S = build_penalty_matrix(gms, groups, lambda2, p)
-    else:
-        S = np.asarray(S_override, dtype=np.float64)
-        if S.shape != (p, p):
-            raise ValueError(f"S_override must have shape {(p, p)}, got {S.shape}")
     has_smooth_penalty = S is not None and bool(np.any(S))
     if not has_smooth_penalty:
         S = None
@@ -1940,7 +1931,7 @@ def _fit_pirls_inner(
                 message = format_runtime_message(w_ratio, outer + 1, drifting, pinned)
                 if separation == "error":
                     raise SeparationError(message)
-                held_warnings.warn(message, SeparationWarning, stacklevel=2)
+                warnings.warn(message, SeparationWarning, stacklevel=2)
     extra = ""
     if active_set:
         total_group_updates = total_inner_iters * n_groups
@@ -2197,7 +2188,6 @@ def fit_pirls(
     lambda2: float | dict[str, float] = 0.0,
     record_diagnostics: bool = False,
     convergence: str = "deviance",
-    S_override: NDArray | None = None,
     trace_run: TraceRun | None = None,
     separation: str = "warn",
     *,
@@ -2247,7 +2237,6 @@ def fit_pirls(
         lambda2=lambda2,
         record_diagnostics=record_diagnostics,
         convergence=convergence,
-        S_override=S_override,
         trace_run=trace_run,
         trace_basis_id=trace_basis_id,
         trace_purpose="initial_flavor_fit" if penalty.flavor is not None else "fit",
@@ -2280,7 +2269,6 @@ def fit_pirls(
             lambda2=lambda2,
             record_diagnostics=record_diagnostics,
             convergence=convergence,
-            S_override=S_override,
             trace_run=trace_run,
             trace_basis_id=trace_basis_id,
             trace_purpose="adjusted_flavor_fit",

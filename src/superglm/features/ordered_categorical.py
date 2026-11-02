@@ -947,8 +947,7 @@ class OrderedCategorical:
         asks for the matching raw geometry off the FEATURE spec -- the same
         object for a plain ``Spline``, this wrapper for an ``OrderedCategorical``
         -- and without this forward it finds nothing and reports the geometry as
-        unavailable. Only QP bases take that branch; a ``ps`` declared with
-        ``shape_engine="scop"`` routes through SCOP and never does.
+        unavailable.
 
         The constraint is stated in the inner spline's own coefficient space,
         which is the space the returned design lives in, so it needs no

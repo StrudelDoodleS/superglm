@@ -8,7 +8,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._group_matrix import _group_matrix_support as row_supports
-from superglm.features._spline_config import clear_scop_state
+from superglm.features._spline_config import clear_scop_state, warn_scop_retired
 from superglm.features._spline_identifiability import (
     apply_identifiability_for_spec,
     build_identifiability_projection_for_spec,
@@ -34,26 +34,30 @@ def _uses_fit_time_shape_constraints(spec: Any) -> bool:
     return _constraint_kind(spec) is not None and _constraint_mode(spec) == "fit"
 
 
-def shape_engine(spec: Any) -> Literal["qp", "scop"] | None:
+def shape_engine(spec: Any) -> Literal["qp"] | None:
     """The engine that fits ``spec``'s fit-time shape constraint, or None.
 
-    ``"scop"`` for a P-spline declared with ``shape_engine="scop"``, and for one
-    pickled before that option existed (its class default, None): SCOP was the
-    only engine its release gave a P-spline, so a saved model and every
-    declaration it holds refit as they were fitted. ``"qp"`` for every other
-    basis that states its shape as rows on the raw coefficients. None without
-    a fit-time constraint, or when no engine can build it.
+    ``"qp"`` for every basis that states its shape as rows on the raw
+    coefficients. None without a fit-time constraint, or when no engine can
+    build it.
     """
     if not _uses_fit_time_shape_constraints(spec):
         return None
-    if hasattr(spec, "_build_scop_reparameterization") and getattr(spec, "shape_engine", None) in (
-        None,
-        "scop",
-    ):
-        return "scop"
     if hasattr(spec, "_build_monotone_constraints_raw"):
         return "qp"
     return None
+
+
+def _warn_if_saved_on_scop(spec: Any) -> None:
+    """Warn once that a P-spline 0.41.0 or earlier fitted on SCOP now fits on the QP.
+
+    Such a spec was pickled before ``shape_engine`` existed, so it reads the
+    class default None. The build marks it ``"qp"``, which stops a second
+    build of the same spec warning again.
+    """
+    if _uses_fit_time_shape_constraints(spec) and getattr(spec, "shape_engine", "qp") is None:
+        warn_scop_retired(saved=True)
+        spec.shape_engine = "qp"
 
 
 def _raise_if_unsupported_fit_shape_constraint(spec: Any) -> None:
@@ -106,6 +110,7 @@ def build_group_info(
     builder to store without scanning the basis.
     """
     _raise_if_unsupported_fit_shape_constraint(spec)
+    _warn_if_saved_on_scop(spec)
     clear_scop_state(spec)
     engine = shape_engine(spec)
 
@@ -135,31 +140,6 @@ def build_group_info(
         return _with_row_support(info, value_rows, index, full)
 
     omega = spec._build_penalty()
-    if engine == "scop":
-        basis_dense = basis.toarray() if hasattr(basis, "toarray") else basis
-        centered_basis, scop_penalty, scop_reparam = spec._build_scop_reparameterization(
-            basis_dense, omega
-        )
-        if sample_weight is not None:
-            geometry_weight = np.asarray(sample_weight, dtype=np.float64).ravel()
-            correction = np.average(
-                centered_basis,
-                axis=0,
-                weights=geometry_weight,
-            )
-            centered_basis = centered_basis - correction
-            spec._scop_col_means = np.asarray(spec._scop_col_means) + correction
-        n_cols_scop = centered_basis.shape[1]
-        return GroupInfo(
-            columns=centered_basis,
-            n_cols=n_cols_scop,
-            penalty_matrix=scop_penalty,
-            reparametrize=False,
-            penalized=True,
-            scop_reparameterization=scop_reparam,
-            monotone_engine="scop",
-        )
-
     basis, omega, n_cols, projection = spec._apply_constraints(basis, omega)
     omega, n_cols, projection = apply_identifiability_for_spec(
         spec,
@@ -235,6 +215,7 @@ def build_knots_and_penalty(
 ) -> tuple[NDArray | None, int, NDArray | None]:
     """Place knots and return projected penalty info without building the full basis."""
     _raise_if_unsupported_fit_shape_constraint(spec)
+    _warn_if_saved_on_scop(spec)
     clear_scop_state(spec)
 
     x = np.asarray(x, dtype=np.float64).ravel()

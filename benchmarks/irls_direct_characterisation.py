@@ -20,15 +20,14 @@ Run it on each tree with that tree's interpreter and the same harness file::
 The matrix (``m/``): every family and link of ``release_differential``'s GLM
 corpus, on its 400-row data, through the dense route (exact and binned by
 ``fit_reml``, exact by ``fit``), the shape-constrained P-spline on the QP
-(``scop``, its term's name; the QP from #537) and on SCOP (``scopeng``, the
-same term with ``shape_engine="scop"``), both exact and binned, the
+(``scop``, its term's name), both exact and binned, the
 constrained QP, QR, and the structured random-effect, ``fs`` and ``sz``
 routes, with binned, ``fit`` and further term kinds on a few pairs.  The
 fixtures (``x/``): #437's mean-space Newton on the dense, QP and structured
 routes and fits that do not engage it, the Gamma/log Fisher-to-Newton switch
 and its latch, Tweedie/log observed Newton, nested random-effect chains,
 shape-constrained P-splines with repeated rows, two groups and a translated
-column, on the QP (``x/scop/``) and on SCOP (``x/scop-engine/``), a term the
+column (``x/scop/``), a term the
 QP holds flat beside a fitted one (its active face), identity-link fits at
 the zero edge, where the working QP goes unbounded, and the QP step's
 infeasible-start restarts (``x/qp/``, some with the QP solve or the line
@@ -124,8 +123,6 @@ MODES = {
     "qr": ("re", "qr"),
     "qrmains": ("mains", "qr"),
     "scop": ("scop", "auto"),
-    # the ``scop`` term with its P-spline on SCOP (``shape_engine="scop"``)
-    "scopeng": ("scop", "auto"),
     "re": ("re", "structured"),
     "fs": ("fs", "structured"),
     "sz": ("sz", "structured"),
@@ -141,8 +138,6 @@ TRACED = [
     "m/binomial-log/dense/exact/fit_reml",
     "m/poisson-log/scop/exact/fit_reml",
     "m/gaussian-identity/scop/binned/fit_reml",
-    "m/poisson-log/scopeng/exact/fit_reml",
-    "m/gaussian-identity/scopeng/binned/fit_reml",
     "m/gaussian-identity/qp/exact/fit_reml",
     "m/poisson-log/qr/exact/fit_reml",
     "m/binomial-logit/re/exact/fit_reml",
@@ -174,7 +169,6 @@ def _registry() -> dict[str, tuple[Callable, dict]]:
         for route in ("exact", "binned"):
             matrix(family, link, "dense", route, "fit_reml")
             matrix(family, link, "scop", route, "fit_reml")
-            matrix(family, link, "scopeng", route, "fit_reml")
         matrix(family, link, "dense", "exact", "fit")
         for mode in ("qp", "qr", "re", "fs", "sz"):
             matrix(family, link, mode, "exact", "fit_reml")
@@ -194,9 +188,7 @@ def _registry() -> dict[str, tuple[Callable, dict]]:
     for family, link in [("poisson", "log"), ("gaussian", "identity"), ("gamma", "log"),
                          ("binomial", "logit"), ("tweedie15", "log")]:  # fmt: skip
         matrix(family, link, "scop", "exact", "fit")
-        matrix(family, link, "scopeng", "exact", "fit")
     matrix("poisson", "log", "scop", "binned", "fit")
-    matrix("poisson", "log", "scopeng", "binned", "fit")
     matrix("poisson", "log", "fs", "exact", "fit")
 
     specials = {
@@ -219,18 +211,6 @@ def _registry() -> dict[str, tuple[Callable, dict]]:
         "x/scop/two-groups/binned": (_scop_variant, {"variant": "two", "route": "binned"}),
         "x/scop/translated-column": (_scop_variant, {"variant": "translated", "route": "exact"}),
         "x/scop/binomial-log-two-groups": (_scop_variant, {"variant": "binlog", "route": "exact"}),
-        "x/scop-engine/lone-repeated-rows": (_scop_variant, {"variant": "repeated", "route": "exact",
-                                                             "engine": "scop"}),
-        "x/scop-engine/two-groups/exact": (_scop_variant, {"variant": "two", "route": "exact",
-                                                           "engine": "scop"}),
-        "x/scop-engine/two-groups/binned": (_scop_variant, {"variant": "two", "route": "binned",
-                                                            "engine": "scop"}),
-        "x/scop-engine/translated-column": (_scop_variant, {"variant": "translated",
-                                                            "route": "exact", "engine": "scop"}),
-        "x/scop-engine/binomial-log-two-groups": (_scop_variant, {"variant": "binlog",
-                                                                  "route": "exact",
-                                                                  "engine": "scop"}),
-        "x/binlog/scop-engine-lowered": (_binlog_scop_lowered, {"engine": "scop"}),
         "x/qp/flat-held/fit_reml": (_flat_held, {"fit": "fit_reml"}),
         "x/qp/flat-held/fit": (_flat_held, {"fit": "fit"}),
         "x/qp/zero-edge/n100-k6": (_zero_edge, {"n": 100, "n_knots": 6}),
@@ -317,14 +297,6 @@ def _matrix_case(family: str, link: str, mode: str, route: str, fit: str) -> dic
     frame, eta, rng = rd.make_data(n, seed)
     y = rd.glm_response(family, link, eta, frame, rng, False)
     features, interactions = rd.glm_terms(term)
-    if mode == "scopeng":
-        from superglm import Constraint, PSpline
-
-        increasing = Constraint.fit.increasing
-        features = {
-            **features,
-            "x1": PSpline(n_knots=8, constraint=increasing, shape_engine="scop"),
-        }
     model = SuperGLM(
         family=rd.glm_family(family),
         link=link,
@@ -605,19 +577,12 @@ def _nested(family: str) -> dict:
     return _model_outputs(model, frame, None, "fit_reml")
 
 
-def _scop_variant(variant: str, route: str, engine: str | None = None) -> dict:
-    """Shape-constrained P-splines beyond the matrix: compressed lone group, two groups, a translated column.
-
-    On the QP by default (#537), on SCOP with ``engine="scop"``.
-    """
+def _scop_variant(variant: str, route: str) -> dict:
+    """Shape-constrained P-splines beyond the matrix: compressed lone group, two groups, a translated column."""
     import numpy as np
     import release_differential as rd
 
-    from superglm import Categorical, Constraint, Numeric, Spline, SuperGLM
-    from superglm import PSpline as _PSpline
-
-    def PSpline(**kwargs):  # noqa: N802
-        return _PSpline(**kwargs, **({} if engine is None else {"shape_engine": engine}))
+    from superglm import Categorical, Constraint, Numeric, PSpline, Spline, SuperGLM
 
     frame, eta, rng = rd.make_data(SMALL_N, 77)
     frame = frame.copy()
@@ -680,8 +645,8 @@ def _separation(separation: str) -> dict:
     return _model_outputs(model, frame, None, "fit")
 
 
-def _binlog_scop_lowered(engine: str | None = None) -> dict:
-    """An increasing PSpline under offset +2: on the QP, or on SCOP (``engine="scop"``) in latent coordinates."""
+def _binlog_scop_lowered() -> dict:
+    """An increasing PSpline under offset +2, on the QP."""
     import numpy as np
     import pandas as pd
 
@@ -690,12 +655,11 @@ def _binlog_scop_lowered(engine: str | None = None) -> dict:
     rng = np.random.default_rng(8)
     x = rng.uniform(0.0, 1.0, 60)
     y = (rng.uniform(size=60) < 0.1 + 0.3 * x).astype(np.float64)
-    shape = {} if engine is None else {"shape_engine": engine}
     model = SuperGLM(
         family="binomial",
         link="log",
         selection_penalty=0.0,
-        features={"x": PSpline(n_knots=5, constraint=Constraint.fit.increasing, **shape)},
+        features={"x": PSpline(n_knots=5, constraint=Constraint.fit.increasing)},
     )
     frame, offset = pd.DataFrame({"x": x}), np.full(60, 2.0)
     model.fit(frame, y, offset=offset)
@@ -1584,7 +1548,6 @@ def _install_hooks(recorder: Recorder) -> dict:
         "superglm.solvers.constrained_qp",
         "superglm.reml.direct",
         "superglm.reml.discrete",
-        "superglm.reml.scop_efs",
         "superglm.model.fit_ops",
         "superglm.model.reml_execute",
         "superglm.model.reml_finalize",

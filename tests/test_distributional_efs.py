@@ -14,7 +14,6 @@ import superglm.distributional.smoothing.authority as smoothing_authority
 import superglm.distributional.smoothing.evidence as smoothing_evidence
 import superglm.distributional.smoothing.loop as smoothing_loop
 import superglm.distributional.smoothing.objective as smoothing_objective
-import superglm.reml.efs as scalar_efs
 import superglm.solvers.rank as rank_module
 from superglm._predictor_compiler import CompiledPredictorDesign
 from superglm.distributional.families.gaussian import GaussianLS
@@ -3824,14 +3823,6 @@ def test_each_accepted_lambda_update_refits_and_uses_fresh_observed_geometry(
 ) -> None:
     frame, response, predictors = _smooth_fixture(fixed_location=True)
     _decreasing_objective(monkeypatch)
-    scalar_calls = 0
-
-    def forbid_scalar_efs(*args, **kwargs):
-        nonlocal scalar_calls
-        scalar_calls += 1
-        raise AssertionError("distributional EFS must not call scalar EFS")
-
-    monkeypatch.setattr(scalar_efs, "optimize_efs_reml", forbid_scalar_efs)
     solver_calls: list[tuple[np.ndarray | None, object | None, object | None, object]] = []
     original_solver = smoothing_authority.fit_dense_fixed_lambda
 
@@ -3882,7 +3873,6 @@ def test_each_accepted_lambda_update_refits_and_uses_fresh_observed_geometry(
     assert smoothing is not None
     assert len(smoothing.history) == 2
     assert all(iteration.accepted for iteration in smoothing.history)
-    assert scalar_calls == 0
     assert solver_calls[0][1] is not None
     assert solver_calls[0][2] is None
     assert len(inverse_inputs) == 1 + len(smoothing.history)

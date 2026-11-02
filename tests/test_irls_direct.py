@@ -1008,7 +1008,6 @@ class TestDirectSolverBasic:
             _return_working_system=True,
             _compute_fit_statistics=False,
             _compute_reml_geometry=False,
-            _compute_scop_postfit_inference=False,
             weight_semantics="frequency",
         )
         shortcut_row_calls = row_calls
@@ -1028,7 +1027,6 @@ class TestDirectSolverBasic:
             compute_rank_info=False,
             _compute_fit_statistics=False,
             _compute_reml_geometry=False,
-            _compute_scop_postfit_inference=False,
             weight_semantics="frequency",
         )
         ordinary_row_calls = row_calls - shortcut_row_calls

@@ -1,12 +1,11 @@
-"""One fresh-process complete-fit receipt for QP, SCOP or sum-to-zero repair.
+"""One fresh-process complete-fit receipt for QP or sum-to-zero repair.
 
 Select package source with PYTHONPATH, then run ``python -m
 benchmarks.solver_repair_complete_fit --case qp --label baseline --out receipt.json``.
 The default is untimed and records actual solver dispatch. ``--measure-time``
 disables solver instrumentation; arrange exclusive execution separately.
 ``qp`` is the inactive-constraint control; ``qp_binding`` requires observed
-active-set iterations. ``scop_single`` means one SCOP group through the joint
-Newton step.
+active-set iterations.
 """
 
 from __future__ import annotations
@@ -44,15 +43,13 @@ from benchmarks.rank_deficient_complete_fit import (
 from threadpoolctl import threadpool_limits
 
 import superglm
-from superglm.solvers import constrained_qp, scop_newton
+from superglm.solvers import constrained_qp
 from superglm.solvers._structured import balance_tree
 
-CASES = ("qp", "qp_binding", "scop_single", "scop_joint_discrete", "sum_to_zero")
+CASES = ("qp", "qp_binding", "sum_to_zero")
 CASE_DESCRIPTIONS = {
     "qp": "QP with the existing inactive-constraint response",
     "qp_binding": "QP with a negative-quadratic response opposing the convex constraint",
-    "scop_single": "One SCOP group using default joint routing",
-    "scop_joint_discrete": "Two SCOP groups using discrete joint routing",
     "sum_to_zero": "Structured sum-to-zero factor smooth with a global spline",
 }
 
@@ -142,12 +139,12 @@ def _fixture(case, seed):
         )
     config = _constrained_fit_profile.ProfileScenario(
         name=case,
-        engine="qp" if case in {"qp", "qp_binding"} else "scop",
+        engine="qp",
         n=600,
         k=8,
-        n_constrained=2 if case == "scop_joint_discrete" else 1,
+        n_constrained=1,
         repeated_support=False,
-        discrete=case == "scop_joint_discrete",
+        discrete=False,
         use_fremtpl=False,
     )
     seed = 42 if seed is None else seed
@@ -184,10 +181,6 @@ def _solver_dispatch(sampler=None):
     """Observe Python call/return events, including aliases, without replacing solvers."""
     targets = {
         constrained_qp.solve_constrained_qp.__code__: "solve_constrained_qp",
-        scop_newton.SCOPJointNewton.step.__code__: "scop_joint_step",
-        scop_newton.SCOPJointNewton._schur_rows.__code__: "scop_schur_rows",
-        scop_newton._compute_cross_gram.__code__: "scop_cross_gram",
-        scop_newton._disc_disc_2d_hist.__code__: "discrete_cross_histogram",
         balance_tree.SumToZeroTreeFactor.__init__.__code__: "SumToZeroTreeFactor.__init__",
         balance_tree.SumToZeroTreeFactor.solve.__code__: "SumToZeroTreeFactor.solve",
         balance_tree.SumToZeroTreeFactor.solve_data.__code__: "SumToZeroTreeFactor.solve_data",
@@ -198,18 +191,10 @@ def _solver_dispatch(sampler=None):
         "calls": Counter(),
         "returned_calls": Counter(),
         "callers": Counter(),
-        "scop_group_counts": Counter(),
-        "scop_support_layouts": Counter(),
-        "scop_ordinary_cross_routes": Counter(),
-        "scop_schur_routes": Counter(),
-        "scop_cross_routes": Counter(),
-        "scop_cross_histogram_returns": 0,
         "qp_results": [],
-        "scop_steps": [],
         "sum_to_zero_factors": [],
         "observer_errors": [],
     }
-    schur_rows = [False]
 
     def observe(frame, event, result):
         name = targets.get(frame.f_code)
@@ -223,33 +208,6 @@ def _solver_dispatch(sampler=None):
                 receipt["calls"][name] += 1
                 caller = frame.f_back.f_code.co_name if frame.f_back is not None else ""
                 receipt["callers"][f"{name} <- {caller}"] += 1
-                if name == "scop_joint_step":
-                    # the layout the step runs on: each group's columns as
-                    # ``_exact_support`` left them, compressed or not
-                    engine = local["self"]
-                    receipt["scop_group_counts"][str(len(engine.specs))] += 1
-                    layout = [
-                        {
-                            "group": int(spec.group_index),
-                            "basis_shape": list(basis.shape),
-                            "bin_indices": bins is not None,
-                        }
-                        for spec, (basis, bins) in zip(engine.specs, engine.columns, strict=True)
-                    ]
-                    receipt["scop_support_layouts"][json.dumps(layout, sort_keys=True)] += 1
-                    cross = engine._cross
-                    if cross is None:
-                        route = "no ordinary design"
-                    elif cross.bounded is None:
-                        route = "dense rows only"
-                    elif cross.tables is not None:
-                        route = "one-pass tables"
-                    else:
-                        route = "per-pair plan"
-                    receipt["scop_ordinary_cross_routes"][route] += 1
-                    schur_rows[0] = False
-                elif name == "scop_schur_rows":
-                    schur_rows[0] = True
                 return
             if result is not None:
                 receipt["returned_calls"][name] += 1
@@ -260,20 +218,6 @@ def _solver_dispatch(sampler=None):
                 )
                 item["constraint_slack"] = local["A"] @ result.beta - local["b"]
                 receipt["qp_results"].append(_json_value(item))
-            elif name == "scop_joint_step" and result is not None:
-                # the Schur block's data part: from its Grams, or a row factor
-                receipt["scop_schur_routes"]["rows" if schur_rows[0] else "gram"] += 1
-                for index, step in result.results.items():
-                    item = _attributes(
-                        step, ("step_norm", "used_fisher_fallback", "discarded_directions")
-                    )
-                    receipt["scop_steps"].append(_json_value({"group": index, **item}))
-            elif name == "scop_cross_gram" and result is not None:
-                route = tuple(local[key] is not None for key in ("bin_i", "bin_j"))
-                receipt["scop_cross_routes"][str(route)] += 1
-            elif name == "discrete_cross_histogram" and result is not None:
-                if frame.f_back.f_code is scop_newton._compute_cross_gram.__code__:
-                    receipt["scop_cross_histogram_returns"] += 1
             elif name == "SumToZeroTreeFactor.__init__":
                 item = _attributes(
                     local["self"],
@@ -300,12 +244,6 @@ def _dispatch_requirements(case, dispatch):
                 item["active_set"] and item["n_iter"] > 0 and item["converged"]
                 for item in dispatch["qp_results"]
             )
-    elif case.startswith("scop_"):
-        groups = "1" if case == "scop_single" else "2"
-        requirements["joint_step_returned"] = dispatch["returned_calls"]["scop_joint_step"] > 0
-        requirements["requested_group_count_observed"] = dispatch["scop_group_counts"][groups] > 0
-        if case == "scop_joint_discrete":
-            requirements["cross_histogram_returned"] = dispatch["scop_cross_histogram_returns"] > 0
     else:
         requirements["factor_rank_published"] = any(
             item["rank"] is not None for item in dispatch["sum_to_zero_factors"]
@@ -357,11 +295,6 @@ def _fit_outputs(model, frame, offset):
                 "curvature_source",
                 "lambda_history",
                 "objective_history",
-                "inner_iter_history",
-                "scop_step_norms",
-                "scop_fisher_fallbacks",
-                "managed_cleanup_active_history",
-                "managed_cleanup_frozen_history",
             ),
         ),
     }
@@ -369,14 +302,6 @@ def _fit_outputs(model, frame, offset):
         {name: value for name, value in asdict(item).items() if not name.endswith("_id")}
         for item in (getattr(result, "iteration_log", None) or ())
     ]
-    outputs["scop_states"] = {
-        str(name): {
-            key: state[key]
-            for key in ("beta_eff", "gamma_eff", "last_step_norm", "last_fisher_fallback")
-            if key in state
-        }
-        for name, state in (getattr(smoothing, "scop_states", None) or {}).items()
-    }
     outputs["constraint_slacks"] = {
         group.name: group.constraints.A @ result.beta[group.sl] - group.constraints.b
         for group in (getattr(model, "_groups", None) or ())

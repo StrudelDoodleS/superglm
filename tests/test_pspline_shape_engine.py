@@ -1,13 +1,14 @@
-"""A fit-time shape constraint on a P-spline fits on the QP; SCOP is an opt-in.
+"""A fit-time shape constraint on a P-spline fits on the QP; SCOP is retired.
 
-``shape_engine`` (``features/_spline_build.py``) decides the engine everywhere:
-the QP, on first-difference (monotone) or exact curvature rows on the raw
-B-spline coefficients, the rows ``bs`` uses; SCOP only for a ``PSpline``
-declared with ``shape_engine="scop"`` or pickled before that option existed.
+The QP fits first-difference (monotone) or exact curvature rows on the raw
+B-spline coefficients, the rows ``bs`` uses. ``shape_engine="scop"`` names the
+engine 0.41.0 used: it warns and fits on the QP. A model fitted on SCOP still
+loads, predicts and reports from what it saved, and its refit goes to the QP.
 """
 
 from __future__ import annotations
 
+import copy
 import pickle
 import warnings
 from pathlib import Path
@@ -18,8 +19,8 @@ import pytest
 
 from superglm import Constraint, PSpline, Spline, SuperGLM, _roundoff, families
 from superglm.features._spline_build import shape_engine
+from superglm.features._spline_config import SCOPRetiredWarning
 from superglm.features.spline import BSplineSmooth
-from superglm.model.reml_execute import STEP_REML_TOL_DEFAULT
 from superglm.solvers import irls_direct
 from superglm.solvers.irls_direct import _qp as irls_direct_qp
 
@@ -108,89 +109,102 @@ def test_ps_default_engine_is_qp() -> None:
         assert getattr(model._specs["x"], "_scop_Sigma", None) is None
 
 
-# Master 973ca2cd's SCOP fit of ``_book("poisson")`` (``fit_reml``): deviance,
-# EDF, and the prediction at x = 0.5, 2.75, 5, 7.25, 9.5. They agree between
-# AVX-512 and Haswell kernels to 3e-15 relative; the same fit on the QP is
-# 4e-3 away in deviance. Agreement to the SCOP engine's stopping tolerance
-# (``STEP_REML_TOL_DEFAULT``, 1e-6) is therefore master's SCOP fit; another
-# kernel may stop a step earlier or later inside it.
-MASTER_SCOP = (
-    787.1287586104952,
-    4.449902735241759,
-    [
-        0.9994423789743592,
-        1.1924052181169178,
-        1.2016693636991418,
-        1.726399582876236,
-        3.5873923611520353,
-    ],
-)
+_DECLARATIONS = {
+    "PSpline": lambda **engine: PSpline(n_knots=8, constraint=Constraint.fit.increasing, **engine),
+    "Spline-ps": lambda **engine: Spline(
+        kind="ps", n_knots=8, constraint=Constraint.fit.increasing, **engine
+    ),
+    "Spline-bs": lambda **engine: Spline(
+        kind="bs", k=10, constraint=Constraint.fit.increasing, **engine
+    ),
+}
 
 
-@pytest.mark.parametrize("declare", ["PSpline", "Spline"])
-def test_ps_scop_opt_in(declare: str) -> None:
-    """``shape_engine="scop"`` fits on SCOP and reproduces master's SCOP fit."""
-    constraint = Constraint.fit.increasing
-    spec = (
-        PSpline(n_knots=8, constraint=constraint, shape_engine="scop")
-        if declare == "PSpline"
-        else Spline(kind="ps", n_knots=8, constraint=constraint, shape_engine="scop")
-    )
-    assert shape_engine(spec) == "scop"
+@pytest.mark.parametrize("declare", sorted(_DECLARATIONS))
+def test_shape_engine_scop_warns_once_and_fits_the_qp_fit(declare: str) -> None:
+    """``shape_engine="scop"`` is accepted with one visible warning and fits exactly the QP fit.
+
+    The warning is a ``UserWarning`` (Python shows it by default, unlike a
+    ``DeprecationWarning``), points at the declaring line, and says what
+    happened and how to silence it. Mutation checks: with the call in
+    ``warn_scop_retired`` removed, or its category a ``DeprecationWarning``,
+    the warning assertions fail; with ``PSpline`` storing ``"scop"`` instead
+    of ``"qp"``, the stored engine assertion fails.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        spec = _DECLARATIONS[declare](shape_engine="scop")
+    retired = [w for w in caught if issubclass(w.category, SCOPRetiredWarning)]
+    assert len(retired) == 1, [str(w.message) for w in caught]
+    warning = retired[0]
+    assert issubclass(warning.category, UserWarning)
+    assert not issubclass(warning.category, DeprecationWarning)
+    assert warning.filename == __file__
+    message = str(warning.message)
+    for part in ("retired", "QP engine", "0.41.0", "Drop shape_engine='scop'"):
+        assert part in message, message
+    assert getattr(spec, "shape_engine", "qp") == "qp" and shape_engine(spec) == "qp"
+
     model = _fit("poisson", spec)
-    assert _group(model).monotone_engine == "scop"
-    assert model._specs["x"]._scop_Sigma is not None
-    deviance, edf, prediction = MASTER_SCOP
-    grid = pd.DataFrame({"x": np.linspace(0.5, 9.5, 5)})
-    np.testing.assert_allclose(model.result.deviance, deviance, rtol=STEP_REML_TOL_DEFAULT)
-    np.testing.assert_allclose(model.result.effective_df, edf, rtol=STEP_REML_TOL_DEFAULT)
-    np.testing.assert_allclose(model.predict(grid), prediction, rtol=STEP_REML_TOL_DEFAULT)
+    reference = _fit("poisson", _DECLARATIONS[declare]())
+    assert _group(model).monotone_engine == "qp"
+    assert getattr(model._specs["x"], "_scop_Sigma", None) is None
+    grid = pd.DataFrame({"x": np.linspace(0.0, 10.0, 41)})
+    np.testing.assert_array_equal(model.predict(grid), reference.predict(grid))
+    assert model.result.effective_df == reference.result.effective_df
+    assert model.reml_diagnostics()["lambdas"] == reference.reml_diagnostics()["lambdas"]
 
 
-def test_shape_engine_scop_needs_a_p_spline() -> None:
-    with pytest.raises(ValueError, match="needs kind='ps'"):
-        Spline(kind="bs", k=8, constraint=Constraint.fit.increasing, shape_engine="scop")
-    with pytest.raises(ValueError, match="needs kind='ps'"):
-        Spline(k=8, constraint=Constraint.fit.increasing, shape_engine="scop")
-    with pytest.raises(ValueError, match="shape_engine must be one of"):
-        PSpline(constraint=Constraint.fit.increasing, shape_engine="sco")
+def test_saved_scop_model_predicts_and_reports_as_saved_and_refits_on_the_qp() -> None:
+    """A model 0.41.0 or earlier fitted on SCOP loads, predicts and reports from what it saved.
 
-
-def test_saved_scop_model_predicts_and_refits_on_scop() -> None:
-    """A P-spline saved before ``shape_engine`` existed predicts as saved and refits on SCOP.
-
-    Its fitted spec and the unfitted declaration a refit starts from both lack
-    the attribute, so both read the class default and stay on SCOP. Fails when
-    ``shape_engine`` sends that default to the QP.
+    Prediction scores through the saved SCOP transform (``_scop_Sigma``), and
+    the standard errors read the saved ``SCOPInferenceInfo``: the reference
+    here forms them from that covariance and the term's basis alone. Its
+    refit warns and goes to the QP, which drops the SCOP transform so the new
+    coefficients score through ``R_inv``. Mutation checks: without the
+    ``_scop_Sigma`` branch in ``_spline_runtime.transform`` the prediction
+    fails; without the ``scop_inference`` branch in ``state_ops`` the standard
+    errors fail; without ``_warn_if_saved_on_scop`` the warnings fail; without
+    ``clear_scop_state`` the rebuilt fitted spec keeps the old transform.
     """
     with open(SAVED_SCOP, "rb") as handle:
         record = pickle.load(handle)
     model, frame, y = record["model"], record["frame"], record["y"]
     fitted, declared = model._specs["x"], dict(model._config.feature_templates)["x"]
     assert "shape_engine" not in fitted.__dict__ and "shape_engine" not in declared.__dict__
-    assert shape_engine(fitted) == shape_engine(declared) == "scop"
+    assert fitted._scop_Sigma is not None
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+        warnings.simplefilter("error", SCOPRetiredWarning)  # loading and reading never warn
         assert_predicts_as_saved(model, frame, record["prediction"])
+        inference = model.term_inference("x")
+        model.summary()
+    group = _group(model)
+    covariance = np.asarray(model._solver_result.scop_inference.augmented_inverse)[1:, 1:]
+    covariance = covariance[group.start : group.end, group.start : group.end]
+    basis = fitted.transform(np.asarray(inference.x))
+    expected = np.sqrt(np.einsum("ij,jk,ik->i", basis, covariance, basis) * model.result.phi)
+    np.testing.assert_allclose(inference.se_log_relativity, expected, rtol=64 * np.finfo(float).eps)
+
+    # The fitted spec itself, rebuilt (as an editor or frozen-model refit does),
+    # warns, goes to the QP and scores through its new ``R_inv``.
+    x = frame["x"].to_numpy()
+    rebuilt = copy.deepcopy(fitted)
+    with pytest.warns(SCOPRetiredWarning, match="fitted on the SCOP shape engine"):
+        info = rebuilt.build(x)
+    assert info.monotone_engine == "qp" and getattr(rebuilt, "_scop_Sigma", None) is None
+    r_inv = np.random.default_rng(6).standard_normal((rebuilt._n_basis, info.n_cols))
+    rebuilt.set_reparametrisation(r_inv)
+    np.testing.assert_array_equal(rebuilt.transform(x), rebuilt._basis_matrix(x).toarray() @ r_inv)
+
+    with pytest.warns(SCOPRetiredWarning, match="fitted on the SCOP shape engine"):
         model.fit_reml(frame, y)
-    assert _group(model).monotone_engine == "scop"
-    assert model._specs["x"]._scop_Sigma is not None
-
-
-def test_stale_scop_state_cleared() -> None:
-    """A spec rebuilt on the QP after SCOP scores through its ``R_inv``, not the old SCOP basis.
-
-    Fails when the build keeps the ``_scop_*`` state a SCOP build left.
-    """
-    x = np.random.default_rng(5).uniform(0.0, 10.0, 200)
-    spec = PSpline(n_knots=6, constraint=Constraint.fit.increasing, shape_engine="scop")
-    assert spec.build(x).monotone_engine == "scop" and spec._scop_Sigma is not None
-    spec.shape_engine = "qp"
-    info = spec.build(x)
-    assert info.monotone_engine == "qp"
-    r_inv = np.random.default_rng(6).standard_normal((spec._n_basis, info.n_cols))
-    spec.set_reparametrisation(r_inv)
-    np.testing.assert_array_equal(spec.transform(x), spec._basis_matrix(x).toarray() @ r_inv)
+    refitted, group = model._specs["x"], _group(model)
+    assert group.monotone_engine == "qp" and group.constraints is not None
+    assert getattr(refitted, "_scop_Sigma", None) is None
+    np.testing.assert_array_equal(
+        refitted.transform(x), refitted._basis_matrix(x).toarray() @ refitted._R_inv
+    )
 
 
 @pytest.mark.parametrize("kind", ["increasing", "decreasing", "convex", "concave"])

@@ -352,59 +352,6 @@ class TestCIAtTheCertifiabilityWall:
         assert interval.lower == pytest.approx(1.45, abs=2e-3)
 
 
-class TestSCOPModeFailuresAreRoutable:
-    def test_a_scop_constrained_profile_search_completes(self):
-        """SCOP mode failures now raise the routable typed family instead of
-        bare RuntimeError, so a coupled search over a SCOP-constrained model
-        scores a failing candidate infeasible rather than dying. The healthy
-        path is pinned end-to-end here; the routing of the typed family is
-        pinned by the injection tests above."""
-        from superglm import Constraint
-
-        rng = np.random.default_rng(31)
-        n = 900
-        x = rng.uniform(0.0, 1.0, n)
-        eta = 0.9 * x - 0.6
-        y = np.where(rng.random(n) < 0.4, 0.0, rng.gamma(1.2, np.exp(eta) * 2.0, n))
-        frame = pd.DataFrame({"x": x})
-        features = {
-            "x": Spline(
-                kind="ps", n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"
-            )
-        }
-
-        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        result = model.estimate_p(frame, y, fit_mode="reml")
-
-        assert 1.05 < float(result.p_hat) < 1.95
-        assert np.isfinite(float(result.phi_hat))
-
-    def test_the_scop_certification_raise_is_typed_and_scored(self):
-        """The SCOP latent-mode certification failure carries its achieved
-        score like the observed-geometry gates, so a search formats a real
-        infeasibility reason instead of 'no mode found'."""
-        import superglm.reml.scop_efs as scop_module
-        from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
-
-        assert scop_module.ObservedModeNotCertifiedError is ObservedModeNotCertifiedError
-
-    def test_the_certification_failure_reports_the_metric_that_failed(self):
-        """The failing condition is mode_newton_relative > mode_tolerance,
-        but the exception carried mode_score.relative_max -- a deliberately
-        distinct metric. An ill-conditioned mode can hold a sub-threshold
-        componentwise score with an excessive Newton correction, so the
-        search's infeasibility reason and PublicationModeError claimed a
-        score that never exceeded the bar."""
-        from superglm.reml.scop_efs import _scop_certification_failure
-
-        exc = _scop_certification_failure(3.2e-5, 1e-8, 4.1e-12)
-
-        assert exc.relative_max == pytest.approx(3.2e-5)
-        assert exc.tolerance == pytest.approx(1e-8)
-        assert "componentwise" in exc.hint
-        assert "4.1e-12" in exc.hint
-
-
 class TestQPModeFailuresAreRoutable:
     def test_the_qp_infeasibility_raise_is_typed_and_routable(self, monkeypatch):
         """A QP candidate with no feasible mode (or no complete KKT

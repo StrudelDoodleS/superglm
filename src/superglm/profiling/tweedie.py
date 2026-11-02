@@ -170,10 +170,7 @@ class _PowerProfile:
 
     def _pirls_ratio(self) -> float:
         """The error ratio of the route a fit without a REML objective took."""
-        shaped = any(
-            group.constraints is not None or group.monotone_engine == "scop"
-            for group in self.clone._groups
-        )
+        shaped = any(group.constraints is not None for group in self.clone._groups)
         return _CANDIDATE_ERROR_RATIO if shaped or self.selecting else _SCORING_ERROR_RATIO
 
     def _prepare_ml(self, X, y, sample_weight, offset) -> None:
@@ -261,15 +258,6 @@ class _PowerProfile:
             # rank this power by.
             raise ObservedModeNotConvergedError(
                 "terminal constrained REML refit ended without a complete inner-QP KKT certificate"
-            )
-        if getattr(clone._reml_result, "termination_reason", None) == "bootstrap_uncertified":
-            # A shape-constrained fit published unconverged because no start of
-            # its bootstrap certified a coefficient mode has no REML objective to
-            # rank this power by: the power is infeasible, and the search routes
-            # around it.
-            raise ObservedModeNotConvergedError(
-                "SCOP REML bootstrap did not converge to a coefficient mode at any start",
-                infeasible_detail="no certified SCOP bootstrap mode",
             )
         # The clone follows the model's retain_fit_state; a released fit keeps
         # its coefficients but not its fitted mean.

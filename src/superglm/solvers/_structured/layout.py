@@ -365,8 +365,8 @@ def build_nested_structured_layout(
             raise ValueError(f"Nested chain group {group.name!r} is not a RandomEffect term.")
         if group.size != matrix.n_levels:
             raise ValueError(f"Nested chain group {group.name!r} slice does not match its levels.")
-        if group.constraints is not None or group.scop_reparameterization is not None:
-            raise ValueError(f"Nested chain group {group.name!r} carries constraints or SCOP.")
+        if group.constraints is not None:
+            raise ValueError(f"Nested chain group {group.name!r} carries constraints.")
         members[index] = matrix
     cache = {} if nesting_cache is None else nesting_cache
     key = ("nested_tree", chain, tuple((group.name, group.start, group.end) for group in groups))

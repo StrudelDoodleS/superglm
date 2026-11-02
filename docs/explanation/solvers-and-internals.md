@@ -1070,9 +1070,8 @@ largest.
   that the other directions cannot change the answer. Where it cannot confirm
   this, the fit factors every row instead.
 
-`metrics()` on rows, weights or offsets other than the fit's, a shape-constrained
-(SCOP) fit's published rank, and a fit's rebuilt inference state decide the
-data rank the same way.
+`metrics()` on rows, weights or offsets other than the fit's and a fit's
+rebuilt inference state decide the data rank the same way.
 
 On the freMTPL2 frequency book with ten interaction pairs, $p = 1535$. Of
 its 230 directions outside the data rank, 164 are read off the tables, and

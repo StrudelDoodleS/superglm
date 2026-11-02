@@ -15,7 +15,8 @@ so it runs unchanged on any release from v0.40.0.
 
 The corpus: SuperGLM over every built-in family and link, nine term kinds
 (mains, random effect, tensor pair, spline-by-category, ``fs`` and ``sz`` factor
-smooths, SCOP and QP monotone splines, ``select=True``), exact and binned, by
+smooths, monotone P-splines (the ``scop`` term) and QP monotone splines,
+``select=True``), exact and binned, by
 ``fit_reml`` and ``fit``, at three sizes (400 rows, 4,000 rows, 4,000 sparse
 rows); and every SuperLSS family, two predictor specs, exact and binned, both
 outer loops, at two sizes.  Each record holds the status (converged, not
@@ -74,12 +75,14 @@ CRITERION_CHANGES = {
 }  # fmt: skip
 # Term kinds (and history cases) whose engine changed in a release, keyed by that
 # release, compared as CRITERION_CHANGES are. From v0.42 a P-spline's fit-time
-# constraint fits on the QP unless it opts into SCOP: a different model, whose
-# criterion is not SCOP's. It is the ``scop`` term's, and history row 1's.
+# constraint fits on the QP, SCOP being retired: a different model, whose
+# criterion is not SCOP's. It is the ``scop`` term's, and history rows 1 and 2's.
 ENGINE_CHANGES = {
     (0, 42, 0): {
         "scop": "P-spline shape constraints on the QP",
         "convex-beside-cr": "P-spline shape constraints on the QP",
+        "kindless-mono-beside-ps": "P-spline shape constraints on the QP",
+        "kindless-mono-beside-ordcat-ps": "P-spline shape constraints on the QP",
     }
 }
 
@@ -150,8 +153,7 @@ HISTORY = {
 CASES = glm_cases() + lss_cases() + list(HISTORY)
 
 # Fits an earlier release converged that this one must too, held in every full
-# suite by ``tests/test_userspace_040.py`` (row 1 is held by its own test in
-# ``tests/test_scop_efs.py``).
+# suite by ``tests/test_userspace_040.py``.
 HISTORY_SUBSET = [
     "hist/r02/kindless-mono-beside-ps/exact",
     "hist/r03/small-n-150/exact",
@@ -534,16 +536,12 @@ def history_book(n: int):
 
 
 def history_terms(kind):
-    import inspect
 
     from superglm import Categorical, Constraint, Numeric, OrderedCategorical, Polynomial, Spline
 
     inc = Constraint.fit.increasing
-    # Row 2 is a kindless spline beside a SCOP P-spline. From the release that added
-    # ``shape_engine`` a P-spline's constraint fits on the QP unless it opts into SCOP.
-    scop = (
-        {"shape_engine": "scop"} if "shape_engine" in inspect.signature(Spline).parameters else {}
-    )
+    # Row 2 is a kindless spline beside a P-spline that 0.41.0 and earlier fitted on
+    # SCOP; from 0.42 every constraint fits on the QP.
     base = {
         "x1": Spline(kind="ps", k=10),
         "x2": Spline(kind="cr", k=8),
@@ -553,8 +551,8 @@ def history_terms(kind):
     return {
         "base": lambda: base,
         "convex_cr": lambda: {"x2": Spline(kind="ps", k=10, constraint=Constraint.fit.convex), "x1": Spline(kind="cr", k=8)},
-        "mono_kindless_ps": lambda: {"x4": Spline(constraint=inc), "x1": Spline(kind="ps", k=8, constraint=inc, **scop), "g": Categorical()},
-        "mono_kindless_ordcat": lambda: {"x4": Spline(constraint=inc), "o": OrderedCategorical(order=list("ABCDE"), basis=Spline(kind="ps", k=5, constraint=inc, **scop))},
+        "mono_kindless_ps": lambda: {"x4": Spline(constraint=inc), "x1": Spline(kind="ps", k=8, constraint=inc), "g": Categorical()},
+        "mono_kindless_ordcat": lambda: {"x4": Spline(constraint=inc), "o": OrderedCategorical(order=list("ABCDE"), basis=Spline(kind="ps", k=5, constraint=inc))},
         "edge": lambda: {"x1": Spline(kind="ps", k=10), "x4": Spline(kind="cr", k=8), "x3": Numeric(), "g": Categorical()},
         "select": lambda: {"x1": Spline(kind="ps", k=10, select=True), "x4": Spline(kind="cr", k=8, select=True), "x3": Spline(kind="cr", k=6, select=True)},
         "constant": lambda: {"x1": Spline(n_knots=8), "x4c": Spline(n_knots=5), "g": Categorical()},

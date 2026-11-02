@@ -282,6 +282,12 @@ def test_a_fit_an_earlier_release_converged_converges_here(name: str) -> None:
         record = {"status": "ok", **release_differential.run_case(name)}
     assert release_differential.sensible(record), record
     recorded = HISTORY_OUTCOMES[name]
+    if any(name.split("/")[2] in terms for terms in release_differential.ENGINE_CHANGES.values()):
+        # The row's shape constraint fitted on SCOP in v0.39.0 and fits on the QP
+        # here: a different fit of the same declaration, held converged and no
+        # worse on held-out rows rather than at the same objective.
+        assert release_differential.flags(name, recorded, record, "v0.39.0") == []
+        return
     scale = 1.0 + abs(recorded["objective"])
     assert abs(record["objective"] - recorded["objective"]) <= (
         release_differential.OBJECTIVE_TOLERANCE * scale

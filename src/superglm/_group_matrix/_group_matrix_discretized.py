@@ -254,6 +254,10 @@ class DiscretizedSSPGroupMatrix:
 class DiscretizedSCOPGroupMatrix:
     """Discretized SCOP group matrix: bin-level centered SCOP design.
 
+    The retired SCOP engine built this for a discrete fit, up to 0.41.0. It
+    stays so that a model saved with one loads and its saved design still
+    works; nothing builds one now.
+
     Stores the centered SCOP design matrix evaluated at bin centers ``(n_bins, q_eff)``
     plus a bin-index array ``(n,)`` mapping observations to bins.  SCOP terms bypass
     SSP reparametrisation, so there is no ``R_inv`` — the columns are already in

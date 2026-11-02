@@ -661,7 +661,6 @@ def test_reml_penalty_algebra_canonical():
 def test_reml_optimizer_canonical():
     from superglm.reml.direct import optimize_direct_reml  # noqa: F401
     from superglm.reml.discrete import optimize_discrete_reml_cached_w  # noqa: F401
-    from superglm.reml.efs import optimize_efs_reml  # noqa: F401
     from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian  # noqa: F401
     from superglm.reml.objective import reml_laml_objective  # noqa: F401
 

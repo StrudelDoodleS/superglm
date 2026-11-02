@@ -141,7 +141,7 @@ _AUTO_MIN_COEFFICIENT_WIDTH = 32
 # No chain is declined for its family, link, working rows or the machine's
 # memory: the chain factors signed observed rows (one-engine design §3.3), and
 # a leaf whose override couples it to the border takes gram by that structure
-# alone, as a constrained or SCOP term does.
+# alone, as a constrained term does.
 _AUTO_MAX_NESTED_COST_RATIO = 0.75
 _AUTO_NESTED_ROW_PASSES = 0.08
 # FactorSmooth and sum-to-zero blocks keep the August 2026 constant bound on the
@@ -370,11 +370,6 @@ def select_structured_group(
         if group.constraints is not None:
             return _selection_failure(
                 f"group {group.name!r} has coefficient constraints",
-                mode,
-            )
-        if group.scop_reparameterization is not None:
-            return _selection_failure(
-                f"group {group.name!r} has unsupported SCOP geometry",
                 mode,
             )
 

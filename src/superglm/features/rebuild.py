@@ -22,7 +22,6 @@ from typing import Any, NamedTuple, cast
 import numpy as np
 import pandas as pd
 
-from superglm.features._spline_build import shape_engine
 from superglm.features._spline_config import (
     SplineKindName,
     configure_knots,
@@ -591,7 +590,7 @@ def declared_spline(model, name: str) -> _SplineBase | None:
 
     An ordered term's declared basis; a numeric term's own declaration, which
     the model keeps unfitted in its configuration, or the ``ps`` the fit built
-    in its place where a kindless spline beside a SCOP term became one. None
+    in its place where a kindless spline became one. None
     for a term with no spline, or a model too old to keep its declarations.
     """
     spec = model._specs[name]
@@ -601,10 +600,7 @@ def declared_spline(model, name: str) -> _SplineBase | None:
     if not isinstance(declared, _SplineBase):
         return None
     declared = copy.deepcopy(declared)
-    if (
-        type(spec) is not type(declared)
-        and (as_ps := kindless_as_ps(declared, shape_engine(spec) or "qp")) is not None
-    ):
+    if type(spec) is not type(declared) and (as_ps := kindless_as_ps(declared)) is not None:
         return as_ps  # the fit built this kindless spline as ``ps``: the editor edits that
     return declared
 
@@ -734,8 +730,6 @@ def rebased_spline(
     if source.constraint_kind is not None:
         constraint = getattr(getattr(Constraint, source.constraint_mode), source.constraint_kind)
     orders = tuple(source._m_orders)
-    # A P-spline on SCOP stays on it as a P-spline; every other kind fits on the QP.
-    engine = "scop" if kind == "ps" and shape_engine(source) == "scop" else "qp"
     spline = Spline(
         kind=cast(SplineKindName, kind),
         n_knots=source.n_knots,
@@ -753,7 +747,6 @@ def rebased_spline(
         m=orders[0] if len(orders) == 1 else orders,
         lambda_policy=source._lambda_policy,
         polynomial_ranges=source.polynomial_ranges or None,
-        shape_engine=engine,
     )
     _carry_marks(source, spline)
     return spline

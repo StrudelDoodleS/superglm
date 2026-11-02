@@ -452,8 +452,7 @@ def random_effect_seed_lambda(
     = tr(A) / q``, the mean over the ``q`` levels, puts the typical level at
     1/2.  ``A`` carries the units of the prior weights, and of the response
     to the power ``2 - p`` under a log link with variance ``mu**p``, as the
-    REML optimum ``phi / sigma_b**2`` does, so the seed moves with them, as
-    ``_hessian_scaled_bootstrap_lambdas`` reasons for a SCOP block.
+    REML optimum ``phi / sigma_b**2`` does, so the seed moves with them.
     Returns None where the mean is not a positive finite number.
     """
     level_weight = np.asarray(group_matrix.rmatvec(information), dtype=np.float64)
@@ -566,8 +565,6 @@ def optimize_discrete_reml_cached_w(
     direct_solve: str = "auto",
     pirls_tol: float = 1e-6,
     max_pirls_iter: int = 100,
-    # Legacy kwargs accepted but ignored (removed in POI rewrite)
-    max_analytical_per_w: int = 30,
     select_snap: bool = True,
     reml_penalties: list[PenaltyComponent] | None = None,
     estimated_names: set[str] | None = None,

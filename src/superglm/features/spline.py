@@ -31,7 +31,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from superglm.features._spline_ranges import PolynomialRange
-    from superglm.solvers.scop import SCOPSolverReparam
 
 
 # A natural spline (``cr``, the default, or ``ns``) has no range to place its
@@ -563,17 +562,16 @@ class PSpline(_BSplineBase):
         Fit-time convexity/concavity is supported for degrees one through
         three; higher degrees require a ``Constraint.postfit.*`` token.
     shape_engine : {"qp", "scop"}
-        The engine for a fit-time shape constraint. ``"qp"`` (default) is
-        the path above. ``"scop"`` fits the shape-constrained P-spline
-        reparameterization of Pya and Wood (2015), whose smoothing
-        parameters ``fit_reml()`` estimates under the constraint with the
-        shape-aware SCOP REML / EFS path; a model cannot mix it with QP
-        constrained terms. A ``PSpline`` saved before this option existed
-        fits on SCOP, as it did then.
+        The engine for a fit-time shape constraint: ``"qp"``, the path above.
+        ``"scop"`` named the SCOP reparameterization (Pya and Wood, 2015),
+        which 0.41.0 fitted every shape-constrained P-spline on. It is
+        retired: the constraint fits on the QP with a ``UserWarning``, and so
+        does a ``PSpline`` saved on SCOP when it is refitted.
     """
 
-    # A spline pickled before ``shape_engine`` existed reads this: its release
-    # fitted every fit-time constrained P-spline on SCOP (``shape_engine()``).
+    # A spline pickled before ``shape_engine`` existed reads this: 0.41.0 and
+    # earlier fitted every fit-time constrained P-spline on SCOP, and its next
+    # build warns that it now fits on the QP (``_spline_build``).
     shape_engine: Literal["qp", "scop"] | None = None
 
     def __init__(
@@ -600,6 +598,8 @@ class PSpline(_BSplineBase):
             raise ValueError(
                 f"shape_engine must be one of {_spline_config.SHAPE_ENGINES}, got {shape_engine!r}"
             )
+        if shape_engine == "scop":
+            _spline_config.warn_scop_retired()
         super().__init__(
             n_knots,
             degree,
@@ -616,7 +616,7 @@ class PSpline(_BSplineBase):
             m=m,
             lambda_policy=lambda_policy,
         )
-        self.shape_engine = shape_engine
+        self.shape_engine = "qp"
 
     def _build_monotone_constraints_raw(self) -> LinearConstraintSet:
         """Build fit-time shape constraints on raw B-spline coefficients (the QP engine).
@@ -624,18 +624,6 @@ class PSpline(_BSplineBase):
         Returns constraints on K raw (pre-projection) coefficients.
         """
         return _spline_subclass_ops.build_shape_constraints_raw(self)
-
-    def _build_scop_reparameterization(
-        self, B: NDArray, omega: NDArray
-    ) -> tuple[NDArray, NDArray, SCOPSolverReparam]:
-        """Build SCOP reparameterization for a shape-constrained PSpline.
-
-        Returns (B_centered, S_scop, scop_reparam) where:
-        - B_centered: design matrix with SCAM-style centering (n, q_eff)
-        - S_scop: SCOP penalty matrix (first-difference on beta), (q_eff, q_eff)
-        - scop_reparam: solver-space SCOPSolverReparam
-        """
-        return _spline_subclass_ops.build_scop_reparameterization(self, B, omega)
 
     def _build_penalty_for_order(self, order: int) -> NDArray:
         return _spline_penalties.difference_penalty_for(self, order)
@@ -1109,8 +1097,8 @@ def Spline(
     cubic and refuse a ``degree`` other than 3, and take penalty orders ``m`` up
     to 3 and 2; pass ``kind="ps"`` (or ``"bs"`` for another degree) beyond
     those. A spline with no kind that ``cr`` cannot serve (a ``degree`` other
-    than 3, a penalty order above 3, or a shape constraint beside a ``ps``
-    one on SCOP) builds as ``"ps"``, as before 0.40, with a ``UserWarning``;
+    than 3 or a penalty order above 3) builds as ``"ps"``, as before 0.40,
+    with a ``UserWarning``;
     pass ``kind=`` to choose and silence it.
 
     ``polynomial_ranges`` (``kind="bs"`` or ``"cr"`` only) pins the curve to a
@@ -1118,7 +1106,8 @@ def Spline(
     penalised smooth.
 
     A fit-time shape constraint fits on the QP for every kind.
-    ``shape_engine="scop"`` (``kind="ps"`` only) fits it on SCOP instead; see
+    ``shape_engine="scop"`` names the retired SCOP engine: it is accepted
+    with a ``UserWarning`` and the constraint fits on the QP; see
     :class:`PSpline`.
     """
     return cast(

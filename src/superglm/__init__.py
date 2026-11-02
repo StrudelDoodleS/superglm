@@ -218,7 +218,6 @@ def warmup() -> None:
     from superglm.solvers._exact_sums import _warmup_exact_sums
     from superglm.solvers._structured.block_leaves import _warmup_factor_smooth
     from superglm.solvers._structured.leaf_kernels import _warmup_leaf_kernels
-    from superglm.solvers.scop_newton import _warmup_scop
 
     _warmup_tweedie()
     _warmup_tweedie_series()
@@ -233,7 +232,6 @@ def warmup() -> None:
     _warmup_gamma()
     _warmup_declared_bounds()
     _warmup_negative_binomial()
-    _warmup_scop()
     _warmup_leaf_kernels()
     _warmup_factor_smooth()
     from superglm._numba_compile import forget_compiles

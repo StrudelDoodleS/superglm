@@ -1483,38 +1483,6 @@ def test_a_probit_row_past_the_binomial_clip_takes_fishers_curvature():
     assert abs(alpha[1] - exact) <= 4 * 16 * u / tail * abs(exact)
 
 
-@pytest.mark.parametrize("family", ["gamma", "poisson"])
-def test_a_scop_curve_bounds_the_gap(family):
-    """A monotone P-spline fitted through its exponential reparametrisation.
-
-    Its coefficients are an exponential map of the fitted ones, so even under
-    a canonical link the fit moves with a full-Newton curvature that neither
-    its covariance nor the observed rebuild reads: where the shape bends, the
-    curve's pull came out wrong.
-    """
-    rng = np.random.default_rng(12)
-    k = np.repeat(np.arange(12), 50)
-    mu = np.exp(1.0 + 0.05 * k)
-    y = mu * rng.gamma(4.0, 0.25, k.size) if family == "gamma" else rng.poisson(mu).astype(float)
-    X = pd.DataFrame({"band": np.array(TWELVE)[k]})
-    band = OrderedCategorical(
-        order=TWELVE,
-        basis=Spline(
-            kind="ps", n_knots=6, constraint=Constraint.fit.increasing, shape_engine="scop"
-        ),
-    )
-    model = SuperGLM(family=family, link="log", features={"band": band}, spline_penalty=5.0).fit(
-        X, y
-    )
-    assert model._solver_pirls_result().scop_inference is not None
-    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y)), "band")
-    assert free["notice"] == (
-        "Each interval allows for any correlation between the curve and the free estimate, "
-        "without the curve's pull toward the level: a shape-constrained P-spline in the model "
-        "is fitted through a transformation the comparison does not follow."
-    )
-
-
 def test_a_flat_curve_beside_a_band_of_almost_no_weight_flags_nothing():
     """A flat increasing curve over a band of weight 1e-16.
 

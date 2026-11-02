@@ -233,8 +233,7 @@ def _resolve_power_request(
 def _publication_reml_budget(max_reml_iter, publish_mode: str, fit_mode) -> int | None:
     """Outer-iteration budget of the REML publication refit; candidate fits keep their own.
 
-    ``None`` stays ``None``: the refit resolves it per engine, as ``fit_reml``
-    does (20 for the Newton engines, 100 for the SCOP engine).
+    ``None`` stays ``None``: the refit resolves it as ``fit_reml`` does (20).
     """
     if max_reml_iter is None:
         return None
