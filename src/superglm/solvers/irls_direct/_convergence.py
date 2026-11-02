@@ -29,27 +29,18 @@ class _IRLSDirectConvergence:
     3. the inner QP's KKT veto on a constrained fit's retained state, then the
        termination reason (``_terminate``).
 
-    The verdict is the fit's: ``converged_this_iter``, ``score_stagnated``,
-    ``termination_reason``, the rule's numbers ``convergence_label``,
-    ``convergence_value`` and ``convergence_tolerance`` (the judge's when it
-    decides), and ``coef_change`` and ``dev_rel_change``.  The loop, the
-    recorder and the finalisation read them there.  The rule keeps what
-    lasts across iterations: the mode score's ratios, its last residual
-    (``last_mode_residual``, which the recorder publishes), and the
-    stagnation window, which the judge's refused stops use too.
-
-    It is not pure: the criterion switches the fit's curvature to Newton
-    steps (``_IRLSDirectCurvaturePolicy.switch_to_newton``), and the judge
-    may engage the mean space's Newton steps; the next iteration's working
-    rows and step read both.  It keeps no reference to the fit, whose state
-    each method is handed.
+    The verdict is written to the fit (``converged_this_iter``,
+    ``termination_reason``, ``convergence_value`` and the rest).  The rule
+    keeps what lasts across iterations: the mode score's ratios, its last
+    residual and the stagnation window.  It is not pure: the criterion may
+    switch the fit's curvature to Newton steps, and the judge may engage the
+    mean space's Newton steps.  It keeps no reference to the fit.
     """
 
     __slots__ = ("stagnation_window", "_mode_ratios", "last_mode_residual")
 
     def __init__(self, max_iter: int, mode_bar: float) -> None:
-        # the iterations over which a resolved score must at least halve
-        # (``mode_score.stagnation_window``)
+        # iterations over which a resolved score must at least halve
         self.stagnation_window = stagnation_window(max_iter, mode_bar)
         # the certificate ratio at every iterate of a mode_score solve, for the
         # stagnation stop
@@ -65,7 +56,7 @@ class _IRLSDirectConvergence:
         self._terminate(fit, it)
 
     def _criterion(self, fit: _IRLSDirectFit, it: int) -> None:
-        """The criterion the fit's ``convergence`` names, then the step-rejected veto (L16).
+        """The criterion the fit's ``convergence`` names, then the step-rejected veto.
 
         - ``"mode_score"``, once a step has set the score's centre: the
           certificate's relative score against the bar, the stagnation stop,
@@ -90,11 +81,9 @@ class _IRLSDirectConvergence:
         fit.convergence_tolerance = tol
         if np.isfinite(fit.dev):
             if convergence == "mode_score" and fit._score_centre is not None:
-                # One-engine design §3.8: stop on the certificate's own score,
-                # in centred coordinates over the identified coefficients,
-                # once it meets the bar the certificate reads (no margin: the
-                # certificate is this residual, ``mode_score``).  The step
-                # length, with its raw intercept, is only reported.
+                # Stop on the certificate's own score (centred coordinates,
+                # identified coefficients) once it meets the bar, with no
+                # margin.  The step length is only reported.
                 coef_change = float(
                     np.max(np.abs(beta - beta_prev) / np.maximum(1.0, np.abs(beta)), initial=0.0)
                 )
@@ -105,9 +94,8 @@ class _IRLSDirectConvergence:
                 converged_this_iter = residual.ratio() <= 1.0
                 _last_mode_residual = residual
                 _mode_ratios.append(residual.ratio())
-                # The score stopped contracting (``stagnation_window``):
-                # the iterate is at its limiting accuracy, so the solve ends
-                # uncertified and the caller discloses it.
+                # A score that stopped contracting is at its limiting accuracy:
+                # the solve ends uncertified and the caller discloses it.
                 score_stagnated = (
                     not converged_this_iter
                     and residual.resolved
@@ -128,10 +116,8 @@ class _IRLSDirectConvergence:
                         )
                     )
                 ):
-                    # Fisher scoring near the mode contracts too slowly to
-                    # meet the bar in the budget, or not at all (the comment
-                    # at ``_IRLSDirectCurvaturePolicy``): the iterations left
-                    # take Newton steps on the observed information.
+                    # Fisher scoring near the mode contracts too slowly to meet
+                    # the bar in the budget: the rest take Newton steps.
                     curvature.switch_to_newton(fit.recorder)
                     score_stagnated = False
                     switched_curvature = True
@@ -144,26 +130,14 @@ class _IRLSDirectConvergence:
                     and retained.centred_intercept == committed.centred_intercept
                     and np.array_equal(beta, beta_prev)
                 ):
-                    # The full step left the state bitwise where it was: the
-                    # iteration is a deterministic map at a float64 fixed
-                    # point, and every further iteration repeats this one
-                    # (the step-tolerance stop of Dennis & Schnabel 1996,
-                    # section 7.2, at its strictest).  A centred state is
-                    # ``(alpha, beta)``, and the raw intercept only its
-                    # reading, which rounds ``alpha - c' beta`` at ``|c' beta|``
-                    # and can hold still while ``alpha`` moves, so ``alpha``
-                    # is compared too (``None`` on both sides otherwise).  An
-                    # iteration that has just changed the map (the Newton
-                    # switch above) is not one: the next iteration takes the
-                    # other step.  A fixed point ends the solve, with the
-                    # floors resolved whatever the relative score: where
-                    # the residuals are at the rounding of the fitted values
-                    # (a model that fits its response exactly, as a linear
-                    # model can) the score's own scale ``sum |s|`` is
-                    # rounding too, the relative score sits near 1 and the
-                    # resolve cap would never let the floor be read.  A score
-                    # within its floor is certified; one above it is the
-                    # limiting accuracy, published as not converged.
+                    # A full step that left the state bitwise unchanged is a
+                    # float64 fixed point: the step-tolerance stop of Dennis &
+                    # Schnabel (1996, section 7.2) at its strictest.  The centred
+                    # intercept is compared too, since the raw one can round
+                    # still while it moves.  The floors are resolved whatever
+                    # the relative score (an exact fit's score scale is itself
+                    # rounding); within its floor the score is certified, above
+                    # it the fit is published as not converged.
                     residual = fit.mode_residual(
                         beta,
                         intercept,
@@ -218,7 +192,7 @@ class _IRLSDirectConvergence:
         fit.score_stagnated, self.last_mode_residual = score_stagnated, _last_mode_residual
 
     def _terminate(self, fit: _IRLSDirectFit, it: int) -> None:
-        """The inner QP's KKT veto on a constrained fit, then the termination reason (L18).
+        """The inner QP's KKT veto on a constrained fit, then the termination reason.
 
         The certificate stands for primal feasibility too: the inner QP
         certifies a solve only where its own feasibility test passes at the
@@ -232,11 +206,8 @@ class _IRLSDirectConvergence:
         constraints_feasible_this_iter = True
         if qp is not None:
             constraints_feasible_this_iter = qp.feasible(fit.beta)
-            # Outer coefficient/deviance stagnation cannot replace the inner
-            # QP's certificate of stationarity, dual and primal feasibility.
-            # Keep iterating while budget remains: a later full QP proposal may
-            # still obtain the missing certificate, or repair an infeasible
-            # warm start.
+            # Outer stagnation cannot replace the inner QP's KKT certificate;
+            # keep iterating while budget remains.
             if not qp.retained_converged:
                 converged_this_iter = False
 

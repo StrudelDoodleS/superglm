@@ -1,14 +1,8 @@
-"""The direct IRLS fit's finalisers: what each returns, and the centred one four steps name.
+"""The direct IRLS fit's finalisers and what they return (``_IRLSDirectFinalGeometry``).
 
-After the loop and its shared blocks (``_IRLSDirectFit._finish``, the step's
-``terminal`` and the export rows), the fit runs the finaliser its step names
-(``_IRLSDirectStep.finalise``) and publishes what it returns, an
-``_IRLSDirectFinalGeometry``.  There are two.  The structured step's is its own
-(``_IRLSDirectStructuredStep.finalise``): the block-form moments and the
-profiled factor.  The QR, dense and QP steps name the centred one here
-(``_finalise_centred``): the centred system of the export rows, its slope
-decomposition and ``RankInfo``, on a constrained fit's active face (the QP
-step's binding rows, ``_active_face_basis``).
+The structured step has its own finaliser; the QR, dense and QP steps share
+``_finalise_centred``: the export rows' centred system, its slope
+decomposition and ``RankInfo``, on a constrained fit's active face.
 """
 
 from __future__ import annotations
@@ -146,14 +140,10 @@ def _face_decomposition(
 ) -> RankDecomposition:
     """``Z' M Z`` decomposed as ``M`` is: its Gram when authoritative, else ``factor() Z``.
 
-    ``M`` is a computed Gram of ``rows`` rows with nonnegative weights, plus a
-    penalty, so a negative eigenvalue or diagonal of ``Z' M Z`` past the
-    eigensolver's resolution, or a diagonal at zero beside a nonzero entry in
-    its row, is the rounding of forming ``M`` and not curvature
-    (``psd_by_construction``).  Nor can a Gram whose formation may have moved
-    it by its smallest eigenvalue certify its spectrum
-    (``_face_formation_unresolved``), even when it factors.  Both happen when
-    weights of ``1e15`` meet a face they do not reach, and the factor decides.
+    ``M`` is PSD by construction (a nonnegative-weight Gram plus a penalty), so
+    an indefinite ``Z' M Z`` is formation rounding, not curvature.  That, or a
+    formation error reaching its smallest eigenvalue
+    (``_face_formation_unresolved``), hands the decision to the factor.
     """
     on_face = _on_face(matrix, face)
     decomposition = decompose_gram_if_authoritative(on_face, psd_by_construction=True)
@@ -171,10 +161,7 @@ def _face_formation_unresolved(matrix: NDArray, face: NDArray, on_face: NDArray,
     r_k r_l`` of its exact value, ``r = |Z|' sqrt(diag M)``:
     ``rank._formation_slack`` bounds that in ``Z' M Z``'s Jacobi scaling.  By
     Weyl's inequality a bound that reaches the smallest eigenvalue there
-    leaves the exact face Gram's definiteness, and its inverse, undecided.  A
-    face that combines columns without cancelling them has ``r_k^2`` near
-    ``(Z' M Z)_kk`` and a bound of order ``gamma_rows``; one that cancels
-    curvature the weights put off it has ``r_k^2`` up to their ratio larger.
+    leaves the exact face Gram's definiteness undecided.
     """
     diagonal = np.diag(on_face)
     active = diagonal > 0.0
@@ -190,40 +177,21 @@ def _face_formation_unresolved(matrix: NDArray, face: NDArray, on_face: NDArray,
 def _face_factor_edf(rows: NDArray, penalty: NDArray, face: NDArray) -> tuple[NDArray, NDArray]:
     """``diag(F)`` and ``diag(2F - F^2)``, ``F = Z M Z'``: the face fit's EDF and ``edf1``.
 
-    Both are read off the data rows projected on the face ``Z``.
+    ``rows`` is ``R`` with ``R'R = Z'DZ`` (``grouped_projected_factor``), so
+    ``B = [R; P Z]``, ``P = penalty_factor(S)``, factors the face Hessian
+    without forming it, and ``M = B^+ [R; 0]``.  The trace is the influence
+    trace from orthogonal factors (Wood 2011; Fasiolo et al. 2020, supplement
+    B); ``edf1`` is Wood (2013, section 2.4).
 
-    ``rows`` is ``R`` with ``R'R = Z'DZ``: the data rows projected on the face
-    and then factored (``grouped_projected_factor``).  With ``P =
-    penalty_factor(S)``, ``B = [R; PZ]`` factors the face Hessian ``Z'(D +
-    S)Z``, and neither ``D`` nor the Hessian is formed.  The face fit is the
-    fit on ``beta = Z theta`` (``_active_face_basis``), and ``Z M Z'``, ``M =
-    B^+ [R; 0] = (Z'(D + S)Z)^+ Z'DZ``, maps its own unpenalized estimate to
-    its penalized one.  Its trace is ``||U_R||_F^2``, the data rows' share of
-    ``B``'s left singular vectors, in ``[0, rank B]``: the influence trace
-    from orthogonal factors, as Wood (2011) computes it (Fasiolo et al. 2020,
-    supplement B, in his notation).  The diagonal sums to it.  ``edf1`` is
-    Wood's alternative EDF, ``diag(2F - F^2)`` (Wood 2013, section 2.4), off
-    the same ``F``.
-
-    Two choices make this trace the rows' own.
-
-    - **The rows are projected before they are factored.**  A Householder
-      factor of the whole design is backward stable only columnwise (Higham
-      2002, section 19.3); row-wise stability needs row pivoting or rows
-      sorted by size (section 19.4; Cox and Higham 1998).  Under weights far
-      apart, its light rows can carry an error of order ``u`` times the
-      heaviest column, and that is all of the face's curvature when the face
-      cancels the heavy rows.
-      ``R`` factors the rows ``AZ`` formed one row at a time, each entry
-      within ``gamma_(p + T + 3) |a_r|' |Z|`` of the exact projection.
-    - **``Z M Z'`` leaves out the coupling to the curvature off the face.**
-      That coupling is ``Z (Z'(D + S)Z)^+ Z'D Z_perp Z_perp'``, the
-      difference from the split ``diag(Z (Z'(D + S)Z)^+ Z'D)``.  Its trace is
-      zero, and so is its diagonal's sum over each term, because the binding
-      rows of a term touch only that term's coefficients.  So it moves no
-      term's EDF, and the same holds for ``edf1``.  But weights far apart
-      make its entries as large as their ratio, up to ``1e15``, where
-      float64 cannot resolve them.
+    - The rows are projected before they are factored: Householder QR is
+      backward stable only columnwise (Higham 2002, sections 19.3-19.4), so
+      under weights far apart a light face's curvature would be lost to the
+      heavy rows.  Each projected entry is within ``gamma_(p + T + 3) |a_r|'
+      |Z|`` of exact (one inner product per entry).
+    - ``Z M Z'`` omits the coupling to curvature off the face: it has zero
+      trace per term, since a term's binding rows touch only its own
+      coefficients, but entries up to the weight ratio, unresolvable in
+      float64.
     """
     projected = np.vstack((rows, penalty_factor(penalty) @ face))
     decomposition = decompose_factor(projected, retain_factor_solve=True)
@@ -243,40 +211,19 @@ def _feature_edf(
 ) -> tuple[NDArray, NDArray | None]:
     """``diag((D + S)^+ D)``: each coefficient's effective degrees of freedom, and its ``edf1``.
 
-    On an active face ``Z`` (``_active_face_basis``), ``decomposition``
-    factors ``Z'(D + S)Z`` and the diagonal is ``diag(Z (Z'(D + S)Z)^+ Z'
-    D)``, whose trace is the face fit's.  When the factor decided that
-    decomposition (``_face_decomposition``), the Gram's formation rounding
-    can be as large as the face's own entries, and ``D`` is as unreliable as
-    the Hessian it was formed with.  The EDF is then the face fit's own,
-    read off the face's projected data rows ``factor(0)``
-    (``_face_factor_edf``), and so is its ``edf1``.  Everywhere else
-    ``edf1`` is ``None``: inference forms it from the data Gram
-    (``state_ops._rank_edf1``).
+    ``D`` is the centred data Gram, ``S`` the penalty; on an active face ``Z``
+    the diagonal is ``diag(Z (Z'(D + S)Z)^+ Z'D)``.  Where the factor decided
+    the face decomposition, ``D`` is as unreliable as the Hessian, so the EDF
+    and ``edf1`` are read off the projected data rows ``factor(0)``
+    (``_face_factor_edf``); elsewhere ``edf1`` is ``None``.
 
-    ``D`` is the centred data Gram and ``S`` the penalty, ``D + S`` the
-    Hessian ``decomposition`` factors.  The trace is invariant under scaling
-    ``D`` and ``S`` jointly by one constant, but the pseudo-inverse is not: at
-    a data scale ``s`` its entries are of order ``1 / s``, which overflows
-    once ``s`` falls below ``1 / max float``, about 5.6e-309 (subnormal
-    weights give ``s ~ 1e-317``).  The unscaled trace is formed first and,
-    when every entry is finite, returned as it is: the unscaled computation,
-    bit for bit, with no scan of the Hessian.  Otherwise the pseudo-inverse
-    overflowed, and ``D`` and ``S`` are multiplied by the one power of two
-    that brings the Hessian's largest entry into ``[1/2, 1)``, exact for
-    normal and subnormal entries alike, and the scaled Hessian is factored
-    again (``factor(exponent)`` when its Gram is not authoritative, read on a
-    face as ``_face_factor_edf`` reads it).  Both
-    are positive semidefinite, so ``|S_ij| <= sqrt(S_ii S_jj) <= max diag(D
-    + S)``: the scaled penalty is at most 1 and cannot overflow; a penalty
-    that dominates the data leaves ``D``'s scaled entries small and the
-    trace near its limit, 0.  ``factor(exponent)`` holds the rows at a scale
-    of ``2^-exponent``.  Off a face, it is the augmented factor ``[F_D; P]``
-    of ``D`` and ``S``.  On a face it is the data rows projected on it and
-    factored, ``R'R = Z'DZ`` (``grouped_projected_factor``), and the penalty
-    is never among them.  ``inverse`` is
-    ``face_pseudo_inverse(decomposition, face)`` when the caller has formed
-    it already.
+    The pseudo-inverse overflows at data scales below ``1 / max float``
+    (subnormal weights).  If the unscaled diagonal is not finite, ``D`` and
+    ``S`` are scaled by the power of two that brings the Hessian's largest
+    entry into ``[1/2, 1)`` (exact) and refactored; PSD gives ``|S_ij| <=
+    max diag(D + S)``, so the scaled penalty cannot overflow.
+    ``factor(exponent)`` gives the rows at scale ``2^-exponent``; ``inverse``
+    is ``face_pseudo_inverse(decomposition, face)`` when already formed.
     """
     if face is not None and decomposition.method == "qr_svd":
         return _face_factor_edf(factor(0), centered.penalty, face)
@@ -321,24 +268,13 @@ def _retained_rank_info(
 ) -> RankInfo:
     """The data-subspace metadata only retained-fit inference reads.
 
-    A pure function of this fit's final centred system and
-    weights, so it is the same whether it runs here or, for a
-    caller that does not yet know whether this fit is the one it
-    publishes (``_defer_rank_info``), after the solve returns.
-
-    Owner and lifetime: the caller's model, from the solve until
-    ``fit_ops._install_deferred_rank_info`` runs it or the next
-    REML attempt drops it. The centred system, weights, augmented
-    decomposition and EDF are bound by ``partial`` with the design
-    (``dm``, read by the data-rank factor route), which is read when it
-    runs, so the invariant is that nothing mutates the design's group
-    matrices in place in between (``update_reml_r_inv`` writes the
-    specs; ``release_leaf_memo`` drops a memo only). A step's own data
-    rank (``step_data_rank``, the QR step's on its dense design) is never
-    deferred (``_finalise_centred``), so no step is kept.  It is never a
-    method of the fit object, which it would keep alive (#492).  A
-    constrained fit's active face (``face``, its binding rows ``face_rows``
-    and the face's augmented decomposition ``face_rank``) is bound with them.
+    A pure function of the final centred system and weights, so it may run
+    here or be deferred (``_defer_rank_info``) until the caller knows this fit
+    is the one it publishes.  Owner and lifetime of a deferred call: the
+    caller's model, until ``fit_ops._install_deferred_rank_info`` runs it or
+    the next REML attempt drops it.  It reads ``dm`` when it runs, so nothing
+    may mutate the design's group matrices in place in between.  Never a
+    method of the fit, which it would keep alive (#492).
     """
     M_beta = centered_final.hessian + centered_final.sum_w * np.outer(
         centered_final.mean_x, centered_final.mean_x
@@ -425,16 +361,13 @@ def _retained_rank_info(
 
 
 def _final_centred_system(fit: _IRLSDirectFit) -> tuple[CenteredSystem, NDArray, NDArray]:
-    """F08 and F09: the retained model's centred system, its raw ``X'WX`` and ``X'W1``, and ``cache_out``.
+    """The retained model's centred system, its raw ``X'WX`` and ``X'W1``, and ``cache_out``.
 
-    The export rows' system through the fit's centred system and its caches;
-    an fREML performance iteration (``_return_working_system``) takes the
+    An fREML performance iteration (``_return_working_system``) takes the
     system its last step solved.
     """
     _return_working_system, W, cache_out = fit._return_working_system, fit.W, fit.cache_out
     dm = fit.dm
-    # Preserve the raw coefficient-space payload used by REML separately from
-    # the centered inference system.
     if _return_working_system:
         if fit._last_working_centered is None:
             raise RuntimeError("working centered system was not computed")
@@ -451,22 +384,18 @@ def _final_centred_system(fit: _IRLSDirectFit) -> tuple[CenteredSystem, NDArray,
     XtWX, XtW1, XtWz, sum_Wz = centered_final.raw_weighted_moments()
     sum_W = centered_final.sum_w
 
-    # Cache final-iteration raw and stable centered quantities for the cached-W
-    # fREML optimizer. These allow re-solving the profiled-intercept system with
-    # a new penalty matrix S without any data passes (O(p³), not O(n·K²)).
+    # The cached-W fREML optimizer re-solves the profiled system for a new
+    # penalty from these, with no data pass (O(p^3), not O(n K^2)).
     if cache_out is not None:
         cache_out["XtWX"] = XtWX
         cache_out["centered_XtWX"] = centered_final.data_gram
         # the pair the Gram was centred about (``(mean_x, None)`` without a dense column)
         cache_out["centre_pair"] = centered_final.centre_pair()
-        # mean_x less the state's centre, formed on centred rows: a cached
-        # trial's centred intercept (``reml.discrete``) reads it
+        # mean_x less the state's centre, for a cached trial's centred intercept
         cache_out["centre_offset_mean"] = offset_mean_final
-        # the matrix the slope decomposition was taken of (the identified
-        # part of the Laplace approximation restricts it, ``reml.identified``)
+        # the matrix the slope decomposition was taken of (``reml.identified``)
         cache_out["centered_hessian"] = centered_final.hessian
-        # the rows its Gram summed: its formation bound's length
-        # (``reml.discrete._profiled_formation_error``)
+        # the rows its Gram summed, the length of its formation bound
         cache_out["n_rows"] = int(dm.n)
         cache_out["XtWz"] = XtWz
         cache_out["XtW1"] = XtW1
@@ -479,25 +408,20 @@ def _final_centred_system(fit: _IRLSDirectFit) -> tuple[CenteredSystem, NDArray,
 
 
 def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirectFinalGeometry:
-    """The centred finaliser, the ``finalise`` the QR, dense and QP steps name (F08 to F11).
+    """The finaliser the QR, dense and QP steps share.
 
-    The retained model's centred system (``_final_centred_system``), then its
-    profiled slope decomposition, ``log det H``, the REML summary, the EDF
-    and ``RankInfo``, computed here or deferred (``_retained_rank_info``).  A
-    constrained fit's statistics are its active face's: the face of the rows
-    the QP step reads as binding at the fit (``binding_rows``).  A
-    step's own data rank (``data_rank``, the QR step's on its dense design) is
-    computed here, never deferred, so no deferred callable keeps the step.
+    The retained centred system, its profiled slope decomposition, ``log det
+    H``, the REML summary, the EDF and ``RankInfo`` (computed here or
+    deferred).  A constrained fit's statistics are its active face's.  A
+    step's own data rank is computed here, never deferred, so no deferred
+    callable keeps the step.
     """
     centered_final, XtWX, XtW1 = _final_centred_system(fit)
     W, dm = fit.W, fit.dm
     _defer_rank_info = fit._defer_rank_info
-    # REML works in the full (intercept, slopes) coefficient space.  Profiling
-    # the unpenalized intercept yields the centered Schur complement H_c.  Its
-    # inverse is the slope block of H_aug^{-1}, while the unit-determinant
-    # centering transform gives log|H_aug| = log(sum(W)) + log|H_c| at full
-    # rank. With aliases, the same expression is the retained centered-space
-    # determinant measure, not the raw augmented pseudo-determinant.
+    # Profiling the intercept gives the Schur complement H_c, whose inverse is
+    # the slope block of H_aug^-1 and log|H_aug| = log(sum W) + log|H_c|.  With
+    # aliases this is the centred-space measure, not the raw pseudo-determinant.
     _t0 = time.perf_counter()
     reml_geometry_summary: REMLGeometrySummary | None = None
     XtWX_beta = XtWX
@@ -600,9 +524,8 @@ def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirect
         )
 
         if fit.compute_rank_info or (_defer_rank_info is not None and step_data_rank is not None):
-            # A deferred step's own data rank would keep the step, and the
-            # QR step's dense (n, p) design, alive until install; it is
-            # computed here.
+            # Deferring a step's own data rank would keep the step (and the QR
+            # step's dense design) alive until install.
             rank_info = retained_rank_info()
         else:
             rank_info = None
