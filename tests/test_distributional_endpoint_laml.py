@@ -2289,8 +2289,9 @@ def _independent_penalty_efs_fit(
     max_iterations: int = 8,
     starting_lambdas: tuple[float, ...] | None = None,
     overlap: bool = False,
+    family: object | None = None,
 ):
-    family = _UnitGaussian()
+    family = _UnitGaussian() if family is None else family
     penalty_labels = ("first", "second", "third")[: len(response)]
     column_labels = (*penalty_labels, "retained")
     response_array = np.asarray((*response, 0.0), dtype=np.float64)
@@ -2374,19 +2375,35 @@ def _independent_penalty_efs_fit(
     return layout, smoothing, authority_faces
 
 
+@pytest.mark.parametrize(
+    ("family_factory", "authority"),
+    [
+        (_UnitGaussian, "joint-analytic-observed-curvature-direction/v1"),
+        (
+            _UnitGaussianWithoutCurvatureDirection,
+            "joint-finite-difference-curvature-direction/v1",
+        ),
+    ],
+)
 def test_efs_activates_two_independent_cap_components_as_one_joint_face(
     monkeypatch: pytest.MonkeyPatch,
+    family_factory: type,
+    authority: str,
 ) -> None:
     layout, smoothing, authority_faces = _independent_penalty_efs_fit(
         monkeypatch,
         (0.5, 0.5),
+        family=family_factory(),
     )
 
     transition = next(item for item in smoothing.history if item.activated_face_components)
     assert transition.activated_face_components == layout.penalty_names
     assert len(transition.coefficient_fit_indices) == 1
     assert transition.accepted_fit_index == transition.coefficient_fit_indices[0]
-    assert isinstance(transition.endpoint_direction_evidence, JointEndpointDirectionEvidence)
+    joint = transition.endpoint_direction_evidence
+    assert isinstance(joint, JointEndpointDirectionEvidence)
+    assert joint.authority_identifier == authority
+    assert joint._derived_authority_matches()
     assert tuple(
         authority_faces[id(smoothing.coefficient_fits[index].terminal_rank)]
         for index in transition.coefficient_fit_indices
