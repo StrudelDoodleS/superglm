@@ -77,6 +77,7 @@ from superglm.distributional.posterior import (
     posterior_predictive,
 )
 from superglm.distributional.predictor import Predictor
+from superglm.distributional.rebuild import clone_with_replaced_terms, fit_settings, replay_fit
 from superglm.distributional.residuals import ResidualKind, ResidualSet, compute_residuals
 from superglm.distributional.results.endpoint_evidence import EFSConvergenceReason
 from superglm.distributional.results.fit import DistributionalFitResult
@@ -413,6 +414,9 @@ class SuperLSS:
     frames must contain the declared columns.
     """
 
+    # The keywords of the last fit() or fit_reml() call; see `rebuild.fit_settings`.
+    _fit_settings: Mapping[str, Any] | None = None
+
     def __init__(
         self,
         family: DistributionalFamily,
@@ -688,7 +692,8 @@ class SuperLSS:
         fit_reml : Estimate smoothing parameters as part of the fit.
         """
         with fit_record(self, "fit", locals()):
-            return self._fit(
+            settings = fit_settings("fit", locals())
+            fitted = self._fit(
                 X,
                 y,
                 sample_weight=sample_weight,
@@ -704,6 +709,8 @@ class SuperLSS:
                 truncation=truncation,
                 censored=censored,
             )
+            self._fit_settings = settings
+            return fitted
 
     def fit_reml(
         self,
@@ -781,7 +788,8 @@ class SuperLSS:
                 or initial_lambda <= 0.0
             ):
                 raise ValueError("initial_lambda must be None or a finite positive number")
-            return self._fit(
+            settings = fit_settings("fit_reml", locals())
+            fitted = self._fit(
                 X,
                 y,
                 sample_weight=sample_weight,
@@ -814,6 +822,28 @@ class SuperLSS:
                 truncation=truncation,
                 censored=censored,
             )
+            self._fit_settings = settings
+            return fitted
+
+    def _clone_with_replaced_terms(self, replacements: Mapping[str, Any]) -> SuperLSS:
+        """An unfitted copy with the terms keyed ``"<parameter>:<term>"`` replaced.
+
+        Values are unfitted feature specs. The copy keeps the family, the
+        constructor settings, the other terms' templates (interactions included)
+        and the source's fit settings, less the fixed smoothing strengths of the
+        replaced terms.
+        """
+        return clone_with_replaced_terms(self, replacements)
+
+    def _replay_fit(
+        self,
+        X: FrameLike | EagerFrame,
+        y: NDArray,
+        sample_weight: NDArray | None = None,
+        offsets: Mapping[str, NDArray] | None = None,
+    ) -> SuperLSS:
+        """Fit with the carried settings, by ``fit`` or ``fit_reml`` as the source was."""
+        return replay_fit(self, X, y, sample_weight, offsets)
 
     def _require_fitted(self) -> DenseDistributionalModel:
         if self._model is None:
