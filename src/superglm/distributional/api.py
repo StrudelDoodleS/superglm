@@ -1649,10 +1649,13 @@ class SuperLSS:
         smoothing did not stop stationary is corrected about its own point
         with a ``ConvergenceWarning``; where no correction can be formed the
         draws use the fixed covariance, say so in a ``ConvergenceWarning``,
-        and carry ``covariance_kind="fixed"``.  One draw set can be reused
-        across quantities.
+        and carry ``covariance_kind="fixed"``.  After a hand edit the draws are
+        centred on the edit and keep the fit's covariance.  One draw set can be
+        reused across quantities.
         """
-        return posterior_draws(self._require_fitted(), n_draws, covariance=covariance, seed=seed)
+        draws = posterior_draws(self._require_fitted(), n_draws, covariance=covariance, seed=seed)
+        self._warn_if_hand_edited()
+        return draws
 
     def posterior_bounds(
         self,
@@ -1674,13 +1677,15 @@ class SuperLSS:
         such slot and the call is refused.
         """
         self._refuse_frequency_row_law(sample_weight)
-        return posterior_bounds(
+        bounds = posterior_bounds(
             self._require_fitted(),
             X,
             quantity,
             weights=self._prior_law_weight(sample_weight),
             **kwargs,
         )
+        self._warn_if_hand_edited()
+        return bounds
 
     def posterior_predictive(
         self,
@@ -1700,13 +1705,15 @@ class SuperLSS:
         rather than simulating a law the weight does not describe.
         """
         self._refuse_frequency_row_law(sample_weight)
-        return posterior_predictive(
+        simulated = posterior_predictive(
             self._require_fitted(),
             X,
             n_draws,
             weights=self._prior_law_weight(sample_weight),
             **kwargs,
         )
+        self._warn_if_hand_edited()
+        return simulated
 
     # -- surfaces, spread and the book ----------------------------------- #
 

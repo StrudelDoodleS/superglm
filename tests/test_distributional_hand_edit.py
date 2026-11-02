@@ -12,7 +12,8 @@ import pandas as pd
 import pytest
 
 from superglm import LogNormalLS, SuperLSS, s
-from superglm.distributional import EditedCoefficientsWarning
+from superglm.distributional import DistributionFunctionFamily, EditedCoefficientsWarning
+from superglm.distributional.fit_state import DistributionalFitState
 from superglm.distributional.revision import HandEdit
 from tests._lss_editor_fixtures import EPS, gamma_case, lognormal_case, nb_case
 
@@ -267,6 +268,98 @@ def test_an_unedited_model_does_not_warn():
         warnings.simplefilter("error", EditedCoefficientsWarning)
         for call in _inference_calls(case.model, case, "scale").values():
             call()
+        for call in _posterior_calls(case.model, case, "scale").values():
+            call()
+
+
+def _edited_by_intercept_shift(case, parameter: str, shift: float = 1.5):
+    """The case's model with ``parameter``'s intercept moved by ``shift`` on the link scale."""
+    m = case.model
+    coefficients = _coefficients(m)
+    coefficients[_intercept(m, parameter)] += shift
+    return m._with_revised_coefficients(
+        coefficients, edited_terms=[f"{parameter}:age"], X_train=case.X
+    )
+
+
+def _posterior_calls(model: SuperLSS, case, parameter: str):
+    rows = case.X.head(20)
+    offsets = None if case.offsets is None else {k: v[:20] for k, v in case.offsets.items()}
+    calls = {
+        "posterior_draws": lambda: model.posterior_draws(64, seed=3),
+        "posterior_bounds": lambda: model.posterior_bounds(
+            case.X, ("parameter", parameter), n_draws=200, seed=3, offsets=case.offsets
+        ),
+    }
+    if isinstance(model.family_, DistributionFunctionFamily):
+        calls["posterior_predictive"] = lambda: model.posterior_predictive(
+            rows, 16, seed=3, offsets=offsets
+        )
+    return calls
+
+
+@pytest.mark.parametrize(("builder", "parameter"), CASES)
+def test_posterior_methods_warn_after_an_edit(builder, parameter):
+    case = builder()
+    edited = _edited_by_intercept_shift(case, parameter)
+    expected = EDITED_WARNING.format(keys=f"{parameter}:age")
+    for name, call in _posterior_calls(edited, case, parameter).items():
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            call()
+        edits = [w for w in caught if issubclass(w.category, EditedCoefficientsWarning)]
+        assert [str(w.message) for w in edits] == [expected], name
+        assert edits[0].filename == __file__, name
+
+
+@pytest.mark.parametrize(("builder", "parameter"), CASES)
+def test_posterior_bounds_contain_the_estimate_of_an_edited_model(builder, parameter):
+    case = builder()
+    edited = _edited_by_intercept_shift(case, parameter)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", EditedCoefficientsWarning)
+        bounds = edited.posterior_bounds(
+            case.X, ("parameter", parameter), n_draws=400, seed=3, offsets=case.offsets
+        )
+    assert (bounds["lower"] <= bounds["estimate"]).all()
+    assert (bounds["estimate"] <= bounds["upper"]).all()
+    # The estimate is the edited curve, well outside the fit's own band.
+    fit_bounds = case.model.posterior_bounds(
+        case.X, ("parameter", parameter), n_draws=400, seed=3, offsets=case.offsets
+    )
+    assert (bounds["estimate"] > fit_bounds["upper"]).all()
+
+
+@pytest.mark.parametrize(("builder", "parameter"), CASES)
+def test_posterior_draws_move_with_the_edit_and_keep_the_fit_covariance(builder, parameter):
+    case = builder()
+    edited = _edited_by_intercept_shift(case, parameter)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", EditedCoefficientsWarning)
+        moved = edited.posterior_draws(64, seed=3).coefficients
+    original = case.model.posterior_draws(64, seed=3).coefficients
+    shift = _coefficients(edited) - _coefficients(case.model)
+    np.testing.assert_allclose(
+        moved - original,
+        np.broadcast_to(shift, moved.shape),
+        rtol=0,
+        atol=8 * EPS * np.abs(moved).max(),
+    )
+
+
+def test_simultaneous_band_of_an_edited_term_is_centred_on_the_edit():
+    case = lognormal_case()
+    m = case.model
+    edited = m._with_revised_coefficients(
+        _edit_term(m, "scale:age", 2.0), edited_terms=["scale:age"], X_train=case.X
+    )
+    plain = m.term_inference("scale", "age", X_train=case.X)
+    with pytest.warns(EditedCoefficientsWarning):
+        band = edited.term_inference("scale", "age", X_train=case.X)
+    # The same draws and covariance give the same critical value; a band centred on
+    # the fit's coefficients would carry the whole edit into it.
+    assert band.critical_value == pytest.approx(plain.critical_value, rel=np.sqrt(EPS))
+    np.testing.assert_array_equal(band.se, plain.se)
 
 
 @pytest.mark.parametrize(("builder", "parameter"), CASES)
@@ -295,6 +388,23 @@ def test_fitted_rows_follow_the_edit(builder, parameter):
         rtol=0,
         atol=8 * EPS * np.abs(original.fitted_eta).max(),
     )
+
+
+def test_a_revision_builds_the_fit_state_once(monkeypatch):
+    case = lognormal_case()
+    m = case.model
+    built = []
+    validate = DistributionalFitState.__post_init__
+
+    def counted(self):
+        built.append(self)
+        validate(self)
+
+    monkeypatch.setattr(DistributionalFitState, "__post_init__", counted)
+    edited = m._with_revised_coefficients(
+        _edit_term(m, "scale:age", 0.5), edited_terms=["scale:age"], X_train=case.X
+    )
+    assert built == [edited._model.fit_state]
 
 
 def _small_case(*, retain_rows: bool = True, zero_weight_rows: int = 0):

@@ -105,6 +105,23 @@ def _rows_of_the_fit(frame: EagerFrame, rows: DistributionalRowState) -> EagerFr
     )
 
 
+def _recomputed_rows(
+    model: DenseDistributionalModel,
+    rows: DistributionalRowState,
+    edit: HandEdit,
+    X_train: FrameLike | EagerFrame | None,
+) -> DistributionalRowState:
+    """The retained rows with fitted ``eta`` and parameters taken at the edit."""
+    if X_train is None:
+        raise ValueError(NO_TRAINING_FRAME)
+    eta = model.predict_eta_at(
+        edit.coefficients,
+        _rows_of_the_fit(as_eager_frame(X_train), rows),
+        offsets=rows.offsets,
+    )
+    return replace(rows, fitted_eta=eta, fitted_parameters=model.parameters_from_eta(eta))
+
+
 def revised_model(
     model: DenseDistributionalModel,
     coefficients: NDArray,
@@ -121,16 +138,12 @@ def revised_model(
         raise TypeError("edited_terms must be a sequence of term names, not one string")
     state = model.fit_state
     earlier = () if state.hand_edit is None else state.hand_edit.edited_terms
-    revised = replace(state, hand_edit=HandEdit(coefficients, (*earlier, *edited_terms)))
-    result = replace(model, _fit_state=revised)
-    rows = revised.retained_rows
-    if rows is None:
-        return result
-    if X_train is None:
-        raise ValueError(NO_TRAINING_FRAME)
-    eta = result.predict_eta(_rows_of_the_fit(as_eager_frame(X_train), rows), offsets=rows.offsets)
-    rows = replace(rows, fitted_eta=eta, fitted_parameters=result.parameters_from_eta(eta))
-    return replace(result, _fit_state=replace(revised, retained_rows=rows))
+    edit = HandEdit(coefficients, (*earlier, *edited_terms))
+    check_hand_edit(edit, state.layout, state.result.coefficients)
+    rows = state.retained_rows
+    if rows is not None:
+        rows = _recomputed_rows(model, rows, edit, X_train)
+    return replace(model, _fit_state=replace(state, hand_edit=edit, retained_rows=rows))
 
 
 __all__ = [

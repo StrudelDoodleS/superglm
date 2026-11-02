@@ -338,6 +338,16 @@ class DenseDistributionalModel:
         offsets: Mapping[str, NDArray] | None = None,
     ) -> NDArray[np.float64]:
         """Evaluate every fitted predictor in family parameter order."""
+        return self.predict_eta_at(self.coefficients, X, offsets=offsets)
+
+    def predict_eta_at(
+        self,
+        coefficients: NDArray[np.float64],
+        X: FrameLike | EagerFrame,
+        *,
+        offsets: Mapping[str, NDArray] | None = None,
+    ) -> NDArray[np.float64]:
+        """Evaluate every predictor at a full coefficient vector in the fit's layout."""
         frame = as_eager_frame(X)
         predictor_names = tuple(predictor.name for predictor in self.compiled_predictors)
         resolved_offsets = _prediction_offsets(offsets, predictor_names, len(frame))
@@ -365,7 +375,7 @@ class DenseDistributionalModel:
                     frame,
                     predictor,
                     self.layout,
-                    self.coefficients,
+                    coefficients,
                     resolved_offsets[predictor.name],
                     named,
                 )

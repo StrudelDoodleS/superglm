@@ -755,9 +755,13 @@ def _posterior_draws_from_covariance(
     covariance: CovarianceKind = "fixed",
     seed: int = 42,
 ) -> PosteriorDraws:
-    """Draw coefficients from one already-resolved posterior covariance."""
+    """Draw coefficients from one already-resolved posterior covariance.
+
+    The draws are centred on the coefficients the model predicts with, so a
+    hand-edited model's draws, bounds and predictions describe the same curve.
+    """
     resolved = np.asarray(matrix, dtype=np.float64)
-    beta = np.asarray(fitted.result.coefficients, dtype=np.float64)
+    beta = np.asarray(fitted.coefficients, dtype=np.float64)
     if resolved.shape != (len(beta), len(beta)):
         raise ValueError("the posterior covariance does not match the fitted coefficients")
 
@@ -782,6 +786,9 @@ def posterior_draws(
     seed: int = 42,
 ) -> PosteriorDraws:
     """Draw coefficients from ``N(beta_hat, V)`` with a checked eigen square root.
+
+    ``beta_hat`` is what the model predicts with; after a hand edit that is the
+    edit, with the fit's ``V``.
 
     ``V`` may be rank deficient: zero-variance rows stay zero, and a negative
     mode is clipped only when a bounded reconstruction shows the covariance
