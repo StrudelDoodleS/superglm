@@ -924,14 +924,11 @@ def _weighted_dense_gram(dense: NDArray, weights: NDArray) -> NDArray:
     The weighted rows are scratch of one sub-block, so a block of rows holds its
     dense rows (a view or one copy) and never a second copy beside them.
     """
-    gram = None
-    for start in range(0, dense.shape[0], _SSP_PRODUCT_ROWS):
+    rows = dense[:_SSP_PRODUCT_ROWS]
+    gram = (rows * weights[:_SSP_PRODUCT_ROWS, None]).T @ rows
+    for start in range(_SSP_PRODUCT_ROWS, dense.shape[0], _SSP_PRODUCT_ROWS):
         rows = dense[start : start + _SSP_PRODUCT_ROWS]
-        part = (rows * weights[start : start + _SSP_PRODUCT_ROWS, None]).T @ rows
-        if gram is None:
-            gram = part
-        else:
-            gram += part
+        gram += (rows * weights[start : start + _SSP_PRODUCT_ROWS, None]).T @ rows
     return gram
 
 

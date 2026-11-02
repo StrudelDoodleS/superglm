@@ -1201,7 +1201,7 @@ def _validate_resolution_limited_stationarity(
     retained_score = face.reduce_vector(score)
     retained_curvature = face.reduce_matrix(penalized_curvature)
     retained_width = face.reduced_width
-    if not _retained_rank_is_full(retained_rank, retained_width):
+    if retained_rank is None or not _retained_rank_is_full(retained_rank, retained_width):
         raise ValueError("resolution-limited stationarity requires full retained rank")
     raw_kkt = float(np.max(np.abs(retained_score), initial=0.0)) / (1.0 + abs(penalized_objective))
     if not math.isfinite(raw_kkt) or raw_kkt <= config.tolerance:
