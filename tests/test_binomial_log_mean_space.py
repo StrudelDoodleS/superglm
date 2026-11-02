@@ -2615,43 +2615,11 @@ def test_the_weak_block_gram_is_whole_across_its_row_chunks(rows: int) -> None:
     assert np.array_equal(support, np.any(columns != 0.0, axis=1))
 
 
-@pytest.mark.parametrize(("row", "refused"), [(-(2.0**-52), False), (-1e-3, True)])
-def test_a_scop_observed_row_is_signed_only_beyond_its_rounding(row: float, refused: bool) -> None:
-    """SCOP's observed rows: a negative row within its rounding is zero, one beyond it is refused.
-
-    A binomial/log event row's observed information is exactly zero, and its
-    terms cancel, so the computed row is the platform's rounding: -1.1e-16
-    and -2.2e-16 on the macOS, Windows and ARM64 runners, where 2357a43a's
-    ``test_a_lowered_scop_fit_is_certified_in_its_latent_coordinates`` raised
-    "signed observed-information rows are not supported".  Rows are within
-    ``gamma_22`` of their terms' scale (``observed_row_error_scale``, at
-    least 1 here: the Fisher part of a row at ``p = 1/2``).
-    """
-    from superglm.reml.observed_geometry import compute_scop_observed_information_weights
-
-    class FixedRows(Binomial):
-        def scop_observed_information_weights(self, link, y, mu, eta, sample_weight):
-            return np.array([row, 1.0])
-
-    eta = np.full(2, math.log(0.5))
-    arguments = (FixedRows(), LogLink(), np.array([1.0, 0.0]), np.exp(eta), eta, np.ones(2))
-    if refused:
-        with pytest.raises(ValueError, match="signed observed-information rows"):
-            compute_scop_observed_information_weights(*arguments)
-    else:
-        assert np.array_equal(compute_scop_observed_information_weights(*arguments), [0.0, 1.0])
-
-
-@pytest.mark.parametrize("shape_engine", ["scop", "qp"])
-def test_a_lowered_scop_fit_is_certified_in_its_latent_coordinates(shape_engine: str) -> None:
+def test_a_lowered_constrained_pspline_fit_is_certified() -> None:
     """Sol's #437 fixture: an increasing PSpline with a constant offset of +2.
 
-    dbeaf5a3 formed no latent score and so never certified a SCOP fit under
-    the check: it ended this one ``score_stagnated``, where master converges
-    in 10 iterations.  The certificate now forms the shape-constrained
-    group's latent score ``J' B' s - lambda S theta`` and certifies the fit,
-    every fitted mean inside the space and above the clip floor.  The
-    default QP engine certifies the same fixture in its own coefficients.
+    The QP engine certifies the fit in its own coefficients, every fitted
+    mean inside the space and above the clip floor.
     """
     rng = np.random.default_rng(8)
     x = rng.uniform(0.0, 1.0, 60)
@@ -2660,9 +2628,7 @@ def test_a_lowered_scop_fit_is_certified_in_its_latent_coordinates(shape_engine:
         family="binomial",
         link="log",
         selection_penalty=0.0,
-        features={
-            "x": PSpline(n_knots=5, constraint=Constraint.fit.increasing, shape_engine=shape_engine)
-        },
+        features={"x": PSpline(n_knots=5, constraint=Constraint.fit.increasing)},
     )
     model.fit(pd.DataFrame({"x": x}), y, offset=np.full(60, 2.0))
     assert model.result.converged
@@ -2670,66 +2636,6 @@ def test_a_lowered_scop_fit_is_certified_in_its_latent_coordinates(shape_engine:
     eta = model._dm.matvec(model.result.beta) + model.result.intercept + 2.0
     assert float(eta.max()) < 0.0
     assert float(eta.min()) > np.log(1e-7)
-
-
-def test_the_certificate_tests_a_scop_group_in_the_latent_coordinates_its_step_hands_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The SCOP step hands the certificate the latent groups whose columns it leaves out.
-
-    The fixture above.  The binomial/log certificate leaves a shape-constrained
-    group's columns out of the ordinary score and tests them as the group's
-    latent score ``J' B' s - lambda S theta`` instead, so the columns the step
-    excludes are exactly those of the latent groups it hands over, and a
-    latent state off the mode fails.  At the fit's last judged state, one
-    latent coordinate moved by -5 (the fitted values unchanged) leaves its
-    penalty's pull unbalanced, and the certificate refuses it.  Mutation
-    check: a step that handed over no latent groups certified the moved state,
-    its SCOP columns tested nowhere.
-    """
-    from dataclasses import replace
-
-    import superglm.solvers.irls_direct._mean_space as irls_mean_space
-
-    certify = irls_mean_space._IRLSDirectMeanSpaceOverlay.certify
-    judged = []
-
-    def recorded(self, fit, beta, intercept, eta, inputs):
-        judged.append((self, fit, beta, intercept, eta, inputs))
-        return certify(self, fit, beta, intercept, eta, inputs)
-
-    monkeypatch.setattr(irls_mean_space._IRLSDirectMeanSpaceOverlay, "certify", recorded)
-    rng = np.random.default_rng(8)
-    x = rng.uniform(0.0, 1.0, 60)
-    y = (rng.uniform(size=60) < 0.1 + 0.3 * x).astype(np.float64)
-    model = SuperGLM(
-        family="binomial",
-        link="log",
-        selection_penalty=0.0,
-        features={
-            "x": PSpline(n_knots=5, constraint=Constraint.fit.increasing, shape_engine="scop")
-        },
-    )
-    model.fit(pd.DataFrame({"x": x}), y, offset=np.full(60, 2.0))
-    assert model.result.converged
-    overlay, fit, beta, intercept, eta, _ = judged[-1]
-    step = fit.step
-    retained = step._retained
-    theta = retained.groups[0].beta_eff.copy()
-    theta[3] -= 5.0
-    step._retained = replace(
-        retained, groups=(replace(retained.groups[0], beta_eff=theta), *retained.groups[1:])
-    )
-    ratio, _ = certify(overlay, fit, beta, intercept, eta, step.certificate_inputs())
-    step._retained = retained
-    assert ratio > 1.0
-
-    _, _, columns, groups = step.certificate_inputs()
-    covered = np.zeros(fit.p, dtype=bool)
-    for _, spec in groups or ():
-        covered[spec.group.sl] = True
-    assert columns is not None and columns.any()
-    np.testing.assert_array_equal(covered, columns)
 
 
 @pytest.mark.parametrize("scale", [100.0, 1.0, 1e-100])

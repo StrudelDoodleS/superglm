@@ -49,10 +49,36 @@ from superglm.reml.penalty_algebra import (
 from superglm.reml.result import _map_beta_between_bases, _map_centred_state_between_bases
 from superglm.reml.scale import (
     GammaScaleProfileData,
+    gaussian_reml_scale_phi,
     gaussian_reml_scale_terms,
     prepare_gamma_reml_scale_data,
     profile_gamma_reml_scale,
-    profile_gaussian_reml_scale,
+)
+from superglm.solvers._structured.balance_tree import (
+    ProfiledSumToZeroTreeFactor,
+    SumToZeroLeafSystem,
+)
+from superglm.solvers._structured.block_leaves import (
+    FactorSmoothLeafSystem,
+    ProfiledFactorSmoothLeafFactor,
+    release_leaf_memo,
+)
+from superglm.solvers._structured.moments import (
+    NestedStructuredSystem,
+)
+from superglm.solvers._structured.nested import (
+    NestedDataOperator,
+    NestedPenalizedOperator,
+    ProfiledNestedSchurFactor,
+)
+from superglm.solvers._structured.operators import (
+    BlockSymmetricOperator,
+    CenteredBlockOperator,
+    SumToZeroBlockOperator,
+)
+from superglm.solvers._structured.state import (
+    StructuredLinearSystemState,
+    centred_data_operator,
 )
 from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
@@ -60,22 +86,6 @@ from superglm.solvers.mode_score import (
     centred_warm_start,
     linear_predictor,
     mode_certification_bar,
-)
-from superglm.solvers.structured import (
-    BlockSymmetricOperator,
-    CenteredBlockOperator,
-    FactorSmoothLeafSystem,
-    NestedDataOperator,
-    NestedPenalizedOperator,
-    NestedStructuredSystem,
-    ProfiledFactorSmoothLeafFactor,
-    ProfiledNestedSchurFactor,
-    ProfiledSumToZeroTreeFactor,
-    StructuredLinearSystemState,
-    SumToZeroBlockOperator,
-    SumToZeroLeafSystem,
-    centred_data_operator,
-    release_leaf_memo,
 )
 
 
@@ -234,8 +244,16 @@ def compute_profiled_phi(
     pirls_result,
     likelihood_size: float | None = None,
     gamma_scale_data: GammaScaleProfileData | None = None,
+    boundary_phi: float | None = None,
 ) -> float:
-    """Return REML-profiled phi for estimated-scale families."""
+    """Return REML-profiled phi for estimated-scale families.
+
+    The Gaussian value is the profile's closed form without the derivative
+    only the REML search reads (``gaussian_reml_scale_phi``).  Where the
+    Gaussian or Gamma profile has no interior optimum, at zero penalized
+    deviance or no residual likelihood size, ``boundary_phi`` is returned
+    when given; otherwise the profiler's ``ValueError`` is raised.
+    """
     scale_known = getattr(model._distribution, "scale_known", True)
     if scale_known:
         return 1.0
@@ -263,25 +281,27 @@ def compute_profiled_phi(
         )
         weight_semantics = model_weight_semantics(model)
         if isinstance(distribution, Gaussian):
-            saturated_log_weight = 0.0
             if likelihood_size is None:
-                likelihood_size, saturated_log_weight = gaussian_reml_scale_terms(
+                likelihood_size, _ = gaussian_reml_scale_terms(
                     sample_weight,
                     weight_semantics=weight_semantics,
                 )
             assert likelihood_size is not None
-            return profile_gaussian_reml_scale(
-                penalized_deviance,
-                likelihood_size,
-                M_p,
-                saturated_log_weight=saturated_log_weight,
-            ).phi
+            if boundary_phi is not None and (
+                penalized_deviance <= 0.0 or likelihood_size - M_p <= 0.0
+            ):
+                return float(boundary_phi)
+            return gaussian_reml_scale_phi(penalized_deviance, likelihood_size, M_p)
         if gamma_scale_data is None:
             gamma_scale_data = prepare_gamma_reml_scale_data(
                 y,
                 sample_weight,
                 weight_semantics=weight_semantics,
             )
+        if boundary_phi is not None and (
+            penalized_deviance <= 0.0 or 2.0 * gamma_scale_data.sum_weight <= M_p
+        ):
+            return float(boundary_phi)
         return profile_gamma_reml_scale(
             gamma_scale_data,
             penalized_deviance,
@@ -491,7 +511,6 @@ def finalize_reml_fit(
     model,
     *,
     best,
-    use_direct: bool,
     reml_groups,
     reml_penalties,
     y,
@@ -512,8 +531,6 @@ def finalize_reml_fit(
     model._result = best.pirls_result
     model._reml_lambdas = best.lambdas
 
-    if not use_direct:
-        reml_penalties, _, _ = build_penalty_context(model._dm.group_matrices, reml_groups)
     model._reml_penalties = reml_penalties
     model._reml_result = best
     lambdas = best.lambdas
@@ -534,18 +551,16 @@ def finalize_reml_fit(
     final_factor = None
     final_cache: dict = {}
     # Whether the terminal refit met the mode certificate (None: a route the
-    # certificate does not judge -- constrained, SCOP, QP passthrough).
+    # certificate does not judge -- constrained, QP passthrough).
     terminal_certified: bool | None = None
-    terminal_curvature = None
-    if use_direct:
-        terminal_curvature = best.curvature_source
-        if terminal_curvature is None:
-            terminal_curvature = (
-                "fisher"
-                if model._discrete
-                else classify_reml_curvature(model._distribution, model._link)
-            )
-        best.curvature_source = terminal_curvature
+    terminal_curvature = best.curvature_source
+    if terminal_curvature is None:
+        terminal_curvature = (
+            "fisher"
+            if model._discrete
+            else classify_reml_curvature(model._distribution, model._link)
+        )
+    best.curvature_source = terminal_curvature
     # The Laplace approximation's identified part (design §3.9,
     # ``reml.identified``): the terminal objective leaves out the same slopes
     # the optimizer's did, so it scores the state it publishes consistently.
@@ -554,119 +569,114 @@ def finalize_reml_fit(
     # search that chose lambda left these out, and they are disclosed.
     identified = IdentifiedLaplace()
     disclosed = identified
-    if use_direct:
-        old_gms = model._dm.group_matrices
-        model._dm = rebuild_dm_with_lambdas(model, lambdas, sample_weight)
-        reml_penalties, _, _ = build_penalty_context(
-            model._dm.group_matrices,
-            reml_groups,
-            _reuse_raw_from=reml_penalties,
-        )
-        model._reml_penalties = reml_penalties
-        if getattr(best, "reml_penalties", None) is not None:
-            # The carrier must not keep obsolete optimizer owners and their
-            # weighted evaluations alive alongside the terminal context.
-            best.reml_penalties = reml_penalties
+    old_gms = model._dm.group_matrices
+    model._dm = rebuild_dm_with_lambdas(model, lambdas, sample_weight)
+    reml_penalties, _, _ = build_penalty_context(
+        model._dm.group_matrices,
+        reml_groups,
+        _reuse_raw_from=reml_penalties,
+    )
+    model._reml_penalties = reml_penalties
+    if getattr(best, "reml_penalties", None) is not None:
+        # The carrier must not keep obsolete optimizer owners and their
+        # weighted evaluations alive alongside the terminal context.
+        best.reml_penalties = reml_penalties
 
-        beta_init = _map_beta_between_bases(
+    beta_init = _map_beta_between_bases(
+        solver_result.beta,
+        old_gms,
+        model._dm.group_matrices,
+        model._groups,
+    )
+    disclosed = IdentifiedLaplace.for_design(
+        model._dm,
+        sample_weight,
+        reml_penalties,
+        y=y,
+        distribution=model._distribution,
+        link=model._link,
+    )
+    if not qp_passthrough:
+        identified = disclosed
+    observed_terminal = terminal_curvature == "observed" and not qp_passthrough
+    # One-engine design §3.8: the terminal refit of every route auto uses,
+    # exact and discrete, gram and structured, stops on the certificate's
+    # own centred score over the identified coefficients, at the one bar
+    # (``mode_score.MODE_CERTIFICATION_BAR``).  An objective change is
+    # blind to a coefficient whose rows carry a small share of the
+    # likelihood (a level driven towards its penalty bound, a tiny-lambda
+    # direction), whose log-curvature still enters log|H| at full weight,
+    # so the published objective described a point short of the mode
+    # (stage-0 verifier census: raw_1e8 binomial, 21.3 above it; the
+    # discrete terminal's unconstrained score left raw_1e8 binomial 16
+    # above gram's, stage-1 verifier).  The bar is set by what the REML
+    # criterion needs, so Fisher's linear rate on a non-canonical link
+    # reaches it; a refit that does not is published as not converged,
+    # never refused.  A linearly constrained mode is certified by its inner
+    # QP/KKT state and keeps the objective stop.
+    shaped = any(getattr(group, "constraints", None) is not None for group in model._groups)
+    certified_terminal = observed_terminal or (not qp_passthrough and not shaped)
+    final_tolerance = min(pirls_tol, 1e-10) if certified_terminal else pirls_tol
+    terminal_bar = mode_certification_bar(profile.get("reml_tol_resolved"))
+    # Rank metadata (a data-subspace TSQR on a large book) is read only
+    # by retained-fit inference.  A power-search candidate is discarded
+    # (``_discard_rank_info``), so it skips it; an NB2 auto-theta refit
+    # may be replaced by the next, so it defers it (``_defer_rank_info``,
+    # computed by ``fit_ops`` for the refit that is published).  A QP
+    # passthrough publishes its constrained refit
+    # (``maybe_qp_passthrough_refit``), which reads only this refit's
+    # coefficients, so it skips it too.  Other shaped fits keep it: their
+    # QP route rewrites it after this refit.
+    discard_rank_info = qp_passthrough or (
+        not shaped and bool(getattr(model, "_discard_rank_info", False))
+    )
+    deferred_rank_info: list | None = (
+        []
+        if not (shaped or discard_rank_info) and bool(getattr(model, "_defer_rank_info", False))
+        else None
+    )
+    final_output = fit_irls_direct(
+        X=model._dm,
+        y=y,
+        weights=sample_weight,
+        family=model._distribution,
+        link=model._link,
+        groups=model._groups,
+        lambda2=lambdas,
+        offset=offset_arr,
+        beta_init=beta_init,
+        intercept_init=float(best.pirls_result.intercept),
+        # the optimizer's state, centred (design §3.8), read in the
+        # rebuilt basis as beta_init is
+        _centred_init=_map_centred_state_between_bases(
+            centred_warm_start(best.pirls_result),
             solver_result.beta,
             old_gms,
             model._dm.group_matrices,
             model._groups,
-        )
-        disclosed = IdentifiedLaplace.for_design(
-            model._dm,
-            sample_weight,
-            reml_penalties,
-            y=y,
-            distribution=model._distribution,
-            link=model._link,
-        )
-        if not qp_passthrough:
-            identified = disclosed
-        observed_terminal = terminal_curvature == "observed" and not qp_passthrough
-        # One-engine design §3.8: the terminal refit of every route auto uses,
-        # exact and discrete, gram and structured, stops on the certificate's
-        # own centred score over the identified coefficients, at the one bar
-        # (``mode_score.MODE_CERTIFICATION_BAR``).  An objective change is
-        # blind to a coefficient whose rows carry a small share of the
-        # likelihood (a level driven towards its penalty bound, a tiny-lambda
-        # direction), whose log-curvature still enters log|H| at full weight,
-        # so the published objective described a point short of the mode
-        # (stage-0 verifier census: raw_1e8 binomial, 21.3 above it; the
-        # discrete terminal's unconstrained score left raw_1e8 binomial 16
-        # above gram's, stage-1 verifier).  The bar is set by what the REML
-        # criterion needs, so Fisher's linear rate on a non-canonical link
-        # reaches it; a refit that does not is published as not converged,
-        # never refused.  A linearly constrained or SCOP mode is certified by
-        # its inner QP/KKT state and keeps the objective stop.
-        shaped = any(
-            getattr(group, "constraints", None) is not None
-            or getattr(group, "monotone_engine", None) == "scop"
-            for group in model._groups
-        )
-        certified_terminal = observed_terminal or (not qp_passthrough and not shaped)
-        final_tolerance = min(pirls_tol, 1e-10) if certified_terminal else pirls_tol
-        terminal_bar = mode_certification_bar(profile.get("reml_tol_resolved"))
-        # Rank metadata (a data-subspace TSQR on a large book) is read only
-        # by retained-fit inference.  A power-search candidate is discarded
-        # (``_discard_rank_info``), so it skips it; an NB2 auto-theta refit
-        # may be replaced by the next, so it defers it (``_defer_rank_info``,
-        # computed by ``fit_ops`` for the refit that is published).  A QP
-        # passthrough publishes its constrained refit
-        # (``maybe_qp_passthrough_refit``), which reads only this refit's
-        # coefficients, so it skips it too.  Other shaped fits keep it: their
-        # SCOP and QP routes rewrite it after this refit.
-        discard_rank_info = qp_passthrough or (
-            not shaped and bool(getattr(model, "_discard_rank_info", False))
-        )
-        deferred_rank_info: list | None = (
-            []
-            if not (shaped or discard_rank_info) and bool(getattr(model, "_defer_rank_info", False))
-            else None
-        )
-        final_output = fit_irls_direct(
-            X=model._dm,
-            y=y,
-            weights=sample_weight,
-            family=model._distribution,
-            link=model._link,
-            groups=model._groups,
-            lambda2=lambdas,
-            offset=offset_arr,
-            beta_init=beta_init,
-            intercept_init=float(best.pirls_result.intercept),
-            # the optimizer's state, centred (design §3.8), read in the
-            # rebuilt basis as beta_init is
-            _centred_init=_map_centred_state_between_bases(
-                centred_warm_start(best.pirls_result),
-                solver_result.beta,
-                old_gms,
-                model._dm.group_matrices,
-                model._groups,
-            ),
-            max_iter=max_pirls_iter,
-            tol=final_tolerance,
-            convergence="mode_score" if certified_terminal else "deviance",
-            return_xtwx=True,
-            cache_out=final_cache,
-            direct_solve=direct_solve,
-            reml_penalties=reml_penalties,
-            trace_run=trace_run,
-            trace_purpose="reml_final",
-            weight_semantics=model_weight_semantics(model),
-            _laplace_excluded=tuple(int(index) for index in identified.weak),
-            _mode_bar=terminal_bar,
-            compute_rank_info=not discard_rank_info and deferred_rank_info is None,
-            _defer_rank_info=deferred_rank_info,
-        )
-        if len(final_output) != 3:  # pragma: no cover - return_xtwx contract
-            raise RuntimeError("terminal direct REML refit omitted its working Gram")
-        solver_result, final_factor, final_xtwx = final_output
-        if deferred_rank_info:
-            model._deferred_rank_info = deferred_rank_info[0]
-        if certified_terminal:
-            terminal_certified = bool(solver_result.converged)
+        ),
+        max_iter=max_pirls_iter,
+        tol=final_tolerance,
+        convergence="mode_score" if certified_terminal else "deviance",
+        return_xtwx=True,
+        cache_out=final_cache,
+        direct_solve=direct_solve,
+        reml_penalties=reml_penalties,
+        trace_run=trace_run,
+        trace_purpose="reml_final",
+        weight_semantics=model_weight_semantics(model),
+        _laplace_excluded=tuple(int(index) for index in identified.weak),
+        _mode_bar=terminal_bar,
+        compute_rank_info=not discard_rank_info and deferred_rank_info is None,
+        _defer_rank_info=deferred_rank_info,
+    )
+    if len(final_output) != 3:  # pragma: no cover - return_xtwx contract
+        raise RuntimeError("terminal direct REML refit omitted its working Gram")
+    solver_result, final_factor, final_xtwx = final_output
+    if deferred_rank_info:
+        model._deferred_rank_info = deferred_rank_info[0]
+    if certified_terminal:
+        terminal_certified = bool(solver_result.converged)
 
     final_pirls = maybe_qp_passthrough_refit(
         model,
@@ -724,13 +734,13 @@ def finalize_reml_fit(
             cache=final_cache,
             support_totals=({} if reporting_state is None else reporting_state.support_totals),
         )
-        if use_direct and not qp_passthrough
+        if not qp_passthrough
         else None
     )
 
     terminal_evaluation: REMLObjectiveEvaluation | None = None
     terminal_tensor_pair_evaluations = None
-    if use_direct and model._discrete:
+    if model._discrete:
         tensor_pair_summaries = build_tensor_pair_logdet_summaries(
             model._dm.group_matrices,
             reml_penalties,
@@ -919,7 +929,7 @@ def finalize_reml_fit(
         terminal_evaluation = terminal_value
         best.objective = terminal_evaluation.value
 
-    if use_direct and terminal_evaluation is None:
+    if terminal_evaluation is None:
         # The optimizer's retained objective belongs to its retained
         # coefficient state.  The authoritative final refit above can move
         # those coefficients even at unchanged lambdas, so Fisher paths must
@@ -1033,7 +1043,7 @@ def finalize_reml_fit(
         offset_arr=offset_arr,
         lambdas=lambdas,
         reml_penalties=reml_penalties,
-        at_mode=use_direct and not qp_passthrough,
+        at_mode=not qp_passthrough,
     )
     model._reporting_support_state = reporting_state
     model._linear_system_state = structured_linear_state
@@ -1045,9 +1055,8 @@ def finalize_reml_fit(
     # Owner decision 3 (2026-09-30): a terminal mode that stays short of the
     # certificate is published as not converged, never refused. A route the
     # certificate does not judge (a linearly constrained mode, the QP
-    # passthrough's constrained refit, the EFS engine's own final fit) is
-    # published the same way when its fit stopped before its own convergence
-    # test: silence would read as converged.
+    # passthrough's constrained refit) is published the same way when its fit
+    # stopped before its own convergence test: silence would read as converged.
     if terminal_certified is not None:
         profile["reml_terminal_mode_certified"] = terminal_certified
         profile["reml_terminal_mode_termination"] = solver_result.termination_reason

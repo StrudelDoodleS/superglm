@@ -369,52 +369,6 @@ class TestCallSiteWarnings:
 
         return fake_solve
 
-    def test_scop_raw_qp_initialize_warns_on_non_convergence(self, caplog, monkeypatch):
-        import logging
-
-        from superglm.solvers import scop
-
-        calls: list[int] = []
-        # raising=True (the default): if the symbol is ever moved back inside
-        # the function body, this patch fails loudly instead of silently
-        # leaving the real solver in place and vacuously passing.
-        monkeypatch.setattr(scop, "solve_constrained_qp", self._non_converging(calls))
-
-        reparam = scop.build_scop_reparam(6, kind="increasing")
-        rng = np.random.default_rng(3)
-        B = rng.normal(size=(40, 6))
-        y = rng.normal(size=40)
-
-        with caplog.at_level(logging.WARNING, logger="superglm.solvers.scop"):
-            reparam.qp_initialize(B, y)
-
-        assert calls, "the patched solver was never called"
-        assert "did not converge" in caplog.text
-        # The two SCOP initialization paths must be distinguishable in a log.
-        assert "raw-space" in caplog.text
-        assert "solver-space" not in caplog.text
-
-    def test_scop_solver_qp_initialize_warns_on_non_convergence(self, caplog, monkeypatch):
-        import logging
-
-        from superglm.solvers import scop
-
-        calls: list[int] = []
-        monkeypatch.setattr(scop, "solve_constrained_qp", self._non_converging(calls))
-
-        reparam = scop.build_scop_solver_reparam(6, kind="increasing")
-        rng = np.random.default_rng(4)
-        B = rng.normal(size=(40, reparam.q))
-        y = rng.normal(size=40)
-
-        with caplog.at_level(logging.WARNING, logger="superglm.solvers.scop"):
-            reparam.qp_initialize(B, y)
-
-        assert calls, "the patched solver was never called"
-        assert "did not converge" in caplog.text
-        assert "solver-space" in caplog.text
-        assert "raw-space" not in caplog.text
-
     def test_irls_direct_reports_incomplete_kkt_as_terminal_nonconvergence(
         self,
         caplog,

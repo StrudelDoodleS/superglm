@@ -25,7 +25,6 @@ from . import (
     base,
     explain_ops,
     fit_ops,
-    monotone_ops,
     plot_ops,
     profile_ops,
     report_ops,
@@ -45,10 +44,10 @@ _SPLINES_DEPRECATION_MESSAGE = (
 
 if TYPE_CHECKING:
     from superglm.diagnostics.discretize import DiscretizationResult
+    from superglm.inference._term_types import InteractionInference, TermInference
     from superglm.inference.factor_smooths import FactorSmoothResult
     from superglm.inference.metrics import ModelMetrics
     from superglm.inference.random_effects import RandomEffectResult
-    from superglm.inference.term import InteractionInference, TermInference
     from superglm.model.fit_ops import PathResult
     from superglm.types import GroupSlice
 
@@ -361,7 +360,9 @@ class SuperGLM:
         rebuilds the linear system with the current engine
         (``superglm.model.retired_state``).  A v0.35.0 Tweedie model's REML
         memo is dropped, and so is a summary v0.35.0 cached after
-        ``estimate_theta``.
+        ``estimate_theta``.  A kindless spline the saved fit built as a SCOP
+        P-spline is marked to warn at its next build
+        (``mark_kindless_saved_on_scop``).
         """
         self.__dict__.update(state)
         # Earlier releases pickled the metadata of a fast discrete predictor
@@ -376,6 +377,9 @@ class SuperGLM:
         mark_retired_linear_state(self)
         release_retired_tweedie_state(self)
         release_v0_35_nb_summaries(self)
+        from superglm.features._spline_build import mark_kindless_saved_on_scop
+
+        mark_kindless_saved_on_scop(self)
 
     def __repr__(self) -> str:
         family = type(self._distribution).__name__ if self._distribution else self.family
@@ -725,7 +729,7 @@ class SuperGLM:
         max_pirls_iter: int | None = None,
         lambda2_init: float | Mapping[str, float] | None = None,
         interaction_mode: str = "full",
-        runtime_validation: str | bool = "auto",
+        runtime_validation: str | bool | None = None,
         verbose: bool = False,
         w_correction_order: int = 1,
     ) -> SuperGLM:
@@ -762,10 +766,7 @@ class SuperGLM:
         offset : array-like, optional
             Offset term.
         max_reml_iter : int, optional
-            Maximum REML outer iterations. Unset, it resolves per engine: 20
-            for the Newton engines, 100 for the SCOP engine, whose
-            Fellner-Schall steps converge linearly (measured 14 to 57 outer
-            iterations on freMTPL2 SCOP fits). A fit that reaches the cap is
+            Maximum REML outer iterations. Unset, it is 20. A fit that reaches the cap is
             returned with a ``ConvergenceWarning``,
             ``reml_diagnostics()["converged"]`` reads ``False`` and the
             summary says why. A cold exact fit of Poisson/log, binomial
@@ -778,12 +779,7 @@ class SuperGLM:
             ``["n_presolve_iter"]`` the pre-solve.
         reml_tol : float, optional
             Stopping tolerance for the smoothing-parameter optimizer. Unset,
-            it resolves per engine: 1e-9 for the Newton engines (exact and
-            discrete), 1e-6 for the step-criterion engines -- the SCOP path,
-            and equally the ``lambda1`` selection-penalty path, which
-            optimizes by EFS steps rather than Newton, stops on a per-step
-            lambda-change bound, and does not carry the Newton engines'
-            determination behavior described below. An explicit
+            it is 1e-9 for both Newton engines (exact and discrete). An explicit
             value reaches the engine verbatim, except that the discrete
             engine floors it at 1e-12, below which its cached-W objective
             differences are numerical noise. Candidate-grade fits
@@ -859,12 +855,7 @@ class SuperGLM:
             search keeps iterating to ``max_reml_iter``: there one
             working-model update per outer iteration routinely rescues
             the next search, so a failed search is not evidence of a
-            fixed point. The SCOP engine stops on a per-step lambda-change bound
-            against ``reml_tol`` and classifies its endgame as
-            ``objective_plateau`` only once steps have stopped contracting
-            -- while iterations still buy precision it keeps going toward
-            the strict bound, so an unreachable tolerance ends as an honest
-            plateau classification rather than an early grant.
+            fixed point.
 
             Versions before 0.20.0 defaulted every engine to 1e-6, so a
             default-tolerance fit can publish standard errors that differ
@@ -901,12 +892,10 @@ class SuperGLM:
             outer updates for interaction models and then runs the normal final
             refit, intended for screening candidate interactions before a full
             final model fit.
-        runtime_validation : {"auto", "full", "skip"} or bool
-            Controls the post-fit public-runtime parity diagnostic.
-            ``"auto"`` validates small fits and skips the full training-row
-            diagnostic for large fits or fast candidate interaction fits.
-            ``"full"`` always validates; ``"skip"`` skips validation while
-            still canonicalizing the public prediction state.
+        runtime_validation : optional
+            Deprecated and ignored. It controlled a post-fit check that
+            re-scored the training rows; the check has been retired, so any
+            value only raises a ``FutureWarning``. Remove the argument.
         verbose : bool
             Print progress.
         w_correction_order : int
@@ -921,6 +910,16 @@ class SuperGLM:
         SuperGLM
             The fitted model (self).
         """
+        if runtime_validation is not None:
+            import warnings
+
+            warnings.warn(
+                "fit_reml(runtime_validation=...) has no effect: the post-fit check it "
+                "controlled has been retired. Remove the argument; it will be removed "
+                "in a future release.",
+                FutureWarning,
+                stacklevel=2,
+            )
         with fit_record(self, "fit_reml", locals()):
             # Resolve PIRLS controls: explicit kwargs > constructor fallback
             resolved_pirls_tol = pirls_tol if pirls_tol is not None else self._tol
@@ -943,7 +942,6 @@ class SuperGLM:
                     max_pirls_iter=resolved_max_pirls_iter,
                     lambda2_init=lambda2_init,
                     interaction_mode=interaction_mode,
-                    runtime_validation=runtime_validation,
                     verbose=verbose,
                     w_correction_order=w_correction_order,
                 )
@@ -1579,8 +1577,7 @@ class SuperGLM:
             candidate search fits keep their own budget. Requires
             ``fit_mode="reml"`` -- a pure-ML publication has no REML
             iteration to budget and refuses the parameter. The default
-            ``None`` resolves per engine, as ``fit_reml``'s does: 20 for the
-            Newton engines, 100 for the SCOP engine.
+            ``None`` resolves as ``fit_reml``'s does, to 20.
         progress_callback : callable, optional
             Called as ``progress_callback(phase, payload)``: ``"profiling"``
             with ``{"profile_trace": [row]}`` for each feasible search
@@ -2095,7 +2092,9 @@ class SuperGLM:
             The model (self), with post-fit shape repairs stored.
         """
         with self._parallel_scope():
-            return monotone_ops.monotonize(self, X, sample_weight, offset, n_grid=n_grid)
+            from superglm.model import shape_ops
+
+            return shape_ops.apply_shape_postfit(self, X, sample_weight, offset, n_grid=n_grid)
 
     def apply_shape_postfit(
         self,

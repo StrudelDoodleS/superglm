@@ -643,10 +643,6 @@ def _read_solver_state_from_public(model) -> None:
     beta = np.asarray(public.beta, dtype=np.float64)
     shift = canonical_intercept_shift(model, beta)
     state["intercept_shift"] = float(shift)
-    diagnostics = state.get("diagnostics")
-    if isinstance(diagnostics, dict):
-        diagnostics["intercept_shift"] = float(shift)
-        diagnostics["coefficients_revised"] = True
     for term_state in state.get("terms", {}).values():
         term_shift = 0.0
         for group_state in term_state.get("groups", []):
@@ -1052,7 +1048,7 @@ def _capture_model_state(
         if config_publication is None
         else config_publication
     )
-    prepared.update(publication.as_model_dict())
+    prepared.update(_scop_templates_marked_qp(publication, work_model).as_model_dict())
     prepared["_resolved_penalty"] = resolved_penalty
     prepared["_selection_penalty_fitted"] = selection_penalty
     prepared["_distribution_fitted"] = work_model._distribution
@@ -1060,6 +1056,47 @@ def _capture_model_state(
     prepared["_fit_state"] = state
     _publish_workspace_extension_state(work_model, public_model, prepared)
     return FitCandidate(state=state, prepared_model_dict=prepared)
+
+
+def _scop_templates_marked_qp(
+    publication: ModelConfigPublication, work_model
+) -> ModelConfigPublication:
+    """``publication`` with each saved SCOP template this fit built on the QP marked ``"qp"``.
+
+    A P-spline saved on SCOP warns when it is built (``_warn_if_saved_on_scop``),
+    which marks the attempt's copy.  Its template is marked once the fit
+    commits, so later refits, and the model saved again, build it as the QP
+    P-spline it now is and warn no more.  An ordered term holds its basis
+    twice (``held_splines``); both are marked, in the template and in the
+    fitted spec the editor clones.  A failed fit publishes nothing and
+    leaves the template unmarked.
+    """
+    from superglm.features._spline_build import held_splines, saved_on_scop
+
+    specs = getattr(work_model, "_specs", {})
+    templates = publication.config.feature_templates
+    built = {
+        name
+        for name, template in templates
+        if any(saved_on_scop(spline) for spline in held_splines(template))
+        and name in specs
+        and getattr(held_splines(specs[name])[-1], "shape_engine", None) == "qp"
+    }
+    if not built:
+        return publication
+    marked = []
+    for name, template in templates:
+        if name in built:
+            template = copy.deepcopy(template)
+            for spline in [*held_splines(template), *held_splines(specs[name])]:
+                if saved_on_scop(spline):
+                    spline.shape_engine = "qp"
+        marked.append((name, template))
+    return replace(
+        publication,
+        config=replace(publication.config, feature_templates=tuple(marked)),
+        revision=publication.revision + 1,
+    )
 
 
 def capture_fit_state(

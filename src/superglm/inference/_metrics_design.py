@@ -285,7 +285,36 @@ class EvaluationDesign:
         return _anchored_weighted_moments(self.iter_dense_chunks, W, self.p)
 
 
-MetricsDesign = DesignMatrix | EvaluationDesign | NDArray
+class ProjectedDesign:
+    """A design's rows projected on a face ``Z``, ``x_i' Z``, one bounded block at a time.
+
+    A constrained fit's covariance on its active face is ``Z (Z' M Z)^+ Z'``.
+    Weights far apart can put curvature off the face that is ``1e15`` or more
+    times the curvature on it, and a quadratic form of that covariance with
+    full rows, or its product with the full data Gram, then cancels at that
+    ratio times ``u``.  Rows projected before any product carry only their own
+    rounding, ``gamma_p |x_i|' |Z|``, so leverage and EDF are read here.
+    """
+
+    def __init__(self, design: MetricsDesign, basis: NDArray):
+        self._design = design
+        self._basis = np.asarray(basis, dtype=np.float64)
+        self.n = int(design.shape[0])
+        self.p = int(self._basis.shape[1])
+        self.shape = (self.n, self.p)
+
+    def iter_dense_chunks(self) -> Iterator[tuple[int, int, NDArray]]:
+        for start, stop, block in iter_dense_chunks(self._design):
+            yield start, stop, block @ self._basis
+
+    def weighted_moments(self, W: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+        W = np.asarray(W, dtype=np.float64)
+        if W.shape != (self.n,):
+            raise ValueError("working weights must match projected design rows")
+        return _anchored_weighted_moments(self.iter_dense_chunks, W, self.p)
+
+
+MetricsDesign = DesignMatrix | EvaluationDesign | ProjectedDesign | NDArray
 
 
 def centered_gram_from_moments(gram: NDArray, xtw1: NDArray, sum_w: float) -> NDArray:
@@ -304,7 +333,7 @@ def centered_gram_from_moments(gram: NDArray, xtw1: NDArray, sum_w: float) -> ND
 
 def iter_dense_chunks(design: MetricsDesign) -> Iterator[tuple[int, int, NDArray]]:
     """Yield bounded dense row blocks from grouped or evaluation designs."""
-    if isinstance(design, EvaluationDesign):
+    if isinstance(design, EvaluationDesign | ProjectedDesign):
         yield from design.iter_dense_chunks()
         return
 
@@ -462,7 +491,7 @@ def _anchored_weighted_moments(chunks, W: NDArray, p: int) -> tuple[NDArray, NDA
 def weighted_moments(design: MetricsDesign, W: NDArray) -> tuple[NDArray, NDArray, NDArray]:
     """Return raw Gram, intercept cross-product, and centered data Gram."""
     W = np.asarray(W, dtype=np.float64)
-    if isinstance(design, EvaluationDesign):
+    if isinstance(design, EvaluationDesign | ProjectedDesign):
         return design.weighted_moments(W)
 
     if isinstance(design, np.ndarray):

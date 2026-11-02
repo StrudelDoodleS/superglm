@@ -5,8 +5,7 @@ import pandas as pd
 import pytest
 
 import superglm.inference.metrics as metrics_module
-from superglm import Categorical, Constraint, Numeric, RandomEffect, Spline, SuperGLM
-from superglm.features.spline import PSpline
+from superglm import Categorical, Numeric, RandomEffect, Spline, SuperGLM
 
 
 def _sample_data(n: int = 500):
@@ -122,35 +121,6 @@ def test_ordinary_metrics_use_compact_inference_after_fit_state_release():
     np.testing.assert_allclose(released_metrics._active_R_factor, compact["R_a"])
     np.testing.assert_allclose(released_metrics._influence_edf[0], compact["edf"])
     np.testing.assert_allclose(released_metrics._influence_edf[1], compact["edf1"])
-
-
-def test_scop_metrics_use_compact_inference_after_fit_state_release():
-    rng = np.random.default_rng(20260718)
-    x = np.linspace(0.0, 1.0, 120)
-    X = pd.DataFrame({"x": x})
-    y = 0.2 + 1.7 * x + rng.normal(0.0, 0.12, size=x.size)
-    model = SuperGLM(
-        family="gaussian",
-        selection_penalty=0.0,
-        spline_penalty=1.7,
-        retain_fit_state=False,
-        features={
-            "x": PSpline(n_knots=6, constraint=Constraint.fit.increasing, shape_engine="scop")
-        },
-    ).fit(X, y)
-
-    assert model._solver_result.scop_inference is not None
-    assert model._dm is None
-    assert "_fit_active_info" not in model.__dict__
-    compact = model.__dict__["_fit_inference_info"]
-
-    metrics = model.metrics(X, y)
-    _, _, inverse, augmented, _ = metrics._active_info
-
-    np.testing.assert_allclose(inverse, compact["XtWX_inv"])
-    np.testing.assert_allclose(augmented, compact["XtWX_inv_aug"])
-    assert np.all(np.isfinite(metrics.leverage))
-    assert "_fit_active_info" not in model.__dict__
 
 
 def test_released_metrics_reuse_compact_inference_for_equal_fit_geometry():

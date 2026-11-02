@@ -9,21 +9,20 @@ from scipy import sparse
 
 from superglm import Categorical, Spline, SuperGLM
 from superglm._fit_trace import TraceRun
-from superglm.distributions import Gamma, Gaussian, Poisson
+from superglm.distributions import Gamma, Poisson
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DesignMatrix,
     RandomEffectGroupMatrix,
     SparseSSPGroupMatrix,
 )
-from superglm.links import IdentityLink, LogLink
+from superglm.links import LogLink
 from superglm.reml import direct, observed_geometry
 from superglm.solvers import centered_system
 from superglm.solvers.irls_direct import _finalise as irls_direct_finalise
 from superglm.solvers.irls_direct import _fit as irls_direct
 from superglm.solvers.irls_direct import _search as irls_direct_search
 from superglm.solvers.irls_state import _IRLSStepDecision
-from superglm.solvers.scop import build_scop_solver_reparam
 from superglm.types import GroupSlice, LinearConstraintSet
 
 
@@ -360,33 +359,12 @@ def test_a_rejected_fisher_step_keeps_the_reuse_entry_on_fisher_systems(monkeypa
     assert set(remembered) <= {"fisher"}
 
 
-def test_scop_and_non_gamma_do_not_populate_the_payload():
+def test_non_gamma_does_not_populate_the_payload():
     problem = _problem()
     entry = centered_system._FisherDataReuse()
     _fit(problem, entry)
     dm, groups, _, link, dense = problem
     _fit((dm, groups, Poisson(), link, dense), entry)
-    assert entry.data is None and entry.weights is None
-
-    _fit(problem, entry)
-    reparam = build_scop_solver_reparam(q_raw=2, kind="increasing")
-    irls_direct.fit_irls_direct(
-        np.array([[-1.0], [1.0]]),
-        np.array([-1.0, 1.0]),
-        np.ones(2),
-        Gaussian(),
-        IdentityLink(),
-        [GroupSlice("shape", 0, 1, monotone_engine="scop", scop_reparameterization=reparam)],
-        lambda2=0.0,
-        beta_init=np.ones(1),
-        intercept_init=0.0,
-        max_iter=1,
-        S_override=np.zeros((1, 1)),
-        scop_state_init={0: {"beta_eff": np.zeros(1), "S_scop": np.zeros((1, 1))}},
-        _compute_scop_postfit_inference=False,
-        weight_semantics="frequency",
-        _fisher_data_reuse=entry,
-    )
     assert entry.data is None and entry.weights is None
 
 

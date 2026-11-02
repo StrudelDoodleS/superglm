@@ -13,7 +13,7 @@ from numpy.typing import NDArray
 from superglm._roundoff import UNIT_ROUNDOFF, gamma_up
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.results.iteration import DistributionalEFSConfig
-from superglm.distributional.results.solver import DenseSolverResult, _record_penalty_objective
+from superglm.distributional.results.solver import DenseSolverResult
 from superglm.distributional.smoothing.endpoint_laml import evaluate_endpoint_laplace
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.smoothing.proposals import _scaled_proposal
@@ -59,9 +59,6 @@ def joint_laplace_objective(
     )
     if not math.isfinite(objective):
         raise ValueError("joint Laplace objective is non-finite")
-    _record_penalty_objective(
-        layout, result, lambdas=lambdas, evaluation=penalty_evaluation, objective=float(objective)
-    )
     return float(objective)
 
 

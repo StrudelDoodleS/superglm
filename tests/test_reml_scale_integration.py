@@ -201,6 +201,7 @@ def test_finalize_profiles_phi_from_post_qp_state(monkeypatch: pytest.MonkeyPatc
         lambdas={"smooth": 1.0},
         n_reml_iter=2,
         converged=True,
+        curvature_source="fisher",
     )
     dm = SimpleNamespace(p=1, group_matrices=[], matvec=lambda beta: np.zeros(3))
     model = SimpleNamespace(
@@ -221,6 +222,19 @@ def test_finalize_profiles_phi_from_post_qp_state(monkeypatch: pytest.MonkeyPatc
         "maybe_qp_passthrough_refit",
         lambda *args, **kwargs: post_qp,
     )
+    # The terminal unconstrained refit: the optimizer's state, unchanged.
+    monkeypatch.setattr(reml_finalize, "rebuild_dm_with_lambdas", lambda *args, **kwargs: dm)
+    monkeypatch.setattr(reml_finalize, "_map_beta_between_bases", lambda beta, *args: beta)
+    monkeypatch.setattr(reml_finalize, "_map_centred_state_between_bases", lambda *args: None)
+    monkeypatch.setattr(reml_finalize, "centred_warm_start", lambda *args: None)
+    monkeypatch.setattr(
+        reml_finalize.IdentifiedLaplace,
+        "for_design",
+        classmethod(lambda cls, *args, **kwargs: cls()),
+    )
+    monkeypatch.setattr(
+        reml_finalize, "fit_irls_direct", lambda *args, **kwargs: (initial, None, None)
+    )
 
     monkeypatch.setattr(
         reml_finalize,
@@ -235,7 +249,6 @@ def test_finalize_profiles_phi_from_post_qp_state(monkeypatch: pytest.MonkeyPatc
     reml_finalize.finalize_reml_fit(
         model,
         best=best,
-        use_direct=False,
         reml_groups=[],
         reml_penalties=[],
         y=np.array([0.5, 1.0, 1.5]),

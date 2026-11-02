@@ -15,13 +15,17 @@ from superglm.group_matrix import (
     RandomEffectGroupMatrix,
     SparseSSPGroupMatrix,
 )
-from superglm.solvers.structured import (
-    build_block_structured_system,
+from superglm.solvers._structured.layout import (
     build_nested_structured_layout,
-    build_nested_structured_system,
-    select_structured_group,
     structured_design_matvec,
     structured_design_rmatvec,
+)
+from superglm.solvers._structured.moments import (
+    build_block_structured_system,
+    build_nested_structured_system,
+)
+from superglm.solvers._structured.selection import (
+    select_structured_group,
 )
 from superglm.types import GroupSlice, LinearConstraintSet
 
@@ -356,7 +360,9 @@ def test_an_fs_leaf_pass_forms_no_stack_beyond_what_the_step_reads(_wide_border_
     import tracemalloc
 
     from superglm.solvers._structured.block_leaves import build_factor_smooth_leaf_system
-    from superglm.solvers.structured import get_structured_layout
+    from superglm.solvers._structured.layout import (
+        get_structured_layout,
+    )
 
     model, p = _wide_border_fs_fit
     K = _WIDE["K"]
@@ -412,7 +418,9 @@ def test_the_fs_build_after_a_compile_frees_the_stack_the_compile_pinned(
 
     from superglm import _numba_compile
     from superglm.solvers._structured import block_leaves
-    from superglm.solvers.structured import get_structured_layout
+    from superglm.solvers._structured.layout import (
+        get_structured_layout,
+    )
 
     model, _ = _wide_border_fs_fit
     K, k = _WIDE["K"], _WIDE["k"]
@@ -495,7 +503,9 @@ def test_the_first_build_after_warmup_does_not_collect(_wide_border_fs_fit) -> N
     import superglm
     from superglm import _numba_compile
     from superglm.solvers._structured import block_leaves
-    from superglm.solvers.structured import get_structured_layout
+    from superglm.solvers._structured.layout import (
+        get_structured_layout,
+    )
 
     model, _ = _wide_border_fs_fit
     system = model._linear_system_state.system
@@ -593,7 +603,9 @@ def test_an_sz_leafs_trailing_factor_forms_no_stack_of_level_triangles(_wide_bor
     import tracemalloc
 
     import superglm.solvers._structured.block_leaves as leaves
-    from superglm.solvers.structured import get_structured_layout
+    from superglm.solvers._structured.layout import (
+        get_structured_layout,
+    )
 
     model, p = _wide_border_sz_fit
     K, k = _WIDE["K"], _WIDE["k"]

@@ -23,7 +23,7 @@ from superglm.editor import EditorSession
 from superglm.editor.errors import EditorValueError
 from superglm.editor.knots import decade_step
 from superglm.editor.payloads import session_payload
-from tests.test_editor import _post_json
+from tests.test_editor import _post_json, _post_refit_at_once
 
 BANDS = [f"B{i}" for i in range(8)]
 AGE_KNOTS = [20.0, 22.0, 24.0, 26.0, 35.0, 50.0, 70.0]
@@ -592,15 +592,12 @@ def test_the_widget_stages_knots_and_refits_them_at_once(book):
         )
         assert staged["state"]["terms"]["age"]["pending"]["knots"]["count"] == 8
         session.pending.clear()
-        _post_json(f"{widget.url}/knots", {"term": "band", "params": {"positions": [2.5]}})
+        _post_refit_at_once(widget, "knots", "band", {"positions": [2.5]})
         # Halfway between the third and fourth levels, at 2/7 and 3/7: a few roundings.
         u = np.finfo(np.float64).eps / 2
         np.testing.assert_allclose(_knots(session.model, "band"), [2.5 / 7], rtol=4 * u, atol=0)
         with pytest.raises(urllib.error.HTTPError) as refused:
-            _post_json(
-                f"{widget.url}/knots",
-                {"term": "age", "params": {"count": 0, "strategy": "uniform"}},
-            )
+            _post_refit_at_once(widget, "knots", "age", {"count": 0, "strategy": "uniform"})
         assert json.loads(refused.value.read().decode("utf-8"))["error"] == (
             "The knot count must be a whole number of at least 1."
         )
@@ -796,12 +793,12 @@ def test_quantile_knots_crowded_where_the_data_is_dense_still_move_by_hand():
 
 
 @pytest.mark.parametrize(
-    ("term", "count"), [("x1", 6), ("band", 3)], ids=["numeric", "ordered_basis_names_no_kind"]
+    ("term", "count"), [("x1", 4), ("band", 3)], ids=["numeric", "ordered_basis_names_no_kind"]
 )
-def test_a_structure_applies_the_knots_of_a_term_that_names_no_kind_beside_scop(term, count):
-    """Beside a SCOP term a monotone spline with no kind fits as ``ps``, which ``k=8`` makes 4
-    knots. The structure file records the 6 the editor chose; applied to the declaration, the
-    fit must place them rather than rebuild ``ps`` from the declared ``k``. Fails on b563b4c7: 4."""
+def test_a_structure_applies_the_knots_of_a_term_that_names_no_kind(term, count):
+    """A monotone spline declared with no kind beside a constrained ``ps`` fits as ``cr``. The
+    structure file records the knot count the editor chose; applied to the declaration, the fit
+    must place those knots rather than rebuild them from the declared ``k``."""
     rng = np.random.default_rng(20261021)
     n = 600
     x2 = rng.uniform(0, 1, n)
@@ -817,7 +814,7 @@ def test_a_structure_applies_the_knots_of_a_term_that_names_no_kind_beside_scop(
             selection_penalty=0,
             features={
                 "x1": Spline(k=8, constraint=inc),
-                "x2": Spline(kind="ps", k=8, constraint=inc, shape_engine="scop"),
+                "x2": Spline(kind="ps", k=8, constraint=inc),
                 "band": OrderedCategorical(order=BANDS, basis=Spline(k=6, constraint=inc)),
             },
         )
@@ -825,6 +822,8 @@ def test_a_structure_applies_the_knots_of_a_term_that_names_no_kind_beside_scop(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model = declared().fit(X, y)
+        # The editor's count differs from the declared placement, so ignoring it would fail.
+        assert _knots(model, term).size != count
         session = EditorSession.from_model(model, train_data=(X, y, np.ones(n)))
         session.replace_with_knots(term, {"count": count, "strategy": "uniform"})
         exported = json.loads(session.export_structure())

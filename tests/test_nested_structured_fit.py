@@ -85,12 +85,12 @@ from superglm.reml._leverage_rows import reads_row_supports
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.penalty_algebra import build_penalty_context, build_penalty_matrix
 from superglm.reml.w_derivatives import reml_w_correction
-from superglm.solvers.irls_direct import fit_irls_direct
-from superglm.solvers.mode_score import mode_certification_bar
-from superglm.solvers.structured import (
+from superglm.solvers._structured.nested import (
     NestedSchurFactor,
     ProfiledNestedSchurFactor,
 )
+from superglm.solvers.irls_direct import fit_irls_direct
+from superglm.solvers.mode_score import mode_certification_bar
 
 EPS = np.finfo(np.float64).eps
 PIRLS_TOL = 1e-10

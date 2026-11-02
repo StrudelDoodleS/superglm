@@ -428,41 +428,6 @@ def piecewise_knot_covariance(
     return cast(NDArray, M @ Cov_g @ M.T)
 
 
-def simultaneous_bands(
-    feature: str,
-    *,
-    result: PIRLSResult,
-    groups: list[GroupSlice],
-    specs: dict[str, Any],
-    covariance_fn,
-    alpha: float = 0.05,
-    n_sim: int = 10_000,
-    n_points: int = 200,
-    seed: int = 42,
-    center: bool = False,
-    interaction_specs: Mapping[Any, Any] | None = None,
-) -> pd.DataFrame:
-    """Simultaneous confidence bands for a spline feature.
-
-    The band is ``simultaneous_band_and_critical_value``'s; see it for the
-    simulation.
-    """
-    bands, _ = simultaneous_band_and_critical_value(
-        feature,
-        result=result,
-        groups=groups,
-        specs=specs,
-        covariance_fn=covariance_fn,
-        alpha=alpha,
-        n_sim=n_sim,
-        n_points=n_points,
-        seed=seed,
-        center=center,
-        interaction_specs=interaction_specs,
-    )
-    return bands
-
-
 def _principal_root(covariance: NDArray) -> NDArray:
     """The principal square root ``V diag(sqrt(lambda)) V'`` of a covariance.
 
@@ -597,9 +562,17 @@ def simultaneous_band_and_critical_value(
     return bands, c_sim
 
 
+def simultaneous_bands(feature: str, **kwargs: Any) -> pd.DataFrame:
+    """The bands of :func:`simultaneous_band_and_critical_value`, without the critical value.
+
+    Deprecated: ``superglm.inference`` and ``superglm.inference.term`` serve
+    it with a FutureWarning; ``SuperGLM.simultaneous_bands`` is the public form.
+    """
+    return simultaneous_band_and_critical_value(feature, **kwargs)[0]
+
+
 __all__ = [
     "feature_se_from_cov",
     "piecewise_knot_covariance",
     "simultaneous_band_and_critical_value",
-    "simultaneous_bands",
 ]

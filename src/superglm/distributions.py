@@ -6,6 +6,7 @@ Each distribution provides V(mu) (variance function) and d(y, mu)
 
 from __future__ import annotations
 
+import warnings
 from typing import Protocol, runtime_checkable
 
 import numpy as np
@@ -845,9 +846,7 @@ def weighted_log_likelihood(
     carried = np.asarray(weights, dtype=np.float64)
     if np.all((carried == 0.0) | (carried == 1.0)) or not report_contract:
         return float(family.log_likelihood(y, mu, weights, phi))
-    from superglm import _held_warnings
-
-    _held_warnings.warn(
+    warnings.warn(
         f"{type(family).__name__} is not a SuperGLM-shipped family, so its EDM "
         "prior-weight normalizer cannot be derived here. Its own log_likelihood "
         "is being used unchanged, which reports sum(w * log f(y; mu, phi)) -- "

@@ -896,12 +896,10 @@ def test_reml_fallback_keeps_smoothing_and_selection_fields_distinct(two_fit_dat
 
 def test_fit_workspace_preserves_bounded_reml_runtime_hooks():
     model = _reml_model()
-    model._max_analytical_per_w = 2
     model._select_snap = False
 
     workspace = FitWorkspace.start(model, mode="fit_reml", validated_inputs=None)
 
-    assert workspace.model._max_analytical_per_w == 2
     assert workspace.model._select_snap is False
 
 

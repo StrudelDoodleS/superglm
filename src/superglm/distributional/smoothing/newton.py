@@ -613,7 +613,6 @@ def newton_iteration_record(
         coefficient_fit_indices=fit_indices,
         accepted_fit_index=fit_indices[-1] if accepted else None,
         coefficient_tolerances=tolerances,
-        boundary_nominations=(),
         update_curvature=state.fit.terminal_curvature,
         accepted_curvature=None if accepted_fit is None else accepted_fit.terminal_curvature,
         stage="newton",

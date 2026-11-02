@@ -64,7 +64,6 @@ def _four_smooth_fit(*, link: str = "logit") -> SuperGLM:
         y,
         sample_weight=weights,
         offset=offset,
-        runtime_validation="skip",
     )
 
 
@@ -85,7 +84,7 @@ def _lookup_fit() -> SuperGLM:
         },
         interactions=[("a", "b"), ("e", "c")],
         discrete=False,
-    ).fit_reml(frame, y, runtime_validation="skip")
+    ).fit_reml(frame, y)
 
 
 def _correction_case(*, zero_weight_outlier: bool = False):
@@ -342,7 +341,7 @@ def test_one_smooth_with_many_categories_keeps_specialized_derivative_gram() -> 
             "x": Spline(n_knots=6, penalty="ssp"),
             "segment": Categorical(base="first"),
         },
-    ).fit_reml(frame, y, runtime_validation="skip")
+    ).fit_reml(frame, y)
 
     assert model._reml_profile["reml_w_correction_mode"] == "derivative_grams"
 
@@ -538,6 +537,6 @@ def test_profile_reports_when_weight_correction_is_structurally_zero() -> None:
         family="binomial",
         selection_penalty=0.0,
         features={f"x{i}": Spline(n_knots=6, penalty="ssp") for i in range(4)},
-    ).fit_reml(frame, y, runtime_validation="skip")
+    ).fit_reml(frame, y)
 
     assert model._reml_profile["reml_w_correction_mode"] == "none"

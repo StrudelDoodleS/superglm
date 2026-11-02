@@ -460,8 +460,8 @@ test("a running mutation suppresses ordinary and structural duplicate submission
   const selection = await actions.executeSelectionMutation({ term: "age", indices: [2] });
   const structural = await actions.executeStructuralMutation({
     name: "collapse levels",
-    path: "/collapse_levels",
-    payload: { term: "age", method: "auto" }
+    path: "/stage",
+    payload: { operation: "collapse", term: "age", params: { levels: ["1", "2"] } }
   });
 
   assert.equal(second.ok, false);
@@ -492,8 +492,8 @@ test("structural mutation commits, paints, becomes idle, then schedules immediat
         postCalls += 1;
         events.push("post");
         assert.equal(store.getState().request.mutation.blocking, true);
-        assert.equal(path, "/collapse_levels");
-        assert.deepEqual(payload, { term: "age", method: "auto" });
+        assert.equal(path, "/stage");
+        assert.deepEqual(payload, { operation: "collapse", term: "age", params: { levels: ["1", "2"] } });
         return envelope;
       },
       getState: async () => { throw new Error("success must not recover through /state"); }
@@ -514,8 +514,8 @@ test("structural mutation commits, paints, becomes idle, then schedules immediat
 
   const pending = actions.executeStructuralMutation({
     name: "collapse levels",
-    path: "/collapse_levels",
-    payload: { term: "age", method: "auto" },
+    path: "/stage",
+    payload: { operation: "collapse", term: "age", params: { levels: ["1", "2"] } },
     onRequestSettled: () => { events.push("request-settled"); },
     onPrimaryCommitted: () => {
       events.push("primary-committed");
@@ -569,8 +569,8 @@ for (const hookFailure of ["throw", "reject"]) {
         };
     const result = await actions.executeStructuralMutation({
       name: "collapse levels",
-      path: "/collapse_levels",
-      payload: { term: "age", method: "auto" },
+      path: "/stage",
+      payload: { operation: "collapse", term: "age", params: { levels: ["1", "2"] } },
       onRequestSettled
     });
 
@@ -616,8 +616,8 @@ test("subscriber failures after structural commit retain success and notify rema
 
   const result = await actions.executeStructuralMutation({
     name: "collapse levels",
-    path: "/collapse_levels",
-    payload: { term: "age", method: "auto" }
+    path: "/stage",
+    payload: { operation: "collapse", term: "age", params: { levels: ["1", "2"] } }
   });
 
   assert.deepEqual(result, { ok: true, envelope });
@@ -652,8 +652,8 @@ test("successful structural finalization cannot reject on an idle listener error
 
   const result = await actions.executeStructuralMutation({
     name: "collapse levels",
-    path: "/collapse_levels",
-    payload: { term: "age", method: "auto" }
+    path: "/stage",
+    payload: { operation: "collapse", term: "age", params: { levels: ["1", "2"] } }
   });
 
   assert.deepEqual(result, { ok: true, envelope });
@@ -694,8 +694,8 @@ test("structural commit failure before envelope installation stays ambiguous", a
 
   const result = await actions.executeStructuralMutation({
     name: "collapse levels",
-    path: "/collapse_levels",
-    payload: { term: "age", method: "auto" }
+    path: "/stage",
+    payload: { operation: "collapse", term: "age", params: { levels: ["1", "2"] } }
   });
 
   assert.equal(result.ok, false);
@@ -736,8 +736,8 @@ test("malformed structural response reconciles once and cannot be retried", asyn
   });
   const descriptor = {
     name: "collapse levels",
-    path: "/collapse_levels",
-    payload: { term: "age", method: "auto" },
+    path: "/stage",
+    payload: { operation: "collapse", term: "age", params: { levels: ["1", "2"] } },
     onRequestSettled: () => { events.push("request-settled"); },
     waitForSecondary: (/** @type {number} */ revision) => { secondaryRevisions.push(revision); }
   };
@@ -777,8 +777,8 @@ test("structural response validates the state object before committing", async (
 
   const result = await actions.executeStructuralMutation({
     name: "collapse levels",
-    path: "/collapse_levels",
-    payload: { term: "age", method: "auto" }
+    path: "/stage",
+    payload: { operation: "collapse", term: "age", params: { levels: ["1", "2"] } }
   });
 
   assert.equal(result.ok, false);
@@ -818,8 +818,8 @@ test("structural response rejects malformed snapshot and timing contracts", asyn
 
     const result = await actions.executeStructuralMutation({
       name: "collapse levels",
-      path: "/collapse_levels",
-      payload: { term: "age", method: "auto" }
+      path: "/stage",
+      payload: { operation: "collapse", term: "age", params: { levels: ["1", "2"] } }
     });
 
     assert.equal(result.ok, false);
@@ -857,8 +857,8 @@ test("structural paint failure keeps authoritative success without recovery", as
 
   const result = await actions.executeStructuralMutation({
     name: "collapse levels",
-    path: "/collapse_levels",
-    payload: { term: "age", method: "auto" }
+    path: "/stage",
+    payload: { operation: "collapse", term: "age", params: { levels: ["1", "2"] } }
   });
 
   assert.deepEqual(result, { ok: true, envelope });
@@ -890,8 +890,8 @@ test("structural evidence scheduling failure cannot change authoritative success
 
   const result = await actions.executeStructuralMutation({
     name: "collapse levels",
-    path: "/collapse_levels",
-    payload: { term: "age", method: "auto" }
+    path: "/stage",
+    payload: { operation: "collapse", term: "age", params: { levels: ["1", "2"] } }
   });
 
   assert.deepEqual(result, { ok: true, envelope });
@@ -947,8 +947,8 @@ test("ambiguous structural failure reconciles by current revision and never retr
 
     const result = await actions.executeStructuralMutation({
       name: "collapse levels",
-      path: "/collapse_levels",
-      payload: { term: "age", method: "auto" },
+      path: "/stage",
+      payload: { operation: "collapse", term: "age", params: { levels: ["1", "2"] } },
       onRequestSettled: () => { settledCalls += 1; }
     });
 
@@ -1004,8 +1004,8 @@ test("structural reconciliation uses the current revision after recovery starts"
 
   const pending = actions.executeStructuralMutation({
     name: "collapse levels",
-    path: "/collapse_levels",
-    payload: { term: "age", method: "auto" }
+    path: "/stage",
+    payload: { operation: "collapse", term: "age", params: { levels: ["1", "2"] } }
   });
   await recoveryStarted.promise;
   const newerEnvelope = transitionEnvelope(5, "newer");

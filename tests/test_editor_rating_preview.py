@@ -206,7 +206,7 @@ def test_a_model_with_a_random_effect_says_rating_tables_do_not_cover_it():
         features={"x": Numeric(), "group": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.0))},
         selection_penalty=0.0,
         direct_solve="structured",
-    ).fit_reml(X, y, runtime_validation="skip")
+    ).fit_reml(X, y)
     session = EditorSession.from_model(model, terms=["x"])
     widget = session.widget()
     try:

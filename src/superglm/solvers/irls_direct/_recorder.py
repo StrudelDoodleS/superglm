@@ -8,13 +8,15 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from superglm.solvers._structured.selection import (
+    record_auto_backend_decision,
+)
 from superglm.solvers.irls_state import _IRLSState
 from superglm.solvers.pirls import (
     IterationDiagnostics,
     TerminationReason,
     _extreme_weight_indices,
 )
-from superglm.solvers.structured import record_auto_backend_decision
 
 if TYPE_CHECKING:
     from superglm.solvers.irls_direct._fit import _IRLSDirectFit
@@ -76,8 +78,7 @@ class _IRLSDirectRecorder:
         # trial's from its endpoints'), its clip and its mean (``eta_formed``).
         # The timers nest, so they are not summed: a proposal or trial the line
         # search evaluates is timed inside its evaluation window, so its eta time
-        # is part of ``t_deviance`` and ``t_deviance_eval`` too, while the SCOP
-        # proposal's predictor is formed outside that window.
+        # is part of ``t_deviance`` and ``t_deviance_eval`` too.
         self.t_working = 0.0
         self.t_gram = 0.0
         self.t_solve = 0.0
@@ -186,7 +187,7 @@ class _IRLSDirectRecorder:
         """The loop's clock starts: ``irls_total_s`` runs from here to ``stop``.
 
         Every phase time counts inside that window, so a state evaluated before
-        it (a SCOP fit's starting state) leaves ``irls_eta_s`` untouched.
+        it leaves ``irls_eta_s`` untouched.
         """
         self.t_eta = 0.0
         self.t_start = time.perf_counter()
@@ -356,7 +357,6 @@ class _IRLSDirectRecorder:
                 "rank_truncated": fit.rank_truncated,
                 "cond_estimate": float(fit._cond_est),
                 "used_svd_fallback": bool(fit._used_svd),
-                "has_scop": bool(fit._has_scop),
                 "working_curvature": (
                     fit.working_rows.curvature_source if fit.newton_score is None else "observed"
                 ),

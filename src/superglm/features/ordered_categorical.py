@@ -649,7 +649,7 @@ class OrderedCategorical:
         # & Tutz (2010), "Sparse modeling of categorial explanatory variables",
         # Ann. Appl. Stat. 4(4):2150-2180: an L1 penalty on adjacent
         # level-effect differences fuses bands data-adaptively -- the penalized
-        # cousin of the editor's /collapse_levels loop, whose stated form is
+        # cousin of the editor's collapse loop, whose stated form is
         # exactly this `grouping=`. If that spelling is ever wanted it attaches
         # here as its own mode (e.g. `fuse=`) beside `basis=`; the stated-
         # structure bases below answer a different question and must not grow
@@ -947,8 +947,7 @@ class OrderedCategorical:
         asks for the matching raw geometry off the FEATURE spec -- the same
         object for a plain ``Spline``, this wrapper for an ``OrderedCategorical``
         -- and without this forward it finds nothing and reports the geometry as
-        unavailable. Only QP bases take that branch; a ``ps`` declared with
-        ``shape_engine="scop"`` routes through SCOP and never does.
+        unavailable.
 
         The constraint is stated in the inner spline's own coefficient space,
         which is the space the returned design lives in, so it needs no

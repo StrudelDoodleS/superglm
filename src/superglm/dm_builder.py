@@ -11,10 +11,7 @@ model.py focused on orchestration.
 
 from __future__ import annotations
 
-import copy
 import logging
-import re
-import warnings
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, cast
@@ -34,7 +31,6 @@ from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
     DesignMatrix,
-    DiscretizedSCOPGroupMatrix,
     DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
@@ -902,9 +898,6 @@ def _process_info(
                 gm.component_types = info.component_types
                 if info.lambda_policies is not None:
                     gm.lambda_policies = info.lambda_policies
-        elif use_discrete and info.scop_reparameterization is not None and bin_idx is not None:
-            # SCOP discrete: columns holds the bin-level centered design
-            gm = DiscretizedSCOPGroupMatrix(info.columns, bin_idx)
         elif info.structured_kind == "factor_smooth":
             factor_basis = (
                 info.factor_smooth_basis_unique
@@ -990,53 +983,6 @@ class BuildResult:
     sample_weight: NDArray
     offset: NDArray | None
     compiled: CompiledPredictorDesign
-
-
-def resolve_kindless_shape_engines(specs: dict[str, FeatureSpec], feature_order) -> None:
-    """Constrained splines with no kind beside a SCOP constrained term build as ``ps`` on SCOP.
-
-    A ``cr`` constraint goes to the QP, and one model cannot use both engines.
-    Before 0.40 such a spline was ``ps``; it is again when every QP term named no kind.
-    A wrapper such as an ordered categorical keeps its levels and takes the ``ps`` basis.
-    Only a P-spline declared with ``shape_engine="scop"``, or saved before that
-    option existed, is on SCOP (``shape_engine``).
-    """
-    from superglm.features._spline_build import _uses_fit_time_shape_constraints as shaped
-    from superglm.features._spline_build import shape_engine
-    from superglm.features._spline_factory import kindless_as_ps, warn_kindless_ps
-    from superglm.features.ordered_categorical import _CLAMP_WARNING_PREFIX
-
-    inner = {name: getattr(specs[name], "_spline", specs[name]) for name in feature_order}
-    on_scop = [name for name, spec in inner.items() if shape_engine(spec) == "scop"]
-    if not on_scop:
-        return
-    shaped_qp = {
-        name: spec for name, spec in inner.items() if shaped(spec) and shape_engine(spec) != "scop"
-    }
-    if not shaped_qp or any(
-        getattr(spec, "_kindless_args", None) is None for spec in shaped_qp.values()
-    ):
-        return
-    try:
-        on_qp = {name: kindless_as_ps(spec, "scop") for name, spec in shaped_qp.items()}
-    except ValueError:
-        # ps cannot take the declaration (k below 5, ranges): the SCOP + QP refusal stands.
-        return
-    for name, replacement in on_qp.items():
-        reason = f"would put this constraint on the QP beside {on_scop[0]!r} on SCOP"
-        warn_kindless_ps(reason, f"Feature {name!r}: ", "kind='ps', shape_engine='scop'")
-        if inner[name] is specs[name]:
-            specs[name] = cast(FeatureSpec, replacement)
-            continue
-        wrapper: Any = copy.deepcopy(specs[name])
-        wrapper._spline_obj = replacement
-        with warnings.catch_warnings():
-            # The wrapper's construction already warned of the clamp to its levels.
-            warnings.filterwarnings(
-                "ignore", message=re.escape(_CLAMP_WARNING_PREFIX), category=UserWarning
-            )
-            wrapper._init_spline()
-        specs[name] = wrapper
 
 
 def build_design_matrix(
@@ -1147,7 +1093,6 @@ def build_design_matrix(
     # Tweedie prior fit.
     physical_rows = weight_semantics == PRIOR_WEIGHTS
     geometry_weight = knot_geometry_weight(sample_weight, weight_semantics)
-    resolve_kindless_shape_engines(specs, feature_order)
 
     compiled = compile_predictor_design(
         X,

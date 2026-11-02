@@ -818,7 +818,7 @@ def needs_factor_certification(
     change and is not carried by this field.
 
     Twenty-one direct call sites remain, across nine modules -- seven in
-    ``solvers/_structured/geometry.py``, five in ``reml/scop_geometry.py``, two
+    ``solvers/_structured/geometry.py``, five in the retired SCOP geometry, two
     each in ``reml/observed_geometry.py`` and ``reml/objective.py``, and one
     each in ``solvers/irls_direct.py``, ``solvers/constrained_qp.py``,
     ``reml/discrete.py``, ``model/state_ops.py`` and ``inference/metrics.py``.

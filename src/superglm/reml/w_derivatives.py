@@ -46,7 +46,38 @@ from superglm.reml.penalty_algebra import (
     penalty_component_dense_matrix,
     penalty_component_matvec,
 )
-from superglm.solvers._structured.block_leaves import factor_smooth_moment_operators
+from superglm.solvers._structured.balance_tree import (
+    ProfiledSumToZeroTreeFactor,
+)
+from superglm.solvers._structured.block_leaves import (
+    ProfiledFactorSmoothLeafFactor,
+    factor_smooth_moment_operators,
+)
+from superglm.solvers._structured.layout import (
+    FactorSmoothLeafLayout,
+    get_nested_structured_layout,
+    get_structured_layout,
+    structured_design_matvec,
+    structured_design_rmatvec,
+)
+from superglm.solvers._structured.moments import (
+    build_block_structured_system,
+    build_nested_structured_system,
+)
+from superglm.solvers._structured.nested import (
+    NestedStructuredLayout,
+    ProfiledNestedSchurFactor,
+)
+from superglm.solvers._structured.operators import (
+    CenteredBlockOperator,
+    CompactSymmetricOperator,
+    LowRankSymmetricOperator,
+    SumBlockOperator,
+    compact_operator_diagonal,
+)
+from superglm.solvers._structured.state import (
+    centred_data_operator,
+)
 from superglm.solvers.centered_system import (
     _dense_split,
     _DenseSplit,
@@ -69,25 +100,6 @@ from superglm.solvers.mode_score import (
     linear_predictor,
 )
 from superglm.solvers.pirls import PIRLSResult
-from superglm.solvers.structured import (
-    CenteredBlockOperator,
-    CompactSymmetricOperator,
-    FactorSmoothLeafLayout,
-    LowRankSymmetricOperator,
-    NestedStructuredLayout,
-    ProfiledFactorSmoothLeafFactor,
-    ProfiledNestedSchurFactor,
-    ProfiledSumToZeroTreeFactor,
-    SumBlockOperator,
-    build_block_structured_system,
-    build_nested_structured_system,
-    centred_data_operator,
-    compact_operator_diagonal,
-    get_nested_structured_layout,
-    get_structured_layout,
-    structured_design_matvec,
-    structured_design_rmatvec,
-)
 from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import GroupSlice, PenaltyComponent
 

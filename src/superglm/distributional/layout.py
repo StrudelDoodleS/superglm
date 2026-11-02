@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 import numpy as np
@@ -55,11 +55,6 @@ class StackedLayout:
     coefficient_names: tuple[str, ...]
     term_slices: Mapping[str, slice]
     penalties: tuple[PenaltyComponent, ...]
-    # Scalar producer evidence lasts for this layout's fit. Replacing a layout
-    # starts a new journal; no evaluations or dense fit objects are cached.
-    _penalty_objective_receipts: dict[tuple, object] = field(
-        default_factory=dict, init=False, repr=False, compare=False
-    )
 
     def __post_init__(self) -> None:
         predictor_names = tuple(state.name for state in self.predictors)

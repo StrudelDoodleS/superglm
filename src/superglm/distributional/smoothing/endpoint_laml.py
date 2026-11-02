@@ -24,7 +24,7 @@ from superglm.distributional.results.endpoint_evidence import (
     EndpointDirectionDecision,
     EndpointDirectionEvidence,
 )
-from superglm.distributional.results.solver import DenseSolverResult, _record_penalty_objective
+from superglm.distributional.results.solver import DenseSolverResult
 from superglm.distributional.smoothing.endpoint_direction import (
     FiniteDifferenceDirection,
     analytic_curvature_direction,
@@ -605,12 +605,5 @@ def evaluate_endpoint_laplace(
         penalty_rank=projected_penalty.rank,
         hessian_log_pdet=hessian_log_pdet,
         penalty_log_pdet=projected_penalty.log_pdet,
-    )
-    _record_penalty_objective(
-        layout,
-        result,
-        lambdas=endpoint_lambdas,
-        evaluation=penalty_evaluation,
-        objective=evaluation.objective,
     )
     return evaluation

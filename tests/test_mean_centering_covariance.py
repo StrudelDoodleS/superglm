@@ -434,7 +434,8 @@ def test_mean_centering_shifts_a_smooth_curve_and_passes_everything_else_through
     """
     import dataclasses
 
-    from superglm.inference import SmoothCurve, TermInference, _recenter_term, _safe_exp
+    from superglm.inference._term_helpers import _recenter_term
+    from superglm.inference._term_types import SmoothCurve, TermInference, _safe_exp
 
     log_rel = np.array([-0.4, -0.1, 0.2, 0.7])
     curve = SmoothCurve(

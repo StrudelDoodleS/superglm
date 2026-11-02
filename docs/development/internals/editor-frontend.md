@@ -166,11 +166,9 @@ waiting), and re-applies hand edits on the terms it did not restructure as one m
 
 `keep_reference` is a JSON boolean, true when absent; any other value is refused with the fixed
 sentence "keep_reference must be true or false.". With Settings' "Refit after every structural
-change" on, the browser posts to the operation's own route (`/collapse_levels`,
-`/ungroup_levels`, `/set_reference`, `/shape_range`, `/special_levels`, `/knots`, `/basis`)
-instead, which stages the change and refits it as one step that one Undo takes back. `/knots` takes
-`{term, params, method, level_display}`, with `params` in one of the three forms above; `/basis`
-takes the same fields, with `params` in one of its two.
+change" on, the browser adds `refit: true` to the same `/stage` request, which stages the change
+and refits every waiting change as one step that one Undo takes back. `refit` is a JSON boolean,
+false when absent; any other value is refused with "refit must be true or false.".
 
 The state snapshot carries the waiting changes in three places:
 
@@ -440,19 +438,15 @@ its wiring:
    spec (never a mutated fitted copy) and returns `(spec, metadata)`, where `metadata["label"]` is
    the short text the Undo and Redo popovers show. Raise `EditorValueError` or `EditorTypeError`
    with fixed text for every refusal.
-2. Add an `EditorSession.replace_with_...` method that passes the builder to `_refit_replacing` and
-   the refit to `_push_structure`. It records one `StructuralStep` holding the editor state before
-   the step (model, terms, edit history, level orders and selection) and puts the refit in force.
-3. Add an `EditorWidget._...` method that calls `_structural_step` with the operation name and the
-   session call. It takes the lock and returns the envelope.
-4. Add a token-guarded route in `server.py` that parses the payload explicitly.
-5. Add a `stage…` descriptor next to `stageReference` in `summary.js` and run it through
+2. Register it in `staging.py`: a branch in the builder dispatch, its parameters by label in
+   `_label_params`, and in `_REFIT_AT_ONCE` the step name it reports when refitted at once.
+   `/stage` and `/refit_pending` then carry it; it needs no widget method or route of its own.
+3. Add a `stage…` descriptor next to `stageReference` in `summary.js` and run it through
    `runStructuralChange` from `main.js`. The change is staged on `/stage` and waits, drawn on the
    chart, until Refit (`/refit_pending`, through `runStructuralRefit`) applies every waiting change
-   in one fit. Give it a case in `refitAtOnceTransition` too: with Settings' "Refit after every
-   structural change" on, the change goes to the operation's own route, which stages it and refits
-   at once as one step that one Undo takes back.
-6. Test the refit, the one pushed step and the refusals in `tests/test_editor_structure.py`, and add
+   in one fit. With Settings' "Refit after every structural change" on, the same request carries
+   `refit: true`, and Python stages it and refits at once as one step that one Undo takes back.
+4. Test the refit, the one pushed step and the refusals in `tests/test_editor_structure.py`, and add
    one browser case to `tests/editor/test_editor_structure_browser.py`.
 
 The timeline is shared, so `EditorSession.undo` and `redo`, Revert and the `undo_redo` snapshot

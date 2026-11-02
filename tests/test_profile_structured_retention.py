@@ -98,7 +98,6 @@ def _profile_model(
             n_knots=5,
             constraint=Constraint.fit.increasing,
             lambda_policy=constraint_policy,
-            shape_engine="scop",
         )
 
     if family_name == "nb":
@@ -230,7 +229,9 @@ def test_constrained_reml_reaches_the_route_with_structured_terms(
         direct_solve="auto",
         constrained_mode=constrained_mode,
     )
-    route_name = "run_fixed_monotone_reml" if constrained_mode == "fixed" else "run_scop_efs_reml"
+    route_name = (
+        "run_fixed_monotone_reml" if constrained_mode == "fixed" else "strip_qp_constraints"
+    )
     real_route = getattr(fit_ops_module, route_name)
     route_calls = []
 
@@ -239,7 +240,7 @@ def test_constrained_reml_reaches_the_route_with_structured_terms(
         return real_route(*args, **kwargs)
 
     monkeypatch.setattr(fit_ops_module, route_name, record_route)
-    model.fit_reml(X, y, max_reml_iter=2, runtime_validation="skip")
+    model.fit_reml(X, y, max_reml_iter=2)
 
     assert route_calls, "the constrained route was never entered"
     assert model.result.converged
@@ -256,7 +257,7 @@ def test_reporting_failure_preserves_installed_revision(
         term_kind="re",
         direct_solve="auto",
     )
-    model.fit_reml(X, y, runtime_validation="skip")
+    model.fit_reml(X, y)
     revision = getattr(model, "_fit_revision")
     predictions = model.predict(X)
     report = model.random_effects(term_name)
@@ -271,7 +272,7 @@ def test_reporting_failure_preserves_installed_revision(
     )
 
     with pytest.raises(RuntimeError, match="report support failed"):
-        model.fit_reml(X, y, runtime_validation="skip")
+        model.fit_reml(X, y)
 
     assert getattr(model, "_fit_revision") == revision
     np.testing.assert_allclose(model.predict(X), predictions, rtol=0.0, atol=0.0)

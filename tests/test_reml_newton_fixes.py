@@ -21,7 +21,7 @@ from superglm.distributions import Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
-from superglm.inference import _MAX_LOG_REL, _safe_exp
+from superglm.inference._term_types import _MAX_LOG_REL, _safe_exp
 
 # ── Fixtures ──────────────────────────────────────────────────────
 
@@ -304,7 +304,6 @@ class TestTerminationAuthority:
             y,
             max_reml_iter=8,
             reml_tol=1e9,
-            runtime_validation="skip",
         )
 
         assert model._reml_result.converged
@@ -337,7 +336,7 @@ class TestTerminationAuthority:
             selection_penalty=0,
         )
 
-        model.fit_reml(X, y, max_reml_iter=5, runtime_validation="skip")
+        model.fit_reml(X, y, max_reml_iter=5)
 
         result = model._reml_result
         assert not result.converged
@@ -356,7 +355,7 @@ class TestTerminationAuthority:
             selection_penalty=0,
         )
 
-        model.fit_reml(X, y, max_reml_iter=1, runtime_validation="skip")
+        model.fit_reml(X, y, max_reml_iter=1)
 
         result = model._reml_result
         assert model._reml_profile["reml_n_linesearch_fits"] > 0
@@ -391,7 +390,7 @@ class TestTerminationAuthority:
             discrete=True,
         )
 
-        model.fit_reml(X, y, max_reml_iter=1, runtime_validation="skip")
+        model.fit_reml(X, y, max_reml_iter=1)
 
         result = model._reml_result
         assert not result.converged
@@ -419,7 +418,7 @@ class TestTerminationAuthority:
             direct_solve="structured",
         )
 
-        model.fit_reml(X, y, max_reml_iter=20, runtime_validation="skip")
+        model.fit_reml(X, y, max_reml_iter=20)
 
         result = model._reml_result
         profile = model._reml_profile

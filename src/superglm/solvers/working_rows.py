@@ -289,7 +289,6 @@ def _fitted_null_intercept(
         _return_working_system=True,
         _compute_fit_statistics=False,
         _compute_reml_geometry=False,
-        _compute_scop_postfit_inference=False,
         separation="ignore",
         weight_semantics=weight_semantics,
     )

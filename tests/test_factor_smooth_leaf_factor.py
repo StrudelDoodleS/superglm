@@ -14,17 +14,19 @@ import numpy as np
 import pytest
 import scipy.interpolate
 
+from superglm.solvers._structured.assembly import (
+    build_penalized_block_operator,
+)
 from superglm.solvers._structured.block_leaves import (
     FactorSmoothLeafFactor,
     FactorSmoothPenalizedOperator,
     ProfiledFactorSmoothLeafFactor,
 )
-from superglm.solvers.structured import (
+from superglm.solvers._structured.operators import (
     BlockSymmetricOperator,
     CenteredBlockOperator,
     LowRankSymmetricOperator,
     _block_operator_bdlr,
-    build_penalized_block_operator,
     materialize_compact_operator,
 )
 from superglm.types import PenaltyComponent
@@ -940,7 +942,12 @@ def test_the_centred_operators_are_formed_on_the_c0_shifted_rows(discrete) -> No
         build_factor_smooth_leaf_system,
         factor_smooth_moment_operators,
     )
-    from superglm.solvers.structured import centred_data_operator, get_structured_layout
+    from superglm.solvers._structured.layout import (
+        get_structured_layout,
+    )
+    from superglm.solvers._structured.state import (
+        centred_data_operator,
+    )
 
     rng, dm, groups = _offset_design(discrete)
     n, p = dm.n, dm.p

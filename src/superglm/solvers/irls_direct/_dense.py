@@ -18,7 +18,7 @@ class _IRLSDirectDenseStep(_IRLSDirectStep):
     """The fit's step on the Gram path when it has no linear constraint: Cholesky or a certified factor.
 
     Chosen in ``_IRLSDirectFit._setup_systems`` when the fit takes none of the
-    QR, structured, SCOP and QP routes.  Each iteration forms the centred normal
+    QR, structured and QP routes.  Each iteration forms the centred normal
     equations, the intercept profiled out, through the fit's centred system and
     its caches, and solves them by Cholesky where the Gram certifies its own
     rank, else through the factor certificate of the grouped augmented design
@@ -82,4 +82,4 @@ class _IRLSDirectDenseStep(_IRLSDirectStep):
 
     def certificate_inputs(self) -> tuple:
         """The iteration's decomposition: the certificate judges its truncated directions."""
-        return self._held_rank, None, None, None
+        return self._held_rank, None

@@ -93,7 +93,6 @@ def _fit(model: SuperGLM, X: pd.DataFrame, y: np.ndarray) -> SuperGLM:
         y,
         max_reml_iter=2,
         pirls_tol=1e-10,
-        runtime_validation="skip",
     )
 
 
@@ -314,7 +313,7 @@ def test_sz_structured_estimability_is_the_data_s():
             ],
             selection_penalty=0.0,
             direct_solve=solve,
-        ).fit_reml(X, y, runtime_validation="skip")
+        ).fit_reml(X, y)
         for solve in ("structured", "gram")
     }
     structured = models["structured"]

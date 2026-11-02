@@ -75,6 +75,11 @@ from superglm.reml.scale import (
     profile_tweedie_reml_scale,
 )
 from superglm.reml.w_derivatives import reml_w_correction, validate_w_correction_order
+from superglm.solvers._structured.selection import (
+    record_auto_backend_decision,
+    resolve_structured_backend,
+    select_structured_group,
+)
 from superglm.solvers.centered_system import (
     TabmatCenteringState,
     _FisherDataReuse,
@@ -84,11 +89,6 @@ from superglm.solvers.dispersion import lazy_likelihood_size
 from superglm.solvers.hessian_factor import DenseHessianFactor, as_hessian_factor
 from superglm.solvers.irls_direct import StructuredSolverError, fit_irls_direct
 from superglm.solvers.mode_score import centred_warm_start, mode_certification_bar
-from superglm.solvers.structured import (
-    record_auto_backend_decision,
-    resolve_structured_backend,
-    select_structured_group,
-)
 from superglm.types import GroupSlice, PenaltyComponent
 
 # The solve ceiling and the certification bar both live in observed_geometry
@@ -317,7 +317,6 @@ def optimize_direct_reml(
     verbose: bool,
     penalty_caches: dict | None = None,
     profile: dict | None = None,
-    max_analytical_per_w: int = 30,
     select_snap: bool = True,
     direct_solve: str = "auto",
     w_correction_order: int = 1,
@@ -395,7 +394,6 @@ def optimize_direct_reml(
             verbose=verbose,
             penalty_caches=penalty_caches,
             profile=profile,
-            max_analytical_per_w=max_analytical_per_w,
             select_snap=select_snap,
             direct_solve=direct_solve,
             reml_penalties=penalties,
@@ -484,16 +482,12 @@ def optimize_direct_reml(
     # A deviance change is blind to a coefficient whose rows carry a small
     # share of the likelihood, while its log-curvature enters log|H| at full
     # weight: the objective then moved with every warm start (stage-0
-    # verifier census, raw_1e8 binomial).  A linearly constrained or SCOP
-    # mode is certified by its inner QP/KKT state and keeps the deviance stop.
+    # verifier census, raw_1e8 binomial).  A linearly constrained mode is
+    # certified by its inner QP/KKT state and keeps the deviance stop.
     pirls_convergence = (
         "mode_score"
         if use_observed_geometry
-        or not any(
-            getattr(group, "constraints", None) is not None
-            or getattr(group, "monotone_engine", None) == "scop"
-            for group in groups
-        )
+        or not any(getattr(group, "constraints", None) is not None for group in groups)
         else "deviance"
     )
 
@@ -1000,7 +994,7 @@ def optimize_direct_reml(
         # What proves this mode stationary is PIRLS's own stop: the mode
         # certificate (``convergence="mode_score"``, one-engine design §3.8)
         # on every route that has one, the deviance stop for a linearly
-        # constrained or SCOP mode.  A budget-exhausted candidate is therefore
+        # constrained mode.  A budget-exhausted candidate is therefore
         # not stationary on any path; the observed geometry's mode score below
         # is recorded as a diagnostic and never raises this flag.
         candidate_mode_stationary = bool(pirls_result.converged)

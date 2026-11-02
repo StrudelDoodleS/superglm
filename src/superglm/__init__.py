@@ -53,7 +53,7 @@ from superglm.distributional.families.two_piece import (
 from superglm.distributional.predictor import Predictor
 from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
 from superglm.export import RatingTableBaseNotRepresentableError, export_rating_tables
-from superglm.features._spline_config import SplineOptionWarning
+from superglm.features._spline_config import SCOPRetiredWarning, SplineOptionWarning
 from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.categorical import Categorical
 from superglm.features.constraint import Constraint
@@ -94,20 +94,20 @@ from superglm.features.spline import (
     Spline,
     n_knots_from_k,
 )
+from superglm.inference._term_types import (
+    InteractionInference,
+    TermInference,
+)
+from superglm.inference._term_types import (
+    SmoothCurve as SmoothCurve,
+)
+from superglm.inference._term_types import (
+    SplineMetadata as SplineMetadata,
+)
 from superglm.inference.factor_smooths import FactorSmoothResult
 from superglm.inference.metrics import ModelMetrics
 from superglm.inference.random_effects import RandomEffectResult
 from superglm.inference.summary import ModelSummary
-from superglm.inference.term import (
-    InteractionInference,
-    TermInference,
-)
-from superglm.inference.term import (
-    SmoothCurve as SmoothCurve,
-)
-from superglm.inference.term import (
-    SplineMetadata as SplineMetadata,
-)
 from superglm.links import (
     CauchitLink,
     CloglogLink,
@@ -218,7 +218,6 @@ def warmup() -> None:
     from superglm.solvers._exact_sums import _warmup_exact_sums
     from superglm.solvers._structured.block_leaves import _warmup_factor_smooth
     from superglm.solvers._structured.leaf_kernels import _warmup_leaf_kernels
-    from superglm.solvers.scop_newton import _warmup_scop
 
     _warmup_tweedie()
     _warmup_tweedie_series()
@@ -233,7 +232,6 @@ def warmup() -> None:
     _warmup_gamma()
     _warmup_declared_bounds()
     _warmup_negative_binomial()
-    _warmup_scop()
     _warmup_leaf_kernels()
     _warmup_factor_smooth()
     from superglm._numba_compile import forget_compiles
@@ -346,6 +344,7 @@ __all__ = [
     "ConvergenceWarning",
     "FactorSmoothGroupTermWarning",
     "RedundantInteractionWarning",
+    "SCOPRetiredWarning",
     "SplineOptionWarning",
     "SeparationError",
     "SeparationWarning",

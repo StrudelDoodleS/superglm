@@ -128,14 +128,11 @@ def _preflight_rating_table_terms(model: SuperGLM) -> None:
         )
 
 
-def _resolve_format(file_path: str | Path, format: str | None) -> str:
-    if format is not None:
-        fmt = format.lower().lstrip(".")
-    else:
-        suffix = Path(file_path).suffix.lower()
-        fmt = suffix.lstrip(".")
+def _require_excel_format(file_path: Path, format: str | None) -> None:
+    """Refuse any export format but Excel, named by ``format`` or the file suffix."""
+    fmt = (format if format is not None else file_path.suffix).lower().lstrip(".")
     if fmt in {"xlsx", "xlsm", "excel"}:
-        return "excel"
+        return
     raise ValueError(
         f"Unsupported rating table export format: {format or Path(file_path).suffix!r}"
     )
@@ -1631,15 +1628,6 @@ def _interaction_beta(model: SuperGLM, name: str) -> np.ndarray:
     return np.concatenate([model.result.beta[g.sl] for g in groups])
 
 
-def _reconstruct_interaction(ispec, beta: NDArray, n_bins: int) -> dict:
-    # Shared with the impact sweep, so "does this spec take n_points" and
-    # "which orientation is this surface" are answered once rather than in two
-    # places that can disagree -- which is the shape issue #287 took.
-    from superglm.diagnostics.discretize import reconstruct_interaction
-
-    return reconstruct_interaction(ispec, beta, n_bins)
-
-
 def _continuous_interaction_block(
     name: str,
     raw: dict,
@@ -1768,7 +1756,11 @@ def _interaction_blocks(
                 )
             )
             continue
-        raw = _reconstruct_interaction(ispec, _interaction_beta(model, name), n_bins)
+        # Shared with the impact sweep, so "does this spec take n_points" and
+        # "which orientation is this surface" are answered in one place.
+        from superglm.diagnostics.discretize import reconstruct_interaction
+
+        raw = reconstruct_interaction(ispec, _interaction_beta(model, name), n_bins)
         # The sweep's predicate, imported rather than respelled.  Four review
         # rounds found the same failure -- the exporter routes a grid on one
         # rule and the sweep re-decides with a second, and where they disagree
@@ -2936,9 +2928,7 @@ def export_rating_tables(
     kinds of block at once.
     """
     out = Path(file_path)
-    fmt = _resolve_format(out, format)
-    if fmt != "excel":
-        raise ValueError(f"Unsupported rating table export format: {fmt!r}")
+    _require_excel_format(out, format)
 
     payload = build_rating_table_payload(
         model,

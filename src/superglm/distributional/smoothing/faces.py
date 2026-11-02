@@ -119,7 +119,6 @@ class _FaceRetraction:
     failure_reason: EndpointAssessmentFailureReason | None
     coefficient_tolerance: float
     assessment_fits: tuple[DenseSolverResult, ...]
-    joint_rollback_penalty_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -798,7 +797,6 @@ def _face_assessment_refusal_iteration(
         coefficient_fit_indices=coefficient_fit_indices,
         accepted_fit_index=None,
         coefficient_tolerances=(coefficient_tolerance,) * len(coefficient_fit_indices),
-        boundary_nominations=(),
         update_curvature=source_fit.terminal_curvature,
         accepted_curvature=None,
         refused_face_components=component_names,
@@ -851,7 +849,6 @@ def _face_transition_iteration(
         coefficient_fit_indices=coefficient_fit_indices,
         accepted_fit_index=accepted_fit_index,
         coefficient_tolerances=(coefficient_tolerance,) * len(coefficient_fit_indices),
-        boundary_nominations=(),
         update_curvature=source_fit.terminal_curvature,
         accepted_curvature=promotion.fit.terminal_curvature,
         activated_face_components=promotion.component_names,
@@ -936,7 +933,6 @@ def _face_revalidation_iteration(
         coefficient_fit_indices=coefficient_fit_indices,
         accepted_fit_index=accepted_fit_index,
         coefficient_tolerances=(check.coefficient_tolerance,) * len(coefficient_fit_indices),
-        boundary_nominations=(),
         update_curvature=source_fit.terminal_curvature,
         accepted_curvature=check.endpoint_fit.terminal_curvature,
         revalidated_face_components=(component_name,),
@@ -992,7 +988,6 @@ def _joint_face_revalidation_iteration(
         coefficient_fit_indices=coefficient_fit_indices,
         accepted_fit_index=accepted_fit_index,
         coefficient_tolerances=(coefficient_tolerance,),
-        boundary_nominations=(),
         update_curvature=source_fit.terminal_curvature,
         accepted_curvature=endpoint_fit.terminal_curvature,
         revalidated_face_components=component_names,
@@ -1045,11 +1040,9 @@ def _face_retraction_iteration(
         coefficient_fit_indices=coefficient_fit_indices,
         accepted_fit_index=accepted_fit_index,
         coefficient_tolerances=(retraction.coefficient_tolerance,) * len(coefficient_fit_indices),
-        boundary_nominations=(),
         update_curvature=source_fit.terminal_curvature,
         accepted_curvature=retraction.fit.terminal_curvature,
         deactivated_face_components=retraction.component_names,
         endpoint_direction_evidence=retraction.direction,
         endpoint_assessment_failure_reason=retraction.failure_reason,
-        joint_rollback_penalty_fingerprint=(retraction.joint_rollback_penalty_fingerprint),
     )

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import os
+import warnings
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -17,7 +19,6 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_centered import centered_gram_rhs
-from superglm._roundoff import gamma as _gamma
 from superglm.distributions import (
     _VARIANCE_FLOOR,
     Binomial,
@@ -49,6 +50,43 @@ from superglm.reml.penalty_algebra import (
     penalty_product_rounding,
     total_penalty_matvec,
 )
+from superglm.solvers._structured.assembly import (
+    build_augmented_structured_factor,
+    build_penalized_structured_operator,
+)
+from superglm.solvers._structured.balance_tree import (
+    ProfiledSumToZeroTreeFactor,
+    SumToZeroLeafSystem,
+    SumToZeroPenalizedOperator,
+    SumToZeroTreeFactor,
+)
+from superglm.solvers._structured.block_leaves import (
+    FactorSmoothLeafFactor,
+    FactorSmoothLeafSystem,
+    FactorSmoothPenalizedOperator,
+    ProfiledFactorSmoothLeafFactor,
+)
+from superglm.solvers._structured.layout import (
+    get_structured_layout,
+)
+from superglm.solvers._structured.moments import (
+    NestedStructuredSystem,
+    build_structured_system,
+)
+from superglm.solvers._structured.nested import (
+    NestedSchurFactor,
+    ProfiledNestedSchurFactor,
+)
+from superglm.solvers._structured.operators import (
+    BlockSymmetricOperator,
+    CenteredBlockOperator,
+    CompactSymmetricOperator,
+    SumToZeroBlockOperator,
+    compact_operator_diagonal,
+)
+from superglm.solvers._structured.state import (
+    centred_data_operator,
+)
 from superglm.solvers.centered_system import (
     TabmatCenteringState,
     build_centered_system,
@@ -65,29 +103,6 @@ from superglm.solvers.mode_score import (
 )
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import decompose_factor, decompose_gram, needs_factor_certification
-from superglm.solvers.structured import (
-    BlockSymmetricOperator,
-    CenteredBlockOperator,
-    CompactSymmetricOperator,
-    FactorSmoothLeafFactor,
-    FactorSmoothLeafSystem,
-    FactorSmoothPenalizedOperator,
-    NestedSchurFactor,
-    NestedStructuredSystem,
-    ProfiledFactorSmoothLeafFactor,
-    ProfiledNestedSchurFactor,
-    ProfiledSumToZeroTreeFactor,
-    SumToZeroBlockOperator,
-    SumToZeroLeafSystem,
-    SumToZeroPenalizedOperator,
-    SumToZeroTreeFactor,
-    build_augmented_structured_factor,
-    build_penalized_structured_operator,
-    build_structured_system,
-    centred_data_operator,
-    compact_operator_diagonal,
-    get_structured_layout,
-)
 from superglm.types import GroupSlice, PenaltyComponent
 
 
@@ -383,7 +398,6 @@ def observed_row_error_scale(
 
 
 REMLCurvature = Literal["fisher", "observed"]
-SCOPREMLCurvature = REMLCurvature
 
 _BUILTIN_REML_DISTRIBUTIONS = (
     Gaussian,
@@ -437,6 +451,40 @@ def _builtin_fisher_equals_observed(distribution: Any, link: Any) -> bool:
     return False
 
 
+# Frames under this directory are superglm's own; a warning skips them to land
+# on the caller's line.
+_PACKAGE_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# The 0.41.0 name of ``reml_curvature``, read by the retired SCOP route. It
+# takes the same counterpart and returns the same 'fisher' or 'observed'
+# (whether the LAML coefficient Hessian takes Fisher or observed rows), so an
+# object that defines only it declares the same geometry under either name.
+_LEGACY_CURVATURE_HOOK = "scop_reml_curvature"
+_warned_legacy_curvature: set[type] = set()
+
+
+def _curvature_hook(owner: Any, hook_name: str) -> Any:
+    """``owner``'s curvature declaration, reading the 0.41.0 name where only it exists."""
+    hook = getattr(owner, hook_name, None)
+    if callable(hook) or hook_name != "reml_curvature":
+        return hook
+    legacy = getattr(owner, _LEGACY_CURVATURE_HOOK, None)
+    if not callable(legacy):
+        return None
+    owner_type = type(owner)
+    if owner_type not in _warned_legacy_curvature:
+        _warned_legacy_curvature.add(owner_type)
+        warnings.warn(
+            f"{owner_type.__name__} declares its REML curvature through "
+            f"{_LEGACY_CURVATURE_HOOK}, which the retired SCOP shape engine read; the "
+            "hook is now reml_curvature, with the same argument and values. Rename "
+            f"{_LEGACY_CURVATURE_HOOK} to reml_curvature to silence this warning.",
+            FutureWarning,
+            skip_file_prefixes=(_PACKAGE_DIRECTORY,),
+        )
+    return legacy
+
+
 def _explicit_curvature_protocol(
     distribution: Any,
     link: Any,
@@ -445,10 +493,10 @@ def _explicit_curvature_protocol(
     description: str,
 ) -> REMLCurvature | None:
     declarations: list[str] = []
-    distribution_hook = getattr(distribution, hook_name, None)
+    distribution_hook = _curvature_hook(distribution, hook_name)
     if callable(distribution_hook):
         declarations.append(str(distribution_hook(link)))
-    link_hook = getattr(link, hook_name, None)
+    link_hook = _curvature_hook(link, hook_name)
     if callable(link_hook):
         declarations.append(str(link_hook(distribution)))
     if not declarations:
@@ -552,86 +600,6 @@ def validate_observed_derivative_capability(
         )
 
 
-def classify_scop_reml_curvature(distribution: Any, link: Any) -> SCOPREMLCurvature:
-    """Select the coefficient Hessian used by shape-constrained LAML.
-
-    Fisher rows are valid only for built-in combinations whose residual
-    curvature term vanishes analytically.  Other built-in combinations use
-    exact order-zero observed rows.  Custom families or links must opt in via
-    ``scop_reml_curvature(counterpart)`` so an unverified Fisher approximation
-    can never be presented as Pya--Wood geometry.
-    """
-    distribution_is_builtin = type(distribution) in _BUILTIN_REML_DISTRIBUTIONS
-    link_is_builtin = type(link) in _BUILTIN_REML_LINKS
-    if distribution_is_builtin and link_is_builtin:
-        return "fisher" if _builtin_fisher_equals_observed(distribution, link) else "observed"
-
-    declared = _explicit_curvature_protocol(
-        distribution,
-        link,
-        hook_name="scop_reml_curvature",
-        description="SCOP REML",
-    )
-    if declared is not None:
-        return declared
-    raise NotImplementedError(
-        "custom family/link combinations require an explicit SCOP REML curvature protocol; "
-        "define scop_reml_curvature(counterpart) returning 'fisher' or 'observed'"
-    )
-
-
-def compute_scop_observed_information_weights(
-    distribution: Any,
-    link: Any,
-    y: NDArray,
-    mu: NDArray,
-    eta: NDArray,
-    sample_weight: NDArray,
-) -> NDArray:
-    """Return exact non-negative observed rows supported by SCOP moment kernels."""
-    y, mu, eta, sample_weight = _validate_rows(y, mu, eta, sample_weight)
-    distribution_hook = getattr(distribution, "scop_observed_information_weights", None)
-    link_hook = getattr(link, "scop_observed_information_weights", None)
-    if callable(distribution_hook) and callable(link_hook):
-        raise ValueError("family and link both define SCOP observed-information row protocols")
-    if callable(distribution_hook):
-        observed = distribution_hook(link, y, mu, eta, sample_weight)
-    elif callable(link_hook):
-        observed = link_hook(distribution, y, mu, eta, sample_weight)
-    else:
-        observed = compute_observed_information_weights(
-            distribution,
-            link,
-            y,
-            mu,
-            eta,
-            sample_weight,
-        )
-    observed = np.asarray(observed, dtype=np.float64)
-    if observed.shape != y.shape or not np.all(np.isfinite(observed)):
-        raise ValueError("SCOP observed-information rows must be finite and match y")
-    if np.any(observed < 0.0):
-        # A row whose terms cancel (a binomial/log event row's is zero) is
-        # computed to the rounding of its terms' sizes (``observed_row_error_scale``),
-        # so its sign there is the platform's rounding (-1.1e-16 and -2.2e-16 on
-        # the macOS, Windows and ARM64 runners).  The generic row ``w (u^2/V +
-        # (y - mu)(u^2 V'/V^2 - v/V))`` takes about ten roundings for ``a =
-        # u^2 V'/V^2``, four for ``b = v/V``, five more for ``a - b``, ``y - mu``,
-        # the product, the sum and ``w``, and ``u``, ``v`` and ``mu`` each carry
-        # one library call's own error, 22 in all: within ``gamma_22`` of that
-        # scale the row is zero.  A row negative beyond it is signed and refused.
-        scale = observed_row_error_scale(distribution, link, y, mu, eta, sample_weight, observed)
-        rounding = (observed < 0.0) & (-observed <= _gamma(22) * scale)
-        observed = np.where(rounding, 0.0, observed)
-        if np.any(observed < 0.0):
-            minimum = float(np.min(observed))
-            raise ValueError(
-                "signed observed-information rows are not supported by the current stable SCOP "
-                f"moment kernels (minimum row={minimum:.3e})"
-            )
-    return observed
-
-
 @dataclass(frozen=True)
 class ObservedREMLGeometry:
     """Observed slope geometry after stable profiling of the intercept."""
@@ -716,8 +684,6 @@ def stopped_on_iteration_budget(result: Any) -> bool:
     judge -- an infeasible constrained mode, a missing inner-QP KKT
     certificate, a non-finite deviance, a state outside the link's domain --
     and keeps its own door.
-
-    ``reml/scop_efs.py`` runs its own criterion and does not defer here.
     """
     return result.termination_reason in ("max_iter", "step_rejected", "score_stagnated")
 

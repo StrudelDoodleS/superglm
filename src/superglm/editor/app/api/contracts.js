@@ -90,26 +90,6 @@
  * @property {("tangent"|"kink")[]} [joins] the joins the term can take
  * @property {string|null} [join_reason] why a join is missing from ``joins``
  */
-/**
- * The /shape_range request: the selection's edges as shapeRangeForSelection
- * names them, the degree of the icon chosen, and the join toggle's choice.
- * @typedef {Object} ShapeRangeRequest
- * @property {string} term
- * @property {number|string} lo
- * @property {number|string} hi
- * @property {number} degree
- * @property {"tangent"|"kink"} join
- * @property {string} method
- */
-/**
- * The /set_reference request: a displayed level, which may be a group label.
- * It, /shape_range, /collapse_levels and /ungroup_levels refit at once:
- * Settings' "Refit after every structural change" sends a change this way.
- * @typedef {Object} SetReferenceRequest
- * @property {string} term
- * @property {string} level
- * @property {string} method
- */
 /** @typedef {"collapse"|"ungroup"|"set_reference"|"shape"|"special"|"on_curve"|"knots"|"basis"} StagedOperation */
 /**
  * How a spline's knots are placed: a rule, or "explicit" positions (set in
@@ -175,17 +155,9 @@
  * @property {boolean} select
  */
 /**
- * One basis change, as /stage and /basis take it: another kind, or Shrink
+ * One basis change, as /stage takes it: another kind, or Shrink
  * turned on or off.
  * @typedef {{kind:Exclude<BasisKind, "cr_cardinal">}|{select:boolean}} BasisParams
- */
-/**
- * The /basis request, which refits at once: Settings' "Refit after every
- * structural change" sends a basis change this way.
- * @typedef {Object} BasisRequest
- * @property {string} term
- * @property {BasisParams} params
- * @property {string} method
  */
 /**
  * A spline basis's construction: its ``degree``; its ``ends``, "open" for a
@@ -212,29 +184,12 @@
  *   `TermKnots.from_editor` reads them after a Refit
  */
 /**
- * One knot change, as /stage and /knots take it: a count placed by a rule
+ * One knot change, as /stage takes it: a count placed by a rule
  * (``alpha`` with tempered quantiles only), positions placed by hand in chart
  * x, or back to the knots the original model declares.
  * @typedef {{count:number, strategy:KnotRule, alpha?:number}
  *   |{positions:number[]}
  *   |{reset:true}} KnotParams
- */
-/**
- * The /knots request, which refits at once: Settings' "Refit after every
- * structural change" sends a knot change this way.
- * @typedef {Object} KnotsRequest
- * @property {string} term
- * @property {KnotParams} params
- * @property {string} method
- */
-/**
- * The /special_levels request, which refits at once: ``special`` takes the
- * levels off an ordered term's curve, ``false`` puts them back on it.
- * @typedef {Object} SpecialLevelsRequest
- * @property {string} term
- * @property {string[]} levels
- * @property {boolean} special
- * @property {string} method
  */
 /**
  * The /stage request: one structural change, with its parameters by label as
@@ -249,6 +204,7 @@
  * @property {Record<string, unknown>} params
  * @property {boolean} [keep_reference]
  * @property {string} [level_display]
+ * @property {boolean} [refit] refit every waiting change at once
  */
 /**
  * A structural change waiting for Refit. The snapshot lists them oldest first.

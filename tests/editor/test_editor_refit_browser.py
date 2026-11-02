@@ -510,18 +510,10 @@ def test_two_staged_collapses_wait_and_one_refit_applies_both(open_editor_page):
         assert refit_info.value.status == 200
         _wait_for_editor_idle(page)
         assert paths.count("/stage") == 2 and paths.count("/refit_pending") == 1
-        assert not {"/collapse_levels", "/ungroup_levels"} & set(paths)
         assert session.pending == []
         groups = session_payload(session)["territory"]["level_groups"]
         assert sorted(group["levels"] for group in groups) == [["T02", "T03"], ["T06", "T07"]]
         page.wait_for_function("() => document.querySelector('#refitPendingAction').disabled")
-
-
-# The routes that refit: Refit itself, and each operation's own route, which
-# stages the change and refits at once.
-_REFIT_ROUTES = frozenset(
-    {"/refit_pending", "/collapse_levels", "/ungroup_levels", "/set_reference", "/shape_range"}
-)
 
 
 def test_refit_after_every_change_is_one_step(open_editor_page):
@@ -548,20 +540,17 @@ def test_refit_after_every_change_is_one_step(open_editor_page):
             ),
         )
         with page.expect_response(
-            lambda response: (
-                response.request.method == "POST" and _path(response.url) == "/collapse_levels"
-            )
+            lambda response: response.request.method == "POST" and _path(response.url) == "/stage"
         ) as refit_info:
             page.get_by_role("button", name="Collapse", exact=True).click()
         assert refit_info.value.status == 200
-        # The change goes to the operation's own route, with Settings' keep-reference.
-        assert refit_info.value.request.post_data_json["keep_reference"] is True
+        # The change goes to /stage with refit, and with Settings' keep-reference.
+        posted = refit_info.value.request.post_data_json
+        assert posted["refit"] is True and posted["keep_reference"] is True
         _wait_for_editor_idle(page)
 
         # One refit and nothing staged first.
-        assert [path for path in paths if path in _REFIT_ROUTES | {"/stage"}] == [
-            "/collapse_levels"
-        ]
+        assert [path for path in paths if path in {"/stage", "/refit_pending"}] == ["/stage"]
         assert session.pending == []
         groups = session_payload(session)["territory"]["level_groups"]
         assert [group["levels"] for group in groups] == [["T04", "T05"]]

@@ -13,7 +13,9 @@ from superglm.types import PenaltyComponent
 
 if TYPE_CHECKING:
     from superglm.solvers._structured.factors import DerivativeDirection
-    from superglm.solvers.structured import CompactSymmetricOperator
+    from superglm.solvers._structured.operators import (
+        CompactSymmetricOperator,
+    )
 
 
 def _component_indices(component: PenaltyComponent, size: int) -> NDArray[np.intp]:
@@ -206,7 +208,9 @@ class DenseHessianFactor:
         """Return ``trace(H^-1 O)`` from a compact symmetric operator."""
         if operator.shape != self.shape:
             raise ValueError("Operator and factor dimensions must match.")
-        from superglm.solvers.structured import materialize_compact_operator
+        from superglm.solvers._structured.operators import (
+            materialize_compact_operator,
+        )
 
         return float(np.trace(self.inverse @ materialize_compact_operator(operator)))
 
@@ -217,7 +221,9 @@ class DenseHessianFactor:
         """Return ``diag(H^-1 O)`` from a compact symmetric operator."""
         if operator.shape != self.shape:
             raise ValueError("Operator and factor dimensions must match.")
-        from superglm.solvers.structured import materialize_compact_operator
+        from superglm.solvers._structured.operators import (
+            materialize_compact_operator,
+        )
 
         return np.diag(self.inverse @ materialize_compact_operator(operator)).copy()
 
@@ -228,7 +234,9 @@ class DenseHessianFactor:
         """Return ``diag((H^-1 O)^2)`` for a dense-reference factor."""
         if operator.shape != self.shape:
             raise ValueError("Operator and factor dimensions must match.")
-        from superglm.solvers.structured import materialize_compact_operator
+        from superglm.solvers._structured.operators import (
+            materialize_compact_operator,
+        )
 
         product = self.inverse @ materialize_compact_operator(operator)
         return np.diag(product @ product).copy()
@@ -239,7 +247,9 @@ class DenseHessianFactor:
         right: CompactSymmetricOperator,
     ) -> float:
         """Return ``trace(H^-1 O_left H^-1 O_right)``."""
-        from superglm.solvers.structured import materialize_compact_operator
+        from superglm.solvers._structured.operators import (
+            materialize_compact_operator,
+        )
 
         left_matrix = materialize_compact_operator(left)
         right_matrix = materialize_compact_operator(right)
@@ -252,7 +262,9 @@ class DenseHessianFactor:
         operator: CompactSymmetricOperator,
     ) -> float:
         """Return ``trace(H^-1 lambda*Omega H^-1 O)``."""
-        from superglm.solvers.structured import materialize_compact_operator
+        from superglm.solvers._structured.operators import (
+            materialize_compact_operator,
+        )
 
         penalty = np.zeros(self.shape)
         indices = _component_indices(component, self.shape[0])

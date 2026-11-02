@@ -3568,38 +3568,335 @@ def test_equal_copy_of_dense_discrete_rows_uses_one_exact_geometry():
     assert abs(exact_edf - fit_edf) > exact_edf_gap + fit_edf_gap
 
 
+def _face_restricted_leverage(evaluation, model, face):
+    """``w_i a_i' Z_a (Z_a' H_a Z_a)^-1 Z_a' a_i`` formed explicitly on the evaluation rows.
+
+    ``a_i = [1, x_i]``, ``H_a = A' W A + diag(0, S)`` on the rows passed and ``Z_a =
+    diag(1, Z)``; ``Z = I`` without a face.  The design and working weights are the
+    evaluation's (Poisson log link: ``W = mu``); the inverse is the test's own.
+    """
+    from superglm.inference.covariance import _active_penalty_matrix
+    from superglm.model.fit_state import fitted_lambda2
+
+    X_a, W, _, _, active_groups = evaluation._active_info
+    design = np.column_stack([np.ones(X_a.shape[0]), X_a.toarray()])
+    np.testing.assert_allclose(W, evaluation._mu, rtol=1e-14)
+    S = np.asarray(
+        _active_penalty_matrix(
+            model._dm.group_matrices,
+            model._groups,
+            active_groups,
+            fitted_lambda2(model),
+            reml_penalties=getattr(model, "_reml_penalties", None),
+        )
+    )
+    width = design.shape[1]
+    hessian = design.T @ (W[:, None] * design)
+    hessian[1:, 1:] += S
+    face_a = np.eye(width)
+    if face is not None:
+        face_a = np.zeros((width, face.shape[1] + 1))
+        face_a[0, 0] = 1.0
+        face_a[1:, 1:] = face
+    covariance = face_a @ np.linalg.solve(face_a.T @ hessian @ face_a, face_a.T)
+    return W * np.einsum("ij,jk,ik->i", design, covariance, design)
+
+
 def test_equal_copy_of_shape_constrained_rows_reads_the_fit_geometry():
-    """A shape-constrained fit's metrics always read its retained covariance, so an
-    equal copy of the training rows (recognised by content) reads the fit design and
-    working weights with it, as the live frame does.  Zero prior weights centre the
-    fit's columns on the positive-weight rows while the public design centres them on
-    all rows, so the public design would not pair with that covariance."""
+    """A QP fit whose shape rows bind keeps its active face's covariance, so an equal
+    copy of the training rows (recognised by content) reads it with the fit design and
+    working weights, as the live frame does.  Zero prior weights centre the fit's
+    columns on the positive-weight rows while the public design centres them on all
+    rows, so the public design would not pair with that covariance.  Other rows
+    re-form the inverse on themselves, restricted to the fit's active face."""
+    from scipy.linalg import null_space
+
     from superglm import Constraint
     from superglm.features.spline import PSpline
 
     rng = np.random.default_rng(20260928)
     x = np.sort(rng.uniform(size=500))
     X = pd.DataFrame({"x": x})
-    y = rng.poisson(np.exp(0.2 + 1.3 * x)).astype(float)
+    # falls, then rises: an increasing fit must hold its left end flat
+    y = rng.poisson(np.exp(0.2 + 1.3 * np.abs(x - 0.4))).astype(float)
     weights = rng.uniform(0.5, 1.5, len(x))
     weights[:30] = 0.0
     model = SuperGLM(
         family="poisson",
         selection_penalty=0.0,
         spline_penalty=1.7,
-        features={
-            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing, shape_engine="scop")
-        },
+        features={"x": PSpline(n_knots=7, constraint=Constraint.fit.increasing)},
     ).fit(X, y, sample_weight=weights)
-    assert model._solver_result.scop_inference is not None
+    rank_info = model.result.rank_info
+    assert rank_info.face is not None
 
     live = model.metrics(X, y, sample_weight=weights)
-    copy = model.metrics(X.copy(), y.copy(), sample_weight=weights)
+    copy = model.metrics(X.copy(), y.copy(), sample_weight=weights.copy())
     # Both read equal retained state; only the order of an at most n-term
     # reduction can separate them.
     rtol = len(y) * np.finfo(np.float64).eps
     for actual, expected in (
         (copy.leverage, live.leverage),
+        (copy.cooks_distance, live.cooks_distance),
         (copy._influence_edf[0], live._influence_edf[0]),
     ):
         np.testing.assert_allclose(actual, expected, rtol=rtol, atol=rtol * np.max(expected))
+
+    # New rows: leverage re-formed on them and restricted to the face the binding
+    # rows leave free, against the face formed here from the binding rows alone.
+    face = null_space(rank_info.face_rows)
+    new = pd.DataFrame({"x": np.linspace(0.05, 0.95, 31)})
+    evaluation = model.metrics(new, model.predict(new))
+    expected = _face_restricted_leverage(evaluation, model, face)
+    unrestricted = _face_restricted_leverage(evaluation, model, None)
+    # the face moves the leverage far beyond the comparison's tolerance
+    assert np.max(np.abs(unrestricted - expected)) > 1e-3 * np.max(expected)
+    np.testing.assert_allclose(evaluation.leverage, expected, rtol=1e-9, atol=1e-12)
+    assert evaluation.leverage.sum() == pytest.approx(evaluation._influence_edf[0].sum() + 1.0)
+
+    # Reversed, the training rows are no longer recognised, and the face re-formed
+    # on them gives the fit's own leverage back.
+    reverse = slice(None, None, -1)
+    reversed_rows = model.metrics(
+        X.iloc[reverse].reset_index(drop=True), y[reverse], sample_weight=weights[reverse]
+    )
+    assert not reversed_rows._fit_geometry_matches
+    np.testing.assert_allclose(
+        reversed_rows.leverage[reverse], live.leverage, rtol=1e-9, atol=1e-12
+    )
+
+
+def test_slack_shape_constraint_reforms_unrestricted_leverage_on_new_rows():
+    """With no shape row binding there is no face: held-out leverage is the
+    unconstrained inverse re-formed on the rows passed."""
+    from superglm import Constraint
+    from superglm.features.spline import PSpline
+
+    rng = np.random.default_rng(20261102)
+    x = np.sort(rng.uniform(size=500))
+    # rises steeply: no increasing row binds
+    y = rng.poisson(np.exp(0.2 + 3.0 * x)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        spline_penalty=1.7,
+        features={"x": PSpline(n_knots=7, constraint=Constraint.fit.increasing)},
+    ).fit(pd.DataFrame({"x": x}), y)
+    assert model.result.rank_info.face is None
+
+    new = pd.DataFrame({"x": np.linspace(0.05, 0.95, 31)})
+    evaluation = model.metrics(new, model.predict(new))
+    np.testing.assert_allclose(
+        evaluation.leverage,
+        _face_restricted_leverage(evaluation, model, None),
+        rtol=1e-9,
+        atol=1e-12,
+    )
+
+
+def _exact_face_leverage(rows, weights, penalties, face):
+    """``w_i a_i' H^-1 a_i`` in exact rationals, ``a_i = [1, x_i' Z]``, ``H = sum w a a' + diag(0, Z'SZ)``.
+
+    ``S = sum_k lam_k S_k`` over the ``(lam_k, S_k)`` in ``penalties``.  The
+    test's own oracle: every float64 input is read as the rational it is, and
+    the penalty's sum, the projection, the Hessian and its solve are exact.
+    """
+    from fractions import Fraction
+
+    def exact(matrix):
+        return [[Fraction(float(value)) for value in row] for row in np.atleast_2d(matrix)]
+
+    Z = exact(face)
+    S = [[Fraction(0)] * len(Z) for _ in Z]
+    for scale, matrix in penalties:
+        for i, row in enumerate(exact(matrix)):
+            for j, value in enumerate(row):
+                S[i][j] += Fraction(float(scale)) * value
+    width = len(Z[0])
+    projected = [
+        [Fraction(1)] + [sum(x[j] * Z[j][k] for j in range(len(x))) for k in range(width)]
+        for x in exact(rows)
+    ]
+    w = [Fraction(float(value)) for value in weights]
+    size = width + 1
+    hessian = [
+        [sum(wi * a[r] * a[c] for wi, a in zip(w, projected)) for c in range(size)]
+        for r in range(size)
+    ]
+    for r in range(width):
+        for c in range(width):
+            hessian[r + 1][c + 1] += sum(
+                Z[i][r] * S[i][j] * Z[j][c] for i in range(len(Z)) for j in range(len(Z))
+            )
+    # Gauss-Jordan on [H | I]
+    system = [row + [Fraction(int(r == c)) for c in range(size)] for r, row in enumerate(hessian)]
+    for col in range(size):
+        pivot = next(r for r in range(col, size) if system[r][col] != 0)
+        system[col], system[pivot] = system[pivot], system[col]
+        lead = system[col][col]
+        system[col] = [value / lead for value in system[col]]
+        for r in range(size):
+            if r != col and system[r][col] != 0:
+                factor = system[r][col]
+                system[r] = [a - factor * b for a, b in zip(system[r], system[col])]
+    inverse = [row[size:] for row in system]
+    return np.array(
+        [
+            float(wi * sum(a[r] * inverse[r][c] * a[c] for r in range(size) for c in range(size)))
+            for wi, a in zip(w, projected)
+        ]
+    )
+
+
+@pytest.mark.parametrize("heavy", [1e12, 1e20])
+def test_face_leverage_and_edf_on_weights_far_apart_match_an_exact_reference(heavy):
+    """A face covariance re-formed on rows whose weights are far apart is decomposed,
+    and reads its leverage and EDF, on the rows projected on the face.  Mutation
+    checks: in full coordinates the rounding of ``Z (Z'MZ)^+ Z'`` off the face meets
+    curvature ``1e20`` times the face's, and the spline EDF came out in the
+    thousands; ``Z'(D + S)Z`` formed from the full Gram still factors at a ratio of
+    ``1e12``, and moves leverage by ``1e-5``."""
+    from scipy.linalg import null_space
+
+    from superglm import Constraint
+    from superglm.features.spline import PSpline
+    from superglm.inference.covariance import _active_penalty_matrix
+    from superglm.model.fit_state import fitted_lambda2
+
+    x = np.linspace(0.0, 1.0, 200)
+    y = 1.0 + 8.0 * (x - 0.5) ** 2
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=6, constraint=Constraint.fit.increasing)},
+    ).fit(X, y)
+    rank_info = model.result.rank_info
+    assert rank_info.face is not None
+
+    weights = np.where(x < 0.1, heavy, 1.0)
+    evaluation = model.metrics(X.copy(), y, sample_weight=weights)
+    assert not evaluation._fit_geometry_matches
+    X_a, W, _, _, active_groups = evaluation._active_info
+    np.testing.assert_array_equal(W, weights)
+    penalty = _active_penalty_matrix(
+        model._dm.group_matrices,
+        model._groups,
+        active_groups,
+        fitted_lambda2(model),
+        reml_penalties=getattr(model, "_reml_penalties", None),
+    )
+    # the face from the binding rows alone, not the fit's own basis
+    expected = _exact_face_leverage(
+        X_a.toarray(), W, [(1.0, penalty)], null_space(rank_info.face_rows)
+    )
+    # three free slopes and the intercept
+    assert 3.0 < expected.sum() < 4.0
+    # Projected, a heavy row carries w (u |x| |Z|)^2 ||(Z'MZ)^+||, at most about
+    # 1e-12; the bound is a sensible multiple of it, far below either failure.
+    np.testing.assert_allclose(evaluation.leverage, expected, rtol=1e-8, atol=1e-10)
+    spline_edf = next(row.edf for row in evaluation.summary()._coef_rows if row.name == "x")
+    assert spline_edf == pytest.approx(expected.sum() - 1.0, rel=1e-8)
+    assert evaluation._influence_edf[0].sum() == pytest.approx(expected.sum() - 1.0, rel=1e-8)
+
+
+def test_face_leverage_at_tiny_weights_on_a_penalty_free_face_is_ols():
+    """A convex fit whose second differences all bind sits on the affine face,
+    where the penalty is exactly zero, so leverage re-formed there is
+    intercept-plus-slope OLS whatever the weights' scale.  Mutation check: the
+    face penalty formed directly, ``Z'SZ``, cancels to rounding of either sign
+    (``-6e-19`` or ``-4e-17`` by BLAS build) that outweighs the data's
+    curvature at weights ``1e-20``: leverage summed to 3.67, or the
+    decomposition refused a materially negative diagonal."""
+    from superglm import Constraint
+    from superglm.features.spline import BSplineSmooth
+
+    x = np.linspace(0.0, 1.0, 100)
+    X = pd.DataFrame({"x": x})
+    y = 2.0 + x - x * x + np.random.default_rng(0).normal(0.0, 0.1, 100)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": BSplineSmooth(n_knots=4, constraint=Constraint.fit.convex)},
+    ).fit(X, y)
+    # one free direction on the spline: the line
+    assert model.result.rank_info.face.shape[1] == 1
+
+    evaluation = model.metrics(X.copy(), y, sample_weight=np.full(100, 1e-20))
+    assert not evaluation._fit_geometry_matches
+    q, _ = np.linalg.qr(np.column_stack((np.ones_like(x), x)))
+    expected = np.sum(q * q, axis=1)
+    # The factor form leaves the null-space penalty at the rounding of ``PZ``
+    # squared, of order u^2 ||S|| (about 4e-27 here), against the data's
+    # curvature w sum (x - mean x)^2, about 8e-20: a leverage error near 1e-9.
+    np.testing.assert_allclose(evaluation.leverage, expected, rtol=0.0, atol=1e-7)
+    assert evaluation.leverage.sum() == pytest.approx(2.0, abs=1e-6)
+
+
+def test_face_leverage_keeps_a_penalty_term_dominated_beyond_one_over_eps():
+    """The face penalty is formed from each term's own root, scaled by its lambda,
+    so a term ``eps`` times weaker than another survives where it is all the
+    curvature the face has.  Here the binding convex rows leave the line free,
+    which ``1e12 S_d2`` leaves unpenalized and ``1e-3 S_d1`` does not.
+    Mutation checks: the root of the summed ``S`` (``penalty_factor(S)``) cuts
+    the first-derivative term, and leverage summed to 2.0; the direct ``Z'SZ``
+    adds the strong term's rounding, ``1e12 u ||S_d2||``, a quarter of the weak
+    term's curvature, and moved leverage by up to ``5e-3`` of itself."""
+    from scipy.linalg import null_space
+
+    from superglm import Constraint, LambdaPolicy
+    from superglm.features.spline import BSplineSmooth
+    from superglm.inference.covariance import (
+        _active_penalty_components,
+        _active_penalty_matrix,
+    )
+    from superglm.model.fit_state import fitted_lambda2
+    from superglm.solvers.centered_system import penalty_factor
+
+    x = np.linspace(0.0, 1.0, 100)
+    X = pd.DataFrame({"x": x})
+    y = 2.0 + x - x * x + np.random.default_rng(0).normal(0.0, 0.1, 100)
+    lambdas = {"d1": LambdaPolicy.fixed(1e-3), "d2": LambdaPolicy.fixed(1e12)}
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={
+            "x": BSplineSmooth(
+                n_knots=4, m=(1, 2), constraint=Constraint.fit.convex, lambda_policy=lambdas
+            )
+        },
+    ).fit_reml(X, y)
+    rank_info = model.result.rank_info
+    assert rank_info.face is not None
+
+    evaluation = model.metrics(X.copy(), y, sample_weight=np.full(100, 1e-4))
+    assert not evaluation._fit_geometry_matches
+    X_a, W, _, _, active_groups = evaluation._active_info
+    terms = (model._dm.group_matrices, model._groups, active_groups, fitted_lambda2(model))
+    reml_penalties = model._reml_penalties
+    (_, weak, S_weak), (_, strong, S_strong) = sorted(
+        _active_penalty_components(*terms, reml_penalties=reml_penalties),
+        key=lambda term: term[1],
+    )
+    face = null_space(rank_info.face_rows)
+    u = np.finfo(np.float64).eps / 2
+    # The face is the line, the second-derivative term's null space, so the
+    # exact reference takes that term as zero there (Wood 2011, sec. 3.1).
+    # Read structurally, as the fix does: the term's root sends the face to
+    # about ``u ||R||``, so its square is ~u^2 ||S||, far below u ||S||.
+    assert np.sum((penalty_factor(S_strong) @ face) ** 2) <= u * np.linalg.norm(S_strong, 2)
+    weak_curvature = weak * (face.T @ S_weak @ face).item()
+    # The event: the root of the summed penalty has cut the weak term.
+    summed_root = penalty_factor(_active_penalty_matrix(*terms, reml_penalties=reml_penalties))
+    assert np.sum((summed_root @ face) ** 2) < 1e-9 * weak_curvature
+    assert strong * u * np.linalg.norm(S_strong, 2) > 0.1 * weak_curvature
+
+    expected = _exact_face_leverage(X_a.toarray(), W, [(weak, S_weak)], face)
+    # the intercept and a line shrunk by the first-derivative penalty
+    assert 1.6 < expected.sum() < 1.7
+    # The strong term's root leaks ``strong (u ||R_d2||)^2`` onto the face,
+    # about 1e-12 of the weak curvature, through a two-column Hessian.
+    np.testing.assert_allclose(evaluation.leverage, expected, rtol=1e-9, atol=1e-12)
+    spline_edf = next(row.edf for row in evaluation.summary()._coef_rows if row.name == "x")
+    assert spline_edf == pytest.approx(expected.sum() - 1.0, rel=1e-9)
+    assert evaluation._influence_edf[0].sum() == pytest.approx(expected.sum() - 1.0, rel=1e-9)

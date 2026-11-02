@@ -90,7 +90,7 @@ class TestDrop1Basic:
             family="gaussian",
             features={"group": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.0))},
             selection_penalty=0.0,
-        ).fit_reml(X, y, runtime_validation="skip")
+        ).fit_reml(X, y)
 
         with pytest.raises(NotImplementedError, match="drop1.*variance-component.*REML"):
             model.drop1(X, y)

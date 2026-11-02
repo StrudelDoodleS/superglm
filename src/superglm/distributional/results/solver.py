@@ -2,23 +2,15 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
-from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Mapping
 from dataclasses import dataclass
-from numbers import Real
 from types import MappingProxyType
 
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._roundoff import UNIT_ROUNDOFF, gamma_up
-from superglm._roundoff import gamma as roundoff_gamma
 from superglm.distributional.results.endpoint_evidence import (
-    CHUNKED_EXECUTION_BACKEND_IDENTIFIER,
-    DENSE_EXECUTION_BACKEND_IDENTIFIER,
     CoefficientCurvature,
     ConvergenceReason,
     EndpointDirectionEvidence,
@@ -27,516 +19,8 @@ from superglm.distributional.results.endpoint_evidence import (
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.telemetry import CurvatureTelemetry
+from superglm.solvers._structured.retired import module_getattr
 from superglm.solvers.rank import RankDecomposition, decompose_gram
-from superglm.types import PenaltyComponent
-
-
-def _dense_penalty_fingerprint(values: NDArray) -> str:
-    """Return a canonical compact record of one assembled dense penalty."""
-
-    array = np.ascontiguousarray(values)
-    digest = hashlib.sha256()
-    digest.update(array.dtype.str.encode("ascii"))
-    digest.update(repr(array.shape).encode("ascii"))
-    digest.update(array.tobytes(order="C"))
-    return digest.hexdigest()
-
-
-def _assessment_face_fingerprint(face: PenaltyFace) -> tuple:
-    return (
-        face.component_names,
-        face.coefficient_names,
-        face.constraint_rank,
-        *(
-            _dense_penalty_fingerprint(array)
-            for array in (face.constraint_matrix, face.null_basis, face.constraint_basis)
-        ),
-    )
-
-
-def _assessment_component_key(component: PenaltyComponent) -> tuple:
-    from superglm.reml.penalty_algebra import _component_geometry_key
-
-    return (
-        _component_geometry_key(component),
-        component.rank,
-        component.log_det_omega_plus,
-        component.component_type,
-        component.lambda_policy,
-    )
-
-
-def _penalty_target_fingerprint(
-    components: Sequence[PenaltyComponent],
-    coefficient_names: tuple[str, ...],
-    values: Mapping[str, float],
-) -> str:
-    """Identify fixed local targets independently of mutable SSP refinement."""
-    from superglm.reml.penalty_algebra import _context_geometry, _group_penalties
-
-    digest = hashlib.sha256(repr(coefficient_names).encode())
-    for indices in _group_penalties(list(components)).values():
-        group = [components[index] for index in indices]
-        for component in group:
-            digest.update(repr(_assessment_component_key(component)).encode())
-            for matrix in (component.omega_raw, component.omega_ssp, component.eigvals_omega):
-                digest.update(
-                    b"None"
-                    if matrix is None
-                    else _dense_penalty_fingerprint(np.asarray(matrix, dtype=np.float64)).encode()
-                )
-        # An entirely inactive family is exactly zero, even if its lazy support
-        # is established later. Active retained families bind the actual fixed
-        # roots/range and common map, never mutable transported approximations.
-        if not any(values[component.name] > 0 for component in group):
-            continue
-        geometry = _context_geometry(group)
-        if geometry is None:
-            digest.update(b"manual component-matrix target")
-            continue
-        digest.update(b"retained component target")
-        if geometry.support is not None:
-            for matrix in (*geometry.support.component_roots, geometry.support.Q_plus):
-                digest.update(_dense_penalty_fingerprint(matrix).encode())
-        if geometry.coordinate_map is not None:
-            digest.update(_dense_penalty_fingerprint(geometry.coordinate_map).encode())
-    return digest.hexdigest()
-
-
-def _objective_receipt_key(
-    result: DenseSolverResult,
-    *,
-    target: str,
-    values: Mapping[str, float],
-    rank: int,
-    objective: float,
-) -> tuple:
-    face = result.coefficient_face
-    curvature = result.terminal_rank if face is None else result.terminal_reduced_rank
-    if curvature is None or result.penalized_optimizing_log_likelihood is None:
-        raise ValueError("penalty objective receipt has incomplete fitted inputs")
-    return (
-        target,
-        tuple((name, float(value).hex()) for name, value in values.items()),
-        None if face is None else _assessment_face_fingerprint(face),
-        _dense_penalty_fingerprint(result.penalty),
-        float(result.penalized_optimizing_log_likelihood).hex(),
-        float(curvature.log_pdet).hex(),
-        int(rank),
-        float(objective).hex(),
-    )
-
-
-@dataclass(frozen=True)
-class _PenaltyObjectiveReceipt:
-    key: tuple
-    logdet: float
-    logdet_error: float
-
-
-def _record_penalty_objective(
-    layout, result: DenseSolverResult, *, lambdas: Mapping[str, float], evaluation, objective: float
-) -> None:
-    """Retain actual scalar error after the producer authenticates its inputs.
-
-    The journal skips no calculation. Duplicate exact inputs/outputs retain
-    the largest original bound, including when a later root refinement returns
-    the same scalar with a smaller error. No fit, design or dense array is held.
-    """
-    values = {name: float(lambdas[name]) for name in layout.penalty_names}
-    if result.coefficient_face is not None:
-        for name in result.coefficient_face.component_names:
-            values[name] = 0.0
-    logdet, error = float(evaluation.logdet), float(evaluation.logdet_error)
-    if not math.isfinite(logdet) or not math.isfinite(error) or error < 0:
-        raise ValueError("penalty objective receipt has invalid numerical evidence")
-    rank = result.terminal_rank if result.coefficient_face is None else result.terminal_reduced_rank
-    reproduced = -float(result.penalized_optimizing_log_likelihood) + 0.5 * (
-        float(rank.log_pdet) - logdet
-    )
-    if reproduced.hex() != float(objective).hex():
-        raise ValueError("penalty objective receipt does not reproduce its producer value")
-    key = _objective_receipt_key(
-        result,
-        target=_penalty_target_fingerprint(layout.penalties, layout.coefficient_names, values),
-        values=values,
-        rank=evaluation.rank,
-        objective=objective,
-    )
-    receipt = _PenaltyObjectiveReceipt(key, logdet, error)
-    previous = layout._penalty_objective_receipts.get(key)
-    if previous is None or previous.logdet_error < error:
-        layout._penalty_objective_receipts[key] = receipt
-
-
-@dataclass(frozen=True)
-class _PenaltyAssessmentContext:
-    """One owned penalty-only target for smoothing-result authentication.
-
-    No design rows or fitted model are retained. Complete component families
-    receive new local owners for their immutable geometry; subsequent changes
-    to the original layout cannot alter the published assessment target.
-    """
-
-    penalties: tuple[PenaltyComponent, ...]
-    coefficient_names: tuple[str, ...]
-    face_fingerprints: frozenset[tuple]
-    _keys: tuple[tuple, ...]
-    _arrays: tuple[tuple[NDArray | None, ...], ...]
-    _owners: tuple[object, ...]
-    _receipts: Mapping[tuple, _PenaltyObjectiveReceipt]
-
-    @classmethod
-    def from_layout(cls, layout, *, faces: Sequence[PenaltyFace] = ()):
-        from superglm.distributional.layout import StackedLayout
-        from superglm.reml.penalty_algebra import _snapshot_penalty_context
-
-        if not isinstance(layout, StackedLayout):
-            raise TypeError("penalty assessment context requires a StackedLayout")
-        fingerprints = set()
-        for face in faces:
-            fingerprint = _assessment_face_fingerprint(face)
-            if fingerprint in fingerprints:
-                continue
-            face.validate_layout(layout)
-            fingerprints.add(fingerprint)
-        components = _snapshot_penalty_context(layout.penalties)
-        if any(item.group_sl.stop > layout.n_coefficients for item in components):
-            raise ValueError("penalty assessment context has an invalid coefficient block")
-        return cls(
-            components,
-            tuple(layout.coefficient_names),
-            frozenset(fingerprints),
-            tuple(_assessment_component_key(item) for item in components),
-            tuple((item.omega_raw, item.omega_ssp, item.eigvals_omega) for item in components),
-            tuple(getattr(item, "_penalty_geometry", None) for item in components),
-            MappingProxyType(dict(layout._penalty_objective_receipts)),
-        )
-
-    def _validate(self) -> None:
-        if not (len(self.penalties) == len(self._keys) == len(self._arrays) == len(self._owners)):
-            raise ValueError("penalty assessment context has inconsistent component bindings")
-        for item, key, arrays, owner in zip(
-            self.penalties, self._keys, self._arrays, self._owners, strict=True
-        ):
-            actual = (item.omega_raw, item.omega_ssp, item.eigvals_omega)
-            if (
-                _assessment_component_key(item) != key
-                or getattr(item, "_penalty_geometry", None) is not owner
-                or any(
-                    value is not held or (value is not None and value.flags.writeable)
-                    for value, held in zip(actual, arrays, strict=True)
-                )
-            ):
-                raise ValueError("penalty assessment context component binding changed")
-
-    def evaluate(self, result: DenseSolverResult, lambdas: Mapping[str, float]):
-        from superglm.distributional.smoothing.penalty_geometry import (
-            _finite_penalty_evaluation_from_components,
-        )
-        from superglm.reml.penalty_algebra import (
-            _compute_penalty_logdet_evaluation,
-            penalty_component_dense_matrix,
-        )
-
-        self._validate()
-        names = tuple(item.name for item in self.penalties)
-        if not isinstance(lambdas, Mapping) or set(lambdas) != set(names):
-            raise ValueError("penalty assessment requires complete component weights")
-        values = {}
-        for name in names:
-            value = lambdas[name]
-            if isinstance(value, bool) or not isinstance(value, Real):
-                raise ValueError("penalty assessment weights must be finite and nonnegative")
-            value = float(value)
-            if not math.isfinite(value) or value < 0:
-                raise ValueError("penalty assessment weights must be finite and nonnegative")
-            values[name] = value
-        face = result.coefficient_face
-        if face is not None:
-            if _assessment_face_fingerprint(face) not in self.face_fingerprints:
-                raise ValueError("penalty assessment face does not match its context")
-            for name in face.component_names:
-                values[name] = 0.0
-        width = len(self.coefficient_names)
-        expected = np.zeros((width, width))
-        for component in self.penalties:
-            local = penalty_component_dense_matrix(component)
-            expected[component.group_sl, component.group_sl] += values[component.name] * local
-        if not np.array_equal(result.penalty, expected):
-            raise ValueError("penalty assessment fit does not match its components and weights")
-        if face is None:
-            return _compute_penalty_logdet_evaluation(values, list(self.penalties))
-        return _finite_penalty_evaluation_from_components(
-            components=self.penalties, resolved=values, face=face
-        )
-
-    def original_error(
-        self,
-        result: DenseSolverResult,
-        *,
-        lambdas: Mapping[str, float],
-        rank: int,
-        objective: float,
-    ) -> float:
-        """Return the actual historical producer bound, never a replay substitute."""
-        self._validate()
-        values = {item.name: float(lambdas[item.name]) for item in self.penalties}
-        if result.coefficient_face is not None:
-            for name in result.coefficient_face.component_names:
-                values[name] = 0.0
-        key = _objective_receipt_key(
-            result,
-            target=_penalty_target_fingerprint(self.penalties, self.coefficient_names, values),
-            values=values,
-            rank=rank,
-            objective=objective,
-        )
-        receipt = self._receipts.get(key)
-        if receipt is None:
-            raise ValueError("penalty assessment has no matching original objective evidence")
-        curvature = (
-            result.terminal_rank
-            if result.coefficient_face is None
-            else result.terminal_reduced_rank
-        )
-        reproduced = -float(result.penalized_optimizing_log_likelihood) + 0.5 * (
-            float(curvature.log_pdet) - receipt.logdet
-        )
-        if reproduced.hex() != float(objective).hex():
-            raise ValueError("penalty assessment original objective evidence changed")
-        return receipt.logdet_error
-
-    def original_objectives(
-        self, result: DenseSolverResult, *, lambdas: Mapping[str, float]
-    ) -> tuple[float, ...]:
-        """Authenticate all producer outcomes when a refusal stored no scalar."""
-        self._validate()
-        values = {item.name: float(lambdas[item.name]) for item in self.penalties}
-        if result.coefficient_face is not None:
-            for name in result.coefficient_face.component_names:
-                values[name] = 0.0
-        prefix = _objective_receipt_key(
-            result,
-            target=_penalty_target_fingerprint(self.penalties, self.coefficient_names, values),
-            values=values,
-            rank=0,
-            objective=0.0,
-        )[:-2]
-        curvature = (
-            result.terminal_rank
-            if result.coefficient_face is None
-            else result.terminal_reduced_rank
-        )
-        outcomes = []
-        for key, receipt in self._receipts.items():
-            if key[:-2] != prefix:
-                continue
-            reproduced = -float(result.penalized_optimizing_log_likelihood) + 0.5 * (
-                float(curvature.log_pdet) - receipt.logdet
-            )
-            if reproduced.hex() != key[-1]:
-                raise ValueError("penalty assessment original objective evidence changed")
-            outcomes.append(reproduced)
-        if not outcomes:
-            raise ValueError("penalty assessment has no matching original objective evidence")
-        return tuple(outcomes)
-
-
-def _assessment_unpenalized_logdet_term(result: DenseSolverResult) -> float:
-    """Return −ℓₚ + ½ log|H|⁺ without the grouped penalty determinant."""
-
-    rank = result.terminal_rank
-    if result.coefficient_face is not None:
-        rank = result.terminal_reduced_rank
-        if rank is None:
-            raise ValueError("endpoint assessment fit has no reduced-rank result")
-    optimizing = result.penalized_optimizing_log_likelihood
-    if optimizing is None:
-        raise ValueError("endpoint assessment fit has no optimizing likelihood")
-    value = -float(optimizing) + 0.5 * float(rank.log_pdet)
-    if not math.isfinite(value):
-        raise ValueError("endpoint assessment objective terms could not be verified")
-    return value
-
-
-def _assessment_exact_face_objective(
-    result: DenseSolverResult,
-    *,
-    context: _PenaltyAssessmentContext | None = None,
-    lambdas: Mapping[str, float] | None = None,
-) -> tuple[float, float, float, int]:
-    """Authenticate a grouped face objective, with its penalty logdet error.
-
-    A legacy manually constructed result without a context retains only its
-    dense matrix's selected target; that fallback claims no grouped evidence.
-    """
-
-    face = result.coefficient_face
-    if face is None:
-        raise ValueError("joint endpoint assessment requires an exact coefficient face")
-    if context is not None:
-        penalty = context.evaluate(result, lambdas)
-        value = _assessment_unpenalized_logdet_term(result) - 0.5 * penalty.logdet
-        if not math.isfinite(value):
-            raise ValueError("joint endpoint assessment objective could not be verified")
-        return float(value), penalty.logdet, penalty.logdet_error, penalty.rank
-    try:
-        penalty_rank = decompose_gram(face.reduce_matrix(result.penalty))
-    except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
-        raise ValueError("joint endpoint assessment has invalid retained penalty geometry") from exc
-    value = _assessment_unpenalized_logdet_term(result) - 0.5 * penalty_rank.log_pdet
-    if not math.isfinite(value):
-        raise ValueError("joint endpoint assessment objective could not be verified")
-    return float(value), float(penalty_rank.log_pdet), 0.0, penalty_rank.rank
-
-
-def _assessment_finite_objective(
-    result: DenseSolverResult,
-    *,
-    context: _PenaltyAssessmentContext | None = None,
-    lambdas: Mapping[str, float] | None = None,
-) -> tuple[float, float, float, int]:
-    """Authenticate a grouped finite objective and its penalty logdet error."""
-
-    if result.coefficient_face is not None:
-        raise ValueError("finite rollback objective requires a finite coefficient fit")
-    if context is not None:
-        penalty = context.evaluate(result, lambdas)
-        value = _assessment_unpenalized_logdet_term(result) - 0.5 * penalty.logdet
-        if not math.isfinite(value):
-            raise ValueError("finite rollback objective could not be verified")
-        return float(value), penalty.logdet, penalty.logdet_error, penalty.rank
-    try:
-        penalty_rank = decompose_gram(result.penalty)
-    except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
-        raise ValueError("finite rollback has invalid penalty geometry") from exc
-    value = _assessment_unpenalized_logdet_term(result) - 0.5 * penalty_rank.log_pdet
-    if not math.isfinite(value):
-        raise ValueError("finite rollback objective could not be verified")
-    return float(value), float(penalty_rank.log_pdet), 0.0, penalty_rank.rank
-
-
-def _assessment_objective_error_bound(
-    evaluation: tuple[float, float, float, int],
-    *,
-    result: DenseSolverResult,
-    original_objective: float,
-    context: _PenaltyAssessmentContext | None,
-    lambdas: Mapping[str, float],
-    failure_context: str = "penalty assessment objective",
-) -> float:
-    """Keep scalar replay policy and add both actually retained penalty errors."""
-    value, logdet, error, rank = evaluation
-    scalar = _assessment_scalar_error_bound(
-        value, original_objective, width=len(result.penalty), calculation_scale=abs(logdet)
-    )
-    if context is None:
-        return scalar
-    from superglm.reml.penalty_algebra import _enclosed_bound_sum
-
-    try:
-        original_error = context.original_error(
-            result, lambdas=lambdas, rank=rank, objective=original_objective
-        )
-    except ValueError as evidence:
-        raise ValueError(f"{failure_context}: invalid original evidence") from evidence
-    return float(_enclosed_bound_sum(scalar, 0.5 * error, 0.5 * original_error))
-
-
-def _assessment_face_geometry_matches(left: PenaltyFace, right: PenaltyFace) -> bool:
-    return bool(
-        left.component_names == right.component_names
-        and left.coefficient_names == right.coefficient_names
-        and left.constraint_rank == right.constraint_rank
-        and np.array_equal(left.constraint_matrix, right.constraint_matrix)
-        and (
-            np.array_equal(left.null_basis, right.null_basis) or _face_projectors_agree(left, right)
-        )
-    )
-
-
-_FIT_TIME_FACE_GEOMETRY: ContextVar[bool] = ContextVar("fit_time_face_geometry", default=False)
-
-
-@contextmanager
-def fit_time_face_geometry() -> Iterator[None]:
-    """Validate face geometry with a fit's acceptance, half the bound a load allows."""
-    token = _FIT_TIME_FACE_GEOMETRY.set(True)
-    try:
-        yield
-    finally:
-        _FIT_TIME_FACE_GEOMETRY.reset(token)
-
-
-def _face_projectors_agree(left: PenaltyFace, right: PenaltyFace) -> bool:
-    """Whether ``N N^T`` of two stored bases agree within their replays' rounding.
-
-    Each computed product lies within ``gamma_r |N| |N|^T`` of the exact one
-    elementwise, ``r`` the inner dimension (Higham 2002, section 3.5), on any
-    platform. With ``M = |N_L| |N_L|^T + |N_R| |N_R|^T``, a load accepts a gap
-    up to ``2 gamma_{2r+4} M`` and a fit up to half that, so the load has
-    margin for its own replay. Replaying both products on another machine
-    moves the gap by at most ``2 gamma_r M``. The computed ``M`` lies within a
-    relative ``gamma_{r+1}`` of the exact one, and forming the bound and the
-    gap adds a relative ``9u`` at most, so a pair a fit accepts loads on every
-    machine when
-    ``2 gamma_r + gamma_{2r+4} (1 + gamma_{r+1} + 9u) <= 2 gamma_{2r+4} (1 - gamma_{r+1})``,
-    which holds for ``r <= 2**20``. Bases saved under the earlier bitwise rule
-    had equal products, a gap of at most ``2 gamma_r M`` anywhere. Half the
-    load bound exceeds ``gamma_r M``, so a fit still accepts every exact change
-    of basis.
-    """
-    left_basis = np.asarray(left.null_basis, dtype=np.float64)
-    right_basis = np.asarray(right.null_basis, dtype=np.float64)
-    if left_basis.shape != right_basis.shape:
-        return False
-    inner = left_basis.shape[1]
-    # gamma_{2r + 4} covers both replays on two machines and the bound's own
-    # products and sum; nonnegative operands keep each step monotone.
-    count = 2 * inner + 4
-    if count * UNIT_ROUNDOFF >= 0.5:
-        return False
-    gamma = gamma_up(count)
-    magnitude = (
-        np.abs(left_basis) @ np.abs(left_basis).T + np.abs(right_basis) @ np.abs(right_basis).T
-    )
-    multiplier = 1.0 if _FIT_TIME_FACE_GEOMETRY.get() else 2.0
-    bound = np.nextafter(multiplier * gamma * magnitude, math.inf)
-    gap = np.abs(left.projector - right.projector)
-    return bool(np.all(np.isfinite(gap)) and np.all(gap <= bound))
-
-
-def _assessment_complete_face_penalty_matches(
-    *,
-    face: PenaltyFace,
-    endpoint_penalty: NDArray,
-    finite_penalty: NDArray,
-) -> bool:
-    """Authenticate the finite penalty added when a complete face is removed."""
-
-    penalty_delta = np.asarray(finite_penalty) - np.asarray(endpoint_penalty)
-    if penalty_delta.shape != (face.width, face.width) or not np.all(np.isfinite(penalty_delta)):
-        return False
-    penalty_delta = 0.5 * penalty_delta + 0.5 * penalty_delta.T
-    try:
-        delta_rank = decompose_gram(penalty_delta)
-    except (ValueError, RuntimeError, np.linalg.LinAlgError):
-        return False
-    if delta_rank.rank != face.constraint_rank:
-        return False
-    scale = float(np.linalg.norm(penalty_delta, ord=2))
-    if not math.isfinite(scale) or scale <= 0.0:
-        return False
-    projector = face.constraint_basis @ face.constraint_basis.T
-    residual = max(
-        float(np.linalg.norm(penalty_delta @ face.null_basis, ord=2)),
-        float(np.linalg.norm(penalty_delta - projector @ penalty_delta @ projector, ord=2)),
-    )
-    operations = 1024 * max(face.width, 1)
-    epsilon = np.finfo(np.float64).eps
-    bound = operations * epsilon * scale
-    return bool(math.isfinite(residual) and residual <= bound)
 
 
 def _assessment_retained_kkt_ratio(result: DenseSolverResult) -> float:
@@ -727,47 +211,6 @@ def _assessment_is_numerically_stationary(
     )
 
 
-def _assessment_scalar_error_bound(
-    left: float,
-    right: float,
-    *,
-    width: int,
-    calculation_scale: float = 1.0,
-) -> float:
-    scale = max(abs(left), abs(right), calculation_scale, 1.0)
-    # These values are already-reduced scalar fit terms.  Reconstructing their
-    # difference takes a fixed number of scalar operations; coefficient width
-    # affects the stored log-determinants, but not this authentication step.
-    # Allow a small logarithmic margin for the reduction tree that originally
-    # produced those stored totals without letting a large common offset hide
-    # a material change in their difference.
-    operations = 32 + 4 * max(int(math.ceil(math.log2(max(width, 1)))), 0)
-    return roundoff_gamma(2 * operations) * scale
-
-
-def _assessment_coefficient_refit_bound(
-    source: NDArray,
-    refit: NDArray,
-    *,
-    tolerance: float,
-) -> float | None:
-    if source.shape != refit.shape:
-        return None
-    width = source.size
-    epsilon = float(np.finfo(np.result_type(source.dtype, refit.dtype)).eps)
-    operation_error = 64.0 * width * epsilon
-    if operation_error >= 1.0:
-        return None
-    gamma = operation_error / (1.0 - operation_error)
-    scale = max(
-        1.0,
-        float(np.max(np.abs(source), initial=0.0)),
-        float(np.max(np.abs(refit), initial=0.0)),
-    )
-    bound = float(np.nextafter((tolerance + gamma) * scale, math.inf))
-    return bound if math.isfinite(bound) else None
-
-
 def _endpoint_revalidation_projection_bound(
     face: PenaltyFace,
     coefficients: NDArray,
@@ -813,33 +256,6 @@ def _endpoint_revalidation_projection_bound(
         return None
     bound = float(np.nextafter(factor * coefficient_norm, math.inf))
     return bound if math.isfinite(bound) else None
-
-
-def _assessment_penalty_direction_matches(
-    *,
-    cap_fit: DenseSolverResult,
-    endpoint_fit: DenseSolverResult,
-    cap_lambda: float,
-    selected_rank: int,
-) -> RankDecomposition | None:
-    """Authenticate the selected penalty from the cap and endpoint fits."""
-
-    if cap_lambda <= 0.0 or not math.isfinite(cap_lambda):
-        return None
-    endpoint_penalty = endpoint_fit.penalty
-    cap_direction = (cap_fit.penalty - endpoint_penalty) / cap_lambda
-    if not np.all(np.isfinite(cap_direction)):
-        return None
-    entry_scale = float(np.max(np.abs(cap_direction), initial=0.0))
-    if entry_scale == 0.0 or not math.isfinite(entry_scale):
-        return None
-    try:
-        decomposition = decompose_gram(0.5 * cap_direction + 0.5 * cap_direction.T)
-    except (ValueError, RuntimeError, np.linalg.LinAlgError):
-        return None
-    if decomposition.rank != selected_rank:
-        return None
-    return decomposition
 
 
 def _frozen_endpoint_mapping(
@@ -1114,49 +530,6 @@ def _newton_decrement_is_certified(
     return bool(math.isfinite(bound) and bound <= limit)
 
 
-def _validate_objective_and_step_certificate(
-    *,
-    config: DenseSolverConfig,
-    converged: bool,
-    terminal_curvature: CurvatureTelemetry,
-    score: NDArray[np.float64],
-    penalized_curvature: NDArray[np.float64],
-    penalized_objective: float,
-    face: PenaltyFace | RetainedCoordinates | None,
-) -> None:
-    """Authenticate an objective-and-step stop against the retained state."""
-    if not converged:
-        raise ValueError("objective-and-step convergence requires converged=True")
-    retained_score = score if face is None else face.reduce_vector(score)
-    retained_kkt = float(np.max(np.abs(retained_score), initial=0.0)) / (
-        1.0 + abs(penalized_objective)
-    )
-    if retained_kkt <= config.tolerance:
-        return
-    if (
-        not isinstance(terminal_curvature, CurvatureTelemetry)
-        or terminal_curvature.requested_source != "observed"
-        or terminal_curvature.actual_source != "observed"
-        or terminal_curvature.fallback_count != 0
-    ):
-        raise ValueError(
-            "objective-and-step convergence requires retained score or "
-            "unfallbacked observed curvature"
-        )
-    if not _newton_decrement_is_certified(
-        config=config,
-        score=score,
-        penalized_curvature=penalized_curvature,
-        penalized_objective=penalized_objective,
-        face=face,
-        tolerance=config.tolerance,
-    ):
-        raise ValueError(
-            "objective-and-step convergence requires retained score or "
-            "a certified scaled Newton decrement"
-        )
-
-
 def _resolution_limited_decrement_is_within_objective_ulp(
     score: NDArray[np.float64],
     correction: NDArray[np.float64],
@@ -1204,18 +577,6 @@ def _resolution_limited_decrement_is_within_objective_ulp(
     )
 
 
-def _retained_rank_is_full(retained_rank: RankDecomposition | None, width: int) -> bool:
-    """Whether the certified terminal rank keeps every direction of the retained system."""
-    return bool(
-        retained_rank is not None
-        and retained_rank.width == width
-        and retained_rank.rank == width
-        and not retained_rank.rank_truncated
-        and not retained_rank.used_svd_fallback
-        and not retained_rank.resolution_limited
-    )
-
-
 def _validate_resolution_limited_stationarity(
     *,
     config: DenseSolverConfig,
@@ -1243,7 +604,14 @@ def _validate_resolution_limited_stationarity(
     retained_score = face.reduce_vector(score)
     retained_curvature = face.reduce_matrix(penalized_curvature)
     retained_width = face.reduced_width
-    if retained_rank is None or not _retained_rank_is_full(retained_rank, retained_width):
+    if (
+        retained_rank is None
+        or retained_rank.width != retained_width
+        or retained_rank.rank != retained_width
+        or retained_rank.rank_truncated
+        or retained_rank.used_svd_fallback
+        or retained_rank.resolution_limited
+    ):
         raise ValueError("resolution-limited stationarity requires full retained rank")
     raw_kkt = float(np.max(np.abs(retained_score), initial=0.0)) / (1.0 + abs(penalized_objective))
     if not math.isfinite(raw_kkt) or raw_kkt <= config.tolerance:
@@ -1327,216 +695,54 @@ class DenseSolverResult:
     row_shape: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
-        if (
-            not isinstance(self.family_likelihood_plan_identifier, str)
-            or not self.family_likelihood_plan_identifier
-        ):
-            raise ValueError("family likelihood plan identifier must be a non-empty string")
-        chunk_size = self.resolved_chunk_size
-        if chunk_size is not None and (
-            isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size < 1
-        ):
-            raise ValueError("resolved_chunk_size must be None or a positive integer")
-        expected_backend = (
-            DENSE_EXECUTION_BACKEND_IDENTIFIER
-            if chunk_size is None
-            else CHUNKED_EXECUTION_BACKEND_IDENTIFIER
-        )
-        if self.execution_backend_identifier != expected_backend:
-            raise ValueError(
-                "execution backend identifier must agree with the resolved chunk route"
-            )
-        coefficients = _readonly_finite(self.coefficients, name="coefficients")
-        if (self.eta is None) != (self.theta is None):
-            raise ValueError("eta and theta rows must be retained or omitted together")
         eta = None if self.eta is None else _readonly_finite(self.eta, name="eta")
         theta = None if self.theta is None else _readonly_finite(self.theta, name="theta")
-        row_shape = self.row_shape
-        if eta is not None:
-            assert theta is not None  # Paired presence was checked above.
-            if eta.ndim != 2 or theta.shape != eta.shape:
-                raise ValueError("eta and theta must be matching two-dimensional arrays")
-            if row_shape is not None and row_shape != eta.shape:
-                raise ValueError("row shape must match retained eta and theta")
-            row_shape = eta.shape
-        if (
-            not isinstance(row_shape, tuple)
-            or len(row_shape) != 2
-            or any(
-                isinstance(size, bool) or not isinstance(size, int) or size < 0
-                for size in row_shape
-            )
-        ):
-            raise ValueError("row shape must record the original two-dimensional rows")
-        penalty = _readonly_finite(self.penalty, name="penalty")
-        score = _readonly_finite(self.terminal_score, name="terminal_score")
-        data_curvature = _readonly_finite(
-            self.terminal_data_curvature,
-            name="terminal_data_curvature",
-        )
-        penalized_curvature = _readonly_finite(
-            self.terminal_penalized_curvature,
-            name="terminal_penalized_curvature",
-        )
-        width = len(coefficients)
-        if coefficients.shape != (width,) or score.shape != (width,):
-            raise ValueError("coefficient and terminal score shapes must agree")
-        if penalty.shape != (width, width):
-            raise ValueError("penalty shape must match coefficients")
-        if data_curvature.shape != (width, width) or penalized_curvature.shape != (width, width):
-            raise ValueError("terminal curvature shapes must match coefficients")
-        if not np.array_equal(penalty, penalty.T):
-            raise ValueError("penalty must be symmetric")
-        if not np.array_equal(data_curvature, data_curvature.T):
-            raise ValueError("terminal data curvature must be symmetric")
-        if not np.array_equal(penalized_curvature, data_curvature + penalty):
-            raise ValueError("terminal penalized curvature must equal data curvature plus penalty")
-        if self.coefficient_face is None:
-            if self.terminal_reduced_rank is not None:
-                raise ValueError("a reduced terminal rank requires a coefficient face")
-        else:
-            if not isinstance(self.coefficient_face, PenaltyFace):
-                raise TypeError("coefficient_face must be a PenaltyFace")
-            if self.coefficient_face.width != width:
-                raise ValueError("coefficient face width must match coefficients")
-            if self.terminal_reduced_rank is None:
-                raise ValueError("a coefficient face requires its reduced terminal rank")
-            if self.terminal_reduced_rank.width != self.coefficient_face.reduced_width:
-                raise ValueError("reduced terminal rank width must match the coefficient face")
-            coefficient_scale = max(1.0, float(np.linalg.norm(coefficients, ord=2)))
-            constraint_residual = float(
-                np.linalg.norm(
-                    self.coefficient_face.constraint_matrix @ coefficients,
-                    ord=2,
-                )
-            )
-            if constraint_residual > self.coefficient_face.null_residual_bound * coefficient_scale:
-                raise ValueError("coefficients must lie in their certified coefficient face")
-        for name in (
-            "initial_penalized_log_likelihood",
-            "log_likelihood",
-            "penalty_value",
-            "penalized_log_likelihood",
-            "score_relative",
-            "objective_relative_change",
-            "step_relative",
-        ):
-            if not math.isfinite(getattr(self, name)):
-                raise ValueError(f"{name} must be finite")
-        reconstructed_penalty_value = 0.5 * float(coefficients @ penalty @ coefficients)
-        penalty_sum = 0.5 * float(np.abs(coefficients) @ np.abs(penalty) @ np.abs(coefficients))
-        penalty_value_bound = (
-            64.0
-            * max(width, 1)
-            * np.finfo(np.float64).eps
-            * max(
-                1.0,
-                abs(float(self.penalty_value)),
-                abs(reconstructed_penalty_value),
-                penalty_sum,
-            )
-        )
-        if abs(float(self.penalty_value) - reconstructed_penalty_value) > penalty_value_bound:
-            raise ValueError(
-                "penalty value must equal one half beta.T @ penalty @ beta within "
-                "floating-point error"
-            )
-        optimizing = (
-            float(self.log_likelihood)
-            if self.optimizing_log_likelihood is None
-            else float(self.optimizing_log_likelihood)
-        )
         carrier = float(self.parameter_independent_carrier)
-        penalized_optimizing = (
-            float(self.penalized_log_likelihood)
-            if self.penalized_optimizing_log_likelihood is None
-            else float(self.penalized_optimizing_log_likelihood)
+        object.__setattr__(
+            self, "coefficients", _readonly_finite(self.coefficients, name="coefficients")
         )
-        initial_penalized_optimizing = (
-            float(self.initial_penalized_log_likelihood) - carrier
-            if self.initial_penalized_optimizing_log_likelihood is None
-            else float(self.initial_penalized_optimizing_log_likelihood)
-        )
-        if not isinstance(self.converged, bool):
-            raise TypeError("converged must be bool")
-        if self.iterations < 0 or self.backtracking_steps < 0:
-            raise ValueError("iteration counts must be non-negative")
-        # A stop is the fit's on the coordinates it moved: a face, or a representative's.
-        retained = (
-            RetainedCoordinates.of(self.terminal_rank)
-            if self.coefficient_face is None
-            else self.coefficient_face
-        )
-        retained_score = score if retained is None else retained.reduce_vector(score)
-        retained_kkt = float(np.max(np.abs(retained_score), initial=0.0)) / (
-            1.0 + abs(penalized_optimizing)
-        )
-        if self.convergence_reason == "score" and (
-            not self.converged
-            or (
-                retained_kkt > self.config.tolerance
-                and not (
-                    _is_unfallbacked_observed(self.terminal_curvature)
-                    and _score_within_rounding_floor(
-                        config=self.config,
-                        penalty=penalty,
-                        coefficients=coefficients,
-                        score=score,
-                        penalized_curvature=penalized_curvature,
-                        face=retained,
-                        objective=penalized_optimizing,
-                        tolerance=self.config.tolerance,
-                    )
-                )
-            )
-        ):
-            raise ValueError(
-                "score convergence requires retained KKT within tolerance, or within its "
-                "rounding floor with a certified Newton decrement"
-            )
-        if self.convergence_reason == "objective_and_step":
-            _validate_objective_and_step_certificate(
-                config=self.config,
-                converged=self.converged,
-                terminal_curvature=self.terminal_curvature,
-                score=score,
-                penalized_curvature=penalized_curvature,
-                penalized_objective=penalized_optimizing,
-                face=retained,
-            )
-        if self.convergence_reason == "resolution_limited_stationarity":
-            _validate_resolution_limited_stationarity(
-                config=self.config,
-                converged=self.converged,
-                terminal_curvature=self.terminal_curvature,
-                score=score,
-                penalized_curvature=penalized_curvature,
-                penalized_objective=penalized_optimizing,
-                face=self.coefficient_face,
-                retained_rank=self.terminal_reduced_rank,
-            )
-        object.__setattr__(self, "coefficients", coefficients)
         object.__setattr__(self, "eta", eta)
         object.__setattr__(self, "theta", theta)
-        object.__setattr__(self, "row_shape", row_shape)
-        object.__setattr__(self, "penalty", penalty)
-        object.__setattr__(self, "terminal_score", score)
-        object.__setattr__(self, "terminal_data_curvature", data_curvature)
-        object.__setattr__(self, "terminal_penalized_curvature", penalized_curvature)
+        object.__setattr__(self, "row_shape", self.row_shape if eta is None else eta.shape)
+        object.__setattr__(self, "penalty", _readonly_finite(self.penalty, name="penalty"))
+        object.__setattr__(
+            self, "terminal_score", _readonly_finite(self.terminal_score, name="terminal_score")
+        )
+        object.__setattr__(
+            self,
+            "terminal_data_curvature",
+            _readonly_finite(self.terminal_data_curvature, name="terminal_data_curvature"),
+        )
+        object.__setattr__(
+            self,
+            "terminal_penalized_curvature",
+            _readonly_finite(
+                self.terminal_penalized_curvature, name="terminal_penalized_curvature"
+            ),
+        )
         object.__setattr__(self, "history", tuple(self.history))
-        object.__setattr__(self, "optimizing_log_likelihood", optimizing)
+        object.__setattr__(
+            self,
+            "optimizing_log_likelihood",
+            float(self.log_likelihood)
+            if self.optimizing_log_likelihood is None
+            else float(self.optimizing_log_likelihood),
+        )
         object.__setattr__(self, "parameter_independent_carrier", carrier)
         object.__setattr__(
             self,
             "penalized_optimizing_log_likelihood",
-            penalized_optimizing,
+            float(self.penalized_log_likelihood)
+            if self.penalized_optimizing_log_likelihood is None
+            else float(self.penalized_optimizing_log_likelihood),
         )
         object.__setattr__(
             self,
             "initial_penalized_optimizing_log_likelihood",
-            initial_penalized_optimizing,
+            float(self.initial_penalized_log_likelihood) - carrier
+            if self.initial_penalized_optimizing_log_likelihood is None
+            else float(self.initial_penalized_optimizing_log_likelihood),
         )
-        validate_solver_likelihood_decomposition(self)
 
     @property
     def objective(self) -> float:
@@ -1566,60 +772,9 @@ class DenseSolverResult:
         return 0.5 * (inverse + inverse.T)
 
 
-def validate_solver_likelihood_decomposition(result: DenseSolverResult) -> None:
-    """Revalidate terminal and initial optimizing/carrier/reporting identities."""
-
-    optimizing = result.optimizing_log_likelihood
-    penalized_optimizing = result.penalized_optimizing_log_likelihood
-    initial_optimizing = result.initial_penalized_optimizing_log_likelihood
-    components = (
-        optimizing,
-        result.parameter_independent_carrier,
-        result.log_likelihood,
-        result.penalty_value,
-        penalized_optimizing,
-        result.penalized_log_likelihood,
-        initial_optimizing,
-        result.initial_penalized_log_likelihood,
-    )
-    if any(
-        value is None or isinstance(value, bool) or not math.isfinite(float(value))
-        for value in components
-    ):
-        raise ValueError("solver likelihood decomposition must contain finite values")
-    assert optimizing is not None
-    assert penalized_optimizing is not None
-    assert initial_optimizing is not None
-    carrier = result.parameter_independent_carrier
-    if result.log_likelihood != optimizing + carrier:
-        raise ValueError(
-            "solver likelihood decomposition requires reported likelihood = "
-            "optimizing likelihood + carrier"
-        )
-    if penalized_optimizing != optimizing - result.penalty_value:
-        raise ValueError(
-            "solver likelihood decomposition requires penalized optimizing likelihood = "
-            "optimizing likelihood - penalty"
-        )
-    if result.penalized_log_likelihood != result.log_likelihood - result.penalty_value:
-        raise ValueError(
-            "solver likelihood decomposition requires reported penalized likelihood = "
-            "reported likelihood - penalty"
-        )
-    initial_reconstructed = initial_optimizing + carrier
-    initial_error = abs(result.initial_penalized_log_likelihood - initial_reconstructed)
-    initial_bound = (
-        8.0
-        * np.finfo(np.float64).eps
-        * max(
-            1.0,
-            abs(result.initial_penalized_log_likelihood),
-            abs(initial_optimizing),
-            abs(carrier),
-        )
-    )
-    if initial_error > initial_bound:
-        raise ValueError(
-            "solver likelihood decomposition requires initial reported penalized likelihood = "
-            "initial penalized optimizing likelihood + carrier within floating-point error"
-        )
+# A v0.41.0 model pickles its smoothing result's assessment context and its
+# layout's objective receipts.  The names stay importable as inert stand-ins
+# (PEP 562) so such a model loads; nothing reads either.
+__getattr__ = module_getattr(
+    __name__, frozenset({"_PenaltyAssessmentContext", "_PenaltyObjectiveReceipt"})
+)

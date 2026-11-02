@@ -134,7 +134,6 @@ class TestNB2DevianceUnit:
                 _return_working_system=True,
                 _compute_fit_statistics=False,
                 _compute_reml_geometry=False,
-                _compute_scop_postfit_inference=False,
                 weight_semantics="prior",
             )
         # The solver walks down from the overshoot on finite deviances.
@@ -895,7 +894,6 @@ class TestNB2AutoTheta:
             y,
             max_reml_iter=2,
             max_pirls_iter=60,
-            runtime_validation="skip",
         )
 
         assert np.isfinite(model.theta_)
@@ -948,7 +946,6 @@ class TestNB2AutoTheta:
                 y,
                 max_reml_iter=2,
                 max_pirls_iter=60,
-                runtime_validation="skip",
             )
 
         structured = fit("auto")

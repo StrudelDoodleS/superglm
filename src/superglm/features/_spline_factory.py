@@ -5,11 +5,11 @@ from __future__ import annotations
 import os
 import warnings
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from numpy.typing import ArrayLike
 
-from superglm.features._spline_config import SHAPE_ENGINES
+from superglm.features._spline_config import SHAPE_ENGINES, warn_scop_retired
 from superglm.types import LambdaPolicy
 
 if TYPE_CHECKING:
@@ -50,21 +50,6 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
     return n_knots
 
 
-def kindless_as_ps(spec: Any, shape_engine: str = "qp") -> _SplineBase | None:
-    """The ``ps`` spline on ``shape_engine`` a spec declared with no kind would be, or None.
-
-    None when the spec named its kind.
-    """
-    declared = getattr(spec, "_kindless_args", None)  # absent on explicit kinds and 0.40 pickles
-    if declared is None:
-        return None
-    from superglm.features.rebuild import _carry_marks
-
-    replacement = Spline(kind="ps", **{**declared, "shape_engine": shape_engine})
-    _carry_marks(spec, replacement)
-    return replacement
-
-
 def warn_kindless_ps(reason: str, prefix: str = "", built: str = "kind='ps'") -> None:
     """Warn that a spline with no kind builds as ``built``, at the caller's line outside superglm."""
     message = (
@@ -101,11 +86,10 @@ def Spline(
     """Create a spline feature spec; with no ``kind``, ``cr`` unless ``cr`` cannot take it."""
     if shape_engine not in SHAPE_ENGINES:
         raise ValueError(f"shape_engine must be one of {SHAPE_ENGINES}, got {shape_engine!r}")
-    if shape_engine == "scop" and kind != "ps":
-        raise ValueError(
-            f"shape_engine='scop' needs kind='ps', got kind={kind!r}: SCOP fits P-splines "
-            "only. Pass kind='ps', or drop shape_engine to fit the constraint on the QP."
-        )
+    if shape_engine == "scop" and kind not in (None, "ps"):
+        # A P-spline warns itself, knowing its constraint; no other basis ever fitted on SCOP.
+        warn_scop_retired(moves_fit=False)
+        shape_engine = "qp"
     if kind is None:
         declared = {name: value for name, value in locals().items() if name != "kind"}
         from superglm.features.spline import CubicRegressionSpline
@@ -197,7 +181,7 @@ def Spline(
     cls = kind_map[kind]
 
     if kind in ("bs", "ps"):
-        # Only a P-spline has a second engine; ``bs`` never sees the keyword.
+        # Only a P-spline takes the keyword; ``bs`` never sees it.
         engine_kwargs = {"shape_engine": shape_engine} if kind == "ps" else {}
         return cast(
             "_SplineBase",

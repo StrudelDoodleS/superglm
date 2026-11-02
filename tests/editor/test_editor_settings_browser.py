@@ -99,8 +99,8 @@ def test_settings_are_kept_under_one_key_and_take_effect(open_editor_page):
 
 def test_keep_reference_off_goes_with_each_structural_request(open_editor_page):
     # A setting that changes what Python builds travels with every request
-    # that builds: the operation's own route, which refits at once, and
-    # /stage, which waits for Refit (D8). Territory declares base="first".
+    # that builds: /stage with refit, which refits at once, and plain /stage,
+    # which waits for Refit (D8). Territory declares base="first".
     with open_editor_page(selected_term="territory") as (page, session):
         pane = _settings_pane(page)
         pane.get_by_role("switch", name="Keep the reference level when collapsing").click()
@@ -112,9 +112,10 @@ def test_keep_reference_off_goes_with_each_structural_request(open_editor_page):
         session.select_levels("territory", ["T04", "T05"])
         _reload(page, "territory")
         page.locator("#selectionMenu").wait_for(state="visible")
-        with page.expect_response(_posted("/collapse_levels")) as refitted:
+        with page.expect_response(_posted("/stage")) as refitted:
             collapse.click()
         assert refitted.value.status == 200
+        assert refitted.value.request.post_data_json["refit"] is True
         assert refitted.value.request.post_data_json["keep_reference"] is False
         page.locator("#chart .level-group-marker").first.wait_for()
         page.locator("#appBusyOverlay").wait_for(state="hidden")
@@ -130,6 +131,7 @@ def test_keep_reference_off_goes_with_each_structural_request(open_editor_page):
         with page.expect_response(_posted("/stage")) as staged:
             collapse.click()
         assert staged.value.status == 200
+        assert "refit" not in staged.value.request.post_data_json
         assert staged.value.request.post_data_json["keep_reference"] is False
         page.wait_for_function(
             "() => document.querySelector('#refitPendingCount')?.textContent === '1'"

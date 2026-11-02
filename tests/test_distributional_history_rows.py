@@ -91,35 +91,6 @@ def test_compact_and_full_history_preserve_fit_and_pickling(outer):
         ]
 
 
-def test_compact_shape_is_anchored_to_terminal_rows():
-    smoothing = _fit().smoothing
-    fits = list(smoothing.coefficient_fits)
-    assert fits[0].eta is None
-    fits[0] = replace(fits[0], row_shape=(97, 2))
-    with pytest.raises(ValueError, match="row shape"):
-        replace(smoothing, coefficient_fits=tuple(fits))
-    fits = list(smoothing.coefficient_fits)
-    fits[smoothing.terminal_fit_index] = replace(smoothing.terminal_fit, eta=None, theta=None)
-    with pytest.raises(ValueError, match="terminal.*rows"):
-        replace(smoothing, coefficient_fits=tuple(fits))
-
-
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"eta": None},
-        {"eta": None, "theta": None, "row_shape": None},
-        {"eta": None, "theta": None, "row_shape": (-1, 2)},
-        {"eta": None, "theta": None, "row_shape": (96, True)},
-        {"eta": None, "theta": None, "row_shape": (96,)},
-    ],
-)
-def test_rowless_results_refuse_partial_or_malformed_provenance(changes):
-    fit = _fit(max_iterations=1).smoothing.terminal_fit
-    with pytest.raises(ValueError, match="rows|row shape"):
-        replace(fit, **changes)
-
-
 @pytest.mark.parametrize("outer", ["efs", "efs+newton"])
 def test_history_row_storage_is_bounded_during_optimization(monkeypatch, outer):
     from superglm.distributional.smoothing import loop, newton
@@ -273,11 +244,6 @@ def test_plateau_and_exact_face_keep_replay_authority(practical):
     np.testing.assert_array_equal(models[0].inference.covariance, models[1].inference.covariance)
     if practical:
         assert left.convergence_reason == "practical_plateau"
-        fits = list(left.coefficient_fits)
-        source_index = left.history[-left.config.plateau_iterations].source_fit_index
-        fits[source_index] = replace(fits[source_index], eta=None, theta=None)
-        with pytest.raises(ValueError, match="rows.*plateau replay"):
-            replace(left, coefficient_fits=tuple(fits))
     else:
         assert left.terminal_fit.coefficient_face is not None
     for model in models:

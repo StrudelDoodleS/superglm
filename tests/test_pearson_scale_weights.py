@@ -7,11 +7,10 @@ import pandas as pd
 import pytest
 
 from superglm import Constraint, SuperGLM
-from superglm.distributions import Gamma, Gaussian, Tweedie
+from superglm.distributions import Gamma, Gaussian
 from superglm.features.spline import PSpline
 from superglm.links import IdentityLink, LogLink
 from superglm.penalties.ridge import Ridge
-from superglm.reml import scop_efs as scop_efs_module
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
 from superglm.types import GroupSlice
@@ -111,7 +110,7 @@ def test_composite_pirls_pearson_phi_frequency_weights_match_row_replication(
     assert weighted.phi == pytest.approx(repeated.phi, rel=2e-9)
 
 
-def test_scop_pearson_phi_frequency_weights_match_row_replication() -> None:
+def test_shape_constrained_pearson_phi_frequency_weights_match_row_replication() -> None:
     x = np.linspace(0.0, 1.0, 28)
     y = 0.6 + 1.4 * x + 0.06 * np.sin(6.0 * x)
     weights = np.resize(np.array([1, 3, 2, 4], dtype=np.float64), x.size)
@@ -130,7 +129,6 @@ def test_scop_pearson_phi_frequency_weights_match_row_replication() -> None:
                     n_knots=6,
                     knot_strategy="uniform",
                     constraint=Constraint.fit.increasing,
-                    shape_engine="scop",
                 )
             },
             weight_semantics="frequency",
@@ -234,42 +232,3 @@ def test_postfit_shape_repair_frequency_weights_match_row_replication(
         atol=2e-12,
     )
     assert weighted.result.phi == pytest.approx(repeated.result.phi, rel=2e-12, abs=2e-12)
-
-
-def test_weighted_tweedie_scop_reml_uses_observation_count_for_terminal_phi(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    n = 36
-    x = np.linspace(0.0, 1.0, n)
-    y = np.exp(0.3 + 0.5 * x) * (1.0 + 0.06 * np.sin(5.0 * x))
-    weights = np.resize(np.array([1, 3, 2, 4], dtype=np.float64), n)
-    frame = pd.DataFrame({"x": x})
-    fallback_sizes: list[float] = []
-    original = scop_efs_module._reml_evaluation_phi
-
-    def recording_phi(evaluation, *, scale_known, fallback_likelihood_size):
-        fallback_sizes.append(float(fallback_likelihood_size))
-        return original(
-            evaluation,
-            scale_known=scale_known,
-            fallback_likelihood_size=fallback_likelihood_size,
-        )
-
-    monkeypatch.setattr(scop_efs_module, "_reml_evaluation_phi", recording_phi)
-    model = SuperGLM(
-        family=Tweedie(p=1.5),
-        selection_penalty=0.0,
-        spline_penalty=0.8,
-        features={
-            "x": PSpline(
-                n_knots=6,
-                knot_strategy="uniform",
-                constraint=Constraint.fit.increasing,
-                shape_engine="scop",
-            )
-        },
-    )
-    model.fit_reml(frame, y, sample_weight=weights, max_reml_iter=2)
-
-    assert fallback_sizes
-    assert fallback_sizes == pytest.approx([float(n)] * len(fallback_sizes))

@@ -10,7 +10,6 @@ import {
 const summaryModulePath = "../../src/superglm/editor/app/summary.js";
 const {
   applySummaryView,
-  refitAtOnceTransition,
   refitPendingTransition,
   refreshSummary,
   renderSummary,
@@ -228,41 +227,7 @@ test("structural changes are staged through one route, levels by label", () => {
   });
 });
 
-test("with Refit after every change on, a change goes to its operation's own route", () => {
-  // Collapse and ungroup act on the selection Python holds; the others name their change.
-  assert.deepEqual(refitAtOnceTransition(stageCollapse("region", ["B", "C"])), {
-    name: "collapse levels",
-    path: "/collapse_levels",
-    payload: { term: "region", method: "auto" }
-  });
-  assert.deepEqual(refitAtOnceTransition(stageUngroup("region", ["B"])), {
-    name: "ungroup levels",
-    path: "/ungroup_levels",
-    payload: { term: "region", method: "auto" }
-  });
-  assert.deepEqual(refitAtOnceTransition(stageReference("region", "B+C")), {
-    name: "set reference",
-    path: "/set_reference",
-    payload: { term: "region", level: "B+C", method: "auto" }
-  });
-  assert.deepEqual(refitAtOnceTransition(stageShapeRange("band", "B2", "B4", 0, "kink")), {
-    name: "make a Flat range",
-    path: "/shape_range",
-    payload: { term: "band", lo: "B2", hi: "B4", degree: 0, join: "kink", method: "auto" }
-  });
-  assert.deepEqual(refitAtOnceTransition(stageSpecial("band", ["B3"])), {
-    name: "make levels special",
-    path: "/special_levels",
-    payload: { term: "band", levels: ["B3"], special: true, method: "auto" }
-  });
-  assert.deepEqual(refitAtOnceTransition(stageOnCurve("band", ["B3"])), {
-    name: "put levels back on the curve",
-    path: "/special_levels",
-    payload: { term: "band", levels: ["B3"], special: false, method: "auto" }
-  });
-});
-
-test("a knot change is staged in one of its three forms, or refitted at once on /knots", () => {
+test("a knot change is staged in one of its three forms", () => {
   assert.deepEqual(stageKnots("age", { count: 8, strategy: "quantile" }), {
     name: "re-place knots",
     path: "/stage",
@@ -283,17 +248,9 @@ test("a knot change is staged in one of its three forms, or refitted at once on 
     path: "/stage",
     payload: { operation: "knots", term: "band", params: { reset: true } }
   });
-  assert.deepEqual(refitAtOnceTransition(stageKnots("age", { positions: [24.5, 31] })), {
-    name: "place knots",
-    path: "/knots",
-    payload: { term: "age", params: { positions: [24.5, 31] }, method: "auto" }
-  });
-  assert.deepEqual(refitAtOnceTransition(stageKnots("band", { reset: true })).payload, {
-    term: "band", params: { reset: true }, method: "auto"
-  });
 });
 
-test("a basis change is staged as a kind or a shrinkage, or refitted at once on /basis", () => {
+test("a basis change is staged as a kind or a shrinkage", () => {
   assert.deepEqual(stageBasis("age", { kind: "cr" }), {
     name: "change the spline kind",
     path: "/stage",
@@ -305,14 +262,6 @@ test("a basis change is staged as a kind or a shrinkage, or refitted at once on 
     payload: { operation: "basis", term: "age", params: { select: true } }
   });
   assert.equal(stageBasis("age", { select: false }).name, "turn shrinkage off");
-  assert.deepEqual(refitAtOnceTransition(stageBasis("band", { kind: "ns" })), {
-    name: "change the spline kind",
-    path: "/basis",
-    payload: { term: "band", params: { kind: "ns" }, method: "auto" }
-  });
-  assert.deepEqual(refitAtOnceTransition(stageBasis("band", { select: false })).payload, {
-    term: "band", params: { select: false }, method: "auto"
-  });
 });
 
 test("transition descriptor payloads are independent caller-owned values", () => {
