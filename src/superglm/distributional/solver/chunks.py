@@ -782,8 +782,10 @@ def _group_row_floats(group) -> int:
     if type(group) not in _EXACT_SPLINES:
         return _BLOCK_ROW_ARRAYS.get(type(group), group.shape[1])
     # An exact spline's block slice owns a CSR copy of the block rows: values,
-    # column indices and row pointers. A saturated basis's gram also forms one
-    # weighted dense copy of its rows (8 * width).
+    # column indices and row pointers. A saturated basis's gram also holds one
+    # dense copy of its rows (8 * width) when the stored values are not a dense
+    # view, as one with a knot row's zeros dropped is not; it weights them in
+    # sub-blocks, so no second copy.
     basis = group.B
     rows, width = basis.shape
     entry = basis.data.itemsize + basis.indices.itemsize

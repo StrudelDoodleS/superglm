@@ -16,6 +16,7 @@ from superglm.distributional.solver import chunks
 from superglm.features import Categorical, Numeric, RandomEffect, Spline
 
 from ._distributional_weights import resolved_prior
+from ._traced_memory import own_traced_peak
 from .test_distributional_fused_trial import _literal_design
 
 
@@ -337,3 +338,39 @@ def test_an_exact_level_group_filling_its_block_owns_no_more_than_its_charge():
             counted = chunks._group_row_floats(parent)
             assert owned <= 8 * length * counted, (owned, counted)
     assert filled == ["SplineCategoricalGroupMatrix"]
+
+
+def test_a_saturated_exact_spline_block_holds_one_dense_copy_of_its_rows():
+    """A cubic basis with a knot row's zeros dropped is no dense view; its gram scratch is charged.
+
+    The charge's weighted-copy term is 8 * width bytes per row. Mutation check:
+    weighting every row at once beside the dense rows holds two copies (16 * width;
+    the traced peak is 2.6 MB against 1.6 MB and the 1.9 MB bound).
+    """
+    n = 20_000
+    x = np.random.default_rng(5).uniform(0.0, 1.0, n)
+    x[0], x[-1] = 0.0, 1.0  # knot rows: both cubic terms vanish, so stored zeros drop
+    compiled = compile_predictors(
+        as_eager_frame(pd.DataFrame({"x": x})),
+        resolved_prior(np.ones(n)),
+        GaussianLS().parameters,
+        (
+            Predictor("location", {"x": Spline(kind="cr_cardinal", k=8, discrete=False)}),
+            Predictor("scale", {}),
+        ),
+        model_discrete=True,
+        n_bins_config=9,
+    )
+    state = build_stacked_layout(compiled).predictors[0]
+    parent = next(
+        g for g in state.design.group_matrices if type(g).__name__ == "SparseSSPGroupMatrix"
+    )
+    width = parent.B.shape[1]
+    assert parent.B.data.size < n * width  # stored zeros dropped: not a dense view
+    assert parent.B.data.size >= 0.9 * n * width  # saturated
+    block_rows = chunks.RowChunk(start=0, stop=n, indices=np.arange(n, dtype=np.intp))
+    block = chunks._row_design(state, block_rows, copy=False)
+    plan = PredictorExecutionPlan(block, state.intercept_index is not None)
+    weights = np.linspace(0.5, 1.5, n)
+    peak, _ = own_traced_peak(plan.diagonal_moment, weights)
+    assert peak < 1.5 * 8 * n * width, (peak, 8 * n * width)
