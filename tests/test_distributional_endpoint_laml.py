@@ -1138,6 +1138,39 @@ def test_private_resolution_limited_stationarity_refuses_each_missing_gate(
         )
 
 
+def test_private_resolution_limited_stop_names_a_terminal_rank_that_dropped_a_direction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kills reporting a rank-disqualified stop as a failed line search."""
+    family, layout, response, likelihood_plan, lambdas, face, initial, config = (
+        _resolution_limited_face_problem()
+    )
+    real_certify = solver_module._certified_terminal_curvature
+
+    def drop_a_direction(*args: object, **kwargs: object):
+        decision = real_certify(*args, **kwargs)  # type: ignore[arg-type]
+        rank = decision.decomposition
+        assert rank is not None
+        # The one-column retained system cannot lose a column and stay liftable,
+        # so the flag a certificate sets when it cuts a direction forces the gate.
+        return replace(decision, decomposition=replace(rank, rank_truncated=True))
+
+    monkeypatch.setattr(solver_module, "_certified_terminal_curvature", drop_a_direction)
+    result = solver_module._fit_dense_fixed_lambda_score_only(
+        family,  # type: ignore[arg-type]
+        layout,
+        response,
+        likelihood_plan,  # type: ignore[arg-type]
+        layout.penalty_matrix(lambdas),
+        initial=initial,
+        config=config,
+        coefficient_face=face,
+    )
+
+    assert result.converged is False
+    assert result.convergence_reason == "rank_reduced_at_stop"
+
+
 def test_resolution_limited_decrement_encloses_subnormal_dot_underflow() -> None:
     """Kills a relative-only dot error bound and duplicate live/result predicates."""
     tiny = np.nextafter(0.0, np.inf)

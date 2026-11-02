@@ -560,7 +560,7 @@ def _assessment_unchanged_failed_cap(
         source is not None
         and source.converged
         and not cap.converged
-        and cap.convergence_reason == "line_search_failed"
+        and cap.convergence_reason in ("line_search_failed", "rank_reduced_at_stop")
         and cap.iterations == 0
         and not cap.history
         and np.array_equal(cap.coefficients, source.coefficients)
@@ -1162,6 +1162,18 @@ def _resolution_limited_decrement_is_within_objective_ulp(
     )
 
 
+def _retained_rank_is_full(retained_rank: RankDecomposition | None, width: int) -> bool:
+    """Whether the certified terminal rank keeps every direction of the retained system."""
+    return bool(
+        retained_rank is not None
+        and retained_rank.width == width
+        and retained_rank.rank == width
+        and not retained_rank.rank_truncated
+        and not retained_rank.used_svd_fallback
+        and not retained_rank.resolution_limited
+    )
+
+
 def _validate_resolution_limited_stationarity(
     *,
     config: DenseSolverConfig,
@@ -1189,14 +1201,7 @@ def _validate_resolution_limited_stationarity(
     retained_score = face.reduce_vector(score)
     retained_curvature = face.reduce_matrix(penalized_curvature)
     retained_width = face.reduced_width
-    if (
-        retained_rank is None
-        or retained_rank.width != retained_width
-        or retained_rank.rank != retained_width
-        or retained_rank.rank_truncated
-        or retained_rank.used_svd_fallback
-        or retained_rank.resolution_limited
-    ):
+    if not _retained_rank_is_full(retained_rank, retained_width):
         raise ValueError("resolution-limited stationarity requires full retained rank")
     raw_kkt = float(np.max(np.abs(retained_score), initial=0.0)) / (1.0 + abs(penalized_objective))
     if not math.isfinite(raw_kkt) or raw_kkt <= config.tolerance:

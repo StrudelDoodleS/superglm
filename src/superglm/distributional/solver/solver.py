@@ -35,6 +35,7 @@ from superglm.distributional.results.solver import (
     SolverIteration,
     _newton_decrement_is_certified,
     _resolution_limited_decrement_is_within_objective_ulp,
+    _retained_rank_is_full,
     _score_within_rounding_floor,
     _validate_resolution_limited_stationarity,
 )
@@ -1856,6 +1857,15 @@ def _fit_dense_fixed_lambda_core(
                     state.coefficients,
                     chunk_size=context.chunk_size,
                 )
+        if (
+            reason == "resolution_limited_stationarity"
+            and context.coefficient_face is not None
+            and not _retained_rank_is_full(
+                terminal_reduced_rank, context.coefficient_face.reduced_width
+            )
+        ):
+            converged = False
+            reason = "rank_reduced_at_stop"
         if reason == "resolution_limited_stationarity":
             try:
                 _validate_resolution_limited_stationarity(
