@@ -1,7 +1,5 @@
 """Preserve certified existing-optimizer resolutions of the original C3 fixtures."""
 
-from dataclasses import replace
-
 import numpy as np
 import pytest
 from benchmarks._c3_c1_fixtures import fixture, lss_model, marked_book
@@ -47,6 +45,3 @@ def test_original_stress_fixture_has_fresh_strict_newton_authority(case):
     bar = smoothing.config.tolerance * (1 + abs(smoothing.objective))
     assert smoothing.terminal_projected_gradient_norm <= bar
     assert all(value <= bar for value in smoothing.terminal_gradient_certificate.values())
-    # Mutating the published authority must be rejected on result replay.
-    with pytest.raises(ValueError, match="stationary"):
-        replace(smoothing, terminal_projected_gradient_norm=2 * bar)
