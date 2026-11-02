@@ -155,7 +155,8 @@ class _AbsDense:
         return _abs_csr(sp.csr_matrix(rows)) if sp.issparse(rows) else np.abs(rows)
 
     def square_partial(self, start, stop, weights):
-        # Squares need no absolute values: the signed rows are a view.
+        # Squares need no absolute values: a dense block's signed rows enter as a
+        # view, a CSR slice as a copy.
         return _weighted_squares(self._matrix[start:stop], weights)
 
     def square_close(self, partial):

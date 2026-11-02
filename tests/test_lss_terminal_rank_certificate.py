@@ -36,6 +36,8 @@ from superglm.distributional.solver.packing import packed_pairs
 from superglm.features import Numeric
 from superglm.features.interaction import SplineCategorical
 
+from ._traced_memory import own_traced_peak
+
 
 @pytest.fixture
 def terminal(monkeypatch):
@@ -609,8 +611,6 @@ def test_tensor_row_pass_forms_no_bin_grid():
     The whole grid's absolute rows would be ``512**2`` rows of 16 columns
     (32 MiB); the margins and a 4,000-row block are well under 4 MiB.
     """
-    import tracemalloc
-
     from superglm._frame import as_eager_frame
     from superglm.distributional.layout import build_stacked_layout
     from superglm.distributional.predictor import Predictor, compile_predictors
@@ -642,13 +642,9 @@ def test_tensor_row_pass_forms_no_bin_grid():
     absolute = _formation.abs_group(tensor)
     values = rng.uniform(0, 1, (tensor.shape[1], 2))
     rows = rng.uniform(0, 1, (4000, 2))
-    tracemalloc.start()
-    try:
-        products = absolute.matvec(1000, 5000, values)
-        transposed = absolute.rmatvec(1000, 5000, rows)
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
+    peak, (products, transposed) = own_traced_peak(
+        lambda: (absolute.matvec(1000, 5000, values), absolute.rmatvec(1000, 5000, rows))
+    )
     assert peak < 4 * 2**20
     # Against the block's own absolute rows, formed from the margins.
     first = np.abs(np.asarray(tensor.B1_unique_t))[tensor.idx1[1000:5000]]
@@ -884,18 +880,11 @@ def test_a_dense_block_statistic_holds_one_copy_of_its_rows():
     Mutation check: squaring an absolute copy holds two copies, about twice
     the rows' bytes.
     """
-    import tracemalloc
-
     from superglm._group_matrix._group_matrix_core import DenseGroupMatrix
 
     matrix = np.random.default_rng(0).normal(size=(20_000, 64))
     weights = np.random.default_rng(1).uniform(0.0, 2.0, len(matrix))
     absolute = _formation.abs_group(DenseGroupMatrix(matrix))
-    tracemalloc.start()
-    try:
-        squares = absolute.square_partial(0, len(matrix), weights)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+    peak, squares = own_traced_peak(absolute.square_partial, 0, len(matrix), weights)
     np.testing.assert_allclose(squares, (matrix * matrix).T @ weights, rtol=1e-12)
     assert peak < 1.5 * matrix.nbytes
