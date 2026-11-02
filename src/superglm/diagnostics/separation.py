@@ -1,34 +1,17 @@
 """Build-time detection of separated categorical cells and levels.
 
-A categorical level, or a crossed-categorical cell, that carries exposure but
-whose responses all sit on the response distribution's boundary (all ``y == 0``
-for a log-link Poisson / Tweedie / negative-binomial fit; all ``y == 0`` or all
-``y == 1`` for a binomial fit) has no finite maximum-likelihood estimate.  The
-likelihood increases monotonically as the cell's linear predictor walks toward
-the boundary, so IRLS drifts until the objective stagnates, declares
-convergence, and returns fitted values collapsed to the boundary.  Rank and
-aggregate metrics (gini, balance) look healthy on such a fit; only the
-out-of-sample likelihood/deviance exposes it.
-
-This is the classical nonexistence problem for exponential-family maximum
-likelihood: the estimate exists iff the sufficient statistic lies in the
-relative interior of its marginal cone (Haberman 1974, *The Analysis of
-Frequency Data*; Fienberg & Rinaldo 2012, *Ann. Statist.* 40(2) 996-1023), and
-in the binomial case it is complete / quasi-complete separation (Albert &
-Anderson 1984, *Biometrika* 71(1) 1-10).  Detection in a general design is a
-linear program over the columns (Konis 2007; Kosmidis' ``detectseparation``),
-but for indicator blocks the coordinate directions of recession are exactly
-the cells with exposure and boundary-only response, so the scan below is exact
-for the block structure it covers -- and O(n) rather than an LP.
-
-The scan runs at design-build time, before any IRLS iteration, on both the
-dense and ``discrete=True`` paths (they share the builder).  A term whose
-block is bounded by an active SELECTION penalty is skipped: that penalty grows
-without bound along any recession direction, so the penalised optimum is finite
-and the term is estimable as specified.  Only ``selection_penalty`` is
-consulted (``dm_builder`` at the exemption site) -- a ridge would bound the
-term too, but ``Categorical`` blocks carry no ``lambda2``, so there is nothing
-to check and claiming otherwise would describe a test that does not run.
+A categorical level, or crossed-categorical cell, with exposure whose responses all
+sit on the response distribution's boundary (all ``y == 0`` for a log-link Poisson /
+Tweedie / negative-binomial fit; all 0 or all 1 for binomial) has no finite
+maximum-likelihood estimate: IRLS drifts until the objective stagnates and returns
+fitted values collapsed to the boundary, while rank metrics still look healthy. This is
+nonexistence of the exponential-family MLE (Haberman 1974; Fienberg and Rinaldo 2012,
+*Ann. Statist.* 40(2); Albert and Anderson 1984, *Biometrika* 71(1) for binomial). In
+general it is a linear program (Konis 2007), but for indicator blocks the directions of
+recession are exactly the cells with exposure and boundary-only response, so the O(n)
+scan is exact. It runs at design-build time on the dense and ``discrete=True`` paths. A
+term bounded by an active selection penalty is skipped (the penalised optimum is finite);
+only ``selection_penalty`` is consulted, since ``Categorical`` blocks carry no ``lambda2``.
 """
 
 from __future__ import annotations
@@ -288,18 +271,12 @@ def drifting_groups(
 ) -> list[str]:
     """The groups that carry the linear predictor to where the walk stopped.
 
-    The rows are those pinned at the link's guard; with none pinned (an
-    exhausted, stagnant walk) the rows whose predictor lies farthest from the
-    bulk, at least half as far as the farthest.  A group is named by how far
-    its own contribution moves those rows from where it puts the bulk (its
-    median over the rows with weight that did not stop, so a group carrying
-    every stopped row still reads as moving them when they are most of the
-    rows), which compares across groups; the size
-    of its coefficients does not, since each group's coefficients are in its
-    own reparametrised scale (a tensor's can dwarf the curve that walked), and
-    nor does its raw contribution, whose constant part -- ``mean * beta`` for a
-    covariate far from zero -- the intercept cancels.  Groups reaching at least
-    half the farthest are named, at most five.
+    The rows are those pinned at the link's guard; with none pinned, the rows whose predictor
+    lies farthest from the bulk (at least half as far as the farthest). A group is scored by
+    how far its own contribution moves those rows from where it puts the bulk (its median over
+    rows whose weight did not stop). Coefficient size is not comparable across groups (each is
+    in its own reparametrised scale) and the raw contribution includes a constant the intercept
+    cancels. Groups reaching at least half the farthest are named, at most five.
     """
     live = weights > 0
     rows = np.flatnonzero((eta != eta_unclipped) & live)
@@ -404,16 +381,13 @@ def validate_separation_mode(mode: str) -> str:
 def _recedes(sign: NDArray, natural: NDArray, null_space: NDArray, free: NDArray) -> bool:
     """Whether some ``g = b(x)' N_P Z h`` has ``sign * g >= 0`` on every row, ``> 0`` on one.
 
-    ``natural`` are the boundary rows' natural basis rows and ``sign`` the
-    side each must keep (``-1``: ``g <= 0`` where the response sits on the
-    lower boundary, ``+1``: the upper one); ``free`` (``Z``) spans the
-    directions of ``N_P`` the level's interior rows do not see.  A
-    least-squares direction with ``sign * g = 1`` settles complete
-    separation; one free direction is its two signs; otherwise the linear
-    program over the rows (Konis 2007; Geyer 2009, directions of recession)
-    maximizes ``sum sign * g`` within ``|h| <= 1``.  A direction counts only
-    when its evaluation clears its own rounding, ``gamma_(k + m + q)`` times
-    ``|b| |N_P| |Z| |h|`` (Higham 2002, section 3.5).
+    ``natural`` are the boundary rows' natural basis rows, ``sign`` the side each must keep
+    (``-1`` at the lower boundary, ``+1`` at the upper), and ``free`` (``Z``) spans the
+    directions of ``N_P`` the level's interior rows do not see. A least-squares direction with
+    ``sign * g = 1`` settles complete separation; one free direction is its two signs;
+    otherwise a linear program (Konis 2007; Geyer 2009) maximizes ``sum sign * g`` within
+    ``|h| <= 1``. A direction counts only when its evaluation clears its own rounding,
+    ``gamma_(k + m + q) |b| |N_P| |Z| |h|`` (Higham 2002, section 3.5).
     """
     rows = natural @ null_space @ free
     D = sign[:, None] * rows
@@ -446,21 +420,13 @@ def _recedes(sign: NDArray, natural: NDArray, null_space: NDArray, free: NDArray
 def _recession_span(sign: NDArray, natural: NDArray, null_space: NDArray, free: NDArray) -> NDArray:
     """``H`` ``(q, r)``, orthonormal: the span of a separated level's directions of recession.
 
-    ``sign``, ``natural``, ``null_space`` and ``free`` as ``_recedes``, which
-    found a direction.  The directions form the polyhedral cone ``C = {h : D h
-    >= 0}``, ``D`` the boundary rows' ``sign * b(x)' N_P Z``.  Its span is
-    ``{h : D_I h = 0}``, ``I`` its implicit equalities: the rows every
-    direction holds at zero.  The other rows are the separated ones, at the
-    boundary in the limiting conditional model, whose likelihood is flat along
-    the span: no coefficient there has a finite estimate, and the fit's
-    coordinate along it is where its walk stopped (Geyer 2009, section 3;
-    Correia, Guimaraes & Zylkin 2021, Proposition 3, whose maximal certificate
-    of separation this is).  One linear program finds a direction in ``C``'s
-    relative interior: maximize ``sum t`` under ``t <= D h``, ``0 <= t <= 1``,
-    ``h`` free.  A relative-interior direction, scaled, clears every row
-    outside ``I`` at once, so the optimum takes ``t = 1`` on exactly those and
-    ``t = 0`` on ``I``.  With one free direction the cone is a ray, spanning it;
-    when the program cannot be solved the span is the whole of ``Z``.
+    Arguments as in ``_recedes``. The directions form the cone ``C = {h : D h >= 0}``, ``D``
+    the boundary rows' ``sign * b(x)' N_P Z``; its span is ``{h : D_I h = 0}`` for the implicit
+    equalities ``I``, and the likelihood is flat along it (Geyer 2009, section 3; Correia,
+    Guimaraes and Zylkin 2021, Proposition 3). One linear program (maximize ``sum t`` under
+    ``t <= D h``, ``0 <= t <= 1``) finds a relative-interior direction, which clears every row
+    outside ``I`` at once. With one free direction the cone is a ray; if the program cannot be
+    solved the span is the whole of ``Z``.
     """
     q = free.shape[1]
     if q == 1:
@@ -641,27 +607,17 @@ def separated_factor_smooth_spans(
 ) -> dict[int, NDArray]:
     """The ``sz`` levels whose unpenalized line separates the response, each with its span.
 
-    Returns ``{level: S}``, in level order, with ``S`` ``(k, r)`` an
-    orthonormal basis, in the natural coordinates, of the span of the level's
-    directions of recession (``_recession_span``): the part of its line with
-    no finite estimate.
+    Returns ``{level: S}`` in level order, ``S`` ``(k, r)`` an orthonormal basis, in natural
+    coordinates, of the level's directions of recession (``_recession_span``).
 
-    An ``sz`` level's deviation keeps its polynomial part ``b(x)' N_P f``
-    unpenalized, and moving it with every level by ``-1 / K`` and the main
-    effect's polynomial by ``+1 / K`` changes the level's linear predictor
-    alone.  So the level has no finite estimate when some such ``g`` is
-    ``<= 0`` on its rows at the lower boundary (``y == 0`` under a log link
-    with mass at zero), ``>= 0`` on those at the upper one (``y == 1``,
-    binomial), zero on its interior rows and not zero throughout: a direction
-    of recession (Geyer 2009, Theorem 4), the categorical scan's rule above
-    for a block of indicators.  Only a level with fewer than ``m`` distinct
-    interior ``x`` values can have one.  A level whose rows all sit on one
-    boundary separates along the constant when the basis reproduces it
-    (``b(x)' N_P v = raw(x)' w`` with ``w`` the unit vector, a partition of
-    unity, positive on every row): one sparse product for every such level.
-    Any other candidate is decided on its own rows (``_recedes``).  Along
-    the constant every row of a one-sided level clears zero, so its directions
-    span all of ``N_P``.
+    An ``sz`` level's polynomial part ``b(x)' N_P f`` is unpenalized, and shifting it with
+    every level by ``-1/K`` and the main effect's by ``+1/K`` changes that level's predictor
+    alone. The level has no finite estimate when some such ``g`` is ``<= 0`` on its
+    lower-boundary rows, ``>= 0`` on its upper-boundary rows, zero on interior rows and not
+    zero throughout (Geyer 2009, Theorem 4). Only a level with fewer than ``m`` distinct
+    interior ``x`` values can have one. A level whose rows all sit on one boundary separates
+    along the constant when the basis reproduces it, tested for all such levels by one sparse
+    product; any other candidate is decided on its own rows (``_recedes``).
     """
     from superglm.solvers._structured.layout import (
         first_distinct_level_rows,
@@ -835,30 +791,21 @@ def _unseen_directions(rows: NDArray) -> NDArray:
     return vt[int(np.count_nonzero(sigma > cut)) :].T
 
 
-#: How far a linear program must move a row, of unit length, for it to count as
-#: moved: a hundred times HiGHS's default primal feasibility tolerance (1e-7),
-#: so a solver residual never reads as a held row.  Rows a direction does hold
-#: move by a property of the cone's geometry, measured at 0.018 and above on
-#: the freMTPL2 guide model's levels.
+#: Distance a program must move a unit-length row for it to count as moved: 100x HiGHS's
+#: default primal feasibility tolerance (1e-7), so solver residual never reads as a held row.
 _PROGRAM_TOL = 1e-5
 
 
 def _held_rows(D: NDArray) -> NDArray:
     """The rows some direction ``a`` moves strictly the right way, ``D a > 0``, with the others unmoved.
 
-    Such directions form a cone, and the rows it moves are the complement of
-    the linearity in Geyer (2009, section 3.12), which he finds with one
-    linear program per row.  One program first maximises how many rows a
-    direction moves, ``sum t`` under ``D a >= t``, ``0 <= t <= 1``, with
-    ``|a| <= 1``; a row the cone moves only together with a larger cost to
-    the others can be left at ``t = 0`` there, so each row it leaves gets its
-    own program, maximising ``D_j a`` under ``D a >= 0``.  Each row is scaled
-    to unit length first, which leaves its sign, and so the cone, unchanged
-    and keeps a row the free directions see only faintly within the
-    solver's tolerances; the box keeps the programs bounded, as HiGHS fails
-    on the free ones once rows differ in scale.  The rows passed in are ones
-    the free directions see by more than the rank cut
-    (``separated_curve_support``).
+    These directions form a cone whose moved rows are the complement of the linearity in Geyer
+    (2009, section 3.12). One program maximises how many rows a direction moves (``sum t`` under
+    ``D a >= t``, ``0 <= t <= 1``, ``|a| <= 1``); each row it leaves gets its own program,
+    maximising ``D_j a`` under ``D a >= 0``. Rows are scaled to unit length (sign, hence the
+    cone, unchanged) and the box keeps the programs bounded, since HiGHS fails on the free ones
+    once rows differ in scale. The rows passed are those the free directions see by more than
+    the rank cut (``separated_curve_support``).
     """
     from scipy import sparse
     from scipy.optimize import linprog
@@ -895,28 +842,18 @@ def separated_curve_support(
 ) -> tuple[NDArray, NDArray] | None:
     """The support points over which one level's curve separates, and the directions only they see.
 
-    ``raw`` holds the level's distinct raw basis rows (one per covariate value,
-    or bin, that carries positive weight), ``projection`` maps the scanned
-    coefficients to raw ones, and ``lower`` / ``upper`` / ``inside`` say
-    whether a point holds rows on the lower boundary (``y == 0`` under a log
-    link with mass at zero), the upper one (``y == 1``, binomial) or strictly
-    between.  A point holding an interior row, or rows on both boundaries,
-    anchors the curve: any direction of recession leaves it unmoved.  The
-    others hold rows on one boundary only, and a direction ``h`` with
-    ``g = raw projection h`` zero at every anchor, ``g <= 0`` where the
-    responses sit on the lower boundary and ``g >= 0`` on the upper, and not
-    zero throughout, raises the likelihood without bound: a direction of
-    recession (Geyer 2009, Theorem 4; the linear-programming test of Konis
-    2007), here inside the curve's penalised range.  Points some such
-    direction moves are the separated ones.
+    ``raw`` holds the level's distinct raw basis rows, ``projection`` maps scanned coefficients
+    to raw ones, and ``lower`` / ``upper`` / ``inside`` say whether a point holds rows on the
+    lower boundary, the upper boundary or strictly between. A point holding an interior row, or
+    rows on both boundaries, anchors the curve. A direction ``h`` with ``g = raw projection h``
+    zero at every anchor, ``g <= 0`` on lower-boundary points, ``g >= 0`` on upper ones and not
+    zero throughout is a direction of recession (Geyer 2009, Theorem 4; Konis 2007); the points
+    some such direction moves are the separated ones.
 
-    Returns ``(separated, free)``: a mask over the points and an orthonormal
-    basis of the scanned directions every other point leaves unseen
-    (``_unseen_directions``), in which every direction of recession lies;
-    ``None`` when no point separates.  The set is settled when a direction in
-    ``free`` moves every point of it the right way; a point no such direction
-    moves is returned to the others, which can only shrink ``free``, so the
-    loop ends.
+    Returns ``(separated, free)``: a mask over points and an orthonormal basis of the directions
+    every other point leaves unseen (``_unseen_directions``), in which every direction of
+    recession lies; ``None`` when no point separates. A point no direction in ``free`` moves is
+    returned to the others, which only shrinks ``free``, so the loop ends.
     """
     anchor = inside | (lower & upper)
     edge = ~anchor & (lower | upper)
@@ -954,20 +891,14 @@ def continuation_basis(
 ) -> NDArray | None:
     """Block coefficients whose separated part is the smooth continuation of the rest.
 
-    ``free`` (raw coefficients, orthonormal columns) spans the curve
-    directions only a level's separated rows see.  The penalised likelihood
-    keeps rising along a direction of recession, so those rows cannot fix
-    the curve there; it is held where the penalty alone puts it given the
-    rest of the curve -- its minimum-penalty continuation, ``free' omega f =
-    0`` for the level's raw curve ``f``, which is how the penalty sets a curve
-    over a range with no rows.  The level's own constant lies in ``omega``'s
-    null space, so the condition reads on the block coefficients ``h`` alone,
-    ``free' omega projection h = 0``.  A ``free`` direction the penalty does
-    not see either (``omega_null``: a straight line no unseparated row pins)
-    has no continuation; the block's own unpenalised directions
-    (``projected_null``) are then held at zero, so the line comes from the
-    rest of the model.  Returns an orthonormal basis of the block coefficients
-    left, or ``None`` when none is.
+    ``free`` (raw coefficients, orthonormal columns) spans the curve directions only a level's
+    separated rows see. The penalised likelihood keeps rising along them, so the curve is held
+    where the penalty alone puts it given the rest: ``free' omega f = 0``, which reads
+    ``free' omega projection h = 0`` on the block coefficients ``h`` since the level's constant
+    lies in ``omega``'s null space. A ``free`` direction the penalty does not see either
+    (``omega_null``) has no continuation; the block's unpenalised directions (``projected_null``)
+    are then held at zero. Returns an orthonormal basis of the block coefficients left, or
+    ``None`` when none is.
     """
     from superglm.solvers.rank import SHARED_RANK_POLICY
 

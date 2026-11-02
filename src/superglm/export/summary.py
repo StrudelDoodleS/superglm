@@ -82,18 +82,11 @@ _PARAMETRIC_WALD_NOTE = (
 )
 _SMOOTH_WOOD_NOTE = "Smooth p-values use Wood (2013) Bayesian tests."
 _GROUP_WALD_NOTE = "Group chi-square p-values are Wald approximations."
-# The workbook's short cell values, one per trigger.  The two are deliberately
-# distinct because this cell travels WITHOUT the note: it lands in a
-# spreadsheet column that a downstream consumer reads on its own, so it has to
-# be a true row-level statement rather than the union of two.  Calling an
-# SE-flagged row "Low credibility" would assert a shortage of data about a row
-# that may have none -- that branch's threshold is not scale-invariant, so a
-# predictor in very small units trips it with the whole sample behind it and an
-# unchanged z and p-value.
-#
-# WHICH one fired is read off the row's ``advisory_trigger``, recorded where
-# the flag is set; ``_advisory_warning`` says why it is not re-derived here.
-# An unrecognised value gets the neutral third value rather than either claim.
+# The workbook's short cell values, one per trigger. The cell travels without the note, so
+# it must be a true row-level statement: calling an SE-flagged row "Low credibility" would
+# assert a data shortage about a row that may have none (that threshold is not scale-invariant,
+# so a predictor in tiny units trips it). Which trigger fired is read off the row's
+# ``advisory_trigger``; an unrecognised value gets the neutral third value.
 _THIN_LEVEL_WARNING = "Low credibility"
 _OUTSIZED_SE_WARNING = "Outsized standard error"
 _UNKNOWN_ADVISORY_WARNING = "Advisory"
@@ -376,25 +369,10 @@ def _term_rows(model: SuperGLM, source: _CompactSummarySource) -> tuple[SummaryT
             row.wald_p if is_group_test else (None if is_structured_metadata else row.p)
         )
         quasi_separated = bool(row.quasi_separated)
-        # An OrderedCategorical specials term contributes two source groups: the
-        # penalized spline block and an unpenalized special block that selection
-        # can never drop. Asking whether ANY of them survived would let the
-        # special keep the rest of the term alive:
-        #
-        #   - the "smooth+free" row describes the SPLINE block (every statistic on
-        #     it was scoped there), so it would report active while showing an
-        #     empty smooth, contradicting model.summary();
-        #   - a SMOOTHED level row is no longer fitted once the spline is dropped,
-        #     so it would inherit activity from a block it has no coefficient in.
-        #
-        # Only a level actually fitted free may take its activity from the special
-        # block -- that one really is still estimated when the curve is gone.
-        #
-        # Through ``spline_groups`` rather than a local
-        # ``getattr(group, "subgroup_type", None) != "special"``: the defaulting
-        # form fails OPEN under a rename (``None != "special"`` keeps every
-        # group) and the filter would silently become a no-op here, which is the
-        # regression this comment describes.
+        # An OrderedCategorical specials term has two source groups: the penalized spline block and
+        # an unpenalized special block that selection never drops. The "smooth+free" row and a
+        # smoothed level row take their activity from the spline block alone (via ``spline_groups``,
+        # which fails loudly on a rename); only a level fitted free takes it from the special block.
         inherits_from_special = kind == "free level"
         active_groups = source_groups
         if not inherits_from_special:

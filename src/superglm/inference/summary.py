@@ -53,17 +53,13 @@ class _CoefRow:
     monotone: str | None = None  # "increasing", "decreasing", or None
     monotone_engine: str | None = None  # "qp" or "scop"
     monotone_repaired: bool = False
-    # Low-credibility advisory: a thin categorical level, or a standard
-    # error far above the model's typical one.  Named for the flag it used
-    # to be rendered as; the renderers no longer report it as a diagnosis
-    # (issue #239), and the field name itself is tracked as issue #304.
+    # Low-credibility advisory: a thin categorical level, or a standard error far above the
+    # model's typical one. The name predates issue #239 (renamed under issue #304); renderers no
+    # longer report it as a diagnosis.
     quasi_separated: bool = False
-    # Which of the two disjoint triggers fired, recorded ALONGSIDE the flag
-    # rather than re-derived by each renderer from ``level_n_obs``.  The level
-    # display strips those diagnostics from all but the first member of a
-    # grouped level so the footnote does not double-count, so a renderer
-    # reading them off a DISPLAY row would call a pooled thin level an
-    # outsized standard error.  ``dataclasses.replace`` carries this through.
+    # Which trigger fired, recorded beside the flag: the level display strips diagnostics from
+    # all but the first member of a grouped level, so a renderer re-deriving it from a display
+    # row would call a pooled thin level an outsized SE.
     advisory_trigger: str = ""
     level_n_obs: int | None = None
     level_exposure_share: float | None = None
@@ -138,51 +134,17 @@ def _profile_nll_cell(info: dict[str, Any], key: str) -> tuple[str, str]:
 
 
 _SIG_LEGEND = "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
-# The column tag and the note that defines it, in one place because the export
-# renders the same note (``superglm.export.summary`` imports both) and the two
-# used to be maintained as separate string literals.
-#
-# The note says what the RULE establishes.  It used to report quasi-complete
-# separation, an infinite maximum-likelihood estimate and a log-link
-# divergence, of every flagged row.  Separation and an infinite MLE component
-# are equivalent (A. Albert and J. A. Anderson, "On the existence of maximum
-# likelihood estimates in logistic regression models", Biometrika 71(1), 1984,
-# 1-10), and it is a joint property of the design and the response, tested by
-# linear-programming feasibility on both (K. Konis, "Linear programming
-# algorithms for detection of separated data in binary logistic regression
-# models", DPhil thesis, Oxford, 2007).  Neither branch of the detection here
-# looks at the response at all, so neither can establish it -- and the phenomenon
-# is defined only where the response distribution has a boundary the predictor
-# can be driven toward, which excludes the gaussian identity-link fits this note
-# was appearing under (R. W. M. Wedderburn, "On the existence and uniqueness of
-# the maximum likelihood estimates for certain generalized linear models",
-# Biometrika 63(1), 1976, 27-32).
-#
-# The second branch is not a volume test, is not scale-invariant, and is a
-# screen rather than a ranking.  Its threshold is ``max(50 * median_se, 10.0)``,
-# so rescaling ONE predictor moves its SE without moving the median and trips
-# the flag on units alone -- and the absolute 10.0 is what actually binds
-# whenever the median parametric SE is under 0.2, which is the ordinary case.
-# Measured on a 5000-row gaussian fit (sigma 0.5, unit-variance predictors,
-# median SE 7.1e-03, so the relative half would fire at 0.36 while the floor
-# sets 10.0), rescaling predictor "c":
-#
-#   1e-3: se 7.02, 985x the median -- NOT flagged, because 7.02 < 10
-#   1e-6: se 7.02e+03              -- flagged
-#
-# with the coefficient, z and p-value identical in both.  The note therefore
-# says what each branch means separately, and says the floor makes the column a
-# screen; splitting the two into separate flags is issue #304.
-#
-# The FIRST branch is a volume test, which in an insurance context
-# is a limited-fluctuation credibility question -- has this cell enough
-# experience to stand on its own (A. H. Mowbray, "How extensive a payroll
-# exposure is necessary to give a dependable pure premium?", PCAS 1, 1914,
-# 24-30; Actuarial Standards Board, ASOP No. 25, "Credibility Procedures",
-# 2013).  The sparse-cell estimate is finite and valid; it is unstable and
-# small-sample biased away from the null (D. Firth, "Bias reduction of maximum
-# likelihood estimates", Biometrika 80(1), 1993, 27-38).  That is what a reader
-# may act on, so that is what the note says.
+# The column tag and the note that defines it, shared with ``superglm.export.summary``.
+# The note states what the rule establishes. The first branch is a volume test, a
+# limited-fluctuation credibility question (Mowbray, *PCAS* 1, 1914; ASOP No. 25): the
+# sparse-cell estimate is finite but unstable and biased away from the null (Firth,
+# *Biometrika* 80(1), 1993). The second is an SE screen with threshold
+# ``max(50 * median_se, 10.0)``: it is not scale-invariant (rescaling one predictor trips it
+# on units alone) and the absolute 10.0 binds whenever the median SE is under 0.2, so it is a
+# screen, not a ranking (splitting the flags is issue #304). Neither branch looks at the
+# response, so neither can establish separation (Albert and Anderson, *Biometrika* 71(1),
+# 1984; Konis, DPhil thesis, Oxford, 2007), which is defined only where the response has a
+# boundary the predictor can approach.
 _LOW_CREDIBILITY_TAG = "LC"
 #: A level is thin when it holds fewer rows than this and less weight than this
 #: many rows of average weight (``coef_tables._thin_levels``).
@@ -294,11 +256,9 @@ def _format_ascii_number(value: float | None, *, decimals: int, width: int) -> s
         parsed = float(candidate)
         return np.isfinite(parsed) and (numeric == 0.0 or parsed != 0.0)
 
-    # Shed fixed decimals before switching notation. A width-limited scientific
-    # field keeps only ``width - 5`` significant figures, so jumping straight to
-    # it discards digits the column can still hold: a monetary-scale interval
-    # would collapse to a zero-width ``2.500e+05 2.500e+05``, and a leading minus
-    # sign alone would drop a value from nine significant figures to four.
+    # Shed fixed decimals before switching notation: a width-limited scientific field keeps
+    # only ``width - 5`` significant figures and would collapse a monetary-scale interval to
+    # ``2.500e+05 2.500e+05``.
     for fixed_decimals in range(decimals, -1, -1):
         fixed = f"{numeric:.{fixed_decimals}f}"
         if len(fixed) <= width and _is_safe(fixed):
@@ -652,11 +612,8 @@ class ModelSummary:
                     if row.monotone_engine is not None:
                         mono_str += f" ({row.monotone_engine})"
                     if row.monotone_repaired:
-                        # The term test, ref_df and the curve SE band are
-                        # WITHHELD for a repaired term rather than printed
-                        # against the unconstrained fit's reference
-                        # distribution -- say which, beside the marker, or the
-                        # row reads as a term that simply had no test.
+                        # The term test, ref_df and curve SE band are withheld for a repaired term (not printed
+                        # against the unconstrained fit's reference distribution); say so beside the marker.
                         mono_str += ", repaired (inference withheld)"
                     detail_parts.append(mono_str)
                 detail_str = ", ".join(detail_parts)
@@ -672,43 +629,20 @@ class ModelSummary:
                     spline_text = (
                         f"[{kind}, {param_label}, chi2({df_str})={row.wald_chi2:.1f}, p={p_str}]"
                     )
-                    # Placed at the header's OWN Sig offset, not right-aligned
-                    # to the box.  A group row hand-builds its line instead of
-                    # going through ``_coef_fields``, and padding to the box
-                    # edge put its stars in the last field -- the advisory, not
-                    # Sig -- on a row kind the detection never inspects, so
-                    # every significant smooth read as flagged.  ``_coef_fields``
-                    # emits six numeric fields each preceded by a space, then a
-                    # space and the 3-wide Sig, which is the offset below.
+                    # Placed at the header's own Sig offset: a group row hand-builds its line, and padding to
+                    # the box edge put stars in the advisory field. ``_coef_fields`` emits six numeric fields
+                    # each preceded by a space, then a space and the 3-wide Sig.
                     row_prefix = _coef_prefix(row)
                     sig_col = len(row_prefix) + sum(coef_field_widths[:6]) + 7
-                    # Elided rather than allowed to push the stars right.  A
-                    # clamped pad slides them out of Sig once the group text
-                    # runs long -- an ordered polynomial with a five-digit
-                    # chi-square reaches it -- and three characters further
-                    # puts them back in the advisory column, which is the
-                    # claim this renderer exists to stop making.  It also
-                    # overruns the coefficient table's own width, so the row's
-                    # right border leaves the box.  Truncating keeps both
-                    # invariants for any label; the elided tail is the p-value,
-                    # which the row's own data still carries.
-                    # Exactly the room before Sig: two characters go to the gap
-                    # after the term name and the rest is the label's.  Not one
-                    # less for a cosmetic gap -- a label that ends flush against
-                    # the stars is what a full-width numeric field looks like
-                    # too, and spending a column on air would elide a label that
-                    # fits, which is a real loss for a cosmetic gain.
+                    # Elided rather than allowed to push the stars right: a clamped pad slides them out of Sig
+                    # on a long group text and overruns the box. ``room`` is exactly the space before Sig (two
+                    # characters go to the gap after the term name).
                     room = sig_col - len(row_prefix) - 2
                     overflow = len(spline_text) - room
                     if overflow > 0:
-                        # The KIND is elided, not the tail.  The tail is
-                        # ``p=``, and on the console that is the only place a
-                        # reader can get the whole-term p-value -- the HTML row
-                        # has no width bound and still prints it, so cutting it
-                        # here would make the two renderers disagree about one
-                        # term, which is the thing this change exists to stop.
-                        # A label is recoverable from the term's own report;
-                        # a number that is nowhere else is not.
+                        # The kind is elided, not the ``p=`` tail: the console is the only place the whole-term
+                        # p-value appears, and the HTML row prints it in full, so cutting it would make the two
+                        # renderers disagree.
                         keep = len(kind) - overflow - 1
                         if keep >= 1:
                             spline_text = spline_text.replace(f"[{kind},", f"[{kind[:keep]}…,", 1)

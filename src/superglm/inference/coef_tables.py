@@ -30,30 +30,15 @@ def _thin_levels(
 ) -> NDArray:
     """Which levels of a categorical are thin: few rows, and little weight.
 
-    A level is thin when it holds fewer than ``_THIN_LEVEL_ROWS`` rows AND less
-    weight than that many rows of average weight.  Either one is enough
-    experience: many rows, or a large share of the book's weight however few
-    rows carry it, as in an aggregated book of rating cells.  Rows are counted
-    as the weight contract counts them:
-
-    - ``"frequency"``: a weight is a replication count, so a level's rows are
-      the replications it holds and integer weights flag as the replicated
-      table would.  The two conditions are then the same one.
-    - ``"prior"`` (and no declared contract): a row is one observation of a
-      given precision and a zero weight an unobserved row, so a level's rows
-      are its rows of positive weight, and the average weight is over those.
-      Prior weights are identified only up to a common factor, which neither
-      condition reads.
-
-    Neither condition depends on the book's size or the weights' units, and
-    neither reads the response.
-
-    A level with ``_THIN_LEVEL_ROWS`` rows or more is therefore never thin,
-    however little weight they carry: 40 policies of a month's exposure each,
-    in a book averaging six months, hold under 7 rows of average weight and
-    are not flagged.  Without the response or absolute weights, such a level
-    looks the same as 40 large rating cells holding as small a share of their
-    book.
+    A level is thin when it holds fewer than ``_THIN_LEVEL_ROWS`` rows AND less weight than that
+    many rows of average weight; either many rows, or a large share of the book's weight however
+    few rows carry it (an aggregated book of rating cells), is enough experience. Rows are
+    counted as the weight contract counts them: under ``"frequency"`` a weight is a replication
+    count (so the two conditions coincide); under ``"prior"`` (or no declared contract) a row is
+    one observation and a zero weight an unobserved row, so a level's rows are its positive-weight
+    rows and the average is over those. Neither condition depends on the book's size, the
+    weights' units or the response. A level with ``_THIN_LEVEL_ROWS`` rows or more is never thin
+    however little weight they carry.
     """
     from superglm.solvers.dispersion import FREQUENCY_WEIGHTS
 
@@ -511,14 +496,9 @@ def build_coef_rows(
             # test, ref_df, n_params — is a statement about the spline block.
             smooth_groups = spline_groups(feature_groups)
             beta_combined = np.concatenate([beta[fg.sl] for fg in feature_groups])
-            # Two notions of "active" for a specials term.  ``feature_active``
-            # asks whether *any* block survived selection and gates the level
-            # table, because a free special keeps its own real standard error
-            # even when the curve is dropped.  ``smooth_active`` asks about the
-            # spline block alone and gates everything printed on the smooth
-            # row: an unpenalized specials block is always selected, so testing
-            # the whole feature there would make the row permanently "active"
-            # while advertising zero edf and a NaN Wald test.
+            # ``feature_active``: any block survived selection; gates the level table (a free special
+            # keeps a real SE even when the curve is dropped). ``smooth_active``: the spline block alone;
+            # gates the smooth row (an unpenalized specials block is always selected).
             feature_active = any(fg.name in selected_names for fg in feature_groups)
             smooth_active = any(fg.name in selected_names for fg in smooth_groups)
             feature_edf = (
@@ -615,18 +595,9 @@ def build_coef_rows(
                         knot_strategy=s_knot_strat,
                         boundary=s_bnd,
                         difference_penalty=s_penalty,
-                        # The wrapper's own forward, not a reach past it into
-                        # `_spline`. Unlike a `getattr` default, this RAISES on
-                        # a step-mode pickle -- and that is safe by local
-                        # dominance, not by any global claim that such a spec
-                        # cannot reach here: `spec.reconstruct(...)` and
-                        # `spec.basis_kind` above both funnel through
-                        # `_basis_spline` unconditionally, so either raises the
-                        # migration error first and this line can never be the
-                        # first failure on any input. Dominance is checkable in
-                        # this one function; "a step pickle dies at build" is a
-                        # claim about every route into this file, and a restored
-                        # whole-model pickle never calls build at all.
+                        # The wrapper's own forward. It raises on a step-mode pickle, which is safe because
+                        # ``spec.reconstruct(...)`` and ``spec.basis_kind`` above already raise the migration
+                        # error first.
                         monotone=spec.constraint_kind,
                         monotone_engine=g.monotone_engine,
                         monotone_repaired=g.feature_name in _mono_repairs,
@@ -1172,41 +1143,15 @@ def build_coef_rows(
             )
 
         elif isinstance(spec, Piecewise):
-            # Per-knot Wald rows, their CIs, and edf = J+1 are valid only when
-            # ALL FOUR of these hold:
-            #   1. the term is unpenalized -- the slope penalty the design defers
-            #      is deferred precisely because it forfeits the fixed-df
-            #      contract (an L1 slope-change penalty on this model class is
-            #      k=1 trend filtering, whose df is E[#knots] + k + 1, i.e.
-            #      data-dependent);
-            #   2. the group carries no selection shrinkage -- GroupInfo.penalized
-            #      is True for a Piecewise group, so a group-lasso
-            #      selection_penalty shrinks this block and breaks both the Wald
-            #      rows and the fixed edf;
-            #   3. the breakpoints are FIXED INPUTS, not selected on the response
-            #      from the same data.  When a breakpoint is data-chosen the
-            #      statistic converges to a supremum of a nonstandard Gaussian
-            #      process and nominal Wald calibration fails, even though df is
-            #      still nominally J+1.  breaks=int quantile placement is
-            #      materially milder: it looks only at x, never at y.  Reading
-            #      kinks off a fitted Spline and refitting them here on the same
-            #      data is the real offender;
-            #   4. the term is unconstrained -- under an active monotone
-            #      constraint the effective df becomes the size of the active
-            #      face, which is data-dependent.
-            # Withdraw the per-coefficient p-values if any of these stops holding.
-            #
-            # Condition 3 is the load-bearing one and it is NOT "because the df
-            # is fixed and known": df stays nominally J+1 under response-selected
-            # breaks while the p-values go wrong.  Validity rests on the
-            # breakpoints being inputs.
-            #
-            # Condition 2 is ENFORCED here, not just stated: when the fitted
-            # penalty carries positive selection shrinkage aimed at this group
-            # (a positive or "auto"-resolved selection_penalty), the per-knot
-            # z/p/CI and the whole-term chi-square are withheld -- None, the
-            # table's convention for a statistic that does not exist -- while
-            # the estimates and their SEs stay reported.
+            # Per-knot Wald rows, CIs and edf = J+1 are valid only when all four hold; otherwise the
+            # per-coefficient p-values are withdrawn: (1) the term is unpenalized (an L1 slope-change
+            # penalty is trend filtering, whose df is data-dependent); (2) the group carries no selection
+            # shrinkage (enforced below: z/p/CI and the whole-term chi-square are withheld, estimates and
+            # SEs stay); (3) the breakpoints are fixed inputs, not selected on the response (the
+            # statistic then converges to a supremum of a nonstandard Gaussian process even though df
+            # stays nominally J+1; quantile placement ``breaks=int`` looks only at x and is milder; kinks
+            # read off a fitted Spline and refit on the same data are the offender); (4) the term is
+            # unconstrained (an active monotone constraint makes df the data-dependent size of the face).
             shrunk = g.name in (selection_shrunk_group_names or ())
             knots = spec._knots
             pw_edf = _get_group_edf_map().get(g.name, 0.0) if active else 0.0
@@ -1230,16 +1175,10 @@ def build_coef_rows(
                     )
                 )
 
-            # edf is carried by the whole-term row below and by nothing else.
-            # Categorical puts it on its first level row because a categorical
-            # term has no term-level row to put it on; this one does, and
-            # reporting it twice would both read as two numbers about one term
-            # and land the same degrees of freedom in the summary's parametric
-            # and smooth buckets at once.  Ordered-spline rows do it this way.
-            #
-            # Whole-term test: a J+1 df chi-square on all coefficients jointly,
-            # testing that the term is flat.  Deliberately not a Wood smooth
-            # test -- there is no smoothing parameter to have been estimated.
+            # edf is carried by the whole-term row alone; reporting it twice would put the same df in
+            # the summary's parametric and smooth buckets. The whole-term test is a J+1 df chi-square on
+            # all coefficients jointly (flat term), not a Wood smooth test: no smoothing parameter was
+            # estimated.
             stat = float("nan")
             p_val = float("nan")
             ref_df = float(g.size)
@@ -1299,19 +1238,12 @@ def build_coef_rows(
             row.estimable = False
 
     # ── Low-credibility advisory ────────────────────────────────
-    # Two disjoint triggers, neither of which is a separation test: neither
-    # reads the response, and separation is a joint property of the design and
-    # the response (issue #239).
-    # Primary: data-driven — categorical levels with too little experience,
-    # flagged as their rows are built (``_thin_levels``).
-    # Fallback: SE-based — for non-categorical features or when
-    # per-level diagnostics are unavailable. Neither scale-invariant nor purely
-    # relative: the threshold is ``max(50 * median_se, 10.0)``, so rescaling ONE
-    # predictor trips it on units alone, while the absolute 10.0 is what binds
-    # whenever the median parametric SE is under 0.2 -- a coefficient can be
-    # hundreds of times the typical width and go unflagged. Splitting the two
-    # branches is issue #304.
-    # SE-based fallback for rows without per-level diagnostics
+    # Two disjoint triggers, neither a separation test (separation is a joint property of design
+    # and response, issue #239). Primary: categorical levels with too little experience
+    # (``_thin_levels``). Fallback, for non-categorical features or when per-level diagnostics are
+    # unavailable: SE-based, threshold ``max(50 * median_se, 10.0)``, which is not scale-invariant
+    # (rescaling one predictor trips it) and is dominated by the absolute 10.0 when the median
+    # parametric SE is under 0.2 (issue #304).
     parametric_ses = [
         r.se
         for r in rows

@@ -29,38 +29,22 @@ _TERM_NUMERIC_COLUMNS = frozenset(
     {"Estimate", "Std Error", "Statistic", "P Value", "CI Lower", "CI Upper", "EDF", "Lambda"}
 )
 
-# The width of an ordinary main-effect block: a key column, a relativity and a
-# weight.  It is no longer the STRIDE -- blocks are placed by their own widths
-# (``_main_effect_start_columns``) because a ppform block is seven columns wide,
-# and the number formats are chosen by a column's role in its block rather than
-# by ``column % 3``.  What the constant still names is the mandatory
-# three-column prefix every block carries: the downstream loader locates blocks
-# by a header signature requiring ``relativity`` at +1 and ``weight`` at +2, so
-# anything a block adds is added to the RIGHT of these three, and that is what
-# makes "past the prefix" a usable test for the exact-form columns.
+# Width of an ordinary main-effect block: key, relativity, weight. Blocks are placed by
+# their own widths (``_main_effect_start_columns``; a ppform block is seven wide). The
+# downstream loader finds blocks by a header signature with ``relativity`` at +1 and
+# ``weight`` at +2, so anything a block adds goes to the right of these three.
 _MAIN_EFFECT_BLOCK_STRIDE = 3
 
-# Blocks sit end to end with no blank column between them, which is what the
-# fixed stride of 3 already did when every block was exactly three wide.  Named
-# rather than left implicit because it is now a layout choice instead of an
-# arithmetic accident: keeping it at 0 is what makes the all-three-wide default
-# layout land on columns 1, 4, 7 exactly as it did before.
+# Blocks sit end to end with no blank column, so an all-three-wide layout lands on
+# columns 1, 4, 7.
 _MAIN_EFFECT_BLOCK_GAP = 0
 
 
 def _main_effect_start_columns(blocks) -> list[int]:
     """The first column of each main-effect block, by cumulative width.
 
-    A ppform block is seven columns and every other block is three, so "block
-    ``i`` starts at ``1 + i * 3``" stopped being true the moment the first wide
-    block could appear in the list.  Under the old rule a wide block's
-    right-hand neighbour was written straight over its coefficients, and
-    openpyxl raised nothing -- the sheet simply lost four columns and repeated a
-    ``Relativity``/``Weight`` pair where they had been.
-
-    Every caller that places or re-reaches a block goes through this, so the
-    placement, the number formats, the piecewise notes and the key-column widths
-    cannot come to disagree about where a block is.
+    Every caller that places or re-reaches a block goes through this, so placement, number
+    formats, piecewise notes and key-column widths agree about where a block is.
     """
     starts: list[int] = []
     column = 1
@@ -74,107 +58,42 @@ _MAIN_EFFECT_TITLE_ROW = 5
 _MAIN_EFFECT_NOTE_ROW = 6
 _MAIN_EFFECT_HEADER_ROW = 7
 
-# The piecewise block's two numeric columns are re-formatted after the per-block
-# format pass.  ``Log relativity`` is not one of the roles that pass knows, and
-# under the ``column % 3`` loop that preceded it the column rendered at two
-# decimal places: the value stored in the cell stays exact either way, but a
-# human reading or copy-pasting the sheet would see ``0.00``, which defeats the
-# entire purpose of publishing that column.
+# The piecewise block's two numeric columns are re-formatted after the per-block pass;
+# ``Log relativity`` is not a role that pass knows, and two decimals would defeat
+# publishing it.
 _PIECEWISE_NUMBER_FORMAT = "0.000000000000"
 
-# The ppform block's four exact-form columns.  Coefficients are not factors and
-# must not be read at six decimal places: a reader copying ``b`` into a stored
-# procedure needs every digit that was fitted, and the magnitude is not bounded
-# the way a relativity's is -- ``a``, ``b``, ``c`` and ``d`` are signed
-# log-space numbers whose scale follows the fitted curve rather than the [0, 1]
-# local variable they multiply.  Significant digits, not decimal places, for the
-# same reason the base relativity gets a scientific format.  (The interval
-# bounds need no format at all: they live in the text key, not in columns of
-# their own.)
+# The ppform exact-form columns: coefficients are signed log-space numbers of unbounded
+# scale, so they get significant digits (scientific), not decimal places.
 _PPFORM_NUMBER_FORMAT = "0.00000000000000E+00"
 
-# The two formats the main-effect blocks have always carried, keyed by the
-# column's ROLE rather than by its position.  The loop these replace keyed on
-# ``cell.column % _MAIN_EFFECT_BLOCK_STRIDE``, which means "the second and third
-# column of a three-wide block" and means nothing at all once blocks differ in
-# width: with one seven-column block on the sheet, ``% 3 == 2`` lands on the
-# ``b`` coefficient and then on the NEXT block's interval key, and ``% 3 == 0``
-# on ``c`` and then on that block's ``Relativity``.  Reading the header the
-# block itself declared cannot drift that way.
+# Formats keyed by a column's role, read from the header the block declares, because
+# blocks differ in width and a position rule like ``column % 3`` misfires on a wider block.
 _MAIN_EFFECT_ROLE_FORMATS = {
     "Relativity": "0.000000",
     "Weight": "#,##0.00",
 }
 
-# The base relativity cell, for the same reason and re-applied at the same
-# point.  ``C2`` sits five rows above the first block, so the per-block format
-# pass never reaches it -- and under the ``column % 3`` loop that preceded that
-# pass it was worse than unformatted, because the loop walked the whole sheet
-# and its ``== 0`` arm claimed column 3, rendering the base at two decimal
-# places.  Either way the value stored keeps its sixteen significant digits, so
-# no reader of the file object notices, but a human reading the sheet does.  It
-# is the one cell that multiplies EVERY row of the tariff, and under
-# ``centering="mean"`` it additionally carries the whole transferred centering
-# constant, so a reader rating off the displayed number is uniformly wrong.
-# Measured on a two-term Poisson fit: base
-# 0.3719954211385351 displays as 0.37, a 5.4e-03 relative error on every risk;
-# 0.4027922135365106 -> 0.40 (6.9e-03) in the mean-centered export of the same
-# model.
-#
-# Scientific rather than a fixed-decimal format, which is where this differs
-# from the piecewise columns.  Those hold log relativities, bounded by the
-# tariff's own design, so twelve decimals is always enough.  The base is
-# ``exp(intercept)`` and its magnitude is bounded by nothing: an ordinary
-# claim-frequency Poisson fit sits near ``exp(-3)`` = 0.05 and a low-frequency
-# one near 1e-6, where twelve decimals leaves seven significant digits.
-#
-# And scientific rather than ``General``, which was the first choice here and
-# does not survive its own justification.  ECMA-376 Part 1 s18.8.30 budgets
-# ``General`` in DISPLAY CHARACTERS, not significant digits -- "max overall
-# length for cell display is 11, not including negative sign, but includes
-# leading zeros and decimal separator" -- so leading zeros are charged against
-# the same eleven, and the precision decays exactly as the base shrinks: at
-# ``exp(-3)`` those eleven characters buy eight significant digits and a
-# 7.4e-09 error.  Below a decimal exponent of -3 the same clause switches
-# ``General`` to exponential and pins no digit count at all, leaving display
-# "based on the available cell width", so there is no precision to claim.
-#
-# ``0.0000000000E+00`` is ten mantissa decimals plus the leading digit: eleven
-# significant digits at EVERY magnitude, and well inside the fifteen Excel
-# retains.  The base should not be the least precisely stated number on a sheet
-# whose other public keys -- bin boundaries, interaction axis values -- are
-# printed at full round-trip precision.
+# The base relativity cell (``C2``, above the first block, so the per-block pass never
+# reaches it). It multiplies every row of the tariff, and under ``centering="mean"``
+# carries the transferred centering constant, so a displayed 0.37 for 0.3719954 is a
+# 5.4e-03 error on every risk. It is ``exp(intercept)`` with unbounded magnitude, so
+# the format is scientific, not fixed-decimal. ``General`` is rejected because ECMA-376
+# s18.8.30 budgets it in display characters (leading zeros count) and then switches to
+# exponential with no pinned precision; ``0.0000000000E+00`` gives eleven significant
+# digits at every magnitude.
 _BASE_RELATIVITY_CELL = "C2"
 _BASE_RELATIVITY_NUMBER_FORMAT = "0.0000000000E+00"
 
-# ...and a format Excel cannot fit renders as ``########``, which is the one
-# cell on the sheet a reader most needs to be able to read.  ``_autosize``
-# cannot see it: it measures ``str(cell.value)``, the raw float, and the base
-# sits in a column whose other entries are a block's ``Weight`` values -- short
-# whole numbers on an ordinary tariff, and absent entirely on an intercept-only
-# export -- so the column lands on the floor of 12 while the rendering needs
-# more.  Derived from the format rather than observed: one leading digit, the
-# decimal separator, ten mantissa decimals, ``E``, the exponent sign, and up to
-# three exponent digits (float64 reaches E+308) is 17 characters; the base is
-# ``exp`` of a real number so it is never negative and never needs an
-# eighteenth.  Plus the two columns of padding ``_autosize`` already applies.
+# A format Excel cannot fit renders as ``########``, and ``_autosize`` measures the raw
+# float. Width derived from the format: 1 digit, separator, 10 decimals, ``E``, sign and 3
+# exponent digits = 17 characters, plus the two columns of padding ``_autosize`` adds.
 _BASE_RELATIVITY_MIN_WIDTH = 17 + 2
 
-# The same failure, one column over.  ``_autosize`` caps at 36 characters, which
-# is a readability limit for PROSE -- the summary sheet's wrapped ``Notes``
-# column depends on it -- and a block's KEY column is not prose.  Its cells are
-# interval strings printed at round-trip precision, and a pair of them runs to
-# 40 characters on an ordinary fixture.  Excel clips rather than overflows,
-# because the neighbouring ``Relativity`` column is populated on every row, so
-# the reader sees ``[20.463050119288255, 23.16627506`` -- which still reads as
-# an interval, with a plausible and wrong right edge.  That is strictly worse
-# than the ``########`` this module already refuses for the base: hash marks
-# announce themselves, a truncated number does not.
-#
-# Derived, not observed: ``repr`` of a float64 is at most 24 characters
-# (``-1.2345678901234567e-308``), so the widest interval this module can print
-# is ``[`` + 24 + ``, `` + 24 + ``)`` = 52, plus the two columns of padding
-# ``_autosize`` applies.
+# A block's key column is not prose, so it is exempt from ``_autosize``'s 36-character
+# cap: Excel clips an interval string, leaving a plausible but wrong right edge. A float64
+# ``repr`` is at most 24 characters, so the widest interval is
+# ``[`` + 24 + ``, `` + 24 + ``)`` = 52, plus the two columns of padding.
 _KEY_COLUMN_MAX_WIDTH = 1 + 24 + 2 + 24 + 1 + 2
 
 
@@ -291,28 +210,13 @@ def _piecewise_interpolation_note(
 ) -> str:
     """The interpolation and extrapolation rule for one piecewise block.
 
-    Derived from the block's own printed columns, so a reader can check the
-    stated slopes against the two end rows rather than take them on trust.
-
-    The slopes are written at full round-trip precision on purpose.  The whole
-    claim of a piecewise rating table is that the workbook reproduces the model
-    exactly; a boundary slope rounded for readability would put a small,
-    silent discrepancy back into the tariff at exactly the rows -- the ones
-    outside the rated range -- where nobody would look for it.
-
-    That exactness claim holds in both centerings.  ``centering="mean"``
-    shifts this block by a constant so its relativities have geometric mean 1,
-    and the exported base relativity carries the same constant back, so the
-    base-times-blocks product is the same number either way.  The note states
-    the constant it was shifted by, because a reader holding the two workbooks
-    side by side can otherwise only see that the columns disagree.
-
-    The out-of-range rule is the term's ``extrapolation`` parameter, and it is
-    stated here rather than assumed because both directions exist in practice:
-    holding flat beyond the outermost knots is the default (the library's
-    splines hold flat too), extending the boundary segments is the stated
-    alternative.  What ``lower``/``upper`` buy is that the knots sit where the
-    tariff's rated range says they should.
+    Derived from the block's own printed columns, so a reader can check the stated slopes
+    against the two end rows. Slopes are written at full round-trip precision: a rounded
+    boundary slope would silently put a discrepancy back into the tariff outside the rated
+    range. The claim holds in both centerings; under ``centering="mean"`` the note states the
+    constant the block was shifted by, which the exported base relativity carries back. The
+    out-of-range rule is the term's ``extrapolation`` parameter: flat beyond the outermost
+    knots (default) or extending the boundary segments.
     """
     knots = [float(value) for value in table.iloc[:, 0]]
     interpolate = (
@@ -367,16 +271,10 @@ def _piecewise_interpolation_note(
 def _main_effect_number_format(block, column_name: str, offset: int) -> str | None:
     """The format one column of one block should carry, or ``None`` for plain.
 
-    ``Relativity`` and ``Weight`` are recognised by name wherever they appear,
-    so the lookup half of a ppform block renders exactly like the binned block
-    it stands in for.  Everything past that block's mandatory three-column
-    prefix is its exact form, and gets significant digits rather than decimal
-    places -- a coefficient rendered as ``0.00`` is stored exactly and read
-    wrongly, which is the failure this whole export exists to remove.
-
-    Keyed on the block's ``kind`` rather than on the four column names, so a
-    coefficient column renamed in ``rating_tables`` cannot quietly fall back to
-    the default rendering.
+    ``Relativity`` and ``Weight`` are recognised by name wherever they appear, so the lookup
+    half of a ppform block renders like the binned block it stands in for. Everything past the
+    mandatory three-column prefix is the exact form and gets significant digits. Keyed on the
+    block's ``kind``, so a column renamed in ``rating_tables`` cannot fall back to the default.
     """
     role = _MAIN_EFFECT_ROLE_FORMATS.get(column_name)
     if role is not None:
@@ -438,27 +336,14 @@ def _annotate_piecewise_blocks(ws, main_effects) -> None:
 def _per_unit_offset_note(name: str) -> str:
     """The multiply rule for one per-unit offset block, stated on the sheet.
 
-    A ``Numeric`` block and a per-unit offset block are the SAME SHAPE -- a
-    single row keyed ``per_unit``, with a ``Relativity`` and a ``Weight`` -- and
-    take DIFFERENT arithmetic: ``Relativity ** x`` for the numeric term, whose
-    coefficient was estimated, against ``Relativity * x`` for the offset, whose
-    coefficient is 1 by construction.  ``RatingTableBlock.kind`` is never
-    written to the workbook, and the per-unit offset block is now the default
-    for a continuous offset and is named after a raw frame column just like a
-    feature block, so a consumer holding only the sheet has nothing else to
-    route on.  This note is that routing information.
-
-    Written for both flavours of the block without branching, because the
-    sentence is true of both: the declared form is keyed on the source column
-    the caller named, the undeclared form on the offset multiplier the consumer
-    computes for itself, and in each case the factor is that value times this
-    ``Relativity`` (which is exactly 1.0 in the undeclared form, so the block
-    returns the input unchanged).
-
-    The absence of a rated range is stated rather than left to be inferred.  It
-    is the property that separates this block from every banded one on the
-    sheet: nothing here is estimated, so there is no training range outside
-    which the relation stops holding, and no extrapolation rule to apply.
+    A ``Numeric`` block and a per-unit offset block have the same shape (one row keyed
+    ``per_unit`` with a ``Relativity`` and a ``Weight``) but different arithmetic:
+    ``Relativity ** x`` for the estimated numeric coefficient, ``Relativity * x`` for the
+    offset, whose coefficient is 1 by construction. ``RatingTableBlock.kind`` is not written to
+    the workbook, so this note is the consumer's routing information. It holds for both
+    declared (keyed on the named source column) and undeclared (the offset multiplier the
+    consumer computes; ``Relativity`` is exactly 1.0) forms. It states that no rated range
+    exists, since nothing is estimated and there is no extrapolation rule.
     """
     return (
         f"Multiply this risk's {name} by the Relativity below: "
@@ -476,22 +361,11 @@ def _per_unit_offset_note(name: str) -> str:
 def _ppform_evaluation_note(name: str, extrapolation: str | None) -> str:
     """How to score one ppform block, stated on the sheet the consumer holds.
 
-    Two sentences and not one, because the block has two kinds of row and the
-    formula only applies to one of them.  A bounded row is evaluated.  An
-    UNBOUNDED row -- the leading and trailing constant pieces -- is read: its
-    factor is the ``Relativity`` beside it.  The distinction is not stylistic.
-    ``u = (x - lower) / (upper - lower)`` with an infinite bound is ``inf/inf``,
-    which is ``nan``, and the zero higher coefficients do not rescue it because
-    ``0 * nan`` is ``nan``; a consumer applying the formula uniformly gets
-    ``nan`` on precisely the rows that price the extremes of the book.
-
-    Under ``extrapolation="error"`` there are no unbounded rows and the second
-    sentence would describe nothing, so it is not written.  A term that declines
-    to price outside its knot range emits no tails at all, and a value matching
-    no row is that term's own answer.
-
-    Written into the same otherwise-unused note row the piecewise and per-unit
-    blocks use, so no layout changes to carry it.
+    A bounded row is evaluated; an unbounded row (the leading and trailing constant pieces)
+    is read, its factor being the ``Relativity`` beside it, because
+    ``u = (x - lower) / (upper - lower)`` with an infinite bound is ``nan`` and ``0 * nan`` is
+    ``nan``. Under ``extrapolation="error"`` there are no unbounded rows and the second
+    sentence is not written. Goes in the note row the piecewise and per-unit blocks use.
     """
     formula = (
         f"Evaluate this block: u = ({name} - lower) / (upper - lower) from the "

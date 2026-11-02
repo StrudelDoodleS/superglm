@@ -1,21 +1,12 @@
 """Per-pair sufficient statistics for interaction screening.
 
-A candidate tensor block over covariates (a, b) needs only two quantities to
-form its score statistic against a fitted mains model: the null score vector
-aggregated over the pair's joint cells, and the working weights aggregated the
-same way.  Both come from one fused O(n) pass; everything downstream is dense
-algebra over ``(n_a, n_b)`` cells and never touches rows again.
-
-Exactness contract: the cell-space assembly must reproduce the dense
-row-Kronecker assembly to floating-point reordering, because the same
-sufficient-statistic identity underpins lossless support compression.  The
-release pin lives in tests/test_interaction_screening.py.
-
-``pair_cell_moments`` and ``working_score`` are live: the factor builders of
-:mod:`superglm.screening._pair_factor` consume exactly the cell tables the
-first produces.  The Gram producers the dense route used to assemble from them
-are the definition those factors are graded against, and live in
-``tests/_screening_oracle.py`` and ``tests/_overlap_oracle.py``.
+A candidate tensor block over covariates (a, b) needs the null score vector and the
+working weights aggregated over the pair's joint cells, from one fused O(n) pass;
+everything downstream is dense algebra over ``(n_a, n_b)`` cells. The cell-space
+assembly must reproduce the dense row-Kronecker assembly to floating-point
+reordering (pinned in tests/test_interaction_screening.py). The Gram producers the
+factors are graded against live in ``tests/_screening_oracle.py`` and
+``tests/_overlap_oracle.py``.
 """
 
 from __future__ import annotations
@@ -37,10 +28,8 @@ def working_score(
 ) -> NDArray:
     """Score of the unnormalised log-likelihood with respect to eta, per row.
 
-    ``s = weights * (dmu/deta) * (y - mu) / V(mu)`` — the exact quantity the
-    solver's KKT threshold uses (``compute_lambda_max`` calls this with the
-    null-model ``mu``), and the residual signal screening aggregates over a
-    candidate pair's cells (with the fitted mains' ``mu``).  Reduces to
+    ``s = weights * (dmu/deta) * (y - mu) / V(mu)``, the quantity the solver's KKT
+    threshold uses and the residual signal screening aggregates over a pair's cells;
     ``weights * (y - mu)`` for canonical links.
     """
     dmu_deta = link.deriv_inverse(eta)
@@ -60,14 +49,11 @@ def pair_cell_moments(
 ) -> tuple[NDArray, NDArray]:
     """Aggregate score and working weights over the pair's joint cells.
 
-    One fused O(n) pass; returns ``(S_cell, W_cell)`` with shape
-    ``(n_a, n_b)``.  Codes must be dense 0-based indices in ``[0, n_a)`` /
-    ``[0, n_b)``.  Support-compressed groups store exactly these.
-    ``CategoricalGroupMatrix`` codes do NOT satisfy this as stored: they
-    carry a sink bin at ``n_levels`` for the base level, so callers must
-    strip base-level rows or widen the grid to ``n_levels + 1``.  The bounds
-    are enforced here because the kernel below indexes without checks — an
-    out-of-range code would be silent memory corruption, not an exception.
+    One fused O(n) pass; returns ``(S_cell, W_cell)`` of shape ``(n_a, n_b)``. Codes must
+    be dense 0-based indices in ``[0, n_a)`` / ``[0, n_b)`` (checked here, since the
+    kernel indexes without bounds checks). ``CategoricalGroupMatrix`` codes carry a sink
+    bin at ``n_levels`` for the base level, so callers strip base-level rows or widen the
+    grid to ``n_levels + 1``.
     """
     codes_a = np.asarray(codes_a, dtype=np.intp)
     codes_b = np.asarray(codes_b, dtype=np.intp)
