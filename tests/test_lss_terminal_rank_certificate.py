@@ -26,6 +26,7 @@ import pytest
 import superglm.distributional.solver._formation as _formation
 import superglm.distributional.solver.certificate as certificate
 import superglm.distributional.solver.chunks as chunking
+import superglm.distributional.solver.curvature as curvature_module
 from superglm import NegativeBinomialLS, SuperLSS, cat, interaction, re, s, term, ti
 from superglm.distributional import GaussianLS
 from superglm.distributional.smoothing.penalty_face import build_penalty_face
@@ -96,9 +97,27 @@ def _alias(constant: bool, discrete: bool = True):
     return model, frame, (~b).astype(float), weights
 
 
+def _formed_by_the_eigensolver(monkeypatch):
+    """Send the curvature policy's formed decision past the Cholesky shortcut.
+
+    Whether rounding leaves the formed alias matrix to the shortcut or to the
+    eigensolver depends on the BLAS build, so the eigensolver route is forced.
+    ``allow_indefinite`` skips only the shortcut and the refusal of a
+    materially indefinite matrix, which this semidefinite fixture never meets.
+    """
+    formed = curvature_module._decompose_gram
+
+    def eigensolver(matrix, **kwargs):
+        return formed(matrix, allow_indefinite=True, **kwargs)
+
+    monkeypatch.setattr(curvature_module, "_decompose_gram", eigensolver)
+
+
 @pytest.mark.parametrize("constant", [True, False], ids=["constant_shortcut", "uniform_eigh"])
 def test_exact_alias_is_certified_rank_deficient(terminal, monkeypatch, constant):
     decisions, calls = terminal
+    if not constant:
+        _formed_by_the_eigensolver(monkeypatch)
     model, frame, y, weights = _alias(constant)
     result = _fit(model, frame, y, weights)
     assert result.terminal_rank.rank == 2
@@ -107,7 +126,7 @@ def test_exact_alias_is_certified_rank_deficient(terminal, monkeypatch, constant
     assert calls == [1]
     standard_errors = np.sqrt(np.diag(np.asarray(model.covariance_)))
     assert standard_errors[0] == pytest.approx(0.008, abs=4e-4)
-    # The formed decision keeps the alias: the shortcut's on constant weights.
+    # The formed decision keeps the alias, through the shortcut on constant weights.
     formed = _main(decisions, 3)[0].decomposition
     assert formed.rank == 3
     assert formed.method == ("cholesky" if constant else "gram_eigh")
