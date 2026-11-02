@@ -56,6 +56,8 @@ from superglm.editor.level_order import (
     level_order_for_labels,
     level_order_for_target,
 )
+from superglm.editor.lss.open import open_lss
+from superglm.editor.lss.view import Response, is_lss
 from superglm.editor.operations import (
     anchored_smooth_values,
     isotonic_values,
@@ -234,6 +236,8 @@ class EditorSession:
         cv_report: Any = None,
         cv: CrossValidationResult | None = None,
         cv_data=None,
+        amount_unit: str | None = None,
+        response: Response = "claims",
     ) -> EditorSession:
         """Build an editor session from fitted 1D main-effect inference.
 
@@ -242,7 +246,33 @@ class EditorSession:
         offset]])`` rows its folds index. Without ``cv_data`` the train data
         is used when its row count matches the folds. ``cv_report`` is the
         older free-form report the Validation tab shows.
+
+        A :class:`~superglm.SuperLSS` model needs ``train_data``, with its
+        offsets a dict keyed by parameter name. Its terms are keyed
+        ``"<parameter>:<term>"``; a bare column name opens that column's term
+        in every parameter. ``amount_unit`` names the currency or unit of the
+        response and ``response`` is ``"claims"`` or ``"generic"``, which
+        decides how the parameters are named.
         """
+        if is_lss(model):
+            return open_lss(
+                cls,
+                model,
+                terms,
+                n_points=n_points,
+                centering=centering,
+                with_se=with_se,
+                train_data=train_data,
+                validation_data=validation_data,
+                test_data=test_data,
+                cv_report=cv_report,
+                cv=cv,
+                cv_data=cv_data,
+                amount_unit=amount_unit,
+                response=response,
+            )
+        if amount_unit is not None:
+            raise EditorValueError("amount_unit applies to SuperLSS models.")
         if getattr(model, "_result", None) is None:
             raise RuntimeError("Model must be fitted before creating an editor session.")
 
@@ -2074,13 +2104,16 @@ def edit(
     test_data=None,
     cv: CrossValidationResult | None = None,
     cv_data=None,
+    amount_unit: str | None = None,
+    response: Response = "claims",
 ) -> EditorSession:
     """Create an editor session for a fitted model.
 
     The split data are ``(X, y[, sample_weight[, offset]])`` tuples.
     ``cv`` is a :func:`superglm.cross_validate` result for the
     Cross-validation tab and ``cv_data`` the rows its folds index; see
-    :meth:`EditorSession.from_model`.
+    :meth:`EditorSession.from_model`, which also describes opening a
+    :class:`~superglm.SuperLSS` model (``amount_unit``, ``response``).
     """
     return EditorSession.from_model(
         model,
@@ -2093,4 +2126,6 @@ def edit(
         test_data=test_data,
         cv=cv,
         cv_data=cv_data,
+        amount_unit=amount_unit,
+        response=response,
     )

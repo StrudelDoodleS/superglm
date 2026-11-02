@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
 from superglm._frame import as_eager_frame
+from superglm.editor.lss.view import parameter_offsets
 
 _SPLIT_LABELS = {
     "train": "Train",
@@ -50,8 +52,13 @@ def coerce_evaluation_data(
     test_data=None,
     family=None,
     weight_semantics: str,
+    offset_parameters: Sequence[str] | None = None,
 ) -> dict[str, EvaluationDataset]:
-    """Normalize plain ``(X, y[, w[, offset]])`` tuples by split name."""
+    """Normalize plain ``(X, y[, w[, offset]])`` tuples by split name.
+
+    ``offset_parameters`` names the parameters of a SuperLSS model, whose offsets
+    are a dict keyed by those names rather than one array.
+    """
     datasets: dict[str, EvaluationDataset] = {}
     for name, data in (
         ("train", train_data),
@@ -63,6 +70,7 @@ def coerce_evaluation_data(
             data,
             family=family,
             weight_semantics=weight_semantics,
+            offset_parameters=offset_parameters,
         )
         if dataset is not None:
             datasets[name] = dataset
@@ -75,6 +83,7 @@ def coerce_dataset(
     *,
     family=None,
     weight_semantics: str,
+    offset_parameters: Sequence[str] | None = None,
 ) -> EvaluationDataset | None:
     """Convert a split tuple into an :class:`EvaluationDataset`."""
     if data is None:
@@ -97,7 +106,9 @@ def coerce_dataset(
         family=family,
         weight_semantics=weight_semantics,
     )
-    if offset is not None and len(offset) != n_obs:
+    if offset_parameters is not None:
+        offset = parameter_offsets(name, offset, offset_parameters, n_obs)
+    elif offset is not None and len(offset) != n_obs:
         raise ValueError(f"{name}_data offset length differs from y.")
     return EvaluationDataset(
         name=name,

@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from superglm import GammaLS, LogNormalLS, NegativeBinomialLS, SuperLSS, cat, s
+from superglm.editor import EditorSession, edit
 
 EPS = np.finfo(np.float64).eps
 
@@ -105,3 +106,8 @@ def nb_case() -> FitCase:
         family.theta(s("age", k=6), cat("region")),
     ).fit_reml(X, y, offsets=offsets, outer="efs+newton")
     return FitCase(model, X, y, None, offsets)
+
+
+def open_case(case: FitCase, **kw) -> EditorSession:
+    """An editor session over ``case``, opened with the rows it was fitted on."""
+    return edit(case.model, train_data=(case.X, case.y, case.sample_weight, case.offsets), **kw)
