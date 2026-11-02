@@ -22,7 +22,7 @@ from superglm.editor.errors import EditorValueError
 from superglm.editor.payloads import session_payload
 from superglm.features._spline_penalties import _general_difference_penalty
 from superglm.features.ordered_categorical import _spline_kind_name
-from tests.test_editor import _post_json
+from tests.test_editor import _post_json, _post_refit_at_once
 from tests.test_editor_knots import _book, _declared, _knots
 
 
@@ -434,11 +434,11 @@ def test_the_widget_stages_a_basis_change_and_refits_one_at_once(book):
         }
         assert staged["state"]["pending"][0]["label"] == "kind bs in age"
         session.pending.clear()
-        refit = _post_json(f"{widget.url}/basis", {"term": "band", "params": {"select": True}})
+        refit = _post_refit_at_once(widget, "basis", "band", {"select": True})
         assert refit["state"]["terms"]["band"]["knots"]["select"] is True
         assert _basis(session.model, "band") == ("ps", True)
         with pytest.raises(urllib.error.HTTPError) as refused:
-            _post_json(f"{widget.url}/basis", {"term": "age", "params": {"kind": "cr"}})
+            _post_refit_at_once(widget, "basis", "age", {"kind": "cr"})
         assert json.loads(refused.value.read().decode("utf-8"))["error"] == (
             "'age' is already a cubic regression spline."
         )

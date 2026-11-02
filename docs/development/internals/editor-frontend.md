@@ -166,11 +166,9 @@ waiting), and re-applies hand edits on the terms it did not restructure as one m
 
 `keep_reference` is a JSON boolean, true when absent; any other value is refused with the fixed
 sentence "keep_reference must be true or false.". With Settings' "Refit after every structural
-change" on, the browser posts to the operation's own route (`/collapse_levels`,
-`/ungroup_levels`, `/set_reference`, `/shape_range`, `/special_levels`, `/knots`, `/basis`)
-instead, which stages the change and refits it as one step that one Undo takes back. `/knots` takes
-`{term, params, method, level_display}`, with `params` in one of the three forms above; `/basis`
-takes the same fields, with `params` in one of its two.
+change" on, the browser adds `refit: true` to the same `/stage` request, which stages the change
+and refits every waiting change as one step that one Undo takes back. `refit` is a JSON boolean,
+false when absent; any other value is refused with "refit must be true or false.".
 
 The state snapshot carries the waiting changes in three places:
 

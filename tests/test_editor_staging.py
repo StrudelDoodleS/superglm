@@ -1284,6 +1284,41 @@ def test_widget_http_refit_pending_applies_every_waiting_change_in_one_step(book
     assert state["undo_redo"] == {"undo": "Refit · 2 changes", "redo": None}
 
 
+def test_widget_http_stage_with_refit_stages_and_refits_in_one_step(book, monkeypatch):
+    """Settings' "Refit after every structural change" sends /stage with ``refit``."""
+    model, _, _ = book
+    session = _session(model)
+    fits = _count_fits(monkeypatch)
+    widget = session.widget()
+    try:
+        payload = _post_json(
+            f"{widget.url}/stage",
+            {
+                "operation": "collapse",
+                "term": "brand",
+                "params": {"levels": ["B10", "B11"]},
+                "refit": True,
+            },
+        )
+        refusal = _refused(
+            f"{widget.url}/stage",
+            {"operation": "collapse", "term": "brand", "params": {"levels": ["B1"]}, "refit": 1},
+        )
+    finally:
+        widget.close()
+
+    assert len(fits) == 1
+    assert payload["timing"]["operation"] == "collapse_levels"
+    state = payload["state"]
+    assert state["pending"] == []
+    assert [e["kind"] for e in state["timeline"]] == ["structural", "marker"]
+    assert state["undo_redo"]["undo"] is not None
+    assert session.model is not model
+    grouping = session.model.features["brand"]._grouping
+    assert grouping.original_to_group["B10"] == grouping.original_to_group["B11"]
+    assert refusal == "refit must be true or false."
+
+
 def test_widget_http_refit_pending_answers_a_refusal_with_the_fixed_sentence(book, monkeypatch):
     model, _, _ = book
     session = _session(model)

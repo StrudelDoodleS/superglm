@@ -843,9 +843,8 @@ function scheduleVisibleEvidenceCatchUp() {
 // A structural change waits: Python builds it and keeps it, drawn on the
 // chart, until Refit applies every waiting change in one fit. Nothing is
 // fitted, so nothing blocks the page. With "Refit after every structural
-// change" on in Settings, the change goes to its operation's own route
-// instead, which stages it and refits at once: one step, which one Undo
-// takes back.
+// change" on in Settings, /stage also refits at once: one step, which one
+// Undo takes back.
 async function runStructuralChange(descriptor) {
   const { keepReference, refitEveryChange } = loadSettings();
   if (refitEveryChange) {

@@ -61,10 +61,6 @@ def create_editor_app(widget: Any) -> FastAPI:
     def state() -> Response:
         return _guarded_json(widget._state)
 
-    @app.get("/health")
-    def health() -> Response:
-        return _json_response({"ok": True})
-
     @app.post("/term")
     def set_term(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(lambda: widget._set_term(str(_required(payload, "term"))))
@@ -156,16 +152,6 @@ def create_editor_app(widget: Any) -> FastAPI:
             response_metadata=_evidence_metadata(payload),
         )
 
-    @app.post("/save_model")
-    def save_model(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
-        return _guarded_json(
-            lambda: widget._save_model(
-                directory=None if "directory" not in payload else str(payload["directory"]),
-                filename=None if "filename" not in payload else str(payload["filename"]),
-                path=None if "path" not in payload else str(payload["path"]),
-            )
-        )
-
     @app.post("/export_file")
     def export_file(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(
@@ -195,13 +181,6 @@ def create_editor_app(widget: Any) -> FastAPI:
             log_message="Unhandled SuperGLM editor export download error.",
         )
 
-    @app.get("/download_model")
-    def download_model(filename: str = "superglm_edited_model.joblib") -> Response:
-        return _guarded_export_download(
-            lambda: widget._export_bytes("joblib", filename),
-            log_message="Unhandled SuperGLM editor download error.",
-        )
-
     @app.post("/open_directory")
     def open_directory(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(
@@ -228,16 +207,6 @@ def create_editor_app(widget: Any) -> FastAPI:
             lambda: widget._refit_offset(
                 str(payload.get("method", "auto")),
                 level_display=_level_display(payload),
-            )
-        )
-
-    @app.post("/profile_distribution")
-    def profile_distribution(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
-        return _guarded_json(
-            lambda: widget._profile_distribution(
-                str(payload.get("parameter", "")),
-                level_display=_level_display(payload),
-                **_profile_options(payload),
             )
         )
 
@@ -273,28 +242,6 @@ def create_editor_app(widget: Any) -> FastAPI:
     def job_cancel(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(lambda: widget._job_cancel(str(_required(payload, "job_id"))))
 
-    @app.post("/collapse_levels")
-    def collapse_levels(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
-        return _guarded_json(
-            lambda: widget._collapse_levels(
-                None if "term" not in payload else str(payload["term"]),
-                str(payload.get("method", "auto")),
-                level_display=_level_display(payload),
-                keep_reference=_keep_reference(payload),
-            )
-        )
-
-    @app.post("/ungroup_levels")
-    def ungroup_levels(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
-        return _guarded_json(
-            lambda: widget._ungroup_levels(
-                None if "term" not in payload else str(payload["term"]),
-                str(payload.get("method", "auto")),
-                level_display=_level_display(payload),
-                keep_reference=_keep_reference(payload),
-            )
-        )
-
     @app.post("/reorder_levels")
     def reorder_levels(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(
@@ -310,65 +257,6 @@ def create_editor_app(widget: Any) -> FastAPI:
             lambda: widget._revert_to_original(level_display=_level_display(payload))
         )
 
-    @app.post("/set_reference")
-    def set_reference(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
-        return _guarded_json(
-            lambda: widget._set_reference(
-                str(_required(payload, "term")),
-                str(_required(payload, "level")),
-                str(payload.get("method", "auto")),
-                level_display=_level_display(payload),
-            )
-        )
-
-    @app.post("/special_levels")
-    def special_levels(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
-        return _guarded_json(
-            lambda: widget._special_levels(
-                str(_required(payload, "term")),
-                _stage_params({"params": {"levels": _required(payload, "levels")}})["levels"],
-                special=_special_flag(payload),
-                method=str(payload.get("method", "auto")),
-                level_display=_level_display(payload),
-            )
-        )
-
-    @app.post("/knots")
-    def knots(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
-        return _guarded_json(
-            lambda: widget._knots(
-                str(_required(payload, "term")),
-                _stage_params({"params": _required(payload, "params")}),
-                method=str(payload.get("method", "auto")),
-                level_display=_level_display(payload),
-            )
-        )
-
-    @app.post("/basis")
-    def basis(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
-        return _guarded_json(
-            lambda: widget._basis(
-                str(_required(payload, "term")),
-                _stage_params({"params": _required(payload, "params")}),
-                method=str(payload.get("method", "auto")),
-                level_display=_level_display(payload),
-            )
-        )
-
-    @app.post("/shape_range")
-    def shape_range(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
-        return _guarded_json(
-            lambda: widget._shape_range(
-                str(_required(payload, "term")),
-                lo=_range_edge(_required(payload, "lo")),
-                hi=_range_edge(_required(payload, "hi")),
-                degree=_required(payload, "degree"),
-                join=payload.get("join", "tangent"),
-                method=str(payload.get("method", "auto")),
-                level_display=_level_display(payload),
-            )
-        )
-
     @app.post("/stage")
     def stage(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(
@@ -378,6 +266,7 @@ def create_editor_app(widget: Any) -> FastAPI:
                 _stage_params(payload),
                 keep_reference=_keep_reference(payload),
                 level_display=_level_display(payload),
+                refit=_refit_flag(payload),
             )
         )
 
@@ -619,10 +508,10 @@ def _keep_reference(payload: dict[str, Any]) -> bool:
     return value
 
 
-def _special_flag(payload: dict[str, Any]) -> bool:
-    value = payload.get("special", True)
+def _refit_flag(payload: dict[str, Any]) -> bool:
+    value = payload.get("refit", False)
     if not isinstance(value, bool):
-        raise EditorValueError("special must be true or false.")
+        raise EditorValueError("refit must be true or false.")
     return value
 
 

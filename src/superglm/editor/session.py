@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -148,6 +149,15 @@ def _explicit_penalties(model, lambda1, lambda2) -> dict[str, Any]:
         if value is not ...
     )
     return explicit
+
+
+def _warn_refit_with(name: str, replacement: str) -> None:
+    warnings.warn(
+        f"EditorSession.{name} is deprecated and will be removed in a future release; "
+        f"use EditorSession.{replacement}, which refits and records the change as one step.",
+        FutureWarning,
+        stacklevel=3,
+    )
 
 
 class EditorSession:
@@ -1174,7 +1184,11 @@ class EditorSession:
         that takes it in; ``False`` lets the declared base policy choose again.
         ``refit_kwargs`` are ``X``, ``y``, ``sample_weight``, ``offset``,
         ``method``, ``lambda1``, ``lambda2`` and fit keywords.
+
+        Deprecated: use :meth:`replace_with_collapsed_levels`, which records the
+        change as one step.
         """
+        _warn_refit_with("refit_with_collapsed_levels", "replace_with_collapsed_levels")
         editable = self._require_term(term)
         idx = self._require_selection(term)
         try:
@@ -1227,7 +1241,11 @@ class EditorSession:
 
         ``keep_reference`` holds the in-force reference; a reference group that
         loses members follows the members that stay.
+
+        Deprecated: use :meth:`replace_with_ungrouped_levels`, which records the
+        change as one step.
         """
+        _warn_refit_with("refit_with_ungrouped_levels", "replace_with_ungrouped_levels")
         editable = self._require_term(term)
         idx = self._require_selection(term)
         return self._refit_replacing(
