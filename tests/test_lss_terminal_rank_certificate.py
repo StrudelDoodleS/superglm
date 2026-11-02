@@ -485,7 +485,7 @@ def test_an_ill_conditioned_fixed_lambda_fit_that_stops_short_warns_and_names_th
     with pytest.warns(ConvergenceWarning, match="condition number is about") as caught:
         result = _offset_fit("GaussianLS", True, max_inner_iter=1)
     assert not result.converged
-    assert "subtracting the column's mean before fitting removes it" in str(caught[0].message)
+    assert "subtracting that column's mean before fitting removes it" in str(caught[0].message)
 
 
 def test_formation_statistics_on_negative_diagonal_channels(terminal):

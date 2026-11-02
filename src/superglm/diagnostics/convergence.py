@@ -231,9 +231,9 @@ def lss_ill_conditioned_note(fitted_result: Any) -> str:
     if factor is None or not factor**2 > 2.0**26.5:
         return ""
     return (
-        f" The coefficient curvature's condition number is about {factor**2:.0e}: a numeric "
-        "column far from zero relative to its spread, beside an intercept, does this, and "
-        "subtracting the column's mean before fitting removes it."
+        f" The coefficient curvature's condition number is about {factor**2:.0e}. One common "
+        "cause is a numeric column far from zero relative to its spread, beside an intercept; "
+        "subtracting that column's mean before fitting removes it."
     )
 
 
