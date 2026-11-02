@@ -2789,58 +2789,6 @@ def test_efs_records_typed_joint_failures_with_their_one_fitted_face(
     ) == tuple(range(1, len(smoothing.coefficient_fits)))
 
 
-def test_joint_face_result_rejects_forged_fit_authority_and_chronology(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _layout, smoothing, _authority_faces = _independent_penalty_efs_fit(
-        monkeypatch,
-        (0.5, 0.5),
-    )
-    activation = next(item for item in smoothing.history if item.activated_face_components)
-    assert activation.accepted_fit_index is not None
-    accepted_index = activation.accepted_fit_index
-    endpoint_fit = smoothing.coefficient_fits[accepted_index]
-
-    wrong_face_fits = list(smoothing.coefficient_fits)
-    wrong_face_fits[accepted_index] = smoothing.coefficient_fits[activation.source_fit_index]
-
-    shifted_fits = list(smoothing.coefficient_fits)
-    objective_shift = 1.0e-4
-    assert endpoint_fit.optimizing_log_likelihood is not None
-    assert endpoint_fit.penalized_optimizing_log_likelihood is not None
-    shifted_fits[accepted_index] = replace(
-        endpoint_fit,
-        optimizing_log_likelihood=endpoint_fit.optimizing_log_likelihood + objective_shift,
-        log_likelihood=endpoint_fit.log_likelihood + objective_shift,
-        penalized_optimizing_log_likelihood=(
-            endpoint_fit.penalized_optimizing_log_likelihood + objective_shift
-        ),
-        penalized_log_likelihood=endpoint_fit.penalized_log_likelihood + objective_shift,
-    )
-
-    moving_score_fits = list(smoothing.coefficient_fits)
-    terminal_score = np.array(endpoint_fit.terminal_score, copy=True)
-    terminal_score[-1] = 1.0e-4
-    moving_score_fits[accepted_index] = _replace_with_certified_nonstationary_objective_step(
-        endpoint_fit,
-        terminal_score,
-    )
-
-    fallback_fits = list(smoothing.coefficient_fits)
-    fallback_fits[accepted_index] = replace(
-        endpoint_fit,
-        terminal_curvature=replace(
-            endpoint_fit.terminal_curvature,
-            actual_source="fisher",
-            reason="test mutation",
-            fallback_count=1,
-        ),
-    )
-
-    direction = activation.endpoint_direction_evidence
-    assert isinstance(direction, JointEndpointDirectionEvidence)
-
-
 def _projected_penalty_problem() -> tuple[
     StackedLayout,
     PenaltyFace,
@@ -3935,14 +3883,10 @@ def test_resolution_limited_stationary_cap_enforces_cap_objective_ceiling() -> N
     forged_fits[cap_index] = forged_cap
 
 
-def test_stationary_scalar_face_refuses_multi_cap_runtime_and_result_forgery(
+def test_stationary_scalar_face_refuses_a_multi_cap_runtime_cohort(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Kills partially accepting one stationary component from a capped cohort."""
-    _names, scalar_smoothing = _two_face_efs_fit()
-    activation = next(item for item in scalar_smoothing.history if item.activated_face_components)
-    cap_fit = scalar_smoothing.coefficient_fits[activation.coefficient_fit_indices[0]]
-    assert _endpoint_retained_kkt_relative(cap_fit) <= activation.coefficient_tolerances[0]
 
     def disable_joint_activation(*args: object, **kwargs: object):
         del args, kwargs

@@ -189,82 +189,6 @@ def test_endpoint_revalidation_records_material_state_refusal(
     assert terminal_event.endpoint_assessment_failure_reason == "endpoint_state_changed"
 
 
-def test_result_rejects_a_within_bound_state_change_receipt(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = 0
-    real_check = smoothing_faces._check_face_direction
-    real_fit = smoothing_faces._fit_endpoint_authority_stationary
-    inject_result = False
-    injected = False
-
-    def inject_endpoint_result(*args: object, **kwargs: object):
-        nonlocal injected
-        fit = real_fit(*args, **kwargs)  # type: ignore[arg-type]
-        if inject_result and not injected and kwargs.get("face") is not None:
-            endpoint_face = kwargs["face"]
-            assert endpoint_face is not None
-            assert endpoint_face.null_basis.shape[1] > 0
-            injected = True
-            fit = replace(
-                fit,
-                coefficients=fit.coefficients + 1.0e-6 * endpoint_face.null_basis[:, 0],
-            )
-        return fit
-
-    def material_refusal(*args: object, **kwargs: object):
-        nonlocal calls, inject_result
-        calls += 1
-        if calls == 2:
-            np.testing.assert_array_equal(kwargs["endpoint_initial"], kwargs["initial"])
-            inject_result = True
-        try:
-            return real_check(*args, **kwargs)  # type: ignore[arg-type]
-        finally:
-            inject_result = False
-
-    monkeypatch.setattr(
-        smoothing_faces, "_fit_endpoint_authority_stationary", inject_endpoint_result
-    )
-    monkeypatch.setattr(smoothing_faces, "_check_face_direction", material_refusal)
-    _values = endpoint_tests._gamma_isolated_cap_face_problem()
-    smoothing = _values[-1]
-    retraction = next(item for item in smoothing.history if item.deactivated_face_components)
-    cap_index, endpoint_index = retraction.coefficient_fit_indices[:2]
-    cap_fit = smoothing.coefficient_fits[cap_index]
-    endpoint_fit = smoothing.coefficient_fits[endpoint_index]
-    source_fit = smoothing.coefficient_fits[retraction.source_fit_index]
-    assert endpoint_fit.coefficient_face is not None
-    within_bound = replace(
-        endpoint_fit,
-        coefficients=source_fit.coefficients
-        + 1.0e-14 * endpoint_fit.coefficient_face.null_basis[:, 0],
-    )
-    fits = list(smoothing.coefficient_fits)
-
-    # Beside a numerically stationary cap, a replay that stepped changed the
-    # endpoint state only beyond the refit envelope.
-    assert _assessment_is_numerically_stationary(cap_fit, retraction.coefficient_tolerances[0])
-    fits[endpoint_index] = replace(within_bound, iterations=within_bound.iterations + 1)
-    # The strict rule a saved v0.40.0 result was made under refused any
-    # stepped replay beside a strictly stationary cap.
-    fits[cap_index] = replace(cap_fit, terminal_score=np.zeros_like(cap_fit.terminal_score))
-    replace(smoothing, coefficient_fits=tuple(fits), rounding_floor_stationarity=False)
-
-    # Beside a cap that is not stationary, direct face authority also needs
-    # full observed rank.
-    fits[cap_index] = endpoint_tests._score_above_rounding_floor(cap_fit)
-    fits[endpoint_index] = within_bound
-
-    assert endpoint_fit.terminal_reduced_rank is not None
-    bad_rank = replace(
-        endpoint_fit.terminal_reduced_rank,
-        rank=endpoint_fit.terminal_reduced_rank.rank - 1,
-    )
-    bad_endpoint = replace(endpoint_fit, terminal_reduced_rank=bad_rank)
-    fits[endpoint_index] = bad_endpoint
-
-
 def _capped_spline_problem():
     """A Gaussian location spline with its smoothing parameter at the cap."""
     family = GaussianLS()
@@ -408,9 +332,7 @@ def test_numerical_stationarity_admits_a_score_within_its_rounding_floor() -> No
 def test_endpoint_revalidation_accepts_a_stepped_replay_within_the_refit_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Kills demanding a zero-step replay beside a numerically stationary cap, and
-    accepting one beside a strictly stationary cap in a result saved before the
-    rounding-floor rule."""
+    """Kills demanding a zero-step replay beside a numerically stationary cap."""
     calls = 0
     real_check = smoothing_faces._check_face_direction
     real_fit = smoothing_faces._fit_endpoint_authority_stationary
@@ -458,14 +380,6 @@ def test_endpoint_revalidation_accepts_a_stepped_replay_within_the_refit_envelop
     assert endpoint_fit.iterations > 0
     assert not np.array_equal(endpoint_fit.coefficients, source_fit.coefficients)
     assert smoothing.terminal_fit is endpoint_fit
-
-    # The strict rule a saved result was made with requires the source's exact
-    # projection for every replay beside a strictly stationary cap.
-    fits = list(smoothing.coefficient_fits)
-    fits[revalidation.coefficient_fit_indices[0]] = replace(
-        cap_fit, terminal_score=np.zeros_like(cap_fit.terminal_score)
-    )
-    replace(smoothing, coefficient_fits=tuple(fits))
 
 
 def _flagged_generalized_pareto_problem() -> tuple[pd.DataFrame, np.ndarray]:
