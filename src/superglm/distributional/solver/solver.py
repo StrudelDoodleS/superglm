@@ -1567,7 +1567,8 @@ def _drops_design_aliases(layout: StackedLayout, rank: RankDecomposition) -> boo
     logarithmic midpoint between that length and an equilibrated column's 1.
     The test is invariant to the basis of the span, so its columns are scaled
     to unit maximum first; a span the design products cannot represent is not
-    called an alias.
+    called an alias. ``N' X' X N`` is formed a column at a time as
+    ``N' X' (X n_j)``, so the check holds one row-length vector, never ``X N``.
     """
     null = rank.null_basis()
     null = null / np.max(np.abs(null), axis=0)
@@ -1580,16 +1581,20 @@ def _drops_design_aliases(layout: StackedLayout, rank: RankDecomposition) -> boo
             continue
         design = state.design
         squared = [np.diag(group.gram(np.ones(design.n))) for group in design.group_matrices]
-        products = np.zeros((design.n, width))
-        if state.intercept_index is not None:
+        intercept = state.intercept_index is not None
+        if intercept:
             squared.insert(0, np.full(1, float(design.n)))
-            products += local[0]
-        slopes = local[int(state.intercept_index is not None) :]
-        for column in range(width if design.p else 0):
-            products[:, column] += design.matvec(slopes[:, column])
-        design_gram += products.T @ products
+        slopes = local[int(intercept) :]
+        for column in range(width):
+            projected = np.full(design.n, local[0, column] if intercept else 0.0)
+            if design.p:
+                projected += design.matvec(slopes[:, column])
+            back = design.rmatvec(projected) if design.p else np.empty(0)
+            if intercept:
+                back = np.concatenate(([projected.sum()], back))
+            design_gram[:, column] += local.T @ back
         scale_gram += local.T @ (np.concatenate(squared)[:, None] * local)
-    difference = design_gram - np.sqrt(rank.cutoff) * scale_gram
+    difference = 0.5 * (design_gram + design_gram.T) - np.sqrt(rank.cutoff) * scale_gram
     return bool(np.all(np.isfinite(difference)) and np.linalg.eigvalsh(difference)[-1] <= 0.0)
 
 
