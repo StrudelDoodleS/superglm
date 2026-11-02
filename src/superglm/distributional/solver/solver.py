@@ -869,6 +869,36 @@ def _policy_curvature(
     return context.coefficient_face.reduce_matrix(matrix)
 
 
+def _solve_residual(
+    system: NDArray,
+    step: NDArray,
+    score: NDArray,
+    decomposition: RankDecomposition,
+    tolerance: float,
+) -> float:
+    """The solve's relative residual ``||H s - g|| / max(1, ||g||)``, or its backward error.
+
+    A backward-stable solve leaves a residual of about ``u ||H|| ||s||``,
+    which exceeds any fixed fraction of ``||g||`` once ``||H|| ||s|| >> ||g||``:
+    a column far from zero beside an intercept puts the step along a
+    direction the curvature barely resists. An untruncated solve that misses
+    ``tolerance`` on the relative test is read by its normwise backward error
+    ``||r|| / (||H|| ||s|| + ||g||)`` instead (Rigal and Gaches, *J. ACM* 14,
+    1967; Higham 2002, Thm 7.1): the relative perturbation of ``H`` and ``g``
+    it solves exactly, with ``||H||_2`` taken at its largest column norm, a
+    lower bound. A truncated solve keeps the relative test, since its
+    residual also holds the score outside the retained range.
+    """
+    residual = float(np.linalg.norm(system @ step - score))
+    score_norm = float(np.linalg.norm(score))
+    relative = residual / max(1.0, score_norm)
+    if relative <= tolerance or decomposition.rank_truncated or not np.isfinite(relative):
+        return relative
+    curvature_norm = float(np.max(np.linalg.norm(system, axis=0), initial=0.0))
+    scale = curvature_norm * float(np.linalg.norm(step)) + score_norm
+    return residual / scale if scale > 0.0 else relative
+
+
 def _solve_direction(
     matrix: NDArray,
     score: NDArray,
@@ -892,8 +922,8 @@ def _solve_direction(
         )
         if decomposition is not None:
             step = decomposition.solve(score)
-            residual = float(
-                np.linalg.norm(matrix @ step - score) / max(1.0, float(np.linalg.norm(score)))
+            residual = _solve_residual(
+                matrix, step, score, decomposition, config.residual_tolerance
             )
             directional_derivative = float(score @ step)
             ascent_floor = (
@@ -925,9 +955,7 @@ def _solve_direction(
             continue
         if not np.all(np.isfinite(step)):
             continue
-        residual = float(
-            np.linalg.norm(system @ step - score) / max(1.0, float(np.linalg.norm(score)))
-        )
+        residual = _solve_residual(system, step, score, decomposition, config.residual_tolerance)
         directional_derivative = float(score @ step)
         ascent_floor = (
             np.finfo(float).eps * float(np.linalg.norm(score)) * float(np.linalg.norm(step))

@@ -338,6 +338,87 @@ def test_offset_column_keeps_its_rank(terminal):
     assert result.terminal_rank.grey_subspace["retained"] == 1.0
 
 
+_FAMILIES = (
+    "GaussianLS", "GammaLS", "LogNormalLS", "NegativeBinomialLS", "TweedieLSS",
+    "GeneralizedGammaLSS", "GeneralizedParetoLSS", "TwoPieceNormalLSS", "TwoPieceLogNormalLSS",
+)  # fmt: skip
+
+
+def _offset_fit(name, discrete, *, centred=False, **fit_kwargs):
+    """``x = 1e6 + z`` beside the first predictor's intercept, ``z ~ N(0, 1)``, or ``x - 1e6``.
+
+    ``x - 1e6`` is exact (Sterbenz), so the centred fit reads the same data.
+    """
+    import superglm
+
+    rng = np.random.default_rng(7)
+    n = 3000
+    z = rng.standard_normal(n)
+    if name == "GaussianLS":
+        y = 1.0 + 0.3 * z + rng.normal(0.0, 0.5, n)
+    elif name == "TwoPieceNormalLSS":
+        sign = np.where(rng.uniform(size=n) < 0.6, -1.0, 2.0)
+        y = 1.0 + 0.3 * z + sign * np.abs(rng.normal(0.0, 0.5, n))
+    elif name == "NegativeBinomialLS":
+        y = rng.negative_binomial(1.5, 1.5 / (1.5 + np.exp(0.3 * z))).astype(float)
+    elif name == "TweedieLSS":
+        counts = rng.poisson(np.exp(0.3 * z + 0.5) * 0.5)
+        y = np.array([rng.gamma(2.0, 1.0, count).sum() for count in counts])
+    elif name == "GeneralizedParetoLSS":
+        y = rng.pareto(4.0, n) * np.exp(0.09 * z) + 1e-3
+    else:
+        y = rng.gamma(3.0, np.exp(0.15 * z + 1.0) / 3.0)
+    family = getattr(superglm, name)()
+    names = ["mu", "phi", "p"] if name == "TweedieLSS" else [p.name for p in family.parameters]
+    declarations = [getattr(family, names[0])(term("x", Numeric()))]
+    declarations += [getattr(family, helper)() for helper in names[1:]]
+    model = SuperLSS(family, *declarations, discrete=discrete)
+    x = 1e6 + z
+    model.fit(pd.DataFrame({"x": x - 1e6 if centred else x}), y, **fit_kwargs)
+    return model._require_fitted().fit_state.solver_result
+
+
+@pytest.mark.parametrize(
+    ("name", "discrete"),
+    [(name, True) for name in _FAMILIES] + [("GaussianLS", False)],
+    ids=[f"{name}-chunked" for name in _FAMILIES] + ["GaussianLS-dense"],
+)
+def test_offset_column_converges_to_the_centred_fit(name, discrete):
+    """``x = 1e6 + N(0, 1)`` beside an intercept reaches the slope of the same fit centred by hand.
+
+    Its curvature's condition number is about ``4e12``, so a backward-stable
+    Newton solve leaves a residual near ``u ||H|| ||s||``, far above a fixed
+    fraction of the score. The step is accepted on its backward error.
+    Mutation check: on the relative test alone seven of these ten fits take
+    a Levenberg shift at every step and stop at ``max_iterations``, with
+    slopes of about a thirtieth of the centred ones.
+    """
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        offset = _offset_fit(name, discrete)
+        centred = _offset_fit(name, discrete, centred=True)
+    assert offset.converged and centred.converged
+    assert offset.coefficients[1] == pytest.approx(centred.coefficients[1], rel=1e-6)
+
+
+def test_an_ill_conditioned_fixed_lambda_fit_that_stops_short_warns_and_names_the_cause():
+    """``fit`` warns when its unconverged coefficient fit's curvature is past certification.
+
+    A well-conditioned one stopped by ``max_inner_iter`` discloses without a
+    warning (``test_distributional_public_face.py``). Mutation check: without
+    the conditioning clause ``fit`` stops silently, ``result_.converged`` its
+    only disclosure.
+    """
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    with pytest.warns(ConvergenceWarning, match="condition number is about") as caught:
+        result = _offset_fit("GaussianLS", True, max_inner_iter=1)
+    assert not result.converged
+    assert "subtracting the column's mean before fitting removes it" in str(caught[0].message)
+
+
 def test_formation_statistics_on_negative_diagonal_channels(terminal):
     decisions, _ = terminal
     rng = np.random.default_rng(4)

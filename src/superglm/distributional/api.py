@@ -21,7 +21,11 @@ from superglm._fit_gate import fit_record
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm._lambda_box import LAMBDA_CEILING
 from superglm._parallel import fit_pool
-from superglm.diagnostics.convergence import ConvergenceWarning, lss_nonconvergence_message
+from superglm.diagnostics.convergence import (
+    ConvergenceWarning,
+    lss_ill_conditioned_note,
+    lss_nonconvergence_message,
+)
 from superglm.diagnostics.fit_report import FitDiagnosticReport
 from superglm.distributional._common import json_number, row_index
 from superglm.distributional.binding import (
@@ -596,15 +600,17 @@ class SuperLSS:
             warnings.warn(message, ConvergenceWarning, stacklevel=3)
         # Returned, not refused, and never silent: fit_reml warns, as its
         # contract says. A fixed-lambda ``fit`` discloses through
-        # ``result_.converged`` and the summary's note column, as before.
-        if efs_config is not None:
-            smoothing = getattr(candidate, "smoothing", None)
-            message = lss_nonconvergence_message(
-                getattr(candidate, "fitted_result", None),
-                None if smoothing is None else smoothing.convergence_reason,
-            )
-            if message is not None:
-                warnings.warn(message, ConvergenceWarning, stacklevel=3)
+        # ``result_.converged`` and the summary's note column, and warns too
+        # when the cause is a curvature too ill-conditioned to certify a stop.
+        fitted_result = getattr(candidate, "fitted_result", None)
+        smoothing = getattr(candidate, "smoothing", None)
+        message = lss_nonconvergence_message(
+            fitted_result, None if smoothing is None else smoothing.convergence_reason
+        )
+        if message is not None and (
+            efs_config is not None or lss_ill_conditioned_note(fitted_result)
+        ):
+            warnings.warn(message, ConvergenceWarning, stacklevel=3)
         return self
 
     def fit(
