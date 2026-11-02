@@ -266,6 +266,16 @@ def test_saved_scop_model_predicts_and_reports_as_saved_and_refits_on_the_qp() -
         refitted.transform(x), refitted._basis_matrix(x).toarray() @ refitted._R_inv
     )
 
+    # Fitted on the QP now, the model warns no more: not on a second refit, and
+    # not once saved again and loaded.  Mutation check: without
+    # ``fit_state._scop_templates_marked_qp`` both refits warn again.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SCOPRetiredWarning)
+        model.fit_reml(frame, y)
+        reloaded = pickle.loads(pickle.dumps(model))
+        reloaded.fit_reml(frame, y)
+    assert dict(reloaded._config.feature_templates)["x"].shape_engine == "qp"
+
 
 @pytest.mark.parametrize(
     ("entry", "warns"),

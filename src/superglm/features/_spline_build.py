@@ -61,7 +61,9 @@ def _warn_if_saved_on_scop(spec: Any) -> None:
     """Warn once that a P-spline 0.41.0 or earlier fitted on SCOP now fits on the QP.
 
     The build marks the spec ``"qp"``, which stops a second build of the same
-    spec warning again.
+    spec warning again, and a fit that commits marks the model's template
+    (``fit_state._scop_templates_marked_qp``), so a saved model warns once,
+    not on every refit.
     """
     if saved_on_scop(spec):
         warn_scop_retired(saved=True)
