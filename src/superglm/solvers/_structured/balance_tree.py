@@ -1494,17 +1494,14 @@ class SumToZeroTreeFactor:
     def _penalized_aliases(self, system, P: NDArray, penalized) -> NDArray | None:
         """The thin levels' data-null directions the border penalty identifies, ``(n_x, g)``.
 
-        A thin level ``t`` (fewer distinct weighted ``x`` values than the
-        dimension ``m`` of the level penalty's null space ``N_P``) has exact
-        data nulls ``beta_t += N_P f (K - 1) / K``, ``beta_l -= N_P f / K``
-        elsewhere, the border taking ``+g(x)' f / K``, for every ``f`` with
-        ``g(x)' f = 0`` on the level's ``x`` values. Their curvature is the
-        border penalty's alone, so they are deflated structurally rather than
-        truncated as data, which would make ``log|H|`` jump with lambda. Only
-        combinations the penalty certifies above the quadratic form's rounding
-        are returned, a test invariant to rescaling the penalty (Wood, Pya &
-        Safken 2016, §3.1.2). The border part must reproduce the null-space
-        functions to ``sqrt(eps)``. ``None`` without thin levels or penalty.
+        A thin level ``t`` (fewer distinct weighted ``x`` values than ``m = dim N_P``) has exact
+        data nulls ``beta_t += N_P f (K - 1) / K``, ``beta_l -= N_P f / K`` elsewhere and border
+        ``+g(x)' f / K``, for every ``f`` with ``g(x)' f = 0`` on its ``x`` values. Only the border
+        penalty curves them, so they are deflated structurally, not truncated as data (which would
+        make ``log|H|`` jump with lambda). Only combinations the penalty certifies above the
+        quadratic form's rounding are returned, a scale-invariant test (Wood, Pya & Safken 2016,
+        §3.1.2); the border part must reproduce the null-space functions to ``sqrt(eps)``.
+        ``None`` without thin levels or penalty.
         """
         counts = getattr(system, "thin_counts", None)
         if counts is None or not len(counts[0]):

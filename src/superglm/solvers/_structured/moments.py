@@ -371,28 +371,17 @@ def _centered_leaf_pass(
     rhs: NDArray | None = None,
     error: NDArray | None = None,
 ) -> tuple[NDArray, NDArray, NDArray, NDArray | None, NDArray | None, NDArray]:
-    """Return leaf means, the centred within-leaf scatter, the absolute mass, the deviations,
-    with ``rhs`` ``sum_r rhs_r (x_r - c)``, and ``sum_r a_r (x_r - c)``, both on the dense columns.
+    """Leaf means, centred within-leaf scatter, absolute mass and deviations in one row pass.
 
-    One exact centred row pass (nested note §3.4, §3.6) over the border rows in
-    leaf order, in chunks of ``chunk_size`` rows centred on ``border_center``;
-    every row sum runs in the serial kernels of ``leaf_kernels``.
-
-    Without ``mean`` (the data pass) the leaf centres use the absolute weights,
-    ``mu_l = x_ref - c + sum_r |a_r| ((x_r - c) - (x_ref - c)) / sum_r |a_r|``,
-    and the carried deviation is ``delta_l = -2 sum_{r: a_r < 0} |a_r| (x_r -
-    mu_l)``, an exact zero (``None``) without negative rows. Cut leaves are
-    combined after the pass (``_combine_leaf_pieces``). With ``mean`` it forms
-    ``dev_l = sum_r a_r (x_r - m_l)``. The scatter is ``P'P - N'N`` per chunk
-    (``_root_scatter``), never a raw-moment subtraction, accumulated with
-    compensated addition and symmetrized. The absolute mass is
-    ``sum_r e_r (x_rj - m_lj)^2``, ``e_r`` the row's weight-error scale
-    (``error``, ``|a|`` by default), chosen by row type.
-
-    Random-effect border blocks are never materialized: each chunk forms them
-    as sparse rows on its leaves' levels (``_indicator_entries``,
-    ``_indicator_means``), reading the same nonzero terms as the dense pass. A
-    given ``mean`` must vanish off each leaf's levels.
+    Also returns ``sum_r rhs_r (x_r - c)`` (with ``rhs``) and ``sum_r a_r (x_r - c)`` on the dense
+    columns, from border rows in leaf order, chunked by ``chunk_size`` about ``border_center``.
+    Without ``mean`` (data pass) leaf centres use ``|a|`` weights and the carried deviation is
+    ``delta_l = -2 sum_{r: a_r < 0} |a_r| (x_r - mu_l)`` (``None`` without negative rows); cut
+    leaves are combined by ``_combine_leaf_pieces``. With ``mean`` it forms
+    ``dev_l = sum_r a_r (x_r - m_l)``. The scatter is ``P'P - N'N`` per chunk (``_root_scatter``),
+    never a raw-moment subtraction, compensated and symmetrized; the absolute mass is
+    ``sum_r e_r (x_rj - m_lj)^2``, ``e_r`` from ``error`` (``|a|`` by default). Random-effect
+    border blocks stay sparse per chunk; a given ``mean`` must vanish off each leaf's levels.
     """
     n = len(weights)
     order, starts = layout.leaf_order, layout.leaf_starts
@@ -674,17 +663,14 @@ def _combine_leaf_pieces(
 ) -> None:
     """Combine the pieces of every leaf a chunk edge cut, in place (data pass).
 
-    Each piece ``p`` was centred on its own ``|a|``-centre ``mu_p`` and records
-    ``W_p``, ``A_p``, ``mu_p``, ``E_p``, ``t_p``, ``delta_p`` and its negative
-    mass ``N_p``. The leaf centre is ``mu_l = mu_h + sum_p A_p (mu_p - mu_h) /
-    A_l`` about the heaviest piece; with ``d_p = mu_p - mu_l`` the exact
-    identities (Chan, Golub & LeVeque 1979)
+    Piece ``p``, centred on its own ``|a|``-centre ``mu_p``, records ``W_p``, ``A_p``, ``mu_p``,
+    ``E_p``, ``t_p``, ``delta_p`` and negative mass ``N_p``. With ``d_p = mu_p - mu_l`` and
+    ``mu_l = mu_h + sum_p A_p (mu_p - mu_h) / A_l`` about the heaviest piece, the exact
+    identities (Chan, Golub & LeVeque 1979) update the scatter, deviation and absolute mass:
 
         sum_{r in l} a (x - mu_l)(x - mu_l)' = sum_p [W_p-scatter + delta_p d_p' + d_p delta_p' + W_p d_p d_p'],
         sum_{r in l} a (x - mu_l) = sum_p [delta_p + W_p d_p] = sum_p [delta_p - 2 N_p d_p],
         sum_{r in l} e (x - mu_l)^2 = sum_p [U_p + 2 d_p t_p + E_p d_p^2]
-
-    update the scatter, the deviation and the absolute mass.
     """
     leaf, weight, total, centre, error, error_residual, piece_deviation, negative = (
         np.concatenate(values) for values in zip(*pieces, strict=True)
@@ -725,17 +711,14 @@ def _nested_pass(
     """One row pass of a nested chain: per-leaf statistics of the row weights.
 
     ``mean=None`` is the data pass about the centre of ``prior_weights``
-    (``nested_prior_statistics``), carrying the structural null generators; a
-    given ``mean`` is a signed pass about those means and needs the factor's
-    ``center``, with no generators. ``error`` ``(n,)`` is the per-row weight
-    rounding scale (``|weights|`` by default). With ``rhs`` it also returns
-    ``sum_r rhs_r (x_r - c)`` on the dense border columns; it always returns
-    ``sum_r weights_r (x_r - c)``, both from the centred rows.
-
-    The bound's inputs: ``error_mass`` per leaf, ``gamma_weight = (n_leaf +
-    16) eps`` for the sequential leaf sums (16 roundings form one observed
-    weight) and ``gamma_scatter = (n_chunk + 21) eps`` for the within
-    ``syrk`` (Higham 2002, Lemma 3.1 and eq. 3.4).
+    (``nested_prior_statistics``), carrying the structural null generators; a given ``mean`` is
+    a signed pass about those means, needs the factor's ``center`` and has no generators.
+    ``error`` ``(n,)`` is the per-row weight rounding scale (``|weights|`` by default). It returns
+    ``sum_r weights_r (x_r - c)``, and with ``rhs`` also ``sum_r rhs_r (x_r - c)``, on the dense
+    border columns. The bound's inputs: ``error_mass`` per leaf,
+    ``gamma_weight = (n_leaf + 16) eps`` for the leaf sums (16 roundings form one weight) and
+    ``gamma_scatter = (n_chunk + 21) eps`` for the within ``syrk`` (Higham 2002, Lemma 3.1 and
+    eq. 3.4).
     """
     leaf = group_matrices[layout.leaf_group_index]
     if not isinstance(leaf, RandomEffectGroupMatrix):

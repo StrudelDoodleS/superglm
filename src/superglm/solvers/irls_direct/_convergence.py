@@ -19,22 +19,15 @@ if TYPE_CHECKING:
 class _IRLSDirectConvergence:
     """The fit's stop rule: whether an iteration's retained state ends the solve, and why.
 
-    ``judge`` gives one verdict per iteration, in this order, each part able
-    to overrule the parts before it:
-
-    1. the criterion the fit's ``convergence`` names, on the retained state,
-       then the step-rejected veto (``_criterion``);
-    2. the binomial/log mean space's judge, on the model's own score
-       (``_IRLSDirectMeanSpaceOverlay.judge``), when the fit holds the overlay;
-    3. the inner QP's KKT veto on a constrained fit's retained state, then the
-       termination reason (``_terminate``).
-
-    The verdict is written to the fit (``converged_this_iter``,
-    ``termination_reason``, ``convergence_value`` and the rest).  The rule
-    keeps what lasts across iterations: the mode score's ratios, its last
-    residual and the stagnation window.  It is not pure: the criterion may
-    switch the fit's curvature to Newton steps, and the judge may engage the
-    mean space's Newton steps.  It keeps no reference to the fit.
+    ``judge`` gives one verdict per iteration, each step able to overrule the ones before: the
+    fit's ``convergence`` criterion and the step-rejected veto (``_criterion``); the
+    binomial/log mean space's judge on the model's own score
+    (``_IRLSDirectMeanSpaceOverlay.judge``) when the fit holds the overlay; and a constrained
+    fit's inner-QP KKT veto, then the termination reason (``_terminate``). The verdict is
+    written to the fit (``converged_this_iter``, ``termination_reason``, ``convergence_value``
+    and the rest). The rule keeps the mode score's ratios, last residual and stagnation window,
+    and no reference to the fit; it is not pure, as the criterion may switch the fit's curvature
+    to Newton steps and the judge may engage the mean space's Newton steps.
     """
 
     __slots__ = ("stagnation_window", "_mode_ratios", "last_mode_residual")

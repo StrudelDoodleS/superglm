@@ -61,25 +61,15 @@ if TYPE_CHECKING:
 class _IRLSDirectFinalGeometry:
     """What a finaliser returns: the retained model's geometry, which the fit publishes.
 
-    - ``XtWX_beta``: the data Gram ``return_xtwx`` returns, ``X'WX`` on the
-      centred route and the block data operator on the structured one;
-    - ``XtWX_S_inv_beta``: the profiled slope inverse, the structured route's
-      profiled factor; empty without REML geometry;
-    - ``log_det_H`` and ``reml_hessian_rank``: the augmented Hessian's log
-      determinant and rank, ``None`` without REML geometry;
-    - ``reml_geometry_summary`` and ``retained_reml_decomposition``: the
-      centred route's O(p) summary for the REML loop and, when the caller keeps
-      it, its slope decomposition;
-    - ``p_eff``: the effective degrees of freedom, 0 without fit statistics;
-    - ``rank_info``: the centred route's data-subspace metadata, ``None`` when
-      it is not asked for or is deferred;
-    - ``structured_factor``: the structured route's profiled factor, which the
-      backend disclosure reads;
-    - ``centered_final`` and ``XtW1``: the centred route's final system and its
-      raw ``X'W1``.
-
-    A field of one route is ``None`` on the other.  It holds arrays and
-    factors, never the fit or a step.
+    ``XtWX_beta`` is the data Gram ``return_xtwx`` returns (``X'WX`` centred, the block data
+    operator structured); ``XtWX_S_inv_beta`` the profiled slope inverse (structured: the
+    profiled factor); ``log_det_H`` and ``reml_hessian_rank`` the augmented Hessian's log
+    determinant and rank; ``reml_geometry_summary`` and ``retained_reml_decomposition`` the
+    centred O(p) REML summary and, when kept, its slope decomposition; ``p_eff`` the EDF (0
+    without fit statistics); ``rank_info`` the centred data-subspace metadata;
+    ``structured_factor`` the profiled factor the backend disclosure reads; ``centered_final``
+    and ``XtW1`` the centred final system and raw ``X'W1``. REML fields are empty or ``None``
+    without REML geometry, one route's fields ``None`` on the other; never the fit or a step.
     """
 
     XtWX_beta: NDArray | BlockSymmetricOperator | SumToZeroBlockOperator | NestedDataOperator
@@ -177,21 +167,14 @@ def _face_formation_unresolved(matrix: NDArray, face: NDArray, on_face: NDArray,
 def _face_factor_edf(rows: NDArray, penalty: NDArray, face: NDArray) -> tuple[NDArray, NDArray]:
     """``diag(F)`` and ``diag(2F - F^2)``, ``F = Z M Z'``: the face fit's EDF and ``edf1``.
 
-    ``rows`` is ``R`` with ``R'R = Z'DZ`` (``grouped_projected_factor``), so
-    ``B = [R; P Z]``, ``P = penalty_factor(S)``, factors the face Hessian
-    without forming it, and ``M = B^+ [R; 0]``.  The trace is the influence
-    trace from orthogonal factors (Wood 2011; Fasiolo et al. 2020, supplement
-    B); ``edf1`` is Wood (2013, section 2.4).
-
-    - The rows are projected before they are factored: Householder QR is
-      backward stable only columnwise (Higham 2002, sections 19.3-19.4), so
-      under weights far apart a light face's curvature would be lost to the
-      heavy rows.  Each projected entry is within ``gamma_(p + T + 3) |a_r|'
-      |Z|`` of exact (one inner product per entry).
-    - ``Z M Z'`` omits the coupling to curvature off the face: it has zero
-      trace per term, since a term's binding rows touch only its own
-      coefficients, but entries up to the weight ratio, unresolvable in
-      float64.
+    ``rows`` is ``R`` with ``R'R = Z'DZ`` (``grouped_projected_factor``), so ``B = [R; P Z]``,
+    ``P = penalty_factor(S)``, factors the face Hessian unformed and ``M = B^+ [R; 0]``: the
+    influence trace from orthogonal factors (Wood 2011; Fasiolo et al. 2020, supplement B) and
+    ``edf1`` of Wood (2013, sec. 2.4). Rows are projected before factoring, since Householder
+    QR is backward stable only columnwise (Higham 2002, secs. 19.3-19.4) and a light face's
+    curvature would be lost to heavy rows; each projected entry is within
+    ``gamma_(p + T + 3) |a_r|' |Z|`` of exact. ``Z M Z'`` omits coupling to curvature off the
+    face: zero trace per term, but entries up to the weight ratio, unresolvable in float64.
     """
     projected = np.vstack((rows, penalty_factor(penalty) @ face))
     decomposition = decompose_factor(projected, retain_factor_solve=True)
@@ -211,19 +194,14 @@ def _feature_edf(
 ) -> tuple[NDArray, NDArray | None]:
     """``diag((D + S)^+ D)``: each coefficient's effective degrees of freedom, and its ``edf1``.
 
-    ``D`` is the centred data Gram, ``S`` the penalty; on an active face ``Z``
-    the diagonal is ``diag(Z (Z'(D + S)Z)^+ Z'D)``.  Where the factor decided
-    the face decomposition, ``D`` is as unreliable as the Hessian, so the EDF
-    and ``edf1`` are read off the projected data rows ``factor(0)``
-    (``_face_factor_edf``); elsewhere ``edf1`` is ``None``.
-
-    The pseudo-inverse overflows at data scales below ``1 / max float``
-    (subnormal weights).  If the unscaled diagonal is not finite, ``D`` and
-    ``S`` are scaled by the power of two that brings the Hessian's largest
-    entry into ``[1/2, 1)`` (exact) and refactored; PSD gives ``|S_ij| <=
-    max diag(D + S)``, so the scaled penalty cannot overflow.
-    ``factor(exponent)`` gives the rows at scale ``2^-exponent``; ``inverse``
-    is ``face_pseudo_inverse(decomposition, face)`` when already formed.
+    ``D`` is the centred data Gram, ``S`` the penalty; on an active face ``Z`` the diagonal is
+    ``diag(Z (Z'(D + S)Z)^+ Z'D)``. Where the factor decided the face decomposition, the EDF and
+    ``edf1`` are read off the projected rows ``factor(0)`` (``_face_factor_edf``); elsewhere
+    ``edf1`` is ``None``. If the diagonal is not finite (subnormal weights overflow the
+    pseudo-inverse), ``D`` and ``S`` are scaled by the power of two bringing the Hessian's
+    largest entry into ``[1/2, 1)`` and refactored; PSD gives ``|S_ij| <= max diag(D + S)``, so
+    the penalty cannot overflow. ``factor(exponent)`` gives the rows at scale ``2^-exponent``;
+    ``inverse`` is ``face_pseudo_inverse(decomposition, face)`` when already formed.
     """
     if face is not None and decomposition.method == "qr_svd":
         return _face_factor_edf(factor(0), centered.penalty, face)

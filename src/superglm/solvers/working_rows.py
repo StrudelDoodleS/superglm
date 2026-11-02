@@ -574,16 +574,12 @@ def _concave_observed_rows(
 ) -> tuple[NDArray, NDArray]:
     """Observed rows of NB2/log and binomial probit and cloglog: ``eta + score / curvature``.
 
-    Probit and cloglog take their closed forms in ``eta``.  NB2/log takes
-    the REML geometry's own observed information
-    (``compute_observed_information_weights``, itself the closed form
-    ``w theta mu (y + theta) / (mu + theta)^2``) and the Fisher rows'
-    score ``W (z - eta)``, which does not depend on the curvature.  Rows that
-    geometry refuses (``ObservedGeometryInfeasibleError``: a non-finite
-    input or row) come back non-finite, so the caller sets
-    ``rejection_reason`` as it does for Gamma and Tweedie.  A row whose
-    curvature is zero (a zero weight, or underflow far in a tail) keeps
-    ``z = eta``: it adds nothing to the update.
+    Probit and cloglog take closed forms in ``eta``. NB2/log takes the REML geometry's observed
+    information (``compute_observed_information_weights``,
+    ``w theta mu (y + theta) / (mu + theta)^2``) and the Fisher rows' score ``W (z - eta)``.
+    Rows that geometry refuses (``ObservedGeometryInfeasibleError``) come back non-finite, so
+    the caller sets ``rejection_reason`` as for Gamma and Tweedie; a zero-curvature row keeps
+    ``z = eta`` and adds nothing to the update.
     """
     if type(link) is ProbitLink:
         observed_weights, score = _probit_observed_rows(y=y, eta=eta, sample_weight=sample_weight)
