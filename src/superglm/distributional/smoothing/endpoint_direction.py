@@ -1,18 +1,13 @@
 """Finite-difference directional derivative of predictor-scale curvature.
 
-Every family provides ``evaluate_natural`` at derivative order two and the
-inverse-link chain rule in :func:`transform_natural_derivatives`.  The
-endpoint LAML derivative needs one more order along one direction; this
-module supplies it by differencing the engine's own ``curvature_packed``
-channel, which is an analytic second derivative, so the difference has an
-eps^(4/5) floor after Richardson extrapolation rather than the eps^(1/2)
-floor of a differenced first derivative.  The exact LAML Hessian needs one
-order more still -- the second directional difference of the same channel,
-bilinear in two directions -- which
-:func:`finite_difference_curvature_second_direction` takes on the same
-five-point stencil.  A family with analytic fourth derivatives supplies that
-order directly (:func:`analytic_curvature_second_direction`), and the
-differences are its fallback.
+The endpoint LAML derivative needs one order beyond the families' analytic
+second derivatives; this module differences the engine's analytic
+``curvature_packed`` channel, so Richardson extrapolation leaves an
+``eps^(4/5)`` floor rather than a differenced gradient's ``eps^(1/2)``. The
+exact LAML Hessian's bilinear second direction uses the same five-point
+stencil (:func:`finite_difference_curvature_second_direction`). Families with
+analytic derivatives supply them directly
+(:func:`analytic_curvature_second_direction`); differences are the fallback.
 """
 
 from __future__ import annotations
@@ -183,21 +178,12 @@ def _second_difference(
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Order-4 second directional difference on the shared five-point stencil.
 
-    With spacing ``d = step / 2`` the stencil holds ``f(0), f(+-d), f(+-2d)``;
-    the order-2 estimate is ``(f(d) - 2 f(0) + f(-d)) / d^2`` and the order-4
-    Richardson combination ``(-f(2d) + 16 f(d) - 30 f(0) + 16 f(-d) - f(-2d))
-    / (12 d^2)``.  The certificate is their difference (the order-2
-    truncation, which bounds the order-4 term) plus a round-off floor.
-
-    The floor is at the ROW's curvature scale, ``64 eps max_row|f| / d^2``,
-    not the entry's: a packed channel can be the difference of larger
-    intermediates (the Gaussian ``(s, s)`` channel is ``(1 - 3 d^2/sigma^2)
-    + (-1 + d^2/sigma^2)``), so its round-off follows the row, exactly as the
-    first-derivative certificate test documents.  Measured on the Gaussian
-    closed form over ten seeds, the worst error is 15.0 in units of
-    ``eps max_row|f| / d^2`` (the stencil's coefficient sum is 64/12 = 5.3 per
-    unit of evaluation error); 64 keeps a four-fold margin and is the
-    constant that test already uses.
+    With ``d = step / 2``: the order-2 estimate ``(f(d) - 2 f(0) + f(-d)) / d^2``
+    and the Richardson combination ``(-f(2d) + 16 f(d) - 30 f(0) + 16 f(-d) -
+    f(-2d)) / (12 d^2)``. The certificate is their difference plus a round-off
+    floor at the row's curvature scale, ``64 eps max_row|f| / d^2``: a packed
+    channel can be a difference of larger intermediates, so its round-off
+    follows the row (64 is four times the worst observed coefficient).
     """
     plus, minus, plus_half, minus_half = stencil
     spacing = 0.5 * step
@@ -234,12 +220,10 @@ def analytic_curvature_direction(
     """The family's analytic curvature direction and its certified error, if it has one.
 
     ``None`` when the family does not implement the protocol or refuses these
-    links with :class:`UnsupportedLikelihoodContractError` (NB2 and GammaLS
-    differentiate only their log links; a link without ``deriv3_inverse``
-    cannot be differentiated a third time), so the caller differences
-    instead.  The certificate is the family's own certified absolute error
-    (:class:`CertifiedCurvatureDirectionalFamily`), or ``None`` for a family
-    whose channels are closed forms.  Numerical failures propagate.
+    links with :class:`UnsupportedLikelihoodContractError` (e.g. NB2 and
+    GammaLS off their log links), so the caller differences. The certificate
+    is the family's certified absolute error, or ``None`` for closed forms.
+    Numerical failures propagate.
     """
     certified = getattr(family, "certified_predictor_curvature_directional_derivative", None)
     plain = getattr(family, "predictor_curvature_directional_derivative", None)
@@ -270,13 +254,10 @@ def analytic_curvature_second_direction(
 ) -> tuple[NDArray[np.float64], NDArray[np.float64] | None] | None:
     """The family's analytic second curvature direction and its certified error, if any.
 
-    The counterpart of :func:`analytic_curvature_direction` one order up and
-    of :func:`finite_difference_curvature_second_direction`: ``None`` when the
-    family does not implement the protocol or refuses these links or rows
-    with :class:`UnsupportedLikelihoodContractError`, so the caller
-    differences.  ``a`` and ``b`` may be stacked ``(m, n, K)`` pairs.  ``step``
-    is the derivative step differences would use, passed to a certified
-    family whose certificate depends on it.
+    ``None`` when the family does not implement the protocol or refuses these
+    links or rows (:class:`UnsupportedLikelihoodContractError`), so the caller
+    differences. ``a`` and ``b`` may be stacked ``(m, n, K)`` pairs; ``step``
+    goes to a certified family whose certificate depends on it.
     """
     certified = getattr(family, "certified_predictor_curvature_second_directional_derivative", None)
     plain = getattr(family, "predictor_curvature_second_directional_derivative", None)
@@ -350,13 +331,10 @@ def finite_difference_curvature_second_direction(
 ) -> FiniteDifferenceDirection:
     """Richardson-extrapolated second directional difference of packed curvature.
 
-    Bilinear in ``(direction_a, direction_b)``; a mixed pair is evaluated by
-    polarisation, ``D4[a, b] = (D4[a+b, a+b] - D4[a-b, a-b]) / 4``, so only
-    axis second differences are ever taken.  Each axis direction is
-    differenced row-wise along its unit vector with the absolute link-scale
-    step and rescaled by the squared row norm.  The centre value is shared by
-    every axis, so a diagonal pair costs five packed-curvature evaluations and
-    a mixed pair nine.
+    Bilinear in ``(direction_a, direction_b)``; a mixed pair uses polarisation,
+    ``D4[a, b] = (D4[a+b, a+b] - D4[a-b, a-b]) / 4``, so only axis second
+    differences are taken, each along the row's unit vector and rescaled by
+    the squared row norm. A diagonal pair costs five evaluations, a mixed nine.
     """
     if not np.isfinite(step) or step <= 0.0:
         raise ValueError("step must be a finite positive float")

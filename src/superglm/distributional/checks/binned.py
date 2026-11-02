@@ -1,25 +1,13 @@
 """Binned residual checks against a covariate.
 
-A Q-Q plot says whether the residuals are standard normal overall; it cannot say
-*where* they are not.  Binning the quantile residuals by a covariate and
-reporting the moments per bin is the scalable checking construction of Fasiolo,
-Nedellec, Goude and Wood (2020), *Journal of Computational and Graphical
-Statistics* 29(1), 78-86, which replaces a scatter of n points by a handful of
-summaries with bootstrap bands.
-
-We report three moments rather than one.  A distributional model has a predictor
-for every parameter, so the question is not only "is the fit wrong here" but "in
-which moment": a bin whose **mean** band excludes zero indicts the location
-predictor, one whose **standard deviation** band excludes one indicts the scale
-predictor, and one whose **skewness** band excludes zero indicts the shape
-predictor.  The bands are seeded percentile bootstrap intervals over the rows of
-the bin, which treats rows within a bin as exchangeable.
-
-Residuals are not rates, so a binned mean here is the plain mean over rows,
-weighted only by replication: under the frequency contract the rows are expanded
-by :func:`~superglm.distributional.residuals.replication_sample` before any
-moment is taken, and under the prior contract the weight is already inside each
-row's own distribution function.
+Quantile residuals binned by a covariate, with per-bin moments and seeded
+percentile bootstrap bands (Fasiolo, Nedellec, Goude and Wood 2020, *JCGS*
+29(1)). Three moments name the predictor at fault: a **mean** band excluding
+zero flags location, a **standard deviation** band excluding one flags scale,
+and a **skewness** band excluding zero flags shape. Means are plain row means,
+weighted only by replication (frequency rows are expanded by
+:func:`~superglm.distributional.residuals.replication_sample`; prior weights
+are already inside each row's law).
 """
 
 from __future__ import annotations
@@ -63,11 +51,8 @@ class _Binning(NamedTuple):
 def _covariate_bins(values: Any, n_bins: int, *, name: str = "covariate") -> _Binning:
     """Split rows into equal-count bins of a numeric covariate, or one bin per level.
 
-    A numeric covariate is cut at its ``n_bins`` quantile edges, deduplicated so
-    a covariate with ties or few distinct values yields fewer, non-empty bins
-    rather than empty ones.  Anything else -- strings, categories, booleans -- is
-    grouped by level in sorted order, and a missing level is refused rather than
-    silently dropped into a bin of its own.
+    Numeric quantile edges are deduplicated, so ties give fewer non-empty
+    bins. Other types group by sorted level; a missing level is refused.
     """
     bins = int(n_bins)
     if bins < 1:
@@ -118,12 +103,9 @@ def _covariate_bins(values: Any, n_bins: int, *, name: str = "covariate") -> _Bi
 class BinnedCheck:
     """Mean, standard deviation and skewness of the residuals per bin, with bands.
 
-    ``edges`` is set for a numeric covariate and ``levels`` for a categorical
-    one; exactly one of the two is ``None``.  ``centers`` is the plotting
-    coordinate either way -- the bin midpoint, or ``0 .. L-1`` for ``L`` levels.
-    A bin holding fewer than three rows reports ``nan`` moments and ``nan``
-    bands: it has no third moment to speak of, and a number there would read as
-    evidence.
+    Exactly one of ``edges`` (numeric covariate) and ``levels`` (categorical)
+    is set; ``centers`` is the plotting coordinate (bin midpoint, or
+    ``0 .. L-1``). Bins with fewer than three rows report ``nan``.
     """
 
     covariate: str
@@ -240,12 +222,8 @@ def binned_check(
         sample = values[rows]
         resampled = sample[generator.integers(0, len(rows), size=(boot, len(rows)))]
         with warnings.catch_warnings(), np.errstate(invalid="ignore", divide="ignore"):
-            # In a very small bin a resample can draw one row throughout, and a
-            # constant sample has no skewness; scipy reports that as a warning
-            # and a nan.  Such replicates leave the percentile band instead of
-            # voiding it -- the bin's own ``n`` says how much the band is worth
-            # -- and a bin whose every replicate is degenerate has no band at
-            # all, which is the honest answer there.
+            # A degenerate replicate (one row drawn throughout, no skewness) leaves
+            # the band rather than voiding it; all-degenerate bins get no band.
             warnings.filterwarnings("ignore", "Precision loss occurred", RuntimeWarning)
             warnings.filterwarnings("ignore", "All-NaN slice encountered", RuntimeWarning)
             statistics = {

@@ -1,18 +1,13 @@
 """Parallelize independent global moments without changing their row order.
 
-The plan supplies already validated bins and likelihood values in its owned
-chunk buffers. Each target (a histogram, a directional moment or a paired
-score/mass vector) is one task on the worker pool (``superglm._parallel``):
-a serial kernel that releases the GIL updates the target's own accumulator,
-visiting the rows in their input order, so signed floating-point additions
-have exactly the serial reduction order at every worker count. Only integer
-diagnostics are summed across tasks; fastmath is disabled.
-
-Accumulators and ordinary panels are views of two owned flat buffers, and the
-kernel addresses each through an element offset and a row width.  A
-``numba.typed.List`` of the arrays would cost every process a compile:
-building one from Python calls numba's own list helpers, which numba does not
-cache (``numba/typed/typedlist.py`` declares them without ``cache=True``).
+Each target (a histogram, a directional moment or a paired score/mass vector)
+is one task on the worker pool (``superglm._parallel``): a serial GIL-free
+kernel updates its own accumulator in input row order, so floating-point sums
+match the serial order at every worker count (fastmath off; only integer
+diagnostics are summed across tasks). Accumulators and panels are views of two
+owned flat buffers addressed by offset and width, because a
+``numba.typed.List`` would recompile numba's uncached list helpers in every
+process.
 """
 
 from __future__ import annotations
@@ -182,12 +177,9 @@ def _initialize_batched_moments():
 def _batch_workspace_bytes(histogram_count, directional_count, ordinary_count, *, vector_count=0):
     """Return exact owned array bytes and a separate descriptor reserve.
 
-    The two owned arrays contain five indices per target and an offset and a
-    width per ordinary panel. The accumulators and panels are borrowed views
-    of the caller's buffers.
-    Python wrappers and tuples receive a bounded conservative reserve; global
-    JIT/runtime state belongs to Numba itself. Both terms are independent of
-    observation count and chunk length.
+    The owned arrays hold five indices per target and an offset and width per
+    ordinary panel; accumulators and panels are borrowed. Python wrappers get
+    a bounded reserve. Neither depends on observation count or chunk length.
     """
     targets = histogram_count + directional_count + vector_count
     owned = np.dtype(np.intp).itemsize * (5 * targets + 2 * ordinary_count)
@@ -229,14 +221,11 @@ def _index(value, upper, label):
 class _BatchedMomentReducers:
     """Bind certified plan buffers once for one native call per chunk.
 
-    Every accumulator is a view of ``output_buffer`` and every ordinary panel a
-    view of ``panel_buffer``, two flat arrays the plan allocates (``_carve``),
-    which the kernel addresses by offset. Callers must not resize the buffers
-    or mutate their shape/dtype. Before every
-    ``accumulate``, the owning plan certifies bins in ``[-1, support_size)``
-    and fills/validates the active rows of the ordinary and likelihood panels.
-    This private prepared-buffer contract avoids revalidating every support
-    index after the plan has already checked and copied it.
+    Accumulators and ordinary panels are views of the plan's two flat buffers
+    (``_carve``), addressed by offset; callers must not resize them or change
+    their shape or dtype. The owning plan certifies bins in
+    ``[-1, support_size)`` and the active panel rows before every
+    ``accumulate``, so nothing is revalidated here.
     """
 
     def __init__(

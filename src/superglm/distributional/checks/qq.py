@@ -1,36 +1,17 @@
 """Q-Q plot of the quantile residuals against a simulated envelope.
 
-Under a correctly specified family the randomised quantile residuals of Dunn
-and Smyth (1996), *Journal of Computational and Graphical Statistics* 5(3),
-236-244, are standard normal, so their order statistics plot on the line
-``Phi^{-1}((i - 0.5) / n)``.  What that plot needs to be readable is a
-statement of how far the order statistics wander under the fitted model itself,
-and the envelope is that statement: ``n_sim`` response vectors simulated from
-the fit, each passed through the same probability-integral transform and
-sorted, give the pointwise 2.5 and 97.5 percent band per order statistic.  That
-is the simulation envelope of Fasiolo, Nedellec, Goude and Wood (2020),
-*Journal of Computational and Graphical Statistics* 29(1), 78-86, which also
-supplies the subsampling that keeps the construction affordable on a long book:
-above ``max_points`` rows the envelope is built on a seeded subsample and the
-observed curve is interpolated onto its grid, so the figure stays the same size
-whatever the row count.
+Randomised quantile residuals (Dunn and Smyth 1996, *JCGS* 5(3)) are standard
+normal under a correct family, so their order statistics plot on
+``Phi^{-1}((i - 0.5) / n)``. The envelope simulates ``n_sim`` responses from
+the fit, transforms and sorts them, and reads the pointwise 2.5–97.5 percent
+band (Fasiolo, Nedellec, Goude and Wood 2020, *JCGS* 29(1)), on a seeded
+subsample above ``max_points`` rows. ``parameter_uncertainty=True`` draws
+``theta`` from the posterior per replicate, widening the band.
 
-``parameter_uncertainty=False`` -- the default -- simulates at the plug-in
-``theta_hat``, and the band is then the pure order-statistic band of the fitted
-model.  ``True`` draws ``theta`` from the coefficient posterior per replicate,
-which widens the band by the estimation uncertainty of the fit.
-
-The simulated responses come from :func:`superglm.distributional.posterior.posterior_predictive`
-and are mapped back through the law they were drawn from: simulating one law
-and transforming through another would not produce a uniform transform, and the
-band would then be wrong rather than merely approximate.  That law is the row's
-own one.  A prior weight -- an exposure on a burn-cost model -- is part of the
-row's distribution, so a policy at a fifth of a year is simulated and inverted
-on its own law through ``quantile_prior_weighted`` and ``cdf_prior_weighted``,
-the same pair the observed residuals read.  A family with a point mass takes
-the randomised construction ``u ~ U(F(y-), F(y))`` here exactly as
-:mod:`superglm.distributional.residuals` takes it, because a band drawn from
-one transform is no band for order statistics of another.
+Simulated responses (:func:`~superglm.distributional.posterior.posterior_predictive`)
+are transformed through the law they were drawn from, the row's own
+prior-weighted one, and atoms take ``u ~ U(F(y-), F(y))`` exactly as
+:mod:`superglm.distributional.residuals` does.
 """
 
 from __future__ import annotations
@@ -201,14 +182,10 @@ def qq_payload(
 ) -> QQPayload:
     """Return the Q-Q payload of ``residuals`` with a simulated envelope.
 
-    ``X`` and ``offsets`` are the design the residuals were computed on: the
-    envelope simulates responses for those same rows, so passing a different
-    frame would band a different model.  Rows are the ones
-    :func:`superglm.distributional.residuals.replication_sample` gives, which is
-    the identity under the prior-weight contract and literal replication under
-    the frequency one.  Above ``max_points`` rows the envelope is built on a
-    seeded subsample of them and the observed curve is interpolated onto the
-    subsample's grid; ``subsampled`` records that this happened.
+    ``X`` and ``offsets`` must be the design the residuals were computed on.
+    Rows are those :func:`superglm.distributional.residuals.replication_sample`
+    gives. Above ``max_points`` rows the envelope uses a seeded subsample and
+    the observed curve is interpolated onto its grid (``subsampled`` records it).
     """
     if not isinstance(residuals, ResidualSet):
         raise TypeError("residuals must be a ResidualSet")

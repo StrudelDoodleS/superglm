@@ -97,8 +97,7 @@ def group_level_values(
 ) -> NDArray | None:
     """A term on an sz term's group in the same predictor: its value at each of the term's levels.
 
-    SuperLSS accepts such a term as redundant (0.40 required one); where it
-    leaves its per-level values unpenalized they alias the sz term's level
+    SuperLSS accepts such a term as redundant; where it leaves its per-level values unpenalized they alias the sz term's level
     constants, so the sz rule reads them as part of each level's line
     (``FactorSmooth._score_identified``).  ``coefficients`` are that term's;
     ``None`` without such a term, and for every sz term on the group but the

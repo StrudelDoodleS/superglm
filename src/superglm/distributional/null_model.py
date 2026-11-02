@@ -74,10 +74,9 @@ def _null_layout(source: StackedLayout, n_observations: int) -> StackedLayout:
 class NullModelFitError(RuntimeError):
     """A joint null coefficient fit that reached no converged state.
 
-    ``fit_joint_null_model`` no longer raises it: an unconverged null fit is
-    returned with ``converged=False`` and its convergence reason, and a
-    SuperLSS fit discloses it instead of refusing. The class stays importable
-    for code that catches it.
+    Not raised by ``fit_joint_null_model``, which returns an unconverged fit
+    with ``converged=False`` for SuperLSS to disclose; kept importable for
+    code that catches it.
     """
 
     def __init__(self, result: DenseSolverResult):

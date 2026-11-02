@@ -1,19 +1,15 @@
 """Compiled near-Poisson theta series for the NB2 row kernel.
 
-One row is the same float64 operation sequence, in the same order, as the
-per-row reference loop it replaces (kept as ``tests/_nb_series_reference.py``):
-every product, quotient and sum is written in the reference's left-to-right
-order, no fast-math flag is set (so no FMA contraction or reassociation), and
-every power the reference takes with ``**`` is a libm ``pow`` call here too.
-The exponents arrive as data (``exponents[k] == float(k)``) rather than as
-literals: LLVM rewrites ``pow(x, 2.0)`` with a literal exponent as ``x * x``,
-which need not equal libm's ``pow`` in the last bit, and a constant trip count
-would let it unroll the series loop into literal exponents.
+Each row runs the same float64 operation sequence, in the same order, as the
+reference loop in ``tests/_nb_series_reference.py``: left-to-right products and
+sums, no fast-math (so no FMA or reassociation), and libm ``pow`` wherever the
+reference uses ``**``. Exponents arrive as data (``exponents[k] == float(k)``)
+because LLVM rewrites ``pow(x, 2.0)`` with a literal exponent as ``x * x`` and
+would unroll a constant trip count.
 
-Rows are independent.  Every kernel here is serial and releases the GIL, and
-the worker pool (``superglm._parallel.pooled_row_blocks``) runs it over fixed
-blocks of ``_PARALLEL_BLOCK`` rows, each with its own scratch: so every worker
-count gives the same bits, and no kernel compiles numba's parallel machinery.
+Kernels are serial and release the GIL; ``superglm._parallel.pooled_row_blocks``
+runs them over fixed blocks of ``_PARALLEL_BLOCK`` rows with private scratch,
+so every worker count gives the same bits.
 """
 
 from __future__ import annotations
@@ -29,11 +25,8 @@ from superglm._roundoff import EPS as _EPS
 from superglm._roundoff import SMALLEST_SUBNORMAL as _SUBNORMAL
 from superglm._roundoff import UNIT_ROUNDOFF as _UNIT_ROUNDOFF
 
-# A block of 1,024 rows is about 0.2 ms of theta-series work and a section
-# costs about 0.15 ms to wake its workers: at eight workers a call over 12,000
-# rows takes 0.7 ms in blocks of 1,024 and 1.3 ms in blocks of 4,096 (which
-# keep three workers busy), and the same at one worker.  Rows are independent,
-# so the blocks change no bit.
+# Rows per parallel block: large enough to amortise waking the workers. Rows
+# are independent, so the block size changes no bit.
 _PARALLEL_BLOCK = 1024
 
 
@@ -98,12 +91,9 @@ def theta_series_serial(
 ) -> None:
     """Fill ``use``, ``natural`` and ``direct`` on the candidate ``rows``, one row at a time.
 
-    One function, with the row body in the loop.  A call per row that passes
-    the fourteen arrays counts each array's reference up and down again (an
-    atomic operation on its shared meminfo, twice per array per row, about
-    120 ns a row where the whole row now takes 200); numba's parallel loops, which
-    this core replaces, hand their body raw pointers and pay none of it.  The
-    scratch is touched only for counts above one, the only counts that read it.
+    The row body stays inside the loop: a call per row would pay reference
+    counting on all fourteen arrays every row. The scratch is touched only for
+    counts above one.
     """
     sums = np.empty(series_order)
     sum_errors = np.empty(series_order)
@@ -639,25 +629,15 @@ def _size_information_row(mean: float, size: float, max_terms: int) -> tuple[flo
     """``theta**2 I_theta_theta`` of one NB2 law, and the series terms it took.
 
     ``I = (1/theta) sum_{j>=1} P(Y > j) j / ((theta + j)**2 (theta + j - 1))``,
-    which equals Lawless's (1987, eq. 2.8) ``sum_j P(Y > j)/(theta + j)**2 -
-    mu/(theta (theta + mu))`` but has only non-negative terms, so the Poisson
-    limit, where both of Lawless's sums approach ``mu/theta**2``, does not
-    cancel. Summed by parts over ``y`` it is ``sum_{y>=2} P(y) C(y-1)``,
-    ``C(k) = sum_{j=1..k} c_j``, ``c_j = j theta/((theta+j)**2 (theta+j-1))``,
-    which one forward pass of the pmf recurrence accumulates.
-
-    The identity is summation by parts with the NB2 recurrence ``(y + 1)
-    P(y + 1) = p (theta + y) P(y)``, which gives ``E[Y/(theta + Y - 1)] = p``,
-    ``p = mu/(mu + theta)``.
+    equal to Lawless's (1987, eq. 2.8) form but with non-negative terms, so the
+    Poisson limit does not cancel; summed by parts (via
+    ``E[Y/(theta + Y - 1)] = p``) it is ``sum_{y>=2} P(y) C(y-1)``,
+    ``C(k) = sum_{j<=k} j theta/((theta+j)**2 (theta+j-1))``, one forward pmf pass.
 
     The tail past ``y`` is at most ``P(y) (C(y-1) r/(1-r) + r/(4 (theta+y-1)
-    (1-r)**2))``: every later pmf ratio is at most ``r = p max(1, (theta+y)/
-    (y+1))`` and ``c_j <= 1/(4 (theta+j-1))``. The series stops once that bound
-    is at most ``u`` times the partial sum, so truncation adds at most ``u``
-    relative error to the terms' own rounding. ``P(y)`` is carried as ``v 2**e``
-    (power-of-two rescaling is exact), so a ``P(0)`` below the normal range
-    does not underflow. Returns ``terms = -1`` when ``max_terms`` runs out
-    first.
+    (1-r)**2))`` with ``r = p max(1, (theta+y)/(y+1))``; the series stops when
+    that is at most ``u`` times the partial sum. ``P(y)`` is carried as
+    ``v 2**e`` so it never underflows. ``terms = -1`` when ``max_terms`` runs out.
     """
     p = mean / (mean + size)
     exponent_value = -size * math.log1p(mean / size)

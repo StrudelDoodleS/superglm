@@ -1,22 +1,14 @@
 """Paired comparison of two fitted distributional models, and the Murphy diagram.
 
-Two models scored on the same rows are compared by their per-row score
-differences: the rows are conditionally independent given the covariates, so the
-paired mean, standard error and ``t`` are the whole test -- with literal row
-replication under frequency weights, and no autocorrelation correction, which
-would be a forecasting-over-time construct this design does not have.
-
-A single mean says *which* model wins.  The Murphy diagram of Ehm, Gneiting,
-Jordan and Krueger (2016), *Journal of the Royal Statistical Society: Series B*
-78(3), 505-562, says *where*.  Every consistent scoring function for the
-``alpha``-quantile is a mixture of the elementary scores
+Per-row score differences give the paired mean, standard error and ``t``
+(rows are conditionally independent; frequency weights replicate). The Murphy
+diagram (Ehm, Gneiting, Jordan and Krueger 2016, *JRSS B* 78(3)) shows where
+one model wins: every consistent quantile score mixes the elementary scores
 
     S_alpha^eta(x, y) = (1 - alpha) 1{y <= eta < x} + alpha 1{x <= eta < y},
 
-so plotting the mean elementary score of both models against ``eta`` decomposes
-the quantile (pinball) loss over the outcome scale: one curve below the other on
-a stretch of ``eta`` is dominance on that stretch, and the curves integrate back
-to the pinball losses being compared.
+so mean elementary scores against ``eta`` decompose the pinball loss over the
+outcome scale.
 """
 
 from __future__ import annotations
@@ -419,18 +411,14 @@ def compare_models(
 ) -> Comparison:
     """Compare two fits on the same rows by their per-row score differences.
 
-    The difference is ``score(a) - score(b)``, so a negative mean says ``a`` is
-    the better model. The two fits share the row set but need not share a
-    family. ``offsets`` is shared shorthand; ``a_offsets`` and ``b_offsets``
-    supply each candidate's own predictor-keyed mapping. Mixing the shared
-    and candidate-specific forms is refused. Non-unit ``sample_weight``
-    requires the candidates to declare the same likelihood-weight semantics.
-    Prior semantics changes each row's law;
-    frequency semantics gives it literal replication mass.  Zero-weight rows
-    are omitted from the comparison.  ``by`` segments the difference, by a
-    column name of ``X`` or by an array of labels.  ``murphy_quantile`` adds the
-    Murphy diagram at that quantile level over ``thresholds``, defaulting to a
-    grid over the replication-expanded pooled outcomes and forecasts.
+    The difference is ``score(a) - score(b)``, so a negative mean favours
+    ``a``; the families may differ. ``offsets`` is shared shorthand;
+    ``a_offsets`` and ``b_offsets`` give each candidate its own mapping (mixing
+    the forms is refused). Non-unit ``sample_weight`` requires both to declare
+    the same weight semantics; zero-weight rows are omitted. ``by`` segments
+    the difference (a column of ``X`` or labels). ``murphy_quantile`` adds the
+    Murphy diagram at that level over ``thresholds`` (default: a grid over the
+    pooled outcomes and forecasts).
     """
     if which not in ("log", "crps"):
         raise ValueError(f"unknown score {which!r}; compare_models scores 'log' or 'crps'")
