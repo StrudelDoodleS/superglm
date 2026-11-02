@@ -45,14 +45,10 @@ def training_telemetry(model) -> dict[str, Any]:
 def _rank_policy_payload(result) -> dict[str, Any]:
     """The rank policy this fit's zeros were decided under.
 
-    ``RankPolicy.version`` is stamped onto every ``RankDecomposition`` and every
-    ``RankInfo``, and before this was read by nothing -- so a governed fit could
-    not be traced back to the rule that chose which coefficients are reported as
-    exact zeros.  Recording it here is what the field is for.
-
-    It is read off the fitted result rather than off the live shared policy, so
-    a result carried across a version boundary reports the version that actually
-    decided it rather than today's.
+    ``RankPolicy.version`` is stamped onto every ``RankDecomposition`` and
+    ``RankInfo``, so a governed fit can be traced to the rule that chose its exact
+    zeros.  It is read off the fitted result, not the live shared policy, so a
+    result carried across a version boundary reports the version that decided it.
     """
     rank_info = getattr(result, "rank_info", None)
     version = getattr(rank_info, "policy_version", None)
@@ -112,10 +108,8 @@ def reml_diagnostics(model) -> dict[str, Any]:
             "objective": getattr(reml, "objective", None),
             "objective_history": getattr(reml, "objective_history", None),
             "inner_iter_history": getattr(reml, "inner_iter_history", None),
-            # The monotone (SCOP) engine's step per iteration ("newton",
-            # "efs", "efs_fisher" where a Fisher-fallback iterate took an EFS
-            # step, or "efs_uncorrected" where the Newton Jacobian's SCOP terms
-            # could not be formed), and why the run fell back to EFS steps, or None
+            # The monotone (SCOP) engine's step per iteration ("newton", "efs",
+            # "efs_fisher", "efs_uncorrected") and why the run fell back to EFS steps, or None
             # (``REMLResult.scop_newton_fallback`` lists the reasons).
             "scop_outer_steps": getattr(reml, "scop_outer_steps", None),
             "scop_newton_fallback": getattr(reml, "scop_newton_fallback", None),

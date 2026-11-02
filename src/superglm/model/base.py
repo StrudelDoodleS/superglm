@@ -155,11 +155,10 @@ def _score_prediction_term_local_exact(
         return _score_feature(term["spec"], X.column_array(term["name"]), beta)
 
     left_name, right_name = term["parent_names"]
-    # A plan cached before parent specs were stashed carries no "parent_specs"
-    # key; ``None`` then resolves through the identity path.  Resolution is
-    # keyed on the INTERACTION too: a FactorSmooth reads its second parent as a
-    # grouping column, so its columns must arrive exactly as the fit factorized
-    # them (see ``resolve_interaction_parent_of``).
+    # A plan cached before parent specs were stashed has no "parent_specs" key;
+    # ``None`` then resolves through the identity path.  Resolution is keyed on the
+    # interaction too: a FactorSmooth reads its second parent as a grouping column
+    # (see ``resolve_interaction_parent_of``).
     left_spec, right_spec = term.get("parent_specs", (None, None))
     ispec = term["spec"]
     _, left = resolve_interaction_parent_of(ispec, left_spec, X.column_array(left_name))
@@ -231,13 +230,11 @@ def _score_unidentified_factor_smooth(
 ) -> tuple[NDArray[np.floating], tuple]:
     """An ``sz`` term with levels left out of its population, as predicted (#432, ``_score_identified``).
 
-    ``features`` are the prediction plan's main-effect terms by name.  The
-    term that folds its group's redundant main effect (an
-    ``OrderedCategorical``, which the model accepts as redundant) reads its
-    value at each level as part of that level's line (``level_constants``),
-    so its share of a separated level's walk does not reach the prediction.
-    Every path that predicts an ``sz`` term calls this, so none can score it
-    without the fold.
+    ``features`` are the prediction plan's main-effect terms by name.  The term that
+    folds its group's redundant main effect (an ``OrderedCategorical``) reads its
+    value at each level as part of that level's line (``level_constants``).  Every
+    path that predicts an ``sz`` term calls this, so none can score it without the
+    fold.
     """
     left_name, right_name = term["parent_names"]
     left_spec, right_spec = term.get("parent_specs", (None, None))
@@ -304,19 +301,15 @@ class EtaSum:
     """A public predictor's sum of its intercept and its term contributions.
 
     As fitted, ``start_eta`` and ``finish_eta``: ``alpha + (alpha_lo + sum_t
-    score_t)``, bit for bit.  When a revision carried a centred column's change
-    into the pair (``PIRLSResult.centred_sum_compensated``), ``alpha`` holds
-    that column's ``c dbeta`` and can cancel against a row's ``(x - c) beta``.
-    The sum is then compensated (``mode_score.CompensatedSum``), with ``alpha``
-    first, each centred column as its exact pieces (``_add_centred_term``) and
-    ``alpha_lo`` joining the errors last, in row chunks.  A row the expansion
-    cannot finish takes the plain predictor (``CompensatedSum``).
-    ``mode_score.linear_predictor`` evaluates the solver's pair the same way.
+    score_t)``, bit for bit.  When a revision carried a centred column's change into
+    the pair (``PIRLSResult.centred_sum_compensated``), ``alpha`` holds that column's
+    ``c dbeta`` and can cancel against a row's ``(x - c) beta``; the sum is then
+    compensated (``mode_score.CompensatedSum``) in row chunks, with ``alpha`` first,
+    each centred column as its exact pieces (``_add_centred_term``) and ``alpha_lo``
+    last.  A row the expansion cannot finish takes the plain predictor.
 
-    ``add`` takes a term's rows or a callable giving them, and returns the
-    handle ``finish(without=...)`` drops: the rows as added, or the
-    compensated sum's addend, whose callable recomputes the rows if a row's
-    fallback needs them, so the sum holds no term's rows.
+    ``add`` takes a term's rows or a callable giving them, and returns the handle
+    ``finish(without=...)`` drops.
     """
 
     __slots__ = ("compensated", "intercept", "intercept_lo", "total")
@@ -383,12 +376,9 @@ def _centred_term_contribution(
 ) -> NDArray[np.floating]:
     """``(B - 1 c') beta`` for a term whose fitted columns carry a centre.
 
-    A raw numeric column is differenced before its product
-    (``_score_centred``), so a column at a large offset contributes rows of
-    its spread rounded at ``|x - c| |beta|``, as the fit's
-    ``mode_score.centred_matvec`` formed them.  Any other term (which the
-    published state never centres) is scored and its ``c' beta`` subtracted,
-    the same algebra.
+    A raw numeric column is differenced before its product (``_score_centred``), as
+    the fit's ``mode_score.centred_matvec`` formed it.  Any other term (which the
+    published state never centres) is scored and its ``c' beta`` subtracted.
     """
     beta = np.asarray(beta_all[term["beta_idx"]], dtype=np.float64)
     spec = term["spec"]
@@ -449,12 +439,10 @@ def _predict_eta(
 ) -> NDArray[np.floating]:
     """Predict the raw or stabilized linear predictor on canonical blocks.
 
-    ``fitted`` scores every term at the fit's own coefficients, the fit's
-    linear predictor on its training rows, for the library's evaluations of
-    the fit (screening's working score, random-effect reporting, the
-    discretization deltas); ``predict`` instead treats ``sz`` levels the data
-    identify only in part (#432, ``FactorSmooth._identified_blocks``), and
-    warns of them unless ``warn`` is false.
+    ``fitted`` scores every term at the fit's own coefficients (screening's working
+    score, random-effect reporting, discretization deltas); ``predict`` instead
+    treats ``sz`` levels the data identify only in part (#432,
+    ``FactorSmooth._identified_blocks``) and warns of them unless ``warn`` is false.
     """
     if random_effects not in ("conditional", "population"):
         raise ValueError(
@@ -1088,18 +1076,12 @@ def clone_without_features(
             max_iter=model._max_iter,
             convergence=model._convergence,
             retain_fit_state=model._retain_fit_state,
-            # A clone is the SAME model with fewer terms, so it must be fitted
-            # under the same likelihood. Falling through to the constructor
-            # default silently turned every frequency-contract model into a prior
-            # one the moment a term was dropped -- which is the path `drop1`,
-            # term importance and `refit_unpenalised` all take.
+            # A clone is the same model with fewer terms, so it must be fitted under the
+            # same likelihood (the `drop1`, term-importance and `refit_unpenalised` path).
             weight_semantics=model_weight_semantics(model),
-            # Its other model-level rules too: falling through, `separation="error"`
-            # became "warn" and `group_pricing="spanned"` became "rank" on every
-            # clone (and the editor's Refit and `Structure.apply`, which clone
-            # here), refitting a different pricing rule. A model pickled before
-            # `group_pricing` existed keeps "spanned", as `model_build_design_matrix`
-            # reads it.
+            # Its other model-level rules too (`separation`, `group_pricing`), including for
+            # the editor's Refit and `Structure.apply`.  A model pickled before
+            # `group_pricing` existed keeps "spanned", as `model_build_design_matrix` reads it.
             separation=getattr(model, "_separation", "warn"),
             group_pricing=getattr(model, "_group_pricing", "spanned"),
         )
@@ -1301,11 +1283,10 @@ def compute_lambda_max(model, y, weights):
     eta_null = model._link.link(mu_null)
     score = working_score(y, mu_null, eta_null, weights, model._distribution, model._link)
     grad = model._dm.rmatvec(score)
-    # A dense column's score is read about its prior-weighted centre, by type,
-    # as the proximal solver reads it about its pair (issue #430; the null W is
-    # the prior times a constant, so the two centres agree).  sum(score) is zero
-    # only to rounding, and raw, a column at 1e12 multiplied that rounding by
-    # its offset (lambda_max read 267.0078125 for 267).
+    # A dense column's score is read about its prior-weighted centre, by type, as the
+    # proximal solver reads it about its pair (the null W is the prior times a
+    # constant).  sum(score) is zero only to rounding, which a raw column at a large
+    # offset would multiply.
     dense = dense_columns(model._dm)
     if np.any(dense):
         prior = np.ones(model._dm.n) if weights is None else np.asarray(weights, dtype=float)
@@ -1337,13 +1318,11 @@ def compute_lambda_max(model, y, weights):
 def _sparse_group_zero_lambda(grad_g: NDArray, weight: float, alpha: float) -> float:
     """Smallest lambda that zeroes one group under the sparse-group KKT rule.
 
-    The composite zero condition is ``||soft(grad_g, lambda*alpha)||_2 <=
-    lambda*(1-alpha)*weight`` (``pirls.py`` prox: L1 soft-threshold first,
-    then the radial group threshold) — not the elastic-net division.  At
-    alpha=0 this reduces to the pure group-lasso ``||grad_g||/weight``; at
-    alpha=1 to the pure-L1 ``max|grad_g|``.  In between the left side is
-    nonincreasing and the right side increasing in lambda, so the boundary
-    is the unique root, found by bisection to float accuracy.
+    The zero condition is ``||soft(grad_g, lambda*alpha)||_2 <= lambda*(1-alpha)*weight``
+    (``pirls.py`` prox: L1 soft-threshold, then the radial group threshold).  At
+    alpha=0 it is the pure group-lasso ``||grad_g||/weight``, at alpha=1 the pure-L1
+    ``max|grad_g|``; in between the left side is nonincreasing and the right side
+    increasing in lambda, so the unique root is found by bisection.
     """
     magnitudes = np.abs(np.asarray(grad_g, dtype=np.float64))
     if magnitudes.size == 0:

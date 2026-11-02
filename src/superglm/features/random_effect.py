@@ -19,33 +19,29 @@ MISSING_POLICIES = ("error",)
 class RandomEffect:
     """All-level categorical effect with a REML-estimated variance component.
 
-    ``levels=`` binds the level universe (spec 2026-08-11, §3.1) from an
-    explicit sequence, a data column, or a categorical dtype.  A declared level
-    with no training rows is not pinned the way an unpenalized dummy is: it
-    keeps its own coefficient and shrinks to the population value through the
-    variance component, exactly as a thinly observed level does.
+    ``levels=`` binds the level universe from an explicit sequence, a data column,
+    or a categorical dtype.  A declared level with no training rows is not pinned
+    the way an unpenalized dummy is: it keeps its own coefficient and shrinks to the
+    population value through the variance component, as a thinly observed level does.
 
-    ``nested_in=`` names another ``RandomEffect`` feature of the same model
-    that this one is nested in: every level of this effect belongs to exactly
-    one of its levels (a region within a country, a vehicle model within a
-    make).  Nesting is also detected from the level codes without it; the
-    declaration is checked on the training rows, and a row that breaks it is
-    an error naming the row and both of the parent's levels.  When this effect
-    is the structured solver's leaf (the random effect with the most levels,
-    with no ``FactorSmooth`` in the model), the declared parent is always in
+    ``nested_in=`` names another ``RandomEffect`` feature of the same model that
+    this one is nested in: every level of this effect belongs to exactly one of its
+    levels (a region within a country).  Nesting is also detected from the level
+    codes without it; the declaration is checked on the training rows, and a row
+    that breaks it is an error naming the row and both of the parent's levels.  When
+    this effect is the structured solver's leaf (the random effect with the most
+    levels, with no ``FactorSmooth`` in the model), the declared parent is always in
     its elimination chain; otherwise the declaration is only validated.
 
     Notes
     -----
     When a REML-estimated ``RandomEffect`` is fitted beside an unpenalised
-    ``Categorical`` whose levels include some with exposure but no positive
-    response (under a log link with a zero-mass family such as Tweedie or
-    Poisson), those levels separate -- their coefficients have no finite MLE
-    -- and the marginal likelihood becomes nearly flat in this term's
-    variance.  The fitted variance component is then poorly determined, and
-    for the estimated-scale Tweedie criterion it is additionally biased
-    upward relative to exact-likelihood REML.  ``fit_reml`` warns on that
-    configuration; treat the published ``tau_squared`` with care there.
+    ``Categorical`` whose levels include some with exposure but no positive response
+    (under a log link with a zero-mass family such as Tweedie or Poisson), those
+    levels separate and the marginal likelihood becomes nearly flat in this term's
+    variance.  The fitted variance component is then poorly determined, and for the
+    estimated-scale Tweedie criterion it is also biased upward.  ``fit_reml`` warns
+    on that configuration; treat the published ``tau_squared`` with care there.
     """
 
     requires_reml = True
@@ -206,11 +202,10 @@ class RandomEffect:
         }
 
 
-# Near-nesting disclosure (one-engine design §3.13): an undeclared pair of
-# random effects is named when all but a few rows nest.  "A few" is at most
-# this share of the rows (and at least one row); a crossed pair breaks nesting
-# on most of its rows, so the warning is not a routing input and its bound is
-# a disclosure choice, not a numerical one.
+# Near-nesting disclosure: an undeclared pair of random effects is named when all
+# but a few rows nest, "a few" being at most this share of the rows (at least
+# one).  A crossed pair breaks nesting on most rows; this is a disclosure choice,
+# not a routing input.
 _NEAR_NESTING_SHARE = 0.01
 _NEAR_NESTING_ROWS_SHOWN = 3
 

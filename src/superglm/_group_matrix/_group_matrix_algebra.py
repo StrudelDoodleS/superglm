@@ -63,12 +63,9 @@ _MAX_DISC_DISC_CHANNEL_HIST_CELLS = 5_000_000
 # this bounds the ROWS the fallback expands, which the cell cap cannot.
 _MAX_CROSS_EXPANSION_BYTES = 64 << 20
 
-# Ceiling on a CROSS-SHAPED aggregate: an array whose row count comes from one
-# block and whose column count comes from the other.  Every gate in this
-# subsystem bounds one block against its OWN width -- the support gate bounds
-# n_support * p_b, the histogram caps bound n_bins_i * n_bins_j -- and none of
-# them bounds a row count from one block against a width from the other.  That
-# product is what the aggregate allocates, so it needs its own ceiling.
+# Ceiling on a CROSS-SHAPED aggregate: row count from one block, column count
+# from the other.  Every other gate bounds a block against its own width, so this
+# product needs its own ceiling.
 _MAX_AGGREGATE_CELLS = _MAX_CROSS_EXPANSION_BYTES // 8
 # A tensor-by-level block forms its channels' histograms in one pass
 # (``_level_tensor_channels``); False keeps one histogram per channel, the
@@ -122,13 +119,11 @@ def _cross_operand_bounds(operand: NDArray) -> tuple[int, int]:
 def _cross_factors_in_range(*operands: NDArray, cache=None, support_factors=()) -> bool:
     """Bound every partial cross product and reduction, not just its result.
 
-    Sum negative/positive exponent bounds separately to bound every partial
-    product, not just the final product. The product of operand dimensions
-    overbounds reduction lengths in either association. Non-cancelling terms
-    then stay normal; cancellation still follows ordinary rounded arithmetic.
-
-    Look up weight_range optionally: centered assembly uses a weight-grid-only
-    cache without that method.
+    Negative and positive exponent bounds are summed separately so each partial
+    product stays normal; the product of operand dimensions overbounds reduction
+    lengths in either association.  Cancellation still follows ordinary rounded
+    arithmetic.  ``weight_range`` is looked up optionally: centered assembly uses a
+    weight-grid-only cache without it.
     """
     weight_range = getattr(cache, "weight_range", None)
     support_range = getattr(cache, "support_range", None)
@@ -224,15 +219,11 @@ class _ChannelBatch:
 class _SharedEntries:
     """Form each shared entry of one pooled assembly once, whichever worker asks first.
 
-    The block queue (``_block_queue``) runs a Gram's blocks on worker threads
-    whose caches share one set of entries (``_BlockWeightCache.worker_view``).
-    Every entry is a function of the assembly's weights and fixed factors
-    alone, so the worker that forms it forms the value a serial assembly
-    would.  This registry also forms each entry exactly once, as the serial
-    assembly does: the first worker to ask registers the key and forms the
-    value outside the lock, and later askers wait for it.  No computation
-    asks the cache for another entry, so no worker waits on itself, and a
-    failed computation wakes its waiters, the next of which forms it again.
+    Block-queue workers share one set of entries (``_BlockWeightCache.worker_view``);
+    each entry depends only on the assembly's weights and fixed factors.  The first
+    asker registers the key and forms the value outside the lock; later askers wait,
+    and a failed computation wakes its waiters, the next of which retries.  No
+    entry's computation asks for another, so no worker waits on itself.
     Owner: one pooled assembly; lifetime: that assembly.
     """
 
@@ -748,14 +739,10 @@ def _runtime_group_matrix_types():
 def _agg_by_bin_fits(gm: GroupMatrix, n_bins: int, *, extra_width: int = 0) -> bool:
     """Whether ``_agg_by_bin``'s output is small enough to materialise.
 
-    Its result is ``(n_bins, gm.shape[1])`` -- the row count from the block
-    supplying the bins, the width from the block being aggregated.  Those are
-    DIFFERENT blocks at every caller, so this is the cross shape, and no gate in
-    the subsystem bounds the product.  An earlier version of the invariant test
-    exempted these calls on the stated ground that both dimensions came from the
-    same block; that was simply wrong, and a narrow million-row support beside a
-    wide sparse term is the counterexample. ``extra_width`` also charges any
-    same-bin mapped output that must coexist with the raw aggregate.
+    Its result is ``(n_bins, gm.shape[1])``, with rows from the block supplying the
+    bins and width from the block aggregated: the cross shape, bounded by no
+    support gate.  ``extra_width`` charges any same-bin mapped output that must
+    coexist with the raw aggregate.
     """
     return int(n_bins) * (_agg_by_bin_width(gm) + extra_width) <= _MAX_AGGREGATE_CELLS
 
@@ -846,15 +833,11 @@ def _agg_by_bin(
         return B_agg @ gm.R_inv
     if isinstance(gm, DiscretizedSplineCategoricalGroupMatrix):
         rows = gm.row_idx
-        # Chunked, and it is the only branch here that needed saying so: the
-        # SCOP, SSP and factor-smooth branches all decline into
-        # ``_aggregate_group_matrix_columns``, which is column-at-a-time and
-        # bounded, while this one expanded the level per observation row.
-        # Reached when ``_cross_gram_discrete_spline_categorical`` declines at
-        # its cell cap and dispatch falls through to the disc-x-non-disc branch,
-        # which is newly reachable because a lossless support makes ``n_bins``
-        # large on both sides.  ``B_unique @ R_inv`` is ``(n_support, p_g)``,
-        # bounded by the support gate; the gather off it was not.
+        # Chunked: the other branches decline into ``_aggregate_group_matrix_columns``
+        # (column-at-a-time, bounded), whereas this one expands the level per row.
+        # Reached when ``_cross_gram_discrete_spline_categorical`` declines at its cell
+        # cap.  ``B_unique @ R_inv`` is bounded by the support gate; the gather off it is
+        # not.
         return _chunked_support_bincount_2d(
             bin_idx[rows], W[rows], gm.B_unique @ gm.R_inv, gm.bin_idx_level, n_bins
         )
@@ -1092,20 +1075,12 @@ def _tensor_channel_workspace_bytes(
 ) -> int:
     """Bound one block's per-operation workspace: its histogram and stage buffers.
 
-    This is not a whole-model/RSS limit.  The grid's cell order
-    (``grid.cell_csr()``, with the counting-sort fill that builds it) is
-    cached on the group matrix and outlives the fit, about ``8 n`` bytes and
-    the cell pointers a grid tensor, as the groups' own row indexes do; the
-    weights permuted into that order are the build's (its cache keeps one
-    ``n``-vector a grid tensor until the build ends).  Neither is charged,
-    nor bounded by this cap: charging them as well put the crossover at
-    about 444k rows, above which every 256 x 256 block fell from the raw
-    band to the dense stage.  The O(n) stage-one gathers
-    (``_gather_cell_order``, ``16 n`` bytes), and the permuted weights of a
-    call without a cache, are this operation's buffers and stay charged,
-    with the histogram, any scratch this assembly retains and the stage-two
-    contraction.  Admission therefore still depends on ``n``: the same
-    blocks now fall to the dense stage near 890k rows.
+    Not a whole-model RSS limit.  The grid's cell order (``grid.cell_csr()``) and
+    the build cache's permuted weights are fit-owned and outlive the call, so they
+    are not charged.  The O(n) stage-one gathers (``_gather_cell_order``, ``16 n``
+    bytes), the permuted weights of a call without a cache, the histogram, any
+    retained scratch and the stage-two contraction are charged, so admission still
+    depends on ``n``.
     """
     n, cells = len(grid.idx1), grid.n_bins1 * grid.n_bins2
     index_bytes = np.dtype(np.intp).itemsize
@@ -1136,16 +1111,13 @@ def _tensor_channel_histogram(
     cache: _BlockWeightCache | None,
     profile: dict[str, Any] | None,
 ) -> tuple[NDArray, NDArray] | None:
-    """Stage 1 of the channel route: ``H`` over the cells of ``grid``, and the
-    map carrying its channels onto ``chan``'s solver columns.
+    """Stage 1 of the channel route: ``H`` over the cells of ``grid``, and the map
+    carrying its channels onto ``chan``'s solver columns.
 
-    Raw bands accumulate in cell order and project after contraction. The
-    dense stage gathers stored joint rows. Both must fit the per-operation
-    byte budget, including retained scratch and subsequent contraction
-    workspace, but not the fit-owned cell order and cached permuted weights
-    (``_tensor_channel_workspace_bytes``). Clear derived build-cache buffers
-    under memory pressure; decline to the existing row route only if neither
-    stage fits on its own.
+    Raw bands accumulate in cell order and project after contraction; the dense
+    stage gathers stored joint rows.  Both must fit the per-operation byte budget
+    (``_tensor_channel_workspace_bytes``).  Clears derived build-cache buffers
+    under memory pressure and declines to the row route only if neither stage fits.
     """
     n1, n2 = grid.n_bins1, grid.n_bins2
     band = chan.raw_channels
@@ -1233,14 +1205,11 @@ def _cell_ranges(ptr: NDArray, parts: int) -> list[tuple[int, int]]:
 def _cell_hist_raw_kron_parts(cache, parts, ptr, order, chan, w, band, H) -> None:
     """``_cell_hist_raw_kron`` over runs of cells, each run one part of the block.
 
-    The rows of cell ``c`` are ``order[ptr[c]:ptr[c + 1]]`` and the kernel
-    sums them into ``H[c]`` alone, from zero and in that order, so a run of
-    cells ``[lo, hi)`` reads only rows ``ptr[lo]:ptr[hi]`` and writes only
-    ``H[lo:hi]``.  Each part gathers its own rows and fills its own buffer,
-    which the calling worker copies into ``H``: the same additions in the
-    same order as one whole pass, so ``H`` is bitwise the unsplit one.  The
-    parts' buffers together hold one more ``H``, which the block queue
-    charges to the block's working set (``_block_queue.block_bytes``).
+    The rows of cell ``c`` are ``order[ptr[c]:ptr[c + 1]]`` and the kernel sums them
+    into ``H[c]`` alone, from zero and in that order, so a run of cells reads and
+    writes only its own slice.  Each part fills its own buffer, which the calling
+    worker copies into ``H``: bitwise the unsplit ``H``.  The parts' buffers hold one
+    more ``H``, charged by ``_block_queue.block_bytes``.
     """
     ranges = _cell_ranges(ptr, parts)
     width = H.shape[1]
@@ -1277,32 +1246,23 @@ def _cross_gram_tensor_tensor_channels(
 ) -> NDArray | None:
     """Cross-Gram of two tensor terms with distinct ids, staged on one term's grid.
 
-    ``X_i.T @ diag(W) @ X_j`` where row ``r`` of tensor ``i`` is the Kronecker
-    row ``B1_i[idx1_r] (x) B2_i[idx2_r]`` (column order ``a * K2 + b``, as
-    ``_row_kron_dense`` stores it) and row ``r`` of tensor ``j`` is its stored
-    joint row ``B_joint_j[bin_idx_r]``.  The raw product factors through the
-    cell index of tensor ``i``::
+    ``X_i.T @ diag(W) @ X_j`` where row ``r`` of tensor ``i`` is the Kronecker row
+    ``B1_i[idx1_r] (x) B2_i[idx2_r]`` (column order ``a * K2 + b``) and row ``r`` of
+    ``j`` is its stored joint row ``B_joint_j[bin_idx_r]``.  The raw product factors
+    through the cell index of ``i``::
 
         H[i1 * n2 + i2, cd] = sum_{r in cell (i1, i2)} W_r * B_joint_j[bin_idx_r, cd]
         raw[a * K2 + b, cd] = sum_{i1, i2} B1_i[i1, a] * B2_i[i2, b] * H[i1 * n2 + i2, cd]
 
-    Accumulate channels over the grid, contract with its two margins, then
-    apply the coefficient maps. Choose the smaller stored-width histogram;
-    ties use the left grid, preserving the established summation orientation.
-
-    Both stages require float64 operands and a histogram below the aggregate
-    cell cap. The stored-margin range guard bounds five factors and three
-    reductions; the raw stage also checks its actual band and map factors.
-    Its byte admission includes retained scratch, the stage buffers and the
-    contraction peak, not just H. If neither stage fits, return None for the
-    bounded row fallback. Cell indexes and a build cache's permuted weights
-    are fit-owned and not charged to this per-operation workspace limit.
-
-    Stored joint rows, products of centered margins, and projected raw bands
-    are related by rounded matrix products. Reassociation changes both that
-    representation error and accumulation error; it does not promise bit
-    identity. Numerical tests check the dimension/epsilon absolute-product
-    bound against the stored-row oracle, separately from backend dispatch.
+    Channels accumulate over the grid, contract with the two margins, then take the
+    coefficient maps; the smaller stored-width histogram is chosen (ties use the
+    left grid).  Both stages require float64 and a histogram below the aggregate
+    cell cap, with the range guard covering five factors and three reductions and
+    byte admission covering retained scratch, stage buffers and the contraction
+    peak.  If neither stage fits, return None for the bounded row fallback.
+    Reassociation changes representation and accumulation error but not bit
+    identity; tests check the dimension/epsilon absolute-product bound against the
+    stored-row oracle.
     """
     if gm_i.tensor_id == gm_j.tensor_id:
         return None
@@ -1351,13 +1311,9 @@ def _cross_gram_tensor_main(
 ) -> NDArray:
     """Blocked cross-gram between a tensor and a main-effect discretized group.
 
-    Returns X_main.T @ diag(W) @ X_tensor in SSP space, shape (p_main, p_tensor).
-
-    Chooses the cheaper channel orientation. If the second tensor margin is
-    narrower, aggregate channels over B2 and contract with B1. If the first
-    margin is narrower, aggregate channels over B1 and contract with B2.
-
-    Column ordering: j1 * K2 + j2, matching _row_kron_dense().
+    Returns X_main.T @ diag(W) @ X_tensor in SSP space, shape (p_main, p_tensor);
+    column ordering j1 * K2 + j2 as in _row_kron_dense().  Aggregates channels over
+    the narrower tensor margin and contracts with the other.
     """
     B1 = gm_tensor.B1_unique_t
     B2 = gm_tensor.B2_unique_t
@@ -1447,14 +1403,10 @@ def _cross_gram_tensor_own_margin(
 ) -> NDArray | None:
     """Cross-Gram for tensor × one of its own discretized marginal smooths.
 
-    mgcv bam(discrete=TRUE) stores tensor marginals as compact matrices plus
-    row index arrays and forms X'WX from that packed representation via XWXd.
-    For tensor × own-margin main-effect cross-blocks, reuse the tensor 2D
-    W-grid instead of rescanning observations through the generic tensor-main
-    channel histogram.
-
-    Returns X_main.T @ diag(W) @ X_tensor in SSP space, or None if the main
-    group is not exactly one unambiguous tensor margin.
+    Reuses the tensor's 2D W-grid instead of rescanning observations through the
+    generic tensor-main channel histogram.  Returns X_main.T @ diag(W) @ X_tensor in
+    SSP space, or None if the main group is not exactly one unambiguous tensor
+    margin.
     """
     cache_key = (id(gm_main), id(gm_main.bin_idx), gm_main.n_bins)
     margin = gm_tensor._own_margin_cache.get(cache_key, -1)
@@ -1550,22 +1502,18 @@ def _cross_gram_tensor_spline_categorical(
                 result_raw[j2::K2, :] = B1.T @ H @ gm_spline_cat.B_unique
             return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
 
-        # Over the cell cap.  Chunk the row expansion rather than materialising
-        # the whole level: the cap bounds CELLS, and a lossless support leaves
-        # the row count unbounded underneath it.  The chunk loop is outermost so
-        # each row is still expanded exactly once across all K2 passes.
+        # Over the cell cap: chunk the row expansion, since a lossless support leaves
+        # the row count unbounded.  The chunk loop is outermost so each row is expanded
+        # once across all K2 passes.
         n_level = int(W_rows.shape[0])
         chunk = min(
             max(n_level, 1),
             _cross_expansion_chunk_rows(K_cat, 0, _MAX_CROSS_EXPANSION_BYTES),
         )
-        # Holding every channel at once lets each row be expanded exactly once,
-        # but the accumulator is (K2, n_bins1, K_cat) -- itself cross-shaped, and
-        # n_bins1 follows a per-feature n_bins that nothing caps.  So the fast
-        # nesting is used only while that buffer fits, and otherwise the loops
-        # invert: one channel at a time, one (n_bins1, K_cat) accumulator, at the
-        # cost of re-expanding the rows per channel.  Bounded memory bought with
-        # time, declared rather than assumed.
+        # Holding every channel at once expands each row once, but the accumulator
+        # (K2, n_bins1, K_cat) is cross-shaped and uncapped.  So that nesting is used
+        # only while the buffer fits; otherwise one channel at a time, re-expanding rows
+        # per channel (memory bought with time).
         if K2 * gm_tensor.n_bins1 * K_cat <= _MAX_AGGREGATE_CELLS:
             agg = np.zeros((K2, gm_tensor.n_bins1, K_cat), dtype=np.float64)
             for start in range(0, n_level, chunk):
@@ -1582,12 +1530,8 @@ def _cross_gram_tensor_spline_categorical(
                 result_raw[j2::K2, :] = B1.T @ agg[j2]
             return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
 
-        # One channel at a time is still not enough: a single (n_bins1, K_cat)
-        # channel is itself cross-shaped, and n_bins1 follows a configured
-        # n_bins.  So the basis dimension is tiled inside the channel as well,
-        # and only the columns of that tile are ever expanded.  What is left at
-        # the smallest tile is (n_bins1, 1), which is the least an aggregate
-        # over n_bins1 bins can occupy.
+        # A single (n_bins1, K_cat) channel is itself cross-shaped, so the basis
+        # dimension is tiled inside the channel as well, down to (n_bins1, 1).
         tile = _aggregate_column_chunk(gm_tensor.n_bins1, K_cat)
         for j2 in range(K2):
             for first in range(0, K_cat, tile):
@@ -1654,13 +1598,9 @@ def _chunked_support_bincount_2d(
 ) -> NDArray:
     """``_weighted_bincount_2d`` over support-indexed rows, expanded in chunks.
 
-    The aggregation is a sum over rows, so partitioning the rows partitions the
-    sum.  Chunking matters because a lossless support bounds the number of
-    DISTINCT rows, not the number of observation rows the level owns, so
-    materialising the level in one go is unbounded in ``n``.
-
-    Below the threshold the loop runs once and the result is bit-identical to
-    the unchunked form, so ordinary fits are unaffected.
+    A lossless support bounds the number of distinct rows, not the observation rows
+    the level owns, so expanding the level at once is unbounded in ``n``.  Below the
+    threshold the loop runs once and is bit-identical to the unchunked form.
     """
     # Resolved at call time, not bound as a default: the budget is a module
     # global so that it can be lowered in a test, and a default argument would
@@ -1689,15 +1629,10 @@ def _mixed_chunk_stop(
 ) -> int:
     """End of a mixed-pair row chunk, budgeting the SPARSE payload as well.
 
-    Sizing by the dense expansion alone budgets only ``rows * p_b * 8``.  The
-    weighted CSR slice beside it costs ``nnz-in-range * 12`` (float64 plus a
-    32-bit index), and ``nnz`` per row is a property of the OTHER block -- for a
-    cardinal-CR basis the rows are structurally dense.  A narrow compressed side
-    therefore permits a huge row count, and the sparse payload follows it: five
-    compressed columns admit ~1.68M rows, which against a 20-column dense CSR is
-    tens of millions of stored entries.  Boundaries come off ``indptr``, so the
-    bound is the range's ACTUAL nonzeros rather than an average that a skewed
-    row density would defeat.
+    Sizing by the dense expansion alone budgets only ``rows * p_b * 8``, but the
+    weighted CSR slice costs ``nnz-in-range * 12`` (float64 plus 32-bit index) and
+    ``nnz`` per row belongs to the other block.  Boundaries come off ``indptr`` so
+    the bound is the range's actual nonzeros.
     """
     stop_row = min(start_row + dense_rows, n_rows)
     limit = int(indptr[start_row]) + max_nnz
@@ -1726,25 +1661,16 @@ def _support_csr_raw_cross(
 ) -> NDArray:
     """``B_support.T @ diag(W) @ B_csr`` with NO observation-level temporary.
 
-    The mixed pairing -- one ``spline_cat`` block compressed, the other still
-    CSR -- is created by the compression gate itself, so it is a regression
-    rather than a pre-existing path: before, two exact blocks contracted sparse
-    against sparse.  Expanding the compressed side and densifying the weighted
-    CSR side made BOTH sides worse than they had been.
-
-    Aggregating the CSR side onto the support bins first avoids the choice.
-    The only dense array is ``(n_support, p_csr)``, bounded by the same support
-    gate that bounds ``B_unique``; the CSR side is never densified and the
-    observation rows are never materialised, so no chunking is needed.
+    The mixed pairing (one ``spline_cat`` block compressed, the other CSR) is
+    created by the compression gate itself.  Aggregating the CSR side onto the
+    support bins first avoids both expanding the compressed side and densifying
+    the CSR side; the only dense array is ``(n_support, p_csr)``, bounded by the
+    support gate.
     """
-    # Row-chunked, in ONE pass over the data.  Column chunking bounded the
-    # memory but made every pass re-walk all n row pointers -- measured at 88
-    # passes for n_support=1e6 against a 700-column term, and the CSC rewrite
-    # that removes the slicing cost still leaves that traversal, so it bought
-    # 1.10x rather than fixing it.  Contracting over row chunks instead touches
-    # each nonzero once, keeps the CSR side sparse throughout, and never forms
-    # the (n_support, p_csr) aggregate at all -- so the cross-shaped array this
-    # helper existed to bound is simply not built.
+    # Row-chunked in ONE pass: contracting over row chunks touches each nonzero
+    # once and keeps the CSR side sparse, so the cross-shaped (n_support, p_csr)
+    # aggregate is never formed.  Column chunking re-walked all n row pointers on
+    # every pass.
     csr = B_csr.tocsr()
     p_b = int(B_unique.shape[1])
     p_csr = int(csr.shape[1])
@@ -1779,31 +1705,22 @@ def _support_support_raw_cross(
 ) -> NDArray:
     """``B_i.T @ diag(W) @ B_j`` for two support-indexed blocks over shared rows.
 
-    The 2-D weight histogram both callers prefer costs ``n_bins_i * n_bins_j``
-    cells, which is bounded only when the supports are bins.  A lossless
-    support is bounded by the row count instead, so this adds one block's
-    weighted rows onto the other block's support index and contracts the two
-    compact arrays: Li and Wood's (2020) right or left accumulation
-    (Algorithms 2 and 3), on the side their operation count favours.  A row
-    subset, such as one level of a ``by=`` smooth, reaches only part of the
-    other block's support, so a target support larger than the rows is first
-    compacted to the rows it holds.  Then ``n_b <= n`` and the work
-    ``n * p_a + n_b * p_i * p_j`` is at most the ``n * p_i * p_j`` of expanding
-    both sides plus an ``n * p_a`` scatter, which replaces their gathers.
+    The 2-D weight histogram costs ``n_bins_i * n_bins_j`` cells, bounded only when
+    the supports are bins.  A lossless support is bounded by the row count, so this
+    adds one block's weighted rows onto the other's support index and contracts the
+    compact arrays: Li and Wood (2020) Algorithms 2 and 3, on the side their
+    operation count favours.  A row subset (one level of a ``by=`` smooth) reaches
+    only part of the other support, so a larger target support is first compacted
+    to the rows it holds.  The work ``n * p_a + n_b * p_i * p_j`` is at most that of
+    expanding both sides plus an ``n * p_a`` scatter.
 
-    The aggregate is accumulated in place by one kernel that reads the support
-    rows directly, at most ``max_bytes`` of it (default 64 MiB, and never less
-    than one column) at a time, so neither gathered rows nor per-chunk results
-    exist and the peak does not grow with ``n``.
-
-    Aggregating reassociates ``B_i[r] * W[r] * B_j[r]``.  When every operand
-    lies in the exponent interval of ``_tensor_operand_in_reassociation_range``,
-    each nonzero product of two or three of them is a normal float64 and every
-    sum of them is finite, so each entry is within ``gamma(n + n_b)`` of the
-    exact product relative to ``sum_r |B_i| |W| |B_j|`` (Higham 2002, eq. 3.5).
-    Otherwise, as for any non-float64 operand, the expansion of both sides
-    with the right side weighted is kept unchanged
-    (:func:`_support_support_raw_cross_expanded`), so the reassociation cannot
+    One kernel accumulates the aggregate in place, at most ``max_bytes`` (default
+    64 MiB, never less than one column) at a time, so the peak does not grow with
+    ``n``.  Aggregating reassociates ``B_i[r] * W[r] * B_j[r]``; when every operand
+    lies in the exponent interval of ``_tensor_operand_in_reassociation_range``
+    each entry is within ``gamma(n + n_b)`` of the exact product relative to
+    ``sum_r |B_i| |W| |B_j|`` (Higham 2002, eq. 3.5).  Otherwise the expansion
+    (:func:`_support_support_raw_cross_expanded`) is kept, so reassociation cannot
     turn a representable product into zero or infinity.
     """
     n_rows = int(W_rows.shape[0])
@@ -1910,24 +1827,18 @@ def _cross_gram_categorical_spline_categorical(
         rows = spline.row_idx
         codes = factor.codes[rows]
         if codes.size and codes.min() == codes.max() and codes[0] < factor.n_levels:
-            # The spline's own factor: every row is one level.  Its weight
-            # summed per support bin, as the spline's own Gram and X'W sum it
-            # (``gram_rmatvec``, the same rows in the same order), then times
-            # the support.  Summing each row's ``W_r B_k`` instead rounded
-            # apart from that weight sum by ``5.5e4 u`` over 103,957 rows on
-            # freMTPL2, where a level sitting in one bin makes its dummy an
-            # exact alias of its smooth: the alias came out at ``-1.8e-12``
-            # against the eigensolver's bar of ``2.4e-13``, and ``5e-16`` from
-            # the one weight sum.
+            # The spline's own factor: every row is one level.  Its weight is summed per
+            # support bin, as the spline's own Gram and X'W sum it (``gram_rmatvec``), then
+            # times the support.  Summing each row's ``W_r B_k`` rounds apart from that
+            # weight sum and can leave an exact alias between a dummy and its smooth above
+            # the eigensolver's bar.
             binned = np.bincount(spline.bin_idx_level, weights=W[rows], minlength=spline.n_bins)
             B_agg = np.zeros((factor.n_levels, spline.B_unique.shape[1]))
             B_agg[int(codes[0])] = binned @ spline.B_unique
             return B_agg @ spline.R_inv
-        # Chunked: this expands the level to observation rows, which no cap
-        # above it bounds.  Pre-dates support compression -- the binned path
-        # reaches it too -- but compression puts it on the hot path of every
-        # model pairing a Categorical main effect with a spline_cat term,
-        # which is every model this compression targets.
+        # Chunked: this expands the level to observation rows, which no cap above it
+        # bounds, and support compression puts it on the hot path of every model pairing
+        # a Categorical main effect with a spline_cat term.
         B_agg = _chunked_support_bincount_2d(
             codes,
             W[rows],
@@ -2079,15 +1990,12 @@ def _support_support_cross_gram(
     gm_spline_cat: DiscretizedSplineCategoricalGroupMatrix,
     W: NDArray,
 ) -> NDArray:
-    """The same product as :func:`_cross_gram_discrete_spline_categorical`,
-    for the case that one declines.
+    """The same product as :func:`_cross_gram_discrete_spline_categorical`, for the
+    case that one declines.
 
-    Two lossless supports can make the joint histogram exceed the cell cap.
-    Falling through from there used to reach ``_agg_by_bin``, whose output is
-    ``(gm_disc.n_bins, p_spline_cat)`` -- cross-shaped, with the row count from
-    one block and the width from the other, so neither support gate bounds it.
-    Contracting over the shared rows instead reuses the row-chunked path, whose
-    transient is the byte budget regardless of either support size.
+    Two lossless supports can make the joint histogram exceed the cell cap, and
+    ``_agg_by_bin`` would then be cross-shaped.  Contracting over the shared rows
+    reuses the row-chunked path, whose transient is the byte budget.
     """
     rows = gm_spline_cat.row_idx
     raw = _support_support_raw_cross(
@@ -2134,10 +2042,10 @@ def _cross_gram_factor_smooth_dense(
     basis = cast(NDArray, basis)
     if not factor.is_discrete:
         basis = basis[:, None]
-    # The native scan computes (W*basis)*dense, while the legacy transpose
-    # product computes basis*(W*dense). Four factors and two reductions fit
-    # comfortably in float64's exponent range under this existing guard.
-    # Recheck mutable operands each time, including the raw natural map.
+    # The native scan computes (W*basis)*dense, the legacy transpose product
+    # basis*(W*dense); four factors and two reductions fit float64's exponent range
+    # under this guard.  Recheck mutable operands each time, including the raw
+    # natural map.
     if not all(
         _tensor_operand_in_reassociation_range(_scan_form(value))
         for value in (W[:, None], dense.M, basis, factor.natural_map)
@@ -2239,10 +2147,9 @@ def _cross_gram_sparse_ssp(
         return None
     k_i, k_j = B_i.shape[1], B_j.shape[1]
     p_i, p_j = gm_i.shape[1], gm_j.shape[1]
-    # For the fully stored routes' SciPy/NumPy products, conservatively allow
-    # two weighted payloads and an index copy, four row-pointer/work arrays,
-    # three raw value/index buffers including dense conversion, and both
-    # mapped outputs. No n-by-solver-width array exists.
+    # For the fully stored routes' SciPy/NumPy products, allow two weighted
+    # payloads and an index copy, four row-pointer/work arrays, three raw buffers
+    # including dense conversion, and both mapped outputs.
     transient_bytes = (
         24 * max(B_i.data.size, B_j.data.size)
         + 32 * (n + 1)
@@ -2256,10 +2163,9 @@ def _cross_gram_sparse_ssp(
         for value in (W[:, None], B_i.data[:, None], B_j.data[:, None], R_i, R_j)
     ):
         return None
-    # Every SSP operation reads the same live B buffers.
-    # Fresh views also avoid cached canonical flags after index mutations.
-    # The sparse-object constructor preserves even int64 buffers; the tuple
-    # constructor may downcast and retain observation-sized index copies.
+    # Every SSP operation reads the same live B buffers; fresh views avoid cached
+    # canonical flags after index mutations.  The sparse-object constructor keeps
+    # int64 buffers, whereas the tuple constructor may downcast and copy.
     left = sp.csr_matrix(B_i, copy=False)
     right = sp.csr_matrix(B_j, copy=False)
     if not left.has_canonical_format or not right.has_canonical_format:
@@ -2294,11 +2200,9 @@ def _cross_gram_sparse_ssp(
         weighted = _weighted_row_chunk(right, W, 0, n)
         raw = np.asarray(weighted.T @ dense_i).T
     else:
-        # One serial pass replaces the weighted copy, transposes and SpGEMM
-        # passes, with their per-entry row order. Nothing it allocates grows
-        # with n: the budget is its p-by-q result, times the channels of a
-        # batched pass, and a pass that does not fit leaves this channel on
-        # the single-weight kernel.
+        # One serial pass replaces the weighted copy, transposes and SpGEMM passes.
+        # Its allocation is the p-by-q result times the channels of a batched pass; a
+        # pass that does not fit leaves this channel on the single-weight kernel.
         weight_left = left.nnz <= right.nnz
         first, second = (left, right) if weight_left else (right, left)
         a, b = (
@@ -2312,10 +2216,8 @@ def _cross_gram_sparse_ssp(
         def single() -> NDArray:
             return _csr_weighted_cross(a[0], a[1], a[2], b[0], b[1], b[2], W, p, q)
 
-        # A batched pass already holds at most _CHANNEL_PASS_BYTES (1 MiB), so
-        # with the shipped constants this guard only fires if that pass cap is
-        # ever raised above _MAX_CROSS_EXPANSION_BYTES (64 MiB); tests reach it
-        # by lowering the budget instead.
+        # A batched pass holds at most _CHANNEL_PASS_BYTES (1 MiB), so this guard fires
+        # only if that cap is raised above _MAX_CROSS_EXPANSION_BYTES (64 MiB).
         if 8 * p * q * cache.channel_width(W, p * q) > _MAX_CROSS_EXPANSION_BYTES:
             raw = single()
         else:
@@ -2440,10 +2342,9 @@ def _cross_gram(
         if result is not None:
             _profile_elapsed(profile, "block_cross_tensor_tensor_s", t0)
             return result
-        # Distinct margins, or a shared margin above the compact helper's cap
-        # (every pair at the default 256 bins): stage the block through the
-        # channel histogram. A decline is counted so that a fit which backs
-        # off to the quadratic row route below says so in its profile.
+        # Distinct margins, or a shared margin above the compact helper's cap: stage
+        # through the channel histogram.  A decline is counted so the profile shows the
+        # fit backed off to the quadratic row route.
         t0 = perf_counter() if profile is not None else 0.0
         result = _cross_gram_tensor_tensor_channels(gm_i, gm_j, W, cache, profile)
         if result is not None:
@@ -2486,11 +2387,8 @@ def _cross_gram(
         t0 = perf_counter() if profile is not None else 0.0
         result = _cross_gram_discrete_spline_categorical(gm_i, gm_j, W)
         if result is None:
-            # Declined at the cell cap.  Falling through would reach the
-            # disc-x-non-disc branch and _agg_by_bin, whose output is
-            # cross-shaped (gm_i.n_bins, p_j) and bounded by neither support
-            # gate.  Contract over rows instead: already chunked, already
-            # bounded, and it is the same product.
+            # Declined at the cell cap.  Contract over rows rather than reach
+            # ``_agg_by_bin``, whose (gm_i.n_bins, p_j) output no support gate bounds.
             result = _support_support_cross_gram(gm_i, gm_j, W)
         _profile_elapsed(profile, "block_cross_disc_other_s", t0)
         return result
@@ -2580,12 +2478,10 @@ def _cross_gram(
         n_i, p_i = B_i.shape
         n_j, p_j = B_j.shape
         n_joint = n_i * n_j
-        # Histogram contraction is efficient BLAS on the bin grid; row panels
-        # also pay NumPy setup, indexed gathering, and weighting costs. Generic
-        # support-grid probes put those overheads at about 128k fixed and 512
-        # per-row multiply-add equivalents. Require a 25% estimated advantage
-        # to change routes; retain histogram reuse near the crossover. Maps are
-        # common to both routes, and the cell ceiling remains a hard limit.
+        # Histogram contraction is BLAS on the bin grid; row panels also pay NumPy
+        # setup, gathering and weighting (about 128k fixed and 512 per-row multiply-add
+        # equivalents).  Require a 25% estimated advantage to change routes.  The cell
+        # ceiling remains a hard limit.
         hist_work = n_joint * (1 + p_i) + n_j * p_i * p_j
         row_work = 128_000 + len(W) * (512 + p_i + p_j + p_i * p_j)
         # The row helper weights a panel in place with a float64 byte budget.

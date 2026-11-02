@@ -24,9 +24,9 @@ from superglm._tweedie_series import _LOG_CUTOFF, log_peak_index, series_moments
 
 _LOG_TWO_PI = math.log(2.0 * math.pi)
 # The series' float64 error in l_sat stays below _SERIES_ERROR eps (a + 1) j log j
-# against the 50-digit oracle (benchmarks/tweedie_series_oracle.py) over
-# p in [1.001, 1.99] and peak indices j from 1e2 to 1e6: log W ~ (a + 1) j
-# cancels against the canonical term, both built from terms of that size.
+# against a 50-digit oracle (benchmarks/tweedie_series_oracle.py) over p in
+# [1.001, 1.99] and peak indices j from 1e2 to 1e6: log W ~ (a + 1) j cancels
+# against the canonical term.
 _SERIES_ERROR = 2.5
 # The corrected saddlepoint's remainder is B3 e^3, e = 1/((2 - p) j): |B3| = 1/360
 # at p -> 1 and p -> 2 (Stirling's series), smaller between on the same oracle,
@@ -35,10 +35,10 @@ _SADDLE_REMAINDER = 1.0 / 360.0
 _NEWTON_MAX_STEPS = 60
 _NEWTON_MAX_STEP = 2.0
 _NEWTON_STEP_TOL = 1e-8
-# Row passes one lattice comparison may make, about five seconds of series work.
-# Its grid grows like 1 / (p - 1); past this bound the power is refused, not
-# searched. A pass costs about 35 us plus 0.1 us per row (measured from 6 to
-# 30,000 rows at p from 1.00001 to 1.5), so each is charged 500 rows more.
+# Row passes one lattice comparison may make (about five seconds of series
+# work).  Its grid grows like 1 / (p - 1); past this bound the power is refused,
+# not searched.  A pass costs about 35 us plus 0.1 us per row, so each is charged
+# 500 rows more.
 _SCAN_WORK_LIMIT = float(1 << 26)
 _PASS_OVERHEAD_ROWS = 500
 _POISSON_LAM_MAX = float(np.iinfo(np.int64).max) - 10.0 * np.sqrt(float(np.iinfo(np.int64).max))
@@ -54,10 +54,9 @@ class TweedieRows:
     log_y: NDArray
     saturated_canonical: NDArray
     count: NDArray | None
-    # solve_log_phi results by (D, M). A REML optimizer re-profiles its accepted
-    # line-search point with identical (Dp, Mp) at the next iteration's start; the
-    # solve is a pure function of these immutable rows and the two floats, so it
-    # lives as long as the rows do.
+    # solve_log_phi results by (D, M).  A REML optimizer re-profiles its accepted
+    # point with identical (Dp, Mp) at the next iteration; the solve is a pure
+    # function of these immutable rows and the two floats.
     phi_solves: dict[tuple[float, float], PhiSolve] = field(
         default_factory=dict, repr=False, compare=False
     )
@@ -282,21 +281,17 @@ class PhiSolve:
 def solve_log_phi(rows: TweedieRows, deviance: float, nullity: float = 0.0) -> PhiSolve:
     """Minimise Q(u) = D e^-u / 2 - l_sat(e^u) - (M / 2)(log 2 pi + u) over u = log phi.
 
-    M = 0 gives the maximum-likelihood dispersion at a fitted mean; D = Dp and
-    M = Mp give Wood (2011) Eq. 4's REML scale term. Newton on the analytic
-    score Q'(u) = -D e^-u / 2 + T(u) - M / 2, one series pass per step,
-    safeguarded by bisection inside the sign-change bracket (Press et al.,
-    rtsafe). Q is not convex near p = 1, where the density approaches the
-    Poisson lattice (Dunn & Smyth 2005, Sec. 8), so where a group of rows
-    sharing a peak index can bend Q the Newton root is compared with every other
-    local minimum (`_lattice_scan`). Its model: rows share a phase only within an
-    exact group (near-harmonic groups, such as integer responses, are seen where
-    any is banded), the bending is measured against the curvature at the Newton
-    root, and Q' is monotone between banded stretches. A comparison whose grid
-    would take more than _SCAN_WORK_LIMIT row passes raises
+    M = 0 gives the maximum-likelihood dispersion at a fitted mean; D = Dp and M =
+    Mp give Wood (2011) Eq. 4's REML scale term.  Newton on the analytic score Q'(u)
+    = -D e^-u / 2 + T(u) - M / 2, one series pass per step, safeguarded by bisection
+    inside the sign-change bracket (Press et al., rtsafe).  Q is not convex near p =
+    1, where the density approaches the Poisson lattice (Dunn & Smyth 2005, Sec. 8),
+    so where a group of rows sharing a peak index can bend Q the Newton root is
+    compared with every other local minimum (`_lattice_scan`).  A comparison whose
+    grid would take more than _SCAN_WORK_LIMIT row passes raises
     NearPoissonDispersionError, which a power search scores infeasible and a
-    fixed-power fit raises; polishing its brackets adds a bracketed Newton each.
-    The bound is per solve: a REML fit solves again at every new (Dp, Mp).
+    fixed-power fit raises.  The bound is per solve: a REML fit solves again at
+    every new (Dp, Mp).
     """
     key = (deviance, nullity)
     if key not in rows.phi_solves:
@@ -508,12 +503,11 @@ def _newton_log_phi(
         walk = -_NEWTON_MAX_STEP if score > 0.0 else _NEWTON_MAX_STEP
         step = -score / curvature if curvature > 0.0 else walk
         proposal = u + max(-_NEWTON_MAX_STEP, min(step, _NEWTON_MAX_STEP))
-        # rtsafe tests the move actually taken, Newton or bisection: at large
-        # modes the score's round-off keeps Newton steps above the tolerance
-        # after the sign-change bracket has already collapsed. A proposal on a
-        # bracket end bisects instead: near p = 1, a clipped Newton step and the
-        # walk from a point of negative curvature can land on each other's
-        # iterate and cycle. A zero score leaves u, its own bracket end, as the root.
+        # rtsafe tests the move actually taken, Newton or bisection: at large modes the
+        # score's round-off keeps Newton steps above tolerance after the bracket has
+        # collapsed.  A proposal on a bracket end bisects instead, since near p = 1 a
+        # clipped Newton step can cycle.  A zero score leaves u, its own bracket end, as
+        # the root.
         inside = lower < proposal < upper or proposal == u
         move = (proposal if inside else 0.5 * (lower + upper)) - u
         if curvature > 0.0 and abs(move) <= _NEWTON_STEP_TOL:
@@ -661,20 +655,14 @@ def tweedie_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArray:
         np.asarray(mu, dtype=np.float64),
     )
     zero_mask = y_array == 0.0
-    # Split on integer positions, not on the boolean mask. Every gather and
-    # every scatter below then indexes directly instead of re-walking the mask,
-    # and the two `np.any` scans collapse into the one `flatnonzero` that has
-    # to run anyway. Measured 2.5-2.7x on the whole call at n = 67,000 across
-    # every branch, power and zero fraction; the selected elements, their
-    # order and their values are unchanged, so the result is bitwise identical.
+    # Split on integer positions, not on the boolean mask, so every gather and
+    # scatter below indexes directly and the two `np.any` scans collapse into the one
+    # `flatnonzero`; selected elements, order and values are unchanged.
     zero_indices = np.flatnonzero(zero_mask)
     if zero_indices.size:
-        # A zero response has the closed form 2 mu**(2-p) / (2-p). The y < mu/2
-        # branch below reproduces it through log(0) = -inf at several
-        # transcendental evaluations per row; on zero-inflated fits those rows
-        # are the bulk of every deviance evaluation. The two routes are bitwise
-        # identical: that branch's g reduces to exactly -0.0 - (-1.0)/(2.0 - p)
-        # and both multiply the same power the same way.
+        # A zero response has the closed form 2 mu**(2-p) / (2-p); the y < mu/2 branch
+        # below reproduces it bitwise through log(0) = -inf at several transcendental
+        # evaluations per row, and zero-inflated fits are mostly such rows.
         deviance = np.empty_like(mu_array)
         with np.errstate(over="ignore"):
             deviance[zero_indices] = (
@@ -706,12 +694,10 @@ def tweedie_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArray:
             series += term
         g[near] = delta_near**2 * series
 
-    # Sterbenz: y - mu is exact only for mu/2 <= y <= 2 mu. Below mu/2 its
-    # rounding leaves 1 + delta an absolute error of order eps, so y / mu, and
-    # the deviance through it, carry a relative error of order eps * mu / y. At
-    # y = 4e-9 mu that moved one row's deviance by 9e-9, ten times a PIRLS line
-    # search's round-off allowance for a whole 20,000-row fit. Those rows take
-    # the log-ratio branch below.
+    # Sterbenz: y - mu is exact only for mu/2 <= y <= 2 mu.  Below mu/2 its rounding
+    # leaves 1 + delta an absolute error of order eps, so the deviance through y / mu
+    # carries a relative error of order eps * mu / y.  Those rows take the log-ratio
+    # branch below.
     regular = ~near & ~extreme_positive & (y_array >= 0.5 * mu_array)
     if np.any(regular):
         delta_regular = delta[regular]
@@ -721,13 +707,12 @@ def tweedie_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArray:
             second = np.expm1((2.0 - p) * log_ratio) / (2.0 - p)
         g[regular] = first - second
 
-    # y < mu/2, down to a delta that rounds to exactly -1: take log(y / mu)
-    # from the original values. A normal quotient carries one rounding, so its
-    # log errs by about eps (1 + 2 |log(y / mu)|) at any scale, where
-    # log y - log mu errs by ulps of max(|log y|, |log mu|); only a subnormal or
-    # underflowed quotient needs the difference. With log_ratio <= -log 2 both
-    # expm1 factors are accurate, and g = first - second cancels by at most a
-    # factor of 6.2 (reached at y = mu/2 as p -> 2).
+    # y < mu/2, down to a delta that rounds to exactly -1: take log(y / mu) from the
+    # original values.  A normal quotient carries one rounding, so its log errs by
+    # about eps (1 + 2 |log(y / mu)|), where log y - log mu errs by ulps of the larger
+    # magnitude; only a subnormal or underflowed quotient needs the difference.  With
+    # log_ratio <= -log 2 both expm1 factors are accurate and g = first - second
+    # cancels by at most a factor of 6.2.
     below = ~near & ~regular & ~extreme_positive
     if np.any(below):
         y_below, mu_below = y_array[below], mu_array[below]
@@ -748,10 +733,9 @@ def tweedie_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArray:
         )
 
     if np.any(extreme_positive):
-        # For y >> mu, factor the expanded positive half-deviance by
-        # A = y * mu**(1-p) / (p-1). The remaining ratios use mu/y and
-        # cannot create inf-inf or 0*inf. -expm1 keeps 1 - B/A accurate
-        # when p is itself very close to one.
+        # For y >> mu, factor the expanded positive half-deviance by A = y * mu**(1-p) /
+        # (p-1); the remaining ratios use mu/y and cannot create inf-inf or 0*inf.
+        # -expm1 keeps 1 - B/A accurate when p is very close to one.
         with np.errstate(all="ignore"):
             log_y = np.log(y_array[extreme_positive])
             log_mu = np.log(mu_array[extreme_positive])

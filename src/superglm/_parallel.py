@@ -1,42 +1,36 @@
 """Worker counts for superglm's pooled kernels: one parallelism level, capped by memory.
 
 A pooled kernel splits its work into tasks whose partition does not depend on
-the worker count, runs them on Python threads, and pins BLAS to one thread
-for the duration (``_blas_threads.pooled_blas_threads``), so the pool is the
-only parallelism level and the result is the same for any number of workers.
-This module only decides how many workers a kernel may use:
+the worker count, runs them on Python threads, and pins BLAS to one thread for
+the duration (``_blas_threads.pooled_blas_threads``), so the pool is the only
+parallelism level and the result is the same for any number of workers.  This
+module only decides how many workers a kernel may use:
 
 ``n_jobs``
-    The most workers any pooled kernel starts.  ``"auto"`` (the default) is
-    the number of physical cores (``joblib.cpu_count(only_physical_cores=
-    True)``, which also honours the process's CPU affinity and cgroup quota).
+    The most workers any pooled kernel starts.  ``"auto"`` (the default) is the
+    number of physical cores (``joblib.cpu_count(only_physical_cores=True)``,
+    which also honours CPU affinity and cgroup quota).
 ``max_memory``
-    Bytes the concurrently running tasks may hold.  ``"auto"`` is a quarter
-    of the memory the process may use: physical memory, or its cgroup's
-    limit where that is tighter (a container or a systemd scope).  A kernel states its per-task working set, and the
-    worker count is ``min(n_jobs, tasks, max_memory // task_bytes)``, at
-    least one: CPU time floats, peak memory is the constraint.
+    Bytes the concurrently running tasks may hold.  ``"auto"`` is a quarter of
+    the memory the process may use (physical memory, or its cgroup limit where
+    tighter).  The worker count is ``min(n_jobs, tasks, max_memory //
+    task_bytes)``, at least one.
 
-Both are ``SuperGLM`` parameters: a fit runs inside :func:`estimator_scope`,
-which applies the estimator's values, and ``"auto"`` there defers to the
-process default.  The process default comes from ``SUPERGLM_N_JOBS`` and
-``SUPERGLM_MAX_MEMORY`` (an integer, ``auto``, or for memory a number with a
-``K``/``M``/``G`` binary suffix), and :func:`parallel_config` overrides both
-for one context, which is how tests pin the worker count.
+Both are ``SuperGLM`` parameters: a fit runs inside :func:`estimator_scope`, and
+``"auto"`` there defers to the process default, which comes from
+``SUPERGLM_N_JOBS`` and ``SUPERGLM_MAX_MEMORY`` (an integer, ``auto``, or for
+memory a number with a ``K``/``M``/``G`` binary suffix).  :func:`parallel_config`
+overrides both for one context.
 
-The pooled kernels are the data-rank factor's TSQR leaves
-(``solvers.rank``), the Gram's blocks (``_group_matrix._block_queue``), the
-lookup tables' sweeps, block products and leverages
-(``_group_matrix._lookup_tables``), the solved-row stop passes
-(``reml.w_derivatives``), the interaction terms' builds
-(``_predictor_compiler``), and SuperLSS's row kernels (the Tweedie and
-negative binomial rows) and batched global moments.  :func:`pooled_map`
-serves the solved-row stop passes and the interaction builds; the SuperLSS
-kernels run on :func:`pooled_for` (through :func:`pooled_row_blocks` for the
-rows), whose tasks are too short for an executor's dispatch; the others start
-executors of their own, sized by :func:`pool_workers`.  Those SuperLSS kernels
-were numba ``prange`` loops, so numba's thread count (``NUMBA_NUM_THREADS``,
-``numba.set_num_threads``) caps them too (:func:`section_threads`).
+The pooled kernels are the data-rank factor's TSQR leaves, the Gram's blocks,
+the lookup tables' sweeps, block products and leverages, the solved-row stop
+passes, the interaction terms' builds, and SuperLSS's row kernels and batched
+global moments.  :func:`pooled_map` serves the stop passes and interaction
+builds; the SuperLSS kernels run on :func:`pooled_for` (through
+:func:`pooled_row_blocks` for rows), whose tasks are too short for an
+executor's dispatch; the others start executors of their own, sized by
+:func:`pool_workers`.  The SuperLSS kernels were numba ``prange`` loops, so
+numba's thread count also caps them (:func:`section_threads`).
 """
 
 from __future__ import annotations
@@ -93,15 +87,11 @@ def _mark_pool_thread() -> None:
 class _Crew:
     """Worker threads that run posted jobs, started on demand and ended with :meth:`close`.
 
-    A job is posted with one queue put and costs a worker's wake-up, about a
-    third of an executor's submit (a ``Future`` and its work item), which is
-    what a section of a few hundred microseconds per task can afford.
-    ``size`` is the most threads the crew may hold; :meth:`grow` starts them
-    as sections admit helpers, so a crew never holds more threads than the
-    widest section used.  A worker drops every reference to a finished job
-    before it reports the job done on the job's own queue: the job's closure
-    holds the section's buffers, which must be released when the section
-    returns.
+    A job is posted with one queue put, about a third of an executor's submit cost,
+    which sections of a few hundred microseconds per task need.  ``size`` is the
+    most threads the crew may hold; :meth:`grow` starts them as sections admit
+    helpers.  A worker drops every reference to a finished job before reporting it
+    done, since the job's closure holds the section's buffers.
     """
 
     def __init__(self, size: int, started: int = 0) -> None:
@@ -521,11 +511,10 @@ def pooled_map(fn: Callable, items: list, item_bytes: int) -> Generator:
         else:
             pool = fit_threads.executor()
             workers = min(workers, fit_threads.size)
-        # The section posts ``workers`` runners, which claim items in order from
-        # one counter, so a shared executor starts threads only as wide as the
-        # sections it served (a task per item would start one thread per
-        # waiting task, up to ``n_jobs``).  Each item gets its own copy of the
-        # caller's context, which carries ``np.errstate``.
+        # The section posts ``workers`` runners that claim items in order from one
+        # counter, so a shared executor starts threads only as wide as the sections it
+        # served.  Each item gets its own copy of the caller's context (which carries
+        # ``np.errstate``).
         caller = contextvars.copy_context()
         slots = [Future() for _ in items]
         lock = threading.Lock()
@@ -564,28 +553,18 @@ def pooled_map(fn: Callable, items: list, item_bytes: int) -> Generator:
 def pooled_for(fn: Callable, items: list, item_bytes: int) -> list:
     """``[fn(item), ...]`` in item order, the calling thread working beside its helpers.
 
-    At most ``pool_workers`` threads, capped by :func:`section_threads`.
-
-    For sections of many short tasks, where :func:`pooled_map` spends more
-    waking its workers and collecting futures than a task runs (about a
-    millisecond of dispatch against 0.2 ms blocks).  The caller and its helpers
-    claim items in order from one counter, so no task waits for a wake-up
-    that has not happened, and only about half as many helpers as items are
-    woken, which the measured wake-up cost makes the cheapest cover of the
-    items.  Nothing here changes what ``fn`` computes: each item's result goes
-    to its own slot, so the list is the same at any worker count.  One
-    parallelism level, memory budget and nested-section rule as
-    :func:`pooled_map`, but not its per-task context: each helper runs all its
-    items in one copy of the caller's context, and the caller's items run in
-    the caller's own, so ``fn`` must not set a ``ContextVar`` (no kernel
-    does).  The first failure in item order is raised once
-    every started task has ended (no task outlives the section), and items
-    after a failure are not started.  An interruption while the caller waits
-    is raised at once: no item is left to claim by then, and the helpers' last
-    tasks end before their crew closes (this call's, or the fit's as the
-    interruption leaves it).  Helpers run on the fit's crew
-    (:func:`fit_pool`) or, outside a fit or in a nested section, on threads
-    started for this call.
+    At most ``pool_workers`` threads, capped by :func:`section_threads`.  For
+    sections of many short tasks, where :func:`pooled_map` spends more waking
+    workers and collecting futures than a task runs.  The caller and its helpers
+    claim items in order from one counter, and only about half as many helpers as
+    items are woken.  Each item's result goes to its own slot, so the list is the
+    same at any worker count.  Same parallelism level, memory budget and
+    nested-section rule as :func:`pooled_map`, but each helper runs all its items in
+    one copy of the caller's context, so ``fn`` must not set a ``ContextVar``.  The
+    first failure in item order is raised once every started task has ended, and
+    items after a failure are not started.  An interruption while the caller waits
+    is raised at once.  Helpers run on the fit's crew (:func:`fit_pool`) or, outside
+    a fit or in a nested section, on threads started for this call.
     """
     import contextvars
 

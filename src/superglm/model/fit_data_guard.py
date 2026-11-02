@@ -31,14 +31,11 @@ def _frame_digest_matches(
 ) -> bool | None:
     """Compare a frame with a stored digest written under *scheme*.
 
-    ``scheme`` is None for guards written before the tag existed.  Those used
-    Polars' own row hash on Polars frames, which can be recomputed on Polars 1.x
-    and not on 2.x.  A digest that cannot be recomputed says nothing about the
-    frame.  For the model's own retained frame (``own_frame``) that is not a
-    mismatch, so it warns once and lets the retained data stand; any other frame
-    is refused with a warning that names the cause, as the data it holds cannot
-    be shown to be the training data, and the verdict is None (cannot tell)
-    rather than False (differs).
+    ``scheme`` is None for guards written before the tag existed; those used Polars'
+    own row hash, which can be recomputed on Polars 1.x and not on 2.x.  For the
+    model's own retained frame (``own_frame``) an unrecomputable digest warns once
+    and lets the retained data stand; any other frame is refused with a warning
+    naming the cause.  The verdict is None (cannot tell) rather than False (differs).
     """
     if scheme == frame.digest_scheme or (scheme is None and frame.backend == "pandas"):
         return frame.digest(columns, include_index=include_index) == expected

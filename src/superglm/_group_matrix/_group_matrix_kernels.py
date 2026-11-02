@@ -1,21 +1,16 @@
 """Private numba kernels shared by group-matrix helpers.
 
-The kernels a Gram block can reach (``_POOLED_BLOCK_KERNELS``) are compiled
-``nogil=True``: the block queue (``_block_queue``) runs blocks on worker
-threads, and a kernel that held the GIL would run them one at a time.  So are
-the ones that write a TSQR leaf's rows on its worker (``_POOLED_LEAF_KERNELS``).  Every
-one is nopython, so it touches no Python object while the GIL is released;
-none uses ``prange``, so it starts no numba threads of its own; and each
-writes only the arrays it allocates or the scratch its caller owns, which is
-never shared between workers.  Kernels no pooled block reaches (the batched
-channel passes, the structured and centred-assembly kernels) keep numba's
-default and hold the GIL.
+The kernels a Gram block can reach (``_POOLED_BLOCK_KERNELS``) and those that
+write a TSQR leaf's rows on its worker (``_POOLED_LEAF_KERNELS``) are compiled
+``nogil=True``, because the block queue runs blocks on worker threads.  Every
+one is nopython, uses no ``prange`` and writes only arrays it allocates or
+scratch its caller owns, never shared between workers.  Other kernels keep
+numba's default and hold the GIL.
 
 The histogram passes of a discrete Gram (``_disc_disc_2d_hist``,
 ``_fused_bincount_2``, ``_pattern_support_summaries``) read each code as
-unsigned.  numba wraps a negative signed index on every access; their codes
-lie in ``[0, size)``, so an unsigned read addresses the same cell, adds the
-same rows in the same order, and skips that test in the row loop.
+unsigned: their codes lie in ``[0, size)``, so this addresses the same cell and
+skips numba's negative-index wrap in the row loop.
 """
 
 from __future__ import annotations
@@ -34,13 +29,9 @@ from superglm._numba_compile import compile_closed
 def _native(values: np.ndarray) -> np.ndarray:
     """``values`` as the read-only C-contiguous array a kernel compiles one signature for.
 
-    A view of C-contiguous input (SuperGLM's weights, a binned SuperLSS
-    channel), a C copy of anything else (an exact SuperLSS fit's strided
-    channel column, a Fortran map).  The kernels read each value as it is, so
-    the copy gives the same bits.  Callers convert at the kernel call alone,
-    never where a BLAS product reads the operand: converting SuperLSS's
-    channels at its predictor boundary changed the last bit of two fits
-    through their dense columns' products.
+    A view of C-contiguous input, a C copy of anything else; the kernels read each
+    value as it is, so the copy gives the same bits.  Callers convert at the kernel
+    call alone, never where a BLAS product reads the operand.
     """
     view = np.ascontiguousarray(values).view()
     view.flags.writeable = False
@@ -97,12 +88,9 @@ _SCANS = (
 def _scan_form(values: np.ndarray) -> np.ndarray:
     """``values`` for a range scan: closes both scans to their one signature first.
 
-    Every call site passes its operand through here, so no call compiles a
-    signature of its own before the scans are closed.  A float64 operand is
-    returned as it is; any other real dtype is promoted to float64, which the
-    closed signature needs.  Promotion is exact for floats of at most 64 bits
-    and keeps an integer's magnitude on its side of [2**-128, 2**128], so the
-    range decision is unchanged.
+    A float64 operand is returned as it is; any other real dtype is promoted to
+    float64, which is exact for floats of at most 64 bits and keeps an integer's
+    magnitude on its side of [2**-128, 2**128], so the range decision is unchanged.
     """
     compile_closed(*_SCANS)
     return values if values.dtype == np.float64 else values.astype(np.float64)
@@ -145,10 +133,8 @@ def _ssp_gram_needs_exact(*operands) -> bool:
     if any(array.dtype.kind not in "bifu" or array.dtype.itemsize > 8 for array in arrays):
         return False
     for array in arrays:
-        # The scan reads float64 (its one signature). Promotion is exact for
-        # every float of at most 64 bits, and an integer or boolean keeps its
-        # side of [2**-128, 2**128]; it affects only classification, and the
-        # native moment path keeps its operands.
+        # The scan reads float64 (its one signature).  Promotion is exact and affects
+        # only classification; the native moment path keeps its operands.
         if array.dtype != np.float64:
             array = array.astype(np.float64)
         values = array if array.ndim == 2 else array.reshape(-1, 1)
@@ -157,10 +143,9 @@ def _ssp_gram_needs_exact(*operands) -> bool:
     return False
 
 
-#: Every bin sum below adds 53-bit binary64 significands split into a signed
-#: high part with |h| <= 2**27 (floor division: m = -(2**53 - 1) gives
-#: h = -2**27) and a low part below 2**26 (``_exact_bin_sums``); fewer than
-#: 2**36 such terms sum within (2**36 - 1) 2**27 = 2**63 - 2**27, inside int64.
+# Every bin sum below adds 53-bit significands split into a signed high part
+# |h| <= 2**27 (floor division) and a low part below 2**26 (``_exact_bin_sums``);
+# fewer than 2**36 such terms sum within 2**63 - 2**27, inside int64.
 _EXACT_SPLIT_BITS = 26
 _EXACT_MAX_TERMS = 1 << 36
 #: Trailing-zero classes of the exact bin masses (``_exact_gram_moments``).
@@ -192,15 +177,12 @@ def _exact_integers(values: np.ndarray, scale: int) -> np.ndarray:
 def _exact_bin_sums(values: np.ndarray, bins: np.ndarray, n_bins: int, scale: int) -> np.ndarray:
     """Exact ``sum(values[bins == b]) * 2**-scale`` for every bin, as Python integers.
 
-    One accumulator per (bin, binary exponent), as in Malcolm's summation
-    (Malcolm, CACM 14(11), 1971) and Neal's superaccumulators (arXiv
-    1505.05571, 2015): rows sharing an exponent add their significands as
-    fixed-width integers, so no row enters Python arithmetic. Each significand
-    ``m = h 2**26 + l`` splits into ``|h| <= 2**27`` (``h = -2**27`` at
-    ``m = -(2**53 - 1)``) and ``0 <= l < 2**26``; fewer than ``2**36`` of
-    either sum within ``2**63 - 2**27`` in int64, whatever the order. Only
-    the per-group totals become Python integers, shifted to the common scale
-    and added per bin. Every operation is exact.
+    One accumulator per (bin, binary exponent), as in Malcolm's summation (CACM
+    14(11), 1971) and Neal's superaccumulators (arXiv 1505.05571): rows sharing an
+    exponent add their significands as fixed-width integers.  Each significand
+    ``m = h 2**26 + l`` splits into ``|h| <= 2**27`` and ``0 <= l < 2**26``, and
+    fewer than ``2**36`` of either sum within int64 in any order.  Only per-group
+    totals become Python integers, shifted to the common scale and added per bin.
     """
     if values.size >= _EXACT_MAX_TERMS:  # pragma: no cover - beyond addressable memory
         raise ValueError("exact SSP bin sums take fewer than 2**36 rows")
@@ -232,19 +214,14 @@ def _exact_bin_sums(values: np.ndarray, bins: np.ndarray, n_bins: int, scale: in
 def _exact_gram_moments(indptr, columns, entries, masses, rhs_masses, width):
     """Exact ``B'MB``, ``B'm`` and ``B'r`` of a CSR row set, as lists of Python integers.
 
-    ``entries`` are the rows' stored values as exact integers. Duplicate
-    columns within a row are summed exactly first (a canonicalized, rounded
-    row would lose that sum). Each row then adds ``m b_i b_j`` to the upper
-    triangle in place; a row whose columns are contiguous (a dense support
-    row) does so a slice at a time through ``map``, so the per-pair work runs
-    in C. Measured on freMTPL2's dense tensor supports (1957 x 169 and
-    3882 x 117), in-place list accumulation beat object-array matmul, outer
-    products and sorted pair reduction by 1.4-3x.
+    ``entries`` are the rows' stored values as exact integers.  Duplicate columns
+    within a row are summed exactly first.  Each row adds ``m b_i b_j`` to the upper
+    triangle in place; a row with contiguous columns does so a slice at a time
+    through ``map`` so the per-pair work runs in C.
     """
-    # Masses share the weights' scale, so an ordinary bin beside a 2**-600
-    # weight is a ~600-bit integer with ~550 trailing zeros. Each row adds
-    # into the accumulator of its trailing-zero class, at that class's shift,
-    # so the products stay narrow; the classes are shifted back and summed once.
+    # Masses share the weights' scale, so each row adds into the accumulator of its
+    # trailing-zero class at that class's shift, keeping products narrow; the
+    # classes are shifted back and summed once.
     grams: dict[int, list[list[int]]] = {}
     xtws: dict[int, list[int]] = {}
     xtw = [0] * width
@@ -378,29 +355,21 @@ def _exact_projected_rows(indptr, columns, entries, coefficients):
 def _exact_ssp_moments(basis, transform, weights, weighted_rhs=None, *, bin_indices=None):
     """Round the requested source-factor moments once on exceptional inputs.
 
-    Finite binary64 entries are exact dyadic rationals. Accumulating
-    ``X' W X = R'(B' M B)R`` and optional ``X' W = R'(B' m)`` / ``X' Wz``
-    over those entries, with ``M`` the bin (or row) masses, avoids an
-    overflowing raw Gram, reciprocal basis or bin mass. No rank or
-    regularization decision is made here. The target is the represented
-    source product ``B R``, before floating-point matrix multiplication rounds
-    that product; in exact arithmetic the two association orders agree, so the
-    once-rounded outputs do too.
+    Finite binary64 entries are exact dyadic rationals.  Accumulating ``X' W X =
+    R'(B' M B)R`` and optional ``X' W = R'(B' m)`` / ``X' Wz`` over them (``M`` the
+    bin or row masses) avoids an overflowing raw Gram, reciprocal basis or bin
+    mass.  No rank or regularization decision is made here.  The target is the
+    represented product ``B R`` before floating-point multiplication rounds it.
 
-    This is an exact dot product rounded once (Kulisch's long accumulator):
-    a shared binary scale per source operand makes every inner operation an
-    integer operation. Binary64's finite exponent span bounds integer widths,
-    apart from logarithmic growth with reduction length; no inner product
-    needs rational normalization. Only final outputs use Fraction rounding.
-    Error-free float transformations (Ogita, Rump & Oishi 2005; Rump, Ogita &
-    Oishi 2008) need products clear of underflow, which is exactly the range
-    that sends operands here, and Demmel & Hida's wider accumulator is not
-    correctly rounded, so neither replaces the integers. Bin and row sums are
-    vectorised (``_exact_bin_sums``); the Gram is accumulated over each
-    active row's support (``_exact_gram_moments``), never as a dense
-    row-by-column table, and the transform touches only its nonzeros
-    (``_exact_congruence``).
-    Ordinary operands never use this path.
+    This is an exact dot product rounded once (Kulisch's long accumulator): a
+    shared binary scale per source operand makes every inner operation an integer
+    one, with widths bounded by binary64's exponent span; only final outputs use
+    Fraction rounding.  Error-free transformations (Ogita, Rump & Oishi 2005) need
+    products clear of underflow, which is the range that sends operands here, and
+    Demmel & Hida's accumulator is not correctly rounded.  Bin and row sums are
+    vectorised (``_exact_bin_sums``), the Gram is accumulated over each active row's
+    support (``_exact_gram_moments``) and the transform touches only its nonzeros
+    (``_exact_congruence``).  Ordinary operands never use this path.
     """
     weights = np.asarray(weights)
     if bin_indices is None:
@@ -775,12 +744,11 @@ def _disc_disc_2d_hist(bin_idx_i, bin_idx_j, W, n_bins_i, n_bins_j):
 def _weighted_hist_channels(idx_a, idx_b, W, start, width, n_a, n_b):
     """Weighted 2-D histograms of ``W[:, start + c]`` in ``result[:, :, c]``.
 
-    One row pass serves ``width`` channels: each sums its weights over the
-    rows with an index pair in ascending row order, the additions of
-    ``_disc_disc_2d_hist``, ``_cat_weighted_bincount``,
-    ``_cat_cat_weighted_crosstab`` and ``np.bincount``. Rows whose index
-    reaches ``n_a`` or ``n_b`` are skipped, as those kernels skip categorical
-    sink codes. ``idx_b=None`` compiles the one-index bincount (``n_b == 1``).
+    One row pass serves ``width`` channels, each summing its weights over the rows
+    with an index pair in ascending row order (the additions of
+    ``_disc_disc_2d_hist``, ``_cat_weighted_bincount``, ``_cat_cat_weighted_crosstab``
+    and ``np.bincount``).  Rows whose index reaches ``n_a`` or ``n_b`` are skipped
+    as categorical sink codes.  ``idx_b=None`` compiles the one-index bincount.
     """
     result = np.zeros((n_a, n_b, width))
     for row in range(W.shape[0]):
@@ -1356,11 +1324,9 @@ def _warmup_group_matrix_kernels() -> None:
     frozen_matrix.setflags(write=False)
     frozen_codes = codes.copy()
     frozen_codes.setflags(write=False)
-    # The range scans take every operand form through their one closed
-    # signature (``_scan_form``); the weight kernels below take their float
-    # operands as read-only C arrays (``_native``), whatever the caller holds:
-    # SuperGLM's weights, SuperLSS's read-only and strided channel columns.
-    # Fits call the float64 scan directly, never through the generic
+    # Range scans take every operand form through one closed signature
+    # (``_scan_form``); weight kernels take float operands as read-only C arrays
+    # (``_native``).  Fits call the float64 scan directly, never through
     # ``_operand_exponent_bounds``, which only a non-float64 operand reaches.
     frozen_values = values.copy()
     frozen_values.setflags(write=False)
