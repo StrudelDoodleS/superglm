@@ -2615,16 +2615,11 @@ def test_the_weak_block_gram_is_whole_across_its_row_chunks(rows: int) -> None:
     assert np.array_equal(support, np.any(columns != 0.0, axis=1))
 
 
-@pytest.mark.parametrize("shape_engine", ["scop", "qp"])
-def test_a_lowered_scop_fit_is_certified_in_its_latent_coordinates(shape_engine: str) -> None:
+def test_a_lowered_constrained_pspline_fit_is_certified() -> None:
     """Sol's #437 fixture: an increasing PSpline with a constant offset of +2.
 
-    dbeaf5a3 formed no latent score and so never certified a SCOP fit under
-    the check: it ended this one ``score_stagnated``, where master converges
-    in 10 iterations.  The certificate now forms the shape-constrained
-    group's latent score ``J' B' s - lambda S theta`` and certifies the fit,
-    every fitted mean inside the space and above the clip floor.  The
-    default QP engine certifies the same fixture in its own coefficients.
+    The QP engine certifies the fit in its own coefficients, every fitted
+    mean inside the space and above the clip floor.
     """
     rng = np.random.default_rng(8)
     x = rng.uniform(0.0, 1.0, 60)
@@ -2633,9 +2628,7 @@ def test_a_lowered_scop_fit_is_certified_in_its_latent_coordinates(shape_engine:
         family="binomial",
         link="log",
         selection_penalty=0.0,
-        features={
-            "x": PSpline(n_knots=5, constraint=Constraint.fit.increasing, shape_engine=shape_engine)
-        },
+        features={"x": PSpline(n_knots=5, constraint=Constraint.fit.increasing)},
     )
     model.fit(pd.DataFrame({"x": x}), y, offset=np.full(60, 2.0))
     assert model.result.converged

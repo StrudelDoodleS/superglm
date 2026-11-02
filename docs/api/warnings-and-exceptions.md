@@ -26,4 +26,5 @@ silence. Each docstring says when it fires and what to do about it.
    superglm.FactorSmoothGroupTermWarning
    superglm.RedundantInteractionWarning
    superglm.SplineOptionWarning
+   superglm.SCOPRetiredWarning
 ```

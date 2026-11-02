@@ -1035,9 +1035,8 @@ def finalize_reml_fit(
     # Owner decision 3 (2026-09-30): a terminal mode that stays short of the
     # certificate is published as not converged, never refused. A route the
     # certificate does not judge (a linearly constrained mode, the QP
-    # passthrough's constrained refit, the EFS engine's own final fit) is
-    # published the same way when its fit stopped before its own convergence
-    # test: silence would read as converged.
+    # passthrough's constrained refit) is published the same way when its fit
+    # stopped before its own convergence test: silence would read as converged.
     if terminal_certified is not None:
         profile["reml_terminal_mode_certified"] = terminal_certified
         profile["reml_terminal_mode_termination"] = solver_result.termination_reason

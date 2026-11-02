@@ -101,8 +101,9 @@ def Spline(
     """Create a spline feature spec; with no ``kind``, ``cr`` unless ``cr`` cannot take it."""
     if shape_engine not in SHAPE_ENGINES:
         raise ValueError(f"shape_engine must be one of {SHAPE_ENGINES}, got {shape_engine!r}")
-    if shape_engine == "scop":
-        warn_scop_retired()
+    if shape_engine == "scop" and kind not in (None, "ps"):
+        # A P-spline warns itself, knowing its constraint; no other basis ever fitted on SCOP.
+        warn_scop_retired(moves_fit=False)
         shape_engine = "qp"
     if kind is None:
         declared = {name: value for name, value in locals().items() if name != "kind"}

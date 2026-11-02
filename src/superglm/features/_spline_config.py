@@ -47,11 +47,13 @@ class SCOPRetiredWarning(UserWarning):
     """A shape constraint declared or saved on the retired SCOP engine, fitted on the QP."""
 
 
-def warn_scop_retired(*, saved: bool = False) -> None:
-    """Warn that a constraint on SCOP fits on the QP, at the caller's line outside superglm.
+def warn_scop_retired(*, saved: bool = False, moves_fit: bool = True) -> None:
+    """Warn that SCOP is retired, at the caller's line outside superglm.
 
     ``saved`` is a P-spline a model fitted on SCOP before the option existed;
-    otherwise the declaration passed ``shape_engine="scop"``.
+    otherwise the declaration passed ``shape_engine="scop"``. ``moves_fit`` is
+    False where 0.41.0 never fitted the term on SCOP (no fit-time constraint,
+    or a basis other than a P-spline), so nothing about the fit changes.
     """
     if saved:
         subject = "This P-spline was fitted on the SCOP shape engine, which is retired"
@@ -59,10 +61,14 @@ def warn_scop_retired(*, saved: bool = False) -> None:
     else:
         subject = "shape_engine='scop' names the SCOP shape engine, which is retired"
         remedy = "Drop shape_engine='scop' to silence this warning."
-    message = (
-        f"{subject}: its shape constraint fits on the QP engine instead, so the fitted "
-        f"curve and its smoothing parameter differ from those 0.41.0 gave. {remedy}"
-    )
+    if saved or moves_fit:
+        effect = (
+            "its shape constraint fits on the QP engine instead, so the fitted curve "
+            "and its smoothing parameter differ from those 0.41.0 gave"
+        )
+    else:
+        effect = "it has no effect on this spline, which fits as it did in 0.41.0"
+    message = f"{subject}: {effect}. {remedy}"
     warnings.warn(message, SCOPRetiredWarning, skip_file_prefixes=(_PACKAGE_DIRECTORY,))
 
 

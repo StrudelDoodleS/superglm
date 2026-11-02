@@ -835,47 +835,12 @@ The mental model is:
 
 In this repo: `src/superglm/reml/discrete.py::optimize_discrete_reml_cached_w`.
 
-### 13.3 EFS REML (Fellner-Schall for sparse models)
+### 13.3 REML and a selection penalty
 
-When `selection_penalty > 0`, the inner fit uses BCD and the active set can change. The repo uses the generalized Fellner-Schall (EFS) fixed-point update from Wood & Fasiolo (2017) instead of the exact Newton outer loop.
-
-That is `optimize_efs_reml()`.
-
-This Anderson step is internal to the EFS log-$\lambda$ update. It is not a
-separate user-tunable acceleration setting on the PIRLS solver.
-
-```
-# ── EFS REML: fixed-point with Anderson acceleration ──────────
-# Used when selection_penalty > 0 (group lasso + REML smoothing)
-
-for iter in 1, 2, ...:
-    if large_change:
-        # Full tier: rebuild design matrix + PIRLS with BCD
-        dm = rebuild_design_matrix(λ)          # R_inv depends on λ
-        β̂ = fit_pirls(X, y, W, S, penalty)    # BCD inner solver
-        XᵀWX = build_xtwx(W)                  # cache for reuse
-    else:
-        # Cheap tier: re-invert cached XᵀWX + S only (O(p³))
-        H⁻¹ = invert(XᵀWX + S(λ))
-
-    # EFS fixed-point update (same formula as Fellner-Schall)
-    for j in each group:
-        if ‖β̂g‖ < ε: continue                 # L₁ killed this group
-        λⱼ = rⱼ / (β̂gᵀΩgβ̂g + tr(H⁻¹[g,g] Ωg))
-        λⱼ = clamp(λⱼ, max_log_step=5)
-
-    # Anderson(1) acceleration on log-λ scale
-    λ = anderson_accelerate(λ, λ_new)
-
-    if max|Δlog λ| < tol: break
-```
-
-So when both sparsity and smoothness selection are active:
-
-- PIRLS + BCD handles coefficient sparsity (which features survive)
-- EFS REML handles smoothness (how wiggly the survivors are)
-
-In this repo: `src/superglm/reml/efs.py::optimize_efs_reml`.
+`fit_reml()` does not combine smoothness selection with group-lasso sparsity: it
+refuses `selection_penalty > 0` before any work starts. Choose which terms survive
+with `fit()` or `fit_path()` at fixed smoothing, then choose smoothness with
+`fit_reml()` on the survivors.
 
 ## 14. Compared to other software
 
@@ -938,7 +903,6 @@ If you want to understand the implementation from top to bottom, read in this or
 5. `src/superglm/reml/objective.py::reml_laml_objective`
 6. `src/superglm/reml/direct.py::optimize_direct_reml`
 7. `src/superglm/reml/discrete.py::optimize_discrete_reml_cached_w`
-8. `src/superglm/reml/efs.py::optimize_efs_reml`
 
 ```{admonition} Three questions to keep in your head
 :class: tip

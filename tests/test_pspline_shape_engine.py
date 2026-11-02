@@ -120,6 +120,27 @@ _DECLARATIONS = {
 }
 
 
+@pytest.mark.parametrize(
+    "declare",
+    [
+        lambda: PSpline(n_knots=8, shape_engine="scop"),
+        lambda: PSpline(n_knots=8, constraint=Constraint.postfit.increasing, shape_engine="scop"),
+        lambda: Spline(kind="cr", k=10, constraint=Constraint.fit.increasing, shape_engine="scop"),
+    ],
+    ids=["ps-unconstrained", "ps-postfit", "cr-constrained"],
+)
+def test_shape_engine_scop_says_no_effect_where_0_41_never_used_scop(declare) -> None:
+    """Only a P-spline with a fit-time constraint ever fitted on SCOP; elsewhere the fit is unchanged.
+
+    Mutation check: with ``moves_fit`` forced True in ``warn_scop_retired``, the
+    message claims the fit differs from 0.41.0 and this test fails.
+    """
+    with pytest.warns(SCOPRetiredWarning) as caught:
+        declare()
+    (message,) = [str(w.message) for w in caught if issubclass(w.category, SCOPRetiredWarning)]
+    assert "no effect" in message and "differ" not in message, message
+
+
 @pytest.mark.parametrize("declare", sorted(_DECLARATIONS))
 def test_shape_engine_scop_warns_once_and_fits_the_qp_fit(declare: str) -> None:
     """``shape_engine="scop"`` is accepted with one visible warning and fits exactly the QP fit.
@@ -141,8 +162,11 @@ def test_shape_engine_scop_warns_once_and_fits_the_qp_fit(declare: str) -> None:
     assert not issubclass(warning.category, DeprecationWarning)
     assert warning.filename == __file__
     message = str(warning.message)
-    for part in ("retired", "QP engine", "0.41.0", "Drop shape_engine='scop'"):
+    moved = declare != "Spline-bs"  # 0.41.0 fitted only a constrained P-spline on SCOP
+    parts = ("QP engine", "0.41.0") if moved else ("no effect",)
+    for part in ("retired", "Drop shape_engine='scop'", *parts):
         assert part in message, message
+    assert ("differ" in message) is moved, message
     assert getattr(spec, "shape_engine", "qp") == "qp" and shape_engine(spec) == "qp"
 
     model = _fit("poisson", spec)

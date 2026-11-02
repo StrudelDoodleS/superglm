@@ -1334,7 +1334,7 @@ class Recorder:
     # The private arguments that are state shared between calls are named, not walked.
     _SHARED = (
         "profile", "cache_out", "debug_recorder", "trace_run", "_initial_data_reuse",
-        "_raw_moment_policy", "_fisher_data_reuse", "_scop_run_centring", "_defer_rank_info",
+        "_raw_moment_policy", "_fisher_data_reuse", "_defer_rank_info",
     )  # fmt: skip
 
     def _inputs(self, arguments: dict) -> dict:
@@ -1368,8 +1368,6 @@ class Recorder:
         census[f"reason:{result.termination_reason}"] += 1
         census["iterations"] += int(result.n_iter)
         groups = arguments["groups"]
-        if any(g.monotone_engine == "scop" for g in groups):
-            census["scop_calls"] += 1
         if any(g.constraints is not None for g in groups):
             census["constrained_calls"] += 1
         rank_info = result.rank_info
@@ -1383,7 +1381,7 @@ class Recorder:
             if arguments[switch]:
                 census[f"switch:{switch}"] += 1
         for name in ("_defer_rank_info", "_initial_data_reuse", "_fisher_data_reuse",
-                     "_scop_run_centring", "_centred_init", "scop_state_init", "_newton_latch",
+                     "_centred_init", "_newton_latch",
                      "trace_run", "debug_recorder", "cache_out", "_deviance_init"):  # fmt: skip
             if arguments[name] is not None:
                 census[f"given:{name}"] += 1

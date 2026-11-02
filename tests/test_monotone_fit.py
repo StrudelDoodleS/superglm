@@ -529,27 +529,6 @@ class TestMonotoneFitPSpline:
         assert not [w for w in recwarn if "names no kind" in str(w.message)]
         assert np.all(np.diff(model.predict(df.sort_values("x"))) >= -1e-12)
 
-    @staticmethod
-    def _kindless_beside_scop(x1):
-        """A Gaussian fit of ``x1`` beside a SCOP ``ps`` term, with its data."""
-        from superglm import Spline
-
-        rng = np.random.default_rng(42)
-        df = pd.DataFrame({"x1": rng.uniform(0, 1, 200), "x2": rng.uniform(0, 1, 200)})
-        y = (df["x1"] + df["x2"] + rng.normal(0, 0.1, 200)).to_numpy()
-        model = SuperGLM(
-            family=Gaussian(),
-            selection_penalty=0,
-            features={
-                "x1": x1,
-                "x2": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing),
-            },
-        )
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            model.fit(df, y)
-        return model, df, y
-
 
 # ── fit_reml with fixed lambda tests ────────────────────────────────────────────
 
@@ -727,8 +706,8 @@ class TestDiscreteMonotoneREML:
         )
 
     @pytest.mark.slow
-    def test_discrete_scop_monotone_fit_reml(self):
-        """PSpline: discrete + monotone + fit_reml with fixed lambda."""
+    def test_discrete_ps_monotone_fit_reml(self):
+        """PSpline: discrete + monotone + fit_reml with fixed lambda, on the QP engine."""
         rng = np.random.default_rng(42)
         n = 250_000
         x = np.sort(rng.uniform(0, 1, n))
@@ -755,12 +734,12 @@ class TestDiscreteMonotoneREML:
         assert model._result.converged
         assert model._reml_lambdas is not None
 
-        # Verify the term used the discretized SCOP path
-        from superglm.group_matrix import DiscretizedSCOPGroupMatrix
+        # SCOP is retired: the constrained P-spline takes the discretized QP path.
+        from superglm.group_matrix import DiscretizedSSPGroupMatrix
 
         gm = model._dm.group_matrices[0]
-        assert isinstance(gm, DiscretizedSCOPGroupMatrix), (
-            f"Expected DiscretizedSCOPGroupMatrix, got {type(gm).__name__}"
+        assert isinstance(gm, DiscretizedSSPGroupMatrix), (
+            f"Expected DiscretizedSSPGroupMatrix, got {type(gm).__name__}"
         )
 
 
@@ -796,8 +775,8 @@ class TestSummaryMonotoneEngine:
         assert "mono=increasing (qp)" in summary_str
 
     @pytest.mark.slow
-    def test_summary_shows_engine_for_scop(self):
-        """PSpline monotone summary shows 'scop' engine."""
+    def test_summary_shows_engine_for_pspline(self):
+        """PSpline monotone summary shows the 'qp' engine now that SCOP is retired."""
         rng = np.random.default_rng(42)
         n = 300
         x = np.sort(rng.uniform(0, 1, n))
@@ -817,8 +796,8 @@ class TestSummaryMonotoneEngine:
         model.fit(df[["x"]], df["y"])
         summary_str = str(model.summary())
 
-        assert "scop" in summary_str.lower()
-        assert "mono=increasing (scop)" in summary_str
+        assert "scop" not in summary_str.lower()
+        assert "mono=increasing (qp)" in summary_str
 
 
 class TestDiscreteQPMonotone:

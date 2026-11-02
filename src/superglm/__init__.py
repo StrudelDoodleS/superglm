@@ -53,7 +53,7 @@ from superglm.distributional.families.two_piece import (
 from superglm.distributional.predictor import Predictor
 from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
 from superglm.export import RatingTableBaseNotRepresentableError, export_rating_tables
-from superglm.features._spline_config import SplineOptionWarning
+from superglm.features._spline_config import SCOPRetiredWarning, SplineOptionWarning
 from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.categorical import Categorical
 from superglm.features.constraint import Constraint
@@ -344,6 +344,7 @@ __all__ = [
     "ConvergenceWarning",
     "FactorSmoothGroupTermWarning",
     "RedundantInteractionWarning",
+    "SCOPRetiredWarning",
     "SplineOptionWarning",
     "SeparationError",
     "SeparationWarning",

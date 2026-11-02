@@ -598,8 +598,6 @@ class PSpline(_BSplineBase):
             raise ValueError(
                 f"shape_engine must be one of {_spline_config.SHAPE_ENGINES}, got {shape_engine!r}"
             )
-        if shape_engine == "scop":
-            _spline_config.warn_scop_retired()
         super().__init__(
             n_knots,
             degree,
@@ -616,6 +614,11 @@ class PSpline(_BSplineBase):
             m=m,
             lambda_policy=lambda_policy,
         )
+        if shape_engine == "scop":
+            fit_time = getattr(self, "constraint_kind", None) is not None and (
+                getattr(self, "constraint_mode", "postfit") == "fit"
+            )
+            _spline_config.warn_scop_retired(moves_fit=fit_time)
         self.shape_engine = "qp"
 
     def _build_monotone_constraints_raw(self) -> LinearConstraintSet:

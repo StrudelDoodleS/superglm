@@ -355,24 +355,14 @@ def test_slack_constraint_with_a_random_effect_reproduces_the_free_fit(
     unconstrained one -- variance component included, that being the quantity a
     shape constraint has no business perturbing.
 
-    The two engines earn different bars, and the difference is structural rather
-    than a tolerance chosen for comfort:
-
-    * QP, a ``bs`` term or a default ``PSpline``, reaches the free fit **exactly**. Its automatic-lambda path is an
-      unconstrained REML pass followed by a constrained refit, so a slack
-      constraint makes the refit a no-op: measured ``0`` on the variance
-      component and ``2.1e-16`` on the deviance across five seeds, i.e. pure
-      round-off. ``1e-12`` is that with room, and would catch any real drift.
-      Note ``pytest.approx`` keeps its default ``abs=1e-12`` alongside ``rel``,
-      so on a variance component of order 0.3 the effective bar is that absolute
-      floor rather than ``3e-13`` -- still four orders inside the measurement.
-    * SCOP reaches it only to ``~1e-4``, because the two arms are optimized by
-      *different routines* -- the free arm by ``optimize_reml_best``, the
-      constrained one by ``run_scop_efs_reml`` -- which stop at slightly
-      different lambdas. Measured worst case over the same five seeds is
-      ``1.13e-4`` on the variance component and ``8.4e-5`` on the deviance;
-      ``1e-3`` is an order of magnitude above that and still an order below the
-      perturbation this control exists to detect.
+    The QP engine, for a ``bs`` term or a ``PSpline``, reaches the free fit
+    **exactly**. Its automatic-lambda path is an unconstrained REML pass followed by a constrained refit, so a slack
+    constraint makes the refit a no-op: measured ``0`` on the variance
+    component and ``2.1e-16`` on the deviance across five seeds, i.e. pure
+    round-off. ``1e-12`` is that with room, and would catch any real drift.
+    Note ``pytest.approx`` keeps its default ``abs=1e-12`` alongside ``rel``,
+    so on a variance component of order 0.3 the effective bar is that absolute
+    floor rather than ``3e-13`` -- still four orders inside the measurement.
     """
     rng = np.random.default_rng(5)
     n, n_levels = 1200, 20
