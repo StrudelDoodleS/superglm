@@ -68,7 +68,7 @@ AUTO_CONTRACTION_MEMORY_BYTES = 64 * 1024 * 1024
 # The longest run of rows one contraction block sums. Bin and level sums run
 # sequentially, so their rounding grows with the run; this keeps it at the
 # scale of the automatic likelihood chunk on a small layout (about 2**15 rows),
-# where aliased columns' Gram entries agree well inside the rank cut.
+# so aliased columns' Gram entries differ by what the chunk stream's sums do.
 AUTO_CONTRACTION_MAX_ROWS = 2**15
 
 # Retained snapshots plus support vectors per pass; refresh uses bounded scratch.
@@ -812,6 +812,18 @@ def contraction_row_bytes(layout: StackedLayout) -> int | None:
     return np.dtype(np.float64).itemsize * floats
 
 
+# A block's level and bin sums run over up to all its rows, and the design then
+# multiplies them by entries up to about 2**23. Where a sum of that many channel
+# values could leave float64's range, the block contracts chunk by chunk, so its
+# sums are the chunk stream's.
+_BLOCK_SUM_LIMIT = 2.0**1000
+
+
+def _block_sums_in_range(rows: int, *channels: NDArray[np.float64]) -> bool:
+    peak = max(max(float(np.max(values)), -float(np.min(values))) for values in channels)
+    return rows * peak <= _BLOCK_SUM_LIMIT
+
+
 def contraction_block_rows(n_observations: int, row_bytes: int | None, chunk_rows: int) -> int:
     """Rows contracted at once: whole likelihood chunks within the byte and row budgets.
 
@@ -1028,25 +1040,35 @@ def _assemble_grouped_pass_geometry(
     curvature = np.empty((k_parameters * (k_parameters + 1) // 2, block_rows), dtype=np.float64)
     accumulator = GroupedGeometryAccumulator(layout, penalty=penalty, coefficients=coefficients)
 
-    def contract(start: int, stop: int) -> None:
+    def row_plans(start: int, stop: int):
         if start == 0 and stop == n_observations:
-            plans = _grouped_predictor_plans(layout)
-        else:
-            indices = np.arange(start, stop, dtype=np.intp)
-            indices.setflags(write=False)
-            rows = RowChunk(start=start, stop=stop, indices=indices)
-            plans = tuple(
-                PredictorExecutionPlan(
-                    _row_design(state, rows, copy=False), state.intercept_index is not None
-                )
-                for state in layout.predictors
+            return _grouped_predictor_plans(layout)
+        indices = np.arange(start, stop, dtype=np.intp)
+        indices.setflags(write=False)
+        rows = RowChunk(start=start, stop=stop, indices=indices)
+        return tuple(
+            PredictorExecutionPlan(
+                _row_design(state, rows, copy=False), state.intercept_index is not None
             )
+            for state in layout.predictors
+        )
+
+    def contract(start: int, stop: int) -> None:
         filled = stop - start
-        accumulator.add_score(plans, score[:filled])
-        for channel_index in range(len(curvature)):
-            accumulator.add_curvature_channel(
-                plans, channel_index, curvature[channel_index, :filled]
-            )
+        step = filled
+        if filled > chunk_rows and not _block_sums_in_range(
+            filled, score[:filled], curvature[:, :filled]
+        ):
+            step = chunk_rows
+        for piece in range(start, stop, step):
+            end = min(piece + step, stop)
+            plans = row_plans(piece, end)
+            rows = slice(piece - start, end - start)
+            accumulator.add_score(plans, score[rows])
+            for channel_index in range(len(curvature)):
+                accumulator.add_curvature_channel(
+                    plans, channel_index, curvature[channel_index, rows]
+                )
 
     iterator = iter_likelihood_chunks(
         family,

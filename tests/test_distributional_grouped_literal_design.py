@@ -198,6 +198,24 @@ def test_two_chunk_blocks_match_the_literal_mixed_design(monkeypatch):
     assert moments == [16] * 3 + [13] * 3
 
 
+def test_blocks_whose_sums_could_leave_the_range_contract_chunk_by_chunk(monkeypatch):
+    layout, literal, score, curvature = _problem()
+    # A sum over the 29-row block could pass 2**1000; each 8-row chunk's cannot.
+    score *= 2.0**996
+    curvature *= 2.0**996
+    moments = []
+    for name in ("diagonal_moment", "cross_moment"):
+        original = getattr(PredictorExecutionPlan, name)
+
+        def counted(self, *args, _original=original, **kwargs):
+            moments.append(self.design.n)
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(PredictorExecutionPlan, name, counted)
+    _assert_geometry(*_assemble(monkeypatch, problem=(layout, literal, score, curvature)))
+    assert moments == [8] * 9 + [5] * 3
+
+
 def _arrays(group):
     names = {name for kind in type(group).__mro__ for name in getattr(kind, "__slots__", ())}
     names |= set(getattr(group, "__dict__", {}))

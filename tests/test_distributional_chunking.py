@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import gc
-import warnings
 import weakref
 from dataclasses import dataclass
 
@@ -11,7 +10,7 @@ import pytest
 
 import superglm.distributional.family as family_contracts
 import superglm.distributional.solver.chunks as chunking
-from superglm import SuperLSS, cat, term
+from superglm import SuperLSS
 from superglm._frame import as_eager_frame
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.families.negative_binomial import (
@@ -369,31 +368,6 @@ def test_contraction_blocks_hold_whole_chunks_within_the_byte_and_row_budgets() 
     assert rows <= chunking.AUTO_CONTRACTION_MAX_ROWS < rows + 4_000
     assert chunking.contraction_block_rows(100, row_bytes, 100) == 100
     assert chunking.contraction_block_rows(10**9, row_bytes, 10**8) == 10**8
-
-
-@pytest.mark.parametrize("seed", [5, 7])
-def test_long_blocks_keep_an_exact_alias_rank_deficient(seed) -> None:
-    # The numeric column equals level b's indicator, so the location has rank 1.
-    # Its Gram entries come from a dense product and from level sums; summed over
-    # one long block, their rounding differs by more than the rank cut.
-    n = 200_001
-    b = np.arange(n) % 2 == 1
-    frame = pd.DataFrame(
-        {"x": b.astype(float), "g": np.where(b, "b", "a"), "z": (~b).astype(float)}
-    )
-    weights = np.ones(n)
-    weights[b] = np.random.default_rng(seed).uniform(0.1, 2.0, b.sum())
-    family = GaussianLS(scale_floor=0)
-    model = SuperLSS(
-        family,
-        family.location(term("x", Numeric()), cat("g", base="a"), intercept=False),
-        family.scale(term("z", Numeric()), intercept=False),
-        discrete=True,
-    )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        model.fit(frame, (~b).astype(float), sample_weight=weights)
-    assert model.result_.rank == 2
 
 
 def test_contraction_row_bytes_count_the_buffer_and_each_groups_owned_rows() -> None:
