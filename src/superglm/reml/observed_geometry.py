@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import os
+import warnings
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -435,6 +437,40 @@ def _builtin_fisher_equals_observed(distribution: Any, link: Any) -> bool:
     return False
 
 
+# Frames under this directory are superglm's own; a warning skips them to land
+# on the caller's line.
+_PACKAGE_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# The 0.41.0 name of ``reml_curvature``, read by the retired SCOP route. It
+# takes the same counterpart and returns the same 'fisher' or 'observed'
+# (whether the LAML coefficient Hessian takes Fisher or observed rows), so an
+# object that defines only it declares the same geometry under either name.
+_LEGACY_CURVATURE_HOOK = "scop_reml_curvature"
+_warned_legacy_curvature: set[type] = set()
+
+
+def _curvature_hook(owner: Any, hook_name: str) -> Any:
+    """``owner``'s curvature declaration, reading the 0.41.0 name where only it exists."""
+    hook = getattr(owner, hook_name, None)
+    if callable(hook) or hook_name != "reml_curvature":
+        return hook
+    legacy = getattr(owner, _LEGACY_CURVATURE_HOOK, None)
+    if not callable(legacy):
+        return None
+    owner_type = type(owner)
+    if owner_type not in _warned_legacy_curvature:
+        _warned_legacy_curvature.add(owner_type)
+        warnings.warn(
+            f"{owner_type.__name__} declares its REML curvature through "
+            f"{_LEGACY_CURVATURE_HOOK}, which the retired SCOP shape engine read; the "
+            "hook is now reml_curvature, with the same argument and values. Rename "
+            f"{_LEGACY_CURVATURE_HOOK} to reml_curvature to silence this warning.",
+            FutureWarning,
+            skip_file_prefixes=(_PACKAGE_DIRECTORY,),
+        )
+    return legacy
+
+
 def _explicit_curvature_protocol(
     distribution: Any,
     link: Any,
@@ -443,10 +479,10 @@ def _explicit_curvature_protocol(
     description: str,
 ) -> REMLCurvature | None:
     declarations: list[str] = []
-    distribution_hook = getattr(distribution, hook_name, None)
+    distribution_hook = _curvature_hook(distribution, hook_name)
     if callable(distribution_hook):
         declarations.append(str(distribution_hook(link)))
-    link_hook = getattr(link, hook_name, None)
+    link_hook = _curvature_hook(link, hook_name)
     if callable(link_hook):
         declarations.append(str(link_hook(distribution)))
     if not declarations:
