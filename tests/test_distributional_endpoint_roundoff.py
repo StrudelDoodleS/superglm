@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import math
+import pickle
 from dataclasses import replace
 
 import numpy as np
 import pandas as pd
 import pytest
+from benchmarks import release_differential
 
 import superglm.distributional.smoothing.authority as smoothing_authority
 import superglm.distributional.smoothing.faces as smoothing_faces
@@ -13,6 +15,7 @@ import superglm.distributional.solver.solver as solver_module
 import tests.test_distributional_endpoint_laml as endpoint_tests
 from superglm import (
     GaussianLS,
+    GeneralizedGammaLSS,
     GeneralizedParetoLSS,
     LambdaPolicy,
     Numeric,
@@ -462,6 +465,47 @@ def test_capped_generalized_pareto_fit_revalidates_its_exact_face() -> None:
     # differential's objective tolerance.
     released = -395.1090527
     assert smoothing.objective <= released + 1.0e-5 * (1.0 + abs(released))
+
+
+def test_a_stationary_endgame_keeps_an_exact_face_beside_a_capped_tensor_margin() -> None:
+    """A scalar exact face revalidates beside another cap the exact gradient certified.
+
+    The release differential's GeneralizedGammaLSS rich book ends its Newton
+    endgame stationary with ``mean:x1#wiggle`` on an exact face and the tensor
+    margin ``mean:x1:x2#margin_x1`` at the cap. A margin that shares its block
+    cannot join a face, so the sole-cap rule alone retracted the face and the
+    fit stopped ``endpoint_revalidation_failed``. Mutation check: without the
+    waiver this fit retracts.
+    """
+    frame, eta, rng = release_differential.make_data(4000, 5155)
+    response = rng.gamma(3.0, np.exp(0.5 * eta + 1.0) / 3.0)
+    family = GeneralizedGammaLSS()
+    model = SuperLSS(
+        family,
+        family.mean(
+            s("x1", kind="cr", k=8), cat("c1"), s("x2", kind="cr", k=6), re("c2"), ti("x1", "x2")
+        ),
+        family.scale(s("x2", kind="cr", k=5)),
+        family.shape(),
+    )
+    model.fit_reml(frame.iloc[:4000], response[:4000], outer="efs+newton")
+    smoothing = model._require_fitted().smoothing
+    assert smoothing is not None
+    promoted = {name for item in smoothing.history for name in item.activated_face_components}
+    beside = [
+        name
+        for name, value in smoothing.lambdas.items()
+        if name not in promoted and value == smoothing.config.maximum_lambda
+    ]
+    if not promoted or not beside:
+        # Another BLAS build can round onto a path that never caps the margin.
+        pytest.skip("this build's endgame left no cap beside an exact face")
+    assert smoothing.convergence_reason == "stationary"
+    assert smoothing.converged is True
+    assert set(model.result_.exact_face_components) == promoted
+    loaded = pickle.loads(pickle.dumps(model))._require_fitted().smoothing
+    assert loaded is not None
+    assert loaded.convergence_reason == "stationary"
 
 
 def test_a_stationary_endgame_voids_a_refreshed_cap_nomination(monkeypatch) -> None:

@@ -936,6 +936,7 @@ def fit_distributional_efs(
                     chunk_size=chunk_size,
                     phase_recorder=phase_recorder,
                     _reuse_session=reuse_session,
+                    other_caps_stationary=endgame_stationary,
                 )
                 resolved_directions: dict[str, EndpointDirectionEvidence] = {}
                 for component_name, check in recheck.checks:
