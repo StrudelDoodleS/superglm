@@ -37,6 +37,10 @@ _MOVED: dict[str, tuple[str, str | None]] = {
     "feature_se_from_cov": ("superglm.inference._term_covariance", None),
     "refit_unpenalised": ("superglm.inference._term_model_ops", "SuperGLM.refit_unpenalised"),
     "relativities": ("superglm.inference._term_model_ops", "SuperGLM.relativities"),
+    "simultaneous_bands": (
+        "superglm.inference._term_covariance",
+        "SuperGLM.simultaneous_bands",
+    ),
     "spline_group_enrichment": ("superglm.inference._term_helpers", None),
     "term_inference": ("superglm.inference._term_ops", "SuperGLM.term_inference"),
 }

@@ -689,6 +689,59 @@ def test_inference_term_old_path_still_resolves_and_warns():
         old._safe_exp  # noqa: B018
 
 
+@pytest.mark.parametrize("name", sorted(superglm.inference._MOVED))
+def test_inference_moved_name_resolves_and_warns_with_its_replacement(name):
+    """Each helper ``superglm.inference`` used to re-export resolves, naming what replaces it."""
+    import importlib
+    import re
+
+    import superglm.inference as package
+
+    owner, replacement = package._MOVED[name]
+    match = f"use {replacement}." if replacement is not None else f"its code is in {owner}."
+    with pytest.warns(FutureWarning, match=re.escape(match)):
+        resolved = getattr(package, name)
+    assert resolved is getattr(importlib.import_module(owner), name)
+
+
+def test_inference_unknown_name_raises_attribute_error():
+    import superglm.inference as package
+
+    with pytest.raises(AttributeError, match="no attribute 'not_a_moved_name'"):
+        package.not_a_moved_name  # noqa: B018
+
+
+def test_simultaneous_bands_resolves_from_both_legacy_paths_and_returns_the_bands():
+    import numpy as np
+    import pandas as pd
+
+    from superglm import Spline, SuperGLM
+    from superglm.inference._term_covariance import simultaneous_band_and_critical_value
+
+    with pytest.warns(FutureWarning, match=r"use SuperGLM\.simultaneous_bands\."):
+        from superglm.inference import simultaneous_bands as package_bands
+    with pytest.warns(FutureWarning, match=r"use SuperGLM\.simultaneous_bands\."):
+        from superglm.inference.term import simultaneous_bands as term_bands
+    assert package_bands is term_bands
+
+    rng = np.random.default_rng(575)
+    X = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 200)})
+    y = np.sin(3.0 * X["x"].to_numpy()) + rng.normal(0.0, 0.3, 200)
+    model = SuperGLM(
+        family="gaussian", features={"x": Spline(n_knots=6)}, selection_penalty=0.0
+    ).fit(X, y)
+    inputs = {
+        "result": model.result,
+        "groups": model._groups,
+        "specs": model._specs,
+        "covariance_fn": lambda: model._coef_covariance,
+        "n_sim": 500,
+        "n_points": 25,
+    }
+    expected, _ = simultaneous_band_and_critical_value("x", **inputs)
+    pd.testing.assert_frame_equal(package_bands("x", **inputs), expected)
+
+
 def test_inference_metrics_canonical():
     from superglm.inference.metrics import ModelMetrics  # noqa: F401
 

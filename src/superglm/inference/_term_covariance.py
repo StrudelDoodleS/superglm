@@ -562,6 +562,15 @@ def simultaneous_band_and_critical_value(
     return bands, c_sim
 
 
+def simultaneous_bands(feature: str, **kwargs: Any) -> pd.DataFrame:
+    """The bands of :func:`simultaneous_band_and_critical_value`, without the critical value.
+
+    Deprecated: ``superglm.inference`` and ``superglm.inference.term`` serve
+    it with a FutureWarning; ``SuperGLM.simultaneous_bands`` is the public form.
+    """
+    return simultaneous_band_and_critical_value(feature, **kwargs)[0]
+
+
 __all__ = [
     "feature_se_from_cov",
     "piecewise_knot_covariance",

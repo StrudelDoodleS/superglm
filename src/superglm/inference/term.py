@@ -9,6 +9,7 @@ _HELPERS = (
     "feature_se_from_cov",
     "refit_unpenalised",
     "relativities",
+    "simultaneous_bands",
     "spline_group_enrichment",
     "term_inference",
 )
