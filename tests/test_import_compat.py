@@ -704,6 +704,60 @@ def test_inference_moved_name_resolves_and_warns_with_its_replacement(name):
     assert resolved is getattr(importlib.import_module(owner), name)
 
 
+# The public names each module's ``__all__`` listed before its helpers moved out.
+_LEGACY_STAR_NAMES = {
+    "superglm.inference": (
+        "FactorSmoothResult",
+        "InteractionInference",
+        "ModelMetrics",
+        "ModelSummary",
+        "RandomEffectResult",
+        "SmoothCurve",
+        "SplineMetadata",
+        "TermInference",
+        "build_basis_detail",
+        "build_coef_rows",
+        "drop1",
+        "feature_se_from_cov",
+        "refit_unpenalised",
+        "relativities",
+        "simultaneous_bands",
+        "spline_group_enrichment",
+        "term_inference",
+    ),
+    "superglm.inference.term": (
+        "InteractionInference",
+        "SmoothCurve",
+        "SplineMetadata",
+        "TermInference",
+        "drop1",
+        "feature_se_from_cov",
+        "refit_unpenalised",
+        "relativities",
+        "simultaneous_bands",
+        "spline_group_enrichment",
+        "term_inference",
+    ),
+}
+
+
+@pytest.mark.parametrize("module_name", sorted(_LEGACY_STAR_NAMES))
+def test_inference_star_import_still_binds_every_legacy_name(module_name):
+    """``from <module> import *`` binds each legacy name, warning for the moved ones."""
+    import importlib
+    import warnings
+
+    module = importlib.import_module(module_name)
+    namespace: dict[str, object] = {}
+    with pytest.warns(FutureWarning, match="is deprecated and will be removed"):
+        exec(f"from {module_name} import *", namespace)  # noqa: S102
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        expected = {name: getattr(module, name) for name in _LEGACY_STAR_NAMES[module_name]}
+    for name, value in expected.items():
+        assert namespace[name] is value, name
+
+
 def test_inference_unknown_name_raises_attribute_error():
     import superglm.inference as package
 

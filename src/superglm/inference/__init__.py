@@ -70,6 +70,8 @@ def __getattr__(name: str):
     return _moved_attribute(__name__, name, _MOVED)
 
 
+# The moved helpers stay listed so a star import reaches them through __getattr__,
+# with its FutureWarning, until they are removed.
 __all__ = [
     "FactorSmoothResult",
     "InteractionInference",
@@ -79,4 +81,5 @@ __all__ = [
     "SmoothCurve",
     "SplineMetadata",
     "TermInference",
+    *_MOVED,
 ]

@@ -19,5 +19,9 @@ _MOVED = {
 }
 
 
+# Listed so a star import reaches each name through __getattr__, with its FutureWarning.
+__all__ = [*_MOVED]
+
+
 def __getattr__(name: str):
     return _moved_attribute(__name__, name, _MOVED)
