@@ -206,8 +206,8 @@ class TestMonotoneRegression:
         assert model._result.converged
 
 
-class TestSCOPPenaltyInEDF:
-    """SCOP penalty contributes to EDF and information criteria."""
+class TestShapePenaltyInEDF:
+    """A shape-constrained term's penalty contributes to EDF and information criteria."""
 
     @pytest.mark.slow
     def test_group_edf_changes_with_lambda(self):
@@ -411,8 +411,8 @@ class TestMonotoneUnsupportedCombinations:
         model.fit_reml(df[["x"]], y)
         assert model._result.converged
 
-    def test_scop_monotone_with_discrete_works(self):
-        """discrete=True + SCOP monotone_mode='fit' is now supported."""
+    def test_ps_monotone_with_discrete_works(self):
+        """discrete=True with a fit-time monotone P-spline fits."""
         rng = np.random.default_rng(42)
         n = 200
         x = rng.uniform(0, 1, n)
@@ -433,11 +433,11 @@ class TestMonotoneUnsupportedCombinations:
         assert np.all(np.diff(pred) >= -1e-8)
 
 
-# ── PSpline SCOP engine tests ─────────────────────────────────────────────────
+# ── PSpline fit-time shape constraints (QP) ──────────────────────────────────
 
 
 class TestMonotoneFitPSpline:
-    """PSpline with monotone_mode='fit' uses SCOP engine."""
+    """PSpline with monotone_mode='fit' fits on the QP."""
 
     @pytest.mark.slow
     def test_predictions_are_monotone(self):
@@ -474,7 +474,7 @@ class TestMonotoneFitPSpline:
         assert np.all(np.diff(pred) <= 1e-8)
 
     @pytest.mark.slow
-    def test_mixed_scop_and_unconstrained(self):
+    def test_mixed_constrained_and_unconstrained(self):
         rng = np.random.default_rng(42)
         n = 500
         x1 = np.sort(rng.uniform(0, 1, n))
@@ -510,8 +510,8 @@ class TestMonotoneFitPSpline:
         assert model._result.converged
 
     @pytest.mark.parametrize("fit_method", ["fit", "fit_reml"])
-    def test_kindless_constraint_without_scop_stays_cr(self, fit_method, recwarn):
-        """No SCOP term, no rewrite: a kindless ``k=4`` monotone spline is the QP ``cr``
+    def test_kindless_constraint_stays_cr(self, fit_method, recwarn):
+        """No rewrite: a kindless ``k=4`` monotone spline is the QP ``cr``
         term it was on 0.40, and nothing is built as ``ps`` (which needs ``k >= 5``).
         Fails on eedfa48e with ``k=4 is too small for kind='ps'``."""
         from superglm import Spline
@@ -603,7 +603,7 @@ class TestMonotoneFixedLambdaREML:
         )
 
     @pytest.mark.slow
-    def test_fit_reml_with_fixed_lambda_policy_scop(self):
+    def test_fit_reml_with_fixed_lambda_policy_ps(self):
         """PSpline monotone with fixed lambda_policy works in fit_reml."""
         rng = np.random.default_rng(42)
         n = 500
@@ -654,8 +654,8 @@ class TestMonotoneFixedLambdaREML:
         assert model._result.converged
 
     @pytest.mark.slow
-    def test_fit_reml_without_fixed_lambdas_works_scop(self):
-        """fit_reml works for SCOP monotone with auto lambda (Phase 5a)."""
+    def test_fit_reml_without_fixed_lambdas_works_ps(self):
+        """fit_reml works for a monotone P-spline with REML-estimated lambda."""
         rng = np.random.default_rng(42)
         n = 300
         x = np.sort(rng.uniform(0, 1, n))
@@ -780,7 +780,7 @@ class TestDiscreteMonotoneREML:
 
 
 class TestSummaryMonotoneEngine:
-    """summary() shows monotone engine type (qp/scop) alongside direction."""
+    """summary() shows the monotone engine alongside the direction."""
 
     @pytest.mark.slow
     def test_summary_shows_engine_for_qp(self):
@@ -937,7 +937,7 @@ class TestDiscreteQPMonotone:
         np.testing.assert_allclose(pred_dense, pred_disc, atol=0.05)
 
 
-class TestDiscreteSCOPMonotone:
+class TestDiscretePSMonotone:
     @pytest.mark.slow
     def test_discrete_pspline_monotone(self):
         rng = np.random.default_rng(42)
@@ -957,7 +957,7 @@ class TestDiscreteSCOPMonotone:
         assert np.all(np.diff(pred) >= -1e-8)
 
     @pytest.mark.slow
-    def test_discrete_scop_vs_nondiscrete_parity(self):
+    def test_discrete_ps_vs_nondiscrete_parity(self):
         rng = np.random.default_rng(42)
         n = 500
         x = np.sort(rng.uniform(0, 1, n))
