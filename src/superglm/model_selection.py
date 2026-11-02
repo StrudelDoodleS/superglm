@@ -590,8 +590,9 @@ def cross_validate(
         Sliced per fold; splitters operate on the physical compact rows, and
         they are read under the model's declared ``weight_semantics``. Under
         ``"frequency"``, integer values are likelihood-equivalent to literal
-        row replication within a fixed train/validation partition and fixed
-        feature geometry. Under ``"prior"`` they state a precision,
+        row replication
+        within a fixed train/validation partition and fixed feature geometry.
+        Under ``"prior"`` they state a precision,
         ``Var(Y_i) = phi * V(mu_i) / w_i``; a Tweedie fit additionally
         requires them finite and strictly positive.
     offset : array-like, optional
