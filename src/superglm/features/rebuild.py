@@ -1,13 +1,10 @@
 """Rebuild a term's spec with new structural decisions.
 
-A structural decision -- how a categorical's levels are grouped, which level
-is the reference, where new levels go, the polynomial ranges, knots and kind
-of a spline -- is built into a fresh, unfitted spec made from the term's
-declaration, never by mutating a fitted one, and the new spec goes into a
-clone of the model.
-The editor's collapse, ungroup, reference, shape, knot and basis steps and
-:meth:`superglm.structure.Structure.apply` build terms here, so the two share
-one implementation and the library never imports the editor.
+A structural decision (level grouping, reference level, polynomial ranges,
+spline knots and kind) is built into a fresh, unfitted spec from the term's
+declaration, never by mutating a fitted one, and goes into a clone of the
+model. The editor and :meth:`superglm.structure.Structure.apply` both build
+terms here, so the library never imports the editor.
 """
 
 from __future__ import annotations
@@ -42,10 +39,8 @@ from superglm.features.spline import CardinalCRSpline, PSpline, Spline, _SplineB
 # The declared bases a fit resolves to a level itself.
 SYMBOLIC_BASE_POLICIES = frozenset({"first", "most_exposed"})
 # The levels a structural decision took off an ordered term's curve, by label,
-# each with what it needs to go back: its value on the axis, and the levels
-# before it in the term's order, nearest first. Levels declared special have
-# neither, so they cannot go onto the curve. A plain dict of tuples, so a
-# pickled spec needs no class from here.
+# each with its axis value and the levels before it, nearest first. A plain
+# dict of tuples, so a pickled spec needs no class from here.
 FREED_LEVELS_ATTRIBUTE = "_freed_levels"
 # Set on a spline whose knots were chosen in the editor, read by structure.py:
 # a structure file records the knots of a spline carrying it, and no others.
@@ -87,11 +82,9 @@ def clone_with_replaced_features(model, replacements: dict[str, Any], *, lambda1
     new_model = model._clone_without_features(set(), lambda1=lambda1, lambda2=lambda2)
     for term, replacement in replacements.items():
         new_model._specs[term] = copy.deepcopy(replacement)
-    # A bind_levels binding was resolved on the old spec. Its base names a
-    # level of the old grouping, which a replacement whose base is still
-    # "most_exposed" would pin though it may no longer be a level, so a
-    # replaced term's base resolves again where it is fitted. Its universe
-    # carries over only to a replacement that declares none.
+    # A bind_levels base names a level of the old grouping, so a replaced
+    # term's base resolves again where it is fitted. The universe carries over
+    # only to a replacement that declares none.
     kept = []
     for name, binding in getattr(new_model, "_level_bindings", None) or ():
         if name not in replacements:
@@ -135,12 +128,10 @@ def rebuilt_categorical(
 ) -> Categorical:
     """A fresh Categorical like ``spec`` with this grouping and base.
 
-    It keeps ``levels=`` and ``unseen=``, which a collapse or ungroup used to
-    drop; ``unseen`` replaces the policy and ``levels`` the declared universe.
-    Grouped, the design speaks the grouping's text labels; ungrouped, the base
-    goes back to its native value, so an integer level stays 3, not "3".
-    ``level=True`` says ``base`` names a level or group, as a reference a fit
-    resolved does, even when it reads "first" or "most_exposed".
+    It keeps ``levels=`` and ``unseen=``. Grouped, the design speaks the
+    grouping's text labels; ungrouped, the base goes back to its native value
+    (an integer level stays 3, not "3"). ``level=True`` says ``base`` names a
+    level or group even when it reads "first" or "most_exposed".
     """
     named = level or str(base) not in SYMBOLIC_BASE_POLICIES
     if grouping is None and named:
@@ -167,12 +158,10 @@ def base_names_level(spec) -> bool:
 def _declared_universe(spec: Categorical, grouping) -> list | None:
     """The universe a rebuild of ``spec`` declares: its own, widened where it accepted more.
 
-    A universe bound from a frame or a dtype is not a declaration: the term
-    accepted every label its grouping maps, those the frame lacks included.
-    So did a term declared before construction refused a grouping wider than
-    ``levels=`` (:func:`accepted_levels`). The rebuilt term declares its
-    universe, and a declaration names every label its grouping maps, so those
-    labels follow the declared ones, which keep their order and so the design's.
+    A universe bound from a frame or dtype is not a declaration, and an older
+    term may carry a grouping wider than ``levels=`` (:func:`accepted_levels`).
+    The rebuilt term declares every label its grouping maps, after the
+    declared ones, whose order the design keeps.
     """
     declared = spec._declared_levels
     if spec._level_source == "declared" and accepted_levels(spec) == declared:
@@ -183,11 +172,9 @@ def _declared_universe(spec: Categorical, grouping) -> list | None:
 def accepted_levels(spec: Categorical) -> list | None:
     """The levels ``spec`` accepts by declaration: ``levels=``, and what its grouping adds.
 
-    Construction refuses a grouping that maps labels ``levels=`` leaves out,
-    but a term pickled before it did (superglm 0.36.1 and earlier), or one
-    whose universe a frame bound, keeps such a grouping: it fits and scores
-    those labels through their group. They follow the declared levels. None
-    when nothing is declared.
+    A term pickled by superglm 0.36.1 or earlier, or one whose universe a frame
+    bound, may keep a grouping that maps labels ``levels=`` leaves out; those
+    follow the declared levels. None when nothing is declared.
     """
     return _with_grouped(spec._declared_levels, getattr(spec, "_grouping", None))
 
@@ -239,11 +226,8 @@ def rebuilt_ordered_spec(
     """
     named = level or str(base) not in SYMBOLIC_BASE_POLICIES
     values, native_base = _ordered_original_values(spec, grouping, data, base, named=named)
-    # Clone the RAW declarations, not the string-coerced ``_specials``. A special
-    # declared as ``9`` on a float column matches through its raw label -- the
-    # string view renders 9.0 as "9.0", which never equals "9" -- so rebuilding
-    # from the coerced form silently drops that fallback and the special's
-    # indicator comes back all-zero on a refit.
+    # Clone the raw declarations, not the string-coerced ``_specials``: a
+    # special declared as ``9`` on a float column matches through its raw label.
     specials = list(spec._special_raw) or list(spec._specials)
     shown = list(spec._special_display)
     record = freed_levels(spec)
@@ -268,19 +252,13 @@ def rebuilt_ordered_spec(
         record[label] = (values.pop(key), tuple(reversed(before)))
         specials.append(key)
         shown.append(key)
-    # A special the declaration also named in order= or values= is reported
-    # under that domain spelling (9.0 beside 1.0 and 2.0) and matches rows
-    # through its raw label (9). The smooth's values lack it, so it is named
-    # in values= again, which takes it out of the smooth as the declaration
-    # did and keeps the spelling; the value given is never read.
+    # A special also named in order=/values= is reported under that spelling
+    # (9.0) and matches rows through its raw label (9); naming it in values=
+    # again keeps both. The value given is never read.
     values.update(dict.fromkeys(shown, 0.0))
     source = pristine_basis(spec) if basis is None else basis
-    # Collapsing levels shrinks the level count, so the pristine spline's
-    # ``n_knots`` routinely exceeds the new ``n_levels - 1`` and construction
-    # clamps it. That clamp is the caller's own basis being re-fitted to the
-    # levels the caller just asked to merge, not a configuration mistake, and
-    # the user-facing construction already warned if the original declaration
-    # over-specified. Do not repeat it from an internal rebuild.
+    # Collapsing levels routinely clamps the pristine spline's ``n_knots``; the
+    # user-facing construction already warned, so an internal rebuild does not.
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
@@ -392,32 +370,18 @@ def _returned_value(
 
 def pristine_basis(spec: OrderedCategorical):
     """A copy of the spline ``spec`` was declared with, before its level count clamped it."""
-    # Clone from the pristine caller-supplied spline, not the clamped inner
-    # copy: the new spec re-clamps against ITS OWN level count, which can
-    # exceed the current one when a grouping is being undone. `_spline_obj` is
-    # always set on a spec this version constructed; the fallback covers a
-    # pre-0.24 pickle, whose `_basis_spline` read refuses a step-mode spec
-    # loudly instead of silently cloning it onto the default spline.
-    #
-    # Read it with `getattr`, not `spec._spline_obj`: an attribute-less read
-    # only reaches the fallback when the key EXISTS and is None, so a pickle
-    # old enough to predate the attribute raised a bare AttributeError naming
-    # `_spline_obj` -- still loud, but without the migration sentence, and
-    # never reaching `_basis_spline` where that sentence lives.
+    # Clone the pristine spline, not the clamped inner copy: the new spec
+    # re-clamps against its own level count, which grows when a grouping is
+    # undone. `getattr`, so a pickle predating `_spline_obj` reaches the
+    # `_basis_spline` refusal and its migration sentence.
     spline_obj = getattr(spec, "_spline_obj", None)
     if spline_obj is not None:
         source = copy.deepcopy(spline_obj)
     else:
-        # A shortcut-era pickle has no pristine declaration, only the inner
-        # spline -- and its `n_knots` was already clamped to the level count it
-        # was BUILT against. Cloning that alone keeps the reduced basis, which
-        # is wrong in exactly the direction ungrouping goes: back to MORE
-        # levels. The removed shortcut path rebuilt from the then-plain
-        # `n_knots` attribute, i.e. the count the caller REQUESTED, and that
-        # entry survives in the pickled __dict__ because the class property
-        # only shadows it. Recover it and let __init__ re-clamp against the new
-        # level count, so the clamp is still enforced -- just against the right
-        # number of levels.
+        # A shortcut-era pickle has only the inner spline, its `n_knots` clamped
+        # to the level count it was built against. The requested count survives
+        # in __dict__ (the property shadows it); recover it and let __init__
+        # re-clamp against the new level count.
         source = copy.deepcopy(spec._basis_spline)
         requested = spec.__dict__.get("n_knots")
         if isinstance(requested, int | np.integer) and int(requested) > source.n_knots:
@@ -449,10 +413,8 @@ def _ordered_original_values(
 
 def special_labels(spec: OrderedCategorical) -> set[str]:
     """The free (special) levels of ``spec``, in every spelling the editor displays."""
-    # Both namespaces: displayed levels arrive in the DISPLAY spelling, so
-    # matching only the str-coerced `_specials` leaves a guard INERT on a float
-    # domain ("9" vs "9.0") -- and a guard that fails open here silently smooths
-    # a level that `specials=` still reports as free.
+    # Both namespaces: displayed levels arrive in the display spelling, so
+    # matching only the str-coerced `_specials` would fail open on a float domain.
     return {str(level) for level in spec._specials} | {
         str(level) for level in spec._special_display
     }
@@ -732,9 +694,8 @@ def rebased_spline(
 def _carry_marks(source: _SplineBase, spline: _SplineBase) -> None:
     """Mark ``spline`` with the editor's marks ``source`` carries.
 
-    A P-spline rebuilt from one 0.41.0 fitted on SCOP keeps that mark too, so
-    its build warns that the constraint now fits on the QP. Another kind fits
-    on the QP as it did in 0.41.0 and takes no mark.
+    A P-spline rebuilt from one fitted on SCOP keeps that mark, so its build
+    warns that the constraint now fits on the QP.
     """
     for mark in EDITOR_MARKS:
         if getattr(source, mark, False):
