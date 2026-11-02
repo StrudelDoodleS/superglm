@@ -91,19 +91,16 @@ class StructuredSolverError(np.linalg.LinAlgError):
 def _structured_solver_errors():
     """Raise a structured factor's ``np.linalg.LinAlgError`` as ``StructuredSolverError``.
 
-    Wraps every structured factor operation of a fit: the build and ``solve``
-    at each iterate, the terminal build, ``logdet`` and
-    ``trace_inverse_operator``, and the discrete line search's cached solve.
-    The factors refuse with ``np.linalg.LinAlgError`` rather than truncate
-    when they cannot certify a rank decision or represent a result.
+    Wraps every structured factor operation of a fit.  The factors refuse
+    with ``np.linalg.LinAlgError`` rather than truncate when they cannot
+    certify a rank decision or represent a result.
     """
     try:
         yield
     except StructuredSolverError:
         raise
     except np.linalg.LinAlgError as error:
-        # ``str`` leaves out a refusal's notes (the largest Levenberg shift's
-        # own refusal, ``_build_iterate_factor``): each joins the message
+        # ``str`` leaves out the error's notes, so join them to the message
         notes = "".join(f" {str(note).rstrip('.')}." for note in getattr(error, "__notes__", ()))
         raise StructuredSolverError(
             f"The structured solver cannot proceed: {str(error).rstrip('.')}.{notes} This "
@@ -112,13 +109,10 @@ def _structured_solver_errors():
         ) from error
 
 
-# Levenberg shifts of an observed iterate the structured factor refuses as not
-# positive definite (one-engine design §3.11): Wood, Pya & Saefken (2016, JASA,
-# section 3.1.2) factor the Jacobi-preconditioned Hessian H' + eps I "with
-# increasing eps, starting from zero, until positive definiteness is obtained";
-# in unscaled coordinates that adds eps |H_ii| to each diagonal entry.  The
-# sequence is fixed, so the shift an iterate takes is a function of the
-# iterate alone; the perturbation does not move the converged mode.
+# Levenberg shifts for an observed iterate the factor refuses as not positive
+# definite: increasing eps on the Jacobi-scaled Hessian, eps |H_ii| unscaled
+# (Wood, Pya & Saefken 2016, section 3.1.2).  The sequence is fixed, so the
+# shift is a function of the iterate alone and does not move the mode.
 _LEVENBERG_SHIFTS = tuple(10.0**power for power in range(-8, 9, 2))
 
 
@@ -219,15 +213,11 @@ def _build_iterate_factor(system, penalized_operator, *, observed: bool):
     An ``sz`` shift is diagonal in level space, not in the public coordinates:
     its ``diag(E)`` is then a callable ``beta -> E beta``.
 
-    Fisher rows are never refused for curvature (a structured refusal of them
-    propagates).  An observed nested iterate the factor refuses (a tree pivot
-    within its certified uncertainty, material negative border curvature)
-    takes the smallest Levenberg shift of ``_LEVENBERG_SHIFTS`` whose factor
-    certifies.  When none does, the unshifted refusal propagates, since it
-    names the iterate's own cause; the largest shift's refusal is attached
-    to it as a note.  The shifted Newton step ``(H + E)^-1 g`` from ``beta``
-    is the normal-equations solve with ``E beta`` added to the right-hand
-    side (the caller's part).
+    A refused Fisher iterate propagates.  A refused observed iterate takes the
+    smallest shift of ``_LEVENBERG_SHIFTS`` whose factor certifies; if none
+    does, the unshifted refusal propagates with the largest shift's attached
+    as a note.  The caller adds ``E beta`` to the right-hand side to make the
+    shifted Newton step ``(H + E)^-1 g``.
     """
     try:
         factor, rhs = build_augmented_structured_factor(system, penalized_operator)
@@ -265,20 +255,16 @@ def _structured_score_centre(
 ) -> tuple:
     """``(mean_x, sum_w, centred diagonal, weakly identified slopes, mean_x - c)`` of a structured solve.
 
-    The centring the certificate's score is formed about (``mode_residual``):
-    the working-weighted means of the system, its centred data diagonal
-    (offset-free for a nested chain, ``compact_operator_diagonal``), the
-    slopes the factor truncated as weakly identified (one-engine design §3.6
-    step 5, §3.9), and the means' offset from the state's centre
-    (``centre_offset_mean``; ``None`` without a centred state).
+    The centring the certificate's score is formed about (``mode_residual``).
+    The last entry is ``None`` without a centred state.
     """
     operator = system.operator
     xtw = np.empty(operator.shape[0], dtype=np.float64)
     xtw[operator.small_indices] = system.xtw_small
     xtw[operator.structured_indices] = system.xtw_structured
     mean_x = xtw / system.sum_w
-    # an fs or sz system centres its c0-shifted moments (design §3.2), so a
-    # large-offset column's centred diagonal does not cancel to noise
+    # an fs or sz system centres its c0-shifted moments, so a large-offset
+    # column's centred diagonal does not cancel to noise
     diagonal = compact_operator_diagonal(centred_data_operator(system))
     excluded = tuple(
         index - 1 for index in getattr(factor, "weakly_identified_coefficients", ()) if index > 0
@@ -294,15 +280,11 @@ def _structured_score_centre(
 class _IRLSDirectStructuredStep(_IRLSDirectStep):
     """The fit's step on the structured backend: the random-effect chain, ``fs`` or ``sz`` term in block form.
 
-    Chosen with the route, in ``_IRLSDirectFit._setup_design``, from the
-    model's structure alone (``resolve_structured_backend``), never its data;
-    its layout fixes the state's centre.  It keeps the dominant group, its
-    layout and the last system it solved, and no reference to the fit, whose
-    state each method is handed.  Each iteration forms the block system and its
-    penalised operator (timed as the Gram), then factors and solves them (timed
-    as the solve).  Its finaliser replaces the centred one: the retained model's
-    block system, ``cache_out``, and the profiled factor's ``log det H``, rank
-    and EDF, with no dense ``RankInfo``.
+    Chosen from the model's structure alone, never its data; its layout fixes
+    the state's centre.  Keeps the dominant group, its layout and the last
+    system solved, and no reference to the fit.  Its own finaliser publishes
+    the profiled factor's ``log det H``, rank and EDF, with no dense
+    ``RankInfo``.
     """
 
     __slots__ = ("_group_index", "_layout", "_last_system")
@@ -321,8 +303,8 @@ class _IRLSDirectStructuredStep(_IRLSDirectStep):
             chain_group_indices=decision.chain_group_indices,
         )
         if isinstance(layout, FactorSmoothLeafLayout):
-            # every dense kernel of the fs leaf route acts on its border (perf F7);
-            # a nested chain's parent blocks are not border-wide and keep the release
+            # every dense kernel of the fs leaf route acts on its border; a
+            # nested chain's parent blocks are not border-wide and keep the release
             keep_narrow_cap(len(layout.small_indices) + 1)
         self._group_index, self._layout = group_index, layout
         # the system the last step solved: the fREML performance iteration's export
@@ -333,10 +315,9 @@ class _IRLSDirectStructuredStep(_IRLSDirectStep):
     def state_centre(self, weights: NDArray, p: int) -> NDArray | None:
         """The PIRLS state's centre: the factor's prior-weighted border centre ``c0``, 0 on the tree.
 
-        One-engine design §3.8: a nested chain's PIRLS state is ``(alpha, beta)``
-        about ``c0``, so no eta is ever formed by cancelling ``X beta`` against a
-        raw intercept that absorbs a column's offset; an ``fs`` term's state is
-        the same (design §3.4).  ``None`` for an ``sz`` term.
+        A nested chain's or ``fs`` term's state is ``(alpha, beta)`` about
+        ``c0``, so eta is never formed by cancelling ``X beta`` against a raw
+        intercept that absorbs a column's offset.  ``None`` for an ``sz`` term.
         """
         layout = self._layout
         if isinstance(layout, NestedStructuredLayout):
@@ -415,32 +396,13 @@ class _IRLSDirectStructuredStep(_IRLSDirectStep):
         if augmented_factor.rank_truncated and (
             isinstance(augmented_factor, SumToZeroTreeFactor) or newton_score is not None
         ):
-            # A truncated factor is a generalized inverse, and its
-            # normal-equations solution ``H^+ [1 X]'Wz`` is the minimum-norm
-            # representative: it resets the iterate's component along every
-            # truncated direction on each step.  Along an ``sz`` level whose
-            # rows the likelihood drives to the link's boundary (a one-row
-            # level with a response below a log link's range: no finite
-            # mode, Geyer 2009, Theorem 4) the direction is truncated once
-            # its rows' working weight falls to its rounding, and the reset
-            # moves those rows' eta arbitrarily far (+2844 from -20.7 on
-            # the stage-4 fixture); step halving then stalls every other
-            # coefficient and PIRLS ends uncertified.  The Gauss-Newton
-            # step of a rank-deficient problem is the minimum-norm
-            # *increment* (Pes & Rodriguez 2021, arXiv 2101.07560, eqs.
-            # 1.2-1.4; the Newton step of Wood, Pya & Safken 2016, section
-            # 3.1.2): ``Delta = H^+ g``, ``g = [1 X]' W (z - eta) - [0; S
-            # beta]``, the shifted factor's under a Levenberg shift, which
-            # leaves the iterate where it is along the truncated directions.
-            # Projecting the iterate onto the null space on every step (the
-            # minimal-norm variant, ibid. section 2, and in effect the
-            # solve above) is safe only along exact nulls; along a direction
-            # truncated as rank but carrying data it raises the residual,
-            # the failure they analyse.  Along an exact null (data and
-            # penalty both leave it free) the iterate keeps its component:
-            # no fitted value or penalty moves along it.  In exact
-            # arithmetic the same step as the solve above whenever nothing
-            # is truncated.
+            # On a truncated factor, step by the minimum-norm increment
+            # ``Delta = H^+ g``, ``g = [1 X]' W (z - eta) - [0; S beta]`` (Pes &
+            # Rodriguez 2021, arXiv 2101.07560, eqs. 1.2-1.4), not the
+            # minimum-norm solution ``H^+ [1 X]'Wz``: the latter resets the
+            # iterate along every truncated direction, which throws a level
+            # with no finite mode (Geyer 2009, Theorem 4) arbitrarily far.  The
+            # two agree in exact arithmetic when nothing is truncated.
             if newton_score is not None:
                 # a mean-space Newton step taken as the increment on a
                 # truncated structured factor
@@ -448,14 +410,10 @@ class _IRLSDirectStructuredStep(_IRLSDirectStep):
             residual_rows = W * (fit.z - fit.eta) if newton_score is None else newton_score
             gradient = np.empty(fit.p + 1, dtype=np.float64)
             gradient[0] = float(np.sum(residual_rows))
-            # the increment's intercept entry in the state's own coordinate:
-            # alpha about the centre when the state is centred (round 1's
-            # centred state; the raw intercept would cancel at a large
-            # column offset), else the raw intercept.  A centred state
-            # takes the score about the same centre, ``(X - 1 c')' r``
-            # formed on centred rows, so the border's ``X' r`` is never
-            # cancelled against ``c`` times the intercept's (a 1e16
-            # offset left no digit of it and the step was rejected)
+            # The intercept entry is in the state's own coordinate (alpha about
+            # the centre when centred), and a centred state's score is formed
+            # on centred rows, ``(X - 1 c')' r``, so a large column offset never
+            # cancels the border's ``X' r``.
             if _state_center is not None:
                 gradient[1:] = centred_data_score(
                     dm, residual_rows, _state_center
@@ -491,11 +449,9 @@ class _IRLSDirectStructuredStep(_IRLSDirectStep):
     def finalise(self, fit: _IRLSDirectFit) -> _IRLSDirectFinalGeometry:
         """The retained model's block system and ``cache_out``, then its profiled factor.
 
-        The structured path retains the moments in block form and never
-        materialises the dominant ``K x K`` block.  An fREML performance
-        iteration (``_return_working_system``) publishes the system its last
-        step solved; every other fit, the system of the export rows at the
-        retained model.
+        Moments stay in block form; the dominant ``K x K`` block is never
+        materialised.  An fREML performance iteration publishes the system its
+        last step solved, every other fit the export rows' system.
         """
         W, dm, p, gms, groups = fit.W, fit.dm, fit.p, fit.gms, fit.groups
         _return_working_system, cache_out = fit._return_working_system, fit.cache_out
@@ -530,9 +486,8 @@ class _IRLSDirectStructuredStep(_IRLSDirectStep):
         sum_W = structured_final.sum_w
         mean_x = XtW1 / sum_W
 
-        # Cache final-iteration raw and stable centered quantities for the cached-W
-        # fREML optimizer. These allow re-solving the profiled-intercept system with
-        # a new penalty matrix S without any data passes.
+        # The cached-W fREML optimizer re-solves the profiled system for a new
+        # penalty from these, with no data pass.
         if cache_out is not None:
             XtWz = np.empty(p, dtype=np.float64)
             XtWz[XtWX_beta.small_indices] = structured_final.xtwz_small
@@ -591,10 +546,8 @@ class _IRLSDirectStructuredStep(_IRLSDirectStep):
         else:
             p_eff = 0.0
         fit.recorder.finalize_time(_t0)
-        # Structured Schur factors have their own retained-factor protocol, and
-        # retained-fit inference consumes the factor directly: the dense
-        # decomposition seam does not apply, and a dense RankInfo would defeat
-        # the backend's O(K q + q²) memory bound.
+        # Inference reads the structured factor directly; a dense RankInfo
+        # would break the backend's O(K q + q^2) memory bound.
         return _IRLSDirectFinalGeometry(
             XtWX_beta=XtWX_beta,
             XtWX_S_inv_beta=XtWX_S_inv_beta,

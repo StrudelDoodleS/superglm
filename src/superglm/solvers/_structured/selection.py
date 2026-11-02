@@ -45,24 +45,14 @@ class StructuredBackendDecision:
     """Resolved direct backend and the selected dominant block.
 
     Every field is decided by the model's terms, their sizes and penalties
-    and the call's configuration, never by values, weights or a caught error
-    (one-engine design §6).  ``fallback_reason`` says why ``auto`` takes gram
-    for these terms (below the size crossover, constraints, no structured
-    term); a fit never switches solver after this decision.
-
-    ``auto_cost_ratio`` carries the crossover model's predicted
-    structured/dense cost ratio whenever ``direct_solve="auto"``
-    reached the cost comparison, for either outcome.  It is ``None`` for
-    forced backends and for eligibility (non-cost) decisions.  Callers put it
-    in the fit profile beside the realized timings so the crossover constants
-    can be recalibrated against real fits (issue #343).
-
-    ``chain_group_indices`` is, for a RandomEffect leaf, its nested chain,
-    coarsest to finest, with ``[-1] == group_index`` (``(g,)``, a chain of one,
-    for a lone random effect); ``(g,)`` for a FactorSmooth block; ``()``
-    without a structured group.  ``nested_fallback_reason`` says why a
-    detected chain was declined to its leaf alone (an override that couples
-    it to the border).
+    and the call's configuration, never by values, weights or a caught error;
+    a fit never switches solver after it.  ``fallback_reason`` says why
+    ``auto`` takes gram.  ``auto_cost_ratio`` is the predicted
+    structured/dense cost ratio when ``auto`` reached the cost comparison,
+    else ``None``.  ``chain_group_indices`` is a RandomEffect leaf's nested
+    chain, coarsest to finest, ending with ``group_index``; ``(g,)`` for a
+    FactorSmooth block; ``()`` without a structured group.
+    ``nested_fallback_reason`` says why a found chain was declined to its leaf.
     """
 
     use_structured: bool
@@ -75,82 +65,20 @@ class StructuredBackendDecision:
 
 
 _AUTO_MIN_COEFFICIENT_WIDTH = 32
-# RandomEffect crossover, re-measured 2026-09-27 after the Schur rank floor
-# changed, the structured Newton Hessian started forming each
-# H^-1 O product once, and nested chains gained their own factor
-# (notes/research/2026-09-26-nested-random-effect-elimination.md, section 5).
-# With w = p + 1, a structured backend that leaves a border of b columns costs
-# K b^2 + b^3 = w b^2 flop units per factorization against the dense w^3, so it
-# predicts the cost ratio (b / w)^2: b1 = w - K for the single level, b = w - k
-# for a chain of k nodes.  A chain also forms the centred within-leaf scatter at
-# every PIRLS iterate and W-derivative operator (sections 3.4 and 3.6), dense
-# passes over the n rows that the other backends skip, priced as
-# _AUTO_NESTED_ROW_PASSES passes of n b^2: its ratio is (b / w)^2 (1 + passes n / w).
-# auto prices every RandomEffect leaf as its chain, a lone level as a chain of
-# one, within 0.75.
-# Memory, w b against w^2, is at most the square root of that ratio, so it never
-# reverses the order; the dense fits below that hit the cap had peaked at 3.4 to
-# 24.0 GiB.
-#
-# Anchors: complete fit_reml fits, one per process, every thread pool pinned to
-# one, 1-minute load under 2.5; wall seconds, ">300" is the cap.  Rows marked *
-# re-measured single against nested on the one-pass row pass (2026-09-27, load
-# 1.9 to 3.4, ABBA means of four fits a side; pg17 C exact one pair).  "single"
-# is the single-level Schur factor (ScalarSchurFactor), retired in one-engine
-# stage 4; its columns are the calibration evidence, not a route:
-#
-#   shape                          n        p       chain            gram  single  nested
-#   pg17 C exact, 5k-row sample *  3,885    562     51/407           13.7     8.2     4.0
-#   pg17 C exact *                 77,014   1,133   87/942           76.2    28.6    40.4
-#   pg17 C discrete *              77,014   1,133   87/942           32.2     3.5     6.5
-#   dvsa C exact, 20k rows *       15,794   1,458   91/1,332         41.5     3.9     2.7
-#   dvsa C discrete, 200k rows *   157,593  4,008   223/3,749        >300     3.0     3.0
-#   dvsa D discrete, 20k rows      15,794   3,862   91/1,332/2,404   >300    42.4     1.6
-#   dvsa D discrete, 200k rows     157,593  10,046  223/3,749/6,038  >300    >300     6.1
-#   pg17 E discrete (crossed leaf) 77,014   16,850  15,717           >300   125.3   100.0
-#   pg17 B exact                   77,014   191     87               16.9    13.8        -
-#
-# The chain's extra passes were priced when a single level still ran the scalar
-# factor, between it and the chain.  Each anchor fixed the passes at which
-# the two ratios tie; the order measured put the price in the bracket (0.035,
-# 0.175): below it pg17 C, where 87 parent nodes sit beside 77k rows, took the
-# slower chain (1.4x exact, 1.8x discrete), above it the pg17 5k sample (2.0x)
-# and then DVSA C exact (1.5x, from 1.06 passes) kept their parents in the
-# border, and DVSA D only above 400.  0.08 sits at the bracket's geometric
-# middle.  The two-read pass it replaced, with its formed border Gram, was
-# priced at 2 inside (1.23, 401).
-#
-# The August 2026 bound of 0.05 (issue #343) was set on a ~67k-row Tweedie(1.5)
-# log-link pricing workload that is not in the repository, where the structured
-# Newton Hessian then cost 5.8 s against 0.01 s dense.  Stand-ins with the same
-# n, K, q and family now show the single level ahead at every #343 shape (gram /
-# single: K=23 beside q=77 41.3 / 37.8; K=39, q=49 15.6 / 14.0; K=80 15.1 / 13.1;
-# K=105 15.6 / 13.7; K=225 14.3 / 11.1), as do Poisson stand-ins at K=80, 105 and
-# 225, pg17 B above (ratio 0.30), and the small-n corner the old bound sent to
-# gram (n=2,000: K=300 beside q=100 14.3 / 10.4; K=600 beside q=200 113 / 73.4).
-# The largest ratio measured ahead is 0.596; at 0.77 (n=200, K=4 beside q=28) the
-# two tie, so 0.75 keeps near-degenerate shapes dense.
-#
-# A lone level is a chain of one on NestedSchurFactor: the scalar factor formed
-# Q by subtraction and truncated on the unscaled Q (spec sections 3.7 and 8),
-# and at ratios in (0.05, 0.75] it refused 22 of 64 randomized fit_reml fits on
-# raw year or vehicle-value columns and aliases under prior weights near 1e2
-# (2026-09-28), where the chain of one refused none of 202.  Priced as a chain,
-# the #343 shapes (K <= 105 beside 67k rows) stay on gram.
-#
-# No chain is declined for its family, link, working rows or the machine's
-# memory: the chain factors signed observed rows (one-engine design §3.3), and
-# a leaf whose override couples it to the border takes gram by that structure
-# alone, as a constrained term does.
+# RandomEffect crossover.  With w = p + 1, a structured factor that leaves a
+# border of b = w - (chain levels) columns costs K b^2 + b^3 = w b^2 flops per
+# factorization against dense w^3, a ratio of (b / w)^2.  A chain also makes
+# dense passes of n b^2 over the rows at every iterate, priced as
+# _AUTO_NESTED_ROW_PASSES passes: ratio (b / w)^2 (1 + passes n / w).  A lone
+# level is a chain of one.  Memory (w b against w^2) never reverses the order.
+# Both constants are calibrated on complete fit_reml fits (issue #343 and the
+# nested-chain work); 0.75 keeps near-degenerate shapes dense.  No chain is
+# declined for its family, link, working rows or memory.
 _AUTO_MAX_NESTED_COST_RATIO = 0.75
 _AUTO_NESTED_ROW_PASSES = 0.08
-# FactorSmooth and sum-to-zero blocks keep the August 2026 constant bound on the
-# factorization ratio (issue #343): synthetic "fs" and "sz" sweeps then lost at
-# mid ratio and won at tiny ratio, and section 5 leaves them as they are.  A
-# sum-to-zero block priced within it takes the balance tree (one-engine design
-# §3.5), which replaced SumToZeroBlockFactor: that range-space factor refused
-# every exactly rank-deficient design and returned inexact fits at tiny lambda
-# under large weights without refusing (2026-09-29).
+# FactorSmooth and sum-to-zero blocks take the structured route below this
+# factorization cost ratio (issue #343); a sum-to-zero block takes the balance
+# tree.
 _AUTO_MAX_STRUCTURED_COST_RATIO = 0.05
 
 
@@ -161,8 +89,8 @@ def _random_effect_auto_cost_ratio(
 ) -> float:
     """Predicted structured/dense cost ratio of a RandomEffect leaf's chain.
 
-    ``level_sizes`` runs coarsest to finest over the chain, one entry for a
-    chain of one; the model and its anchors are the comment above.
+    ``level_sizes`` runs coarsest to finest over the chain; the model is the
+    comment above ``_AUTO_MAX_NESTED_COST_RATIO``.
     """
     width = coefficient_width + 1
     border = width - sum(level_sizes)
@@ -237,11 +165,7 @@ def _structured_auto_cost_decision(
     chain: tuple[int, ...],
     nested_fallback_reason: str | None,
 ) -> StructuredBackendDecision:
-    """Return the measured automatic crossover decision for one selected block.
-
-    A RandomEffect leaf compares its chain, a chain of one included, with
-    gram.
-    """
+    """Return the automatic crossover decision for one selected block."""
     small_size = coefficient_width - dominant_matrix.shape[1]
     bound = _AUTO_MAX_STRUCTURED_COST_RATIO
     if isinstance(dominant_matrix, RandomEffectGroupMatrix):
@@ -306,13 +230,10 @@ def record_auto_backend_decision(
 ) -> None:
     """Record one automatic crossover decision for offline recalibration.
 
-    Writes the predicted cost ratio and the choice into the fit
-    profile, where they sit beside the realized per-phase timings
-    (``irls_gram_s``, ``irls_solve_s``, ``reml_*_s``) that a forced-backend
-    rerun can be compared against.  Emits one INFO line when ``auto`` commits
-    to the structured backend; drivers that resolve once per fit pass
-    ``log=True``, per-solve callers pass ``log=False`` so repeated inner
-    resolutions stay quiet.
+    Writes the predicted cost ratio and the choice into the fit profile,
+    beside the realized phase timings.  ``log=True`` emits one INFO line when
+    ``auto`` chooses the structured backend; per-solve callers pass
+    ``log=False``.
     """
     if direct_solve != "auto" or decision.auto_cost_ratio is None:
         return
@@ -424,11 +345,9 @@ def nested_parent_codes(
 ) -> NDArray | None:
     """Return each child level's parent code, or ``None`` when not strictly nested.
 
-    The count test of §3.7 in O(n) without a sort: record one parent per child
-    code and require every row to agree with it, which holds exactly when
-    each observed child code meets a single parent code.  Unobserved child
-    levels point at parent 0 (their accumulated weight is exactly zero, so the
-    pointer is never read, §3.7).
+    The strict-nesting count test in O(n) without a sort: each observed child
+    code must meet a single parent code.  Unobserved child levels point at
+    parent 0; their weight is exactly zero, so the pointer is never read.
     """
     return _parent_codes(child.codes, parent.codes, child.n_levels)
 
@@ -445,19 +364,14 @@ def _group_spans(groups: list[GroupSlice]) -> tuple[tuple[str, int, int], ...]:
     return tuple((group.name, group.start, group.end) for group in groups)
 
 
-# The nesting cache holds the pair tests (``nested_parent``), the chains
-# (``nested_chain``) and the chains' trees with their leaf row orders
-# (``nested_tree``); every key carries its group indices and the group spans.
-# It is one dictionary, stored in a design's ``_structured_layout_cache``
-# and shared by reference with every lambda rebuild of that design
-# (``carry_nesting_cache``), so the pair tests' O(n) row passes and the leaf
-# argsort run once per design lineage, not once per REML outer iteration or
-# per refit.  The leaf row order is its one O(n) entry, 8 bytes per row plus
-# K + 1 starts, held as long as the fitted design (the cache is not pickled).  Owner: the lineage's RandomEffect codes, which
-# ``rebuild_design_matrix_with_lambdas`` passes through unchanged.  Lifetime:
-# the first design built on those codes and all its rebuilds.  Invalidation:
-# none; a lambda, weight or border change moves no code.  Layouts hold border
-# matrices, which a rebuild replaces, so they stay per design.
+# The nesting cache: pair tests, chains and the chains' trees with their leaf
+# row orders, keyed by group indices and spans.  One dict in a design's
+# ``_structured_layout_cache``, shared by reference with every lambda rebuild
+# (``carry_nesting_cache``), so its O(n) passes run once per design lineage.
+# Owner: the lineage's RandomEffect codes.  Lifetime: the first design built on
+# them and all its rebuilds; not pickled.  Invalidation: none, since a lambda,
+# weight or border change moves no code.  Layouts hold border matrices, so they
+# stay per design.
 _NESTING_CACHE_KEY = "nesting"
 
 
@@ -495,7 +409,7 @@ def _declared_ancestors(
     groups: list[GroupSlice],
     leaf_index: int,
 ) -> frozenset[int]:
-    """The RandomEffect terms the leaf is declared nested in, transitively (§3.13).
+    """The RandomEffect terms the leaf is declared nested in, transitively.
 
     Follows ``RandomEffect(nested_in=)`` from the leaf through each declared
     parent's own declaration, by feature name; a name that is not a
@@ -521,29 +435,18 @@ def find_nested_chain(
     excluded: frozenset[int] = frozenset(),
     cache: dict | None = None,
 ) -> tuple[int, ...]:
-    """Return the nested RandomEffect chain above a leaf that eliminates most levels (Rule B, §5).
+    """Return the nested RandomEffect chain above a leaf that eliminates most levels.
 
-    Every chain member is a function of the leaf (nesting is transitive), so
-    each remaining RandomEffect term takes one row test against the leaf (the
-    count test of §3.7).  Nesting is a partial order on the passing terms and
-    every totally ordered subset of them is a valid chain; the rule takes the
-    one that holds the most of the leaf's declared ancestors
-    (``RandomEffect(nested_in=)``, one-engine design §3.13: a declared
-    hierarchy is always used) and then the most levels, a heaviest path found
-    by dynamic programming from the coarsest term.  A crossed term, or a
-    coarsening of the leaf crossed with its hierarchy, stays in the border
-    unless its chain carries more levels.  Ties go to the chain met first,
-    finest term first.  Without declarations the rule reads the level-code
-    pattern alone, as a sparse Cholesky's symbolic analysis does.
-
-    Terms are ordered finest first by observed levels, then levels, then
-    index, which puts every coarsening after its refinements and orders
-    relabelled duplicates.  A pair of passing terms is then tested on the
-    leaf's observed levels instead of the rows: each row's codes are the
-    leaf maps at its leaf, so the pairs met, and the parent codes stored in
-    the cache, are the row test's.  ``cache`` is the nesting cache (contract
-    above ``_NESTING_CACHE_KEY``).  Returns the chain coarsest to finest,
-    ending with ``leaf_index``.
+    Each other RandomEffect term takes one count test against the leaf
+    (nesting is transitive).  Of the totally ordered subsets of the passing
+    terms, the rule takes the one holding most of the leaf's declared
+    ancestors (``RandomEffect(nested_in=)``; a declared hierarchy is always
+    used), then most levels: a heaviest path, by dynamic programming from the
+    coarsest term.  Ties go to the chain met first, finest term first.
+    Without declarations it reads the level-code pattern alone, as a sparse
+    Cholesky's symbolic analysis does.  Pairs of passing terms are tested on
+    the leaf's observed levels, not the rows, with the same result.  Returns
+    the chain coarsest to finest, ending with ``leaf_index``.
     """
     cache = {} if cache is None else cache
     random_effects = {
@@ -604,7 +507,7 @@ def _zero_penalty_random_effects(
     lambda2: float | dict[str, float] | None,
     S_override: NDArray | None,
 ) -> frozenset[int]:
-    """Return the RandomEffect groups whose whole penalty is zero (§3.7).
+    """Return the RandomEffect groups whose whole penalty is zero.
 
     Such a level leaves the chain for the border; the chain is re-grown over
     the others, so its parents compose through the removed level.
@@ -641,10 +544,8 @@ def _resolve_nested_chain(
     """Return the chain for a RandomEffect leaf and why a found chain was declined.
 
     A lone leaf is a chain of one.  The chain never depends on the family,
-    the link or the rows: signed working rows keep it (one-engine design
-    §3.3).  An override that is not diagonal on a longer chain declines it to
-    its leaf.  An override coupling the leaf itself to the border is the
-    dominant block's own ineligibility.
+    the link or the rows, since the factor takes signed working rows.  An
+    override that is not diagonal on a longer chain declines it to its leaf.
     """
     excluded = _zero_penalty_random_effects(group_matrices, groups, lambda2, S_override)
     chain_key = ("nested_chain", leaf_index, tuple(sorted(excluded)), _group_spans(groups))
@@ -736,19 +637,16 @@ def resolve_structured_backend(
 ) -> StructuredBackendDecision:
     """Resolve forced/automatic structured use once for a direct fit.
 
-    A RandomEffect leaf grows a nested chain (Rule B, §5) over the other
-    RandomEffect terms with a non-zero penalty; a lone leaf is a chain of one.
-    The decision reads the model's terms, their sizes and penalties, never
-    values, weights, the family, the link or the sign of the working rows:
-    the chain factors signed rows (one-engine design §3.3, §6).  The chain is
-    declined to its leaf, with ``nested_fallback_reason``, when an
-    authoritative ``S_override`` is not diagonal on it (§3.7).  Under
-    ``auto`` a term the structured solvers do not take by structure -- an
-    override coupling the leaf to the border, a zero penalty on the leaf, a
-    zero FactorSmooth component -- is fitted on gram, with the reason in
-    ``fallback_reason``; ``direct_solve="structured"`` raises instead.  A
-    ``basis="sz"`` FactorSmooth takes the balance tree on the size rule alone.
-    ``nesting_cache`` is the design's layout cache.
+    A RandomEffect leaf grows a nested chain over the other RandomEffect terms
+    with a non-zero penalty.  The decision reads the model's terms, sizes and
+    penalties, never values, weights, family, link or the sign of the working
+    rows.  A chain on which an ``S_override`` is not diagonal is declined to
+    its leaf (``nested_fallback_reason``).  Under ``auto`` a term the
+    structured solvers cannot take (an override coupling the leaf to the
+    border, a zero penalty on the leaf or a FactorSmooth component) is fitted
+    on gram with the reason in ``fallback_reason``;
+    ``direct_solve="structured"`` raises instead.  ``nesting_cache`` is the
+    design's layout cache.
     """
     if direct_solve not in ("auto", "structured"):
         return StructuredBackendDecision(
@@ -896,10 +794,8 @@ def resolve_structured_backend(
                     mode,
                     selection,
                 )
-            # No data-dependent check follows (one-engine design §3.4, §5): the fs
-            # leaf factor takes each level's pivot block from the rows with the
-            # penalty's square root inside, so a nearly singular block is resolved
-            # (and its pivot certified) rather than routed away on its weights.
+            # No data-dependent check: the fs leaf factor certifies each level's
+            # pivot block from the rows with the penalty's square root inside.
         elif lambda2 is not None:
             zero_component = _factor_smooth_zero_penalty_component(
                 dominant_matrix,
@@ -927,6 +823,6 @@ def resolve_structured_backend(
         )
     if auto_cost_decision is None:  # pragma: no cover - mode invariant
         raise RuntimeError("automatic structured resolution omitted its cost decision")
-    # A basis="sz" FactorSmooth takes the balance tree (one-engine design §3.5)
-    # on the same size rule as fs: no route reads its weights, lambdas or data.
+    # A basis="sz" FactorSmooth takes the balance tree on the same size rule as
+    # fs: no route reads its weights, lambdas or data.
     return auto_cost_decision
