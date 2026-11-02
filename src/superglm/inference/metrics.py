@@ -334,6 +334,22 @@ def _requires_wood_inference(model, active_groups: list[GroupSlice]) -> bool:
     return False
 
 
+def _keeps_constrained_covariance(result) -> bool:
+    """Whether a fit's covariance is its shape constraints' active face's.
+
+    A QP fit whose shape rows bind records its active face on its rank record
+    (``RankInfo.face``, from the rows ``irls_direct._binding_rows`` reads as
+    binding at the fit).  Its covariance is the equality-constrained fit's on
+    that face, which no evaluation re-forms from the rows passed, so every
+    frame reads it: the training rows with the fit's own design, others with
+    their own design.
+    """
+    if getattr(result, "scop_inference", None) is not None:
+        return True
+    rank_info = getattr(result, "rank_info", None)
+    return rank_info is not None and getattr(rank_info, "face", None) is not None
+
+
 class ModelMetrics:
     """Post-fit diagnostics for a SuperGLM model.
 
@@ -441,10 +457,9 @@ class ModelMetrics:
             # content fingerprint of X, y, weights and offset. Only a fit whose metrics always read
             # its retained covariance (structured or shape-constrained) then reads the fit design;
             # a dense fit re-forms everything on the supplied rows.
-            keeps_fit_covariance = (
-                retained_linear_state(model) is not None
-                or getattr(self._result, "scop_inference", None) is not None
-            )
+            keeps_fit_covariance = retained_linear_state(
+                model
+            ) is not None or _keeps_constrained_covariance(self._result)
             self._fit_geometry_matches = bool(
                 self._uses_fit_design
                 and fit_weights is not None
@@ -818,6 +833,20 @@ class ModelMetrics:
     # ── Influence diagnostics (lazy) ──────────────────────────────
 
     @cached_property
+    def _reads_retained_covariance(self) -> bool:
+        """Whether this evaluation reads the fit's retained covariance and EDF.
+
+        A compact fit on its own rows, a fit that kept a SCOP covariance on
+        any rows, and a QP constrained fit on rows other than its training
+        rows (``_keeps_constrained_covariance``).
+        """
+        return (
+            self._uses_compact_fit_inference
+            or getattr(self._result, "scop_inference", None) is not None
+            or (_keeps_constrained_covariance(self._result) and not self._fit_geometry_matches)
+        )
+
+    @cached_property
     def _active_info(
         self,
     ) -> tuple[MetricsDesign, NDArray, NDArray, NDArray, list[GroupSlice]]:
@@ -851,8 +880,12 @@ class ModelMetrics:
             )
 
         uses_fitted_rank = self._working_weights_match_fit(W)
-        scop_inference = getattr(self._result, "scop_inference", None)
-        if scop_inference is not None or self._uses_compact_fit_inference:
+        # The training rows of a constrained fit, by identity or by content,
+        # read its face through its rank record below, as the fit itself does.
+        constrained_training_rows = (
+            _keeps_constrained_covariance(self._result) and self._fit_geometry_matches
+        )
+        if self._reads_retained_covariance:
             fit_inference = self._model._fit_inference_info
             inverse = fit_inference["XtWX_inv"]
             augmented = fit_inference["XtWX_inv_aug"]
@@ -895,7 +928,7 @@ class ModelMetrics:
                     self.__dict__["_coefficient_estimable"] = np.ones(len(beta), dtype=bool)
             return X_a, W, inverse, augmented, active_groups
 
-        if not self._uses_fit_design:
+        if not (self._uses_fit_design or constrained_training_rows):
             selected_columns, active_groups = _selected_group_state(
                 self._result,
                 self._groups,
@@ -1002,10 +1035,7 @@ class ModelMetrics:
         if X_a.shape[1] == 0:
             return np.empty((0, 0))
 
-        if (
-            getattr(self._result, "scop_inference", None) is not None
-            or self._uses_compact_fit_inference
-        ):
+        if self._reads_retained_covariance:
             return self._model._fit_inference_info["R_a"]
 
         if self._working_weights_match_fit(W):
@@ -1026,10 +1056,7 @@ class ModelMetrics:
         if X_a.shape[1] == 0:
             return np.array([]), np.array([])
 
-        if (
-            getattr(self._result, "scop_inference", None) is not None
-            or self._uses_compact_fit_inference
-        ):
+        if self._reads_retained_covariance:
             inference = self._model._fit_inference_info
             return inference["edf"], inference["edf1"]
 

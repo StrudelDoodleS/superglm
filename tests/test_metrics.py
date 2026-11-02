@@ -3566,3 +3566,48 @@ def test_equal_copy_of_dense_discrete_rows_uses_one_exact_geometry():
     # The binned and exact geometries differ far beyond either evaluation's gap.
     assert np.any(np.abs(exact_hat - fit_hat) > exact_hat_gap + fit_hat_gap)
     assert abs(exact_edf - fit_edf) > exact_edf_gap + fit_edf_gap
+
+
+def test_equal_copy_of_shape_constrained_rows_reads_the_fit_geometry():
+    """A QP fit whose shape rows bind keeps its active face's covariance, so an equal
+    copy of the training rows (recognised by content) reads it with the fit design and
+    working weights, as the live frame does.  Zero prior weights centre the fit's
+    columns on the positive-weight rows while the public design centres them on all
+    rows, so the public design would not pair with that covariance.  Other rows read
+    the same face covariance with their own design."""
+    from superglm import Constraint
+    from superglm.features.spline import PSpline
+
+    rng = np.random.default_rng(20260928)
+    x = np.sort(rng.uniform(size=500))
+    X = pd.DataFrame({"x": x})
+    # falls, then rises: an increasing fit must hold its left end flat
+    y = rng.poisson(np.exp(0.2 + 1.3 * np.abs(x - 0.4))).astype(float)
+    weights = rng.uniform(0.5, 1.5, len(x))
+    weights[:30] = 0.0
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        spline_penalty=1.7,
+        features={"x": PSpline(n_knots=7, constraint=Constraint.fit.increasing)},
+    ).fit(X, y, sample_weight=weights)
+    rank_info = model.result.rank_info
+    assert rank_info.face is not None
+
+    live = model.metrics(X, y, sample_weight=weights)
+    copy = model.metrics(X.copy(), y.copy(), sample_weight=weights.copy())
+    # Both read equal retained state; only the order of an at most n-term
+    # reduction can separate them.
+    rtol = len(y) * np.finfo(np.float64).eps
+    for actual, expected in (
+        (copy.leverage, live.leverage),
+        (copy.cooks_distance, live.cooks_distance),
+        (copy._influence_edf[0], live._influence_edf[0]),
+    ):
+        np.testing.assert_allclose(actual, expected, rtol=rtol, atol=rtol * np.max(expected))
+
+    # New rows read the face covariance, not the unconstrained one re-formed on them.
+    new = pd.DataFrame({"x": np.linspace(0.05, 0.95, 31)})
+    evaluation = model.metrics(new, model.predict(new))
+    _, _, inverse, _, _ = evaluation._active_info
+    np.testing.assert_array_equal(inverse, rank_info.coefficient_inverse())
