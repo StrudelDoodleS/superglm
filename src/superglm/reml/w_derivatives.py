@@ -200,26 +200,15 @@ def _leverage_derivative_terms(
 ) -> tuple[NDArray, NDArray | None]:
     """The W(rho) gradient correction and the Hessian's penalty-by-weight cross traces, in one pass.
 
-    For each centred row ``x_r`` with a nonzero weight derivative ``w'_r``,
-    ``_leverage_rows.solved_row_blocks`` supplies ``y_r = H^-1 x_r`` and the
-    leverage ``h_r = x_r' y_r``.  With ``s_j = S_j beta`` (``penalty_rhs``) the
-    direction ``dbeta_j = -H^-1 s_j`` moves the linear predictor by ``x_r'
-    dbeta_j = -y_r' s_j`` and the working weight by ``a_jr = w'_r x_r'
-    dbeta_j``, and the pass accumulates
+    Each centred row ``x_r`` with ``w'_r != 0`` gives ``y_r = H^-1 x_r`` and
+    ``h_r = x_r' y_r``; with ``a_jr = -w'_r y_r' s_j``, ``s_j = S_j beta``:
 
     - ``grad_j = sum_r a_jr (h_r + 1/sum_w) / 2 = tr(H^-1 C_j) / 2 + d log(sum
-      W)/(2 drho_j)``, with ``C_j = X_c' diag(a_j) X_c`` (Wood 2011, sec.
-      3.5.1: ``tr(K' T_k K)`` from the leading diagonal of ``K K'``);
-    - ``P_ij = sum_r q_ri a_jr = tr(H^-1 S_i H^-1 C_j)``, ``q_ri = y_r' S_i
-      y_r`` with ``S_i = lambda_i Omega_i`` on its block: the Hessian's cross
-      term between the penalty derivative ``S_i`` and the weight derivative
-      ``C_j``.
+      W)/(2 drho_j)``, ``C_j = X_c' diag(a_j) X_c`` (Wood 2011, sec. 3.5.1);
+    - ``P_ij = sum_r (y_r' S_i y_r) a_jr = tr(H^-1 S_i H^-1 C_j)``.
 
-    Rows are centred as ``(x - mean_x) - mean_lo`` when the centre is an exact
-    pair.  The work is one solved row per data row whatever ``m`` is, ``O(n
-    p_i^2)`` per penalty block and ``O(n m^2)`` for ``P``: never a ``p x p``
-    Gram per penalty.  ``cross_terms=False`` forms the gradient alone and
-    returns ``None`` for ``P``.
+    One solved row per data row whatever ``m`` is, never a ``p x p`` Gram per
+    penalty. ``cross_terms=False`` returns ``None`` for ``P``.
     """
     m = penalty_rhs.shape[1]
     block_rhs = [
@@ -256,8 +245,7 @@ def _leverage_derivative_terms(
             directions[:, batch.members] = -np.matmul(solved_blocks, rhs).transpose(1, 0, 2)
             if quadratic is None:
                 continue
-            # Row sums over a block's width as one matrix-vector product: a
-            # level is a dozen columns wide, too short for a loop per row.
+            # Row sums over a block's width as one matrix-vector product.
             ones = np.ones(width, dtype=np.float64)
             if batch.stacked is not None:
                 products = np.matmul(solved_blocks, batch.stacked).reshape(
@@ -286,9 +274,8 @@ def _leverage_derivative_terms(
     sums = [(grad, grad_compensation)] + ([(cross, cross_compensation)] if cross_terms else [])
     blocks = solved_row_blocks(dm, inverse, mean_x, mean_lo, row_weights != 0.0)
     if blocks.block_bytes is None:
-        # The chunked route reads one stream of chunks on this thread: no pool
-        # runs, so the fit's BLAS policy applies to its products.  A generator,
-        # so each chunk's cross matrix is reduced before the next is formed.
+        # The chunked route runs on this thread under the fit's BLAS policy; a
+        # generator, so each chunk is reduced before the next is formed.
         parts = (contributions(job()) for job in blocks.jobs)
     else:
         parts = pooled_map(lambda job: contributions(job()), list(blocks.jobs), blocks.block_bytes)
@@ -316,14 +303,11 @@ def _leverage_cross_batches(
 ) -> list[_PenaltyBatch]:
     """The penalties by coefficient block, lambda-scaled, blocks of one shape batched together.
 
-    Each dense member is the matrix ``reml_direct_hessian`` traces against
-    (``penalty_component_dense_matrix``), so the cross term and the penalty
-    products in the outer Hessian read the same ``S_i``.  Adjacent blocks of
-    one width and one count of dense and identity penalties (a
-    spline-by-category term's levels) share a batch, read as one view of the
-    solved rows, so a row block costs a few products per term, not per level.
-    ``dense_matrices=False`` leaves ``stacked`` unset: only the cross traces
-    read it, and a factor smooth's member is a dense ``kron(I_L, Omega)``.
+    Each dense member is the matrix ``reml_direct_hessian`` traces against,
+    so both read the same ``S_i``. Adjacent blocks of one shape (a
+    spline-by-category term's levels) share a batch, so a row block costs a
+    few products per term, not per level. ``dense_matrices=False`` leaves
+    ``stacked`` unset: only the cross traces read it.
     """
     members: dict[tuple[int, int], list[int]] = {}
     for index, pc in enumerate(penalties):
@@ -380,10 +364,8 @@ def _leverage_cross_batches(
 def _centered_signed_moments(moments, row_weights: NDArray, mean_x: NDArray) -> NDArray:
     """``X_c' diag(row_weights) X_c`` from raw signed moments about ``mean_x``.
 
-    The mass meets one mean before the other, ``(S m_j) m_k``: ``|S m_j|``
-    lies between ``|S|`` and ``|S m_j^2|`` and ``|S m_j m_k|`` is the
-    geometric mean of two diagonal terms, so no intermediate leaves float64's
-    range where the raw moments do not, as ``m_j m_k`` would.
+    The mass meets one mean first, ``(S m_j) m_k``, so no intermediate leaves
+    float64's range where the raw moments do not, as ``m_j m_k`` could.
     """
     if moments.xtw is None:
         raise RuntimeError("centered signed moments omitted X'W1")
@@ -398,11 +380,9 @@ def _centered_signed_moments(moments, row_weights: NDArray, mean_x: NDArray) -> 
 def _centred_scale(geometry, pirls_result, sum_w: float | None, p: int) -> NDArray | None:
     """Per column ``sqrt(diag(X_c' W X_c) / sum_w)`` at the weights ``W`` the centre is the mean of.
 
-    Read from the record ``reml_w_correction`` reads ``mean_x`` from, in the
-    same order: the geometry's centred data Gram, the rank record's data
-    decomposition (``column_scale``, the root of that Gram's diagonal, on
-    its selected columns) or the geometry summary's column scales.  ``None``
-    without a profiled intercept or a record that carries them.
+    Read from the record ``mean_x`` comes from: the geometry's centred Gram,
+    the rank record's ``column_scale`` or the geometry summary's scales.
+    ``None`` without a profiled intercept or such a record.
     """
     if sum_w is None:
         return None
@@ -467,19 +447,12 @@ class _ColumnRepair:
 def _split_pays(split: _DenseSplit) -> bool:
     """Whether a signed Gram costs less through the dense split than through centred rows.
 
-    Centred rows (``centered_signed_grams``) are one ``n p^2`` BLAS product
-    per direction.  The split is the bounded design's raw moments (the block
-    queue's estimate, ``diagonal_cost`` and ``block_cost``: row visits and
-    kernel multiply-adds), the dense block's ``n p_d^2`` BLAS product, and
-    the cross block's pass of every bounded group for each dense column,
-    ``n p_d (1 + r)`` with ``r`` the group's row work.  A BLAS multiply-add
-    counts ``_P_SPACE_WEIGHT`` of a row visit.  The split must estimate at
-    most half the rows' cost: on one core its kernels ran up to 2.3 times
-    their estimate relative to the rows' (ten designs, 34 to 128 columns, 1
-    to 80 dense).  Per Gram there, rows against split: supports and
-    categoricals beside one dense column (300,000 rows, p = 67) 0.105 s
-    against 0.015 s; three sparse splines beside one dense column (60,000
-    rows, p = 34) 0.010 s against 0.015 s.
+    Centred rows cost one ``n p^2`` BLAS product per direction. The split
+    costs the bounded design's raw moments (the block queue's estimate), the
+    dense block's ``n p_d^2`` and the cross block's ``n p_d (1 + r)``, ``r``
+    a group's row work; a BLAS multiply-add counts ``_P_SPACE_WEIGHT`` of a
+    row visit. The split must estimate at most half the rows' cost, the margin
+    its kernels' measured overrun on one core.
     """
     n = split.dense.n
     groups = split.bounded.group_matrices
@@ -504,27 +477,17 @@ def _dense_split_signed_gram(
 ) -> NDArray:
     """``X_c' diag(a) X_c`` beside dense columns, ``moments`` the bounded design's raw signed moments.
 
-    The split of the IRLS Gram (``centered_system._attach_dense_split``), about
-    the fixed centre: the bounded columns from their raw moments, centred
-    after, as on a design without a dense column; every dense column's rows
-    centred explicitly as ``r = x - c`` about the exact pair ``(c, d)``, its
-    block ``G - e d' - d e' + d d' sum a`` from ``e = sum a r`` and ``G = sum
-    a r r'`` (``anchored_dense_moments``, ``two_pass_centred_gram``) and its
-    cross block ``N'(a r) - m_N e' - (N'a - m_N sum a) d'``
-    (``dense_split_cross``), O(n) per bounded group and block of dense
-    columns.  The algebra is linear in ``a``, and the summation bound holds
-    for terms of any sign (Higham 2002, eq. 3.5), so signed weights change
-    only the error bound of the corrected two-pass algorithm (Chan, Golub &
-    LeVeque 1983), ``|a|`` in place of the weights: per entry
-    ``gamma_(n+p+8) sum |a| (|x~_j| + |l_j|)(|x~_k| + |l_k|)``, with ``x~`` a
-    bounded column's own values (a support group's projected support
-    ``fl(B_unique R_inv)``, as every reader of the column forms it) or a
-    dense column's rows ``r`` and ``l`` its centre or ``d``.  No dense
-    column's offset meets a product.  A bounded column the certificate
-    rejected (``repair``) meets every partner, the dense rows and ``d``
-    included, through its centred support instead (``recentred_gram_rows``,
-    ``recentred_products``), so ``x~`` is its centred value ``c_j`` there and
-    ``l_j`` is zero.
+    The IRLS Gram's split (``centered_system._attach_dense_split``) about the
+    fixed centre: bounded columns from raw moments, centred after; dense
+    columns' rows centred as ``r = x - c`` about the exact pair ``(c, d)``,
+    block ``G - e d' - d e' + d d' sum a`` and cross block
+    ``N'(a r) - m_N e' - (N'a - m_N sum a) d'``. The algebra is linear in
+    ``a`` and the summation bound holds for any sign (Higham 2002, eq. 3.5),
+    so the corrected two-pass bound (Chan, Golub & LeVeque 1983) holds with
+    ``|a|``: per entry ``gamma_(n+p+8) sum |a| (|x~_j| + |l_j|)(|x~_k| + |l_k|)``,
+    ``x~`` a column's values (``r`` for a dense one) and ``l`` its centre or
+    ``d``. A column the certificate rejected (``repair``) enters through its
+    centred support, so there ``x~ = c_j`` and ``l_j = 0``.
     """
     dense_index, bounded_index = split.dense_index, split.bounded_index
     lo = centre_lo[dense_index]
@@ -694,24 +657,10 @@ def _qualified_class_name(obj: Any) -> str:
 def _warn_w_correction_unavailable(link: Any, distribution: Any) -> None:
     """Report the capability gap that silently drops the W(rho) correction.
 
-    Called only where ``dW_deta is None``, which is reachable only from
-    ``compute_dW_deta``'s missing-method return, so the list is never empty
-    here.  The other branch that binds ``dW_deta`` -- the observed-geometry one
-    -- cannot reach this line at all: ``reml_w_correction`` raises
-    ``"observed REML geometry omitted first weight derivatives"`` before the
-    assignment when ``geometry.weight_derivative is None``.  Drop that raise
-    and this docstring becomes false, with ``detail`` reading
-    ``" is not implemented"`` on an empty join.
-
-    Every message opens with the *module-qualified* link/distribution pair,
-    then says which method is missing.  The stdlib default filter dedups on
-    (message, category, module, lineno), so that prefix is what sets the
-    granularity: one warning per unique pair rather than one per REML
-    iteration.  Both halves of the prefix are load-bearing.
-
-    The missing-method clause deliberately stays unqualified -- it would
-    repeat the same long path a few words later, buying no distinctness and
-    no information.
+    Called only after ``compute_dW_deta`` returned None, so the missing list
+    is never empty. The message opens with the module-qualified
+    link/distribution pair because the default warning filter deduplicates on
+    the message: one warning per pair, not one per REML iteration.
     """
     missing = _missing_w_derivative_methods(link, distribution)
     detail = f"{' and '.join(missing)} is not implemented"
@@ -752,87 +701,50 @@ def reml_w_correction(
 ):
     """W(rho) correction for REML derivatives (first- or second-order).
 
-    Wood (2011) Section 3.4 / Appendix C: implicit differentiation of beta_hat(rho)
-    through W(eta(rho)) using the chain dbeta_hat/drho = -H^{-1} S_j beta_hat (IFT on the
-    PIRLS stationarity condition).
-
-    Computes the contribution from
-    ``d(X_c' W X_c)/drho_j = X_c' diag(dW/drho_j) X_c`` and from the
-    profiled scalar determinant ``log(sum(W))``, which the fixed-W Laplace
-    approximation drops.  The gradient correction is exact to first order;
-    second derivatives are dropped unless ``w_correction_order=2``.
-
-    When ``w_correction_order=2``, the full second-order Hessian correction
-    from Section 3.5.1 is computed::
-
-        d2w/(drho_j drho_k) = (d2w/deta2)*(deta/drho_j)*(deta/drho_k) + (dw/deta)*(d2eta/(drho_j drho_k))
-
-    In the profiled-intercept coordinates used here,
-    ``d2eta_jk = X_c d2beta_jk - dmean_x_k' dbeta_j``.  Differentiating
-    ``X_c' W X_c`` also contributes the two weighted-mean outer products.
+    Implicit differentiation of beta_hat(rho) through W(eta(rho)), with
+    ``dbeta_hat/drho_j = -H^{-1} S_j beta_hat`` (Wood 2011, sec. 3.4 and
+    App. C). Adds ``X_c' diag(dW/drho_j) X_c`` and the profiled determinant
+    ``log(sum(W))``, which the fixed-W Laplace approximation drops. The
+    gradient correction is exact; second derivatives enter only with
+    ``w_correction_order=2`` (Wood 2011, sec. 3.5.1), where in the
+    profiled-intercept coordinates ``d2eta_jk = X_c d2beta_jk - dmean_x_k'
+    dbeta_j`` and both weighted-mean outer products enter.
 
     Parameters
     ----------
     w_correction_order : int, default 1
-        1 = first-order only (backward compatible).
-        2 = include second-order Hessian cross-terms (Wood 2011 Section 3.5.1).
+        1 = first order only; 2 = add the second-order Hessian cross terms.
+    geometry
+        Observed-information rows and profiled-intercept metadata for Wood's
+        LAML criterion; omitted, the Fisher working geometry is used.
+        ``XtWX_S_inv`` must belong to the same geometry.
+    leverage_hessian
+        First order with a profiled intercept, on a dense or nested
+        (``ProfiledNestedSchurFactor``) factor: one row pass
+        (``_leverage_derivative_terms``) replaces the ``m`` derivative Grams
+        and returns ``(grad_correction, None, w_cross)``, ``w_cross =
+        -(P + P') / 2`` with ``P_ij = tr(H^-1 S_i H^-1 C_j)``. The
+        ``tr(H^-1 C_i H^-1 C_j)`` term is left out, as order 1 leaves out
+        second weight derivatives. Callers add ``w_cross`` as ``dH2_cross``.
+        Otherwise the derivative-Gram result is returned.
+    lookup_tables
+        With ``leverage_hessian``, when every group is a lookup or dense
+        column (``_lookup_tables``), or on the nested factor, the leverages
+        are read back without solving rows and the result is
+        ``(grad_correction, None, None)``. ``False`` forces the solved-row
+        ``w_cross`` (the REML stop's second-order check needs it).
+    gradient_terms_only
+        With ``leverage_hessian``, return ``(grad_correction, None, None)``
+        from the solved rows, forming no ``P_ij``.
 
-    Returns ``(grad_correction, dH_extra)`` when ``w_correction_order=1``
-    (backward compatible 2-tuple), or
-    ``(grad_correction, dH_extra, dH2_cross)`` when
-    ``w_correction_order=2`` (3-tuple).  Returns None if the correction
-    vanishes under the selected geometry or
-    if the link/distribution does not provide the required methods.
-
-    ``geometry`` supplies the observed-information rows and profiled-intercept
-    metadata required by Wood's LAML criterion.  When it is omitted, the
-    historical Fisher working geometry is retained for callers that optimize
-    a working-model criterion.  The inverse passed as ``XtWX_S_inv`` must
-    correspond to the same geometry.
-
-    ``dH2_cross`` is an ``(m, m)`` array of second-order Hessian
-    corrections.  It includes the second derivative of the profiled data
-    Hessian ``X_c' W X_c`` (including both weighted-mean outer terms) and the
-    scalar curvature of ``0.5 * log(sum(W))``.
-
-    ``leverage_hessian`` (first order, profiled intercept) replaces, on a
-    dense inverse, the ``m`` derivative Grams ``C_j = X_c' diag(dw/drho_j) X_c``
-    by one row pass (``_leverage_derivative_terms``) and returns
-    ``(grad_correction, None, w_cross)``.  The gradient correction is the same
-    exact quantity, by the leverage identity.  ``w_cross`` is the additive
-    ``(m, m)`` outer-Hessian term ``-(P + P') / 2`` with ``P_ij = tr(H^-1 S_i
-    H^-1 C_j)``, the cross products that ``dH_extra`` contributes to
-    ``-tr(F_i F_j) / 2`` through ``F_i = H^-1 (S_i + C_i)``; the
-    weight-derivative product ``tr(H^-1 C_i H^-1 C_j)``, which no identity
-    reduces below one Gram per direction (Wood 2011, sec. 3.5.1: second
-    derivatives cost ``O(M n p^2 / 2)``, first derivatives ``O(n p^2)``), is
-    left out, as order 1 already leaves out the second weight derivatives.
-    Callers add ``w_cross`` where they would add ``dH2_cross``.  When the
-    weight sum is not profiled, or the factor is neither dense nor the nested
-    factor (``ProfiledNestedSchurFactor``), whose augmented factor gives row
-    quadratic forms, the request is not taken, and the derivative-Gram result
-    is returned instead.
-
-    When every group is a lookup or a dense column (``_lookup_tables``),
-    the leverages are read back from term-pair tables and no row is solved:
-    the result is ``(grad_correction, None, None)``, the same exact gradient
-    and no ``w_cross``, whose ``P_ij`` needs every solved row.  On freMTPL2
-    (4 and 10 interaction pairs) leaving it out of the Newton model cost one
-    outer iteration of six.  The nested factor returns the same: its
-    augmented factor's row quadratic forms give the leverages, and no row is
-    solved.  ``lookup_tables=False`` turns both off: a caller that needs
-    ``w_cross`` at one point (the REML stop's second-order check,
-    ``reml/direct.py``) gets the solved-row result, or on the nested factor
-    the derivative operators' ``w_cross`` (``_structured_weight_cross``).
-
-    ``gradient_terms_only`` (read only with ``leverage_hessian``) returns
-    ``(grad_correction, None, None)`` from the solved rows too, forming no
-    ``P_ij``, while ``lookup_tables`` is on.  The REML loop sets it for a model
-    the structured solvers can fit, so above the leverage work bar the dense
-    solver builds the Newton model a structured factor does, whichever groups
-    the design holds; and for binomial/logit on a dense factor at any work,
-    which keeps the Newton model and the stop of the pass it took before
-    (``reml/direct.py``).
+    Returns
+    -------
+    tuple or None
+        ``(grad_correction, dH_extra)`` at order 1, ``(grad_correction,
+        dH_extra, dH2_cross)`` at order 2, ``dH2_cross`` the ``(m, m)``
+        second-order corrections, including the curvature of
+        ``0.5 * log(sum(W))``. None when the correction vanishes or the
+        link/distribution lacks the required methods.
     """
     w_correction_order = validate_w_correction_order(w_correction_order)
     if leverage_hessian and w_correction_order != 1:
@@ -857,9 +769,8 @@ def reml_w_correction(
         eta = geometry.eta
         mu = geometry.mu
         dW_deta = geometry.weight_derivative
-        # Geometry is an atomic determinant/inverse/centering payload.  Never
-        # permit a separately supplied Fisher inverse to create a hybrid that
-        # does not differentiate any coherent LAML criterion.
+        # Geometry is one determinant/inverse/centering payload: a separate
+        # Fisher inverse would differentiate no coherent LAML criterion.
         XtWX_S_inv = geometry.hessian_inverse
 
     if dW_deta is None:
@@ -923,29 +834,15 @@ def reml_w_correction(
             sample_weight=np.ones(dm.n) if sample_weight is None else np.asarray(sample_weight),
         )
 
-    # Every dense column is centred about an exact pair, by type (issue #430):
-    # ``(x - c) - d`` with ``c`` the rounded mean and ``d`` the remainder formed
-    # on rows differenced from it (``centered_system.dense_mean_pair``, the
-    # corrected two-pass algorithm), with the weights ``mean_x`` carries -- the
-    # geometry's, else the Fisher weights at the mode -- and its own
-    # ``sum_w``; ``d`` enters every product below as a rank-one correction.
-    # No row and no state centre seeds it beyond pass one's
-    # rounding.  About the rounded ``mean_x`` the direction
-    # ``X dbeta - mean_x' dbeta``, the signed Grams and the leverage rows all
-    # cancel ``c' dbeta`` at a column's offset (at 1e16 the correction was 9.2%
-    # off, 17.1% on the leverage route, and exact REML ended
-    # line_search_failed).  Without a profiled intercept (``sum_w`` None) the
-    # operator is not centred and the pair is not formed.  The signed Grams
-    # take raw moments, certified per column, on the columns whose entries
-    # their type bounds, and with the pair the dense columns' rows centred
-    # explicitly beside them (``_dense_split_signed_gram``).
+    # Every dense column is centred about an exact pair ``(x - c) - d``
+    # (``centered_system.dense_mean_pair``, the corrected two-pass algorithm),
+    # since a rounded centre alone cancels ``c' dbeta`` at a large offset.
+    # Without a profiled intercept (``sum_w`` None) nothing is centred.
     dense = dense_columns(dm)
     centre_hi = mean_x
     centre_lo: NDArray | None = None
-    # Without a geometry the summary's pair is the final system's own: the
-    # summary, ``rank_info`` and ``mean_x`` all come from ``centered_final``
-    # (``irls_direct``), formed with the Fisher weights at the mode, so it is
-    # read, not formed again.  Older pickled summaries carry no pair.
+    # Without a geometry, read the final system's pair from the summary
+    # (``irls_direct.centered_final``); older pickled summaries carry none.
     summary = pirls_result.reml_geometry if geometry is None else None
     carried_hi = None if summary is None else getattr(summary, "mean_hi", None)
     carried_lo = None if summary is None else getattr(summary, "mean_lo", None)
@@ -999,9 +896,8 @@ def reml_w_correction(
     signed_leaf_center: NDArray | None = None
     signed_center = mean_x
     if isinstance(factor, ProfiledNestedSchurFactor):
-        # A nested factor is found by its chain, never by its leaf name, and
-        # its signed operators are built about its own data leaf means and
-        # centred on its own mean_x (§3.6, §6).
+        # A nested factor is found by its chain, never its leaf name; its
+        # signed operators are centred on its own leaf means and mean_x.
         structured_group_index = factor.chain_group_indices[-1]
         structured_layout = get_nested_structured_layout(
             dm,
@@ -1052,15 +948,9 @@ def reml_w_correction(
             return grad_correction, None, None
         return grad_correction, None, -0.5 * (penalty_weight_cross + penalty_weight_cross.T)
 
-    # The nested factor's leverage route (the only structured one a model
-    # reaches: a factor smooth's design reads no row supports, so it keeps its
-    # Grams, ``reml/direct.py``): its augmented factor gives each
-    # row's ``[1, x] H_aug^-1 [1, x]' = 1/sum_w + x_c' H_c^-1 x_c``, the hat
-    # diagonal of Bates et al. (2015, eqs. 63-65), so the row channel
-    # ``w'(h + 1/sum_w) / 2`` forms the exact gradient with no derivative
-    # operator.  ``lookup_tables=False`` forms the cross terms instead, from the
-    # derivative operators below and the factor's cross traces.  As on the dense
-    # routes, a row without a weight derivative is never formed.
+    # The nested factor's leverage route: its augmented factor gives each row's
+    # ``1/sum_w + x_c' H_c^-1 x_c`` (Bates et al. 2015, eqs. 63-65), so the row
+    # channel ``w'(h + 1/sum_w) / 2`` forms the exact gradient.
     structured_leverage = leverage_route and isinstance(factor, ProfiledNestedSchurFactor)
     if structured_leverage and lookup_tables:
         leverage = grouped_augmented_row_quadratic_forms(
@@ -1070,10 +960,8 @@ def reml_w_correction(
         grad_correction[:] = centered_rmatvec(0.5 * dW_deta * leverage) @ -factor.solve(penalty_rhs)
         return grad_correction, None, None
 
-    # Beside a dense column the Grams take the split where it costs less than
-    # centred rows (``_split_pays``): the bounded design's moments, and each
-    # Gram joins the dense columns to them (``_dense_split_signed_gram``).
-    # Otherwise every Gram takes the rows centred about the pair.
+    # Beside a dense column the Grams take the split where ``_split_pays``,
+    # else the rows centred about the pair.
     split = _dense_split(dm) if centre_lo is not None and structured_group_index is None else None
     stable_rows = split is not None and not _split_pays(split)
     if stable_rows:
@@ -1081,13 +969,10 @@ def reml_w_correction(
     elif split is not None:
         release_for_serial_row_passes(split.dense.p)  # the dense block, n p_d^2 per direction
     moment_dm = dm if split is None else split.bounded
-    # The raw moments are certified per column as the IRLS Gram's are
-    # (``_raw_centering_admitted``), at the weights the centre is the mean of:
-    # with ``|m_j| <= s_j`` and ``|a| <= rho W`` a raw entry lies within
-    # ``6 gamma rho S s_j s_k``, the centred rows' own ``gamma rho S s_j s_k`` up
-    # to the constant.  A rejected column is recentred inside its group about
-    # the fixed centre (``recentred_about``, the IRLS repair), and where the
-    # repair declines every Gram takes centred rows.
+    # Raw moments are certified per column as the IRLS Gram's are: with
+    # ``|m_j| <= s_j`` and ``|a| <= rho W`` an entry lies within
+    # ``6 gamma rho S s_j s_k``, the centred rows' bound up to the constant.
+    # A rejected column is recentred (``recentred_about``), else centred rows.
     repair: _ColumnRepair | None = None
     # the bounded supports the cross blocks project, formed once for every direction
     cross_supports: dict = {}
@@ -1114,28 +999,22 @@ def reml_w_correction(
         and m > 1
         and not stable_rows
     )
-    # Factors cannot change between these first-order directions. Public moment
-    # calls and later correction calls still start with fresh numerical state.
+    # Factors cannot change between these first-order directions.
     fixed_support = moment_dm.execution_plan._fixed_support_cache() if batch_moments else None
-    # Directions batch only where none keeps its own support projections:
-    # beside that shared owner, which projects each support once for all, or
-    # when no group projects one. Otherwise every direction would build its
-    # own and keep it until the batch returns, which the budget below omits.
+    # Batch only where no direction keeps its own support projections, which
+    # the memory budget below does not count.
     batch_moments = batch_moments and (
         fixed_support is not None or moment_dm.execution_plan._projects_no_support()
     )
     batch_size = 0
     if stable_rows and isinstance(factor, DenseHessianFactor) and w_correction_order == 1:
         # Retained weights, Gram accumulators, compensation and outputs.
-        # Row blocks and single-direction scratch retain their chunk-scale cost.
         bytes_per_direction = np.dtype(np.float64).itemsize * (dm.n + 3 * p * p)
         batch_size = min(m, _SIGNED_GRAM_BATCH_BYTES // max(1, bytes_per_direction))
         if batch_size < 2:
             batch_size = 0
     elif batch_moments:
-        # One row pass per block serves every direction: retained weights and
-        # their stacked copy, the raw moments, and the centred outputs. Support
-        # projections, if any, are the shared owner's, held once for all.
+        # Retained weights and their stacked copy, raw moments and outputs.
         bytes_per_direction = np.dtype(np.float64).itemsize * (2 * dm.n + 3 * p * p)
         batch_size = min(m, _SIGNED_GRAM_BATCH_BYTES // max(1, bytes_per_direction))
         if batch_size < 2:
@@ -1192,9 +1071,8 @@ def reml_w_correction(
                     center=signed_leaf_center,
                 )
                 if isinstance(structured_layout, NestedStructuredLayout)
-                # a FactorSmooth term's weight-derivative operators only enter
-                # traces: the moment kernel, never the leaf factorization
-                # (design §3.4, F5)
+                # A FactorSmooth term's weight-derivative operators only enter
+                # traces: the moment kernel, never the leaf factorization.
                 else build_block_structured_system(
                     list(dm.group_matrices),
                     groups,
@@ -1308,11 +1186,9 @@ def reml_w_correction(
     if pending:
         flush_signed_grams()
     if fs_pending and fs_layout is not None:
-        # One pass over the rows forms every direction's moments (perf F5):
-        # sandwich products for traces, never a factorization (design §3.4).
-        # They are formed on the rows shifted by the fit's c0 and centred on
-        # the fit's own shifted mean, so a large-offset column's centred block
-        # does not cancel to noise (design §3.2; the centring is shift-invariant).
+        # One row pass forms every direction's moments, on rows shifted by the
+        # fit's c0 and centred on its shifted mean, so a large-offset column
+        # does not cancel to noise (the centring is shift-invariant).
         if not isinstance(factor, ProfiledFactorSmoothLeafFactor | ProfiledSumToZeroTreeFactor):
             raise RuntimeError("An fs or sz weight derivative needs its profiled leaf factor.")
         fit_system = factor.augmented_factor.system
@@ -1329,10 +1205,8 @@ def reml_w_correction(
             grad_correction[i] += 0.5 * factor.trace_inverse_operator(C_j)
             dH_extra[i] = C_j
 
-    # -- Second-order Hessian cross-terms (Wood 2011, Section 3.5.1) --
-    #
-    # Cost: m^2/2 signed centered-Gram operations plus m^2/2 rmatvec +
-    # matvec calls, each Gram from the execution plan's signed moments.
+    # Second-order Hessian cross terms (Wood 2011, sec. 3.5.1): m^2/2 signed
+    # centred Grams plus m^2/2 matvec/rmatvec pairs.
     dH2_cross: NDArray | None = None
     if w_correction_order >= 2 and d2W_deta2 is not None:
         dH2_cross = np.zeros((m, m))
