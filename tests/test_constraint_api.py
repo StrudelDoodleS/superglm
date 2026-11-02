@@ -1,8 +1,28 @@
 """Tests for public constraint tokens."""
 
+import pickle
+
 import pytest
 
-from superglm import BSplineSmooth, Constraint, ConstraintSpec, PSpline, Spline, features
+from superglm import (
+    BSplineSmooth,
+    Constraint,
+    ConstraintRules,
+    ConstraintSpec,
+    PSpline,
+    Spline,
+    features,
+)
+from superglm.features.constraint import RULE_KINDS, rules_of
+
+C = Constraint.fit
+
+# A ConstraintSpec(mode="fit", kind="increasing") pickled (protocol 4) when the class had two fields.
+_TWO_FIELD_PICKLE = (
+    b"\x80\x04\x95\\\x00\x00\x00\x00\x00\x00\x00\x8c\x1csuperglm.features.constraint\x94"
+    b"\x8c\x0eConstraintSpec\x94\x93\x94)\x81\x94}\x94(\x8c\x04mode\x94\x8c\x03fit\x94"
+    b"\x8c\x04kind\x94\x8c\nincreasing\x94ub."
+)
 
 
 def test_constraint_fit_increasing_token():
@@ -62,3 +82,161 @@ def test_pspline_rejects_old_public_monotone_arguments():
 def test_spline_factory_rejects_old_public_monotone_arguments():
     with pytest.raises(TypeError):
         Spline(kind="ps", n_knots=8, monotone="increasing", monotone_mode="fit")
+
+
+def test_and_builds_rules_in_order():
+    rules = C.increasing & C.concave & C.cap(0.6, 1.8)
+    assert isinstance(rules, ConstraintRules)
+    assert [r.kind for r in rules] == ["increasing", "concave", "cap"]
+    assert len(rules) == 3
+    assert rules.describe() == "increasing & concave & cap(0.6, 1.8)"
+    assert (
+        repr(rules)
+        == "Constraint.fit.increasing & Constraint.fit.concave & Constraint.fit.cap(0.6, 1.8)"
+    )
+
+
+def test_and_joins_rules_with_rules_in_either_order():
+    left = C.increasing & C.concave
+    right = C.max_step(0.15) & C.flat.within(25, 40)
+    assert [r.kind for r in left & right] == ["increasing", "concave", "max_step", "flat"]
+    assert [r.kind for r in C.cap(0.5, 2) & left] == ["cap", "increasing", "concave"]
+    assert [r.kind for r in left & C.cap(0.5, 2)] == ["increasing", "concave", "cap"]
+
+
+def test_single_rule_tokens_keep_their_old_identity():
+    assert C.increasing == ConstraintSpec(mode="fit", kind="increasing")
+    assert hash(C.increasing) == hash(ConstraintSpec(mode="fit", kind="increasing"))
+    assert C.increasing.stretch == (None, None)
+    assert repr(C.increasing) == "Constraint.fit.increasing"
+    assert repr(Constraint.postfit.concave) == "Constraint.postfit.concave"
+    assert set(RULE_KINDS) >= {"flat", "cap", "max_step"}
+
+
+def test_stretches():
+    r = C.decreasing.below(25)
+    assert r.stretch == (None, 25) and r.describe() == "decreasing.below(25)"
+    assert C.flat.within(25, 40).stretch == (25, 40)
+    assert C.increasing.above(40).stretch == (40, None)
+    assert C.flat.within(25, 40).describe() == "flat.within(25, 40)"
+    assert C.increasing.above(40).describe() == "increasing.above(40)"
+
+
+def test_label_stretches_are_kept_and_compared_only_after_resolve():
+    position = {"young": 20.0, "mid": 40.0, "old": 60.0}.__getitem__
+    overlapping = C.increasing.within("young", "old") & C.decreasing.above("mid")
+    assert overlapping.rules[0].stretch == ("young", "old")
+    overlapping.validate()  # labels are not compared before resolve
+    with pytest.raises(ValueError, match=r"\[40, 60\]"):
+        overlapping.resolve(position)
+    disjoint = C.increasing.below("mid") & C.decreasing.above("mid")
+    assert [r.stretch for r in disjoint.resolve(position)] == [(None, 40.0), (40.0, None)]
+
+
+def test_resolve_refuses_labels_that_land_out_of_order():
+    rules = ConstraintRules((C.increasing.within("old", "young"),))
+    rules.validate()
+    with pytest.raises(ValueError, match="lo < hi"):
+        rules.resolve({"young": 20.0, "old": 60.0}.__getitem__)
+
+
+def test_split_partitions_by_kind_preserving_order():
+    rules = C.increasing & C.cap(0.5, 2) & C.concave & C.max_step(0.2)
+    shape, rest = rules.split(frozenset({"increasing", "concave"}))
+    assert [r.kind for r in shape] == ["increasing", "concave"]
+    assert [r.kind for r in rest] == ["cap", "max_step"]
+    assert isinstance(shape, ConstraintRules) and isinstance(rest, ConstraintRules)
+
+
+def test_describe_cap_and_max_step():
+    assert C.cap(0.6, 1.8).describe() == "cap(0.6, 1.8)"
+    assert C.max_step(0.15).describe() == "max_step(0.15)"
+    assert C.max_step(0.2, 0.1).describe() == "max_step(0.2, 0.1)"
+    assert C.max_step(0.15).bounds == (0.15, 0.15)
+
+
+@pytest.mark.parametrize(
+    "bad, match",
+    [
+        (lambda: C.cap(1.1, 2.0), "contain 1"),
+        (lambda: C.cap(0.0, 2.0), "contain 1"),
+        (lambda: C.cap(0.5, 0.5), "lo < hi"),
+        (lambda: C.max_step(0.1, 1.0), "down"),
+        (lambda: C.max_step(0.0), "up"),
+        (lambda: C.max_step(1.5), "down"),
+        (
+            lambda: (C.increasing.within(20, 40) & C.decreasing.within(30, 50)).validate(),
+            r"\[30, 40\]",
+        ),
+        (lambda: (C.concave & C.convex.above(10)).validate(), "overlap"),
+        (lambda: (C.cap(0.5, 2) & C.cap(0.6, 1.8)).validate(), "one cap"),
+        (lambda: (C.max_step(0.1) & C.max_step(0.2)).validate(), "one max_step"),
+        (lambda: (C.flat.within(10, 30) & C.flat.within(20, 40)).validate(), r"\[20, 30\]"),
+        (lambda: rules_of_flat().validate(), "needs a stretch"),
+        (lambda: C.flat.within(40, 25), "lo < hi"),
+        (lambda: C.flat.within(25, 25), "lo < hi"),
+        (lambda: C.increasing.below(5).above(1), "already has a stretch"),
+        (lambda: C.cap(0.5, 2).below(1), "whole curve"),
+        (lambda: C.increasing.below(float("nan")), "finite"),
+        (lambda: Constraint.postfit.increasing & C.concave, "fit-time"),
+        (lambda: C.concave & Constraint.postfit.increasing, "fit-time"),
+        (lambda: Constraint.postfit.increasing.below(3), "fit-time"),
+        (lambda: ConstraintRules((ConstraintSpec("postfit", "flat"),)).validate(), "fit-time"),
+    ],
+)
+def test_refusals(bad, match):
+    with pytest.raises(ValueError, match=match):
+        bad()
+
+
+def rules_of_flat():
+    return C.flat & C.increasing
+
+
+def test_disjoint_and_touching_stretches_are_accepted():
+    (C.increasing.below(30) & C.decreasing.above(30)).validate()
+    (C.increasing & C.convex & C.cap(0.5, 2) & C.max_step(0.1)).validate()
+    (C.decreasing.within(0, 10) & C.decreasing.within(20, 30)).validate()
+
+
+def test_rules_of_reads_legacy_single_rule():
+    class Old:
+        constraint_kind, constraint_mode = "increasing", "fit"
+
+    assert [r.kind for r in rules_of(Old())] == ["increasing"]
+
+    class Older:
+        monotone, monotone_mode = "decreasing", "postfit"
+
+    assert rules_of(Older()).rules[0] == Constraint.postfit.decreasing
+
+
+def test_rules_of_prefers_constraint_rules_and_defaults_to_empty():
+    class New:
+        constraint_rules = C.increasing & C.concave
+        constraint_kind, constraint_mode = "decreasing", "fit"
+
+    assert [r.kind for r in rules_of(New())] == ["increasing", "concave"]
+    assert len(rules_of(object())) == 0
+
+    class Unconstrained:
+        constraint_kind = None
+        constraint_rules = None
+
+    assert len(rules_of(Unconstrained())) == 0
+
+
+def test_rules_of_reads_a_real_spline_spec():
+    spec = PSpline(n_knots=8, constraint=Constraint.fit.convex)
+    assert rules_of(spec).rules == (Constraint.fit.convex,)
+    assert len(rules_of(PSpline(n_knots=8))) == 0
+
+
+def test_two_field_pickle_loads_and_equals_the_new_token():
+    old = pickle.loads(_TWO_FIELD_PICKLE)
+    assert old == C.increasing
+    assert old.stretch == (None, None) and old.bounds is None
+    assert old.describe() == "increasing"
+    assert pickle.loads(pickle.dumps(C.cap(0.6, 1.8))) == C.cap(0.6, 1.8)
+    rules = C.increasing.below(3) & C.max_step(0.2)
+    assert pickle.loads(pickle.dumps(rules)) == rules

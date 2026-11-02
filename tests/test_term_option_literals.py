@@ -30,7 +30,7 @@ from superglm.features import (
 )
 from superglm.features._spline_config import EXTRAPOLATIONS, KNOT_STRATEGIES, PENALTIES
 from superglm.features._spline_ranges import JOINS
-from superglm.features.constraint import CONSTRAINT_KINDS, CONSTRAINT_MODES, ConstraintSpec
+from superglm.features.constraint import CONSTRAINT_MODES, RULE_KINDS, ConstraintSpec
 from superglm.features.rebuild import SYMBOLIC_BASE_POLICIES
 from superglm.links import _LINK_SHORTCUTS, Link
 from superglm.types import LAMBDA_POLICY_MODES
@@ -73,7 +73,7 @@ _CASES = [
     ((superglm.Piecewise,), "extrapolation", set(EXTRAPOLATIONS), False),
     ((superglm.PolynomialRange,), "join", set(JOINS), False),
     ((ConstraintSpec,), "mode", set(CONSTRAINT_MODES), False),
-    ((ConstraintSpec,), "kind", set(CONSTRAINT_KINDS), False),
+    ((ConstraintSpec,), "kind", set(RULE_KINDS), False),
     ((superglm.LambdaPolicy,), "mode", set(LAMBDA_POLICY_MODES), False),
     (
         (sklearn_wrappers.SuperGLMRegressor, sklearn_wrappers.SuperGLMClassifier),

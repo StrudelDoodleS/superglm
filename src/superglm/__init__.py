@@ -56,7 +56,7 @@ from superglm.export import RatingTableBaseNotRepresentableError, export_rating_
 from superglm.features._spline_config import SCOPRetiredWarning, SplineOptionWarning
 from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.categorical import Categorical
-from superglm.features.constraint import Constraint
+from superglm.features.constraint import Constraint, ConstraintRules
 from superglm.features.constraint import ConstraintSpec as ConstraintSpec
 from superglm.features.factor_smooth import FactorSmooth, FactorSmoothGroupTermWarning
 from superglm.features.grouping import LevelGrouping, collapse_levels
@@ -307,6 +307,7 @@ __all__ = [
     "Categorical",
     "OrderedCategorical",
     "Constraint",
+    "ConstraintRules",
     "FactorSmooth",
     "FactorSmoothResult",
     "RandomEffect",
