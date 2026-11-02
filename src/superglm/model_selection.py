@@ -106,12 +106,9 @@ class CrossValidationResult:
     fit_kwargs : dict or None
         The ``fit_kwargs`` every fold's fit received, copied.
 
-    ``n_rows``, ``data_fingerprint``, ``splitter``, ``fingerprint_columns``,
-    ``fit_mode``, ``fingerprint_version``, ``builtin_scores``, ``warm_start``
-    and ``fit_kwargs`` are ``None`` on a result made before they were
-    recorded. ``warm_start`` and ``fit_kwargs`` were recorded from the release
-    that added them to :func:`cross_validate`, so a result without them was
-    fitted cold, with no extra fit arguments.
+    ``n_rows`` through ``fit_kwargs`` are ``None`` on a result made before
+    they were recorded; such a result without ``warm_start`` and
+    ``fit_kwargs`` was fitted cold, with no extra fit arguments.
     """
 
     fold_scores: pd.DataFrame
@@ -252,26 +249,19 @@ def _fingerprint_columns(model, frame) -> tuple[str, ...]:
     return tuple(sorted(dict.fromkeys(names), key=repr))
 
 
-# The recipe of _data_fingerprint. A result records it beside its fingerprint,
-# and one made by another recipe is refused as such, never as other data.
-# Version 3 keeps apart equal values a grouped categorical reads as two
-# levels, -0.0 and 0.0, or 1 and 1.0 in an object column; version 2 did not.
+# The recipe of _data_fingerprint, recorded beside it; a fingerprint of another
+# recipe is refused as such, never as other data.
 FINGERPRINT_VERSION = 3
 
 
 def _data_fingerprint(X, y, sample_weight=None, offset=None, columns=None) -> str:
     """SHA-256 of the recipe, the row count, the frame's columns, then y, weights and offsets.
 
-    The response and weights alone do not identify the rows: two rows with
-    the same response and weight can swap their features, and stored fold
-    indices would then fall on different rows. The frame enters as its
-    library ("pandas" or "polars", whose frames of the same values differ)
-    and then ``columns`` (every column when ``None``) in name order, so that
-    reordering columns alone does not change it, each as its name and
-    :func:`_column_bytes`. Unit weights stand in for ``sample_weight=None``
-    and zeros for ``offset=None``, which is how every scorer reads them, so
-    rows supplied with those explicit values match. Every variable-length
-    part carries its length, so the boundaries between the parts are fixed.
+    The frame enters as its library name and then ``columns`` (every column
+    when ``None``) in name order, each as its name and :func:`_column_bytes`,
+    so swapped features change it and reordered columns do not. Unit weights
+    stand in for ``sample_weight=None`` and zeros for ``offset=None``, as every
+    scorer reads them. Every variable-length part carries its length.
     """
     frame = as_eager_frame(X)
     response = np.asarray(y, dtype=np.float64).ravel()
@@ -295,17 +285,12 @@ def _data_fingerprint(X, y, sample_weight=None, offset=None, columns=None) -> st
 def _column_bytes(frame, name) -> bytes:
     """One column as bytes no pandas or polars version changes: a type tag, then its values.
 
-    The tag is this recipe's own, from the NumPy array the model reads: a
-    number's kind and width (``int32``, ``float64``), ``bool``, or ``values``
-    for anything else, text included, whatever its dtype is called. A
-    pandas categorical or polars Enum adds its declared categories, which
-    the fit takes as the level universe. Numbers are written at a fixed
-    width, little-endian: integers as 64-bit, floats as float64 (exact) with
-    one NaN; anything else as codes in order of first appearance (missing
-    values -1) and the text of each code's first value (:func:`_value_codes`).
-    A grouped categorical reads a level by its text, so equal values that
-    print differently stay apart: ``-0.0`` and ``0.0`` in a float column, and
-    in an object column also ``1`` and ``1.0``.
+    The tag is the NumPy array's kind and width (``int32``, ``float64``),
+    ``bool``, or ``values`` for anything else; a pandas categorical or polars
+    Enum adds its declared categories. Numbers are written little-endian at a
+    fixed width (64-bit integers, float64 with one NaN); anything else as codes
+    in order of first appearance and each code's text (:func:`_value_codes`),
+    so equal values that print differently (``-0.0`` and ``0.0``) stay apart.
     """
     values = frame.column_array(name)
     kind = values.dtype.kind
@@ -605,9 +590,8 @@ def cross_validate(
         Sliced per fold; splitters operate on the physical compact rows, and
         they are read under the model's declared ``weight_semantics``. Under
         ``"frequency"``, integer values are likelihood-equivalent to literal
-        row replication
-        within a fixed train/validation partition and fixed feature geometry.
-        Under ``"prior"`` they state a precision,
+        row replication within a fixed train/validation partition and fixed
+        feature geometry. Under ``"prior"`` they state a precision,
         ``Var(Y_i) = phi * V(mu_i) / w_i``; a Tweedie fit additionally
         requires them finite and strictly positive.
     offset : array-like, optional
@@ -637,15 +621,10 @@ def cross_validate(
         Under ``fit_mode="fit_reml"``, start every fold after the first
         converged one from that fold's smoothing parameters
         (``lambda2_init``), so later folds take fewer outer iterations.
-        Components a search could not leave from where that fold ended them
-        (frozen as flat by the Newton engines) start from the
-        engine's own bootstrap instead, together with every other component
-        of the same penalty block, so a tensor product never starts half
-        warm. Each fold still searches
-        to its own convergence test; a fold that does not converge warns and
-        reads ``converged=False``. Set ``False`` to start every fold from the
-        engine's own bootstrap. A ``lambda2_init`` in ``fit_kwargs`` takes
-        precedence for every fold.
+        Components frozen as flat start cold, with the rest of their penalty
+        block. Each fold still searches to its own convergence test. Set
+        ``False`` to start every fold cold; a ``lambda2_init`` in
+        ``fit_kwargs`` takes precedence for every fold.
 
     Returns
     -------
@@ -709,11 +688,9 @@ def cross_validate(
     scorers = _resolve_scorers(scoring)
     score_names = list(scorers.keys())
 
-    # One vocabulary for every fold, resolved before the split: a level thin
-    # enough to miss a training fold would otherwise invent a per-fold universe
-    # and kill that fold at predict time.  A binding the caller already made on
-    # a wider frame (bind_levels, spec §9) outranks this one: the frame here is
-    # whatever slice CV was handed, so this pass fills gaps, never overwrites.
+    # One level vocabulary for every fold, resolved before the split, so a level
+    # missing from a training fold does not fail it at predict time. A
+    # ``bind_levels`` binding on a wider frame outranks this one.
     existing = dict(getattr(getattr(model, "_config", None), "level_bindings", None) or ())
     level_bindings = {**_resolve_level_bindings(model, frame, sample_weight), **existing}
 
@@ -728,11 +705,8 @@ def cross_validate(
     pooled_denominators: dict[str, float] = {
         name: 0.0 for name in score_names if name in _POOLED_PARTS
     }
-    # The score columns a callable wrote last in some fold that scored, its
-    # dict's keys included: such a column is not the built-in scorer's,
-    # whatever it is named, even where a built-in scorer wrote it last in
-    # another fold. A fold that failed partway is left out: error_score fills
-    # its scores. A callable's own name starts here.
+    # Score columns a callable wrote last in some scored fold are not built-in,
+    # whatever their name; a fold that failed partway is left out.
     not_built_in = {
         name for name, scorer in scorers.items() if scorer is not _BUILTIN_SCORERS.get(name)
     }
@@ -802,17 +776,9 @@ def cross_validate(
             for sname, sfn in scorers.items():
                 pooled_fn = _POOLED_PARTS.get(sname)
                 if pooled_fn is not None and sfn is _BUILTIN_SCORERS.get(sname):
-                    # One evaluation per fold. The per-fold score is exactly
-                    # the pooled parts' quotient -- both scorers divide the
-                    # same numerator by the same denominator -- so calling the
-                    # two separately predicted twice, and once the contract
-                    # check landed in each, warned twice about one condition.
-                    #
-                    # Guarded on the scorer actually being the built-in.
-                    # `_resolve_scorers` already normalises a name to its
-                    # built-in today, so this cannot currently differ -- it is
-                    # here so that a future resolver change cannot silently
-                    # route a custom callable through the built-in's parts.
+                    # One evaluation per fold: the per-fold score is the pooled
+                    # parts' quotient. Only the built-in scorer itself takes
+                    # this route, never a custom callable of the same name.
                     numerator, denominator = pooled_fn(
                         est,
                         X_test,
@@ -920,10 +886,8 @@ def cross_validate(
     try:
         fingerprint = _data_fingerprint(frame, y, sample_weight, offset, columns)
     except (TypeError, ValueError):
-        # A column the model reads that cannot be fingerprinted: the result
-        # keeps its folds and scores, and records the recipe version beside no
-        # fingerprint, so a consumer refuses to check rows against it rather
-        # than taking it for an older result.
+        # The recipe version beside no fingerprint tells a consumer the columns
+        # could not be hashed, not that the result is older.
         fingerprint = None
 
     return CrossValidationResult(
