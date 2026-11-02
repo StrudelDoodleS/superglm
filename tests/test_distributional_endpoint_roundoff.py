@@ -378,7 +378,10 @@ def test_endpoint_authority_does_not_polish_a_score_within_its_rounding_floor(
         return real_fit(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(smoothing_authority, "_fit_fixed_state", counted_fit)
-    config = smoothing_authority._face_authority_config(DenseSolverConfig())
+    # At 1e-10, as in the replay test above, the certificate has margin on every BLAS kernel.
+    config = replace(
+        smoothing_authority._face_authority_config(DenseSolverConfig()), tolerance=1.0e-10
+    )
     fit = smoothing_authority._fit_endpoint_authority_stationary(
         family,
         layout,
