@@ -247,7 +247,7 @@ def structural_derivative_penalty(
 
     A sum of positive semidefinite blocks has the null space of every positive
     weighting of them, so this has the penalty's exact rank without the
-    ``width**-3`` spread a narrow interval gives the penalty's eigenvalues.
+    ``width**(1 - 2 * order)`` spread a narrow interval gives the penalty's eigenvalues.
     """
     K = len(knots) - degree - 1
     knots, bounds = _unit_knots(knots, degree, excluded, intervals)
@@ -275,7 +275,7 @@ def structural_penalty_ranks(spec: Any, info: Any) -> dict[str, int] | None:
 
     An integrated derivative penalty's null space is the polynomials of degree below
     its order wherever the knots are, so its rank is a property of the construction,
-    not of its spectrum (which spreads as ``width**-3``); smoothers declare it with
+    not of its spectrum (which spreads as ``width**(1 - 2 * order)``); smoothers declare it with
     the penalty (mgcv ``smooth.construct`` ``rank`` and ``null.space.dim``; Wood,
     Pya and Saefken, JASA 111, 2016, section 3.1.1).  Each penalty in ``info`` is
     ``T' S T`` for the raw penalty ``S`` and projection ``T``, so ``T' structural T``
