@@ -72,7 +72,7 @@ def test_endpoint_revalidation_projection_roundoff_has_an_arithmetic_bound() -> 
 
     bound = smoothing_faces._endpoint_revalidation_projection_bound(face, canonical)
 
-    assert bound is not None
+    assert bound is not None and bound > 0.0
     assert movement <= bound
 
 

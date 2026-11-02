@@ -27,11 +27,7 @@ from superglm.distributional.families import gaussian as gaussian_module
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.model import DenseDistributionalModel
 from superglm.distributional.posterior import posterior_covariance
-from superglm.distributional.results import solver as result_solver
-from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.weights import UnsupportedLikelihoodContractError
-
-from . import test_distributional_endpoint_laml as endpoint_laml_tests
 
 N_ROWS = 120
 
@@ -388,80 +384,3 @@ def test_corrected_covariance_refuses_a_changed_carrier(replayed_gamma, monkeypa
             posterior_covariance(replayed_gamma, kind="corrected")
     assert len(replays) == 1
     assert any("likelihood plan" in str(item.message) for item in record)
-
-
-@pytest.fixture(scope="module")
-def revalidated_face():
-    """An EFS result that revalidates an exact face beside its cap, and that event."""
-    smoothing = endpoint_laml_tests._gamma_isolated_cap_face_problem()[-1]
-    event = next(
-        item
-        for item in smoothing.history
-        if item.revalidated_face_components and item.accepted_fit_index is not None
-    )
-    return smoothing, event
-
-
-@pytest.fixture(scope="module")
-def exact_face(revalidated_face) -> PenaltyFace:
-    """The exact penalty face the revalidated endpoint sits on."""
-    smoothing, event = revalidated_face
-    endpoint_index = event.coefficient_fit_indices[1]
-    return smoothing.coefficient_fits[endpoint_index].coefficient_face
-
-
-def _forged_projection_replay(
-    revalidated_face, patch: pytest.MonkeyPatch, *, replay_gap: float
-) -> tuple[object, tuple]:
-    """The revalidation's fits with a forged endpoint, and a forged replay of its projection.
-
-    The stored endpoint is the source moved by an eighth of the projection
-    bound along one coordinate, reached without a step, beside a cap whose
-    score is zero, so the result authenticates it as a replay of the source's
-    face projection. The result's own replay is the stored endpoint moved by
-    ``replay_gap`` times the bound along that coordinate. Every margin is a
-    fixed fraction of the bound, far above one rounding of the coordinate, so
-    the decision is the same on every BLAS.
-    """
-    smoothing, event = revalidated_face
-    fits = list(smoothing.coefficient_fits)
-    cap_index, endpoint_index = event.coefficient_fit_indices[:2]
-    source = np.asarray(fits[event.source_fit_index].coefficients)
-    endpoint_fit = fits[endpoint_index]
-    face = endpoint_fit.coefficient_face
-    bound = result_solver._endpoint_revalidation_projection_bound(face, source)
-    assert bound is not None and bound > 0.0
-    row = int(np.argmax(np.abs(source)))
-    assert 2.0 * float(np.spacing(np.abs(source[row]))) < 1.0e-2 * bound
-    endpoint = np.array(source, copy=True)
-    endpoint[row] += 0.125 * bound
-    replay = np.array(endpoint, copy=True)
-    replay[row] += replay_gap * bound
-    fits[cap_index] = replace(
-        fits[cap_index], terminal_score=np.zeros_like(fits[cap_index].terminal_score)
-    )
-    fits[endpoint_index] = replace(endpoint_fit, coefficients=endpoint, iterations=0)
-    real_project = PenaltyFace.project
-
-    def project(face_, values):
-        values = np.asarray(values)
-        if values.shape == source.shape and np.array_equal(values, source):
-            return replay.copy()
-        return real_project(face_, values)
-
-    patch.setattr(PenaltyFace, "project", project)
-    return smoothing, tuple(fits)
-
-
-@pytest.mark.parametrize("replay_gap", [0.0, 1.5])
-def test_a_revalidated_endpoint_is_accepted_where_the_projection_rounds_differently(
-    revalidated_face, monkeypatch, replay_gap: float
-) -> None:
-    """A stored replay within twice the bound of the result's own replay is accepted.
-
-    Each replay lies within the bound of the exact projection on its own
-    machine, so two machines' replays differ by up to twice the bound.
-    """
-    with monkeypatch.context() as patch:
-        smoothing, fits = _forged_projection_replay(revalidated_face, patch, replay_gap=replay_gap)
-        replace(smoothing, coefficient_fits=fits)
