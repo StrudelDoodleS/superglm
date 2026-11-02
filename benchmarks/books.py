@@ -352,7 +352,21 @@ def load_book(dataset: dict):
         _FRAMES[key] = (
             _synthetic(dataset) if dataset["book"] == "synthetic" else _fremtpl2_book(dataset)
         )
+        _release_arrow_pool()
     return _FRAMES[key]
+
+
+def _release_arrow_pool() -> None:
+    """Return the pages pyarrow's pool freed after the parquet read to the OS.
+
+    The pool (mimalloc by default) keeps about 100 MiB of freed read buffers
+    resident until a later pyarrow allocation happens to purge them, which a
+    timed fit may or may not make.  Releasing them here gives every commit the
+    same allocator state at the start of the fit, so peak RSS measures the fit.
+    """
+    pyarrow = sys.modules.get("pyarrow")
+    if pyarrow is not None:
+        pyarrow.default_memory_pool().release_unused()
 
 
 def _fremtpl2_book(d):
