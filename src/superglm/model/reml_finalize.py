@@ -121,20 +121,18 @@ def _build_structured_linear_system_state(
     ):
         raise RuntimeError("terminal structured refit omitted its compact data operator")
 
-    # No raw-coordinate coefficient factor and no view derived from one (design
-    # §3.6, §3.10): the slope covariance is M_ss, the slope block of the
-    # augmented inverse, which ``profiled_factor`` serves.
+    # No raw-coordinate coefficient factor: the slope covariance is M_ss, the
+    # slope block of the augmented inverse, which ``profiled_factor`` serves.
     if isinstance(system, FactorSmoothLeafSystem | SumToZeroLeafSystem):
         if data_operator is not system.operator:
             raise RuntimeError("terminal structured refit's data operator is not its system's")
-        # on the c0-shifted moments (design §3.2): the estimability, the column
-        # scales and the small data factor read its numbers
+        # on the c0-shifted moments: the estimability, the column scales and
+        # the small data factor read its numbers
         centered_data_operator = centred_data_operator(
             system, row_column_norm=cache.get("structured_row_column_norm")
         )
-        # the published state keeps no row-scale leaf arrays (Opus review P1):
-        # the system and the factor are copies whose leaf keeps only what a
-        # published factor reads, and the fit's own objects are left as they are
+        # the published state keeps no row-scale leaf arrays: the system and
+        # factor are copies keeping only what a published factor reads
         own = factor.augmented_factor.system is system
         system = system.published()
         factor = factor.published(system if own else None)
@@ -308,10 +306,9 @@ def compute_profiled_phi(
             M_p,
         ).phi
 
-    # Reduced profile for estimated-scale families without an explicit Wood
-    # Eq. (4) profiler (notably Tweedie). The residual likelihood dimension is
-    # governed by the penalty *nullity* on the identified coefficient range,
-    # not by the total penalty rank.
+    # Reduced profile for estimated-scale families without a Wood Eq. (4)
+    # profiler (Tweedie): the residual likelihood dimension is the penalty
+    # nullity on the identified coefficient range, not the penalty rank.
     hessian_rank = pirls_result.reml_hessian_rank
     if hessian_rank is None:
         hessian_rank = 1 + p_dim
@@ -322,11 +319,8 @@ def compute_profiled_phi(
         lambdas=lambdas,
         coefficient_width=p_dim,
     )
-    # The declared contract's likelihood size, not the row count. This
-    # fallback is reached by `apply_shape_postfit`'s repair as well as the
-    # terminal publication, so a row-count denominator here republishes the
-    # wrong dispersion -- and every Wald interval drawn from it -- after an
-    # otherwise contract-correct fit.
+    # The declared contract's likelihood size, not the row count; the shape
+    # repair reaches this fallback too.
     size = (
         float(likelihood_size)
         if likelihood_size is not None
@@ -383,13 +377,13 @@ def maybe_qp_passthrough_refit(
 
 
 def _disclose_thin_levels(profile: dict, factor) -> None:
-    """Name the ``sz`` levels too thin to identify their polynomial deviation (decision 4).
+    """Name the ``sz`` levels too thin to identify their polynomial deviation.
 
     A level with fewer than ``m`` distinct weighted ``x`` values (the penalty's
     null space) beside the required global Spline makes an exact alias of the
     main effect's polynomial with that level's deviation, and a level with no
     weight lets the others' constants reproduce the intercept.  The balance
-    tree keeps the level and truncates the alias (one-engine design §3.5):
+    tree keeps the level and truncates the alias;
     ``profile["structured_thin_levels"]`` and one ``UserWarning`` name it.
     """
     levels = tuple(getattr(factor, "thin_levels", ()) or ())
@@ -422,17 +416,15 @@ def _disclose_weak_identification(
     reml_penalties,
     at_mode: bool,
 ) -> None:
-    """Publish every weakly identified slope of a finished REML fit (design §3.9).
+    """Publish every weakly identified slope of a finished REML fit.
 
-    Once per fit, for every family and backend of the direct REML engine: the
-    §3.9 test at the final mode from its Fisher rows
-    (``reml.identified.final_mode_weak_slopes``; ``at_mode``, not for a
-    constrained QP refit, whose mode its QP certifies), the slopes the
-    Laplace approximation left out, the directions the border factor
-    truncated as weakly identified and those the observed certificate
-    flagged.  The fit keeps them all; ``profile["reml_weakly_identified"]``
-    holds the slope indices, ``model.diagnostics()`` their names, and a
-    ``WeakIdentificationWarning`` names them once.
+    Once per fit, for every family and backend: the final-mode test from its
+    Fisher rows (``reml.identified.final_mode_weak_slopes``; ``at_mode``, not
+    for a QP-certified refit), the slopes the Laplace approximation left out,
+    and the directions the border factor or the observed certificate flagged.
+    The fit keeps them all; ``profile["reml_weakly_identified"]`` holds the
+    slope indices, ``model.diagnostics()`` their names, and one
+    ``WeakIdentificationWarning`` names them.
     """
     flagged: set[int] = set()
     if at_mode:
@@ -534,11 +526,8 @@ def finalize_reml_fit(
     model._reml_penalties = reml_penalties
     model._reml_result = best
     lambdas = best.lambdas
-    # The optimizer already built and filled a per-fit Tweedie saturated-density
-    # cache; without this the terminal evaluations below construct a cold one and
-    # re-solve a (Dp, Mp) the search has already solved (measured: 20 of 177
-    # fresh density passes on a burn-cost-shaped fit).  Same pure inputs, so the
-    # reconstructed object is value-identical -- only its memo dicts differ.
+    # Reuse the optimizer's filled Tweedie saturated-density cache, so the
+    # terminal evaluations do not re-solve a (Dp, Mp) the search already solved.
     terminal_tweedie_scale_data = getattr(best, "tweedie_scale_data", None)
     n_reml_iter = best.n_reml_iter
     converged = best.converged
@@ -561,12 +550,9 @@ def finalize_reml_fit(
             else classify_reml_curvature(model._distribution, model._link)
         )
     best.curvature_source = terminal_curvature
-    # The Laplace approximation's identified part (design §3.9,
-    # ``reml.identified``): the terminal objective leaves out the same slopes
-    # the optimizer's did, so it scores the state it publishes consistently.
-    # ``disclosed`` is the same record for the disclosure: on the QP
-    # passthrough the terminal objective keeps the full Laplace term, but the
-    # search that chose lambda left these out, and they are disclosed.
+    # The Laplace approximation's identified part (``reml.identified``): the
+    # terminal objective leaves out the slopes the optimizer did. ``disclosed``
+    # is the record disclosed, which on the QP passthrough differs from it.
     identified = IdentifiedLaplace()
     disclosed = identified
     old_gms = model._dm.group_matrices
@@ -599,34 +585,19 @@ def finalize_reml_fit(
     if not qp_passthrough:
         identified = disclosed
     observed_terminal = terminal_curvature == "observed" and not qp_passthrough
-    # One-engine design §3.8: the terminal refit of every route auto uses,
-    # exact and discrete, gram and structured, stops on the certificate's
-    # own centred score over the identified coefficients, at the one bar
-    # (``mode_score.MODE_CERTIFICATION_BAR``).  An objective change is
-    # blind to a coefficient whose rows carry a small share of the
-    # likelihood (a level driven towards its penalty bound, a tiny-lambda
-    # direction), whose log-curvature still enters log|H| at full weight,
-    # so the published objective described a point short of the mode
-    # (stage-0 verifier census: raw_1e8 binomial, 21.3 above it; the
-    # discrete terminal's unconstrained score left raw_1e8 binomial 16
-    # above gram's, stage-1 verifier).  The bar is set by what the REML
-    # criterion needs, so Fisher's linear rate on a non-canonical link
-    # reaches it; a refit that does not is published as not converged,
-    # never refused.  A linearly constrained mode is certified by its inner
-    # QP/KKT state and keeps the objective stop.
+    # Every unconstrained terminal refit stops on the certificate's centred
+    # score over the identified coefficients at ``MODE_CERTIFICATION_BAR``: an
+    # objective change is blind to a coefficient with a small share of the
+    # likelihood whose log-curvature still enters log|H|. A refit short of the
+    # bar is published as not converged, never refused. A linearly constrained
+    # mode is certified by its QP/KKT state and keeps the objective stop.
     shaped = any(getattr(group, "constraints", None) is not None for group in model._groups)
     certified_terminal = observed_terminal or (not qp_passthrough and not shaped)
     final_tolerance = min(pirls_tol, 1e-10) if certified_terminal else pirls_tol
     terminal_bar = mode_certification_bar(profile.get("reml_tol_resolved"))
-    # Rank metadata (a data-subspace TSQR on a large book) is read only
-    # by retained-fit inference.  A power-search candidate is discarded
-    # (``_discard_rank_info``), so it skips it; an NB2 auto-theta refit
-    # may be replaced by the next, so it defers it (``_defer_rank_info``,
-    # computed by ``fit_ops`` for the refit that is published).  A QP
-    # passthrough publishes its constrained refit
-    # (``maybe_qp_passthrough_refit``), which reads only this refit's
-    # coefficients, so it skips it too.  Other shaped fits keep it: their
-    # QP route rewrites it after this refit.
+    # Rank metadata is read only by retained-fit inference: a discarded
+    # power-search candidate and a QP passthrough skip it, an NB2 auto-theta
+    # refit defers it to the published refit, and other shaped fits keep it.
     discard_rank_info = qp_passthrough or (
         not shaped and bool(getattr(model, "_discard_rank_info", False))
     )
@@ -646,8 +617,7 @@ def finalize_reml_fit(
         offset=offset_arr,
         beta_init=beta_init,
         intercept_init=float(best.pirls_result.intercept),
-        # the optimizer's state, centred (design §3.8), read in the
-        # rebuilt basis as beta_init is
+        # the optimizer's centred state, read in the rebuilt basis as beta_init is
         _centred_init=_map_centred_state_between_bases(
             centred_warm_start(best.pirls_result),
             solver_result.beta,
@@ -693,15 +663,10 @@ def finalize_reml_fit(
         direct_solve=direct_solve,
         trace_run=trace_run,
     )
-    # Typed for the same routing contract as the candidate-side gate in
-    # run_fixed_monotone_reml: a power search treats a terminal QP refit
-    # with no feasible mode as this point's infeasibility, not a crash.  A
-    # mode outside the constraints is not the declared shape at all, so it is
-    # refused.  A feasible mode whose inner QP did not complete its KKT
-    # certificate keeps every constraint and is only short of certified
-    # optimality: it is published as not converged (owner decision 3, below),
-    # its stop named in ``terminal_refit_termination``, and a power search
-    # routes around it by that name (``profiling.tweedie``).
+    # Typed so a power search scores an infeasible terminal QP mode as this
+    # point's infeasibility, not a crash. A feasible mode short of its KKT
+    # certificate is published as not converged, its stop named in
+    # ``terminal_refit_termination``.
     if final_pirls.termination_reason == "constraint_infeasible":
         raise ObservedModeNotConvergedError(
             "terminal constrained REML refit ended at an infeasible coefficient mode"
@@ -750,12 +715,9 @@ def finalize_reml_fit(
             lambdas,
         )
     if qp_passthrough:
-        # Lambda selection ran on the unconstrained surrogate, but the state
-        # published below is the constrained Fisher/QP refit. Its determinant,
-        # rank, scale profile, objective, and curvature label must therefore be
-        # recomputed as one coherent terminal evaluation. Retaining the
-        # optimizer's observed label/objective would describe coefficients that
-        # are no longer installed.
+        # Lambda was selected on the unconstrained surrogate, but the published
+        # state is the constrained Fisher/QP refit, so its terminal evaluation
+        # is recomputed as one coherent whole.
         terminal_curvature = "fisher"
         best.curvature_source = terminal_curvature
         if final_pirls.log_det_H is None or final_pirls.reml_hessian_rank is None:
@@ -792,11 +754,9 @@ def finalize_reml_fit(
         best.objective = terminal_evaluation.value
     if terminal_curvature == "observed" and not qp_passthrough:
         if not final_pirls.converged and not stopped_on_iteration_budget(final_pirls):
-            # Typed: to a power search this is one more point with no usable
-            # penalized mode. Only a structural failure (a non-finite
-            # deviance, an infeasible or KKT-incomplete constrained mode)
-            # lands here; a mode short of the certificate is published as
-            # not converged (``terminal_certified``), as at the candidate gate.
+            # Typed: a structural failure is one more point a power search
+            # scores infeasible; a mode short of the certificate is published
+            # as not converged (``terminal_certified``).
             raise ObservedModeNotConvergedError(
                 "terminal observed REML refit did not converge to a penalized coefficient mode",
                 hint=mode_certification_hint(model._distribution),
@@ -836,24 +796,10 @@ def finalize_reml_fit(
                 structured_chain_group_indices=structured_chain,
             )
         except ObservedGeometryInfeasibleError as exc:
-            # The same retype the candidate gate in optimize_direct_reml makes,
-            # for the same reason. The convergence gate above now admits a
-            # budget-exhausted iterate, and an iterate still mid-descent can
-            # carry observed information the geometry refuses outright -- a
-            # non-finite row, a non-positive intercept curvature. The line
-            # search answers that refusal by halving its step; here there is no
-            # step left to halve, so retyping is the only routing available.
-            # Left bare this is a ValueError, and it would sail past every
-            # `except ObservedModeNotCertifiedError` that guards this call --
-            # the power search in profiling/tweedie.py, which names the
-            # terminal refit as a place it expects this family from, and the
-            # two publication handlers in model/profile_ops.py -- killing a
-            # search that only needed to score this point infeasible.
-            #
-            # Only that one refusal is retyped. The build's other ValueErrors
-            # report a violated caller contract -- a misshapen design, a bad
-            # derivative_order, a penalty that is not PSD -- which no iterate
-            # can clear, so they must keep surfacing as the bugs they are.
+            # A budget-exhausted iterate can carry observed information the
+            # geometry refuses; retype that refusal so the power search and the
+            # publication handlers score the point infeasible. The build's other
+            # ValueErrors are caller-contract bugs and stay bare.
             raise ObservedModeNotConvergedError(
                 f"terminal observed REML geometry refused the penalized coefficient mode: {exc}",
                 hint=mode_certification_hint(model._distribution),
@@ -877,12 +823,7 @@ def finalize_reml_fit(
                 bar=terminal_bar,
             )
         except ObservedGeometryInfeasibleError as exc:
-            # The score carries the same exposure as the build above: a score
-            # that evaluates non-finite describes these coefficients, so it has
-            # to reach a power search as one more point with no usable
-            # penalized mode rather than as a bare ValueError nothing on that
-            # path catches. Its argument-shape refusals stay bare, for the
-            # reason the build's do.
+            # Retyped as the build's refusal is; argument-shape refusals stay bare.
             raise ObservedModeNotConvergedError(
                 "terminal observed REML refit could not score its penalized "
                 f"coefficient mode: {exc}",
@@ -893,9 +834,8 @@ def finalize_reml_fit(
         # (``final_pirls.converged`` under ``convergence="mode_score"``); the
         # geometry's score here is published as a diagnostic, never gated.
         profile["reml_terminal_observed_mode_residual"] = mode_score.relative_max
-        # §3.8, §3.9: disclose a binding floor and every coefficient flagged
-        # weakly identified and kept (slope indices), which the certificate
-        # did not gate.
+        # Disclose a binding floor and every coefficient flagged weakly
+        # identified and kept, which the certificate did not gate.
         profile["reml_terminal_mode_floor_binding"] = mode_score.floor_binding
         profile["reml_terminal_weakly_identified"] = mode_score.weakly_identified
         profile["reml_terminal_raw_mode_residual"] = mode_score.raw_relative_max
@@ -930,9 +870,7 @@ def finalize_reml_fit(
         best.objective = terminal_evaluation.value
 
     if terminal_evaluation is None:
-        # The optimizer's retained objective belongs to its retained
-        # coefficient state.  The authoritative final refit above can move
-        # those coefficients even at unchanged lambdas, so Fisher paths must
+        # The final refit can move the coefficients at unchanged lambdas, so
         # evaluate LAML once more from the state that will be published.
         if final_xtwx is None:  # pragma: no cover - final direct-refit contract
             raise RuntimeError("terminal Fisher REML refit omitted its working Gram")
@@ -978,15 +916,9 @@ def finalize_reml_fit(
         terminal_evaluation = terminal_value
         best.objective = terminal_evaluation.value
 
-    # Profile dispersion from the state that will actually be returned.  A
-    # constrained QP passthrough refit can change both beta'S beta and deviance.
-    #
-    # The deviance-form branches below divide by the DECLARED contract's
-    # likelihood size, not the physical row count: `sum(w)` under
-    # `"frequency"`, the positive-row count under `"prior"`.  Reading `len(y)`
-    # there puts the published dispersion -- and every Wald interval drawn from
-    # it -- out of step with both the terminal objective and literal row
-    # replication whenever the weights are not all one.
+    # Profile dispersion from the state actually returned. The deviance-form
+    # branches divide by the declared contract's likelihood size: `sum(w)`
+    # under "frequency", the positive-row count under "prior".
     published_likelihood_size = dispersion_likelihood_size(
         sample_weight,
         weight_semantics=model_weight_semantics(model),
@@ -994,13 +926,9 @@ def finalize_reml_fit(
     if isinstance(model._distribution, Tweedie) and not qp_passthrough:
         phi_fixed = float(final_pirls.phi)
     elif isinstance(model._distribution, Tweedie) and terminal_evaluation is not None:
-        # QP passthrough keeps publishing the deviance-form dispersion with
-        # the terminal evaluation's identified nullity. The evaluation now
-        # carries the exact Tweedie scale profile for the criterion itself,
-        # but unifying the three published Tweedie dispersions (Pearson here
-        # above, profile MLE in estimate_p, deviance form on this path) is
-        # deliberately deferred to a release that measures its own
-        # before/after; see the families guide's dispersion inventory.
+        # QP passthrough publishes the deviance-form dispersion with the
+        # terminal evaluation's identified nullity; see the families guide's
+        # dispersion inventory.
         penalty_nullity = float(terminal_evaluation.penalty_nullity or 0.0)
         phi_fixed = max(
             float(terminal_evaluation.penalized_deviance)
@@ -1052,11 +980,9 @@ def finalize_reml_fit(
 
     update_reml_r_inv(model, reml_groups, lambdas)
 
-    # Owner decision 3 (2026-09-30): a terminal mode that stays short of the
-    # certificate is published as not converged, never refused. A route the
-    # certificate does not judge (a linearly constrained mode, the QP
-    # passthrough's constrained refit) is published the same way when its fit
-    # stopped before its own convergence test: silence would read as converged.
+    # A terminal mode short of the certificate is published as not converged,
+    # never refused; so is a route the certificate does not judge when its fit
+    # stopped before its own convergence test.
     if terminal_certified is not None:
         profile["reml_terminal_mode_certified"] = terminal_certified
         profile["reml_terminal_mode_termination"] = solver_result.termination_reason

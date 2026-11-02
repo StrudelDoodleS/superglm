@@ -1,18 +1,11 @@
 """Optional REML iteration tracing written to a debug directory.
 
-An exact fit that starts from the cached-weights pre-solve runs that
-pre-solve untraced: the stream carries one ``step_decision`` event for it
-(channel ``reml``, purpose ``reml_presolve``: updates, objective, lambdas,
-wall time), and its REML evaluations start after it.  Such a fit has no
-bootstrap state in the stream either; its first candidate starts from the
-pre-solve's mode.  Where such a fit stops on a decrease within the
-evaluations' rounding, a ``step_decision`` event (purpose
-``reml_rounding_stall``: the decrease and its rounding bound) records that
-the last accepted trial was discarded.  A search that discards an accepted
-shorter step whose decrease no quadratic criterion rejecting the full step
-allows records the same, as a ``step_decision`` event of purpose
-``reml_inconsistent_decrease`` (the decrease, the trial's step and the
-predicted decrease).
+A cached-weights pre-solve runs untraced and appears as one ``step_decision``
+event (channel ``reml``, purpose ``reml_presolve``); the REML evaluations, with
+no bootstrap state, start after it.  A discarded accepted trial is recorded as
+a ``step_decision`` event of purpose ``reml_rounding_stall`` (decrease within
+rounding) or ``reml_inconsistent_decrease`` (decrease no quadratic criterion
+allows).
 """
 
 from __future__ import annotations
