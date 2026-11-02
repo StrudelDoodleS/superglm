@@ -41,6 +41,10 @@ SAVED_KINDLESS_SCOP = (
     Path(__file__).parent / "fixtures" / "saved_v0_41_0" / "kindless_beside_scop.pkl"
 )
 SAVED_V041 = Path(__file__).parent / "fixtures" / "saved_v0_41_0"
+# ``scripts/make_saved_v040_fixtures.py`` run from master 71b133b2, the last with SCOP
+SAVED_MASTER_SCOP = (
+    Path(__file__).parent / "fixtures" / "saved_master_71b133b2" / "pspline_explicit_scop.pkl"
+)
 FAMILIES = {
     "gaussian": families.gaussian,
     "poisson": families.poisson,
@@ -200,6 +204,13 @@ def test_shape_engine_scop_warns_once_and_fits_the_qp_fit(declare: str) -> None:
     assert ("differ" in message) is moved, message
     assert getattr(spec, "shape_engine", "qp") == "qp" and shape_engine(spec) == "qp"
 
+    # the declaration warned; its fit, on the QP it asked for, does not
+    frame, y = _book("poisson")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        SuperGLM(family="poisson", selection_penalty=0, features={"x": spec}).fit_reml(frame, y)
+    assert not [w for w in caught if issubclass(w.category, SCOPRetiredWarning)]
+
     model = _fit("poisson", spec)
     reference = _fit("poisson", _DECLARATIONS[declare]())
     assert _group(model).monotone_engine == "qp"
@@ -276,6 +287,45 @@ def test_saved_scop_model_predicts_and_reports_as_saved_and_refits_on_the_qp() -
     # ``fit_state._scop_templates_marked_qp`` both refits warn again.
     with warnings.catch_warnings():
         warnings.simplefilter("error", SCOPRetiredWarning)
+        model.fit_reml(frame, y)
+        reloaded = pickle.loads(pickle.dumps(model))
+        reloaded.fit_reml(frame, y)
+    assert dict(reloaded._config.feature_templates)["x"].shape_engine == "qp"
+
+
+def test_saved_explicit_scop_pspline_from_master_warns_once_and_refits_on_the_qp() -> None:
+    """A master build that still had SCOP pickles a P-spline declared on it with
+    ``shape_engine="scop"``, not the class default None a 0.41.0 pickle reads, and
+    loading skips the constructor's warning.  It predicts as saved, its first refit
+    warns once and is the QP fit of the same declaration, and it warns no more: not on
+    a second refit, and not once saved again and loaded.  Mutation check: with
+    ``saved_on_scop`` recognising only None, the refit moves to the QP silently.
+    """
+    with open(SAVED_MASTER_SCOP, "rb") as handle:
+        record = pickle.load(handle)
+    model, frame, y = record["model"], record["frame"], record["y"]
+    fitted, declared = model._specs["x"], dict(model._config.feature_templates)["x"]
+    assert fitted.shape_engine == "scop" and declared.shape_engine == "scop"
+    assert _group(model).monotone_engine == "scop"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SCOPRetiredWarning)  # loading and reading never warn
+        assert_predicts_as_saved(model, frame, record["prediction"])
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(frame, y)
+    moved = [str(w.message) for w in caught if issubclass(w.category, SCOPRetiredWarning)]
+    assert len(moved) == 1 and "fitted on the SCOP shape engine" in moved[0], moved
+    assert _group(model).monotone_engine == "qp"
+    fresh = SuperGLM(
+        family="poisson", features={"x": PSpline(n_knots=5, constraint=Constraint.fit.increasing)}
+    ).fit_reml(frame, y)
+    np.testing.assert_allclose(model.predict(frame), fresh.predict(frame), rtol=1e-10)
+    # the QP fit is not the SCOP fit the model saved (by about 6e-3 here)
+    assert np.max(np.abs(model.predict(frame) - record["prediction"])) > 1e-3
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
         model.fit_reml(frame, y)
         reloaded = pickle.loads(pickle.dumps(model))
         reloaded.fit_reml(frame, y)

@@ -49,13 +49,19 @@ def shape_engine(spec: Any) -> Literal["qp"] | None:
 
 
 def saved_on_scop(spec: Any) -> bool:
-    """Whether ``spec`` is a spline 0.41.0 or earlier fitted on SCOP, not yet built since.
+    """Whether ``spec`` is a spline saved fitted on SCOP, not yet built since.
 
-    A P-spline was pickled before ``shape_engine`` existed, so it reads the
-    class default None; a spline declared with no kind that such a fit built
-    as one is marked None when it loads (``mark_kindless_saved_on_scop``).
+    A P-spline pickled by 0.41.0 or earlier, before ``shape_engine`` existed,
+    reads the class default None; one pickled by a later build that still had
+    SCOP keeps the ``"scop"`` it was declared with, which a spline constructed
+    now never stores (it warns and stores ``"qp"``).  A spline declared with
+    no kind that such a fit built as one is marked None when it loads
+    (``mark_kindless_saved_on_scop``).
     """
-    return _uses_fit_time_shape_constraints(spec) and getattr(spec, "shape_engine", "qp") is None
+    return _uses_fit_time_shape_constraints(spec) and getattr(spec, "shape_engine", "qp") in (
+        None,
+        "scop",
+    )
 
 
 def held_splines(spec: Any) -> list[Any]:
@@ -115,7 +121,7 @@ def mark_kindless_saved_on_scop(model) -> None:
 
 
 def _warn_if_saved_on_scop(spec: Any) -> None:
-    """Warn once that a spline 0.41.0 or earlier fitted on SCOP now fits on the QP.
+    """Warn once that a spline saved fitted on SCOP (``saved_on_scop``) now fits on the QP.
 
     The build marks the spec ``"qp"``, which stops a second build of the same
     spec warning again, and a fit that commits marks the model's template
