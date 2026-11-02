@@ -49,6 +49,7 @@ from superglm.distributional.prediction_design import (
     build_joint_prediction_design,
     warn_population_levels,
 )
+from superglm.distributional.revision import CORRECTED_COVARIANCE_NEEDS_THE_FIT
 from superglm.distributional.smoothing.derivatives import LamlDerivatives, laml_derivatives
 from superglm.distributional.solver.assembly import dense_predictor_matrices
 from superglm.reml.multi_penalty import (
@@ -577,6 +578,8 @@ def _resolved_posterior_covariance(
         return covariance, "fixed"
     if kind != "corrected":
         raise ValueError("covariance must be 'fixed' or 'corrected'")
+    if fitted.fit_state.hand_edit is not None:
+        raise ValueError(CORRECTED_COVARIANCE_NEEDS_THE_FIT)
 
     smoothing = fitted.smoothing
     if smoothing is None or smoothing.convergence_reason == "fixed_only":

@@ -44,6 +44,7 @@ from superglm.distributional.results.endpoint_evidence import ConvergenceReason
 from superglm.distributional.results.fit import DistributionalFitResult
 from superglm.distributional.results.smoothing import DistributionalEFSResult
 from superglm.distributional.results.solver import DenseSolverConfig, DenseSolverResult
+from superglm.distributional.revision import HandEdit, check_hand_edit
 from superglm.distributional.solver.chunks import ChunkSize
 from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.distributional.walls import PRESSED_STEP, outward_step, wall_rows
@@ -275,6 +276,17 @@ class DistributionalFitState:
     # Rows read as truncated and as censored; class defaults read older pickles.
     truncated_row_count: int = 0
     censored_row_count: int = 0
+    # Coefficients the model predicts with when they were edited by hand; the
+    # solver result, inference and covariance keep describing the fit. The class
+    # default reads older pickles as unedited.
+    hand_edit: HandEdit | None = None
+
+    @property
+    def prediction_coefficients(self) -> NDArray[np.float64]:
+        """The coefficients predictions use: the hand edit's, else the fit's."""
+        if self.hand_edit is None:
+            return self.result.coefficients
+        return self.hand_edit.coefficients
 
     @property
     def requested_solver_config(self) -> DenseSolverConfig:
@@ -398,6 +410,10 @@ class DistributionalFitState:
             raise ValueError("compact and inference covariance must agree")
         if self.result.rank != self.inference.rank:
             raise ValueError("compact and inference rank must agree")
+        if self.hand_edit is not None:
+            if not isinstance(self.hand_edit, HandEdit):
+                raise TypeError("hand_edit must be HandEdit or None")
+            check_hand_edit(self.hand_edit, self.layout, self.result.coefficients)
         if self.result.null_objective != self.null_model.objective:
             raise ValueError("compact fit and null objective must agree")
         if self.retained_rows is not None and not isinstance(

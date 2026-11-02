@@ -211,6 +211,10 @@ _EXPORTS = {
         "PriorWeightedVarianceFamily",
     ),
     "VarianceFamily": ("superglm.distributional.family", "VarianceFamily"),
+    "EditedCoefficientsWarning": (
+        "superglm.distributional.revision",
+        "EditedCoefficientsWarning",
+    ),
 }
 
 __all__ = sorted(_EXPORTS)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 import numpy as np
 from numpy.typing import NDArray
@@ -172,12 +173,12 @@ def _predict_one_eta(
     frame: EagerFrame,
     predictor: CompiledPredictor,
     layout: StackedLayout,
-    result: DenseSolverResult,
+    coefficients: NDArray[np.float64],
     offset: NDArray,
     named: list[str] | None = None,
 ) -> NDArray[np.float64]:
     state = layout.predictors[predictor.parameter_index]
-    local_coefficients = result.coefficients[state.coefficient_slice]
+    local_coefficients = coefficients[state.coefficient_slice]
     intercept_width = int(state.intercept_index is not None)
     slopes = local_coefficients[intercept_width:]
     eta = np.zeros(len(frame), dtype=np.float64)
@@ -299,7 +300,8 @@ class DenseDistributionalModel:
 
     @property
     def coefficients(self) -> NDArray[np.float64]:
-        return self.fitted_result.coefficients
+        """The coefficients predictions use: the hand edit's, else the fit's."""
+        return self._fit_state.prediction_coefficients
 
     @property
     def covariance(self) -> NDArray[np.float64]:
@@ -307,7 +309,15 @@ class DenseDistributionalModel:
 
     @property
     def predictor_coefficients(self) -> Mapping[str, NDArray[np.float64]]:
-        return self.fitted_result.predictor_coefficients
+        state = self._fit_state
+        if state.hand_edit is None:
+            return state.result.predictor_coefficients
+        return MappingProxyType(
+            {
+                predictor.name: state.hand_edit.coefficients[predictor.coefficient_slice]
+                for predictor in state.layout.predictors
+            }
+        )
 
     @property
     def smoothing_parameters(self) -> Mapping[str, float]:
@@ -355,7 +365,7 @@ class DenseDistributionalModel:
                     frame,
                     predictor,
                     self.layout,
-                    self.result,
+                    self.coefficients,
                     resolved_offsets[predictor.name],
                     named,
                 )
@@ -372,7 +382,10 @@ class DenseDistributionalModel:
         offsets: Mapping[str, NDArray] | None = None,
     ) -> NDArray[np.float64]:
         """Return fitted natural parameters in family order."""
-        eta = self.predict_eta(X, offsets=offsets)
+        return self.parameters_from_eta(self.predict_eta(X, offsets=offsets))
+
+    def parameters_from_eta(self, eta: NDArray[np.float64]) -> NDArray[np.float64]:
+        """Apply each parameter's inverse link to its linear predictor column."""
         theta = np.empty_like(eta)
         for parameter_index, state in enumerate(self.layout.predictors):
             # Overflow is refused by the support check immediately below.

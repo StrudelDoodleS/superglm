@@ -848,6 +848,7 @@ def _corrected_shim(*, lambdas, gradient, hessian, penalties=()) -> SimpleNamesp
         family_likelihood_plan_identifier="authenticated-shim-plan",
         lambdas=lambdas,
         exact_face_components=(),
+        hand_edit=None,
     )
     return shim
 

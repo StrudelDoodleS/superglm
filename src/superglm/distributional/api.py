@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib
 import math
 import operator
@@ -81,6 +82,7 @@ from superglm.distributional.results.endpoint_evidence import EFSConvergenceReas
 from superglm.distributional.results.fit import DistributionalFitResult
 from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.results.solver import DenseSolverConfig
+from superglm.distributional.revision import EditedCoefficientsWarning, revised_model
 from superglm.distributional.separation import validate_separation_policy
 from superglm.distributional.surfaces import (
     DensityFan,
@@ -897,6 +899,47 @@ class SuperLSS:
     def result_(self) -> DistributionalFitResult:
         return self._require_fitted().fitted_result
 
+    @property
+    def _hand_edited_terms(self) -> tuple[str, ...]:
+        """Qualified names of the terms whose coefficients were edited by hand."""
+        edit = self._require_fitted().fit_state.hand_edit
+        return () if edit is None else edit.edited_terms
+
+    def _with_revised_coefficients(
+        self,
+        coefficients: NDArray,
+        *,
+        edited_terms: Sequence[str],
+        X_train: FrameLike | EagerFrame | None = None,
+    ) -> SuperLSS:
+        """Return a model that predicts with ``coefficients``; this one is unchanged.
+
+        ``coefficients`` is the full vector in the fit's layout. It may differ
+        from the fit's only inside ``edited_terms`` (qualified names such as
+        ``"scale:age"``) and at the intercept of their parameters, together with
+        the terms of any earlier revision. Predictions, term effects, ``coef_``
+        and ``coef_by_predictor_`` follow the edit; ``result_``,
+        ``covariance_`` and the inference behind them keep describing the fit.
+        The fitted rows are recomputed, which needs the training frame: the one
+        attached, else ``X_train``.
+        """
+        frame = self._training_frame if X_train is None else X_train
+        revised = revised_model(self._require_fitted(), coefficients, edited_terms, frame)
+        copied = copy.copy(self)
+        copied._model = revised
+        return copied
+
+    def _warn_if_hand_edited(self) -> None:
+        """Say once, from the caller's line, that the inference quoted predates the edit."""
+        edited = self._hand_edited_terms
+        if edited:
+            warnings.warn(
+                f"Coefficients of {', '.join(edited)} were edited by hand; "
+                "standard errors, bands and tests are from the fit before the edit.",
+                EditedCoefficientsWarning,
+                stacklevel=3,
+            )
+
     def predict_link(
         self,
         X: FrameLike | EagerFrame,
@@ -1524,7 +1567,7 @@ class SuperLSS:
         not survive pickling, so a restored model must be given
         ``X_train=``.
         """
-        return term_effect(
+        effect = term_effect(
             self._require_fitted(),
             self._term_training_frame(X_train),
             parameter,
@@ -1532,6 +1575,8 @@ class SuperLSS:
             covariance=covariance,
             **kwargs,
         )
+        self._warn_if_hand_edited()
+        return effect
 
     def term_test(
         self,
@@ -1551,7 +1596,7 @@ class SuperLSS:
         it evaluates on the training frame, so a restored model needs
         ``X_train=``.
         """
-        return term_test(
+        test = term_test(
             self._require_fitted(),
             self._term_training_frame(X_train),
             parameter,
@@ -1559,6 +1604,8 @@ class SuperLSS:
             covariance=covariance,
             **kwargs,
         )
+        self._warn_if_hand_edited()
+        return test
 
     def summary(
         self,
@@ -1574,11 +1621,13 @@ class SuperLSS:
         holds a single coefficient.  It reads the training frame the same way
         :meth:`term_test` does, so a restored model needs ``X_train=``.
         """
-        return summary_table(
+        table = summary_table(
             self._require_fitted(),
             self._term_training_frame(X_train),
             covariance=covariance,
         )
+        self._warn_if_hand_edited()
+        return table
 
     # -- the posterior primitive ----------------------------------------- #
 
