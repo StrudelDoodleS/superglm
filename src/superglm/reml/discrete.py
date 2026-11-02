@@ -117,24 +117,15 @@ def _profiled_formation_error(
 ) -> NDArray:
     """``g`` with ``|dH_ij| <= sqrt(g_i g_j)`` between the cached ``H_c`` and its exact value.
 
-    ``H_c = X_c' W X_c + S`` is PSD by construction (``W >= 0``, each penalty
-    block a Gram), so its only negative curvature is formation rounding,
-    which the eigensolver's bar in ``decompose_gram`` leaves out.
-
-    A centred-Gram entry sums at most ``n`` terms ``W_r x_ri x_rj`` of three
-    products, within ``gamma_{n+2} sqrt(M_i M_j)`` whatever the summation tree
-    (Higham 2002, eq. 3.13, and Cauchy-Schwarz), ``M_i`` the second moment
-    about the centre used. A raw-moment rung's ``a a' / s`` adds
-    ``2 gamma_{n+1} + gamma_{n-1}`` of ``sqrt(R_ii R_jj)`` and admits a column
-    only when ``s mean_i^2 <= C_ii``, so ``|dG_ij| <= 5 gamma_{n+4}
-    sqrt(M_i M_j)``, ``M_i = min(R_ii, 2 C_ii)``, while ``n u < 1/5``. A
-    penalty block adds ``gamma_{2p+2} sqrt(S_ii S_jj)``, ``G + S`` adds
-    ``gamma_2 sqrt(d_i d_j)``, and forming ``g`` nine counts in each
-    ``gamma`` (Higham 2002, Lemma 3.3).
-
-    Kernels that transform after accumulating (``R' (B'WB) R``, tensor grids)
-    can exceed this bound; an under-estimate only refuses a semidefinite
-    matrix, never accepts one its rounding cannot explain.
+    ``H_c = X_c' W X_c + S`` is PSD by construction, so its only negative curvature is rounding.
+    A centred-Gram entry of at most ``n`` three-product terms is within ``gamma_{n+2}
+    sqrt(M_i M_j)`` (Higham 2002, eq. 3.13, and Cauchy-Schwarz), ``M_i`` the second moment about
+    the centre. A raw-moment rung's ``a a' / s`` adds ``2 gamma_{n+1} + gamma_{n-1}`` of
+    ``sqrt(R_ii R_jj)`` and admits a column only when ``s mean_i^2 <= C_ii``, so
+    ``|dG_ij| <= 5 gamma_{n+4} sqrt(M_i M_j)``, ``M_i = min(R_ii, 2 C_ii)``, while ``n u < 1/5``.
+    A penalty block adds ``gamma_{2p+2} sqrt(S_ii S_jj)``, ``G + S`` adds ``gamma_2 sqrt(d_i d_j)``
+    and forming ``g`` adds nine to each count (Higham 2002, Lemma 3.3). An under-estimate only
+    refuses a semidefinite matrix, never accepts one its rounding cannot explain.
     """
     p = int(np.size(mean_x))
     data = np.maximum(np.diag(centered_XtWX), 0.0)

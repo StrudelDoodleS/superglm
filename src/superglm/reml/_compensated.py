@@ -143,22 +143,12 @@ def _warmup_compensated() -> None:
 def _dot2_quadratic_form(rows, columns, entries, vector):
     """Evaluate ``x' A x`` as ``Dot2(x, A x)`` with each row of ``A x`` from Dot2.
 
-    ``A`` is given by its nonzero entries in row-major order, as ``np.nonzero``
-    returns them. A zero term leaves the Dot2 state unchanged (its TwoProduct
-    and TwoSum errors are zero), so skipping zeros gives the dense recurrence's
-    value up to the sign of a zero result, at a cost proportional to the
-    nonzeros of a block-diagonal penalty. By Proposition 5.5 of Ogita, Rump and
-    Oishi (2005), without underflow, each row ``v_i`` of ``k_i`` terms is within
-    ``u |(A x)_i| + gamma_k_i**2 (|A| |x|)_i`` of ``(A x)_i``, and the outer
-    product is within ``u |x' v| + gamma_m**2 |x|' |v|`` of ``x' v``, so the
-    result is within ``u |x' A x| + u |x|' |A x| + 2 gamma_n**2 |x|' |A| |x|``
-    to first order, ``n`` the order of ``A``. False requests the caller's
-    fallback, as ``_dot2_value`` does.
-
-    Each row's Dot2 and the outer Dot2 run as the same recurrence as
-    ``_dot2_value``, operation for operation, but the outer one advances as
-    each row finishes, so the kernel allocates nothing: no per-row gather and
-    no scratch sized by the nonzeros, which a dense block makes ``p**2``.
+    ``A`` is given by its nonzeros in row-major order (as ``np.nonzero``); skipping zero terms
+    leaves the Dot2 state unchanged, so the value is the dense recurrence's up to a zero's sign.
+    By Ogita, Rump and Oishi (2005, Prop. 5.5), without underflow, the result is within
+    ``u |x' A x| + u |x|' |A x| + 2 gamma_n**2 |x|' |A| |x|`` to first order, ``n`` the order of
+    ``A``. The outer Dot2 advances as each row finishes, so nothing is allocated. False requests
+    the caller's fallback, as ``_dot2_value`` does.
     """
     count = len(entries)
     if count == 0:

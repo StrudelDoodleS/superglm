@@ -477,17 +477,14 @@ def _dense_split_signed_gram(
 ) -> NDArray:
     """``X_c' diag(a) X_c`` beside dense columns, ``moments`` the bounded design's raw signed moments.
 
-    The IRLS Gram's split (``centered_system._attach_dense_split``) about the
-    fixed centre: bounded columns from raw moments, centred after; dense
-    columns' rows centred as ``r = x - c`` about the exact pair ``(c, d)``,
-    block ``G - e d' - d e' + d d' sum a`` and cross block
-    ``N'(a r) - m_N e' - (N'a - m_N sum a) d'``. The algebra is linear in
-    ``a`` and the summation bound holds for any sign (Higham 2002, eq. 3.5),
-    so the corrected two-pass bound (Chan, Golub & LeVeque 1983) holds with
-    ``|a|``: per entry ``gamma_(n+p+8) sum |a| (|x~_j| + |l_j|)(|x~_k| + |l_k|)``,
-    ``x~`` a column's values (``r`` for a dense one) and ``l`` its centre or
-    ``d``. A column the certificate rejected (``repair``) enters through its
-    centred support, so there ``x~ = c_j`` and ``l_j = 0``.
+    The IRLS Gram's split (``centered_system._attach_dense_split``): bounded columns from raw
+    moments, centred after; dense rows centred as ``r = x - c`` about the exact pair ``(c, d)``,
+    block ``G - e d' - d e' + d d' sum a``, cross ``N'(a r) - m_N e' - (N'a - m_N sum a) d'``.
+    Linear in ``a``, and summation bounds hold for any sign (Higham 2002, eq. 3.5), so the
+    corrected two-pass bound (Chan, Golub & LeVeque 1983) holds with ``|a|``: per entry
+    ``gamma_(n+p+8) sum |a| (|x~_j| + |l_j|)(|x~_k| + |l_k|)``, ``x~`` a column's values (``r``
+    if dense), ``l`` its centre or ``d``; a ``repair`` column enters by its centred support,
+    ``x~ = c_j``, ``l_j = 0``.
     """
     dense_index, bounded_index = split.dense_index, split.bounded_index
     lo = centre_lo[dense_index]

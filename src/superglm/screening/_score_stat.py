@@ -135,21 +135,14 @@ def _empty_pencil(tr_v: float = 0.0, tr_s: float = 0.0, penalty_exponent: int = 
 def _pair_pencil(pair: PairFactor, penalty_root: NDArray | None) -> _Pencil:
     """Diagonalize ``(V_eff, S)`` from the pair's factor, never from its Gram.
 
-    The GSVD of ``(R_eff, rootS)`` by a QR of the stack and the CS decomposition of its
-    orthonormal factor (see the module docstring; *LAPACK Users' Guide*, 3rd ed.,
-    sec. 4.7, recommends it when the second matrix is ill conditioned). ``dggsvd3`` is
-    absent from ``scipy.linalg.lapack``, but a pivoted QR and one SVD are enough. With
-    ``[R_eff ; rootS] = Q Rg``, ``Q = [Q1 ; Q2]`` and ``Q1 = Uc C W'``, ``Q2 = Us S W'``,
-
-        V_eff = Y C^2 Y',   S = Y S^2 Y',   Y = Rg' W,   u = C Uc' z_t,
-
-    so every rung is a sum of filter factors, each in ``[0, 1]``, none a difference,
-    exact where ``Y`` is rank deficient (``Y`` has full column rank after truncation).
-
-    ``rootS`` is scaled by ``sqrt(tr(V_eff) / tr(S))`` before stacking, for accuracy:
-    each block's SVD is accurate to ``eps`` absolutely. ``penalty_root = None`` is the
-    unpenalized block: every ``s_j`` is zero, so ``edf`` is the retained rank and ``T``
-    the squared norm of ``z_t`` projected on the resolved directions.
+    The GSVD of ``(R_eff, rootS)`` by a pivoted QR of the stack and the CS decomposition of its
+    orthonormal factor (*LAPACK Users' Guide*, 3rd ed., sec. 4.7). With
+    ``[R_eff ; rootS] = Q Rg``, ``Q1 = Uc C W'``, ``Q2 = Us S W'``: ``V_eff = Y C^2 Y'``,
+    ``S = Y S^2 Y'``, ``Y = Rg' W``, ``u = C Uc' z_t``, so every rung is a sum of filter factors
+    in ``[0, 1]``, none a difference. ``rootS`` is first scaled by ``sqrt(tr(V_eff) / tr(S))``,
+    as each block's SVD is accurate to ``eps`` absolutely. ``penalty_root = None`` is the
+    unpenalized block: ``edf`` is the retained rank and ``T`` the squared norm of ``z_t`` on the
+    resolved directions.
     """
     R_eff, z_t = _profiled_factor(pair)
     # ``tr(V_eff)`` once, off the block this pencil scores; the ladder's bracket reuses it.
