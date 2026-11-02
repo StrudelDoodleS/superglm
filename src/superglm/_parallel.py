@@ -19,7 +19,7 @@ module only decides how many workers a kernel may use:
 Both are ``SuperGLM`` parameters: a fit runs inside :func:`estimator_scope`, and
 ``"auto"`` there defers to the process default, which comes from
 ``SUPERGLM_N_JOBS`` and ``SUPERGLM_MAX_MEMORY`` (an integer, ``auto``, or for
-memory a number with a ``K``/``M``/``G`` binary suffix).  :func:`parallel_config`
+memory a number with a ``K``/``M``/``G``/``T`` binary suffix).  :func:`parallel_config`
 overrides both for one context.
 
 The pooled kernels are the data-rank factor's TSQR leaves, the Gram's blocks,

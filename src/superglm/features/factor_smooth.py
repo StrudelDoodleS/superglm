@@ -239,7 +239,7 @@ class FactorSmooth:
         population curve as ``fs`` does with its ``null_j`` components.  It makes
         curves finite and unique for a level whose line separates the response or a
         term whose levels hold fewer distinct ``x`` values than the line has
-        coefficients (#444).  Without it the lines stay unpenalized whatever the
+        coefficients.  Without it the lines stay unpenalized whatever the
         data, and such levels are named in a fit warning.
     """
 

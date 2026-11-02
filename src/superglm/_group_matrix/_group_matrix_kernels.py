@@ -133,8 +133,9 @@ def _ssp_gram_needs_exact(*operands) -> bool:
     if any(array.dtype.kind not in "bifu" or array.dtype.itemsize > 8 for array in arrays):
         return False
     for array in arrays:
-        # The scan reads float64 (its one signature).  Promotion is exact and affects
-        # only classification; the native moment path keeps its operands.
+        # The scan reads float64 (its one signature).  Promotion is exact for floats
+        # and keeps an integer on its side of the scanned range (``_scan_form``); it
+        # affects only classification, and the native moment path keeps its operands.
         if array.dtype != np.float64:
             array = array.astype(np.float64)
         values = array if array.ndim == 2 else array.reshape(-1, 1)

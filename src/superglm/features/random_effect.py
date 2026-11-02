@@ -48,8 +48,8 @@ class RandomEffect:
         breaks it is an error naming the row and both of the parent's levels.  When
         this effect is the structured solver's leaf (the random effect with the
         most levels, with no ``FactorSmooth`` in the model), the declared parent is
-        always in its elimination chain; otherwise the declaration is only
-        validated.
+        in its elimination chain unless its smoothing parameter is zero, which
+        moves it to the border; otherwise the declaration is only validated.
 
     Notes
     -----
