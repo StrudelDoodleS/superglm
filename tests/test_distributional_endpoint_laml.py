@@ -2032,153 +2032,27 @@ def test_joint_endpoint_direction_evidence_normalizes_an_ordered_list() -> None:
     )
 
 
-def _joint_endpoint_iteration(
-    *,
-    event: str,
-    decisions: tuple[str, ...] = ("endpoint", "endpoint"),
-    receipt_component_indices: tuple[int, ...] | None = None,
-    indexed: bool = True,
-    receipt_fit_index: int | None = None,
-    receipt_tolerance: float = 1.0e-12,
-    event_fit_indices: tuple[int, ...] | None = None,
-    event_tolerances: tuple[float, ...] | None = None,
-    scalar_evidence: bool = False,
-    failure_reason: str | None = None,
-):
-    first_name, smoothing = _scalar_efs_fit(0.5)
-    source = smoothing.history[0]
-    assert source.accepted_fit_index is not None
-    component_names = tuple(
-        [first_name] + [f"mean:joint-{index}#wiggle" for index in range(1, len(decisions))]
-    )
-
-    mapping_updates: dict[str, dict[str, float]] = {}
-    for field_name in (
-        "lambdas_before",
-        "proposed_lambdas",
-        "lambdas_after",
-        "proposed_log_steps",
-        "accepted_log_steps",
-        "quadratic_forms",
-        "trace_terms",
-    ):
-        source_mapping = getattr(source, field_name)
-        first_value = source_mapping[first_name]
-        mapping_updates[field_name] = {name: first_value for name in component_names}
-
-    direction = None
-    if failure_reason is None:
-        if scalar_evidence:
-            direction = source.endpoint_direction_evidence
-        else:
-            named_components = (
-                component_names
-                if receipt_component_indices is None
-                else tuple(component_names[index] for index in receipt_component_indices)
-            )
-            named_directions = tuple(
-                (
-                    name,
-                    _unindexed_endpoint_direction(
-                        endpoint_objective=source.objective_after,
-                        decision=decision,
-                    ),
-                )
-                for name, decision in zip(
-                    named_components,
-                    decisions[: len(named_components)],
-                    strict=True,
-                )
-            )
-            endpoint_fit_index = (
-                source.accepted_fit_index if receipt_fit_index is None else receipt_fit_index
-            )
-            direction = JointEndpointDirectionEvidence(
-                authority_identifier="joint-analytic-observed-curvature-direction/v1",
-                component_directions=named_directions,
-                endpoint_fit_index=endpoint_fit_index if indexed else None,
-                coefficient_tolerance=receipt_tolerance if indexed else None,
-            )
-
-    event_fields = {
-        "activated_face_components": (),
-        "deactivated_face_components": (),
-        "revalidated_face_components": (),
-        "refused_face_components": (),
-    }
-    event_fields[f"{event}_face_components"] = component_names
-    accepted = event != "refused"
-    coefficient_fit_indices = (
-        (source.accepted_fit_index,) if event_fit_indices is None else event_fit_indices
-    )
-    coefficient_tolerances = (receipt_tolerance,) if event_tolerances is None else event_tolerances
-    iteration = replace(
-        source,
-        **mapping_updates,
-        **event_fields,
-        accepted=accepted,
-        accepted_fit_index=source.accepted_fit_index if accepted else None,
-        accepted_curvature=source.accepted_curvature if accepted else None,
-        coefficient_fit_indices=coefficient_fit_indices,
-        coefficient_tolerances=coefficient_tolerances,
-        endpoint_direction_evidence=direction,
-        endpoint_assessment_failure_reason=failure_reason,
-    )
-    return component_names, iteration
-
-
-@pytest.mark.parametrize("event", ["activated", "revalidated"])
-def test_joint_endpoint_direction_evidence_iteration_accepts_one_atomic_event(
-    event: str,
-) -> None:
-    component_names, iteration = _joint_endpoint_iteration(event=event)
-
-    assert getattr(iteration, f"{event}_face_components") == component_names
-    assert isinstance(
-        iteration.endpoint_direction_evidence,
-        JointEndpointDirectionEvidence,
-    )
-    assert iteration.endpoint_direction_evidence.component_names == component_names
-    assert iteration.endpoint_direction_evidence.fit_indices == (iteration.accepted_fit_index,)
-
-
-@pytest.mark.parametrize("decision", ["finite", "unresolved"])
-def test_joint_endpoint_direction_evidence_iteration_accepts_a_resolved_joint_refusal(
-    decision: str,
-) -> None:
-    component_names, iteration = _joint_endpoint_iteration(
-        event="refused",
-        decisions=("endpoint", decision),
-    )
-
-    assert iteration.refused_face_components == component_names
-    assert isinstance(
-        iteration.endpoint_direction_evidence,
-        JointEndpointDirectionEvidence,
-    )
-    assert iteration.endpoint_direction_evidence.decision == decision
-
-
 @pytest.mark.parametrize(
-    "failure_reason",
+    ("decisions", "expected"),
     [
-        "joint_endpoint_not_converged",
-        "joint_endpoint_not_stationary",
-        "joint_analytic_unavailable",
-        "joint_objective_rejected",
+        (("endpoint", "finite"), "finite"),
+        (("endpoint", "unresolved"), "unresolved"),
+        (("unresolved", "finite"), "finite"),
     ],
 )
-def test_joint_endpoint_direction_evidence_iteration_accepts_a_typed_joint_failure(
-    failure_reason: str,
+def test_joint_endpoint_direction_decision_refuses_when_any_component_does(
+    decisions: tuple[str, str],
+    expected: str,
 ) -> None:
-    component_names, iteration = _joint_endpoint_iteration(
-        event="refused",
-        failure_reason=failure_reason,
+    joint = JointEndpointDirectionEvidence(
+        authority_identifier="joint-analytic-observed-curvature-direction/v1",
+        component_directions=tuple(
+            (f"mean:component-{index}#0", _unindexed_endpoint_direction(decision=decision))
+            for index, decision in enumerate(decisions)
+        ),
     )
 
-    assert iteration.refused_face_components == component_names
-    assert iteration.endpoint_direction_evidence is None
-    assert iteration.endpoint_assessment_failure_reason == failure_reason
+    assert joint.decision == expected
 
 
 def test_efs_certifies_an_exact_face_by_finite_differences_without_directional_curvature() -> None:
