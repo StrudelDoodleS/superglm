@@ -221,20 +221,13 @@ def _plan_spline_cat_support(
 ):
     """Lossless row-support compression for a shared ``spline_cat`` basis.
 
-    A varying-coefficient term stores one CSR basis shared by its levels plus a row
-    subset per level.  When the spline covariate repeats (a rating factor in whole
-    years), one dense block of distinct rows serves every level.  The gate is the
-    one ``_build_ssp_group`` applies to a main effect, with three differences: the
-    cost model is told how many grams (levels) share the support; the grouping is
-    offered (equal *x* gives equal rows) rather than detected, and
-    ``plan_verified_row_support`` still checks it; and only ``active`` rows count,
-    because the base level is absorbed into the main effect and its rows appear in
-    no emitted block.
-
-    ``index`` reads ``B`` as one row per distinct value of ``x`` plus each row's
-    index into them; the support is then the rows of the values the active rows
-    hold, in increasing order of value.  Returns ``None`` when the gate declines,
-    leaving CSR in place.
+    When the spline covariate repeats, one dense block of distinct rows serves every level's
+    row subset. The gate is ``_build_ssp_group``'s, except that the cost model counts the levels
+    sharing the support, the grouping (equal *x*, equal rows) is offered and still checked by
+    ``plan_verified_row_support``, and only ``active`` rows count (the base level is absorbed
+    into the main effect). ``index`` reads ``B`` as one row per distinct ``x`` plus each row's
+    index into them; the support is then the active rows' values in increasing order. Returns
+    ``None`` when the gate declines, leaving CSR in place.
     """
     # Function-local on purpose: these thresholds are read at call time so a test
     # that lowers the module global reaches the pre-gate below.  Hoisting to module
@@ -624,27 +617,15 @@ class SplineCategorical:
     ) -> list[GroupInfo]:
         """Hold each level's curve where its responses all sit on a boundary.
 
-        ``separation`` is ``(response, prior weights, boundaries, level effect, main
-        curve)``: whether the factor's main effect gives each level its own constant,
-        and the spline's main-effect spec whose curve is the factor base's (``None``
-        without one).  ``binned`` is the discrete path's ``(support basis, bin index,
-        bin values)``.  A level whose responses all sit on a boundary over a covariate
-        range has a likelihood that keeps rising as its curve walks toward a zero (or
-        certain) mean there (``diagnostics.separation.separated_curve_support``); only
-        the level's smoothing penalty bounds the walk.
-
-        Beyond the level's anchors (first and last covariate values where its
-        responses vary) a separated range is outside what its responses identify, and
-        the curve is held at the anchor's value, as ``extrapolation="clip"`` does
-        (``_level_clip``).  A separated range between anchors keeps its rows, and the
-        curve directions only that range sees are held at the minimum-penalty
-        interpolation of the rest (``continuation_basis``).  The group keeps its name
-        and smoothing parameter; its support, ``projection`` and ``penalty_matrix``
-        carry the change.  Findings are kept on ``_separated_curves``.
-
-        The factor's base level has no group: its curve is the main effect's, so it is
-        scanned in the main effect's basis and its ranges named, not held, and
-        reported as approximate.
+        ``separation`` is ``(response, prior weights, boundaries, level effect, main curve)``,
+        ``binned`` the discrete path's ``(support basis, bin index, bin values)``. There only the
+        level's penalty bounds its curve (``diagnostics.separation.separated_curve_support``).
+        Beyond the level's anchors (first and last values where responses vary) the curve is held
+        at the anchor value, as ``extrapolation="clip"`` does (``_level_clip``); between anchors the
+        directions only that range sees are held at the minimum-penalty interpolation
+        (``continuation_basis``). Support, ``projection`` and ``penalty_matrix`` carry the change,
+        findings go on ``_separated_curves``, and the base level (the main effect's curve) has its
+        ranges named and reported as approximate, not held.
         """
         from superglm.diagnostics.separation import (
             SeparatedCurve,

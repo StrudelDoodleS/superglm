@@ -319,20 +319,13 @@ def _certified_profile_rank(
 def _face_ranks(design: MetricsDesign, W: NDArray, root: NDArray, face: NDArray):
     """``Z'(X'WX + S)Z`` and ``Z'(D + S)Z`` decomposed from the rows projected on the face ``Z``.
 
-    Returns the projected rows, their centred Gram ``Z'DZ`` and the two
-    decompositions, for ``face_pseudo_inverse``.  The rows are projected
-    before any product (``ProjectedDesign``), and each decomposition is
-    certified as the unconstrained one is, on the projected Grams and the
-    penalty on the face.  ``Z' M Z`` formed from the full Gram instead
-    carries an error of the curvature weights put off the face times ``u``,
-    which no factorization of it detects while it stays definite.  The
-    penalty on the face is ``(PZ)'(PZ)`` from the stacked root ``P'P = S``
-    of its terms (``_active_penalty_root``), PSD by construction, and ``PZ``
-    is the penalty's factor wherever the rows certify a rank: ``Z'SZ``
-    formed directly cancels to rounding of either sign in the penalty's null
-    space, which outweighs the data's curvature once the weights are small,
-    and a root of the summed ``S`` cuts a term below ``eps`` times another,
-    which can be all the curvature the face has.
+    Returns the projected rows, their centred Gram ``Z'DZ`` and the two decompositions, for
+    ``face_pseudo_inverse``, each certified as the unconstrained one is. Rows are projected
+    before any product (``ProjectedDesign``): ``Z' M Z`` from the full Gram carries ``u`` times
+    the curvature off the face, which no factorization detects while it stays definite. The
+    face penalty is ``(PZ)'(PZ)`` from the stacked root ``P'P = S`` (``_active_penalty_root``),
+    PSD and the penalty's factor: ``Z'SZ`` formed directly cancels to rounding of either sign in
+    the null space, and a root of the summed ``S`` loses a term below rounding of another.
     """
     rows = ProjectedDesign(design, face)
     raw_gram, xtw1, data_gram = weighted_moments(rows, W)
@@ -1408,23 +1401,16 @@ class ModelMetrics:
         *,
         phi_scale: bool = True,
     ) -> dict[str, Any]:
-        """SE of the log-relativity curve/levels for a feature.
+        """SE of the log-relativity curve/levels for a feature, from the coefficient covariance.
 
-        Propagates the covariance of the fitted coefficients through the
-        feature's design matrix to produce SEs on the interpretable scale.
-
-        For splines: returns ``{x, se_log_relativity}`` on a grid.
-        For categoricals: returns ``{levels, se_log_relativity}`` per level.
-        For numerics: returns ``{se_coef}``.
-
-        Uses the same quasi-likelihood dispersion as
-        :attr:`coefficient_se` when ``phi_scale=True``.
+        Splines return ``{x, se_log_relativity}`` on a grid, categoricals
+        ``{levels, se_log_relativity}``, numerics ``{se_coef}``. ``phi_scale=True`` uses the
+        quasi-likelihood dispersion of :attr:`coefficient_se`.
 
         Parameters
         ----------
         name : str
-            Feature name (e.g. "DrivAge"). For select=True splines with multiple
-            subgroups, all subgroups are gathered automatically.
+            Feature name (e.g. "DrivAge"); a ``select=True`` spline's subgroups are gathered.
         """
         from superglm.features.categorical import Categorical
         from superglm.features.numeric import Numeric

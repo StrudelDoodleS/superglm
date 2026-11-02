@@ -286,18 +286,12 @@ def _group_test_kind(model: SuperGLM, row, groups: tuple[Any, ...]) -> str:
 
 
 def _level_row_kind(row: _CoefRow) -> str:
-    """Per-level provenance for a level row.
+    """Level row's kind: ``"free level"`` for a free special, else ``"level"``.
 
-    The Summary sheet emits one row per coefficient row, so an
-    OrderedCategorical special already has its own row here; it only needs a
-    kind that says so.  ``level_fit`` is set by both level-row builders
-    (``coef_tables.build_coef_rows`` and
-    ``report_ops._build_editor_stale_coef_rows``), so the edited-model path
-    carries the marker too.
-
-    Read the field directly: every row here is a ``_CoefRow``, so a defaulting
-    ``getattr`` would only turn a rename or a wrong row type into every special
-    silently reverting to ``"level"`` in the exported workbook.
+    Both level-row builders (``coef_tables.build_coef_rows`` and
+    ``report_ops._build_editor_stale_coef_rows``) set ``level_fit``, so the edited-model path
+    carries the marker too. The field is read directly, not by a defaulting ``getattr``, so a
+    rename fails loudly instead of exporting every special as ``"level"``.
     """
     return "free level" if row.level_fit == "free" else "level"
 

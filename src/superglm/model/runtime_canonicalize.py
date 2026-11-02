@@ -299,16 +299,12 @@ def _public_centred_state(
 ) -> tuple[float | None, NDArray[np.float64] | None, float | None]:
     """The solver's centred state ``(alpha, c, alpha_lo)`` read in the public coordinates.
 
-    The fit's predictor is ``eta = alpha + (X - 1 c') beta``
-    (``mode_score.linear_predictor``), free of the cancellation a dense
-    column's offset forces between ``X beta`` and the raw intercept.  Only a
-    ``DenseGroupMatrix`` column its term scores centred (``base.scores_centred``:
-    a numeric column or a product of two) keeps its centre; every other
-    column's ``(m - c)' beta`` is folded into ``alpha`` once, with the fold's
-    rounding kept in the compensated remainder ``alpha_lo`` (a TwoSum).
-    Returns ``(None, None, None)`` when the solver carries no centred state,
-    or no remainder and no kept centre, so the model predicts from its raw
-    intercept.
+    The fit's predictor is ``eta = alpha + (X - 1 c') beta`` (``mode_score.linear_predictor``),
+    free of the cancellation between ``X beta`` and the raw intercept. Only a
+    ``DenseGroupMatrix`` column its term scores centred (``base.scores_centred``) keeps its
+    centre; every other column's ``(m - c)' beta`` is folded into ``alpha`` once, its rounding
+    kept in ``alpha_lo`` by TwoSum. Returns ``(None, None, None)`` when there is no centred
+    state, or no remainder and no kept centre, so the model predicts from its raw intercept.
     """
     from superglm.group_matrix import DenseGroupMatrix
     from superglm.model.base import scores_centred

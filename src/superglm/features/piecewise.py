@@ -430,18 +430,12 @@ class Piecewise:
     def _resolve_segmented_structure(self) -> None:
         """Derive the segmented column structure from ``_knots``/``degrees``.
 
-        Runs after ``_resolve_base``; the base column becomes the knot-value group
-        containing the base knot.  The structure is the grafted-polynomial space
-        (per-segment degrees, C0 seams) in a local form:
-
-        - one knot-value column per group of knots, a maximal run of consecutive
-          degree-0 segments merging its knots into one group (the plateau);
-        - for each segment of degree d >= 2, columns ``u**p - u`` (p = 2..d, ``u`` the
-          within-segment coordinate), supported on that segment and zero at both seams.
-
-        Seams are value-continuous by construction and evaluating at the knots reads
-        off the knot-value coefficients: the span of the truncated-power spelling
-        (Smith 1979) in a better-conditioned basis.
+        Runs after ``_resolve_base``; the base column becomes the knot-value group holding the base
+        knot. The grafted-polynomial space (per-segment degrees, C0 seams) is spanned locally by one
+        knot-value column per knot group (a run of degree-0 segments merges its knots) and, for
+        each segment of degree d >= 2, columns ``u**p - u`` (p = 2..d, ``u`` the within-segment
+        coordinate) zero at both seams. Evaluating at the knots reads off the knot-value
+        coefficients: the truncated-power span (Smith 1979) in a better-conditioned basis.
         """
         degrees = self.degrees
         assert degrees is not None
