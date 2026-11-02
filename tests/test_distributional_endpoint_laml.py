@@ -3781,108 +3781,6 @@ def _two_face_efs_fit(*, retain_history_rows: bool = False):
     return (first_name, second_name), smoothing
 
 
-def _resolution_limited_cap_revalidation_result(
-    *,
-    cap_objective: float,
-) -> tuple[DistributionalEFSResult, int, int, int]:
-    """Forge only the finite-cap state on an authenticated scalar revalidation."""
-    (first_name, _second_name), smoothing = _two_face_efs_fit()
-    activation = next(
-        item for item in smoothing.history if item.activated_face_components == (first_name,)
-    )
-    cap_source_index, endpoint_source_index = activation.coefficient_fit_indices
-    cap_source = smoothing.coefficient_fits[cap_source_index]
-    endpoint_source = smoothing.coefficient_fits[endpoint_source_index]
-    cap_face = cap_source.coefficient_face
-    assert cap_face is not None
-    tolerance = activation.coefficient_tolerances[0]
-    retained_score = np.zeros(cap_face.reduced_width, dtype=np.float64)
-    retained_score[0] = 2.0 * tolerance * (1.0 + abs(cap_objective))
-    optimizing = cap_objective + cap_source.penalty_value
-    reported = optimizing + cap_source.parameter_independent_carrier
-    cap = replace(
-        cap_source,
-        optimizing_log_likelihood=optimizing,
-        log_likelihood=reported,
-        penalized_optimizing_log_likelihood=cap_objective,
-        penalized_log_likelihood=reported - cap_source.penalty_value,
-        terminal_score=cap_face.lift_vector(retained_score),
-        score_relative=2.0 * tolerance,
-        convergence_reason="resolution_limited_stationarity",
-    )
-
-    prefix_history = smoothing.history[: activation.iteration]
-    prefix_fits = smoothing.coefficient_fits[: endpoint_source_index + 1]
-    cap_index = len(prefix_fits)
-    endpoint_index = cap_index + 1
-    direction = replace(
-        activation.endpoint_direction_evidence,
-        fit_indices=(cap_index, endpoint_index),
-    )
-    revalidation = replace(
-        activation,
-        iteration=len(prefix_history) + 1,
-        source_fit_index=endpoint_source_index,
-        accepted_fit_index=endpoint_index,
-        coefficient_fit_indices=(cap_index, endpoint_index),
-        activated_face_components=(),
-        revalidated_face_components=(first_name,),
-        objective_before=activation.objective_after,
-        objective_relative_change=(
-            abs(activation.objective_after - activation.objective_after)
-            / (1.0 + abs(activation.objective_after))
-        ),
-        endpoint_direction_evidence=direction,
-    )
-    authenticated = replace(
-        smoothing,
-        objective=revalidation.objective_after,
-        converged=False,
-        convergence_reason="max_iterations",
-        iterations=revalidation.iteration,
-        history=(*prefix_history, revalidation),
-        coefficient_fits=(*prefix_fits, cap, endpoint_source),
-        terminal_fit_index=endpoint_index,
-        terminal_endpoint_directions={},
-    )
-    return authenticated, cap_index, endpoint_index, endpoint_source_index
-
-
-def test_resolution_limited_stationary_cap_enforces_cap_objective_ceiling() -> None:
-    """Kills skipping the finite-cap objective ceiling when raw KKT is above tolerance."""
-    smoothing, cap_index, _endpoint_index, _source_index = (
-        _resolution_limited_cap_revalidation_result(cap_objective=-1.0)
-    )
-    revalidation = smoothing.history[-1]
-    cap = smoothing.coefficient_fits[cap_index]
-    tolerance = revalidation.coefficient_tolerances[0]
-    direction = revalidation.endpoint_direction_evidence
-    assert direction is not None
-    assert cap.convergence_reason == "resolution_limited_stationarity"
-    assert _endpoint_retained_kkt_relative(cap) > tolerance
-    assert _assessment_is_numerically_stationary(cap, tolerance)
-    assert direction.endpoint_objective <= revalidation.objective_before
-
-    cap_face = cap.coefficient_face
-    assert cap_face is not None
-    forged_objective = 1.0
-    retained_score = np.zeros(cap_face.reduced_width, dtype=np.float64)
-    retained_score[0] = 2.0 * tolerance * (1.0 + abs(forged_objective))
-    optimizing = forged_objective + cap.penalty_value
-    reported = optimizing + cap.parameter_independent_carrier
-    forged_cap = replace(
-        cap,
-        optimizing_log_likelihood=optimizing,
-        log_likelihood=reported,
-        penalized_optimizing_log_likelihood=forged_objective,
-        penalized_log_likelihood=reported - cap.penalty_value,
-        terminal_score=cap_face.lift_vector(retained_score),
-        score_relative=2.0 * tolerance,
-    )
-    forged_fits = list(smoothing.coefficient_fits)
-    forged_fits[cap_index] = forged_cap
-
-
 def test_stationary_scalar_face_refuses_a_multi_cap_runtime_cohort(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4144,6 +4042,39 @@ def test_efs_retracts_a_face_when_the_fresh_cap_has_a_better_objective(
     assert smoothing.matched_certified is False
     assert smoothing.terminal_fit.coefficient_face is None
     assert smoothing.history[-1].deactivated_face_components == (component_name,)
+
+
+def test_efs_refuses_a_face_promotion_when_the_stationary_cap_has_a_better_objective(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kills promoting a capped component past a stationary cap with a better objective."""
+    calls = 0
+    real_check = smoothing_faces._check_face_direction
+
+    def make_promotion_cap_better(*args: object, **kwargs: object):
+        nonlocal calls
+        calls += 1
+        attempt = real_check(*args, **kwargs)  # type: ignore[arg-type]
+        check = attempt.check
+        assert check is not None
+        assert check.direction.decision == "endpoint"
+        assert check.cap_fit.converged
+        assert _assessment_is_numerically_stationary(check.cap_fit, check.coefficient_tolerance)
+        return replace(
+            attempt,
+            check=replace(check, cap_objective=check.endpoint_objective - 1.0),
+        )
+
+    monkeypatch.setattr(smoothing_faces, "_check_face_direction", make_promotion_cap_better)
+    component_name, smoothing = _scalar_efs_fit(0.5)
+
+    assert calls == 1
+    assert smoothing.converged is False
+    assert smoothing.convergence_reason == "lambda_cap_unresolved"
+    assert smoothing.terminal_fit.coefficient_face is None
+    assert smoothing.history[-1].refused_face_components == (component_name,)
+    assert smoothing.history[-1].accepted_fit_index is None
+    assert not any(item.activated_face_components for item in smoothing.history)
 
 
 def test_efs_retracts_a_face_when_terminal_direction_resolves_finite(
