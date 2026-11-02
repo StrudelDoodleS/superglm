@@ -191,9 +191,9 @@ def fit_pool() -> Iterator[None]:
     Inside this scope :func:`pooled_map` runs on one executor and
     :func:`pooled_for` on one crew of threads, each started by its first
     section and shut down when the scope ends, instead of starting one per
-    call.  Owner: this scope; lifetime: the fit; a section that runs on
-    one of these threads (a nested map) starts its own executor, as it always
-    has, so a nested section cannot wait on threads its caller holds.  Nothing
+    call.  Owner: this scope; lifetime: the fit.  A section that runs on
+    one of these threads (a nested map) starts its own executor, so a nested
+    section cannot wait on threads its caller holds.  Nothing
     changes numerically: a section's partition never depends on the workers.
     """
     if _fit_threads.get() is not None:

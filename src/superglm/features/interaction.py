@@ -1490,7 +1490,7 @@ class CategoricalInteraction:
             if len(kept) == 0:
                 # The alias rule would empty the block (e.g. a fully nested
                 # one-cell grid).  Keep the occupied cells and let the solver
-                # resolve the aliasing at runtime, as it always has.
+                # resolve the aliasing at runtime.
                 kept = np.flatnonzero(grid_occupied)
             if len(kept) < n_pairs:
                 remap = np.full(n_pairs, -1, dtype=np.intp)
