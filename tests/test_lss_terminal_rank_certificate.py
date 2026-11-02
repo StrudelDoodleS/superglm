@@ -1016,6 +1016,7 @@ def test_a_row_decided_fit_keeps_the_stable_saturated_smoothing_step(terminal):
             initial_lambda=1e10,
             max_lambda=1e12,
             practical_reml=False,
+            outer="efs",
         )
     result = model._require_fitted().fit_state.solver_result
     assert result.terminal_rank.row_decided
