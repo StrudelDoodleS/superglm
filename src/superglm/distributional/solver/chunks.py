@@ -1131,8 +1131,8 @@ def _assemble_grouped_pass_geometry(
     block_rows = contraction_block_rows(n_observations, row_bytes, chunk_rows)
     table_budget = AUTO_CONTRACTION_MEMORY_BYTES - (row_bytes or 0) * block_rows
     tables = PassTables(table_budget) if block_rows < n_observations and table_budget > 0 else None
-    # A block of one chunk out of several contracts that chunk's own plans as it
-    # arrives, as the chunk stream does, so nothing is buffered or rebuilt.
+    # A block of one chunk out of several contracts that chunk's rows as it
+    # arrives, so nothing is buffered.
     per_chunk = block_rows <= chunk_rows < n_observations
     buffered = 0 if per_chunk else block_rows
     score = np.empty((buffered, k_parameters), dtype=np.float64)
@@ -1141,7 +1141,9 @@ def _assemble_grouped_pass_geometry(
     accumulator = GroupedGeometryAccumulator(
         layout, penalty=penalty, coefficients=coefficients, tables=tables
     )
-    formation = FormationAccumulator(layout)
+    # The stream evaluates rows in ranges and builds no chunk designs; each
+    # block reads its rows from the layout's own designs.
+    formation = FormationAccumulator(layout, range_geometry=True)
     # Rows and channel peak the pass tables have summed; a table entry sums at
     # most that many rows of that size.
     summed = [0, 0.0]
@@ -1181,11 +1183,7 @@ def _assemble_grouped_pass_geometry(
             rows = slice(piece - start, end - start)
             # One add per contracted piece, over its contiguous channel rows.
             formation.add(piece, end, curvature[:, rows].T)
-            accumulator.add_score(plans, score[rows])
-            for channel_index in range(len(curvature)):
-                accumulator.add_curvature_channel(
-                    plans, channel_index, curvature[channel_index, rows]
-                )
+            accumulator.add_block(plans, score[rows], curvature[:, rows])
 
     iterator = iter_likelihood_chunks(
         family,
@@ -1195,6 +1193,7 @@ def _assemble_grouped_pass_geometry(
         coefficients,
         chunk_size=chunk_size,
         curvature_source=curvature_source,
+        _range_geometry=True,
         **({"_recover_derivative_failure": True} if _likelihood_sums is not None else {}),
         **({"likelihood_cache": likelihood_cache} if likelihood_cache is not None else {}),
     )
@@ -1209,11 +1208,11 @@ def _assemble_grouped_pass_geometry(
                         length, _channel_peak(chunk.score_eta, chunk.curvature_packed)
                     )
                 formation.add(position, position + length, chunk.curvature_packed)
-                accumulator.add_score(chunk.plans, chunk.score_eta)
-                for channel_index in range(len(curvature)):
-                    accumulator.add_curvature_channel(
-                        chunk.plans, channel_index, chunk.curvature_packed[:, channel_index]
-                    )
+                accumulator.add_block(
+                    row_plans(position, position + length),
+                    chunk.score_eta,
+                    chunk.curvature_packed.T,
+                )
                 position = block_start = position + length
             else:
                 if position + length - block_start > block_rows:

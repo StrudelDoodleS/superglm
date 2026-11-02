@@ -43,7 +43,6 @@ import math
 import threading
 from collections import deque
 from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -321,7 +320,12 @@ def run_block_tasks(
     places its blocks as it forms them.
     """
     from superglm._blas_threads import pooled_blas_threads
-    from superglm._parallel import pool_workers, resolve_max_memory, retained_bytes
+    from superglm._parallel import (
+        pool_workers,
+        resolve_max_memory,
+        retained_bytes,
+        section_executor,
+    )
 
     override = _override.get()
     units = _units(tasks)
@@ -362,7 +366,7 @@ def run_block_tasks(
         shared = _SharedEntries()
         queue = _WorkQueue(units)
         profiles = [None if profile is None else {} for _ in range(workers)]
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="superglm-gram") as pool:
+        with section_executor(workers, "superglm-gram") as pool:
             # Each worker runs in its own copy of the caller's context, which
             # carries np.errstate and the held-warning scope as serial has them.
             futures = [

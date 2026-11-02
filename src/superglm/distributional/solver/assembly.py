@@ -7,7 +7,12 @@ from dataclasses import dataclass, field
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._group_matrix._group_matrix_algebra import PassFactors, PassTables
+from superglm._group_matrix._block_queue import run_block_tasks
+from superglm._group_matrix._group_matrix_algebra import (
+    PassFactors,
+    PassTables,
+    _BlockWeightCache,
+)
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.solver._formation import CurvatureFormation, dense_formation
@@ -283,7 +288,8 @@ class GroupedGeometryAccumulator:
     support is projected once per assembly rather than once per row block and
     channel; it is released when the geometry is published. ``tables`` keeps
     the by-bin aggregates of the blocks it admits across row blocks and
-    contracts each once (:meth:`release_tables`).
+    contracts each once (:meth:`release_tables`); its pairs are admitted here,
+    in the serial order, so the blocks of :meth:`add_block` may run on a pool.
     """
 
     def __init__(
@@ -310,6 +316,13 @@ class GroupedGeometryAccumulator:
         self._finished = False
         self._factors: PassFactors | None = PassFactors()
         self._tables = tables
+        if tables is not None:
+            groups = [plan.design.group_matrices for plan in reference_plans]
+            for channel, (left, right) in enumerate(self._pairs):
+                for i, gm_i in enumerate(groups[left]):
+                    for j, gm_j in enumerate(groups[right]):
+                        if left != right or i < j:
+                            tables.reserve((channel, i, j), gm_i, gm_j)
         # Each predictor's group columns in the global layout, for pass tables.
         self._group_columns = tuple(
             tuple(
@@ -382,8 +395,6 @@ class GroupedGeometryAccumulator:
             raise ValueError(f"chunk curvature channel must be finite with shape {expected}")
 
         left_index, right_index = self._pairs[channel_index]
-        left_state = self._layout.predictors[left_index]
-        right_state = self._layout.predictors[right_index]
         tables = None if self._tables is None else self._tables.scope(channel_index)
         if left_index == right_index:
             block = plan_tuple[left_index].diagonal_moment(
@@ -393,6 +404,52 @@ class GroupedGeometryAccumulator:
             block = plan_tuple[left_index].cross_moment(
                 plan_tuple[right_index], weight_values, _factors=self._factors, _tables=tables
             )
+        self._place_channel(channel_index, block)
+
+    def add_block(
+        self,
+        plans: tuple[PredictorExecutionPlan, ...],
+        score_eta: NDArray,
+        curvature: NDArray,
+    ) -> None:
+        """Accumulate one row block's score and every curvature channel.
+
+        ``curvature`` holds one row vector per canonical packed channel. The
+        group-pair blocks of every channel run as one queue
+        (``run_block_tasks``), on the pool when their work warrants it; each
+        channel's block is the one :meth:`add_curvature_channel` adds.
+        """
+        self.add_score(plans, score_eta)
+        plan_tuple = self._validated_plans(plans)
+        channels = np.asarray(curvature, dtype=np.float64)
+        expected = (len(self._pairs), plan_tuple[0].design.n)
+        if channels.shape != expected or not np.all(np.isfinite(channels)):
+            raise ValueError(f"chunk curvature channels must be finite with shape {expected}")
+        tasks: list = []
+        finishers = []
+        for channel_index, (left_index, right_index) in enumerate(self._pairs):
+            weights = channels[channel_index]
+            if left_index == right_index:
+                channel_tasks, finish = plan_tuple[left_index].diagonal_tasks(
+                    weights, channel=channel_index
+                )
+            else:
+                channel_tasks, finish = plan_tuple[left_index].cross_tasks(
+                    plan_tuple[right_index], weights, channel=channel_index
+                )
+            for task in channel_tasks:
+                task.index = len(tasks)
+                tasks.append(task)
+            finishers.append(finish)
+        add_table = None if self._tables is None else self._tables.add_by_bin
+        run_block_tasks(tasks, _BlockWeightCache(None, self._factors, add_table), None)
+        for channel_index, finish in enumerate(finishers):
+            self._place_channel(channel_index, finish())
+
+    def _place_channel(self, channel_index: int, block: NDArray) -> None:
+        left_index, right_index = self._pairs[channel_index]
+        left_state = self._layout.predictors[left_index]
+        right_state = self._layout.predictors[right_index]
         self._curvature[left_state.coefficient_slice, right_state.coefficient_slice] += block
         if left_index != right_index:
             self._curvature[right_state.coefficient_slice, left_state.coefficient_slice] += block.T

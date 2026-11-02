@@ -434,7 +434,7 @@ def test_grouped_geometry_contracts_each_channel_once_per_block(
             lambda n, k, rows: min(n, chunks_per_block * rows),
         )
     contracted = []
-    for name in ("diagonal_moment", "cross_moment"):
+    for name in ("diagonal_tasks", "cross_tasks"):
         original = getattr(PredictorExecutionPlan, name)
 
         def counted(self, *args, _original=original, **kwargs):
@@ -442,12 +442,11 @@ def test_grouped_geometry_contracts_each_channel_once_per_block(
             return _original(self, *args, **kwargs)
 
         monkeypatch.setattr(PredictorExecutionPlan, name, counted)
-    rebuilt = []
+    rebuilt, copied = [], []
     row_design = chunking._row_design
 
     def counted_rows(state, rows, *, copy=True):
-        if not copy:
-            rebuilt.append(rows.stop - rows.start)
+        (copied if copy else rebuilt).append(rows.stop - rows.start)
         return row_design(state, rows, copy=copy)
 
     monkeypatch.setattr(chunking, "_row_design", counted_rows)
@@ -457,8 +456,10 @@ def test_grouped_geometry_contracts_each_channel_once_per_block(
     block = 137 if chunks_per_block is None else 19 * chunks_per_block
     starts = range(0, 137, block)
     assert contracted == [min(block, 137 - start) for start in starts for _ in "abc"]
-    # One-chunk blocks contract the chunk's own plans; longer blocks build row views.
-    expected = [] if block in (19, 137) else [min(block, 137 - start) for start in starts]
+    # The stream builds no chunk designs; a block shorter than the pass reads
+    # row views of the layout's designs.
+    assert copied == []
+    expected = [] if block == 137 else [min(block, 137 - start) for start in starts]
     assert rebuilt == [rows for rows in expected for _ in layout.predictors]
     eps = np.finfo(np.float64).eps
     for name in ("score_data", "data_curvature"):

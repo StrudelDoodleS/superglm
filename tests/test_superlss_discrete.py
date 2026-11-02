@@ -312,11 +312,12 @@ def test_public_discrete_tensor_and_categorical_interaction_parity() -> None:
     _assert_parity(*models, frame, offsets)
 
 
-def test_chunked_discrete_curvature_builds_its_gram_blocks_serially(monkeypatch) -> None:
-    """Each row chunk's Gram runs on the calling thread, even where the queue would pool it.
+def test_chunked_discrete_curvature_pools_its_gram_blocks_bitwise(monkeypatch) -> None:
+    """A row block's Gram blocks, every channel's, run on one pool and fit the serial bits.
 
-    Pooling ~4k-row chunks cost a three-pair book fit 1.8x its wall time and
-    11x its CPU beside the Tweedie row kernel's own threads.
+    Forced onto four workers, the fit's coefficients, covariance,
+    log-likelihood and EDF are the one-worker fit's to the bit: each block is
+    formed by the serial kernels and each channel is added in its serial order.
     """
     monkeypatch.setattr(chunking, "AUTO_CHUNK_MEMORY_BYTES", 8192)
     # Every block its own unit, so a chunk this small still reaches the pool decision.
@@ -338,28 +339,37 @@ def test_chunked_discrete_curvature_builds_its_gram_blocks_serially(monkeypatch)
         ),
         Predictor("scale", {"x": Spline(kind="cr", n_knots=4)}),
     )
-    model = model_from_templates(
-        family=family, predictors=predictors, discrete=True, n_bins=32, weight_semantics="frequency"
+    lambdas = dict.fromkeys(
+        (
+            "location:x#wiggle",
+            "location:z#wiggle",
+            "location:x:z#margin_x",
+            "location:x:z#margin_z",
+            "scale:x#wiggle",
+        ),
+        1.0,
     )
-    with block_queue_config(min_cost=0), parallel.parallel_config(n_jobs=4, max_memory="1G"):
-        model.fit(
-            frame,
-            y,
-            sample_weight=weights,
-            offsets=offsets,
-            lambdas=dict.fromkeys(
-                (
-                    "location:x#wiggle",
-                    "location:z#wiggle",
-                    "location:x:z#margin_x",
-                    "location:x:z#margin_z",
-                    "scale:x#wiggle",
-                ),
-                1.0,
-            ),
+    fits = []
+    for n_jobs in (1, 4):
+        workers.clear()
+        model = model_from_templates(
+            family=family,
+            predictors=predictors,
+            discrete=True,
+            n_bins=32,
+            weight_semantics="frequency",
         )
-    assert model.training_telemetry().resolved_chunk_size is not None
-    assert workers and max(workers) == 1
+        with (
+            block_queue_config(min_cost=0),
+            parallel.parallel_config(n_jobs=n_jobs, max_memory="1G"),
+        ):
+            model.fit(frame, y, sample_weight=weights, offsets=offsets, lambdas=lambdas)
+        assert model.training_telemetry().resolved_chunk_size is not None
+        assert workers and max(workers) == n_jobs
+        fits.append(model)
+    for name in ("coefficients", "covariance", "log_likelihood", "total_effective_df"):
+        serial, pooled = (np.asarray(getattr(fit.result_, name), dtype=np.float64) for fit in fits)
+        assert np.array_equal(serial.view(np.uint64), pooled.view(np.uint64)), name
 
 
 @pytest.mark.parametrize(
@@ -419,8 +429,8 @@ def test_public_discrete_dispatches_compressed_signed_chunks(monkeypatch) -> Non
     monkeypatch.setattr(chunking, "AUTO_CHUNK_MEMORY_BYTES", 8192)
     # Two likelihood chunks per contraction block.
     monkeypatch.setattr(chunking, "contraction_block_rows", lambda n, k, rows: min(n, 2 * rows))
-    original_moments = MatrixExecutionPlan.moments
-    original_cross = CrossMatrixExecutionPlan.cross_moment
+    original_moments = MatrixExecutionPlan.signed_moment_tasks
+    original_cross = CrossMatrixExecutionPlan.cross_tasks
     original_geometry = chunking.assemble_chunked_geometry
     compressed_rows = []
     cross_signs = []
@@ -446,8 +456,8 @@ def test_public_discrete_dispatches_compressed_signed_chunks(monkeypatch) -> Non
             cross_signs.extend(np.sign(weights).tolist())
         return original_cross(self, weights, *args, **kwargs)
 
-    monkeypatch.setattr(MatrixExecutionPlan, "moments", moments)
-    monkeypatch.setattr(CrossMatrixExecutionPlan, "cross_moment", cross)
+    monkeypatch.setattr(MatrixExecutionPlan, "signed_moment_tasks", moments)
+    monkeypatch.setattr(CrossMatrixExecutionPlan, "cross_tasks", cross)
     monkeypatch.setattr(chunking, "assemble_chunked_geometry", geometry)
     model = model_from_templates(
         family=family, predictors=predictors, discrete=True, n_bins=32

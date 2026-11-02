@@ -340,41 +340,70 @@ class PassTables:
     Owner: one chunked assembly; lifetime: until it is contracted. ``budget``
     bounds the bytes of the totals; a pair whose table does not fit, and every
     pair after the totals are contracted, contracts each block as it arrives.
+    Pairs are admitted at their first block in arrival order, or beforehand
+    in the caller's serial order (:meth:`reserve`), after which a block's
+    pairs may run on several threads: each key is written by its own task.
     """
 
-    __slots__ = ("_entries", "_declined", "_remaining")
+    __slots__ = ("_entries", "_declined", "_remaining", "_reserved")
 
     def __init__(self, budget: int) -> None:
         self._entries: dict[tuple[int, int, int], list] = {}
         self._declined: set[tuple[int, int, int]] = set()
         self._remaining = int(budget)
+        self._reserved = False
 
     def scope(self, channel: int) -> Callable[..., bool]:
         """The ``_tables`` of one channel's moments calls: adds a block's table under its pair."""
         return lambda pair, *arguments: self.add_by_bin((channel, *pair), *arguments)
 
-    def add_by_bin(self, key, disc, other, W, cache, transposed: bool) -> bool:
-        """Add one block's by-bin aggregate under ``key``; False when the pair is not kept."""
-        entry = self._entries.get(key)
-        if entry is not None:
-            entry[0] += _agg_by_bin(other, disc.bin_idx, W, disc.n_bins, cache)
-            return True
-        if key in self._declined or not _pass_table_pair(disc, other):
-            return False
+    def reserve(self, key, gm_i, gm_j) -> None:
+        """Admit ``key``'s pair now if it keeps a table; afterwards only reserved keys are kept."""
+        self._reserved = True
+        ssp = _runtime_group_matrix_types()[3]
+        disc_left = isinstance(gm_i, ssp)
+        if disc_left == isinstance(gm_j, ssp) or key in self._entries or key in self._declined:
+            return
+        disc, other = (gm_i, gm_j) if disc_left else (gm_j, gm_i)
+        if _pass_table_pair(disc, other) and _agg_by_bin_fits(other, disc.n_bins):
+            self._admit(key, disc, other, None, not disc_left)
+
+    def _admit(self, key, disc, other, table, transposed: bool) -> bool:
         nbytes = 8 * int(disc.n_bins) * _agg_by_bin_width(other)
         if nbytes > self._remaining:
             self._declined.add(key)
             return False
         self._remaining -= nbytes
-        table = _agg_by_bin(other, disc.bin_idx, W, disc.n_bins, cache)
         self._entries[key] = [table, disc, transposed]
         return True
+
+    def add_by_bin(self, key, disc, other, W, cache, transposed: bool) -> bool:
+        """Add one block's by-bin aggregate under ``key``; False when the pair is not kept."""
+        entry = self._entries.get(key)
+        if entry is not None:
+            table = _agg_by_bin(other, disc.bin_idx, W, disc.n_bins, cache)
+            if entry[0] is None:
+                entry[0] = table
+            else:
+                entry[0] += table
+            return True
+        if self._reserved or key in self._declined or not _pass_table_pair(disc, other):
+            return False
+        nbytes = 8 * int(disc.n_bins) * _agg_by_bin_width(other)
+        if nbytes > self._remaining:
+            self._declined.add(key)
+            return False
+        return self._admit(
+            key, disc, other, _agg_by_bin(other, disc.bin_idx, W, disc.n_bins, cache), transposed
+        )
 
     def contracted(self, factors: PassFactors | None):
         """Yield ``(key, X_left' W X_right)`` for every kept pair, releasing its table."""
         cache = _BlockWeightCache(None, factors)
         while self._entries:
             key, (table, disc, transposed) = self._entries.popitem()
+            if table is None:
+                continue
             result = _by_bin_contraction(disc, cache, table)
             yield key, result.T if transposed else result
 
@@ -401,11 +430,13 @@ class _BlockWeightCache:
 
     A pooled assembly gives each worker a view (:meth:`worker_view`) that
     shares the entries, formed once through :class:`_SharedEntries`, and owns
-    its scratch, so no array is written by two workers. ``factors`` shares the
-    fixed-factor products of a whole assembly (:class:`PassFactors`), and
-    ``tables`` (:meth:`PassTables.scope`) keeps its by-bin aggregates; views
-    for pool workers and new weights keep no tables, so a pass table is only
-    ever written by one thread.
+    its scratch, so no array is written by two workers. Weighted entries are
+    keyed by their weights' identity, so one cache serves several weight
+    channels. ``factors`` shares the fixed-factor products of a whole
+    assembly (:class:`PassFactors`), and ``tables`` keeps its by-bin
+    aggregates (:meth:`PassTables.scope`, or :meth:`PassTables.add_by_bin`
+    for reserved keys, whose tasks each write their own); views for new
+    weights keep no tables.
     """
 
     __slots__ = (
@@ -442,7 +473,7 @@ class _BlockWeightCache:
         self._channel_scratch = np.empty(0)
         self._cell_weights: dict[tuple[int, int], NDArray] = {}
         self._supports: dict[DiscretizedSSPGroupMatrix, NDArray] = {}
-        self._sparse_grams: dict[SparseSSPGroupMatrix, tuple[NDArray, bool]] = {}
+        self._sparse_grams: dict[tuple[SparseSSPGroupMatrix, int], tuple] = {}
         self._weight_ranges: dict[int, tuple[NDArray, bool, tuple[int, int]]] = {}
         self._support_ranges: dict[int, tuple[NDArray, tuple[int, int]]] = (
             {} if factors is None else factors.ranges
@@ -473,6 +504,7 @@ class _BlockWeightCache:
             "_support_ranges",
             "_cell_orders",
             "_factors",
+            "_tables",
         ):
             setattr(view, name, getattr(self, name))
         view._shared = shared
@@ -588,18 +620,21 @@ class _BlockWeightCache:
     def sparse_gram(self, gm: SparseSSPGroupMatrix, weights: NDArray) -> tuple[NDArray, bool]:
         """Share a sparse diagonal's cancellation decision with its crosses.
 
-        This cache belongs to one weighted assembly. A cross may request the
-        right diagonal early; the diagonal loop then reuses that same result.
+        A cross may request the right diagonal early; the diagonal loop then
+        reuses that same result. Keys retain the weights.
         """
         return self._once(
             self._sparse_grams,
-            gm,
+            (gm, id(weights)),
             lambda: (
-                gm._gram_with_projection(weights)
-                if self._batch is None
-                else gm._gram_with_projection(weights, _csr_gram=self._csr_gram)
+                weights,
+                *(
+                    gm._gram_with_projection(weights)
+                    if self._batch is None
+                    else gm._gram_with_projection(weights, _csr_gram=self._csr_gram)
+                ),
             ),
-        )[0]
+        )[0][1:]
 
     def _csr_gram(self, data, indices, indptr, W, p, absolute_weights=False) -> NDArray:
         """``_csr_weighted_gram``, one pass shared by batched channels."""

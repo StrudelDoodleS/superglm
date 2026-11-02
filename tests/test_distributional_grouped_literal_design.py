@@ -120,14 +120,14 @@ def test_default_geometry_matches_independent_literal_design(monkeypatch):
 
 
 def test_tiny_signed_cross_channel_matches_the_literal_design(monkeypatch):
-    cross = PredictorExecutionPlan.cross_moment
+    cross = PredictorExecutionPlan.cross_tasks
     contracted_rows = []
 
     def counted_cross(self, right, weights, **kwargs):
         contracted_rows.append(len(weights))
         return cross(self, right, weights, **kwargs)
 
-    monkeypatch.setattr(PredictorExecutionPlan, "cross_moment", counted_cross)
+    monkeypatch.setattr(PredictorExecutionPlan, "cross_tasks", counted_cross)
     result, layout, literal, _, curvature, _, _ = _assemble(monkeypatch, tiny_cross=True)
     expected = literal[0].T @ (curvature[:, 1, None] * literal[1])
     absolute_sum = np.abs(literal[0]).T @ (np.abs(curvature[:, 1, None]) * np.abs(literal[1]))
@@ -195,7 +195,7 @@ def test_two_chunk_blocks_match_the_literal_mixed_design(monkeypatch):
     assert "DiscretizedSplineCategoricalGroupMatrix" in kinds
     monkeypatch.setattr(chunks, "contraction_block_rows", lambda n, row_bytes, rows: 2 * rows)
     moments = []
-    for name in ("diagonal_moment", "cross_moment"):
+    for name in ("diagonal_tasks", "cross_tasks"):
         original = getattr(PredictorExecutionPlan, name)
 
         def counted(self, *args, _original=original, **kwargs):
@@ -214,7 +214,7 @@ def test_blocks_whose_sums_could_leave_the_range_contract_chunk_by_chunk(monkeyp
     score *= 2.0**996
     curvature *= 2.0**996
     moments = []
-    for name in ("diagonal_moment", "cross_moment"):
+    for name in ("diagonal_tasks", "cross_tasks"):
         original = getattr(PredictorExecutionPlan, name)
 
         def counted(self, *args, _original=original, **kwargs):
