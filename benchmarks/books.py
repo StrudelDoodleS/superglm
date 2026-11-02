@@ -293,11 +293,13 @@ def digest(obj) -> str:
     return hashlib.sha256(canonical(obj).encode()).hexdigest()
 
 
-# The harness code that turns a spec into a problem, its metrics and its work counts; its
-# source, with the counter tables, is part of every spec hash, so a change to how y, weights,
-# offsets, a metric, a count or a fit field is computed retires the baselines stored under
-# the old code.
+# The harness code that turns a spec into a problem, its metrics, its work counts and the
+# process state its peak RSS is measured from; its source, with the counter tables, is part
+# of every spec hash, so a change to how y, weights, offsets, a metric, a count, a fit field
+# or the memory baseline is computed retires the baselines stored under the old code.
 _SEMANTICS = (
+    "load_book",
+    "_release_arrow_pool",
     "_fremtpl2_book",
     "_synthetic",
     "_response",
