@@ -218,7 +218,6 @@ class DistributionalEFSIteration:
         EndpointDirectionEvidence | JointEndpointDirectionEvidence | None
     ) = None
     endpoint_assessment_failure_reason: EndpointAssessmentFailureReason | None = None
-    joint_rollback_penalty_fingerprint: str | None = None
     # The Newton endgame's record.  ``stage="newton"`` iterations carry the
     # exact LAML gradient (with its finite-difference certificate) that
     # produced their step, the largest Hessian certificate on the active set

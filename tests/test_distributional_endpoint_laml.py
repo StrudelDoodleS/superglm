@@ -2628,7 +2628,6 @@ def test_efs_rolls_back_the_complete_joint_face_when_the_second_recheck_is_finit
     assert not any(item.revalidated_face_components for item in smoothing.history)
     retraction = smoothing.history[-1]
     assert retraction.deactivated_face_components == layout.penalty_names
-    assert retraction.joint_rollback_penalty_fingerprint is not None
     assert len(retraction.coefficient_fit_indices) == 2
     assert retraction.accepted_fit_index == retraction.coefficient_fit_indices[-1]
     assert tuple(
@@ -3868,29 +3867,6 @@ def test_terminal_failure_rolls_back_the_whole_multi_face(
     assert common_fit.coefficient_face is not None
     assert common_fit.coefficient_face.component_names == (first_name, second_name)
     assert rollback_fit.coefficient_face is None
-
-
-def test_joint_terminal_result_binds_finite_rollback_penalty_magnitude(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Kills accepting an earlier finite fit whose penalty spans the right subspace."""
-    # This mutation promotes an older fit to terminal, which requires real rows.
-    _names, smoothing = _joint_terminal_analytic_failure(monkeypatch, retain_history_rows=True)
-    retraction = smoothing.history[-1]
-    _common_index, rollback_index = retraction.coefficient_fit_indices
-    rollback_fit = smoothing.coefficient_fits[rollback_index]
-    assert retraction.joint_rollback_penalty_fingerprint is not None
-    _earlier_index, earlier_fit = next(
-        (index, fit)
-        for index, fit in enumerate(smoothing.coefficient_fits[: retraction.source_fit_index])
-        if fit.coefficient_face is None
-        and fit.config == rollback_fit.config
-        and not np.array_equal(fit.penalty, rollback_fit.penalty)
-    )
-    assert not np.array_equal(earlier_fit.penalty, rollback_fit.penalty)
-    assert earlier_fit.penalized_optimizing_log_likelihood is not None
-    forged_fits = list(smoothing.coefficient_fits)
-    forged_fits[rollback_index] = earlier_fit
 
 
 def test_efs_retracts_a_face_when_terminal_endpoint_assessment_is_unavailable(

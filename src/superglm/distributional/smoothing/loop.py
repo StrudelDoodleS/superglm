@@ -27,7 +27,6 @@ from superglm.distributional.results.solver import (
     DenseSolverConfig,
     DenseSolverResult,
     _assessment_is_numerically_stationary,
-    _dense_penalty_fingerprint,
 )
 from superglm.distributional.smoothing.acceleration import WindowedTypeIIAnderson
 from superglm.distributional.smoothing.authority import (
@@ -839,9 +838,6 @@ def fit_distributional_efs(
                             terminal_endpoint_directions=terminal_endpoint_directions,
                         )
                     else:
-                        rollback_penalty_fingerprint = _dense_penalty_fingerprint(
-                            layout.penalty_matrix(current_lambdas)
-                        )
                         rollback_initial = (
                             current_fit.coefficients
                             if not joint_attempt.assessment_fits
@@ -895,7 +891,6 @@ def fit_distributional_efs(
                             ),
                             coefficient_tolerance=joint_attempt.coefficient_tolerance,
                             assessment_fits=rollback_fits,
-                            joint_rollback_penalty_fingerprint=(rollback_penalty_fingerprint),
                         )
                         history.append(
                             _face_retraction_iteration(

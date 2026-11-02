@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -22,17 +21,6 @@ from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.solvers._structured.retired import module_getattr
 from superglm.solvers.rank import RankDecomposition, decompose_gram
-
-
-def _dense_penalty_fingerprint(values: NDArray) -> str:
-    """Return a canonical compact record of one assembled dense penalty."""
-
-    array = np.ascontiguousarray(values)
-    digest = hashlib.sha256()
-    digest.update(array.dtype.str.encode("ascii"))
-    digest.update(repr(array.shape).encode("ascii"))
-    digest.update(array.tobytes(order="C"))
-    return digest.hexdigest()
 
 
 def _assessment_retained_kkt_ratio(result: DenseSolverResult) -> float:

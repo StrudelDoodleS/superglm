@@ -119,7 +119,6 @@ class _FaceRetraction:
     failure_reason: EndpointAssessmentFailureReason | None
     coefficient_tolerance: float
     assessment_fits: tuple[DenseSolverResult, ...]
-    joint_rollback_penalty_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1046,5 +1045,4 @@ def _face_retraction_iteration(
         deactivated_face_components=retraction.component_names,
         endpoint_direction_evidence=retraction.direction,
         endpoint_assessment_failure_reason=retraction.failure_reason,
-        joint_rollback_penalty_fingerprint=(retraction.joint_rollback_penalty_fingerprint),
     )
