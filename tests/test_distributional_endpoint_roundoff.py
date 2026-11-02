@@ -349,7 +349,10 @@ def test_a_capped_fit_stops_at_its_rounding_floor() -> None:
     """Kills stepping on round-off once the score is within its rounding floor."""
     start = _floor_start()
 
-    replay = _capped_spline_fit(max_iterations=150, initial=start)
+    # At 1e-10 the one-ulp score is still ~1000x the bare tolerance, while the
+    # certified decrement sits ~250x inside its limit on every BLAS kernel; at
+    # 1e-12 that margin is 2-3x and some builds step.
+    replay = _capped_spline_fit(max_iterations=150, initial=start, tolerance=1.0e-10)
 
     tolerance = replay.config.tolerance
     assert replay.convergence_reason == "score"
