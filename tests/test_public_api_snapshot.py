@@ -90,6 +90,7 @@ PUBLIC_API = [
     "RatingTableBaseNotRepresentableError",
     "RedundantInteractionWarning",
     "Ridge",
+    "SCOPRetiredWarning",
     "ScoreTestZIResult",
     "SeparationError",
     "SeparationWarning",
