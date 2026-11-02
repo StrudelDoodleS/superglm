@@ -1319,6 +1319,30 @@ def test_widget_http_stage_with_refit_stages_and_refits_in_one_step(book, monkey
     assert refusal == "refit must be true or false."
 
 
+def test_widget_http_stage_with_refit_ungroup_puts_the_pre_collapse_fit_back(book, monkeypatch):
+    """A refit-at-once Ungroup of the only collapse reuses the opened fit, as the session does."""
+    model, _, _ = book
+    session = _session(model)
+    fits = _count_fits(monkeypatch)
+    body = {"term": "brand", "params": {"levels": ["B10", "B11"]}, "refit": True}
+    widget = session.widget()
+    try:
+        _post_json(f"{widget.url}/stage", {"operation": "collapse", **body})
+        collapsed = len(fits)
+        payload = _post_json(f"{widget.url}/stage", {"operation": "ungroup", **body})
+    finally:
+        widget.close()
+
+    assert collapsed == 1
+    assert len(fits) == collapsed
+    assert session.model is model
+    assert payload["timing"]["operation"] == "ungroup_levels"
+    assert [step.operation for step in session.structure_history] == [
+        "collapse_levels",
+        "ungroup_levels",
+    ]
+
+
 def test_widget_http_refit_pending_answers_a_refusal_with_the_fixed_sentence(book, monkeypatch):
     model, _, _ = book
     session = _session(model)
