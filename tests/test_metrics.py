@@ -3880,9 +3880,11 @@ def test_face_leverage_keeps_a_penalty_term_dominated_beyond_one_over_eps():
     )
     face = null_space(rank_info.face_rows)
     u = np.finfo(np.float64).eps / 2
-    # The face is the line, the second-derivative term's null space: it is a
-    # machine zero there, as the exact reference takes it (Wood 2011, sec. 3.1).
-    assert abs((face.T @ S_strong @ face).item()) <= len(face) * u * np.linalg.norm(S_strong, 2)
+    # The face is the line, the second-derivative term's null space, so the
+    # exact reference takes that term as zero there (Wood 2011, sec. 3.1).
+    # Read structurally, as the fix does: the term's root sends the face to
+    # about ``u ||R||``, so its square is ~u^2 ||S||, far below u ||S||.
+    assert np.sum((penalty_factor(S_strong) @ face) ** 2) <= u * np.linalg.norm(S_strong, 2)
     weak_curvature = weak * (face.T @ S_weak @ face).item()
     # The event: the root of the summed penalty has cut the weak term.
     summed_root = penalty_factor(_active_penalty_matrix(*terms, reml_penalties=reml_penalties))
