@@ -1,42 +1,26 @@
-"""Nested random-effect chain elimination (fix D).
+"""Nested random-effect chain elimination.
 
 The mathematics, accuracy bounds and refusal rules are in
-``notes/research/2026-09-26-nested-random-effect-elimination.md`` (cited below
-as §N) and the exact contracts in
+``notes/research/2026-09-26-nested-random-effect-elimination.md`` (cited
+below as §N) and the exact contracts in
 ``notes/research/lean-gaussian-certificate/NestedElimination.lean``.
 
-Geometry.  A chain is ``L >= 1`` random-effect terms, each strictly nested in
-the next coarser one; a lone random effect is a chain of one, whose leaves are
-its roots.  Level 0 is the coarsest (its nodes are the roots) and
-level ``L - 1`` the finest (the leaves, the only level whose codes touch
-rows).  Every tree node carries one coefficient.  Node order is level-major,
-coarsest first: node ``tree.offsets[j] + u`` is local node ``u`` of level
-``j``, and ``structured_indices[tree.offsets[j] + u]`` is its global
-coefficient index.  The border ("small") block holds every other coefficient,
-crossed random effects included; in augmented coordinates the intercept is
-border column 0 and global index 0.
-
-Every operator here is leaf-form (§3.6).  With ``M`` the leaf-to-node
-incidence (``M[l, u] = 1`` iff ``u`` is ``l`` or an ancestor of ``l``), row
-weights ``a_r`` and border rows ``x_r``,
+A chain is ``L >= 1`` random-effect terms, each strictly nested in the next
+coarser one (a lone random effect is a chain of one). Level 0 holds the roots,
+level ``L - 1`` the leaves, the only level whose codes touch rows. Nodes are
+level-major, coarsest first: node ``tree.offsets[j] + u`` is local node ``u``
+of level ``j``. The border holds every other coefficient; in augmented
+coordinates the intercept is border column 0. Operators are leaf-form (§3.6):
+with ``M`` the leaf-to-node incidence,
 
     O = [[M' diag(a_leaf) M, M' C_leaf], [C_leaf' M, A]],
-    a_leaf[l] = sum_{r in l} a_r,  C_leaf[l] = sum_{r in l} a_r x_r,  A = X_b' diag(a) X_b,
 
-and the penalized Hessian is ``H = O_w + blockdiag(diag(lambda_node), S_b)``.
+and ``H = O_w + blockdiag(diag(lambda_node), S_b)``.
 
-Refusals follow the structured-factor convention.  ``np.linalg.LinAlgError``
-reports what an iterate's numbers caused (non-finite statistics, a tree or
-super-root pivot within its certified uncertainty or below minus it, material
-negative Schur curvature, exact intercept aliasing); callers such as the
-observed-geometry build rely on that type.  ``ValueError`` reports a
-malformed call (shapes, partitions, coordinates, an operator built about
-other leaf means).  ``TypeError`` reports an operator kind the nested factor
-does not represent (for example a single-level ``SymmetricBlockOperator``).
-
-The factors are verified against exact rational references in
-``tests/test_nested_schur_factor.py``; ``tests/test_nested_structured_fit.py``
-runs complete fits against the dense backend.
+``np.linalg.LinAlgError`` reports what an iterate's numbers caused
+(non-finite statistics, an uncertified pivot, material negative Schur
+curvature, exact intercept aliasing); ``ValueError`` a malformed call;
+``TypeError`` an operator kind the nested factor does not represent.
 """
 
 from __future__ import annotations
@@ -91,12 +75,9 @@ if TYPE_CHECKING:
 # are sparse indicators by type (``NestedStructuredLayout.sparse_indicators``).
 _TABLE_TYPES = (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix)
 _ONE_HOT_TYPES = (CategoricalGroupMatrix,)
-# The saved-model format of the nested factors (one-engine design §3.12).  A
-# factor pickled by another build (master 94359786, the uncommitted speed
-# build) holds another set of derived attributes but always the inputs it
-# factored: it is rebuilt from those by the current engine on first use, with
-# a notice, and a state written by this format is restored as is.  A later
-# minor release may drop the foreign-state rebuild.
+# Saved-model format of the nested factors. A factor pickled by another build
+# keeps the inputs it factored and is rebuilt from them on first use, with a
+# notice; a state written by this format is restored as is.
 _NESTED_STATE_FORMAT = 1
 _REBUILT_NOTICE = (
     "This model was saved by an earlier superglm build: its nested random-effect "
@@ -146,10 +127,8 @@ def _rebuild_on_first_use(instance, name: str, rebuild: Callable[[dict], None]):
 def _frozen(values, dtype) -> NDArray:
     """A read-only array of ``dtype`` that no other reference can write.
 
-    An array that is already read-only, of this dtype and owns its data is
-    returned as it is (a fresh array this module froze, or an earlier
-    ``_frozen`` result); anything else is copied.  The per-build copies of
-    the leaf means were 142 MB each on pg17 E (perf scout F5).
+    An array already read-only, of this dtype and owning its data, is returned
+    as it is; anything else is copied.
     """
     if (
         isinstance(values, np.ndarray)
@@ -173,19 +152,12 @@ def _sealed(array: NDArray) -> NDArray:
 class NestedTree:
     """Forest of a nested chain: level sizes and child-to-parent pointers.
 
-    ``sizes[j]`` is ``K_j``, the coefficient count of level ``j`` (observed and
-    unobserved levels alike).  ``parent[j]`` is an ``intp`` array of length
-    ``K_j``: for ``j >= 1`` the local index at level ``j - 1`` of each node's
-    parent, in ``[0, K_{j-1})``; ``parent[0]`` is all ``-1`` (roots).  A node
-    with no weighted row below it may point at any parent (the layout uses 0):
-    its accumulated weight is exactly zero, so ``sigma = omega / D = 0`` severs
-    it (§3.7, §10).  ``offsets[j]`` is the first node-order position of level
-    ``j`` and ``offsets[L] == n_nodes``.
-
-    ``subtree_sum`` is ``M'`` extended to every level and ``path_sum`` is ``M``
-    (§3.1); both accept one value or a row of values per node.  Equality is
-    identity; two trees describe the same forest when their sizes and parent
-    arrays are equal.
+    ``sizes[j]`` is the coefficient count of level ``j``; ``parent[j]`` holds
+    each node's parent index at level ``j - 1`` (``-1`` at the roots). A node
+    with no weighted row may point at any parent: its weight is exactly zero,
+    so ``sigma = 0`` severs it (§3.7, §10). ``offsets[j]`` is the first node of
+    level ``j``. ``subtree_sum`` is ``M'`` and ``path_sum`` is ``M`` (§3.1).
+    Two trees are equal when their sizes and parent arrays are.
     """
 
     sizes: tuple[int, ...]
@@ -295,18 +267,12 @@ def _lineage_entry(
 ) -> Any:
     """``build()`` held in a design lineage's nesting cache for these integer code arrays.
 
-    The sources are integer code arrays (bin and level codes) and the leaf
-    order, whose leaf starts come with it from one tree entry; ``build``
-    reads nothing else but ``size`` (a level count), which is part of the
-    key.  Keyed by the sources' ids; the entry holds the sources themselves,
-    so no id is reused while it lives.  Owner: the
-    lineage's nesting cache (``selection.shared_nesting_cache``), beside the
-    tree and leaf order it already holds on the same terms.  Lifetime: the
-    first design built on these codes and all its lambda rebuilds, which pass
-    code arrays through unchanged (``rebuild_design_matrix_with_lambdas``).
-    Invalidation: none; the matrix constructors own their code arrays and
-    nothing writes them after construction, so a different code array is a
-    different key.  No weight, lambda, basis or penalty enters an entry.
+    Keyed by the ids of the source code arrays and leaf order, which the entry
+    holds so no id is reused while it lives. Owner: the lineage's nesting cache
+    (``selection.shared_nesting_cache``). Lifetime: the first design built on
+    these codes and its lambda rebuilds. Invalidation: none; code arrays are
+    never written after construction, and no weight, lambda, basis or penalty
+    enters an entry.
     """
     key = (name, size, *(id(source) for source in sources))
     if key not in cache:
@@ -338,17 +304,12 @@ def _leaf_codes(sources: tuple, order: NDArray) -> NDArray:
 class LeafRows:
     """The dense border rows of a nested layout in leaf order, as the row pass forms them.
 
-    ``codes`` ``(n, t + h)`` int32 holds each row's codes in leaf order: first
-    the bins of ``t`` discretized splines, whose rows are rows of their tables
-    (the support ``B_unique R_inv``, back to back in ``tables`` from
-    ``table_start`` with ``table_width`` columns), then the levels of ``h``
-    categorical blocks of ``one_hot_width`` levels, whose rows are one-hot (a
-    code past the last level is the base level, a zero row).  ``gathered``
-    ``(column, matrix)`` holds dense blocks read through the leaf order,
-    ``sparse`` ``(column, B[leaf_order], R_inv)`` sparse splines, and
-    ``generic`` ``(column, matrix)`` any other block, through its
-    ``row_subset``.  Every ``column`` is a block's first column among the
-    pass's dense columns.
+    ``codes`` ``(n, t + h)`` int32: the bins of ``t`` discretized splines (rows
+    of their support tables, back to back in ``tables`` from ``table_start``,
+    ``table_width`` wide), then the levels of ``h`` one-hot blocks (a code past
+    the last level is the zero base row). ``gathered``, ``sparse`` and
+    ``generic`` hold the other blocks; every ``column`` is a block's first
+    column among the pass's dense columns.
     """
 
     codes: NDArray
@@ -424,21 +385,12 @@ class NestedStructuredLayout:
     """Design partition for one nested chain beside a dense border (§4).
 
     Built once per design and chain by ``layout.build_nested_structured_layout``
-    and cached on the ``DesignMatrix`` like the single-level layouts.  Chain
-    fields run coarsest to finest; ``chain_group_indices[-1]`` is the leaf
-    group, the one whose ``RandomEffectGroupMatrix.codes`` are the leaf codes.
-    ``level_indices[j]`` holds the global design coefficient indices of level
-    ``j`` (its ``GroupSlice`` range) and ``structured_indices`` their
-    concatenation in node order.  ``leaf_order`` holds the rows sorted by leaf
-    code (stable) and ``leaf_starts`` ``(K + 1,)`` each leaf's start in it, so
-    ``leaf_order[leaf_starts[l]:leaf_starts[l + 1]]`` are the rows of leaf
-    ``l`` in row order; both are read-only and shared with the nesting cache
-    entry that holds the tree.  The border fields (``_border_partition``'s)
-    hold every group outside the chain, crossed random effects included.
-
-    There is deliberately no ``dominant_group_index``: code written for one
-    dominant group fails on this layout instead of treating the leaf as the
-    only structured level.
+    and cached on the ``DesignMatrix``. Chain fields run coarsest to finest;
+    ``chain_group_indices[-1]`` is the leaf group. ``level_indices[j]`` holds
+    level ``j``'s coefficient indices and ``structured_indices`` their node
+    order. ``leaf_order``/``leaf_starts`` give the rows of each leaf
+    (read-only, shared with the nesting cache). The border fields hold every
+    group outside the chain. There is no ``dominant_group_index`` on purpose.
     """
 
     chain_group_indices: tuple[int, ...]
@@ -457,12 +409,9 @@ class NestedStructuredLayout:
     # The chain's nesting cache (selection.shared_nesting_cache), where the
     # leaf-ordered border codes outlive a lambda rebuild (``_lineage_entry``).
     lineage_cache: dict = field(default_factory=dict, repr=False)
-    # The border centre and structural null generators per prior-weight
-    # vector (``moments.nested_prior_statistics``).  Owner: this layout.
-    # Lifetime: the layout.  Key: the prior weights themselves (held as a
-    # read-only copy and compared exactly); at most two entries.  No working
-    # weight, lambda or penalty enters an entry; the border matrices never
-    # change, so nothing else invalidates it.
+    # Border centre and structural null generators per prior-weight vector.
+    # Owner and lifetime: this layout. Key: the prior weights, compared exactly;
+    # at most two entries. Nothing else enters, so nothing else invalidates.
     prior_cache: list = field(default_factory=list, repr=False)
 
     def __post_init__(self) -> None:
@@ -492,16 +441,11 @@ class NestedStructuredLayout:
     def sparse_indicators(self) -> tuple[IndicatorCells, ...]:
         """The border's random-effect blocks, as the (leaf, level) cells their rows take.
 
-        A row's centred entry ``x_j - m_lj`` of a one-hot block is exactly zero
-        on every level ``j`` its leaf's rows never take (the border centre is
-        0 there by type), so the row pass needs only ``sum_r L(r)`` entries, ``L(r)`` the
-        number of levels of the row's leaf, where the dense pass forms ``n k``.
-        The rule is the block's type: every ``RandomEffectGroupMatrix`` border
-        block goes through its cells and every other block through the dense
-        rows (``leaf_rows``), whatever its levels' fill.  Cache contract: owned
-        by this immutable layout and living as long as it; the cells come from
-        the lineage cache (``_lineage_entry``), valid for the very code array
-        and leaf order they were built from.
+        A one-hot block's centred entry is exactly zero on every level a
+        leaf's rows never take, so the row pass forms only the cells. Every
+        ``RandomEffectGroupMatrix`` border block takes this route, every other
+        block the dense rows (``leaf_rows``). Owned by this immutable layout;
+        the cells come from the lineage cache (``_lineage_entry``).
         """
         if self.dense_small_matrix is not None:
             return ()
@@ -580,63 +524,34 @@ class NestedStructuredLayout:
 class NestedLeafStatistics:
     """Per-leaf statistics of one row-weight vector ``a`` (§3.4, §3.6, §4).
 
-    Produced by one row pass (``moments._nested_pass``) in the
-    border coordinates of the operator that carries them (``q`` columns), on
-    the rows ``x - center`` so that no statistic carries a column's offset:
+    Produced by one row pass (``moments._nested_pass``) on the rows
+    ``x - center``, in the ``q`` border coordinates of the carrying operator:
 
     - ``weight`` ``(K,)``: ``a_leaf[l] = sum_{r in l} a_r``.
-    - ``mean`` ``(K, q)``: the DATA leaf centres ``mu_l - center`` of the
-      factor these statistics belong to, in the shifted form ``x_ref(l) - c
-      + sum_{r in l} |w_r| ((x_r - c) - (x_ref(l) - c)) / sum_{r in l} |w_r|``
-      with the ABSOLUTE data weights (signed-rows note §4.1; never the
-      operator's ``a``; a leaf cut by the row pass's chunks combines its
-      pieces' centres the same way about the heaviest piece), and 0 for a
-      leaf without a weighted row.  For rows ``w >= 0`` these are the
-      weighted means.  A column that is constant within a leaf gives that
-      constant (less ``c``) exactly.  Signed operators carry the same array
-      their factor was built from.
-    - ``within`` ``(q, q)``: ``sum_r a_r (x_r - m_l)(x_r - m_l)'`` by the centred
-      row pass, never ``X'aX - sum_l ...`` (decision 1); exactly symmetric (the
-      builder canonicalises ``0.5 (W + W')``).  A column constant within every
-      leaf has an exactly zero row and column.
+    - ``mean`` ``(K, q)``: the data leaf centres ``mu_l - center``, shifted
+      means with the absolute data weights (the weighted means for ``w >= 0``);
+      0 for a leaf with no weighted row.
+    - ``within`` ``(q, q)``: ``sum_r a_r (x_r - m_l)(x_r - m_l)'`` by the
+      centred pass, exactly symmetric.
     - ``absolute`` ``(q,)``: ``sum_r e_r (x_rj - m_lj)^2`` with ``e_r >= |a_r|``
-      the scale of row ``r``'s weight error (``e = a`` for Fisher rows, the
-      observed rows' ``w0 (|u^2/V| + |(y - mu) factor|)``; design §3.3): the
-      within-leaf curvature the rounding of the rows can move.
-    - ``center`` ``(q,)``: the global centre ``c`` of the rows, the shifted
-      prior-weighted mean of every column that is not one-hot and 0 on the
-      one-hot ones and on an intercept column (``moments.nested_prior_statistics``,
-      design §3.2).
-    - ``deviation`` ``(K, q)`` or ``None``: ``dev_l = sum_{r in l} a_r (x_r -
-      m_l)``; ``None`` means exactly zero.  The data pass carries it about the
-      absolute-weight centres, ``-2 sum_{r in l, w_r < 0} |w_r| (x_r - m_l)``,
-      an exact zero (``None``) when no row is negative.
-    - ``indicator`` ``(q,)`` bool or ``None``: the columns of the border's
-      random-effect blocks (the layout's ``indicator_columns``; False on an
-      intercept column), whose node means vanish off each node's levels, so
-      the factor sums their between-node scatter sparsely
-      (``_weighted_scatter``); ``None`` means no such column.
+      the scale of row ``r``'s weight error.
+    - ``center`` ``(q,)``: the rows' global centre, 0 on one-hot and intercept
+      columns.
+    - ``deviation`` ``(K, q)`` or ``None`` (exact zero):
+      ``dev_l = sum_{r in l} a_r (x_r - m_l)``.
+    - ``indicator`` ``(q,)`` bool or ``None``: the border's random-effect
+      columns, summed sparsely (``_weighted_scatter``).
     - ``generators`` ``BorderGenerators`` or ``None``: the exact null basis of
-      the border's data part that the specification determines (design §3.6
-      step 1), which the factor deflates structurally; ``None`` on a
-      W-derivative operator, which is never factored, and where the border has
-      no complete one-hot block.
-    - ``error_mass`` ``(K,)`` or ``None``: ``sum_{r in l} e_r``, the leaf's
-      weight-error mass (``None``: ``|weight|``, rows ``w >= 0`` with ``e = w``).
+      the border's data part, deflated structurally.
+    - ``error_mass`` ``(K,)`` or ``None`` (``|weight|``): ``sum_{r in l} e_r``.
     - ``rounding`` ``(gamma_weight, gamma_scatter)`` or ``None``: the row
-      pass's rounding constants for the leaf sums and the within scatter
-      (``moments._nested_pass``); ``None`` lets the factor charge its own
-      ``gamma_Q`` for both.
-    - ``indicator_pattern`` ``(rows, positions)`` or ``None``: the layout's
-      (leaf, level) cells (``NestedStructuredLayout.indicator_pattern``), a
-      superset of the nonzeros of ``mean``'s ``indicator`` columns, which the
-      factor's root scatter reads in place of a scan of the ``(K, q)`` block
-      (perf scout F2).
+      pass's rounding constants; ``None`` charges ``gamma_Q`` for both.
+    - ``indicator_pattern`` ``(rows, positions)`` or ``None``: a superset of
+      the nonzeros of ``mean``'s indicator columns.
 
-    ``cross`` is the raw ``C_leaf[l] = sum_{r in l} a_r x_r = a_l (m_l + c) +
-    dev_l``, derived for the raw-coordinate readers.  Non-finite values raise
-    ``np.linalg.LinAlgError`` (the iterate's weights caused them);
-    inconsistent shapes or an asymmetric ``within`` raise ``ValueError``.
+    ``cross`` is the raw ``C_leaf[l] = a_l (m_l + c) + dev_l``. Non-finite
+    values raise ``np.linalg.LinAlgError``; inconsistent shapes or an
+    asymmetric ``within`` raise ``ValueError``.
     """
 
     weight: NDArray
@@ -733,9 +648,8 @@ def _check_partition(small_indices: NDArray, structured_indices: NDArray) -> int
 def _assemble_leaf_statistics(**fields) -> NestedLeafStatistics:
     """``NestedLeafStatistics`` from arrays already frozen and exact copies of validated ones.
 
-    For ``NestedDataOperator.augmented`` only, whose every entry is a copy of
-    a validated statistic or an exact 0 or 1: no copy and no second
-    finiteness or symmetry pass over the ``(K, q)`` means (perf scout F5).
+    For ``NestedDataOperator.augmented`` only: no copy and no second
+    validation pass over the ``(K, q)`` means.
     """
     statistics = object.__new__(NestedLeafStatistics)
     for spec in dataclasses.fields(NestedLeafStatistics):
@@ -782,7 +696,7 @@ class NestedDataOperator:
 
         ``within + sum_l [dev_l m_l' + m_l dev_l' + a_l m_l m_l']`` with the raw
         leaf means ``m = mean + center``: the chain path never forms it from
-        rows (decision 1); only the dense-reference, diagonal and estimability
+        rows (§12, decision 1); only the dense-reference, diagonal and estimability
         readers ask for it.  Cached for the life of this immutable operator.
         """
         leaf = self.leaf
@@ -954,21 +868,11 @@ def _weighted_scatter(
 ) -> tuple[NDArray, NDArray]:
     """``X' diag(weight) X`` ``(q, q)`` and ``|weight|' X**2`` ``(q,)`` for ``X = values - center``.
 
-    ``center`` (``None`` for 0) must be 0 on the ``indicator`` columns, which
-    keep their exact zeros.  The node means of a random-effect border column
-    vanish on every node whose subtree lacks its level, so those columns
-    (``indicator``, chosen by the block's type) go through sparse products on
-    their exact nonzeros and the rest through BLAS; with no such column the
-    product is the dense one.  Only exact zeros are skipped, so every entry
-    sums the same nonzero terms as the dense product.  The centring touches
-    only the dense columns' slice, never a copy of the whole ``(K, q)`` block.
-    The second result is the absolute mass of each column, the diagonal of
-    the same sum with ``|weight|``, for the componentwise rounding bound.
-    ``pattern`` ``(rows, positions)``, row-major, is a superset of the
-    indicator block's nonzeros known by construction (the leaf means' cells,
-    ``NestedLeafStatistics.indicator_pattern``): it replaces the scan for
-    them, and its extra entries hold exact zeros, which add nothing to any
-    sum.
+    ``center`` (``None`` for 0) must be 0 on the ``indicator`` columns. Those
+    columns go through sparse products on their exact nonzeros (``pattern``,
+    a known superset, when given) and the rest through BLAS, so every entry
+    sums the same nonzero terms as the dense product. The second result is the
+    absolute mass of each column, for the componentwise rounding bound.
     """
     magnitude = np.abs(weight)
     if indicator is None or not indicator.any():
@@ -1007,7 +911,7 @@ def _carried_deviation(
     d: NDArray,
     deviation: NDArray | None,
 ) -> NDArray | None:
-    """The parents' carried deviation ``delta_p = sum_c (s_c d_c + rho_c delta_c)`` (note §4.2).
+    """The parents' carried deviation ``delta_p = sum_c (s_c d_c + rho_c delta_c)``.
 
     ``sum_c |s_c| d_c = 0`` about the |s|-weighted parent centre, so the first
     sum is ``2 sum_{c: s_c < 0} s_c d_c``: an exact zero (``None``, with no
@@ -1026,7 +930,7 @@ def _carried_terms(
     d: NDArray, delta: NDArray, rho: NDArray, pivot: NDArray
 ) -> tuple[NDArray, NDArray]:
     """One level's carried terms of ``Q``, ``sum_u [rho_u (d_u delta_u' + delta_u d_u') -
-    delta_u delta_u' / D_u]`` (note §4.3), and the diagonal majorant of their rounding.
+    delta_u delta_u' / D_u]``, and the diagonal majorant of their rounding.
 
     Only the nodes with a nonzero deviation contribute (exact zeros skipped).
     The majorant, before ``gamma_Q``, is ``sum_u [|rho_u| r2(d_u, delta_u) +
@@ -1051,7 +955,7 @@ def _balanced_rank_two(a: NDArray, b: NDArray) -> NDArray:
     any ``t > 0`` (Cauchy-Schwarz); ``t = ||b|| / ||a||`` per row balances the
     two, and a row with ``a = 0`` or ``b = 0`` is an exact zero.  Summed over
     rows the majorants keep ``|E_ij| <= sqrt(U_i U_j)`` (Cauchy-Schwarz again),
-    which is what the border factorization's ``u_s`` needs (design §3.6).
+    which is what the border factorization's ``u_s`` needs (§3.6).
     """
     size_a = np.sqrt(np.einsum("ij,ij->i", a, a))
     size_b = np.sqrt(np.einsum("ij,ij->i", b, b))
@@ -1093,42 +997,17 @@ def _border_bound(
 ) -> NDArray:
     """The running bound ``U`` ``(q - 1,)`` of the profiled border Schur complement.
 
-    Signed-rows note §4.4 and design §3.6: ``|dQ_ij| <= sqrt(U_i U_j)`` to first
-    order, every rounding charged where it is made with the exact first-order
-    sensitivity of the profiled ``Q``.  The sensitivity of ``Q`` to a node's
-    weight ``omega_u`` is ``e~_u e~_u'`` and to its carried deviation ``delta_u``
-    is ``Delta e~_u' + e~_u Delta'`` (the node's leaf-like form after its subtree
-    is eliminated: ``m_u - (MF)_u = e_u``), with ``e~_u = e_u[1:] - c_eff
-    e_u[0]`` the profiled vector (``e~_0 = -delta_0 / D_0`` at the super-root).
-    So, with ``gamma_Q = (n_nodes + q + 10) eps`` and the row pass's
-    ``gamma_weight``, ``gamma_scatter`` (``moments._nested_pass``):
-
-    - the accumulation of ``Q``: ``gamma_Q (sum_u |s_u| d_u^2 + the one-hot
-      root form + sum_u [|rho_u| r2(d_u, delta_u) + delta_u^2 / D_u] +
-      delta_0^2 / D_0 + |S_jj|)`` (``accumulation``);
-    - the leaf rows: ``omega_l`` within ``gamma_weight sum_r e_r``, ``delta_l``
-      within ``gamma_weight sum_r e_r |x_r - mu_l|`` and the within scatter
-      within ``gamma_scatter sum_r e_r (x_r - mu_l)^2``, which by ``2ab <= a^2
-      + b^2`` per row give ``(gamma_scatter + gamma_weight) absolute + 2
-      gamma_weight sum_l E_l e~_l^2`` (``E_l = error_mass``);
-    - every internal node and the super-root: the rounding of ``omega_p =
-      sum_c s_c``, ``l_p = gamma_Q sum_c |s_c|`` (``local``), charged ``l_p
-      e~_p^2``, and of ``delta_p``, componentwise within ``gamma_Q sum_c
-      (|s_c| |d_c| + |rho_c| |delta_c|)``.  A rank-two term ``D e~' + e~ D'``
-      with ``|D_j| <= eta_j`` is majorized by ``eta_j^2 / t + t e~_j^2`` for any
-      ``t > 0`` (``_balanced_rank_two``); with ``t = l_p`` and, by
-      Cauchy-Schwarz over the children, ``(sum_c |s_c| |d_cj|)^2 <= (sum_c
-      |s_c|) (sum_c |s_c| d_cj^2)``, the ``|s| |d|`` part is at most ``gamma_Q
-      sum_c |s_c| d_cj^2 + l_p e~_pj^2``: the node masses already summed
-      (``node_mass``) and the weight term again.  The ``|rho| |delta|`` part
-      is formed where a child carries a deviation (signed rows only).
-
-    Every ``e~^2`` sum is bounded by ``_profiled_square_sums``, so the bound
-    streams once over each level's ``e`` and forms no ``(K, q)`` temporary.
-    For rows ``w >= 0`` (``delta = 0``) it is ``gamma_Q (accumulation +
-    node_mass) + (gamma_scatter + gamma_weight) absolute + 2 gamma_weight sum
-    E e~^2 + 2 sum_p l_p e~_p^2``, within a small constant of the non-negative
-    construction's ``gamma_Q (absolute + sum |s| d^2)``.
+    ``|dQ_ij| <= sqrt(U_i U_j)`` to first order, each rounding charged where
+    it is made with the exact sensitivity of the profiled ``Q``: ``e~_u e~_u'``
+    to a node's weight and ``Delta e~_u' + e~_u Delta'`` to its carried
+    deviation, ``e~_u = e_u[1:] - c_eff e_u[0]``. With
+    ``gamma_Q = (n_nodes + q + 10) eps`` and the row pass's ``gamma_weight``,
+    ``gamma_scatter``, it charges the accumulation of ``Q``, the leaf rows
+    (``(gamma_scatter + gamma_weight) absolute + 2 gamma_weight sum E e~^2``)
+    and each internal node's sums. Rank-two terms are majorized by
+    ``eta^2 / t + t e~^2`` (``_balanced_rank_two``) and the child sums by
+    Cauchy-Schwarz. For rows ``w >= 0`` the bound is within a small constant of
+    ``gamma_Q (absolute + sum |s| d^2)``. Streams once over each level's ``e``.
     """
     gamma_Q, gamma_weight, gamma_scatter = gammas
     depth = tree.depth
@@ -1185,7 +1064,7 @@ def _square_diagonal_by_columns(
     """Return ``diag((H^-1 O)^2)`` from explicit columns, ``sum_v (O H^-1)_vi (H^-1 O)_vi``.
 
     O(p (n_nodes q + q^2)) in all: the route for an operator other than the
-    factor's own data (decision 3), which no production caller passes; its
+    factor's own data (§12, decision 3), which no production caller passes; its
     accuracy is the forward error of the solves.
     """
     diagonal = np.empty(width)
@@ -1313,111 +1192,43 @@ def _super_root_inverse(rest_inverse: NDArray, center_star: NDArray, D0: float) 
 
 
 class NestedSchurFactor:
-    """Factorization of a nested chain beside a dense border (§3.2-§3.7; one-engine design §3.1, §3.6).
+    """Factorization of a nested chain beside a dense border (§3.2-§3.7).
 
-    ``H = [[T, C], [C', A]]`` with the tree block eliminated leaves first by the
+    ``H = [[T, C], [C', A]]``: the tree block is eliminated leaves first by the
     closed-form pivot recursion (no fill; Lean ``chain_ldl``, ``chain_det``),
-    then the intercept as the tree's super-root (design §3.1): border column 0
-    is the unpenalized parent of every root, with pivot ``D_0 = sum_r s_r``
-    and between-child term the ``s``-weighted scatter of the root means about
-    their centre ``c*``.  The rows may have any sign (design §3.3, signed-rows
-    note §4): every node is centred on the ``|s|``-weighted (at the leaves
-    ``|w|``-weighted) shifted mean of its children, and the deviation
-    ``delta_u = sum a (x - m_u)`` that centre leaves, an exact zero for rows
-    ``w >= 0``, is carried up the tree, ``delta_p = sum_c (s_c d_c + rho_c
-    delta_c)``.  What remains is the intercept-profiled border Schur
-    complement,
+    then the intercept as the tree's super-root, the unpenalized parent of
+    every root with pivot ``D_0 = sum_r s_r``. Rows may have any sign: each
+    node is centred on the ``|s|``-weighted shifted mean of its children and
+    the deviation that centre leaves is carried up the tree (exactly zero for
+    ``w >= 0``). What remains is the intercept-profiled Schur complement
 
         Q = S_b + W_in + sum_u [s_u d_u d_u' + rho_u (d_u delta_u' + delta_u d_u')
             - delta_u delta_u' / D_u] - delta_0 delta_0' / D_0,
 
-    ``d_u = m_u - m_p(u)`` (``m_root - c*`` at a root), from shifted means
-    (§3.4): dense columns about the heaviest root, one-hot columns as ``sum s
-    m m' - D_0 c* c*'`` on their sparse means with ``c* = sum_r s_r m_r /
-    D_0``; for rows ``w >= 0`` every carried term is an exact zero and ``Q`` is
-    the PSD sum.  ``sigma = omega / D`` (never ``1 - rho``); ``F`` and ``M F``
-    by the top-down ``g/e`` recursion with the carried deviation, ``F_u =
-    sigma_u g_u + delta_u / D_u``, ``e_u = rho_u g_u - delta_u / D_u`` (never
-    ``c/D - sigma A``); ``H^-1`` on the pattern from the
-    Takahashi scalars ``t, Z_uu, v, kappa`` (§3.5).  ``Q`` is factored by
-    ``border.factor_border``: structural deflation of the exact null space
-    the specification determines (``leaf.generators``), complete pivoting,
-    Rump's verification of the retained block, a residual bound on the
-    truncated subspace and disclosure of every null direction
-    (``border_certificate``); every rank decision is taken there, on the
-    Jacobi-scaled deflated matrix, never on the intercept.  The running bound
-    ``U`` (``_border_bound``; signed-rows note §4.4) charges every rounding of
-    the construction where it is made, with ``gamma_Q = (n_nodes + q + 10)
-    eps`` and the row pass's constants, and with each row's weight-error scale
-    ``e_r`` (``leaf.error_mass``) rather than ``|w_r|``: the rows' builder
-    states where their weights come from a cancellation.  Non-negative Fisher
-    weights (``e = w``) are charged componentwise, so only an exactly zero
-    pivot is null and a tiny positive weight keeps its column.  The
-    generalized inverse is ``Q^+ = L0^-T diag(1 / D_0, Q_rest^+) L0^-1``, ``L0
-    = [[1, 0], [c_eff, I]]`` with the super-root's multiplier ``c_eff = c* +
-    delta_0 / D_0``,
-    with ``Q_rest^+`` the Moore-Penrose inverse in the scaled metric on the
-    retained subspace; every null of ``Q`` then has the form ``[-c*'z; z]``
-    and ``Q^+ Q e_0 = e_0``: the intercept is H-orthogonal to every null, the
-    dense backend's weighted-mean-centred convention.  ``log|H| = sum_u log
-    D_u + log D_0 + log pdet(Q_rest)`` is published as is, the convention
-    identity ``det(T) pdet(Q) = sum_w pdet(H_c)``; no coupling term is added
-    and no null space is refused for touching the tree.
+    factored by ``border.factor_border`` (structural deflation, complete
+    pivoting, Rump's verification, disclosure of every null), which takes every
+    rank decision. ``H^-1`` on the pattern comes from the Takahashi scalars
+    (§3.5); ``log|H| = sum_u log D_u + log D_0 + log pdet(Q_rest)``. Every null
+    has the form ``[-c*'z; z]``, so the intercept is H-orthogonal to it.
 
-    Construction takes a ``NestedPenalizedOperator`` on the coordinates ``[1,
-    X]`` (``assembly.build_augmented_nested_factor``) and ``intercept=True``
-    (``intercept=False``, the retired raw-coordinate coefficient factor, is a
-    ``ValueError``).  It works in the centred coordinates ``[1, X - 1 c']`` of
-    its leaf statistics (``c = leaf.center``, 0 on the intercept): ``Q``,
-    ``F``, ``e`` and every closed form are free of the columns' offsets.  The
-    change of basis ``R = I - e_0 c'`` touches only the intercept row, so the
-    public methods return raw-coordinate values: ``solve`` maps ``R' r`` in
-    and ``R x`` out, the intercept entry of ``diag(H^-1)`` is ``(e_0 - c)'
-    Q^-1 (e_0 - c)``, ``inverse_operator_diagonal`` and
-    ``coefficient_estimable`` add their intercept-column terms, and traces,
-    ``diag(H^+ H)`` and ``logdet`` are invariant.
+    Takes a ``NestedPenalizedOperator`` on ``[1, X]`` with ``intercept=True``
+    and works in its centred coordinates ``[1, X - 1 c']``; public methods
+    return raw-coordinate values through ``R = I - e_0 c'``.
 
-    Refusals at construction: ``LinAlgError`` when a tree pivot fails its
-    certificate ``D_u > E_u + 4 eps (|omega_u| + lambda_u)``, ``E_u`` the
-    running bound on its rounding (``E_leaf = gamma_weight sum_r e_r``,
-    ``E_p = sum_c rho_c^2 E_c + gamma_Q sum_c |s_c|``; note §4.4, item 1): it
-    never fires for ``w >= 0``, since then ``D_u >= lambda_u`` and ``E_u`` is
-    a rounding of ``omega_u``, and it is the certificate that signed observed
-    rows define a positive definite ``H`` there (design §6: a refused iterate,
-    never another route); for a node with ``lambda_u = 0`` and ``omega_u =
-    0``, a super-root pivot ``D_0`` within its own bound (for ``w >= 0``,
-    ``D_0 == 0`` exactly: intercept aliasing), and the border refusals of
-    ``factor_border`` (material negative curvature, which ``w >= 0`` cannot
-    produce).
+    Refusals at construction (``LinAlgError``): a tree pivot failing
+    ``D_u > E_u + 4 eps (|omega_u| + lambda_u)`` (never for ``w >= 0``), a
+    super-root pivot within its own bound (intercept aliasing), and the border
+    refusals of ``factor_border``.
 
-    Attributes read by callers (all set at construction):
-    ``shape``, ``backend = "structured"``, ``rank`` (``n_nodes + rank(Q)``),
-    ``rank_truncated``, ``schur_condition_estimate``
-    (the retained squared-pivot ratio of the scaled border, ``inf`` when
-    anything was truncated), ``minimum_local_diagonal`` (``min_u D_u``),
-    ``border_certificate``, ``small_indices``, ``structured_indices`` (node
-    order), ``max_structured_inverse_block``, ``chain_group_indices``,
-    ``chain_group_names``, ``dominant_group_name`` (the leaf name, for
-    reporting only: never use it to find a layout), ``intercept``,
-    ``operator`` (the ``NestedPenalizedOperator`` it factors).
+    Accepted operators: ``NestedDataOperator`` on the same forest, partitions
+    and bitwise ``leaf.mean``/``leaf.center`` (else ``ValueError``),
+    ``LowRankSymmetricOperator`` and ``SumBlockOperator`` of those; anything
+    else raises ``TypeError``.
 
-    Operators accepted by the operator methods, in this factor's coordinates:
-    ``NestedDataOperator`` on the same forest (the same tree object, or equal
-    sizes and parents), the same partitions and bitwise the same
-    ``leaf.mean`` and ``leaf.center`` (else ``ValueError``);
-    ``LowRankSymmetricOperator`` (handled
-    by solves); and ``SumBlockOperator`` of those.  Anything else, including
-    ``CenteredBlockOperator`` and the single-level operators, raises
-    ``TypeError``.  ``operator.data`` itself is recognised by identity as the
-    factor's own data operator (``H - S``).
-
-    Caches (owner: the factor; lifetime: the factor; invalidation: none,
-    because weights, penalties, basis, target and precision are all fixed at
-    construction and any change builds a new factor): ``Q^-1``, ``diag(H^-1)``,
-    the scaled border eigenvalues and, per chain level on first use, ``G_I =
-    F_I' F_I``, ``h^I`` and the level-pair traces ``t1 + t2 + t3``.  ``T^-1 E_I
-    F`` is recomputed per pair (one O(n_nodes q) tree solve).  They must not
-    change a rank decision or a bound.
+    Caches (owner and lifetime: the factor; invalidation: none, since every
+    input is fixed at construction): ``Q^-1``, ``diag(H^-1)``, the scaled border
+    eigenvalues and the per-level traces. They never change a rank decision
+    or a bound.
     """
 
     backend = "structured"
@@ -1445,12 +1256,8 @@ class NestedSchurFactor:
         max_structured_inverse_block: int = 256,
         excluded: tuple[int, ...] = (),
     ):
-        # The whole construction under one BLAS thread when a wide fit released
-        # the cap and the border is below the break-even: its dense kernels act
-        # on the border width, and numpy's and scipy's OpenBLAS pools otherwise
-        # contend between a GEMM and the next LAPACK call (perf scout F1:
-        # dpotrf 140 ms after a threaded GEMM against 6 ms alone; the whole
-        # construction 285 ms against 326 ms for the border kernels alone).
+        # One BLAS thread for the whole construction when the border is below
+        # the break-even: numpy's and scipy's OpenBLAS pools otherwise contend.
         with narrow_kernel_blas_threads(operator.data.leaf.width):
             self._construct(
                 operator,
@@ -1505,12 +1312,9 @@ class NestedSchurFactor:
         self._mean = leaf.mean
         self._center = leaf.center
 
-        # Up pass, leaves first (§3.3; signed-rows note §4.2): pivots,
-        # multipliers, shrunk weights, the |s|-weighted shifted node centres
-        # and the carried deviation delta, with the running bound E_u on each
-        # pivot's rounding (note §4.4).  For rows w >= 0 every delta is an
-        # exact zero and |s| = s, so this is the non-negative recursion bit
-        # for bit.
+        # Up pass, leaves first (§3.3): pivots, multipliers, shrunk weights,
+        # |s|-weighted shifted centres and the carried deviation, with the
+        # running bound E_u on each pivot. For w >= 0 every delta is exactly 0.
         gamma_Q = (tree.n_nodes + q + 10) * eps
         gamma_weight, gamma_scatter = (gamma_Q, gamma_Q) if leaf.rounding is None else leaf.rounding
         error_mass = np.abs(leaf.weight) if leaf.error_mass is None else leaf.error_mass
@@ -1526,7 +1330,7 @@ class NestedSchurFactor:
                     f"Nested chain level {names[level]!r} has a node with zero penalty and "
                     "zero accumulated weight, a singular pivot."
                 )
-            # the tree pivot certificate (note §4.4, item 1): it cannot fail
+            # the tree pivot certificate: it cannot fail
             # for w >= 0, where D_u >= lambda_u and E_u << omega_u
             floor = pivot_error + 4.0 * eps * (np.abs(omega) + lam)
             if np.any(pivot <= floor):
@@ -1560,10 +1364,8 @@ class NestedSchurFactor:
             magnitude = np.abs(s)
             magnitude_parent = _to_parent(tree, level, magnitude)
             # Shifted parent centres about the child of largest |s|: a column
-            # that is constant within the parent gives d = m_c - m_p = 0
-            # exactly.  Any centre is exact algebra once the deviation it
-            # leaves is carried (note §4.2); |s| keeps the divisor away from a
-            # cancelling signed sum.
+            # constant within the parent gives d = 0 exactly, and the carried
+            # deviation keeps any centre exact.
             order = np.lexsort((-magnitude, parent))
             head = order[np.r_[True, parent[order][1:] != parent[order][:-1]]]
             reference = np.zeros((tree.sizes[level - 1], q))
@@ -1584,7 +1386,7 @@ class NestedSchurFactor:
         self.minimum_local_diagonal = float(min(np.min(pivot) for pivot in pivots))
 
         # F = T^-1 C and M F by the top-down g/e recursion (§3.3), with the
-        # carried deviation (note §4.3): F_u = sigma_u g_u + delta_u / D_u,
+        # carried deviation: F_u = sigma_u g_u + delta_u / D_u,
         # e_u = rho_u g_u - delta_u / D_u, g_u = d_u + e_p(u).
         F: list[Any] = [None] * depth
         e: list[Any] = [None] * depth
@@ -1630,15 +1432,9 @@ class NestedSchurFactor:
         self._path = tuple(_descendant_products(self._rho_all[table[:-1]]) for table in tables)
         self._pi = _descendant_products(self._rho_all[tables[-1]])
 
-        # The super-root (design §3.1): border column 0, the intercept, is the
-        # unpenalized parent of every root, eliminated last in the tree with
-        # pivot D_0 = sum_r s_r.  Its between-child term is the s-weighted
-        # scatter of the root means about c* (the |s|-weighted shifted mean on
-        # the dense columns, the s-weighted mean on the one-hot ones), plus the
-        # carried terms of the roots and the super-root's own -delta_0 delta_0'
-        # / D_0, so the border matrix below is the intercept-profiled Schur
-        # complement: log|H| = sum_u log D_u + log D_0 + log|Q|, and the
-        # intercept never enters a rank decision.
+        # The super-root: the intercept, eliminated last with pivot
+        # D_0 = sum_r s_r, so the border matrix below is the intercept-profiled
+        # Schur complement and the intercept never enters a rank decision.
         root_s, root_mean = shrunk[0], deltas[0][:, 1:]
         root_rho, root_magnitude = rhos[0], np.abs(shrunk[0])
         D0 = float(np.sum(root_s))
@@ -1659,11 +1455,8 @@ class NestedSchurFactor:
         indicator = None if leaf.indicator is None else leaf.indicator[1:]
         dense = np.ones(q - 1, dtype=bool) if indicator is None else ~indicator
         # Dense columns: the shifted two-pass form about the heaviest root.
-        # One-hot columns: sum s m m' - D_0 c* c*' on their sparse means, whose
-        # rounding the bound U below charges; the one direction where it
-        # matters, the block's sum, is deflated structurally (§3.6 step 1).
-        # (one product over the whole block for the one-hot columns, whose
-        # reference is 0, and the shifted form on the dense columns' slice)
+        # One-hot columns: sum s m m' - D_0 c* c*' on their sparse means; the
+        # block's sum direction is deflated structurally (§3.6 step 1).
         dense_columns = np.flatnonzero(dense)
         reference = root_mean[int(np.argmax(root_magnitude)), dense_columns]
         center_star = (root_s @ root_mean) / D0
@@ -1692,7 +1485,7 @@ class NestedSchurFactor:
         root_deviation = None if carried[0] is None else carried[0][:, 1:]
         # the super-root's carried deviation delta_0 = sum_r (s_r d_r + rho_r
         # delta_r): -2 sum_{s_r < 0} |s_r| d_r on the |s|-centred dense
-        # columns, 0 on the s-centred one-hot ones (exact algebra, note §4.2)
+        # columns, 0 on the s-centred one-hot ones (exact algebra)
         super_deviation = np.zeros(q - 1)
         carried_Q, carried_mass = np.zeros((q - 1, q - 1)), np.zeros(q - 1)
         negative_roots = np.flatnonzero(root_s < 0.0)
@@ -1732,9 +1525,7 @@ class NestedSchurFactor:
         S_rest = operator.border_penalty[1:, 1:]
         # the super-root's multiplier F_0 = c* + delta_0 / D_0 (sigma_0 = 1)
         center_effective = center_star + super_deviation / D0
-        # The running bound of every term (signed-rows note §4.4, design
-        # §3.6): |dQ_ij| <= sqrt(U_i U_j), each rounding charged where it is
-        # made with the exact first-order sensitivity of Q (``_border_bound``).
+        # The running bound of every term (``_border_bound``).
         # sum_c |s_c| d_c^2 over every child of an internal node and over the
         # roots about c*, the rank-two majorants' share (``_border_bound``): the
         # scatter masses, with the one-hot root form's (m - c)^2 <= 2 m^2 + 2 c^2
@@ -1764,12 +1555,9 @@ class NestedSchurFactor:
             node_mass=node_mass + root_node_mass,
         )
         generators = None if leaf.generators is None else leaf.generators.dropped(1)
-        # Coordinates excluded from the Laplace approximation (design §3.9,
-        # ``reml.identified``): removing border columns from H leaves the
-        # other columns' Schur complement Q[M, M], so their rows and columns
-        # of Q, S and U are set to exact zero and the border takes them as
-        # exact nulls; Q^+ is then (Q[M, M])^-1 padded with zeros and log
-        # pdet(Q) = log|Q[M, M]|, the identified part of H.
+        # Coordinates excluded from the Laplace approximation
+        # (``reml.identified``): their rows and columns of Q, S and U are zeroed
+        # and become exact nulls, leaving log pdet(Q) = log|Q[M, M]|.
         self.excluded = tuple(int(index) for index in excluded)
         if self.excluded:
             rest = self._small_position[np.asarray(self.excluded, dtype=np.intp)] - 1
@@ -1808,10 +1596,9 @@ class NestedSchurFactor:
         self._scaled_matrix = border.scaled_matrix
         self._scaled_eigenvalues_cache: NDArray | None = None
         self.schur_condition_estimate = border.condition
-        # Nulls of Q in the factor's coordinates: [-c*'z; z] for every null z
-        # of the profiled Q (W's intercept entry is 0, so Q^+ Q e_0 = e_0 and
-        # the intercept is H-orthogonal to every null: gram's weighted-mean-
-        # centred convention, §3.6).  diag(Q^+ Q) = 1 - sum_k V_jk W_jk.
+        # Nulls of Q: [-c*'z; z] for every null z of the profiled Q, so the
+        # intercept is H-orthogonal to every null (§3.6).
+        # diag(Q^+ Q) = 1 - sum_k V_jk W_jk.
         null = border.null
         self._null_border = np.vstack((-(center_star @ null)[None, :], null))
         self._retained_own = np.concatenate(
@@ -2051,20 +1838,12 @@ class NestedSchurFactor:
     ) -> NDArray:
         """Return ``H^-1 rhs`` for a data-derived ``rhs``, such as the normal equations' ``X'Wz``.
 
-        A right-hand side in the range of the data operator's transpose is
-        exactly orthogonal to the deflated structural nulls, so this reads the
-        data-side border inverse (``BorderFactor.inverse_data``): the same
-        solution in exact arithmetic, without the cancellation of ``1 / a_NN``
-        sized products along a direction only the penalty identifies (one-engine
-        design §3.6 step 1).  PIRLS solves its Newton system through it.
-        ``border_centred`` ``(q,)`` or ``(q, m)``, when given, is the border
-        part of ``rhs`` already in the factor's centred coordinates (``R'``
-        applied), formed from centred rows (``NestedStructuredSystem.
-        xtwz_small_centred`` behind the intercept's sum): it replaces the
-        subtraction ``r_b - c r_0``, which loses a column's offset-to-spread
-        ratio in digits (§3.2).  With ``centred`` the intercept entry of the
-        solution stays the centred ``alpha`` (no ``R`` map out), the PIRLS
-        state of one-engine design §3.8.
+        Such a right-hand side is orthogonal to the deflated structural nulls,
+        so this reads the data-side border inverse (``BorderFactor.inverse_data``),
+        avoiding the cancellation along directions only the penalty identifies.
+        ``border_centred``, when given, is the border part of ``rhs`` already
+        in centred coordinates and replaces the subtraction ``r_b - c r_0``
+        (§3.2). With ``centred`` the intercept entry stays the centred ``alpha``.
         """
         return self._solve(
             rhs, self._border_apply_data, border_centred=border_centred, centred=centred
@@ -2103,7 +1882,7 @@ class NestedSchurFactor:
         else:
             border_rhs = np.asarray(border_centred, dtype=np.float64).reshape(len(self._center), -1)
         reached = tree.path_sum(u)
-        # C_leaf = w m + delta: the carried deviation of signed rows (note §4.3)
+        # C_leaf = w m + delta: the carried deviation of signed rows
         share = self._mean.T @ (self._leaf.weight[:, None] * reached)
         if self._leaf_deviation is not None:
             share = share + self._leaf_deviation.T @ reached
@@ -2180,19 +1959,12 @@ class NestedSchurFactor:
     def row_quadratic_forms(self, rows: NDArray) -> NDArray:
         """Return ``x_i' H^+ x_i`` for each row of ``rows`` ``(m, p)``, forming no ``K x K`` block.
 
-        In the factor's coordinates ``H^+ = [[T^-1 + F Q^+ F', -F Q^+], [-Q^+ F',
-        Q^+]]``, so a row with tree part ``b`` and border part ``a`` (``R'``
-        applied) gives ``||D^-1/2 L^-1 b||^2 + y' Q^+ y`` with ``y = a - F' b``:
-        the random-effect and fixed-effect halves of the hat diagonal of Bates et
-        al. (2015, eqs. 63-65).  ``L^-1 e_u`` lives on the reach of ``u`` (Gilbert
-        and Peierls 1988), its ancestors-or-self: 1 at ``u`` and ``-sigma_u`` times
-        the ``rho`` product strictly between at each ancestor (``_path``).  Each
-        nonzero of ``b`` adds at most ``depth`` terms, summed per row and node
-        before squaring, so a row whose levels are not one root-to-leaf path is
-        exact too.  O(nnz(b) depth + m q^2).  The rows must be data rows (a fit
-        row ``[1, x_i]``, the only caller being leverage): ``y`` then has no
-        component along the deflated structural nulls and ``y' Q^+ y`` reads the
-        data side (``BorderFactor.quadratic_data``).
+        A row with tree part ``b`` and border part ``a`` gives
+        ``||D^-1/2 L^-1 b||^2 + y' Q^+ y`` with ``y = a - F' b`` (Bates et al.
+        2015, eqs. 63-65). ``L^-1 e_u`` lives on the ancestors of ``u``
+        (Gilbert and Peierls 1988), so the cost is O(nnz(b) depth + m q^2). The
+        rows must be data rows, so ``y' Q^+ y`` reads the data side
+        (``BorderFactor.quadratic_data``).
         """
         values = scipy.sparse.csr_array(rows, dtype=np.float64)
         if values.shape[1] != self.shape[0]:
@@ -2685,7 +2457,7 @@ class NestedSchurFactor:
         return value + sum(_low_rank_trace(self.solve, piece) for piece in record.low_rank)
 
     def inverse_operator_diagonal(self, operator: CompactSymmetricOperator) -> NDArray:
-        """Return ``diag(H^-1 O)`` ``(p,)`` (§3.6, decision 3).
+        """Return ``diag(H^-1 O)`` ``(p,)`` (§3.6, §12 decision 3).
 
         The factor's own data operator takes the identity route: ``1 -
         lambda_u (H^-1)_uu`` on the tree, ``1 - diag(Q^-1 S_b)`` on the border.
@@ -2711,18 +2483,13 @@ class NestedSchurFactor:
         return diagonal
 
     def inverse_operator_square_diagonal(self, operator: CompactSymmetricOperator) -> NDArray:
-        """Return ``diag((H^-1 O)^2)`` ``(p,)`` (§3.6, decision 3).
+        """Return ``diag((H^-1 O)^2)`` ``(p,)`` (§3.6, §12 decision 3).
 
-        Own data operator: ``1 - 2 lambda_u Z^H_uu + lambda_u (H^-1 S H^-1)_uu``
-        on the tree and ``1 - 2 (Q^-1 S_b)_jj + ((H^-1 S H^-1)_bb S_b)_jj`` on the
-        border, from the penalty sandwich; O(n_nodes d^2 + n_nodes q^2).  Other
-        operators take ``sum_v (O H^-1)_vi (H^-1 O)_vi`` from explicit columns
-        (``_square_diagonal_by_columns``), O(p (n_nodes q + q^2)) and limited to
-        the forward error of the solves; the exact-arithmetic decomposition
-        ``sum_v (H^-1 O H^-1)_uv O_vu`` it evaluates has terms of size
-        ``1/lambda`` that cancel to a result of size ``1/w`` when ``lambda <<
-        omega`` (§10, measured 1.9e-3).  No production caller passes another
-        operator.
+        The factor's own data operator uses the penalty sandwich,
+        O(n_nodes d^2 + n_nodes q^2). Other operators take explicit columns
+        (``_square_diagonal_by_columns``), limited to the solves' forward error,
+        because the exact decomposition cancels ``1/lambda`` terms when
+        ``lambda << omega`` (§10). No production caller passes another operator.
         """
         if operator is self.operator.data:
             return self._identity_square_diagonal(self._retained_diagonal)
@@ -2822,65 +2589,32 @@ class NestedSchurFactor:
 class ProfiledNestedSchurFactor(_ProfiledInterceptFactor):
     """Slope inverse of a nested fit with the intercept profiled out (§3.6, §6).
 
-    ``augmented_factor`` factors ``H_aug`` on ``[1, X]`` (``intercept=True``);
-    this adapter exposes ``H_c^-1``, the slope block of ``H_aug^-1``, through the
-    Hessian-factor protocol.  With ``e0`` the intercept coordinate, ``u = (1,
-    mean_x)`` and ``P = [-mean_x'; I]`` these identities hold exactly and are
-    the whole adapter:
+    ``augmented_factor`` factors ``H_aug`` on ``[1, X]``; this adapter exposes
+    ``H_c^-1``, the slope block of ``H_aug^-1``. With ``e0`` the intercept
+    coordinate and ``P = [-mean_x'; I]`` these exact identities are the whole
+    adapter (``y = O_aug e0``, ``t = (O_aug)_00``):
 
-        H_aug^-1 = e0 e0' / sum_w + P H_c^-1 P',   H_aug^-1 u = e0 / sum_w,
-        G := H_aug^-1 - e0 e0' / sum_w = P H_c^-1 P',   H_c^-1 P' = E' G,
-        O_c = P' O_aug P for an operator centred on mean_x.
-
-    So for a slope penalty ``Omega`` (embedded with a zero intercept row) and
-    centred operators ``O_c = P' O_aug P`` with ``y = O_aug e0`` and ``t =
-    (O_aug)_00``:
-
-        tr(H_c^-1 Omega) and all penalty pairs: the augmented values (index shift);
+        H_aug^-1 = e0 e0' / sum_w + P H_c^-1 P',   O_c = P' O_aug P,
+        tr(H_c^-1 Omega) and penalty pairs: the augmented values;
         tr(H_c^-1 O_c) = tr(H_aug^-1 O_aug) - t / sum_w;
         tr(H_c^-1 Omega H_c^-1 O_c) = tr(H_aug^-1 Omega H_aug^-1 O_aug);
         tr(H_c^-1 O_c H_c^-1 O'_c) = tr(H_aug^-1 O_aug H_aug^-1 O'_aug)
                                       - 2 y' H_aug^-1 y' / sum_w + t t' / sum_w^2;
         diag(H_c^-1 O_c)_j = (H_aug^-1 O_aug)_(j+1, j+1) - mean_x[j] (H_aug^-1 y)_(j+1).
 
-    ``O_aug`` is ``raw.augmented()`` for a ``CenteredBlockOperator`` whose
-    ``raw`` is a ``NestedDataOperator`` in slope coordinates.  The augmented
-    factor evaluates every piece in its centred coordinates (centre ``c``,
-    0 on the tree), where the last identity reads ``N_(j+1, j+1) - (mean_x[j]
-    - c[j]) N_(j+1, 0)`` with ``N = H_aug^-1 O_aug`` centred: both terms are
-    free of the columns' offsets.  The corrections carry no ``1/lambda`` term: the near-null
-    direction of ``H_aug`` (intercept against the roots) is annihilated by
-    ``O_aug`` and orthogonal to ``y``.  ``tests/test_nested_schur_factor.py``
-    verifies these routes against an exact centred reference (the §8
-    verification checked the augmented factor only).
+    The augmented factor evaluates each piece in centred coordinates, free of
+    the columns' offsets, and the corrections carry no ``1/lambda`` term.
 
-    Accepted operators, in slope coordinates: a ``CenteredBlockOperator`` whose
-    ``center`` is bitwise ``mean_x`` and whose ``raw`` is a ``NestedDataOperator``
-    accepted by the augmented factor after augmentation; ``data_operator``
-    itself passed raw, which is wrapped as ``CenteredBlockOperator(raw,
-    cross=xtw, total=sum_w, center=mean_x)``, the implicit centring
-    ``irls_direct``'s ``p_eff`` relies on; ``LowRankSymmetricOperator`` pieces through profiled solves; and
-    ``SumBlockOperator`` of those.  Any other raw ``NestedDataOperator``, or a
-    centred operator about any other center, raises ``ValueError`` (its
-    correction would carry ``1/lambda`` terms); other kinds raise
-    ``TypeError``.  The centred ``data_operator``
-    (``StructuredLinearSystemState.centered_data_operator``, the ``edf`` and
-    ``edf1`` caller in ``state_ops``) takes the identity routes, recognised by
-    ``raw is data_operator`` with ``center``, ``cross`` and ``total`` equal to
-    ``mean_x``, ``xtw`` and ``sum_w``.
+    Accepted operators: a ``CenteredBlockOperator`` with ``center`` bitwise
+    ``mean_x`` and a ``NestedDataOperator`` ``raw``; ``data_operator`` itself
+    (wrapped about ``mean_x``); ``LowRankSymmetricOperator``; and
+    ``SumBlockOperator`` of those. A centred operator about another centre
+    raises ``ValueError``, other kinds ``TypeError``.
 
-    Attributes (the named contracts of §6): ``augmented_factor``, ``sum_w``,
-    ``xtw`` ``(p,)``, ``mean_x = xtw / sum_w`` (``w_derivatives`` reads
-    ``mean_x`` and ``sum_w`` by ``getattr`` and silently uncentres without
-    them), ``data_operator``, ``shape = (p, p)``, ``backend = "structured"``,
-    ``rank = max(augmented rank - 1, 0)``, ``rank_truncated``,
-    ``schur_condition_estimate``, ``minimum_local_diagonal``, ``dominant_group_name``,
-    ``chain_group_indices``, ``chain_group_names``, ``small_indices`` and
-    ``structured_indices`` (slope coordinates, ``augmented - 1`` without the
-    intercept), ``max_structured_inverse_block``.  ``logdet()`` is
-    ``augmented logdet - log(sum_w)``.  ``ValueError`` when ``sum_w`` is not
-    positive and finite or the widths disagree.  Its augmented ``solve`` runs
-    in the raw coordinates.
+    ``mean_x`` and ``sum_w`` are read by ``w_derivatives`` through ``getattr``
+    and must be present. ``rank = max(augmented rank - 1, 0)``, ``logdet()`` is
+    ``augmented logdet - log(sum_w)``, and index attributes are in slope
+    coordinates. ``ValueError`` when ``sum_w`` is not positive and finite.
     """
 
     _solve_options: ClassVar[dict] = {}
@@ -3024,10 +2758,7 @@ class ProfiledNestedSchurFactor(_ProfiledInterceptFactor):
         centered, low_rank = self._pieces(operator)
         shifted = None if component is None else self._shift_component(component)
         augmented = tuple(self._augment(item) for item in centered)
-        # the augmented operators have given the record its piece, and only the
-        # slope record's operators meet low-rank columns (``_cross_matrix``): a
-        # record that kept them would hold each direction's [1 | X] leaf copies
-        # through the whole cross matrix
+        # slope record's operators meet low-rank columns (``_cross_matrix``).
         record = replace(
             self.augmented_factor._direction(shifted, scale, augmented, ()), operators=()
         )

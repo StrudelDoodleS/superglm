@@ -39,12 +39,10 @@ from superglm.solvers._structured.operators import (
 class StructuredLinearSystemState:
     """Authoritative compact factors and moments retained after a fit.
 
-    There is no raw-coordinate coefficient factor (one-engine design §3.6,
-    §3.10): the slope covariance is ``M_ss``, the slope block of the augmented
-    inverse, which ``profiled_factor`` serves.  A state pickled before this
-    carries a ``coefficient_factor`` entry, which unpickling restores as an
-    unread attribute, and one pickled by v0.35.0 its retired factor's
-    ``fallback_reason``.
+    There is no raw-coordinate coefficient factor: the slope covariance is
+    ``M_ss``, the slope block of the augmented inverse (``profiled_factor``).
+    Older pickles' ``coefficient_factor`` or ``fallback_reason`` entries are
+    restored as unread attributes.
     """
 
     profiled_factor: (
@@ -79,7 +77,7 @@ def centred_data_operator(
     """``system``'s data operator centred on its working-weighted mean, ``X~' W X~``.
 
     An ``fs`` or ``sz`` leaf system serves it on its ``c0``-shifted moments
-    (``centred_data_operator``, one-engine design §3.2), which round at the
+    (``centred_data_operator``), which round at the
     columns' spread; every other system centres its raw moments on ``xtw /
     sum_w``.  ``row_column_norm`` attaches the rows' norms of the columns whose
     moments cancel (``geometry.cancelled_column_row_norms``).

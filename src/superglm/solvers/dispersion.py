@@ -1,77 +1,24 @@
 """The two weight contracts, and the likelihood sizes they imply.
 
-An observation weight can enter an exponential-dispersion likelihood in two
-ways, and they are different models rather than different scalings of one
-model:
-
 ``"prior"``
-    ``w_i`` states the *precision* of row ``i``: ``Var(Y_i) = phi V(mu_i) / w_i``
-    and the contribution is ``log f(y_i; mu_i, phi / w_i)``.  This is what you
-    have when the response is an average -- an aggregated ``incurred /
-    exposure`` with the exposure as weight, or an average severity with the
-    claim count as weight.  McCullagh & Nelder (*Generalized Linear Models*,
-    2nd ed., 1989, Sec. 2.2.2) call these prior weights; statsmodels and Stata
-    call the same thing variance or analytic weights.
+    ``w_i`` is the precision of row ``i``: ``Var(Y_i) = phi V(mu_i) / w_i``
+    and the contribution is ``log f(y_i; mu_i, phi / w_i)`` (McCullagh &
+    Nelder 1989, Sec. 2.2.2; statsmodels ``var_weights``, Stata ``aweight``).
+    The default, as in R's ``glm`` and glum.
 ``"frequency"``
-    ``w_i`` states that row ``i`` stands in for ``w_i`` identical rows, so the
-    contribution is ``w_i log f(y_i; mu_i, phi)``.  The data are a compression
-    of a longer table.
+    Row ``i`` stands for ``w_i`` identical rows: ``w_i log f(y_i; mu_i, phi)``
+    (statsmodels ``freq_weights``, Stata ``fweight``, SAS ``FREQ``).
 
-The two coincide only at ``w == 1``.  Integer weights do NOT make them agree:
-at ``w == 2`` over ``n`` rows the likelihood size is ``n`` under the prior
-reading and ``2n`` under the frequency one, so the residual d.f., ``phi``,
-every Wald standard error and BIC's penalty all differ -- and the Poisson
-normalizer at ``y = 1, mu = 1, w = 2`` is ``-1.30685`` against ``-2.0``.
-"Measured twice as precisely" and "seen twice" are different statements about
-the world, and the arithmetic keeps them apart.
+Both give the same score equations and ``beta_hat``, but they coincide only at
+``w == 1`` (integer weights do not make them agree), and they differ in the
+likelihood's size, which this module returns. The size sets the dispersion,
+residual degrees of freedom, Wald standard errors, the ``n`` of AIC/BIC and,
+through REML, the smoothing parameters. Only the prior reading is a
+likelihood for fractional ``w``.
 
-What IS true of fractional ``w`` is stronger: only the prior reading is a
-likelihood at all there, because a row cannot be replicated 0.4 times and the
-frequency reading's ``sum(w) - edf`` residual d.f. stops counting anything.
-
-Both contracts give the *same* score equations and therefore the same
-``beta_hat``; they part company over the likelihood's size, which is what this
-module returns.  Everything downstream of the size moves with it: the Pearson
-dispersion, residual degrees of freedom, Wald standard errors and intervals,
-the effective ``n`` in AIC/BIC, and -- through the REML criterion -- the
-smoothing parameters and the fitted surface.
-
-Established practice, and where SuperGLM sits in it
----------------------------------------------------
-
-Every major system either offers both contracts as separate declared inputs or
-defaults to the prior reading:
-
-=================  ====================================  ======================
-system             prior / variance / analytic            frequency / case
-=================  ====================================  ======================
-R ``glm``          ``weights=`` (the only weight input)   replicate the rows
-statsmodels GLM    ``var_weights=``                       ``freq_weights=``
-Stata              ``aweight``                            ``fweight``
-SAS ``GENMOD``     ``WEIGHT`` (fractional allowed)        ``FREQ`` (integers)
-glum               ``sample_weight=``                     replicate the rows
-=================  ====================================  ======================
-
-R documents ``weights`` as "prior weights", with the values "inversely
-proportional to the dispersions"; SAS is explicit that ``FREQ`` changes the
-sample size used in downstream formulas and ``WEIGHT`` does not, which is
-exactly the distinction below.  SuperGLM's default is ``"prior"`` for the same
-reason R's and glum's is: exposure is continuous, and in the setting this
-library targets the aggregated response is the ordinary case.
-
-Zero weights
-------------
-
-Under ``"frequency"`` a zero-weight row drops out of ``sum(w)`` on its own.
-Under ``"prior"`` it has to be counted out deliberately, because ``w = 0`` says
-the row carries no information at all -- infinite variance -- rather than that
-it was observed once.  The prior size is therefore the number of rows carrying
-positive weight, which is what R reports: a twelve-row Gamma fit with four zero
-weights and rank 2 returns ``df.residual = 6``, not ``10``, alongside the
-explicit note that "observations with zero weight not used for calculating
-dispersion".  Tweedie forbids ``w <= 0`` outright (its compound-Poisson
-normalizer carries ``log w``), so the count and the row total agree there and
-this rule changes nothing for it.
+Under ``"prior"`` a zero weight means infinite variance, so the size counts
+the rows with positive weight, as R's ``df.residual`` does. Tweedie forbids
+``w <= 0``. See ``docs/explanation/families-and-weights.md``.
 """
 
 from __future__ import annotations
@@ -170,17 +117,11 @@ def lazy_likelihood_size(sample_weight: NDArray, *, weight_semantics: str) -> Ca
     """``dispersion_likelihood_size``, computed at the first call and reused after it.
 
     Every REML dispersion denominator and the scale term's
-    ``0.5 * (n - M_p) * log(D)`` read this, the declared contract's size,
-    never the physical row count: ``sum(w)`` under ``"frequency"``, the
-    positive-row count under ``"prior"``.  The objective, its gradient and
-    its Hessian all read it, so a row count in any one of them would make the
-    Newton step inconsistent with the surface it steps on.
-
-    The memo's owner is the calling optimizer's frame and its lifetime is one
-    optimizer call.  Nothing invalidates it: ``sample_weight`` and
-    ``weight_semantics`` are captured, so the memo is not valid after an
-    in-place change to ``sample_weight``, and the caller must not make one
-    while the memo is alive.
+    ``0.5 * (n - M_p) * log(D)`` read the declared contract's size, never the
+    physical row count, so the objective, gradient and Hessian stay
+    consistent. Owner: the calling optimizer's frame; lifetime: one optimizer
+    call. ``sample_weight`` is captured, so it must not change in place while
+    the memo is alive.
     """
     return functools.cache(
         lambda: dispersion_likelihood_size(sample_weight, weight_semantics=weight_semantics)

@@ -428,10 +428,9 @@ def _certified_congruence(basis: NDArray, matrix: NDArray) -> tuple[NDArray, NDA
     Ogita, Rump and Oishi 2005), and the first product's enclosure is carried
     through the second: ``|T^ B^ - S B| <= E_M + E_T |B|`` with ``T^ = fl(B' S)``.
     Plain products would leave ``gamma_{2n} |B|' |S| |B|``, which on a skewed
-    spline penalty is three times the eigenvalue a tail direction keeps
-    (1.6e-14 against 6e-15 of the largest). The exact product is symmetric,
-    so one computed triangle is mirrored under the larger of the two mirrored
-    enclosures.
+    spline penalty exceeds the eigenvalue a tail direction keeps. The exact
+    product is symmetric, so one computed triangle is mirrored under the
+    larger of the two mirrored enclosures.
     """
     basis = np.asarray(basis, dtype=np.float64)
     matrix = np.asarray(matrix, dtype=np.float64)
@@ -1267,12 +1266,11 @@ def _direct_sum_summary(
     rank(S_k) / lambda_k`` for non-overlapping penalties (Wood and Fasiolo,
     2017, section 2), and the root-error term is the unit-weight one, because
     exact roots obeying the same rank pattern satisfy the same identity. A
-    ``select=True`` pair (Marra and Wood, 2011) is the standard case. The
-    general evaluation at a large weight ratio represents ``S(lambda)`` by a
-    root whose condition is the square root of that ratio times the roots'
-    own, and can then legitimately miss its accuracy contract; the unit-weight
-    evaluation carries no ratio. ``None`` when the identity does not apply,
-    or at unit weights, where it would repeat the refused evaluation.
+    ``select=True`` pair (Marra and Wood, 2011) is the standard case. At a
+    large weight ratio the general evaluation's root has condition the square
+    root of that ratio and can miss its accuracy contract; the unit-weight one
+    carries no ratio. ``None`` when the identity does not apply, or at unit
+    weights.
     """
     roots = support.component_roots
     if (

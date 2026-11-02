@@ -8,59 +8,26 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-# The Newton engines' active-set freeze bar never drops below this floor,
-# whatever reml_tol the caller asked for. Freezing classifies GEOMETRY --
-# "is this direction informative at all" -- and an inferentially flat
-# direction stays flat however precisely the informative lambdas are
-# located. Coupling the bar to 0.1*reml_tol alone meant the tight 1e-9
-# default un-froze the null directions the historical 1e-6 default froze at
-# exactly this value; unfrozen, they march geometrically toward the lambda
-# cap, paying 8-15 extra iterations, publishing platform-dependent lambda
-# values, and exhausting the line search at tight tolerances.
+# The freeze bar never drops below this floor, whatever reml_tol: freezing
+# classifies geometry (is a direction informative at all), and a flat
+# direction stays flat however tightly the informative lambdas are located.
 FLAT_DIRECTION_FREEZE_FLOOR = 1e-7
 
-# The curvature arm of the freeze decision. score_scale = 1+|objective|
-# grows with the row count while log-lambda curvature saturates (measured
-# on the flat-lambda stress design: informative |H_ii| 0.25 at 12k rows,
-# 0.62 at 1e6, while score_scale went 7.5e4 -> 8.5e6), so judging |H_ii|
-# against freeze_tol*score_scale froze an informative direction at 400k
-# rows and every direction at 1e6 by iteration 3 -- publishing lambdas a
-# factor e^5.6 from the optimum with SEs off by up to 87%. Absolute
-# curvature cannot classify either: a null direction mid-march carries
-# |H_ii| of the same order as an informative endgame (measured 0.056 vs
-# 0.060 at 1e6 rows).
-#
-# The comparison is per penalty DIMENSION: raw row curvature scales with
-# penalty rank (a random effect measured 112 -> 255 -> 391 across
-# 300 -> 600 -> 1000 levels, ~0.4 per rank, while an informative low-rank
-# spline held ~2.5 raw, ~0.8 per rank), so a raw ratio-to-strongest bar
-# froze a real-signal spline beside a 600-level random effect.
-# Rank-normalized, null directions measure <= 6e-5 per dimension at their
-# freeze states, the tightest informative direction 5.2e-3, and strong
-# ones 0.3 .. 0.8 -- commensurate across rank scales. The anchor keeps
-# the bar meaningful when every direction is weak (an all-null model has
-# no strong direction; without the anchor its last null would chase the
-# lambda cap forever): 1e-2 * 0.1 = 1e-3 per dimension splits the fully
-# null (<= 6e-5) from the tightest informative (5.2e-3).
+# The curvature arm of the freeze decision, per penalty dimension and
+# relative to the strongest estimated direction. score_scale grows with the
+# row count while log-lambda curvature saturates, and raw row curvature
+# scales with penalty rank, so neither an objective-scaled nor a raw bar
+# classifies. The anchor keeps the bar meaningful when every direction is
+# weak: 1e-2 * 0.1 = 1e-3 per dimension separates null from informative.
 FLAT_DIRECTION_CURVATURE_REL = 1e-2
 FLAT_DIRECTION_CURVATURE_ANCHOR = 0.1
 
-# The gradient ceiling of the dead-search decrement arm, in multiples of the
-# gradient bar max(1e-7, reml_tol) * (1 + |objective|). The decrement is
-# computed from the outer Hessian the step used, which by default
-# (w_correction_order=1) is a modified-Newton approximation: if it overstates
-# the curvature by a factor K the decrement understates the remaining
-# decrease by K, and no bound on K is available. The ceiling makes the arm's
-# guarantee independent of K. Along a direction of true curvature h a fit the
-# arm grants has true remaining decrease g^2 / (2h) < (10 bar)^2 / (2h): at
-# most 10^2 times the most the gradient arm already accepts at that h,
-# whatever K is. It also keeps the stall invariant the dead-search exit relies
-# on: a granted fit's active gradient is within one decade of the bar, so an
-# undetermined stall, orders above it, stays a failure. Measured: #459's
-# panel endgames sit at 1.009 to 2.03 times the bar (margin 4.9); every
-# genuine dead-search stall in the focused REML suites at 2.8e4 times it or
-# more; and at the panel's optimum the order-1 Hessian is within 0.42% of a
-# finite-difference Hessian of the exact gradient (order 2 within 2e-6).
+# Ceiling of the dead-search decrement arm, in multiples of the gradient bar
+# max(1e-7, reml_tol) * (1 + |objective|). The decrement comes from a
+# modified-Newton Hessian of unknown error, so the arm is granted only when
+# the active gradient is within this factor of the bar: the true remaining
+# decrease is then at most 10^2 times what the gradient arm accepts, and an
+# undetermined stall, orders above the bar, stays a failure.
 DECREMENT_GRADIENT_CEILING = 10.0
 
 
@@ -129,46 +96,21 @@ def concave_live_directions(
 ) -> NDArray:
     """Estimated directions with negative curvature and a decrease left to take.
 
-    A direction whose diagonal curvature is negative fails the second-order
-    necessary condition for a minimum (More & Sorensen 1979): the quadratic
-    model decreases along it without bound, so a trust-region step lies on
-    the region's boundary.  Over a step of ``step_bound`` the model
-    promises ``step_bound * |g_i| + step_bound**2 * |H_ii| / 2``; when that
-    reaches the stopping resolution ``tolerance * (1 + |objective|)`` the
-    point is not a minimum to the precision asked for, whatever the
-    gradient alone says.  A projected gradient of exactly zero is a bound
-    holding the direction (``project_reml_gradient``) or exact
-    stationarity, and is left to the first-order test.
+    Negative curvature fails the second-order necessary condition (More &
+    Sorensen 1979). Over a step of ``step_bound`` the model promises
+    ``step_bound * |g_i| + step_bound**2 * |H_ii| / 2``; when that reaches
+    ``tolerance * (1 + |objective|)`` the point is not a minimum to the
+    precision asked for. A projected gradient of exactly zero is left to the
+    first-order test.
 
-    Only the shoulder's own signature is read, its sign included.  A flat
-    direction sits at the lambda -> infinity end (towards lambda -> 0 an
-    identified term's log-penalty slope, -r/2, is not flat), where the
-    criterion expands in powers of 1/lambda, ``V_inf + c exp(-j rho) + ...``
-    with j >= 1 the leading power (the penalized part of a term shrinks
-    like 1/lambda), so ``g_i = -j c exp(-j rho)`` and ``H_ii = -j g_i``.  A
-    shoulder approaches the plateau from below (c < 0): ``g_i > 0`` and
-    ``H_ii < 0``, and descent leads away from the plateau, into the
-    interior.  A direction with ``g_i < 0`` decreases into the plateau, the
-    projected-Newton hold applies (Bertsekas 1982), and its true curvature
-    is positive: a negative diagonal read there is an error in that entry,
-    not a shoulder, at any ratio.  (Measured on a spline-by-factor fit with
-    aliased levels: every negative diagonal read on its frozen ``x``
-    direction, -7.3e-5 to -1.4e-4, came with g = -2.7e-4 to -3.3e-4, while
-    differences of the criterion along ``x`` gave curvature +9.4e-4 against
-    slope -9.4e-4, j = 1.  Read inside the band once on native Windows, it
-    stepped ``x`` from 7e6 to 1.3e9, where the search ended
-    line_search_failed; default OpenBLAS kernels read it there on another
-    variant.)  The band brackets j: measured k = 0.66 .. 1.72 on freMTPL2
-    fits started at lambda = 1e4.  A negative diagonal hundreds of times the
-    gradient is the roughness the rank decisions of a strongly penalized
-    system can give the criterion near the lambda cap (measured -0.0025 ..
-    -0.016 against a gradient of 2e-5 on a spline-by-factor fit with aliased
-    levels, whose steps from there ended line_search_failed on OpenBLAS
-    Haswell and Zen kernels), and stays with the first-order hold.  The lower
-    edge has no derivation: off the asymptote k need not be the integer j,
-    and 0.5 only brackets the measured k from below as 2 does from above.  A
-    shoulder with k under 0.5 keeps the first-order hold, so a start on one
-    can still stop there.
+    Only a shoulder's signature counts. Toward lambda -> infinity the
+    criterion expands as ``V_inf + c exp(-j rho)``, so ``H_ii = -j g_i``; a
+    shoulder has ``g_i > 0`` and ``H_ii < 0``, and ``H_ii / g_i`` must lie in
+    the band ``[-2, -0.5]`` bracketing ``j``. A direction with ``g_i < 0``
+    decreases into the plateau and keeps the projected-Newton hold
+    (Bertsekas 1982), as does a negative diagonal far outside the band, which
+    is rank-decision roughness near the lambda cap. A shoulder with ratio
+    below 0.5 keeps the first-order hold.
     """
     signed_gradient = np.asarray(projected_gradient, dtype=np.float64)
     gradient = np.abs(signed_gradient)
@@ -198,48 +140,21 @@ def freeze_flat_directions(
 ) -> FlatDirectionDecision:
     """Active-set freeze: mark directions with negligible gradient and curvature.
 
-    The gradient arm is judged against the objective's scale -- both grow
-    with the row count, so the comparison is dimensionally sound. The
-    curvature arm judges each direction's ROW of the estimated Hessian
-    block, not its diagonal alone: REML Hessians carry cross-terms
-    (multi-penalty anisotropy adds them explicitly) and need not be
-    positive definite, so a coordinate can hold a small diagonal with
-    large off-diagonal curvature -- a [[0, c], [c, 0]] block has zero
-    diagonals yet real curvature in the coupled eigenvector. Coupling to
-    a FIXED direction is excluded: that lambda never moves, so the cross
-    term is not exploitable. Curvature is normalized per penalty
-    dimension SYMMETRICALLY -- the matrix is scaled D^{-1/2} H D^{-1/2}
-    with D = diag(ranks), so a diagonal reads H_ii / r_i and a shared
-    cross-term reads H_ij / sqrt(r_i * r_j), the same value from both
-    ends. Row-asymmetric division read a rank-[1000, 1] coupled pair as
-    per-rank [5e-4, 0.5]: the high-rank half froze and the reduced solve
-    on its orphaned partner saw a zero one-dimensional Hessian where the
-    only curvature was joint. The normalized rows are judged against the
-    strongest estimated direction, anchored for all-weak models (see the
-    constants' calibration): per-dimension curvature is O(1) in both the
-    row count and the rank, where an absolute, objective-scaled, or
-    raw-relative bar is not. Fixed lambdas are always frozen.
+    The gradient arm is judged against the objective's scale. The curvature
+    arm judges each direction's row of the estimated Hessian block, not its
+    diagonal alone (REML Hessians carry cross-terms and need not be PD),
+    excluding coupling to fixed directions, normalized symmetrically per
+    penalty dimension (``D^{-1/2} H D^{-1/2}``, ``D = diag(ranks)``) and judged
+    against the strongest estimated direction with an anchor for all-weak
+    models. Fixed lambdas are always frozen.
 
-    Holding a direction is Wood's (2008, sec. 3.4) "working infinity":
-    a smoothing parameter on a flat end of the criterion is dropped from
-    the Newton step.  That is a projected-Newton hold at a virtual bound,
-    and it is valid only where the objective decreases INTO that bound
-    (Bertsekas 1982: a coordinate is held only when its gradient pushes it
-    against the bound).  On a convex tail -- ``H_ii > 0``, whichever end
-    -- descent leads to the end the direction is moving toward.  A
-    direction with ``H_ii < 0`` is on a concave shoulder: descent leads
-    away from the plateau, back into the interior, and negative curvature
-    is itself a descent direction (More & Sorensen 1979), so it is never
-    held while its trust-region model still promises a decrease the
-    stopping rule can resolve (``concave_live_directions``).  Such a
-    direction the flat test alone would have held is reported in
-    ``shoulder``; a caller without a trust-region step (``step_bound``
-    None) keeps the first-order hold.  (Measured on freMTPL2 as published,
-    before the claim recount, with the mains and 10 pairs: a start at
-    lambda = 1e4 held VehAge x VehBrand[B4] at 1e4 against an optimum near
-    7.8, gradient 1.8e-3 and curvature -1.9e-3, and reported a fit 8.8 worse
-    as converged.  On the recounted book with 4 gated pairs the same start
-    reported 1.89 worse.)
+    Holding a direction is Wood's (2008, sec. 3.4) "working infinity", a
+    projected-Newton hold valid only where the objective decreases into the
+    bound (Bertsekas 1982). A direction on a concave shoulder is never held
+    while its trust-region model promises a resolvable decrease
+    (``concave_live_directions``, More & Sorensen 1979); such directions are
+    reported in ``shoulder``. Without ``step_bound`` the first-order hold
+    stays.
     """
     gradient = np.abs(np.asarray(projected_gradient, dtype=np.float64))
     hess = np.abs(np.asarray(hessian, dtype=np.float64))
@@ -366,24 +281,16 @@ def revalidate_stop(
 ) -> tuple[bool, bool]:
     """Whether a stop the first-order test accepted stands, and whether a shoulder refused it.
 
-    The compound stop test is first order.  A point it accepts must also
-    pass the second-order necessary condition to the precision asked for
-    (``concave_live_directions``): on a concave shoulder of a plateau the
-    gradient is small however far the optimum is.  Its stop mask is the
-    previous iteration's freeze decision intersected with the current
-    gradient arm, which cannot see a curvature-only re-activation: a masked
-    direction can hold a gradient below the freeze floor yet above the
-    tolerance while its coupled partner's update raised its row curvature
-    past the bar.  So when a shoulder refuses, or a masked direction's
-    gradient reaches the tolerance, the freeze decision is recomputed
-    against the current Hessian, and the stop stands only if that
-    reactivates nothing.  The revalidation is then the last freeze decision
-    made, and the published record describes it.
+    An accepted point must also pass the second-order condition
+    (``concave_live_directions``). The stop mask is the previous freeze
+    intersected with the current gradient arm, which misses curvature-only
+    re-activation, so when a shoulder refuses or a masked direction's gradient
+    reaches the tolerance the freeze is recomputed against the current
+    Hessian, and the stop stands only if nothing reactivates. That
+    revalidation is then the published freeze decision.
 
-    ``concave_live`` and ``freeze`` are the engine's own bindings of
-    ``concave_live_directions`` and ``freeze_flat_directions``; ``ranks``
-    resolves its penalty ranks from its current penalty context
-    (``direction_penalty_ranks``), only when the freeze decision is remade.
+    ``concave_live`` and ``freeze`` are the engine's bindings of those
+    functions; ``ranks`` resolves penalty ranks only when the freeze is remade.
     """
     gradient_live = np.abs(projected_gradient) >= tolerance * score_scale
     masked_live = previously_frozen is not None and bool(
@@ -485,18 +392,10 @@ def newton_predicted_decrease(
 ) -> float | None:
     """Half the squared Newton decrement, ``g' H^-1 g / 2``, or None.
 
-    The decrease the quadratic model predicts from its minimizer, the
-    estimate of ``f(x) - p*`` that Newton's method stops on (Boyd &
-    Vandenberghe 2004, Convex Optimization, sec. 9.5.1 and Algorithm 9.5).
-    It is defined only for a positive definite Hessian, judged on the
-    caller's own modified-Newton floor: when every eigenvalue is at or above
-    it the modification left ``H`` unchanged, so this is the decrease of the
-    step the line search actually tried, before any step cap. Otherwise the
-    model has no minimizer and there is nothing to predict: None. Eigenvalues
-    that clear the floor (relative ``eps**0.7``) lie far above the
-    eigensolver's backward error, of order ``m u ||H||``, so their
-    perturbation moves the result by a relative amount far below the
-    decisions it informs.
+    Newton's predicted decrease (Boyd & Vandenberghe 2004, sec. 9.5.1),
+    defined only when every eigenvalue is at or above the caller's
+    modified-Newton floor (relative ``eps**0.7``, far above the eigensolver's
+    ``m u ||H||`` backward error), so ``H`` was unmodified. Otherwise None.
     """
     values = np.asarray(eigenvalues, dtype=np.float64)
     if values.size == 0 or not bool(np.all(values >= eigenvalue_floor)):
@@ -517,42 +416,23 @@ def classify_dead_feasible_exit(
 ) -> str:
     """Classify a line search whose every feasible trial was rejected.
 
-    The optimum is resolved when either of two measures of what is left
-    falls below the precision asked for:
+    The optimum is resolved when either measure of what is left is below the
+    precision asked for:
 
-    - the current active set's gradient is below the resolved tolerance,
-      never tighter than the achievable-precision floor, times the
-      objective's scale. Holding a loose-tolerance fit to the floor
-      misreported a resolved optimum as line_search_failed.
-    - the decrease the active set's Newton model still predicts,
-      ``predicted_decrease`` (half the squared Newton decrement, from
-      :func:`newton_predicted_decrease`; None when the active Hessian is
-      not positive definite or the caller's step cap or trust region bound
-      the Newton step), is below ``tolerance * (1 + |objective|)``: the
-      resolution at which the compound stop criterion already treats an
-      objective change as no change. This is Newton's decrement stopping
-      test (Boyd & Vandenberghe 2004, sec. 9.5.1). It catches a gradient
-      just above the bar along a strongly curved direction, where the
-      decrease left is quadratically small and below the objective's
-      evaluation noise, so rounding decides whether a trial is accepted:
-      a line search is expected to fail there (Shi, Xie, Byrd & Nocedal
-      2022, SIAM J. Optim. 32(1), sec. 4.1; Berahas, Byrd & Nocedal 2019,
-      SIAM J. Optim. 29(2)). Measured on #459's panel model: active
-      gradient 1.009 to 2.03 times the bar, predicted decrease 1.4e-3 to
-      5.8e-3 of the resolution, objective noise at fixed lambda 4.2e-7.
-      This arm applies only with the active gradient under
-      ``DECREMENT_GRADIENT_CEILING`` (10) times the gradient bar, so an
-      error in a modified-Newton Hessian cannot grant a fit whose gradient
-      is orders above the bar (see the constant). It does not also need
-      the exact Hessian (``w_correction_order=2``): the ceiling's bound
-      holds whatever the Hessian's error, and the default order-1 fits are
-      the ones #459 measured.
+    - the active gradient is below the resolved tolerance (never tighter than
+      the achievable-precision floor) times the objective's scale;
+    - ``predicted_decrease`` (:func:`newton_predicted_decrease`; None when
+      the Hessian is not PD or a step cap bound the step) is below
+      ``tolerance * (1 + |objective|)``: Newton's decrement test (Boyd &
+      Vandenberghe 2004, sec. 9.5.1). There the decrease left is below the
+      objective's evaluation noise and a line search is expected to fail
+      (Shi, Xie, Byrd & Nocedal 2022, SIAM J. Optim. 32(1), sec. 4.1; Berahas,
+      Byrd & Nocedal 2019, SIAM J. Optim. 29(2)). Only with the active
+      gradient under ``DECREMENT_GRADIENT_CEILING`` times the bar, which
+      bounds the result whatever the Hessian's error.
 
-    The proof requires evidence: at least one trial whose objective was
-    actually evaluated and rejected. On observed-geometry paths every
-    trial can be skipped (PIRLS non-convergence, geometry failure, an
-    uncertified mode) without any objective computed -- a search that
-    evaluated nothing has shown nothing, and stays an honest failure.
+    At least one trial must have been evaluated and rejected; a search that
+    evaluated nothing stays a failure.
     """
     if not evaluated_trial:
         return "line_search_failed"

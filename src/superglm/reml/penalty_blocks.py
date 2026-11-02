@@ -69,19 +69,10 @@ def similarity_transformed_roots(
     closed, and the pass repeats on the rest.
 
     Every step is an orthogonal rotation of the trailing columns, so the
-    transform discards no direction and the determinant is unchanged.  The
-    appendix sets the dominant terms to zero beyond their formal rank because
-    a formed ``lambda_i S_i`` carries rounding of order ``eps lambda_i ||S_i||``
-    in every entry, which is first order in the eigenvalues the smaller terms
-    set.  Stacked roots keep each term's rounding in that term's own rows: after
-    the rotation a dominant root's trailing columns hold its true content there
-    plus rounding of order ``u sqrt(lambda_i) ||R_i||``, which reaches the
-    trailing Gram only squared and through the closed block's Schur complement.
-    They are carried into the next pass, where they compete by their own norm,
-    rather than cut at a fixed rank: a penalty whose spectrum runs below any such
-    cut, as a column-equilibrated support keeps, still sets eigenvalues that the
-    smaller terms' weighted ones can match.
-
+    determinant is unchanged. Stacked roots keep each term's rounding in its
+    own rows, reaching the trailing Gram only squared, so dominant roots are
+    carried into the next pass and compete by norm rather than being cut at a
+    fixed rank, as the appendix's formed ``lambda_i S_i`` would require.
     ``log Omega_j`` is taken on the whole support, in the first pass; the
     rotations leave it unchanged.
     """
