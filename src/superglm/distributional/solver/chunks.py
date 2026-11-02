@@ -14,6 +14,8 @@ from superglm._group_matrix._group_matrix_core import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
     RandomEffectGroupMatrix,
+    SparseSSPGroupMatrix,
+    SplineCategoricalGroupMatrix,
 )
 from superglm._group_matrix._group_matrix_discretized import (
     DiscretizedSCOPGroupMatrix,
@@ -764,10 +766,30 @@ _SPLINE_CATEGORY_ROW_ARRAYS = 2
 # Transient per-row gathers while one group pair is contracted, and the
 # block's row indices.
 _BLOCK_GATHER_FLOATS = 5
-# Group types whose block rows' ownership is counted. Others (CSR splines,
-# factor smooths, subclasses) may own rows in raw storage, so their layouts
-# contract one likelihood chunk at a time, as the chunk stream sizes it.
-_COUNTED_GROUPS = frozenset((DenseGroupMatrix, *_BLOCK_ROW_ARRAYS, *_SPLINE_CATEGORY_GROUPS))
+# Group types whose block rows' ownership is counted. Others (factor smooths,
+# sparse groups, subclasses) may own rows in raw storage, so their layouts
+# contract one likelihood chunk at a time.
+_EXACT_SPLINES = (SparseSSPGroupMatrix, SplineCategoricalGroupMatrix)
+_COUNTED_GROUPS = frozenset(
+    (DenseGroupMatrix, *_EXACT_SPLINES, *_BLOCK_ROW_ARRAYS, *_SPLINE_CATEGORY_GROUPS)
+)
+
+
+def _group_row_floats(group) -> int:
+    """Owned floats per block row of one counted group outside spline-by-category."""
+    if type(group) not in _EXACT_SPLINES:
+        return _BLOCK_ROW_ARRAYS.get(type(group), group.shape[1])
+    # An exact spline's block slice owns a CSR copy of the block rows: values,
+    # column indices and row pointers.
+    basis = group.B
+    rows = basis.shape[0]
+    entry = basis.data.itemsize + basis.indices.itemsize
+    per_row = entry * basis.nnz + basis.indptr.itemsize * rows
+    if type(group) is SplineCategoricalGroupMatrix:
+        # A level group also owns its rows' CSR, a float copy of its values and
+        # its row indices; charging these on every row bounds each level.
+        per_row += (entry + 8) * basis.nnz + (basis.indptr.itemsize + 8) * rows
+    return -(-per_row // (8 * rows))
 
 
 def _spline_category_row_floats(design) -> int:
@@ -791,21 +813,23 @@ def _spline_category_row_floats(design) -> int:
 
 
 def contraction_row_bytes(layout: StackedLayout) -> int | None:
-    """Bytes one row adds to a contraction block, or None for an uncounted group.
+    """Bytes one row adds to a contraction block, or None for an uncounted design.
 
     The buffer holds ``K + K(K+1)/2`` channels. Each group adds its owned row
     arrays, spline-by-category terms as :func:`_spline_category_row_floats`
-    counts them; a dense group may form a weighted copy of its rows, so it
-    counts its full width.
+    counts them and exact splines their CSR slice; a dense group may form a
+    weighted copy of its rows, so it counts its full width.
     """
     k_parameters = len(layout.predictors)
     floats = k_parameters + k_parameters * (k_parameters + 1) // 2 + _BLOCK_GATHER_FLOATS
     for state in layout.predictors:
-        if any(type(group) not in _COUNTED_GROUPS for group in state.design.group_matrices):
+        if type(state.design) is not DesignMatrix or any(
+            type(group) not in _COUNTED_GROUPS for group in state.design.group_matrices
+        ):
             return None
         floats += _spline_category_row_floats(state.design)
         floats += sum(
-            _BLOCK_ROW_ARRAYS.get(type(group), group.shape[1])
+            _group_row_floats(group)
             for group in state.design.group_matrices
             if type(group) not in _SPLINE_CATEGORY_GROUPS
         )
@@ -813,7 +837,7 @@ def contraction_row_bytes(layout: StackedLayout) -> int | None:
 
 
 # A block's level and bin sums run over up to all its rows, and the design then
-# multiplies them by entries up to about 2**23. Where a sum of that many channel
+# multiplies them by products of entries up to about 2**23. Where a sum of that many channel
 # values could leave float64's range, the block contracts chunk by chunk, so its
 # sums are the chunk stream's.
 _BLOCK_SUM_LIMIT = 2.0**1000
@@ -1035,9 +1059,13 @@ def _assemble_grouped_pass_geometry(
         n_observations, k_parameters, chunk_size, p_coefficients=layout.n_coefficients
     )
     block_rows = contraction_block_rows(n_observations, contraction_row_bytes(layout), chunk_rows)
-    score = np.empty((block_rows, k_parameters), dtype=np.float64)
+    # A block of one chunk out of several contracts that chunk's own plans as it
+    # arrives, as the chunk stream does, so nothing is buffered or rebuilt.
+    per_chunk = block_rows <= chunk_rows < n_observations
+    buffered = 0 if per_chunk else block_rows
+    score = np.empty((buffered, k_parameters), dtype=np.float64)
     # Channel-major, so each contracted channel is one contiguous row vector.
-    curvature = np.empty((k_parameters * (k_parameters + 1) // 2, block_rows), dtype=np.float64)
+    curvature = np.empty((k_parameters * (k_parameters + 1) // 2, buffered), dtype=np.float64)
     accumulator = GroupedGeometryAccumulator(layout, penalty=penalty, coefficients=coefficients)
 
     def row_plans(start: int, stop: int):
@@ -1086,13 +1114,21 @@ def _assemble_grouped_pass_geometry(
     try:
         for chunk in iterator:
             length = len(chunk.score_eta)
-            if position + length - block_start > block_rows:
-                contract(block_start, position)
-                block_start = position
-            rows = slice(position - block_start, position + length - block_start)
-            position += length
-            score[rows] = chunk.score_eta
-            curvature[:, rows] = chunk.curvature_packed.T
+            if per_chunk:
+                accumulator.add_score(chunk.plans, chunk.score_eta)
+                for channel_index in range(len(curvature)):
+                    accumulator.add_curvature_channel(
+                        chunk.plans, channel_index, chunk.curvature_packed[:, channel_index]
+                    )
+                position = block_start = position + length
+            else:
+                if position + length - block_start > block_rows:
+                    contract(block_start, position)
+                    block_start = position
+                rows = slice(position - block_start, position + length - block_start)
+                position += length
+                score[rows] = chunk.score_eta
+                curvature[:, rows] = chunk.curvature_packed.T
             if _likelihood_sums is not None:
                 _likelihood_sums[0] += float(
                     np.sum(chunk.optimizing_log_likelihood, dtype=np.float64)
@@ -1107,7 +1143,8 @@ def _assemble_grouped_pass_geometry(
             close()
     if position != n_observations:
         raise RuntimeError("likelihood chunks must cover every row exactly once")
-    contract(block_start, position)
+    if block_start < position:
+        contract(block_start, position)
     return accumulator.finish()
 
 

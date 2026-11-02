@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import scipy.sparse as sp
 
 from superglm._frame import as_eager_frame
 from superglm.distributional.families.gaussian import GaussianLS
@@ -150,14 +151,20 @@ def _mixed_problem(*, extended=False):
             "t": np.sin(rows * 0.4),
             "g": np.resize(list("abc"), n),
             "h": np.resize(list("pqrst"), n),
+            "u": np.cos(rows * 0.3),
         }
     )
     location = {"x": Numeric(), "s": Spline(kind="cr", k=4), "g": Categorical()}
     interactions = (("s", "g"),)
     if extended:
-        # A random effect and a second spline term on the same categorical.
-        location |= {"h": RandomEffect(), "t": Spline(kind="cr", k=4)}
-        interactions += (("t", "g"),)
+        # A random effect, an exact spline and a second spline term on the
+        # same categorical.
+        location |= {
+            "h": RandomEffect(),
+            "t": Spline(kind="cr", k=4),
+            "u": Spline(kind="cr", k=5, discrete=False),
+        }
+        interactions += (("t", "g"), ("u", "g"))
     family = GaussianLS()
     compiled = compile_predictors(
         as_eager_frame(frame),
@@ -222,6 +229,18 @@ def _arrays(group):
     return [value for name in names if isinstance(value := getattr(group, name, None), np.ndarray)]
 
 
+def _sparse_arrays(group):
+    """The value, index and pointer arrays of a group's sparse attributes."""
+    names = {name for kind in type(group).__mro__ for name in getattr(kind, "__slots__", ())}
+    names |= set(getattr(group, "__dict__", {}))
+    return [
+        array
+        for name in names
+        if sp.issparse(value := getattr(group, name, None))
+        for array in (value.data, value.indices, value.indptr)
+    ]
+
+
 def test_block_design_rows_own_no_more_than_the_budget_counts():
     layout = _mixed_problem(extended=True)[0]
     rows = chunks.RowChunk(start=5, stop=21, indices=np.arange(5, 21, dtype=np.intp))
@@ -236,14 +255,20 @@ def test_block_design_rows_own_no_more_than_the_budget_counts():
         # Owned spline-by-category bytes, spread over the block rows each level owns.
         per_row = np.zeros(length)
         for parent, child in zip(state.design.group_matrices, block.group_matrices, strict=True):
-            parents = _arrays(parent)
-            # A level group's row arrays cover only its level's rows.
+            parents = _arrays(parent) + _sparse_arrays(parent)
+            # A level group's row arrays cover only its level's rows; an exact
+            # level group's value copy has one entry per stored value.
             child_rows = len(getattr(child, "row_idx", rows.indices))
+            level = getattr(child, "B_level", None)
+            shapes = {(child_rows,)} | ({(level.nnz,)} if sp.issparse(level) else set())
+            # A sparse basis owns its slice whatever the arrays' lengths.
+            candidates = [a for a in _arrays(child) if a.shape[:1] in shapes]
+            candidates += _sparse_arrays(child)
+            distinct = {a.__array_interface__["data"][0]: a for a in candidates}
             owned = sum(
                 array.nbytes
-                for array in _arrays(child)
-                if array.shape[:1] == (child_rows,)
-                and not any(np.shares_memory(array, source) for source in parents)
+                for array in distinct.values()
+                if not any(np.shares_memory(array, source) for source in parents)
             )
             kinds.add(type(child).__name__)
             if type(parent) in chunks._SPLINE_CATEGORY_GROUPS:
@@ -252,11 +277,12 @@ def test_block_design_rows_own_no_more_than_the_budget_counts():
                     assert np.max(child.row_idx) < length
                     per_row[child.row_idx] += owned / child_rows
                 continue
-            counted = chunks._BLOCK_ROW_ARRAYS.get(type(child), child.shape[1])
+            counted = chunks._group_row_floats(parent)
             assert owned <= 8 * length * counted, (type(child).__name__, owned, counted)
         charged = chunks._spline_category_row_floats(state.design)
         assert np.max(per_row) <= 8 * charged, (np.max(per_row), charged)
     assert {"CategoricalGroupMatrix", "RandomEffectGroupMatrix"} <= kinds
     assert {"DiscretizedSSPGroupMatrix", "DiscretizedSplineCategoricalGroupMatrix"} <= kinds
-    # Two spline terms on one categorical, two non-base levels each.
+    assert {"SparseSSPGroupMatrix", "SplineCategoricalGroupMatrix"} <= kinds
+    # Two binned spline terms on one categorical, two non-base levels each.
     assert level_groups == 4

@@ -38,7 +38,7 @@ from superglm.distributional.weights import (
     WeightContract,
     resolve_likelihood_weights,
 )
-from superglm.features import Numeric, Spline
+from superglm.features import FactorSmooth, Numeric, Spline
 
 from ._distributional_weights import resolved_prior
 from ._gaussian_lss_oracles import (
@@ -385,8 +385,28 @@ def test_contraction_row_bytes_count_the_buffer_and_each_groups_owned_rows() -> 
 
 
 def test_layouts_with_uncounted_groups_contract_one_chunk_at_a_time() -> None:
-    _, layout, _, _, _, _, _ = _problem(discrete=False)
-    assert "SparseSSPGroupMatrix" in {
+    n = 40
+    frame = as_eager_frame(
+        pd.DataFrame({"x": np.linspace(-1.0, 1.0, n), "g": np.resize(list("abc"), n)})
+    )
+    compiled = compile_predictors(
+        frame,
+        resolved_prior(np.ones(n)),
+        GaussianLS().parameters,
+        (
+            Predictor(
+                "location",
+                {"x": Numeric()},
+                interaction_specs={"x:g:fs": FactorSmooth("x", group="g", k=6)},
+            ),
+            Predictor("scale", {}),
+        ),
+        model_discrete=True,
+        n_bins_config=17,
+    )
+    layout = build_stacked_layout(compiled)
+    # A factor smooth's block storage is not counted.
+    assert "FactorSmoothGroupMatrix" in {
         type(group).__name__ for state in layout.predictors for group in state.design.group_matrices
     }
     row_bytes = chunking.contraction_row_bytes(layout)
@@ -423,11 +443,24 @@ def test_grouped_geometry_contracts_each_channel_once_per_block(
             return _original(self, *args, **kwargs)
 
         monkeypatch.setattr(PredictorExecutionPlan, name, counted)
+    rebuilt = []
+    row_design = chunking._row_design
+
+    def counted_rows(state, rows, *, copy=True):
+        if not copy:
+            rebuilt.append(rows.stop - rows.start)
+        return row_design(state, rows, copy=copy)
+
+    monkeypatch.setattr(chunking, "_row_design", counted_rows)
     actual = chunking.assemble_chunked_geometry(*arguments, chunk_size=19, **options)
 
     # Eight 19-row chunks; each block contracts the three packed channels once.
     block = 137 if chunks_per_block is None else 19 * chunks_per_block
-    assert contracted == [min(block, 137 - start) for start in range(0, 137, block) for _ in "abc"]
+    starts = range(0, 137, block)
+    assert contracted == [min(block, 137 - start) for start in starts for _ in "abc"]
+    # One-chunk blocks contract the chunk's own plans; longer blocks build row views.
+    expected = [] if block in (19, 137) else [min(block, 137 - start) for start in starts]
+    assert rebuilt == [rows for rows in expected for _ in layout.predictors]
     eps = np.finfo(np.float64).eps
     for name in ("score_data", "data_curvature"):
         expected = getattr(reference, name)

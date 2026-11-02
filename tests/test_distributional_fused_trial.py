@@ -242,8 +242,9 @@ def test_derivative_failure_releases_the_contraction_buffer_before_value_retry(m
             assert buffers and all(ref() is None for ref in buffers)
         return original(self, *args, **kwargs)
 
-    # One-chunk blocks: the first block is contracted before the third chunk fails.
-    monkeypatch.setattr(chunks, "contraction_block_rows", lambda n, row_bytes, rows: rows)
+    # Blocks one row longer than a chunk buffer one chunk each, so the first block
+    # is contracted from the buffer before the third chunk fails.
+    monkeypatch.setattr(chunks, "contraction_block_rows", lambda n, row_bytes, rows: rows + 1)
     monkeypatch.setattr(chunks.GroupedGeometryAccumulator, "add_curvature_channel", channel)
     monkeypatch.setattr(chunks.GroupedGeometryAccumulator, "add_score", score)
     monkeypatch.setattr(type(context.family), "evaluate_natural", evaluate)
