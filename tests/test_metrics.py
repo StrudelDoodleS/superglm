@@ -3692,3 +3692,101 @@ def test_slack_shape_constraint_reforms_unrestricted_leverage_on_new_rows():
         rtol=1e-9,
         atol=1e-12,
     )
+
+
+def _exact_face_leverage(rows, weights, penalty, face):
+    """``w_i a_i' H^-1 a_i`` in exact rationals, ``a_i = [1, x_i' Z]``, ``H = sum w a a' + diag(0, Z'SZ)``.
+
+    The test's own oracle: every float64 input is read as the rational it is,
+    and the projection, the Hessian and its solve are exact.
+    """
+    from fractions import Fraction
+
+    def exact(matrix):
+        return [[Fraction(float(value)) for value in row] for row in np.atleast_2d(matrix)]
+
+    Z, S = exact(face), exact(penalty)
+    width = len(Z[0])
+    projected = [
+        [Fraction(1)] + [sum(x[j] * Z[j][k] for j in range(len(x))) for k in range(width)]
+        for x in exact(rows)
+    ]
+    w = [Fraction(float(value)) for value in weights]
+    size = width + 1
+    hessian = [
+        [sum(wi * a[r] * a[c] for wi, a in zip(w, projected)) for c in range(size)]
+        for r in range(size)
+    ]
+    for r in range(width):
+        for c in range(width):
+            hessian[r + 1][c + 1] += sum(
+                Z[i][r] * S[i][j] * Z[j][c] for i in range(len(Z)) for j in range(len(Z))
+            )
+    # Gauss-Jordan on [H | I]
+    system = [row + [Fraction(int(r == c)) for c in range(size)] for r, row in enumerate(hessian)]
+    for col in range(size):
+        pivot = next(r for r in range(col, size) if system[r][col] != 0)
+        system[col], system[pivot] = system[pivot], system[col]
+        lead = system[col][col]
+        system[col] = [value / lead for value in system[col]]
+        for r in range(size):
+            if r != col and system[r][col] != 0:
+                factor = system[r][col]
+                system[r] = [a - factor * b for a, b in zip(system[r], system[col])]
+    inverse = [row[size:] for row in system]
+    return np.array(
+        [
+            float(wi * sum(a[r] * inverse[r][c] * a[c] for r in range(size) for c in range(size)))
+            for wi, a in zip(w, projected)
+        ]
+    )
+
+
+@pytest.mark.parametrize("heavy", [1e12, 1e20])
+def test_face_leverage_and_edf_on_weights_far_apart_match_an_exact_reference(heavy):
+    """A face covariance re-formed on rows whose weights are far apart is decomposed,
+    and reads its leverage and EDF, on the rows projected on the face.  Mutation
+    checks: in full coordinates the rounding of ``Z (Z'MZ)^+ Z'`` off the face meets
+    curvature ``1e20`` times the face's, and the spline EDF came out in the
+    thousands; ``Z'(D + S)Z`` formed from the full Gram still factors at a ratio of
+    ``1e12``, and moves leverage by ``1e-5``."""
+    from scipy.linalg import null_space
+
+    from superglm import Constraint
+    from superglm.features.spline import PSpline
+    from superglm.inference.covariance import _active_penalty_matrix
+    from superglm.model.fit_state import fitted_lambda2
+
+    x = np.linspace(0.0, 1.0, 200)
+    y = 1.0 + 8.0 * (x - 0.5) ** 2
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=6, constraint=Constraint.fit.increasing)},
+    ).fit(X, y)
+    rank_info = model.result.rank_info
+    assert rank_info.face is not None
+
+    weights = np.where(x < 0.1, heavy, 1.0)
+    evaluation = model.metrics(X.copy(), y, sample_weight=weights)
+    assert not evaluation._fit_geometry_matches
+    X_a, W, _, _, active_groups = evaluation._active_info
+    np.testing.assert_array_equal(W, weights)
+    penalty = _active_penalty_matrix(
+        model._dm.group_matrices,
+        model._groups,
+        active_groups,
+        fitted_lambda2(model),
+        reml_penalties=getattr(model, "_reml_penalties", None),
+    )
+    # the face from the binding rows alone, not the fit's own basis
+    expected = _exact_face_leverage(X_a.toarray(), W, penalty, null_space(rank_info.face_rows))
+    # three free slopes and the intercept
+    assert 3.0 < expected.sum() < 4.0
+    # Projected, a heavy row carries w (u |x| |Z|)^2 ||(Z'MZ)^+||, at most about
+    # 1e-12; the bound is a sensible multiple of it, far below either failure.
+    np.testing.assert_allclose(evaluation.leverage, expected, rtol=1e-8, atol=1e-10)
+    spline_edf = next(row.edf for row in evaluation.summary()._coef_rows if row.name == "x")
+    assert spline_edf == pytest.approx(expected.sum() - 1.0, rel=1e-8)
+    assert evaluation._influence_edf[0].sum() == pytest.approx(expected.sum() - 1.0, rel=1e-8)
