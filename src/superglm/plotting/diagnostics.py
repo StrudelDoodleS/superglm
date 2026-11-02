@@ -138,11 +138,9 @@ def _validate_diagnostic_weights(
 ) -> NDArray:
     """Normalize diagnostic weights under the declared weight contract.
 
-    Strict positivity is a Tweedie *density* requirement rather than a
-    statement about weights: only the prior contract puts ``log w`` inside the
-    compound-Poisson normalizer.  Read as a replication count, a Tweedie zero
-    weight means what it means everywhere else -- a row that appears no times --
-    and fitting accepts it, so plotting must too.
+    Strict positivity is a Tweedie density requirement: only the prior
+    contract puts ``log w`` inside the compound-Poisson normalizer. A
+    replication weight of zero is a row that appears no times, as in fitting.
     """
     from superglm.distributions import Tweedie
 
@@ -191,19 +189,13 @@ def _simulate_response(
 ) -> NDArray | None:
     """Simulate one response vector from the fitted model.
 
-    A replication weight does not alter a single row's response distribution --
-    copies of a draw are draws -- so the frequency contract simulates every
-    family at ``w = 1``.  A prior weight is part of the row's own distribution
-    and stays in the draw.
-
-    The envelope this feeds is compared against quantile residuals that
-    ``ModelMetrics`` computes under the model's declared contract, so these
-    draws must come from exactly the marginals ``_quantile_residuals`` inverts:
-    the Gaussian's ``phi / w`` variance, the Gamma's ``w / phi`` shape, the
-    Poisson's and negative binomial's ``w``-scaled lattice, and the binomial's
-    ``w``-trial success probability.  Simulating from a different distribution
-    than the residual transform assumes puts a correct fit outside its own
-    envelope.
+    A replication weight does not alter a row's response distribution, so the
+    frequency contract simulates every family at ``w = 1``; a prior weight is
+    part of the row's distribution and stays in the draw. The draws must come
+    from exactly the marginals ``_quantile_residuals`` inverts (Gaussian
+    ``phi / w`` variance, Gamma ``w / phi`` shape, the ``w``-scaled Poisson and
+    negative binomial lattice, binomial ``w``-trial probability), or a correct
+    fit falls outside its own envelope.
 
     Returns None if the family is not supported (caller should degrade
     gracefully).
@@ -253,11 +245,9 @@ def _simulate_response(
         return generate_tweedie_cpg(len(mu), mu, row_phi, family.p, rng=rng)
 
     if isinstance(family, Binomial):
-        # Contract-invariant, matching `_quantile_residuals`: the prior
-        # likelihood's two reachable masses at y in {0, 1} do not sum to one
-        # for w != 1, so no {0,1}-supported marginal reproduces it and no
-        # uniform PIT of it exists. Drawing Bernoulli(mu) keeps the envelope a
-        # valid reference band; see the note in `_quantile_residuals`.
+        # As in `_quantile_residuals`: the prior likelihood's masses at y in {0, 1}
+        # do not sum to one for w != 1, so no uniform PIT exists; Bernoulli(mu)
+        # keeps the envelope a valid reference band.
         return rng.binomial(n=1, p=mu).astype(float)
 
     return None
@@ -289,21 +279,17 @@ def _diagnostic_rows(
 ):
     """Return row-level plot arrays honoring frequency-weight replication.
 
-    Replication is what the *frequency* contract means, so it is the contract
-    and not the family that decides whether these rows expand.  Under the prior
-    contract there is no literal row array to expand into -- the weight lives
-    in each row's own marginal, which the quantile residual already carries --
-    and rebuilding metrics at unit weight would discard exactly the term that
-    distinguishes the two readings.
+    The frequency contract, not the family, decides whether rows expand. Under
+    the prior contract the weight lives in each row's marginal, which the
+    quantile residual already carries, so there is nothing to expand.
     """
     if np.all(weights == 1.0):
         return y, mu, eta, weights, qresid
 
     positive = weights > 0.0
     if weight_semantics == PRIOR_WEIGHTS:
-        # A zero prior weight is a row that was not observed; it leaves the
-        # plot the same way it leaves the likelihood. Everything else stays as
-        # it was fitted.
+        # A zero prior weight is an unobserved row; it leaves the plot as it
+        # leaves the likelihood.
         if np.all(positive):
             return y, mu, eta, weights, qresid
         return (

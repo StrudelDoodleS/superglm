@@ -2,16 +2,11 @@
 
 Every function here takes a payload built in :mod:`superglm.distributional` --
 never a model -- and returns a :class:`~matplotlib.figure.Figure` drawn in the
-notebook editor's chart grammar: the fitted thing in ``.edited`` blue, the
-reference in ``.original`` grey dashes, bands in the ``.ci`` fill, simultaneous
-outlines and whiskers in ``.ci-whisker``, exposure and counts in the
-``.exposure`` yellow, observations as ``.point`` and flagged ones as
-``.point.selected``.  The constants come from
-:mod:`superglm.plotting.editor_style` and from nowhere else, so a figure from
-this module and a chart in the editor read as one product.
-
-A figure is therefore reproducible from its payload alone: nothing below calls
-the model, resolves weights or decides a statistic.
+notebook editor's chart grammar (``.edited`` blue, ``.original`` grey dashes,
+``.ci`` bands, ``.exposure`` yellow, ``.point`` and ``.point.selected``). The
+constants come only from :mod:`superglm.plotting.editor_style`, so a figure
+and an editor chart read as one product. A figure is reproducible from its
+payload alone: nothing here calls the model or decides a statistic.
 """
 
 from __future__ import annotations
@@ -235,10 +230,8 @@ def _step(positions: NDArray[np.float64]) -> float:
 def _level_ticks(ax: Axes, positions: NDArray[np.float64], levels: Sequence[str] | None) -> None:
     """Label a level coordinate with its levels, when the payload names them.
 
-    Past a dozen levels horizontal labels collide -- two dozen mileage bands
-    render as one grey smear -- so a crowded axis writes them at an angle
-    instead of dropping every second one, which would leave a reader unable to
-    say which bar is which.
+    Past a dozen levels horizontal labels collide, so a crowded axis writes
+    them at an angle rather than dropping every second one.
     """
     if levels is None:
         return
@@ -533,9 +526,8 @@ def _draw_coverage(ax: Axes, payload: CalibrationPayload) -> None:
 def _tail_tick(threshold: float, group: str) -> str:
     """A tail-table tick: the threshold and its group, short enough to read.
 
-    The decile groups arrive spelled ``exceedance:decile 7``, which at eleven
-    ticks per threshold leaves a column of text taller than the panel; the
-    reader needs the threshold and which decile, and nothing else.
+    Decile groups arrive spelled ``exceedance:decile 7``; only the threshold
+    and the decile are kept so the ticks fit the panel.
     """
     label = str(group)
     _, _, decile = label.rpartition("decile ")

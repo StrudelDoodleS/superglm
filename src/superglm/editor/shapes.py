@@ -176,13 +176,10 @@ def shaped_feature_spec(
 
     ``join`` is ``"tangent"`` (the curve leaves the range along its slope) or
     ``"kink"`` (the slope may change at the edge). The new range is painted
-    over the ranges already there (``painted_ranges``): a range it covers
-    goes, the same range included, and one it overlaps keeps the part outside
-    it, which is refused by name when it holds too few values for its shape.
-    The label names each range the new one cuts. A
-    numeric term keeps its fitted base knots and boundary, so the free
-    part's knots never move; an ordered term rebuilds from its declaration,
-    whose placement is deterministic on the same level axis.
+    over existing ones (``painted_ranges``): a range it covers goes, and one it
+    overlaps keeps the part outside it, refused by name when that holds too few
+    values for its shape. A numeric term keeps its fitted base knots and
+    boundary; an ordered term rebuilds from its declaration on the same axis.
 
     ``X`` and ``sample_weight`` are the rows and weights the refit reads.
     ``draft_spec`` is the term's spec as waiting changes leave it (None: the

@@ -1,4 +1,4 @@
-"""Where a categorical's new levels go: the editor's "New levels →" control (spec addendum S6).
+"""Where a categorical's new levels go: the editor's "New levels →" control.
 
 A plain categorical's ``unseen`` policy says what prediction does with a level
 the fit never saw: ``"error"`` refuses it (Refuse), ``"base"`` rates it at the

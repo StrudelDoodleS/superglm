@@ -55,11 +55,9 @@ def relativities(
 
     from superglm.features.ordered_categorical import OrderedCategorical
 
-    # The shift below is the mean of the same fitted coefficients the frame
-    # reports, so a centered frame's errors are those of the contrast ``C b``
-    # and have to be propagated through ``C``, not carried over.  They are
-    # asked for at each SE call site rather than repaired here, because this
-    # function only sees the shifted values and not the covariance.
+    # The shift below is the mean of the frame's own coefficients, so a centred
+    # frame's errors are those of a contrast ``C b``, propagated at each SE call
+    # site (this function sees only the shifted values, not the covariance).
     center_se = centering == "mean"
 
     def _center_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -258,9 +256,7 @@ def drop1(
     dispersion with a chi-square reference on the effective-d.f. difference.
     Estimated-scale families divide by the fitted ``phi``; known-scale
     families such as Poisson and Binomial divide by their unit scale, taken
-    from the family rather than from the result because ``fit()`` pins
-    ``phi`` to 1.0 while ``fit_path()`` publishes the solver's Pearson
-    dispersion untouched. ``test="F"`` compares
+    from the family. ``test="F"`` compares
     ``(delta_deviance / delta_df) / phi`` with an F reference whose residual
     d.f. follows the fitted family's sample-weight contract; an F reference
     presumes an estimated scale, so that path always divides by the fitted
@@ -288,10 +284,8 @@ def drop1(
     edf_full = model._result.effective_df
     n = len(y)
     phi = model._result.phi
-    # The chi-square LRT reference for a known-scale family is the family's
-    # unit dispersion. Reading it off the result would make the test depend on
-    # the fitting entry point: fit() pins phi to 1.0, but fit_path() publishes
-    # the path solution's Pearson dispersion untouched.
+    # A known-scale family's chi-square reference is its unit dispersion, not the
+    # result's: fit() pins phi to 1.0 but fit_path() publishes Pearson dispersion.
     chisq_scale = 1.0 if getattr(model._distribution, "scale_known", True) else phi
     if sample_weight is None:
         diagnostic_weights = np.ones(n, dtype=np.float64)

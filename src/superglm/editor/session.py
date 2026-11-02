@@ -199,7 +199,7 @@ class EditorSession:
         # the session, so Undo never refits: memory grows by one fit per step.
         self.structure_history: list[StructuralStep] = []
         self.structure_redo: list[StructuralStep] = []
-        # Structural changes waiting for one Refit (spec D1), oldest first, and
+        # Structural changes waiting for one Refit, oldest first, and
         # the ones Undo took back, latest last. Notes are kept by step id, apart
         # from the undo states, so they survive undo and redo.
         self.pending: list[PendingStep] = []
@@ -833,7 +833,7 @@ class EditorSession:
         """What a plain :meth:`redo` puts back next, in the reverse of the order Undo took."""
         return staging.redo_target(self)
 
-    # Structural changes wait for one Refit (spec D1); the bodies live in
+    # Structural changes wait for one Refit; the bodies live in
     # ``superglm.editor.staging``.
     def draft_spec(self, term: str):
         """``term``'s spec as waiting changes leave it.
@@ -1274,16 +1274,9 @@ class EditorSession:
     def _pre_collapse_model(self, term: str, *, keep_reference: bool, **kwargs: Any):
         """The model before the latest step, when this ungroup reproduces it exactly.
 
-        Only a step that did nothing but collapse ``term``'s levels qualifies:
-        an ungroup does not take back what the same Refit did to another term,
-        or to this term's reference. A New levels choice made since that step
-        changed the in-force model, and the earlier fit lacks it, so it rules
-        the shortcut out too. So does an ungroup whose term the earlier fit
-        would not fit again, such as one keeping a reference a collapse made
-        without keeping the old one, and one whose ``lambda1`` or ``lambda2``,
-        given now or to an earlier Refit, the earlier fit was not given. So
-        does an ungroup given its own rows or fit options, or a method the
-        earlier fit was not fitted with.
+        Only a step that did nothing but collapse ``term``'s levels qualifies,
+        and only if nothing since (a New levels choice, other penalties, rows,
+        fit options or method) makes the earlier fit differ from the ungroup's.
         """
         step = self.structure_history[-1] if self.structure_history else None
         if step is None or not step.changes:

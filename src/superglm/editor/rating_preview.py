@@ -15,10 +15,8 @@ import pandas as pd
 
 from superglm.editor.io import jsonable
 
-# The preview asks for no discretisation-impact sweep. The builder makes every
-# block before it sweeps, and the sweep fills only the workbook's impact sheet,
-# so the blocks are the workbook's; the sweep was 5.5 s of the 7.0 s build on
-# the 678,013-row freMTPL2 book with two splines.
+# The preview asks for no discretisation-impact sweep: it fills only the
+# workbook's impact sheet and is built after every block, so the blocks match.
 PREVIEW_IMPACT_BINS: tuple[int, ...] = ()
 
 # One fixed sentence per reason there is no table to show.
