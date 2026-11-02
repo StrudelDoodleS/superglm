@@ -140,10 +140,79 @@ def test_exact_alias_is_certified_rank_deficient(terminal, monkeypatch, constant
     formed = _main(decisions, 3)[0].decomposition
     assert formed.rank == 3
     assert formed.method == ("cholesky" if constant else "gram_eigh")
+    # The dropped level takes the representative value with the variance it publishes.
+    assert result.terminal_rank.structural_aliases.tolist() == [False, True, False]
+    assert result.coefficients[1] == 0.0 and standard_errors[1] == 0.0
 
     _uncertified(monkeypatch)
     model, frame, y, weights = _alias(constant)
     assert _fit(model, frame, y, weights).terminal_rank.rank == 3
+
+
+# mgcv 1.9.3, black box: gam(list(y ~ u + x + g, ~ 1), family = gaulss()) on
+# _alias_parity_frame() written to CSV; rank 4 of 5, gb dropped. Location
+# coefficient and its Vp diagonal, as (Intercept), u, x, gb.
+_MGCV_ALIAS_PARITY = (
+    (0.99920138097021116, 0.00020324934623268122),
+    (0.31834249904033862, 0.00012462321096326823),
+    (0.69742210600496091, 0.00052712207151484308),
+    (0.0, 0.0),
+)
+
+
+def _alias_parity_frame():
+    """``x = 1[g = b]`` beside the categorical ``g`` and a numeric ``u``: rank 4 of 5."""
+    rng = np.random.default_rng(20261102)
+    n = 2000
+    b = rng.uniform(size=n) < 0.4
+    u = rng.standard_normal(n)
+    y = 1.0 + 0.3 * u + 0.7 * b + 0.5 * rng.standard_normal(n)
+    return pd.DataFrame({"u": u, "x": b.astype(float), "g": np.where(b, "b", "a")}), y
+
+
+@pytest.mark.parametrize("discrete", [True, False], ids=["chunked", "dense"])
+def test_aliased_coefficients_take_the_representative_value(monkeypatch, discrete):
+    """A dropped alias is published at zero, as mgcv publishes it, with the same predictions.
+
+    The start is moved 3 along the alias direction, as an uncertified Newton
+    step can move it, so the fit ends with ``x`` and ``g_b`` 3 away from the
+    representative unless the terminal state is projected onto it. Mutation
+    check: without the projection ``g_b`` stays near -3 with SE 0.
+    """
+    import superglm.distributional.solver.solver as solver
+
+    start = solver._initial_coefficients
+
+    def drifted(context):
+        coefficients = np.array(start(context))
+        if context.layout.n_coefficients == 5:
+            coefficients[2:4] += (3.0, -3.0)
+        return coefficients
+
+    monkeypatch.setattr(solver, "_initial_coefficients", drifted)
+    frame, y = _alias_parity_frame()
+
+    def fitted():
+        family = GaussianLS(scale_floor=0)
+        location = family.location(term("u", Numeric()), term("x", Numeric()), cat("g", base="a"))
+        model = SuperLSS(family, location, family.scale(), discrete=discrete)
+        result = _fit(model, frame, y)
+        return model, result, np.asarray(model.predict(frame), dtype=np.float64).ravel()
+
+    model, result, prediction = fitted()
+    assert result.terminal_rank.rank == 4 and result.converged
+    coefficients, variances = result.coefficients, np.diag(np.asarray(model.covariance_))
+    for index, (value, variance) in enumerate(_MGCV_ALIAS_PARITY):
+        assert coefficients[index] == pytest.approx(value, rel=1e-7, abs=1e-12)
+        assert variances[index] == pytest.approx(variance, rel=1e-6, abs=0.0)
+    assert coefficients[3] == 0.0 and variances[3] == 0.0
+    assert model.result_.total_effective_df == pytest.approx(4.0, abs=1e-9)
+
+    monkeypatch.setattr(solver, "_representative_state", lambda context, state, *args: state)
+    _, drifted_result, drifted_prediction = fitted()
+    assert abs(drifted_result.coefficients[3]) > 1.0
+    scale = np.sum(np.abs(drifted_result.coefficients)) * max(1.0, float(np.max(np.abs(frame.u))))
+    np.testing.assert_allclose(prediction, drifted_prediction, rtol=0, atol=64 * 2.0**-53 * scale)
 
 
 def test_well_conditioned_fit_reads_no_rows(terminal):

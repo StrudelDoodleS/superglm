@@ -1541,6 +1541,50 @@ def _certified_terminal_curvature(
         return replace(curvature, telemetry=replace(curvature.telemetry, certified=False))
 
 
+def _representative_state(
+    context: _SolverContext,
+    state: _AcceptedState,
+    rank: RankDecomposition,
+    config: DenseSolverConfig,
+    phase_recorder: FitPhaseRecorder | None,
+) -> _AcceptedState:
+    """The terminal state at the representative of its certified rank: dropped coefficients zero.
+
+    A rank-deficient terminal decision publishes the representative inverse,
+    which gives each rejected coefficient (``structural_aliases``, ``J``)
+    variance zero; Newton steps decide their rank uncertified and can leave
+    ``beta`` anywhere along the null space it drops. The representative is
+    ``beta - N N_J^-1 beta_J``, ``N`` the null basis of the penalized
+    curvature: ``beta_J = 0``, and an exact alias's predictors and penalty
+    move by rounding alone (Wood, Pya and Saefken 2016, sec. 3.1.2: zeros for
+    the dropped coefficients). It is adopted when the penalized objective,
+    evaluated once there, is within the fit's tolerance of the stop's;
+    otherwise the state is kept.
+    """
+    aliases = rank.structural_aliases
+    if aliases is None or rank.rank == rank.width or not np.any(state.coefficients[aliases]):
+        return state
+    null = rank.null_basis()
+    if null.shape != (rank.width, int(np.count_nonzero(aliases))):
+        return state
+    try:
+        along = np.linalg.solve(null[aliases], state.coefficients[aliases])
+    except np.linalg.LinAlgError:
+        return state
+    coefficients = state.coefficients - null @ along
+    coefficients[aliases] = 0.0
+    projected = _evaluate_state(
+        context, coefficients, phase_recorder=phase_recorder, derivative_order=0
+    )
+    objective = state.penalized_optimizing_log_likelihood
+    if projected is None or not (
+        projected.penalized_optimizing_log_likelihood
+        >= objective - config.tolerance * (1.0 + abs(objective))
+    ):
+        return state
+    return projected
+
+
 def _fit_dense_fixed_lambda_core(
     family: DistributionalFamily,
     layout: StackedLayout,
@@ -1862,9 +1906,13 @@ def _fit_dense_fixed_lambda_core(
             accepted_geometry.penalized_curvature,
             dtype=np.float64,
         )
+        unprojected = state
         if context.coefficient_face is None:
             terminal_rank = decomposition
             terminal_reduced_rank = None
+            state = _representative_state(
+                context, state, terminal_rank, solver_config, phase_recorder
+            )
         else:
             face = context.coefficient_face
             terminal_reduced_rank = decomposition
@@ -1942,7 +1990,8 @@ def _fit_dense_fixed_lambda_core(
             coefficient_face=context.coefficient_face,
             terminal_reduced_rank=terminal_reduced_rank,
         )
-        if _reuse_session is not None:
+        # A projected endpoint's score and curvature were measured before it moved.
+        if _reuse_session is not None and state is unprojected:
             _reuse_session.remember(
                 result,
                 reuse_owner,
