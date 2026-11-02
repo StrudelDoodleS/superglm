@@ -137,12 +137,15 @@ def formation_bound(
     full = _up(gamma(roundings) * _up(data + penalty_norm) * (1.0 + gamma(2)))
     if face is None:
         return full
-    reduced_matrix = np.asarray(reduced, dtype=np.float64)
-    reduced_diagonal = np.diag(reduced_matrix)
-    if np.any(reduced_diagonal <= 0.0):
-        return math.inf
+    reduced_diagonal = np.diag(np.asarray(reduced, dtype=np.float64))
     null = np.asarray(face.null_basis, dtype=np.float64)
-    reduced_reciprocal = 1.0 / np.sqrt(reduced_diagonal)
+    # A face direction supported only on columns no row or penalty entry
+    # touches is an exactly zero reduced column, inactive as those columns are.
+    reduced_active = np.any(null[active] != 0.0, axis=0)
+    if np.any(reduced_diagonal[reduced_active] <= 0.0):
+        return math.inf
+    reduced_reciprocal = np.zeros_like(reduced_diagonal)
+    reduced_reciprocal[reduced_active] = 1.0 / np.sqrt(reduced_diagonal[reduced_active])
     lift = np.abs(np.sqrt(diagonal)[:, None] * null * reduced_reciprocal[None, :])
     lift_norm = _up(_column_sum_bound(lift) * _column_sum_bound(lift.T) * (1.0 + gamma(8)))
     weighted = np.abs(null) * reduced_reciprocal[None, :]
@@ -411,7 +414,8 @@ def certify_terminal_rank(
     does not cover.  A decision the row pass cannot improve on (the grey set
     past its cap, a non-finite projection) is the formed one, unchanged.
     Without formation statistics (an assembly route or group type that
-    records none) the decision is returned as it was, ``certified=None``.
+    records none) the decision is returned as it was, ``certified=None``;
+    with statistics but no finite bound, it is returned ``certified=False``.
     """
     matrix = decision.matrix
     if formation is None or matrix is None or decision.decomposition is None:
@@ -421,7 +425,7 @@ def certify_terminal_rank(
         formation, penalized, penalty, blocks, face=face, reduced=None if face is None else matrix
     )
     if not math.isfinite(bound):
-        return decision
+        return replace(decision, telemetry=replace(decision.telemetry, certified=False))
 
     def project(basis: NDArray) -> SymmetricGreyProjection:
         return project_terminal_curvature(

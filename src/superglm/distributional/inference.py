@@ -214,32 +214,27 @@ def _columns(solve, matrix: NDArray) -> NDArray[np.float64]:
 def _influence(result: DenseSolverResult) -> NDArray[np.float64]:
     """``F = G^+ D`` for the matrix the terminal decomposition inverts.
 
-    Where the terminal rank was decided from the rows (``grey_subspace``
-    records ``rows_read``; ``certificate.py``), the decomposition inverts
-    ``G_rep = E diag(r) E'``, its estimable basis and retained values, not the
-    formed ``G``. The two differ in the directions read from the rows by more
-    than a stored float64 matrix resolves of their eigenvalues, so ``G^+ D``
+    Where the terminal rank was decided from the rows (``row_decided``;
+    ``certificate.py``), the decomposition inverts ``G_rep = E diag(r) E'``,
+    its estimable basis and retained values, not the formed ``G``. The two
+    differ in the directions read from the rows by more than a stored float64
+    matrix resolves of their eigenvalues, so ``G^+ D``
     with the formed ``D`` is inconsistent there. ``F`` is then ``G^+ G_rep -
-    G^+ S``: the projector of the decomposition's own matrix and the exact
-    penalty, so an unpenalized retained direction contributes exactly one.
+    G^+ S``: the projector ``W E'`` of the decomposition's own matrix (``W``
+    its solution basis) and the exact penalty, so an unpenalized retained
+    direction contributes exactly one.
     Under a face, the formed ``G`` supplies the columns outside the face's
     span: ``F = N P N' + G^+ G (I - N N') - G^+ S``, which equals ``G^+ D`` when
     ``N' G N`` is the matrix decomposed.  Every other fit takes ``G^+ D``.
     """
     face = result.coefficient_face
     decomposition = result.terminal_rank if face is None else result.terminal_reduced_rank
-    grey = (decomposition.grey_subspace if decomposition is not None else None) or {}
-    if (
-        decomposition is None
-        or not grey.get("rows_read")
-        or grey.get("projection_failed")
-        or decomposition.estimable_functional_basis is None
-        or decomposition.retained_values is None
-    ):
+    if decomposition is None or not decomposition.row_decided:
         return _columns(result.solve_terminal, result.terminal_data_curvature)
-    basis = np.asarray(decomposition.estimable_functional_basis, dtype=np.float64)
-    retained = np.asarray(decomposition.retained_values, dtype=np.float64)
-    projector = _columns(decomposition.solve, basis) @ (retained[:, None] * basis.T)
+    # G^+ G_rep = W diag(1/r) W' E diag(r) E' = W E', since W' E = I for the
+    # solution basis W; formed directly, a solve would divide by small r again.
+    solution = np.asarray(decomposition.solution_basis, dtype=np.float64)
+    projector = solution @ np.asarray(decomposition.estimable_functional_basis).T
     influence = -_columns(result.solve_terminal, np.asarray(result.penalty, dtype=np.float64))
     if face is None:
         return projector + influence

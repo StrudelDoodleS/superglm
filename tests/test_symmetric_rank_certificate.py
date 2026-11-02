@@ -15,6 +15,7 @@ here from the same float rows.
 """
 
 import dataclasses
+import math
 import pickle
 from fractions import Fraction
 
@@ -396,3 +397,39 @@ def test_the_shifted_cholesky_proves_only_true_floors():
         assert rank._shifted_cholesky_clears(matrix, smallest * (1.0 - 1e-3))
         assert not rank._shifted_cholesky_clears(matrix, smallest)
         assert not rank._shifted_cholesky_clears(matrix, smallest * (1.0 + 1e-12))
+
+
+def test_a_dropped_coupled_grey_direction_keeps_the_published_pseudo_determinant():
+    """``log_pdet`` is that of ``E diag(r) E'`` when a grey column coupled to the top block is dropped.
+
+    The rows couple the near-null direction to a top eigenvector (Jacobi-scaled
+    coupling 0.05, forced here rather than left to rounding), so the Schur
+    complement drops it and the factor ``E`` is orthogonal to the null basis
+    but not orthonormal: its volume is part of the determinant.  The
+    reference is the exact rational determinant of ``E' E`` for the published
+    float ``E``.  Mutation check: the complementary-minor shortcut on ``E``
+    itself misses ``log det(E' E)``, 1.8e-3 here.
+    """
+    rng = np.random.default_rng(0)
+    q, _ = np.linalg.qr(rng.standard_normal((3, 3)))
+    scale = np.array([1.0, 2.0**10, 2.0**-6])
+    formed = (scale[:, None] * q) * np.array([1e-10, 1.0, 2.0]) @ (q.T * scale[None, :])
+    formed = 0.5 * (formed + formed.T)
+    unit = np.sqrt(np.diag(formed))
+    _, vectors = np.linalg.eigh(formed / np.outer(unit, unit))
+    grey, top = vectors[:, 0], vectors[:, 1]
+    exact = formed + np.outer(unit, unit) * 0.05 * (np.outer(top, grey) + np.outer(grey, top))
+
+    def project(basis):
+        cross = exact @ basis
+        error = 16.0 * _U * (np.abs(exact) @ np.abs(basis))
+        return rank.SymmetricGreyProjection(basis.T @ cross, cross, np.abs(basis).T @ error, error)
+
+    decided = rank.decompose_symmetric_deflated(formed, project, formation_bound=1e-6)
+    assert decided.rank == 2 and decided.grey_subspace["retained"] == 0.0
+    basis = [[Fraction(float(v)) for v in row] for row in decided.estimable_functional_basis]
+    gram = [[sum(basis[r][i] * basis[r][j] for r in range(3)) for j in range(2)] for i in range(2)]
+    determinant = gram[0][0] * gram[1][1] - gram[0][1] * gram[1][0]
+    reference = math.log(determinant) + float(np.sum(np.log(decided.retained_values)))
+    assert abs(math.log(determinant)) > 1e-3
+    assert abs(decided.log_pdet - reference) <= 1e-12 * max(1.0, abs(reference))

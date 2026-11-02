@@ -122,6 +122,26 @@ def _bin_sums(index: NDArray, values: NDArray, length: int) -> NDArray:
     return sums
 
 
+def _weighted_squares(rows, weights: NDArray) -> NDArray:
+    """``sum_r w_r x_ri^2`` per column, with no weighted square lost to an underflowed ``x^2``.
+
+    ``x (w x)`` is normal wherever ``w x^2`` is, overflowing only with it, so
+    it is taken when a square underflows (the hardware flag, at no cost
+    otherwise) and for sparse blocks, whose products set no flag.
+    """
+    if sp.issparse(rows):
+        weighted = sp.csr_matrix(rows.multiply(weights[:, None]))
+        return np.asarray(weighted.multiply(rows).sum(axis=0)).ravel()
+    try:
+        with np.errstate(under="raise"):
+            squared = rows * rows
+    except FloatingPointError:
+        weighted = rows * weights[:, None]
+        weighted *= rows
+        return weighted.sum(axis=0)
+    return squared.T @ weights
+
+
 class _AbsDense:
     """A dense or CSR block: ``X^abs = |M|``; a row sums nothing before its product."""
 
@@ -135,9 +155,7 @@ class _AbsDense:
         return _abs_csr(sp.csr_matrix(rows)) if sp.issparse(rows) else np.abs(rows)
 
     def square_partial(self, start, stop, weights):
-        rows = self._rows(start, stop)
-        squared = rows.multiply(rows) if sp.issparse(rows) else rows * rows
-        return np.asarray(squared.T @ weights).ravel()
+        return _weighted_squares(self._rows(start, stop), weights)
 
     def square_close(self, partial):
         return partial
@@ -177,22 +195,17 @@ class _AbsTable:
     """Rows that index a support ``X^abs = basis[index] transform``; level groups use some rows only.
 
     With a transform the squared statistic takes Cauchy-Schwarz, as
-    :class:`_AbsFactoredCSR` does, so a chunk adds one bin sum and the table
-    ``basis transform`` is formed only for a row pass.
+    :class:`_AbsFactoredCSR` does, so a chunk adds one bin sum, and a row pass
+    applies ``transform`` and ``basis`` in turn: the table ``basis transform``
+    is never formed, and level groups that index one support share its array.
     """
 
     def __init__(self, basis, index, inner, transform=None, level_group=None):
         self._basis = np.ascontiguousarray(basis, dtype=np.float64)
         self._transform = transform
-        self._table = None
         self._index = index
         self.inner = int(inner)
         self._level = level_group
-
-    def _full(self):
-        if self._table is None:
-            self._table = self._basis if self._transform is None else self._basis @ self._transform
-        return self._table
 
     def _rows(self, start, stop):
         """``(local rows or None for every row, the table rows they index)``."""
@@ -218,7 +231,9 @@ class _AbsTable:
 
     def matvec(self, start, stop, values):
         local, bins = self._rows(start, stop)
-        gathered = (self._full() @ values)[bins]
+        if self._transform is not None:
+            values = self._transform @ values
+        gathered = (self._basis @ values)[bins]
         if local is None:
             return gathered
         out = np.zeros((stop - start, values.shape[1]))
@@ -228,7 +243,8 @@ class _AbsTable:
     def rmatvec(self, start, stop, values):
         local, bins = self._rows(start, stop)
         rows = values if local is None else values[local]
-        return self._full().T @ _bin_sums(bins, rows, len(self._basis))
+        aggregate = self._basis.T @ _bin_sums(bins, rows, len(self._basis))
+        return aggregate if self._transform is None else self._transform.T @ aggregate
 
 
 class _AbsFactoredCSR:
@@ -385,8 +401,24 @@ class _AbsGroup(Protocol):
     def rmatvec(self, start: int, stop: int, values: NDArray, /) -> NDArray: ...
 
 
-def abs_group(group) -> _AbsGroup | None:
-    """The absolute design of one group matrix, or ``None`` when none is defined here."""
+def _absolute(array, shared: dict | None) -> NDArray:
+    """``|array|`` in float64, formed once per source array that ``shared`` has seen."""
+    if shared is None:
+        return np.abs(np.asarray(array, dtype=np.float64))
+    # The entry holds its source, so the id cannot be reused while it lives.
+    entry = shared.get(id(array))
+    if entry is None:
+        entry = shared[id(array)] = (array, np.abs(np.asarray(array, dtype=np.float64)))
+    return entry[1]
+
+
+def abs_group(group, shared: dict | None = None) -> _AbsGroup | None:
+    """The absolute design of one group matrix, or ``None`` when none is defined here.
+
+    ``shared`` maps source arrays to their absolute values across the groups
+    of one design, so the levels of a spline-by-category term, which index
+    one support, hold one absolute copy of it.
+    """
     kind = type(group)
     if kind is DenseGroupMatrix:
         return _AbsDense(np.asarray(group.M, dtype=np.float64))
@@ -395,20 +427,20 @@ def abs_group(group) -> _AbsGroup | None:
     if kind in (CategoricalGroupMatrix, RandomEffectGroupMatrix):
         return _AbsCategorical(group)
     if kind in (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix):
-        basis = np.abs(np.asarray(group.B_unique, dtype=np.float64))
-        transform = np.abs(np.asarray(group.R_inv, dtype=np.float64))
+        basis = _absolute(group.B_unique, shared)
+        transform = _absolute(group.R_inv, shared)
         index = np.asarray(group.bin_idx)
         return _AbsTable(basis, index, basis.shape[1], transform=transform)
     if kind is DiscretizedTensorGroupMatrix:
         return _AbsTensor(group)
     if kind is DiscretizedSCOPGroupMatrix:
-        return _AbsTable(np.abs(group.B_scop_unique), np.asarray(group.bin_idx), 0)
+        return _AbsTable(_absolute(group.B_scop_unique, shared), np.asarray(group.bin_idx), 0)
     if kind in (
         DiscretizedSplineCategoricalGroupMatrix,
         SupportCompressedSplineCategoricalGroupMatrix,
     ):
-        basis = np.abs(np.asarray(group.B_unique, dtype=np.float64))
-        transform = np.abs(np.asarray(group.R_inv, dtype=np.float64))
+        basis = _absolute(group.B_unique, shared)
+        transform = _absolute(group.R_inv, shared)
         return _AbsTable(basis, None, basis.shape[1], transform=transform, level_group=group)
     if kind in (SparseSSPGroupMatrix, SplineCategoricalGroupMatrix):
         return _AbsFactoredCSR(group)
@@ -423,6 +455,7 @@ class AbsDesign:
         self.supported = True
         self.inner = 0
         self.predictors: list[tuple[int | None, list[tuple[slice, _AbsGroup]]]] = []
+        shared: dict = {}
         for state in layout.predictors:
             design = state.design
             if type(design) is not DesignMatrix:
@@ -436,7 +469,7 @@ class AbsDesign:
             groups = []
             for group in design.group_matrices:
                 width = int(group.shape[1])
-                absolute = abs_group(group)
+                absolute = abs_group(group, shared)
                 if absolute is None:
                     self.supported = False
                     return
@@ -566,7 +599,7 @@ def dense_formation(
     majorant = np.zeros(layout.n_coefficients)
     row_weights = channel_weights(channels, diagonal, cross)
     for state, matrix, weights in zip(layout.predictors, matrices, row_weights, strict=True):
-        majorant[state.coefficient_slice] = (matrix * matrix).T @ weights
+        majorant[state.coefficient_slice] = _weighted_squares(matrix, weights)
     majorant.setflags(write=False)
     return CurvatureFormation(
         rows=int(channels.shape[0]),

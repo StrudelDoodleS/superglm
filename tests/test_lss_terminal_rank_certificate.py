@@ -16,8 +16,10 @@ inverse of the fit's own rows.
 
 from __future__ import annotations
 
+import math
 import warnings
 from fractions import Fraction
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -97,32 +99,33 @@ def _alias(constant: bool, discrete: bool = True):
     return model, frame, (~b).astype(float), weights
 
 
-def _formed_by_the_eigensolver(monkeypatch):
-    """Make the curvature policy's formed decision keep the alias, through the eigensolver.
+def _formed_keeps_the_alias(monkeypatch, *, eigensolver):
+    """Make the curvature policy's formed decision keep the alias, on a forced route.
 
     Whether rounding leaves the formed alias above the cut, and to the
     Cholesky shortcut or the eigensolver, depends on the BLAS build.  So the
     formed decision sees the matrix plus ``1e-13`` of its diagonal, far inside
     the formation bound (about ``1e-11`` here), as formation error would put
-    it; ``allow_indefinite`` skips only the shortcut and the refusal of a
-    materially indefinite matrix, which this fixture never meets.  The
-    certificate decides the matrix as formed.
+    it, which keeps it positive definite for the shortcut.  ``eigensolver``
+    routes it past the shortcut instead (``allow_indefinite`` skips only the
+    shortcut and the refusal of a materially indefinite matrix, which this
+    fixture never meets).  The certificate decides the matrix as formed.
     """
     formed = curvature_module._decompose_gram
 
-    def eigensolver(matrix, **kwargs):
-        kwargs.pop("spectrum", None)
-        lifted = matrix + 1e-13 * np.diag(np.diag(matrix))
-        return formed(lifted, allow_indefinite=True, **kwargs)
+    def lifted(matrix, **kwargs):
+        if eigensolver:
+            kwargs.pop("spectrum", None)
+            kwargs["allow_indefinite"] = True
+        return formed(matrix + 1e-13 * np.diag(np.diag(matrix)), **kwargs)
 
-    monkeypatch.setattr(curvature_module, "_decompose_gram", eigensolver)
+    monkeypatch.setattr(curvature_module, "_decompose_gram", lifted)
 
 
 @pytest.mark.parametrize("constant", [True, False], ids=["constant_shortcut", "uniform_eigh"])
 def test_exact_alias_is_certified_rank_deficient(terminal, monkeypatch, constant):
     decisions, calls = terminal
-    if not constant:
-        _formed_by_the_eigensolver(monkeypatch)
+    _formed_keeps_the_alias(monkeypatch, eigensolver=not constant)
     model, frame, y, weights = _alias(constant)
     result = _fit(model, frame, y, weights)
     assert result.terminal_rank.rank == 2
@@ -286,6 +289,33 @@ def test_near_pair_edf_follows_the_certified_curvature(terminal):
     np.testing.assert_allclose(standard_errors[1:3], 2.0**19, rtol=1e-9)
 
 
+def test_near_pair_term_edfs_are_one_each():
+    """Each unpenalized slope of a row-decided near pair has EDF one, not only their sum.
+
+    ``z = x + 1e-7 e`` with random normal ``x``, ``e`` and ``y``: the rows
+    retain the near-null direction (``grey_k = 1``).  The influence's
+    projector is ``W E'`` from the decomposition's dual bases.  Mutation
+    check: re-solving the factor, ``G^+ (E diag(r) E')``, divides by the
+    small retained value again and splits the two EDFs about 0.97 and 1.03
+    (0.92 and 1.08 on another BLAS), with the total still 4.
+    """
+    rng = np.random.default_rng(1)
+    x = rng.normal(size=1000)
+    y = rng.normal(size=1000)
+    z = x + 1e-7 * rng.normal(size=1000)
+    family = GaussianLS()
+    model = SuperLSS(
+        family,
+        family.location(term("x", Numeric()), term("z", Numeric())),
+        family.scale(),
+        discrete=False,
+    )
+    result = _fit(model, pd.DataFrame({"x": x, "z": z}), y)
+    assert result.terminal_curvature.grey_k == 1 and result.terminal_rank.row_decided
+    edf = model._require_fitted().fit_state.inference.coefficient_edf
+    np.testing.assert_allclose(edf, 1.0, rtol=0.0, atol=1e-9)
+
+
 def test_offset_column_keeps_its_rank(terminal):
     _, calls = terminal
     rng = np.random.default_rng(12345)
@@ -440,6 +470,14 @@ def test_row_pass_agrees_with_the_rows_on_every_group_type(terminal, monkeypatch
     cross = [(index, k, j) for index, (k, j) in enumerate(pairs) if k != j]
     weights = _formation.channel_weights(channels, diagonal, cross)
     design = _formation.AbsDesign(layout)
+    # The spline-by-category levels index one support and share its absolute copy.
+    level_bases = [
+        absolute._basis
+        for _, groups in design.predictors
+        for _, absolute in groups
+        if isinstance(absolute, _formation._AbsTable) and absolute._level is not None
+    ]
+    assert len(level_bases) >= 2 and all(basis is level_bases[0] for basis in level_bases)
     for k, state in enumerate(layout.predictors):
         columns = state.coefficient_slice
         unit = np.zeros((width, columns.stop - columns.start))
@@ -706,3 +744,95 @@ def test_absolute_designs_dominate_exact_sparse_and_scop_groups():
                 basis[start:stop] @ transform @ values,
                 rtol=1e-12,
             )
+
+
+def test_a_face_direction_on_untouched_columns_keeps_the_bound_finite():
+    """Under a face, a direction on columns no row or penalty touches is an inactive, exactly zero column.
+
+    The bound with that direction equals the bound without it, as an all-zero
+    column is skipped without a face.  Mutation check: requiring a positive
+    reduced diagonal on every face column returns ``inf`` here, and the
+    certificate is then skipped for the whole fit.
+    """
+    penalized = np.array([[2.0, 1.0, 0.0], [1.0, 2.0, 0.0], [0.0, 0.0, 0.0]])
+    formation = _formation.CurvatureFormation(
+        rows=10,
+        chunks=1,
+        inner=0,
+        majorant=np.array([3.0, 3.0, 0.0]),
+        route="dense",
+        range_geometry=False,
+    )
+    null = np.array([[2.0**-0.5, 0.0], [2.0**-0.5, 0.0], [0.0, 1.0]])
+
+    def bound(columns):
+        basis = null[:, columns]
+        return certificate.formation_bound(
+            formation,
+            penalized,
+            np.zeros((3, 3)),
+            [slice(0, 3)],
+            face=SimpleNamespace(null_basis=basis),
+            reduced=basis.T @ penalized @ basis,
+        )
+
+    assert math.isfinite(bound([0, 1]))
+    assert bound([0, 1]) == bound([0])
+
+
+def test_a_bound_that_is_not_finite_discloses_an_uncertified_rank(monkeypatch):
+    """Formation statistics but no finite bound: the formed rank stands, ``certified=False``.
+
+    ``None`` is kept for a fit without formation statistics.  Forced: the bound
+    is replaced by ``inf``.  Mutation check: returning the decision unchanged
+    reports ``certified=None``.
+    """
+    monkeypatch.setattr(certificate, "formation_bound", lambda *args, **kwargs: math.inf)
+    rng = np.random.default_rng(0)
+    n = 2000
+    frame = pd.DataFrame({"x": rng.normal(size=n)})
+    y = 1.0 + 0.5 * frame.x.to_numpy() + rng.normal(size=n)
+    family = GaussianLS()
+    model = SuperLSS(family, family.location(term("x", Numeric())), family.scale())
+    assert _fit(model, frame, y).terminal_curvature.certified is False
+
+
+def test_a_power_of_two_rescaled_design_reaches_the_same_certified_rank(terminal):
+    """Design entries near ``2**-560`` with prior weights ``2**996``: the rank of the unscaled problem.
+
+    ``y`` is orthogonal to every column, so both fits stay at zero
+    coefficients, and uniform prior weights scale a Gaussian fit's curvature
+    uniformly: scaling the design by ``2**-560`` (exact) and the weights to
+    ``2**996`` multiplies the curvature by ``2**-124`` and leaves the
+    equilibrated matrix unchanged.  The decision must match the same fit at
+    scale one with unit weights, where nothing leaves float64's normal range.
+    The squares of the small entries underflow on their own; the weighted
+    statistic squares ``sqrt(w) |x|`` instead.  Mutation check: squaring
+    ``|x|`` before weighting it zeroes the majorant, and the certificate then
+    certifies rank 3 without reading a row (an exact reference puts the third
+    eigenvalue at 0.76 of the cut).
+    """
+    _, calls = terminal
+    a, b = np.random.default_rng(8).normal(size=(2, 256))
+    y = np.tile([1.0, -1.0, -1.0, 1.0], 256)
+    ranks = []
+    for scale, weight in ((2.0**-560, 2.0**996), (1.0, 1.0)):
+        frame = pd.DataFrame(
+            {
+                "x": np.repeat(a, 4) * scale,
+                "z": np.repeat(a + 5e-8 * b, 4) * scale,
+                "q": np.tile([1.0, 1.0, -1.0, -1.0], 256) * scale,
+            }
+        )
+        family = GaussianLS(scale_floor=0)
+        model = SuperLSS(
+            family,
+            family.location(term("x", Numeric()), term("z", Numeric()), intercept=False),
+            family.scale(term("q", Numeric()), intercept=False),
+            discrete=False,
+        )
+        result = _fit(model, frame, y, np.full(len(y), weight))
+        assert result.terminal_curvature.certified is True
+        ranks.append(result.terminal_rank.rank)
+    assert ranks == [2, 2]
+    assert calls == [1, 1]

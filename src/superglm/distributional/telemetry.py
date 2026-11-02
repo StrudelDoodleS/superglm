@@ -33,7 +33,8 @@ class CurvatureTelemetry:
     # directions sat within the formation bound of the cut and were read from
     # the rows, and whether the rank was certified against that bound.  None
     # where none was attempted: a fit saved before the certificate existed, or
-    # an assembly that records no formation statistics.
+    # an assembly that records no formation statistics.  False where the
+    # formed rank stands uncertified, a non-finite formation bound included.
     grey_k: int | None = None
     certified: bool | None = None
 

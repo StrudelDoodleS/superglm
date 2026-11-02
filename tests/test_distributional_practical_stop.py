@@ -37,7 +37,7 @@ def test_saturated_update_checks_inverse_products_before_cancellation() -> None:
     fit = SimpleNamespace(
         coefficients=beta,
         coefficient_face=None,
-        terminal_rank=SimpleNamespace(rank=2),
+        terminal_rank=SimpleNamespace(rank=2, row_decided=False),
         terminal_data_curvature=np.eye(2),
         terminal_penalized_curvature=np.eye(2) + lam * penalty,
     )
@@ -78,6 +78,36 @@ def test_saturated_update_checks_inverse_products_before_cancellation() -> None:
     assert refused == frozenset()
 
 
+def test_a_row_decided_rank_keeps_the_generic_saturated_update() -> None:
+    """A rank decided from the rows inverts ``E diag(r) E'``, not the formed curvature.
+
+    The stable quotient pairs the inverse with the formed curvature, so it is
+    declined and the generic update, which pairs it with the exact penalty,
+    stands.  Mutation check: without the ``row_decided`` gate the saturated
+    fit takes the stable route, as the test above shows for a formed rank.
+    """
+    factor = np.array([1.0, math.sqrt(2.0)])
+    penalty = np.outer(factor, factor)
+    projector = penalty / float(factor @ factor)
+    lam = 1.0e10
+    inverse = np.eye(2) - projector + projector / (1.0 + float(factor @ factor) * lam)
+    beta = np.array([factor[1], -factor[0]]) + 2.0**-40 * factor
+    component = EFSComponentState("smooth", slice(0, 2), penalty, 1.0, lam, LambdaPolicy.estimate())
+    fit = SimpleNamespace(
+        coefficients=beta,
+        coefficient_face=None,
+        terminal_rank=SimpleNamespace(rank=2, row_decided=True),
+        terminal_data_curvature=np.eye(2),
+        terminal_penalized_curvature=np.eye(2) + lam * penalty,
+    )
+    raw = wood_fasiolo_update((component,), beta, inverse, inverse_scale=1.0)
+    stable, names = _stable_isolated_gfs_update(
+        (component,), fit, inverse, raw, DistributionalEFSConfig()
+    )
+    assert names == frozenset()
+    assert stable is raw
+
+
 def test_saturated_update_refuses_an_unresolved_residual_product() -> None:
     penalty = np.array([[0.5, -0.5], [-0.5, 0.5]])
     common = np.eye(2) - penalty
@@ -91,7 +121,7 @@ def test_saturated_update_refuses_an_unresolved_residual_product() -> None:
     fit = SimpleNamespace(
         coefficients=beta,
         coefficient_face=None,
-        terminal_rank=SimpleNamespace(rank=2),
+        terminal_rank=SimpleNamespace(rank=2, row_decided=False),
         terminal_data_curvature=curvature,
         terminal_penalized_curvature=curvature + lam * penalty,
     )

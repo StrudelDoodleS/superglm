@@ -971,6 +971,24 @@ class RankDecomposition:
     def width(self) -> int:
         return int(self.column_scale.size)
 
+    @property
+    def row_decided(self) -> bool:
+        """Whether this inverts ``E diag(r) E'`` rather than the formed matrix.
+
+        True when :func:`decompose_symmetric_deflated` read the grey block from
+        the rows.  The two matrices then differ in the directions read by more
+        than a stored float64 matrix resolves of their eigenvalues, so a
+        consumer that pairs this inverse with a curvature pairs it with
+        ``E diag(r) E'`` (``estimable_functional_basis``, ``retained_values``).
+        """
+        grey = self.grey_subspace or {}
+        return bool(
+            grey.get("rows_read")
+            and not grey.get("projection_failed")
+            and self.estimable_functional_basis is not None
+            and self.retained_values is not None
+        )
+
     def _solve_deferred(self, rhs: NDArray) -> NDArray:
         """Evaluate the stored Gram action with exact exceptional intermediates."""
         active = self.active_columns
@@ -3463,11 +3481,17 @@ def decompose_symmetric_deflated(
     estimable_basis[active_columns] = factor_vectors * active_scale[:, None]
     solution_basis = np.zeros((width, rank))
     solution_basis[active_columns] = inverse_vectors / active_scale[:, None]
-    log_pdet = (
-        2.0 * float(np.sum(np.log(active_scale))) + float(np.sum(np.log(retained_values)))
-        if rank == width
-        else _retained_log_pdet(active_scale, factor_vectors, discarded, retained_values)
-    )
+    if rank == width:
+        # The factor is the unit-triangular block factor of an orthogonal basis.
+        log_pdet = 2.0 * float(np.sum(np.log(active_scale)))
+        log_pdet += float(np.sum(np.log(retained_values)))
+    else:
+        # A dropped grey column leaves F orthogonal to the null basis but not
+        # orthonormal, so pdet(D F diag(r) F' D) = det(diag(r)) det(R)^2
+        # det(Q' D^2 Q) with F = Q R, and Q completes the null basis.
+        orthonormal, triangle = np.linalg.qr(factor_vectors)
+        log_pdet = _retained_log_pdet(active_scale, orthonormal, discarded, retained_values)
+        log_pdet += 2.0 * float(np.sum(np.log(np.abs(np.diag(triangle)))))
     null_basis = _freeze(_null_basis(width, active_columns, active_scale, discarded))
 
     def decided(

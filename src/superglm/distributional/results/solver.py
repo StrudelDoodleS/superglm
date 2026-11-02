@@ -1219,15 +1219,9 @@ def _validate_resolution_limited_stationarity(
     # Each solve is checked against the matrix it inverts.  A terminal rank
     # decided from the rows inverts ``E diag(r) E'`` (``certificate.py``), not
     # the formed curvature, in the directions it read.
-    grey = retained_rank.grey_subspace or {}
     with np.errstate(over="ignore", invalid="ignore"):
         stored_product = retained_curvature @ stored_correction
-        if (
-            grey.get("rows_read")
-            and not grey.get("projection_failed")
-            and retained_rank.estimable_functional_basis is not None
-            and retained_rank.retained_values is not None
-        ):
+        if retained_rank.row_decided:
             basis = np.asarray(retained_rank.estimable_functional_basis, dtype=np.float64)
             retained = np.asarray(retained_rank.retained_values, dtype=np.float64)
             stored_product = basis @ (retained * (basis.T @ stored_correction))
