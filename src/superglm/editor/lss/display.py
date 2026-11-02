@@ -18,7 +18,7 @@ from numpy.typing import ArrayLike, NDArray
 
 from superglm.distributional.families import GammaLS, LogNormalLS, NegativeBinomialLS
 from superglm.editor.errors import EditorValueError
-from superglm.editor.lss.view import LSSModelView, Response
+from superglm.editor.lss.view import LSSModelView, Response, split_key
 
 Role = Literal["average", "spread"]
 Colour = Literal["blue", "orange"]
@@ -153,3 +153,26 @@ def display_for(model: object, key: str) -> DisplayTransform:
     kind = next(kind for cls, kind in SPREAD_KINDS.items() if isinstance(family, cls))
     floor = family.scale_floor if isinstance(family, LogNormalLS) else 0.0
     return DisplayTransform(kind, model.reference_eta(key), floor)
+
+
+def lss_term_fields(view: LSSModelView, key: str, term: object) -> dict[str, object]:
+    """The payload fields a SuperLSS term carries beyond a SuperGLM term's.
+
+    ``baseline`` is the display value when the term's own effect is zero, the
+    line the chart measures the curve from; ``term`` is the editor's term.
+    """
+    parameter, label = split_key(key)
+    shown = parameter_display(view.family, parameter, response=view.response)
+    transform = display_for(view, key)
+    return {
+        "parameter": parameter,
+        "parameter_label": shown.label,
+        "parameter_role": shown.role,
+        "term_label": label,
+        "display": transform.to_payload(),
+        "baseline": float(transform.to_display(0.0)),
+        "y_label": transform.y_label,
+        "y_format": transform.y_format,
+        "x_label": label,
+        "title": label,
+    }

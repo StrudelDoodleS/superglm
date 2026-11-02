@@ -52,6 +52,7 @@ from superglm.editor.evaluation_cache import (
 from superglm.editor.evidence import EvidenceCoordinator, EvidenceKey
 from superglm.editor.io import jsonable
 from superglm.editor.jobs import JobContext, JobRunner
+from superglm.editor.lss import display_for
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
 from superglm.editor.notebook import NotebookTransport, notebook_view_class
@@ -351,8 +352,8 @@ class EditorWidget:
             if values is None:
                 self.session.shift(term, float(delta))
             else:
-                rel = np.maximum(np.asarray(values, dtype=np.float64), 1e-12)
-                self.session.set_values(term, indices, np.log(rel))
+                shown = display_for(self.session.model, term)
+                self.session.set_values(term, indices, shown.from_display(values))
             self._invalidate_refit()
             self._chart_generation += 1
             return self._state()
@@ -372,7 +373,7 @@ class EditorWidget:
             self.session.move_control_point(
                 term,
                 int(handle_index),
-                float(np.log(max(value, 1e-12))),
+                float(display_for(self.session.model, term).from_display(value)),
                 n_handles=self.control_counts.get(term),
             )
             self._invalidate_refit()
@@ -400,8 +401,11 @@ class EditorWidget:
             weights = np.asarray(editable.weights[idx], dtype=np.float64)
         if float(np.sum(weights)) <= 0.0:
             weights = None
-        value = float(np.average(np.exp(editable.edited_log_effect[idx]), weights=weights))
-        self.session.set_values(term, idx, np.full(idx.size, np.log(max(value, 1e-12))))
+        shown = display_for(self.session.model, term)
+        value = float(
+            np.average(shown.to_display(editable.edited_log_effect[idx]), weights=weights)
+        )
+        self.session.set_values(term, idx, np.full(idx.size, shown.from_display(value)))
 
     def _current_model_for_evidence(self):
         """Resolve one current model without materializing under the widget lock."""

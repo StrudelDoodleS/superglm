@@ -5,6 +5,7 @@ from superglm.editor.lss.display import (
     DisplayTransform,
     ParameterDisplay,
     display_for,
+    lss_term_fields,
     parameter_display,
 )
 from superglm.editor.lss.terms import LSSTermInference, lss_editable_terms
@@ -28,6 +29,7 @@ __all__ = [
     "is_lss",
     "lss_editable_terms",
     "lss_key",
+    "lss_term_fields",
     "parameter_display",
     "predictor_of",
     "split_key",

@@ -19,6 +19,8 @@ from superglm.editor.controls import (
 )
 from superglm.editor.group_display import build_group_display
 from superglm.editor.knots import knots_payload, pending_knots
+from superglm.editor.lss import DisplayTransform, display_for, is_lss, lss_term_fields
+from superglm.editor.lss.tool_payloads import lss_knots_payload, lss_shape_payload
 from superglm.editor.shapes import shape_payload, waiting_ranges
 from superglm.editor.terms import term_from_inference
 from superglm.editor.unseen import unseen_payload
@@ -39,26 +41,30 @@ def session_payload(
     # only JSON-safe primitives.
     payload: dict[str, dict[str, Any]] = {}
     edited = set(session.edited_terms())
+    lss = is_lss(session.model)
     for name, term in session.terms.items():
+        display = display_for(session.model, name)
         x_values = list(range(term.size)) if term.x is None else [float(v) for v in term.x]
         weights = _term_weights(term)
         edit_delta = np.asarray(term.edited_log_effect - term.original_log_effect, dtype=np.float64)
         reference_log_effect = _reference_log_effect(session, name, term)
-        ci_lower, ci_upper = _ci_payload(term, edit_delta)
+        ci_lower, ci_upper = _ci_payload(term, edit_delta, display)
         n_handles = None if control_counts is None else control_counts.get(name)
-        ordered_controls, spline_view = _ordered_spline_payloads(session, name, term, n_handles)
+        ordered_controls, spline_view = _ordered_spline_payloads(
+            session, name, term, n_handles, display
+        )
         term_payload = {
             "kind": term.kind,
             "term_type": str(term.metadata.get("term_type", term.kind)),
             "x": x_values,
             "x_domain": _x_domain(x_values, pad_discrete=term.levels is not None),
-            "y": [float(v) for v in np.exp(term.edited_log_effect)],
-            "original_y": [float(v) for v in np.exp(reference_log_effect)],
-            "previous_y": _previous_y(session, name, term),
+            "y": [float(v) for v in display.to_display(term.edited_log_effect)],
+            "original_y": [float(v) for v in display.to_display(reference_log_effect)],
+            "previous_y": _previous_y(session, name, term, display),
             "controls": (
                 ordered_controls
                 if spline_view is not None
-                else _controls_payload(session, name, term, n_handles)
+                else _controls_payload(session, name, term, n_handles, display)
             ),
             "spline_view": spline_view,
             "ci_lower_y": ci_lower,
@@ -66,25 +72,37 @@ def session_payload(
             "weights": weights,
             "exposure": _exposure_payload(term, x_values, weights),
             "handle_indices": _handle_indices(term).astype(int).tolist(),
-            "impact": _impact_payload(term, weights, session.selection(name), reference_log_effect),
+            "impact": _impact_payload(
+                term, weights, session.selection(name), reference_log_effect, display
+            ),
             "n_points": int(term.size),
             "levels": term.levels,
             "level_groups": _level_groups(session, name, term),
             "level_order_changed": _level_order_changed(session, name),
-            "reference": _reference_payload(session, name),
-            "shape": shape_payload(
-                session.model, name, term.metadata.get("shape_support"), _draft(session, name)
+            "reference": None if lss else _reference_payload(session, name),
+            "shape": (
+                lss_shape_payload()
+                if lss
+                else shape_payload(
+                    session.model, name, term.metadata.get("shape_support"), _draft(session, name)
+                )
             ),
-            "knots": {**knots_payload(session, name, term), **basis_payload(session, name)},
+            "knots": (
+                lss_knots_payload()
+                if lss
+                else {**knots_payload(session, name, term), **basis_payload(session, name)}
+            ),
             "pending": _pending_term_payload(session, name),
-            "unseen": unseen_payload(session, name),
-            "unsmoothed": unsmoothed_available(session.model._specs[name]),
+            "unseen": None if lss else unseen_payload(session, name),
+            "unsmoothed": False if lss else unsmoothed_available(session.model._specs[name]),
             "effective_df": _finite_float(term.metadata.get("edf")),
             "edited": name in edited,
             "x_label": name,
             "y_label": "relativity",
             "title": name,
         }
+        if lss:
+            term_payload.update(lss_term_fields(session.model, name, term))
         term_payload["group_display"] = build_group_display(term_payload)
         payload[name] = term_payload
     return payload
@@ -271,7 +289,7 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
-def _previous_y(session, name: str, term) -> list[float] | None:
+def _previous_y(session, name: str, term, display: DisplayTransform) -> list[float] | None:
     for record in reversed(getattr(session, "history", [])):
         if record.term != name:
             continue
@@ -279,7 +297,7 @@ def _previous_y(session, name: str, term) -> list[float] | None:
         previous[np.asarray(record.indices, dtype=np.intp)] = np.asarray(
             record.before, dtype=np.float64
         )
-        return [float(v) for v in np.exp(previous)]
+        return [float(v) for v in display.to_display(previous)]
     return None
 
 
@@ -378,7 +396,9 @@ def _finite_float(value: Any) -> float | None:
     return number if np.isfinite(number) else None
 
 
-def _ci_payload(term, edit_delta: np.ndarray) -> tuple[list[float] | None, list[float] | None]:
+def _ci_payload(
+    term, edit_delta: np.ndarray, display: DisplayTransform
+) -> tuple[list[float] | None, list[float] | None]:
     # CI bands come from the reference fit. After a manual edit, shift the band
     # by the edit delta for visual reference only; summaries suppress edited
     # inference separately.
@@ -386,7 +406,9 @@ def _ci_payload(term, edit_delta: np.ndarray) -> tuple[list[float] | None, list[
         return None, None
     ci_lower = np.asarray(term.ci_lower_log_effect, dtype=np.float64) + edit_delta
     ci_upper = np.asarray(term.ci_upper_log_effect, dtype=np.float64) + edit_delta
-    return [float(v) for v in np.exp(ci_lower)], [float(v) for v in np.exp(ci_upper)]
+    # A display that falls as the effect rises (1/theta) swaps the ends.
+    shown = display.to_display(ci_lower), display.to_display(ci_upper)
+    return [float(v) for v in np.minimum(*shown)], [float(v) for v in np.maximum(*shown)]
 
 
 def _x_domain(x_values: list[float], *, pad_discrete: bool = False) -> list[float]:
@@ -416,7 +438,8 @@ def _controls_payload(
     session,
     name: str,
     term,
-    n_handles: int | None = None,
+    n_handles: int | None,
+    display: DisplayTransform,
 ) -> dict[str, Any] | None:
     if str(term.metadata.get("term_type", term.kind)) not in CONTROL_HANDLE_TERM_TYPES:
         return None
@@ -426,13 +449,13 @@ def _controls_payload(
         controls = session.control_points(name, n_handles=n_handles)
     except TypeError:
         return None
-    return _control_payload(controls)
+    return _control_payload(controls, display)
 
 
-def _control_payload(controls: dict[str, Any]) -> dict[str, Any]:
+def _control_payload(controls: dict[str, Any], display: DisplayTransform) -> dict[str, Any]:
     payload = {
         "x": [float(v) for v in controls["x"]],
-        "y": [float(v) for v in np.exp(controls["log_effect"])],
+        "y": [float(v) for v in display.to_display(controls["log_effect"])],
         "log_effect": [float(v) for v in controls["log_effect"]],
         "basis_index": [int(v) for v in controls["basis_index"]],
         "count": int(len(controls["x"])),
@@ -454,7 +477,7 @@ def _control_payload(controls: dict[str, Any]) -> dict[str, Any]:
 
 
 def _ordered_spline_payloads(
-    session, name: str, term, n_handles: int | None
+    session, name: str, term, n_handles: int | None, display: DisplayTransform
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """``(controls, spline_view)`` for an ordered term with a spline basis.
 
@@ -481,12 +504,14 @@ def _ordered_spline_payloads(
     # replaced it; after one, the chart joins the original levels instead.
     in_force_is_original = getattr(session, "reference_model", session.model) is session.model
     original = geometry.grid_basis @ geometry.fitted if in_force_is_original else None
-    return _control_payload(controls), {
+    return _control_payload(controls, display), {
         "available": True,
         "reason": None,
         "x": [float(v) for v in geometry.grid_x],
-        "y": [float(v) for v in np.exp(geometry.grid_basis @ coefficients)],
-        "original_y": None if original is None else [float(v) for v in np.exp(original)],
+        "y": [float(v) for v in display.to_display(geometry.grid_basis @ coefficients)],
+        "original_y": None
+        if original is None
+        else [float(v) for v in display.to_display(original)],
         "level_indices": geometry.level_index.astype(int).tolist(),
         "fits_levels": spline_fits_levels(geometry, term, session.history),
     }
@@ -541,11 +566,19 @@ def _smoothed_exposure_density(weights: np.ndarray) -> np.ndarray:
     return np.convolve(padded, kernel, mode="valid")
 
 
+def _display_ratio(display: DisplayTransform, reference: np.ndarray, delta: np.ndarray):
+    """What the displayed value is multiplied by when ``delta`` is added to ``reference``."""
+    if display.kind == "relativity":
+        return np.exp(delta)
+    return display.to_display(reference + delta) / display.to_display(reference)
+
+
 def _impact_payload(
     term,
     weights: list[float],
     selection: np.ndarray,
     reference_log_effect: np.ndarray,
+    display: DisplayTransform,
 ) -> dict[str, float]:
     w = _positive_weights(term, weights)
     reference = np.asarray(reference_log_effect, dtype=np.float64)
@@ -559,7 +592,9 @@ def _impact_payload(
     return {
         "total_weight": total,
         "weighted_mean_link_delta": float(np.average(delta, weights=w)),
-        "weighted_mean_relativity": float(np.average(np.exp(delta), weights=w)),
+        "weighted_mean_relativity": float(
+            np.average(_display_ratio(display, reference, delta), weights=w)
+        ),
         "max_abs_link_delta": float(np.max(np.abs(delta))) if delta.size else 0.0,
         "selected_weight_share": float(np.sum(w[selected]) / total) if total > 0 else 0.0,
     }
