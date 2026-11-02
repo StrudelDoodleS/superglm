@@ -270,6 +270,10 @@ class FamilyCapabilities:
 
     ``censored_response`` declares that the family binds the
     ``"censored_truncated"`` observation contract: truncated and censored rows.
+    ``continuous_curvature`` declares that the log density's curvature in the
+    natural parameters is continuous. Newton steps in log smoothing parameters
+    assume it (Wood, Pya and Saefken 2016, section 3), so ``SuperLSS.fit_reml``
+    adds its Newton endgame by default only for such families.
     """
 
     max_derivative_order: int
@@ -279,6 +283,7 @@ class FamilyCapabilities:
     random: bool
     response_mean: bool
     censored_response: bool = False
+    continuous_curvature: bool = True
 
     def __post_init__(self) -> None:
         if (
@@ -294,6 +299,7 @@ class FamilyCapabilities:
             "random",
             "response_mean",
             "censored_response",
+            "continuous_curvature",
         ):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"{name} must be bool")

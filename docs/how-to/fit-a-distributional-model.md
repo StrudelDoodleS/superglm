@@ -876,11 +876,11 @@ read every row as complete. Each of these warns when the model was fitted with
 bounds and is called without them.
 
 `GaussianLS`, `LogNormalLS`, `GammaLS`, `GeneralizedGammaLSS` and
-`GeneralizedParetoLSS` take these bounds; the other families refuse them. When
-the Newton endgame of smoothing selection runs (`outer="efs+newton"`), it uses
-closed-form third and fourth derivatives of these rows for `GammaLS` and
+`GeneralizedParetoLSS` take these bounds; the other families refuse them. The
+Newton endgame of smoothing selection, which these families run by default,
+uses closed-form third and fourth derivatives of these rows for `GammaLS` and
 `GeneralizedGammaLSS`, as it does for complete rows; for the other three it
-differences the curvature instead. The default `outer="efs"` needs neither.
+differences the curvature instead. `outer="efs"` needs neither.
 
 A window that keeps only a small share of the law, such as a body truncated
 above at its own 5% point, says little about the law beyond the bound: the fit
@@ -993,9 +993,9 @@ duplicated in `lambdas`. Every other penalty component needs a supplied value fo
 
 `fit_reml()` estimates every component whose policy is `LambdaPolicy.estimate()`
 by minimising the negative Laplace-approximate marginal likelihood (LAML) in
-log λ over the box `[1e-6, max_lambda]`. The default `outer="efs"` uses the
-generalised Fellner–Schall fixed-point iteration, safeguarded by objective
-backtracking. Set `outer="efs+newton"` to opt into a two-stage search:
+log λ over the box `[1e-6, max_lambda]`. By default every family except
+`TwoPieceNormalLSS` and `TwoPieceLogNormalLSS` runs a two-stage search,
+`outer="efs+newton"`:
 
 1. **Warm-up.** The generalised Fellner–Schall (EFS) fixed-point iteration of
    Wood and Fasiolo (2017), safeguarded by objective backtracking, moves λ from
@@ -1020,6 +1020,17 @@ backtracking. Set `outer="efs+newton"` to opt into a two-stage search:
    `reml_tol * (1 + |LAML|)`, the objective change below the same bar, and the
    estimated remaining quadratic improvement below the same bar.
 
+`outer="efs"` runs the warm-up alone until its own stop. That stop asks for
+the fixed-point residual below `reml_tol` without scaling it by the objective,
+so it is much stricter than the endgame's bar, and the plateau stop is off
+while any term sits at `max_lambda`. On fits where some terms are not needed,
+so that their λ climb to the cap, it often runs to `max_reml_iter`, and the
+terms it leaves at the cap can change with rounding. The two-piece families
+use it by default because their row curvature jumps where the two pieces join.
+Newton's quadratic model assumes a smooth objective (Wood, Pya and Säfken 2016),
+and in our checks the endgame stopped short of a stationary point on these
+families.
+
 Here, `smoothing_certified_` reports the existing numerical stationarity
 contract in log smoothing parameters, together with converged coefficient fits
 and accepted curvature authority. For differenced derivatives, the reported
@@ -1035,16 +1046,17 @@ the original correlated Tweedie and GPD failures, records the strict Newton
 settings that pass these checks, and reports across-start sensitivity and the
 limits of independent references.
 
-To compare a practical fit with a stricter smoothing search, set both options:
+To compare a practical fit with a stricter smoothing search, turn practical
+stopping off:
 
 ```python
-model.fit_reml(X_train, y_train, outer="efs+newton", practical_reml=False)
+model.fit_reml(X_train, y_train, practical_reml=False)
 print(model.smoothing_convergence_reason_)
 print(model.smoothing_certified_)
 model.diagnose()
 ```
 
-Selecting `outer="efs+newton"` alone still permits the outward practical stop
+The default search still permits the outward practical stop
 described above. Disabling practical stopping requests stronger completion
 checks; it does not guarantee that the fit will pass them. Inspect the returned
 reason and diagnostics, including iteration limits and unresolved derivatives.
@@ -1061,9 +1073,9 @@ are cleared. A state already released beyond the configured upper bounds keeps
 an explicit `derivative_unavailable` stop instead of being clipped into the EFS box.
 Hessian-only failures retain the BFGS fallback.
 
-With the default `outer="efs"`, `practical_reml=True` permits a sustained
+With `outer="efs"`, `practical_reml=True` permits a sustained
 objective-and-parameter plateau to stop the fit. `smoothing_convergence_reason_`
-reports how the search ended. `stationary` is the optional endgame's converged
+reports how the search ended. `stationary` is the endgame's converged
 stop; `lambda_change` and `objective_plateau` are the Fellner–Schall fixed
 point's. `gradient_unresolved` carries evaluated gradient evidence whose
 certificate cannot resolve stationarity. `derivative_unavailable` means fresh

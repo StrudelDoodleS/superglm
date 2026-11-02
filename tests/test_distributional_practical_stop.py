@@ -565,6 +565,7 @@ def _outward_random_effect_fit(*, practical=True, max_log_step=0.5, span=1.5, fi
         inner_tol=1.0e-10,
         reml_plateau_tol=1.0e-6,
         practical_reml=practical,
+        outer="efs",
     )
     return model, model._require_fitted().smoothing
 

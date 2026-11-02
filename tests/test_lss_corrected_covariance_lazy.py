@@ -1308,7 +1308,7 @@ def test_fisher_fallback_corrected_covariance_is_computed_and_disclosed(
 
 
 def _efs_fit(*, retain_rows: bool) -> tuple[SuperLSS, pd.DataFrame]:
-    """A default ``outer="efs"`` fit: Fellner--Schall stops, never certified stationary."""
+    """An ``outer="efs"`` fit: Fellner--Schall stops, never certified stationary."""
     rng = np.random.default_rng(7351)
     x = rng.uniform(-1.0, 1.0, 320)
     frame = pd.DataFrame({"x": x})
@@ -1321,13 +1321,13 @@ def _efs_fit(*, retain_rows: bool) -> tuple[SuperLSS, pd.DataFrame]:
             Predictor("location", {"x": Spline("cr", k=7)}),
             Predictor("scale", {"x": Spline("cr", k=5)}),
         ],
-    ).fit_reml(frame, response, retain_rows=retain_rows)
+    ).fit_reml(frame, response, retain_rows=retain_rows, outer="efs")
     smoothing = model._require_fitted().smoothing
     assert smoothing is not None and smoothing.convergence_reason != "stationary"
     return model, frame
 
 
-def test_a_default_efs_fit_is_corrected_about_its_own_stop() -> None:
+def test_an_efs_fit_is_corrected_about_its_own_stop() -> None:
     """The parent refused every ``outer="efs"`` fit ("requires a converged stationary ...")."""
     model, frame = _efs_fit(retain_rows=True)
     fitted = model._require_fitted()

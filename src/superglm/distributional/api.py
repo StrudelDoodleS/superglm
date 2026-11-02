@@ -739,7 +739,7 @@ class SuperLSS:
         retain_history_rows: bool = False,
         practical_reml_parameter_tol: float = 1.0e-3,
         reml_plateau_tol: float = 1.0e-7,
-        outer: Literal["efs", "efs+newton"] = "efs",
+        outer: Literal["efs", "efs+newton"] | None = None,
         phase_recorder: FitPhaseRecorder | None = None,
         truncation: BoundPair = None,
         censored: CensoredRows = None,
@@ -752,9 +752,13 @@ class SuperLSS:
         known additions on the link scale. ``truncation`` and ``censored``
         are as in :meth:`fit`. This method updates the model and returns it.
 
-        ``outer`` selects the smoothing optimiser.  The default ``"efs"`` runs
-        generalised Fellner-Schall updates. ``"efs+newton"`` adds Newton
-        refinement using the LAML gradient and Hessian in log lambda.
+        ``outer`` selects the smoothing optimiser. ``"efs"`` runs generalised
+        Fellner-Schall updates. ``"efs+newton"`` follows them with Newton steps
+        on the LAML gradient and Hessian in log lambda, and stops at a certified
+        stationary point (Wood, Pya and Saefken 2016, section 3.1). The default
+        ``None`` chooses ``"efs+newton"``, except for families whose curvature
+        jumps (``TwoPieceNormalLSS`` and ``TwoPieceLogNormalLSS``), which get
+        ``"efs"`` because Newton's smoothness assumption fails there.
 
         ``practical_reml`` stops the Fellner--Schall loop after sustained
         negligible objective and fitted-parameter movement. Set it to ``False``
@@ -782,8 +786,12 @@ class SuperLSS:
         with fit_record(self, "fit_reml", locals()):
             if method != "efs":
                 raise NotImplementedError("SuperLSS currently supports only method='efs'")
-            if outer not in ("efs", "efs+newton"):
-                raise ValueError("outer must be 'efs' or 'efs+newton'")
+            if outer is None:
+                capabilities = getattr(self._family, "capabilities", None)
+                smooth = getattr(capabilities, "continuous_curvature", True)
+                outer = "efs+newton" if smooth else "efs"
+            elif outer not in ("efs", "efs+newton"):
+                raise ValueError("outer must be None, 'efs' or 'efs+newton'")
             if initial_lambda is not None and (
                 isinstance(initial_lambda, bool)
                 or not isinstance(initial_lambda, int | float)

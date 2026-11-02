@@ -516,6 +516,7 @@ def test_parameter_name_must_be_nonempty_identifier(name: str) -> None:
         ({"max_derivative_order": -1}, "max_derivative_order"),
         ({"expected_information": 1}, "expected_information"),
         ({"cdf": "yes"}, "cdf"),
+        ({"continuous_curvature": 0}, "continuous_curvature"),
     ],
 )
 def test_capabilities_reject_invalid_declarations(

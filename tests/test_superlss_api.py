@@ -12,8 +12,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperLSS, bind_predictor, term
-from superglm.distributional import GammaLS, GaussianLS, Predictor
+from superglm import SuperLSS, bind_predictor, s, term
+from superglm.distributional import GammaLS, GaussianLS, Predictor, TwoPieceNormalLSS
 from superglm.distributional import TweedieLSS as _TweedieLSS
 from superglm.distributional import api as api_module
 from superglm.distributional import model as model_module
@@ -1591,19 +1591,32 @@ def _small_gaussian_reml_model() -> tuple[SuperLSS, pd.DataFrame, np.ndarray]:
     return model, frame, response
 
 
-def test_fit_reml_outer_defaults_to_efs_and_is_validated() -> None:
+def test_fit_reml_outer_default_follows_curvature_continuity_and_is_validated() -> None:
     model, frame, response = _small_gaussian_reml_model()
     model.fit_reml(frame, response)
     smoothing = model._require_fitted().smoothing
     assert smoothing is not None
-    assert smoothing.config.outer == "efs"
+    assert smoothing.config.outer == "efs+newton"
     with pytest.raises(ValueError, match="outer"):
         model.fit_reml(frame, response, outer="newton")
-    newton_model, _, _ = _small_gaussian_reml_model()
-    newton_model.fit_reml(frame, response, outer="efs+newton")
-    newton = newton_model._require_fitted().smoothing
-    assert newton is not None
-    assert newton.config.outer == "efs+newton"
+    efs_model, _, _ = _small_gaussian_reml_model()
+    efs_model.fit_reml(frame, response, outer="efs")
+    efs = efs_model._require_fitted().smoothing
+    assert efs is not None
+    assert efs.config.outer == "efs"
+    # The two-piece curvature jumps at the join, so its default stays Fellner-Schall.
+    family = TwoPieceNormalLSS()
+    assert family.capabilities.continuous_curvature is False
+    two_piece = SuperLSS(
+        family,
+        family.location(s("x", kind="cr", k=6)),
+        family.scale(),
+        family.skew(),
+    )
+    two_piece.fit_reml(frame, response)
+    kinked = two_piece._require_fitted().smoothing
+    assert kinked is not None
+    assert kinked.config.outer == "efs"
 
 
 @pytest.mark.parametrize(

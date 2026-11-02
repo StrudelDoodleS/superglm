@@ -86,7 +86,9 @@ def test_uncapped_gamma_mean_and_scale_converge(uncapped_claims, case):
         # an exact face; in its knot intervals that cap is 1e10 times the same
         # hbar**-3, and every other lambda stops far below it.
         cap = 1.0e10 * starts["mean:VehAge#wiggle"] / 0.1
-        options = {"initial_lambda": 0.1, "lambdas": starts, "max_lambda": cap}
+        # The face is the Fellner-Schall stop's; the Newton endgame stops inside the
+        # objective bar with VehAge's lambda finite.
+        options = {"initial_lambda": 0.1, "lambdas": starts, "max_lambda": cap, "outer": "efs"}
     model = model_from_templates(
         family=GammaLS(),
         predictors=[Predictor(name, spec) for name, spec in named],

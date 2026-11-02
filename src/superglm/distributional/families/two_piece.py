@@ -181,6 +181,7 @@ TwoPieceRowLaw = Literal[
     "two-piece-epsilon-skew-literal-replication/v1",
 ]
 _HALF_LOG_TWO_PI = 0.5 * math.log(2.0 * math.pi)
+# The location curvature jumps at the join (``location_join_jumps``).
 _CAPABILITIES = FamilyCapabilities(
     max_derivative_order=2,
     expected_information=True,
@@ -188,6 +189,7 @@ _CAPABILITIES = FamilyCapabilities(
     quantile=True,
     random=False,
     response_mean=True,
+    continuous_curvature=False,
 )
 
 

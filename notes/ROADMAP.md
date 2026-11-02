@@ -44,8 +44,8 @@ the scalar engine's existing performance and interpretability.
   at `practical_plateau`, not a current-head certified benchmark or an assembly
   timing. Scalar and LSS timings describe different workloads.
 - **Existing smoothing and inference:** [smoothing](../docs/how-to/fit-a-distributional-model.md#how-smoothing-parameters-are-chosen)
-  has safeguarded EFS, optional Newton/BFGS, stationarity evidence, and exact
-  infinity-face decisions. [Inference](../docs/how-to/check-a-distributional-fit.md)
+  has safeguarded EFS, a Newton/BFGS endgame (the default except for the
+  two-piece families), stationarity evidence, and exact infinity-face decisions. [Inference](../docs/how-to/check-a-distributional-fit.md)
   already includes callable posterior bounds, supported tail functionals,
   smoothing-uncertainty correction, proper scores, and portfolio simulation.
 - **Production grouped LSS is implemented:** public `discrete=True` supports

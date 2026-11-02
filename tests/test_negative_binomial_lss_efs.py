@@ -421,7 +421,7 @@ def test_size_reaching_its_poisson_limit_during_selection_still_converges() -> N
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit_reml(frame, response, offsets={"mean": log_exposure})
+        model.fit_reml(frame, response, offsets={"mean": log_exposure}, outer="efs")
 
     smoothing = model._require_fitted().fit_state.smoothing
     ranks = {fit.terminal_rank.rank for fit in smoothing.coefficient_fits}
