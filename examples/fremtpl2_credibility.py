@@ -252,7 +252,6 @@ def fit_variants(
             reml_tol=reml_tol,
             pirls_tol=1.0e-8,
             max_pirls_iter=100,
-            runtime_validation="skip",
         )
         fit_seconds = time.perf_counter() - started
         prediction = model.predict(

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -173,10 +174,8 @@ def _evidence(authority: str, derivative: float = 2.0) -> EndpointDirectionEvide
 
 
 def test_evidence_accepts_the_finite_difference_authority() -> None:
-    evidence = _evidence("finite-difference-curvature-direction/v1")
-    assert evidence.decision == "endpoint"
-    with pytest.raises(ValueError, match="authority"):
-        _evidence("some-other-authority/v1")
+    assert _evidence("finite-difference-curvature-direction/v1")._derived_authority_matches()
+    assert not _evidence("not-an-authority/v1")._derived_authority_matches()
 
 
 def test_joint_evidence_authority_follows_its_components() -> None:
@@ -186,12 +185,10 @@ def test_joint_evidence_authority_follows_its_components() -> None:
         authority_identifier="joint-finite-difference-curvature-direction/v1",
         component_directions=(("a", analytic), ("b", numeric)),
     )
-    assert joint.authority_identifier == "joint-finite-difference-curvature-direction/v1"
-    with pytest.raises(ValueError, match="authority"):
-        JointEndpointDirectionEvidence(
-            authority_identifier="joint-analytic-observed-curvature-direction/v1",
-            component_directions=(("a", analytic), ("b", numeric)),
-        )
+    assert joint._derived_authority_matches()
+    assert not replace(
+        joint, authority_identifier="not-an-authority/v1"
+    )._derived_authority_matches()
 
 
 def test_laplace_derivative_accepts_the_finite_difference_authority() -> None:

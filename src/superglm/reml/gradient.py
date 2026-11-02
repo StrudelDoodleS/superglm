@@ -21,6 +21,9 @@ from superglm.reml.penalty_algebra import (
     penalty_component_matvec,
     penalty_component_quadratic,
 )
+from superglm.solvers._structured.operators import (
+    CompactSymmetricOperator,
+)
 from superglm.solvers.hessian_factor import (
     DenseHessianFactor,
     DerivativeCrossTraceFactor,
@@ -28,7 +31,6 @@ from superglm.solvers.hessian_factor import (
     as_hessian_factor,
 )
 from superglm.solvers.pirls import PIRLSResult
-from superglm.solvers.structured import CompactSymmetricOperator
 from superglm.types import PenaltyComponent
 
 

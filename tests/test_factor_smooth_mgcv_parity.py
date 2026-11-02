@@ -59,7 +59,6 @@ def fitted_cases(mgcv_fixture: dict) -> dict[str, SuperGLM]:
             reml_tol=1.0e-9,
             pirls_tol=1.0e-10,
             max_pirls_iter=200,
-            runtime_validation="skip",
         )
         fitted[name] = model
     return fitted

@@ -2,12 +2,8 @@
 
 This module owns feature and interaction build state.  It deliberately knows
 nothing about responses, distributions, links, or offsets; scalar SuperGLM
-adapts those concerns in :mod:`superglm.dm_builder`.
-
-The build body below is lifted verbatim from ``dm_builder.build_design_matrix``
-so the two stay diffable: ``compile_predictor_design`` binds the cloned graph
-to the same names that function uses, which keeps the region byte-identical
-and makes any future drift a one-command comparison.
+adapts those concerns in :mod:`superglm.dm_builder`, which calls
+:func:`compile_predictor_design` for its design build.
 """
 
 from __future__ import annotations

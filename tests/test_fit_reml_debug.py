@@ -330,7 +330,7 @@ def test_debug_trace_summarises_the_presolve_before_the_reml_events(tmp_path: Pa
     monkeypatch.setenv("SUPERGLM_DEBUG_DIR", str(tmp_path))
     set_debug_level(2)
     model, x, y = _ten_penalty_poisson()
-    model.fit_reml(x, y, runtime_validation="skip")
+    model.fit_reml(x, y)
 
     run_file = next(tmp_path.glob("*run.json"))
     run = load_reml_debug_run(tmp_path, run_file.name.removesuffix("_run.json"))

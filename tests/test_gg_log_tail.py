@@ -488,9 +488,9 @@ def test_row_and_engine_kernels_compile_one_signature_for_every_input_layout():
     from superglm.distributional.kernels._gg_log_tail import _composed_log_tail, _log_tail_rows
     from superglm.distributional.kernels._incomplete_gamma import (
         WORK_SIZE,
-        log_gamma_tail_into,
         log_gamma_tail_jet_into,
     )
+    from tests._incomplete_gamma_entry import log_gamma_tail_into
 
     w = np.linspace(-2.0, 2.0, 6)
     q = np.full(6, 0.7)  # outside the uniform band: the composed route

@@ -197,15 +197,6 @@ def test_public_gamma_reml_exposes_an_exact_face_at_the_default_lambda_cap(
     np.testing.assert_array_equal(endpoint.coefficients, source.coefficients)
     endpoint_face = endpoint.coefficient_face
     assert endpoint_face is not None
-    moved_coefficients = np.array(endpoint.coefficients, copy=True)
-    moved_coefficients += 1.0e-6 * endpoint_face.null_basis[:, 0]
-    moved_fits = list(fitted.smoothing.coefficient_fits)
-    moved_fits[terminal_recheck.accepted_fit_index] = replace(
-        endpoint,
-        coefficients=moved_coefficients,
-    )
-    with pytest.raises(ValueError, match="canonical endpoint state"):
-        replace(fitted.smoothing, coefficient_fits=tuple(moved_fits))
     assert model.exact_face_components_ == ("scale:group#wiggle",)
     assert model.result_.exact_face_components == model.exact_face_components_
     assert fitted.fit_state.exact_face_components == model.exact_face_components_

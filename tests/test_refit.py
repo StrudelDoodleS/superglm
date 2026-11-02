@@ -171,7 +171,7 @@ def test_refit_unpenalised_rejects_variance_component_terms_at_entry(monkeypatch
         },
         selection_penalty=0.0,
         direct_solve="structured",
-    ).fit_reml(X, y, runtime_validation="skip")
+    ).fit_reml(X, y)
 
     def fail_clone(*args, **kwargs):
         del args, kwargs

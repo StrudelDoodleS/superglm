@@ -649,7 +649,7 @@ class OrderedCategorical:
         # & Tutz (2010), "Sparse modeling of categorial explanatory variables",
         # Ann. Appl. Stat. 4(4):2150-2180: an L1 penalty on adjacent
         # level-effect differences fuses bands data-adaptively -- the penalized
-        # cousin of the editor's /collapse_levels loop, whose stated form is
+        # cousin of the editor's collapse loop, whose stated form is
         # exactly this `grouping=`. If that spelling is ever wanted it attaches
         # here as its own mode (e.g. `fuse=`) beside `basis=`; the stated-
         # structure bases below answer a different question and must not grow

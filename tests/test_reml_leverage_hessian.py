@@ -33,8 +33,10 @@ from superglm.reml.penalty_algebra import (
     penalty_component_dense_matrix,
     penalty_component_matvec,
 )
+from superglm.solvers._structured.nested import (
+    ProfiledNestedSchurFactor,
+)
 from superglm.solvers.pirls import PIRLSResult, REMLGeometrySummary
-from superglm.solvers.structured import ProfiledNestedSchurFactor
 from superglm.types import GroupSlice, PenaltyComponent
 
 _U = np.finfo(np.float64).eps / 2.0
@@ -89,7 +91,7 @@ def _poisson_model(offset: float, n: int = 1500) -> SuperGLM:
         interactions=[("a", "b"), ("e", "c")],
         weight_semantics="frequency",
         discrete=False,
-    ).fit_reml(frame, y, sample_weight=weights, runtime_validation="skip")
+    ).fit_reml(frame, y, sample_weight=weights)
 
 
 def _correction_inputs(model: SuperGLM) -> tuple[tuple, dict]:
@@ -409,7 +411,7 @@ def test_weight_correction_makes_one_row_pass_per_reml_iteration(monkeypatch, pa
         interactions=interactions,
         weight_semantics="frequency",
         discrete=False,
-    ).fit_reml(frame, y, sample_weight=weights, runtime_validation="skip")
+    ).fit_reml(frame, y, sample_weight=weights)
 
     assert len(model._reml_penalties) >= 4
     assert counts["calls"] >= 2
@@ -433,7 +435,7 @@ def test_a_fit_whose_grams_are_cheap_keeps_them():
         interactions=[("a", "b")],
         weight_semantics="frequency",
         discrete=False,
-    ).fit_reml(frame, y, sample_weight=weights, runtime_validation="skip")
+    ).fit_reml(frame, y, sample_weight=weights)
 
     m, n, p = len(model._reml_penalties), model._dm.n, model._dm.p
     assert m >= 4 and m * n * p * p < direct._LEVERAGE_HESSIAN_MIN_GRAM_WORK
@@ -517,7 +519,7 @@ def test_a_random_effect_takes_the_leverage_route_where_its_design_reads_row_sup
         interactions=interactions,
         selection_penalty=0.0,
         direct_solve=direct_solve,
-    ).fit_reml(frame, y, runtime_validation="skip")
+    ).fit_reml(frame, y)
 
     assert len(model._reml_penalties) >= 4
     assert reads_row_supports(model._dm) == term.startswith("random_effect")
@@ -554,7 +556,7 @@ def test_the_leverage_route_does_not_read_the_machines_memory(monkeypatch, direc
             selection_penalty=0.0,
             direct_solve=direct_solve,
             max_memory=max_memory,
-        ).fit_reml(frame, y, reml_tol=_REML_TOL, runtime_validation="skip")
+        ).fit_reml(frame, y, reml_tol=_REML_TOL)
 
     ample = fit("auto")
     dm = ample._dm
@@ -653,7 +655,7 @@ def test_each_route_stops_where_the_other_route_is_stationary(monkeypatch):
             interactions=[("a", "b"), ("e", "c")],
             weight_semantics="frequency",
             discrete=False,
-        ).fit_reml(frame, y, sample_weight=weights, reml_tol=_REML_TOL, runtime_validation="skip")
+        ).fit_reml(frame, y, sample_weight=weights, reml_tol=_REML_TOL)
         return model, last
 
     for leverage in (True, False):
@@ -744,7 +746,7 @@ def test_a_row_without_weight_never_reaches_the_structured_row_forms(monkeypatch
             features=_random_effect_features(),
             selection_penalty=0.0,
             direct_solve="structured",
-        ).fit_reml(frame, y, sample_weight=weights, reml_tol=_REML_TOL, runtime_validation="skip")
+        ).fit_reml(frame, y, sample_weight=weights, reml_tol=_REML_TOL)
 
     gram = fit()
     monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0)
@@ -819,7 +821,9 @@ def test_the_nested_factor_takes_the_leverage_route_within_rounding():
     the materialised inverse and operators.  Mutations (each fails here): the
     row channel without its ``1 / sum_w``; the cross block read as ``[:m, :m]``.
     """
-    from superglm.solvers.structured import materialize_compact_operator
+    from superglm.solvers._structured.operators import (
+        materialize_compact_operator,
+    )
 
     dm, groups, penalties, lambdas, result, factor, weight, offset = _nested_iterate()
     assert isinstance(factor, ProfiledNestedSchurFactor)

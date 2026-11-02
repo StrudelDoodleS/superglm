@@ -50,14 +50,16 @@ from superglm.solvers.rank import (
 
 if TYPE_CHECKING:
     from superglm.group_matrix import DesignMatrix
+    from superglm.solvers._structured.nested import (
+        NestedDataOperator,
+    )
+    from superglm.solvers._structured.operators import (
+        BlockSymmetricOperator,
+        SumToZeroBlockOperator,
+    )
     from superglm.solvers.hessian_factor import HessianFactor
     from superglm.solvers.irls_direct._fit import _CenteredFactorCertification, _IRLSDirectFit
     from superglm.solvers.irls_direct._step import _IRLSDirectStep
-    from superglm.solvers.structured import (
-        BlockSymmetricOperator,
-        NestedDataOperator,
-        SumToZeroBlockOperator,
-    )
     from superglm.types import GroupSlice
 
 

@@ -2902,7 +2902,7 @@ class TestExactPresolve:
         14 iterations; from the pre-solve's 11 cached-W updates it converges in
         4, to an objective 1.8e-5 lower (both stops within reml_tol)."""
         model, X, y = _ten_penalty_poisson()
-        info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        info = model.fit_reml(X, y).reml_diagnostics()
         assert info["profile"]["reml_presolve_n_iter"] > 0
         assert info["n_presolve_iter"] == info["profile"]["reml_presolve_n_iter"]
         assert info["converged"]
@@ -2926,7 +2926,7 @@ class TestExactPresolve:
 
         monkeypatch.setattr(direct_module, "fit_irls_direct", recorded)
         model, X, y = _ten_penalty_poisson()
-        info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        info = model.fit_reml(X, y).reml_diagnostics()
         assert info["profile"]["reml_presolve_n_iter"] > 0
         assert "bootstrap" not in phases
         assert "candidate" in phases
@@ -2943,7 +2943,7 @@ class TestExactPresolve:
             if cap == "fast_candidate"
             else {"max_reml_iter": 5}
         )
-        info = model.fit_reml(X, y, runtime_validation="skip", **kwargs).reml_diagnostics()
+        info = model.fit_reml(X, y, **kwargs).reml_diagnostics()
         assert "reml_presolve_n_iter" not in info["profile"]
         assert info["n_presolve_iter"] == 0
 
@@ -2955,7 +2955,7 @@ class TestExactPresolve:
         updates = []
         for tol in (None, 1e-5):
             model, X, y = _ten_penalty_poisson()
-            info = model.fit_reml(X, y, runtime_validation="skip", reml_tol=tol)
+            info = model.fit_reml(X, y, reml_tol=tol)
             updates.append(info.reml_diagnostics()["profile"]["reml_presolve_n_iter"])
         assert updates[0] == updates[1]
 
@@ -3000,7 +3000,7 @@ class TestExactPresolve:
 
         monkeypatch.setattr(direct_module, "freeze_flat_directions", hold_all_first)
         model, X, y = _ten_penalty_poisson()
-        info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        info = model.fit_reml(X, y).reml_diagnostics()
         assert info["n_presolve_iter"] > 0
         assert info["converged"]
         names = info["profile"]["reml_freeze_decision"]["names"]
@@ -3031,7 +3031,7 @@ class TestExactPresolve:
                 "c1": Categorical(),
             },
         )
-        info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        info = model.fit_reml(X, y).reml_diagnostics()
         monkeypatch.setattr(reml_ops_module, "optimize_direct_reml", real_direct)
         return info
 
@@ -3123,7 +3123,7 @@ class TestExactPresolve:
 
         monkeypatch.setattr(direct_module, "reml_laml_objective", recorded)
         model, X, y = _ten_penalty_poisson()
-        model.fit_reml(X, y, runtime_validation="skip")
+        model.fit_reml(X, y)
         self._fit_stall_gamma(monkeypatch)
         assert evaluations
         u = 2.0**-53
@@ -3158,7 +3158,7 @@ class TestExactPresolve:
 
         def fit():
             model, X, y = _ten_penalty_poisson()
-            return model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+            return model.fit_reml(X, y).reml_diagnostics()
 
         plain = fit()
         self._count_every_decrease_as_rounding(monkeypatch)
@@ -3270,7 +3270,7 @@ class TestExactPresolveScope:
                 interactions=[("x3", "g")],
                 **kwargs,
             )
-            return model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+            return model.fit_reml(X, y).reml_diagnostics()
 
         info = fit()
         assert len(info["lambdas"]) >= 8
@@ -3311,7 +3311,7 @@ class TestExactPresolveScope:
             return real_presolve(*args, **kw)
 
         monkeypatch.setattr(direct_module, "optimize_discrete_reml_cached_w", counted)
-        fitted = model().fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        fitted = model().fit_reml(X, y).reml_diagnostics()
         assert len(fitted["lambdas"]) >= 8
         assert presolves == []
 
@@ -3322,7 +3322,7 @@ class TestExactPresolveScope:
             return real_direct(*args, **kw)
 
         monkeypatch.setattr(reml_ops_module, "optimize_direct_reml", without_presolve)
-        plain = model().fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        plain = model().fit_reml(X, y).reml_diagnostics()
         assert fitted["lambdas"] == plain["lambdas"]
         assert fitted["objective"] == plain["objective"]
 
@@ -3375,7 +3375,7 @@ class TestExactPresolveScope:
             features=_ten_penalty_features(False),
             interactions=[("x3", "g")],
         )
-        info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        info = model.fit_reml(X, y).reml_diagnostics()
         assert calls and all(presolve is False for presolve in calls)
         assert info["n_presolve_iter"] == 0
         assert "_nb_theta_search" not in vars(model)
@@ -3404,6 +3404,6 @@ class TestExactPresolveScope:
                 features=_ten_penalty_features(False),
                 interactions=[("x3", "g")],
             )
-            info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+            info = model.fit_reml(X, y).reml_diagnostics()
             routes.append(info["n_presolve_iter"] > 0)
         assert routes == [link == "log"] * 3

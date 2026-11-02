@@ -23,7 +23,7 @@ from superglm.editor import EditorSession
 from superglm.editor.errors import EditorValueError
 from superglm.editor.knots import decade_step
 from superglm.editor.payloads import session_payload
-from tests.test_editor import _post_json
+from tests.test_editor import _post_json, _post_refit_at_once
 
 BANDS = [f"B{i}" for i in range(8)]
 AGE_KNOTS = [20.0, 22.0, 24.0, 26.0, 35.0, 50.0, 70.0]
@@ -592,15 +592,12 @@ def test_the_widget_stages_knots_and_refits_them_at_once(book):
         )
         assert staged["state"]["terms"]["age"]["pending"]["knots"]["count"] == 8
         session.pending.clear()
-        _post_json(f"{widget.url}/knots", {"term": "band", "params": {"positions": [2.5]}})
+        _post_refit_at_once(widget, "knots", "band", {"positions": [2.5]})
         # Halfway between the third and fourth levels, at 2/7 and 3/7: a few roundings.
         u = np.finfo(np.float64).eps / 2
         np.testing.assert_allclose(_knots(session.model, "band"), [2.5 / 7], rtol=4 * u, atol=0)
         with pytest.raises(urllib.error.HTTPError) as refused:
-            _post_json(
-                f"{widget.url}/knots",
-                {"term": "age", "params": {"count": 0, "strategy": "uniform"}},
-            )
+            _post_refit_at_once(widget, "knots", "age", {"count": 0, "strategy": "uniform"})
         assert json.loads(refused.value.read().decode("utf-8"))["error"] == (
             "The knot count must be a whole number of at least 1."
         )

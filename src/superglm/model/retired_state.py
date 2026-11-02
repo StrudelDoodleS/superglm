@@ -78,19 +78,33 @@ def retained_linear_state(model):
 def _rebuild(model):
     from superglm.model.reml_finalize import _build_structured_linear_system_state
     from superglm.model.state_ops import _solver_space_working_weights
-    from superglm.solvers._structured.retired import REBUILT_NOTICE
-    from superglm.solvers.structured import (
-        FactorSmoothLeafFactor,
-        NestedSchurFactor,
-        ProfiledFactorSmoothLeafFactor,
-        ProfiledNestedSchurFactor,
-        ProfiledSumToZeroTreeFactor,
-        SumToZeroTreeFactor,
+    from superglm.solvers._structured.assembly import (
         build_augmented_structured_factor,
         build_penalized_structured_operator,
-        build_structured_system,
+    )
+    from superglm.solvers._structured.balance_tree import (
+        ProfiledSumToZeroTreeFactor,
+        SumToZeroTreeFactor,
+    )
+    from superglm.solvers._structured.block_leaves import (
+        FactorSmoothLeafFactor,
+        ProfiledFactorSmoothLeafFactor,
+    )
+    from superglm.solvers._structured.geometry import (
         cancelled_column_row_norms,
+    )
+    from superglm.solvers._structured.layout import (
         get_structured_layout,
+    )
+    from superglm.solvers._structured.moments import (
+        build_structured_system,
+    )
+    from superglm.solvers._structured.nested import (
+        NestedSchurFactor,
+        ProfiledNestedSchurFactor,
+    )
+    from superglm.solvers._structured.retired import REBUILT_NOTICE
+    from superglm.solvers._structured.selection import (
         resolve_structured_backend,
     )
 

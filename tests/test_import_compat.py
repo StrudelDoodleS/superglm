@@ -76,7 +76,6 @@ _GROUP = "superglm._group_matrix._group_matrix_kernels."
 _TWEEDIE = "superglm.distributional.kernels._tweedie_numba."
 _NB = "superglm.distributional.kernels._negative_binomial_numba."
 _DECLARED = "superglm.distributional.kernels._declared."
-_ENGINE = "superglm.distributional.kernels._incomplete_gamma."
 _PRIMITIVES = "superglm.distributional.kernels._severity_primitives."
 _FIRST_USE: dict[str, str] = {
     # Measured over cold first fits on the freMTPL2 book: 71 on 2026-10-20
@@ -147,15 +146,6 @@ _FIRST_USE: dict[str, str] = {
         "reaches it (logratio is its centred log(y/mean))",
     ),
     **dict.fromkeys(
-        (
-            _ENGINE + "log_gamma_tail",
-            _ENGINE + "log_gamma_tail_into",
-            _ENGINE + "_log_gamma_tail_rows",
-        ),
-        "the incomplete-gamma engine's plain-partial entry points, for tests: fits call "
-        "log_gamma_tail_scaled_into from the declared kernels",
-    ),
-    **dict.fromkeys(
         (_PRIMITIVES + name for name in ("softplus", "expit", "log1mexp", "invexpm1")),
         "primitives of the declared test laws (Weibull, Burr XII, log-logistic, Lomax); no "
         "public family calls them",
@@ -196,7 +186,6 @@ _FIRST_USE: dict[str, str] = {
                 "superglm.distributional.kernels._gg_uniform_tail." + name
                 for name in ("gg_uniform_log_tail", "_log_tail_rows", "_domain_rows")
             ),
-            "superglm.distributional.kernels._gg_log_tail._composed_rows",
         ),
         "the generalized gamma tails' own scalar and array entry points, for tests: bounded "
         "fits reach both engines through gg_log_tail's row kernel",
@@ -687,26 +676,124 @@ def test_reml_multi_penalty_canonical():
     )
 
 
-def test_inference_term_canonical():
-    # ``compute_coef_covariance`` was listed here until the dead covariance
-    # chain was deleted (PR "Delete the covariance chain no production fit
-    # reaches").  It recomputed W from scratch and called
-    # ``_penalised_xtwx_inv_gram``; ``model/state_ops.coef_covariance``
-    # superseded it, and nothing in ``src/`` called it.  Dropping it from this
-    # contract is a deliberate supported-surface removal for 0.30.0.
-    from superglm.inference.term import (  # noqa: F401
-        _VALID_CENTERING,
-        InteractionInference,
-        SmoothCurve,
-        SplineMetadata,
-        TermInference,
-        _recenter_term,
-        _resolve_group_lambda,
-        _safe_exp,
-        feature_se_from_cov,
-        spline_group_enrichment,
-        term_inference,
-    )
+def test_inference_term_old_path_still_resolves_and_warns():
+    """``superglm.inference.term`` was a re-export shell; each name resolves to its owner."""
+    import superglm.inference.term as old
+    from superglm.inference import _term_ops, _term_types
+
+    with pytest.warns(FutureWarning, match=r"use superglm\.inference\.TermInference\."):
+        assert old.TermInference is _term_types.TermInference
+    with pytest.warns(FutureWarning, match=r"use SuperGLM\.term_inference\."):
+        assert old.term_inference is _term_ops.term_inference
+    with pytest.raises(AttributeError):
+        old._safe_exp  # noqa: B018
+
+
+@pytest.mark.parametrize("name", sorted(superglm.inference._MOVED))
+def test_inference_moved_name_resolves_and_warns_with_its_replacement(name):
+    """Each helper ``superglm.inference`` used to re-export resolves, naming what replaces it."""
+    import importlib
+    import re
+
+    import superglm.inference as package
+
+    owner, replacement = package._MOVED[name]
+    match = f"use {replacement}." if replacement is not None else f"its code is in {owner}."
+    with pytest.warns(FutureWarning, match=re.escape(match)):
+        resolved = getattr(package, name)
+    assert resolved is getattr(importlib.import_module(owner), name)
+
+
+# The public names each module's ``__all__`` listed before its helpers moved out.
+_LEGACY_STAR_NAMES = {
+    "superglm.inference": (
+        "FactorSmoothResult",
+        "InteractionInference",
+        "ModelMetrics",
+        "ModelSummary",
+        "RandomEffectResult",
+        "SmoothCurve",
+        "SplineMetadata",
+        "TermInference",
+        "build_basis_detail",
+        "build_coef_rows",
+        "drop1",
+        "feature_se_from_cov",
+        "refit_unpenalised",
+        "relativities",
+        "simultaneous_bands",
+        "spline_group_enrichment",
+        "term_inference",
+    ),
+    "superglm.inference.term": (
+        "InteractionInference",
+        "SmoothCurve",
+        "SplineMetadata",
+        "TermInference",
+        "drop1",
+        "feature_se_from_cov",
+        "refit_unpenalised",
+        "relativities",
+        "simultaneous_bands",
+        "spline_group_enrichment",
+        "term_inference",
+    ),
+}
+
+
+@pytest.mark.parametrize("module_name", sorted(_LEGACY_STAR_NAMES))
+def test_inference_star_import_still_binds_every_legacy_name(module_name):
+    """``from <module> import *`` binds each legacy name, warning for the moved ones."""
+    import importlib
+    import warnings
+
+    module = importlib.import_module(module_name)
+    namespace: dict[str, object] = {}
+    with pytest.warns(FutureWarning, match="is deprecated and will be removed"):
+        exec(f"from {module_name} import *", namespace)  # noqa: S102
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        expected = {name: getattr(module, name) for name in _LEGACY_STAR_NAMES[module_name]}
+    for name, value in expected.items():
+        assert namespace[name] is value, name
+
+
+def test_inference_unknown_name_raises_attribute_error():
+    import superglm.inference as package
+
+    with pytest.raises(AttributeError, match="no attribute 'not_a_moved_name'"):
+        package.not_a_moved_name  # noqa: B018
+
+
+def test_simultaneous_bands_resolves_from_both_legacy_paths_and_returns_the_bands():
+    import numpy as np
+    import pandas as pd
+
+    from superglm import Spline, SuperGLM
+    from superglm.inference._term_covariance import simultaneous_band_and_critical_value
+
+    with pytest.warns(FutureWarning, match=r"use SuperGLM\.simultaneous_bands\."):
+        from superglm.inference import simultaneous_bands as package_bands
+    with pytest.warns(FutureWarning, match=r"use SuperGLM\.simultaneous_bands\."):
+        from superglm.inference.term import simultaneous_bands as term_bands
+    assert package_bands is term_bands
+
+    rng = np.random.default_rng(575)
+    X = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 200)})
+    y = np.sin(3.0 * X["x"].to_numpy()) + rng.normal(0.0, 0.3, 200)
+    model = SuperGLM(
+        family="gaussian", features={"x": Spline(n_knots=6)}, selection_penalty=0.0
+    ).fit(X, y)
+    inputs = {
+        "result": model.result,
+        "groups": model._groups,
+        "specs": model._specs,
+        "covariance_fn": lambda: model._coef_covariance,
+        "n_sim": 500,
+        "n_points": 25,
+    }
+    expected, _ = simultaneous_band_and_critical_value("x", **inputs)
+    pd.testing.assert_frame_equal(package_bands("x", **inputs), expected)
 
 
 def test_inference_metrics_canonical():

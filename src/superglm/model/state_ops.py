@@ -15,6 +15,18 @@ from superglm.inference.covariance import (
 )
 from superglm.model.fit_state import fitted_lambda2, fitted_penalty
 from superglm.model.retired_state import retained_linear_state
+from superglm.solvers._structured.balance_tree import (
+    ProfiledSumToZeroTreeFactor,
+)
+from superglm.solvers._structured.geometry import (
+    centered_operator_coefficient_estimable,
+)
+from superglm.solvers._structured.operators import (
+    CenteredBlockOperator,
+)
+from superglm.solvers._structured.state import (
+    StructuredLinearSystemState,
+)
 from superglm.solvers.rank import (
     decide_data_rank,
     decompose_factor,
@@ -22,12 +34,6 @@ from superglm.solvers.rank import (
     decompose_gram_if_authoritative,
     diagonal_of_square,
     selected_group_name_set,
-)
-from superglm.solvers.structured import (
-    CenteredBlockOperator,
-    ProfiledSumToZeroTreeFactor,
-    StructuredLinearSystemState,
-    centered_operator_coefficient_estimable,
 )
 from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import GroupSlice

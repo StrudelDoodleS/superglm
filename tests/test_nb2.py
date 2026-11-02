@@ -894,7 +894,6 @@ class TestNB2AutoTheta:
             y,
             max_reml_iter=2,
             max_pirls_iter=60,
-            runtime_validation="skip",
         )
 
         assert np.isfinite(model.theta_)
@@ -947,7 +946,6 @@ class TestNB2AutoTheta:
                 y,
                 max_reml_iter=2,
                 max_pirls_iter=60,
-                runtime_validation="skip",
             )
 
         structured = fit("auto")

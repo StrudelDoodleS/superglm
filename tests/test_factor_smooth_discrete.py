@@ -12,12 +12,16 @@ import superglm.reml.discrete as discrete_module
 from superglm import FactorSmooth, LambdaPolicy, Numeric, RandomEffect, Spline, SuperGLM
 from superglm.group_matrix import FactorSmoothGroupMatrix
 from superglm.reml.penalty_algebra import build_penalty_matrix
-from superglm.solvers.structured import (
+from superglm.solvers._structured.assembly import (
+    solve_cached_structured,
+)
+from superglm.solvers._structured.block_leaves import (
     FactorSmoothLeafSystem,
     FactorSmoothPenalizedOperator,
     ProfiledFactorSmoothLeafFactor,
+)
+from superglm.solvers._structured.operators import (
     materialize_compact_operator,
-    solve_cached_structured,
 )
 
 
@@ -99,7 +103,6 @@ def _fit(model: SuperGLM, X, y, weights, offset) -> SuperGLM:
         max_reml_iter=12,
         reml_tol=1e-5,
         pirls_tol=1e-9,
-        runtime_validation="skip",
     )
 
 
@@ -429,7 +432,6 @@ def test_factor_smooth_marginal_backend_preserves_exact_discrete_fit(
         y,
         sample_weight=weights,
         offset=offset,
-        runtime_validation="skip",
     )
     discrete = _fixed_policy_model(
         discrete=True,
@@ -439,7 +441,6 @@ def test_factor_smooth_marginal_backend_preserves_exact_discrete_fit(
         y,
         sample_weight=weights,
         offset=offset,
-        runtime_validation="skip",
     )
 
     assert exact._interaction_specs["x:segment:fs"]._marginal_build_backend == backend

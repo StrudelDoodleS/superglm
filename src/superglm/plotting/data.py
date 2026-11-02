@@ -9,7 +9,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame
-from superglm.inference.term import SmoothCurve, TermInference
+from superglm.inference._term_types import SmoothCurve, TermInference
 from superglm.plotting.common import (
     _exposure_kde,
     _kde_2d,

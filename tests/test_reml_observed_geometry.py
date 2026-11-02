@@ -2836,7 +2836,6 @@ def test_a_structured_factor_that_refuses_an_iterate_is_scored_not_raised() -> N
         offset=offset,
         max_reml_iter=2,
         pirls_tol=1e-10,
-        runtime_validation="skip",
     )
     structured_index = next(
         i
@@ -2924,7 +2923,7 @@ def test_a_structural_refusal_from_the_structured_factor_is_not_relabelled(
             "lvl": RandomEffect(levels=[f"L{i}" for i in range(n_levels)]),
         },
         direct_solve="structured",
-    ).fit_reml(frame, y, max_reml_iter=2, runtime_validation="skip")
+    ).fit_reml(frame, y, max_reml_iter=2)
     structured_index = next(
         i
         for i, matrix in enumerate(model._dm.group_matrices)
@@ -3055,7 +3054,6 @@ def test_exact_reml_routes_all_noncanonical_builtins_through_observed_geometry(
         max_reml_iter=2,
         reml_tol=1e-12,
         pirls_tol=1e-9,
-        runtime_validation="skip",
         w_correction_order=2,
     )
 
@@ -3092,7 +3090,6 @@ def test_discrete_bam_path_bypasses_ordinary_observed_geometry(
         pd.DataFrame({"x": x}),
         y,
         max_reml_iter=2,
-        runtime_validation="skip",
         w_correction_order=2,
     )
 
@@ -3134,7 +3131,6 @@ def test_custom_order2_observed_capability_fails_before_first_pirls(
             pd.DataFrame({"x": x}),
             y,
             max_reml_iter=2,
-            runtime_validation="skip",
             w_correction_order=2,
         )
 
@@ -4228,7 +4224,7 @@ def _structured_random_effect_build():
                 "lvl": RandomEffect(levels=[f"L{i}" for i in range(n_levels)]),
             },
             direct_solve="structured",
-        ).fit_reml(frame, y, max_reml_iter=2, runtime_validation="skip")
+        ).fit_reml(frame, y, max_reml_iter=2)
     structured_index = next(
         i
         for i, matrix in enumerate(model._dm.group_matrices)

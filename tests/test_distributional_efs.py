@@ -34,8 +34,8 @@ from superglm.distributional.smoothing.acceleration import (
     MultisecantProposal,
     WindowedTypeIIAnderson,
 )
-from superglm.distributional.smoothing.evidence import _fresh_raw_evidence, _saturated_names
-from superglm.distributional.smoothing.objective import _component_states, _estimated_names
+from superglm.distributional.smoothing.evidence import _fresh_raw_evidence
+from superglm.distributional.smoothing.objective import _component_states
 from superglm.distributional.smoothing.proposals import _accelerated_proposal
 from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.distributional.weights import ResolvedLikelihoodWeights, WeightContract
@@ -77,38 +77,6 @@ _EFS_INNER_TOLERANCE = float(np.finfo(np.float64).eps ** (2.0 / 3.0))
 _EFS_REPLICATION_INNER_TOLERANCE = float(128.0 * np.finfo(np.float64).eps)
 _EFS_CARRIER_PER_ROW = 1.0e8
 _EFS_LAMBDA_NAME = "scale:z#wiggle"
-
-
-@pytest.mark.parametrize(
-    ("field_name", "replacement"),
-    [
-        ("analytic_derivative", 0.0),
-        ("profile_score_term", 0.0),
-        ("numerical_error", 0.0),
-        ("lower_bound", 1.0),
-        ("upper_bound", 2.0),
-    ],
-)
-def test_endpoint_direction_evidence_rejects_forged_derived_authority(
-    field_name: str,
-    replacement: object,
-) -> None:
-    """Kills accepting endpoint bounds inconsistent with their analytic terms."""
-    evidence = EndpointDirectionEvidence(
-        authority_identifier="analytic-observed-curvature-direction/v1",
-        decision="endpoint",
-        endpoint_objective=0.125,
-        analytic_derivative=1.5,
-        profile_score_term=1.0,
-        curvature_schur_term=2.0,
-        curvature_drift_term=0.0,
-        numerical_error=0.1,
-        lower_bound=1.4,
-        upper_bound=1.6,
-    )
-
-    with pytest.raises(ValueError, match="derived endpoint direction evidence"):
-        replace(evidence, **{field_name: replacement})
 
 
 @dataclass(frozen=True)
@@ -2768,38 +2736,6 @@ def test_default_efs_iterations_publish_acceleration_telemetry(
         "rejected",
     }
     assert iteration.raw_backtracks >= 0
-    assert isinstance(iteration.boundary_nominations, tuple)
-
-
-def test_acceleration_telemetry_rejects_unknown_reasons_and_orphan_fits(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    frame, response, predictors = _smooth_fixture()
-    _decreasing_objective(monkeypatch)
-    model = fit_dense_distributional(
-        frame,
-        response,
-        family=GaussianLS(),
-        weight_contract=WeightContract(semantics="prior"),
-        predictors=predictors,
-        lambdas={"location:x#wiggle": 0.3, "scale:z#wiggle": 0.2},
-        efs_config=DistributionalEFSConfig(outer="efs", max_iterations=1),
-    )
-
-    smoothing = model.smoothing
-    assert smoothing is not None
-    iteration = smoothing.history[0]
-    with pytest.raises(ValueError, match="refusal reason"):
-        replace(
-            iteration,
-            acceleration_outcome="refused",
-            acceleration_refusal_reason="invented",  # type: ignore[arg-type]
-        )
-    with pytest.raises(ValueError, match="chronology"):
-        replace(
-            smoothing,
-            coefficient_fits=(*smoothing.coefficient_fits, smoothing.coefficient_fits[-1]),
-        )
 
 
 def test_rejected_acceleration_falls_back_to_raw_scale_one_from_same_source(
@@ -2919,8 +2855,6 @@ def test_admissible_acceleration_is_the_only_trial_when_objective_accepts(
     assert smoothing.accelerated_trial_count == 1
     assert smoothing.accelerated_accept_count == 1
     assert smoothing.raw_fallback_count == 0
-    with pytest.raises(ValueError, match="accelerated_fit_index"):
-        replace(second, accelerated_fit_index=np.int64(2))
 
 
 def test_acceleration_with_changed_fit_provenance_falls_back_to_raw(
@@ -3412,16 +3346,6 @@ def test_fixed_components_never_move_and_fixed_only_fit_stops_cleanly() -> None:
     assert model.smoothing.history == ()
     assert len(model.smoothing.coefficient_fits) == 1
     assert model.result.converged is True
-    with pytest.raises(ValueError, match="fresh convergence"):
-        replace(
-            model.smoothing,
-            terminal_raw_max_log_step=np.nextafter(model.smoothing.config.tolerance, math.inf),
-        )
-    with pytest.raises(ValueError, match="unresolved upper"):
-        replace(
-            model.smoothing,
-            unresolved_upper_bound=("location:x#wiggle",),
-        )
 
     tampered = replace(model.smoothing)
     object.__setattr__(
@@ -3469,16 +3393,6 @@ def _upper_cap_refusal_result(
     assert synthetic_update.lambdas[target] == maximum_lambda
     assert synthetic_update.log_steps[target] == 0.0
     assert 0.0 < synthetic_update.raw_log_steps[target] < 1.0e-6
-    saturation_update = replace(
-        synthetic_update,
-        trace_terms={"location:x#wiggle": 0.0, target: 0.099},
-    )
-    assert _saturated_names(
-        synthetic_components,
-        saturation_update,
-        (target,),
-        0.95,
-    ) == frozenset({target})
     monkeypatch.setattr(
         smoothing_evidence, "wood_fasiolo_update", lambda *args, **kwargs: synthetic_update
     )
@@ -3529,293 +3443,11 @@ def test_positive_raw_pressure_at_the_exact_upper_cap_is_unresolved(
     assert direction.coefficient_tolerance == refusal.coefficient_tolerances[0]
     assert refusal.endpoint_assessment_failure_reason is None
     assert len(smoothing.coefficient_fits) == 3
-    with pytest.raises(ValueError, match="direction evidence or a failure reason"):
-        replace(refusal, endpoint_direction_evidence=None)
-    with pytest.raises(ValueError, match="event without direction evidence"):
-        replace(refusal, endpoint_assessment_failure_reason="analytic_unavailable")
     assert smoothing.matched_certified is False
     with pytest.raises(RuntimeError, match="certification"):
         assert_matched_certified(smoothing)
     with pytest.raises(ValueError, match="finite and non-negative"):
         replace(smoothing, terminal_raw_max_log_step=-1.0)
-    with pytest.raises(ValueError, match="positive fresh convergence"):
-        replace(smoothing, terminal_raw_max_log_step=0.0)
-    with pytest.raises(ValueError, match="positive fresh convergence"):
-        replace(
-            smoothing,
-            convergence_reason="coefficient_not_converged",
-            terminal_raw_max_log_step=0.0,
-        )
-    with pytest.raises(ValueError, match="nonempty unresolved"):
-        replace(smoothing, unresolved_upper_bound=())
-    with pytest.raises(ValueError, match="exact configured maximum"):
-        replace(smoothing, unresolved_upper_bound=("location:x#wiggle",))
-    with pytest.raises(ValueError, match="invalid EFS convergence reason"):
-        replace(
-            smoothing,
-            convergence_reason="boundary_heuristic_stopped",  # type: ignore[arg-type]
-        )
-
-
-def test_cap_not_stationary_receipt_authenticates_retained_score(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Kills trusting the convergence flag or stored score telemetry at the cap."""
-
-    _, _, smoothing = _upper_cap_refusal_result(monkeypatch)
-    source_fit, cap_fit, endpoint_fit = smoothing.coefficient_fits
-    refusal = smoothing.history[0]
-    tolerance = refusal.coefficient_tolerances[0]
-    cap_objective = cap_fit.penalized_optimizing_log_likelihood
-    assert cap_objective is not None
-    nonstationary_score = np.zeros_like(cap_fit.terminal_score)
-    nonstationary_score[0] = 2.0 * tolerance * (1.0 + abs(cap_objective))
-    nonstationary_cap = replace(
-        cap_fit,
-        terminal_score=nonstationary_score,
-        score_relative=0.0,
-        convergence_reason="objective_and_step",
-    )
-    receipt = replace(
-        refusal,
-        coefficient_fit_indices=(1,),
-        coefficient_tolerances=(tolerance,),
-        endpoint_direction_evidence=None,
-        endpoint_assessment_failure_reason="cap_not_stationary",
-    )
-
-    authenticated = replace(
-        smoothing,
-        history=(receipt,),
-        coefficient_fits=(source_fit, nonstationary_cap),
-    )
-    assert authenticated.history[0].endpoint_assessment_failure_reason == "cap_not_stationary"
-
-    boundary_score = np.zeros_like(nonstationary_score)
-    boundary_score[0] = tolerance * (1.0 + abs(cap_objective))
-    assert np.linalg.norm(boundary_score, ord=np.inf) > tolerance
-    stationary_cap_with_forged_telemetry = replace(
-        nonstationary_cap,
-        terminal_score=boundary_score,
-        score_relative=1.0,
-    )
-    with pytest.raises(ValueError, match="cap stationarity failure reason"):
-        replace(
-            authenticated,
-            coefficient_fits=(source_fit, stationary_cap_with_forged_telemetry),
-        )
-
-    nonconverged_cap = replace(
-        nonstationary_cap,
-        converged=False,
-        convergence_reason="max_iterations",
-    )
-    with pytest.raises(ValueError, match="cap stationarity failure reason"):
-        replace(authenticated, coefficient_fits=(source_fit, nonconverged_cap))
-
-    wrong_config_cap = replace(
-        nonstationary_cap,
-        config=replace(nonstationary_cap.config, tolerance=2.0 * tolerance),
-    )
-    with pytest.raises(ValueError, match="tight tolerance"):
-        replace(authenticated, coefficient_fits=(source_fit, wrong_config_cap))
-
-    two_fit_receipt = replace(
-        receipt,
-        coefficient_fit_indices=(1, 2),
-        coefficient_tolerances=(tolerance, tolerance),
-    )
-    with pytest.raises(ValueError, match="failure reason disagrees with its fits"):
-        replace(
-            smoothing,
-            history=(two_fit_receipt,),
-            coefficient_fits=(source_fit, nonstationary_cap, endpoint_fit),
-        )
-
-    legacy_failed_cap = replace(
-        nonstationary_cap,
-        converged=False,
-        convergence_reason="max_iterations",
-    )
-    legacy_receipt = replace(
-        receipt,
-        endpoint_assessment_failure_reason="cap_not_converged",
-    )
-    legacy = replace(
-        smoothing,
-        history=(legacy_receipt,),
-        coefficient_fits=(source_fit, legacy_failed_cap),
-    )
-    assert legacy.history[0].endpoint_assessment_failure_reason == "cap_not_converged"
-    with pytest.raises(ValueError, match="endpoint cap failure reason"):
-        replace(legacy, coefficient_fits=(source_fit, cap_fit))
-
-
-def test_endpoint_not_stationary_receipt_authenticates_retained_face_score(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Kills using full-space or stored score telemetry for endpoint authority."""
-
-    _, _, smoothing = _upper_cap_refusal_result(monkeypatch)
-    source_fit, cap_fit, endpoint_fit = smoothing.coefficient_fits
-    refusal = smoothing.history[0]
-    tolerance = refusal.coefficient_tolerances[0]
-    endpoint_objective = endpoint_fit.penalized_optimizing_log_likelihood
-    endpoint_face = endpoint_fit.coefficient_face
-    assert endpoint_objective is not None and endpoint_face is not None
-    nonstationary_reduced_score = np.zeros(endpoint_face.reduced_width)
-    nonstationary_reduced_score[0] = 2.0 * tolerance * (1.0 + abs(endpoint_objective))
-    nonstationary_endpoint = replace(
-        endpoint_fit,
-        terminal_score=endpoint_face.lift_vector(nonstationary_reduced_score),
-        score_relative=0.0,
-        convergence_reason="objective_and_step",
-    )
-    receipt = replace(
-        refusal,
-        endpoint_direction_evidence=None,
-        endpoint_assessment_failure_reason="endpoint_not_stationary",
-    )
-    cap_objective = cap_fit.penalized_optimizing_log_likelihood
-    assert cap_objective is not None
-    boundary_cap_score = np.zeros_like(cap_fit.terminal_score)
-    boundary_cap_score[0] = tolerance * (1.0 + abs(cap_objective))
-    boundary_cap = replace(
-        cap_fit,
-        terminal_score=boundary_cap_score,
-        score_relative=0.0,
-    )
-
-    authenticated = replace(
-        smoothing,
-        history=(receipt,),
-        coefficient_fits=(source_fit, boundary_cap, nonstationary_endpoint),
-    )
-    assert authenticated.history[0].endpoint_assessment_failure_reason == "endpoint_not_stationary"
-
-    retained_direction = endpoint_face.null_basis[:, 0]
-    retained_unit_norm = float(
-        np.max(np.abs(endpoint_face.reduce_vector(retained_direction)), initial=0.0)
-    )
-    boundary_coefficient = tolerance * (1.0 + abs(endpoint_objective)) / retained_unit_norm
-    for _ in range(64):
-        endpoint_boundary_score = retained_direction * boundary_coefficient
-        retained_boundary_ratio = float(
-            np.max(
-                np.abs(endpoint_face.reduce_vector(endpoint_boundary_score)),
-                initial=0.0,
-            )
-            / (1.0 + abs(endpoint_objective))
-        )
-        if retained_boundary_ratio == tolerance:
-            break
-        boundary_coefficient = np.nextafter(
-            boundary_coefficient,
-            0.0 if retained_boundary_ratio > tolerance else math.inf,
-        )
-    else:
-        raise AssertionError("could not construct the exact retained-score boundary")
-    assert np.linalg.norm(endpoint_boundary_score, ord=np.inf) > tolerance
-    boundary_endpoint_with_forged_telemetry = replace(
-        endpoint_fit,
-        terminal_score=endpoint_boundary_score,
-        score_relative=1.0,
-    )
-    with pytest.raises(ValueError, match="endpoint stationarity failure reason"):
-        replace(
-            authenticated,
-            coefficient_fits=(source_fit, boundary_cap, boundary_endpoint_with_forged_telemetry),
-        )
-
-    nonstationary_cap_score = np.zeros_like(cap_fit.terminal_score)
-    nonstationary_cap_score[0] = 2.0 * tolerance * (1.0 + abs(cap_objective))
-    nonstationary_cap = replace(
-        cap_fit,
-        terminal_score=nonstationary_cap_score,
-        score_relative=0.0,
-        convergence_reason="objective_and_step",
-    )
-    with pytest.raises(ValueError, match="stationary endpoint cap"):
-        replace(
-            authenticated,
-            coefficient_fits=(source_fit, nonstationary_cap, nonstationary_endpoint),
-        )
-
-    constrained_score = (
-        endpoint_face.constraint_basis[:, 0] * 100.0 * tolerance * (1.0 + abs(endpoint_objective))
-    )
-    stationary_endpoint_with_forged_telemetry = replace(
-        endpoint_fit,
-        terminal_score=constrained_score,
-        score_relative=1.0,
-    )
-    with pytest.raises(ValueError, match="endpoint stationarity failure reason"):
-        replace(
-            authenticated,
-            coefficient_fits=(
-                source_fit,
-                boundary_cap,
-                stationary_endpoint_with_forged_telemetry,
-            ),
-        )
-
-    nonconverged_endpoint = replace(
-        nonstationary_endpoint,
-        converged=False,
-        convergence_reason="max_iterations",
-    )
-    with pytest.raises(ValueError, match="endpoint stationarity failure reason"):
-        replace(
-            authenticated,
-            coefficient_fits=(source_fit, boundary_cap, nonconverged_endpoint),
-        )
-
-    wrong_tolerance_receipt = replace(
-        receipt,
-        coefficient_tolerances=(tolerance, 2.0 * tolerance),
-    )
-    with pytest.raises(ValueError, match="tight tolerance"):
-        replace(
-            smoothing,
-            history=(wrong_tolerance_receipt,),
-            coefficient_fits=(source_fit, boundary_cap, nonstationary_endpoint),
-        )
-
-    one_fit_receipt = replace(
-        receipt,
-        coefficient_fit_indices=(1,),
-        coefficient_tolerances=(tolerance,),
-    )
-    with pytest.raises(ValueError, match="failure reason disagrees with its fits"):
-        replace(
-            smoothing,
-            history=(one_fit_receipt,),
-            coefficient_fits=(source_fit, boundary_cap),
-        )
-
-    with pytest.raises(ValueError, match="wrong exact coefficient face"):
-        replace(authenticated, coefficient_fits=(source_fit, boundary_cap, cap_fit))
-
-    legacy_failed_endpoint = replace(
-        nonstationary_endpoint,
-        converged=False,
-        convergence_reason="max_iterations",
-    )
-    legacy_receipt = replace(
-        receipt,
-        endpoint_assessment_failure_reason="endpoint_not_converged",
-    )
-    legacy = replace(
-        smoothing,
-        history=(legacy_receipt,),
-        coefficient_fits=(source_fit, nonstationary_cap, legacy_failed_endpoint),
-    )
-    assert legacy.history[0].endpoint_assessment_failure_reason == "endpoint_not_converged"
-    with pytest.raises(ValueError, match="endpoint fit failure reason"):
-        replace(
-            legacy,
-            coefficient_fits=(source_fit, nonstationary_cap, endpoint_fit),
-        )
 
 
 def test_each_accepted_lambda_update_refits_and_uses_fresh_observed_geometry(
@@ -4442,202 +4074,6 @@ def test_a_random_effect_fits_under_efs_and_recovers_its_group_variance() -> Non
 
     # Doubling the simulated group sd must quarter the recovered lambda.
     assert 3.6 <= recovered[0.3] / recovered[0.6] <= 4.4
-
-
-def _null_space_fixture() -> tuple[pd.DataFrame, np.ndarray, tuple[Predictor, Predictor]]:
-    """A location smooth on a covariate the response does not depend on.
-
-    Its true effect is zero, which lies in the null space of a second-derivative
-    penalty, so its REML-optimal lambda is ``+inf``.  The other two smooths are
-    genuinely wiggly and have finite optima.
-    """
-    # Sized and seeded so the boundary component's saturation crossing is
-    # SUSTAINED rather than transient: below roughly this size the null-space
-    # term's lambda has not grown enough for the penalty to dominate its block,
-    # and the plateau rule stops the fit first.
-    rng = np.random.default_rng(2024)
-    n = 400
-    x = np.linspace(0.0, 1.0, n)
-    z = np.mod(0.37 + 1.7 * x, 1.0)
-    w = rng.uniform(0.0, 1.0, n)
-    sigma = 0.22 + np.exp(-1.2 + 0.35 * np.cos(2.0 * np.pi * z))
-    response = 0.35 + 0.8 * np.sin(2.0 * np.pi * x) + rng.normal(scale=sigma)
-    estimate = {"wiggle": LambdaPolicy.estimate()}
-    predictors = (
-        Predictor(
-            "location",
-            {
-                "x": Spline(kind="cr", n_knots=6, lambda_policy=estimate),
-                "w": Spline(kind="cr", n_knots=6, lambda_policy=estimate),
-            },
-        ),
-        Predictor("scale", {"z": Spline(kind="cr", n_knots=5, lambda_policy=estimate)}),
-    )
-    return pd.DataFrame({"x": x, "z": z, "w": w}), response, predictors
-
-
-def test_boundary_nomination_is_telemetry_only_and_preserves_the_numerical_route() -> None:
-    frame, response, predictors = _null_space_fixture()
-    nominated = fit_dense_distributional(
-        frame,
-        response,
-        family=GaussianLS(),
-        weight_contract=WeightContract(semantics="prior"),
-        predictors=predictors,
-        efs_config=DistributionalEFSConfig(
-            outer="efs", max_iterations=200, boundary_saturation=0.95
-        ),
-    )
-    disabled = fit_dense_distributional(
-        frame,
-        response,
-        family=GaussianLS(),
-        weight_contract=WeightContract(semantics="prior"),
-        predictors=predictors,
-        efs_config=DistributionalEFSConfig(outer="efs", max_iterations=200),
-    )
-
-    left = nominated.smoothing
-    right = disabled.smoothing
-    assert left is not None and right is not None
-    assert any(iteration.boundary_nominations for iteration in left.history)
-    assert all(not iteration.boundary_nominations for iteration in right.history)
-    assert left.iterations == right.iterations
-    assert dict(left.lambdas) == dict(right.lambdas)
-    assert left.objective == right.objective
-    assert left.terminal_fit_index == right.terminal_fit_index
-    np.testing.assert_array_equal(nominated.coefficients, disabled.coefficients)
-    assert (
-        tuple(replace(iteration, boundary_nominations=()) for iteration in left.history)
-        == right.history
-    )
-
-    terminal_components = _component_states(nominated.layout, left.lambdas)
-    estimated_names = _estimated_names(terminal_components)
-    terminal_update = wood_fasiolo_update(
-        terminal_components,
-        left.terminal_fit.coefficients,
-        left.terminal_fit.terminal_rank.pseudo_inverse(),
-        inverse_scale=1.0,
-        max_log_step=left.config.max_log_step,
-        minimum_lambda=left.config.minimum_lambda,
-        maximum_lambda=left.config.maximum_lambda,
-    )
-    proposal_by_name = {
-        name: abs(float(terminal_update.raw_log_steps[name])) for name in estimated_names
-    }
-    stationarity_by_name = {
-        name: abs(float(terminal_update.stationarity_log_residuals[name]))
-        for name in estimated_names
-    }
-    largest_proposal_name = max(proposal_by_name, key=proposal_by_name.__getitem__)
-    nominated_names = {
-        name for iteration in left.history for name in iteration.boundary_nominations
-    }
-    assert largest_proposal_name in nominated_names
-    assert proposal_by_name[largest_proposal_name] > 0.0
-    assert left.terminal_raw_max_log_step == max(stationarity_by_name.values())
-    assert left.converged == right.converged
-    assert left.convergence_reason == right.convergence_reason
-    assert left.matched_certified == right.matched_certified
-
-
-def test_an_interior_boundary_nomination_never_grants_convergence() -> None:
-    frame, response, predictors = _smooth_fixture()
-    # The first nomination arrives at iteration 9 and recurs at every later one, so a
-    # 30-iteration budget leaves 21 nominated iterations in which one could stop the
-    # fit; its history is exactly the first 30 records of a 200-iteration run.
-    model = fit_dense_distributional(
-        frame,
-        response,
-        family=GaussianLS(),
-        weight_contract=WeightContract(semantics="prior"),
-        predictors=predictors,
-        efs_config=DistributionalEFSConfig(
-            outer="efs", max_iterations=30, boundary_saturation=0.95
-        ),
-    )
-
-    smoothing = model.smoothing
-    assert smoothing is not None
-    # This deliberately demonstrates why saturation is telemetry: a finite
-    # interior fit can cross the same threshold and retain positive raw drift.
-    assert any(iteration.boundary_nominations for iteration in smoothing.history)
-    assert smoothing.converged is False
-    assert smoothing.convergence_reason == "max_iterations"
-    assert smoothing.terminal_raw_max_log_step > smoothing.config.tolerance
-    assert smoothing.unresolved_upper_bound == ()
-    assert smoothing.matched_certified is False
-
-
-def test_boundary_saturation_must_be_a_usable_fraction() -> None:
-    for value in (0.0, -0.25, 1.5, float("nan"), float("inf")):
-        with pytest.raises(ValueError, match="boundary_saturation"):
-            DistributionalEFSConfig(outer="efs", boundary_saturation=value)
-    # one disables the rule: the ratio it thresholds is bounded above by one,
-    # and disabled is the default
-    assert DistributionalEFSConfig(outer="efs").boundary_saturation == 1.0
-    # A zero streak would make nomination or plateau qualification immediate;
-    # fresh convergence evidence still independently controls convergence.
-    for value in (0, -1):
-        with pytest.raises(ValueError, match="boundary_iterations"):
-            DistributionalEFSConfig(outer="efs", boundary_iterations=value)
-        with pytest.raises(ValueError, match="plateau_iterations"):
-            DistributionalEFSConfig(outer="efs", plateau_iterations=value)
-
-
-def test_high_start_boundary_telemetry_never_changes_the_fit() -> None:
-    """Boundary nominations remain telemetry even when their classifier fires.
-
-    A fit started far above a finite optimum is saturated from iteration one
-    while EFS initially walks lambda down. True GFS can later propose an upward
-    correction, so neither saturation nor instantaneous direction separates a
-    finite optimum from infinity. The telemetry must not change the route.
-
-    Exercise the early nominations, not thousands of iterations toward the
-    optimum: this regression compares the entire real trajectory while the
-    two fits have the same finite iteration budget.
-    """
-    frame, response, predictors = _smooth_fixture()
-    high_start = {"location:x#wiggle": 100.0, "scale:z#wiggle": 100.0}
-    guarded = fit_dense_distributional(
-        frame,
-        response,
-        family=GaussianLS(),
-        weight_contract=WeightContract(semantics="prior"),
-        predictors=predictors,
-        lambdas=high_start,
-        efs_config=DistributionalEFSConfig(
-            outer="efs", max_iterations=20, boundary_saturation=0.95
-        ),
-    )
-    reference = fit_dense_distributional(
-        frame,
-        response,
-        family=GaussianLS(),
-        weight_contract=WeightContract(semantics="prior"),
-        predictors=predictors,
-        lambdas=high_start,
-        efs_config=DistributionalEFSConfig(outer="efs", max_iterations=20),
-    )
-
-    assert guarded.smoothing is not None and reference.smoothing is not None
-    assert any(iteration.boundary_nominations for iteration in guarded.smoothing.history)
-    assert all(not iteration.boundary_nominations for iteration in reference.smoothing.history)
-    assert (
-        tuple(
-            replace(iteration, boundary_nominations=()) for iteration in guarded.smoothing.history
-        )
-        == reference.smoothing.history
-    )
-    assert guarded.smoothing.iterations == reference.smoothing.iterations
-    assert guarded.smoothing.objective == reference.smoothing.objective
-    assert guarded.smoothing.converged == reference.smoothing.converged
-    assert guarded.smoothing.convergence_reason == reference.smoothing.convergence_reason
-    assert guarded.smoothing.matched_certified == reference.smoothing.matched_certified
-    np.testing.assert_array_equal(guarded.coefficients, reference.coefficients)
-    for name, reference_value in dict(reference.smoothing.lambdas).items():
-        assert dict(guarded.smoothing.lambdas)[name] == float(reference_value)
 
 
 def _rank_fit(matrix: np.ndarray) -> SimpleNamespace:

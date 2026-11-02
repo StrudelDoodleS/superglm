@@ -21,7 +21,7 @@ from superglm.inference.covariance import (
 )
 from superglm.model.retired_state import retained_linear_state
 from superglm.model.state_ops import _solver_space_working_weights
-from superglm.solvers.structured import (
+from superglm.solvers._structured.state import (
     FactorSmoothLevelSupport,
     StructuredLinearSystemState,
 )

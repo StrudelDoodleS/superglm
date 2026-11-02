@@ -250,7 +250,7 @@ class TestDiscreteTensorStepIsADescentDirection:
         """
         X, y = _stall_frame()
         model = _tensor_model()
-        model.fit_reml(X, y, max_reml_iter=12, runtime_validation="skip")
+        model.fit_reml(X, y, max_reml_iter=12)
 
         stats = model.reml_diagnostics()["profile"]["reml_outer_step_stats"]
         assert stats, "the damped tensor branch must have run"
@@ -272,7 +272,7 @@ class TestDiscreteTensorStepIsADescentDirection:
         """
         X, y = _stall_frame()
         model = _tensor_model()
-        model.fit_reml(X, y, max_reml_iter=40, runtime_validation="skip")
+        model.fit_reml(X, y, max_reml_iter=40)
 
         result = model._reml_result
         assert result.objective <= UNFIXED_STALL_OBJECTIVE - STALL_OBJECTIVE_MARGIN
@@ -293,7 +293,7 @@ class TestDiscreteTensorStepIsADescentDirection:
 
         X, y = _stall_frame()
         model = _tensor_model()
-        model.fit_reml(X, y, max_reml_iter=12, runtime_validation="skip")
+        model.fit_reml(X, y, max_reml_iter=12)
 
         result = model._reml_result
         assert result.termination_reason == "line_search_failed"
@@ -340,9 +340,7 @@ class TestDiscreteTensorStepIsADescentDirection:
             monkeypatch.setattr(discrete_reml, "_damped_tensor_newton_step", tight_trust_region)
         X, y = _mild_frame()
         model = _tensor_model()
-        model.fit_reml(
-            X, y, lambda2_init=start, reml_tol=8e-3, max_reml_iter=12, runtime_validation="skip"
-        )
+        model.fit_reml(X, y, lambda2_init=start, reml_tol=8e-3, max_reml_iter=12)
         profile = model.reml_diagnostics()["profile"]
         return (
             model._reml_result,
@@ -422,7 +420,7 @@ class TestDiscreteTensorStepIsADescentDirection:
 
         X, y = _mild_frame()
         model = _tensor_model()
-        model.fit_reml(X, y, max_reml_iter=1, runtime_validation="skip")
+        model.fit_reml(X, y, max_reml_iter=1)
 
         profile = model.reml_diagnostics()["profile"]
         entry = profile["reml_outer_step_stats"][0]
@@ -441,7 +439,7 @@ class TestUntouchedByTheTensorRepair:
         monkeypatch.setattr(discrete_reml, "_damped_tensor_newton_step", _forbid_tensor_step)
         X, y = _additive_frame()
         model = _additive_model()
-        model.fit_reml(X, y, runtime_validation="skip")
+        model.fit_reml(X, y)
 
         result = model._reml_result
         assert result.converged
@@ -459,7 +457,7 @@ class TestUntouchedByTheTensorRepair:
         monkeypatch.setattr(discrete_reml, "_damped_tensor_newton_step", _forbid_tensor_step)
         X, y = _additive_frame()
         model = _additive_model()
-        model.fit_reml(X, y, max_reml_iter=3, runtime_validation="skip")
+        model.fit_reml(X, y, max_reml_iter=3)
 
         result = model._reml_result
         assert not result.converged
@@ -485,7 +483,7 @@ class TestUntouchedByTheTensorRepair:
 
         X, y = _additive_frame()
         model = _additive_model()
-        model.fit_reml(X, y, max_reml_iter=4, runtime_validation="skip")
+        model.fit_reml(X, y, max_reml_iter=4)
 
         result = model._reml_result
         assert not result.converged
@@ -508,7 +506,7 @@ class TestUntouchedByTheTensorRepair:
         monkeypatch.setattr(discrete_reml, "_damped_tensor_newton_step", _forbid_tensor_step)
         X, y = _gamma_frame()
         model = _tensor_model(family="gamma")
-        model.fit_reml(X, y, max_reml_iter=3, runtime_validation="skip")
+        model.fit_reml(X, y, max_reml_iter=3)
 
         result = model._reml_result
         assert np.isfinite(result.objective)
@@ -518,7 +516,7 @@ class TestUntouchedByTheTensorRepair:
         """Curvature in both margins keeps the convergence fixture off flat directions."""
         X, y = _gamma_frame(curved=True)
         model = _tensor_model(family="gamma")
-        model.fit_reml(X, y, max_reml_iter=12, runtime_validation="skip")
+        model.fit_reml(X, y, max_reml_iter=12)
 
         result = model._reml_result
         assert result.converged
@@ -536,7 +534,7 @@ class TestUntouchedByTheTensorRepair:
         """
         X, y = _mild_frame()
         model = _tensor_model()
-        model.fit_reml(X, y, max_reml_iter=20, runtime_validation="skip")
+        model.fit_reml(X, y, max_reml_iter=20)
 
         result = model._reml_result
         assert result.converged

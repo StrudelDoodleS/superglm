@@ -77,6 +77,22 @@ from superglm.reml.scale import (
     profile_gaussian_reml_scale,
     profile_tweedie_reml_scale,
 )
+from superglm.solvers._structured.assembly import (
+    solve_cached_structured,
+)
+from superglm.solvers._structured.balance_tree import (
+    SumToZeroLeafSystem,
+)
+from superglm.solvers._structured.block_leaves import (
+    FactorSmoothLeafSystem,
+)
+from superglm.solvers._structured.moments import (
+    NestedStructuredSystem,
+)
+from superglm.solvers._structured.selection import (
+    record_auto_backend_decision,
+    resolve_structured_backend,
+)
 from superglm.solvers.dispersion import lazy_likelihood_size
 from superglm.solvers.hessian_factor import as_hessian_factor
 from superglm.solvers.irls_direct import (
@@ -92,14 +108,6 @@ from superglm.solvers.mode_score import (
 )
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
-from superglm.solvers.structured import (
-    FactorSmoothLeafSystem,
-    NestedStructuredSystem,
-    SumToZeroLeafSystem,
-    record_auto_backend_decision,
-    resolve_structured_backend,
-    solve_cached_structured,
-)
 from superglm.solvers.working_rows import fisher_working_weights, null_fit_eta
 from superglm.types import GroupSlice, PenaltyComponent
 

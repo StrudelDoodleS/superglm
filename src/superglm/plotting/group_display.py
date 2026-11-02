@@ -11,7 +11,7 @@ from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame
 from superglm.features.ordered_categorical import OrderedCategorical, group_axis_position
-from superglm.inference.term import SmoothCurve, TermInference
+from superglm.inference._term_types import SmoothCurve, TermInference
 
 
 @dataclass(frozen=True)

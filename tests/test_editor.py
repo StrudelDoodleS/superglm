@@ -27,6 +27,7 @@ from superglm import (
     generate_tweedie_cpg,
 )
 from superglm.editor import EditableTerm, EditorSession
+from superglm.editor import staging as staging_module
 from superglm.editor.apply import apply_edits_to_model_copy_with_data
 from superglm.editor.evaluation import coerce_dataset
 from superglm.editor.persistence import (
@@ -1447,7 +1448,7 @@ def test_widget_evidence_and_export_reuse_materialized_model(
         summary = widget._summary("in_force")
         metrics = widget._metrics("deviance", "in_force")
         report = widget._report("final")
-        saved = widget._save_model(path=str(tmp_path / "edited-model.joblib"))
+        saved = widget._export_file("joblib", path=str(tmp_path / "edited-model.joblib"))
         exported = widget._export_bytes("joblib", "edited-model.joblib")
         downloaded, filename = exported.data, exported.filename
     finally:
@@ -2354,7 +2355,8 @@ def test_collapse_selected_categorical_levels_refits_copied_model(editor_model, 
     session = EditorSession.from_model(editor_model, terms=["region", "x_spline"])
     session.select_levels("region", ["B", "C"])
 
-    refit = session.refit_with_collapsed_levels("region", method="fit")
+    with pytest.warns(FutureWarning, match="replace_with_collapsed_levels"):
+        refit = session.refit_with_collapsed_levels("region", method="fit")
 
     assert refit is not editor_model
     assert set(refit.features) == set(editor_model.features)
@@ -2377,15 +2379,24 @@ def test_collapse_selected_categorical_levels_refits_copied_model(editor_model, 
     assert inference.se_log_relativity is not None
 
 
+def test_refit_with_ungrouped_levels_warns_that_it_is_deprecated(editor_model):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+
+    with pytest.warns(FutureWarning, match="replace_with_ungrouped_levels"):
+        with pytest.raises(KeyError):
+            session.refit_with_ungrouped_levels("not_a_term", method="fit")
+
+
 def test_collapse_selected_ordered_categorical_levels_requires_contiguous_selection(editor_model):
     session = EditorSession.from_model(editor_model, terms=["band"])
     session.select_levels("band", ["low", "high"])
 
-    with pytest.raises(ValueError, match="contiguous"):
+    with pytest.raises(ValueError, match="contiguous"), pytest.warns(FutureWarning):
         session.refit_with_collapsed_levels("band", method="fit")
 
     session.select_levels("band", ["medium", "high"])
-    refit = session.refit_with_collapsed_levels("band", method="fit")
+    with pytest.warns(FutureWarning):
+        refit = session.refit_with_collapsed_levels("band", method="fit")
 
     grouping = refit.features["band"]._grouping
     assert grouping.original_to_group["low"] == "low"
@@ -4185,11 +4196,11 @@ def test_widget_structural_mutations_advance_chart_generation_once(editor_model)
     widget = session.widget()
     try:
         selected = widget._select("region", [1, 2])
-        collapsed = widget._collapse_levels("region", method="fit")["state"]
+        collapsed = _refit_at_once(widget, "collapse", "region")["state"]
         uncollapsed = widget._operate("undo")
         selected_again = widget._select("region", [1, 2])
-        collapsed_again = widget._collapse_levels("region", method="fit")["state"]
-        ungrouped = widget._ungroup_levels("region", method="fit")["state"]
+        collapsed_again = _refit_at_once(widget, "collapse", "region")["state"]
+        ungrouped = _refit_at_once(widget, "ungroup", "region")["state"]
     finally:
         widget.close()
 
@@ -4224,7 +4235,7 @@ def test_invalid_level_display_cannot_commit_structural_mutations(editor_model, 
     try:
         widget._select("region", [1, 2])
         if operation != "collapse":
-            widget._collapse_levels("region", method="fit")
+            _refit_at_once(widget, "collapse", "region")
 
         before_model = session.model
         before_revision = session.model_revision
@@ -4233,9 +4244,9 @@ def test_invalid_level_display_cannot_commit_structural_mutations(editor_model, 
 
         with pytest.raises(ValueError, match="level_display"):
             if operation == "collapse":
-                widget._collapse_levels("region", method="fit", level_display="invalid")
+                _refit_at_once(widget, "collapse", "region", level_display="invalid")
             elif operation == "ungroup":
-                widget._ungroup_levels("region", method="fit", level_display="invalid")
+                _refit_at_once(widget, "ungroup", "region", level_display="invalid")
             else:
                 widget._revert_to_original(level_display="invalid")
 
@@ -4290,10 +4301,10 @@ def test_widget_final_ungroup_keeps_collapse_metadata_history_aligned(editor_mod
     widget = session.widget()
     try:
         widget._select("region", [1, 2])
-        widget._collapse_levels("region", method="fit")
+        _refit_at_once(widget, "collapse", "region")
         widget._select("region", [1, 2])
 
-        state = widget._ungroup_levels("region", method="fit")["state"]
+        state = _refit_at_once(widget, "ungroup", "region")["state"]
     finally:
         widget.close()
 
@@ -4710,10 +4721,7 @@ def test_widget_http_collapse_levels_refit_updates_summary_source(editor_model):
     widget = session.widget()
     try:
         _post_json(f"{widget.url}/select", {"term": "region", "indices": [1, 2]})
-        payload = _post_json(
-            f"{widget.url}/collapse_levels",
-            {"term": "region", "method": "fit", "level_display": "grouped"},
-        )
+        payload = _post_refit_at_once(widget, "collapse", "region", level_display="grouped")
 
         assert set(payload) == {"state", "summary", "timing"}
         assert payload["summary"]["available"] is True
@@ -4743,12 +4751,9 @@ def test_widget_http_ungroup_levels_returns_transition_envelope(editor_model):
     widget = session.widget()
     try:
         _post_json(f"{widget.url}/select", {"term": "region", "indices": [1, 2]})
-        _post_json(f"{widget.url}/collapse_levels", {"term": "region", "method": "fit"})
+        _post_refit_at_once(widget, "collapse", "region")
 
-        payload = _post_json(
-            f"{widget.url}/ungroup_levels",
-            {"term": "region", "method": "fit", "level_display": "grouped"},
-        )
+        payload = _post_refit_at_once(widget, "ungroup", "region", level_display="grouped")
 
         assert set(payload) == {"state", "summary", "timing"}
         assert payload["summary"]["available"] is True
@@ -4767,7 +4772,7 @@ def _structural_alias_fixture(editor_model):
     session = EditorSession.from_model(editor_model, terms=["region"])
     widget = session.widget()
     session.select_levels("region", ["B", "C"])
-    envelope = widget._collapse_levels("region", method="fit")
+    envelope = _refit_at_once(widget, "collapse", "region")
     return session, widget, envelope
 
 
@@ -4883,9 +4888,8 @@ def test_widget_collapse_restores_selection_by_level_when_indices_are_stale(
     try:
         session.select_indices("region", [1, 2])
 
-        def replace_with_smaller_term(term, *, method="auto", keep_reference=True):
-            assert term == "region"
-            assert method == "fit"
+        def replace_with_smaller_term(session_, operation, term, params, *, keep_reference=True):
+            assert (session_, operation, term) == (session, "collapse", "region")
             assert keep_reference is True
             session.terms["region"] = EditableTerm(
                 name="region",
@@ -4900,14 +4904,14 @@ def test_widget_collapse_restores_selection_by_level_when_indices_are_stale(
             session._selection["region"] = np.array([], dtype=np.intp)
             return editor_model
 
-        monkeypatch.setattr(session, "replace_with_collapsed_levels", replace_with_smaller_term)
+        monkeypatch.setattr(staging_module, "stage_and_refit", replace_with_smaller_term)
         monkeypatch.setattr(
             widget_module,
             "summary_payload",
             lambda *_args, **_kwargs: {"available": True, "source": "in_force"},
         )
 
-        payload = widget._collapse_levels("region", method="fit")
+        payload = _refit_at_once(widget, "collapse", "region")
 
         assert payload["summary"]["available"] is True
         assert session.selection("region").tolist() == [1]
@@ -4924,9 +4928,9 @@ def test_widget_collapse_levels_reports_refit_timing(editor_model, monkeypatch):
     try:
         monkeypatch.setattr(widget_module.time, "perf_counter", lambda: next(clock))
         monkeypatch.setattr(
-            session,
-            "replace_with_collapsed_levels",
-            lambda term, *, method="auto", keep_reference=True: editor_model,
+            staging_module,
+            "stage_and_refit",
+            lambda *_args, **_kwargs: editor_model,
         )
         monkeypatch.setattr(
             widget_module,
@@ -4934,7 +4938,7 @@ def test_widget_collapse_levels_reports_refit_timing(editor_model, monkeypatch):
             lambda *_args, **_kwargs: {"available": True, "source": "in_force"},
         )
 
-        payload = widget._collapse_levels("region", method="fit")
+        payload = _refit_at_once(widget, "collapse", "region", {"levels": []})
 
         assert payload["timing"]["operation"] == "collapse_levels"
         assert payload["timing"]["fit_ms"] == pytest.approx(50.0)
@@ -4968,9 +4972,7 @@ def test_widget_http_undo_and_redo_step_across_a_collapse(editor_model):
     widget = session.widget()
     try:
         _post_json(f"{widget.url}/select", {"term": "region", "indices": [1, 2]})
-        collapse_payload = _post_json(
-            f"{widget.url}/collapse_levels", {"term": "region", "method": "fit"}
-        )
+        collapse_payload = _post_refit_at_once(widget, "collapse", "region")
         collapsed = widget.session.model
         assert collapse_payload["state"]["undo_redo"]["undo"] == "collapse B + C in region"
         assert collapsed.features["region"]._grouping.original_to_group["B"] == "B+C"
@@ -5523,7 +5525,7 @@ def test_widget_http_collapse_invalidates_stale_fixed_offset_refit(editor_model)
         assert refit["available"] is True
 
         _post_json(f"{widget.url}/select", {"term": "region", "indices": [1, 2]})
-        _post_json(f"{widget.url}/collapse_levels", {"term": "region", "method": "fit"})
+        _post_refit_at_once(widget, "collapse", "region")
 
         stale_refit = _post_json(f"{widget.url}/summary", {"source": "refit"})
         assert stale_refit["available"] is False
@@ -5645,7 +5647,7 @@ def test_widget_http_report_sanitizes_non_finite_cv_values(editor_model, editor_
         widget.close()
 
 
-def test_widget_http_save_model_writes_edited_joblib(editor_model, tmp_path):
+def test_widget_http_export_file_writes_edited_joblib(editor_model, tmp_path):
     import joblib
 
     session = EditorSession.from_model(editor_model, terms=["x_spline"])
@@ -5655,8 +5657,8 @@ def test_widget_http_save_model_writes_edited_joblib(editor_model, tmp_path):
     widget = session.widget()
     try:
         payload = _post_json(
-            f"{widget.url}/save_model",
-            {"directory": str(tmp_path), "filename": "edited-model"},
+            f"{widget.url}/export_file",
+            {"format": "joblib", "directory": str(tmp_path), "filename": "edited-model"},
         )
     finally:
         widget.close()
@@ -5769,7 +5771,7 @@ def test_save_model_uses_validation_data_without_retained_fit_state(tmp_path):
     assert saved_model.summary()["deviance"]["deviance"] is not None
 
 
-def test_widget_http_download_model_returns_joblib_attachment(editor_model):
+def test_widget_http_download_export_joblib_returns_joblib_attachment(editor_model):
     import io
 
     import joblib
@@ -5781,7 +5783,7 @@ def test_widget_http_download_model_returns_joblib_attachment(editor_model):
     widget = session.widget()
     try:
         request = urllib.request.Request(
-            f"{widget.url}/download_model?filename=edited-model.joblib",
+            f"{widget.url}/download_export?format=joblib&filename=edited-model.joblib",
             headers=_editor_token_header(widget.url),
         )
         with urllib.request.urlopen(request, timeout=5) as response:
@@ -6105,7 +6107,7 @@ def test_widget_export_file_discards_superseded_build(
     assert not target.exists()
 
 
-def test_widget_http_download_model_uses_session_train_data_without_retained_fit_state():
+def test_widget_http_download_export_joblib_uses_session_train_data_without_retained_fit_state():
     import io
 
     import joblib
@@ -6127,7 +6129,7 @@ def test_widget_http_download_model_uses_session_train_data_without_retained_fit
     widget = session.widget()
     try:
         request = urllib.request.Request(
-            f"{widget.url}/download_model?filename=edited-model.joblib",
+            f"{widget.url}/download_export?format=joblib&filename=edited-model.joblib",
             headers=_editor_token_header(widget.url),
         )
         with urllib.request.urlopen(request, timeout=5) as response:
@@ -6140,7 +6142,7 @@ def test_widget_http_download_model_uses_session_train_data_without_retained_fit
     assert downloaded_model.summary()["deviance"]["deviance"] is not None
 
 
-def test_widget_http_download_model_uses_validation_data_without_retained_fit_state():
+def test_widget_http_download_export_joblib_uses_validation_data_without_retained_fit_state():
     import io
 
     import joblib
@@ -6165,7 +6167,7 @@ def test_widget_http_download_model_uses_validation_data_without_retained_fit_st
     widget = session.widget()
     try:
         request = urllib.request.Request(
-            f"{widget.url}/download_model?filename=edited-model.joblib",
+            f"{widget.url}/download_export?format=joblib&filename=edited-model.joblib",
             headers=_editor_token_header(widget.url),
         )
         with urllib.request.urlopen(request, timeout=5) as response:
@@ -6919,7 +6921,6 @@ def test_editor_server_declares_fastapi_routes():
     }
 
     assert ("/state", frozenset({"GET"})) in routes
-    assert ("/health", frozenset({"GET"})) in routes
     assert ("/term", frozenset({"POST"})) in routes
     assert ("/select", frozenset({"POST"})) in routes
     assert ("/op", frozenset({"POST"})) in routes
@@ -6929,22 +6930,17 @@ def test_editor_server_declares_fastapi_routes():
     assert ("/metrics", frozenset({"POST"})) in routes
     assert ("/summary", frozenset({"POST"})) in routes
     assert ("/report", frozenset({"POST"})) in routes
-    assert ("/save_model", frozenset({"POST"})) in routes
-    assert ("/download_model", frozenset({"GET"})) in routes
     assert ("/export_file", frozenset({"POST"})) in routes
     assert ("/download_export", frozenset({"GET"})) in routes
     assert ("/native_save_dialog", frozenset({"POST"})) not in routes
     assert ("/open_directory", frozenset({"POST"})) in routes
     assert ("/save_directory", frozenset({"POST"})) in routes
     assert ("/refit_offset", frozenset({"POST"})) in routes
-    assert ("/profile_distribution", frozenset({"POST"})) in routes
     assert ("/profile_distribution/start", frozenset({"POST"})) in routes
     assert ("/profile_distribution/status/{job_id}", frozenset({"GET"})) in routes
     assert ("/job_start", frozenset({"POST"})) in routes
     assert ("/job_status", frozenset({"POST"})) in routes
     assert ("/job_cancel", frozenset({"POST"})) in routes
-    assert ("/collapse_levels", frozenset({"POST"})) in routes
-    assert ("/ungroup_levels", frozenset({"POST"})) in routes
     assert ("/reorder_levels", frozenset({"POST"})) in routes
     assert ("/stage", frozenset({"POST"})) in routes
     assert ("/refit_pending", frozenset({"POST"})) in routes
@@ -7014,6 +7010,41 @@ def _get_json(url: str):
     request = urllib.request.Request(url, headers=_editor_token_header(url))
     with urllib.request.urlopen(request, timeout=5) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _refit_at_once(
+    widget,
+    operation: str,
+    term: str | None = None,
+    params: dict | None = None,
+    *,
+    level_display: str = "expanded",
+    keep_reference: bool = True,
+):
+    """One structural change staged and refitted at once, as Settings' "Refit
+    after every structural change" sends it: collapse and ungroup act on the
+    levels Python holds selected."""
+    term = widget.selected_term if term is None else term
+    if params is None:
+        params = {"levels": staging_module.selected_labels(widget.session, term)}
+    return widget._stage(
+        operation,
+        term,
+        params,
+        refit=True,
+        keep_reference=keep_reference,
+        level_display=level_display,
+    )
+
+
+def _post_refit_at_once(widget, operation: str, term: str, params: dict | None = None, **body):
+    """The HTTP form of :func:`_refit_at_once`: /stage with ``refit``."""
+    if params is None:
+        params = {"levels": staging_module.selected_labels(widget.session, term)}
+    return _post_json(
+        f"{widget.url}/stage",
+        {"operation": operation, "term": term, "params": params, "refit": True, **body},
+    )
 
 
 def _post_json(url: str, payload: dict):

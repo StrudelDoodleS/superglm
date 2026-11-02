@@ -13,40 +13,58 @@ from numpy.typing import NDArray
 
 from superglm._blas_threads import keep_narrow_cap
 from superglm.group_matrix import DesignMatrix
-from superglm.solvers._structured.assembly import profile_structured_factor
-from superglm.solvers._structured.block_leaves import factor_smooth_prior_statistics
+from superglm.solvers._structured.assembly import (
+    build_augmented_structured_factor,
+    build_penalized_structured_operator,
+    profile_structured_factor,
+    solve_augmented_normal_equations,
+)
+from superglm.solvers._structured.balance_tree import (
+    SumToZeroLeafSystem,
+    SumToZeroPenalizedOperator,
+    SumToZeroTreeFactor,
+)
+from superglm.solvers._structured.block_leaves import (
+    FactorSmoothLeafSystem,
+    FactorSmoothPenalizedOperator,
+    factor_smooth_prior_statistics,
+)
+from superglm.solvers._structured.geometry import (
+    cancelled_column_row_norms,
+)
+from superglm.solvers._structured.layout import (
+    FactorSmoothLeafLayout,
+    get_structured_layout,
+)
+from superglm.solvers._structured.moments import (
+    NestedStructuredSystem,
+    build_structured_system,
+    nested_prior_statistics,
+)
+from superglm.solvers._structured.nested import (
+    NestedDataOperator,
+    NestedPenalizedOperator,
+    NestedStructuredLayout,
+)
+from superglm.solvers._structured.operators import (
+    BlockSymmetricOperator,
+    CenteredBlockOperator,
+    SumToZeroBlockOperator,
+    compact_operator_diagonal,
+)
+from superglm.solvers._structured.state import (
+    centred_data_operator,
+)
 from superglm.solvers.hessian_factor import HessianFactor
 from superglm.solvers.irls_direct._finalise import _IRLSDirectFinalGeometry
 from superglm.solvers.irls_direct._step import _IRLSDirectStep
 from superglm.solvers.mode_score import centre_offset_mean, centred_data_score
-from superglm.solvers.structured import (
-    BlockSymmetricOperator,
-    CenteredBlockOperator,
-    FactorSmoothLeafLayout,
-    FactorSmoothLeafSystem,
-    FactorSmoothPenalizedOperator,
-    NestedDataOperator,
-    NestedPenalizedOperator,
-    NestedStructuredLayout,
-    NestedStructuredSystem,
-    SumToZeroBlockOperator,
-    SumToZeroLeafSystem,
-    SumToZeroPenalizedOperator,
-    SumToZeroTreeFactor,
-    build_augmented_structured_factor,
-    build_penalized_structured_operator,
-    build_structured_system,
-    cancelled_column_row_norms,
-    centred_data_operator,
-    compact_operator_diagonal,
-    get_structured_layout,
-    nested_prior_statistics,
-    solve_augmented_normal_equations,
-)
 
 if TYPE_CHECKING:
+    from superglm.solvers._structured.selection import (
+        StructuredBackendDecision,
+    )
     from superglm.solvers.irls_direct._fit import _IRLSDirectFit
-    from superglm.solvers.structured import StructuredBackendDecision
     from superglm.types import GroupSlice
 
 

@@ -42,6 +42,9 @@ from superglm.group_matrix import (
     SupportCompressedSSPGroupMatrix,
 )
 from superglm.links import IdentityLink, Link, LogitLink, LogLink, stabilize_eta
+from superglm.solvers._structured.selection import (
+    resolve_structured_backend,
+)
 from superglm.solvers.centered_system import (
     CenteredSystem,
     TabmatCenteringState,
@@ -93,7 +96,6 @@ from superglm.solvers.rank import (
     decompose_gram_if_authoritative,
     decompose_symmetric,
 )
-from superglm.solvers.structured import resolve_structured_backend
 from superglm.solvers.working_rows import (
     CoefficientWorkingRows,
     coefficient_initial_intercept,

@@ -1056,25 +1056,6 @@ def _rebind_penalty_context(
             component._penalty_geometry = owner
 
 
-def _snapshot_penalty_context(
-    components: Sequence[PenaltyComponent],
-) -> tuple[PenaltyComponent, ...]:
-    """Own declared component arrays while preserving complete selected targets."""
-    copied = tuple(
-        replace(
-            component,
-            omega_raw=None if component.omega_raw is None else _frozen_array(component.omega_raw),
-            omega_ssp=None if component.omega_ssp is None else _frozen_array(component.omega_ssp),
-            eigvals_omega=(
-                None if component.eigvals_omega is None else _frozen_array(component.eigvals_omega)
-            ),
-        )
-        for component in components
-    )
-    _rebind_penalty_context(components, copied)
-    return copied
-
-
 def _penalty_component_omega_ssp(
     component: PenaltyComponent,
     group_matrix: GroupMatrix | None = None,

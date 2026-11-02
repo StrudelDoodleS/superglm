@@ -38,13 +38,19 @@ from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.penalty_algebra import build_penalty_matrix
 from superglm.reml.w_derivatives import reml_w_correction
-from superglm.solvers.structured import (
-    BlockSymmetricOperator,
+from superglm.solvers._structured.block_leaves import (
     FactorSmoothLeafFactor,
     ProfiledFactorSmoothLeafFactor,
-    StructuredLinearSystemState,
+)
+from superglm.solvers._structured.operators import (
+    BlockSymmetricOperator,
     materialize_compact_operator,
+)
+from superglm.solvers._structured.selection import (
     resolve_structured_backend,
+)
+from superglm.solvers._structured.state import (
+    StructuredLinearSystemState,
 )
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -1072,7 +1078,6 @@ def test_factor_smooth_exact_reml_matches_dense_end_to_end(family: str) -> None:
         max_reml_iter=6,
         reml_tol=1e-5,
         pirls_tol=1e-9,
-        runtime_validation="skip",
     )
     structured.fit_reml(
         X,
@@ -1082,7 +1087,6 @@ def test_factor_smooth_exact_reml_matches_dense_end_to_end(family: str) -> None:
         max_reml_iter=6,
         reml_tol=1e-5,
         pirls_tol=1e-9,
-        runtime_validation="skip",
     )
 
     np.testing.assert_allclose(structured.result.beta, dense.result.beta, atol=5e-8)
@@ -1155,12 +1159,10 @@ def test_factor_smooth_estimability_and_summary_match_dense_centered_geometry():
     dense = SuperGLM(**common, direct_solve="gram").fit_reml(
         X,
         y,
-        runtime_validation="skip",
     )
     structured = SuperGLM(**common, direct_solve="structured").fit_reml(
         X,
         y,
-        runtime_validation="skip",
     )
 
     np.testing.assert_array_equal(
@@ -1242,7 +1244,6 @@ def test_auto_factor_smooth_falls_back_for_unsupported_local_geometry(
         y,
         sample_weight=sample_weight,
         offset=offset,
-        runtime_validation="skip",
     )
 
     if basis == "fs":
@@ -1263,7 +1264,6 @@ def test_auto_factor_smooth_falls_back_for_unsupported_local_geometry(
         y,
         sample_weight=sample_weight,
         offset=offset,
-        runtime_validation="skip",
     )
     live = sample_weight > 0.0
     np.testing.assert_allclose(model.predict(X)[live], gram.predict(X)[live], atol=2.0e-8)
@@ -1365,12 +1365,10 @@ def test_zero_penalty_fs_falls_back_or_rejects_but_gram_fits() -> None:
     automatic = SuperGLM(**common, direct_solve="auto").fit_reml(
         X,
         y,
-        runtime_validation="skip",
     )
     gram = SuperGLM(**common, direct_solve="gram").fit_reml(
         X,
         y,
-        runtime_validation="skip",
     )
 
     assert automatic.result.direct_backend == "gram"
@@ -1383,7 +1381,6 @@ def test_zero_penalty_fs_falls_back_or_rejects_but_gram_fits() -> None:
         SuperGLM(**common, direct_solve="structured").fit_reml(
             X,
             y,
-            runtime_validation="skip",
         )
 
 
@@ -1420,12 +1417,10 @@ def test_zero_penalty_sz_wiggle_remains_structured_and_matches_gram() -> None:
     structured = SuperGLM(**common, direct_solve="structured").fit_reml(
         X,
         y,
-        runtime_validation="skip",
     )
     gram = SuperGLM(**common, direct_solve="gram").fit_reml(
         X,
         y,
-        runtime_validation="skip",
     )
 
     assert structured.result.direct_backend == "structured"
@@ -1483,15 +1478,15 @@ def test_two_factor_smooths_auto_fall_back_and_forced_structured_rejects():
             direct_solve=mode,
         )
 
-    gram = model("gram").fit_reml(X, y, runtime_validation="skip")
-    auto = model("auto").fit_reml(X, y, runtime_validation="skip")
+    gram = model("gram").fit_reml(X, y)
+    auto = model("auto").fit_reml(X, y)
 
     assert auto.result.direct_backend == "gram"
     assert "at most one FactorSmooth" in auto.result.direct_fallback_reason
     np.testing.assert_allclose(auto.predict(X), gram.predict(X), atol=2e-8)
 
     with pytest.raises(ValueError, match="at most one FactorSmooth"):
-        model("structured").fit_reml(X, y, runtime_validation="skip")
+        model("structured").fit_reml(X, y)
 
 
 @pytest.mark.parametrize("basis", ["fs", "sz"])
@@ -1523,9 +1518,9 @@ def test_single_factor_smooth_dominates_wider_random_effect(basis: str):
             direct_solve=mode,
         )
 
-    gram = model("gram").fit_reml(X, y, runtime_validation="skip")
-    auto = model("auto").fit_reml(X, y, runtime_validation="skip")
-    structured = model("structured").fit_reml(X, y, runtime_validation="skip")
+    gram = model("gram").fit_reml(X, y)
+    auto = model("auto").fit_reml(X, y)
+    structured = model("structured").fit_reml(X, y)
 
     # Selection still nominates the single FactorSmooth as the dominant block
     # over the wider RandomEffect -- forced structured factors around it -- but

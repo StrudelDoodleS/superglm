@@ -316,7 +316,6 @@ def test_auto_detection_cannot_bypass_group_geometry_validation(basis) -> None:
             X,
             y,
             max_reml_iter=1,
-            runtime_validation="skip",
         )
 
 

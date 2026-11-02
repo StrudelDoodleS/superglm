@@ -16,7 +16,9 @@ from superglm import (
     Spline,
     SuperGLM,
 )
-from superglm.solvers.structured import FactorSmoothLevelSupport
+from superglm.solvers._structured.state import (
+    FactorSmoothLevelSupport,
+)
 
 
 def _data() -> tuple[pd.DataFrame, np.ndarray]:
@@ -98,7 +100,6 @@ def test_released_fs_report_is_backend_neutral(direct_solve: str):
         X,
         y,
         max_reml_iter=2,
-        runtime_validation="skip",
     )
 
     assert model.result.direct_backend == "gram"
@@ -150,7 +151,6 @@ def test_factor_smooth_evaluation_metrics_expand_structured_penalties(
         X,
         y,
         max_reml_iter=1,
-        runtime_validation="skip",
     )
 
     leverage = model.metrics(X.copy(), y.copy()).leverage
@@ -166,7 +166,6 @@ def test_factor_smooth_conditional_and_population_prediction(discrete: bool) -> 
         X,
         y,
         max_reml_iter=2,
-        runtime_validation="skip",
     )
     spec = model._interaction_specs["x:segment:fs"]
     group = next(group for group in model._groups if group.name == "x:segment:fs")
@@ -196,7 +195,6 @@ def test_factor_smooth_prediction_policies_validate_unseen_and_missing(
         X,
         y,
         max_reml_iter=2,
-        runtime_validation="skip",
     )
     unseen = X.iloc[:4].copy()
     unseen["segment"] = "never-seen"
@@ -226,7 +224,6 @@ def test_factor_smooth_population_prediction_ignores_unseen_policy() -> None:
         X,
         y,
         max_reml_iter=2,
-        runtime_validation="skip",
     )
     known = X.iloc[:4].copy()
     unseen = known.copy()
@@ -250,7 +247,6 @@ def test_factor_smooth_prediction_survives_released_state_and_pickle(
         X,
         y,
         max_reml_iter=2,
-        runtime_validation="skip",
     )
     rows = X.iloc[:12]
     expected = model.predict(rows)
@@ -274,13 +270,11 @@ def test_factor_smooth_report_matches_dense_covariance_and_edf() -> None:
         X,
         y,
         max_reml_iter=2,
-        runtime_validation="skip",
     )
     structured = _model(discrete=False).fit_reml(
         X,
         y,
         max_reml_iter=2,
-        runtime_validation="skip",
     )
     grid = np.linspace(-0.9, 0.9, 11)
     dense_report = dense.factor_smooth("x:segment:fs", grid=grid)
@@ -354,7 +348,6 @@ def test_factor_smooth_report_selects_levels_and_flags_insufficient_support() ->
         X.iloc[keep].reset_index(drop=True),
         y[keep],
         max_reml_iter=2,
-        runtime_validation="skip",
     )
 
     report = model.factor_smooth(
@@ -385,7 +378,6 @@ def test_factor_smooth_zero_weight_level_has_no_information() -> None:
         y,
         sample_weight=sample_weight,
         max_reml_iter=2,
-        runtime_validation="skip",
     )
 
     report = model.factor_smooth("x:segment:fs", grid=5)
@@ -421,7 +413,6 @@ def test_unpenalized_factor_smooth_reports_infinite_variance_components() -> Non
     ).fit_reml(
         X,
         y,
-        runtime_validation="skip",
     )
 
     report = model.factor_smooth("x:segment:fs", grid=5)
@@ -439,7 +430,6 @@ def test_factor_smooth_upper_boundary_reports_collapse() -> None:
         X,
         y,
         max_reml_iter=2,
-        runtime_validation="skip",
     )
 
     with pytest.warns(UserWarning, match="collapsed"):

@@ -27,6 +27,7 @@ from superglm.editor.carry import carried_curve
 from superglm.editor.collapse import (
     collapsed_feature_spec,
     reference_feature_spec,
+    ungroup_label,
     ungrouped_feature_spec,
 )
 from superglm.editor.errors import (
@@ -276,12 +277,20 @@ def stage_and_refit(
     The step keeps the state from before the change was staged, so one Undo
     takes the whole call back and any earlier waiting changes wait again. A
     refusal leaves nothing staged; a library range refusal reads as the
-    operation's own fixed sentence.
+    operation's own fixed sentence. An ungroup that reproduces the fit from
+    before the latest step puts that fit back instead of refitting
+    (:func:`_restore_pre_collapse`).
     """
     before = session._capture_state()
     future = (list(session.redo_stack), list(session.pending_redo), list(session.structure_redo))
     change = None
     try:
+        if operation == "ungroup":
+            restored = _restore_pre_collapse(
+                session, term, params, keep_reference=keep_reference, **refit_kwargs
+            )
+            if restored is not None:
+                return restored
         change = stage_structural(
             session,
             operation,
@@ -302,6 +311,44 @@ def stage_and_refit(
             raise
         raise EditorValueError(sentence) from exc
     return session.model
+
+
+def _restore_pre_collapse(
+    session: EditorSession,
+    term: str,
+    params: dict[str, Any],
+    *,
+    keep_reference: bool,
+    **refit_kwargs: Any,
+):
+    """Put back the fit from before the latest step when this ungroup reproduces it exactly.
+
+    With nothing waiting and no New levels choice since the latest step, an
+    ungroup that removes the model's last collapsed group reuses the fit from
+    before that step, when that model had none and its term is the one the
+    ungroup would fit, reference included, on the same rows, with the same
+    method and at the penalties the ungroup would record as given. Returns
+    the model put in force, or None when the ungroup must refit.
+    """
+    if session.pending:
+        return None
+    editable = session._require_term(term)
+    idx = np.unique(_level_indices(editable, _param(params, "levels")))
+    model = session._pre_collapse_model(term, idx, keep_reference=keep_reference, **refit_kwargs)
+    if model is None:
+        return None
+    # In the sorted display order the ungrouped spec uses.
+    label = ungroup_label(term, [str(editable.levels[int(index)]) for index in idx])
+    put_in_force(
+        session,
+        model,
+        restructured={term},
+        at_once=True,
+        operation="ungroup_levels",
+        term=term,
+        label=label,
+    )
+    return model
 
 
 def put_in_force(

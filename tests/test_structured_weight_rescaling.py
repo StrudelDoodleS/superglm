@@ -98,12 +98,16 @@ from superglm.model.reml_setup import collect_reml_groups
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.penalty_algebra import build_penalty_context, build_penalty_matrix
 from superglm.reml.w_derivatives import reml_w_correction
-from superglm.solvers.irls_direct import StructuredSolverError, fit_irls_direct
-from superglm.solvers.structured import (
-    ProfiledFactorSmoothLeafFactor,
-    ProfiledNestedSchurFactor,
+from superglm.solvers._structured.balance_tree import (
     ProfiledSumToZeroTreeFactor,
 )
+from superglm.solvers._structured.block_leaves import (
+    ProfiledFactorSmoothLeafFactor,
+)
+from superglm.solvers._structured.nested import (
+    ProfiledNestedSchurFactor,
+)
+from superglm.solvers.irls_direct import StructuredSolverError, fit_irls_direct
 
 EPS = float(np.finfo(np.float64).eps)
 _U = EPS / 2.0

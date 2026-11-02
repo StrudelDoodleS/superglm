@@ -55,7 +55,6 @@ def request_json(widget, path, payload=None):
     [
         ("/op", {"operation": "reset"}, "_operate"),
         ("/download_export", None, "_export_bytes"),
-        ("/download_model", None, "_export_bytes"),
     ],
 )
 def test_backend_errors_are_private(

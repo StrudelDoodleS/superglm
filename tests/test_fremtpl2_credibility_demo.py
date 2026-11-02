@@ -114,7 +114,6 @@ def test_demo_factor_smooth_variant_has_public_fitted_report() -> None:
         max_reml_iter=1,
         pirls_tol=1.0e-8,
         max_pirls_iter=60,
-        runtime_validation="skip",
     )
 
     report = model.factor_smooth("DrivAge:Region:fs", grid=12)

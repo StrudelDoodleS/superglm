@@ -64,12 +64,11 @@ from scipy.stats import gamma as gamma_law  # noqa: E402
 from superglm.distributional.kernels._incomplete_gamma import (  # noqa: E402
     MAX_ORDER,
     WORK_SIZE,
-    log_gamma_tail,
     log_gamma_tail_jet_into,
-    log_gamma_tail_jets,
     log_gamma_tail_scaled_into,
     output_size,
 )
+from tests._incomplete_gamma_entry import log_gamma_tail, log_gamma_tail_jets  # noqa: E402
 
 _DIGITS = 60
 _TOLERANCE = (1e-12, 1e-12, 1e-12, 1e-11, 1e-10)

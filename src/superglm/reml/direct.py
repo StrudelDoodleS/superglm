@@ -75,6 +75,11 @@ from superglm.reml.scale import (
     profile_tweedie_reml_scale,
 )
 from superglm.reml.w_derivatives import reml_w_correction, validate_w_correction_order
+from superglm.solvers._structured.selection import (
+    record_auto_backend_decision,
+    resolve_structured_backend,
+    select_structured_group,
+)
 from superglm.solvers.centered_system import (
     TabmatCenteringState,
     _FisherDataReuse,
@@ -84,11 +89,6 @@ from superglm.solvers.dispersion import lazy_likelihood_size
 from superglm.solvers.hessian_factor import DenseHessianFactor, as_hessian_factor
 from superglm.solvers.irls_direct import StructuredSolverError, fit_irls_direct
 from superglm.solvers.mode_score import centred_warm_start, mode_certification_bar
-from superglm.solvers.structured import (
-    record_auto_backend_decision,
-    resolve_structured_backend,
-    select_structured_group,
-)
 from superglm.types import GroupSlice, PenaltyComponent
 
 # The solve ceiling and the certification bar both live in observed_geometry

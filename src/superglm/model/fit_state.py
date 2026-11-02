@@ -643,10 +643,6 @@ def _read_solver_state_from_public(model) -> None:
     beta = np.asarray(public.beta, dtype=np.float64)
     shift = canonical_intercept_shift(model, beta)
     state["intercept_shift"] = float(shift)
-    diagnostics = state.get("diagnostics")
-    if isinstance(diagnostics, dict):
-        diagnostics["intercept_shift"] = float(shift)
-        diagnostics["coefficients_revised"] = True
     for term_state in state.get("terms", {}).values():
         term_shift = 0.0
         for group_state in term_state.get("groups", []):

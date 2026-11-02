@@ -376,7 +376,6 @@ def fit_once(
         reml_tol=reml_tol,
         pirls_tol=1e-8,
         max_pirls_iter=100,
-        runtime_validation="skip",
     )
     return model, time.perf_counter() - started
 

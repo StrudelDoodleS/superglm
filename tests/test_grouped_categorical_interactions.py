@@ -648,8 +648,14 @@ def test_public_grouped_interaction_fit_predict_and_canonicalization():
     canonical = model._runtime_canonical_state
     assert canonical["terms"]
     assert canonical["solver_to_public_complete"] is True
-    assert canonical["diagnostics"]["max_abs_eta_delta"] < 1e-12
-    assert canonical["diagnostics"]["max_abs_mu_delta"] < 1e-12
+    solver = model._solver_pirls_result()
+    solver_eta = model._dm.matvec(solver.beta) + solver.intercept
+    np.testing.assert_allclose(
+        model._link.link(prediction),
+        solver_eta,
+        rtol=0.0,
+        atol=1e-12 * (1 + np.abs(solver_eta).max()),
+    )
     same_group = pd.DataFrame({"x": [0.25, 0.25], "g": ["a", "b"]})
     np.testing.assert_allclose(model.predict(same_group)[0], model.predict(same_group)[1])
 
