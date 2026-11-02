@@ -333,6 +333,7 @@ class OrderedCategorical:
         sparse bands better than free levels do. A label listed here is
         removed from ``order``/``values`` if also present there, and never
         receives a numeric position on the smooth's axis.
+
     Examples
     --------
     Using ordered level names (auto-spaced 0 to 1) with an explicit smooth::
