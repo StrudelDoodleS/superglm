@@ -49,16 +49,42 @@ def shape_engine(spec: Any) -> Literal["qp"] | None:
 
 
 def saved_on_scop(spec: Any) -> bool:
-    """Whether ``spec`` is a P-spline 0.41.0 or earlier fitted on SCOP, not yet built since.
+    """Whether ``spec`` is a spline 0.41.0 or earlier fitted on SCOP, not yet built since.
 
-    Such a spec was pickled before ``shape_engine`` existed, so it reads the
-    class default None.
+    A P-spline was pickled before ``shape_engine`` existed, so it reads the
+    class default None; a spline declared with no kind that such a fit built
+    as one is marked None when it loads (``mark_kindless_saved_on_scop``).
     """
     return _uses_fit_time_shape_constraints(spec) and getattr(spec, "shape_engine", "qp") is None
 
 
+def mark_kindless_saved_on_scop(model) -> None:
+    """Mark each kindless declaration that ``model``'s saved fit built as a SCOP P-spline.
+
+    0.40.0 and 0.41.0 fitted a spline declared with no kind beside a
+    constrained P-spline as a ``ps`` on SCOP, and kept the kindless
+    declaration as the model's template.  Every refit now builds that
+    declaration as it reads, a ``cr`` on the QP, as a fresh fit of the same
+    spec does, so its first build warns as a saved SCOP P-spline does.
+    """
+    from superglm.features.spline import PSpline
+
+    specs = getattr(model, "_specs", None) or {}
+    templates = getattr(getattr(model, "_config", None), "feature_templates", ())
+    for name, template in templates:
+        fitted = specs.get(name)
+        if (
+            isinstance(fitted, PSpline)
+            and saved_on_scop(fitted)
+            and not isinstance(template, PSpline)
+            and getattr(template, "_kindless_args", None) is not None
+            and _uses_fit_time_shape_constraints(template)
+        ):
+            template.shape_engine = None
+
+
 def _warn_if_saved_on_scop(spec: Any) -> None:
-    """Warn once that a P-spline 0.41.0 or earlier fitted on SCOP now fits on the QP.
+    """Warn once that a spline 0.41.0 or earlier fitted on SCOP now fits on the QP.
 
     The build marks the spec ``"qp"``, which stops a second build of the same
     spec warning again, and a fit that commits marks the model's template

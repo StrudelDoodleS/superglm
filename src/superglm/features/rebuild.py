@@ -28,7 +28,6 @@ from superglm.features._spline_config import (
     configure_knots,
     initialize_runtime_state,
 )
-from superglm.features._spline_factory import kindless_as_ps
 from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.categorical import Categorical
 from superglm.features.constraint import Constraint
@@ -589,9 +588,9 @@ def painted_ranges(
 def declared_spline(model, name: str) -> _SplineBase | None:
     """A copy of the spline ``name`` is declared with in ``model``, unfitted, or None.
 
-    An ordered term's declared basis; a numeric term's own declaration, which
-    the model keeps unfitted in its configuration, or the ``ps`` the fit built
-    in its place where a kindless spline became one. None
+    An ordered term's declared basis, or a numeric term's own declaration,
+    which the model keeps unfitted in its configuration: a spline declared
+    with no kind stays the ``cr`` it declares, as every refit builds it. None
     for a term with no spline, or a model too old to keep its declarations.
     """
     spec = model._specs[name]
@@ -600,10 +599,7 @@ def declared_spline(model, name: str) -> _SplineBase | None:
     declared = dict(getattr(getattr(model, "_config", None), "feature_templates", ())).get(name)
     if not isinstance(declared, _SplineBase):
         return None
-    declared = copy.deepcopy(declared)
-    if type(spec) is not type(declared) and (as_ps := kindless_as_ps(declared)) is not None:
-        return as_ps  # the fit built this kindless spline as ``ps``: the editor edits that
-    return declared
+    return copy.deepcopy(declared)
 
 
 def stated_knots(spline: _SplineBase) -> Any:

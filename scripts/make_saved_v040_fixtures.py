@@ -19,6 +19,11 @@ model per era of terms that gained predict-time state after the saver.  The
 0.41 audit found those terms' pickles failing at predict until
 ``__setstate__`` restored the state their saver scored with.  Their API is the
 one these releases share, so ``data`` and the records stay identical in form.
+
+Run with v0.41.0 (``git worktree add <dir> v0.41.0``) and
+``tests/fixtures/saved_v0_41_0`` as the output, it writes a spline declared
+with no kind beside a constrained ``PSpline``, which 0.40.0 and 0.41.0 fitted
+as a ``ps`` on SCOP while the model kept the kindless declaration.
 """
 
 from __future__ import annotations
@@ -134,6 +139,7 @@ LEGACY_SAVERS = {
     "0.17.0": ("spline_cat",),
     "0.18.0": ("ordered_cat",),
     "0.25.0": ("spline_cat",),
+    "0.41.0": ("kindless_beside_scop",),
 }
 BANDS = list("ABCDE")
 LEGACY_ROWS = 60
@@ -142,6 +148,12 @@ LEGACY_ROWS = 60
 def _legacy_case(name: str):
     """``(features, interactions)`` of one legacy record."""
     spline = sg.Spline(kind="cr", k=5)
+    if name == "kindless_beside_scop":
+        increasing = sg.Constraint.fit.increasing
+        return {
+            "x": sg.Spline(constraint=increasing),
+            "z": sg.PSpline(n_knots=6, constraint=increasing),
+        }, None
     if name == "ordered_cat":
         return {"band": sg.OrderedCategorical(order=BANDS), "x": spline}, None
     return {"x": spline, "c": sg.Categorical()}, [("x", "c")]

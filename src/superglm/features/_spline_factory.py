@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import warnings
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from numpy.typing import ArrayLike
 
@@ -48,21 +48,6 @@ def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
         )
 
     return n_knots
-
-
-def kindless_as_ps(spec: Any) -> _SplineBase | None:
-    """The ``ps`` spline a spec declared with no kind would be, or None.
-
-    None when the spec named its kind.
-    """
-    declared = getattr(spec, "_kindless_args", None)  # absent on explicit kinds and 0.40 pickles
-    if declared is None:
-        return None
-    from superglm.features.rebuild import _carry_marks
-
-    replacement = Spline(kind="ps", **{**declared, "shape_engine": "qp"})
-    _carry_marks(spec, replacement)
-    return replacement
 
 
 def warn_kindless_ps(reason: str, prefix: str = "", built: str = "kind='ps'") -> None:

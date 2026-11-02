@@ -36,6 +36,10 @@ from superglm.solvers.irls_direct import _qp as irls_direct_qp
 from .test_saved_fs_models import assert_predicts_as_saved
 
 SAVED_SCOP = Path(__file__).parent / "fixtures" / "saved_v0_40_0" / "glm_poisson_scop.pkl"
+# ``scripts/make_saved_v040_fixtures.py`` run with v0.41.0
+SAVED_KINDLESS_SCOP = (
+    Path(__file__).parent / "fixtures" / "saved_v0_41_0" / "kindless_beside_scop.pkl"
+)
 FAMILIES = {
     "gaussian": families.gaussian,
     "poisson": families.poisson,
@@ -275,6 +279,54 @@ def test_saved_scop_model_predicts_and_reports_as_saved_and_refits_on_the_qp() -
         reloaded = pickle.loads(pickle.dumps(model))
         reloaded.fit_reml(frame, y)
     assert dict(reloaded._config.feature_templates)["x"].shape_engine == "qp"
+
+
+def test_saved_kindless_spline_beside_scop_refits_as_the_cr_it_declares_and_warns() -> None:
+    """0.41.0 fitted a spline declared with no kind beside a constrained P-spline as a
+    ``ps`` on SCOP and kept the kindless declaration.  A refit and the editor's
+    declaration both build it as that declaration reads, the ``cr`` a fresh fit of the
+    same spec gives, and the term warns that its SCOP fit moved, once.  Mutation
+    checks: without ``mark_kindless_saved_on_scop`` the term's warnings fail; with
+    ``declared_spline`` editing the ``ps`` 0.41.0 built, the editor's kind fails.
+    """
+    from superglm.features.rebuild import declared_spline
+    from superglm.features.spline import CubicRegressionSpline
+
+    with open(SAVED_KINDLESS_SCOP, "rb") as handle:
+        record = pickle.load(handle)
+    model, frame, y = record["model"], record["frame"], record["y"]
+    assert record["version"] == "0.41.0"
+    assert isinstance(model._specs["x"], PSpline)  # what 0.41.0 fitted
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SCOPRetiredWarning)  # loading and reading never warn
+        assert_predicts_as_saved(model, frame, record["prediction"])
+        declared = declared_spline(model, "x")
+    assert type(declared) is CubicRegressionSpline
+
+    # The editor's route: its declaration warns when built.
+    with pytest.warns(SCOPRetiredWarning, match="fitted on the SCOP shape engine"):
+        declared.build(frame["x"].to_numpy())
+
+    # A plain refit: both terms 0.41.0 fitted on SCOP warn, and each warns once.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(frame, y)
+    moved = [str(w.message) for w in caught if issubclass(w.category, SCOPRetiredWarning)]
+    assert len(moved) == 2 and all("fitted on the SCOP shape engine" in m for m in moved)
+    assert type(model._specs["x"]) is CubicRegressionSpline
+    assert _group(model).monotone_engine == "qp"
+    fresh = SuperGLM(
+        family="poisson",
+        features={
+            "x": Spline(constraint=Constraint.fit.increasing),
+            "z": PSpline(n_knots=6, constraint=Constraint.fit.increasing),
+        },
+    ).fit_reml(frame, y)
+    np.testing.assert_allclose(model.predict(frame), fresh.predict(frame), rtol=1e-10)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SCOPRetiredWarning)
+        model.fit_reml(frame, y)
+        assert type(declared_spline(model, "x")) is CubicRegressionSpline
 
 
 @pytest.mark.parametrize(
