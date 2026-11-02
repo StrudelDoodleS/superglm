@@ -1,18 +1,13 @@
 """Primitive row numerics for the Prentice (1974) generalized gamma.
 
-Coordinates: location form ``(mu, sigma, Q)`` with ``log Y = mu + sigma W``,
+Location form ``(mu, sigma, Q)`` with ``log Y = mu + sigma W``,
 ``W = log(Q^2 G)/Q``, ``G ~ Gamma(Q^-2, 1)``; ``Q = 0`` is the log-normal,
-``Q = 1`` the Weibull, ``Q = sigma`` the gamma.  The mean form replaces ``mu``
-by ``m = E[Y] = exp(mu) C(sigma, Q)``.
-
-Every formula is written without catastrophic cancellation: the log density is
-``-log sigma - S(k) - w^2 R2(Q w)`` with ``S`` the Stirling remainder of
-``lgamma`` at ``k = Q^-2`` and ``R2(u) = (expm1(u) - u)/u^2``.  The limiting
-cases and cancellation-sensitive branches are checked against independent
-high-precision references in the family kernel tests.
-
-Imports only numpy, scipy, the standard library and the sibling primitive
-helpers (primitive-kernel rule).
+``Q = 1`` the Weibull, ``Q = sigma`` the gamma. The mean form replaces ``mu``
+by ``m = E[Y] = exp(mu) C(sigma, Q)``. The log density is written without
+catastrophic cancellation as ``-log sigma - S(k) - w^2 R2(Q w)``, ``S`` the
+Stirling remainder of ``lgamma`` at ``k = Q^-2`` and
+``R2(u) = (expm1(u) - u)/u^2``. Imports only numpy, scipy, the standard
+library and sibling primitive helpers.
 """
 
 from __future__ import annotations
@@ -155,11 +150,8 @@ def _stirling_d2_series(x: NDArray[np.float64]) -> NDArray[np.float64]:
 def stirling_remainder_d2(x: NDArray) -> NDArray[np.float64]:
     """``trigamma(x) - 1/x - 1/(2x^2)``; series for ``x >= 8``.
 
-    Below the switch the remainder's own recurrence
-    ``S''(x) = S''(x + 1) + 1 / (2 x^2 (x + 1)^2)`` (from
-    ``trigamma(x) - trigamma(x + 1) = 1/x^2``) walks the argument onto the
-    series with positive terms only, so nothing cancels; SciPy's ``polygamma``
-    goes through the Hurwitz zeta and is two orders slower.
+    Below the switch the recurrence ``S''(x) = S''(x + 1) + 1 / (2 x^2 (x + 1)^2)``
+    walks onto the series with positive terms only, so nothing cancels.
     """
     x = np.asarray(x, dtype=_FLOAT)
     out = np.empty_like(x)
@@ -320,12 +312,10 @@ def series_l2(v: NDArray) -> NDArray[np.float64]:
 def _m3_series(v: NDArray[np.float64]) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """``(M3, M3')`` for ``|v| < 0.8`` from the ``atanh`` form of ``log1p``.
 
-    With ``t = v/(2 + v)``, ``log1p(v) = 2 atanh(t)`` and the numerator
-    ``v - (1 + v/2) log1p(v)`` becomes ``-(2/(1 - t)) (atanh(t) - t)``, so
-    ``M3 = -(1 - t)^2 A(t)/4`` with ``A(t) = sum_j t^(2j)/(2j + 3)`` and
-    ``M3' = (1 - t)^3 A/4 - (1 - t)^4 A'/8``.  The series in ``t^2 <= 0.45``
-    reaches float64 in 48 terms; the direct formulas lose ``eps/v^3`` and
-    ``eps/v^4`` there (measured ``3e-15`` and ``4e-14`` at ``|v| = 0.25``).
+    With ``t = v/(2 + v)``, ``M3 = -(1 - t)^2 A(t)/4``,
+    ``A(t) = sum_j t^(2j)/(2j + 3)``, and ``M3' = (1 - t)^3 A/4 - (1 - t)^4 A'/8``;
+    48 terms reach float64 for ``t^2 <= 0.45``, where the direct formulas lose
+    ``u/v^3`` and ``u/v^4``.
     """
     t = v / (2.0 + v)
     t2 = t * t
@@ -714,10 +704,9 @@ def location_expected_information(
     s2 = np.where(zero, 0.0, stirling_remainder_d2(k))
     q2 = safe * safe
     a = s1 + q2 / 2.0  # psi(k + 1) - log k
-    # psi'(k + 1) + a^2 - Q^2, with its O(Q^2) terms cancelled analytically against
-    # psi'(k + 1) = S''(k) + Q^2 - Q^4/2 and a = S'(k) + Q^2/2.  Formed directly it
-    # cancels four leading digits per decade of Q: the difference is -Q^4/4 + O(Q^6)
-    # while the terms are O(Q^2), which drove I_QQ 550% wrong and negative near 1e-8.
+    # psi'(k + 1) + a^2 - Q^2 with its O(Q^2) terms cancelled analytically, using
+    # psi'(k + 1) = S''(k) + Q^2 - Q^4/2 and a = S'(k) + Q^2/2: the direct form
+    # cancels to -Q^4/4 + O(Q^6) from O(Q^2) terms.
     cross = s2 + s1 * s1 + s1 * q2 - 0.25 * q2 * q2
     sig2 = sigma_values * sigma_values
     information = np.empty((len(q), 6), dtype=_FLOAT)
@@ -1681,13 +1670,11 @@ def generalized_gamma_expected_shortfall(
 ) -> NDArray[np.float64]:
     """Upper conditional first moment in Prentice location coordinates.
 
-    With ``kappa = Q^-2``, ``r = sigma / Q`` and ``a = kappa + r``, the
-    truncated first moment uses the upper regularized gamma tail for ``Q > 0``
-    and the lower tail for ``Q < 0``.  The latter is positive infinity when
-    ``a <= 0`` because the upper tail of ``Y`` then has no first moment.  For
-    ``0 < |Q| <= 0.2887`` it is read through the fitted law's uniform tail instead
-    (:func:`_size_biased_log_tail_ratio`), which is analytic through ``Q = 0``;
-    ``Q = 0`` is the log-normal's closed form.
+    With ``kappa = Q^-2``, ``r = sigma / Q`` and ``a = kappa + r``: the upper
+    regularized gamma tail for ``Q > 0``, the lower for ``Q < 0`` (``+inf``
+    when ``a <= 0``, no first moment). For ``0 < |Q| <= 0.2887`` it reads the
+    uniform tail (:func:`_size_biased_log_tail_ratio`); ``Q = 0`` is the
+    log-normal closed form.
     """
     probabilities = np.asarray(p, dtype=_FLOAT)
     if (
@@ -1784,20 +1771,16 @@ def _size_biased_log_tail_ratio(
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Log ``E[Y; Y > y_p] / ((1 - p) E[Y])`` and ``w_p``, through the uniform tail.
 
-    The size-biased law ``y f(y) / E[Y]`` is the generalized gamma at gamma shape
-    ``kappa + sigma/Q`` (Stacy 1962; the truncated first moment is the
-    incomplete gamma at that shifted shape), which in Prentice coordinates is
-    shape ``Q' = Q / sqrt(1 + sigma Q)`` with
-    ``{Y > y_p} = {W' > (w_p - log1p(sigma Q)/Q) sqrt(1 + sigma Q)}``.  Both
-    tails are read by :func:`gg_log_tail_jets`, Temme's uniform expansion near
-    ``Q = 0``, so nothing divides by ``Q`` or forms ``kappa = Q^-2``.
+    The size-biased law ``y f(y) / E[Y]`` is the generalized gamma at gamma
+    shape ``kappa + sigma/Q`` (Stacy 1962), i.e. Prentice shape
+    ``Q' = Q / sqrt(1 + sigma Q)`` with
+    ``{Y > y_p} = {W' > (w_p - log1p(sigma Q)/Q) sqrt(1 + sigma Q)}``. Both
+    tails use :func:`gg_log_tail_jets` (Temme's uniform expansion near
+    ``Q = 0``), so nothing divides by ``Q``.
 
     ``w_p`` solves ``log S(w) = log(1 - p)`` (``log F(w) = log p`` below the
-    median, the smaller tail) by Newton's method from ``z - Q (z^2 + 2)/6``.  The
-    GG density is log-concave in ``w``, so both log tails are concave and the
-    iteration converges monotonically after its first step; once a step is below
-    ``2^-40`` relative, quadratic convergence leaves an error below rounding.
-    Rows that do not resolve are NaN.
+    median) by Newton from ``z - Q (z^2 + 2)/6``; log-concavity makes the
+    iteration monotone after one step. Unresolved rows are NaN.
     """
     z = special.ndtri(probabilities)
     w = z - shape * (z * z + 2.0) / 6.0
@@ -2082,12 +2065,10 @@ def initialize_generalized_gamma(
         return sigma, mean_z - sigma * expected_w
 
     def floored_sigma_mu(shape: float) -> tuple[float, float]:
-        """``sigma_mu`` with the scale floor already applied.
+        """``sigma_mu`` with the scale floor applied inside the mean-existence loop.
 
-        The floor has to be inside the mean-existence loop, not after it: a
-        floor above the sample scale raises ``sigma`` again, and on the
-        ``Q < 0`` side that walks the start back into ``sigma |Q| >= 1``, where
-        the mean is infinite.
+        A floor applied afterwards could push a ``Q < 0`` start back into
+        ``sigma |Q| >= 1``, where the mean is infinite.
         """
         sigma, mu = sigma_mu(shape)
         margin = max(1.0e-8, math.sqrt(np.finfo(_FLOAT).eps) * max(1.0, abs(mu)))

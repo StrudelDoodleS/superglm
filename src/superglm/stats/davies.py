@@ -191,14 +191,10 @@ def psum_chisq(
     )
     component_scale_ratio = weight_scale / smallest_component_scale
 
-    # Integrate in units of the dominant component scale. The substitution
-    # u = v / unit_scale leaves the Imhof integral unchanged -- the 1/u factor
-    # cancels the Jacobian -- but keeps the transform frequency and every
-    # component transition O(1). QUADPACK loses accuracy without warning at
-    # large absolute frequencies, and P[Q > q] depends only on the ratios
-    # lambda_j / q, so the answer must not depend on the units the caller
-    # works in. A power-of-two unit makes the rescaling exact in binary
-    # floating point; it is abandoned only where q could not survive it.
+    # Integrate in units of the dominant component scale (a power of two, so exact): ``u = v /
+    # unit_scale`` leaves the Imhof integral unchanged but keeps frequencies O(1), since
+    # QUADPACK loses accuracy silently at large absolute frequencies and the answer depends
+    # only on ``lambda_j / q``. Abandoned only where q could not survive it.
     unit_scale = math.ldexp(1.0, math.frexp(weight_scale)[1])
     scaled_q = float(q) / unit_scale
     if not np.isfinite(scaled_q):
@@ -247,14 +243,9 @@ def psum_chisq(
             log_rho += 0.125 * sigma_u * sigma_u
         return phase, log_rho
 
-    # Only the cosine and sine Fourier passes below visit the same abscissae
-    # (QAWO's Clenshaw-Curtis rule evaluates its interval endpoints, which
-    # both passes share), so one pass's evaluations serve the other. The
-    # Gauss-Kronrod passes (the near-origin and direct-inversion integrals)
-    # never repeat a node, and read ``_phase_and_log_rho_at`` directly. Owner
-    # and lifetime: this call; the entries depend on nothing but the scaled
-    # weights, degrees of freedom and sigma fixed above, so nothing
-    # invalidates them.
+    # Only the cosine and sine Fourier passes (QAWO) visit the same abscissae, so one pass's
+    # evaluations serve the other; they depend only on the scaled weights, df and sigma, so
+    # the memo (owned by this call) needs no invalidation.
     phase_memo: dict[float, tuple[float, float]] = {}
 
     def _phase_and_log_rho(u: float) -> tuple[float, float]:
@@ -297,15 +288,10 @@ def psum_chisq(
         return value, error, converged
 
     try:
-        # QUADPACK's Fourier driver is ill-conditioned as its frequency tends
-        # to zero.  In that regime the characteristic-function amplitude
-        # decays before even one q-driven oscillation, so ordinary adaptive
-        # quadrature is both the stable and the natural representation.
-        #
-        # A single direct integral can still skip a small-weight component:
-        # its transition occurs around u=1/abs(weight), potentially decades
-        # after the largest component has decayed. Partitioning at every such
-        # reciprocal scale makes those transitions explicit to QUADPACK.
+        # QUADPACK's Fourier driver is ill-conditioned as its frequency tends to zero, where the
+        # amplitude decays before one oscillation, so use adaptive quadrature. A direct integral
+        # can skip a small-weight component whose transition is near u=1/abs(weight), so
+        # partition at every such reciprocal scale.
         omega = 0.5 * abs(scaled_q)
         used_direct_inversion = omega <= epsilon**0.25 * scaled_weight_scale
         if used_direct_inversion:

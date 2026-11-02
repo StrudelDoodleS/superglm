@@ -596,17 +596,12 @@ def _binary_eta(eta: NDArray, _link: Link) -> NDArray:
 
 
 def _cloglog_eta(eta: NDArray, _link: Link) -> NDArray:
-    # The positive tail saturates much earlier than logit -- dμ/dη = exp(η-e^η)
-    # is already 0.0 at η = 20 -- so the band needs its own cap.  That cap is set
-    # by ``clip_mu``, not by CloglogLink.link()'s 1e-15 endpoint: the eta the
-    # stabiliser hands back must invert to a mean the family will keep.  A cap
-    # at (or past) clip_mu's 1 - 1e-7 boundary lets clip_mu rewrite mu behind
-    # this function's back, which both desynchronises eta from mu and leaves the
-    # two band edges equidistant from the probability boundary, so the IRLS line
-    # search cannot tell a saturated positive start from its mirror image.  A cap
-    # tighter than the family's floor is just as wrong the other way: it pins any
-    # fit whose MLE tail mass falls between the cap and clip_mu -- e.g. an
-    # exposure-weighted rate at 1 - 3.3e-07 -- while still reporting convergence.
+    # The positive tail saturates much earlier than logit (dμ/dη = exp(η-e^η) is
+    # 0.0 at η = 20), so the band needs its own cap, set by ``clip_mu`` rather than
+    # CloglogLink.link()'s 1e-15 endpoint: the eta returned must invert to a mean the
+    # family will keep.  A cap at or past clip_mu's boundary lets clip_mu rewrite mu
+    # behind this function's back; a cap tighter than the family's floor pins fits
+    # whose MLE tail mass lies between the cap and clip_mu.
     return np.clip(
         np.asarray(eta, dtype=np.float64),
         -20.0,

@@ -239,10 +239,8 @@ class DenseDistributionalModel:
 
     family: DistributionalFamily
     _fit_state: DistributionalFitState
-    # Whether the family supplied expected information when this model was
-    # fitted, as a loaded artifact's manifest records it; None for a model
-    # fitted in this process. Schema-8 telemetry did not record its curvature
-    # scope, which depended on this, and a family can gain the capability later.
+    # Whether the family supplied expected information at fit time, from a loaded
+    # manifest (None if fitted here); schema-8 curvature scope depended on it.
     recorded_expected_information: bool | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -465,10 +463,8 @@ def _fixed_fit_lambdas(
 ) -> dict[str, float]:
     """The fit's lambda for every penalty component, in layout order.
 
-    ``selected_lines`` holds the name prefixes of ``select=True`` ``sz``
-    terms.  Their components refuse zero, as ``FactorSmooth`` refuses a
-    policy fixed at zero: part of every level would stay unpenalized, and a
-    declared level with no rows would leave the system singular.
+    Components of ``select=True`` ``sz`` terms (prefixes in ``selected_lines``)
+    refuse zero: an unpenalized level with no rows would make the system singular.
     """
     values: Mapping[str, float] = {} if supplied is None else supplied
     if not isinstance(values, Mapping):
@@ -617,10 +613,8 @@ def _fit_candidate(
         raise UnsupportedLikelihoodContractError(certificate_problem)
     with measure_phase(phase_recorder, "predictor_compilation"):
         templates = _clone_predictor_templates(predictor_templates)
-        # The scalar scanner reads each Categorical's built level universe,
-        # so the compile records the scannable terms and the scan runs on
-        # them before any coefficient is fitted.  A predictor-count mismatch
-        # is left for compile_predictors to report.
+        # The scalar scanner reads each Categorical's level universe, so scan the
+        # compiled terms before fitting; compile_predictors reports count mismatches.
         separation_boundaries = (
             predictor_response_boundaries(
                 family,

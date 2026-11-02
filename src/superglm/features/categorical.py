@@ -29,10 +29,8 @@ def _validate_observed_categorical_levels(
     """Raise for observed levels outside a fitted categorical domain."""
     unseen = observed - known_levels
     if unseen:
-        # Sort by str: a domain may legitimately mix types (numeric bands beside a
-        # labelled special, `order=[1..6], specials=["MISSING"]`), and a bare
-        # sorted() raises TypeError comparing int to str -- turning a clean report
-        # of a genuinely unseen level into a crash from the error path itself.
+        # Sort by str: a domain may mix types (numeric bands beside a labelled
+        # special), and a bare sorted() would raise TypeError from the error path itself.
         msg = (
             f"Encountered unseen categorical levels at predict time: "
             f"{sorted(unseen, key=str)}. All levels must be among those seen "
@@ -50,23 +48,11 @@ def _validate_missing_only(x: NDArray, *, context: str = "") -> None:
     stops rejecting novel levels: the two checks are independent questions and
     only one of them is governed by the policy.
     """
-    # Missing values are checked before the level scan: a NaN beside strings is
-    # a broken column, not an unseen level, and it should say so.
-    #
-    # This scan stays exact and per-element on purpose. `pd.isna` is a C-level
-    # test and reads as the obvious pre-filter, but it is not a superset of the
-    # question asked here: pandas decides nullness by asking `v != v`, so a
-    # float subclass that compares equal to itself is a NaN this check owns and
-    # `pd.isna` calls clean. Short-circuiting on it therefore turns a rejected
-    # column into an accepted one whenever that value is also a fitted level --
-    # a validation surface quietly widening, which is not a trade worth 0.08s
-    # per search. The narrow test below is the boundary, so the narrow test is
-    # what runs.
-    #
-    # `pd.isna` is wrong as the answer too, for the opposite reason: it is true
-    # for a wider family this check does NOT own (pd.NA, pd.NaT, a NaN that is
-    # not a Python float). Those are unseen LEVELS and the report has to name
-    # them rather than blame the column.
+    # Missing values are checked before the level scan: a NaN beside strings is a
+    # broken column, not an unseen level.  The scan stays exact and per-element:
+    # `pd.isna` is not the same question (pandas decides nullness by `v != v`, so a
+    # self-equal float subclass would pass; and it is true for pd.NA, pd.NaT and
+    # non-float NaNs, which are unseen LEVELS the report must name).
     if any(v is None or (isinstance(v, float) and np.isnan(v)) for v in x):
         msg = "Categorical column contains missing values (NaN or None)."
         if context:
@@ -90,12 +76,9 @@ def _validate_categorical_levels(x: NDArray, known_levels: set, *, context: str 
 
     _validate_missing_only(x, context=context)
 
-    # Hash, don't sort. Membership is all this function needs, and `np.unique`
-    # buys it with an O(n log n) sort that on an object column runs every
-    # comparison through the interpreter. Hashing also removes the reason the
-    # old sorting path needed a fallback: an object column holding more than one
-    # type has no order (`["MISSING", 1]` raised TypeError comparing str to int)
-    # but it hashes like any other.
+    # Hash, don't sort: membership is all that is needed, `np.unique` costs an
+    # O(n log n) interpreter-bound sort, and an object column of mixed types has no
+    # order but hashes fine.
     observed = set(pd.unique(np.asarray(x).ravel()).tolist())
     _validate_observed_categorical_levels(
         observed,
@@ -137,13 +120,11 @@ def _resolve_categorical_labels(
 ) -> NDArray:
     """Resolve one categorical parent's raw labels into its fitted level domain.
 
-    A grouped categorical's public input contract is always the ORIGINAL
-    labels.  Group labels are not accepted as an alternative input domain:
-    they may themselves be original labels with a different mapping.  Validate
-    the raw domain first, apply the mapping exactly once, then (when fitted
-    levels are supplied) certify that the collapsed level was present at fit.
-    ``at_fit`` reports a label the grouping does not cover as training data
-    rather than as a level unseen at fit.
+    A grouped categorical's public input is always the ORIGINAL labels (group
+    labels are not an alternative domain).  Validate the raw domain, apply the
+    mapping once, then (when fitted levels are supplied) certify that the collapsed
+    level was present at fit.  ``at_fit`` reports a label the grouping does not
+    cover as training data rather than as unseen at fit.
     """
     x = np.asarray(x).ravel()
     if grouping is None:
@@ -210,18 +191,13 @@ def _warn_unseen_routed(x: NDArray, codes: NDArray, *, group: Any = None) -> Non
 def _route_unseen_to_group(x: NDArray, grouping, universe: list, group: Any) -> NDArray:
     """Resolve raw labels through ``grouping``, sending each level unseen at fit to ``group``.
 
-    A raw label the grouping does not know, or one whose group has no place in
-    the fitted ``universe``, is unseen. Its rows take ``group``'s label, and so
-    that group's effect, and one warning names those levels and their row
-    count. This is the rule of scikit-learn's ``OneHotEncoder`` with
-    ``handle_unknown="warn"`` (``"infrequent_if_exist"`` plus the warning),
-    whose documentation says an unknown category "will map to the infrequent
-    category if it exists"; here the user names the group, and the fit has
-    checked that it exists.
-
-    ``group=None`` is ``unseen="base"`` under a grouping: the unseen rows keep
-    a label no fitted level matches, so they code as ``-1`` and take the base,
-    as ``handle_unknown="ignore"`` encodes an unknown category as all zeros.
+    A raw label the grouping does not know, or whose group has no place in the
+    fitted ``universe``, is unseen: its rows take ``group``'s label and effect, with
+    one warning naming those levels and their row count.  This is scikit-learn's
+    ``OneHotEncoder`` rule with ``handle_unknown="warn"`` (``"infrequent_if_exist"``
+    plus the warning); here the user names the group and the fit has checked it
+    exists.  ``group=None`` is ``unseen="base"`` under a grouping: unseen rows keep
+    a label no fitted level matches, code as ``-1`` and take the base.
     """
     import pandas as pd
 
@@ -251,43 +227,31 @@ class Categorical:
         - ``'most_exposed'`` - level with highest total sample_weight (default,
           best for insurance)
         - ``'first'`` - first level in the level universe (alphabetical when
-          inferred, as declared when ``levels=`` or a categorical dtype bounds
-          it)
+          inferred, as declared when ``levels=`` or a categorical dtype bounds it)
 
         Or pass a specific level name as a string.
     grouping : LevelGrouping, optional
         Collapse original levels into groups before fitting.
     levels : list | tuple | Series | ndarray | CategoricalDtype, optional
-        The level universe to bind to (spec 2026-08-11, §3.1).  With a
-        ``grouping`` this declares the RAW, pre-collapse universe, and the
-        grouping must cover exactly these levels.  Levels with
+        The level universe to bind to.  With a ``grouping`` this declares the RAW,
+        pre-collapse universe, which the grouping must cover exactly.  Levels with
         no training rows are pinned to base rather than dropped; training rows
         outside the universe are an error.
     unseen : str
-        Predict-time policy for levels outside the universe.  'error' (default)
-        is the historical behavior; 'base' routes those rows, raw labels a
-        ``grouping`` does not know included, to the base level with one warning
-        per call.  Any other value names a group of
-        ``grouping``: levels unseen at fit, including raw labels the grouping
-        does not know, then take that group's effect, again with one warning
-        per call.  The fit checks that the group exists and has a place in the
-        fitted universe.
+        Predict-time policy for levels outside the universe.  ``'error'`` (default)
+        raises; ``'base'`` routes those rows, raw labels a ``grouping`` does not
+        know included, to the base level with one warning per call.  Any other value
+        names a group of ``grouping`` whose effect those levels then take, again
+        with one warning per call; the fit checks that the group exists and has a
+        place in the fitted universe.
     """
 
-    # Class-level defaults for the level-universe state. Unpickling restores an
-    # instance `__dict__` and bypasses `__init__`, so a spec pickled before this
-    # state existed carries none of these names; a class attribute is what makes
-    # every read site (build, transform, score, reconstruct, the summary audit,
-    # the editor) find a value instead of raising AttributeError, and it does so
-    # without a `__setstate__` that would have to be kept in step with
-    # `__init__`. The values are the pre-feature behaviour exactly: no declared
-    # universe, an inferred source, nothing pinned, `unseen="error"`.
-    #
-    # IMMUTABLE defaults only. A class attribute is shared by every instance
-    # that never assigns its own, so a mutable default turns one legacy spec's
-    # in-place mutation into a change to every other. `__init__` assigns its own
-    # instance value for each of these, so a spec built by this version never
-    # reads them; `build` likewise rebinds `_pinned_levels` rather than mutating.
+    # Class-level defaults for the level-universe state.  Unpickling bypasses
+    # `__init__`, so a spec pickled before this state existed needs these names to
+    # exist; a class attribute does that without a `__setstate__` to keep in step.
+    # The values are the pre-feature behaviour: no declared universe, an inferred
+    # source, nothing pinned, `unseen="error"`.  IMMUTABLE defaults only, since a
+    # class attribute is shared by every instance that never assigns its own.
     unseen: str = "error"
     _declared_levels: list | None = None
     _level_source: str = "inferred"
@@ -397,27 +361,14 @@ class Categorical:
         if self._grouping is None:
             return LevelBinding(levels=tuple(probe._levels), base=probe._base_level)
 
-        # Under a grouping the binding must carry the RAW, pre-collapse
-        # universe. `apply_level_binding` stores `binding.levels` as
-        # `_declared_levels`, and `_working_universe` then maps each one through
-        # `grouping.original_to_group` -- so handing back `probe._levels`, which
-        # is already collapsed, makes that lookup a KeyError for every group
-        # label that is not also a raw label, i.e. for every genuine collapse.
-        # The raw labels are read in the same str-cast domain the grouping path
-        # itself uses, and sorted so the binding is reproducible; `build` above
-        # has already rejected missing values and raws the grouping cannot map.
-        #
-        # The base stays the probe's own fitted level, which names a GROUP: that
-        # is the domain `_resolve_base` and `_levels` work in once the declared
-        # raws have been mapped through.
-        #
-        # Ordered by (group, raw) rather than by raw alone, so the image
-        # `_working_universe` builds comes out in sorted GROUP order -- which is
-        # exactly the order the unbound path gets from `pd.factorize(sort=True)`
-        # on the collapsed labels. Sorting the raws alone would order the groups
-        # by their alphabetically-first member instead, and binding a frame in
-        # which every level is present would then silently permute the design
-        # columns and move which level `base="first"` names.
+        # Under a grouping the binding must carry the RAW, pre-collapse universe:
+        # `apply_level_binding` stores it as `_declared_levels` and `_working_universe`
+        # maps each one through `grouping.original_to_group`.  The raw labels are read in
+        # the grouping path's str-cast domain; `build` above has already rejected missing
+        # values and unmappable raws.  The base stays the probe's own fitted level (a
+        # GROUP).  Ordered by (group, raw) so the image comes out in sorted GROUP order,
+        # as the unbound path's `pd.factorize(sort=True)` gives; sorting raws alone would
+        # silently permute the design columns and move `base="first"`.
         to_group = self._grouping.original_to_group
         raws = sorted(set(_grouping_labels(values).tolist()), key=lambda raw: (to_group[raw], raw))
         return LevelBinding(levels=tuple(raws), base=probe._base_level)
@@ -456,12 +407,11 @@ class Categorical:
     ) -> tuple[GroupInfo, NDArray]:
         """``build``, and every row's code against the fitted level universe.
 
-        The codes index ``_levels`` (base and pinned levels included) and are
-        never negative: a row outside the universe is refused above. A caller
-        that scans the same rows against the universe, as the separation scan
-        does, reads them instead of coding the column a second time.
-        ``stacklevel`` is the frame, counted from this method, that the
-        build's warnings are attributed to.
+        The codes index ``_levels`` (base and pinned levels included) and are never
+        negative: a row outside the universe is refused above.  A caller that scans the
+        same rows (the separation scan) reads them instead of coding the column again.
+        ``stacklevel`` is the frame, counted from this method, that the build's warnings
+        are attributed to.
         """
         import pandas as pd
 
@@ -523,11 +473,9 @@ class Categorical:
                 stacklevel=stacklevel,
             )
 
-        # Remap codes: drop the base level and every pinned level, producing
-        # 0-based codes for the levels that actually get a design column.
-        # Base-level observations are excluded from the design matrix entirely
-        # (absorbed into the intercept), so we encode them as -1 -- the sink bin
-        # the categorical kernel already reads as zero contribution.
+        # Remap codes: drop the base level and every pinned level, giving 0-based codes
+        # for the levels with a design column.  Base-level rows are absorbed into the
+        # intercept and encoded -1, the sink bin the categorical kernel reads as zero.
         emitted = [
             i for i, lev in enumerate(self._levels) if lev != self._base_level and observed[i]
         ]

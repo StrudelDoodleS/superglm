@@ -1,44 +1,30 @@
-"""The identified part of the Laplace approximation (one-engine design §3.9).
+"""The identified part of the Laplace approximation.
 
-**The class.**  A slope is weakly identified by its specification when no
-penalty touches it and its column, centred on its shifted prior-weighted
-mean (design §3.2), carries curvature only through rows whose prior weight
-is within the rounding of an accumulation at the largest prior weight:
+**The class.** A slope is weakly identified by its specification when no
+penalty touches it and its column, centred on its shifted prior-weighted mean,
+carries curvature only through rows whose prior weight is within the rounding
+of an accumulation at the largest prior weight:
 
     sum_r w_r x~_rj^2 <= gamma_{n+} max_r(w_r) sum_{w_r > 0} x~_rj^2,
 
 ``gamma_k = k u / (1 - k u)`` (Higham 2002, Lemma 3.1), ``n+`` the rows with
-positive prior weight: the design's §3.9 test with the working weights taken
-at unit variance factor, so that it is a function of the design and the prior
-weights alone -- rows weighted 1e-15 beside rows weighted 1.  A penalty
-identifies a slope however small its data curvature, so only slopes outside
-every penalty component are candidates (a penalty at the rounding of the data
-is the border's step-5 truncation instead, design §3.6).
+positive prior weight, at unit variance factor so that it depends on the
+design and prior weights alone. Only slopes outside every penalty component
+are candidates.
 
-**Why the Laplace approximation leaves it out.**  Along such a slope the
-likelihood is flat to within float64: PIRLS reaches no reproducible value of
-it (a deviance-stopped iteration never converges it, a certificate-stopped
-one excludes it by design §3.8), yet its log-curvature enters ``log|H|`` at
-full weight, because ``log`` is scale-free.  ``log|H|`` then moves with
-wherever PIRLS stopped, and REML's smoothing parameters for every other term
-move with it: path-dependent, and silently wrong (the stage-0 verifier's
-``offset_rare`` Poisson, lambda_u 19.0 against 10.47).  The approximation is
-therefore taken over the identified slopes ``I`` with the weakly identified
-slopes ``W`` held fixed at the fitted values (decision 7: flag, keep, and
-certify the identified part).  ``log|H_II|``, the inverse ``[H_II^+, 0; 0,
-0]`` (exactly zero ``W`` rows and columns) and the coefficient rank are read
-from one factorization of ``H_II`` itself (``IdentifiedLaplace``), so they
-describe the same matrix even where ``H`` or ``H_II`` is singular.  The REML
-objective, its gradient, the ``W(rho)`` correction and the outer Hessian all
-read these, so they are one function of the smoothing parameters whatever
-value of ``beta_W`` PIRLS leaves: the identified block depends on ``beta_W``
-only through rows weighted at the rounding.  The fit keeps ``beta_W``, and
-its standard error comes from the full ``H``, never from this part.
+**Why the Laplace approximation leaves it out.** Along such a slope the
+likelihood is flat to within float64, so PIRLS reaches no reproducible value,
+yet its log-curvature enters ``log|H|`` at full weight and would make every
+smoothing parameter path-dependent. The approximation is taken over the
+identified slopes ``I`` with ``W`` held at the fitted values: ``log|H_II|``,
+the inverse ``[H_II^+, 0; 0, 0]`` and the rank come from one factorization of
+``H_II`` (``IdentifiedLaplace``), and the REML objective, gradient,
+``W(rho)`` correction and outer Hessian all read them. The fit keeps
+``beta_W``, with its standard error from the full ``H``.
 
 The set is decided once per fit, before any iterate, from the design and the
-prior weights: no classification changes between REML candidates, and none
-selects a route (design §6).  With ``W`` empty every method returns its
-argument, so every other fit is unchanged bit for bit.
+prior weights, and selects no route. With ``W`` empty every method returns
+its argument, so every other fit is unchanged bit for bit.
 """
 
 from __future__ import annotations
@@ -140,7 +126,7 @@ def laplace_excluded_coefficients(
     weights = np.asarray(sample_weight, dtype=np.float64)
     positive = weights > 0.0
     row_count = int(np.count_nonzero(positive))
-    # Rows of weight 0, masked to an exact 0 (#369); None in the usual fit.
+    # Rows of weight 0, masked to an exact 0; None in the usual fit.
     zero_rows = None if row_count == weights.size else ~positive
     candidates = ~penalized_columns(dm.p, penalties)
     if row_count == 0 or not np.any(candidates):
@@ -223,46 +209,26 @@ def separated_directions(
 ) -> tuple[NDArray, tuple]:
     """``(pivots, sets)``: a binomial/log fit's separated unpenalized directions.
 
-    **The class.**  A set of rows the one-hot blocks move on their own
-    (``mode_score.row_sets``: a level, a block's reference rows, a kept joint
-    set; a set held without its direction, past the bridge budget, is judged
-    but not left out here) whose positive-weight responses are all 0, or all 1, along a
-    direction no penalty touches has no interior maximum.  The likelihood's
-    supremum along it is at ``eta -> -infinity`` (or at the mean space's
-    boundary), where the rows' log-likelihood and their observed curvature
-    are both 0.  A fit stops somewhere along that drift.  Where it stops moves
-    ``log|H|`` by the log of the rows' vanishing curvature, so the criterion
-    and its smoothing parameters move with the stopping point: with a
-    constant offset, with the start, with the solver's path.  The Laplace
-    approximation is therefore taken at the supremum along these directions:
-    they are left out of it, as the weakly identified slopes are.  (Their
-    rows' log-likelihood, about the sum of their means, has underflowed to
-    0 where the fits measured for #437 stop, so it is left as it is.)  The
-    set is decided once per fit from the design,
-    the responses, the prior weights and which columns a penalty covers, so
-    no classification changes between REML candidates.  A penalized set (a
-    random-effect level inside a level without events) is not in the class:
-    its penalized maximum is finite.
+    **The class.** A set of rows the one-hot blocks move on their own
+    (``mode_score.row_sets``) whose positive-weight responses are all 0, or
+    all 1, along a direction no penalty touches has no interior maximum: the
+    supremum is at ``eta -> -infinity`` (or the mean-space boundary), where
+    the rows' log-likelihood and curvature are both 0. Where a fit stops along
+    that drift would move ``log|H|``, so these directions are left out of the
+    Laplace approximation, as the weakly identified slopes are. Decided once
+    per fit from the design, responses, prior weights and penalty coverage. A
+    penalized set has a finite maximum and is not in the class.
 
-    **Pivots.**  ``IdentifiedLaplace`` leaves out coordinates.  Each
-    direction is reduced by the directions already taken (Gaussian
-    elimination) and stands for one coordinate where it is largest, among the
-    unpenalized columns outside a random-effect block (``generator_columns``,
-    which a structured rebuild cannot leave out).  A level's direction is its
-    own column.  A block's reference direction is the intercept less the
-    block's columns, ``-1_B`` once the intercept is profiled, and stands for
-    one of the block's other columns.  The change of basis that makes it a
-    coordinate is unimodular, and at the supremum ``H`` is singular along
-    it, so the determinant left over differs from the pseudo-determinant of
-    the rest by a constant that no smoothing parameter moves.  A direction
-    with no such column, or spanned by those already taken, adds none.  The
-    ``weak`` slopes, which the Laplace term leaves out already, come first in
-    the elimination: no pivot is a weak column, and a set whose direction a
-    weak slope already spans (a separated level that is also weak) takes none
-    and is disclosed once, as weak.  ``pivots`` are in the order the sets are
-    found, and ``sets`` match them one to one, each a tuple of ``(block's
-    first column, level code or None for its reference)`` over the blocks it
-    names (``separated_set_labels``).
+    **Pivots.** Each direction is reduced by those already taken (Gaussian
+    elimination) and stands for the coordinate where it is largest among the
+    unpenalized columns outside a random-effect block. A level's direction is
+    its own column; a block's reference direction, ``-1_B`` once the
+    intercept is profiled, stands for one of the block's other columns. The
+    change of basis is unimodular, so the leftover determinant differs by a
+    constant no smoothing parameter moves. ``weak`` slopes come first, so no
+    pivot is a weak column. ``pivots`` are in discovery order and ``sets``
+    match them, each a tuple of ``(block's first column, level code or None
+    for its reference)`` (``separated_set_labels``).
     """
     from superglm.solvers.mode_score import row_sets
 
@@ -393,38 +359,25 @@ class _IdentifiedPart:
 class IdentifiedLaplace:
     """The identified part of one fit's Laplace approximation (module docstring).
 
-    ``excluded`` holds the slope indices ``W`` the Laplace term leaves out:
-    the weakly identified slopes (``weak``, which the fit also leaves ungated
-    and discloses) and, for binomial/log, the pivots standing for its
-    separated unpenalized directions (``separated_directions``).  The identified part is read
-    from ONE factorization of ``H_II`` itself, so its inverse, ``log|H_II|``
-    and coefficient rank always describe the same matrix: a structured factor
-    is rebuilt by its own engine with the ``W`` border columns left out (its
-    ``logdet`` and ``rank``), and a dense system's centred Hessian ``H_c`` is
-    restricted to ``I`` and decomposed by the shared rank rule
-    (``solvers.rank.decompose_gram``), ``log|H_II| = log(sum w) + log
-    pdet(H_c[I, I])`` as for ``H``.  Jacobi's complementary-minor identity
-    ``det H_II = det H det((H^-1)_WW)`` is a statement about an invertible
-    ``H``; once the full factor truncates a direction, the ``W`` block of its
-    generalized inverse no longer determines ``H_II`` (the Jacobi-type
-    identities for generalized inverses carry nullity terms instead), so it
-    is not used.  A dense input therefore needs its centred Hessian
-    (``dense=(H_c, sum_w)``), which every dense caller holds, and may carry
-    its formation bound as a third entry (``_dense_part``).
+    ``excluded`` holds the slope indices ``W`` left out: the weakly identified
+    slopes (``weak``) and, for binomial/log, the pivots of its separated
+    directions (``separated_directions``). The identified part comes from one
+    factorization of ``H_II``: a structured factor is rebuilt by its own
+    engine without the ``W`` border columns, and a dense system's centred
+    Hessian is restricted to ``I`` and decomposed by
+    ``solvers.rank.decompose_gram``, ``log|H_II| = log(sum w) + log
+    pdet(H_c[I, I])``. Jacobi's complementary-minor identity needs an
+    invertible ``H``, so it is not used; a dense input therefore passes
+    ``dense=(H_c, sum_w)``, optionally with its formation bound
+    (``_dense_part``).
 
-    Every method returns its argument unchanged when ``W`` is empty.
-    ``unsupported`` counts the inputs this cannot restrict -- an excluded
-    slope outside a structured factor's border, or on a random-effect block,
-    whose complete one-hot sum is a structural generator of the border that
-    the rebuild cannot leave out -- for which every method keeps the full
-    ``H``, inverse, determinant and rank alike; the count is published.
+    ``unsupported`` counts inputs this cannot restrict (an excluded slope
+    outside a structured border, or on a random-effect block); those keep the
+    full ``H``, inverse, determinant and rank, and the count is published.
 
     Cache: the last input's part is memoised (owner: this object, one fit;
-    lifetime: until an input of another identity arrives; invalidation: the
-    identity of the input factor or Hessian, which are immutable once built),
-    so the inverse, determinant and rank reads of one evaluation share one
-    rebuild.  A structured refusal while restricting raises
-    ``StructuredSolverError``, as every structured factor operation does.
+    invalidation: the identity of the immutable input factor or Hessian). A
+    structured refusal raises ``StructuredSolverError``.
     """
 
     def __init__(

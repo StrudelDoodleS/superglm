@@ -62,10 +62,9 @@ def minimize_profile(
     Infeasible points (inf) are replaced by a finite barrier inside the search
     so the parabolic steps stay finite; they never win `best()`.
 
-    The method is local (a local minimiser in the interval, as SciPy's
-    fminbound documents it): on a profile with more than one interior minimum
-    it can settle in either, and nothing here detects the other. Only an
-    optimum on a bound is caught, by `best()`.
+    The method is local (as SciPy's fminbound documents): with more than one
+    interior minimum it can settle in either. Only an optimum on a bound is
+    caught, by `best()`.
     """
     objective(bounds[0])
     objective(bounds[1])
@@ -146,9 +145,8 @@ def likelihood_ratio_interval(
     (`credible_lower_point`) shows x_hat is not the minimum, so the interval is
     inverted again from the lowest point recorded, at most ``_MAX_RECENTRINGS``
     times; a smaller drop is evaluation error and leaves x_hat the centre. Like
-    the search (`minimize_profile`), a side assumes one crossing: a profile
-    that dips back under the cutoff within one step of its outward walk joins
-    that dip to the interval, and nothing here detects it.
+    the search, a side assumes one crossing: a profile that dips back under the
+    cutoff within one step of its outward walk joins that dip to the interval.
     """
     # The upper tail directly: 1 - alpha rounds to 1 for alpha below 1.1e-16.
     cutoff = float(chi2.isf(alpha, 1))

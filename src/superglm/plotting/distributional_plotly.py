@@ -2,15 +2,12 @@
 
 Every function here takes one payload built in ``superglm.distributional`` and
 returns a :class:`plotly.graph_objects.Figure` drawn in the notebook editor's
-grammar: the ``superglm_editor`` template registered on import of this module,
-the blue of the model under study, the grey dashed reference, the soft-blue
-band, the yellow exposure bar and the red flag. Every colour is read from
-:mod:`superglm.plotting.editor_style` rather than written here, so the editor's
-palette and the suite's cannot drift apart.
+grammar, through the ``superglm_editor`` template registered on import. Every
+colour is read from :mod:`superglm.plotting.editor_style`.
 
 The matplotlib renderers in ``superglm.plotting.distributional`` draw the same
-payloads with the same semantics; these add what an interactive figure can say
-that a static one cannot -- the numbers on hover, and the green of a selection.
+payloads with the same semantics; these add hover values and the selection
+green.
 """
 
 from __future__ import annotations
@@ -175,9 +172,8 @@ def _sequential_color(position: float) -> str:
 def _tail_tick(threshold: float, group: str) -> str:
     """A tail-table tick: the threshold and its group, short enough to read.
 
-    The decile groups arrive spelled ``exceedance:decile 7``, which at eleven
-    ticks per threshold leaves a column of text taller than the panel; the
-    reader needs the threshold and which decile, and nothing else.
+    Decile groups arrive spelled ``exceedance:decile 7``; only the threshold
+    and the decile are kept so the ticks fit the panel.
     """
     label = str(group)
     _, _, decile = label.rpartition("decile ")
@@ -246,8 +242,7 @@ def _categorical_ticks(fig: go.Figure, positions: Any, levels: Sequence[str], **
     """Label a numeric sweep axis with the level names it stands for.
 
     Past a dozen levels horizontal labels collide, so a crowded axis writes
-    them at an angle rather than thinning them out and leaving a reader unable
-    to say which mark is which.
+    them at an angle rather than thinning them out.
     """
     fig.update_xaxes(
         tickmode="array",

@@ -121,12 +121,10 @@ def _explained_deviance(
 ) -> float:
     """Return explained deviance with an ulp-scale exact-null convention.
 
-    A mathematically constant response can acquire a positive null deviance
-    solely because its floating-point weighted mean differs by one or two
-    representable values. Treat that null model as exact only when the active
-    response values are exactly constant and each agrees with its null
-    prediction within eight local ulps. Requiring exact response constancy
-    preserves genuine adjacent-float variation at every physical scale.
+    A mathematically constant response can acquire a positive null deviance because
+    its floating-point weighted mean differs by a few ulps.  The null model is
+    treated as exact only when the active response values are exactly constant and
+    each agrees with its null prediction within eight local ulps.
     """
     if null_deviance <= 0.0:
         return 0.0

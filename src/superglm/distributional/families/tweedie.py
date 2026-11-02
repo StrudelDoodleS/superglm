@@ -267,16 +267,11 @@ def _series_window(
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """The Poisson orders a row keeps; the rest carry mass below the tolerance.
 
-    Dunn & Smyth (2005, Section 4) sum a Tweedie series only where its terms
-    live rather than from index one, because "the naive approach of starting at
-    index 1 and adding more terms can result in a very large number of
-    unnecessary terms".  Every term of this series is bounded by its own Poisson
-    mass, so the window is where Chernoff's bound on a Poisson count first falls
-    below half the tail tolerance on each side: with
-    ``D(k) = k log(k / rate) - k + rate`` both ``P(N >= k)`` for ``k > rate`` and
-    ``P(N <= k)`` for ``k < rate`` are at most ``exp(-D(k))``.  ``D`` is convex
-    with derivative ``log(k / rate)``, so Newton's method from a start outside
-    the root converges to it monotonically from that side.
+    Dunn & Smyth (2005, §4) sum only where the terms live. Each term is bounded
+    by its Poisson mass, so the window ends where Chernoff's bound
+    ``exp(-D(k))``, ``D(k) = k log(k / rate) - k + rate``, falls below half the
+    tail tolerance on each side; ``D`` is convex, so Newton from outside the
+    root converges monotonically.
     """
     level = _SERIES_TAIL_LEVEL
     spread = np.sqrt(2.0 * level * rate)
@@ -347,11 +342,8 @@ def _build_series_block(
     mass = np.where(inside, np.exp(order * np.log(rate) - rate - special.gammaln(order + 1.0)), 0.0)
     atom = np.exp(-rate)
     if np.any(lowest > 1.0):
-        # The dropped orders below the window carry a regularised incomplete
-        # gamma no smaller than the window's first order, whose shape they sit
-        # under, so carrying their whole Poisson mass on that first term keeps
-        # the sum a lower bound on the untruncated series and shrinks its
-        # deficit below that mass.
+        # Carry the dropped lower orders' whole Poisson mass on the window's first
+        # term: their incomplete gammas are no smaller, so the sum stays a lower bound.
         mass[0] += special.gammaincc(lowest, rate) - atom
     shape = order * jump_shape
     # Only the density reads the log gamma of every term's shape; a lone
@@ -371,12 +363,9 @@ def _series_blocks(
 ) -> Iterator[tuple[NDArray[np.intp], _SeriesBlock]]:
     """Slabs of ``(rows, block)`` sharing a term axis of nearly one width.
 
-    A slab evaluates its whole term axis on every row it holds, so rows are
-    sorted by window width and cut into slabs whose widest row is within
-    ``_SERIES_WIDTH_SPREAD`` of its narrowest.  Without that cut one slab of
-    mixed widths would evaluate the widest row's term count on every row and
-    give back the whole point of the per-row window.  The element budget cuts
-    again where a slab would be too large to hold.
+    Rows are sorted by window width and cut where the widest row exceeds the
+    narrowest by ``_SERIES_WIDTH_SPREAD``, or where the element budget is
+    reached, so no slab evaluates a wide row's term count on narrow rows.
     """
     lowest, highest = _series_window(rate[rows], terms)
     widths = highest - lowest + 1.0
@@ -420,11 +409,8 @@ def _block_log_derivatives(
 ) -> tuple[NDArray[np.float64], ...]:
     """``F`` and its first three derivatives in ``log y``, from one series pass.
 
-    With ``r = y / scale`` the term ``mass * r**a exp(-r) / Gamma(a)`` is
-    ``y f(y)`` order by order, and differentiating it in ``log y`` multiplies it
-    by ``a - r``; the three derivatives therefore cost two more passes over the
-    terms the distribution function already needed and no further special
-    functions.
+    With ``r = y / scale`` each term ``mass * r**a exp(-r) / Gamma(a)`` is
+    ``y f(y)``, and each ``log y`` derivative multiplies it by ``a - r``.
     """
     ratio = y / block.scale
     total = np.minimum(
@@ -445,12 +431,9 @@ def _block_log_derivatives(
 def _block_start(block: _SeriesBlock, target: NDArray[np.float64]) -> NDArray[np.float64]:
     """``log q`` from a gamma matched to the row's conditional positive part.
 
-    A gamma matched to the first two moments of an aggregate compound sum is the
-    standard approximation of actuarial practice (Hardy 2004); the moments of
-    the sum conditioned on at least one jump are closed forms of the compound
-    rate, jump shape and jump scale.  Deep in the left tail the single-jump term
-    carries the distribution function alone, and there the exact
-    ``Gamma(jump shape, jump scale)`` tail is the better start.
+    Two-moment gamma matching of the compound sum given at least one jump
+    (Hardy 2004); deep in the left tail the exact single-jump
+    ``Gamma(jump shape, jump scale)`` tail is used instead.
     """
     survive = -np.expm1(-block.rate)
     mean = block.rate * block.jump_shape * block.scale
@@ -485,17 +468,12 @@ def _block_start(block: _SeriesBlock, target: NDArray[np.float64]) -> NDArray[np
 def _block_quantile(block: _SeriesBlock, target: NDArray[np.float64]) -> NDArray[np.float64]:
     """Solve ``F(q) = target`` on ``log q`` by a bracketed Householder iteration.
 
-    Newton's iteration on ``F(q) - p`` converges monotonically for any
-    continuous unimodal distribution when it starts at the mode, because the
-    distribution function is convex below the mode and concave above it (Giner &
-    Smyth 2016).  A Tweedie density is not always unimodal: it is multimodal for
-    ``p`` near one and unbounded at zero for ``p`` above 1.5 (Dunn & Smyth 2005,
-    Section 8), both inside this family's power walls.  The iteration is
-    therefore bracketed and falls back to bisection whenever a step leaves the
-    bracket or stops reducing the residual fast enough, which is the ``rtsafe``
-    safeguard of Press et al. (2007, Section 9.4) and leaves the bracket the
-    guarantee of convergence.  The step is Householder's third-order form, whose
-    two extra derivatives come free from the series pass the residual needed.
+    Newton from the mode converges monotonically for a unimodal law (Giner &
+    Smyth 2016), but a Tweedie density can be multimodal or unbounded at zero
+    inside the power walls (Dunn & Smyth 2005, §8), so the iteration is
+    bracketed with bisection fallback (``rtsafe``, Press et al. 2007, §9.4).
+    The third-order Householder step's extra derivatives come from the same
+    series pass.
     """
     rows = len(target)
     position = _block_start(block, target)
@@ -794,11 +772,9 @@ class TweedieLSS(TweediePredictors):
     ) -> NDArray[np.float64]:
         """Differentiate observed predictor curvature twice, along ``a`` then ``b``.
 
-        The kernel's derivatives are in ``(mu, rho = log phi, p)``; the
-        dispersion's predictor reaches ``rho`` through ``log`` of its inverse
-        link, which under the default log link is the identity, so no
-        ``phi``-scale round trip cancels.  A row the kernel refuses sends the
-        caller to differences.
+        Kernel derivatives are in ``(mu, rho = log phi, p)``; the dispersion
+        reaches ``rho`` through ``log`` of its inverse link, so no ``phi``-scale
+        round trip cancels. A refused row sends the caller to differences.
         """
 
         response = _validated_response(y)

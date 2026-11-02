@@ -445,41 +445,32 @@ class Structure:
     def apply(self, model, X=None):
         """An unfitted copy of ``model`` with these decisions built into its features.
 
-        Nothing is fitted. Each feature the structure names is rebuilt from
-        the model's declared spec with the structure's grouping, reference,
-        unseen policy and polynomial ranges, by the builders the editor uses;
-        every other feature is copied as it is. Groupings are built from the
-        structure's level universe, so no data is needed, and a grouped term
-        is declared with that universe as ``levels=`` declares one: a group
-        or reference whose levels have no rows in the fit is pinned to the
-        base, with the library's warning, rather than refused. Ranges on a ``ps``
-        or ``ns`` spline rebuild it as a ``bs`` spline with the same knots,
-        degree and penalty order, as the editor does. A recorded basis
-        rebuilds the declared spline as that kind, with or without shrinkage,
-        before its knots and ranges. The copy's penalties
-        and family are those ``model`` was declared with: applied to a fitted
-        model, a ``selection_penalty="auto"`` is calibrated again at the next
-        fit, smoothing that ``fit_reml`` estimated starts again from the
-        declared ``spline_penalty``, and a ``NegativeBinomial(theta="auto")``
-        estimates its theta again, as they would on a fresh declaration.
+        Nothing is fitted.  Each feature the structure names is rebuilt from the
+        model's declared spec with the structure's grouping, reference, unseen policy
+        and polynomial ranges, by the builders the editor uses; every other feature is
+        copied as it is.  Groupings are built from the structure's level universe, as
+        ``levels=`` declares one, so a group or reference whose levels have no rows in
+        the fit is pinned to the base with a warning rather than refused.  Ranges on a
+        ``ps`` or ``ns`` spline rebuild it as a ``bs`` spline with the same knots,
+        degree and penalty order; a recorded basis rebuilds the declared spline as that
+        kind before its knots and ranges.  The copy's penalties and family are those
+        ``model`` was declared with, so a ``selection_penalty="auto"``, REML-estimated
+        smoothing or ``NegativeBinomial(theta="auto")`` is estimated again at the next
+        fit.
 
         Parameters
         ----------
         model : SuperGLM
-            The model to build into, fitted or not. It is left unchanged.
+            The model to build into, fitted or not.  It is left unchanged.
         X : DataFrame, optional
-            The data the model will be fit on. It is read for one thing only:
-            levels of a grouped term that the structure does not list. Those
-            go where the structure sends new levels, into its ``unseen`` group,
-            or each into a level of its own when that is ``"error"`` or
-            ``"base"``, with one warning per feature; a model that declares
-            its levels with ``levels=`` refuses them. Without ``X`` a grouped
-            term covers only the structure's levels, and a fit on data holding
-            others refuses them. ``X`` also places the ranges the structure
-            gives a spline: a spline whose boundary the model leaves to the
-            data is fitted out to hold a range that reaches past ``X``'s
-            values, with one warning, and a range the spline refuses on ``X``
-            is refused here. Without ``X`` the fit checks the ranges.
+            The data the model will be fit on, read for two things.  Levels of a
+            grouped term that the structure does not list go to its ``unseen`` group,
+            or each into a level of its own when that is ``"error"`` or ``"base"``,
+            with one warning per feature; a model that declares ``levels=`` refuses
+            them.  Without ``X`` a grouped term covers only the structure's levels.
+            ``X`` also places spline ranges: a spline whose boundary the model leaves to
+            the data is fitted out to hold a range reaching past ``X``, with one
+            warning, and a range the spline refuses on ``X`` is refused here.
 
         Returns
         -------
@@ -489,12 +480,11 @@ class Structure:
         Raises
         ------
         StructureError
-            If ``model`` is not a SuperGLM, a feature is not in the model or is
-            another kind of term, its levels are not those the model declares
-            (an ordered term's bands in the order it declares them), or its
-            spline refuses a range. Any other error while a feature is
-            rebuilt is reported as that feature's refusal, with the error as
-            its cause.
+            If ``model`` is not a SuperGLM, a feature is not in the model or is another
+            kind of term, its levels are not those the model declares (an ordered term's
+            bands in declared order), or its spline refuses a range.  Any other error
+            while a feature is rebuilt is reported as that feature's refusal, with the
+            error as its cause.
         """
         _require_superglm(model, "apply")
         frame = None
@@ -522,9 +512,8 @@ class Structure:
                 raise
             except Exception as exc:
                 raise StructureError(_NOT_APPLIED.format(feature=name)) from exc
-        # The penalties and family as declared: a calibrated
-        # selection_penalty="auto", smoothing a REML fit estimated or an NB2
-        # theta="auto" belongs to that fit, like its coefficients, so a fitted
+        # Penalties and family as declared: a calibrated selection_penalty="auto",
+        # REML-estimated smoothing or NB2 theta="auto" belongs to the fit, so a fitted
         # model and its declaration give one copy.
         applied = clone_with_replaced_features(
             model,
@@ -692,21 +681,17 @@ def _rebuilt_categorical_term(name: str, spec, entry: FeatureStructure, column):
     levels = list(entry.levels)
     groups = {label: list(members) for label, members in entry.groups.items()}
     declared = accepted_levels(spec)
-    # The levels the model declares must be the structure's exactly. Grouped,
-    # a level the grouping missed would be refused at fit and a member the
-    # declaration leaves out admitted; ungrouped, the declaration would fit
+    # The declared levels must be the structure's exactly: grouped, a level the
+    # grouping missed would be refused at fit; ungrouped, the declaration would fit
     # its own levels in place of the structure's.
     if declared is not None and _texts(declared) != _texts(levels):
         raise StructureError(_UNIVERSE.format(feature=name))
     if groups and column is not None:
         levels, groups = _placed_new_levels(name, entry, levels, groups, column, declared)
     grouping = _grouping(levels, groups, order=[str(level) for level in levels])
-    # A grouped term is declared with the structure's universe, as levels=
-    # declares one: a group or reference whose levels have no rows in the
-    # next fit is then pinned to the base with the library's warning, not
-    # dropped from the universe. The file lists the levels in model order, so
-    # the fitted levels, and the design's columns, come out in the order of
-    # the model the structure was exported from.
+    # A grouped term is declared with the structure's universe (as levels=), so a
+    # group or reference with no rows in the next fit is pinned to the base with a
+    # warning, not dropped.  Levels keep the file's model order.
     universe = list(levels) if grouping is not None and declared is None else None
     # Grouped, the design speaks the grouping's text; ungrouped, the builder
     # gives the reference its native type from the levels.
@@ -934,13 +919,11 @@ def _rebuilt_spline(model, name: str, spec, entry: FeatureStructure, column):
 def _placed_boundary(name: str, ranges: list, fits, boundary, extent, position):
     """The boundary that holds ``ranges`` on the data, or the structure's refusal.
 
-    ``fits(subset, boundary)`` builds the term with ``subset`` of ``ranges``
-    on the data and raises the library's ``RangeError`` when the spline
-    refuses it. When the model leaves the spline's boundary to the data
-    (``boundary`` is None) and a range reaches past the data's ``extent()``,
-    the spline is fitted out to the ranges' ends, with one warning: a range
-    drawn to the end of one year's data then holds as written on the next
-    year's narrower data. ``position`` places a range edge on the axis.
+    ``fits(subset, boundary)`` builds the term with ``subset`` of ``ranges`` and
+    raises ``RangeError`` when the spline refuses it.  When the model leaves the
+    boundary to the data (``boundary`` is None) and a range reaches past the data's
+    ``extent()``, the spline is fitted out to the ranges' ends, with one warning.
+    ``position`` places a range edge on the axis.
     """
     refusal = _refusal(name, ranges, fits, boundary)
     if refusal is None:
@@ -1358,12 +1341,10 @@ def _is_scalar(value) -> bool:
 def _is_finite(value) -> bool:
     """Whether ``value`` is a number a file holds as itself, finite in float64.
 
-    That is an integer, which JSON writes exactly, or a binary float float64
-    holds every value of. A Decimal, a Fraction or an extended float would be
-    written as a float64 that need not equal it, so the file could not find
-    that level again. JSON reads an integer of any length, and one past
-    float64's range is no level or edge: ``float`` would raise
-    ``OverflowError`` on it.
+    An integer (JSON writes it exactly) or a binary float.  A Decimal, Fraction or
+    extended float could be written as a float64 that differs from it, and an
+    integer past float64's range is no level or edge (``float`` would raise
+    ``OverflowError``).
     """
     if isinstance(value, bool | np.bool_) or not isinstance(
         value, Integral | float | np.float32 | np.float16

@@ -375,17 +375,11 @@ def _apply_ordered_spline_term(
     # term's own rows spell it "9.0" -- the level is then reported missing and the
     # edit is refused on data that plainly contains it.
     specials = [str(level) for level in spec._special_display]
-    # A special with no effective training rows is PINNED: it stays a declared,
-    # known level but this fit emitted no indicator column for it, so there is no
-    # coefficient for an edit to write. `special_beta` below is built over every
-    # DECLARED special, one entry per row, so without this the block comes out
-    # wider than the groups and `_patch_beta_block` reports a raw width mismatch.
-    # Refuse the whole term rather than dropping the pinned entries: the term is
-    # patched as one block, and an edit that silently does not apply to a level
-    # the user can see and select is worse than one that fails. Read through
-    # `getattr` -- a spec pickled before pinning has no such attribute, and every
-    # declared special is then active. Compare in the same str-coerced display
-    # namespace as `specials`, for the float-domain reason above.
+    # A special with no effective training rows is pinned: declared, but with no indicator
+    # column, so an edit has no coefficient to write and the block would come out wider than
+    # the groups. Refuse the whole term (it is patched as one block; a silent no-op on a
+    # visible level is worse). `getattr`: a spec pickled before pinning has no attribute.
+    # Compared in the same str-coerced display namespace as `specials`.
     pinned_display = {str(level) for level in getattr(spec, "_pinned_specials", ())}
     pinned = [level for level in specials if level in pinned_display]
     if pinned and not keep_pinned:
@@ -429,18 +423,10 @@ def _apply_categorical_term(
 ) -> None:
     if term.levels is None:
         raise NotImplementedError(f"Term {term.name!r} has no editable levels.")
-    # A pinned level is a DECLARED level with no effective training rows: it
-    # keeps its identity in `_levels` and `reconstruct()` reports it at
-    # relativity 1.0, which is what the editor draws a handle from -- so it
-    # looks exactly as editable as any level sitting at the base. It is not.
-    # `_non_base` excludes it, so the patched block never has a slot for it and
-    # the edit is a silent no-op that the user reads back as applied. Refuse the
-    # whole term rather than the selection, for the same reason the pinned
-    # SPECIALS guard does: the term is patched as one block, and half-applying
-    # an edit is worse than declining it. Read through `getattr` so a spec
-    # pickled before pinning existed pins nothing.
-    # A carry onto another fit keeps the pin (``keep_pinned``): that fit never
-    # saw the level, which predicts as the base level there.
+    # A pinned level is declared but has no effective training rows: it is drawn as editable at
+    # relativity 1.0, yet `_non_base` excludes it, so an edit would be a silent no-op. Refuse the
+    # whole term, as the pinned-specials guard does. `getattr`: older pickles pin nothing. A
+    # carry onto another fit keeps the pin (``keep_pinned``): it predicts as base there.
     pinned = list(getattr(spec, "_pinned_levels", ()))
     if pinned and not keep_pinned:
         raise EditorValueError(
@@ -581,18 +567,12 @@ def _patch_beta_block(model, groups: list[GroupSlice], beta_new: NDArray) -> Non
 
 
 def _adjust_intercept(model, delta: float) -> None:
-    # The solver's intercepts are read from the published ones when the
-    # revision is published (``publish_revised_coefficients``).
-    #
-    # The skip is absolute on purpose.  An edit's intercept change is a
-    # log-effect, and the editor resolves log-effects absolutely: a term counts
-    # as edited when it moves by more than 1e-14 (``edited_terms``).  A least-
-    # squares intercept below 1e-15 is the projection's rounding (-2.7e-17 when
-    # #447's spline is halved), not a change anyone asked for.  A relative form
-    # would scale with the intercept, which at an offset of 1e16 (about 2e15)
-    # would swallow a real change of 0.1 (#447, part 2).  It would also need
-    # the projection's conditioning to tell rounding from intent.  Skipping
-    # keeps every edit that moves no intercept bit for bit (#449).
+    # The solver's intercepts are read from the published ones when the revision is published
+    # (``publish_revised_coefficients``). The skip is absolute: a term counts as edited when it
+    # moves by more than 1e-14 (``edited_terms``), and a least-squares intercept below 1e-15 is
+    # the projection's rounding. A relative form would swallow a real 0.1 change at an offset of
+    # 1e16 (#447) and need the projection's conditioning; skipping keeps no-op edits bit for bit
+    # (#449).
     if abs(delta) < 1e-15:
         return
     move_public_intercept(model, delta)

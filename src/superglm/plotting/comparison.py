@@ -32,11 +32,8 @@ def _comparison_family(spec) -> str | None:
     """Map a feature spec to its comparison family."""
     if isinstance(spec, Categorical | OrderedCategorical):
         return "level"
-    # Piecewise belongs here: the continuous path evaluates `spec.score` on a
-    # shared grid, which a piecewise term answers exactly (and past both
-    # boundary knots).  Left out, the term was reported as "missing or
-    # unsupported in one or more models" even when both models declared it
-    # identically, sending the reader after a column that is not absent.
+    # Piecewise is continuous: `spec.score` on a shared grid answers it exactly,
+    # past both boundary knots too.
     if isinstance(spec, Numeric | Piecewise | Polynomial | _SplineBase):
         return "continuous"
     return None
@@ -162,13 +159,11 @@ def _score_levels(spec, levels: NDArray, beta: NDArray[np.float64]) -> NDArray[n
     """Score a level term on ``levels``, NaN at a level the model did not estimate.
 
     A fold model has no estimate at a level its training rows lack, whatever
-    its unseen policy. Outside its universe, ``unseen="error"`` refuses the
-    level, while ``unseen="base"`` or a group policy would score it at the
-    base or in that group without refusing. One that ``cross_validate``'s
-    shared universe gave it with no training rows it holds pinned and scores
-    at the pin. Each is a gap in its curve rather than a value, or a failure
-    of the whole comparison. Only the other levels are scored, one by one
-    only when the model refuses them together.
+    its unseen policy (``"base"`` or a group policy would score it without
+    refusing; a level from ``cross_validate``'s shared universe is pinned and
+    scores at the pin). Each is a gap in the curve, not a value or a failure
+    of the comparison. Only the other levels are scored, one by one only when
+    the model refuses them together.
     """
     values = np.full(len(levels), np.nan, dtype=np.float64)
     scored = np.flatnonzero(~_unestimated_points(spec, levels))
@@ -189,13 +184,11 @@ def _unestimated_points(spec, points: NDArray) -> NDArray[np.bool_]:
     """Which level points ``spec`` has no estimate at.
 
     Levels, or specials, it holds pinned with no training rows, and on a
-    Categorical any level outside its universe, which its unseen policy may
-    score without refusing; an ordered term refuses one. Labels compare as
-    text, as the comparison domain names them. A grouped term reads each
-    member at its group: a member whose group it pins, or whose group is
-    outside its universe (no training rows, unbound), is a gap whatever its
-    unseen policy would route it to; one whose group it estimated reads that
-    estimate, rows of its own or not.
+    Categorical any level outside its universe (an ordered term refuses one).
+    Labels compare as text, as the comparison domain names them. A grouped term
+    reads each member at its group: a member whose group is pinned or outside
+    its universe is a gap whatever its unseen policy; one whose group it
+    estimated reads that estimate, rows of its own or not.
     """
     pinned = {
         str(level)

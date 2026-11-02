@@ -120,15 +120,11 @@ def term_weights_from_data(X_ref, sample_weight, name: str, term: EditableTerm) 
 
     edges = grid_edges(term.x)
     if _grid_is_knot_vector(term):
-        # `np.histogram` drops anything outside the outermost edges. For a term
-        # whose grid may be narrower than the data that silently deletes the
-        # exposure sitting behind the two boundary segments -- measured at 21.7%
-        # of total exposure on the shipped narrower-pin fixture -- which is the
-        # exposure a user is looking at when deciding whether to drag a boundary
-        # handle. Attribute those rows to the end bins instead of losing them.
-        # Right under every extrapolation mode: "clip" grouped those rows onto
-        # the boundary knots at fit time, "extend" rates them off the end bins'
-        # slopes, and "error" admits no such rows in the first place.
+        # `np.histogram` drops anything outside the outermost edges, which for a term whose grid is
+        # narrower than the data deletes the exposure behind the boundary segments (21.7% on the
+        # narrower-pin fixture). Attribute those rows to the end bins: under "clip" they were grouped
+        # onto the boundary knots at fit time, "extend" rates them off the end bins' slopes, and
+        # "error" admits none.
         raw_x = np.clip(raw_x, edges[0], edges[-1])
     return np.histogram(raw_x, bins=edges, weights=weights)[0].astype(np.float64)
 
@@ -238,15 +234,10 @@ def term_offset_values(term: EditableTerm, values) -> NDArray:
             )
     scored = np.interp(x_values, x_sorted, y_sorted, left=y_sorted[0], right=y_sorted[-1])
     if _term_extrapolates_linearly(term) and x_sorted.size >= 2:
-        # A piecewise term's grid IS its knot vector, and it is the first spec
-        # whose grid is deliberately allowed to be narrower than the data.
-        # Under extrapolation="extend" the fitted term continues past the
-        # boundary knots at the boundary slope -- that slope is printed in the
-        # exported workbook -- so clamping here would condition
-        # `refit_with_edited_offset` on a function that is flat in exactly the
-        # tails the model is not, with no edit applied.  Under "clip" (the
-        # default) the interp clamp above already IS the model, and this branch
-        # stays cold.
+        # A piecewise term's grid is its knot vector and may be narrower than the data. Under
+        # extrapolation="extend" the term continues past the boundary knots at the boundary slope, so
+        # clamping would condition `refit_with_edited_offset` on a function flat in the tails; under
+        # "clip" (default) the interp clamp above is already the model and this branch is cold.
         scored = np.where(
             x_values < x_sorted[0],
             y_sorted[0]

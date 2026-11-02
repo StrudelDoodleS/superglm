@@ -21,57 +21,22 @@ from superglm.links import IdentityLink
 class SlowFitWarning(UserWarning):
     """An exact REML fit is large enough to be slow: most of a minute or more.
 
-    ``SuperGLM.fit_reml`` warns before the smoothing search starts when the
-    model is fitted with ``discrete=False`` and rows x coefficients squared
-    reaches 1e11, for a family whose working weights change with the fit
-    (every family except Gaussian with the identity link, whose weighted
-    cross-product is formed once and reused). A fit on the structured solver
-    for a random effect or factor smooth does not warn: it never forms the
-    full cross-product. Nor does a model with a monotone (shape-constrained)
-    term: its smoothing is chosen by a different engine, whose cost has not
-    been measured. The fit still runs and its result is unaffected. Pass ``discrete=True`` to the constructor for the
-    fast path, or silence the warning with
-    ``warnings.filterwarnings("ignore", category=SlowFitWarning)``.
+    ``SuperGLM.fit_reml`` warns before the smoothing search starts when the model is fitted with
+    ``discrete=False`` and rows x coefficients squared reaches 1e11, for a family whose working
+    weights change with the fit (every family except Gaussian with the identity link). It does
+    not warn for a structured-solver fit with a random effect or factor smooth (it never forms
+    the full cross-product) or a model with a monotone term (different engine). The fit still
+    runs and its result is unaffected. Pass ``discrete=True`` to the constructor for the fast
+    path, or silence with ``warnings.filterwarnings("ignore", category=SlowFitWarning)``.
     """
 
 
-# rows x coefficients^2: the multiply-adds of one dense weighted cross-product.
-# At 1e11 one product costs seconds on one thread and a search forms dozens;
-# block-sparse designs cost less than the dense count, dense ones more.
-#
-# Evidence: the 542,410-row freMTPL2 frequency book as published (ClaimNb not
-# recounted; not re-measured on the corrected counts; Poisson, exposure
-# weights), one quiet benchboard run-timed session on PR #487 at 742fa910,
-# after the cached-W pre-solve, one pinned thread.  "Coefficients" is the
-# design width ``dm.p``, intercept excluded, after the spline-by-factor
-# separation hold.  In brackets, the earlier f71dc03b session (before the
-# pre-solve, on a shared machine; its walls varied up to 1.5x between
-# sessions, and its binned times, rounded to the second in the brackets,
-# were 3 to 24% slower than this quiet one's).
-#
-#   model              coefs  n p^2    exact          discrete=True
-#   main effects          67  2.4e9    7.0 s (9 s)    2.5 s (3 s)
-#   + 1 pair             192  2.0e10   15 s (40 s)    9.1 s (9 s)
-#   + 3 pairs            478  1.2e11   48 s (86 s)    17 s (20 s)
-#   + 10 pairs         1,540  1.3e12   214 s (422 s)  76 s (84 s)
-#
-# Since the pre-solve the threshold no longer marks a minute: the 3-pair fit
-# at 1.2e11 takes 48 s.  Exact wall time grows about as (n p^2)^0.64 between
-# the 3- and 10-pair rows, which puts a minute near 1.8e11.
-#
-# Binned against exact fitted values, the same models (Poisson, exposure
-# weights, 542,410 training rows), measured at 092df0d5: |mu_binned /
-# mu_exact - 1| over the training rows.
-#
-#   model        99th percentile   maximum   median
-#   + 3 pairs    0.46%             28.1%     0.023%
-#   + 10 pairs   0.99%             39.8%     0.070%
-#
-# Gamma with the log link reuses its constant Fisher data Gram across the
-# coefficient fits but is not exempt: the observed-curvature geometry, the
-# weight-derivative pass and the line search still cross every row, and in
-# the f71dc03b session (before the pre-solve) the same designs with a Gamma
-# response took 119 s (3 pairs, 21 s binned) and 554 s (10 pairs).
+# rows x coefficients^2: the multiply-adds of one dense weighted cross-product. At 1e11 one
+# product costs seconds on one thread and a search forms dozens; block-sparse designs cost
+# less than the dense count, dense ones more. Exact wall time grows about as (n p^2)^0.64,
+# which puts a minute near 1.8e11 (measured on the 542,410-row freMTPL2 frequency book,
+# one pinned thread: 48 s at 1.2e11, 214 s at 1.3e12). Binning with `discrete=True` is
+# faster but changes fitted values (99th percentile 0.46-0.99% on the training rows).
 EXACT_REML_WORK_WARN = 1.0e11
 
 

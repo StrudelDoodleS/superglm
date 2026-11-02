@@ -31,28 +31,21 @@ from superglm.features._spline_config import EXTRAPOLATIONS
 from superglm.features._spline_knots import weighted_quantile_knots
 from superglm.types import GroupInfo
 
-# Placement rules for int-mode ``breaks``.  Kept as a frozenset so a second rule
-# can land without an API change.  It stays a set of one on current evidence:
-# the reported gains for k-means binning over equal-frequency binning come from
-# a single-author histogram-GBT study (Labovich 2025, arXiv:2505.12460), and
-# nothing located addresses *weighted* quantiles at all, which is the only kind
-# an exposure-weighted tariff ever computes.  Reserve the seam, do not act on it.
+# Placement rules for int-mode ``breaks``, kept as a frozenset so a second rule
+# can land without an API change.  Only weighted quantiles are used: the case for
+# k-means binning (Labovich 2025, arXiv:2505.12460) does not address weighted
+# quantiles, the only kind an exposure-weighted tariff computes.
 _STRATEGIES = frozenset({"quantile"})
 
-# A segment carrying less than this fraction of the total weight warns (rule 11).
-# What degrades on a starved segment is the conditioning of X'WX -- a property of
-# the data, not of the basis.  The hat basis itself stays well conditioned under
-# any knot placement, so this is a data-support diagnostic, not a numerical one,
-# and the two must not be conflated in the message.
+# A segment carrying less than this fraction of the total weight warns (rule
+# 11).  This is a data-support diagnostic: the hat basis stays well conditioned
+# under any knot placement, but X'WX degrades on a starved segment.
 _SMALL_SEGMENT_WEIGHT_FRACTION = 0.005
 
-# Rule-10 rank probe routing.  Up to this many distinct x values the probe runs
-# as an SVD on the weighted FACTOR sqrt(W)H -- the reliable rank object -- and
-# the (n_unique, J+2) dense factor it needs is bounded and small.  Above it the
-# probe falls back to the (J+2)x(J+2) weighted Gram accumulated by bincount;
-# see the inline rationale at the use site for why that backstop is safe there
-# and only there.  Module globals rather than defaults so a test can lower the
-# ceiling and drive a small fixture through the Gram arm.
+# Rule-10 rank probe routing.  Up to this many distinct x values the probe is an
+# SVD on the weighted factor sqrt(W)H; above it, the (J+2)x(J+2) weighted Gram
+# accumulated by bincount.  Module globals so a test can lower the ceiling and
+# reach the Gram arm.
 _RANK_PROBE_MAX_FACTOR_ROWS = 10_000
 _GRAM_CHUNK_ROWS = 1 << 20
 _GRAM_PROBE_RELATIVE_TOL = 1e-8
@@ -78,12 +71,9 @@ def _conforming_weights(
 ) -> NDArray[np.float64]:
     """Return per-row weights as float64, defaulting to ones (part of rule 1).
 
-    Mirrors ``_spline_knots.knot_geometry_data``: a frequency weight counts
-    replicated rows, so a negative or non-finite count is refused here, where
-    the input is written -- otherwise a negative weight reaches ``np.sqrt`` in
-    the rule-10 rank probe and surfaces as a NaN or LinAlgError far from the
-    cause.  Zero weights are legal (zero replicated rows) and are excluded
-    from learned geometry in ``_resolve_knots``.
+    Mirrors ``_spline_knots.knot_geometry_data``: a negative or non-finite
+    frequency weight is refused here rather than surfacing as a NaN in the rule-10
+    rank probe.  Zero weights are legal and excluded from learned geometry.
     """
     if sample_weight is None:
         return np.ones(n_rows, dtype=np.float64)
@@ -135,10 +125,8 @@ def _validate_degrees(degrees: Sequence[int] | None, breaks: Any) -> tuple[int, 
         )
     items = list(degrees)
     if len(list(breaks)) == 0:
-        # Without the early refusal this falls through to build()'s rule 2,
-        # whose "use Numeric() instead" advice is wrong for the one caller
-        # degrees= exists for: a single global polynomial segment is a
-        # Polynomial, on either axis.
+        # Refuse early: build()'s rule 2 would advise "use Numeric() instead", wrong for
+        # degrees=, whose single global polynomial segment is a Polynomial.
         raise ValueError(
             "Piecewise(breaks=[], degrees=...) states one global polynomial "
             "segment with no breaks, which is a Polynomial: use "
@@ -204,97 +192,70 @@ class StructuralContrastRow:
 class Piecewise:
     """Continuous piecewise-linear feature on stated breakpoints.
 
-    Given ``J`` breakpoints the knot vector is ``[lower, *breaks, upper]``
-    (``J + 2`` knots) and the basis is the degree-1 B-spline (hat) basis on
-    those knots, evaluated directly rather than through ``scipy`` so that the
-    outer segments extend linearly past the boundary knots.  The hat at a base
-    knot ``t_r`` is dropped for identifiability against the model intercept, so
-    the group has ``J + 1`` columns and each retained coefficient is exactly
-
-    ``v_j = f(t_j) - f(t_r)`` -- the log relativity at knot ``j``, against base.
+    Given ``J`` breakpoints the knot vector is ``[lower, *breaks, upper]`` (``J + 2``
+    knots) and the basis is the degree-1 B-spline (hat) basis on those knots,
+    evaluated directly so the outer segments extend linearly past the boundary
+    knots.  The hat at a base knot ``t_r`` is dropped for identifiability against
+    the intercept, so the group has ``J + 1`` columns and each retained
+    coefficient is ``v_j = f(t_j) - f(t_r)``, the log relativity at knot ``j``.
 
     Parameters
     ----------
     breaks : sequence of float, or int
-        The breakpoints.  A sequence is the primary mode and the defensible
-        one: you state where the kinks are.  An int places that many
-        breakpoints at exposure-weighted quantiles of *x*, snapped to observed
-        values -- a convenience for exploration, not for a filed tariff.  Heaped
-        data (ages ending 0/5, whole-year tenures) routinely collapses tied
-        quantiles, so int mode can realise fewer breakpoints than requested; it
-        warns rather than raising, because that outcome is the library's doing
-        and not the caller's.
-
-        As the ``basis=`` of an :class:`OrderedCategorical` the breaks may
-        also be stated as BAND NAMES (``breaks=["Mi060", "Mi066"]``), resolved
-        to level positions when the ordered term is constructed; integer
-        positions on the level axis are the escape hatch.  On the numeric axis
-        a name has nothing to resolve against, so string breaks refuse at
-        ``build()``.
+        The breakpoints.  A sequence states where the kinks are.  An int places
+        that many at exposure-weighted quantiles of *x*, snapped to observed
+        values (for exploration, not a filed tariff); heaped data can collapse tied
+        quantiles, so fewer may be realised, with a warning.  As the ``basis=`` of
+        an :class:`OrderedCategorical` the breaks may be band names
+        (``breaks=["Mi060", "Mi066"]``), resolved to level positions when the
+        ordered term is constructed; string breaks refuse at ``build()`` on the
+        numeric axis.
     degrees : sequence of int, optional
-        One polynomial degree per segment (``len(breaks) + 1`` entries),
-        default all 1 -- the plain kinked line.  ``0`` states a flat segment
-        (the grouped/plateau tail); ``2`` and above add within-segment
-        curvature.  Seams stay value-continuous by construction (the grafted-
-        polynomial device: Gallant & Fuller 1973; plateau tails: Anderson &
-        Nelson 1975).  Legal only when this Piecewise is the ``basis=`` of an
-        :class:`OrderedCategorical`: there the export contract is one row per
-        band, so the table is exact at any degree, while on the numeric axis
-        the exported workbook is exact under linear interpolation only at
-        degree 1 -- a numeric-axis build with any degree != 1 refuses loudly.
-        Requires stated breaks (int-mode placement has no stated segments).
+        One polynomial degree per segment (``len(breaks) + 1`` entries), default
+        all 1.  ``0`` is a flat segment (plateau tail); ``2`` and above add
+        within-segment curvature.  Seams stay value-continuous (Gallant & Fuller
+        1973; Anderson & Nelson 1975).  Legal only as the ``basis=`` of an
+        :class:`OrderedCategorical`, where the export is one row per band; a
+        numeric-axis build with any degree != 1 refuses.  Requires stated breaks.
     base : float or {'most_exposed', 'first'}
-        Reference knot, mirroring ``Categorical``.  ``'most_exposed'`` picks
-        the knot carrying the largest hat-carried mass under the fit weights;
-        with no ``sample_weight`` the weights are ones, so it is the knot
-        carrying the most rows.  A float must equal exactly one knot.  The
-        resolved base is sticky: ``_base_knot`` persists across ``build()``
-        calls, so after a refit whose knot set changed, ``base='first'`` can
-        legitimately remain on a surviving interior knot rather than move to
-        the new first knot.
+        Reference knot, mirroring ``Categorical``.  ``'most_exposed'`` picks the
+        knot carrying the largest hat-carried mass under the fit weights (the
+        most rows when no ``sample_weight`` is given).  A float must equal
+        exactly one knot.  The resolved base is sticky across ``build()`` calls
+        (``_base_knot``), so after a refit whose knot set changed,
+        ``base='first'`` can remain on a surviving interior knot.
     strategy : {'quantile'}
         Placement rule, consulted only when *breaks* is an int.
     lower, upper : float, optional
-        Pin the outermost knots.  Default ``min(x)`` / ``max(x)``.  Pinning
-        **wider** than the data states a rated range the tariff must cover.
-        Pinning **narrower** is allowed too, and what happens to the rows
-        outside ``[lower, upper]`` is the ``extrapolation`` parameter's call:
-        under ``"clip"`` they are grouped onto the boundary knots, so
-        ``Piecewise(breaks, upper=u)`` fits identically to precomputing
-        ``x.clip(max=u)`` -- the tail-grouping idiom stated as a term
-        parameter instead of a preprocessing step; under ``"extend"`` they
-        load the linear tails, and their leverage lands entirely on the two
-        boundary segments' slopes; under ``"error"`` the build refuses.
+        Pin the outermost knots; default ``min(x)`` / ``max(x)``.  Pinning wider
+        than the data states a rated range the tariff must cover.  Pinning
+        narrower is allowed; rows outside ``[lower, upper]`` follow
+        ``extrapolation``: under ``"clip"`` they group onto the boundary knots
+        (the tail-grouping idiom), under ``"extend"`` they load the linear
+        tails, whose leverage lands on the two boundary slopes, and under
+        ``"error"`` the build refuses.
     extrapolation : {'clip', 'extend', 'error'}
         Behaviour outside ``[lower, upper]``, mirroring ``Spline``.  ``"clip"``
-        (default) holds the boundary knot's value.  ``"extend"`` continues the
-        boundary segments at their fitted slopes.  ``"error"`` raises on
-        out-of-range values.  The policy binds at ``build()`` as well as at
-        prediction, so the design that is fitted is the design the tariff
-        states.
+        (default) holds the boundary knot's value, so ``Piecewise(breaks, upper=u)``
+        fits identically to ``x.clip(max=u)``; ``"extend"`` continues the boundary
+        segments at their slopes; ``"error"`` raises.  The policy binds at
+        ``build()`` as well as at prediction.
 
     Notes
     -----
-    Outside ``[t_0, t_{J+1}]`` the term follows ``extrapolation``, and the
-    default mirrors this library's splines: hold the boundary knot's value
-    flat.  Under ``"extend"`` the boundary segments' slopes continue past the
-    boundary knots -- and the slope is *stated*: ``lower`` / ``upper`` pin
-    where the boundary segments start and the exported table prints the two
-    boundary slopes, so the rule outside the tabulated range is reproducible
-    by hand.  The exported workbook states whichever rule is in force.
+    Outside ``[t_0, t_{J+1}]`` the term follows ``extrapolation``; the default
+    mirrors this library's splines and holds the boundary knot's value flat.
+    Under ``"extend"`` the exported table prints the two boundary slopes, so the
+    rule outside the tabulated range is reproducible by hand, and the exported
+    workbook states whichever rule is in force.
 
-    In the editor the term gets one control handle per knot -- the handle *is*
-    the coefficient, because the raw basis evaluated at the knots is the
-    identity.  The editor's hard cap of 24 handles still applies, so a term
-    with more than 24 knots displays a subsampled set of them and the knots
-    without a handle cannot be dragged.  State fewer breakpoints if every knot
-    has to be editable.
+    In the editor the term gets one control handle per knot (the handle is the
+    coefficient).  The editor's hard cap of 24 handles still applies, so a term
+    with more knots displays a subsample and the rest cannot be dragged.
     """
 
-    # Opt out of the editor's 12-handle default (see `editor/controls.py`).
-    # Every column here is a reported coefficient with a knot to sit on, so
-    # thinning the handles would drop model parameters out of the editor rather
-    # than thin a redundant display grid.
+    # Opt out of the editor's 12-handle default (see `editor/controls.py`): every
+    # column is a reported coefficient with a knot to sit on.
     _editor_wants_all_handles = True
 
     def __init__(
@@ -314,14 +275,10 @@ class Piecewise:
             raise ValueError(
                 f"extrapolation must be one of ('clip', 'extend', 'error'), got {extrapolation!r}"
             )
-        # Finiteness is validated here for the same reason: NaN passes every
-        # ordering comparison (rule 4's strict-increase check and rule 6's
-        # in-range check are both false-negative on NaN), so a non-finite
-        # break or bound would otherwise surface at build() as a low-level
-        # rank/SVD failure with nothing pointing at the line that wrote it.
-        # Name-mode breaks defer instead: a level name is resolved (and
-        # validated) against an OrderedCategorical's declared levels, and a
-        # numeric-axis build refuses it loudly before any arithmetic.
+        # Finiteness is validated here because NaN passes every ordering comparison
+        # (rules 4 and 6) and would surface at build() as a rank/SVD failure.  Name-mode
+        # breaks defer: a level name is resolved against an OrderedCategorical's levels,
+        # and a numeric-axis build refuses it.
         if not isinstance(breaks, int | np.integer) and not _breaks_contain_names(breaks):
             requested = np.asarray(breaks, dtype=np.float64).ravel()
             if not np.all(np.isfinite(requested)):
@@ -428,20 +385,15 @@ class Piecewise:
     def _hat_values(self, x: NDArray[np.float64]) -> NDArray[np.float64]:
         """Evaluate all ``J+2`` hats at *x*, with the policy already applied.
 
-        Three properties this construction is relied on for, all of them tested:
-        the rows sum to exactly 1 everywhere *including* outside the knot span,
-        evaluating at the knots gives exactly the identity, and outside the
-        span the values continue the boundary segment's line -- which is the
-        ``"extend"`` behaviour, and which ``"clip"`` never reaches because its
-        x has already been clamped onto the boundary knots.
+        The rows sum to exactly 1 everywhere, including outside the knot span; at the
+        knots the values are exactly the identity; and outside the span they continue
+        the boundary segment's line (the ``"extend"`` behaviour, never reached by
+        ``"clip"`` because x is already clamped).
         """
         t = self._knots
         seg = self._segment_index(x)
-        # UNCLIPPED on purpose: w < 0 below t_0 and w > 1 above t_{J+1}.  That is
-        # precisely what continues the boundary segment's line past the last
-        # knot; clipping w to [0, 1] here would silently re-impose "clip" on a
-        # term whose stated policy is "extend", and would also make the outer
-        # columns of a narrower-than-the-data pin misreport their support.
+        # UNCLIPPED on purpose: w < 0 below t_0 and w > 1 above t_{J+1} continue the
+        # boundary segment's line; clipping w would re-impose "clip" on an "extend" term.
         w = (x - t[seg]) / (t[seg + 1] - t[seg])
         H = np.zeros((x.size, t.size), dtype=np.float64)
         rows = np.arange(x.size)
@@ -464,11 +416,9 @@ class Piecewise:
         at every knot, the base knot included.
         """
         if self._degrees_active:
-            # Handle-per-knot recovery assumes a coefficient per knot, which a
-            # merged flat run and a curvature column both break.  Unreachable
-            # from shipped surfaces (a segmented term exists only inside an
-            # OrderedCategorical, whose editor display is level-based), so any
-            # future caller fails loudly rather than dragging wrong handles.
+            # Handle-per-knot recovery assumes a coefficient per knot, which a merged flat
+            # run and a curvature column both break.  Unreachable from shipped surfaces, so
+            # a future caller fails loudly.
             raise RuntimeError(
                 "Piecewise with per-segment degrees has no per-knot handle basis; "
                 "its columns are knot-value groups plus curvature columns."
@@ -480,24 +430,18 @@ class Piecewise:
     def _resolve_segmented_structure(self) -> None:
         """Derive the segmented column structure from ``_knots``/``degrees``.
 
-        Runs after ``_resolve_base``, which fixed the base KNOT; here the base
-        COLUMN becomes the knot-value group containing it.  The structure is
-        the grafted-polynomial space (per-segment degrees, C0 seams) spanned in
-        a local form:
+        Runs after ``_resolve_base``; the base column becomes the knot-value group
+        containing the base knot.  The structure is the grafted-polynomial space
+        (per-segment degrees, C0 seams) in a local form:
 
-        - one knot-value column per group of knots, where a maximal run of
-          consecutive degree-0 segments merges its knots into one group (the
-          plateau: the segment is flat because its endpoint values are one
-          coefficient);
-        - for each segment of degree d >= 2, columns ``u**p - u`` (p = 2..d,
-          ``u`` the within-segment coordinate), supported on that segment and
-          vanishing at both seams.
+        - one knot-value column per group of knots, a maximal run of consecutive
+          degree-0 segments merging its knots into one group (the plateau);
+        - for each segment of degree d >= 2, columns ``u**p - u`` (p = 2..d, ``u`` the
+          within-segment coordinate), supported on that segment and zero at both seams.
 
-        Every column is continuous and the curvature columns are zero at every
-        knot, so seams are value-continuous BY CONSTRUCTION and evaluating at
-        the knots still reads off the knot-value coefficients -- the same
-        span as the one-sided truncated-power spelling (Smith 1979), in a
-        better-conditioned local basis.
+        Seams are value-continuous by construction and evaluating at the knots reads
+        off the knot-value coefficients: the span of the truncated-power spelling
+        (Smith 1979) in a better-conditioned basis.
         """
         degrees = self.degrees
         assert degrees is not None
@@ -607,14 +551,10 @@ class Piecewise:
                     f"{requested[j + 1]:.10g}. Got {_format_values(requested)}."
                 )
 
-        # Rule 6a -- the rated range.  Resolved before int-mode placement, which
-        # needs it to know which rows are inside the range.  Learned geometry
-        # comes from positive-weight rows only (the documented
-        # ``knot_geometry_data`` rule: a zero frequency weight is zero
-        # replicated rows, so it must not widen the default boundaries or move
-        # data-adaptive knots).  The fixed rules downstream are weight-linear,
-        # so a zero-weight row already contributes nothing to them; it is only
-        # the defaults and int-mode placement that must be scoped here.
+        # Rule 6a -- the rated range, resolved before int-mode placement.  Learned
+        # geometry comes from positive-weight rows only (``knot_geometry_data``): a zero
+        # frequency weight is zero replicated rows and must not widen the defaults or
+        # move data-adaptive knots.
         positive = weights > 0.0
         lo = float(x[positive].min()) if self.lower is None else float(self.lower)
         hi = float(x[positive].max()) if self.upper is None else float(self.upper)
@@ -623,33 +563,22 @@ class Piecewise:
                 f"Piecewise needs lower < upper, got lower={lo:.10g}, upper={hi:.10g}."
             )
 
-        # The extrapolation policy binds here, before placement.  Under "clip"
-        # rows outside [lo, hi] are grouped onto the boundary knots, so
-        # Piecewise(breaks, upper=u) fits identically to a precomputed
-        # x.clip(max=u); under "error" a narrower-than-the-data pin refuses
-        # before any downstream rule can report on rows the term will not rate.
+        # The extrapolation policy binds here, before placement: "clip" groups outside
+        # rows onto the boundary knots; "error" refuses a narrower-than-the-data pin.
         x = self._policy_x(x, lo, hi)
 
-        # Rule 5 -- int mode places breakpoints at exposure-weighted quantiles
-        # of the positive-weight rows: a zero-weight row must not pull a
-        # quantile, and snapping must not target an x value that only a
-        # zero-weight row exhibits.
+        # Rule 5 -- int mode places breakpoints at exposure-weighted quantiles of the
+        # positive-weight rows, so a zero-weight row cannot pull a quantile or a snap.
         if int_mode:
             n_requested = int(breaks)
             inside = (x >= lo) & (x <= hi) & positive
             x_q = x[inside]
             w_q = None if sample_weight is None else weights[inside]
             placed = weighted_quantile_knots(x_q, n_requested, 1.0, sample_weight=w_q)
-            # Snap each quantile onto an observed value before deduplicating.
-            # The quantile helper interpolates a weighted CDF, so on heaped data
-            # it happily returns breakpoints in the gaps *between* the heaps --
-            # measured on x heaped at multiples of 5, breaks=8 placed four
-            # breakpoints inside gaps that bracket no rows at all, which rule 9
-            # then rejects.  Turning a bare `breaks=8` into a hard error is the
-            # library's mistake reported as the caller's.  Snapping also makes
-            # every segment provably non-empty (each breakpoint is a value that
-            # occurs) and is what actually collapses tied quantiles, which is the
-            # documented reason realised J can fall short of the request.
+            # Snap each quantile onto an observed value before deduplicating.  The weighted
+            # CDF interpolates, so on heaped data it returns breakpoints in gaps that bracket
+            # no rows, which rule 9 would reject.  Snapping makes every segment non-empty and
+            # is what collapses tied quantiles (why realised J can fall short).
             distinct = np.unique(x_q)
             if placed.size and distinct.size > 1:
                 right = np.clip(np.searchsorted(distinct, placed), 1, distinct.size - 1)
@@ -771,14 +700,9 @@ class Piecewise:
                 if self.base == "first":
                     r = 0
                 elif self.base == "most_exposed":
-                    # Signed mass, not |h|: the partition of unity makes
-                    # h_j(x_i) row i's share of knot j, and a tail row's
-                    # negative share is genuinely negative support.  With no
-                    # sample_weight the weights are ones, so this is the knot
-                    # carrying the most rows -- the model API always passes
-                    # explicit weights (ones when the caller gave none), so a
-                    # weights-absent special case would be unreachable there
-                    # and would make the direct spec API disagree with it.
+                    # Signed mass, not |h|: h_j(x_i) is row i's share of knot j, and a tail row's
+                    # negative share is genuinely negative support.  Weights are ones when none were
+                    # given, so this is the knot carrying the most rows.
                     r = int(np.argmax(signed_mass))
                 else:
                     raise ValueError(
@@ -808,21 +732,16 @@ class Piecewise:
     ) -> None:
         """Check the data can carry the knots that were asked for (rules 8-11).
 
-        Callers pass unique x values with per-value aggregated weights, plus
-        the segment index and within-segment fraction that determine each
-        row's two hat entries: every rule here is linear in the weights, and
-        the rank probe sees the same weighted Gram either way.  Nothing in
-        here materialises an ``(n, J+2)`` array except the rank probe's
-        factor, whose row count is capped.
+        Callers pass unique x values with per-value aggregated weights, plus the
+        segment index and within-segment fraction that fix each row's two hat entries;
+        every rule is linear in the weights.  Only the rank probe's capped factor is
+        materialised.
         """
         t = self._knots
 
-        # Rule 8 -- a knot whose column is identically zero.  Written with |h_j|
-        # rather than the signed sum: the signed sum is the true zero-column test
-        # only where the hats are non-negative, and with lower/upper pinned
-        # narrower than the data the tail rows carry negative entries, so a
-        # non-zero column can sum to zero by cancellation.  |h_j| is that same
-        # condition stated correctly on the mode this feature explicitly supports.
+        # Rule 8 -- a knot whose column is identically zero.  Uses |h_j|: with bounds
+        # pinned narrower than the data, tail rows carry negative entries and a non-zero
+        # column can sum to zero by cancellation.
         mass = self._knot_mass(seg, frac, weights, signed=False)
         empty_knots = np.flatnonzero(mass == 0.0)
         if empty_knots.size:
@@ -833,18 +752,12 @@ class Piecewise:
                 f"{_format_values(mass)}."
             )
 
-        # Rules 9 and 11 count IN-RANGE support only.  `_segment_index` clamps a
-        # row outside [t_0, t_{J+1}] into the nearest boundary segment, which is
-        # right for evaluating the basis -- that clamp is what continues the
-        # boundary line -- and wrong for counting support: a row at x = 95 is not
-        # evidence about the segment [45, 50].  Binning the clamped index lets a
-        # rated range holding no observation at all pass both rules while the
-        # message reports full weight, so the extrapolating rows are separated
-        # out here and reported rather than credited.  Out-of-range rows exist
-        # only under extrapolation="extend": under "clip" x arrives already
-        # grouped onto the boundary knots -- those rows genuinely support the
-        # boundary values, count as such, and the tails report never fires --
-        # and under "error" the build has already refused them.
+        # Rules 9 and 11 count IN-RANGE support only.  `_segment_index` clamps an
+        # outside row into the nearest boundary segment, right for evaluating the basis
+        # and wrong for counting support, so extrapolating rows are separated out and
+        # reported rather than credited.  They exist only under extrapolation="extend":
+        # under "clip" x is already grouped onto the boundary knots and under "error" the
+        # build has refused them.
         n_seg = t.size - 1
         inside = (x >= t[0]) & (x <= t[-1])
         seg_weight = np.bincount(seg[inside], weights=weights[inside], minlength=n_seg)
@@ -859,10 +772,8 @@ class Piecewise:
             )
         )
 
-        # Rule 9 -- a segment bracketing no data.  This is a DATA-SUPPORT rule,
-        # not an identifiability rule: it rates a distinction the data cannot
-        # support.  Positive weight per segment is *not* sufficient for
-        # identifiability -- that is what rule 10 is for.
+        # Rule 9 -- a segment bracketing no data: a data-support rule, not
+        # identifiability (that is rule 10).
         starved = np.flatnonzero(seg_weight <= 0.0)
         if starved.size:
             edges = ", ".join(f"[{t[j]:.10g}, {t[j + 1]:.10g}]" for j in starved)
@@ -872,43 +783,28 @@ class Piecewise:
                 f"{_format_values(t)}: {_format_values(seg_weight)}.{tails}"
             )
 
-        # Rule 10 -- the rule that actually catches degeneracy.  Rules 8 and 9
-        # both pass on configurations whose retained columns are still rank
-        # deficient (one distinct x per segment, for instance).
-        #
-        # The rank is taken on ALL J+2 weighted hat columns, not on the J+1
-        # retained ones, because the intercept is part of the matrix the fit
-        # inverts and the dropped hat is what makes room for it.  The hats are a
-        # partition of unity, so the weighted intercept column sqrt(w) is exactly
-        # their row sum: rank(sqrt(w) H) == rank([sqrt(w) 1, sqrt(w) H_retained]).
-        # Checking only the retained columns misses the very degeneracy this rule
-        # was added for -- one distinct x per segment gives J+1 independent
-        # retained columns that are still collinear with the intercept.
+        # Rule 10 -- catches degeneracy that rules 8 and 9 pass (one distinct x per
+        # segment).  The rank is taken on ALL J+2 weighted hat columns: the hats are a
+        # partition of unity, so the weighted intercept sqrt(w) is their row sum, and
+        # rank(sqrt(w) H) == rank([sqrt(w) 1, sqrt(w) H_retained]).  The retained columns
+        # alone would miss collinearity with the intercept.
         if self._degrees_active:
             self._validate_segmented_rank(x, weights)
             self._warn_thin_segments(t, seg_weight, tails)
             return
         n_cols = self._non_base_indices.size
         if x.size <= _RANK_PROBE_MAX_FACTOR_ROWS:
-            # The FACTOR, never the Gram, is the reliable rank object: this
-            # repository's recorded lesson is that eigensolver rank probes on a
-            # Gram are not driver-stable near the cutoff.  The SVD on
-            # sqrt(W)H therefore stays authoritative wherever its dense factor
-            # is affordable, and 10_000 distinct values covers every banded
-            # rating factor this feature was built for.
+            # The factor, never the Gram, is the reliable rank object (eigensolver probes on
+            # a Gram are not driver-stable near the cutoff), so the SVD on sqrt(W)H stays
+            # authoritative while its dense factor is affordable.
             H = self._hat_values(x)
             scaled = np.sqrt(weights)[:, None] * H
             rank = int(np.linalg.matrix_rank(scaled))
         else:
-            # Backstop above the factor ceiling, not a peer of it.  The Gram
-            # squares the condition number and its small eigenvalues are
-            # eigensolver-driver-sensitive, so this arm runs with a GENEROUS
-            # relative tolerance and only needs to catch EXACT deficiency --
-            # an empty or single-point segment -- because rules 8/9/11 catch
-            # graded near-deficiency structurally first.  For exact deficiency
-            # the null eigenvalue is exact up to accumulation round-off,
-            # orders below this tolerance under any LAPACK driver, so the
-            # loose cut cannot flip a verdict either way.
+            # Backstop above the factor ceiling.  The Gram squares the condition number, so
+            # this arm uses a generous relative tolerance and only catches EXACT deficiency
+            # (an empty or single-point segment), whose null eigenvalue is round-off orders
+            # below the cut under any LAPACK driver; rules 8/9/11 catch graded deficiency.
             gram = self._weighted_gram(seg, frac, weights)
             eigenvalues = np.linalg.eigvalsh(gram)
             cutoff = _GRAM_PROBE_RELATIVE_TOL * max(float(eigenvalues[-1]), 0.0)
@@ -921,10 +817,8 @@ class Piecewise:
                 f"distinct positions than x supplies. Knots: {_format_values(t)}."
             )
 
-        # Rule 11 -- positive but thin. A warning, not an error: it is the
-        # failure mode most likely to reach production silently, and the weight
-        # per segment is the diagnostic that tells an actuary which breakpoint
-        # to move.
+        # Rule 11 -- positive but thin.  A warning, not an error; the per-segment weight
+        # tells an actuary which breakpoint to move.
         self._warn_thin_segments(t, seg_weight, tails)
 
     @staticmethod
@@ -953,16 +847,12 @@ class Piecewise:
     ) -> None:
         """Segmented rule 10: refuse a degenerate segmented basis loudly.
 
-        Two layers, both refusals and never regularization (the Item A
-        discipline): a per-segment distinct-support count with a message that
-        names the starved segment and its degree, then an SVD rank probe on
-        the weighted FACTOR -- the driver-stable rank object this repository
-        standardises on -- over ALL segmented columns.  The knot-value groups
-        are a partition of unity, so the intercept is their row sum and full
-        column rank is exactly identifiability against the intercept, the same
-        argument as the legacy probe.  The row count is the distinct level
-        positions (<= the level count), far under the factor ceiling, so the
-        Gram fallback is never needed here.
+        Two refusals (never regularization): a per-segment distinct-support count that
+        names the starved segment and its degree, then an SVD rank probe on the
+        weighted factor over ALL segmented columns.  The knot-value groups are a
+        partition of unity, so full column rank is identifiability against the
+        intercept.  The row count (distinct level positions) is far under the factor
+        ceiling, so no Gram fallback is needed.
         """
         degrees = self.degrees
         assert degrees is not None
@@ -1003,17 +893,12 @@ class Piecewise:
     ) -> GroupInfo:
         """Resolve knots and base from *x*, validate, and return the ``J+1`` columns.
 
-        Validation runs in a fixed order, and the order is part of the contract
-        because several rules fire together on a degenerate input: (1) finite x,
-        (2) non-empty breaks, (3) known strategy, (4) increasing sequence breaks,
-        (6a) lower < upper, then the extrapolation policy binds (clip groups the
-        out-of-range rows onto the boundary knots, error refuses them), (5)
-        int-mode placement, (6b) breaks strictly inside, (7) base resolves to
-        one knot, (8) no zero-mass knot, (9) no in-range empty segment, (10)
-        full column rank against the intercept, (11) thin-segment warning.
-
-        Level-axis-only declarations refuse before any of that: band-name
-        breaks and per-segment ``degrees=`` exist only where an
+        Validation order is part of the contract: (1) finite x, (2) non-empty breaks,
+        (3) known strategy, (4) increasing sequence breaks, (6a) lower < upper, then
+        the extrapolation policy binds, (5) int-mode placement, (6b) breaks strictly
+        inside, (7) base resolves to one knot, (8) no zero-mass knot, (9) no in-range
+        empty segment, (10) full column rank against the intercept, (11) thin-segment
+        warning.  Band-name breaks and per-segment ``degrees=`` refuse first unless an
         ``OrderedCategorical`` hosts this spec as its ``basis=``.
         """
         if not self._on_level_axis:
@@ -1038,30 +923,20 @@ class Piecewise:
         x = _finite_x(x)
         weights = _conforming_weights(sample_weight, x.size)
         x = self._resolve_knots(x, weights, sample_weight)
-        # Deduplicate before anything scales with n.  Rating variables are
-        # heaped, so the distinct values are typically dozens; every rule below
-        # is weight-linear, so unique values with per-value aggregated weights
-        # give the same masses, the same segment counts and the same weighted
-        # Gram -- hence the same rank verdict -- as the row-level design.  This
-        # is deduplication, not binning: no discretisation error exists to
-        # introduce.  The policy is already applied to x, so the raw segment
-        # arithmetic is the right one here; _hat_basis would just clamp again.
+        # Deduplicate before anything scales with n.  Every rule is weight-linear, so
+        # unique values with aggregated weights give the same masses, segment counts and
+        # rank verdict as the row-level design; this is deduplication, not binning.  The
+        # policy is already applied to x, so raw segment arithmetic is right here.
         x_unique, inverse = np.unique(x, return_inverse=True)
-        # asarray is a no-copy identity here (bincount with weights= already
-        # returns float64); it exists because the checker's bincount stubs
-        # report an integer array, which every float64-annotated consumer of
-        # w_agg would then trip over.
+        # asarray is a no-copy identity (bincount already returns float64); it fixes the
+        # checker's integer-array stubs.
         w_agg = np.asarray(
             np.bincount(inverse, weights=weights, minlength=x_unique.size),
             dtype=np.float64,
         )
-        # Everything downstream works from the two hat entries per row -- the
-        # segment index and the within-segment fraction -- rather than a dense
-        # (n_unique, J+2) basis.  On a genuinely continuous x (n_unique ~ n)
-        # the dense route peaked at three full-height arrays for a basis with
-        # two non-zeros per row; these two vectors are the same information at
-        # O(n) and the identical arithmetic (`_hat_values` computes exactly
-        # `1 - frac` and `frac`), so every emitted float is bit-identical.
+        # Work from the two hat entries per row (segment index and within-segment
+        # fraction) rather than a dense (n_unique, J+2) basis: the same information at
+        # O(n) with identical arithmetic (`_hat_values` computes `1 - frac` and `frac`).
         t = self._knots
         seg = self._segment_index(x_unique)
         frac = (x_unique - t[seg]) / (t[seg + 1] - t[seg])
@@ -1081,10 +956,8 @@ class Piecewise:
         self._seg_bubbles = []
         self._seg_retained = None
         self._validate_support(x_unique, seg, frac, w_agg)
-        # Emitted sparse (a hat row has at most two non-zeros) so the builder's
-        # sparse branch can re-detect the repeated rows and store the design
-        # one distinct row deep.  The gather reconstructs the exact per-row
-        # values: equal x means bit-identical hat arithmetic.
+        # Emitted sparse (at most two non-zeros per row) so the builder re-detects the
+        # repeated rows; equal x gives bit-identical hat arithmetic.
         columns = self._emit_unique_csr(seg, frac)[inverse]
         return GroupInfo(
             columns=columns,
@@ -1150,13 +1023,9 @@ class Piecewise:
         # Derived, not fitted: the slopes carry no independent p-value.
         slopes = np.diff(log_rel) / np.diff(t)
         return {
-            # "x" is the generic contract key every x-bearing spec returns, and
-            # the dispatchers that render a fitted curve -- `model.relativities()`
-            # above all -- are if/elif chains with no else, so a spec that omits
-            # it is dropped from the output with no error and no warning.
-            # "knots" is the same vector under the name that means something
-            # here; both are exported so neither caller has to know about the
-            # other.
+            # "x" is the generic key every x-bearing spec returns; dispatchers such as
+            # `model.relativities()` are if/elif chains with no else, so a spec without it
+            # is silently dropped.  "knots" is the same vector under its local name.
             "x": t.copy(),
             "knots": t.copy(),
             "base_knot": float(t[self._base_index]),
@@ -1207,20 +1076,12 @@ class Piecewise:
     def ordered_structural_rows(self) -> list[StructuralContrastRow]:
         """Structural contrasts of a fitted piecewise term, for summaries.
 
-        One slope-change contrast per stated break and one curvature family
-        per segment of degree >= 2.  This is the fixed-knot truncated-power
-        inference vocabulary: with the knots stated as inputs the design is
-        linear in every parameter, the slope change at a stated join is the
-        coefficient of its plus-function, and both hypotheses are ordinary
-        Wald/F tests (Smith 1979, "Splines as a useful and convenient
-        statistical tool", Am. Statist. 33(2):57-62; Sprent 1961 for the
-        known-changeover two-phase case).  Deliberately NOT per-segment
-        per-power z-rows: under C0 seams the segments share their joint
-        values, so within-segment orthogonal components are not free
-        parameters and that clean-z geometry does not exist here.
-
-        Contrast vectors are stated over the retained columns of
-        ``transform`` and are invariant to the base-column choice.
+        One slope-change contrast per stated break and one curvature family per segment
+        of degree >= 2: the fixed-knot truncated-power vocabulary, where each is an
+        ordinary Wald/F test (Smith 1979, Am. Statist. 33(2):57-62; Sprent 1961 for
+        the known-changeover two-phase case).  Not per-segment per-power z-rows: under
+        C0 seams within-segment components are not free parameters.  Contrast vectors
+        are over the retained columns of ``transform`` and invariant to the base choice.
         """
         self._require_fitted()
         t = self._knots

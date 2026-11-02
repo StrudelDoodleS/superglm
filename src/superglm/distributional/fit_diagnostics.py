@@ -53,13 +53,9 @@ type _EvidenceProvenance = Literal[
 type _FindingSeverity = Literal["error", "warning", "info"]
 type _FindingConfidence = Literal["certified", "strong", "suggestive", "unresolved"]
 type _CurvatureMatrixKind = Literal["data", "penalized"]
-# Phases the profile reports by name, with their exclusive seconds: the
-# recorder charges each clock interval to the innermost open phase alone, so
-# these never double count even where one encloses another
-# (``layout_penalty_assembly`` builds the dense predictor matrices on the EFS
-# path).  The exclusive seconds of every other phase, including the fit's own
-# time outside any phase, form the orchestration row.  The left name is the
-# recorder's, the right name is the profile's.
+# Phases the profile reports by name (recorder name -> profile name). Each clock
+# interval is charged to the innermost open phase only, so nothing double
+# counts; every other phase's exclusive time forms the orchestration row.
 _PROFILE_LEAF_PHASES = (
     ("frame_normalization", "frame_normalization"),
     ("predictor_compilation", "predictor_compilation"),
@@ -122,11 +118,9 @@ class _LSSDiagnosticContext:
 def _legacy_policy_matrix_kind(model: DenseDistributionalModel) -> _CurvatureMatrixKind:
     """The curvature scope schema-8 telemetry left unrecorded.
 
-    Before schema 9 the terminal policy assessed the data curvature when the
-    family supplied expected information and the penalized curvature
-    otherwise. That is decided by what the artifact recorded about the family
-    when it was fitted, not by what the family declares today (NB2 gained
-    expected information later).
+    Before schema 9 the policy assessed data curvature when the family had
+    expected information, else penalized curvature; this reads what the
+    artifact recorded about the family, not what it declares today.
     """
     recorded = model.recorded_expected_information
     expected = isinstance(model.family, ExpectedInformationFamily) if recorded is None else recorded
@@ -456,10 +450,8 @@ def _curvature_indefinite_finding(
     material_fallback = used_fallback and telemetry.reason == "material_indefiniteness_after_retry"
     resolution: float | None = None
     if used_fallback:
-        # The accepted terminal matrix is Fisher curvature, but the retained
-        # minimum is from the rejected requested spectrum.  Its matrix scale is
-        # not retained, so the solver's materiality decision is the only sound
-        # authority; do not compare that minimum with the accepted Fisher norm.
+        # Fisher was accepted but the retained minimum is from the rejected
+        # spectrum, whose scale is not kept: trust the solver's materiality decision.
         if not material_fallback:
             return None
     else:
@@ -732,11 +724,9 @@ _TERMINATION_ACTION_METRICS = {
 def _stop_wording(kind: StopKind) -> dict[str, str]:
     """The practical-plateau, stationary or strict wording of every stop-related finding.
 
-    One table, so no finding phrases the same stop two ways.  The
-    ``lambda_cap_unresolved`` finding has no practical variant: a practical
-    plateau is an interior stop and cannot coexist with an unresolved cap.
-    A stationary stop is the Newton endgame's: its authority is the projected
-    exact LAML gradient, not the Fellner--Schall residual.
+    One table, so no finding phrases a stop two ways. ``lambda_cap_unresolved``
+    has no practical variant (a plateau is an interior stop); a stationary
+    stop's authority is the projected exact LAML gradient.
     """
     if kind == "practical":
         return {
@@ -1135,11 +1125,8 @@ def _build_profile(
 ) -> FitWorkProfile:
     """Summarise the accepted fit's work, timing shares, and smoothing outcomes.
 
-    Every published number is one the profile records validate: shares lie in
-    [0, 1], the phase seconds sum to the fit time, and an exact-face outcome
-    names the iteration that activated it.  The phases are disjoint exclusive
-    times, and the fit time is their sum rather than a separate reading, so
-    no timing can make the profile inconsistent.
+    Shares lie in [0, 1], phases are disjoint exclusive times whose sum is the
+    fit time, and an exact-face outcome names the iteration that activated it.
     """
     smoothing = context.smoothing
     if smoothing is None:
@@ -1248,10 +1235,8 @@ def _build_profile(
                 0,
             )
         )
-        # Disjoint intervals of the fit sum to its wall time.  Summing the same
-        # values in the same order as the profile's own check makes the two
-        # totals identical, where a remainder against ``fit_total`` would need
-        # a rounding allowance.
+        # Sum the disjoint intervals in the profile check's own order, so the two
+        # totals are identical without a rounding allowance.
         fit_seconds = sum(seconds for _, seconds, _ in parts)
         phases = tuple(
             FitPhaseProfile(

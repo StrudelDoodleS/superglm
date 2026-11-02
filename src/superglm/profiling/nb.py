@@ -56,11 +56,9 @@ from superglm.solvers.dispersion import (
 )
 from superglm.solvers.mode_score import linear_predictor
 
-#: Default search range for the NB2 shape parameter. Deliberately wide: these
-#: are numerical guard rails for the bracketed solve, not a statistical prior.
-#: The historical default of (0.1, 50.0) excluded routinely occurring true
-#: values at both ends (heavy overdispersion sits below 0.1; near-Poisson data
-#: pushes the profile optimum far above 50).
+#: Default search range for the NB2 shape parameter: wide numerical guard rails for the
+#: bracketed solve, not a statistical prior. Heavy overdispersion sits below 0.1 and
+#: near-Poisson data pushes the profile optimum far above 50.
 _THETA_DEFAULT_BOUNDS: tuple[float, float] = (1e-8, 1e8)
 #: Geometric step used to bracket a sign change of the profile score.
 _THETA_BRACKET_FACTOR = 10.0
@@ -73,12 +71,8 @@ _CI_RANGE = (0.01, 500.0)
 #: relative; roots to 1e-6 in log theta place each endpoint five times finer
 #: than that at every scale the ten-decade range admits.
 _CI_LOG_XTOL = 1e-6
-#: Direct-route mean fits stop at this relative objective change, as master's
-#: did. At the model's default 1e-6 the unrounded theta moved 4e-6 to 9e-6
-#: relative, a unit in the sixth published digit; at 1e-8 theta_hat matches
-#: master on every characterisation book for one or two more IRLS iterations
-#: per fit. BCD converges linearly (40% more iterations at 1e-8) and master
-#: left it at 1e-6, the model default.
+#: Direct-route mean fits stop at this relative objective change; at the model default 1e-6
+#: the unrounded theta moves 4e-6 to 9e-6 relative, a unit in the sixth published digit.
 _DIRECT_MEAN_FIT_TOL = 1e-8
 
 
@@ -94,26 +88,12 @@ class NBThetaBoundWarning(UserWarning):
     """
 
 
-#: Above this PSI ARGUMENT the profile score switches to its large-argument
-#: expansion.  The threshold is compared against ``a = theta`` under the
-#: frequency contract and ``a = w * theta`` under the prior one, because the
-#: expansion is in the psi argument and it is that argument, not theta, which
-#: has to be large for the series to converge.
-#:
-#: The naive form obtains an O(theta^-2) score by cancelling digamma,
-#: logarithm, and ratio terms whose leading parts are O(theta^-1) computed
-#: from O(log theta)-sized intermediates, so float64 loses the sign to
-#: roundoff around theta ~ 1e7-1e8 -- exactly the near-Poisson regime the
-#: widened bounds admit.
-#:
-#: The truncation error is governed by ``a`` alone: the expansion keeps the
-#: Bernoulli terms through ``1/(12 a^2)`` and drops ``1/(120 a^4)``.  Measured
-#: at the switch (``a = 1e5``, across w from 1 down to 1e-4 with theta raised
-#: to match), the dropped tail is **6.7e-17 relative to the score** -- below
-#: eps, and the same figure at every (w, theta) pair with the same product,
-#: which is what confirms the switch belongs on ``a``.  The naive form is
-#: still accurate there, so the two branches agree to ~1e-9 relative across
-#: the switch.
+#: Above this psi argument the profile score switches to its large-argument expansion. It is
+#: compared against ``a = theta`` (frequency contract) or ``a = w * theta`` (prior), since the
+#: series is in the psi argument. The naive form cancels O(theta^-1) terms to an O(theta^-2)
+#: score, so float64 loses the sign near theta ~ 1e7-1e8, the near-Poisson regime. The
+#: expansion drops ``1/(120 a^4)``, 6.7e-17 relative at ``a = 1e5``, and agrees with the
+#: naive form to ~1e-9 across the switch.
 _THETA_SCORE_ASYMPTOTIC_MIN = 1e5
 
 
@@ -127,35 +107,16 @@ def theta_score(
 ) -> float:
     """Closed-form NB2 profile score dl/dtheta at fixed mu (Lawless 1987).
 
-    Under the prior contract ``w Y ~ NB2(w mu, w theta)``, and differentiating
-    that in ``theta`` leaves every term below unchanged except the digamma
-    pair, which becomes ``psi(w(y+theta)) - psi(w theta)``.  The rest cancels
-    exactly: ``log(w theta) - log(w theta + w mu)`` is ``log theta -
-    log(theta + mu)``, and ``(w y + w theta)/(w mu + w theta)`` is
-    ``(y + theta)/(mu + theta)``.  At ``w == 1`` the two arms are the same
-    expression.
+    Under the prior contract ``w Y ~ NB2(w mu, w theta)``, only the digamma pair changes, to
+    ``psi(w(y+theta)) - psi(w theta)``; the other terms cancel exactly, and at ``w == 1`` the two
+    arms coincide. For large theta the direct expression cancels catastrophically (three O(theta^-1)
+    terms summing to O(theta^-2)), so above the switch point the score uses the asymptotic psi series
+    (Abramowitz and Stegun 6.3.18):
 
-    For large theta the direct expression cancels catastrophically: each of
-    ``digamma(y+theta) - digamma(theta)``, ``log(theta) - log(theta+mu)``,
-    and ``1 - (y+theta)/(mu+theta)`` is O(theta^-1) while their sum is
-    O(theta^-2), so beyond ~1e7 the sign that drives the bracketing solve is
-    roundoff rather than likelihood geometry. Above the switch point the
-    score is evaluated by a controlled expansion built from the asymptotic
-    psi series (Abramowitz & Stegun 6.3.18):
-
-        psi(theta+y) - psi(theta)
-            = log((theta+y)/theta) + (1/theta - 1/(theta+y))/2
-              + (1/theta^2 - 1/(theta+y)^2)/12 - O(theta^-4)
-
-    which combines with the remaining terms into
-
-        score_i = [log1p(x) - x] + y/(2 theta (theta+y))
-                  + (1/theta^2 - 1/(theta+y)^2)/12,
+        score_i = [log1p(x) - x] + y/(2 theta (theta+y)) + (1/theta^2 - 1/(theta+y)^2)/12,
         x = (y - mu)/(theta + mu),
 
-    every term individually O(theta^-2) with no cancellation: log1p(x) - x
-    is -x^2/2 + O(x^3) evaluated with error ~eps*|x|, negligible against the
-    other O(theta^-2) terms whenever it matters.
+    each term O(theta^-2) with no cancellation.
     """
     prior = weight_semantics == PRIOR_WEIGHTS
     if prior:

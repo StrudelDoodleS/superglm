@@ -276,12 +276,8 @@ def _raise_compiled_refusal(*, status: int, failing_row: int, max_terms: int) ->
     raise TweedieNumericalRefusal(f"row {failing_row}: {message}")
 
 
-# The LAML endgame's third- and fourth-derivative kernels
-# (``_tweedie_hessian_direction_rows``, ``_tweedie_fourth_rows`` and the
-# helpers they call) compile, or load from numba's cache, on a Tweedie fit's
-# first endgame call, not in ``superglm.warmup()``: only a fit whose
-# smoothing parameter reaches its endpoint calls them (the first-use list in
-# tests/test_import_compat.py records the measurements).
+# The LAML endgame's third- and fourth-derivative kernels compile (or load from
+# cache) on first endgame use, not in ``superglm.warmup()``: few fits reach it.
 
 
 def _pooled_rows(kernel: Callable[[int, int], tuple[int, int]], n_rows: int) -> tuple[int, int]:
@@ -418,21 +414,13 @@ def tweedie_hessian_direction(
     """Packed derivative of the natural ``(mu, phi, p)`` Hessian along ``direction``.
 
     The positive-row series contributes the joint cumulants of its term
-    derivatives over the Hessian's own window (two passes: means, then
-    central moments about them); the zero row and the canonical part are
-    closed forms.  Rows the Hessian would refuse are refused here too.
-
-    The cumulants of the window's normalized terms are exactly the derivatives
-    of the windowed sums, so this is the derivative of the published Hessian,
-    window included, which is the curvature the LAML objective is defined on;
-    it carries no certificate for the omitted tail, and needs none against
-    that objective.  The window's distance from the full Tweedie law is the
-    published likelihood's own, uncertified (see the module note), and
-    v0.40.0's Richardson stencil differenced the same windowed Hessian, so
-    its certificate did not cover that distance either.  The Hessian moves
-    discontinuously only where the window gains or loses a term below
-    ``exp(-log_cutoff)`` of the mode term: at the default cutoff, within the
-    Hessian's own rounding.
+    derivatives over the Hessian's own window (means, then central moments);
+    the zero row and canonical part are closed forms. This is the exact
+    derivative of the published windowed Hessian, the curvature the LAML
+    objective is defined on, so the omitted tail needs no certificate; the
+    Hessian jumps only where the window gains or loses a term below
+    ``exp(-log_cutoff)`` of the mode, within its own rounding at the default.
+    Rows the Hessian would refuse are refused here too.
     """
     arrays, _, row_max_terms, cutoff = _validated_tweedie_inputs(
         y,
@@ -485,14 +473,11 @@ def tweedie_natural_fourth(
 ) -> NDArray[np.float64]:
     """Derivatives of orders one to four in ``(mu, rho, p)``, ``rho = log phi``, as ``(n, 34)``.
 
-    Packed by order (3 + 6 + 10 + 15).  ``rho`` rather than ``phi`` because
-    the series is linear in ``rho`` and the default dispersion link is
-    ``rho`` itself; the caller composes with its links.  The positive row's
-    series contributes the joint cumulants of its term derivatives through
-    fourth order over the Hessian's own window (two passes, as
-    :func:`tweedie_hessian_direction`), so this differentiates the published,
-    windowed likelihood; the closed part, and the zero row, are generated
-    closed forms.  Rows the Hessian would refuse are refused here too.
+    Packed by order (3 + 6 + 10 + 15); ``rho`` because the series is linear in
+    it and it is the default dispersion link. The positive row's series gives
+    the joint cumulants of its term derivatives over the Hessian's window (as
+    :func:`tweedie_hessian_direction`); the closed part and zero row are
+    generated closed forms. Rows the Hessian refuses are refused here too.
     """
     arrays, _, row_max_terms, cutoff = _validated_tweedie_inputs(
         y,

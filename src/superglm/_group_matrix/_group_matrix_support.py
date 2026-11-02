@@ -1,39 +1,27 @@
 """Lossless row-support detection for factored SSP group matrices.
 
-Exact-path spline and tensor bases repeat rows whenever the underlying covariate
-is integer-valued or otherwise low-cardinality, which is the common case for
-insurance rating variables.  Storing one copy per distinct row turns an O(n)
-weighted gram into an O(n) bincount plus an O(n_support) dense gram.
-
-This is deduplication, not binning: it introduces no discretisation error and is
-unrelated to ``discrete=True``.
-
-Three entry points, differing only in how the row grouping is obtained and
-whether it is checked against the basis:
+Exact-path spline and tensor bases repeat rows whenever the covariate is
+integer-valued or low-cardinality (the common case for rating variables).
+Storing one copy per distinct row turns an O(n) weighted gram into an O(n)
+bincount plus an O(n_support) dense gram.  This is deduplication, not binning:
+no discretisation error, unrelated to ``discrete=True``.
 
 ``detect_row_support``
     The production path (``dm_builder._build_ssp_group``).  Derives the
-    grouping from the basis itself, chunk by chunk, so only bit-identical
-    rows merge; transients are bounded chunks plus one dense
-    ``(n_support, p_b)`` representative block (which approaches the dense
-    basis only when nothing repeats).  Needs no assumption that equal
-    covariate values produce bit-identical basis rows.
-
+    grouping from the basis itself, chunk by chunk, so only bit-identical rows
+    merge; transients are bounded chunks plus one dense ``(n_support, p_b)``
+    representative block.
 ``plan_row_support``
-    Core gate + materialisation for callers that already know the grouping --
-    a single-covariate spline basis repeats rows exactly where the covariate
-    value repeats -- letting them skip the detection scan entirely.
-
+    Gate + materialisation for callers that already know the grouping (a
+    single-covariate spline basis repeats rows where the covariate repeats),
+    skipping the detection scan.
 ``plan_verified_row_support``
-    The same caller-supplied grouping, checked against the basis before it is
-    used.  It gates on a one-dimensional scan, so a declined block never
-    touches the basis at all, and it densifies once on accept to verify.
-    Exact like ``detect_row_support`` and cheaper than it at both outcomes;
-    the price is that the caller must have a grouping to offer.
-
-``detect_cell_support`` returns what ``detect_row_support`` would for a
-basis whose rows repeat by cell, scanning one row per cell, so that basis
-need never be formed.
+    The same caller-supplied grouping, checked against the basis before use.
+    It gates on a one-dimensional scan, so a declined block never touches the
+    basis, and densifies once on accept to verify.
+``detect_cell_support``
+    What ``detect_row_support`` would return for a basis whose rows repeat by
+    cell, scanning one row per cell so the basis need never be formed.
 """
 
 from __future__ import annotations
@@ -50,18 +38,10 @@ from numpy.typing import NDArray
 DEFAULT_MIN_SPEEDUP = 1.5
 
 # Ratio of realised speedup to the flop-count ratio below.  The flop count alone
-# badly under-predicts, because the compressed side is a BLAS dense gram while
-# the current side is a numba scalar loop over rows.  Measured at n=200_000,
-# median of 5 after warm-up (see notes/audit/2026-07-28/):
-#
-#   p_b  nnz_row  support ratio  flop ratio  measured  implied factor
-#     9        4          0.400       0.309     1.68x            5.4
-#     9        4          0.950       0.130     0.74x            5.7
-#    20        4          0.400       0.063     0.73x           11.7
-#    81       81          0.400       1.266     9.96x            7.9
-#    81       81          0.950       0.533     4.46x            8.4
-#
-# The low end of the observed range is used so the gate stays conservative.
+# under-predicts because the compressed side is a BLAS dense gram while the
+# current side is a numba scalar loop over rows.  Measured implied factors at
+# n=200_000 range from 5.4 to 11.7 (notes/audit/2026-07-28/); the low end is used
+# so the gate stays conservative.
 _BLAS_ADVANTAGE = 6.0
 
 # Cap on the dense unique-row buffer, matching the byte budgets used elsewhere
@@ -134,21 +114,13 @@ def _estimated_speedup(
 ) -> float:
     """Estimated gram speedup from deduplicating rows.
 
-    The current path (``_csr_weighted_gram``) accumulates only nonzero pairs
-    within each row, so it costs about ``n * r(r+1)/2`` for ``r`` nonzeros per
-    row -- cheap for a locally-supported B-spline, expensive for a tensor whose
-    row-Kronecker rows are dense.  The compressed path costs one bincount over
-    ``n`` plus a dense ``(n_support, p_b)`` gram.
-
-    ``gram_repeats`` is how many separate grams run over the one shared support.
-    A single block runs one, so the default leaves the model unchanged.  A
-    ``spline_cat`` term shares one support across its levels and each level runs
-    its own gram over the whole of it, while the levels partition the rows
-    between them -- so the ``n_rows`` bincount term is counted once and the
-    dense term once per level.
-
-    The flop ratio is scaled by ``_BLAS_ADVANTAGE`` because the two sides run on
-    very different hardware paths; the raw ratio under-predicts by 5-12x.
+    The current path (``_csr_weighted_gram``) costs about ``n * r(r+1)/2`` for ``r``
+    nonzeros per row; the compressed path costs one bincount over ``n`` plus a dense
+    ``(n_support, p_b)`` gram.  ``gram_repeats`` is how many separate grams run over
+    the one shared support (a ``spline_cat`` term runs one per level while the
+    levels partition the rows), so the ``n_rows`` term counts once and the dense
+    term once per level.  The flop ratio is scaled by ``_BLAS_ADVANTAGE`` because
+    the raw ratio under-predicts by 5-12x.
     """
     if n_rows <= 0 or n_support <= 0 or gram_repeats <= 0:
         return 0.0
@@ -375,13 +347,12 @@ def _passes_support_gates(
     # negligible either way and the calibration does not apply.
     if n_rows < _MIN_CALIBRATED_ROWS:
         return False
-    # One shared support block is stored however many grams read it, so the
-    # byte budget is not scaled by ``gram_repeats``. The budget bounds what
-    # compression adds; it bounds nothing by keeping a basis larger than the
-    # compressed group, which is what a saturated tensor basis is (12 bytes
-    # per stored entry on every row, against 8 per distinct row). That group
-    # holds the block and a row index, and its Gram forms two more products
-    # no wider than the block: the projected support and its weighted copy.
+    # One shared support block is stored however many grams read it, so the byte
+    # budget is not scaled by ``gram_repeats``.  It bounds what compression adds, not
+    # a basis larger than the compressed group (a saturated tensor basis stores 12
+    # bytes per entry on every row against 8 per distinct row).  That group holds the
+    # block and a row index, and its Gram forms two more products no wider than the
+    # block.
     support_bytes = n_support * p_b * 8
     if support_bytes > max_support_bytes and (
         _COMPRESSED_GRAM_BLOCKS * support_bytes + n_rows * np.dtype(np.intp).itemsize
@@ -409,10 +380,9 @@ def plan_row_support(
     Only the first occurrence of each group is materialised, so the full basis
     is never densified.
     """
-    # Resolved at call time, never bound as a default: these are module globals
-    # so a test can lower them, and a default argument would freeze them at
-    # import -- the shape that made a lowered budget silently do nothing in the
-    # algebra module, and that here would split two gates documented as agreeing.
+    # Resolved at call time, never as a default argument: these module globals can
+    # be lowered by a test, and a default would freeze them at import and split two
+    # gates documented as agreeing.
     min_speedup = DEFAULT_MIN_SPEEDUP if min_speedup is None else min_speedup
     max_support_bytes = (
         DEFAULT_MAX_SUPPORT_BYTES if max_support_bytes is None else max_support_bytes
@@ -462,10 +432,9 @@ def plan_verified_row_support(
     values did not produce identical rows, and the fallback derives the
     grouping from the basis instead.
     """
-    # Resolved at call time, never bound as a default: these are module globals
-    # so a test can lower them, and a default argument would freeze them at
-    # import -- the shape that made a lowered budget silently do nothing in the
-    # algebra module, and that here would split two gates documented as agreeing.
+    # Resolved at call time, never as a default argument: these module globals can
+    # be lowered by a test, and a default would freeze them at import and split two
+    # gates documented as agreeing.
     min_speedup = DEFAULT_MIN_SPEEDUP if min_speedup is None else min_speedup
     max_support_bytes = (
         DEFAULT_MAX_SUPPORT_BYTES if max_support_bytes is None else max_support_bytes
@@ -506,28 +475,21 @@ def detect_row_support(
 ) -> tuple[NDArray, NDArray] | None:
     """Derive the row grouping from the basis itself, then plan compression.
 
-    Rows are grouped by a vectorized 64-bit mix of their raw float bits and the
-    grouping is verified bitwise, falling back to byte keying on a collision.
-    The scan is O(n * p_b) in bounded chunks; the accept/decline gates run on
-    the hash grouping alone, so a declined block (nothing repeats, support
-    over budget, speedup below threshold) never materialises the dense
-    ``(n_support, p_b)`` representative block — the worst case for that
-    allocation is exactly the no-repeats case where compression is refused.
-    On accept the verified representative block is returned directly, so the
-    support rows are densified exactly once.  Callers that already know the
-    grouping can skip the scan via :func:`plan_row_support`, or keep the
-    bitwise check and skip only the hash pass via
-    :func:`plan_verified_row_support`.
+    Rows are grouped by a vectorized 64-bit mix of their raw float bits, verified
+    bitwise (byte keying on a collision).  The scan is O(n * p_b) in bounded chunks;
+    the accept/decline gates run on the hash grouping alone, so a declined block
+    never materialises the dense ``(n_support, p_b)`` block.  On accept the verified
+    block is returned directly.  Callers that know the grouping can use
+    :func:`plan_row_support`, or :func:`plan_verified_row_support` to keep the
+    bitwise check and skip the hash pass.
 
-    Only bit-identical densified rows merge, so reconstruction is exact even
-    for non-finite values: NaN rows merge only when their bit patterns match.
-    (Explicitly stored ``-0.0`` entries densify to ``+0.0`` before grouping,
-    identically for grouping and reconstruction, so exactness is unaffected.)
+    Only bit-identical densified rows merge, so reconstruction is exact even for
+    non-finite values (NaN rows merge only on matching bit patterns; stored ``-0.0``
+    densifies to ``+0.0`` before grouping and reconstruction alike).
     """
-    # Resolved at call time, never bound as a default: these are module globals
-    # so a test can lower them, and a default argument would freeze them at
-    # import -- the shape that made a lowered budget silently do nothing in the
-    # algebra module, and that here would split two gates documented as agreeing.
+    # Resolved at call time, never as a default argument: these module globals can
+    # be lowered by a test, and a default would freeze them at import and split two
+    # gates documented as agreeing.
     min_speedup = DEFAULT_MIN_SPEEDUP if min_speedup is None else min_speedup
     max_support_bytes = (
         DEFAULT_MAX_SUPPORT_BYTES if max_support_bytes is None else max_support_bytes

@@ -428,10 +428,10 @@ class TestRelativities:
 
         source = Path(coef_tables.__file__).read_text()
         branch = source.split("elif isinstance(spec, Piecewise):", 1)[1]
-        comment = branch.split("knots = spec._knots", 1)[0]
+        comment = " ".join(branch.split("knots = spec._knots", 1)[0].replace("#", " ").split())
         assert "unpenalized" in comment
         assert "selection shrinkage" in comment or "selection_penalty" in comment
-        assert "FIXED INPUTS" in comment
+        assert "fixed inputs" in comment.lower()
         assert "unconstrained" in comment
 
 

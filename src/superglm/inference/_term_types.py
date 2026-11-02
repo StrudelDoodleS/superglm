@@ -130,45 +130,19 @@ class TermInference:
 
     # --- Fields below are APPENDED.  Add new ones here, never in the middle.
     #
-    # ``TermInference`` is public: ``SuperGLM.term_inference()`` returns it and
-    # callers construct it.  A dataclass field inserted between existing ones
-    # renumbers every positional argument after it, and because all of these
-    # are optional with defaults, that is a SILENT reinterpretation rather
-    # than a TypeError -- the call still succeeds and every argument from the
-    # insertion point on lands one field to the left of where it was written.
-    # ``centering_shift`` was first written between ``centering_mode`` and
-    # ``edf``, where a caller's positional ``edf=3.0`` became a centering
-    # shift of 3.0 and ``edf`` silently became ``None``.  That is the worst
-    # possible field to absorb a stray value: it is added to the exported base
-    # relativity, so a stale positional caller would have rated every risk in
-    # the workbook at ``exp(3.0)`` -- 20x -- of the model's premium.
+    # ``TermInference`` is public and callers construct it; a field inserted between
+    # existing ones silently reinterprets positional arguments (a positional ``edf=3.0``
+    # would become a centering shift of 3.0).
     # ``test_term_inference_field_order_is_append_only`` pins the order.
 
-    # The constant a reporting centering removed from this term, on the log
-    # scale: ``log_relativity`` as reported is the fitted contribution MINUS
-    # ``centering_shift``.  Zero for every term the centering left alone --
-    # ``centering="native"``, a single-valued ``Numeric``, an
-    # ``OrderedCategorical`` (which ``_recenter_term`` never reaches, because
-    # it is already anchored on its base level).
-    #
-    # Scope: this describes ``SuperGLM.term_inference``.  The sibling public
-    # surface ``SuperGLM.relativities(centering="mean")`` runs a SEPARATE
-    # centering (``_term_model_ops._center_df``) that records no shift and,
-    # unlike this one, does shift an ``OrderedCategorical`` spline term.  The
-    # two disagree today; see ``test_the_two_mean_centerings_disagree_on_an_
-    # ordered_categorical``, which pins the divergence so that whoever wires
-    # ``centering_shift`` into the plot-data path finds it deliberately
-    # measured rather than inheriting a silently different constant.
-    #
-    # It is recorded rather than re-derived because the two are not the same
-    # number.  A consumer who reconstructs it as ``mean(log_relativity)`` over
-    # the values it can see gets zero for a mean-centered term (correct but
-    # useless), the whole level mean for an ``OrderedCategorical`` that was
-    # never shifted at all, and the EXPANDED level mean for a grouped
-    # categorical whose shift was computed on its grouped levels.  Anything
-    # that has to add the constant back -- the rating-table export folds it
-    # into ``base_relativity`` so the workbook still multiplies out to
-    # ``model.predict`` -- must use the constant that was actually subtracted.
+    # The constant a reporting centering removed, on the log scale: ``log_relativity`` is
+    # the fitted contribution MINUS ``centering_shift``. Zero where centering left the term
+    # alone (``centering="native"``, a single-valued ``Numeric``, an ``OrderedCategorical``).
+    # It describes ``SuperGLM.term_inference``; ``relativities(centering="mean")`` runs a
+    # separate centering that records no shift. It is recorded, not re-derived, because
+    # ``mean(log_relativity)`` of the visible values is the wrong constant for a grouped
+    # categorical or an unshifted ordered one; the rating-table export folds this constant
+    # into ``base_relativity`` so the workbook multiplies out to ``model.predict``.
     centering_shift: float = 0.0
 
     def to_dataframe(self) -> pd.DataFrame:

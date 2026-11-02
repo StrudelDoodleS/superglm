@@ -82,31 +82,18 @@ def _replace_result_beta(model, beta) -> None:
 def _term_publishes_a_centred_contribution(model, groups) -> bool:
     """Whether the published basis for this term asserts a zero-mean contribution.
 
-    The centering check below is a statement about the CANONICALIZED public
-    basis: runtime canonicalization records a per-group ``column_means`` for
-    every term it registered and the public intercept carries ``means @ beta``
-    for them, so a registered term's published contribution has mean zero by
-    construction and a repair cannot move it. A term the canonicalizer never
-    registered has no such invariant to assert -- its design columns are
-    published as they stand, and the whole of a repair's level is carried by the
-    intercept the engine reprofiles immediately afterwards.
+    Runtime canonicalization records a per-group ``column_means`` for every term it
+    registered and the public intercept carries ``means @ beta`` for them, so a
+    registered term's published contribution has mean zero by construction and a
+    repair cannot move it.  An unregistered term has no such invariant to assert.
 
     Membership is decided by ``hasattr(spec, "_basis_matrix")``, which an
-    ``OrderedCategorical`` fails because it WRAPS the spline that carries the
-    matrix. With ``select=True`` the inner spline's identifiability projection
-    is skipped as well, so the columns genuinely do not sum to zero; the check
-    then read a nonzero mean off a term that never claimed a zero one and
-    refused every repair on it, while the identical unwrapped ``Spline`` --
-    registered, its recorded means cancelling the same quantity -- repaired.
-    Issue #311: a declared constraint made unusable on the wrapper for a reason
-    that has nothing to do with the constraint.
-
-    Nothing is given up by asking first. For a term the check does clear, its
-    quantity is ``column_means @ delta`` minus the recorded shift of the same
-    name, which is zero for EVERY ``delta`` -- so on the terms where it passes
-    today it is not discriminating between repairs at all. The guards that are
-    (feasibility of the certificate, and the objective against the zero-term
-    fallback) run on this term exactly as before.
+    ``OrderedCategorical`` fails because it wraps the spline that carries the
+    matrix; with ``select=True`` its columns genuinely do not sum to zero, and the
+    check must not refuse repairs for a zero mean the term never claimed (#311).
+    For a term the check does clear, its quantity is zero for every ``delta``; the
+    discriminating guards (certificate feasibility, objective against the zero-term
+    fallback) run on this term regardless.
     """
     runtime_state = getattr(model, "_runtime_canonical_state", None)
     if not isinstance(runtime_state, dict):
@@ -629,13 +616,11 @@ def _validate_repair_for_publication(
 class _PendingRepair:
     """One term whose declared post-fit shape has to be projected.
 
-    ``spec`` is the FEATURE as the model holds it; ``curve_spec`` is the object
-    whose coefficient space the repair actually works in. They are the same
-    object for a plain spline and differ for a wrapper such as
-    ``OrderedCategorical``, whose smooth is an inner spline over mapped level
-    scores. Keeping both means the repair reads geometry from the basis that
-    owns it while the column, the groups and the recorded result stay keyed to
-    the feature the caller declared.
+    ``spec`` is the feature as the model holds it; ``curve_spec`` is the object whose
+    coefficient space the repair works in.  They are the same for a plain spline and
+    differ for a wrapper such as ``OrderedCategorical`` (an inner spline over mapped
+    level scores): geometry comes from ``curve_spec`` while the column, groups and
+    recorded result stay keyed to the declared feature.
     """
 
     name: str
@@ -648,19 +633,12 @@ class _PendingRepair:
 def _curve_spec(name: str, spec):
     """The basis whose coefficient space a shape repair operates in.
 
-    Selection is by declaration; this resolution is by type, and the two can
-    drift. A spec that grows a ``constraint=`` without being a spline -- a
-    ``Piecewise`` with a stated monotone segment is the obvious candidate --
-    would pass the filter and arrive here, and every consumer downstream reads
-    spline internals (``_lo``, ``_hi``, ``_knots``, ``reconstruct``). Without
-    this guard the mismatch surfaces as an ``AttributeError`` on ``spec._lo``
-    inside the grid weights, several frames from the declaration that caused
-    it. Refuse by name instead, with the same intent as the ordered wrapper's
-    refusal of a basis that cannot supply raw QP geometry -- though not the
-    same exception: that one reports a builder invariant and raises
-    ``RuntimeError``, while this reports an engine that was never written for
-    the basis in hand, which is what ``NotImplementedError`` means here and in
-    ``_reject_structured_fit_constraints``.
+    Selection is by declaration but resolution is by type, and the two can drift: a
+    spec that grows a ``constraint=`` without being a spline (a ``Piecewise`` with a
+    monotone segment) would reach consumers that read spline internals (``_lo``,
+    ``_hi``, ``_knots``, ``reconstruct``).  Refuse by name instead, with
+    ``NotImplementedError`` (an engine never written for the basis in hand, as in
+    ``_reject_structured_fit_constraints``).
     """
     from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.spline import _SplineBase
@@ -679,19 +657,11 @@ def _curve_spec(name: str, spec):
 def _pending_repairs(model) -> list[_PendingRepair]:
     """Return repairs that can change coefficients without cloning fitted state.
 
-    Selects on the DECLARATION -- a spec that names a post-fit shape -- rather
-    than on the spec's type. The type test this replaced (``isinstance(spec,
-    _SplineBase)``) ran before the declaration was ever read, so a constraint
-    declared on a wrapped spline was skipped in silence: no repair, no warning,
-    and a summary that still reported the constraint. Any spec that does not
-    declare one still answers ``None`` here and is skipped as before.
-
-    The repair is a statement about THE SMOOTH, so it takes the feature's
-    spline blocks through the shared filter rather than every block under the
-    feature name: an ordered term carrying ``specials=`` owns an unpenalized
-    free-level block beside its curve, and concatenating that into the term
-    vector would reinterpret free level effects as the spline's trailing
-    coefficients and repair a curve nobody fitted.
+    Selects on the declaration (a spec that names a post-fit shape) rather than on
+    the spec's type, so a constraint declared on a wrapped spline is not skipped.
+    The repair is about the smooth, so it takes the feature's spline blocks through
+    the shared filter: an ordered term with ``specials=`` owns an unpenalized
+    free-level block that must not be read as the spline's trailing coefficients.
     """
     from superglm.inference._term_helpers import spline_groups
 
@@ -757,11 +727,9 @@ def _refresh_repaired_geometry(model, prior_working_weights, prior_selected_name
     if weights_unchanged and selection_unchanged and not curvature_changes and record is not None:
         return
 
-    # A repair moves only its own term's coefficients and the intercept, so a
-    # record of the rows a constrained fit held keeps them, none binding
-    # included, formed again at the new weights over the active design, which
-    # is the record's full width only where every column was selected; any
-    # other record is dropped.
+    # A repair moves only its own term's coefficients and the intercept, so a record
+    # of the rows a constrained fit held is formed again at the new weights over the
+    # active design; it is kept only where every column was selected, else dropped.
     refreshed = (
         state_ops.face_record_at(model, current_working_weights)
         if record is not None
@@ -925,29 +893,21 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
         None if scoring_offset is None else np.asarray(scoring_offset, dtype=np.float64),
     )
 
-    # Why an ordered term carrying `specials=` survives the centering check
-    # below, since this is the first consumer whose NUMERICAL VALIDITY depends
-    # on it. `_validate_repair_for_publication` refuses any repair that moves
-    # the fitted mean. That mean is unmoved here only because the wrapper
-    # builds its inner spline on the ordered rows ALONE and zero-fills the
-    # special rows afterwards: the identifiability projection is therefore a
-    # column sum over exactly the rows the block is nonzero on, so it vanishes
-    # over all n rows once the zeros are scattered back, and any delta confined
-    # to the spline block leaves the mean alone. Building that block over all
-    # rows instead -- which `OrderedCategorical._build_spline` already warns
-    # against for its own reasons -- would break this repair rather than merely
-    # the projection, and would do it silently.
+    # An ordered term carrying `specials=` passes the centering check below because
+    # the wrapper builds its inner spline on the ordered rows alone and zero-fills the
+    # special rows afterwards: the identifiability projection is a column sum over
+    # exactly the rows the block is nonzero on, so any delta confined to the spline
+    # block leaves the fitted mean alone (`_validate_repair_for_publication` refuses
+    # repairs that move it).  Building the block over all rows would break this
+    # silently.
     for pending in pending_repairs:
         name, kind, groups = pending.name, pending.kind, pending.groups
         curve_spec = pending.curve_spec
         beta = work_model.result.beta
         beta_before = np.asarray(beta, dtype=np.float64).copy()
         x_col, axis_rows = _repair_axis_column(pending, frame)
-        # Rows a `specials=` level holds out of the smooth carry no coordinate
-        # on the axis, so the histogram behind the grid weights has to lose the
-        # same rows or the two arrays stop describing one set of observations.
-        # Left exactly as it was when nothing is held out, which is every term
-        # but that one.
+        # Rows a `specials=` level holds out of the smooth carry no coordinate on the
+        # axis, so the histogram behind the grid weights loses the same rows.
         axis_weights = scoring_weights_arr if axis_rows.all() else scoring_weights_arr[axis_rows]
         grid_weights = _grid_weights(curve_spec, x_col, axis_weights, n_grid)
 
@@ -972,15 +932,11 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
             selection_penalty=selection_penalty,
             current_eta=current_eta,
         )
-        # Recorded only if this term's coefficients actually moved. The early
-        # exit above is a statement about the WHOLE model -- once any one term
-        # binds, the loop runs for every pending term, and a term that was
-        # already feasible comes back from the repairer with its coefficients
-        # copied through unchanged. Recording that as a repair used to cost a
-        # cosmetic `repaired` marker; now it would cost the term its entire
-        # published inference, and the reason the withholding exists does not
-        # apply to it -- no cone projection happened, so there is no active edge
-        # and no boundary to sit on.
+        # Recorded only if this term's coefficients actually moved.  The early exit
+        # above concerns the whole model: once any term binds the loop runs for every
+        # pending term, and an already-feasible term comes back unchanged.  Recording it
+        # as repaired would withhold its published inference although no cone projection
+        # happened.
         projected = not np.array_equal(candidate_beta, beta_before)
         _replace_result_beta(work_model, candidate_beta)
         move_public_intercept(work_model, intercept_shift)

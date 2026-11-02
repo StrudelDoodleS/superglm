@@ -17,12 +17,12 @@ from numpy.typing import NDArray
 
 # Terms 37 log-units below the peak change log W by < 1e-16 (Dunn & Smyth 2005).
 _LOG_CUTOFF = 37.0
-# Beyond 2**52 consecutive integers are no longer exact in float64.
+# Below 2**53 every j + 1 is exact in float64; 2**52 keeps a factor of two in hand.
 _MAX_SAFE_MODE = float(2**52)
-# A cap on one row's work: peak indices up to ~3.4e9 (a + 1). The density's
-# accuracy switch to the saddlepoint (superglm._tweedie.saddlepoint_switch) sits
-# below it for every p < 2 - 1.2e-9; nearer p = 2 the rows it refuses below the
-# switch take the p -> 2 Gamma limit instead.
+# A cap on one row's work: peak indices up to ~3.4e9 (a + 1).  The accuracy
+# switch to the saddlepoint (superglm._tweedie.saddlepoint_switch) sits below it
+# for every p < 2 - 1.2e-9; nearer p = 2 the refused rows take the p -> 2 Gamma
+# limit.
 MAX_ROW_TERMS = 1_000_000
 # lgamma(j + 1) + lgamma(a j) is shared by every row of one call. The accuracy
 # switch bounds it by 1.03-1.73 j* entries (the low end at the lattice floor as

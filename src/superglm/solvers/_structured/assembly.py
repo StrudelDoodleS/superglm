@@ -56,7 +56,7 @@ class CachedStructuredSolution:
     )
     log_det_H: float  # noqa: N815
     hessian_rank: int
-    # the solve's centred state (one-engine design §3.8): ``alpha`` about the
+    # the solve's centred state: ``alpha`` about the
     # factor's border centre ``c0``, written into slope coordinates (0 off
     # the border); ``intercept = alpha - fsum(c * beta)``
     centred_intercept: float | None = None
@@ -429,8 +429,8 @@ def _memoised_leaf_factor(system, penalized_operator, factor_type: type, name: s
     """Factor an ``fs`` or ``sz`` leaf system; return the factor and the raw RHS.
 
     The last factor built on the system is reused for bitwise the same
-    penalty parts (perf F1); the memo holds it weakly, so a system and its
-    factor form no reference cycle (perf F17).
+    penalty parts; the memo holds it weakly, so a system and its factor form
+    no reference cycle.
     """
     if not np.array_equal(penalized_operator.small_indices, system.operator.small_indices):
         raise ValueError("Penalized and unpenalized operators must use identical partitions.")
@@ -536,7 +536,7 @@ def solve_augmented_normal_equations(
     about the factor's border centre instead of the raw one.  A factor that
     is not its system's own raises ``TypeError``.  ``extra``
     ``(p + 1,)``, zero in the intercept entry, is a further right-hand side
-    (a Levenberg shift's ``E beta``, design §3.11): it is not data, so it
+    (a Levenberg shift's ``E beta``): it is not data, so it
     takes the factor's full solve beside the data-side one, in the same
     intercept coordinate.
     """

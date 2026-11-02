@@ -57,13 +57,10 @@ def _curve_correlation(left: NDArray[np.float64], right: NDArray[np.float64]) ->
     shared point, or a flat curve, has no correlation, neither 1 nor 0.
 
     Each curve is shifted by one of its own points and scaled by its range
-    before it is centred. Centring at the mean alone cancels in a curve whose
-    range is a few units in the last place of its values, the case shifted
-    data guards against (Chan, Golub and LeVeque, *Algorithms for computing
-    the sample variance: analysis and recommendations*, The American
-    Statistician 37(3), 1983): a point within a factor of two of the shift
-    point subtracts exactly (Sterbenz's lemma), and the scaled curve has
-    range 1.
+    before it is centred, so a curve whose range is a few units in the last
+    place does not cancel (Chan, Golub and LeVeque, American Statistician
+    37(3), 1983); a point within a factor of two of the shift point subtracts
+    exactly (Sterbenz's lemma), and the scaled curve has range 1.
     """
     left = np.asarray(left, dtype=np.float64)
     right = np.asarray(right, dtype=np.float64)

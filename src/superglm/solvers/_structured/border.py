@@ -1,92 +1,51 @@
-"""The border factorization of a nested chain (one-engine design, section 3.6).
+"""The border factorization of a nested chain.
 
-``NestedSchurFactor`` eliminates the tree and the intercept (the super-root)
-and hands this module the intercept-profiled border Schur complement
-``Q = Q_d + S`` in the rest coordinates: ``Q_d`` its data part, ``S`` the
-border penalty, and ``U`` the running bound of every term that formed ``Q_d``,
-so that ``|dQ_ij| <= sqrt(U_i U_j)`` componentwise.  Five steps, one path:
+``NestedSchurFactor`` (and the ``fs``/``sz`` factors) hand this module the
+intercept-profiled border Schur complement ``Q = Q_d + S``: ``Q_d`` its data
+part, ``S`` the border penalty and ``U`` a running bound with
+``|dQ_ij| <= sqrt(U_i U_j)``. Five steps, one path:
 
-1. **Structural deflation, by term type.**  ``BorderGenerators`` holds the
-   exact null basis ``N`` of the data part that the specification
-   determines: a complete one-hot block sums to the intercept, which the
-   super-root has already eliminated, and a nested pair of border blocks has
-   a parent indicator equal to the sum of its children's.  ``N`` is reduced
-   so that ``N[references] = I``, which makes ``B = [N, E_M]`` unimodular
-   (``E_M`` the identity columns off the references).  In that basis the data
-   rows and columns of ``N`` are set to exact zero, the penalty parts come
-   from ``S`` directly (``a_NN = N'SN``, ``a_MN = E_M'SN``), and ``N`` is
-   eliminated first: ``Q''' = Q_d[M, M] + S[M, M] - a_MN a_NN^-1 a_NM``.
-2. **Pivoted Cholesky** (LAPACK ``dpstrf``, complete pivoting) of the
-   Jacobi-scaled ``Q_s = D_s Q''' D_s`` with the stopping tolerance
-   ``tau = c_R(n) + u_s``.  ``u_s = sum_j U_j / Q_jj`` bounds ``||dQ_s||_2``
-   (Perron-Frobenius on the rank-one majorant ``sqrt(u_i u_j)``) and
-   ``c_R(n)`` is Rump's constant (Rump 2006, BIT 46, Theorem 2.3 and bound
-   I of section 3): ``gamma_{n+1} (1 - gamma_{n+1})^-1 tr(A) + n M eta`` with
-   ``gamma_k = k u / (1 - k u)``, ``u = 2^-53``, ``M = 3 (2 n + max a_ii)``
-   and ``eta = 2^-1074``.  A column whose pivot is within its own ``U_j`` is
-   an exact null before the factorization, as before.
-3. **Verification** of the retained block (Rump 2006, Corollaries 2.4 and
-   2.7): the floating-point Cholesky of ``Q_s[P_r, P_r] - (c_R(r) + tau) I``,
-   its diagonal rounded downwards by Rump's Lemma 2.5, must run to
-   completion.  That proves every eigenvalue of the retained principal block
-   exceeds ``tau``, so every matrix in the ``u_s`` ball is positive definite
-   there and, by Cauchy interlacing, ``Q_s`` has ``r`` eigenvalues above
-   ``tau``.  If it fails, ``r <- r - 1`` and the test repeats.  The test
-   runs first on the whole live block: when it certifies ``lambda_min(Q_s) >
-   tau`` there is nothing to truncate (every pivot of step 2 is at least
-   ``lambda_min``), so the unpivoted Cholesky factors ``Q_s`` and step 2 is
-   skipped; ``dpstrf`` runs only when some direction is not certified.
-4. **The truncated subspace.**  ``Z`` from the pivoted factor,
-   ``P [-L11^-T L21'; I]`` orthonormalized, gives the Ritz values ``Theta =
-   eig(Z'Q_sZ)`` and the residual ``R = Q_sZ - Z(Z'Q_sZ)``.  With the
-   certified gap ``delta = tau - max Theta > ||R||_2``, the Davis-Kahan sin
-   theorem and the quadratic residual bound of Mathias (1998, SIMAX 19,
-   541-550; as Zhu and Knyazev 2016, arXiv 1601.06146, Corollary 5.4, state
-   it) bound every eigenvalue of ``Q_s`` in the trailing cluster by ``max
-   Theta + ||R||^2 / (delta cos theta_max) + u_s`` with ``sin theta_max <=
-   ||R|| / delta``; the true matrix adds ``u_s`` (Weyl).  The certificate
-   records it; ``inf`` when the gap is not certified.
-5. **Disclosure.**  Every truncated direction is reported with the rest
-   columns it touches and its exact penalty curvature ``z'Sz`` (in the
-   deflated coordinates).  With Fisher rows the data part is positive
-   semidefinite, so a curvature above its own rounding certifies that the
-   direction is not an exact null of ``H``: it is reported as weakly
-   identified rather than aliased.
+1. **Structural deflation, by term type.** ``BorderGenerators`` holds the
+   exact data-null basis ``N`` the specification determines (complete one-hot
+   blocks summing to the eliminated intercept; nested border blocks), reduced
+   to ``N[references] = I`` so ``B = [N, E_M]`` is unimodular. The data part
+   is zero along ``N``, the penalty parts come from ``S`` directly, and ``N``
+   is eliminated first: ``Q''' = Q_d[M, M] + S[M, M] - a_MN a_NN^-1 a_NM``.
+2. **Pivoted Cholesky** (LAPACK ``dpstrf``) of the Jacobi-scaled
+   ``Q_s = D_s Q''' D_s`` with tolerance ``tau = c_R(n) + u_s``:
+   ``u_s = sum_j U_j / Q_jj`` bounds ``||dQ_s||_2`` (Perron-Frobenius) and
+   ``c_R(n) = gamma_{n+1} (1 - gamma_{n+1})^-1 tr(A) + n M eta`` is Rump's
+   constant (Rump 2006, BIT 46, Theorem 2.3 and bound I of section 3), with
+   ``M = 3 (2 n + max a_ii)`` and ``eta = 2^-1074``. A column whose pivot is
+   within its own ``U_j`` is an exact null.
+3. **Verification** of the retained block (Rump 2006, Corollaries 2.4, 2.7):
+   the Cholesky of ``Q_s[P_r, P_r] - (c_R(r) + tau) I``, diagonal rounded
+   down (Lemma 2.5), must complete, proving ``r`` eigenvalues above ``tau``
+   for every matrix in the ``u_s`` ball (interlacing); otherwise ``r -= 1``.
+   It runs first on the whole block, and ``dpstrf`` only when that fails.
+4. **The truncated subspace** ``Z`` gives Ritz values ``Theta`` and residual
+   ``R``. With certified gap ``delta = tau - max Theta > ||R||_2``,
+   Davis-Kahan and Mathias's quadratic residual bound (Mathias 1998, SIMAX
+   19; Zhu and Knyazev 2016, arXiv 1601.06146, Corollary 5.4) bound the
+   trailing cluster by ``max Theta + ||R||^2 / (delta cos theta_max) + u_s``;
+   ``inf`` without a certified gap.
+5. **Disclosure.** Every truncated direction is reported with the columns it
+   touches and its penalty curvature ``z'Sz``; with Fisher rows a curvature
+   above its rounding marks it weakly identified rather than aliased.
 
-The generalized inverse is the Moore-Penrose inverse, in the scaled metric,
-of ``Q_s`` compressed onto the retained subspace: ``A = P Q_s P`` with ``P =
-I - ZZ'`` and ``Z`` the orthonormal scaled null basis (the Rayleigh-Ritz
-compression onto ``span(Z)^perp``; Parlett, *The Symmetric Eigenvalue
-Problem*, 1998, chapter 11).  A truncated direction is not an exact null of
-``Q_s``: it keeps curvature up to its Ritz values ``Theta`` and residual
-``R`` of step 4, and ``A = Q_s - (Z Theta Z' + Z R' + R Z')`` drops exactly
-those, which the certificate bounds.  Because ``A Z = 0``, ``A^+ = P (A +
-ZZ')^-1 P`` whenever ``A`` is positive definite on ``span(Z)^perp`` (the
-null-space identity for a symmetric matrix and an orthonormal basis of its
-null space; the Cholesky of ``A + ZZ'`` checks it and refuses otherwise, as
-before).  The solve, the explicit inverse and the pseudo-determinant ``log
-det(A + ZZ') = log pdet(A)`` all describe ``A``, so the inverse is positive
-semidefinite whatever the truncated curvature; without the compression,
-``(Q_s + ZZ')^-1 - ZZ'`` inverts nothing when ``Q_s Z != 0`` and can be
-indefinite.  Every result is projected by ``P``, which leaves its truncated
-component at the rounding of the projection rather than at ``eps kappa(A +
-ZZ')``.  The cost is ``O(width^2 t)`` for ``t`` truncated directions, once
-per factor, and ``O(width t)`` per solved column.  The inverse is mapped
-back through ``D_s``, the elimination of ``N`` and ``B``.  The
-pseudo-determinant is the unscaled Moore-Penrose one, ``log det a_NN + log pdet(Q''')``; with every deflated
-block penalized a null of ``Q`` vanishes on the block, so neither ``B`` nor
-the elimination moves it.
+The generalized inverse is the Moore-Penrose inverse of the Rayleigh-Ritz
+compression ``A = P Q_s P``, ``P = I - ZZ'`` (Parlett, *The Symmetric
+Eigenvalue Problem*, 1998, ch. 11): ``A^+ = P (A + ZZ')^-1 P`` when ``A`` is
+positive definite off ``span(Z)`` (the Cholesky of ``A + ZZ'`` checks it), so
+the inverse is PSD whatever the truncated curvature. The log-determinant is
+the unscaled ``log det a_NN + log pdet(Q''')``.
 
-Every rank decision, bound and ``log pdet`` is formed at construction, from
-the factorization alone.  The explicit inverses (``BorderFactor.inverse``,
-``inverse_data``, the retained ``inverse_kept`` and the first-order
-``logdet_bound``) are formed on first read, and a data-side solve
-(``apply_data``) goes through the Cholesky factor itself, a backward-stable
-solve (Higham 2002, chapter 10) instead of a product with the explicit
-inverse: most factors a fit builds are only ever solved with (measured on
-pg17: 43 of 62 builds).  Cache owner: the factor; lifetime: the factor;
-invalidation: none, since every input is fixed at construction.  No rank
-decision or bound reads a lazily formed quantity.
+Every rank decision, bound and ``log pdet`` is formed at construction. The
+explicit inverses (``inverse``, ``inverse_data``, ``inverse_kept``) and
+``logdet_bound`` are formed on first read; ``apply_data`` solves through the
+Cholesky factor (backward stable; Higham 2002, ch. 10), since most factors are
+only solved with. Cache owner and lifetime: the factor; invalidation: none.
+No rank decision or bound reads a lazily formed quantity.
 """
 
 from __future__ import annotations
@@ -118,7 +77,7 @@ _PHI = _UNIT_ROUNDOFF * (1.0 + 2.0 * _UNIT_ROUNDOFF)
 
 @dataclass(frozen=True, eq=False)
 class BorderGenerators:
-    """Exact null generators of the border's data part (design section 3.6, step 1).
+    """Exact null generators of the border's data part (step 1 of the module docstring).
 
     ``matrix`` ``(q, g)`` holds small integers: every column is an integer
     combination of the specification's data-null vectors (the block sums of
@@ -252,7 +211,7 @@ def verified_positive_definite(block: NDArray, shift: float) -> bool:
 
 @dataclass(frozen=True, eq=False)
 class BorderCertificate:
-    """What the border factorization certified (design section 3.7), for disclosure.
+    """What the border factorization certified, for disclosure.
 
     ``width`` columns entered the scaled matrix after deflation (``deflated``
     generators removed, ``exact_null`` columns zero by their own bound);
@@ -291,16 +250,10 @@ class BorderCertificate:
     def curvature_floor(self, norm: float) -> float:
         """``tau + 2 width eps norm``: a computed scaled eigenvalue below minus it is negative curvature.
 
-        ``tau = c_R + u_s`` is what the certificate cannot tell apart from zero
-        in the scaled matrix itself (the data's running bound ``u_s`` and the
-        Cholesky constant ``c_R``); a backward-stable symmetric eigensolver
-        moves each eigenvalue by at most ``p(n) eps ||Q_s||_2`` (LAPACK Users'
-        Guide, 3rd ed., section 4.7), taken here as ``2 n eps`` times
-        ``norm``, the computed ``||Q_s||_2``.  Step 4's refusal of a Ritz value
-        is the same two terms with ``||Q_s||_2 <= n`` for the unit-diagonal
-        live block, so an eigenvalue below minus this floor is one the factor's
-        own certificate calls material, and one above it is within what the
-        factor truncates as a null.
+        ``tau`` is what the certificate cannot tell from zero; a
+        backward-stable symmetric eigensolver moves each eigenvalue by at most
+        ``p(n) eps ||Q_s||_2`` (*LAPACK Users' Guide*, 3rd ed., section 4.7),
+        taken as ``2 n eps`` times ``norm``, the computed ``||Q_s||_2``.
         """
         return float(self.tau + 2.0 * self.width * _EPS * float(norm))
 
@@ -330,10 +283,8 @@ class _BorderInverse:
     nulls); ``scale`` is ``D_s``; ``deflation``
     ``(N, references)`` with ``M``, ``G`` and ``a_lower`` the structural
     elimination of step 1, or ``None``.  Every lazy body runs under the same
-    one-thread BLAS cap as the construction (``narrow_kernel_blas_threads``):
-    a lazily formed ``dpotri`` would otherwise run at the pool width a wide
-    fit released, where two OpenBLAS pools contend (measured 3.8 s against
-    0.5 s per build).
+    one-thread BLAS cap as the construction (``narrow_kernel_blas_threads``),
+    so two OpenBLAS pools never contend.
     """
 
     def __init__(
@@ -472,14 +423,10 @@ class BorderFactor:
 
     ``inverse`` is the generalized inverse described in the module docstring
     and ``logdet`` the unscaled Moore-Penrose ``log pdet(Q)``.
-    ``inverse_data`` is ``inverse`` less ``N a_NN^-1 N'``, its part along the
-    deflated structural nulls: equal to it on every vector ``y`` with ``N'y =
-    0``, which every data-derived vector satisfies exactly (the data part of
-    ``Q`` vanishes along ``N``), and free of the ``1 / a_NN`` entries whose
-    products with such a vector cancel.  ``a_NN`` is the penalty curvature
-    alone, so with a tiny penalty those entries dwarf the result: solves of a
-    normal-equations right-hand side and every product with a data operator
-    read ``inverse_data``; penalty traces and variances read ``inverse``.  ``null``
+    ``inverse_data`` is ``inverse`` less ``N a_NN^-1 N'``: equal to it on every
+    data-derived vector (``N'y = 0``) and free of the ``1 / a_NN`` entries that
+    cancel on them. Normal-equation solves and data-operator products read
+    ``inverse_data``; penalty traces and variances read ``inverse``. ``null``
     ``(m, k)`` holds unscaled null vectors ``V`` and ``null_left`` the matching
     ``W`` with ``Q^+ Q = I - V W'``.  ``scaled_matrix`` is the Jacobi-scaled
     deflated matrix (exact-null rows and columns zero) whose eigenvalues the
@@ -595,14 +542,10 @@ def _deflate(Q_d, S, U, generators):
     if not N.shape[1]:
         return None, np.arange(m), Q_d + S, np.array(U, dtype=np.float64), S, 0.0, None, None
     a_NN = 0.5 * (a_NN + a_NN.T)
-    # The generators' penalty products themselves round: |d a_MN| <= gamma_m
-    # |S||N| and |d a_NN| <= gamma_(2m) |N|'|S||N| (Higham 2002, section 3.5).
-    # A thin level's penalized alias lies almost in S's null space, so a_NN is
-    # those products' cancellation (2e-10 against |N|'|S||N| near 1e-3 on an
-    # sz term whose every level is thin), and the elimination multiplies their
-    # rounding by its multiplier G = a_MN a_NN^-1 (below).  Unresolved when
-    # ||a_NN^-1|| ||E_NN|| reaches 1/2: those generators then stay with the
-    # pivoted factorization, as an exact null does.
+    # The generators' penalty products round: |d a_MN| <= gamma_m |S||N| and
+    # |d a_NN| <= gamma_(2m) |N|'|S||N| (Higham 2002, section 3.5), and the
+    # elimination multiplies that by G = a_MN a_NN^-1. Unresolved when
+    # ||a_NN^-1|| ||E_NN|| reaches 1/2: those generators stay with dpstrf.
     absolute_N = np.abs(N)
     S_N = np.abs(S) @ absolute_N
     E_MN = _gamma(m) * S_N
@@ -628,16 +571,10 @@ def _deflate(Q_d, S, U, generators):
     logdet_N = float(2.0 * np.sum(np.log(np.diag(lower))))
     # G = a_MN a_NN^-1, the elimination multiplier of L1 = [[I, 0], [G, I]]
     G = scipy.linalg.solve_triangular(lower, Y, lower=True, trans="T", check_finite=False).T
-    # The products' rounding through the elimination: at first order S_M moves
-    # by d a_MN G' + G d a_NM - G d a_NN G', and the inverse's remainder is a
-    # factor 1 / (1 - ratio).  With e_i = ||E_MN[i]|| and g_i = ||G[i]||,
-    # |e_i g_j| + |g_i e_j| <= sqrt((t e_i^2 + g_i^2 / t)(t e_j^2 + g_j^2 / t))
-    # for every t > 0 (Cauchy-Schwarz) and |g_i' d a_NN g_j| <= ||E_NN|| g_i g_j,
-    # so the column bound below keeps factor_border's |dQ_ij| <= sqrt(b_i b_j);
-    # t minimises the Jacobi-scaled sum u_s, as the border majorant's own does.
-    # Range-safe (Sol review of 0ccab297): norms by max-abs scaling and t through
-    # ratios of scaled sums, so a penalty near 1e-140 neither overflows t nor
-    # underflows e_i^2 into a spurious t = 1.
+    # First order: S_M moves by d a_MN G' + G d a_NM - G d a_NN G'. By
+    # Cauchy-Schwarz, |e_i g_j| + |g_i e_j| <= sqrt(b_i b_j) with
+    # b = t e^2 + g^2 / t, and |g_i' d a_NN g_j| <= ||E_NN|| g_i g_j, so the
+    # bound keeps |dQ_ij| <= sqrt(b_i b_j). Norms and t are range-safe.
     e = _row_norms(E_MN[M])
     g = _row_norms(G)
     bound = bound + _paired_majorant(e, g, np.diag(Q)) + (E_norm / (1.0 - ratio)) * g * g
@@ -778,14 +715,9 @@ def factor_border(
         squares = np.diag(factor) ** 2
         condition = float(squares.max() / squares.min())
     else:
-        # The truncated operator: Q_s compressed onto the retained subspace,
-        # P Q_s P with P = I - ZZ' (Rayleigh-Ritz), whose null space is
-        # exactly span(Z).  A truncated direction keeps curvature up to its
-        # Ritz values and residual (step 4), so Q_s Z != 0 and (Q_s + ZZ')^-1
-        # - ZZ' is no inverse of anything: it can be indefinite.  P Q_s P =
-        # Q_s - (Z Theta Z' + Z R' + R Z'), so it differs from Q_s by the
-        # Ritz block and the residual the certificate already bounds; exact
-        # nulls have zero rows in Q_s and need no projection.
+        # The truncated operator P Q_s P = Q_s - (Z Theta Z' + Z R' + R Z'),
+        # whose null space is exactly span(Z); (Q_s + ZZ')^-1 - ZZ' can be
+        # indefinite. Exact nulls have zero rows and need no projection.
         operator = Q_scaled
         if trailing:
             coupling = np.zeros((width, trailing))
@@ -848,12 +780,9 @@ def factor_border(
         logdet = logdet_N + logdet_M
         if k:
             # ``Q = C^-T diag(a_NN, Q''') C^-1`` with ``C = B L1^-T`` unimodular, so
-            # the pseudo-determinant of the congruence (design §3.5) is
-            # ``pdet(diag(a_NN, Q''')) det(V'V) / det(Z'Z)`` with ``V = C [0; Z]``
-            # the mapped nulls and ``Z`` any basis of ``Q'''``'s null space.  One
-            # (exactly) when the nulls vanish on the deflated block; not when a
-            # deflated direction couples to a null through the penalty (an ``sz``
-            # thin level's penalized alias beside its exact ones).
+            # by the pseudo-determinant of a congruence ``pdet(Q) =
+            # pdet(diag(a_NN, Q''')) det(V'V) / det(Z'Z)``, ``V = C [0; Z]``;
+            # one when the nulls vanish on the deflated block.
             logdet += float(
                 np.linalg.slogdet(null.T @ null)[1]
                 - np.linalg.slogdet(unscaled_null.T @ unscaled_null)[1]

@@ -92,10 +92,8 @@ GroupMatrix = (
     | DiscretizedTensorGroupMatrix
 )
 
-# The histogram cell caps live in _group_matrix_algebra, which is where they are
-# read.  Duplicating them here was dead weight of an actively misleading kind:
-# they are the names a reviewer greps first, and patching them did nothing --
-# the same failure mode as a threshold frozen into a default argument.
+# The histogram cell caps live in _group_matrix_algebra, where they are read;
+# they are not duplicated here, since patching a copy would do nothing.
 
 
 def _disc_disc_2d_hist(

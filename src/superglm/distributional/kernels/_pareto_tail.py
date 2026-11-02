@@ -17,16 +17,13 @@ four.  With ``z = xi t``, ``a = 1/(1 + z)`` and ``v = t a``:
   ``z -> 0`` (the removable singularity at ``xi = 0``), and the direct
   recursion below ``z = -1/2``.  For ``z >= 1/2`` they are ``N_(k+1)(u)/xi^(k+1)``
   up to sign, ``u = z/(1 + z)``, with ``N_m = (m - 1)! sum_(j >= m) u^j/j`` the
-  remainder of ``-log(1 - u) = log1p(z)`` (Abramowitz and Stegun 4.1.24).
-  To order two it is formed directly, as the complete-row Hessian is; the
-  third and fourth orders sum the remainder while ``u < 0.8`` (200 terms
-  leave under ``0.8^200``) and form it directly above, where it cancels by
-  at most a factor of eight.
+  remainder of ``-log(1 - u) = log1p(z)`` (Abramowitz and Stegun 4.1.24),
+  summed for orders three and four while ``u < 0.8`` and formed directly
+  otherwise (cancelling by at most a factor of eight).
 
 ``upper`` must be true: the family reads every window from the survival
 function.  ``t = inf`` is ``log S = -inf``, and a row outside ``t >= 0``,
-``1 + z > 0`` writes NaN.  Plain ``njit``:
-the generated kernels that call it hold the GIL.
+``1 + z > 0`` writes NaN. Plain ``njit``: the generated callers hold the GIL.
 """
 
 from __future__ import annotations

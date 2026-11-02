@@ -11,12 +11,9 @@ from superglm._roundoff import gamma as _gamma
 from superglm.editor._types import EditableTerm
 from superglm.editor.errors import EditorIndexError, EditorTypeError
 
-# Term types whose control handles are recovered from a fitted basis rather than
-# drawn as a display-only fallback.  Kept here, where the recovery lives, so the
-# two callers that gate on it (`EditorSession._require_control_term` and
-# `payloads._controls_payload`) cannot drift apart.  An ordered categorical is
-# not listed: only one with a spline basis has handles, and
-# `ordered_spline_geometry` is the gate both callers ask about it.
+# Term types whose control handles are recovered from a fitted basis, shared by
+# `EditorSession._require_control_term` and `payloads._controls_payload`. An
+# ordered categorical is gated by `ordered_spline_geometry` instead.
 CONTROL_HANDLE_TERM_TYPES = ("spline", "piecewise")
 
 # Points per gap between adjacent levels on the grid an ordered spline is drawn
@@ -41,16 +38,15 @@ class OrderedSplineGeometry:
     """An ordered term's fitted spline on its level axis, in display coordinates.
 
     Smooth level ``i`` sits at display x ``i``; between levels the spline's own
-    positions (``linspace(0, 1)`` or the user's ``values=``) map linearly onto
-    the display axis.  ``level_basis`` ``(S, K)`` and ``grid_basis`` ``(G, K)``
-    are the inner spline's raw basis at the level positions and on a grid of
-    ``ORDERED_SPLINE_GRID_STEPS`` points per gap; grid row
-    ``ORDERED_SPLINE_GRID_STEPS * i`` is evaluated at level ``i``'s position
-    itself.  ``fitted`` are the in-force fit's raw coefficients less the curve
-    at the reporting base, so ``level_basis @ fitted`` is the displayed level
-    effects: every basis row sums to one, so subtracting a constant from every
-    coefficient subtracts it from the curve.  ``live`` lists, in order, the
-    columns with positive mass on the grid; only they get handles.
+    positions (``linspace(0, 1)`` or ``values=``) map linearly onto the axis.
+    ``level_basis`` ``(S, K)`` and ``grid_basis`` ``(G, K)`` are the inner
+    spline's raw basis at the level positions and on a grid of
+    ``ORDERED_SPLINE_GRID_STEPS`` points per gap (grid row
+    ``ORDERED_SPLINE_GRID_STEPS * i`` is level ``i``). ``fitted`` are the raw
+    coefficients less the curve at the reporting base, so
+    ``level_basis @ fitted`` is the displayed level effects (basis rows sum to
+    one). ``live`` lists the columns with positive mass on the grid; only they
+    get handles.
     """
 
     level_index: NDArray[np.intp]
@@ -155,12 +151,9 @@ def raw_control_components(
     if x_ctrl is None:
         x_ctrl = _greville_abscissae(spec, basis.shape[1], term)
     if n_handles is None and getattr(spec, "_editor_wants_all_handles", False):
-        # Opt-in: one handle per basis column instead of the 12-handle default.
-        # A spec sets this when every column is a reported coefficient rather
-        # than one sample of a dense curve -- subsampling would then hide model
-        # parameters from the editor, not just thin the display. The hard cap in
-        # `_control_handle_limits` still applies, so a spec with more than 24
-        # columns does subsample and has to say so.
+        # Opt-in: one handle per basis column instead of the 12-handle default,
+        # for a spec whose columns are reported coefficients. The hard cap in
+        # `_control_handle_limits` still applies (more than 24 columns subsample).
         n_handles = basis.shape[1]
     basis_indices = _control_basis_indices(basis.shape[1], n_handles=n_handles)
     return basis, basis_indices, x_ctrl[basis_indices], np.asarray(coeff, dtype=np.float64)
@@ -372,13 +365,11 @@ def least_change_coefficients(
 ) -> NDArray:
     """The coefficients behind ``effects``: the least change from ``prior`` that reproduces them.
 
-    ``prior`` is the vector the latest handle move wrote, else the fit's.  The
-    level points alone cannot say which coefficients they came from -- the
-    basis usually has more columns than there are levels -- so the
-    minimum-norm correction ``lstsq`` returns keeps every coefficient the
-    edits do not need to move.  With no more levels than the basis can
-    interpolate, the corrected spline passes through every edited level;
-    otherwise it is their least-squares spline.
+    ``prior`` is the vector the latest handle move wrote, else the fit's. The
+    basis usually has more columns than levels, so the minimum-norm correction
+    ``lstsq`` returns keeps every coefficient the edits need not move. With no
+    more levels than the basis can interpolate, the spline passes through every
+    edited level; otherwise it is their least-squares spline.
     """
     start = geometry.fitted if prior is None else np.asarray(prior, dtype=np.float64)
     if start.shape != geometry.fitted.shape:
@@ -448,11 +439,10 @@ def ordered_control_after_move(
 def spline_fits_levels(geometry: OrderedSplineGeometry, term: EditableTerm, records) -> bool:
     """Whether the spline the coefficients draw passes through the edited levels.
 
-    Decided by construction, not by a tolerance: it does when the basis
-    interpolates any level values (full row rank at the level positions), when
-    no smooth level is edited, or when the latest edit touching the smooth
-    levels was a handle move that wrote all of them.  ``matrix_rank`` uses
-    numpy's default cutoff; the answer only picks what the chart draws.
+    It does when the basis interpolates any level values (full row rank at the
+    level positions), when no smooth level is edited, or when the latest edit
+    touching them was a handle move that wrote all of them. ``matrix_rank``
+    uses numpy's default cutoff; the answer only picks what the chart draws.
     """
     smooth = geometry.level_index
     if np.linalg.matrix_rank(geometry.level_basis) == smooth.size:
@@ -492,18 +482,15 @@ def _certification_bound(level_basis, base_row, coefficient_map, beta, inner) ->
     ``gamma_{K+p+3} (1 + |b_i|_1) (a_i + a_0)`` of the exact value, where
     ``a_i = |b_i| |M| |beta|`` (Higham 2002, sections 3.1 and 3.5), plus the
     SCOP column-mean constant's magnitude when the fit carries one.  Twice
-    that, and a ``gamma`` whose count also covers forming ``a_i`` from
-    non-negative terms, keeps the computed bound an upper bound.
+    that, with a ``gamma`` count that also covers forming ``a_i``, keeps the
+    computed bound an upper bound.
 
-    That bound is relative, and rounds to zero when the effects are
-    subnormal. Under gradual underflow each product also carries an absolute
-    error of at most ``eta = 2^-1075``, half the subnormal spacing, while a
-    sum that underflows is exact (Demmel, *Underflow and the Reliability of
-    Numerical Software*, SIAM J. Sci. Stat. Comput. 5(4), 1984). The four
-    evaluations form at most ``K + p + 1`` products a level, whose errors the
-    later sums and products carry at most ``(1 + |beta|_1)(1 + |b|_1)`` times,
-    so ``count (1 + |beta|_1)(1 + |b|_1)`` subnormal spacings ``2 eta``, each
-    product and sum of it rounded outward, bound the absolute part.
+    That bound is relative and rounds to zero for subnormal effects. Under
+    gradual underflow each product also carries an absolute error of at most
+    ``eta = 2^-1075`` (Demmel 1984), and the four evaluations form at most
+    ``K + p + 1`` products a level, whose errors later operations carry at
+    most ``(1 + |beta|_1)(1 + |b|_1)`` times: ``count (1 + |beta|_1)(1 +
+    |b|_1)`` spacings ``2 eta``, rounded outward, bound the absolute part.
     """
     columns = level_basis.shape[1]
     weights = np.abs(coefficient_map) @ np.abs(beta)
@@ -548,8 +535,7 @@ def _handle_centres(grid_basis: NDArray, grid_x: NDArray) -> NDArray:
     Indiana Univ. Math. J. 25, 1976), so these centres never decrease from one
     column to the next; a cardinal basis's negative lobes are left out of the
     mass.  Greville abscissae are not the fallback here: a P-spline's open knot
-    vector puts its end columns' abscissae outside the level range, which
-    stacked two handles on each end level of the browser fixture's ``age_band``.
+    vector puts its end columns' abscissae outside the level range.
     """
     mass = np.maximum(grid_basis, 0.0)
     totals = np.sum(mass, axis=0)

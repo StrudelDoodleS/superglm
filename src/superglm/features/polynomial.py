@@ -27,49 +27,39 @@ _RANK_RTOL = 1e-10
 class Polynomial:
     """Orthogonal polynomial feature (orthonormal in the training-weight measure).
 
-    Scales x to [-1, 1] using training-data min/max, seeds a Legendre
-    basis (including the constant), and orthonormalizes it against the
-    training ``sample_weight`` by weighted thin QR.  The constant column
-    is dropped from the emitted block — the model intercept carries it.
+    Scales x to [-1, 1] using training-data min/max, seeds a Legendre basis
+    (including the constant), and orthonormalizes it against the training
+    ``sample_weight`` by weighted thin QR.  The constant column is dropped from the
+    emitted block; the model intercept carries it.
 
-    Normalization convention: with training weights ``w``, the emitted
-    components ``phi_j`` (one per stated power) satisfy
+    Normalization convention: with training weights ``w``, the emitted components
+    ``phi_j`` (one per stated power) satisfy
 
         (1 / sum(w)) * sum_i w_i * phi_j(x_i) * phi_k(x_i) = delta_jk
 
-    i.e. they are orthonormal in the *mean* empirical inner product of the
-    training ``sample_weight``, and each is orthogonal to the constant in
-    the same inner product.  When exposure enters through an offset (the
-    documented count workflow) ``sample_weight`` stays at ones, so the
-    basis is orthonormalized against the row-count measure. The feature itself
-    is weight-contract neutral: it follows exactly the stream its caller
-    supplies. Scalar SuperGLM preserves likelihood-weight standardization,
-    while distributional compilation supplies resolved data-derived geometry
-    (physical rows for prior weights and replication mass for frequency
-    weights). Under Gaussian/fixed-weight fitting where the supplied stream is
-    also the fitting measure, this makes the per-power coefficient estimates
-    exactly uncorrelated and gives the group penalty the within-group
-    orthonormal geometry that the group lasso assumes (Yuan & Lin 2006, JRSS-B
-    68:49-67; Simon & Tibshirani 2012, Statistica Sinica 22(3):983-1001 —
-    orthonormalizing within the group is exactly equivalent to their
-    standardized group lasso).
+    i.e. they are orthonormal in the mean empirical inner product of the training
+    ``sample_weight``, and each is orthogonal to the constant in the same inner
+    product.  When exposure enters through an offset (the documented count
+    workflow) ``sample_weight`` stays at ones, so the basis is orthonormalized
+    against the row-count measure.  The feature is weight-contract neutral: it
+    follows the stream its caller supplies (scalar SuperGLM preserves
+    likelihood-weight standardization; distributional compilation supplies physical
+    rows for prior weights and replication mass for frequency weights).  Where the
+    supplied stream is also the fitting measure (Gaussian/fixed weights), the
+    per-power coefficient estimates are exactly uncorrelated and the group penalty
+    sees the within-group orthonormal geometry the group lasso assumes (Yuan & Lin
+    2006, JRSS-B 68:49-67; Simon & Tibshirani 2012, Statistica Sinica 22(3):983-1001).
 
-    The triangular factor of the weighted QR is stored as fitted state
-    beside the min/max scaling.  ``transform``/``score`` push new x
-    through the same seed basis and the *stored* factor — they never
-    re-orthogonalize against new data or new weights.  Out-of-range x is
-    plain polynomial evaluation on the scaled seed basis (unbounded
-    growth); every orthogonality and uncorrelatedness statement is a
-    property of the *training* measure only.
+    The triangular factor of the weighted QR is stored as fitted state beside the
+    min/max scaling.  ``transform``/``score`` push new x through the same seed basis
+    and the stored factor and never re-orthogonalize.  Out-of-range x is plain
+    polynomial evaluation on the scaled seed basis (unbounded growth); every
+    orthogonality statement is a property of the training measure only.
 
-    Honest caveats:
+    Caveats:
 
-    - Exact uncorrelatedness of the per-power estimates holds when the
-      supplied QR stream is also the fixed fitting measure (the scalar
-      fixed-weight/Gaussian world). In a GLM it is approximate at the IRLS
-      working weights; no published result
-      quantifies that gap, and published group-penalty practice makes the
-      same fixed spherical approximation of the working Hessian (Simon &
+    - In a GLM, uncorrelatedness of the per-power estimates is approximate at the
+      IRLS working weights, as in published group-penalty practice (Simon &
       Tibshirani 2012, section 5.3).
     - Dropping powers by their z-statistics is response-driven selection.
       Validate out-of-fold, or state ``powers`` from the plan.
@@ -77,40 +67,29 @@ class Polynomial:
     Parameters
     ----------
     degree : int, optional
-        Maximum polynomial degree; sugar for ``powers=range(1, degree+1)``.
-        2 (quadratic) or 3 (cubic) are the standard insurance choices.
-        Defaults to 3 when neither ``degree`` nor ``powers`` is given.
-        Mutually exclusive with *powers*.
+        Maximum polynomial degree; sugar for ``powers=range(1, degree+1)``.  2
+        (quadratic) or 3 (cubic) are the standard insurance choices.  Defaults to 3
+        when neither ``degree`` nor ``powers`` is given.  Mutually exclusive with
+        *powers*.
     powers : sequence of int, optional
-        Distinct integers >= 1 naming the orthogonal components to keep,
-        e.g. ``powers=[1, 2, 4]``.  The orthogonal basis is built up to
-        ``max(powers)`` and the stated components are selected, so when the QR
-        and fitting measures coincide, dropping a middle power leaves the
-        retained components' fitted coefficients unchanged. Excluding "power 3"
-        excludes the degree-3 *orthogonal component*, not the raw ``x**3``
-        monomial — on asymmetric exposure the degree-4 orthogonal
-        polynomial carries ``x**3`` monomial content.  API precedent for
-        a degree list: ``numpy.polynomial.Polynomial.fit(deg=[...])``.
+        Distinct integers >= 1 naming the orthogonal components to keep, e.g.
+        ``powers=[1, 2, 4]``.  The orthogonal basis is built up to ``max(powers)``
+        and the stated components are selected, so when the QR and fitting measures
+        coincide, dropping a middle power leaves the retained coefficients
+        unchanged.  Excluding "power 3" excludes the degree-3 orthogonal component,
+        not the raw ``x**3`` monomial.
 
     Notes
     -----
-    Group size = ``len(powers)``.  Columns are emitted in ascending power
-    order and summary rows are labelled by the stated power.
+    Group size = ``len(powers)``.  Columns are emitted in ascending power order and
+    summary rows are labelled by the stated power.
 
-    The QR-on-Legendre-seed build is the published standardized-group-
-    lasso algorithm and is well conditioned at degree <= 8 on min/max-
-    scaled data.  If the degree ceiling ever rises, the upgrade path is
-    the three-term recurrence for weighted discrete measures (Forsythe
-    1957; Gautschi 2004, *Orthogonal Polynomials: Computation and
-    Approximation*): store the recurrence coefficients instead of the
-    triangular factor and evaluate new x by re-running the recurrence.
-
-    The rank guard admits pivots down to 1e-10 of the largest (which is
-    exactly 1 — the constant column under normalized weights), so a build
-    just clearing it has cond(R) near 1e10 and its computed columns are
-    orthonormal only to roughly eps * cond(R) ~ 1e-6: near the guard
-    boundary the orthonormality and uncorrelatedness statements hold to
-    that reduced precision, not machine precision.
+    The QR-on-Legendre-seed build is the standardized-group-lasso algorithm and is
+    well conditioned at degree <= 8 on min/max-scaled data (for higher degrees see
+    the three-term recurrence for weighted discrete measures: Forsythe 1957;
+    Gautschi 2004).  The rank guard admits pivots down to 1e-10 of the largest, so a
+    build just clearing it has orthonormal columns only to roughly eps * cond(R) ~
+    1e-6.
     """
 
     def __init__(
@@ -142,10 +121,8 @@ class Polynomial:
         return f"Polynomial(powers={list(self.powers)})"
 
     def __setstate__(self, state: dict) -> None:
-        # Pre-0.22 pickles predate the data-orthogonal basis: no stored
-        # factor, no powers.  Default them so restore succeeds and
-        # _components can refuse with a migration message instead of an
-        # AttributeError.
+        # Pre-0.22 pickles have no stored factor or powers.  Default them so restore
+        # succeeds and _components can refuse with a migration message.
         state = dict(state)
         state.setdefault("_R", None)
         if "powers" not in state:

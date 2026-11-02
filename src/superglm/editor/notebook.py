@@ -39,14 +39,10 @@ REQUEST = "superglm.request"
 RESPONSE = "superglm.response"
 CHANGED = "superglm.changed"
 
-# One widget can show in several outputs, each a page with its own copy of
-# the session. After a request through one of these routes succeeds, Python
-# tells every view, and the others re-read the session, so none acts on a
-# selection or model it no longer shows. The other POST routes only read
-# (evidence, reports, files, job status) or start a job, so a view re-reading
-# the session never sends a notice back; a job that changes what the views
-# show (a distribution profile, Run CV, Final fit) sends its own notice when
-# it publishes (EditorWidget._notify_changed). Every POST route is in exactly
+# One widget can show in several outputs, each with its own copy of the session. After a
+# POST route in this set succeeds, Python tells every view to re-read the session. The other
+# routes only read or start a job; a job that changes what the views show sends its own
+# notice when it publishes (EditorWidget._notify_changed). Every POST route is in exactly
 # one of the two sets.
 CHANGE_ROUTES = frozenset(
     {

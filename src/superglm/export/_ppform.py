@@ -1,17 +1,9 @@
 """Exact piecewise-polynomial form of a fitted smooth term.
 
-A fitted spline is a piecewise polynomial exactly, not approximately.  Whatever
-basis a spline spec uses internally -- B-spline for ``PSpline``/``BSplineSmooth``,
-value-parameterised for the ``cr``/``ns`` family -- the fitted curve lies in the
-clamped B-spline space on the knots the model already reports publicly.  So the
-coefficients are recoverable from the knots and the curve alone, by one solve,
-uniformly across every kind.  Measured on all five: residual 1.9e-15 to 2.9e-15,
-``cond(B) = 5.16``.
-
-That uniformity is the whole reason this module is short.  Reading each spec's
-internal parameterisation would need five derivations; reading its knots needs
-one.  See ``docs/superpowers/specs/2026-08-16-continuous-block-ppform-design.md``
-section 4.1 for the measurements.
+A fitted spline is a piecewise polynomial exactly. Whatever basis a spec uses internally, the
+fitted curve lies in the clamped B-spline space on the knots the model already reports, so the
+coefficients are recoverable from the knots and the curve by one solve, uniformly across every
+kind (residual 1.9e-15 to 2.9e-15, ``cond(B) = 5.16`` on all five).
 """
 
 from __future__ import annotations
@@ -45,27 +37,16 @@ class PpformNotExactError(ValueError):
 class PpformSegments:
     """One fitted smooth as exact polynomial pieces.
 
-    ``coefficients[i]`` are ascending powers of the NORMALISED local variable
-    ``u = (x - breaks[i]) / (breaks[i + 1] - breaks[i])``, so segment ``i``
-    evaluates as ``a + b*u + c*u**2 + d*u**3`` on ``[breaks[i], breaks[i+1])``.
+    ``coefficients[i]`` are ascending powers of the normalised local variable ``u = (x - breaks[i])
+    / (breaks[i + 1] - breaks[i])``, so segment ``i`` is ``a + b*u + c*u**2 + d*u**3`` on
+    ``[breaks[i], breaks[i+1])``. Normalised because a raw local variable on a covariate ranging to
+    1e5 loses enough precision in a fixed-scale decimal column to give a 3.3x relativity error. A
+    term below cubic degree reports four coefficients with the unused high powers exactly zero.
 
-    Normalised rather than ``x - breaks[i]`` deliberately: a raw local variable
-    on a covariate ranging to 1e5 loses enough precision in a fixed-scale
-    DECIMAL column to produce a 3.3x relativity error, which is worse than the
-    binning this replaces.  It is also de Boor's own shifted-and-scaled form.
-
-    A term fitted below cubic degree still reports four coefficients, with the
-    unused high powers exactly zero, so every block this feeds has one column
-    shape regardless of the degree the caller happened to fit.
-
-    ``centering_shift`` is the constant these coefficients have ALREADY had
-    subtracted, reported so a consumer that has to put it back adds the number
-    that was actually taken out.  It travels with the coefficients rather than
-    being re-derived beside them because under ``centering="mean"`` the shift is
-    the mean of the curve OVER THE GRID it was read on: a second
-    ``term_inference`` call at a different ``n_points`` returns a different
-    constant for the same fitted term, and the difference lands whole on every
-    exported premium.  Zero under ``centering="native"``.
+    ``centering_shift`` is the constant these coefficients have already had subtracted, carried with
+    them because under ``centering="mean"`` it is the curve's mean over the grid it was read on, and
+    a second ``term_inference`` call at a different ``n_points`` returns a different constant. Zero
+    under ``centering="native"``.
     """
 
     breaks: NDArray[np.float64]
@@ -149,15 +130,10 @@ def extract_ppform(
     basis = BSpline.design_matrix(x_fit, knots, degree, extrapolate=False).toarray()
     coef, _residuals, rank, _singular = np.linalg.lstsq(basis, f_fit, rcond=None)
     if rank != basis.shape[1]:
-        # ``lstsq`` ANSWERS a rank-deficient system rather than refusing one: it
-        # returns the minimum-norm solution, which reproduces the sampled points
-        # exactly.  So the residual below stays at round-off and certifies
-        # nothing about the curve BETWEEN those points, where the coefficients
-        # are unconstrained.  Measured on an 8-knot ``ps`` fit read at 5 points:
-        # rank 5 of 12 columns, residual 2.2e-16, and the recovered pieces
-        # mis-rate the fitted curve by up to 2.41x.  A knot interval holding no
-        # grid point is the same failure by a subtler route, which is why the
-        # guard is on the rank and not on ``n_points``.
+        # ``lstsq`` answers a rank-deficient system with the minimum-norm solution, whose residual stays
+        # at round-off and certifies nothing between the sampled points (rank 5 of 12 on an 8-knot ``ps``
+        # read at 5 points mis-rates the curve by up to 2.41x). A knot interval with no grid point fails
+        # the same way, so the guard is on rank, not on ``n_points``.
         raise PpformNotExactError(
             f"Term {name!r} has an underdetermined piecewise-polynomial solve: its "
             f"B-spline basis has {basis.shape[1]} columns but the {len(x_fit)} curve "

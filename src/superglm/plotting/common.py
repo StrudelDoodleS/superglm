@@ -165,18 +165,14 @@ def _exposure_kde(x_vals, sample_weight, grid, bw_factor=0.03):
 def piecewise_display_term(ti, n_points: int = 200):
     """Resample a piecewise ``TermInference`` onto a dense display grid.
 
-    The fitted log effect interpolates linearly between knots, but its
-    variance inside a segment is the quadratic form of BOTH adjacent hats
-    with their covariance -- ``var f(x) = h1^2 V11 + 2 h1 h2 V12 + h2^2 V22``
-    -- so neither the standard error nor the exponentiated limits interpolate
-    linearly between the knot values.  This evaluates the exact closed form
-    on a grid that includes every knot (the kinks stay kinks) and rebuilds
-    the CI from it; the centre curve becomes the true piecewise-exponential
-    on the response scale rather than chords between knot relativities.
+    The log effect interpolates linearly between knots, but its variance in a
+    segment is ``var f(x) = h1^2 V11 + 2 h1 h2 V12 + h2^2 V22`` (both adjacent
+    hats and their covariance), so the standard error and the exponentiated
+    limits do not interpolate linearly. This evaluates that form on a grid that
+    includes every knot and rebuilds the CI and the response-scale curve.
 
-    A term whose band cannot be computed exactly (no ``knot_covariance``) is
-    returned unchanged: a knots-only band is honest, an interpolated one is
-    not.  Terms of any other kind pass through untouched.
+    A term without ``knot_covariance`` is returned unchanged (a knots-only band
+    is honest, an interpolated one is not), as is any other kind of term.
     """
     from dataclasses import replace
 

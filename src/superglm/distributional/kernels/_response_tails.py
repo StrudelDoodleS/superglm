@@ -1,30 +1,19 @@
 """Log probabilities of response windows, for truncated and censored rows, on packed jets.
 
-A truncated row divides its density by ``P(a < Y <= b)``, and a censored row
-contributes ``log P(l < Y <= r)`` alone.  Both are ``log(T(near) - T(far))``
-for one tail function ``T`` (the CDF, or the survival function under
-reflection) taken at the window's two ends, with ``T(far) <= T(near)``.  The
-family supplies ``log T`` at each end as a packed jet in its parameters;
-:func:`log_window_jets` combines them.  With ``Delta = log T(far) - log
-T(near) <= 0`` and ``kappa = 1/expm1(-Delta)``::
+A truncated row divides its density by ``P(a < Y <= b)``; a censored row
+contributes ``log P(l < Y <= r)``. Both are ``log(T(near) - T(far))`` for one
+tail function ``T`` at the window's ends. With
+``Delta = log T(far) - log T(near) <= 0`` and ``kappa = 1/expm1(-Delta)``::
 
     log D = log T(near) + log(-expm1(Delta))
     grad  = g_near + kappa d
     hess  = H_near + kappa (H_near - H_far) - kappa (1 + kappa) d d^T
 
-with ``d = g_near - g_far``, and every higher derivative of ``log(-expm1(Delta))``
-a polynomial in ``kappa``, composed with ``Delta``'s derivatives by the
-set-partition chain rule.  An absent far end (``Delta = -inf``), or one whose
-tail is negligible beside the near end's (``kappa`` rounds to zero), returns
-the near end's jet unchanged, so a one-sided window is exactly its tail.  The
-difference of two log tails keeps only about ``u/Delta`` of relative accuracy
-as the window narrows, so a window narrower than :data:`NARROW_WINDOW` on its
-density's own scale is integrated instead by three-point Gauss-Legendre
-quadrature of the density (:func:`quadrature_window_jets`).  The quadrature's
-relative error there is about ``5e-7`` times the sixth power of that width
-(Abramowitz and Stegun 25.4.30), below ``1e-13``.
-
-Imports only numpy and the shared chain-rule helpers.
+with ``d = g_near - g_far``. The difference of two log tails keeps only about
+``u/Delta`` relative accuracy, so a window narrower than :data:`NARROW_WINDOW`
+on its density's scale uses three-point Gauss-Legendre quadrature instead
+(error about ``5e-7`` times the sixth power of the width; Abramowitz and
+Stegun 25.4.30). Imports only numpy and the shared chain-rule helpers.
 """
 
 from __future__ import annotations
@@ -79,17 +68,12 @@ def _checked_order(order: int) -> int:
 def log_window_jets(near: Jet, far: Jet, *, order: int) -> Jet:
     """``log(T(near) - T(far))`` and its packed derivatives to ``order <= 4``.
 
-    ``near`` and ``far`` are the two ends' log-tail jets ``(J0, J1, ...)``,
-    ``J0`` per row and ``Jk`` the packed ``k``-th partial derivatives in
-    :func:`packed_tuples` order, each with at least ``order + 1`` entries.
-    With ``Delta = J0_far - J0_near``, ``log D = J0_near + phi(Delta)``, and
-    the derivatives of ``phi(Delta(theta))`` follow from the set-partition
-    chain rule (Constantine and Savits, *A multivariate Faa di Bruno formula
-    with applications*, Trans. AMS 348, 1996; Hardy 2006) with the far-minus-
-    near jets as ``Delta``'s derivatives.  A far end with value ``-inf`` is
-    absent, one with ``kappa`` rounding to zero is negligible, and both return
-    the near jets with the far entries ignored; ends whose tails round equal
-    give ``-inf`` with non-finite derivatives.
+    ``near`` and ``far`` are log-tail jets ``(J0, J1, ...)`` in
+    :func:`packed_tuples` order. With ``Delta = J0_far - J0_near``,
+    ``log D = J0_near + phi(Delta)``, differentiated by the set-partition chain
+    rule (Constantine and Savits, Trans. AMS 348, 1996; Hardy 2006). An absent
+    (``-inf``) or negligible (``kappa`` rounds to zero) far end returns the
+    near jets; ends whose tails round equal give ``-inf``.
     """
     order = _checked_order(order)
     near_value, far_value = near[0], far[0]
@@ -170,23 +154,16 @@ def quadrature_window_jets(
 ) -> Jet:
     """Jets of ``log P`` of a window ``2 half_width`` wide by Gauss-Legendre quadrature.
 
-    ``log_density_jets(fraction)`` gives the log density's jet (at least
-    ``order + 1`` entries) at the point that far across each row's window,
-    ``0 < fraction < 1``; the caller forms that point in coordinates where it
-    does not round away.  ``F = log sum_i omega_i exp(l_i(theta))`` has, with node
-    weights ``p_i`` proportional to ``omega_i f(y_i)``, the derivatives
+    ``log_density_jets(fraction)`` gives the log density's jet at that
+    fraction across each row's window (the caller forms the point so it does
+    not round away). With node weights ``p_i`` proportional to
+    ``omega_i f(y_i)``, ``F = log sum_i omega_i exp(l_i)`` has derivatives
 
         F_I = sum over set partitions pi of I of kappa_p(l_B : B in pi),
 
-    the joint cumulants under ``p`` of the blocks' node derivatives ``l_B``:
-    the cumulant expansion ``log E_p exp(X) = sum_r kappa_r(X)/r!`` of the
-    Taylor increment ``X`` of ``l``.  So ``F_ij = E[l_ij] + Cov(l_i, l_j)``,
-    order 3 adds ``3 sym Cov(l_ij, l_k)`` and the third central moment of the
-    score, and order 4 the covariances of third with first and second with
-    second derivatives, the third cumulants of a second derivative with two
-    scores and the scores' fourth cumulant.  Each cumulant is formed from
-    node values centred at their mixture means, as the narrow window makes
-    them nearly equal.
+    the joint cumulants under ``p`` of the node derivatives (e.g.
+    ``F_ij = E[l_ij] + Cov(l_i, l_j)``), formed from values centred at their
+    mixture means since the narrow window makes them nearly equal.
     """
     order = _checked_order(order)
     nodes = [log_density_jets(0.5 * (1.0 + float(t)))[: order + 1] for t in _LEGENDRE_NODES]

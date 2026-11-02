@@ -509,11 +509,9 @@ def vuong_test(
     n = len(y_raw)
     y_arr = _finite_vector("y", y_raw, n)
 
-    # The comparison is between two likelihoods, so both models must read the
-    # weights the same way.  That is now a declared contract rather than a
-    # consequence of the families, so two models of different families can be
-    # compared with weights whenever they agree on it, and two models of the
-    # same family cannot when they do not.
+    # Both models must read the weights the same way, a declared contract: models
+    # of different families may be compared with weights when they agree on it,
+    # models of one family may not when they differ.
     contract_a = model_weight_semantics(model_a)
     contract_b = model_weight_semantics(model_b)
     mixed_weight_contracts = contract_a != contract_b
@@ -548,15 +546,10 @@ def vuong_test(
             offset,
             sample_weight=prior_weights,
         )
-        # A zero prior weight is a row that was not observed, and both models
-        # return exactly 0 for its density -- so leaving it in ``d`` feeds an
-        # artificial zero to the mean and the variance while
-        # ``likelihood_size`` below already counts only the carried rows. The
-        # moments have to agree with that count, or adding a row the test
-        # ignores moves the statistic and can flip the selected model. The
-        # frequency arm gets this right by weighting both moments.
-        # ``prior_weights`` is None when no sample_weight was supplied, in
-        # which case every row carries weight and there is nothing to exclude.
+        # A zero prior weight is an unobserved row with density exactly 0; it must
+        # leave the mean and variance, as ``likelihood_size`` below counts only
+        # carried rows. ``prior_weights`` is None without a sample_weight, when
+        # every row carries weight.
         d = ll_a - ll_b
         measure = np.ones(n) if prior_weights is None else (prior_weights > 0.0).astype(float)
         if prior_weights is not None:
@@ -566,18 +559,16 @@ def vuong_test(
             if prior_weights is None
             else dispersion_likelihood_size(prior_weights, weight_semantics=PRIOR_WEIGHTS)
         )
-        # Sized before the moments are formed: with a single carried row
-        # ``np.std(..., ddof=1)`` divides by zero and emits a numpy
-        # RuntimeWarning ahead of the ValueError this is meant to raise.
+        # Sized before the moments: one carried row would make ``np.std(ddof=1)``
+        # warn ahead of the intended ValueError.
         if likelihood_size <= 1.0:
             raise ValueError("Vuong test requires an effective likelihood size greater than one")
         mean_m = float(np.mean(d))
         omega = float(np.std(d, ddof=1))
     elif mixed_weight_contracts:
-        # Reachable only with sample_weight None -- that is what makes a
-        # mixed-contract comparison legal at all -- so the evaluation carries
-        # unit weights. Those still define a lattice for whichever model is
-        # the counting one, which is why this arm is checked like the others.
+        # Reachable only with sample_weight None (what makes a mixed-contract
+        # comparison legal); unit weights still define a lattice for a counting
+        # model, so this arm is checked like the others.
         evaluated_weights = np.ones(n, dtype=np.float64)
         measure = evaluated_weights
         ll_a = _per_obs_log_likelihood(model_a, X, y_arr, offset)
@@ -602,16 +593,11 @@ def vuong_test(
     if likelihood_size <= 1.0:
         raise ValueError("Vuong test requires an effective likelihood size greater than one")
 
-    # Vuong takes its own evaluation rows, so a response that cannot be honoured
-    # under the declared contract -- off the counting lattice, a non-unit prior
-    # binomial weight, a fractional replication count -- would otherwise become
-    # a finite pseudo-log-likelihood and produce an apparently valid statistic,
-    # p-value and preferred model with nothing to mark it.
-    #
-    # One site, after every arm has resolved the weights it actually evaluated
-    # at, rather than one per arm: the previous version sat inside the
-    # both-prior branch and so never ran for the mixed or frequency arms.
-    # Checked against BOTH families, since either may be the counting one.
+    # A response that cannot be honoured under the declared contract (off the
+    # counting lattice, a non-unit prior binomial weight, a fractional
+    # replication count) would give a finite pseudo-log-likelihood and an
+    # apparently valid result. Checked once, after every arm has resolved its
+    # weights, against both families, since either may be the counting one.
     from superglm.model.input_validation import check_weight_contract
 
     for compared in (model_a, model_b):

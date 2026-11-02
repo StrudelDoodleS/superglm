@@ -15,10 +15,8 @@ from narwhals.dependencies import get_polars, is_into_dataframe
 from numpy.typing import NDArray
 
 # Deliberately the ``TypeAlias`` form, not PEP 695 ``type``: polars is optional,
-# so the runtime branch must bind a plain ``object`` while the checked branch
-# names ``pl.DataFrame``. A conditionally-defined ``type`` statement is legal but
-# resolves less predictably across type checkers, and the runtime saving here is
-# the whole point of the split.
+# so the runtime branch binds a plain ``object`` while the checked branch names
+# ``pl.DataFrame``; a conditional ``type`` statement resolves less predictably.
 if TYPE_CHECKING:
     import polars as pl
 
@@ -288,12 +286,10 @@ _TEXT_CHUNK_ROWS = 1 << 16
 def _update_polars_text(digest: Any, column: Any) -> None:
     """Feed a string, categorical or enum column as its lengths, then its UTF-8 bytes.
 
-    The byte stream is one length segment (little-endian uint32 per row, 0 for a
-    null) and one text segment (the non-null values joined, prefixed by their
-    total byte length, which is the sum of the lengths).  Both are produced in
-    slices of ``_TEXT_CHUNK_ROWS`` rows, so a slice's cast and joined copy are
-    the only text held at once; the prefix is the sum of the lengths, so the
-    stream is the one a single join would give.
+    The stream is one length segment (little-endian uint32 per row, 0 for a null) and
+    one text segment (the non-null values joined, prefixed by their total byte
+    length).  Both are produced in slices of ``_TEXT_CHUNK_ROWS`` rows, so only a
+    slice's text is held at once; the stream equals the one a single join would give.
     """
     string = get_polars().String
     n = len(column)

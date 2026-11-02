@@ -189,53 +189,21 @@ def _validated(s, w, tol, max_bands):
 def _fewest_then_least(s, w, tol, *, count_only: bool = False) -> Any:
     """Fewest bands meeting ``tol``, then least weighted squared error at their factors.
 
-    ``s`` and ``tol`` are ``(n, m)`` for ``m`` curves sharing the bands, or 1-D
-    for one, which returns 1-D factors.  Returns each band's start and the
-    factor it publishes per curve, or with ``count_only`` just the number of
-    bands: the same ``count`` the full pass forms, without the squared errors and
-    factors that only choose among bands of equal count, which is what asking
-    whether ``tol`` fits a cap needs.  ``count[j]`` and ``sse[j]`` describe the
-    best banding of the first ``j`` values.  A band is allowed when every
-    curve's factor meets that curve's tolerances, and it costs the sum over
-    curves of its squared error, so feasibility is a conjunction and the cost
-    a sum over curves and a segment's value is fixed by its own values alone:
-    the recursion over the last band's start is Bellman's, with the last
-    band's cost the sum over curves.
+    ``s`` and ``tol`` are ``(n, m)`` for ``m`` curves sharing the bands, or 1-D for one. Returns
+    each band's start and its factor per curve, or with ``count_only`` just the band count (all
+    that testing a cap needs). A band is allowed when every curve's factor meets that curve's
+    tolerances and costs the sum of the curves' squared errors, so the recursion over the last
+    band's start is Bellman's. For each end ``j`` candidate starts run leftwards until some
+    tolerance window ``[max(s - tol), min(s + tol)]`` empties (it only shrinks as a band grows);
+    the pass is O(n W m) for windows of W starts, O(n^2 m) worst, memory O(n m). The mean test is
+    not hereditary and the best count is not monotone in ``j``, so every open start is tested.
 
-    For each end ``j`` the candidate starts run leftwards until some curve's
-    tolerance window ``[max(s - tol), min(s + tol)]`` empties; the window only
-    shrinks as a band grows, so every longer band is infeasible too.  Starts
-    that closed at an earlier end are not scanned again, so an end costs the
-    number of its open starts times the number of curves, and the pass is
-    O(n W m) for windows of W starts and O(n^2 m) at worst.  Memory is
-    O(n m).  The mean test is not hereditary (a band whose mean is
-    inside its windows can hold a part whose mean is not), so every open start
-    is tested, not only the longest; and the best count is not monotone in
-    ``j`` either, so no start can be skipped on the strength of a smaller prefix.
-
-    Everything is compared in the frame shifted by ``s[j]``, so the curve's
-    level drops out of every rounding error, and a band is accepted only when
-    its computed mean clears the window by more than that error: every
-    accepted band keeps every value within its requested tolerance.  The cost
-    of certifying is a tie at rounding level: a mean that meets a zero-width
-    window exactly, as around a zero tolerance, is rejected unless the band is
-    a plateau.  Each curve is certified on its own columns with the same
-    arithmetic one curve gets, so the certificate holds curve by curve.
-
-    A band also needs a double that meets every tolerance in it, for every
-    curve, to carry as its factor.  The exact mean can fall between two
-    doubles that each miss one tolerance, and such a band is not formed.
-
-    A band's factor is its weighted mean, summed value by value in the frame
-    of its first value, added back to that value and held to those doubles.
-    Its cost is its squared error at that factor, ``M2 + W (factor - mean)**2``,
-    where ``M2``, the squared error about the mean, is kept for every open
-    start by West's (1979) weighted update as each end is added.  That
-    update's rounding grows like ``k kappa u`` in the band's condition
-    number, where the running moments' grew like ``k kappa**2 u`` (Chan,
-    Golub and LeVeque 1983, Table 1).  The objective is the published
-    factors' error, a sum over bands each fixed by its own values, so the
-    principle of optimality holds for it.
+    Comparisons are made in the frame shifted by ``s[j]`` and a band is accepted only when its
+    computed mean clears the window by more than the rounding error, so every accepted band keeps
+    every value within tolerance; a mean meeting a zero-width window exactly is rejected unless
+    the band is a plateau. A band also needs a double meeting every tolerance in it to carry as
+    its factor. Its cost is ``M2 + W (factor - mean)**2`` with ``M2`` kept by West's (1979)
+    weighted update, whose rounding grows like ``k kappa u`` (Chan, Golub and LeVeque 1983).
     """
     one_curve = s.ndim == 1
     if one_curve:
@@ -256,11 +224,8 @@ def _fewest_then_least(s, w, tol, *, count_only: bool = False) -> Any:
     square = np.zeros((n, curves), dtype=np.float64)
     floor = 0
     for j in range(n):
-        # The starts still open are floor..j, reversed so that row k is start
-        # j - k; the accumulations below run leftwards from j, so a row's
-        # window is unchanged by cutting the rows past the open ones off.
-        # d is exact for values within a factor two of s[j] (Sterbenz), and
-        # otherwise off by at most u |d|.
+        # Rows are starts j - k, reversed so the accumulations run leftwards from j; d is exact
+        # within a factor two of s[j] (Sterbenz), otherwise off by at most u |d|.
         d_all = s[floor : j + 1][::-1] - s[j]
         t_all = tol[floor : j + 1][::-1]
         lo = np.maximum.accumulate(d_all - t_all, axis=0)
@@ -296,29 +261,12 @@ def _fewest_then_least(s, w, tol, *, count_only: bool = False) -> Any:
         wr = w[floor : j + 1][::-1]
         cw = np.cumsum(wr)
         mean = np.cumsum(wr[:, None] * d, axis=0) / cw[:, None]
-        # The mean of k shifted values in the solve's weights, w / scale, errs
-        # by at most 2k u max|d| to first order: 2k - 1 roundings in its sums
-        # and division (d[0] = 0, so the numerator's first addition is exact;
-        # Higham 2002, Lemma 3.1) and u max|d| from rounding d.  Each window
-        # edge errs by u max|d| from its d plus u times its own size.  The
-        # caller's exact mean differs from the solve's, since w / scale rounds
-        # each weight by a relative e_i, |e_i| <= u, unless the largest weight
-        # is a power of two (exports pass 1).  That moves the mean by
-        # sum w_i e_i (d_i - mean) / sum w_i (1 + e_i), at most u / (1 - u)
-        # times max|d_i - mean| <= max d - min d <= 2 max|d|.  The margin takes
-        # 4 (k + 2) u max|d|, more than twice those three, and 2 u times each
-        # edge's size (x + 2 u |x| is increasing, so that covers every d - t
-        # below lo and d + t above hi).  The two additions that form low_edge
-        # and high_edge can round that 2 u |edge| term away; err's own roundings
-        # are second order.  The (2k + 5) u max|d| left after the three errors
-        # covers the edge's u |edge| instead wherever it decides the band, with
-        # u max|d| to spare for the second-order terms: the caller's mean is
-        # within max|d| of zero, so an edge within (2k + 3) max|d| of it is
-        # within (2k + 4) max|d| of zero, and an edge further from it is far
-        # past its own rounding.  Feasibility is then monotone in a widening
-        # factor, and a plateau (d = 0) merges whatever its tolerances.  All of
-        # this is per column: max|d| is each curve's own, and a column does not
-        # see the others' values.
+        # Margin on the window edges, with u the unit roundoff: the mean of k shifted values errs
+        # by at most 2k u max|d| (Higham 2002, Lemma 3.1), the caller's exact mean differs from
+        # the solve's by at most 2 u/(1-u) max|d| (weights w / scale), and each edge errs by
+        # u max|d| plus u times its size. The margin 4 (k + 2) u max|d| + 2 u |edge| covers all
+        # three with room for second-order terms, so feasibility is monotone in a widening factor
+        # and a plateau (d = 0) merges whatever its tolerances. All per column.
         length = np.arange(1, m + 1)
         max_d = np.maximum.accumulate(np.abs(d), axis=0)
         err = 4.0 * _UNIT_ROUNDOFF * (length + 2)[:, None] * max_d
@@ -368,14 +316,10 @@ def _fewest_then_least(s, w, tol, *, count_only: bool = False) -> Any:
 def _squared_error(s, w, starts, factors) -> float:
     """Weighted squared error of ``s`` about its bands' factors, summed directly.
 
-    Each term ``w (s - factor)**2`` is nonnegative and carries a relative error
-    of at most ``gamma_4``, its difference entering twice, so no cancellation
-    can occur; summing n of them in any order adds at most ``gamma_(n - 1)``
-    (Higham 2002, Lemma 3.1 and eq. 4.4).  A curve's sum has relative error at
-    most ``gamma_(n + 3)``, plus underflow; the curves' sums are nonnegative
-    too and ``math.fsum`` rounds their total once, so the total's is at most
-    ``gamma_(n + 4)``, plus underflow.  ``s`` and ``factors`` are ``(n, m)`` and
-    ``(bands, m)``.
+    Each term ``w (s - factor)**2`` is nonnegative with relative error at most ``gamma_4``, so
+    a curve's sum has relative error at most ``gamma_(n + 3)`` plus underflow (Higham 2002,
+    Lemma 3.1, eq. 4.4); ``math.fsum`` over the nonnegative curve sums adds one rounding
+    (``gamma_(n + 4)``). ``s`` is ``(n, m)`` and ``factors`` ``(bands, m)``.
     """
     gap = s - np.repeat(factors, np.diff(np.append(starts, len(s))), axis=0)
     return math.fsum(float(np.sum(w * gap[:, c] * gap[:, c])) for c in range(s.shape[1]))
@@ -440,22 +384,14 @@ def _fits(s, w, tol, factor: float, max_bands: int) -> bool:
 def _smallest_fitting_factor(s, w, tol, max_bands: int):
     """Smallest multiplier of ``tol``, to relative 1e-6, whose banding fits ``max_bands``.
 
-    Returns the factor and that banding (starts and factors).  Widening every tolerance only enlarges
-    each feasible set (float64 rounding is monotone), so the fewest-band count
-    never rises with the factor and bisection applies.  The search is bounded
-    by ``2 * reach / tau``, with ``reach`` the widest curve's range plus
-    :func:`_underflow_margin` and ``tau`` the least positive tolerance.  When
-    that is a double, every positive-tolerance window there holds every
-    possible band mean and every value of the curve, so a double as well, and
-    no larger multiplier fits more: if it fails, zero tolerances are what stand
-    in the way.  When it is past the largest double, the bound is the largest
-    double instead, and failing there means no multiplier a double can hold
-    fits.  Probes from 2, doubled to 16 and squared after, bracket the factor
-    in at most a dozen passes for any double, and the geometric bisection
-    within the bracket takes at most thirty more.  A pass only has to say
-    whether the fewest bands fit, which the band count alone answers
-    (:func:`_fewest_then_least` with ``count_only``), and the banding is
-    formed once, at the factor kept.
+    Returns the factor and that banding (starts and factors). Widening every tolerance only
+    enlarges each feasible set, so the fewest-band count never rises with the factor and
+    bisection applies. The search is bounded by ``2 * reach / tau`` (the widest curve's range
+    plus :func:`_underflow_margin`, over the least positive tolerance), where every positive
+    window holds every band mean; if the banding fails there, zero tolerances stand in the way,
+    and past the largest double the bound is the largest double. Probes from 2, doubled to 16
+    and squared after, bracket the factor in at most a dozen passes, the geometric bisection
+    takes at most thirty more, and each pass uses only the band count (``count_only``).
     """
     positive = tol[tol > 0.0]
     if positive.size == 0:
@@ -467,13 +403,9 @@ def _smallest_fitting_factor(s, w, tol, max_bands: int):
     reach = float((s.max(axis=0) - s.min(axis=0)).max()) + _underflow_margin(w)
     upper = max(2.0 * reach / float(positive.min()), 1.0)
     upper = min(upper, float(np.finfo(np.float64).max))
-    # Fitting is monotone in the factor, so one pass settles every larger factor
-    # (it fits) and every smaller one (it does not).  The bisection below is
-    # walked on what is known, so its path, and its result, are those of a pass
-    # at every trial; but its first trials sit far above the answer, where the
-    # windows span the whole curve and a pass costs the most.  Doubling from
-    # 1, where the caller found the bands too many, brackets the answer at a
-    # tolerance close to it, and those trials are never run.
+    # One pass settles every larger factor (fits) and every smaller one (does not). Doubling
+    # from 1 brackets the answer near its tolerance, so the costly trials far above it, where
+    # windows span the whole curve, are never run.
     does_not_fit, fits = 1.0, upper
     probe = 2.0
     while probe < upper:

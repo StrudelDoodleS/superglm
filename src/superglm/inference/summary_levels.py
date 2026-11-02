@@ -49,27 +49,16 @@ def build_level_universes(
     specs: Mapping[str, Any],
     interaction_specs: Mapping[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Per-term level-universe provenance for the summary payload (spec §3.8).
+    """Per-term level-universe provenance for the summary payload.
 
-    The audit trail a rating-governance reader needs about a categorical-family
-    term: the bound universe, where it came from (``declared`` / ``dtype`` /
-    ``full-frame`` / ``inferred``), the reference level and whether an empty
-    declared base forced a swap, and any level pinned to base for want of
-    training rows.
-
-    Keys mirror ``reconstruct()`` exactly, because both are read as one record
-    of the same fitted state and a second spelling is how they drift apart. A
-    term with no universe at all -- every numeric spec -- is absent rather than
-    present-and-empty, so ``level_universes`` reads as the list of terms that
-    have levels.
-
-    ``interaction_specs`` is the model's interaction namespace, read on the same
-    terms as the main one. ``FactorSmooth`` is the reason it exists: it carries
-    a bound group universe and a ``_level_source``, and it lives ONLY there, so
-    scanning ``_specs`` alone drops precisely the term whose universe is least
-    obvious from the coefficient table. The two namespaces share one key space
-    (``validate_term_name_namespace`` refuses a name in both), so a flat payload
-    keyed by term name cannot collide.
+    The audit trail a rating-governance reader needs for a categorical-family term: the bound
+    universe, where it came from (``declared`` / ``dtype`` / ``full-frame`` / ``inferred``), the
+    reference level and whether an empty declared base forced a swap, and any level pinned to
+    base for want of training rows. Keys mirror ``reconstruct()`` exactly. A term with no universe
+    (every numeric spec) is absent, not present-and-empty. ``interaction_specs`` is read on the
+    same terms as the main namespace: ``FactorSmooth`` lives only there, and the two namespaces
+    share one key space (``validate_term_name_namespace``), so a flat payload keyed by term name
+    cannot collide.
     """
     from superglm.features.categorical import Categorical
     from superglm.features.factor_smooth import FactorSmooth
@@ -120,18 +109,11 @@ def _with_piecewise_reference_rows(
 ) -> list[_CoefRow]:
     """Give a ``Piecewise`` term the base row a ``Categorical`` already displays.
 
-    Every coefficient in a piecewise block is a contrast against the base knot,
-    and without a row naming that knot the summary is the only surface that
-    never says which one it is: the workbook prints all ``J + 2`` knots and the
-    editor shows a handle at each, so the three surfaces the design promises to
-    keep identical would differ by exactly one row.  With ``breaks=int`` the
-    knot vector is not printed either, so the base cannot even be inferred by
-    elimination.
-
-    Display-only, and built here rather than in ``coef_tables`` for the same
-    reason the categorical reference row is: it carries no coefficient, so it
-    must not reach ``_coef_rows``, which is what the export payload, the edf
-    buckets and every consumer that counts fitted parameters read.
+    Every coefficient in a piecewise block is a contrast against the base knot; the workbook and
+    editor both show that knot, so the summary names it too (with ``breaks=int`` it could not be
+    inferred). Display-only and built here, not in ``coef_tables``: it carries no coefficient,
+    so it must not reach ``_coef_rows``, which the export payload, the edf buckets and every
+    parameter count read.
     """
     from superglm.features.piecewise import Piecewise
 

@@ -1,30 +1,15 @@
 """PIT and randomised quantile residuals for a fitted distributional model.
 
-One transform serves every fitted family that implements a distribution
-function: the probability-integral transform ``u_i = F(y_i | theta_hat_i)``
-and its normal inverse ``r_i = Phi^{-1}(u_i)``, the randomised quantile
-residual of Dunn and Smyth (1996), *Journal of Computational and Graphical
-Statistics* 5(3), 236-244. Under a correctly specified supported family ``u``
-is uniform and ``r`` is standard normal, which is what lets one Q-Q envelope,
-one worm plot and one PIT histogram check a Gaussian, a gamma and a
-generalised Pareto alike; the calibration reading of the uniform histogram is
-Gneiting, Balabdaoui and Raftery (2007), *Journal of the Royal Statistical
-Society B* 69(2), 243-268.
-
-Two departures from the plain transform are recorded rather than hidden.  A
-family with a point mass takes the randomised construction ``u ~ U(F(y-),
-F(y))`` over the atom, which is what makes the transform uniform on a
-discontinuous CDF, and the number of randomised rows is on the payload.  A row
-the fitted model gives essentially no mass has ``u`` clipped into
-``[1e-12, 1 - 1e-12]`` before the inverse; the clipped count is a misfit
-statement about the fit, not a rounding note, so it travels with the residuals.
-
-A truncated or censored row is read through the parent law's CDF ``F`` and the
-row's truncation window ``(a, b]``: with ``D = F(b) - F(a)``, an observed row
-has ``u = (F(y) - F(a)) / D``, a right-censored row at ``c`` has ``u`` uniform
-on ``((F(c) - F(a)) / D, 1)`` and a left-censored one has ``u`` uniform on
-``(0, (F(c) - F(a)) / D)``.  The censored draw is the randomised construction
-of Dunn and Smyth (1996) and is counted in ``randomised_rows``.
+``u_i = F(y_i | theta_hat_i)`` and ``r_i = Phi^{-1}(u_i)``, the randomised
+quantile residual of Dunn and Smyth (1996), *JCGS* 5(3); under a correct model
+``u`` is uniform and ``r`` standard normal (calibration reading: Gneiting,
+Balabdaoui and Raftery 2007, *JRSS B* 69(2)). A point mass takes
+``u ~ U(F(y-), F(y))``, counted in ``randomised_rows``; ``u`` is clipped into
+``[1e-12, 1 - 1e-12]`` before the inverse, and the clipped count is reported
+as misfit. A truncated row with window ``(a, b]`` and ``D = F(b) - F(a)`` has
+``u = (F(y) - F(a)) / D``; a right-censored row at ``c`` is uniform on
+``((F(c) - F(a)) / D, 1)`` and a left-censored one on
+``(0, (F(c) - F(a)) / D)``, both randomised.
 """
 
 from __future__ import annotations
@@ -87,20 +72,13 @@ def _validated_kind(kind: str) -> ResidualKind:
 class ResidualSet:
     """The transform, its normal inverse, and everything a check needs beside them.
 
-    ``weights`` are the *replication* weights the checks group and average by:
-    the declared counts under the frequency contract and ones under the prior
-    contract, where the weight has already entered each row's own distribution
-    function instead.  ``prior_weights`` are that row law's own weights -- the
-    resolved prior weights under the prior contract and ones under the
-    frequency one -- so a builder that has to simulate or invert the row's
-    distribution can hand them straight to the posterior primitive.  Rows whose
-    weight is zero are not here at all -- they leave the diagnostics the way
-    they leave the likelihood. ``pit_lower`` and ``pit_upper``, when present,
-    own the unclipped physical-row bounds F(y-) and F(y). They let diagnostic
-    samples randomise replicated atom occurrences independently. ``bounds`` are
-    the resolved truncation windows and censoring sides of the retained rows
-    when the residuals were read under them, and ``None`` otherwise. Stored
-    values, row counts and JSON arrays always describe physical rows.
+    ``weights`` are the replication weights the checks group by (frequency
+    counts, or ones under the prior contract); ``prior_weights`` are the row
+    law's own weights (ones under the frequency contract). Zero-weight rows
+    are absent. ``pit_lower`` and ``pit_upper``, when present, are the
+    unclipped bounds ``F(y-)`` and ``F(y)``; ``bounds`` are the resolved
+    truncation and censoring of the retained rows, or ``None``. Everything
+    describes physical rows.
     """
 
     pit: NDArray[np.float64]
@@ -210,22 +188,13 @@ def compute_residuals(
 ) -> ResidualSet:
     """Return the residual payload of ``y`` under the fit's plug-in parameters.
 
-    ``kind`` names the residual the caller is after and is validated here; the
-    payload always carries both, because ``quantile`` is one normal inverse
-    away from ``pit`` and every check wants one of the two.
-
-    Weights follow the contract the model was fitted under.  Frequency weights
-    are literal replication, so they leave the transform alone and travel on
-    the payload for :func:`replication_sample` to expand.  Prior weights are
-    part of the row's own law: the family validates them exactly as the fit
-    does -- the families that refuse prior weights raise from that call -- and
-    a non-unit prior weight is then read through the family's prior-weighted
-    distribution function.  A family without one refuses rather than quietly
-    inverting the unit-weight distribution.
-
-    ``truncation`` and ``censored`` are the bounds of the fit, read as
-    ``SuperLSS.fit`` reads them; the transform is then that of the row's
-    truncated or censored observation, and a censored row is randomised.
+    ``kind`` is validated here; the payload always carries both ``pit`` and
+    ``quantile``. Frequency weights leave the transform alone and travel on
+    the payload for :func:`replication_sample`. Prior weights are validated as
+    the fit validates them and read through the family's prior-weighted
+    distribution function; a family without one refuses. ``truncation`` and
+    ``censored`` are read as ``SuperLSS.fit`` reads them, and a censored row
+    is randomised.
     """
     _validated_kind(kind)
     evaluation = _evaluate_residuals(
@@ -272,10 +241,8 @@ def _bounded_intervals(
 ) -> tuple[NDArray, NDArray]:
     """Map the parent CDF interval of each bounded row to its truncated or censored one.
 
-    Each probability is a ratio of tail-safe log window probabilities, so a
-    window far in a tail keeps its mass where distribution-function values
-    round to one.  A window the fitted law gives no mass puts the row at the
-    top of the probability scale, where the clipped count reports it.
+    Probabilities are ratios of tail-safe log window probabilities; a window
+    with no fitted mass puts the row at the top, where the clipped count shows it.
     """
     new_lower = np.array(lower, dtype=np.float64, copy=True)
     new_upper = np.array(upper, dtype=np.float64, copy=True)
@@ -306,12 +273,9 @@ def _evaluate_residuals(
 ) -> _ResidualEvaluation:
     """Evaluate the retained row law without randomization or retained designs.
 
-    Held-out responses must be finite after zero-weight selection. Frequency
-    diagnostics otherwise use the CDF's scoring support; prior laws retain the
-    family's likelihood-binding validation and refusals. ``truncation`` and
-    ``censored`` resolve as the fit resolves them, on the retained rows; ``bounds``
-    are instead the retained rows' already resolved bounds, for rows the caller
-    selected itself, and replace both.
+    Held-out responses must be finite after zero-weight selection.
+    ``truncation`` and ``censored`` resolve as the fit resolves them;
+    ``bounds``, the retained rows' already resolved bounds, replaces both.
     """
     family = fitted.family
     if not isinstance(family, DistributionFunctionFamily):
@@ -495,12 +459,10 @@ def _sample_residuals(
 ) -> _ResidualSample:
     """Return aligned physical rows and occurrence PIT/quantile values.
 
-    Integer frequency counts below the cap have the law of literal expansion.
-    Above it (or for legacy fractional counts), selection is a weighted row
-    mixture with fresh atom draws, not resampling one already-randomized book.
-    Prior/all-unit and continuous observations preserve their stored transforms.
-    Construction seed controls physical atoms; this seed controls selection and
-    sampled atoms on independent streams. Storage is O(physical rows + cap).
+    Integer frequency counts below the cap expand literally; above it (or for
+    fractional counts) rows are a weighted mixture with fresh atom draws.
+    Prior and continuous observations keep their stored transforms. Selection
+    and sampled atoms use independent streams of ``seed``.
     """
     rows = replication_sample(residuals, max_rows=max_rows, seed=seed)
     pit, quantile = residuals.pit[rows], residuals.quantile[rows]
@@ -540,11 +502,9 @@ def replication_sample(
 ) -> NDArray[np.intp]:
     """Return the row indices a row-level check should read.
 
-    Replication is what the frequency contract means, so integer weights become
-    literal repeated rows.  Above ``max_rows`` repeated rows -- and for the
-    fractional weights that have no literal expansion -- a seeded
-    weight-proportional sample stands in for them, as the scalar diagnostics
-    do.  Under the prior contract every weight is one and this is the identity.
+    Integer frequency weights become literal repeated rows; above ``max_rows``
+    (and for fractional weights) a seeded weight-proportional sample stands in.
+    Under the prior contract this is the identity.
     """
     if not isinstance(residuals, ResidualSet):
         raise TypeError("residuals must be a ResidualSet")

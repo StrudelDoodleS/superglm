@@ -199,7 +199,7 @@ def edited_model_for_export(session, *, model_override=None):
 
 
 def with_editor_history(model, records: list[dict[str, Any]]):
-    """A shallow copy of ``model`` carrying the editor's timeline as ``_editor_history`` (D11).
+    """A shallow copy of ``model`` carrying the editor's timeline as ``_editor_history``.
 
     The copy shares every fitted attribute and owns only the new one, so the
     in-force or cached model the editor holds is never changed.
@@ -213,9 +213,9 @@ def export_structure(session, path: str | Path | None = None) -> str:
     """The in-force model's structure file as JSON text, written to ``path`` too when given.
 
     The in-force model is the last Refit, so changes still waiting are not in
-    it (spec addendum S2), and the file holds no coefficients and no hand
-    edits. The training rows, when the session has them, give a grouped
-    term's levels their native types (``Structure.from_model``).
+    it, and the file holds no coefficients and no hand edits. The training
+    rows, when the session has them, give a grouped term's levels their native
+    types (``Structure.from_model``).
     """
     from superglm.editor.evaluation import training_export_dataset
     from superglm.structure import Structure, StructureError

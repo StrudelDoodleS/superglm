@@ -1,25 +1,14 @@
-"""Saved-model shims for structured classes the one engine retired (one-engine design §3.12).
+"""Saved-model shims for retired structured classes.
 
-A fitted model pickles its retained linear system (``_linear_system_state``).
-When a class that state names is deleted, its name stays importable at its
-pickled path through the defining module's ``__getattr__`` (PEP 562), which
-returns an inert ``RetiredStructuredState`` subclass of the same name: it
-accepts whatever state was pickled and does nothing else.  ``SuperGLM``'s
-``__setstate__`` then finds it (``model.retired_state.mark_retired_linear_state``)
-and drops the retained state; the first inference call rebuilds it with the
-current engine at the saved coefficients and smoothing parameters, with a
-one-time notice (``model.retired_state.retained_linear_state``).  Predictions,
-coefficients and relativities never read it.
-
-The same stand-ins serve the v0.35.0 Tweedie classes a saved model can hold
-(``superglm.reml.scale`` and ``superglm.profiling.tweedie``): the REML
-saturated-density memo, which ``SuperGLM.__setstate__`` drops
-(``model.retired_state.release_retired_tweedie_state``), and the profile
-search state of ``estimate_p``, whose result restates itself in the current
-layout (``TweedieProfileResult.__setstate__``).
-
-The retired names are kept so that models saved by v0.35.0 load; a later
-minor release may drop them.
+A fitted model pickles its retained linear system. A deleted class named in
+that state stays importable at its pickled path through the module's
+``__getattr__`` (PEP 562) as an inert ``RetiredStructuredState`` subclass.
+``SuperGLM.__setstate__`` drops such state
+(``model.retired_state.mark_retired_linear_state``) and the first inference
+call rebuilds it at the saved coefficients and smoothing parameters, with a
+one-time notice. Predictions, coefficients and relativities never read it.
+The same stand-ins serve the v0.35.0 Tweedie classes in
+``superglm.reml.scale`` and ``superglm.profiling.tweedie``.
 """
 
 from __future__ import annotations

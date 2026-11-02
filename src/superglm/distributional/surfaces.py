@@ -1,22 +1,12 @@
 """Story-telling surfaces for a fitted distributional model.
 
-Four payloads, all built on the posterior primitive of
-:mod:`superglm.distributional.posterior`:
-
-* :func:`risk_curves` sweeps one covariate and reports predicted quantiles with
-  posterior bands -- the centile curve of Rigby and Stasinopoulos (2005),
-  *Journal of the Royal Statistical Society: Series C* 54(3), 507-554, drawn in
-  pricing clothing.
-* :func:`density_fan` puts the whole conditional density on the same sweep,
-  differencing the family's distribution function on a response grid.
-* :func:`parameter_spread` reports the sharpness of the fitted parameters
-  (Gneiting, Balabdaoui and Raftery 2007, *JRSS-B* 69(2), 243-268) and the
-  spread of tail probability among rows the model prices identically.
-* :func:`portfolio` summarises simulated total loss, overall and per segment.
-
-Grouped means here are ratios of weighted sums through
-:func:`superglm.distributional.checks._aggregate.grouped_ratio`, never means of
-per-row ratios.
+Built on :mod:`superglm.distributional.posterior`: :func:`risk_curves`
+(centile curves with posterior bands; Rigby and Stasinopoulos 2005, *JRSS C*
+54(3)), :func:`density_fan` (the conditional density along a sweep),
+:func:`parameter_spread` (sharpness, Gneiting, Balabdaoui and Raftery 2007,
+and tail spread among identically priced rows) and :func:`portfolio`
+(simulated total loss). Grouped means are ratios of weighted sums
+(:func:`superglm.distributional.checks._aggregate.grouped_ratio`).
 """
 
 from __future__ import annotations
@@ -397,19 +387,12 @@ def risk_curves(
 ) -> RiskCurves:
     """Predicted quantiles along one covariate, with posterior bands.
 
-    The covariate sweeps its training range (or its levels) while every other
-    column the model reads is held at ``reference``; a column the reference does
-    not name is held at its training median (numeric) or modal value, as in
-    ``term_effect``: missing values ignored, a tied mode going to the level first
-    in the fitted level order.  One
-    posterior draw set serves every requested quantile, so the bands of the
-    curves are coherent with one another rather than independently simulated.
-
-    ``offsets`` are offsets of the *sweep*, so each one carries ``n_points``
-    rows (one per level for a non-numeric covariate), not one per training row.
-    ``weights`` are the same shape: the curve is a reference policy at full
-    exposure unless the caller states an exposure per swept point, and then
-    each point's quantile is the one of its own prior-weighted law.
+    The covariate sweeps its training range (or levels) with every other column
+    held at ``reference``, or else at its training median or mode as in
+    ``term_effect``. One posterior draw set serves every quantile, so the bands
+    are coherent. ``offsets`` and ``weights`` are per swept point (``n_points``
+    rows, or one per level); without ``weights`` the curve is a reference
+    policy at full exposure.
     """
     asked = _asked_quantiles(quantiles, what="risk curves")
     sweep, levels, positions, resolved = _sweep(fitted, X_train, reference, covariate, n_points)
@@ -623,22 +606,16 @@ def parameter_spread(
 ) -> Spread:
     """Sharpness of the fitted parameters and spread among identical prices.
 
-    The histograms show how far the fitted parameters and the predicted
-    ``tail_p`` quantile spread across the rows.  The identically-priced table
-    bins rows into ``n_bins`` equal-count bins of the predicted mean and reports,
-    per bin, the weighted mean price as a ratio of sums and the 5th and 95th
-    percentiles of the exceedance probability ``P(Y > threshold)`` with their
-    ratio: rows a model prices alike can still differ many-fold in tail risk.
+    Histograms show the spread of fitted parameters and of the predicted
+    ``tail_p`` quantile. The identically-priced table bins rows into ``n_bins``
+    equal-count bins of the predicted mean and reports the weighted mean price
+    (a ratio of sums) and the 5th and 95th percentiles of ``P(Y > threshold)``
+    with their ratio.
 
-    Under frequency semantics, ``sample_weight`` gives literal replication
-    counts for bins, percentiles and histograms as well as weighted means.
-    Under prior semantics it weighs the ratio of sums with physical-row bins.
-    Zero-weight rows are omitted before prediction. ``offsets`` belong to X.
-    ``weights`` are the rows' *prior* weights, part of each row's own law, so the
-    tail quantile and the exceedance probability are read from the
-    prior-weighted law of the row rather than from the unit-weight one.  The
-    prices the table bins by do not move with it: a prior weight leaves the
-    mean of the row law alone.
+    Under frequency semantics ``sample_weight`` replicates rows everywhere;
+    under prior semantics it weighs the ratio of sums only. Zero-weight rows
+    are omitted. ``offsets`` belong to ``X``. ``weights`` are prior weights:
+    tail quantities read each row's prior-weighted law; the mean does not move.
     """
     if by != "mean":
         raise NotImplementedError(
@@ -787,11 +764,9 @@ class _WeightedTotal:
 class _SegmentTotals:
     """A predictive reduce that totals each segment while returning the book total.
 
-    ``posterior_predictive`` sums a ``(draws,)`` reduce across row chunks and
-    concatenates a ``(draws, columns)`` one, so a per-segment total -- additive,
-    not concatenable -- is accumulated here and the chunk's overall total is what
-    the primitive sees.  Chunks arrive once each, in row order, which is what
-    the cursor consumes.
+    Per-segment totals are additive, not concatenable, so they accumulate here
+    while the primitive sees each chunk's overall total; chunks arrive once, in
+    row order.
     """
 
     def __init__(
@@ -891,22 +866,15 @@ def portfolio(
 ) -> Portfolio:
     """Summarise the simulated total loss of a book of rows.
 
-    The total is ``posterior_predictive(..., reduce="sum")``: one simulated
-    response per row per draw, summed over rows.  ``by`` -- a column of ``X`` or
-    an array of labels -- also reports each segment's own total, whose means sum
-    to the book mean because every row lands in exactly one segment.
-    ``chunk_rows`` is the memory knob of the primitive; a predictive total is not
-    chunk-invariant, since the uniforms are drawn per chunk.
-    Nonfinite totals or summary arithmetic raise rather than publishing an
-    unrepresentable payload.
+    The total is ``posterior_predictive(..., reduce="sum")``. ``by`` (a column
+    of ``X`` or an array of labels) adds each segment's total; segment means sum
+    to the book mean. ``chunk_rows`` bounds memory; totals are not
+    chunk-invariant, since uniforms are drawn per chunk. Nonfinite totals raise.
 
-    ``weights`` are the rows' prior weights -- an exposure on a burn-cost
-    model.  They enter twice, because they mean the same thing in both places:
-    each row is simulated on its own prior-weighted law, and what the book pays
-    is ``sum_i w_i y_i``, the rate times the exposure that bought it, overall
-    and within every segment.
-    Zero-weight rows are omitted before simulation. ``offsets`` give one
-    predictor-keyed offset per input row and are sliced with those rows.
+    ``weights`` are the rows' prior weights (an exposure on a burn-cost model):
+    each row is simulated on its prior-weighted law and the book pays
+    ``sum_i w_i y_i``. Zero-weight rows are omitted; ``offsets`` give one
+    predictor-keyed offset per input row.
     """
     asked = _asked_quantiles(quantiles, what="a portfolio payload")
     columns = [f"q{value:g}" for value in asked]

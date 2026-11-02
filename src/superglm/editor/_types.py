@@ -92,7 +92,7 @@ class EditRecord:
 
 @dataclass(frozen=True)
 class PendingStep:
-    """One structural change waiting for a Refit (spec D1).
+    """One structural change waiting for a Refit.
 
     ``params`` name levels, groups and edges by label, as the builder resolved
     them. ``draft_spec`` is the term's unfitted spec after this change, built
