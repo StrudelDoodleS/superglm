@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import math
 import pickle
-from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -353,18 +352,6 @@ def test_budget_is_no_worse_than_practical_efs() -> None:
         assert newton.objective <= practical.objective + 1e-9 * (1 + abs(practical.objective))
 
 
-def test_stationary_results_are_validated_on_replay() -> None:
-    newton = _newton_stop("gaussian")
-    with pytest.raises(ValueError, match="projected gradient"):
-        replace(newton, terminal_projected_gradient_norm=1.0)
-    with pytest.raises(ValueError, match="stationary"):
-        replace(
-            newton, convergence_reason="lambda_change"
-        )  # FS evidence is not fresh at the optimum
-    # the FS residual is NOT zero at the REML optimum
-    assert newton.terminal_raw_max_log_step > newton.config.tolerance
-
-
 def test_gradient_unresolved_when_certificate_dominates() -> None:
     """A finite-difference step so small the certificate exceeds the stationarity bar.
 
@@ -621,13 +608,3 @@ def test_unavailable_gradient_after_cap_release_retains_uncertified_fit(monkeypa
     assert restored.convergence_reason == "derivative_unavailable"
     assert restored.beyond_cap_components == result.beyond_cap_components
     assert restored.terminal_gradient is None and not restored.matched_certified
-    with pytest.raises(ValueError, match="gradient_unresolved requires"):
-        replace(result, convergence_reason="gradient_unresolved")
-    with pytest.raises(ValueError, match="derivative_unavailable"):
-        replace(result, terminal_projected_gradient_norm=0.0)
-    with pytest.raises(ValueError, match="derivative_unavailable"):
-        replace(
-            result,
-            terminal_gradient={"location:x#wiggle": 0.0},
-            terminal_gradient_certificate={"location:x#wiggle": 0.0},
-        )

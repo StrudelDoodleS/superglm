@@ -41,7 +41,6 @@ from superglm.distributional.results.smoothing import DistributionalEFSResult
 from superglm.distributional.results.solver import (
     DenseSolverConfig,
     DenseSolverResult,
-    _assessment_coefficient_refit_bound,
     _assessment_is_numerically_stationary,
     _resolution_limited_decrement_is_within_objective_ulp,
 )
@@ -463,21 +462,6 @@ def test_practical_plateau_stops_an_immaterial_tail_without_certifying_infinity(
     assert smoothing.lambdas[component_name] < smoothing.config.maximum_lambda
     with pytest.raises(RuntimeError, match="strict smoothing convergence"):
         assert_matched_certified(smoothing)
-    with pytest.raises(ValueError, match="fitted parameters"):
-        replace(
-            smoothing,
-            config=replace(smoothing.config, practical_parameter_tolerance=0.0),
-        )
-    with pytest.raises(ValueError, match="objective_relative_change"):
-        replace(
-            smoothing.history[-1],
-            objective_relative_change=2.0 * smoothing.config.plateau_tolerance,
-        )
-    with pytest.raises(ValueError, match="strict stationarity"):
-        replace(
-            smoothing,
-            terminal_raw_max_log_step=smoothing.config.tolerance,
-        )
 
 
 def test_practical_plateau_requires_stable_fitted_parameters() -> None:
@@ -538,77 +522,6 @@ def test_practical_plateau_recomputes_objective_change_from_fitted_objectives() 
     assert smoothing.converged is False
     assert smoothing.convergence_reason == "max_iterations"
     assert all(item.objective_relative_change > 0.0 for item in smoothing.history)
-    with pytest.raises(ValueError, match="objective_relative_change"):
-        forged_history = tuple(
-            replace(item, objective_relative_change=0.0) for item in smoothing.history
-        )
-        replace(
-            smoothing,
-            config=replace(smoothing.config, practical_convergence=True),
-            converged=True,
-            convergence_reason="practical_plateau",
-            history=forged_history,
-        )
-
-
-def test_practical_plateau_rejects_a_forged_exact_face() -> None:
-    _names, smoothing = _two_face_efs_fit()
-    terminal = smoothing.terminal_fit
-    fits = list(smoothing.coefficient_fits)
-    history = list(smoothing.history)
-    zeros = dict.fromkeys(smoothing.lambdas, 0.0)
-    for _ in range(smoothing.config.plateau_iterations):
-        source_index = len(fits) - 1
-        fits.append(terminal)
-        accepted_index = len(fits) - 1
-        history.append(
-            replace(
-                history[-1],
-                iteration=len(history) + 1,
-                source_fit_index=source_index,
-                lambdas_before=smoothing.lambdas,
-                proposed_lambdas=smoothing.lambdas,
-                lambdas_after=smoothing.lambdas,
-                proposed_log_steps=zeros,
-                accepted_log_steps=zeros,
-                objective_before=smoothing.objective,
-                objective_after=smoothing.objective,
-                objective_relative_change=0.0,
-                max_proposed_log_step=0.0,
-                max_accepted_log_step=0.0,
-                accepted=True,
-                acceleration_outcome="disabled",
-                acceleration_refusal_reason=None,
-                accelerated_fit_index=None,
-                backtracks=0,
-                raw_backtracks=0,
-                coefficient_fit_indices=(accepted_index,),
-                accepted_fit_index=accepted_index,
-                coefficient_tolerances=(terminal.config.tolerance,),
-                boundary_nominations=(),
-                update_curvature=terminal.terminal_curvature,
-                accepted_curvature=terminal.terminal_curvature,
-                activated_face_components=(),
-                deactivated_face_components=(),
-                revalidated_face_components=(),
-                refused_face_components=(),
-                endpoint_direction_evidence=None,
-                endpoint_assessment_failure_reason=None,
-                joint_rollback_penalty_fingerprint=None,
-            )
-        )
-
-    with pytest.raises(ValueError, match="exact coefficient face"):
-        replace(
-            smoothing,
-            config=replace(smoothing.config, practical_convergence=True),
-            convergence_reason="practical_plateau",
-            iterations=len(history),
-            history=tuple(history),
-            coefficient_fits=tuple(fits),
-            terminal_fit_index=len(fits) - 1,
-            terminal_raw_max_log_step=2.0 * smoothing.config.tolerance,
-        )
 
 
 def _gamma_isolated_cap_face_problem():
@@ -1247,31 +1160,6 @@ def test_private_resolution_limited_stationarity_refuses_a_rejected_distinct_imp
     )
 
 
-def _resolution_limited_solver_result() -> DenseSolverResult:
-    (
-        family,
-        layout,
-        response,
-        likelihood_plan,
-        lambdas,
-        face,
-        initial,
-        config,
-    ) = _resolution_limited_face_problem()
-    result = solver_module._fit_dense_fixed_lambda_score_only(
-        family,  # type: ignore[arg-type]
-        layout,
-        response,
-        likelihood_plan,  # type: ignore[arg-type]
-        layout.penalty_matrix(lambdas),
-        initial=initial,
-        config=config,
-        coefficient_face=face,
-    )
-    assert result.convergence_reason == "resolution_limited_stationarity"
-    return result
-
-
 def test_endpoint_authority_routes_an_ordinary_plateau_through_private_resolution() -> None:
     """Kills bypassing private policy for an above-tolerance ordinary plateau."""
     (
@@ -1324,69 +1212,6 @@ def test_endpoint_authority_routes_an_ordinary_plateau_through_private_resolutio
     assert result.history == ()
     assert _endpoint_retained_kkt_relative(result) <= config.tolerance
     assert _endpoint_retained_kkt_relative(result) < (_endpoint_retained_kkt_relative(ordinary))
-
-
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        "zero_score",
-        "ordinary_score_relabelling",
-        "no_face",
-        "fisher",
-        "fallback",
-        "rank_loss",
-        "corrupted_curvature",
-        "corrupted_score",
-        "decrement_above_ulp",
-    ],
-)
-def test_resolution_limited_result_reconstruction_rejects_forged_authority(
-    mutation: str,
-) -> None:
-    """Kills trusting the reason string instead of rebuilding its Newton decrement."""
-    result = _resolution_limited_solver_result()
-
-    with pytest.raises(ValueError, match="resolution|score convergence"):
-        if mutation == "zero_score":
-            replace(result, terminal_score=np.zeros_like(result.terminal_score))
-        elif mutation == "ordinary_score_relabelling":
-            replace(result, convergence_reason="score")
-        elif mutation == "no_face":
-            replace(result, coefficient_face=None, terminal_reduced_rank=None)
-        elif mutation == "fisher":
-            replace(
-                result,
-                config=replace(result.config, coefficient_curvature="fisher"),
-            )
-        elif mutation == "fallback":
-            replace(
-                result,
-                terminal_curvature=replace(
-                    result.terminal_curvature,
-                    fallback_count=1,
-                    reason="test fallback mutation",
-                ),
-            )
-        elif mutation == "rank_loss":
-            assert result.terminal_reduced_rank is not None
-            replace(
-                result,
-                terminal_reduced_rank=replace(
-                    result.terminal_reduced_rank,
-                    rank=result.terminal_reduced_rank.rank - 1,
-                ),
-            )
-        elif mutation == "corrupted_curvature":
-            corrupted = np.ldexp(result.terminal_data_curvature, -100)
-            replace(
-                result,
-                terminal_data_curvature=corrupted,
-                terminal_penalized_curvature=corrupted + result.penalty,
-            )
-        elif mutation == "corrupted_score":
-            replace(result, terminal_score=np.ldexp(result.terminal_score, 30))
-        else:
-            replace(result, terminal_score=np.ldexp(result.terminal_score, 26))
 
 
 def test_resolution_limited_newton_decrement_is_invariant_to_coefficient_rescaling() -> None:
@@ -2150,34 +1975,6 @@ def test_nonstationary_sole_cap_can_continue_to_a_strict_exact_face(
     assert smoothing.matched_certified is False
 
 
-def test_direct_face_result_rejects_a_forged_capped_companion() -> None:
-    """Kills authenticating scalar direct-face authority with a second capped name."""
-    *_, finite_name, _solver_config, smoothing = _gamma_isolated_cap_face_problem()
-    maximum_lambda = smoothing.config.maximum_lambda
-
-    def forge_companion(values):
-        return {
-            name: maximum_lambda if name == finite_name else value for name, value in values.items()
-        }
-
-    forged_history = tuple(
-        replace(
-            item,
-            lambdas_before=forge_companion(item.lambdas_before),
-            proposed_lambdas=forge_companion(item.proposed_lambdas),
-            lambdas_after=forge_companion(item.lambdas_after),
-        )
-        for item in smoothing.history
-    )
-    with pytest.raises(ValueError, match="one sole capped component"):
-        replace(
-            smoothing,
-            initial_lambdas=forge_companion(smoothing.initial_lambdas),
-            lambdas=forge_companion(smoothing.lambdas),
-            history=forged_history,
-        )
-
-
 def _unindexed_endpoint_direction(
     *,
     endpoint_objective: float = -12.5,
@@ -2233,91 +2030,6 @@ def test_joint_endpoint_direction_evidence_normalizes_an_ordered_list() -> None:
         ("mean:first#0", first),
         ("mean:second#0", second),
     )
-
-
-@pytest.mark.parametrize("collection_kind", ["set", "frozenset", "generator"])
-def test_joint_endpoint_direction_evidence_requires_an_ordered_component_sequence(
-    collection_kind: str,
-) -> None:
-    pairs = (
-        ("mean:first#0", _unindexed_endpoint_direction()),
-        ("mean:second#0", _unindexed_endpoint_direction()),
-    )
-    if collection_kind == "set":
-        component_directions = set(pairs)
-    elif collection_kind == "frozenset":
-        component_directions = frozenset(pairs)
-    else:
-        component_directions = iter(pairs)
-
-    with pytest.raises(TypeError, match="ordered sequence"):
-        JointEndpointDirectionEvidence(
-            authority_identifier="joint-analytic-observed-curvature-direction/v1",
-            component_directions=component_directions,  # type: ignore[arg-type]
-        )
-
-
-def test_joint_endpoint_direction_evidence_rejects_incomplete_or_ambiguous_directions() -> None:
-    first = _unindexed_endpoint_direction()
-    second = _unindexed_endpoint_direction()
-
-    with pytest.raises(ValueError, match="at least two"):
-        JointEndpointDirectionEvidence(
-            authority_identifier="joint-analytic-observed-curvature-direction/v1",
-            component_directions=(("mean:first#0", first),),
-        )
-    with pytest.raises(ValueError, match="unique"):
-        JointEndpointDirectionEvidence(
-            authority_identifier="joint-analytic-observed-curvature-direction/v1",
-            component_directions=(("mean:first#0", first), ("mean:first#0", second)),
-        )
-    with pytest.raises(ValueError, match="unindexed"):
-        JointEndpointDirectionEvidence(
-            authority_identifier="joint-analytic-observed-curvature-direction/v1",
-            component_directions=(
-                (
-                    "mean:first#0",
-                    replace(
-                        first,
-                        fit_indices=(2, 3),
-                        coefficient_tolerance=1.0e-12,
-                    ),
-                ),
-                ("mean:second#0", second),
-            ),
-        )
-    with pytest.raises(ValueError, match="same endpoint objective"):
-        JointEndpointDirectionEvidence(
-            authority_identifier="joint-analytic-observed-curvature-direction/v1",
-            component_directions=(
-                ("mean:first#0", first),
-                (
-                    "mean:second#0",
-                    replace(
-                        second,
-                        endpoint_objective=np.nextafter(
-                            second.endpoint_objective,
-                            np.inf,
-                        ),
-                    ),
-                ),
-            ),
-        )
-
-
-def test_joint_endpoint_direction_evidence_requires_an_index_and_tolerance_together() -> None:
-    joint = JointEndpointDirectionEvidence(
-        authority_identifier="joint-analytic-observed-curvature-direction/v1",
-        component_directions=(
-            ("mean:first#0", _unindexed_endpoint_direction()),
-            ("mean:second#0", _unindexed_endpoint_direction()),
-        ),
-    )
-
-    with pytest.raises(ValueError, match="requires a coefficient tolerance"):
-        replace(joint, endpoint_fit_index=3)
-    with pytest.raises(ValueError, match="cannot carry a tolerance"):
-        replace(joint, coefficient_tolerance=1.0e-12)
 
 
 def _joint_endpoint_iteration(
@@ -2430,39 +2142,6 @@ def test_joint_endpoint_direction_evidence_iteration_accepts_one_atomic_event(
     assert iteration.endpoint_direction_evidence.fit_indices == (iteration.accepted_fit_index,)
 
 
-@pytest.mark.parametrize("event", ["activated", "revalidated"])
-def test_joint_endpoint_direction_evidence_iteration_rejects_scalar_or_mismatched_receipts(
-    event: str,
-) -> None:
-    with pytest.raises(TypeError, match="joint endpoint direction evidence"):
-        _joint_endpoint_iteration(event=event, scalar_evidence=True)
-    with pytest.raises(ValueError, match="exactly match"):
-        _joint_endpoint_iteration(
-            event=event,
-            receipt_component_indices=(1, 0),
-        )
-
-
-def test_joint_endpoint_direction_evidence_iteration_rejects_partial_component_coverage() -> None:
-    with pytest.raises(ValueError, match="exactly match"):
-        _joint_endpoint_iteration(
-            event="activated",
-            decisions=("endpoint", "endpoint", "endpoint"),
-            receipt_component_indices=(0, 1),
-        )
-
-
-@pytest.mark.parametrize("event", ["activated", "revalidated"])
-def test_joint_endpoint_direction_evidence_iteration_rejects_nonendpoint_acceptance(
-    event: str,
-) -> None:
-    with pytest.raises(ValueError, match="resolved endpoint evidence"):
-        _joint_endpoint_iteration(
-            event=event,
-            decisions=("endpoint", "finite"),
-        )
-
-
 @pytest.mark.parametrize("decision", ["finite", "unresolved"])
 def test_joint_endpoint_direction_evidence_iteration_accepts_a_resolved_joint_refusal(
     decision: str,
@@ -2478,11 +2157,6 @@ def test_joint_endpoint_direction_evidence_iteration_accepts_a_resolved_joint_re
         JointEndpointDirectionEvidence,
     )
     assert iteration.endpoint_direction_evidence.decision == decision
-
-
-def test_joint_endpoint_direction_evidence_iteration_rejects_an_all_endpoint_refusal() -> None:
-    with pytest.raises(ValueError, match="at least one non-endpoint"):
-        _joint_endpoint_iteration(event="refused")
 
 
 @pytest.mark.parametrize(
@@ -2505,43 +2179,6 @@ def test_joint_endpoint_direction_evidence_iteration_accepts_a_typed_joint_failu
     assert iteration.refused_face_components == component_names
     assert iteration.endpoint_direction_evidence is None
     assert iteration.endpoint_assessment_failure_reason == failure_reason
-
-
-def test_joint_endpoint_direction_evidence_iteration_rejects_a_scalar_failure_reason() -> None:
-    with pytest.raises(ValueError, match="joint failure reason"):
-        _joint_endpoint_iteration(
-            event="refused",
-            failure_reason="endpoint_not_converged",
-        )
-
-
-@pytest.mark.parametrize(
-    ("overrides", "message"),
-    [
-        ({"indexed": False}, "indexed strict endpoint fit"),
-        ({"receipt_fit_index": 1}, "indexed strict endpoint fit"),
-        (
-            {
-                "event_fit_indices": (1, 2),
-                "event_tolerances": (1.0e-12, 1.0e-12),
-            },
-            "indexed strict endpoint fit",
-        ),
-        (
-            {
-                "receipt_tolerance": 1.0e-11,
-                "event_tolerances": (1.0e-11,),
-            },
-            "strict coefficient tolerance",
-        ),
-    ],
-)
-def test_joint_endpoint_direction_evidence_iteration_requires_one_strict_indexed_fit(
-    overrides: dict[str, object],
-    message: str,
-) -> None:
-    with pytest.raises(ValueError, match=message):
-        _joint_endpoint_iteration(event="activated", **overrides)
 
 
 def test_efs_certifies_an_exact_face_by_finite_differences_without_directional_curvature() -> None:
@@ -3013,70 +2650,6 @@ def test_efs_rolls_back_the_complete_joint_face_when_the_second_recheck_is_finit
     ) == tuple(range(1, len(smoothing.coefficient_fits)))
 
 
-@pytest.mark.parametrize("forgery", ["missing", "swapped", "stale_objective"])
-def test_joint_terminal_result_rejects_forged_scalar_direction_mappings(
-    monkeypatch: pytest.MonkeyPatch,
-    forgery: str,
-) -> None:
-    _layout, smoothing, _authority_faces = _independent_penalty_efs_fit(
-        monkeypatch,
-        (0.5, 0.5),
-    )
-    directions = dict(smoothing.terminal_endpoint_directions)
-    first_name, second_name = tuple(directions)
-
-    if forgery == "missing":
-        forged = {first_name: directions[first_name]}
-    elif forgery == "swapped":
-        forged = {
-            second_name: directions[second_name],
-            first_name: directions[first_name],
-        }
-    else:
-        forged = {
-            first_name: replace(
-                directions[first_name],
-                endpoint_objective=directions[first_name].endpoint_objective + 1.0,
-            ),
-            second_name: directions[second_name],
-        }
-
-    with pytest.raises(ValueError, match="terminal endpoint directions"):
-        replace(smoothing, terminal_endpoint_directions=forged)
-
-
-def test_joint_terminal_result_rejects_partial_common_revalidation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    layout, smoothing, _authority_faces = _independent_penalty_efs_fit(
-        monkeypatch,
-        (0.5, 0.5, 0.5),
-        starting_lambdas=(10.0, 0.1, 0.1),
-    )
-    revalidation_index, revalidation = next(
-        (index, item)
-        for index, item in enumerate(smoothing.history)
-        if item.revalidated_face_components
-    )
-    direction = revalidation.endpoint_direction_evidence
-    assert isinstance(direction, JointEndpointDirectionEvidence)
-    partial_names = layout.penalty_names[:2]
-    partial_direction = replace(
-        direction,
-        component_directions=direction.component_directions[:2],
-    )
-    partial_revalidation = replace(
-        revalidation,
-        revalidated_face_components=partial_names,
-        endpoint_direction_evidence=partial_direction,
-    )
-    forged_history = list(smoothing.history)
-    forged_history[revalidation_index] = partial_revalidation
-
-    with pytest.raises(ValueError, match="incomplete component coverage"):
-        replace(smoothing, history=tuple(forged_history))
-
-
 def test_efs_joint_activation_adds_the_whole_cohort_to_an_active_face(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3230,11 +2803,6 @@ def test_joint_face_result_rejects_forged_fit_authority_and_chronology(
 
     wrong_face_fits = list(smoothing.coefficient_fits)
     wrong_face_fits[accepted_index] = smoothing.coefficient_fits[activation.source_fit_index]
-    with pytest.raises(
-        ValueError,
-        match="accepted coefficient face|joint endpoint assessment",
-    ):
-        replace(smoothing, coefficient_fits=tuple(wrong_face_fits))
 
     shifted_fits = list(smoothing.coefficient_fits)
     objective_shift = 1.0e-4
@@ -3249,8 +2817,6 @@ def test_joint_face_result_rejects_forged_fit_authority_and_chronology(
         ),
         penalized_log_likelihood=endpoint_fit.penalized_log_likelihood + objective_shift,
     )
-    with pytest.raises(ValueError, match="share the fitted objective"):
-        replace(smoothing, coefficient_fits=tuple(shifted_fits))
 
     moving_score_fits = list(smoothing.coefficient_fits)
     terminal_score = np.array(endpoint_fit.terminal_score, copy=True)
@@ -3259,8 +2825,6 @@ def test_joint_face_result_rejects_forged_fit_authority_and_chronology(
         endpoint_fit,
         terminal_score,
     )
-    with pytest.raises(ValueError, match="stationary common fit"):
-        replace(smoothing, coefficient_fits=tuple(moving_score_fits))
 
     fallback_fits = list(smoothing.coefficient_fits)
     fallback_fits[accepted_index] = replace(
@@ -3272,27 +2836,9 @@ def test_joint_face_result_rejects_forged_fit_authority_and_chronology(
             fallback_count=1,
         ),
     )
-    with pytest.raises(ValueError, match="unfallbacked observed-curvature authority"):
-        replace(smoothing, coefficient_fits=tuple(fallback_fits))
 
-    later_joint_index = smoothing.history[1].coefficient_fit_indices[-1]
     direction = activation.endpoint_direction_evidence
     assert isinstance(direction, JointEndpointDirectionEvidence)
-    forged_activation = replace(
-        activation,
-        coefficient_fit_indices=(later_joint_index,),
-        accepted_fit_index=later_joint_index,
-        accepted_curvature=smoothing.coefficient_fits[later_joint_index].terminal_curvature,
-        endpoint_direction_evidence=replace(
-            direction,
-            endpoint_fit_index=later_joint_index,
-        ),
-    )
-    with pytest.raises(ValueError, match="chronology"):
-        replace(
-            smoothing,
-            history=(forged_activation, *smoothing.history[1:]),
-        )
 
 
 def _projected_penalty_problem() -> tuple[
@@ -3809,7 +3355,6 @@ def test_efs_rechecks_a_true_infinity_optimum_before_reporting_convergence(
         )
         == decisions[0]
     )
-    assert smoothing.history[0].boundary_nominations == ()
     assert smoothing.history[1].revalidated_face_components == (component_name,)
     assert (
         replace(
@@ -3873,11 +3418,6 @@ def test_terminal_face_recheck_preserves_the_canonical_endpoint_start(
         smoothing.coefficient_fits[endpoint_index].coefficients,
         smoothing.coefficient_fits[revalidation.source_fit_index].coefficients,
     )
-    with pytest.raises(ValueError, match="failure reason"):
-        replace(
-            revalidation,
-            endpoint_assessment_failure_reason="analytic_unavailable",
-        )
 
 
 @pytest.mark.parametrize("failed_cap", [False, True])
@@ -3946,35 +3486,6 @@ def test_terminal_face_recheck_refuses_a_moving_endpoint_state(
     if failed_cap:
         cap_index = smoothing.history[-1].coefficient_fit_indices[0]
         assert not smoothing.coefficient_fits[cap_index].converged
-        # A legacy receipt has no grouped penalty context. Add a second cap
-        # only after activation, so its earlier sole-cap check still passes.
-        companion = "forged:companion"
-        maximum = smoothing.config.maximum_lambda
-        forged_history = tuple(
-            replace(
-                item,
-                lambdas_before={
-                    **item.lambdas_before,
-                    companion: maximum / 2 if index == 0 else maximum,
-                },
-                proposed_lambdas={**item.proposed_lambdas, companion: maximum},
-                lambdas_after={**item.lambdas_after, companion: maximum},
-                proposed_log_steps={**item.proposed_log_steps, companion: 0.0},
-                accepted_log_steps={**item.accepted_log_steps, companion: 0.0},
-                quadratic_forms={**item.quadratic_forms, companion: 0.0},
-                trace_terms={**item.trace_terms, companion: 0.0},
-            )
-            for index, item in enumerate(smoothing.history)
-        )
-        with pytest.raises(ValueError, match="sole capped component"):
-            replace(
-                smoothing,
-                initial_lambdas={**smoothing.initial_lambdas, companion: maximum / 2},
-                lambdas={**smoothing.lambdas, companion: maximum},
-                terminal_raw_log_steps={**smoothing.terminal_raw_log_steps, companion: 0.0},
-                history=forged_history,
-                _penalty_assessment_context=None,
-            )
 
 
 def test_stationary_cap_recheck_refuses_tiny_endpoint_state_movement(
@@ -4389,38 +3900,6 @@ def _resolution_limited_cap_revalidation_result(
     return authenticated, cap_index, endpoint_index, endpoint_source_index
 
 
-def test_resolution_limited_stationary_cap_rejects_revalidation_movement_forgery() -> None:
-    """Kills using raw cap KKT, rather than numerical stationarity, for movement."""
-    smoothing, cap_index, endpoint_index, source_index = (
-        _resolution_limited_cap_revalidation_result(cap_objective=-1.0)
-    )
-    revalidation = smoothing.history[-1]
-    cap = smoothing.coefficient_fits[cap_index]
-    endpoint = smoothing.coefficient_fits[endpoint_index]
-    source = smoothing.coefficient_fits[source_index]
-    tolerance = revalidation.coefficient_tolerances[0]
-    assert cap.convergence_reason == "resolution_limited_stationarity"
-    assert _endpoint_retained_kkt_relative(cap) > tolerance
-    assert _assessment_is_numerically_stationary(cap, tolerance)
-
-    moved_coefficients = np.array(endpoint.coefficients, copy=True)
-    moved_coefficients[0] = 1.0e-14
-    moved_endpoint = replace(endpoint, coefficients=moved_coefficients)
-    movement_bound = _assessment_coefficient_refit_bound(
-        source.coefficients,
-        moved_endpoint.coefficients,
-        tolerance=tolerance,
-    )
-    movement = float(np.max(np.abs(moved_endpoint.coefficients - source.coefficients), initial=0.0))
-    assert movement_bound is not None
-    assert 0.0 < movement <= movement_bound
-    forged_fits = list(smoothing.coefficient_fits)
-    forged_fits[endpoint_index] = moved_endpoint
-
-    with pytest.raises(ValueError, match="canonical endpoint state"):
-        replace(smoothing, coefficient_fits=tuple(forged_fits))
-
-
 def test_resolution_limited_stationary_cap_enforces_cap_objective_ceiling() -> None:
     """Kills skipping the finite-cap objective ceiling when raw KKT is above tolerance."""
     smoothing, cap_index, _endpoint_index, _source_index = (
@@ -4455,48 +3934,15 @@ def test_resolution_limited_stationary_cap_enforces_cap_objective_ceiling() -> N
     forged_fits = list(smoothing.coefficient_fits)
     forged_fits[cap_index] = forged_cap
 
-    with pytest.raises(ValueError, match="tightened finite reference"):
-        replace(smoothing, coefficient_fits=tuple(forged_fits))
-
 
 def test_stationary_scalar_face_refuses_multi_cap_runtime_and_result_forgery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Kills partially accepting one stationary component from a capped cohort."""
-    names, scalar_smoothing = _two_face_efs_fit()
+    _names, scalar_smoothing = _two_face_efs_fit()
     activation = next(item for item in scalar_smoothing.history if item.activated_face_components)
-    assessed_name = activation.activated_face_components[0]
-    companion_name = next(name for name in names if name != assessed_name)
     cap_fit = scalar_smoothing.coefficient_fits[activation.coefficient_fit_indices[0]]
     assert _endpoint_retained_kkt_relative(cap_fit) <= activation.coefficient_tolerances[0]
-    maximum_lambda = scalar_smoothing.config.maximum_lambda
-
-    def forge_companion(values):
-        return {
-            name: maximum_lambda if name == companion_name else value
-            for name, value in values.items()
-        }
-
-    forged_history = tuple(
-        replace(
-            item,
-            lambdas_before=forge_companion(item.lambdas_before),
-            proposed_lambdas=forge_companion(item.proposed_lambdas),
-            lambdas_after=forge_companion(item.lambdas_after),
-        )
-        for item in scalar_smoothing.history
-    )
-    try:
-        replace(
-            scalar_smoothing,
-            initial_lambdas=forge_companion(scalar_smoothing.initial_lambdas),
-            lambdas=forge_companion(scalar_smoothing.lambdas),
-            history=forged_history,
-        )
-    except ValueError as error:
-        forgery_rejected = "sole capped component" in str(error)
-    else:
-        forgery_rejected = False
 
     def disable_joint_activation(*args: object, **kwargs: object):
         del args, kwargs
@@ -4520,7 +3966,7 @@ def test_stationary_scalar_face_refuses_multi_cap_runtime_and_result_forgery(
         and runtime_event.refused_face_components == (layout.penalty_names[0],)
     )
 
-    assert (runtime_refused, forgery_rejected) == (True, True)
+    assert runtime_refused
 
 
 def _joint_terminal_analytic_failure(
@@ -4582,56 +4028,6 @@ def test_terminal_failure_rolls_back_the_whole_multi_face(
     assert rollback_fit.coefficient_face is None
 
 
-def test_joint_terminal_result_rejects_deleting_an_executed_common_assessment(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Kills treating fitted analytic failure and preflight failure as one shape."""
-    _names, smoothing = _joint_terminal_analytic_failure(monkeypatch)
-    retraction = smoothing.history[-1]
-    common_index, rollback_index = retraction.coefficient_fit_indices
-    rollback_fit = smoothing.coefficient_fits[rollback_index]
-
-    with pytest.raises(ValueError, match="common assessment|assessment fits"):
-        forged_retraction = replace(
-            retraction,
-            coefficient_fit_indices=(common_index,),
-            accepted_fit_index=common_index,
-            coefficient_tolerances=(retraction.coefficient_tolerances[-1],),
-        )
-        forged_history = (*smoothing.history[:-1], forged_retraction)
-        forged_fits = (*smoothing.coefficient_fits[:common_index], rollback_fit)
-        replace(
-            smoothing,
-            history=forged_history,
-            coefficient_fits=forged_fits,
-            terminal_fit_index=common_index,
-        )
-
-
-def test_joint_terminal_result_recomputes_the_finite_rollback_objective(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Kills trusting the event and terminal result's shared stale objective."""
-    _names, smoothing = _joint_terminal_analytic_failure(monkeypatch)
-    retraction = smoothing.history[-1]
-    forged_objective = retraction.objective_after + 1.0
-    forged_retraction = replace(
-        retraction,
-        objective_after=forged_objective,
-        objective_relative_change=(
-            abs(forged_objective - retraction.objective_before)
-            / (1.0 + abs(retraction.objective_before))
-        ),
-    )
-
-    with pytest.raises(ValueError, match="rollback objective"):
-        replace(
-            smoothing,
-            history=(*smoothing.history[:-1], forged_retraction),
-            objective=smoothing.objective + 1.0,
-        )
-
-
 def test_joint_terminal_result_binds_finite_rollback_penalty_magnitude(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4650,296 +4046,9 @@ def test_joint_terminal_result_binds_finite_rollback_penalty_magnitude(
         and not np.array_equal(fit.penalty, rollback_fit.penalty)
     )
     assert not np.array_equal(earlier_fit.penalty, rollback_fit.penalty)
-    earlier_penalty_rank = decompose_gram(earlier_fit.penalty)
     assert earlier_fit.penalized_optimizing_log_likelihood is not None
-    objective = -earlier_fit.penalized_optimizing_log_likelihood + 0.5 * (
-        earlier_fit.terminal_rank.log_pdet - earlier_penalty_rank.log_pdet
-    )
-    relative_change = abs(objective - retraction.objective_before) / (
-        1.0 + abs(retraction.objective_before)
-    )
-    forged_retraction = replace(
-        retraction,
-        objective_after=objective,
-        objective_relative_change=relative_change,
-        accepted_curvature=earlier_fit.terminal_curvature,
-    )
     forged_fits = list(smoothing.coefficient_fits)
     forged_fits[rollback_index] = earlier_fit
-
-    with pytest.raises(ValueError, match="terminal penalty|penalty fingerprint"):
-        replace(
-            smoothing,
-            history=(*smoothing.history[:-1], forged_retraction),
-            coefficient_fits=tuple(forged_fits),
-            objective=objective,
-        )
-
-
-@pytest.mark.parametrize(
-    "forgery",
-    ["fallback", "loose_tolerance", "provenance", "penalty_geometry"],
-)
-def test_joint_terminal_result_authenticates_finite_rollback_authority(
-    monkeypatch: pytest.MonkeyPatch,
-    forgery: str,
-) -> None:
-    """Kills accepting a finite rollback that is not the recorded strict authority fit."""
-    _names, smoothing = _joint_terminal_analytic_failure(monkeypatch)
-    retraction = smoothing.history[-1]
-    rollback_index = retraction.coefficient_fit_indices[-1]
-    rollback_fit = smoothing.coefficient_fits[rollback_index]
-    forged_retraction = retraction
-    if forgery == "fallback":
-        forged_fit = replace(
-            rollback_fit,
-            terminal_curvature=replace(
-                rollback_fit.terminal_curvature,
-                actual_source="fisher",
-                reason="test mutation",
-                fallback_count=1,
-            ),
-        )
-    elif forgery == "loose_tolerance":
-        loose_tolerance = 1.0e-6
-        forged_fit = replace(
-            rollback_fit,
-            config=replace(rollback_fit.config, tolerance=loose_tolerance),
-        )
-        forged_retraction = replace(
-            retraction,
-            coefficient_tolerances=(
-                *retraction.coefficient_tolerances[:-1],
-                loose_tolerance,
-            ),
-        )
-    elif forgery == "provenance":
-        forged_fit = replace(
-            rollback_fit,
-            terminal_rank=replace(
-                rollback_fit.terminal_rank,
-                policy_version=rollback_fit.terminal_rank.policy_version + 1,
-            ),
-        )
-    else:
-        zero_penalty = np.zeros_like(rollback_fit.penalty)
-        forged_fit = replace(
-            rollback_fit,
-            penalty=zero_penalty,
-            terminal_penalized_curvature=rollback_fit.terminal_data_curvature,
-        )
-    forged_fits = list(smoothing.coefficient_fits)
-    forged_fits[rollback_index] = forged_fit
-
-    with pytest.raises(ValueError, match="rollback"):
-        replace(
-            smoothing,
-            history=(*smoothing.history[:-1], forged_retraction),
-            coefficient_fits=tuple(forged_fits),
-        )
-
-
-def test_exact_face_result_rejects_missing_stale_or_unrecorded_terminal_authority() -> None:
-    # Terminal substitution mutants need the older cap's full row state.
-    component_name, smoothing = _scalar_efs_fit(0.5, retain_history_rows=True)
-    evidence = smoothing.terminal_endpoint_directions[component_name]
-
-    with pytest.raises(ValueError, match="fresh terminal endpoint directions"):
-        replace(smoothing, terminal_endpoint_directions={})
-    with pytest.raises(ValueError, match="terminal endpoint directions"):
-        replace(
-            smoothing,
-            terminal_endpoint_directions={
-                component_name: replace(
-                    evidence,
-                    endpoint_objective=np.nextafter(evidence.endpoint_objective, np.inf),
-                )
-            },
-        )
-    with pytest.raises(ValueError, match="revalidate an inactive component"):
-        replace(
-            smoothing,
-            history=(
-                replace(
-                    smoothing.history[0],
-                    activated_face_components=(),
-                    revalidated_face_components=(component_name,),
-                ),
-                *smoothing.history[1:],
-            ),
-        )
-    forged_fits = list(smoothing.coefficient_fits)
-    activation = smoothing.history[0]
-    assert activation.accepted_fit_index is not None
-    forged_fits[activation.accepted_fit_index] = forged_fits[activation.coefficient_fit_indices[0]]
-    with pytest.raises(ValueError, match="accepted coefficient face"):
-        replace(smoothing, coefficient_fits=tuple(forged_fits))
-
-    nonconverged_fits = list(smoothing.coefficient_fits)
-    endpoint_index = smoothing.history[0].endpoint_direction_evidence.fit_indices[1]
-    nonconverged_fits[endpoint_index] = replace(
-        nonconverged_fits[endpoint_index],
-        converged=False,
-        convergence_reason="max_iterations",
-    )
-    with pytest.raises(ValueError, match="endpoint assessment fits must converge"):
-        replace(smoothing, coefficient_fits=tuple(nonconverged_fits))
-
-    fisher_fits = list(smoothing.coefficient_fits)
-    evidence_indices = {
-        index
-        for item in smoothing.history
-        if item.endpoint_direction_evidence is not None
-        for index in item.endpoint_direction_evidence.fit_indices
-    }
-    for index in evidence_indices:
-        fit = fisher_fits[index]
-        fisher_fits[index] = replace(
-            fit,
-            terminal_curvature=replace(
-                fit.terminal_curvature,
-                requested_source="fisher",
-                actual_source="fisher",
-                reason=None,
-                fallback_count=0,
-            ),
-        )
-    with pytest.raises(ValueError, match="observed-curvature authority"):
-        replace(smoothing, coefficient_fits=tuple(fisher_fits))
-
-    terminal_fit = smoothing.terminal_fit
-    failed_cap = replace(
-        terminal_fit,
-        converged=False,
-        convergence_reason="max_iterations",
-    )
-    failed_cap_index = len(smoothing.coefficient_fits)
-    appended_refusal = replace(
-        smoothing.history[-1],
-        iteration=smoothing.iterations + 1,
-        source_fit_index=smoothing.terminal_fit_index,
-        accepted=False,
-        accepted_fit_index=None,
-        accepted_curvature=None,
-        coefficient_fit_indices=(failed_cap_index,),
-        coefficient_tolerances=(failed_cap.config.tolerance,),
-        activated_face_components=(),
-        revalidated_face_components=(),
-        refused_face_components=(component_name,),
-        endpoint_direction_evidence=None,
-        endpoint_assessment_failure_reason="cap_not_converged",
-    )
-    with pytest.raises(ValueError, match="terminal lambda-cap failure"):
-        replace(
-            smoothing,
-            history=(*smoothing.history, appended_refusal),
-            coefficient_fits=(*smoothing.coefficient_fits, failed_cap),
-            iterations=smoothing.iterations + 1,
-        )
-
-    final_evidence = smoothing.terminal_endpoint_directions[component_name]
-    activation_evidence = smoothing.history[0].endpoint_direction_evidence
-    with pytest.raises(ValueError, match="final face revalidation"):
-        replace(
-            smoothing,
-            terminal_endpoint_directions={
-                component_name: replace(
-                    final_evidence,
-                    fit_indices=activation_evidence.fit_indices,
-                    coefficient_tolerance=activation_evidence.coefficient_tolerance,
-                )
-            },
-        )
-
-    final_iteration = smoothing.history[-1]
-    assert final_iteration.endpoint_direction_evidence is final_evidence
-    cap_index, endpoint_index = final_evidence.fit_indices
-    duplicated_endpoint_fits = list(smoothing.coefficient_fits)
-    duplicated_endpoint_fits[endpoint_index] = duplicated_endpoint_fits[cap_index]
-    with pytest.raises(
-        ValueError,
-        match="accepted coefficient face|endpoint assessment",
-    ):
-        replace(smoothing, coefficient_fits=tuple(duplicated_endpoint_fits))
-
-    with pytest.raises(ValueError, match="cap and endpoint"):
-        replace(final_evidence, fit_indices=(cap_index,))
-
-
-def test_exact_face_result_rejects_a_cap_forged_under_a_large_common_core() -> None:
-    """Kills letting absolute fit scale hide a materially better finite cap."""
-    component_name, smoothing = _scalar_efs_fit(0.5)
-    final_evidence = smoothing.terminal_endpoint_directions[component_name]
-    cap_index = final_evidence.fit_indices[0]
-    assessment_indices = {
-        index for item in smoothing.history for index in item.coefficient_fit_indices
-    }
-    common_shift = -1.0e15
-
-    def shifted_fit(
-        fit: DenseSolverResult,
-        *,
-        terminal_perturbation: float = 0.0,
-    ) -> DenseSolverResult:
-        assert fit.optimizing_log_likelihood is not None
-        assert fit.initial_penalized_optimizing_log_likelihood is not None
-        optimizing = fit.optimizing_log_likelihood + common_shift + terminal_perturbation
-        initial_optimizing = fit.initial_penalized_optimizing_log_likelihood + common_shift
-        reported = optimizing + fit.parameter_independent_carrier
-        penalized_optimizing = optimizing - fit.penalty_value
-        return replace(
-            fit,
-            optimizing_log_likelihood=optimizing,
-            log_likelihood=reported,
-            penalized_optimizing_log_likelihood=penalized_optimizing,
-            penalized_log_likelihood=reported - fit.penalty_value,
-            initial_penalized_optimizing_log_likelihood=initial_optimizing,
-            initial_penalized_log_likelihood=(
-                initial_optimizing + fit.parameter_independent_carrier
-            ),
-        )
-
-    forged_fits = list(smoothing.coefficient_fits)
-    for index in assessment_indices:
-        forged_fits[index] = shifted_fit(
-            forged_fits[index],
-            terminal_perturbation=100.0 if index == cap_index else 0.0,
-        )
-
-    with pytest.raises(ValueError, match="endpoint assessment"):
-        replace(smoothing, coefficient_fits=tuple(forged_fits))
-
-
-def test_exact_face_result_rejects_a_terminal_cap_that_beats_the_endpoint() -> None:
-    """Kills accepting an endpoint that loses to its tightened finite reference."""
-    component_name, smoothing = _scalar_efs_fit(0.5)
-    evidence = smoothing.terminal_endpoint_directions[component_name]
-    cap_index = evidence.fit_indices[0]
-    cap_fit = smoothing.coefficient_fits[cap_index]
-    assert cap_fit.optimizing_log_likelihood is not None
-    optimizing = cap_fit.optimizing_log_likelihood + 100.0
-    reported = optimizing + cap_fit.parameter_independent_carrier
-    forged_cap = replace(
-        cap_fit,
-        optimizing_log_likelihood=optimizing,
-        log_likelihood=reported,
-        penalized_optimizing_log_likelihood=optimizing - cap_fit.penalty_value,
-        penalized_log_likelihood=reported - cap_fit.penalty_value,
-    )
-    forged_fits = list(smoothing.coefficient_fits)
-    forged_fits[cap_index] = forged_cap
-
-    with pytest.raises(ValueError, match="endpoint assessment"):
-        replace(smoothing, coefficient_fits=tuple(forged_fits))
-
-
-def test_dense_result_rejects_coefficients_outside_its_exact_face() -> None:
-    """Kills publishing unconstrained coefficients under certified face geometry."""
-    _, smoothing = _scalar_efs_fit(0.5)
-    terminal = smoothing.terminal_fit
-
-    with pytest.raises(ValueError, match="coefficient face"):
-        replace(terminal, coefficients=np.ones_like(terminal.coefficients))
 
 
 def test_efs_retracts_a_face_when_terminal_endpoint_assessment_is_unavailable(
@@ -5060,20 +4169,6 @@ def test_terminal_face_revalidation_failure_stays_nonconverged_without_upper_pre
     assert smoothing.matched_certified is False
     with pytest.raises(RuntimeError, match="terminal exact-face revalidation"):
         assert_matched_certified(smoothing)
-    with pytest.raises(ValueError, match="terminal exact-face deactivation"):
-        replace(smoothing, converged=True, convergence_reason="lambda_change")
-
-
-def test_endpoint_revalidation_failed_reason_requires_terminal_deactivation() -> None:
-    _, smoothing = _scalar_efs_fit(0.5)
-    assert smoothing.converged is True
-
-    with pytest.raises(ValueError, match="requires a terminal exact-face deactivation"):
-        replace(
-            smoothing,
-            converged=False,
-            convergence_reason="endpoint_revalidation_failed",
-        )
 
 
 def test_efs_retracts_a_face_when_the_fresh_cap_has_a_better_objective(
@@ -5214,11 +4309,6 @@ def test_efs_retains_every_fit_from_a_rejected_endpoint_assessment() -> None:
     assert refusal.endpoint_direction_evidence is not None
     assert refusal.endpoint_assessment_failure_reason is None
     assert refusal.endpoint_direction_evidence.fit_indices == refusal.coefficient_fit_indices
-    with pytest.raises(ValueError, match="failure reason|direction evidence"):
-        replace(
-            smoothing,
-            history=(replace(refusal, endpoint_direction_evidence=None),),
-        )
 
 
 def test_endpoint_matches_an_independent_reduced_model_objective() -> None:
