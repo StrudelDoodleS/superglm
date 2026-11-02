@@ -611,19 +611,12 @@ def _priced_group_dimension(
 ) -> tuple[int, int | None]:
     """``(p_g, penalty_dim)``: what the penalty prices a group at, and its stamp.
 
-    A spec that withholds columns the design cannot identify (an empty
-    interaction cell, or one aliased with the main effects) reports the width
-    the term spans through ``info.penalty_width``.
-
-    - ``"rank"`` (default): price at the emitted, identifiable width; the
-      stamp is ``None``.  The ``sqrt(p_g)`` weight is calibrated to the
-      group's identifiable df (Yuan & Lin 2006; Meier, van de Geer & Buhlmann
-      2008; Breheny & Huang 2015, section 2.1).
-    - ``"spanned"``: price at the width the term spans, so pruning a dead
-      column is a pure reparametrisation of the fit.
-
-    The group-lasso weight and the Breheny-Huang df allocation both read this
-    one decision.
+    ``info.penalty_width`` is the width the term spans when its spec withholds columns the
+    design cannot identify. ``"rank"`` (default) prices at the emitted, identifiable width with
+    stamp ``None``, calibrating the ``sqrt(p_g)`` weight to the group's identifiable df (Yuan &
+    Lin 2006; Meier, van de Geer & Buhlmann 2008; Breheny & Huang 2015, sec. 2.1).
+    ``"spanned"`` prices at the spanned width, so pruning a dead column is a pure
+    reparametrisation. The group-lasso weight and the Breheny-Huang df allocation both read it.
     """
     if info.penalty_width is None or group_pricing == "rank":
         return int(n_cols), None

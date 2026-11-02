@@ -1244,25 +1244,16 @@ def _cross_gram_tensor_tensor_channels(
     cache: _BlockWeightCache | None = None,
     profile: dict[str, Any] | None = None,
 ) -> NDArray | None:
-    """Cross-Gram of two tensor terms with distinct ids, staged on one term's grid.
+    """Cross-Gram ``X_i.T @ diag(W) @ X_j`` of two tensor terms with distinct ids, on one grid.
 
-    ``X_i.T @ diag(W) @ X_j`` where row ``r`` of tensor ``i`` is the Kronecker row
-    ``B1_i[idx1_r] (x) B2_i[idx2_r]`` (column order ``a * K2 + b``) and row ``r`` of
-    ``j`` is its stored joint row ``B_joint_j[bin_idx_r]``.  The raw product factors
-    through the cell index of ``i``::
+    The product factors through the cell index of ``i`` (column order ``a * K2 + b``)::
 
         H[i1 * n2 + i2, cd] = sum_{r in cell (i1, i2)} W_r * B_joint_j[bin_idx_r, cd]
         raw[a * K2 + b, cd] = sum_{i1, i2} B1_i[i1, a] * B2_i[i2, b] * H[i1 * n2 + i2, cd]
 
-    Channels accumulate over the grid, contract with the two margins, then take the
-    coefficient maps; the smaller stored-width histogram is chosen (ties use the
-    left grid).  Both stages require float64 and a histogram below the aggregate
-    cell cap, with the range guard covering five factors and three reductions and
-    byte admission covering retained scratch, stage buffers and the contraction
-    peak.  If neither stage fits, return None for the bounded row fallback.
-    Reassociation changes representation and accumulation error but not bit
-    identity; tests check the dimension/epsilon absolute-product bound against the
-    stored-row oracle.
+    The smaller stored-width histogram is chosen (ties use the left grid). Both stages need
+    float64, a histogram below the cell cap, the five-factor range guard and byte admission;
+    otherwise returns None for the bounded row fallback. Reassociation is not bit-identical.
     """
     if gm_i.tensor_id == gm_j.tensor_id:
         return None
@@ -1705,23 +1696,15 @@ def _support_support_raw_cross(
 ) -> NDArray:
     """``B_i.T @ diag(W) @ B_j`` for two support-indexed blocks over shared rows.
 
-    The 2-D weight histogram costs ``n_bins_i * n_bins_j`` cells, bounded only when
-    the supports are bins.  A lossless support is bounded by the row count, so this
-    adds one block's weighted rows onto the other's support index and contracts the
-    compact arrays: Li and Wood (2020) Algorithms 2 and 3, on the side their
-    operation count favours.  A row subset (one level of a ``by=`` smooth) reaches
-    only part of the other support, so a larger target support is first compacted
-    to the rows it holds.  The work ``n * p_a + n_b * p_i * p_j`` is at most that of
-    expanding both sides plus an ``n * p_a`` scatter.
-
-    One kernel accumulates the aggregate in place, at most ``max_bytes`` (default
-    64 MiB, never less than one column) at a time, so the peak does not grow with
-    ``n``.  Aggregating reassociates ``B_i[r] * W[r] * B_j[r]``; when every operand
-    lies in the exponent interval of ``_tensor_operand_in_reassociation_range``
-    each entry is within ``gamma(n + n_b)`` of the exact product relative to
-    ``sum_r |B_i| |W| |B_j|`` (Higham 2002, eq. 3.5).  Otherwise the expansion
-    (:func:`_support_support_raw_cross_expanded`) is kept, so reassociation cannot
-    turn a representable product into zero or infinity.
+    Adds one block's weighted rows onto the other's support index and contracts the compact
+    arrays (Li and Wood 2020, Algorithms 2 and 3) on the side their operation count favours;
+    a larger target support is first compacted to the rows a row subset reaches. Work is
+    ``n * p_a + n_b * p_i * p_j``, accumulated at most ``max_bytes`` (default 64 MiB, at least
+    one column) at a time. When every operand lies in the range of
+    ``_tensor_operand_in_reassociation_range`` each entry is within ``gamma(n + n_b)`` of the
+    exact product relative to ``sum_r |B_i| |W| |B_j|`` (Higham 2002, eq. 3.5); otherwise
+    :func:`_support_support_raw_cross_expanded` runs, so reassociation cannot turn a
+    representable product into zero or infinity.
     """
     n_rows = int(W_rows.shape[0])
     n_i, p_i = B_unique_i.shape

@@ -350,17 +350,12 @@ def _row_certificate_error(
 ) -> float:
     """Bound on half the drift term's error, contracted row by row before any sum.
 
-    The drift term is ``tr(R^-1 B' (sum_i X_i' D_i X_i) B) = sum_i <D_i, G_i>_w``
-    with ``G_i = X_i Q X_i'``, ``Q = B R^-1 B'`` and ``w`` two on an off-diagonal
-    packed channel, so an entrywise error ``|dD_i| <= C_i`` moves it by at most
-    ``sum_i <C_i, |G_i|>_w``.  Each row is contracted before rows are summed,
-    so mixed-sign design rows cannot cancel each other's error.  ``G_i`` is
-    formed in float64 from ``p``-term dot products, so ``gamma_{2p + 4}`` of
-    ``|X_i| |Q| |X_i|'`` is added to ``|G_i|``; the nonnegative chunk sums are
-    within ``gamma_{chunk + 4}`` and are inflated by it, and the chunks are
-    summed by ``math.fsum``.  A channel whose certificate is zero on every
-    row contributes nothing and is skipped (NB2 certifies only ``l_bbb``, so
-    two of its three channels are zero), and an all-zero certificate is zero.
+    The drift term ``tr(R^-1 B' (sum_i X_i' D_i X_i) B)`` is ``sum_i <D_i, G_i>_w`` with
+    ``G_i = X_i Q X_i'``, ``Q = B R^-1 B'`` and ``w`` two on an off-diagonal packed channel, so
+    ``|dD_i| <= C_i`` moves it by at most ``sum_i <C_i, |G_i|>_w``; contracting rows first stops
+    mixed-sign rows cancelling error. ``|G_i|`` gains ``gamma_{2p + 4} |X_i| |Q| |X_i|'`` for its
+    ``p``-term dot products, the nonnegative chunk sums are inflated by ``gamma_{chunk + 4}``
+    and summed by ``math.fsum``. Channels whose certificate is zero on every row are skipped.
     """
     matrices = bounded_predictor_matrices(layout)
     pairs = packed_pairs(len(matrices))

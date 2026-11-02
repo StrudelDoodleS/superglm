@@ -356,21 +356,13 @@ def _exact_projected_rows(indptr, columns, entries, coefficients):
 def _exact_ssp_moments(basis, transform, weights, weighted_rhs=None, *, bin_indices=None):
     """Round the requested source-factor moments once on exceptional inputs.
 
-    Finite binary64 entries are exact dyadic rationals.  Accumulating ``X' W X =
-    R'(B' M B)R`` and optional ``X' W = R'(B' m)`` / ``X' Wz`` over them (``M`` the
-    bin or row masses) avoids an overflowing raw Gram, reciprocal basis or bin
-    mass.  No rank or regularization decision is made here.  The target is the
-    represented product ``B R`` before floating-point multiplication rounds it.
-
-    This is an exact dot product rounded once (Kulisch's long accumulator): a
-    shared binary scale per source operand makes every inner operation an integer
-    one, with widths bounded by binary64's exponent span; only final outputs use
-    Fraction rounding.  Error-free transformations (Ogita, Rump & Oishi 2005) need
-    products clear of underflow, which is the range that sends operands here, and
-    Demmel & Hida's accumulator is not correctly rounded.  Bin and row sums are
-    vectorised (``_exact_bin_sums``), the Gram is accumulated over each active row's
-    support (``_exact_gram_moments``) and the transform touches only its nonzeros
-    (``_exact_congruence``).  Ordinary operands never use this path.
+    Accumulates ``X' W X = R'(B' M B)R`` and optional ``X' W = R'(B' m)`` / ``X' Wz`` (``M`` the
+    bin or row masses) as exact dot products rounded once (Kulisch's long accumulator), so no
+    raw Gram, reciprocal basis or bin mass overflows; the target is the represented product
+    ``B R`` before rounding. A shared binary scale per operand makes every inner operation an
+    integer one, and only final outputs use Fraction rounding. Error-free transformations
+    (Ogita, Rump & Oishi 2005) need products clear of underflow, the range that sends operands
+    here. No rank or regularization decision is made here; ordinary operands never use it.
     """
     weights = np.asarray(weights)
     if bin_indices is None:
