@@ -807,7 +807,7 @@ def test_a_power_of_two_rescaled_design_reaches_the_same_certified_rank(terminal
     equilibrated matrix unchanged.  The decision must match the same fit at
     scale one with unit weights, where nothing leaves float64's normal range.
     The squares of the small entries underflow on their own; the weighted
-    statistic squares ``sqrt(w) |x|`` instead.  Mutation check: squaring
+    statistic then takes ``x (w x)`` instead.  Mutation check: squaring
     ``|x|`` before weighting it zeroes the majorant, and the certificate then
     certifies rank 3 without reading a row (an exact reference puts the third
     eigenvalue at 0.76 of the cut).
@@ -836,3 +836,42 @@ def test_a_power_of_two_rescaled_design_reaches_the_same_certified_rank(terminal
         ranks.append(result.terminal_rank.rank)
     assert ranks == [2, 2]
     assert calls == [1, 1]
+
+
+def test_a_row_decided_fit_keeps_the_stable_saturated_smoothing_step(terminal):
+    """A near pair decided from the rows does not stop a saturated spline's smoothing at its start.
+
+    ``z = x + 1e-7 e`` puts one direction in the band (``grey_k = 1``, rows
+    read), and the spline on an unrelated column starts saturated at
+    ``lambda = 1e10``, its raw log-step about ``-4.6``.  The generic quotient
+    ``rank(S) - lambda tr(G^+ S)`` cancels there and reads as stationary, so the
+    stable form must stay in use on a row-decided rank.  Mutation check:
+    declining the stable form whenever the rank was decided from the rows
+    reports convergence at the starting smoothing parameter, with no
+    smoothing iteration (sol-review, round 8).
+    """
+    rng = np.random.default_rng(3)
+    u = np.repeat(rng.uniform(-1, 1, 256), 4)
+    x = np.repeat(rng.normal(size=256), 4)
+    z = x + 1e-7 * np.tile([1.0, 1.0, -1.0, -1.0], 256)
+    y = 2 * u + np.tile([1.0, -1.0, -1.0, 1.0], 256)
+    family = GaussianLS(scale_floor=0)
+    model = SuperLSS(
+        family,
+        family.location(s("u", kind="cr", k=5), term("x", Numeric()), term("z", Numeric())),
+        family.scale(),
+        discrete=False,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(
+            pd.DataFrame({"u": u, "x": x, "z": z}),
+            y,
+            initial_lambda=1e10,
+            max_lambda=1e12,
+            practical_reml=False,
+        )
+    result = model._require_fitted().fit_state.solver_result
+    assert result.terminal_rank.row_decided
+    assert model.result_.n_smoothing_iter > 0
+    assert not (model.result_.converged and model.result_.n_smoothing_iter == 0)

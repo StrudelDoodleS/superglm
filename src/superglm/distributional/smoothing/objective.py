@@ -334,13 +334,9 @@ def _stable_isolated_gfs_update(
     positive residual degrees of freedom without that subtraction.  The
     identity is used only for a full-rank fit and a penalty whose coefficient
     slice overlaps no other penalty; shared-penalty blocks retain the generic
-    update until they have an equally strong joint identity.  A rank decided
-    from the rows inverts ``E diag(r) E'``, not the formed ``A + λS`` this
-    pairs it with, so it keeps the generic quotient, whose pairing with the
-    exact ``S`` is consistent.
+    update until they have an equally strong joint identity.
     """
-    rank = fit.terminal_rank
-    if fit.coefficient_face is not None or rank.rank != len(fit.coefficients) or rank.row_decided:
+    if fit.coefficient_face is not None or fit.terminal_rank.rank != len(fit.coefficients):
         return update, frozenset()
 
     data_curvature = fit.terminal_data_curvature
