@@ -44,10 +44,10 @@ _SPLINES_DEPRECATION_MESSAGE = (
 
 if TYPE_CHECKING:
     from superglm.diagnostics.discretize import DiscretizationResult
+    from superglm.inference._term_types import InteractionInference, TermInference
     from superglm.inference.factor_smooths import FactorSmoothResult
     from superglm.inference.metrics import ModelMetrics
     from superglm.inference.random_effects import RandomEffectResult
-    from superglm.inference.term import InteractionInference, TermInference
     from superglm.model.fit_ops import PathResult
     from superglm.types import GroupSlice
 

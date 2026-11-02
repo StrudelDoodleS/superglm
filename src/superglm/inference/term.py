@@ -1,51 +1,20 @@
-"""Compatibility shell for term inference public helpers.
+"""Former import surface for term inference; each name now lives in its owner module."""
 
-Keep this module as the canonical import surface while Wave 1 extraction moves
-implementation details into smaller internal modules.
-"""
+from superglm.inference import _moved_attribute
 
-from superglm.inference._term_covariance import (
-    feature_se_from_cov,
-    simultaneous_bands,
-)
-from superglm.inference._term_helpers import (
-    _VALID_CENTERING,
-    _recenter_term,
-    _resolve_group_lambda,
-    spline_group_enrichment,
-)
-from superglm.inference._term_model_ops import (
-    drop1,
-    refit_unpenalised,
-    relativities,
-)
-from superglm.inference._term_ops import (
-    term_inference,
-)
-from superglm.inference._term_types import (
-    _MAX_LOG_REL,
-    InteractionInference,
-    SmoothCurve,
-    SplineMetadata,
-    TermInference,
-    _safe_exp,
-)
+_MOVED = {
+    "InteractionInference": "superglm.inference._term_types",
+    "SmoothCurve": "superglm.inference._term_types",
+    "SplineMetadata": "superglm.inference._term_types",
+    "TermInference": "superglm.inference._term_types",
+    "drop1": "superglm.inference._term_model_ops",
+    "feature_se_from_cov": "superglm.inference._term_covariance",
+    "refit_unpenalised": "superglm.inference._term_model_ops",
+    "relativities": "superglm.inference._term_model_ops",
+    "spline_group_enrichment": "superglm.inference._term_helpers",
+    "term_inference": "superglm.inference._term_ops",
+}
 
-__all__ = [
-    "_MAX_LOG_REL",
-    "_VALID_CENTERING",
-    "_recenter_term",
-    "_resolve_group_lambda",
-    "_safe_exp",
-    "drop1",
-    "feature_se_from_cov",
-    "InteractionInference",
-    "refit_unpenalised",
-    "relativities",
-    "simultaneous_bands",
-    "SmoothCurve",
-    "spline_group_enrichment",
-    "SplineMetadata",
-    "TermInference",
-    "term_inference",
-]
+
+def __getattr__(name: str):
+    return _moved_attribute(__name__, name, _MOVED)

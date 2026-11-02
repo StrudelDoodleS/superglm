@@ -97,7 +97,7 @@ class TestSimultaneousBands:
         Cholesky factor exists; the principal root takes it as a null
         direction. Mutation: a Cholesky root raises ``LinAlgError``.
         """
-        from superglm.inference._term_covariance import simultaneous_bands
+        from superglm.inference._term_covariance import simultaneous_band_and_critical_value
 
         model = spline_model
         cov, active = model._coef_covariance
@@ -108,7 +108,7 @@ class TestSimultaneousBands:
         values[-1] = -1e-9
         crafted = np.zeros_like(cov)
         crafted[np.ix_(idx, idx)] = 1e6 * (q * values) @ q.T
-        bands = simultaneous_bands(
+        bands, _ = simultaneous_band_and_critical_value(
             "x",
             result=model.result,
             groups=model._groups,
@@ -128,7 +128,7 @@ class TestCriticalValueUnits:
         self, spline_model, monkeypatch, unit
     ):
         """Rescaling the response rescales the covariance by its square, not the critical value."""
-        from superglm.inference._term_covariance import simultaneous_bands
+        from superglm.inference._term_covariance import simultaneous_band_and_critical_value
 
         covariance, active_groups = spline_model._coef_covariance
         real_quantile = np.quantile
@@ -142,7 +142,7 @@ class TestCriticalValueUnits:
 
             with monkeypatch.context() as patch:
                 patch.setattr(np, "quantile", spy)
-                simultaneous_bands(
+                simultaneous_band_and_critical_value(
                     "x",
                     result=spline_model.result,
                     groups=spline_model._groups,

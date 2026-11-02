@@ -21,7 +21,7 @@ from superglm.distributions import Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
-from superglm.inference import _MAX_LOG_REL, _safe_exp
+from superglm.inference._term_types import _MAX_LOG_REL, _safe_exp
 
 # ── Fixtures ──────────────────────────────────────────────────────
 

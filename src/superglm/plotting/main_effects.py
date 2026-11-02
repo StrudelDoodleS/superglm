@@ -46,7 +46,7 @@ from superglm.plotting.group_display import (
 )
 
 if TYPE_CHECKING:
-    from superglm.inference.term import TermInference
+    from superglm.inference._term_types import TermInference
 
 
 def plot_relativities(
@@ -103,22 +103,152 @@ def plot_relativities(
     """
     if not with_ci:
         interval = None
-    frame = None if X is None else as_eager_frame(X)
+    X = None if X is None else as_eager_frame(X)
+    import matplotlib.pyplot as plt
 
-    return _plot_relativities_new(
-        terms,
-        model=model,
-        X=frame,
-        sample_weight=sample_weight,
-        ncols=ncols,
-        figsize=figsize,
-        interval=interval,
-        show_exposure=show_exposure,
-        show_knots=show_knots,
-        title=title,
-        subtitle=subtitle,
-        grouped_level_display=grouped_level_display,
+    n = len(terms)
+    if n == 0:
+        fig, _ = plt.subplots()
+        return fig
+
+    weighted = sample_weight is not None
+    if sample_weight is not None:
+        sample_weight = np.asarray(sample_weight, dtype=np.float64)
+    elif X is not None and show_exposure:
+        sample_weight = np.ones(len(X), dtype=np.float64)
+
+    density_label = "Weight\ndensity" if weighted else "Obs.\ndensity"
+    weight_label = "Weight" if weighted else "Count"
+    ncols = min(ncols, n)
+    nrows = math.ceil(n / ncols)
+
+    has_density = show_exposure and X is not None and sample_weight is not None
+    supported_kinds = ("spline", "polynomial", "piecewise", "numeric", "categorical")
+    any_density = has_density and any(
+        ti.kind in supported_kinds and ti.name in X.columns for ti in terms
     )
+
+    if figsize is None:
+        figsize = (5.5 * ncols, (4.5 if any_density else 3.5) * nrows + 0.7)
+    fig = plt.figure(figsize=figsize)
+    outer = fig.add_gridspec(nrows, 1, hspace=0.16)
+    rows = [
+        outer[row].subgridspec(2, ncols, height_ratios=[4.2, 1.0], hspace=0.04, wspace=0.08)
+        for row in range(nrows)
+    ]
+    main_axes = []
+    density_axes = []
+    for idx, ti in enumerate(terms):
+        uses_strip = has_density and ti.kind in supported_kinds and ti.name in X.columns
+        row, col = divmod(idx, ncols)
+        gs = rows[row]
+        ax_main, ax_den = (
+            _make_effect_axes(fig, gs[0, col], gs[1, col])
+            if uses_strip
+            else _make_effect_axes(fig, gs[:, col])
+        )
+        main_axes.append(ax_main)
+        density_axes.append(ax_den)
+    for idx in range(n, nrows * ncols):
+        row, col = divmod(idx, ncols)
+        fig.add_subplot(rows[row][:, col]).set_visible(False)
+
+    # ── Render each panel ──
+    for idx, ti in enumerate(terms):
+        ax = main_axes[idx]
+        ax_den = density_axes[idx]
+        display: GroupedTermDisplay | None = None
+        display_ti = ti
+        if ti.kind == "categorical":
+            display = project_grouped_term_for_display(model, ti, grouped_level_display)
+            display_ti = display.term
+        elif ti.kind == "piecewise":
+            display_ti = piecewise_display_term(ti)
+
+        if display_ti.kind in ("spline", "polynomial", "piecewise"):
+            _plot_spline_panel(ax, display_ti, interval, show_knots)
+
+            if ax_den is not None:
+                knots = display_ti.spline.interior_knots if display_ti.spline is not None else None
+                _plot_density_strip(
+                    ax_den, display_ti.name, X, sample_weight, display_ti.x, show_knots, knots
+                )
+                ax_den.set_xlabel("")
+
+        elif display_ti.kind == "categorical" and display_ti.smooth_curve is not None:
+            _plot_ordered_spline_panel(
+                ax,
+                display_ti,
+                interval,
+                X=X,
+                sample_weight=sample_weight if has_density else None,
+                weight_label=weight_label,
+                display=display,
+                ax_support=ax_den,
+            )
+
+        elif display_ti.kind == "categorical":
+            _plot_categorical_panel_vertical(
+                ax,
+                display_ti,
+                interval,
+                X=X,
+                sample_weight=sample_weight if has_density else None,
+                weight_label=weight_label,
+                display=display,
+                ax_support=ax_den,
+            )
+
+        elif display_ti.kind == "numeric":
+            if X is not None and display_ti.name in X.columns:
+                x_vals = X.column_array(display_ti.name, dtype=np.float64)
+                x_grid = np.linspace(x_vals.min(), x_vals.max(), 200)
+            else:
+                x_grid = np.linspace(0.0, 1.0, 200)
+            _plot_numeric_panel_continuous(ax, display_ti, interval, x_grid)
+
+            if ax_den is not None:
+                _plot_density_strip(ax_den, display_ti.name, X, sample_weight, x_grid, False, None)
+                ax_den.set_xlabel("")
+
+        else:
+            ax.set_visible(False)
+
+        ax.set_ylabel("Relativity" if idx % ncols == 0 else "")
+        if ax_den is not None:
+            support_label = weight_label if display_ti.kind == "categorical" else density_label
+            ax_den.set_ylabel(support_label if idx % ncols == 0 else "", fontsize=8)
+
+    # ── Figure-level legend ──
+    legend_handles = []
+    legend_labels = []
+    for ax in main_axes:
+        h, lab = ax.get_legend_handles_labels()
+        for hi, li in zip(h, lab):
+            if li not in legend_labels:
+                legend_handles.append(hi)
+                legend_labels.append(li)
+
+    if show_knots and any(
+        ti.spline is not None and ti.spline.interior_knots.size > 0
+        for ti in terms
+        if ti.kind in ("spline", "polynomial")
+    ):
+        knot_handle = Line2D(
+            [0],
+            [0],
+            color=_KNOT_COLOR,
+            marker="|",
+            linestyle="None",
+            markersize=9,
+            markeredgewidth=1.1,
+            label="Interior knots",
+        )
+        legend_handles.append(knot_handle)
+        legend_labels.append("Interior knots")
+
+    _finish_matplotlib_figure(fig, legend_handles, legend_labels, title, subtitle)
+    return fig
 
 
 # ── New TermInference-based plotting ─────────────────────────────
@@ -659,166 +789,3 @@ def _plot_categorical_panel_vertical(
     _set_level_ticks(ax if ax_support is None else ax_support, levels, x_pos)
     ax.set_ylabel("Relativity")
     _style_matplotlib_axis(ax, title=ti.name)
-
-
-def _plot_relativities_new(
-    terms: list[TermInference],
-    *,
-    model=None,
-    X: EagerFrame | None = None,
-    sample_weight: NDArray | None = None,
-    ncols: int = 2,
-    figsize: tuple[float, float] | None = None,
-    interval: str | None = "pointwise",
-    show_exposure: bool = True,
-    show_knots: bool = False,
-    title: str | None = None,
-    subtitle: str | None = None,
-    grouped_level_display: str = "auto",
-) -> Figure:
-    """TermInference-based relativity grid with the new visual language."""
-    import matplotlib.pyplot as plt
-
-    n = len(terms)
-    if n == 0:
-        fig, _ = plt.subplots()
-        return fig
-
-    weighted = sample_weight is not None
-    if sample_weight is not None:
-        sample_weight = np.asarray(sample_weight, dtype=np.float64)
-    elif X is not None and show_exposure:
-        sample_weight = np.ones(len(X), dtype=np.float64)
-
-    density_label = "Weight\ndensity" if weighted else "Obs.\ndensity"
-    weight_label = "Weight" if weighted else "Count"
-    ncols = min(ncols, n)
-    nrows = math.ceil(n / ncols)
-
-    has_density = show_exposure and X is not None and sample_weight is not None
-    supported_kinds = ("spline", "polynomial", "piecewise", "numeric", "categorical")
-    any_density = has_density and any(
-        ti.kind in supported_kinds and ti.name in X.columns for ti in terms
-    )
-
-    if figsize is None:
-        figsize = (5.5 * ncols, (4.5 if any_density else 3.5) * nrows + 0.7)
-    fig = plt.figure(figsize=figsize)
-    outer = fig.add_gridspec(nrows, 1, hspace=0.16)
-    rows = [
-        outer[row].subgridspec(2, ncols, height_ratios=[4.2, 1.0], hspace=0.04, wspace=0.08)
-        for row in range(nrows)
-    ]
-    main_axes = []
-    density_axes = []
-    for idx, ti in enumerate(terms):
-        uses_strip = has_density and ti.kind in supported_kinds and ti.name in X.columns
-        row, col = divmod(idx, ncols)
-        gs = rows[row]
-        ax_main, ax_den = (
-            _make_effect_axes(fig, gs[0, col], gs[1, col])
-            if uses_strip
-            else _make_effect_axes(fig, gs[:, col])
-        )
-        main_axes.append(ax_main)
-        density_axes.append(ax_den)
-    for idx in range(n, nrows * ncols):
-        row, col = divmod(idx, ncols)
-        fig.add_subplot(rows[row][:, col]).set_visible(False)
-
-    # ── Render each panel ──
-    for idx, ti in enumerate(terms):
-        ax = main_axes[idx]
-        ax_den = density_axes[idx]
-        display: GroupedTermDisplay | None = None
-        display_ti = ti
-        if ti.kind == "categorical":
-            display = project_grouped_term_for_display(model, ti, grouped_level_display)
-            display_ti = display.term
-        elif ti.kind == "piecewise":
-            display_ti = piecewise_display_term(ti)
-
-        if display_ti.kind in ("spline", "polynomial", "piecewise"):
-            _plot_spline_panel(ax, display_ti, interval, show_knots)
-
-            if ax_den is not None:
-                knots = display_ti.spline.interior_knots if display_ti.spline is not None else None
-                _plot_density_strip(
-                    ax_den, display_ti.name, X, sample_weight, display_ti.x, show_knots, knots
-                )
-                ax_den.set_xlabel("")
-
-        elif display_ti.kind == "categorical" and display_ti.smooth_curve is not None:
-            _plot_ordered_spline_panel(
-                ax,
-                display_ti,
-                interval,
-                X=X,
-                sample_weight=sample_weight if has_density else None,
-                weight_label=weight_label,
-                display=display,
-                ax_support=ax_den,
-            )
-
-        elif display_ti.kind == "categorical":
-            _plot_categorical_panel_vertical(
-                ax,
-                display_ti,
-                interval,
-                X=X,
-                sample_weight=sample_weight if has_density else None,
-                weight_label=weight_label,
-                display=display,
-                ax_support=ax_den,
-            )
-
-        elif display_ti.kind == "numeric":
-            if X is not None and display_ti.name in X.columns:
-                x_vals = X.column_array(display_ti.name, dtype=np.float64)
-                x_grid = np.linspace(x_vals.min(), x_vals.max(), 200)
-            else:
-                x_grid = np.linspace(0.0, 1.0, 200)
-            _plot_numeric_panel_continuous(ax, display_ti, interval, x_grid)
-
-            if ax_den is not None:
-                _plot_density_strip(ax_den, display_ti.name, X, sample_weight, x_grid, False, None)
-                ax_den.set_xlabel("")
-
-        else:
-            ax.set_visible(False)
-
-        ax.set_ylabel("Relativity" if idx % ncols == 0 else "")
-        if ax_den is not None:
-            support_label = weight_label if display_ti.kind == "categorical" else density_label
-            ax_den.set_ylabel(support_label if idx % ncols == 0 else "", fontsize=8)
-
-    # ── Figure-level legend ──
-    legend_handles = []
-    legend_labels = []
-    for ax in main_axes:
-        h, lab = ax.get_legend_handles_labels()
-        for hi, li in zip(h, lab):
-            if li not in legend_labels:
-                legend_handles.append(hi)
-                legend_labels.append(li)
-
-    if show_knots and any(
-        ti.spline is not None and ti.spline.interior_knots.size > 0
-        for ti in terms
-        if ti.kind in ("spline", "polynomial")
-    ):
-        knot_handle = Line2D(
-            [0],
-            [0],
-            color=_KNOT_COLOR,
-            marker="|",
-            linestyle="None",
-            markersize=9,
-            markeredgewidth=1.1,
-            label="Interior knots",
-        )
-        legend_handles.append(knot_handle)
-        legend_labels.append("Interior knots")
-
-    _finish_matplotlib_figure(fig, legend_handles, legend_labels, title, subtitle)
-    return fig

@@ -94,20 +94,20 @@ from superglm.features.spline import (
     Spline,
     n_knots_from_k,
 )
+from superglm.inference._term_types import (
+    InteractionInference,
+    TermInference,
+)
+from superglm.inference._term_types import (
+    SmoothCurve as SmoothCurve,
+)
+from superglm.inference._term_types import (
+    SplineMetadata as SplineMetadata,
+)
 from superglm.inference.factor_smooths import FactorSmoothResult
 from superglm.inference.metrics import ModelMetrics
 from superglm.inference.random_effects import RandomEffectResult
 from superglm.inference.summary import ModelSummary
-from superglm.inference.term import (
-    InteractionInference,
-    TermInference,
-)
-from superglm.inference.term import (
-    SmoothCurve as SmoothCurve,
-)
-from superglm.inference.term import (
-    SplineMetadata as SplineMetadata,
-)
 from superglm.links import (
     CauchitLink,
     CloglogLink,

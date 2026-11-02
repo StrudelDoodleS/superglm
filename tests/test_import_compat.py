@@ -687,26 +687,17 @@ def test_reml_multi_penalty_canonical():
     )
 
 
-def test_inference_term_canonical():
-    # ``compute_coef_covariance`` was listed here until the dead covariance
-    # chain was deleted (PR "Delete the covariance chain no production fit
-    # reaches").  It recomputed W from scratch and called
-    # ``_penalised_xtwx_inv_gram``; ``model/state_ops.coef_covariance``
-    # superseded it, and nothing in ``src/`` called it.  Dropping it from this
-    # contract is a deliberate supported-surface removal for 0.30.0.
-    from superglm.inference.term import (  # noqa: F401
-        _VALID_CENTERING,
-        InteractionInference,
-        SmoothCurve,
-        SplineMetadata,
-        TermInference,
-        _recenter_term,
-        _resolve_group_lambda,
-        _safe_exp,
-        feature_se_from_cov,
-        spline_group_enrichment,
-        term_inference,
-    )
+def test_inference_term_old_path_still_resolves_and_warns():
+    """``superglm.inference.term`` was a re-export shell; each name resolves to its owner."""
+    import superglm.inference.term as old
+    from superglm.inference import _term_ops, _term_types
+
+    with pytest.warns(FutureWarning, match="_term_types"):
+        assert old.TermInference is _term_types.TermInference
+    with pytest.warns(FutureWarning, match="_term_ops"):
+        assert old.term_inference is _term_ops.term_inference
+    with pytest.raises(AttributeError):
+        old._safe_exp  # noqa: B018
 
 
 def test_inference_metrics_canonical():
