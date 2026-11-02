@@ -341,9 +341,9 @@ remaining binned route contract each block of likelihood chunks once per pass
 automatic small-group panels, which that route beats on every layout they
 admitted. A block holds at most 2**15 rows, the scale the automatic chunk sums
 over on small layouts. The terminal rank is certified against the rounding of
-forming the curvature (`RankPolicy` v5), so block length no longer decides it,
-and an exact alias reads rank-deficient at any chunk length, where master can
-report it estimable.
+forming the curvature (`RankPolicy` v5), so block length no longer decides it:
+where the decision is certified (`certified=True`), an exact alias reads
+rank-deficient at any chunk length, where master can report it estimable.
 Keeping each block's bin-pair tables and contracting them once per pass is the
 next speed step. Global moments stays: on the million-row C1 fixture the per-pass
 route takes 22.9 s against 11.1 s, because pair-by-pair contraction rescans

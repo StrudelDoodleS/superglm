@@ -875,3 +875,27 @@ def test_a_row_decided_fit_keeps_the_stable_saturated_smoothing_step(terminal):
     assert result.terminal_rank.row_decided
     assert model.result_.n_smoothing_iter > 0
     assert not (model.result_.converged and model.result_.n_smoothing_iter == 0)
+
+
+def test_a_dense_block_statistic_holds_one_copy_of_its_rows():
+    """The chunked statistic of a dense group forms one block-sized product, as its charge counts.
+
+    Squares need no absolute values, so the signed rows enter as a view.
+    Mutation check: squaring an absolute copy holds two copies, about twice
+    the rows' bytes.
+    """
+    import tracemalloc
+
+    from superglm._group_matrix._group_matrix_core import DenseGroupMatrix
+
+    matrix = np.random.default_rng(0).normal(size=(20_000, 64))
+    weights = np.random.default_rng(1).uniform(0.0, 2.0, len(matrix))
+    absolute = _formation.abs_group(DenseGroupMatrix(matrix))
+    tracemalloc.start()
+    try:
+        squares = absolute.square_partial(0, len(matrix), weights)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    np.testing.assert_allclose(squares, (matrix * matrix).T @ weights, rtol=1e-12)
+    assert peak < 1.5 * matrix.nbytes
