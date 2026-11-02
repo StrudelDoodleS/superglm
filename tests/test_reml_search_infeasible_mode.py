@@ -375,7 +375,7 @@ class TestQPModeFailuresAreRoutable:
             family="poisson",
             features={"x": Spline(kind="cr", n_knots=6, constraint=Constraint.fit.increasing)},
         )
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
         lambdas = {k: float(v) for k, v in model._reml_result.lambdas.items()}
 
         for reason in ("constraint_infeasible", "constraint_kkt_incomplete"):

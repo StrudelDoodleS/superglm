@@ -677,7 +677,7 @@ def test_qp_passthrough_finally_preserves_restored_constraints_after_state_relea
         )
 
     monkeypatch.setattr(fit_ops, "restore_qp_constraints", record_finally_restore)
-    model.fit_reml(frame, y, max_reml_iter=8, runtime_validation="skip")
+    model.fit_reml(frame, y, max_reml_iter=8)
 
     assert finally_calls == [(True, True, True)]
     assert model._dm is None
@@ -1134,7 +1134,7 @@ def test_qp_reml_refuses_an_infeasible_terminal_state_before_objective_or_public
         RuntimeError,
         match="terminal constrained REML refit ended at an infeasible coefficient mode",
     ):
-        model.fit_reml(frame, y, max_reml_iter=8, runtime_validation="skip")
+        model.fit_reml(frame, y, max_reml_iter=8)
 
     assert terminal_objective_calls == []
     assert model._result is None
@@ -1158,7 +1158,7 @@ def test_qp_reml_discloses_a_feasible_terminal_state_without_a_kkt_certificate(
     _force_terminal_qp_refit(monkeypatch, "constraint_kkt_incomplete")
 
     with pytest.warns(ConvergenceWarning, match="could not certify that its coefficients"):
-        model.fit_reml(frame, y, max_reml_iter=8, runtime_validation="skip")
+        model.fit_reml(frame, y, max_reml_iter=8)
 
     assert model._reml_result is not None and not model._reml_result.converged
     assert model._reml_result.terminal_refit_termination == "constraint_kkt_incomplete"
@@ -1232,7 +1232,7 @@ def test_fixed_lambda_qp_reml_refuses_uncertified_result_before_publication(
         RuntimeError,
         match=error_pattern,
     ):
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
 
     assert fixed_route_calls == [{"phase": "fixed_constraint"}]
     assert model._result is None
