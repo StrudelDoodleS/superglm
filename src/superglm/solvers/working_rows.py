@@ -39,8 +39,7 @@ class CoefficientWorkingRows:
 
     ``rejection_reason`` is set when the declared rows cannot form a step at
     these coefficients (a non-finite observed row or total): the caller
-    rejects the step, never substitutes another curvature (one-engine design
-    §3.11).
+    rejects the step, never substitutes another curvature.
     """
 
     weights: NDArray
@@ -54,7 +53,7 @@ def supports_observed_newton(distribution: object, link: object) -> bool:
 
     The declaration is by exact type and is the whole curvature choice: a fit
     whose pair is declared takes observed rows on every iteration its route
-    allows, whatever their values (one-engine design §3.11).
+    allows, whatever their values.
     """
     # Exact types are intentional: a subclass can change either likelihood or
     # inverse-link derivatives and must not inherit an unproved Hessian.
@@ -64,27 +63,15 @@ def supports_observed_newton(distribution: object, link: object) -> bool:
 def concave_observed_rows(distribution: object, link: object) -> bool:
     """Whether the pair's observed working rows exist and are never negative.
 
-    The row log-likelihood is concave in ``eta`` for Gamma/log and Tweedie/log
-    (``supports_observed_newton``), for NB2/log (``-d2l/deta2 = w theta mu
-    (y + theta) / (mu + theta)^2``), and for the binomial probit and cloglog
-    links (log-concave cumulative distribution functions; Pratt 1981, JASA
-    76(373)), and each has rows formed in ``eta`` that stay non-negative in
-    floating point, so its observed information is a valid weight for a
-    working linear model.  Probit and cloglog use closed forms in ``eta``
-    (``_probit_observed_rows``, ``_cloglog_observed_rows``): the generic
-    observed row reads the clipped mean (``clip_mu``) beside derivatives of
-    the unclipped ``eta``, and goes negative in the tails past the clip.
-
-    Other concave pairs are not declared, and stay on Fisher rows:
-    binomial/log (``w mu (1 - y) / (1 - mu)^2 >= 0``) because its maximum
-    can sit on the mean-space boundary, where the clip holds rows and an
-    event row has no curvature at all; Poisson/sqrt (``w (2 + 2 y / eta^2)``)
-    because it is not yet declared.  Gaussian/log (``w mu (2 mu - y)``) and
-    binomial/cauchit (a CDF that is not log-concave) have rows that go
-    negative.  The binned REML route takes observed curvature only for the
-    declared pairs (``reml.observed_geometry.classify_binned_reml_curvature``).
-    Exact types, as ``supports_observed_newton``: a subclass must not inherit
-    the claim.
+    Declared for Gamma/log and Tweedie/log (``supports_observed_newton``),
+    NB2/log and binomial probit and cloglog (log-concave CDFs; Pratt 1981,
+    JASA 76(373)), each with rows formed in ``eta`` that stay non-negative in
+    floating point.  Probit and cloglog use closed forms in ``eta``, since the
+    generic row reads the clipped mean and goes negative past the clip.
+    Binomial/log stays on Fisher rows (its maximum can sit on the mean-space
+    boundary), as does Poisson/sqrt (not declared); Gaussian/log and
+    binomial/cauchit rows go negative.  Exact types: a subclass must not
+    inherit the claim.
     """
     if supports_observed_newton(distribution, link):
         return True
@@ -132,37 +119,20 @@ def null_fit_eta(
 ) -> NDArray | None:
     """The linear predictor of the intercept-only maximum-likelihood fit given the offset.
 
-    The offset is read relative to its largest value on a weighted row,
-    ``o~ = o - max o``, so a constant added to every offset, which the
-    intercept absorbs, changes nothing here: where ``o + c`` is exact, ``o~``
-    is the same float64 vector.  Where ``o~`` is zero on every weighted row
-    the mean is constant, and the intercept-only score ``sum w (y - mu) mu' /
-    V(mu)`` vanishes at the weighted mean of the response: the family's
-    initial intercept (up to its positive floor), and for a binomial the link
-    of the mean itself, which the binomial start clamps to ``[1e-3, 1 -
-    1e-3]``.  For a log link and variance ``mu**p`` (Gaussian 0, Poisson 1,
-    Tweedie p, Gamma 2) the score equation given ``o~``, ``sum w (y - t e^o~)
-    (t e^o~)**(1-p) = 0`` with ``t = e^intercept``, solves to ``t = sum w y
-    e^((1-p) o~) / sum w e^((2-p) o~)``: the weighted mean of the response
-    ``y e^-o~`` under the weights ``w e^((2-p) o~)``, which is what the
-    family's initial intercept of those rows computes (up to its positive
-    floor).  Any other pair, or a row set whose rescaled response or weight is
-    not finite, has no closed form: its intercept is fitted by the
-    line-searched direct IRLS on an empty design, Fisher scoring on the one
-    coefficient with steps halved back inside the link's domain and the
-    family's mean space (McCullagh & Nelder 1989, sec. 2.5; Marschner 2011, R
-    Journal 3(2)), as R's ``glm`` fits the null model with its offset and
-    ``_compute_null_mu`` the sqrt link's.  Only positive-weight rows are read:
-    a zero-weight row's offset moves nothing here.
+    The offset is read as ``o~ = o - max o`` over positive-weight rows, so a
+    constant shift (absorbed by the intercept) changes nothing.  Closed forms:
+    a constant ``o~`` gives the family's initial intercept of the weighted
+    mean (the link of the mean for a binomial); a log link with variance
+    ``mu**p`` gives ``e^intercept = sum w y e^((1-p) o~) / sum w e^((2-p)
+    o~)``.  Any other case is fitted by line-searched direct IRLS on an empty
+    design (McCullagh & Nelder 1989, sec. 2.5; Marschner 2011, R Journal
+    3(2)), as R's ``glm`` fits its null model.
 
     None where no valid mode is found: the fit does not converge, the
-    intercept is infinite (a binomial mean of 0 or 1), or on a positive-weight
-    row ``stabilize_eta`` or ``clip_mu`` holds the mode at a clip past which
-    the Fisher weight grows (``_clip_raises_information``).  A curvature read
-    there is the clip's, not the model's: an inverse-link row clipped to
-    ``eta = 1e-12`` has the Gamma Fisher weight ``1e24``.  A row held at a
-    clip past which the weight falls or is flat is read where the clip holds
-    it, as the fit's own working weights read it.
+    intercept is infinite (a binomial mean of 0 or 1), or a positive-weight
+    row is held at a clip past which the Fisher weight grows
+    (``_clip_raises_information``), where the curvature read is the clip's,
+    not the model's.
     """
     weights = np.asarray(sample_weight, dtype=np.float64)
     offset = np.asarray(offset, dtype=np.float64)
@@ -225,23 +195,15 @@ def _clip_raises_information(
 ) -> bool:
     """Whether the Fisher weight grows past the clip that holds any of these rows.
 
-    ``eta`` are the rows' own linear predictors and ``held_mean`` the means
-    ``stabilize_eta`` and ``clip_mu`` hold them at, at the clip's edge
-    ``eta_e = link(held_mean)``.  The weight per unit prior weight, ``I(eta)
-    = mu'**2 / V(mu)``, has the slope ``(mu' / V) (2 mu'' - mu'**2 V' / V)``
-    (``compute_dW_deta``).  Where ``I`` falls or is flat from ``eta_e``
-    toward the row's own ``eta``, the edge is the band's least informative
-    point there: the row is read at no more than a represented row at the
-    edge carries, and its own weight lies between zero and that, so reading
-    it moves the weights by at most the edge's.  Where ``I`` grows, the edge
-    is the band's most informative point, and the weight read there is set
-    by where the clip sits, without bound: ``1 / eta**2`` for Gamma under the
-    inverse link held at ``eta = 1e-12``, ``1 / mu`` for Poisson under the
-    identity link held at ``mu = 1e-50``.  Each of the bracket's two terms is
-    a product of at most four evaluated factors, so a bracket within ``16
-    eps`` of their magnitudes is flat (Gamma/log and Poisson/sqrt cancel in
-    exact arithmetic).  A pair without ``deriv2_inverse`` or
-    ``variance_derivative`` cannot be decided, and its clips count as rising.
+    ``held_mean`` is where ``stabilize_eta`` and ``clip_mu`` hold the rows,
+    at the edge ``eta_e = link(held_mean)``.  The weight ``I(eta) = mu'**2 /
+    V(mu)`` has slope ``(mu' / V) (2 mu'' - mu'**2 V' / V)``.  Where ``I``
+    falls or is flat from ``eta_e`` toward the row's ``eta``, the clip
+    understates the row and is harmless; where it grows, the weight read is
+    set by where the clip sits, without bound.  Each of the bracket's two
+    terms is a product of at most four evaluated factors, so a bracket within
+    ``16 eps = 32 u`` of their magnitudes is flat.  A pair without
+    ``deriv2_inverse`` or ``variance_derivative`` counts as rising.
     """
     if not (hasattr(link, "deriv2_inverse") and hasattr(distribution, "variance_derivative")):
         return True
@@ -672,15 +634,11 @@ def coefficient_working_rows(
     ``z = eta + (y - mu) g' / alpha``, with
     ``alpha = 1 + (y - mu) (V'/V + g''/g')``; Fisher scoring is ``alpha = 1``.
     Which one a fit takes is chosen by the caller from the family and link
-    (``prefer_observed`` with a pair ``concave_observed_rows`` declares; the
-    exact route's PIRLS asks only for ``supports_observed_newton`` pairs, the
-    binned performance iteration for every declared pair), never from the
-    rows' values (one-engine design §3.11).  An observed row may be zero, and
-    every declared pair's rows are non-negative: the dense working system
-    requires that, and only the structured route would accept signed rows.
-    Only finiteness remains a condition: a non-finite observed row or total
-    sets ``rejection_reason``, and the caller rejects the step rather than mix
-    in another curvature.
+    (``prefer_observed`` with a ``concave_observed_rows`` pair), never from
+    the rows' values.  Every declared pair's rows are non-negative, as the
+    dense working system requires.  A non-finite observed row or total sets
+    ``rejection_reason``, and the caller rejects the step rather than mix in
+    another curvature.
     """
     y = np.asarray(y, dtype=np.float64)
     mu = np.asarray(mu, dtype=np.float64)

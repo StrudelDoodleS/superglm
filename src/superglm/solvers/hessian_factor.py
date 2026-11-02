@@ -284,7 +284,7 @@ def as_hessian_factor(
     *,
     log_det: float = float("nan"),
 ) -> HessianFactor:
-    """Normalize a historical dense inverse or compact factor to one protocol."""
+    """Normalize a dense inverse or compact factor to one protocol."""
     if isinstance(inverse_or_factor, HessianFactor):
         return inverse_or_factor
     return DenseHessianFactor(
