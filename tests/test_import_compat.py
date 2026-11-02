@@ -76,7 +76,6 @@ _GROUP = "superglm._group_matrix._group_matrix_kernels."
 _TWEEDIE = "superglm.distributional.kernels._tweedie_numba."
 _NB = "superglm.distributional.kernels._negative_binomial_numba."
 _DECLARED = "superglm.distributional.kernels._declared."
-_ENGINE = "superglm.distributional.kernels._incomplete_gamma."
 _PRIMITIVES = "superglm.distributional.kernels._severity_primitives."
 _FIRST_USE: dict[str, str] = {
     # Measured over cold first fits on the freMTPL2 book: 71 on 2026-10-20
@@ -147,15 +146,6 @@ _FIRST_USE: dict[str, str] = {
         "reaches it (logratio is its centred log(y/mean))",
     ),
     **dict.fromkeys(
-        (
-            _ENGINE + "log_gamma_tail",
-            _ENGINE + "log_gamma_tail_into",
-            _ENGINE + "_log_gamma_tail_rows",
-        ),
-        "the incomplete-gamma engine's plain-partial entry points, for tests: fits call "
-        "log_gamma_tail_scaled_into from the declared kernels",
-    ),
-    **dict.fromkeys(
         (_PRIMITIVES + name for name in ("softplus", "expit", "log1mexp", "invexpm1")),
         "primitives of the declared test laws (Weibull, Burr XII, log-logistic, Lomax); no "
         "public family calls them",
@@ -196,7 +186,6 @@ _FIRST_USE: dict[str, str] = {
                 "superglm.distributional.kernels._gg_uniform_tail." + name
                 for name in ("gg_uniform_log_tail", "_log_tail_rows", "_domain_rows")
             ),
-            "superglm.distributional.kernels._gg_log_tail._composed_rows",
         ),
         "the generalized gamma tails' own scalar and array entry points, for tests: bounded "
         "fits reach both engines through gg_log_tail's row kernel",
