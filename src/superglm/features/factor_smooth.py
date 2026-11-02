@@ -184,11 +184,7 @@ def _fixed_at_zero(policy: LambdaPolicy | None) -> bool:
 
 
 class FactorSmooth:
-    """A factor-by-P-spline interaction.
-
-    ``basis="fs"`` is fully penalized and retains independent level curves.
-    ``basis="sz"`` represents centered sum-to-zero deviations; its specialized
-    geometry is populated by the design-matrix builder.
+    """A factor-by-P-spline interaction: one smooth curve of ``variable`` per level of ``group``.
 
     Both bases store each level's curve in the natural parameterization of the
     marginal P-spline: per level, the coordinates in which the wiggle penalty is
@@ -197,23 +193,54 @@ class FactorSmooth:
     read a level's curve through ``SuperGLM.factor_smooth``.  (An ``sz`` model
     saved by 0.35.0 or earlier keeps the marginal-basis coordinates.)
 
-    ``levels=`` binds the grouping column's level universe.  Under ``basis="fs"``
-    a declared level with no training rows keeps its curve block and shrinks to
-    zero through the penalty.  ``basis="sz"`` rejects one unless ``select=True``,
-    since the sum-to-zero contrast cannot identify the deviations with an empty
-    level; with ``select=True`` the empty level is predicted at the population
-    curve.
-
-    ``basis="sz"`` leaves each level's polynomial part (its line, with ``m=2``)
-    unpenalized, as mgcv's ``sz`` does.  ``select=True`` adds a second penalty
-    component ``"null"`` on every level's line (Marra & Wood 2011, as mgcv's
-    ``select=TRUE``) with its own smoothing parameter, reading the lines as random
-    effects shrunk toward the population curve as ``fs`` does with its ``null_j``
-    components.  It makes curves finite and unique for a level whose line separates
-    the response or a term whose levels hold fewer distinct ``x`` values than the
-    line has coefficients (#444).  ``lambda_policy`` may then name ``"null"``; one
-    policy applies to both components.  Without ``select=True`` the lines stay
-    unpenalized whatever the data, and such levels are named in a fit warning.
+    Parameters
+    ----------
+    variable : hashable
+        The numeric column each level's curve is a function of.
+    group : hashable
+        The grouping column; one curve per level.
+    basis : {"fs", "sz"}, default "fs"
+        ``"fs"`` penalizes every level's curve fully, its polynomial part through
+        one ``null_j`` component per coordinate.  ``"sz"`` fits sum-to-zero
+        deviations from a population curve and leaves each level's polynomial part
+        (its line, with ``m=2``) unpenalized, as mgcv's ``sz`` does.
+    kind : {"ps"}, default "ps"
+        The marginal basis, a cubic P-spline.
+    k : int, default 6
+        Basis functions per level, at least 5.
+    m : int, default 2
+        Difference order of the wiggle penalty, between 1 and ``k - 1``; each
+        level's polynomial part has ``m`` coordinates.
+    levels : list | tuple | Series | ndarray | CategoricalDtype, optional
+        The grouping column's level universe.  Under ``basis="fs"`` a declared
+        level with no training rows keeps its curve block and shrinks to zero
+        through the penalty.  ``basis="sz"`` rejects one unless ``select=True``,
+        since the sum-to-zero contrast cannot identify the deviations with an empty
+        level; with ``select=True`` the empty level is predicted at the population
+        curve.
+    unseen : {"population", "error"}, default "population"
+        Predict-time policy for group levels outside the universe.
+        ``"population"`` predicts those rows at the population curve; ``"error"``
+        raises.
+    missing : {"error"}, default "error"
+        Missing values in either column, or a non-finite ``variable``, raise.
+    lambda_policy : LambdaPolicy, dict of str to LambdaPolicy, or None
+        Control of the smoothing parameters.  One ``LambdaPolicy`` applies to every
+        component; a mapping names components, ``"wiggle"`` and
+        ``"null_0"`` ... ``"null_{m-1}"`` under ``basis="fs"``, ``"wiggle"`` (and
+        ``"null"`` with ``select=True``) under ``basis="sz"``, and estimates the
+        ones it does not name.  None estimates every component by REML.
+    name : str or None
+        The term's name; defaults to ``"{variable}:{group}:{basis}"``.
+    select : bool, default False
+        ``basis="sz"`` only.  Adds a second penalty component ``"null"`` on every
+        level's line (Marra & Wood 2011, as mgcv's ``select=TRUE``) with its own
+        smoothing parameter, reading the lines as random effects shrunk toward the
+        population curve as ``fs`` does with its ``null_j`` components.  It makes
+        curves finite and unique for a level whose line separates the response or a
+        term whose levels hold fewer distinct ``x`` values than the line has
+        coefficients (#444).  Without it the lines stay unpenalized whatever the
+        data, and such levels are named in a fit warning.
     """
 
     structured_kind = "factor_smooth"

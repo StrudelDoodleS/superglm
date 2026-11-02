@@ -17,7 +17,7 @@ from numpy.typing import NDArray
 
 # Terms 37 log-units below the peak change log W by < 1e-16 (Dunn & Smyth 2005).
 _LOG_CUTOFF = 37.0
-# Beyond 2**52 consecutive integers are no longer exact in float64.
+# Below 2**53 every j + 1 is exact in float64; 2**52 keeps a factor of two in hand.
 _MAX_SAFE_MODE = float(2**52)
 # A cap on one row's work: peak indices up to ~3.4e9 (a + 1).  The accuracy
 # switch to the saddlepoint (superglm._tweedie.saddlepoint_switch) sits below it

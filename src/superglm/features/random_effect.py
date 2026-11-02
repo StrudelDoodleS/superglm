@@ -19,19 +19,37 @@ MISSING_POLICIES = ("error",)
 class RandomEffect:
     """All-level categorical effect with a REML-estimated variance component.
 
-    ``levels=`` binds the level universe from an explicit sequence, a data column,
-    or a categorical dtype.  A declared level with no training rows is not pinned
-    the way an unpenalized dummy is: it keeps its own coefficient and shrinks to the
-    population value through the variance component, as a thinly observed level does.
+    Every level keeps its own coefficient, shrunk toward the population value by
+    the variance component ``tau_squared = phi / lambda`` that ``fit_reml``
+    estimates; no level is dropped as a reference.
 
-    ``nested_in=`` names another ``RandomEffect`` feature of the same model that
-    this one is nested in: every level of this effect belongs to exactly one of its
-    levels (a region within a country).  Nesting is also detected from the level
-    codes without it; the declaration is checked on the training rows, and a row
-    that breaks it is an error naming the row and both of the parent's levels.  When
-    this effect is the structured solver's leaf (the random effect with the most
-    levels, with no ``FactorSmooth`` in the model), the declared parent is always in
-    its elimination chain; otherwise the declaration is only validated.
+    Parameters
+    ----------
+    levels : list | tuple | Series | ndarray | CategoricalDtype, optional
+        The level universe to bind to.  Without it the universe is the column's
+        categorical dtype, else its sorted training levels.  A declared level with
+        no training rows is not pinned the way an unpenalized dummy is: it keeps
+        its own coefficient and shrinks to the population value, as a thinly
+        observed level does.  Training rows outside the universe are an error.
+    unseen : {"population", "error"}, default "population"
+        Predict-time policy for levels outside the universe.  ``"population"``
+        gives those rows the population value (a level effect of zero);
+        ``"error"`` raises.
+    missing : {"error"}, default "error"
+        Missing values (NaN or None) in the column raise, at fit and at predict.
+    lambda_policy : LambdaPolicy or None
+        Control of the term's smoothing parameter.  None estimates it by REML;
+        ``LambdaPolicy.fixed(value)`` holds it at ``value``.
+    nested_in : hashable or None
+        Another ``RandomEffect`` feature of the same model that this one is nested
+        in: every level of this effect belongs to exactly one of its levels (a
+        region within a country).  Nesting is also detected from the level codes
+        without it; the declaration is checked on the training rows, and a row that
+        breaks it is an error naming the row and both of the parent's levels.  When
+        this effect is the structured solver's leaf (the random effect with the
+        most levels, with no ``FactorSmooth`` in the model), the declared parent is
+        always in its elimination chain; otherwise the declaration is only
+        validated.
 
     Notes
     -----
