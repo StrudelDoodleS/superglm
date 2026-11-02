@@ -79,7 +79,8 @@ rather than leaving a reader to price off it.
 from __future__ import annotations
 
 import math
-from collections.abc import Hashable, Mapping
+import warnings
+from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal
@@ -382,16 +383,148 @@ def _interaction_on(fitted: Any, parameter: str, feature: Hashable) -> str | Non
     return None
 
 
-def _reference_row(frame: EagerFrame, columns: tuple[str, ...]) -> dict[str, Any]:
-    """Hold every covariate at its training median (numeric) or mode (otherwise)."""
-    row: dict[str, Any] = {}
-    for name in columns:
-        values = np.asarray(frame.column_array(name))
-        if frame.column_kind(name) == "numeric":
-            row[name] = float(np.nanmedian(values.astype(np.float64)))
-        else:
-            row[name] = pd.Series(values).value_counts().index[0]
-    return row
+def _fitted_level_spec(fitted: Any, name: Hashable) -> Any | None:
+    """Return the first term, in predictor order, that reads column ``name`` with
+    levels, or ``None`` if no term does."""
+    for predictor in fitted.compiled_predictors:
+        spec = predictor.compiled.specs.get(name)
+        if spec is not None and _level_domain(spec) is not None:
+            return spec
+    return None
+
+
+def _fitted_levels(fitted: Any, name: Hashable) -> tuple[Any, ...] | None:
+    """Return the level domain of the first term that reads column ``name`` with levels."""
+    spec = _fitted_level_spec(fitted, name)
+    return None if spec is None else _level_domain(spec)
+
+
+def _read_levels(spec: Any, labels: Sequence[Any]) -> NDArray:
+    """Return the fitted level a categorical term reads each raw label at.
+
+    This is the term's own predict-time resolution, so its spelling, grouping
+    and unseen policy decide, as they do in ``predict``.  A label the term
+    refuses as unseen at fit keeps its raw spelling, so it matches no fitted
+    level.  A term without a resolver, such as a ``RandomEffect``, reads its
+    raw labels as its levels.
+    """
+    resolve = getattr(spec, "_resolved_labels", None) or getattr(
+        spec, "_resolve_predict_labels", None
+    )
+    if resolve is None:
+        return np.asarray(labels, dtype=object)
+    try:
+        return _resolve_quietly(resolve, labels)
+    except ValueError:
+        return np.array([_read_one_level(resolve, label) for label in labels], dtype=object)
+
+
+def _resolve_quietly(resolve: Any, labels: Sequence[Any]) -> NDArray:
+    """Resolve raw labels without the routing warnings ``predict`` reports."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return np.asarray(resolve(np.asarray(labels, dtype=object)), dtype=object)
+
+
+def _read_one_level(resolve: Any, label: Any) -> Any:
+    """Return the fitted level one raw label is read at, or the label if refused."""
+    try:
+        return _resolve_quietly(resolve, [label])[0]
+    except ValueError:
+        return label
+
+
+def _level_inputs(spec: Any | None, levels: Sequence[Any], values: Any) -> list[Any]:
+    """Return the input label that reads each fitted level.
+
+    A grouped term's levels are its group labels, but it reads original
+    labels. Each group is swept through the first of the frame's labels, in
+    sorted order, that the term reads at it, so on the training frame every
+    other term reading the column has seen that label too. A group with no
+    label in the frame is swept through its first member.
+    """
+    grouping = None if spec is None else getattr(spec, "_grouping", None)
+    if grouping is None:
+        return list(levels)
+    _, labels = pd.factorize(values, sort=True)
+    present: dict[Any, Any] = {}
+    for label, level in zip(labels, _read_levels(spec, labels), strict=True):
+        present.setdefault(level, label)
+    members = grouping.group_to_originals
+    return [present.get(level, members.get(str(level), [level])[0]) for level in levels]
+
+
+def _column_levels(fitted: Any, frame: EagerFrame, name: Hashable) -> list[Any] | None:
+    """Return a column's level order, or ``None`` for a numeric column without levels.
+
+    The fitted level domain (:func:`_fitted_levels`) when a term reads the column
+    with levels; otherwise, for a non-numeric column, its declared categories or
+    else its observed labels sorted.  Term effects and the surfaces sweep this
+    domain and break a tied mode by it.
+    """
+    levels = _fitted_levels(fitted, name)
+    if levels is not None:
+        return list(levels)
+    if frame.column_kind(name) == "numeric":
+        return None
+    declared = frame.column_declared_categories(name)
+    if declared is not None:
+        return list(declared)
+    return list(pd.factorize(frame.column_array(name), sort=True)[1])
+
+
+def _numeric_range(frame: EagerFrame, name: Hashable, n_points: int) -> NDArray[np.float64]:
+    """Return ``n_points`` points spanning a numeric column's range, missing values ignored."""
+    values = np.asarray(frame.column_array(name), dtype=np.float64)
+    return np.linspace(float(np.nanmin(values)), float(np.nanmax(values)), n_points)
+
+
+def _reference_value(fitted: Any, frame: EagerFrame, name: Hashable) -> Any:
+    """Return a column's training centre, missing values ignored.
+
+    A numeric column without levels is held at its median.  Any other column is
+    held at its most frequent fitted level, counted over the labels the term reads
+    at it; a tie goes to the level that comes first in :func:`_column_levels` order.
+    A label the term reads at no fitted level is held only if no fitted level is
+    present.  The value returned is the chosen level's most frequent label, so a
+    grouped term is held at one of its members.
+    """
+    values = frame.column_array(name)
+    empty = (
+        f"column {name!r} has no non-missing values to take a training centre from; "
+        "pass rows that have values for it, or name its value in a surface's reference"
+    )
+    if _fitted_levels(fitted, name) is None and frame.column_kind(name) == "numeric":
+        numeric = np.asarray(values, dtype=np.float64)
+        if np.all(np.isnan(numeric)):
+            raise ValueError(empty)
+        return float(np.nanmedian(numeric))
+    codes, labels = pd.factorize(values, sort=True)
+    present = codes[codes >= 0]
+    if present.size == 0:
+        raise ValueError(empty)
+    counts = np.bincount(present, minlength=len(labels))
+    spec = _fitted_level_spec(fitted, name)
+    read = list(labels) if spec is None else list(_read_levels(spec, labels))
+    rank = {
+        level: position for position, level in enumerate(_column_levels(fitted, frame, name) or ())
+    }
+    if not any(level in rank for level in read):
+        # No fitted level is present, so each label stands for itself.
+        read = list(labels)
+    level_counts: dict[Any, int] = {}
+    for level, count in zip(read, counts.tolist(), strict=True):
+        level_counts[level] = level_counts.get(level, 0) + count
+    # A label read at no fitted level is held only when no fitted level is present.
+    candidates = {level: count for level, count in level_counts.items() if level in rank}
+    candidates = candidates or level_counts
+    top = max(candidates.values())
+    level = min(
+        (level for level, count in candidates.items() if count == top),
+        key=lambda level: rank.get(level, len(rank)),
+    )
+    members = [code for code, read_at in enumerate(read) if read_at == level]
+    return labels[max(members, key=lambda code: counts[code])]
 
 
 def _sweep(
@@ -410,24 +543,24 @@ def _sweep(
         )
     column = _feature_label(fitted, parameter, term)
     columns = _required_columns(fitted.compiled_predictors)
-    reference = _reference_row(frame, columns)
 
     levels = _level_domain(spec)
     if levels is not None:
-        swept: Any = list(levels)
+        swept: Any = _level_inputs(spec, levels, frame.column_array(column))
         grid = None
         names = tuple(str(level) for level in levels)
     else:
-        values = np.asarray(frame.column_array(column), dtype=np.float64)
-        grid = np.linspace(float(np.nanmin(values)), float(np.nanmax(values)), n_points)
+        grid = _numeric_range(frame, column, n_points)
         swept = grid
         names = None
 
     rows = len(swept)
     data: dict[Hashable, pd.Series] = {
-        name: pd.Series([reference[name]] * rows) for name in columns
+        name: pd.Series(swept)
+        if name == column
+        else pd.Series([_reference_value(fitted, frame, name)] * rows)
+        for name in columns
     }
-    data[column] = pd.Series(swept)
     return pd.DataFrame(data), grid, names
 
 
@@ -530,9 +663,11 @@ def term_effect(
     """Report one term of one predictor on that predictor's link scale.
 
     A one-variable term is swept over ``n_points`` points spanning its training
-    range with every other covariate held at its training median or mode; a
-    term with levels reports one row per fitted level, the reference level (and
-    any level pinned to it) reading back as an exact zero.  Bands are the
+    range with every other covariate held at its training median or mode
+    (:func:`_reference_value`: missing values ignored, a tied mode going to the
+    level first in the fitted level order); a term with levels reports one row per
+    fitted level, the reference level (and any level pinned to it) reading back as
+    an exact zero.  Bands are the
     Bayesian pointwise interval and, unless ``simultaneous=False``, the
     max-deviation simultaneous band of Ruppert, Wand and Carroll (2003),
     section 6.5, over ``n_sim`` posterior draws.  ``multiplier`` is

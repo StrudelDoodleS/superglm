@@ -156,12 +156,14 @@ def _composed_log_tail(w, q, upper, order, out, flat):
         if not (
             log_ratio <= _LOG_SMALL_RATIO
             and log_gamma_tail_small_x_jet_into(
-                a, math.log(a) + log_ratio, primary, order, True, jet, flat
+                a, math.log(a) + log_ratio, primary, order, np.bool_(True), jet, flat
             )
         ):
             _fill_nan(out)
             return
-    elif not log_gamma_tail_jet_into(a, a * math.exp(log_ratio), primary, order, True, jet, flat):
+    elif not log_gamma_tail_jet_into(
+        a, a * math.exp(log_ratio), primary, order, np.bool_(True), jet, flat
+    ):
         _fill_nan(out)
         return
     if jet[0] == -math.inf:
@@ -257,10 +259,13 @@ def _jet_rows(w, q, upper, order, kernel):
     )
     if w_rows.ndim != 1:
         raise ValueError("w and q must broadcast to one dimension")
-    w_rows, q_rows = np.ascontiguousarray(w_rows), np.ascontiguousarray(q_rows)
-    upper_rows = np.ascontiguousarray(
-        np.broadcast_to(np.asarray(upper, dtype=np.bool_), w_rows.shape)
-    )
+    # Writable C-contiguous rows whatever the inputs, so the kernel compiles one
+    # signature: numba types a read-only array (a broadcast view, a read-only
+    # input) apart from a writable one.
+    w_rows = np.require(w_rows, np.float64, ("C", "W"))
+    q_rows = np.require(q_rows, np.float64, ("C", "W"))
+    upper_rows = np.empty(w_rows.shape, dtype=np.bool_)
+    upper_rows[:] = np.asarray(upper, dtype=np.bool_)
     order = int(order)
     packed = np.empty((w_rows.shape[0], (order + 1) * (order + 2) // 2))
     kernel(w_rows, q_rows, upper_rows, order, packed)

@@ -472,3 +472,37 @@ def test_vector_wrapper_is_an_i1_jet_of_the_scalar_engine():
             assert np.array_equal(np.concatenate([np.atleast_1d(j[row]) for j in jets]), scalar)
     with pytest.raises(ValueError, match="order"):
         engine.gg_log_tail_jets(w, q, upper=False, order=5)
+
+
+def test_row_and_engine_kernels_compile_one_signature_for_every_input_layout():
+    """A scalar or per-row ``upper`` and a read-only input reuse one row kernel,
+    and both incomplete-gamma callers (fixed ``x`` and along ``x/a``) pass the
+    engine a run-time flag, so it compiles once for both.
+
+    Each extra numba signature is a full compile in ``superglm.warmup()``.  The
+    callers are recompiled here, uncached, because a caller loaded from the
+    numba cache registers no signature on the engine it calls.
+    """
+    import numba
+
+    from superglm.distributional.kernels._gg_log_tail import _composed_log_tail, _log_tail_rows
+    from superglm.distributional.kernels._incomplete_gamma import (
+        WORK_SIZE,
+        log_gamma_tail_into,
+        log_gamma_tail_jet_into,
+    )
+
+    w = np.linspace(-2.0, 2.0, 6)
+    q = np.full(6, 0.7)  # outside the uniform band: the composed route
+    read_only = w.copy()
+    read_only.flags.writeable = False
+    engine.gg_log_tail_jets(w, q, upper=True, order=1)
+    engine.gg_log_tail_jets(read_only, q, upper=np.arange(6) % 2 == 0, order=1)
+    assert len(_log_tail_rows.signatures) == 1, _log_tail_rows.signatures
+
+    numba.njit(log_gamma_tail_into.py_func)(2.0, 1.5, True, 1, np.empty(3), np.empty(WORK_SIZE))
+    numba.njit(_composed_log_tail.py_func)(
+        0.5, 0.7, True, 1, np.empty(3), np.empty(engine.SCRATCH_SHAPE).reshape(-1)
+    )
+    flags = {signature[4] for signature in log_gamma_tail_jet_into.signatures}
+    assert flags and not any(isinstance(flag, numba.types.Literal) for flag in flags), flags

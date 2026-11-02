@@ -17,7 +17,6 @@ from superglm.distributional.kernels._common import (
     validated_derivative_order,
     validated_semantics,
 )
-from superglm.distributional.kernels._response_tails import TailChannels, normal_window_channels
 from superglm.distributional.kernels._weighted import weighted_natural_channel
 
 
@@ -240,30 +239,6 @@ def evaluate_gaussian_rows(
         score=score,
         hessian_packed=hessian,
         valid=np.ones(len(response_values), dtype=bool),
-    )
-
-
-def gaussian_window(
-    lower: NDArray,
-    upper: NDArray,
-    location: NDArray,
-    scale: NDArray,
-    weights: NDArray,
-    semantics: WeightSemantics,
-    *,
-    derivative_order: int,
-) -> TailChannels:
-    """``log P(lower < Y <= upper)`` per row of mass one, in ``(location, scale)``.
-
-    Under prior weights the row law is ``N(location, scale^2/w)``, so the
-    window is standardised by ``sqrt(w)``; under frequency weights the law is
-    the unit one and the caller multiplies the row term by ``w``.
-    """
-    weight_semantics = validated_semantics(semantics)
-    weight_values = np.asarray(weights, dtype=np.float64)
-    root = np.sqrt(weight_values) if weight_semantics == "prior" else np.ones_like(weight_values)
-    return normal_window_channels(
-        lower, upper, location, scale, root, derivative_order=derivative_order
     )
 
 

@@ -52,6 +52,13 @@ from superglm.distributional.posterior import (
 # needs; a sweep frame that restated the rule would drift from the design it is
 # built to feed.
 from superglm.distributional.prediction_design import _required_columns
+from superglm.distributional.terms import (
+    _column_levels,
+    _fitted_level_spec,
+    _level_inputs,
+    _numeric_range,
+    _reference_value,
+)
 from superglm.distributional.weights import (
     LikelihoodWeightError,
     ResolvedLikelihoodWeights,
@@ -268,43 +275,34 @@ def _model_columns(fitted: Any) -> tuple[str, ...]:
 
 
 def _covariate_grid(
-    frame: EagerFrame, covariate: str, n_points: int
+    fitted: Any, frame: EagerFrame, covariate: str, n_points: int
 ) -> tuple[NDArray, tuple[str, ...] | None, NDArray[np.float64]]:
-    """Return the swept values, the level labels if any, and the plot coordinate."""
-    if frame.column_kind(covariate) == "numeric":
+    """Return the swept values, the level labels if any, and the plot coordinate.
+
+    A column with levels sweeps its :func:`_column_levels` domain, as
+    ``term_effect`` does; a numeric one its training range, missing values ignored.
+    """
+    labels = _column_levels(fitted, frame, covariate)
+    if labels is None:
         points = int(n_points)
         if points < 2:
             raise ValueError("a swept covariate needs at least two grid points")
-        values = frame.column_array(covariate, dtype=float)
-        grid = np.linspace(float(values.min()), float(values.max()), points)
+        grid = _numeric_range(frame, covariate, points)
         return grid, None, grid
-    declared = frame.column_declared_categories(covariate)
-    observed = (
-        declared
-        if declared is not None
-        else pd.factorize(frame.column_array(covariate), sort=True)[1]
-    )
-    labels = list(observed)
     return (
-        np.array(labels, dtype=object),
+        np.array(
+            _level_inputs(
+                _fitted_level_spec(fitted, covariate), labels, frame.column_array(covariate)
+            ),
+            dtype=object,
+        ),
         tuple(str(label) for label in labels),
         np.arange(len(labels), dtype=float),
     )
 
 
-def _default_value(frame: EagerFrame, name: str) -> Any:
-    """The training median of a numeric column, else its modal value."""
-    values = frame.column_array(name)
-    if frame.column_kind(name) == "numeric":
-        return float(np.median(np.asarray(values, dtype=float)))
-    codes, labels = pd.factorize(values, sort=True)
-    if np.any(codes < 0):
-        raise ValueError(f"reference column {name!r} has missing category labels")
-    counts = np.bincount(codes, minlength=len(labels))
-    return labels[int(np.argmax(counts))]
-
-
 def _reference_values(
+    fitted: Any,
     frame: EagerFrame,
     reference: Mapping[str, Any] | pd.Series,
     covariate: str,
@@ -321,7 +319,9 @@ def _reference_values(
     # A reference taken from a training row carries the swept covariate as well;
     # the sweep overrides it rather than refusing the row.
     return {
-        name: supplied[str(name)] if str(name) in supplied else _default_value(frame, name)
+        name: supplied[str(name)]
+        if str(name) in supplied
+        else _reference_value(fitted, frame, name)
         for name in columns
         if name != covariate
     }
@@ -361,8 +361,8 @@ def _sweep(
     if covariate not in columns:
         raise ValueError(f"the model does not use column {covariate!r}; it reads {list(columns)}")
     frame.require_columns(columns)
-    values, levels, positions = _covariate_grid(frame, covariate, n_points)
-    resolved = _reference_values(frame, reference, covariate, columns)
+    values, levels, positions = _covariate_grid(fitted, frame, covariate, n_points)
+    resolved = _reference_values(fitted, frame, reference, covariate, columns)
     return _sweep_frame(frame, columns, covariate, values, resolved), levels, positions, resolved
 
 
@@ -399,7 +399,9 @@ def risk_curves(
 
     The covariate sweeps its training range (or its levels) while every other
     column the model reads is held at ``reference``; a column the reference does
-    not name is held at its training median (numeric) or modal value.  One
+    not name is held at its training median (numeric) or modal value, as in
+    ``term_effect``: missing values ignored, a tied mode going to the level first
+    in the fitted level order.  One
     posterior draw set serves every requested quantile, so the bands of the
     curves are coherent with one another rather than independently simulated.
 

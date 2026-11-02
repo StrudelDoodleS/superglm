@@ -416,13 +416,237 @@ def test_review_nonfinite_density_refuses():
 
 def test_review_sweep_and_reference_accept_mixed_categories():
     from superglm._frame import as_eager_frame
-    from superglm.distributional.surfaces import _covariate_grid, _default_value
+    from superglm.distributional.surfaces import _covariate_grid
+    from superglm.distributional.terms import _reference_value
 
+    unfitted = SimpleNamespace(compiled_predictors=())  # no term reads g with levels
     frame = as_eager_frame(pd.DataFrame({"g": [1, "b", 1, "a"]}))
-    values, levels, positions = _covariate_grid(frame, "g", 10)
+    values, levels, positions = _covariate_grid(unfitted, frame, "g", 10)
     assert set(values) == {1, "a", "b"}
     assert len(levels) == len(positions) == 3
-    assert _default_value(frame, "g") == 1
+    assert _reference_value(unfitted, frame, "g") == 1
+
+
+def test_term_effect_and_surfaces_hold_and_sweep_one_reference_row(gaussian_case) -> None:
+    """A tied mode, a missing numeric value and a fitted level absent from the
+    frame: ``term_effect`` and the surfaces hold and sweep the same values."""
+    from superglm._frame import as_eager_frame
+    from superglm.distributional import terms
+
+    fitted, _, _ = gaussian_case
+    # "b" comes first and ties "a"; "c" is a fitted level the frame lacks.
+    X = pd.DataFrame({"x": [0.3, np.nan, -0.6, 0.8], "g": ["b", "a", "b", "a"]})
+
+    term_frame, grid, _ = terms._sweep(fitted, as_eager_frame(X), "location", "x", 5)
+    curves = risk_curves(fitted, X, {}, "x", n_points=5, n_draws=60, seed=1)
+    # A tie goes to the level first in the fitted order; the range ignores the NaN.
+    assert curves.reference == {"g": "a"}
+    assert list(term_frame["g"]) == ["a"] * 5
+    np.testing.assert_array_equal(grid, np.linspace(-0.6, 0.8, 5))
+    np.testing.assert_array_equal(curves.x, grid)
+
+    effect = terms.term_effect(fitted, X, "location", "g", simultaneous=False)
+    swept = risk_curves(fitted, X, {}, "g", n_draws=60, seed=1)
+    assert effect.levels == swept.levels == ("a", "b", "c")
+    assert swept.reference == {"x": 0.3}  # the median of the three present values
+
+
+def test_a_tie_goes_to_the_first_fitted_level_not_the_first_sorted() -> None:
+    from superglm._frame import as_eager_frame
+    from superglm.distributional.terms import _reference_value
+
+    # A term whose raw labels are already its fitted levels.
+    spec = SimpleNamespace(_levels=("c", "b", "a"), _resolve_predict_labels=lambda labels: labels)
+    fitted = SimpleNamespace(
+        compiled_predictors=(SimpleNamespace(compiled=SimpleNamespace(specs={"g": spec})),)
+    )
+    frame = as_eager_frame(pd.DataFrame({"g": ["a", "b", "a", "b"]}))
+    assert _reference_value(fitted, frame, "g") == "b"
+
+
+def test_a_grouped_column_is_held_at_its_most_frequent_group() -> None:
+    """a, c and b hold 30, 35 and 40 rows; the group "ac" holds 65, so it is the
+    reference, held at its most frequent member, although b is the commonest label."""
+    from superglm._frame import as_eager_frame
+    from superglm.distributional.terms import _reference_value
+
+    to_group = {"a": "ac", "c": "ac"}
+    spec = SimpleNamespace(
+        _levels=("ac", "b"),
+        _resolve_predict_labels=lambda labels: np.array(
+            [to_group.get(label, label) for label in labels], dtype=object
+        ),
+    )
+    fitted = SimpleNamespace(
+        compiled_predictors=(SimpleNamespace(compiled=SimpleNamespace(specs={"g": spec})),)
+    )
+    frame = as_eager_frame(pd.DataFrame({"g": ["a"] * 30 + ["c"] * 35 + ["b"] * 40}))
+    assert _reference_value(fitted, frame, "g") == "c"
+
+
+def test_a_random_effect_column_is_held_at_its_first_tied_level() -> None:
+    """A RandomEffect reads its raw labels as its levels, so a balanced panel's tie
+    goes to its first fitted level and the surfaces still build a reference row."""
+    from superglm import RandomEffect
+    from superglm.distributional.terms import term_effect
+
+    X, y = _gaussian_sample()
+    X = X.assign(panel=np.tile(["s", "r", "q", "p"], len(X) // 4))
+    fitted = (
+        model_from_templates(
+            family=GaussianLS(),
+            predictors=[
+                Predictor("location", {"x": Spline("cr", k=6)}),
+                Predictor("scale", {"panel": RandomEffect()}),
+            ],
+        )
+        .fit_reml(X, y)
+        ._require_fitted()
+    )
+    curves = risk_curves(fitted, X, {}, "x", n_draws=60, seed=1)
+    term_effect(fitted, X, "location", "x", simultaneous=False)
+    assert curves.reference["panel"] == "p"
+
+
+@pytest.mark.parametrize("unseen_rows", [50, 400])
+def test_a_label_unseen_at_fit_does_not_stop_the_reference_row(unseen_rows) -> None:
+    """Rows of "d" carry zero weight, so the fit never sees that level; a frame that
+    still holds them takes its reference from the fitted levels, as documented, even
+    where "d" is the commonest label."""
+    from superglm.distributional.terms import term_effect
+
+    X, y = _gaussian_sample()
+    X.loc[: unseen_rows - 1, "g"] = "d"
+    weight = np.where(X["g"] == "d", 0.0, 1.0)
+    fitted = (
+        model_from_templates(
+            family=GaussianLS(),
+            predictors=[
+                Predictor("location", {"x": Spline("cr", k=6), "g": Categorical()}),
+                Predictor("scale", {}),
+            ],
+        )
+        .fit_reml(X, y, sample_weight=weight)
+        ._require_fitted()
+    )
+    curves = risk_curves(fitted, X, {}, "x", n_draws=60, seed=1)
+    term_effect(fitted, X, "location", "x", simultaneous=False)
+    # The commonest label among the rows the fit saw; a tie goes to the first fitted
+    # level, which for an inferred universe is the first sorted.
+    assert curves.reference["g"] == X.loc[weight > 0, "g"].mode()[0]
+
+
+def test_a_label_the_grouping_does_not_cover_is_never_the_reference() -> None:
+    """A grouped unseen="base" term reads a label its grouping does not cover as NaN;
+    that NaN holds the most rows but is no fitted level, so b is the reference."""
+    from superglm._frame import as_eager_frame
+    from superglm.distributional.terms import _reference_value
+
+    to_group = {"a": "ac", "c": "ac", "b": "b"}
+    spec = SimpleNamespace(
+        _levels=("ac", "b"),
+        _resolve_predict_labels=lambda labels: np.array(
+            [to_group.get(label, np.nan) for label in labels], dtype=object
+        ),
+    )
+    fitted = SimpleNamespace(
+        compiled_predictors=(SimpleNamespace(compiled=SimpleNamespace(specs={"g": spec})),)
+    )
+    frame = as_eager_frame(pd.DataFrame({"g": ["d"] * 100 + ["a"] * 10 + ["b"] * 20}))
+    assert _reference_value(fitted, frame, "g") == "b"
+    # With no fitted level present, each label stands for itself.
+    only_uncovered = as_eager_frame(pd.DataFrame({"g": ["d"] * 3 + ["e"]}))
+    assert _reference_value(fitted, only_uncovered, "g") == "d"
+
+
+@pytest.fixture(scope="module")
+def grouped_case() -> tuple[DenseDistributionalModel, pd.DataFrame]:
+    from superglm.features.grouping import collapse_levels
+
+    X, y = _gaussian_sample()
+    grouping = collapse_levels(X["g"], groups={"ac": ["a", "c"]})
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=[
+            Predictor("location", {"x": Spline("cr", k=6), "g": Categorical(grouping=grouping)}),
+            Predictor("scale", {}),
+        ],
+    ).fit_reml(X, y)
+    return model._require_fitted(), X
+
+
+def test_a_grouped_level_is_swept_through_one_of_its_original_labels(grouped_case) -> None:
+    """A grouped term reads original labels, so its groups sweep through their members."""
+    from superglm.distributional import terms
+
+    fitted, X = grouped_case
+    effect = terms.term_effect(fitted, X, "location", "g", simultaneous=False)
+    curves = risk_curves(fitted, X, {}, "g", n_draws=60, seed=1)
+    fan = density_fan(fitted, X, {}, "g")
+    assert set(effect.levels) == set(curves.levels) == set(fan.levels) == {"ac", "b"}
+    # The group reads its own effect, not the base level's: a = +0.3, c = 0 against b = -0.2.
+    estimate = dict(zip(effect.levels, effect.effect, strict=True))
+    assert estimate["ac"] - estimate["b"] > 0.2
+
+
+def test_a_grouped_level_is_swept_through_a_label_every_term_has_seen() -> None:
+    """A grouping built on more labels than the fit saw sweeps each group through a
+    label in the frame, so an ungrouped term on the same column accepts it too."""
+    from superglm.distributional import terms
+    from superglm.features.grouping import collapse_levels
+
+    X, y = _gaussian_sample()
+    grouping = collapse_levels(X["g"], groups={"ac": ["a", "c"]})
+    seen = (X["g"] != "a").to_numpy()
+    X, y = X[seen].reset_index(drop=True), y[seen]
+    fitted = (
+        model_from_templates(
+            family=GaussianLS(),
+            predictors=[
+                Predictor(
+                    "location", {"x": Spline("cr", k=6), "g": Categorical(grouping=grouping)}
+                ),
+                Predictor("scale", {"g": Categorical()}),
+            ],
+        )
+        .fit_reml(X, y)
+        ._require_fitted()
+    )
+    effect = terms.term_effect(fitted, X, "location", "g", simultaneous=False)
+    curves = risk_curves(fitted, X, {}, "g", n_draws=60, seed=1)
+    fan = density_fan(fitted, X, {}, "g")
+    assert set(effect.levels) == set(curves.levels) == set(fan.levels) == {"ac", "b"}
+
+
+def test_a_tie_reads_raw_labels_in_the_terms_own_spelling() -> None:
+    """Float labels 4.0 .. 1.0 are read as the ordered term's levels "4", "23" and "1",
+    which hold 300 rows each; the tie goes to the first fitted level, 4, not to the
+    first sorted label."""
+    from superglm import OrderedCategorical
+    from superglm._frame import as_eager_frame
+    from superglm.distributional.terms import _reference_value, term_effect
+    from superglm.features.grouping import collapse_levels
+
+    band = np.repeat([4.0, 3.0, 2.0, 1.0], [300, 150, 150, 300])
+    X = pd.DataFrame({"band": band})
+    y = 0.1 * band + np.random.default_rng(7).standard_normal(band.size)
+    grouping = collapse_levels(
+        X["band"], groups={"23": ["2.0", "3.0"]}, order=["4.0", "3.0", "2.0", "1.0"]
+    )
+    term = OrderedCategorical(order=[4, 3, 2, 1], grouping=grouping)
+    fitted = (
+        model_from_templates(
+            family=GaussianLS(),
+            predictors=[Predictor("location", {"band": term}), Predictor("scale", {})],
+        )
+        .fit_reml(X, y)
+        ._require_fitted()
+    )
+    assert _reference_value(fitted, as_eager_frame(X), "band") == 4.0
+    # The sweep reads the frame's float labels through the term, one per fitted level.
+    effect = term_effect(fitted, X, "location", "band", simultaneous=False)
+    curves = risk_curves(fitted, X, {}, "band", n_draws=60, seed=1)
+    assert list(effect.levels) == list(curves.levels) == ["4", "23", "1"]
 
 
 def test_json_scalars_are_plain_values_and_nothing_unrepresentable() -> None:

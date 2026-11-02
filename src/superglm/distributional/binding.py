@@ -105,7 +105,8 @@ def bind_predictor(
         in the mapping's order. Supply no terms for an intercept-only
         predictor.
     intercept : bool, default=True
-        Include an intercept in this predictor.
+        Include an intercept in this predictor. A predictor needs at least
+        one term or its intercept.
     link : str or Link, optional
         Override the family's default link. The model checks compatibility
         with the parameter's support.
@@ -145,7 +146,7 @@ def bind_predictor(
             else ""
         ),
     )
-    return BoundPredictor(
+    bound = BoundPredictor(
         family,
         Predictor(
             name,
@@ -157,6 +158,14 @@ def bind_predictor(
             interaction_order=normalized.interaction_order,
         ),
     )
+    # Checked after the name and controls, so their errors come first.
+    if not intercept and not normalized.features and not normalized.interaction_specs:
+        raise ValueError(
+            f"The {name!r} predictor of {type(family).__name__} was declared with no "
+            "terms and intercept=False, so it has no coefficients to fit. Keep its "
+            "intercept (intercept=True) or give it at least one term."
+        )
+    return bound
 
 
 def _bind_predictor_template(family: DistributionalFamily, template: Predictor) -> BoundPredictor:

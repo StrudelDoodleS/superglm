@@ -146,6 +146,22 @@ def test_resolver_requires_a_sequence(value):
         _resolve(TweedieLSS(), value)
 
 
+@pytest.mark.parametrize(
+    ("family", "helper"),
+    [(GeneralizedGammaLSS(), "shape"), (TwoPieceNormalLSS(), "skew")],
+)
+def test_predictor_without_terms_or_intercept_is_refused_at_declaration(family, helper):
+    with pytest.raises(ValueError) as error:
+        getattr(family, helper)(intercept=False)
+    message = str(error.value)
+    assert f"{helper!r} predictor" in message
+    assert "no terms and intercept=False" in message
+    assert "intercept=True" in message and "at least one term" in message
+    # A term or the intercept alone still declares a fittable predictor.
+    assert getattr(family, helper)("x", intercept=False).name == helper
+    assert getattr(family, helper)().name == helper
+
+
 def test_binding_preserves_controls_interactions_and_owned_mutable_terms():
     from superglm.features import Spline
     from superglm.links import LogLink
