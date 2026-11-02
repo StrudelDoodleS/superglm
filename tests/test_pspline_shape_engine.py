@@ -120,6 +120,23 @@ _DECLARATIONS = {
 }
 
 
+def _numeric_sum(obj) -> float:
+    """Sum every number in a nested payload: frames, arrays, dicts, lists, objects."""
+    if isinstance(obj, dict):
+        return sum(_numeric_sum(obj[k]) for k in sorted(obj, key=str))
+    if isinstance(obj, (list, tuple)):
+        return sum(_numeric_sum(v) for v in obj)
+    if hasattr(obj, "select_dtypes"):
+        return float(np.nansum(np.asarray(obj.select_dtypes("number"), dtype=float)))
+    if isinstance(obj, np.ndarray) and obj.dtype.kind in "fiu":
+        return float(np.nansum(obj.astype(float)))
+    if isinstance(obj, (int, float)) and not isinstance(obj, bool):
+        return float(obj)
+    if hasattr(obj, "__dict__"):
+        return _numeric_sum(vars(obj))
+    return 0.0
+
+
 @pytest.mark.parametrize(
     "declare",
     [
@@ -203,6 +220,16 @@ def test_saved_scop_model_predicts_and_reports_as_saved_and_refits_on_the_qp() -
         assert_predicts_as_saved(model, frame, record["prediction"])
         inference = model.term_inference("x")
         model.summary()
+        metrics = model.metrics(frame, y)
+        leverage, cooks = np.asarray(metrics.leverage), np.asarray(metrics.cooks_distance)
+        from superglm.export.rating_tables import build_rating_table_payload
+
+        payload = build_rating_table_payload(model, frame, y)
+    # Master 71b133b2 (the SCOP engine) on this fixture: the saved model's
+    # diagnostics and rating tables read what it saved, so they do not move.
+    np.testing.assert_allclose(leverage.sum(), 5.0197227810892695, rtol=1e-9)
+    np.testing.assert_allclose(cooks.sum(), 1.1744743077217192, rtol=1e-9)
+    np.testing.assert_allclose(_numeric_sum(payload), 9388.896825679873, rtol=1e-9)
     group = _group(model)
     covariance = np.asarray(model._solver_result.scop_inference.augmented_inverse)[1:, 1:]
     covariance = covariance[group.start : group.end, group.start : group.end]
