@@ -166,10 +166,6 @@ class DistributionalEFSResult:
     newton_iterations: int = 0
     bfgs_fallback_iterations: int = 0
     beyond_cap_components: tuple[str, ...] = ()
-    # Endpoint receipts made under the rounding-floor stationarity rule. A
-    # result saved before that rule carries none and is validated under the
-    # strict rule its receipts were made with.
-    rounding_floor_stationarity: bool = False
 
     @property
     def stationarity_bar(self) -> float:
