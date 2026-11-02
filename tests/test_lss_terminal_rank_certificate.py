@@ -275,6 +275,34 @@ def test_a_near_alias_publishes_the_reduced_fit(monkeypatch, discrete, drift):
     assert coefficients[2] == 0.0 and variances[2] == 0.0
 
 
+@pytest.mark.parametrize("discrete", [True, False], ids=["chunked", "dense"])
+def test_a_near_alias_is_refitted_whatever_the_stop(monkeypatch, discrete):
+    """The design, not the stop, decides the refit: a run forced to stop short is refitted too.
+
+    Every run on the full coefficients reports ``max_iterations``; the
+    reduced fit from the projection converges to mgcv's values. Mutation
+    check: refitting only converged fits publishes the stopped state.
+    """
+    import dataclasses
+
+    import superglm.distributional.solver.solver as solver
+
+    run = solver._run_iterations
+
+    def stopped_short(context, *args, **kwargs):
+        result = run(context, *args, **kwargs)
+        if context.retained is not None:
+            return result
+        return dataclasses.replace(result, converged=False, reason="max_iterations")
+
+    monkeypatch.setattr(solver, "_run_iterations", stopped_short)
+    model, frame, y = _near_alias(discrete)
+    result = _fit(model, frame, y)
+    assert result.converged and result.terminal_rank.rank == 3
+    for index, (value, _) in enumerate(_MGCV_NEAR_ALIAS):
+        assert result.coefficients[index] == pytest.approx(value, rel=1e-7, abs=1e-12)
+
+
 @pytest.mark.parametrize("event", ["no_start", "rank_moved"])
 def test_a_reduced_fit_off_its_representative_says_so(monkeypatch, event):
     """A drifted alias whose reduced fit cannot be the published representative is disclosed.

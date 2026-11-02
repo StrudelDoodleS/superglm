@@ -421,6 +421,29 @@ def test_a_pressed_group_whose_direction_the_rank_decision_drops_is_disclosed(he
     assert "1000 of 2000 rows" in message and "the data put the shape" in message
 
 
+@pytest.mark.parametrize("heavy, wall", [(1.5, "upper wall 1"), (-0.3, "lower wall 0")])
+def test_a_pressed_group_beside_a_scale_alias_keeps_its_wall_disclosure(heavy, wall):
+    # the converged fit drops z - z2, which the design aliases, and the pressed group's shape,
+    # which only the weights flatten: zero is no optimum for the second, so neither is refitted
+    rng = np.random.default_rng(8)
+    pressed = np.expm1(-heavy * np.log(rng.random(1_000))) / heavy
+    interior = np.expm1(-0.3 * np.log(rng.random(1_000))) / 0.3
+    frame = pd.DataFrame({"g": np.repeat([1.0, 0.7], 1_000), "x": rng.uniform(size=2_000)})
+    frame["z"] = rng.uniform(size=2_000)
+    frame["z2"] = frame["z"] + 1.0e-9 * rng.standard_normal(2_000)
+    scale = {"x": Spline(kind="cr", k=6), "g": Numeric(), "z": Numeric(), "z2": Numeric()}
+    model = model_from_templates(
+        family=GeneralizedParetoLSS(),
+        predictors=(Predictor("scale", scale), Predictor("shape", {"g": Numeric()})),
+    )
+    with pytest.warns(ConvergenceWarning, match=wall):
+        model.fit_reml(frame, np.concatenate([pressed, interior]))
+    assert model.result_.converged
+    assert model.result_.rank == len(model.result_.coefficients) - 2
+    (message,) = _wall_messages(model)
+    assert "1000 of 2000 rows" in message and "the data put the shape" in message
+
+
 def test_near_collinear_shape_covariates_at_an_interior_optimum_are_not_disclosed():
     # the rank decision drops the direction in which the two columns nearly cancel; the design,
     # not the link, loses its curvature there

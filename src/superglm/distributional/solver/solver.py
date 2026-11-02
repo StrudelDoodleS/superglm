@@ -34,7 +34,6 @@ from superglm.distributional.results.solver import (
     DenseSolverResult,
     RetainedCoordinates,
     SolverIteration,
-    _is_unfallbacked_observed,
     _newton_decrement_is_certified,
     _resolution_limited_decrement_is_within_objective_ulp,
     _score_within_rounding_floor,
@@ -1551,6 +1550,49 @@ def _certified_terminal_curvature(
         return replace(curvature, telemetry=replace(curvature.telemetry, certified=False))
 
 
+def _drops_design_aliases(layout: StackedLayout, rank: RankDecomposition) -> bool:
+    """Whether every direction ``rank`` drops is a near-dependency of the design itself.
+
+    The curvature ``X' W X + S`` loses a direction ``N`` when the design does,
+    ``X N ~ 0`` (an alias), or when the weights vanish where ``X N`` lies,
+    which Lesaffre and Marx (1993) call ML-collinearity: a parameter at a
+    boundary of the likelihood, whose reduced optimum is not zero. ``X`` is
+    the predictors' block-diagonal design, intercepts included. On the
+    column-equilibrated design (Belsley, Kuh and Welsch 1980) a direction's
+    length is ``rho = ||X N|| / ||C N||``, ``C`` the column norms. The rank
+    equilibrates the curvature by its diagonal, the same scaling of the
+    weighted design, and every direction it drops has length at most
+    ``sqrt(cutoff)`` there. The dropped
+    span is an alias when ``rho <= cutoff ** (1/4)`` on all of it, the
+    logarithmic midpoint between that length and an equilibrated column's 1.
+    The test is invariant to the basis of the span, so its columns are scaled
+    to unit maximum first; a span the design products cannot represent is not
+    called an alias.
+    """
+    null = rank.null_basis()
+    null = null / np.max(np.abs(null), axis=0)
+    width = null.shape[1]
+    design_gram = np.zeros((width, width))
+    scale_gram = np.zeros((width, width))
+    for state in layout.predictors:
+        local = null[state.coefficient_slice]
+        if not np.any(local):
+            continue
+        design = state.design
+        squared = [np.diag(group.gram(np.ones(design.n))) for group in design.group_matrices]
+        products = np.zeros((design.n, width))
+        if state.intercept_index is not None:
+            squared.insert(0, np.full(1, float(design.n)))
+            products += local[0]
+        slopes = local[int(state.intercept_index is not None) :]
+        for column in range(width if design.p else 0):
+            products[:, column] += design.matvec(slopes[:, column])
+        design_gram += products.T @ products
+        scale_gram += local.T @ (np.concatenate(squared)[:, None] * local)
+    difference = design_gram - np.sqrt(rank.cutoff) * scale_gram
+    return bool(np.all(np.isfinite(difference)) and np.linalg.eigvalsh(difference)[-1] <= 0.0)
+
+
 def _representative_state(
     context: _SolverContext,
     state: _AcceptedState,
@@ -1912,15 +1954,14 @@ def _fit_dense_fixed_lambda_core(
             )
             if reduced is not None or context.coefficient_face is not None:
                 break
-            # Coefficients are dropped at convergence, where the observed curvature is
-            # at worst semidefinite (Wood, Pya and Saefken 2016, sec. 3.1.2). A fit that
-            # stopped short, or whose observed curvature fell back, keeps its state.
-            reduced = (
-                RetainedCoordinates.of(decomposition)
-                if converged and _is_unfallbacked_observed(curvature.telemetry)
-                else None
-            )
-            if reduced is None or not np.any(state.coefficients[reduced.dropped]):
+            # Coefficients the design aliases are dropped (Wood, Pya and Saefken 2016,
+            # sec. 3.1.2). A direction only the weights flatten keeps its state.
+            reduced = RetainedCoordinates.of(decomposition)
+            if (
+                reduced is None
+                or not np.any(state.coefficients[reduced.dropped])
+                or not _drops_design_aliases(context.layout, decomposition)
+            ):
                 reduced = None
                 break
             # Repeat the Newton iteration to convergence on the retained coefficients,
