@@ -122,9 +122,10 @@ SHARED_RANK_POLICY = RankPolicy(
     # the cut is decided by its block evaluated from the rows, so an alias the
     # formation lifted over the cut is dropped and a near-null direction it
     # pushed under is kept. The thresholds are unchanged; ``rank`` and
-    # ``active_columns`` change for the same model and data. A stored
-    # decomposition keeps the version that decided it; nothing compares it
-    # with this one on load.
+    # ``active_columns`` change for the same model and data. A caller that
+    # supplies no bound, such as every scalar ``SuperGLM`` fit, decides as under
+    # version 4 and records version 5. A stored decomposition keeps the version
+    # that decided it; nothing compares it with this one on load.
     version=5,
     factor_rcond=float(np.sqrt(_EPS)),
     gram_rcond=float(_EPS),
