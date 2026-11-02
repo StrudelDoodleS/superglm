@@ -460,7 +460,7 @@ def evaluate_endpoint_laplace_derivative(
     certificate: NDArray[np.float64] | None = None
     try:
         # A family that refuses these links (UnsupportedLikelihoodContractError)
-        # is differenced, as v0.40.0 differenced every family without the protocol.
+        # is differenced instead.
         analytic = analytic_curvature_direction(
             family,
             y,
