@@ -54,7 +54,7 @@ def _scop_fit(retain_fit_state=True, n=400, seed=1):
         selection_penalty=0.0,
         features={
             "z": Numeric(),
-            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing, shape_engine="scop"),
+            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing),
         },
         retain_fit_state=retain_fit_state,
     )
@@ -198,31 +198,6 @@ def test_weights_of_the_same_sum_do_not_take_the_gram(gram_builds):
         info["R_a"].T @ info["R_a"], fresh, rtol=0.0, atol=_gram_bound(model, fresh) + 1e-14 * scale
     )
     assert rank_info.data_gram is None
-
-
-def test_scop_fit_releases_the_gram_at_its_first_inference(gram_builds):
-    model, frame, y = _scop_fit()
-    rank_info = model._solver_result.rank_info
-    assert model._solver_result.scop_inference is not None
-    assert rank_info.data_gram is not None
-    fits_gram = rank_info.data_gram
-    taken = model._fit_inference_info  # the cached record the summary's rows read
-    assert gram_builds == []
-    assert rank_info.data_gram is None
-    formed = state_ops._rank_centered_data_gram(
-        state_ops._rank_active_state(model, rank_info)[0],
-        state_ops._solver_space_working_weights(model),
-    )
-    bound = _gram_bound(model, fits_gram)
-    np.testing.assert_allclose(taken["R_a"].T @ taken["R_a"], formed, rtol=0.0, atol=bound)
-    reference_model, _, _ = _scop_fit()
-    builds = len(gram_builds)  # the reference Gram above is the test's own build
-    rows = _wood_rows(model, frame, y)
-    assert len(gram_builds) == builds  # the rows used the fit's Gram, not a rebuilt one
-    reference = _wood_rows(_without_gram(reference_model), frame, y)
-    assert rows.keys() == reference.keys() and rows
-    for name, values in rows.items():
-        np.testing.assert_allclose(values, reference[name], rtol=1e-8, atol=1e-12)
 
 
 def test_released_scop_fit_holds_no_gram():

@@ -37,9 +37,39 @@ EXTRAPOLATIONS = ("clip", "extend", "error")
 PENALTIES = ("ssp", "none")
 # The ``knot_strategy=`` rules a spline takes: "uniform", or a data-driven one.
 KNOT_STRATEGIES = ("uniform", *QUANTILE_STRATEGIES)
-# The engines a fit-time shape constraint fits on: the QP on the raw rows (every
-# constrained basis), or SCOP's reparameterization (a P-spline that asks for it).
+# The ``shape_engine=`` values a spline takes. Every fit-time shape constraint
+# fits on the QP on the raw rows; "scop" names the engine 0.41.0 used for a
+# P-spline, accepted with ``warn_scop_retired`` and fitted on the QP.
 SHAPE_ENGINES = ("qp", "scop")
+
+
+class SCOPRetiredWarning(UserWarning):
+    """A shape constraint declared or saved on the retired SCOP engine, fitted on the QP."""
+
+
+def warn_scop_retired(*, saved: bool = False, moves_fit: bool = True) -> None:
+    """Warn that SCOP is retired, at the caller's line outside superglm.
+
+    ``saved`` is a P-spline a model fitted on SCOP before the option existed;
+    otherwise the declaration passed ``shape_engine="scop"``. ``moves_fit`` is
+    False where 0.41.0 never fitted the term on SCOP (no fit-time constraint,
+    or a basis other than a P-spline), so nothing about the fit changes.
+    """
+    if saved:
+        subject = "This P-spline was fitted on the SCOP shape engine, which is retired"
+        remedy = "Declare the spline again, without shape_engine, to silence this warning."
+    else:
+        subject = "shape_engine='scop' names the SCOP shape engine, which is retired"
+        remedy = "Drop shape_engine='scop' to silence this warning."
+    if saved or moves_fit:
+        effect = (
+            "its shape constraint fits on the QP engine instead, so the fitted curve "
+            "and its smoothing parameter differ from those 0.41.0 gave"
+        )
+    else:
+        effect = "it has no effect on this spline, which fits as it did in 0.41.0"
+    message = f"{subject}: {effect}. {remedy}"
+    warnings.warn(message, SCOPRetiredWarning, skip_file_prefixes=(_PACKAGE_DIRECTORY,))
 
 
 def _iter_knots(knots: Any) -> list[Any]:
@@ -301,10 +331,10 @@ def initialize_runtime_state(
 
 
 def clear_scop_state(spec: Any) -> None:
-    """Drop the SCOP transform an earlier build left; every build starts from none.
+    """Drop the SCOP transform a model fitted before 0.42 left; every build starts from none.
 
-    ``transform`` scores through ``_scop_Sigma`` whenever it is set, so a spec
-    built on SCOP and rebuilt on the QP would otherwise score its new
+    ``transform`` scores through ``_scop_Sigma`` whenever it is set, so a
+    saved SCOP spec refitted on the QP would otherwise score its new
     coefficients through the old SCOP basis instead of its ``R_inv``.
     """
     for name in ("_scop_Sigma", "_scop_null_dim", "_scop_col_means"):

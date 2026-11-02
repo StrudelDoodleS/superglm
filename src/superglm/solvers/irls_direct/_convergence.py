@@ -71,15 +71,12 @@ class _IRLSDirectConvergence:
           certificate's relative score against the bar, the stagnation stop,
           the Gamma/log switch to Newton steps and the float64 fixed point.
         - ``"coefficients"``, and ``"mode_score"`` on a route that sets no
-          centre: the largest relative change in the coefficients, the
-          intercept and the step's latent coordinates (``latent_change``).
+          centre: the largest relative change in the coefficients and the
+          intercept.
         - ``"deviance"``: the relative change in the penalised objective
           from the committed state.
-
-        Under the last two a damped step whose change bounds nothing (the
-        step's ``damped``) never stops the fit.
         """
-        convergence, tol, beta, step = fit.convergence, fit.tol, fit.beta, fit.step
+        convergence, tol, beta = fit.convergence, fit.tol, fit.beta
         intercept, retained, committed = fit.intercept, fit.retained, fit.committed
         beta_prev, intercept_prev = committed.beta, committed.intercept
         step_rejected = fit.step_rejected
@@ -188,16 +185,8 @@ class _IRLSDirectConvergence:
                     coef_change,
                     abs(intercept - intercept_prev) / max(1.0, abs(intercept)),
                 )
-                latent_change = step.latent_change
-                if latent_change is not None:
-                    coef_change = max(coef_change, latent_change())
                 convergence_value = coef_change
                 converged_this_iter = coef_change < tol
-                damped = step.damped
-                if damped is not None and damped(fit):
-                    # a damped step's change is a fraction of the full
-                    # step's and bounds nothing either (below)
-                    converged_this_iter = False
             else:
                 objective = (
                     retained.deviance
@@ -217,11 +206,6 @@ class _IRLSDirectConvergence:
                         objective_scale=fit.objective_merit_scale,
                     )
                 converged_this_iter = dev_rel_change is not None and dev_rel_change < tol
-                damped = step.damped
-                if damped is not None and damped(fit):
-                    # A step whose decrease bounds nothing never stops the fit
-                    # (the SCOP step's: a damped joint Newton step).
-                    converged_this_iter = False
                 convergence_value = dev_rel_change
         else:
             converged_this_iter = False

@@ -35,17 +35,6 @@ def test_weighted_mean_retains_representable_extreme_contribution(monkeypatch):
     )
 
 
-def test_penalty_roundoff_retains_balanced_extreme_coordinate_products():
-    from superglm.solvers.scop_newton import _positive_quadratic_roundoff
-
-    actual = _positive_quadratic_roundoff(
-        np.array([1e150, 1e-150]),
-        np.diag([1e-300, 1e300]),
-        1e-14,
-    )
-    assert actual == pytest.approx(2e-14, rel=16 * np.finfo(float).eps, abs=0)
-
-
 def test_roundoff_gamma_is_infinite_once_count_u_reaches_one_on_an_array():
     from superglm._roundoff import gamma
 

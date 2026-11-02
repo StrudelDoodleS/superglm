@@ -73,9 +73,7 @@ coefficients-by-coefficients product over all rows, and choosing the smoothing
 takes dozens of them. A Gaussian fit with the identity link does not warn,
 since its weights never change and the product is formed once. Nor does a fit
 that uses the structured solver for a random effect or factor smooth, since it
-never forms that product. A model with a monotone (shape-constrained) term does
-not warn either: its smoothing is chosen by a different method, whose run time
-has not been measured.
+never forms that product.
 
 On the 542,000-row freMTPL2 frequency book, a model with three interaction
 pairs (about 480 coefficients) took 48 seconds exactly and 17 seconds with
@@ -99,75 +97,17 @@ as converged. This trades some speed for results you can rely on.
 - **A fit that cannot be checked says so.** It is returned, not refused. It
   warns with a `ConvergenceWarning` that names the reason, the summary repeats
   it, and `model.reml_diagnostics()["converged"]` reads `False`.
-- **A monotone (SCOP) term keeps a higher iteration limit.** Its smoothing
-  search can fall back to smaller steps (see below), so its limit defaults to
-  100 rather than 20. Set `max_reml_iter` to override either default.
 - **Barely identified coefficients are left out of the check.** A
   `WeakIdentificationWarning` names them.
 
 ### Smoothing search with a monotone term
 
-A model with a monotone (SCOP) term chooses its smoothing with Newton steps.
-
-- **It needs fewer iterations.** On the 678,000-row freMTPL2 claim-frequency
-  model with a monotone BonusMalus curve, the search took 9 iterations instead
-  of 27 in the previous release on the raw counts, and 14 instead of 57 on the
-  cleaned counts.
-- **It usually reaches the same smoothing.** When every step is a Newton step,
-  it stops where the earlier search's steps would stop, to the same tolerance.
-- **A tensor interaction can settle elsewhere.** Where the data barely support
-  a tensor product, its smoothing can have more than one local optimum, and the
-  two kinds of step can end in different ones. On a 3,000-row synthetic book
-  with no interaction signal, predictions differed by up to 0.34 standard
-  errors, and the Newton search reached the lower REML objective. On the other
-  cases measured they differed by at most 0.05 standard errors.
-- **A rejected Newton step restarts the search.** If no Newton step improves
-  the REML objective, the search starts again from the beginning with the
-  smaller steps used before this release, and returns what that search
-  returns. The Newton iterations already taken are the extra cost.
-- **The restart shares the iteration limit.** It runs within the iterations
-  `max_reml_iter` has left, so it returns exactly the smaller steps' answer
-  when those are enough. If none are left, the fit stops there and warns that
-  it did not converge.
-- **A rejected first step needs no restart.** The smaller steps take over from
-  where the search stands. `model.reml_diagnostics()["scop_newton_fallback"]`
-  names which of these happened; it is `None` when the search kept its Newton
-  steps throughout.
-- **A rejected step next to the answer ends the search there.** If the
-  rejected step would move every smoothing parameter by less than 1%, and the
-  gain it predicts is too small for the REML objective to resolve, the fit
-  stops and reports convergence, as the smaller steps do when they stall.
-- **A heavily smoothed term can come back down.** Earlier releases could not
-  lower a large smoothing parameter, whatever the data said, and still
-  reported the fit as converged. A smoothing parameter is now held only where
-  the REML objective is flat in the direction of its step. On freMTPL2
-  with the Wüthrich & Merz cleaning, whose claim counts come from the
-  severity file (`examples/fremtpl2_data.py`), this moved VehAge's smoothing
-  parameter from 468 to 371 and its effective degrees of freedom from 3.57 to
-  3.74. Predictions moved by at
-  most 0.04 standard errors on the full book and 0.27 out of fold.
-- **A term smoothed to its limit stops near the limit.** Once such a term has
-  under 0.05 effective degrees of freedom left, the search stops it, and
-  exactly where depends on the steps taken.
-- **A starting fit that cannot be checked is tried once more.** The search
-  begins with one coefficient fit at very light smoothing, or at the
-  `lambda2_init` values you pass. If the solver cannot check that fit, it fits
-  again with every smoothing value set from the data so that each term keeps
-  about half its flexibility, and the search starts from there. On the
-  678,000-row freMTPL2 pure-premium model (Tweedie, monotone BonusMalus curve)
-  this is what lets the fit finish.
-- **Only the starting fit that is kept warns.** superglm's own warnings from
-  a discarded first attempt, such as a `SeparationWarning`, are not shown.
-- **A fit with no checkable start is returned, not refused.** If the second
-  start cannot be checked either, the search does not run. The model is
-  returned at that start's smoothing values with a `ConvergenceWarning` that
-  says what to change, and `model.reml_diagnostics()["termination_reason"]`
-  reads `"bootstrap_uncertified"`. `estimate_p` skips a Tweedie power where
-  this happens.
-- **A start that cannot be scored at all is tried once more too.** If the
-  second start's fit cannot be scored either, for example because its score
-  is not a finite number, `fit_reml` raises an error that says so, and
-  `estimate_p` skips that power.
+A shape-constrained term chooses its smoothing by the same Newton search as
+every other term: the search runs without the constraint, and the
+coefficients are then refitted with it at the chosen smoothing (see
+[Constrain a smooth](constrain-a-smooth.md)). Releases up to 0.41.0 searched
+a shape-constrained `PSpline` on the SCOP engine instead, which is retired; a
+model they fitted still reports its own search in `reml_diagnostics()`.
 
 ### Refitting on similar data
 

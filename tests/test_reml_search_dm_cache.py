@@ -226,11 +226,7 @@ class TestConstrainedGroupsDisableTheCache:
         frame = pd.DataFrame({"x": x})
         from superglm import Constraint
 
-        features = {
-            "x": Spline(
-                kind="ps", n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"
-            )
-        }
+        features = {"x": Spline(kind="ps", n_knots=8, constraint=Constraint.fit.increasing)}
 
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
         model.estimate_p(frame, y, fit_mode="reml", p_bounds=(1.4, 1.6), xatol=0.05)

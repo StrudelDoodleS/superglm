@@ -4,7 +4,6 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -48,7 +47,7 @@ def _make_features(engine: str, n_constrained: int) -> dict[str, object]:
     for j in range(n_constrained):
         name = f"x{j + 1}"
         constraint = Constraint.fit.convex if j % 2 == 0 else Constraint.fit.concave
-        if engine == "scop":
+        if engine == "ps":
             features[name] = PSpline(n_knots=10, constraint=constraint)
         elif engine == "qp":
             features[name] = BSplineSmooth(n_knots=10, constraint=constraint)
@@ -89,35 +88,15 @@ def _run_scenario(scenario: Scenario, *, n: int, seed: int, max_reml_iter: int) 
     return summary, run_id
 
 
-def _plot_step_norms(run, output_path: Path) -> Path | None:
-    if not run.scop_rows:
-        return None
-
-    xs = list(range(1, len(run.scop_rows) + 1))
-    ys = [float(row.get("step_norm", 0.0)) for row in run.scop_rows]
-
-    fig, ax = plt.subplots(figsize=(8.0, 4.8))
-    ax.plot(xs, ys, marker="o", color="#2a9d8f")
-    ax.set_xlabel("SCOP step row index")
-    ax.set_ylabel("step norm")
-    ax.set_title(f"SCOP step norms: {run.run_id}")
-    ax.grid(alpha=0.25)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=160, bbox_inches="tight")
-    plt.close(fig)
-    return output_path
-
-
 def main() -> None:
     os.environ.setdefault("SUPERGLM_DEBUG", "2")
     os.environ.setdefault("SUPERGLM_DEBUG_DIR", str(RESULTS_DIR))
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     scenarios = [
-        Scenario("single_scop_discrete", "scop", True, 1),
-        Scenario("multi_scop_discrete", "scop", True, 2),
-        Scenario("single_scop_exact", "scop", False, 1),
+        Scenario("single_ps_discrete", "ps", True, 1),
+        Scenario("multi_ps_discrete", "ps", True, 2),
+        Scenario("single_ps_exact", "ps", False, 1),
         Scenario("single_qp_discrete", "qp", True, 1),
     ]
 
@@ -146,9 +125,6 @@ def main() -> None:
             title=f"{scenario.name} trajectory",
         )
         print(f"wrote {traj}")
-        step_plot = _plot_step_norms(run, RESULTS_DIR / f"{scenario.name}_scop_steps.png")
-        if step_plot is not None:
-            print(f"wrote {step_plot}")
 
     summary_path = write_reml_debug_summary_csv(summary_rows, SUMMARY_CSV)
     print(f"wrote {summary_path}")

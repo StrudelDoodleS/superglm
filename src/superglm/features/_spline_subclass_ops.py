@@ -40,46 +40,6 @@ def assemble_clamped_knot_vector(spec: Any, interior: NDArray) -> None:
     spec._n_basis = len(spec._knots) - spec.degree - 1
 
 
-def build_scop_reparameterization(
-    spec: Any,
-    basis: NDArray,
-    omega: NDArray,
-):
-    """Build the SCOP reparameterization for shape-constrained P-splines."""
-    del omega
-    from superglm.solvers.scop import build_scop_reparam, build_scop_solver_reparam
-
-    q = spec._n_basis
-    kind = getattr(spec, "constraint_kind", None) or spec.monotone
-    reparam = build_scop_reparam(
-        q,
-        kind=kind,
-        knots=spec._knots,
-        degree=spec.degree,
-        domain=(spec._lo, spec._hi),
-    )
-    drop_dim = 1
-
-    x_sigma = basis @ reparam.Sigma
-    x_shape = x_sigma[:, drop_dim:]
-    col_means = x_shape.mean(axis=0)
-    x_centered = x_shape - col_means
-
-    spec._scop_Sigma = reparam.Sigma
-    spec._scop_null_dim = drop_dim
-    spec._scop_col_means = col_means
-
-    solver_reparam = build_scop_solver_reparam(
-        q,
-        kind=kind,
-        knots=spec._knots,
-        degree=spec.degree,
-        domain=(spec._lo, spec._hi),
-    )
-    scop_penalty = solver_reparam.penalty_matrix()
-    return x_centered, scop_penalty, solver_reparam
-
-
 def build_shape_constraints_raw(spec: Any):
     """Build fit-time shape constraints on raw spline coefficients."""
     kind = spec.constraint_kind

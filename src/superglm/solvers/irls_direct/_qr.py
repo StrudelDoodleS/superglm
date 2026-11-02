@@ -56,7 +56,7 @@ def _centred_rows(X: NDArray, system: CenteredSystem) -> NDArray:
 class _IRLSDirectQRStep(_IRLSDirectStep):
     """The fit's step under ``direct_solve="qr"``: a QR factor of ``[sqrt(W) X~; sqrt(S)]``.
 
-    Taken when the fit has no linear constraints and no SCOP group.  It
+    Taken when the fit has no linear constraints.  It
     materialises the dense ``(n, p)`` design and the penalty's square root once,
     at setup, and keeps them, and the iteration's decomposition, whose truncated
     directions the true-score certificate judges (``certificate_inputs``); it
@@ -102,7 +102,7 @@ class _IRLSDirectQRStep(_IRLSDirectStep):
 
     def certificate_inputs(self) -> tuple:
         """The iteration's decomposition: the certificate judges its truncated directions."""
-        return self._held_rank, None, None, None
+        return self._held_rank, None
 
     def data_rank(self, centered_final: CenteredSystem, W: NDArray) -> RankDecomposition:
         """The retained fit's data rank, from the factor of its weighted, centred dense rows."""

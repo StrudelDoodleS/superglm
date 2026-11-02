@@ -14,7 +14,6 @@ from superglm.features._spline_constraints import (
     build_curvature_difference_constraints,
     curvature_difference_operator,
 )
-from superglm.solvers.scop import build_scop_solver_reparam
 
 
 def _clamped_irregular_knots(q: int, degree: int = 3) -> np.ndarray:
@@ -121,35 +120,6 @@ def test_knot_aware_curvature_rows_match_exact_derivative_on_irregular_knots(
             degree,
         )(grid, nu=2)
     assert np.min(signed_curvature) > 0.0
-
-
-@pytest.mark.parametrize("kind", ["convex", "concave"])
-def test_curvature_scop_retains_free_affine_slope(kind):
-    knots = _clamped_irregular_knots(7)
-    reparam = build_scop_solver_reparam(
-        7,
-        kind=kind,
-        knots=knots,
-        degree=3,
-        domain=(0.0, 1.0),
-    )
-    beta = np.linspace(-0.7, 0.8, reparam.q)
-
-    mapped = reparam.forward(beta)
-    jacobian = reparam.jacobian_diagonal(beta)
-    second_derivative = reparam.second_derivative_diagonal(beta)
-    penalty = reparam.penalty_matrix()
-
-    assert reparam.q == 6
-    assert reparam.free_dim == 1
-    assert mapped[0] == beta[0]
-    assert jacobian[0] == 1.0
-    assert second_derivative[0] == 0.0
-    assert np.all(mapped[1:] > 0.0)
-    np.testing.assert_allclose(jacobian[1:], mapped[1:])
-    np.testing.assert_allclose(second_derivative[1:], mapped[1:])
-    np.testing.assert_array_equal(penalty[0], np.zeros(reparam.q))
-    np.testing.assert_array_equal(penalty[:, 0], np.zeros(reparam.q))
 
 
 def test_bspline_default_curvature_qp_and_exact_certificate_agree():

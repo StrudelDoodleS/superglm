@@ -311,9 +311,7 @@ def compile_predictor_design(
         bin_idx = None
         exposure_agg = None
 
-        constraint_kind = getattr(spec, "constraint_kind", getattr(spec, "monotone", None))
         engine = shape_engine(spec)
-        _scop_discrete = use_discrete and engine == "scop"
 
         if use_discrete:
             n_bins_feat = resolve_discrete_n_bins(name, spec, n_bins_config)
@@ -340,69 +338,7 @@ def compile_predictor_design(
                 monotone_engine = "qp"
                 raw_to_solver_map = projection_penalty
 
-            if _scop_discrete:
-                # ── SCOP monotone + discrete: bin-level centered design ──
-                from superglm.solvers.scop import build_scop_reparam, build_scop_solver_reparam
-
-                q_raw = spec._n_basis
-                raw_reparam = build_scop_reparam(
-                    q_raw,
-                    kind=constraint_kind,
-                    knots=spec._knots,
-                    degree=spec.degree,
-                    domain=(spec._lo, spec._hi),
-                )
-                X_sigma_unique = B_unique @ raw_reparam.Sigma  # (n_bins, K)
-
-                # Center in model-geometry mass: physical retained rows for a
-                # prior contract, literal expanded-row mass for frequency.
-                if feature_build_weight is None:
-                    bin_geometry_mass = np.bincount(
-                        bin_idx,
-                        minlength=len(bin_centers),
-                    )
-                else:
-                    bin_geometry_mass = np.bincount(
-                        bin_idx,
-                        weights=feature_build_weight,
-                        minlength=len(bin_centers),
-                    )
-                drop_dim = 1
-                X_shape_unique = X_sigma_unique[:, drop_dim:]
-                col_means = (X_shape_unique.T @ bin_geometry_mass) / np.sum(
-                    bin_geometry_mass,
-                    dtype=np.float64,
-                )
-                X_centered_unique = X_shape_unique - col_means  # (n_bins, q_eff)
-
-                # Store on spec for predict-time transform
-                spec._scop_Sigma = raw_reparam.Sigma
-                setattr(spec, "_scop_null_dim", drop_dim)
-                spec._scop_col_means = col_means
-
-                solver_reparam = build_scop_solver_reparam(
-                    q_raw,
-                    kind=constraint_kind,
-                    knots=spec._knots,
-                    degree=spec.degree,
-                    domain=(spec._lo, spec._hi),
-                )
-                S_scop = solver_reparam.penalty_matrix()
-                q_eff = X_centered_unique.shape[1]
-
-                infos = [
-                    GroupInfo(
-                        columns=X_centered_unique,  # bin-level centered design
-                        n_cols=q_eff,
-                        penalty_matrix=S_scop,
-                        reparametrize=False,
-                        penalized=True,
-                        scop_reparameterization=solver_reparam,
-                        monotone_engine="scop",
-                    )
-                ]
-
-            elif getattr(spec, "select", False):
+            if getattr(spec, "select", False):
                 n_null = 1
                 n_range = spec._U_range.shape[1]
                 n_combined = n_null + n_range
@@ -589,7 +525,6 @@ def compile_predictor_design(
                     subgroup_type=info.subgroup_name,
                     constraints=info.constraints,
                     monotone_engine=info.monotone_engine,
-                    scop_reparameterization=info.scop_reparameterization,
                 )
             )
             col_offset += n_cols

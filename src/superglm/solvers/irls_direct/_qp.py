@@ -5,12 +5,12 @@ from __future__ import annotations
 import logging
 import math
 import time
+import warnings
 from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm import _held_warnings as held_warnings
 from superglm._roundoff import gamma as _gamma
 from superglm.solvers.constrained_qp import (
     QPResult,
@@ -144,8 +144,7 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
     """The fit's step when a group has linear constraints ``A beta >= b``: an active-set QP.
 
     Chosen where the route is decided (``_IRLSDirectFit._setup_routes``): a
-    constrained fit has no SCOP group (``fit_irls_direct`` refuses the mix) and
-    takes neither the QR route nor the structured one, whose selector refuses
+    constrained fit takes neither the QR route nor the structured one, whose selector refuses
     constrained groups; it has the dense step's state centre and no observed
     curvature.  Each iteration solves the centred normal equations, the
     intercept profiled out, subject to the stacked constraints, warm-started
@@ -307,7 +306,7 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
 
             link, family = fit.link, fit.family
             # fit_irls_direct's frame: _unbounded, propose, run, _fit_irls_direct_once, it
-            held_warnings.warn(
+            warnings.warn(
                 "The coefficient fit stopped early and returns its last "
                 "accepted coefficients, not converged: some rows' linear "
                 "predictor sits at zero, the edge of the "
@@ -350,4 +349,4 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
     def certificate_inputs(self) -> tuple:
         """The constraint rows active at the proposal: the certificate's KKT residual reads them."""
         active_set = self.active_set
-        return None, self.A_all[list(active_set)] if active_set else None, None, None
+        return None, self.A_all[list(active_set)] if active_set else None

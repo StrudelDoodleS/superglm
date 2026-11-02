@@ -638,16 +638,12 @@ def cross_validate(
         converged one from that fold's smoothing parameters
         (``lambda2_init``), so later folds take fewer outer iterations.
         Components a search could not leave from where that fold ended them
-        (frozen as flat by the Newton engines, or held at either flat end by
-        the SCOP engine's suppression holds: residual EDF under 0.05, or a
-        tensor margin whose penalty the other margin covers) start from the
+        (frozen as flat by the Newton engines) start from the
         engine's own bootstrap instead, together with every other component
         of the same penalty block, so a tensor product never starts half
         warm. Each fold still searches
         to its own convergence test; a fold that does not converge warns and
-        reads ``converged=False``. A fold whose SCOP search found no
-        certified mode at its warm start, and started again from its own
-        bootstrap, reads ``warm_started=False``. Set ``False`` to start every fold from the
+        reads ``converged=False``. Set ``False`` to start every fold from the
         engine's own bootstrap. A ``lambda2_init`` in ``fit_kwargs`` takes
         precedence for every fold.
 
@@ -789,10 +785,7 @@ def cross_validate(
             record["effective_df"] = est._result.effective_df
             if fit_mode == "fit_reml":
                 record["n_reml_iter"] = 0 if reml is None else int(reml.n_reml_iter)
-                # a fold whose search retried away from its warm start (a SCOP
-                # bootstrap with no certified mode there) did not start warm
-                kept = None if reml is None else getattr(reml, "warm_start_components", None)
-                record["warm_started"] = warm_this_fold and (kept is None or bool(kept))
+                record["warm_started"] = warm_this_fold
                 # A model with no REML-eligible groups legitimately fits without
                 # smoothing selection (``_reml_result`` is None): nothing to warm-start.
                 if (

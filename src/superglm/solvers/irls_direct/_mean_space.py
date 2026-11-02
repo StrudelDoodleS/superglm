@@ -21,7 +21,6 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._roundoff import EPS as _EPS_FLOAT
-from superglm._roundoff import UNIT_ROUNDOFF as _UNIT_ROUNDOFF_FLOAT
 from superglm._roundoff import gamma as _gamma
 from superglm.solvers.irls_state import (
     _IRLSState,
@@ -103,8 +102,7 @@ class _IRLSDirectMeanSpaceOverlay:
     **The Newton half** acts on the dense, QP and structured steps once the
     certificate engages it (``engaged``); it is available (``available``)
     off the QR route, whose least squares cannot carry a zero-curvature row's
-    score, the SCOP route, which takes its own Newton steps, and the fREML
-    performance iteration.  Its parts:
+    score, and the fREML performance iteration.  Its parts:
 
     - ``newton_rows``: the working rows (L02) on the observed information;
     - ``centred_rhs``: the score in the centred right-hand side, and its
@@ -449,9 +447,8 @@ class _IRLSDirectMeanSpaceOverlay:
           noise, which can only refuse.
 
         **What the step holds** (``inputs``, the step's ``certificate_inputs``):
-        the decomposition its solve holds, the constraint rows active at the
-        iterate, the columns tested in latent coordinates instead, and the
-        latent groups.
+        the decomposition its solve holds and the constraint rows active at the
+        iterate.
 
         **Constraints.** The active rows are the hard constraints ``a' beta >=
         b`` active at the iterate.  A constrained mode is stationary when ``G
@@ -461,20 +458,11 @@ class _IRLSDirectMeanSpaceOverlay:
         in ``[1/2, 1)`` by a power of two and then to unit length: this leaves
         the cone it spans unchanged, and its own units can neither overflow
         nor vanish in the norm.
-
-        **SCOP.** The latent groups pair each shape-constrained group's state
-        with its spec.  A shape-constrained group's coefficients are its
-        latent ``theta``, with ``gamma = forward(theta)``.  Its stationarity is
-        the latent score ``J' B' s - lambda S theta`` (``J = d gamma / d
-        theta``, diagonal).  The groups' latent scores are projected together off the
-        joint directions their Newton step could not resolve, and tested in
-        the same relative form, bar and floor, in the weights' units (a latent
-        penalty that overflows there is refused).
         """
-        dm, lambda2, p, y, weights = fit.dm, fit.lambda2, fit.p, fit.y, fit.weights
+        dm, p, y, weights = fit.dm, fit.p, fit.y, fit.weights
         mode_bar, _penalty_curvature = fit.mode_bar, fit._penalty_curvature
         penalty_matvec, penalty_rounding = fit.penalty_matvec, fit.penalty_rounding
-        held_rank, active_rows, scop_columns, scop_groups = inputs
+        held_rank, active_rows = inputs
         self.last_true_residual = None
         # this state is judged: no truncated direction unless one is found below
         self._judged_truncated = (eta_values, ())
@@ -506,8 +494,6 @@ class _IRLSDirectMeanSpaceOverlay:
             scale = np.sqrt(np.maximum(diagonal, 0.0) / sum_w)
         excluded = np.zeros(p, dtype=bool)
         excluded[list(fit._laplace_excluded)] = True
-        if scop_columns is not None:
-            excluded |= scop_columns
         tiny = float(np.finfo(np.float64).tiny)
         zeta = float(np.sum(np.abs(score))) / math.sqrt(max(sum_w, tiny))
         if active_rows is not None and active_rows.size:
@@ -630,12 +616,11 @@ class _IRLSDirectMeanSpaceOverlay:
         # the directions the factorization this iteration holds truncates,
         # judged on the rows they move (``mode_score.truncated_direction_ratio``):
         # a light row set the relative score sums beside the heavy rows'
-        # rounding.  The gram and qr routes hold one; unconstrained, no SCOP.
+        # rounding.  The gram and qr routes hold one; unconstrained only.
         if (
             held_rank is not None
             and held_rank.parameter_null_basis is not None
             and (active_rows is None or not active_rows.size)
-            and not scop_groups
         ):
             with np.errstate(over="ignore", under="ignore", invalid="ignore"):
                 truncated_ratio, truncated = truncated_direction_ratio(
@@ -670,94 +655,6 @@ class _IRLSDirectMeanSpaceOverlay:
                 # the truncated rows (an ``unresolved_basis`` record)
                 fit.recorder.count("irls_truncated_unresolved")
         resolved = bool(np.max(residual.relative, initial=0.0) <= MODE_RESOLVE_CAP)
-        latent_parts = []
-        for group_state, spec in scop_groups or ():
-            group = spec.group
-            lam = float(lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2)
-            theta = np.asarray(group_state.beta_eff, dtype=np.float64)
-            penalty_matrix = np.asarray(spec.S_scop, dtype=np.float64)
-            with np.errstate(over="ignore", invalid="ignore"):
-                pull = np.ldexp(lam * (penalty_matrix @ theta), -weight_exponent)
-                pull_size = np.ldexp(
-                    lam * (np.abs(penalty_matrix) @ np.abs(theta)), -weight_exponent
-                )
-                pull_diagonal = np.ldexp(lam * np.diag(penalty_matrix), -weight_exponent)
-            # a latent penalty past float64 beside the data's units: refused
-            # (the shape-constrained groups are tested in the weights' units)
-            if not (
-                np.all(np.isfinite(pull))
-                and np.all(np.isfinite(pull_size))
-                and np.all(np.isfinite(pull_diagonal))
-            ):
-                return math.inf, False
-            bins = spec.bin_idx
-            basis = np.asarray(spec.B_scop, dtype=np.float64)
-
-            def by_bin(values: NDArray, bins=bins, basis=basis) -> NDArray:
-                if bins is None:
-                    return values
-                return np.bincount(bins, weights=values, minlength=basis.shape[0])
-
-            jacobian = spec.reparam.jacobian_diagonal(theta)
-            latent_parts.append(
-                (
-                    group_state,
-                    theta,
-                    jacobian * (basis.T @ by_bin(score)) - pull,
-                    jacobian**2 * ((basis**2).T @ by_bin(fisher)) + pull_diagonal,
-                    np.abs(pull),
-                    pull_size,
-                    np.abs(jacobian) * (np.abs(basis).T @ by_bin(np.abs(score))),
-                )
-            )
-        if latent_parts:
-            # The joint step truncates one factor across every SCOP group and
-            # hands each group its own columns of each discarded direction, so
-            # the groups' blocks reassemble row by row into the joint
-            # directions (a group absent here holds zeros in them).  The
-            # concatenated latent score is projected once off their span,
-            # which an SVD finds with its rank (a QR would invent a direction
-            # for a zero block).
-            widths = [part[1].size for part in latent_parts]
-            offsets = np.concatenate(([0], np.cumsum(widths)))
-            blocks = [
-                (k, np.asarray(part[0].discarded_directions, dtype=np.float64))
-                for k, part in enumerate(latent_parts)
-                if part[0].discarded_directions is not None
-                and np.asarray(part[0].discarded_directions).ndim == 2
-                and np.asarray(part[0].discarded_directions).shape[0] > 0
-            ]
-            gradient = np.concatenate([part[2] for part in latent_parts])
-            if blocks:
-                counts = {rows.shape[0] for _, rows in blocks}
-                if len(counts) != 1:  # pragma: no cover - joint-step invariant
-                    raise RuntimeError(
-                        "the joint SCOP step handed its groups different discarded directions"
-                    )
-                directions = np.zeros((counts.pop(), int(offsets[-1])))
-                for k, rows in blocks:
-                    directions[:, offsets[k] : offsets[k + 1]] = rows
-                left, singular, _ = np.linalg.svd(directions.T, full_matrices=False)
-                cutoff = float(np.max(singular, initial=0.0)) * directions.shape[1] * _EPS_FLOAT
-                frozen = left[:, singular > cutoff]
-                gradient = gradient - frozen @ (frozen.T @ gradient)
-            curvature_all = np.concatenate([part[3] for part in latent_parts])
-            pull_all = np.concatenate([part[4] for part in latent_parts])
-            size_all = np.concatenate([part[5] for part in latent_parts])
-            evaluation = np.concatenate([part[6] for part in latent_parts])
-            latent_scale = np.maximum(
-                tiny, zeta * np.sqrt(np.maximum(curvature_all, 0.0)) + pull_all
-            )
-            if np.any(mode_bar * latent_scale <= underflow):
-                return math.inf, False
-            relative = np.abs(gradient) / latent_scale
-            floor = (
-                _gamma(rows_n) * evaluation
-                + _gamma(int(offsets[-1]) + 2) * size_all
-                + _UNIT_ROUNDOFF_FLOAT * size_all
-            ) / latent_scale
-            ratio = max(ratio, float(np.max(relative / np.maximum(mode_bar, floor), initial=0.0)))
-            resolved = resolved and bool(np.max(relative, initial=0.0) <= MODE_RESOLVE_CAP)
         return ratio, resolved
 
     def final(

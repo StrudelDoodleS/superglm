@@ -1081,14 +1081,9 @@ class TestPriorCountingRatesAreQuiet:
 class TestTheContractReachesTheSmoothingParameters:
     """Seams where the contract changes lambda or the published dispersion.
 
-    The Fellner-Schall dispersion denominator in ``reml/efs.py`` is corrected
-    in the same change but is NOT pinned here: ``optimize_efs_reml`` runs only
-    when ``use_direct`` is false, which needs ``lam1 > 0``, and ``fit_reml()``
-    refuses selection penalties outright -- so no public call reaches it. The
-    correction stands on the arithmetic (a dispersion denominator must be the
-    contract's likelihood size, exactly as everywhere else) rather than on a
-    regression.  ``reml/runner.py`` carried the same denominator and was
-    deleted unreached, for the same reason.
+    ``fit_reml()`` refuses selection penalties, so the Fellner-Schall route a
+    selection penalty would have needed is gone; every seam here is the
+    Newton REML path.
     """
 
     def test_reml_replication_identity_holds_where_lambda_is_identified(self):

@@ -72,16 +72,6 @@ class TestSplineAPIParams:
         with pytest.raises(TypeError):
             Spline(monotone="increasing", monotone_mode="invalid")
 
-    def test_monotone_fit_mode_builds_scop(self):
-        """PSpline with shape_engine='scop' builds the SCOP reparameterization."""
-        from superglm.features.spline import PSpline
-
-        s = PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop")
-        x = np.linspace(0, 1, 200)
-        info = s.build(x)
-        assert info.scop_reparameterization is not None
-        assert info.monotone_engine == "scop"
-
     def test_monotone_ns_rejected(self):
         with pytest.raises(NotImplementedError, match="constraint is not supported for kind='ns'"):
             Spline(kind="ns", constraint=Constraint.fit.increasing)

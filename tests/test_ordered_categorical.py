@@ -16,7 +16,6 @@ from superglm import (
     collapse_levels,
 )
 from superglm.constraints import shape_constraint_certificate
-from superglm.features.factor_smooth import FactorSmoothGroupTermWarning
 
 # ── Fixtures ──────────────────────────────────────────────────────
 
@@ -1031,79 +1030,6 @@ class TestOrderedCategoricalShapeDispatch:
         steps = np.diff(after)
         assert np.all(steps >= -_monotone_slack(after)), f"not increasing: {steps}"
         assert "band" in model._shape_repairs
-
-    def test_structured_guard_resolves_the_engine_through_the_wrapper(self, dipping_ordinal_data):
-        """The wrapper must not change which engine the guard thinks it holds.
-
-        ``OrderedCategorical`` delegates its build to an inner spline, so the
-        inner basis picks the engine -- ``ps`` routes through SCOP. The wrapper
-        itself defines ``_build_monotone_constraints_raw`` unconditionally, so
-        that the builder can find raw geometry through it, and defines no SCOP
-        method at all. Asking the WRAPPER therefore reads QP for every basis,
-        including the SCOP ones.
-
-        The case below is the one where that misreading would do damage. An
-        ordinal feature is the only way a *categorical* column carries a shape
-        constraint, and a factor smooth grouped by that column duplicates its
-        effect through the per-level null-space blocks. So ``ps`` on SCOP must be
-        refused and ``cr`` -- a QP engine, which pairs with a factor smooth
-        normally -- must fit. Both are real, buildable models, and the outcome
-        differs only because the wrapper was resolved to its inner spline.
-
-        This test formerly asserted that a wrapped constraint beside a
-        ``RandomEffect`` was refused. That refusal was withdrawn: a variance
-        component and a smoothing parameter are one object to the extended
-        Fellner-Schall update (Wood & Fasiolo, 2017).
-        """
-        from superglm import FactorSmooth, RandomEffect
-        from superglm.features.spline import Spline
-
-        rng = np.random.default_rng(0)
-        n, n_levels = 1500, 10
-        levels = [f"L{index:02d}" for index in range(n_levels)]
-        codes = rng.integers(0, n_levels, n)
-        x = rng.uniform(0.0, 1.0, n)
-        y = 0.25 * codes + np.sin(3.0 * x) + rng.normal(0.0, 0.3, n)
-        X = pd.DataFrame({"x": x, "g": [levels[code] for code in codes]})
-
-        def band(kind):
-            engine = "scop" if kind == "ps" else "qp"
-            return OrderedCategorical(
-                order=levels,
-                basis=Spline(
-                    kind=kind, n_knots=6, constraint=Constraint.fit.increasing, shape_engine=engine
-                ),
-            )
-
-        def grouped_factor_smooth(kind):
-            # 0.40 fitted this; it keeps fitting, with a warning that the term is redundant.
-            with pytest.warns(FactorSmoothGroupTermWarning, match=r"term on 'g' is redundant"):
-                return SuperGLM(
-                    family="gaussian",
-                    features={"g": band(kind)},
-                    interactions=[FactorSmooth("x", group="g", basis="fs", k=5)],
-                )
-
-        with pytest.raises(NotImplementedError, match=r"stated twice"):
-            grouped_factor_smooth("ps").fit_reml(X, y)
-
-        qp_model = grouped_factor_smooth("cr")
-        qp_model.fit_reml(X, y)
-        assert qp_model.result.converged
-
-        # Either engine pairs with a random effect, and neither is refused. The
-        # grouping is drawn independently of ``g``: nesting it inside the
-        # constrained ordinal would confound the two terms and test the fixture
-        # rather than the guard.
-        independent = rng.integers(0, 6, n)
-        frame = X.assign(grp2=[f"r{code}" for code in independent])
-        for kind in ("ps", "cr"):
-            model = SuperGLM(
-                family="gaussian",
-                features={"g": band(kind), "grp2": RandomEffect()},
-            )
-            model.fit_reml(frame, y)
-            assert model.result.converged
 
     @pytest.mark.parametrize("basis", ["piecewise", "polynomial"])
     def test_postfit_repair_refuses_a_basis_with_no_curve_geometry(self, basis):

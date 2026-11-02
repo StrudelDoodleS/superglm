@@ -1,5 +1,3 @@
-from functools import partial
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -8,7 +6,6 @@ from superglm import (
     BSplineSmooth,
     Constraint,
     FactorSmooth,
-    NegativeBinomial,
     PSpline,
     RandomEffect,
     Spline,
@@ -18,7 +15,6 @@ from superglm.constraints import (
     shape_constraint_certificate,
     shape_constraint_is_roundoff_feasible,
 )
-from superglm.features.factor_smooth import FactorSmoothGroupTermWarning
 
 
 def test_qp_convex_fit_reml_auto_lambda_constrained_refit():
@@ -53,7 +49,7 @@ def test_scop_concave_fit_reml_discrete_estimates_lambda():
     model = SuperGLM(
         family="gaussian",
         discrete=True,
-        features={"x": PSpline(n_knots=10, constraint=Constraint.fit.concave, shape_engine="scop")},
+        features={"x": PSpline(n_knots=10, constraint=Constraint.fit.concave)},
     ).fit_reml(df, y)
 
     assert model._reml_lambdas["x"] > 0.0
@@ -86,7 +82,6 @@ def test_scop_fit_reml_recovers_both_slope_orientations(
             "x": PSpline(
                 n_knots=10,
                 constraint=getattr(Constraint.fit, kind),
-                shape_engine="scop",
             )
         },
     ).fit_reml(frame, y)
@@ -266,81 +261,6 @@ def _scop_factor_smooth_frame():
     ), 0.3 + 0.7 * x + 0.2 * rng.normal(size=len(x))
 
 
-def test_scop_constraint_rejects_a_main_effect_factor_smooth_of_the_same_variable() -> None:
-    """The one specification with no converging path -- and it is a spec, not a pair.
-
-    A ``basis="fs"`` factor smooth carries its own main effect. Put one on a
-    variable that also has a SCOP shape constraint and the model states that
-    variable's effect twice: once confined to the shape cone, once free. The
-    free copy absorbs what the constrained copy may not do, the two compensate,
-    and no coefficient mode is reached -- measured 0/7 across seed, rows, level
-    count and basis size, where every adjacent specification is 7/7.
-
-    An earlier form of this refusal covered ``basis="sz"`` and factor smooths of
-    other variables as well. That was generalised from a sweep which varied the
-    data but never the specification, so all of its cases were this one.
-    """
-    X, y = _scop_factor_smooth_frame()
-    model = SuperGLM(
-        family="gaussian",
-        features={
-            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing, shape_engine="scop")
-        },
-        interactions=[FactorSmooth("x", group="group", basis="fs", k=5)],
-        direct_solve="auto",
-    )
-
-    with pytest.raises(NotImplementedError, match=r"stated twice"):
-        model.fit_reml(X, y)
-
-
-def test_scop_constraint_rejects_a_factor_smooth_grouped_by_the_constrained_column() -> None:
-    """The duplication is reachable on the factor smooth's OTHER parent too.
-
-    A factor smooth spans two columns. Along ``variable`` the free copy of the
-    effect is the marginal smooth; along ``group`` it is the per-level
-    null-space blocks, which are a per-level effect of the grouping column. So
-    constraining the *grouping* column duplicates just as constraining the
-    smoothed one does -- reachable when the grouping column carries an
-    ``OrderedCategorical`` SCOP constraint, since that is what lets a
-    categorical column be shape-constrained at all.
-
-    Measured 0/6 across seed, rows, level count and basis size. A guard keyed on
-    ``spec.variable`` alone passes this straight through to that failure, which
-    is what an earlier form of this change did.
-    """
-    from superglm import OrderedCategorical
-
-    rng = np.random.default_rng(0)
-    n, n_levels = 1500, 10
-    levels = [f"L{index:02d}" for index in range(n_levels)]
-    codes = rng.integers(0, n_levels, n)
-    x = rng.uniform(0.0, 1.0, n)
-    y = 0.25 * codes + np.sin(3.0 * x) + rng.normal(0.0, 0.3, n)
-    X = pd.DataFrame({"x": x, "g": [levels[code] for code in codes]})
-
-    # 0.40 fitted this; it keeps fitting, with a warning that the term is redundant.
-    with pytest.warns(FactorSmoothGroupTermWarning, match=r"term on 'g' is redundant"):
-        model = SuperGLM(
-            family="gaussian",
-            features={
-                "g": OrderedCategorical(
-                    order=levels,
-                    basis=Spline(
-                        kind="ps",
-                        n_knots=6,
-                        constraint=Constraint.fit.increasing,
-                        shape_engine="scop",
-                    ),
-                )
-            },
-            interactions=[FactorSmooth("x", group="g", basis="fs", k=5)],
-        )
-
-    with pytest.raises(NotImplementedError, match=r"stated twice"):
-        model.fit_reml(X, y)
-
-
 @pytest.mark.parametrize(
     ("features_for", "interaction_for", "case"),
     [
@@ -361,9 +281,7 @@ def test_scop_constraints_fit_beside_a_non_duplicating_factor_smooth(
     cases the wider refusal was taking with it.
     """
     X, y = _scop_factor_smooth_frame()
-    features = {
-        features_for: PSpline(n_knots=7, constraint=Constraint.fit.increasing, shape_engine="scop")
-    }
+    features = {features_for: PSpline(n_knots=7, constraint=Constraint.fit.increasing)}
     if interaction_for != features_for:
         features[interaction_for] = PSpline(n_knots=7)
     model = SuperGLM(
@@ -374,44 +292,6 @@ def test_scop_constraints_fit_beside_a_non_duplicating_factor_smooth(
     )
     model.fit_reml(X, y)
     assert model.result.converged
-
-
-def test_structured_fit_constraint_preflight_runs_before_nb_theta_profile(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from superglm.model import fit_ops
-
-    x = np.linspace(0.0, 1.0, 160)
-    codes = np.arange(len(x)) % 40
-    X = pd.DataFrame(
-        {
-            "x": x,
-            "group": np.array([f"g{code}" for code in codes], dtype=object),
-        }
-    )
-    y = np.resize(np.array([1.0, 2.0, 3.0, 4.0]), len(x))
-    model = SuperGLM(
-        family=NegativeBinomial(theta="auto"),
-        features={
-            "x": PSpline(
-                n_knots=7,
-                constraint=Constraint.fit.increasing,
-                shape_engine="scop",
-            ),
-        },
-        interactions=[FactorSmooth("x", group="group", k=5)],
-    )
-
-    def unexpected_theta_profile(*_args, **_kwargs):
-        raise AssertionError("NB theta profiling must not run before the shape preflight")
-
-    monkeypatch.setattr(fit_ops, "_maybe_estimate_nb_theta", unexpected_theta_profile)
-
-    with pytest.raises(
-        NotImplementedError,
-        match=r"fit-time SCOP shape constraints.*FactorSmooth",
-    ):
-        model.fit_reml(X, y)
 
 
 def test_scop_constraints_fit_alongside_a_random_effect() -> None:
@@ -441,7 +321,7 @@ def test_scop_constraints_fit_alongside_a_random_effect() -> None:
     model = SuperGLM(
         family="gaussian",
         features={
-            "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
+            "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
             "group": RandomEffect(),
         },
     )
@@ -462,7 +342,6 @@ def test_scop_constraints_fit_alongside_a_random_effect() -> None:
     [
         pytest.param(BSplineSmooth, 1e-12, id="qp-engine"),
         pytest.param(PSpline, 1e-12, id="ps-qp-engine"),
-        pytest.param(partial(PSpline, shape_engine="scop"), 1e-3, id="scop-engine"),
     ],
 )
 def test_slack_constraint_with_a_random_effect_reproduces_the_free_fit(
@@ -476,24 +355,14 @@ def test_slack_constraint_with_a_random_effect_reproduces_the_free_fit(
     unconstrained one -- variance component included, that being the quantity a
     shape constraint has no business perturbing.
 
-    The two engines earn different bars, and the difference is structural rather
-    than a tolerance chosen for comfort:
-
-    * QP, a ``bs`` term or a default ``PSpline``, reaches the free fit **exactly**. Its automatic-lambda path is an
-      unconstrained REML pass followed by a constrained refit, so a slack
-      constraint makes the refit a no-op: measured ``0`` on the variance
-      component and ``2.1e-16`` on the deviance across five seeds, i.e. pure
-      round-off. ``1e-12`` is that with room, and would catch any real drift.
-      Note ``pytest.approx`` keeps its default ``abs=1e-12`` alongside ``rel``,
-      so on a variance component of order 0.3 the effective bar is that absolute
-      floor rather than ``3e-13`` -- still four orders inside the measurement.
-    * SCOP reaches it only to ``~1e-4``, because the two arms are optimized by
-      *different routines* -- the free arm by ``optimize_reml_best``, the
-      constrained one by ``run_scop_efs_reml`` -- which stop at slightly
-      different lambdas. Measured worst case over the same five seeds is
-      ``1.13e-4`` on the variance component and ``8.4e-5`` on the deviance;
-      ``1e-3`` is an order of magnitude above that and still an order below the
-      perturbation this control exists to detect.
+    The QP engine, for a ``bs`` term or a ``PSpline``, reaches the free fit
+    **exactly**. Its automatic-lambda path is an unconstrained REML pass followed by a constrained refit, so a slack
+    constraint makes the refit a no-op: measured ``0`` on the variance
+    component and ``2.1e-16`` on the deviance across five seeds, i.e. pure
+    round-off. ``1e-12`` is that with room, and would catch any real drift.
+    Note ``pytest.approx`` keeps its default ``abs=1e-12`` alongside ``rel``,
+    so on a variance component of order 0.3 the effective bar is that absolute
+    floor rather than ``3e-13`` -- still four orders inside the measurement.
     """
     rng = np.random.default_rng(5)
     n, n_levels = 1200, 20

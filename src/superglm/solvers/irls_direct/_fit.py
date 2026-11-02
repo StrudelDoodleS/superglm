@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+import warnings
 from collections.abc import Callable
 from dataclasses import KW_ONLY, dataclass, replace
 from functools import partial
@@ -16,7 +17,6 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm import _held_warnings as held_warnings
 from superglm._fit_trace import TraceRun
 from superglm._group_matrix._group_matrix_tabmat import (
     _defer_raw_spline_tabmat_plan,
@@ -61,12 +61,6 @@ from superglm.solvers.irls_direct._mean_space import _IRLSDirectMeanSpaceOverlay
 from superglm.solvers.irls_direct._qp import _QP_FEASIBILITY_TOL, _IRLSDirectQPStep
 from superglm.solvers.irls_direct._qr import _IRLSDirectQRStep
 from superglm.solvers.irls_direct._recorder import _IRLSDirectRecorder
-from superglm.solvers.irls_direct._scop import (
-    SCOPRunCentring,
-    _carry_refusals,
-    _IRLSDirectSCOPStep,
-    _seed_refusals,
-)
 from superglm.solvers.irls_direct._search import _IRLSDirectTrialSearch
 from superglm.solvers.irls_direct._step import _IRLSDirectStep
 from superglm.solvers.irls_direct._structured import _IRLSDirectStructuredStep
@@ -191,28 +185,6 @@ def _safe_decompose_H(H: NDArray, residual_tol: float = 1e-6) -> tuple[NDArray, 
     return decomposition.pseudo_inverse(), decomposition.log_pdet, cholesky_ok
 
 
-def _refuse_scop_with_linear_constraints(groups: list[GroupSlice]) -> None:
-    """Refuse a fit with both shape-constrained (SCOP) and linearly constrained groups.
-
-    The SCOP step takes one Newton step on every coefficient and has no
-    constrained QP, so a linear constraint beside it would be checked at the
-    end but never enforced by a step.  Every fit entry point refuses the mix;
-    the solver refuses it as well, so each fit has exactly one step method.
-    """
-    shaped = [group.name for group in groups if group.monotone_engine == "scop"]
-    bounded = [group.name for group in groups if group.constraints is not None]
-    if shaped and bounded:
-        raise NotImplementedError(
-            "fit_irls_direct cannot fit shape-constrained (SCOP) groups and linearly "
-            f"constrained groups together: {', '.join(map(repr, shaped))} "
-            f"{'is' if len(shaped) == 1 else 'are'} shape-constrained and "
-            f"{', '.join(map(repr, bounded))} {'has' if len(bounded) == 1 else 'have'} "
-            "linear constraints. Use one constraint method for every constrained term "
-            "(all of them PSplines, which use SCOP, or none of them), or drop one of the "
-            "constraints."
-        )
-
-
 def fit_irls_direct(
     X: NDArray | DesignMatrix,
     y: NDArray,
@@ -234,8 +206,6 @@ def fit_irls_direct(
     convergence: str = "deviance",
     S_override: NDArray | None = None,
     reml_penalties: list[PenaltyComponent] | None = None,
-    return_scop_state: bool = False,
-    scop_state_init: dict[int, dict] | None = None,
     debug_recorder=None,
     debug_context: dict[str, object] | None = None,
     compute_rank_info: bool = True,
@@ -249,14 +219,12 @@ def fit_irls_direct(
     _deviance_init: float | None = None,
     trace_run: TraceRun | None = None,
     trace_purpose: str = "fit",
-    _compute_scop_postfit_inference: bool = True,
     separation: str = "warn",
     *,
     weight_semantics: str,
     _initial_data_reuse: _InitialDataReuse | None = None,
     _raw_moment_policy: TabmatCenteringState | None = None,
     _fisher_data_reuse: _FisherDataReuse | None = None,
-    _scop_run_centring: SCOPRunCentring | None = None,
     _laplace_excluded: tuple[int, ...] = (),
     _mode_bar: float | None = None,
     _compensate_centred_intercept: bool = True,
@@ -268,15 +236,12 @@ def fit_irls_direct(
     A structured factor that cannot proceed raises ``StructuredSolverError``
     under every ``direct_solve`` (one-engine design §6, decision 6): no fit is
     rerun on another solver.  A Fisher-data reuse cache is cleared when the
-    fit fails or ends unconverged.  Shape-constrained (SCOP) groups and
-    linearly constrained groups are refused together
-    (``_refuse_scop_with_linear_constraints``).
+    fit fails or ends unconverged.
     """
     result = None
     try:
         if max_iter < 1:
             raise ValueError(f"max_iter must be at least 1, got {max_iter}")
-        _refuse_scop_with_linear_constraints(groups)
         result = _fit_irls_direct_once(
             X=X,
             y=y,
@@ -298,8 +263,6 @@ def fit_irls_direct(
             convergence=convergence,
             S_override=S_override,
             reml_penalties=reml_penalties,
-            return_scop_state=return_scop_state,
-            scop_state_init=scop_state_init,
             debug_recorder=debug_recorder,
             debug_context=debug_context,
             compute_rank_info=compute_rank_info,
@@ -313,13 +276,11 @@ def fit_irls_direct(
             _deviance_init=_deviance_init,
             trace_run=trace_run,
             trace_purpose=trace_purpose,
-            _compute_scop_postfit_inference=_compute_scop_postfit_inference,
             separation=separation,
             weight_semantics=weight_semantics,
             _initial_data_reuse=_initial_data_reuse,
             _raw_moment_policy=_raw_moment_policy,
             _fisher_data_reuse=_fisher_data_reuse,
-            _scop_run_centring=_scop_run_centring,
             _laplace_excluded=_laplace_excluded,
             _mode_bar=_mode_bar,
             _compensate_centred_intercept=_compensate_centred_intercept,
@@ -483,7 +444,6 @@ class _IRLSDirectCurvaturePolicy:
         return_working_system: bool,
         latch: list[bool] | None,
         has_constraints: bool,
-        has_scop: bool,
         use_structured: bool,
     ) -> None:
         # Laplace-approximate REML is built on the observed Hessian, so its PIRLS
@@ -516,10 +476,6 @@ class _IRLSDirectCurvaturePolicy:
         # Newton rows when its optimizer asks (``_working_newton``): the discrete
         # route's working model then carries the observed curvature its REML
         # criterion is (``reml.discrete``).
-        # A shape-constrained (SCOP) fit takes the same rows: its joint Newton
-        # step is Pya & Wood's (2015, Appendix 1) full Newton on the observed
-        # information, and the REML geometry it hands on reads Fisher rows at the
-        # retained model either way.
         constant_weights = _has_constant_irls_weights(family, link)
         observed = bool(
             use_observed_newton
@@ -533,7 +489,6 @@ class _IRLSDirectCurvaturePolicy:
         stagnation_newton_available = bool(
             use_observed_newton
             and not has_constraints
-            and not has_scop
             and not return_working_system
             and supports_observed_newton(family, link)
             and not observed
@@ -543,9 +498,7 @@ class _IRLSDirectCurvaturePolicy:
         self.observed = observed
         self.stagnation_newton_available = stagnation_newton_available
         # Observed rows are not the constant Fisher weights this reuse assumes.
-        self.weighted_gram_reuse = (
-            constant_weights and not has_scop and not use_structured and not observed
-        )
+        self.weighted_gram_reuse = constant_weights and not use_structured and not observed
         self._latch = latch
         self._family, self._link, self._y, self._weights = family, link, y, weights
 
@@ -567,7 +520,7 @@ class _IRLSDirectCurvaturePolicy:
         One-engine design §3.11: finiteness is the one condition the declared
         observed rows keep; a trial without finite rows is not a state the
         next Newton step can start from. Every line search of an observed fit
-        reads it, the SCOP one included.
+        reads it.
         """
         rows = coefficient_working_rows(
             distribution=self._family,
@@ -612,7 +565,7 @@ class _IRLSDirectFitFields:
         " _direct_fallback_reason _state_center beta intercept _start_lowered S"
         " _penalty_curvature"
         # _setup_routes
-        " qp _scop_run _has_scop curvature"
+        " qp curvature"
         # _setup_systems
         " mean_space _constant_centered_cache _constant_centered_z"
         " certify_centered_factor authoritative_gram_rank _initial_data_key _tabmat_split"
@@ -724,11 +677,10 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         offset.  Ignored without ``beta_init`` (the state's own ``beta``) or
         when ``intercept_init`` is not the start.
     _compute_reml_geometry : bool
-        Internal SCOP-candidate switch. If False, omit the generic profiled
-        slope inverse, determinant, and rank because the caller replaces them
-        with one joint latent-coordinate LAML geometry. This requires both
-        retained rank metadata and fit statistics to be disabled. Public and
-        terminal fits must leave this True.
+        Internal switch. If False, omit the generic profiled slope inverse,
+        determinant, and rank. This requires both retained rank metadata and
+        fit statistics to be disabled. Public and terminal fits must leave
+        this True.
     _newton_latch : list of one bool, optional
         Internal, shared by the PIRLS solves of one REML fit.  A Gamma/log
         solve that switched from Fisher to Newton sets it, and a later solve
@@ -745,10 +697,9 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
     _use_observed_newton : bool
         Internal curvature switch. When enabled, a fit whose observed
         information is supported and whose Fisher weights vary (Tweedie/log)
-        takes exact observed-Newton steps on every iteration, a
-        shape-constrained (SCOP) fit's joint Newton step included; a Gamma/log
-        fit, whose Fisher weights are constant, starts on Fisher scoring and,
-        without SCOP groups, switches to Newton only when its resolved score
+        takes exact observed-Newton steps on every iteration; a Gamma/log
+        fit, whose Fisher weights are constant, starts on Fisher scoring and
+        switches to Newton only when its resolved score
         is measured to stall (``_IRLSDirectCurvaturePolicy``) or when
         ``_newton_latch`` is set; no rejected step switches the curvature
         (one-engine design §3.11). As to this switch, unsupported pairs and
@@ -761,9 +712,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
     _deviance_init : float, optional
         Previously evaluated deviance at ``beta_init``/``intercept_init``.
         Used by private fREML steps to avoid repeating a full response scan.
-    _compute_scop_postfit_inference : bool
-        Internal SCOP EFS switch. Candidate modes leave this False; the
-        terminal/public mode installs covariance and EDF exactly once.
     record_diagnostics : bool
         If True, record per-iteration W/mu/eta stats on the result.
     S_override : (p, p) ndarray, optional
@@ -800,8 +748,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
     convergence: str = "deviance"
     S_override: NDArray | None = None
     reml_penalties: list[PenaltyComponent] | None = None
-    return_scop_state: bool = False
-    scop_state_init: dict[int, dict] | None = None
     debug_recorder: Any = None
     debug_context: dict[str, object] | None = None
     compute_rank_info: bool = True
@@ -815,14 +761,12 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
     _deviance_init: float | None = None
     trace_run: TraceRun | None = None
     trace_purpose: str = "fit"
-    _compute_scop_postfit_inference: bool = True
     separation: str = "warn"
     _: KW_ONLY
     weight_semantics: str
     _initial_data_reuse: _InitialDataReuse | None = None
     _raw_moment_policy: TabmatCenteringState | None = None
     _fisher_data_reuse: _FisherDataReuse | None = None
-    _scop_run_centring: SCOPRunCentring | None = None
     _laplace_excluded: tuple[int, ...] = ()
     _mode_bar: float | None = None
     _compensate_centred_intercept: bool = True
@@ -837,8 +781,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         recorder.start()
         self._setup_loop()
         step, stop_rule = self.step, self.stop_rule
-        # the step's own line search, or the shared one
-        search = self.trial_search.search if step.search is None else step.search
+        search = self.trial_search.search
         for it in range(self.max_iter):
             self._working(it)
             if step.propose(self, it):
@@ -1219,11 +1162,10 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             lambdas=recorder.resolved_lambdas,
             eta_clock=recorder.eta_formed,
         )
-        if not self._has_scop:
-            state = replace(
-                state,
-                penalized_deviance=float(state.deviance + self.penalty_quadratic(state.beta)),
-            )
+        state = replace(
+            state,
+            penalized_deviance=float(state.deviance + self.penalty_quadratic(state.beta)),
+        )
         if centred_intercept is not None:
             state = replace(state, centred_intercept=float(centred_intercept))
         if emit_trace:
@@ -1251,13 +1193,9 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         if qp is not None:
             self.step = qp
 
-        # ── SCOP monotone engine support ──
-        _has_scop = any(g.monotone_engine == "scop" for g in groups)
-        self._scop_run: SCOPRunCentring | None = None
         if (
             _state_center is None
             and not self._use_structured
-            and not _has_scop
             and hasattr(self.dm, "group_matrices")
         ):
             # The nested chain's centred state on gram's centred system too: eta
@@ -1268,15 +1206,10 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             # 1e-11 relative, so no Newton step near the mode was accepted and
             # the score stalled at 1e-6).
             _state_center = prior_weighted_centre(self.dm, self.weights)
-        _scop_curvature = "fisher"
-        if _has_scop:
-            from superglm.reml.observed_geometry import classify_scop_reml_curvature
-
-            _scop_curvature = classify_scop_reml_curvature(family, link)
         if compute_rank_info and self._defer_rank_info is not None:
             raise ValueError("deferred rank metadata requires compute_rank_info=False")
         if (not self._compute_fit_statistics and compute_rank_info) or (
-            _return_working_system and (compute_rank_info or has_constraints or _has_scop)
+            _return_working_system and (compute_rank_info or has_constraints)
         ):
             raise ValueError("intermediate REML shortcuts require rank metadata to be disabled")
         if not self._compute_reml_geometry and (compute_rank_info or self._compute_fit_statistics):
@@ -1296,43 +1229,36 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             return_working_system=_return_working_system,
             latch=self._newton_latch,
             has_constraints=has_constraints,
-            has_scop=_has_scop,
             use_structured=self._use_structured,
         )
-        self._has_scop = _has_scop
         self._state_center = _state_center
-        if _has_scop:
-            # The step is chosen with its route.  Its setup evaluates the start,
-            # so it follows every field the evaluation reads.
-            self.step = _IRLSDirectSCOPStep(self, _scop_curvature)
 
     def _setup_systems(self) -> None:
         dm, family, link, groups, gms = self.dm, self.family, self.link, self.groups, self.gms
-        has_constraints, _has_scop = self.qp is not None, self._has_scop
+        has_constraints = self.qp is not None
         _use_structured, _raw_moment_policy = self._use_structured, self._raw_moment_policy
         _fisher_data_reuse = self._fisher_data_reuse
         # The fit's one step method, chosen here unless it is structured
-        # (``_setup_design``), QP or SCOP (``_setup_routes``): QR materialises the
+        # (``_setup_design``) or QP (``_setup_routes``): QR materialises the
         # full design once.
-        # Constrained QP / SCOP requires Gram path — force it if constraints present;
+        # Constrained QP requires Gram path — force it if constraints present;
         # a design with no columns has nothing to factor, and the Gram path solves
         # its intercept
-        _use_qr = self.direct_solve == "qr" and self.p > 0 and not has_constraints and not _has_scop
+        _use_qr = self.direct_solve == "qr" and self.p > 0 and not has_constraints
         # The binomial/log mean space's overlay, ``None`` for a family and link
         # whose means cannot leave their space: its certificate judges every
         # route, and its Newton steps are available off the QR route (whose
-        # least squares cannot carry a zero-curvature row's score), the SCOP
-        # route (which takes its own Newton steps) and the fREML performance
-        # iteration.
+        # least squares cannot carry a zero-curvature row's score) and the fREML
+        # performance iteration.
         self.mean_space = (
             None
             if mean_space_violation(family, link) is None
             else _IRLSDirectMeanSpaceOverlay(
-                available=not (_use_qr or _has_scop or self._return_working_system),
+                available=not (_use_qr or self._return_working_system),
                 start_lowered=self._start_lowered,
             )
         )
-        if not (_use_structured or has_constraints or _has_scop):
+        if not (_use_structured or has_constraints):
             self.step: _IRLSDirectStep = (
                 _IRLSDirectQRStep(gms, self.S, self.p) if _use_qr else _IRLSDirectDenseStep()
             )
@@ -1372,8 +1298,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         _tabmat_centering_state = TabmatCenteringState(
             raw_spline_eligible=False if _defer_raw_spline else None
         )
-        if self._scop_run is not None:
-            _seed_refusals(_tabmat_centering_state, self._scop_run.full_refusals)
         fixed_owners = ()
         if _raw_moment_policy is not None or _fisher_data_reuse is not None:
             # A negative route choice is safe for changed W; no accepted preflight,
@@ -1400,7 +1324,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     )
                     for group in groups
                 )
-                and not (_use_qr or _use_structured or _has_scop)
+                and not (_use_qr or _use_structured)
                 and self.debug_recorder is None
                 and self.trace_run is None
                 else ()
@@ -1441,7 +1365,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 )
                 for gm in gms
             )
-            and not (_use_qr or _use_structured or has_constraints or _has_scop)
+            and not (_use_qr or _use_structured or has_constraints)
             and self.debug_recorder is None
             and self.trace_run is None
         )
@@ -1517,8 +1441,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         )
         if fisher is not None and fisher.data is None:
             fisher.remember(W_current, system)
-        if self._scop_run is not None:
-            _carry_refusals(self._scop_run.full_refusals, _tabmat_centering_state)
         if (
             self._raw_moment_policy is not None
             and _tabmat_centering_state.raw_moment_eligible is False
@@ -1548,15 +1470,14 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         # iterate each solve linearised about -- (mean_x, sum_w, centred diagonal,
         # coefficients the factor truncated as weakly identified, mean_x less the
         # state's centre or None without one) -- or None on a
-        # route that forms no centred system (SCOP, linear constraints), which
+        # route that forms no centred system (linear constraints), which
         # keeps the coefficient-step test.
         self._score_centre: tuple | None = None
         # the certificate's bar (``mode_score.mode_certification_bar``): the REML
         # fit passes the one its stopping tolerance needs
         mode_bar = MODE_CERTIFICATION_BAR if self._mode_bar is None else float(self._mode_bar)
         self.stop_rule = _IRLSDirectConvergence(self.max_iter, mode_bar)
-        # the shared line search, unless the step searches its own way
-        self.trial_search = _IRLSDirectTrialSearch() if self.step.search is None else None
+        self.trial_search = _IRLSDirectTrialSearch()
         # A warm start's centred state carried to this fit's centre (one-engine
         # design §3.8): alpha + (X - 1 c_warm') beta = alpha_c + (X - 1 c') beta
         # gives alpha_c = alpha + fsum((c - c_warm) beta), exact on every column
@@ -1577,19 +1498,14 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     (_state_center - warm_centre) * self.beta
                 )
         # Freeze the fit-entry state so iteration-one trial safety has a baseline.
-        # A step with its own entry state traces that state, not this one.
-        initial_state = self.step.initial_state
         committed = self.evaluate_state(
             self.beta,
             self.intercept,
             phase="initial",
             iteration=0,
             deviance=self._deviance_init,
-            emit_trace=initial_state is None,
             centred_intercept=centred_start,
         )
-        if initial_state is not None:
-            committed = initial_state(self, committed)
         self.recorder.emit_state_commit(
             committed,
             iteration=0,
@@ -1751,7 +1667,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     if self.separation == "error":
                         raise SeparationError(message)
                     # fit_irls_direct's frame: _finish, run, _fit_irls_direct_once, it
-                    held_warnings.warn(message, SeparationWarning, stacklevel=4)
+                    warnings.warn(message, SeparationWarning, stacklevel=4)
 
         if qp is not None:
             if not qp.feasible(beta):
@@ -1781,7 +1697,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
 
             converged, termination_reason = False, "link_domain_infeasible"
             # fit_irls_direct's frame: _finish, run, _fit_irls_direct_once, it
-            held_warnings.warn(
+            warnings.warn(
                 "The coefficient fit returns its last iterate, not converged: some rows' "
                 f"linear predictor lies outside the range the {type(link).__name__} allows "
                 f"a {type(family).__name__} mean. This link may not suit these data; a log "
@@ -1801,7 +1717,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         self.converged, self.termination_reason = converged, termination_reason
 
     def _terminal_rows(self) -> None:
-        W, z, terminal = self.W, self.z, self.step.terminal
+        W, z = self.W, self.z
         # Every public/exported matrix and rank claim is evaluated at the retained
         # model. Private fREML performance iterations deliberately reuse the
         # working system used for their one coefficient update.
@@ -1819,10 +1735,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             z = export_rows.response
             self.export_rows = export_rows
         self.W, self.z = W, z
-        if terminal is not None:
-            # the step's own state at the retained model (the SCOP Hessian caches,
-            # from the export rows)
-            terminal(self)
 
     def _publish(
         self, it: int, final: _IRLSDirectFinalGeometry
@@ -1847,7 +1759,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         else:
             phi = 1.0
         if not self._compute_reml_geometry or not _compute_fit_statistics:
-            # Private SCOP candidates and stats-skipping in-loop REML fits have no
+            # Stats-skipping in-loop REML fits have no
             # retained-fit statistics. NaN makes accidental publication fail
             # visibly instead of presenting 0 EDF or unit dispersion as if either
             # had been evaluated; published statistics come from the terminal
@@ -1889,15 +1801,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             ),
         )
 
-        # the step's part of the publication: the SCOP latent states and inference
-        postfit = self.step.postfit
-        scop_converged = None if postfit is None else postfit(self, result, final)
-
         if self.return_xtwx:
-            if self.return_scop_state and scop_converged is not None:
-                return result, XtWX_S_inv_beta, final.XtWX_beta, scop_converged
             return result, XtWX_S_inv_beta, final.XtWX_beta
-
-        if self.return_scop_state and scop_converged is not None:
-            return result, XtWX_S_inv_beta, scop_converged
         return result, XtWX_S_inv_beta

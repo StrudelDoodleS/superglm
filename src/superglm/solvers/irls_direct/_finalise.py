@@ -5,7 +5,7 @@ After the loop and its shared blocks (``_IRLSDirectFit._finish``, the step's
 (``_IRLSDirectStep.finalise``) and publishes what it returns, an
 ``_IRLSDirectFinalGeometry``.  There are two.  The structured step's is its own
 (``_IRLSDirectStructuredStep.finalise``): the block-form moments and the
-profiled factor.  The QR, dense, QP and SCOP steps name the centred one here
+profiled factor.  The QR, dense and QP steps name the centred one here
 (``_finalise_centred``): the centred system of the export rows, its slope
 decomposition and ``RankInfo``, on a constrained fit's active face (the QP
 step's binding rows, ``_active_face_basis``).
@@ -80,7 +80,7 @@ class _IRLSDirectFinalGeometry:
     - ``structured_factor``: the structured route's profiled factor, which the
       backend disclosure reads;
     - ``centered_final`` and ``XtW1``: the centred route's final system and its
-      raw ``X'W1``, which the SCOP step's post-fit inference reads.
+      raw ``X'W1``.
 
     A field of one route is ``None`` on the other.  It holds arrays and
     factors, never the fit or a step.
@@ -477,7 +477,7 @@ def _final_centred_system(fit: _IRLSDirectFit) -> tuple[CenteredSystem, NDArray,
 
 
 def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirectFinalGeometry:
-    """The centred finaliser, the ``finalise`` the QR, dense, QP and SCOP steps name (F08 to F11).
+    """The centred finaliser, the ``finalise`` the QR, dense and QP steps name (F08 to F11).
 
     The retained model's centred system (``_final_centred_system``), then its
     profiled slope decomposition, ``log det H``, the REML summary, the EDF

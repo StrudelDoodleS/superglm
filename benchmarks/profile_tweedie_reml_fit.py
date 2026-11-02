@@ -88,8 +88,6 @@ class Probes:
         consumer_names = [
             "superglm.reml.direct",
             "superglm.reml.discrete",
-            "superglm.reml.efs",
-            "superglm.reml.scop_efs",
             "superglm.model.reml_finalize",
             "superglm.model.reml_ops",
         ]

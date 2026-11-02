@@ -7,6 +7,7 @@ Laplace-approximate restricted maximum likelihood objective
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,7 +36,6 @@ from superglm.reml.scale import (
     profile_gaussian_reml_scale,
     profile_tweedie_reml_scale,
 )
-from superglm.reml.scop_geometry import decompose_on_scop_resolved_range
 from superglm.solvers.dispersion import dispersion_likelihood_size, validate_weight_semantics
 from superglm.solvers.irls_state import mean_space_log_likelihood_rows
 from superglm.solvers.mode_score import linear_predictor
@@ -98,7 +98,6 @@ def reml_laml_objective(
     hessian_rank: int | None = None,
     S_override: NDArray | None = None,
     reml_penalties: list[PenaltyComponent] | None = None,
-    scop_states: dict[int, dict] | None = None,
     tensor_pair_evaluations: dict | None = None,
     likelihood_size: float | None = None,
     gamma_scale_data: GammaScaleProfileData | None = None,
@@ -210,12 +209,7 @@ def reml_laml_objective(
         if S_override is not None
         else (XtWX.shape[0] if XtWX is not None else dm.p)
     )
-    need_dense_penalty = (
-        S_override is not None
-        or scop_states is not None
-        or reml_penalties is None
-        or log_det_H is None
-    )
+    need_dense_penalty = S_override is not None or reml_penalties is None or log_det_H is None
     if S_override is not None:
         S: NDArray | None = np.asarray(S_override, dtype=np.float64)
     elif need_dense_penalty:
@@ -226,19 +220,7 @@ def reml_laml_objective(
         S = None
     if S is not None and S.shape != (p, p):
         raise ValueError("REML penalty must be square")
-    if scop_states:
-        from superglm.reml.scop_efs import compute_scop_aware_penalty_quad
-
-        if S is None:  # pragma: no cover - dense SCOP invariant
-            raise RuntimeError("SCOP objective is missing its dense penalty.")
-        penalty_quad = compute_scop_aware_penalty_quad(
-            result.beta,
-            S,
-            scop_states,
-            lambdas,
-            reml_penalties=reml_penalties,
-        )
-    elif reml_penalties is not None:
+    if reml_penalties is not None:
         penalty_quad = total_penalty_quadratic(
             result.beta,
             lambdas,
@@ -276,22 +258,6 @@ def reml_laml_objective(
     # side defines the translation-invariant identified-coordinate measure.
     if log_det_H is not None:
         logdet_m = log_det_H
-    elif scop_states:
-        from superglm.reml.scop_efs import assemble_joint_hessian
-
-        if XtW1 is None or sum_W is None:
-            raise ValueError("SCOP REML requires intercept cross-products")
-        if S is None or not isinstance(XtWX, np.ndarray):
-            raise ValueError("SCOP REML requires dense Gram and penalty matrices.")
-        H_joint, _ = assemble_joint_hessian(
-            XtWX + S,
-            scop_states,
-            XtW1=XtW1,
-            sum_W=sum_W,
-        )
-        centered_decomposition = decompose_on_scop_resolved_range(H_joint, scop_states)
-        centered_hessian_rank = centered_decomposition.rank
-        logdet_m = float(np.log(sum_W) + centered_decomposition.log_pdet)
     else:
         if not isinstance(XtWX, np.ndarray):
             raise ValueError("A compact structured Gram requires a precomputed log_det_H.")
@@ -423,9 +389,7 @@ def reml_laml_objective(
             # so out loud instead of silently substituting (the silent form
             # of this branch is exactly how the Tweedie criterion defect
             # shipped).
-            from superglm import _held_warnings
-
-            _held_warnings.warn(
+            warnings.warn(
                 "REML is using a Gaussian-shaped scale profile for "
                 f"estimated-scale family {type(distribution).__name__!r}, "
                 "which has no exact saturated-likelihood profiler. This is "

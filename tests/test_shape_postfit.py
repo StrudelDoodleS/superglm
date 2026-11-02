@@ -123,46 +123,6 @@ def test_apply_shape_postfit_installs_one_synchronized_revision_without_row_copi
         model.result.deviance = 0.0
 
 
-def test_postfit_repair_rejects_mixed_scop_model_before_state_revision() -> None:
-    """A partial repair cannot discard the untouched term's nonlinear inference."""
-    rng = np.random.default_rng(4)
-    n = 320
-    x = np.sort(rng.uniform(size=n))
-    z = rng.uniform(size=n)
-    X = pd.DataFrame({"x": x, "z": z})
-    y = 0.3 + 1.4 * x - 0.8 * (z - 0.45) ** 2 + rng.normal(0.0, 0.08, size=n)
-    model = SuperGLM(
-        family="gaussian",
-        selection_penalty=0.0,
-        spline_penalty=1.2,
-        features={
-            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing, shape_engine="scop"),
-            "z": PSpline(n_knots=7, constraint=Constraint.postfit.convex),
-        },
-    ).fit(X, y)
-
-    original_dict = model.__dict__
-    original_result = model.result
-    original_solver_result = model._solver_result
-    original_revision = model._fit_revision
-    original_edf = model.result.effective_df
-    original_predictions = model.predict(X)
-    original_covariance = model._coef_covariance[0].copy()
-    assert model._solver_result.scop_inference is not None
-
-    with pytest.raises(RuntimeError, match="joint SCOP inference"):
-        model.apply_shape_postfit(X)
-
-    assert model.__dict__ is original_dict
-    assert model.result is original_result
-    assert model._solver_result is original_solver_result
-    assert model._fit_revision == original_revision
-    assert model.result.effective_df == original_edf
-    assert model._solver_result.scop_inference is not None
-    np.testing.assert_array_equal(model.predict(X), original_predictions)
-    np.testing.assert_array_equal(model._coef_covariance[0], original_covariance)
-
-
 def test_gaussian_shape_repair_refreshes_dispersion_after_final_edf() -> None:
     """Coefficient repair must not leave covariance and likelihood on the old scale."""
     rng = np.random.default_rng(20260718)
@@ -280,38 +240,6 @@ def test_failed_second_shape_repair_rolls_back_first_repair(monkeypatch):
     np.testing.assert_array_equal(model.result.beta, old_beta)
     np.testing.assert_array_equal(model.predict(X), old_predictions)
     np.testing.assert_equal(model._runtime_canonical_state, old_runtime_canonical_state)
-
-
-def test_mixed_scop_with_feasible_postfit_term_is_an_exact_noop():
-    rng = np.random.default_rng(0)
-    n = 500
-    x = rng.uniform(size=n)
-    z = rng.uniform(size=n)
-    X = pd.DataFrame({"x": x, "z": z})
-    y = 0.2 + 1.2 * x + 2.0 * z
-    model = SuperGLM(
-        family="gaussian",
-        selection_penalty=0.0,
-        spline_penalty=2.0,
-        features={
-            "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
-            "z": PSpline(n_knots=8, constraint=Constraint.postfit.increasing),
-        },
-    ).fit(X, y)
-    groups = [group for group in model._groups if group.feature_name == "z"]
-    beta = np.concatenate([model.result.beta[group.sl] for group in groups])
-    assert (
-        shape_constraint_certificate(model._specs["z"], beta, "increasing").minimum_scaled_slack
-        > 0.0
-    )
-    old_revision = model._fit_revision
-    old_result = model.result
-
-    returned = model.apply_shape_postfit(X)
-
-    assert returned is model
-    assert model._fit_revision == old_revision
-    assert model.result is old_result
 
 
 def test_compact_shape_repair_is_rejected_before_mutating_fitted_state():
@@ -1338,14 +1266,14 @@ def test_structured_postfit_shape_repair_uses_compact_penalties(
 
 def test_structured_guard_covers_every_importer_of_the_materialiser() -> None:
     """The structured-penalty guard must see the modules that bind the materialiser by name."""
-    from superglm.reml import gradient, penalty_algebra, scop_efs, w_derivatives
+    from superglm.reml import gradient, penalty_algebra, w_derivatives
 
     importers = set(_importers(penalty_algebra, "penalty_component_dense_matrix"))
-    assert {gradient, scop_efs, w_derivatives} <= importers
+    assert {gradient, w_derivatives} <= importers
 
 
 @pytest.mark.parametrize("structured_kind", ["re", "fs", "sz"])
-@pytest.mark.parametrize("importer", ["gradient", "scop_efs", "w_derivatives"])
+@pytest.mark.parametrize("importer", ["gradient", "w_derivatives"])
 def test_expanding_a_structured_penalty_inside_the_repair_reaches_the_guard(
     structured_kind: str,
     importer: str,
@@ -1428,10 +1356,10 @@ def test_wide_shape_repair_does_not_request_a_global_dense_penalty(
 def test_global_penalty_guard_covers_every_importer_of_the_builder():
     """The guard must see the modules that bind ``build_penalty_matrix`` by name."""
     from superglm.model import reml_finalize
-    from superglm.reml import direct, discrete, efs, objective, penalty_algebra, scop_efs
+    from superglm.reml import direct, discrete, objective, penalty_algebra
 
     importers = set(_importers(penalty_algebra, "build_penalty_matrix"))
-    assert {objective, direct, efs, discrete, scop_efs, reml_finalize} <= importers
+    assert {objective, direct, discrete, reml_finalize} <= importers
 
 
 def test_a_guard_on_the_defining_module_alone_misses_the_importers(monkeypatch):
@@ -1457,9 +1385,7 @@ def test_a_guard_on_the_defining_module_alone_misses_the_importers(monkeypatch):
         "superglm.model.reml_finalize",
         "superglm.reml.direct",
         "superglm.reml.discrete",
-        "superglm.reml.efs",
         "superglm.reml.objective",
-        "superglm.reml.scop_efs",
     ],
 )
 def test_a_global_penalty_request_inside_the_repair_reaches_the_guard(monkeypatch, importer):

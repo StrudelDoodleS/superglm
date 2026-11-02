@@ -25,7 +25,6 @@ from superglm.reml.direct import optimize_direct_reml  # noqa: F401
 from superglm.reml.discrete import (  # noqa: F401
     optimize_discrete_reml_cached_w,
 )
-from superglm.reml.efs import optimize_efs_reml  # noqa: F401
 from superglm.reml.gradient import (  # noqa: F401
     reml_direct_gradient,
     reml_direct_hessian,
@@ -47,7 +46,6 @@ from superglm.reml.penalty_algebra import (  # noqa: F401
     compute_total_penalty_rank,
 )
 from superglm.reml.result import PenaltyCache, REMLResult, _map_beta_between_bases  # noqa: F401
-from superglm.reml.scop_efs import optimize_scop_efs_reml  # noqa: F401
 from superglm.reml.w_derivatives import (  # noqa: F401
     compute_d2W_deta2,
     compute_dW_deta,

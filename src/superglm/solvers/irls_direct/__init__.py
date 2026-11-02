@@ -20,8 +20,7 @@ recorder in ``_recorder``, its stop rule in ``_convergence``, its shared line
 search in ``_search``, and its step methods behind the interface in
 ``_step``: the QR step in ``_qr``, the dense step in ``_dense``, the
 linearly constrained (QP) step in ``_qp``, the structured step (random-effect
-chains, ``fs`` and ``sz`` terms) in ``_structured``, the shape-constrained
-(SCOP) step with its own line search in ``_scop``.  Each step names its
+chains, ``fs`` and ``sz`` terms) in ``_structured``.  Each step names its
 finaliser: the structured step its own, the others the centred one in
 ``_finalise``, beside what every finaliser returns and the active face a
 constrained fit's statistics are taken on (the QP step's binding rows,
@@ -51,13 +50,6 @@ from superglm.solvers.irls_direct._qp import (
     _binding_rows,
     _solve_constrained_qp_with_cold_retry,
 )
-from superglm.solvers.irls_direct._scop import (
-    SCOPRunCentring,
-    _centred_system_matvec,
-    _evaluate_scop_trial,
-    _SCOPGroupState,
-    _SCOPTrialState,
-)
 from superglm.solvers.irls_direct._structured import (
     StructuredSolverError,
     _build_iterate_factor,
@@ -68,21 +60,16 @@ from superglm.solvers.irls_direct._structured import (
 __all__ = [
     "_QP_FEASIBILITY_TOL",
     "_SUBNORMAL_SPACING",
-    "SCOPRunCentring",
     "StructuredSolverError",
     "_active_face_basis",
     "_binding_rank",
     "_binding_rows",
     "_build_iterate_factor",
     "_build_penalty_matrix",
-    "_centred_system_matvec",
-    "_evaluate_scop_trial",
     "_face_decomposition",
     "_feature_edf",
     "_levenberg_shifted_leaf_operator",
     "_safe_decompose_H",
-    "_SCOPGroupState",
-    "_SCOPTrialState",
     "_separation_weight_ratio",
     "_solve_constrained_qp_with_cold_retry",
     "_structured_solver_errors",

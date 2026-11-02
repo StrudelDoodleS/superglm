@@ -187,10 +187,6 @@ class GroupInfo:
     constraints: LinearConstraintSet | None = None
     monotone_engine: str | None = None
     raw_to_solver_map: NDArray | None = None
-    # SCOP reparameterization for monotone P-splines (Phase 3).
-    # Solver-space (q_eff = q_raw - 1 dimensional) — the solver calls
-    # forward(), jacobian(), penalty_matrix() directly without dimension translation.
-    scop_reparameterization: SCOPSolverReparam | None = None
     # Compact spline-by-categorical level representation.  ``columns`` stays
     # None so the builder can avoid materialising B * level_indicator.
     spline_cat_basis: sp.spmatrix | None = None
@@ -342,6 +338,8 @@ class GroupSlice:
     subgroup_type: str | None = None  # "linear", "spline", or None
     constraints: LinearConstraintSet | None = None
     monotone_engine: str | None = None
+    # The retired SCOP engine's map, on a model 0.41.0 or earlier fitted
+    # (``solvers/scop.py``); inference reads its penalty. Nothing sets it now.
     scop_reparameterization: SCOPSolverReparam | None = None
     # Dimension the penalty prices this group at; ``None`` means ``size``.
     # Stamped only under ``group_pricing="spanned"`` builds, where it carries

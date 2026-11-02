@@ -25,8 +25,6 @@ from superglm.model.state_ops import _legacy_active_state
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
 from superglm.reml.observed_geometry import build_observed_reml_geometry
-from superglm.reml.scop_efs import _certified_terminal_rank
-from superglm.reml.scop_geometry import build_cached_scop_joint_geometry
 from superglm.solvers.centered_system import (
     grouped_augmented_factor,
     grouped_weighted_factor,
@@ -272,33 +270,6 @@ def _correctly_rounded_gram(factor: np.ndarray) -> np.ndarray:
     return exact_matmul((factor.T, factor))
 
 
-def test_factor_certificate_is_invariant_to_row_order_and_gram_accumulation() -> None:
-    design, right = _paired_boundary_design()
-    reversed_design = design[::-1]
-    variants = (
-        (design, design.T @ design),
-        (reversed_design, reversed_design.T @ reversed_design),
-        (design, np.einsum("ni,nj->ij", design, design, optimize=False)),
-        (design, _correctly_rounded_gram(design)),
-    )
-    reference_prediction = design @ right[:, 0]
-
-    for factor, gram in variants:
-        preliminary = decompose_gram(gram)
-        assert needs_factor_certification(preliminary)
-        actual = _certified_terminal_rank(gram, lambda factor=factor: factor)
-        _assert_factor_certificate(actual, factor)
-
-        solve = decompose_factor(factor, retain_factor_solve=True)
-        fitted = design @ solve.solve_factor_rhs(factor @ right[:, 0])
-        action_scale = np.linalg.norm(design, ord=2) * np.linalg.norm(right[:, 0])
-        action_bound = (
-            2.0 * SHARED_RANK_POLICY.factor_rcond
-            + _roundoff_gamma(design.shape[0] + design.shape[1])
-        ) * action_scale
-        assert np.linalg.norm(fitted - reference_prediction) <= action_bound
-
-
 def test_factor_certificate_checker_rejects_preliminary_gram_mutation() -> None:
     design, _ = _paired_boundary_design()
     preliminary = decompose_gram(design.T @ design)
@@ -319,46 +290,6 @@ def test_inverse_checker_rejects_preliminary_gram_inverse_hybrid() -> None:
     _assert_factor_certificate(certificate, factor)
     with pytest.raises(AssertionError, match="inverse escaped certified"):
         _assert_inverse_representative_support(preliminary_inverse, factor)
-
-
-def test_well_conditioned_factor_inverse_action_rejects_scale_mutations(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A forced certificate branch has a resolvable covariance magnitude."""
-    import superglm.reml.scop_efs as scop_efs
-
-    factor = np.array(
-        [
-            [1.5, 0.2, -0.1],
-            [0.1, 1.2, 0.3],
-            [0.2, -0.1, 1.1],
-            [0.5, 0.4, -0.2],
-            [-0.3, 0.2, 0.6],
-            [0.4, -0.5, 0.3],
-        ]
-    )
-    factor_calls = 0
-
-    def factor_factory() -> np.ndarray:
-        nonlocal factor_calls
-        factor_calls += 1
-        return factor
-
-    monkeypatch.setattr(
-        scop_efs,
-        "decompose_gram_if_authoritative",
-        lambda _matrix: None,
-    )
-    certificate = scop_efs._certified_terminal_rank(factor.T @ factor, factor_factory)
-    assert factor_calls == 1
-    _assert_factor_certificate(certificate, factor)
-
-    inverse = certificate.pseudo_inverse()
-    metrics = _assert_well_conditioned_inverse_action(inverse, factor)
-    assert metrics.conditioned_beta < 1.0
-    for scale in (0.5, 2.0):
-        with pytest.raises(AssertionError):
-            _assert_well_conditioned_inverse_action(scale * inverse, factor)
 
 
 def test_metrics_rank_helpers_use_factor_certified_subspaces() -> None:
@@ -490,182 +421,6 @@ def test_observed_reml_geometry_uses_factor_certified_subspace() -> None:
         geometry.log_det_H - float(np.log(np.sum(weights))),
         factor,
     )
-
-
-def test_scop_efs_terminal_rank_uses_factor_certified_subspace() -> None:
-    design, _ = _paired_boundary_design()
-    gram = decompose_gram(design.T @ design)
-    assert needs_factor_certification(gram)
-
-    actual = _certified_terminal_rank(design.T @ design, lambda: design)
-
-    _assert_factor_certificate(actual, design)
-
-
-def test_scop_fisher_geometry_uses_equal_full_rank_factor_certificate() -> None:
-    # This construction leaves a wide cross-platform margin: both routes are
-    # full rank, while their inverses differ by roughly 60% on the reference
-    # LAPACK build rather than sitting near the assertion boundary.
-    design, _ = _paired_boundary_design((1.0, 5.5e-8, 3.025e-8), seed=4256)
-    dm = _grouped_design(design)
-    weights = np.ones(len(design))
-    mean_x = np.average(design, axis=0, weights=weights)
-    centered = design - mean_x
-    centered_gram = centered.T @ centered
-    raw_gram = design.T @ design
-    penalty = np.zeros((3, 3))
-    gram = decompose_gram(centered_gram)
-    factor = grouped_augmented_factor(dm, weights, penalty, center=mean_x)
-    expected = decompose_factor(factor)
-    assert expected.rank == expected.width == 3
-    assert needs_factor_certification(gram)
-    states = {
-        0: {
-            "group_sl": slice(0, 3),
-            "gamma_eff": np.ones(3),
-            "last_fisher_fallback": True,
-        }
-    }
-
-    geometry = build_cached_scop_joint_geometry(
-        raw_fisher_gram=raw_gram,
-        fisher_xtw=design.T @ weights,
-        fisher_sum_w=float(np.sum(weights)),
-        latent_penalty=penalty,
-        scop_states=states,
-        centered_fisher_gram=centered_gram,
-        fisher_mean_x=mean_x,
-        dm=dm,
-        fisher_weights=weights,
-    )
-
-    assert geometry.curvature_source == "fisher"
-    assert geometry.hessian_rank == 1 + expected.rank
-    _assert_inverse_representative_support(
-        geometry.hessian_inverse,
-        factor,
-    )
-    _assert_log_pdet(
-        geometry.log_det_H - float(np.log(np.sum(weights))),
-        factor,
-    )
-
-
-def test_scop_equal_full_rank_certificate_preserves_observed_curvature() -> None:
-    """A full Fisher range certifies estimability, not observed curvature values."""
-    design, _ = _paired_boundary_design((1.0, 4e-8, 3e-8))
-    dm = _grouped_design(design)
-    weights = np.ones(len(design))
-    mean_x = np.average(design, axis=0, weights=weights)
-    centered_gram = (design - mean_x).T @ (design - mean_x)
-    raw_gram = design.T @ design
-    penalty = np.zeros((3, 3))
-    observed_centered = centered_gram + 5.0e-16 * np.eye(3)
-    observed = decompose_gram(observed_centered)
-    certified = decompose_factor(grouped_augmented_factor(dm, weights, penalty, center=mean_x))
-    assert observed.rank == certified.rank == observed.width == 3
-    assert needs_factor_certification(observed)
-    transformed_cross = float(np.sum(weights)) * mean_x
-    states = {
-        0: {
-            "group_sl": slice(0, 3),
-            "gamma_eff": np.ones(3),
-            "H_scop_penalized": observed_centered
-            + np.outer(transformed_cross, transformed_cross) / float(np.sum(weights)),
-            "last_fisher_fallback": False,
-        }
-    }
-
-    geometry = build_cached_scop_joint_geometry(
-        raw_fisher_gram=raw_gram,
-        fisher_xtw=design.T @ weights,
-        fisher_sum_w=float(np.sum(weights)),
-        latent_penalty=penalty,
-        scop_states=states,
-        centered_fisher_gram=centered_gram,
-        fisher_mean_x=mean_x,
-        dm=dm,
-        fisher_weights=weights,
-    )
-
-    assert geometry.curvature_source == "observed"
-    assert geometry.hessian_rank == 1 + observed.rank
-    np.testing.assert_allclose(geometry.centered_hessian, observed_centered, rtol=0.0, atol=2e-30)
-    np.testing.assert_allclose(
-        geometry.hessian_inverse,
-        observed.pseudo_inverse(),
-        rtol=2e-14,
-        atol=0.0,
-    )
-    assert geometry.log_det_H == pytest.approx(
-        float(np.log(np.sum(weights)) + observed.log_pdet),
-        rel=2e-14,
-        abs=0.0,
-    )
-
-
-def test_scop_observed_geometry_uses_factor_certified_range() -> None:
-    design, _ = _paired_boundary_design()
-    dm = _grouped_design(design)
-    weights = np.ones(len(design))
-    mean_x = np.average(design, axis=0, weights=weights)
-    centered = design - mean_x
-    centered_gram = centered.T @ centered
-    raw_gram = design.T @ design
-    penalty = np.zeros((3, 3))
-    gram = decompose_gram(centered_gram)
-    factor = grouped_augmented_factor(dm, weights, penalty, center=mean_x)
-    certified = decompose_factor(factor)
-    assert needs_factor_certification(gram)
-    _assert_factor_certificate(certified, factor)
-    states = {
-        0: {
-            "group_sl": slice(0, 3),
-            "gamma_eff": np.ones(3),
-            "H_scop_penalized": centered_gram,
-            "last_fisher_fallback": False,
-        }
-    }
-
-    geometry = build_cached_scop_joint_geometry(
-        raw_fisher_gram=raw_gram,
-        fisher_xtw=design.T @ weights,
-        fisher_sum_w=float(np.sum(weights)),
-        latent_penalty=penalty,
-        scop_states=states,
-        centered_fisher_gram=centered_gram,
-        fisher_mean_x=mean_x,
-        dm=dm,
-        fisher_weights=weights,
-    )
-
-    # Fisher rows certify estimability, while the retained observed matrix
-    # still supplies curvature and determinant on that certified range.
-    nullity = certified.width - certified.rank
-    orthogonal, _ = np.linalg.qr(certified.parameter_null_basis, mode="complete")
-    estimable_basis = orthogonal[:, nullity:]
-    reduced = estimable_basis.T @ centered_gram @ estimable_basis
-    reduced = 0.5 * (reduced + reduced.T)
-    observed_on_range = decompose_gram(reduced)
-    expected_centered = estimable_basis @ reduced @ estimable_basis.T
-    expected_inverse = estimable_basis @ observed_on_range.pseudo_inverse() @ estimable_basis.T
-    expected_log_det = float(np.log(np.sum(weights)) + observed_on_range.log_pdet)
-
-    assert geometry.curvature_source == "observed"
-    assert geometry.hessian_rank == 1 + certified.rank
-    np.testing.assert_allclose(
-        geometry.centered_hessian,
-        expected_centered,
-        rtol=2e-14,
-        atol=2e-30,
-    )
-    np.testing.assert_allclose(
-        geometry.hessian_inverse,
-        expected_inverse,
-        rtol=2e-14,
-        atol=0.0,
-    )
-    assert geometry.log_det_H == pytest.approx(expected_log_det, rel=2e-14, abs=0.0)
 
 
 def test_pirls_rank_metadata_uses_factor_certified_subspaces() -> None:
@@ -848,7 +603,7 @@ def test_aliased_pair_geometry_lands_inside_the_certification_band() -> None:
     the FIXTURE -- that the alias survives the active-group filter, that the
     width is 18, that the Gram truncates to 17 -- and of ``rank.py``'s verdict
     on it.  Both outlive the wrapper, and ``inference/metrics.py``,
-    ``model/state_ops.py``, ``solvers/pirls.py`` and ``reml/scop_efs.py`` all
+    ``model/state_ops.py`` and ``solvers/pirls.py`` all
     consult that verdict on live paths.
 
     Read a failure here as "the fixture drifted", which would silently defuse

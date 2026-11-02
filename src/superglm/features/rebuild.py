@@ -22,13 +22,12 @@ from typing import Any, NamedTuple, cast
 import numpy as np
 import pandas as pd
 
-from superglm.features._spline_build import shape_engine
+from superglm.features._spline_build import saved_on_scop
 from superglm.features._spline_config import (
     SplineKindName,
     configure_knots,
     initialize_runtime_state,
 )
-from superglm.features._spline_factory import kindless_as_ps
 from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.categorical import Categorical
 from superglm.features.constraint import Constraint
@@ -38,7 +37,7 @@ from superglm.features.ordered_categorical import (
     OrderedCategorical,
     _spline_kind_name,
 )
-from superglm.features.spline import CardinalCRSpline, Spline, _SplineBase
+from superglm.features.spline import CardinalCRSpline, PSpline, Spline, _SplineBase
 
 # The declared bases a fit resolves to a level itself.
 SYMBOLIC_BASE_POLICIES = frozenset({"first", "most_exposed"})
@@ -589,9 +588,9 @@ def painted_ranges(
 def declared_spline(model, name: str) -> _SplineBase | None:
     """A copy of the spline ``name`` is declared with in ``model``, unfitted, or None.
 
-    An ordered term's declared basis; a numeric term's own declaration, which
-    the model keeps unfitted in its configuration, or the ``ps`` the fit built
-    in its place where a kindless spline beside a SCOP term became one. None
+    An ordered term's declared basis, or a numeric term's own declaration,
+    which the model keeps unfitted in its configuration: a spline declared
+    with no kind stays the ``cr`` it declares, as every refit builds it. None
     for a term with no spline, or a model too old to keep its declarations.
     """
     spec = model._specs[name]
@@ -600,13 +599,7 @@ def declared_spline(model, name: str) -> _SplineBase | None:
     declared = dict(getattr(getattr(model, "_config", None), "feature_templates", ())).get(name)
     if not isinstance(declared, _SplineBase):
         return None
-    declared = copy.deepcopy(declared)
-    if (
-        type(spec) is not type(declared)
-        and (as_ps := kindless_as_ps(declared, shape_engine(spec) or "qp")) is not None
-    ):
-        return as_ps  # the fit built this kindless spline as ``ps``: the editor edits that
-    return declared
+    return copy.deepcopy(declared)
 
 
 def stated_knots(spline: _SplineBase) -> Any:
@@ -651,26 +644,6 @@ def respaced_spline(
         knot_alpha=source.knot_alpha if knot_alpha is None else knot_alpha,
         boundary=source._explicit_boundary,
     )
-    declared = getattr(spline, "_kindless_args", None)
-    if declared is not None:
-        # A spline declared with no kind may fit as ``ps``, rebuilt from these arguments. ``k``
-        # is 6 knots as ``cr`` and 4 as ``ps``, so it stays only where no count was passed.
-        stated = spline._named_knots if spline._named_knots is not None else spline._explicit_knots
-        placed = (
-            {}
-            if knots is None and n_knots is None
-            else {"k": None, "n_knots": spline.n_knots, "knots": stated}
-        )
-        setattr(
-            spline,
-            "_kindless_args",
-            {
-                **declared,
-                **placed,
-                "knot_strategy": spline.knot_strategy,
-                "knot_alpha": spline.knot_alpha,
-            },
-        )
     return spline
 
 
@@ -734,8 +707,6 @@ def rebased_spline(
     if source.constraint_kind is not None:
         constraint = getattr(getattr(Constraint, source.constraint_mode), source.constraint_kind)
     orders = tuple(source._m_orders)
-    # A P-spline on SCOP stays on it as a P-spline; every other kind fits on the QP.
-    engine = "scop" if kind == "ps" and shape_engine(source) == "scop" else "qp"
     spline = Spline(
         kind=cast(SplineKindName, kind),
         n_knots=source.n_knots,
@@ -753,14 +724,20 @@ def rebased_spline(
         m=orders[0] if len(orders) == 1 else orders,
         lambda_policy=source._lambda_policy,
         polynomial_ranges=source.polynomial_ranges or None,
-        shape_engine=engine,
     )
     _carry_marks(source, spline)
     return spline
 
 
 def _carry_marks(source: _SplineBase, spline: _SplineBase) -> None:
-    """Mark ``spline`` with the editor's marks ``source`` carries."""
+    """Mark ``spline`` with the editor's marks ``source`` carries.
+
+    A P-spline rebuilt from one 0.41.0 fitted on SCOP keeps that mark too, so
+    its build warns that the constraint now fits on the QP. Another kind fits
+    on the QP as it did in 0.41.0 and takes no mark.
+    """
     for mark in EDITOR_MARKS:
         if getattr(source, mark, False):
             setattr(spline, mark, getattr(source, mark))
+    if saved_on_scop(source) and isinstance(spline, PSpline):
+        spline.shape_engine = None

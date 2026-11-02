@@ -149,7 +149,6 @@ def test_finalization_passes_the_optimizer_support_to_the_new_ssp_context(monkey
         reml_finalize.finalize_reml_fit(
             model,
             best=best,
-            use_direct=True,
             reml_groups=[(0, group)],
             reml_penalties=source,
             y=np.zeros(4),

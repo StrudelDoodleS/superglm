@@ -98,7 +98,6 @@ def _profile_model(
             n_knots=5,
             constraint=Constraint.fit.increasing,
             lambda_policy=constraint_policy,
-            shape_engine="scop",
         )
 
     if family_name == "nb":
@@ -230,7 +229,9 @@ def test_constrained_reml_reaches_the_route_with_structured_terms(
         direct_solve="auto",
         constrained_mode=constrained_mode,
     )
-    route_name = "run_fixed_monotone_reml" if constrained_mode == "fixed" else "run_scop_efs_reml"
+    route_name = (
+        "run_fixed_monotone_reml" if constrained_mode == "fixed" else "strip_qp_constraints"
+    )
     real_route = getattr(fit_ops_module, route_name)
     route_calls = []
 

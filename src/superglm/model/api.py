@@ -361,7 +361,9 @@ class SuperGLM:
         rebuilds the linear system with the current engine
         (``superglm.model.retired_state``).  A v0.35.0 Tweedie model's REML
         memo is dropped, and so is a summary v0.35.0 cached after
-        ``estimate_theta``.
+        ``estimate_theta``.  A kindless spline the saved fit built as a SCOP
+        P-spline is marked to warn at its next build
+        (``mark_kindless_saved_on_scop``).
         """
         self.__dict__.update(state)
         # Earlier releases pickled the metadata of a fast discrete predictor
@@ -376,6 +378,9 @@ class SuperGLM:
         mark_retired_linear_state(self)
         release_retired_tweedie_state(self)
         release_v0_35_nb_summaries(self)
+        from superglm.features._spline_build import mark_kindless_saved_on_scop
+
+        mark_kindless_saved_on_scop(self)
 
     def __repr__(self) -> str:
         family = type(self._distribution).__name__ if self._distribution else self.family
@@ -762,10 +767,7 @@ class SuperGLM:
         offset : array-like, optional
             Offset term.
         max_reml_iter : int, optional
-            Maximum REML outer iterations. Unset, it resolves per engine: 20
-            for the Newton engines, 100 for the SCOP engine, whose
-            Fellner-Schall steps converge linearly (measured 14 to 57 outer
-            iterations on freMTPL2 SCOP fits). A fit that reaches the cap is
+            Maximum REML outer iterations. Unset, it is 20. A fit that reaches the cap is
             returned with a ``ConvergenceWarning``,
             ``reml_diagnostics()["converged"]`` reads ``False`` and the
             summary says why. A cold exact fit of Poisson/log, binomial
@@ -778,12 +780,7 @@ class SuperGLM:
             ``["n_presolve_iter"]`` the pre-solve.
         reml_tol : float, optional
             Stopping tolerance for the smoothing-parameter optimizer. Unset,
-            it resolves per engine: 1e-9 for the Newton engines (exact and
-            discrete), 1e-6 for the step-criterion engines -- the SCOP path,
-            and equally the ``lambda1`` selection-penalty path, which
-            optimizes by EFS steps rather than Newton, stops on a per-step
-            lambda-change bound, and does not carry the Newton engines'
-            determination behavior described below. An explicit
+            it is 1e-9 for both Newton engines (exact and discrete). An explicit
             value reaches the engine verbatim, except that the discrete
             engine floors it at 1e-12, below which its cached-W objective
             differences are numerical noise. Candidate-grade fits
@@ -859,12 +856,7 @@ class SuperGLM:
             search keeps iterating to ``max_reml_iter``: there one
             working-model update per outer iteration routinely rescues
             the next search, so a failed search is not evidence of a
-            fixed point. The SCOP engine stops on a per-step lambda-change bound
-            against ``reml_tol`` and classifies its endgame as
-            ``objective_plateau`` only once steps have stopped contracting
-            -- while iterations still buy precision it keeps going toward
-            the strict bound, so an unreachable tolerance ends as an honest
-            plateau classification rather than an early grant.
+            fixed point.
 
             Versions before 0.20.0 defaulted every engine to 1e-6, so a
             default-tolerance fit can publish standard errors that differ
@@ -1579,8 +1571,7 @@ class SuperGLM:
             candidate search fits keep their own budget. Requires
             ``fit_mode="reml"`` -- a pure-ML publication has no REML
             iteration to budget and refuses the parameter. The default
-            ``None`` resolves per engine, as ``fit_reml``'s does: 20 for the
-            Newton engines, 100 for the SCOP engine.
+            ``None`` resolves as ``fit_reml``'s does, to 20.
         progress_callback : callable, optional
             Called as ``progress_callback(phase, payload)``: ``"profiling"``
             with ``{"profile_trace": [row]}`` for each feasible search

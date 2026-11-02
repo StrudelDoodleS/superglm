@@ -14,14 +14,15 @@ Spline(kind="ps", n_knots=10)    # the P-spline that 0.39 fitted
 
 A spline with no kind that `cr` cannot take builds as `kind="ps"`, the
 P-spline that 0.39 built, with a warning. Pass `kind=` to choose the kind and
-silence it. This happens in three cases:
+silence it. This happens in two cases:
 
 - **A degree other than 3**, such as `Spline(degree=2)`.
 - **A penalty order above 3**, such as `Spline(m=4)` or `Spline(m=(2, 4))`.
-- **A fit-time shape constraint beside a `ps` term with one.** A `cr` spline
-  puts its constraint on the QP, a `ps` term puts its on SCOP, and one model
-  cannot use both. A `cr` or `bs` term whose kind is named still stops with
-  an error.
+
+From 0.40 to 0.41 there was a third: a fit-time shape constraint beside a `ps`
+term with one, because a `ps` term then fitted its constraint on SCOP and one
+model could not use both engines. SCOP is retired, so every constraint fits
+on the QP and that case is gone.
 
 Four changes follow from the new default:
 
@@ -32,9 +33,8 @@ Four changes follow from the new default:
 - **A fit-time shape constraint with no kind moves from SCOP to the QP.**
   `Spline(constraint=Constraint.fit.increasing)` is now a `cr` term, which the
   QP constrains. The QP chooses the smoothing parameter without the constraint
-  and then refits with it. SCOP, which a `ps` term uses, chooses it with the
-  constraint in place. Beside a `ps` constrained term it stays a `ps` term on
-  SCOP.
+  and then refits with it. SCOP, which a `ps` term used up to 0.41, chose it
+  with the constraint in place.
 - **`cr` refuses a degree other than 3.** A cubic regression spline is always
   cubic. In 0.39, `Spline(kind="cr", degree=2)` fitted a cubic without saying
   so. It now raises an error that names `kind="ps"` and `kind="bs"`.

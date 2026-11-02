@@ -18,7 +18,7 @@ import superglm.model.input_validation as input_validation_module
 from superglm import Constraint, SuperGLM
 from superglm.distributions import Tweedie
 from superglm.features.numeric import Numeric
-from superglm.features.spline import BSplineSmooth, PSpline, Spline
+from superglm.features.spline import BSplineSmooth, Spline
 from superglm.types import LambdaPolicy
 
 
@@ -136,7 +136,6 @@ def test_write_profile_artifacts_creates_expected_files(tmp_path: Path):
     "feature, expected_engine",
     [
         (BSplineSmooth(n_knots=6, constraint=Constraint.fit.increasing), "qp"),
-        (PSpline(n_knots=6, constraint=Constraint.fit.increasing, shape_engine="scop"), "scop"),
     ],
 )
 def test_tweedie_profile_constrained_terms_dispatch_to_direct(
@@ -185,27 +184,6 @@ def test_nb_theta_profile_rejects_monotone_selection_penalty_before_fitting(monk
             model.estimate_theta(X, y)
         else:
             model.fit(X, y)
-
-
-def test_tweedie_profile_rejects_mixed_scop_and_qp_engines():
-    X = pd.DataFrame(
-        {
-            "x_qp": np.linspace(0.0, 1.0, 24),
-            "x_scop": np.linspace(1.0, 0.0, 24),
-        }
-    )
-    y = np.linspace(0.5, 2.0, len(X))
-    model = SuperGLM(
-        family=Tweedie(p=1.5),
-        selection_penalty=0,
-        features={
-            "x_qp": BSplineSmooth(n_knots=6, constraint=Constraint.fit.increasing),
-            "x_scop": PSpline(n_knots=6, constraint=Constraint.fit.increasing, shape_engine="scop"),
-        },
-    )
-
-    with pytest.raises(NotImplementedError, match=r"SCOP \+ QP"):
-        model.estimate_p(X, y)
 
 
 def test_tweedie_profile_rejects_fit_only_lambda_policy():

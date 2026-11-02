@@ -345,7 +345,7 @@ def test_nested_layout_refuses_malformed_chains() -> None:
         build(case.matrices, widened, chain_group_indices=CHAIN)
     constrained = list(case.groups)
     constrained[MAKE] = replace(constrained[MAKE], constraints=object())
-    with pytest.raises(ValueError, match="constraints or SCOP"):
+    with pytest.raises(ValueError, match="carries constraints"):
         build(case.matrices, constrained, chain_group_indices=CHAIN)
     with pytest.raises(ValueError, match="interaction code"):
         build(case.matrices, case.groups, chain_group_indices=(CROSSED, VARIANT))
