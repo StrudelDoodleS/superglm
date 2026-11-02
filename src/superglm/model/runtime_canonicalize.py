@@ -98,22 +98,6 @@ def _group_column_means(group_matrix, n_rows: int) -> NDArray[np.float64]:
     return np.asarray(group_matrix.rmatvec(ones), dtype=np.float64) / float(n_rows)
 
 
-def _term_contribution(
-    model,
-    solver: PIRLSResult,
-    group_indices: tuple[int, ...],
-) -> NDArray[np.float64]:
-    """Evaluate one fitted term on the training rows in solver space."""
-    contribution = np.zeros(model._dm.n, dtype=np.float64)
-    for idx in group_indices:
-        group = model._groups[idx]
-        contribution += np.asarray(
-            model._dm.group_matrices[idx].matvec(solver.beta[group.sl]),
-            dtype=np.float64,
-        )
-    return contribution
-
-
 def _term_group_metadata(model, group_indices: tuple[int, ...]) -> list[dict[str, Any]]:
     """Collect blockwise group metadata for one term."""
     groups: list[dict[str, Any]] = []
@@ -280,11 +264,6 @@ def _compile_runtime_terms(
             )
 
         shift = _term_shift_from_groups(solver, groups)
-        mean_before = (
-            float(shift)
-            if can_materialize
-            else float(np.mean(_term_contribution(model, solver, group_indices)))
-        )
         applied_to_public_model = _materialize_public_term(term_kind, spec, mode, groups)
 
         if applied_to_public_model:
@@ -296,7 +275,6 @@ def _compile_runtime_terms(
             "applied_to_public_model": applied_to_public_model,
             "group_indices": group_indices,
             "groups": groups,
-            "term_mean_before": mean_before,
             "intercept_shift": float(shift),
         }
 

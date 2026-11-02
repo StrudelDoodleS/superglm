@@ -386,7 +386,6 @@ class TestRuntimeCanonicalization:
         assert state["mode"] == "blockwise"
         assert state["applied_to_public_model"] is False
         assert len(state["group_indices"]) == 2
-        assert abs(state["term_mean_before"]) > 1e-6
         assert model._runtime_canonical_state["solver_to_public"] is None
         assert model._runtime_canonical_state["solver_to_public_complete"] is False
 
