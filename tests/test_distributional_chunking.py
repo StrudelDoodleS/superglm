@@ -246,17 +246,11 @@ def _history_values(result, name: str) -> np.ndarray:
 
 
 def test_auto_chunk_selector_has_stable_release_identity_and_budget() -> None:
-    assert chunking.AUTO_CHUNK_SELECTOR == "distributional-auto-v1"
+    assert chunking.AUTO_CHUNK_SELECTOR == "distributional-auto-v2"
     assert chunking.AUTO_CHUNK_MEMORY_BYTES == 8_388_608
-    assert (
-        chunking.resolve_chunk_size(
-            100_000,
-            2,
-            "auto",
-            p_coefficients=25,
-        )
-        == 19_784
-    )
+    # 53 floats a row fit 19,784 rows; 28 fit 37,449, above the contraction row cap.
+    assert chunking.resolve_chunk_size(100_000, 2, "auto", row_floats=25) == 19_784
+    assert chunking.resolve_chunk_size(100_000, 2, "auto") == chunking.AUTO_CONTRACTION_MAX_ROWS
 
 
 @pytest.mark.parametrize(

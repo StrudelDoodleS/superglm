@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._group_matrix._group_matrix_algebra import PassFactors, PassTables
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.solver._formation import CurvatureFormation, dense_formation
@@ -276,7 +277,14 @@ def _grouped_predictor_plans(
 
 
 class GroupedGeometryAccumulator:
-    """Accumulate row-block score and curvature into coefficient space."""
+    """Accumulate row-block score and curvature into coefficient space.
+
+    Every moments call of the assembly shares one :class:`PassFactors`, so a
+    support is projected once per assembly rather than once per row block and
+    channel; it is released when the geometry is published. ``tables`` keeps
+    the by-bin aggregates of the blocks it admits across row blocks and
+    contracts each once (:meth:`release_tables`).
+    """
 
     def __init__(
         self,
@@ -284,6 +292,7 @@ class GroupedGeometryAccumulator:
         *,
         penalty: NDArray,
         coefficients: NDArray,
+        tables: PassTables | None = None,
     ) -> None:
         reference_plans = _grouped_predictor_plans(layout)
         self._layout = layout
@@ -299,6 +308,19 @@ class GroupedGeometryAccumulator:
         self._channel_chunks = np.zeros(len(self._pairs), dtype=np.intp)
         self._score_chunks = 0
         self._finished = False
+        self._factors: PassFactors | None = PassFactors()
+        self._tables = tables
+        # Each predictor's group columns in the global layout, for pass tables.
+        self._group_columns = tuple(
+            tuple(
+                slice(offset + span.start, offset + span.end)
+                for span in plan.design.execution_plan.group_spans
+            )
+            for offset, plan in (
+                (state.coefficient_slice.start + int(plan.intercept), plan)
+                for state, plan in zip(layout.predictors, reference_plans, strict=True)
+            )
+        )
 
     def _validated_plans(
         self,
@@ -362,14 +384,31 @@ class GroupedGeometryAccumulator:
         left_index, right_index = self._pairs[channel_index]
         left_state = self._layout.predictors[left_index]
         right_state = self._layout.predictors[right_index]
+        tables = None if self._tables is None else self._tables.scope(channel_index)
         if left_index == right_index:
-            block = plan_tuple[left_index].diagonal_moment(weight_values)
+            block = plan_tuple[left_index].diagonal_moment(
+                weight_values, _factors=self._factors, _tables=tables
+            )
         else:
-            block = plan_tuple[left_index].cross_moment(plan_tuple[right_index], weight_values)
+            block = plan_tuple[left_index].cross_moment(
+                plan_tuple[right_index], weight_values, _factors=self._factors, _tables=tables
+            )
         self._curvature[left_state.coefficient_slice, right_state.coefficient_slice] += block
         if left_index != right_index:
             self._curvature[right_state.coefficient_slice, left_state.coefficient_slice] += block.T
         self._channel_chunks[channel_index] += 1
+
+    def release_tables(self) -> None:
+        """Contract the pass tables into the curvature; later blocks contract their own."""
+        tables, self._tables = self._tables, None
+        if tables is None:
+            return
+        for (channel_index, left, right), block in tables.contracted(self._factors):
+            left_index, right_index = self._pairs[channel_index]
+            rows = self._group_columns[left_index][left]
+            columns = self._group_columns[right_index][right]
+            self._curvature[rows, columns] += block
+            self._curvature[columns, rows] += block.T
 
     def finish(self) -> DenseJointGeometry:
         """Validate complete channel coverage and publish immutable geometry."""
@@ -377,7 +416,9 @@ class GroupedGeometryAccumulator:
             raise RuntimeError("geometry accumulator is already finished")
         if self._score_chunks < 1 or np.any(self._channel_chunks != self._score_chunks):
             raise RuntimeError("every score chunk must contribute every curvature channel")
+        self.release_tables()
         self._finished = True
+        self._factors = None
         if not np.array_equal(self._curvature, self._curvature.T):
             raise RuntimeError("grouped data curvature lost exact symmetry")
 

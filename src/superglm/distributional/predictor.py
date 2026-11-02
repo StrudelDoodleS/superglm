@@ -193,8 +193,15 @@ class PredictorExecutionPlan:
     def diagonal_moment(
         self,
         weights: NDArray,
+        *,
+        _factors=None,
+        _tables=None,
     ) -> NDArray[np.float64]:
-        """Return one symmetric ``X.T @ diag(weights) @ X`` predictor block."""
+        """Return one symmetric ``X.T @ diag(weights) @ X`` predictor block.
+
+        ``_factors`` and ``_tables`` are the assembly's shared products and
+        pass tables (``MatrixExecutionPlan.moments``).
+        """
         # Serial Gram blocks: SuperLSS takes no ``n_jobs``, so its assembly
         # starts no pool beside the family kernels' own threads.
         with parallel_config(n_jobs=1):
@@ -202,6 +209,8 @@ class PredictorExecutionPlan:
                 weights,
                 include_xtw=self.intercept,
                 signed=True,
+                _factors=_factors,
+                _tables=_tables,
             )
         slope_start = int(self.intercept)
         result = np.zeros((self.width, self.width), dtype=np.float64)
@@ -222,6 +231,9 @@ class PredictorExecutionPlan:
         self,
         right: PredictorExecutionPlan,
         weights: NDArray,
+        *,
+        _factors=None,
+        _tables=None,
     ) -> NDArray[np.float64]:
         """Return one rectangular cross-predictor weighted moment."""
         if not isinstance(right, PredictorExecutionPlan):
@@ -230,7 +242,7 @@ class PredictorExecutionPlan:
             self.design.execution_plan,
             right.design.execution_plan,
         )
-        slopes = cross_plan.cross_moment(weights, signed=True)
+        slopes = cross_plan.cross_moment(weights, signed=True, _factors=_factors, _tables=_tables)
         weight_values = np.asarray(weights, dtype=np.float64)
         result = np.zeros((self.width, right.width), dtype=np.float64)
         left_start = int(self.intercept)

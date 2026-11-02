@@ -120,9 +120,9 @@ def test_tiny_signed_cross_channel_matches_the_literal_design(monkeypatch):
     cross = PredictorExecutionPlan.cross_moment
     contracted_rows = []
 
-    def counted_cross(self, right, weights):
+    def counted_cross(self, right, weights, **kwargs):
         contracted_rows.append(len(weights))
-        return cross(self, right, weights)
+        return cross(self, right, weights, **kwargs)
 
     monkeypatch.setattr(PredictorExecutionPlan, "cross_moment", counted_cross)
     result, layout, literal, _, curvature, _, _ = _assemble(monkeypatch, tiny_cross=True)

@@ -298,12 +298,114 @@ class _SharedEntries:
         return key, value, True
 
 
+class PassFactors:
+    """Weight-free products of fixed design factors, shared by the moments calls of one assembly.
+
+    Each support projection ``B_unique @ R_inv`` and each factor's exponent
+    bounds is formed once per assembly instead of once per moments call, row
+    block and channel. Owner: the assembly that creates it; lifetime: that
+    assembly. Entries are keyed by their source arrays' identities and retain
+    those arrays, so no identity is reused while its entry lives, and an
+    assembly reads its design's factors without changing them.
+    """
+
+    __slots__ = ("projections", "ranges")
+
+    def __init__(self) -> None:
+        self.projections: dict[tuple[int, int], tuple[NDArray, NDArray, NDArray]] = {}
+        self.ranges: dict[int, tuple[NDArray, tuple[int, int]]] = {}
+
+    def projection(self, B_unique: NDArray, R_inv: NDArray) -> NDArray:
+        key = (id(B_unique), id(R_inv))
+        entry = self.projections.get(key)
+        if entry is None:
+            entry = self.projections[key] = (B_unique, R_inv, B_unique @ R_inv)
+        return entry[2]
+
+
+class PassTables:
+    """Li and Wood's Algorithm 1 tables of one assembly, summed over its row blocks.
+
+    Li and Wood (2020, *Stat. Comput.* 30:19) form the cross block of a
+    discretised group ``d`` and another group ``g`` as ``S' T``: ``S`` is
+    ``d``'s support and ``T`` sums the rows' weighted columns of ``g`` by
+    ``d``'s bins. Here each row block forms its own ``T``, whose sums run over
+    that block's rows only, and adds it into the assembly's total, so the
+    contraction ``S' T`` runs once per assembly (:meth:`contracted`) instead
+    of once per block. A pair is admitted when ``d`` is a discretised support
+    or tensor and ``g`` a categorical, random-effect or dense group, whose
+    ``T`` is a plain sum of rows. Keys are ``(channel, left, right)``: the
+    curvature channel and the pair's group indices in its two predictors.
+
+    Owner: one chunked assembly; lifetime: until it is contracted. ``budget``
+    bounds the bytes of the totals; a pair whose table does not fit, and every
+    pair after the totals are contracted, contracts each block as it arrives.
+    """
+
+    __slots__ = ("_entries", "_declined", "_remaining")
+
+    def __init__(self, budget: int) -> None:
+        self._entries: dict[tuple[int, int, int], list] = {}
+        self._declined: set[tuple[int, int, int]] = set()
+        self._remaining = int(budget)
+
+    def scope(self, channel: int) -> Callable[..., bool]:
+        """The ``_tables`` of one channel's moments calls: adds a block's table under its pair."""
+        return lambda pair, *arguments: self.add_by_bin((channel, *pair), *arguments)
+
+    def add_by_bin(self, key, disc, other, W, cache, transposed: bool) -> bool:
+        """Add one block's by-bin aggregate under ``key``; False when the pair is not kept."""
+        entry = self._entries.get(key)
+        if entry is not None:
+            entry[0] += _agg_by_bin(other, disc.bin_idx, W, disc.n_bins, cache)
+            return True
+        if key in self._declined or not _pass_table_pair(disc, other):
+            return False
+        nbytes = 8 * int(disc.n_bins) * _agg_by_bin_width(other)
+        if nbytes > self._remaining:
+            self._declined.add(key)
+            return False
+        self._remaining -= nbytes
+        table = _agg_by_bin(other, disc.bin_idx, W, disc.n_bins, cache)
+        self._entries[key] = [table, disc, transposed]
+        return True
+
+    def contracted(self, factors: PassFactors | None):
+        """Yield ``(key, X_left' W X_right)`` for every kept pair, releasing its table."""
+        cache = _BlockWeightCache(None, factors)
+        while self._entries:
+            key, (table, disc, transposed) = self._entries.popitem()
+            result = _by_bin_contraction(disc, cache, table)
+            yield key, result.T if transposed else result
+
+
+def _pass_table_pair(disc, other) -> bool:
+    from ..group_matrix import (
+        CategoricalGroupMatrix,
+        DenseGroupMatrix,
+        DiscretizedSSPGroupMatrix,
+        DiscretizedTensorGroupMatrix,
+        RandomEffectGroupMatrix,
+        SupportCompressedSSPGroupMatrix,
+    )
+
+    return type(disc) in (
+        DiscretizedSSPGroupMatrix,
+        SupportCompressedSSPGroupMatrix,
+        DiscretizedTensorGroupMatrix,
+    ) and type(other) in (CategoricalGroupMatrix, RandomEffectGroupMatrix, DenseGroupMatrix)
+
+
 class _BlockWeightCache:
     """Per-block-assembly cache for weighted discrete summaries.
 
     A pooled assembly gives each worker a view (:meth:`worker_view`) that
     shares the entries, formed once through :class:`_SharedEntries`, and owns
-    its scratch, so no array is written by two workers.
+    its scratch, so no array is written by two workers. ``factors`` shares the
+    fixed-factor products of a whole assembly (:class:`PassFactors`), and
+    ``tables`` (:meth:`PassTables.scope`) keeps its by-bin aggregates; views
+    for pool workers and new weights keep no tables, so a pass table is only
+    ever written by one thread.
     """
 
     __slots__ = (
@@ -322,9 +424,16 @@ class _BlockWeightCache:
         "_shared",
         "_parts",
         "_queue",
+        "_factors",
+        "_tables",
     )
 
-    def __init__(self, profile: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        profile: dict[str, Any] | None = None,
+        factors: PassFactors | None = None,
+        tables: Callable[..., bool] | None = None,
+    ) -> None:
         self._batch: _ChannelBatch | None = None
         self._channel = 0
         self._hist2d: dict[tuple[int, int, int, int, int], NDArray] = {}
@@ -335,11 +444,15 @@ class _BlockWeightCache:
         self._supports: dict[DiscretizedSSPGroupMatrix, NDArray] = {}
         self._sparse_grams: dict[SparseSSPGroupMatrix, tuple[NDArray, bool]] = {}
         self._weight_ranges: dict[int, tuple[NDArray, bool, tuple[int, int]]] = {}
-        self._support_ranges: dict[int, tuple[NDArray, tuple[int, int]]] = {}
+        self._support_ranges: dict[int, tuple[NDArray, tuple[int, int]]] = (
+            {} if factors is None else factors.ranges
+        )
         self._cell_orders: dict[DiscretizedTensorGroupMatrix, tuple[NDArray, NDArray]] = {}
         self._shared: _SharedEntries | None = None
         self._parts = 1
         self._queue = None
+        self._factors = factors
+        self._tables = tables
 
     def worker_view(
         self, shared: _SharedEntries, profile: dict[str, Any] | None, queue
@@ -359,6 +472,7 @@ class _BlockWeightCache:
             "_weight_ranges",
             "_support_ranges",
             "_cell_orders",
+            "_factors",
         ):
             setattr(view, name, getattr(self, name))
         view._shared = shared
@@ -399,6 +513,7 @@ class _BlockWeightCache:
         child = _BlockWeightCache(self._profile)
         child._supports = self._supports
         child._support_ranges = self._support_ranges
+        child._factors = self._factors
         child._batch = batch
         child._channel = channel
         return child
@@ -521,9 +636,20 @@ class _BlockWeightCache:
 
         Keys retain the owning blocks. A new moments call creates a new cache,
         so changed factors, weights, subsets and reparameterizations cannot
-        reuse a previous assembly's projection.
+        reuse a previous assembly's projection; an assembly's
+        :class:`PassFactors` serves every row block whose groups share the
+        factors.
         """
-        support, formed = self._once(self._supports, gm, lambda: gm.B_unique @ gm.R_inv)
+        factors = self._factors
+        support, formed = self._once(
+            self._supports,
+            gm,
+            lambda: (
+                gm.B_unique @ gm.R_inv
+                if factors is None
+                else factors.projection(gm.B_unique, gm.R_inv)
+            ),
+        )
         if formed:
             _profile_count(self._profile, "block_solver_support_builds")
         else:
@@ -2286,12 +2412,20 @@ def _cross_gram_by_columns(
     return result
 
 
+def _by_bin_contraction(gm: DiscretizedSSPGroupMatrix, cache, WX_agg: NDArray) -> NDArray:
+    """``X_gm' W X_other`` from ``WX_agg``, the other group's weighted columns summed by gm's bins."""
+    support, transform = _cross_support(gm, cache, WX_agg)
+    result = support.T @ WX_agg
+    return result if transform is None else transform.T @ result
+
+
 def _cross_gram(
     gm_i: GroupMatrix,
     gm_j: GroupMatrix,
     W: NDArray,
     cache: _BlockWeightCache | None = None,
     profile: dict[str, Any] | None = None,
+    table_key: tuple[int, int] | None = None,
 ) -> NDArray:
     """Compute X_i.T @ diag(W) @ X_j efficiently.
 
@@ -2299,7 +2433,10 @@ def _cross_gram(
     materializing either (n, p) matrix. For disc × non-disc, aggregates by
     disc bins in a single compiled pass (fused W-weighting, no toarray for
     sparse groups). Otherwise falls back to materializing the smaller group
-    and using rmatvec on the larger.
+    and using rmatvec on the larger. ``table_key`` is the pair's group
+    indices, under which a cache's pass tables (:class:`PassTables`) keep its
+    aggregate; the returned block is then zero, and the table is contracted
+    when the assembly ends.
     """
     (
         CategoricalGroupMatrix,
@@ -2543,37 +2680,28 @@ def _cross_gram(
 
     # Disc × non-disc: batch aggregate by disc bins, then dense matmuls.
     # Avoids per-column rmatvec loop, toarray() for sparse groups, and
-    # the (n, p) W-broadcast allocation.
-    if isinstance(gm_i, DiscretizedSSPGroupMatrix) and not isinstance(
-        gm_j, DiscretizedSSPGroupMatrix
-    ):
+    # the (n, p) W-broadcast allocation. An assembly's pass tables take the
+    # aggregate and contract it once for all its row blocks.
+    disc_left = isinstance(gm_i, DiscretizedSSPGroupMatrix)
+    if disc_left != isinstance(gm_j, DiscretizedSSPGroupMatrix):
         t0 = perf_counter() if profile is not None else 0.0
-        if not _agg_by_bin_fits(gm_j, gm_i.n_bins):
+        disc, other = (gm_i, gm_j) if disc_left else (gm_j, gm_i)
+        if not _agg_by_bin_fits(other, disc.n_bins):
             result = _cross_gram_by_columns(gm_i, gm_j, W)
             _profile_elapsed(profile, "block_cross_fallback_s", t0)
             return result
-        WX_agg = _agg_by_bin(gm_j, gm_i.bin_idx, W, gm_i.n_bins, cache)
-        support, transform = _cross_support(gm_i, cache, WX_agg)
-        result = support.T @ WX_agg
-        if transform is not None:
-            result = transform.T @ result
-        _profile_elapsed(profile, "block_cross_disc_other_s", t0)
-        return result
-
-    if isinstance(gm_j, DiscretizedSSPGroupMatrix) and not isinstance(
-        gm_i, DiscretizedSSPGroupMatrix
-    ):
-        t0 = perf_counter() if profile is not None else 0.0
-        if not _agg_by_bin_fits(gm_i, gm_j.n_bins):
-            result = _cross_gram_by_columns(gm_i, gm_j, W)
-            _profile_elapsed(profile, "block_cross_fallback_s", t0)
-            return result
-        WX_agg = _agg_by_bin(gm_i, gm_j.bin_idx, W, gm_j.n_bins, cache)
-        support, transform = _cross_support(gm_j, cache, WX_agg)
-        result = support.T @ WX_agg
-        if transform is not None:
-            result = transform.T @ result
-        result = result.T
+        add_table = getattr(cache, "_tables", None)
+        if (
+            table_key is not None
+            and add_table is not None
+            and add_table(table_key, disc, other, W, cache, not disc_left)
+        ):
+            result = np.zeros((gm_i.shape[1], gm_j.shape[1]))
+        else:
+            WX_agg = _agg_by_bin(other, disc.bin_idx, W, disc.n_bins, cache)
+            result = _by_bin_contraction(disc, cache, WX_agg)
+            if not disc_left:
+                result = result.T
         _profile_elapsed(profile, "block_cross_disc_other_s", t0)
         return result
 

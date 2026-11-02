@@ -17,16 +17,7 @@ def test_unadmitted_and_explicit_requests_keep_existing_resolution(monkeypatch, 
         pytest.fail("unadmitted or explicit request attempted global batch growth")
 
     monkeypatch.setattr(chunks, "global_moment_chunk_size", forbidden)
-    expected = (
-        None
-        if requested is None
-        else chunks.resolve_chunk_size(
-            layout.predictors[0].design.n,
-            len(layout.predictors),
-            requested,
-            p_coefficients=layout.n_coefficients,
-        )
-    )
+    expected = None if requested is None else chunks.layout_chunk_size(layout, requested)
     assert chunks._resolve_fitting_chunk_size(family, layout, plan, requested) == expected
 
 

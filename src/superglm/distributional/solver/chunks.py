@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import operator
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._group_matrix._group_matrix_algebra import PassTables
 from superglm._group_matrix._group_matrix_core import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
@@ -64,9 +66,10 @@ ChunkSize = int | Literal["auto"]
 # curvature with each row's block projected onto the semidefinite cone.
 CurvatureSource = Literal["observed", "fisher", "nearest_semidefinite"]
 
-# Includes eta, theta, natural/transformed derivatives, masks, and family temporaries.
+# Counts eta, theta, natural/transformed derivatives, masks, family temporaries
+# and the rows each chunk's predictor designs own (:func:`chunk_row_floats`).
 # It is a deterministic bound selector, not a claim about exact allocator RSS.
-AUTO_CHUNK_SELECTOR = "distributional-auto-v1"
+AUTO_CHUNK_SELECTOR = "distributional-auto-v2"
 AUTO_CHUNK_MEMORY_BYTES = 8 * 1024 * 1024
 AUTO_CONTRACTION_MEMORY_BYTES = 64 * 1024 * 1024
 # The longest run of rows one contraction block sums. Bin and level sums run
@@ -194,29 +197,45 @@ def resolve_chunk_size(
     k_parameters: int,
     chunk_size: ChunkSize,
     *,
-    p_coefficients: int = 0,
+    row_floats: int = 0,
 ) -> int:
-    """Resolve an explicit or memory-budgeted row bound."""
+    """Resolve an explicit or memory-budgeted row bound.
+
+    ``row_floats`` counts the floats a chunk's designs own per row, beyond the
+    likelihood's own channels. An automatic bound holds at most the
+    contraction row cap, so a chunk that contracts its own rows sums no
+    longer runs than a block.
+    """
     rows = _positive_integer(n_observations, name="n_observations")
     parameters = _positive_integer(k_parameters, name="k_parameters")
-    if isinstance(p_coefficients, bool):
-        raise TypeError("p_coefficients must be a non-negative integer")
+    if isinstance(row_floats, bool):
+        raise TypeError("row_floats must be a non-negative integer")
     try:
-        width = operator.index(p_coefficients)
+        width = operator.index(row_floats)
     except TypeError as exc:
-        raise TypeError("p_coefficients must be a non-negative integer") from exc
+        raise TypeError("row_floats must be a non-negative integer") from exc
     if width < 0:
-        raise ValueError("p_coefficients must be a non-negative integer")
+        raise ValueError("row_floats must be a non-negative integer")
     if chunk_size == "auto":
         n_channels = parameters * (parameters + 1) // 2
         estimated_float_columns = width + 6 * parameters + 4 * n_channels + 4
         budget_rows = AUTO_CHUNK_MEMORY_BYTES // (
             np.dtype(np.float64).itemsize * estimated_float_columns
         )
-        return min(rows, max(1, int(budget_rows)))
+        return min(rows, AUTO_CONTRACTION_MAX_ROWS, max(1, int(budget_rows)))
     if isinstance(chunk_size, str):
         raise ValueError("chunk_size string must be 'auto'")
     return min(rows, _positive_integer(chunk_size, name="chunk_size"))
+
+
+def layout_chunk_size(layout: StackedLayout, chunk_size: ChunkSize) -> int:
+    """:func:`resolve_chunk_size` for a layout's rows, predictors and chunk designs."""
+    return resolve_chunk_size(
+        layout.predictors[0].design.n,
+        len(layout.predictors),
+        chunk_size,
+        row_floats=chunk_row_floats(layout) if chunk_size == "auto" else 0,
+    )
 
 
 def _resolve_fitting_chunk_size(family, layout, likelihood_plan, chunk_size):
@@ -229,12 +248,7 @@ def _resolve_fitting_chunk_size(family, layout, likelihood_plan, chunk_size):
     """
     if chunk_size is None:
         return None
-    resolved = resolve_chunk_size(
-        layout.predictors[0].design.n,
-        len(layout.predictors),
-        chunk_size,
-        p_coefficients=layout.n_coefficients,
-    )
+    resolved = layout_chunk_size(layout, chunk_size)
     if type(chunk_size) is str and chunk_size == "auto":
         budget = automatic_global_moment_budget(family, likelihood_plan, layout)
         if budget is not None:
@@ -256,16 +270,11 @@ def iter_row_chunks(
     chunk_size: ChunkSize,
     *,
     k_parameters: int = 1,
-    p_coefficients: int = 0,
+    row_floats: int = 0,
 ):
     """Yield contiguous row chunks that cover every observation exactly once."""
     rows = _positive_integer(n_observations, name="n_observations")
-    size = resolve_chunk_size(
-        rows,
-        k_parameters,
-        chunk_size,
-        p_coefficients=p_coefficients,
-    )
+    size = resolve_chunk_size(rows, k_parameters, chunk_size, row_floats=row_floats)
     for start in range(0, rows, size):
         stop = min(rows, start + size)
         indices = np.arange(start, stop, dtype=np.intp)
@@ -530,7 +539,6 @@ def iter_likelihood_chunks(
         coefficients,
     )
     links = tuple(state.link for state in layout.predictors)
-    k_parameters = len(links)
     support_predictions = _SupportPredictions()
     range_plans = None
     if _range_geometry and all(
@@ -544,12 +552,7 @@ def iter_likelihood_chunks(
             PredictorExecutionPlan(state.design, state.intercept_index is not None)
             for state in layout.predictors
         )
-    for rows in iter_row_chunks(
-        len(response),
-        chunk_size,
-        k_parameters=k_parameters,
-        p_coefficients=layout.n_coefficients,
-    ):
+    for rows in iter_row_chunks(len(response), layout_chunk_size(layout, chunk_size)):
         if range_plans is None:
             eta, plans = _predictor_chunk(
                 layout,
@@ -677,12 +680,7 @@ def evaluate_chunked_log_likelihood(
     optimizing_total = 0.0
     carrier_total = 0.0
     support_predictions = _SupportPredictions()
-    for rows in iter_row_chunks(
-        len(response),
-        chunk_size,
-        k_parameters=len(layout.predictors),
-        p_coefficients=layout.n_coefficients,
-    ):
+    for rows in iter_row_chunks(len(response), layout_chunk_size(layout, chunk_size)):
         eta = _predictor_values(
             layout,
             coefficient_values,
@@ -777,8 +775,12 @@ _COUNTED_GROUPS = frozenset(
 )
 
 
-def _group_row_floats(group) -> int:
-    """Owned floats per block row of one counted group outside spline-by-category."""
+def _group_row_floats(group, *, dense_copies: bool = True) -> int:
+    """Owned floats per block row of one counted group outside spline-by-category.
+
+    ``dense_copies`` charges the dense rows a saturated exact spline's gram
+    forms, which only a contraction makes.
+    """
     if type(group) not in _EXACT_SPLINES:
         return _BLOCK_ROW_ARRAYS.get(type(group), group.shape[1])
     # An exact spline's block slice owns a CSR copy of the block rows: values,
@@ -787,13 +789,14 @@ def _group_row_floats(group) -> int:
     basis = group.B
     rows, width = basis.shape
     entry = basis.data.itemsize + basis.indices.itemsize
-    per_row = entry * basis.nnz + (basis.indptr.itemsize + 8 * width) * rows
+    dense = 8 * width if dense_copies else 0
+    per_row = entry * basis.nnz + (basis.indptr.itemsize + dense) * rows
     if type(group) is SplineCategoricalGroupMatrix:
         # A level group also owns its rows' CSR, a float copy of its values, its
         # row indices and, for a saturated basis, the dense copy of its rows
         # that the weighted copy above is made from; charging these on every
         # row bounds each level.
-        per_row += (entry + 8) * basis.nnz + (basis.indptr.itemsize + 8 + 8 * width) * rows
+        per_row += (entry + 8) * basis.nnz + (basis.indptr.itemsize + 8 + dense) * rows
     return -(-per_row // (8 * rows))
 
 
@@ -841,16 +844,74 @@ def contraction_row_bytes(layout: StackedLayout) -> int | None:
     return np.dtype(np.float64).itemsize * floats
 
 
+def _exact_spline_category_chunk_floats(design) -> int:
+    """Owned floats per chunk row of a design's exact spline-by-category level groups.
+
+    Every level group copies the chunk's basis rows. A row's own level group
+    also copies its level rows, their values and row indices, and a row lies
+    in one level of each term, the terms on one categorical sharing its name.
+    """
+    slices = 0.0
+    own: dict = {}
+    levels: dict[tuple, int] = {}
+    for group in design.group_matrices:
+        if type(group) is not SplineCategoricalGroupMatrix:
+            continue
+        basis = group.B
+        entry = basis.data.itemsize + basis.indices.itemsize
+        slices += entry * basis.nnz / basis.shape[0] + basis.indptr.itemsize
+        feature = group.spline_cat_feature
+        key = (id(group), None) if feature is None else (feature, group.spline_cat_level)
+        levels[key] = levels.get(key, 0) + 1
+        level_rows = max(1, len(group.row_idx))
+        level = (entry + 8) * group.B_level.nnz / level_rows + basis.indptr.itemsize + 8
+        own[key[0]] = max(own.get(key[0], 0.0), level)
+    terms: dict = {}
+    for (feature, _level), count in levels.items():
+        terms[feature] = max(terms.get(feature, 0), count)
+    return math.ceil((slices + sum(count * own[f] for f, count in terms.items())) / 8)
+
+
+def chunk_row_floats(layout: StackedLayout) -> int:
+    """Floats per row that one likelihood chunk's predictor designs own.
+
+    ``_predictor_chunk`` copies each group's rows (:func:`_row_design`): what
+    a contraction block's design owns (:func:`contraction_row_bytes`), with a
+    support's bin codes copied too, exact spline-by-category levels counted
+    as disjoint, and no gram's dense rows, which belong to the contraction's
+    budget. A group whose rows are not counted, or a design that is not a
+    plain ``DesignMatrix``, owns its width.
+    """
+    floats = 0
+    for state in layout.predictors:
+        design = state.design
+        if type(design) is not DesignMatrix:
+            floats += design.p
+            continue
+        floats += _spline_category_row_floats(design)
+        floats += _exact_spline_category_chunk_floats(design)
+        for group in design.group_matrices:
+            kind = type(group)
+            if kind in _SPLINE_CATEGORY_GROUPS or kind is SplineCategoricalGroupMatrix:
+                continue
+            if kind not in _COUNTED_GROUPS:
+                floats += group.shape[1]
+                continue
+            floats += _group_row_floats(group, dense_copies=False)
+            floats += kind in (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix)
+    return floats
+
+
 # A block's level and bin sums run over up to all its rows, and the design then
 # multiplies them by products of entries up to about 2**23. Where a sum of that many channel
 # values could leave float64's range, the block contracts chunk by chunk, so its
-# sums are the chunk stream's.
+# sums are the chunk stream's. The pass tables sum over every block they have
+# seen, so they are contracted before a block that would take them past it.
 _BLOCK_SUM_LIMIT = 2.0**1000
 
 
-def _block_sums_in_range(rows: int, *channels: NDArray[np.float64]) -> bool:
-    peak = max(max(float(np.max(values)), -float(np.min(values))) for values in channels)
-    return rows * peak <= _BLOCK_SUM_LIMIT
+def _channel_peak(*channels: NDArray[np.float64]) -> float:
+    return max(max(float(np.max(values)), -float(np.min(values))) for values in channels)
 
 
 def contraction_block_rows(n_observations: int, row_bytes: int | None, chunk_rows: int) -> int:
@@ -896,12 +957,7 @@ def assemble_chunked_geometry(
         built = build_global_moment_plan(
             layout,
             byte_budget=global_budget,
-            chunk_size=resolve_chunk_size(
-                layout.predictors[0].design.n,
-                len(layout.predictors),
-                chunk_size,
-                p_coefficients=layout.n_coefficients,
-            ),
+            chunk_size=layout_chunk_size(layout, chunk_size),
         )
         if built.plan is not None:
             result = _try_global_geometry(
@@ -1059,13 +1115,16 @@ def _assemble_grouped_pass_geometry(
     # contracted once over many rows (Li and Wood 2020, Algorithm 1). The
     # chunks stream score and packed curvature channels into a bounded buffer,
     # and the group plans contract each block of chunks once; a block covers
-    # every row up to the byte and row budgets.
+    # every row up to the byte and row budgets. A pass of several blocks keeps
+    # the by-bin tables its pass tables admit, each block adding its own, and
+    # contracts them once, within the allowance the block leaves.
     n_observations = layout.predictors[0].design.n
     k_parameters = len(layout.predictors)
-    chunk_rows = resolve_chunk_size(
-        n_observations, k_parameters, chunk_size, p_coefficients=layout.n_coefficients
-    )
-    block_rows = contraction_block_rows(n_observations, contraction_row_bytes(layout), chunk_rows)
+    chunk_rows = layout_chunk_size(layout, chunk_size)
+    row_bytes = contraction_row_bytes(layout)
+    block_rows = contraction_block_rows(n_observations, row_bytes, chunk_rows)
+    table_budget = AUTO_CONTRACTION_MEMORY_BYTES - (row_bytes or 0) * block_rows
+    tables = PassTables(table_budget) if block_rows < n_observations and table_budget > 0 else None
     # A block of one chunk out of several contracts that chunk's own plans as it
     # arrives, as the chunk stream does, so nothing is buffered or rebuilt.
     per_chunk = block_rows <= chunk_rows < n_observations
@@ -1073,8 +1132,20 @@ def _assemble_grouped_pass_geometry(
     score = np.empty((buffered, k_parameters), dtype=np.float64)
     # Channel-major, so each contracted channel is one contiguous row vector.
     curvature = np.empty((k_parameters * (k_parameters + 1) // 2, buffered), dtype=np.float64)
-    accumulator = GroupedGeometryAccumulator(layout, penalty=penalty, coefficients=coefficients)
+    accumulator = GroupedGeometryAccumulator(
+        layout, penalty=penalty, coefficients=coefficients, tables=tables
+    )
     formation = FormationAccumulator(layout)
+    # Rows and channel peak the pass tables have summed; a table entry sums at
+    # most that many rows of that size.
+    summed = [0, 0.0]
+
+    def keep_tables_in_range(rows: int, peak: float) -> None:
+        peak = max(summed[1], peak)
+        if (summed[0] + rows) * peak > _BLOCK_SUM_LIMIT:
+            accumulator.release_tables()
+        summed[0] += rows
+        summed[1] = peak
 
     def row_plans(start: int, stop: int):
         if start == 0 and stop == n_observations:
@@ -1092,10 +1163,12 @@ def _assemble_grouped_pass_geometry(
     def contract(start: int, stop: int) -> None:
         filled = stop - start
         step = filled
-        if filled > chunk_rows and not _block_sums_in_range(
-            filled, score[:filled], curvature[:, :filled]
-        ):
-            step = chunk_rows
+        if tables is not None or filled > chunk_rows:
+            peak = _channel_peak(score[:filled], curvature[:, :filled])
+            if tables is not None:
+                keep_tables_in_range(filled, peak)
+            if filled > chunk_rows and filled * peak > _BLOCK_SUM_LIMIT:
+                step = chunk_rows
         for piece in range(start, stop, step):
             end = min(piece + step, stop)
             plans = row_plans(piece, end)
@@ -1125,6 +1198,10 @@ def _assemble_grouped_pass_geometry(
         for chunk in iterator:
             length = len(chunk.score_eta)
             if per_chunk:
+                if tables is not None:
+                    keep_tables_in_range(
+                        length, _channel_peak(chunk.score_eta, chunk.curvature_packed)
+                    )
                 formation.add(position, position + length, chunk.curvature_packed)
                 accumulator.add_score(chunk.plans, chunk.score_eta)
                 for channel_index in range(len(curvature)):
@@ -1170,12 +1247,7 @@ def maximum_chunked_predictor_change(
     maximum = 0.0
     support_predictions = _SupportPredictions()
     n_observations = layout.predictors[0].design.n
-    for rows in iter_row_chunks(
-        n_observations,
-        chunk_size,
-        k_parameters=len(layout.predictors),
-        p_coefficients=layout.n_coefficients,
-    ):
+    for rows in iter_row_chunks(n_observations, layout_chunk_size(layout, chunk_size)):
         change = _predictor_values(
             layout,
             step,
@@ -1200,12 +1272,7 @@ def materialize_terminal_predictions(
     eta = np.empty((n_observations, k_parameters), dtype=np.float64)
     theta = np.empty_like(eta)
     support_predictions = _SupportPredictions()
-    for rows in iter_row_chunks(
-        n_observations,
-        chunk_size,
-        k_parameters=k_parameters,
-        p_coefficients=layout.n_coefficients,
-    ):
+    for rows in iter_row_chunks(n_observations, layout_chunk_size(layout, chunk_size)):
         eta_chunk = _predictor_values(
             layout,
             coefficient_values,
@@ -1233,5 +1300,6 @@ __all__ = [
     "iter_row_chunks",
     "materialize_terminal_predictions",
     "maximum_chunked_predictor_change",
+    "layout_chunk_size",
     "resolve_chunk_size",
 ]
