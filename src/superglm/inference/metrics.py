@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from functools import cached_property
+from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -27,6 +27,7 @@ from superglm.inference._metrics_design import (
 from superglm.inference.coef_tables import build_basis_detail, build_coef_rows  # noqa: F401
 from superglm.inference.covariance import (  # noqa: F401
     _active_penalty_matrix,
+    _active_penalty_root,
     _second_diff_penalty,
     covariance_selected_block,
     covariance_selected_diagonal,
@@ -262,8 +263,12 @@ def _penalized_factor(
     penalty: NDArray,
     *,
     centred: bool = False,
+    root: NDArray | None = None,
 ) -> NDArray:
-    """``[sqrt(W) X; P]`` with ``P'P = S``, its rows centred on the weighted mean when ``centred``."""
+    """``[sqrt(W) X; P]`` with ``P'P = S``, its rows centred on the weighted mean when ``centred``.
+
+    ``P`` is ``root`` when given, else ``penalty_factor(S)``.
+    """
     center, center_lo = _centre_pair(design, W) if centred else (None, None)
     factor = streamed_weighted_factor(
         iter_dense_chunks(design),
@@ -271,7 +276,7 @@ def _penalized_factor(
         center=center,
         center_lo=center_lo,
     )
-    smooth_factor = penalty_factor(penalty)
+    smooth_factor = penalty_factor(penalty) if root is None else root
     if smooth_factor.shape[0]:
         factor = np.vstack((factor, smooth_factor))
     return factor
@@ -282,12 +287,14 @@ def _certified_coefficient_rank(
     W: NDArray,
     raw_gram: NDArray,
     penalty: NDArray,
+    *,
+    root: NDArray | None = None,
 ):
     """Certify ambiguous raw penalized geometry with observation rows."""
     decomposition = decompose_gram_if_authoritative(raw_gram + penalty)
     if decomposition is not None:
         return decomposition
-    return decompose_factor(_penalized_factor(design, W, penalty))
+    return decompose_factor(_penalized_factor(design, W, penalty, root=root))
 
 
 def _certified_profile_rank(
@@ -297,6 +304,8 @@ def _certified_profile_rank(
     xtw1: NDArray,
     penalty: NDArray,
     data_rank,
+    *,
+    root: NDArray | None = None,
 ):
     """Return the certified centered Hessian decomposition for covariance."""
     if not np.any(penalty):
@@ -304,10 +313,10 @@ def _certified_profile_rank(
     decomposition = decompose_gram_if_authoritative(data_gram + penalty)
     if decomposition is not None:
         return decomposition
-    return decompose_factor(_penalized_factor(design, W, penalty, centred=True))
+    return decompose_factor(_penalized_factor(design, W, penalty, centred=True, root=root))
 
 
-def _face_ranks(design: MetricsDesign, W: NDArray, penalty: NDArray, face: NDArray):
+def _face_ranks(design: MetricsDesign, W: NDArray, root: NDArray, face: NDArray):
     """``Z'(X'WX + S)Z`` and ``Z'(D + S)Z`` decomposed from the rows projected on the face ``Z``.
 
     Returns the projected rows, their centred Gram ``Z'DZ`` and the two
@@ -317,23 +326,30 @@ def _face_ranks(design: MetricsDesign, W: NDArray, penalty: NDArray, face: NDArr
     penalty on the face.  ``Z' M Z`` formed from the full Gram instead
     carries an error of the curvature weights put off the face times ``u``,
     which no factorization of it detects while it stays definite.  The
-    penalty on the face is ``(PZ)'(PZ)`` from its factor ``P'P = S``
-    (``penalty_factor``), PSD by construction: ``Z'SZ`` formed directly
-    cancels to rounding of either sign in the penalty's null space, and that
-    rounding outweighs the data's curvature once the weights are small.
+    penalty on the face is ``(PZ)'(PZ)`` from the stacked root ``P'P = S``
+    of its terms (``_active_penalty_root``), PSD by construction, and ``PZ``
+    is the penalty's factor wherever the rows certify a rank: ``Z'SZ``
+    formed directly cancels to rounding of either sign in the penalty's null
+    space, which outweighs the data's curvature once the weights are small,
+    and a root of the summed ``S`` cuts a term below ``eps`` times another,
+    which can be all the curvature the face has.
     """
     rows = ProjectedDesign(design, face)
     raw_gram, xtw1, data_gram = weighted_moments(rows, W)
-    projected_penalty = penalty_factor(penalty) @ face
+    projected_penalty = root @ face
     face_penalty = projected_penalty.T @ projected_penalty
     face_penalty = 0.5 * face_penalty + 0.5 * face_penalty.T
-    coefficient = _certified_coefficient_rank(rows, W, raw_gram, face_penalty)
+    coefficient = _certified_coefficient_rank(
+        rows, W, raw_gram, face_penalty, root=projected_penalty
+    )
     data_rank = (
         None
         if np.any(face_penalty)
         else _certified_data_rank(rows, W, data_gram, xtw1, face_penalty)
     )
-    profile = _certified_profile_rank(rows, W, data_gram, xtw1, face_penalty, data_rank)
+    profile = _certified_profile_rank(
+        rows, W, data_gram, xtw1, face_penalty, data_rank, root=projected_penalty
+    )
     return rows, data_gram, coefficient, profile
 
 
@@ -985,13 +1001,9 @@ class ModelMetrics:
             )
             X_a = EvaluationDesign(self._model, self._X, selected_columns)
             lam2 = fitted_lambda2(self._model)
-            S_active = _active_penalty_matrix(
-                self._model._dm.group_matrices,
-                self._groups,
-                active_groups,
-                lam2,
-                reml_penalties=getattr(self._model, "_reml_penalties", None),
-            )
+            penalty_terms = (self._model._dm.group_matrices, self._groups, active_groups, lam2)
+            reml_penalties = getattr(self._model, "_reml_penalties", None)
+            S_active = _active_penalty_matrix(*penalty_terms, reml_penalties=reml_penalties)
             XtWX, XtW1, centered_data_gram = weighted_moments(X_a, W)
             self.__dict__["_active_centered_data_gram"] = centered_data_gram
             data_rank = _certified_data_rank(X_a, W, centered_data_gram, XtW1, S_active)
@@ -1002,7 +1014,15 @@ class ModelMetrics:
                 len(beta),
             )
             inverse, profile_rank = self._reformed_ranks(
-                X_a, W, XtWX, XtW1, centered_data_gram, S_active, data_rank, face
+                X_a,
+                W,
+                XtWX,
+                XtW1,
+                centered_data_gram,
+                S_active,
+                data_rank,
+                face,
+                partial(_active_penalty_root, *penalty_terms, reml_penalties=reml_penalties),
             )
             augmented = _profiled_augmented_covariance(
                 centered_data_gram,
@@ -1028,13 +1048,9 @@ class ModelMetrics:
         )
         X_a = _grouped_active_design(self._model, active_groups)
         lam2 = fitted_lambda2(self._model)
-        S_active = _active_penalty_matrix(
-            self._dm.group_matrices,
-            self._groups,
-            active_groups,
-            lam2,
-            reml_penalties=getattr(self._model, "_reml_penalties", None),
-        )
+        penalty_terms = (self._dm.group_matrices, self._groups, active_groups, lam2)
+        reml_penalties = getattr(self._model, "_reml_penalties", None)
+        S_active = _active_penalty_matrix(*penalty_terms, reml_penalties=reml_penalties)
         XtWX, XtW1, centered_data_gram = weighted_moments(X_a, W)
         self.__dict__["_active_centered_data_gram"] = centered_data_gram
         data_rank = _certified_data_rank(X_a, W, centered_data_gram, XtW1, S_active)
@@ -1045,7 +1061,15 @@ class ModelMetrics:
             len(beta),
         )
         inverse, profile_rank = self._reformed_ranks(
-            X_a, W, XtWX, XtW1, centered_data_gram, S_active, data_rank, face
+            X_a,
+            W,
+            XtWX,
+            XtW1,
+            centered_data_gram,
+            S_active,
+            data_rank,
+            face,
+            partial(_active_penalty_root, *penalty_terms, reml_penalties=reml_penalties),
         )
         augmented = _profiled_augmented_covariance(
             centered_data_gram,
@@ -1058,13 +1082,16 @@ class ModelMetrics:
         augmented = _public_augmented_covariance(self._model, augmented, active_groups)
         return X_a, W, inverse, augmented, active_groups
 
-    def _reformed_ranks(self, X_a, W, XtWX, XtW1, centered_data_gram, S_active, data_rank, face):
+    def _reformed_ranks(
+        self, X_a, W, XtWX, XtW1, centered_data_gram, S_active, data_rank, face, penalty_root
+    ):
         """The re-formed coefficient inverse and the profiled decomposition, on ``face`` if any.
 
         Without a face, ``(X'WX + S)^+`` and the decomposition of ``D + S``.
         On one, ``Z (Z'(X'WX + S)Z)^+ Z'`` and the decomposition of ``Z'(D +
-        S)Z``, both from the rows projected on it (``_face_ranks``), which
-        are kept for leverage and EDF (``_face_projection``).
+        S)Z``, both from the rows projected on it and the penalty's stacked
+        root ``penalty_root()`` (``_face_ranks``), which are kept for
+        leverage and EDF (``_face_projection``).
         """
         if face is None:
             inverse = _certified_coefficient_rank(X_a, W, XtWX, S_active).pseudo_inverse()
@@ -1072,7 +1099,7 @@ class ModelMetrics:
                 X_a, W, centered_data_gram, XtW1, S_active, data_rank
             )
             return inverse, profile_rank
-        rows, face_gram, coefficient_rank, profile_rank = _face_ranks(X_a, W, S_active, face)
+        rows, face_gram, coefficient_rank, profile_rank = _face_ranks(X_a, W, penalty_root(), face)
         self.__dict__["_face_profile"] = (rows, face, profile_rank, face_gram)
         return face_pseudo_inverse(coefficient_rank, face), profile_rank
 

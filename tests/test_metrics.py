@@ -3694,18 +3694,24 @@ def test_slack_shape_constraint_reforms_unrestricted_leverage_on_new_rows():
     )
 
 
-def _exact_face_leverage(rows, weights, penalty, face):
+def _exact_face_leverage(rows, weights, penalties, face):
     """``w_i a_i' H^-1 a_i`` in exact rationals, ``a_i = [1, x_i' Z]``, ``H = sum w a a' + diag(0, Z'SZ)``.
 
-    The test's own oracle: every float64 input is read as the rational it is,
-    and the projection, the Hessian and its solve are exact.
+    ``S = sum_k lam_k S_k`` over the ``(lam_k, S_k)`` in ``penalties``.  The
+    test's own oracle: every float64 input is read as the rational it is, and
+    the penalty's sum, the projection, the Hessian and its solve are exact.
     """
     from fractions import Fraction
 
     def exact(matrix):
         return [[Fraction(float(value)) for value in row] for row in np.atleast_2d(matrix)]
 
-    Z, S = exact(face), exact(penalty)
+    Z = exact(face)
+    S = [[Fraction(0)] * len(Z) for _ in Z]
+    for scale, matrix in penalties:
+        for i, row in enumerate(exact(matrix)):
+            for j, value in enumerate(row):
+                S[i][j] += Fraction(float(scale)) * value
     width = len(Z[0])
     projected = [
         [Fraction(1)] + [sum(x[j] * Z[j][k] for j in range(len(x))) for k in range(width)]
@@ -3781,7 +3787,9 @@ def test_face_leverage_and_edf_on_weights_far_apart_match_an_exact_reference(hea
         reml_penalties=getattr(model, "_reml_penalties", None),
     )
     # the face from the binding rows alone, not the fit's own basis
-    expected = _exact_face_leverage(X_a.toarray(), W, penalty, null_space(rank_info.face_rows))
+    expected = _exact_face_leverage(
+        X_a.toarray(), W, [(1.0, penalty)], null_space(rank_info.face_rows)
+    )
     # three free slopes and the intercept
     assert 3.0 < expected.sum() < 4.0
     # Projected, a heavy row carries w (u |x| |Z|)^2 ||(Z'MZ)^+||, at most about
@@ -3823,3 +3831,70 @@ def test_face_leverage_at_tiny_weights_on_a_penalty_free_face_is_ols():
     # curvature w sum (x - mean x)^2, about 8e-20: a leverage error near 1e-9.
     np.testing.assert_allclose(evaluation.leverage, expected, rtol=0.0, atol=1e-7)
     assert evaluation.leverage.sum() == pytest.approx(2.0, abs=1e-6)
+
+
+def test_face_leverage_keeps_a_penalty_term_dominated_beyond_one_over_eps():
+    """The face penalty is formed from each term's own root, scaled by its lambda,
+    so a term ``eps`` times weaker than another survives where it is all the
+    curvature the face has.  Here the binding convex rows leave the line free,
+    which ``1e12 S_d2`` leaves unpenalized and ``1e-3 S_d1`` does not.
+    Mutation checks: the root of the summed ``S`` (``penalty_factor(S)``) cuts
+    the first-derivative term, and leverage summed to 2.0; the direct ``Z'SZ``
+    adds the strong term's rounding, ``1e12 u ||S_d2||``, a quarter of the weak
+    term's curvature, and moved leverage by up to ``5e-3`` of itself."""
+    from scipy.linalg import null_space
+
+    from superglm import Constraint, LambdaPolicy
+    from superglm.features.spline import BSplineSmooth
+    from superglm.inference.covariance import (
+        _active_penalty_components,
+        _active_penalty_matrix,
+    )
+    from superglm.model.fit_state import fitted_lambda2
+    from superglm.solvers.centered_system import penalty_factor
+
+    x = np.linspace(0.0, 1.0, 100)
+    X = pd.DataFrame({"x": x})
+    y = 2.0 + x - x * x + np.random.default_rng(0).normal(0.0, 0.1, 100)
+    lambdas = {"d1": LambdaPolicy.fixed(1e-3), "d2": LambdaPolicy.fixed(1e12)}
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={
+            "x": BSplineSmooth(
+                n_knots=4, m=(1, 2), constraint=Constraint.fit.convex, lambda_policy=lambdas
+            )
+        },
+    ).fit_reml(X, y)
+    rank_info = model.result.rank_info
+    assert rank_info.face is not None
+
+    evaluation = model.metrics(X.copy(), y, sample_weight=np.full(100, 1e-4))
+    assert not evaluation._fit_geometry_matches
+    X_a, W, _, _, active_groups = evaluation._active_info
+    terms = (model._dm.group_matrices, model._groups, active_groups, fitted_lambda2(model))
+    reml_penalties = model._reml_penalties
+    (_, weak, S_weak), (_, strong, S_strong) = sorted(
+        _active_penalty_components(*terms, reml_penalties=reml_penalties),
+        key=lambda term: term[1],
+    )
+    face = null_space(rank_info.face_rows)
+    u = np.finfo(np.float64).eps / 2
+    # The face is the line, the second-derivative term's null space: it is a
+    # machine zero there, as the exact reference takes it (Wood 2011, sec. 3.1).
+    assert abs((face.T @ S_strong @ face).item()) <= len(face) * u * np.linalg.norm(S_strong, 2)
+    weak_curvature = weak * (face.T @ S_weak @ face).item()
+    # The event: the root of the summed penalty has cut the weak term.
+    summed_root = penalty_factor(_active_penalty_matrix(*terms, reml_penalties=reml_penalties))
+    assert np.sum((summed_root @ face) ** 2) < 1e-9 * weak_curvature
+    assert strong * u * np.linalg.norm(S_strong, 2) > 0.1 * weak_curvature
+
+    expected = _exact_face_leverage(X_a.toarray(), W, [(weak, S_weak)], face)
+    # the intercept and a line shrunk by the first-derivative penalty
+    assert 1.6 < expected.sum() < 1.7
+    # The strong term's root leaks ``strong (u ||R_d2||)^2`` onto the face,
+    # about 1e-12 of the weak curvature, through a two-column Hessian.
+    np.testing.assert_allclose(evaluation.leverage, expected, rtol=1e-9, atol=1e-12)
+    spline_edf = next(row.edf for row in evaluation.summary()._coef_rows if row.name == "x")
+    assert spline_edf == pytest.approx(expected.sum() - 1.0, rel=1e-9)
+    assert evaluation._influence_edf[0].sum() == pytest.approx(expected.sum() - 1.0, rel=1e-9)
