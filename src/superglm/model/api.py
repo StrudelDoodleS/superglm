@@ -153,35 +153,29 @@ class SuperGLM:
             interactions; and ``{column: spec}`` mappings, each standing for
             one ``term(column, spec)`` per entry, in the mapping's order. For
             example, ``terms=[s("age", k=10), s("value", k=8), cat("region"),
-            "density", ti("age", "value")]``. A list gives the same model as the
-            equivalent ``features=`` and ``interactions=``, bit for bit: the
-            design holds the main effects in the order declared, then the
-            interactions in the order declared, so declaration order sets
-            the column order. Cannot be combined with *features*, *splines*
-            or *interactions*. Like ``features=``, it does not read
-            *n_knots*, *degree* or *categorical_base*, which configure only
-            *splines* auto-detection; a value other than the default for
-            any of them raises ``ValueError``. Set those options on each term
-            instead, as in ``s("age", n_knots=8)``.
+            "density", ti("age", "value")]``. A list gives the same model as
+            the equivalent ``features=`` and ``interactions=``, bit for bit,
+            with main effects then interactions in declaration order. Cannot
+            be combined with *features*, *splines* or *interactions*. A
+            non-default *n_knots*, *degree* or *categorical_base* raises
+            ``ValueError``; set those options on each term instead, as in
+            ``s("age", n_knots=8)``.
         active_set : bool
             Use active-set cycling in the BCD solver.
         direct_solve : {"auto", "gram", "qr", "structured"}
             Strategy for the direct IRLS solver (lambda1=0).
-            ``"auto"`` selects compact structured elimination for random-effect
-            and factor-smooth (``basis="fs"`` or ``"sz"``) terms above the
-            measured size crossover, otherwise using Gram; the choice reads the
-            model's terms, their sizes and the grouping columns' level pattern
-            (which levels nest in which), never the response, the weights or
-            the fit's progress, and ``result.direct_fallback_reason`` says why
-            Gram was chosen.  A
-            fit never switches solver: when the structured solver cannot
-            proceed, the fit stops with an error that names the cause, and
-            ``"gram"`` fits the model with the dense solver instead.
-            ``"gram"`` forces the gram path. ``"qr"`` uses QR on the
-            materialised weighted design matrix — backward-stable but
-            O(n·p²) per iteration.  Intended for smaller datasets.
-            ``"structured"`` forces structured elimination for an eligible
-            random-effect, FS, or SZ block, and raises for any other model.
+            ``"auto"`` (default) uses compact structured elimination for large
+            random-effect and factor-smooth (``basis="fs"`` or ``"sz"``)
+            terms and the Gram solver otherwise; the choice reads only the
+            terms, their sizes and the grouping columns' nesting, and
+            ``result.direct_fallback_reason`` says why Gram was chosen. A fit
+            never switches solver: when the structured solver cannot proceed
+            the fit stops with an error naming the cause, and ``"gram"`` fits
+            the model with the dense solver instead. ``"qr"`` uses QR on the
+            materialised weighted design, backward-stable but O(n·p²) per
+            iteration, for smaller datasets. ``"structured"`` forces
+            structured elimination for an eligible random-effect, FS or SZ
+            block, and raises for any other model.
         discrete : bool
             Use discretized basis matrices for large-*n* REML (fREML-style).
         n_bins : int or dict[str, int]
@@ -190,8 +184,8 @@ class SuperGLM:
             Convergence tolerance for IRLS / PIRLS.  Default ``1e-6``.
             Can also be set per-call via ``fit(tol=...)`` or
             ``fit_reml(pirls_tol=...)``.  Fit-time values take precedence.
-            Larger values (e.g. ``1e-6``) converge faster but may stop
-            before near-separated coefficients have stabilised.
+            Larger values converge faster but may stop before
+            near-separated coefficients have stabilised.
         max_iter : int
             Maximum IRLS / PIRLS outer iterations.  Default ``100``.
         convergence : {"deviance", "coefficients"}
@@ -208,39 +202,19 @@ class SuperGLM:
             training caches while preserving prediction, summaries, and term
             confidence intervals.
         separation : {"warn", "error", "ignore"}
-            Build-time check for separated categorical cells: levels or
-            crossed-interaction cells that carry exposure but whose responses
-            all sit on the response boundary (e.g. no positive response under
-            a log-link Tweedie/Poisson fit). Such cells have no finite
-            maximum-likelihood effect, IRLS drifts until the objective
-            stagnates, and the affected predictions collapse to the boundary
-            while rank and aggregate metrics (gini, balance) still look
-            healthy -- only out-of-sample likelihood/deviance exposes the
-            damage. ``"warn"`` (default) emits a ``SeparationWarning`` naming
-            the offending cells and the remedies before fitting; ``"error"``
-            refuses the design with a ``SeparationError``; ``"ignore"``
-            disables the check. Terms bounded by an active selection penalty
-            are exempt, as their penalised optima are finite. The same mode
-            governs the in-solver backstop that fires when an exhausted,
-            stagnant IRLS run shows the extreme-working-weight signature of
-            separation the build scan cannot see.
-            A spline-by-factor level whose responses all sit on the boundary
-            over a covariate range is held there before fitting: before its
-            first and past its last response off the boundary its curve keeps
-            its value at that point, in the fit and in ``predict``, and
-            between two such responses it takes the smoothest path joining
-            them; the factor's base, whose curve is the main effect's, is
-            scanned on the main effect alone and named as approximate, not
-            held.  ``"warn"`` names the term, the level and the range,
-            ``"error"`` refuses (never on a base's range alone), and
-            ``"ignore"`` leaves those curves free.
-            A ``FactorSmooth(basis="sz")`` level whose unpenalized line
-            separates the response is named in a ``SeparationWarning`` at fit
-            under ``"warn"`` and ``"error"`` alike (never refused) and left
-            out of the term's population curve; ``"ignore"`` silences the
-            warning only. The warning names the term's remedy,
-            ``FactorSmooth(..., select=True)``, which penalizes the levels'
-            lines so that none separates.
+            Check for separated cells: categorical levels or crossed cells
+            with exposure whose responses all sit on the response boundary
+            (no positive response under a log-link Poisson fit, say), so they
+            have no finite maximum-likelihood effect. ``"warn"``
+            (default) emits a ``SeparationWarning`` naming the cells and the
+            remedies before fitting; ``"error"`` raises ``SeparationError``;
+            ``"ignore"`` disables the check. Terms under an active selection
+            penalty are exempt. The same mode governs the solver's backstop
+            for separation the build scan cannot see, the hold on a
+            spline-by-factor level's curve over a boundary-only range, and the
+            warning for a ``FactorSmooth(basis="sz")`` level whose line
+            separates (warned, never refused; ``select=True`` is the remedy).
+            See the how-to *Interactions*, section *Separated cells*.
         group_pricing : {"rank", "spanned"}
             Dimension ``p_g`` at which the selection penalty and the fallback
             df ledger price a group whose spec emits fewer columns than the
@@ -248,12 +222,10 @@ class SuperGLM:
             cells).  ``"rank"`` (default) prices the emitted, identifiable
             width, following the group-lasso literature's derivation of
             ``sqrt(p_g)`` from the df of the group's score statistic.
-            ``"spanned"`` prices the width the term spans -- the historical
-            behaviour -- so cell pruning is a pure reparametrisation of the
-            fit.  The choice moves fitted results only for models that
-            combine such an interaction with an active group penalty --
-            ``selection_penalty > 0`` or an explicit ``penalty=`` whose
-            ``lambda1 > 0`` -- and moves the reported
+            ``"spanned"`` prices the width the term spans, so cell pruning is
+            a pure reparametrisation of the fit.  The choice moves fitted
+            results only for models that combine such an interaction with an
+            active group penalty, and moves the reported
             ``effective_df``/``phi``/AIC/BIC of any fit whose df falls back
             to the Breheny-Huang allocation.
         weight_semantics : {"prior", "frequency"}
@@ -268,17 +240,12 @@ class SuperGLM:
             weight is exactly equivalent to repeating the row; that is
             statsmodels' ``freq_weights`` and Stata's ``fweight``.
 
-            The two agree only at ``w == 1`` -- integer weights do not make
-            them coincide -- and only the prior reading is a likelihood at
-            fractional ones.  They share a score equation,
-            so ``beta`` is unchanged; what moves is ``phi``, every Wald
-            standard error and interval, residual degrees of freedom, the
-            effective ``n`` in AIC/BIC, and -- through the REML criterion --
-            the smoothing parameters, the effective degrees of freedom and
-            hence the fitted surface.  Spline knot placement moves too:
-            frequency mass shapes the same support as replicated rows, while
-            prior weights leave learned geometry a function of physical rows.
-            Unweighted fits and fits with ``w == 1`` are identical under both.
+            The two agree only at ``w == 1``, and only the prior reading is a
+            likelihood at fractional weights.  At fixed smoothing they share
+            ``beta``; ``phi``, Wald standard errors, residual degrees of
+            freedom, AIC/BIC, and through REML the smoothing parameters and
+            fitted surface all differ, as does learned knot placement. See
+            the explanation *Families and Dispersion Estimation*.
         n_jobs : int or "auto"
             The most threads a fit uses for its heaviest steps: forming the
             weighted Gram block by block and checking the rank of the design.
@@ -340,12 +307,9 @@ class SuperGLM:
     def _parallel_scope(self):
         """The fit's thread and memory limits (``_parallel.estimator_scope``).
 
-        ``fit``, ``fit_path``, ``fit_reml`` and every public method that can
-        refit, build a Gram or factor the design enter it in their own
-        bodies, so a refit (``drop1``, ``estimate_p``) and post-fit inference
-        (``summary``, ``metrics``) keep the fit's limits.  Not through a
-        wrapper: an extra frame would move the caller every warning's
-        ``stacklevel`` points at.
+        Every public method that can refit, build a Gram or factor the design
+        enters it in its own body, not through a wrapper, whose extra frame
+        would shift every warning's ``stacklevel``.
         """
         from superglm._parallel import estimator_scope
 
@@ -365,8 +329,7 @@ class SuperGLM:
         (``mark_kindless_saved_on_scop``).
         """
         self.__dict__.update(state)
-        # Earlier releases pickled the metadata of a fast discrete predictor
-        # that no longer exists; nothing reads it.
+        # Metadata of a retired fast discrete predictor; nothing reads it.
         self.__dict__.pop("_fast_prediction_state", None)
         from superglm.model.retired_state import (
             mark_retired_linear_state,
@@ -467,12 +430,8 @@ class SuperGLM:
         from superglm.model.binding_ops import resolve_level_bindings, validate_binding_weight
 
         frame = as_eager_frame(X)
-        # The weight decides the pinned base and which levels count as empty,
-        # and both decisions outlive this call on every later fit -- so it is
-        # checked here rather than trusted, on the same terms `fit` checks its
-        # own. Unvalidated, a ragged or negative weight either dies inside a
-        # bincount with no mention of `sample_weight` or moves the reference
-        # level with no error at all.
+        # The weight decides the pinned base and which levels count as empty
+        # for every later fit, so it is validated here as `fit` validates its own.
         sample_weight = validate_binding_weight(sample_weight, len(frame))
         # strict=True: this frame is the caller's stated universe source, so a
         # column that cannot bind is an error now, not a surprise per fold.
@@ -735,17 +694,16 @@ class SuperGLM:
     ) -> SuperGLM:
         """Fit with REML estimation of per-term smoothing parameters.
 
-        ``fit_reml()`` is the smoothness-selection path and does not support a
-        selection penalty: configure ``selection_penalty=None`` or ``0.0``.
-        A Tweedie power within about 0.005 of 1, or further out for repeated
-        responses (whose rows share a lattice phase), makes the dispersion
-        profile multimodal; each of its solves then searches globally (seconds
-        per fit at p = 1.001 on 30,000 distinct rows), and a power too close to
-        1 for that search raises ``superglm.NearPoissonDispersionError``.
         It optimizes a Laplace approximate REML objective over per-term
-        smoothing parameters. For sparse/group selection, use ``fit()`` or
-        ``fit_path()``. To let REML shrink spline null spaces, use
-        ``select=True`` on the spline terms instead.
+        smoothing parameters, and does not support a selection penalty:
+        configure ``selection_penalty=None`` or ``0.0``. For sparse/group
+        selection, use ``fit()`` or ``fit_path()``; to let REML shrink spline
+        null spaces, use ``select=True`` on the spline terms.
+
+        A Tweedie power within about 0.005 of 1, or further out for repeated
+        responses, makes the dispersion profile multimodal; each solve then
+        searches it globally, and a power too close to 1 for that search
+        raises ``superglm.NearPoissonDispersionError``.
 
         Parameters
         ----------
@@ -766,102 +724,32 @@ class SuperGLM:
         offset : array-like, optional
             Offset term.
         max_reml_iter : int, optional
-            Maximum REML outer iterations. Unset, it is 20. A fit that reaches the cap is
-            returned with a ``ConvergenceWarning``,
+            Maximum REML outer iterations. Unset, it is 20. A fit that
+            reaches the cap is returned with a ``ConvergenceWarning``,
             ``reml_diagnostics()["converged"]`` reads ``False`` and the
-            summary says why. A cold exact fit of Poisson/log, binomial
-            with the logit, probit or cloglog link, Gamma/log, Tweedie/log
-            or NB2/log with a fixed theta, with at least eight smoothing
-            parameters, no ``RandomEffect`` or ``FactorSmooth`` term and a
-            cap of at least 10 can first run up to this many cached-W updates
-            (a pre-solve) before the exact loop;
+            summary says why. A cold exact fit with at least eight smoothing
+            parameters and no ``RandomEffect`` or ``FactorSmooth`` term may
+            first run up to this many cached-W updates (a pre-solve);
             ``reml_diagnostics()["n_reml_iter"]`` counts the exact loop and
             ``["n_presolve_iter"]`` the pre-solve.
         reml_tol : float, optional
             Stopping tolerance for the smoothing-parameter optimizer. Unset,
-            it is 1e-9 for both Newton engines (exact and discrete). An explicit
-            value reaches the engine verbatim, except that the discrete
-            engine floors it at 1e-12, below which its cached-W objective
-            differences are numerical noise. Candidate-grade fits
-            (``interaction_mode="fast_candidate"`` and power-search
-            candidates inside ``estimate_p``) pin 1e-6 themselves: they are
-            ranked, never published.
-
-            The Newton engines stop when the projected log-lambda gradient
-            and the objective change both fall below
-            ``reml_tol * (1 + |objective|)``, judged over the ACTIVE
-            directions: inferentially flat directions are frozen where they
-            stand rather than marched toward the lambda cap. One on a concave
-            shoulder of a flat region (a positive gradient, the criterion
-            still falling toward the optimum, with negative curvature about
-            equal to it, whose model still promises a decrease this tolerance
-            resolves) refuses the stop and keeps stepping; the last such
-            refusal is recorded under
-            ``profile["reml_concave_stop_refusal"]``. A direction
-            freezes when its gradient falls below
-            ``max(0.1 * reml_tol, 1e-7) * (1 + |objective|)`` -- a loose
-            tolerance widens that arm; tightening stops at the 1e-7 floor
-            -- and its row curvature per penalty dimension
-            (``max_j |H_ij| / sqrt(rank_i * rank_j)`` over the estimated
-            block) is under 1% of the strongest estimated direction's,
-            anchored at 0.1 per dimension for all-weak models. Rows
-            rather than diagonals so coupled curvature counts;
-            symmetrically per rank so a high-rank random effect and a
-            low-rank spline stay commensurate and a shared cross-term
-            reads the same from both ends; relative to the strongest
-            direction because judging curvature against the objective's
-            scale would freeze informative directions as the row count
-            grows. The per-direction freeze decision -- including the
-            ``row_curvature``, ``penalty_rank`` and ``curvature_bar`` it
-            judged -- is recorded in ``reml_diagnostics()`` under
-            ``profile["reml_freeze_decision"]``. Loose values still leave
-            the informative smoothing parameters -- and the standard errors
-            computed from them -- underdetermined long before predictions
-            are affected: at 1e-6, a converged fit on a synthetic 12k-row
-            stress design publishes a worst-coefficient SE 92% away from
-            the determined answer; 1e-9 pins it to ~0.01%, measured at 3->7
-            extra Newton iterations on a 97k benchmark fixture and 5->13 on
-            that stress design. A tolerance tighter than the candidate
-            machinery can resolve terminates -- on the exact engine, whose
-            line search is where that limit surfaces, and on the discrete
-            engine's shared-tensor line search -- as
-            ``termination_reason="converged_at_precision"`` (at least one
-            evaluated trial rejected and none left, or the accepted one
-            discarded: its decrease within the evaluations' rounding, or,
-            after a rejected full step, more than a quadratic criterion
-            allows and within ``reml_tol * (1 + |objective|)``; and either
-            every active gradient under ``max(1e-7, reml_tol) * (1 +
-            |objective|)`` or,
-            with every active gradient under ten times that bar, the
-            decrease the active set's Newton model still predicts, half of
-            ``g' H^-1 g`` for a positive definite Hessian whose Newton step
-            no step cap or trust region shortened, under
-            ``reml_tol * (1 + |objective|)``) with
+            it is 1e-9 for both Newton engines (exact and discrete); the
+            discrete engine floors an explicit value at 1e-12, and
+            candidate-grade fits (``interaction_mode="fast_candidate"`` and
+            ``estimate_p``'s power-search candidates) use 1e-6. The engines
+            stop when the projected log-lambda gradient and the objective
+            change both fall below ``reml_tol * (1 + |objective|)`` over the
+            active directions; a direction whose gradient and relative row
+            curvature are both negligible is frozen where it stands, as
+            recorded in ``reml_diagnostics()`` under
+            ``profile["reml_freeze_decision"]``. A tolerance tighter than the
+            line search can resolve ends as
+            ``termination_reason="converged_at_precision"`` with
             ``converged=True``; ``line_search_failed`` with
-            ``converged=False`` is reserved for genuinely undetermined
-            stalls. The discrete engine's exits are therefore
-            ``score_objective_tolerance``, ``active_set_stationary``,
-            ``fixed_lambdas``, ``max_reml_iter`` and, from a dead line
-            search on a numeric-by-numeric tensor interaction with a
-            known-scale family only (an estimated-scale family takes the
-            generic path even with a tensor interaction),
-            ``line_search_failed`` or ``converged_at_precision``, decided
-            by the same predicate the exact engine uses. A dead tensor
-            search that meets neither condition is
-            ``line_search_failed`` with ``converged=False``; the exit fires
-            only once the candidate's own working-model step has settled,
-            so the next iteration would repeat this one, and never on the
-            first iteration. On the discrete engine's other paths a dead
-            search keeps iterating to ``max_reml_iter``: there one
-            working-model update per outer iteration routinely rescues
-            the next search, so a failed search is not evidence of a
-            fixed point.
-
-            Versions before 0.20.0 defaulted every engine to 1e-6, so a
-            default-tolerance fit can publish standard errors that differ
-            from 0.19.x by the full determination gap above. The numbers
-            moved once, to the determined values; pass ``reml_tol=1e-6`` to
-            reproduce the old ones.
+            ``converged=False`` is reserved for undetermined stalls. Looser
+            values (``1e-6``) are faster, but leave standard errors less
+            determined well before predictions move.
         pirls_tol : float, optional
             Inner PIRLS/IRLS convergence tolerance. Defaults to
             constructor ``tol`` (1e-6). Pass explicitly to override.
@@ -872,21 +760,14 @@ class SuperGLM:
             Where the smoothing-parameter search starts. A mapping keyed by
             smoothing component (or group) name, such as an earlier fit's
             ``reml_diagnostics()["lambdas"]``, is a warm start: each named
-            component begins there instead of at the engine's own bootstrap,
-            so a refit on similar data (a cross-validation fold, a bootstrap
-            or a later year) takes fewer outer iterations. Components the
-            mapping does not name start as usual, fixed-policy components
-            keep their fixed value, and values must be finite and positive.
-            A term's components start warm only together: a mapping that
-            names some of a tensor interaction's components but not all
-            starts that whole term as usual, with a ``UserWarning``, and a
-            key that names nothing in the model is ignored, with a
-            ``UserWarning``.
-            Coefficients are not carried over: their basis is rebuilt from
-            each fit's own data. The search converges to the same criterion
-            either way; where the criterion is flat, a different start can
-            stop at a different point of that flat region. A float, or leaving
-            it unset, keeps the engines' own bootstrap start, as before.
+            component begins there, so a refit on similar data (a
+            cross-validation fold, a later year) takes fewer outer
+            iterations. Values must be finite and positive; unnamed and
+            fixed-policy components start as usual. A term whose components
+            are only partly named starts cold, and an unknown key is ignored,
+            each with a ``UserWarning``. Coefficients are not carried over,
+            and where the criterion is flat a different start can stop at a
+            different point of the flat region. A float, or leaving it unset, keeps the engines' own start.
         interaction_mode : {"full", "fast_candidate"}
             ``"full"`` runs ordinary REML. ``"fast_candidate"`` caps REML
             outer updates for interaction models and then runs the normal final
@@ -971,18 +852,14 @@ class SuperGLM:
         for a per-level numeric slope and ``numeric_numeric`` for a product
         of two numerics — and ``z`` normalizes each kind against its own
         noise floor, so the one sorted table ranks them together, though not
-        on equal terms and not simply by df: the measured null maxima span
-        3.98 to 7.53 across kinds.  The heaviest tails sit at low probe df,
-        yet "neither kind is monotone in df", and the headline maxima read as
-        "Gaussian-driven rather than as something every family reproduces".
-        Compare like with like before spending a refit (see the measured
-        floors in the screening guide).  A spline-mode
-        ``OrderedCategorical`` margin screens as a spline on its mapped level
-        scores, so its pairs carry the spline kinds.  A kind whose block carries no
-        penalty (``cat_cat``, ``numeric_cat``, ``numeric_numeric``) has no
-        bandwidth to scan and is evaluated at a single rung: ``edf0`` then
-        reports the block's achieved rank with
-        ``lambda0`` 0.  ``edf0`` is a probe bandwidth; the
+        on equal terms: the null maxima differ by kind, so compare like with
+        like before spending a refit (see the floors in the screening
+        guide).  A spline-mode ``OrderedCategorical`` margin screens as a
+        spline on its mapped level scores, so its pairs carry the spline
+        kinds.  A kind whose block carries no penalty (``cat_cat``,
+        ``numeric_cat``, ``numeric_numeric``) has no bandwidth to scan and is
+        evaluated at a single rung: ``edf0`` then reports the block's
+        achieved rank with ``lambda0`` 0.  ``edf0`` is a probe bandwidth; the
         default ladder evaluates each pair at several budgets and ranks by
         the best noise-normalized score ``z`` (the statistic is scaled by
         the fit's Pearson dispersion estimate first, so the noise floor
@@ -1015,10 +892,7 @@ class SuperGLM:
         grows as ``k^3`` where the allocations grow as ``k^2``.  A probe
         column collinear with the overlap span is routine rather than
         exceptional (one empty ``cat_cat`` cell or one singleton level does
-        it) and is settled by a rank cut on that factor; the Cholesky that
-        used to run here, and the pseudo-inverse it used to fall back to,
-        went with the assembled Grams in issue #257, which changed neither
-        the cost class nor any ceiling below.  A cubic-work gate caps ``k``
+        it) and is settled by a rank cut on that factor.  A cubic-work gate caps ``k``
         at the FLOOR of ``(1000 * max_cells)^(1/3)`` for an unpenalized block
         and of ``(500 * max_cells)^(1/3)`` for a penalized one, whose ladder
         can bisect: 1709 and 1357 at the default.  Take the floor — at
@@ -1036,8 +910,6 @@ class SuperGLM:
         ``k_spline`` times the factor's CONTRAST count — the levels that
         carry a column, not the declared universe, since a level with no
         effective training rows is pinned to base and contributes none.
-        (Per-pair times are deliberately not quoted here; the module's own
-        comments carry the measured ones.)
 
         Which kernel scores a pair follows from that.  The dense path gets
         first refusal and keeps every pair it can score exactly.  A
@@ -1060,8 +932,7 @@ class SuperGLM:
         rather than the gridded one, and ``numeric_numeric`` contracts to a
         five-column design whatever the supports, so it never meets the cap at
         all.  Every kind is reduced to a triangular FACTOR of its own weighted
-        design rather than to a curvature matrix (issue #257); the caps above
-        are dimensional and are unchanged by that.
+        design rather than to a curvature matrix.
 
         A NaN row is not by itself a routing signal.  A ``spline_cat`` pair
         reaches one either because the arrow gates or its ladder refused
@@ -1080,9 +951,8 @@ class SuperGLM:
         ``spline_cat`` threshold above — gets a NaN row, and raising
         ``max_cells`` computes it exactly.  Screening always probes exact bases, so a pair whose
         confirmatory refit would discretize LOSSILY is flagged
-        ``approx=True`` to make that support-discretization gap — measured
-        at ~3.5% on signal pairs, the same class as the quantile fallback —
-        visible in the output.  The flag applies the refit's own gate, which
+        ``approx=True`` to make that support-discretization gap, the same
+        class as the quantile fallback, visible in the output.  The flag applies the refit's own gate, which
         differs by kind: a ``ti`` refit bins its marginals only when BOTH
         parents resolve to fit-time discretization, a ``spline_cat`` refit
         bins its spline margin whenever that ONE parent does, and the
@@ -1537,23 +1407,16 @@ class SuperGLM:
 
             ``fit_mode="reml", search_fit_mode="fit"`` selects ``p`` under
             ordinary ML and then publishes one REML fit at the selected ``p``,
-            which is the cost of a single smoothing-parameter search rather than
-            one per candidate. In either coupling the published fit is
-            publication-grade: candidate fits only rank powers and run at the
-            loose search tolerance, while the published refit runs the tight
-            publication default and re-profiles dispersion against its own
-            fitted mean, so the returned estimates describe the model you get
-            back. Selecting ``p`` under a different objective than the one that
-            publishes it is an approximation -- on the synthetic benchmark
-            fixture it moved ``p_hat`` by 1.1e-6 while running about 1.8x faster
-            -- so measure it on your own data before relying on it. A decoupled
-            search also never meets the certifiable-region boundary a coupled
-            REML search must route around (a coupled run warns when its optimum
-            is pinned against that boundary), at the price that the publication
-            refit may instead fail at the selected ``p`` with a typed
-            ``superglm.PublicationModeError`` naming the ways out. Likelihood-ratio confidence intervals remain
-            available either way; they invert the searched profile, so they
-            describe the regime named by ``search_fit_mode``.
+            the cost of one smoothing-parameter search rather than one per
+            candidate. Selecting ``p`` under a different objective than the
+            one that publishes it is an approximation, so check it on your
+            own data. Either way the published refit runs at the publication
+            tolerance and re-profiles dispersion against its own mean. A
+            coupled REML search warns when its optimum is pinned against the
+            certifiable-region boundary; a decoupled refit may fail at the selected ``p`` with a
+            ``superglm.PublicationModeError`` naming the ways out, and its
+            likelihood-ratio intervals describe the ``search_fit_mode``
+            profile.
         p_bounds : tuple of float
             Search interval for ``p``, strictly inside ``(1, 2)``. An estimate on
             a bound is warned about and recorded in ``result.warnings``: a
@@ -1946,18 +1809,12 @@ class SuperGLM:
         geometric mean of relativities = 1.
 
         A grouped ``OrderedCategorical`` is always exported on the **expanded**
-        axis — one row per original level — where :meth:`plot` defaults to the
-        collapsed view and takes ``grouped_level_display=``, which this method
-        does not. That matters for a merged group, because the two payload
-        pieces then live on different axes: ``effect["x_position"]`` holds the
-        declared level values, while ``smooth_curve["x"]`` spans the axis the
-        smooth was FITTED on, which for a merged group is its members' mean
-        position. A merge at either end of the ordering therefore leaves the
-        exported curve short of the outermost exported markers, and a merged
-        group's two markers sit off the curve's own band — correctly, since they
-        are one parameter reported at two coordinates, but it reads like a
-        coverage failure if you do not expect it. Join the two on the level
-        table, not on x.
+        axis, one row per original level, where :meth:`plot` defaults to the
+        collapsed view. For a merged group the two payload pieces then live
+        on different axes: ``effect["x_position"]`` holds the declared level
+        values, while ``smooth_curve["x"]`` spans the fitted axis, on which a
+        merged group sits at its members' mean position. Join the two on the
+        level table, not on x.
 
         Examples
         --------
