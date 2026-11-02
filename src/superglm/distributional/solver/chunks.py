@@ -782,16 +782,17 @@ def _group_row_floats(group) -> int:
     if type(group) not in _EXACT_SPLINES:
         return _BLOCK_ROW_ARRAYS.get(type(group), group.shape[1])
     # An exact spline's block slice owns a CSR copy of the block rows: values,
-    # column indices and row pointers. A saturated basis's gram also forms a
-    # weighted dense block of its rows.
+    # column indices and row pointers. A saturated basis's gram also forms one
+    # weighted dense copy of its rows (8 * width).
     basis = group.B
     rows, width = basis.shape
     entry = basis.data.itemsize + basis.indices.itemsize
     per_row = entry * basis.nnz + (basis.indptr.itemsize + 8 * width) * rows
     if type(group) is SplineCategoricalGroupMatrix:
         # A level group also owns its rows' CSR, a float copy of its values, its
-        # row indices and, for a saturated basis, a dense copy of its rows,
-        # which its gram weights; charging these on every row bounds each level.
+        # row indices and, for a saturated basis, the dense copy of its rows
+        # that the weighted copy above is made from; charging these on every
+        # row bounds each level.
         per_row += (entry + 8) * basis.nnz + (basis.indptr.itemsize + 8 + 8 * width) * rows
     return -(-per_row // (8 * rows))
 
