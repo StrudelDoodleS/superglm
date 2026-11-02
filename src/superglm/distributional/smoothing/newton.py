@@ -736,12 +736,8 @@ def run_newton_endgame(
         accepted_count = 1
     consecutive_provenance_changes = 0
     # The quasi-Newton memory ``B ~ H^-1``, secant-updated with every accepted
-    # step.  Seeded from a TRUSTED exact Hessian it is reusable: the passes
-    # after that step judge and step with it until a step from it is refused.
-    # A fallback memory (an untrusted Hessian's iteration, seeded from the
-    # last good Hessian or the identity) keeps updating but is not reused: the
-    # next step tries the exact Hessian at its point again, as the fallback
-    # was designed per iteration.
+    # step. Seeded from a trusted exact Hessian it is reused until a step from
+    # it is refused; a fallback memory keeps updating but is not reused.
     inverse_memory: NDArray[np.float64] | None = None
     memory_reusable = False
     last_good_hessian: NDArray[np.float64] | None = None
@@ -831,11 +827,8 @@ def run_newton_endgame(
             )
         # The curvature the gradient-only pass freezes and judges with: the
         # reusable memory's Hessian after a trusted step, else the penalty-only
-        # Hessian (h_kl without the likelihood's third and fourth derivatives),
-        # which vanishes at a working infinity as the exact one does.  The
-        # Fellner--Schall diagonal does not: it tends to half the penalty rank
-        # there, and a direction it never froze was stepped by 1e-9 for ever on
-        # the NB2 linear-effect cap fixture.
+        # Hessian, which vanishes at a working infinity as the exact one does
+        # (the Fellner--Schall diagonal tends to half the penalty rank there).
         estimate: NDArray[np.float64] | None = None
         if inverse_memory is not None and memory_reusable:
             estimate = _hessian_from_inverse(inverse_memory)
@@ -892,11 +885,8 @@ def run_newton_endgame(
             if bool(np.any(blocking)):
                 return finish("gradient_unresolved", published, norm)
             # A component at its upper bound is under cap pressure only when its
-            # gradient is MATERIALLY outward.  Within the bar it is KKT-stationary
-            # at the box bound (measured: an NB2 linear effect at the cap with
-            # g = -2.9e-9 against a bar of 3.5e-3, whose endpoint verdict was
-            # "finite" and whose bracketed probe at 1e14 was still outward --
-            # the objective is flat to 1e-9 there, and the fit is converged).
+            # gradient is materially outward; within the bar it is KKT-stationary
+            # at the box bound.
             caps = tuple(
                 name
                 for k, name in enumerate(names)
@@ -907,15 +897,10 @@ def run_newton_endgame(
                 return finish("cap_pressure", published, norm, caps)
             return finish("stationary", published, norm)
 
-        # Wood's criterion judges the gradient and the objective change on the
-        # objective's scale.  A third arm on the same scale: the objective the
-        # remaining Newton step could still win, the Newton decrement
-        # 0.5 * g' H^-1 g, must be below the bar too.  A bound on the step's
-        # LENGTH in log lambda is the wrong quantity: on a real book the
-        # objective is flat to round-off along some directions, Newton steps
-        # there are 1e-4 to 1e-2 in log lambda for ever, and a length bar of
-        # reml_tol never fires (measured: 17 wasted iterations after Wood's
-        # criterion was met at the third Newton step).
+        # A third arm beside Wood's criterion, on the objective's scale: the
+        # Newton decrement 0.5 * g' H^-1 g must be below the bar too. A bound on
+        # step length in log lambda never fires where the objective is flat to
+        # round-off.
         remaining_gain = 0.0
         if candidate.converged and active_index.size:
             try:
@@ -951,9 +936,8 @@ def run_newton_endgame(
             and last_exact_positive_definite is False
         ):
             # Accepted BFGS steps can leave the region where the last exact
-            # Hessian was indefinite. Refresh it before the next step instead
-            # of letting that old verdict prevent every later stop. Keep the
-            # inverse memory for the existing unavailable-Hessian fallback.
+            # Hessian was indefinite, so refresh it before the next step; the
+            # inverse memory stays for the unavailable-Hessian fallback.
             memory_reusable = False
 
         # The step.  A quasi-Newton step from the memory when one holds; else one
@@ -1014,10 +998,8 @@ def run_newton_endgame(
                     step_source = "newton"
                 else:
                     if inverse_memory is None:
-                        # Seed the quasi-Newton memory from the last trusted exact
-                        # Hessian; with none yet, the identity (Nocedal and Wright
-                        # 2006 §6.1): an untrusted Hessian's inverse can be 1e-12
-                        # and freeze the search.
+                        # Seed the memory from the last trusted exact Hessian, else
+                        # the identity (Nocedal and Wright 2006 §6.1).
                         inverse_memory = (
                             np.eye(count)
                             if last_good_hessian is None
@@ -1036,10 +1018,8 @@ def run_newton_endgame(
                     step[k] = float(update.log_steps[names[k]])
             step[frozen] = 0.0
             if not np.any(step != 0.0):
-                # Nothing to move: every direction is frozen or at a bound.  Wood's
-                # compound criterion needs one accepted step to judge the objective
-                # change, but there is no step to take; a gradient under the bar is
-                # the stationary point (an EFS warm-up can hand over a flat problem).
+                # Nothing to move (every direction frozen or at a bound): a
+                # gradient under the bar is the stationary point.
                 if norm < tolerance * score_scale:
                     return converged_outcome(recorded)
                 return finish("objective_rejected", recorded, norm)
