@@ -73,13 +73,19 @@ Releases up to 0.41.0 fitted a shape-constrained `PSpline` on SCOP, the shape
 constrained P-spline reparameterization of Pya and Wood (2015). That engine is
 retired:
 
+- A `PSpline`, or a `Spline(kind="ps")`, declared with a `Constraint.fit.*`
+  and no `shape_engine` (the code 0.41.0 ran) now fits on the QP with no
+  warning. Its curve and smoothing parameter differ from those 0.41.0 gave.
 - `shape_engine="scop"` is still accepted. It warns that SCOP is retired and
   fits the constraint on the QP, so the fitted curve and its smoothing
   parameter differ from those 0.41.0 gave. Drop the argument to silence the
   warning.
 - A model saved with a SCOP term still loads, predicts, summarizes and exports
   as it was saved.
-- Refitting such a model fits the term on the QP, with the same warning.
+- Refitting such a model fits the term on the QP and warns once; a model
+  refitted and saved again no longer warns. A spline declared with no kind
+  beside a SCOP term (0.41.0 fitted it as `ps` on SCOP) refits as the `cr` it
+  declares, with the same warning.
 
 ## QP-Backed Shape Fits
 
