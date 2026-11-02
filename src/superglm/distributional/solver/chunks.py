@@ -1027,8 +1027,8 @@ def _assemble_grouped_pass_geometry(
     # Binned crossproducts amortise only when each bin-pair weight table is
     # contracted once over many rows (Li and Wood 2020, Algorithm 1). The
     # chunks stream score and packed curvature channels into a bounded buffer,
-    # and the group plans contract each block of chunks once; one block covers
-    # every row up to the buffer budget.
+    # and the group plans contract each block of chunks once; a block covers
+    # every row up to the byte and row budgets.
     n_observations = layout.predictors[0].design.n
     k_parameters = len(layout.predictors)
     chunk_rows = resolve_chunk_size(
