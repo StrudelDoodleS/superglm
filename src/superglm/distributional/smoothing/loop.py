@@ -320,6 +320,11 @@ def fit_distributional_efs(
         reason: EFSConvergenceReason,
         terminal_endpoint_directions: Mapping[str, EndpointDirectionEvidence] | None = None,
     ) -> DistributionalEFSResult:
+        evidence = terminal_evidence
+        if converged and endgame_stationary:
+            # The exact gradient voids a Fellner--Schall cap nomination, including
+            # one on evidence refreshed after an exact-face revalidation.
+            evidence = replace(evidence, unresolved_upper_bound=())
         return _efs_result(
             layout=layout,
             config=outer_config,
@@ -329,7 +334,7 @@ def fit_distributional_efs(
             objective=current_objective,
             converged=converged,
             reason=reason,
-            terminal_evidence=terminal_evidence,
+            terminal_evidence=evidence,
             history=history,
             coefficient_fits=coefficient_fits,
             terminal_fit_index=terminal_fit_index,

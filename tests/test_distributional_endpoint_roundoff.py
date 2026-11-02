@@ -464,6 +464,56 @@ def test_capped_generalized_pareto_fit_revalidates_its_exact_face() -> None:
     assert smoothing.objective <= released + 1.0e-5 * (1.0 + abs(released))
 
 
+def test_a_stationary_endgame_voids_a_refreshed_cap_nomination(monkeypatch) -> None:
+    """The endgame's exact gradient outranks a Fellner--Schall cap nomination.
+
+    An exact-face revalidation after a stationary endgame refreshes the
+    Fellner--Schall evidence, and that evidence can nominate a capped component
+    whose exact gradient the endgame found flat. The fit still stops stationary.
+    Mutation check: without the rule the stationary result kept the nomination.
+    """
+    import superglm.distributional.smoothing.loop as loop
+
+    endgame = loop.run_newton_endgame
+    fresh = loop._fresh_raw_evidence
+    stationary: list[bool] = []
+    nominated: list[tuple[str, ...]] = []
+
+    def flagged_endgame(*args, **kwargs):
+        outcome = endgame(*args, **kwargs)
+        if outcome.kind == "stationary":
+            stationary.append(True)
+        return outcome
+
+    def nominating(layout, lambdas, fit, config, *, face=None):
+        evidence = fresh(layout, lambdas, fit, config, face=face)
+        capped = tuple(name for name, value in lambdas.items() if value == config.maximum_lambda)
+        if stationary and face is not None and capped and evidence.maximum > 0.0:
+            nominated.append(capped)
+            return replace(evidence, unresolved_upper_bound=capped)
+        return evidence
+
+    monkeypatch.setattr(loop, "run_newton_endgame", flagged_endgame)
+    monkeypatch.setattr(loop, "_fresh_raw_evidence", nominating)
+    frame, response = _flagged_generalized_pareto_problem()
+    family = GeneralizedParetoLSS()
+    model = SuperLSS(
+        family,
+        family.scale(
+            s("x1", kind="cr", k=8), cat("c1"), s("x2", kind="cr", k=6), re("c2"), ti("x1", "x2")
+        ),
+        family.shape(s("x2", kind="cr", k=5)),
+        discrete=True,
+    )
+    model.fit_reml(frame, response, outer="efs+newton")
+    smoothing = model._require_fitted().smoothing
+    assert nominated
+    assert smoothing is not None
+    assert smoothing.convergence_reason == "stationary"
+    assert smoothing.converged is True
+    assert smoothing.unresolved_upper_bound == ()
+
+
 def _null_direction_problem(offset: float = -2.0e8):
     """Two constant location columns tied by a penalty at the cap, offset to cancel.
 
