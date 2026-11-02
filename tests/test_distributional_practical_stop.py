@@ -227,9 +227,6 @@ def test_practical_stop_does_not_preempt_the_exact_face() -> None:
     assert practical.unresolved_upper_bound == ()
     assert abs(practical.objective - strict.objective) <= 1.0e-9 * (1.0 + abs(strict.objective))
 
-    # Several invariants can fire first (the forged name is not at the cap,
-    # the strict raw step is zero); all of them name the unresolved pressure.
-
 
 def _start_fixture():
     rng = np.random.default_rng(11)

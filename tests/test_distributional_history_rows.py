@@ -244,9 +244,6 @@ def test_plateau_and_exact_face_keep_replay_authority(practical):
     np.testing.assert_array_equal(models[0].inference.covariance, models[1].inference.covariance)
     if practical:
         assert left.convergence_reason == "practical_plateau"
-        fits = list(left.coefficient_fits)
-        source_index = left.history[-left.config.plateau_iterations].source_fit_index
-        fits[source_index] = replace(fits[source_index], eta=None, theta=None)
     else:
         assert left.terminal_fit.coefficient_face is not None
     for model in models:
