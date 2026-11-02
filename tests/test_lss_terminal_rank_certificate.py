@@ -624,7 +624,8 @@ def test_an_offset_column_at_the_edge_of_float64_converges_or_says_why(name, dis
     whether it certifies depends on the platform's rounding; a fit that does
     not certify must warn and name the cause, never stop silently. Mutation
     check: on the relative residual test alone seven of these ten fits stop
-    at ``max_iterations`` with a thirtieth of the slope and no warning.
+    at ``max_iterations`` with a thirtieth of the slope. The slope is checked
+    whether or not the fit certifies, since that mutant still warns.
     """
     from superglm.diagnostics.convergence import ConvergenceWarning
 
@@ -632,9 +633,7 @@ def test_an_offset_column_at_the_edge_of_float64_converges_or_says_why(name, dis
         warnings.simplefilter("always", ConvergenceWarning)
         offset = _offset_fit(name, discrete)
     named = [w for w in caught if "condition number is about" in str(w.message)]
-    if not offset.converged:
-        assert named
-        return
+    assert offset.converged or named
     centred = _offset_fit(name, discrete, centred=True)
     assert offset.coefficients[1] == pytest.approx(
         centred.coefficients[1], rel=_slope_tolerance(offset)
