@@ -50,6 +50,43 @@ from superglm.reml.penalty_algebra import (
     penalty_product_rounding,
     total_penalty_matvec,
 )
+from superglm.solvers._structured.assembly import (
+    build_augmented_structured_factor,
+    build_penalized_structured_operator,
+)
+from superglm.solvers._structured.balance_tree import (
+    ProfiledSumToZeroTreeFactor,
+    SumToZeroLeafSystem,
+    SumToZeroPenalizedOperator,
+    SumToZeroTreeFactor,
+)
+from superglm.solvers._structured.block_leaves import (
+    FactorSmoothLeafFactor,
+    FactorSmoothLeafSystem,
+    FactorSmoothPenalizedOperator,
+    ProfiledFactorSmoothLeafFactor,
+)
+from superglm.solvers._structured.layout import (
+    get_structured_layout,
+)
+from superglm.solvers._structured.moments import (
+    NestedStructuredSystem,
+    build_structured_system,
+)
+from superglm.solvers._structured.nested import (
+    NestedSchurFactor,
+    ProfiledNestedSchurFactor,
+)
+from superglm.solvers._structured.operators import (
+    BlockSymmetricOperator,
+    CenteredBlockOperator,
+    CompactSymmetricOperator,
+    SumToZeroBlockOperator,
+    compact_operator_diagonal,
+)
+from superglm.solvers._structured.state import (
+    centred_data_operator,
+)
 from superglm.solvers.centered_system import (
     TabmatCenteringState,
     build_centered_system,
@@ -66,29 +103,6 @@ from superglm.solvers.mode_score import (
 )
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import decompose_factor, decompose_gram, needs_factor_certification
-from superglm.solvers.structured import (
-    BlockSymmetricOperator,
-    CenteredBlockOperator,
-    CompactSymmetricOperator,
-    FactorSmoothLeafFactor,
-    FactorSmoothLeafSystem,
-    FactorSmoothPenalizedOperator,
-    NestedSchurFactor,
-    NestedStructuredSystem,
-    ProfiledFactorSmoothLeafFactor,
-    ProfiledNestedSchurFactor,
-    ProfiledSumToZeroTreeFactor,
-    SumToZeroBlockOperator,
-    SumToZeroLeafSystem,
-    SumToZeroPenalizedOperator,
-    SumToZeroTreeFactor,
-    build_augmented_structured_factor,
-    build_penalized_structured_operator,
-    build_structured_system,
-    centred_data_operator,
-    compact_operator_diagonal,
-    get_structured_layout,
-)
 from superglm.types import GroupSlice, PenaltyComponent
 
 

@@ -54,28 +54,38 @@ from superglm.reml.scale import (
     prepare_gamma_reml_scale_data,
     profile_gamma_reml_scale,
 )
+from superglm.solvers._structured.balance_tree import (
+    ProfiledSumToZeroTreeFactor,
+    SumToZeroLeafSystem,
+)
+from superglm.solvers._structured.block_leaves import (
+    FactorSmoothLeafSystem,
+    ProfiledFactorSmoothLeafFactor,
+    release_leaf_memo,
+)
+from superglm.solvers._structured.moments import (
+    NestedStructuredSystem,
+)
+from superglm.solvers._structured.nested import (
+    NestedDataOperator,
+    NestedPenalizedOperator,
+    ProfiledNestedSchurFactor,
+)
+from superglm.solvers._structured.operators import (
+    BlockSymmetricOperator,
+    CenteredBlockOperator,
+    SumToZeroBlockOperator,
+)
+from superglm.solvers._structured.state import (
+    StructuredLinearSystemState,
+    centred_data_operator,
+)
 from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.mode_score import (
     centred_warm_start,
     linear_predictor,
     mode_certification_bar,
-)
-from superglm.solvers.structured import (
-    BlockSymmetricOperator,
-    CenteredBlockOperator,
-    FactorSmoothLeafSystem,
-    NestedDataOperator,
-    NestedPenalizedOperator,
-    NestedStructuredSystem,
-    ProfiledFactorSmoothLeafFactor,
-    ProfiledNestedSchurFactor,
-    ProfiledSumToZeroTreeFactor,
-    StructuredLinearSystemState,
-    SumToZeroBlockOperator,
-    SumToZeroLeafSystem,
-    centred_data_operator,
-    release_leaf_memo,
 )
 
 

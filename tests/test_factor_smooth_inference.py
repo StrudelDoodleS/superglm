@@ -16,7 +16,9 @@ from superglm import (
     Spline,
     SuperGLM,
 )
-from superglm.solvers.structured import FactorSmoothLevelSupport
+from superglm.solvers._structured.state import (
+    FactorSmoothLevelSupport,
+)
 
 
 def _data() -> tuple[pd.DataFrame, np.ndarray]:

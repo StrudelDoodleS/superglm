@@ -41,12 +41,18 @@ from superglm.links import SqrtLink
 from superglm.reml.observed_geometry import (
     compute_observed_information_weights,
 )
-from superglm.solvers.structured import (
+from superglm.solvers._structured.assembly import (
     build_augmented_structured_factor,
     build_penalized_structured_operator,
-    build_structured_system,
-    find_nested_chain,
+)
+from superglm.solvers._structured.layout import (
     get_structured_layout,
+)
+from superglm.solvers._structured.moments import (
+    build_structured_system,
+)
+from superglm.solvers._structured.selection import (
+    find_nested_chain,
     nested_parent_codes,
     resolve_structured_backend,
 )

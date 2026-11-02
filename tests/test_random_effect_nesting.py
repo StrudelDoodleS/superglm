@@ -19,7 +19,9 @@ import pytest
 from superglm import NegativeBinomial, Numeric, RandomEffect, SuperGLM, Tweedie
 from superglm.features.random_effect import near_nesting_notes, validate_declared_nesting
 from superglm.group_matrix import DenseGroupMatrix, RandomEffectGroupMatrix
-from superglm.solvers.structured import resolve_structured_backend
+from superglm.solvers._structured.selection import (
+    resolve_structured_backend,
+)
 from superglm.types import GroupSlice
 
 

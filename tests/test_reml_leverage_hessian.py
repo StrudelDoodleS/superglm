@@ -33,8 +33,10 @@ from superglm.reml.penalty_algebra import (
     penalty_component_dense_matrix,
     penalty_component_matvec,
 )
+from superglm.solvers._structured.nested import (
+    ProfiledNestedSchurFactor,
+)
 from superglm.solvers.pirls import PIRLSResult, REMLGeometrySummary
-from superglm.solvers.structured import ProfiledNestedSchurFactor
 from superglm.types import GroupSlice, PenaltyComponent
 
 _U = np.finfo(np.float64).eps / 2.0
@@ -819,7 +821,9 @@ def test_the_nested_factor_takes_the_leverage_route_within_rounding():
     the materialised inverse and operators.  Mutations (each fails here): the
     row channel without its ``1 / sum_w``; the cross block read as ``[:m, :m]``.
     """
-    from superglm.solvers.structured import materialize_compact_operator
+    from superglm.solvers._structured.operators import (
+        materialize_compact_operator,
+    )
 
     dm, groups, penalties, lambdas, result, factor, weight, offset = _nested_iterate()
     assert isinstance(factor, ProfiledNestedSchurFactor)

@@ -3843,9 +3843,11 @@ def test_an_sz_weight_derivative_cross_trace_survives_the_alias_variance(variant
     generalized inverse gives the one trace.
     """
     from superglm.solvers._structured.block_leaves import factor_smooth_moment_operators
+    from superglm.solvers._structured.layout import (
+        get_structured_layout,
+    )
     from superglm.solvers._structured.operators import CenteredBlockOperator
     from superglm.solvers._structured.state import centred_data_operator
-    from superglm.solvers.structured import get_structured_layout
 
     frame, y, weight = _signed_aliased_frame(variant)
     model = _model("gaussian_log", "auto", lam=1.29, main_lam=lam_x, numerics=("x1", "x10"))

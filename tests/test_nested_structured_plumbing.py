@@ -36,29 +36,41 @@ from superglm.group_matrix import (
 from superglm.links import LogLink
 from superglm.reml.penalty_algebra import build_penalty_matrix
 from superglm.reml.w_derivatives import reml_w_correction
-from superglm.solvers._structured.moments import _leaf_rows
-from superglm.solvers.irls_direct import fit_irls_direct
-from superglm.solvers.rank import decompose_factor, decompose_gram
-from superglm.solvers.structured import (
-    CenteredBlockOperator,
-    NestedStructuredLayout,
-    ProfiledNestedSchurFactor,
-    _random_effect_auto_cost_ratio,
+from superglm.solvers._structured.assembly import (
     build_augmented_nested_factor,
-    build_nested_structured_layout,
-    build_nested_structured_system,
     build_penalized_nested_operator,
+)
+from superglm.solvers._structured.geometry import (
     centered_operator_coefficient_estimable,
-    compact_operator_diagonal,
-    find_nested_chain,
+)
+from superglm.solvers._structured.layout import (
+    build_nested_structured_layout,
     get_structured_layout,
-    materialize_compact_operator,
-    nested_parent_codes,
-    nested_prior_statistics,
-    resolve_structured_backend,
     structured_design_matvec,
     structured_design_rmatvec,
 )
+from superglm.solvers._structured.moments import (
+    _leaf_rows,
+    build_nested_structured_system,
+    nested_prior_statistics,
+)
+from superglm.solvers._structured.nested import (
+    NestedStructuredLayout,
+    ProfiledNestedSchurFactor,
+)
+from superglm.solvers._structured.operators import (
+    CenteredBlockOperator,
+    compact_operator_diagonal,
+    materialize_compact_operator,
+)
+from superglm.solvers._structured.selection import (
+    _random_effect_auto_cost_ratio,
+    find_nested_chain,
+    nested_parent_codes,
+    resolve_structured_backend,
+)
+from superglm.solvers.irls_direct import fit_irls_direct
+from superglm.solvers.rank import decompose_factor, decompose_gram
 from superglm.types import GroupSlice, PenaltyComponent
 
 EPS = np.finfo(np.float64).eps

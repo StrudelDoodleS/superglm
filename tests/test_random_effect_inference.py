@@ -21,7 +21,9 @@ from superglm.inference.random_effects import (
     vectorized_conditional_unpooled_effect,
 )
 from superglm.links import IdentityLink, LogitLink, LogLink, stabilize_eta
-from superglm.solvers.structured import StructuredLinearSystemState
+from superglm.solvers._structured.state import (
+    StructuredLinearSystemState,
+)
 
 
 def _fit_pair(

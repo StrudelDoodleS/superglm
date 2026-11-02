@@ -15,9 +15,13 @@ from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.observed_geometry import build_observed_reml_geometry
 from superglm.reml.w_derivatives import reml_w_correction
-from superglm.solvers.structured import (
-    FactorSmoothLeafLayout,
+from superglm.solvers._structured.balance_tree import (
     ProfiledSumToZeroTreeFactor,
+)
+from superglm.solvers._structured.layout import (
+    FactorSmoothLeafLayout,
+)
+from superglm.solvers._structured.operators import (
     materialize_compact_operator,
 )
 

@@ -41,7 +41,12 @@ from superglm.group_matrix import (
     RandomEffectGroupMatrix,
 )
 from superglm.links import LogLink
-from superglm.solvers.structured import NestedSchurFactor, resolve_structured_backend
+from superglm.solvers._structured.nested import (
+    NestedSchurFactor,
+)
+from superglm.solvers._structured.selection import (
+    resolve_structured_backend,
+)
 from superglm.types import GroupSlice, LinearConstraintSet, PenaltyComponent
 
 # site number in the inventory: (site, disposition, where it is checked)
@@ -273,7 +278,9 @@ def test_invariant_violation_is_an_error() -> None:
 
 def test_a_random_effect_is_always_a_chain() -> None:
     """Site 20: the scalar layout is gone; every random-effect leaf resolves a chain."""
-    from superglm.solvers.structured import get_structured_layout
+    from superglm.solvers._structured.layout import (
+        get_structured_layout,
+    )
 
     matrices, groups, _lambda2, _ = _case("zero-penalty")
     lone = [matrices[0], RandomEffectGroupMatrix(np.arange(240) % 60, 60)]
@@ -346,7 +353,9 @@ def test_refusal_is_one_clear_error(monkeypatch, site: str) -> None:
     if site == "build":
         monkeypatch.setattr(irls_structured, "build_augmented_structured_factor", refuse)
     else:
-        from superglm.solvers.structured import ProfiledNestedSchurFactor
+        from superglm.solvers._structured.nested import (
+            ProfiledNestedSchurFactor,
+        )
 
         owner, method = {
             "solve": (NestedSchurFactor, "solve_data"),

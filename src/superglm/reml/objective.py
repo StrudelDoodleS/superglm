@@ -36,12 +36,14 @@ from superglm.reml.scale import (
     profile_gaussian_reml_scale,
     profile_tweedie_reml_scale,
 )
+from superglm.solvers._structured.operators import (
+    CompactSymmetricOperator,
+)
 from superglm.solvers.dispersion import dispersion_likelihood_size, validate_weight_semantics
 from superglm.solvers.irls_state import mean_space_log_likelihood_rows
 from superglm.solvers.mode_score import linear_predictor
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import decompose_gram
-from superglm.solvers.structured import CompactSymmetricOperator
 from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import GroupSlice, PenaltyComponent
 

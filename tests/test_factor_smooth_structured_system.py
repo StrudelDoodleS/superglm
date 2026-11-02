@@ -15,16 +15,26 @@ from superglm.group_matrix import (
     RandomEffectGroupMatrix,
     SparseGroupMatrix,
 )
-from superglm.solvers.structured import (
-    FactorSmoothLeafSystem,
+from superglm.solvers._structured.balance_tree import (
     SumToZeroLeafSystem,
-    build_block_structured_system,
-    build_structured_system,
+)
+from superglm.solvers._structured.block_leaves import (
+    FactorSmoothLeafSystem,
+)
+from superglm.solvers._structured.layout import (
     get_structured_layout,
-    materialize_compact_operator,
-    select_structured_group,
     structured_design_matvec,
     structured_design_rmatvec,
+)
+from superglm.solvers._structured.moments import (
+    build_block_structured_system,
+    build_structured_system,
+)
+from superglm.solvers._structured.operators import (
+    materialize_compact_operator,
+)
+from superglm.solvers._structured.selection import (
+    select_structured_group,
 )
 from superglm.types import GroupSlice
 

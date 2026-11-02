@@ -27,11 +27,13 @@ from superglm.group_matrix import (
     SplineCategoricalGroupMatrix,
 )
 from superglm.solvers._structured.balance_tree import ProfiledSumToZeroTreeFactor
-from superglm.solvers.hessian_factor import HessianFactor, _expanded_component_omega
-from superglm.solvers.structured import (
+from superglm.solvers._structured.block_leaves import (
     ProfiledFactorSmoothLeafFactor,
+)
+from superglm.solvers._structured.nested import (
     ProfiledNestedSchurFactor,
 )
+from superglm.solvers.hessian_factor import HessianFactor, _expanded_component_omega
 from superglm.types import GroupSlice
 
 

@@ -38,13 +38,19 @@ from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.penalty_algebra import build_penalty_matrix
 from superglm.reml.w_derivatives import reml_w_correction
-from superglm.solvers.structured import (
-    BlockSymmetricOperator,
+from superglm.solvers._structured.block_leaves import (
     FactorSmoothLeafFactor,
     ProfiledFactorSmoothLeafFactor,
-    StructuredLinearSystemState,
+)
+from superglm.solvers._structured.operators import (
+    BlockSymmetricOperator,
     materialize_compact_operator,
+)
+from superglm.solvers._structured.selection import (
     resolve_structured_backend,
+)
+from superglm.solvers._structured.state import (
+    StructuredLinearSystemState,
 )
 from superglm.types import GroupSlice, PenaltyComponent
 

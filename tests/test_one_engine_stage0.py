@@ -45,16 +45,22 @@ from superglm.group_matrix import (
 )
 from superglm.inference.covariance import _active_penalty_matrix
 from superglm.model.fit_state import fitted_lambda2
-from superglm.solvers._structured.border import factor_border
-from superglm.solvers.mode_score import mode_certification_bar
-from superglm.solvers.structured import (
-    ProfiledNestedSchurFactor,
+from superglm.solvers._structured.assembly import (
     build_augmented_nested_factor,
-    build_nested_structured_system,
     build_penalized_nested_operator,
+)
+from superglm.solvers._structured.border import factor_border
+from superglm.solvers._structured.layout import (
     get_structured_layout,
+)
+from superglm.solvers._structured.moments import (
+    build_nested_structured_system,
     nested_prior_statistics,
 )
+from superglm.solvers._structured.nested import (
+    ProfiledNestedSchurFactor,
+)
+from superglm.solvers.mode_score import mode_certification_bar
 from superglm.types import GroupSlice, PenaltyComponent
 
 EPS = float(np.finfo(np.float64).eps)

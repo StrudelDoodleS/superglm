@@ -12,12 +12,16 @@ import superglm.reml.discrete as discrete_module
 from superglm import FactorSmooth, LambdaPolicy, Numeric, RandomEffect, Spline, SuperGLM
 from superglm.group_matrix import FactorSmoothGroupMatrix
 from superglm.reml.penalty_algebra import build_penalty_matrix
-from superglm.solvers.structured import (
+from superglm.solvers._structured.assembly import (
+    solve_cached_structured,
+)
+from superglm.solvers._structured.block_leaves import (
     FactorSmoothLeafSystem,
     FactorSmoothPenalizedOperator,
     ProfiledFactorSmoothLeafFactor,
+)
+from superglm.solvers._structured.operators import (
     materialize_compact_operator,
-    solve_cached_structured,
 )
 
 

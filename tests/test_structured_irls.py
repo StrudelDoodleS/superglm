@@ -37,14 +37,18 @@ from superglm.links import IdentityLink, LogLink
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.penalty_algebra import build_penalty_matrix
 from superglm.reml.w_derivatives import reml_w_correction
-from superglm.solvers.hessian_factor import HessianFactor
-from superglm.solvers.structured import (
+from superglm.solvers._structured.nested import (
     NestedDataOperator,
     NestedSchurFactor,
     ProfiledNestedSchurFactor,
+)
+from superglm.solvers._structured.operators import (
     materialize_compact_operator,
+)
+from superglm.solvers._structured.selection import (
     resolve_structured_backend,
 )
+from superglm.solvers.hessian_factor import HessianFactor
 from superglm.types import (
     GroupSlice,
     LinearConstraintSet,
@@ -1293,7 +1297,7 @@ def test_auto_fit_publishes_predicted_cost_ratio_in_profile(
 
 def test_record_auto_backend_decision_logs_only_structured_auto_picks(caplog):
     """One INFO line per automatic structured pick; silence otherwise."""
-    from superglm.solvers.structured import (
+    from superglm.solvers._structured.selection import (
         StructuredBackendDecision,
         record_auto_backend_decision,
     )
@@ -1712,7 +1716,9 @@ class TestStructuredPenaltyBuilderComponentLambdas:
         import scipy.sparse as sp
 
         from superglm.group_matrix import SparseSSPGroupMatrix
-        from superglm.solvers.structured import build_structured_system
+        from superglm.solvers._structured.moments import (
+            build_structured_system,
+        )
         from tests.test_factor_smooth_structured_system import _dominant
 
         rng = np.random.default_rng(12)
@@ -1738,7 +1744,7 @@ class TestStructuredPenaltyBuilderComponentLambdas:
 
     @pytest.mark.parametrize("factor_basis", ["fs", "sz"])
     def test_leaf_builders_require_the_compact_penalty_components(self, factor_basis):
-        from superglm.solvers.structured import (
+        from superglm.solvers._structured.assembly import (
             build_penalized_block_operator,
             build_penalized_sum_to_zero_operator,
         )

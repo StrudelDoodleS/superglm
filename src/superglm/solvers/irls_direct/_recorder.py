@@ -8,13 +8,15 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from superglm.solvers._structured.selection import (
+    record_auto_backend_decision,
+)
 from superglm.solvers.irls_state import _IRLSState
 from superglm.solvers.pirls import (
     IterationDiagnostics,
     TerminationReason,
     _extreme_weight_indices,
 )
-from superglm.solvers.structured import record_auto_backend_decision
 
 if TYPE_CHECKING:
     from superglm.solvers.irls_direct._fit import _IRLSDirectFit
