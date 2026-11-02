@@ -21,29 +21,41 @@ from superglm.inference._term_types import (
     TermInference,
 )
 
-# Helpers this package used to re-export, by the module that owns them.  Each
-# still resolves, with a FutureWarning naming the owner.
-_MOVED = {
-    "build_basis_detail": "superglm.inference.coef_tables",
-    "build_coef_rows": "superglm.inference.coef_tables",
-    "drop1": "superglm.inference._term_model_ops",
-    "feature_se_from_cov": "superglm.inference._term_covariance",
-    "refit_unpenalised": "superglm.inference._term_model_ops",
-    "relativities": "superglm.inference._term_model_ops",
-    "spline_group_enrichment": "superglm.inference._term_helpers",
-    "term_inference": "superglm.inference._term_ops",
+# Helpers this package used to re-export: name -> (the module that owns it,
+# its public replacement or None).  Each still resolves, with a FutureWarning
+# naming the replacement, else the owner.
+_MOVED: dict[str, tuple[str, str | None]] = {
+    "build_basis_detail": (
+        "superglm.inference.coef_tables",
+        "superglm.inference.coef_tables.build_basis_detail",
+    ),
+    "build_coef_rows": (
+        "superglm.inference.coef_tables",
+        "superglm.inference.coef_tables.build_coef_rows",
+    ),
+    "drop1": ("superglm.inference._term_model_ops", "SuperGLM.drop1"),
+    "feature_se_from_cov": ("superglm.inference._term_covariance", None),
+    "refit_unpenalised": ("superglm.inference._term_model_ops", "SuperGLM.refit_unpenalised"),
+    "relativities": ("superglm.inference._term_model_ops", "SuperGLM.relativities"),
+    "spline_group_enrichment": ("superglm.inference._term_helpers", None),
+    "term_inference": ("superglm.inference._term_ops", "SuperGLM.term_inference"),
 }
 
 
-def _moved_attribute(module: str, name: str, moved: dict[str, str]):
-    """Resolve a re-export this module no longer carries, warning where it lives now."""
+def _moved_attribute(module: str, name: str, moved: dict[str, tuple[str, str | None]]):
+    """Resolve a re-export this module no longer carries, warning what replaces it."""
     import warnings
 
-    owner = moved.get(name)
-    if owner is None:
+    if name not in moved:
         raise AttributeError(f"module {module!r} has no attribute {name!r}")
+    owner, replacement = moved[name]
+    advice = (
+        f"use {replacement}"
+        if replacement is not None
+        else f"it has no public replacement; its code is in {owner}"
+    )
     warnings.warn(
-        f"{module}.{name} is deprecated and will be removed; import it from {owner}.",
+        f"{module}.{name} is deprecated and will be removed; {advice}.",
         FutureWarning,
         stacklevel=3,
     )

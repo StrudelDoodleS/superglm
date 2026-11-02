@@ -681,9 +681,9 @@ def test_inference_term_old_path_still_resolves_and_warns():
     import superglm.inference.term as old
     from superglm.inference import _term_ops, _term_types
 
-    with pytest.warns(FutureWarning, match="_term_types"):
+    with pytest.warns(FutureWarning, match=r"use superglm\.inference\.TermInference\."):
         assert old.TermInference is _term_types.TermInference
-    with pytest.warns(FutureWarning, match="_term_ops"):
+    with pytest.warns(FutureWarning, match=r"use SuperGLM\.term_inference\."):
         assert old.term_inference is _term_ops.term_inference
     with pytest.raises(AttributeError):
         old._safe_exp  # noqa: B018
