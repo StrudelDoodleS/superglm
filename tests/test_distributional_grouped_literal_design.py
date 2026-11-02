@@ -143,27 +143,31 @@ def test_tiny_signed_cross_channel_matches_the_literal_design(monkeypatch):
     assert contracted_rows == [len(curvature)]
 
 
-def _mixed_problem(*, random_effect=False):
+def _mixed_problem(*, extended=False):
     n = 29
     rows = np.arange(n)
     frame = pd.DataFrame(
         {
             "x": np.linspace(-1.1, 0.8, n),
             "s": np.cos(rows * 0.7),
+            "t": np.sin(rows * 0.4),
             "g": np.resize(list("abc"), n),
             "h": np.resize(list("pqrst"), n),
         }
     )
     location = {"x": Numeric(), "s": Spline(kind="cr", k=4), "g": Categorical()}
-    if random_effect:
-        location["h"] = RandomEffect()
+    interactions = (("s", "g"),)
+    if extended:
+        # A random effect and a second spline term on the same categorical.
+        location |= {"h": RandomEffect(), "t": Spline(kind="cr", k=4)}
+        interactions += (("t", "g"),)
     family = GaussianLS()
     compiled = compile_predictors(
         as_eager_frame(frame),
         resolved_prior(np.ones(n)),
         family.parameters,
         (
-            Predictor("location", location, interactions=(("s", "g"),)),
+            Predictor("location", location, interactions=interactions),
             Predictor("scale", {"s": Spline(kind="cr", k=4)}),
         ),
         model_discrete=True,
@@ -174,7 +178,7 @@ def _mixed_problem(*, random_effect=False):
     curvature = np.column_stack(
         (np.linspace(-0.7, 1.1, n), np.cos(rows), np.linspace(1.3, -0.2, n))
     )
-    literal = None if random_effect else _literal_design(layout)
+    literal = None if extended else _literal_design(layout)
     return layout, literal, score, curvature
 
 
@@ -221,17 +225,18 @@ def _arrays(group):
 
 
 def test_block_design_rows_own_no_more_than_the_budget_counts():
-    layout = _mixed_problem(random_effect=True)[0]
+    layout = _mixed_problem(extended=True)[0]
     rows = chunks.RowChunk(start=5, stop=21, indices=np.arange(5, 21, dtype=np.intp))
     length = len(rows.indices)
-    kinds = set()
+    kinds, level_groups = set(), 0
     for state in layout.predictors:
         block = chunks._row_design(state, rows, copy=False)
         # Contract once, so arrays a group builds lazily are counted too.
         PredictorExecutionPlan(block, state.intercept_index is not None).diagonal_moment(
             np.linspace(0.5, 1.5, length)
         )
-        terms = {}
+        # Owned spline-by-category bytes, spread over the block rows each level owns.
+        per_row = np.zeros(length)
         for parent, child in zip(state.design.group_matrices, block.group_matrices, strict=True):
             parents = _arrays(parent)
             # A level group's row arrays cover only its level's rows.
@@ -244,15 +249,19 @@ def test_block_design_rows_own_no_more_than_the_budget_counts():
             )
             kinds.add(type(child).__name__)
             if type(parent) in chunks._SPLINE_CATEGORY_GROUPS:
-                assert parent.spline_cat_feature is not None
-                terms[parent.spline_cat_feature] = terms.get(parent.spline_cat_feature, 0) + owned
+                level_groups += 1
+                if child_rows:
+                    assert np.max(child.row_idx) < length
+                    per_row[child.row_idx] += owned / child_rows
                 continue
             counted = chunks._BLOCK_ROW_ARRAYS.get(type(child), child.shape[1])
             assert owned <= 8 * length * counted, (type(child).__name__, owned, counted)
-        for feature, owned in terms.items():
-            assert owned <= 8 * length * chunks._SPLINE_CATEGORY_ROW_ARRAYS, (feature, owned)
+        charged = chunks._spline_category_row_floats(state.design)
+        assert np.max(per_row) <= 8 * charged, (np.max(per_row), charged)
     assert {"CategoricalGroupMatrix", "RandomEffectGroupMatrix"} <= kinds
     assert {"DiscretizedSSPGroupMatrix", "DiscretizedSplineCategoricalGroupMatrix"} <= kinds
+    # Two spline terms on one categorical, two non-base levels each.
+    assert level_groups == 4
 
 
 def test_scaled_curvature_keeps_weights_that_would_turn_subnormal(monkeypatch):

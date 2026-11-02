@@ -373,8 +373,9 @@ def test_contraction_row_bytes_count_the_buffer_and_each_groups_owned_rows() -> 
         "DiscretizedSSPGroupMatrix",
     ]
     assert [type(g).__name__ for g in scale.design.group_matrices] == ["DiscretizedSSPGroupMatrix"]
-    # Five channels, four gathers, the dense column's weighted copy, row views for splines.
-    assert chunking.contraction_row_bytes(layout) == 8 * (2 + 3 + 4 + 1)
+    # Five channels, four gathers and the row indices, the dense column's weighted copy,
+    # row views for splines.
+    assert chunking.contraction_row_bytes(layout) == 8 * (2 + 3 + 5 + 1)
 
 
 @pytest.mark.parametrize("chunks_per_block", [None, 3, 1])

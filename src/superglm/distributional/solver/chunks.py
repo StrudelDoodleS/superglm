@@ -755,33 +755,57 @@ _SPLINE_CATEGORY_GROUPS = (
     SupportCompressedSplineCategoricalGroupMatrix,
 )
 _SPLINE_CATEGORY_ROW_ARRAYS = 2
-# Transient per-row gathers while one group pair is contracted.
-_BLOCK_GATHER_FLOATS = 4
+# Transient per-row gathers while one group pair is contracted, and the
+# block's row indices.
+_BLOCK_GATHER_FLOATS = 5
+
+
+def _spline_category_row_floats(design) -> int:
+    """Owned floats per block row of a design's spline-by-category terms.
+
+    A term's level groups own disjoint rows, so one term owns two arrays per
+    row; terms on the same categorical share its name, and a row belongs to
+    one level group of each, so the terms on a categorical number at most the
+    groups that share any one of its levels.
+    """
+    levels: dict[tuple, int] = {}
+    for group in design.group_matrices:
+        if type(group) in _SPLINE_CATEGORY_GROUPS:
+            feature = group.spline_cat_feature
+            key = (id(group), None) if feature is None else (feature, group.spline_cat_level)
+            levels[key] = levels.get(key, 0) + 1
+    terms: dict = {}
+    for (feature, _level), count in levels.items():
+        terms[feature] = max(terms.get(feature, 0), count)
+    return _SPLINE_CATEGORY_ROW_ARRAYS * sum(terms.values())
 
 
 def contraction_row_bytes(layout: StackedLayout) -> int:
     """Bytes one row adds to a contraction block.
 
     The buffer holds ``K + K(K+1)/2`` channels. Each group adds its owned row
-    arrays, a spline-by-category term once for all its levels; any other group
-    may form a weighted copy of its rows, so it counts its full width.
+    arrays, spline-by-category terms as :func:`_spline_category_row_floats`
+    counts them; any other group may form a weighted copy of its rows, so it
+    counts its full width.
     """
     k_parameters = len(layout.predictors)
     floats = k_parameters + k_parameters * (k_parameters + 1) // 2 + _BLOCK_GATHER_FLOATS
     for state in layout.predictors:
-        terms = set()
-        for group in state.design.group_matrices:
-            if type(group) in _SPLINE_CATEGORY_GROUPS:
-                feature = group.spline_cat_feature
-                terms.add(id(group) if feature is None else feature)
-            else:
-                floats += _BLOCK_ROW_ARRAYS.get(type(group), group.shape[1])
-        floats += _SPLINE_CATEGORY_ROW_ARRAYS * len(terms)
+        floats += _spline_category_row_floats(state.design)
+        floats += sum(
+            _BLOCK_ROW_ARRAYS.get(type(group), group.shape[1])
+            for group in state.design.group_matrices
+            if type(group) not in _SPLINE_CATEGORY_GROUPS
+        )
     return np.dtype(np.float64).itemsize * floats
 
 
 def contraction_block_rows(n_observations: int, row_bytes: int, chunk_rows: int) -> int:
-    """Rows contracted at once: whole likelihood chunks within a fixed byte budget."""
+    """Rows contracted at once: whole likelihood chunks within a fixed byte budget.
+
+    A block holds at least one chunk, so a single chunk larger than the budget
+    forms its own block.
+    """
     chunks_per_block = max(1, AUTO_CONTRACTION_MEMORY_BYTES // (row_bytes * chunk_rows))
     return min(n_observations, chunks_per_block * chunk_rows)
 
