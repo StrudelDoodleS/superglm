@@ -42,7 +42,6 @@ import {
 } from "./state/timing.js";
 import {
   applySummaryView,
-  refitAtOnceTransition,
   refitPendingTransition,
   renderSummary,
   runDistributionProfile,
@@ -848,10 +847,9 @@ function scheduleVisibleEvidenceCatchUp() {
 async function runStructuralChange(descriptor) {
   const { keepReference, refitEveryChange } = loadSettings();
   if (refitEveryChange) {
-    const atOnce = refitAtOnceTransition(descriptor);
     return runStructuralRefit({
-      ...atOnce,
-      payload: { ...atOnce.payload, keep_reference: keepReference }
+      ...descriptor,
+      payload: { ...descriptor.payload, refit: true, keep_reference: keepReference }
     });
   }
   if (editorOccupied()) return null;

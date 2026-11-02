@@ -10,7 +10,6 @@ import {
 const summaryModulePath = "../../src/superglm/editor/app/summary.js";
 const {
   applySummaryView,
-  refitAtOnceTransition,
   refitPendingTransition,
   refreshSummary,
   renderSummary,
@@ -226,27 +225,6 @@ test("structural changes are staged through one route, levels by label", () => {
     path: "/revert_to_original",
     payload: {}
   });
-});
-
-test("with Refit after every change on, a change is staged with refit on /stage", () => {
-  const staged = [
-    stageCollapse("region", ["B", "C"]),
-    stageUngroup("region", ["B"]),
-    stageReference("region", "B+C"),
-    stageShapeRange("band", "B2", "B4", 0, "kink"),
-    stageSpecial("band", ["B3"]),
-    stageOnCurve("band", ["B3"]),
-    stageKnots("age", { positions: [24.5, 31] }),
-    stageBasis("band", { kind: "ns" })
-  ];
-  for (const descriptor of staged) {
-    assert.deepEqual(refitAtOnceTransition(descriptor), {
-      name: descriptor.name,
-      path: "/stage",
-      payload: { ...descriptor.payload, refit: true }
-    });
-    assert.equal("refit" in descriptor.payload, false);
-  }
 });
 
 test("a knot change is staged in one of its three forms", () => {

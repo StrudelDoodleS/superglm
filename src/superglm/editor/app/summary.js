@@ -265,17 +265,6 @@ export function refitPendingTransition(count) {
   };
 }
 
-/**
- * The same change refitted at once, as Settings' "Refit after every structural
- * change" asks: /stage with ``refit``, so Python stages it and refits every
- * waiting change in one fit: one step, which one Undo takes back.
- * @param {{name:string, path:string, payload:StageRequest}} staged a descriptor from a stage* builder
- * @returns {{name:string, path:string, payload:StageRequest}}
- */
-export function refitAtOnceTransition({ name, path, payload }) {
-  return { name, path, payload: { ...payload, refit: true } };
-}
-
 /** @returns {{name:string, path:string, payload:EmptyStructuralRequest}} */
 export function revertTransition() {
   return {
