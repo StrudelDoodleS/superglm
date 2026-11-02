@@ -25,7 +25,11 @@ from superglm.distributional.family import (
 from superglm.distributional.inference import compute_joint_inference
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.packing import packed_pairs
-from superglm.distributional.predictor import Predictor, compile_predictors
+from superglm.distributional.predictor import (
+    Predictor,
+    PredictorExecutionPlan,
+    compile_predictors,
+)
 from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.solver import fit_dense_fixed_lambda
 from superglm.distributional.weights import (
@@ -34,7 +38,7 @@ from superglm.distributional.weights import (
     WeightContract,
     resolve_likelihood_weights,
 )
-from superglm.features import Numeric, Spline
+from superglm.features import FactorSmooth, Numeric, Spline
 
 from ._distributional_weights import resolved_prior
 from ._gaussian_lss_oracles import (
@@ -349,6 +353,121 @@ def test_row_chunk_iterator_covers_rows_once_and_validates_sizes(
         tuple(chunking.iter_row_chunks(8, 0))
     with pytest.raises(TypeError, match="chunk_size"):
         tuple(chunking.iter_row_chunks(8, True))
+
+
+def test_contraction_blocks_hold_whole_chunks_within_the_byte_and_row_budgets() -> None:
+    # A wide row: the byte budget binds.
+    row_bytes = 8 * 4_000
+    rows = chunking.contraction_block_rows(10**9, row_bytes, 100)
+    assert rows % 100 == 0
+    assert rows * row_bytes <= chunking.AUTO_CONTRACTION_MEMORY_BYTES < (rows + 100) * row_bytes
+    # A narrow row: the row budget binds.
+    row_bytes = 8 * 40
+    rows = chunking.contraction_block_rows(10**9, row_bytes, 4_000)
+    assert rows % 4_000 == 0
+    assert rows <= chunking.AUTO_CONTRACTION_MAX_ROWS < rows + 4_000
+    assert chunking.contraction_block_rows(100, row_bytes, 100) == 100
+    assert chunking.contraction_block_rows(10**9, row_bytes, 10**8) == 10**8
+
+
+def test_contraction_row_bytes_count_the_buffer_and_each_groups_owned_rows() -> None:
+    _, layout, _, _, _, _, _ = _problem()
+    # Location: a numeric column and a discretised spline; scale: one spline.
+    location, scale = layout.predictors
+    assert [type(g).__name__ for g in location.design.group_matrices] == [
+        "DenseGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+    ]
+    assert [type(g).__name__ for g in scale.design.group_matrices] == ["DiscretizedSSPGroupMatrix"]
+    # Five channels, four gathers and the row indices, the dense column's weighted copy,
+    # row views for splines.
+    assert chunking.contraction_row_bytes(layout) == 8 * (2 + 3 + 5 + 1)
+
+
+def test_layouts_with_uncounted_groups_contract_one_chunk_at_a_time() -> None:
+    n = 40
+    frame = as_eager_frame(
+        pd.DataFrame({"x": np.linspace(-1.0, 1.0, n), "g": np.resize(list("abc"), n)})
+    )
+    compiled = compile_predictors(
+        frame,
+        resolved_prior(np.ones(n)),
+        GaussianLS().parameters,
+        (
+            Predictor(
+                "location",
+                {"x": Numeric()},
+                interaction_specs={"x:g:fs": FactorSmooth("x", group="g", k=6)},
+            ),
+            Predictor("scale", {}),
+        ),
+        model_discrete=True,
+        n_bins_config=17,
+    )
+    layout = build_stacked_layout(compiled)
+    # A factor smooth's block storage is not counted.
+    assert "FactorSmoothGroupMatrix" in {
+        type(group).__name__ for state in layout.predictors for group in state.design.group_matrices
+    }
+    row_bytes = chunking.contraction_row_bytes(layout)
+    assert row_bytes is None
+    assert chunking.contraction_block_rows(10**6, row_bytes, 4_000) == 4_000
+    assert chunking.contraction_block_rows(1_000, row_bytes, 4_000) == 1_000
+
+
+@pytest.mark.parametrize("discrete", [True, False], ids=["binned", "exact"])
+@pytest.mark.parametrize("chunks_per_block", [None, 3, 1])
+def test_grouped_geometry_contracts_each_channel_once_per_block(
+    monkeypatch: pytest.MonkeyPatch,
+    chunks_per_block: int | None,
+    discrete: bool,
+) -> None:
+    family, layout, response, weights, _, _, _ = _problem(n=137, discrete=discrete)
+    coefficients = np.linspace(-0.2, 0.3, layout.n_coefficients)
+    arguments = (family, layout, response, _plan(family, response, weights), coefficients)
+    options = {
+        "penalty": np.zeros((layout.n_coefficients, layout.n_coefficients)),
+        "curvature_source": "observed",
+    }
+    reference = chunking.assemble_chunked_geometry(*arguments, chunk_size=137, **options)
+    if chunks_per_block is not None:
+        monkeypatch.setattr(
+            chunking,
+            "contraction_block_rows",
+            lambda n, k, rows: min(n, chunks_per_block * rows),
+        )
+    contracted = []
+    for name in ("diagonal_moment", "cross_moment"):
+        original = getattr(PredictorExecutionPlan, name)
+
+        def counted(self, *args, _original=original, **kwargs):
+            contracted.append(self.design.n)
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(PredictorExecutionPlan, name, counted)
+    rebuilt = []
+    row_design = chunking._row_design
+
+    def counted_rows(state, rows, *, copy=True):
+        if not copy:
+            rebuilt.append(rows.stop - rows.start)
+        return row_design(state, rows, copy=copy)
+
+    monkeypatch.setattr(chunking, "_row_design", counted_rows)
+    actual = chunking.assemble_chunked_geometry(*arguments, chunk_size=19, **options)
+
+    # Eight 19-row chunks; each block contracts the three packed channels once.
+    block = 137 if chunks_per_block is None else 19 * chunks_per_block
+    starts = range(0, 137, block)
+    assert contracted == [min(block, 137 - start) for start in starts for _ in "abc"]
+    # One-chunk blocks contract the chunk's own plans; longer blocks build row views.
+    expected = [] if block in (19, 137) else [min(block, 137 - start) for start in starts]
+    assert rebuilt == [rows for rows in expected for _ in layout.predictors]
+    eps = np.finfo(np.float64).eps
+    for name in ("score_data", "data_curvature"):
+        expected = getattr(reference, name)
+        tolerance = 32 * 137 * eps * max(1.0, float(np.max(np.abs(expected))))
+        np.testing.assert_allclose(getattr(actual, name), expected, rtol=0, atol=tolerance)
 
 
 def test_public_superlss_admits_a_structural_gaussian_subclass_without_eager_binding() -> None:

@@ -417,6 +417,8 @@ def test_public_discrete_remaining_builtin_families(family) -> None:
 def test_public_discrete_dispatches_compressed_signed_chunks(monkeypatch) -> None:
     frame, y, weights, offsets, family, predictors = _fixture("gaussian", "prior")
     monkeypatch.setattr(chunking, "AUTO_CHUNK_MEMORY_BYTES", 8192)
+    # Two likelihood chunks per contraction block.
+    monkeypatch.setattr(chunking, "contraction_block_rows", lambda n, k, rows: min(n, 2 * rows))
     original_moments = MatrixExecutionPlan.moments
     original_cross = CrossMatrixExecutionPlan.cross_moment
     original_geometry = chunking.assemble_chunked_geometry
@@ -459,7 +461,8 @@ def test_public_discrete_dispatches_compressed_signed_chunks(monkeypatch) -> Non
     telemetry = model.training_telemetry()
     assert telemetry.execution_backend_identifier == "distributional-chunked-v1"
     assert 0 < telemetry.resolved_chunk_size < np.count_nonzero(weights)
-    assert compressed_rows and max(compressed_rows) <= telemetry.resolved_chunk_size
+    chunk_rows = telemetry.resolved_chunk_size
+    assert compressed_rows and chunk_rows < max(compressed_rows) <= 2 * chunk_rows
     assert {-1.0, 1.0} <= set(cross_signs)
 
 

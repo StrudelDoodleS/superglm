@@ -12,7 +12,7 @@ from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import Predictor, compile_predictors
 from superglm.distributional.results.solver import DenseSolverConfig
-from superglm.distributional.solver import fit_dense_fixed_lambda
+from superglm.distributional.solver import chunks, fit_dense_fixed_lambda
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.features import Numeric, Spline
 from superglm.group_matrix import DesignMatrix
@@ -88,7 +88,7 @@ def _install_shape_sentinel(
     return observed
 
 
-def test_discrete_chunked_fit_never_allocates_full_design_or_curvature_channels(
+def test_discrete_chunked_fit_never_allocates_full_design_and_bounds_curvature_channels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     family, layout, response, weights, penalty = _discrete_problem()
@@ -125,7 +125,12 @@ def test_discrete_chunked_fit_never_allocates_full_design_or_curvature_channels(
     forbidden = {
         (n, layout.n_coefficients),
         (n, n_channels),
+        (n_channels, n),
     }
+    # Two 19-row likelihood chunks per contraction block.
+    monkeypatch.setattr(
+        chunks, "contraction_block_rows", lambda rows, k, chunk: min(rows, 2 * chunk)
+    )
 
     def forbid_toarray(*_args, **_kwargs):
         raise AssertionError("chunked discrete fitting materialized a full design")
@@ -147,3 +152,4 @@ def test_discrete_chunked_fit_never_allocates_full_design_or_curvature_channels(
     assert result.theta.shape == result.eta.shape
     assert forbidden.isdisjoint(observed)
     assert any(shape[0] == 19 for shape in observed if shape)
+    assert (n_channels, 38) in observed

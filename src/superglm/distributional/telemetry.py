@@ -29,6 +29,14 @@ class CurvatureTelemetry:
     fallback_count: int
     # Absent in schema 8, whose scope depended on the family's Fisher support.
     matrix_kind: Literal["data", "penalized"] | None = None
+    # The terminal rank certificate (``solver/certificate.py``): how many
+    # directions sat within the formation bound of the cut and were read from
+    # the rows, and whether the rank was certified against that bound.  None
+    # where none was attempted: a fit saved before the certificate existed, or
+    # an assembly that records no formation statistics.  False where the
+    # formed rank stands uncertified, a non-finite formation bound included.
+    grey_k: int | None = None
+    certified: bool | None = None
 
     def __post_init__(self) -> None:
         valid_sources = ("observed", "fisher", "hybrid")
@@ -57,6 +65,12 @@ class CurvatureTelemetry:
             or self.fallback_count < 0
         ):
             raise ValueError("fallback_count must be a non-negative integer")
+        if self.grey_k is not None and (
+            isinstance(self.grey_k, bool) or not isinstance(self.grey_k, int) or self.grey_k < 0
+        ):
+            raise ValueError("grey_k must be None or a non-negative integer")
+        if self.certified is not None and not isinstance(self.certified, bool):
+            raise ValueError("certified must be None or bool")
 
     def to_dict(self) -> dict[str, Any]:
         """Return exactly the versioned curvature-fallback fields."""
@@ -73,4 +87,8 @@ class CurvatureTelemetry:
         }
         if self.matrix_kind is not None:
             result["matrix_kind"] = self.matrix_kind
+        if self.grey_k is not None:
+            result["grey_k"] = self.grey_k
+        if self.certified is not None:
+            result["certified"] = self.certified
         return result

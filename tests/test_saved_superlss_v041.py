@@ -18,6 +18,7 @@ import pytest
 import superglm as sg
 from superglm._frame import as_eager_frame
 from superglm.distributional.model import _score_feature, _term_indices
+from superglm.solvers.rank import SHARED_RANK_POLICY
 
 FIXTURES = Path(__file__).parent / "fixtures" / "saved_v0_41_0"
 CASES = ["lss_gaussian", "lss_gamma"]
@@ -83,6 +84,9 @@ def test_a_superlss_saved_by_v0_41_0_loads_predicts_and_reads_its_fit(name: str)
     assert reference["version"] == "0.41.0"
     model = joblib.load(FIXTURES / f"{name}.model.joblib.xz")
     assert isinstance(model, sg.SuperLSS)
+    # Decided under rank-policy version 4, and it still says so under a later rule.
+    assert model._require_fitted().result.terminal_rank.policy_version == 4
+    assert SHARED_RANK_POLICY.version > 4
     frame = reference["frame"]
 
     eta = model.predict_link(frame).to_numpy(dtype=np.float64)

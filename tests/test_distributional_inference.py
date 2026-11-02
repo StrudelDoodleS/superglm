@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from fractions import Fraction
 from types import MappingProxyType
 
 import numpy as np
@@ -13,11 +14,19 @@ from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.inference import compute_joint_inference
 from superglm.distributional.layout import StackedLayout, build_stacked_layout
 from superglm.distributional.predictor import Predictor, compile_predictors
-from superglm.distributional.results.solver import DenseSolverConfig, DenseSolverResult
+from superglm.distributional.results.solver import (
+    DenseSolverConfig,
+    DenseSolverResult,
+    _validate_resolution_limited_stationarity,
+)
 from superglm.distributional.smoothing.penalty_face import build_penalty_face
 from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.features import Numeric
-from superglm.solvers.rank import decompose_gram
+from superglm.solvers.rank import (
+    SymmetricGreyProjection,
+    decompose_gram,
+    decompose_symmetric_deflated,
+)
 from superglm.types import PenaltyComponent
 
 from ._distributional_weights import resolved_prior
@@ -253,6 +262,173 @@ def test_exact_face_inference_uses_reduced_covariance_and_solves() -> None:
     )
     assert inference.coefficient_edf[constrained_index] == 0.0
     assert inference.rank == reduced_rank.rank
+
+
+def _exact_inverse(matrix: np.ndarray) -> np.ndarray:
+    """The inverse of a float matrix's exact value (Gauss-Jordan in Fractions)."""
+    width = len(matrix)
+    rows = [
+        [Fraction(float(v)) for v in row] + [Fraction(int(i == j)) for j in range(width)]
+        for i, row in enumerate(matrix)
+    ]
+    for column in range(width):
+        pivot = next(r for r in range(column, width) if rows[r][column] != 0)
+        rows[column], rows[pivot] = rows[pivot], rows[column]
+        rows[column] = [value / rows[column][column] for value in rows[column]]
+        for r in range(width):
+            if r != column and rows[r][column] != 0:
+                factor = rows[r][column]
+                rows[r] = [a - factor * b for a, b in zip(rows[r], rows[column], strict=True)]
+    return np.array([[float(value) for value in row[width:]] for row in rows])
+
+
+@pytest.mark.parametrize("faced", [False, True], ids=["full", "face"])
+def test_row_certified_inference_uses_the_decomposed_matrix(faced: bool) -> None:
+    """EDF and covariance of a rank decided from the rows follow the exact matrix, not the formed one.
+
+    ``H = M' M + d w w' + S`` holds exactly in float64: an integer Gram whose
+    null direction ``w = e_0 - e_3`` the term ``d = 2**-30`` lifts, and a
+    penalty on location:z.  The formed data curvature carries ``2**-26`` of
+    formation error along ``w``, so ``G^+ D`` with the formed ``D`` gives
+    that direction 17 degrees of freedom.  ``project`` evaluates through
+    ``M B``, as the row pass does through ``X B``.  ``H`` has condition about
+    ``1e10``, so the influence is checked to ``1e-5``, ten times ``u`` times
+    that condition.
+    """
+    layout = _layout()
+    rows = np.array(
+        [[1.0, 2.0, 0.0, 1.0, 1.0], [2.0, -1.0, 1.0, 2.0, 0.0], [0.0, 1.0, 3.0, 0.0, 2.0],
+         [1.0, 0.0, -2.0, 1.0, 1.0]]
+    )  # fmt: skip
+    near_null = np.array([1.0, 0.0, 0.0, -1.0, 0.0])
+    lift = 2.0**-30
+    exact_data = rows.T @ rows + lift * np.outer(near_null, near_null)
+    formed_data = exact_data + 2.0**-26 * np.outer(near_null, near_null)
+    penalty = np.zeros((5, 5))
+    penalty[2, 2] = 0.5
+    exact = exact_data + penalty
+    result = _result(layout, formed_data, penalty)
+    null = np.eye(5)
+    face = None
+    if faced:
+        component = PenaltyComponent(
+            name="location:x#identity",
+            group_name="location:x",
+            group_index=0,
+            group_sl=layout.term_slices["location:x"],
+            omega_raw=np.ones((1, 1)),
+            omega_ssp=np.ones((1, 1)),
+            rank=1.0,
+            eigvals_omega=np.ones(1),
+        )
+        layout = replace(layout, penalties=(component,))
+        face = build_penalty_face(layout, (component.name,))
+        null = face.null_basis
+
+    def project(basis):
+        lifted = null @ basis
+        products = rows @ lifted
+        along = near_null @ lifted
+        block = products.T @ products + lift * np.outer(along, along) + lifted.T @ penalty @ lifted
+        cross = rows.T @ products + lift * np.outer(near_null, along) + penalty @ lifted
+        zero = np.zeros_like(block)
+        return SymmetricGreyProjection(block, null.T @ cross, zero, 0.0 * basis)
+
+    formed = result.terminal_penalized_curvature
+    decided = decompose_symmetric_deflated(
+        formed if face is None else face.reduce_matrix(formed), project, formation_bound=1.0e-8
+    )
+    assert decided.grey_subspace["rows_read"] == 1.0
+    assert decided.grey_subspace["retained"] == 1.0
+    if face is None:
+        result = replace(result, terminal_rank=decided)
+    else:
+        result = replace(
+            result,
+            coefficient_face=face,
+            terminal_reduced_rank=decided,
+            terminal_rank=face.lift_rank_decomposition(decided),
+        )
+    covariance = null @ _exact_inverse(null.T @ exact @ null) @ null.T
+    reference = covariance @ exact_data
+    inference = compute_joint_inference(layout, result)
+    scale = float(np.max(np.abs(covariance)))
+    np.testing.assert_allclose(inference.covariance, covariance, rtol=0.0, atol=1.0e-8 * scale)
+    np.testing.assert_allclose(inference.influence, reference, rtol=0.0, atol=1.0e-5)
+    assert inference.total_edf == pytest.approx(float(np.trace(reference)), abs=1.0e-5)
+    # The formed data curvature's own product is far off along the near-null direction.
+    formed_influence = np.column_stack(
+        tuple(result.solve_terminal(formed_data[:, column]) for column in range(5))
+    )
+    assert abs(float(np.trace(formed_influence)) - inference.total_edf) > 10.0
+
+
+def test_resolution_limited_stop_checks_a_row_certified_solve_against_its_own_matrix() -> None:
+    """A rank read from the rows keeps a resolution-limited stop converged.
+
+    The fixture above, scaled by ``2**40`` (exactly), on its face: a retained
+    score of 100 along the top direction and 0.01 along the near-null one
+    has raw KKT above tolerance and a Newton decrement below one ULP of the
+    objective.  The certified solve misses the formed retained curvature by
+    far more than the residual tolerance, so checking it there refused the stop.
+    """
+    layout = _layout()
+    scale = 2.0**40
+    rows = scale**0.5 * np.array(
+        [[1.0, 2.0, 0.0, 1.0, 1.0], [2.0, -1.0, 1.0, 2.0, 0.0], [0.0, 1.0, 3.0, 0.0, 2.0],
+         [1.0, 0.0, -2.0, 1.0, 1.0]]
+    )  # fmt: skip
+    near_null = np.array([1.0, 0.0, 0.0, -1.0, 0.0])
+    lift = scale * 2.0**-30
+    exact_data = rows.T @ rows + lift * np.outer(near_null, near_null)
+    formed_data = exact_data + scale * 2.0**-26 * np.outer(near_null, near_null)
+    penalty = np.zeros((5, 5))
+    penalty[2, 2] = 0.5 * scale
+    exact = exact_data + penalty
+    component = PenaltyComponent(
+        name="location:x#identity",
+        group_name="location:x",
+        group_index=0,
+        group_sl=layout.term_slices["location:x"],
+        omega_raw=np.ones((1, 1)),
+        omega_ssp=np.ones((1, 1)),
+        rank=1.0,
+        eigvals_omega=np.ones(1),
+    )
+    layout = replace(layout, penalties=(component,))
+    face = build_penalty_face(layout, (component.name,))
+    null = face.null_basis
+    formed = formed_data + penalty
+
+    def project(basis):
+        lifted = null @ basis
+        products = rows @ lifted
+        along = near_null @ lifted
+        block = products.T @ products + lift * np.outer(along, along) + lifted.T @ penalty @ lifted
+        cross = rows.T @ products + lift * np.outer(near_null, along) + penalty @ lifted
+        return SymmetricGreyProjection(block, null.T @ cross, np.zeros_like(block), 0.0 * basis)
+
+    reduced = face.reduce_matrix(formed)
+    certified = decompose_symmetric_deflated(reduced, project, formation_bound=1.0e-8)
+    assert certified.grey_subspace["rows_read"] == 1.0 and certified.rank == face.reduced_width
+    values, vectors = np.linalg.eigh(null.T @ exact @ null)
+    score = null @ (100.0 * vectors[:, -1] + 0.01 * (null.T @ near_null) / np.sqrt(2.0))
+    config = DenseSolverConfig()
+    telemetry = _result(layout, formed_data, penalty).terminal_curvature
+    # Forced: the certified solve misses the formed retained curvature.
+    retained_score = face.reduce_vector(score)
+    miss = np.linalg.norm(reduced @ certified.solve(retained_score) - retained_score)
+    assert miss > 1.0e3 * config.residual_tolerance * np.linalg.norm(retained_score)
+    _validate_resolution_limited_stationarity(
+        config=config,
+        converged=True,
+        terminal_curvature=telemetry,
+        score=score,
+        penalized_curvature=formed,
+        penalized_objective=1.0e9,
+        face=face,
+        retained_rank=certified,
+    )
 
 
 def test_inference_rejects_incomplete_or_overlapping_global_slice_partitions() -> None:

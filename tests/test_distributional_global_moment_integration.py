@@ -16,16 +16,56 @@ from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS, LowerBoundedLogLink
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.layout import build_stacked_layout
-from superglm.distributional.predictor import compile_predictors
+from superglm.distributional.predictor import Predictor, compile_predictors
 from superglm.distributional.solver import chunks
 from superglm.distributional.solver._global_moments import GlobalMomentRefusalError
 from superglm.distributional.weights import ResolvedLikelihoodWeights
+from superglm.features import Categorical, Numeric, Spline
 from superglm.group_matrix import DiscretizedSplineCategoricalGroupMatrix, DiscretizedSSPGroupMatrix
 from superglm.links import IdentityLink, LogLink
 
 from ._distributional_weights import resolved_prior
-from .test_distributional_automatic_panels import _literal_design, _predictor, _problem
-from .test_distributional_small_group_panel_integration import _assert_geometry, _stream
+from .test_distributional_fused_trial import _literal_design
+from .test_distributional_grouped_literal_design import _assert_geometry, _stream
+
+
+def _problem(modes=("mixed", "mixed")):
+    n = 37
+    x = np.linspace(-1, 1, n)
+    z = np.cos(np.arange(n) * 0.7)
+    frame = as_eager_frame(pd.DataFrame({"x": x, "s": z, "g": np.resize(list("abc"), n)}))
+    family = GaussianLS()
+    layout = build_stacked_layout(
+        compile_predictors(
+            frame,
+            resolved_prior(np.ones(n)),
+            family.parameters,
+            tuple(_predictor(name, mode) for name, mode in zip(("location", "scale"), modes)),
+            model_discrete=True,
+            n_bins_config=9,
+        )
+    )
+    score = np.column_stack((np.sin(np.arange(n)), np.linspace(-0.3, 0.8, n)))
+    curvature = np.column_stack((x, np.cos(np.arange(n)), -x))
+    return layout, score, curvature
+
+
+def _predictor(name, mode):
+    features = {}
+    if mode in ("mixed", "numeric", "numeric_spline"):
+        features["x"] = Numeric()
+    if mode in ("mixed", "support", "support_category", "numeric_spline"):
+        features["s"] = Spline(kind="cr", k=4)
+    if mode in ("mixed", "category", "support_category"):
+        features["g"] = Categorical()
+    # Different intercept choices give rectangular curvature blocks without
+    # relying on tiny, roundoff-sensitive raw spline values for dispatch.
+    return Predictor(
+        name,
+        features,
+        interactions=(("s", "g"),) if mode == "mixed" else (),
+        intercept=not (name == "scale" and mode == "mixed"),
+    )
 
 
 def _row_stream(layout, score, curvature):
@@ -202,27 +242,6 @@ def test_contract_failures_propagate_after_cleanup_without_replay(monkeypatch, f
     if failure != "rows":
         assert caught.value is error
     assert events == ["stream", "stream-close", "plan-close"]
-
-
-@pytest.mark.parametrize("budget", [None, 1, 64 << 20])
-def test_explicit_panel_options_never_attempt_global(monkeypatch, budget):
-    layout, score, curvature = _problem()
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("explicit panel option reached global admission")
-
-    monkeypatch.setattr(chunks, "automatic_global_moment_budget", forbidden)
-    monkeypatch.setattr(chunks, "build_global_moment_plan", forbidden)
-    monkeypatch.setattr(
-        chunks,
-        "iter_likelihood_chunks",
-        lambda *args, **kwargs: _row_stream(layout, score, curvature),
-    )
-    result = _assemble(layout, small_group_panel_byte_budget=budget)
-    p = layout.n_coefficients
-    _assert_geometry(
-        result, layout, _literal_design(layout), score, curvature, np.zeros((p, p)), np.zeros(p)
-    )
 
 
 @pytest.mark.parametrize("reason", ["unsupported-layout", "budget"])
@@ -607,14 +626,8 @@ def test_real_bound_likelihood_keeps_chunks_and_penalized_endpoint(
     coefficients = np.linspace(-0.08, 0.13, p)
     penalty = np.diag(np.linspace(0, 0.2, p))
     options = dict(penalty=penalty, chunk_size=7, curvature_source=curvature_source)
-    baseline = chunks.assemble_chunked_geometry(
-        family,
-        layout,
-        response,
-        bound,
-        coefficients,
-        small_group_panel_byte_budget=None,
-        **options,
+    baseline = chunks._assemble_grouped_pass_geometry(
+        family, layout, response, bound, coefficients, **options
     )
     monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: 64 << 20)
     original = chunks.iter_likelihood_chunks

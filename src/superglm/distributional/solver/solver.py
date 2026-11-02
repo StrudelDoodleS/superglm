@@ -9,6 +9,7 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
+import superglm.distributional.solver.certificate as rank_certificate
 import superglm.distributional.solver.chunks as chunking
 from superglm.distributional.family import (
     DistributionalFamily,
@@ -38,6 +39,7 @@ from superglm.distributional.results.solver import (
     _validate_resolution_limited_stationarity,
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
+from superglm.distributional.solver._formation import CurvatureFormation
 from superglm.distributional.solver._likelihood_cache import (
     _is_builtin_gaussian_gamma,
     _LikelihoodCache,
@@ -146,7 +148,12 @@ class _DenseObservedReuseSession:
 
     def __init__(self) -> None:
         self._results: dict[
-            int, tuple[weakref.ReferenceType[DenseSolverResult], _DenseObservedReuseOwner]
+            int,
+            tuple[
+                weakref.ReferenceType[DenseSolverResult],
+                _DenseObservedReuseOwner,
+                CurvatureFormation | None,
+            ],
         ] = {}
         self._chunk_results: dict[int, _ChunkObservedReuseRecord] = {}
         self._dense: dict[int, tuple[StackedLayout, tuple[NDArray[np.float64], ...]]] = {}
@@ -202,6 +209,7 @@ class _DenseObservedReuseSession:
         *,
         context: _SolverContext | None = None,
         score_data: NDArray[np.float64] | None = None,
+        formation: CurvatureFormation | None = None,
     ) -> None:
         curvature = result.terminal_curvature
         if (
@@ -222,6 +230,7 @@ class _DenseObservedReuseSession:
             self._results[key] = (
                 self._source_reference(result, chunked=False),
                 owner,
+                formation,
             )
         elif (
             context is not None
@@ -246,6 +255,7 @@ class _DenseObservedReuseSession:
                 coefficients=_readonly(result.coefficients),
                 score_data=_readonly(score_data),
                 data_curvature=_readonly(result.terminal_data_curvature),
+                formation=formation,
             )
 
     def _source_reference(
@@ -273,6 +283,8 @@ class _ChunkObservedReuseRecord:
     coefficients: NDArray[np.float64]
     score_data: NDArray[np.float64]
     data_curvature: NDArray[np.float64]
+    # The source assembly's formation statistics: the data curvature is reused.
+    formation: CurvatureFormation | None = None
 
 
 @dataclass(frozen=True)
@@ -684,9 +696,30 @@ def _geometry(
         )
     if state.derivatives is None:
         raise RuntimeError("dense accepted state is missing derivative geometry")
+    curvature = _dense_curvature_channels(context, state, source)
+    if context.dense_matrices is None:
+        raise RuntimeError("dense solver context is missing predictor matrices")
+    return _assemble_dense_geometry_from_matrices(
+        context.layout,
+        context.dense_matrices,
+        state.derivatives.score_eta,
+        curvature,
+        penalty=context.penalty,
+        coefficients=state.coefficients,
+    )
+
+
+def _dense_curvature_channels(
+    context: _SolverContext,
+    state: _AcceptedState,
+    source: chunking.CurvatureSource,
+) -> NDArray[np.float64]:
+    """The dense state's packed curvature channels of ``source``."""
+    if state.derivatives is None:
+        raise RuntimeError("dense accepted state is missing derivative geometry")
     if source == "nearest_semidefinite":
-        curvature = nearest_semidefinite_curvature(state.derivatives.curvature_packed)
-    elif source == "fisher":
+        return nearest_semidefinite_curvature(state.derivatives.curvature_packed)
+    if source == "fisher":
         curvature = state.fisher_curvature_packed
         if curvature is None:
             if context.fisher_family is None or state.theta is None or state.eta is None:
@@ -700,18 +733,8 @@ def _geometry(
                 state.eta,
                 context.links,
             )
-    else:
-        curvature = state.derivatives.curvature_packed
-    if context.dense_matrices is None:
-        raise RuntimeError("dense solver context is missing predictor matrices")
-    return _assemble_dense_geometry_from_matrices(
-        context.layout,
-        context.dense_matrices,
-        state.derivatives.score_eta,
-        curvature,
-        penalty=context.penalty,
-        coefficients=state.coefficients,
-    )
+        return curvature
+    return state.derivatives.curvature_packed
 
 
 def _measured_geometry(
@@ -1345,6 +1368,7 @@ def _reuse_observed_initial_result(
 
         score_data = source.terminal_score + source.penalty @ coefficients
         data_curvature = np.asarray(source.terminal_data_curvature, dtype=np.float64)
+        formation = session._results[id(source)][2]
     else:
         record = session._chunk_results.get(id(source))
         if (
@@ -1372,6 +1396,7 @@ def _reuse_observed_initial_result(
                 return None
         score_data = record.score_data
         data_curvature = record.data_curvature
+        formation = record.formation
 
     penalty_value = _half_penalty_quadratic(context.penalty, coefficients, context.penalty_entries)
     penalized_optimizing = float(optimizing - penalty_value)
@@ -1404,6 +1429,7 @@ def _reuse_observed_initial_result(
         data_curvature=_readonly(data_curvature),
         penalty=context.penalty,
         penalized_curvature=_readonly(penalized_curvature),
+        formation=formation,
     )
     return state, geometry
 
@@ -1424,6 +1450,66 @@ def _geometry_from(
     if held is not None:
         return held
     return _measured_geometry(context, state, source, phase_recorder)
+
+
+def _certified_terminal_curvature(
+    context: _SolverContext,
+    state: _AcceptedState,
+    curvature: CurvatureDecision,
+    geometry: DenseJointGeometry,
+    phase_recorder: FitPhaseRecorder | None,
+) -> CurvatureDecision:
+    """The accepted terminal decision, its rank certified against forming the matrix.
+
+    ``certificate.certify_terminal_rank`` reads the rows of the accepted
+    curvature source once at most, and only when a direction lies within the
+    formation bound of the cut. Newton steps keep the formed decision. A row
+    pass that cannot evaluate the state it accepted, or runs out of memory,
+    keeps the formed decision, marked uncertified: the fit is disclosed, never
+    refused.
+    """
+    formation = geometry.formation
+    if formation is None:
+        return curvature
+    source = curvature.telemetry.actual_source
+    if source not in ("observed", "fisher", "nearest_semidefinite"):
+        return curvature
+    if context.chunk_size is None:
+        if context.dense_matrices is None:
+            return curvature
+
+        def channels() -> NDArray[np.float64]:
+            evaluated = state
+            if evaluated.derivatives is None:
+                evaluated = _evaluate_state(
+                    context, state.coefficients, phase_recorder=phase_recorder
+                )
+            if evaluated is None or evaluated.derivatives is None:
+                raise FloatingPointError("terminal state has no curvature channels")
+            return _dense_curvature_channels(context, evaluated, source)
+
+        rows = rank_certificate.dense_rows(context.layout, context.dense_matrices, channels)
+    else:
+        rows = rank_certificate.chunked_rows(context, state.coefficients, source, formation)
+    try:
+        return rank_certificate.certify_terminal_rank(
+            curvature,
+            formation,
+            layout=context.layout,
+            penalized=geometry.penalized_curvature,
+            penalty=geometry.penalty,
+            face=context.coefficient_face,
+            rows=rows,
+            product_roundings=rank_certificate.product_roundings(context.layout, formation),
+        )
+    except (
+        _NumericalEvaluationError,
+        FloatingPointError,
+        OverflowError,
+        MemoryError,
+        np.linalg.LinAlgError,
+    ):
+        return replace(curvature, telemetry=replace(curvature.telemetry, certified=False))
 
 
 def _fit_dense_fixed_lambda_core(
@@ -1730,6 +1816,15 @@ def _fit_dense_fixed_lambda_core(
             accepted_geometry = terminal_semidefinite_geometry[0]
         else:
             accepted_geometry = observed_geometry
+        if not (
+            context.coefficient_face is not None and context.coefficient_face.reduced_width == 0
+        ):
+            curvature = _certified_terminal_curvature(
+                context, state, curvature, accepted_geometry, phase_recorder
+            )
+        decomposition = curvature.decomposition
+        if decomposition is None:  # the certificate keeps an accepted decomposition
+            raise RuntimeError("terminal rank certificate lost the accepted decomposition")
         terminal_data_curvature = np.asarray(
             accepted_geometry.data_curvature,
             dtype=np.float64,
@@ -1739,11 +1834,11 @@ def _fit_dense_fixed_lambda_core(
             dtype=np.float64,
         )
         if context.coefficient_face is None:
-            terminal_rank = curvature.decomposition
+            terminal_rank = decomposition
             terminal_reduced_rank = None
         else:
             face = context.coefficient_face
-            terminal_reduced_rank = curvature.decomposition
+            terminal_reduced_rank = decomposition
             terminal_rank = face.lift_rank_decomposition(terminal_reduced_rank)
         terminal_score_geometry = observed_geometry
         penalty_value = _half_penalty_quadratic(
@@ -1811,7 +1906,11 @@ def _fit_dense_fixed_lambda_core(
         )
         if _reuse_session is not None:
             _reuse_session.remember(
-                result, reuse_owner, context=context, score_data=terminal_score_geometry.score_data
+                result,
+                reuse_owner,
+                context=context,
+                score_data=terminal_score_geometry.score_data,
+                formation=terminal_score_geometry.formation,
             )
         return result
 

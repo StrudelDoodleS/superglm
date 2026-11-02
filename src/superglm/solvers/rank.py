@@ -10,13 +10,15 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
 from superglm._roundoff import EPS as _EPS
+from superglm._roundoff import SMALLEST_SUBNORMAL as _ETA
+from superglm._roundoff import UNIT_ROUNDOFF as _U
 from superglm._roundoff import gamma_up as _gamma_up
 
 
@@ -114,7 +116,17 @@ SHARED_RANK_POLICY = RankPolicy(
     # previously lost beside epsilon-amplified zero-diagonal blocks. Both can
     # change rank or representatives for identical input without changing the
     # threshold fields, so stored decompositions must distinguish this rule.
-    version=4,
+    # Version 5. Where a caller bounds how far forming a matrix moved it and
+    # can read the rows it was formed from (``decompose_symmetric_deflated``),
+    # the rank is that of the exact matrix: a direction within the bound of
+    # the cut is decided by its block evaluated from the rows, so an alias the
+    # formation lifted over the cut is dropped and a near-null direction it
+    # pushed under is kept. The thresholds are unchanged; ``rank`` and
+    # ``active_columns`` change for the same model and data. A caller that
+    # supplies no bound, such as every scalar ``SuperGLM`` fit, decides as under
+    # version 4 and records version 5. A stored decomposition keeps the version
+    # that decided it; nothing compares it with this one on load.
+    version=5,
     factor_rcond=float(np.sqrt(_EPS)),
     gram_rcond=float(_EPS),
     certification_band=32.0,
@@ -949,13 +961,33 @@ class RankDecomposition:
     # matrix was taken as the semidefinite one it was formed from.
     formation_limited: bool = False
     # ``decide_data_rank``'s certificate when the observation rows decided only
-    # the Gram's grey subspace (``decompose_gram_deflated``); ``None`` for a
-    # Gram or full-factor decomposition.
+    # the Gram's grey subspace (``decompose_gram_deflated``), or the formed
+    # matrix's rank certificate against its formation bound
+    # (``decompose_symmetric_deflated``, and ``decompose_gram`` given a
+    # ``formation_bound``); ``None`` for a Gram or full-factor decomposition.
     grey_subspace: Mapping[str, float] | None = None
 
     @property
     def width(self) -> int:
         return int(self.column_scale.size)
+
+    @property
+    def row_decided(self) -> bool:
+        """Whether this inverts ``E diag(r) E'`` rather than the formed matrix.
+
+        True when :func:`decompose_symmetric_deflated` read the grey block from
+        the rows.  The two matrices then differ in the directions read by more
+        than a stored float64 matrix resolves of their eigenvalues, so a
+        consumer that pairs this inverse with a curvature pairs it with
+        ``E diag(r) E'`` (``estimable_functional_basis``, ``retained_values``).
+        """
+        grey = self.grey_subspace or {}
+        return bool(
+            grey.get("rows_read")
+            and not grey.get("projection_failed")
+            and self.estimable_functional_basis is not None
+            and self.retained_values is not None
+        )
 
     def _solve_deferred(self, rhs: NDArray) -> NDArray:
         """Evaluate the stored Gram action with exact exceptional intermediates."""
@@ -2114,6 +2146,148 @@ def _formation_slack(formation_error: NDArray, diagonal: NDArray) -> float:
     return float(np.nextafter(total + scaling, np.inf))
 
 
+def _up(value: float) -> float:
+    """``value`` moved one float toward ``+inf``: one rounding of a bound, taken outward."""
+    return float(np.nextafter(value, np.inf))
+
+
+def _down(value: float) -> float:
+    """``value`` moved one float toward ``-inf``."""
+    return float(np.nextafter(value, -np.inf))
+
+
+def _frobenius_up(values: NDArray) -> float:
+    """An upper bound on ``||values||_F``, which bounds the spectral norm.
+
+    Scaled by the largest magnitude first, so no square underflows or
+    overflows; the scaled sum is correctly rounded (``math.fsum``), and the
+    quotients, squares, square root and product add at most ``gamma_(size +
+    4)``.
+    """
+    magnitude = np.abs(np.asarray(values, dtype=np.float64))
+    largest = float(np.max(magnitude, initial=0.0))
+    if largest == 0.0 or not math.isfinite(largest):
+        return largest
+    scaled = magnitude / largest
+    norm = largest * math.sqrt(math.fsum((scaled * scaled).ravel()))
+    return _up(norm * (1.0 + _gamma_up(magnitude.size + 4)))
+
+
+def _formed_matrix_error(norm_one: float, width: int, formation_bound: float) -> float:
+    """``e_mat``: a bound on ``||D^-1 H D^-1 - E||_2``, ``E`` the equilibrated matrix as computed.
+
+    ``H`` is the exact symmetric matrix the formed one approximates and
+    ``formation_bound >= ||D^-1 (G - H) D^-1||_2`` the caller's bound, with
+    ``D`` from the exact square roots of ``diag G``; the computed square roots
+    scale it by at most ``(1 - u)^-2 <= 1 + gamma_2``.  Equilibrating rounds
+    each entry three times (symmetric part, product of scales, quotient), at
+    most ``gamma_3 |E|`` entrywise, and ``|| |E| ||_2 <= ||E||_1`` for
+    symmetric ``E``; the computed 1-norm, a sum of ``width`` nonnegative
+    terms, is inflated by ``gamma_width``.
+    """
+    norm = _up(norm_one * (1.0 + _gamma_up(width)))
+    rounding = _up(_gamma_up(3) * norm)
+    formation = _up(formation_bound * (1.0 + _gamma_up(2)))
+    return _up(rounding + formation)
+
+
+def _shifted_cholesky_clears(equilibrated: NDArray, floor: float) -> bool:
+    """Whether one Cholesky proves ``lambda_min(equilibrated) > floor``.
+
+    Rump, "Verification of positive definiteness", *BIT* 46 (2006), 433-452,
+    Corollary 2.4: if floating-point Cholesky of ``A~`` runs to completion,
+    where ``A~`` agrees with ``A`` off the diagonal and ``a~_ii <= a_ii - c``
+    with ``c >= ||Delta(A)||_2``, then ``A`` is positive definite, in any
+    order of evaluation and under underflow.  His bound I (section 3, from
+    Theorem 2.3) is ``||Delta(A)||_2 <= gamma_(n+1) / (1 - gamma_(n+1)) tr(A)
+    + n M eta``, ``M = 3 (2n + max a_ii)``, ``eta = 2**-1074``; his ``eps``
+    is the unit roundoff ``u``.  ``Delta`` grows with the diagonal, so for
+    ``A = equilibrated - floor I`` the matrix's own trace and diagonal bound
+    it, and a completed factor proves ``lambda_min(equilibrated) > floor``.
+    The lowered diagonal is rounded down by his Lemma 2.5, ``fl(d - phi
+    |d|)`` with ``phi = u (1 + 2u)``.
+    """
+    width = equilibrated.shape[0]
+    rounding = _gamma_up(width + 1)
+    if not (rounding < 1.0 and math.isfinite(floor) and floor >= 0.0):
+        return False
+    diagonal = np.diag(equilibrated)
+    if np.any(diagonal <= 0.0):
+        return False
+    ratio = _up(rounding / _down(1.0 - rounding))
+    trace = _up(math.fsum(diagonal))
+    largest = float(np.max(diagonal))
+    underflow = _up(_up(width * _up(3.0 * _up(2.0 * width + largest))) * _ETA)
+    allowance = _up(_up(ratio * trace) + underflow)
+    shift = _up(floor + allowance)
+    lowered = np.array(equilibrated, dtype=np.float64, copy=True)
+    reduced = diagonal - shift
+    np.fill_diagonal(lowered, reduced - _U * (1.0 + 2.0 * _U) * np.abs(reduced))
+    try:
+        scipy.linalg.cholesky(lowered, lower=True, check_finite=False)
+    except (np.linalg.LinAlgError, ValueError):
+        return False
+    return True
+
+
+def _full_rank_cholesky(
+    equilibrated: NDArray,
+    column_scale: NDArray,
+    active_columns: NDArray,
+    *,
+    policy: RankPolicy,
+    residual_tol: float,
+    condition: float,
+    cutoff: float,
+    eigenvalues: NDArray,
+) -> RankDecomposition | None:
+    """The full-rank decomposition the eigendecomposition path publishes: the equilibrated Cholesky.
+
+    ``None`` when the factor fails or does not solve a probe to
+    ``residual_tol``; the caller then publishes the spectral form.
+    """
+    width = len(column_scale)
+    rank = len(active_columns)
+    structural_aliases = column_scale == 0.0
+    try:
+        factor = scipy.linalg.cholesky(equilibrated, lower=True, check_finite=False)
+        probe = np.arange(1.0, len(active_columns) + 1.0)
+        solved = scipy.linalg.cho_solve((factor, True), probe, check_finite=False)
+        residual = np.linalg.norm(equilibrated @ solved - probe) / max(
+            np.linalg.norm(probe), 1e-300
+        )
+        if residual <= residual_tol:
+            log_pdet = 2.0 * float(np.sum(np.log(np.diag(factor)))) + 2.0 * float(
+                np.sum(np.log(column_scale[active_columns]))
+            )
+            null = _null_basis(
+                width,
+                active_columns,
+                column_scale[active_columns],
+                np.zeros((len(active_columns), 0)),
+            )
+            return RankDecomposition(
+                policy_version=policy.version,
+                method="cholesky",
+                column_scale=_freeze(column_scale),
+                active_columns=_freeze(active_columns, dtype=int),
+                rank=rank,
+                pre_truncation_condition=condition,
+                cutoff=cutoff,
+                rank_truncated=rank < width,
+                used_svd_fallback=False,
+                resolution_limited=False,
+                log_pdet=log_pdet,
+                cholesky_factor=_freeze(factor),
+                parameter_null_basis=_freeze(null),
+                structural_aliases=_freeze(structural_aliases, dtype=bool),
+                retained_values=_freeze(eigenvalues),
+            )
+    except (np.linalg.LinAlgError, ValueError):
+        pass
+    return None
+
+
 def _decompose_gram(
     matrix: NDArray,
     *,
@@ -2125,8 +2299,15 @@ def _decompose_gram(
     psd_by_construction: bool = False,
     formation_error: NDArray | None = None,
     spectrum: dict | None = None,
+    formation_bound: float | None = None,
+    shortcut_only: bool = False,
 ) -> RankDecomposition | None:
     """Equilibrate and decompose a symmetric positive-semidefinite matrix.
+
+    ``shortcut_only`` returns ``None`` wherever the Cholesky full-rank
+    shortcut does not return, before any eigendecomposition
+    (:func:`decompose_symmetric_deflated`'s first step).
+    ``formation_bound``: see :func:`decompose_gram`.
 
     ``spectrum``, when given, receives the equilibrated matrix's eigenpairs
     whenever they are computed (``values``, ``vectors`` and the ``active``
@@ -2225,7 +2406,7 @@ def _decompose_gram(
                         column_scale[active_columns],
                         np.zeros((len(active_columns), 0)),
                     )
-                    return RankDecomposition(
+                    shortcut = RankDecomposition(
                         policy_version=policy.version,
                         method="cholesky",
                         column_scale=_freeze(column_scale),
@@ -2255,8 +2436,45 @@ def _decompose_gram(
                         parameter_null_basis=_freeze(null),
                         structural_aliases=_freeze(structural_aliases, dtype=bool),
                     )
+                    if formation_bound is None:
+                        return shortcut
+                    # The threshold above clears the cut for the matrix as
+                    # formed; the exact one is up to ``e_mat`` away, so the
+                    # shortcut certifies only what Rump's shifted Cholesky
+                    # proves past both.
+                    error = _formed_matrix_error(
+                        matrix_norm, len(active_columns), float(formation_bound)
+                    )
+                    floor = _up(
+                        _up(
+                            max(
+                                policy.certification_band * policy.gram_rcond,
+                                _eigensolver_relative_bar(len(active_columns)),
+                            )
+                            * matrix_norm
+                        )
+                        + error
+                    )
+                    if _shifted_cholesky_clears(equilibrated, floor):
+                        return replace(
+                            shortcut,
+                            grey_subspace={
+                                "certified": 1.0,
+                                "k": 0.0,
+                                "rows_read": 0.0,
+                                "retained": 0.0,
+                                "unresolved": 0.0,
+                                "indefinite": 0.0,
+                                "capped": 0.0,
+                                "projection_failed": 0.0,
+                                "cut": floor / matrix_norm,
+                                "error": error / matrix_norm,
+                            },
+                        )
         except (np.linalg.LinAlgError, ValueError):
             pass
+    if shortcut_only:
+        return None
 
     eigenvalues, eigenvectors = np.linalg.eigh(equilibrated)
     if spectrum is not None:
@@ -2350,42 +2568,18 @@ def _decompose_gram(
     )
 
     if rank == len(active_columns) and np.all(eigenvalues > 0.0):
-        try:
-            factor = scipy.linalg.cholesky(equilibrated, lower=True, check_finite=False)
-            probe = np.arange(1.0, len(active_columns) + 1.0)
-            solved = scipy.linalg.cho_solve((factor, True), probe, check_finite=False)
-            residual = np.linalg.norm(equilibrated @ solved - probe) / max(
-                np.linalg.norm(probe), 1e-300
-            )
-            if residual <= residual_tol:
-                log_pdet = 2.0 * float(np.sum(np.log(np.diag(factor)))) + 2.0 * float(
-                    np.sum(np.log(column_scale[active_columns]))
-                )
-                null = _null_basis(
-                    width,
-                    active_columns,
-                    column_scale[active_columns],
-                    np.zeros((len(active_columns), 0)),
-                )
-                return RankDecomposition(
-                    policy_version=policy.version,
-                    method="cholesky",
-                    column_scale=_freeze(column_scale),
-                    active_columns=_freeze(active_columns, dtype=int),
-                    rank=rank,
-                    pre_truncation_condition=condition,
-                    cutoff=cutoff,
-                    rank_truncated=rank < width,
-                    used_svd_fallback=False,
-                    resolution_limited=False,
-                    log_pdet=log_pdet,
-                    cholesky_factor=_freeze(factor),
-                    parameter_null_basis=_freeze(null),
-                    structural_aliases=_freeze(structural_aliases, dtype=bool),
-                    retained_values=_freeze(eigenvalues),
-                )
-        except (np.linalg.LinAlgError, ValueError):
-            pass
+        full = _full_rank_cholesky(
+            equilibrated,
+            column_scale,
+            active_columns,
+            policy=policy,
+            residual_tol=residual_tol,
+            condition=condition,
+            cutoff=cutoff,
+            eigenvalues=eigenvalues,
+        )
+        if full is not None:
+            return full
 
     # Normal equations cannot distinguish an exact active-column alias from a
     # full-rank factor direction whose squared singular value rounded to zero.
@@ -2521,6 +2715,7 @@ def decompose_gram(
     fallback_factor: NDArray | None = None,
     allow_indefinite: bool = False,
     formation_error: NDArray | None = None,
+    formation_bound: float | None = None,
 ) -> RankDecomposition:
     """Equilibrate and decompose a symmetric positive-semidefinite matrix.
 
@@ -2537,6 +2732,19 @@ def decompose_gram(
     widened bar it still raises.  The bound decides only refusals: a matrix
     whose residues all land positive, or inside the eigensolver's bar, is
     decomposed exactly as without it.
+
+    ``formation_bound``, a scalar and a different bound, is
+    ``>= ||D^-1 (A - H) D^-1||_2`` with ``D = diag(sqrt(diag A))``: the
+    distance, Jacobi-scaled, from the matrix given to the exact one ``H`` it
+    was formed from.  It decides only the Cholesky full-rank shortcut, which
+    then also needs one Cholesky of the matrix lowered by the cut, that
+    bound's ``e_mat`` (``_formed_matrix_error``) and Rump's backward-error
+    allowance (``_shifted_cholesky_clears``) to complete, proving that ``H``
+    clears the cut.  Then the result is the shortcut's, carrying
+    ``grey_subspace = {"certified": 1.0, "k": 0.0, ...}``; otherwise the
+    eigendecomposition decides, as it does for a matrix the shortcut does not
+    take.  Omitted, every result is bit for bit what it was before the
+    keyword existed.
     """
     decomposition = _decompose_gram(
         matrix,
@@ -2545,6 +2753,7 @@ def decompose_gram(
         fallback_factor=fallback_factor,
         allow_indefinite=allow_indefinite,
         formation_error=formation_error,
+        formation_bound=formation_bound,
     )
     if decomposition is None:  # pragma: no cover - omit_uncertifiable defaults off
         raise RuntimeError("gram decomposition omitted its subspace without being asked to")
@@ -2909,6 +3118,442 @@ def decide_data_rank(
         if deflated is not None:
             return deflated
     return factor_decomposition()
+
+
+# ``decompose_symmetric_deflated`` reads the rows for at most this many grey
+# directions; past it the formed decision stands, flagged ``resolution_limited``.
+_SYMMETRIC_GREY_CAP = 32
+
+
+class SymmetricGreyProjection(NamedTuple):
+    """What ``project`` returns to :func:`decompose_symmetric_deflated` for a basis ``B``.
+
+    ``block`` is ``B' H B`` (``k x k``) and ``cross`` is ``H B`` (``p x k``),
+    both evaluated from the rows; ``|block - B' H B| <= block_bound`` and
+    ``|cross - H B| <= cross_bound`` entrywise, in exact arithmetic.  A bound
+    is any nonnegative array (or scalar) that broadcasts to its value's
+    shape; ``inf`` means unbounded and leaves the affected directions
+    unresolved.
+    """
+
+    block: NDArray
+    cross: NDArray
+    block_bound: NDArray | float
+    cross_bound: NDArray | float
+
+
+def _li_li_shift(coupling: float, gap: float) -> float:
+    """``2 c^2 / (gap + sqrt(gap^2 + 4 c^2))`` rounded up; ``inf`` without a positive gap.
+
+    Evaluated as ``2 c / (r + sqrt(r^2 + 4))`` with ``r = gap / c``, so no
+    square overflows; past ``r = 1e150`` it is bounded by ``c / r``.
+    """
+    if coupling == 0.0:
+        return 0.0
+    if not (gap > 0.0 and math.isfinite(coupling)):
+        return math.inf
+    ratio = gap / coupling
+    if ratio >= 1e150:
+        return _up(coupling / ratio * (1.0 + _gamma_up(2)))
+    return _up(2.0 * coupling / (ratio + math.sqrt(ratio * ratio + 4.0)) * (1.0 + _gamma_up(8)))
+
+
+def decompose_symmetric_deflated(
+    matrix: NDArray,
+    project: Callable[[NDArray], SymmetricGreyProjection | tuple],
+    *,
+    formation_bound: float,
+    policy: RankPolicy = SHARED_RANK_POLICY,
+    residual_tol: float = 1e-6,
+    max_grey: int = _SYMMETRIC_GREY_CAP,
+    spectrum: dict | None = None,
+) -> RankDecomposition:
+    """The rank of the exact matrix a formed symmetric one approximates, reading rows only on its grey subspace.
+
+    **The problem.**  ``matrix`` is ``G``, the formed value of ``H = sum_r
+    X_r' C_r X_r + S`` (rows ``X_r``, per-row weights ``C_r`` that may be
+    signed or ``K x K`` and indefinite row by row, penalty ``S``; under an
+    active face, the reduced ``N' H N``).  :func:`decompose_gram` keeps the
+    eigenvalues ``w_i`` of ``E = D^-1 G D^-1``, ``D = diag(sqrt(diag G))``,
+    above ``tau = max(gram_rcond, n_a eps) max(w)``, and so decides ``G``.
+    ``formation_bound >= ||D^-1 (G - H) D^-1||_2`` is the caller's bound on
+    how far forming moved it (Higham 2002, eq. 3.13), and it can exceed
+    ``tau``.  This decides the eigenvalues of ``D^-1 H D^-1`` above the same
+    ``tau``.  Errors in evaluating ``C_r`` themselves are outside it: ``H`` is
+    the exact sum of the computed rows, weights and penalty.
+
+    **The method**: Weyl outside a band, and inside it a Rayleigh-Ritz block
+    evaluated from the rows with Li & Li's quadratic residual bound; it is
+    the symmetric sibling of :func:`decompose_gram_deflated`, whose grey
+    block is a factor of rows that a signed ``C_r`` does not have.
+
+    1. ``e = (n_a + 1) eps ||E|| + gamma_3 ||E||_1 + formation_bound (1 +
+       gamma_2)`` bounds ``|lambda_i(D^-1 H D^-1) - w_i|`` (Weyl: the
+       eigensolver's bar, *LAPACK Users' Guide* sec. 4.7 with ``p(n) = n``;
+       the equilibration's roundings; the formation).  Rank ``n_a`` is
+       certified without reading a row when the Cholesky shortcut's shifted
+       factor proves it (Rump 2006, Cor. 2.4; :func:`decompose_gram` with
+       ``formation_bound``) or when ``w_1 > tau + e``.
+    2. Otherwise the grey set is the ``k`` eigenvectors with ``w_i <= tau +
+       e``, extended upward to the first spacing of ``_GREY_GAP e``.  Past
+       ``max_grey`` the formed decision (:func:`decompose_gram`) is returned,
+       flagged ``resolution_limited`` with ``grey_subspace["capped"] = 1``.
+    3. ``project`` evaluates the grey block and its cross term from the rows,
+       once (contract below).
+    4. In the computed eigenbasis ``V = [V_g, V_r]`` the exact matrix is ``M =
+       [[H2, Z'], [Z, H1]]``: ``H2`` within ``e_H2`` of the row block, ``Z =
+       V_r' D^-1 H B`` within ``e_Z`` of the cross term's, and ``H1`` within
+       ``e_top = (1 + w)^2 e + w (2 + w) ||E||`` of ``diag(w_r)``, ``w = n_a
+       eps`` the eigenvectors' distance from an orthogonal matrix.  Li & Li
+       (*Linear Algebra Appl.* 395, 2005, 183-190, Thm 2; corrected version
+       arXiv 2508.08203) put every eigenvalue of ``M`` within ``shift = 2
+       ||Z||^2 / (eta + sqrt(eta^2 + 4 ||Z||^2))`` of the block-diagonal
+       matrix's, ``eta = (w_(k+1) - e_top) - (mu_max + e_H2)``, ``mu`` the
+       row block's eigenvalues; they need symmetry only, not definiteness.
+       ``V`` is not orthogonal, so Ostrowski's theorem scales the eigenvalues
+       of ``M`` to those of ``D^-1 H D^-1`` by ``1 +- omega``, ``omega = (2
+       n_a + k + 1) eps >= ||V'V - I||`` (``B``'s own rounding included).
+       ``mu_j`` is retained when ``mu_j - e_H2 - shift > tau (1 + omega)``
+       and dropped when ``mu_j + e_H2 + shift < tau (1 - omega)``; the top
+       block is retained when ``w_(k+1) - e_top - shift > tau (1 + omega)``.
+       Anything else is unresolved, and then every grey direction is decided
+       by its row estimate ``sigma_j`` (step 5) against ``tau``, flagged
+       ``resolution_limited`` with ``grey_subspace["certified"] = 0``: the
+       rank is disclosed as uncertain, never refused.  A direction whose
+       upper bound is below ``-max(100 eps, n_a eps) ||E||`` is a resolved
+       negative eigenvalue of ``H`` (counted in ``"indefinite"``; dropped,
+       as the semidefinite reading of :func:`decompose_gram` drops it).
+    5. The decomposition is published in that basis, never by recomposing
+       ``V M V'``, which puts ``u ||E||`` back on the grey block.  With
+       ``Z_hat`` the computed cross term and ``K = diag(w_r)^-1 Z_hat``, the
+       computed block matrix is exactly ``F' diag(Sigma, w_r) F`` with ``F =
+       [[Y', 0], [K, I]]``, where ``Y Sigma Y'`` is the Schur complement
+       ``H2_hat - Z_hat' K`` (``k x k``, evaluated at the grey block's own
+       scale).  ``Sigma`` are the grey row estimates; the inverse basis is
+       ``[(V_g - V_r K) Y, V_r]``, the factor (estimable-functional) basis
+       ``[V_g Y, V_r + V_g K']``, and a dropped column ``(V_g - V_r K) y_j``
+       is an exact null vector of the computed matrix, the first-order
+       invariant subspace of :func:`decompose_gram_deflated` made exact.
+
+    **The ``project`` contract.**  ``project(B)`` is called at most once,
+    with ``B`` a ``(p, k)`` float64 array in ``matrix``'s coordinates (one
+    row per column of ``matrix``; under a face, the reduced coordinates), zero
+    on columns whose diagonal is zero: ``B = D^-1 V_g``.  Treat ``B`` as
+    exact.  It returns a :class:`SymmetricGreyProjection` (or the same four
+    arrays as a tuple), each from the rows and not from ``matrix``:
+
+    * ``block`` ``(k, k)``: ``B' H B``.  Form ``T = X B`` per row chunk FIRST
+      and then ``T' C T`` (plus ``B' S B``): along a null direction ``T`` is
+      itself near zero, so this resolves at ``u ||X v||``.  ``B' (H B)`` from
+      ``cross`` would resolve only at the formed matrix's ``u ||H||``.
+    * ``cross`` ``(p, k)``: ``H B = X' (C T) + S B`` from the same ``T``.
+    * ``block_bound``, ``cross_bound``: entrywise bounds on the error of each,
+      in exact arithmetic on the same rows, weights and penalty.  With
+      ``|fl(T) - X B| <= Delta = gamma_q |X| |B|`` (``q`` the terms in one
+      row's product), Higham (2002) eq. 3.13 gives for one channel ``(k,
+      l)`` summed over ``n`` rows in any order ``gamma_(n+2) |T_k|' |c_kl|
+      |T_l| + (1 + gamma_(n+2)) (Delta_k' |c_kl| |T_l| + |T_k|' |c_kl|
+      Delta_l + Delta_k' |c_kl| Delta_l)``, both orders for ``k != l``, plus
+      ``gamma_(2p) |B|' |S| |B|``; ``cross`` likewise with ``|X_k|'`` in place
+      of ``|T_k|'``.  A face's lifting ``N B`` and reduction ``N' (.)`` add
+      their own products' terms.  Count each kernel's roundings.
+
+    Returns a :class:`RankDecomposition` that every consumer reads as it
+    reads :func:`decompose_gram`'s: ``rank``, ``pseudo_inverse``, ``solve``,
+    ``log_pdet`` (the pseudo-determinant of the published factor), the null
+    basis, estimability and representatives.  Full rank after a row pass is
+    ``"gram_eigh"``.  A deficient rank takes representatives from the
+    corrected null basis by :func:`decompose_gram`'s rule and screens
+    (``"pivoted_cholesky"``, else ``"gram_eigh"``), but publishes the
+    representative inverse from the eigenbasis, ``P S Lambda^-1 S' P'`` with
+    ``P = I - N N_J^-1 e_J'`` (which zeroes the rejected coordinates along
+    the null space ``N``; equal to the inverse of the representative block
+    for any generalized inverse), so ``cholesky_factor`` is ``None`` and the
+    inverse is carried by ``solution_basis`` and ``retained_values``.
+    ``grey_subspace`` records the decision: ``certified``, ``k``,
+    ``rows_read``, ``retained`` (grey directions kept), ``unresolved``,
+    ``indefinite``, ``capped`` and ``projection_failed`` (0 or 1), and,
+    relative to the largest eigenvalue, ``cut``, ``error`` (``e``) and,
+    once rows are read, ``block_error``, ``coupling``, ``gap`` and
+    ``shift``.  (The shortcut's ``cut`` and ``error`` are relative to the
+    1-norm, and its ``cut`` is the floor it proved.)  A projection that is
+    not finite keeps the formed decision, flagged like ``capped``.  A matrix
+    with no positive diagonal is returned as :func:`decompose_gram` returns
+    it, without a certificate.
+
+    ``spectrum`` holds the equilibrated matrix's eigenpairs where
+    :func:`decompose_gram_if_authoritative` (or ``_decompose_gram``) computed
+    them for the same matrix; they are read rather than computed again, and
+    filled when empty.  The same refusals as :func:`decompose_gram` raise
+    (a diagonal no semidefinite matrix has; a negative eigenvalue past the
+    eigensolver's bar plus ``e``).
+    """
+    bound = float(formation_bound)
+    if not bound >= 0.0:
+        raise ValueError("formation_bound must be nonnegative")
+    if isinstance(max_grey, bool) or not isinstance(max_grey, int) or max_grey < 0:
+        raise ValueError("max_grey must be a nonnegative integer")
+    shortcut = _decompose_gram(
+        matrix,
+        policy=policy,
+        residual_tol=residual_tol,
+        formation_bound=bound,
+        shortcut_only=True,
+    )
+    if shortcut is not None:
+        return shortcut
+    equilibration = _equilibrate_gram(matrix)
+    assert equilibration is not None  # the shortcut raised on any refusal
+    equilibrated, column_scale, active_columns, _ = equilibration
+    width, n_active = int(column_scale.size), int(active_columns.size)
+    if spectrum and "active" in spectrum and np.array_equal(spectrum["active"], active_columns):
+        values, vectors = spectrum["values"], spectrum["vectors"]
+    else:
+        values, vectors = np.linalg.eigh(equilibrated)
+        if spectrum is not None:
+            spectrum.update(values=values, vectors=vectors, active=active_columns)
+    largest = max(float(values[-1]), 0.0)
+    max_abs = float(np.max(np.abs(values)))
+    reference = largest if largest > 0.0 else 1.0
+    cutoff = max(policy.gram_rcond, _eigensolver_relative_bar(n_active)) * largest
+    eigensolver = _up(_eigensolver_relative_bar(n_active + 1) * max_abs)
+    error = _up(
+        eigensolver
+        + _formed_matrix_error(float(np.linalg.norm(equilibrated, ord=1)), n_active, bound)
+    )
+    negative_tolerance = max(100.0 * _EPS, _eigensolver_relative_bar(n_active)) * max(max_abs, 1.0)
+    if values[0] < -_up(negative_tolerance + error):
+        raise ValueError(
+            "matrix is materially indefinite "
+            f"(min equilibrated eigenvalue={values[0]:.3e}, scale={max_abs:.3e})"
+        )
+    info = {
+        "certified": 0.0,
+        "k": 0.0,
+        "rows_read": 0.0,
+        "retained": 0.0,
+        "unresolved": 0.0,
+        "indefinite": 0.0,
+        "capped": 0.0,
+        "projection_failed": 0.0,
+        "cut": cutoff / reference,
+        "error": error / reference,
+    }
+
+    def formed_decision() -> RankDecomposition:
+        formed = decompose_gram(matrix, policy=policy, residual_tol=residual_tol)
+        return replace(formed, resolution_limited=True, grey_subspace=dict(info))
+
+    grey = int(np.searchsorted(values, _up(cutoff + error), side="right"))
+    if grey == 0:
+        # Every eigenvalue clears the cut by more than the error: full rank.
+        info["certified"] = 1.0
+        full = _full_rank_cholesky(
+            equilibrated,
+            column_scale,
+            active_columns,
+            policy=policy,
+            residual_tol=residual_tol,
+            condition=float(np.sqrt(max_abs / float(values[0]))),
+            cutoff=cutoff,
+            eigenvalues=values,
+        )
+        if full is not None:
+            return replace(full, grey_subspace=dict(info))
+    while 0 < grey < n_active and values[grey] - values[grey - 1] < _GREY_GAP * error:
+        grey += 1
+    info["k"] = float(grey)
+    if grey > max_grey:
+        info["capped"] = 1.0
+        return formed_decision()
+
+    active_scale = column_scale[active_columns]
+    top_values, top = values[grey:], vectors[:, grey:]
+    certified = grey == 0
+    kept = np.zeros(0, dtype=bool)
+    sigma, rotation = np.zeros(0), np.zeros((0, 0))
+    correction = np.zeros((n_active - grey, 0))
+    if grey:
+        basis = np.zeros((width, grey))
+        basis[active_columns] = vectors[:, :grey] / active_scale[:, None]
+        block, cross, block_bound, cross_bound = project(basis)
+        info["rows_read"] = 1.0
+        block = np.asarray(block, dtype=np.float64)
+        cross = np.asarray(cross, dtype=np.float64)
+        if block.shape != (grey, grey) or cross.shape != (width, grey):
+            raise ValueError("project returned a block or cross term of the wrong shape")
+        block_bound = np.broadcast_to(np.asarray(block_bound, dtype=np.float64), block.shape)
+        cross_bound = np.broadcast_to(np.asarray(cross_bound, dtype=np.float64), cross.shape)
+        if not (
+            np.all(np.isfinite(block))
+            and np.all(np.isfinite(cross))
+            and not np.any(np.isnan(block_bound))
+            and not np.any(np.isnan(cross_bound))
+        ):
+            info["projection_failed"] = 1.0
+            return formed_decision()
+        if np.any(block_bound < 0.0) or np.any(cross_bound < 0.0):
+            raise ValueError("project's error bounds must be nonnegative")
+
+        symmetric_block = _symmetric_part(block)
+        mu = np.linalg.eigvalsh(symmetric_block)
+        block_norm = _frobenius_up(symmetric_block)
+        block_error = _up(
+            _up(_frobenius_up(0.5 * (block_bound + block_bound.T)) + _up(_gamma_up(2) * block_norm))
+            + _up(_eigensolver_relative_bar(grey + 1) * block_norm)
+        )
+        scaled_cross = cross[active_columns] / active_scale[:, None]
+        coupling = top.T @ scaled_cross
+        scaled_bound = cross_bound[active_columns]
+        if np.all(np.isfinite(scaled_bound)):
+            terms = scaled_bound / active_scale[:, None] + _gamma_up(n_active + 1) * np.abs(
+                scaled_cross
+            )
+            coupling_error = _up(
+                _frobenius_up(np.abs(top).T @ terms) * (1.0 + _gamma_up(n_active + 2))
+            )
+        else:
+            coupling_error = math.inf
+        coupling_norm = _up(_frobenius_up(coupling) + coupling_error)
+
+        orthogonality = _eigensolver_relative_bar(n_active)
+        top_error = _up(
+            _up(_up((1.0 + orthogonality) ** 2) * error)
+            + _up(orthogonality * (2.0 + orthogonality) * max_abs)
+        )
+        ostrowski = _eigensolver_relative_bar(2 * n_active + grey + 1)
+        cut_high = _up(cutoff * _up(1.0 + ostrowski))
+        cut_low = _down(cutoff * _down(1.0 - ostrowski))
+        if grey < n_active:
+            top_low = _down(float(top_values[0]) - top_error)
+            gap = _down(top_low - _up(float(mu[-1]) + block_error))
+        else:
+            top_low = gap = math.inf
+        shift = _li_li_shift(coupling_norm, gap)
+        margin = _up(block_error + shift)
+        low = np.nextafter(mu - margin, -np.inf)
+        high = np.nextafter(mu + margin, np.inf)
+        retained, dropped = low > cut_high, high < cut_low
+        unresolved = ~(retained | dropped)
+        certified = bool(
+            (grey == n_active or _down(top_low - shift) > cut_high) and not np.any(unresolved)
+        )
+
+        # The Schur complement of the top block, at the grey block's scale.
+        correction = coupling / top_values[:, None]
+        sigma, rotation = np.linalg.eigh(_symmetric_part(symmetric_block - coupling.T @ correction))
+        kept = np.zeros(grey, dtype=bool)
+        count = int(np.count_nonzero(retained))
+        if count:
+            kept[grey - count :] = True
+        if certified and count and not sigma[grey - count] > 0.0:
+            certified = False
+        if not certified:
+            kept = sigma > cutoff
+        info.update(
+            certified=float(certified),
+            retained=float(np.count_nonzero(kept)),
+            unresolved=float(np.count_nonzero(unresolved)),
+            indefinite=float(np.count_nonzero(high < -negative_tolerance)),
+            block_error=block_error / reference,
+            coupling=coupling_norm / reference,
+            gap=gap / reference,
+            shift=shift / reference,
+        )
+
+    rotated = vectors[:, :grey] @ rotation
+    corrected = rotated - top @ (correction @ rotation)
+    inverse_vectors = np.hstack((corrected[:, kept], top))
+    factor_top = top + vectors[:, :grey] @ correction.T if grey else top
+    factor_vectors = np.hstack((rotated[:, kept], factor_top))
+    retained_values = np.concatenate((sigma[kept], top_values))
+    order = np.argsort(retained_values, kind="stable")
+    inverse_vectors, factor_vectors = inverse_vectors[:, order], factor_vectors[:, order]
+    retained_values = retained_values[order]
+    discarded = corrected[:, ~kept]
+    if discarded.shape[1]:
+        discarded = np.linalg.qr(discarded)[0]
+    rank = int(retained_values.size)
+    every = np.abs(np.concatenate((sigma, top_values)))
+    positive = every[every > 0.0]
+    condition = float(np.sqrt(max_abs / np.min(positive))) if positive.size else float("inf")
+    estimable_basis = np.zeros((width, rank))
+    estimable_basis[active_columns] = factor_vectors * active_scale[:, None]
+    solution_basis = np.zeros((width, rank))
+    solution_basis[active_columns] = inverse_vectors / active_scale[:, None]
+    if rank == width:
+        # The factor is the unit-triangular block factor of an orthogonal basis.
+        log_pdet = 2.0 * float(np.sum(np.log(active_scale)))
+        log_pdet += float(np.sum(np.log(retained_values)))
+    else:
+        # A dropped grey column leaves F orthogonal to the null basis but not
+        # orthonormal, so pdet(D F diag(r) F' D) = det(diag(r)) det(R)^2
+        # det(Q' D^2 Q) with F = Q R, and Q completes the null basis.
+        orthonormal, triangle = np.linalg.qr(factor_vectors)
+        log_pdet = _retained_log_pdet(active_scale, orthonormal, discarded, retained_values)
+        log_pdet += 2.0 * float(np.sum(np.log(np.abs(np.diag(triangle)))))
+    null_basis = _freeze(_null_basis(width, active_columns, active_scale, discarded))
+
+    def decided(
+        method: Literal["pivoted_cholesky", "gram_eigh"],
+        active: NDArray,
+        solution: NDArray,
+        aliases: NDArray,
+        pivots: NDArray | None = None,
+    ) -> RankDecomposition:
+        return RankDecomposition(
+            method=method,
+            active_columns=_freeze(active, dtype=int),
+            pivots=None if pivots is None else _freeze(pivots, dtype=int),
+            solution_basis=_freeze(solution),
+            structural_aliases=_freeze(aliases, dtype=bool),
+            policy_version=policy.version,
+            column_scale=_freeze(column_scale),
+            rank=rank,
+            pre_truncation_condition=condition,
+            cutoff=cutoff,
+            rank_truncated=rank < width,
+            used_svd_fallback=False,
+            resolution_limited=not certified,
+            log_pdet=log_pdet,
+            parameter_null_basis=null_basis,
+            estimable_functional_basis=_freeze(estimable_basis),
+            retained_values=_freeze(retained_values),
+            grey_subspace=dict(info),
+        )
+
+    if 0 < rank < n_active:
+        selected = _conditioned_representatives(
+            discarded,
+            rank,
+            block_condition=lambda keep: _principal_block_condition(equilibrated, keep),
+            block_admissible=lambda keep, _amplification: _principal_block_clears_cutoff(
+                equilibrated, keep, cutoff
+            ),
+            maximum_condition=policy.severe_condition,
+        )
+        if selected is not None:
+            rejected = np.setdiff1d(np.arange(n_active), selected)
+            try:
+                along_null = np.linalg.solve(discarded[rejected], inverse_vectors[rejected])
+            except np.linalg.LinAlgError:
+                along_null = None
+            if along_null is not None:
+                representative = inverse_vectors - discarded @ along_null
+                representative[rejected] = 0.0
+                representative_columns = active_columns[selected]
+                representative_basis = np.zeros((width, rank))
+                representative_basis[active_columns] = representative / active_scale[:, None]
+                aliases = np.ones(width, dtype=bool)
+                aliases[representative_columns] = False
+                return decided(
+                    "pivoted_cholesky",
+                    representative_columns,
+                    representative_basis,
+                    aliases,
+                    pivots=representative_columns,
+                )
+    return decided("gram_eigh", active_columns, solution_basis, column_scale == 0.0)
 
 
 def decompose_symmetric(
