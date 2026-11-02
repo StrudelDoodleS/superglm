@@ -163,7 +163,9 @@ def run_fixed_monotone_reml(
     # (Wood 2011, JRSS-B 73(1); Wood 2017, GAMs 2nd ed., section 6.2) for
     # Gaussian and Gamma, the deviance form over the penalty nullity for the
     # other estimated-scale families, and the solver's Pearson value for
-    # Tweedie, as that route keeps it.
+    # Tweedie, as that route keeps it.  Where the profile has no interior
+    # optimum (zero penalized deviance) that route refuses the fit, and this
+    # one publishes the solver's Pearson value.
     if not isinstance(model._distribution, Tweedie):
         result = replace(
             result,
@@ -174,6 +176,7 @@ def run_fixed_monotone_reml(
                 lambdas=lambdas,
                 reml_penalties=reml_penalties,
                 pirls_result=result,
+                boundary_phi=result.phi,
             ),
         )
 

@@ -293,6 +293,45 @@ def gaussian_reml_scale_terms(
     return likelihood_size, saturated_log_weight
 
 
+def _gaussian_reml_log_phi(
+    penalized_deviance: float,
+    likelihood_size: float,
+    penalty_nullity: float,
+) -> tuple[float, float]:
+    """``(log phi, n - Mp)`` at the Gaussian REML profile's optimum, ``phi = Dp / (n - Mp)``.
+
+    Raises where the profile has no interior optimum (``Dp <= 0`` or ``n - Mp
+    <= 0``) or where ``phi`` or ``1 / phi`` is not a finite float64.
+    """
+    values = np.asarray([penalized_deviance, likelihood_size, penalty_nullity], dtype=np.float64)
+    if not np.all(np.isfinite(values)) or penalized_deviance <= 0.0:
+        raise ValueError("Gaussian profile inputs must be finite with positive deviance")
+    residual_size = likelihood_size - penalty_nullity
+    if penalty_nullity < 0.0 or residual_size <= 0.0:
+        raise ValueError("Gaussian REML profile requires positive residual likelihood size")
+    log_phi = float(np.log(penalized_deviance) - np.log(residual_size))
+    if abs(log_phi) > float(np.log(np.finfo(np.float64).max)):
+        raise FloatingPointError("Gaussian REML scale profile is not representable")
+    return log_phi, residual_size
+
+
+def gaussian_reml_scale_phi(
+    penalized_deviance: float,
+    likelihood_size: float,
+    penalty_nullity: float,
+) -> float:
+    """The Gaussian REML profile's ``phi``, without the derivative only the REML search reads.
+
+    ``profile_gaussian_reml_scale(...).phi`` bit for bit wherever that
+    returns; it also returns where only ``d(1/phi)/d(Dp) = -(n - Mp) /
+    Dp^2`` overflows, at ``Dp`` below about ``1e-154``.
+    """
+    log_phi, _ = _gaussian_reml_log_phi(
+        float(penalized_deviance), float(likelihood_size), float(penalty_nullity)
+    )
+    return float(np.exp(log_phi))
+
+
 def profile_gaussian_reml_scale(
     penalized_deviance: float,
     likelihood_size: float,
@@ -305,19 +344,13 @@ def profile_gaussian_reml_scale(
     likelihood_size = float(likelihood_size)
     penalty_nullity = float(penalty_nullity)
     saturated_log_weight = float(saturated_log_weight)
-    values = np.asarray(
-        [penalized_deviance, likelihood_size, penalty_nullity, saturated_log_weight],
-        dtype=np.float64,
-    )
-    if not np.all(np.isfinite(values)) or penalized_deviance <= 0.0:
+    if not np.isfinite(saturated_log_weight):
         raise ValueError("Gaussian profile inputs must be finite with positive deviance")
-    residual_size = likelihood_size - penalty_nullity
-    if penalty_nullity < 0.0 or residual_size <= 0.0:
-        raise ValueError("Gaussian REML profile requires positive residual likelihood size")
-    log_phi = float(np.log(penalized_deviance) - np.log(residual_size))
-    log_float_max = float(np.log(np.finfo(np.float64).max))
+    log_phi, residual_size = _gaussian_reml_log_phi(
+        penalized_deviance, likelihood_size, penalty_nullity
+    )
     log_derivative_magnitude = float(np.log(residual_size) - 2.0 * np.log(penalized_deviance))
-    if abs(log_phi) > log_float_max or log_derivative_magnitude > log_float_max:
+    if log_derivative_magnitude > float(np.log(np.finfo(np.float64).max)):
         raise FloatingPointError("Gaussian REML scale profile is not representable")
     phi = float(np.exp(log_phi))
     inverse_phi = float(np.exp(-log_phi))
@@ -862,6 +895,7 @@ def prepare_reml_scale_data(
 __all__ = [
     "GammaScaleProfileData",
     "ProfiledScaleTerm",
+    "gaussian_reml_scale_phi",
     "gaussian_reml_scale_terms",
     "prepare_gamma_reml_scale_data",
     "prepare_reml_scale_data",

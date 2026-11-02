@@ -49,10 +49,10 @@ from superglm.reml.penalty_algebra import (
 from superglm.reml.result import _map_beta_between_bases, _map_centred_state_between_bases
 from superglm.reml.scale import (
     GammaScaleProfileData,
+    gaussian_reml_scale_phi,
     gaussian_reml_scale_terms,
     prepare_gamma_reml_scale_data,
     profile_gamma_reml_scale,
-    profile_gaussian_reml_scale,
 )
 from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
@@ -234,8 +234,16 @@ def compute_profiled_phi(
     pirls_result,
     likelihood_size: float | None = None,
     gamma_scale_data: GammaScaleProfileData | None = None,
+    boundary_phi: float | None = None,
 ) -> float:
-    """Return REML-profiled phi for estimated-scale families."""
+    """Return REML-profiled phi for estimated-scale families.
+
+    The Gaussian value is the profile's closed form without the derivative
+    only the REML search reads (``gaussian_reml_scale_phi``).  Where the
+    Gaussian or Gamma profile has no interior optimum, at zero penalized
+    deviance or no residual likelihood size, ``boundary_phi`` is returned
+    when given; otherwise the profiler's ``ValueError`` is raised.
+    """
     scale_known = getattr(model._distribution, "scale_known", True)
     if scale_known:
         return 1.0
@@ -263,25 +271,27 @@ def compute_profiled_phi(
         )
         weight_semantics = model_weight_semantics(model)
         if isinstance(distribution, Gaussian):
-            saturated_log_weight = 0.0
             if likelihood_size is None:
-                likelihood_size, saturated_log_weight = gaussian_reml_scale_terms(
+                likelihood_size, _ = gaussian_reml_scale_terms(
                     sample_weight,
                     weight_semantics=weight_semantics,
                 )
             assert likelihood_size is not None
-            return profile_gaussian_reml_scale(
-                penalized_deviance,
-                likelihood_size,
-                M_p,
-                saturated_log_weight=saturated_log_weight,
-            ).phi
+            if boundary_phi is not None and (
+                penalized_deviance <= 0.0 or likelihood_size - M_p <= 0.0
+            ):
+                return float(boundary_phi)
+            return gaussian_reml_scale_phi(penalized_deviance, likelihood_size, M_p)
         if gamma_scale_data is None:
             gamma_scale_data = prepare_gamma_reml_scale_data(
                 y,
                 sample_weight,
                 weight_semantics=weight_semantics,
             )
+        if boundary_phi is not None and (
+            penalized_deviance <= 0.0 or 2.0 * gamma_scale_data.sum_weight <= M_p
+        ):
+            return float(boundary_phi)
         return profile_gamma_reml_scale(
             gamma_scale_data,
             penalized_deviance,

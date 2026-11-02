@@ -602,6 +602,54 @@ class TestMonotoneFixedLambdaREML:
             rtol=1e-4,
         )
 
+    def test_fixed_lambda_constrained_fit_publishes_the_reml_scale_where_its_derivative_overflows(
+        self,
+    ):
+        """At a response scale of ``1e-90`` the profiled phi, ``Dp / (n - Mp)``, is
+        representable while ``d(1/phi)/d(Dp) = -(n - Mp) / Dp^2``, which only the REML
+        search reads, overflows.  A Gaussian fit at fixed lambda is linear in ``y``, so
+        its phi is ``1e-180`` times the unit-scale fit's.  Mutation check: published
+        through ``profile_gaussian_reml_scale``, the fit raised FloatingPointError."""
+        x = np.linspace(0, 1, 80)
+        y = 10 * x + 0.2 * np.sin(9 * x) + np.random.default_rng(7).normal(0, 0.3, 80)
+        X = pd.DataFrame({"x": x})
+
+        def fit(response):
+            spec = PSpline(
+                n_knots=6,
+                constraint=Constraint.fit.increasing,
+                lambda_policy=LambdaPolicy.fixed(0.01),
+            )
+            model = SuperGLM(family=Gaussian(), selection_penalty=0, features={"x": spec})
+            model.fit_reml(X, response)
+            return model
+
+        unit = fit(y)
+        tiny = fit(1e-90 * y)
+        log_max = np.log(np.finfo(np.float64).max)
+        assert np.log(len(y)) - 2.0 * np.log(tiny._result.deviance) > log_max
+        assert tiny._result.phi == pytest.approx(1e-180 * unit._result.phi, rel=1e-9)
+
+    def test_fixed_lambda_constrained_fit_at_zero_deviance_publishes_pearson(self):
+        """A constant response fits with zero deviance, where the REML scale profile
+        has no interior optimum and the unconstrained route refuses the fit; this route
+        publishes the solver's Pearson value, zero.  Mutation check: without the
+        boundary value the profiler's positive-deviance guard raised ValueError."""
+        x = np.linspace(0, 1, 80)
+        y = np.full(80, 3.0)
+        X = pd.DataFrame({"x": x})
+        spec = PSpline(
+            n_knots=6,
+            constraint=Constraint.fit.increasing,
+            lambda_policy=LambdaPolicy.fixed(0.01),
+        )
+        model = SuperGLM(family=Gaussian(), selection_penalty=0, features={"x": spec})
+        model.fit_reml(X, y)
+        assert model._result.deviance == 0.0
+        np.testing.assert_allclose(model.predict(X), y, rtol=1e-12)
+        pearson = np.sum((y - model.predict(X)) ** 2) / (len(y) - model._result.effective_df)
+        assert model._result.phi == pearson == 0.0
+
     @pytest.mark.slow
     def test_fit_reml_with_fixed_lambda_policy_ps(self):
         """PSpline monotone with fixed lambda_policy works in fit_reml."""
