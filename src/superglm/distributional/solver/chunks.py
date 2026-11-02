@@ -11,6 +11,7 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._group_matrix._block_queue import BlockTask
 from superglm._group_matrix._group_matrix_algebra import PassTables
 from superglm._group_matrix._group_matrix_core import (
     CategoricalGroupMatrix,
@@ -28,7 +29,6 @@ from superglm._group_matrix._group_matrix_discretized import (
     SupportCompressedSSPGroupMatrix,
 )
 from superglm._group_matrix._group_matrix_range import group_range_matvec, group_row_range
-from superglm.distributional._global_moment_policy import automatic_global_moment_budget
 from superglm.distributional.family import (
     DistributionalFamily,
     ExpectedInformationFamily,
@@ -39,15 +39,12 @@ from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.solver._formation import FormationAccumulator
-from superglm.distributional.solver._global_moments import (
-    GlobalMomentRefusalError,
-    build_global_moment_plan,
-    global_moment_chunk_size,
-)
+from superglm.distributional.solver._ordinary_packing import predictor_panels
 from superglm.distributional.solver.assembly import (
     DenseJointGeometry,
     GroupedGeometryAccumulator,
     _grouped_predictor_plans,
+    pass_table_bytes,
     with_formation,
 )
 from superglm.distributional.solver.derivatives import (
@@ -67,16 +64,20 @@ ChunkSize = int | Literal["auto"]
 CurvatureSource = Literal["observed", "fisher", "nearest_semidefinite"]
 
 # Counts eta, theta, natural/transformed derivatives, masks, family temporaries
-# and the rows each chunk's predictor designs own (:func:`chunk_row_floats`).
+# and the rows the stream's predictor products hold (:func:`chunk_row_floats`).
 # It is a deterministic bound selector, not a claim about exact allocator RSS.
-AUTO_CHUNK_SELECTOR = "distributional-auto-v2"
+AUTO_CHUNK_SELECTOR = "distributional-auto-v3"
 AUTO_CHUNK_MEMORY_BYTES = 8 * 1024 * 1024
 AUTO_CONTRACTION_MEMORY_BYTES = 64 * 1024 * 1024
-# The longest run of rows one contraction block sums. Bin and level sums run
-# sequentially, so their rounding grows with the run; this keeps it at the
-# scale the automatic likelihood chunk sums over on a small layout (about 2**15
-# rows). It does not reproduce the chunk stream's rounding on every layout.
+# The longest run of rows a contraction block of several chunks sums. Bin and
+# level sums run sequentially, so their rounding grows with the run; this keeps
+# it at the scale the automatic likelihood chunk sums over on a small layout
+# (about 2**15 rows). It does not reproduce the chunk stream's rounding on every
+# layout.
 AUTO_CONTRACTION_MAX_ROWS = 2**15
+# The longest automatic chunk of a layout that streams in ranges, which
+# contracts each chunk as it arrives (``layout_chunk_size``).
+AUTO_STREAM_MAX_ROWS = 2**16
 
 # Retained snapshots plus support vectors per pass; refresh uses bounded scratch.
 # No observation-sized predictions are retained here.
@@ -217,43 +218,50 @@ def resolve_chunk_size(
     if width < 0:
         raise ValueError("row_floats must be a non-negative integer")
     if chunk_size == "auto":
-        n_channels = parameters * (parameters + 1) // 2
-        estimated_float_columns = width + 6 * parameters + 4 * n_channels + 4
-        budget_rows = AUTO_CHUNK_MEMORY_BYTES // (
-            np.dtype(np.float64).itemsize * estimated_float_columns
-        )
+        budget_rows = AUTO_CHUNK_MEMORY_BYTES // (8 * _likelihood_row_floats(parameters, width))
         return min(rows, AUTO_CONTRACTION_MAX_ROWS, max(1, int(budget_rows)))
     if isinstance(chunk_size, str):
         raise ValueError("chunk_size string must be 'auto'")
     return min(rows, _positive_integer(chunk_size, name="chunk_size"))
 
 
+def _likelihood_row_floats(k_parameters: int, row_floats: int) -> int:
+    """Floats an automatic chunk holds per row: ``row_floats`` and the likelihood's channels."""
+    n_channels = k_parameters * (k_parameters + 1) // 2
+    return row_floats + 6 * k_parameters + 4 * n_channels + 4
+
+
 def layout_chunk_size(layout: StackedLayout, chunk_size: ChunkSize) -> int:
-    """:func:`resolve_chunk_size` for a layout's rows, predictors and chunk designs."""
-    return resolve_chunk_size(
-        layout.predictors[0].design.n,
-        len(layout.predictors),
-        chunk_size,
-        row_floats=chunk_row_floats(layout) if chunk_size == "auto" else 0,
-    )
+    """:func:`resolve_chunk_size` for a layout's rows, predictors and chunk designs.
+
+    A layout that streams in ranges contracts each chunk as it arrives, so an
+    automatic chunk may instead take the contraction allowance its pass
+    tables leave (``pass_table_bytes``), up to ``AUTO_STREAM_MAX_ROWS`` rows:
+    fewer chunks spread each pass's fixed work over more rows. Its likelihood
+    arrays then hold at most that many rows of the floats
+    :func:`_likelihood_row_floats` counts.
+    """
+    n = layout.predictors[0].design.n
+    k = len(layout.predictors)
+    if chunk_size != "auto":
+        return resolve_chunk_size(n, k, chunk_size)
+    floats = chunk_row_floats(layout)
+    rows = resolve_chunk_size(n, k, "auto", row_floats=floats)
+    if not _streams_in_ranges(layout):
+        return rows
+    panels = predictor_panels(layout)
+    row_bytes = contraction_row_bytes(layout, panels)
+    if row_bytes is None:
+        return rows
+    stream = (AUTO_CONTRACTION_MEMORY_BYTES - pass_table_bytes(layout, panels)) // row_bytes
+    return max(rows, min(n, AUTO_STREAM_MAX_ROWS, stream))
 
 
 def _resolve_fitting_chunk_size(family, layout, likelihood_plan, chunk_size):
-    """Resolve one row bound for all phases of an admitted global fit.
-
-    Larger batches amortize native scheduling and likelihood preparation. The
-    global assembler's shared estimate limits its additional workspace; the
-    caller's likelihood arrays remain separately bounded by the returned rows.
-    Explicit requests and unsupported models retain the ordinary selector.
-    """
+    """One row bound for every phase of a fit, or None for unchunked evaluation."""
     if chunk_size is None:
         return None
-    resolved = layout_chunk_size(layout, chunk_size)
-    if type(chunk_size) is str and chunk_size == "auto":
-        budget = automatic_global_moment_budget(family, likelihood_plan, layout)
-        if budget is not None:
-            return global_moment_chunk_size(layout, byte_budget=budget, minimum_chunk_size=resolved)
-    return resolved
+    return layout_chunk_size(layout, chunk_size)
 
 
 @dataclass(frozen=True)
@@ -526,8 +534,9 @@ def iter_likelihood_chunks(
 ):
     """Yield bounded predictor derivatives and curvature for each row chunk.
 
-    Private global assembly may retain original plans and consume their row
-    ranges directly. The default stream continues to supply owned child plans.
+    ``_range_geometry`` evaluates each chunk from the layout's own designs in
+    row ranges, for an assembly that reads the rows itself. The default
+    stream supplies owned child plans.
     """
     if curvature_source == "fisher" and not isinstance(family, ExpectedInformationFamily):
         raise ValueError("Fisher chunking requires expected_information_natural")
@@ -826,27 +835,32 @@ def _spline_category_row_floats(design) -> int:
     return _SPLINE_CATEGORY_ROW_ARRAYS * sum(terms.values())
 
 
-def contraction_row_bytes(layout: StackedLayout) -> int | None:
+def contraction_row_bytes(layout: StackedLayout, panels=None) -> int | None:
     """Bytes one row adds to a contraction block, or None for an uncounted design.
 
     The buffer holds ``K + K(K+1)/2`` channels. Each group adds its owned row
     arrays, spline-by-category terms as :func:`_spline_category_row_floats`
     counts them and exact splines their CSR slice; a dense group may form a
-    weighted copy of its rows, so it counts its full width.
+    weighted copy of its rows, so it counts its full width. A predictor's
+    panel (``panels``) counts its rows and one weighted copy in place of the
+    groups it packs.
     """
     k_parameters = len(layout.predictors)
     floats = k_parameters + k_parameters * (k_parameters + 1) // 2 + _BLOCK_GATHER_FLOATS
-    for state in layout.predictors:
+    for position, state in enumerate(layout.predictors):
         if type(state.design) is not DesignMatrix or any(
             type(group) not in _COUNTED_GROUPS for group in state.design.group_matrices
         ):
             return None
+        panel = None if panels is None else panels[position]
         floats += _spline_category_row_floats(state.design)
         floats += sum(
             _group_row_floats(group)
-            for group in state.design.group_matrices
-            if type(group) not in _SPLINE_CATEGORY_GROUPS
+            for index, group in enumerate(state.design.group_matrices)
+            if type(group) not in _SPLINE_CATEGORY_GROUPS and (panel is None or index in panel.rest)
         )
+        if panel is not None:
+            floats += 2 * panel.width
     return np.dtype(np.float64).itemsize * floats
 
 
@@ -878,8 +892,65 @@ def _exact_spline_category_chunk_floats(design) -> int:
     return math.ceil((slices + sum(count * own[f] for f, count in terms.items())) / 8)
 
 
+def _streams_in_ranges(layout: StackedLayout) -> bool:
+    """Whether the likelihood stream evaluates every predictor in row ranges, building no designs."""
+    return all(
+        type(state.design) is DesignMatrix
+        and not (
+            state.design._tabmat_vector_candidate and state.design._tabmat_holder.split is not None
+        )
+        for state in layout.predictors
+    )
+
+
+# Groups whose range product (``group_range_matvec``) holds one row vector.
+_RANGE_PRODUCTS = (
+    DenseGroupMatrix,
+    CategoricalGroupMatrix,
+    RandomEffectGroupMatrix,
+    DiscretizedSSPGroupMatrix,
+    SupportCompressedSSPGroupMatrix,
+)
+
+
+def _range_product_floats(group) -> int:
+    """Floats per chunk row one group's range product holds while it is formed.
+
+    A level group also holds its level rows and bins, an exact one its rows'
+    stored basis values; a group the range products decline is copied
+    (``row_subset``) and owns its chunk rows, as :func:`_group_row_floats`
+    counts them.
+    """
+    kind = type(group)
+    if kind in _RANGE_PRODUCTS:
+        return 1
+    if kind in _SPLINE_CATEGORY_GROUPS:
+        return 3
+    if kind is SplineCategoricalGroupMatrix:
+        basis = group.B
+        entry = basis.data.itemsize + basis.indices.itemsize
+        return 3 + math.ceil((entry * _max_row_values(basis) + basis.indptr.itemsize) / 8)
+    return 1 + (_group_row_floats(group, chunk=True) if kind in _COUNTED_GROUPS else group.shape[1])
+
+
 def chunk_row_floats(layout: StackedLayout) -> int:
-    """Floats per row that one likelihood chunk's predictor designs own.
+    """Floats per row the likelihood stream holds beside its channels for one chunk.
+
+    A layout of plain designs streams in row ranges (``_predictor_values``):
+    each predictor holds its running sum and one group's range product at a
+    time. Otherwise each chunk copies its predictor designs
+    (:func:`_chunk_design_floats`).
+    """
+    if not _streams_in_ranges(layout):
+        return _chunk_design_floats(layout)
+    return sum(
+        1 + max(map(_range_product_floats, state.design.group_matrices), default=0)
+        for state in layout.predictors
+    )
+
+
+def _chunk_design_floats(layout: StackedLayout) -> int:
+    """Floats per row that one likelihood chunk's copied predictor designs own.
 
     ``_predictor_chunk`` copies each group's rows (:func:`_row_design`): what
     a contraction block's design owns (:func:`contraction_row_bytes`), with a
@@ -953,182 +1024,25 @@ def assemble_chunked_geometry(
 ) -> DenseJointGeometry:
     """Stream likelihood chunks into one coefficient-space geometry.
 
-    The admitted large mixed-layout scope accumulates support moments across
-    chunks in one global pass, within an additional 64 MiB allowance. A
-    recoverable global numerical refusal releases the partial state before
-    the per-pass contraction replays the complete chunk stream.
+    Binned crossproducts amortise only when each bin-pair weight table is
+    contracted once over many rows (Li and Wood 2020, Algorithm 1). The
+    chunks stream score and packed curvature channels into a bounded buffer,
+    and the group plans contract each block of chunks once; a block covers
+    every row up to the byte and row budgets. A pass of several blocks keeps
+    the by-bin and joint tables its pass tables admit, each block adding its
+    own, and contracts them once, within the allowance the block leaves.
     """
-    global_budget = automatic_global_moment_budget(family, likelihood_plan, layout)
-    if global_budget is not None:
-        built = build_global_moment_plan(
-            layout,
-            byte_budget=global_budget,
-            chunk_size=layout_chunk_size(layout, chunk_size),
-        )
-        if built.plan is not None:
-            result = _try_global_geometry(
-                built.plan,
-                family,
-                layout,
-                y,
-                likelihood_plan,
-                coefficients,
-                penalty=penalty,
-                chunk_size=chunk_size,
-                curvature_source=curvature_source,
-                likelihood_cache=likelihood_cache,
-                _likelihood_sums=_likelihood_sums,
-            )
-            if result is not None:
-                return result
-            if _likelihood_sums is not None:
-                _likelihood_sums[:] = [0.0, 0.0]
-    return _assemble_grouped_pass_geometry(
-        family,
-        layout,
-        y,
-        likelihood_plan,
-        coefficients,
-        penalty=penalty,
-        chunk_size=chunk_size,
-        curvature_source=curvature_source,
-        likelihood_cache=likelihood_cache,
-        _likelihood_sums=_likelihood_sums,
-    )
-
-
-def _try_global_geometry(
-    plan,
-    family,
-    layout,
-    y,
-    likelihood_plan,
-    coefficients,
-    *,
-    penalty,
-    chunk_size,
-    curvature_source,
-    likelihood_cache=None,
-    _likelihood_sums=None,
-) -> DenseJointGeometry | None:
-    """Own one attempt; no exception/stream frame survives into fallback."""
-    iterator = None
-    chunk = None
-    try:
-        plan.reset(coefficients=coefficients, penalty=penalty)
-        formation = FormationAccumulator(layout, range_geometry=hasattr(plan, "add_row_range"))
-        iterator = iter_likelihood_chunks(
-            family,
-            layout,
-            y,
-            likelihood_plan,
-            coefficients,
-            chunk_size=chunk_size,
-            curvature_source=curvature_source,
-            _range_geometry=hasattr(plan, "add_row_range"),
-            **({"_recover_derivative_failure": True} if _likelihood_sums is not None else {}),
-            **({"likelihood_cache": likelihood_cache} if likelihood_cache is not None else {}),
-        )
-        expected_start = 0
-        n = layout.predictors[0].design.n
-        for chunk in iterator:
-            # The built-in iterator supplies contiguous positional ranges. Do
-            # not accept a repeated, skipped or malformed stream as a numerical
-            # refusal that could hide a source/iterator contract violation.
-            rows = chunk.rows
-            if (
-                type(rows) is not RowChunk
-                or rows.start != expected_start
-                or not rows.start < rows.stop <= n
-                or rows.stop - rows.start != len(chunk.score_eta)
-            ):
-                raise ValueError("global moment stream has inconsistent row ranges")
-            if hasattr(plan, "add_row_range") and all(
-                predictor.design is state.design
-                for predictor, state in zip(chunk.plans, layout.predictors, strict=True)
-            ):
-                plan.add_row_range(
-                    chunk.plans, rows.start, rows.stop, chunk.score_eta, chunk.curvature_packed
-                )
-            else:
-                # Preserve streams supplied by callers which own child plans.
-                plan.add_chunk(chunk.plans, chunk.score_eta, chunk.curvature_packed)
-            formation.add(rows.start, rows.stop, chunk.curvature_packed)
-            if _likelihood_sums is not None:
-                _likelihood_sums[0] += float(
-                    np.sum(chunk.optimizing_log_likelihood, dtype=np.float64)
-                )
-                _likelihood_sums[1] += float(
-                    np.sum(chunk.parameter_independent_carrier, dtype=np.float64)
-                )
-            expected_start = rows.stop
-            chunk = None
-        if expected_start != n:
-            raise ValueError("global moment stream does not cover all observations")
-        return with_formation(plan.finish(), formation.finish())
-    except _TrialDerivativeError as exc:
-        if exc.rows is not None and exc.plans is not None and hasattr(plan, "_prepare_chunk"):
-            # A derivative can fail before add_row_range has checked live
-            # indices and metadata. Preserve hard-source priority on this rare
-            # path using the same preparation checks, without updating moments.
-            rows = exc.rows
-            k = len(layout.predictors)
-            zero = np.zeros(())
-            score = np.broadcast_to(zero, (rows.stop - rows.start, k))
-            curvature = np.broadcast_to(zero, (len(score), k * (k + 1) // 2))
-            row_range = (
-                (rows.start, rows.stop)
-                if all(
-                    p.design is s.design for p, s in zip(exc.plans, layout.predictors, strict=True)
-                )
-                else None
-            )
-            try:
-                plan._prepare_chunk(exc.plans, score, curvature, row_range=row_range)
-            except GlobalMomentRefusalError as refusal:
-                if not refusal.recoverable:
-                    raise
-        raise
-    except GlobalMomentRefusalError as exc:
-        if not exc.recoverable:
-            raise
-        return None
-    finally:
-        try:
-            if iterator is not None:
-                close = getattr(iterator, "close", None)
-                if close is not None:
-                    close()
-        finally:
-            chunk = None
-            plan.close()
-
-
-def _assemble_grouped_pass_geometry(
-    family,
-    layout,
-    y,
-    likelihood_plan,
-    coefficients,
-    *,
-    penalty,
-    chunk_size,
-    curvature_source,
-    likelihood_cache=None,
-    _likelihood_sums=None,
-) -> DenseJointGeometry:
-    # Binned crossproducts amortise only when each bin-pair weight table is
-    # contracted once over many rows (Li and Wood 2020, Algorithm 1). The
-    # chunks stream score and packed curvature channels into a bounded buffer,
-    # and the group plans contract each block of chunks once; a block covers
-    # every row up to the byte and row budgets. A pass of several blocks keeps
-    # the by-bin tables its pass tables admit, each block adding its own, and
-    # contracts them once, within the allowance the block leaves.
     n_observations = layout.predictors[0].design.n
     k_parameters = len(layout.predictors)
     chunk_rows = layout_chunk_size(layout, chunk_size)
-    row_bytes = contraction_row_bytes(layout)
+    panels = predictor_panels(layout)
+    row_bytes = contraction_row_bytes(layout, panels)
     block_rows = contraction_block_rows(n_observations, row_bytes, chunk_rows)
+    if block_rows >= n_observations:
+        # A pass of one block forms each group pair's own product, as the
+        # unchunked assembly does; panels, like tables, serve passes of many.
+        panels = (None,) * k_parameters
+    packed = any(panel is not None for panel in panels)
     table_budget = AUTO_CONTRACTION_MEMORY_BYTES - (row_bytes or 0) * block_rows
     tables = PassTables(table_budget) if block_rows < n_observations and table_budget > 0 else None
     # A block of one chunk out of several contracts that chunk's rows as it
@@ -1139,7 +1053,7 @@ def _assemble_grouped_pass_geometry(
     # Channel-major, so each contracted channel is one contiguous row vector.
     curvature = np.empty((k_parameters * (k_parameters + 1) // 2, buffered), dtype=np.float64)
     accumulator = GroupedGeometryAccumulator(
-        layout, penalty=penalty, coefficients=coefficients, tables=tables
+        layout, penalty=penalty, coefficients=coefficients, tables=tables, panels=panels
     )
     # The stream evaluates rows in ranges and builds no chunk designs; each
     # block reads its rows from the layout's own designs.
@@ -1156,16 +1070,38 @@ def _assemble_grouped_pass_geometry(
         summed[1] = peak
 
     def row_plans(start: int, stop: int):
-        if start == 0 and stop == n_observations:
+        if start == 0 and stop == n_observations and not packed:
             return _grouped_predictor_plans(layout)
         indices = np.arange(start, stop, dtype=np.intp)
         indices.setflags(write=False)
         rows = RowChunk(start=start, stop=stop, indices=indices)
-        return tuple(
-            PredictorExecutionPlan(
-                _row_design(state, rows, copy=False), state.intercept_index is not None
-            )
-            for state in layout.predictors
+        plans = []
+        for state, panel in zip(layout.predictors, panels, strict=True):
+            if panel is None:
+                design = _row_design(state, rows, copy=False)
+                plans.append(PredictorExecutionPlan(design, state.intercept_index is not None))
+                continue
+            groups = state.design.group_matrices
+            rest = []
+            for index in panel.rest:
+                child = group_row_range(groups[index], start, stop, copy=False)
+                rest.append(groups[index].row_subset(indices) if child is None else child)
+            design = panel.packed_design(panel.panel(state.design, start, stop), rest, stop - start)
+            plans.append(PredictorExecutionPlan(design, False))
+        return tuple(plans)
+
+    formation_cost = k_parameters * (k_parameters + 1) // 2 + sum(
+        len(state.design.group_matrices) for state in layout.predictors
+    )
+
+    def formation_task(start: int, stop: int, channels: NDArray) -> BlockTask:
+        # The certificate's row majorants, formed beside the block's Gram blocks.
+        return BlockTask(
+            index=0,
+            cost=float((stop - start) * formation_cost),
+            nbytes=8 * (stop - start) * (k_parameters + 2),
+            run=lambda _cache, _profile: formation.add(start, stop, channels),
+            place=lambda _value: None,
         )
 
     def contract(start: int, stop: int) -> None:
@@ -1182,8 +1118,12 @@ def _assemble_grouped_pass_geometry(
             plans = row_plans(piece, end)
             rows = slice(piece - start, end - start)
             # One add per contracted piece, over its contiguous channel rows.
-            formation.add(piece, end, curvature[:, rows].T)
-            accumulator.add_block(plans, score[rows], curvature[:, rows])
+            accumulator.add_block(
+                plans,
+                score[rows],
+                curvature[:, rows],
+                beside=formation_task(piece, end, curvature[:, rows].T),
+            )
 
     iterator = iter_likelihood_chunks(
         family,
@@ -1207,11 +1147,11 @@ def _assemble_grouped_pass_geometry(
                     keep_tables_in_range(
                         length, _channel_peak(chunk.score_eta, chunk.curvature_packed)
                     )
-                formation.add(position, position + length, chunk.curvature_packed)
                 accumulator.add_block(
                     row_plans(position, position + length),
                     chunk.score_eta,
                     chunk.curvature_packed.T,
+                    beside=formation_task(position, position + length, chunk.curvature_packed),
                 )
                 position = block_start = position + length
             else:

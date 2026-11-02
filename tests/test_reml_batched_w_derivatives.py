@@ -707,10 +707,19 @@ def test_derivative_reuse_keeps_custom_and_dtype_fallback(monkeypatch, storage, 
     assert len(builds) == builds_expected
 
 
-def test_derivative_weighted_cache_sharing_mutation_is_detected(monkeypatch):
+def test_derivative_weighted_entries_are_keyed_by_their_weights(monkeypatch):
     kwargs = _correction_fixture(p=3, shift=0, storage="mixed")
-    # Reusing the weighted sparse Gram is wrong even though the design is fixed.
+    # One cache may serve several weight vectors: its weighted entries are keyed by them.
     monkeypatch.setattr(algebra._BlockWeightCache, "for_new_weights", lambda self, *_: self)
+    _assert_poisson_correction(kwargs, w_derivatives.reml_w_correction(**kwargs))
+    # Mutation: a sparse Gram keyed by its group alone is reused for other weights.
+    sparse_gram = algebra._BlockWeightCache.sparse_gram
+    first = {}
+
+    def group_keyed(cache, gm, weights):
+        return sparse_gram(cache, gm, first.setdefault((id(cache), gm), weights))
+
+    monkeypatch.setattr(algebra._BlockWeightCache, "sparse_gram", group_keyed)
     correction = w_derivatives.reml_w_correction(**kwargs)
     with pytest.raises(AssertionError):
         _assert_poisson_correction(kwargs, correction)

@@ -193,6 +193,8 @@ def test_two_chunk_blocks_match_the_literal_mixed_design(monkeypatch):
     problem = _mixed_problem()
     kinds = {type(g).__name__ for g in problem[0].predictors[0].design.group_matrices}
     assert "DiscretizedSplineCategoricalGroupMatrix" in kinds
+    # The location predictor packs its intercept, numeric and two categorical columns.
+    assert chunks.predictor_panels(problem[0])[0].width == 1 + 1 + 2
     monkeypatch.setattr(chunks, "contraction_block_rows", lambda n, row_bytes, rows: 2 * rows)
     moments = []
     for name in ("diagonal_tasks", "cross_tasks"):
@@ -206,6 +208,19 @@ def test_two_chunk_blocks_match_the_literal_mixed_design(monkeypatch):
     _assert_geometry(*_assemble(monkeypatch, problem=problem))
     # Four 8-row chunks: blocks of 16 and 13 rows, three channels each.
     assert moments == [16] * 3 + [13] * 3
+
+
+def test_a_pass_of_one_block_keeps_each_group_pairs_product(monkeypatch):
+    problem = _mixed_problem()
+    k = len(problem[0].predictors)
+    assert chunks.predictor_panels(problem[0])[0] is not None
+    # The 29 rows are one block, which packs no panel: its sums are the group pairs' own.
+    packed, *_ = _assemble(monkeypatch, problem=problem)
+    monkeypatch.setattr(chunks, "predictor_panels", lambda layout: (None,) * k)
+    unpacked, *_ = _assemble(monkeypatch, problem=problem)
+    for name in ("score_data", "data_curvature"):
+        actual, expected = getattr(packed, name), getattr(unpacked, name)
+        assert np.array_equal(actual.view(np.uint64), expected.view(np.uint64)), name
 
 
 def test_blocks_whose_sums_could_leave_the_range_contract_chunk_by_chunk(monkeypatch):
@@ -256,6 +271,47 @@ def test_by_bin_tables_are_contracted_once_per_pass(monkeypatch, chunks_per_bloc
     assert len(contracted) == (4 if kept else 4 * blocks)
 
 
+def _joint_contractions(monkeypatch):
+    contracted, histograms = [], []
+    original_block, original_hist = algebra._joint_block, algebra._disc_disc_2d_hist
+
+    def block(kind, gm_i, gm_j, H, cache):
+        contracted.append(kind)
+        return original_block(kind, gm_i, gm_j, H, cache)
+
+    def hist(*args):
+        histograms.append(len(args[2]))
+        return original_hist(*args)
+
+    monkeypatch.setattr(algebra, "_joint_block", block)
+    monkeypatch.setattr(algebra, "_disc_disc_2d_hist", hist)
+    return contracted, histograms
+
+
+@pytest.mark.parametrize("chunks_per_block", [1, 2])
+@pytest.mark.parametrize("kept", [True, False], ids=["kept", "declined"])
+def test_joint_histograms_are_contracted_once_per_pass(monkeypatch, chunks_per_block, kept):
+    problem = _mixed_problem()
+    monkeypatch.setattr(
+        chunks, "contraction_block_rows", lambda n, row_bytes, rows: chunks_per_block * rows
+    )
+    if not kept:
+        monkeypatch.setattr(chunks, "PassTables", lambda budget: algebra.PassTables(0))
+    contracted, histograms = _joint_contractions(monkeypatch)
+    _assert_geometry(*_assemble(monkeypatch, problem=problem))
+    # Five binned pairs: the location spline with each of the two levels of its
+    # by-category term, and the scale spline with the location spline and with
+    # each level. Kept, each histogram sums every block and is contracted once;
+    # declined, every block forms and contracts its own.
+    blocks = -(-4 // chunks_per_block)
+    if kept:
+        assert sorted(contracted) == ["level"] * 2 + ["level_t"] * 2 + ["supports"]
+        assert histograms == []
+    else:
+        assert contracted == []
+        assert len(histograms) == 5 * blocks
+
+
 def test_pass_tables_are_contracted_before_their_sums_could_leave_the_range(monkeypatch):
     layout, literal, score, curvature = _mixed_problem()
     # One 8-row block's sums stay below 2**1000; two blocks' could pass it.
@@ -276,22 +332,30 @@ def test_an_assembly_projects_each_support_once(monkeypatch):
     original = algebra.PassFactors.projection
 
     def counted(self, B_unique, R_inv):
-        calls.append(1)
-        if (id(B_unique), id(R_inv)) not in self.projections:
-            formed.append((B_unique, R_inv))
+        key = (id(B_unique), id(R_inv))
+        calls.append(key)
+        if key not in self.projections:
+            formed.append(key)
         return original(self, B_unique, R_inv)
 
     monkeypatch.setattr(algebra.PassFactors, "projection", counted)
     _assert_geometry(*_assemble(monkeypatch, problem=problem))
+    groups = [group for state in problem[0].predictors for group in state.design.group_matrices]
     supports = {
         (id(group.B_unique), id(group.R_inv))
-        for state in problem[0].predictors
-        for group in state.design.group_matrices
+        for group in groups
         if type(group) is DiscretizedSSPGroupMatrix
     }
+    # Binned levels project their support too, where their tables contract.
+    levels = {
+        (id(group.B_unique), id(group.R_inv))
+        for group in groups
+        if type(group).__name__ == "DiscretizedSplineCategoricalGroupMatrix"
+    }
     # Each block and channel asks again; each support is formed once.
-    assert len(formed) == len(supports) == 2
-    assert len(calls) >= 4 * len(supports)
+    assert len(supports) == 2
+    assert len(formed) == len(set(formed)) and supports <= set(formed) <= supports | levels
+    assert all(calls.count(key) >= 4 for key in supports)
 
 
 def _arrays(group):
@@ -388,7 +452,7 @@ def test_chunk_design_rows_own_no_more_than_the_chunk_selector_counts():
                     per_row[child.row_idx] += (owned - spread) / child_rows
             else:
                 per_row += owned / length
-    assert np.max(per_row) <= 8 * chunks.chunk_row_floats(layout)
+    assert np.max(per_row) <= 8 * chunks._chunk_design_floats(layout)
     assert {"DenseGroupMatrix", "CategoricalGroupMatrix", "RandomEffectGroupMatrix"} <= kinds
     assert {"DiscretizedSSPGroupMatrix", "DiscretizedSplineCategoricalGroupMatrix"} <= kinds
     assert {"SparseSSPGroupMatrix", "SplineCategoricalGroupMatrix"} <= kinds

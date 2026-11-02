@@ -1,4 +1,4 @@
-"""Automatic global batching belongs to the complete solver context."""
+"""A fit resolves one row bound in its solver context, and every phase uses it."""
 
 import numpy as np
 import pytest
@@ -9,43 +9,25 @@ from .test_distributional_support_predictions import _support_problem
 
 
 @pytest.mark.parametrize("requested", [None, 1, 7, "auto"])
-def test_unadmitted_and_explicit_requests_keep_existing_resolution(monkeypatch, requested):
+def test_requests_resolve_through_the_layout_selector(requested):
     family, layout, _, plan, _ = _support_problem(False)
-    monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: None)
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("unadmitted or explicit request attempted global batch growth")
-
-    monkeypatch.setattr(chunks, "global_moment_chunk_size", forbidden)
     expected = None if requested is None else chunks.layout_chunk_size(layout, requested)
     assert chunks._resolve_fitting_chunk_size(family, layout, plan, requested) == expected
 
 
-def test_explicit_request_stays_explicit_even_when_global_is_admitted(monkeypatch):
-    family, layout, _, plan, _ = _support_problem(False)
-    monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: 64 << 20)
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("explicit request attempted global batch growth")
-
-    monkeypatch.setattr(chunks, "global_moment_chunk_size", forbidden)
-    assert chunks._resolve_fitting_chunk_size(family, layout, plan, 7) == 7
-
-
-def test_admitted_auto_resolution_reaches_every_phase(monkeypatch):
+def test_automatic_resolution_reaches_every_phase(monkeypatch):
     family, layout, response, plan, initial = _support_problem(False)
-    monkeypatch.setattr(chunks, "AUTO_CHUNK_MEMORY_BYTES", 128)
-    monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: 64 << 20)
+    original_selector = chunks.layout_chunk_size
     selections = []
 
-    def select(source, *, byte_budget, minimum_chunk_size):
+    def select(source, chunk_size):
+        if chunk_size != "auto":
+            return original_selector(source, chunk_size)
         assert source is layout
-        assert byte_budget == 64 << 20
-        assert minimum_chunk_size < 17
         selections.append(17)
         return 17
 
-    monkeypatch.setattr(chunks, "global_moment_chunk_size", select)
+    monkeypatch.setattr(chunks, "layout_chunk_size", select)
     penalty = np.eye(layout.n_coefficients)
     kwargs = dict(coefficient_curvature="observed", coefficient_face=None)
     context = solver._validated_context(

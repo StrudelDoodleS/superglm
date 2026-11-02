@@ -20,7 +20,10 @@ blocks "in order of decreasing computational cost".  This module does that:
   covers every split block's extra histogram (``split_bytes``) at once.
   Other blocks always run whole.
 - **Workers.**  ``_parallel.pool_workers``: ``n_jobs`` capped by the task
-  count and by ``max_memory`` over the largest task's working set.  One
+  count, by ``max_memory`` over the largest task's working set, and by the
+  total cost over the largest unsplit task's: no schedule finishes before
+  that task, and LPT on that many workers finishes within twice its cost
+  (Graham 1969), so further workers would only contend for the GIL.  One
   parallelism level: BLAS runs on one thread for the whole assembly
   (``pooled_blas_threads``), and the block kernels are ``nogil`` and never
   ``prange``.
@@ -338,7 +341,10 @@ def run_block_tasks(
     elif total < min_cost:
         workers = 1
     else:
+        largest_unsplit = max((task.cost for task in tasks if not task.split_bytes), default=0.0)
         workers = pool_workers(len(units), max(task.nbytes for task in tasks))
+        if largest_unsplit > 0:
+            workers = min(workers, max(1, math.ceil(total / largest_unsplit)))
 
     # Every split block's parts can run at once, each block holding one more
     # histogram, so the splits share what the fit's retained tables and the

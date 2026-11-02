@@ -78,14 +78,11 @@ class CrossMatrixExecutionPlan:
         signed: bool = True,
         profile: dict | None = None,
         _factors=None,
-        _tables=None,
     ) -> NDArray[np.float64]:
         """Return ``X_left.T @ diag(weights) @ X_right`` in global coordinates.
 
         ``_factors`` (a ``PassFactors``) shares fixed-factor products with the
-        other moments calls of one assembly, and ``_tables`` (a
-        ``PassTables.scope``) keeps the blocks it admits for one contraction
-        per assembly; those blocks are zero here.
+        other moments calls of one assembly.
         """
         if not isinstance(signed, bool):
             raise TypeError("signed must be bool")
@@ -108,7 +105,7 @@ class CrossMatrixExecutionPlan:
             _profile_count(profile, key, 0)
         started = perf_counter() if profile is not None else 0.0
         result = np.zeros(self.shape, dtype=np.float64)
-        cache = _BlockWeightCache(profile, _factors, _tables)
+        cache = _BlockWeightCache(profile, _factors)
         for pair, left_group, right_group in self._pair_entries:
             category = f"{type(left_group).__name__}__{type(right_group).__name__}"
             _profile_count(profile, f"cross_pair_{category}_calls")

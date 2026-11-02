@@ -194,19 +194,16 @@ class PredictorExecutionPlan:
         weights: NDArray,
         *,
         _factors=None,
-        _tables=None,
     ) -> NDArray[np.float64]:
         """Return one symmetric ``X.T @ diag(weights) @ X`` predictor block.
 
-        ``_factors`` and ``_tables`` are the assembly's shared products and
-        pass tables (``MatrixExecutionPlan.moments``).
+        ``_factors`` are the assembly's shared products (``MatrixExecutionPlan.moments``).
         """
         moments = self.design.execution_plan.moments(
             weights,
             include_xtw=self.intercept,
             signed=True,
             _factors=_factors,
-            _tables=_tables,
         )
         return self._diagonal_block(weights, moments.gram, moments.xtw)
 
@@ -243,7 +240,6 @@ class PredictorExecutionPlan:
         weights: NDArray,
         *,
         _factors=None,
-        _tables=None,
     ) -> NDArray[np.float64]:
         """Return one rectangular cross-predictor weighted moment."""
         if not isinstance(right, PredictorExecutionPlan):
@@ -252,7 +248,7 @@ class PredictorExecutionPlan:
             self.design.execution_plan,
             right.design.execution_plan,
         )
-        slopes = cross_plan.cross_moment(weights, signed=True, _factors=_factors, _tables=_tables)
+        slopes = cross_plan.cross_moment(weights, signed=True, _factors=_factors)
         return self._cross_block(right, weights, slopes)
 
     def cross_tasks(self, right: PredictorExecutionPlan, weights: NDArray, *, channel: int):

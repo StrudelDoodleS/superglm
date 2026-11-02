@@ -207,6 +207,12 @@ def _kernel_calls():
             data, indices, indptr, other.data, other.indices, other.indptr, W, 6, 4
         ),
         "_weighted_bincount_2d": lambda: kernels._weighted_bincount_2d(idx1, W, dense, n1),
+        "_rows_weighted_bincount_2d": lambda: kernels._rows_weighted_bincount_2d(
+            rows_a, idx2[rows_a], W, dense, n2
+        ),
+        "_level_weighted_bincount_2d": lambda: kernels._level_weighted_bincount_2d(
+            other_codes, W, dense, levels
+        ),
         "_support_weighted_bincount_2d": lambda: (
             kernels._support_weighted_bincount_2d(
                 out := np.zeros((n2, 3)), idx2, W, support, idx1, 1
@@ -217,6 +223,15 @@ def _kernel_calls():
             data, indices, indptr, 6, idx1, W, n1
         ),
         "_disc_disc_2d_hist": lambda: kernels._disc_disc_2d_hist(idx1, idx2, W, n1, n2),
+        "_disc_disc_2d_hist_add": lambda: (
+            kernels._disc_disc_2d_hist_add(out := np.zeros((n1, n2)), idx1, idx2, W) or out
+        ),
+        "_rows_disc_disc_2d_hist_add": lambda: (
+            kernels._rows_disc_disc_2d_hist_add(
+                out := np.zeros((n1, n2)), rows_b, idx1, idx2[rows_b], W
+            )
+            or out
+        ),
         "_disc_disc_2d_hist_channels": lambda: kernels._disc_disc_2d_hist_channels(
             idx1, idx2, idx2, W, table2, n1, n2
         ),
@@ -365,7 +380,6 @@ def test_categorical_blocks_sum_their_levels_without_np_bincount(monkeypatch):
 def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
     from superglm._group_matrix import _group_matrix_support
     from superglm.distributional.kernels import _negative_binomial_numba, _tweedie_numba
-    from superglm.distributional.solver import _batched_moments
     from superglm.features import interaction
     from superglm.reml import _leverage_rows
 
@@ -378,7 +392,6 @@ def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
         + _group_matrix_support._POOLED_SUPPORT_KERNELS
         + _tweedie_numba._POOLED_ROW_KERNELS
         + _negative_binomial_numba._POOLED_ROW_KERNELS
-        + _batched_moments._POOLED_TARGET_KERNELS
     )
     pooled = {id(kernel) for kernel in pooled_kernels}
     for kernel in pooled_kernels:
@@ -539,6 +552,40 @@ def test_a_pooled_worker_holds_no_finished_block():
         queue.run_block_tasks(tasks, Cache(), None)
     assert values == {i: i for i in range(12)}
     assert max(held) <= 2
+
+
+def test_workers_stop_at_the_total_over_the_largest_unsplit_block(monkeypatch):
+    """No schedule ends before its largest unsplit block, and LPT on ``ceil(total / largest)``
+    workers ends within twice it (Graham 1969), so more workers only contend."""
+
+    def tasks(split_largest: bool) -> list[BlockTask]:
+        costs = (8, 1, 1, 1, 1)
+        return [
+            BlockTask(
+                index,
+                cost * queue._TINY_COST,
+                1,
+                lambda cache, profile: None,
+                lambda value: None,
+                split_bytes=1 if split_largest and index == 0 else 0,
+            )
+            for index, cost in enumerate(costs)
+        ]
+
+    class Cache:
+        _batch = None
+        _profile = None
+
+        def worker_view(self, shared, profile, work_queue):
+            return self
+
+    monkeypatch.setattr(parallel, "pool_workers", lambda n_units, task_bytes: 8)
+    for split_largest, expected in ((False, 2), (True, 8)):
+        profile: dict = {}
+        with block_queue_config(min_cost=0):
+            queue.run_block_tasks(tasks(split_largest), Cache(), profile)
+        # Twelve units of work: a whole 8 caps two workers; split, the largest whole is 1.
+        assert profile["block_pool_workers"] == expected
 
 
 def test_largest_first_with_tiny_tasks_batched_and_the_oversized_pair_split(monkeypatch):

@@ -24,8 +24,8 @@ overrides both for one context.
 
 The pooled kernels are the data-rank factor's TSQR leaves, the Gram's blocks,
 the lookup tables' sweeps, block products and leverages, the solved-row stop
-passes, the interaction terms' builds, and SuperLSS's row kernels and batched
-global moments.  :func:`pooled_map` serves the stop passes and interaction
+passes, the interaction terms' builds, and SuperLSS's row kernels.
+:func:`pooled_map` serves the stop passes and interaction
 builds; the SuperLSS kernels run on :func:`pooled_for` (through
 :func:`pooled_row_blocks` for rows), whose tasks are too short for an
 executor's dispatch; the others start executors of their own, sized by

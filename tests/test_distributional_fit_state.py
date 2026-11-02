@@ -308,6 +308,7 @@ def test_refit_inherits_requested_policy_but_recomputes_auto_chunk_execution(
     monkeypatch.setattr(model_module, "fit_dense_fixed_lambda", record_fit)
     monkeypatch.setattr(chunking, "evaluate_chunked_log_likelihood", count_chunked)
     monkeypatch.setattr(chunking, "AUTO_CHUNK_MEMORY_BYTES", 256)
+    monkeypatch.setattr(chunking, "AUTO_STREAM_MAX_ROWS", 1)
 
     refit_dense_distributional(model, new_frame, new_response)
     current = model.fit_state

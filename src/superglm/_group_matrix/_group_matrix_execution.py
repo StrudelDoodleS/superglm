@@ -248,12 +248,12 @@ class MatrixExecutionPlan:
         target[columns] = np.asarray(values, dtype=np.float64)
 
     def _compressed_signed_gram(
-        self, weights: NDArray, *, profile: dict | None, _factors=None, _tables=None
+        self, weights: NDArray, *, profile: dict | None, _factors=None
     ) -> NDArray:
         """Return a signed Gram without the general weighted-moment dispatch."""
         gram = np.zeros((self.p, self.p), dtype=np.float64)
         tasks = self._signed_gram_tasks(weights, gram)
-        run_block_tasks(tasks, _BlockWeightCache(profile, _factors, _tables), profile)
+        run_block_tasks(tasks, _BlockWeightCache(profile, _factors), profile)
         return gram
 
     def _signed_gram_tasks(self, weights: NDArray, gram: NDArray, channel=None) -> list[BlockTask]:
@@ -334,14 +334,11 @@ class MatrixExecutionPlan:
         signed: bool = False,
         profile: dict | None = None,
         _factors=None,
-        _tables=None,
     ) -> WeightedMoments:
         """Validate inputs and return weighted products through this plan.
 
         ``_factors`` (a ``PassFactors``) shares fixed-factor products with the
-        other moments calls of one assembly, and ``_tables`` (a
-        ``PassTables.scope``) keeps the blocks it admits for one contraction
-        per assembly; those blocks are zero here.
+        other moments calls of one assembly.
         """
         return self._moments_impl(
             weights,
@@ -351,7 +348,6 @@ class MatrixExecutionPlan:
             profile=profile,
             validate_inputs=True,
             _factors=_factors,
-            _tables=_tables,
         )
 
     def _fixed_support_cache(self) -> _BlockWeightCache | None:
@@ -619,7 +615,6 @@ class MatrixExecutionPlan:
         validate_inputs: bool,
         _cache: _BlockWeightCache | None = None,
         _factors=None,
-        _tables=None,
     ) -> WeightedMoments:
         """Return a Gram and transpose products through one hybrid plan.
 
@@ -645,16 +640,14 @@ class MatrixExecutionPlan:
             and not self._ordinary_indices
         ):
             return WeightedMoments(
-                gram=self._compressed_signed_gram(
-                    W, profile=profile, _factors=_factors, _tables=_tables
-                ),
+                gram=self._compressed_signed_gram(W, profile=profile, _factors=_factors),
                 xtw=None,
                 xt_rhs=(),
             )
 
         gram, xtw, xt_rhs, tasks = self._moment_tasks(W, rhs_vectors, include_xtw, signed, profile)
         if tasks:
-            cache = _BlockWeightCache(profile, _factors, _tables) if _cache is None else _cache
+            cache = _BlockWeightCache(profile, _factors) if _cache is None else _cache
             run_block_tasks(tasks, cache, profile)
         return WeightedMoments(gram=gram, xtw=xtw, xt_rhs=tuple(xt_rhs))
 

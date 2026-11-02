@@ -7,15 +7,18 @@ from dataclasses import dataclass, field
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._group_matrix._block_queue import run_block_tasks
+from superglm._group_matrix._block_queue import BlockTask, run_block_tasks
 from superglm._group_matrix._group_matrix_algebra import (
     PassFactors,
     PassTables,
     _BlockWeightCache,
+    _pass_table,
 )
+from superglm._group_matrix._group_matrix_core import OrdinaryPanelGroupMatrix
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.solver._formation import CurvatureFormation, dense_formation
+from superglm.distributional.solver._ordinary_packing import PredictorPanel
 from superglm.distributional.solver.packing import packed_pairs
 from superglm.solvers.rank import _symmetric_part
 
@@ -281,6 +284,36 @@ def _grouped_predictor_plans(
     return tuple(plans)
 
 
+def _accumulation_groups(plan: PredictorExecutionPlan, panel: PredictorPanel | None) -> list:
+    """A predictor's groups in accumulation order: its panel (a placeholder) first, if any."""
+    if panel is None:
+        return list(plan.design.group_matrices)
+    placeholder = OrdinaryPanelGroupMatrix(
+        np.broadcast_to(np.float64(0.0), (plan.design.n, panel.width))
+    )
+    return [placeholder, *(plan.design.group_matrices[i] for i in panel.rest)]
+
+
+def _channel_group_pairs(pairs, groups):
+    """``((channel, i, j), X_i, X_j)`` for every group pair of every curvature channel."""
+    for channel, (left, right) in enumerate(pairs):
+        for i, gm_i in enumerate(groups[left]):
+            for j, gm_j in enumerate(groups[right]):
+                if left != right or i < j:
+                    yield (channel, i, j), gm_i, gm_j
+
+
+def pass_table_bytes(layout: StackedLayout, panels: tuple[PredictorPanel | None, ...]) -> int:
+    """The bytes a chunked assembly's pass tables keep when every pair's table is admitted."""
+    plans = _grouped_predictor_plans(layout)
+    groups = [_accumulation_groups(plan, panel) for plan, panel in zip(plans, panels, strict=True)]
+    return sum(
+        table[0]
+        for _key, gm_i, gm_j in _channel_group_pairs(packed_pairs(len(plans)), groups)
+        if (table := _pass_table(gm_i, gm_j)) is not None
+    )
+
+
 class GroupedGeometryAccumulator:
     """Accumulate row-block score and curvature into coefficient space.
 
@@ -299,6 +332,7 @@ class GroupedGeometryAccumulator:
         penalty: NDArray,
         coefficients: NDArray,
         tables: PassTables | None = None,
+        panels: tuple[PredictorPanel | None, ...] | None = None,
     ) -> None:
         reference_plans = _grouped_predictor_plans(layout)
         self._layout = layout
@@ -316,24 +350,38 @@ class GroupedGeometryAccumulator:
         self._finished = False
         self._factors: PassFactors | None = PassFactors()
         self._tables = tables
-        if tables is not None:
-            groups = [plan.design.group_matrices for plan in reference_plans]
-            for channel, (left, right) in enumerate(self._pairs):
-                for i, gm_i in enumerate(groups[left]):
-                    for j, gm_j in enumerate(groups[right]):
-                        if left != right or i < j:
-                            tables.reserve((channel, i, j), gm_i, gm_j)
-        # Each predictor's group columns in the global layout, for pass tables.
-        self._group_columns = tuple(
-            tuple(
-                slice(offset + span.start, offset + span.end)
-                for span in plan.design.execution_plan.group_spans
-            )
-            for offset, plan in (
-                (state.coefficient_slice.start + int(plan.intercept), plan)
-                for state, plan in zip(layout.predictors, reference_plans, strict=True)
-            )
+        # A predictor with a panel (``predictor_panels``) is accumulated in its
+        # packed column order, the panel's columns first, and ``finish``
+        # permutes the result back: ``order[c]`` is packed column c's coefficient.
+        groups, columns, order = [], [], []
+        for state, plan, panel in zip(
+            layout.predictors,
+            reference_plans,
+            (None,) * len(reference_plans) if panels is None else panels,
+            strict=True,
+        ):
+            start = state.coefficient_slice.start
+            design_groups = _accumulation_groups(plan, panel)
+            if panel is None:
+                cursor = start + int(plan.intercept)
+                order.extend(range(start, state.coefficient_slice.stop))
+            else:
+                cursor = start
+                order.extend(start + panel.order)
+            spans = []
+            for group in design_groups:
+                spans.append(slice(cursor, cursor + group.shape[1]))
+                cursor += group.shape[1]
+            groups.append(design_groups)
+            columns.append(tuple(spans))
+        # Each predictor's group columns in accumulation order, for pass tables.
+        self._group_columns = tuple(columns)
+        self._order = (
+            None if panels is None or all(p is None for p in panels) else np.asarray(order)
         )
+        if tables is not None:
+            for key, gm_i, gm_j in _channel_group_pairs(self._pairs, groups):
+                tables.reserve(key, gm_i, gm_j)
 
     def _validated_plans(
         self,
@@ -360,16 +408,29 @@ class GroupedGeometryAccumulator:
     ) -> None:
         """Accumulate all predictor score channels for one row block."""
         plan_tuple = self._validated_plans(plans)
-        n_observations = plan_tuple[0].design.n
+        self._place_score(
+            self._score_products(plan_tuple, self._validated_score(plan_tuple, score_eta))
+        )
+
+    def _validated_score(self, plan_tuple, score_eta: NDArray) -> NDArray:
         try:
             score = np.asarray(score_eta, dtype=np.float64)
         except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError("chunk score must be a finite row-by-parameter array") from exc
-        expected = (n_observations, len(plan_tuple))
+        expected = (plan_tuple[0].design.n, len(plan_tuple))
         if score.shape != expected or not np.all(np.isfinite(score)):
             raise ValueError(f"chunk score must be finite with shape {expected}")
-        for state, plan in zip(self._layout.predictors, plan_tuple, strict=True):
-            self._score[state.coefficient_slice] += plan.score(score[:, state.parameter_index])
+        return score
+
+    def _score_products(self, plan_tuple, score: NDArray) -> list[NDArray]:
+        return [
+            plan.score(score[:, state.parameter_index])
+            for state, plan in zip(self._layout.predictors, plan_tuple, strict=True)
+        ]
+
+    def _place_score(self, products: list[NDArray]) -> None:
+        for state, product in zip(self._layout.predictors, products, strict=True):
+            self._score[state.coefficient_slice] += product
         self._score_chunks += 1
 
     def add_curvature_channel(
@@ -394,15 +455,14 @@ class GroupedGeometryAccumulator:
         if weight_values.shape != expected or not np.all(np.isfinite(weight_values)):
             raise ValueError(f"chunk curvature channel must be finite with shape {expected}")
 
+        if self._tables is not None:
+            raise RuntimeError("an accumulator with pass tables adds whole blocks (add_block)")
         left_index, right_index = self._pairs[channel_index]
-        tables = None if self._tables is None else self._tables.scope(channel_index)
         if left_index == right_index:
-            block = plan_tuple[left_index].diagonal_moment(
-                weight_values, _factors=self._factors, _tables=tables
-            )
+            block = plan_tuple[left_index].diagonal_moment(weight_values, _factors=self._factors)
         else:
             block = plan_tuple[left_index].cross_moment(
-                plan_tuple[right_index], weight_values, _factors=self._factors, _tables=tables
+                plan_tuple[right_index], weight_values, _factors=self._factors
             )
         self._place_channel(channel_index, block)
 
@@ -411,16 +471,20 @@ class GroupedGeometryAccumulator:
         plans: tuple[PredictorExecutionPlan, ...],
         score_eta: NDArray,
         curvature: NDArray,
+        *,
+        beside: BlockTask | None = None,
     ) -> None:
         """Accumulate one row block's score and every curvature channel.
 
         ``curvature`` holds one row vector per canonical packed channel. The
-        group-pair blocks of every channel run as one queue
-        (``run_block_tasks``), on the pool when their work warrants it; each
-        channel's block is the one :meth:`add_curvature_channel` adds.
+        group-pair blocks of every channel, the block's score products and
+        ``beside`` (another product of the caller's over the block's rows) run
+        as one queue (``run_block_tasks``), on the pool when their work
+        warrants it; each channel's block is the one
+        :meth:`add_curvature_channel` adds.
         """
-        self.add_score(plans, score_eta)
         plan_tuple = self._validated_plans(plans)
+        score = self._validated_score(plan_tuple, score_eta)
         channels = np.asarray(curvature, dtype=np.float64)
         expected = (len(self._pairs), plan_tuple[0].design.n)
         if channels.shape != expected or not np.all(np.isfinite(channels)):
@@ -441,7 +505,21 @@ class GroupedGeometryAccumulator:
                 task.index = len(tasks)
                 tasks.append(task)
             finishers.append(finish)
-        add_table = None if self._tables is None else self._tables.add_by_bin
+        n_rows = plan_tuple[0].design.n
+        side = [] if beside is None else [beside]
+        side.append(
+            BlockTask(
+                index=0,
+                cost=float(n_rows * sum(self._expected_widths)),
+                nbytes=8 * n_rows,
+                run=lambda _cache, _profile: self._score_products(plan_tuple, score),
+                place=self._place_score,
+            )
+        )
+        for task in side:
+            task.index = len(tasks)
+            tasks.append(task)
+        add_table = None if self._tables is None else self._tables.add
         run_block_tasks(tasks, _BlockWeightCache(None, self._factors, add_table), None)
         for channel_index, finish in enumerate(finishers):
             self._place_channel(channel_index, finish())
@@ -476,6 +554,12 @@ class GroupedGeometryAccumulator:
         self.release_tables()
         self._finished = True
         self._factors = None
+        if self._order is not None:
+            score = np.empty_like(self._score)
+            score[self._order] = self._score
+            curvature = np.empty_like(self._curvature)
+            curvature[np.ix_(self._order, self._order)] = self._curvature
+            self._score, self._curvature = score, curvature
         if not np.array_equal(self._curvature, self._curvature.T):
             raise RuntimeError("grouped data curvature lost exact symmetry")
 

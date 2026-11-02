@@ -3,7 +3,6 @@
 import math
 import weakref
 from dataclasses import replace
-from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -20,7 +19,6 @@ from superglm.distributional.predictor import Predictor, compile_predictors
 from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.solver import chunks
 from superglm.distributional.solver import solver as solver_api
-from superglm.distributional.solver._global_moments import GlobalMomentRefusalError
 from superglm.distributional.weights import UnsupportedLikelihoodContractError
 from superglm.features import Numeric, Spline
 from superglm.group_matrix import (
@@ -138,55 +136,6 @@ def _combined(context, coefficients, **kwargs):
     )
 
 
-@pytest.mark.parametrize("failure", ["add", "finish"])
-def test_partial_global_fallback_resets_likelihood_sums_and_closes_workspace(monkeypatch, failure):
-    context, coefficients = _context()
-    monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: None)
-    expected_geometry, expected_sums = _combined(context, coefficients)
-    events, refs = [], []
-
-    class Plan:
-        def reset(self, **kwargs):
-            self.buffer = np.empty((4, 4))
-            refs.append(weakref.ref(self.buffer))
-            self.count = 0
-
-        def add_chunk(self, *args):
-            self.count += 1
-            if self.count == 2 and failure == "add":
-                raise GlobalMomentRefusalError("numerical refusal", recoverable=True)
-
-        def finish(self):
-            raise GlobalMomentRefusalError("numerical refusal", recoverable=True)
-
-        def close(self):
-            self.buffer = None
-            events.append("closed")
-
-    original = chunks._assemble_grouped_pass_geometry
-
-    def replay(*args, **kwargs):
-        assert events == ["closed"]
-        assert all(ref() is None for ref in refs)
-        assert kwargs["_likelihood_sums"] == [0.0, 0.0]
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: 64 << 20)
-    monkeypatch.setattr(
-        chunks, "build_global_moment_plan", lambda *args, **kwargs: SimpleNamespace(plan=Plan())
-    )
-    monkeypatch.setattr(chunks, "_assemble_grouped_pass_geometry", replay)
-    geometry, sums = _combined(context, coefficients)
-    # Exact on purpose: the replay runs the same per-pass assembly, in the same order, as the
-    # run it is compared with. What the test guards is a likelihood sum that was not reset, an
-    # error of a whole chunk, so no rounding allowance is needed or wanted.
-    assert sums == expected_sums
-    np.testing.assert_allclose(geometry.score_data, expected_geometry.score_data, rtol=0, atol=0)
-    np.testing.assert_allclose(
-        geometry.data_curvature, expected_geometry.data_curvature, rtol=0, atol=0
-    )
-
-
 def test_derivative_failure_releases_partial_trial_before_value_retry(monkeypatch):
     context, coefficients = _context()
     initial, geometry, config = _run(context, coefficients)
@@ -221,17 +170,12 @@ def test_derivative_failure_releases_the_contraction_buffer_before_value_retry(m
     context, coefficients = _context()
     initial, geometry, config = _run(context, coefficients)
     original = type(context.family).evaluate_natural
-    add_channel = chunks.GroupedGeometryAccumulator.add_curvature_channel
-    add_score = chunks.GroupedGeometryAccumulator.add_score
+    add_block = chunks.GroupedGeometryAccumulator.add_block
     orders, buffers = [], []
 
-    def channel(self, plans, channel_index, weights):
-        buffers.append(weakref.ref(weights.base))
-        return add_channel(self, plans, channel_index, weights)
-
-    def score(self, plans, score_eta):
-        buffers.append(weakref.ref(score_eta.base))
-        return add_score(self, plans, score_eta)
+    def block(self, plans, score_eta, curvature, **kwargs):
+        buffers.extend((weakref.ref(score_eta.base), weakref.ref(curvature.base)))
+        return add_block(self, plans, score_eta, curvature, **kwargs)
 
     def evaluate(self, *args, **kwargs):
         order = kwargs.get("derivative_order", 2)
@@ -245,8 +189,7 @@ def test_derivative_failure_releases_the_contraction_buffer_before_value_retry(m
     # Blocks one row longer than a chunk buffer one chunk each, so the first block
     # is contracted from the buffer before the third chunk fails.
     monkeypatch.setattr(chunks, "contraction_block_rows", lambda n, row_bytes, rows: rows + 1)
-    monkeypatch.setattr(chunks.GroupedGeometryAccumulator, "add_curvature_channel", channel)
-    monkeypatch.setattr(chunks.GroupedGeometryAccumulator, "add_score", score)
+    monkeypatch.setattr(chunks.GroupedGeometryAccumulator, "add_block", block)
     monkeypatch.setattr(type(context.family), "evaluate_natural", evaluate)
     solver_api._run_iterations(
         context, initial, config, initial_geometry=geometry, stop_policy="ordinary"
@@ -460,8 +403,7 @@ def test_gamma_unrepresentable_derivative_keeps_its_finite_value_screen():
     assert np.isfinite(screened.penalized_optimizing_log_likelihood)
 
 
-@pytest.mark.parametrize("global_moments", [False, True])
-def test_fused_gaussian_cancellation_obeys_independent_backward_bounds(monkeypatch, global_moments):
+def test_fused_gaussian_cancellation_obeys_independent_backward_bounds():
     context, coefficients = _context()
     location, scale = context.layout.predictors
     coefficients[scale.coefficient_slice] = 0
@@ -471,8 +413,6 @@ def test_fused_gaussian_cancellation_obeys_independent_backward_bounds(monkeypat
     penalty = context.penalty.copy()
     penalty[0, 0] = 0
     context = replace(context, layout=layout, penalty=penalty)
-    if global_moments:
-        monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: 64 << 20)
     matrices = _literal_design(layout)
     # Correctly rounded [X, offset] @ [beta; 1] for each predictor.
     eta = np.column_stack(
