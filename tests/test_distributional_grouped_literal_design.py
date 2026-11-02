@@ -18,12 +18,9 @@ from ._distributional_weights import resolved_prior
 from .test_distributional_fused_trial import _literal_design
 
 
-def _problem(*, mirror=False):
+def _problem():
     n = 29
     x = np.linspace(-1.1, 0.8, n)
-    if mirror:
-        # Rows 14-27 repeat rows 0-13, so opposite scores on the halves cancel.
-        x[14:28] = x[:14]
     z = np.cos(np.arange(n) * 0.3)
     category = np.resize(["a", "b", "c"], n)
     family = GaussianLS()
@@ -201,23 +198,6 @@ def test_two_chunk_blocks_match_the_literal_mixed_design(monkeypatch):
     assert moments == [16] * 3 + [13] * 3
 
 
-def test_cancelling_scores_beyond_the_float_range_aggregate_finitely(monkeypatch):
-    layout, literal, score, curvature = _problem(mirror=True)
-    n = len(score)
-    # A category level's five same-sign rows sum past float64's range in a
-    # sequential bincount; the true scores are at most one row's value.
-    score[:, 0] = 0.0
-    score[:14, 0] = 2.0**1022
-    score[14:28, 0] = -(2.0**1022)
-    result, *_ = _assemble(monkeypatch, problem=(layout, literal, score, curvature))
-    assert np.all(np.isfinite(result.score_data))
-    scaled = 2.0**-30
-    expected = literal[0].T @ (score[:, 0] * scaled)
-    tolerance = 32 * n * np.finfo(float).eps * (np.abs(literal[0]).T @ np.abs(score[:, 0] * scaled))
-    actual = result.score_data[layout.predictors[0].coefficient_slice] * scaled
-    assert np.all(np.abs(actual - expected) <= tolerance), (actual, expected, tolerance)
-
-
 def _arrays(group):
     names = {name for kind in type(group).__mro__ for name in getattr(kind, "__slots__", ())}
     names |= set(getattr(group, "__dict__", {}))
@@ -262,16 +242,3 @@ def test_block_design_rows_own_no_more_than_the_budget_counts():
     assert {"DiscretizedSSPGroupMatrix", "DiscretizedSplineCategoricalGroupMatrix"} <= kinds
     # Two spline terms on one categorical, two non-base levels each.
     assert level_groups == 4
-
-
-def test_scaled_curvature_keeps_weights_that_would_turn_subnormal(monkeypatch):
-    layout, literal, score, curvature = _problem()
-    level_b = literal[0][:, 3] == 1
-    # One huge weight forces scaling; level b's rows carry only tiny weights.
-    curvature[:, 0] = 2.0**-1050
-    curvature[0, 0] = 2.0**1022
-    assert not level_b[0]
-    result, *_ = _assemble(monkeypatch, problem=(layout, literal, score, curvature))
-    b = layout.predictors[0].coefficient_slice.start + 3
-    expected = np.count_nonzero(level_b) * 2.0**-1050
-    np.testing.assert_allclose(result.data_curvature[b, b], expected, rtol=1e-12, atol=0)

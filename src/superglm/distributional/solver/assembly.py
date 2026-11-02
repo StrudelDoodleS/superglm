@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -12,41 +11,6 @@ from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.solver.packing import packed_pairs
 from superglm.solvers.rank import _symmetric_part
-
-# A row sum of values below 2**_AGGREGATE_EXPONENT stays finite after the
-# design multiplies it by entries up to about 2**23.
-_AGGREGATE_EXPONENT = 1000
-
-
-def _aggregate_exponent(values: NDArray[np.float64]) -> int:
-    """Power-of-two exponent that keeps a row sum of ``values`` finite.
-
-    Zero unless ``len(values) * max|values|`` could leave float64's range.
-    """
-    if not len(values):
-        return 0
-    peak = max(float(np.max(values)), -float(np.min(values)))
-    if peak == 0.0:
-        return 0
-    return max(0, math.frexp(peak)[1] + math.frexp(len(values))[1] - _AGGREGATE_EXPONENT)
-
-
-def _range_safe(contract, values: NDArray[np.float64]):
-    """``contract(values)`` for a linear contraction whose row sums could overflow.
-
-    Entries that stay normal after scaling by ``2**-e`` are scaled exactly and
-    contracted, and the result is scaled back once. Entries that would turn
-    subnormal are contracted unscaled; their sums stay far inside the range.
-    In range (``e == 0``) this is ``contract(values)``.
-    """
-    exponent = _aggregate_exponent(values)
-    if not exponent:
-        return contract(values)
-    small = np.abs(values) < np.ldexp(1.0, exponent - 1022)
-    result = np.ldexp(contract(np.ldexp(np.where(small, 0.0, values), -exponent)), exponent)
-    if np.any(small & (values != 0.0)):
-        result = result + contract(np.where(small, values, 0.0))
-    return result
 
 
 def _readonly(values: NDArray) -> NDArray[np.float64]:
@@ -352,9 +316,7 @@ class GroupedGeometryAccumulator:
         if score.shape != expected or not np.all(np.isfinite(score)):
             raise ValueError(f"chunk score must be finite with shape {expected}")
         for state, plan in zip(self._layout.predictors, plan_tuple, strict=True):
-            self._score[state.coefficient_slice] += _range_safe(
-                plan.score, score[:, state.parameter_index]
-            )
+            self._score[state.coefficient_slice] += plan.score(score[:, state.parameter_index])
         self._score_chunks += 1
 
     def add_curvature_channel(
@@ -383,12 +345,9 @@ class GroupedGeometryAccumulator:
         left_state = self._layout.predictors[left_index]
         right_state = self._layout.predictors[right_index]
         if left_index == right_index:
-            block = _range_safe(plan_tuple[left_index].diagonal_moment, weight_values)
+            block = plan_tuple[left_index].diagonal_moment(weight_values)
         else:
-            block = _range_safe(
-                lambda values: plan_tuple[left_index].cross_moment(plan_tuple[right_index], values),
-                weight_values,
-            )
+            block = plan_tuple[left_index].cross_moment(plan_tuple[right_index], weight_values)
         self._curvature[left_state.coefficient_slice, right_state.coefficient_slice] += block
         if left_index != right_index:
             self._curvature[right_state.coefficient_slice, left_state.coefficient_slice] += block.T

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import warnings
 import weakref
 from dataclasses import dataclass
 
@@ -10,7 +11,7 @@ import pytest
 
 import superglm.distributional.family as family_contracts
 import superglm.distributional.solver.chunks as chunking
-from superglm import SuperLSS
+from superglm import SuperLSS, cat, term
 from superglm._frame import as_eager_frame
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.families.negative_binomial import (
@@ -355,13 +356,44 @@ def test_row_chunk_iterator_covers_rows_once_and_validates_sizes(
         tuple(chunking.iter_row_chunks(8, True))
 
 
-def test_contraction_blocks_hold_whole_chunks_within_the_buffer_budget() -> None:
+def test_contraction_blocks_hold_whole_chunks_within_the_byte_and_row_budgets() -> None:
+    # A wide row: the byte budget binds.
+    row_bytes = 8 * 4_000
+    rows = chunking.contraction_block_rows(10**9, row_bytes, 100)
+    assert rows % 100 == 0
+    assert rows * row_bytes <= chunking.AUTO_CONTRACTION_MEMORY_BYTES < (rows + 100) * row_bytes
+    # A narrow row: the row budget binds.
     row_bytes = 8 * 40
     rows = chunking.contraction_block_rows(10**9, row_bytes, 4_000)
     assert rows % 4_000 == 0
-    assert rows * row_bytes <= chunking.AUTO_CONTRACTION_MEMORY_BYTES < (rows + 4_000) * row_bytes
+    assert rows <= chunking.AUTO_CONTRACTION_MAX_ROWS < rows + 4_000
     assert chunking.contraction_block_rows(100, row_bytes, 100) == 100
     assert chunking.contraction_block_rows(10**9, row_bytes, 10**8) == 10**8
+
+
+@pytest.mark.parametrize("seed", [5, 7])
+def test_long_blocks_keep_an_exact_alias_rank_deficient(seed) -> None:
+    # The numeric column equals level b's indicator, so the location has rank 1.
+    # Its Gram entries come from a dense product and from level sums; summed over
+    # one long block, their rounding differs by more than the rank cut.
+    n = 200_001
+    b = np.arange(n) % 2 == 1
+    frame = pd.DataFrame(
+        {"x": b.astype(float), "g": np.where(b, "b", "a"), "z": (~b).astype(float)}
+    )
+    weights = np.ones(n)
+    weights[b] = np.random.default_rng(seed).uniform(0.1, 2.0, b.sum())
+    family = GaussianLS(scale_floor=0)
+    model = SuperLSS(
+        family,
+        family.location(term("x", Numeric()), cat("g", base="a"), intercept=False),
+        family.scale(term("z", Numeric()), intercept=False),
+        discrete=True,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(frame, (~b).astype(float), sample_weight=weights)
+    assert model.result_.rank == 2
 
 
 def test_contraction_row_bytes_count_the_buffer_and_each_groups_owned_rows() -> None:
@@ -376,6 +408,17 @@ def test_contraction_row_bytes_count_the_buffer_and_each_groups_owned_rows() -> 
     # Five channels, four gathers and the row indices, the dense column's weighted copy,
     # row views for splines.
     assert chunking.contraction_row_bytes(layout) == 8 * (2 + 3 + 5 + 1)
+
+
+def test_layouts_with_uncounted_groups_contract_one_chunk_at_a_time() -> None:
+    _, layout, _, _, _, _, _ = _problem(discrete=False)
+    assert "SparseSSPGroupMatrix" in {
+        type(group).__name__ for state in layout.predictors for group in state.design.group_matrices
+    }
+    row_bytes = chunking.contraction_row_bytes(layout)
+    assert row_bytes is None
+    assert chunking.contraction_block_rows(10**6, row_bytes, 4_000) == 4_000
+    assert chunking.contraction_block_rows(1_000, row_bytes, 4_000) == 1_000
 
 
 @pytest.mark.parametrize("chunks_per_block", [None, 3, 1])

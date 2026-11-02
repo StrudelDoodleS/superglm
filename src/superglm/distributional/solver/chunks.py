@@ -12,6 +12,7 @@ from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_core import (
     CategoricalGroupMatrix,
+    DenseGroupMatrix,
     RandomEffectGroupMatrix,
 )
 from superglm._group_matrix._group_matrix_discretized import (
@@ -64,6 +65,11 @@ CurvatureSource = Literal["observed", "fisher", "nearest_semidefinite"]
 AUTO_CHUNK_SELECTOR = "distributional-auto-v1"
 AUTO_CHUNK_MEMORY_BYTES = 8 * 1024 * 1024
 AUTO_CONTRACTION_MEMORY_BYTES = 64 * 1024 * 1024
+# The longest run of rows one contraction block sums. Bin and level sums run
+# sequentially, so their rounding grows with the run; this keeps it at the
+# scale of the automatic likelihood chunk on a small layout (about 2**15 rows),
+# where aliased columns' Gram entries agree well inside the rank cut.
+AUTO_CONTRACTION_MAX_ROWS = 2**15
 
 # Retained snapshots plus support vectors per pass; refresh uses bounded scratch.
 # No observation-sized predictions are retained here.
@@ -758,6 +764,10 @@ _SPLINE_CATEGORY_ROW_ARRAYS = 2
 # Transient per-row gathers while one group pair is contracted, and the
 # block's row indices.
 _BLOCK_GATHER_FLOATS = 5
+# Group types whose block rows' ownership is counted. Others (CSR splines,
+# factor smooths, subclasses) may own rows in raw storage, so their layouts
+# contract one likelihood chunk at a time, as the chunk stream sizes it.
+_COUNTED_GROUPS = frozenset((DenseGroupMatrix, *_BLOCK_ROW_ARRAYS, *_SPLINE_CATEGORY_GROUPS))
 
 
 def _spline_category_row_floats(design) -> int:
@@ -780,17 +790,19 @@ def _spline_category_row_floats(design) -> int:
     return _SPLINE_CATEGORY_ROW_ARRAYS * sum(terms.values())
 
 
-def contraction_row_bytes(layout: StackedLayout) -> int:
-    """Bytes one row adds to a contraction block.
+def contraction_row_bytes(layout: StackedLayout) -> int | None:
+    """Bytes one row adds to a contraction block, or None for an uncounted group.
 
     The buffer holds ``K + K(K+1)/2`` channels. Each group adds its owned row
     arrays, spline-by-category terms as :func:`_spline_category_row_floats`
-    counts them; any other group may form a weighted copy of its rows, so it
+    counts them; a dense group may form a weighted copy of its rows, so it
     counts its full width.
     """
     k_parameters = len(layout.predictors)
     floats = k_parameters + k_parameters * (k_parameters + 1) // 2 + _BLOCK_GATHER_FLOATS
     for state in layout.predictors:
+        if any(type(group) not in _COUNTED_GROUPS for group in state.design.group_matrices):
+            return None
         floats += _spline_category_row_floats(state.design)
         floats += sum(
             _BLOCK_ROW_ARRAYS.get(type(group), group.shape[1])
@@ -800,13 +812,21 @@ def contraction_row_bytes(layout: StackedLayout) -> int:
     return np.dtype(np.float64).itemsize * floats
 
 
-def contraction_block_rows(n_observations: int, row_bytes: int, chunk_rows: int) -> int:
-    """Rows contracted at once: whole likelihood chunks within a fixed byte budget.
+def contraction_block_rows(n_observations: int, row_bytes: int | None, chunk_rows: int) -> int:
+    """Rows contracted at once: whole likelihood chunks within the byte and row budgets.
 
-    A block holds at least one chunk, so a single chunk larger than the budget
-    forms its own block.
+    A block holds at least one chunk, so a single chunk larger than either
+    budget forms its own block, as does every chunk of an uncounted layout.
     """
-    chunks_per_block = max(1, AUTO_CONTRACTION_MEMORY_BYTES // (row_bytes * chunk_rows))
+    if row_bytes is None:
+        return min(n_observations, chunk_rows)
+    chunks_per_block = max(
+        1,
+        min(
+            AUTO_CONTRACTION_MEMORY_BYTES // (row_bytes * chunk_rows),
+            AUTO_CONTRACTION_MAX_ROWS // chunk_rows,
+        ),
+    )
     return min(n_observations, chunks_per_block * chunk_rows)
 
 
