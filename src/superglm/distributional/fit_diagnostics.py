@@ -333,10 +333,9 @@ def _not_converged_finding(
             "No damping of the coefficient curvature gave a certified ascent direction, so the "
             "solver stopped at its last accepted coefficients."
             if reason == "no_ascent_direction"
-            else "The solver stopped within floating-point resolution of a stationary point, but "
-            "the rank certificate removed a direction the formed curvature kept, so that stop "
-            "could not be validated on the full system. The fitted values are the last accepted "
-            "iterate."
+            else "The rank certificate removed a direction the solver's stop kept, or kept one "
+            "the reduced fit dropped, so that stop could not be validated on the coefficients "
+            "the certificate keeps. The fitted values are the last accepted iterate."
             if reason == "rank_reduced_at_stop"
             else "The reported parameter state did not satisfy its governing fit contract."
         ),

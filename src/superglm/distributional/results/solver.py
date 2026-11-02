@@ -567,6 +567,45 @@ def _assessment_unchanged_failed_cap(
     )
 
 
+@dataclass(frozen=True)
+class RetainedCoordinates:
+    """The coefficients ``K`` a rank-deficient representative keeps; the dropped ``J`` are zero.
+
+    The representative inverts the curvature's ``K`` block and gives ``J``
+    zeros, so its fit is the reduced problem on ``K`` (Wood, Pya and Saefken
+    2016, sec. 3.1.2), whose score and curvature are the ``K`` entries of the
+    full ones. The basis ``I[:, K]`` makes every reduction and lift exact.
+    """
+
+    dropped: NDArray[np.bool_]
+
+    @classmethod
+    def of(cls, rank: RankDecomposition) -> RetainedCoordinates | None:
+        """``rank``'s retained coordinates; ``None`` unless it is a rank-deficient representative."""
+        aliases = rank.structural_aliases
+        if aliases is None or rank.rank == rank.width:
+            return None
+        if np.count_nonzero(aliases) != rank.width - rank.rank:
+            return None
+        return cls(np.array(aliases, dtype=bool))
+
+    @property
+    def null_basis(self) -> NDArray[np.float64]:
+        return np.eye(self.dropped.size)[:, ~self.dropped]
+
+    def reduce_vector(self, values: NDArray) -> NDArray[np.float64]:
+        return np.asarray(values, dtype=np.float64)[~self.dropped]
+
+    def reduce_matrix(self, values: NDArray) -> NDArray[np.float64]:
+        kept = ~self.dropped
+        return np.asarray(values, dtype=np.float64)[np.ix_(kept, kept)]
+
+    def lift_vector(self, values: NDArray) -> NDArray[np.float64]:
+        lifted = np.zeros(self.dropped.size)
+        lifted[~self.dropped] = values
+        return lifted
+
+
 def _score_within_rounding_floor(
     *,
     config: DenseSolverConfig,
@@ -574,7 +613,7 @@ def _score_within_rounding_floor(
     coefficients: NDArray,
     score: NDArray,
     penalized_curvature: NDArray,
-    face: PenaltyFace | None,
+    face: PenaltyFace | RetainedCoordinates | None,
     objective: float,
     tolerance: float,
 ) -> bool:
@@ -901,7 +940,7 @@ def _newton_decrement_is_certified(
     score: NDArray[np.float64],
     penalized_curvature: NDArray[np.float64],
     penalized_objective: float,
-    face: PenaltyFace | None,
+    face: PenaltyFace | RetainedCoordinates | None,
     tolerance: float,
     score_error: NDArray[np.float64] | None = None,
 ) -> bool:
@@ -1083,7 +1122,7 @@ def _validate_objective_and_step_certificate(
     score: NDArray[np.float64],
     penalized_curvature: NDArray[np.float64],
     penalized_objective: float,
-    face: PenaltyFace | None,
+    face: PenaltyFace | RetainedCoordinates | None,
 ) -> None:
     """Authenticate an objective-and-step stop against the retained state."""
     if not converged:
@@ -1422,9 +1461,13 @@ class DenseSolverResult:
             raise TypeError("converged must be bool")
         if self.iterations < 0 or self.backtracking_steps < 0:
             raise ValueError("iteration counts must be non-negative")
-        retained_score = (
-            score if self.coefficient_face is None else self.coefficient_face.reduce_vector(score)
+        # A stop is the fit's on the coordinates it moved: a face, or a representative's.
+        retained = (
+            RetainedCoordinates.of(self.terminal_rank)
+            if self.coefficient_face is None
+            else self.coefficient_face
         )
+        retained_score = score if retained is None else retained.reduce_vector(score)
         retained_kkt = float(np.max(np.abs(retained_score), initial=0.0)) / (
             1.0 + abs(penalized_optimizing)
         )
@@ -1440,7 +1483,7 @@ class DenseSolverResult:
                         coefficients=coefficients,
                         score=score,
                         penalized_curvature=penalized_curvature,
-                        face=self.coefficient_face,
+                        face=retained,
                         objective=penalized_optimizing,
                         tolerance=self.config.tolerance,
                     )
@@ -1459,7 +1502,7 @@ class DenseSolverResult:
                 score=score,
                 penalized_curvature=penalized_curvature,
                 penalized_objective=penalized_optimizing,
-                face=self.coefficient_face,
+                face=retained,
             )
         if self.convergence_reason == "resolution_limited_stationarity":
             _validate_resolution_limited_stationarity(

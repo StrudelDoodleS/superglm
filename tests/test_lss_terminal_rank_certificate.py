@@ -133,7 +133,9 @@ def test_exact_alias_is_certified_rank_deficient(terminal, monkeypatch, constant
     assert result.terminal_rank.rank == 2
     assert result.terminal_curvature.certified is True
     assert result.terminal_curvature.grey_k == 1
-    assert calls == [1]
+    # One row pass per terminal decision: the stopped state's, and the reduced
+    # fit's when Newton steps left the alias nonzero.
+    assert calls in ([1], [1, 1])
     standard_errors = np.sqrt(np.diag(np.asarray(model.covariance_)))
     assert standard_errors[0] == pytest.approx(0.008, abs=4e-4)
     # The formed decision keeps the alias, through the shortcut on constant weights.
@@ -215,19 +217,78 @@ def test_aliased_coefficients_take_the_representative_value(monkeypatch, discret
     np.testing.assert_allclose(prediction, drifted_prediction, rtol=0, atol=64 * 2.0**-53 * scale)
 
 
-def test_a_projected_state_the_stop_check_rejects_publishes_the_stopped_state(monkeypatch):
-    """The stop was certified at the unprojected coefficients, so a rejected projection falls back.
+# mgcv 1.9.3, black box: gam(list(y ~ x + z, ~ 1), family = gaulss()) on _near_alias()
+# written to CSV; rank 3 of 4, z dropped. Location coefficient and its Vp diagonal, as
+# (Intercept), x, z.
+_MGCV_NEAR_ALIAS = (
+    (1.0071311150156979, 8.3063594167458155e-05),
+    (0.49569104718142049, 8.3718800662953594e-05),
+    (0.0, 0.0),
+)
 
-    The projection is forced to a state the result's stop check rejects (a
-    non-finite objective), standing in for a rounding floor that shrinks
-    with ``|b|``. Mutation check: without the fallback the fit raises
-    ``ValueError``.
+
+def _near_alias(discrete):
+    """``z = x + 1e-8 h`` and a ``3e-6 h`` signal: the certified rank, 3 of 4, drops ``z``."""
+    draws = np.random.default_rng(11).standard_normal((8, 3000))
+    h, x = draws[4], draws[5]
+    frame = pd.DataFrame({"x": x, "z": x + 1e-8 * h})
+    y = 1.0 + 0.5 * x + 3e-6 * h + 0.5 * draws[7]
+    family = GaussianLS(scale_floor=0)
+    location = family.location(term("x", Numeric()), term("z", Numeric()))
+    return SuperLSS(family, location, family.scale(), discrete=discrete), frame, y
+
+
+@pytest.mark.parametrize("drift", [0.0, 1e6], ids=["as_fitted", "drifted_start"])
+@pytest.mark.parametrize("discrete", [True, False], ids=["chunked", "dense"])
+def test_a_near_alias_publishes_the_reduced_fit(monkeypatch, discrete, drift):
+    """The certified rank drops a near alias, and the fit is refitted without it, as mgcv is.
+
+    Newton steps on the formed curvature wander along ``x - z`` (to about
+    1950 on the dense route), and moving to the representative costs more
+    objective than the fit's tolerance: the direction carries a little
+    information below the certified rank. The fit repeats the Newton
+    iteration on the retained coefficients from the projected start;
+    ``drifted_start`` moves the start 1e6 along ``x - z`` so that it takes
+    steps. Mutation checks: keeping the drifted state when the projection
+    costs objective publishes x = 1953.7 on the dense route; publishing the
+    projection without the reduced steps misses mgcv's variances by 8e-5
+    (chunked) and fails the stop's check (dense) on the drifted start.
     """
-    import dataclasses
-
     import superglm.distributional.solver.solver as solver
 
-    start, project = solver._initial_coefficients, solver._representative_state
+    start = solver._initial_coefficients
+
+    def drifted(context):
+        coefficients = np.array(start(context))
+        if context.layout.n_coefficients == 4:
+            coefficients[1:3] += (drift, -drift)
+        return coefficients
+
+    monkeypatch.setattr(solver, "_initial_coefficients", drifted)
+    model, frame, y = _near_alias(discrete)
+    result = _fit(model, frame, y)
+    assert result.converged and result.terminal_rank.rank == 3
+    coefficients, variances = result.coefficients, np.diag(np.asarray(model.covariance_))
+    for index, (value, variance) in enumerate(_MGCV_NEAR_ALIAS):
+        assert coefficients[index] == pytest.approx(value, rel=1e-7, abs=1e-12)
+        assert variances[index] == pytest.approx(variance, rel=1e-6, abs=0.0)
+    assert coefficients[2] == 0.0 and variances[2] == 0.0
+
+
+@pytest.mark.parametrize("event", ["no_start", "rank_moved"])
+def test_a_reduced_fit_off_its_representative_says_so(monkeypatch, event):
+    """A drifted alias whose reduced fit cannot be the published representative is disclosed.
+
+    Forced: the projected start has no finite likelihood (``no_start``), or
+    the rank certified at the reduced fit's end keeps every coefficient
+    (``rank_moved``: the formed decision, which keeps the alias). Mutation
+    check: without the check, ``rank_moved`` reports convergence and
+    ``no_start`` raises.
+    """
+    import superglm.distributional.solver.solver as solver
+
+    start, certify = solver._initial_coefficients, solver._certified_terminal_curvature
+    decided = []
 
     def drifted(context):
         coefficients = np.array(start(context))
@@ -235,21 +296,25 @@ def test_a_projected_state_the_stop_check_rejects_publishes_the_stopped_state(mo
             coefficients[2:4] += (3.0, -3.0)
         return coefficients
 
-    def rejected(context, state, *args):
-        projected = project(context, state, *args)
-        if projected is state:
-            return state
-        return dataclasses.replace(projected, penalized_optimizing_log_likelihood=math.nan)
+    def certified_once(context, state, curvature, *args):
+        if context.layout.n_coefficients == 5:
+            decided.append(state.coefficients)
+            if len(decided) > 1:
+                return curvature
+        return certify(context, state, curvature, *args)
 
     monkeypatch.setattr(solver, "_initial_coefficients", drifted)
-    monkeypatch.setattr(solver, "_representative_state", rejected)
+    if event == "no_start":
+        monkeypatch.setattr(solver, "_representative_state", lambda *args: None)
+    else:
+        _formed_keeps_the_alias(monkeypatch, eigensolver=False)
+        monkeypatch.setattr(solver, "_certified_terminal_curvature", certified_once)
     frame, y = _alias_parity_frame()
     family = GaussianLS(scale_floor=0)
     location = family.location(term("u", Numeric()), term("x", Numeric()), cat("g", base="a"))
     result = _fit(SuperLSS(family, location, family.scale(), discrete=False), frame, y)
-    assert result.converged and result.terminal_rank.rank == 4
-    assert abs(result.coefficients[3]) > 1.0
-    assert math.isfinite(result.penalized_optimizing_log_likelihood)
+    assert not result.converged and result.convergence_reason == "rank_reduced_at_stop"
+    assert result.terminal_rank.rank == (4 if event == "no_start" else 5)
 
 
 def test_well_conditioned_fit_reads_no_rows(terminal):
