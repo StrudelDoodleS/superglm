@@ -3568,13 +3568,49 @@ def test_equal_copy_of_dense_discrete_rows_uses_one_exact_geometry():
     assert abs(exact_edf - fit_edf) > exact_edf_gap + fit_edf_gap
 
 
+def _face_restricted_leverage(evaluation, model, face):
+    """``w_i a_i' Z_a (Z_a' H_a Z_a)^-1 Z_a' a_i`` formed explicitly on the evaluation rows.
+
+    ``a_i = [1, x_i]``, ``H_a = A' W A + diag(0, S)`` on the rows passed and ``Z_a =
+    diag(1, Z)``; ``Z = I`` without a face.  The design and working weights are the
+    evaluation's (Poisson log link: ``W = mu``); the inverse is the test's own.
+    """
+    from superglm.inference.covariance import _active_penalty_matrix
+    from superglm.model.fit_state import fitted_lambda2
+
+    X_a, W, _, _, active_groups = evaluation._active_info
+    design = np.column_stack([np.ones(X_a.shape[0]), X_a.toarray()])
+    np.testing.assert_allclose(W, evaluation._mu, rtol=1e-14)
+    S = np.asarray(
+        _active_penalty_matrix(
+            model._dm.group_matrices,
+            model._groups,
+            active_groups,
+            fitted_lambda2(model),
+            reml_penalties=getattr(model, "_reml_penalties", None),
+        )
+    )
+    width = design.shape[1]
+    hessian = design.T @ (W[:, None] * design)
+    hessian[1:, 1:] += S
+    face_a = np.eye(width)
+    if face is not None:
+        face_a = np.zeros((width, face.shape[1] + 1))
+        face_a[0, 0] = 1.0
+        face_a[1:, 1:] = face
+    covariance = face_a @ np.linalg.solve(face_a.T @ hessian @ face_a, face_a.T)
+    return W * np.einsum("ij,jk,ik->i", design, covariance, design)
+
+
 def test_equal_copy_of_shape_constrained_rows_reads_the_fit_geometry():
     """A QP fit whose shape rows bind keeps its active face's covariance, so an equal
     copy of the training rows (recognised by content) reads it with the fit design and
     working weights, as the live frame does.  Zero prior weights centre the fit's
     columns on the positive-weight rows while the public design centres them on all
-    rows, so the public design would not pair with that covariance.  Other rows read
-    the same face covariance with their own design."""
+    rows, so the public design would not pair with that covariance.  Other rows
+    re-form the inverse on themselves, restricted to the fit's active face."""
+    from scipy.linalg import null_space
+
     from superglm import Constraint
     from superglm.features.spline import PSpline
 
@@ -3606,8 +3642,53 @@ def test_equal_copy_of_shape_constrained_rows_reads_the_fit_geometry():
     ):
         np.testing.assert_allclose(actual, expected, rtol=rtol, atol=rtol * np.max(expected))
 
-    # New rows read the face covariance, not the unconstrained one re-formed on them.
+    # New rows: leverage re-formed on them and restricted to the face the binding
+    # rows leave free, against the face formed here from the binding rows alone.
+    face = null_space(rank_info.face_rows)
     new = pd.DataFrame({"x": np.linspace(0.05, 0.95, 31)})
     evaluation = model.metrics(new, model.predict(new))
-    _, _, inverse, _, _ = evaluation._active_info
-    np.testing.assert_array_equal(inverse, rank_info.coefficient_inverse())
+    expected = _face_restricted_leverage(evaluation, model, face)
+    unrestricted = _face_restricted_leverage(evaluation, model, None)
+    # the face moves the leverage far beyond the comparison's tolerance
+    assert np.max(np.abs(unrestricted - expected)) > 1e-3 * np.max(expected)
+    np.testing.assert_allclose(evaluation.leverage, expected, rtol=1e-9, atol=1e-12)
+    assert evaluation.leverage.sum() == pytest.approx(evaluation._influence_edf[0].sum() + 1.0)
+
+    # Reversed, the training rows are no longer recognised, and the face re-formed
+    # on them gives the fit's own leverage back.
+    reverse = slice(None, None, -1)
+    reversed_rows = model.metrics(
+        X.iloc[reverse].reset_index(drop=True), y[reverse], sample_weight=weights[reverse]
+    )
+    assert not reversed_rows._fit_geometry_matches
+    np.testing.assert_allclose(
+        reversed_rows.leverage[reverse], live.leverage, rtol=1e-9, atol=1e-12
+    )
+
+
+def test_slack_shape_constraint_reforms_unrestricted_leverage_on_new_rows():
+    """With no shape row binding there is no face: held-out leverage is the
+    unconstrained inverse re-formed on the rows passed."""
+    from superglm import Constraint
+    from superglm.features.spline import PSpline
+
+    rng = np.random.default_rng(20261102)
+    x = np.sort(rng.uniform(size=500))
+    # rises steeply: no increasing row binds
+    y = rng.poisson(np.exp(0.2 + 3.0 * x)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        spline_penalty=1.7,
+        features={"x": PSpline(n_knots=7, constraint=Constraint.fit.increasing)},
+    ).fit(pd.DataFrame({"x": x}), y)
+    assert model.result.rank_info.face is None
+
+    new = pd.DataFrame({"x": np.linspace(0.05, 0.95, 31)})
+    evaluation = model.metrics(new, model.predict(new))
+    np.testing.assert_allclose(
+        evaluation.leverage,
+        _face_restricted_leverage(evaluation, model, None),
+        rtol=1e-9,
+        atol=1e-12,
+    )
