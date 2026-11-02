@@ -14,7 +14,7 @@ and records the decision.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import numpy as np
@@ -26,6 +26,7 @@ from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
     RankDecomposition,
     RankPolicy,
+    _decompose_gram,
     _symmetric_part,
     decompose_gram,
 )
@@ -71,6 +72,9 @@ class CurvatureDecision:
     telemetry: CurvatureTelemetry
     retry_required: bool
     state: CurvaturePolicyState
+    # The equilibrated eigenpairs ``decomposition`` computed, when it did, for
+    # a caller that decomposes the same matrix again (the terminal certificate).
+    spectrum: dict | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.retry_required, bool):
@@ -89,6 +93,7 @@ class _CurvatureAnalysis:
     materially_indefinite: bool
     minimum_eigenvalue: float
     condition_estimate: float | None
+    spectrum: dict | None = None
 
 
 def _analyze_curvature(
@@ -115,8 +120,12 @@ def _analyze_curvature(
     minimum_eigenvalue = float(eigenvalues[0])
 
     materially_indefinite = False
+    spectrum: dict = {}
     try:
-        decomposition = decompose_gram(symmetric, policy=policy)
+        # decompose_gram's own computation, keeping the eigenpairs it forms.
+        decomposition = _decompose_gram(symmetric, policy=policy, spectrum=spectrum)
+        if decomposition is None:  # pragma: no cover - omit_uncertifiable is off
+            raise RuntimeError("gram decomposition omitted its subspace without being asked to")
     except ValueError as exc:
         # A zero diagonal with a nonzero off-diagonal entry is indefinite: a
         # semidefinite matrix with a zero diagonal entry has that row zero.
@@ -143,6 +152,7 @@ def _analyze_curvature(
         materially_indefinite=materially_indefinite,
         minimum_eigenvalue=minimum_eigenvalue,
         condition_estimate=condition_estimate,
+        spectrum=None if materially_indefinite or not spectrum else spectrum,
     )
 
 
@@ -224,6 +234,7 @@ def resolve_curvature(
                 retry_attempted=False,
                 fallback_count=current_state.fallback_count,
             ),
+            spectrum=requested.spectrum,
         )
 
     if requested_source == "fisher":
@@ -288,4 +299,5 @@ def resolve_curvature(
         telemetry=telemetry,
         retry_required=False,
         state=CurvaturePolicyState(retry_attempted=False, fallback_count=fallback_count),
+        spectrum=accepted.spectrum,
     )

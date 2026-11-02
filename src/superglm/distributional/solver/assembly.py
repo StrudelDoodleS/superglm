@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
+from superglm.distributional.solver._formation import CurvatureFormation, dense_formation
 from superglm.distributional.solver.packing import packed_pairs
 from superglm.solvers.rank import _symmetric_part
 
@@ -21,13 +22,18 @@ def _readonly(values: NDArray) -> NDArray[np.float64]:
 
 @dataclass(frozen=True)
 class DenseJointGeometry:
-    """Score and data/penalized curvature in the global coefficient layout."""
+    """Score and data/penalized curvature in the global coefficient layout.
+
+    ``formation`` holds the data curvature's formation statistics when the
+    assembly recorded them, for the terminal rank certificate.
+    """
 
     score_data: NDArray[np.float64]
     score_penalized: NDArray[np.float64]
     data_curvature: NDArray[np.float64]
     penalty: NDArray[np.float64]
     penalized_curvature: NDArray[np.float64]
+    formation: CurvatureFormation | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         score_data = _readonly(self.score_data)
@@ -52,6 +58,17 @@ class DenseJointGeometry:
         object.__setattr__(self, "data_curvature", data_curvature)
         object.__setattr__(self, "penalty", penalty)
         object.__setattr__(self, "penalized_curvature", penalized)
+
+
+def with_formation(geometry, formation: CurvatureFormation | None):
+    """Return a just-published ``geometry`` carrying ``formation``.
+
+    The arrays are already validated and read-only, so they are not copied.
+    Anything other than a ``DenseJointGeometry`` passes through unchanged.
+    """
+    if formation is not None and isinstance(geometry, DenseJointGeometry):
+        object.__setattr__(geometry, "formation", formation)
+    return geometry
 
 
 def dense_predictor_matrices(layout: StackedLayout) -> tuple[NDArray[np.float64], ...]:
@@ -230,6 +247,7 @@ def _assemble_dense_geometry_from_matrices(
         data_curvature=data_curvature,
         penalty=penalty_matrix,
         penalized_curvature=penalized_curvature,
+        formation=dense_formation(layout, matrices, curvature),
     )
 
 

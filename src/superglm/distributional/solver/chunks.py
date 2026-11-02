@@ -36,6 +36,7 @@ from superglm.distributional.family import (
 from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
+from superglm.distributional.solver._formation import FormationAccumulator
 from superglm.distributional.solver._global_moments import (
     GlobalMomentRefusalError,
     build_global_moment_plan,
@@ -45,6 +46,7 @@ from superglm.distributional.solver.assembly import (
     DenseJointGeometry,
     GroupedGeometryAccumulator,
     _grouped_predictor_plans,
+    with_formation,
 )
 from superglm.distributional.solver.derivatives import (
     nearest_semidefinite_curvature,
@@ -951,6 +953,7 @@ def _try_global_geometry(
     chunk = None
     try:
         plan.reset(coefficients=coefficients, penalty=penalty)
+        formation = FormationAccumulator(layout, range_geometry=hasattr(plan, "add_row_range"))
         iterator = iter_likelihood_chunks(
             family,
             layout,
@@ -987,6 +990,7 @@ def _try_global_geometry(
             else:
                 # Preserve streams supplied by callers which own child plans.
                 plan.add_chunk(chunk.plans, chunk.score_eta, chunk.curvature_packed)
+            formation.add(rows.start, rows.stop, chunk.curvature_packed)
             if _likelihood_sums is not None:
                 _likelihood_sums[0] += float(
                     np.sum(chunk.optimizing_log_likelihood, dtype=np.float64)
@@ -998,7 +1002,7 @@ def _try_global_geometry(
             chunk = None
         if expected_start != n:
             raise ValueError("global moment stream does not cover all observations")
-        return plan.finish()
+        return with_formation(plan.finish(), formation.finish())
     except _TrialDerivativeError as exc:
         if exc.rows is not None and exc.plans is not None and hasattr(plan, "_prepare_chunk"):
             # A derivative can fail before add_row_range has checked live
@@ -1069,6 +1073,7 @@ def _assemble_grouped_pass_geometry(
     # Channel-major, so each contracted channel is one contiguous row vector.
     curvature = np.empty((k_parameters * (k_parameters + 1) // 2, buffered), dtype=np.float64)
     accumulator = GroupedGeometryAccumulator(layout, penalty=penalty, coefficients=coefficients)
+    formation = FormationAccumulator(layout)
 
     def row_plans(start: int, stop: int):
         if start == 0 and stop == n_observations:
@@ -1094,6 +1099,8 @@ def _assemble_grouped_pass_geometry(
             end = min(piece + step, stop)
             plans = row_plans(piece, end)
             rows = slice(piece - start, end - start)
+            # One add per contracted piece, over its contiguous channel rows.
+            formation.add(piece, end, curvature[:, rows].T)
             accumulator.add_score(plans, score[rows])
             for channel_index in range(len(curvature)):
                 accumulator.add_curvature_channel(
@@ -1117,6 +1124,7 @@ def _assemble_grouped_pass_geometry(
         for chunk in iterator:
             length = len(chunk.score_eta)
             if per_chunk:
+                formation.add(position, position + length, chunk.curvature_packed)
                 accumulator.add_score(chunk.plans, chunk.score_eta)
                 for channel_index in range(len(curvature)):
                     accumulator.add_curvature_channel(
@@ -1147,7 +1155,7 @@ def _assemble_grouped_pass_geometry(
         raise RuntimeError("likelihood chunks must cover every row exactly once")
     if block_start < position:
         contract(block_start, position)
-    return accumulator.finish()
+    return with_formation(accumulator.finish(), formation.finish())
 
 
 def maximum_chunked_predictor_change(
