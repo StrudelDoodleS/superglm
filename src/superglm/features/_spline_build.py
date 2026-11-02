@@ -48,14 +48,22 @@ def shape_engine(spec: Any) -> Literal["qp"] | None:
     return None
 
 
+def saved_on_scop(spec: Any) -> bool:
+    """Whether ``spec`` is a P-spline 0.41.0 or earlier fitted on SCOP, not yet built since.
+
+    Such a spec was pickled before ``shape_engine`` existed, so it reads the
+    class default None.
+    """
+    return _uses_fit_time_shape_constraints(spec) and getattr(spec, "shape_engine", "qp") is None
+
+
 def _warn_if_saved_on_scop(spec: Any) -> None:
     """Warn once that a P-spline 0.41.0 or earlier fitted on SCOP now fits on the QP.
 
-    Such a spec was pickled before ``shape_engine`` existed, so it reads the
-    class default None. The build marks it ``"qp"``, which stops a second
-    build of the same spec warning again.
+    The build marks the spec ``"qp"``, which stops a second build of the same
+    spec warning again.
     """
-    if _uses_fit_time_shape_constraints(spec) and getattr(spec, "shape_engine", "qp") is None:
+    if saved_on_scop(spec):
         warn_scop_retired(saved=True)
         spec.shape_engine = "qp"
 

@@ -22,6 +22,7 @@ from typing import Any, NamedTuple, cast
 import numpy as np
 import pandas as pd
 
+from superglm.features._spline_build import saved_on_scop
 from superglm.features._spline_config import (
     SplineKindName,
     configure_knots,
@@ -37,7 +38,7 @@ from superglm.features.ordered_categorical import (
     OrderedCategorical,
     _spline_kind_name,
 )
-from superglm.features.spline import CardinalCRSpline, Spline, _SplineBase
+from superglm.features.spline import CardinalCRSpline, PSpline, Spline, _SplineBase
 
 # The declared bases a fit resolves to a level itself.
 SYMBOLIC_BASE_POLICIES = frozenset({"first", "most_exposed"})
@@ -753,7 +754,14 @@ def rebased_spline(
 
 
 def _carry_marks(source: _SplineBase, spline: _SplineBase) -> None:
-    """Mark ``spline`` with the editor's marks ``source`` carries."""
+    """Mark ``spline`` with the editor's marks ``source`` carries.
+
+    A P-spline rebuilt from one 0.41.0 fitted on SCOP keeps that mark too, so
+    its build warns that the constraint now fits on the QP. Another kind fits
+    on the QP as it did in 0.41.0 and takes no mark.
+    """
     for mark in EDITOR_MARKS:
         if getattr(source, mark, False):
             setattr(spline, mark, getattr(source, mark))
+    if saved_on_scop(source) and isinstance(spline, PSpline):
+        spline.shape_engine = None

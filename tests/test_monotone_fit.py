@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 from superglm import Constraint, SuperGLM
-from superglm.families import Gaussian
+from superglm.families import Gamma, Gaussian
 from superglm.features.spline import BSplineSmooth, CubicRegressionSpline, PSpline
 from superglm.types import LambdaPolicy
 
@@ -568,6 +568,39 @@ class TestMonotoneFixedLambdaREML:
 
         # REML lambdas should be set
         assert model._reml_lambdas is not None
+
+    @pytest.mark.parametrize("kind", ["ps", "bs", "cr"])
+    @pytest.mark.parametrize("family_name", ["gaussian", "gamma"])
+    def test_fixed_lambda_constrained_fit_publishes_the_reml_scale(self, kind, family_name):
+        """A slack constraint at fixed lambda publishes the unconstrained REML phi."""
+        cls = {"ps": PSpline, "bs": BSplineSmooth, "cr": CubicRegressionSpline}[kind]
+        x = np.linspace(0, 1, 80)
+        y = 10 * x + 0.2 * np.sin(9 * x) + np.random.default_rng(7).normal(0, 0.3, 80)
+        family = Gaussian()
+        if family_name == "gamma":
+            family, y = Gamma(), np.exp(y / 5)
+        X = pd.DataFrame({"x": x})
+
+        def fit(constraint):
+            spec = cls(
+                n_knots=6,
+                constraint=constraint,
+                lambda_policy=LambdaPolicy.fixed(0.01),
+            )
+            model = SuperGLM(family=family, selection_penalty=0, features={"x": spec})
+            model.fit_reml(X, y)
+            return model
+
+        constrained = fit(Constraint.fit.increasing)
+        free = fit(None)
+        # The increasing constraint is slack: the two fits are the same mode.
+        np.testing.assert_allclose(constrained.predict(X), free.predict(X), rtol=1e-5, atol=0.0)
+        assert constrained._result.phi == pytest.approx(free._result.phi, rel=1e-6)
+        np.testing.assert_allclose(
+            constrained.term_inference("x").se_log_relativity,
+            free.term_inference("x").se_log_relativity,
+            rtol=1e-4,
+        )
 
     @pytest.mark.slow
     def test_fit_reml_with_fixed_lambda_policy_scop(self):

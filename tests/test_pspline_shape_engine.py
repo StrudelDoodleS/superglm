@@ -17,7 +17,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Constraint, PSpline, Spline, SuperGLM, _roundoff, families
+from superglm import (
+    Constraint,
+    FeatureStructure,
+    PSpline,
+    Spline,
+    Structure,
+    SuperGLM,
+    _roundoff,
+    families,
+)
 from superglm.features._spline_build import shape_engine
 from superglm.features._spline_config import SCOPRetiredWarning
 from superglm.features.spline import BSplineSmooth
@@ -256,6 +265,48 @@ def test_saved_scop_model_predicts_and_reports_as_saved_and_refits_on_the_qp() -
     np.testing.assert_array_equal(
         refitted.transform(x), refitted._basis_matrix(x).toarray() @ refitted._R_inv
     )
+
+
+@pytest.mark.parametrize(
+    ("entry", "warns"),
+    [
+        ({"basis": {"kind": "ps", "select": False}}, True),
+        (
+            {
+                "knots": {
+                    "n_knots": 6,
+                    "strategy": "uniform",
+                    "knot_alpha": 0.2,
+                    "positions": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                }
+            },
+            True,
+        ),
+        # 0.41.0 fitted a ``bs`` on the QP too: the retirement moves nothing.
+        ({"basis": {"kind": "bs", "select": False}}, False),
+    ],
+    ids=["ps-basis", "knots", "bs-basis"],
+)
+def test_a_structure_rebuilding_a_saved_scop_spline_warns_where_the_fit_moves(entry, warns) -> None:
+    """A structure applied to a model saved on SCOP warns when its P-spline now fits on the QP.
+
+    Mutation check: without the saved-SCOP mark in ``rebuild._carry_marks``
+    the ``ps``-basis case fits silently.
+    """
+    with open(SAVED_SCOP, "rb") as handle:
+        record = pickle.load(handle)
+    structure = Structure(features={"x": FeatureStructure(kind="spline", **entry)})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SCOPRetiredWarning)  # applying never warns
+        rebuilt = structure.apply(record["model"])
+    if warns:
+        with pytest.warns(SCOPRetiredWarning, match="fitted on the SCOP shape engine"):
+            rebuilt.fit_reml(record["frame"], record["y"])
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SCOPRetiredWarning)
+            rebuilt.fit_reml(record["frame"], record["y"])
+    assert _group(rebuilt).monotone_engine == "qp"
 
 
 @pytest.mark.parametrize("kind", ["increasing", "decreasing", "convex", "concave"])

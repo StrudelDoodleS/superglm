@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import replace
 from typing import Any
 
-from superglm.distributions import clip_mu
+from superglm.distributions import Tweedie, clip_mu
 from superglm.links import stabilize_eta
+from superglm.model.reml_finalize import compute_profiled_phi
 from superglm.reml.observed_geometry import ObservedModeNotConvergedError
 from superglm.solvers.dispersion import model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
@@ -154,6 +156,25 @@ def run_fixed_monotone_reml(
     if result.termination_reason == "constraint_kkt_incomplete":
         raise ObservedModeNotConvergedError(
             "fixed-lambda constrained REML fit ended without a complete inner-QP KKT certificate"
+        )
+
+    # Publish the scale the unconstrained fixed-lambda REML route publishes
+    # (``finalize_reml_fit``): the REML profile of phi at the penalized mode
+    # (Wood 2011, JRSS-B 73(1); Wood 2017, GAMs 2nd ed., section 6.2) for
+    # Gaussian and Gamma, the deviance form over the penalty nullity for the
+    # other estimated-scale families, and the solver's Pearson value for
+    # Tweedie, as that route keeps it.
+    if not isinstance(model._distribution, Tweedie):
+        result = replace(
+            result,
+            phi=compute_profiled_phi(
+                model,
+                y=y,
+                sample_weight=sample_weight,
+                lambdas=lambdas,
+                reml_penalties=reml_penalties,
+                pirls_result=result,
+            ),
         )
 
     model._result = result
