@@ -9,6 +9,7 @@ import pandas as pd
 import scipy.sparse as sp
 
 from superglm._frame import as_eager_frame
+from superglm._group_matrix import _group_matrix_core
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import Predictor, PredictorExecutionPlan, compile_predictors
@@ -374,3 +375,10 @@ def test_a_saturated_exact_spline_block_holds_one_dense_copy_of_its_rows():
     weights = np.linspace(0.5, 1.5, n)
     peak, _ = own_traced_peak(plan.diagonal_moment, weights)
     assert peak < 1.5 * 8 * n * width, (peak, 8 * n * width)
+    # The sub-blocks pair each row with its own weight: the gram matches one product.
+    gram = _group_matrix_core._saturated_ssp_gram(parent.B, weights)
+    dense = parent.B.toarray()
+    reference = (dense * weights[:, None]).T @ dense
+    scale = (np.abs(dense) * weights[:, None]).T @ np.abs(dense)
+    gamma = n * 2.0**-53 / (1.0 - n * 2.0**-53)
+    assert np.all(np.abs(gram - reference) <= 2.0 * gamma * scale)

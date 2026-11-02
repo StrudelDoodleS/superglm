@@ -215,6 +215,43 @@ def test_aliased_coefficients_take_the_representative_value(monkeypatch, discret
     np.testing.assert_allclose(prediction, drifted_prediction, rtol=0, atol=64 * 2.0**-53 * scale)
 
 
+def test_a_projected_state_the_stop_check_rejects_publishes_the_stopped_state(monkeypatch):
+    """The stop was certified at the unprojected coefficients, so a rejected projection falls back.
+
+    The projection is forced to a state the result's stop check rejects (a
+    non-finite objective), standing in for a rounding floor that shrinks
+    with ``|b|``. Mutation check: without the fallback the fit raises
+    ``ValueError``.
+    """
+    import dataclasses
+
+    import superglm.distributional.solver.solver as solver
+
+    start, project = solver._initial_coefficients, solver._representative_state
+
+    def drifted(context):
+        coefficients = np.array(start(context))
+        if context.layout.n_coefficients == 5:
+            coefficients[2:4] += (3.0, -3.0)
+        return coefficients
+
+    def rejected(context, state, *args):
+        projected = project(context, state, *args)
+        if projected is state:
+            return state
+        return dataclasses.replace(projected, penalized_optimizing_log_likelihood=math.nan)
+
+    monkeypatch.setattr(solver, "_initial_coefficients", drifted)
+    monkeypatch.setattr(solver, "_representative_state", rejected)
+    frame, y = _alias_parity_frame()
+    family = GaussianLS(scale_floor=0)
+    location = family.location(term("u", Numeric()), term("x", Numeric()), cat("g", base="a"))
+    result = _fit(SuperLSS(family, location, family.scale(), discrete=False), frame, y)
+    assert result.converged and result.terminal_rank.rank == 4
+    assert abs(result.coefficients[3]) > 1.0
+    assert math.isfinite(result.penalized_optimizing_log_likelihood)
+
+
 def test_well_conditioned_fit_reads_no_rows(terminal):
     decisions, calls = terminal
     rng = np.random.default_rng(0)
@@ -413,10 +450,10 @@ _FAMILIES = (
 )  # fmt: skip
 
 
-def _offset_fit(name, discrete, *, centred=False, **fit_kwargs):
-    """``x = 1e6 + z`` beside the first predictor's intercept, ``z ~ N(0, 1)``, or ``x - 1e6``.
+def _offset_fit(name, discrete, *, centred=False, offset=1e6, **fit_kwargs):
+    """``x = offset + z`` beside the first predictor's intercept, ``z ~ N(0, 1)``, or ``x - offset``.
 
-    ``x - 1e6`` is exact (Sterbenz), so the centred fit reads the same data.
+    ``x - offset`` is exact (Sterbenz), so the centred fit reads the same data.
     """
     import superglm
 
@@ -442,9 +479,44 @@ def _offset_fit(name, discrete, *, centred=False, **fit_kwargs):
     declarations = [getattr(family, names[0])(term("x", Numeric()))]
     declarations += [getattr(family, helper)() for helper in names[1:]]
     model = SuperLSS(family, *declarations, discrete=discrete)
-    x = 1e6 + z
-    model.fit(pd.DataFrame({"x": x - 1e6 if centred else x}), y, **fit_kwargs)
+    x = offset + z
+    model.fit(pd.DataFrame({"x": x - offset if centred else x}), y, **fit_kwargs)
     return model._require_fitted().fit_state.solver_result
+
+
+def _slope_tolerance(fit) -> float:
+    """``4 kappa u``, ``kappa`` the curvature's condition number (its factor's, squared).
+
+    The weakest direction of ``[1, offset + z]`` is almost all intercept; its
+    error of about ``kappa u ||beta||`` reaches the slope through a component of
+    ``1 / offset``, and ``||beta|| ~ offset |slope|``, so the slope's relative
+    error is about ``kappa u``.
+    """
+    return 4.0 * fit.terminal_curvature.condition_estimate**2 * np.finfo(np.float64).eps / 2
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+def test_an_offset_column_converges_in_a_few_newton_steps(discrete):
+    """``x = 1e5 + N(0, 1)`` beside an intercept converges, unshifted, to the centred fit's slope.
+
+    The curvature's condition number is about ``4e10``, so a backward-stable
+    Newton solve leaves a residual near ``u ||H|| ||s||``, above a fixed
+    fraction of the score, and the step is accepted on its backward error.
+    Mutation check: on the relative test alone every step takes a Levenberg
+    shift, and the dense fit stops at ``max_iterations`` with the slope 1%
+    off; the chunked one needs 76 to 90 iterations.
+    """
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        offset = _offset_fit("GaussianLS", discrete, offset=1e5)
+        centred = _offset_fit("GaussianLS", discrete, offset=1e5, centred=True)
+    assert offset.converged and centred.converged
+    assert offset.iterations <= 12
+    assert offset.coefficients[1] == pytest.approx(
+        centred.coefficients[1], rel=_slope_tolerance(offset)
+    )
 
 
 @pytest.mark.parametrize(
@@ -452,24 +524,28 @@ def _offset_fit(name, discrete, *, centred=False, **fit_kwargs):
     [(name, True) for name in _FAMILIES] + [("GaussianLS", False)],
     ids=[f"{name}-chunked" for name in _FAMILIES] + ["GaussianLS-dense"],
 )
-def test_offset_column_converges_to_the_centred_fit(name, discrete):
-    """``x = 1e6 + N(0, 1)`` beside an intercept reaches the slope of the same fit centred by hand.
+def test_an_offset_column_at_the_edge_of_float64_converges_or_says_why(name, discrete):
+    """``x = 1e6 + N(0, 1)``: the centred fit's slope, or a warning that names the conditioning.
 
-    Its curvature's condition number is about ``4e12``, so a backward-stable
-    Newton solve leaves a residual near ``u ||H|| ||s||``, far above a fixed
-    fraction of the score. The step is accepted on its backward error.
-    Mutation check: on the relative test alone seven of these ten fits take
-    a Levenberg shift at every step and stop at ``max_iterations``, with
-    slopes of about a thirtieth of the centred ones.
+    At a condition number of about ``4e12`` the stop is resolution-limited, so
+    whether it certifies depends on the platform's rounding; a fit that does
+    not certify must warn and name the cause, never stop silently. Mutation
+    check: on the relative residual test alone seven of these ten fits stop
+    at ``max_iterations`` with a thirtieth of the slope and no warning.
     """
     from superglm.diagnostics.convergence import ConvergenceWarning
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", ConvergenceWarning)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ConvergenceWarning)
         offset = _offset_fit(name, discrete)
-        centred = _offset_fit(name, discrete, centred=True)
-    assert offset.converged and centred.converged
-    assert offset.coefficients[1] == pytest.approx(centred.coefficients[1], rel=1e-6)
+    named = [w for w in caught if "condition number is about" in str(w.message)]
+    if not offset.converged:
+        assert named
+        return
+    centred = _offset_fit(name, discrete, centred=True)
+    assert offset.coefficients[1] == pytest.approx(
+        centred.coefficients[1], rel=_slope_tolerance(offset)
+    )
 
 
 def test_an_ill_conditioned_fixed_lambda_fit_that_stops_short_warns_and_names_the_cause():

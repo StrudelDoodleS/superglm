@@ -882,6 +882,9 @@ class SolverIteration:
     levenberg_shift: float
     rank: int
     condition_estimate: float | None
+    # ``||H s - g|| / max(1, ||g||)``, or, for an untruncated solve that misses the
+    # residual tolerance on it, the normwise backward error ``||H s - g|| /
+    # (||H|| ||s|| + ||g||)`` that accepted it (``solver._solve_residual``).
     solve_residual: float
 
 

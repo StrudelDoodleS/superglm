@@ -792,9 +792,9 @@ def _group_row_floats(group) -> int:
     per_row = entry * basis.nnz + (basis.indptr.itemsize + 8 * width) * rows
     if type(group) is SplineCategoricalGroupMatrix:
         # A level group also owns its rows' CSR, a float copy of its values, its
-        # row indices and, for a saturated basis, the dense copy of its rows
-        # that the weighted copy above is made from; charging these on every
-        # row bounds each level.
+        # row indices and, for a saturated basis, a cached dense copy of its rows,
+        # beside which its gram forms the weighted copy the 8 * width above pays
+        # for; charging these on every row bounds each level.
         per_row += (entry + 8) * basis.nnz + (basis.indptr.itemsize + 8 + 8 * width) * rows
     return -(-per_row // (8 * rows))
 

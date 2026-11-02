@@ -35,7 +35,6 @@ from superglm.distributional.results.solver import (
     SolverIteration,
     _newton_decrement_is_certified,
     _resolution_limited_decrement_is_within_objective_ulp,
-    _retained_rank_is_full,
     _score_within_rounding_floor,
     _validate_resolution_limited_stationarity,
 )
@@ -1918,26 +1917,15 @@ def _fit_dense_fixed_lambda_core(
             terminal_reduced_rank = decomposition
             terminal_rank = face.lift_rank_decomposition(terminal_reduced_rank)
         terminal_score_geometry = observed_geometry
-        penalty_value = _half_penalty_quadratic(
-            context.penalty, state.coefficients, context.penalty_entries
-        )
-        if context.chunk_size is None:
-            if state.eta is None or state.theta is None:
-                raise RuntimeError("dense terminal state is missing predictor values")
-            terminal_eta = state.eta
-            terminal_theta = state.theta
-        else:
-            with measure_phase(phase_recorder, "likelihood_evaluation"):
-                terminal_eta, terminal_theta = chunking.materialize_terminal_predictions(
-                    context.layout,
-                    state.coefficients,
-                    chunk_size=context.chunk_size,
-                )
+        # A certified rank that dropped a retained direction; an uncertified band that
+        # kept every direction is left to the validator below.
         if (
             reason == "resolution_limited_stationarity"
             and context.coefficient_face is not None
-            and not _retained_rank_is_full(
-                terminal_reduced_rank, context.coefficient_face.reduced_width
+            and terminal_reduced_rank is not None
+            and (
+                terminal_reduced_rank.rank < context.coefficient_face.reduced_width
+                or terminal_reduced_rank.rank_truncated
             )
         ):
             converged = False
@@ -1957,39 +1945,64 @@ def _fit_dense_fixed_lambda_core(
             except ValueError:
                 converged = False
                 reason = "line_search_failed"
-        result = DenseSolverResult(
-            config=solver_config,
-            family_likelihood_plan_identifier=context.likelihood_plan.plan_identifier,
-            resolved_chunk_size=context.chunk_size,
-            execution_backend_identifier=context.execution_backend_identifier,
-            coefficients=state.coefficients,
-            eta=terminal_eta,
-            theta=terminal_theta,
-            penalty=context.penalty,
-            initial_penalized_optimizing_log_likelihood=initial_optimizing_objective,
-            initial_penalized_log_likelihood=initial_reported_objective,
-            optimizing_log_likelihood=state.optimizing_log_likelihood,
-            parameter_independent_carrier=state.parameter_independent_carrier,
-            log_likelihood=state.log_likelihood,
-            penalty_value=penalty_value,
-            penalized_optimizing_log_likelihood=state.penalized_optimizing_log_likelihood,
-            penalized_log_likelihood=state.penalized_log_likelihood,
-            terminal_score=terminal_score_geometry.score_penalized,
-            score_relative=score_relative,
-            objective_relative_change=objective_relative_change,
-            step_relative=step_relative,
-            converged=converged,
-            convergence_reason=reason,
-            iterations=len(history),
-            history=tuple(history),
-            backtracking_steps=sum(item.backtracks for item in history),
-            terminal_data_curvature=terminal_data_curvature,
-            terminal_penalized_curvature=terminal_penalized_curvature,
-            terminal_rank=terminal_rank,
-            terminal_curvature=curvature.telemetry,
-            coefficient_face=context.coefficient_face,
-            terminal_reduced_rank=terminal_reduced_rank,
-        )
+
+        def publish(state: _AcceptedState) -> DenseSolverResult:
+            if context.chunk_size is None:
+                if state.eta is None or state.theta is None:
+                    raise RuntimeError("dense terminal state is missing predictor values")
+                terminal_eta, terminal_theta = state.eta, state.theta
+            else:
+                with measure_phase(phase_recorder, "likelihood_evaluation"):
+                    terminal_eta, terminal_theta = chunking.materialize_terminal_predictions(
+                        context.layout,
+                        state.coefficients,
+                        chunk_size=context.chunk_size,
+                    )
+            return DenseSolverResult(
+                config=solver_config,
+                family_likelihood_plan_identifier=context.likelihood_plan.plan_identifier,
+                resolved_chunk_size=context.chunk_size,
+                execution_backend_identifier=context.execution_backend_identifier,
+                coefficients=state.coefficients,
+                eta=terminal_eta,
+                theta=terminal_theta,
+                penalty=context.penalty,
+                initial_penalized_optimizing_log_likelihood=initial_optimizing_objective,
+                initial_penalized_log_likelihood=initial_reported_objective,
+                optimizing_log_likelihood=state.optimizing_log_likelihood,
+                parameter_independent_carrier=state.parameter_independent_carrier,
+                log_likelihood=state.log_likelihood,
+                penalty_value=_half_penalty_quadratic(
+                    context.penalty, state.coefficients, context.penalty_entries
+                ),
+                penalized_optimizing_log_likelihood=state.penalized_optimizing_log_likelihood,
+                penalized_log_likelihood=state.penalized_log_likelihood,
+                terminal_score=terminal_score_geometry.score_penalized,
+                score_relative=score_relative,
+                objective_relative_change=objective_relative_change,
+                step_relative=step_relative,
+                converged=converged,
+                convergence_reason=reason,
+                iterations=len(history),
+                history=tuple(history),
+                backtracking_steps=sum(item.backtracks for item in history),
+                terminal_data_curvature=terminal_data_curvature,
+                terminal_penalized_curvature=terminal_penalized_curvature,
+                terminal_rank=terminal_rank,
+                terminal_curvature=curvature.telemetry,
+                coefficient_face=context.coefficient_face,
+                terminal_reduced_rank=terminal_reduced_rank,
+            )
+
+        try:
+            result = publish(state)
+        except ValueError:
+            # The stop was certified at the unprojected state, so where the projected
+            # one fails its re-check (a floor that shrank with |b|), publish that state.
+            if state is unprojected:
+                raise
+            state = unprojected
+            result = publish(state)
         # A projected endpoint's score and curvature were measured before it moved.
         if _reuse_session is not None and state is unprojected:
             _reuse_session.remember(
