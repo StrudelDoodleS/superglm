@@ -207,6 +207,48 @@ def _attributed_edf(
     return predictor_edf, intercept_edf, term_edf
 
 
+def _columns(solve, matrix: NDArray) -> NDArray[np.float64]:
+    return np.column_stack(tuple(solve(matrix[:, column]) for column in range(matrix.shape[1])))
+
+
+def _influence(result: DenseSolverResult) -> NDArray[np.float64]:
+    """``F = G^+ D`` for the matrix the terminal decomposition inverts.
+
+    Where the terminal rank was decided from the rows (``grey_subspace``
+    records ``rows_read``; ``certificate.py``), the decomposition inverts
+    ``G_rep = E diag(r) E'``, its estimable basis and retained values, not the
+    formed ``G``. The two differ in the directions read from the rows by more
+    than a stored float64 matrix resolves of their eigenvalues, so ``G^+ D``
+    with the formed ``D`` is inconsistent there. ``F`` is then ``G^+ G_rep -
+    G^+ S``: the projector of the decomposition's own matrix and the exact
+    penalty, so an unpenalized retained direction contributes exactly one.
+    Under a face, the formed ``G`` supplies the columns outside the face's
+    span: ``F = N P N' + G^+ G (I - N N') - G^+ S``, which equals ``G^+ D`` when
+    ``N' G N`` is the matrix decomposed.  Every other fit takes ``G^+ D``.
+    """
+    face = result.coefficient_face
+    decomposition = result.terminal_rank if face is None else result.terminal_reduced_rank
+    grey = (decomposition.grey_subspace if decomposition is not None else None) or {}
+    if (
+        decomposition is None
+        or not grey.get("rows_read")
+        or grey.get("projection_failed")
+        or decomposition.estimable_functional_basis is None
+        or decomposition.retained_values is None
+    ):
+        return _columns(result.solve_terminal, result.terminal_data_curvature)
+    basis = np.asarray(decomposition.estimable_functional_basis, dtype=np.float64)
+    retained = np.asarray(decomposition.retained_values, dtype=np.float64)
+    projector = _columns(decomposition.solve, basis) @ (retained[:, None] * basis.T)
+    influence = -_columns(result.solve_terminal, np.asarray(result.penalty, dtype=np.float64))
+    if face is None:
+        return projector + influence
+    null = np.asarray(face.null_basis, dtype=np.float64)
+    curvature = np.asarray(result.terminal_penalized_curvature, dtype=np.float64)
+    outside = curvature - (curvature @ null) @ null.T
+    return null @ projector @ null.T + _columns(result.solve_terminal, outside) + influence
+
+
 def compute_joint_inference(
     layout: StackedLayout,
     result: DenseSolverResult,
@@ -223,12 +265,7 @@ def compute_joint_inference(
         raise ValueError("terminal rank decomposition does not match the global layout")
 
     covariance = result.terminal_pseudo_inverse()
-    influence = np.column_stack(
-        tuple(
-            result.solve_terminal(result.terminal_data_curvature[:, column])
-            for column in range(width)
-        )
-    )
+    influence = _influence(result)
     if not np.all(np.isfinite(covariance)) or not np.all(np.isfinite(influence)):
         raise ValueError("terminal rank solve produced non-finite inference state")
     diagonal = np.diag(influence).copy()

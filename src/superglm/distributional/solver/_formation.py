@@ -294,7 +294,8 @@ class _AbsTensor:
     The squared statistic takes Cauchy-Schwarz over the separable rows: the
     cell sums ``S_ij`` weighted by the margins' row sums give ``sum_ij S_ij
     kron(M_1[i], M_2[j]) = vec(M_1' S M_2)``, then ``(A o A)'`` of that.  The
-    grid is formed only for a row pass.
+    row pass contracts the margins on its rows, as the group's own products
+    do, so no basis row of the bin grid is formed.
     """
 
     def __init__(self, group: DiscretizedTensorGroupMatrix):
@@ -328,12 +329,15 @@ class _AbsTensor:
         # The kron row (and the projection with a band), the margins' row
         # sums, and Cauchy-Schwarz's product.
         self.inner = width1 * width2 + chain + width1 + width2 + 4
-        self._grid = None
 
-    def _cells(self, start, stop):
+    def _margins(self, start, stop):
         group = self._group
         first = np.asarray(group.idx1[start:stop], dtype=np.intp)
-        return first * self._n2 + np.asarray(group.idx2[start:stop], dtype=np.intp)
+        return first, np.asarray(group.idx2[start:stop], dtype=np.intp)
+
+    def _cells(self, start, stop):
+        first, second = self._margins(start, stop)
+        return first * self._n2 + second
 
     def square_partial(self, start, stop, weights):
         cells = len(self._first) * self._n2
@@ -345,21 +349,26 @@ class _AbsTensor:
         aggregate = (self._first.T @ cells @ self._second).reshape(-1)
         return (self._transform * self._transform).T @ aggregate * (1.0 + 16.0 * _U)
 
-    def _table(self):
-        if self._grid is None:
-            first, second = self._first, self._second
-            grid = (first[:, None, :, None] * second[None, :, None, :]).reshape(
-                first.shape[0] * second.shape[0], first.shape[1] * second.shape[1]
-            )
-            self._grid = grid @ self._transform * (1.0 + 4.0 * _U)
-        return self._grid
-
     def matvec(self, start, stop, values):
-        return (self._table() @ values)[self._cells(start, stop)]
+        # Row (i, j) of kron(M_1, M_2) A v is M_2[j] . (M_1 reshape(A v))[i].
+        width1, width2 = self._first.shape[1], self._second.shape[1]
+        count = values.shape[1]
+        combined = (self._transform @ values).reshape(width1, width2 * count)
+        left = (self._first @ combined).reshape(-1, width2, count)
+        first, second = self._margins(start, stop)
+        rows = np.einsum("rb,rbg->rg", self._second[second], left[first])
+        return rows * (1.0 + 4.0 * _U)
 
     def rmatvec(self, start, stop, values):
-        table = self._table()
-        return table.T @ _bin_sums(self._cells(start, stop), values, len(table))
+        width1, width2 = self._first.shape[1], self._second.shape[1]
+        count = values.shape[1]
+        first, second = self._margins(start, stop)
+        weighted = (self._second[second][:, :, None] * values[:, None, :]).reshape(
+            -1, width2 * count
+        )
+        summed = _bin_sums(first, weighted, len(self._first))
+        aggregate = (self._first.T @ summed).reshape(width1 * width2, count)
+        return self._transform.T @ aggregate * (1.0 + 4.0 * _U)
 
 
 class _AbsGroup(Protocol):

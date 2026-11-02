@@ -98,17 +98,22 @@ def _alias(constant: bool, discrete: bool = True):
 
 
 def _formed_by_the_eigensolver(monkeypatch):
-    """Send the curvature policy's formed decision past the Cholesky shortcut.
+    """Make the curvature policy's formed decision keep the alias, through the eigensolver.
 
-    Whether rounding leaves the formed alias matrix to the shortcut or to the
-    eigensolver depends on the BLAS build, so the eigensolver route is forced.
-    ``allow_indefinite`` skips only the shortcut and the refusal of a
-    materially indefinite matrix, which this semidefinite fixture never meets.
+    Whether rounding leaves the formed alias above the cut, and to the
+    Cholesky shortcut or the eigensolver, depends on the BLAS build.  So the
+    formed decision sees the matrix plus ``1e-13`` of its diagonal, far inside
+    the formation bound (about ``1e-11`` here), as formation error would put
+    it; ``allow_indefinite`` skips only the shortcut and the refusal of a
+    materially indefinite matrix, which this fixture never meets.  The
+    certificate decides the matrix as formed.
     """
     formed = curvature_module._decompose_gram
 
     def eigensolver(matrix, **kwargs):
-        return formed(matrix, allow_indefinite=True, **kwargs)
+        kwargs.pop("spectrum", None)
+        lifted = matrix + 1e-13 * np.diag(np.diag(matrix))
+        return formed(lifted, allow_indefinite=True, **kwargs)
 
     monkeypatch.setattr(curvature_module, "_decompose_gram", eigensolver)
 
@@ -225,12 +230,16 @@ def _near_pair(discrete):
 @pytest.mark.parametrize("discrete", [True, False], ids=["chunked", "dense"])
 def test_near_pair_keeps_rank_with_exact_variance(terminal, monkeypatch, discrete):
     decisions, calls = terminal
+    # The dense route's row pass streams blocks of rows; force several.
+    monkeypatch.setattr(certificate, "_DENSE_BLOCK_ROWS", 700)
     model, frame, y, weights = _near_pair(discrete)
     result = _fit(model, frame, y, weights)
     assert result.terminal_rank.rank == 4
     assert result.terminal_curvature.certified is True
     assert result.terminal_curvature.grey_k == 1 and calls == [1]
     record = _main(decisions, 4)
+    if not discrete:
+        assert [block.stop - block.start for block in record[2]["rows"]()] == [700] * 4 + [200]
     layout, channels, matrices = _rows_and_design(record)
     exact = _exact_inverse_diagonal(layout, channels, matrices, np.asarray(result.penalty))
     published = np.diag(np.asarray(result.terminal_pseudo_inverse()))
@@ -243,6 +252,38 @@ def test_near_pair_keeps_rank_with_exact_variance(terminal, monkeypatch, discret
     model, frame, y, weights = _near_pair(discrete)
     unfixed = np.diag(np.asarray(_fit(model, frame, y, weights).terminal_pseudo_inverse()))
     assert np.max(np.abs(unfixed / exact - 1.0)) > 1e-6
+
+
+def test_near_pair_edf_follows_the_certified_curvature(terminal):
+    """Four unpenalized coefficients have EDF 4 when the rows decide the near-null direction.
+
+    Orthogonal +-1 Walsh columns: ``x``, ``x + 2**-23 e`` and the intercept,
+    with ``y`` orthogonal to all three, so the residual scale is 1 and each
+    slope's standard error is ``sqrt(1 + d**2) / (16 d)``, ``d = 2**-23``,
+    which is ``2**19`` to float64.  Master publishes 741,455 there and EDF 4.
+    The certificate publishes the exact error, and the influence of its own
+    decomposition keeps EDF at 4 (``inference._influence``).
+    """
+    _, calls = terminal
+    index = np.arange(256)
+    x = 1.0 - 2.0 * (index % 2)
+    e = 1.0 - 2.0 * ((index // 2) % 2)
+    family = GaussianLS(scale_floor=0)
+    model = SuperLSS(
+        family,
+        family.location(term("x1", Numeric()), term("x2", Numeric())),
+        family.scale(),
+        discrete=False,
+    )
+    result = _fit(
+        model, pd.DataFrame({"x1": x, "x2": x + 2.0**-23 * e}), 1.0 - 2.0 * ((index // 4) % 2)
+    )
+    assert result.terminal_curvature.grey_k == 1 and calls == [1]
+    assert result.terminal_rank.rank == 4
+    assert result.terminal_rank.grey_subspace["retained"] == 1.0
+    assert model.result_.total_effective_df == pytest.approx(4.0, abs=1e-9)
+    standard_errors = np.sqrt(np.diag(np.asarray(model.covariance_)))
+    np.testing.assert_allclose(standard_errors[1:3], 2.0**19, rtol=1e-9)
 
 
 def test_offset_column_keeps_its_rank(terminal):
@@ -522,3 +563,146 @@ def test_factored_statistics_match_cauchy_schwarz_row_by_row(kind):
         expected = ((weights * rows.sum(axis=1)) @ rows) @ (transform * transform) * scale
         got = absolute.square_close(absolute.square_partial(0, n, weights))
         np.testing.assert_allclose(got, expected, rtol=1e-12, atol=0)
+
+
+def test_tensor_row_pass_forms_no_bin_grid():
+    """A 512-by-512-bin tensor's row-pass products stay at its rows' and margins' size.
+
+    The whole grid's absolute rows would be ``512**2`` rows of 16 columns
+    (32 MiB); the margins and a 4,000-row block are well under 4 MiB.
+    """
+    import tracemalloc
+
+    from superglm._frame import as_eager_frame
+    from superglm.distributional.layout import build_stacked_layout
+    from superglm.distributional.predictor import Predictor, compile_predictors
+    from superglm.features import Spline
+
+    from ._distributional_weights import resolved_prior
+
+    rng = np.random.default_rng(7)
+    n = 20000
+    frame = pd.DataFrame({"a": rng.uniform(0, 1, n), "b": rng.uniform(0, 1, n)})
+    compiled = compile_predictors(
+        as_eager_frame(frame),
+        resolved_prior(np.ones(n)),
+        GaussianLS().parameters,
+        (
+            Predictor(
+                "location",
+                {"a": Spline(kind="cr", k=5), "b": Spline(kind="cr", k=5)},
+                interactions=(("a", "b"),),
+            ),
+            Predictor("scale", {}),
+        ),
+        model_discrete=True,
+        n_bins_config=512,
+    )
+    groups = build_stacked_layout(compiled).predictors[0].design.group_matrices
+    tensor = next(g for g in groups if type(g).__name__ == "DiscretizedTensorGroupMatrix")
+    assert tensor.n_bins1 * tensor.n_bins2 * tensor.shape[1] * 8 >= 32 * 2**20
+    absolute = _formation.abs_group(tensor)
+    values = rng.uniform(0, 1, (tensor.shape[1], 2))
+    rows = rng.uniform(0, 1, (4000, 2))
+    tracemalloc.start()
+    try:
+        products = absolute.matvec(1000, 5000, values)
+        transposed = absolute.rmatvec(1000, 5000, rows)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 4 * 2**20
+    # Against the block's own absolute rows, formed from the margins.
+    first = np.abs(np.asarray(tensor.B1_unique_t))[tensor.idx1[1000:5000]]
+    second = np.abs(np.asarray(tensor.B2_unique_t))[tensor.idx2[1000:5000]]
+    block = np.einsum("ra,rb->rab", first, second).reshape(4000, -1) @ np.abs(tensor.R_inv)
+    np.testing.assert_allclose(products, block @ values, rtol=1e-12)
+    np.testing.assert_allclose(transposed, block.T @ rows, rtol=1e-12)
+
+
+def _exact_and_direct_groups():
+    """Exact spline and spline-by-category groups from a compiled layout, and direct sparse and SCOP ones."""
+    import scipy.sparse as sp
+
+    from superglm._frame import as_eager_frame
+    from superglm._group_matrix._group_matrix_core import SparseGroupMatrix
+    from superglm._group_matrix._group_matrix_discretized import DiscretizedSCOPGroupMatrix
+    from superglm.distributional.layout import build_stacked_layout
+    from superglm.distributional.predictor import Predictor, compile_predictors
+    from superglm.features import Categorical, Spline
+
+    from ._distributional_weights import resolved_prior
+
+    rng = np.random.default_rng(8)
+    n = 400
+    frame = pd.DataFrame({"a": rng.uniform(0, 1, n), "g": rng.choice(list("abc"), n)})
+    compiled = compile_predictors(
+        as_eager_frame(frame),
+        resolved_prior(np.ones(n)),
+        GaussianLS().parameters,
+        (
+            Predictor(
+                "location",
+                {"a": Spline(k=8, discrete=False), "g": Categorical()},
+                interactions=(("a", "g"),),
+            ),
+            Predictor("scale", {}),
+        ),
+        model_discrete=False,
+    )
+    groups = list(build_stacked_layout(compiled).predictors[0].design.group_matrices)
+    sparse = sp.random(n, 6, density=0.3, random_state=9, format="csr") - sp.random(
+        n, 6, density=0.2, random_state=10, format="csr"
+    )
+    groups.append(SparseGroupMatrix(sp.csr_matrix(sparse)))
+    groups.append(DiscretizedSCOPGroupMatrix(rng.normal(size=(30, 5)), rng.integers(0, 30, n)))
+    return n, groups
+
+
+def test_absolute_designs_dominate_exact_sparse_and_scop_groups():
+    """Each group's absolute design and squared statistic dominate its rows, on row ranges too."""
+    n, groups = _exact_and_direct_groups()
+    kinds = [type(group).__name__ for group in groups]
+    for kind in ("SparseSSPGroupMatrix", "SplineCategoricalGroupMatrix", "SparseGroupMatrix"):
+        assert kind in kinds
+    assert "DiscretizedSCOPGroupMatrix" in kinds
+    rng = np.random.default_rng(11)
+    weights = rng.uniform(0.1, 2.0, n)
+    for group in groups:
+        absolute = _formation.abs_group(group)
+        assert absolute is not None, type(group).__name__
+        rows = np.abs(np.asarray(group.toarray()))
+        start, stop = 50, 330
+        values = rng.uniform(0.0, 1.0, (group.shape[1], 2))
+        products = rng.uniform(0.0, 1.0, (stop - start, 2))
+        lower = 1.0 - 1e-12
+        # The squared statistic over two chunks, closed once.
+        partial = absolute.square_partial(0, start, weights[:start])
+        partial = partial + absolute.square_partial(start, n, weights[start:])
+        squares = (rows * rows).T @ weights
+        assert np.all(absolute.square_close(partial) >= squares * lower), type(group).__name__
+        assert np.all(absolute.matvec(start, stop, values) >= rows[start:stop] @ values * lower)
+        assert np.all(
+            absolute.rmatvec(start, stop, products) >= rows[start:stop].T @ products * lower
+        )
+        if type(group).__name__ not in ("SparseSSPGroupMatrix", "SplineCategoricalGroupMatrix"):
+            # No factor chain: the absolute design is |X| itself.
+            np.testing.assert_allclose(absolute.square_close(partial), squares, rtol=1e-12)
+            np.testing.assert_allclose(
+                absolute.matvec(start, stop, values), rows[start:stop] @ values, rtol=1e-12
+            )
+        else:
+            # |B| |R_inv| on the group's own rows, through Cauchy-Schwarz for the statistic.
+            basis = np.abs(group.B.toarray())
+            if hasattr(group, "row_idx"):
+                mask = np.zeros(n, dtype=bool)
+                mask[np.asarray(group.row_idx)] = True
+                basis = basis * mask[:, None]
+            transform = np.abs(np.asarray(group.R_inv))
+            expected = ((weights * basis.sum(axis=1)) @ basis) @ (transform * transform)
+            np.testing.assert_allclose(absolute.square_close(partial), expected, rtol=1e-12)
+            np.testing.assert_allclose(
+                absolute.matvec(start, stop, values),
+                basis[start:stop] @ transform @ values,
+                rtol=1e-12,
+            )

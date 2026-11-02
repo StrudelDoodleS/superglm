@@ -155,14 +155,19 @@ def formation_bound(
     return _up(_up(full * lift_norm) + rounding)
 
 
-class _DenseRows:
-    """All rows of the dense predictor matrices as one row block."""
+# Rows per block of the dense route's row pass, so its absolute rows and
+# products are block-sized rather than the size of the design.
+_DENSE_BLOCK_ROWS = 2**15
 
-    def __init__(self, layout, matrices, curvature):
-        self.start, self.stop = 0, int(curvature.shape[0])
-        self.curvature = curvature
-        self._matrices = matrices
-        self._absolute = [np.abs(matrix) for matrix in matrices]
+
+class _DenseRows:
+    """One block of rows of the dense predictor matrices."""
+
+    def __init__(self, layout, matrices, curvature, start, stop):
+        self.start, self.stop = start, stop
+        self.curvature = curvature[start:stop]
+        self._matrices = [matrix[start:stop] for matrix in matrices]
+        self._absolute = [np.abs(matrix) for matrix in self._matrices]
         self._slices = [state.coefficient_slice for state in layout.predictors]
 
     def products(self, k, values):
@@ -445,10 +450,13 @@ def certify_terminal_rank(
 
 
 def dense_rows(layout, matrices, channels: Callable[[], NDArray]) -> Callable[[], Iterable]:
-    """The dense route's one row block, its channels evaluated on demand."""
+    """The dense route's rows in blocks, their channels evaluated on demand."""
 
     def rows():
-        return (_DenseRows(layout, matrices, np.asarray(channels(), dtype=np.float64)),)
+        curvature = np.asarray(channels(), dtype=np.float64)
+        n = int(curvature.shape[0])
+        for start in range(0, n, _DENSE_BLOCK_ROWS):
+            yield _DenseRows(layout, matrices, curvature, start, min(start + _DENSE_BLOCK_ROWS, n))
 
     return rows
 

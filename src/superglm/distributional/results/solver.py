@@ -1216,10 +1216,26 @@ def _validate_resolution_limited_stationarity(
         ) from exc
     if reconstructed_rank.rank != retained_width:
         raise ValueError("resolution-limited stationarity requires full reconstructed rank")
-    for candidate in (stored_correction, correction):
+    # Each solve is checked against the matrix it inverts.  A terminal rank
+    # decided from the rows inverts ``E diag(r) E'`` (``certificate.py``), not
+    # the formed curvature, in the directions it read.
+    grey = retained_rank.grey_subspace or {}
+    with np.errstate(over="ignore", invalid="ignore"):
+        stored_product = retained_curvature @ stored_correction
+        if (
+            grey.get("rows_read")
+            and not grey.get("projection_failed")
+            and retained_rank.estimable_functional_basis is not None
+            and retained_rank.retained_values is not None
+        ):
+            basis = np.asarray(retained_rank.estimable_functional_basis, dtype=np.float64)
+            retained = np.asarray(retained_rank.retained_values, dtype=np.float64)
+            stored_product = basis @ (retained * (basis.T @ stored_correction))
+        products = (stored_product, retained_curvature @ correction)
+    for product in products:
         with np.errstate(over="ignore", invalid="ignore"):
             residual = float(
-                np.linalg.norm(retained_curvature @ candidate - retained_score, ord=2)
+                np.linalg.norm(product - retained_score, ord=2)
                 / max(1.0, float(np.linalg.norm(retained_score, ord=2)))
             )
         if not math.isfinite(residual) or residual > config.residual_tolerance:

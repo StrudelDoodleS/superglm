@@ -1484,8 +1484,9 @@ def _certified_terminal_curvature(
     ``certificate.certify_terminal_rank`` reads the rows of the accepted
     curvature source once at most, and only when a direction lies within the
     formation bound of the cut. Newton steps keep the formed decision. A row
-    pass that cannot evaluate the state it accepted keeps the formed decision,
-    marked uncertified: the fit is disclosed, never refused.
+    pass that cannot evaluate the state it accepted, or runs out of memory,
+    keeps the formed decision, marked uncertified: the fit is disclosed, never
+    refused.
     """
     formation = geometry.formation
     if formation is None:
@@ -1521,7 +1522,13 @@ def _certified_terminal_curvature(
             rows=rows,
             product_roundings=rank_certificate.product_roundings(context.layout, formation),
         )
-    except (_NumericalEvaluationError, FloatingPointError, OverflowError, np.linalg.LinAlgError):
+    except (
+        _NumericalEvaluationError,
+        FloatingPointError,
+        OverflowError,
+        MemoryError,
+        np.linalg.LinAlgError,
+    ):
         return replace(curvature, telemetry=replace(curvature.telemetry, certified=False))
 
 
