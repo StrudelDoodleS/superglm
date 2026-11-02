@@ -316,11 +316,16 @@ def _face_ranks(design: MetricsDesign, W: NDArray, penalty: NDArray, face: NDArr
     certified as the unconstrained one is, on the projected Grams and the
     penalty on the face.  ``Z' M Z`` formed from the full Gram instead
     carries an error of the curvature weights put off the face times ``u``,
-    which no factorization of it detects while it stays definite.
+    which no factorization of it detects while it stays definite.  The
+    penalty on the face is ``(PZ)'(PZ)`` from its factor ``P'P = S``
+    (``penalty_factor``), PSD by construction: ``Z'SZ`` formed directly
+    cancels to rounding of either sign in the penalty's null space, and that
+    rounding outweighs the data's curvature once the weights are small.
     """
     rows = ProjectedDesign(design, face)
     raw_gram, xtw1, data_gram = weighted_moments(rows, W)
-    face_penalty = face.T @ penalty @ face
+    projected_penalty = penalty_factor(penalty) @ face
+    face_penalty = projected_penalty.T @ projected_penalty
     face_penalty = 0.5 * face_penalty + 0.5 * face_penalty.T
     coefficient = _certified_coefficient_rank(rows, W, raw_gram, face_penalty)
     data_rank = (

@@ -3790,3 +3790,36 @@ def test_face_leverage_and_edf_on_weights_far_apart_match_an_exact_reference(hea
     spline_edf = next(row.edf for row in evaluation.summary()._coef_rows if row.name == "x")
     assert spline_edf == pytest.approx(expected.sum() - 1.0, rel=1e-8)
     assert evaluation._influence_edf[0].sum() == pytest.approx(expected.sum() - 1.0, rel=1e-8)
+
+
+def test_face_leverage_at_tiny_weights_on_a_penalty_free_face_is_ols():
+    """A convex fit whose second differences all bind sits on the affine face,
+    where the penalty is exactly zero, so leverage re-formed there is
+    intercept-plus-slope OLS whatever the weights' scale.  Mutation check: the
+    face penalty formed directly, ``Z'SZ``, cancels to rounding of either sign
+    (``-6e-19`` or ``-4e-17`` by BLAS build) that outweighs the data's
+    curvature at weights ``1e-20``: leverage summed to 3.67, or the
+    decomposition refused a materially negative diagonal."""
+    from superglm import Constraint
+    from superglm.features.spline import BSplineSmooth
+
+    x = np.linspace(0.0, 1.0, 100)
+    X = pd.DataFrame({"x": x})
+    y = 2.0 + x - x * x + np.random.default_rng(0).normal(0.0, 0.1, 100)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": BSplineSmooth(n_knots=4, constraint=Constraint.fit.convex)},
+    ).fit(X, y)
+    # one free direction on the spline: the line
+    assert model.result.rank_info.face.shape[1] == 1
+
+    evaluation = model.metrics(X.copy(), y, sample_weight=np.full(100, 1e-20))
+    assert not evaluation._fit_geometry_matches
+    q, _ = np.linalg.qr(np.column_stack((np.ones_like(x), x)))
+    expected = np.sum(q * q, axis=1)
+    # The factor form leaves the null-space penalty at the rounding of ``PZ``
+    # squared, of order u^2 ||S|| (about 4e-27 here), against the data's
+    # curvature w sum (x - mean x)^2, about 8e-20: a leverage error near 1e-9.
+    np.testing.assert_allclose(evaluation.leverage, expected, rtol=0.0, atol=1e-7)
+    assert evaluation.leverage.sum() == pytest.approx(2.0, abs=1e-6)
