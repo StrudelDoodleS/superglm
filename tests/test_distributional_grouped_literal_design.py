@@ -6,14 +6,17 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 import scipy.sparse as sp
 
+import superglm._group_matrix._group_matrix_algebra as algebra
 from superglm._frame import as_eager_frame
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import Predictor, PredictorExecutionPlan, compile_predictors
 from superglm.distributional.solver import chunks
 from superglm.features import Categorical, Numeric, RandomEffect, Spline
+from superglm.group_matrix import DiscretizedSSPGroupMatrix
 
 from ._distributional_weights import resolved_prior
 from .test_distributional_fused_trial import _literal_design
@@ -223,6 +226,74 @@ def test_blocks_whose_sums_could_leave_the_range_contract_chunk_by_chunk(monkeyp
     assert moments == [8] * 9 + [5] * 3
 
 
+def _by_bin_contractions(monkeypatch):
+    contracted = []
+    original = algebra._by_bin_contraction
+
+    def counted(gm, cache, table):
+        contracted.append(table.shape)
+        return original(gm, cache, table)
+
+    monkeypatch.setattr(algebra, "_by_bin_contraction", counted)
+    return contracted
+
+
+@pytest.mark.parametrize("chunks_per_block", [1, 2])
+@pytest.mark.parametrize("kept", [True, False], ids=["kept", "declined"])
+def test_by_bin_tables_are_contracted_once_per_pass(monkeypatch, chunks_per_block, kept):
+    problem = _mixed_problem()
+    monkeypatch.setattr(
+        chunks, "contraction_block_rows", lambda n, row_bytes, rows: chunks_per_block * rows
+    )
+    if not kept:
+        monkeypatch.setattr(chunks, "PassTables", lambda budget: algebra.PassTables(0))
+    contracted = _by_bin_contractions(monkeypatch)
+    _assert_geometry(*_assemble(monkeypatch, problem=problem))
+    # Four by-bin pairs: the numeric column and the categorical against the
+    # location spline, and both against the scale spline. Four 8-row chunks
+    # form 4 or 2 blocks; kept tables contract once per pass.
+    blocks = -(-4 // chunks_per_block)
+    assert len(contracted) == (4 if kept else 4 * blocks)
+
+
+def test_pass_tables_are_contracted_before_their_sums_could_leave_the_range(monkeypatch):
+    layout, literal, score, curvature = _mixed_problem()
+    # One 8-row block's sums stay below 2**1000; two blocks' could pass it.
+    score *= 2.0**996
+    curvature *= 2.0**996
+    monkeypatch.setattr(chunks, "contraction_block_rows", lambda n, row_bytes, rows: rows)
+    contracted = _by_bin_contractions(monkeypatch)
+    _assert_geometry(*_assemble(monkeypatch, problem=(layout, literal, score, curvature)))
+    # The tables hold the first block and are contracted before the second;
+    # the other three blocks contract their own four pairs.
+    assert len(contracted) == 4 + 3 * 4
+
+
+def test_an_assembly_projects_each_support_once(monkeypatch):
+    problem = _mixed_problem()
+    monkeypatch.setattr(chunks, "contraction_block_rows", lambda n, row_bytes, rows: rows)
+    formed, calls = [], []
+    original = algebra.PassFactors.projection
+
+    def counted(self, B_unique, R_inv):
+        calls.append(1)
+        if (id(B_unique), id(R_inv)) not in self.projections:
+            formed.append((B_unique, R_inv))
+        return original(self, B_unique, R_inv)
+
+    monkeypatch.setattr(algebra.PassFactors, "projection", counted)
+    _assert_geometry(*_assemble(monkeypatch, problem=problem))
+    supports = {
+        (id(group.B_unique), id(group.R_inv))
+        for state in problem[0].predictors
+        for group in state.design.group_matrices
+        if type(group) is DiscretizedSSPGroupMatrix
+    }
+    # Each block and channel asks again; each support is formed once.
+    assert len(formed) == len(supports) == 2
+    assert len(calls) >= 4 * len(supports)
+
+
 def _arrays(group):
     names = {name for kind in type(group).__mro__ for name in getattr(kind, "__slots__", ())}
     names |= set(getattr(group, "__dict__", {}))
@@ -292,6 +363,35 @@ def test_block_design_rows_own_no_more_than_the_budget_counts():
     assert {"SparseSSPGroupMatrix", "SplineCategoricalGroupMatrix"} <= kinds
     # Two binned spline terms on one categorical, two non-base levels each.
     assert level_groups == 4
+
+
+def test_chunk_design_rows_own_no_more_than_the_chunk_selector_counts():
+    layout = _mixed_problem(extended=True)[0]
+    rows = chunks.RowChunk(start=5, stop=21, indices=np.arange(5, 21, dtype=np.intp))
+    length = len(rows.indices)
+    # Owned bytes per chunk row: a level's own arrays over its rows, the rest
+    # (an exact level group's basis slice included) over every row.
+    per_row = np.zeros(length)
+    kinds = set()
+    for state in layout.predictors:
+        chunk = chunks._row_design(state, rows)
+        for parent, child in zip(state.design.group_matrices, chunk.group_matrices, strict=True):
+            kinds.add(type(child).__name__)
+            owned, child_rows = _owned_bytes(parent, child, length)
+            basis = getattr(child, "B", None) if hasattr(child, "row_idx") else None
+            spread = 0
+            if sp.issparse(basis):
+                spread = sum(a.nbytes for a in (basis.data, basis.indices, basis.indptr))
+            per_row += spread / length
+            if hasattr(child, "row_idx"):
+                if child_rows:
+                    per_row[child.row_idx] += (owned - spread) / child_rows
+            else:
+                per_row += owned / length
+    assert np.max(per_row) <= 8 * chunks.chunk_row_floats(layout)
+    assert {"DenseGroupMatrix", "CategoricalGroupMatrix", "RandomEffectGroupMatrix"} <= kinds
+    assert {"DiscretizedSSPGroupMatrix", "DiscretizedSplineCategoricalGroupMatrix"} <= kinds
+    assert {"SparseSSPGroupMatrix", "SplineCategoricalGroupMatrix"} <= kinds
 
 
 def test_an_exact_level_group_filling_its_block_owns_no_more_than_its_charge():

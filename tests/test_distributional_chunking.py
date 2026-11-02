@@ -376,6 +376,9 @@ def test_contraction_row_bytes_count_the_buffer_and_each_groups_owned_rows() -> 
     # Five channels, four gathers and the row indices, the dense column's weighted copy,
     # row views for splines.
     assert chunking.contraction_row_bytes(layout) == 8 * (2 + 3 + 5 + 1)
+    # A likelihood chunk copies the numeric column and each spline's bin codes,
+    # not a coefficient-wide row.
+    assert chunking.chunk_row_floats(layout) == 1 + 1 + 1 < layout.n_coefficients
 
 
 def test_layouts_with_uncounted_groups_contract_one_chunk_at_a_time() -> None:

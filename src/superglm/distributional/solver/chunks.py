@@ -775,11 +775,16 @@ _COUNTED_GROUPS = frozenset(
 )
 
 
-def _group_row_floats(group, *, dense_copies: bool = True) -> int:
+def _max_row_values(matrix) -> int:
+    """The most stored values one row of a CSR matrix holds."""
+    return int(np.max(np.diff(matrix.indptr), initial=0))
+
+
+def _group_row_floats(group, *, chunk: bool = False) -> int:
     """Owned floats per block row of one counted group outside spline-by-category.
 
-    ``dense_copies`` charges the dense rows a saturated exact spline's gram
-    forms, which only a contraction makes.
+    ``chunk`` counts a likelihood chunk's copy instead: no gram forms dense
+    rows, and its rows may be the basis's fullest.
     """
     if type(group) not in _EXACT_SPLINES:
         return _BLOCK_ROW_ARRAYS.get(type(group), group.shape[1])
@@ -789,14 +794,15 @@ def _group_row_floats(group, *, dense_copies: bool = True) -> int:
     basis = group.B
     rows, width = basis.shape
     entry = basis.data.itemsize + basis.indices.itemsize
-    dense = 8 * width if dense_copies else 0
-    per_row = entry * basis.nnz + (basis.indptr.itemsize + dense) * rows
+    dense = 0 if chunk else 8 * width
+    stored = _max_row_values(basis) * rows if chunk else basis.nnz
+    per_row = entry * stored + (basis.indptr.itemsize + dense) * rows
     if type(group) is SplineCategoricalGroupMatrix:
         # A level group also owns its rows' CSR, a float copy of its values, its
         # row indices and, for a saturated basis, the dense copy of its rows
         # that the weighted copy above is made from; charging these on every
         # row bounds each level.
-        per_row += (entry + 8) * basis.nnz + (basis.indptr.itemsize + 8 + dense) * rows
+        per_row += (entry + 8) * stored + (basis.indptr.itemsize + 8 + dense) * rows
     return -(-per_row // (8 * rows))
 
 
@@ -850,6 +856,7 @@ def _exact_spline_category_chunk_floats(design) -> int:
     Every level group copies the chunk's basis rows. A row's own level group
     also copies its level rows, their values and row indices, and a row lies
     in one level of each term, the terms on one categorical sharing its name.
+    A row holds at most its basis's most stored values.
     """
     slices = 0.0
     own: dict = {}
@@ -859,12 +866,11 @@ def _exact_spline_category_chunk_floats(design) -> int:
             continue
         basis = group.B
         entry = basis.data.itemsize + basis.indices.itemsize
-        slices += entry * basis.nnz / basis.shape[0] + basis.indptr.itemsize
+        slices += entry * _max_row_values(basis) + basis.indptr.itemsize
         feature = group.spline_cat_feature
         key = (id(group), None) if feature is None else (feature, group.spline_cat_level)
         levels[key] = levels.get(key, 0) + 1
-        level_rows = max(1, len(group.row_idx))
-        level = (entry + 8) * group.B_level.nnz / level_rows + basis.indptr.itemsize + 8
+        level = (entry + 8) * _max_row_values(group.B_level) + basis.indptr.itemsize + 8
         own[key[0]] = max(own.get(key[0], 0.0), level)
     terms: dict = {}
     for (feature, _level), count in levels.items():
@@ -897,7 +903,7 @@ def chunk_row_floats(layout: StackedLayout) -> int:
             if kind not in _COUNTED_GROUPS:
                 floats += group.shape[1]
                 continue
-            floats += _group_row_floats(group, dense_copies=False)
+            floats += _group_row_floats(group, chunk=True)
             floats += kind in (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix)
     return floats
 
