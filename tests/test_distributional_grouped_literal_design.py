@@ -241,6 +241,26 @@ def _sparse_arrays(group):
     ]
 
 
+def _owned_bytes(parent, child, block_rows):
+    """Bytes a block child owns that share no memory with its parent, and its rows."""
+    parents = _arrays(parent) + _sparse_arrays(parent)
+    # A level group's row arrays cover only its level's rows; an exact level
+    # group's value copy has one entry per stored value.
+    child_rows = len(child.row_idx) if hasattr(child, "row_idx") else block_rows
+    level = getattr(child, "B_level", None)
+    shapes = {(child_rows,)} | ({(level.nnz,)} if sp.issparse(level) else set())
+    # A sparse basis owns its slice whatever the arrays' lengths.
+    candidates = [a for a in _arrays(child) if a.shape[:1] in shapes]
+    candidates += _sparse_arrays(child)
+    distinct = {a.__array_interface__["data"][0]: a for a in candidates}
+    owned = sum(
+        array.nbytes
+        for array in distinct.values()
+        if not any(np.shares_memory(array, source) for source in parents)
+    )
+    return owned, child_rows
+
+
 def test_block_design_rows_own_no_more_than_the_budget_counts():
     layout = _mixed_problem(extended=True)[0]
     rows = chunks.RowChunk(start=5, stop=21, indices=np.arange(5, 21, dtype=np.intp))
@@ -255,21 +275,7 @@ def test_block_design_rows_own_no_more_than_the_budget_counts():
         # Owned spline-by-category bytes, spread over the block rows each level owns.
         per_row = np.zeros(length)
         for parent, child in zip(state.design.group_matrices, block.group_matrices, strict=True):
-            parents = _arrays(parent) + _sparse_arrays(parent)
-            # A level group's row arrays cover only its level's rows; an exact
-            # level group's value copy has one entry per stored value.
-            child_rows = len(getattr(child, "row_idx", rows.indices))
-            level = getattr(child, "B_level", None)
-            shapes = {(child_rows,)} | ({(level.nnz,)} if sp.issparse(level) else set())
-            # A sparse basis owns its slice whatever the arrays' lengths.
-            candidates = [a for a in _arrays(child) if a.shape[:1] in shapes]
-            candidates += _sparse_arrays(child)
-            distinct = {a.__array_interface__["data"][0]: a for a in candidates}
-            owned = sum(
-                array.nbytes
-                for array in distinct.values()
-                if not any(np.shares_memory(array, source) for source in parents)
-            )
+            owned, child_rows = _owned_bytes(parent, child, length)
             kinds.add(type(child).__name__)
             if type(parent) in chunks._SPLINE_CATEGORY_GROUPS:
                 level_groups += 1
@@ -286,3 +292,48 @@ def test_block_design_rows_own_no_more_than_the_budget_counts():
     assert {"SparseSSPGroupMatrix", "SplineCategoricalGroupMatrix"} <= kinds
     # Two binned spline terms on one categorical, two non-base levels each.
     assert level_groups == 4
+
+
+def test_an_exact_level_group_filling_its_block_owns_no_more_than_its_charge():
+    n = 40
+    rows = np.arange(n)
+    frame = pd.DataFrame(
+        {
+            "u": np.cos(rows * 0.3),
+            # Sorted levels, so the block below lies inside level b.
+            "g": np.where(rows < 20, "a", "b"),
+        }
+    )
+    compiled = compile_predictors(
+        as_eager_frame(frame),
+        resolved_prior(np.ones(n)),
+        GaussianLS().parameters,
+        (
+            Predictor(
+                "location",
+                {"u": Spline(kind="cr", k=6, discrete=False), "g": Categorical()},
+                interactions=(("u", "g"),),
+            ),
+            Predictor("scale", {}),
+        ),
+        model_discrete=True,
+        n_bins_config=9,
+    )
+    state = build_stacked_layout(compiled).predictors[0]
+    block_rows = chunks.RowChunk(start=22, stop=38, indices=np.arange(22, 38, dtype=np.intp))
+    length = len(block_rows.indices)
+    block = chunks._row_design(state, block_rows, copy=False)
+    # Contract once, so a saturated level's dense rows are built.
+    PredictorExecutionPlan(block, state.intercept_index is not None).diagonal_moment(
+        np.linspace(0.5, 1.5, length)
+    )
+    filled = []
+    for parent, child in zip(state.design.group_matrices, block.group_matrices, strict=True):
+        if type(child).__name__ != "SplineCategoricalGroupMatrix":
+            continue
+        owned, child_rows = _owned_bytes(parent, child, length)
+        if child_rows == length:
+            filled.append(type(child).__name__)
+            counted = chunks._group_row_floats(parent)
+            assert owned <= 8 * length * counted, (owned, counted)
+    assert filled == ["SplineCategoricalGroupMatrix"]

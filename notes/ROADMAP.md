@@ -339,9 +339,12 @@ refusal on the two large mixed cases; smaller controls retain existing routes.
 remaining binned route contract each block of likelihood chunks once per pass
 (Li and Wood 2020, Algorithm 1) instead of once per chunk, and retires the
 automatic small-group panels, which that route beats on every layout they
-admitted. A block holds at most 2**15 rows, because longer sequential bin sums
-can make an exact alias look estimable; keeping each block's bin-pair tables
-and contracting them once per pass is the next step. Global moments stays: on the million-row C1 fixture the per-pass
+admitted. A block holds at most 2**15 rows, the scale the automatic chunk sums
+over on small layouts, since longer sequential bin sums make an exact alias look
+estimable more often. The LSS rank cut ignores the Gram's assembly rounding, so
+master can do the same at chunk length; a cut that counts it is the fix.
+Keeping each block's bin-pair tables and contracting them once per pass is the
+next speed step. Global moments stays: on the million-row C1 fixture the per-pass
 route takes 22.9 s against 11.1 s, because pair-by-pair contraction rescans
 the rows once for each of its 465 group pairs. Retiring global moments needs
 the per-pass route to match it there first; pooling the group pairs on threads

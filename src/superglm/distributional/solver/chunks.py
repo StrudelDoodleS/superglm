@@ -69,8 +69,8 @@ AUTO_CHUNK_MEMORY_BYTES = 8 * 1024 * 1024
 AUTO_CONTRACTION_MEMORY_BYTES = 64 * 1024 * 1024
 # The longest run of rows one contraction block sums. Bin and level sums run
 # sequentially, so their rounding grows with the run; this keeps it at the
-# scale of the automatic likelihood chunk on a small layout (about 2**15 rows),
-# so aliased columns' Gram entries differ by what the chunk stream's sums do.
+# scale the automatic likelihood chunk sums over on a small layout (about 2**15
+# rows). It does not reproduce the chunk stream's rounding on every layout.
 AUTO_CONTRACTION_MAX_ROWS = 2**15
 
 # Retained snapshots plus support vectors per pass; refresh uses bounded scratch.
@@ -780,15 +780,17 @@ def _group_row_floats(group) -> int:
     if type(group) not in _EXACT_SPLINES:
         return _BLOCK_ROW_ARRAYS.get(type(group), group.shape[1])
     # An exact spline's block slice owns a CSR copy of the block rows: values,
-    # column indices and row pointers.
+    # column indices and row pointers. A saturated basis's gram also forms a
+    # weighted dense block of its rows.
     basis = group.B
-    rows = basis.shape[0]
+    rows, width = basis.shape
     entry = basis.data.itemsize + basis.indices.itemsize
-    per_row = entry * basis.nnz + basis.indptr.itemsize * rows
+    per_row = entry * basis.nnz + (basis.indptr.itemsize + 8 * width) * rows
     if type(group) is SplineCategoricalGroupMatrix:
-        # A level group also owns its rows' CSR, a float copy of its values and
-        # its row indices; charging these on every row bounds each level.
-        per_row += (entry + 8) * basis.nnz + (basis.indptr.itemsize + 8) * rows
+        # A level group also owns its rows' CSR, a float copy of its values, its
+        # row indices and, for a saturated basis, a dense copy of its rows,
+        # which its gram weights; charging these on every row bounds each level.
+        per_row += (entry + 8) * basis.nnz + (basis.indptr.itemsize + 8 + 8 * width) * rows
     return -(-per_row // (8 * rows))
 
 

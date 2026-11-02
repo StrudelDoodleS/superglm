@@ -415,12 +415,14 @@ def test_layouts_with_uncounted_groups_contract_one_chunk_at_a_time() -> None:
     assert chunking.contraction_block_rows(1_000, row_bytes, 4_000) == 1_000
 
 
+@pytest.mark.parametrize("discrete", [True, False], ids=["binned", "exact"])
 @pytest.mark.parametrize("chunks_per_block", [None, 3, 1])
 def test_grouped_geometry_contracts_each_channel_once_per_block(
     monkeypatch: pytest.MonkeyPatch,
     chunks_per_block: int | None,
+    discrete: bool,
 ) -> None:
-    family, layout, response, weights, _, _, _ = _problem(n=137)
+    family, layout, response, weights, _, _, _ = _problem(n=137, discrete=discrete)
     coefficients = np.linspace(-0.2, 0.3, layout.n_coefficients)
     arguments = (family, layout, response, _plan(family, response, weights), coefficients)
     options = {
