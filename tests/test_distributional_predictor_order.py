@@ -13,15 +13,33 @@ from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.model import _predict_one_eta
-from superglm.distributional.predictor import compile_predictors
+from superglm.distributional.predictor import Predictor, compile_predictors
 from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.solver import chunks, fit_dense_fixed_lambda
 from superglm.distributional.solver._global_moments import build_global_moment_plan
+from superglm.features import Categorical, Numeric, Spline
 from superglm.group_matrix import CategoricalGroupMatrix
 
 from ._distributional_weights import resolved_prior
 from ._exact_reference import exact_sum
-from .test_distributional_automatic_panels import _predictor
+
+
+def _predictor(name, mode):
+    features = {}
+    if mode in ("mixed", "numeric", "numeric_spline"):
+        features["x"] = Numeric()
+    if mode in ("mixed", "support", "support_category", "numeric_spline"):
+        features["s"] = Spline(kind="cr", k=4)
+    if mode in ("mixed", "category", "support_category"):
+        features["g"] = Categorical()
+    # Different intercept choices give rectangular curvature blocks without
+    # relying on tiny, roundoff-sensitive raw spline values for dispatch.
+    return Predictor(
+        name,
+        features,
+        interactions=(("s", "g"),) if mode == "mixed" else (),
+        intercept=not (name == "scale" and mode == "mixed"),
+    )
 
 
 @pytest.fixture(scope="module")
@@ -200,7 +218,6 @@ def test_complete_admitted_fit_matches_grouped_stationarity(admitted_problem, mo
     actual = fit()
     assert finished and set(finished) == {len(problem.y)}
     monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: None)
-    monkeypatch.setattr(chunks, "automatic_small_group_panel_budget", lambda *args: None)
     grouped = fit()
     assert actual.converged and grouped.converged
     gap = min(

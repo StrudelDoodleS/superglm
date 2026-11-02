@@ -17,9 +17,7 @@ def test_admitted_global_stream_does_not_construct_child_geometry(monkeypatch, c
     layout = problem[1]
     p = layout.n_coefficients
     options = dict(penalty=np.eye(p), chunk_size=7, curvature_source="observed")
-    baseline = chunks.assemble_chunked_geometry(
-        *problem, small_group_panel_byte_budget=None, **options
-    )
+    baseline = chunks._assemble_grouped_pass_geometry(*problem, **options)
     monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: 64 << 20)
     original = chunks.PredictorExecutionPlan
     plans = []
@@ -77,9 +75,7 @@ def test_range_refusal_releases_stream_before_complete_child_replay(monkeypatch)
     problem = _support_problem(True)
     p = problem[1].n_coefficients
     options = dict(penalty=np.eye(p), chunk_size=7, curvature_source="observed")
-    expected = chunks.assemble_chunked_geometry(
-        *problem, small_group_panel_byte_budget=None, **options
-    )
+    expected = chunks._assemble_grouped_pass_geometry(*problem, **options)
     monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: 64 << 20)
     original_build = chunks.build_global_moment_plan
     original_stream = chunks.iter_likelihood_chunks

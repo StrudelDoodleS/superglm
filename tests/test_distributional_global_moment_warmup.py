@@ -19,8 +19,7 @@ assert all(not kernel.nopython_signatures for kernel in kernels)
 superglm.warmup()
 compiled = tuple(tuple(kernel.nopython_signatures) for kernel in kernels)
 assert tuple(map(len, compiled)) == (1, 1, 1, 1)
-from tests.test_distributional_automatic_panels import _problem
-from tests.test_distributional_global_moment_integration import _row_stream
+from tests.test_distributional_global_moment_integration import _problem, _row_stream
 for companion in ('mixed', 'intercept'):
     layout, score, curvature = _problem(('mixed', companion))
     for readonly in (False, True):

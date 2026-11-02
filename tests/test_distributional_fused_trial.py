@@ -23,10 +23,17 @@ from superglm.distributional.solver import solver as solver_api
 from superglm.distributional.solver._global_moments import GlobalMomentRefusalError
 from superglm.distributional.weights import UnsupportedLikelihoodContractError
 from superglm.features import Numeric, Spline
+from superglm.group_matrix import (
+    CategoricalGroupMatrix,
+    DenseGroupMatrix,
+    DiscretizedSplineCategoricalGroupMatrix,
+    DiscretizedSSPGroupMatrix,
+    SupportCompressedSplineCategoricalGroupMatrix,
+    SupportCompressedSSPGroupMatrix,
+)
 
 from ._exact_reference import exact_matmul, exact_weighted_gram
 from ._gaussian_lss_oracles import gamma, gaussian_row_oracle
-from .test_distributional_automatic_panels import _literal_design
 from .test_distributional_chunk_execution import _problem
 
 
@@ -43,6 +50,32 @@ def _context(problem=None, *, source="observed"):
         coefficient_face=None,
     )
     return context, coefficients
+
+
+def _literal_design(layout):
+    matrices = []
+    for state in layout.predictors:
+        pieces = [np.ones((state.design.n, 1))] if state.intercept_index is not None else []
+        for group in state.design.group_matrices:
+            if type(group) is DenseGroupMatrix:
+                values = group.M.copy()
+            elif type(group) is CategoricalGroupMatrix:
+                values = np.zeros(group.shape)
+                for row, code in enumerate(group.codes):
+                    if code < group.n_levels:
+                        values[row, code] = 1
+            elif type(group) in (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix):
+                values = group.B_unique[group.bin_idx] @ group.R_inv
+            else:
+                assert type(group) in (
+                    DiscretizedSplineCategoricalGroupMatrix,
+                    SupportCompressedSplineCategoricalGroupMatrix,
+                )
+                values = np.zeros(group.shape)
+                values[group.row_idx] = group.B_unique[group.bin_idx_level] @ group.R_inv
+            pieces.append(values)
+        matrices.append(np.column_stack(pieces))
+    return tuple(matrices)
 
 
 def test_a_replaced_penalty_rebuilds_the_penalty_entries():
@@ -108,9 +141,8 @@ def _combined(context, coefficients, **kwargs):
 @pytest.mark.parametrize("failure", ["add", "finish"])
 def test_partial_global_fallback_resets_likelihood_sums_and_closes_workspace(monkeypatch, failure):
     context, coefficients = _context()
-    expected_geometry, expected_sums = _combined(
-        context, coefficients, small_group_panel_byte_budget=None
-    )
+    monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: None)
+    expected_geometry, expected_sums = _combined(context, coefficients)
     events, refs = [], []
 
     class Plan:
@@ -131,7 +163,7 @@ def test_partial_global_fallback_resets_likelihood_sums_and_closes_workspace(mon
             self.buffer = None
             events.append("closed")
 
-    original = chunks._assemble_grouped_chunk_geometry
+    original = chunks._assemble_grouped_pass_geometry
 
     def replay(*args, **kwargs):
         assert events == ["closed"]
@@ -143,9 +175,9 @@ def test_partial_global_fallback_resets_likelihood_sums_and_closes_workspace(mon
     monkeypatch.setattr(
         chunks, "build_global_moment_plan", lambda *args, **kwargs: SimpleNamespace(plan=Plan())
     )
-    monkeypatch.setattr(chunks, "_assemble_grouped_chunk_geometry", replay)
+    monkeypatch.setattr(chunks, "_assemble_grouped_pass_geometry", replay)
     geometry, sums = _combined(context, coefficients)
-    # Exact on purpose: the replay runs the same per-chunk assembly, in the same order, as the
+    # Exact on purpose: the replay runs the same per-pass assembly, in the same order, as the
     # run it is compared with. What the test guards is a likelihood sum that was not reset, an
     # error of a whole chunk, so no rounding allowance is needed or wanted.
     assert sums == expected_sums
@@ -183,6 +215,44 @@ def test_derivative_failure_releases_partial_trial_before_value_retry(monkeypatc
     )
     assert run.history[0].backtracks == 0
     assert orders == [2, 2] + [0] * 4 + [2] * 4
+
+
+def test_derivative_failure_releases_the_contraction_buffer_before_value_retry(monkeypatch):
+    context, coefficients = _context()
+    initial, geometry, config = _run(context, coefficients)
+    original = type(context.family).evaluate_natural
+    add_channel = chunks.GroupedGeometryAccumulator.add_curvature_channel
+    add_score = chunks.GroupedGeometryAccumulator.add_score
+    orders, buffers = [], []
+
+    def channel(self, plans, channel_index, weights):
+        buffers.append(weakref.ref(weights.base))
+        return add_channel(self, plans, channel_index, weights)
+
+    def score(self, plans, score_eta):
+        buffers.append(weakref.ref(score_eta.base))
+        return add_score(self, plans, score_eta)
+
+    def evaluate(self, *args, **kwargs):
+        order = kwargs.get("derivative_order", 2)
+        orders.append(order)
+        if len(orders) == 3:
+            raise FloatingPointError("temporary derivative domain failure")
+        if order == 0:
+            assert buffers and all(ref() is None for ref in buffers)
+        return original(self, *args, **kwargs)
+
+    # Blocks one row longer than a chunk buffer one chunk each, so the first block
+    # is contracted from the buffer before the third chunk fails.
+    monkeypatch.setattr(chunks, "contraction_block_rows", lambda n, row_bytes, rows: rows + 1)
+    monkeypatch.setattr(chunks.GroupedGeometryAccumulator, "add_curvature_channel", channel)
+    monkeypatch.setattr(chunks.GroupedGeometryAccumulator, "add_score", score)
+    monkeypatch.setattr(type(context.family), "evaluate_natural", evaluate)
+    solver_api._run_iterations(
+        context, initial, config, initial_geometry=geometry, stop_policy="ordinary"
+    )
+    assert orders[:3] == [2, 2, 2]
+    assert 0 in orders
 
 
 @pytest.mark.parametrize("error", [UnsupportedLikelihoodContractError, ValueError])

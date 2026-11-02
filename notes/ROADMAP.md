@@ -293,9 +293,9 @@ the resulting bounded range and renderer changes reduce complete-fit medians by
 The constructor-inclusive raw-basis tabmat pilot is slower than those panels,
 so the existing signed matrix-product architecture is retained.
 
-Automatic panels now admit a narrow mixed ordinary layout supported by those
-measurements, with a separate 64 MiB workspace allowance and existing numerical
-refusal. Automatic dense selection remains deferred. Full non-browser validation
+Automatic panels (retired by #569) then admitted a narrow mixed ordinary layout
+supported by those measurements, with a separate 64 MiB workspace allowance
+and existing numerical refusal. Automatic dense selection remains deferred. Full non-browser validation
 passes 12,350 tests, including all 84 required real-data checks, with 109 other
 skips. Final actual-default validation completes 28 timed public fits and three
 separate dispatch witnesses. Discrete medians improve by 58.5% for fragmented
@@ -334,6 +334,21 @@ median falls 12.036 to 7.884 s, and the million-row/P102 sample falls 39.439 to
 versus 3,893.99 MiB exact. Same-discrete outputs agree at roundoff scale;
 discretization error remains separately measured. Global moments execute without
 refusal on the two large mixed cases; smaller controls retain existing routes.
+
+[PR #569](https://github.com/StrudelDoodleS/superglm/pull/569) makes the
+remaining binned route contract each block of likelihood chunks once per pass
+(Li and Wood 2020, Algorithm 1) instead of once per chunk, and retires the
+automatic small-group panels, which that route beats on every layout they
+admitted. A block holds at most 2**15 rows, the scale the automatic chunk sums
+over on small layouts, since longer sequential bin sums make an exact alias look
+estimable more often. The LSS rank cut ignores the Gram's assembly rounding, so
+master can do the same at chunk length; a cut that counts it is the fix.
+Keeping each block's bin-pair tables and contracting them once per pass is the
+next speed step. Global moments stays: on the million-row C1 fixture the per-pass
+route takes 22.9 s against 11.1 s, because pair-by-pair contraction rescans
+the rows once for each of its 465 group pairs. Retiring global moments needs
+the per-pass route to match it there first; pooling the group pairs on threads
+alone takes one assembly from 1.40 to 0.72 s on 8 cores, against 0.48 s.
 
 The user judged the 8% one-thread time advantage over exact insufficient and
 explicitly selected further latency reduction on 2026-09-09. Single-fit wall
