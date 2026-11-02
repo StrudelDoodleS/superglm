@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Protocol
 
 import numpy as np
 import scipy.sparse as sp
@@ -362,7 +362,21 @@ class _AbsTensor:
         return table.T @ _bin_sums(self._cells(start, stop), values, len(table))
 
 
-def abs_group(group):
+class _AbsGroup(Protocol):
+    """One group's absolute design over row ranges, and its squared statistic."""
+
+    inner: int
+
+    def square_partial(self, start: int, stop: int, weights: NDArray, /) -> NDArray: ...
+
+    def square_close(self, partial: NDArray, /) -> NDArray: ...
+
+    def matvec(self, start: int, stop: int, values: NDArray, /) -> NDArray: ...
+
+    def rmatvec(self, start: int, stop: int, values: NDArray, /) -> NDArray: ...
+
+
+def abs_group(group) -> _AbsGroup | None:
     """The absolute design of one group matrix, or ``None`` when none is defined here."""
     kind = type(group)
     if kind is DenseGroupMatrix:
@@ -399,7 +413,7 @@ class AbsDesign:
         self.layout = layout
         self.supported = True
         self.inner = 0
-        self.predictors: list[tuple[int | None, list[tuple[slice, object]]]] = []
+        self.predictors: list[tuple[int | None, list[tuple[slice, _AbsGroup]]]] = []
         for state in layout.predictors:
             design = state.design
             if type(design) is not DesignMatrix:

@@ -3287,7 +3287,7 @@ def decompose_symmetric_deflated(
     assert equilibration is not None  # the shortcut raised on any refusal
     equilibrated, column_scale, active_columns, _ = equilibration
     width, n_active = int(column_scale.size), int(active_columns.size)
-    if spectrum and np.array_equal(spectrum.get("active"), active_columns):
+    if spectrum and "active" in spectrum and np.array_equal(spectrum["active"], active_columns):
         values, vectors = spectrum["values"], spectrum["vectors"]
     else:
         values, vectors = np.linalg.eigh(equilibrated)
@@ -3467,23 +3467,36 @@ def decompose_symmetric_deflated(
         if rank == width
         else _retained_log_pdet(active_scale, factor_vectors, discarded, retained_values)
     )
-    common = {
-        "policy_version": policy.version,
-        "column_scale": _freeze(column_scale),
-        "rank": rank,
-        "pre_truncation_condition": condition,
-        "cutoff": cutoff,
-        "rank_truncated": rank < width,
-        "used_svd_fallback": False,
-        "resolution_limited": not certified,
-        "log_pdet": log_pdet,
-        "parameter_null_basis": _freeze(
-            _null_basis(width, active_columns, active_scale, discarded)
-        ),
-        "estimable_functional_basis": _freeze(estimable_basis),
-        "retained_values": _freeze(retained_values),
-        "grey_subspace": dict(info),
-    }
+    null_basis = _freeze(_null_basis(width, active_columns, active_scale, discarded))
+
+    def decided(
+        method: Literal["pivoted_cholesky", "gram_eigh"],
+        active: NDArray,
+        solution: NDArray,
+        aliases: NDArray,
+        pivots: NDArray | None = None,
+    ) -> RankDecomposition:
+        return RankDecomposition(
+            method=method,
+            active_columns=_freeze(active, dtype=int),
+            pivots=None if pivots is None else _freeze(pivots, dtype=int),
+            solution_basis=_freeze(solution),
+            structural_aliases=_freeze(aliases, dtype=bool),
+            policy_version=policy.version,
+            column_scale=_freeze(column_scale),
+            rank=rank,
+            pre_truncation_condition=condition,
+            cutoff=cutoff,
+            rank_truncated=rank < width,
+            used_svd_fallback=False,
+            resolution_limited=not certified,
+            log_pdet=log_pdet,
+            parameter_null_basis=null_basis,
+            estimable_functional_basis=_freeze(estimable_basis),
+            retained_values=_freeze(retained_values),
+            grey_subspace=dict(info),
+        )
+
     if 0 < rank < n_active:
         selected = _conditioned_representatives(
             discarded,
@@ -3508,21 +3521,14 @@ def decompose_symmetric_deflated(
                 representative_basis[active_columns] = representative / active_scale[:, None]
                 aliases = np.ones(width, dtype=bool)
                 aliases[representative_columns] = False
-                return RankDecomposition(
-                    method="pivoted_cholesky",
-                    active_columns=_freeze(representative_columns, dtype=int),
-                    pivots=_freeze(representative_columns, dtype=int),
-                    solution_basis=_freeze(representative_basis),
-                    structural_aliases=_freeze(aliases, dtype=bool),
-                    **common,
+                return decided(
+                    "pivoted_cholesky",
+                    representative_columns,
+                    representative_basis,
+                    aliases,
+                    pivots=representative_columns,
                 )
-    return RankDecomposition(
-        method="gram_eigh",
-        active_columns=_freeze(active_columns, dtype=int),
-        solution_basis=_freeze(solution_basis),
-        structural_aliases=_freeze(column_scale == 0.0, dtype=bool),
-        **common,
-    )
+    return decided("gram_eigh", active_columns, solution_basis, column_scale == 0.0)
 
 
 def decompose_symmetric(

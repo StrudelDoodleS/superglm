@@ -1838,6 +1838,9 @@ def _fit_dense_fixed_lambda_core(
             curvature = _certified_terminal_curvature(
                 context, state, curvature, accepted_geometry, phase_recorder
             )
+        decomposition = curvature.decomposition
+        if decomposition is None:  # the certificate keeps an accepted decomposition
+            raise RuntimeError("terminal rank certificate lost the accepted decomposition")
         terminal_data_curvature = np.asarray(
             accepted_geometry.data_curvature,
             dtype=np.float64,
@@ -1847,11 +1850,11 @@ def _fit_dense_fixed_lambda_core(
             dtype=np.float64,
         )
         if context.coefficient_face is None:
-            terminal_rank = curvature.decomposition
+            terminal_rank = decomposition
             terminal_reduced_rank = None
         else:
             face = context.coefficient_face
-            terminal_reduced_rank = curvature.decomposition
+            terminal_reduced_rank = decomposition
             terminal_rank = face.lift_rank_decomposition(terminal_reduced_rank)
         terminal_score_geometry = observed_geometry
         penalty_value = _half_penalty_quadratic(
