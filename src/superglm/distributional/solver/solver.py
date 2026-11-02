@@ -1598,6 +1598,31 @@ def _drops_design_aliases(layout: StackedLayout, rank: RankDecomposition) -> boo
     return bool(np.all(np.isfinite(difference)) and np.linalg.eigvalsh(difference)[-1] <= 0.0)
 
 
+def _reduced_fit_is_stationary(
+    run: _OptimizationRun, retained: RetainedCoordinates, config: DenseSolverConfig
+) -> bool:
+    """Whether a fit on the retained coefficients is also stationary for the full problem.
+
+    The reduced fit is the optimum under ``beta_J = 0``; it is the full
+    problem's when that constraint's multiplier, the score ``g_J``, vanishes,
+    the Kuhn-Tucker test an active-set method makes before it keeps a
+    variable fixed (Lawson and Hanson 1974, ch. 23). On ``K`` that is the
+    reduced run's own stop; on ``J`` it is the score stop's test,
+    ``||g_J||_inf <= tolerance (1 + |f|)``. The rounding floor cannot widen
+    it, since the floor needs a certified Newton decrement of the full
+    curvature, which is rank-deficient here. An alias carries no information,
+    so ``g_J`` vanishes with the retained score. A column far from zero
+    beside an intercept is collinear with it only in uncentred coordinates
+    (Marquardt's non-essential ill-conditioning): the rank drops it, but the
+    data resolve it, and ``g_J`` stays.
+    """
+    if not run.converged:
+        return False
+    score = np.asarray(run.geometry.score_penalized, dtype=np.float64)[retained.dropped]
+    objective = run.state.penalized_optimizing_log_likelihood
+    return _relative_score(score, objective) <= config.tolerance
+
+
 def _representative_state(
     context: _SolverContext,
     state: _AcceptedState,
@@ -1743,7 +1768,6 @@ def _fit_dense_fixed_lambda_core(
     objective_relative_change = run.objective_relative_change
     step_relative = run.step_relative
     observed_geometry = run.observed_geometry
-    del run
 
     def adopt(run: _OptimizationRun) -> None:
         nonlocal state, coefficient_geometry, converged, reason, score_relative
@@ -1757,10 +1781,17 @@ def _fit_dense_fixed_lambda_core(
         objective_relative_change = run.objective_relative_change
         step_relative = run.step_relative
 
-    if converged and _wall_step_unsettled(context, state, coefficient_geometry, solver_config):
+    def settled(
+        run_context: _SolverContext, stopped: _OptimizationRun, start_iteration: int
+    ) -> _OptimizationRun | None:
         # Continue a fit stopped with a row still moving towards a wall, at a
         # hundredth of the tolerance: a pressed fit keeps moving, an interior one
         # settles. Only a continuation that converges replaces the stop.
+        if not (
+            stopped.converged
+            and _wall_step_unsettled(run_context, stopped.state, stopped.geometry, solver_config)
+        ):
+            return None
         continuation_config = replace(
             solver_config,
             max_iterations=solver_config.terminal_retry_iterations,
@@ -1770,20 +1801,26 @@ def _fit_dense_fixed_lambda_core(
             # timed with the terminal retry, so a fit that runs both records the phase twice
             with measure_phase(phase_recorder, "terminal_observed_retry_fallback"):
                 continued = _run_iterations(
-                    context,
-                    state,
+                    run_context,
+                    stopped.state,
                     continuation_config,
-                    initial_geometry=(coefficient_geometry if state.derivatives is None else None),
+                    initial_geometry=(
+                        stopped.geometry if stopped.state.derivatives is None else None
+                    ),
                     stop_policy=stop_policy,
-                    start_iteration=len(history),
+                    start_iteration=start_iteration,
                     phase_recorder=phase_recorder,
                 )
         except DenseSolverError:
-            continued = None
-        if continued is not None and continued.converged:
-            adopt(continued)
-            observed_geometry = continued.observed_geometry
-        del continued
+            return None
+        return continued if continued.converged else None
+
+    continued = settled(context, run, len(history))
+    del run
+    if continued is not None:
+        adopt(continued)
+        observed_geometry = continued.observed_geometry
+    del continued
 
     with measure_phase(phase_recorder, "terminal_observed_retry_fallback"):
         # The stopped state's decision, and after a rank-deficient one the reduced fit's.
@@ -1976,17 +2013,29 @@ def _fit_dense_fixed_lambda_core(
                 converged, reason = False, "rank_reduced_at_stop"
                 break
             iteration_context = replace(context, retained=reduced)
-            reduced_run = _run_iterations(
-                iteration_context,
-                start,
-                solver_config,
-                stop_policy=stop_policy,
-                start_iteration=len(history),
-                phase_recorder=phase_recorder,
+            reduced_runs = [
+                _run_iterations(
+                    iteration_context,
+                    start,
+                    solver_config,
+                    stop_policy=stop_policy,
+                    start_iteration=len(history),
+                    phase_recorder=phase_recorder,
+                )
+            ]
+            continued = settled(
+                iteration_context, reduced_runs[0], len(history) + len(reduced_runs[0].history)
             )
-            adopt(reduced_run)
-            observed_geometry = reduced_run.observed_geometry
-            del reduced_run
+            if continued is not None:
+                reduced_runs.append(continued)
+            if not _reduced_fit_is_stationary(reduced_runs[-1], reduced, solver_config):
+                # The data resolve a dropped direction: the stopped state and its decision stand.
+                reduced = None
+                break
+            for reduced_run in reduced_runs:
+                adopt(reduced_run)
+            observed_geometry = reduced_runs[-1].observed_geometry
+            del reduced_runs, continued
         # The reduced fit's stop holds on the coefficients it moved, and the rank
         # certified at its end must keep exactly those.
         aliases = decomposition.structural_aliases

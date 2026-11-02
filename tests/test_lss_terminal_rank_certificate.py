@@ -640,6 +640,30 @@ def test_an_offset_column_at_the_edge_of_float64_converges_or_says_why(name, dis
     )
 
 
+@pytest.mark.parametrize(
+    ("name", "discrete"),
+    [(name, True) for name in _FAMILIES] + [("GaussianLS", False)],
+    ids=[f"{name}-chunked" for name in _FAMILIES] + ["GaussianLS-dense"],
+)
+def test_an_offset_column_the_rank_drops_is_not_refitted_away(name, discrete):
+    """``x = 3e7 + N(0, 1)``: the rank drops the slope with the intercept, but the data resolve it.
+
+    The column is collinear with the intercept only in uncentred coordinates,
+    so a refit without it leaves the slope's score at about half the
+    objective, and the stopped state is published with its disclosure.
+    Mutation check: accepting the refit publishes a zero slope, and on the
+    dense route a converged fit with no warning.
+    """
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ConvergenceWarning)
+        offset = _offset_fit(name, discrete, offset=3e7)
+    named = [w for w in caught if "condition number is about" in str(w.message)]
+    assert offset.coefficients[1] != 0.0
+    assert offset.converged or named
+
+
 def test_an_ill_conditioned_fixed_lambda_fit_that_stops_short_warns_and_names_the_cause():
     """``fit`` warns when its unconverged coefficient fit's curvature is past certification.
 
