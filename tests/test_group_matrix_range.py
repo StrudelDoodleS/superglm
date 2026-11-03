@@ -377,3 +377,23 @@ def test_range_geometry_does_not_retain_the_full_parent_row_array(kind):
     del source, group
     assert reference() is None
     assert subset.toarray().shape == (16, 2)
+
+
+def test_an_exact_levels_absolute_rows_read_only_the_level():
+    """The formation's absolute basis takes the level's rows of a range, never the whole range."""
+    from superglm.distributional.solver import _formation
+
+    group = _group(SplineCategoricalGroupMatrix)
+    reads = []
+
+    class Recording(sp.csr_matrix):
+        def __getitem__(self, key):
+            reads.append(key)
+            return super().__getitem__(key)
+
+    absolute = _formation.abs_group(group)
+    plain = group.B
+    group.B = Recording(plain)
+    local, basis = absolute._basis(3, 19)
+    assert reads and not any(isinstance(key, slice) for key in reads)
+    np.testing.assert_array_equal(basis.toarray(), np.abs(plain[3:19][local].toarray()))

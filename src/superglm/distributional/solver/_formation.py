@@ -271,7 +271,7 @@ class _AbsFactoredCSR:
             local = np.sort(row_idx[(row_idx >= start) & (row_idx < stop)]) - start
         else:
             local = located[0]
-        return local, _abs_csr(group.B[start:stop][local])
+        return local, _abs_csr(group.B[local + start])
 
     def square_partial(self, start, stop, weights):
         local, basis = self._basis(start, stop)
