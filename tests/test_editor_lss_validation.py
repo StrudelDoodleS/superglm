@@ -324,11 +324,10 @@ def test_a_split_whose_weights_the_family_refuses_is_shown_unavailable(make, rep
         rows = {row["name"]: row for row in payload["splits"]}
         refused = rows["validation"]
         assert refused["available"] is False and "metrics" not in refused
-        assert refused["error"].startswith(
-            "The Validation split cannot be scored with its weights. "
+        assert refused["error"] == (
+            "The Validation split cannot be scored with its weights: the model's family has no "
+            "likelihood for weights like these. Pass the split without weights to score it."
         )
-        assert refused["error"].endswith(".")
-        assert type(case.model.family).__name__ in refused["error"] or "weight" in refused["error"]
         assert "available" not in rows["train"]
         assert np.isfinite(rows["train"]["metrics"]["edited"]["log_score"])
         again = {row["name"]: row for row in widget._report(report)["splits"]}

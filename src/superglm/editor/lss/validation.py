@@ -49,11 +49,10 @@ def lss_split_reason(model: Any, dataset) -> str | None:
     )
     try:
         lss.family.bind_likelihood(y[resolved.input_positions], resolved, COMPLETE_OBSERVATION)
-    except UnsupportedLikelihoodContractError as exc:
-        detail = str(exc).rstrip(".")
+    except UnsupportedLikelihoodContractError:
         return (
-            f"The {dataset.label} split cannot be scored with its weights. "
-            f"{detail[:1].upper()}{detail[1:]}."
+            f"The {dataset.label} split cannot be scored with its weights: the model's family "
+            "has no likelihood for weights like these. Pass the split without weights to score it."
         )
     return None
 
