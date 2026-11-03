@@ -721,7 +721,7 @@ def test_a_column_far_from_zero_is_kept_in_any_units(monkeypatch, discrete, orig
     )
 
 
-@pytest.mark.parametrize("constant", [1e6, 1e8])
+@pytest.mark.parametrize("constant", [1e6, 1e9])
 @pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
 def test_a_constant_column_beside_an_intercept_is_refitted_as_an_alias(
     monkeypatch, discrete, constant
@@ -734,8 +734,8 @@ def test_a_constant_column_beside_an_intercept_is_refitted_as_an_alias(
     score inside ``tol (1 + |f|)``, which moves a coefficient by about that
     times ``sigma^2 / n``, here 3e-8. Mutation checks: on centred column norms
     alone the alias reads 0 / 0, and the drifted state is published; the raw
-    dropped score, ``c`` times the retained one, refused the refit at ``c = 1e6``
-    on Linux ARM64, where the retained score stopped larger.
+    dropped score, ``c`` times the retained one, refuses the refit at ``c = 1e9``,
+    and did at ``c = 1e6`` on Linux ARM64, where the retained score stopped larger.
     """
     import superglm.distributional.solver.solver as solver
 
@@ -764,19 +764,30 @@ def test_a_constant_column_beside_an_intercept_is_refitted_as_an_alias(
     np.testing.assert_allclose(result.coefficients[[0, 1, 3]], reference.coefficients, atol=1e-6)
 
 
+@pytest.mark.parametrize("factor", [2.0**30, 1e9])
 @pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
-def test_a_scaled_copy_of_a_column_is_refitted_as_an_alias(discrete):
-    """``z = 2^30 x``: an exact alias whatever its units.
+def test_a_scaled_copy_of_a_column_is_refitted_as_an_alias(monkeypatch, discrete, factor):
+    """``z = c x``: an exact alias in any units, refitted from a start moved 3 along it.
 
-    The raw dropped score is ``2^30`` times the retained one, which the stop
-    leaves anywhere inside its tolerance; net of the retained score the
-    multiplier is rounding, so the refit is kept and matches the fit on ``x``
-    alone, within the ``3e-8`` of the constant-column test. Mutation check: on
+    The raw dropped score is ``c`` times the retained one, which the stop leaves
+    anywhere inside its tolerance. Net of it the multiplier is rounding, ``c``
+    times the dot products' unless ``c`` is a power of two, and ``z``'s spread,
+    ``c`` times ``x``'s, takes that out. So the refit is kept and matches the fit
+    on ``x`` alone, within the constant-column test's 3e-8. Mutation check: on
     the raw dropped score the refit is refused and ``z`` is published nonzero.
     """
+    import superglm.distributional.solver.solver as solver
+
     rng = np.random.default_rng(11)
     x = rng.standard_normal(3000)
     y = 1.0 + 0.7 * x + rng.normal(0.0, 0.5, 3000)
+    start = solver._initial_coefficients
+
+    def drifted(context):
+        coefficients = np.array(start(context))
+        if context.layout.n_coefficients == 4:
+            coefficients[[1, 2]] += (3.0, -3.0 / factor)
+        return coefficients
 
     def fitted(columns):
         family = GaussianLS(scale_floor=0)
@@ -784,48 +795,52 @@ def test_a_scaled_copy_of_a_column_is_refitted_as_an_alias(discrete):
         model = SuperLSS(family, location, family.scale(), discrete=discrete)
         return _fit(model, pd.DataFrame(columns), y)
 
+    monkeypatch.setattr(solver, "_initial_coefficients", drifted)
     reference = fitted({"x": x})
-    result = fitted({"x": x, "z": 2.0**30 * x})
+    result = fitted({"x": x, "z": factor * x})
     assert result.converged and result.terminal_rank.rank == 3
     assert result.coefficients[2] == 0.0
     np.testing.assert_allclose(result.coefficients[[0, 1, 3]], reference.coefficients, atol=1e-6)
 
 
+@pytest.mark.parametrize("units", [1.0, 1e-4])
 @pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
-def test_a_column_beside_its_square_far_from_zero_keeps_both(discrete):
-    """``x = 1e4 + z`` beside ``x^2``: centred they stay collinear, but the data resolve them.
+def test_a_column_beside_its_square_far_from_zero_keeps_both(monkeypatch, discrete, units):
+    """``x = c (1e4 + z)`` beside ``x^2``: centred they stay collinear, but the data resolve them.
 
     The certified rank drops a direction the centred design test calls an
-    alias, so the refit runs, and its dropped multiplier, about ``0.1 * 2n``
-    for the ``0.1 z^2`` signal, refuses it: the stopped state is published,
-    and it predicts what the same model fitted on ``(z, z^2)`` predicts.
-    Mutation check: accepting every refit publishes a coefficient at zero and
-    drops the quadratic.
+    alias, so the refit runs. Its dropped multiplier, read per unit of the
+    column's spread, refuses it in any units ``c``: the stopped state stands, as
+    with no refit at all, its square nonzero. Mutation checks: accepting every
+    refit publishes the square at zero, and so does reading the multiplier in
+    the column's own units at ``c = 1e-4``.
     """
+    import superglm.distributional.solver.solver as solver
+
     rng = np.random.default_rng(5)
     z = rng.standard_normal(3000)
     y = 1.0 + 0.5 * z + 0.1 * z**2 + rng.normal(0.0, 0.5, 3000)
+    x = units * (1e4 + z)
+    run, reduced = solver._run_iterations, []
 
-    def fitted(columns):
+    def recorded(context, *args, **kwargs):
+        reduced.append(context.retained is not None)
+        return run(context, *args, **kwargs)
+
+    def fitted():
         family = GaussianLS(scale_floor=0)
-        location = family.location(*(term(name, Numeric()) for name in columns))
+        location = family.location(term("x", Numeric()), term("x2", Numeric()))
         model = SuperLSS(family, location, family.scale(), discrete=discrete)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            model.fit(pd.DataFrame(columns), y)
-        return model
+        return _fit(model, pd.DataFrame({"x": x, "x2": x**2}), y)
 
-    x = 1e4 + z
-    offset = fitted({"x": x, "x2": x**2})
-    centred = fitted({"z": z, "z2": z**2})
-    result = offset._require_fitted().fit_state.solver_result
+    monkeypatch.setattr(solver, "_run_iterations", recorded)
+    result = fitted()
+    assert any(reduced)
+    monkeypatch.setattr(solver, "_drops_design_aliases", lambda layout, rank: False)
+    unreduced = fitted()
     assert result.terminal_rank.rank < result.terminal_rank.width
     assert np.all(result.coefficients[:3] != 0.0)
-    np.testing.assert_allclose(
-        np.asarray(offset.predict(pd.DataFrame({"x": x, "x2": x**2})).mean()),
-        np.asarray(centred.predict(pd.DataFrame({"z": z, "z2": z**2})).mean()),
-        atol=1e-6,
-    )
+    np.testing.assert_array_equal(result.coefficients, unreduced.coefficients)
 
 
 def test_an_ill_conditioned_fixed_lambda_fit_that_stops_short_warns_and_names_the_cause():

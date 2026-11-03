@@ -1606,19 +1606,42 @@ def _drops_design_aliases(layout: StackedLayout, rank: RankDecomposition) -> boo
     return bool(np.all(np.isfinite(difference)) and np.linalg.eigvalsh(difference)[-1] <= 0.0)
 
 
+def _column_spread(layout: StackedLayout, index: int) -> float:
+    """Root-mean-square of coefficient ``index``'s column, about its mean beside an intercept.
+
+    A column constant to within its centred square's cancellation, ``3 gamma_{n+2}``
+    of its square (Chan, Golub and LeVeque 1983), the intercept's included, is read
+    about zero, as the design test reads it.
+    """
+    state = next(s for s in layout.predictors if index < s.coefficient_slice.stop)
+    local = index - state.coefficient_slice.start - (state.intercept_index is not None)
+    if local < 0:
+        return 1.0
+    unit = np.zeros(state.design.p)
+    unit[local] = 1.0
+    column = state.design.matvec(unit)
+    squared = float(column @ column)
+    centred = float(np.sum((column - column.mean()) ** 2))
+    if state.intercept_index is None or centred <= 3.0 * gamma(state.design.n + 2) * squared:
+        centred = squared
+    return float(np.sqrt(centred / state.design.n))
+
+
 def _reduced_fit_is_stationary(
     run: _OptimizationRun,
     retained: RetainedCoordinates,
     rank: RankDecomposition,
+    layout: StackedLayout,
     config: DenseSolverConfig,
 ) -> bool:
     """Whether a fit on the retained coefficients is also stationary for the full problem.
 
     The optimum under ``beta_J = 0`` is the full problem's when that constraint's
-    multiplier vanishes (Lawson and Hanson 1974, ch. 23). It is read net of the retained
-    score, ``d = N_J^-T N'g`` with ``N`` the dropped null basis: ``X N`` and ``S N`` vanish
-    for an alias, so ``d`` is rounding whatever the alias's scale, while ``x`` and ``x^2``
-    far from zero, which the design test passes, keep ``d``, in the dropped columns' units.
+    multiplier vanishes (Lawson and Hanson 1974, ch. 23), read net of the retained
+    score, ``d = N_J^-T N'g`` with ``N`` the dropped null basis: ``X N`` and ``S N``
+    vanish for an alias, so ``d`` is rounding. Each ``d_j`` is read per unit of its
+    column's spread, a relative gradient (Dennis and Schnabel 1983, sec. 7.2) on the
+    design test's centred unit columns, so no unit or origin decides the refit.
     """
     if not run.converged:
         return False
@@ -1629,6 +1652,8 @@ def _reduced_fit_is_stationary(
         multiplier = np.linalg.solve(null[retained.dropped].T, null.T @ score)
     except np.linalg.LinAlgError:
         return False
+    spread = np.array([_column_spread(layout, int(j)) for j in np.flatnonzero(retained.dropped)])
+    multiplier = np.divide(multiplier, spread, out=multiplier, where=spread > 0.0)
     objective = run.state.penalized_optimizing_log_likelihood
     return _relative_score(multiplier, objective) <= config.tolerance
 
@@ -2039,7 +2064,7 @@ def _fit_dense_fixed_lambda_core(
             if continued is not None:
                 reduced_runs.append(continued)
             if not _reduced_fit_is_stationary(
-                reduced_runs[-1], reduced, decomposition, solver_config
+                reduced_runs[-1], reduced, decomposition, context.layout, solver_config
             ):
                 # The data resolve a dropped direction: the stopped state and its decision stand.
                 reduced = None
