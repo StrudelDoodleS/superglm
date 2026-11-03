@@ -15,6 +15,7 @@ from superglm.diagnostics.convergence import (
     coefficient_nonconvergence_message,
     reml_nonconvergence_message,
 )
+from superglm.features.categorical import Categorical
 from superglm.features.constraint import rules_of
 
 
@@ -310,11 +311,14 @@ def _feature_spec_payload(spec) -> dict[str, Any]:
         "degree",
         "_n_knots",
         "_degree",
-        "constraint_kind",
-        "constraint_mode",
     ):
         if hasattr(spec, attr):
             payload["config"][attr] = getattr(spec, attr)
+    # A categorical states its constraint fields only when it holds a rule (a cap).
+    if not isinstance(spec, Categorical) or rules_of(spec):
+        for attr in ("constraint_kind", "constraint_mode"):
+            if hasattr(spec, attr):
+                payload["config"][attr] = getattr(spec, attr)
     return payload
 
 

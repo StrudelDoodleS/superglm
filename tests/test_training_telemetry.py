@@ -254,3 +254,24 @@ def test_constraint_payload_lists_every_rule():
         "rules": ["increasing", "concave.above(30)"],
     }
     assert telemetry_ops._constraint_payload(Spline(kind="ps", k=12)) is None
+
+
+def test_categorical_states_constraint_fields_only_with_a_cap():
+    """An uncapped categorical's telemetry keeps the keys it had before caps existed.
+
+    Mutation: recording constraint_kind/constraint_mode for every spec adds
+    ``None`` and ``"postfit"`` to the uncapped payload.
+    """
+    from superglm import Categorical, Constraint
+
+    rng = np.random.default_rng(2)
+    X = pd.DataFrame({"g": rng.choice(["a", "b", "c"], 300)})
+    y = rng.poisson(1.0, 300).astype(float)
+
+    def config(spec):
+        model = SuperGLM(family="poisson", selection_penalty=0.0, features={"g": spec})
+        return model.fit(X, y).training_telemetry()["features"]["features"]["g"]["config"]
+
+    assert config(Categorical(base="first")) == {"base": "first"}
+    capped = config(Categorical(base="first", constraint=Constraint.fit.cap(0.5, 2.0)))
+    assert capped == {"base": "first", "constraint_kind": "cap(0.5, 2)", "constraint_mode": "fit"}
