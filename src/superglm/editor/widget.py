@@ -53,7 +53,11 @@ from superglm.editor.evidence import EvidenceCoordinator, EvidenceKey
 from superglm.editor.io import jsonable
 from superglm.editor.jobs import JobContext, JobRunner
 from superglm.editor.lss import display_for, is_lss
-from superglm.editor.lss.availability import require_available, session_availability
+from superglm.editor.lss.availability import (
+    LSS_CAPABILITIES,
+    require_available,
+    session_availability,
+)
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
 from superglm.editor.notebook import NotebookTransport, notebook_view_class
@@ -64,7 +68,7 @@ from superglm.editor.payloads import (
     undo_redo_payload,
 )
 from superglm.editor.rating_preview import PREVIEW_IMPACT_BINS, RatingPreview
-from superglm.editor.reports import report_payload, split_metrics_payload
+from superglm.editor.reports import report_metrics, report_payload, split_metrics_payload
 from superglm.editor.server import EditorAppServer, create_editor_app
 from superglm.editor.summaries import offset_label_payload, summary_payload
 from superglm.inference.summary_levels import validate_level_display
@@ -273,6 +277,7 @@ class EditorWidget:
             }
             if is_lss(self.session.model):
                 state["unavailable"] = session_availability()
+                state["capabilities"] = dict(LSS_CAPABILITIES)
             self._state_generation += 1
             state["state_generation"] = self._state_generation
             state["chart_generation"] = self._chart_generation
@@ -467,6 +472,7 @@ class EditorWidget:
         model_revision: int | None = None,
         request_sequence: int | None = None,
     ) -> dict[str, Any]:
+        require_available(self.session.model, "metrics")
         selected_source = "in_force" if source is None or source == "selected" else source
         with self._lock:
             current_revision = self.session.model_revision
@@ -667,7 +673,7 @@ class EditorWidget:
                 )
 
         summary_model = edited_model
-        if report == "final" and self.session.edited_terms():
+        if report == "final" and self.session.edited_terms() and not is_lss(reference_model):
             fit_dataset = training_export_dataset(self.session)
             metrics_dataset = default_metrics_dataset(self.session)
             if fit_dataset is not None and (
@@ -690,7 +696,7 @@ class EditorWidget:
             if edited is None:
                 return _superseded_payload(revision, request_sequence)
             metric_pairs[eval_dataset.name] = (original, edited)
-        splits = split_metrics_payload(datasets, metric_pairs)
+        splits = split_metrics_payload(datasets, metric_pairs, report_metrics(reference_model))
         payload = report_payload(
             self,
             report,

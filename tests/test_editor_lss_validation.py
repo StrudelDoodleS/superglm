@@ -1,0 +1,276 @@
+"""Validation scores, Final fit and the capabilities of an edited SuperLSS."""
+
+from __future__ import annotations
+
+import dataclasses
+import io
+
+import joblib
+import numpy as np
+import pytest
+from scipy import integrate, stats
+
+from superglm import LogNormalLS, SuperLSS, cat, s
+from superglm.editor.cv import capture_cv_run, capture_final_fit, run_final_fit
+from superglm.editor.errors import EditorValueError
+from superglm.editor.lss.availability import LSS_UNAVAILABLE, SESSION_TOOLS
+from superglm.editor.lss.validation import LSS_METRIC_LABELS, lss_dataset_metrics
+from superglm.editor.reports import final_fit_report_payload, validation_report_payload
+from tests._lss_editor_fixtures import (
+    EPS,
+    FitCase,
+    gamma_case,
+    holdout_rows,
+    lognormal_case,
+    nb_case,
+    open_case,
+)
+from tests.test_editor import editor_frame, editor_model  # noqa: F401
+
+
+@pytest.fixture(scope="module")
+def frequency_lognormal() -> FitCase:
+    """A log-normal fitted under frequency weights, the contract that scores integer weights."""
+    case = lognormal_case()
+    rng = np.random.default_rng(7)
+    weights = rng.integers(1, 3, len(case.y)).astype(np.float64)
+    family = LogNormalLS()
+    model = SuperLSS(
+        family,
+        family.mean(s("age", k=8), cat("region")),
+        family.scale(s("age", k=6)),
+        weight_semantics="frequency",
+    ).fit_reml(case.X, case.y, sample_weight=weights, outer="efs+newton")
+    return FitCase(model, case.X, case.y, weights, None)
+
+
+def _shift(session, key, delta, indices):
+    session.select_indices(key, list(indices))
+    session.shift(key, delta)
+
+
+def _job(widget, kind):
+    started = widget._job_start(kind)
+    status = widget._job_status(started["job_id"], wait=True)
+    assert status["status"] == "done", status
+    return status
+
+
+def test_validation_metrics_match_direct_computation(frequency_lognormal):
+    case = frequency_lognormal
+    split = holdout_rows(case, 200)
+    split = dataclasses.replace(split, sample_weight=np.ceil(split.sample_weight))
+    got = lss_dataset_metrics(case.model, split)
+
+    par = case.model.predict_parameters(split.X)
+    sigma = par["scale"].to_numpy()
+    mu = np.log(par["mean"].to_numpy()) - sigma**2 / 2
+    # The log score is a loss: the negative log-likelihood, lower for a better fit.
+    nll = -stats.lognorm(s=sigma, scale=np.exp(mu)).logpdf(split.y)
+    w = split.sample_weight
+    assert got["log_score"] == pytest.approx(np.average(nll, weights=w), rel=1e3 * EPS)
+    assert got["actual_expected"] == pytest.approx(
+        np.sum(w * split.y) / np.sum(w * par["mean"]), rel=64 * EPS
+    )
+    # CRPS of a log-normal law by quadrature: the integral of (F(x) - 1{y <= x})^2.
+    crps = _lognormal_crps(sigma[:5], mu[:5], split.y[:5])
+    scores = case.model.scores(split.X.iloc[:5], split.y[:5], sample_weight=w[:5])
+    np.testing.assert_allclose(scores["crps"], w[:5] * crps, rtol=1e-6)
+    assert got["crps"] == pytest.approx(
+        np.nansum(case.model.scores(split.X, split.y, sample_weight=w)["crps"]) / w.sum()
+    )
+    assert set(got) == set(LSS_METRIC_LABELS)
+
+
+def _lognormal_crps(sigma, mu, y):
+    """CRPS as the integral of F^2 below y plus (1 - F)^2 above it."""
+    out = []
+    for s_, m_, y_ in zip(sigma, mu, y, strict=True):
+        law = stats.lognorm(s=s_, scale=np.exp(m_))
+        below = integrate.quad(lambda x: law.cdf(x) ** 2, 0.0, y_, epsabs=0, epsrel=1e-10)[0]
+        above = integrate.quad(lambda x: law.sf(x) ** 2, y_, np.inf, epsabs=0, epsrel=1e-10)[0]
+        out.append(below + above)
+    return np.array(out)
+
+
+def test_prior_weights_scale_each_rows_contribution():
+    case = gamma_case()
+    split = holdout_rows(case, 120)
+    got = lss_dataset_metrics(case.model, split)
+    scores = case.model.scores(split.X, split.y, sample_weight=split.sample_weight)
+    total = split.sample_weight.sum()
+    assert got["log_score"] == pytest.approx(scores["log"].sum() / total, rel=64 * EPS)
+    assert got["crps"] == pytest.approx(scores["crps"].sum() / total, rel=64 * EPS)
+    unweighted = lss_dataset_metrics(case.model, dataclasses.replace(split, sample_weight=None))
+    assert unweighted["log_score"] != pytest.approx(got["log_score"], rel=1e-6)
+
+
+def test_a_family_without_a_distribution_function_has_no_crps():
+    case = nb_case()
+    split = dataclasses.replace(holdout_rows(case, 100), sample_weight=None)
+    got = lss_dataset_metrics(case.model, split)
+    assert np.isnan(got["crps"])
+    assert np.isfinite(got["log_score"]) and np.isfinite(got["actual_expected"])
+
+
+def test_spread_edit_moves_log_score_but_not_actual_expected():
+    case = lognormal_case()
+    split = dataclasses.replace(holdout_rows(case, 200), sample_weight=None)
+    session = open_case(case, validation_data=(split.X, split.y))
+    _shift(session, "scale:age", 0.4, range(10, 150))
+
+    report = validation_report_payload(session)
+    row = next(r for r in report["splits"] if r["name"] == "validation")
+    original, edited = row["metrics"]["original"], row["metrics"]["edited"]
+    assert list(report["metric_labels"]) == list(LSS_METRIC_LABELS)
+    assert set(original) == set(LSS_METRIC_LABELS)
+    assert abs(edited["log_score"] - original["log_score"]) > 1e-3
+    # The mean form fixes the mean when only the spread moves.
+    assert edited["actual_expected"] == pytest.approx(original["actual_expected"], rel=64 * EPS)
+    assert row["metrics"]["delta"]["log_score"] == edited["log_score"] - original["log_score"]
+
+
+def test_cv_run_is_refused_for_superlss():
+    session = open_case(lognormal_case())
+    with pytest.raises(EditorValueError) as info:
+        capture_cv_run(session)
+    assert info.value.public_message == LSS_UNAVAILABLE["cv"]
+    widget = session.widget()
+    try:
+        with pytest.raises(EditorValueError) as info:
+            widget._metrics("deviance")
+        assert info.value.public_message == LSS_UNAVAILABLE["metrics"]
+        with pytest.raises(EditorValueError) as info:
+            widget._job_start("cv")
+        assert info.value.public_message == LSS_UNAVAILABLE["cv"]
+        assert {"metrics", "cv"} <= set(SESSION_TOOLS)
+        unavailable = widget._state()["unavailable"]
+        assert unavailable["cv"] == LSS_UNAVAILABLE["cv"]
+        assert unavailable["metrics"] == LSS_UNAVAILABLE["metrics"]
+    finally:
+        widget.close()
+
+
+class _Context:
+    def check(self):
+        return None
+
+    def progress(self, phase, **details):
+        return None
+
+
+@pytest.mark.filterwarnings("ignore::superglm.distributional.revision.EditedCoefficientsWarning")
+def test_final_fit_refits_on_all_rows_and_carries_edits(monkeypatch):
+    case = lognormal_case()
+    split = dataclasses.replace(holdout_rows(case, 200), sample_weight=None)
+    session = open_case(case, validation_data=(split.X, split.y))
+    _shift(session, "scale:age", 0.3, range(20, 120))
+
+    calls = []
+    replay = SuperLSS._replay_fit
+
+    def counted(self, X, y, sample_weight=None, offsets=None):
+        calls.append((len(y), sample_weight, offsets))
+        return replay(self, X, y, sample_weight, offsets)
+
+    monkeypatch.setattr(SuperLSS, "_replay_fit", counted)
+    final = run_final_fit(capture_final_fit(session), _Context())
+
+    assert calls == [(800, None, None)]
+    assert type(final.model) is SuperLSS
+    assert (final.n_rows, final.splits, final.carried) == (
+        800,
+        ("train", "validation"),
+        ("scale:age",),
+    )
+    stacked = _stack(case, split)
+    plain = case.model._clone_with_replaced_terms({})
+    replay(plain, stacked, np.concatenate([case.y, split.y]))
+    kept = final.model.term_inference("scale", "age", X_train=stacked)
+    refit = plain.term_inference("scale", "age", X_train=stacked)
+    # The drawn bump survives the refit, as far as a six-column basis carries a box.
+    drawn = session.terms["scale:age"].x
+    gap = kept.effect - refit.effect
+    inside = (kept.x > drawn[40]) & (kept.x < drawn[100])
+    assert inside.sum() > 40 and gap[inside].min() > 0.0 and gap[inside].mean() > 0.1
+    assert gap[inside].mean() > gap[kept.x > drawn[170]].mean() + 0.1
+
+
+def _stack(case, split):
+    import pandas as pd
+
+    return pd.concat([case.X, split.X], ignore_index=True)
+
+
+def test_final_fit_stacks_parameter_offsets(monkeypatch):
+    case = nb_case()
+    split = holdout_rows(case, 100)
+    split = dataclasses.replace(split, sample_weight=None)
+    session = open_case(case, validation_data=(split.X, split.y, None, split.offset))
+    seen = []
+    replay = SuperLSS._replay_fit
+
+    def counted(self, X, y, sample_weight=None, offsets=None):
+        seen.append(offsets)
+        return replay(self, X, y, sample_weight, offsets)
+
+    monkeypatch.setattr(SuperLSS, "_replay_fit", counted)
+    final = run_final_fit(capture_final_fit(session), _Context())
+    assert final.n_rows == 700
+    (offsets,) = seen
+    assert list(offsets) == ["mean"]
+    np.testing.assert_array_equal(
+        offsets["mean"], np.concatenate([case.offsets["mean"], split.offset["mean"]])
+    )
+
+
+@pytest.mark.filterwarnings("ignore::superglm.distributional.revision.EditedCoefficientsWarning")
+def test_the_widget_runs_final_fit_and_exports_it():
+    case = lognormal_case()
+    split = dataclasses.replace(holdout_rows(case, 150), sample_weight=None)
+    session = open_case(case, validation_data=(split.X, split.y))
+    _shift(session, "scale:age", 0.3, range(20, 120))
+    widget = session.widget()
+    try:
+        assert widget._state()["final_fit"] == {"available": False, "stale": False}
+        _job(widget, "final_fit")
+        report = widget._report("final")
+        assert report["final_fit"]["available"] is True
+        assert report["final_fit"]["n_rows"] == 750
+        assert report["final_fit"]["carried"] == ["scale:age"]
+        assert "summary" not in report
+        assert list(report["metric_labels"]) == list(LSS_METRIC_LABELS)
+        result = widget._export_bytes("final")
+    finally:
+        widget.close()
+
+    loaded = joblib.load(io.BytesIO(result.data))
+    assert type(loaded) is SuperLSS
+    assert [record["predictor"] for record in loaded._editor_history] == ["scale"]
+    assert loaded._editor_history[-1]["term"] == "scale:age"
+
+
+def test_final_fit_report_before_a_run_has_no_summary():
+    session = open_case(lognormal_case())
+    widget = session.widget()
+    try:
+        payload = final_fit_report_payload(widget)
+    finally:
+        widget.close()
+    assert "summary" not in payload
+    assert payload["final_fit"]["available"] is False
+
+
+def test_capabilities_only_for_superlss(editor_model):  # noqa: F811
+    widget = open_case(lognormal_case()).widget()
+    try:
+        assert widget._state()["capabilities"] == {"cv": False, "final_fit": True}
+    finally:
+        widget.close()
+    from superglm.editor import edit
+
+    glm = edit(editor_model).widget()
+    try:
+        assert "capabilities" not in glm._state()
+    finally:
+        glm.close()

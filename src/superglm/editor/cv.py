@@ -31,6 +31,9 @@ from superglm.editor.carry import model_with_edited_curves, weighted_mean
 from superglm.editor.errors import EditorClientError, EditorValueError
 from superglm.editor.evaluation import EvaluationDataset, training_export_dataset
 from superglm.editor.jobs import JobCancelledError
+from superglm.editor.lss.availability import require_available
+from superglm.editor.lss.validation import offset_departs, stack_offsets
+from superglm.editor.lss.view import column_of, is_lss
 from superglm.editor.refit import EXPLICIT_PENALTY_ATTRIBUTE, fit_refit_model
 from superglm.editor.terms import resolve_refit_method
 from superglm.features.categorical import Categorical, _codes_against, _grouping_labels
@@ -353,7 +356,7 @@ def _unstackable_reason(datasets: Sequence[EvaluationDataset]) -> str | None:
             dataset.name
             for dataset in datasets
             if getattr(dataset, name) is not None
-            and np.any(np.asarray(getattr(dataset, name), dtype=np.float64) != neutral)
+            and offset_departs(getattr(dataset, name), neutral)
         ]
         if lack and have:
             return FINAL_SPLIT_MISSING.format(column=column, have=have[0], lack=lack[0])
@@ -774,6 +777,7 @@ class CVRunPlan(_Plan):
 
 def capture_cv_run(session) -> CVRunPlan:
     """Capture Run CV's inputs; refuse with the tab's reason while it is disabled."""
+    require_available(session.model, "cv")
     reason = run_cv_reason(session)
     if reason is not None:
         raise EditorValueError(reason)
@@ -822,6 +826,8 @@ def _declared_template(session):
     it, re-profiled or not. A ``lambda1`` or ``lambda2`` passed to a Refit
     is the analyst's choice and stays.
     """
+    if is_lss(session.model):
+        return session.model.lss._clone_with_replaced_terms({})
     opened = session.reference_model
     template = session.model.clone_unfitted()
     explicit = getattr(session.model, EXPLICIT_PENALTY_ATTRIBUTE, {})
@@ -1117,10 +1123,15 @@ def capture_final_fit(session) -> FinalFitPlan:
 
 def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
     """Refit the in-force structure on train and validation rows, then put the edits back."""
-    X, y, sample_weight, offset = _union_rows(plan.datasets, plan.template)
+    lss = is_lss(plan.model)
+    # A SuperLSS template is an unfitted copy; its view names the columns the terms read.
+    X, y, sample_weight, offset = _union_rows(plan.datasets, plan.model if lss else plan.template)
     context.progress("fitting", n_rows=int(y.size))
     context.check()
-    model = _covering_template(plan.template, X, "Final fit").clone_unfitted()
+    if lss:
+        model = plan.template
+    else:
+        model = _covering_template(plan.template, X, "Final fit").clone_unfitted()
     try:
         fit_refit_model(
             plan.model,
@@ -1266,7 +1277,7 @@ def _stacked_columns(frames, template) -> tuple[list[str], dict[str, str]]:
 def _label_columns(template) -> set[str]:
     """The columns ``template`` reads as labels: its level terms', and its factor smooths' groups."""
     labelled = {
-        name
+        column_of(template, name)
         for name, spec in template._specs.items()
         if isinstance(spec, Categorical | OrderedCategorical | RandomEffect)
     }
@@ -1308,6 +1319,8 @@ def _stacked(datasets: Sequence[EvaluationDataset], name: str, fill: float):
     columns = [getattr(dataset, name) for dataset in datasets]
     if all(column is None for column in columns):
         return None
+    if any(isinstance(column, Mapping) for column in columns):
+        return stack_offsets(datasets)
     return np.concatenate(
         [
             np.full(dataset.n_obs, fill) if column is None else np.asarray(column, dtype=float)

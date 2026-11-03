@@ -17,6 +17,7 @@ import pandas as pd
 
 from superglm import GammaLS, LogNormalLS, NegativeBinomialLS, SuperLSS, cat, s
 from superglm.editor import EditorSession, edit
+from superglm.editor.evaluation import EvaluationDataset
 
 EPS = np.finfo(np.float64).eps
 
@@ -38,14 +39,14 @@ class FitCase:
     offsets: dict[str, np.ndarray] | None
 
 
-def _covariates(seed: int) -> tuple[np.random.Generator, pd.DataFrame, np.ndarray]:
+def _covariates(seed: int, n: int = N_ROWS) -> tuple[np.random.Generator, pd.DataFrame, np.ndarray]:
     rng = np.random.default_rng(seed)
-    region = rng.choice(len(REGIONS), size=N_ROWS, p=_REGION_FREQUENCIES)
+    region = rng.choice(len(REGIONS), size=n, p=_REGION_FREQUENCIES)
     frame = pd.DataFrame(
         {
-            "age": rng.uniform(18.0, 90.0, N_ROWS),
+            "age": rng.uniform(18.0, 90.0, n),
             "region": np.array(REGIONS)[region],
-            "power": rng.uniform(4.0, 12.0, N_ROWS),
+            "power": rng.uniform(4.0, 12.0, n),
         }
     )
     return rng, frame, region
@@ -61,12 +62,20 @@ def _log_spread(frame: pd.DataFrame, region: np.ndarray) -> np.ndarray:
     return 0.5 * centred**2 + _REGION_SPREAD[region]
 
 
-@functools.cache
-def lognormal_case() -> FitCase:
-    rng, X, region = _covariates(seed=20261103)
+_SEEDS = {LogNormalLS: 20261103, GammaLS: 20261104, NegativeBinomialLS: 20261105}
+
+
+def _lognormal_rows(seed: int, n: int):
+    rng, X, region = _covariates(seed, n)
     mean = np.exp(7.0 + _log_mean(X, region))
     sigma = np.exp(-0.7 + _log_spread(X, region))
-    y = np.exp(np.log(mean) - 0.5 * sigma**2 + sigma * rng.standard_normal(N_ROWS))
+    y = np.exp(np.log(mean) - 0.5 * sigma**2 + sigma * rng.standard_normal(n))
+    return X, y, None
+
+
+@functools.cache
+def lognormal_case() -> FitCase:
+    X, y, _ = _lognormal_rows(_SEEDS[LogNormalLS], N_ROWS)
     family = LogNormalLS()
     model = SuperLSS(
         family,
@@ -76,12 +85,16 @@ def lognormal_case() -> FitCase:
     return FitCase(model, X, y, None, None)
 
 
-@functools.cache
-def gamma_case() -> FitCase:
-    rng, X, region = _covariates(seed=20261104)
+def _gamma_rows(seed: int, n: int):
+    rng, X, region = _covariates(seed, n)
     mean = np.exp(7.0 + _log_mean(X, region))
     cv = np.exp(-0.6 + _log_spread(X, region))
-    y = rng.gamma(shape=1.0 / cv**2, scale=mean * cv**2)
+    return X, rng.gamma(shape=1.0 / cv**2, scale=mean * cv**2), None
+
+
+@functools.cache
+def gamma_case() -> FitCase:
+    X, y, _ = _gamma_rows(_SEEDS[GammaLS], N_ROWS)
     family = GammaLS()
     model = SuperLSS(
         family,
@@ -91,14 +104,18 @@ def gamma_case() -> FitCase:
     return FitCase(model, X, y, None, None)
 
 
-@functools.cache
-def nb_case() -> FitCase:
-    rng, X, region = _covariates(seed=20261105)
-    X["exposure"] = rng.uniform(0.2, 1.0, N_ROWS)
+def _nb_rows(seed: int, n: int):
+    rng, X, region = _covariates(seed, n)
+    X["exposure"] = rng.uniform(0.2, 1.0, n)
     mean = X["exposure"].to_numpy() * np.exp(1.2 + _log_mean(X, region))
     theta = np.exp(1.0 - 0.5 * _log_spread(X, region))
     y = rng.negative_binomial(theta, theta / (theta + mean)).astype(np.float64)
-    offsets = {"mean": np.log(X["exposure"].to_numpy())}
+    return X, y, {"mean": np.log(X["exposure"].to_numpy())}
+
+
+@functools.cache
+def nb_case() -> FitCase:
+    X, y, offsets = _nb_rows(_SEEDS[NegativeBinomialLS], N_ROWS)
     family = NegativeBinomialLS()
     model = SuperLSS(
         family,
@@ -106,6 +123,18 @@ def nb_case() -> FitCase:
         family.theta(s("age", k=6), cat("region")),
     ).fit_reml(X, y, offsets=offsets, outer="efs+newton")
     return FitCase(model, X, y, None, offsets)
+
+
+_ROW_DRAWS = {LogNormalLS: _lognormal_rows, GammaLS: _gamma_rows, NegativeBinomialLS: _nb_rows}
+
+
+def holdout_rows(case: FitCase, n: int) -> EvaluationDataset:
+    """``n`` fresh rows from the case's generator, with weights uniform on 0.5-2."""
+    family = type(case.model.family)
+    seed = _SEEDS[family] + 1000
+    X, y, offset = _ROW_DRAWS[family](seed, n)
+    weights = np.random.default_rng(seed + 1).uniform(0.5, 2.0, n)
+    return EvaluationDataset("holdout", "Holdout", X, y, weights, offset, "supplied")
 
 
 def open_case(case: FitCase, **kw) -> EditorSession:

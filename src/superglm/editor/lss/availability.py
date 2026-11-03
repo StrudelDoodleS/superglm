@@ -41,6 +41,9 @@ LSS_UNAVAILABLE: Mapping[str, str] = MappingProxyType(
     }
 )
 
+# What the frontend reads to hide a tab: no cross-validation, but Final fit.
+LSS_CAPABILITIES: Mapping[str, bool] = MappingProxyType({"cv": False, "final_fit": True})
+
 # The tools tied to one term, listed on that term's payload.
 TERM_TOOLS = ("shape", "special", "free_levels", "unsmoothed", "unseen")
 # The tools of the whole session, listed on the editor state.
@@ -49,6 +52,8 @@ SESSION_TOOLS = (
     "profile_distribution",
     "rating_table",
     "summary",
+    "metrics",
+    "cv",
     "export_structure",
     "export_xlsx",
     "save_session",
