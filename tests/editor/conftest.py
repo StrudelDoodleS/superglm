@@ -6,6 +6,7 @@ from contextlib import ExitStack, contextmanager
 import numpy as np
 import pandas as pd
 import pytest
+from tests._lss_editor_fixtures import lognormal_case, open_case
 from tests.editor._chart_layout import wait_for_chart_to_fit
 
 from superglm import Categorical, OrderedCategorical, Spline, SuperGLM
@@ -104,6 +105,48 @@ def choose_feature_fixture():
     return choose_feature
 
 
+def _open_session_page(
+    resources: ExitStack,
+    chromium_browser,
+    session: EditorSession,
+    *,
+    viewport: dict[str, int] | None,
+    prepare: Callable[[object], None] | None,
+    first_term: str,
+    selected_term: str,
+):
+    """Serve ``session``, open it in a page, and wait until ``selected_term`` is drawn."""
+    widget = session.widget()
+    resources.callback(widget.close)
+    page = chromium_browser.new_page(viewport=viewport or {"width": 1180, "height": 720})
+    resources.callback(page.close)
+    if prepare is not None:
+        prepare(page)
+    page.goto(f"{widget.app_url}&test=1", wait_until="domcontentloaded")
+    page.locator("#chart path.edited").first.wait_for()
+    page.wait_for_function(
+        "term => document.querySelector('#status')?.dataset.term === term",
+        arg=first_term,
+    )
+    if selected_term != first_term:
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/term")
+            )
+        ):
+            choose_feature(page, selected_term)
+        page.wait_for_function(
+            "term => document.querySelector('#status')?.dataset.term === term",
+            arg=selected_term,
+        )
+        page.locator("#chart path.edited").first.wait_for()
+    # The chart is drawn at its panel's size, and the panel settles a
+    # frame after the feature list toggles or the metrics render.
+    wait_for_chart_to_fit(page)
+    return page
+
+
 @pytest.fixture
 def open_editor_page(chromium_browser, editor_browser_model):
     opened: list[ExitStack] = []
@@ -129,34 +172,60 @@ def open_editor_page(chromium_browser, editor_browser_model):
                 collapsed_term, levels = collapsed_levels
                 session.select_levels(collapsed_term, levels)
                 session.replace_with_collapsed_levels(collapsed_term, method="fit")
-            widget = session.widget()
-            resources.callback(widget.close)
-            page = chromium_browser.new_page(viewport=viewport or {"width": 1180, "height": 720})
-            resources.callback(page.close)
-            if prepare is not None:
-                prepare(page)
-            page.goto(f"{widget.app_url}&test=1", wait_until="domcontentloaded")
-            page.locator("#chart path.edited").first.wait_for()
-            page.wait_for_function(
-                "term => document.querySelector('#status')?.dataset.term === term",
-                arg="curve",
+            page = _open_session_page(
+                resources,
+                chromium_browser,
+                session,
+                viewport=viewport,
+                prepare=prepare,
+                first_term="curve",
+                selected_term=selected_term,
             )
-            if selected_term != "curve":
-                with page.expect_response(
-                    lambda response: (
-                        response.request.method == "POST"
-                        and response.url.split("?", maxsplit=1)[0].endswith("/term")
-                    )
-                ):
-                    choose_feature(page, selected_term)
-                page.wait_for_function(
-                    "term => document.querySelector('#status')?.dataset.term === term",
-                    arg=selected_term,
-                )
-                page.locator("#chart path.edited").first.wait_for()
-            # The chart is drawn at its panel's size, and the panel settles a
-            # frame after the feature list toggles or the metrics render.
-            wait_for_chart_to_fit(page)
+            yield page, session
+        finally:
+            if resources in opened:
+                opened.remove(resources)
+            resources.close()
+
+    try:
+        yield open_page
+    finally:
+        with ExitStack() as teardown:
+            for resources in opened:
+                teardown.callback(resources.close)
+            opened.clear()
+
+
+@pytest.fixture(scope="session")
+def lss_browser_case():
+    """The fitted log-normal SuperLSS and its rows; sessions open over copies."""
+    return lognormal_case()
+
+
+@pytest.fixture
+def open_lss_editor_page(chromium_browser, lss_browser_case):
+    opened: list[ExitStack] = []
+
+    @contextmanager
+    def open_page(
+        *,
+        viewport: dict[str, int] | None = None,
+        selected_term: str = "mean:age",
+        prepare: Callable[[object], None] | None = None,
+    ) -> Iterator[tuple[object, EditorSession]]:
+        resources = ExitStack()
+        opened.append(resources)
+        try:
+            session = open_case(lss_browser_case)
+            page = _open_session_page(
+                resources,
+                chromium_browser,
+                session,
+                viewport=viewport,
+                prepare=prepare,
+                first_term=next(iter(session.terms)),
+                selected_term=selected_term,
+            )
             yield page, session
         finally:
             if resources in opened:
