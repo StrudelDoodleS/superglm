@@ -32,7 +32,6 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
     "distributional/results/solver.py::_score_within_rounding_floor": (30, PR577),
     "distributional/smoothing/objective.py::_discarded_space_error": (16, PR577),
     "distributional/smoothing/objective.py::_restricted_objective": (46, PR577),
-    "distributional/smoothing/objective.py::_stable_isolated_gfs_update": (14, PR577),
     "distributional/solver/_formation.py::_AbsTensor": (16, PR577),
     "distributional/solver/solver.py::_half_penalty_quadratic": (14, PR577),
     "editor/free_levels.py::_gap_variances": (14, PR571),

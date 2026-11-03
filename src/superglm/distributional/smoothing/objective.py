@@ -323,17 +323,11 @@ def _stable_isolated_gfs_update(
     """Replace cancellation-prone GFS quotients where an exact identity applies.
 
     For one isolated penalty S with range projector P and penalized curvature
-    H = A + λS, cyclicity of the trace gives
-
-        rank(S) - λ tr(H⁻¹S) = tr(P H⁻¹ A).
-
-    The left side loses relative accuracy as λ grows because it subtracts two
-    quantities tending to ``rank(S)``.  The right side evaluates the same
-    positive residual degrees of freedom without that subtraction.  The
-    identity is used only for a full-rank fit and a penalty whose coefficient
-    slice overlaps no other penalty; shared-penalty blocks retain the generic
-    update until they have an equally strong joint identity.  A rank decided
-    from the rows evaluates the right side against the matrix it inverts
+    H = A + λS, ``rank(S) - λ tr(H⁻¹S) = tr(P H⁻¹ A)``; the right side avoids
+    the left's cancellation between two numbers near ``rank(S)`` as λ grows.
+    It is used only for a full-rank fit and a penalty whose slice overlaps no
+    other; shared-penalty blocks keep the generic update.  A rank decided from
+    the rows evaluates it against the matrix it inverts
     (:func:`_representative_numerator`).
     """
     rank = fit.terminal_rank
@@ -506,40 +500,24 @@ def _representative_numerator(
 ) -> tuple[float, float]:
     """``tr(P G⁻¹ A)`` for the matrix a row-decided rank inverts, and its bound.
 
-    The decomposition inverts ``G = E diag(r) E'`` with dual bases ``W'E =
-    I``, so over its columns ``w_j``, with ``U diag(s) U'`` the penalty's
-    range and ``α_j = U'w_j`` on the penalty's block,
-
-        tr(P G⁻¹ A) = Σ_j α_j' U'(A w_j) / r_j.
-
-    The formed ``A`` is the representative's except along the grey columns,
-    the ones evaluated from the rows, where they differ by the formation
-    error and ``1 / r_j`` amplifies it.  Those columns take the
-    representative's own ``A w_j = r_j e_j - λ S w_j`` instead,
-
-        α_j' U'(A w_j) / r_j = α_j'ε_j - λ α_j' diag(s) α_j / r_j,
-
-    ``ε_j = U'e_j``: squaring in the range keeps a grey column's share of
-    ``S``'s null space out of the subtraction (the structural zeros of Wood,
-    Pya and Säfken 2016, Suppl. C).  At full rank ``W E' = I``, so the
-    identity ``rank(S) = tr(P W E')`` needs no authentication.
-
-    The bound, in ``u`` (Higham 2002, eq. 3.5 for each dot product):
-
-    * the other columns: ``2048 p u`` times the absolute products, as for
-      the formed numerator, which covers the decomposition's own eigenvector
-      residual.  Their representative columns also carry ``V_g Z'``, the
-      grey block's coupling: at most ``||ε_g||_F ||Z||_F ||α_j / r_j||_F``;
-    * a grey column: ``|fl(α) - α| <= γ_m a``, ``a = |U|'|w_j|``, and
-      likewise ``ε`` with ``b = |U|'|e_j|`` (``m`` the block width), so with
-      ``α~ = |α| + γ_m a``, ``ε~ = |ε| + γ_m b`` the share is within ``γ_m
-      (α~'b + a'ε~ + 2 λ s'(a α~) / r_j) + γ_(k+3) (α~'ε~ + λ s'α~² /
-      r_j)``, plus ``λ α~'|R|'|w_j| / r_j`` for the eigensolver residual ``R
-      = S U - U diag(s)``, within ``γ_(m+1) (|S||U| + |U| diag(s))`` of its
-      computed value.  Every term is a product with ``α`` or ``ε``, so a grey
-      column in ``S``'s null space, whose ``α`` is at rounding level, keeps a
-      bound at that level.
+    With dual bases ``W'E = I`` and the penalty's range ``U diag(s) U'``,
+    ``tr(P G⁻¹ A) = Σ_j α_j' U'(A w_j) / r_j``, ``α_j = U'w_j``.  The grey
+    columns, evaluated from the rows, take the representative's own
+    ``A w_j = r_j e_j - λ S w_j``, so their share is ``α_j'ε_j - λ α_j'
+    diag(s) α_j / r_j`` with ``ε_j = U'e_j``: squaring in the range keeps
+    ``S``'s null space out of the subtraction (Wood, Pya and Säfken 2016,
+    Suppl. C).  The bound is written in ``u`` in the comment below.
     """
+    # Bound, in u (Higham 2002, eq. 3.5 per dot product). Other columns: 2048 p u
+    # times the absolute products, which covers the eigenvector residual, plus the
+    # grey block's coupling V_g Z', at most ||ε_g||_F ||Z||_F ||α_j / r_j||_F.
+    # A grey column, with a = |U|'|w_j|, b = |U|'|e_j|, α~ = |α| + γ_m a and
+    # ε~ = |ε| + γ_m b (m the block width): γ_m (α~'b + a'ε~ + 2 λ s'(a α~) / r_j)
+    # + γ_(k+3) (α~'ε~ + λ s'α~² / r_j), plus λ α~'|R|'|w_j| / r_j for the
+    # eigensolver residual R = S U - U diag(s), within γ_(m+1) (|S||U| + |U|
+    # diag(s)). Every term is a product with α or ε, so a grey column in S's null
+    # space keeps a bound at rounding level. At full rank W E' = I, so
+    # rank(S) = tr(P W E') needs no authentication.
     rank = fit.terminal_rank
     block = component.coefficient_slice
     solution = np.asarray(rank.solution_basis, dtype=np.float64)

@@ -889,9 +889,8 @@ def _solve_residual(
     """The solve's relative residual ``||H s - g|| / max(1, ||g||)``, or its backward error.
 
     A backward-stable solve leaves a residual of about ``u ||H|| ||s||``,
-    which exceeds any fixed fraction of ``||g||`` once ``||H|| ||s|| >> ||g||``:
-    a column far from zero beside an intercept puts the step along a
-    direction the curvature barely resists. An untruncated solve that misses
+    which exceeds any fixed fraction of ``||g||`` once ``||H|| ||s|| >> ||g||``,
+    as for a column far from zero beside an intercept. An untruncated solve that misses
     ``tolerance`` on the relative test is read by its normwise backward error
     ``||r|| / (||H|| ||s|| + ||g||)`` instead (Rigal and Gaches, *J. ACM* 14,
     1967; Higham 2002, Thm 7.1): the relative perturbation of ``H`` and ``g``
