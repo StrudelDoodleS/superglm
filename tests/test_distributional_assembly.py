@@ -10,10 +10,12 @@ import pytest
 import superglm.distributional.solver.assembly as assembly_module
 import superglm.distributional.solver.solver as solver_module
 from superglm._frame import as_eager_frame
+from superglm._group_matrix._block_queue import block_queue_config
 from superglm.distributional.family import ParameterSpec, ParameterSupport
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import Predictor, compile_predictors
 from superglm.distributional.solver.assembly import (
+    _dense_channel_blocks,
     _evaluate_predictors_from_matrices,
     assemble_grouped_geometry,
     dense_predictor_matrices,
@@ -452,3 +454,63 @@ def test_assembler_rejects_channel_coefficient_and_layout_shape_mismatches() -> 
         _evaluate_predictors_from_matrices(
             broken_layout, np.zeros(5), dense_predictor_matrices(broken_layout)
         )
+
+
+@pytest.mark.parametrize("weights", ["nonnegative", "mixed"])
+def test_wide_dense_gram_is_the_same_at_every_worker_count(weights: str) -> None:
+    rng = np.random.default_rng(19)
+    n_rows = 2 * assembly_module._GRAM_BLOCK_ROWS + 5
+    matrices = (rng.standard_normal((n_rows, 130)), rng.standard_normal((n_rows, 40)))
+    curvature = rng.standard_normal((n_rows, 3))
+    if weights == "nonnegative":
+        curvature[:, 0] = np.abs(curvature[:, 0])
+        curvature[::7, 0] = 0.0
+    channels = [(0, 0), (0, 1), (1, 1)]
+
+    with block_queue_config(workers=1):
+        serial = _dense_channel_blocks(matrices, curvature, channels)
+    with block_queue_config(workers=4):
+        pooled = _dense_channel_blocks(matrices, curvature, channels)
+
+    for channel, (left, right) in enumerate(channels):
+        np.testing.assert_array_equal(pooled[channel], serial[channel])
+        channel_weights = curvature[:, channel, None]
+        literal = matrices[left].T @ (channel_weights * matrices[right])
+        magnitude = np.abs(matrices[left]).T @ (np.abs(channel_weights) * np.abs(matrices[right]))
+        assert np.all(np.abs(pooled[channel] - literal) <= _gamma(n_rows) * magnitude)
+
+
+def test_a_narrow_dense_channel_stays_one_general_product(monkeypatch) -> None:
+    def no_queue(*_args, **_kwargs):
+        raise AssertionError("a narrow channel uses no block queue")
+
+    monkeypatch.setattr(assembly_module, "run_block_tasks", no_queue)
+    rng = np.random.default_rng(23)
+    matrix = rng.standard_normal((3 * assembly_module._GRAM_BLOCK_ROWS, 5))
+    weights = rng.standard_normal((matrix.shape[0], 1))
+
+    (block,) = _dense_channel_blocks((matrix,), weights, [(0, 0)])
+
+    np.testing.assert_array_equal(block, matrix.T @ (weights * matrix))
+
+
+@pytest.mark.parametrize(
+    ("n_rows", "blocks"),
+    [(300_000, assembly_module._GRAM_MAX_BLOCKS), (2 * assembly_module._GRAM_BLOCK_ROWS + 5, 3)],
+)
+def test_the_dense_gram_partition_follows_the_row_count(monkeypatch, n_rows, blocks) -> None:
+    run = assembly_module.run_block_tasks
+    seen = []
+
+    def counted(tasks, *args, **kwargs):
+        seen.append(len(tasks))
+        run(tasks, *args, **kwargs)
+
+    monkeypatch.setattr(assembly_module, "run_block_tasks", counted)
+    monkeypatch.setattr(assembly_module, "_GRAM_POOL_COST", 1)
+    matrix = np.ones((n_rows, 2))
+
+    (block,) = _dense_channel_blocks((matrix,), np.ones((n_rows, 1)), [(0, 0)])
+
+    assert seen == [blocks]
+    np.testing.assert_array_equal(block, np.full((2, 2), float(n_rows)))

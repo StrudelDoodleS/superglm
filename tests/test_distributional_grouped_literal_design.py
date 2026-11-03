@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 import numpy as np
@@ -274,6 +275,28 @@ def test_by_bin_tables_are_contracted_once_per_pass(monkeypatch, chunks_per_bloc
     # form 4 or 2 blocks; kept tables contract once per pass.
     blocks = -(-4 // chunks_per_block)
     assert len(contracted) == (4 if kept else 4 * blocks)
+
+
+def test_pass_tables_contract_on_the_pool_with_the_serial_result(monkeypatch):
+    problem = _mixed_problem()
+    monkeypatch.setattr(chunks, "contraction_block_rows", lambda n, row_bytes, rows: 2 * rows)
+    original = algebra._by_bin_contraction
+    threads = []
+
+    def recorded(gm, cache, table, **kwargs):
+        threads.append(threading.current_thread().name)
+        return original(gm, cache, table, **kwargs)
+
+    monkeypatch.setattr(algebra, "_by_bin_contraction", recorded)
+    with block_queue_config(workers=1):
+        serial = _assemble(monkeypatch, problem=problem)[0]
+    threads.clear()
+    monkeypatch.setattr(block_queue, "_TINY_COST", 0)
+    with block_queue_config(workers=3, min_cost=0):
+        pooled = _assemble(monkeypatch, problem=problem)[0]
+
+    assert threads and all(name.startswith("superglm-gram") for name in threads)
+    np.testing.assert_array_equal(pooled.data_curvature, serial.data_curvature)
 
 
 def _joint_contractions(monkeypatch):

@@ -24,6 +24,15 @@ from superglm.distributional.solver._ordinary_packing import PredictorPanel
 from superglm.distributional.solver.packing import packed_pairs
 from superglm.solvers.rank import _symmetric_part
 
+# A dense Gram's row block. Fixed, so the partition and its rounding do not depend
+# on the workers.
+_GRAM_BLOCK_ROWS = 2048
+# The most blocks a channel holds until their row-order sum: 64 Grams, against the
+# whole weighted design a single product holds.
+_GRAM_MAX_BLOCKS = 64
+# Multiply-adds below which a dense channel stays one general product (under a ms).
+_GRAM_POOL_COST = 1 << 24
+
 
 def _readonly(values: NDArray) -> NDArray[np.float64]:
     result = np.array(values, dtype=np.float64, copy=True)
@@ -221,6 +230,79 @@ def validated_dense_penalty(penalty: NDArray, width: int) -> NDArray[np.float64]
     return _symmetric_part(values)
 
 
+def _gram_rows(left: NDArray, right: NDArray, weights: NDArray, start: int, stop: int) -> NDArray:
+    """``left' diag(weights) right`` over one row block.
+
+    A diagonal block of nonnegative weights is the crossproduct of its root-weighted
+    rows, which BLAS ``syrk`` forms in about two thirds of a general product's time.
+    """
+    rows, row_weights = left[start:stop], weights[start:stop]
+    if left is right and row_weights.min() >= 0.0:
+        scaled = np.sqrt(row_weights)[:, None] * rows
+        return np.dot(scaled.T, scaled)
+    return np.dot(rows.T, row_weights[:, None] * right[start:stop])
+
+
+def _gram_channel_tasks(left: NDArray, right: NDArray, weights: NDArray, block_rows: int):
+    """One channel's row-block tasks and its ``finish``, the blocks' sum in row order.
+
+    A channel below ``_GRAM_POOL_COST`` is one general product and has no tasks.
+    """
+    n_rows = weights.shape[0]
+    cells = left.shape[1] * right.shape[1]
+    if n_rows <= block_rows or n_rows * cells < _GRAM_POOL_COST:
+        whole = left.T @ (weights[:, None] * right)
+        return [], lambda: whole
+    spans = [(start, min(start + block_rows, n_rows)) for start in range(0, n_rows, block_rows)]
+    parts: list[NDArray | None] = [None] * len(spans)
+
+    def finish() -> NDArray:
+        total = parts[0]
+        for part in parts[1:]:
+            total += part
+        return total
+
+    tasks = [
+        BlockTask(
+            index=0,
+            cost=float((stop - start) * cells),
+            nbytes=8 * ((stop - start) * right.shape[1] + cells),
+            run=lambda _cache, _profile, a=start, b=stop: _gram_rows(left, right, weights, a, b),
+            place=partial(parts.__setitem__, slot),
+        )
+        for slot, (start, stop) in enumerate(spans)
+    ]
+    return tasks, finish
+
+
+def _dense_channel_blocks(
+    matrices: tuple[NDArray[np.float64], ...],
+    curvature: NDArray,
+    channels: list[tuple[int, int]],
+) -> list[NDArray]:
+    """Every channel's ``X_l' diag(w) X_r``, a wide channel's over fixed row blocks on the pool.
+
+    The partition depends only on the row count, each block runs on one BLAS thread
+    and the blocks are summed in row order, so the result is the same at every
+    worker count (Li and Wood 2020, sec. 4).
+    """
+    n_rows = curvature.shape[0]
+    block_rows = max(_GRAM_BLOCK_ROWS, -(-n_rows // _GRAM_MAX_BLOCKS))
+    tasks: list[BlockTask] = []
+    finishers = []
+    for channel_index, (left_index, right_index) in enumerate(channels):
+        channel_tasks, finish = _gram_channel_tasks(
+            matrices[left_index], matrices[right_index], curvature[:, channel_index], block_rows
+        )
+        for task in channel_tasks:
+            task.index = len(tasks)
+            tasks.append(task)
+        finishers.append(finish)
+    if tasks:
+        run_block_tasks(tasks, _BlockWeightCache(), None, dispatch_bound=True)
+    return [finish() for finish in finishers]
+
+
 def _assemble_dense_geometry_from_matrices(
     layout: StackedLayout,
     matrices: tuple[NDArray[np.float64], ...],
@@ -257,11 +339,11 @@ def _assemble_dense_geometry_from_matrices(
     for state, matrix in zip(layout.predictors, matrices, strict=True):
         score_data[state.coefficient_slice] = matrix.T @ score[:, state.parameter_index]
 
-    for channel_index, (left_index, right_index) in enumerate(packed_pairs(k_parameters)):
+    channels = packed_pairs(k_parameters)
+    blocks = _dense_channel_blocks(matrices, curvature, channels)
+    for (left_index, right_index), block in zip(channels, blocks, strict=True):
         left_state = layout.predictors[left_index]
         right_state = layout.predictors[right_index]
-        weights = curvature[:, channel_index]
-        block = matrices[left_index].T @ (weights[:, None] * matrices[right_index])
         data_curvature[left_state.coefficient_slice, right_state.coefficient_slice] = block
         if left_index != right_index:
             data_curvature[right_state.coefficient_slice, left_state.coefficient_slice] = block.T
@@ -557,16 +639,37 @@ class GroupedGeometryAccumulator:
         self._channel_chunks[channel_index] += 1
 
     def release_tables(self) -> None:
-        """Contract the pass tables into the curvature; later blocks contract their own."""
+        """Contract the pass tables into the curvature; later blocks contract their own.
+
+        One queue over the pairs. A pair's part of the curvature holds nothing
+        else, so the result does not depend on the workers or their order.
+        """
         tables, self._tables = self._tables, None
         if tables is None:
             return
-        for (channel_index, left, right), block in tables.contracted(self._factors):
-            left_index, right_index = self._pairs[channel_index]
-            rows = self._group_columns[left_index][left]
-            columns = self._group_columns[right_index][right]
+        tasks = [self._table_task(index, *entry) for index, entry in enumerate(tables.drain())]
+        if tasks:
+            run_block_tasks(
+                tasks, _BlockWeightCache(None, self._factors), None, dispatch_bound=True
+            )
+
+    def _table_task(self, index: int, key, table: NDArray, contract, width: int) -> BlockTask:
+        channel_index, left, right = key
+        left_index, right_index = self._pairs[channel_index]
+        rows = self._group_columns[left_index][left]
+        columns = self._group_columns[right_index][right]
+
+        def place(block: NDArray) -> None:
             self._curvature[rows, columns] += block
             self._curvature[columns, rows] += block.T
+
+        return BlockTask(
+            index=index,
+            cost=float(table.size * width),
+            nbytes=table.nbytes,
+            run=lambda cache, _profile: contract(table, cache),
+            place=place,
+        )
 
     def finish(self) -> DenseJointGeometry:
         """Validate complete channel coverage and publish immutable geometry."""

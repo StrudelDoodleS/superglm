@@ -364,7 +364,7 @@ class PassTables:
         table = _pass_table(gm_i, gm_j)
         if table is not None and table[0] <= self._remaining:
             self._remaining -= table[0]
-            self._entries[key] = [None, table[1], table[2]]
+            self._entries[key] = [None, table[1], table[2], table[3]]
 
     def add(self, key, gm_i, gm_j, W, cache) -> bool:
         """Add one block's rows into ``key``'s table; False when the pair keeps none."""
@@ -374,17 +374,28 @@ class PassTables:
         entry[0] = entry[1](entry[0], gm_i, gm_j, W, cache)
         return True
 
+    def drain(self) -> list[tuple]:
+        """Release every kept pair with rows: ``(key, table, contract, width)``."""
+        entries, self._entries = self._entries, {}
+        return [
+            (key, table, contract, width)
+            for key, (table, _add, contract, width) in entries.items()
+            if table is not None
+        ]
+
     def contracted(self, factors: PassFactors | None):
         """Yield ``(key, X_left' W X_right)`` for every kept pair, releasing its table."""
         cache = _BlockWeightCache(None, factors)
-        while self._entries:
-            key, (table, _add, contract) = self._entries.popitem()
-            if table is not None:
-                yield key, contract(table, cache)
+        for key, table, contract, _width in self.drain():
+            yield key, contract(table, cache)
 
 
 def _pass_table(gm_i, gm_j):
-    """``(bytes, add, contract)`` of the pair's pass table, or None when it keeps none."""
+    """``(bytes, add, contract, width)`` of the pair's pass table, or None when it keeps none.
+
+    ``width`` is the support columns its contraction multiplies the table by, for
+    the block queue's cost model only.
+    """
     for disc, other, transposed in ((gm_i, gm_j, False), (gm_j, gm_i, True)):
         if _pass_table_pair(disc, other):
             if not _agg_by_bin_fits(other, disc.n_bins):
@@ -400,12 +411,18 @@ def _pass_table(gm_i, gm_j):
                 nbytes,
                 partial(_add_by_bin, transposed, aggregate),
                 partial(_by_bin_block, disc, transposed),
+                int(disc.shape[1]),
             )
     kind = _joint_table_kind(gm_i, gm_j)
     if kind is None:
         return None
     nbytes = 8 * int(gm_i.n_bins) * int(gm_j.n_bins)
-    return nbytes, partial(_add_joint, kind), partial(_joint_block, kind, gm_i, gm_j)
+    return (
+        nbytes,
+        partial(_add_joint, kind),
+        partial(_joint_block, kind, gm_i, gm_j),
+        int(gm_i.shape[1]),
+    )
 
 
 def _pass_table_pair(disc, other) -> bool:
