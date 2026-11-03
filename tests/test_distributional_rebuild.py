@@ -164,7 +164,8 @@ def test_offsets_replay_on_a_count_model():
     np.testing.assert_allclose(_vector(again), before, rtol=0, atol=1e3 * EPS * before.size * scale)
 
 
-def test_a_bounded_fit_is_not_replayed():
+@pytest.mark.parametrize("bounds", ["truncation", "censored"])
+def test_a_bounded_fit_is_not_replayed(bounds):
     rng = np.random.default_rng(20261103)
     X = pd.DataFrame({"age": rng.uniform(18.0, 90.0, 150)})
     y = rng.gamma(4.0, 100.0, 150)
@@ -172,7 +173,8 @@ def test_a_bounded_fit_is_not_replayed():
     censored[:6] = True
     family = GammaLS()
     model = SuperLSS(family, family.mean(s("age", k=5)), family.scale())
-    model.fit_reml(X, y, truncation=(1.0, None), censored=censored)
+    keywords = {"truncation": (1.0, None)} if bounds == "truncation" else {"censored": censored}
+    model.fit_reml(X, y, **keywords)
     with pytest.raises(ValueError, match="fitted with truncated or censored rows"):
         model._clone_with_replaced_terms({})
 

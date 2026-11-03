@@ -179,7 +179,7 @@ def open_lss(
         editable,
         n_points=n_points,
         centering=centering,
-        reference_model=view.with_model(lss),
+        reference_model=view,
         evaluation_data=evaluation_data,
         cv_report=cv_report,
         cv=cv,

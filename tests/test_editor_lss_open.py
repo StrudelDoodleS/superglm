@@ -111,7 +111,7 @@ def test_opens_each_supported_family(make):
     assert isinstance(session.model, LSSModelView)
     assert session.model.lss is case.model
     assert isinstance(session.reference_model, LSSModelView)
-    assert session.reference_model is not session.model
+    assert session.reference_model is session.model
     assert session.reference_model.lss is case.model
     assert session.centering == "native"
     for key, term in session.terms.items():

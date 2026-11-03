@@ -149,6 +149,10 @@ class LSSModelView:
             )
         )
         self._reference_row: pd.DataFrame | None = None
+        # Why Refit cannot run on the session's training rows, with the rows it was read for.
+        # Owned by this view: one fitted model, over training rows a session never changes;
+        # a Refit makes a new view.
+        self._refit_reason: tuple[Any, str | None] | None = None
         self._reference_etas: dict[str, float] = {}
         # Each edited term's change to its predictor at the reference row, by its curve.
         self._reference_edits: dict[str, tuple[tuple[bytes, bytes], float]] = {}

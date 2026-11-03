@@ -155,7 +155,12 @@ def session_refit_reason(session: Any) -> str | None:
     train = session._evaluation_data.get("train")
     if train is None:
         return refit_reason(session.model, None, None)
-    return refit_reason(session.model, train.sample_weight, train.offset, train.y)
+    view = session.model
+    if not isinstance(view, LSSModelView):
+        return refit_reason(view, train.sample_weight, train.offset, train.y)
+    if view._refit_reason is None or view._refit_reason[0] is not train:
+        view._refit_reason = (train, refit_reason(view, train.sample_weight, train.offset, train.y))
+    return view._refit_reason[1]
 
 
 def _weights_differ(state: Any, sample_weight: Any, n_rows: int) -> bool:

@@ -657,6 +657,46 @@ def test_a_change_of_penalties_is_refused_when_the_fit_fixed_every_strength(repl
     assert len(replays) == 1
 
 
+def test_the_state_reads_the_training_weights_once_per_model(monkeypatch):
+    import superglm.editor.lss.availability as availability
+
+    session = open_case(weighted_case())
+    calls = []
+    resolve = availability.resolve_likelihood_weights
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return resolve(*args, **kwargs)
+
+    monkeypatch.setattr(availability, "resolve_likelihood_weights", counted)
+    widget = session.widget()
+    try:
+        widget._state()
+        widget._state()
+    finally:
+        widget.close()
+    assert len(calls) == 1
+
+
+def test_a_freshly_opened_model_is_the_model_in_force(monkeypatch):
+    session = open_case(gamma_case())
+    swept = []
+    sweep = LSSModelView.term_inference
+
+    def counted(self, *args, **kwargs):
+        swept.append(1)
+        return sweep(self, *args, **kwargs)
+
+    monkeypatch.setattr(LSSModelView, "term_inference", counted)
+    session_payload(session)
+    assert swept == []
+    widget = session.widget()
+    try:
+        assert widget._state()["in_force_is_original"] is True
+    finally:
+        widget.close()
+
+
 def test_a_model_opened_on_the_rows_its_fit_kept_can_refit():
     base = gamma_case()
     weights = np.random.default_rng(20261103).uniform(0.5, 2.0, base.y.size)
