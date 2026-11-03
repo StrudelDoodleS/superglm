@@ -561,6 +561,24 @@ def test_flat_over_the_whole_range_is_refused(kind, rule, held):
     assert "no effect" in message and "remove the term" in message
 
 
+def test_flats_covering_the_range_through_a_gap_are_refused():
+    """Two flats one knot span apart that reach both ends hold the whole curve constant.
+
+    The gap between them is under ``degree`` spans, so it is flat too, and the
+    refusal names it. Mutation: without the gap merge the term fitted.
+    """
+    x = np.linspace(0.0, 10.0, 300)
+    y = np.random.default_rng(0).poisson(2, 300).astype(float)
+    rule = C.flat.within(0.1, 3.9) & C.flat.within(6.1, 9.9)
+    model = SuperGLM(family="poisson", features={"x": Spline(kind="ps", k=8, constraint=rule)})
+    with pytest.raises(ValueError) as refusal:
+        model.fit_reml(pd.DataFrame({"x": x}), y)
+    message = str(refusal.value)
+    assert re.search(r"holds the curve flat on \[0, 10\]", message)
+    assert "the gaps between them, under 3 knot spans wide" in message
+    assert "leave at least 3 knot spans between flat stretches" in message
+
+
 def test_flat_leaving_a_span_free_still_fits():
     """A flat stretch that leaves part of the range free is not the whole-range refusal."""
     x = np.linspace(0.0, 10.0, 300)

@@ -266,6 +266,39 @@ def test_natural_ends_keep_no_row_the_equalities_hold(rules):
         assert np.min(np.linalg.norm(rows.A @ Z, axis=1)) > 1e-3
 
 
+def _gap_layouts(t: np.ndarray) -> list:
+    """Rules on a gap under ``degree`` knot spans between two flats, from interior knots ``t``."""
+    h = t[4] - t[3]
+    inside = C.increasing.within(float(t[3] + 0.2 * h), float(t[4] - 0.2 * h))
+    return [
+        C.flat.within(float(t[2]), float(t[3])) & inside & C.flat.within(float(t[4]), float(t[5])),
+        C.convex
+        & C.flat.within(float(t[1]), float(t[2]))
+        & C.flat.within(float(t[4]), float(t[5])),
+    ]
+
+
+@pytest.mark.parametrize("natural_ends", [False, True], ids=["open", "natural"])
+@pytest.mark.parametrize("layout", [0, 1], ids=["rule-inside-gap", "curvature-over-gap"])
+def test_rules_on_a_held_gap_keep_no_row_the_equalities_hold(layout, natural_ends):
+    """A gap under ``degree`` knot spans between two flats is flat, so no row on it survives.
+
+    The increasing stretch sits strictly inside a one-span gap; the convex rule
+    crosses a two-span gap with a knot inside it. Mutation: rows were dropped only
+    on the unmerged zero regions, so the gap's rows survived (norm about 1e-16
+    after composition).
+    """
+    knots = _clamped_knots() if natural_ends else _open_knots()
+    pieces = shape_pieces(_gap_layouts(knots[DEGREE + 1 : -DEGREE - 1])[layout], LO, HI)
+    rows, flat = shape_rows(knots, DEGREE, pieces, domain=(LO, HI), natural_ends=natural_ends)
+    natural = [derivative_value_row(knots, DEGREE, x, 2) for x in (LO, HI)] if natural_ends else []
+    equalities = np.vstack([flat, *natural])
+    Q, _ = np.linalg.qr(equalities.T, mode="complete")
+    Z = Q[:, equalities.shape[0] :]
+    if rows.A.shape[0]:
+        assert np.min(np.linalg.norm(rows.A @ Z, axis=1)) > 1e-3
+
+
 def test_flat_covers_the_curve_when_its_zero_region_and_natural_ends_reach_every_span():
     """Whether the flat rows leave only the constants: every slope coefficient held at zero."""
     from superglm.features._shape_rule_rows import flat_covers_curve

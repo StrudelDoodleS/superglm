@@ -192,27 +192,6 @@ def flat_zero_regions(knots: NDArray, pieces: list[ShapePiece]) -> list[tuple[fl
     return _zero_regions(np.asarray(knots, dtype=np.float64), flats)
 
 
-def natural_flat_extent(
-    knots: NDArray, degree: int, lo: float, hi: float, *, natural_ends: bool
-) -> tuple[float, float]:
-    """Where a flat zero region [lo, hi] holds a cubic with natural ends constant.
-
-    A natural end holds ``f''`` at zero at the end of the knot vector's base
-    interval. A zero region that begins at the first interior knot leaves the
-    boundary span a cubic with ``f'' = 0`` at both of its ends, so ``f''`` is
-    zero on it, and with ``f' = 0`` at the knot the curve is constant there
-    too. The same holds at the right end.
-    """
-    if degree != 3 or not natural_ends:
-        return lo, hi
-    n_basis = len(knots) - degree - 1
-    if lo == knots[degree + 1]:
-        lo = knots[degree]
-    if hi == knots[n_basis - 1]:
-        hi = knots[n_basis]
-    return lo, hi
-
-
 def held_flat_regions(
     knots: NDArray, degree: int, pieces: list[ShapePiece], *, natural_ends: bool
 ) -> list[tuple[float, float]]:
@@ -328,17 +307,16 @@ def shape_rows(
     at the ends of the knot vector's base interval, where a natural spline
     (clamped at its range) puts its boundary conditions: a curvature piece
     drops its coefficient there, and a zero region reaching that end drops the
-    flat row the boundary row implies. A zero region that starts (ends) at the
-    first (last) interior knot holds the boundary span flat beside it
-    (:func:`natural_flat_extent`), so the rows above are dropped for that span too.
+    flat row the boundary row implies. The rows above are dropped wherever the
+    curve is held constant (:func:`held_flat_regions`): on the zero regions, on
+    the boundary span a natural end holds flat beside one, and on a gap under
+    ``degree`` knot spans between two.
     """
     knots = np.asarray(knots, dtype=np.float64)
     n_basis = len(knots) - degree - 1
     flats = [(a, b) for kind, a, b in pieces if kind == "flat"]
     zero = _zero_regions(knots, flats)
-    held_zero = [
-        natural_flat_extent(knots, degree, s, e, natural_ends=natural_ends) for s, e in zero
-    ]
+    held_zero = held_flat_regions(knots, degree, pieces, natural_ends=natural_ends)
     ends = (knots[degree], knots[n_basis])
     curvature = {(a, b): kind for kind, a, b in pieces if kind in _CURVATURE}
 
@@ -424,7 +402,6 @@ __all__ = [
     "flat_zero_regions",
     "full_range_rows",
     "held_flat_regions",
-    "natural_flat_extent",
     "refined_derivative_rows",
     "shape_pieces",
     "shape_rows",
