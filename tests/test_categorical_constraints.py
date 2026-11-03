@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, Constraint, Spline, SuperGLM, collapse_levels
+from superglm import Categorical, Constraint, Spline, SuperGLM, cat, collapse_levels
 from superglm.features.constraint import ConstraintRules, rules_of
 
 C = Constraint.fit
@@ -151,6 +151,21 @@ def test_categorical_grouping_and_unseen():
     with pytest.warns(UserWarning, match="Z"):
         mu = model.predict(rows)
     assert mu[1] == mu[0]
+
+
+def test_cat_term_takes_a_cap():
+    """``cat(..., constraint=)`` in ``terms=`` prints the relativities of the ``features=`` form.
+
+    Mutation: without the pass-through ``cat`` raises TypeError, or the cap is ignored.
+    """
+    X, y = _region_rows()
+    cap = C.cap(0.7, 1.5)
+    model = SuperGLM(family="poisson", selection_penalty=0.0, terms=[cat("region", constraint=cap)])
+    printed = _printed(model.fit(X, y))
+    assert printed["B"] == pytest.approx(1.5, rel=1e-6)
+    expected = _printed(_fit(X, y, Categorical(constraint=cap)))
+    assert printed.keys() == expected.keys()
+    np.testing.assert_allclose(list(printed.values()), list(expected.values()), rtol=1e3 * _U)
 
 
 def test_categorical_cap_survives_rebuild():

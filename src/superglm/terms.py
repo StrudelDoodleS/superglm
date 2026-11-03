@@ -315,6 +315,7 @@ def cat(
     grouping: LevelGrouping | None = None,
     levels: Any = None,
     unseen: Literal["error", "base"] | str = "error",
+    constraint: ConstraintSpec | ConstraintRules | None = None,
 ) -> BoundTerm:
     """Declare a categorical effect with a reference level.
 
@@ -339,6 +340,9 @@ def cat(
         ``"base"`` uses the reference level and emits a warning. The label of
         a group of ``grouping`` gives them that group's effect, also with a
         warning.
+    constraint : ConstraintSpec or ConstraintRules, optional
+        Relativity cap, e.g. ``Constraint.fit.cap(0.7, 1.5)``; caps only — use
+        an ordered term for shapes.
 
     Returns
     -------
@@ -350,7 +354,12 @@ def cat(
     Categorical : Encoding, grouping and level-universe rules.
     re : A penalized effect with a coefficient for every level.
     """
-    return term(column, Categorical(base=base, grouping=grouping, levels=levels, unseen=unseen))
+    return term(
+        column,
+        Categorical(
+            base=base, grouping=grouping, levels=levels, unseen=unseen, constraint=constraint
+        ),
+    )
 
 
 def re(
