@@ -383,14 +383,40 @@ def _interaction_on(fitted: Any, parameter: str, feature: Hashable) -> str | Non
     return None
 
 
-def _fitted_level_spec(fitted: Any, name: Hashable) -> Any | None:
-    """Return the first term, in predictor order, that reads column ``name`` with
-    levels, or ``None`` if no term does."""
+def _fitted_level_specs(fitted: Any, name: Hashable) -> list[Any]:
+    """Every term that reads column ``name`` with levels: the main terms in
+    predictor order, then the factor smooths whose group it is."""
+    from superglm.features.factor_smooth import FactorSmooth
+
+    mains: list[Any] = []
+    groups: list[Any] = []
     for predictor in fitted.compiled_predictors:
-        spec = predictor.compiled.specs.get(name)
+        compiled = predictor.compiled
+        spec = compiled.specs.get(name)
         if spec is not None and _level_domain(spec) is not None:
-            return spec
-    return None
+            mains.append(spec)
+        groups.extend(
+            spec
+            for spec in getattr(compiled, "interaction_specs", {}).values()
+            if isinstance(spec, FactorSmooth) and spec.group == name and _level_domain(spec)
+        )
+    return mains + groups
+
+
+def _fitted_level_spec(fitted: Any, name: Hashable) -> Any | None:
+    """Return the first of :func:`_fitted_level_specs`, or ``None`` if no term
+    reads column ``name`` with levels."""
+    specs = _fitted_level_specs(fitted, name)
+    return specs[0] if specs else None
+
+
+def _read_by_all(specs: Sequence[Any], labels: Sequence[Any]) -> NDArray[np.bool_]:
+    """Which raw labels every term in ``specs`` reads at one of its own fitted levels."""
+    readable = np.ones(len(labels), dtype=bool)
+    for spec in specs:
+        domain = set(_level_domain(spec) or ())
+        readable &= np.array([level in domain for level in _read_levels(spec, labels)], dtype=bool)
+    return readable
 
 
 def _fitted_levels(fitted: Any, name: Hashable) -> tuple[Any, ...] | None:
@@ -434,24 +460,37 @@ def _read_one_level(resolve: Any, label: Any) -> Any:
         return label
 
 
-def _level_inputs(spec: Any | None, levels: Sequence[Any], values: Any) -> list[Any]:
-    """Return the input label that reads each fitted level.
+def _level_inputs(readers: Sequence[Any], levels: Sequence[Any], values: Any) -> list[Any]:
+    """Return the input label that reads each fitted level of ``readers[0]``.
 
-    A grouped term's levels are its group labels, but it reads original
-    labels. Each group is swept through the first of the frame's labels, in
-    sorted order, that the term reads at it, so on the training frame every
-    other term reading the column has seen that label too. A group with no
-    label in the frame is swept through its first member.
+    ``readers`` are :func:`_fitted_level_specs` of the column. A term's levels
+    can differ from the labels it reads: a grouped term's are its group labels,
+    and another reader may spell them differently. Each level is swept through
+    the first of the frame's labels, in sorted order, that the term reads at it,
+    preferring labels every reader reads at one of its fitted levels. A level
+    with no label in the frame is swept through its first member every reader
+    reads, else its first member.
     """
+    spec = readers[0] if readers else None
     grouping = None if spec is None else getattr(spec, "_grouping", None)
-    if grouping is None:
+    if grouping is None and len(readers) < 2:
         return list(levels)
     _, labels = pd.factorize(values, sort=True)
     present: dict[Any, Any] = {}
-    for label, level in zip(labels, _read_levels(spec, labels), strict=True):
+    readable = _read_by_all(readers, labels)
+    for label, level, _ in sorted(
+        zip(labels, _read_levels(spec, labels), readable, strict=True), key=lambda row: not row[2]
+    ):
         present.setdefault(level, label)
-    members = grouping.group_to_originals
-    return [present.get(level, members.get(str(level), [level])[0]) for level in levels]
+
+    def member(level: Any) -> Any:
+        members = (
+            [level] if grouping is None else grouping.group_to_originals.get(str(level), [level])
+        )
+        readable = _read_by_all(readers, members)
+        return members[int(np.argmax(readable))]
+
+    return [present[level] if level in present else member(level) for level in levels]
 
 
 def _column_levels(fitted: Any, frame: EagerFrame, name: Hashable) -> list[Any] | None:
@@ -487,7 +526,9 @@ def _reference_value(fitted: Any, frame: EagerFrame, name: Hashable) -> Any:
     at it; a tie goes to the level that comes first in :func:`_column_levels` order.
     A label the term reads at no fitted level is held only if no fitted level is
     present.  The value returned is the chosen level's most frequent label, so a
-    grouped term is held at one of its members.
+    grouped term is held at one of its members; when some label is read at a
+    fitted level by every term that reads the column with levels, only such
+    labels are chosen, so no other term is handed a label it never fitted.
     """
     values = frame.column_array(name)
     empty = (
@@ -518,12 +559,16 @@ def _reference_value(fitted: Any, frame: EagerFrame, name: Hashable) -> Any:
     # A label read at no fitted level is held only when no fitted level is present.
     candidates = {level: count for level, count in level_counts.items() if level in rank}
     candidates = candidates or level_counts
+    readable = _read_by_all(_fitted_level_specs(fitted, name), labels)
+    readable |= not readable.any()
+    usable = {read[code] for code in np.flatnonzero(readable)}
+    candidates = {level: count for level, count in candidates.items() if level in usable}
     top = max(candidates.values())
     level = min(
         (level for level, count in candidates.items() if count == top),
         key=lambda level: rank.get(level, len(rank)),
     )
-    members = [code for code, read_at in enumerate(read) if read_at == level]
+    members = [code for code, read_at in enumerate(read) if read_at == level and readable[code]]
     return labels[max(members, key=lambda code: counts[code])]
 
 
@@ -546,7 +591,11 @@ def _sweep(
 
     levels = _level_domain(spec)
     if levels is not None:
-        swept: Any = _level_inputs(spec, levels, frame.column_array(column))
+        readers = [
+            spec,
+            *(other for other in _fitted_level_specs(fitted, column) if other is not spec),
+        ]
+        swept: Any = _level_inputs(readers, levels, frame.column_array(column))
         grid = None
         names = tuple(str(level) for level in levels)
     else:
