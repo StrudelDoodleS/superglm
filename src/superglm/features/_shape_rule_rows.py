@@ -266,6 +266,8 @@ def _flat_rows(
     region reaching that end drops the second.
     """
     n_basis = len(knots) - degree - 1
+    if not zero:
+        return np.zeros((0, n_basis))
     spans = knots[degree + 1 : degree + n_basis] - knots[1:n_basis]
     D = degree * np.diff(np.eye(n_basis), axis=0) / spans[:, None]
     held = _held_at_zero(knots[1:n_basis], knots[degree + 1 : degree + n_basis], zero)

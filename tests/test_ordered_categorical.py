@@ -16,6 +16,7 @@ from superglm import (
     collapse_levels,
 )
 from superglm.constraints import shape_constraint_certificate
+from superglm.solvers.irls_direct._qp import _QP_FEASIBILITY_TOL
 
 # ── Fixtures ──────────────────────────────────────────────────────
 
@@ -1111,6 +1112,8 @@ def test_ordered_term_reads_its_basis_rule_objects():
 
 
 _U = 2.0**-53
+# The QP certifies its scaled slack to _QP_FEASIBILITY_TOL, so printed bounds hold to that.
+_SLACK = _QP_FEASIBILITY_TOL + 1e3 * _U
 _AGE_BANDS = ["18-25", "26-35", "36-45", "46-55", "56-65", "66-75", "76-85", "86+"]
 
 
@@ -1152,8 +1155,8 @@ def test_ordered_cap_at_levels():
     C = Constraint.fit
     X, y = _band_rows(_steep_effect())
     printed = _printed_levels(_ordered_fit(X, y, C.increasing & C.cap(0.8, 1.25)))
-    assert np.min(printed) >= 0.8 * (1.0 - 1e3 * _U)
-    assert np.max(printed) <= 1.25 * (1.0 + 1e3 * _U)
+    assert np.min(printed) >= 0.8 * (1.0 - _SLACK)
+    assert np.max(printed) <= 1.25 * (1.0 + _SLACK)
     assert np.max(printed) == pytest.approx(1.25, abs=1e-3)  # the cap binds
     assert np.min(printed) == pytest.approx(0.8, abs=1e-3)
     assert np.max(_printed_levels(_ordered_fit(X, y, C.increasing))) > 1.8
@@ -1185,11 +1188,11 @@ def test_ordered_cap_holds_at_levels_absent_from_training(kind, extrapolation):
     """
     model = _absent_end_levels_fit(kind, extrapolation)
     printed = _printed_levels(model)
-    assert np.min(printed) >= 0.8 * (1.0 - 1e3 * _U)
-    assert np.max(printed) <= 1.2 * (1.0 + 1e3 * _U)
+    assert np.min(printed) >= 0.8 * (1.0 - _SLACK)
+    assert np.max(printed) <= 1.2 * (1.0 + _SLACK)
     mu = model.predict(pd.DataFrame({"band": np.array(list("ABCDEF"), dtype=object)}))
-    assert np.max(mu / mu[0]) <= 1.2 * (1.0 + 1e3 * _U)
-    assert np.min(mu / mu[0]) >= 0.8 * (1.0 - 1e3 * _U)
+    assert np.max(mu / mu[0]) <= 1.2 * (1.0 + _SLACK)
+    assert np.min(mu / mu[0]) >= 0.8 * (1.0 - _SLACK)
 
 
 def test_ordered_cap_under_error_extrapolation_fits():
@@ -1208,8 +1211,8 @@ def test_ordered_cap_without_a_shape_rule(method):
     """
     X, y = _band_rows(_steep_effect())
     printed = _printed_levels(_ordered_fit(X, y, Constraint.fit.cap(0.8, 1.25), method=method))
-    assert np.min(printed) >= 0.8 * (1.0 - 1e3 * _U)
-    assert np.max(printed) <= 1.25 * (1.0 + 1e3 * _U)
+    assert np.min(printed) >= 0.8 * (1.0 - _SLACK)
+    assert np.max(printed) <= 1.25 * (1.0 + _SLACK)
     assert np.max(printed) == pytest.approx(1.25, abs=1e-3)  # the cap binds at the top
 
 
@@ -1222,8 +1225,8 @@ def test_ordered_max_step():
     X, y = _band_rows(_steep_effect())
     printed = _printed_levels(_ordered_fit(X, y, C.increasing & C.max_step(0.15)))
     ratios = printed[1:] / printed[:-1]
-    assert np.min(ratios) >= 0.85 * (1.0 - 1e3 * _U)
-    assert np.max(ratios) <= 1.15 * (1.0 + 1e3 * _U)
+    assert np.min(ratios) >= 0.85 * (1.0 - _SLACK)
+    assert np.max(ratios) <= 1.15 * (1.0 + _SLACK)
     assert np.max(ratios) == pytest.approx(1.15, abs=1e-3)  # the limit binds
     free = _printed_levels(_ordered_fit(X, y, C.increasing))
     assert np.max(free[1:] / free[:-1]) > 1.2
@@ -1290,10 +1293,10 @@ def test_ordered_rules_under_reml():
     assert len(model._reml_result.lambdas) > 0
     printed = _printed_levels(model)
     ratios = printed[1:] / printed[:-1]
-    assert np.min(printed) >= 0.8 * (1.0 - 1e3 * _U)
-    assert np.max(printed) <= 1.25 * (1.0 + 1e3 * _U)
-    assert np.min(ratios) >= 1.0 - 1e3 * _U
-    assert np.max(ratios) <= 1.15 * (1.0 + 1e3 * _U)
+    assert np.min(printed) >= 0.8 * (1.0 - _SLACK)
+    assert np.max(printed) <= 1.25 * (1.0 + _SLACK)
+    assert np.min(ratios) >= 1.0 - _SLACK
+    assert np.max(ratios) <= 1.15 * (1.0 + _SLACK)
     free = _printed_levels(_ordered_fit(X, y, C.increasing, method="fit_reml"))
     assert np.max(free) > 1.25 and np.max(free[1:] / free[:-1]) > 1.15
 

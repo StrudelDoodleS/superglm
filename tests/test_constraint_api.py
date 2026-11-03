@@ -1,6 +1,7 @@
 """Tests for public constraint tokens."""
 
 import pickle
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -368,10 +369,13 @@ def test_degree_zero_spline_with_a_cap_builds(rules):
     """A degree-0 spline has no slope coefficients, so with no flat rule nothing is held flat.
 
     Mutation: every span read as held, the whole-range flat refusal fired with no
-    flat rule to name, and the build failed unpacking an empty list.
+    flat rule to name, and the build failed unpacking an empty list; the flat rows
+    divided 0/0 with no region to hold.
     """
     spec = Spline(kind="ps", n_knots=6, degree=0, constraint=rules)
-    info = spec.build(np.linspace(0.0, 10.0, 200))
+    with warnings.catch_warnings(), np.errstate(invalid="raise", divide="raise"):
+        warnings.simplefilter("error")
+        info = spec.build(np.linspace(0.0, 10.0, 200))
     assert info.constraints is not None and info.constraints.A.shape[0] > 0
 
 
