@@ -817,7 +817,7 @@ class TestFeasibilityToleranceScaling:
     def test_badly_scaled_constraints_do_not_report_spurious_non_convergence(self):
         """A blocking step lands on a constraint only to ~eps*|A_i @ beta|.
 
-        With rows of order 1e3 that rounding already exceeds an absolute 1e-12
+        With rows of order 1e5 that rounding already exceeds an absolute 1e-12
         tolerance, so the unscaled test called a genuine KKT point infeasible
         and made all three call sites warn.
         """
@@ -825,7 +825,7 @@ class TestFeasibilityToleranceScaling:
         p = 6
         M = rng.standard_normal((p, p))
         H = M.T @ M + 0.5 * np.eye(p)
-        scale = 1e3
+        scale = 1e5
         g = rng.standard_normal(p) * scale
         A = np.diff(np.eye(p), axis=0)  # monotone increasing
         b = rng.standard_normal(p - 1) * scale
@@ -833,10 +833,10 @@ class TestFeasibilityToleranceScaling:
         result = solve_constrained_qp(H, g, A, b)
 
         raw_slack = A @ result.beta - b
-        # Precondition: an absolute 1e-12 test really would call this a
-        # violation, so the test exercises the scaling rather than passing
-        # for free.
-        assert np.min(raw_slack) < -1e-12, f"min slack {np.min(raw_slack):.3e} is not tight"
+        # Precondition: one rounding of the binding rows' action exceeds an
+        # absolute 1e-12, whatever its sign on this BLAS, so the test exercises
+        # the scaling rather than passing for free.
+        assert np.finfo(np.float64).eps / 2 * np.max(np.abs(A @ result.beta)) > 1e-12
         # ...but it is a rounding-level violation relative to the row scale.
         row_scale = np.maximum(1.0, np.maximum(np.abs(b), np.abs(A @ result.beta)))
         assert np.min(raw_slack / row_scale) >= -1e-12
@@ -2453,32 +2453,137 @@ class TestFaceMinimumAboveTheStepGate:
         A[np.arange(k), np.arange(k) + 1] = 1.0
         return C, root, target, A
 
-    def test_a_widely_scaled_face_minimum_is_certified_before_the_budget_ends(self):
-        """Certified in a few iterations, and equal to the well-scaled reformulation.
+    @pytest.mark.parametrize(("seed", "spread"), [(33, 1e6), (20, 1e10)])
+    def test_a_widely_scaled_face_minimum_is_certified_at_the_optimum(self, seed, spread):
+        """Certified, within the certificate's tolerance of the Lagrangian dual's (NNLS) point.
 
-        ``beta = gamma / root`` turns the problem into one with Hessian ``C``
-        (condition number below 10) and the same feasible set, whose solve is
-        the oracle.  Mutation: without the face-minimum certificate the loop
-        exhausts its 200 iterations and returns ``converged=False``.
+        Both are compared in ``gamma = root * beta``, where the Hessian is
+        ``C`` (condition below 10) and the oracle is accurate. The certificate
+        admits a stationarity residual of ``tol`` times each coefficient's
+        absolute terms, which ``C``'s least eigenvalue bounds in coefficient
+        error, plus a rounding model of ``p u`` times ``C``'s condition with a
+        safety factor. An outcome check only: which faces the loop visits, and
+        whether a face minimum on the way carries a negative multiplier (#472,
+        seed 20 on one BLAS), depend on the saddle solve's rounding, so the
+        forced tests in ``TestFaceRelease`` carry the mutation checks.
         """
-        C, root, target, A = self._ill_scaled_problem(seed=33, spread=1e6)
+        C, root, target, A = self._ill_scaled_problem(seed=seed, spread=spread)
         H = C * np.outer(root, root)
         g = H @ target
         b = np.zeros(A.shape[0])
 
         result = solve_constrained_qp(H, g, A, b)
         assert result.converged
-        assert result.n_iter < 50
-
-        oracle = solve_constrained_qp(C, g / root, A / root[None, :], b)
-        assert oracle.converged
-        assert sorted(result.active_set) == sorted(oracle.active_set)
-        reference = oracle.beta / root
-        # A backward-stable solve's forward error: p u times the condition number.
+        gamma, lam = TestDegenerateVertex._dual_oracle(C, g / root, A / root)
+        terms = np.abs(C) @ np.abs(gamma) + np.abs(g / root) + np.abs(A / root).T @ lam
         unit = np.finfo(np.float64).eps / 2
-        bound = H.shape[0] * unit * np.linalg.cond(H) * np.max(np.abs(reference))
-        assert np.max(np.abs(result.beta - reference)) <= bound
-        assert bound < 1e-6  # informative on this fixture
+        rounding = 64 * len(g) * unit * np.linalg.cond(C) * np.max(np.abs(gamma))
+        bound = 2 * TestDegenerateVertex._TOL * np.linalg.norm(terms) / np.linalg.eigvalsh(C)[0]
+        assert np.linalg.norm(root * result.beta - gamma) <= bound + rounding
+
+
+class TestFaceRelease:
+    """#472: a face minimum with a negative multiplier releases its row; saddle solves are equilibrated."""
+
+    _H = np.array(
+        [
+            [7.780802171408732e-9, 0.1531965503633448, 3.8391297350947284],
+            [0.1531965503633448, 27018222.15463324, 267095962.64557153],
+            [3.8391297350947284, 267095962.64557153, 13791900060.023077],
+        ]
+    )
+    _G = np.array([-2.560515372904948, 0.8732164923565644, -0.2883062753863353])
+
+    def test_a_face_minimum_releases_a_negative_multiplier_above_the_step_gate(self, monkeypatch):
+        """Forced tangent rounding above ``tol``; the warm face ``x0 = x1 = 0`` must release ``x0``.
+
+        The optimum ``(1, 0, 2)`` has ``x1``'s row alone active. Mutation:
+        reading the face-minimum certificate as a pass or fail re-solves the
+        wrong face until the eight iterations run out.
+        """
+        H, g = np.eye(3), np.array([1.0, -1.0, 2.0])
+        A, b = np.eye(3)[:2], np.zeros(2)
+        solve, calls = np.linalg.solve, [0]
+
+        def rounded_solve(matrix, rhs):
+            sol = solve(matrix, rhs)
+            if matrix.shape == (5, 5):
+                calls[0] += 1
+                sol[2] += (-1.0) ** calls[0] * 1e-9
+            return sol
+
+        monkeypatch.setattr(np.linalg, "solve", rounded_solve)
+        result = solve_constrained_qp(H, g, A, b, active_set_init=[0, 1], max_iter=8)
+        assert result.converged and result.active_set == [1]
+        np.testing.assert_allclose(
+            result.beta, [1.0, 0.0, 2.0], rtol=0, atol=64 * np.finfo(np.float64).eps
+        )
+
+    def test_a_certified_face_minimum_solves_no_further_saddle(self, monkeypatch):
+        """Work count: the face minimum is certified before its next, unused, saddle solve."""
+        H, g = np.array([[2.0, 1.0], [1.0, 2.0]]), np.array([-1.0, 1.0])
+        A, b = np.array([[1.0, 0.0]]), np.zeros(1)
+        solve, saddles = np.linalg.solve, []
+
+        def counted(matrix, rhs):
+            saddles.extend([None] * (matrix.shape == (3, 3)))
+            return solve(matrix, rhs)
+
+        monkeypatch.setattr(np.linalg, "solve", counted)
+        result = solve_constrained_qp(H, g, A, b)
+        assert result.converged and len(saddles) == 1
+        reference, _ = TestDegenerateVertex._dual_oracle(H, g, A)
+        np.testing.assert_allclose(
+            result.beta, reference, rtol=0, atol=32 * np.finfo(np.float64).eps
+        )
+
+    def _assert_certified_at_the_exact_optimum(self, objective_power, row_power):
+        """``H``'s diagonal spans 1e18 but its Jacobi-scaled condition is below 4.
+
+        The reference solves the face's saddle system over the rationals (the
+        NNLS dual is not accurate enough at this spread); a positive multiplier
+        makes it the optimum. The tolerance is a rounding model, normwise in
+        ``root * beta`` units, where ``H``'s condition is below 4.
+        """
+        sympy = pytest.importorskip("sympy")
+        H, g = np.ldexp(self._H, objective_power), np.ldexp(self._G, objective_power)
+        A, b = np.ldexp(np.array([[1.0, -1.0, -1.0]]), row_power), np.zeros(1)
+        result = solve_constrained_qp(H, g, A, b)
+        assert result.converged and result.rank == 3 and result.active_set == [0]
+        saddle = sympy.Matrix(np.block([[H, -A.T], [A, np.zeros((1, 1))]]).tolist())
+        rhs = sympy.Matrix([*g, 0.0]).applyfunc(sympy.Rational)
+        exact = saddle.applyfunc(sympy.Rational).LUsolve(rhs)
+        assert exact[3] > 0
+        reference = np.array([float(value) for value in exact[:3]])
+        root = np.sqrt(H.diagonal())
+        model = 64 * 3 * 4 * (np.finfo(np.float64).eps / 2) * np.max(np.abs(root * reference))
+        assert np.max(np.abs(root * (result.beta - reference))) <= model
+
+    @pytest.mark.parametrize("objective_power", [-40, 0, 40])
+    @pytest.mark.parametrize("row_power", [-40, 0, 40])
+    def test_a_feasible_qp_with_spread_curvature_is_certified(self, objective_power, row_power):
+        """Certified at the exact optimum under every power-of-two rescaling."""
+        self._assert_certified_at_the_exact_optimum(objective_power, row_power)
+
+    def test_a_normwise_backward_stable_saddle_solve_is_enough(self, monkeypatch):
+        """Each saddle solve is replaced by the exact solve of ``K + u max|K| E``.
+
+        LU guarantees no more than that normwise backward error, on any BLAS.
+        On the raw saddle matrix it moves the small rows' equations by about
+        1e-6 of their own size, and the certificate refuses every iterate;
+        equilibrated, it is ``u`` of each row's size. Mutation: the raw solve
+        stops uncertified after 200 iterations.
+        """
+        solve = np.linalg.solve
+        signs = np.where(np.random.default_rng(0).random((4, 4)) < 0.5, -1.0, 1.0)
+
+        def backward_stable(matrix, rhs):
+            if matrix.shape == (4, 4):
+                matrix = matrix + np.finfo(np.float64).eps / 2 * np.max(np.abs(matrix)) * signs
+            return solve(matrix, rhs)
+
+        monkeypatch.setattr(np.linalg, "solve", backward_stable)
+        self._assert_certified_at_the_exact_optimum(0, 0)
 
 
 _ISSUE_472_QP = Path(__file__).parent / "fixtures" / "issue472_terminal_qp.json"
@@ -2711,7 +2816,7 @@ class TestDegenerateVertex:
         scale = np.linalg.norm(np.abs(H) @ np.abs(x) + np.abs(g))
         assert residual <= 64 * unit_roundoff * scale, "the fixture is no longer a KKT point"
         assert _stationarity_certificate(H, g, x, A, self._TOL)[:2] == (True, None)
-        assert _certifies_kkt_point(H, g, x, A, b, list(range(len(A))), self._TOL, np.abs(A))
+        assert _certifies_kkt_point(H, g, x, A, b, list(range(len(A))), self._TOL, np.abs(A))[0]
 
     def test_row_sorting_keeps_a_light_equation_in_the_multiplier_fit(self):
         """Powell and Reid's matrix as a vertex: its multipliers need the light equation.
@@ -2754,7 +2859,7 @@ class TestDegenerateVertex:
         np.testing.assert_allclose(
             multipliers, [0.25, 0.5, 0.25], rtol=64 * condition * unit_roundoff
         )
-        assert _certifies_kkt_point(H, g, x, A, b, [0, 1, 2], self._TOL, np.abs(A))
+        assert _certifies_kkt_point(H, g, x, A, b, [0, 1, 2], self._TOL, np.abs(A))[0]
         result = solve_constrained_qp(H, g, A, b)
         assert result.converged
         assert result.n_iter <= 8
