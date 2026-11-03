@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import cast
 
 import numpy as np
 from numba import njit, types
@@ -101,6 +102,7 @@ class PredictorPanel:
             if type(group) is DenseGroupMatrix:
                 values[:, column : column + group.shape[1]] = group.M[start:stop]
             else:
+                group = cast(CategoricalGroupMatrix, group)
                 _write_categorical_block(values, group.codes[start:stop], column, group.n_levels)
         return OrdinaryPanelGroupMatrix(values)
 

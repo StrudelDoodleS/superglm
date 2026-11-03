@@ -356,7 +356,7 @@ class PassTables:
     __slots__ = ("_entries", "_remaining")
 
     def __init__(self, budget: int) -> None:
-        self._entries: dict[tuple[int, int, int], list] = {}
+        self._entries: dict[tuple[int, ...], list] = {}
         self._remaining = int(budget)
 
     def reserve(self, key, gm_i, gm_j) -> None:
@@ -2583,7 +2583,7 @@ def _cross_gram(
     W: NDArray,
     cache: _BlockWeightCache | None = None,
     profile: dict[str, Any] | None = None,
-    table_key: tuple[int, int] | None = None,
+    table_key: tuple[int, ...] | None = None,
 ) -> NDArray:
     """Compute X_i.T @ diag(W) @ X_j efficiently.
 
