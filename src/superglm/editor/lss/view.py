@@ -11,7 +11,7 @@ stay as they are.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, Literal
 
 import numpy as np
@@ -30,6 +30,7 @@ from superglm.distributional.terms import (
 )
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.lss.terms import LSSTermInference, lss_term_inference
+from superglm.features.rebuild import interaction_users as glm_interaction_users
 
 Response = Literal["claims", "generic"]
 
@@ -68,6 +69,18 @@ def predictor_of(model: object, term: str | None) -> str | None:
 def column_of(model: object, name: str) -> str:
     """The data column a term reads: a SuperLSS key's term, else ``name`` itself."""
     return split_key(name)[1] if is_lss(model) else name
+
+
+def interaction_users(model: object, term: str) -> list[str]:
+    """The interactions that use ``term`` as a parent; a SuperLSS key looks in its own predictor."""
+    if not is_lss(model):
+        return glm_interaction_users(model, term)
+    parameter, column = split_key(term)
+    return [
+        name
+        for name, spec in model._interaction_specs.items()
+        if split_key(name)[0] == parameter and column in getattr(spec, "parent_names", ())
+    ]
 
 
 def parameter_offsets(
@@ -132,12 +145,32 @@ class LSSModelView:
         self._specs: Mapping[str, Any] = MappingProxyType(specs)
         self._feature_order: list[str] = list(specs)
         self._interaction_specs: Mapping[str, Any] = MappingProxyType(interactions)
+        # The terms as declared, keyed like ``_specs``: what the knot and basis tools rebuild from.
+        self._config = SimpleNamespace(
+            feature_templates=tuple(
+                (lss_key(predictor.name, term), declared)
+                for predictor in lss._predictors
+                for term, declared in predictor.features.items()
+            )
+        )
         self._reference_row: pd.DataFrame | None = None
         self._reference_etas: dict[str, float] = {}
 
     @property
     def _result(self):
         return self.lss.result_
+
+    @property
+    def _weight_semantics(self) -> str:
+        return self.lss.weight_semantics
+
+    @property
+    def _discrete(self) -> bool:
+        return self.lss.discrete
+
+    @property
+    def _n_bins(self) -> int | dict[str, int]:
+        return self.lss._n_bins_config()
 
     def parameter_of(self, key: str) -> str:
         return split_key(key)[0]

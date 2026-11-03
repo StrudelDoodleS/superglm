@@ -54,18 +54,38 @@ def _smoothing_lambda(lambdas: Mapping[str, float]) -> float | dict[str, float] 
     return {name: float(value) for name, value in lambdas.items()}
 
 
+def _original_levels(
+    effect: ParameterTermEffect, spec: Any
+) -> tuple[list[str] | None, list[int] | slice]:
+    """The levels the editor shows and, for each, the position of its fitted level.
+
+    A collapsed term shows every original level, each at its group's effect, as a
+    SuperGLM term does; that is what lets a member be selected, ungrouped or
+    given an exposure of its own.
+    """
+    if effect.levels is None:
+        return None, slice(None)
+    grouping = getattr(spec, "_grouping", None)
+    if grouping is None:
+        return list(effect.levels), slice(None)
+    position = {str(level): i for i, level in enumerate(effect.levels)}
+    shown = [str(level) for level in grouping.all_original_levels]
+    return shown, [position[str(grouping.original_to_group[level])] for level in shown]
+
+
 def lss_term_inference(
     key: str, effect: ParameterTermEffect, spec: Any, *, with_se: bool
 ) -> LSSTermInference:
     """``effect`` of the term ``key`` names, fitted as ``spec``, as the editor reads a term."""
+    levels, take = _original_levels(effect, spec)
     return LSSTermInference(
         name=key,
         kind=effect.kind,
         x=effect.x,
-        levels=None if effect.levels is None else list(effect.levels),
-        log_relativity=effect.effect,
-        ci_lower=_safe_exp(effect.lower) if with_se else None,
-        ci_upper=_safe_exp(effect.upper) if with_se else None,
+        levels=levels,
+        log_relativity=effect.effect[take],
+        ci_lower=_safe_exp(effect.lower[take]) if with_se else None,
+        ci_upper=_safe_exp(effect.upper[take]) if with_se else None,
         active=True,
         centering_mode="native",
         edf=effect.edf,

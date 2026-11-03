@@ -10,6 +10,7 @@ import numpy as np
 from superglm._frame import as_eager_frame
 from superglm.editor._types import EditableTerm
 from superglm.editor.errors import EditorIndexError, EditorTypeError, EditorValueError
+from superglm.editor.lss.view import column_of, interaction_users
 from superglm.features.categorical import Categorical
 from superglm.features.grouping import LevelGrouping, collapse_levels
 from superglm.features.ordered_categorical import OrderedCategorical
@@ -17,7 +18,6 @@ from superglm.features.piecewise import Piecewise
 from superglm.features.rebuild import (
     base_names_level,
     clone_with_replaced_features,  # noqa: F401  (imported from here by the editor's tests)
-    interaction_users,
     rebuilt_categorical,
     rebuilt_ordered_spec,
     special_labels,
@@ -64,9 +64,10 @@ def collapsed_feature_spec(
             f"Collapse levels is only available for categorical terms, got {term.name!r}."
         )
     _require_not_interaction_parent(model, term.name, operation="collapse levels")
+    column = column_of(model, term.name)
     frame = as_eager_frame(X)
-    frame.require_columns((term.name,))
-    values = frame.column_array(term.name)
+    frame.require_columns((column,))
+    values = frame.column_array(column)
 
     idx = np.unique(np.asarray(selected_indices, dtype=np.intp))
     if idx.min() < 0 or idx.max() >= len(term.levels):
@@ -168,9 +169,10 @@ def ungrouped_feature_spec(
             f"Ungroup levels is only available for categorical terms, got {term.name!r}."
         )
     _require_not_interaction_parent(model, term.name, operation="ungroup levels")
+    column = column_of(model, term.name)
     frame = as_eager_frame(X)
-    frame.require_columns((term.name,))
-    values = frame.column_array(term.name)
+    frame.require_columns((column,))
+    values = frame.column_array(column)
     existing = getattr(spec, "_grouping", None)
     if existing is None:
         raise EditorValueError(f"Term {term.name!r} does not have collapsed levels.")
@@ -240,9 +242,10 @@ def reference_feature_spec(
     _require_not_interaction_parent(model, term.name, operation="set the reference level")
     grouping = getattr(spec, "_grouping", None)
     label = _fitted_level_label(spec, grouping, term, level)
+    column = column_of(model, term.name)
     frame = as_eager_frame(X)
-    frame.require_columns((term.name,))
-    values = frame.column_array(term.name)
+    frame.require_columns((column,))
+    values = frame.column_array(column)
     if isinstance(spec, OrderedCategorical):
         replacement = rebuilt_ordered_spec(
             spec, grouping=grouping, base=label, data=values, level=True

@@ -12,6 +12,7 @@ import pytest
 
 from superglm.editor import EditorSession
 from superglm.editor.lss import RELATIVITY, DisplayTransform, display_for
+from superglm.editor.lss.availability import LSS_UNAVAILABLE
 from superglm.editor.payloads import session_payload
 from tests._lss_editor_fixtures import EPS, gamma_case, lognormal_case, nb_case, open_case
 from tests.test_editor import editor_frame, editor_model  # noqa: F401
@@ -166,14 +167,17 @@ def test_average_is_taken_in_display_units():
         widget.close()
 
 
-def test_lss_tool_payloads_are_off():
+def test_lss_tool_payloads_follow_the_tools_a_superlss_offers():
     payload = session_payload(open_case(lognormal_case()))
     for key in ("mean:age", "mean:region", "scale:age"):
         term = payload[key]
-        assert term["shape"]["available"] is False and term["shape"]["reason"] is None
-        assert term["knots"]["available"] is False and term["knots"]["reason"] is None
+        assert term["shape"]["available"] is False
+        assert term["shape"]["reason"] == LSS_UNAVAILABLE["shape"]
         assert term["unsmoothed"] is False and term["unseen"] is None
-        assert term["reference"] is None
+    assert payload["mean:region"]["reference"]["level"] == "R0"
+    assert payload["mean:age"]["knots"]["available"] is True
+    assert payload["scale:age"]["knots"]["available"] is True
+    assert payload["mean:region"]["knots"]["available"] is False
 
 
 def test_glm_payload_has_no_parameter_fields(editor_model):  # noqa: F811

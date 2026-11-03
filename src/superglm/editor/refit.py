@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from superglm.distributional.api import SuperLSS
 from superglm.editor.errors import EditorValueError
 from superglm.editor.terms import resolve_refit_method
 
@@ -24,7 +25,14 @@ def fit_refit_model(
     offset=None,
     fit_kwargs: dict[str, Any] | None = None,
 ) -> str:
-    """Fit a refit model with the same fit/fit_reml mode resolution everywhere."""
+    """Fit a refit model with the same fit/fit_reml mode resolution everywhere.
+
+    A SuperLSS replays the fit its source was made with; ``fit_kwargs`` and
+    ``method`` do not apply (``editor.lss.refit``).
+    """
+    if isinstance(refit_model, SuperLSS):
+        refit_model._replay_fit(X, y, sample_weight, offset)
+        return refit_model._fit_settings["method"]
     resolved_method = resolve_refit_method(source_model, method)
     kwargs = dict(fit_kwargs or {})
     if resolved_method == "fit_reml":

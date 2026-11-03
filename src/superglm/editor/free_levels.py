@@ -58,6 +58,7 @@ from superglm.diagnostics.separation import _separated_flags, response_boundarie
 from superglm.distributions import clip_mu
 from superglm.editor.collapse import _require_not_interaction_parent
 from superglm.editor.errors import EditorClientError, EditorTypeError, EditorValueError
+from superglm.editor.lss.availability import require_available
 from superglm.editor.refit import fit_refit_model
 from superglm.features.categorical import Categorical, _grouping_labels
 from superglm.features.grouping import LevelGrouping
@@ -152,6 +153,7 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
     mean, and the levels whose interval misses the curve. Hand edits are not
     part of either: both are fits.
     """
+    require_available(session.model, "free_levels")
     term = session._require_term(name)
     spec = session.model._specs[name]
     if not isinstance(spec, OrderedCategorical):

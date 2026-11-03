@@ -25,6 +25,7 @@ import numpy as np
 
 from superglm.editor.errors import EditorClientError, EditorTypeError, EditorValueError
 from superglm.editor.free_levels import _lift_selection
+from superglm.editor.lss.availability import require_available
 from superglm.editor.refit import fit_refit_model
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.rebuild import clone_with_replaced_features
@@ -75,6 +76,7 @@ def unsmoothed_job(session, name: str) -> Callable[[], dict[str, Any]]:
     caller holding the editor's lock may release it first. Refusals are
     fixed sentences (:class:`EditorValueError`), here or from the call.
     """
+    require_available(session.model, "unsmoothed")
     term = session._require_term(name)
     spec = session.model._specs[name]
     if isinstance(spec, OrderedCategorical):

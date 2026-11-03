@@ -20,7 +20,8 @@ from superglm.editor.controls import (
 from superglm.editor.group_display import build_group_display
 from superglm.editor.knots import knots_payload, pending_knots
 from superglm.editor.lss import DisplayTransform, display_for, is_lss, lss_term_fields
-from superglm.editor.lss.tool_payloads import lss_knots_payload, lss_shape_payload
+from superglm.editor.lss.availability import lss_availability
+from superglm.editor.lss.tool_payloads import lss_shape_payload
 from superglm.editor.shapes import shape_payload, waiting_ranges
 from superglm.editor.terms import term_from_inference
 from superglm.editor.unseen import unseen_payload
@@ -79,7 +80,7 @@ def session_payload(
             "levels": term.levels,
             "level_groups": _level_groups(session, name, term),
             "level_order_changed": _level_order_changed(session, name),
-            "reference": None if lss else _reference_payload(session, name),
+            "reference": _reference_payload(session, name),
             "shape": (
                 lss_shape_payload()
                 if lss
@@ -87,11 +88,7 @@ def session_payload(
                     session.model, name, term.metadata.get("shape_support"), _draft(session, name)
                 )
             ),
-            "knots": (
-                lss_knots_payload()
-                if lss
-                else {**knots_payload(session, name, term), **basis_payload(session, name)}
-            ),
+            "knots": {**knots_payload(session, name, term), **basis_payload(session, name)},
             "pending": _pending_term_payload(session, name),
             "unseen": None if lss else unseen_payload(session, name),
             "unsmoothed": False if lss else unsmoothed_available(session.model._specs[name]),
@@ -103,6 +100,7 @@ def session_payload(
         }
         if lss:
             term_payload.update(lss_term_fields(session.model, name, term))
+            term_payload = lss_availability(term_payload)
         term_payload["group_display"] = build_group_display(term_payload)
         payload[name] = term_payload
     return payload

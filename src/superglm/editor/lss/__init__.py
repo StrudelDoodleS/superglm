@@ -12,6 +12,7 @@ from superglm.editor.lss.terms import LSSTermInference, lss_editable_terms
 from superglm.editor.lss.view import (
     LSSModelView,
     column_of,
+    interaction_users,
     is_lss,
     lss_key,
     predictor_of,
@@ -26,6 +27,7 @@ __all__ = [
     "ParameterDisplay",
     "column_of",
     "display_for",
+    "interaction_users",
     "is_lss",
     "lss_editable_terms",
     "lss_key",

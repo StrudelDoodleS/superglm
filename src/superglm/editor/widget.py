@@ -52,7 +52,8 @@ from superglm.editor.evaluation_cache import (
 from superglm.editor.evidence import EvidenceCoordinator, EvidenceKey
 from superglm.editor.io import jsonable
 from superglm.editor.jobs import JobContext, JobRunner
-from superglm.editor.lss import display_for
+from superglm.editor.lss import display_for, is_lss
+from superglm.editor.lss.availability import require_available, session_availability
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
 from superglm.editor.notebook import NotebookTransport, notebook_view_class
@@ -270,6 +271,8 @@ class EditorWidget:
                     and self._final_fit.model_revision != self.session.model_revision,
                 },
             }
+            if is_lss(self.session.model):
+                state["unavailable"] = session_availability()
             self._state_generation += 1
             state["state_generation"] = self._state_generation
             state["chart_generation"] = self._chart_generation
@@ -578,6 +581,7 @@ class EditorWidget:
         model_revision: int | None = None,
         request_sequence: int | None = None,
     ) -> dict[str, Any]:
+        require_available(self.session.model, "summary")
         if source == "selected":
             source = "in_force"
         if source in {"edited", "collapse"}:
@@ -704,6 +708,8 @@ class EditorWidget:
     def _export_bytes(self, format: str, filename: str | None = None) -> ExportResult:
         """Build one validated export from one captured model revision."""
         canonical_format = _normalise_export_format(format)
+        if canonical_format in {"structure", "xlsx"}:
+            require_available(self.session.model, f"export_{canonical_format}")
         safe_name = _safe_export_filename(canonical_format, filename)
 
         validation_scope: str | None = None
@@ -836,6 +842,7 @@ class EditorWidget:
         Built once per model revision, outside the lock like the export, and
         reused while the revision stands.
         """
+        require_available(self.session.model, "rating_table")
         with self._lock:
             if term not in self.session.terms:
                 raise EditorKeyError(f"Unknown editable term: {term!r}")
@@ -954,6 +961,7 @@ class EditorWidget:
         *,
         level_display: str = "expanded",
     ) -> dict[str, Any]:
+        require_available(self.session.model, "refit_offset")
         level_display = validate_level_display(level_display)
         with self._lock:
             terms = self.session.edited_terms()
@@ -1003,6 +1011,7 @@ class EditorWidget:
         **options: Any,
     ) -> dict[str, Any]:
         """Start a distribution-parameter profile job and return its status payload."""
+        require_available(self.session.model, "profile_distribution")
         level_display = validate_level_display(level_display)
         with self._profile_condition:
             self._profile_job_counter += 1

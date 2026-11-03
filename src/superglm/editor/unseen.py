@@ -22,6 +22,7 @@ from superglm.editor._types import EditRecord
 from superglm.editor.apply import _copy_model_for_editor_edits
 from superglm.editor.collapse import _require_not_interaction_parent
 from superglm.editor.errors import EditorTypeError, EditorValueError
+from superglm.editor.lss.availability import require_available
 from superglm.features.categorical import Categorical
 
 if TYPE_CHECKING:
@@ -91,6 +92,7 @@ def set_unseen(session: EditorSession, term: str, policy: Any) -> UnseenChoice |
     groups. Nothing is fitted. Choosing the policy in force changes nothing
     and returns None.
     """
+    require_available(session.model, "unseen")
     session._require_term(term)
     spec = session.model._specs[term]
     if not isinstance(spec, Categorical):

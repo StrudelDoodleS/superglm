@@ -56,8 +56,11 @@ from superglm.editor.level_order import (
     level_order_for_labels,
     level_order_for_target,
 )
+from superglm.editor.lss.availability import require_available
 from superglm.editor.lss.open import open_lss
-from superglm.editor.lss.view import Response, is_lss
+from superglm.editor.lss.refit import lss_refit_with_drafts
+from superglm.editor.lss.terms import lss_editable_terms
+from superglm.editor.lss.view import LSSModelView, Response, is_lss
 from superglm.editor.operations import (
     anchored_smooth_values,
     isotonic_values,
@@ -320,6 +323,10 @@ class EditorSession:
         with_se: bool,
         train_data=None,
     ) -> dict[str, EditableTerm]:
+        if is_lss(model):
+            return lss_editable_terms(
+                model, names, n_points=n_points, with_se=with_se, train=train_data
+            )
         editable: dict[str, EditableTerm] = {}
         # The rows a shape refit reads (_resolve_refit_data).
         refit_data = (
@@ -1088,6 +1095,7 @@ class EditorSession:
         the returned model is therefore for the refitted remaining terms, not
         for the manually edited offset curves.
         """
+        require_available(self.model, "refit_offset")
         if self.model is None:
             raise RuntimeError("Cannot refit without a source model.")
         names = self._resolve_offset_terms(terms)
@@ -1146,6 +1154,7 @@ class EditorSession:
         **profile_kwargs: Any,
     ):
         """Explicitly re-estimate a distribution parameter for the in-force model."""
+        require_available(self.model, "profile_distribution")
         if self.model is None:
             raise RuntimeError("Cannot reprofile without a source model.")
         if self.pending:
@@ -1481,6 +1490,20 @@ class EditorSession:
         )
         if y_ref is None:
             raise RuntimeError("Fit response data was not retained on the source model.")
+        if is_lss(self.model):
+            refit_model = lss_refit_with_drafts(
+                self.model,
+                drafts,
+                X=X_ref,
+                y=y_ref,
+                sample_weight=sample_weight_ref,
+                offsets=base_offset,
+                method=method,
+                lambda1=lambda1,
+                lambda2=lambda2,
+                **fit_kwargs,
+            )
+            return refit_model, refit_model._fit_settings["method"]
         refit_model = clone_with_replaced_features(
             self.model, drafts, lambda1=lambda1, lambda2=lambda2
         )
@@ -1573,8 +1596,11 @@ class EditorSession:
         """Replace the editable in-force model while retaining the original reference model.
 
         Display level reorders carry over unless ``level_orders`` replaces them.
-        Edits and waiting changes do not carry over.
+        Edits and waiting changes do not carry over. A SuperLSS is wrapped in the
+        view of the model in force, over the same rows.
         """
+        if is_lss(self.model) and not isinstance(model, LSSModelView):
+            model = self.model.with_model(model)
         train_data = self._evaluation_data.get("train")
         new_terms = self._editable_terms_from_model(
             model,
