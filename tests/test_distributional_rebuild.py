@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import types
+
 import joblib
 import numpy as np
 import pandas as pd
@@ -172,3 +174,26 @@ def test_fit_settings_survive_pickle(tmp_path):
     restored = joblib.load(path)
     assert restored._fit_settings == case.model._fit_settings
     assert restored._clone_with_replaced_terms({})._fit_settings["outer"] == "efs+newton"
+
+
+def test_fit_takes_the_last_fits_smoothing_parameters():
+    # smoothing_parameters_ is a read-only mapping view; recording it must not copy it deeply.
+    case = lognormal_case()
+    lambdas = case.model.smoothing_parameters_
+    fitted = case.model._clone_with_replaced_terms({}).fit(case.X, case.y, lambdas=lambdas)
+    assert fitted._fit_settings["lambdas"] == dict(lambdas)
+    assert type(fitted._fit_settings["lambdas"]) is dict
+    again = _refit(case, fitted._clone_with_replaced_terms({}))
+    before = _vector(fitted)
+    scale = np.linalg.norm(before)
+    np.testing.assert_allclose(_vector(again), before, rtol=0, atol=1e3 * EPS * before.size * scale)
+
+
+def test_fit_reml_takes_a_mapping_proxy_of_lambdas():
+    case = lognormal_case()
+    family = LogNormalLS()
+    fixed = types.MappingProxyType({"scale:age#wiggle": 2.0})
+    model = SuperLSS(family, family.mean(s("age", k=6)), family.scale(s("age", k=5))).fit_reml(
+        case.X, case.y, lambdas=fixed
+    )
+    assert model._fit_settings["lambdas"] == {"scale:age#wiggle": 2.0}

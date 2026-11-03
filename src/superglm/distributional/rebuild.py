@@ -16,6 +16,8 @@ import dataclasses
 from collections.abc import Mapping
 from typing import Any
 
+import numpy as np
+
 from superglm.distributional.binding import _bind_predictor_template
 from superglm.distributional.predictor import Predictor
 from superglm.terms import normalize_terms
@@ -40,14 +42,24 @@ def fit_settings(method: str, params: Mapping[str, Any]) -> dict[str, Any]:
     """The estimator keywords of a ``fit`` or ``fit_reml`` call, from its ``locals()``.
 
     ``fit_reml(method=...)`` only accepts ``"efs"``, the default, so it is not recorded;
-    ``"method"`` names the entry point instead.
+    ``"method"`` names the entry point instead. A mapping (``lambdas``) is recorded as
+    a plain dict of its items and an array as a copy, so a later change to the
+    caller's object cannot change the replay; any other value is recorded as given.
     """
     settings = {
-        name: copy.deepcopy(value)
+        name: _recorded(value)
         for name, value in params.items()
         if name not in _NOT_SETTINGS and name != "method"
     }
     return {"method": method, **settings}
+
+
+def _recorded(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, np.ndarray):
+        return np.array(value)
+    return value
 
 
 def _split_key(key: str) -> tuple[str, str]:
