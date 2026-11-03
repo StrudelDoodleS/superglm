@@ -640,8 +640,16 @@ def test_the_opened_spread_curve_keeps_the_opened_models_level_after_a_refit():
     moved = session.model.reference_eta("scale:age") - opened.reference_eta("scale:age")
     assert abs(moved) > 1e-6
     # ... and the opened curve is still the CV the opened model gives.
-    after = session_payload(session)["scale:age"]["original_y"]
-    np.testing.assert_allclose(after, before, rtol=64 * EPS, atol=0.0)
+    payload = session_payload(session)["scale:age"]
+    np.testing.assert_allclose(payload["original_y"], before, rtol=64 * EPS, atol=0.0)
+    # The impact reads the curve in force against the opened one.
+    ratio = np.asarray(payload["y"]) / np.asarray(payload["original_y"])
+    np.testing.assert_allclose(
+        payload["impact"]["weighted_mean_relativity"],
+        np.average(ratio, weights=payload["weights"]),
+        rtol=64 * EPS,
+        atol=0.0,
+    )
 
 
 def test_a_change_of_penalties_is_refused_when_the_fit_fixed_every_strength(replays):
@@ -655,6 +663,19 @@ def test_a_change_of_penalties_is_refused_when_the_fit_fixed_every_strength(repl
     session.stage_structural("knots", "mean:age", KNOTS)
     session.refit_pending()
     assert len(replays) == 1
+
+
+def test_switching_shrinkage_off_is_refused_when_the_fit_fixed_every_strength():
+    base = gamma_case()
+    lambdas = {**base.model.smoothing_parameters_, "mean:age#null": 2.0}
+    shrunk = base.model._clone_with_replaced_terms({"mean:age": s("age", k=8, select=True)})
+    session = open_case(
+        FitCase(shrunk.fit(base.X, base.y, lambdas=lambdas), base.X, base.y, None, None)
+    )
+    with pytest.raises(EditorValueError) as info:
+        session.stage_structural("basis", "mean:age", {"select": False})
+    assert info.value.public_message == FIXED_STRENGTHS_COVER_NO_NEW_PENALTY.format(term="mean:age")
+    assert session.pending == []
 
 
 def test_the_state_reads_the_training_weights_once_per_model(monkeypatch):

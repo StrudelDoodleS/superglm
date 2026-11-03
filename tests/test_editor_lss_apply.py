@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import LogNormalLS, Spline, SuperLSS, cat, s, term
+from superglm import GammaLS, LogNormalLS, Numeric, RandomEffect, Spline, SuperLSS, cat, s, term
 from superglm.distributional.terms import _resolve_term, _term_design
 from superglm.editor import edit
 from superglm.editor.apply import _term_weights, materialize_edit_request
@@ -142,6 +142,61 @@ def test_the_level_of_a_curve_goes_to_the_intercept():
     intercept = view._fitted.layout.predictor("scale").intercept_index
     gain = _coefficients(revised)[intercept] - _coefficients(case.model)[intercept]
     np.testing.assert_allclose(gain, 0.3, rtol=0.0, atol=bound)
+
+
+def _moved(case, revised, parameter, rows):
+    return (
+        revised.predict_link(rows)[parameter].to_numpy()
+        - case.model.predict_link(rows)[parameter].to_numpy()
+    )
+
+
+def test_an_edit_of_one_integer_random_effect_level_moves_that_level_alone():
+    rng = np.random.default_rng(20261103)
+    group = rng.integers(1, 5, 400)
+    X = pd.DataFrame({"age": rng.uniform(18.0, 90.0, 400), "group": group})
+    y = rng.gamma(4.0, np.exp(5.0 + 0.3 * (group - 2.5)) / 4.0)
+    family = GammaLS()
+    model = SuperLSS(
+        family, family.mean(s("age", k=5), term("group", RandomEffect())), family.scale()
+    ).fit_reml(X, y, outer="efs+newton")
+    case = FitCase(model, X, y, None, None)
+    session = open_case(case)
+    edited = session.terms["mean:group"]
+    step = np.where(np.asarray(edited.levels) == "1", 0.2, 0.0)
+    edited.edited_log_effect = edited.original_log_effect + step
+
+    revised = lss_model_with_edits(session.model, session.terms)
+
+    rows = _rows_with(session.model, "group", [1, 2, 3, 4])
+    target = np.abs(edited.edited_log_effect).max()
+    np.testing.assert_allclose(
+        _moved(case, revised, "mean", rows), [0.2, 0.0, 0.0, 0.0], rtol=0.0, atol=1e3 * EPS * target
+    )
+
+
+def test_a_covariate_far_from_its_origin_keeps_every_direction_of_its_edit():
+    rng = np.random.default_rng(20261103)
+    t = np.linspace(0.0, 1.0, 180)
+    X = pd.DataFrame({"x": 1e7 + 10.0 * t})
+    y = rng.gamma(20.0, np.exp(1.0 + 0.4 * np.cos(2.0 * np.pi * t)) / 20.0)
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(term("x", Numeric())), family.scale()).fit_reml(
+        X, y, outer="efs+newton"
+    )
+    case = FitCase(model, X, y, None, None)
+    session = open_case(case)
+    edited = session.terms["mean:x"]
+    added = 0.2 * (np.asarray(edited.x) - 1e7) / 10.0
+    edited.edited_log_effect = edited.original_log_effect + added
+
+    revised = lss_model_with_edits(session.model, session.terms)
+
+    rows = _rows_with(session.model, "x", edited.x)
+    # The row values carry absolute error u * |x|, read at the edit's slope.
+    bound = 1e3 * EPS * np.abs(X["x"]).max() * 0.2 / 10.0
+    assert bound < 1e-3
+    np.testing.assert_allclose(_moved(case, revised, "mean", rows), added, rtol=0.0, atol=bound)
 
 
 def test_categorical_edit_is_exact():

@@ -131,6 +131,26 @@ def test_opens_each_supported_family(make):
         assert term.metadata["shape_support"] is None
 
 
+def test_a_row_the_fit_left_out_sets_no_grid_or_reference_value():
+    rng = np.random.default_rng(20261103)
+    X = pd.DataFrame({"x": np.linspace(0.0, 1.0, 180)})
+    X.loc[179, "x"] = np.inf
+    y = rng.gamma(4.0, 100.0, 180)
+    weights = np.ones(180)
+    weights[-1] = 0.0
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(s("x", k=5)), family.scale()).fit_reml(
+        X, y, sample_weight=weights
+    )
+
+    session = edit(model, train_data=(X, y, weights))
+
+    grid = np.asarray(session.terms["mean:x"].x)
+    assert grid.min() == 0.0
+    assert grid.max() == X["x"].iloc[178]
+    assert session.model.reference_row()["x"].iloc[0] == np.median(X["x"].iloc[:179])
+
+
 def test_term_types_and_spline_metadata_come_from_the_fitted_spec():
     case = lognormal_case()
     session = open_case(case)
