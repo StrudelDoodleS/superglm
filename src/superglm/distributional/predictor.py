@@ -39,7 +39,11 @@ from superglm.types import FeatureSpec, PenaltyComponent
 
 
 class ShapeConstraintIgnoredWarning(UserWarning):
-    """A feature asked for a shape constraint the distributional path cannot apply yet."""
+    """A feature asked for a shape constraint the fit cannot apply.
+
+    SuperLSS has no constraint machinery yet, and ``fit_path`` takes no constraint rows;
+    both fit the term unconstrained and say so.
+    """
 
 
 def _constrained_features(predictor: Predictor) -> list[tuple[str, str, str]]:

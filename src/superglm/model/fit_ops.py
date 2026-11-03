@@ -1317,27 +1317,38 @@ def _validate_rule_fit_conflicts(model) -> None:
                 )
 
 
-def _reject_fit_time_rules_on_path(model) -> None:
-    """Refuse a fit-time shape rule on ``fit_path``, whose solver takes no constraint rows.
+def _warn_fit_time_rules_ignored_on_path(model) -> None:
+    """Disclose, once, the fit-time shape rules ``fit_path`` fits unconstrained.
 
-    The path sweeps a selection penalty through PIRLS, which neither the constrained
-    QP route nor ``fit()`` with ``selection_penalty > 0`` supports; it would publish
-    the unconstrained path. Reads every main-effect and interaction spec by its rule
-    objects (spline, ordered and categorical terms alike). A post-fit shape applies
-    after the fit and is not refused.
+    The path sweeps a selection penalty through PIRLS, which takes no constraint
+    rows (the constrained QP route ignores ``lambda1``), so every term fits
+    without its shape, cap and step-limit rules, as it always has. A flat stretch
+    is not one of them: it is part of the term's basis and still holds. Reads
+    every main-effect and interaction spec by its rule objects (spline, ordered
+    and categorical terms alike). A post-fit shape applies after the fit and is
+    not named.
     """
+    from superglm.distributional.predictor import ShapeConstraintIgnoredWarning
     from superglm.features.constraint import rules_of
 
+    ignored = []
+    flat = False
     for name, spec in itertools.chain(model._specs.items(), model._interaction_specs.items()):
-        held = [rule for rule in rules_of(spec) if rule.mode == "fit"]
+        fit_time = [rule for rule in rules_of(spec) if rule.mode == "fit"]
+        flat = flat or any(rule.kind == "flat" for rule in fit_time)
+        held = [rule.describe() for rule in fit_time if rule.kind != "flat"]
         if held:
-            raise NotImplementedError(
-                f"fit_path() cannot hold the fit-time rules on {name!r}: "
-                f"{' & '.join(rule.describe() for rule in held)}. The path sweeps a selection "
-                "penalty, which no constrained solver takes, so it would ignore them. Use "
-                "fit_reml() or fit() with selection_penalty=0 to keep the rules, or drop "
-                "them to fit the path"
-            )
+            ignored.append(f"{name!r} ({' & '.join(held)})")
+    if ignored:
+        warnings.warn(
+            f"fit_path() ignores the fit-time shape rules on {', '.join(ignored)} and fits "
+            "these terms unconstrained: the path sweeps a selection penalty, which no "
+            "constrained solver takes"
+            + ("; a flat stretch is part of the basis and still holds" if flat else "")
+            + ". Refit with fit() or fit_reml() to enforce them",
+            ShapeConstraintIgnoredWarning,
+            stacklevel=5,
+        )
 
 
 def _uses_direct_solver(model, penalty, has_lambda1_targets) -> bool:
@@ -1625,8 +1636,8 @@ def _fit_path_in_workspace(
     )
 
     _auto_detect_specs_if_needed(model, X, sample_weight_ref)
-    _reject_fit_time_rules_on_path(model)
     _validate_rule_fit_conflicts(model)
+    _warn_fit_time_rules_ignored_on_path(model)
     # A path sweeps lambda1 over a positive grid on ONE design, so the design
     # has to be the one a positive lambda1 requires, whatever the model was
     # configured with.

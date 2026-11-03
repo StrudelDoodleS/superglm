@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pickle
 import re
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -18,6 +19,7 @@ from superglm import (
     cat,
     collapse_levels,
 )
+from superglm.distributional.predictor import ShapeConstraintIgnoredWarning
 from superglm.features.constraint import ConstraintRules, rules_of
 from superglm.solvers.irls_direct._qp import _QP_FEASIBILITY_TOL
 
@@ -130,7 +132,7 @@ def test_categorical_cap_refused_under_identity_link():
     [
         ("region", Categorical(base="A", constraint=C.cap(0.7, 1.5)), "cap(0.7, 1.5)"),
         ("x", Spline(kind="ps", k=6, constraint=C.increasing), "increasing"),
-        ("x", Spline(kind="ps", k=6, constraint=C.flat.within(3, 7)), "flat.within(3, 7)"),
+        ("x", Spline(kind="ps", k=10, constraint=C.cap(0.7, 1.5)), "cap(0.7, 1.5)"),
         (
             "region",
             OrderedCategorical(
@@ -140,25 +142,88 @@ def test_categorical_cap_refused_under_identity_link():
             "increasing & max_step(0.2)",
         ),
     ],
-    ids=["categorical-cap", "spline-increasing", "spline-flat", "ordered-step"],
+    ids=["categorical-cap", "spline-increasing", "spline-cap", "ordered-step"],
 )
-def test_fit_path_refuses_fit_time_rules(feature, spec, rules):
-    """The path solver takes no constraint rows, so fit_path refuses any fit-time rule.
+def test_fit_path_says_it_ignores_fit_time_rules(feature, spec, rules):
+    """fit_path takes no constraint rows, so it fits the term unconstrained and says so, once.
 
-    Mutation: fit_path published the unconstrained path, the capped categorical
-    printing B near 2.5 against its cap of 1.5.
+    Mutation: without the warning the path published the unconstrained fit silently.
     """
     X, y = _region_rows(n=2_000, x=True)
     X["x"] = X["x"] * 10.0
     model = SuperGLM(family="poisson", features={feature: spec})
-    with pytest.raises(NotImplementedError) as refusal:
+    with pytest.warns(ShapeConstraintIgnoredWarning) as record:
         model.fit_path(X, y, lambda_seq=[0.1, 0.001])
-    message = str(refusal.value)
-    assert f"fit_path() cannot hold the fit-time rules on {feature!r}: {rules}" in message
-    assert "fit_reml()" in message and "drop" in message
+    [warned] = [w for w in record if issubclass(w.category, ShapeConstraintIgnoredWarning)]
+    message = str(warned.message)
+    assert f"fit_path() ignores the fit-time shape rules on {feature!r} ({rules})" in message
+    assert "unconstrained" in message and "fit() or fit_reml()" in message
+    assert warned.filename == __file__, "the warning points at the caller of fit_path"
+    assert model.result is not None
 
 
-def test_fit_path_still_runs_with_no_fit_time_rule():
+def test_fit_path_fits_a_capped_categorical_unconstrained():
+    """The warning is true: the capped level prints outside its cap, as without the cap."""
+    X, y = _region_rows(n=20_000, x=True)
+    model = SuperGLM(family="poisson", features={"region": Categorical(constraint=C.cap(0.7, 1.5))})
+    with pytest.warns(ShapeConstraintIgnoredWarning, match="'region' .cap"):
+        model.fit_path(X, y, lambda_seq=[0.1, 0.001])
+    assert _printed(model)["B"] > 2.0
+
+
+def test_fit_path_fits_an_increasing_spline_unconstrained():
+    """A plain single-rule spline is fitted as before, now with the disclosure."""
+    X, y = _region_rows(n=20_000, x=True)
+    model = SuperGLM(
+        family="poisson", features={"x": Spline(kind="ps", k=8, constraint=C.increasing)}
+    )
+    with pytest.warns(ShapeConstraintIgnoredWarning, match="'x' .increasing"):
+        model.fit_path(X, y, lambda_seq=[0.1, 0.001])
+    grid = pd.DataFrame({"x": np.linspace(0.02, 0.98, 50)})
+    assert np.min(np.diff(np.log(model.predict(grid)))) < -0.01  # the sine falls; no increasing
+
+
+def test_fit_path_names_every_ruled_feature_in_one_warning():
+    X, y = _region_rows(n=2_000, x=True)
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "region": Categorical(constraint=C.cap(0.7, 1.5)),
+            "x": Spline(kind="ps", k=6, constraint=C.increasing),
+        },
+    )
+    with pytest.warns(ShapeConstraintIgnoredWarning) as record:
+        model.fit_path(X, y, lambda_seq=[0.1, 0.001])
+    [warned] = [w for w in record if issubclass(w.category, ShapeConstraintIgnoredWarning)]
+    assert "'region' (cap(0.7, 1.5)), 'x' (increasing)" in str(warned.message)
+
+
+def test_fit_path_holds_a_flat_stretch_and_says_so_only_beside_an_ignored_rule():
+    """A flat stretch is part of the basis, so fit_path still holds it; it is not an ignored rule."""
+    X, y = _region_rows(n=2_000, x=True)
+    grid = pd.DataFrame({"x": np.linspace(0.45, 0.55, 20)})
+    flat = C.flat.within(0.3, 0.7)
+    alone = SuperGLM(family="poisson", features={"x": Spline(kind="ps", k=12, constraint=flat)})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # the stretch widens to whole knot spans
+        warnings.simplefilter("error", ShapeConstraintIgnoredWarning)
+        alone.fit_path(X, y, lambda_seq=[0.1, 0.001])
+    assert np.ptp(np.log(alone.predict(grid))) < 1e-9
+    beside = SuperGLM(
+        family="poisson",
+        features={"x": Spline(kind="ps", k=12, constraint=C.decreasing.below(0.3) & flat)},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with pytest.warns(ShapeConstraintIgnoredWarning) as record:
+            beside.fit_path(X, y, lambda_seq=[0.1, 0.001])
+    [warned] = [w for w in record if issubclass(w.category, ShapeConstraintIgnoredWarning)]
+    assert "'x' (decreasing.below(0.3))" in str(warned.message)
+    assert "flat.within" not in str(warned.message)
+    assert "a flat stretch is part of the basis and still holds" in str(warned.message)
+
+
+def test_fit_path_is_silent_with_no_fit_time_rule():
     """Terms without a fit-time rule, a post-fit shape included, take the path as before."""
     X, y = _region_rows(n=2_000, x=True)
     model = SuperGLM(
@@ -168,7 +233,9 @@ def test_fit_path_still_runs_with_no_fit_time_rule():
             "x": Spline(kind="ps", k=6, constraint=Constraint.postfit.increasing),
         },
     )
-    model.fit_path(X, y, lambda_seq=[0.1, 0.001])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ShapeConstraintIgnoredWarning)
+        model.fit_path(X, y, lambda_seq=[0.1, 0.001])
     assert model.result.converged
 
 

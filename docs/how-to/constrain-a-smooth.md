@@ -271,6 +271,9 @@ model.fit(df, y)
   Combinations, stretches and caps are fit-time only.
 - `SuperLSS` does not enforce these rules. It warns and fits the term
   unconstrained.
+- `fit_path()` does not enforce them either. It warns once, naming every term
+  with a fit-time rule, and fits those terms unconstrained; refit with `fit()`
+  or `fit_reml()` to enforce the rules.
 
 ## Linear Predictor Semantics
 
@@ -452,7 +455,6 @@ These combinations are intentionally guarded:
 - `Constraint.fit.flat` with no stretch, or with a stretch that holds every knot
   span of the term
 - `Constraint.fit.flat` on a spline of degree 0
-- `fit_path()` on a term with any fit-time rule
 - `polynomial_ranges=` on a term that also has a shape constraint
 - a shape rule other than a cap on a `Categorical`
 
