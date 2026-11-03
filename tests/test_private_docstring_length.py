@@ -45,7 +45,7 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
     "export/rating_tables.py::_export_weights": (21, PR571),
     "export/rating_tables.py::_format_interval": (14, PR571),
     "export/rating_tables.py::_format_number": (34, PR571),
-    "export/rating_tables.py::_impact_sweep": (20, PR571),
+    "export/rating_tables.py::_impact_sweep": (17, PR571),
     "export/rating_tables.py::_offset_per_unit_block": (19, PR571),
     "export/rating_tables.py::_offset_per_unit_block_from_multiplier": (18, PR571),
     "export/rating_tables.py::_piecewise_block": (28, PR571),

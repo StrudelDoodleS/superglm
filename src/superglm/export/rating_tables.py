@@ -1964,15 +1964,12 @@ def _impact_sweep(
     The ``exported`` column says which row is theirs, and it is the one to
     read.
 
-    An empty ``impact_bins`` still means NO SWEEP, and the fold-in does not
-    override it.  That is the documented opt-out for a caller who wants the
-    tables without paying for the analysis, and turning it into "one sweep at
-    ``n_bins``" would have been a silent cost -- the fold-in exists so the
-    ladder describes the shipped table, not so a caller who declined the ladder
-    gets one anyway.
+    An empty ``impact_bins`` skips the ladder and leaves the sheet empty, but
+    the exported resolution is still evaluated, because declining the
+    disclosure cannot make a non-finite approximation exportable.
     """
     rows: list[dict[str, float | int | str]] = []
-    if not features or not impact_bins:
+    if not features:
         return _empty_impact_frame()
 
     for n_bins in sorted(dict.fromkeys((*impact_bins, exported_n_bins))):
@@ -1987,6 +1984,8 @@ def _impact_sweep(
             band_se=band_se,
             band_max_error=band_max_error,
         )
+        if not impact_bins:
+            return _empty_impact_frame()
         for feature, table in result.tables.items():
             row: dict[str, float | int | str] = {
                 "n_bins": int(n_bins),
@@ -2293,22 +2292,26 @@ def build_rating_table_payload(
     binning, not the interaction's own.  That is what makes it the bound a
     consumer of the whole table needs, and it is stated because this issue
     exists precisely because one number on this sheet was read as more than it
-    was.  ``impact_bins`` sweeps that ladder; an empty one skips the sweep
-    entirely, and the worksheet is still created with its column headers and
-    no rows -- ``write_rating_table_workbook`` creates it unconditionally.
+    was.  ``impact_bins`` sweeps that ladder; an empty one skips it, and the
+    worksheet is still created with its column headers and no rows --
+    ``write_rating_table_workbook`` creates it unconditionally.  The exported
+    resolution is evaluated either way, and an approximation whose product is
+    non-finite or zero on a row stops the export with ``OverflowError``.
+
+    The sheet's approximated prediction is the unclipped product the workbook
+    computes: neither the predictor nor the mean is clipped, because clipping
+    hides the error where binning removes cancellation between terms (issue
+    #313).
 
     The bound is over the TERMS the sheet lists, not over every factor the
-    workbook carries, and three limits on it are tracked rather than fixed
+    workbook carries, and two limits on it are tracked rather than fixed
     here.  A binned OFFSET MULTIPLIER block -- reachable now only by asking for
     ``offset_kind="binned"``, and measured above at 8.86e-02 -- is not swept at
     all, and the sweep passes the exact offset into every call, so a
     categorical-only model exported that way gets an empty sheet beside a binned
     offset block (issue #314).  Under the default the empty sheet is CORRECT for
     the offset: there is no offset approximation left in the workbook to
-    measure.  The sheet's
-    discretised prediction goes through ``stabilize_eta`` and the workbook's
-    product does not, so an approximation that pushes a row out of the link's
-    range is clipped on the sheet and not in the table (issue #313).  And for a
+    measure.  And for a
     grid whose parent is a spline-mode ``OrderedCategorical``, the block is a
     DISCLOSURE rather than a lookup: ``_continuous_interaction_block`` prints
     the axis in mapped-score space while a consumer holds the level label, and
