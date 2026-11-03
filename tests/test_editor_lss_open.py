@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import GammaLS, LogNormalLS, NegativeBinomialLS, SuperLSS, TweedieLSS, s, ti
+from superglm import GammaLS, LogNormalLS, SuperLSS, TweedieLSS, s, ti
 from superglm.editor import edit
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.lss import (
@@ -261,13 +261,13 @@ def test_offsets_are_stored_by_parameter_name():
         open_case(nb, test_data=short)
 
 
-def test_amount_unit_and_response_are_kept_on_the_view():
+def test_amount_unit_is_kept_on_the_view():
     case = lognormal_case()
-    view = open_case(case, amount_unit="GBP", response="generic").model
-    assert (view.amount_unit, view.response) == ("GBP", "generic")
+    view = open_case(case, amount_unit="GBP").model
+    assert view.amount_unit == "GBP"
     view = open_case(case).model
-    assert (view.amount_unit, view.response) == (None, "claims")
-    assert view.with_model(case.model).response == "claims"
+    assert view.amount_unit is None
+    assert view.with_model(case.model).amount_unit is None
 
 
 def test_restored_model_opens_with_train_data(tmp_path):
@@ -349,42 +349,27 @@ def test_reference_row_is_the_training_centre_and_survives_mutation():
 
 
 @pytest.mark.parametrize(
-    ("family", "parameter", "response", "label", "role", "colour"),
+    ("parameter", "label", "role", "colour"),
     [
-        (LogNormalLS(), "mean", "claims", "Average claim", "average", "blue"),
-        (LogNormalLS(), "scale", "claims", "Spread of claim sizes", "spread", "orange"),
-        (GammaLS(), "mean", "claims", "Average claim", "average", "blue"),
-        (GammaLS(), "scale", "claims", "Spread of claim sizes", "spread", "orange"),
-        (NegativeBinomialLS(), "mean", "claims", "Claim frequency", "average", "blue"),
-        (
-            NegativeBinomialLS(),
-            "theta",
-            "claims",
-            "Extra variation in claim counts",
-            "spread",
-            "orange",
-        ),
-        (LogNormalLS(), "mean", "generic", "Average", "average", "blue"),
-        (LogNormalLS(), "scale", "generic", "Spread", "spread", "orange"),
-        (NegativeBinomialLS(), "theta", "generic", "Spread", "spread", "orange"),
+        ("mean", "Average", "average", "blue"),
+        ("scale", "Spread", "spread", "orange"),
+        ("theta", "Spread", "spread", "orange"),
     ],
 )
-def test_parameter_display_names(family, parameter, response, label, role, colour):
-    display = parameter_display(family, parameter, response=response)
+def test_parameter_display_names_a_parameter_by_its_role(parameter, label, role, colour):
+    display = parameter_display(parameter)
     assert (display.name, display.label, display.role, display.colour) == (
         parameter,
         label,
         role,
         colour,
     )
-    assert display.chip == ("Average" if role == "average" else "Spread")
+    assert display.chip == label
 
 
 def test_parameter_display_refuses_what_it_does_not_name():
-    with pytest.raises(EditorValueError, match="response"):
-        parameter_display(LogNormalLS(), "mean", response="money")
     with pytest.raises(EditorValueError, match="'power'"):
-        parameter_display(LogNormalLS(), "power", response="claims")
+        parameter_display("power")
 
 
 def _spread(kind, parameter_values):
@@ -400,7 +385,7 @@ def _spread(kind, parameter_values):
     ("make", "kind"),
     [(lognormal_case, "lognormal_cv"), (gamma_case, "gamma_cv"), (nb_case, "inverse_theta")],
 )
-def test_display_transform_reads_the_spread_at_the_reference_policy(make, kind):
+def test_display_transform_reads_the_spread_at_the_reference_row(make, kind):
     case = make()
     session = open_case(case)
     second = case.model.parameter_names_[1]

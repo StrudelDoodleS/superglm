@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType, SimpleNamespace
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -31,8 +31,6 @@ from superglm.distributional.terms import (
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.lss.terms import LSSTermInference, lss_term_inference
 from superglm.features.rebuild import interaction_users as glm_interaction_users
-
-Response = Literal["claims", "generic"]
 
 NATIVE_ONLY = "SuperLSS terms open on their native scale; pass centering='native'."
 _SPECIAL_SUFFIX = ":special"
@@ -115,8 +113,7 @@ class LSSModelView:
     """The editor's view of a fitted SuperLSS and the rows it was fitted on.
 
     ``X_train`` is the editor's own copy of the training frame: a model restored
-    from a file carries none, and every term sweep needs it. ``amount_unit`` and
-    ``response`` only label what the editor shows.
+    from a file carries none, and every term sweep needs it. ``amount_unit`` only labels what the editor shows.
     """
 
     def __init__(
@@ -125,13 +122,11 @@ class LSSModelView:
         X_train: Any,
         *,
         amount_unit: str | None = None,
-        response: Response = "claims",
     ) -> None:
         fitted = lss._require_fitted()
         self.lss = lss
         self.X_train = X_train
         self.amount_unit = amount_unit
-        self.response = response
         self.family = lss.family
         self._fitted = fitted
         specs: dict[str, Any] = {}
@@ -182,7 +177,7 @@ class LSSModelView:
 
     def with_model(self, lss: SuperLSS) -> LSSModelView:
         """A view of ``lss``, another fit of the same model, over the same rows."""
-        return LSSModelView(lss, self.X_train, amount_unit=self.amount_unit, response=self.response)
+        return LSSModelView(lss, self.X_train, amount_unit=self.amount_unit)
 
     def term_inference(
         self,

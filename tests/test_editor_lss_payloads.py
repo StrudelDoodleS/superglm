@@ -359,7 +359,7 @@ def test_spread_curve_follows_an_edit_to_another_term_of_its_parameter(level_edi
         # The fit's curve stays where the fit put it.
         np.testing.assert_allclose(after["original_y"], before["original_y"], rtol=0, atol=0)
         if level_edit == "reference":
-            # An edit at the reference level moves the whole spread at the reference policy.
+            # An edit at the reference level moves the whole spread at the reference row.
             assert np.min(np.abs(np.asarray(after["y"]) / np.asarray(before["y"]) - 1.0)) > 0.1
             assert after["display"]["reference_eta"] != before["display"]["reference_eta"]
         else:

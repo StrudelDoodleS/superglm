@@ -2,7 +2,7 @@
 
 A mean with a log link is shown as relativities, as the editor shows a SuperGLM
 term. A spread parameter is shown as the readable quantity it controls, at the
-reference policy: the coefficient of variation of a claim for the log-normal and
+reference row: the coefficient of variation for the log-normal and
 gamma scales, and ``1 / theta`` for the negative binomial. An edit made in those
 units converts back to the term's link-scale effect, clamped to the nearest
 value the parameter can take.
@@ -20,7 +20,7 @@ from numpy.typing import ArrayLike, NDArray
 from superglm.distributional.families import GammaLS, LogNormalLS, NegativeBinomialLS
 from superglm.editor._types import EditableTerm
 from superglm.editor.errors import EditorValueError
-from superglm.editor.lss.view import LSSModelView, Response, split_key
+from superglm.editor.lss.view import LSSModelView, split_key
 
 Role = Literal["average", "spread"]
 Colour = Literal["blue", "orange"]
@@ -33,14 +33,6 @@ _SMALLEST = 1.0e-12
 _ROLES: dict[str, Role] = {"mean": "average", "scale": "spread", "theta": "spread"}
 _COLOURS: dict[Role, Colour] = {"average": "blue", "spread": "orange"}
 _CHIPS: dict[Role, str] = {"average": "Average", "spread": "Spread"}
-_CLAIM_LABELS = {
-    "mean": "Average claim",
-    "scale": "Spread of claim sizes",
-}
-_COUNT_LABELS = {
-    "mean": "Claim frequency",
-    "theta": "Extra variation in claim counts",
-}
 _GENERIC_LABELS: dict[Role, str] = {"average": "Average", "spread": "Spread"}
 # The families the editor opens, with how each shows its spread parameter.
 SPREAD_KINDS: dict[type, Kind] = {
@@ -73,29 +65,22 @@ class ParameterDisplay:
     colour: Colour
 
 
-def parameter_display(family: object, parameter: str, *, response: Response) -> ParameterDisplay:
-    """The plain-language name of ``family``'s ``parameter`` for a claims or generic response."""
+def parameter_display(parameter: str) -> ParameterDisplay:
+    """The plain-language name of ``parameter``, by its role: average or spread."""
     role = _ROLES.get(parameter)
     if role is None:
         raise EditorValueError(
             f"The editor has no display for parameter {parameter!r}; it shows 'mean', 'scale' "
             "and 'theta'."
         )
-    if response == "generic":
-        label = _GENERIC_LABELS[role]
-    elif response == "claims":
-        labels = _COUNT_LABELS if isinstance(family, NegativeBinomialLS) else _CLAIM_LABELS
-        label = labels[parameter]
-    else:
-        raise EditorValueError(f"response must be 'claims' or 'generic'; got {response!r}.")
-    return ParameterDisplay(parameter, label, _CHIPS[role], role, _COLOURS[role])
+    return ParameterDisplay(parameter, _GENERIC_LABELS[role], _CHIPS[role], role, _COLOURS[role])
 
 
 @dataclass(frozen=True)
 class DisplayTransform:
     """Between a term's link-scale effect and the number the editor shows for it.
 
-    ``reference_eta`` is the parameter's link predictor at the reference policy
+    ``reference_eta`` is the parameter's link predictor at the reference row
     less the term's own part there, so ``reference_eta + effect`` is the link
     predictor with only this term's column moved. ``floor`` is the log-normal
     scale's lower bound.
@@ -157,7 +142,7 @@ def display_for(
 ) -> DisplayTransform:
     """How the term ``key`` of ``model`` is shown; relativities for anything but a SuperLSS spread.
 
-    A spread is shown at the reference policy under the model in force: with
+    A spread is shown at the reference row under the model in force: with
     ``terms``, the editor's terms, the other edited terms of the parameter move
     the reference; without them it is the fit's.
     """
@@ -205,7 +190,7 @@ def lss_history_fields(view: LSSModelView, key: str | None) -> dict[str, str | b
     if key is None:
         return {}
     parameter, label = split_key(key)
-    chip = parameter_display(view.family, parameter, response=view.response).chip
+    chip = parameter_display(parameter).chip
     return {
         "predictor": parameter,
         "predictor_label": chip,
@@ -223,7 +208,7 @@ def lss_term_fields(
     line the chart measures the curve from; ``terms`` are the editor's terms.
     """
     parameter, label = split_key(key)
-    shown = parameter_display(view.family, parameter, response=view.response)
+    shown = parameter_display(parameter)
     transform = display_for(view, key, terms)
     return {
         "parameter": parameter,

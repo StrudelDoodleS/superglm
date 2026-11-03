@@ -18,10 +18,10 @@ const term = (parameter, label, role, bare) => ({
 });
 
 const LSS_TERMS = {
-  "mean:age": term("mean", "Average claim", "average", "age"),
-  "scale:age": term("scale", "Spread of claim sizes", "spread", "age"),
-  "mean:region": term("mean", "Average claim", "average", "region"),
-  "scale:region": term("scale", "Spread of claim sizes", "spread", "region"),
+  "mean:age": term("mean", "Average", "average", "age"),
+  "scale:age": term("scale", "Spread", "spread", "age"),
+  "mean:region": term("mean", "Average", "average", "region"),
+  "scale:region": term("scale", "Spread", "spread", "region"),
 };
 
 test("a payload with parameter roles has parameters; a SuperGLM payload has none", () => {
@@ -32,9 +32,9 @@ test("a payload with parameter roles has parameters; a SuperGLM payload has none
 
 test("groups follow the payload, each parameter first where it first appears", () => {
   assert.deepEqual(parameterGroups(LSS_TERMS), [
-    { key: "mean", label: "Average claim", role: "average", terms: ["mean:age", "mean:region"] },
+    { key: "mean", label: "Average", role: "average", terms: ["mean:age", "mean:region"] },
     {
-      key: "scale", label: "Spread of claim sizes", role: "spread",
+      key: "scale", label: "Spread", role: "spread",
       terms: ["scale:age", "scale:region"],
     },
   ]);
@@ -55,12 +55,12 @@ test("generic wording and a frequency model name their own parameters", () => {
   };
   assert.deepEqual(parameterGroups(generic).map((group) => group.label), ["Average", "Spread"]);
   const counts = {
-    "mean:x": term("mean", "Claim frequency", "average", "x"),
-    "theta:x": term("theta", "Extra variation in claim counts", "spread", "x"),
+    "mean:x": term("mean", "Average", "average", "x"),
+    "theta:x": term("theta", "Spread", "spread", "x"),
   };
   assert.deepEqual(
     parameterGroups(counts).map((group) => [group.label, group.role]),
-    [["Claim frequency", "average"], ["Extra variation in claim counts", "spread"]],
+    [["Average", "average"], ["Spread", "spread"]],
   );
 });
 

@@ -60,7 +60,7 @@ from superglm.editor.lss.availability import require_available
 from superglm.editor.lss.open import open_lss
 from superglm.editor.lss.refit import lss_refit_with_drafts
 from superglm.editor.lss.terms import lss_editable_terms
-from superglm.editor.lss.view import LSSModelView, Response, is_lss
+from superglm.editor.lss.view import LSSModelView, is_lss
 from superglm.editor.operations import (
     anchored_smooth_values,
     isotonic_values,
@@ -240,7 +240,6 @@ class EditorSession:
         cv: CrossValidationResult | None = None,
         cv_data=None,
         amount_unit: str | None = None,
-        response: Response = "claims",
     ) -> EditorSession:
         """Build an editor session from fitted 1D main-effect inference.
 
@@ -254,8 +253,7 @@ class EditorSession:
         offsets a dict keyed by parameter name. Its terms are keyed
         ``"<parameter>:<term>"``; a bare column name opens that column's term
         in every parameter. ``amount_unit`` names the currency or unit of the
-        response and ``response`` is ``"claims"`` or ``"generic"``, which
-        decides how the parameters are named.
+        response.
         """
         if is_lss(model):
             return open_lss(
@@ -272,7 +270,6 @@ class EditorSession:
                 cv=cv,
                 cv_data=cv_data,
                 amount_unit=amount_unit,
-                response=response,
             )
         if amount_unit is not None:
             raise EditorValueError("amount_unit applies to SuperLSS models.")
@@ -2132,7 +2129,6 @@ def edit(
     cv: CrossValidationResult | None = None,
     cv_data=None,
     amount_unit: str | None = None,
-    response: Response = "claims",
 ) -> EditorSession:
     """Create an editor session for a fitted model.
 
@@ -2140,7 +2136,7 @@ def edit(
     ``cv`` is a :func:`superglm.cross_validate` result for the
     Cross-validation tab and ``cv_data`` the rows its folds index; see
     :meth:`EditorSession.from_model`, which also describes opening a
-    :class:`~superglm.SuperLSS` model (``amount_unit``, ``response``).
+    :class:`~superglm.SuperLSS` model (``amount_unit``).
     """
     return EditorSession.from_model(
         model,
@@ -2154,5 +2150,4 @@ def edit(
         cv=cv,
         cv_data=cv_data,
         amount_unit=amount_unit,
-        response=response,
     )

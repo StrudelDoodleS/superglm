@@ -16,7 +16,7 @@ from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.evaluation import coerce_dataset, coerce_evaluation_data
 from superglm.editor.lss.display import SPREAD_KINDS
 from superglm.editor.lss.terms import lss_editable_terms
-from superglm.editor.lss.view import NATIVE_ONLY, LSSModelView, Response
+from superglm.editor.lss.view import NATIVE_ONLY, LSSModelView
 
 _OPENS = "The editor opens LogNormalLS (mean form), GammaLS and NegativeBinomialLS models"
 _NEEDS_ROWS = (
@@ -84,7 +84,6 @@ def open_lss(
     cv,
     cv_data,
     amount_unit: str | None,
-    response: Response,
 ):
     """An ``EditorSession`` (``cls``) over a fitted SuperLSS, its terms keyed ``parameter:term``."""
     lss = model.lss if isinstance(model, LSSModelView) else model
@@ -106,7 +105,7 @@ def open_lss(
         offset_parameters=names,
     )
     train = evaluation_data["train"]
-    view = LSSModelView(lss, train.X, amount_unit=amount_unit, response=response)
+    view = LSSModelView(lss, train.X, amount_unit=amount_unit)
     editable = lss_editable_terms(
         view, _term_keys(view, terms), n_points=n_points, with_se=with_se, train=train
     )

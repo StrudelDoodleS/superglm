@@ -265,9 +265,9 @@ export const HELP_SECTIONS = Object.freeze([
     title: "SuperLSS models",
     items: Object.freeze([
       "A SuperLSS model has more than one curve per feature. The feature list groups them by what they describe: the average (blue) and the spread (orange). A feature that acts in both appears in both groups, with a small curve of its effect on each row.",
-      "Edit an average curve as a relativity, as in any other model. A spread curve is shown in the units of that spread: the coefficient of variation for claim sizes, or 1/theta for the extra variation in claim counts. Moving a spread point sets the spread to the value you drag to; a value the model cannot reach settles on the nearest one it can.",
+      "Edit an average curve as a relativity, as in any other model. A spread curve is shown in the units of that spread: the coefficient of variation for the log-normal and gamma families, or 1/theta for the negative binomial. Moving a spread point sets the spread to the value you drag to; a value the model cannot reach settles on the nearest one it can.",
       "On a spread curve, Increase and Decrease move the selected points by about 5% of the value shown, and Make increasing, Make decreasing and the snaps act on the curve as drawn: on a 1/theta curve, Increase raises 1/theta.",
-      "A spread curve reads the spread at the reference policy under the model as edited. Editing another spread curve of the same parameter can therefore move it away from its original line, though its own points are unchanged.",
+      "A spread curve reads the spread at the reference row under the model as edited. Editing another spread curve of the same parameter can therefore move it away from its original line, though its own points are unchanged.",
       "Refit keeps the hand edits made in this session. A model exported with hand edits and opened again holds those edits in its coefficients, and Refit estimates those terms again from the data.",
       "History marks each step with the parameter it acted in. Undo, Redo, Revert and Refit cover both parameters in one history.",
       "There is no Cross-validation tab: cross-validation is not available for SuperLSS models. Compare fits in the Validation tab, which scores each split by log score, CRPS and actual over expected, and use Run final fit in the Final Fit tab to refit on all rows.",
