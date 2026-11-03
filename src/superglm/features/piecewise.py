@@ -967,10 +967,9 @@ class Piecewise:
         """Emit the retained hat columns over the unique rows as canonical CSR.
 
         Built straight from the two per-row entries, never via a dense
-        intermediate.  ``eliminate_zeros`` matches what a dense->CSR
-        conversion produced historically: an x sitting exactly on a knot puts
-        an exact ``0.0`` in its neighbour knot's entry, and the dense route
-        never stored it.
+        intermediate.  An x exactly on a knot puts an exact ``0.0`` in its
+        neighbour knot's entry; ``eliminate_zeros`` drops it, so the CSR
+        stores only the nonzero hat entries.
         """
         n = seg.size
         r = self._base_index

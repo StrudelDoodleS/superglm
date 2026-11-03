@@ -45,10 +45,11 @@ THETA_ESTIMATED = "estimated"  #: profiled and fed back into IRLS (an auto fit)
 def _interpolated_density_reach(family, *, theta_role: str) -> str:
     """How far an interpolated counting density reaches into the results.
 
-    Wherever a counting family evaluates ``gammaln`` at a fractional argument.
-    Under ``THETA_FIXED`` (a given theta, or a fitted model being scored) only
-    the reported likelihood moves; under ``THETA_ESTIMATED`` theta is profiled
-    and re-enters ``V(mu)`` and the IRLS weights, so the estimates move too.
+    It applies wherever a counting family evaluates ``gammaln`` at a fractional
+    argument.  Under ``THETA_FIXED`` (a given theta, or a fitted model being
+    scored) only the reported likelihood moves; under ``THETA_ESTIMATED`` theta
+    is profiled and re-enters ``V(mu)`` and the IRLS weights, so the estimates
+    move too.
     """
     if not isinstance(family, NegativeBinomial):
         return " Coefficients, fitted means and deviance are unaffected."
