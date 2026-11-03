@@ -19,6 +19,7 @@ from scipy.optimize import LinearConstraint, minimize
 from scipy.special import xlogy
 
 from superglm import Categorical, ConvergenceWarning, Numeric, Spline, SuperGLM
+from superglm.links import IdentityLink
 
 
 def _eta(model):
@@ -119,3 +120,28 @@ def test_reml_returns_a_boundary_maximum_disclosed_rather_than_refused(discrete)
         issubclass(item.category, ConvergenceWarning) and "boundary" in str(item.message)
         for item in caught
     )
+
+
+class _ShiftedIdentity(IdentityLink):
+    """``link(mu) = mu - 1``, so the probability is ``eta + 1``."""
+
+    def link(self, mu):
+        return mu - 1.0
+
+    def inverse(self, eta):
+        return eta + 1.0
+
+
+def test_a_shifted_identity_link_reads_the_boundary_on_its_mean():
+    # The optimum predicts 0.5 on every row, an interior maximum, at eta = -0.5.
+    X = pd.DataFrame({"x": [-1.0, 0.0, 1.0, -1.0, 0.0, 1.0]})
+    y = np.array([0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
+    model = SuperGLM(
+        family="binomial", link=_ShiftedIdentity(), selection_penalty=0, features={"x": Numeric()}
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        model.fit(X, y)
+    np.testing.assert_allclose(model.predict(X), 0.5, atol=1e-8)
+    assert model.result.converged
+    assert model.result.mean_space_boundary_rows == 0
