@@ -369,9 +369,10 @@ def feature_se_from_cov(
         return se_all
 
     if isinstance(spec, Piecewise):
-        # ``_raw_basis_matrix`` at the knots is the identity padded with a zero
-        # row at the base knot; going through it keeps this a plain quadratic
-        # form, so the base knot's SE is 0 without a special case.
+        # ``_raw_basis_matrix`` at the knots is the identity; its retained
+        # columns are the identity with a zero row at the base knot.  Going
+        # through the basis keeps this a plain quadratic form, so the base
+        # knot's SE is 0 without a special case.
         M = np.asarray(
             spec._raw_basis_matrix(spec._knots)[:, spec._non_base_indices], dtype=np.float64
         )

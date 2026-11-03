@@ -99,8 +99,11 @@ class PathResult:
     a point's predictor as ``X @ coef_path[i] + intercept_path[i]`` cancels
     each numeric column's offset ``c`` against the raw intercept, so a row
     errs by about ``2u |c' beta|`` (``u = 2**-53``), or ``2u c / s`` of the
-    term's effect for a column of spread ``s``: negligible for a year or an
-    epoch time, visible only for a raw ID or a nanosecond timestamp.  The
+    term's effect for a column of spread ``s``.  The ratio ``c / s`` decides
+    it, not the units: a year (``c / s`` near 300) or an epoch time in seconds
+    over months stays near ``1e-13`` of the effect, while an offset many orders
+    of magnitude above the spread (a raw ID, or a timestamp over a spread of
+    seconds or less) loses visible digits.  The
     fitted model predicts at the last point with the centred predictor; to
     predict at point ``i``, refit at ``selection_penalty=lambda_seq[i]``,
     which reproduces the point to the solver's ``tol``.

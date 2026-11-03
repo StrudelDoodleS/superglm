@@ -195,15 +195,15 @@ def _clip_raises_information(
 ) -> bool:
     """Whether the Fisher weight grows past the clip that holds any of these rows.
 
-    ``held_mean`` is where ``stabilize_eta`` and ``clip_mu`` hold the rows,
-    at the edge ``eta_e = link(held_mean)``.  The weight ``I(eta) = mu'**2 /
-    V(mu)`` has slope ``(mu' / V) (2 mu'' - mu'**2 V' / V)``.  Where ``I``
-    falls or is flat from ``eta_e`` toward the row's ``eta``, the clip
-    understates the row and is harmless; where it grows, the weight read is
-    set by where the clip sits, without bound.  Each of the bracket's two
-    terms is a product of at most four evaluated factors, so a bracket within
-    ``16 eps = 32 u`` of their magnitudes is flat.  A pair without
-    ``deriv2_inverse`` or ``variance_derivative`` counts as rising.
+    The rows are held at the edge ``eta_e = link(held_mean)``; ``I(eta) =
+    mu'**2 / V(mu)`` has slope ``(mu' / V) (2 mu'' - mu'**2 V' / V)``.  Where
+    ``I`` falls or is flat toward the row's ``eta``, the edge is the band's
+    least informative point, so reading the row there overstates it by at most
+    the edge's weight.  Where ``I`` grows, the clip sets the weight without
+    bound (``1 / eta**2`` for Gamma/inverse at ``eta = 1e-12``).  Each bracket
+    term is a product of at most four factors, so a bracket within ``16 eps =
+    32 u`` of their magnitudes is flat; a pair without ``deriv2_inverse`` or
+    ``variance_derivative`` counts as rising.
     """
     if not (hasattr(link, "deriv2_inverse") and hasattr(distribution, "variance_derivative")):
         return True

@@ -1009,8 +1009,10 @@ def _add_selection_local_curvature(
     Ridge contributes its ordinary quadratic Hessian.  For a nonzero group
     lasso block, the Hessian of ``lambda * weight * ||beta_g||`` is the
     tangential projector ``lambda * weight / ||beta_g|| * (I - uu')``.
-    This is the geometry of the general-design group-lasso degrees of
-    freedom.  Other penalty types, subclasses included, add nothing.
+    ``GroupElasticNet`` adds both: ``(1 - alpha) * lambda`` on the diagonal
+    and the projector scaled by ``alpha``.  This is the geometry of the
+    general-design group-lasso degrees of freedom.  The check is on exact
+    type, so other penalties and subclasses of these three add nothing.
     """
     width = sum(group.size for group in active_groups)
     if curvature.shape != (width, width):
