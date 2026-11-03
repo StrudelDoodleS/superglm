@@ -281,11 +281,10 @@ def _stationarity_certificate(
     ``|M^+|`` maps score-action uncertainty to multiplier uncertainty, and a multiplier below
     that allowance releases its constraint. The clipped multipliers must then reproduce
     stationarity; an uncertain sign never certifies success. The multipliers are fitted in the
-    per-coefficient test's units (each equation divided by ``max(|H||beta|, |g|)``), which
-    matters when active rows touch coefficients orders of magnitude apart; those weights can
-    span 1e32, and Householder QR is row-wise backward stable under them with column pivoting
-    and rows sorted by decreasing infinity norm (Powell and Reid, 1969; Cox and Higham, Pitman
-    Res. Notes Math. 380, 1998, Lemma 4.2 and Theorem 3.2).
+    per-coefficient test's units (each equation divided by ``max(|H||beta|, |g|)``); Householder
+    QR is row-wise backward stable under those weights, which span 1e32, with column pivoting
+    and rows sorted by decreasing infinity norm (Powell and Reid 1969; Cox and Higham, Pitman
+    Res. Notes Math. 380, 1998, Lemma 4.2, Theorem 3.2).
     """
     active_matrix = np.asarray(active_matrix, dtype=float)
     products, h_action, g_values, _, _ = _constraint_actions(H, beta, g, common=True)
@@ -627,20 +626,13 @@ def _raises_rank(distance: float | NDArray) -> bool | NDArray:
 class _WorkingBasis:
     """An orthonormal basis of the working rows' span, in working-set order.
 
-    Working-set rows must stay linearly independent (Nocedal and Wright,
-    *Numerical Optimization*, 2nd ed., 2006, section 16.5; Gill and Wong, Math.
-    Prog. Comp. 7, 2015, section 2): only then does releasing a row with a
-    negative multiplier let the step move off it. In exact arithmetic a
-    dependent row cannot block, since ``A_w @ step = 0``; rounding, or a
-    violated row at an infeasible start, makes it appear to.
-
-    ``q`` and ``r`` are the thin QR factors of the working rows, each scaled
-    to unit norm (``unit_rows``, from ``_ConstraintStructure``), taken as
-    columns. ``scipy.linalg.qr_insert`` and ``qr_delete`` update them as rows
-    enter and leave (Golub and Van Loan, *Matrix Computations*, 4th ed.,
-    2013, section 6.5), so testing a candidate is one projection, ``O(p k)``.
-    A candidate raises the working rank when its distance from ``range(q)``
-    passes ``_raises_rank``.
+    Working-set rows must stay linearly independent (Nocedal and Wright 2006, section 16.5;
+    Gill and Wong, Math. Prog. Comp. 7, 2015, section 2): in exact arithmetic a dependent row
+    cannot block, since ``A_w @ step = 0``; rounding makes it appear to.
+    ``q`` and ``r`` are the thin QR factors of the working rows, each scaled to unit norm
+    (``unit_rows``), taken as columns and updated by ``scipy.linalg.qr_insert`` and
+    ``qr_delete`` (Golub and Van Loan 2013, section 6.5). A candidate raises the working rank
+    when its distance from ``range(q)`` passes ``_raises_rank``: one ``O(p k)`` projection.
     """
 
     def __init__(self, unit_rows: NDArray) -> None:
@@ -706,16 +698,13 @@ def _zero_block_faces(
 ) -> NDArray:
     """Construct the exact zero point of each block on a homogeneous zero face.
 
-    This is the ``n_eq >= p`` construction in ``solve_constrained_qp`` applied
-    to one block at a time. Rows of other blocks have no entries in a block's
-    columns. If a block's homogeneous working rows have full column rank there,
-    the face fixes ``beta[block_cols] == 0`` exactly. Without the construction,
-    cancellation residue around 1e-15 stays in the block. Primal slack is
-    measured relative to that residue and so reads as violated, up to ``-1``.
-    ``A_eq`` holds the normalized working rows in ``active`` order, and
-    ``full_rank`` caches the rank decision by row tuple. A block with fewer
-    working rows than coefficients cannot be fixed, so only blocks with as
-    many are examined.
+    This is the ``n_eq >= p`` construction in ``solve_constrained_qp`` applied to one block at
+    a time. If a block's homogeneous working rows have full column rank, the face fixes
+    ``beta[block_cols] == 0`` exactly; otherwise cancellation residue around 1e-15 stays in the
+    block and primal slack, measured relative to it, reads as violated, up to ``-1``. ``A_eq``
+    holds the normalized working rows in ``active`` order, ``full_rank`` caches the rank
+    decision by row tuple, and only blocks with at least as many working rows as coefficients
+    are examined.
     """
     labels = blocks.row_label[active]
     counts = np.bincount(labels[labels >= 0], minlength=blocks.width.size)

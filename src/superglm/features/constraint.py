@@ -257,15 +257,12 @@ class _FitKindNamespace(_ConstraintKindNamespace):
 class _ConstraintNamespace:
     """The shape constraints a feature can carry, reached through ``Constraint``.
 
-    ``Constraint.fit`` enforces the shape inside the fit, so the fitted coefficients satisfy it;
-    ``Constraint.postfit`` repairs the shape after an unconstrained fit. Each offers
-    ``increasing``, ``decreasing``, ``convex`` and ``concave``, each a :class:`ConstraintSpec`.
-    ``Constraint.fit`` also offers ``flat``, ``cap(lo, hi)`` and ``max_step(up, down=None)``;
-    its rules combine with ``&`` into :class:`ConstraintRules`, and ``.below(x)``, ``.above(x)``
-    and ``.within(a, b)`` restrict a rule to a stretch of the feature.
+    ``Constraint.fit`` enforces the shape inside the fit, ``Constraint.postfit`` repairs it after
+    an unconstrained fit; each offers ``increasing``, ``decreasing``, ``convex`` and ``concave``
+    (a :class:`ConstraintSpec`). ``Constraint.fit`` also offers ``flat``, ``cap(lo, hi)`` and
+    ``max_step(up, down=None)``; rules join with ``&`` into :class:`ConstraintRules`, and
+    ``.below``, ``.above`` and ``.within(a, b)`` restrict one to a stretch.
 
-    Examples
-    --------
     >>> from superglm import Constraint, Spline
     >>> Spline(kind="ps", k=10, constraint=Constraint.fit.increasing)  # doctest: +SKIP
     """
