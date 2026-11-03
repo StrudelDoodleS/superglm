@@ -174,13 +174,26 @@ def display_for(
     return DisplayTransform(kind, reference, floor)
 
 
-def shown_rises(model: object, key: str | None) -> bool:
-    """Whether ``key``'s shown curve rises with its link-scale effect; True with no term.
+_MIRRORED_OPERATIONS = {
+    "isotonic_increasing": "isotonic_decreasing",
+    "increasing": "decreasing",
+    "isotonic_decreasing": "isotonic_increasing",
+    "decreasing": "increasing",
+    "snap_highest": "snap_lowest",
+    "snap_lowest": "snap_highest",
+}
+
+
+def directed_operation(model: object, key: str | None, operation: str) -> tuple[str, float]:
+    """The operation, and the sign of its effect-scale shift, that act on ``key``'s shown curve.
 
     A directional tool (Increase, Make increasing, Snap to highest) names the shown
-    curve, so on a falling display it runs the opposite way on the effect.
+    curve, so on a display that falls as its effect rises it runs the opposite way
+    on the effect. With no term the operation is unchanged.
     """
-    return key is None or display_for(model, key).increasing
+    if key is None or display_for(model, key).increasing:
+        return operation, 1.0
+    return _MIRRORED_OPERATIONS.get(operation, operation), -1.0
 
 
 def lss_history_fields(view: LSSModelView, key: str | None) -> dict[str, str | bool]:

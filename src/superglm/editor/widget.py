@@ -60,7 +60,7 @@ from superglm.editor.lss.availability import (
     session_availability,
     unavailable_evidence,
 )
-from superglm.editor.lss.display import shown_rises
+from superglm.editor.lss.display import directed_operation
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
 from superglm.editor.notebook import NotebookTransport, notebook_view_class
@@ -310,18 +310,15 @@ class EditorWidget:
             if term is not None:
                 self._select_term(term)
             target = self.selected_term
-            # Directional tools name the shown curve; a falling display mirrors them.
-            rises = shown_rises(self.session.model, target)
-            sign = 1.0 if rises else -1.0
-            up, down = ("increasing", "decreasing") if rises else ("decreasing", "increasing")
+            operation, sign = directed_operation(self.session.model, target, operation)
             if operation == "shift_up":
                 self.session.shift(target, sign * float(np.log(1.05)))
             elif operation == "shift_down":
                 self.session.shift(target, sign * float(np.log(0.95)))
             elif operation in {"isotonic_increasing", "increasing"}:
-                self.session.isotonic(target, up)
+                self.session.isotonic(target, "increasing")
             elif operation in {"isotonic_decreasing", "decreasing"}:
-                self.session.isotonic(target, down)
+                self.session.isotonic(target, "decreasing")
             elif operation == "smooth":
                 self.session.smooth(target, 1.0)
             elif operation == "average":
@@ -333,9 +330,9 @@ class EditorWidget:
             elif operation == "level_right":
                 self.session.level_right(target)
             elif operation == "snap_highest":
-                (self.session.snap_highest if rises else self.session.snap_lowest)(target)
+                self.session.snap_highest(target)
             elif operation == "snap_lowest":
-                (self.session.snap_lowest if rises else self.session.snap_highest)(target)
+                self.session.snap_lowest(target)
             elif operation == "reset_order":
                 self.session.reset_level_order(target)
             elif operation == "reset":
