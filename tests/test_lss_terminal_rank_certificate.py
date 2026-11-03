@@ -810,23 +810,16 @@ def test_a_scaled_copy_of_a_column_is_refitted_as_an_alias(monkeypatch, discrete
     np.testing.assert_allclose(result.coefficients[[0, 1, 3]], reference.coefficients, atol=1e-6)
 
 
-@pytest.mark.parametrize("units", [1.0, 1e-4])
-@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
-def test_a_column_beside_its_square_far_from_zero_keeps_both(monkeypatch, discrete, units):
-    """``x = c (1e4 + z)`` beside ``x^2``: centred they stay collinear, but the data resolve them.
+def _square_far_from_zero(monkeypatch, discrete, units, response):
+    """``x = c (1e4 + z)`` beside ``x^2``, fitted with ``y`` scaled by ``response``.
 
-    The certified rank drops a direction the centred design test calls an
-    alias, so the refit runs. Its dropped multiplier, read per unit of the
-    column's spread, refuses it in any units ``c``: the stopped state stands, as
-    with no refit at all, its square nonzero. Mutation checks: accepting every
-    refit publishes the square at zero, and so does reading the multiplier in
-    the column's own units at ``c = 1e-4``.
+    Returns the solver result and whether a reduced run ran.
     """
     import superglm.distributional.solver.solver as solver
 
     rng = np.random.default_rng(5)
     z = rng.standard_normal(3000)
-    y = 1.0 + 0.5 * z + 0.1 * z**2 + rng.normal(0.0, 0.5, 3000)
+    y = response * (1.0 + 0.5 * z + 0.1 * z**2 + rng.normal(0.0, 0.5, 3000))
     x = units * (1e4 + z)
     run, reduced = solver._run_iterations, []
 
@@ -834,18 +827,52 @@ def test_a_column_beside_its_square_far_from_zero_keeps_both(monkeypatch, discre
         reduced.append(context.retained is not None)
         return run(context, *args, **kwargs)
 
-    def fitted():
-        family = GaussianLS(scale_floor=0)
-        location = family.location(term("x", Numeric()), term("x2", Numeric()))
-        model = SuperLSS(family, location, family.scale(), discrete=discrete)
-        return _fit(model, pd.DataFrame({"x": x, "x2": x**2}), y)
-
     monkeypatch.setattr(solver, "_run_iterations", recorded)
-    result = fitted()
-    assert any(reduced)
-    monkeypatch.setattr(solver, "_drops_design_aliases", lambda layout, rank: False)
-    unreduced = fitted()
+    family = GaussianLS(scale_floor=0)
+    location = family.location(term("x", Numeric()), term("x2", Numeric()))
+    model = SuperLSS(family, location, family.scale(), discrete=discrete)
+    return _fit(model, pd.DataFrame({"x": x, "x2": x**2}), y), any(reduced)
+
+
+@pytest.mark.parametrize(("units", "response"), [(1.0, 1.0), (1e-4, 1.0), (1.0, 100.0)])
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+def test_a_column_beside_its_square_far_from_zero_keeps_both(
+    monkeypatch, discrete, units, response
+):
+    """``x = c (1e4 + z)`` beside ``x^2``: centred they stay collinear, but the data resolve them.
+
+    On centred unit columns the pair's direction has ``rho`` about 5e-5, far above
+    the 1e-7 at which a design has a linear dependency, so no refit runs in any
+    units of ``x`` or ``y`` and the stopped state stands, its square nonzero.
+    Mutation check: on ``rho <= cutoff ** (1/4)`` the refit runs, and at
+    ``y = 100 (...)`` the dropped multiplier keeps it, publishing the square at zero.
+    """
+    result, reduced = _square_far_from_zero(monkeypatch, discrete, units, response)
+    assert not reduced
     assert result.terminal_rank.rank < result.terminal_rank.width
+    assert np.all(result.coefficients[:3] != 0.0)
+
+
+@pytest.mark.parametrize("units", [1.0, 1e-4])
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+def test_a_refit_the_dropped_multiplier_refuses_keeps_the_stopped_state(
+    monkeypatch, discrete, units
+):
+    """The x / x^2 pair forced past the design test: the dropped multiplier refuses its refit.
+
+    Read per unit of the square's spread, the multiplier is about 495 times the
+    stop's bar in any units ``c``, so the published coefficients are the stopped
+    state's, those of the same fit with no refit. Mutation checks: accepting every
+    refit publishes the square at zero, and so does reading the multiplier in the
+    column's own units at ``c = 1e-4``.
+    """
+    import superglm.distributional.solver.solver as solver
+
+    monkeypatch.setattr(solver, "_drops_design_aliases", lambda layout, rank: True)
+    result, reduced = _square_far_from_zero(monkeypatch, discrete, units, 1.0)
+    assert reduced
+    monkeypatch.setattr(solver, "_drops_design_aliases", lambda layout, rank: False)
+    unreduced, _ = _square_far_from_zero(monkeypatch, discrete, units, 1.0)
     assert np.all(result.coefficients[:3] != 0.0)
     np.testing.assert_array_equal(result.coefficients, unreduced.coefficients)
 

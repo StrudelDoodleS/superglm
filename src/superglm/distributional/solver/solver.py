@@ -1550,18 +1550,22 @@ def _certified_terminal_curvature(
         return replace(curvature, telemetry=replace(curvature.telemetry, certified=False))
 
 
+# R's lm.fit and qr tolerance for a linear dependency among a design's columns.
+_DESIGN_DEPENDENCY_TOLERANCE = 1e-7
+
+
 def _drops_design_aliases(layout: StackedLayout, rank: RankDecomposition) -> bool:
     """Whether every direction ``rank`` drops is a near-dependency of the design itself.
 
     ``X N ~ 0`` is an alias; a direction only the weights flatten is a likelihood boundary
     (Lesaffre and Marx 1993). ``rho = ||X N|| / ||C N||`` on unit columns (Belsley, Kuh and
-    Welsch 1980) centred beside an intercept (Marquardt and Snee 1975), so no unit or origin
-    makes a resolved column an alias. The span is one when ``rho <= cutoff ** (1/4)`` on all
-    of it, the log-midpoint between a dropped direction's ``sqrt(cutoff)`` and 1, or when
-    ``X N`` is rounding, ``2 k gamma_k`` of the uncentred norms (a constant column, 0 / 0
-    centred). A centred square within its cancellation, ``3 gamma_{n+2} sum x^2`` (Chan,
-    Golub and LeVeque 1983), counts as zero, which can only refuse an alias. Columns are
-    scaled to unit maximum (the test is basis-free); a non-finite span is not an alias.
+    Welsch 1980) centred beside an intercept (Marquardt and Snee 1975), so no unit, origin
+    or response decides. The span is one when ``rho <= 1e-7`` on all of it, R's ``lm.fit``
+    and ``qr`` tolerance for a linear dependency, or when ``X N`` is rounding, ``2 k
+    gamma_k`` of the uncentred norms (a constant column, 0 / 0 centred). A centred square
+    within its cancellation, ``3 gamma_{n+2} sum x^2`` (Chan, Golub and LeVeque 1983),
+    counts as zero, which can only refuse an alias. Columns are scaled to unit maximum (the
+    test is basis-free); a non-finite span is not an alias.
     """
     null = rank.null_basis()
     null = null / np.max(np.abs(null), axis=0)
@@ -1600,7 +1604,7 @@ def _drops_design_aliases(layout: StackedLayout, rank: RankDecomposition) -> boo
     resolution = (2.0 * null.shape[0] * gamma(null.shape[0])) ** 2
     difference = (
         0.5 * (design_gram + design_gram.T)
-        - np.sqrt(rank.cutoff) * scale_gram
+        - _DESIGN_DEPENDENCY_TOLERANCE**2 * scale_gram
         - resolution * rounding_gram
     )
     return bool(np.all(np.isfinite(difference)) and np.linalg.eigvalsh(difference)[-1] <= 0.0)
