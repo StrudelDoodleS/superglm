@@ -1011,8 +1011,10 @@ log λ over the box `[1e-6, max_lambda]`. By default every family except
    the Hessian through its fourth derivatives. Every built-in family supplies
    both analytically; a family or link without them, or a two-piece row on its
    kink, falls back to finite differences of the packed row curvature, and
-   each carries a certificate. The Hessian is made
-   positive definite by a growing ridge, the step is capped at `max_log_step`
+   each carries a certificate. An indefinite Hessian is replaced by its
+   absolute-eigenvalue modification (Gill, Murray and Wright 1981, as Wood 2008
+   applies it), so only its indefinite directions change, and the next step
+   forms the exact Hessian again; the step is capped at `max_log_step`
    and accepted by Armijo backtracking; when the Hessian's certificate exceeds
    a tenth of its smallest active diagonal the iteration steps by damped BFGS
    instead. The search stops at a stationary point of the box-constrained

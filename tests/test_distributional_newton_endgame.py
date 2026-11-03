@@ -464,6 +464,10 @@ def test_a_modified_hessian_seeds_no_reusable_memory(monkeypatch) -> None:
     assert result.convergence_reason == "stationary"
     steps = [it for it in result.history if it.stage == "newton"]
     assert steps[0].step_source == "newton" and steps[0].newton_ridge > 0.0
+    # The memory rule, not Wood's stop, must force that Hessian: the second iterate's
+    # gradient is still outside the bar.
+    bar = result.config.tolerance * (1.0 + abs(steps[1].objective_before))
+    assert steps[1].projected_gradient_norm >= bar
     assert steps[1].step_source == "newton" and steps[1].hessian_certificate is not None
     assert steps[1].newton_ridge == 0.0
 
