@@ -1255,15 +1255,14 @@ def _disclose_data_rank_route(model) -> None:
 def _reject_monotone_fit_conflicts(model, penalty, has_lambda1_targets) -> None:
     """Refuse the monotone configurations no ordinary-fit solver honours, once the groups exist."""
     # The constrained QP solver path ignores lambda1 — reject explicitly.
-    if (
-        any(g.monotone_engine is not None for g in model._groups)
-        and penalty.lambda1 is not None
-        and penalty.lambda1 > 0
-        and has_lambda1_targets
-    ):
+    constrained = list(
+        dict.fromkeys(g.feature_name for g in model._groups if g.monotone_engine is not None)
+    )
+    if constrained and penalty.lambda1 is not None and penalty.lambda1 > 0 and has_lambda1_targets:
         raise NotImplementedError(
-            "Monotone fit-time constraints are not supported with selection_penalty > 0. "
-            "Set selection_penalty=0 or fit unconstrained and call model.monotonize()."
+            f"Fit-time constraints on {constrained} are not supported with "
+            "selection_penalty > 0. Set selection_penalty=0, or drop the constraint "
+            "(for a monotone smooth, fit unconstrained and call model.monotonize())."
         )
 
 

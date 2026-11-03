@@ -7,12 +7,13 @@ simultaneously), which is the correct variable selection behavior.
 from __future__ import annotations
 
 import warnings
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.types import GroupInfo
+from superglm.features.constraint import ConstraintRules, ConstraintSpec
+from superglm.types import GroupInfo, LinearConstraintSet
 
 # The named unseen policies; any other `unseen=` text names a group.
 _UNSEEN_POLICIES = ("error", "base")
@@ -216,6 +217,26 @@ def _route_unseen_to_group(x: NDArray, grouping, universe: list, group: Any) -> 
     return resolved
 
 
+def _categorical_rules(constraint: ConstraintSpec | ConstraintRules | None) -> ConstraintRules:
+    """The rules a ``Categorical`` stores for ``constraint``: a cap, or none."""
+    if constraint is None:
+        return ConstraintRules(())
+    rules = ConstraintRules((constraint,)) if isinstance(constraint, ConstraintSpec) else constraint
+    if not isinstance(rules, ConstraintRules):
+        raise TypeError(
+            f"Categorical constraint must be None or a cap such as Constraint.fit.cap(0.7, 1.5), "
+            f"got {constraint!r}"
+        )
+    shape = next((rule for rule in rules if rule.kind != "cap"), None)
+    if shape is not None:
+        raise ValueError(
+            f"Categorical takes only a cap, but got {shape.describe()}, a shape rule that "
+            f"needs ordered levels; use OrderedCategorical with this rule, or drop it"
+        )
+    rules.validate()
+    return rules
+
+
 class Categorical:
     """One-hot encoded categorical feature.
 
@@ -244,6 +265,10 @@ class Categorical:
         names a group of ``grouping`` whose effect those levels then take, again
         with one warning per call; the fit checks that the group exists and has a
         place in the fitted universe.
+    constraint : ConstraintSpec | ConstraintRules, optional
+        A relativity cap, ``Constraint.fit.cap(lo, hi)``: every level's printed
+        relativity against the base lies in ``[lo, hi]`` (needs a log link).  A
+        shape rule needs ordered levels; use ``OrderedCategorical`` for one.
     """
 
     # Class-level defaults for the level-universe state.  Unpickling bypasses
@@ -264,6 +289,8 @@ class Categorical:
     # Levels with exposure but only boundary responses at fit (the build's
     # separation scan); ``predict`` names them when it meets them.
     _separated_levels_at_fit: tuple = ()
+    # The fit-time cap, if any; a spec pickled before caps existed has none.
+    _constraint_rules: ConstraintRules = ConstraintRules(())
 
     def __init__(
         self,
@@ -272,8 +299,11 @@ class Categorical:
         *,
         levels=None,
         unseen: Literal["error", "base"] | str = "error",
+        constraint: ConstraintSpec | ConstraintRules | None = None,
     ):
         from superglm.features._level_source import resolve_level_source
+
+        self._constraint_rules = _categorical_rules(constraint)
 
         # A group label can only be checked against the grouping at fit
         # (`_require_unseen_group`): an editor rebuild may hand over a grouping
@@ -320,6 +350,38 @@ class Categorical:
         self._base_fallback: tuple | None = None
         self._pinned_base: Any | None = None
         self._base_is_level: bool = False
+
+    @property
+    def constraint_rules(self) -> ConstraintRules:
+        """The fit-time rules this term carries: a cap, or none."""
+        return self._constraint_rules
+
+    @property
+    def constraint_kind(self) -> str | None:
+        """The rules' description, or None without a cap."""
+        return self._constraint_rules.describe() if self._constraint_rules else None
+
+    @property
+    def constraint_mode(self) -> str:
+        """``"fit"`` with a cap; ``"postfit"``, the unconstrained default, without."""
+        return "fit" if self._constraint_rules else "postfit"
+
+    def _build_monotone_constraints_raw(self) -> LinearConstraintSet:
+        """Rows ``A @ beta >= b`` holding the cap on every emitted level.
+
+        Each emitted column's coefficient is that level's log relativity
+        against the base, as printed (``reconstruct``), so a cap is the two
+        rows ``log lo <= beta_j <= log hi`` per column. The base and pinned
+        levels print at 1, which every cap contains.
+        """
+        n = len(self._non_base)
+        cap = next(rule for rule in self._constraint_rules if rule.kind == "cap")
+        lo, hi = cast(tuple[float, float], cap.bounds)
+        eye = np.eye(n, dtype=np.float64)
+        return LinearConstraintSet(
+            A=np.vstack([eye, -eye]),
+            b=np.concatenate([np.full(n, np.log(lo)), np.full(n, -np.log(hi))]),
+        )
 
     def __repr__(self) -> str:
         n = len(self._levels)
@@ -493,7 +555,16 @@ class Categorical:
         remap[emitted] = np.arange(n_levels, dtype=np.intp)
         cat_codes = remap[codes]
 
-        return GroupInfo(columns=None, n_cols=n_levels, cat_codes=cat_codes), codes
+        if not self._constraint_rules:
+            return GroupInfo(columns=None, n_cols=n_levels, cat_codes=cat_codes), codes
+        info = GroupInfo(
+            columns=None,
+            n_cols=n_levels,
+            cat_codes=cat_codes,
+            constraints=self._build_monotone_constraints_raw(),
+            monotone_engine="qp",
+        )
+        return info, codes
 
     def _require_unseen_group(self) -> None:
         """Refuse an ``unseen`` group this fit cannot route new levels to."""

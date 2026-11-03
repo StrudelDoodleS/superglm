@@ -141,6 +141,7 @@ def rebuilt_categorical(
         grouping=grouping,
         levels=_declared_universe(spec, grouping) if levels is None else levels,
         unseen=spec.unseen if unseen is None else unseen,
+        constraint=rules_of(spec) or None,
     )
     rebuilt._base_is_level = named and str(base) in SYMBOLIC_BASE_POLICIES
     return rebuilt
