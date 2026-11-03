@@ -18,18 +18,23 @@ when selected.  Threads are not pinned here; pin them on the command line.
     uv run python benchmarks/shape_rules_fit_cost.py --configs A,B,C --data-dir DIR
 
 Metric sources: wall seconds is ``time.perf_counter`` around the fit call only;
-IRLS iterations are the REML profile's ``irls_iters`` (``fit_reml``) or
-``result.n_iter`` (``fit``); QP iterations are the summed ``QPResult.n_iter`` of
+``irls_iterations`` is the smoothing stage's count (the REML profile's
+``irls_iters``, which runs on the stripped, unconstrained terms) and
+``refit_irls_iterations`` the constrained fit's own ``result.n_iter``; with
+``fit`` the two are the same count. QP iterations are the summed ``QPResult.n_iter`` of
 every ``solve_constrained_qp`` call the fit made (counted by wrapping that
 function, which records nothing itself); the backend is
 ``model.result.direct_backend``; peak RSS is ``ru_maxrss`` of the whole process
-(KiB on Linux), so it includes the data load; held-out deviance, NLL, Gini and
+(KiB on Linux), a running maximum that includes the data load and every
+configuration run before it in the same process, so run one configuration per
+process for a per-configuration figure; held-out deviance, NLL, Gini and
 A/E come from ``benchmarks/books.glm_results``, the helper every book run uses.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import resource
 import subprocess
@@ -126,13 +131,15 @@ class QPCount:
     def __init__(self):
         self.calls = 0
         self.iterations = 0
-        self.module = sys.modules.get("superglm.solvers.irls_direct._qp")
+        self.module = importlib.import_module("superglm.solvers.irls_direct._qp")
         self.original = getattr(self.module, "solve_constrained_qp", None)
+        if self.original is None:
+            raise RuntimeError(
+                "superglm.solvers.irls_direct._qp.solve_constrained_qp was not found; "
+                "update QPCount to wrap the solver the IRLS step now calls"
+            )
 
     def __enter__(self):
-        if self.original is None:
-            return self
-
         def counted(*args, **kwargs):
             result = self.original(*args, **kwargs)
             self.calls += 1
@@ -143,8 +150,7 @@ class QPCount:
         return self
 
     def __exit__(self, *exc):
-        if self.original is not None:
-            self.module.solve_constrained_qp = self.original
+        self.module.solve_constrained_qp = self.original
 
 
 def fit_model(features, train, method, discrete, **opts):
@@ -178,10 +184,11 @@ def run_config(config, train, test, method, discrete):
         "constrained_terms": sorted(rule),
         "wall_s": wall,
         "irls_iterations": irls,
+        "refit_irls_iterations": getattr(model.result, "n_iter", None),
         "qp_calls": qp.calls,
         "qp_iterations": qp.iterations,
         "peak_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0,
-        "peak_rss_scope": "process-wide, includes the data load",
+        "peak_rss_scope": "process-wide running maximum: data load and earlier configs",
         "backend": getattr(model.result, "direct_backend", None),
         "converged": bool(getattr(model.result, "converged", False)),
         "deviance": held_out["test_deviance"],
