@@ -26,6 +26,7 @@ from ._group_matrix_kernels import (
     _disc_disc_2d_hist,
     _disc_disc_2d_hist_add,
     _disc_disc_2d_hist_channels,
+    _disc_disc_2d_hist_stack_add,
     _float64_operand_exponent_bounds,
     _fused_2d_bincount_2,
     _gather_cell_order,
@@ -36,9 +37,11 @@ from ._group_matrix_kernels import (
     _rows_weighted_bincount_2d,
     _scan_form,
     _sorted_intersection,
+    _ssp_gram_needs_exact,
     _support_weighted_bincount_2d,
     _tensor_operand_in_reassociation_range,
     _weighted_bincount_2d,
+    _weighted_bincount_2d_stack_add,
     _weighted_hist_channels,
 )
 from ._group_matrix_kernels import (
@@ -540,6 +543,187 @@ def _joint_block(kind: str, gm_i, gm_j, H: NDArray, cache) -> NDArray:
     raw = np.dot(np.dot(disc.B_unique.T, H), level.B_unique)
     result = disc.R_inv.T @ raw @ level.R_inv
     return result if kind == "level" else result.T
+
+
+class StackedPassTables:
+    """:class:`PassTables` shared by ``m`` assemblies of one layout: one row pass per pair serves all.
+
+    Assembly ``k`` reads them through :meth:`component`. A kept pair's table has a
+    trailing axis of the ``m`` components; component 0's task for the pair adds
+    every component's rows of the block (:meth:`next_block`), and the others'
+    tasks find them added. By linearity slice ``k`` is the table :class:`PassTables`
+    keeps for component ``k``, and it contracts alone, on its own range
+    (``_table_projects``). All components are released together. Owner: one
+    batched pass; lifetime: until its last component is contracted.
+    """
+
+    __slots__ = ("_entries", "_remaining", "_components", "_released", "_block", "_blocks")
+
+    def __init__(self, budget: int, components: int) -> None:
+        self._entries: dict[tuple[int, ...], list] = {}
+        self._remaining = int(budget)
+        self._components = int(components)
+        self._released = 0
+        self._block: NDArray | None = None
+        self._blocks = 0
+
+    def component(self, k: int) -> _StackedComponent:
+        return _StackedComponent(self, k)
+
+    def next_block(self, weights: NDArray) -> None:
+        """Take the next row block's ``(rows, m, channels)`` weights."""
+        self._block = np.ascontiguousarray(np.moveaxis(weights, 2, 0))
+        self._blocks += 1
+
+
+class _StackedComponent:
+    """Component ``k``'s :class:`PassTables` interface onto a :class:`StackedPassTables`."""
+
+    __slots__ = ("_stack", "_k")
+
+    def __init__(self, stack: StackedPassTables, k: int) -> None:
+        self._stack = stack
+        self._k = k
+
+    def reserve(self, key, gm_i, gm_j) -> None:
+        """Component 0 admits the pair, with ``m`` times :class:`PassTables`' bytes.
+
+        Two supports whose rows the pass reads instead of a joint table keep
+        the right accumulation (``_rows_table``), which reads fewer per row.
+        """
+        if self._k != 0:
+            return
+        stack = self._stack
+        table = _pass_table(gm_i, gm_j)
+        if table is None:
+            entry = _rows_table(gm_i, gm_j)
+        else:
+            entry = (table[0], _stacked_add(gm_i, gm_j), table[2])
+        if entry is not None and entry[0] * stack._components <= stack._remaining:
+            stack._remaining -= entry[0] * stack._components
+            stack._entries[key] = [None, entry[1], entry[2], 0]
+
+    def add(self, key, gm_i, gm_j, W, cache) -> bool:
+        """Component 0 adds every component's block rows of ``key``'s channel."""
+        stack = self._stack
+        entry = stack._entries.get(key)
+        if entry is None:
+            return False
+        if self._k == 0:
+            entry[0] = entry[1](entry[0], gm_i, gm_j, stack._block[key[0]])
+            entry[3] = stack._blocks
+        elif entry[3] != stack._blocks:
+            raise RuntimeError("component 0 must add each block's stacked rows first")
+        return True
+
+    def contracted(self, factors: PassFactors | None):
+        """Yield ``(key, block)`` of this component's slice of every kept pair."""
+        stack = self._stack
+        cache = _BlockWeightCache(None, factors)
+        if stack._released == 0:
+            # Component-major once, so each component's slice is contiguous.
+            for entry in stack._entries.values():
+                if entry[0] is not None:
+                    entry[0] = np.ascontiguousarray(np.moveaxis(entry[0], -1, 0))
+        for key, entry in list(stack._entries.items()):
+            if entry[0] is not None:
+                yield key, entry[2](entry[0][self._k], cache)
+        stack._released += 1
+        if stack._released == stack._components:
+            stack._entries.clear()
+            stack._block = None
+
+
+def _stacked_add(gm_i, gm_j):
+    """``(table, gm_i, gm_j, W) -> table`` for a pair :func:`_pass_table` keeps, ``W`` ``(rows, m)``."""
+    if _pass_table_pair(gm_i, gm_j):
+        return partial(_add_by_bin_stack, False)
+    if _pass_table_pair(gm_j, gm_i):
+        return partial(_add_by_bin_stack, True)
+    return partial(_add_joint_stack, _joint_table_kind(gm_i, gm_j))
+
+
+def _rows_table(gm_i, gm_j):
+    """``(bytes, add, contract)`` summing one support's projected rows by the other's bins.
+
+    Li and Wood's (2020) right accumulation, ``T = sum_rows w S_j[k_j]`` by
+    ``k_i``, contracted as ``S_i' T``; the side whose table is smaller sums.
+    None unless both groups are float64 supports whose ``S = B R`` forms in range.
+    """
+    from ..group_matrix import (
+        DiscretizedSSPGroupMatrix,
+        DiscretizedTensorGroupMatrix,
+        SupportCompressedSSPGroupMatrix,
+    )
+
+    kinds = (
+        DiscretizedSSPGroupMatrix,
+        SupportCompressedSSPGroupMatrix,
+        DiscretizedTensorGroupMatrix,
+    )
+    if not all(
+        type(gm) in kinds
+        and gm.B_unique.dtype == gm.R_inv.dtype == np.float64
+        and not _ssp_gram_needs_exact(gm.B_unique, gm.R_inv)
+        for gm in (gm_i, gm_j)
+    ):
+        return None
+    transposed = gm_j.n_bins * gm_i.shape[1] < gm_i.n_bins * gm_j.shape[1]
+    disc, other = (gm_j, gm_i) if transposed else (gm_i, gm_j)
+    support = other.B_unique @ other.R_inv
+    nbytes = 8 * int(disc.n_bins) * support.shape[1]
+    return (
+        nbytes,
+        partial(_add_rows_stack, support, transposed),
+        partial(_by_bin_block, disc, transposed),
+    )
+
+
+def _add_rows_stack(support, transposed: bool, table, gm_i, gm_j, W: NDArray) -> NDArray:
+    """Add every column of ``W`` times the other support's rows into the summing side's bins."""
+    disc, other = (gm_j, gm_i) if transposed else (gm_i, gm_j)
+    if table is None:
+        table = np.zeros((disc.n_bins, support.shape[1], W.shape[1]))
+    rows = _native(support[other.bin_idx])
+    _weighted_bincount_2d_stack_add(table, _native(disc.bin_idx), _native(W), rows)
+    return table
+
+
+def _add_by_bin_stack(transposed: bool, table, gm_i, gm_j, W: NDArray) -> NDArray:
+    """``_add_by_bin`` of every column of ``W``: the other group's weighted columns by bin."""
+    from ._group_matrix_core import CategoricalGroupMatrix
+
+    disc, other = (gm_j, gm_i) if transposed else (gm_i, gm_j)
+    categorical = isinstance(other, CategoricalGroupMatrix)
+    if table is None:
+        width = other.n_levels if categorical else other.M.shape[1]
+        table = np.zeros((disc.n_bins, width, W.shape[1]))
+    if hasattr(disc, "row_idx"):
+        # A binned level's rows of a panel, summed by the level's bins.
+        rows = disc.row_idx
+        _weighted_bincount_2d_stack_add(
+            table, _native(disc.bin_idx_level), _native(W[rows]), _native(other.M[rows])
+        )
+    elif categorical:
+        _disc_disc_2d_hist_stack_add(table, _native(disc.bin_idx), _native(other.codes), _native(W))
+    else:
+        _weighted_bincount_2d_stack_add(table, _native(disc.bin_idx), _native(W), _native(other.M))
+    return table
+
+
+def _add_joint_stack(kind: str, table, gm_i, gm_j, W: NDArray) -> NDArray:
+    """``_add_joint`` of every column of ``W`` into the joint histogram's trailing axis."""
+    if kind == "supports":
+        idx_i, idx_j, shape = gm_i.bin_idx, gm_j.bin_idx, (gm_i.n_bins, gm_j.n_bins)
+    else:
+        disc, level = (gm_i, gm_j) if kind == "level" else (gm_j, gm_i)
+        rows = level.row_idx
+        idx_i, idx_j, W = disc.bin_idx[rows], level.bin_idx_level, W[rows]
+        shape = (disc.n_bins, level.n_bins)
+    if table is None:
+        table = np.zeros((*shape, W.shape[1]))
+    _disc_disc_2d_hist_stack_add(table, _native(idx_i), _native(idx_j), _native(W))
+    return table
 
 
 class _BlockWeightCache:

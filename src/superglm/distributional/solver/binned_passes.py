@@ -16,7 +16,8 @@ reads rows only through their codes (Wood, Li, Shaddick and Augustin 2017,
   as Li and Wood's Algorithms 2/3 stand to their Algorithm 1.
 - :func:`binned_cross_grams`, ``X' diag-blocks(w_k) X`` for each smoothing
   component ``k``: the binned SuperLSS assembly (``GroupedGeometryAccumulator``
-  with its pass tables and range rules) once per component over shared blocks.
+  with its range rules) once per component over shared blocks, its pass tables
+  stacked so that one row pass per pair serves every component.
 
 Each returns ``None`` for a layout that is not binned (:func:`binned_layout`):
 its callers keep their dense row chunks.
@@ -30,7 +31,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._group_matrix._group_matrix_algebra import PassTables
+from superglm._group_matrix._group_matrix_algebra import StackedPassTables
 from superglm._group_matrix._group_matrix_core import ONE_HOT_CODE_TYPES, DenseGroupMatrix
 from superglm._group_matrix._group_matrix_discretized import (
     DiscretizedSplineCategoricalGroupMatrix,
@@ -47,7 +48,6 @@ from superglm.distributional.solver._ordinary_packing import predictor_panels
 from superglm.distributional.solver.assembly import GroupedGeometryAccumulator
 from superglm.distributional.solver.chunks import (
     _BLOCK_SUM_LIMIT,
-    AUTO_CONTRACTION_MAX_ROWS,
     AUTO_CONTRACTION_MEMORY_BYTES,
     _channel_peak,
     block_plans,
@@ -269,6 +269,23 @@ def binned_leverage_blocks(layout: StackedLayout, inverse: NDArray) -> NDArray[n
     return out if np.all(np.isfinite(out)) else None
 
 
+def _cross_blocks(layout: StackedLayout, count: int) -> tuple[tuple, int, int]:
+    """``(panels, bytes per row, rows per block)`` of a cross-Gram pass of ``count`` components.
+
+    A block holds its assembly rows, the producer's weights and their stacked
+    copy, so the rows depend only on the layout, ``count`` and the allowance.
+    """
+    panels = predictor_panels(layout)
+    channels = len(layout.predictors) * (len(layout.predictors) + 1) // 2
+    row_bytes = contraction_row_bytes(layout, panels) or 8 * layout.n_coefficients
+    block_bytes = row_bytes + 16 * count * channels
+    return (
+        panels,
+        block_bytes,
+        contraction_block_rows(layout.predictors[0].design.n, block_bytes, 1),
+    )
+
+
 def binned_cross_grams(
     layout: StackedLayout,
     packed_rows: Callable[[int, int], NDArray],
@@ -276,11 +293,12 @@ def binned_cross_grams(
 ) -> NDArray[np.float64] | None:
     """``X' diag-blocks(packed[:, k, :]) X`` for every ``k``, ``(m, P, P)``; None off a binned layout.
 
-    The same output as ``_cross_all``. ``packed_rows(start, stop)`` gives one
-    row block's ``(stop - start, m, K(K+1)/2)`` weights and is called once per
-    block, in row order. Blocks hold the assembly's rows and the producer's
-    weights within the contraction allowance; each component runs the binned
-    assembly, its pass tables taking an equal share of what the block leaves.
+    The same output as ``_cross_all``. ``packed_rows(start, stop)`` gives the
+    ``(stop - start, m, K(K+1)/2)`` weights of rows ``[start, stop)``: it is
+    called first for ``[0, 0)``, whose ``m`` sizes the blocks within the
+    contraction allowance, then once per block in row order. Each component
+    runs the binned assembly without a score, over pass tables stacked across
+    the components (``StackedPassTables``) in what the block leaves.
     """
     if not binned_layout(layout):
         return None
@@ -289,53 +307,106 @@ def binned_cross_grams(
     n = layout.predictors[0].design.n
     k_parameters = len(layout.predictors)
     channels = k_parameters * (k_parameters + 1) // 2
-    panels = predictor_panels(layout)
-    row_bytes = contraction_row_bytes(layout, panels) or 8 * (width + channels)
-    rows = contraction_block_rows(n, row_bytes, 1)
+
+    def produce(start: int, stop: int, count: int | None = None) -> NDArray:
+        packed = np.asarray(packed_rows(start, stop), dtype=np.float64)
+        if count is None and packed.ndim == 3:
+            count = packed.shape[1]
+        if packed.shape != (stop - start, count, channels):
+            raise ValueError("packed_rows must give (rows, m, K(K+1)/2) weights for its rows")
+        return packed
+
+    count = produce(0, 0).shape[1]
+    if count == 0:
+        return np.zeros((0, width, width), dtype=np.float64)
+    panels, block_bytes, rows = _cross_blocks(layout, count)
     if rows >= n:
         panels = (None,) * k_parameters
-    score = np.zeros((rows, k_parameters), dtype=np.float64)
-    accumulators: list[GroupedGeometryAccumulator] | None = None
-    summed: list[list[float]] = []
-    start = 0
-    while start < n:
+    share = AUTO_CONTRACTION_MEMORY_BYTES - block_bytes * rows
+    stack = StackedPassTables(share, count) if share > 0 else None
+    zero = np.zeros(width, dtype=np.float64)
+    accumulators = [
+        GroupedGeometryAccumulator(
+            layout,
+            penalty=np.zeros((width, width)),
+            coefficients=zero,
+            tables=None if stack is None else stack.component(k),
+            panels=panels,
+        )
+        for k in range(count)
+    ]
+    # Rows and channel peak the stacked tables have summed, over every component.
+    summed = [0, 0.0]
+    for start in range(0, n, rows):
         stop = min(start + rows, n)
-        packed = np.asarray(packed_rows(start, stop), dtype=np.float64)
-        count = packed.shape[1] if packed.ndim == 3 else -1
-        if packed.shape != (stop - start, count, channels) or (
-            accumulators is not None and count != len(accumulators)
-        ):
-            raise ValueError("packed_rows must give (rows, m, K(K+1)/2) weights for its rows")
-        if accumulators is None:
-            block_bytes = row_bytes + 8 * count * channels
-            rows = max(
-                1,
-                min(rows, AUTO_CONTRACTION_MAX_ROWS, AUTO_CONTRACTION_MEMORY_BYTES // block_bytes),
-            )
-            share = (AUTO_CONTRACTION_MEMORY_BYTES - block_bytes * rows) // max(count, 1)
-            several = stop < n and share > 0
-            zero = np.zeros(width, dtype=np.float64)
-            accumulators = [
-                GroupedGeometryAccumulator(
-                    layout,
-                    penalty=np.zeros((width, width)),
-                    coefficients=zero,
-                    tables=PassTables(share) if several else None,
-                    panels=panels,
-                )
-                for _ in range(count)
-            ]
-            summed = [[0, 0.0] for _ in range(count)]
+        packed = produce(start, stop, count)
+        if stack is not None:
+            # A table entry sums at most the rows seen at their peak: release before it could overflow.
+            peak = max(summed[1], _channel_peak(packed))
+            if (summed[0] + stop - start) * peak > _BLOCK_SUM_LIMIT:
+                for accumulator in accumulators:
+                    accumulator.release_tables()
+                stack = None
+            else:
+                summed = [summed[0] + stop - start, peak]
+                stack.next_block(packed)
         plans = block_plans(layout, panels, start, stop)
         for k, accumulator in enumerate(accumulators):
-            weights = np.ascontiguousarray(packed[:, k, :].T)
-            # A table entry sums at most the rows seen at their peak: release before it could overflow.
-            peak = max(summed[k][1], _channel_peak(weights))
-            if (summed[k][0] + stop - start) * peak > _BLOCK_SUM_LIMIT:
-                accumulator.release_tables()
-            summed[k] = [summed[k][0] + stop - start, peak]
-            accumulator.add_block(plans, score[: stop - start], weights)
-        start = stop
-    if not accumulators:
-        return np.zeros((0, width, width), dtype=np.float64)
+            accumulator.add_block(plans, None, np.ascontiguousarray(packed[:, k, :].T))
     return np.stack([accumulator.finish().data_curvature for accumulator in accumulators])
+
+
+@dataclass(frozen=True)
+class BinnedRoundingCounts:
+    """``k`` with ``|fl(y) - y| <= gamma_k * y_abs`` for every entry ``y`` of a binned kernel.
+
+    ``gamma_k = k u / (1 - k u)`` with ``u = 2**-53`` (Higham 2002, sections 2.2
+    and 3.1). ``y_abs`` is the kernel applied to absolute values with every
+    table ``|S|`` replaced by ``|B| |R|`` (the raw chain's product bound is the
+    same): ``cross`` bounds :func:`binned_cross_grams` by ``|X|' |W| |X|``,
+    ``leverage`` :func:`binned_leverage_blocks` by ``|x_l|' |V| |x_r|`` and
+    ``dot`` :func:`design_dot_rows` by ``|X| |D|``.
+    """
+
+    cross: int
+    leverage: int
+    dot: int
+
+
+def binned_rounding_counts(layout: StackedLayout, m: int) -> BinnedRoundingCounts | None:
+    """The binned kernels' rounding counts for ``m`` components; None off a binned layout.
+
+    A sum of ``k`` terms in any order is within ``gamma_(k-1)`` of its absolute
+    sum, and a product, or forming ``S = B R`` over ``p`` raw columns, adds 1 or
+    ``p``. A cross entry: two products (the weight's and a tensor margin's or a
+    row route's), its longest sum (a block's rows for an intercept, dense
+    column or row route; a bin's or level's rows over the pass for a table,
+    then two contractions over bins), the blocks' sum and both sides' ``S``.
+    Leverage and dot entries: each side's ``S`` and its contraction with ``V``
+    or ``D``, then the sum over term pairs or terms.
+    """
+    if not binned_layout(layout):
+        return None
+    n = layout.predictors[0].design.n
+    rows = min(_cross_blocks(layout, m)[2], n)
+    terms = [_terms(state, 0) for state in layout.predictors]
+    lookups = [t for predictor in terms for t in predictor if not t.dense and t.group is not None]
+    # Bins or levels a lookup reads (a level's zero row and a categorical's sink excluded).
+    sizes = [t.columns.stop - t.columns.start if t.one_hot else t.group.n_bins for t in lookups]
+    cell = max(
+        int(np.bincount(_codes(t, 0, n), minlength=size + 1)[:size].max())
+        for t, size in zip(lookups, sizes, strict=True)
+    )
+    binned = [t.group for t in lookups if not t.one_hot]
+    bins = max(group.n_bins for group in binned)
+    raw = max(group.B_unique.shape[1] for group in binned)
+    width = max(t.columns.stop - t.columns.start for predictor in terms for t in predictor)
+    pairs = max(
+        len(terms[left]) * (len(terms[right]) + (left == right)) // (1 + (left == right))
+        for left, right in packed_pairs(len(terms))
+    )
+    return BinnedRoundingCounts(
+        cross=2 + max(rows, cell + 2 * bins) + -(-n // rows) + 2 * raw,
+        leverage=2 * (raw + width) + pairs,
+        dot=raw + width + max(len(predictor) for predictor in terms),
+    )
