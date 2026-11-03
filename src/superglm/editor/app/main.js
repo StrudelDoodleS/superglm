@@ -1,3 +1,4 @@
+import { canShowContributions } from "./chart/display.js";
 import { EditorAPIError, editorClient } from "./api/client.js";
 import {
   bindPointLens,
@@ -1929,17 +1930,6 @@ function applyTermDefaults(term) {
   if (!Object.keys(patch).length) return false;
   actions.patchView(patch);
   return true;
-}
-
-function canShowContributions(term) {
-  const controls = term && term.controls;
-  return Boolean(
-    controls &&
-    Array.isArray(controls.basis) &&
-    controls.basis.length > 0 &&
-    Array.isArray(controls.build_basis) &&
-    controls.build_basis.length > 0
-  );
 }
 
 function buildDurationMs() {

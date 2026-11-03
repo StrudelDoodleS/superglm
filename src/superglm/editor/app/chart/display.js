@@ -91,3 +91,22 @@ export function formatDisplay(term, value) {
   const text = fmt(value);
   return text && term.y_format === "times" ? `${text}×` : text;
 }
+
+/**
+ * Whether the Contrib and Build overlays can be drawn. They exponentiate the
+ * basis terms into relativities, so a term shown in any other unit has none.
+ * @param {TermPayload|null|undefined} term
+ * @returns {boolean}
+ */
+export function canShowContributions(term) {
+  const controls = term && term.controls;
+  const relativity = !term || !term.display || term.display.kind === "relativity";
+  return Boolean(
+    relativity &&
+    controls &&
+    Array.isArray(controls.basis) &&
+    controls.basis.length > 0 &&
+    Array.isArray(controls.build_basis) &&
+    controls.build_basis.length > 0
+  );
+}
