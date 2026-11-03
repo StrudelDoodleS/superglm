@@ -767,7 +767,8 @@ class SuperGLM:
             are only partly named starts cold, and an unknown key is ignored,
             each with a ``UserWarning``. Coefficients are not carried over,
             and where the criterion is flat a different start can stop at a
-            different point of the flat region. A float, or leaving it unset, keeps the engines' own start.
+            different point of the flat region. A float, or leaving it unset,
+            keeps the engines' own start.
         interaction_mode : {"full", "fast_candidate"}
             ``"full"`` runs ordinary REML. ``"fast_candidate"`` caps REML
             outer updates for interaction models and then runs the normal final
@@ -892,8 +893,9 @@ class SuperGLM:
         grows as ``k^3`` where the allocations grow as ``k^2``.  A probe
         column collinear with the overlap span is routine rather than
         exceptional (one empty ``cat_cat`` cell or one singleton level does
-        it) and is settled by a rank cut on that factor.  A cubic-work gate caps ``k``
-        at the FLOOR of ``(1000 * max_cells)^(1/3)`` for an unpenalized block
+        it) and is settled by a rank cut on that factor.  A cubic-work gate
+        caps ``k`` at the FLOOR of ``(1000 * max_cells)^(1/3)`` for an
+        unpenalized block
         and of ``(500 * max_cells)^(1/3)`` for a penalized one, whose ladder
         can bisect: 1709 and 1357 at the default.  Take the floor — at
         ``max_cells`` 1e4 the penalized root is 170.998 and the cap is 170,
@@ -903,11 +905,10 @@ class SuperGLM:
         ``k <= 2 * sqrt(max_cells)`` binding instead below ``max_cells``
         ~3906 (the crossover is ~15625 for an unpenalized block, so a wide
         ``cat_cat`` reaches the allocation gate at a ``max_cells`` four times
-        larger).  Family,
-        link, ``phi``, penalty order, basis kind, prior weights and the
-        ``edf0`` ladder move none of it; only the block's own width does,
-        and for ``spline_cat`` that width is
-        ``k_spline`` times the factor's CONTRAST count — the levels that
+        larger).  Family, link, ``phi``, penalty order, basis kind, prior
+        weights and the ``edf0`` ladder move none of it; only the block's
+        own width does, and for ``spline_cat`` that width is ``k_spline``
+        times the factor's CONTRAST count — the levels that
         carry a column, not the declared universe, since a level with no
         effective training rows is pinned to base and contributes none.
 
@@ -949,10 +950,12 @@ class SuperGLM:
         inside it, which binds first and admits 1710 UNPINNED levels (1709
         contrasts) at the default, counted the same way as the
         ``spline_cat`` threshold above — gets a NaN row, and raising
-        ``max_cells`` computes it exactly.  Screening always probes exact bases, so a pair whose
+        ``max_cells`` computes it exactly.  Screening always probes exact
+        bases, so a pair whose
         confirmatory refit would discretize LOSSILY is flagged
         ``approx=True`` to make that support-discretization gap, the same
-        class as the quantile fallback, visible in the output.  The flag applies the refit's own gate, which
+        class as the quantile fallback, visible in the output.  The flag
+        applies the refit's own gate, which
         differs by kind: a ``ti`` refit bins its marginals only when BOTH
         parents resolve to fit-time discretization, a ``spline_cat`` refit
         bins its spline margin whenever that ONE parent does, and the

@@ -1,6 +1,10 @@
 """Private docstrings in ``src/superglm`` stay at 12 lines or fewer, except those allowlisted.
 
-The allowlist is a ratchet: it only shrinks, and an entry may not grow past its recorded length.
+"Private" means the name: a function, method or class whose own name, or an enclosing one's,
+starts with an underscore. A public name inside an underscore module is not checked.
+
+The allowlist is a ratchet: an entry records its docstring's exact length, so a trimmed
+docstring lowers its count in the same commit and a longer one fails.
 """
 
 import ast
@@ -139,7 +143,10 @@ def test_allowlist_only_shrinks():
     assert not stale, f"gone or now within {LIMIT} lines; delete these allowlist entries: {stale}"
 
 
-def test_allowlisted_docstrings_do_not_grow():
+def test_allowlisted_docstrings_keep_their_recorded_length():
     found = _long_docstrings()
-    grown = {k: (found[k], n) for k, (n, _) in ALLOWLIST.items() if found.get(k, 0) > n}
-    assert not grown, f"allowlisted docstrings longer than recorded (now, recorded): {grown}"
+    moved = {k: (found[k], n) for k, (n, _) in ALLOWLIST.items() if k in found and found[k] != n}
+    assert not moved, (
+        "allowlisted docstrings differ from their recorded length (now, recorded); "
+        f"lower the count of a shorter one, shorten a longer one: {moved}"
+    )

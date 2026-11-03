@@ -552,9 +552,8 @@ class _BlockWeightCache:
 
         The raw-band kernel writes every row, so the scratch is never zeroed
         and its pages are faulted in once per build rather than once per
-        block (a fresh accumulator's first touch measured 15.6% of the dense
-        kernel's time).  Blocks are assembled one after another, so one
-        buffer serves them all.
+        block.  Blocks are assembled one after another, so one buffer serves
+        them all.
         """
         cells = n_cells * width
         if self._channel_scratch.size < cells:
@@ -964,8 +963,8 @@ def _shared_margin_fits(
 
     Checked BEFORE the O(n) index comparison of ``_same_discrete_margin``: at
     the default 256 bins every pairing is over the cap, so comparing first
-    cost four full row passes per tensor pair per Gram build for a route the
-    pair could never take (0.375 s of a ten-pair fit).
+    would cost four full row passes per tensor pair per Gram build for a
+    route the pair can never take.
     """
     n_shared, n_other_i = _margin_bins(gm_i, margin_i)
     n_shared_j, n_other_j = _margin_bins(gm_j, margin_j)

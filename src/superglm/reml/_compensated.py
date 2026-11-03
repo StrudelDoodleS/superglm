@@ -90,7 +90,7 @@ def _dot2_selected(left, right_t, indices):
 
     ``right_t`` is ``right`` transposed and C-contiguous, so each column is a
     contiguous row and ``_dot2_value`` keeps the one specialisation its other
-    caller compiles (a strided column compiled a second, 0.3-0.4 s cold).
+    caller compiles (a strided column would compile a second).
     """
     values = np.zeros(len(indices), dtype=np.float64)
     success = np.zeros(len(indices), dtype=np.bool_)

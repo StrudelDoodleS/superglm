@@ -60,7 +60,7 @@ class CrossValidationResult:
     curve_similarity : dict or None
         Fold-by-fold term similarity diagnostics for comparable main effects.
         A correlation is NaN where two curves share fewer than two finite
-        points or either is flat there, a term a fold's penalty zeroes say.
+        points or either is flat there, as for a term a fold's penalty zeroes.
         A fold's distance to the fold mean is NaN where it shares no point
         with another fold: the mean is taken where two or more folds have a
         value.

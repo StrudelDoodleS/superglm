@@ -791,9 +791,9 @@ def _gather_cell_order(order, bin1, bin2):
     """Permute a partner's channel bins into a grid's cell order.
 
     Two sequential passes so that the cell loop streams every input;
-    gathering through ``order`` inside the cell loop instead cost as much as
-    the dense kernel it replaces (31.5 against 30.3 ms, measured), the kernel
-    being latency-bound on dependent random reads.  The weights take the same
+    gathering through ``order`` inside the cell loop costs as much as the
+    dense kernel it replaces, the kernel being latency-bound on dependent
+    random reads.  The weights take the same
     permutation once per grid tensor per build (``_BlockWeightCache``).
     """
     n = order.shape[0]
@@ -819,7 +819,7 @@ def _cell_hist_raw_kron(ptr, bin1, bin2, w, offsets1, values1, offsets2, values2
     width = out.shape[1]
     acc = np.zeros(width)
     # Explicit loops for the zeroing and the copy: numba's slice assignment
-    # made the whole kernel 2.5x slower (17.6 against 7.1 ms, measured).
+    # makes the whole kernel more than twice as slow.
     for cell in range(ptr.shape[0] - 1):
         for column in range(width):
             acc[column] = 0.0
@@ -855,8 +855,8 @@ def _cell_csr(idx1, idx2, n_bins1, n_bins2):
 
     Returns ``(ptr, order)``: ``order[ptr[c]:ptr[c + 1]]`` are the rows of cell
     ``c`` in ascending row order, so a sum over a cell runs in one fixed order
-    whatever visits it.  O(n + cells); ``np.argsort(kind="stable")`` on the
-    same 300,000 rows measured 24x slower.
+    whatever visits it.  O(n + cells), against O(n log n) for
+    ``np.argsort(kind="stable")``.
     """
     n_cells = n_bins1 * n_bins2
     ptr = np.zeros(n_cells + 1, dtype=np.int64)
