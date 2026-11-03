@@ -295,7 +295,7 @@ def test_gradient_certificate_carries_the_theta_third_bound() -> None:
 
 
 def test_axis_derivatives_are_evaluated_once(monkeypatch) -> None:
-    """K axis derivatives cost K kernel calls: the admission check is the pass itself."""
+    """K axis derivatives cost one stacked kernel call: the admission check is the pass itself."""
     from superglm.distributional.smoothing.derivatives import (
         _analytic_first_derivative,
         _first_derivatives,
@@ -309,7 +309,7 @@ def test_axis_derivatives_are_evaluated_once(monkeypatch) -> None:
     original = NegativeBinomialLS.certified_predictor_curvature_directional_derivative
 
     def counted(self, *args):
-        calls.append(1)
+        calls.append(np.shape(args[2]))
         return original(self, *args)
 
     monkeypatch.setattr(
@@ -320,7 +320,7 @@ def test_axis_derivatives_are_evaluated_once(monkeypatch) -> None:
     first, certificate, _stencils, evaluations = _first_derivatives(
         lambda values: values, eta, DEFAULT_STEP, analytic_first=analytic
     )
-    assert len(calls) == 2 and evaluations == 0
+    assert calls == [(2, 5, 2)] and evaluations == 0
     np.testing.assert_array_equal(first[0], analytic.axes[0][0])
     np.testing.assert_array_equal(certificate[0], analytic.axes[0][1])
 

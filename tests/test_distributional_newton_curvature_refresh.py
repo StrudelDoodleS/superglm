@@ -78,7 +78,7 @@ def test_newton_refreshes_indefinite_curvature_after_accepted_bfgs_steps(monkeyp
     assert any(item.accepted and item.step_source == "bfgs" for item in smoothing.history)
     assert smoothing.converged and smoothing.matched_certified
     assert smoothing.convergence_reason == "stationary"
-    assert smoothing.newton_iterations < smoothing.config.max_newton_iterations
+    assert smoothing.iterations < smoothing.config.max_iterations
     assert gradient_fits[-1] is smoothing.terminal_fit
     assert smoothing.terminal_evidence_fresh
     assert smoothing.terminal_projected_gradient_norm <= smoothing.stationarity_bar
@@ -90,7 +90,11 @@ def test_newton_refreshes_indefinite_curvature_after_accepted_bfgs_steps(monkeyp
 
 @pytest.mark.parametrize("failure", ["unavailable", "untrusted", "indefinite"])
 def test_failed_curvature_refresh_keeps_bounded_bfgs_fallback(monkeypatch, failure):
-    """A refresh failure keeps the accepted state and the existing inverse memory."""
+    """A refresh failure keeps the accepted state and the existing inverse memory.
+
+    ``max_reml_iter=30`` bounds warm-up and endgame together; with its refreshes
+    failing, the fallback needs more than that, so the budget ends it.
+    """
     real_derivatives = newton.laml_derivatives
     hessian_calls = []
     gradient_fits = []
@@ -123,7 +127,7 @@ def test_failed_curvature_refresh_keeps_bounded_bfgs_fallback(monkeypatch, failu
 
     monkeypatch.setattr(newton, "laml_derivatives", fail_refresh)
     model, frame, y = _case("gaussian")
-    model.fit_reml(frame, y, outer="efs+newton", practical_reml=False)
+    model.fit_reml(frame, y, outer="efs+newton", practical_reml=False, max_reml_iter=30)
     smoothing = model._require_fitted().smoothing
 
     assert len(hessian_calls) > 1
@@ -133,7 +137,7 @@ def test_failed_curvature_refresh_keeps_bounded_bfgs_fallback(monkeypatch, failu
         and dict(item.lambdas_before) == hessian_calls[1]
         for item in smoothing.history
     )
-    assert smoothing.newton_iterations <= smoothing.config.max_newton_iterations
+    assert smoothing.iterations <= smoothing.config.max_iterations
     assert gradient_fits[-1] is smoothing.terminal_fit
     assert smoothing.terminal_fit.converged
     assert dict(smoothing.terminal_gradient) == dict(

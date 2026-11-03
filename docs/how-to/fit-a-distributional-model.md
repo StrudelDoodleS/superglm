@@ -1011,14 +1011,30 @@ backtracking. Set `outer="efs+newton"` to opt into a two-stage search:
    the Hessian through its fourth derivatives. Every built-in family supplies
    both analytically; a family or link without them, or a two-piece row on its
    kink, falls back to finite differences of the packed row curvature, and
-   each carries a certificate. The Hessian is made
-   positive definite by a growing ridge, the step is capped at `max_log_step`
+   each carries a certificate. An indefinite Hessian is replaced by its
+   absolute-eigenvalue modification (Gill, Murray and Wright 1981, as Wood 2008
+   applies it), so only its indefinite directions change, and the next step
+   forms the exact Hessian again; the step is capped at `max_log_step`
    and accepted by Armijo backtracking; when the Hessian's certificate exceeds
    a tenth of its smallest active diagonal the iteration steps by damped BFGS
    instead. The search stops at a stationary point of the box-constrained
    problem: the largest projected gradient component below
    `reml_tol * (1 + |LAML|)`, the objective change below the same bar, and the
    estimated remaining quadratic improvement below the same bar.
+
+`outer="efs"` runs the warm-up alone until its own stop. That stop asks for
+the fixed-point residual below `reml_tol` without scaling it by the objective,
+so it is much stricter than the endgame's bar, and the plateau stop is off
+while any term sits at `max_lambda`. On fits where some terms are not needed,
+so that their λ climb to the cap, it often runs to `max_reml_iter`, and the
+terms it leaves at the cap can change with rounding. With the endgame such
+fits usually stop at a stationary point instead, at a cost in fit time that
+depends on the model: on some fits it is faster than the warm-up alone, on
+others slower. The endgame is not advised
+for `TwoPieceNormalLSS` and `TwoPieceLogNormalLSS`, whose row curvature jumps
+where the two pieces join: Newton's quadratic model assumes a smooth objective
+(Wood, Pya and Säfken 2016), and in our checks the endgame stopped short of a
+stationary point on these families.
 
 Here, `smoothing_certified_` reports the existing numerical stationarity
 contract in log smoothing parameters, together with converged coefficient fits

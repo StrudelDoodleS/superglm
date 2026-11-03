@@ -52,7 +52,5 @@ def bounded_predictor_matrices(
 
 
 def matrix_row_chunk(matrices: tuple[PredictorMatrix, ...], default: int) -> int:
-    return min(
-        [default]
-        + [matrix.chunk_size for matrix in matrices if isinstance(matrix, BoundedPredictorMatrix)]
-    )
+    """The largest row chunk every matrix allows; a materialised array allows any."""
+    return min([default] + [getattr(matrix, "chunk_size", default) for matrix in matrices])

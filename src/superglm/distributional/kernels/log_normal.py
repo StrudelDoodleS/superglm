@@ -351,7 +351,8 @@ def _predictor_arrays(
     expected = (len(y), 2)
     if (
         predictors.shape != expected
-        or direction.shape != expected
+        or direction.ndim not in (2, 3)
+        or direction.shape[-2:] != expected
         or not np.all(np.isfinite(predictors))
         or not np.all(np.isfinite(direction))
     ):
@@ -404,6 +405,7 @@ def mean_curvature_directional(
     factor cancels.  Each channel is a short sum of products of singly rounded
     factors, so its error is ``gamma_k`` of its absolute-term scale with
     ``k <= 16`` (``k`` counts the exponential, the factors and the sum).
+    A stacked direction ``(m, n, 2)`` gives ``(m, n, 3)``.
     """
     y, mass, predictors, direction = _predictor_arrays(response, eta, eta_direction, multiplier)
     floor = float(scale_floor)
@@ -422,11 +424,11 @@ def mean_curvature_directional(
             - 3.0 * (kappa * kappa) * complement
             + polynomial * (standardized * standardized - residual)
         )
-        along_mean, along_scale = direction[:, 0], direction[:, 1]
-        result = np.empty((len(y), 3), dtype=_FLOAT)
-        result[:, 0] = -mass * (lab_b * along_scale)
-        result[:, 1] = -mass * (lab_b * along_mean + lab_bb * along_scale)
-        result[:, 2] = -mass * (lab_bb * along_mean + lbbb * along_scale)
+        along_mean, along_scale = direction[..., 0], direction[..., 1]
+        result = np.empty((*direction.shape[:-1], 3), dtype=_FLOAT)
+        result[..., 0] = -mass * (lab_b * along_scale)
+        result[..., 1] = -mass * (lab_b * along_mean + lab_bb * along_scale)
+        result[..., 2] = -mass * (lab_bb * along_mean + lbbb * along_scale)
     if not np.all(np.isfinite(result)):
         raise LogNormalDomainError("log-normal predictor-curvature derivative is not representable")
     return readonly(result)

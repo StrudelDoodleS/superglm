@@ -53,6 +53,7 @@ from superglm.distributional.prediction_design import (
 from superglm.distributional.revision import CORRECTED_COVARIANCE_NEEDS_THE_FIT
 from superglm.distributional.smoothing.derivatives import LamlDerivatives, laml_derivatives
 from superglm.distributional.solver.assembly import dense_predictor_matrices
+from superglm.distributional.solver.binned_rows import binned_layout
 from superglm.reml.multi_penalty import (
     _UNIT_ROUNDOFF,
     _gamma,
@@ -406,11 +407,12 @@ def _replayed_smoothing_hessian(
             "corrected covariance replay produced a different likelihood plan identifier"
         )
     try:
+        # A binned layout's derivative passes read their rows from its bin tables,
+        # so they need no dense design.
+        chunk_size = terminal.resolved_chunk_size
         matrices = (
-            bounded_predictor_matrices(
-                fitted.layout, chunk_size=min(terminal.resolved_chunk_size, 4096)
-            )
-            if terminal.resolved_chunk_size is not None
+            bounded_predictor_matrices(fitted.layout, chunk_size=min(chunk_size or 4096, 4096))
+            if chunk_size is not None or binned_layout(fitted.layout)
             else dense_predictor_matrices(fitted.layout)
         )
         derivatives = laml_derivatives(
@@ -604,7 +606,13 @@ def _resolved_posterior_covariance(
         return covariance, "corrected"
     if open_stop is not None:
         warnings.warn(
-            lss_corrected_covariance_nonstationary_message(open_stop),
+            lss_corrected_covariance_nonstationary_message(
+                open_stop,
+                newton_can_help=smoothing.config.outer == "efs"
+                and getattr(
+                    getattr(fitted.family, "capabilities", None), "continuous_curvature", True
+                ),
+            ),
             ConvergenceWarning,
             stacklevel=3,
         )

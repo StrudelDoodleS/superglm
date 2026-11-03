@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import functools
 import math
+import warnings
 from dataclasses import replace
 
 import numpy as np
@@ -604,3 +605,460 @@ def test_hessian_certificate_costs_no_absolute_assembly(monkeypatch) -> None:
     family, layout, y, plan, lambdas, fit, dense = _legacy_case("gamma", "finite-difference")
     laml_derivatives(family, layout, y, plan, lambdas=lambdas, fit=fit, dense_matrices=dense)
     assert calls == [False]
+
+
+# --- Derivative-pass cost: the family's state once per pass, not once per axis --
+
+_U = 2.0**-53
+
+
+@pytest.mark.parametrize("blocked", [False, True], ids=["one block", "row blocks"])
+@pytest.mark.parametrize("kind", ["gaussian", "gamma"])
+def test_stacked_axis_directions_reproduce_the_per_axis_pass(kind, blocked, monkeypatch) -> None:
+    """A family with ``stacked_curvature_directions`` takes the K axes in one call per row block.
+
+    The same family without the flag takes one call per axis over all rows.
+    Every row and direction runs the same arithmetic either way, so the
+    gradient, Hessian and both certificates agree within ``8 u`` of their
+    largest entry.
+    """
+    from superglm.distributional.kernels import _curvature_direction as curvature_kernels
+
+    family, layout, y, plan, lambdas, fit, _config, session = _interior_case(kind, "observed")
+    n, k = fit.eta.shape
+    # Three blocks, the last one shorter, or the whole case in one block.
+    chunk = n // 3 + 1 if blocked else curvature_kernels.STACKED_ROW_CHUNK
+    assert blocked or n <= chunk
+    monkeypatch.setattr(curvature_kernels, "STACKED_ROW_CHUNK", chunk)
+    shapes: list[tuple[int, ...]] = []
+
+    class _Counted(type(family)):
+        def predictor_curvature_directional_derivative(self, y, eta, direction, links, plan):
+            shapes.append(np.shape(direction))
+            return super().predictor_curvature_directional_derivative(
+                y, eta, direction, links, plan
+            )
+
+    class _PerAxis(_Counted):
+        stacked_curvature_directions = False
+
+    def make(cls):
+        return cls(scale_floor=family.scale_floor) if kind == "gaussian" else cls()
+
+    common = dict(lambdas=lambdas, fit=fit, dense_matrices=session.dense_matrices(layout))
+    stacked = laml_derivatives(make(_Counted), layout, y, plan, **common)
+    assert shapes == [(k, min(chunk, n - start), k) for start in range(0, n, chunk)]
+    shapes.clear()
+    per_axis = laml_derivatives(make(_PerAxis), layout, y, plan, **common)
+    assert shapes == [(n, k)] * k
+    for name in ("gradient", "gradient_certificate", "hessian", "hessian_certificate"):
+        got, want = getattr(stacked, name), getattr(per_axis, name)
+        assert np.all(np.abs(got - want) <= 8 * _U * np.max(np.abs(want))), name
+
+
+def _stacked_family_cases():
+    from superglm.distributional.families import (
+        GeneralizedGammaLSS,
+        GeneralizedParetoLSS,
+        LogNormalLS,
+        NegativeBinomialLS,
+        TweedieLSS,
+        TwoPieceLogNormalLSS,
+        TwoPieceNormalLSS,
+    )
+
+    return {
+        "gaussian": GaussianLS,
+        "gamma": GammaLS,
+        "log-normal (mean)": LogNormalLS,
+        "log-normal (location)": lambda: LogNormalLS(parametrisation="location"),
+        "negative binomial": NegativeBinomialLS,
+        "tweedie": TweedieLSS,
+        "generalized gamma (mean)": GeneralizedGammaLSS,
+        "generalized gamma (location)": lambda: GeneralizedGammaLSS(parametrisation="location"),
+        "generalized pareto": GeneralizedParetoLSS,
+        "two-piece log-normal (mean)": TwoPieceLogNormalLSS,
+        "two-piece log-normal (location)": lambda: TwoPieceLogNormalLSS(parametrisation="location"),
+        "two-piece normal": TwoPieceNormalLSS,
+    }
+
+
+def _stacked_rows(family, n: int, rng):
+    """A response and a predictor state inside the family's domain."""
+    kind = type(family).__name__
+    if kind in ("GaussianLS", "TwoPieceNormalLSS"):
+        y = rng.normal(1.0, 1.0, n)
+    elif kind == "NegativeBinomialLS":
+        y = rng.poisson(2.0, n).astype(float)
+    elif kind == "TweedieLSS":
+        y = rng.gamma(2.0, 1.0, n) * (rng.uniform(size=n) < 0.6)
+    else:
+        y = np.exp(rng.normal(0.5, 0.6, n))
+    eta = rng.normal(0.0, 0.3, (n, len(family.parameters)))
+    if kind in ("GaussianLS", "TwoPieceNormalLSS"):
+        eta[:, 0] += 1.0
+    if kind == "GeneralizedGammaLSS":
+        eta[:, 2] = rng.uniform(-0.1, 0.8, n)
+    return y, eta
+
+
+#: Families whose likelihood takes truncated and censored rows.
+_BOUNDED_CASES = (
+    "gamma",
+    "gaussian",
+    "generalized gamma (location)",
+    "generalized gamma (mean)",
+    "generalized pareto",
+    "log-normal (location)",
+    "log-normal (mean)",
+)
+
+
+def _bounded_observation(y, rng):
+    """A fifth of the rows right-censored, some truncated below or above."""
+    from superglm.distributional.family import bounded_observation
+    from superglm.distributional.observation import ResponseBounds
+
+    n = len(y)
+    side = np.where(rng.uniform(size=n) < 0.2, 1, 0)
+    lower = np.where(rng.uniform(size=n) < 0.3, y - 0.5 * np.abs(y) - 0.1, -np.inf)
+    if np.all(y > 0.0):
+        lower = np.where(np.isfinite(lower), np.maximum(lower, 0.0), lower)
+    upper = np.where((rng.uniform(size=n) < 0.3) & (side == 0), y + np.abs(y) + 0.1, np.inf)
+    return bounded_observation(ResponseBounds.from_arrays(lower, upper, side))
+
+
+@pytest.mark.parametrize(
+    ("name", "bounded"),
+    [(name, False) for name in sorted(_stacked_family_cases())]
+    + [(name, True) for name in _BOUNDED_CASES],
+)
+def test_stacked_curvature_directions_match_one_direction_at_a_time(name, bounded) -> None:
+    """``(m, n, K)`` directions on one state evaluation equal ``m`` single calls.
+
+    The K parameter axes the LAML pass asks for and three random directions,
+    per family, on complete rows and, where the family takes them, on
+    truncated and censored rows: within ``4 u`` of each direction's largest
+    entry (values and, for NB2, its certificate).
+    """
+    from superglm.distributional.smoothing.endpoint_direction import (
+        analytic_curvature_direction,
+    )
+
+    family = _stacked_family_cases()[name]()
+    assert family.stacked_curvature_directions is True
+    rng = np.random.default_rng(23)
+    n = 400
+    y, eta = _stacked_rows(family, n, rng)
+    links = tuple(spec.default_link for spec in family.parameters)
+    k = len(links)
+    weights = resolve_likelihood_weights(None, n_observations=n, contract=WeightContract("prior"))
+    observation = _bounded_observation(y, rng) if bounded else COMPLETE_OBSERVATION
+    plan = family.bind_likelihood(y, weights, observation)
+    directions = np.concatenate(
+        [np.repeat(np.eye(k)[:, None, :], n, axis=1), rng.normal(size=(3, n, k))]
+    )
+    stacked, stacked_certificate = analytic_curvature_direction(
+        family, y, eta, directions, links, plan
+    )
+    assert stacked.shape == (len(directions), n, k * (k + 1) // 2)
+    for index, direction in enumerate(directions):
+        single, certificate = analytic_curvature_direction(family, y, eta, direction, links, plan)
+        assert np.all(np.abs(stacked[index] - single) <= 4 * _U * np.max(np.abs(single))), index
+        if certificate is not None:
+            assert np.all(
+                np.abs(stacked_certificate[index] - certificate) <= 4 * _U * np.max(certificate)
+            ), index
+
+
+@pytest.mark.parametrize("bounded", [False, True], ids=["complete", "bounded"])
+def test_generalized_pareto_natural_thirds_are_row_blocked(bounded, monkeypatch) -> None:
+    """The Hessian pass's stacked natural thirds over row blocks equal one block over all rows.
+
+    Each row's thirds use only that row, so blocks of 7 rows reproduce the
+    single block within ``4 u`` of each pair's largest entry, values and
+    certificate, on complete and on truncated and censored rows.
+    """
+    from superglm.distributional.families import GeneralizedParetoLSS
+    from superglm.distributional.families import generalized_pareto as family_module
+    from superglm.distributional.kernels import _curvature_direction as curvature_kernels
+    from superglm.distributional.smoothing.derivatives import _analytic_second_derivatives
+    from superglm.distributional.smoothing.endpoint_direction import DEFAULT_STEP
+
+    family = GeneralizedParetoLSS()
+    rng = np.random.default_rng(29)
+    n = 40
+    y, eta = _stacked_rows(family, n, rng)
+    links = tuple(spec.default_link for spec in family.parameters)
+    weights = resolve_likelihood_weights(None, n_observations=n, contract=WeightContract("prior"))
+    observation = _bounded_observation(y, rng) if bounded else COMPLETE_OBSERVATION
+    plan = family.bind_likelihood(y, weights, observation)
+    shapes: list[tuple[int, ...]] = []
+    original = family_module.scale_hessian_direction
+
+    def counted(response, scale, shape, direction, multiplier):
+        shapes.append(np.shape(direction))
+        return original(response, scale, shape, direction, multiplier)
+
+    monkeypatch.setattr(family_module, "scale_hessian_direction", counted)
+    results = []
+    for chunk in (n, 7):
+        monkeypatch.setattr(curvature_kernels, "STACKED_ROW_CHUNK", chunk)
+        shapes.clear()
+        results.append(_analytic_second_derivatives(family, y, eta, links, plan, step=DEFAULT_STEP))
+        assert shapes == [(2, min(chunk, n - start), 2) for start in range(0, n, chunk)]
+    (whole_values, whole_certificate), (blocked_values, blocked_certificate) = results
+    for pair, want in whole_values.items():
+        assert np.all(np.abs(blocked_values[pair] - want) <= 4 * _U * np.max(np.abs(want))), pair
+        bar = 4 * _U * np.max(whole_certificate[pair])
+        assert np.all(np.abs(blocked_certificate[pair] - whole_certificate[pair]) <= bar), pair
+
+
+# --- Binned layouts: every caller reads the rows from the layout's bin tables --
+
+_LAML_RESULTS = ("gradient", "gradient_certificate", "hessian", "hessian_certificate")
+# The group kinds each binned fixture holds.
+_BINNED_KINDS = {
+    "K2": {
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedSplineCategoricalGroupMatrix",
+        "CategoricalGroupMatrix",
+        "RandomEffectGroupMatrix",
+        "DenseGroupMatrix",
+    },
+    "compressed": {
+        "SupportCompressedSSPGroupMatrix",
+        "SupportCompressedSplineCategoricalGroupMatrix",
+        "CategoricalGroupMatrix",
+        "DenseGroupMatrix",
+    },
+}
+_BINNED_KINDS["K3"] = _BINNED_KINDS["K2"]
+
+
+def _compressed_case():
+    """An exact-mode fit on integer covariates, which compresses each spline to its supports."""
+    from superglm.features import Categorical, Numeric
+    from superglm.features.interaction import SplineCategorical
+
+    n = 1500
+    rng = np.random.default_rng(3)
+    frame = pd.DataFrame(
+        {
+            "a": rng.integers(18, 60, n).astype(float),
+            "b": rng.integers(0, 12, n).astype(float),
+            "d": rng.normal(size=n),
+            "g": rng.choice(list("abc"), n),
+            "h": rng.choice(list("pqrs"), n),
+        }
+    )
+    y = (
+        np.sin(frame["a"] / 9)
+        + 0.2 * (frame["g"] == "b")
+        + rng.normal(size=n) * np.exp(-0.5 + 0.05 * frame["b"])
+    )
+    predictors = [
+        Predictor(
+            "location",
+            {
+                "a": Spline(kind="cr", n_knots=6),
+                "g": Categorical(base="a"),
+                "h": Categorical(base="p"),
+                "d": Numeric(),
+            },
+            interaction_specs={"a:h": SplineCategorical("a", "h")},
+        ),
+        Predictor("scale", {"b": Spline(kind="cr", n_knots=5), "h": Categorical(base="p")}),
+    ]
+    return GaussianLS(), frame, y, predictors, False
+
+
+@functools.cache
+def _binned_case(case: str):
+    """A binned fit: discretised, with a tensor, a categorical, a random effect, a level and a
+    dense term (``K2``, ``K3``), or exact mode on integer covariates (``compressed``)."""
+    from superglm.distributional.families import GeneralizedGammaLSS
+    from superglm.features import Categorical, Numeric, RandomEffect
+    from superglm.features.interaction import SplineCategorical, TensorInteraction
+
+    if case == "compressed":
+        family, frame, y, predictors, discrete = _compressed_case()
+        return _binned_fit(family, frame, y, predictors, discrete)
+    k_parameters = int(case[1])
+    n = 900
+    rng = np.random.default_rng(61 + k_parameters)
+    frame = pd.DataFrame(
+        {
+            "x": rng.uniform(-1, 1, n),
+            "z": rng.uniform(-1, 1, n),
+            "d": rng.normal(size=n),
+            "g": rng.choice(list("abc"), n),
+            "h": rng.choice(list("pq"), n),
+            "r": rng.choice([f"l{i}" for i in range(12)], n),
+        }
+    )
+    signal = np.sin(2 * frame["x"]) + 0.5 * frame["z"] * frame["x"] + 0.3 * (frame["g"] == "b")
+    if k_parameters == 2:
+        family = GaussianLS()
+        y = signal + np.exp(-0.5 + 0.3 * frame["z"]) * rng.normal(size=n)
+    else:
+        family = GeneralizedGammaLSS()
+        y = np.exp(0.4 * signal + 0.3 * rng.normal(size=n))
+    names = [parameter.name for parameter in family.parameters]
+    predictors = [
+        Predictor(
+            names[0],
+            {
+                "x": Spline(kind="cr", n_knots=6),
+                "z": Spline(kind="cr", n_knots=5),
+                "g": Categorical(base="a"),
+                "d": Numeric(),
+                "r": RandomEffect(),
+            },
+            interaction_specs={"x:z": TensorInteraction("x", "z", n_knots=(4, 4))},
+        ),
+        Predictor(
+            names[1],
+            {"x": Spline(kind="cr", n_knots=5), "h": Categorical(base="p")},
+            interaction_specs={"x:h": SplineCategorical("x", "h")},
+        ),
+    ]
+    if k_parameters == 3:
+        predictors.append(Predictor(names[2], {"z": Spline(kind="cr", n_knots=4)}))
+    return _binned_fit(family, frame, y, predictors, True)
+
+
+def _binned_fit(family, frame, y, predictors, discrete: bool):
+    model = fit_dense_distributional(
+        frame,
+        np.asarray(y, dtype=np.float64),
+        family=family,
+        predictors=predictors,
+        weight_contract=WeightContract("prior"),
+        efs_config=DistributionalEFSConfig(max_iterations=4, outer="efs"),
+        discrete=discrete,
+        n_bins=24,
+    )
+    rows = model.fit_state.retained_rows
+    plan = family.bind_likelihood(rows.response, rows.likelihood_weights, COMPLETE_OBSERVATION)
+    options = dict(lambdas=dict(model.smoothing.lambdas), fit=model.smoothing.terminal_fit)
+    return family, model.layout, rows.response, plan, options
+
+
+def test_the_corrected_covariance_replay_builds_no_dense_design_on_a_binned_layout(
+    monkeypatch,
+) -> None:
+    """The bin-table route reads its own rows, so the replay does not form the n x p design for it.
+
+    An unchunked exact-mode fit on integer covariates is the route that formed it. The
+    correction equals the one the dense matrices give, bit for bit. Mutation check:
+    choosing the matrices by the chunk size alone builds the design once.
+    """
+    from superglm.distributional import posterior as posterior_module
+    from superglm.distributional.solver.binned_rows import binned_layout
+
+    family, frame, y, predictors, discrete = _compressed_case()
+    model = fit_dense_distributional(
+        frame,
+        np.asarray(y, dtype=np.float64),
+        family=family,
+        predictors=predictors,
+        weight_contract=WeightContract("prior"),
+        efs_config=DistributionalEFSConfig(max_iterations=4, outer="efs"),
+        discrete=discrete,
+        n_bins=24,
+    )
+    assert binned_layout(model.layout)
+    assert model.smoothing.terminal_fit.resolved_chunk_size is None
+    dense_design = posterior_module.dense_predictor_matrices
+    replay = posterior_module.laml_derivatives
+    builds: list[bool] = []
+    replays: list[bool] = []
+
+    def counted_design(layout):
+        builds.append(True)
+        return dense_design(layout)
+
+    def counted_replay(*args, **kwargs):
+        replays.append(True)
+        return replay(*args, **kwargs)
+
+    monkeypatch.setattr(posterior_module, "dense_predictor_matrices", counted_design)
+    monkeypatch.setattr(posterior_module, "laml_derivatives", counted_replay)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        corrected = posterior_module.posterior_covariance(model, kind="corrected")
+    assert replays == [True] and not builds
+
+    monkeypatch.setattr(posterior_module, "binned_layout", lambda layout: False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        from_dense = posterior_module.posterior_covariance(model, kind="corrected")
+    assert replays == [True, True] and builds == [True]
+    assert not np.array_equal(corrected, model.covariance)
+    np.testing.assert_array_equal(corrected, from_dense)
+
+
+def _binned_family(family, authority: str):
+    if authority == "analytic":
+        return family
+    differenced = type(
+        "Differenced",
+        (type(family),),
+        {
+            "predictor_curvature_directional_derivative": None,
+            "predictor_curvature_second_directional_derivative": None,
+        },
+    )
+    return differenced()
+
+
+@pytest.mark.parametrize("authority", ["analytic", "finite-difference"])
+@pytest.mark.parametrize("case", ["K2", "K3", "compressed"])
+def test_binned_layout_derivatives_equal_the_dense_row_chunks(case, authority, monkeypatch) -> None:
+    """Rows read from the bin tables are the values a bounded chunk forms, so the gradient,
+    Hessian and both certificates are those of the dense row chunks, bit for bit. The
+    fixtures hold every binned group kind, and the differenced pass nonzero certificates."""
+    from superglm.distributional._row_design import bounded_predictor_matrices
+    from superglm.distributional.smoothing import derivatives as derivatives_module
+    from superglm.distributional.solver.binned_rows import binned_layout
+
+    family, layout, y, plan, options = _binned_case(case)
+    family = _binned_family(family, authority)
+    assert binned_layout(layout)
+    kinds = {type(g).__name__ for state in layout.predictors for g in state.design.group_matrices}
+    assert kinds >= _BINNED_KINDS[case]
+    matrices = bounded_predictor_matrices(layout)
+    binned = laml_derivatives(family, layout, y, plan, dense_matrices=matrices, **options)
+    monkeypatch.setattr(derivatives_module, "binned_rows", lambda layout: None)
+    dense = laml_derivatives(family, layout, y, plan, dense_matrices=matrices, **options)
+    assert binned.third_derivative_authority == dense.third_derivative_authority
+    assert bool(np.max(binned.hessian_certificate) > 1e-9) is (authority == "finite-difference")
+    for name in (*_LAML_RESULTS, "fs_gradient", "penalty_hessian"):
+        np.testing.assert_array_equal(getattr(binned, name), getattr(dense, name), err_msg=name)
+
+
+@pytest.mark.parametrize("case", ["K2", "K3", "compressed"])
+def test_binned_layout_derivatives_never_read_the_callers_rows(case, monkeypatch) -> None:
+    """The layout decides the rows: materialised matrices and bounded chunks of 97 rows (whose
+    dense route rounds differently) give the same bits, and no bounded chunk is formed."""
+    from superglm.distributional._row_design import (
+        BoundedPredictorMatrix,
+        bounded_predictor_matrices,
+    )
+    from superglm.distributional.solver.assembly import dense_predictor_matrices
+
+    family, layout, y, plan, options = _binned_case(case)
+    family = _binned_family(family, "finite-difference")
+    materialised = laml_derivatives(
+        family, layout, y, plan, dense_matrices=dense_predictor_matrices(layout), **options
+    )
+
+    def forbidden(self, rows):
+        pytest.fail("a binned layout's derivative pass read the caller's bounded rows")
+
+    monkeypatch.setattr(BoundedPredictorMatrix, "__getitem__", forbidden)
+    bounded = bounded_predictor_matrices(layout, chunk_size=97)
+    chunked = laml_derivatives(family, layout, y, plan, dense_matrices=bounded, **options)
+    for name in _LAML_RESULTS:
+        np.testing.assert_array_equal(getattr(chunked, name), getattr(materialised, name), name)

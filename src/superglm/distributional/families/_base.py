@@ -102,7 +102,10 @@ def natural_curvature_direction(
 
     ``hessian_direction(theta, v)`` returns the packed derivative of the
     family's weighted natural Hessian along the natural direction ``v``.
-    Every inverse link must supply three derivatives.
+    Every inverse link must supply three derivatives.  A stacked
+    ``eta_direction`` ``(m, n, K)`` reaches ``hessian_direction`` stacked too,
+    so the state's links and natural derivatives are evaluated once for all
+    ``m``; the result has the direction's shape with packed channels last.
     """
     from superglm.distributional.kernels._curvature_direction import (
         predictor_curvature_direction,
@@ -118,7 +121,8 @@ def natural_curvature_direction(
     expected = (response_row_count(y), k_parameters)
     if (
         predictors.shape != expected
-        or direction.shape != expected
+        or direction.ndim not in (2, 3)
+        or direction.shape[-2:] != expected
         or len(link_tuple) != k_parameters
         or not np.all(np.isfinite(predictors))
         or not np.all(np.isfinite(direction))
@@ -161,7 +165,7 @@ def natural_curvature_direction(
     # A row the family flags invalid publishes zero curvature, so its
     # derivative is zero too.
     valid = np.asarray(evaluation.valid, dtype=np.bool_)
-    result[~valid] = 0.0
+    result[..., ~valid, :] = 0.0
     if not np.all(np.isfinite(result)):
         raise ValueError("the predictor-curvature derivative is not representable at this state")
     return readonly(result)
@@ -269,7 +273,7 @@ def link_inner_derivatives(*derivatives: NDArray[np.float64]):
 
 
 def natural_third_from_direction(hessian_direction, n_rows: int, k_parameters: int):
-    """Packed natural third derivatives from a family's ``dH(v)`` on the natural axes."""
+    """Packed natural third derivatives from ``dH(v, rows)`` on the stacked natural axes, per row block."""
     from superglm.distributional.kernels._curvature_direction import (
         third_from_hessian_direction,
     )

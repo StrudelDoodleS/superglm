@@ -32,7 +32,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributional.kernels._common import readonly, readonly_bool
+from superglm.distributional.kernels._common import readonly, readonly_bool, stacked_direction
 from superglm.distributional.kernels._weighted import weighted_natural_channel
 
 _FLOAT = np.float64
@@ -319,27 +319,32 @@ def scale_hessian_direction(
       ``(6L - 6u - 3u^2 - 2u^3)/xi^4 - 2 v^3`` in the positive tail, with
       ``L = log1p(z)`` and ``u = xi v``, the Hessian's own tail split.
 
-    Rows outside the support (published as zero) return zero.
+    Rows outside the support (published as zero) return zero.  A stacked
+    direction ``(m, n, 2)`` gives ``(m, n, 3)`` on one evaluation of the thirds.
     """
     y = _nonnegative_vector(response, name="response")
     psi = _positive_vector(scale, name="scale")
     xi = _vector(shape, name="shape")
     weight = _positive_vector(multiplier, name="multiplier")
     _matching(y, psi, xi, weight)
-    nu = np.asarray(direction, dtype=_FLOAT)
-    if nu.shape != (len(y), 2) or not np.all(np.isfinite(nu)):
-        raise GeneralizedParetoDomainError("natural direction must be a finite n-by-2 array")
+    nu = stacked_direction(
+        direction,
+        len(y),
+        2,
+        GeneralizedParetoDomainError,
+        "natural direction must be a finite n-by-2 array",
+    )
     with np.errstate(over="ignore", invalid="ignore"):
         t = y / psi
         z = xi * t
     support = 1.0 + z
     positive_tail = (xi > 0.0) & (z >= _Z_SERIES_RADIUS)
     ordinary = np.isfinite(support) & (support > 0.0) & ~positive_tail
-    result = np.zeros((len(y), 3), dtype=_FLOAT)
+    result = np.zeros((*nu.shape[:-1], 3), dtype=_FLOAT)
     for rows in (ordinary, positive_tail):
         if not np.any(rows):
             continue
-        yi, pi, xi_i, wi, ni = y[rows], psi[rows], xi[rows], weight[rows], nu[rows]
+        yi, pi, xi_i, wi, ni = y[rows], psi[rows], xi[rows], weight[rows], nu[..., rows, :]
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
             if rows is ordinary:
                 ti, zi = t[rows], z[rows]
@@ -365,10 +370,10 @@ def scale_hessian_direction(
             t_ppp = 2.0 * (v * (1.0 + a + a * a) - a**3) / pi**3
             t_ppx = -v * (2.0 * a * a - v * (1.0 + 2.0 * a)) / (pi * pi)
             t_pxx = 2.0 * v * v * (v - a) / pi
-            vp, vx = ni[:, 0], ni[:, 1]
-            result[rows, 0] = wi * (t_ppp * vp + t_ppx * vx)
-            result[rows, 1] = wi * (t_ppx * vp + t_pxx * vx)
-            result[rows, 2] = wi * (t_pxx * vp + t_xxx * vx)
+            vp, vx = ni[..., 0], ni[..., 1]
+            result[..., rows, 0] = wi * (t_ppp * vp + t_ppx * vx)
+            result[..., rows, 1] = wi * (t_ppx * vp + t_pxx * vx)
+            result[..., rows, 2] = wi * (t_pxx * vp + t_xxx * vx)
     if not np.all(np.isfinite(result)):
         raise GeneralizedParetoDomainError(
             "generalized Pareto Hessian direction is not representable"

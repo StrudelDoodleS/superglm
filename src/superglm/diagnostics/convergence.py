@@ -325,8 +325,8 @@ def lss_corrected_covariance_substitute_message(source: str) -> str:
     )
 
 
-# The Fellner-Schall stops are the ones outer='efs+newton' can improve on; every other
-# stop is one that endgame itself produced, so repeating it would change nothing.
+# The Fellner-Schall stops of an outer='efs' fit are the ones the endgame can improve on,
+# on a family with continuous curvature; an outer='efs+newton' fit already ran it.
 _NONSTATIONARY_DEFAULT = "model.diagnose() explains the stop."
 _NONSTATIONARY_REMEDY = dict.fromkeys(
     ("lambda_change", "objective_plateau", "practical_plateau"),
@@ -335,14 +335,20 @@ _NONSTATIONARY_REMEDY = dict.fromkeys(
 )
 
 
-def lss_corrected_covariance_nonstationary_message(reason: str) -> str:
-    """What a corrected covariance means when smoothing did not stop at a certified stationary point."""
+def lss_corrected_covariance_nonstationary_message(reason: str, *, newton_can_help: bool) -> str:
+    """What a corrected covariance means when smoothing did not stop at a certified stationary point.
+
+    ``newton_can_help`` says whether refitting with the Newton endgame is advice
+    worth giving: the fit ran plain Fellner-Schall on a family whose curvature is
+    continuous.
+    """
+    remedy = _NONSTATIONARY_REMEDY.get(reason) if newton_can_help else None
     return (
         f"SuperLSS corrected covariance: smoothing stopped with reason {reason!r}, not at a "
         "certified stationary point of the Laplace objective, so V_rho inverts the Hessian in "
         "log smoothing parameters at the fitted smoothing parameters rather than at the maximum "
         "Wood, Pya and Saefken (2016, section 4) expand about. V + J V_rho J' is a first-order "
-        f"correction about this point. {_NONSTATIONARY_REMEDY.get(reason, _NONSTATIONARY_DEFAULT)}"
+        f"correction about this point. {remedy or _NONSTATIONARY_DEFAULT}"
     )
 
 

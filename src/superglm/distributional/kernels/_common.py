@@ -70,6 +70,24 @@ def positive_weights(values: object, weight_semantics: WeightSemantics) -> NDArr
     return weights
 
 
+def stacked_direction(
+    direction: object,
+    n_rows: int,
+    k_parameters: int,
+    error: type[Exception],
+    message: str,
+) -> NDArray[np.float64]:
+    """A finite float64 direction ``(n, K)``, or ``(m, n, K)`` for ``m`` stacked directions."""
+    values = np.asarray(direction, dtype=FLOAT)
+    if (
+        values.ndim not in (2, 3)
+        or values.shape[-2:] != (n_rows, k_parameters)
+        or not np.all(np.isfinite(values))
+    ):
+        raise error(message)
+    return values
+
+
 def validated_derivative_order(value: object) -> DerivativeOrder:
     if isinstance(value, bool | np.bool_):
         raise ValueError(_DERIVATIVE_ORDER_MESSAGE)
@@ -90,6 +108,7 @@ __all__ = [
     "positive_weights",
     "readonly",
     "readonly_bool",
+    "stacked_direction",
     "validated_derivative_order",
     "validated_semantics",
 ]

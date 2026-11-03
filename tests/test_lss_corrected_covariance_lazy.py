@@ -19,7 +19,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 
-from superglm import Spline, SuperLSS
+from superglm import Spline, SuperLSS, TwoPieceNormalLSS, s
 from superglm.diagnostics.convergence import (
     ConvergenceWarning,
     lss_corrected_covariance_nonstationary_message,
@@ -247,6 +247,59 @@ def test_retained_stationary_fit_replays_exact_hessian_without_mutation(stationa
     assert fitted.fit_state is fit_state
     assert fitted.smoothing is smoothing
     assert fitted.smoothing.smoothing_hessian is None
+
+
+def test_binned_stationary_fit_replays_the_stored_terminal_gradient(monkeypatch) -> None:
+    """A discretised fit's replay reads the rows its endgame read, whatever matrices it
+    builds (here chunks of 97 rows, which the dense route sums in another order), so its
+    gradient is the stored terminal gradient bit for bit and the correction forms."""
+    from superglm.distributional._row_design import bounded_predictor_matrices
+    from superglm.distributional.solver.binned_rows import binned_layout
+
+    rng = np.random.default_rng(7351)
+    x = rng.uniform(-1.0, 1.0, 900)
+    response = 0.6 * np.sin(2.4 * x) + np.exp(-1.0 + 0.5 * np.cos(1.8 * x)) * rng.standard_normal(
+        len(x)
+    )
+    fitted = (
+        model_from_templates(
+            family=GaussianLS(),
+            predictors=[
+                Predictor("location", {"x": Spline("cr", k=7)}),
+                Predictor("scale", {"x": Spline("cr", k=5)}),
+            ],
+            discrete=True,
+        )
+        .fit_reml(pd.DataFrame({"x": x}), response, outer="efs+newton")
+        ._require_fitted()
+    )
+    assert binned_layout(fitted.layout)
+    assert fitted.smoothing is not None and fitted.smoothing.convergence_reason == "stationary"
+    # Without a published Hessian the correction replays and checks the stored gradient.
+    smoothing = dataclasses.replace(
+        fitted.smoothing, smoothing_hessian=None, smoothing_hessian_certificate=None
+    )
+    state = dataclasses.replace(fitted.fit_state, smoothing=smoothing)
+    replaying = DenseDistributionalModel(family=fitted.family, _fit_state=state)
+    replays: list[LamlDerivatives] = []
+
+    def recorded(*args, **kwargs) -> LamlDerivatives:
+        replays.append(real_laml_derivatives(*args, **kwargs))
+        return replays[-1]
+
+    def chunks_of_97(layout, chunk_size=None):
+        return bounded_predictor_matrices(layout, chunk_size=97)
+
+    monkeypatch.setattr(posterior_module, "laml_derivatives", recorded)
+    monkeypatch.setattr(posterior_module, "bounded_predictor_matrices", chunks_of_97)
+    monkeypatch.setattr(posterior_module, "dense_predictor_matrices", chunks_of_97)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        covariance = posterior_covariance(replaying, kind="corrected")
+    (replayed,) = replays
+    stored = smoothing.terminal_gradient
+    np.testing.assert_array_equal(replayed.gradient, [stored[name] for name in replayed.names])
+    assert np.all(np.isfinite(covariance))
 
 
 def test_compact_fit_discloses_the_conditional_covariance(stationary_case) -> None:
@@ -783,14 +836,54 @@ def test_derivative_replay_failure_is_disclosed_with_its_root_cause(
         ("endpoint_revalidation_failed", False),
     ],
 )
+@pytest.mark.parametrize("newton_can_help", [True, False])
 def test_the_newton_remedy_is_offered_only_to_stops_it_can_improve(
-    reason: str, advises_newton: bool
+    reason: str, advises_newton: bool, newton_can_help: bool
 ) -> None:
-    """A stop the efs+newton endgame itself produced is not told to refit with it."""
-    message = lss_corrected_covariance_nonstationary_message(reason)
+    """A stop the efs+newton endgame itself produced is not told to refit with it.
+
+    Nor is a fit that already ran the endgame, or one whose family's curvature
+    jumps (``newton_can_help=False``).
+    """
+    message = lss_corrected_covariance_nonstationary_message(
+        reason, newton_can_help=newton_can_help
+    )
     assert f"reason {reason!r}" in message
-    assert ("outer='efs+newton'" in message) is advises_newton
+    assert ("outer='efs+newton'" in message) is (advises_newton and newton_can_help)
     assert "model.diagnose()" in message
+
+
+def test_a_fellner_schall_stop_of_an_endgame_fit_is_not_told_to_run_the_endgame(
+    stationary_case,
+) -> None:
+    """An outward practical plateau can stop an efs+newton fit."""
+    fitted, _ = stationary_case
+    assert fitted.smoothing is not None and fitted.smoothing.config.outer == "efs+newton"
+    altered = _with_smoothing_stop(fitted, reason="practical_plateau", converged=True)
+    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point") as record:
+        posterior_covariance(altered, kind="corrected")
+    assert not any("outer='efs+newton'" in str(item.message) for item in record)
+
+
+def test_a_two_piece_fit_is_not_told_to_run_the_endgame() -> None:
+    """A two-piece curvature jumps at the join, so its open stop gets no Newton remedy.
+
+    The default Fellner-Schall fit is relabelled to a stop the remedy would
+    otherwise address. Mutation check: deciding the advice by the fitted outer
+    alone offered ``outer='efs+newton'``.
+    """
+    rng = np.random.default_rng(7351)
+    x = rng.uniform(-1.0, 1.0, 320)
+    frame = pd.DataFrame({"x": x})
+    response = 0.6 * np.sin(2.4 * x) + np.exp(-1.0) * rng.standard_normal(len(x))
+    family = TwoPieceNormalLSS()
+    model = SuperLSS(family, family.location(s("x", kind="cr", k=6)), family.scale(), family.skew())
+    fitted = model.fit_reml(frame, response)._require_fitted()
+    assert fitted.smoothing is not None and fitted.smoothing.config.outer == "efs"
+    altered = _with_smoothing_stop(fitted, reason="practical_plateau", converged=True)
+    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point") as record:
+        posterior_covariance(altered, kind="corrected")
+    assert not any("outer='efs+newton'" in str(item.message) for item in record)
 
 
 @pytest.mark.parametrize("defect", [TypeError, AttributeError, KeyError, IndexError])
@@ -1338,6 +1431,8 @@ def test_a_default_efs_fit_is_corrected_about_its_own_stop() -> None:
     with pytest.warns(ConvergenceWarning, match="not at a certified stationary point") as record:
         corrected = posterior_covariance(fitted, kind="corrected")
     assert [f"reason {reason!r}" in str(item.message) for item in record] == [True]
+    # A plain Fellner--Schall stop on a smooth family is offered the endgame.
+    assert "outer='efs+newton'" in str(record[0].message)
     assert np.all(np.isfinite(corrected))
     np.testing.assert_array_equal(corrected, corrected.T)
     posterior_module._posterior_covariance_factor(corrected)

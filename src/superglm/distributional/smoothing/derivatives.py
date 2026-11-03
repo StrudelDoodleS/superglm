@@ -11,6 +11,11 @@ default. ``curvature="terminal"`` differentiates the accepted substitute
 instead (expected information, or each row block projected onto the
 semidefinite cone; Wood, Pya and Säfken 2016 §3.3.1, Wood and Fasiolo 2017 §3),
 a first-order approximation to the true derivative.
+
+On a binned layout (``binned_rows.binned_layout``) the passes read each
+predictor's rows from its bin tables, formed once per pass (``BinnedRows``),
+whatever matrices the caller gave: the same values a bounded row chunk forms,
+so every caller at one fit gets the same bits as the dense row chunks.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from typing import Literal, cast
 import numpy as np
 from numpy.typing import NDArray
 
+import superglm.distributional.kernels._curvature_direction as curvature_kernels
 from superglm.distributional._row_design import (
     BoundedPredictorMatrix,
     PredictorMatrix,
@@ -58,6 +64,7 @@ from superglm.distributional.smoothing.endpoint_laml import (
 from superglm.distributional.smoothing.face_efs import projected_component_states
 from superglm.distributional.smoothing.objective import _component_states, _estimated_names
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
+from superglm.distributional.solver.binned_rows import BinnedRows, binned_rows
 from superglm.distributional.solver.derivatives import (
     nearest_semidefinite_curvature,
     transform_natural_information,
@@ -334,6 +341,23 @@ def _cross_all(
     return 0.5 * (result + np.transpose(result, (0, 2, 1)))
 
 
+class _TableRows:
+    """One predictor's rows from a pass's bin tables, sliced as a bounded matrix is.
+
+    ``BinnedRows`` forms ``S = B R`` once; rows are gathers from it. The chunk is
+    the fit's own row budget.
+    """
+
+    def __init__(self, tables: BinnedRows, q: int, width: int, chunk_size: int) -> None:
+        self._tables, self._q = tables, q
+        self.shape = (tables.n, width)
+        self.chunk_size = chunk_size
+
+    def __getitem__(self, rows: slice) -> NDArray[np.float64]:
+        start, stop, _ = rows.indices(self.shape[0])
+        return self._tables.rows(self._q, start, stop)
+
+
 def _leverage_blocks(
     matrices: tuple[PredictorMatrix, ...],
     slices: tuple[slice, ...],
@@ -394,8 +418,10 @@ _CertifiedRows = tuple[NDArray[np.float64], NDArray[np.float64]]
 class _AnalyticFirst:
     """A family's analytic derivatives along every parameter axis.
 
-    ``axes[q]`` is ``(values, certificate)`` along ``e_q``. All axes are
-    evaluated first, so one refused axis sends the whole pass to differences.
+    ``axes[q]`` is ``(values, certificate)`` along ``e_q``: the slice
+    ``-l[:, :, q]`` of the row's third-derivative tensor in the predictors.
+    All axes are evaluated first, so one refused axis sends the whole pass to
+    differences.
     """
 
     axes: tuple[_CertifiedRows, ...]
@@ -414,18 +440,28 @@ def _analytic_first_derivative(
 
     ``None`` when the family does not implement the protocol, refuses these
     links (NB2 and GammaLS accept only their log links) or refuses a row on any
-    axis (a two-piece row on its join); the caller then differences.
+    axis (a two-piece row on its join); the caller then differences.  A family
+    with ``stacked_curvature_directions`` takes the ``K`` axes stacked, so its
+    state is evaluated once per pass rather than once per axis, over blocks of
+    ``STACKED_ROW_CHUNK`` rows so that its ``K``-fold scratch is bounded by the
+    block, not the row count.
     """
     if not isinstance(
         family, (PredictorCurvatureDirectionalFamily, CertifiedCurvatureDirectionalFamily)
     ):
         return None
-    expected = (n_observations, k_parameters * (k_parameters + 1) // 2)
+    channels = k_parameters * (k_parameters + 1) // 2
 
-    def derivative(unit: NDArray[np.float64]) -> _CertifiedRows:
-        analytic = analytic_curvature_direction(family, y, eta, unit, links, likelihood_plan)
+    def derivative(
+        y_rows: NDArray,
+        eta_rows: NDArray[np.float64],
+        unit: NDArray[np.float64],
+        plan_rows: FamilyLikelihoodPlan,
+    ) -> _CertifiedRows:
+        analytic = analytic_curvature_direction(family, y_rows, eta_rows, unit, links, plan_rows)
         if analytic is None:
             raise UnsupportedLikelihoodContractError("the family refused these links")
+        expected = (*unit.shape[:-1], channels)
         values, certificate = analytic
         if values.shape != expected or not np.all(np.isfinite(values)):
             raise LamlDerivativeError("family returned an invalid curvature direction")
@@ -439,12 +475,36 @@ def _analytic_first_derivative(
             raise LamlDerivativeError("family returned an invalid curvature-direction certificate")
         return values, certificate
 
-    axes = []
-    try:
+    def axis_units(rows: int) -> NDArray[np.float64]:
+        units = np.zeros((k_parameters, rows, k_parameters), dtype=np.float64)
         for q in range(k_parameters):
-            unit = np.zeros((n_observations, k_parameters), dtype=np.float64)
-            unit[:, q] = 1.0
-            axes.append(derivative(unit))
+            units[q, :, q] = 1.0
+        return units
+
+    try:
+        if getattr(family, "stacked_curvature_directions", False) is True:
+            chunk = min(curvature_kernels.STACKED_ROW_CHUNK, n_observations)
+            if chunk == n_observations:
+                values, certificate = derivative(y, eta, axis_units(chunk), likelihood_plan)
+            else:
+                values = np.empty((k_parameters, n_observations, channels), dtype=np.float64)
+                certificate = np.empty_like(values)
+                units = axis_units(chunk)
+                for start in range(0, n_observations, chunk):
+                    stop = min(start + chunk, n_observations)
+                    if stop - start != chunk:
+                        units = axis_units(stop - start)
+                    plan_rows = likelihood_plan.take(np.arange(start, stop, dtype=np.intp))
+                    values[:, start:stop], certificate[:, start:stop] = derivative(
+                        y[start:stop], eta[start:stop], units, plan_rows
+                    )
+            axes = [(values[q], certificate[q]) for q in range(k_parameters)]
+        else:
+            axes = []
+            for q in range(k_parameters):
+                unit = np.zeros((n_observations, k_parameters), dtype=np.float64)
+                unit[:, q] = 1.0
+                axes.append(derivative(y, eta, unit, likelihood_plan))
     except (
         TypeError,
         ValueError,
@@ -689,6 +749,18 @@ def _gradient_pass(
     eta = np.asarray(fit.eta, dtype=np.float64)
     n_observations, k_parameters = eta.shape
     matrices = _validated_matrices(layout, dense_matrices, n_observations)
+    tables = binned_rows(layout)
+    if tables is not None:
+        # Chunk by the fit's own row budget, as its bounded matrices and the
+        # corrected-covariance replay do, so memory stays bounded and every caller
+        # at this fit sums in the same order.
+        chunk_size = min(_ROW_CHUNK, fit.resolved_chunk_size or _ROW_CHUNK)
+        matrices = tuple(
+            _TableRows(
+                tables, q, state.coefficient_slice.stop - state.coefficient_slice.start, chunk_size
+            )
+            for q, state in enumerate(layout.predictors)
+        )
     slices = tuple(state.coefficient_slice for state in layout.predictors)
     links = tuple(state.link for state in layout.predictors)
     width = layout.n_coefficients

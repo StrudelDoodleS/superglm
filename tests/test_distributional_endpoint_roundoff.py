@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import math
+import pickle
+import warnings
 from dataclasses import replace
 
 import numpy as np
 import pandas as pd
 import pytest
+from benchmarks import release_differential
 
 import superglm.distributional.smoothing.authority as smoothing_authority
 import superglm.distributional.smoothing.faces as smoothing_faces
@@ -13,6 +16,7 @@ import superglm.distributional.solver.solver as solver_module
 import tests.test_distributional_endpoint_laml as endpoint_tests
 from superglm import (
     GaussianLS,
+    GeneralizedGammaLSS,
     GeneralizedParetoLSS,
     LambdaPolicy,
     Numeric,
@@ -25,8 +29,10 @@ from superglm import (
     ti,
 )
 from superglm._frame import as_eager_frame
+from superglm.diagnostics.convergence import ConvergenceWarning
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.layout import build_stacked_layout
+from superglm.distributional.posterior import posterior_covariance
 from superglm.distributional.predictor import compile_predictors
 from superglm.distributional.results.solver import (
     DenseSolverConfig,
@@ -34,6 +40,7 @@ from superglm.distributional.results.solver import (
     _assessment_is_numerically_stationary,
     _assessment_retained_kkt_ratio,
 )
+from superglm.distributional.smoothing.derivatives import LamlDerivativeError
 from superglm.distributional.smoothing.penalty_face import build_penalty_face
 from superglm.distributional.solver import fit_dense_fixed_lambda
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
@@ -462,6 +469,319 @@ def test_capped_generalized_pareto_fit_revalidates_its_exact_face() -> None:
     # differential's objective tolerance.
     released = -395.1090527
     assert smoothing.objective <= released + 1.0e-5 * (1.0 + abs(released))
+
+
+def test_a_stationary_endgame_keeps_an_exact_face_beside_a_capped_tensor_margin() -> None:
+    """A scalar exact face revalidates beside another cap the exact gradient certified.
+
+    The release differential's GeneralizedGammaLSS rich book ends its Newton
+    endgame stationary with ``mean:x1#wiggle`` on an exact face and the tensor
+    margin ``mean:x1:x2#margin_x1`` at the cap. A margin that shares its block
+    cannot join a face, so the sole-cap rule alone retracted the face and the
+    fit stopped ``endpoint_revalidation_failed``. The refreshed Fellner--Schall
+    evidence then nominates that margin, and the revalidation refit moves the
+    coefficients by a rounding, so the gradient the stop published must be
+    retaken at the published fit for the corrected covariance to replay it.
+    Mutation checks: without the waiver this fit retracts; without the
+    nomination rule it keeps ``unresolved_upper_bound`` nonempty; without the
+    retaken gradient the corrected covariance falls back to the fixed one.
+    """
+    frame, eta, rng = release_differential.make_data(4000, 5155)
+    response = rng.gamma(3.0, np.exp(0.5 * eta + 1.0) / 3.0)
+    family = GeneralizedGammaLSS()
+    model = SuperLSS(
+        family,
+        family.mean(
+            s("x1", kind="cr", k=8), cat("c1"), s("x2", kind="cr", k=6), re("c2"), ti("x1", "x2")
+        ),
+        family.scale(s("x2", kind="cr", k=5)),
+        family.shape(),
+    )
+    model.fit_reml(frame.iloc[:4000], response[:4000], outer="efs+newton")
+    smoothing = model._require_fitted().smoothing
+    assert smoothing is not None
+    promoted = {name for item in smoothing.history for name in item.activated_face_components}
+    beside = [
+        name
+        for name, value in smoothing.lambdas.items()
+        if name not in promoted and value == smoothing.config.maximum_lambda
+    ]
+    if not promoted or not beside:
+        # Another BLAS build can round onto a path that never caps the margin.
+        pytest.skip("this build's endgame left no cap beside an exact face")
+    assert smoothing.convergence_reason == "stationary"
+    assert smoothing.converged is True
+    assert smoothing.unresolved_upper_bound == ()
+    assert set(model.result_.exact_face_components) == promoted
+    fitted = model._require_fitted()
+    # The retake makes the replayed gradient agree; the positive-definiteness
+    # gate's verdict on the capped margin's near-zero curvature varies by platform.
+    fallbacks = _corrected_covariance_fallbacks(fitted)
+    assert _only_the_hessian_gate_declined(fallbacks), fallbacks
+    loaded = pickle.loads(pickle.dumps(model))._require_fitted().smoothing
+    assert loaded is not None
+    assert loaded.convergence_reason == "stationary"
+
+
+def test_a_stationary_endgame_voids_a_refreshed_cap_nomination(monkeypatch) -> None:
+    """The endgame's exact gradient outranks a Fellner--Schall cap nomination.
+
+    An exact-face revalidation after a stationary endgame refreshes the
+    Fellner--Schall evidence, and that evidence can nominate a capped component
+    outside the face whose exact gradient the endgame found flat. The nomination
+    is forced here on every component outside the face, all of which that
+    gradient judged. The fit still stops stationary. Mutation check: without the
+    rule the stationary result kept the nomination.
+    """
+    import superglm.distributional.smoothing.loop as loop
+
+    endgame = loop.run_newton_endgame
+    fresh = loop._fresh_raw_evidence
+    stationary: list[bool] = []
+    nominated: list[tuple[str, ...]] = []
+
+    def flagged_endgame(*args, **kwargs):
+        outcome = endgame(*args, **kwargs)
+        if outcome.kind == "stationary":
+            stationary.append(True)
+        return outcome
+
+    def nominating(layout, lambdas, fit, config, *, face=None):
+        evidence = fresh(layout, lambdas, fit, config, face=face)
+        if stationary and face is not None:
+            outside = evidence.estimated_names
+            assert outside and not set(outside) & set(face.component_names)
+            nominated.append(outside)
+            return replace(evidence, unresolved_upper_bound=outside)
+        return evidence
+
+    monkeypatch.setattr(loop, "run_newton_endgame", flagged_endgame)
+    monkeypatch.setattr(loop, "_fresh_raw_evidence", nominating)
+    frame, response = _flagged_generalized_pareto_problem()
+    family = GeneralizedParetoLSS()
+    model = SuperLSS(
+        family,
+        family.scale(
+            s("x1", kind="cr", k=8), cat("c1"), s("x2", kind="cr", k=6), re("c2"), ti("x1", "x2")
+        ),
+        family.shape(s("x2", kind="cr", k=5)),
+        discrete=True,
+    )
+    model.fit_reml(frame, response, outer="efs+newton")
+    smoothing = model._require_fitted().smoothing
+    assert nominated, "the fixture's stationary endgame revalidates an exact face"
+    assert smoothing is not None
+    assert smoothing.convergence_reason == "stationary"
+    assert smoothing.converged is True
+    assert smoothing.unresolved_upper_bound == ()
+
+
+def _flagged_generalized_pareto_model(**shape_options) -> SuperLSS:
+    """The release differential's mid GeneralizedParetoLSS model, as in the tests above."""
+    family = GeneralizedParetoLSS()
+    return SuperLSS(
+        family,
+        family.scale(
+            s("x1", kind="cr", k=8), cat("c1"), s("x2", kind="cr", k=6), re("c2"), ti("x1", "x2")
+        ),
+        family.shape(s("x2", kind="cr", k=5, **shape_options)),
+        discrete=True,
+    )
+
+
+def test_a_stationary_endgame_revalidates_its_face_beside_another_cap(monkeypatch) -> None:
+    """The sole-cap waiver, forced: the terminal recheck sees another cap outside the face.
+
+    A tensor margin at the cap beside a scalar face is the case it covers. Here
+    the recheck is told the face's component is not the sole cap, on a fixture
+    whose endgame ends stationary with an exact face. That endgame's exact
+    gradient certified every other cap, so the face is kept. The shape smooth
+    is held below the cap so the face is a scalar one: at the cap the two
+    components can form a joint face, which takes another route. Mutation
+    check: without the waiver the recheck retracts the face and the fit stops
+    ``endpoint_revalidation_failed``.
+    """
+    import superglm.distributional.smoothing.loop as loop
+
+    recheck = loop._recheck_exact_face
+    sole_cap = smoothing_faces._is_sole_cap_outside_face
+    waivers: list[bool] = []
+
+    def not_sole(*args, **kwargs) -> bool:
+        sole_cap(*args, **kwargs)
+        return False
+
+    def recheck_beside_another_cap(*args, **kwargs):
+        waivers.append(kwargs["other_caps_stationary"])
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(smoothing_faces, "_is_sole_cap_outside_face", not_sole)
+            return recheck(*args, **kwargs)
+
+    monkeypatch.setattr(loop, "_recheck_exact_face", recheck_beside_another_cap)
+    frame, response = _flagged_generalized_pareto_problem()
+    model = _flagged_generalized_pareto_model(lambda_policy=LambdaPolicy.fixed(9.99e9)).fit_reml(
+        frame, response, outer="efs+newton"
+    )
+    smoothing = model._require_fitted().smoothing
+    assert smoothing is not None
+    assert waivers == [True], "the fixture's stationary endgame revalidates an exact face"
+    assert smoothing.convergence_reason == "stationary"
+    promoted = {name for item in smoothing.history for name in item.activated_face_components}
+    assert promoted and set(model.result_.exact_face_components) == promoted
+
+
+_HESSIAN_GATE_REFUSALS = (
+    "the smoothing Hessian is not positive definite",
+    "the smoothing Hessian certificate is too large",
+    "does not establish positive invertibility",
+)
+
+
+def _corrected_covariance_fallbacks(fitted) -> list[str]:
+    """The corrected covariance's fallback disclosures, after checking it against them.
+
+    The covariance is finite, and it equals the fixed covariance exactly when a
+    fallback is disclosed.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        corrected = posterior_covariance(fitted, kind="corrected")
+    assert np.all(np.isfinite(corrected))
+    fallbacks = [
+        str(item.message)
+        for item in caught
+        if issubclass(item.category, ConvergenceWarning)
+        and "corrected covariance is unavailable" in str(item.message)
+    ]
+    assert bool(fallbacks) == np.array_equal(corrected, posterior_covariance(fitted, kind="fixed"))
+    return fallbacks
+
+
+def _only_the_hessian_gate_declined(fallbacks: list[str]) -> bool:
+    """Whether every fallback is the positive-definiteness gate's own refusal."""
+    return all(
+        any(refusal in message for refusal in _HESSIAN_GATE_REFUSALS) for message in fallbacks
+    )
+
+
+@pytest.mark.parametrize("retake", ["published", "unavailable", "declined"])
+def test_a_revalidated_stationary_stop_publishes_derivatives_at_its_fit(
+    monkeypatch, retake: str
+) -> None:
+    """The stationary derivatives are retaken at the fit the face revalidation published.
+
+    The corrected covariance replays its gradient at that fit and compares, so
+    a retaken gradient always agrees with its replay. The covariance's separate
+    positive-definiteness gate may still decline the correction here: the
+    shape smooth ends near the lambda cap with a curvature of about 3e-8 of the
+    largest, and where the endgame leaves that flat direction varies by
+    platform, so a published retake may fall back only through that gate; the
+    declined case forces its refusal. When the retake fails, the stop keeps
+    the endgame's derivatives. In every case the corrected covariance is
+    finite, and it falls back to the fixed one only with a disclosure.
+    Mutation checks: without the retake there is no pass at the published fit,
+    and a fallback without its ConvergenceWarning fails the declined case.
+    """
+    import superglm.distributional.smoothing.loop as loop
+
+    retaken = loop.published_derivatives
+    fits: list[DenseSolverResult] = []
+
+    def spy(*args, **kwargs):
+        fits.append(kwargs["fit"])
+        if retake == "unavailable":
+            raise LamlDerivativeError("injected unavailable derivatives at the published fit")
+        return retaken(*args, **kwargs)
+
+    monkeypatch.setattr(loop, "published_derivatives", spy)
+    frame, response = _flagged_generalized_pareto_problem()
+    model = _flagged_generalized_pareto_model().fit_reml(frame, response, outer="efs+newton")
+    fitted = model._require_fitted()
+    smoothing = fitted.smoothing
+    assert smoothing is not None and smoothing.convergence_reason == "stationary"
+    assert smoothing.history[-1].revalidated_face_components
+    assert len(fits) == 1 and fits[0] is smoothing.terminal_fit
+    if retake == "declined":
+        import superglm.distributional.posterior as posterior
+
+        def declined(*args, **kwargs):
+            raise RuntimeError("the smoothing Hessian is not positive definite")
+
+        monkeypatch.setattr(posterior, "_trusted_smoothing_hessian", declined)
+    fallbacks = _corrected_covariance_fallbacks(fitted)
+    if retake == "published":
+        assert _only_the_hessian_gate_declined(fallbacks), fallbacks
+    if retake == "declined":
+        assert fallbacks
+
+
+def test_a_revalidated_face_keeps_the_endgames_published_hessian(monkeypatch) -> None:
+    """The retake keeps a smoothing Hessian the endgame published.
+
+    The endgame is made to stop with its exact Hessian, as its Newton-step
+    exits do. Without retained rows the corrected covariance can only use the
+    published Hessian, so it may fall back only through the positive-
+    definiteness gate. Mutation check: a gradient-only retake publishes no
+    Hessian, and the correction falls back for want of retained rows.
+    """
+    import superglm.distributional.smoothing.loop as loop
+    import superglm.distributional.smoothing.newton as newton
+
+    endgame = loop.run_newton_endgame
+
+    def with_hessian(*args, **kwargs):
+        outcome = endgame(*args, **kwargs)
+        if outcome.kind != "stationary" or outcome.derivatives.hessian is not None:
+            return outcome
+        derivatives = newton.published_derivatives(
+            *args[:4],
+            lambdas=outcome.state.lambdas,
+            fit=outcome.state.fit,
+            efs_config=kwargs["efs_config"],
+            phase_recorder=None,
+            reuse_session=kwargs["reuse_session"],
+            want_hessian=True,
+        )
+        return replace(outcome, derivatives=derivatives)
+
+    monkeypatch.setattr(loop, "run_newton_endgame", with_hessian)
+    frame, response = _flagged_generalized_pareto_problem()
+    model = _flagged_generalized_pareto_model().fit_reml(
+        frame, response, retain_rows=False, outer="efs+newton"
+    )
+    fitted = model._require_fitted()
+    smoothing = fitted.smoothing
+    assert smoothing is not None and smoothing.convergence_reason == "stationary"
+    assert smoothing.history[-1].revalidated_face_components
+    assert smoothing.smoothing_hessian is not None
+    # Without retained rows only the published Hessian can form the correction;
+    # the positive-definiteness gate's verdict on it varies by platform here.
+    fallbacks = _corrected_covariance_fallbacks(fitted)
+    assert _only_the_hessian_gate_declined(fallbacks), fallbacks
+
+
+def test_the_iteration_budget_does_not_refuse_a_stationary_endgames_face_check() -> None:
+    """``max_reml_iter`` counts search iterations; the terminal face revalidation is not one.
+
+    The fit is refitted with exactly the budget its own search used. Mutation
+    check: when the revalidation counted against the budget, the refit stopped
+    ``max_iterations`` with its face never revalidated.
+    """
+    frame, response = _flagged_generalized_pareto_problem()
+    reference = _flagged_generalized_pareto_model().fit_reml(frame, response, outer="efs+newton")
+    smoothing = reference._require_fitted().smoothing
+    assert smoothing is not None and smoothing.convergence_reason == "stationary"
+    searched = len(smoothing.history)
+    while searched and smoothing.history[searched - 1].revalidated_face_components:
+        searched -= 1
+    assert searched < len(smoothing.history), "the fixture's stop revalidates an exact face"
+    refit = _flagged_generalized_pareto_model().fit_reml(
+        frame, response, max_reml_iter=searched, outer="efs+newton"
+    )
+    again = refit._require_fitted().smoothing
+    assert again is not None
+    assert again.convergence_reason == "stationary"
+    assert refit.result_.exact_face_components == reference.result_.exact_face_components
 
 
 def _null_direction_problem(offset: float = -2.0e8):

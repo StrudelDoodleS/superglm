@@ -70,16 +70,18 @@ class DistributionalEFSConfig:
     acceleration_history: int = 5
     acceleration_max_amplification: float = 8.0
     # The outer method. ``"efs"`` is the Fellner--Schall fixed point;
-    # ``"efs+newton"`` opts into a Newton endgame after the warm-up.
+    # ``"efs+newton"`` adds a Newton endgame after the warm-up.
     outer: Literal["efs", "efs+newton"] = "efs"
     handoff_step: float = 0.5
     handoff_iterations: int = 10
-    # The endgame's own budget, the finite-difference step of the row-curvature
-    # derivatives (link scale), the fraction of the smallest active Hessian
-    # diagonal that its certificate may reach before the iteration steps by
-    # damped BFGS instead, and the conditioning limit a component released
-    # beyond ``maximum_lambda`` by the bracketed search may reach.
-    max_newton_iterations: int = 20
+    # An optional cap on the endgame's own iterations (``None``: what remains of
+    # ``max_iterations``, which bounds warm-up and endgame together), the
+    # finite-difference step of the row-curvature derivatives (link scale), the
+    # fraction of the smallest active Hessian diagonal that its certificate may
+    # reach before the iteration steps by damped BFGS instead, and the
+    # conditioning limit a component released beyond ``maximum_lambda`` by the
+    # bracketed search may reach.
+    max_newton_iterations: int | None = None
     derivative_step: float = 1.0e-3  # endpoint_direction.DEFAULT_STEP (pinned by test)
     hessian_certificate_fraction: float = 0.1
     # ``None`` resolves to ``max(1e14, maximum_lambda)``: a cap above 1e14 is
@@ -96,7 +98,6 @@ class DistributionalEFSConfig:
             "plateau_iterations",
             "acceleration_history",
             "handoff_iterations",
-            "max_newton_iterations",
         ):
             value = getattr(self, name)
             # Keep iteration/history windows positive.  A zero plateau streak
@@ -149,6 +150,11 @@ class DistributionalEFSConfig:
             raise ValueError("acceleration must be 'none' or 'multisecant'")
         if self.outer not in ("efs", "efs+newton"):
             raise ValueError("outer must be 'efs' or 'efs+newton'")
+        newton_cap = self.max_newton_iterations
+        if newton_cap is not None and (
+            isinstance(newton_cap, bool) or not isinstance(newton_cap, int) or newton_cap < 1
+        ):
+            raise ValueError("max_newton_iterations must be None or a positive integer")
         for name in ("handoff_step", "derivative_step"):
             object.__setattr__(self, name, _finite_positive(getattr(self, name), name=name))
         conditioning = self.maximum_lambda_conditioning
@@ -223,9 +229,9 @@ class DistributionalEFSIteration:
     # produced their step, the largest Hessian certificate on the active set
     # (``None`` on a pass that formed no exact Hessian: a quasi-Newton step
     # from the reused memory or a bracket step), the
-    # projected-gradient norm judged for convergence, and the ridge that
-    # made the active Hessian positive definite (``None`` for a BFGS or
-    # bracket step).  A convergence check that makes no trial fit is not an
+    # projected-gradient norm judged for convergence, and the largest
+    # eigenvalue raise that made the active Hessian positive definite
+    # (``0.0`` when it already was, ``None`` for a BFGS or bracket step).  A convergence check that makes no trial fit is not an
     # iteration and leaves no record.
     stage: Literal["efs", "newton"] = "efs"
     step_source: Literal["efs", "newton", "bfgs", "bracket"] = "efs"

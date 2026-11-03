@@ -28,6 +28,7 @@ from scipy import optimize, special
 from superglm.distributional.kernels._common import (
     readonly,
     readonly_bool,
+    stacked_direction,
     validated_derivative_order,
 )
 from superglm.distributional.kernels._curvature_direction import (
@@ -410,6 +411,16 @@ def mean_rows(
     return _placeholders_where_invalid(optimizing, score, hessian, np.asarray(base.valid))
 
 
+def _natural_direction(direction: NDArray, n_rows: int) -> NDArray[np.float64]:
+    return stacked_direction(
+        direction,
+        n_rows,
+        3,
+        TwoPieceDomainError,
+        "two-piece natural direction must be a finite n-by-3 array",
+    )
+
+
 def location_hessian_direction(
     variate: NDArray,
     location: NDArray,
@@ -432,6 +443,7 @@ def location_hessian_direction(
     The Hessian jumps at ``u = 0``; there the right piece's derivative is
     returned, as the Hessian's own piece selection does.  Each entry has
     relative error ``gamma_8``; each output channel sums three of them.
+    A stacked direction ``(m, n, 3)`` gives ``(m, n, 6)``.
     """
     t = _vector(variate, name="variate")
     mu = _vector(location, name="location")
@@ -439,9 +451,7 @@ def location_hessian_direction(
     eps = _skew_vector(skew)
     m = _positive_vector(multiplier, name="multiplier")
     _same_shape(t, mu, sigma, eps, m)
-    v = np.asarray(direction, dtype=_FLOAT)
-    if v.shape != (len(t), 3) or not np.all(np.isfinite(v)):
-        raise TwoPieceDomainError("two-piece natural direction must be a finite n-by-3 array")
+    v = _natural_direction(direction, len(t))
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         u, s, e = _pieces(t, mu, sigma, eps)
         u2 = u * u
@@ -455,14 +465,14 @@ def location_hessian_direction(
         t_sse = 6.0 * u2 * e * inv_sigma**2 * inv_s
         t_see = 6.0 * u2 * inv_sigma * inv_s**2
         t_eee = 12.0 * u2 * e * inv_s**3
-        vm, vs, ve = v[:, 0], v[:, 1], v[:, 2]
-        result = np.empty((len(t), 6), dtype=_FLOAT)
-        result[:, 0] = t_mms * vs + t_mme * ve
-        result[:, 1] = t_mms * vm + t_mss * vs + t_mse * ve
-        result[:, 2] = t_mme * vm + t_mse * vs + t_mee * ve
-        result[:, 3] = t_mss * vm + t_sss * vs + t_sse * ve
-        result[:, 4] = t_mse * vm + t_sse * vs + t_see * ve
-        result[:, 5] = t_mee * vm + t_see * vs + t_eee * ve
+        vm, vs, ve = v[..., 0], v[..., 1], v[..., 2]
+        result = np.empty((*v.shape[:-1], 6), dtype=_FLOAT)
+        result[..., 0] = t_mms * vs + t_mme * ve
+        result[..., 1] = t_mms * vm + t_mss * vs + t_mse * ve
+        result[..., 2] = t_mme * vm + t_mse * vs + t_mee * ve
+        result[..., 3] = t_mss * vm + t_sss * vs + t_sse * ve
+        result[..., 4] = t_mse * vm + t_sse * vs + t_see * ve
+        result[..., 5] = t_mee * vm + t_see * vs + t_eee * ve
         result *= m[:, None]
     return result
 
@@ -585,7 +595,7 @@ def mean_hessian_direction(
     """Packed derivative of the mean-form Hessian in ``(m, sigma, eps)`` along ``v``.
 
     The location-form direction chained through ``mu = log m - log K(sigma, eps)``
-    (see ``mean_form_hessian_direction``).
+    (see ``mean_form_hessian_direction``); the direction may be stacked.
     """
     y = _positive_vector(response, name="response")
     m = _positive_vector(mean, name="mean")
@@ -593,9 +603,7 @@ def mean_hessian_direction(
     eps = _skew_vector(skew)
     weight = _positive_vector(multiplier, name="multiplier")
     _same_shape(y, m, sigma, eps, weight)
-    v = np.asarray(direction, dtype=_FLOAT)
-    if v.shape != (len(y), 3) or not np.all(np.isfinite(v)):
-        raise TwoPieceDomainError("two-piece natural direction must be a finite n-by-3 array")
+    v = _natural_direction(direction, len(y))
     logk = log_mean_loading(sigma, eps)[0]
     k_s, k_e, k_ss, k_se, k_ee, k_sss, k_sse, k_see, k_eee = _log_mean_loading_third(sigma, eps)
     location = np.log(m) - logk

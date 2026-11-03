@@ -11,7 +11,7 @@ import hashlib
 import math
 import warnings
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -208,6 +208,9 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     ``scale / (1 - shape)``. A fit whose shape reaches a wall says so in
     ``result_.warnings``. The threshold is not a fitted parameter.
     """
+
+    # Its curvature directions take stacked (m, n, K) directions on one state evaluation.
+    stacked_curvature_directions: ClassVar[bool] = True
 
     shape_lower: float = 0.0
     shape_upper: float = 1.0
@@ -464,7 +467,7 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         if np.all(windows_valid):
             return result
         result = result.copy()
-        result[~windows_valid] = 0.0
+        result[..., ~windows_valid, :] = 0.0
         return readonly(result)
 
     def predictor_curvature_second_directional_derivative(
@@ -478,9 +481,10 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         windows_valid = np.ones(len(response), dtype=bool)
 
         def natural_derivatives(theta: NDArray, natural_a: NDArray, natural_b: NDArray):
+            multiplier = bound.multiplier
             third = natural_third_from_direction(
-                lambda v: scale_hessian_direction(
-                    response, theta[:, 0], theta[:, 1], v, bound.multiplier
+                lambda v, rows: scale_hessian_direction(
+                    response[rows], theta[rows, 0], theta[rows, 1], v, multiplier[rows]
                 ),
                 len(response),
                 2,

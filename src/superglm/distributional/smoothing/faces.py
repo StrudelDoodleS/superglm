@@ -644,8 +644,14 @@ def _recheck_exact_face(
     chunk_size: ChunkSize | None,
     phase_recorder: FitPhaseRecorder | None,
     _reuse_session: _DenseObservedReuseSession | None = None,
+    other_caps_stationary: bool = False,
 ) -> _FaceRecheck:
-    """Revalidate every active component at the terminal finite smoothing state."""
+    """Revalidate every active component at the terminal finite smoothing state.
+
+    A scalar endpoint test certifies a component only as the sole cap outside
+    the face, unless ``other_caps_stationary``: a stationary Newton endgame's
+    exact gradient has already put every other capped component within the bar.
+    """
     checks: list[tuple[str, _FaceDirectionCheck]] = []
     canonical_fit = current_fit
     accepted_objective = current_objective
@@ -684,7 +690,9 @@ def _recheck_exact_face(
             )
         check = None if attempt is None else attempt.check
         direction_resolved = (
-            sole_capped_component and check is not None and check.direction.decision == "endpoint"
+            (sole_capped_component or other_caps_stationary)
+            and check is not None
+            and check.direction.decision == "endpoint"
         )
         objective_resolved = False
         if check is not None:

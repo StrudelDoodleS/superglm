@@ -6,7 +6,7 @@ import hashlib
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -103,6 +103,12 @@ def _refuse_join_crossing(
         )
 
 
+def _moved_by(natural: NDArray, columns: slice) -> NDArray:
+    """Rows where a direction, ``(n, K)`` or stacked ``(m, n, K)``, moves the given natural columns."""
+    axes = (*range(natural.ndim - 2), natural.ndim - 1)
+    return np.any(natural[..., columns] != 0.0, axis=axes).astype(np.float64)
+
+
 def _moved_by_pair(natural_a: NDArray, natural_b: NDArray, columns: slice) -> NDArray:
     """Rows where some stacked pair's direction moves the given natural columns."""
     moved = np.any(natural_a[..., columns] != 0.0, axis=(0, 2)) | np.any(
@@ -181,6 +187,7 @@ TwoPieceRowLaw = Literal[
     "two-piece-epsilon-skew-literal-replication/v1",
 ]
 _HALF_LOG_TWO_PI = 0.5 * math.log(2.0 * math.pi)
+# The location curvature jumps at the join (``location_join_jumps``).
 _CAPABILITIES = FamilyCapabilities(
     max_derivative_order=2,
     expected_information=True,
@@ -188,6 +195,7 @@ _CAPABILITIES = FamilyCapabilities(
     quantile=True,
     random=False,
     response_mean=True,
+    continuous_curvature=False,
 )
 
 
@@ -381,6 +389,9 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
     deviation. ``skew`` is epsilon, not the standardized third moment.
     ``predict`` returns the response mean in either parametrization.
     """
+
+    # Its curvature directions take stacked (m, n, K) directions on one state evaluation.
+    stacked_curvature_directions: ClassVar[bool] = True
 
     parametrisation: Parametrisation = "mean"
     scale_floor: float = 0.01
@@ -578,13 +589,17 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
                     np.log(theta[:, 0]) - logk,
                     theta[:, 1],
                     theta[:, 2],
-                    np.any(natural != 0.0, axis=1).astype(np.float64),
+                    _moved_by(natural, slice(0, 3)),
                 )
                 return mean_hessian_direction(
                     response, theta[:, 0], theta[:, 1], theta[:, 2], natural, bound.multiplier
                 )
             _refuse_join_crossing(
-                np.log(response), theta[:, 0], theta[:, 1], theta[:, 2], natural[:, 0]
+                np.log(response),
+                theta[:, 0],
+                theta[:, 1],
+                theta[:, 2],
+                _moved_by(natural, slice(0, 1)),
             )
             return location_hessian_direction(
                 np.log(response), theta[:, 0], theta[:, 1], theta[:, 2], natural, bound.multiplier
@@ -747,6 +762,9 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
     the response mean, including the location adjustment given above.
     """
 
+    # Its curvature directions take stacked (m, n, K) directions on one state evaluation.
+    stacked_curvature_directions: ClassVar[bool] = True
+
     scale_floor: float = 0.01
     skew_bound: float = 0.9
 
@@ -905,7 +923,9 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
         bound = self._plan(plan, len(response))
 
         def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
-            _refuse_join_crossing(response, theta[:, 0], theta[:, 1], theta[:, 2], natural[:, 0])
+            _refuse_join_crossing(
+                response, theta[:, 0], theta[:, 1], theta[:, 2], _moved_by(natural, slice(0, 1))
+            )
             return location_hessian_direction(
                 response, theta[:, 0], theta[:, 1], theta[:, 2], natural, bound.multiplier
             )

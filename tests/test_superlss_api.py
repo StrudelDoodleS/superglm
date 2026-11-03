@@ -12,8 +12,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperLSS, bind_predictor, term
-from superglm.distributional import GammaLS, GaussianLS, Predictor
+from superglm import SuperLSS, bind_predictor, s, term
+from superglm.distributional import (
+    GammaLS,
+    GaussianLS,
+    Predictor,
+    TwoPieceLogNormalLSS,
+    TwoPieceNormalLSS,
+)
 from superglm.distributional import TweedieLSS as _TweedieLSS
 from superglm.distributional import api as api_module
 from superglm.distributional import model as model_module
@@ -1591,19 +1597,139 @@ def _small_gaussian_reml_model() -> tuple[SuperLSS, pd.DataFrame, np.ndarray]:
     return model, frame, response
 
 
-def test_fit_reml_outer_defaults_to_efs_and_is_validated() -> None:
+def test_fit_reml_outer_defaults_to_efs_for_every_family_and_is_validated() -> None:
+    """The fit records the outer that ran: ``None`` and an omitted outer both record ``"efs"``."""
     model, frame, response = _small_gaussian_reml_model()
     model.fit_reml(frame, response)
     smoothing = model._require_fitted().smoothing
     assert smoothing is not None
     assert smoothing.config.outer == "efs"
+    assert model._fit_settings["outer"] == "efs"
     with pytest.raises(ValueError, match="outer"):
         model.fit_reml(frame, response, outer="newton")
+    model.fit_reml(frame, response, outer=None)
+    assert model._require_fitted().smoothing.config.outer == "efs"
+    assert model._fit_settings["outer"] == "efs"
     newton_model, _, _ = _small_gaussian_reml_model()
     newton_model.fit_reml(frame, response, outer="efs+newton")
     newton = newton_model._require_fitted().smoothing
     assert newton is not None
     assert newton.config.outer == "efs+newton"
+    assert newton_model._fit_settings["outer"] == "efs+newton"
+    # The two-piece curvature jumps at the join; its default is Fellner-Schall too.
+    family = TwoPieceNormalLSS()
+    assert family.capabilities.continuous_curvature is False
+    two_piece = SuperLSS(
+        family,
+        family.location(s("x", kind="cr", k=6)),
+        family.scale(),
+        family.skew(),
+    )
+    two_piece.fit_reml(frame, response)
+    kinked = two_piece._require_fitted().smoothing
+    assert kinked is not None
+    assert kinked.config.outer == "efs"
+    assert TwoPieceLogNormalLSS().capabilities.continuous_curvature is False
+    # An explicit outer still runs the endgame there.
+    two_piece.fit_reml(frame, response, outer="efs+newton")
+    forced = two_piece._require_fitted().smoothing
+    assert forced is not None
+    assert forced.config.outer == "efs+newton"
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        pytest.param({"practical_reml": False}, id="strict"),
+        pytest.param(
+            {"reml_tol": 1e-12, "reml_plateau_tol": 1e-2, "practical_reml_parameter_tol": 1.0},
+            id="practical",
+        ),
+    ],
+)
+def test_a_spent_iteration_budget_leaves_the_fellner_schall_stop_in_place(
+    monkeypatch, options
+) -> None:
+    """With no iterations left a hand-off keeps the EFS stop instead of reporting max_iterations.
+
+    The endgame is made to hand off only once the plain EFS stop qualifies, on
+    the last iteration ``max_reml_iter`` allows. Loose plateau tolerances force
+    the interior practical plateau, the stop a practical fit reaches. Mutation
+    check: when the strict-stop or practical-plateau hand-off checked only the
+    endgame's own budget, the fit stopped ``max_iterations``.
+    """
+    import superglm.distributional.smoothing.loop as loop
+
+    model, frame, response = _small_gaussian_reml_model()
+    model.fit_reml(frame, response, outer="efs", **options)
+    plain = model._require_fitted().smoothing
+    assert plain is not None and plain.converged
+    practical = options.get("practical_reml", True)
+    assert plain.convergence_reason in (
+        {"practical_plateau"} if practical else {"lambda_change", "objective_plateau"}
+    )
+    last = plain.iterations
+
+    # With an iteration to spare, the stop asks for the hand-off this test guards.
+    requested: list[tuple[str | None, int]] = []
+
+    def record(reason, *, iterations, **_):
+        requested.append((reason, iterations))
+        return False
+
+    monkeypatch.setattr(loop, "should_hand_off", record)
+    spare, _, _ = _small_gaussian_reml_model()
+    spare.fit_reml(frame, response, max_reml_iter=last + 1, outer="efs+newton", **options)
+    assert (plain.convergence_reason, last) in requested
+    monkeypatch.undo()
+
+    hand_off = loop.should_hand_off
+
+    def at_the_stop(reason, *, max_accepted_step, iterations, config):
+        if iterations < last:
+            return False
+        return hand_off(
+            reason, max_accepted_step=max_accepted_step, iterations=iterations, config=config
+        )
+
+    monkeypatch.setattr(loop, "should_hand_off", at_the_stop)
+    newton, _, _ = _small_gaussian_reml_model()
+    newton.fit_reml(frame, response, max_reml_iter=last, outer="efs+newton", **options)
+    smoothing = newton._require_fitted().smoothing
+    assert smoothing is not None
+    assert smoothing.config.outer == "efs+newton"
+    assert smoothing.converged
+    assert smoothing.convergence_reason == plain.convergence_reason
+    assert smoothing.newton_iterations == 0
+
+
+def test_the_endgame_spends_the_requested_iteration_budget() -> None:
+    """``max_reml_iter`` bounds warm-up and endgame together; the endgame has no budget of its own.
+
+    Small log steps from a far start need many Newton iterations. Mutation
+    check: with the endgame's former fixed budget of 20 the fit stopped
+    ``max_iterations`` at lambda 122 instead of about 0.09.
+    """
+    x = np.linspace(-1.0, 1.0, 200)
+    response = np.sin(3.0 * np.pi * x) + np.random.default_rng(42).normal(0.0, 0.2, 200)
+    frame = pd.DataFrame({"x": x})
+    family = GaussianLS()
+    model = SuperLSS(family, family.location(s("x", kind="cr", k=10)), family.scale())
+    model.fit_reml(
+        frame,
+        response,
+        initial_lambda=1000.0,
+        max_log_step=0.1,
+        max_reml_iter=300,
+        outer="efs+newton",
+    )
+    smoothing = model._require_fitted().smoothing
+    assert smoothing is not None
+    assert smoothing.config.outer == "efs+newton"
+    assert smoothing.convergence_reason == "stationary"
+    assert smoothing.newton_iterations > 20
+    assert smoothing.iterations <= 300
+    assert smoothing.lambdas["location:x#wiggle"] < 1.0
 
 
 @pytest.mark.parametrize(

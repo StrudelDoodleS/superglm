@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -595,6 +595,9 @@ class TweedieLSS(TweediePredictors):
     --------
     SuperLSS : Construct and fit a model with these predictors.
     """
+
+    # Its curvature directions take stacked (m, n, K) directions on one state evaluation.
+    stacked_curvature_directions: ClassVar[bool] = True
 
     power_lower: float = 1.05
     power_upper: float = 1.95

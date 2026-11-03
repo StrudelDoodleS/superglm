@@ -270,6 +270,10 @@ class FamilyCapabilities:
 
     ``censored_response`` declares that the family binds the
     ``"censored_truncated"`` observation contract: truncated and censored rows.
+    ``continuous_curvature`` declares that the log density's curvature in the
+    natural parameters is continuous. Newton steps in log smoothing parameters
+    assume it (Wood, Pya and Saefken 2016, section 3), so the corrected-covariance
+    warning suggests refitting with ``outer="efs+newton"`` only for such families.
     """
 
     max_derivative_order: int
@@ -279,6 +283,7 @@ class FamilyCapabilities:
     random: bool
     response_mean: bool
     censored_response: bool = False
+    continuous_curvature: bool = True
 
     def __post_init__(self) -> None:
         if (
@@ -294,6 +299,7 @@ class FamilyCapabilities:
             "random",
             "response_mean",
             "censored_response",
+            "continuous_curvature",
         ):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"{name} must be bool")
@@ -743,7 +749,13 @@ def expected_information_provider(family: object, plan: object) -> ExpectedInfor
 
 @runtime_checkable
 class PredictorCurvatureDirectionalFamily(Protocol):
-    """Optional exact directional derivative of observed predictor curvature."""
+    """Optional exact directional derivative of observed predictor curvature.
+
+    ``eta_direction`` is ``(n, K)``.  A family whose class sets
+    ``stacked_curvature_directions = True`` also takes ``(m, n, K)``, ``m``
+    directions sharing one evaluation of the state, and returns their leading
+    shape; the LAML derivatives then ask for all ``K`` axes in one call.
+    """
 
     def predictor_curvature_directional_derivative(
         self,
@@ -764,7 +776,8 @@ class CertifiedCurvatureDirectionalFamily(Protocol):
     ``certificate`` an entrywise non-negative absolute bound on the error the
     family's kernel certifies for it (a series or recurrence that is exact
     only to a bound).  A family whose analytic channels are closed forms
-    leaves this out and its direction counts as exact.
+    leaves this out and its direction counts as exact.  Stacked directions
+    follow ``PredictorCurvatureDirectionalFamily``.
     """
 
     def certified_predictor_curvature_directional_derivative(

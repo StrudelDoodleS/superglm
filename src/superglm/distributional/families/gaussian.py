@@ -436,6 +436,9 @@ class GaussianLS(LocationPredictor, ScalePredictor):
     SuperLSS : Construct and fit a model with these predictors.
     """
 
+    # Its curvature directions take stacked (m, n, K) directions on one state evaluation.
+    stacked_curvature_directions: ClassVar[bool] = True
+
     scale_floor: float = 0.01
 
     def __post_init__(self) -> None:
@@ -693,7 +696,7 @@ class GaussianLS(LocationPredictor, ScalePredictor):
         )
         direction = np.asarray(eta_direction, dtype=np.float64)
         result = np.where(kept[:, None], complete, 0.0) - contract_third(third, direction)
-        result[~valid] = 0.0
+        result[..., ~valid, :] = 0.0
         return readonly(result)
 
     def predictor_curvature_second_directional_derivative(

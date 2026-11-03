@@ -33,6 +33,12 @@ from collections.abc import Callable, Mapping
 import numpy as np
 from numpy.typing import NDArray
 
+#: Rows per block when ``m`` stacked directions share one state evaluation: the
+#: ``m``-fold scratch then stays near ``STACKED_ROW_CHUNK * m`` doubles per
+#: intermediate whatever the row count, and a block is long enough that numpy's
+#: per-call cost stays small beside the row arithmetic.
+STACKED_ROW_CHUNK = 32768
+
 #: ``inner[m][(c, idx)]`` is ``d^m phi_c / d x_idx`` for a sorted index tuple
 #: ``idx`` of length ``m``; entries left out are structurally zero.
 InnerDerivatives = Mapping[int, Mapping[tuple[int, tuple[int, ...]], NDArray[np.float64] | float]]
@@ -58,8 +64,10 @@ def predictor_curvature_direction(
     ``score`` is ``(n, K)``, ``hessian`` and ``hessian_direction`` are packed
     ``(n, K(K+1)/2)`` in the canonical upper-triangular order, and ``first``,
     ``second`` and ``third`` are the inverse links' derivatives ``(n, K)``.
+    A stacked ``direction`` ``(m, n, K)``, with ``hessian_direction``
+    ``(m, n, K(K+1)/2)``, gives ``m`` directions on one evaluation of the state.
     """
-    n_rows, k_parameters = score.shape
+    k_parameters = score.shape[1]
     pairs = _pairs(k_parameters)
     index = {pair: column for column, pair in enumerate(pairs)}
 
@@ -67,27 +75,27 @@ def predictor_curvature_direction(
         return values[:, index[(left, right) if left <= right else (right, left)]]
 
     natural_direction = first * direction
-    hessian_times_direction = np.zeros((n_rows, k_parameters), dtype=np.float64)
+    hessian_times_direction = np.zeros(direction.shape, dtype=np.float64)
     for left in range(k_parameters):
         for right in range(k_parameters):
-            hessian_times_direction[:, left] += (
-                entry(hessian, left, right) * natural_direction[:, right]
+            hessian_times_direction[..., left] += (
+                entry(hessian, left, right) * natural_direction[..., right]
             )
-    result = np.empty((n_rows, len(pairs)), dtype=np.float64)
+    result = np.empty((*direction.shape[:-1], len(pairs)), dtype=np.float64)
     for column, (left, right) in enumerate(pairs):
-        value = first[:, left] * first[:, right] * hessian_direction[:, column] + hessian[
+        value = first[:, left] * first[:, right] * hessian_direction[..., column] + hessian[
             :, column
         ] * (
-            second[:, left] * direction[:, left] * first[:, right]
-            + first[:, left] * second[:, right] * direction[:, right]
+            second[:, left] * direction[..., left] * first[:, right]
+            + first[:, left] * second[:, right] * direction[..., right]
         )
         if left == right:
             value = (
                 value
-                + second[:, left] * hessian_times_direction[:, left]
-                + score[:, left] * third[:, left] * direction[:, left]
+                + second[:, left] * hessian_times_direction[..., left]
+                + score[:, left] * third[:, left] * direction[..., left]
             )
-        result[:, column] = -value
+        result[..., column] = -value
     return result
 
 
@@ -112,7 +120,10 @@ def mean_form_hessian_direction(
 
     ``location_hessian`` is packed (3 parameters, unit mass), ``location_direction(w)``
     returns the location form's packed ``dH_loc(w)``, ``loading_third`` is
-    ``(C_aaa, C_aab, C_abb, C_bbb)``.
+    ``(C_aaa, C_aab, C_abb, C_bbb)``.  A stacked ``direction`` ``(m, n, 3)``
+    gives ``(m, n, 6)``: ``J``, ``H`` and one ``location_direction`` call on the
+    stacked ``w`` serve every direction, and the ``(n, 3, 3)`` assembly runs per
+    direction so its scratch does not grow with ``m``.
     """
     c_a, c_b = loading_first
     c_aa, c_ab, c_bb = loading_second
@@ -129,31 +140,40 @@ def mean_form_hessian_direction(
     second[:, 1, 1] = -c_aa
     second[:, 1, 2] = second[:, 2, 1] = -c_ab
     second[:, 2, 2] = -c_bb
-    vm, va, vb = direction[:, 0], direction[:, 1], direction[:, 2]
-    third = np.zeros((n_rows, 3, 3), dtype=np.float64)
-    third[:, 0, 0] = 2.0 / (mean * mean * mean) * vm
-    third[:, 1, 1] = -(c_aaa * va + c_aab * vb)
-    third[:, 1, 2] = third[:, 2, 1] = -(c_aab * va + c_abb * vb)
-    third[:, 2, 2] = -(c_abb * va + c_bbb * vb)
-    w = np.matmul(jacobian, direction[:, :, None])[:, :, 0]
     pairs = _pairs(3)
     hessian = np.empty((n_rows, 3, 3), dtype=np.float64)
-    location = np.empty((n_rows, 3, 3), dtype=np.float64)
-    packed_location = location_direction(w)
     for column, (left, right) in enumerate(pairs):
         hessian[:, left, right] = hessian[:, right, left] = location_hessian[:, column]
-        location[:, left, right] = location[:, right, left] = packed_location[:, column]
-    z = np.matmul(second, direction[:, :, None])[:, :, 0]
     hessian_jacobian_mu = np.matmul(hessian[:, 0:1, :], jacobian)[:, 0, :]
-    hessian_w_mu = np.sum(hessian[:, 0, :] * w, axis=1)
-    full = (
-        np.matmul(np.matmul(np.swapaxes(jacobian, 1, 2), location), jacobian)
-        + z[:, :, None] * hessian_jacobian_mu[:, None, :]
-        + hessian_jacobian_mu[:, :, None] * z[:, None, :]
-        + second * hessian_w_mu[:, None, None]
-        + location_score[:, None, None] * third
-    )
-    return np.column_stack([full[:, left, right] for left, right in pairs])
+    w = np.matmul(jacobian, direction[..., None])[..., 0]
+    packed_location = location_direction(w)
+
+    def assemble(
+        v: NDArray[np.float64], w_v: NDArray[np.float64], packed_v: NDArray[np.float64]
+    ) -> NDArray[np.float64]:
+        vm, va, vb = v[:, 0], v[:, 1], v[:, 2]
+        third = np.zeros((n_rows, 3, 3), dtype=np.float64)
+        third[:, 0, 0] = 2.0 / (mean * mean * mean) * vm
+        third[:, 1, 1] = -(c_aaa * va + c_aab * vb)
+        third[:, 1, 2] = third[:, 2, 1] = -(c_aab * va + c_abb * vb)
+        third[:, 2, 2] = -(c_abb * va + c_bbb * vb)
+        location = np.empty((n_rows, 3, 3), dtype=np.float64)
+        for column, (left, right) in enumerate(pairs):
+            location[:, left, right] = location[:, right, left] = packed_v[:, column]
+        z = np.matmul(second, v[:, :, None])[:, :, 0]
+        hessian_w_mu = np.sum(hessian[:, 0, :] * w_v, axis=1)
+        full = (
+            np.matmul(np.matmul(np.swapaxes(jacobian, 1, 2), location), jacobian)
+            + z[:, :, None] * hessian_jacobian_mu[:, None, :]
+            + hessian_jacobian_mu[:, :, None] * z[:, None, :]
+            + second * hessian_w_mu[:, None, None]
+            + location_score[:, None, None] * third
+        )
+        return np.column_stack([full[:, left, right] for left, right in pairs])
+
+    if direction.ndim == 2:
+        return assemble(direction, w, packed_location)
+    return np.stack([assemble(*parts) for parts in zip(direction, w, packed_location, strict=True)])
 
 
 def packed_tuples(k_parameters: int, order: int) -> tuple[tuple[int, ...], ...]:
@@ -249,25 +269,31 @@ def separable_inner_derivatives(
 
 
 def third_from_hessian_direction(
-    hessian_direction: Callable[[NDArray[np.float64]], NDArray[np.float64]],
+    hessian_direction: Callable[[NDArray[np.float64], slice], NDArray[np.float64]],
     n_rows: int,
     k_parameters: int,
 ) -> NDArray[np.float64]:
     """Packed natural third derivatives from a family's ``dH(v)`` on the natural axes.
 
-    ``dH(e_k)[i, j]`` is ``L_ijk``, so ``K`` evaluations of the existing
-    direction give every distinct third derivative.
+    ``dH(e_k)[i, j]`` is ``L_ijk``, so the ``K`` axes, stacked ``(K, b, K)``
+    into one call ``hessian_direction(axes, rows)`` per block of ``b <=
+    STACKED_ROW_CHUNK`` rows, give every distinct third derivative with scratch
+    bounded by the block.
     """
     pairs = packed_tuples(k_parameters, 2)
     triples = {key: column for column, key in enumerate(packed_tuples(k_parameters, 3))}
     third = np.empty((n_rows, len(triples)), dtype=np.float64)
-    for k in range(k_parameters):
-        axis = np.zeros((n_rows, k_parameters), dtype=np.float64)
-        axis[:, k] = 1.0
-        packed = np.asarray(hessian_direction(axis), dtype=np.float64)
-        for column, (i, j) in enumerate(pairs):
-            if j <= k:
-                third[:, triples[(i, j, k)]] = packed[:, column]
+    chunk = max(1, min(STACKED_ROW_CHUNK, n_rows))
+    for start in range(0, n_rows, chunk):
+        rows = slice(start, min(start + chunk, n_rows))
+        axes = np.zeros((k_parameters, rows.stop - start, k_parameters), dtype=np.float64)
+        for k in range(k_parameters):
+            axes[k, :, k] = 1.0
+        packed = np.asarray(hessian_direction(axes, rows), dtype=np.float64)
+        for k in range(k_parameters):
+            for column, (i, j) in enumerate(pairs):
+                if j <= k:
+                    third[rows, triples[(i, j, k)]] = packed[k, :, column]
     return third
 
 
@@ -328,6 +354,7 @@ def predictor_curvature_second_direction(
 
 
 __all__ = [
+    "STACKED_ROW_CHUNK",
     "InnerDerivatives",
     "compose_derivatives",
     "curvature_second_direction",

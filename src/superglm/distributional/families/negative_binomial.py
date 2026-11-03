@@ -241,6 +241,9 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
     SuperLSS : Construct and fit a model with these predictors.
     """
 
+    # Its curvature directions take stacked (m, n, K) directions on one state evaluation.
+    stacked_curvature_directions: ClassVar[bool] = True
+
     parameters = _PARAMETERS
     default_prediction_name = "conditional_mean"
     capabilities = _CAPABILITIES

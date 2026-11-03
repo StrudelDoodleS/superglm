@@ -21,6 +21,7 @@ from superglm._parallel import pooled_row_blocks
 from superglm.distributional.kernels._common import (
     WeightSemantics,
     readonly,
+    stacked_direction,
     validated_derivative_order,
 )
 
@@ -420,7 +421,8 @@ def tweedie_hessian_direction(
     objective is defined on, so the omitted tail needs no certificate; the
     Hessian jumps only where the window gains or loses a term below
     ``exp(-log_cutoff)`` of the mode, within its own rounding at the default.
-    Rows the Hessian would refuse are refused here too.
+    Rows the Hessian would refuse are refused here too.  A stacked direction
+    ``(m, n, 3)`` gives ``(m, n, 6)`` on one series evaluation per row.
     """
     arrays, _, row_max_terms, cutoff = _validated_tweedie_inputs(
         y,
@@ -433,14 +435,20 @@ def tweedie_hessian_direction(
         max_terms=max_terms,
         log_cutoff=log_cutoff,
     )
-    natural = np.require(np.asarray(direction, dtype=np.float64), requirements=("C", "A"))
-    if natural.shape != (len(arrays[0]), 3) or not np.all(np.isfinite(natural)):
-        raise ValueError("Tweedie natural direction must be a finite n-by-3 array")
+    given = stacked_direction(
+        direction,
+        len(arrays[0]),
+        3,
+        ValueError,
+        "Tweedie natural direction must be a finite n-by-3 array",
+    )
+    # The compiled rows always take the stacked (m, n, 3) form.
+    natural = np.require(given.reshape(-1, *given.shape[-2:]), requirements=("C", "A"))
     normalized = tuple(
         np.require(values, dtype=np.float64, requirements=("C", "A", "W")) for values in arrays
     )
     n_rows = len(normalized[0])
-    result = np.empty((n_rows, 6), dtype=np.float64)
+    result = np.empty((len(natural), n_rows, 6), dtype=np.float64)
     statuses = np.empty(n_rows, dtype=np.int64)
     weight_mode = 0 if semantics == "prior" else 1
     native_max_terms = min(row_max_terms, _MAX_SAFE_MODE + 1)
@@ -457,7 +465,7 @@ def tweedie_hessian_direction(
         _raise_compiled_refusal(
             status=int(status), failing_row=int(failing_row), max_terms=row_max_terms
         )
-    return result
+    return result.reshape(given.shape[:-1] + (6,))
 
 
 def tweedie_natural_fourth(
