@@ -454,29 +454,29 @@ def test_a_pressed_group_whose_direction_the_rank_decision_drops_is_disclosed(he
     assert "1000 of 2000 rows" in message and "the data put the shape" in message
 
 
-@pytest.mark.parametrize("heavy, wall", [(1.5, "upper wall 1"), (-0.3, "lower wall 0")])
-def test_a_pressed_group_beside_a_scale_alias_keeps_its_wall_disclosure(heavy, wall):
-    # the coefficient fit drops z - z2, which the design aliases, and the pressed group's shape,
-    # which only the weights flatten: zero is no optimum for the second, so neither is refitted.
-    # Plain EFS may end this trajectory with its outer step rejected, so only the coefficient
-    # fit's convergence is asserted.
-    rng = np.random.default_rng(8)
-    pressed = np.expm1(-heavy * np.log(rng.random(1_000))) / heavy
-    interior = np.expm1(-0.3 * np.log(rng.random(1_000))) / 0.3
-    frame = pd.DataFrame({"g": np.repeat([1.0, 0.7], 1_000), "x": rng.uniform(size=2_000)})
-    frame["z"] = rng.uniform(size=2_000)
-    frame["z2"] = frame["z"] + 1.0e-9 * rng.standard_normal(2_000)
-    scale = {"x": Spline(kind="cr", k=6), "g": Numeric(), "z": Numeric(), "z2": Numeric()}
+def test_a_shape_at_the_last_float_beside_a_scale_alias_keeps_its_caveat():
+    # the coefficient fit drops z2 - 2 z, which the design aliases, and the shape at the last
+    # float below one, which only the link flattens: zero is no optimum for the second, so
+    # neither is refitted. Both are forced: the alias is exact, and at the last float the
+    # shape's equilibrated curvature is about 1e-2 of the rank cut, where a shape the wall step
+    # stops short of it sits at the cut. Mutation check: refitting a span that holds an alias,
+    # and keeping the refit, loses the caveat.
+    rng = np.random.default_rng(11)
+    y = stats.genpareto(3.0).rvs(2_000, random_state=rng)
+    frame = pd.DataFrame({"x": rng.uniform(size=2_000), "z": rng.uniform(size=2_000)})
+    frame["z2"] = 2.0 * frame["z"]
+    scale = {"x": Spline(kind="cr", k=6), "z": Numeric(), "z2": Numeric()}
     model = model_from_templates(
         family=GeneralizedParetoLSS(),
-        predictors=(Predictor("scale", scale), Predictor("shape", {"g": Numeric()})),
+        predictors=(Predictor("scale", scale), Predictor("shape", {})),
     )
-    with pytest.warns(ConvergenceWarning, match=wall):
-        model.fit_reml(frame, np.concatenate([pressed, interior]))
+    with pytest.warns(ConvergenceWarning, match="float64 can represent"):
+        model.fit_reml(frame, y, inner_tol=1.0e-12)
     assert model.result_.coefficient_converged
     assert model.result_.rank == len(model.result_.coefficients) - 2
+    assert np.all(model.predict_parameters(frame)["shape"].to_numpy() == np.nextafter(1.0, 0.0))
     (message,) = _wall_messages(model)
-    assert "1000 of 2000 rows" in message and "the data put the shape" in message
+    assert "not reliable" in message
 
 
 @pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])

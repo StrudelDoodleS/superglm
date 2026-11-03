@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 
 import superglm.distributional.solver.certificate as rank_certificate
 import superglm.distributional.solver.chunks as chunking
+from superglm._roundoff import gamma
 from superglm.distributional.family import (
     DistributionalFamily,
     ExpectedInformationFamily,
@@ -1553,37 +1554,33 @@ def _certified_terminal_curvature(
 def _drops_design_aliases(layout: StackedLayout, rank: RankDecomposition) -> bool:
     """Whether every direction ``rank`` drops is a near-dependency of the design itself.
 
-    The curvature ``X' W X + S`` loses a direction ``N`` when the design does,
-    ``X N ~ 0`` (an alias), or when the weights vanish where ``X N`` lies,
-    which Lesaffre and Marx (1993) call ML-collinearity: a parameter at a
-    boundary of the likelihood, whose reduced optimum is not zero. ``X`` is
-    the predictors' block-diagonal design, intercepts included. On the
-    column-equilibrated design (Belsley, Kuh and Welsch 1980) a direction's
-    length is ``rho = ||X N|| / ||C N||``, ``C`` the column norms. The rank
-    equilibrates the curvature by its diagonal, the same scaling of the
-    weighted design, and every direction it drops has length at most
-    ``sqrt(cutoff)`` there. The dropped
-    span is an alias when ``rho <= cutoff ** (1/4)`` on all of it, the
-    logarithmic midpoint between that length and an equilibrated column's 1.
-    The test is invariant to the basis of the span, so its columns are scaled
-    to unit maximum first; a span the design products cannot represent is not
-    called an alias. ``N' X' X N`` is formed a column at a time as
-    ``N' X' (X n_j)``, so the check holds one row-length vector, never ``X N``.
+    ``X N ~ 0`` is an alias; a direction only the weights flatten is a likelihood boundary
+    (Lesaffre and Marx 1993). ``rho = ||X N|| / ||C N||`` on unit columns (Belsley, Kuh and
+    Welsch 1980) centred beside an intercept (Marquardt and Snee 1975), so no unit or origin
+    makes a resolved column an alias. The span is one when ``rho <= cutoff ** (1/4)`` on all
+    of it, the log-midpoint between a dropped direction's ``sqrt(cutoff)`` and 1, or when
+    ``X N`` is rounding, ``2 k gamma_k`` of the uncentred norms (a constant column, 0 / 0
+    centred). A centred square within its cancellation, ``3 gamma_{n+2} sum x^2`` (Chan,
+    Golub and LeVeque 1983), counts as zero, which can only refuse an alias. Columns are
+    scaled to unit maximum (the test is basis-free); a non-finite span is not an alias.
     """
     null = rank.null_basis()
     null = null / np.max(np.abs(null), axis=0)
     width = null.shape[1]
     design_gram = np.zeros((width, width))
     scale_gram = np.zeros((width, width))
+    rounding_gram = np.zeros((width, width))
     for state in layout.predictors:
         local = null[state.coefficient_slice]
         if not np.any(local):
             continue
         design = state.design
-        squared = [np.diag(group.gram(np.ones(design.n))) for group in design.group_matrices]
+        squared = np.concatenate(
+            [np.diag(group.gram(np.ones(design.n))) for group in design.group_matrices] or [[]]
+        )
         intercept = state.intercept_index is not None
         if intercept:
-            squared.insert(0, np.full(1, float(design.n)))
+            squared = np.concatenate(([float(design.n)], squared))
         slopes = local[int(intercept) :]
         for column in range(width):
             projected = np.full(design.n, local[0, column] if intercept else 0.0)
@@ -1593,8 +1590,20 @@ def _drops_design_aliases(layout: StackedLayout, rank: RankDecomposition) -> boo
             if intercept:
                 back = np.concatenate(([projected.sum()], back))
             design_gram[:, column] += local.T @ back
-        scale_gram += local.T @ (np.concatenate(squared)[:, None] * local)
-    difference = 0.5 * (design_gram + design_gram.T) - np.sqrt(rank.cutoff) * scale_gram
+        rounding_gram += local.T @ (squared[:, None] * local)
+        if intercept:
+            means = design.rmatvec(np.ones(design.n)) / design.n if design.p else squared[1:]
+            centred = squared[1:] - design.n * means**2
+            centred[centred <= 3.0 * gamma(design.n + 2) * squared[1:]] = 0.0
+            squared[1:] = centred
+            local = np.vstack((local[:1] + means @ slopes, slopes))
+        scale_gram += local.T @ (squared[:, None] * local)
+    resolution = (2.0 * null.shape[0] * gamma(null.shape[0])) ** 2
+    difference = (
+        0.5 * (design_gram + design_gram.T)
+        - np.sqrt(rank.cutoff) * scale_gram
+        - resolution * rounding_gram
+    )
     return bool(np.all(np.isfinite(difference)) and np.linalg.eigvalsh(difference)[-1] <= 0.0)
 
 
@@ -1603,18 +1612,14 @@ def _reduced_fit_is_stationary(
 ) -> bool:
     """Whether a fit on the retained coefficients is also stationary for the full problem.
 
-    The reduced fit is the optimum under ``beta_J = 0``; it is the full
-    problem's when that constraint's multiplier, the score ``g_J``, vanishes,
-    the Kuhn-Tucker test an active-set method makes before it keeps a
-    variable fixed (Lawson and Hanson 1974, ch. 23). On ``K`` that is the
-    reduced run's own stop; on ``J`` it is the score stop's test,
-    ``||g_J||_inf <= tolerance (1 + |f|)``. The rounding floor cannot widen
-    it, since the floor needs a certified Newton decrement of the full
-    curvature, which is rank-deficient here. An alias carries no information,
-    so ``g_J`` vanishes with the retained score. A column far from zero
-    beside an intercept is collinear with it only in uncentred coordinates
-    (Marquardt's non-essential ill-conditioning): the rank drops it, but the
-    data resolve it, and ``g_J`` stays.
+    The reduced fit is the optimum under ``beta_J = 0``, and the full problem's when that
+    constraint's multiplier, the score ``g_J``, vanishes: the Kuhn-Tucker test an active-set
+    method makes before it keeps a variable fixed (Lawson and Hanson 1974, ch. 23). On ``K``
+    that is the reduced run's own stop; on ``J`` it is the score stop's test, which the
+    rounding floor cannot widen: the floor needs a certified Newton decrement of the full,
+    here rank-deficient, curvature. An alias's ``g_J`` vanishes with the retained score;
+    ``x`` and ``x^2`` far from zero pass the design test, but the data resolve them, and
+    ``g_J`` stays, in the dropped columns' units.
     """
     if not run.converged:
         return False

@@ -664,6 +664,99 @@ def test_an_offset_column_the_rank_drops_is_not_refitted_away(name, discrete):
     assert offset.converged or named
 
 
+@pytest.mark.parametrize("units", [1e-7, 1.0, 1e7])
+@pytest.mark.parametrize("origin", [3e7, 1e13])
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+def test_a_column_far_from_zero_is_kept_in_any_units(monkeypatch, discrete, origin, units):
+    """``x = c (o + z)``: no unit ``c`` makes the slope an alias of the intercept.
+
+    The fit starts at the centred fit's optimum, so the rank drops a slope away
+    from zero. The design test reads the column centred, where it is ordinary,
+    so the slope is never refitted away; at ``o = 1e13`` float64 cancels the
+    centred square, which then counts as zero. Mutation checks: on uncentred
+    column norms ``c = 1e-7`` publishes a zero slope as converged, its score
+    inside the stop's ``tol (1 + |f|)``, and every ``c`` runs a refit; taking
+    the cancelled square as computed does the first at ``o = 1e13``.
+    """
+    import superglm.distributional.solver.solver as solver
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    rng = np.random.default_rng(11)
+    z = rng.standard_normal(3000)
+    y = 1.0 + 0.7 * z + rng.normal(0.0, 0.5, 3000)
+
+    def fitted(x):
+        family = GaussianLS(scale_floor=0)
+        location = family.location(term("x", Numeric()))
+        model = SuperLSS(family, location, family.scale(), discrete=discrete)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ConvergenceWarning)
+            model.fit(pd.DataFrame({"x": x}), y)
+        return model._require_fitted().fit_state.solver_result, caught
+
+    centred, _ = fitted(z)
+    start, run, reduced = solver._initial_coefficients, solver._run_iterations, []
+
+    def at_the_optimum(context):
+        coefficients = np.array(start(context))
+        if context.layout.n_coefficients == 3:
+            level, slope, scale = centred.coefficients
+            coefficients[:] = (level - origin * slope, slope / units, scale)
+        return coefficients
+
+    def recorded(context, *args, **kwargs):
+        reduced.append(context.retained is not None)
+        return run(context, *args, **kwargs)
+
+    monkeypatch.setattr(solver, "_initial_coefficients", at_the_optimum)
+    monkeypatch.setattr(solver, "_run_iterations", recorded)
+    offset, caught = fitted(units * (origin + z))
+    assert not any(reduced) and offset.terminal_rank.rank == 2
+    assert offset.coefficients[1] != 0.0
+    assert offset.converged or [w for w in caught if "condition number is about" in str(w.message)]
+    assert offset.coefficients[1] * units == pytest.approx(
+        centred.coefficients[1], rel=_slope_tolerance(offset)
+    )
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+def test_a_constant_column_beside_an_intercept_is_refitted_as_an_alias(monkeypatch, discrete):
+    """``x = 1e6`` on every row: centred it is a zero column, and it is still an alias.
+
+    Its direction ``X N`` vanishes to rounding, so it is an alias whatever the
+    coordinates, and the fit is refitted without it from a start moved 3 along
+    it. The fit without the column bounds the agreement: each stops with its
+    score inside ``tol (1 + |f|)``, which moves a coefficient by about that
+    times ``sigma^2 / n``, here 3e-8. Mutation check: on centred column norms
+    alone the alias reads 0 / 0, and the drifted state is published.
+    """
+    import superglm.distributional.solver.solver as solver
+
+    rng = np.random.default_rng(3)
+    w = rng.standard_normal(3000)
+    y = 1.0 + 0.5 * w + rng.normal(0.0, 0.5, 3000)
+    start = solver._initial_coefficients
+
+    def drifted(context):
+        coefficients = np.array(start(context))
+        if context.layout.n_coefficients == 4:
+            coefficients[[0, 2]] += (-3e6, 3.0)
+        return coefficients
+
+    def fitted(columns):
+        family = GaussianLS(scale_floor=0)
+        location = family.location(*(term(name, Numeric()) for name in columns))
+        model = SuperLSS(family, location, family.scale(), discrete=discrete)
+        return _fit(model, pd.DataFrame(columns), y)
+
+    monkeypatch.setattr(solver, "_initial_coefficients", drifted)
+    reference = fitted({"w": w})
+    result = fitted({"w": w, "x": np.full(3000, 1e6)})
+    assert result.converged and result.terminal_rank.rank == 3
+    assert result.coefficients[2] == 0.0
+    np.testing.assert_allclose(result.coefficients[[0, 1, 3]], reference.coefficients, atol=1e-6)
+
+
 def test_an_ill_conditioned_fixed_lambda_fit_that_stops_short_warns_and_names_the_cause():
     """``fit`` warns when its unconverged coefficient fit's curvature is past certification.
 
