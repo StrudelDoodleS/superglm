@@ -710,7 +710,7 @@ def _covariance_shim(covariance: np.ndarray) -> SimpleNamespace:
     return SimpleNamespace(
         inference=SimpleNamespace(covariance=covariance, reconciliation_tolerance=1.0e-6),
         result=SimpleNamespace(coefficients=np.zeros(width)),
-        coefficients=np.zeros(width),
+        prediction_coefficients=np.zeros(width),
         layout=SimpleNamespace(
             coefficient_names=tuple(f"b[{index}]" for index in range(width)),
             n_coefficients=width,
@@ -894,7 +894,7 @@ def test_posterior_draws_defend_their_own_shape() -> None:
             PosteriorDraws(np.zeros((2, 2)), "fixed", 0, names, provenance)
 
     mismatched = _covariance_shim(np.eye(3))
-    mismatched.coefficients = np.zeros(2)
+    mismatched.prediction_coefficients = np.zeros(2)
     with pytest.raises(ValueError, match="does not match the fitted coefficients"):
         posterior_draws(mismatched, 4)
 

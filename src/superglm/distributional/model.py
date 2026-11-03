@@ -300,8 +300,14 @@ class DenseDistributionalModel:
 
     @property
     def coefficients(self) -> NDArray[np.float64]:
-        """The coefficients predictions use: the hand edit's, else the fit's."""
-        return self._fit_state.prediction_coefficients
+        """The coefficients the fit reports: the hand edit's, else the fit result's."""
+        return self._fit_state.reported_coefficients
+
+    @property
+    def prediction_coefficients(self) -> NDArray[np.float64]:
+        """The coefficients predictions and posterior draws use: the hand edit's, else ``result``'s."""
+        edit = self._fit_state.hand_edit
+        return self.result.coefficients if edit is None else edit.coefficients
 
     @property
     def covariance(self) -> NDArray[np.float64]:
@@ -311,7 +317,7 @@ class DenseDistributionalModel:
     def predictor_coefficients(self) -> Mapping[str, NDArray[np.float64]]:
         state = self._fit_state
         if state.hand_edit is None:
-            return state.result.predictor_coefficients
+            return self.fitted_result.predictor_coefficients
         return MappingProxyType(
             {
                 predictor.name: state.hand_edit.coefficients[predictor.coefficient_slice]
@@ -338,7 +344,7 @@ class DenseDistributionalModel:
         offsets: Mapping[str, NDArray] | None = None,
     ) -> NDArray[np.float64]:
         """Evaluate every fitted predictor in family parameter order."""
-        return self.predict_eta_at(self.coefficients, X, offsets=offsets)
+        return self.predict_eta_at(self.prediction_coefficients, X, offsets=offsets)
 
     def predict_eta_at(
         self,

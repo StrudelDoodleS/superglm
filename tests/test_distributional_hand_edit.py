@@ -207,7 +207,7 @@ def test_the_fit_state_itself_checks_the_edit():
     with pytest.raises(ValueError, match=re.escape("mean:power[0]")):
         dataclasses.replace(state, hand_edit=bad)
     good = HandEdit(_edit_term(case.model, "mean:age", 0.5), ("mean:age",))
-    assert dataclasses.replace(state, hand_edit=good).prediction_coefficients is good.coefficients
+    assert dataclasses.replace(state, hand_edit=good).reported_coefficients is good.coefficients
 
 
 @pytest.mark.parametrize(
@@ -473,4 +473,4 @@ def test_fit_state_from_before_hand_edits_reads_as_unedited():
     # An older pickle has no ``hand_edit`` entry; the class default is read.
     del state.__dict__["hand_edit"]
     assert state.hand_edit is None
-    assert state.prediction_coefficients is state.result.coefficients
+    assert state.reported_coefficients is state.result.coefficients

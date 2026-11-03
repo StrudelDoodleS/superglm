@@ -282,8 +282,8 @@ class DistributionalFitState:
     hand_edit: HandEdit | None = None
 
     @property
-    def prediction_coefficients(self) -> NDArray[np.float64]:
-        """The coefficients predictions use: the hand edit's, else the fit's."""
+    def reported_coefficients(self) -> NDArray[np.float64]:
+        """The coefficients the fit reports: the hand edit's, else the fit result's."""
         if self.hand_edit is None:
             return self.result.coefficients
         return self.hand_edit.coefficients

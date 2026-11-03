@@ -761,7 +761,7 @@ def _posterior_draws_from_covariance(
     hand-edited model's draws, bounds and predictions describe the same curve.
     """
     resolved = np.asarray(matrix, dtype=np.float64)
-    beta = np.asarray(fitted.coefficients, dtype=np.float64)
+    beta = np.asarray(fitted.prediction_coefficients, dtype=np.float64)
     if resolved.shape != (len(beta), len(beta)):
         raise ValueError("the posterior covariance does not match the fitted coefficients")
 
