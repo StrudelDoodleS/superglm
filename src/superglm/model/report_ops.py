@@ -375,6 +375,7 @@ def summary(
         n_obs=n,
         alpha=alpha,
         monotone_repairs=shape_repaired_feature_names(model),
+        rules_enforced=rules_enforced(model),
         precomputed_R_a=inf["R_a"],
         precomputed_edf=inf["edf"],
         precomputed_edf1=inf["edf1"],
@@ -687,6 +688,11 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
         )
 
     return rows
+
+
+def rules_enforced(model) -> bool:
+    """False for a model last fitted by ``fit_path``, which fits every term without its rows."""
+    return (getattr(model, "_last_fit_meta", None) or {}).get("method") != "fit_path"
 
 
 def shape_repaired_feature_names(model) -> dict:

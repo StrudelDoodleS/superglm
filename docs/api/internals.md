@@ -52,7 +52,8 @@ wraps them in a {py:class}`~superglm.BoundPredictor`, listed with the
 
 {py:obj}`~superglm.Constraint` is what you write, and `Constraint.fit.increasing`
 and its siblings are {py:class}`~superglm.ConstraintSpec` values: one shape
-constraint, with when it applies and what it requires. Where a fit-time
+constraint, with when it applies and what it requires. Fit-time rules combine with
+`&` into a {py:class}`~superglm.ConstraintRules` and can carry a stretch. Where a fit-time
 constraint is enforced by quadratic programming it is expressed as the linear
 inequalities of a {py:class}`~superglm.LinearConstraintSet`. Behind
 {py:meth}`~superglm.SuperGLM.apply_shape_postfit`, monotone constraints are
@@ -65,6 +66,7 @@ a {py:class}`~superglm.MonotoneRepairResult`.
    :toctree: generated
    :nosignatures:
 
+   superglm.ConstraintRules
    superglm.ConstraintSpec
    superglm.LinearConstraintSet
    superglm.MonotoneRepairer

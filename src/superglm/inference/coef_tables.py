@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.features.constraint import rules_of
 from superglm.inference._metrics_design import MetricsDesign, factor_from_gram, weighted_moments
 from superglm.inference.covariance import (
     covariance_quadratic_form,
@@ -20,6 +21,7 @@ from superglm.inference.summary import (
     _BasisDetailRow,
     _CoefRow,
     _compute_coef_stats,
+    unenforced_rules_tag,
 )
 from superglm.solvers.rank import diagonal_of_square, selected_group_name_set
 from superglm.types import GroupSlice
@@ -173,6 +175,7 @@ def build_coef_rows(
     weight_semantics: str | None = None,
     recorded_likelihood_size: float | None = None,
     selection_shrunk_group_names: set[str] | None = None,
+    rules_enforced: bool = True,
 ) -> list[_CoefRow]:
     """Build coefficient table rows for summary output.
 
@@ -188,6 +191,9 @@ def build_coef_rows(
         shrinks (``penalties.base.selection_shrunk_group_names``).  Rows whose
         Wald validity is conditional on being unshrunk -- today the Piecewise
         branch -- withhold z/p/CI and the whole-term chi-square for these.
+    rules_enforced : False for a model last fitted by ``fit_path``, which fits every
+        term without its constraint rows; the rule line of a term the build
+        constrained then says its rules were not enforced.
     """
     from superglm.features.categorical import Categorical
     from superglm.features.factor_smooth import FactorSmooth
@@ -451,6 +457,13 @@ def build_coef_rows(
 
     # Monotone repair info
     _mono_repairs = monotone_repairs or {}
+
+    def _engine_tag(spec, engine):
+        """The engine on a term's rule line, or the mark that a path did not enforce its rules."""
+        if engine is None or rules_enforced:
+            return engine
+        return unenforced_rules_tag(rules_of(spec))
+
     handled_ordered_features: set[Hashable] = set()
 
     # Feature rows
@@ -595,11 +608,11 @@ def build_coef_rows(
                         knot_strategy=s_knot_strat,
                         boundary=s_bnd,
                         difference_penalty=s_penalty,
-                        # The wrapper's own forward. It raises on a step-mode pickle, which is safe because
-                        # ``spec.reconstruct(...)`` and ``spec.basis_kind`` above already raise the migration
-                        # error first.
-                        monotone=spec.constraint_kind,
-                        monotone_engine=g.monotone_engine,
+                        # The wrapper forwards its basis's rules, and raises on a step-mode pickle, which is
+                        # safe because ``spec.reconstruct(...)`` and ``spec.basis_kind`` above already raise
+                        # the migration error first.
+                        monotone=rules_of(spec).describe() or None,
+                        monotone_engine=_engine_tag(spec, g.monotone_engine),
                         monotone_repaired=g.feature_name in _mono_repairs,
                     )
                 )
@@ -735,8 +748,8 @@ def build_coef_rows(
 
         if isinstance(spec, _SplineBase):
             is_linear_subgroup = g.subgroup_type == "linear"
-            _mono_dir = getattr(spec, "monotone", None)
-            _mono_engine = g.monotone_engine
+            _mono_dir = rules_of(spec).describe() or None
+            _mono_engine = _engine_tag(spec, g.monotone_engine)
             _mono_repaired = g.feature_name in _mono_repairs
             if active:
                 stat = float("nan")
@@ -832,6 +845,7 @@ def build_coef_rows(
             gedf = _get_group_edf_map()
             cat_edf = gedf.get(g.name, 0.0) if active else 0.0
             diag = _level_diag.get(g.name, {})
+            cat_rules = rules_of(spec).describe() or None
             for i, level in enumerate(spec._non_base):
                 coef_val = float(b_g[i])
                 se_val = float(se_g[i])
@@ -852,6 +866,8 @@ def build_coef_rows(
                         level_exposure_share=exp_share_i,
                         quasi_separated=thin_i,
                         advisory_trigger="thin_level" if thin_i else "",
+                        monotone=cat_rules,
+                        monotone_engine=_engine_tag(spec, g.monotone_engine if cat_rules else None),
                     )
                 )
 

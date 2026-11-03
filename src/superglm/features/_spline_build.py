@@ -8,7 +8,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._group_matrix import _group_matrix_support as row_supports
-from superglm.features._spline_config import clear_scop_state, warn_scop_retired
+from superglm.features._spline_config import (
+    clear_scop_state,
+    fit_time_select_message,
+    warn_scop_retired,
+)
 from superglm.features._spline_identifiability import (
     apply_identifiability_for_spec,
     build_identifiability_projection_for_spec,
@@ -16,22 +20,14 @@ from superglm.features._spline_identifiability import (
 from superglm.features._spline_multi_penalty import build_multi_m_components
 from superglm.features._spline_penalties import structural_penalty_ranks
 from superglm.features._spline_select import build_select
-from superglm.types import GroupInfo, TensorMarginalInfo
-
-
-def _constraint_kind(spec: Any) -> str | None:
-    """Return the canonical shape token, falling back to legacy fields if needed."""
-    return getattr(spec, "constraint_kind", getattr(spec, "monotone", None))
-
-
-def _constraint_mode(spec: Any) -> str:
-    """Return the canonical shape mode, falling back to legacy fields if needed."""
-    return getattr(spec, "constraint_mode", getattr(spec, "monotone_mode", "postfit"))
+from superglm.features._spline_subclass_ops import prepare_shape_rules
+from superglm.features.constraint import postfit_token, rules_of
+from superglm.types import GroupInfo, LinearConstraintSet, TensorMarginalInfo
 
 
 def _uses_fit_time_shape_constraints(spec: Any) -> bool:
     """Whether the spec requests any fit-time shape-constrained build path."""
-    return _constraint_kind(spec) is not None and _constraint_mode(spec) == "fit"
+    return any(rule.mode == "fit" for rule in rules_of(spec))
 
 
 def shape_engine(spec: Any) -> Literal["qp"] | None:
@@ -132,12 +128,63 @@ def _warn_if_saved_on_scop(spec: Any) -> None:
 
 def _raise_if_unsupported_fit_shape_constraint(spec: Any) -> None:
     """Reject fit-time shape constraints that no current engine can build."""
-    kind = _constraint_kind(spec)
-    if _uses_fit_time_shape_constraints(spec) and shape_engine(spec) is None:
+    if not _uses_fit_time_shape_constraints(spec) or shape_engine(spec) is not None:
+        return
+    rules = rules_of(spec)
+    token = postfit_token(rules)
+    if token:
         raise NotImplementedError(
-            f"Fit-time {kind} constraints are not implemented yet. "
-            f"Use Constraint.postfit.{kind} instead."
+            f"Fit-time {rules.describe()} constraints are not implemented yet. Use {token} instead."
         )
+    raise NotImplementedError(
+        f"Fit-time {rules.describe()} constraints are not implemented for this spline kind yet. "
+        "Constraint.postfit repairs one whole-curve shape and cannot take them; "
+        "use kind='cr', kind='ps' or kind='bs', or drop the rules."
+    )
+
+
+def qp_geometry(
+    spec: Any, engine: str | None, projection: NDArray | None
+) -> tuple[LinearConstraintSet | None, str | None, NDArray | None]:
+    """The QP rows, engine tag and raw-to-solver map a built group carries, or three Nones.
+
+    A group with no inequality row has no work for the QP and takes the ordinary
+    route: a term whose rules all went into its basis (a flat stretch) holds them
+    there, and a constrained group would be refused under a selection penalty and
+    fitted by the direct solver for nothing.
+    """
+    if engine != "qp":
+        return None, None, None
+    raw = spec._build_monotone_constraints_raw()
+    if raw.A.shape[0] == 0:
+        return None, None, None
+    return (raw if projection is None else raw.compose(projection)), "qp", projection
+
+
+def training_basis_mean(spec: Any, x: NDArray) -> NDArray:
+    """The unweighted mean of the raw basis over the training rows ``x``.
+
+    ``m @ c`` is the shift ``model/runtime_canonicalize.py`` removes from the
+    fitted term to print it: the mean of ``spec.transform`` over every stored
+    training row, zero-weight rows included, each distinct value counted by
+    its rows. Evaluated once per distinct value.
+    """
+    support, counts = np.unique(np.asarray(x, dtype=np.float64).ravel(), return_counts=True)
+    basis = spec._basis_matrix(support)
+    total = np.asarray(basis.T @ counts.astype(np.float64), dtype=np.float64).ravel()
+    return total / float(counts.sum())
+
+
+def _store_training_basis_mean(spec: Any, x: NDArray) -> None:
+    """Store the basis mean a fit-time cap is stated against, or clear it without one.
+
+    Every later rebuild of the cap rows (the REML restore, the design
+    compiler) reads it from the spec, so they are the build's rows.
+    """
+    capped = _uses_fit_time_shape_constraints(spec) and any(
+        rule.kind == "cap" for rule in rules_of(spec)
+    )
+    spec._training_basis_mean = training_basis_mean(spec, x) if capped else None
 
 
 def _is_unpenalised(omega: NDArray) -> bool:
@@ -165,6 +212,25 @@ def _with_row_support(info: GroupInfo, value_rows, index: NDArray | None, basis)
     return info
 
 
+def _interaction_projection(
+    spec: Any,
+    x: NDArray,
+    omega_raw: NDArray,
+    projection: NDArray | None,
+    sample_weight: NDArray | None,
+) -> NDArray | None:
+    """The projection interactions inherit: the main effect's, less its flat stretches.
+
+    ``projection`` is the main effect's constraint and identifiability
+    projection. Flat stretches bind the main-effect curve only, so with flat
+    rows the interaction projection is rebuilt from the other equality rows.
+    """
+    if spec._flat_rows is None or not spec._flat_rows.shape[0]:
+        return projection
+    _, _, _, constraint = spec._apply_constraints(None, omega_raw, main_effect=False)
+    return build_identifiability_projection_for_spec(spec, x, constraint, sample_weight)
+
+
 def build_group_info(
     spec: Any,
     x: NDArray,
@@ -186,14 +252,13 @@ def build_group_info(
 
     if _uses_fit_time_shape_constraints(spec):
         if spec.select:
-            raise NotImplementedError(
-                "Fit-time shape constraints are not supported with "
-                "select=True. Use select=False or Constraint.postfit.*."
-            )
+            raise NotImplementedError(fit_time_select_message(rules_of(spec)))
 
     x = np.asarray(x, dtype=np.float64).ravel()
     spec._place_knots(x, sample_weight)
     spec._validate_m_orders_build()
+    prepare_shape_rules(spec, stacklevel=3)
+    _store_training_basis_mean(spec, x)
     distinct = row_supports.distinct_values(x)
     if distinct is None:
         value_rows = index = None
@@ -209,8 +274,8 @@ def build_group_info(
         info.structural_ranks = structural_penalty_ranks(spec, info)
         return _with_row_support(info, value_rows, index, full)
 
-    omega = spec._build_penalty()
-    basis, omega, n_cols, projection = spec._apply_constraints(basis, omega)
+    omega_raw = spec._build_penalty()
+    basis, omega, n_cols, projection = spec._apply_constraints(basis, omega_raw)
     omega, n_cols, projection = apply_identifiability_for_spec(
         spec,
         x,
@@ -218,7 +283,9 @@ def build_group_info(
         projection,
         sample_weight,
     )
-    spec._interaction_projection = projection
+    spec._interaction_projection = _interaction_projection(
+        spec, x, omega_raw, projection, sample_weight
+    )
 
     penalty_components = None
     if len(spec._m_orders) > 1:
@@ -244,15 +311,7 @@ def build_group_info(
     if _is_unpenalised(omega):
         omega, penalty_components = None, None
 
-    constraints = None
-    monotone_engine = None
-    raw_to_solver_map = None
-    if engine == "qp":
-        constraints = spec._build_monotone_constraints_raw()
-        if projection is not None:
-            constraints = constraints.compose(projection)
-        monotone_engine = "qp"
-        raw_to_solver_map = projection
+    constraints, monotone_engine, raw_to_solver_map = qp_geometry(spec, engine, projection)
 
     info = GroupInfo(
         columns=basis,
@@ -291,6 +350,8 @@ def build_knots_and_penalty(
     x = np.asarray(x, dtype=np.float64).ravel()
     spec._place_knots(x, sample_weight, n_bins)
     spec._validate_m_orders_build()
+    prepare_shape_rules(spec, stacklevel=3)
+    _store_training_basis_mean(spec, x)
     omega = spec._build_penalty()
     _, omega_constrained, n_cols, projection = spec._apply_constraints(None, omega)
 
@@ -317,7 +378,9 @@ def build_knots_and_penalty(
         projection,
         sample_weight,
     )
-    spec._interaction_projection = projection
+    spec._interaction_projection = _interaction_projection(
+        spec, x, omega, projection, sample_weight
+    )
 
     if len(spec._m_orders) > 1:
         spec._penalty_components = build_multi_m_components(
@@ -389,7 +452,9 @@ def tensor_marginal_info(
         else np.asarray(spec._raw_basis_matrix(distinct[0]))[distinct[1]]
     )
     omega = spec._build_penalty()
-    _, omega_constrained, _, projection_constraints = spec._apply_constraints(None, omega)
+    _, omega_constrained, _, projection_constraints = spec._apply_constraints(
+        None, omega, main_effect=False
+    )
 
     if projection_constraints is not None:
         basis_constrained = basis_raw @ projection_constraints

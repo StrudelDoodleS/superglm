@@ -143,6 +143,8 @@ SCIPY_ROUTINES = (
     "pinv",
     "pinvh",
     "qr",
+    "qr_delete",
+    "qr_insert",
     "qr_multiply",
     "qz",
     "rq",
@@ -222,6 +224,10 @@ FACTORIZATIONS = frozenset(
                 "pinv",
                 "pinvh",
                 "qr",
+                # A Givens update of an m x k thin QR costs O(m*k), quadratic
+                # in the operand's core shape as solve_triangular's O(n**2) is.
+                "qr_delete",
+                "qr_insert",
                 "qr_multiply",
                 "qz",
                 "rq",

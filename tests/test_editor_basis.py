@@ -446,3 +446,22 @@ def test_the_widget_stages_a_basis_change_and_refits_one_at_once(book):
         widget.close()
     session.undo()
     assert _basis(session.model, "band") == ("ps", False)
+
+
+def test_rebased_spline_keeps_every_rule():
+    from superglm.features.constraint import rules_of
+    from superglm.features.rebuild import rebased_spline
+
+    C = Constraint.fit
+    rules = C.increasing & C.concave.above(30) & C.max_step(0.2)
+    source = Spline(kind="ps", k=12, constraint=rules)
+    rebased = rebased_spline(source, kind="bs", select=False)
+    assert rebased.constraint_rules == source.constraint_rules == rules
+    assert (rebased.constraint_kind, rebased.constraint_mode) == (rules.describe(), "fit")
+    # A single rule, stretched or not, passes through as the bare rule.
+    for single in (C.decreasing, C.decreasing.below(40), Constraint.postfit.convex):
+        again = rebased_spline(Spline(kind="ps", k=12, constraint=single), kind="bs", select=False)
+        assert rules_of(again).rules == (single,)
+    assert (
+        len(rebased_spline(Spline(kind="ps", k=12), kind="bs", select=False).constraint_rules) == 0
+    )

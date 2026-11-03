@@ -277,6 +277,18 @@ def term_inference(
     # way to learn the curve came out of a projection.
     if repaired and not inference.monotone_repaired:
         inference = dataclasses.replace(inference, monotone_repaired=True)
+    # A path fits the term without the rows its build made; the rule line says so.
+    from superglm.features.constraint import rules_of
+    from superglm.inference.summary import unenforced_rules_tag
+    from superglm.model.report_ops import rules_enforced
+
+    if (
+        not rules_enforced(model)
+        and getattr(inference, "monotone", None)
+        and any(g.feature_name == name and g.monotone_engine for g in model._groups)
+    ):
+        tag = unenforced_rules_tag(rules_of(model._specs[name]))
+        inference = dataclasses.replace(inference, monotone=f"{inference.monotone} ({tag})")
     return inference
 
 

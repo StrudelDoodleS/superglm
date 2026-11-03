@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import copy
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, cast
@@ -20,7 +21,7 @@ from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame
 from superglm._parallel import pooled_map
-from superglm.features._spline_build import shape_engine
+from superglm.features._spline_build import qp_geometry, shape_engine
 from superglm.features._spline_penalties import structural_penalty_ranks
 from superglm.features.categorical import Categorical
 from superglm.features.factor_smooth import FactorSmooth
@@ -137,6 +138,28 @@ class _BuiltInteraction:
     result: Any
     processed: list[tuple[Any, GroupInfo, GroupMatrix, NDArray | None, int]]
     records: list[tuple]
+
+
+@contextmanager
+def _feature_named_messages(name: str) -> Iterator[None]:
+    """Name feature ``name`` in the ValueErrors and warnings its build raises.
+
+    Spec-level guards (Polynomial's distinct-support and rank checks, a shape
+    rule's stretch) cannot know the column name. Warnings are re-emitted at
+    the caller of ``compile_predictor_design``, the model fit that named the
+    feature.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            yield
+        except ValueError as err:
+            raise ValueError(f"Feature {name!r}: {err}") from err
+    for captured in caught:
+        # This generator, contextlib's __exit__, compile_predictor_design, its caller.
+        warnings.warn(
+            f"Feature {name!r}: {captured.message}", category=captured.category, stacklevel=4
+        )
 
 
 def compile_predictor_design(
@@ -279,9 +302,10 @@ def compile_predictor_design(
 
         if use_discrete:
             n_bins_feat = resolve_discrete_n_bins(name, spec, n_bins_config)
-            omega, n_cols_penalty, projection_penalty = spec.build_knots_and_penalty(
-                x_col, feature_build_weight, n_bins_feat
-            )
+            with _feature_named_messages(name):
+                omega, n_cols_penalty, projection_penalty = spec.build_knots_and_penalty(
+                    x_col, feature_build_weight, n_bins_feat
+                )
             bin_centers, bin_idx = _discretize_spline_column(
                 x_col,
                 n_bins_feat,
@@ -291,16 +315,9 @@ def compile_predictor_design(
             exposure_agg = np.bincount(bin_idx, weights=sample_weight, minlength=len(bin_centers))
 
             # ── QP monotone constraint metadata (coefficient-space, survives discretization) ──
-            constraints = None
-            monotone_engine = None
-            raw_to_solver_map = None
-            if engine == "qp":
-                cs_raw = spec._build_monotone_constraints_raw()
-                constraints = (
-                    cs_raw.compose(projection_penalty) if projection_penalty is not None else cs_raw
-                )
-                monotone_engine = "qp"
-                raw_to_solver_map = projection_penalty
+            constraints, monotone_engine, raw_to_solver_map = qp_geometry(
+                spec, engine, projection_penalty
+            )
 
             if getattr(spec, "select", False):
                 n_null = 1
@@ -370,49 +387,33 @@ def compile_predictor_design(
                 ]
                 infos[0].structural_ranks = structural_penalty_ranks(spec, infos[0])
         else:
-            try:
-                # Capture build-time warnings to re-emit them with the feature
-                # name, as the errors below are.
-                with warnings.catch_warnings(record=True) as caught:
-                    warnings.simplefilter("always")
-                    if isinstance(spec, OrderedCategorical):
-                        result = spec._build_with_geometry(
-                            x_col,
-                            reporting_weight=ordered_reporting_weight,
-                            geometry_weight=feature_build_weight,
-                        )
-                    elif scan_levels and getattr(spec.build, "__func__", None) is Categorical.build:
-                        # The scan reads the build's codes. A subclass that
-                        # overrides build() keeps its override, and the scan
-                        # codes its column itself.
-                        result, row_codes = cast(Categorical, spec)._build_with_codes(
-                            x_col, sample_weight=feature_build_weight
-                        )
-                        # Held until the scan, across every other term's build:
-                        # one byte a row for the usual few levels, not eight.
-                        scan_codes[name] = row_codes.astype(np.min_scalar_type(len(spec._levels)))
-                        del row_codes
-                    elif getattr(spec.build, "__func__", None) is _SPLINE_BUILD:
-                        # The design keeps the row support the build finds;
-                        # any other build() keeps its own, and its basis is
-                        # scanned.
-                        result = cast(_SplineBase, spec)._build_with_row_support(
-                            x_col, sample_weight=feature_build_weight
-                        )
-                    else:
-                        result = spec.build(x_col, sample_weight=feature_build_weight)
-            except ValueError as err:
-                # Name the failing term: spec-level guards (e.g. Polynomial's
-                # distinct-support and rank checks) cannot know the column name.
-                raise ValueError(f"Feature {name!r}: {err}") from err
-            for captured in caught:
-                warnings.warn(
-                    f"Feature {name!r}: {captured.message}",
-                    category=captured.category,
-                    # Two frames up is the model fit call that named the
-                    # feature -- the place a user can act on the warning.
-                    stacklevel=2,
-                )
+            with _feature_named_messages(name):
+                if isinstance(spec, OrderedCategorical):
+                    result = spec._build_with_geometry(
+                        x_col,
+                        reporting_weight=ordered_reporting_weight,
+                        geometry_weight=feature_build_weight,
+                    )
+                elif scan_levels and getattr(spec.build, "__func__", None) is Categorical.build:
+                    # The scan reads the build's codes. A subclass that
+                    # overrides build() keeps its override, and the scan
+                    # codes its column itself.
+                    result, row_codes = cast(Categorical, spec)._build_with_codes(
+                        x_col, sample_weight=feature_build_weight
+                    )
+                    # Held until the scan, across every other term's build:
+                    # one byte a row for the usual few levels, not eight.
+                    scan_codes[name] = row_codes.astype(np.min_scalar_type(len(spec._levels)))
+                    del row_codes
+                elif getattr(spec.build, "__func__", None) is _SPLINE_BUILD:
+                    # The design keeps the row support the build finds;
+                    # any other build() keeps its own, and its basis is
+                    # scanned.
+                    result = cast(_SplineBase, spec)._build_with_row_support(
+                        x_col, sample_weight=feature_build_weight
+                    )
+                else:
+                    result = spec.build(x_col, sample_weight=feature_build_weight)
             infos = result if isinstance(result, list) else [result]
         if scan_levels:
             # Scanned after the loops, once the spec has learned its levels

@@ -1,5 +1,5 @@
 from superglm.features.categorical import Categorical
-from superglm.features.constraint import Constraint, ConstraintSpec
+from superglm.features.constraint import Constraint, ConstraintRules, ConstraintSpec
 from superglm.features.factor_smooth import FactorSmooth
 from superglm.features.grouping import LevelGrouping, collapse_levels
 from superglm.features.interaction import (
@@ -30,6 +30,7 @@ __all__ = [
     "Categorical",
     "OrderedCategorical",
     "Constraint",
+    "ConstraintRules",
     "ConstraintSpec",
     "FactorSmooth",
     "RandomEffect",

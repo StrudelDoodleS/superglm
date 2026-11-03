@@ -5,7 +5,8 @@ the model rather than repairing the spline afterward.
 
 ## Constraint Settings
 
-The public spline API now uses a single `constraint=` argument:
+The public spline API uses a single `constraint=` argument. It takes one rule
+or several rules joined with `&`:
 
 - `constraint=Constraint.fit.increasing`
 - `constraint=Constraint.fit.decreasing`
@@ -19,6 +20,268 @@ The public spline API now uses a single `constraint=` argument:
 Use `Constraint.fit.*` when the shape constraint should live inside the solver.
 Use `Constraint.postfit.*` when you want the fitted spline repaired after
 estimation instead.
+
+`Constraint.fit` also offers rules that `Constraint.postfit` does not:
+
+- `Constraint.fit.flat`, a flat stretch of the curve
+- `Constraint.fit.cap(lo, hi)`, a floor and a ceiling on the printed relativity
+- `Constraint.fit.max_step(up, down)`, a limit on the step between adjacent
+  bands of an ordered categorical
+
+Join rules with `&`, and limit a shape rule to part of the feature with
+`.below(x)`, `.above(x)` or `.within(a, b)`. The next section shows each.
+
+## Combining Rules, Stretches And Caps
+
+A term can carry several fit-time rules at once. The rules sit inside the fit,
+so the other terms and the intercept adjust to them. Hand edits made after the
+fit leave the book off balance.
+
+The examples on this page share one small data set. Run this block once. The
+later blocks reuse `df` and `y`.
+
+```python
+import numpy as np
+import pandas as pd
+
+from superglm import Categorical, Constraint, OrderedCategorical, Spline, SuperGLM
+
+C = Constraint.fit
+
+rng = np.random.default_rng(7)
+n = 3_000
+bands = ["18-25", "26-35", "36-45", "46-55", "56-65", "66-75", "76-85", "86+"]
+band_effect = dict(zip(bands, np.linspace(-0.9, 0.9, len(bands))))
+region_effect = {"North": 0.0, "South": 0.25, "East": -0.3, "West": 0.6}
+
+df = pd.DataFrame(
+    {
+        "age": rng.integers(10, 86, n).astype(float),
+        "power": rng.uniform(0.0, 10.0, n),
+        "band": rng.choice(bands, n),
+        "region": rng.choice(list(region_effect), n),
+    }
+)
+age_effect = np.where(
+    df["age"] < 25, 0.08 * (25 - df["age"]), np.where(df["age"] > 40, 0.02 * (df["age"] - 40), 0.0)
+)
+eta = (
+    -1.0
+    + age_effect
+    + 1.5 * (1.0 - np.exp(-df["power"] / 2.0))
+    + df["band"].map(band_effect)
+    + df["region"].map(region_effect)
+)
+y = rng.poisson(np.exp(eta.to_numpy())).astype(float)
+```
+
+### Two shapes on one curve
+
+Any direction can be combined with any curvature:
+
+```python
+model = SuperGLM(
+    family="poisson",
+    selection_penalty=0.0,
+    features={"power": Spline(kind="ps", k=10, constraint=C.increasing & C.concave)},
+)
+model.fit(df, y)
+```
+
+This curve rises and never speeds up. The curvature limits on
+[Engine Selection](#engine-selection) still apply to the `concave` half.
+
+### A rule on a stretch
+
+Limit a rule to a stretch of the feature with `.below(x)`, `.above(x)` or
+`.within(a, b)`. This rule makes the price fall to age 25, stay level from 25
+to 40, and rise after 40:
+
+```python
+rules = C.decreasing.below(25) & C.flat.within(25, 40) & C.increasing.above(40)
+
+model = SuperGLM(
+    family="poisson",
+    selection_penalty=0.0,
+    features={"age": Spline(kind="ps", n_knots=9, constraint=rules)},
+)
+model.fit(df, y)
+```
+
+A rule with no stretch covers the whole range. Outside every stretch the curve
+is free.
+
+- Two direction rules, two curvature rules or two flat rules may not overlap.
+  The fit is refused and names the overlap.
+- A stretch rule works on `ps`, `bs` and `cr` splines, and on an
+  `OrderedCategorical` with a spline basis.
+- Stretch ends are values of the feature. On an `OrderedCategorical` they are
+  band labels, as described under
+  [Ordered categoricals](#ordered-categoricals).
+
+### Flat stretches
+
+`C.flat` holds the curve level on a stretch.
+
+- `flat` needs a stretch, such as `C.flat.within(25, 40)`. A flat rule over
+  the whole range is refused, and so is a stretch that widens to every knot
+  span: the term would have no effect, so remove it.
+- `flat` needs a spline of degree 1 or more. On a degree-0 spline, put knots at
+  the stretch edges or band the feature with `OrderedCategorical`.
+- A flat stretch covers every whole knot span it touches. When a stretch
+  edge is not a knot, the fit warns and names the interval it actually
+  flattens.
+- On a `cr` spline, the natural end condition can also flatten the end span
+  beside a flat stretch. The warning names that case too.
+- Two flat stretches fewer than `degree` knot spans apart (three for a cubic)
+  also flatten the gap between them, since the curve has too few knots there
+  to bend. The warning names the whole interval; leave more knot spans between
+  the stretches to keep the gap free.
+
+For exact edges, use one of these:
+
+- `PolynomialRange(degree=0)` on a `bs` or `cr` spline. This pins the curve
+  flat on the range and changes the basis. See
+  [Polynomial ranges](specify-features.md#polynomial-ranges-polynomial_ranges).
+  A term with polynomial ranges cannot also carry a shape rule.
+- Knots at the stretch edges, set with `knots=[...]` or by choosing
+  `n_knots`. This keeps the shape rules. In the example above the ages run
+  from 10 to 85. `n_knots=9` puts evenly spaced knots 7.5 apart, so two of
+  them land on 25 and 40 and the fit does not warn.
+
+### Caps
+
+`C.cap(lo, hi)` keeps the printed relativity between `lo` and `hi`. Joined
+with a shape rule, it caps the shaped curve:
+
+```python
+model = SuperGLM(
+    family="poisson",
+    selection_penalty=0.0,
+    features={
+        "power": Spline(kind="ps", k=10, constraint=C.increasing & C.concave & C.cap(0.6, 1.8)),
+    },
+)
+model.fit(df, y)
+
+curve = model.term_inference("power", with_se=False, n_points=200).relativity
+curve.min(), curve.max()  # inside 0.6 and 1.8, to solver tolerance
+```
+
+- A cap is measured on the printed curve, not on the raw coefficients.
+- For a spline, the printed curve is the native one. Its log relativity
+  averages to 0 over the training rows, so its geometric mean is 1.
+- For a categorical or an ordered categorical, the cap is measured against the
+  base level, whose relativity is 1.
+- A cap needs a log link and is refused under any other link, because only
+  then is the printed relativity a factor.
+- A cap must contain 1: `0 < lo <= 1 <= hi` and `lo < hi`.
+- A term takes at most one cap.
+- On a spline whose rules make it monotone over the whole range, the cap is
+  exact at the ends.
+- On a curve that is not monotone, the cap holds everywhere, but the curve may
+  stop slightly short of it.
+- A cap holds on the training range. With `extrapolation="extend"` the fit
+  warns that the tails beyond it are not capped. Use `extrapolation="clip"` to
+  keep predictions inside the cap.
+
+### Ordered categoricals
+
+Put the rules on the spline basis of an `OrderedCategorical`. Add a cap to
+limit the relativity of every band against the base band, and `max_step` to
+limit the step between neighbours:
+
+```python
+steps = C.increasing & C.cap(0.8, 1.25) & C.max_step(0.15)
+
+model = SuperGLM(
+    family="poisson",
+    selection_penalty=0.0,
+    features={"band": OrderedCategorical(order=bands, basis=Spline(k=6, constraint=steps))},
+)
+model.fit(df, y)
+
+ti = model.term_inference("band", with_se=False)
+pd.Series(ti.relativity, index=ti.levels)
+```
+
+`C.max_step(up, down)` keeps every ratio between adjacent bands inside
+`[1 - down, 1 + up]`. `C.max_step(0.15)` allows 15% up and 15% down. A
+separate limit down, as in `C.max_step(0.15, 0.10)`, allows 15% up and 10%
+down. Both are fractions, `up > 0` and `0 < down < 1`.
+
+- `down` defaults to `up`. When `up` is 1 or more, give `down` explicitly:
+  `C.max_step(1.0)` is refused, while `C.max_step(1.0, 0.5)` fits.
+- A term takes at most one `max_step`.
+- `max_step` applies only to ordered categoricals, where it limits the step
+  between the levels.
+- On a spline term `max_step` is refused. To limit steps on a numeric
+  feature, band it with `OrderedCategorical` first.
+- `max_step` needs a log link, like a cap.
+- Shape rules and `flat` bind on the whole level axis, as stated under
+  [Constraints on an `OrderedCategorical`](#constraints-on-an-orderedcategorical-bind-on-the-whole-level-axis).
+- Caps and `max_step` bind at the levels.
+- Stretch ends are level labels, inclusive, in level order. When the term uses
+  a grouping, a group label names its group. For example,
+  `C.increasing.above("36-45")` applies from the 36-45 band to the last.
+- A cap or `max_step` together with special levels is refused. A special
+  level is a free effect off the curve, so no level row can hold it.
+
+### Caps on plain categoricals
+
+A `Categorical` takes a cap and nothing else. Every level is held between
+`lo` and `hi` against the base level:
+
+```python
+model = SuperGLM(
+    family="poisson",
+    selection_penalty=0.0,
+    features={"region": Categorical(constraint=C.cap(0.8, 1.25))},
+)
+model.fit(df, y)
+
+ti = model.term_inference("region", with_se=False)
+pd.Series(ti.relativity, index=ti.levels)
+```
+
+`cat("region", constraint=C.cap(0.8, 1.25))` is the same declaration in the
+`terms=[...]` form:
+
+```python
+from superglm import cat
+
+model = SuperGLM(
+    family="poisson",
+    selection_penalty=0.0,
+    terms=[cat("region", constraint=C.cap(0.8, 1.25))],
+)
+model.fit(df, y)
+```
+
+- A shape rule on a plain categorical is refused. Use an `OrderedCategorical`
+  for a shape.
+- A capped categorical needs `selection_penalty=0`, as every fit-time shape,
+  cap and step limit does. A flat stretch alone is part of the basis and fits
+  under a selection penalty.
+
+### What the rules do not do
+
+- Rules bind the main-effect curve only. In an interaction, the main effect
+  times the interaction effect can go past a cap.
+- Smoothing is chosen without the rules, then the model is refit with them.
+  See [REML Semantics](#reml-semantics).
+- Intervals treat a rule that binds as fixed. See
+  [QP-Backed Shape Fits](#qp-backed-shape-fits).
+- `Constraint.postfit` takes only a single shape over the whole range.
+  Combinations, stretches and caps are fit-time only.
+- `SuperLSS` does not enforce these rules. It warns and fits the term
+  unconstrained.
+- `fit_path()` does not enforce shapes, caps or step limits either. It warns
+  once, naming every term whose rules it ignores, and fits those terms
+  unconstrained; refit with `fit()` or `fit_reml()` to enforce the rules. The
+  summary and `term_inference()` mark those rule lines `not enforced: fit_path`.
+  A flat stretch is part of the term's basis, so it still holds on the path and
+  is not named.
 
 ## Linear Predictor Semantics
 
@@ -127,6 +390,8 @@ Statistics* 40(2), 2012, Theorem 3).
 - Standard errors and intervals are conditional on which rows bind. Along the
   directions those rows hold, they are zero, so a term held flat has a
   zero-width interval.
+- A rule that binds is treated as fixed. A curve held on a cap has a
+  zero-width interval along it, the same as a term held flat.
 - Under `fit_reml()`, the published scale is still the REML estimate, which
   does not read the face.
 
@@ -140,7 +405,10 @@ Shape-constrained splines work with `fit_reml()`:
 
 Automatic lambda estimation is not exact joint constrained REML: it estimates
 the lambdas from an unconstrained REML pass and then refits with the shape
-constraints at those lambdas.
+constraints at those lambdas. Combined rules, stretches, caps and step limits
+take the same route. REML chooses the smoothing without the shapes, caps and step
+limits, then the model is refit with them at those smoothing parameters. A flat
+stretch is part of the term's basis, so REML already holds it.
 
 ### With a random effect
 
@@ -178,11 +446,26 @@ not monotone in `x` and are not supposed to be. Read the term's own curve via
 
 These combinations are intentionally guarded:
 
-- fit-time shape constraints with `selection_penalty > 0`
+- fit-time shapes, caps and step limits, including caps on a `Categorical`,
+  with `selection_penalty > 0` (a term whose only rules are flat stretches fits
+  under a selection penalty)
 - fit-time shape constraints with `select=True`
 - `kind="ns"` fit-time shape constraints
 - `Constraint.fit.convex` or `Constraint.fit.concave` on a `PSpline` or
   `BSplineSmooth` with `degree > 3`
+- a direction rule on a stretch, such as `C.increasing.below(5)`, on a spline
+  of degree 1
+- a curvature rule on a stretch, such as `C.convex.above(5)`, on a spline of
+  degree 2 or less
+- `Constraint.fit.cap` or `Constraint.fit.max_step` under any link but log
+- `Constraint.fit.cap` or `Constraint.fit.max_step` on an `OrderedCategorical`
+  with special levels
+- `Constraint.fit.max_step` on a spline term
+- `Constraint.fit.flat` with no stretch, or with a stretch that holds every knot
+  span of the term
+- `Constraint.fit.flat` on a spline of degree 0
+- `polynomial_ranges=` on a term that also has a shape constraint
+- a shape rule other than a cap on a `Categorical`
 
 If you need one of these combinations, treat it as unsupported rather than
 assuming it is a valid workflow.
@@ -194,6 +477,10 @@ Post-fit repair still exists for all `Constraint.postfit.*` tokens:
 ```python
 model.apply_shape_postfit(df)
 ```
+
+`Constraint.postfit` takes only a single shape over the whole range. A
+combination, a stretch, `flat`, a cap or `max_step` is fit-time only, and
+`Constraint.postfit` refuses it.
 
 Use it when you already have a fitted model and need a manual monotone,
 convex, or concave repair. Do not treat it as the preferred modeling path when
@@ -308,6 +595,8 @@ today.
 
 - choose solver-backed monotone / curvature constraints when the business rule
   is part of the actual tariff design
+- state a relativity cap or a limit on the step between bands inside the fit,
+  rather than editing the table afterwards
 - the QP fits constrained splines of every kind, P-splines included
 - keep `selection_penalty=0` for these workflows
 - validate the fitted shape on a prediction grid before signing off

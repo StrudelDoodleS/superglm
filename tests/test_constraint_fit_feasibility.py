@@ -59,20 +59,15 @@ def _increasing_model() -> SuperGLM:
     )
 
 
-@pytest.mark.parametrize(
-    ("cold_converged", "safeguarded_converged"),
-    [(False, False), (False, True), (True, False)],
-)
+@pytest.mark.parametrize("cold_converged", [False, True])
 def test_failed_warm_qp_retries_cold_without_weakening_certificate(
     monkeypatch: pytest.MonkeyPatch,
     cold_converged: bool,
-    safeguarded_converged: bool,
 ) -> None:
     """A warm active set is only an optimization hint for the same QP.
 
-    The degenerate-vertex attempt (issue #472) runs only after both the warm
-    and the cold solve fail. It replaces their result only when it is
-    certified.
+    A failed warm solve is retried cold, once; the cold result replaces it
+    only when it is certified.
     """
     import superglm.solvers.irls_direct._qp as irls_direct_qp
     from superglm.solvers.constrained_qp import QPResult
@@ -87,17 +82,10 @@ def test_failed_warm_qp_retries_cold_without_weakening_certificate(
         active_set=[],
         converged=cold_converged,
     )
-    safeguarded_result = QPResult(
-        beta=np.array([0.75]),
-        active_set=[],
-        converged=safeguarded_converged,
-    )
-    calls: list[tuple[list[int] | None, bool]] = []
+    calls: list[list[int] | None] = []
 
-    def fake_solve(*_args, active_set_init=None, _degeneracy_safeguards=False, **_kwargs):
-        calls.append((active_set_init, _degeneracy_safeguards))
-        if _degeneracy_safeguards:
-            return safeguarded_result
+    def fake_solve(*_args, active_set_init=None, **_kwargs):
+        calls.append(active_set_init)
         return warm_result if active_set_init is not None else cold_result
 
     monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", fake_solve)
@@ -109,12 +97,8 @@ def test_failed_warm_qp_retries_cold_without_weakening_certificate(
         [0],
     )
 
-    if cold_converged:
-        assert calls == [([0], False), (None, False)]
-        assert result is cold_result
-    else:
-        assert calls == [([0], False), (None, False), (None, True)]
-        assert result is (safeguarded_result if safeguarded_converged else warm_result)
+    assert calls == [[0], None]
+    assert result is (cold_result if cold_converged else warm_result)
 
 
 @pytest.mark.parametrize(
@@ -132,8 +116,7 @@ def test_qp_cold_retry_is_absent_from_the_normal_solve_path(
 ) -> None:
     """Cold retry adds no work unless a nonempty warm active set fails.
 
-    A failed cold start goes straight to the degenerate-vertex attempt,
-    and a certified solve makes no further call.
+    A failed cold start, and a certified solve, make no further call.
     """
     import superglm.solvers.irls_direct._qp as irls_direct_qp
     from superglm.solvers.constrained_qp import QPResult
@@ -143,14 +126,9 @@ def test_qp_cold_retry_is_absent_from_the_normal_solve_path(
         active_set=[] if active_set_init is None else active_set_init,
         converged=converged,
     )
-    safeguarded_result = QPResult(beta=np.array([0.5]), converged=False)
     active_sets: list[list[int] | None] = []
-    safeguarded_calls: list[list[int] | None] = []
 
-    def fake_solve(*_args, active_set_init=None, _degeneracy_safeguards=False, **_kwargs):
-        if _degeneracy_safeguards:
-            safeguarded_calls.append(active_set_init)
-            return safeguarded_result
+    def fake_solve(*_args, active_set_init=None, **_kwargs):
         active_sets.append(active_set_init)
         return result
 
@@ -164,7 +142,6 @@ def test_qp_cold_retry_is_absent_from_the_normal_solve_path(
     )
 
     assert active_sets == [active_set_init]
-    assert safeguarded_calls == ([] if converged else [None])
     assert observed is result
 
 
@@ -188,9 +165,8 @@ def test_primal_feasibility_cannot_replace_the_inner_qp_kkt_certificate(
     design, y, weights, groups = _one_coefficient_line_search_problem(constrained=True)
     calls: list[None] = []
 
-    def feasible_but_uncertified_qp(*_args, _degeneracy_safeguards=False, **_kwargs):
-        if not _degeneracy_safeguards:
-            calls.append(None)
+    def feasible_but_uncertified_qp(*_args, **_kwargs):
+        calls.append(None)
         return QPResult(beta=np.zeros(1), converged=False)
 
     monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", feasible_but_uncertified_qp)
@@ -298,97 +274,6 @@ def test_a_strict_separation_stop_raises_before_the_constraint_refusal(
         if "no complete constrained-QP KKT certificate" in record.getMessage()
     ]
     assert len(refusals) == (1 if separation == "warn" else 0)
-
-
-def test_a_failed_degeneracy_retry_is_latched_off_for_the_rest_of_the_fit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A QP that keeps failing pays for the #472 retry once per fit.
-
-    The retry can cost a full active-set solve, and non-convergence usually
-    persists for the rest of a fit. Mutation: without the latch in
-    ``fit_irls_direct``, the failed retry runs again on every IRLS iteration,
-    three times here instead of once.
-    """
-    import superglm.solvers.irls_direct._fit as irls_direct
-    import superglm.solvers.irls_direct._qp as irls_direct_qp
-    from superglm.distributions import Gaussian
-    from superglm.links import IdentityLink
-    from superglm.solvers.constrained_qp import QPResult
-
-    design, y, weights, groups = _one_coefficient_line_search_problem(constrained=True)
-    ordinary: list[None] = []
-    safeguarded: list[None] = []
-
-    def uncertified_qp(*_args, _degeneracy_safeguards=False, **_kwargs):
-        (safeguarded if _degeneracy_safeguards else ordinary).append(None)
-        return QPResult(beta=np.zeros(1), converged=False)
-
-    monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", uncertified_qp)
-    result, _ = irls_direct.fit_irls_direct(
-        design,
-        y,
-        weights,
-        Gaussian(),
-        IdentityLink(),
-        groups,
-        lambda2=0.0,
-        max_iter=3,
-        tol=1e-10,
-        convergence="coefficients",
-        weight_semantics="frequency",
-    )
-
-    assert len(ordinary) == 3
-    assert len(safeguarded) == 1
-    assert result.termination_reason == "constraint_kkt_incomplete"
-
-
-def test_a_certified_solve_rearms_the_degeneracy_retry(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An ordinary solve that certifies re-arms the #472 retry for the rest of the fit (#477 review).
-
-    The QP fails, certifies, then fails again.  The first failure latches the
-    retry off; the certified solve between shows the failure was transient,
-    so the third iterate's failure gets the retry again: two retries, not
-    one.  Mutation: a latch that never re-arms runs it once.
-    """
-    import superglm.solvers.irls_direct._fit as irls_direct
-    import superglm.solvers.irls_direct._qp as irls_direct_qp
-    from superglm.distributions import Gaussian
-    from superglm.links import IdentityLink
-    from superglm.solvers.constrained_qp import QPResult
-
-    # y = +x: the optimum beta = 1 is interior, so the stand-in QP's steps
-    # 0.3, 0.6, 0.9 each lower the deviance and are accepted.
-    design, y, weights, groups = _one_coefficient_line_search_problem(constrained=True)
-    y = -y
-    ordinary: list[None] = []
-    safeguarded: list[None] = []
-
-    def qp(*_args, _degeneracy_safeguards=False, **_kwargs):
-        if _degeneracy_safeguards:
-            safeguarded.append(None)
-            return QPResult(beta=np.full(1, 0.3 * len(ordinary)), converged=False)
-        ordinary.append(None)
-        return QPResult(beta=np.full(1, 0.3 * len(ordinary)), converged=len(ordinary) == 2)
-
-    monkeypatch.setattr(irls_direct_qp, "solve_constrained_qp", qp)
-    irls_direct.fit_irls_direct(
-        design,
-        y,
-        weights,
-        Gaussian(),
-        IdentityLink(),
-        groups,
-        lambda2=0.0,
-        max_iter=3,
-        tol=1e-10,
-        convergence="coefficients",
-        weight_semantics="frequency",
-    )
-
-    assert len(ordinary) == 3
-    assert len(safeguarded) == 2
 
 
 def test_rejected_poisson_proposal_cannot_reuse_the_previous_working_kkt_certificate(
@@ -1555,8 +1440,8 @@ def test_an_increasing_term_held_flat_by_an_inverse_link_returns_a_certified_mod
     """Gamma/inverse: the passthrough's terminal QP at a flat term certifies.
 
     The term sits at its zero face, or on a ray of it near 1e-6, in
-    coordinates scaled by its smoothing parameter; its QP certifies only on
-    the retry, whose multipliers are fitted in the certificate's units.
+    coordinates scaled by its smoothing parameter; its QP certifies in the
+    ordinary solve, whose multipliers are fitted in the certificate's units.
     Mutation: fitted unweighted, as before, the REML fit ends unconverged.
     """
     frame, y = _restricted_link_book("inverse", seed=0)

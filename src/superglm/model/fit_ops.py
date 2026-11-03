@@ -1255,15 +1255,99 @@ def _disclose_data_rank_route(model) -> None:
 def _reject_monotone_fit_conflicts(model, penalty, has_lambda1_targets) -> None:
     """Refuse the monotone configurations no ordinary-fit solver honours, once the groups exist."""
     # The constrained QP solver path ignores lambda1 — reject explicitly.
-    if (
-        any(g.monotone_engine is not None for g in model._groups)
-        and penalty.lambda1 is not None
-        and penalty.lambda1 > 0
-        and has_lambda1_targets
-    ):
+    constrained = list(
+        dict.fromkeys(g.feature_name for g in model._groups if g.monotone_engine is not None)
+    )
+    if constrained and penalty.lambda1 is not None and penalty.lambda1 > 0 and has_lambda1_targets:
         raise NotImplementedError(
-            "Monotone fit-time constraints are not supported with selection_penalty > 0. "
-            "Set selection_penalty=0 or fit unconstrained and call model.monotonize()."
+            f"Fit-time constraints on {constrained} are not supported with "
+            "selection_penalty > 0. Set selection_penalty=0, or drop the constraint "
+            "(for a monotone smooth, fit unconstrained and call model.monotonize())."
+        )
+
+
+def _validate_rule_fit_conflicts(model) -> None:
+    """Refuse caps and step limits a fit cannot honour and disclose what a cap leaves out.
+
+    A cap and a step limit bound printed relativities, which are factors only
+    under a log link (the rating-table export refuses other links for the
+    same reason).
+    A capped spline that extends linearly past its training range is capped
+    on that range only, so the fit warns once per feature that its tails are
+    not. Reads every main-effect and interaction spec by its rule objects; a
+    spec whose rows cannot hold a cap or step limit refuses it first, before
+    the link: an ordered term with special levels (``_refuse_level_rules``)
+    and a spline term given a step limit (``refuse_max_step``).
+    """
+    from superglm._predictor_compiler import _feature_named_messages
+    from superglm.features._spline_subclass_ops import refuse_max_step
+    from superglm.features.constraint import rules_of
+    from superglm.features.spline import _SplineBase
+    from superglm.links import LogLink, resolve_link
+
+    link = None
+    for name, spec in itertools.chain(model._specs.items(), model._interaction_specs.items()):
+        rules = rules_of(spec)
+        if not any(rule.kind in ("cap", "max_step") for rule in rules):
+            continue
+        with _feature_named_messages(name):
+            refuse_level_rules = getattr(spec, "_refuse_level_rules", None)
+            if refuse_level_rules is not None:
+                refuse_level_rules()
+            if isinstance(spec, _SplineBase):
+                refuse_max_step(spec)
+            held = next(rule for rule in rules if rule.kind in ("cap", "max_step"))
+            if link is None:
+                family = resolve_distribution(configured_family(model))
+                link = resolve_link(configured_link(model), family)
+            if not isinstance(link, LogLink):
+                raise ValueError(
+                    f"{held.describe()} bounds printed relativities, which need a log link; "
+                    f"this model uses {type(link).__name__}. Fit with link='log' or drop the "
+                    f"{held.kind}"
+                )
+            cap = next((rule for rule in rules if rule.kind == "cap"), None)
+            if cap is not None and getattr(spec, "extrapolation", None) == "extend":
+                warnings.warn(
+                    f"{cap.describe()} holds on the training range; with extrapolation='extend' "
+                    "the tails beyond the training range are not capped. Use "
+                    "extrapolation='clip' to keep predictions inside the cap",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
+
+def _warn_fit_time_rules_ignored_on_path(model) -> None:
+    """Disclose, once, the fit-time shape rules ``fit_path`` fits unconstrained.
+
+    The path sweeps a selection penalty through PIRLS, which takes no constraint
+    rows (the constrained QP route ignores ``lambda1``), so every term fits
+    without its shape, cap and step-limit rules, as it always has. A flat stretch
+    is not one of them: it is part of the term's basis and still holds. Reads
+    every main-effect and interaction spec by its rule objects (spline, ordered
+    and categorical terms alike). A post-fit shape applies after the fit and is
+    not named.
+    """
+    from superglm.distributional.predictor import ShapeConstraintIgnoredWarning
+    from superglm.features.constraint import rules_of
+
+    ignored = []
+    flat = False
+    for name, spec in itertools.chain(model._specs.items(), model._interaction_specs.items()):
+        fit_time = [rule for rule in rules_of(spec) if rule.mode == "fit"]
+        flat = flat or any(rule.kind == "flat" for rule in fit_time)
+        held = [rule.describe() for rule in fit_time if rule.kind != "flat"]
+        if held:
+            ignored.append(f"{name!r} ({' & '.join(held)})")
+    if ignored:
+        warnings.warn(
+            f"fit_path() ignores the fit-time shape rules on {', '.join(ignored)} and fits "
+            "these terms unconstrained: the path sweeps a selection penalty, which no "
+            "constrained solver takes"
+            + ("; a flat stretch is part of the basis and still holds" if flat else "")
+            + ". Refit with fit() or fit_reml() to enforce them",
+            ShapeConstraintIgnoredWarning,
+            stacklevel=5,
         )
 
 
@@ -1418,6 +1502,7 @@ def _fit_in_workspace(
     _reject_lambda_policy_fit(model, "fit")
 
     _auto_detect_specs_if_needed(model, X, sample_weight_ref)
+    _validate_rule_fit_conflicts(model)
     _clear_profile_results(model)
 
     _clear_reml_state(model)
@@ -1551,6 +1636,8 @@ def _fit_path_in_workspace(
     )
 
     _auto_detect_specs_if_needed(model, X, sample_weight_ref)
+    _validate_rule_fit_conflicts(model)
+    _warn_fit_time_rules_ignored_on_path(model)
     # A path sweeps lambda1 over a positive grid on ONE design, so the design
     # has to be the one a positive lambda1 requires, whatever the model was
     # configured with.
@@ -1848,6 +1935,7 @@ def _fit_reml_in_workspace(
     model.__dict__.pop("_deferred_rank_info", None)
 
     _auto_detect_specs_if_needed(model, X, sample_weight_ref)
+    _validate_rule_fit_conflicts(model)
     _maybe_estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
     configured_smoothing = configured_lambda2(model)
 

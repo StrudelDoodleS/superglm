@@ -15,6 +15,8 @@ from superglm.diagnostics.convergence import (
     coefficient_nonconvergence_message,
     reml_nonconvergence_message,
 )
+from superglm.features.categorical import Categorical
+from superglm.features.constraint import rules_of
 
 
 def training_telemetry(model) -> dict[str, Any]:
@@ -309,11 +311,14 @@ def _feature_spec_payload(spec) -> dict[str, Any]:
         "degree",
         "_n_knots",
         "_degree",
-        "constraint_kind",
-        "constraint_mode",
     ):
         if hasattr(spec, attr):
             payload["config"][attr] = getattr(spec, attr)
+    # A categorical states its constraint fields only when it holds a rule (a cap).
+    if not isinstance(spec, Categorical) or rules_of(spec):
+        for attr in ("constraint_kind", "constraint_mode"):
+            if hasattr(spec, attr):
+                payload["config"][attr] = getattr(spec, attr)
     return payload
 
 
@@ -341,14 +346,18 @@ def _interaction_spec_payload(spec) -> dict[str, Any]:
     return payload
 
 
-def _constraint_payload(spec) -> dict[str, str] | None:
+def _constraint_payload(spec) -> dict[str, Any] | None:
     if spec is None:
         return None
     kind = getattr(spec, "constraint_kind", None) or getattr(spec, "monotone", None)
     mode = getattr(spec, "constraint_mode", None) or getattr(spec, "monotone_mode", None)
     if kind is None:
         return None
-    return {"kind": str(kind), "mode": str(mode)}
+    return {
+        "kind": str(kind),
+        "mode": str(mode),
+        "rules": [rule.describe() for rule in rules_of(spec)],
+    }
 
 
 def _group_size(group) -> int:

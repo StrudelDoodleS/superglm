@@ -25,6 +25,7 @@ from superglm.features import (
     _spline_select,
     _spline_subclass_ops,
 )
+from superglm.features.constraint import ConstraintRules
 from superglm.types import GroupInfo, LambdaPolicy, LinearConstraintSet, TensorMarginalInfo
 
 if TYPE_CHECKING:
@@ -113,6 +114,19 @@ class _SplineBase:
     # class attribute is shared by every instance that never assigns its own.
     _polynomial_ranges: tuple[PolynomialRange, ...] = ()
     _base_interior_knots: NDArray | None = None
+    # Unpickled specs saved before rule collections read the empty default;
+    # ``rules_of`` then derives their single rule from ``constraint_kind``.
+    constraint_rules: ConstraintRules = ConstraintRules(())
+    # A rule collection's pieces and flat equality rows, resolved on the placed
+    # knots at each build (``_spline_subclass_ops.prepare_shape_rules``).
+    _shape_pieces: list[tuple[str, float, float]] | None = None
+    _flat_rows: NDArray | None = None
+    # The training basis mean a cap's rows are centred by, stored at each build
+    # (``_spline_build.training_basis_mean``).
+    _training_basis_mean: NDArray | None = None
+    # ``(value, label)`` of each level when the spline is an ordered term's basis,
+    # so a message names levels rather than their values; None otherwise.
+    _axis_levels: tuple[tuple[float, Any], ...] | None = None
 
     # Configuration and build-time state, assigned by ``_spline_config`` and by the
     # build helpers in ``_spline_runtime`` and ``_spline_cardinal_spec``. Annotations
@@ -305,17 +319,24 @@ class _SplineBase:
         """
         return _spline_ranges.pinning_rows(self._knots, self.degree, self._polynomial_ranges)
 
-    def _apply_constraints(self, B, omega: NDArray) -> tuple[Any, NDArray, int, NDArray | None]:
+    def _apply_constraints(
+        self, B, omega: NDArray, *, main_effect: bool = True
+    ) -> tuple[Any, NDArray, int, NDArray | None]:
         """Absorb ``C beta = 0`` as ``beta = Z theta``. Returns (B, omega, n_cols, projection).
 
         Z spans the null space of C (Wood 2017, section 1.8.1); without rows
-        the basis is left as it is.
+        the basis is left as it is. The main effect's rows include its flat
+        stretches (``_flat_rows``), which bind the main-effect curve only:
+        ``main_effect=False`` leaves them out and does not record ``_Z``.
         """
         C = self._constraint_rows()
+        if main_effect and self._flat_rows is not None and self._flat_rows.shape[0]:
+            C = np.vstack([C, self._flat_rows])
         if C.shape[0] == 0:
             return B, omega, self._n_basis, None
         Z = _spline_ranges.constraint_null_space(C)
-        self._Z = Z
+        if main_effect:
+            self._Z = Z
         return B, Z.T @ omega @ Z, Z.shape[1], Z
 
     def _natural_constraint_rows(self) -> NDArray:
@@ -544,8 +565,9 @@ class PSpline(_BSplineBase):
 
     knots : array-like or None
         Explicit interior knot positions.
-    constraint : ConstraintSpec or None
-        Public shape-constraint token. Use ``Constraint.fit.increasing``,
+    constraint : ConstraintSpec, ConstraintRules or None
+        Public shape-constraint token, or fit-time rules joined with ``&``
+        into a ``ConstraintRules``. Use ``Constraint.fit.increasing``,
         ``Constraint.fit.decreasing``, ``Constraint.fit.convex``,
         ``Constraint.fit.concave``, ``Constraint.postfit.increasing``,
         ``Constraint.postfit.decreasing``, ``Constraint.postfit.convex``, or
@@ -667,8 +689,9 @@ class BSplineSmooth(_IntegratedPenaltySpline, _BSplineBase):
         If True, add double-penalty shrinkage (null + range space).
     knots : array-like or None
         Explicit interior knot positions.
-    constraint : ConstraintSpec or None
-        Public shape-constraint token. Use ``Constraint.fit.increasing``,
+    constraint : ConstraintSpec, ConstraintRules or None
+        Public shape-constraint token, or fit-time rules joined with ``&``
+        into a ``ConstraintRules``. Use ``Constraint.fit.increasing``,
         ``Constraint.fit.decreasing``, ``Constraint.fit.convex``,
         ``Constraint.fit.concave``, ``Constraint.postfit.increasing``,
         ``Constraint.postfit.decreasing``, ``Constraint.postfit.convex``, or
@@ -830,8 +853,9 @@ class CubicRegressionSpline(_IntegratedPenaltySpline):
 
     Parameters
     ----------
-    constraint : ConstraintSpec or None
-        Public shape-constraint token. Use ``Constraint.fit.increasing``,
+    constraint : ConstraintSpec, ConstraintRules or None
+        Public shape-constraint token, or fit-time rules joined with ``&``
+        into a ``ConstraintRules``. Use ``Constraint.fit.increasing``,
         ``Constraint.fit.decreasing``, ``Constraint.fit.convex``,
         ``Constraint.fit.concave``, or any of the corresponding
         ``Constraint.postfit.*`` kinds. Fit-time constraints apply on the
@@ -926,12 +950,13 @@ class CubicRegressionSpline(_IntegratedPenaltySpline):
         natural row goes: for a Flat or Line range it is implied (a dependent
         duplicate), and for a Quadratic or Cubic one it would flatten the range.
         """
-        ranges = self._polynomial_ranges
-        free_ends = [
-            all(r.lo > self._lo for r in ranges),
-            all(r.hi < self._hi for r in ranges),
-        ]
+        free_ends = self._free_ends()
         return np.vstack([self._natural_constraint_rows()[free_ends], super()._constraint_rows()])
+
+    def _free_ends(self) -> list[bool]:
+        """Whether no polynomial range reaches the lower end, then the upper end."""
+        ranges = self._polynomial_ranges
+        return [all(r.lo > self._lo for r in ranges), all(r.hi < self._hi for r in ranges)]
 
 
 class CardinalCRSpline(_SplineBase):
@@ -964,7 +989,7 @@ class CardinalCRSpline(_SplineBase):
         If True, decompose into linear + wiggly subgroups (double penalty).
     knots : array-like or None
         Explicit interior knot positions.
-    constraint : ConstraintSpec or None
+    constraint : ConstraintSpec, ConstraintRules or None
         Public shape-constraint token. Cardinal CR splines support
         ``Constraint.postfit.increasing``, ``Constraint.postfit.decreasing``,
         ``Constraint.postfit.convex``, and ``Constraint.postfit.concave``.
@@ -1052,8 +1077,11 @@ class CardinalCRSpline(_SplineBase):
             return None
         return self._cr_knots[1:-1].copy()
 
-    def _apply_constraints(self, B, omega: NDArray) -> tuple[Any, NDArray, int, NDArray | None]:
+    def _apply_constraints(
+        self, B, omega: NDArray, *, main_effect: bool = True
+    ) -> tuple[Any, NDArray, int, NDArray | None]:
         """No Z-projection needed — natural BCs are built into M."""
+        del main_effect
         return B, omega, self._n_basis, None
 
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:

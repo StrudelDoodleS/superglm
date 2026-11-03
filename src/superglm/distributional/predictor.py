@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -16,8 +17,13 @@ from superglm._frame import EagerFrame
 from superglm._predictor_compiler import CompiledPredictorDesign, compile_predictor_design
 from superglm.distributional.family import ParameterSpec
 from superglm.distributional.weights import ResolvedLikelihoodWeights
+from superglm.features._spline_config import clear_shape_rules
+from superglm.features.categorical import Categorical
+from superglm.features.constraint import ConstraintRules, rules_of
 from superglm.features.factor_smooth import FactorSmooth
+from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.random_effect import validate_declared_nesting
+from superglm.features.spline import _SplineBase
 from superglm.group_matrix import (
     CrossMatrixExecutionPlan,
     DesignMatrix,
@@ -33,19 +39,46 @@ from superglm.types import FeatureSpec, PenaltyComponent
 
 
 class ShapeConstraintIgnoredWarning(UserWarning):
-    """A feature asked for a shape constraint the distributional path cannot apply yet."""
+    """A feature asked for a shape constraint the fit cannot apply.
+
+    SuperLSS has no constraint machinery yet, and ``fit_path`` takes no constraint rows;
+    both fit the term unconstrained and say so.
+    """
 
 
 def _constrained_features(predictor: Predictor) -> list[tuple[str, str, str]]:
-    """``(feature, kind, mode)`` for every feature spec carrying a shape constraint."""
+    """``(feature, rules, mode)`` for every feature spec carrying shape rules, as written."""
     found: list[tuple[str, str, str]] = []
     for name, spec in predictor.features.items():
-        inner = getattr(spec, "basis", spec)
-        kind = getattr(inner, "constraint_kind", getattr(inner, "monotone", None))
-        if kind is not None:
-            mode = getattr(inner, "constraint_mode", getattr(inner, "monotone_mode", "postfit"))
-            found.append((name, str(kind), str(mode)))
+        rules = rules_of(spec)
+        if rules:
+            found.append((name, rules.describe(), rules.rules[0].mode))
     return found
+
+
+def _without_shape_rules(predictor: Predictor) -> Predictor:
+    """``predictor`` with every shape rule removed from copies of the features that carry one.
+
+    SuperLSS applies no shape rule. A flat stretch is absorbed into the basis at every
+    spline build, so a feature must be built without its rules to be fitted without them.
+    """
+    if not _constrained_features(predictor):
+        return predictor
+    features = {}
+    for name, spec in predictor.features.items():
+        if rules_of(spec):
+            spec = copy.deepcopy(spec)
+            if isinstance(spec, OrderedCategorical):
+                bases = (spec._spline_obj, spec._spline)
+            else:
+                bases = (spec,)
+            for basis in bases:
+                if isinstance(basis, _SplineBase):
+                    clear_shape_rules(basis)
+                elif isinstance(basis, Categorical):
+                    basis._constraint_rules = ConstraintRules(())
+        features[name] = spec
+    return replace(predictor, features=features)
 
 
 @dataclass(frozen=True)
@@ -533,14 +566,15 @@ def compile_predictors(
     if not all(isinstance(predictor, Predictor) for predictor in predictor_tuple):
         raise TypeError("predictors must contain only Predictor values")
     for predictor in predictor_tuple:
-        for feature, kind, mode in _constrained_features(predictor):
+        for feature, rules, mode in _constrained_features(predictor):
             warnings.warn(
                 f"SuperLSS ignores shape constraints: {predictor.name}:{feature} asked for "
-                f"{kind} ({mode}); the distributional path has no constraint machinery yet, "
+                f"{rules} ({mode}); the distributional path has no constraint machinery yet, "
                 "so the smooth is fitted unconstrained",
                 ShapeConstraintIgnoredWarning,
                 stacklevel=3,
             )
+    predictor_tuple = tuple(_without_shape_rules(predictor) for predictor in predictor_tuple)
     _validate_predictor_order(parameter_tuple, predictor_tuple)
     boundary_tuple = (
         tuple(() for _ in predictor_tuple)

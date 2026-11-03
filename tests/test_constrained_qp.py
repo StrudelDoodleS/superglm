@@ -12,20 +12,22 @@ import scipy.optimize
 from superglm._fit_trace import MemoryTraceSink, NullTraceSink, TraceRun
 from superglm.solvers.constrained_qp import (
     BLOCKING_TRACE_CHANNEL,
+    _certifies_kkt_point,
     _consistency_floor,
     _constraint_blocks,
+    _constraint_structure,
     _feasibility_scale,
     _feasibility_slack,
+    _homogeneous_feasible_start,
     _is_feasible,
     _null_space_mass,
     _project_feasible,
-    _raises_working_rank,
     _solve_saddle_least_squares,
     _stationarity_certificate,
+    _WorkingBasis,
     _zero_block_faces,
     solve_constrained_qp,
 )
-from superglm.solvers.irls_direct import _solve_constrained_qp_with_cold_retry
 from superglm.solvers.rank import decompose_gram, needs_factor_certification
 
 
@@ -355,14 +357,12 @@ class TestCallSiteWarnings:
     def _non_converging(calls):
         """Wrap the real solver, forcing ``converged=False`` on every call.
 
-        ``calls`` counts ordinary solves. The retry's degenerate-vertex attempt
-        is forced to fail as well, but it is not counted.
+        ``calls`` counts them.
         """
         from superglm.solvers.constrained_qp import solve_constrained_qp as real_solve
 
         def fake_solve(*args, **kwargs):
-            if not kwargs.get("_degeneracy_safeguards"):
-                calls.append(1)
+            calls.append(1)
             result = real_solve(*args, **kwargs)
             result.converged = False
             return result
@@ -1894,14 +1894,14 @@ class TestInfeasibleEarlyReturnIsProjected:
         calls = []
         original = _project_feasible
 
-        def project(beta, A, b, tol):
+        def project(beta, A, b, tol, **kwargs):
             calls.append(beta.copy())
             if len(calls) == 1:
                 # A zero initial sweep budget leaves the unconstrained point.
                 # This directly exercises the same boundary as budget exhaustion,
                 # without counting a changing population of LAPACK roundoff.
                 return beta.copy()
-            return original(beta, A, b, tol)
+            return original(beta, A, b, tol, **kwargs)
 
         monkeypatch.setattr("superglm.solvers.constrained_qp._project_feasible", project)
         H = np.array([[2.0, 1.0], [1.0, 2.0]])
@@ -1932,9 +1932,9 @@ class TestInfeasibleEarlyReturnIsProjected:
         calls = []
         original = _project_feasible
 
-        def recording(beta, A, b, tol):
+        def recording(beta, A, b, tol, **kwargs):
             calls.append(_is_feasible(A, beta, b, tol))
-            return original(beta, A, b, tol)
+            return original(beta, A, b, tol, **kwargs)
 
         monkeypatch.setattr("superglm.solvers.constrained_qp._project_feasible", recording)
         rng = np.random.default_rng(11)
@@ -2483,9 +2483,12 @@ class TestFaceMinimumAboveTheStepGate:
 
 _ISSUE_472_QP = Path(__file__).parent / "fixtures" / "issue472_terminal_qp.json"
 _SCALED_BLOCK_QPS = Path(__file__).parent / "fixtures" / "shape_block_scaled_terminal_qp.json"
+_DEPENDENT_STALL_QP = Path(__file__).parent / "fixtures" / "qp_dependent_working_set_stall.npz"
+_WEIGHTED_MULTIPLIER_POINT = Path(__file__).parent / "fixtures" / "qp_weighted_multiplier_point.npz"
+_CAPPED_VERTEX_QP = Path(__file__).parent / "fixtures" / "qp_capped_vertex_drop.npz"
 
 
-class TestDegenerateVertexRetry:
+class TestDegenerateVertex:
     """Issue #472: a flat monotone term at zero with more active rows than coefficients.
 
     ``b = 0`` makes ``beta = 0`` feasible and ``H`` is positive definite, so the
@@ -2609,32 +2612,250 @@ class TestDegenerateVertexRetry:
         return H, H @ beta - A.T @ multipliers, A, np.zeros(11)
 
     @pytest.mark.parametrize("order", ["C", "F"])
-    def test_a_degenerate_vertex_is_certified_by_the_retry(self, order):
-        """The retry certifies the degenerate vertex: the regression for #472.
+    def test_a_degenerate_vertex_is_certified_by_the_ordinary_solve(self, order):
+        """The ordinary solve certifies the degenerate vertex: the regression for #472.
 
-        Mutation: 0.37.1 returns ``converged=False`` here. Removing either
-        safeguard alone from the retry also leaves it uncertified: the
-        dependent-row skip (``_raises_working_rank``) or the per-block zero
-        face (``_zero_block_faces``). All three hold in both memory orders and
-        at every 8-byte offset of ``H``, ``g`` and ``A`` from a 64-byte
-        boundary. The parametrization is a portability check of that.
+        Rows ``2 B[0]`` and ``B[3] / 2`` are exactly dependent on the rest, so
+        the working set's independence is a decision of geometry, not of
+        rounding. Mutation: 0.37.1, and the solver before every solve kept its
+        working set independent, exhaust 200 iterations here uncertified.
+        Without the dependent-row test a dependent row reaches the basis
+        update, whose ``qr_insert`` raises ``LinAlgError``; without the
+        per-block zero face (``_zero_block_faces``) the solve ends uncertified.
+        All of these hold in both memory orders; the parametrization is a
+        portability check.
         """
         H, g, A, b = self._degenerate_vertex_problem(seed=113)
         H, A = np.asarray(H, order=order), np.asarray(A, order=order)
-        result = _solve_constrained_qp_with_cold_retry(H, g, A, b, None)
+        result = solve_constrained_qp(H, g, A, b)
         assert result.converged
+        assert result.n_iter <= 12
         self._assert_agrees_with_dual_oracle(H, g, A, b, result)
 
-    def test_an_exactly_dependent_row_does_not_raise_the_working_rank(self):
-        """The skip's decision is geometry, independent of rounding in any solve.
+    @pytest.mark.parametrize("order", ["C", "F"])
+    def test_a_captured_dependent_working_set_is_certified(self, order):
+        """A stretched U-shape's junction rows certify within 30 iterations: a portability check.
 
-        ``2 B[0]`` is exactly dependent on ``B[0]``, and ``B[1]`` is not.
+        The fixture is a 32-coefficient sub-problem of a shape-rule fit's first
+        QP (provenance inside), with 25 homogeneous rows. Six of them state the
+        sign of one quadratic piece of the U's derivative, on the knot span
+        holding its turning point, and span three dimensions there. Whether the
+        solver before this fix fails on it depends on the BLAS rounding path:
+        with native AVX-512 OpenBLAS kernels it cycles on one dependent row
+        for 200 iterations in both orders, ending on a rank-deficient working
+        set; with ``OPENBLAS_CORETYPE=Haswell`` it certifies in 18. The
+        regression for the mechanism is the designed degenerate vertex above.
+        """
+        doc = np.load(_DEPENDENT_STALL_QP)
+        H, g, A, b = (doc[key] for key in ("H", "g", "A", "b"))
+        A = np.asarray(A, order=order)
+        result = solve_constrained_qp(H, g, A, b)
+        assert result.converged
+        assert result.n_iter <= 30
+        working = A[result.active_set]
+        working = working / np.linalg.norm(working, axis=1)[:, None]
+        assert np.linalg.matrix_rank(working) == len(result.active_set)
+        self._assert_agrees_with_dual_oracle(H, g, A, b, result)
+
+    @pytest.mark.parametrize("problem", ["designed", "captured"])
+    def test_every_blocking_row_raises_the_working_set_rank(self, problem):
+        """Each row the ratio test adds lies off the span of the rows already working.
+
+        Checked on every blocking decision with this test's own SVD. A
+        dependent row's distance from that span, relative to its norm, is
+        rounding (below 1e-13 on these fixtures) and an independent row's is
+        1e-3 or more, so ``sqrt(u)``, about 1e-8, lies orders of magnitude
+        from both. Mutation: without the dependent-row test the captured
+        problem's working set takes a row at rounding distance.
+        """
+        unit_roundoff = np.finfo(np.float64).eps / 2
+        if problem == "designed":
+            H, g, A, b = self._degenerate_vertex_problem(seed=113)
+        else:
+            doc = np.load(_DEPENDENT_STALL_QP)
+            H, g, A, b = (doc[key] for key in ("H", "g", "A", "b"))
+        sink = MemoryTraceSink()
+        solve_constrained_qp(H, g, A, b, _trace_run=TraceRun("independence", sink=sink))
+        blocked = [event.payload for event in sink.events if event.payload["blocking_row"] >= 0]
+        assert blocked, "no blocking decision: the fixture no longer reaches the ratio test"
+        unit = A / np.linalg.norm(A, axis=1)[:, None]
+        separation = np.sqrt(unit_roundoff)
+        for record in blocked:
+            candidate = unit[record["blocking_row"]]
+            if record["working_rows"]:
+                _, singular, right = np.linalg.svd(unit[list(record["working_rows"])])
+                span = right[: int(np.sum(singular > separation * singular[0]))]
+                candidate = candidate - span.T @ (span @ candidate)
+            assert np.linalg.norm(candidate) > separation, (
+                f"row {record['blocking_row']} entered the working set "
+                f"{record['working_rows']} at distance {np.linalg.norm(candidate):.1e}"
+            )
+
+    def test_the_multiplier_fit_certifies_a_kkt_point_across_a_wide_weight_spread(self):
+        """A captured KKT point whose coordinate weights span about 2e32 passes the certificate.
+
+        One categorical level without claims has curvature 1.85e-32 at this
+        point (provenance in the fixture), so its coefficient's own actions
+        are about 1e-33. An independent NNLS fit on the working rows leaves a
+        relative residual below ``64 u``: the point is KKT. Mutations: fitted
+        unweighted, the certificate releases working row 14 on a multiplier it
+        reads as negative; fitted weighted through an SVD (the #472 retry
+        before this fix), row 9 reads -2.08e-4 and is released.
+        """
+        unit_roundoff = np.finfo(np.float64).eps / 2
+        doc = np.load(_WEIGHTED_MULTIPLIER_POINT)
+        H, g, A, b, x = (doc[key] for key in ("H", "g", "A", "b", "x"))
+        H = 0.5 * (H + H.T)
+        rows = A / np.max(np.abs(A), axis=1)[:, None]
+        _, residual = scipy.optimize.nnls(rows.T, H @ x - g, maxiter=50 * len(A))
+        scale = np.linalg.norm(np.abs(H) @ np.abs(x) + np.abs(g))
+        assert residual <= 64 * unit_roundoff * scale, "the fixture is no longer a KKT point"
+        assert _stationarity_certificate(H, g, x, A, self._TOL)[:2] == (True, None)
+        assert _certifies_kkt_point(H, g, x, A, b, list(range(len(A))), self._TOL, np.abs(A))
+
+    def test_row_sorting_keeps_a_light_equation_in_the_multiplier_fit(self):
+        """Powell and Reid's matrix as a vertex: its multipliers need the light equation.
+
+        Coefficients 1 and 2 have actions ``2**-62`` of coefficient 0's, so
+        the weighted system the multipliers are fitted from is Powell and
+        Reid's example (Cox and Higham 1998, eq. 1.3),
+        ``[[0, 1, 1], [lam, -lam/2, 0], [lam, 0, -lam]]`` with
+        ``lam = 2**62``. The heavy equations leave the multipliers' direction
+        ``(1, 2, 1)`` free, so the light one fixes their size. The three rows
+        meet at the planted point, where ``H beta - g = A' (1, 2, 1)`` exactly:
+        the vertex is the optimum, with multipliers ``(1, 2, 1) / 4`` in the
+        certificate's units. Column pivoting takes column 0 first, whose entry
+        in the light equation is zero. Unless the equations are sorted by
+        decreasing infinity norm, that first reflection mixes the light
+        equation into the heavy ones and loses it once ``lam > 2 sqrt(2) / u``
+        (Cox and Higham, section 1 and Lemma 4.2). Mutation: unsorted, the
+        multipliers come out about 300 times too small, stationarity fails at
+        coefficient 0, and the solve runs its 200 iterations uncertified.
+
+        The multipliers' tolerance is ``64 u`` times the infinity-norm
+        condition number of the row-equilibrated weighted system, 4, against
+        which the fit is row-wise backward stable (4 u measured).
+        The iteration bound is twice the 4 measured (three adds and the
+        certifying step); the mutation runs to 200.
+        """
+        unit_roundoff = np.finfo(np.float64).eps / 2
+        light = 2.0**-60
+        A = np.array([[0.0, 1.0, 1.0], [1.0, -0.5, 0.0], [1.0, 0.0, -1.0]])
+        H = np.diag([4.0, 1.0, 1.0])
+        x = np.array([1.0, light, light])
+        g = H @ x - A.T @ np.array([1.0, 2.0, 1.0])
+        b = A @ x
+        assert np.array_equal(H @ x - g, [3.0, 0.0, 0.0]), "the planted point is no longer KKT"
+        stationary, drop, multipliers = _stationarity_certificate(H, g, x, A, self._TOL)
+        assert (stationary, drop) == (True, None)
+        weighted = A.T * np.array([1.0, 2.0**62, 2.0**62])[:, None]
+        equilibrated = weighted / np.max(np.abs(weighted), axis=1)[:, None]
+        condition = np.linalg.cond(equilibrated, np.inf)
+        np.testing.assert_allclose(
+            multipliers, [0.25, 0.5, 0.25], rtol=64 * condition * unit_roundoff
+        )
+        assert _certifies_kkt_point(H, g, x, A, b, [0, 1, 2], self._TOL, np.abs(A))
+        result = solve_constrained_qp(H, g, A, b)
+        assert result.converged
+        assert result.n_iter <= 8
+        np.testing.assert_allclose(result.beta, x, rtol=0.0, atol=16 * unit_roundoff)
+
+    def test_an_exactly_dependent_row_does_not_raise_the_working_rank(self):
+        """The independence decision is geometry, independent of rounding in any solve.
+
+        ``2 B[0]`` (row 4) is exactly dependent on ``B[0]``, and ``B[1]`` is
+        not; ``B[3] / 2`` (row 5) is dependent on the four basis rows. Once
+        ``B[0]`` leaves the working set, ``2 B[0]`` is independent again, so
+        the basis follows a drop as well as an add. A warm set that repeats a
+        row keeps its first occurrence only.
         """
         _, _, A, _ = self._degenerate_vertex_problem(seed=113)
-        assert not _raises_working_rank(A, [0], 4, {})
-        assert not _raises_working_rank(A, [0, 1, 2, 3], 5, {})
-        assert _raises_working_rank(A, [0], 1, {})
-        assert _raises_working_rank(A, [], 4, {})
+        basis = _WorkingBasis(_constraint_structure(A).unit_rows)
+        assert basis.raises_rank(4)
+        assert basis.start([0]) == [0]
+        assert not basis.raises_rank(4)
+        assert basis.raises_rank(1)
+        for row in (1, 2, 3):
+            basis.insert(row)
+        assert not basis.raises_rank(5)
+        basis.delete(0)
+        assert basis.raises_rank(4)
+        assert not basis.raises_rank(2)
+        warm = _WorkingBasis(_constraint_structure(A).unit_rows).start([0, 1, 4, 2, 3, 5])
+        assert warm == [0, 1, 2, 3]
+
+    @pytest.mark.parametrize("entry", ["insert", "warm"])
+    def test_the_basis_follows_a_drop_from_as_many_rows_as_coefficients(self, entry):
+        """After a drop from p working rows on p coefficients, the basis spans the rows left.
+
+        The thin QR factor of p rows on p coefficients is square, and
+        ``scipy.linalg.qr_delete`` reads a square factor as a full one. The rows
+        are a hard cap's (``qp_capped_vertex_drop.npz``, provenance inside):
+        lower rows 0-4 and upper rows 16-19, nine of the ten basis coefficients.
+        The ten rows of one side have one dependency, with every weight
+        nonzero, so these nine are independent. Once row 0 leaves, rows 0, 5,
+        10 and 15 lie off the span of the eight left and the other rows lie on
+        it. Each decision is checked against this test's own SVD, where every
+        distance is either below 1e-13 or above 1e-2. Mutation: with
+        ``qr_delete``'s square ``Q`` kept, every row reads as dependent after
+        the drop.
+        """
+        separation = np.sqrt(np.finfo(np.float64).eps / 2)
+        A = np.load(_CAPPED_VERTEX_QP)["A"]
+        working = [0, 1, 2, 3, 4, 16, 17, 18, 19]
+        basis = _WorkingBasis(_constraint_structure(A).unit_rows)
+        if entry == "warm":
+            assert basis.start(working) == working
+        else:
+            for row in working:
+                assert basis.raises_rank(row)
+                basis.insert(row)
+        assert not any(basis.raises_rank(row) for row in range(len(A)))
+        basis.delete(0)
+        unit = A / np.linalg.norm(A, axis=1)[:, None]
+        span = np.linalg.svd(unit[working[1:]])[2][: len(working) - 1]
+        distance = np.linalg.norm(unit - (unit @ span.T) @ span, axis=1)
+        assert np.all((distance < 1e-13) | (distance > 1e-2))
+        assert np.flatnonzero(distance > separation).tolist() == [0, 5, 10, 15]
+        assert [basis.raises_rank(row) for row in range(len(A))] == list(distance > separation)
+
+    @pytest.mark.parametrize("order", ["C", "F"])
+    def test_a_hard_cap_vertex_is_certified(self, order):
+        """A captured hard-cap QP certifies at its vertex: a portability check.
+
+        The fixture is the first QP of a fit whose data push hard against
+        ``cap(0.95, 1.05)`` (provenance inside). Its optimum is a vertex, nine
+        cap rows on nine coefficients. The solve reaches a vertex at
+        iteration 9 and leaves it by a drop, so the next ratio test runs
+        against a basis just downdated from as many rows as coefficients. The
+        oracle shares no code with the solver: the solution is feasible, and
+        the rows tight there carry Lawson-Hanson NNLS multipliers that leave a
+        stationarity residual of rounding size. With ``H`` positive definite
+        that is the unique optimum. Tight slacks are below 1e-13 and the rest
+        above 4e-2, so ``sqrt(u)`` separates them. Mutation: with
+        ``qr_delete``'s square ``Q`` kept after the drop, the ratio test reads
+        both candidate rows as dependent, the full step leaves the cap by
+        8.9e-4 and the solve ends uncertified after 12 iterations, which
+        ``converged`` catches. The iteration bound, twice the 14 measured,
+        only catches a regression to a stall. The regression for the
+        mechanism is the basis test above.
+        """
+        unit_roundoff = np.finfo(np.float64).eps / 2
+        doc = np.load(_CAPPED_VERTEX_QP)
+        H, g, A, b = (doc[key] for key in ("H", "g", "A", "b"))
+        A = np.asarray(A, order=order)
+        result = solve_constrained_qp(H, g, A, b)
+        assert result.converged
+        assert result.n_iter <= 28
+        x = result.beta
+        assert _is_feasible(A, x, b, self._TOL)
+        tight = np.flatnonzero(_feasibility_slack(A, x, b) <= np.sqrt(unit_roundoff))
+        assert sorted(result.active_set) == tight.tolist()
+        rows = A[tight] / np.max(np.abs(A[tight]), axis=1)[:, None]
+        H = 0.5 * (H + H.T)
+        _, residual = scipy.optimize.nnls(rows.T, H @ x - g, maxiter=50 * len(A))
+        scale = np.linalg.norm(np.abs(H) @ np.abs(x) + np.abs(g))
+        assert residual <= 64 * unit_roundoff * scale
 
     def test_a_full_rank_homogeneous_block_face_is_exactly_zero(self):
         """Four independent homogeneous rows on four coefficients fix them at zero.
@@ -2654,56 +2875,57 @@ class TestDegenerateVertexRetry:
             np.testing.assert_array_equal(out[12:], residue[12:])
 
     @pytest.mark.parametrize("order", ["C", "F"])
-    def test_issue_472_terminal_qp_is_certified_by_the_retry(self, order):
+    def test_issue_472_terminal_qp_is_certified_by_the_ordinary_solve(self, order):
         """A refused sweep fit's terminal QP is certified: a portability check.
 
         The fixture is the QP reduced exactly onto its 12 constrained
         coefficients (provenance inside the file). Its rows include nearly,
         not exactly, parallel pairs. Whether 0.37.1 fails on it depends on
-        the BLAS rounding path. It exhausts 200 iterations with Fortran-ordered
-        ``A`` here and certifies in 12 with C order, so ``C`` is a control.
-        The regression for the mechanism is the designed degenerate vertex
-        above.
+        the BLAS rounding path. Without an independent working set it
+        exhausts 200 iterations with Fortran-ordered ``A`` here and certifies
+        in 12 with C order, so ``C`` is a control. The regression for the
+        mechanism is the designed degenerate vertex above.
         """
         doc = json.loads(_ISSUE_472_QP.read_text())
         H, g, A, b = (np.asarray(doc[key], dtype=float) for key in ("H", "g", "A", "b"))
         A = np.asarray(A, order=order)
-        result = _solve_constrained_qp_with_cold_retry(H, g, A, b, None)
+        result = solve_constrained_qp(H, g, A, b)
         assert result.converged
         self._assert_agrees_with_dual_oracle(H, g, A, b, result)
 
     @pytest.mark.parametrize("face", ["ray", "vertex"])
-    def test_a_shape_term_far_below_the_rest_is_certified_by_the_retry(self, face):
-        """A shape term at a smoothing parameter near 1e7 has a terminal QP the retry certifies.
+    def test_a_shape_term_far_below_the_rest_is_certified_by_the_ordinary_solve(self, face):
+        """A shape term at a smoothing parameter near 1e7 has a terminal QP the solve certifies.
 
         In its penalty-scaled coordinates the term's columns of ``A`` are
         about 1e-4 against 0.4 for its unpenalized direction (provenance in
         the fixture). The stationarity test is per coefficient, against that
-        coefficient's own actions, and a least-squares multiplier fit leaves a
+        coefficient's own actions, and an unweighted multiplier fit leaves a
         residual of rounding size against the largest. Mutation: with the
-        retry's multipliers fitted unweighted, as before, both exhaust 200
-        iterations uncertified, and the fits they came from raised
+        multipliers fitted unweighted, both exhaust 200 iterations
+        uncertified, and the fits they came from raised
         ``ObservedModeNotConvergedError``.
         """
         doc = json.loads(_SCALED_BLOCK_QPS.read_text())[face]
         H, g, A, b = (np.asarray(doc[key], dtype=float) for key in ("H", "g", "A", "b"))
-        result = _solve_constrained_qp_with_cold_retry(H, g, A, b, None)
+        result = solve_constrained_qp(H, g, A, b)
         assert result.converged
         self._assert_agrees_with_dual_oracle(H, g, A, b, result)
 
     @pytest.mark.parametrize("stiff_force", [-1e-12, -1e-16])
-    def test_the_retry_fits_multipliers_in_each_coefficients_own_units(self, stiff_force):
-        """At the dual oracle's optimum the weighted certificate passes; the unweighted fails.
+    def test_the_multipliers_are_fitted_in_each_coefficients_own_units(self, stiff_force):
+        """At the dual oracle's optimum the certificate passes, which an unweighted fit cannot.
 
         Row ``u + s >= 0`` is active with multiplier 1e-9 on a coefficient
-        ``s`` whose actions are near 1e-9, beside ``u`` near 1: the unweighted
-        fit leaves ``s`` a residual of ``u``'s rounding, 1e7 times its own
-        allowance. Row ``t >= 0`` holds an independent coefficient with
-        ``H = 1`` and force ``stiff_force``, whose weight is near
-        ``1 / |stiff_force|``. At 1e-16 that weight puts lstsq's relative
-        cutoff above the genuine singular value of row ``w >= 0``. Mutations:
-        fitted unweighted, both fail; with the rank decided on the weighted
-        rows (as ec377777 did), 1e-16 fails.
+        ``s`` whose actions are near 1e-9, beside ``u`` near 1: an unweighted
+        least-squares fit leaves ``s`` a residual of ``u``'s rounding, about
+        1e4 times ``tol`` times its own action. Row ``t >= 0`` holds an
+        independent coefficient with ``H = 1`` and force ``stiff_force``,
+        whose weight is near ``1 / |stiff_force|``. At 1e-16 that weight puts
+        a cutoff relative to the largest weighted singular value above the
+        genuine one of row ``w >= 0``. Mutations: fitted unweighted, both
+        fail; with the rank decided on the weighted rows (as ec377777 did),
+        1e-16 fails.
         """
         H = np.diag([1.0, 1.0, 1e-9, 1.0, 1.0])
         H[0, 1] = H[1, 0] = 0.5
@@ -2712,19 +2934,20 @@ class TestDegenerateVertexRetry:
         g = H @ np.array([0.7, 0.3, -0.3, 0.0, 0.0]) - A.T @ np.array([1e-9, 0.5, 0.0])
         g[4] = stiff_force
         x, _ = self._dual_oracle(H, g, A)
-        unweighted = _stationarity_certificate(H, g, x, A, self._TOL)
-        weighted = _stationarity_certificate(H, g, x, A, self._TOL, coordinate_weighted=True)
-        assert unweighted[:2] == (False, None), "the fixture no longer separates the scales"
-        assert weighted[:2] == (True, None)
+        residual = H @ x - g
+        unweighted = np.linalg.lstsq(A.T, residual, rcond=None)[0]
+        miss = np.abs(residual - A.T @ np.maximum(unweighted, 0.0))
+        own = np.maximum(np.abs(H) @ np.abs(x), np.abs(g))
+        assert miss[2] > 100 * self._TOL * own[2], "the fixture no longer separates the scales"
+        assert _stationarity_certificate(H, g, x, A, self._TOL)[:2] == (True, None)
 
     def test_a_stiff_independent_row_leaves_the_degenerate_vertex_certified(self):
         """The degenerate vertex plus a coefficient with ``H = 1``, force -1e-12 and ``x >= 0``.
 
-        Its row's weight, near 1e12, would make lstsq discard a genuine
-        singular value of the vertex's rows if the rank were decided on the
-        weighted system. Mutation: decided there (as ec377777 did), the retry
-        exhausts 200 iterations; decided unweighted it certifies in 8, as the
-        unweighted fit does.
+        Its row's weight, near 1e12, would discard a genuine singular value of
+        the vertex's rows if the rank were decided on the weighted system.
+        Mutation: decided there (as ec377777 did), the solve exhausts 200
+        iterations; decided unweighted it certifies in 8.
         """
         H0, g0, A0, b0 = self._degenerate_vertex_problem(seed=113)
         p, m = H0.shape[0], A0.shape[0]
@@ -2732,24 +2955,24 @@ class TestDegenerateVertexRetry:
         H[:p, :p], H[p, p] = H0, 1.0
         A[:m, :p], A[m, p] = A0, 1.0
         g, b = np.append(g0, -1e-12), np.append(b0, 0.0)
-        result = _solve_constrained_qp_with_cold_retry(H, g, A, b, None)
+        result = solve_constrained_qp(H, g, A, b)
         assert result.converged
         self._assert_agrees_with_dual_oracle(H, g, A, b, result)
 
     @pytest.mark.parametrize("touched", [False, True], ids=["free", "row"])
     @pytest.mark.parametrize("force", [1e-308, -1e-308, 1e-310, 1e-200, 2.0**-1074])
     def test_the_weighted_certificate_stays_finite_across_the_exponent_range(self, force, touched):
-        """The safeguarded solve beside a coefficient whose only action is ``force``.
+        """The solve beside a coefficient whose only action is ``force``.
 
         Seed 1's vertex plus a coefficient with ``H = 1``, force ``g`` and
         either no row or ``x >= 0``. Its own action, divided into a weight,
         overflows below about 1e-308; zero constraint entries times that
-        weight made NaN, and the SVD failed. Mutation: without the
-        ``sqrt(TINY)`` floor (17b69145), +-1e-308 and 1e-310 raise
-        ``LinAlgError``; the ordinary solve certifies all ten in 9 to 11
-        iterations. A force below the smallest normal double may be flushed
-        to zero by the BLAS, so there the solve must certify or refuse, never
-        raise or certify a point the dual oracle rejects.
+        weight make NaN, and the factorization fails. Mutation: without the
+        ``sqrt(TINY)`` floor (17b69145), +-1e-308 and 1e-310 raise; with it
+        the solve certifies all ten in 9 to 10 iterations. A force below the
+        smallest normal double may be flushed to zero by the BLAS, so there
+        the solve must certify or refuse, never raise or certify a point the
+        dual oracle rejects.
         """
         H0, g0, A0, b0 = self._degenerate_vertex_problem(seed=1)
         p, m = H0.shape[0], A0.shape[0]
@@ -2758,7 +2981,25 @@ class TestDegenerateVertexRetry:
         if touched:
             A[m, p] = 1.0
         g, b = np.append(g0, force), np.zeros(A.shape[0])
-        result = solve_constrained_qp(H, g, A, b, _degeneracy_safeguards=True)
+        result = solve_constrained_qp(H, g, A, b)
         assert result.converged or abs(force) < np.finfo(float).tiny
         if result.converged:
             self._assert_agrees_with_dual_oracle(H, g, A, b, result)
+
+
+def test_feasible_start_with_nonhomogeneous_rows():
+    """A violated block whose rows all hold at zero restarts there; one with ``b > 0`` cannot.
+
+    Cap rows ``log lo <= x <= log hi`` contain zero, so ``b <= 0``. The second
+    coefficient has no rows and keeps its value. Mutation: the rule "every
+    ``b`` is zero" returns ``None`` for the cap block.
+    """
+    cap = np.array([[1.0, 0.0], [-1.0, 0.0]])
+    bounds = np.array([np.log(0.6), -np.log(1.8)])
+    beta = np.array([3.0, 5.0])
+    np.testing.assert_array_equal(_homogeneous_feasible_start(beta, cap, bounds, 1e-12), [0.0, 5.0])
+    # Satisfied blocks keep their coefficients.
+    inside = np.array([0.25, 5.0])
+    np.testing.assert_array_equal(_homogeneous_feasible_start(inside, cap, bounds, 1e-12), inside)
+    # Zero violates ``x >= 1``: no phase-one point without an LP.
+    assert _homogeneous_feasible_start(beta * -1.0, cap[:1], np.array([1.0]), 1e-12) is None

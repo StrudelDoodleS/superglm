@@ -15,6 +15,7 @@ from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.export._ppform import extract_ppform
 from superglm.export.summary import SummaryExportPayload, build_summary_export_payload
 from superglm.features.categorical import Categorical
+from superglm.features.constraint import rules_of
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.piecewise import Piecewise
@@ -604,20 +605,15 @@ def _require_ppform_exportable(
     """
     for name in names:
         spec = model._specs[name]
-        # The spec does NOT keep the ConstraintSpec it was constructed with --
-        # ``getattr(spec, "constraint")`` is None even when one was passed.  It
-        # is unpacked at construction into ``constraint_kind`` /
-        # ``constraint_mode`` (mirrored as ``monotone`` / ``monotone_mode``).
-        #
-        # BOTH are read, and that is load-bearing: ``constraint_mode`` is
-        # ``"postfit"`` on an UNCONSTRAINED spline too, because that is the
-        # default mode a token would have been given rather than a record that
-        # one was.  ``constraint_kind is None`` is what says "no constraint", so
-        # keying on the mode alone would refuse every spline ever fitted.
-        constraint_kind = getattr(spec, "constraint_kind", None)
-        if constraint_kind is not None and getattr(spec, "constraint_mode", None) == "postfit":
+        # ``rules_of`` reads the spec's rule objects, or the kind and mode a model
+        # saved before rule collections holds.  Its rules carry their own mode, so
+        # an unconstrained spline (whose ``constraint_mode`` still reads
+        # ``"postfit"``) has no rule to refuse.  A postfit repair is always one
+        # whole-curve shape.
+        postfit = next((rule for rule in rules_of(spec) if rule.mode == "postfit"), None)
+        if postfit is not None:
             raise ValueError(
-                f"Term {name!r} carries a postfit {constraint_kind} constraint, whose "
+                f"Term {name!r} carries a postfit {postfit.describe()} constraint, whose "
                 "repaired curve has not been verified to be piecewise polynomial. It "
                 "cannot be exported with continuous_kind='ppform'; export it with "
                 "continuous_kind='binned', or use Constraint.fit instead."

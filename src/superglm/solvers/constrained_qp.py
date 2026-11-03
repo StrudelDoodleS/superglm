@@ -10,9 +10,12 @@ warm-starts the working set from a previous solve.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import numpy as np
+import scipy.linalg
 import scipy.sparse
 import scipy.sparse.csgraph
 from numpy.typing import NDArray
@@ -21,6 +24,7 @@ from superglm._fit_trace import TraceRun
 from superglm._roundoff import EPS as _EPS
 from superglm._roundoff import TINY, UNIT_ROUNDOFF, gamma
 from superglm.solvers.rank import (
+    SHARED_RANK_POLICY,
     RankDecomposition,
     _symmetric_part,
     decompose_factor,
@@ -269,8 +273,6 @@ def _stationarity_certificate(
     beta: NDArray,
     active_matrix: NDArray,
     tol: float,
-    *,
-    coordinate_weighted: bool = False,
 ) -> tuple[bool, int | None, NDArray]:
     """Certify a nonnegative dual force in homogeneous stationarity units.
 
@@ -278,10 +280,11 @@ def _stationarity_certificate(
     absolute actions of ``H beta`` and ``g``; with ``M = A_active.T`` in those coordinates,
     ``|M^+|`` maps score-action uncertainty to multiplier uncertainty, and a multiplier below
     that allowance releases its constraint. The clipped multipliers must then reproduce
-    stationarity; an uncertain sign never certifies success. ``coordinate_weighted`` fits the
-    multipliers in the per-coefficient test's units (each equation divided by
-    ``max(|H||beta|, |g|)``), which matters when active rows touch coefficients orders of
-    magnitude apart, such as a shape term at a very large smoothing parameter.
+    stationarity; an uncertain sign never certifies success. The multipliers are fitted in the
+    per-coefficient test's units (each equation divided by ``max(|H||beta|, |g|)``); Householder
+    QR is row-wise backward stable under those weights, which span 1e32, with column pivoting
+    and rows sorted by decreasing infinity norm (Powell and Reid 1969; Cox and Higham, Pitman
+    Res. Notes Math. 380, 1998, Lemma 4.2, Theorem 3.2).
     """
     active_matrix = np.asarray(active_matrix, dtype=float)
     products, h_action, g_values, _, _ = _constraint_actions(H, beta, g, common=True)
@@ -303,20 +306,22 @@ def _stationarity_certificate(
     )
     arithmetic = _roundoff_tolerance(len(beta) + len(rows))
     if len(rows):
-        if coordinate_weighted:
-            # A positive diagonal weighting cannot change the rank, but it
-            # can push a genuine singular value under a cutoff relative to
-            # the largest weighted one: the rank is decided unweighted.
-            # Weights stay at most 1 / sqrt(TINY), so the weighted rows and
-            # any product of two of them are finite (the square-root safe
-            # range of LAPACK's la_constants; Anderson, ACM TOMS 44, 2017).
-            own = np.maximum(h_action, g_action)
-            weight = 1.0 / np.where(own > 0.0, np.maximum(own, _SQRT_TINY), 1.0)
-            rank = np.linalg.matrix_rank(rows.T)
-            u, s, vt = np.linalg.svd(rows.T * weight[:, None], full_matrices=False)
-            inverse_action = (vt[:rank].T / s[:rank]) @ (u[:, :rank].T * weight)
-        else:
-            inverse_action = np.linalg.lstsq(rows.T, np.eye(len(beta)), rcond=None)[0]
+        # A positive diagonal weighting cannot change the rank, but it can
+        # push a genuine singular value under a cutoff relative to the
+        # largest weighted one: the rank is decided unweighted, and the
+        # basic solution on the leading pivoted columns has that rank.
+        # Weights stay at most 1 / sqrt(TINY), so the weighted rows and any
+        # product of two of them are finite (the square-root safe range of
+        # LAPACK's la_constants; Anderson, ACM TOMS 44, 2017).
+        own = np.maximum(h_action, g_action)
+        weight = 1.0 / np.where(own > 0.0, np.maximum(own, _SQRT_TINY), 1.0)
+        rank = np.linalg.matrix_rank(rows.T)
+        weighted = rows.T * weight[:, None]
+        order = np.argsort(-np.max(np.abs(weighted), axis=1, initial=0.0), kind="stable")
+        q, r, pivots = scipy.linalg.qr(weighted[order], mode="economic", pivoting=True)
+        basic = scipy.linalg.solve_triangular(r[:rank, :rank], q[:, :rank].T)
+        inverse_action = np.zeros((len(rows), len(beta)))
+        inverse_action[np.ix_(pivots[:rank], order)] = basic * weight[order]
         multipliers = inverse_action @ residual
         dual_action = np.abs(rows.T) @ np.abs(multipliers)
         score_scale = np.maximum(np.maximum(h_action, g_action), dual_action)
@@ -351,8 +356,6 @@ def _certifies_kkt_point(
     active: list[int],
     tol: float,
     abs_A: NDArray,
-    *,
-    coordinate_weighted: bool = False,
 ) -> bool:
     """Whether ``beta`` passes the complete KKT certificate on ``active`` as it stands.
 
@@ -363,9 +366,7 @@ def _certifies_kkt_point(
     """
     if not _is_feasible(A, beta, b, tol, abs_A=abs_A):
         return False
-    stationary, drop_idx, multipliers = _stationarity_certificate(
-        H, g, beta, A[active], tol, coordinate_weighted=coordinate_weighted
-    )
+    stationary, drop_idx, multipliers = _stationarity_certificate(H, g, beta, A[active], tol)
     if not stationary or drop_idx is not None:
         return False
     return _complementarity_certificate(H, g, beta, A[active], b[active], multipliers, tol)
@@ -461,7 +462,14 @@ def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
     return np.linalg.lstsq(equilibrated, rhs * scale, rcond=None)[0] * scale
 
 
-def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDArray:
+def _project_feasible(
+    beta: NDArray,
+    A: NDArray,
+    b: NDArray,
+    tol: float,
+    *,
+    structure: _ConstraintStructure | None = None,
+) -> NDArray:
     """Repair a half-space violation, for at most 100 sweeps.
 
     Termination uses the same homogeneous primal predicate as the QP. Each
@@ -469,10 +477,15 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
     the projection under tiny or large constraint units. A violated zero row
     is impossible to repair and leaves an uncertified candidate. Exhaustion
     also requires the caller to check feasibility; neither case is success.
+    ``structure``, when given, is ``_constraint_structure(A)``.
     """
     beta = beta.copy()
     # Loop-invariant: only ``A @ beta`` changes between sweeps.
-    abs_A = np.abs(A)
+    if structure is None:
+        abs_A = np.abs(A)
+        row_max = np.max(abs_A, axis=1, initial=0.0)
+    else:
+        abs_A, row_max = structure.abs_entries, structure.row_max
     for _ in range(100):
         # Inlined rather than calling ``_feasibility_slack``, which would
         # recompute the matvec; the arithmetic is identical term for term.
@@ -485,7 +498,7 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
         worst = int(np.argmin(violations))
         # Project onto the violated constraint: a^T x >= b_i
         a = A[worst]
-        row_scale = float(np.max(np.abs(a), initial=0.0))
+        row_scale = float(row_max[worst])
         if row_scale == 0.0:
             break  # A violated structurally zero row cannot be repaired.
         normalized = a / row_scale
@@ -494,7 +507,19 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
     return beta
 
 
-def _constraint_blocks(A: NDArray) -> list[tuple[NDArray, frozenset[int]]]:
+class _ConstraintBlocks(NamedTuple):
+    """Coefficient blocks that no constraint row couples.
+
+    ``columns[j]`` holds block ``j``'s coefficients and ``width[j]`` their
+    count; ``row_label[i]`` is row ``i``'s block, ``-1`` for a zero row.
+    """
+
+    columns: list[NDArray]
+    row_label: NDArray
+    width: NDArray
+
+
+def _constraint_blocks(A: NDArray) -> _ConstraintBlocks:
     """Coefficient blocks that no constraint row couples, each with its rows.
 
     These are the connected components of the bipartite row-column support
@@ -504,58 +529,163 @@ def _constraint_blocks(A: NDArray) -> list[tuple[NDArray, frozenset[int]]]:
     """
     m, p = A.shape
     rows, cols = np.nonzero(A)
-    graph = scipy.sparse.coo_matrix((np.ones(rows.size), (rows, m + cols)), shape=(m + p, m + p))
-    _, labels = scipy.sparse.csgraph.connected_components(graph, directed=False)
-    blocks = []
-    for label in np.unique(labels[:m]):
-        block_cols = np.flatnonzero(labels[m:] == label)
-        if block_cols.size:
-            blocks.append((block_cols, frozenset(np.flatnonzero(labels[:m] == label).tolist())))
-    return blocks
+    # ``np.nonzero`` lists entries row by row, so the row nodes' adjacency is
+    # already in CSR order; the column nodes have no stored entries.
+    indptr = np.full(m + p + 1, rows.size, dtype=np.intp)
+    indptr[0] = 0
+    indptr[1 : m + 1] = np.cumsum(np.bincount(rows, minlength=m))
+    graph = scipy.sparse.csr_matrix((np.ones(rows.size), m + cols, indptr), shape=(m + p, m + p))
+    count, labels = scipy.sparse.csgraph.connected_components(graph, directed=False)
+    row_component, column_component = labels[:m], labels[m:]
+    has_columns = np.zeros(count, dtype=bool)
+    has_columns[column_component] = True
+    components = np.unique(row_component[has_columns[row_component]])
+    block_of = np.full(count, -1, dtype=np.intp)
+    block_of[components] = np.arange(components.size)
+    column_label = block_of[column_component]
+    return _ConstraintBlocks(
+        columns=[np.flatnonzero(column_label == j) for j in range(components.size)],
+        row_label=block_of[row_component],
+        width=np.bincount(column_label[column_label >= 0], minlength=components.size),
+    )
+
+
+class _ConstraintStructure(NamedTuple):
+    """What a solve reads from ``A`` alone, for a system several solves share.
+
+    ``abs_entries`` is ``|A|`` and ``row_max`` each row's largest ``|entry|``.
+    ``scaled_rows`` is each row divided by ``row_max``, or by 1 for a zero row:
+    the working subproblem's equality rows. ``unit_rows`` are those rows at
+    unit Euclidean norm, zero for a zero row (``_WorkingBasis``), and
+    ``blocks`` is ``_constraint_blocks(A)``.
+    """
+
+    abs_entries: NDArray
+    row_max: NDArray
+    scaled_rows: NDArray
+    unit_rows: NDArray
+    blocks: _ConstraintBlocks
+
+
+def _constraint_structure(A: NDArray) -> _ConstraintStructure:
+    """Build ``_ConstraintStructure`` for ``A``, once for every solve on that system."""
+    A = np.asarray(A, dtype=float)
+    abs_A = np.abs(A)
+    row_max = np.max(abs_A, axis=1, initial=0.0)
+    scaled_rows = A / np.where(row_max > 0.0, row_max, 1.0)[:, None]
+    norm = np.linalg.norm(scaled_rows, axis=1)
+    unit_rows = np.divide(
+        scaled_rows, norm[:, None], out=np.zeros_like(A), where=norm[:, None] > 0.0
+    )
+    return _ConstraintStructure(abs_A, row_max, scaled_rows, unit_rows, _constraint_blocks(A))
 
 
 def _homogeneous_feasible_start(
     beta: NDArray, A: NDArray, b: NDArray, tol: float
 ) -> NDArray | None:
-    """Phase one for homogeneous rows: each block that violates its rows restarts at zero.
+    """Phase one for rows zero satisfies: each block that violates its rows restarts at zero.
 
     A primal active-set method needs a feasible start (Nocedal and Wright,
     *Numerical Optimization*, 2nd ed., 2006, section 16.5), found in general
-    by a phase-one LP. A block whose rows all have ``b == 0`` is a cone, and
-    its apex ``beta[block] = 0`` is feasible, so no LP is needed. Blocks that
-    satisfy their rows keep their coefficients. ``None`` when a violated
-    block has a row with ``b != 0``.
+    by a phase-one LP. A block whose rows all have ``b <= 0`` holds them at
+    ``beta[block] = 0``, so no LP is needed: a homogeneous block (every
+    ``b == 0``) is a cone with that point as its apex, and a cap, whose bounds
+    contain a zero log effect, has ``b <= 0``. Blocks that satisfy their rows
+    keep their coefficients. ``None`` when a violated block has a row zero
+    violates (``b > 0``).
     """
     beta = beta.copy()
-    for block_cols, block_rows in _constraint_blocks(A):
-        rows = sorted(block_rows)
+    blocks = _constraint_blocks(A)
+    for j, block_cols in enumerate(blocks.columns):
+        rows = np.flatnonzero(blocks.row_label == j)
         if _is_feasible(A[rows], beta, b[rows], tol):
             continue
-        if np.any(b[rows] != 0.0):
+        if np.any(b[rows] > 0.0):
             return None
         beta[block_cols] = 0.0
     return beta
 
 
-def _raises_working_rank(
-    A: NDArray, active: list[int], row: int, working_rank: dict[tuple[int, ...], int]
-) -> bool:
-    """Whether ``A[row]`` is numerically independent of the working rows.
+def _raises_rank(distance: float | NDArray) -> bool | NDArray:
+    """The shared factor rank rule for a unit vector at ``distance`` from an orthonormal span.
 
-    Working-set rows must stay independent to keep the KKT matrix nonsingular (Nocedal and
-    Wright 2006, sec. 16.5; Gill and Wong, Math. Prog. Comp. 7, 2015, sec. 2); in exact
-    arithmetic a dependent row cannot block, since ``A_w @ step = 0``. The decision is
-    ``decompose_factor``'s rank rule on unit-norm columns ``[A_w.T, a]``: dependent when
-    ``sigma_(k+1) <= sqrt(2 u) * sigma_1``, which clears the SVD error bound
-    ``p(m, n) u sigma_1`` (*LAPACK Users' Guide*, 3rd ed., sec. 4.9) while
-    ``max(p, k + 1) < 2**27``. ``working_rank`` caches each working set's rank by index tuple.
+    ``distance`` may be an array of distances, each decided alone.
+
+    The unit columns ``[Q, a]``, with ``a`` at relative distance ``rho`` from ``range(Q)``, have
+    singular values 1 and ``sqrt(1 +- sqrt(1 - rho**2))``. ``decompose_factor``'s rule,
+    ``sigma_min > factor_rcond * sigma_max``, reads ``rho > factor_rcond * (1 + sqrt(1 -
+    rho**2))``, between ``factor_rcond`` and twice it, far above the projection's rounding.
+    The rule is sequential (a Gram-Schmidt decision on ``[Q, a]``), not on ``[A_W.T, a]``: with
+    ill-conditioned working rows the two can differ near the threshold, and the effect is a
+    disclosed non-convergence, not a wrong number.
     """
-    if not active:
-        return True
-    key = tuple(active)
-    if key not in working_rank:
-        working_rank[key] = decompose_factor(A[active].T).rank
-    return decompose_factor(np.column_stack([A[active].T, A[row]])).rank > working_rank[key]
+    cosine = np.sqrt(np.maximum(0.0, 1.0 - distance * distance))
+    return distance > SHARED_RANK_POLICY.factor_rcond * (1.0 + cosine)
+
+
+class _WorkingBasis:
+    """An orthonormal basis of the working rows' span, in working-set order.
+
+    Working-set rows must stay linearly independent (Nocedal and Wright 2006, section 16.5;
+    Gill and Wong, Math. Prog. Comp. 7, 2015, section 2): in exact arithmetic a dependent row
+    cannot block, since ``A_w @ step = 0``; rounding makes it appear to.
+    ``q`` and ``r`` are the thin QR factors of the working rows, each scaled to unit norm
+    (``unit_rows``), taken as columns and updated by ``scipy.linalg.qr_insert`` and
+    ``qr_delete`` (Golub and Van Loan 2013, section 6.5). A candidate raises the working rank
+    when its distance from ``range(q)`` passes ``_raises_rank``: one ``O(p k)`` projection.
+    """
+
+    def __init__(self, unit_rows: NDArray) -> None:
+        self.rows = unit_rows
+        self.q = np.zeros((unit_rows.shape[1], 0))
+        self.r = np.zeros((0, 0))
+
+    def start(self, working: list[int]) -> list[int]:
+        """Factor a warm working set; rows dependent on those before them are left out.
+
+        In unpivoted QR, ``|r_jj|`` is column ``j``'s distance from the span
+        of the columns before it, so one factorization decides an independent
+        set, as a previous solve returns. A set it cannot certify is built one
+        row at a time instead.
+        """
+        k = len(working)
+        if 0 < k <= self.q.shape[0]:
+            q, r = scipy.linalg.qr(self.rows[working].T, mode="economic", check_finite=False)
+            if np.all(_raises_rank(np.abs(np.diag(r)))):
+                self.q, self.r = q, r
+                return list(working)
+        kept: list[int] = []
+        for row in working:
+            if self.raises_rank(row):
+                self.insert(row)
+                kept.append(row)
+        return kept
+
+    def raises_rank(self, row: int) -> bool:
+        """Whether row ``row`` of ``A`` is independent of the working rows."""
+        candidate = self.rows[row]
+        residual = candidate - self.q @ (self.q.T @ candidate)
+        # ``np.linalg.norm``'s own formula for a vector, without its dispatch.
+        return bool(_raises_rank(math.sqrt(residual.dot(residual))))
+
+    def insert(self, row: int) -> None:
+        """Append row ``row`` of ``A`` to the working rows."""
+        self.q, self.r = scipy.linalg.qr_insert(
+            self.q, self.r, self.rows[row], self.q.shape[1], which="col", check_finite=False
+        )
+
+    def delete(self, position: int) -> None:
+        """Remove the working row at ``position``.
+
+        ``qr_delete`` reads a square ``q`` as a full factor and keeps all its
+        columns, so with as many working rows as coefficients the result still
+        spans every direction. The thin factor of the ``k`` rows left is the
+        leading ``k`` columns of ``q`` and rows of ``r``, the rest of ``r``
+        being zero.
+        """
+        q, r = scipy.linalg.qr_delete(self.q, self.r, position, which="col", check_finite=False)
+        k = r.shape[1]
+        self.q, self.r = q[:, :k], r[:k]
 
 
 def _zero_block_faces(
@@ -563,24 +693,26 @@ def _zero_block_faces(
     A_eq: NDArray,
     b: NDArray,
     active: list[int],
-    blocks: list[tuple[NDArray, frozenset[int]]],
+    blocks: _ConstraintBlocks,
     full_rank: dict[tuple[int, ...], bool],
 ) -> NDArray:
     """Construct the exact zero point of each block on a homogeneous zero face.
 
-    This is the ``n_eq >= p`` construction in ``solve_constrained_qp`` applied
-    to one block at a time. Rows of other blocks have no entries in a block's
-    columns. If a block's homogeneous working rows have full column rank there,
-    the face fixes ``beta[block_cols] == 0`` exactly. Without the construction,
-    cancellation residue around 1e-15 stays in the block. Primal slack is
-    measured relative to that residue and so reads as violated, up to ``-1``.
-    ``A_eq`` holds the normalized working rows in ``active`` order, and
-    ``full_rank`` caches the rank decision by row tuple.
+    This is the ``n_eq >= p`` construction in ``solve_constrained_qp`` applied to one block at
+    a time. If a block's homogeneous working rows have full column rank, the face fixes
+    ``beta[block_cols] == 0`` exactly; otherwise cancellation residue around 1e-15 stays in the
+    block and primal slack, measured relative to it, reads as violated, up to ``-1``. ``A_eq``
+    holds the normalized working rows in ``active`` order, ``full_rank`` caches the rank
+    decision by row tuple, and only blocks with at least as many working rows as coefficients
+    are examined.
     """
-    for block_cols, block_rows in blocks:
-        local = [k for k, row in enumerate(active) if row in block_rows]
+    labels = blocks.row_label[active]
+    counts = np.bincount(labels[labels >= 0], minlength=blocks.width.size)
+    for j in np.flatnonzero(counts >= blocks.width):
+        block_cols = blocks.columns[j]
+        local = np.flatnonzero(labels == j)
         rows = tuple(active[k] for k in local)
-        if len(rows) < block_cols.size or np.any(b[list(rows)] != 0.0):
+        if np.any(b[list(rows)] != 0.0):
             continue
         if rows not in full_rank:
             rank = decompose_factor(A_eq[np.ix_(local, block_cols)]).rank
@@ -606,7 +738,7 @@ def _emit_blocking_decision(
     tol: float,
     products: NDArray,
     raw_step: NDArray,
-    active_lookup: set[int],
+    working_rows: tuple[int, ...],
     blocking: int,
     alpha_min: float,
 ) -> None:
@@ -624,6 +756,7 @@ def _emit_blocking_decision(
     derived_scaled_step = np.divide(
         raw_step, direction_scale, out=np.zeros_like(raw_step), where=direction_scale > 0.0
     )
+    active_lookup = set(working_rows)
     considered = [
         index
         for index in range(A.shape[0])
@@ -638,6 +771,8 @@ def _emit_blocking_decision(
             # a step the convergence test rejects.
             "full_step_is_feasible": _is_feasible(A, beta_new, b, tol),
             "considered_rows": tuple(considered),
+            # The working rows the candidate was tested against, in order.
+            "working_rows": working_rows,
             # The ratio inputs (common power-of-two units on exceptional rows),
             # so a reader can recompute alpha instead of trusting its value.
             "row_products": tuple(float(products[i]) for i in considered),
@@ -676,7 +811,7 @@ def solve_constrained_qp(
     tol: float = 1e-12,
     *,
     _trace_run: TraceRun | None = None,
-    _degeneracy_safeguards: bool = False,
+    _structure: _ConstraintStructure | None = None,
 ) -> QPResult:
     """Solve a convex quadratic subject to A @ beta >= b.
 
@@ -693,15 +828,19 @@ def solve_constrained_qp(
     the complete certificate rather than establish it. An exhausted or
     uncertified candidate is not converged.
 
-    active_set_init supplies a warm active set. The optional _trace_run emits
-    blocking decisions only when explicitly enabled. Result rank metadata
-    describes the shared H decomposition; no ridge is added.
+    The working rows stay linearly independent (Nocedal and Wright 2006,
+    section 16.5): the ratio test takes the least step among rows that raise
+    the working rank (_WorkingBasis), ties to the lowest index. Each block
+    whose homogeneous working rows have full column rank is set to its exact
+    zero point (_zero_block_faces), and the certificate's multipliers are
+    fitted in the certificate's own units (_stationarity_certificate).
 
-    _degeneracy_safeguards, used by callers as a retry at a degenerate vertex,
-    skips blocking rows dependent on the working rows (_raises_working_rank),
-    constructs the exact zero point of each block whose homogeneous working
-    rows have full column rank, and fits the certificate's multipliers in the
-    certificate's own units (_stationarity_certificate).
+    active_set_init supplies a warm active set; a row dependent on those
+    before it is left out. The optional _trace_run emits blocking decisions
+    only when explicitly enabled. _structure is _constraint_structure(A), for a
+    caller that solves on one A repeatedly; without it each solve builds it.
+    Result rank metadata describes the shared H decomposition; no ridge is
+    added.
     """
     # Checked at the public boundary rather than at each use: every predicate
     # below reads ``tol``, and a vacuous one is not detectable from the result.
@@ -798,19 +937,24 @@ def solve_constrained_qp(
         # No constraints: the unconstrained solve above is already the answer.
         return _result(beta_unc, [], 0, converged=unconstrained_stationary)
 
-    if _is_feasible(A, beta_unc, b, tol):
+    abs_A = None if _structure is None else _structure.abs_entries
+    if _is_feasible(A, beta_unc, b, tol, abs_A=abs_A):
         return _result(beta_unc, [], 0, converged=unconstrained_stationary)
 
+    structure = _constraint_structure(A) if _structure is None else _structure
+    # ``|A|`` is loop-invariant; only the ``|beta|`` matvec is per iteration.
+    abs_A = structure.abs_entries
+
     # --- Initialize active set ---
-    if active_set_init is not None:
-        active = list(active_set_init)
-    else:
-        active = []
+    # The working rows stay linearly independent in every solve; a warm set
+    # is a hint, so a row dependent on those before it is left out.
+    basis = _WorkingBasis(structure.unit_rows)
+    active = basis.start([] if active_set_init is None else list(active_set_init))
 
     # --- Feasible starting point ---
     # This may still be infeasible; see _project_feasible.  Feasibility is
     # therefore re-tested on the point actually returned, below.
-    beta = _project_feasible(beta_unc, A, b, tol)
+    beta = _project_feasible(beta_unc, A, b, tol, structure=structure)
 
     # Resolved once: the hot loop must not pay a per-row or per-iteration
     # attribute lookup for a seam that is off in every production call.
@@ -824,12 +968,9 @@ def solve_constrained_qp(
     # every near-singular fit and is a separate decision.
     kkt_may_be_singular = decomposition.rank < decomposition.width
 
-    # ``|A|`` is loop-invariant; only the ``|beta|`` matvec is per iteration.
-    abs_A = np.abs(A)
     zero_face_cache: dict[tuple[int, ...], bool] = {}
-    blocks = _constraint_blocks(A) if _degeneracy_safeguards else []
+    blocks = structure.blocks
     block_zero_face: dict[tuple[int, ...], bool] = {}
-    working_rank: dict[tuple[int, ...], int] = {}
     # Whether ``beta`` minimizes on the current face (previous iteration took
     # its full step and kept the active set). The exact next step is then zero
     # (Nocedal and Wright 2006, Algorithm 16.3); in floating point it is the
@@ -845,15 +986,12 @@ def solve_constrained_qp(
             # quantity, already computed above the loop.
             step = beta_unc - beta
         else:
-            A_eq = A[active]  # (|active|, p)
-            b_eq = b[active]  # (|active|,)
             # Equality rows express geometry, not objective units. Normalize
             # before the saddle solve so equivalent constraint scaling does
             # not manufacture a primal residual on an active boundary.
-            constraint_scale = np.max(np.abs(A_eq), axis=1, initial=0.0)
-            constraint_scale = np.where(constraint_scale > 0.0, constraint_scale, 1.0)
-            A_eq = A_eq / constraint_scale[:, None]
-            b_eq = b_eq / constraint_scale
+            A_eq = structure.scaled_rows[active]  # (|active|, p)
+            row_max = structure.row_max[active]
+            b_eq = b[active] / np.where(row_max > 0.0, row_max, 1.0)  # (|active|,)
 
             n_eq = len(active)
             zero_face = False
@@ -866,7 +1004,7 @@ def solve_constrained_qp(
                 if key not in zero_face_cache:
                     zero_face_cache[key] = decompose_factor(A_eq).rank == p
                 zero_face = zero_face_cache[key]
-            if not zero_face and blocks:
+            if not zero_face:
                 beta = _zero_block_faces(beta, A_eq, b, active, blocks, block_zero_face)
             if zero_face:
                 beta = np.zeros_like(beta)
@@ -909,9 +1047,7 @@ def solve_constrained_qp(
             at_face_minimum
             and not small_step
             and not kkt_may_be_singular
-            and _certifies_kkt_point(
-                H_sym, g, beta, A, b, active, tol, abs_A, coordinate_weighted=_degeneracy_safeguards
-            )
+            and _certifies_kkt_point(H_sym, g, beta, A, b, active, tol, abs_A)
         ):
             # The complete certificate, so a pass means the same here as at a
             # small step; a failure changes nothing and the loop steps on.
@@ -919,22 +1055,24 @@ def solve_constrained_qp(
         at_face_minimum = False
         if small_step:
             stationary, drop_idx, multipliers = _stationarity_certificate(
-                H_sym, g, beta, A[active], tol, coordinate_weighted=_degeneracy_safeguards
+                H_sym, g, beta, A[active], tol
             )
             if drop_idx is not None:
                 active.pop(drop_idx)
+                basis.delete(drop_idx)
                 continue
-            feasible = _is_feasible(A, beta, b, tol)
+            feasible = _is_feasible(A, beta, b, tol, abs_A=abs_A)
             if not feasible:
-                beta = _project_feasible(beta, A, b, tol)
-                feasible = _is_feasible(A, beta, b, tol)
+                beta = _project_feasible(beta, A, b, tol, structure=structure)
+                feasible = _is_feasible(A, beta, b, tol, abs_A=abs_A)
                 # A repair is a new candidate: recheck its full dual and
                 # stationarity certificate before assigning convergence.
                 stationary, drop_idx, multipliers = _stationarity_certificate(
-                    H_sym, g, beta, A[active], tol, coordinate_weighted=_degeneracy_safeguards
+                    H_sym, g, beta, A[active], tol
                 )
                 if drop_idx is not None:
                     active.pop(drop_idx)
+                    basis.delete(drop_idx)
                     continue
             complementary = _complementarity_certificate(
                 H_sym, g, beta, A[active], b[active], multipliers, tol
@@ -964,26 +1102,25 @@ def solve_constrained_qp(
             # Same scale ``_is_feasible`` uses, which is what makes "does this
             # step move the row" agree with "is this row satisfied".
             scaled_step, _ = _scaled_constraint_step(A, beta, step, b, abs_A)
-            # A set, not ``i in active``, for O(1) membership.
-            active_lookup = set(active)
-
-            for i in range(m):
-                if i in active_lookup:
-                    continue
-                if scaled_step[i] < -tol:
-                    # Gate on the scaled derivative, as _is_feasible does;
-                    # take the ratio from the raw pair, which rounds once.
-                    alpha = float((products[i] - bounds[i]) / -raw_step[i])
-                    if alpha < alpha_min and (
-                        not _degeneracy_safeguards
-                        or _raises_working_rank(A, active, i, working_rank)
-                    ):
-                        alpha_min = alpha
-                        blocking = i
+            # Gate on the scaled derivative, as _is_feasible does; take the
+            # ratio from the raw pair, which rounds once.
+            gated = scaled_step < -tol
+            gated[active] = False
+            candidates = np.flatnonzero(gated)
+            alphas = (products[candidates] - bounds[candidates]) / -raw_step[candidates]
+            ahead = alphas < alpha_min
+            candidates, alphas = candidates[ahead], alphas[ahead]
+            # The least step among rows that raise the working rank, ties to
+            # the lowest index: rows are tested in that order until one does.
+            for k in np.lexsort((candidates, alphas)):
+                if basis.raises_rank(int(candidates[k])):
+                    alpha_min = float(alphas[k])
+                    blocking = int(candidates[k])
+                    break
 
             if tracing:
                 # After selection, before `active` is mutated, so the recorded
-                # `active_lookup` is the set the decision was actually made
+                # working rows are the set the decision was actually made
                 # against.  Off by default, so this costs one bool test.
                 _emit_blocking_decision(
                     _trace_run,
@@ -996,7 +1133,7 @@ def solve_constrained_qp(
                     tol=tol,
                     products=products,
                     raw_step=raw_step,
-                    active_lookup=active_lookup,
+                    working_rows=tuple(active),
                     blocking=blocking,
                     alpha_min=alpha_min,
                 )
@@ -1004,6 +1141,7 @@ def solve_constrained_qp(
             if blocking >= 0:
                 beta = beta + alpha_min * step
                 active.append(blocking)
+                basis.insert(blocking)
             else:
                 beta = beta_new
                 at_face_minimum = True

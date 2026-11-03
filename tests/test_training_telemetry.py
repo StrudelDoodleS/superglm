@@ -130,6 +130,7 @@ def test_training_telemetry_is_plain_json_ready_payload():
     assert telemetry["features"]["constraints"]["DrivAge"] == {
         "kind": "increasing",
         "mode": "fit",
+        "rules": ["increasing"],
     }
     assert telemetry["edf"]["by_feature"]["DrivAge:Area"] == pytest.approx(1.25)
     assert telemetry["reml"]["lambdas"] == {"DrivAge": 2.0, "DrivAge:Area": 3.5}
@@ -238,3 +239,39 @@ def test_path_result_to_frame_and_telemetry():
     assert telemetry["deviance_path"] == [12.0, 9.5]
     assert telemetry["edf_path"] == [1.25, 1.75]
     json.dumps(telemetry)
+
+
+def test_constraint_payload_lists_every_rule():
+    from superglm.features.constraint import Constraint
+    from superglm.features.spline import Spline
+    from superglm.model import telemetry_ops
+
+    C = Constraint.fit
+    spec = Spline(kind="ps", k=12, constraint=C.increasing & C.concave.above(30))
+    assert telemetry_ops._constraint_payload(spec) == {
+        "kind": "increasing & concave.above(30)",
+        "mode": "fit",
+        "rules": ["increasing", "concave.above(30)"],
+    }
+    assert telemetry_ops._constraint_payload(Spline(kind="ps", k=12)) is None
+
+
+def test_categorical_states_constraint_fields_only_with_a_cap():
+    """An uncapped categorical's telemetry keeps the keys it had before caps existed.
+
+    Mutation: recording constraint_kind/constraint_mode for every spec adds
+    ``None`` and ``"postfit"`` to the uncapped payload.
+    """
+    from superglm import Categorical, Constraint
+
+    rng = np.random.default_rng(2)
+    X = pd.DataFrame({"g": rng.choice(["a", "b", "c"], 300)})
+    y = rng.poisson(1.0, 300).astype(float)
+
+    def config(spec):
+        model = SuperGLM(family="poisson", selection_penalty=0.0, features={"g": spec})
+        return model.fit(X, y).training_telemetry()["features"]["features"]["g"]["config"]
+
+    assert config(Categorical(base="first")) == {"base": "first"}
+    capped = config(Categorical(base="first", constraint=Constraint.fit.cap(0.5, 2.0)))
+    assert capped == {"base": "first", "constraint_kind": "cap(0.5, 2)", "constraint_mode": "fit"}

@@ -1584,6 +1584,7 @@ class ModelMetrics:
         )
         from superglm.model.report_ops import (
             _withhold_repaired_term_inference,
+            rules_enforced,
             shape_repaired_feature_names,
         )
 
@@ -1605,6 +1606,7 @@ class ModelMetrics:
             n_obs=self.n_obs,
             alpha=alpha,
             monotone_repairs=repaired,
+            rules_enforced=rules_enforced(self._model),
             # A shape repair republishes coefficients from a constrained
             # estimator; the marker and the withholding that go with it belong
             # on every summary surface, not only ``model.summary()``.

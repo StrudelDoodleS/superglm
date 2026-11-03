@@ -8,6 +8,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from superglm.group_matrix import (
+    CategoricalGroupMatrix,
     DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     FactorSmoothGroupMatrix,
@@ -207,7 +208,9 @@ def restore_qp_constraints(model, saved_state: list[tuple[int, Any, Any]]) -> No
     reparameterization. The saved matrix is therefore composed with the old
     ``R_inv`` and cannot be installed unchanged after the design is rebuilt.
     Rebuild spline constraints from their raw coefficient rows and compose
-    them with the current group matrix instead.
+    them with the current group matrix instead; a categorical's one-hot
+    block has no ``R_inv``, is in raw coordinates and takes the raw rows
+    unchanged.
     """
     groups = model._groups
     dm = getattr(model, "_dm", None)
@@ -241,14 +244,19 @@ def restore_qp_constraints(model, saved_state: list[tuple[int, Any, Any]]) -> No
                 f"cannot restore QP constraints for group {group.name!r}: "
                 "its raw constraint geometry is unavailable"
             )
-        current_map = getattr(dm.group_matrices[group_index], "R_inv", None)
-        if current_map is None:
+        # A categorical's one-hot block has no SSP map: its columns are the raw
+        # coefficients, so its raw rows are the current ones.
+        group_matrix = dm.group_matrices[group_index]
+        current_map = getattr(group_matrix, "R_inv", None)
+        if current_map is None and not isinstance(group_matrix, CategoricalGroupMatrix):
             raise RuntimeError(
                 f"cannot restore QP constraints for group {group.name!r}: "
                 "its current solver-coordinate map is unavailable"
             )
-
-        current_constraints = raw_builder().compose(current_map)
+        raw_constraints = raw_builder()
+        current_constraints = (
+            raw_constraints if current_map is None else raw_constraints.compose(current_map)
+        )
         if current_constraints.n_params != group.size:
             raise RuntimeError(
                 "restored QP constraint width does not match its current coefficient group"

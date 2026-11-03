@@ -10,6 +10,7 @@ from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
 from superglm._utils import weighted_row_sum
+from superglm.features.constraint import rules_of
 from superglm.group_matrix import GroupMatrix
 from superglm.model.fit_state import (
     FittedStateRevision,
@@ -23,14 +24,6 @@ from superglm.solvers.dispersion import (
 )
 from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import PenaltyComponent
-
-
-def _constraint_kind(spec) -> str | None:
-    return getattr(spec, "constraint_kind", getattr(spec, "monotone", None))
-
-
-def _constraint_mode(spec) -> str:
-    return getattr(spec, "constraint_mode", getattr(spec, "monotone_mode", "postfit"))
 
 
 def _grid_weights(spec, x_col, sample_weight, n_grid: int):
@@ -663,9 +656,12 @@ def _pending_repairs(model) -> list[_PendingRepair]:
     beta = model.result.beta
     pending: list[_PendingRepair] = []
     for name, spec in model._specs.items():
-        kind = _constraint_kind(spec)
-        if kind is None or _constraint_mode(spec) != "postfit":
+        # A post-fit repair is always one whole-curve shape (``Constraint.postfit`` refuses
+        # combinations), so no rule collection reaches ``_repairer``.
+        postfit = next((rule for rule in rules_of(spec) if rule.mode == "postfit"), None)
+        if postfit is None:
             continue
+        kind = postfit.kind
         groups = spline_groups([group for group in model._groups if group.feature_name == name])
         if groups and any(np.any(beta[group.sl] != 0.0) for group in groups):
             pending.append(_PendingRepair(name, spec, _curve_spec(name, spec), kind, groups))
