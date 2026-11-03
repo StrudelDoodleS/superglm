@@ -677,6 +677,7 @@ def _process_info(
     tensor_build: DiscreteTensorBuildResult | None = None,
     tensor_id: int = -1,
     ssp_supports: dict | None = None,
+    eigenbasis_turn: bool = True,
 ) -> tuple[GroupMatrix, NDArray | None, int]:
     """Compute R_inv and construct a GroupMatrix from a single GroupInfo.
 
@@ -684,6 +685,7 @@ def _process_info(
     is the R_inv column block (for collecting into combined R_inv) or None
     if no reparametrization was applied.  ``ssp_supports`` is shared by the
     calls of one term, so subgroups over one basis share its row support.
+    ``eigenbasis_turn=False`` keeps a raw block in its declared coordinates.
     """
     use_discrete = B_unique is not None
     use_tensor = tensor_build is not None
@@ -786,7 +788,11 @@ def _process_info(
             R_inv_local = compute_projected_R_inv(B_for, P, info.penalty_matrix, exp_for, lambda2)
             R_inv = P @ R_inv_local
         else:
-            R_inv_local = _dominant_penalty_eigenbasis(info, sample_weight, lambda2)
+            R_inv_local = (
+                _dominant_penalty_eigenbasis(info, sample_weight, lambda2)
+                if eigenbasis_turn
+                else None
+            )
             R_inv = P if R_inv_local is None else P @ R_inv_local
         n_cols = R_inv.shape[1]
         omega_full = P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None
@@ -1048,6 +1054,17 @@ def build_design_matrix(
     # sample_weight under both: it spans the same column space either way.
     physical_rows = weight_semantics == PRIOR_WEIGHTS
     geometry_weight = knot_geometry_weight(sample_weight, weight_semantics)
+    # The eigenbasis turn is orthogonal within a block, so it keeps the
+    # selection penalty's objective only when that penalty reads each group
+    # through its norm; an elementwise L1 part, or a penalty not known to,
+    # keeps the declared coordinates.
+    from superglm.penalties import GroupElasticNet, GroupLasso, Ridge, SparseGroupLasso
+
+    eigenbasis_turn = (
+        selection_penalty is None
+        or isinstance(selection_penalty, (Ridge, GroupLasso, GroupElasticNet))
+        or (isinstance(selection_penalty, SparseGroupLasso) and selection_penalty.alpha == 0)
+    )
 
     compiled = compile_predictor_design(
         X,
@@ -1071,6 +1088,7 @@ def build_design_matrix(
         alias_prune=alias_prune,
         own_specs=False,
         separation_response=y,
+        eigenbasis_turn=eigenbasis_turn,
     )
     separation_records = compiled.separation_records
     from superglm.features.categorical import Categorical

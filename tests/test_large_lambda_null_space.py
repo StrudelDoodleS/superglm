@@ -21,6 +21,7 @@ import scipy.sparse as sp
 
 from superglm import LambdaPolicy, Spline, SuperGLM
 from superglm.dm_builder import compute_R_inv
+from superglm.penalties import GroupElasticNet, GroupLasso, Ridge, SparseGroupLasso
 from superglm.reml.penalty_algebra import ssp_penalty_matrix
 from superglm.types import GroupInfo
 
@@ -97,6 +98,35 @@ def test_the_ssp_map_factors_a_penalty_whose_formed_null_is_negative():
     # Inverting a triangular factor of condition kappa errs by a small multiple
     # of u kappa (Higham 2002, sec. 14.2).
     assert np.max(np.abs(whitened - np.eye(p))) <= 2**8 * U * np.linalg.cond(R_inv)
+
+
+@pytest.mark.parametrize(
+    "selection, turned",
+    [
+        (lambda: SparseGroupLasso(lambda1=1e-3, alpha=0.5), False),
+        (lambda: SparseGroupLasso(lambda1=1e-3, alpha=0.0), True),
+        (lambda: GroupLasso(lambda1=1e-3), True),
+        (lambda: GroupElasticNet(lambda1=1e-3, alpha=0.5), True),
+        (lambda: Ridge(lambda1=1e-3), True),
+    ],
+    ids=["sgl-l1", "sgl-group", "group-lasso", "group-elastic-net", "ridge"],
+)
+def test_the_eigenbasis_turn_waits_for_a_rotation_invariant_selection_penalty(selection, turned):
+    """The turn is orthogonal within the block, which an elementwise L1 part is not invariant under.
+
+    Under ``SparseGroupLasso(alpha > 0)`` the block keeps its declared
+    (projected) coordinates, so the L1 part acts on the coefficients it was
+    declared on; penalties reading each group through its norm keep the turn.
+    """
+    spline = Spline(kind="cr", n_knots=8, penalty="none")
+    model = SuperGLM(
+        family="gaussian", penalty=selection(), features={"x": spline}, spline_penalty=1e14
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(pd.DataFrame({"x": X_GRID}), Y)
+    block = model._dm.group_matrices[0]
+    assert np.array_equal(block.R_inv, block.projection) is not turned
 
 
 class _NearRangePenalty:
