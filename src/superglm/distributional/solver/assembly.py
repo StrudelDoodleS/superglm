@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 
 import numpy as np
 from numpy.typing import NDArray
@@ -34,7 +36,9 @@ class DenseJointGeometry:
     """Score and data/penalized curvature in the global coefficient layout.
 
     ``formation`` holds the data curvature's formation statistics when the
-    assembly recorded them, for the terminal rank certificate.
+    assembly recorded them, for the terminal rank certificate. A dense assembly
+    defers them as a callable that :meth:`formed` runs on first use, so only
+    the geometry the certificate reads pays for them.
     """
 
     score_data: NDArray[np.float64]
@@ -42,7 +46,15 @@ class DenseJointGeometry:
     data_curvature: NDArray[np.float64]
     penalty: NDArray[np.float64]
     penalized_curvature: NDArray[np.float64]
-    formation: CurvatureFormation | None = field(default=None, compare=False, repr=False)
+    formation: CurvatureFormation | Callable[[], CurvatureFormation] | None = field(
+        default=None, compare=False, repr=False
+    )
+
+    def formed(self) -> CurvatureFormation | None:
+        """The formation statistics, formed on first use if the assembly deferred them."""
+        if callable(self.formation):
+            object.__setattr__(self, "formation", self.formation())
+        return self.formation
 
     def __post_init__(self) -> None:
         score_data = _readonly(self.score_data)
@@ -256,7 +268,7 @@ def _assemble_dense_geometry_from_matrices(
         data_curvature=data_curvature,
         penalty=penalty_matrix,
         penalized_curvature=penalized_curvature,
-        formation=dense_formation(layout, matrices, curvature),
+        formation=partial(dense_formation, layout, matrices, curvature),
     )
 
 

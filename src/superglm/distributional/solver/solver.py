@@ -1506,7 +1506,7 @@ def _certified_terminal_curvature(
     keeps the formed decision, marked uncertified: the fit is disclosed, never
     refused.
     """
-    formation = geometry.formation
+    formation = geometry.formed()
     if formation is None:
         return curvature
     source = curvature.telemetry.actual_source
@@ -2173,7 +2173,7 @@ def _fit_dense_fixed_lambda_core(
                 reuse_owner,
                 context=context,
                 score_data=terminal_score_geometry.score_data,
-                formation=terminal_score_geometry.formation,
+                formation=terminal_score_geometry.formed(),
             )
         return result
 

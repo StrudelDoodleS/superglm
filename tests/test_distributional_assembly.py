@@ -267,6 +267,37 @@ def test_retained_dense_geometry_matches_literal_augmented_products(
         assert not result.data_curvature.flags.writeable
 
 
+def test_a_dense_assembly_forms_its_formation_statistics_only_when_read(monkeypatch) -> None:
+    """Kills forming the certificate's statistics for every geometry, read or not."""
+    layout, frame = _layout()
+    n = len(frame)
+    rng = np.random.default_rng(3)
+    score_eta = rng.normal(size=(n, 2))
+    curvature = rng.uniform(0.5, 1.5, size=(n, 3))
+    matrices = dense_predictor_matrices(layout)
+    formed = []
+    original = assembly_module.dense_formation
+
+    def counted(*args):
+        formed.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(assembly_module, "dense_formation", counted)
+    geometry = assembly_module._assemble_dense_geometry_from_matrices(
+        layout,
+        matrices,
+        score_eta,
+        curvature,
+        penalty=np.diag([0.0, 0.4, 0.7, 0.0, 1.2]),
+        coefficients=rng.normal(size=5),
+    )
+    assert formed == []
+
+    formation = geometry.formed()
+    assert geometry.formed() is formation and len(formed) == 1
+    assert formation == original(layout, matrices, curvature)
+
+
 def test_dense_predictor_evaluation_includes_intercepts_slopes_and_offsets() -> None:
     layout, frame = _layout()
     coefficients = np.array([0.2, -0.3, 0.5, -0.4, 0.8])
