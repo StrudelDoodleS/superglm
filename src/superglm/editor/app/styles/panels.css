@@ -206,6 +206,22 @@
   display: none;
 }
 
+.final-fit-run-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: 420px;
+}
+
+.final-fit-run-note {
+  text-align: right;
+}
+
+.final-fit-run-note[hidden] {
+  display: none;
+}
+
 .final-fit-run:disabled {
   opacity: 0.6;
 }

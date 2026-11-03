@@ -76,6 +76,7 @@ import {
   storeFeatureListOpen
 } from "./views/feature_list.js";
 import { hasParameters, parameterGroups } from "./views/feature_groups.js";
+import { finalFitFailure, finalFitRunState } from "./views/final_fit_run.js";
 import { renderHelpDrawer } from "./views/help_drawer.js";
 import {
   bindKnotBar,
@@ -143,6 +144,7 @@ const reportStatus = document.getElementById("reportStatus");
 const reportFreshness = document.getElementById("reportFreshness");
 const reportRetry = document.getElementById("reportRetry");
 const finalFitRun = document.getElementById("finalFitRun");
+const finalFitRunNote = document.getElementById("finalFitRunNote");
 const reportFrame = document.getElementById("reportFrame");
 const svg = document.getElementById("chart");
 const selectionMenu = document.getElementById("selectionMenu");
@@ -304,9 +306,17 @@ const evidenceTiming = createEvidenceTimingTracker({
 const cvTab = createCVTab({
   frame: reportFrame,
   client: editorClient,
-  onJobSettled: async (kind) => {
-    if (kind === "final_fit") await actions.refreshFromPythonWhenIdle();
+  onJobSettled: async (kind, job) => {
+    if (kind === "final_fit") {
+      finalFitRunError = finalFitFailure(job);
+      await actions.refreshFromPythonWhenIdle();
+    }
     await refreshActiveReport();
+  },
+  onError: (kind, message) => {
+    if (kind !== "final_fit") return;
+    finalFitRunError = message;
+    renderFinalFitRun();
   },
   isShown: () => store.getState().view.activeView === "cv"
 });
@@ -778,11 +788,40 @@ bindExportDialog({
   }
 });
 
+// The Final fit panel's button follows the plan the Cross-validation report
+// gives (can it run, and why not), fetched when the panel opens and after a run.
+let finalFitPlan = null;
+let finalFitRunning = false;
+let finalFitRunError = "";
+
+function renderFinalFitRun() {
+  if (!finalFitRun || !finalFitRunNote) return;
+  const { disabled, hint, note } = finalFitRunState({
+    final: finalFitPlan,
+    running: finalFitRunning,
+    error: finalFitRunError
+  });
+  finalFitRun.disabled = disabled;
+  finalFitRun.dataset.popoverBody = hint;
+  finalFitRunNote.textContent = note;
+  finalFitRunNote.hidden = !note;
+}
+
+async function refreshFinalFitPlan() {
+  try {
+    finalFitPlan = (await editorClient.postJSON("/report", { report: "cv" })).final_fit ?? null;
+  } catch {
+    finalFitPlan = null;
+  }
+  renderFinalFitRun();
+}
+
 // A session tool the model does not offer: its export format is disabled, and
 // hovering the card says why, in the server's words.
 function renderSessionAvailability(unavailable) {
   for (const input of exportFormatInputs) {
     const reason = unavailable[`export_${input.value}`];
+    if (reason === undefined) continue;
     input.disabled = Boolean(reason);
     const card = input.closest("label");
     if (!card) continue;
@@ -1409,7 +1448,10 @@ function sameActiveViewRenderState(next, previous) {
 // Without a Cross-validation tab, the Final fit panel starts the final fit.
 function renderActiveViewState({ ready, activeView, finalFitHere }) {
   if (!ready) return;
-  if (finalFitRun) finalFitRun.hidden = !(finalFitHere && activeView === "final");
+  if (finalFitRun) {
+    finalFitRun.hidden = !(finalFitHere && activeView === "final");
+    if (!finalFitRun.hidden) void refreshFinalFitPlan();
+  }
   renderAppView(activeView);
   renderReportEvidence(store.getState().request.evidence.report, activeView);
 }
@@ -2236,11 +2278,14 @@ if (summaryRetry) {
 }
 if (finalFitRun) {
   finalFitRun.addEventListener("click", async () => {
-    finalFitRun.disabled = true;
+    finalFitRunning = true;
+    finalFitRunError = "";
+    renderFinalFitRun();
     try {
       await cvTab.start("final_fit");
     } finally {
-      finalFitRun.disabled = false;
+      finalFitRunning = false;
+      await refreshFinalFitPlan();
     }
   });
 }

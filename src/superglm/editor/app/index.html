@@ -717,9 +717,11 @@
           <button id="reportRetry" class="evidence-retry" type="button" hidden>Retry</button>
         </div>
       </div>
-      <button id="finalFitRun" class="final-fit-run" type="button" hidden
-        data-popover-title="Final fit"
-        data-popover-body="Refit the current structure on train and validation rows and put your hand edits back. The test split stays held out. Export offers the result as Final fit model.">Run final fit</button>
+      <div class="final-fit-run-group">
+        <button id="finalFitRun" class="final-fit-run" type="button" hidden
+          data-popover-title="Final fit">Run final fit</button>
+        <p id="finalFitRunNote" class="final-fit-run-note" role="status" hidden></p>
+      </div>
     </div>
     <div id="reportFrame" class="report-frame" aria-busy="true"
       data-freshness="idle"></div>
