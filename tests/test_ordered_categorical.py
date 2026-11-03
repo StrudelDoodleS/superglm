@@ -1159,28 +1159,45 @@ def test_ordered_cap_at_levels():
     assert np.max(_printed_levels(_ordered_fit(X, y, C.increasing))) > 1.8
 
 
-def test_ordered_cap_holds_at_levels_absent_from_training():
-    """A cap holds on the printed relativities of declared levels the data never shows.
-
-    Bands A and F are declared but absent, so their axis values lie outside the
-    inner spline's range and prediction clips them; the base is A. Mutation: the
-    rows read the raw polynomial beyond the range and E printed 1.5 under a 1.2 cap.
-    """
-    C = Constraint.fit
+def _absent_end_levels_fit(kind, extrapolation):
+    """A capped ordered fit whose declared end bands A (the base) and F the data never shows."""
     X = pd.DataFrame({"band": np.repeat(np.array(list("BCDE"), dtype=object), 200)})
     y = np.repeat([1.0, 6.0, 1.0, 6.0], 200)
-    spec = OrderedCategorical(
-        order=list("ABCDEF"), base="A", basis=Spline(kind="ps", k=5, constraint=C.cap(0.8, 1.2))
+    basis = Spline(
+        kind=kind, k=5, extrapolation=extrapolation, constraint=Constraint.fit.cap(0.8, 1.2)
     )
+    spec = OrderedCategorical(order=list("ABCDEF"), base="A", basis=basis)
     model = SuperGLM(family="poisson", selection_penalty=0.0, features={"band": spec})
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit(X, y)
+        return model.fit(X, y)
+
+
+@pytest.mark.parametrize("extrapolation", ["clip", "extend"])
+@pytest.mark.parametrize("kind", ["ps", "cr"])
+def test_ordered_cap_holds_at_levels_absent_from_training(kind, extrapolation):
+    """A cap holds on the printed relativities of declared levels the data never shows.
+
+    A and F lie outside the inner spline's range, where prediction clips, follows
+    the end polynomial (``ps``) or a linear tail (``cr``). Mutation: the rows read
+    the raw polynomial and E printed 1.5 under a 1.2 cap; rows read always clipped
+    break the ``extend`` cases.
+    """
+    model = _absent_end_levels_fit(kind, extrapolation)
     printed = _printed_levels(model)
     assert np.min(printed) >= 0.8 * (1.0 - 1e3 * _U)
     assert np.max(printed) <= 1.2 * (1.0 + 1e3 * _U)
     mu = model.predict(pd.DataFrame({"band": np.array(list("ABCDEF"), dtype=object)}))
     assert np.max(mu / mu[0]) <= 1.2 * (1.0 + 1e3 * _U)
+    assert np.min(mu / mu[0]) >= 0.8 * (1.0 - 1e3 * _U)
+
+
+def test_ordered_cap_under_error_extrapolation_fits():
+    """Under ``extrapolation="error"`` absent levels cannot be predicted; the capped fit still runs.
+
+    Mutation: the rows read the absent levels unclipped and the build raised.
+    """
+    assert _absent_end_levels_fit("ps", "error").result.converged
 
 
 @pytest.mark.parametrize("method", ["fit", "fit_reml"])

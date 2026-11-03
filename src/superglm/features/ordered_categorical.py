@@ -891,21 +891,14 @@ class OrderedCategorical:
     def _level_rows(self) -> LinearConstraintSet:
         """Rows ``A @ c >= b`` holding the cap and step limit at the levels.
 
-        ``c`` is the inner spline's raw coefficient vector, the space its own
-        shape rows are stated in, and ``B(l) @ c`` is the curve at the value of
-        level ``l``. The term prints ``f(l) - f(base)``, so a cap is
-        ``log lo <= (B(l) - B(base)) @ c <= log hi`` at every other level and a
-        step limit is ``log(1 - down) <= (B(l_{j+1}) - B(l_j)) @ c <= log(1 + up)``
-        for each adjacent pair; any constant centring shift cancels in both.
-        Each row is scaled by its largest entry; a zero row bounds nothing and
-        is dropped.
-
-        ``B`` is the inner basis the term predicts with, under its extrapolation
-        policy, because a declared level absent from the training rows can sit
-        outside the inner range: there prediction clips (or follows a natural
-        spline's linear tail), and the rows must bound that curve. Under
-        ``extrapolation="error"`` such a level cannot be predicted, so its row is
-        read at the clipped value, which bounds nothing a user reads.
+        ``B(l) @ c`` is the curve the term predicts at level ``l`` (the inner raw
+        basis under its extrapolation policy, since a level absent from training
+        can sit outside the inner range). A cap is ``log lo <= (B(l) - B(base)) @ c
+        <= log hi`` at every other level, and a step limit bounds ``(B(l_{j+1}) -
+        B(l_j)) @ c`` by ``log(1 - down)`` and ``log(1 + up)``. Rows are scaled by
+        their largest entry, and zero rows are dropped. Under
+        ``extrapolation="error"`` an out-of-range level is read clipped: it cannot
+        be predicted.
         """
         inner = cast(Any, self._basis_spline)  # ty: the knots are set per instance at the build
         levels = sorted(self._smooth_levels, key=self._level_to_value.__getitem__)
