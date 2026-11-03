@@ -1672,6 +1672,14 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     # fit_irls_direct's frame: _finish, run, _fit_irls_direct_once, it
                     warnings.warn(message, SeparationWarning, stacklevel=4)
 
+        # A binomial/identity state holding rows at a clipped probability is on the
+        # mean-space boundary, whatever stopped the loop
+        # (``mean_space_boundary_rows``); a broken shape constraint names its own stop.
+        if self.mean_space is None and mean_space_boundary_rows(
+            family, link, eta_unclipped, weights
+        ):
+            converged, termination_reason = False, "mean_space_boundary"
+
         if qp is not None:
             if not qp.feasible(beta):
                 minimum_scaled_slack = float(np.min(_feasibility_slack(qp.A_all, beta, qp.b_all)))
@@ -1691,12 +1699,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     "constrained-QP KKT certificate; fit is not converged."
                 )
 
-        # A binomial/identity state holding rows at a clipped probability is on the
-        # mean-space boundary, whatever stopped the loop (``mean_space_boundary_rows``).
-        if self.mean_space is None and mean_space_boundary_rows(
-            family, link, eta_unclipped, weights
-        ):
-            converged, termination_reason = False, "mean_space_boundary"
         # A returned state with a row outside the link's domain is no fitted model,
         # whatever stopped the loop (``link_domain_violation``), and its reason
         # says so: a caller never reads it as a mode short of its certificate.

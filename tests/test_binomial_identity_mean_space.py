@@ -18,7 +18,15 @@ import pytest
 from scipy.optimize import LinearConstraint, minimize
 from scipy.special import xlogy
 
-from superglm import Categorical, ConvergenceWarning, Numeric, Spline, SuperGLM
+from superglm import (
+    BSplineSmooth,
+    Categorical,
+    Constraint,
+    ConvergenceWarning,
+    Numeric,
+    Spline,
+    SuperGLM,
+)
 from superglm.links import IdentityLink
 
 
@@ -145,3 +153,56 @@ def test_a_shifted_identity_link_reads_the_boundary_on_its_mean():
     np.testing.assert_allclose(model.predict(X), 0.5, atol=1e-8)
     assert model.result.converged
     assert model.result.mean_space_boundary_rows == 0
+
+
+def _forced_end_of_fit_qp_failure(monkeypatch, stop):
+    """The retained mode fails its shape constraint; the steps before it are untouched."""
+    import sys
+
+    from superglm.solvers.irls_direct._qp import _IRLSDirectQPStep
+
+    if stop == "constraint_kkt_incomplete":
+        monkeypatch.setattr(
+            _IRLSDirectQPStep, "retained_converged", property(lambda self: False, lambda *_: None)
+        )
+    else:
+        feasible = _IRLSDirectQPStep.feasible
+        monkeypatch.setattr(
+            _IRLSDirectQPStep,
+            "feasible",
+            lambda self, beta: (
+                sys._getframe(1).f_code.co_name != "_finish" and feasible(self, beta)
+            ),
+        )
+
+
+@pytest.mark.parametrize("stop", ["constraint_infeasible", "constraint_kkt_incomplete"])
+def test_a_constraint_failure_on_the_boundary_keeps_its_own_stop(monkeypatch, stop):
+    # Level c's responses are all 0, so the mode holds rows on the boundary;
+    # a broken shape constraint there is named as such, not as a boundary maximum.
+    from superglm.reml.observed_geometry import ObservedModeNotConvergedError
+
+    _forced_end_of_fit_qp_failure(monkeypatch, stop)
+    rng = np.random.default_rng(1)
+    x = rng.uniform(0.0, 1.0, 1500)
+    g = rng.choice(["a", "b", "c"], 1500)
+    y = rng.binomial(1, 0.3 + 0.3 * x).astype(float)
+    y[g == "c"] = 0.0
+    model = SuperGLM(
+        family="binomial",
+        link="identity",
+        features={
+            "x": BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing),
+            "g": Categorical(),
+        },
+    )
+    X = pd.DataFrame({"x": x, "g": g})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        if stop == "constraint_infeasible":
+            with pytest.raises(ObservedModeNotConvergedError, match="infeasible"):
+                model.fit_reml(X, y)
+            return
+        model.fit_reml(X, y)
+    assert not model.result.converged
+    assert model.result.termination_reason == stop
