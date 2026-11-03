@@ -266,6 +266,24 @@ def test_natural_ends_keep_no_row_the_equalities_hold(rules):
         assert np.min(np.linalg.norm(rows.A @ Z, axis=1)) > 1e-3
 
 
+def test_flat_covers_the_curve_when_its_zero_region_and_natural_ends_reach_every_span():
+    """Whether the flat rows leave only the constants: every slope coefficient held at zero."""
+    from superglm.features._shape_rule_rows import flat_covers_curve
+
+    open_knots, clamped = _open_knots(), _clamped_knots()
+    whole = shape_pieces(C.flat.within(LO, HI), LO, HI)
+    assert flat_covers_curve(open_knots, DEGREE, whole, natural_ends=False)
+    assert flat_covers_curve(clamped, DEGREE, whole, natural_ends=True)
+    inner = shape_pieces(C.flat.within(_natural_knot(0), _natural_knot(-1)), LO, HI)
+    # A natural end holds the boundary span flat beside a region that starts at the
+    # first interior knot; an open spline leaves that span free.
+    assert flat_covers_curve(clamped, DEGREE, inner, natural_ends=True)
+    assert not flat_covers_curve(clamped, DEGREE, inner, natural_ends=False)
+    assert not flat_covers_curve(
+        open_knots, DEGREE, shape_pieces(C.flat.within(25, 40), LO, HI), natural_ends=False
+    )
+
+
 @pytest.mark.parametrize(
     ("knots", "rules", "natural_ends"),
     [

@@ -213,6 +213,32 @@ def natural_flat_extent(
     return lo, hi
 
 
+def held_flat_regions(
+    knots: NDArray, degree: int, pieces: list[ShapePiece], *, natural_ends: bool
+) -> list[tuple[float, float]]:
+    """Where the flat pieces hold the curve constant, a natural end's boundary span included."""
+    knots = np.asarray(knots, dtype=np.float64)
+    return [
+        natural_flat_extent(knots, degree, s, e, natural_ends=natural_ends)
+        for s, e in flat_zero_regions(knots, pieces)
+    ]
+
+
+def flat_covers_curve(
+    knots: NDArray, degree: int, pieces: list[ShapePiece], *, natural_ends: bool
+) -> bool:
+    """Whether the flat pieces hold every first-derivative coefficient at zero.
+
+    The curve is then constant, and its one free column is confounded with the
+    intercept.
+    """
+    knots = np.asarray(knots, dtype=np.float64)
+    n_basis = len(knots) - degree - 1
+    zero = held_flat_regions(knots, degree, pieces, natural_ends=natural_ends)
+    held = _held_at_zero(knots[1:n_basis], knots[degree + 1 : degree + n_basis], zero)
+    return bool(zero) and bool(held.all())
+
+
 def _held_at_zero(lo: NDArray, hi: NDArray, zero: list[tuple[float, float]]) -> NDArray:
     """Which supports [lo, hi] overlap a stretch where ``f'`` is held at zero."""
     held = np.zeros(np.shape(lo), dtype=bool)
@@ -372,8 +398,10 @@ def spline_cap_rows(
 __all__ = [
     "ShapePiece",
     "derivative_value_row",
+    "flat_covers_curve",
     "flat_zero_regions",
     "full_range_rows",
+    "held_flat_regions",
     "natural_flat_extent",
     "refined_derivative_rows",
     "shape_pieces",

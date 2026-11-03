@@ -96,6 +96,21 @@ def _natural_flat_extent(spec: Any, lo: float, hi: float) -> tuple[float, float]
     )
 
 
+def _shown_and_held(spec: Any, rule: Any, lo: float, hi: float) -> tuple[Any, str]:
+    """A flat rule and the ground it holds on [lo, hi], in the term's own words.
+
+    An ordered term's basis (``_axis_levels``) names the rule's ends and the levels it
+    holds rather than their values.
+    """
+    levels = spec._axis_levels
+    if levels is None:
+        return rule, f"[{_fmt_end(lo)}, {_fmt_end(hi)}]"
+    label = dict(levels)
+    shown = replace(rule, lo=label.get(rule.lo, rule.lo), hi=label.get(rule.hi, rule.hi))
+    covered = [name for value, name in levels if lo <= value <= hi]
+    return shown, f"the levels {covered[0]!r} to {covered[-1]!r}"
+
+
 def _warn_widened_flats(spec: Any, pieces: list, *, stacklevel: int) -> None:
     """Warn once when a flat stretch holds on more than it states, naming where it holds.
 
@@ -136,15 +151,37 @@ def _warn_widened_flats(spec: Any, pieces: list, *, stacklevel: int) -> None:
         if extended:
             reason += " and the boundary span its natural end holds flat beside them"
             fixes.append("put a knot inside the boundary span to keep it free")
-        if levels is None:
-            shown, held = rule, f"[{_fmt_end(lo)}, {_fmt_end(hi)}]"
-        else:
-            shown = replace(rule, lo=label.get(rule.lo, rule.lo), hi=label.get(rule.hi, rule.hi))
-            covered = [name for value, name in levels if lo <= value <= hi]
-            held = f"the levels {covered[0]!r} to {covered[-1]!r}"
+        shown, held = _shown_and_held(spec, rule, lo, hi)
         widened.append(f"{shown.describe()} holds on {held}, {reason}; {'; '.join(fixes)}")
     if widened:
         warnings.warn("; ".join(widened), UserWarning, stacklevel=stacklevel + 1)
+
+
+def _refuse_flat_over_curve(spec: Any, pieces: list) -> None:
+    """Refuse flat stretches that hold the whole curve constant.
+
+    Every first-derivative coefficient is then held at zero, which leaves one
+    column, the constant, confounded with the intercept: the term has no effect
+    to report, and its rounding would print a varying one. A flat rule needs a
+    stretch for the same reason.
+    """
+    natural = has_natural_ends(spec)
+    if not _shape_rule_rows.flat_covers_curve(
+        spec._knots, spec.degree, pieces, natural_ends=natural
+    ):
+        return
+    regions = _shape_rule_rows.held_flat_regions(
+        spec._knots, spec.degree, pieces, natural_ends=natural
+    )
+    lo, hi = max(regions[0][0], spec._lo), min(regions[-1][1], spec._hi)
+    flat_rules = [rule for rule in rules_of(spec) if rule.kind == "flat"]
+    shown, held = zip(*(_shown_and_held(spec, rule, lo, hi) for rule in flat_rules), strict=True)
+    raise ValueError(
+        f"{' & '.join(rule.describe() for rule in shown)} holds the curve flat on {held[0]}, "
+        "the whole knot spans it touches, which is the feature's whole range and leaves the "
+        "term with no effect; remove the term, or narrow the stretch to leave part of the "
+        "range free"
+    )
 
 
 def prepare_shape_rules(spec: Any, *, stacklevel: int = 1) -> None:
@@ -162,6 +199,7 @@ def prepare_shape_rules(spec: Any, *, stacklevel: int = 1) -> None:
     if not _is_rule_collection(spec):
         return
     pieces = _collection_pieces(spec, stacklevel=stacklevel + 1)
+    _refuse_flat_over_curve(spec, pieces)
     _warn_widened_flats(spec, pieces, stacklevel=stacklevel + 1)
     _, flat_rows = _shape_rule_rows.shape_rows(
         spec._knots,

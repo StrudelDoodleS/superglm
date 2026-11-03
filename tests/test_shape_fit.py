@@ -1,3 +1,4 @@
+import re
 import warnings
 
 import numpy as np
@@ -504,3 +505,42 @@ def test_cap_reml_and_discrete(method, discrete):
     printed = _printed(model)
     _assert_inside(printed, 0.6, 1.8)
     assert np.max(printed) == pytest.approx(1.8, abs=1e-3)
+
+
+@pytest.mark.parametrize(
+    ("kind", "rule", "held"),
+    [
+        ("ps", C.flat.within(0.1, 9.9), r"\[0, 10\]"),
+        ("ps", C.flat.within(0.0, 10.0), r"\[0, 10\]"),
+        ("ps", C.flat.within(0.1, 4.0) & C.flat.within(4.0, 9.9), r"\[0, 10\]"),
+    ],
+    ids=["widened", "whole-range", "two-stretches"],
+)
+def test_flat_over_the_whole_range_is_refused(kind, rule, held):
+    """A flat stretch that widens to every knot span leaves a constant, the term's no-effect curve.
+
+    The constant column is confounded with the intercept, so the fit would print
+    a varying effect from its rounding. Mutation: the term fitted with an EDF of 2 and
+    predictions spanning about 0.4 on the linear predictor.
+    """
+    x = np.linspace(0.0, 10.0, 300)
+    y = np.random.default_rng(0).poisson(2, 300).astype(float)
+    spec = Spline(kind=kind, k=8, constraint=rule)
+    model = SuperGLM(family="poisson", features={"x": spec})
+    with pytest.raises(ValueError) as refusal:
+        model.fit_reml(pd.DataFrame({"x": x}), y)
+    message = str(refusal.value)
+    assert message.startswith("Feature 'x': ")
+    assert re.search(rf"holds the curve flat on {held}", message)
+    assert "no effect" in message and "remove the term" in message
+
+
+def test_flat_leaving_a_span_free_still_fits():
+    """A flat stretch that leaves part of the range free is not the whole-range refusal."""
+    x = np.linspace(0.0, 10.0, 300)
+    y = np.random.default_rng(0).poisson(2, 300).astype(float)
+    spec = Spline(kind="ps", k=8, constraint=C.flat.within(3.0, 7.0))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # the stretch widens to whole knot spans
+        model = SuperGLM(family="poisson", features={"x": spec}).fit_reml(pd.DataFrame({"x": x}), y)
+    assert model.result.converged
