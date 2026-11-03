@@ -239,6 +239,26 @@ def test_u_with_flat_bottom_fit(kind):
     assert np.ptp(f) > 1e3 * U * np.max(np.abs(f))
 
 
+def test_natural_cr_flat_warning_names_the_flat_boundary_span():
+    """A flat zero region from the first interior knot also flattens the boundary span.
+
+    The knot at 2 starts the zero region of ``flat.within(3, 5)``, which is
+    [2, 6]; the natural end holds ``f''(0) = 0``, so the fit is constant on
+    [0, 6], and the warning says so. Mutation: the warning named [2, 6].
+    """
+    rng = np.random.default_rng(3)
+    x = np.linspace(0.0, 10.0, 4_000)
+    X, y = pd.DataFrame({"x": x}), rng.poisson(np.exp(0.15 * x))
+    spec = CubicRegressionSpline(knots=[2.0, 4.0, 6.0, 8.0], constraint=C.flat.within(3, 5))
+    model = SuperGLM(family="poisson", selection_penalty=0.0, features={"x": spec})
+    with pytest.warns(UserWarning, match=r"flat\.within\(3, 5\) holds on \[0, 6\]"):
+        model.fit(X, y)
+    grid = np.linspace(0.0, 10.0, 1_000)
+    f = _native_curve(model, "x", grid, 0)
+    assert np.ptp(f[grid <= 6.0]) <= 1e3 * U * np.max(np.abs(f))
+    assert np.ptp(f) > 0.5  # the curve rises beyond the flat
+
+
 def test_natural_cr_with_flat_keeps_end_curvature_rows():
     x = np.linspace(17.0, 80.0, 500)
     knots = [25.0, 30.0, 35.0, 40.0, 50.0, 60.0, 70.0]

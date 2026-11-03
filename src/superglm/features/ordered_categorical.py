@@ -27,7 +27,12 @@ from superglm.features.categorical import (
     _validate_categorical_levels,
     _validate_missing_only,
 )
-from superglm.features.constraint import ConstraintRules, rules_of
+from superglm.features.constraint import (
+    _CURVATURE_KINDS,
+    _DIRECTION_KINDS,
+    ConstraintRules,
+    rules_of,
+)
 from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
 from superglm.types import GroupInfo, LinearConstraintSet
@@ -768,14 +773,7 @@ class OrderedCategorical:
                 "Fit-time shape constraints are not supported with "
                 "select=True. Use select=False or Constraint.postfit.*."
             )
-        for rule in shape:
-            if rule.lo is None or rule.hi is None:
-                continue
-            if not self._stretch_end_value(rule.lo) < self._stretch_end_value(rule.hi):
-                raise ValueError(
-                    f"{rule.describe()} needs its first level before its second in level "
-                    "order; swap the ends or use a single below/above"
-                )
+        self._refuse_stretches_in_levels(shape)
         rules, kind, mode = _normalize_constraint(shape.resolve(self._stretch_end_value))
         inner.constraint_rules = rules
         inner.constraint_kind = inner.monotone = kind
@@ -784,12 +782,48 @@ class OrderedCategorical:
             (float(self._level_to_value[level]), level) for level in self._smooth_levels
         )
 
+    def _refuse_stretches_in_levels(self, shape: ConstraintRules) -> None:
+        """Refuse reversed or overlapping stretches, in level labels, before they are resolved.
+
+        ``ConstraintRules.resolve`` would refuse both too, but in axis values.
+        Overlap is checked within the direction, curvature and flat groups, as
+        ``ConstraintRules.validate`` checks it; stretches that only touch at a
+        level do not overlap.
+        """
+        levels = sorted(self._smooth_levels, key=self._level_to_value.__getitem__)
+        name = {float(self._level_to_value[level]): level for level in levels}
+        spans = []
+        for rule in shape:
+            lo = -np.inf if rule.lo is None else self._stretch_end_value(rule.lo)
+            hi = np.inf if rule.hi is None else self._stretch_end_value(rule.hi)
+            if rule.lo is not None and rule.hi is not None and not lo < hi:
+                raise ValueError(
+                    f"{rule.describe()} needs its first level before its second in level "
+                    "order; swap the ends or use a single below/above"
+                )
+            spans.append((rule, lo, hi))
+        for group in _DIRECTION_KINDS, _CURVATURE_KINDS, ("flat",):
+            members = [span for span in spans if span[0].kind in group]
+            for i, (a, a_lo, a_hi) in enumerate(members):
+                for b, b_lo, b_hi in members[i + 1 :]:
+                    start, stop = max(a_lo, b_lo), min(a_hi, b_hi)
+                    if start < stop:
+                        first = name.get(start, levels[0])
+                        last = name.get(stop, levels[-1])
+                        raise ValueError(
+                            f"{a.describe()} and {b.describe()} both apply from level "
+                            f"{first!r} to level {last!r}; give them stretches that do not "
+                            "overlap"
+                        )
+
     def _stretch_end_value(self, end: float | str) -> float:
         """The axis value of the level a stretch end names.
 
         Ends are level labels, numeric ones included, matched as data values
         are (``_declared_matcher``), then through the grouping as a Spline knot
-        is. A special level has no place on the curve and is refused.
+        is. A group label names its group. A level the grouping merges with
+        others is refused, naming the group label to use, and so is a special
+        level, which has no place on the curve.
         """
         texts = [str(level) for level in self._declared_smooth_levels]
         specials = [str(level) for level in self._special_display]
@@ -799,13 +833,29 @@ class OrderedCategorical:
                 f"the stretch at one of the levels {texts!r}"
             )
         matched = str(_declared_matcher(list(self._declared_smooth_levels))(end))
-        if matched not in texts:
-            raise ValueError(
-                f"stretch end {end!r} is not one of the levels {texts!r}; end the stretch at "
-                "one of them"
-            )
-        position = self._grouped_break_position(texts.index(matched), parameter="stretch end")
-        return float(self._level_to_value[self._smooth_levels[position]])
+        grouping = self._grouping
+        if matched in texts and grouping is not None:
+            group = str(grouping.original_to_group.get(matched, matched))
+            members = [str(m) for m in grouping.group_to_originals.get(group, [matched])]
+            if len(members) > 1:
+                raise ValueError(
+                    f"stretch end {end!r} names level {matched!r}, which the grouping merges "
+                    f"into group {group!r} with {members!r}; end the stretch at the group "
+                    f"label {group!r}"
+                )
+        if matched in texts:
+            position = self._grouped_break_position(texts.index(matched), parameter="stretch end")
+            return float(self._level_to_value[self._smooth_levels[position]])
+        # A grouped term's curve levels are its group labels, and each names a level too.
+        curve = [str(level) for level in self._smooth_levels]
+        group = str(_declared_matcher(list(self._smooth_levels))(end))
+        if group in curve:
+            return float(self._level_to_value[self._smooth_levels[curve.index(group)]])
+        known = texts if grouping is None else curve
+        raise ValueError(
+            f"stretch end {end!r} is not one of the levels {known!r}; end the stretch at "
+            "one of them"
+        )
 
     def _level_rows(self) -> LinearConstraintSet:
         """Rows ``A @ c >= b`` holding the cap and step limit at the levels.

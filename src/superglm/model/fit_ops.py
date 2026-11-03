@@ -1268,10 +1268,11 @@ def _reject_monotone_fit_conflicts(model, penalty, has_lambda1_targets) -> None:
 
 
 def _validate_rule_fit_conflicts(model) -> None:
-    """Refuse caps a fit cannot honour and disclose what a cap leaves out, before the build.
+    """Refuse caps and step limits a fit cannot honour and disclose what a cap leaves out.
 
-    A cap bounds printed relativities, which are factors only under a log
-    link (the rating-table export refuses other links for the same reason).
+    A cap and a step limit bound printed relativities, which are factors only
+    under a log link (the rating-table export refuses other links for the
+    same reason).
     A capped spline that extends linearly past its training range is capped
     on that range only, so the fit warns once per feature that its tails are
     not. Reads every main-effect and interaction spec by its rule objects; a
@@ -1291,18 +1292,18 @@ def _validate_rule_fit_conflicts(model) -> None:
             refuse_level_rules = getattr(spec, "_refuse_level_rules", None)
             if refuse_level_rules is not None:
                 refuse_level_rules()
-            cap = next((rule for rule in rules if rule.kind == "cap"), None)
-            if cap is None:
-                continue
+            held = next(rule for rule in rules if rule.kind in ("cap", "max_step"))
             if link is None:
                 family = resolve_distribution(configured_family(model))
                 link = resolve_link(configured_link(model), family)
             if not isinstance(link, LogLink):
                 raise ValueError(
-                    f"{cap.describe()} bounds printed relativities, which need a log link; "
-                    f"this model uses {type(link).__name__}. Fit with link='log' or drop the cap"
+                    f"{held.describe()} bounds printed relativities, which need a log link; "
+                    f"this model uses {type(link).__name__}. Fit with link='log' or drop the "
+                    f"{held.kind}"
                 )
-            if getattr(spec, "extrapolation", None) == "extend":
+            cap = next((rule for rule in rules if rule.kind == "cap"), None)
+            if cap is not None and getattr(spec, "extrapolation", None) == "extend":
                 warnings.warn(
                     f"{cap.describe()} holds on the training range; with extrapolation='extend' "
                     "the tails beyond the training range are not capped. Use "

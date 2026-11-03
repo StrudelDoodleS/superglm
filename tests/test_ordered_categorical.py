@@ -1,6 +1,5 @@
 """Tests for OrderedCategorical feature type."""
 
-import re
 import warnings
 
 import numpy as np
@@ -1246,17 +1245,78 @@ def test_ordered_rules_under_reml():
 
 
 def test_ordered_flat_warning_names_levels():
-    """A flat stretch widened to whole knot spans is reported in levels, not axis values.
+    """A widened flat stretch is reported in levels, over the interval the fit holds flat.
 
-    Mutation: without the level names the warning reads ``flat.within(0.2857, ...)``.
+    On cr k=6 the zero region of ``flat.within('36-45', '46-55')`` starts at
+    the first interior knot, so the natural end flattens the boundary span too:
+    the fit prints one relativity from '18-25' to '56-65'. Mutation: the
+    warning named '36-45' to '56-65' (and before that, axis values).
     """
-    rule = Constraint.fit.flat.within("36-45", "46-55")
-    spec = OrderedCategorical(order=_AGE_BANDS, basis=Spline(k=6, constraint=rule))
-    rows = np.array(_AGE_BANDS, dtype=object)[np.arange(8).repeat(20)]
+    C = Constraint.fit
+    X, y = _band_rows(_steep_effect(), n=4_000)
     with pytest.warns(UserWarning, match="whole knot spans") as seen:
-        spec.build(rows)
+        model = _ordered_fit(X, y, C.flat.within("36-45", "46-55"))
     message = str(next(w.message for w in seen if "whole knot spans" in str(w.message)))
-    assert re.search(
-        r"flat\.within\('36-45', '46-55'\) holds on the levels '[^']+' to '[^']+'", message
-    ), message
+    assert "flat.within('36-45', '46-55') holds on the levels '18-25' to '56-65'" in message
     assert "0.28" not in message
+    printed = _printed_levels(model)
+    assert np.ptp(printed[:5]) <= 1e3 * _U * np.max(printed)
+    assert np.ptp(printed) > 0.5
+
+
+def test_ordered_max_step_refused_under_identity_link():
+    """A step limit bounds printed ratios, so it needs a log link, as a cap does.
+
+    Mutation: before the check the identity-link fit ran.
+    """
+    rule = Constraint.fit.increasing & Constraint.fit.max_step(0.15)
+    X, y = _band_rows(_steep_effect(), n=2_000)
+    spec = OrderedCategorical(order=_AGE_BANDS, basis=Spline(k=6, constraint=rule))
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"band": spec})
+    with pytest.raises(
+        ValueError, match=r"Feature 'band': max_step\(0\.15\).*log link.*drop the max_step"
+    ):
+        model.fit(X, y)
+
+
+def test_ordered_overlapping_stretches_refused_in_labels():
+    """Overlapping stretches are refused naming the levels they share, not axis values."""
+    C = Constraint.fit
+    X, y = _band_rows(_steep_effect(), n=2_000)
+    rule = C.increasing.below("46-55") & C.increasing.above("26-35")
+    with pytest.raises(
+        ValueError,
+        match=r"Feature 'band': .*both apply from level '26-35' to level '46-55'; give them",
+    ):
+        _ordered_fit(X, y, rule)
+
+
+def test_ordered_stretch_end_absorbed_by_grouping():
+    """A stretch end at a level a grouping merged is refused, naming the group to use instead.
+
+    The advice holds: the same stretch ended at the group label fits.
+    Mutation: the refusal used the Piecewise break/knot sentence.
+    """
+    groups = {"26-45": ["26-35", "36-45"]}
+    groups |= {level: [level] for level in _AGE_BANDS if level not in groups["26-45"]}
+    grouping = collapse_levels(
+        np.array(_AGE_BANDS * 4, dtype=object), groups=groups, order=_AGE_BANDS
+    )
+    X, y = _band_rows(_steep_effect(), n=4_000)
+
+    def fit(end):
+        basis = Spline(k=5, constraint=Constraint.fit.increasing.above(end))
+        spec = OrderedCategorical(order=_AGE_BANDS, basis=basis, grouping=grouping)
+        model = SuperGLM(family="poisson", selection_penalty=0.0, features={"band": spec})
+        return model.fit(X, y)
+
+    with pytest.raises(
+        ValueError,
+        match=r"Feature 'band': stretch end '26-35' names level '26-35', which the grouping "
+        r"merges into group '26-45' .*end the stretch at the group label '26-45'",
+    ):
+        fit("26-35")
+    ti = fit("26-45").term_inference("band", with_se=False)
+    by_level = dict(zip(map(str, ti.levels), np.asarray(ti.relativity, dtype=np.float64)))
+    printed = np.array([by_level[level] for level in _AGE_BANDS])  # members print their group
+    assert np.min(np.diff(printed[1:])) >= -1e3 * _U * np.max(printed)

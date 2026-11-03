@@ -83,12 +83,35 @@ def _fmt_end(x: float) -> str:
     return f"{x:.6g}"
 
 
-def _warn_widened_flats(spec: Any, pieces: list, *, stacklevel: int) -> None:
-    """Warn once when a flat stretch's ends are not knots, naming where it holds.
+def _natural_flat_extent(spec: Any, lo: float, hi: float) -> tuple[float, float]:
+    """Where a flat zero region [lo, hi] holds a cubic with natural ends constant.
 
-    An end at the feature's boundary is exact: the curve is read on its range.
-    An ordered term's basis (``_axis_levels``) names its ends and the levels
-    the stretch holds on rather than their values.
+    A natural end holds ``f''`` at zero at the end of the knot vector's base
+    interval. A zero region that begins at the first interior knot leaves the
+    boundary span a cubic with ``f'' = 0`` at both of its ends, so ``f''`` is
+    zero on it, and with ``f' = 0`` at the knot the curve is constant there
+    too. The same holds at the right end.
+    """
+    if spec.degree != 3 or not has_natural_ends(spec):
+        return lo, hi
+    knots = spec._knots
+    n_basis = len(knots) - spec.degree - 1
+    if lo == knots[spec.degree + 1]:
+        lo = knots[spec.degree]
+    if hi == knots[n_basis - 1]:
+        hi = knots[n_basis]
+    return lo, hi
+
+
+def _warn_widened_flats(spec: Any, pieces: list, *, stacklevel: int) -> None:
+    """Warn once when a flat stretch holds on more than it states, naming where it holds.
+
+    It does when an end is not a knot (the whole knot spans it touches) or
+    when a natural end holds the boundary span flat beside it
+    (``_natural_flat_extent``). An end at the feature's boundary is exact:
+    the curve is read on its range. An ordered term's basis
+    (``_axis_levels``) names its ends and the levels the stretch holds on
+    rather than their values.
     """
     levels = spec._axis_levels
     label = {} if levels is None else dict(levels)
@@ -96,7 +119,9 @@ def _warn_widened_flats(spec: Any, pieces: list, *, stacklevel: int) -> None:
     flat_pieces = [piece for piece in pieces if piece[0] == "flat"]
     widened = []
     for rule, piece in zip(flat_rules, flat_pieces, strict=True):
-        (lo, hi) = _shape_rule_rows.flat_zero_regions(spec._knots, [piece])[0]
+        zero = _shape_rule_rows.flat_zero_regions(spec._knots, [piece])[0]
+        lo, hi = _natural_flat_extent(spec, *zero)
+        extended = (lo, hi) != zero
         lo, hi = max(lo, spec._lo), min(hi, spec._hi)
         _, a, b = piece
         missing = [
@@ -104,21 +129,27 @@ def _warn_widened_flats(spec: Any, pieces: list, *, stacklevel: int) -> None:
             for end in (a, b)
             if end not in (spec._lo, spec._hi) and not np.any(spec._knots == end)
         ]
-        if not missing:
+        if not missing and not extended:
             continue
-        where = (
-            "a knot at " + missing[0] if len(missing) == 1 else "knots at " + " and ".join(missing)
-        )
+        reason = "the whole knot spans it touches"
+        fixes = []
+        if missing:
+            where = (
+                "a knot at " + missing[0]
+                if len(missing) == 1
+                else "knots at " + " and ".join(missing)
+            )
+            fixes.append(f"put {where} for exact edges")
+        if extended:
+            reason += " and the boundary span its natural end holds flat beside them"
+            fixes.append("put a knot inside the boundary span to keep it free")
         if levels is None:
             shown, held = rule, f"[{_fmt_end(lo)}, {_fmt_end(hi)}]"
         else:
             shown = replace(rule, lo=label.get(rule.lo, rule.lo), hi=label.get(rule.hi, rule.hi))
             covered = [name for value, name in levels if lo <= value <= hi]
             held = f"the levels {covered[0]!r} to {covered[-1]!r}"
-        widened.append(
-            f"{shown.describe()} holds on {held}, the whole knot spans it touches; put {where} "
-            "for exact edges"
-        )
+        widened.append(f"{shown.describe()} holds on {held}, {reason}; {'; '.join(fixes)}")
     if widened:
         warnings.warn("; ".join(widened), UserWarning, stacklevel=stacklevel + 1)
 
