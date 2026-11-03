@@ -20,7 +20,7 @@ from superglm.distributional.smoothing.derivatives import LamlDerivativeWorkspac
 from superglm.distributional.smoothing.endpoint_direction import _curvature_packed
 from superglm.distributional.smoothing.penalty_face import build_penalty_face
 from superglm.distributional.solver.assembly import dense_predictor_matrices
-from superglm.distributional.solver.binned_passes import binned_layout
+from superglm.distributional.solver.binned_rows import binned_layout
 from superglm.distributional.solver.solver import _DenseObservedReuseSession, fit_dense_fixed_lambda
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.features import Spline

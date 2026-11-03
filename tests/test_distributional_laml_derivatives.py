@@ -966,7 +966,7 @@ def test_binned_layout_derivatives_equal_the_dense_row_chunks(case, authority, m
     fixtures hold every binned group kind, and the differenced pass nonzero certificates."""
     from superglm.distributional._row_design import bounded_predictor_matrices
     from superglm.distributional.smoothing import derivatives as derivatives_module
-    from superglm.distributional.solver.binned_passes import binned_layout
+    from superglm.distributional.solver.binned_rows import binned_layout
 
     family, layout, y, plan, options = _binned_case(case)
     family = _binned_family(family, authority)
@@ -975,7 +975,7 @@ def test_binned_layout_derivatives_equal_the_dense_row_chunks(case, authority, m
     assert kinds >= _BINNED_KINDS[case]
     matrices = bounded_predictor_matrices(layout)
     binned = laml_derivatives(family, layout, y, plan, dense_matrices=matrices, **options)
-    monkeypatch.setattr(derivatives_module, "binned_layout", lambda layout: False)
+    monkeypatch.setattr(derivatives_module, "binned_rows", lambda layout: None)
     dense = laml_derivatives(family, layout, y, plan, dense_matrices=matrices, **options)
     assert binned.third_derivative_authority == dense.third_derivative_authority
     assert bool(np.max(binned.hessian_certificate) > 1e-9) is (authority == "finite-difference")

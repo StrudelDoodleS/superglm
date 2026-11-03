@@ -254,7 +254,7 @@ def test_binned_stationary_fit_replays_the_stored_terminal_gradient(monkeypatch)
     builds (here chunks of 97 rows, which the dense route sums in another order), so its
     gradient is the stored terminal gradient bit for bit and the correction forms."""
     from superglm.distributional._row_design import bounded_predictor_matrices
-    from superglm.distributional.solver.binned_passes import binned_layout
+    from superglm.distributional.solver.binned_rows import binned_layout
 
     rng = np.random.default_rng(7351)
     x = rng.uniform(-1.0, 1.0, 900)
