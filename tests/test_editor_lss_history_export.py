@@ -6,6 +6,7 @@ import io
 
 import joblib
 import numpy as np
+import pandas as pd
 import pytest
 
 from superglm import SuperLSS
@@ -15,7 +16,14 @@ from superglm.editor.lss.apply import lss_model_with_edits
 from superglm.editor.lss.availability import LSS_UNAVAILABLE, SESSION_TOOLS
 from superglm.editor.lss.persistence import validate_lss_artifact
 from superglm.editor.payloads import pending_payload, timeline_payload
-from tests._lss_editor_fixtures import EPS, lognormal_case, nb_case, open_case
+from tests._lss_editor_fixtures import (
+    EPS,
+    gamma_case,
+    holdout_rows,
+    lognormal_case,
+    nb_case,
+    open_case,
+)
 from tests.test_editor import editor_frame, editor_model  # noqa: F401
 
 KNOTS = {"count": 5, "strategy": "uniform"}
@@ -171,6 +179,19 @@ def test_export_with_parameter_offsets_validates_predictions(tmp_path):
     )
     got = loaded.predict_parameters(case.X, offsets=case.offsets)
     np.testing.assert_allclose(got, want, rtol=0, atol=64 * EPS * float(np.abs(want).max().max()))
+
+
+def test_export_leaves_out_a_zero_weight_row_as_scoring_does(tmp_path):
+    case = gamma_case()
+    split = holdout_rows(case, 80)
+    extra = split.X.iloc[[0]].assign(age=np.nan)
+    X = pd.concat([split.X, extra], ignore_index=True)
+    y = np.append(split.y, split.y[0])
+    weights = np.append(split.sample_weight, 0.0)
+    session = open_case(case, validation_data=(X, y, weights))
+    _shift(session, "scale:age", 0.2)
+    loaded = joblib.load(session.save_model(tmp_path / "zero.joblib"))
+    assert tuple(loaded._hand_edited_terms) == ("scale:age",)
 
 
 def test_the_artifact_check_refuses_what_a_round_trip_changed():

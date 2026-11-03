@@ -30,7 +30,11 @@ from superglm.editor.lss.availability import (
     lss_availability,
     session_refit_reason,
 )
-from superglm.editor.lss.refit import lss_probe_build, lss_refit_with_drafts
+from superglm.editor.lss.refit import (
+    FIXED_STRENGTHS_COVER_NO_NEW_PENALTY,
+    lss_probe_build,
+    lss_refit_with_drafts,
+)
 from superglm.editor.metrics import metrics_payload
 from superglm.editor.payloads import session_payload
 from tests._lss_editor_fixtures import (
@@ -638,6 +642,19 @@ def test_the_opened_spread_curve_keeps_the_opened_models_level_after_a_refit():
     # ... and the opened curve is still the CV the opened model gives.
     after = session_payload(session)["scale:age"]["original_y"]
     np.testing.assert_allclose(after, before, rtol=64 * EPS, atol=0.0)
+
+
+def test_a_change_of_penalties_is_refused_when_the_fit_fixed_every_strength(replays):
+    session = open_case(weighted_case())
+    message = FIXED_STRENGTHS_COVER_NO_NEW_PENALTY.format(term="mean:age")
+    with pytest.raises(EditorValueError) as info:
+        session.stage_structural("basis", "mean:age", {"select": True})
+    assert info.value.public_message == message
+    assert session.pending == []
+    # A change that keeps the term's penalties stages and refits on the fixed strengths.
+    session.stage_structural("knots", "mean:age", KNOTS)
+    session.refit_pending()
+    assert len(replays) == 1
 
 
 def test_a_model_opened_on_the_rows_its_fit_kept_can_refit():

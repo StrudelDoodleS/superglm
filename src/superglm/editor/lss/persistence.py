@@ -51,9 +51,16 @@ def validate_lss_artifact(model: SuperLSS, loaded: object) -> None:
 def lss_prediction_rows(model: SuperLSS, dataset: Any, max_rows: int) -> NDArray[np.float64]:
     """Every parameter's prediction on at most ``max_rows`` rows spread across ``dataset``.
 
-    The offsets are the dataset's, a dict keyed by parameter name, cut to the same rows.
+    Rows of zero weight are left out, as scoring leaves them out. The offsets are
+    the dataset's, a dict keyed by parameter name, cut to the same rows.
     """
-    indices = _spread_row_indices(dataset.n_obs, max_rows)
+    weights = dataset.sample_weight
+    kept = (
+        np.arange(dataset.n_obs)
+        if weights is None
+        else np.flatnonzero(np.asarray(weights, dtype=np.float64) > 0.0)
+    )
+    indices = kept[_spread_row_indices(kept.size, max_rows)]
     offsets = (
         None
         if dataset.offset is None
