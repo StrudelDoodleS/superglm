@@ -10,6 +10,7 @@ stay as they are.
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
@@ -154,6 +155,9 @@ class LSSModelView:
         # a Refit makes a new view.
         self._refit_reason: tuple[Any, str | None] | None = None
         self._reference_etas: dict[str, float] = {}
+        # Each term's sweep, by its arguments. Owned by this view for the same reason:
+        # no entry goes stale, and a caller gets its own copy.
+        self._term_inferences: dict[tuple[str, bool, int, str], Any] = {}
         # Each edited term's change to its predictor at the reference row, by its curve.
         self._reference_edits: dict[str, tuple[tuple[bytes, bytes], float]] = {}
 
@@ -194,11 +198,16 @@ class LSSModelView:
         """One term on its link scale, in the fields the editor builds an ``EditableTerm`` from."""
         if centering != "native":
             raise EditorValueError(NATIVE_ONLY)
-        parameter, term = split_key(name)
-        effect = self.lss.term_inference(
-            parameter, term, X_train=self.X_train, n_points=n_points, simultaneous=False
-        )
-        return lss_term_inference(name, effect, self._specs[name], with_se=with_se)
+        key = (name, with_se, n_points, centering)
+        if key not in self._term_inferences:
+            parameter, term = split_key(name)
+            effect = self.lss.term_inference(
+                parameter, term, X_train=self.X_train, n_points=n_points, simultaneous=False
+            )
+            self._term_inferences[key] = lss_term_inference(
+                name, effect, self._specs[name], with_se=with_se
+            )
+        return copy.deepcopy(self._term_inferences[key])
 
     def data_columns(self) -> tuple[str, ...]:
         """The data columns the model reads: every predictor's features and interaction parents."""

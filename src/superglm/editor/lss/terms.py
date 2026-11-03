@@ -107,6 +107,9 @@ def lss_editable_terms(
     for key in keys:
         term = term_from_inference(view.term_inference(key, with_se=with_se, n_points=n_points))
         term.metadata["term_type"] = term_type_from_spec(view._specs[key])
+        if term.metadata["term_type"] == "piecewise":
+            # A carried edit reads whether the term holds flat or continues its end slopes.
+            term.metadata["extrapolation"] = view._specs[key].extrapolation
         term.metadata["shape_support"] = None
         term.weights = term_weights_from_data(
             train.X, train.sample_weight, view.column_of(key), term

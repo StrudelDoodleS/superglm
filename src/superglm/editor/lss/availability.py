@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 
-from superglm.distributional.weights import resolve_likelihood_weights
+from superglm.distributional.weights import LikelihoodWeightError, resolve_likelihood_weights
 from superglm.editor.errors import EditorValueError
 from superglm.editor.lss.view import LSSModelView, is_lss
 
@@ -166,16 +166,28 @@ def session_refit_reason(session: Any) -> str | None:
 def _weights_differ(state: Any, sample_weight: Any, n_rows: int) -> bool:
     """Whether ``sample_weight`` on ``n_rows`` rows resolves to other kept weights than the fit's.
 
-    The rows may be the frame the fit was given or only the rows it kept, so
-    the kept weights are compared through the summary the fit records: their
-    counts, extremes and unit flag exactly, and their sum and log sum to the
-    rounding of one summation, since a sum evaluated afresh (perhaps on
-    another machine) may differ in its last bits.
+    On the frame the fit was given, the weights are compared by the digest the
+    fit records of every row's weight, in order. On only the rows it kept, a fit
+    that kept its rows is compared row by row and exactly, since the same inputs
+    resolve to the same kept weights. Otherwise the kept weights are compared
+    through the summary the fit records: their counts, extremes and unit flag
+    exactly, and their sum and log sum to the rounding of one summation, since a
+    sum evaluated afresh (perhaps on another machine) may differ in its last
+    bits. The summary cannot see weights moved to other rows.
     """
-    got = resolve_likelihood_weights(
-        sample_weight, n_observations=n_rows, contract=state.weight_contract
-    ).provenance
+    try:
+        resolved = resolve_likelihood_weights(
+            sample_weight, n_observations=n_rows, contract=state.weight_contract
+        )
+    except LikelihoodWeightError:
+        # Weights the fit's contract refuses are not the weights it was fitted with.
+        return True
     fit = state.weight_provenance
+    if n_rows == fit.original_count:
+        return resolved.provenance.root_digest != fit.root_digest
+    if state.retained_rows is not None:
+        return not np.array_equal(resolved.values, state.retained_rows.likelihood_weights.values)
+    got = resolved.provenance
     exact = ("retained_count", "likelihood_count", "min_weight", "max_weight", "all_unit")
     if any(getattr(got, name) != getattr(fit, name) for name in exact):
         return True

@@ -196,14 +196,16 @@ def _projection(
 ) -> tuple[float, NDArray[np.float64]]:
     """The weighted least-squares fit of ``target`` by an intercept and ``design``.
 
-    The rank is decided on columns scaled to unit weighted norm and centred, so a
-    covariate's units and origin do not decide which directions are kept; the
-    intercept takes the centring back.
+    The rank is decided on columns scaled to unit weighted norm and centred, under
+    weights that sum to one, so neither a covariate's units and origin nor the
+    weights' scale decide which directions are kept; the intercept takes the
+    centring back.
     """
+    weights = weights / weights.sum()
     norm = np.sqrt(weights @ np.square(design))
     norm[norm == 0.0] = 1.0
     scaled = design / norm
-    centre = (weights @ scaled) / weights.sum()
+    centre = weights @ scaled
     shift, coefficients = editor_apply._solve_with_intercept(scaled - centre, target, weights)
     return shift - float(centre @ coefficients), coefficients / norm
 

@@ -185,7 +185,9 @@ def test_a_covariate_far_from_its_origin_keeps_every_direction_of_its_edit():
         X, y, outer="efs+newton"
     )
     case = FitCase(model, X, y, None, None)
-    session = open_case(case)
+    # lstsq's rank cutoff grows with the grid's rows: on 2000 the raw [1, x] design
+    # sits about 15 times below it, so the test does not ride on the default grid.
+    session = open_case(case, n_points=2000)
     edited = session.terms["mean:x"]
     added = 0.2 * (np.asarray(edited.x) - 1e7) / 10.0
     edited.edited_log_effect = edited.original_log_effect + added
@@ -197,6 +199,28 @@ def test_a_covariate_far_from_its_origin_keeps_every_direction_of_its_edit():
     bound = 1e3 * EPS * np.abs(X["x"]).max() * 0.2 / 10.0
     assert bound < 1e-3
     np.testing.assert_allclose(_moved(case, revised, "mean", rows), added, rtol=0.0, atol=bound)
+
+
+def test_the_scale_of_the_weights_decides_nothing_in_a_projection():
+    rng = np.random.default_rng(781)
+    x = np.linspace(0.0, 1.0, 180)
+    X = pd.DataFrame({"x": x})
+    y = rng.gamma(8.0, np.exp(1.0 + x) / 8.0)
+    weights = np.full(x.size, 1e28)
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(term("x", Numeric())), family.scale()).fit_reml(
+        X, y, sample_weight=weights, outer="efs+newton"
+    )
+    case = FitCase(model, X, y, weights, None)
+    session = open_case(case)
+    edited = session.terms["mean:x"]
+    added = 0.2 * np.asarray(edited.x)
+    edited.edited_log_effect = edited.original_log_effect + added
+
+    revised = lss_model_with_edits(session.model, session.terms)
+
+    rows = _rows_with(session.model, "x", edited.x)
+    np.testing.assert_allclose(_moved(case, revised, "mean", rows), added, rtol=0.0, atol=1e3 * EPS)
 
 
 def test_categorical_edit_is_exact():

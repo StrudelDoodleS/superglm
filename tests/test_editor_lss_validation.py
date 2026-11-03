@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import io
 
 import joblib
@@ -11,11 +12,26 @@ import pandas as pd
 import pytest
 from scipy import integrate, stats
 
-from superglm import Categorical, GammaLS, LogNormalLS, SuperLSS, cat, collapse_levels, s, term
+from superglm import (
+    Categorical,
+    GammaLS,
+    LogNormalLS,
+    Piecewise,
+    SuperLSS,
+    cat,
+    collapse_levels,
+    s,
+    term,
+)
 from superglm.editor import edit
 from superglm.editor.cv import capture_cv_run, capture_final_fit, final_fit_reason, run_final_fit
 from superglm.editor.errors import EditorValueError
-from superglm.editor.lss.availability import LSS_UNAVAILABLE, SESSION_TOOLS
+from superglm.editor.lss.availability import (
+    LSS_UNAVAILABLE,
+    SESSION_TOOLS,
+    WEIGHTS_DIFFER,
+    session_refit_reason,
+)
 from superglm.editor.lss.validation import LSS_METRIC_LABELS, lss_dataset_metrics
 from superglm.editor.reports import final_fit_report_payload, validation_report_payload
 from tests._lss_editor_fixtures import (
@@ -282,6 +298,84 @@ def test_final_fit_places_a_validation_only_level_in_the_unseen_group():
     np.testing.assert_allclose(
         final.model.predict(X.iloc[:1]), final.model.predict(probe), rtol=64 * EPS
     )
+
+
+def test_final_fit_reads_no_level_from_a_zero_weight_row():
+    case = gamma_case()
+    X = pd.concat([case.X, case.X.iloc[[0]].assign(region=None)], ignore_index=True)
+    y = np.append(case.y, case.y[0])
+    weights = np.append(np.ones(case.y.size), 0.0)
+    model = case.model._clone_with_replaced_terms({}).fit(
+        X, y, sample_weight=weights, lambdas=dict(case.model.smoothing_parameters_)
+    )
+    session = edit(model, train_data=(X, y, weights))
+    final = run_final_fit(capture_final_fit(session), _Context())
+    assert final.n_rows == y.size
+
+
+def test_final_fit_carries_a_piecewise_edit_past_the_fitted_range_as_the_term_extends():
+    rng = np.random.default_rng(20261103)
+    X = pd.DataFrame({"x": rng.uniform(0.0, 1.0, 300)})
+    y = rng.gamma(8.0, np.exp(1.0 + 0.5 * X["x"].to_numpy()) / 8.0)
+    family = GammaLS()
+    spec = Piecewise(breaks=[0.5], lower=0.0, upper=1.0, base="first", extrapolation="extend")
+    model = SuperLSS(family, family.mean(term("x", spec)), family.scale()).fit_reml(X, y)
+    held = pd.DataFrame({"x": rng.uniform(-0.5, 1.5, 200)})
+    held_y = rng.gamma(8.0, np.exp(1.0 + 0.5 * held["x"].to_numpy()) / 8.0)
+    session = edit(model, train_data=(X, y), validation_data=(held, held_y))
+    edited = session.terms["mean:x"]
+    edited.edited_log_effect = edited.original_log_effect + 0.4 * np.asarray(edited.x)
+    in_force = session.to_model()
+
+    final = run_final_fit(capture_final_fit(session), _Context())
+
+    # The edit's own shape inside the fitted range survives the wider rows.
+    rows = pd.DataFrame({"x": [0.25, 0.75]})
+
+    def step(fitted):
+        eta = fitted.predict_link(rows)["mean"].to_numpy()
+        return eta[1] - eta[0]
+
+    np.testing.assert_allclose(step(final.model), step(in_force), rtol=0.0, atol=1e3 * EPS)
+
+
+@functools.cache
+def _frequency_model():
+    """The gamma case's rows fitted under frequency weights, with none given."""
+    case = gamma_case()
+    family = GammaLS()
+    return SuperLSS(
+        family, family.mean(s("age", k=5)), family.scale(), weight_semantics="frequency"
+    ).fit_reml(case.X, case.y)
+
+
+def test_training_weights_the_fit_cannot_take_are_not_its_weights():
+    case = gamma_case()
+    session = edit(_frequency_model(), train_data=(case.X, case.y, np.full(case.y.size, 0.5)))
+    assert session_refit_reason(session) == WEIGHTS_DIFFER
+
+
+@pytest.mark.parametrize("report", ["validation", "final"])
+def test_a_split_whose_weights_the_fit_cannot_take_is_shown_unavailable(report):
+    case = gamma_case()
+    model = _frequency_model()
+    split = holdout_rows(case, 100)
+    session = edit(
+        model, train_data=(case.X, case.y), validation_data=(split.X, split.y, split.sample_weight)
+    )
+    widget = session.widget()
+    try:
+        rows = {row["name"]: row for row in widget._report(report)["splits"]}
+        refused = rows["validation"]
+        assert refused["available"] is False and "metrics" not in refused
+        assert refused["error"] == (
+            "The Validation split cannot be scored with its weights: frequency weights must be "
+            "exact non-negative integers. Pass weights of the kind the model was fitted with, "
+            "or the split without weights."
+        )
+        assert np.isfinite(rows["train"]["metrics"]["edited"]["log_score"])
+    finally:
+        widget.close()
 
 
 def test_final_fit_reads_only_the_columns_the_model_uses():

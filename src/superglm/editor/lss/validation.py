@@ -17,6 +17,7 @@ from numpy.typing import NDArray
 from superglm.distributional.checks.scores import _scoring_rows
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.weights import (
+    LikelihoodWeightError,
     UnsupportedLikelihoodContractError,
     resolve_likelihood_weights,
 )
@@ -42,11 +43,17 @@ def lss_split_reason(model: Any, dataset) -> str | None:
     """
     lss = _fitted(model)
     y = np.asarray(dataset.y, dtype=np.float64).ravel()
-    resolved = resolve_likelihood_weights(
-        dataset.sample_weight,
-        n_observations=y.size,
-        contract=lss._require_fitted().fit_state.weight_contract,
-    )
+    try:
+        resolved = resolve_likelihood_weights(
+            dataset.sample_weight,
+            n_observations=y.size,
+            contract=lss._require_fitted().fit_state.weight_contract,
+        )
+    except LikelihoodWeightError as exc:
+        return (
+            f"The {dataset.label} split cannot be scored with its weights: {exc}. Pass weights "
+            "of the kind the model was fitted with, or the split without weights."
+        )
     try:
         lss.family.bind_likelihood(y[resolved.input_positions], resolved, COMPLETE_OBSERVATION)
     except UnsupportedLikelihoodContractError:

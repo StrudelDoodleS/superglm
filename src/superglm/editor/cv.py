@@ -1159,7 +1159,13 @@ def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
     context.progress("fitting", n_rows=int(y.size))
     context.check()
     if lss:
-        covering = _covering_replacements(plan.model, X, "Final fit")
+        # Only the rows the fit keeps read a level: a zero-weight row is dropped first.
+        kept = (
+            X
+            if sample_weight is None
+            else as_eager_frame(X).take_rows(np.flatnonzero(np.asarray(sample_weight) > 0.0))
+        )
+        covering = _covering_replacements(plan.model, kept, "Final fit")
         model = plan.model.lss._clone_with_replaced_terms(covering) if covering else plan.template
     else:
         model = _covering_template(plan.template, X, "Final fit").clone_unfitted()

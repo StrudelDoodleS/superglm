@@ -652,6 +652,23 @@ def test_the_opened_spread_curve_keeps_the_opened_models_level_after_a_refit():
     )
 
 
+def test_the_opened_model_is_swept_once_after_a_refit(monkeypatch):
+    session = open_case(lognormal_case())
+    session.stage_structural("collapse", "scale:region", {"levels": ["R5", "R6"]})
+    session.refit_pending()
+    session_payload(session)
+    swept = []
+    sweep = SuperLSS.term_inference
+
+    def counted(self, *args, **kwargs):
+        swept.append(1)
+        return sweep(self, *args, **kwargs)
+
+    monkeypatch.setattr(SuperLSS, "term_inference", counted)
+    session_payload(session)
+    assert swept == []
+
+
 def test_a_change_of_penalties_is_refused_when_the_fit_fixed_every_strength(replays):
     session = open_case(weighted_case())
     message = FIXED_STRENGTHS_COVER_NO_NEW_PENALTY.format(term="mean:age")
@@ -718,12 +735,17 @@ def test_a_freshly_opened_model_is_the_model_in_force(monkeypatch):
         widget.close()
 
 
-def test_a_model_opened_on_the_rows_its_fit_kept_can_refit():
+@pytest.mark.parametrize("retain_rows", [True, False])
+def test_a_model_opened_on_the_rows_its_fit_kept_can_refit(retain_rows):
     base = gamma_case()
     weights = np.random.default_rng(20261103).uniform(0.5, 2.0, base.y.size)
     weights[::30] = 0.0
     model = base.model._clone_with_replaced_terms({}).fit(
-        base.X, base.y, sample_weight=weights, lambdas=dict(base.model.smoothing_parameters_)
+        base.X,
+        base.y,
+        sample_weight=weights,
+        lambdas=dict(base.model.smoothing_parameters_),
+        retain_rows=retain_rows,
     )
     kept = weights > 0.0
     given = edit(model, train_data=(base.X, base.y, weights))
@@ -732,6 +754,12 @@ def test_a_model_opened_on_the_rows_its_fit_kept_can_refit():
     assert session_refit_reason(retained) is None
     doubled = edit(model, train_data=(base.X[kept], base.y[kept], 2.0 * weights[kept]))
     assert session_refit_reason(doubled) == WEIGHTS_DIFFER
+    # The fit's weights on other rows are other weights.
+    moved = edit(model, train_data=(base.X, base.y, weights[::-1]))
+    assert session_refit_reason(moved) == WEIGHTS_DIFFER
+    if retain_rows:
+        moved = edit(model, train_data=(base.X[kept], base.y[kept], weights[kept][::-1]))
+        assert session_refit_reason(moved) == WEIGHTS_DIFFER
 
 
 def test_a_model_opened_with_other_weights_cannot_refit(replays):
