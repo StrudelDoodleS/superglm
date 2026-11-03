@@ -1,11 +1,17 @@
-# Pin scam's unpenalised shape-constrained Poisson fits for
-# tests/test_shape_rules_reference.py::test_scam_shapes_agree.
+# Pin scam's unpenalised shape-constrained Poisson fits for three tests in
+# tests/test_shape_rules_reference.py: test_scam_shapes_hold,
+# test_matches_scams_stated_problem_solved_exactly and test_scam_shapes_agree.
+# The second solves the problem the paper states, on the knots recorded here,
+# with a general-purpose solver; it reads the data and knots, not scam's fit.
 #
 # scam fits shape-constrained P-splines by reparameterising the coefficients
-# (Pya, N. and Wood, S. N. (2015), "Shape constrained additive models",
-# Statistics and Computing 25, 543-559).  scam is GPL: this script runs it as a
-# black box and records only what the fitted object reports (fitted values,
-# linear predictor, EDF, knots, convergence); nothing here reads its source.
+# with exponentiated elements (Pya, N. and Wood, S. N. (2015), "Shape
+# constrained additive models", Statistics and Computing 25, 543-559; Pya
+# Arnqvist, N. (2024), "On some extensions of shape-constrained generalized
+# additive modelling in R", arXiv:2403.09438, section 2).  scam is GPL: this
+# script runs it as a black box and records only what the fitted object reports
+# (fitted values, linear predictor, EDF, knots, convergence); nothing here reads
+# its source.
 #
 # Regenerate the fixture (R >= 4.5, scam in a private library):
 #   mkdir -p ~/.cache/superglm-oracles/R-lib

@@ -11,12 +11,20 @@ absorbs it into the term's basis as an equality (Wood 2017, section 1.8.1), so
 both solvers search the same flat-holding subspace, and the test checks the
 flat on the fitted curve instead.
 
-``test_scam_shapes_agree`` compares unpenalised increasing/decreasing,
-convex/concave fits with scam's (Pya, N. and Wood, S. N. (2015), "Shape
-constrained additive models", Statistics and Computing 25, 543-559), pinned in
+Three tests read unpenalised increasing/decreasing, convex/concave fits by
+scam (Pya, N. and Wood, S. N. (2015), "Shape constrained additive models",
+Statistics and Computing 25, 543-559), pinned in
 ``fixtures/scam_shape_rules.json`` by ``oracles/scam_shape_rules.R`` with the
-data scam fitted.  scam is GPL and is run only as a black box; the test needs
-the JSON alone.
+data scam fitted.  scam is GPL and is run only as a black box; the tests need
+the JSON alone.  ``test_scam_shapes_hold`` checks our fit's shape and that its
+deviance is no worse than scam's.  ``test_matches_scams_stated_problem_solved_exactly``
+compares our fit with an exact solve of the problem the paper states on scam's
+reported basis: signed first and second coefficient differences, which scam
+holds through a reparameterisation with exponentiated coefficients (Pya and
+Wood 2015; Pya Arnqvist, N. (2024), "On some extensions of shape-constrained
+generalized additive modelling in R", arXiv:2403.09438, section 2).
+``test_scam_shapes_agree`` compares our fitted means with scam's own where
+scam reached that problem's optimum.
 """
 
 from __future__ import annotations
@@ -257,7 +265,9 @@ def _scam_case(scam_fixture, shape):
     knots.  Its open knot vector pads the range by 0.001 of it where scam's
     starts at the data, so the two bases differ outside the knots inside.
     The IRLS tolerance is tightened from ``1e-6`` to ``1e-10`` so the fit
-    sits at its optimum, not at its stop.
+    sits at its optimum, not at its stop.  The knots must be evenly spaced:
+    only then are plain coefficient differences, the conditions of
+    ``_scams_stated_problem``, proportional to the derivative's coefficients.
     """
     case = scam_fixture[shape]
     rules = SCAM_SHAPES[shape][0]
@@ -267,6 +277,9 @@ def _scam_case(scam_fixture, shape):
     assert case["converged"]
     assert knots.size == 14
     assert (knots[3], knots[-4]) == (x.min(), x.max())
+    # each knot rounds once in R's seq() and each difference once more
+    spacing = np.diff(knots)
+    assert np.max(np.abs(spacing - spacing[0])) <= 8 * U * np.max(np.abs(knots))
     X = pd.DataFrame({"x": x})
     spline = Spline(kind="ps", knots=knots[4:-4], constraint=rules)
     model = SuperGLM(
@@ -285,7 +298,8 @@ def test_scam_shapes_hold(scam_fixture, shape):
     """Our unpenalised fit has scam's shape on a dense grid, and fits no worse than scam's.
 
     scam holds the shape through signed differences of reparameterised
-    coefficients, our rows the curvature exactly at the knots and, with it,
+    coefficients (Pya and Wood 2015; Pya Arnqvist 2024, arXiv:2403.09438,
+    section 2), our rows the curvature exactly at the knots and, with it,
     the slope at the ends, on a basis padded beyond the data; the feasible
     sets differ, and on these data our fit is never the worse of the two.
     """
@@ -357,8 +371,11 @@ def _scams_stated_problem(case, slope_sign, curvature_sign, families=("slope", "
     # Newton on the face the interior point identified (Nocedal and Wright,
     # Numerical Optimization, 2nd ed., 2006, section 16.5): its barrier leaves
     # the edge coefficients, which few rows see, ~1e-6 short of the optimum.
+    # Rows the barrier leaves within 2**40 u (1.2e-4) of their scale are on
+    # the face: measured, the face rows sit at most 5.5e-7 slack and the rest
+    # at least 1.7e-2, two orders of magnitude either side.
     beta = result.x
-    on_face = A @ beta <= 1e-6 * (np.abs(A) @ np.abs(beta))
+    on_face = A @ beta <= 2.0**40 * U * (np.abs(A) @ np.abs(beta))
     face = null_space(A[on_face])
     beta = face @ (face.T @ beta)
     for _ in range(50):
@@ -366,11 +383,21 @@ def _scams_stated_problem(case, slope_sign, curvature_sign, families=("slope", "
         beta = beta - face @ step
         if np.max(np.abs(face @ step)) <= 1e3 * U * np.max(np.abs(beta)):
             break
-    # the face is the optimum's: feasible off it, non-negative multipliers on it
+    else:
+        pytest.fail("Newton on the face did not settle within 50 steps")
+    # The face is the optimum's: feasible off it, and the gradient a
+    # non-negative combination of its rows.  The face rows can be linearly
+    # dependent (mdcv: 7 rows of rank 6), so the multipliers are the
+    # non-negative least-squares fit, as in ``_kkt_residual``; a min-norm fit
+    # could give a dependent row a negative multiplier at a true optimum.
     scale = np.abs(A) @ np.abs(beta)
     assert np.all(A @ beta >= -1e3 * U * scale)
-    multipliers = np.linalg.lstsq(A[on_face].T, jacobian(beta), rcond=None)[0]
-    assert np.all(multipliers >= -1e-8 * np.max(np.abs(multipliers), initial=1.0))
+    gradient = jacobian(beta)
+    held = A[on_face]
+    multipliers, _ = nnls(held.T, gradient)
+    residual = gradient - held.T @ multipliers
+    terms = np.abs(basis).T @ np.abs(np.exp(basis @ beta) - y) + np.abs(held).T @ multipliers
+    assert np.max(np.abs(residual) / terms) <= 1e3 * U
     return np.exp(basis @ beta)
 
 
