@@ -15,6 +15,7 @@ from superglm.solvers.constrained_qp import (
     _certifies_kkt_point,
     _consistency_floor,
     _constraint_blocks,
+    _constraint_structure,
     _feasibility_scale,
     _feasibility_slack,
     _homogeneous_feasible_start,
@@ -1890,14 +1891,14 @@ class TestInfeasibleEarlyReturnIsProjected:
         calls = []
         original = _project_feasible
 
-        def project(beta, A, b, tol):
+        def project(beta, A, b, tol, **kwargs):
             calls.append(beta.copy())
             if len(calls) == 1:
                 # A zero initial sweep budget leaves the unconstrained point.
                 # This directly exercises the same boundary as budget exhaustion,
                 # without counting a changing population of LAPACK roundoff.
                 return beta.copy()
-            return original(beta, A, b, tol)
+            return original(beta, A, b, tol, **kwargs)
 
         monkeypatch.setattr("superglm.solvers.constrained_qp._project_feasible", project)
         H = np.array([[2.0, 1.0], [1.0, 2.0]])
@@ -1928,9 +1929,9 @@ class TestInfeasibleEarlyReturnIsProjected:
         calls = []
         original = _project_feasible
 
-        def recording(beta, A, b, tol):
+        def recording(beta, A, b, tol, **kwargs):
             calls.append(_is_feasible(A, beta, b, tol))
-            return original(beta, A, b, tol)
+            return original(beta, A, b, tol, **kwargs)
 
         monkeypatch.setattr("superglm.solvers.constrained_qp._project_feasible", recording)
         rng = np.random.default_rng(11)
@@ -2752,7 +2753,7 @@ class TestDegenerateVertex:
         row keeps its first occurrence only.
         """
         _, _, A, _ = self._degenerate_vertex_problem(seed=113)
-        basis = _WorkingBasis(A)
+        basis = _WorkingBasis(_constraint_structure(A).unit_rows)
         assert basis.raises_rank(4)
         assert basis.start([0]) == [0]
         assert not basis.raises_rank(4)
@@ -2763,7 +2764,8 @@ class TestDegenerateVertex:
         basis.delete(0)
         assert basis.raises_rank(4)
         assert not basis.raises_rank(2)
-        assert _WorkingBasis(A).start([0, 1, 4, 2, 3, 5]) == [0, 1, 2, 3]
+        warm = _WorkingBasis(_constraint_structure(A).unit_rows).start([0, 1, 4, 2, 3, 5])
+        assert warm == [0, 1, 2, 3]
 
     @pytest.mark.parametrize("entry", ["insert", "warm"])
     def test_the_basis_follows_a_drop_from_as_many_rows_as_coefficients(self, entry):
@@ -2784,7 +2786,7 @@ class TestDegenerateVertex:
         separation = np.sqrt(np.finfo(np.float64).eps / 2)
         A = np.load(_CAPPED_VERTEX_QP)["A"]
         working = [0, 1, 2, 3, 4, 16, 17, 18, 19]
-        basis = _WorkingBasis(A)
+        basis = _WorkingBasis(_constraint_structure(A).unit_rows)
         if entry == "warm":
             assert basis.start(working) == working
         else:

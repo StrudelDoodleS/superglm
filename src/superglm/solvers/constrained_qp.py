@@ -10,6 +10,7 @@ warm-starts the working set from a previous solve.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -462,7 +463,14 @@ def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
     return np.linalg.lstsq(equilibrated, rhs * scale, rcond=None)[0] * scale
 
 
-def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDArray:
+def _project_feasible(
+    beta: NDArray,
+    A: NDArray,
+    b: NDArray,
+    tol: float,
+    *,
+    structure: _ConstraintStructure | None = None,
+) -> NDArray:
     """Repair a half-space violation, for at most 100 sweeps.
 
     Termination uses the same homogeneous primal predicate as the QP. Each
@@ -470,10 +478,15 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
     the projection under tiny or large constraint units. A violated zero row
     is impossible to repair and leaves an uncertified candidate. Exhaustion
     also requires the caller to check feasibility; neither case is success.
+    ``structure``, when given, is ``_constraint_structure(A)``.
     """
     beta = beta.copy()
     # Loop-invariant: only ``A @ beta`` changes between sweeps.
-    abs_A = np.abs(A)
+    if structure is None:
+        abs_A = np.abs(A)
+        row_max = np.max(abs_A, axis=1, initial=0.0)
+    else:
+        abs_A, row_max = structure.abs_entries, structure.row_max
     for _ in range(100):
         # Inlined rather than calling ``_feasibility_slack``, which would
         # recompute the matvec; the arithmetic is identical term for term.
@@ -486,7 +499,7 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
         worst = int(np.argmin(violations))
         # Project onto the violated constraint: a^T x >= b_i
         a = A[worst]
-        row_scale = float(np.max(np.abs(a), initial=0.0))
+        row_scale = float(row_max[worst])
         if row_scale == 0.0:
             break  # A violated structurally zero row cannot be repaired.
         normalized = a / row_scale
@@ -538,6 +551,36 @@ def _constraint_blocks(A: NDArray) -> _ConstraintBlocks:
     )
 
 
+class _ConstraintStructure(NamedTuple):
+    """What a solve reads from ``A`` alone, for a system several solves share.
+
+    ``abs_entries`` is ``|A|`` and ``row_max`` each row's largest ``|entry|``.
+    ``scaled_rows`` is each row divided by ``row_max``, or by 1 for a zero row:
+    the working subproblem's equality rows. ``unit_rows`` are those rows at
+    unit Euclidean norm, zero for a zero row (``_WorkingBasis``), and
+    ``blocks`` is ``_constraint_blocks(A)``.
+    """
+
+    abs_entries: NDArray
+    row_max: NDArray
+    scaled_rows: NDArray
+    unit_rows: NDArray
+    blocks: _ConstraintBlocks
+
+
+def _constraint_structure(A: NDArray) -> _ConstraintStructure:
+    """Build ``_ConstraintStructure`` for ``A``, once for every solve on that system."""
+    A = np.asarray(A, dtype=float)
+    abs_A = np.abs(A)
+    row_max = np.max(abs_A, axis=1, initial=0.0)
+    scaled_rows = A / np.where(row_max > 0.0, row_max, 1.0)[:, None]
+    norm = np.linalg.norm(scaled_rows, axis=1)
+    unit_rows = np.divide(
+        scaled_rows, norm[:, None], out=np.zeros_like(A), where=norm[:, None] > 0.0
+    )
+    return _ConstraintStructure(abs_A, row_max, scaled_rows, unit_rows, _constraint_blocks(A))
+
+
 def _homogeneous_feasible_start(
     beta: NDArray, A: NDArray, b: NDArray, tol: float
 ) -> NDArray | None:
@@ -564,8 +607,10 @@ def _homogeneous_feasible_start(
     return beta
 
 
-def _raises_rank(distance: float) -> bool:
+def _raises_rank(distance: float | NDArray) -> bool | NDArray:
     """The shared factor rank rule for a unit vector at ``distance`` from an orthonormal span.
+
+    ``distance`` may be an array of distances, each decided alone.
 
     The unit columns ``[Q, a]``, with ``a`` at relative distance ``rho`` from ``range(Q)``, have
     singular values 1 and ``sqrt(1 +- sqrt(1 - rho**2))``. ``decompose_factor``'s rule,
@@ -587,23 +632,17 @@ class _WorkingBasis:
     violated row at an infeasible start, makes it appear to.
 
     ``q`` and ``r`` are the thin QR factors of the working rows, each scaled
-    to unit norm, taken as columns. ``scipy.linalg.qr_insert`` and
-    ``qr_delete`` update them as rows enter and leave (Golub and Van Loan,
-    *Matrix Computations*, 4th ed., 2013, section 6.5), so testing a
-    candidate is one projection, ``O(p k)``. A candidate raises the working
-    rank when its distance from ``range(q)`` passes ``_raises_rank``.
+    to unit norm (``unit_rows``, from ``_ConstraintStructure``), taken as
+    columns. ``scipy.linalg.qr_insert`` and ``qr_delete`` update them as rows
+    enter and leave (Golub and Van Loan, *Matrix Computations*, 4th ed.,
+    2013, section 6.5), so testing a candidate is one projection, ``O(p k)``.
+    A candidate raises the working rank when its distance from ``range(q)``
+    passes ``_raises_rank``.
     """
 
-    def __init__(self, A: NDArray) -> None:
-        row_scale = np.max(np.abs(A), axis=1, initial=0.0)
-        rows = np.divide(
-            A, row_scale[:, None], out=np.zeros_like(A), where=row_scale[:, None] > 0.0
-        )
-        norm = np.linalg.norm(rows, axis=1)
-        self.rows = np.divide(
-            rows, norm[:, None], out=np.zeros_like(rows), where=norm[:, None] > 0.0
-        )
-        self.q = np.zeros((A.shape[1], 0))
+    def __init__(self, unit_rows: NDArray) -> None:
+        self.rows = unit_rows
+        self.q = np.zeros((unit_rows.shape[1], 0))
         self.r = np.zeros((0, 0))
 
     def start(self, working: list[int]) -> list[int]:
@@ -617,7 +656,7 @@ class _WorkingBasis:
         k = len(working)
         if 0 < k <= self.q.shape[0]:
             q, r = scipy.linalg.qr(self.rows[working].T, mode="economic", check_finite=False)
-            if all(_raises_rank(abs(float(r[j, j]))) for j in range(k)):
+            if np.all(_raises_rank(np.abs(np.diag(r)))):
                 self.q, self.r = q, r
                 return list(working)
         kept: list[int] = []
@@ -631,7 +670,8 @@ class _WorkingBasis:
         """Whether row ``row`` of ``A`` is independent of the working rows."""
         candidate = self.rows[row]
         residual = candidate - self.q @ (self.q.T @ candidate)
-        return _raises_rank(float(np.linalg.norm(residual)))
+        # ``np.linalg.norm``'s own formula for a vector, without its dispatch.
+        return bool(_raises_rank(math.sqrt(residual.dot(residual))))
 
     def insert(self, row: int) -> None:
         """Append row ``row`` of ``A`` to the working rows."""
@@ -779,6 +819,7 @@ def solve_constrained_qp(
     tol: float = 1e-12,
     *,
     _trace_run: TraceRun | None = None,
+    _structure: _ConstraintStructure | None = None,
 ) -> QPResult:
     """Solve a convex quadratic subject to A @ beta >= b.
 
@@ -804,8 +845,10 @@ def solve_constrained_qp(
 
     active_set_init supplies a warm active set; a row dependent on those
     before it is left out. The optional _trace_run emits blocking decisions
-    only when explicitly enabled. Result rank metadata describes the shared H
-    decomposition; no ridge is added.
+    only when explicitly enabled. _structure is _constraint_structure(A), for a
+    caller that solves on one A repeatedly; without it each solve builds it.
+    Result rank metadata describes the shared H decomposition; no ridge is
+    added.
     """
     # Checked at the public boundary rather than at each use: every predicate
     # below reads ``tol``, and a vacuous one is not detectable from the result.
@@ -902,19 +945,24 @@ def solve_constrained_qp(
         # No constraints: the unconstrained solve above is already the answer.
         return _result(beta_unc, [], 0, converged=unconstrained_stationary)
 
-    if _is_feasible(A, beta_unc, b, tol):
+    abs_A = None if _structure is None else _structure.abs_entries
+    if _is_feasible(A, beta_unc, b, tol, abs_A=abs_A):
         return _result(beta_unc, [], 0, converged=unconstrained_stationary)
+
+    structure = _constraint_structure(A) if _structure is None else _structure
+    # ``|A|`` is loop-invariant; only the ``|beta|`` matvec is per iteration.
+    abs_A = structure.abs_entries
 
     # --- Initialize active set ---
     # The working rows stay linearly independent in every solve; a warm set
     # is a hint, so a row dependent on those before it is left out.
-    basis = _WorkingBasis(A)
+    basis = _WorkingBasis(structure.unit_rows)
     active = basis.start([] if active_set_init is None else list(active_set_init))
 
     # --- Feasible starting point ---
     # This may still be infeasible; see _project_feasible.  Feasibility is
     # therefore re-tested on the point actually returned, below.
-    beta = _project_feasible(beta_unc, A, b, tol)
+    beta = _project_feasible(beta_unc, A, b, tol, structure=structure)
 
     # Resolved once: the hot loop must not pay a per-row or per-iteration
     # attribute lookup for a seam that is off in every production call.
@@ -928,10 +976,8 @@ def solve_constrained_qp(
     # every near-singular fit and is a separate decision.
     kkt_may_be_singular = decomposition.rank < decomposition.width
 
-    # ``|A|`` is loop-invariant; only the ``|beta|`` matvec is per iteration.
-    abs_A = np.abs(A)
     zero_face_cache: dict[tuple[int, ...], bool] = {}
-    blocks = _constraint_blocks(A)
+    blocks = structure.blocks
     block_zero_face: dict[tuple[int, ...], bool] = {}
     # Whether ``beta`` minimizes on the current face (previous iteration took
     # its full step and kept the active set). The exact next step is then zero
@@ -948,15 +994,12 @@ def solve_constrained_qp(
             # quantity, already computed above the loop.
             step = beta_unc - beta
         else:
-            A_eq = A[active]  # (|active|, p)
-            b_eq = b[active]  # (|active|,)
             # Equality rows express geometry, not objective units. Normalize
             # before the saddle solve so equivalent constraint scaling does
             # not manufacture a primal residual on an active boundary.
-            constraint_scale = np.max(np.abs(A_eq), axis=1, initial=0.0)
-            constraint_scale = np.where(constraint_scale > 0.0, constraint_scale, 1.0)
-            A_eq = A_eq / constraint_scale[:, None]
-            b_eq = b_eq / constraint_scale
+            A_eq = structure.scaled_rows[active]  # (|active|, p)
+            row_max = structure.row_max[active]
+            b_eq = b[active] / np.where(row_max > 0.0, row_max, 1.0)  # (|active|,)
 
             n_eq = len(active)
             zero_face = False
@@ -1026,10 +1069,10 @@ def solve_constrained_qp(
                 active.pop(drop_idx)
                 basis.delete(drop_idx)
                 continue
-            feasible = _is_feasible(A, beta, b, tol)
+            feasible = _is_feasible(A, beta, b, tol, abs_A=abs_A)
             if not feasible:
-                beta = _project_feasible(beta, A, b, tol)
-                feasible = _is_feasible(A, beta, b, tol)
+                beta = _project_feasible(beta, A, b, tol, structure=structure)
+                feasible = _is_feasible(A, beta, b, tol, abs_A=abs_A)
                 # A repair is a new candidate: recheck its full dual and
                 # stationarity certificate before assigning convergence.
                 stationary, drop_idx, multipliers = _stationarity_certificate(
