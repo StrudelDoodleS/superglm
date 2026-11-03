@@ -288,3 +288,37 @@ def test_a_kept_by_bin_table_projects_unless_projection_could_overflow():
     exact = sum(Fraction(W[0]) for W in blocks) * support
     u = np.finfo(np.float64).eps / 2
     assert key == (0, 0, 1) and abs(Fraction(block[0, 0]) - exact) <= 4 * u * abs(exact)
+
+
+@pytest.mark.parametrize(
+    "b,r,blocks,expected",
+    [
+        # S = 2**530 per bin, so S' T overflows to inf - inf; B' T cancels to 2**448 first.
+        (1.0, 2.0**530, ((2.0**500, 0.0), (0.0, -(2.0**500 - 2.0**448))), 2.0**978),
+        # S = 2**-1200 cannot form; B' T = 2**100 and R takes it to 2**-500.
+        (2.0**-600, 2.0**-600, ((2.0**699, 0.0), (2.0**699, 0.0)), 2.0**-500),
+    ],
+    ids=["S-T-overflows", "S-underflows"],
+)
+def test_a_kept_by_bin_table_keeps_the_raw_chain_where_projection_could_leave_the_range(
+    b, r, blocks, expected
+):
+    """A kept by-bin table declines projection when ``S' T`` could overflow or ``S``
+    cannot form, and the raw chain ``R' (B' T)`` is then exact.
+
+    Two rows in bins 0 and 1 against a dense column of ones, weighted per block.
+    Mutation check: dropping the overflow bound (the first case, nan) or
+    the bound on ``S = B R`` (the second, 0) projects a block the raw chain keeps.
+    """
+    from superglm._group_matrix._group_matrix_core import DenseGroupMatrix
+    from superglm._group_matrix._group_matrix_discretized import DiscretizedSSPGroupMatrix
+
+    disc = DiscretizedSSPGroupMatrix(np.array([[b], [b]]), np.array([[r]]), np.array([0, 1]))
+    dense = DenseGroupMatrix(np.ones((2, 1)))
+    tables = algebra.PassTables(1 << 20)
+    tables.reserve((0, 0, 1), disc, dense)
+    for W in blocks:
+        assert tables.add((0, 0, 1), disc, dense, np.array(W), algebra._BlockWeightCache(None))
+    ((key, block),) = tables.contracted(None)
+    u = np.finfo(np.float64).eps / 2
+    assert key == (0, 0, 1) and abs(block[0, 0] - expected) <= 4 * u * expected

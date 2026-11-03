@@ -449,10 +449,12 @@ def _table_projects(cache, table: NDArray, *gms) -> bool:
 
     Each ``S`` must form in range, bounded by its ``B`` and ``R``, and ``S' T``
     or ``S_i' H S_j`` must not overflow, bounded by the ``S`` and the table
-    themselves. Underflow there costs at most 2**-1075 absolute per product,
-    and nothing rescales it, so the table's low exponents, which cancellation
-    across blocks can push far below any block's, do not refuse it; in the raw
-    association ``R`` would rescale that underflow.
+    themselves. The table's low exponents, which cancellation across blocks can
+    push far below any block's, do not refuse it. Underflow then costs at most
+    2**-1075 absolute per product of ``S' T``; in ``S_i' H S_j`` the underflowed
+    ``S_i' H`` is rescaled by ``S_j``, at most ``n_bins * 2**-1075 * max|S_j|``,
+    which by per-row PSD weights needs a channel's summed weights below 2**-1022
+    to show beside the diagonal blocks. The raw chain lets ``R`` rescale it too.
     """
     upper = _cross_operand_bounds(table)[1]
     for gm in gms:
