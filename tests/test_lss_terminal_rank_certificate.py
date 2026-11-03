@@ -673,10 +673,12 @@ def test_a_column_far_from_zero_is_kept_in_any_units(monkeypatch, discrete, orig
     The fit starts at the centred fit's optimum, so the rank drops a slope away
     from zero. The design test reads the column centred, where it is ordinary,
     so the slope is never refitted away; at ``o = 1e13`` float64 cancels the
-    centred square, which then counts as zero. Mutation checks: on uncentred
-    column norms ``c = 1e-7`` publishes a zero slope as converged, its score
-    inside the stop's ``tol (1 + |f|)``, and every ``c`` runs a refit; taking
-    the cancelled square as computed does the first at ``o = 1e13``.
+    centred square, which then counts as zero. The slope's ``4 kappa u`` bound
+    is about 1.6 relative at ``o = 3e7`` and vacuous at 1e13, so what the test
+    pins is the decision: no refit, and a slope off zero. Mutation checks: on
+    uncentred column norms ``c = 1e-7`` publishes a zero slope as converged, its
+    score inside the stop's ``tol (1 + |f|)``, and every ``c`` runs a refit;
+    taking the cancelled square as computed does the first at ``o = 1e13``.
     """
     import superglm.distributional.solver.solver as solver
     from superglm.diagnostics.convergence import ConvergenceWarning
@@ -719,7 +721,7 @@ def test_a_column_far_from_zero_is_kept_in_any_units(monkeypatch, discrete, orig
     )
 
 
-@pytest.mark.parametrize("constant", [1e6, 1e9])
+@pytest.mark.parametrize("constant", [1e6, 1e8])
 @pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
 def test_a_constant_column_beside_an_intercept_is_refitted_as_an_alias(
     monkeypatch, discrete, constant
@@ -731,8 +733,9 @@ def test_a_constant_column_beside_an_intercept_is_refitted_as_an_alias(
     it. The fit without the column bounds the agreement: each stops with its
     score inside ``tol (1 + |f|)``, which moves a coefficient by about that
     times ``sigma^2 / n``, here 3e-8. Mutation checks: on centred column norms
-    alone the alias reads 0 / 0, and the drifted state is published; on the raw
-    dropped score, ``c`` times the retained one, the refit at ``c = 1e9`` is refused.
+    alone the alias reads 0 / 0, and the drifted state is published; the raw
+    dropped score, ``c`` times the retained one, refused the refit at ``c = 1e6``
+    on Linux ARM64, where the retained score stopped larger.
     """
     import superglm.distributional.solver.solver as solver
 
