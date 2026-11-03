@@ -483,6 +483,8 @@ def _gap_variances(
         if curve_side is not None and ratio is not None and curve_rows is not None:
             moved = moved - ratio * curve_side.influence(curve_rows[i])
         variances[i] = phi * float(np.sum((root * moved[informative]) ** 2))
+        if not np.isfinite(variances[i]):
+            return None, _UNMEASURED
     return variances, None
 
 
@@ -551,9 +553,9 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
     its face under any small change of the response, so the fit moves with
     ``F - F A'(A F A')^+ A F``, the restricted estimator's form, rather than
     ``F``; a curve held flat by its monotone constraint does not move at all.
-    The rows held are the ones the fit held (``RankInfo.face_rows``), an
-    independent set of them in their own units, none where it held none; a
-    post-fit repair keeps them (``state_ops.face_record_at``). A record
+    The rows held are the ones the fit held (``RankInfo.face_rows``), in their
+    own units, as many as its face (``RankInfo.face``) holds, none where it held
+    none; a post-fit repair keeps them (``state_ops.face_record_at``). A record
     without them, pickled before fits kept them (0.41 and earlier), has its
     rows read as the fit reads them (``irls_direct._binding_rows``), all of them,
     the QP's active set being unknown, over the active columns ``X`` at the
@@ -563,13 +565,17 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
     formed to a relative accuracy of 1e-6.
     """
     full = {group.name: group for group in model._groups}
-    recorded = getattr(model._solver_pirls_result().rank_info, "face_rows", None)
+    record = model._solver_pirls_result().rank_info
+    recorded = getattr(record, "face_rows", None)
+    face = getattr(record, "face", None)
     width = X.p
     if recorded is not None:
         # Over the active columns; an inactive term's coefficients are zero,
         # so its rows drop.
-        columns = [np.arange(full[group.name].start, full[group.name].end) for group in active]
-        R = recorded[:, np.concatenate(columns)]
+        columns = np.concatenate(
+            [np.arange(full[group.name].start, full[group.name].end) for group in active]
+        )
+        R = recorded[:, columns]
         R = R[np.any(R != 0.0, axis=1)]
     else:
         beta = np.asarray(model.result.beta, dtype=np.float64)
@@ -592,9 +598,23 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
         R = _binding_rows(np.vstack(rows), np.concatenate(bounds), theta, column_scale)
     if not R.shape[0]:
         return apply
-    # The fit's rank rule (``irls_direct._binding_rank``) on the rows as
-    # recorded, so it decides as the fit's face did.
-    rank = _binding_rank(R)[2]
+    if face is None:
+        # The fit's rank rule (``irls_direct._binding_rank``) on the rows as
+        # read, so it decides as the fit's face would.
+        rank = _binding_rank(R)[2]
+    else:
+        # The fit's own face decides the rank. Constraints and selection act on
+        # whole terms, so over the active columns the face still spans an
+        # orthogonal projector's range (singular values 0 or 1).
+        face = face[columns]
+        rank = width - int(np.count_nonzero(np.linalg.svd(face, compute_uv=False) > 0.5))
+        if not rank:
+            return apply
+        if R.shape[0] > rank:
+            # Redundant rows are projected off the free subspace, so none holds
+            # a direction the fit's rank cut freed. Independent rows are not:
+            # the face's rounding can lose their small entries.
+            R = R - (R @ face) @ face.T
     moves = np.column_stack([apply(row) for row in R])
     # Scaled to a unit diagonal, R F R' has within a factor of its size the
     # least condition any diagonal scaling gives it (van der Sluis 1969;
