@@ -17,9 +17,9 @@ from superglm._frame import as_eager_frame
 from superglm.distributional.api import SuperLSS
 from superglm.distributional.layout import _qualify_local_component
 from superglm.distributional.predictor import compile_predictors
-from superglm.distributional.weights import resolve_likelihood_weights
+from superglm.distributional.weights import LikelihoodWeightError, resolve_likelihood_weights
 from superglm.editor.errors import EditorValueError
-from superglm.editor.lss.availability import refit_reason
+from superglm.editor.lss.availability import WEIGHTS_DIFFER, refit_reason
 from superglm.editor.lss.view import LSSModelView, split_key
 from superglm.editor.refit import fit_refit_model
 
@@ -115,9 +115,13 @@ def lss_probe_build(view: LSSModelView, key: str, replacement, X, sample_weight)
     lss = view.lss
     frame = as_eager_frame(X)
     frame.require_columns((column,))
-    resolved = resolve_likelihood_weights(
-        sample_weight, n_observations=len(frame), contract=lss._weight_contract
-    )
+    try:
+        resolved = resolve_likelihood_weights(
+            sample_weight, n_observations=len(frame), contract=lss._weight_contract
+        )
+    except LikelihoodWeightError as exc:
+        # No refit could run on these weights, so the change is refused when it is staged.
+        raise EditorValueError(WEIGHTS_DIFFER) from exc
     if len(resolved.input_positions) < len(frame):
         frame = as_eager_frame(frame.take_rows(resolved.input_positions))
     template = next(p for p in lss._predictors if p.name == parameter)

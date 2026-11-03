@@ -20,7 +20,7 @@ from superglm._frame import as_eager_frame
 from superglm.distributional.families import LogNormalLS
 from superglm.distributional.prediction_design import _required_columns
 from superglm.distributional.predictor import resolve_predictor_link
-from superglm.distributional.weights import resolve_likelihood_weights
+from superglm.distributional.weights import LikelihoodWeightError, resolve_likelihood_weights
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.evaluation import coerce_dataset, coerce_evaluation_data
 from superglm.editor.lss.display import SPREAD_KINDS
@@ -89,9 +89,16 @@ def _kept_rows(lss, train) -> Any:
     if state.retained_rows is not None:
         positions = state.retained_rows.likelihood_weights.input_positions
     else:
-        positions = resolve_likelihood_weights(
-            train.sample_weight, n_observations=train.n_obs, contract=state.weight_contract
-        ).input_positions
+        try:
+            positions = resolve_likelihood_weights(
+                train.sample_weight, n_observations=train.n_obs, contract=state.weight_contract
+            ).input_positions
+        except LikelihoodWeightError as exc:
+            raise EditorValueError(
+                "The editor finds the rows this model's fit kept from train_data's weights, "
+                f"and this model cannot take them: {exc}. Open the editor with the rows and "
+                "weights the model was fitted on: train_data=(X, y, sample_weight, offsets)."
+            ) from exc
     return as_eager_frame(train.X).take_rows(np.asarray(positions, dtype=np.intp))
 
 

@@ -355,6 +355,27 @@ def test_training_weights_the_fit_cannot_take_are_not_its_weights():
     assert session_refit_reason(session) == WEIGHTS_DIFFER
 
 
+def test_a_change_on_training_weights_the_fit_cannot_take_is_refused_when_staged():
+    case = gamma_case()
+    session = edit(_frequency_model(), train_data=(case.X, case.y, np.full(case.y.size, 0.5)))
+    with pytest.raises(EditorValueError) as info:
+        session.stage_structural("knots", "mean:age", {"count": 5, "strategy": "uniform"})
+    assert info.value.public_message == WEIGHTS_DIFFER
+    assert session.pending == []
+
+
+def test_opening_on_weights_a_fit_that_kept_no_rows_cannot_take_is_refused():
+    case = gamma_case()
+    weights = np.ones(case.y.size)
+    weights[-1] = 0.0
+    family = GammaLS()
+    model = SuperLSS(
+        family, family.mean(s("age", k=5)), family.scale(), weight_semantics="frequency"
+    ).fit_reml(case.X, case.y, sample_weight=weights, retain_rows=False)
+    with pytest.raises(EditorValueError, match="this model cannot take them: frequency weights"):
+        edit(model, train_data=(case.X, case.y, np.full(case.y.size, 0.5)))
+
+
 @pytest.mark.parametrize("report", ["validation", "final"])
 def test_a_split_whose_weights_the_fit_cannot_take_is_shown_unavailable(report):
     case = gamma_case()
