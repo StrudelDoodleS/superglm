@@ -50,7 +50,9 @@ from superglm.links import (
     Link,
     LogitLink,
     LogLink,
+    PowerLink,
     ProbitLink,
+    SqrtLink,
     resolve_link,
 )
 
@@ -268,6 +270,20 @@ def _default_link_class(parameter: ParameterSpec) -> type:
     return type(default if isinstance(default, Link) else resolve_link(default, cast(Any, None)))
 
 
+def _ends_only_at_infinity(link: Link) -> tuple[bool, bool]:
+    """Whether a link reaches the (lower, upper) end of its range only as its predictor walks off.
+
+    Sqrt and a positive power reach zero at a finite predictor and grow
+    without bound only as it does; a negative power, clamped at a small
+    positive predictor, reaches its upper end there and zero only at infinity.
+    """
+    if type(link) is SqrtLink:
+        return False, True
+    if type(link) is PowerLink:
+        return link.power < 0.0, link.power > 0.0
+    return False, False
+
+
 def censored_recession(
     family: DistributionalFamily, bounds: ResponseBounds, compiled: Sequence[CompiledPredictor]
 ) -> NDArray[np.bool_]:
@@ -279,8 +295,12 @@ def censored_recession(
     predictor walks off.  Such flags are read on the parameter's default link
     class and on those links; a link that reaches an end of its range at a
     finite coefficient, such as sqrt, leaves the level a finite estimate there.
-    A parameter the family names in ``censored_recession_link_sensitive`` has
-    flags that are not monotone; there a bounded link, such as a logit on a
+    A built-in family's flag rises with its parameter on a right-censored row
+    and falls on a left-censored one, so on a link that reaches only one end
+    at infinity it is read on the side that walks to that end; a family's own
+    flags declare no direction and are not read there.  A parameter the
+    family names in ``censored_recession_link_sensitive`` has flags that are
+    not monotone; there a bounded link, such as a logit on a
     scale, can stop short of the limit, so those flags are read only on the
     parameter's default link class.
     """
@@ -298,15 +318,21 @@ def censored_recession(
             f"{type(family).__name__}.censored_recession_link_sensitive must be a tuple of "
             f"the family's parameter names, got {sensitive!r}"
         )
-    readable = [
-        type(predictor.link) is _default_link_class(parameters[predictor.parameter_index])
-        or (
-            parameters[predictor.parameter_index].name not in sensitive
-            and type(predictor.link) in _OPEN_MONOTONE_LINKS
-        )
-        for predictor in compiled_tuple
-    ]
-    return flags & np.asarray(readable, dtype=bool)
+    method = getattr(type(family), "censored_recession", None)
+    built_in = str(getattr(method, "__module__", "")).startswith("superglm.")
+    readable = np.zeros(shape, dtype=bool)
+    for column, predictor in enumerate(compiled_tuple):
+        parameter = parameters[predictor.parameter_index]
+        if type(predictor.link) is _default_link_class(parameter) or (
+            parameter.name not in sensitive and type(predictor.link) in _OPEN_MONOTONE_LINKS
+        ):
+            readable[:, column] = True
+        elif built_in and parameter.name not in sensitive:
+            lower, upper = _ends_only_at_infinity(predictor.link)
+            readable[:, column] = ((bounds.side == RIGHT_CENSORED) & upper) | (
+                (bounds.side == LEFT_CENSORED) & lower
+            )
+    return flags & readable
 
 
 def scan_censored_separation(
