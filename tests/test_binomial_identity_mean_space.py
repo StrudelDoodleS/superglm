@@ -206,3 +206,23 @@ def test_a_constraint_failure_on_the_boundary_keeps_its_own_stop(monkeypatch, st
         model.fit_reml(X, y)
     assert not model.result.converged
     assert model.result.termination_reason == stop
+
+
+def test_a_start_spanning_past_one_is_centred_inside_the_space():
+    # The default start, the mean response 0.455 plus the offset, spans
+    # (0.455, 1.255); aligning its smallest row with the mean leaves it there,
+    # while a span of 0.8 fits inside (0, 1).
+    rng = np.random.default_rng(5)
+    offset = rng.uniform(0.0, 0.8, 2000)
+    x = rng.uniform(0.0, 1.0, 2000)
+    y = rng.binomial(1, 0.02 + offset + 0.1 * x).astype(float)
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="binomial", link="identity", selection_penalty=0, features={"x": Numeric()}
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        model.fit(X, y, offset=offset)
+    assert model.result.converged
+    mean = model.predict(X, offset=offset)
+    assert np.all((mean > 0.0) & (mean < 1.0))

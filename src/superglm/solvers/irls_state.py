@@ -381,6 +381,8 @@ def interior_start_intercept(
     until the smallest positive-weight ``eta`` is ``level``, that link's
     intercept-only start ``g(mean)``, when that level is inside the domain;
     so is an identity-link start of a family whose means are positive.  A
+    binomial/identity start that alignment leaves above 1 is centred on 1/2
+    instead, inside (0, 1) whenever its span is narrower.  A
     constant offset ``c`` then starts at ``intercept - c``, the no-offset start shifted with the
     optimum.  A start already inside is left alone, so a fit without an
     offset starts exactly as before.
@@ -401,7 +403,14 @@ def interior_start_intercept(
         bottom = float(np.min(eta[weights > 0.0]))
         if not math.isfinite(bottom):
             return float(intercept)
-        return float(intercept) + (float(level) - bottom)
+        shift = float(level) - bottom
+        if outside(eta + shift, weights):
+            # Only a two-sided domain, the binomial's (0, 1), is still crossed.
+            top = float(np.max(eta[weights > 0.0]))
+            centre = float(link.link(np.array([0.5]))[0]) - 0.5 * (bottom + top)
+            if math.isfinite(centre) and not outside(eta + centre, weights):
+                shift = centre
+        return float(intercept) + shift
     return float(intercept)
 
 
