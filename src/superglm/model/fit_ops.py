@@ -1275,8 +1275,8 @@ def _validate_rule_fit_conflicts(model) -> None:
     A capped spline that extends linearly past its training range is capped
     on that range only, so the fit warns once per feature that its tails are
     not. Reads every main-effect and interaction spec by its rule objects; a
-    spec whose rows cannot state a cap or step limit yet refuses it first
-    (``_refuse_level_rules``).
+    spec whose rows cannot hold a cap or step limit, an ordered term with
+    special levels, refuses it first (``_refuse_level_rules``).
     """
     from superglm._predictor_compiler import _feature_named_messages
     from superglm.features.constraint import rules_of

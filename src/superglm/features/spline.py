@@ -124,6 +124,9 @@ class _SplineBase:
     # The training basis mean a cap's rows are centred by, stored at each build
     # (``_spline_build.training_basis_mean``).
     _training_basis_mean: NDArray | None = None
+    # ``(value, label)`` of each level when the spline is an ordered term's basis,
+    # so a message names levels rather than their values; None otherwise.
+    _axis_levels: tuple[tuple[float, Any], ...] | None = None
 
     # Configuration and build-time state, assigned by ``_spline_config`` and by the
     # build helpers in ``_spline_runtime`` and ``_spline_cardinal_spec``. Annotations

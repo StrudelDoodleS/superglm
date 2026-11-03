@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -86,7 +87,11 @@ def _warn_widened_flats(spec: Any, pieces: list, *, stacklevel: int) -> None:
     """Warn once when a flat stretch's ends are not knots, naming where it holds.
 
     An end at the feature's boundary is exact: the curve is read on its range.
+    An ordered term's basis (``_axis_levels``) names its ends and the levels
+    the stretch holds on rather than their values.
     """
+    levels = spec._axis_levels
+    label = {} if levels is None else dict(levels)
     flat_rules = [rule for rule in rules_of(spec) if rule.kind == "flat"]
     flat_pieces = [piece for piece in pieces if piece[0] == "flat"]
     widened = []
@@ -95,7 +100,7 @@ def _warn_widened_flats(spec: Any, pieces: list, *, stacklevel: int) -> None:
         lo, hi = max(lo, spec._lo), min(hi, spec._hi)
         _, a, b = piece
         missing = [
-            _fmt_end(end)
+            repr(label[end]) if end in label else _fmt_end(end)
             for end in (a, b)
             if end not in (spec._lo, spec._hi) and not np.any(spec._knots == end)
         ]
@@ -104,9 +109,15 @@ def _warn_widened_flats(spec: Any, pieces: list, *, stacklevel: int) -> None:
         where = (
             "a knot at " + missing[0] if len(missing) == 1 else "knots at " + " and ".join(missing)
         )
+        if levels is None:
+            shown, held = rule, f"[{_fmt_end(lo)}, {_fmt_end(hi)}]"
+        else:
+            shown = replace(rule, lo=label.get(rule.lo, rule.lo), hi=label.get(rule.hi, rule.hi))
+            covered = [name for value, name in levels if lo <= value <= hi]
+            held = f"the levels {covered[0]!r} to {covered[-1]!r}"
         widened.append(
-            f"{rule.describe()} holds on [{_fmt_end(lo)}, {_fmt_end(hi)}], the whole knot spans "
-            f"it touches; put {where} for exact edges"
+            f"{shown.describe()} holds on {held}, the whole knot spans it touches; put {where} "
+            "for exact edges"
         )
     if widened:
         warnings.warn("; ".join(widened), UserWarning, stacklevel=stacklevel + 1)

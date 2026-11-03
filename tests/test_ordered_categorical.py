@@ -1,5 +1,6 @@
 """Tests for OrderedCategorical feature type."""
 
+import re
 import warnings
 
 import numpy as np
@@ -1072,33 +1073,24 @@ def _rising_bands(n: int = 20_000, seed: int = 47) -> tuple[pd.DataFrame, np.nda
     return pd.DataFrame({"band": band}), rng.poisson(np.exp(1.5 * (band / 9.0) ** 3))
 
 
-@pytest.mark.parametrize(
-    "rule",
-    [Constraint.fit.cap(0.6, 1.8), Constraint.fit.increasing & Constraint.fit.max_step(0.2)],
-    ids=["cap", "max_step"],
-)
-@pytest.mark.parametrize("family", ["poisson", "gaussian"])
-def test_level_rules_on_ordered_basis_are_refused(rule, family):
-    """A cap or step limit on an ordered term's basis is refused at fit, naming the feature.
+def test_ordered_cap_refused_under_identity_link():
+    """A cap on an ordered term's basis is refused under an identity link, naming the feature.
 
-    Its rows would be stated against the basis spline's native centre while the
-    term prints against its base level. Mutation: before the refusal the
-    Poisson cap fit printed relativities up to 2.38, and the identity-link one
-    fitted with no refusal.
+    The one link check every capped term passes through covers ordered terms.
+    Mutation: before the check the identity-link fit ran with no refusal.
     """
     X, y = _rising_bands()
     model = SuperGLM(
-        family=family,
+        family="gaussian",
         selection_penalty=0.0,
         features={
             "band": OrderedCategorical(
-                values=_LEVEL_VALUES, basis=Spline(kind="ps", k=6, constraint=rule)
+                values=_LEVEL_VALUES,
+                basis=Spline(kind="ps", k=6, constraint=Constraint.fit.cap(0.6, 1.8)),
             )
         },
     )
-    with pytest.raises(
-        ValueError, match=r"Feature 'band': .* on an OrderedCategorical is not supported yet"
-    ):
+    with pytest.raises(ValueError, match=r"Feature 'band': cap\(0\.6, 1\.8\).*log link"):
         model.fit(X, y.astype(float))
 
 
@@ -1109,10 +1101,162 @@ def test_ordered_term_reads_its_basis_rule_objects():
     rules = C.increasing & C.cap(0.6, 1.8)
     spec = OrderedCategorical(values=_LEVEL_VALUES, basis=Spline(kind="ps", k=6, constraint=rules))
     assert [rule.kind for rule in rules_of(spec)] == ["increasing", "cap"]
-    # The basis spline is never built with the cap, so it emits no cap rows.
-    with pytest.raises(ValueError, match="on an OrderedCategorical is not supported yet"):
-        spec.build(np.arange(10).repeat(20))
+    # The cap is stated at the ten levels against the base: two rows per non-base level.
+    capped = spec.build(np.arange(10).repeat(20))
+    assert np.count_nonzero(capped.constraints.b) == 2 * 9
+    assert [rule.kind for rule in rules_of(spec)] == ["increasing", "cap"]
     shaped = OrderedCategorical(
         values=_LEVEL_VALUES, basis=Spline(kind="ps", k=6, constraint=C.increasing & C.concave)
     )
     assert shaped.build(np.arange(10).repeat(20)).constraints.A.shape[0] > 0
+
+
+_U = 2.0**-53
+_AGE_BANDS = ["18-25", "26-35", "36-45", "46-55", "56-65", "66-75", "76-85", "86+"]
+
+
+def _band_rows(log_effect, *, levels=_AGE_BANDS, n=40_000, seed=61):
+    """Poisson rows on ``levels``, most exposed at the fourth, with the given log effect."""
+    rng = np.random.default_rng(seed)
+    p = np.array([0.08, 0.12, 0.16, 0.2, 0.16, 0.12, 0.09, 0.07])
+    band = rng.choice(len(levels), n, p=p)
+    X = pd.DataFrame({"band": np.array(levels, dtype=object)[band]})
+    return X, rng.poisson(np.exp(-1.0 + np.asarray(log_effect)[band])).astype(float)
+
+
+def _ordered_fit(X, y, constraint, *, levels=_AGE_BANDS, method="fit", specials=None):
+    spec = OrderedCategorical(
+        order=levels, specials=specials, basis=Spline(k=6, constraint=constraint)
+    )
+    model = SuperGLM(family="poisson", selection_penalty=0.0, features={"band": spec})
+    return getattr(model, method)(X, y)
+
+
+def _printed_levels(model) -> np.ndarray:
+    """The level relativities ``term_inference`` prints, in level order."""
+    ti = model.term_inference("band", with_se=False)
+    order = {str(level): i for i, level in enumerate(model._specs["band"]._smooth_levels)}
+    rel = np.asarray(ti.relativity, dtype=np.float64)
+    return rel[np.argsort([order[str(level)] for level in ti.levels])]
+
+
+def _steep_effect():
+    return np.linspace(-0.9, 0.9, len(_AGE_BANDS))
+
+
+def test_ordered_cap_at_levels():
+    """Every printed band relativity, against the base band, lies inside the cap.
+
+    The base is the most exposed band, the fourth, so the cap binds at both ends.
+    Mutation: without the cap the printed relativities reach beyond 1.8.
+    """
+    C = Constraint.fit
+    X, y = _band_rows(_steep_effect())
+    printed = _printed_levels(_ordered_fit(X, y, C.increasing & C.cap(0.8, 1.25)))
+    assert np.min(printed) >= 0.8 * (1.0 - 1e3 * _U)
+    assert np.max(printed) <= 1.25 * (1.0 + 1e3 * _U)
+    assert np.max(printed) == pytest.approx(1.25, abs=1e-3)  # the cap binds
+    assert np.min(printed) == pytest.approx(0.8, abs=1e-3)
+    assert np.max(_printed_levels(_ordered_fit(X, y, C.increasing))) > 1.8
+
+
+def test_ordered_max_step():
+    """Adjacent printed band ratios stay within 15% either way.
+
+    Mutation: without the step limit an adjacent ratio exceeds 1.2.
+    """
+    C = Constraint.fit
+    X, y = _band_rows(_steep_effect())
+    printed = _printed_levels(_ordered_fit(X, y, C.increasing & C.max_step(0.15)))
+    ratios = printed[1:] / printed[:-1]
+    assert np.min(ratios) >= 0.85 * (1.0 - 1e3 * _U)
+    assert np.max(ratios) <= 1.15 * (1.0 + 1e3 * _U)
+    assert np.max(ratios) == pytest.approx(1.15, abs=1e-3)  # the limit binds
+    free = _printed_levels(_ordered_fit(X, y, C.increasing))
+    assert np.max(free[1:] / free[:-1]) > 1.2
+
+
+@pytest.mark.parametrize(
+    "levels", [_AGE_BANDS, [18, 26, 36, 46, 56, 66, 76, 86]], ids=["labels", "numeric"]
+)
+def test_ordered_stretch_by_label(levels):
+    """Stretch ends name levels, numeric levels included; the printed relativities fall then rise.
+
+    The true effect rises on the first two bands and dips at the fifth.
+    Mutation: unconstrained, the printed relativities break both stretches; a
+    numeric end read as an axis value lies outside the level axis and is refused.
+    """
+    C = Constraint.fit
+    effect = [0.0, 0.5, -0.3, 0.2, -0.1, 0.3, 0.5, 0.7]
+    X, y = _band_rows(effect, levels=levels)
+    rule = C.decreasing.below(levels[1]) & C.increasing.above(levels[2])
+    printed = _printed_levels(_ordered_fit(X, y, rule, levels=levels))
+    scale = 1e3 * _U * np.max(printed)
+    assert printed[1] - printed[0] <= scale
+    assert np.min(np.diff(printed[2:])) >= -scale
+    free = _printed_levels(_ordered_fit(X, y, None, levels=levels))
+    assert free[1] > free[0] and np.min(np.diff(free[2:])) < 0.0
+
+
+@pytest.mark.parametrize(
+    ("levels", "end"), [(_AGE_BANDS, "99-100"), ([18, 26, 36, 46, 56, 66, 76, 86], 30)]
+)
+def test_ordered_unknown_label_refused(levels, end):
+    """A stretch end that is not a level is refused, naming it and the feature."""
+    X, y = _band_rows(_steep_effect(), levels=levels, n=2_000)
+    with pytest.raises(ValueError, match=rf"Feature 'band': .*{end!r}.*not one of the levels"):
+        _ordered_fit(X, y, Constraint.fit.increasing.below(end), levels=levels)
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [Constraint.fit.increasing & Constraint.fit.cap(0.8, 1.25), Constraint.fit.max_step(0.15)],
+    ids=["cap", "max_step"],
+)
+def test_ordered_cap_with_specials_refused(rule):
+    """A cap or step limit with special levels is refused, naming the feature and the specials.
+
+    A special level is a free effect off the curve, so rows at the levels
+    cannot hold it. Mutation: without the refusal the fit runs.
+    """
+    X, y = _band_rows(_steep_effect(), n=4_000)
+    X.loc[X.index[:200], "band"] = "Unknown"
+    with pytest.raises(ValueError, match=r"Feature 'band': .*special level.*'Unknown'"):
+        _ordered_fit(X, y, rule, specials=["Unknown"])
+
+
+def test_ordered_rules_under_reml():
+    """With an estimated smoothing parameter, the restored fit meets every rule.
+
+    Mutation: without the cap and step limit the REML fit leaves both.
+    """
+    C = Constraint.fit
+    X, y = _band_rows(_steep_effect())
+    rules = C.increasing & C.cap(0.8, 1.25) & C.max_step(0.15)
+    model = _ordered_fit(X, y, rules, method="fit_reml")
+    assert len(model._reml_result.lambdas) > 0
+    printed = _printed_levels(model)
+    ratios = printed[1:] / printed[:-1]
+    assert np.min(printed) >= 0.8 * (1.0 - 1e3 * _U)
+    assert np.max(printed) <= 1.25 * (1.0 + 1e3 * _U)
+    assert np.min(ratios) >= 1.0 - 1e3 * _U
+    assert np.max(ratios) <= 1.15 * (1.0 + 1e3 * _U)
+    free = _printed_levels(_ordered_fit(X, y, C.increasing, method="fit_reml"))
+    assert np.max(free) > 1.25 and np.max(free[1:] / free[:-1]) > 1.15
+
+
+def test_ordered_flat_warning_names_levels():
+    """A flat stretch widened to whole knot spans is reported in levels, not axis values.
+
+    Mutation: without the level names the warning reads ``flat.within(0.2857, ...)``.
+    """
+    rule = Constraint.fit.flat.within("36-45", "46-55")
+    spec = OrderedCategorical(order=_AGE_BANDS, basis=Spline(k=6, constraint=rule))
+    rows = np.array(_AGE_BANDS, dtype=object)[np.arange(8).repeat(20)]
+    with pytest.warns(UserWarning, match="whole knot spans") as seen:
+        spec.build(rows)
+    message = str(next(w.message for w in seen if "whole knot spans" in str(w.message)))
+    assert re.search(
+        r"flat\.within\('36-45', '46-55'\) holds on the levels '[^']+' to '[^']+'", message
+    ), message
+    assert "0.28" not in message

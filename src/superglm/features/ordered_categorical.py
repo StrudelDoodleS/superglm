@@ -15,7 +15,7 @@ import copy
 import warnings
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -48,6 +48,9 @@ _STEP_MODE_REMOVED_MESSAGE = (
 # Stable leading clause of the knot-clamp warning; editor/collapse.py filters
 # its internal clone's warning by this prefix.
 _CLAMP_WARNING_PREFIX = "OrderedCategorical: n_knots exceeds the level count"
+
+# The rules an ordered term holds at its levels rather than on its basis spline.
+_LEVEL_RULE_KINDS = frozenset({"cap", "max_step"})
 
 
 def _spline_kind_name(spline: Any) -> str:
@@ -359,6 +362,9 @@ class OrderedCategorical:
     # Whether `base=` names a band although it reads "first" or "most_exposed";
     # set only by a rebuild. A class attribute so older pickles read False.
     _base_is_level: bool = False
+    # The cap and step limit the last build holds at the levels; a spec pickled
+    # before level rules existed reads none.
+    _level_rules: ConstraintRules = ConstraintRules(())
 
     def __setstate__(self, state: dict) -> None:
         """Restore a pickle; a spec saved before ``specials=`` existed has none.
@@ -679,6 +685,10 @@ class OrderedCategorical:
     # ── Declared shape constraint ──────────────────────────────────
     # Forwarded because shape engines read ``getattr(spec, "constraint_kind",
     # ...)`` on the feature spec, which for an ordered term is this wrapper.
+    # They forward the basis as declared (``_declared_basis``), not the built
+    # inner spline: a build places the declaration (``_place_basis_rules``),
+    # moving stretch ends to level values on the inner spline and leaving the
+    # cap and step limit on this wrapper, where they bind at the levels.
     # The legacy ``monotone`` spelling is not forwarded; new readers must use
     # the canonical name.
 
@@ -690,40 +700,149 @@ class OrderedCategorical:
         level values: conservative, since published monotone-ordinal methods
         constrain the level effects (Rufibach, CSDA 54(6), 2010, Sec. 5) and
         sign conditions are sufficient but not necessary (Hofner, Kneib &
-        Hothorn, Stat. Comput. 26, 2016, Sec. 3.3). See
+        Hothorn, Stat. Comput. 26, 2016, Sec. 3.3). A cap and a step limit
+        bind at the levels, which are what gets priced (``_level_rows``). See
         ``docs/how-to/constrain-a-smooth.md``.
         """
-        inner = self._basis_spline
-        return getattr(inner, "constraint_kind", getattr(inner, "monotone", None))
+        declared = self._declared_basis
+        return getattr(declared, "constraint_kind", getattr(declared, "monotone", None))
 
     @property
     def constraint_mode(self) -> str:
         """Whether the declared constraint binds at fit time or post-fit."""
-        inner = self._basis_spline
-        return getattr(inner, "constraint_mode", getattr(inner, "monotone_mode", "postfit"))
+        declared = self._declared_basis
+        return getattr(declared, "constraint_mode", getattr(declared, "monotone_mode", "postfit"))
 
     @property
     def constraint_rules(self) -> ConstraintRules:
-        """The rule objects declared on the inner basis; empty for a basis that takes none.
+        """The rule objects declared on the basis; empty for a basis that takes none.
 
         ``rules_of`` reads these, so an ordered term answers with real rule
         kinds rather than the describe-string ``constraint_kind`` forwards.
         """
-        return getattr(self._basis_spline, "constraint_rules", ConstraintRules(()))
+        return getattr(self._declared_basis, "constraint_rules", ConstraintRules(()))
+
+    @property
+    def _declared_basis(self) -> Any:
+        """The basis as the caller declared it, or the inner spline for a spec without one."""
+        inner = self._basis_spline
+        declared = getattr(self, "_spline_obj", None)
+        return inner if declared is None else declared
 
     def _refuse_level_rules(self) -> None:
-        """Refuse a cap or step limit on the basis: no rows state it against the base level.
+        """Refuse a cap or step limit beside special levels, which no level row can hold.
 
-        The ordered term prints against its base level, while the basis spline
-        would state a cap against its own native centre, so the printed
-        relativities would leave the cap.
+        A special level is fitted as a free effect off the curve, so rows at the
+        level values do not bound its printed relativity.
         """
-        held = next((rule for rule in rules_of(self) if rule.kind in ("cap", "max_step")), None)
-        if held is not None:
-            raise ValueError(
-                f"{held.describe()} on an OrderedCategorical is not supported yet; "
-                "remove it from the basis spline"
+        held = next((rule for rule in rules_of(self) if rule.kind in _LEVEL_RULE_KINDS), None)
+        if held is None or not self.has_specials:
+            return
+        raise ValueError(
+            f"{held.describe()} binds the relativities of the ordered levels, but the special "
+            f"level(s) {list(self._special_display)!r} are free effects off the curve that it "
+            "cannot hold; list those levels in order= or values= to put them on the curve, "
+            "or drop the rule"
+        )
+
+    def _place_basis_rules(self) -> None:
+        """Split the declared rules between the inner spline and this term, once per build.
+
+        The shape rules go onto the inner spline, each stretch end moved to the
+        value of the level it names (``_stretch_end_value``); a stretch is
+        inclusive at the levels that end it. The cap and step limit stay here
+        (``_level_rules``) and become rows at the levels. A declaration with
+        neither stretches nor level rules leaves the inner spline as built, so
+        a single full-range rule builds the rows it always has.
+        """
+        from superglm.features._spline_config import _normalize_constraint
+
+        self._refuse_level_rules()
+        level, shape = rules_of(self).split(_LEVEL_RULE_KINDS)
+        self._level_rules = level
+        if not level and all(rule.stretch == (None, None) for rule in shape):
+            return
+        inner = cast(Any, self._basis_spline)  # ty: the constraint fields are set per instance
+        if level and inner.select:
+            raise NotImplementedError(
+                "Fit-time shape constraints are not supported with "
+                "select=True. Use select=False or Constraint.postfit.*."
             )
+        for rule in shape:
+            if rule.lo is None or rule.hi is None:
+                continue
+            if not self._stretch_end_value(rule.lo) < self._stretch_end_value(rule.hi):
+                raise ValueError(
+                    f"{rule.describe()} needs its first level before its second in level "
+                    "order; swap the ends or use a single below/above"
+                )
+        rules, kind, mode = _normalize_constraint(shape.resolve(self._stretch_end_value))
+        inner.constraint_rules = rules
+        inner.constraint_kind = inner.monotone = kind
+        inner.constraint_mode = inner.monotone_mode = mode
+        inner._axis_levels = tuple(
+            (float(self._level_to_value[level]), level) for level in self._smooth_levels
+        )
+
+    def _stretch_end_value(self, end: float | str) -> float:
+        """The axis value of the level a stretch end names.
+
+        Ends are level labels, numeric ones included, matched as data values
+        are (``_declared_matcher``), then through the grouping as a Spline knot
+        is. A special level has no place on the curve and is refused.
+        """
+        texts = [str(level) for level in self._declared_smooth_levels]
+        specials = [str(level) for level in self._special_display]
+        if str(_declared_matcher(list(self._special_display))(end)) in specials:
+            raise ValueError(
+                f"stretch end {end!r} is a special level, a free effect off the curve; end "
+                f"the stretch at one of the levels {texts!r}"
+            )
+        matched = str(_declared_matcher(list(self._declared_smooth_levels))(end))
+        if matched not in texts:
+            raise ValueError(
+                f"stretch end {end!r} is not one of the levels {texts!r}; end the stretch at "
+                "one of them"
+            )
+        position = self._grouped_break_position(texts.index(matched), parameter="stretch end")
+        return float(self._level_to_value[self._smooth_levels[position]])
+
+    def _level_rows(self) -> LinearConstraintSet:
+        """Rows ``A @ c >= b`` holding the cap and step limit at the levels.
+
+        ``c`` is the inner spline's raw coefficient vector, the space its own
+        shape rows are stated in, and ``B(l) @ c`` is the curve at the value of
+        level ``l``. The term prints ``f(l) - f(base)``, so a cap is
+        ``log lo <= (B(l) - B(base)) @ c <= log hi`` at every other level and a
+        step limit is ``log(1 - down) <= (B(l_{j+1}) - B(l_j)) @ c <= log(1 + up)``
+        for each adjacent pair; any constant centring shift cancels in both.
+        Each row is scaled by its largest entry; a zero row bounds nothing and
+        is dropped.
+        """
+        from superglm.features._spline_ranges import derivative_design
+
+        inner = cast(Any, self._basis_spline)  # ty: the knots are set per instance at the build
+        levels = sorted(self._smooth_levels, key=self._level_to_value.__getitem__)
+        values = np.array([self._level_to_value[level] for level in levels], dtype=np.float64)
+        B = derivative_design(inner._knots, inner.degree, values, 0)
+        blocks: list[NDArray] = []
+        bounds: list[NDArray] = []
+        for rule in self._level_rules:
+            if rule.kind == "cap":
+                base = levels.index(self._base_level)
+                D = np.delete(B - B[base], base, axis=0)
+                lo, hi = cast(tuple[float, float], rule.bounds)
+            else:
+                D = np.diff(B, axis=0)
+                up, down = cast(tuple[float, float], rule.bounds)
+                lo, hi = 1.0 - down, 1.0 + up
+            blocks += [D, -D]
+            bounds += [np.full(len(D), np.log(lo)), np.full(len(D), -np.log(hi))]
+        A = np.vstack(blocks)
+        b = np.concatenate(bounds)
+        scale = np.max(np.abs(A), axis=1)
+        keep = scale > 0.0
+        return LinearConstraintSet(A=A[keep] / scale[keep, None], b=b[keep] / scale[keep])
 
     def shape_axis(self, x: NDArray) -> tuple[NDArray, NDArray[np.bool_]]:
         """The inner basis' numeric axis, and the rows that sit on it.
@@ -745,10 +864,13 @@ class OrderedCategorical:
 
         The builder asks for raw geometry off the feature spec, which here is
         the wrapper; the constraint is already in the inner spline's
-        coefficient space, which the design lives in. Because the wrapper
-        always has this method, the builder's own backstop cannot fire, so the
-        refusal for a basis without the geometry is raised here.
+        coefficient space. Because the wrapper always has this method, the
+        builder's own backstop cannot fire, so the refusal for a basis
+        without the geometry is raised here. A cap or step limit adds its rows
+        at the levels (``_level_rows``) below the inner spline's shape rows.
         """
+        from superglm.features._spline_build import _uses_fit_time_shape_constraints
+
         inner = self._basis_spline
         raw_builder = getattr(inner, "_build_monotone_constraints_raw", None)
         if raw_builder is None:
@@ -758,7 +880,17 @@ class OrderedCategorical:
                 f"unavailable. Fit-time shape constraints need a basis that "
                 f"states them in coefficient space; use kind='cr', kind='bs' or kind='ps'."
             )
-        return raw_builder()
+        if not self._level_rules:
+            return raw_builder()
+        if _uses_fit_time_shape_constraints(inner):
+            shape = raw_builder()
+        else:
+            width = cast(Any, inner)._n_basis
+            shape = LinearConstraintSet(A=np.zeros((0, width)), b=np.zeros(0))
+        level = self._level_rows()
+        return LinearConstraintSet(
+            A=np.vstack([shape.A, level.A]), b=np.concatenate([shape.b, level.b])
+        )
 
     def __repr__(self) -> str:
         n = self._n_levels
@@ -1169,9 +1301,9 @@ class OrderedCategorical:
 
         inner = self._basis_spline
         if isinstance(inner, _SplineBase):
-            self._refuse_level_rules()
+            self._place_basis_rules()
             try:
-                return inner.build(numeric, sample_weight=sample_weight)
+                info = inner.build(numeric, sample_weight=sample_weight)
             except OneValueError:
                 # The spline's message names a level score and its kind=, which
                 # an ordered term has neither of; it takes its kind in basis=.
@@ -1180,6 +1312,21 @@ class OrderedCategorical:
                     "spline basis has no range to place its knots on. Drop the term, or "
                     "pass basis=Spline(kind='ps'), which fits a term with one observed level."
                 ) from None
+            if not self._level_rules:
+                return info
+            # The level rows join the inner spline's, composed through its
+            # identifiability projection as the spline composes its own; a cap
+            # with no shape rule makes this the term's only QP geometry.
+            info = cast(GroupInfo, info)
+            constraints = self._build_monotone_constraints_raw()
+            if info.projection is not None:
+                constraints = constraints.compose(info.projection)
+            return replace(
+                info,
+                constraints=constraints,
+                monotone_engine="qp",
+                raw_to_solver_map=info.projection,
+            )
         info = inner.build(numeric, sample_weight=sample_weight)
         if isinstance(info, GroupInfo):
             # Both parametric bases are an unpenalized main block, like the
