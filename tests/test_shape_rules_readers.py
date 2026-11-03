@@ -291,7 +291,7 @@ def test_old_pickles_unchanged(relative):
 def test_every_constrained_fixture_is_listed():
     found = {}
     for path in sorted(_FIXTURES.glob("saved_*/*.pkl")):
-        relative = str(path.relative_to(_FIXTURES))
+        relative = path.relative_to(_FIXTURES).as_posix()
         record = _load(relative)
         model = record.get("model") if isinstance(record, dict) else record
         for term, spec in (getattr(model, "_specs", None) or {}).items():
