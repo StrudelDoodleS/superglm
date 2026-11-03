@@ -224,6 +224,14 @@ def initialize_spec(
             f"degree=0 splines are discontinuous and cannot represent a classical "
             f"{curvature[0]} curve; use degree>=1"
         )
+    flat = next((r for r in rules if r.kind == "flat"), None)
+    if degree == 0 and flat is not None:
+        raise ValueError(
+            f"{flat.describe()} needs a spline of degree 1 or more, got degree=0: a degree-0 "
+            "spline is constant between its knots and has no slope to hold at zero. Use "
+            "degree>=1; for a constant stretch on a degree-0 spline, give explicit knots at "
+            "the stretch ends or band the feature with OrderedCategorical"
+        )
     if constraint_mode == "fit" and curvature and degree > 3:
         token = postfit_token(rules)
         advice = (

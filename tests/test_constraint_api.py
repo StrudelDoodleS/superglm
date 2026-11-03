@@ -338,6 +338,22 @@ def test_per_rule_degree_checks():
     Spline(kind="bs", degree=4, constraint=C.increasing & C.max_step(0.2))
 
 
+def test_flat_on_a_degree_zero_spline_is_refused():
+    """A flat stretch holds the slope at zero, and a degree-0 spline has no slope.
+
+    Mutation: the build formed 0/0 derivative rows and failed in the equality
+    projection with "SVD did not converge".
+    """
+    for rules in (C.flat.within(3, 7), C.increasing & C.flat.within(3, 7)):
+        with pytest.raises(
+            ValueError,
+            match=r"flat\.within\(3, 7\) needs a spline of degree 1 or more.*degree=0.*"
+            r"explicit knots.*OrderedCategorical",
+        ):
+            Spline(kind="ps", n_knots=6, degree=0, constraint=rules)
+    Spline(kind="ps", n_knots=6, degree=1, constraint=C.flat.within(3, 7))
+
+
 def test_ranges_with_rules_still_refused():
     from superglm import PolynomialRange
 
