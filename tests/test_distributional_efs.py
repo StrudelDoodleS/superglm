@@ -57,6 +57,7 @@ from superglm.reml.penalty_algebra import (
     build_penalty_components,
     compute_logdet_s_derivatives,
     compute_logdet_s_plus,
+    ssp_penalty_matrix,
 )
 from superglm.types import GroupSlice, LambdaPolicy
 from tests._matched_certified import assert_matched_certified
@@ -681,7 +682,7 @@ def _certify_structural_penalty_logdet(
 
     # eigvals_omega precedes omega_ssp canonicalization in production. Replay
     # that exact intervening route before applying a numerical residual bound.
-    transform = group_matrix.R_inv.T @ raw_omega @ group_matrix.R_inv
+    transform = ssp_penalty_matrix(group_matrix.R_inv, raw_omega)
     replay_values, replay_vectors = np.linalg.eigh(transform)
     retained_values = replay_values[-declared_rank:]
     retained_vectors = replay_vectors[:, -declared_rank:]

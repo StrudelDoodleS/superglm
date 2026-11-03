@@ -2193,7 +2193,7 @@ def build_penalty_components(
                     rank, log_det, pos_eigvals = tensor_summary
                     omega_ssp_j = _canonicalize_ssp_penalty(omega_j, rank)
                 else:
-                    omega_ssp_j = gm.R_inv.T @ omega_j @ gm.R_inv
+                    omega_ssp_j = ssp_penalty_matrix(gm.R_inv, omega_j)
                     force_solver_rank = (
                         isinstance(gm, DiscretizedTensorGroupMatrix)
                         and getattr(gm, "projection", None) is not None
@@ -2222,7 +2222,7 @@ def build_penalty_components(
         else:
             # Single-penalty path.
             lp_map = getattr(gm, "lambda_policies", None) or {}
-            omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+            omega_ssp = ssp_penalty_matrix(gm.R_inv, gm.omega)
             force_solver_rank = (
                 isinstance(gm, DiscretizedTensorGroupMatrix)
                 and getattr(gm, "projection", None) is not None
