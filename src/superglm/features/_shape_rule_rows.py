@@ -125,8 +125,10 @@ def shape_pieces(
 ) -> list[ShapePiece]:
     """The direction, curvature and flat rules as numeric pieces on [lo, hi].
 
-    Open ends become ``lo`` or ``hi``. A stretch reaching past the range is
-    clipped with a warning; one with no overlap is refused. Direction and
+    Open ends become ``lo`` or ``hi``. A reversed stretch, or two that overlap
+    within a rule group, is refused (``ConstraintRules.validate_stretches``). A
+    stretch reaching past the range is clipped with a warning; one with no
+    overlap is refused. Direction and
     curvature pieces are split around flat pieces, where a flat curve already
     satisfies them. Caps and step limits are not pieces and are skipped.
     ``feature`` names the feature in messages; ``stacklevel`` counts frames
@@ -135,6 +137,7 @@ def shape_pieces(
     where = "" if feature is None else f"feature {feature!r}: "
     if isinstance(rules, ConstraintSpec):
         rules = ConstraintRules((rules,))
+    rules.validate_stretches()
     pieces = []
     for rule in rules:
         if rule.kind not in _DIRECTION + _CURVATURE + ("flat",):

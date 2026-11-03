@@ -1304,6 +1304,60 @@ def test_ordered_overlapping_stretches_refused_in_labels():
         _ordered_fit(X, y, rule)
 
 
+_NUMERIC_BANDS = [10, 20, 0, 30, 40, 50, 60, 70]  # the declared order is not the numeric one
+
+
+def test_ordered_numeric_labels_follow_declared_order():
+    """A numeric band label is a position in the declared order, as its string spelling is.
+
+    In ``_NUMERIC_BANDS`` the levels 10 and 20 come first and 0 third, so
+    ``decreasing.below(20)`` and ``increasing.above(0)`` are disjoint and
+    ``flat.within(20, 0)`` runs from the second level to the third. Mutation:
+    the rules compared the labels as numbers when built, refusing the first
+    pair as overlapping on [0, 20] and the flat stretch as reversed.
+    """
+    C = Constraint.fit
+    effect = np.array([0.0, 0.5, -0.5, -0.6, 0.0, 0.3, 0.5, 0.8])
+    X, y = _band_rows(effect, levels=_NUMERIC_BANDS, n=20_000)
+    split = _printed_levels(
+        _ordered_fit(X, y, C.decreasing.below(20) & C.increasing.above(0), levels=_NUMERIC_BANDS)
+    )
+    assert split[1] <= split[0] * (1.0 + 1e3 * _U), "decreasing from the first level to the second"
+    assert np.all(np.diff(split[2:]) >= -1e3 * _U * np.max(split)), "increasing from the third on"
+    # The same stretches spelt as strings build the same fit.
+    spelt = _printed_levels(
+        _ordered_fit(
+            X, y, C.decreasing.below("20") & C.increasing.above("0"), levels=_NUMERIC_BANDS
+        )
+    )
+    np.testing.assert_allclose(split, spelt, rtol=1e4 * _U)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # flat spans widen to whole knot spans
+        flat = _printed_levels(_ordered_fit(X, y, C.flat.within(20, 0), levels=_NUMERIC_BANDS))
+    np.testing.assert_allclose(flat[2], flat[1], rtol=1e4 * _U)
+    assert abs(split[2] - split[1]) > 0.1, "the curve is not flat there without the rule"
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        Constraint.fit.decreasing.below(0) & Constraint.fit.increasing.above(20),
+        Constraint.fit.flat.within(0, 20),
+    ],
+    ids=["overlap", "reversed"],
+)
+def test_ordered_numeric_labels_still_refuse_a_real_overlap_or_reversal(rule):
+    """The refusals read the declared order, in level labels: 0 comes after 20 here."""
+    effect = np.linspace(-0.9, 0.9, len(_NUMERIC_BANDS))
+    X, y = _band_rows(effect, levels=_NUMERIC_BANDS, n=2_000)
+    with pytest.raises(
+        ValueError,
+        match=r"^Feature 'band': .*(both apply from level 20 to level 0|"
+        r"needs its first level before its second in level order)",
+    ):
+        _ordered_fit(X, y, rule, levels=_NUMERIC_BANDS)
+
+
 @pytest.mark.parametrize(
     ("rule", "message"),
     [

@@ -66,18 +66,11 @@ class ConstraintSpec:
             raise ValueError(f"{self.describe()} already has a stretch; give one stretch per rule")
         _check_end(lo)
         _check_end(hi)
-        if lo is not None and hi is not None:
-            if lo == hi:
-                raise ValueError(
-                    f"within({_fmt(lo)}, {_fmt(hi)}) starts and ends at the same point, which "
-                    "leaves no stretch; give two different ends"
-                )
-            numeric = not isinstance(lo, str) and not isinstance(hi, str)
-            if numeric and not lo < hi:
-                raise ValueError(
-                    f"a stretch needs lo < hi, got within({_fmt(lo)}, {_fmt(hi)}); "
-                    "swap the ends or use a single below/above"
-                )
+        if lo is not None and hi is not None and lo == hi:
+            raise ValueError(
+                f"within({_fmt(lo)}, {_fmt(hi)}) starts and ends at the same point, which "
+                "leaves no stretch; give two different ends"
+            )
         return ConstraintSpec(self.mode, self.kind, lo, hi, self.bounds)
 
     def below(self, x: float | str) -> ConstraintSpec:
@@ -170,17 +163,36 @@ class ConstraintRules:
             )
         )
         resolved.validate()
+        resolved.validate_stretches()
         return resolved
 
     def validate(self) -> None:
-        """Refuse rule sets that contradict themselves or cannot be fitted."""
+        """Refuse rule sets that contradict themselves or cannot be fitted.
+
+        Stretch ends are not compared here: a numeric end may be a band label of an
+        ordered term, whose order is its declared one. :meth:`validate_stretches` compares
+        them once the term has placed them on its axis.
+        """
         for r in self.rules:
             self._validate_one(r)
         for kind in ("cap", "max_step"):
             if sum(r.kind == kind for r in self.rules) > 1:
                 raise ValueError(f"give at most one {kind} rule per term; merge them into one")
+
+    def validate_stretches(self) -> None:
+        """Refuse reversed stretches and stretches that overlap, once their ends are placed.
+
+        A stretch whose end is a band label is skipped: an ordered term compares
+        those in level order before it places them.
+        """
+        placed = [r for r in self.rules if not isinstance(r.lo, str) and not isinstance(r.hi, str)]
+        for r in placed:
+            if r.lo is not None and r.hi is not None and not r.lo < r.hi:
+                raise ValueError(
+                    f"{r.describe()} needs lo < hi; swap the ends or use a single below/above"
+                )
         for group in (_DIRECTION_KINDS, _CURVATURE_KINDS, ("flat",)):
-            members = [r for r in self.rules if r.kind in group]
+            members = [r for r in placed if r.kind in group]
             for i, a in enumerate(members):
                 for b in members[i + 1 :]:
                     self._refuse_overlap(a, b)
@@ -194,18 +206,9 @@ class ConstraintRules:
                 "a flat rule needs a stretch such as Constraint.fit.flat.within(25, 40); "
                 "a term with no effect should be removed"
             )
-        lo, hi = r.stretch
-        labelled = isinstance(lo, str) or isinstance(hi, str)
-        if lo is not None and hi is not None and not labelled and not lo < hi:
-            raise ValueError(
-                f"{r.describe()} needs lo < hi; swap the ends or use a single below/above"
-            )
 
     @staticmethod
     def _refuse_overlap(a: ConstraintSpec, b: ConstraintSpec) -> None:
-        ends = (a.lo, a.hi, b.lo, b.hi)
-        if any(isinstance(x, str) for x in ends):
-            return  # band labels are compared once resolved to positions
         start = max(-math.inf if a.lo is None else a.lo, -math.inf if b.lo is None else b.lo)
         stop = min(math.inf if a.hi is None else a.hi, math.inf if b.hi is None else b.hi)
         if start < stop:

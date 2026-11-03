@@ -168,15 +168,20 @@ def test_describe_cap_and_max_step():
         (lambda: C.max_step(0.0), "up"),
         (lambda: C.max_step(1.5), "down"),
         (
-            lambda: (C.increasing.within(20, 40) & C.decreasing.within(30, 50)).validate(),
+            lambda: (
+                C.increasing.within(20, 40) & C.decreasing.within(30, 50)
+            ).validate_stretches(),
             r"\[30, 40\]",
         ),
-        (lambda: (C.concave & C.convex.above(10)).validate(), "overlap"),
+        (lambda: (C.concave & C.convex.above(10)).validate_stretches(), "overlap"),
         (lambda: (C.cap(0.5, 2) & C.cap(0.6, 1.8)).validate(), "one cap"),
         (lambda: (C.max_step(0.1) & C.max_step(0.2)).validate(), "one max_step"),
-        (lambda: (C.flat.within(10, 30) & C.flat.within(20, 40)).validate(), r"\[20, 30\]"),
+        (
+            lambda: (C.flat.within(10, 30) & C.flat.within(20, 40)).validate_stretches(),
+            r"\[20, 30\]",
+        ),
         (lambda: rules_of_flat().validate(), "needs a stretch"),
-        (lambda: C.flat.within(40, 25), "lo < hi"),
+        (lambda: (C.flat.within(40, 25) & C.increasing).validate_stretches(), "lo < hi"),
         (
             lambda: C.flat.within(25, 25),
             r"^within\(25, 25\) starts and ends at the same point, which leaves no stretch; "
@@ -214,9 +219,13 @@ def rules_of_flat():
 
 
 def test_disjoint_and_touching_stretches_are_accepted():
-    (C.increasing.below(30) & C.decreasing.above(30)).validate()
-    (C.increasing & C.convex & C.cap(0.5, 2) & C.max_step(0.1)).validate()
-    (C.decreasing.within(0, 10) & C.decreasing.within(20, 30)).validate()
+    for rules in (
+        C.increasing.below(30) & C.decreasing.above(30),
+        C.increasing & C.convex & C.cap(0.5, 2) & C.max_step(0.1),
+        C.decreasing.within(0, 10) & C.decreasing.within(20, 30),
+    ):
+        rules.validate()
+        rules.validate_stretches()
 
 
 def test_rules_of_reads_legacy_single_rule():
@@ -370,8 +379,6 @@ def test_constraint_input_is_checked():
         Spline(kind="ps", k=12, constraint="increasing")
     with pytest.raises(ValueError, match="at most one cap"):
         Spline(kind="ps", k=12, constraint=C.cap(0.6, 1.8) & C.cap(0.5, 2.0))
-    with pytest.raises(ValueError, match="both apply"):
-        Spline(kind="ps", k=12, constraint=C.increasing & C.increasing.below(3))
 
 
 def test_rules_of_derives_the_rule_of_a_spec_saved_before_collections():
@@ -379,3 +386,23 @@ def test_rules_of_derives_the_rule_of_a_spec_saved_before_collections():
     del spec.__dict__["constraint_rules"]  # what an old pickle holds
     assert rules_of(spec).rules == (C.increasing,)
     assert len(rules_of(Spline(kind="ps", k=12))) == 0
+
+
+def test_numeric_stretch_ends_are_ordered_and_overlap_checked_where_they_are_placed():
+    """A numeric end may be an ordered-band label, so only a placed stretch is compared.
+
+    A spline term places its ends on its own axis at the build, an ordered term
+    on its level positions (``test_ordered_numeric_labels_follow_declared_order``).
+    Mutation: both were compared as numbers when the rules were built, so the
+    spline below was refused at construction, and a numeric label order was too.
+    """
+    rng = np.random.default_rng(8)
+    X = pd.DataFrame({"x": rng.uniform(0.0, 10.0, 300)})
+    y = rng.poisson(2.0, 300).astype(float)
+    for rules, match in [
+        (C.decreasing.below(6) & C.increasing.above(4), r"both apply on \[4, 6\]"),
+        (C.flat.within(7, 3) & C.increasing.below(2), "lo < hi"),
+    ]:
+        spec = Spline(kind="ps", k=8, constraint=rules)
+        with pytest.raises(ValueError, match=rf"^Feature 'x': .*{match}"):
+            SuperGLM(family="poisson", selection_penalty=0.0, features={"x": spec}).fit(X, y)
