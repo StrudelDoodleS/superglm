@@ -122,7 +122,9 @@ class TermInference:
     level_is_special: NDArray[np.bool_] | None = None
 
     # Monotonicity
-    monotone: str | None = None  # the term's rules as written, e.g. "increasing & concave", or None
+    # The term's rules as a display line, e.g. "increasing & concave", or None. After
+    # fit_path() it ends "(not enforced: fit_path)"; compare rules via rules_of(spec).
+    monotone: str | None = None
     monotone_repaired: bool = False
 
     # CI alpha used

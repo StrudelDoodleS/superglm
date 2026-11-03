@@ -133,6 +133,10 @@ is free.
   flattens.
 - On a `cr` spline, the natural end condition can also flatten the end span
   beside a flat stretch. The warning names that case too.
+- Two flat stretches fewer than `degree` knot spans apart (three for a cubic)
+  also flatten the gap between them, since the curve has too few knots there
+  to bend. The warning names the whole interval; leave more knot spans between
+  the stretches to keep the gap free.
 
 For exact edges, use one of these:
 
@@ -256,8 +260,9 @@ model.fit(df, y)
 
 - A shape rule on a plain categorical is refused. Use an `OrderedCategorical`
   for a shape.
-- A capped categorical needs `selection_penalty=0`, as every fit-time rule
-  does.
+- A capped categorical needs `selection_penalty=0`, as every fit-time shape,
+  cap and step limit does. A flat stretch alone is part of the basis and fits
+  under a selection penalty.
 
 ### What the rules do not do
 
@@ -441,8 +446,9 @@ not monotone in `x` and are not supposed to be. Read the term's own curve via
 
 These combinations are intentionally guarded:
 
-- fit-time shape constraints, including caps on a `Categorical`, with
-  `selection_penalty > 0`
+- fit-time shapes, caps and step limits, including caps on a `Categorical`,
+  with `selection_penalty > 0` (a term whose only rules are flat stretches fits
+  under a selection penalty)
 - fit-time shape constraints with `select=True`
 - `kind="ns"` fit-time shape constraints
 - `Constraint.fit.convex` or `Constraint.fit.concave` on a `PSpline` or
