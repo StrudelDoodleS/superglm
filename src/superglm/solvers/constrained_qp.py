@@ -640,10 +640,17 @@ class _WorkingBasis:
         )
 
     def delete(self, position: int) -> None:
-        """Remove the working row at ``position``."""
-        self.q, self.r = scipy.linalg.qr_delete(
-            self.q, self.r, position, which="col", check_finite=False
-        )
+        """Remove the working row at ``position``.
+
+        ``qr_delete`` reads a square ``q`` as a full factor and keeps all its
+        columns, so with as many working rows as coefficients the result still
+        spans every direction. The thin factor of the ``k`` rows left is the
+        leading ``k`` columns of ``q`` and rows of ``r``, the rest of ``r``
+        being zero.
+        """
+        q, r = scipy.linalg.qr_delete(self.q, self.r, position, which="col", check_finite=False)
+        k = r.shape[1]
+        self.q, self.r = q[:, :k], r[:k]
 
 
 def _zero_block_faces(

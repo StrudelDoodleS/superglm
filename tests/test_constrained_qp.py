@@ -2481,6 +2481,7 @@ _ISSUE_472_QP = Path(__file__).parent / "fixtures" / "issue472_terminal_qp.json"
 _SCALED_BLOCK_QPS = Path(__file__).parent / "fixtures" / "shape_block_scaled_terminal_qp.json"
 _DEPENDENT_STALL_QP = Path(__file__).parent / "fixtures" / "qp_dependent_working_set_stall.npz"
 _WEIGHTED_MULTIPLIER_POINT = Path(__file__).parent / "fixtures" / "qp_weighted_multiplier_point.npz"
+_CAPPED_VERTEX_QP = Path(__file__).parent / "fixtures" / "qp_capped_vertex_drop.npz"
 
 
 class TestDegenerateVertex:
@@ -2706,6 +2707,41 @@ class TestDegenerateVertex:
         assert _stationarity_certificate(H, g, x, A, self._TOL)[:2] == (True, None)
         assert _certifies_kkt_point(H, g, x, A, b, list(range(len(A))), self._TOL, np.abs(A))
 
+    def test_row_sorting_keeps_a_light_equation_in_the_multiplier_fit(self):
+        """Powell and Reid's matrix as a vertex: its multipliers need the light equation.
+
+        Coefficients 1 and 2 have actions ``2**-62`` of coefficient 0's, so
+        the weighted system the multipliers are fitted from is Powell and
+        Reid's example (Cox and Higham 1998, eq. 1.3),
+        ``[[0, 1, 1], [lam, -lam/2, 0], [lam, 0, -lam]]`` with ``lam = 2**62``. The heavy equations leave the multipliers' direction
+        ``(1, 2, 1)`` free, so the light one fixes their size. The three rows
+        meet at the planted point, where ``H beta - g = A' (1, 2, 1)`` exactly:
+        the vertex is the optimum, with multipliers ``(1, 2, 1) / 4`` in the
+        certificate's units. Column pivoting takes column 0 first, whose entry
+        in the light equation is zero. Unless the equations are sorted by
+        decreasing infinity norm, that first reflection mixes the light
+        equation into the heavy ones and loses it once ``lam > 2 sqrt(2) / u``
+        (Cox and Higham, section 1 and Lemma 4.2). Mutation: unsorted, the
+        multipliers come out about 300 times too small, stationarity fails at
+        coefficient 0, and the solve runs its 200 iterations uncertified.
+        """
+        unit_roundoff = np.finfo(np.float64).eps / 2
+        light = 2.0**-60
+        A = np.array([[0.0, 1.0, 1.0], [1.0, -0.5, 0.0], [1.0, 0.0, -1.0]])
+        H = np.diag([4.0, 1.0, 1.0])
+        x = np.array([1.0, light, light])
+        g = H @ x - A.T @ np.array([1.0, 2.0, 1.0])
+        b = A @ x
+        assert np.array_equal(H @ x - g, [3.0, 0.0, 0.0]), "the planted point is no longer KKT"
+        stationary, drop, multipliers = _stationarity_certificate(H, g, x, A, self._TOL)
+        assert (stationary, drop) == (True, None)
+        np.testing.assert_allclose(multipliers, [0.25, 0.5, 0.25], rtol=16 * unit_roundoff)
+        assert _certifies_kkt_point(H, g, x, A, b, [0, 1, 2], self._TOL, np.abs(A))
+        result = solve_constrained_qp(H, g, A, b)
+        assert result.converged
+        assert result.n_iter <= 4
+        np.testing.assert_allclose(result.beta, x, rtol=0.0, atol=16 * unit_roundoff)
+
     def test_an_exactly_dependent_row_does_not_raise_the_working_rank(self):
         """The independence decision is geometry, independent of rounding in any solve.
 
@@ -2728,6 +2764,77 @@ class TestDegenerateVertex:
         assert basis.raises_rank(4)
         assert not basis.raises_rank(2)
         assert _WorkingBasis(A).start([0, 1, 4, 2, 3, 5]) == [0, 1, 2, 3]
+
+    @pytest.mark.parametrize("entry", ["insert", "warm"])
+    def test_the_basis_follows_a_drop_from_as_many_rows_as_coefficients(self, entry):
+        """After a drop from p working rows on p coefficients, the basis spans the rows left.
+
+        The thin QR factor of p rows on p coefficients is square, and
+        ``scipy.linalg.qr_delete`` reads a square factor as a full one. The rows
+        are a hard cap's (``qp_capped_vertex_drop.npz``, provenance inside):
+        lower rows 0-4 and upper rows 16-19, nine of the ten basis coefficients.
+        The ten rows of one side have one dependency, with every weight
+        nonzero, so these nine are independent. Once row 0 leaves, rows 0, 5,
+        10 and 15 lie off the span of the eight left and the other rows lie on
+        it. Each decision is checked against this test's own SVD, where every
+        distance is either below 1e-13 or above 1e-2. Mutation: with
+        ``qr_delete``'s square ``Q`` kept, every row reads as dependent after
+        the drop.
+        """
+        separation = np.sqrt(np.finfo(np.float64).eps / 2)
+        A = np.load(_CAPPED_VERTEX_QP)["A"]
+        working = [0, 1, 2, 3, 4, 16, 17, 18, 19]
+        basis = _WorkingBasis(A)
+        if entry == "warm":
+            assert basis.start(working) == working
+        else:
+            for row in working:
+                assert basis.raises_rank(row)
+                basis.insert(row)
+        assert not any(basis.raises_rank(row) for row in range(len(A)))
+        basis.delete(0)
+        unit = A / np.linalg.norm(A, axis=1)[:, None]
+        span = np.linalg.svd(unit[working[1:]])[2][: len(working) - 1]
+        distance = np.linalg.norm(unit - (unit @ span.T) @ span, axis=1)
+        assert np.all((distance < 1e-13) | (distance > 1e-2))
+        assert np.flatnonzero(distance > separation).tolist() == [0, 5, 10, 15]
+        assert [basis.raises_rank(row) for row in range(len(A))] == list(distance > separation)
+
+    @pytest.mark.parametrize("order", ["C", "F"])
+    def test_a_hard_cap_vertex_is_certified(self, order):
+        """A captured hard-cap QP certifies at its vertex within 14 iterations: a portability check.
+
+        The fixture is the first QP of a fit whose data push hard against
+        ``cap(0.95, 1.05)`` (provenance inside). Its optimum is a vertex, nine
+        cap rows on nine coefficients. The solve reaches a vertex at
+        iteration 9 and leaves it by a drop, so the next ratio test runs
+        against a basis just downdated from as many rows as coefficients. The
+        oracle shares no code with the solver: the solution is feasible, and
+        the rows tight there carry Lawson-Hanson NNLS multipliers that leave a
+        stationarity residual of rounding size. With ``H`` positive definite
+        that is the unique optimum. Tight slacks are below 1e-13 and the rest
+        above 4e-2, so ``sqrt(u)`` separates them. Mutation: with
+        ``qr_delete``'s square ``Q`` kept after the drop, the ratio test reads
+        both candidate rows as dependent, the full step leaves the cap by
+        8.9e-4 and the solve ends uncertified after 12 iterations. The
+        regression for the mechanism is the basis test above.
+        """
+        unit_roundoff = np.finfo(np.float64).eps / 2
+        doc = np.load(_CAPPED_VERTEX_QP)
+        H, g, A, b = (doc[key] for key in ("H", "g", "A", "b"))
+        A = np.asarray(A, order=order)
+        result = solve_constrained_qp(H, g, A, b)
+        assert result.converged
+        assert result.n_iter <= 14
+        x = result.beta
+        assert _is_feasible(A, x, b, self._TOL)
+        tight = np.flatnonzero(_feasibility_slack(A, x, b) <= np.sqrt(unit_roundoff))
+        assert sorted(result.active_set) == tight.tolist()
+        rows = A[tight] / np.max(np.abs(A[tight]), axis=1)[:, None]
+        H = 0.5 * (H + H.T)
+        _, residual = scipy.optimize.nnls(rows.T, H @ x - g, maxiter=50 * len(A))
+        scale = np.linalg.norm(np.abs(H) @ np.abs(x) + np.abs(g))
+        assert residual <= 64 * unit_roundoff * scale
 
     def test_a_full_rank_homogeneous_block_face_is_exactly_zero(self):
         """Four independent homogeneous rows on four coefficients fix them at zero.
