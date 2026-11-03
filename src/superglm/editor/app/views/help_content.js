@@ -266,6 +266,7 @@ export const HELP_SECTIONS = Object.freeze([
     items: Object.freeze([
       "A SuperLSS model has more than one curve per feature. The feature list groups them by what they describe: the average (blue) and the spread (orange). A feature that acts in both appears in both groups, with a small curve of its effect on each row.",
       "Edit an average curve as a relativity, as in any other model. A spread curve is shown in the units of that spread: the coefficient of variation for claim sizes, or 1/theta for the extra variation in claim counts. Moving a spread point sets the spread to the value you drag to; a value the model cannot reach settles on the nearest one it can.",
+      "On a spread curve, Increase and Decrease move the selected points by about 5% of the value shown, and Make increasing, Make decreasing and the snaps act on the curve as drawn: on a 1/theta curve, Increase raises 1/theta.",
       "History marks each step with the parameter it acted in. Undo, Redo, Revert and Refit cover both parameters in one history.",
       "There is no Cross-validation tab: cross-validation is not available for SuperLSS models. Compare fits in the Validation tab, which scores each split by log score, CRPS and actual over expected, and use Run final fit in the Final Fit tab to refit on all rows.",
       "Shaped ranges are off: a SuperLSS fit ignores shape constraints, so a shaped range would not hold after Refit. The same goes for special levels, the Unsmoothed line, free levels and new-level choices.",

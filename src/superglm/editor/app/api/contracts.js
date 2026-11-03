@@ -40,6 +40,7 @@
  * @property {string|null} [predictor] SuperLSS only: the family parameter the step acted in
  * @property {string} [predictor_label] SuperLSS only: the history chip, "Average" or "Spread"
  * @property {string} [term_label] SuperLSS only: the bare feature name, without its parameter prefix
+ * @property {boolean} [display_decreasing] SuperLSS only: the shown curve falls as the recorded effect rises
  */
 /**
  * @typedef {Object} GroupDisplayPayload

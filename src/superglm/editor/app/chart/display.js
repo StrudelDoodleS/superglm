@@ -45,7 +45,8 @@ export function fromDisplay(spec, value) {
   const c = spec.reference_eta;
   switch (spec.kind) {
     case "lognormal_cv": {
-      const s = Math.sqrt(Math.log1p(value * value));
+      const cv = Math.max(value, 0);
+      const s = Math.sqrt(Math.log1p(cv * cv));
       return Math.log(Math.max(s - spec.floor, FLOOR)) - c;
     }
     case "gamma_cv":

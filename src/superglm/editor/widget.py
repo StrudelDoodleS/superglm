@@ -59,6 +59,7 @@ from superglm.editor.lss.availability import (
     require_available,
     session_availability,
 )
+from superglm.editor.lss.display import shown_rises
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
 from superglm.editor.notebook import NotebookTransport, notebook_view_class
@@ -308,14 +309,18 @@ class EditorWidget:
             if term is not None:
                 self._select_term(term)
             target = self.selected_term
+            # Directional tools name the shown curve; a falling display mirrors them.
+            rises = shown_rises(self.session.model, target)
+            sign = 1.0 if rises else -1.0
+            up, down = ("increasing", "decreasing") if rises else ("decreasing", "increasing")
             if operation == "shift_up":
-                self.session.shift(target, float(np.log(1.05)))
+                self.session.shift(target, sign * float(np.log(1.05)))
             elif operation == "shift_down":
-                self.session.shift(target, float(np.log(0.95)))
+                self.session.shift(target, sign * float(np.log(0.95)))
             elif operation in {"isotonic_increasing", "increasing"}:
-                self.session.isotonic(target, "increasing")
+                self.session.isotonic(target, up)
             elif operation in {"isotonic_decreasing", "decreasing"}:
-                self.session.isotonic(target, "decreasing")
+                self.session.isotonic(target, down)
             elif operation == "smooth":
                 self.session.smooth(target, 1.0)
             elif operation == "average":
@@ -327,9 +332,9 @@ class EditorWidget:
             elif operation == "level_right":
                 self.session.level_right(target)
             elif operation == "snap_highest":
-                self.session.snap_highest(target)
+                (self.session.snap_highest if rises else self.session.snap_lowest)(target)
             elif operation == "snap_lowest":
-                self.session.snap_lowest(target)
+                (self.session.snap_lowest if rises else self.session.snap_highest)(target)
             elif operation == "reset_order":
                 self.session.reset_level_order(target)
             elif operation == "reset":
@@ -364,7 +369,7 @@ class EditorWidget:
             if values is None:
                 self.session.shift(term, float(delta))
             else:
-                shown = display_for(self.session.model, term)
+                shown = display_for(self.session.model, term, self.session.terms)
                 self.session.set_values(term, indices, shown.from_display(values))
             self._invalidate_refit()
             self._chart_generation += 1
@@ -385,7 +390,9 @@ class EditorWidget:
             self.session.move_control_point(
                 term,
                 int(handle_index),
-                float(display_for(self.session.model, term).from_display(value)),
+                float(
+                    display_for(self.session.model, term, self.session.terms).from_display(value)
+                ),
                 n_handles=self.control_counts.get(term),
             )
             self._invalidate_refit()
@@ -413,7 +420,7 @@ class EditorWidget:
             weights = np.asarray(editable.weights[idx], dtype=np.float64)
         if float(np.sum(weights)) <= 0.0:
             weights = None
-        shown = display_for(self.session.model, term)
+        shown = display_for(self.session.model, term, self.session.terms)
         value = float(
             np.average(shown.to_display(editable.edited_log_effect[idx]), weights=weights)
         )

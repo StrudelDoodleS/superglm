@@ -45,7 +45,7 @@ def session_payload(
     edited = set(session.edited_terms())
     lss = is_lss(session.model)
     for name, term in session.terms.items():
-        display = display_for(session.model, name)
+        display = display_for(session.model, name, session.terms)
         x_values = list(range(term.size)) if term.x is None else [float(v) for v in term.x]
         weights = _term_weights(term)
         edit_delta = np.asarray(term.edited_log_effect - term.original_log_effect, dtype=np.float64)
@@ -61,7 +61,9 @@ def session_payload(
             "x": x_values,
             "x_domain": _x_domain(x_values, pad_discrete=term.levels is not None),
             "y": [float(v) for v in display.to_display(term.edited_log_effect)],
-            "original_y": [float(v) for v in display.to_display(reference_log_effect)],
+            "original_y": [
+                float(v) for v in display_for(session.model, name).to_display(reference_log_effect)
+            ],
             "previous_y": _previous_y(session, name, term, display),
             "controls": (
                 ordered_controls
@@ -100,7 +102,7 @@ def session_payload(
             "title": name,
         }
         if lss:
-            term_payload.update(lss_term_fields(session.model, name, term))
+            term_payload.update(lss_term_fields(session.model, name, session.terms))
             term_payload = lss_availability(term_payload)
         term_payload["group_display"] = build_group_display(term_payload)
         payload[name] = term_payload

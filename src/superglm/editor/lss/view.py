@@ -155,6 +155,8 @@ class LSSModelView:
         )
         self._reference_row: pd.DataFrame | None = None
         self._reference_etas: dict[str, float] = {}
+        # Each edited term's change to its predictor at the reference row, by its curve.
+        self._reference_edits: dict[str, tuple[tuple[bytes, bytes], float]] = {}
 
     @property
     def _result(self):
@@ -215,11 +217,12 @@ class LSSModelView:
         return self._reference_row.copy()
 
     def reference_eta(self, key: str) -> float:
-        """The link predictor of ``key``'s parameter at the reference row, less the term's own part.
+        """The fitted link predictor of ``key``'s parameter at the reference row, less the term's part.
 
         What the parameter would read at the reference row if this term's effect
         were zero there: adding the term's effect at any value of its column
-        gives the parameter at the reference row with that column changed.
+        gives the parameter at the reference row with that column changed. The
+        other edits of the parameter add ``lss.apply.reference_shift``.
         """
         if key not in self._reference_etas:
             parameter, term = split_key(key)

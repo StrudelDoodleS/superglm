@@ -10,6 +10,7 @@ value the parameter can take.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -17,6 +18,7 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from superglm.distributional.families import GammaLS, LogNormalLS, NegativeBinomialLS
+from superglm.editor._types import EditableTerm
 from superglm.editor.errors import EditorValueError
 from superglm.editor.lss.view import LSSModelView, Response, split_key
 
@@ -120,7 +122,7 @@ class DisplayTransform:
         if self.kind == "relativity":
             return np.log(np.maximum(v, _SMALLEST))
         if self.kind == "lognormal_cv":
-            sigma = np.sqrt(np.log1p(v**2))
+            sigma = np.sqrt(np.log1p(np.maximum(v, 0.0) ** 2))
             return np.log(np.maximum(sigma - self.floor, _SMALLEST)) - self.reference_eta
         if self.kind == "gamma_cv":
             return np.log(np.maximum(v, _SMALLEST)) - self.reference_eta
@@ -134,6 +136,11 @@ class DisplayTransform:
         }
 
     @property
+    def increasing(self) -> bool:
+        """Whether the shown value rises with the effect; ``1 / theta`` falls."""
+        return self.kind != "inverse_theta"
+
+    @property
     def y_label(self) -> str:
         return _Y_LABELS[self.kind]
 
@@ -145,34 +152,66 @@ class DisplayTransform:
 RELATIVITY = DisplayTransform("relativity")
 
 
-def display_for(model: object, key: str) -> DisplayTransform:
-    """How the term ``key`` of ``model`` is shown; relativities for anything but a SuperLSS spread."""
+def display_for(
+    model: object, key: str, terms: Mapping[str, EditableTerm] | None = None
+) -> DisplayTransform:
+    """How the term ``key`` of ``model`` is shown; relativities for anything but a SuperLSS spread.
+
+    A spread is shown at the reference policy under the model in force: with
+    ``terms``, the editor's terms, the other edited terms of the parameter move
+    the reference; without them it is the fit's.
+    """
     if not isinstance(model, LSSModelView) or model.parameter_of(key) == "mean":
         return RELATIVITY
     family = model.family
     kind = next(kind for cls, kind in SPREAD_KINDS.items() if isinstance(family, cls))
     floor = family.scale_floor if isinstance(family, LogNormalLS) else 0.0
-    return DisplayTransform(kind, model.reference_eta(key), floor)
+    reference = model.reference_eta(key)
+    if terms is not None:
+        from superglm.editor.lss.apply import reference_shift
+
+        reference += reference_shift(model, terms, key)
+    return DisplayTransform(kind, reference, floor)
 
 
-def lss_history_fields(view: LSSModelView, key: str | None) -> dict[str, str]:
-    """The parameter, its chip and the term a history entry names; empty for no term."""
+def shown_rises(model: object, key: str | None) -> bool:
+    """Whether ``key``'s shown curve rises with its link-scale effect; True with no term.
+
+    A directional tool (Increase, Make increasing, Snap to highest) names the shown
+    curve, so on a falling display it runs the opposite way on the effect.
+    """
+    return key is None or display_for(model, key).increasing
+
+
+def lss_history_fields(view: LSSModelView, key: str | None) -> dict[str, str | bool]:
+    """The parameter, its chip and the term a history entry names; empty for no term.
+
+    ``display_decreasing`` says the shown curve falls as the recorded effect rises,
+    so History names a recorded shift, monotone fit or snap by the shown direction.
+    """
     if key is None:
         return {}
     parameter, label = split_key(key)
     chip = parameter_display(view.family, parameter, response=view.response).chip
-    return {"predictor": parameter, "predictor_label": chip, "term_label": label}
+    return {
+        "predictor": parameter,
+        "predictor_label": chip,
+        "term_label": label,
+        "display_decreasing": not display_for(view, key).increasing,
+    }
 
 
-def lss_term_fields(view: LSSModelView, key: str, term: object) -> dict[str, object]:
+def lss_term_fields(
+    view: LSSModelView, key: str, terms: Mapping[str, EditableTerm]
+) -> dict[str, object]:
     """The payload fields a SuperLSS term carries beyond a SuperGLM term's.
 
     ``baseline`` is the display value when the term's own effect is zero, the
-    line the chart measures the curve from; ``term`` is the editor's term.
+    line the chart measures the curve from; ``terms`` are the editor's terms.
     """
     parameter, label = split_key(key)
     shown = parameter_display(view.family, parameter, response=view.response)
-    transform = display_for(view, key)
+    transform = display_for(view, key, terms)
     return {
         "parameter": parameter,
         "parameter_label": shown.label,

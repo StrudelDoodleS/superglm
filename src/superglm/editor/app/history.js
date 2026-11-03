@@ -42,6 +42,21 @@ const EDIT_ACTIONS = Object.freeze({
 });
 
 /**
+ * A directional action and its opposite. On a curve shown falling in its
+ * effect (1/theta), the menu action that made an edit is the opposite of the
+ * recorded one.
+ * @type {Readonly<Record<string, string>>}
+ */
+const MIRRORED = Object.freeze({
+  shift_up: "shift_down",
+  shift_down: "shift_up",
+  increasing: "decreasing",
+  decreasing: "increasing",
+  snap_highest: "snap_lowest",
+  snap_lowest: "snap_highest",
+});
+
+/**
  * Each structural operation by the change it makes; a change refitted at once
  * is named by its route.
  * @type {Readonly<Record<string, string>>}
@@ -284,13 +299,14 @@ function changeMessage(change, params) {
 function editMessage(entry) {
   const params = entry.params ?? {};
   const operation = String(entry.operation ?? "");
+  const action = editAction(operation, params, entry.display_decreasing === true);
   if (Array.isArray(params.levels) && params.levels.length) {
-    return `${editAction(operation, params)} ${levelList(params.levels)}`;
+    return `${action} ${levelList(params.levels)}`;
   }
   if (params.lo === undefined || params.hi === undefined) return null;
   const lo = axisText(params.lo);
   const hi = axisText(params.hi);
-  return `${editAction(operation, params)} ${lo === hi ? lo : `${lo} – ${hi}`}`;
+  return `${action} ${lo === hi ? lo : `${lo} – ${hi}`}`;
 }
 
 /**
@@ -307,9 +323,11 @@ function levelList(levels) {
 
 /**
  * @param {string} operation @param {Record<string, unknown>} params
+ * @param {boolean} falls whether the shown curve falls as the recorded effect rises
  */
-function editAction(operation, params) {
-  const action = menuAction(operation, params);
+function editAction(operation, params, falls) {
+  const recorded = menuAction(operation, params);
+  const action = falls ? (MIRRORED[recorded] ?? recorded) : recorded;
   return Object.hasOwn(OPERATION_HELP, action)
     ? OPERATION_HELP[action].title.replace(/ selection$/, "")
     : sentenceCase(operation.replaceAll("_", " "));

@@ -306,3 +306,27 @@ test("a chip's text is escaped, and a marker-like entry with a chip but no term 
   assert.match(html, /&lt;b&gt;Spread&lt;\/b&gt;/);
   assert.doesNotMatch(html, /<b>Spread/);
 });
+
+test("an edit on a curve shown falling in its effect is named by the shown direction", () => {
+  const node = { innerHTML: "" };
+  const base = {
+    kind: "edit", status: "edit", time: at(15, 2), note: null, term: "theta:age",
+    term_label: "age", predictor: "theta", predictor_label: "Spread", redo: false,
+  };
+  renderHistory([
+    { ...base, id: "7182930", label: "shift theta:age", operation: "shift",
+      params: { delta: -0.0488, lo: 30, hi: 40 }, display_decreasing: true },
+    { ...base, id: "8293041", label: "isotonic theta:age", operation: "isotonic",
+      params: { direction: "decreasing", lo: 30, hi: 40 }, display_decreasing: true },
+    { ...base, id: "9304152", label: "snap_lowest theta:age", operation: "snap_lowest",
+      params: { lo: 30, hi: 40 }, display_decreasing: true },
+    { ...base, id: "a415263", label: "shift theta:age", operation: "shift",
+      params: { delta: -0.0488, lo: 30, hi: 40 }, display_decreasing: false },
+    { kind: "marker" },
+  ], node);
+  const label = (id) => row(node, id).match(/class="history-label">([^<]*)</)[1];
+  assert.equal(label("7182930"), "Increase 30 – 40");
+  assert.equal(label("8293041"), "Make increasing 30 – 40");
+  assert.equal(label("9304152"), "Snap to highest 30 – 40");
+  assert.equal(label("a415263"), "Decrease 30 – 40");
+});

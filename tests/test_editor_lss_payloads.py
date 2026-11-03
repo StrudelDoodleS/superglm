@@ -12,6 +12,7 @@ import pytest
 
 from superglm.editor import EditorSession
 from superglm.editor.lss import RELATIVITY, DisplayTransform, display_for
+from superglm.editor.lss.apply import lss_model_with_edits
 from superglm.editor.lss.availability import LSS_UNAVAILABLE
 from superglm.editor.payloads import session_payload
 from tests._lss_editor_fixtures import EPS, gamma_case, lognormal_case, nb_case, open_case
@@ -120,6 +121,18 @@ def test_out_of_range_spread_clamps():
         assert np.all(np.isfinite(transform.to_display(effects)))
 
 
+@pytest.mark.parametrize("transform", _transforms()[1:], ids=lambda t: t.kind)
+def test_spread_at_or_below_zero_clamps_to_the_floor(transform):
+    # A display value at or below zero is past every spread's range: it takes the effect of
+    # zero, never that of its absolute value, and larger values never take smaller effects.
+    floor = transform.from_display(0.0)
+    np.testing.assert_array_equal(transform.from_display([-3.0, -1.0, -0.3, -1e-9]), floor)
+    probes = np.array([-3.0, -1.0, 0.0, 1e-9, 0.01, 0.3, 1.0, 3.0])
+    effects = transform.from_display(probes)
+    direction = 1.0 if transform.kind != "inverse_theta" else -1.0
+    assert np.all(np.diff(direction * effects) >= 0.0)
+
+
 def test_dragged_cv_converts_back_to_the_link_scale():
     session = open_case(lognormal_case())
     widget = session.widget()
@@ -200,7 +213,7 @@ def _fixture_content() -> dict:
         }
         if transform.kind != "relativity":
             # Values at and past what the parameter can take convert to a finite effect.
-            probes = [-1.0, 0.0, 1e-9, 0.01, 0.5, 2.0]
+            probes = [-3.0, -1.0, -0.3, 0.0, 1e-9, 0.01, 0.5, 2.0]
             entry["probes"] = probes
             entry["effects_from_probes"] = [float(v) for v in transform.from_display(probes)]
         else:
@@ -226,3 +239,137 @@ def test_display_fixture_is_current():
                 assert stored[kind][field] == pytest.approx(value, rel=TOLERANCE)
             else:
                 assert stored[kind][field] == value
+
+
+def _shown_after(operation, key="theta:age"):
+    """The shown curve before and after ``operation`` on every point of an NB spread term.
+
+    A dip at the middle point is drawn first, so the curve both rises and falls.
+    """
+    session = open_case(nb_case())
+    widget = session.widget()
+    try:
+        transform = display_for(session.model, key)
+        assert not transform.increasing
+        middle = session.terms[key].size // 2
+        shown = transform.to_display(session.terms[key].edited_log_effect[middle])
+        widget._drag(key, [middle], values=[0.5 * float(shown)])
+        widget._select(key, list(range(session.terms[key].size)))
+        before = transform.to_display(session.terms[key].edited_log_effect.copy())
+        widget._operate(operation, key)
+        after = transform.to_display(session.terms[key].edited_log_effect)
+        return before, after, transform
+    finally:
+        widget.close()
+
+
+@pytest.mark.parametrize(("operation", "factor"), [("shift_up", 1.05), ("shift_down", 0.95)])
+def test_shift_moves_a_falling_display_the_way_it_names(operation, factor):
+    before, after, transform = _shown_after(operation)
+    np.testing.assert_allclose(after / before, factor, rtol=1e3 * EPS, atol=0.0)
+
+
+@pytest.mark.parametrize(("operation", "sign"), [("increasing", 1.0), ("decreasing", -1.0)])
+def test_monotone_fit_makes_the_shown_curve_monotone(operation, sign):
+    before, after, _ = _shown_after(operation)
+    # The curve rises and falls, so each fit has to move it.
+    assert np.any(np.diff(before) < 0.0) and np.any(np.diff(before) > 0.0)
+    steps = sign * np.diff(after)
+    assert np.all(steps >= -1e3 * EPS * np.max(np.abs(after)))
+
+
+@pytest.mark.parametrize(("operation", "pick"), [("snap_highest", np.max), ("snap_lowest", np.min)])
+def test_snap_takes_the_shown_extreme(operation, pick):
+    before, after, _ = _shown_after(operation)
+    np.testing.assert_allclose(after, pick(before), rtol=1e3 * EPS, atol=0.0)
+
+
+def test_directional_tools_on_a_rising_display_are_unchanged():
+    session = open_case(gamma_case())
+    widget = session.widget()
+    try:
+        transform = display_for(session.model, "scale:age")
+        assert transform.increasing
+        widget._select("scale:age", [2, 3, 4])
+        before = session.terms["scale:age"].edited_log_effect[[2, 3, 4]].copy()
+        widget._operate("shift_up", "scale:age")
+        after = session.terms["scale:age"].edited_log_effect[[2, 3, 4]]
+        np.testing.assert_allclose(after - before, np.log(1.05), rtol=1e3 * EPS, atol=0.0)
+    finally:
+        widget.close()
+
+
+def test_history_names_a_falling_display_by_its_shown_direction():
+    session = open_case(nb_case())
+    widget = session.widget()
+    try:
+        widget._select("theta:age", [1, 2])
+        widget._operate("shift_up", "theta:age")
+        entry = next(e for e in widget._state()["timeline"] if e.get("operation") == "shift")
+        assert entry["params"]["delta"] < 0.0
+        assert entry["display_decreasing"] is True
+        widget._select("mean:age", [1, 2])
+        widget._operate("shift_up", "mean:age")
+        entries = [e for e in widget._state()["timeline"] if e.get("term") == "mean:age"]
+        assert entries[-1]["display_decreasing"] is False
+    finally:
+        widget.close()
+
+
+def _cv_at(model, session, term, column, parameter="scale"):
+    frame = pd.concat([session.model.reference_row()] * len(term["x"]), ignore_index=True)
+    frame[column] = term["x"]
+    s = model.predict_parameters(frame)[parameter].to_numpy()
+    return np.sqrt(np.expm1(s**2))
+
+
+@pytest.mark.parametrize("level_edit", ["reference", "other"])
+def test_spread_curve_follows_an_edit_to_another_term_of_its_parameter(level_edit):
+    case = lognormal_case()
+    session = open_case(case)
+    widget = session.widget()
+    try:
+        before = session_payload(session)["scale:age"]
+        region = session_payload(session)["scale:region"]
+        reference = session.model.reference_row()["region"].iloc[0]
+        index = region["levels"].index(reference) if level_edit == "reference" else 3
+        assert (region["levels"][index] == reference) == (level_edit == "reference")
+        widget._drag("scale:region", [index], values=[region["y"][index] * 1.3])
+        edited = lss_model_with_edits(session.model, session.terms)
+        after = session_payload(session)["scale:age"]
+        shown = _cv_at(edited, session, after, "age")
+        np.testing.assert_allclose(after["y"], shown, rtol=1e3 * EPS, atol=0.0)
+        # The fit's curve stays where the fit put it.
+        np.testing.assert_allclose(after["original_y"], before["original_y"], rtol=0, atol=0)
+        if level_edit == "reference":
+            # An edit at the reference level moves the whole spread at the reference policy.
+            assert np.min(np.abs(np.asarray(after["y"]) / np.asarray(before["y"]) - 1.0)) > 0.1
+            assert after["display"]["reference_eta"] != before["display"]["reference_eta"]
+        else:
+            np.testing.assert_allclose(after["y"], before["y"], rtol=1e3 * EPS, atol=0.0)
+    finally:
+        widget.close()
+
+
+def test_a_drag_converts_with_the_reference_in_force():
+    case = lognormal_case()
+    session = open_case(case)
+    widget = session.widget()
+    try:
+        region = session_payload(session)["scale:region"]
+        reference = session.model.reference_row()["region"].iloc[0]
+        index = region["levels"].index(reference)
+        widget._drag("scale:region", [index], values=[region["y"][index] * 1.3])
+        moved = session_payload(session)["scale:age"]
+        target = float(moved["y"][5]) * 1.2
+        widget._drag("scale:age", [5], values=[target])
+        transform = DisplayTransform(**moved["display"])
+        edited = session.terms["scale:age"].edited_log_effect[5]
+        np.testing.assert_allclose(transform.to_display(edited), target, rtol=1e3 * EPS)
+        fitted = display_for(session.model, "scale:age")
+        assert abs(float(fitted.to_display(edited)) / target - 1.0) > 0.1
+        np.testing.assert_allclose(
+            session_payload(session)["scale:age"]["y"][5], target, rtol=1e3 * EPS
+        )
+    finally:
+        widget.close()

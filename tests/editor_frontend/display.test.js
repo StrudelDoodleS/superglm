@@ -56,6 +56,25 @@ test("out-of-range spreads clamp to finite effects", () => {
   assert.ok(toDisplay(lognormal, fromDisplay(lognormal, 0)) >= 0);
 });
 
+test("a spread at or below zero clamps to the floor, never to its mirror", () => {
+  const specs = [
+    { kind: "lognormal_cv", reference_eta: -0.7, floor: 0.05 },
+    { kind: "gamma_cv", reference_eta: -0.6, floor: 0 },
+    { kind: "inverse_theta", reference_eta: 1, floor: 0 },
+  ];
+  const probes = [-3, -1, -0.3, -1e-9, 0, 1e-9, 0.01, 0.3, 1, 3];
+  for (const spec of specs) {
+    const floor = fromDisplay(spec, 0);
+    for (const v of [-3, -1, -0.3, -1e-9]) assert.equal(fromDisplay(spec, v), floor, `${spec.kind} ${v}`);
+    for (const v of [-3, -1, -0.3]) {
+      assert.equal(reachableDisplay(spec, v), reachableDisplay(spec, 0), `${spec.kind} ${v}`);
+    }
+    const sign = spec.kind === "inverse_theta" ? -1 : 1;
+    const effects = probes.map((v) => sign * fromDisplay(spec, v));
+    effects.slice(1).forEach((e, i) => assert.ok(e >= effects[i], `${spec.kind} monotone at ${probes[i + 1]}`));
+  }
+});
+
 test("a reachable value is one the transform can return", () => {
   assert.equal(reachableDisplay(undefined, -2), 1e-12);
   assert.equal(reachableDisplay(undefined, 0.3), 0.3);
