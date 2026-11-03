@@ -9,6 +9,7 @@ here.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
@@ -109,6 +110,8 @@ WEIGHTS_NOT_GIVEN = (
 )
 
 
+_UNIT_ROUNDOFF = 2.0**-53
+
 WEIGHTS_DIFFER = (
     "This model was fitted with other sample weights than the editor's training rows carry, so "
     "Refit and Final fit would fit a different model. Open the editor with the rows and "
@@ -156,15 +159,29 @@ def session_refit_reason(session: Any) -> str | None:
 
 
 def _weights_differ(state: Any, sample_weight: Any, n_rows: int) -> bool:
-    """Whether ``sample_weight`` on ``n_rows`` rows resolves to another root than the fit's.
+    """Whether ``sample_weight`` on ``n_rows`` rows resolves to other kept weights than the fit's.
 
-    The fit records the digest of its resolved weights, so one pass over the
-    rows' weights shows whether a replay would fit the same likelihood.
+    The rows may be the frame the fit was given or only the rows it kept, so
+    the kept weights are compared through the summary the fit records: their
+    counts, extremes and unit flag exactly, and their sum and log sum to the
+    rounding of one summation, since a sum evaluated afresh (perhaps on
+    another machine) may differ in its last bits.
     """
-    resolved = resolve_likelihood_weights(
+    got = resolve_likelihood_weights(
         sample_weight, n_observations=n_rows, contract=state.weight_contract
+    ).provenance
+    fit = state.weight_provenance
+    exact = ("retained_count", "likelihood_count", "min_weight", "max_weight", "all_unit")
+    if any(getattr(got, name) != getattr(fit, name) for name in exact):
+        return True
+    n = fit.retained_count
+    largest_log = max(abs(math.log(fit.min_weight)), abs(math.log(fit.max_weight)))
+    sum_tolerance = 2.0 * n * _UNIT_ROUNDOFF * fit.weight_sum
+    log_tolerance = 2.0 * n * _UNIT_ROUNDOFF * n * largest_log
+    return (
+        abs(got.weight_sum - fit.weight_sum) > sum_tolerance
+        or abs(got.log_weight_sum - fit.log_weight_sum) > log_tolerance
     )
-    return resolved.provenance.root_digest != state.weight_provenance.root_digest
 
 
 def session_availability(session: Any) -> dict[str, str]:
