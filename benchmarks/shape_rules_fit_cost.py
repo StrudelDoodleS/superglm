@@ -114,7 +114,8 @@ def build_features(config):
         ),
         "LogDensity": PSpline(n_knots=8, constraint=rule.get("LogDensity")),
         "VehPower": PSpline(n_knots=6, constraint=rule.get("VehPower")),
-        "Region": Categorical(constraint=rule.get("Region")),
+        # master's Categorical takes no constraint=, so (A) must not pass one
+        "Region": Categorical(**({"constraint": rule["Region"]} if "Region" in rule else {})),
         "VehBrand": Categorical(),
     }
 
