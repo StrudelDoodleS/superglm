@@ -12,7 +12,7 @@ from typing import Any, Literal, cast
 from numpy.typing import ArrayLike
 
 from superglm.features import Categorical, LevelGrouping, Numeric, RandomEffect, Spline
-from superglm.features.constraint import ConstraintSpec
+from superglm.features.constraint import ConstraintRules, ConstraintSpec
 from superglm.features.factor_smooth import FactorSmooth
 from superglm.features.interaction import (
     CategoricalInteraction,
@@ -198,7 +198,7 @@ def s(
     extrapolation: Literal["clip", "extend", "error"] = "clip",
     boundary: tuple[float, float] | None = None,
     knot_alpha: float = 0.2,
-    constraint: ConstraintSpec | None = None,
+    constraint: ConstraintSpec | ConstraintRules | None = None,
     m: int | tuple[int, ...] = 2,
     lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
 ) -> BoundTerm:
@@ -253,8 +253,8 @@ default="uniform"
         training range.
     knot_alpha : float, default=0.2
         Tempering control for ``"quantile_tempered"`` knot placement.
-    constraint : ConstraintSpec, optional
-        Requested shape constraint. See the SuperLSS limitation below.
+    constraint : ConstraintSpec or ConstraintRules, optional
+        Requested shape constraint, or rules joined with ``&``. See the SuperLSS limitation below.
     m : int or tuple of int, default=2
         Penalty order: a difference order for P-splines or a derivative order
         for derivative-penalty bases. Multiple orders require a basis that

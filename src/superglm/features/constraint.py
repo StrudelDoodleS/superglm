@@ -274,7 +274,7 @@ Constraint = _ConstraintNamespace()
 def rules_of(spec: Any) -> ConstraintRules:
     """The rules a spline spec carries, reading current fields then the legacy ones."""
     rules = getattr(spec, "constraint_rules", None)
-    if rules is not None:
+    if rules:  # a spec saved before collections holds the empty class default
         return rules
     kind = getattr(spec, "constraint_kind", getattr(spec, "monotone", None))
     if kind is None:

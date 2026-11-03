@@ -25,6 +25,7 @@ from superglm.features import (
     _spline_select,
     _spline_subclass_ops,
 )
+from superglm.features.constraint import ConstraintRules
 from superglm.types import GroupInfo, LambdaPolicy, LinearConstraintSet, TensorMarginalInfo
 
 if TYPE_CHECKING:
@@ -113,6 +114,9 @@ class _SplineBase:
     # class attribute is shared by every instance that never assigns its own.
     _polynomial_ranges: tuple[PolynomialRange, ...] = ()
     _base_interior_knots: NDArray | None = None
+    # Unpickled specs saved before rule collections read the empty default;
+    # ``rules_of`` then derives their single rule from ``constraint_kind``.
+    constraint_rules: ConstraintRules = ConstraintRules(())
 
     # Configuration and build-time state, assigned by ``_spline_config`` and by the
     # build helpers in ``_spline_runtime`` and ``_spline_cardinal_spec``. Annotations

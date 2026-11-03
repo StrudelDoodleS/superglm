@@ -130,6 +130,7 @@ def test_training_telemetry_is_plain_json_ready_payload():
     assert telemetry["features"]["constraints"]["DrivAge"] == {
         "kind": "increasing",
         "mode": "fit",
+        "rules": ["increasing"],
     }
     assert telemetry["edf"]["by_feature"]["DrivAge:Area"] == pytest.approx(1.25)
     assert telemetry["reml"]["lambdas"] == {"DrivAge": 2.0, "DrivAge:Area": 3.5}
@@ -238,3 +239,18 @@ def test_path_result_to_frame_and_telemetry():
     assert telemetry["deviance_path"] == [12.0, 9.5]
     assert telemetry["edf_path"] == [1.25, 1.75]
     json.dumps(telemetry)
+
+
+def test_constraint_payload_lists_every_rule():
+    from superglm.features.constraint import Constraint
+    from superglm.features.spline import Spline
+    from superglm.model import telemetry_ops
+
+    C = Constraint.fit
+    spec = Spline(kind="ps", k=12, constraint=C.increasing & C.concave.above(30))
+    assert telemetry_ops._constraint_payload(spec) == {
+        "kind": "increasing & concave.above(30)",
+        "mode": "fit",
+        "rules": ["increasing", "concave.above(30)"],
+    }
+    assert telemetry_ops._constraint_payload(Spline(kind="ps", k=12)) is None

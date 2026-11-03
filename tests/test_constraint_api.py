@@ -240,3 +240,89 @@ def test_two_field_pickle_loads_and_equals_the_new_token():
     assert pickle.loads(pickle.dumps(C.cap(0.6, 1.8))) == C.cap(0.6, 1.8)
     rules = C.increasing.below(3) & C.max_step(0.2)
     assert pickle.loads(pickle.dumps(rules)) == rules
+
+
+def test_spline_stores_rules():
+    spec = Spline(kind="ps", k=12, constraint=C.increasing & C.concave)
+    assert spec.constraint_rules.describe() == "increasing & concave"
+    assert spec.constraint_kind == "increasing & concave"
+    assert spec.constraint_mode == "fit"
+    assert (spec.monotone, spec.monotone_mode) == ("increasing & concave", "fit")
+    assert rules_of(spec) == C.increasing & C.concave
+
+
+def test_single_rule_spec_unchanged():
+    spec = Spline(kind="ps", k=12, constraint=C.increasing)
+    assert (spec.constraint_kind, spec.constraint_mode) == ("increasing", "fit")
+    assert (spec.monotone, spec.monotone_mode) == ("increasing", "fit")
+    assert rules_of(spec).rules == (C.increasing,)
+    post = Spline(kind="ps", k=12, constraint=Constraint.postfit.decreasing)
+    assert (post.constraint_kind, post.constraint_mode) == ("decreasing", "postfit")
+    none = Spline(kind="ps", k=12)
+    assert (none.constraint_kind, none.constraint_mode, len(none.constraint_rules)) == (
+        None,
+        "postfit",
+        0,
+    )
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [C.increasing.below(25), C.flat.within(20, 30), C.cap(0.6, 1.8), C.max_step(0.2)],
+)
+def test_a_single_stretched_or_new_rule_is_a_collection_not_dropped(rule):
+    spec = Spline(kind="ps", k=12, constraint=rule)
+    assert spec.constraint_rules.rules == (rule,)
+    assert spec.constraint_kind == rule.describe()
+    assert spec.constraint_mode == "fit"
+    assert (spec.monotone, spec.monotone_mode) == (rule.describe(), "fit")
+
+
+def test_a_rule_collection_never_fits_with_rules_dropped():
+    from superglm.features._spline_subclass_ops import build_shape_constraints_raw
+
+    # Rows for collections arrive with their builders; until then the build refuses.
+    for rule in (C.increasing.below(25), C.increasing & C.concave):
+        spec = Spline(kind="ps", k=12, constraint=rule)
+        with pytest.raises(ValueError, match="Unsupported fit-time shape kind"):
+            build_shape_constraints_raw(spec)
+
+
+def test_per_rule_degree_checks():
+    with pytest.raises(ValueError) as single:
+        Spline(kind="bs", degree=0, constraint=C.convex)
+    with pytest.raises(ValueError) as combined:
+        Spline(kind="bs", degree=0, constraint=C.increasing & C.convex)
+    assert str(combined.value) == str(single.value)
+    with pytest.raises(NotImplementedError, match="degree <= 3") as high:
+        Spline(kind="bs", degree=4, constraint=C.increasing & C.concave)
+    assert "Constraint.postfit" in str(high.value)
+    # A shape that is not curvature has no degree limit.
+    Spline(kind="bs", degree=4, constraint=C.increasing & C.max_step(0.2))
+
+
+def test_ranges_with_rules_still_refused():
+    from superglm import PolynomialRange
+
+    with pytest.raises(ValueError, match="would move the pinned coefficients"):
+        Spline(
+            kind="cr",
+            polynomial_ranges=[PolynomialRange(1, 2, 0)],
+            constraint=C.increasing & C.concave,
+        )
+
+
+def test_constraint_input_is_checked():
+    with pytest.raises(TypeError, match="Constraint"):
+        Spline(kind="ps", k=12, constraint="increasing")
+    with pytest.raises(ValueError, match="at most one cap"):
+        Spline(kind="ps", k=12, constraint=C.cap(0.6, 1.8) & C.cap(0.5, 2.0))
+    with pytest.raises(ValueError, match="both apply"):
+        Spline(kind="ps", k=12, constraint=C.increasing & C.increasing.below(3))
+
+
+def test_rules_of_derives_the_rule_of_a_spec_saved_before_collections():
+    spec = Spline(kind="ps", k=12, constraint=C.increasing)
+    del spec.__dict__["constraint_rules"]  # what an old pickle holds
+    assert rules_of(spec).rules == (C.increasing,)
+    assert len(rules_of(Spline(kind="ps", k=12))) == 0

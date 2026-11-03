@@ -12,7 +12,13 @@ from numpy.typing import ArrayLike, NDArray
 
 from superglm.features._spline_knots import QUANTILE_STRATEGIES
 from superglm.features._spline_ranges import PolynomialRange
-from superglm.features.constraint import CONSTRAINT_KINDS, CONSTRAINT_MODES, ConstraintSpec
+from superglm.features.constraint import (
+    CONSTRAINT_KINDS,
+    CONSTRAINT_MODES,
+    RULE_KINDS,
+    ConstraintRules,
+    ConstraintSpec,
+)
 from superglm.types import LambdaPolicy
 
 
@@ -131,18 +137,35 @@ def validate_select(spec: Any) -> None:
         )
 
 
-def _normalize_constraint(constraint: ConstraintSpec | None) -> tuple[str | None, str]:
+def _normalize_constraint(
+    constraint: ConstraintSpec | ConstraintRules | None,
+) -> tuple[ConstraintRules, str | None, str]:
+    """The rules, ``constraint_kind`` and ``constraint_mode`` a spline stores for ``constraint``.
+
+    A single full-range shape rule keeps its own kind and mode. Any other
+    collection (several rules, a stretch, ``flat``, ``cap``, ``max_step``) is
+    a fit-time collection whose kind is its description.
+    """
     if constraint is None:
-        return None, "postfit"
-    if not isinstance(constraint, ConstraintSpec):
+        return ConstraintRules(()), None, "postfit"
+    if isinstance(constraint, ConstraintSpec):
+        constraint = ConstraintRules((constraint,))
+    if not isinstance(constraint, ConstraintRules):
         raise TypeError(
             "constraint must be None or a Constraint token such as Constraint.fit.increasing"
         )
-    if constraint.kind not in CONSTRAINT_KINDS:
-        raise ValueError(f"Unsupported constraint kind: {constraint.kind!r}")
-    if constraint.mode not in CONSTRAINT_MODES:
-        raise ValueError(f"Unsupported constraint mode: {constraint.mode!r}")
-    return constraint.kind, constraint.mode
+    for rule in constraint:
+        if rule.kind not in RULE_KINDS:
+            raise ValueError(f"Unsupported constraint kind: {rule.kind!r}")
+        if rule.mode not in CONSTRAINT_MODES:
+            raise ValueError(f"Unsupported constraint mode: {rule.mode!r}")
+    constraint.validate()
+    if not constraint:
+        return constraint, None, "postfit"
+    only = constraint.rules[0]
+    if len(constraint) == 1 and only.kind in CONSTRAINT_KINDS and only.stretch == (None, None):
+        return constraint, only.kind, only.mode
+    return constraint, constraint.describe(), "fit"
 
 
 def initialize_spec(
@@ -159,7 +182,7 @@ def initialize_spec(
     boundary: tuple[float, float] | None,
     knot_alpha: float,
     select: bool,
-    constraint: ConstraintSpec | None,
+    constraint: ConstraintSpec | ConstraintRules | None,
     m: int | tuple[int, ...],
     lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None,
     polynomial_ranges: Sequence[PolynomialRange] | None = None,
@@ -173,13 +196,14 @@ def initialize_spec(
             "polynomial_ranges cannot be combined with a shape constraint in this version: "
             "the constraint would move the pinned coefficients."
         )
-    constraint_kind, constraint_mode = _normalize_constraint(constraint)
-    if degree == 0 and constraint_kind in {"convex", "concave"}:
+    rules, constraint_kind, constraint_mode = _normalize_constraint(constraint)
+    curvature = [r.kind for r in rules if r.kind in {"convex", "concave"}]
+    if degree == 0 and curvature:
         raise ValueError(
             f"degree=0 splines are discontinuous and cannot represent a classical "
-            f"{constraint_kind} curve; use degree>=1"
+            f"{curvature[0]} curve; use degree>=1"
         )
-    if constraint_mode == "fit" and constraint_kind in {"convex", "concave"} and degree > 3:
+    if constraint_mode == "fit" and curvature and degree > 3:
         raise NotImplementedError(
             "Fit-time convex/concave constraints require degree <= 3. "
             "For higher degrees, non-negative derivative control coefficients "
@@ -187,6 +211,7 @@ def initialize_spec(
             "degree<=3 or a Constraint.postfit.* token."
         )
 
+    spec.constraint_rules = rules
     spec.constraint_kind = constraint_kind
     spec.constraint_mode = constraint_mode
 

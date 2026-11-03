@@ -15,6 +15,7 @@ from superglm.diagnostics.convergence import (
     coefficient_nonconvergence_message,
     reml_nonconvergence_message,
 )
+from superglm.features.constraint import rules_of
 
 
 def training_telemetry(model) -> dict[str, Any]:
@@ -341,14 +342,18 @@ def _interaction_spec_payload(spec) -> dict[str, Any]:
     return payload
 
 
-def _constraint_payload(spec) -> dict[str, str] | None:
+def _constraint_payload(spec) -> dict[str, Any] | None:
     if spec is None:
         return None
     kind = getattr(spec, "constraint_kind", None) or getattr(spec, "monotone", None)
     mode = getattr(spec, "constraint_mode", None) or getattr(spec, "monotone_mode", None)
     if kind is None:
         return None
-    return {"kind": str(kind), "mode": str(mode)}
+    return {
+        "kind": str(kind),
+        "mode": str(mode),
+        "rules": [rule.describe() for rule in rules_of(spec)],
+    }
 
 
 def _group_size(group) -> int:

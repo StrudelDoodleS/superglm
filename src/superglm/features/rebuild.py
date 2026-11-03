@@ -27,7 +27,7 @@ from superglm.features._spline_config import (
 )
 from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.categorical import Categorical
-from superglm.features.constraint import Constraint
+from superglm.features.constraint import rules_of
 from superglm.features.grouping import LevelGrouping, native_by_text
 from superglm.features.ordered_categorical import (
     _CLAMP_WARNING_PREFIX,
@@ -665,9 +665,8 @@ def rebased_spline(
     with its own error.
     """
     stated = source._named_knots if source._named_knots is not None else source._explicit_knots
-    constraint = None
-    if source.constraint_kind is not None:
-        constraint = getattr(getattr(Constraint, source.constraint_mode), source.constraint_kind)
+    rules = rules_of(source)
+    constraint = rules.rules[0] if len(rules) == 1 else rules or None
     orders = tuple(source._m_orders)
     spline = Spline(
         kind=cast(SplineKindName, kind),
