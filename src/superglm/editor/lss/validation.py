@@ -54,6 +54,12 @@ def lss_split_reason(model: Any, dataset) -> str | None:
             f"The {dataset.label} split cannot be scored with its weights: the model's family "
             "has no likelihood for weights like these. Pass the split without weights to score it."
         )
+    except ValueError:
+        # The family's own response check: a value outside its support.
+        return (
+            f"The {dataset.label} split cannot be scored: its responses include values the "
+            "model's family does not take. Remove those rows from the split to score it."
+        )
     return None
 
 

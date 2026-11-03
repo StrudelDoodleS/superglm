@@ -10,7 +10,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm.editor import EditorSession
+from superglm.editor import EditorSession, edit
+from superglm.editor.controls import ORDERED_SPLINE_UNAVAILABLE
 from superglm.editor.lss import RELATIVITY, DisplayTransform, display_for
 from superglm.editor.lss.apply import lss_model_with_edits
 from superglm.editor.lss.availability import LSS_UNAVAILABLE
@@ -240,6 +241,17 @@ def _fixture_content() -> dict:
             ]
         out[transform.kind] = entry
     return out
+
+
+def test_an_ordered_spline_term_opens_with_its_handles_off():
+    from tests.test_editor_lss_apply import ordered_case
+
+    case = ordered_case()
+    session = edit(case.model, train_data=(case.X, case.y))
+    term = session_payload(session)["scale:region"]
+    assert term["spline_view"]["available"] is False
+    assert term["spline_view"]["reason"] == ORDERED_SPLINE_UNAVAILABLE
+    assert len(term["y"]) == len(term["levels"])
 
 
 def test_display_fixture_is_current():

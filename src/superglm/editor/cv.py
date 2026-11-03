@@ -866,6 +866,16 @@ def _covering_template(template, X, job: str):
     ``specials=``) leaves the level out, refuses ``job`` in one sentence. Every
     such term, and a factor smooth's group, also refuses a missing value.
     """
+    replacements = _covering_replacements(template, X, job)
+    return clone_with_replaced_features(template, replacements) if replacements else template
+
+
+def _covering_replacements(template, X, job: str) -> dict[str, Any]:
+    """The grouped categoricals of ``template`` (a SuperGLM or a SuperLSS view), widened to cover ``X``.
+
+    Keyed as ``template._specs`` is; each term reads its column ``column_of(template, name)``.
+    See :func:`_covering_template` for the rules.
+    """
     frame = as_eager_frame(X)
     _require_valued_labels(template, frame, job)
     bindings = dict(getattr(template, "_level_bindings", None) or ())
@@ -873,9 +883,10 @@ def _covering_template(template, X, job: str):
     for name, spec in template._specs.items():
         if not isinstance(spec, Categorical | OrderedCategorical | RandomEffect):
             continue
-        if name not in frame.columns:
+        column = column_of(template, name)
+        if column not in frame.columns:
             continue
-        values = np.asarray(frame.column_array(name)).ravel()
+        values = np.asarray(frame.column_array(column)).ravel()
         if isinstance(spec, OrderedCategorical):
             outside = _outside_order(values, spec)
             if outside:
@@ -886,7 +897,7 @@ def _covering_template(template, X, job: str):
             continue
         grouping = getattr(spec, "_grouping", None)
         if grouping is None:
-            outside = _outside_universe(values, frame, name, spec, bindings.get(name))
+            outside = _outside_universe(values, frame, column, spec, bindings.get(name))
             if outside:
                 raise EditorValueError(
                     OUTSIDE_DECLARED_LEVELS.format(job=job, term=name, levels=outside)
@@ -898,7 +909,7 @@ def _covering_template(template, X, job: str):
         if spec._declared_levels is not None:
             raise EditorValueError(OUTSIDE_DECLARED_LEVELS.format(job=job, term=name, levels=new))
         # A binding (or a categorical dtype) names the universe as levels= does.
-        outside = _outside_universe(values, frame, name, spec, bindings.get(name))
+        outside = _outside_universe(values, frame, column, spec, bindings.get(name))
         if outside:
             raise EditorValueError(
                 OUTSIDE_DECLARED_LEVELS.format(job=job, term=name, levels=outside)
@@ -922,7 +933,7 @@ def _covering_template(template, X, job: str):
             data=np.asarray(new, dtype=object),
             level=base_names_level(spec),
         )
-    return clone_with_replaced_features(template, replacements) if replacements else template
+    return replacements
 
 
 def _require_valued_labels(template, X, job: str) -> None:
@@ -1148,7 +1159,8 @@ def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
     context.progress("fitting", n_rows=int(y.size))
     context.check()
     if lss:
-        model = plan.template
+        covering = _covering_replacements(plan.model, X, "Final fit")
+        model = plan.model.lss._clone_with_replaced_terms(covering) if covering else plan.template
     else:
         model = _covering_template(plan.template, X, "Final fit").clone_unfitted()
     try:

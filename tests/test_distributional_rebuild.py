@@ -72,12 +72,12 @@ def test_settings_replay_the_estimator():
         lambdas={"mean:age#wiggle": 3.0, "mean:power#wiggle": 4.0, "scale:age#wiggle": 5.0},
     )
     assert fixed._fit_settings["method"] == "fit"
-    dropped = fixed._clone_with_replaced_terms({"mean:age": s("age", k=7)})
-    assert dropped._fit_settings["lambdas"] == {
-        "mean:power#wiggle": 4.0,
-        "scale:age#wiggle": 5.0,
-    }
-    assert fixed._fit_settings["lambdas"]["mean:age#wiggle"] == 3.0
+    # fit() estimates no strength, so a replaced term keeps the one it was given.
+    kept = fixed._clone_with_replaced_terms({"mean:age": s("age", k=7)})
+    assert kept._fit_settings["lambdas"] == fixed._fit_settings["lambdas"]
+    again = _refit(case, kept)
+    assert again.smoothing_parameters_["mean:age#wiggle"] == 3.0
+    assert _block_length(again, "mean:age") != _block_length(fixed, "mean:age")
 
 
 def test_settings_exclude_data_and_row_options():

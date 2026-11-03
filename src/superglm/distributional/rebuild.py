@@ -107,12 +107,17 @@ def _replaced_templates(source: Any, replacements: Mapping[str, Any]) -> tuple[P
 def _filtered_settings(
     settings: Mapping[str, Any] | None, replacements: Mapping[str, Any]
 ) -> dict[str, Any] | None:
-    """The source's settings without the fixed smoothing strengths of the replaced terms."""
+    """The source's settings, without the fixed smoothing strengths of the replaced terms under REML.
+
+    ``fit_reml`` estimates a strength ``lambdas`` does not pin, so a replaced
+    term's is estimated again. ``fit`` estimates none and needs every one, so a
+    replaced term keeps the strength it was given.
+    """
     if settings is None:
         return None
     prefixes = tuple(f"{key}#" for key in replacements)
     kept = dict(settings)
-    if kept.get("lambdas") is not None:
+    if kept.get("lambdas") is not None and kept.get("method") != "fit":
         kept["lambdas"] = {k: v for k, v in kept["lambdas"].items() if not k.startswith(prefixes)}
     return kept
 

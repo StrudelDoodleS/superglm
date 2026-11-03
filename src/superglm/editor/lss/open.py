@@ -3,7 +3,9 @@
 The refusals are checked in a fixed order, so a model that breaks several rules
 is told about the first: the family, the log-normal's form, a model never
 fitted, truncated or censored rows, a parameter on a link other than its
-default, missing training rows, a centering other than native, then the offsets.
+default, a column named by something other than a string, missing training
+rows, a centering other than native, the offsets, then training rows that are
+not the fit's.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from typing import Any
 import numpy as np
 
 from superglm.distributional.families import LogNormalLS
+from superglm.distributional.prediction_design import _required_columns
 from superglm.distributional.predictor import resolve_predictor_link
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.evaluation import coerce_dataset, coerce_evaluation_data
@@ -54,6 +57,25 @@ def _overridden_link(lss) -> str | None:
     return None
 
 
+def _data_columns(lss) -> tuple[Any, ...]:
+    return _required_columns(lss._require_fitted().compiled_predictors)
+
+
+def _refuse_other_rows(lss, n_rows: int) -> None:
+    """Refuse training rows of another length than the fit's: an edit recomputes the fit's rows.
+
+    The rows may be the frame the fit was given or the rows it kept, as a hand
+    edit reads them.
+    """
+    provenance = lss._model.fit_state.weight_provenance
+    if n_rows not in (provenance.original_count, provenance.retained_count):
+        raise EditorValueError(
+            f"The editor needs the rows the model was fitted on: train_data has {n_rows} rows, "
+            f"but the fit was given {provenance.original_count} and kept "
+            f"{provenance.retained_count}. Pass the frame the model was fitted on."
+        )
+
+
 def _refuse_unopenable(lss, train_data, centering: str) -> None:
     family = lss.family
     if not isinstance(family, tuple(SPREAD_KINDS)):
@@ -70,6 +92,13 @@ def _refuse_unopenable(lss, train_data, centering: str) -> None:
         raise EditorValueError(
             "The editor opens models fitted without truncation or censoring; this model has "
             f"{state.truncated_row_count} truncated and {state.censored_row_count} censored rows."
+        )
+    unnamed = next((name for name in _data_columns(lss) if not isinstance(name, str)), None)
+    if unnamed is not None:
+        raise EditorValueError(
+            "The editor names each SuperLSS term '<parameter>:<column>', so it opens models "
+            f"whose columns are named by strings; this model reads column {unnamed!r}. Rename "
+            "the column to a string and refit to open it in the editor."
         )
     overridden = _overridden_link(lss)
     if overridden is not None:
@@ -140,6 +169,7 @@ def open_lss(
         offset_parameters=names,
     )
     train = evaluation_data["train"]
+    _refuse_other_rows(lss, train.n_obs)
     view = LSSModelView(lss, train.X, amount_unit=amount_unit)
     editable = lss_editable_terms(
         view, _term_keys(view, terms), n_points=n_points, with_se=with_se, train=train

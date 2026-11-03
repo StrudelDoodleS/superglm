@@ -352,6 +352,19 @@ def test_lss_refit_with_drafts_leaves_its_source_alone():
     )
 
 
+@pytest.mark.parametrize("refit", [False, True])
+def test_a_structural_change_answers_with_the_calm_summary(refit):
+    session = open_case(gamma_case())
+    widget = session.widget()
+    try:
+        response = widget._stage("collapse", "scale:region", {"levels": ["R5", "R6"]}, refit=refit)
+        assert response["summary"]["available"] is False
+        assert response["state"]["model_revision"] == session.model_revision
+        assert len(session.pending) == (0 if refit else 1)
+    finally:
+        widget.close()
+
+
 # -- tool availability ------------------------------------------------------------
 
 

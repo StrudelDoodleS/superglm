@@ -290,11 +290,15 @@ def ordered_spline_geometry(model, term: EditableTerm) -> OrderedSplineGeometry 
     the coefficients mean, and a fitted curve that does not reproduce the
     reported level effects to round-off is refused rather than drawn.
     """
+    from superglm.editor.lss.view import LSSModelView
     from superglm.features.ordered_categorical import OrderedCategorical
 
     spec = None if model is None else getattr(model, "_specs", {}).get(term.name)
     if not isinstance(spec, OrderedCategorical) or spec.basis_kind != "spline":
         return None
+    # A SuperLSS term is edited level by level; its spline handles read SuperGLM groups.
+    if isinstance(model, LSSModelView):
+        return ORDERED_SPLINE_UNAVAILABLE
     if spec._grouping is not None:
         return ORDERED_SPLINE_GROUPED
     inner = spec._basis_spline

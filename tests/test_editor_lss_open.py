@@ -10,7 +10,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import GammaLS, LogNormalLS, SuperLSS, TweedieLSS, s, ti
+import superglm
+from superglm import GammaLS, LogNormalLS, Numeric, SuperLSS, TweedieLSS, s, ti
 from superglm.editor import edit
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.lss import (
@@ -67,6 +68,16 @@ def _linked_model(scale_link: str | None, mean_link: str | None = None):
         family.mean(s("age", k=5), link=mean_link),
         family.scale(link=scale_link),
     )
+    return model.fit_reml(X, y), X, y
+
+
+@functools.cache
+def _integer_column_model():
+    rng = np.random.default_rng(20261103)
+    X = pd.DataFrame({0: rng.uniform(18.0, 90.0, 300)})
+    y = rng.gamma(4.0, 100.0, 300)
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(superglm.term(0, Numeric())), family.scale())
     return model.fit_reml(X, y), X, y
 
 
@@ -197,6 +208,14 @@ def _refusal(case_id):
             "120 truncated and 5 censored rows."
         )
         return model, {"train_data": (X, y)}, EditorValueError, message
+    if case_id == "column-name":
+        model, X, y = _integer_column_model()
+        message = (
+            "The editor names each SuperLSS term '<parameter>:<column>', so it opens models "
+            "whose columns are named by strings; this model reads column 0. Rename the column "
+            "to a string and refit to open it in the editor."
+        )
+        return model, {"train_data": (X, y)}, EditorValueError, message
     if case_id == "link":
         model, X, y = _linked_model("logit")
         message = (
@@ -226,6 +245,12 @@ def _refusal(case_id):
         message = f"Unknown offset parameter 'location'; this model's parameters are {names}."
         unknown = (case.X, case.y, None, {"location": np.zeros(len(case.y))})
         return case.model, {"train_data": unknown}, EditorValueError, message
+    if case_id == "train-rows":
+        message = (
+            "The editor needs the rows the model was fitted on: train_data has 400 rows, but "
+            "the fit was given 600 and kept 600. Pass the frame the model was fitted on."
+        )
+        return case.model, {"train_data": (case.X[:400], case.y[:400])}, EditorValueError, message
     assert case_id == "amount-unit-glm"
     return None, {"amount_unit": "GBP"}, EditorValueError, "amount_unit applies to SuperLSS models."
 
@@ -237,11 +262,13 @@ def _refusal(case_id):
         "location-form",
         "unfitted",
         "truncated",
+        "column-name",
         "link",
         "no-train-data",
         "centering",
         "offsets-array",
         "offsets-unknown-key",
+        "train-rows",
         "amount-unit-glm",
     ],
 )

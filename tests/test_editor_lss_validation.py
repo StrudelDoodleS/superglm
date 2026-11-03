@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 from scipy import integrate, stats
 
-from superglm import LogNormalLS, SuperLSS, cat, s
+from superglm import Categorical, GammaLS, LogNormalLS, SuperLSS, cat, collapse_levels, s, term
 from superglm.editor import edit
 from superglm.editor.cv import capture_cv_run, capture_final_fit, final_fit_reason, run_final_fit
 from superglm.editor.errors import EditorValueError
@@ -262,6 +262,28 @@ def test_final_fit_refuses_a_split_missing_one_parameters_offsets():
         capture_final_fit(session)
 
 
+def test_final_fit_places_a_validation_only_level_in_the_unseen_group():
+    case = gamma_case()
+    grouping = collapse_levels(case.X["region"], groups={"Other": ["R5", "R6"]})
+    family = GammaLS()
+    region = Categorical(grouping=grouping, unseen="Other")
+    model = SuperLSS(
+        family, family.mean(s("age", k=6), term("region", region)), family.scale()
+    ).fit_reml(case.X, case.y)
+    split = dataclasses.replace(holdout_rows(case, 120), sample_weight=None)
+    X = split.X.copy()
+    X.loc[X.index[:10], "region"] = "R9"
+    session = edit(model, train_data=(case.X, case.y), validation_data=(X, split.y))
+    assert final_fit_reason(session) is None
+    final = run_final_fit(capture_final_fit(session), _Context())
+    assert final.n_rows == len(case.y) + 120
+    # R9 is predicted as the Other group, as the in-force model places it.
+    probe = X.iloc[:1].assign(region="R5")
+    np.testing.assert_allclose(
+        final.model.predict(X.iloc[:1]), final.model.predict(probe), rtol=64 * EPS
+    )
+
+
 def test_final_fit_reads_only_the_columns_the_model_uses():
     case = lognormal_case()
     split = dataclasses.replace(holdout_rows(case, 150), sample_weight=None)
@@ -348,6 +370,27 @@ def test_state_carries_the_final_fit_plan_for_superlss_only(editor_model):  # no
         assert "final_fit_plan" not in glm._state()
     finally:
         glm.close()
+
+
+@pytest.mark.parametrize("report", ["validation", "final"])
+def test_a_split_with_responses_outside_the_family_is_shown_unavailable(report):
+    case = gamma_case()
+    split = dataclasses.replace(holdout_rows(case, 100), sample_weight=None)
+    y = split.y.copy()
+    y[:3] = 0.0
+    session = open_case(case, validation_data=(split.X, y))
+    widget = session.widget()
+    try:
+        rows = {row["name"]: row for row in widget._report(report)["splits"]}
+        refused = rows["validation"]
+        assert refused["available"] is False and "metrics" not in refused
+        assert refused["error"] == (
+            "The Validation split cannot be scored: its responses include values the model's "
+            "family does not take. Remove those rows from the split to score it."
+        )
+        assert np.isfinite(rows["train"]["metrics"]["edited"]["log_score"])
+    finally:
+        widget.close()
 
 
 @pytest.mark.parametrize("make", [lognormal_case, nb_case])

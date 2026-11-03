@@ -1208,7 +1208,19 @@ class EditorWidget:
     ) -> dict[str, Any]:
         with self._lock:
             summary_start = time.perf_counter()
-            summary = jsonable(summary_payload(self, "in_force", level_display=level_display))
+            # A model without a summary (a SuperLSS) answers with the calm payload its route gives.
+            calm = unavailable_evidence(
+                self.session.model,
+                "summary",
+                model_revision=self.session.model_revision,
+                source="in_force",
+                level_display=level_display,
+            )
+            summary = (
+                calm
+                if calm is not None
+                else jsonable(summary_payload(self, "in_force", level_display=level_display))
+            )
             summary_end = time.perf_counter()
             state_start = time.perf_counter()
             state = jsonable(self._state())
