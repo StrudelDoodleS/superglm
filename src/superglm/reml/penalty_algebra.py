@@ -1771,13 +1771,25 @@ def ssp_penalty_matrix(coordinate_map: NDArray, omega: NDArray) -> NDArray:
     ``penalty_factor`` cuts on.  ``B`` is ``penalty_factor``'s root of the
     raw ``Omega`` (formed without a congruence), so its rank is decided on
     ``Omega``'s own Jacobi equilibration, as every penalty root is.
+
+    Entries above ``2**512`` would overflow the root's sums and squares, so
+    such an ``Omega`` is rooted as ``2**-2k Omega`` against ``2**-m C`` and the
+    Gram is scaled back by ``2**(2k + 2m)``: exact, with the same rank decision.
     """
     from superglm.solvers.centered_system import penalty_factor
 
     coordinate_map = np.asarray(coordinate_map, dtype=np.float64)
-    transported = penalty_factor(np.asarray(omega, dtype=np.float64)) @ coordinate_map
+    omega = np.asarray(omega, dtype=np.float64)
+    peak = np.max(np.abs(omega), initial=0.0)
+    if peak <= 2.0**512:
+        transported = penalty_factor(omega) @ coordinate_map
+        gram = transported.T @ transported
+        return 0.5 * (gram + gram.T)
+    half = (math.frexp(peak)[1] + 1) // 2
+    shift = math.frexp(np.max(np.abs(coordinate_map), initial=0.0))[1]
+    transported = penalty_factor(np.ldexp(omega, -2 * half)) @ np.ldexp(coordinate_map, -shift)
     gram = transported.T @ transported
-    return 0.5 * (gram + gram.T)
+    return np.ldexp(0.5 * (gram + gram.T), 2 * (half + shift))
 
 
 def build_penalty_matrix(

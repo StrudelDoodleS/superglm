@@ -17,9 +17,12 @@ import warnings
 import numpy as np
 import pandas as pd
 import pytest
+import scipy.sparse as sp
 
 from superglm import LambdaPolicy, Spline, SuperGLM
 from superglm.dm_builder import compute_R_inv
+from superglm.reml.penalty_algebra import ssp_penalty_matrix
+from superglm.types import GroupInfo
 
 U = 2.0**-53
 X_GRID = np.linspace(0.0, 1.0, 200)
@@ -94,3 +97,51 @@ def test_the_ssp_map_factors_a_penalty_whose_formed_null_is_negative():
     # Inverting a triangular factor of condition kappa errs by a small multiple
     # of u kappa (Higham 2002, sec. 14.2).
     assert np.max(np.abs(whitened - np.eye(p))) <= 2**8 * U * np.linalg.cond(R_inv)
+
+
+class _NearRangePenalty:
+    """``[sin x, cos x]`` with the finite penalty ``1e308 I``, whose root's sums overflow unscaled."""
+
+    def raw(self, x):
+        return np.column_stack([np.sin(x), np.cos(x)])
+
+    def build(self, x, sample_weight=None):
+        basis = sp.csr_matrix(self.raw(x))
+        return GroupInfo(basis, 2, penalty_matrix=1e308 * np.eye(2), reparametrize=True)
+
+    def set_reparametrisation(self, R_inv):
+        self.R_inv = R_inv
+
+    def transform(self, x):
+        return self.raw(x) @ self.R_inv
+
+    def reconstruct(self, beta):
+        return {"beta": self.R_inv @ beta}
+
+
+def test_a_penalty_near_the_float64_range_fits_its_null_space():
+    """A finite penalty above ``2**1023`` penalises the whole term away, as before #468."""
+    x = np.linspace(0.0, 10.0, 100)
+    frame, y = pd.DataFrame({"x": x}), 1.0 + np.sin(x)
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0, features={"x": _NearRangePenalty()}
+    ).fit_reml(frame, y)
+    assert model.result.converged
+    assert model.result.effective_df == pytest.approx(1.0, abs=1e-9)
+    # The intercept-only least squares fit: the penalty has no null space.
+    np.testing.assert_allclose(model.predict(frame), y.mean(), rtol=1e-12)
+
+
+def test_a_huge_ssp_penalty_is_the_ordinary_one_scaled_by_powers_of_two():
+    """Rooting ``2**1021 Omega`` against ``2**-511 C`` gives half of ``C' Omega C``."""
+    difference = np.diff(np.eye(6), n=2, axis=0)
+    omega = difference.T @ difference  # entries up to 6: 6 * 2**1021 overflows P + P'
+    coordinate_map = np.random.default_rng(468).standard_normal((6, 6))
+    ordinary = ssp_penalty_matrix(coordinate_map, omega)
+    huge = ssp_penalty_matrix(2.0**-511 * coordinate_map, 2.0**1021 * omega)
+    assert np.all(np.isfinite(huge))
+    np.testing.assert_allclose(huge, 0.5 * ordinary, rtol=0, atol=8 * U * np.max(np.abs(ordinary)))
+    # The reviewer's case: the old congruence ``C' Omega C`` gave the identity.
+    np.testing.assert_allclose(
+        ssp_penalty_matrix(1e-154 * np.eye(2), 1e308 * np.eye(2)), np.eye(2), rtol=8 * U, atol=0
+    )
