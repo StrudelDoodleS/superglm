@@ -256,6 +256,43 @@ def shape_rows(
     return LinearConstraintSet(A=A, b=np.zeros(A.shape[0])), E
 
 
+def spline_cap_rows(
+    knots: NDArray,
+    degree: int,
+    mean_row: NDArray,
+    bounds: tuple[float, float],
+    *,
+    ends: tuple[float, float] | None,
+) -> LinearConstraintSet:
+    """Rows ``A @ c >= b`` holding the printed curve ``(B(x) - m) @ c`` in ``[log lo, log hi]``.
+
+    ``m`` (``mean_row``) is the training basis mean whose product with ``c`` is
+    the shift the printed curve is centred by. With ``ends`` (a curve monotone
+    on the whole range, whose extremes are at its ends) the rows bound the
+    curve at the two ends, which is exact. Otherwise they bound every
+    coefficient, ``log lo <= (e_j - m) @ c <= log hi``: B-splines are a
+    non-negative partition of unity, so the curve is a convex combination of
+    its coefficients and the rows are sufficient, strict by a gap that shrinks
+    as O(h^2 |f''|) (Lyche & Mørken, *Spline Methods*, Lemma 9.17, Thm 9.18).
+    Both are invariant to adding a constant to ``c``, since ``m`` sums to one.
+    Each row is scaled by its largest entry; a zero row bounds nothing and is
+    dropped.
+    """
+    knots = np.asarray(knots, dtype=np.float64)
+    n_basis = len(knots) - degree - 1
+    if ends is None:
+        values = np.eye(n_basis)
+    else:
+        values = derivative_design(knots, degree, np.asarray(ends, dtype=np.float64), 0)
+    shifted = values - np.asarray(mean_row, dtype=np.float64)[None, :]
+    A = np.vstack([shifted, -shifted])
+    log_lo, log_hi = np.log(bounds[0]), np.log(bounds[1])
+    b = np.concatenate([np.full(len(shifted), log_lo), np.full(len(shifted), -log_hi)])
+    scale = np.max(np.abs(A), axis=1)
+    keep = scale > 0.0
+    return LinearConstraintSet(A=A[keep] / scale[keep, None], b=b[keep] / scale[keep])
+
+
 __all__ = [
     "ShapePiece",
     "derivative_value_row",
@@ -263,4 +300,5 @@ __all__ = [
     "refined_derivative_rows",
     "shape_pieces",
     "shape_rows",
+    "spline_cap_rows",
 ]

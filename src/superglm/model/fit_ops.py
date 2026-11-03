@@ -1267,6 +1267,45 @@ def _reject_monotone_fit_conflicts(model, penalty, has_lambda1_targets) -> None:
         )
 
 
+def _validate_rule_fit_conflicts(model) -> None:
+    """Refuse caps a fit cannot honour and disclose what a cap leaves out, before the build.
+
+    A cap bounds printed relativities, which are factors only under a log
+    link (the rating-table export refuses other links for the same reason).
+    A capped spline that extends linearly past its training range is capped
+    on that range only, so the fit warns once per feature that its tails are
+    not. Reads every main-effect and interaction spec.
+    """
+    from superglm._predictor_compiler import _feature_named_messages
+    from superglm.features.constraint import rules_of
+    from superglm.links import LogLink, resolve_link
+
+    capped = {
+        name: spec
+        for name, spec in itertools.chain(model._specs.items(), model._interaction_specs.items())
+        if any(rule.kind == "cap" for rule in rules_of(spec))
+    }
+    if not capped:
+        return
+    link = resolve_link(configured_link(model), resolve_distribution(configured_family(model)))
+    for name, spec in capped.items():
+        cap = next(rule for rule in rules_of(spec) if rule.kind == "cap")
+        with _feature_named_messages(name):
+            if not isinstance(link, LogLink):
+                raise ValueError(
+                    f"{cap.describe()} bounds printed relativities, which need a log link; "
+                    f"this model uses {type(link).__name__}. Fit with link='log' or drop the cap"
+                )
+            if getattr(spec, "extrapolation", None) == "extend":
+                warnings.warn(
+                    f"{cap.describe()} holds on the training range; with extrapolation='extend' "
+                    "the tails beyond the training range are not capped. Use "
+                    "extrapolation='clip' to keep predictions inside the cap",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
+
 def _uses_direct_solver(model, penalty, has_lambda1_targets) -> bool:
     """Whether `_solve_coefficients` takes the direct IRLS route rather than BCD."""
     return any(group.constraints is not None for group in model._groups) or (
@@ -1418,6 +1457,7 @@ def _fit_in_workspace(
     _reject_lambda_policy_fit(model, "fit")
 
     _auto_detect_specs_if_needed(model, X, sample_weight_ref)
+    _validate_rule_fit_conflicts(model)
     _clear_profile_results(model)
 
     _clear_reml_state(model)
@@ -1551,6 +1591,7 @@ def _fit_path_in_workspace(
     )
 
     _auto_detect_specs_if_needed(model, X, sample_weight_ref)
+    _validate_rule_fit_conflicts(model)
     # A path sweeps lambda1 over a positive grid on ONE design, so the design
     # has to be the one a positive lambda1 requires, whatever the model was
     # configured with.
@@ -1848,6 +1889,7 @@ def _fit_reml_in_workspace(
     model.__dict__.pop("_deferred_rank_info", None)
 
     _auto_detect_specs_if_needed(model, X, sample_weight_ref)
+    _validate_rule_fit_conflicts(model)
     _maybe_estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
     configured_smoothing = configured_lambda2(model)
 

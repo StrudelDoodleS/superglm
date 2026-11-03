@@ -291,3 +291,138 @@ def test_flat_does_not_reach_spline_categorical():
         widths[label] = (main.n_cols, varying._projection.shape[1])
     assert widths["flat"][0] < widths["free"][0]
     assert widths["flat"][1] == widths["free"][1]
+
+
+def _rising_to_three(n: int = 20_000, seed: int = 47) -> tuple[pd.DataFrame, np.ndarray]:
+    """Poisson rows whose printed relativity rises from about 0.69 to about 3.1."""
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(0.0, 10.0, n)
+    return pd.DataFrame({"x": x}), rng.poisson(np.exp(1.5 * (x / 10.0) ** 3))
+
+
+def _cap_fit(
+    X,
+    y,
+    constraint,
+    *,
+    kind="ps",
+    sample_weight=None,
+    method="fit",
+    family="poisson",
+    discrete=False,
+    extrapolation="clip",
+):
+    spline = Spline(kind=kind, k=10, constraint=constraint, extrapolation=extrapolation)
+    model = SuperGLM(
+        family=family, selection_penalty=0.0, discrete=discrete, features={"x": spline}
+    )
+    return getattr(model, method)(X, y, sample_weight=sample_weight)
+
+
+def _printed(model, name: str = "x") -> np.ndarray:
+    """The relativities ``term_inference`` prints, on 2000 grid points."""
+    return model.term_inference(name, with_se=False, n_points=2000, centering="native").relativity
+
+
+def _assert_inside(relativity: np.ndarray, lo: float, hi: float) -> None:
+    assert np.min(relativity) >= lo * (1.0 - 1e3 * U)
+    assert np.max(relativity) <= hi * (1.0 + 1e3 * U)
+
+
+@pytest.mark.parametrize("kind", ["ps", "bs", "cr"])
+def test_cap_binds_printed_curve(kind):
+    X, y = _rising_to_three()
+    model = _cap_fit(X, y, C.cap(0.6, 1.8), kind=kind)
+    printed = _printed(model)
+    assert model.result.converged
+    _assert_inside(printed, 0.6, 1.8)
+    assert np.max(printed) == pytest.approx(1.8, abs=1e-3)  # the cap binds
+    # Mutation: without the cap the curve prints above 2.5.
+    assert np.max(_printed(_cap_fit(X, y, None, kind=kind))) > 2.5
+
+
+def test_cap_keeps_book_balanced():
+    X, y = _rising_to_three()
+    model = _cap_fit(X, y, C.cap(0.6, 1.8))
+    mu = model.predict(X)
+    assert np.max(_printed(model)) == pytest.approx(1.8, abs=1e-3)
+    assert np.sum(mu) == pytest.approx(np.sum(y), rel=1e-8)
+
+
+def test_cap_with_monotone_uses_endpoint_rows():
+    X, y = _rising_to_three()
+    x = X["x"].to_numpy()
+
+    def rows(rule):
+        spec = Spline(kind="ps", k=10, constraint=rule)
+        spec.build(x)
+        return spec, build_shape_constraints_raw(spec)
+
+    spec, monotone = rows(C.increasing & C.cap(0.6, 1.8))
+    assert np.count_nonzero(monotone.b) == 4  # f(lo) and f(hi), each bounded twice
+    spec, alone = rows(C.cap(0.6, 1.8))
+    assert alone.A.shape[0] == np.count_nonzero(alone.b) == 2 * spec._n_basis
+    # Endpoint rows are exact for a monotone curve: the printed curve meets the cap.
+    model = _cap_fit(X, y, C.increasing & C.cap(0.6, 1.8))
+    printed = _printed(model)
+    _assert_inside(printed, 0.6, 1.8)
+    assert np.min(np.diff(printed)) >= -1e3 * U * np.max(printed)
+
+
+def test_cap_rows_include_centring_shift(monkeypatch):
+    """The printed curve is centred unweighted over every training row, zero weights included.
+
+    Half the rows below 5 carry zero weight. The solver centres its basis on
+    the observed (positive-weight) rows, the printed curve on every row, so
+    the two centres differ. Mutation: rows built on the raw coefficients (no
+    mean) print outside the cap.
+    """
+    from superglm.features import _spline_build
+
+    X, y = _rising_to_three()
+    x = X["x"].to_numpy()
+    rng = np.random.default_rng(5)
+    unobserved = (x < 5.0) & (rng.uniform(size=x.size) < 0.5)
+    weight = np.where(unobserved, 0.0, 0.05 + (x / 10.0) ** 4)
+    model = _cap_fit(X, y, C.cap(0.6, 1.8), sample_weight=weight)
+    _assert_inside(_printed(model), 0.6, 1.8)
+
+    monkeypatch.setattr(
+        _spline_build, "training_basis_mean", lambda spec, x: np.zeros(spec._n_basis)
+    )
+    unshifted = _cap_fit(X, y, C.cap(0.6, 1.8), sample_weight=weight)
+    printed = _printed(unshifted)
+    assert np.max(printed) > 1.8 * (1.0 + 1e-3) or np.min(printed) < 0.6 * (1.0 - 1e-3)
+
+
+def test_hard_cap_converges():
+    X, y = _rising_to_three()
+    model = _cap_fit(X, y, C.cap(0.95, 1.05))
+    assert model.result.converged
+    _assert_inside(_printed(model), 0.95, 1.05)
+
+
+def test_cap_refused_under_identity_link():
+    X, y = _rising_to_three()
+    with pytest.raises(ValueError, match=r"Feature 'x': cap\(0\.6, 1\.8\).*log link"):
+        _cap_fit(X, y.astype(float), C.cap(0.6, 1.8), family="gaussian")
+
+
+def test_cap_extend_warns():
+    X, y = _rising_to_three()
+    with pytest.warns(UserWarning, match="tails beyond the training range are not capped") as seen:
+        _cap_fit(X, y, C.cap(0.6, 1.8), extrapolation="extend")
+    assert sum("not capped" in str(w.message) for w in seen) == 1
+
+
+@pytest.mark.parametrize(
+    ("method", "discrete"),
+    [("fit_reml", False), ("fit", True), ("fit_reml", True)],
+    ids=["reml", "discrete", "reml-discrete"],
+)
+def test_cap_reml_and_discrete(method, discrete):
+    X, y = _rising_to_three()
+    model = _cap_fit(X, y, C.cap(0.6, 1.8), method=method, discrete=discrete)
+    printed = _printed(model)
+    _assert_inside(printed, 0.6, 1.8)
+    assert np.max(printed) == pytest.approx(1.8, abs=1e-3)

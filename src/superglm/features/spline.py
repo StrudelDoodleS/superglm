@@ -121,6 +121,9 @@ class _SplineBase:
     # knots at each build (``_spline_subclass_ops.prepare_shape_rules``).
     _shape_pieces: list[tuple[str, float, float]] | None = None
     _flat_rows: NDArray | None = None
+    # The training basis mean a cap's rows are centred by, stored at each build
+    # (``_spline_build.training_basis_mean``).
+    _training_basis_mean: NDArray | None = None
 
     # Configuration and build-time state, assigned by ``_spline_config`` and by the
     # build helpers in ``_spline_runtime`` and ``_spline_cardinal_spec``. Annotations

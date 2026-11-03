@@ -17,6 +17,7 @@ from superglm.features._spline_multi_penalty import build_multi_m_components
 from superglm.features._spline_penalties import structural_penalty_ranks
 from superglm.features._spline_select import build_select
 from superglm.features._spline_subclass_ops import prepare_shape_rules
+from superglm.features.constraint import rules_of
 from superglm.types import GroupInfo, TensorMarginalInfo
 
 
@@ -141,6 +142,32 @@ def _raise_if_unsupported_fit_shape_constraint(spec: Any) -> None:
         )
 
 
+def training_basis_mean(spec: Any, x: NDArray) -> NDArray:
+    """The unweighted mean of the raw basis over the training rows ``x``.
+
+    ``m @ c`` is the shift ``model/runtime_canonicalize.py`` removes from the
+    fitted term to print it: the mean of ``spec.transform`` over every stored
+    training row, zero-weight rows included, each distinct value counted by
+    its rows. Evaluated once per distinct value.
+    """
+    support, counts = np.unique(np.asarray(x, dtype=np.float64).ravel(), return_counts=True)
+    basis = spec._basis_matrix(support)
+    total = np.asarray(basis.T @ counts.astype(np.float64), dtype=np.float64).ravel()
+    return total / float(counts.sum())
+
+
+def _store_training_basis_mean(spec: Any, x: NDArray) -> None:
+    """Store the basis mean a fit-time cap is stated against, or clear it without one.
+
+    Every later rebuild of the cap rows (the REML restore, the design
+    compiler) reads it from the spec, so they are the build's rows.
+    """
+    capped = _uses_fit_time_shape_constraints(spec) and any(
+        rule.kind == "cap" for rule in rules_of(spec)
+    )
+    spec._training_basis_mean = training_basis_mean(spec, x) if capped else None
+
+
 def _is_unpenalised(omega: NDArray) -> bool:
     """Whether a built penalty is identically zero.
 
@@ -215,6 +242,7 @@ def build_group_info(
     spec._place_knots(x, sample_weight)
     spec._validate_m_orders_build()
     prepare_shape_rules(spec, stacklevel=3)
+    _store_training_basis_mean(spec, x)
     distinct = row_supports.distinct_values(x)
     if distinct is None:
         value_rows = index = None
@@ -315,6 +343,7 @@ def build_knots_and_penalty(
     spec._place_knots(x, sample_weight, n_bins)
     spec._validate_m_orders_build()
     prepare_shape_rules(spec, stacklevel=3)
+    _store_training_basis_mean(spec, x)
     omega = spec._build_penalty()
     _, omega_constrained, n_cols, projection = spec._apply_constraints(None, omega)
 

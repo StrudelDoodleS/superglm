@@ -16,6 +16,7 @@ from superglm.solvers.constrained_qp import (
     _constraint_blocks,
     _feasibility_scale,
     _feasibility_slack,
+    _homogeneous_feasible_start,
     _is_feasible,
     _null_space_mass,
     _project_feasible,
@@ -2762,3 +2763,21 @@ class TestDegenerateVertexRetry:
         assert result.converged or abs(force) < np.finfo(float).tiny
         if result.converged:
             self._assert_agrees_with_dual_oracle(H, g, A, b, result)
+
+
+def test_feasible_start_with_nonhomogeneous_rows():
+    """A violated block whose rows all hold at zero restarts there; one with ``b > 0`` cannot.
+
+    Cap rows ``log lo <= x <= log hi`` contain zero, so ``b <= 0``. The second
+    coefficient has no rows and keeps its value. Mutation: the rule "every
+    ``b`` is zero" returns ``None`` for the cap block.
+    """
+    cap = np.array([[1.0, 0.0], [-1.0, 0.0]])
+    bounds = np.array([np.log(0.6), -np.log(1.8)])
+    beta = np.array([3.0, 5.0])
+    np.testing.assert_array_equal(_homogeneous_feasible_start(beta, cap, bounds, 1e-12), [0.0, 5.0])
+    # Satisfied blocks keep their coefficients.
+    inside = np.array([0.25, 5.0])
+    np.testing.assert_array_equal(_homogeneous_feasible_start(inside, cap, bounds, 1e-12), inside)
+    # Zero violates ``x >= 1``: no phase-one point without an LP.
+    assert _homogeneous_feasible_start(beta * -1.0, cap[:1], np.array([1.0]), 1e-12) is None

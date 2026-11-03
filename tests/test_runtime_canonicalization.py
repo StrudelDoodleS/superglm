@@ -57,6 +57,34 @@ def test_runtime_feature_means_evaluate_repeated_values_once() -> None:
     assert spec.call_sizes == [3]
 
 
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+def test_training_basis_mean_is_the_runtime_shift(discrete) -> None:
+    """The stored basis mean ``m`` gives the shift canonicalization removes: ``m @ c``.
+
+    The shift is an unweighted mean over every stored training row, zero-weight
+    rows included, so the public basis ``B @ R_inv`` has zero mean under ``m``.
+    Mutation: a weighted mean, one over the positive-weight rows, or one that
+    counts each distinct value once leaves ``m @ R_inv`` of the order of
+    ``R_inv`` itself.
+    """
+    rng = np.random.default_rng(3)
+    x = np.round(rng.uniform(0.0, 10.0, 4000), 1)  # repeated values: counts matter
+    weight = np.where(rng.uniform(size=x.size) < 0.2, 0.0, 0.1 + x)
+    y = rng.poisson(np.exp(0.1 * x)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        discrete=discrete,
+        features={"x": PSpline(n_knots=8, constraint=Constraint.fit.cap(0.5, 2.0))},
+    ).fit(pd.DataFrame({"x": x}), y, sample_weight=weight)
+    spec = model._specs["x"]
+    m = spec._training_basis_mean
+    reference = np.asarray(spec._basis_matrix(x).toarray().mean(axis=0))
+    np.testing.assert_allclose(m, reference, rtol=0.0, atol=1e3 * 2.0**-53)
+    public = np.asarray(spec._R_inv)
+    assert np.max(np.abs(m @ public)) <= 1e3 * 2.0**-53 * np.max(np.abs(public))
+
+
 def test_runtime_feature_means_chunk_high_cardinality_support() -> None:
     from superglm.model.runtime_canonicalize import (
         _RUNTIME_MEAN_CHUNK_SIZE,

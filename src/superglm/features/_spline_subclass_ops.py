@@ -66,13 +66,14 @@ def _is_rule_collection(spec: Any) -> bool:
 
 
 def _collection_pieces(spec: Any, *, stacklevel: int) -> list:
-    """The spec's rules as pieces on its range, refusing rules a spline cannot fit yet."""
+    """The spec's rules as pieces on its range, refusing rules a spline cannot fit."""
     rules = rules_of(spec)
     for rule in rules:
-        if rule.kind in ("cap", "max_step"):
+        if rule.kind == "max_step":
             raise ValueError(
-                f"{rule.describe()} is not supported on spline terms yet: caps and step "
-                "limits cannot be fitted on this term type; drop the rule"
+                f"{rule.describe()} limits the step between adjacent levels, and a spline term "
+                "has no levels; band the feature with OrderedCategorical to limit its steps, "
+                "or drop the rule"
             )
     return _shape_rule_rows.shape_pieces(rules, spec._lo, spec._hi, stacklevel=stacklevel + 1)
 
@@ -167,4 +168,30 @@ def build_shape_constraints_raw(spec: Any) -> LinearConstraintSet:
     rows, _ = _shape_rule_rows.shape_rows(
         spec._knots, spec.degree, pieces, natural_ends=has_natural_ends(spec)
     )
-    return rows
+    cap = _cap_rows(spec)
+    if cap is None:
+        return rows
+    return LinearConstraintSet(A=np.vstack([rows.A, cap.A]), b=np.concatenate([rows.b, cap.b]))
+
+
+def _cap_rows(spec: Any) -> LinearConstraintSet | None:
+    """The rows of the spec's cap on its printed curve, or ``None`` without a cap.
+
+    The curve is monotone on its whole range when a direction rule covers it,
+    and its cap is then stated at the two ends.
+    """
+    rules = rules_of(spec)
+    cap = next((rule for rule in rules if rule.kind == "cap"), None)
+    if cap is None:
+        return None
+    mean = spec._training_basis_mean
+    if mean is None:
+        raise RuntimeError(
+            f"{cap.describe()} needs the training basis mean stored when the term was built; "
+            "build the term on its training rows before building its constraint rows"
+        )
+    monotone = any(
+        rule.kind in ("increasing", "decreasing") and rule.stretch == (None, None) for rule in rules
+    )
+    ends = (spec._lo, spec._hi) if monotone else None
+    return _shape_rule_rows.spline_cap_rows(spec._knots, spec.degree, mean, cap.bounds, ends=ends)

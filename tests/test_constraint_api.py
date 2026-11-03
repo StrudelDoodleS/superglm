@@ -280,14 +280,13 @@ def test_a_single_stretched_or_new_rule_is_a_collection_not_dropped(rule):
 
 
 def test_a_rule_collection_never_fits_with_rules_dropped():
-    # Shape collections build rows; caps and step limits are refused until they do.
+    # Shape collections and caps build rows; a spline has no levels to limit steps between.
     x = np.linspace(0.0, 50.0, 200)
-    for rule in (C.increasing.below(25), C.increasing & C.concave):
+    for rule in (C.increasing.below(25), C.increasing & C.concave, C.increasing & C.cap(0.6, 1.8)):
         assert Spline(kind="ps", k=12, constraint=rule).build(x).constraints.A.shape[0] > 0
-    for rule in (C.increasing & C.cap(0.6, 1.8), C.max_step(0.2)):
-        spec = Spline(kind="ps", k=12, constraint=rule)
-        with pytest.raises(ValueError, match="not supported on spline terms yet"):
-            spec.build(x)
+    spec = Spline(kind="ps", k=12, constraint=C.increasing & C.max_step(0.2))
+    with pytest.raises(ValueError, match="band the feature with OrderedCategorical"):
+        spec.build(x)
 
 
 def test_per_rule_degree_checks():

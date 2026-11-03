@@ -517,21 +517,23 @@ def _constraint_blocks(A: NDArray) -> list[tuple[NDArray, frozenset[int]]]:
 def _homogeneous_feasible_start(
     beta: NDArray, A: NDArray, b: NDArray, tol: float
 ) -> NDArray | None:
-    """Phase one for homogeneous rows: each block that violates its rows restarts at zero.
+    """Phase one for rows zero satisfies: each block that violates its rows restarts at zero.
 
     A primal active-set method needs a feasible start (Nocedal and Wright,
     *Numerical Optimization*, 2nd ed., 2006, section 16.5), found in general
-    by a phase-one LP. A block whose rows all have ``b == 0`` is a cone, and
-    its apex ``beta[block] = 0`` is feasible, so no LP is needed. Blocks that
-    satisfy their rows keep their coefficients. ``None`` when a violated
-    block has a row with ``b != 0``.
+    by a phase-one LP. A block whose rows all have ``b <= 0`` holds them at
+    ``beta[block] = 0``, so no LP is needed: a homogeneous block (every
+    ``b == 0``) is a cone with that point as its apex, and a cap, whose bounds
+    contain a zero log effect, has ``b <= 0``. Blocks that satisfy their rows
+    keep their coefficients. ``None`` when a violated block has a row zero
+    violates (``b > 0``).
     """
     beta = beta.copy()
     for block_cols, block_rows in _constraint_blocks(A):
         rows = sorted(block_rows)
         if _is_feasible(A[rows], beta, b[rows], tol):
             continue
-        if np.any(b[rows] != 0.0):
+        if np.any(b[rows] > 0.0):
             return None
         beta[block_cols] = 0.0
     return beta
