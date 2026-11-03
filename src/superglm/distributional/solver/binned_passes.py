@@ -187,9 +187,13 @@ def _pair_reader(t: _Term, u: _Term, V: NDArray, n: int, budget: list[int]) -> C
     ``S_t V`` against the narrower side's rows (``_choose_pairs``' cost
     model); a one-hot side always takes the table that fits, and is never read
     as a row. A dense side reads its values against the other side's ``S V``.
+    Any order but the rows' ``(x_t V) x_u`` runs only where every partial
+    product stays normal (``_cross_factors_in_range``).
     """
     if t.dense and u.dense:
         return lambda codes, values: np.einsum("ij,ij->i", values[t] @ V, values[u])
+    if t.dense and not (u.one_hot or _cross_factors_in_range(t.group.M, V, u.table)):
+        return lambda codes, values: np.einsum("ij,ij->i", values[t] @ V, u.table[codes[u]])
     if t.dense:
         t, u, V = u, t, V.T
     if u.dense:
@@ -215,7 +219,7 @@ def _pair_reader(t: _Term, u: _Term, V: NDArray, n: int, budget: list[int]) -> C
             G = _left(u, _left(t, V).T).T
         flat = np.ascontiguousarray(G).ravel()
         return lambda codes, values: flat[codes[t] * m_u + codes[u]]
-    if u.one_hot or (not t.one_hot and p_t < p_u):
+    if u.one_hot or (not t.one_hot and p_t < p_u and _cross_factors_in_range(V, t.table, u.table)):
         t, u, V = u, t, V.T
     Q = _left(t, V)
     return lambda codes, values: np.einsum("ij,ij->i", Q[codes[t]], u.table[codes[u]])
@@ -303,7 +307,8 @@ def binned_cross_grams(
     contraction allowance, then once per block in row order. Each component
     runs the binned assembly without a score, over pass tables stacked across
     the components (``StackedPassTables``) in what the block leaves. A
-    non-finite result is None, as the leverage blocks' is.
+    non-finite result is None, as the leverage blocks' is; non-finite weights,
+    or a moment the assembly cannot represent (``LinAlgError``), raise.
     """
     if not binned_layout(layout):
         return None
@@ -358,8 +363,10 @@ def binned_cross_grams(
         plans = block_plans(layout, panels, start, stop)
         for k, accumulator in enumerate(accumulators):
             accumulator.add_block(plans, None, np.ascontiguousarray(packed[:, k, :].T))
-    out = np.stack([accumulator.finish().data_curvature for accumulator in accumulators])
-    return out if np.all(np.isfinite(out)) else None
+    # An overflow meets signed weights as nan, which finish()'s symmetry check refuses.
+    if not all(accumulator.curvature_is_finite() for accumulator in accumulators):
+        return None
+    return np.stack([accumulator.finish().data_curvature for accumulator in accumulators])
 
 
 @dataclass(frozen=True)

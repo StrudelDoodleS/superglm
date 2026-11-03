@@ -551,6 +551,11 @@ class GroupedGeometryAccumulator:
             self._curvature[rows, columns] += block
             self._curvature[columns, rows] += block.T
 
+    def curvature_is_finite(self) -> bool:
+        """Whether the curvature summed so far, its pass tables contracted, is finite."""
+        self.release_tables()
+        return bool(np.all(np.isfinite(self._curvature)))
+
     def finish(self) -> DenseJointGeometry:
         """Validate complete channel coverage and publish immutable geometry."""
         if self._finished:

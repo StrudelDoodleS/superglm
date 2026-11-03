@@ -582,3 +582,76 @@ def test_support_compressed_layouts_equal_the_dense_rows(split_blocks):
         dot = bp.design_dot_rows(layout, q, D, 31, 900)
         dot_magnitude = np.abs(matrix[31:900]) @ np.abs(D)
         assert _excess(dot, matrix[31:900] @ D, dot_magnitude, matrix.shape[1]) <= 0.0
+
+
+@pytest.mark.parametrize("dense", [False, True], ids=["rows-swap", "dense-swap"])
+@pytest.mark.parametrize("guarded", [True, False], ids=["guarded", "mutation-unguarded"])
+def test_leverage_rows_keep_their_order_where_reading_v_x_u_first_would_underflow(
+    dense, guarded, monkeypatch
+):
+    """``x_t = 2**128 e_0`` and ``x_u = 2**-128 e_0`` with ``V = 2**-1000 [I 0]``: the
+    narrower or dense side would read ``V x_u`` first, which underflows to 0.
+
+    The rows' order ``(x_t V) x_u`` gives exactly 2**-1000. Mutation check:
+    dropping the range check takes the swap and reads 0.
+    """
+    from superglm._group_matrix._group_matrix_core import DenseGroupMatrix
+
+    if not guarded:
+        monkeypatch.setattr(bp, "_cross_factors_in_range", lambda *operands: True)
+    monkeypatch.setattr(bp, "_CELL_CAP", 0)
+    left = 2.0**128 * np.eye(2)
+    if dense:
+        t = bp._Term(slice(0, 2), DenseGroupMatrix(np.tile(left[0], (6, 1))), None)
+    else:
+        t = bp._Term(slice(0, 2), None, left)
+    u = bp._Term(slice(2, 5), None, 2.0**-128 * np.eye(3))
+    reader = bp._pair_reader(t, u, 2.0**-1000 * np.eye(2, 3), 6, [1 << 20])
+    codes = (
+        {u: np.zeros(6, np.intp)} if dense else {t: np.zeros(6, np.intp), u: np.zeros(6, np.intp)}
+    )
+    values = {t: t.group.M} if dense else {}
+    got = reader(codes, values)
+    assert bool(abs(got[0] - 2.0**-1000) <= 4 * U * 2.0**-1000) is guarded
+
+
+@pytest.mark.parametrize("guarded", [True, False], ids=["guarded", "mutation-unguarded"])
+def test_cross_grams_whose_sum_is_not_finite_are_none(problem, split_blocks, monkeypatch, guarded):
+    """A nan in the summed curvature (an overflow meeting signed weights) gives None,
+    so a caller falls back to its dense rows. The event is forced: one block's
+    curvature entry is set to nan. Mutation check: without the finiteness check,
+    ``finish()``'s symmetry check raises instead.
+    """
+    from superglm.distributional.solver.assembly import GroupedGeometryAccumulator
+
+    original = GroupedGeometryAccumulator.add_block
+
+    def poisoned(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        self._curvature[0, 0] = np.nan
+
+    monkeypatch.setattr(GroupedGeometryAccumulator, "add_block", poisoned)
+    if not guarded:
+        monkeypatch.setattr(GroupedGeometryAccumulator, "curvature_is_finite", lambda self: True)
+    layout, matrices, _slices, rng = problem
+    k = len(matrices)
+    packed = rng.normal(size=(N, 2, k * (k + 1) // 2))
+    run = lambda: bp.binned_cross_grams(layout, lambda a, b: packed[a:b], layout.n_coefficients)  # noqa: E731
+    if guarded:
+        assert run() is None
+    else:
+        with pytest.raises(RuntimeError, match="symmetry"):
+            run()
+
+
+def test_out_of_range_inputs_refuse_or_fall_back(problem, split_blocks):
+    """Weights at 1e308 meet the assembly's refusal of a moment it cannot represent, as
+    every chunked SuperLSS fit does; an inverse at 1e308 overflows the leverage
+    blocks, which then give None."""
+    layout, matrices, _slices, _rng = problem
+    k = len(matrices)
+    packed = np.full((N, 2, k * (k + 1) // 2), 1e308)
+    with pytest.raises(np.linalg.LinAlgError, match="not representable"):
+        bp.binned_cross_grams(layout, lambda a, b: packed[a:b], layout.n_coefficients)
+    inverse = np.full((layout.n_coefficients,) * 2, 1e308)
+    assert bp.binned_leverage_blocks(layout, inverse) is None
