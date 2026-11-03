@@ -19,6 +19,7 @@ from superglm import (
     collapse_levels,
 )
 from superglm.features.constraint import ConstraintRules, rules_of
+from superglm.solvers.irls_direct._qp import _QP_FEASIBILITY_TOL
 
 C = Constraint.fit
 _U = 2.0**-53
@@ -51,9 +52,12 @@ def _fit(X, y, spec, *, method="fit", family="poisson", **features):
 
 
 def _assert_in_cap(printed, lo, hi):
+    # The QP certifies a point once its scaled slack is within its feasibility
+    # tolerance, so a capped relativity may print that far past its bound.
+    slack = _QP_FEASIBILITY_TOL + 1e3 * _U
     values = np.array(list(printed.values()))
-    assert np.min(values) >= lo * (1.0 - 1e3 * _U)
-    assert np.max(values) <= hi * (1.0 + 1e3 * _U)
+    assert np.min(values) >= lo * (1.0 - slack)
+    assert np.max(values) <= hi * (1.0 + slack)
 
 
 def test_categorical_cap_binds():

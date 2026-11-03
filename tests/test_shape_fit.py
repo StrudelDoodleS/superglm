@@ -18,6 +18,7 @@ from superglm import (
 )
 from superglm.constraints import shape_constraint_certificate, shape_derivative_matrix
 from superglm.features._spline_subclass_ops import build_shape_constraints_raw
+from superglm.solvers.irls_direct._qp import _QP_FEASIBILITY_TOL
 
 C = Constraint.fit
 U = 2.0**-53
@@ -346,8 +347,11 @@ def _printed(model, name: str = "x") -> np.ndarray:
 
 
 def _assert_inside(relativity: np.ndarray, lo: float, hi: float) -> None:
-    assert np.min(relativity) >= lo * (1.0 - 1e3 * U)
-    assert np.max(relativity) <= hi * (1.0 + 1e3 * U)
+    # The QP certifies a point once its scaled slack is within its feasibility
+    # tolerance, so a capped relativity may print that far past its bound.
+    slack = _QP_FEASIBILITY_TOL + 1e3 * U
+    assert np.min(relativity) >= lo * (1.0 - slack)
+    assert np.max(relativity) <= hi * (1.0 + slack)
 
 
 @pytest.mark.parametrize("kind", ["ps", "bs", "cr"])
