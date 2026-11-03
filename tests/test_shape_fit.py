@@ -589,3 +589,37 @@ def test_flat_only_term_takes_the_ordinary_route_under_a_selection_penalty(discr
     ):
         warnings.simplefilter("ignore", UserWarning)
         model_of(C.decreasing.below(3.0) & flat).fit(X, y)
+
+
+def test_whole_range_flat_refusal_names_the_boundary_spans_a_natural_end_holds():
+    """On a natural spline the stretch itself touches [2, 8]; the natural ends hold the rest.
+
+    The refusal says both, and that a knot inside a boundary span, or a narrower
+    stretch, keeps the term. Mutation: it said only "the whole knot spans it touches".
+    """
+    X = pd.DataFrame({"x": np.linspace(0.0, 10.0, 600)})
+    y = np.random.default_rng(3).poisson(2.0, 600).astype(float)
+
+    def fit(knots, stretch):
+        spec = CubicRegressionSpline(knots=knots, constraint=C.flat.within(*stretch))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            return SuperGLM(family="poisson", selection_penalty=0.0, features={"x": spec}).fit(X, y)
+
+    with pytest.raises(ValueError) as refusal:
+        fit([2, 4, 6, 8], (3, 7))
+    message = str(refusal.value)
+    assert message.startswith("Feature 'x': flat.within(3, 7) holds the curve flat on [0, 10], ")
+    assert (
+        "the whole knot spans it touches and the boundary spans its natural ends hold flat "
+        "beside them, which is the feature's whole range" in message
+    )
+    assert "or put a knot inside a boundary span" in message
+    # A knot in a boundary span, or a stretch that stops short of the last interior knot, keeps the term.
+    fit([1, 2, 4, 6, 8], (3, 7))
+    fit([2, 4, 6, 8], (3, 5))
+    # An open spline has no natural end: its refusal does not mention one.
+    with pytest.raises(ValueError) as open_refusal:
+        spec = Spline(kind="ps", k=8, constraint=C.flat.within(0.1, 9.9))
+        SuperGLM(family="poisson", selection_penalty=0.0, features={"x": spec}).fit(X, y)
+    assert "natural" not in str(open_refusal.value)

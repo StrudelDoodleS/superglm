@@ -176,11 +176,14 @@ def _refuse_flat_over_curve(spec: Any, pieces: list) -> None:
     lo, hi = max(regions[0][0], spec._lo), min(regions[-1][1], spec._hi)
     flat_rules = [rule for rule in rules_of(spec) if rule.kind == "flat"]
     shown, held = zip(*(_shown_and_held(spec, rule, lo, hi) for rule in flat_rules), strict=True)
+    natural = regions != _shape_rule_rows.flat_zero_regions(spec._knots, pieces)
     raise ValueError(
         f"{' & '.join(rule.describe() for rule in shown)} holds the curve flat on {held[0]}, "
-        "the whole knot spans it touches, which is the feature's whole range and leaves the "
-        "term with no effect; remove the term, or narrow the stretch to leave part of the "
-        "range free"
+        "the whole knot spans it touches"
+        + (" and the boundary spans its natural ends hold flat beside them" if natural else "")
+        + ", which is the feature's whole range and leaves the term with no effect; remove the "
+        "term, or narrow the stretch to leave part of the range free"
+        + (", or put a knot inside a boundary span" if natural else "")
     )
 
 
