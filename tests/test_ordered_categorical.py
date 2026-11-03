@@ -1159,6 +1159,30 @@ def test_ordered_cap_at_levels():
     assert np.max(_printed_levels(_ordered_fit(X, y, C.increasing))) > 1.8
 
 
+def test_ordered_cap_holds_at_levels_absent_from_training():
+    """A cap holds on the printed relativities of declared levels the data never shows.
+
+    Bands A and F are declared but absent, so their axis values lie outside the
+    inner spline's range and prediction clips them; the base is A. Mutation: the
+    rows read the raw polynomial beyond the range and E printed 1.5 under a 1.2 cap.
+    """
+    C = Constraint.fit
+    X = pd.DataFrame({"band": np.repeat(np.array(list("BCDE"), dtype=object), 200)})
+    y = np.repeat([1.0, 6.0, 1.0, 6.0], 200)
+    spec = OrderedCategorical(
+        order=list("ABCDEF"), base="A", basis=Spline(kind="ps", k=5, constraint=C.cap(0.8, 1.2))
+    )
+    model = SuperGLM(family="poisson", selection_penalty=0.0, features={"band": spec})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y)
+    printed = _printed_levels(model)
+    assert np.min(printed) >= 0.8 * (1.0 - 1e3 * _U)
+    assert np.max(printed) <= 1.2 * (1.0 + 1e3 * _U)
+    mu = model.predict(pd.DataFrame({"band": np.array(list("ABCDEF"), dtype=object)}))
+    assert np.max(mu / mu[0]) <= 1.2 * (1.0 + 1e3 * _U)
+
+
 @pytest.mark.parametrize("method", ["fit", "fit_reml"])
 def test_ordered_cap_without_a_shape_rule(method):
     """A cap alone binds the printed band relativities; the inner spline adds no rows.

@@ -899,13 +899,21 @@ class OrderedCategorical:
         for each adjacent pair; any constant centring shift cancels in both.
         Each row is scaled by its largest entry; a zero row bounds nothing and
         is dropped.
-        """
-        from superglm.features._spline_ranges import derivative_design
 
+        ``B`` is the inner basis the term predicts with, under its extrapolation
+        policy, because a declared level absent from the training rows can sit
+        outside the inner range: there prediction clips (or follows a natural
+        spline's linear tail), and the rows must bound that curve. Under
+        ``extrapolation="error"`` such a level cannot be predicted, so its row is
+        read at the clipped value, which bounds nothing a user reads.
+        """
         inner = cast(Any, self._basis_spline)  # ty: the knots are set per instance at the build
         levels = sorted(self._smooth_levels, key=self._level_to_value.__getitem__)
         values = np.array([self._level_to_value[level] for level in levels], dtype=np.float64)
-        B = derivative_design(inner._knots, inner.degree, values, 0)
+        if inner.extrapolation == "error":
+            values = np.clip(values, inner._lo, inner._hi)
+        B = inner._basis_matrix(values)
+        B = B.toarray() if sp.issparse(B) else np.asarray(B, dtype=np.float64)
         blocks: list[NDArray] = []
         bounds: list[NDArray] = []
         for rule in self._level_rules:
