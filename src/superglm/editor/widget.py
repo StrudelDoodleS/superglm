@@ -33,6 +33,7 @@ from superglm.editor.cv import (
     FinalFit,
     capture_cv_run,
     capture_final_fit,
+    final_fit_reason,
     run_cv,
     run_final_fit,
 )
@@ -278,6 +279,9 @@ class EditorWidget:
             if is_lss(self.session.model):
                 state["unavailable"] = session_availability()
                 state["capabilities"] = dict(LSS_CAPABILITIES)
+                # The Final fit panel's own button reads whether the fit can run.
+                reason = final_fit_reason(self.session)
+                state["final_fit_plan"] = {"available": reason is None, "reason": reason}
             self._state_generation += 1
             state["state_generation"] = self._state_generation
             state["chart_generation"] = self._chart_generation

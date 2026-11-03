@@ -11,7 +11,7 @@ import pytest
 from scipy import integrate, stats
 
 from superglm import LogNormalLS, SuperLSS, cat, s
-from superglm.editor.cv import capture_cv_run, capture_final_fit, run_final_fit
+from superglm.editor.cv import capture_cv_run, capture_final_fit, final_fit_reason, run_final_fit
 from superglm.editor.errors import EditorValueError
 from superglm.editor.lss.availability import LSS_UNAVAILABLE, SESSION_TOOLS
 from superglm.editor.lss.validation import LSS_METRIC_LABELS, lss_dataset_metrics
@@ -283,5 +283,31 @@ def test_capabilities_only_for_superlss(editor_model):  # noqa: F811
     glm = edit(editor_model).widget()
     try:
         assert "capabilities" not in glm._state()
+    finally:
+        glm.close()
+
+
+def test_state_carries_the_final_fit_plan_for_superlss_only(editor_model):  # noqa: F811
+    # Available: the fit rows and a validation split with the same columns.
+    case = nb_case()
+    split = holdout_rows(case, 100)
+    ready = open_case(case, validation_data=(split.X, split.y, None, split.offset)).widget()
+    # Unavailable: the validation split lacks the offsets the train rows hold.
+    lacking = open_case(case, validation_data=(split.X, split.y, None, None))
+    blocked = lacking.widget()
+    try:
+        assert final_fit_reason(ready.session) is None
+        assert ready._state()["final_fit_plan"] == {"available": True, "reason": None}
+        reason = final_fit_reason(lacking)
+        assert reason is not None
+        assert blocked._state()["final_fit_plan"] == {"available": False, "reason": reason}
+    finally:
+        ready.close()
+        blocked.close()
+    from superglm.editor import edit
+
+    glm = edit(editor_model).widget()
+    try:
+        assert "final_fit_plan" not in glm._state()
     finally:
         glm.close()

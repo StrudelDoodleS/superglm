@@ -9,7 +9,7 @@ import {
   finalFitRunState,
 } from "../../src/superglm/editor/app/views/final_fit_run.js";
 
-const ready = { available: true, reason: null, note: null, done: false, stale: false, n_rows: null };
+const ready = { available: true, reason: null };
 
 test("a final fit that can run enables the button with the standard hover text", () => {
   assert.deepEqual(finalFitRunState({ final: ready }), {
@@ -18,7 +18,7 @@ test("a final fit that can run enables the button with the standard hover text",
 });
 
 test("a final fit that cannot run disables the button and says why on hover", () => {
-  const state = finalFitRunState({ final: { ...ready, available: false, reason: "No train or validation rows are kept." } });
+  const state = finalFitRunState({ final: { available: false, reason: "No train or validation rows are kept." } });
   assert.equal(state.disabled, true);
   assert.equal(state.hint, "No train or validation rows are kept.");
 });
@@ -47,4 +47,14 @@ test("a failed or cancelled job is told; a finished or running one says nothing"
   assert.equal(finalFitFailure({ status: "cancelled" }), "The job was cancelled and nothing was kept.");
   assert.equal(finalFitFailure({ status: "done" }), "");
   assert.equal(finalFitFailure({ status: "running" }), "");
+});
+
+test("the button follows the plan in a snapshot, and a snapshot without one leaves it enabled", () => {
+  const snapshot = (plan) => ({ model_revision: 3, capabilities: { cv: false, final_fit: true }, final_fit_plan: plan });
+  const reason = "Final fit needs offsets in every split.";
+  const blocked = finalFitRunState({ final: snapshot({ available: false, reason }).final_fit_plan });
+  assert.deepEqual([blocked.disabled, blocked.hint], [true, reason]);
+  const open = finalFitRunState({ final: snapshot({ available: true, reason: null }).final_fit_plan });
+  assert.equal(open.disabled, false);
+  assert.equal(finalFitRunState({ final: snapshot(undefined).final_fit_plan }).disabled, false);
 });

@@ -1,6 +1,6 @@
 // @ts-check
 
-/** @typedef {import('../api/contracts.js').CVReportPayload['final_fit']} FinalFitPlan */
+/** @typedef {NonNullable<import('../api/contracts.js').EditorSnapshot['final_fit_plan']>} FinalFitPlan */
 /** @typedef {import('../api/contracts.js').JobStatus} JobStatus */
 
 export const FINAL_FIT_RUN_HINT =
@@ -13,15 +13,15 @@ export const FINAL_FIT_RUN_HINT =
  * that tab's: disabled with the server's reason when the fit cannot run, and
  * while one runs. A failure to start is told beside it, not in a popup.
  *
- * @param {{final:FinalFitPlan|null, running?:boolean, error?:string}} state
- *   `final` is the plan the server reports, null until it is known
+ * @param {{final:FinalFitPlan|null|undefined, running?:boolean, error?:string}} state
+ *   `final` is the snapshot's `final_fit_plan`, absent until a snapshot arrives
  * @returns {{disabled:boolean, hint:string, note:string}}
  */
 export function finalFitRunState({ final, running = false, error = "" }) {
-  const blocked = final !== null && !final.available;
+  const blocked = Boolean(final) && !final?.available;
   return {
     disabled: running || blocked,
-    hint: blocked && final.reason ? final.reason : FINAL_FIT_RUN_HINT,
+    hint: blocked && final?.reason ? final.reason : FINAL_FIT_RUN_HINT,
     note: error ? `Final fit could not run. ${sentence(error)} Change the model if needed, then run it again.` : "",
   };
 }

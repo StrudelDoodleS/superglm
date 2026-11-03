@@ -788,16 +788,14 @@ bindExportDialog({
   }
 });
 
-// The Final fit panel's button follows the plan the Cross-validation report
-// gives (can it run, and why not), fetched when the panel opens and after a run.
-let finalFitPlan = null;
+// The Final fit panel's button follows the snapshot's plan (can it run, and why not).
 let finalFitRunning = false;
 let finalFitRunError = "";
 
 function renderFinalFitRun() {
   if (!finalFitRun || !finalFitRunNote) return;
   const { disabled, hint, note } = finalFitRunState({
-    final: finalFitPlan,
+    final: store.getState().remote.snapshot?.final_fit_plan ?? null,
     running: finalFitRunning,
     error: finalFitRunError
   });
@@ -805,15 +803,6 @@ function renderFinalFitRun() {
   finalFitRun.dataset.popoverBody = hint;
   finalFitRunNote.textContent = note;
   finalFitRunNote.hidden = !note;
-}
-
-async function refreshFinalFitPlan() {
-  try {
-    finalFitPlan = (await editorClient.postJSON("/report", { report: "cv" })).final_fit ?? null;
-  } catch {
-    finalFitPlan = null;
-  }
-  renderFinalFitRun();
 }
 
 // A session tool the model does not offer: its export format is disabled, and
@@ -1436,13 +1425,15 @@ function selectActiveViewRenderState(state) {
   return {
     ready: state.remote.snapshot !== null,
     activeView: state.view.activeView,
-    finalFitHere: state.remote.snapshot?.capabilities?.cv === false
+    finalFitHere: state.remote.snapshot?.capabilities?.cv === false,
+    finalFitPlan: state.remote.snapshot?.final_fit_plan ?? null
   };
 }
 
 function sameActiveViewRenderState(next, previous) {
   return next.ready === previous.ready && next.activeView === previous.activeView &&
-    next.finalFitHere === previous.finalFitHere;
+    next.finalFitHere === previous.finalFitHere &&
+    JSON.stringify(next.finalFitPlan) === JSON.stringify(previous.finalFitPlan);
 }
 
 // Without a Cross-validation tab, the Final fit panel starts the final fit.
@@ -1450,7 +1441,7 @@ function renderActiveViewState({ ready, activeView, finalFitHere }) {
   if (!ready) return;
   if (finalFitRun) {
     finalFitRun.hidden = !(finalFitHere && activeView === "final");
-    if (!finalFitRun.hidden) void refreshFinalFitPlan();
+    renderFinalFitRun();
   }
   renderAppView(activeView);
   renderReportEvidence(store.getState().request.evidence.report, activeView);
@@ -2285,7 +2276,7 @@ if (finalFitRun) {
       await cvTab.start("final_fit");
     } finally {
       finalFitRunning = false;
-      await refreshFinalFitPlan();
+      renderFinalFitRun();
     }
   });
 }

@@ -395,6 +395,7 @@
  * @property {{available:boolean, stale:boolean}} [final_fit] whether Export can offer the Final fit model
  * @property {number} [fit_token] changes only when the fitted model in force is replaced
  * @property {{cv:boolean, final_fit:boolean}} [capabilities] SuperLSS sessions only: what the session offers
+ * @property {{available:boolean, reason:string|null}} [final_fit_plan] SuperLSS sessions only: whether Final fit can run now, and the sentence for why not
  * @property {Record<string, string>} [unavailable] SuperLSS sessions only: the reason for each session tool that is off
  */
 /**
