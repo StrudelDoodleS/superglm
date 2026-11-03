@@ -1049,13 +1049,18 @@ def _convergence_note(fitted: Any) -> str:
     why = lss_nonconvergence_reason(
         getattr(fitted, "fitted_result", None),
         None if smoothing is None else smoothing.convergence_reason,
+        getattr(getattr(fitted, "result", None), "convergence_reason", None),
     )
     return "" if why is None else f"fit not converged: {why}"
 
 
-def _negative_edf_note(edf: float) -> str:
-    """A negative EDF is no degree of freedom; the row must not read as one."""
-    return f"negative EDF ({float(edf):.3g}) is not interpretable" if float(edf) < 0.0 else ""
+def _negative_edf_note(edf: float, tolerance: float) -> str:
+    """A negative EDF is no degree of freedom; the row must not read as one.
+
+    Below the fit's EDF reconciliation ``tolerance`` a negative value is
+    rounding of a zero EDF, and is not flagged.
+    """
+    return f"negative EDF ({float(edf):.3g}) is not interpretable" if edf < -tolerance else ""
 
 
 def _covariance_note(requested: CovarianceKind, resolved: CovarianceKind) -> str:
@@ -1173,7 +1178,7 @@ def summary_table(
                         ),
                         convergence_note,
                         covariance_note,
-                        _negative_edf_note(outcome.edf),
+                        _negative_edf_note(outcome.edf, fitted.inference.reconciliation_tolerance),
                     ),
                 }
             )

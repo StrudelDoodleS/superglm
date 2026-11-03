@@ -611,7 +611,9 @@ class SuperLSS:
         fitted_result = getattr(candidate, "fitted_result", None)
         smoothing = getattr(candidate, "smoothing", None)
         message = lss_nonconvergence_message(
-            fitted_result, None if smoothing is None else smoothing.convergence_reason
+            fitted_result,
+            None if smoothing is None else smoothing.convergence_reason,
+            candidate.result.convergence_reason,
         )
         if message is not None and (
             efs_config is not None or lss_ill_conditioned_note(fitted_result)

@@ -7,7 +7,10 @@ from typing import Any, cast
 
 import numpy as np
 
-from superglm.diagnostics.convergence import reml_nonconvergence_message
+from superglm.diagnostics.convergence import (
+    coefficient_nonconvergence_message,
+    reml_nonconvergence_message,
+)
 from superglm.inference._term_helpers import (
     ordered_level_fit,
     spline_group_enrichment,
@@ -26,6 +29,15 @@ from superglm.profiling._reporting import (
 from superglm.solvers.rank import selected_group_name_set
 from superglm.terms import TermResults
 from superglm.types import GroupSlice
+
+
+def _terminal_stop(model, res) -> tuple[str | None, str | None]:
+    """The last fitting stage's stop and its non-convergence note: REML's when
+    smoothing was selected, otherwise the coefficient fit's."""
+    reml = getattr(model, "_reml_result", None)
+    if reml is None:
+        return getattr(res, "termination_reason", None), coefficient_nonconvergence_message(res)
+    return reml.termination_reason, reml_nonconvergence_message(reml)
 
 
 def diagnostics(model) -> dict[str, Any]:
@@ -57,6 +69,7 @@ def diagnostics(model) -> dict[str, Any]:
             int(index) - g.start for index in weak_indices if g.start <= int(index) < g.end
         ]
         out[g.name] = entry
+    termination_reason, convergence_note = _terminal_stop(model, res)
     out["_model"] = {
         "intercept": res.intercept,
         "deviance": res.deviance,
@@ -72,10 +85,8 @@ def diagnostics(model) -> dict[str, Any]:
             if getattr(model, "_reml_result", None) is not None
             else res.converged
         ),
-        "termination_reason": getattr(
-            getattr(model, "_reml_result", None), "termination_reason", None
-        ),
-        "convergence_note": reml_nonconvergence_message(getattr(model, "_reml_result", None)),
+        "termination_reason": termination_reason,
+        "convergence_note": convergence_note,
         "lambda1": penalty.lambda1,
         "weakly_identified": list(reml_profile.get("reml_weakly_identified_labels", ()) or ()),
         "excluded_from_smoothing_selection": list(
@@ -285,9 +296,9 @@ def summary(
             else res.n_iter
         ),
     }
-    convergence_note = reml_nonconvergence_message(getattr(model, "_reml_result", None))
+    termination_reason, convergence_note = _terminal_stop(model, res)
     if convergence_note is not None:
-        model_info["termination_reason"] = model._reml_result.termination_reason
+        model_info["termination_reason"] = termination_reason
         model_info["convergence_note"] = convergence_note
     editor_meta = getattr(model, "_editor_edits", None)
     if getattr(model, "_editor_inference_stale", False):

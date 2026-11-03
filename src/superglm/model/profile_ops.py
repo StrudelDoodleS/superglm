@@ -321,9 +321,8 @@ def _publish_profiled_family(
         from superglm.model import fit_ops
 
         fit_ops._record_reml_terminal_best_effort(model, debug_recorder)
-        # The published refit warns once, as fit_reml does; stacklevel 4
-        # reaches the caller of SuperGLM.estimate_p / estimate_theta.
-        fit_ops.warn_published_reml_nonconvergence(model, stacklevel=4)
+        # The published refit warns once, as fit_reml does, at the caller's line.
+        fit_ops.warn_published_reml_nonconvergence(model)
     return published
 
 
@@ -386,12 +385,14 @@ def _install_tweedie_profile(final_model, *, X, y, offset, result) -> None:
     _synchronize_tweedie_profile_refit(
         final_model, y, base.predict_exact(final_model, X, offset, warn=False), result
     )
-    # The estimate is converged only if the fit it is published with is.
-    reml = getattr(final_model, "_reml_result", None)
-    result.converged = bool(
-        result.converged and final_model.result.converged and (reml is None or reml.converged)
-    )
+    result.converged = _published_converged(final_model, result.converged)
     final_model._tweedie_profile_result = _detached_copy(result)
+
+
+def _published_converged(final_model, converged: bool) -> bool:
+    """An estimate is converged only if the fit it is published with is."""
+    reml = getattr(final_model, "_reml_result", None)
+    return bool(converged and final_model.result.converged and (reml is None or reml.converged))
 
 
 def _detached_copy(result):
@@ -579,6 +580,7 @@ def _install_nb_profile(final_model, *, y, result, ci_alpha):
     the alternation's last mean is not the published one.
     """
     published = result._at_mean(y, final_model._fit_mu, final_model._fit_weights)
+    published.converged = _published_converged(final_model, published.converged)
     if ci_alpha is not None:
         published.interval(ci_alpha)
     final_model._nb_profile_result = _detached_copy(published)
