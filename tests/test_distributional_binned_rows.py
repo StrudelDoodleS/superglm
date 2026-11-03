@@ -162,6 +162,19 @@ def test_support_compressed_layouts_equal_the_dense_rows():
         assert _within(reader.rows(q, 31, 900), matrix[31:900], matrix.shape[1])
 
 
+@pytest.mark.parametrize("compressed", [False, True], ids=["binned", "support-compressed"])
+def test_level_rows_without_a_certified_lookup_equal_the_dense_rows(
+    problem, monkeypatch, compressed
+):
+    """A level whose row lookup has no certificate reads its rows through ``row_subset``;
+    the event is forced, and rows from an interior start must still match."""
+    layout, matrices, _slices, _rng = _compressed_layout() if compressed else problem
+    monkeypatch.setattr(br, "_category_rows", lambda group, start, stop: None)
+    reader = br.binned_rows(layout)
+    for q, matrix in enumerate(matrices):
+        assert _within(reader.rows(q, 31, 500), matrix[31:500], matrix.shape[1])
+
+
 def test_exact_route_layouts_have_no_reader():
     layout = _layout(2, discrete=False)[0]
     assert not br.binned_layout(layout)
@@ -222,6 +235,11 @@ def test_tables_are_formed_once_and_no_dense_rows_are_read(problem, monkeypatch)
     monkeypatch.setattr(DesignMatrix, "toarray", forbidden)
     monkeypatch.setattr(BoundedPredictorMatrix, "__getitem__", forbidden)
     reader = br.binned_rows(layout)
+    # Re-forming a table needs ``R``: take it away once the reader holds its tables.
+    for state in layout.predictors:
+        for group in state.design.group_matrices:
+            if hasattr(group, "R_inv"):
+                monkeypatch.setattr(group, "R_inv", None)
     for q in range(len(matrices)):
         for start in range(0, N, 97):
             reader.rows(q, start, min(start + 97, N))

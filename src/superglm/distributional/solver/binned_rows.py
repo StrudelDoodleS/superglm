@@ -24,7 +24,6 @@ from superglm._group_matrix._group_matrix_discretized import (
     SupportCompressedSplineCategoricalGroupMatrix,
     SupportCompressedSSPGroupMatrix,
 )
-from superglm._group_matrix._group_matrix_kernels import _ssp_gram_needs_exact
 from superglm._group_matrix._group_matrix_range import _category_rows
 from superglm.distributional.layout import PredictorState, StackedLayout
 from superglm.group_matrix import DesignMatrix
@@ -41,21 +40,15 @@ _GROUPS = (*_SUPPORTS, *_LEVELS, *ONE_HOT_CODE_TYPES, DenseGroupMatrix)
 def binned_layout(layout: StackedLayout) -> bool:
     """Whether every group reads its rows as a lookup or dense values, and one is binned.
 
-    A support or level must also keep ``B R`` in the range the binned routes
-    reassociate in (``_ssp_gram_needs_exact``); any other group, design type
-    or factor leaves the layout to its ordinary row chunks.
+    The tables are the product ``B R`` the dense rows form, on the same operands,
+    so any range or dtype a support has reads the same rows either way; any
+    other group or design type leaves the layout to its ordinary row chunks.
     """
     if any(type(state.design) is not DesignMatrix for state in layout.predictors):
         return False
     groups = [group for state in layout.predictors for group in state.design.group_matrices]
-    if any(type(group) not in _GROUPS for group in groups):
-        return False
-    binned = [group for group in groups if type(group) in (*_SUPPORTS, *_LEVELS)]
-    return bool(binned) and not any(
-        group.B_unique.dtype != np.float64
-        or group.R_inv.dtype != np.float64
-        or _ssp_gram_needs_exact(group.B_unique, group.R_inv)
-        for group in binned
+    return all(type(group) in _GROUPS for group in groups) and any(
+        type(group) in (*_SUPPORTS, *_LEVELS) for group in groups
     )
 
 
