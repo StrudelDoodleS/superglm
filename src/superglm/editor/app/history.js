@@ -211,7 +211,7 @@ function historyItem(entry, takesUndo) {
     : "";
   return `<li class="${classes}"${idAttribute}><div class="history-row">`
     + `<div class="history-body"><div class="history-label">${escapeHTML(entryMessage(entry, status))}</div>`
-    + `<div class="history-meta">${escapeHTML(entryMeta(entry, status))}</div></div>`
+    + `<div class="history-meta">${parameterChip(entry)}${escapeHTML(entryMeta(entry, status))}</div></div>`
     + `${chip}<div class="history-stamp">${stamp}</div>${id ? noteButton(note) : ""}</div>`
     + `${noteHTML}</li>`;
 }
@@ -382,7 +382,18 @@ function entryMeta(entry, status) {
   const word = status === "edit"
     ? "edit"
     : OPERATION_WORDS[operation] ?? (operation.replaceAll("_", " ") || "step");
-  return [entry.term, word].filter(Boolean).join(" · ");
+  return [entry.term_label ?? entry.term, word].filter(Boolean).join(" · ");
+}
+
+/**
+ * The parameter a distributional model's step acted in, as a chip before the
+ * term name; a SuperGLM step has none.
+ * @param {TimelineEntry} entry
+ */
+function parameterChip(entry) {
+  if (typeof entry.predictor_label !== "string" || !entry.predictor_label) return "";
+  const role = entry.predictor_label === "Spread" ? "spread" : "average";
+  return `<span class="parameter-chip" data-role="${role}">${escapeHTML(entry.predictor_label)}</span> `;
 }
 
 /** @param {unknown} seconds */

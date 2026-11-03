@@ -75,6 +75,7 @@ import {
   renderFeatureList,
   storeFeatureListOpen
 } from "./views/feature_list.js";
+import { hasParameters, parameterGroups } from "./views/feature_groups.js";
 import { renderHelpDrawer } from "./views/help_drawer.js";
 import {
   bindKnotBar,
@@ -141,6 +142,7 @@ const reportTitle = document.getElementById("reportTitle");
 const reportStatus = document.getElementById("reportStatus");
 const reportFreshness = document.getElementById("reportFreshness");
 const reportRetry = document.getElementById("reportRetry");
+const finalFitRun = document.getElementById("finalFitRun");
 const reportFrame = document.getElementById("reportFrame");
 const svg = document.getElementById("chart");
 const selectionMenu = document.getElementById("selectionMenu");
@@ -776,6 +778,19 @@ bindExportDialog({
   }
 });
 
+// A session tool the model does not offer: its export format is disabled, and
+// hovering the card says why, in the server's words.
+function renderSessionAvailability(unavailable) {
+  for (const input of exportFormatInputs) {
+    const reason = unavailable[`export_${input.value}`];
+    input.disabled = Boolean(reason);
+    const card = input.closest("label");
+    if (!card) continue;
+    if (reason) card.title = reason;
+    else card.removeAttribute("title");
+  }
+}
+
 async function refreshMetricsView() {
   await actions.refreshEvidence("metrics", "/metrics", {
     metric: "deviance",
@@ -1043,8 +1058,13 @@ function formatMilliseconds(value) {
   return `${(number / 1000).toFixed(2)} s`;
 }
 
+// The views a model offers: a SuperLSS session has no Cross-validation tab.
+function offeredViews(snapshot) {
+  return snapshot?.capabilities?.cv === false ? ["validation", "final"] : ["validation", "cv", "final"];
+}
+
 async function showView(view) {
-  const activeView = ["validation", "cv", "final"].includes(view) ? view : "editor";
+  const activeView = offeredViews(store.getState().remote.snapshot).includes(view) ? view : "editor";
   actions.patchView({ activeView });
   if (activeView === "editor") {
     scheduleVisibleEvidenceCatchUp();
@@ -1227,10 +1247,20 @@ function renderChartOnly() {
   drawChart(term, selection, chartContext);
 }
 
-function termCatalogueKey(terms) {
-  return groupedTerms(terms).map(
+// A distributional model groups its features by family parameter.
+function featureGroups(terms) {
+  return hasParameters(terms)
+    ? parameterGroups(terms).map((group) => [group.label, group.terms, group.role])
+    : groupedTerms(terms);
+}
+
+// The mini curves of a distributional model follow every edit, so its key
+// carries the chart generation.
+function termCatalogueKey(terms, chartGeneration) {
+  const groups = featureGroups(terms).map(
     ([group, names]) => `${group}\u0000${names.join("\u0000")}`
   ).join("\u0001");
+  return hasParameters(terms) ? `${groups}\u0002${chartGeneration ?? 0}` : groups;
 }
 
 // The revision stands in for every row's EDF, which only a refit changes; a
@@ -1239,7 +1269,7 @@ function selectFeatureListRenderState(state) {
   const snapshot = selectSnapshot(state);
   return {
     ready: snapshot !== null,
-    catalogueKey: snapshot ? termCatalogueKey(snapshot.terms || {}) : "",
+    catalogueKey: snapshot ? termCatalogueKey(snapshot.terms || {}, snapshot.chart_generation) : "",
     revision: selectModelRevision(state),
     activeTerm: selectActiveTermName(state),
     waiting: selectWaitingTerms(state).join("\u0000")
@@ -1258,7 +1288,7 @@ function renderFeatureListState() {
   const state = store.getState();
   const terms = selectSnapshot(state)?.terms ?? {};
   renderFeatureList(featureListNodes, {
-    groups: groupedTerms(terms),
+    groups: featureGroups(terms),
     terms,
     activeTerm: selectActiveTermName(state),
     query: featureQuery,
@@ -1327,7 +1357,8 @@ function selectAppBarRenderState(state) {
     redoLabel: snapshot?.undo_redo.redo ?? null,
     canRevert: Boolean(snapshot && revertAvailable(snapshot)),
     busy: state.request.mutation.status === "running",
-    pendingCount: selectPendingSteps(state).length
+    pendingCount: selectPendingSteps(state).length,
+    hiddenViews: snapshot?.capabilities?.cv === false ? "cv" : ""
   };
 }
 
@@ -1338,7 +1369,8 @@ function sameAppBarRenderState(next, previous) {
     next.redoLabel === previous.redoLabel &&
     next.canRevert === previous.canRevert &&
     next.busy === previous.busy &&
-    next.pendingCount === previous.pendingCount;
+    next.pendingCount === previous.pendingCount &&
+    next.hiddenViews === previous.hiddenViews;
 }
 
 function renderAppBarState(state) {
@@ -1356,20 +1388,28 @@ function renderAppBarState(state) {
     busy: state.busy,
     refitButton: refitPendingAction,
     refitCount: refitPendingCount,
-    pendingCount: state.pendingCount
+    pendingCount: state.pendingCount,
+    hiddenViews: state.hiddenViews ? [state.hiddenViews] : []
   });
 }
 
 function selectActiveViewRenderState(state) {
-  return { ready: state.remote.snapshot !== null, activeView: state.view.activeView };
+  return {
+    ready: state.remote.snapshot !== null,
+    activeView: state.view.activeView,
+    finalFitHere: state.remote.snapshot?.capabilities?.cv === false
+  };
 }
 
 function sameActiveViewRenderState(next, previous) {
-  return next.ready === previous.ready && next.activeView === previous.activeView;
+  return next.ready === previous.ready && next.activeView === previous.activeView &&
+    next.finalFitHere === previous.finalFitHere;
 }
 
-function renderActiveViewState({ ready, activeView }) {
+// Without a Cross-validation tab, the Final fit panel starts the final fit.
+function renderActiveViewState({ ready, activeView, finalFitHere }) {
   if (!ready) return;
+  if (finalFitRun) finalFitRun.hidden = !(finalFitHere && activeView === "final");
   renderAppView(activeView);
   renderReportEvidence(store.getState().request.evidence.report, activeView);
 }
@@ -2194,6 +2234,16 @@ if (metricRetry) {
 if (summaryRetry) {
   summaryRetry.addEventListener("click", () => { void actions.retryEvidence("summary"); });
 }
+if (finalFitRun) {
+  finalFitRun.addEventListener("click", async () => {
+    finalFitRun.disabled = true;
+    try {
+      await cvTab.start("final_fit");
+    } finally {
+      finalFitRun.disabled = false;
+    }
+  });
+}
 if (reportRetry) {
   reportRetry.addEventListener("click", () => { void actions.retryEvidence("report"); });
 }
@@ -2277,6 +2327,10 @@ store.subscribe(
   selectFeatureListRenderState,
   renderFeatureListState,
   sameFeatureListRenderState
+);
+store.subscribe(
+  (state) => JSON.stringify(state.remote.snapshot?.unavailable ?? {}),
+  (unavailable) => renderSessionAvailability(JSON.parse(unavailable))
 );
 store.subscribe(selectHistoryRenderState, renderHistoryState, sameHistoryRenderState);
 store.subscribe(selectAppBarRenderState, renderAppBarState, sameAppBarRenderState);

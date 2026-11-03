@@ -134,6 +134,8 @@ const TEXT_ON_GROUND = [
   ["--muted", ["--surface", "--surface-subtle", "--surface-hover", "--blue-soft"]],
   // .tool-rail button.active, .selection-item:focus-visible, .context-bar button[aria-pressed].
   ["--blue", ["--surface", "--surface-subtle", "--blue-soft"]],
+  // The spread parameter's group heading and chip: the list's ground, the chip's own.
+  ["--orange-text", ["--surface", "--surface-subtle", "--orange-soft"]],
   // #status.is-error on the workspace, .summary-table td.advisory-code in the inspector.
   ["--danger", ["--surface", "--surface-subtle"]],
   // Metric and report deltas.

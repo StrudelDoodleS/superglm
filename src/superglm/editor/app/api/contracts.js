@@ -37,6 +37,9 @@
  * @property {number} [time] when the step was made, in Unix seconds
  * @property {string|null} [note] the analyst's note, saved with the exported model
  * @property {"applied"|"waiting"|"edit"} [status]
+ * @property {string|null} [predictor] SuperLSS only: the family parameter the step acted in
+ * @property {string} [predictor_label] SuperLSS only: the history chip, "Average" or "Spread"
+ * @property {string} [term_label] SuperLSS only: the bare feature name, without its parameter prefix
  */
 /**
  * @typedef {Object} GroupDisplayPayload
@@ -216,6 +219,9 @@
  * @property {Record<string, unknown>} params
  * @property {string|null} note
  * @property {number} time Unix seconds
+ * @property {string|null} [predictor] SuperLSS only: the family parameter the step acts in
+ * @property {string} [predictor_label] SuperLSS only: "Average" or "Spread"
+ * @property {string} [term_label] SuperLSS only: the bare feature name
  */
 /**
  * What a term's waiting changes make of it at the next Refit: its groups by
@@ -388,6 +394,8 @@
  * @property {PendingStep[]} [pending]
  * @property {{available:boolean, stale:boolean}} [final_fit] whether Export can offer the Final fit model
  * @property {number} [fit_token] changes only when the fitted model in force is replaced
+ * @property {{cv:boolean, final_fit:boolean}} [capabilities] SuperLSS sessions only: what the session offers
+ * @property {Record<string, string>} [unavailable] SuperLSS sessions only: the reason for each session tool that is off
  */
 /**
  * @typedef {Object} StructuralTransitionTiming

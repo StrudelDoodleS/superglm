@@ -271,3 +271,38 @@ test("a timeline holding only the marker, or none at all, says nothing happened 
     assert.equal(node.innerHTML, '<div class="history-empty">Nothing yet.</div>');
   }
 });
+
+test("an LSS entry carries its parameter as a chip before the bare term name; a GLM entry has no chip", () => {
+  const node = { innerHTML: "" };
+  const lss = {
+    kind: "edit", status: "edit", id: "4e5f607", time: at(15, 0), note: null,
+    label: "Shift 3 – 5", term: "scale:age", term_label: "age", operation: "shift",
+    predictor: "scale", predictor_label: "Spread", redo: false,
+  };
+  const average = { ...lss, id: "5f60718", predictor: "mean", predictor_label: "Average" };
+  renderHistory([lss, average, TIMELINE[0], { kind: "marker" }], node);
+
+  const spread = row(node, "4e5f607");
+  assert.match(
+    spread,
+    /<div class="history-meta"><span class="parameter-chip" data-role="spread">Spread<\/span> age · edit<\/div>/,
+  );
+  assert.match(row(node, "5f60718"), /<span class="parameter-chip" data-role="average">Average<\/span> age · edit/);
+  assert.doesNotMatch(spread, /scale:age/);
+
+  const glm = row(node, "0a1b2c3");
+  assert.doesNotMatch(glm, /parameter-chip/);
+  assert.match(glm, /<div class="history-meta">curve · edit<\/div>/);
+});
+
+test("a chip's text is escaped, and a marker-like entry with a chip but no term still shows it", () => {
+  const node = { innerHTML: "" };
+  renderHistory([
+    { kind: "pending", status: "waiting", id: "6071829", time: at(15, 1), note: null,
+      label: "Refit", operation: "refit", predictor: "scale", predictor_label: "<b>Spread</b>", redo: false },
+    { kind: "marker" },
+  ], node);
+  const html = row(node, "6071829");
+  assert.match(html, /&lt;b&gt;Spread&lt;\/b&gt;/);
+  assert.doesNotMatch(html, /<b>Spread/);
+});

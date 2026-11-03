@@ -24,9 +24,11 @@ export function bindAppBar({
   root, undoButton, redoButton, revertButton, refreshButton, refitButton,
   onView, onUndo, onRedo, onRevert, onRefresh, onRefit,
 }) {
-  const tabs = Array.from(root.querySelectorAll('[role="tab"]')).filter(
+  const allTabs = Array.from(root.querySelectorAll('[role="tab"]')).filter(
     (tab) => tab instanceof HTMLButtonElement,
   );
+  // A tab a model does not offer is hidden; the arrows pass over it.
+  const shownTabs = () => allTabs.filter((tab) => !tab.hidden);
 
   /** @param {MouseEvent} event */
   function onClick(event) {
@@ -39,6 +41,7 @@ export function bindAppBar({
   /** @param {KeyboardEvent} event */
   function onTabKeyDown(event) {
     if (!(event.target instanceof HTMLButtonElement)) return;
+    const tabs = shownTabs();
     const index = tabs.indexOf(event.target);
     if (index < 0 || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       return;
@@ -114,10 +117,11 @@ export function bindAppBar({
  * @param {boolean} options.canRevert
  * @param {boolean} options.busy
  * @param {number} options.pendingCount how many structural changes wait for Refit
+ * @param {readonly string[]} [options.hiddenViews] views whose tabs the model does not offer
  */
 export function renderAppBar({
   root, activeView, undoButton, redoButton, revertButton, refreshButton, refitButton, refitCount,
-  undoLabel, redoLabel, canRevert, busy, pendingCount,
+  undoLabel, redoLabel, canRevert, busy, pendingCount, hiddenViews = [],
 }) {
   for (const element of root.querySelectorAll('[role="tab"]')) {
     if (!(element instanceof HTMLButtonElement)) continue;
@@ -125,6 +129,7 @@ export function renderAppBar({
     element.classList.toggle("active", active);
     element.setAttribute("aria-selected", String(active));
     element.tabIndex = active ? 0 : -1;
+    element.hidden = hiddenViews.includes(element.dataset.view ?? "");
   }
   undoButton.disabled = undoLabel === null;
   undoButton.dataset.popoverBody = undoLabel === null ? "Nothing to undo." : `Undo: ${undoLabel}`;
