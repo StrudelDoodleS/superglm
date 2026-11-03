@@ -739,6 +739,7 @@ def _evaluate_chunked_geometry(
     chunk_size,
     curvature_source,
     likelihood_cache=None,
+    pass_factors=None,
 ) -> tuple[DenseJointGeometry, ChunkedLikelihoodSums]:
     """Return owned geometry and scalar likelihood sums from the same stream."""
     sums = [0.0, 0.0]
@@ -752,6 +753,7 @@ def _evaluate_chunked_geometry(
         chunk_size=chunk_size,
         curvature_source=curvature_source,
         likelihood_cache=likelihood_cache,
+        pass_factors=pass_factors,
         _likelihood_sums=sums,
     )
     if not all(np.isfinite(value) for value in sums):
@@ -1027,6 +1029,7 @@ def assemble_chunked_geometry(
     chunk_size: ChunkSize,
     curvature_source: CurvatureSource,
     likelihood_cache=None,
+    pass_factors=None,
     _likelihood_sums: list[float] | None = None,
 ) -> DenseJointGeometry:
     """Stream likelihood chunks into one coefficient-space geometry.
@@ -1060,7 +1063,12 @@ def assemble_chunked_geometry(
     # Channel-major, so each contracted channel is one contiguous row vector.
     curvature = np.empty((k_parameters * (k_parameters + 1) // 2, buffered), dtype=np.float64)
     accumulator = GroupedGeometryAccumulator(
-        layout, penalty=penalty, coefficients=coefficients, tables=tables, panels=panels
+        layout,
+        penalty=penalty,
+        coefficients=coefficients,
+        tables=tables,
+        panels=panels,
+        factors=pass_factors,
     )
     # The stream evaluates rows in ranges and builds no chunk designs; each
     # block reads its rows from the layout's own designs.

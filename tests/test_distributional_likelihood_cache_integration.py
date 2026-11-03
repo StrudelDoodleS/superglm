@@ -6,6 +6,7 @@ from dataclasses import fields, replace
 import numpy as np
 import pytest
 
+import superglm._group_matrix._group_matrix_algebra as algebra
 from superglm.distributional.solver import solver
 
 from .test_distributional_support_predictions import _support_problem
@@ -59,6 +60,9 @@ def test_contexts_share_preparation_only_within_their_fit_session():
     assert first.likelihood_cache is second.likelihood_cache
     assert _context(problem).likelihood_cache is not first.likelihood_cache
     assert _context(problem, chunk_size=None).likelihood_cache is None
+    assert first.pass_factors is second.pass_factors is session.pass_factors()
+    assert _context(problem).pass_factors is not first.pass_factors
+    assert _context(problem, session=session, chunk_size=None).pass_factors is None
 
 
 @pytest.mark.parametrize("derived_root", [False, True])
@@ -123,3 +127,24 @@ def test_complete_fit_reuses_one_cache_and_matches_uncached_fit(monkeypatch):
     np.testing.assert_array_equal(fitted.terminal_data_curvature, expected.terminal_data_curvature)
     assert fitted.history == expected.history
     assert "likelihood_cache" not in {field.name for field in fields(fitted)}
+
+
+def test_a_fit_projects_each_support_once_across_its_assemblies(monkeypatch):
+    problem = _support_problem(False)
+    family, layout, response, plan, initial = problem
+    original = algebra.PassFactors.projection
+    owners, formed = set(), []
+
+    def counted(self, B_unique, R_inv):
+        owners.add(id(self))
+        if (id(B_unique), id(R_inv)) not in self.projections:
+            formed.append(1)
+        return original(self, B_unique, R_inv)
+
+    monkeypatch.setattr(algebra.PassFactors, "projection", counted)
+    fitted = solver.fit_dense_fixed_lambda(
+        family, layout, response, plan, np.eye(layout.n_coefficients), initial=initial, chunk_size=7
+    )
+    assert fitted.iterations > 1
+    # Every assembly of the fit reads one PassFactors, so a support is projected once.
+    assert len(owners) == 1 and len(formed) > 0

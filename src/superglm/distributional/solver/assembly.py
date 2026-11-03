@@ -330,8 +330,9 @@ class GroupedGeometryAccumulator:
     """Accumulate row-block score and curvature into coefficient space.
 
     Every moments call of the assembly shares one :class:`PassFactors`, so a
-    support is projected once per assembly rather than once per row block and
-    channel; it is released when the geometry is published. ``tables`` keeps
+    support is projected once rather than once per row block and channel;
+    ``factors`` is the caller's, shared by its assemblies, else the assembly's
+    own, released when the geometry is published. ``tables`` keeps
     the by-bin aggregates of the blocks it admits across row blocks and
     contracts each once (:meth:`release_tables`); its pairs are admitted here,
     in the serial order, so the blocks of :meth:`add_block` may run on a pool.
@@ -345,6 +346,7 @@ class GroupedGeometryAccumulator:
         coefficients: NDArray,
         tables: PassTables | None = None,
         panels: tuple[PredictorPanel | None, ...] | None = None,
+        factors: PassFactors | None = None,
     ) -> None:
         reference_plans = _grouped_predictor_plans(layout)
         self._layout = layout
@@ -360,7 +362,7 @@ class GroupedGeometryAccumulator:
         self._channel_chunks = np.zeros(len(self._pairs), dtype=np.intp)
         self._score_chunks = 0
         self._finished = False
-        self._factors: PassFactors | None = PassFactors()
+        self._factors: PassFactors | None = PassFactors() if factors is None else factors
         self._tables = tables
         # A predictor with a panel (``predictor_panels``) is accumulated in its
         # packed column order, the panel's columns first, and ``finish``
