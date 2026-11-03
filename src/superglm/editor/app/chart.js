@@ -651,13 +651,15 @@ function pointTooltipLines(term, i) {
   const exposure = Array.isArray(term.weights) ? term.weights[i] : null;
   return [
     label,
-    `${yTooltipLabel(term)}: ${formatDisplay(term, term.y[i])}`,
+    showsRelativity(term)
+      ? `Relativity: ${fmt(term.y[i])}`
+      : `${yTooltipLabel(term)}: ${formatDisplay(term, term.y[i])}`,
     `Exposure: ${fmt(exposure)}`
   ];
 }
 
 function yTooltipLabel(term) {
-  const label = term.y_label || "Relativity";
+  const label = term.y_label;
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
