@@ -40,6 +40,7 @@ from superglm.distributional.results.solver import (
     _assessment_is_numerically_stationary,
     _assessment_retained_kkt_ratio,
 )
+from superglm.distributional.smoothing.derivatives import LamlDerivativeError
 from superglm.distributional.smoothing.penalty_face import build_penalty_face
 from superglm.distributional.solver import fit_dense_fixed_lambda
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
@@ -623,6 +624,87 @@ def test_a_stationary_endgame_revalidates_its_face_beside_another_cap(monkeypatc
     assert smoothing.convergence_reason == "stationary"
     promoted = {name for item in smoothing.history for name in item.activated_face_components}
     assert promoted and set(model.result_.exact_face_components) == promoted
+
+
+@pytest.mark.parametrize("retake", ["published", "unavailable"])
+def test_a_revalidated_stationary_stop_publishes_derivatives_at_its_fit(
+    monkeypatch, retake: str
+) -> None:
+    """The stationary derivatives are retaken at the fit the face revalidation published.
+
+    The corrected covariance replays its gradient at that fit and compares.
+    When the retake fails, the stop keeps the endgame's derivatives and any
+    covariance it returns is finite and disclosed. Mutation check: without the
+    retake there is no pass at the published fit.
+    """
+    import superglm.distributional.smoothing.loop as loop
+
+    retaken = loop.published_derivatives
+    fits: list[DenseSolverResult] = []
+
+    def spy(*args, **kwargs):
+        fits.append(kwargs["fit"])
+        if retake == "unavailable":
+            raise LamlDerivativeError("injected unavailable derivatives at the published fit")
+        return retaken(*args, **kwargs)
+
+    monkeypatch.setattr(loop, "published_derivatives", spy)
+    frame, response = _flagged_generalized_pareto_problem()
+    model = _flagged_generalized_pareto_model().fit_reml(frame, response)
+    fitted = model._require_fitted()
+    smoothing = fitted.smoothing
+    assert smoothing is not None and smoothing.convergence_reason == "stationary"
+    assert smoothing.history[-1].revalidated_face_components
+    assert len(fits) == 1 and fits[0] is smoothing.terminal_fit
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        corrected = posterior_covariance(fitted, kind="corrected")
+    assert np.all(np.isfinite(corrected))
+    disclosures = [item for item in caught if issubclass(item.category, ConvergenceWarning)]
+    if retake == "published":
+        assert not disclosures, [str(item.message) for item in disclosures]
+
+
+def test_a_revalidated_face_keeps_the_endgames_published_hessian(monkeypatch) -> None:
+    """The retake keeps a smoothing Hessian the endgame published.
+
+    The endgame is made to stop with its exact Hessian, as its Newton-step
+    exits do. Without retained rows the corrected covariance can only use the
+    published Hessian. Mutation check: a gradient-only retake dropped it, and
+    the correction fell back to the fixed covariance.
+    """
+    import superglm.distributional.smoothing.loop as loop
+    import superglm.distributional.smoothing.newton as newton
+
+    endgame = loop.run_newton_endgame
+
+    def with_hessian(*args, **kwargs):
+        outcome = endgame(*args, **kwargs)
+        if outcome.kind != "stationary" or outcome.derivatives.hessian is not None:
+            return outcome
+        derivatives = newton.published_derivatives(
+            *args[:4],
+            lambdas=outcome.state.lambdas,
+            fit=outcome.state.fit,
+            efs_config=kwargs["efs_config"],
+            phase_recorder=None,
+            reuse_session=kwargs["reuse_session"],
+            want_hessian=True,
+        )
+        return replace(outcome, derivatives=derivatives)
+
+    monkeypatch.setattr(loop, "run_newton_endgame", with_hessian)
+    frame, response = _flagged_generalized_pareto_problem()
+    model = _flagged_generalized_pareto_model().fit_reml(frame, response, retain_rows=False)
+    fitted = model._require_fitted()
+    smoothing = fitted.smoothing
+    assert smoothing is not None and smoothing.convergence_reason == "stationary"
+    assert smoothing.history[-1].revalidated_face_components
+    assert smoothing.smoothing_hessian is not None
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        corrected = posterior_covariance(fitted, kind="corrected")
+    assert np.all(np.diag(corrected) >= np.diag(posterior_covariance(fitted, kind="fixed")))
 
 
 def test_the_iteration_budget_does_not_refuse_a_stationary_endgames_face_check() -> None:

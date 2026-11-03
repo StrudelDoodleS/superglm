@@ -72,7 +72,7 @@ from superglm.distributional.smoothing.newton import (
     NewtonEndgameOutcome,
     bracket_refused_component,
     newton_iteration_record,
-    published_gradient,
+    published_derivatives,
     run_newton_endgame,
     should_hand_off,
 )
@@ -321,6 +321,10 @@ def fit_distributional_efs(
     )
     beyond_cap: dict[str, float] = {}
 
+    def _endgame_budget() -> int:
+        """The endgame iterations left: ``max_iterations`` bounds warm-up and endgame together."""
+        return min(newton_budget, outer_config.max_iterations - len(history))
+
     def _result(
         *,
         converged: bool,
@@ -333,12 +337,17 @@ def fit_distributional_efs(
             # The exact gradient voids a Fellner--Schall cap nomination, including
             # one on evidence refreshed after an exact-face revalidation.
             evidence = replace(evidence, unresolved_upper_bound=())
-            if endgame is not None and endgame.state.fit is not current_fit:
+            if (
+                endgame is not None
+                and endgame.derivatives is not None
+                and endgame.state.fit is not current_fit
+            ):
                 # A face revalidation refits the stationary point. The published
-                # gradient is taken at the published fit, the one the corrected
-                # covariance replays against.
+                # derivatives are taken at the published fit, the one the corrected
+                # covariance replays against, with the Hessian when the endgame
+                # published one (a fit without retained rows cannot replay it).
                 with contextlib.suppress(LamlDerivativeError):
-                    derivatives = published_gradient(
+                    derivatives = published_derivatives(
                         family,
                         layout,
                         y,
@@ -348,6 +357,7 @@ def fit_distributional_efs(
                         efs_config=outer_config,
                         phase_recorder=phase_recorder,
                         reuse_session=reuse_session,
+                        want_hessian=endgame.derivatives.hessian is not None,
                     )
                     endgame = replace(endgame, derivatives=derivatives)
         return _efs_result(
@@ -389,8 +399,7 @@ def fit_distributional_efs(
         nonlocal terminal_evidence, endgame_outcome, endgame_stationary, pending_cap, newton_budget
         nonlocal plateau_run, practical_run, plateau_qualified
         nonlocal previous_accepted_step
-        # ``max_iterations`` bounds warm-up and endgame iterations together.
-        budget = min(newton_budget, outer_config.max_iterations - len(history))
+        budget = _endgame_budget()
         if budget <= 0:
             return _result(converged=False, reason="max_iterations")
         outcome = run_newton_endgame(
@@ -619,7 +628,7 @@ def fit_distributional_efs(
                 )
             if promotion is None:
                 if outer_config.outer == "efs+newton" and pending_cap is None:
-                    if newton_budget > 0 and estimated_names:
+                    if _endgame_budget() > 0 and estimated_names:
                         # The FS proposal nominated this cap; the exact gradient decides
                         # before a refusal is recorded (these assessment fits are dropped).
                         endgame_result = _run_endgame()
@@ -750,7 +759,7 @@ def fit_distributional_efs(
             if (
                 not endgame_stationary
                 and estimated_names
-                and newton_budget > 0
+                and _endgame_budget() > 0
                 and should_hand_off(
                     "objective_plateau" if plateau_qualified else "lambda_change",
                     max_accepted_step=0.0,
@@ -1067,16 +1076,6 @@ def fit_distributional_efs(
                 terminal_endpoint_directions=terminal_endpoint_directions,
             )
         if len(history) >= outer_config.max_iterations:
-            if newton_budget > 0 and should_hand_off(
-                "max_iterations",
-                max_accepted_step=0.0,
-                iterations=len(history),
-                config=outer_config,
-            ):
-                endgame_result = _run_endgame()
-                if endgame_result is not None:
-                    return endgame_result
-                continue
             return _result(converged=False, reason="max_iterations")
         if beyond_cap and outer_config.outer == "efs+newton":
             # A component released beyond the cap never meets the FS proposal's box.
@@ -1336,7 +1335,7 @@ def fit_distributional_efs(
             reason: EFSConvergenceReason = (
                 "objective_rejected" if any_converged_trial else "coefficient_not_converged"
             )
-            if newton_budget > 0 and should_hand_off(
+            if _endgame_budget() > 0 and should_hand_off(
                 reason, max_accepted_step=0.0, iterations=len(history), config=outer_config
             ):
                 endgame_result = _run_endgame()
@@ -1468,7 +1467,7 @@ def fit_distributional_efs(
             and not terminal_evidence.unresolved_upper_bound
             and not terminal_evidence.working_infinity
         ):
-            if newton_budget > 0 and should_hand_off(
+            if _endgame_budget() > 0 and should_hand_off(
                 "practical_plateau",
                 max_accepted_step=max_accepted_step,
                 iterations=len(history),
@@ -1479,7 +1478,7 @@ def fit_distributional_efs(
                     return endgame_result
                 continue
             return _result(converged=True, reason="practical_plateau")
-        if newton_budget > 0 and should_hand_off(
+        if _endgame_budget() > 0 and should_hand_off(
             None,
             max_accepted_step=max_accepted_step,
             iterations=len(history),

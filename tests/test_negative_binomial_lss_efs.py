@@ -437,8 +437,7 @@ def test_size_reaching_its_poisson_limit_under_the_default_is_disclosed() -> Non
 
     Here the endgame can end ``gradient_unresolved``: the size direction of the
     Poisson group is flat to its certificate. The fit must still predict and
-    publish a finite covariance, and an open stop must warn. A later fix that
-    converges here changes this test deliberately.
+    publish a finite covariance, and an open stop must warn.
     """
     frame, response, log_exposure = _poisson_group_fixture()
     family = NegativeBinomialLS()

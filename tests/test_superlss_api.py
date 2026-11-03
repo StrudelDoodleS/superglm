@@ -1631,6 +1631,41 @@ def test_fit_reml_outer_default_follows_curvature_continuity_and_is_validated() 
     assert forced.config.outer == "efs+newton"
 
 
+def test_a_spent_iteration_budget_leaves_the_fellner_schall_stop_in_place(monkeypatch) -> None:
+    """With no iterations left a hand-off keeps the EFS stop instead of reporting max_iterations.
+
+    The default is made to hand off only once the plain EFS stop qualifies, on
+    the last iteration ``max_reml_iter`` allows. Mutation check: when hand-offs
+    checked only the endgame's own budget, the fit stopped ``max_iterations``.
+    """
+    import superglm.distributional.smoothing.loop as loop
+
+    model, frame, response = _small_gaussian_reml_model()
+    model.fit_reml(frame, response, outer="efs", practical_reml=False)
+    plain = model._require_fitted().smoothing
+    assert plain is not None and plain.converged
+    assert plain.convergence_reason in {"lambda_change", "objective_plateau"}
+    last = plain.iterations
+    hand_off = loop.should_hand_off
+
+    def at_the_stop(reason, *, max_accepted_step, iterations, config):
+        if iterations < last:
+            return False
+        return hand_off(
+            reason, max_accepted_step=max_accepted_step, iterations=iterations, config=config
+        )
+
+    monkeypatch.setattr(loop, "should_hand_off", at_the_stop)
+    default, _, _ = _small_gaussian_reml_model()
+    default.fit_reml(frame, response, practical_reml=False, max_reml_iter=last)
+    smoothing = default._require_fitted().smoothing
+    assert smoothing is not None
+    assert smoothing.config.outer == "efs+newton"
+    assert smoothing.converged
+    assert smoothing.convergence_reason == plain.convergence_reason
+    assert smoothing.newton_iterations == 0
+
+
 def test_the_default_endgame_spends_the_requested_iteration_budget() -> None:
     """``max_reml_iter`` bounds warm-up and endgame together; the endgame has no budget of its own.
 

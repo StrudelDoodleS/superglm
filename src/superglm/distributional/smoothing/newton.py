@@ -1145,7 +1145,7 @@ def run_newton_endgame(
         )
 
 
-def published_gradient(
+def published_derivatives(
     family: DistributionalFamily,
     layout: StackedLayout,
     y: NDArray,
@@ -1156,8 +1156,9 @@ def published_gradient(
     efs_config: DistributionalEFSConfig,
     phase_recorder: FitPhaseRecorder | None,
     reuse_session: _DenseObservedReuseSession,
+    want_hessian: bool,
 ) -> LamlDerivatives:
-    """The endgame's gradient pass at ``fit``, on the matrices its replay uses."""
+    """The endgame's derivative pass at ``fit``, on the matrices its replay uses."""
     dense = (
         bounded_predictor_matrices(layout, chunk_size=min(fit.resolved_chunk_size, 4096))
         if fit.resolved_chunk_size is not None
@@ -1173,7 +1174,7 @@ def published_gradient(
             fit=fit,
             dense_matrices=dense,
             step=efs_config.derivative_step,
-            want_hessian=False,
+            want_hessian=want_hessian,
             curvature="terminal",
         )
 
