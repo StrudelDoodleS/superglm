@@ -520,7 +520,9 @@ class GroupedGeometryAccumulator:
             task.index = len(tasks)
             tasks.append(task)
         add_table = None if self._tables is None else self._tables.add
-        run_block_tasks(tasks, _BlockWeightCache(None, self._factors, add_table), None)
+        run_block_tasks(
+            tasks, _BlockWeightCache(None, self._factors, add_table), None, dispatch_bound=True
+        )
         for channel_index, finish in enumerate(finishers):
             self._place_channel(channel_index, finish())
 

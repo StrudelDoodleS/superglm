@@ -20,15 +20,16 @@ blocks "in order of decreasing computational cost".  This module does that:
   covers every split block's extra histogram (``split_bytes``) at once.
   Other blocks always run whole.
 - **Workers.**  ``_parallel.pool_workers``: ``n_jobs`` capped by the task
-  count, by ``max_memory`` over the largest task's working set, by the
-  total cost over the largest unsplit task's (no schedule finishes before
-  that task, and LPT on that many workers finishes within twice its cost;
-  Graham 1969), and by the queue's cost over its serial part: every task
-  pays a fixed ``_TASK_OVERHEAD_COST`` of dispatch under the GIL, and a
-  queue whose serial fraction is ``s`` runs at most ``1 / s`` times faster
-  on any number of workers (Amdahl 1967), so further workers would only
-  contend for the GIL, and a queue no pool can make twice as fast runs
-  serially.  One parallelism level: BLAS runs on one thread for the whole
+  count and by ``max_memory`` over the largest task's working set.  A queue
+  that bounds its dispatch (``dispatch_bound``, the SuperLSS row block's,
+  where the overhead was measured) is also capped by the total cost over
+  the largest unsplit task's (no schedule finishes before that task, and
+  LPT on that many workers finishes within twice its cost; Graham 1969),
+  and by the queue's cost over its serial part: every task pays a fixed
+  ``_TASK_OVERHEAD_COST`` of dispatch under the GIL, and a queue whose
+  serial fraction is ``s`` runs at most ``1 / s`` times faster on any
+  number of workers (Amdahl 1967), so further workers would only contend
+  for the GIL, and a queue no pool can make twice as fast runs serially.  One parallelism level: BLAS runs on one thread for the whole
   assembly (``pooled_blas_threads``), and the block kernels are ``nogil``
   and never ``prange``.
 - **Determinism.**  A task's arithmetic does not depend on which worker runs
@@ -321,6 +322,8 @@ def run_block_tasks(
     tasks: list[BlockTask],
     cache: _BlockWeightCache,
     profile: dict[str, Any] | None,
+    *,
+    dispatch_bound: bool = False,
 ) -> None:
     """Run every task and place its block: serially in task order, or on a pool.
 
@@ -348,11 +351,12 @@ def run_block_tasks(
     elif total < min_cost:
         workers = 1
     else:
+        workers = pool_workers(len(units), max(task.nbytes for task in tasks))
+    if dispatch_bound and workers > 1 and override.workers is None:
         largest_unsplit = max((task.cost for task in tasks if not task.split_bytes), default=0.0)
         overhead = len(tasks) * _TASK_OVERHEAD_COST
         amdahl = (total + overhead) / overhead
         lpt = total / largest_unsplit if largest_unsplit > 0 else amdahl
-        workers = pool_workers(len(units), max(task.nbytes for task in tasks))
         # A pool that cannot halve the queue's time costs about what it saves.
         workers = 1 if amdahl < 2 else min(workers, math.ceil(min(amdahl, lpt)))
 

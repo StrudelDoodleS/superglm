@@ -408,7 +408,7 @@ def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
     }
     assert not released
     # One parallelism level: no kernel starts numba's own threads (SuperLSS's
-    # row kernels and batched moments run on the worker pool).
+    # row kernels and Gram block queues run on the worker pool).
     parallel = {
         f"{module.__name__}.{name}"
         for module in list(sys.modules.values())
@@ -583,7 +583,7 @@ def test_workers_stop_at_the_total_over_the_largest_unsplit_block(monkeypatch):
     for split_largest, expected in ((False, 2), (True, 8)):
         profile: dict = {}
         with block_queue_config(min_cost=0):
-            queue.run_block_tasks(tasks(split_largest), Cache(), profile)
+            queue.run_block_tasks(tasks(split_largest), Cache(), profile, dispatch_bound=True)
         # Twelve units of work: a whole 8 caps two workers; split, the largest whole is 1.
         assert profile["block_pool_workers"] == expected
 
@@ -592,7 +592,10 @@ def test_workers_stop_at_the_queue_cost_over_its_per_task_overhead(monkeypatch):
     """Every task dispatches under the GIL, so a queue whose serial part is ``s`` of
     its cost runs at most ``1 / s`` times faster (Amdahl): 40 tasks of one overhead
     each keep two workers busy, of seven overheads each eight, and of half an
-    overhead each, which no pool can make twice as fast, run serially."""
+    overhead each, which no pool can make twice as fast, run serially. A queue
+    that does not bound its dispatch (the scalar Gram's, the REML moments') keeps
+    every worker ``pool_workers`` gives. Mutation check: capping every queue
+    leaves the unbounded queues with fewer workers."""
 
     class Cache:
         _batch = None
@@ -614,8 +617,11 @@ def test_workers_stop_at_the_queue_cost_over_its_per_task_overhead(monkeypatch):
             for index in range(40)
         ]
         profile: dict = {}
-        queue.run_block_tasks(tasks, Cache(), profile)
+        queue.run_block_tasks(tasks, Cache(), profile, dispatch_bound=True)
         assert profile.get("block_pool_workers") == expected
+        profile = {}
+        queue.run_block_tasks(tasks, Cache(), profile)
+        assert profile.get("block_pool_workers") == 16
 
 
 @pytest.fixture

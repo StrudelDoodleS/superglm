@@ -187,7 +187,7 @@ def fit_pool() -> Iterator[None]:
 
     Starting and joining a pool costs about the same as a few milliseconds of
     kernel, which a SuperLSS fit pays hundreds of times (a Tweedie or negative
-    binomial row kernel per iteration, a batched moment pass per chunk).
+    binomial row kernel per iteration, a row block's Gram queue per contraction).
     Inside this scope :func:`pooled_map` and the Gram's block queue
     (:func:`section_executor`) run on one executor and :func:`pooled_for` on
     one crew of threads, each started by its first section and shut down when
