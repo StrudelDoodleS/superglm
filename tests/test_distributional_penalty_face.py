@@ -215,6 +215,30 @@ def test_face_layout_validation_accepts_one_ulp_normalization_drift() -> None:
     portable.validate_layout(layout)
 
 
+def test_face_layout_validation_takes_no_norm_for_an_identical_matrix(monkeypatch) -> None:
+    """Kills taking three spectral norms on every call: identical geometry has no error to bound."""
+    _family, layout, _component, face, _response, _weights, _penalty = _random_effect_problem()
+    drifted = np.array(face.constraint_matrix, copy=True)
+    index = int(np.flatnonzero(np.diag(drifted) != 0.0)[0])
+    drifted[index, index] *= 2.0
+    forged = replace(face)
+    object.__setattr__(forged, "constraint_matrix", drifted)
+    norms = []
+    original = np.linalg.norm
+
+    def counted(*args, **kwargs):
+        norms.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(np.linalg, "norm", counted)
+    face.validate_layout(layout)
+    expansion_norms = len(norms)
+    with pytest.raises(PenaltyFaceError, match="geometry does not match"):
+        forged.validate_layout(layout)
+    # The same expansion, plus the two scales and the error of the unequal case.
+    assert len(norms) == 2 * expansion_norms + 3
+
+
 def test_face_of_independent_blocks_is_invariant_to_each_penalty_scale() -> None:
     """Kills resolving independent selected blocks against one global scale."""
     layout = _numeric_layout()

@@ -251,6 +251,11 @@ class PenaltyFace:
         if tuple(layout.coefficient_names) != self.coefficient_names:
             raise PenaltyFaceError("penalty face belongs to a different coefficient layout")
         constraint, expected_rank = _expanded_components(layout, self.component_names)
+        # An identical matrix has zero error, inside any bound, so no norm is taken.
+        if expected_rank == self.constraint_rank and np.array_equal(
+            constraint, self.constraint_matrix
+        ):
+            return
         matrix_scale = max(
             float(np.linalg.norm(constraint, ord=2)),
             float(np.linalg.norm(self.constraint_matrix, ord=2)),
