@@ -93,16 +93,24 @@ def _lognormal_crps(sigma, mu, y):
     return np.array(out)
 
 
-def test_prior_weights_scale_each_rows_contribution():
+def test_prior_weighted_split_is_averaged_over_rows_not_weight():
+    """A prior weight sharpens a row's own law (shape times w); rows count once each."""
     case = gamma_case()
-    split = holdout_rows(case, 120)
+    split = holdout_rows(case, 150)
     got = lss_dataset_metrics(case.model, split)
-    scores = case.model.scores(split.X, split.y, sample_weight=split.sample_weight)
-    total = split.sample_weight.sum()
-    assert got["log_score"] == pytest.approx(scores["log"].sum() / total, rel=64 * EPS)
-    assert got["crps"] == pytest.approx(scores["crps"].sum() / total, rel=64 * EPS)
-    unweighted = lss_dataset_metrics(case.model, dataclasses.replace(split, sample_weight=None))
-    assert unweighted["log_score"] != pytest.approx(got["log_score"], rel=1e-6)
+
+    par = case.model.predict_parameters(split.X)
+    w = split.sample_weight
+    cv = par["scale"].to_numpy() / np.sqrt(w)
+    mean = par["mean"].to_numpy()
+    law = stats.gamma(a=1.0 / cv**2, scale=mean * cv**2)
+    # Each row's mean log score; the weights enter the law, not the average.
+    assert got["log_score"] == pytest.approx(np.mean(-law.logpdf(split.y)), rel=1e3 * EPS)
+    assert got["log_score"] != pytest.approx(np.average(-law.logpdf(split.y), weights=w), rel=1e-3)
+    # The mean is unchanged by a prior weight, so A/E reads the weights as exposure.
+    assert got["actual_expected"] == pytest.approx(
+        np.sum(w * split.y) / np.sum(w * mean), rel=64 * EPS
+    )
 
 
 def test_a_family_without_a_distribution_function_has_no_crps():
@@ -137,6 +145,9 @@ def test_cv_run_is_refused_for_superlss():
     assert info.value.public_message == LSS_UNAVAILABLE["cv"]
     widget = session.widget()
     try:
+        with pytest.raises(EditorValueError) as info:
+            widget._report("cv")
+        assert info.value.public_message == LSS_UNAVAILABLE["cv"]
         with pytest.raises(EditorValueError) as info:
             widget._metrics("deviance")
         assert info.value.public_message == LSS_UNAVAILABLE["metrics"]

@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.distributional.checks.scores import _scoring_rows
 from superglm.editor.lss.view import LSSModelView
 
 LSS_METRIC_LABELS = {
@@ -31,7 +32,9 @@ def lss_dataset_metrics(model: Any, dataset) -> dict[str, float]:
     """Score ``dataset`` with a SuperLSS (or the editor's view of one).
 
     ``log_score`` is the negative log-likelihood and ``crps`` the CRPS, each the
-    weighted contributions of ``model.scores`` over the total weight.
+    sum of ``model.scores`` contributions over the library's aggregation mass:
+    the total weight under frequency weights, the number of scored rows under
+    prior weights, whose rows already score their own weighted law.
     ``actual_expected`` is ``sum(w * y) / sum(w * mean)``. A family without a
     distribution function has no CRPS, which is then NaN.
     """
@@ -40,19 +43,21 @@ def lss_dataset_metrics(model: Any, dataset) -> dict[str, float]:
     weights = dataset.sample_weight
     y = np.asarray(dataset.y, dtype=np.float64).ravel()
     w = np.ones(y.size) if weights is None else np.asarray(weights, dtype=np.float64).ravel()
-    total = float(np.sum(w))
     kwargs = {"sample_weight": weights, "offsets": offsets}
+    mass = float(
+        _scoring_rows(lss._require_fitted(), dataset.X, y, **kwargs).aggregation_mass.sum()
+    )
+    log = lss.scores(dataset.X, y, which=("log",), **kwargs)["log"]
     try:
-        scores = lss.scores(dataset.X, y, which=("log", "crps"), **kwargs)
+        crps = lss.scores(dataset.X, y, which=("crps",), **kwargs)["crps"]
+        crps_score = float(np.nansum(crps) / mass)
     except NotImplementedError:
-        scores = lss.scores(dataset.X, y, which=("log",), **kwargs)
+        crps_score = float("nan")
     mean = np.asarray(lss.predict(dataset.X, offsets=offsets), dtype=np.float64)
-    expected = float(np.sum(w * mean))
-    crps = np.nansum(scores["crps"]) / total if "crps" in scores else np.nan
     return {
-        "log_score": float(np.nansum(scores["log"]) / total),
-        "crps": float(crps),
-        "actual_expected": float(np.sum(w * y) / expected),
+        "log_score": float(np.nansum(log) / mass),
+        "crps": crps_score,
+        "actual_expected": float(np.sum(w * y) / np.sum(w * mean)),
     }
 
 

@@ -649,6 +649,7 @@ class EditorWidget:
             if model_revision is not None and int(model_revision) != current_revision:
                 return _superseded_payload(int(model_revision), request_sequence)
         if report == "cv":
+            require_available(self.session.model, "cv")
             payload = report_payload(self, report, request_sequence=request_sequence)
             with self._lock:
                 if payload["model_revision"] != self.session.model_revision:
