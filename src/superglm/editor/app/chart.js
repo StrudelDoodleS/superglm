@@ -1,4 +1,4 @@
-import { formatDisplay } from "./chart/display.js";
+import { formatDisplay, showsRelativity } from "./chart/display.js";
 import { fmt } from "./format.js";
 import {
   anchorMarks,
@@ -262,7 +262,7 @@ export function drawChart(term, selection, context) {
       band(svg, x, view.ci_lower_y, view.ci_upper_y, sx, sy, "ci");
     }
   }
-  if (visualMode === "handles" && context.showContrib && context.showContrib()) {
+  if (visualMode === "handles" && showsRelativity(term) && context.showContrib && context.showContrib()) {
     basisContributions(svg, term, sx, sy, buildActive);
   }
   if (visualMode === "handles" && buildProgress !== null) {

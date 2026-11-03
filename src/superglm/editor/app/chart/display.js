@@ -93,16 +93,24 @@ export function formatDisplay(term, value) {
 }
 
 /**
- * Whether the Contrib and Build overlays can be drawn. They exponentiate the
- * basis terms into relativities, so a term shown in any other unit has none.
+ * Whether the term's curve is drawn in relativities. The Contrib and Build
+ * overlays exponentiate basis terms, so only such a term has them.
+ * @param {TermPayload|null|undefined} term
+ * @returns {boolean}
+ */
+export function showsRelativity(term) {
+  return !term || !term.display || term.display.kind === "relativity";
+}
+
+/**
+ * Whether the Contrib and Build overlays can be drawn.
  * @param {TermPayload|null|undefined} term
  * @returns {boolean}
  */
 export function canShowContributions(term) {
   const controls = term && term.controls;
-  const relativity = !term || !term.display || term.display.kind === "relativity";
   return Boolean(
-    relativity &&
+    showsRelativity(term) &&
     controls &&
     Array.isArray(controls.basis) &&
     controls.basis.length > 0 &&

@@ -8,6 +8,7 @@ import {
   canShowContributions,
   fromDisplay,
   formatDisplay,
+  showsRelativity,
   reachableDisplay,
   shiftDisplay,
   toDisplay,
@@ -113,4 +114,13 @@ test("a handle drag shifts a spread curve on the effect scale", () => {
     const expected = toDisplay(spec, fromDisplay(spec, b) + row[i] * delta);
     assert.ok(Math.abs(moved[i] - expected) <= 64 * EPS * Math.max(1, expected), `index ${i}`);
   });
+});
+
+test("only a relativity curve gets the overlays that exponentiate basis terms", () => {
+  assert.equal(showsRelativity(undefined), true);
+  assert.equal(showsRelativity({}), true);
+  assert.equal(showsRelativity({ display: { kind: "relativity", reference_eta: 0, floor: 0 } }), true);
+  for (const kind of ["lognormal_cv", "gamma_cv", "inverse_theta"]) {
+    assert.equal(showsRelativity({ display: { kind, reference_eta: 0, floor: 0 } }), false, kind);
+  }
 });

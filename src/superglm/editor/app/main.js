@@ -1,4 +1,4 @@
-import { canShowContributions } from "./chart/display.js";
+import { canShowContributions, showsRelativity } from "./chart/display.js";
 import { EditorAPIError, editorClient } from "./api/client.js";
 import {
   bindPointLens,
@@ -1879,7 +1879,8 @@ function updateHandleCount(term) {
   const controls = term.controls;
   const active = visualMode() === "handles" && controls && controls.count;
   handleCountWrap.hidden = !active;
-  const canShowContrib = active && Array.isArray(controls.basis) && controls.basis.length > 0;
+  const canShowContrib = active && showsRelativity(term) &&
+    Array.isArray(controls.basis) && controls.basis.length > 0;
   basisToggle.hidden = !canShowContrib;
   contribPlay.hidden = !canShowContrib;
   contribTools.hidden = !canShowContrib;
