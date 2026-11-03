@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.features import _shape_rule_rows, _spline_constraints
+from superglm.features import _shape_rule_rows
 from superglm.features.constraint import CONSTRAINT_KINDS, rules_of
 from superglm.types import LinearConstraintSet
 
@@ -66,17 +66,23 @@ def _is_rule_collection(spec: Any) -> bool:
     return kind is not None and mode == "fit" and kind not in CONSTRAINT_KINDS
 
 
-def _collection_pieces(spec: Any, *, stacklevel: int) -> list:
-    """The spec's rules as pieces on its range, refusing rules a spline cannot fit."""
-    rules = rules_of(spec)
-    for rule in rules:
+def refuse_max_step(spec: Any) -> None:
+    """Refuse a step limit on a spline term, which has no levels to step between."""
+    for rule in rules_of(spec):
         if rule.kind == "max_step":
             raise ValueError(
                 f"{rule.describe()} limits the step between adjacent levels, and a spline term "
                 "has no levels; band the feature with OrderedCategorical to limit its steps, "
                 "or drop the rule"
             )
-    return _shape_rule_rows.shape_pieces(rules, spec._lo, spec._hi, stacklevel=stacklevel + 1)
+
+
+def _collection_pieces(spec: Any, *, stacklevel: int) -> list:
+    """The spec's rules as pieces on its range, refusing rules a spline cannot fit."""
+    refuse_max_step(spec)
+    return _shape_rule_rows.shape_pieces(
+        rules_of(spec), spec._lo, spec._hi, stacklevel=stacklevel + 1
+    )
 
 
 def _fmt_end(x: float) -> str:
@@ -171,7 +177,11 @@ def prepare_shape_rules(spec: Any, *, stacklevel: int = 1) -> None:
     pieces = _collection_pieces(spec, stacklevel=stacklevel + 1)
     _warn_widened_flats(spec, pieces, stacklevel=stacklevel + 1)
     _, flat_rows = _shape_rule_rows.shape_rows(
-        spec._knots, spec.degree, pieces, natural_ends=has_natural_ends(spec)
+        spec._knots,
+        spec.degree,
+        pieces,
+        domain=(spec._lo, spec._hi),
+        natural_ends=has_natural_ends(spec),
     )
     spec._shape_pieces = pieces
     spec._flat_rows = flat_rows
@@ -185,30 +195,26 @@ def build_shape_constraints_raw(spec: Any) -> LinearConstraintSet:
     rows are equalities the main effect absorbs, not rows here.
     """
     kind = spec.constraint_kind
-    if kind in {"increasing", "decreasing"}:
-        return _spline_constraints.build_monotone_difference_constraints(spec._n_basis, kind)
-    if kind in {"convex", "concave"}:
-        constraints = _spline_constraints.build_curvature_difference_constraints(
+    if kind in CONSTRAINT_KINDS:
+        rows = _shape_rule_rows.full_range_rows(
             spec._knots,
             spec.degree,
             kind,
             domain=(spec._lo, spec._hi),
+            natural_ends=has_natural_ends(spec),
         )
-        if has_natural_ends(spec):
-            # Natural boundary conditions already impose the first and last
-            # exact curvature rows as equalities.  Keeping their O(eps)
-            # projections as QP inequalities creates scale-dependent fake
-            # active constraints.
-            interior = constraints.A[1:-1]
-            return LinearConstraintSet(A=interior, b=np.zeros(interior.shape[0]))
-        return constraints
+        return LinearConstraintSet(A=rows, b=np.zeros(rows.shape[0]))
     if not _is_rule_collection(spec):
         raise ValueError(f"Unsupported fit-time shape kind: {kind!r}")
     pieces = spec._shape_pieces
     if pieces is None:
         pieces = _collection_pieces(spec, stacklevel=1)
     rows, _ = _shape_rule_rows.shape_rows(
-        spec._knots, spec.degree, pieces, natural_ends=has_natural_ends(spec)
+        spec._knots,
+        spec.degree,
+        pieces,
+        domain=(spec._lo, spec._hi),
+        natural_ends=has_natural_ends(spec),
     )
     cap = _cap_rows(spec)
     if cap is None:

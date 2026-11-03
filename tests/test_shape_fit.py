@@ -422,6 +422,64 @@ def test_hard_cap_converges():
     _assert_inside(_printed(model), 0.95, 1.05)
 
 
+def _falling_and_bending_down(n: int = 20_000, seed: int = 53) -> tuple[pd.DataFrame, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(0.0, 10.0, n)
+    return pd.DataFrame({"x": x}), rng.poisson(np.exp(0.5 - 0.02 * x**2))
+
+
+@pytest.mark.parametrize(
+    ("degree", "combined", "single", "data", "orders"),
+    [
+        (1, C.increasing & C.cap(0.5, 2.5), C.increasing, _rising_to_three, {1: 1.0}),
+        (2, C.decreasing & C.concave, C.concave, _falling_and_bending_down, {1: -1.0, 2: -1.0}),
+    ],
+    ids=["degree1-increasing-cap", "degree2-decreasing-concave"],
+)
+def test_whole_range_combination_on_a_low_degree_spline(degree, combined, single, data, orders):
+    """A combination on the whole range builds its single rules' rows, at any degree.
+
+    The direction rows of ``increasing & cap`` are the single ``increasing``
+    rows; ``decreasing & concave`` is one end-slope row followed by the single
+    ``concave`` rows, each scaled by its largest entry.
+    """
+    X, y = data()
+    x = X["x"].to_numpy()
+    built = {}
+    for label, rule in (("combined", combined), ("single", single)):
+        spec = Spline(kind="ps", k=8, degree=degree, constraint=rule)
+        spec.build(x)
+        built[label] = build_shape_constraints_raw(spec).A
+    alone = built["single"]
+    alone = alone / np.max(np.abs(alone), axis=1, keepdims=True)
+    offset = 0 if degree == 1 else 1
+    assert np.array_equal(built["combined"][offset : offset + len(alone)], alone)
+
+    features = {"x": Spline(kind="ps", k=8, degree=degree, constraint=combined)}
+    model = SuperGLM(family="poisson", selection_penalty=0.0, features=features).fit(X, y)
+    spec = model._specs["x"]
+    grid = np.linspace(spec._lo, spec._hi, 2000)
+    tol = 1e3 * U * np.max(np.abs(_native_curve(model, "x", grid, 0)))
+    assert model.result.converged
+    for order, sign in orders.items():
+        assert np.min(sign * _native_curve(model, "x", grid, order)) >= -tol
+    if degree == 1:
+        _assert_inside(_printed(model), 0.5, 2.5)
+
+
+def test_stretch_on_a_degree_one_spline_is_refused():
+    X, y = _rising_to_three()
+    rule = C.increasing.below(5) & C.cap(0.5, 2.5)
+    features = {"x": Spline(kind="ps", k=8, degree=1, constraint=rule)}
+    with pytest.raises(
+        ValueError,
+        match=r"^Feature 'x': increasing on the stretch \[\S+, 5\] needs a spline of degree 2 "
+        r"or more, and this term has degree 1; raise the degree \(degree=3 is a cubic\) or "
+        r"give the rule on the whole range$",
+    ):
+        SuperGLM(family="poisson", selection_penalty=0.0, features=features).fit(X, y)
+
+
 def test_cap_refused_under_identity_link():
     X, y = _rising_to_three()
     with pytest.raises(ValueError, match=r"Feature 'x': cap\(0\.6, 1\.8\).*log link"):

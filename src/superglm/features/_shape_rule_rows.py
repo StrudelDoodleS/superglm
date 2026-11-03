@@ -10,7 +10,8 @@ the values of ``f^(order)`` at ``a`` and ``b``.
 
 Inequality rows follow the full-range builders in ``_spline_constraints``:
 ``A @ c >= 0`` means the rule holds, decreasing and concave rows are negated,
-and each row is scaled by its largest entry.
+and each row is scaled by its largest entry. A rule on the whole range uses
+those builders' rows, which exist at every degree.
 """
 
 from __future__ import annotations
@@ -22,6 +23,10 @@ from numpy.lib.stride_tricks import sliding_window_view
 from numpy.typing import NDArray
 from scipy.interpolate import BSpline
 
+from superglm.features._spline_constraints import (
+    build_curvature_difference_constraints,
+    build_monotone_difference_constraints,
+)
 from superglm.features._spline_ranges import derivative_design
 from superglm.features.constraint import ConstraintRules, ConstraintSpec
 from superglm.types import LinearConstraintSet
@@ -36,6 +41,28 @@ _CURVATURE = ("convex", "concave")
 def derivative_value_row(knots: NDArray, degree: int, x: float, order: int) -> NDArray:
     """The row ``r`` with ``r @ c = f^(order)(x)``."""
     return derivative_design(knots, degree, np.array([float(x)]), order)[0]
+
+
+def full_range_rows(
+    knots: NDArray,
+    degree: int,
+    kind: str,
+    *,
+    domain: tuple[float, float],
+    natural_ends: bool,
+) -> NDArray:
+    """The rows ``A @ c >= 0`` a direction or curvature rule on the whole range builds.
+
+    Direction rules use the coefficient differences, curvature rules the
+    knot-scaled curvature rows bounded at ``domain``. With ``natural_ends``
+    the first and last curvature rows are dropped: the natural boundary
+    conditions already hold ``f''`` at zero there as equalities, and their
+    round-off projections would read as active inequalities in the QP.
+    """
+    if kind in _DIRECTION:
+        return build_monotone_difference_constraints(len(knots) - degree - 1, kind).A
+    rows = build_curvature_difference_constraints(knots, degree, kind, domain=domain).A
+    return rows[1:-1] if natural_ends else rows
 
 
 def _refined(
@@ -195,9 +222,19 @@ def _flat_rows(
 
 
 def shape_rows(
-    knots: NDArray, degree: int, pieces: list[ShapePiece], *, natural_ends: bool
+    knots: NDArray,
+    degree: int,
+    pieces: list[ShapePiece],
+    *,
+    domain: tuple[float, float],
+    natural_ends: bool,
 ) -> tuple[LinearConstraintSet, NDArray]:
     """Inequality rows ``A @ c >= 0`` and flat equality rows ``E @ c = 0``.
+
+    A piece on the whole of ``domain`` (the feature's range) takes the rows
+    :func:`full_range_rows` builds. A piece on a stretch takes the refined
+    rows, which need ``degree - order >= 1``: a direction stretch needs
+    degree 2 or more, a curvature stretch degree 3 or more.
 
     A direction piece with a curvature piece on the same stretch keeps one
     end-slope row: with ``f'`` monotone on [a, b], its sign there is its sign
@@ -238,7 +275,17 @@ def shape_rows(
             if not any(s <= end <= e for s, e in zero):
                 blocks.append(sign * derivative_value_row(knots, degree, end, 1)[None, :])
             continue
+        if (a, b) == tuple(domain):
+            rows = full_range_rows(knots, degree, kind, domain=domain, natural_ends=natural_ends)
+            blocks.append(rows)
+            continue
         order = 1 if kind in _DIRECTION else 2
+        if degree - order < 1:
+            raise ValueError(
+                f"{kind} on the stretch [{a:g}, {b:g}] needs a spline of degree {order + 1} or "
+                f"more, and this term has degree {degree}; raise the degree (degree=3 is a "
+                "cubic) or give the rule on the whole range"
+            )
         rows, t_ref = _refined(knots, degree, order, a, b)
         m, p = rows.shape[0], degree - order
         keep = ~_held_at_zero(t_ref[:m], t_ref[p + 1 :], zero)
@@ -297,6 +344,7 @@ __all__ = [
     "ShapePiece",
     "derivative_value_row",
     "flat_zero_regions",
+    "full_range_rows",
     "refined_derivative_rows",
     "shape_pieces",
     "shape_rows",

@@ -109,7 +109,7 @@ def test_u_turn_slope_zero_only_at_turn():
     knots = _open_knots()
     c = _coefficients_of(knots, lambda x: (x - 25.0) ** 2)
     pieces = [("decreasing", LO, 25.0), ("increasing", 25.0, HI)]
-    rows, flat = shape_rows(knots, DEGREE, pieces, natural_ends=False)
+    rows, flat = shape_rows(knots, DEGREE, pieces, domain=(LO, HI), natural_ends=False)
     assert flat.shape == (0, K)
     assert np.all(rows.A @ c >= -_slack(rows.A, c))
     slope = BSpline(knots, c, DEGREE)(np.array([24.0, 26.0]), nu=1)
@@ -128,11 +128,15 @@ def test_u_turn_slope_zero_only_at_turn():
 def test_end_slope_pairing(direction, curvature, feasible, infeasible):
     knots = _open_knots()
     rules = getattr(C, direction) & getattr(C, curvature)
-    rows, _ = shape_rows(knots, DEGREE, shape_pieces(rules, LO, HI), natural_ends=False)
+    rows, _ = shape_rows(
+        knots, DEGREE, shape_pieces(rules, LO, HI), domain=(LO, HI), natural_ends=False
+    )
     assert rows.A.shape == (K - 2 + 1, K)
     # Mutation check: the direction rows stacked in full give 2k - 3 rows.
     stacked = sum(
-        shape_rows(knots, DEGREE, [(kind, LO, HI)], natural_ends=False)[0].A.shape[0]
+        shape_rows(knots, DEGREE, [(kind, LO, HI)], domain=(LO, HI), natural_ends=False)[0].A.shape[
+            0
+        ]
         for kind in (direction, curvature)
     )
     assert stacked == 2 * K - 3
@@ -147,7 +151,11 @@ def test_end_slope_pairing(direction, curvature, feasible, infeasible):
 def test_end_slope_row_is_the_slope_at_the_end():
     knots = _open_knots()
     rows, _ = shape_rows(
-        knots, DEGREE, [("increasing", 25.0, 40.0), ("concave", 25.0, 40.0)], natural_ends=False
+        knots,
+        DEGREE,
+        [("increasing", 25.0, 40.0), ("concave", 25.0, 40.0)],
+        domain=(LO, HI),
+        natural_ends=False,
     )
     slope_row = derivative_value_row(knots, DEGREE, 40.0, 1)
     matches = [
@@ -163,8 +171,8 @@ def test_natural_ends_drop_the_pinned_curvature_rows():
     Z = Q[:, 2:]  # coefficients that keep f''(17) = f''(80) = 0
     for rule, dropped in [(C.convex, 2), (C.convex.below(40), 1), (C.concave.within(25, 40), 0)]:
         pieces = shape_pieces(rule, LO, HI)
-        plain, _ = shape_rows(knots, DEGREE, pieces, natural_ends=False)
-        rows, _ = shape_rows(knots, DEGREE, pieces, natural_ends=True)
+        plain, _ = shape_rows(knots, DEGREE, pieces, domain=(LO, HI), natural_ends=False)
+        rows, _ = shape_rows(knots, DEGREE, pieces, domain=(LO, HI), natural_ends=True)
         assert rows.A.shape[0] == plain.A.shape[0] - dropped
         # The rows kept survive the natural projection; the dropped ones vanish there.
         kept = np.linalg.norm(rows.A @ Z, axis=1)
@@ -190,7 +198,7 @@ def test_flat_rows_hold_the_slope_at_zero_and_drop_held_rows(rules):
     knots = _open_knots()
     pieces = shape_pieces(rules, LO, HI)
     (a, b) = next((a, b) for kind, a, b in pieces if kind == "flat")
-    rows, flat = shape_rows(knots, DEGREE, pieces, natural_ends=False)
+    rows, flat = shape_rows(knots, DEGREE, pieces, domain=(LO, HI), natural_ends=False)
     # E states f' = 0 on the knot spans the stretch meets: the same condition
     # as the stretch's own rows, with as many independent rows.
     stretch = refined_derivative_rows(knots, DEGREE, 1, a, b)
@@ -205,7 +213,7 @@ def test_flat_rows_hold_the_slope_at_zero_and_drop_held_rows(rules):
     # Mutation check: the same pieces without the flat equalities keep every
     # row; the rows dropped are exactly those the equalities hold at zero.
     others = [piece for piece in pieces if piece[0] != "flat"]
-    plain, _ = shape_rows(knots, DEGREE, others, natural_ends=False)
+    plain, _ = shape_rows(knots, DEGREE, others, domain=(LO, HI), natural_ends=False)
     vanishing = np.linalg.norm(plain.A @ Z, axis=1) <= 1e3 * U * np.linalg.norm(plain.A, axis=1)
     assert vanishing.any()
     kept = [r for r in plain.A if any(np.array_equal(r, k) for k in rows.A)]
@@ -239,7 +247,7 @@ def test_flat_rows_hold_the_slope_at_zero_and_drop_held_rows(rules):
 )
 def test_flat_rows_are_independent(knots, rules, natural_ends):
     pieces = shape_pieces(rules, LO, HI)
-    _, flat = shape_rows(knots, DEGREE, pieces, natural_ends=natural_ends)
+    _, flat = shape_rows(knots, DEGREE, pieces, domain=(LO, HI), natural_ends=natural_ends)
     equalities = flat
     if natural_ends:
         natural = [derivative_value_row(knots, DEGREE, x, 2) for x in (LO, HI)]
@@ -266,7 +274,7 @@ def test_random_flat_sets_give_independent_rows(knots, natural_ends):
     for _ in range(50):
         ends = np.sort(rng.uniform(LO, HI, size=(rng.integers(1, 4), 2)), axis=1)
         pieces = [("flat", float(a), float(b)) for a, b in ends if a < b]
-        _, flat = shape_rows(knots, DEGREE, pieces, natural_ends=natural_ends)
+        _, flat = shape_rows(knots, DEGREE, pieces, domain=(LO, HI), natural_ends=natural_ends)
         equalities = flat
         if natural_ends:
             natural = [derivative_value_row(knots, DEGREE, x, 2) for x in (LO, HI)]
