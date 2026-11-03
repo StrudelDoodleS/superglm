@@ -4,13 +4,18 @@ A hand edit is a full coefficient vector that may differ from the fit's only
 inside the terms it names, and at the intercept of each named term's
 parameter. It lives in the fit state beside the fit's own solver result,
 inference and covariance, which keep describing the fit.
+
+Models and row states are typed ``Any``: ``fit_state`` imports this module for
+``HandEdit``, so it cannot import ``fit_state`` or ``model`` back
+(``tests/test_distributional_family_kernel_architecture.py`` forbids import
+cycles even under ``TYPE_CHECKING``).
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -18,10 +23,6 @@ from numpy.typing import NDArray
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.distributional._common import readonly_finite
 from superglm.distributional.layout import StackedLayout
-
-if TYPE_CHECKING:
-    from superglm.distributional.fit_state import DistributionalRowState
-    from superglm.distributional.model import DenseDistributionalModel
 
 NO_TRAINING_FRAME = (
     "Pass X_train= to revise the coefficients of a model whose training frame is not attached."
@@ -92,7 +93,7 @@ def check_hand_edit(edit: HandEdit, layout: StackedLayout, fitted: NDArray[np.fl
         )
 
 
-def _rows_of_the_fit(frame: EagerFrame, rows: DistributionalRowState) -> EagerFrame:
+def _rows_of_the_fit(frame: EagerFrame, rows: Any) -> EagerFrame:
     """The rows the fit kept, from either the kept rows or the frame it was given."""
     provenance = rows.likelihood_weights.provenance
     if len(frame) == provenance.retained_count:
@@ -106,11 +107,11 @@ def _rows_of_the_fit(frame: EagerFrame, rows: DistributionalRowState) -> EagerFr
 
 
 def _recomputed_rows(
-    model: DenseDistributionalModel,
-    rows: DistributionalRowState,
+    model: Any,
+    rows: Any,
     edit: HandEdit,
     X_train: FrameLike | EagerFrame | None,
-) -> DistributionalRowState:
+) -> Any:
     """The retained rows with fitted ``eta`` and parameters taken at the edit."""
     if X_train is None:
         raise ValueError(NO_TRAINING_FRAME)
@@ -123,11 +124,11 @@ def _recomputed_rows(
 
 
 def revised_model(
-    model: DenseDistributionalModel,
+    model: Any,
     coefficients: NDArray,
     edited_terms: Sequence[str],
     X_train: FrameLike | EagerFrame | None,
-) -> DenseDistributionalModel:
+) -> Any:
     """A model predicting with ``coefficients``; ``model`` is left as it was.
 
     Terms edited earlier stay edited, and every difference is judged against the

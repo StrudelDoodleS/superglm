@@ -3,6 +3,10 @@
 A term is named ``"<parameter>:<term>"``, the layout's own composite key. A
 rebuilt model is unfitted: it carries no coefficients and no hand edit, only the
 templates and the settings the source was fitted with.
+
+Models are typed ``Any``: ``api`` imports this module, so it cannot import ``api``
+(``tests/test_distributional_family_kernel_architecture.py`` forbids import cycles
+even under ``TYPE_CHECKING``).
 """
 
 from __future__ import annotations
@@ -10,15 +14,12 @@ from __future__ import annotations
 import copy
 import dataclasses
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from superglm.distributional.binding import _bind_predictor_template
 from superglm.distributional.predictor import Predictor
 from superglm.terms import normalize_terms
 from superglm.types import FeatureSpec
-
-if TYPE_CHECKING:
-    from superglm.distributional.api import SuperLSS
 
 # Arguments of fit and fit_reml that describe the data or the rows, not the estimator.
 _NOT_SETTINGS = frozenset(
@@ -70,7 +71,7 @@ def _unfitted_spec(key: str, label: str, value: Any) -> FeatureSpec:
     return copy.deepcopy(features[label])
 
 
-def _replaced_templates(source: SuperLSS, replacements: Mapping[str, Any]) -> tuple[Predictor, ...]:
+def _replaced_templates(source: Any, replacements: Mapping[str, Any]) -> tuple[Predictor, ...]:
     by_parameter: dict[str, dict[str, FeatureSpec]] = {}
     for key, value in replacements.items():
         parameter, term = _split_key(key)
@@ -104,7 +105,7 @@ def _filtered_settings(
     return kept
 
 
-def clone_with_replaced_terms(source: SuperLSS, replacements: Mapping[str, Any]) -> SuperLSS:
+def clone_with_replaced_terms(source: Any, replacements: Mapping[str, Any]) -> Any:
     """An unfitted copy of ``source`` with the named terms' specs replaced."""
     templates = _replaced_templates(source, replacements)
     family = source._family
@@ -121,7 +122,7 @@ def clone_with_replaced_terms(source: SuperLSS, replacements: Mapping[str, Any])
     return clone
 
 
-def replay_fit(model: SuperLSS, X: Any, y: Any, sample_weight: Any, offsets: Any) -> SuperLSS:
+def replay_fit(model: Any, X: Any, y: Any, sample_weight: Any, offsets: Any) -> Any:
     """Fit ``model`` the way its source was fitted and return it."""
     settings = model._fit_settings
     if settings is None:
