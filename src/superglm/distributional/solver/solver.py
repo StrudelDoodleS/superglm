@@ -1607,24 +1607,30 @@ def _drops_design_aliases(layout: StackedLayout, rank: RankDecomposition) -> boo
 
 
 def _reduced_fit_is_stationary(
-    run: _OptimizationRun, retained: RetainedCoordinates, config: DenseSolverConfig
+    run: _OptimizationRun,
+    retained: RetainedCoordinates,
+    rank: RankDecomposition,
+    config: DenseSolverConfig,
 ) -> bool:
     """Whether a fit on the retained coefficients is also stationary for the full problem.
 
-    The reduced fit is the optimum under ``beta_J = 0``, and the full problem's when that
-    constraint's multiplier, the score ``g_J``, vanishes: the Kuhn-Tucker test an active-set
-    method makes before it keeps a variable fixed (Lawson and Hanson 1974, ch. 23). On ``K``
-    that is the reduced run's own stop; on ``J`` it is the score stop's test, which the
-    rounding floor cannot widen: the floor needs a certified Newton decrement of the full,
-    here rank-deficient, curvature. An alias's ``g_J`` vanishes with the retained score;
-    ``x`` and ``x^2`` far from zero pass the design test, but the data resolve them, and
-    ``g_J`` stays, in the dropped columns' units.
+    The optimum under ``beta_J = 0`` is the full problem's when that constraint's
+    multiplier vanishes (Lawson and Hanson 1974, ch. 23). It is read net of the retained
+    score, ``d = N_J^-T N'g`` with ``N`` the dropped null basis: ``X N`` and ``S N`` vanish
+    for an alias, so ``d`` is rounding whatever the alias's scale, while ``x`` and ``x^2``
+    far from zero, which the design test passes, keep ``d``, in the dropped columns' units.
     """
     if not run.converged:
         return False
-    score = np.asarray(run.geometry.score_penalized, dtype=np.float64)[retained.dropped]
+    null = rank.null_basis()
+    null = null / np.max(np.abs(null), axis=0)
+    score = np.asarray(run.geometry.score_penalized, dtype=np.float64)
+    try:
+        multiplier = np.linalg.solve(null[retained.dropped].T, null.T @ score)
+    except np.linalg.LinAlgError:
+        return False
     objective = run.state.penalized_optimizing_log_likelihood
-    return _relative_score(score, objective) <= config.tolerance
+    return _relative_score(multiplier, objective) <= config.tolerance
 
 
 def _representative_state(
@@ -2032,7 +2038,9 @@ def _fit_dense_fixed_lambda_core(
             )
             if continued is not None:
                 reduced_runs.append(continued)
-            if not _reduced_fit_is_stationary(reduced_runs[-1], reduced, solver_config):
+            if not _reduced_fit_is_stationary(
+                reduced_runs[-1], reduced, decomposition, solver_config
+            ):
                 # The data resolve a dropped direction: the stopped state and its decision stand.
                 reduced = None
                 break

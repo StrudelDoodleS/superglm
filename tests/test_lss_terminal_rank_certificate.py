@@ -649,10 +649,10 @@ def test_an_offset_column_the_rank_drops_is_not_refitted_away(name, discrete):
     """``x = 3e7 + N(0, 1)``: the rank drops the slope with the intercept, but the data resolve it.
 
     The column is collinear with the intercept only in uncentred coordinates,
-    so a refit without it leaves the slope's score at about half the
-    objective, and the stopped state is published with its disclosure.
-    Mutation check: accepting the refit publishes a zero slope, and on the
-    dense route a converged fit with no warning.
+    so the centred design test refuses the refit and the stopped state is
+    published with its disclosure. Mutation check: on uncentred column norms
+    with the refit accepted, the slope is published at zero, and on the dense
+    route as a converged fit with no warning.
     """
     from superglm.diagnostics.convergence import ConvergenceWarning
 
@@ -719,16 +719,20 @@ def test_a_column_far_from_zero_is_kept_in_any_units(monkeypatch, discrete, orig
     )
 
 
+@pytest.mark.parametrize("constant", [1e6, 1e9])
 @pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
-def test_a_constant_column_beside_an_intercept_is_refitted_as_an_alias(monkeypatch, discrete):
-    """``x = 1e6`` on every row: centred it is a zero column, and it is still an alias.
+def test_a_constant_column_beside_an_intercept_is_refitted_as_an_alias(
+    monkeypatch, discrete, constant
+):
+    """``x = c`` on every row: centred it is a zero column, and it is still an alias.
 
     Its direction ``X N`` vanishes to rounding, so it is an alias whatever the
     coordinates, and the fit is refitted without it from a start moved 3 along
     it. The fit without the column bounds the agreement: each stops with its
     score inside ``tol (1 + |f|)``, which moves a coefficient by about that
-    times ``sigma^2 / n``, here 3e-8. Mutation check: on centred column norms
-    alone the alias reads 0 / 0, and the drifted state is published.
+    times ``sigma^2 / n``, here 3e-8. Mutation checks: on centred column norms
+    alone the alias reads 0 / 0, and the drifted state is published; on the raw
+    dropped score, ``c`` times the retained one, the refit at ``c = 1e9`` is refused.
     """
     import superglm.distributional.solver.solver as solver
 
@@ -740,7 +744,7 @@ def test_a_constant_column_beside_an_intercept_is_refitted_as_an_alias(monkeypat
     def drifted(context):
         coefficients = np.array(start(context))
         if context.layout.n_coefficients == 4:
-            coefficients[[0, 2]] += (-3e6, 3.0)
+            coefficients[[0, 2]] += (-3.0 * constant, 3.0)
         return coefficients
 
     def fitted(columns):
@@ -751,10 +755,47 @@ def test_a_constant_column_beside_an_intercept_is_refitted_as_an_alias(monkeypat
 
     monkeypatch.setattr(solver, "_initial_coefficients", drifted)
     reference = fitted({"w": w})
-    result = fitted({"w": w, "x": np.full(3000, 1e6)})
+    result = fitted({"w": w, "x": np.full(3000, constant)})
     assert result.converged and result.terminal_rank.rank == 3
     assert result.coefficients[2] == 0.0
     np.testing.assert_allclose(result.coefficients[[0, 1, 3]], reference.coefficients, atol=1e-6)
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+def test_a_column_beside_its_square_far_from_zero_keeps_both(discrete):
+    """``x = 1e4 + z`` beside ``x^2``: centred they stay collinear, but the data resolve them.
+
+    The certified rank drops a direction the centred design test calls an
+    alias, so the refit runs, and its dropped multiplier, about ``0.1 * 2n``
+    for the ``0.1 z^2`` signal, refuses it: the stopped state is published,
+    and it predicts what the same model fitted on ``(z, z^2)`` predicts.
+    Mutation check: accepting every refit publishes a coefficient at zero and
+    drops the quadratic.
+    """
+    rng = np.random.default_rng(5)
+    z = rng.standard_normal(3000)
+    y = 1.0 + 0.5 * z + 0.1 * z**2 + rng.normal(0.0, 0.5, 3000)
+
+    def fitted(columns):
+        family = GaussianLS(scale_floor=0)
+        location = family.location(*(term(name, Numeric()) for name in columns))
+        model = SuperLSS(family, location, family.scale(), discrete=discrete)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit(pd.DataFrame(columns), y)
+        return model
+
+    x = 1e4 + z
+    offset = fitted({"x": x, "x2": x**2})
+    centred = fitted({"z": z, "z2": z**2})
+    result = offset._require_fitted().fit_state.solver_result
+    assert result.terminal_rank.rank < result.terminal_rank.width
+    assert np.all(result.coefficients[:3] != 0.0)
+    np.testing.assert_allclose(
+        np.asarray(offset.predict(pd.DataFrame({"x": x, "x2": x**2})).mean()),
+        np.asarray(centred.predict(pd.DataFrame({"z": z, "z2": z**2})).mean()),
+        atol=1e-6,
+    )
 
 
 def test_an_ill_conditioned_fixed_lambda_fit_that_stops_short_warns_and_names_the_cause():
