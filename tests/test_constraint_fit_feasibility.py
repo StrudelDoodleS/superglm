@@ -1440,8 +1440,8 @@ def test_an_increasing_term_held_flat_by_an_inverse_link_returns_a_certified_mod
     """Gamma/inverse: the passthrough's terminal QP at a flat term certifies.
 
     The term sits at its zero face, or on a ray of it near 1e-6, in
-    coordinates scaled by its smoothing parameter; its QP certifies only on
-    the retry, whose multipliers are fitted in the certificate's units.
+    coordinates scaled by its smoothing parameter; its QP certifies in the
+    ordinary solve, whose multipliers are fitted in the certificate's units.
     Mutation: fitted unweighted, as before, the REML fit ends unconverged.
     """
     frame, y = _restricted_link_book("inverse", seed=0)

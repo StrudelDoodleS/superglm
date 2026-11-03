@@ -616,8 +616,11 @@ def _raises_rank(distance: float | NDArray) -> bool | NDArray:
     singular values 1 and ``sqrt(1 +- sqrt(1 - rho**2))``. ``decompose_factor``'s rule,
     ``sigma_min > factor_rcond * sigma_max``, reads ``rho > factor_rcond * (1 + sqrt(1 -
     rho**2))``, between ``factor_rcond`` and twice it, far above the projection's rounding.
+    The rule is sequential (a Gram-Schmidt decision on ``[Q, a]``), not on ``[A_W.T, a]``: with
+    ill-conditioned working rows the two can differ near the threshold, and the effect is a
+    disclosed non-convergence, not a wrong number.
     """
-    cosine = np.sqrt(max(0.0, 1.0 - distance * distance))
+    cosine = np.sqrt(np.maximum(0.0, 1.0 - distance * distance))
     return distance > SHARED_RANK_POLICY.factor_rcond * (1.0 + cosine)
 
 

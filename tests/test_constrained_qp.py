@@ -355,7 +355,10 @@ class TestCallSiteWarnings:
 
     @staticmethod
     def _non_converging(calls):
-        """Wrap the real solver, forcing ``converged=False`` on every call; ``calls`` counts them."""
+        """Wrap the real solver, forcing ``converged=False`` on every call.
+
+        ``calls`` counts them.
+        """
         from superglm.solvers.constrained_qp import solve_constrained_qp as real_solve
 
         def fake_solve(*args, **kwargs):
@@ -2616,9 +2619,11 @@ class TestDegenerateVertex:
         the working set's independence is a decision of geometry, not of
         rounding. Mutation: 0.37.1, and the solver before every solve kept its
         working set independent, exhaust 200 iterations here uncertified.
-        Without the dependent-row test, or without the per-block zero face
-        (``_zero_block_faces``), the solve also ends uncertified. All of these
-        hold in both memory orders; the parametrization is a portability check.
+        Without the dependent-row test a dependent row reaches the basis
+        update, whose ``qr_insert`` raises ``LinAlgError``; without the
+        per-block zero face (``_zero_block_faces``) the solve ends uncertified.
+        All of these hold in both memory orders; the parametrization is a
+        portability check.
         """
         H, g, A, b = self._degenerate_vertex_problem(seed=113)
         H, A = np.asarray(H, order=order), np.asarray(A, order=order)
@@ -2714,7 +2719,8 @@ class TestDegenerateVertex:
         Coefficients 1 and 2 have actions ``2**-62`` of coefficient 0's, so
         the weighted system the multipliers are fitted from is Powell and
         Reid's example (Cox and Higham 1998, eq. 1.3),
-        ``[[0, 1, 1], [lam, -lam/2, 0], [lam, 0, -lam]]`` with ``lam = 2**62``. The heavy equations leave the multipliers' direction
+        ``[[0, 1, 1], [lam, -lam/2, 0], [lam, 0, -lam]]`` with
+        ``lam = 2**62``. The heavy equations leave the multipliers' direction
         ``(1, 2, 1)`` free, so the light one fixes their size. The three rows
         meet at the planted point, where ``H beta - g = A' (1, 2, 1)`` exactly:
         the vertex is the optimum, with multipliers ``(1, 2, 1) / 4`` in the
@@ -2725,6 +2731,12 @@ class TestDegenerateVertex:
         (Cox and Higham, section 1 and Lemma 4.2). Mutation: unsorted, the
         multipliers come out about 300 times too small, stationarity fails at
         coefficient 0, and the solve runs its 200 iterations uncertified.
+
+        The multipliers' tolerance is ``64 u`` times the infinity-norm
+        condition number of the row-equilibrated weighted system, 4, against
+        which the fit is row-wise backward stable (4 u measured).
+        The iteration bound is twice the 4 measured (three adds and the
+        certifying step); the mutation runs to 200.
         """
         unit_roundoff = np.finfo(np.float64).eps / 2
         light = 2.0**-60
@@ -2736,11 +2748,16 @@ class TestDegenerateVertex:
         assert np.array_equal(H @ x - g, [3.0, 0.0, 0.0]), "the planted point is no longer KKT"
         stationary, drop, multipliers = _stationarity_certificate(H, g, x, A, self._TOL)
         assert (stationary, drop) == (True, None)
-        np.testing.assert_allclose(multipliers, [0.25, 0.5, 0.25], rtol=16 * unit_roundoff)
+        weighted = A.T * np.array([1.0, 2.0**62, 2.0**62])[:, None]
+        equilibrated = weighted / np.max(np.abs(weighted), axis=1)[:, None]
+        condition = np.linalg.cond(equilibrated, np.inf)
+        np.testing.assert_allclose(
+            multipliers, [0.25, 0.5, 0.25], rtol=64 * condition * unit_roundoff
+        )
         assert _certifies_kkt_point(H, g, x, A, b, [0, 1, 2], self._TOL, np.abs(A))
         result = solve_constrained_qp(H, g, A, b)
         assert result.converged
-        assert result.n_iter <= 4
+        assert result.n_iter <= 8
         np.testing.assert_allclose(result.beta, x, rtol=0.0, atol=16 * unit_roundoff)
 
     def test_an_exactly_dependent_row_does_not_raise_the_working_rank(self):
@@ -2804,7 +2821,7 @@ class TestDegenerateVertex:
 
     @pytest.mark.parametrize("order", ["C", "F"])
     def test_a_hard_cap_vertex_is_certified(self, order):
-        """A captured hard-cap QP certifies at its vertex within 14 iterations: a portability check.
+        """A captured hard-cap QP certifies at its vertex: a portability check.
 
         The fixture is the first QP of a fit whose data push hard against
         ``cap(0.95, 1.05)`` (provenance inside). Its optimum is a vertex, nine
@@ -2818,8 +2835,10 @@ class TestDegenerateVertex:
         above 4e-2, so ``sqrt(u)`` separates them. Mutation: with
         ``qr_delete``'s square ``Q`` kept after the drop, the ratio test reads
         both candidate rows as dependent, the full step leaves the cap by
-        8.9e-4 and the solve ends uncertified after 12 iterations. The
-        regression for the mechanism is the basis test above.
+        8.9e-4 and the solve ends uncertified after 12 iterations, which
+        ``converged`` catches. The iteration bound, twice the 14 measured,
+        only catches a regression to a stall. The regression for the
+        mechanism is the basis test above.
         """
         unit_roundoff = np.finfo(np.float64).eps / 2
         doc = np.load(_CAPPED_VERTEX_QP)
@@ -2827,7 +2846,7 @@ class TestDegenerateVertex:
         A = np.asarray(A, order=order)
         result = solve_constrained_qp(H, g, A, b)
         assert result.converged
-        assert result.n_iter <= 14
+        assert result.n_iter <= 28
         x = result.beta
         assert _is_feasible(A, x, b, self._TOL)
         tight = np.flatnonzero(_feasibility_slack(A, x, b) <= np.sqrt(unit_roundoff))
