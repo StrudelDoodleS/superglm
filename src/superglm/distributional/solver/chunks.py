@@ -237,7 +237,8 @@ def layout_chunk_size(layout: StackedLayout, chunk_size: ChunkSize) -> int:
     A layout that streams in ranges contracts each chunk as it arrives, so an
     automatic chunk may instead take the contraction allowance its pass
     tables leave (``pass_table_bytes``), up to ``AUTO_STREAM_MAX_ROWS`` rows:
-    fewer chunks spread each pass's fixed work over more rows. Its likelihood
+    fewer chunks spread each pass's fixed work over more rows. An allowance
+    that holds every row is one block, which keeps no tables. Its likelihood
     arrays then hold at most that many rows of the floats
     :func:`_likelihood_row_floats` counts.
     """
@@ -253,6 +254,8 @@ def layout_chunk_size(layout: StackedLayout, chunk_size: ChunkSize) -> int:
     row_bytes = contraction_row_bytes(layout, panels)
     if row_bytes is None:
         return rows
+    if n <= AUTO_STREAM_MAX_ROWS and n * row_bytes <= AUTO_CONTRACTION_MEMORY_BYTES:
+        return n
     stream = (AUTO_CONTRACTION_MEMORY_BYTES - pass_table_bytes(layout, panels)) // row_bytes
     return max(rows, min(n, AUTO_STREAM_MAX_ROWS, stream))
 

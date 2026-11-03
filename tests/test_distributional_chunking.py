@@ -365,10 +365,15 @@ def test_a_range_streamed_chunk_takes_the_allowance_its_pass_tables_leave(monkey
         n, len(layout.predictors), "auto", row_floats=chunking.chunk_row_floats(layout)
     )
     assert floor + 3 < n
-    # The allowance holds the tables and exactly ``rows`` rows of the contraction.
-    for rows in (floor + 3, n - 1):
-        monkeypatch.setattr(chunking, "AUTO_CONTRACTION_MEMORY_BYTES", tables + rows * row_bytes)
-        assert chunking.layout_chunk_size(layout, "auto") == rows
+    assert tables + (floor + 3) * row_bytes < n * row_bytes
+    # The allowance holds the tables and exactly ``floor + 3`` rows of the contraction.
+    monkeypatch.setattr(chunking, "AUTO_CONTRACTION_MEMORY_BYTES", tables + (floor + 3) * row_bytes)
+    assert chunking.layout_chunk_size(layout, "auto") == floor + 3
+    # An allowance holding every row is one block, which keeps no tables to charge.
+    monkeypatch.setattr(chunking, "AUTO_CONTRACTION_MEMORY_BYTES", n * row_bytes)
+    assert chunking.layout_chunk_size(layout, "auto") == n
+    monkeypatch.setattr(chunking, "AUTO_CONTRACTION_MEMORY_BYTES", n * row_bytes - 1)
+    assert chunking.layout_chunk_size(layout, "auto") == (n * row_bytes - 1 - tables) // row_bytes
     # Never fewer rows than the likelihood rule, nor more than the pass or the stream cap.
     monkeypatch.setattr(chunking, "AUTO_CONTRACTION_MEMORY_BYTES", tables)
     assert chunking.layout_chunk_size(layout, "auto") == floor

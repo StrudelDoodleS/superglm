@@ -563,7 +563,7 @@ def test_workers_stop_at_the_total_over_the_largest_unsplit_block(monkeypatch):
         return [
             BlockTask(
                 index,
-                cost * queue._TINY_COST,
+                cost * 4 * queue._TASK_OVERHEAD_COST,
                 1,
                 lambda cache, profile: None,
                 lambda value: None,
@@ -588,7 +588,45 @@ def test_workers_stop_at_the_total_over_the_largest_unsplit_block(monkeypatch):
         assert profile["block_pool_workers"] == expected
 
 
-def test_largest_first_with_tiny_tasks_batched_and_the_oversized_pair_split(monkeypatch):
+def test_workers_stop_at_the_queue_cost_over_its_per_task_overhead(monkeypatch):
+    """Every task dispatches under the GIL, so a queue whose serial part is ``s`` of
+    its cost runs at most ``1 / s`` times faster (Amdahl): 40 tasks of one overhead
+    each keep two workers busy, of seven overheads each eight, and of half an
+    overhead each, which no pool can make twice as fast, run serially."""
+
+    class Cache:
+        _batch = None
+        _profile = None
+
+        def worker_view(self, shared, profile, work_queue):
+            return self
+
+    monkeypatch.setattr(parallel, "pool_workers", lambda n_units, task_bytes: 16)
+    for multiple, expected in ((0.5, None), (1, 2), (7, 8)):
+        tasks = [
+            BlockTask(
+                index,
+                multiple * queue._TASK_OVERHEAD_COST,
+                1,
+                lambda cache, profile: None,
+                lambda value: None,
+            )
+            for index in range(40)
+        ]
+        profile: dict = {}
+        queue.run_block_tasks(tasks, Cache(), profile)
+        assert profile.get("block_pool_workers") == expected
+
+
+@pytest.fixture
+def sub_overhead_costs(monkeypatch):
+    """Synthetic tasks far below one task's overhead test ordering and splits, not that cap."""
+    monkeypatch.setattr(queue, "_TASK_OVERHEAD_COST", 1)
+
+
+def test_largest_first_with_tiny_tasks_batched_and_the_oversized_pair_split(
+    monkeypatch, sub_overhead_costs
+):
     def tasks() -> list[BlockTask]:
         small = queue._TINY_COST / 4
         costs = (1, 10, 1, 80, 1, 1, 9)
@@ -634,7 +672,7 @@ def test_largest_first_with_tiny_tasks_batched_and_the_oversized_pair_split(monk
     assert parts == {104: [1, 1, 1, 4, 1, 1, 1], 103: [1] * 7}
 
 
-def test_blocks_split_at_once_share_one_memory_budget(monkeypatch):
+def test_blocks_split_at_once_share_one_memory_budget(monkeypatch, sub_overhead_costs):
     """Each split adds one histogram, and every split block's parts can run at once.
 
     Two pairs of 40 small units in 86, each above the eight-worker bound of
@@ -683,7 +721,7 @@ def test_blocks_split_at_once_share_one_memory_budget(monkeypatch):
     }
 
 
-def test_split_headroom_leaves_the_fits_retained_tables_alone(monkeypatch):
+def test_split_headroom_leaves_the_fits_retained_tables_alone(monkeypatch, sub_overhead_costs):
     """Splits share only what the fit's retained tables and the workers leave of ``max_memory``.
 
     Eight one-byte tasks and one 100-byte split fit a budget of 108 bytes,
