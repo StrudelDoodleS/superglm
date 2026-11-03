@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import GammaLS, LogNormalLS, SuperLSS, TweedieLSS, s, ti
+from superglm import GammaLS, LogNormalLS, NegativeBinomialLS, SuperLSS, TweedieLSS, s, ti
 from superglm.editor import edit
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.lss import (
@@ -355,9 +355,9 @@ def test_reference_row_is_the_training_centre_and_survives_mutation():
         (LogNormalLS(), "scale", "claims", "Spread of claim sizes", "spread", "orange"),
         (GammaLS(), "mean", "claims", "Average claim", "average", "blue"),
         (GammaLS(), "scale", "claims", "Spread of claim sizes", "spread", "orange"),
-        (nb_case().model.family, "mean", "claims", "Claim frequency", "average", "blue"),
+        (NegativeBinomialLS(), "mean", "claims", "Claim frequency", "average", "blue"),
         (
-            nb_case().model.family,
+            NegativeBinomialLS(),
             "theta",
             "claims",
             "Extra variation in claim counts",
@@ -366,7 +366,7 @@ def test_reference_row_is_the_training_centre_and_survives_mutation():
         ),
         (LogNormalLS(), "mean", "generic", "Average", "average", "blue"),
         (LogNormalLS(), "scale", "generic", "Spread", "spread", "orange"),
-        (nb_case().model.family, "theta", "generic", "Spread", "spread", "orange"),
+        (NegativeBinomialLS(), "theta", "generic", "Spread", "spread", "orange"),
     ],
 )
 def test_parameter_display_names(family, parameter, response, label, role, colour):

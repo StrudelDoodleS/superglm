@@ -29,9 +29,9 @@ def _posted(path: str):
 def test_feature_list_groups_by_parameter(open_lss_editor_page):
     with open_lss_editor_page() as (page, session):
         assert list(session.terms) == _LOG_NORMAL_TERMS
-        headers = page.locator("#featureList").get_by_text("Average claim", exact=True)
-        assert headers.count() == 1
-        assert page.locator("#featureList").get_by_text("Spread of claim sizes").count() == 1
+        titles = page.locator("#featureList .feature-group-title")
+        assert titles.get_by_text("Average claim", exact=True).count() == 1
+        assert titles.get_by_text("Spread of claim sizes", exact=True).count() == 1
 
         rows = page.locator("#featureList [data-term]")
         assert rows.evaluate_all("els => els.map(e => e.dataset.term)") == _LOG_NORMAL_TERMS

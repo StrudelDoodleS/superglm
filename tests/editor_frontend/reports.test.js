@@ -84,3 +84,16 @@ test("a split the model cannot score shows its reason across the metric columns"
   // The other split keeps its metrics.
   assert.match(html, /data-direction="better">Δ -0\.05</);
 });
+
+test("a SuperGLM metric the report has no value for shows a dash and no change", () => {
+  const html = render({
+    report: "validation",
+    available: true,
+    metric_labels: { deviance: "Deviance", effective_df: "EDF" },
+    splits: [split({ deviance: null, effective_df: 4 }, { deviance: null, effective_df: 0 })],
+    cv_report: null,
+  });
+  const deviance = html.split("<td>")[2];
+  assert.match(deviance, /^\s*--\s*<span class="report-delta" data-direction="neutral">Δ --<\/span>/);
+  assert.doesNotMatch(html, /NaN|null|undefined/);
+});

@@ -224,10 +224,6 @@ def apply_edits_to_model_copy_with_data(
 
 def materialize_edit_request(request):
     """Construct an edited model from an immutable session snapshot."""
-    if is_lss(request.base_model):
-        from superglm.editor.lss.apply import lss_model_with_edits
-
-        return lss_model_with_edits(request.base_model, request.terms)
     kwargs = {}
     if request.dataset is not None:
         kwargs = {

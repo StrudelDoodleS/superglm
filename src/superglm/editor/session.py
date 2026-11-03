@@ -1054,6 +1054,7 @@ class EditorSession:
         edited terms should be treated as fixed rating factors. If ``terms`` is
         omitted, all changed terms in the session are used.
         """
+        require_available(self.model, "refit_offset")
         names = self._resolve_offset_terms(terms)
         X_ref = self._resolve_offset_frame(X)
         frame = as_eager_frame(X_ref)

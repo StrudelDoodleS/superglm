@@ -21,6 +21,14 @@ from tests.test_editor import editor_frame, editor_model  # noqa: F401
 
 FIXTURE = Path(__file__).parent / "editor_frontend" / "fixtures" / "display_transforms.json"
 TOLERANCE = 64 * EPS
+# Every key of a SuperGLM term's payload; a SuperLSS key on it would change a SuperGLM page.
+GLM_TERM_KEYS = {
+    "kind", "term_type", "x", "x_domain", "y", "original_y", "previous_y", "controls",
+    "spline_view", "ci_lower_y", "ci_upper_y", "weights", "exposure", "handle_indices", "impact",
+    "n_points", "levels", "level_groups", "level_order_changed", "reference", "shape", "knots",
+    "pending", "unseen", "unsmoothed", "effective_df", "edited", "x_label", "y_label", "title",
+    "group_display",
+}  # fmt: skip
 LSS_FIELDS = {
     "parameter",
     "parameter_label",
@@ -198,6 +206,7 @@ def test_glm_payload_has_no_parameter_fields(editor_model):  # noqa: F811
     session = EditorSession.from_model(editor_model, terms=["x_spline"])
     term = session_payload(session)["x_spline"]
     assert not (LSS_FIELDS | {"y_format"}) & set(term)
+    assert set(term) == GLM_TERM_KEYS
     np.testing.assert_array_equal(term["y"], np.exp(session.terms["x_spline"].edited_log_effect))
     assert term["y_label"] == "relativity" and term["title"] == "x_spline"
 

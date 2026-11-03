@@ -640,3 +640,11 @@ def test_evidence_routes_answer_calmly_for_tools_a_superlss_does_not_offer():
         assert metrics_payload(session, "deviance")["error"] == LSS_UNAVAILABLE["metrics"]
     finally:
         widget.close()
+
+
+@pytest.mark.parametrize("call", ["edited_offset", "edited_offset_factor"])
+def test_the_edited_offset_is_refused_with_the_tools_reason(call):
+    session = open_case(lognormal_case())
+    with pytest.raises(EditorValueError) as info:
+        getattr(session, call)()
+    assert info.value.public_message == LSS_UNAVAILABLE["refit_offset"]
