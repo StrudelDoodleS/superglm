@@ -946,12 +946,13 @@ class SuperLSS:
 
         ``coefficients`` is the full vector in the fit's layout. It may differ
         from the fit's only inside ``edited_terms`` (qualified names such as
-        ``"scale:age"``) and at the intercept of their parameters, together with
-        the terms of any earlier revision. Predictions, term effects, ``coef_``
-        and ``coef_by_predictor_`` follow the edit; ``result_``,
-        ``covariance_`` and the inference behind them keep describing the fit.
-        The fitted rows are recomputed, which needs the training frame: the one
-        attached, else ``X_train``.
+        ``"scale:age"``), at their parameters' intercepts, and in the terms of
+        earlier revisions. Predictions, term effects, ``coef_`` and
+        ``coef_by_predictor_`` follow the edit; ``result_``, ``covariance_``, term
+        tests and the rest of the inference describe the fit. An edit may write a
+        non-zero value onto a coefficient the fit publishes at zero as aliased;
+        its standard error stays 0. The fitted rows are recomputed from the
+        training frame attached, else ``X_train``.
         """
         frame = self._training_frame if X_train is None else X_train
         revised = revised_model(self._require_fitted(), coefficients, edited_terms, frame)

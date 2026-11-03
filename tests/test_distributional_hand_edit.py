@@ -474,3 +474,32 @@ def test_fit_state_from_before_hand_edits_reads_as_unedited():
     del state.__dict__["hand_edit"]
     assert state.hand_edit is None
     assert state.reported_coefficients is state.result.coefficients
+
+
+@pytest.mark.parametrize(("builder", "parameter"), CASES)
+def test_tests_and_summary_describe_the_fit_after_an_edit(builder, parameter):
+    case = builder()
+    m = case.model
+    key = f"{parameter}:age"
+    coefficients = _edit_term(m, key, 0.0)
+    coefficients[_intercept(m, parameter)] += 0.3
+    edited = m._with_revised_coefficients(coefficients, edited_terms=[key], X_train=case.X)
+    fitted = m.term_test(parameter, "age", X_train=case.X)
+    with pytest.warns(EditedCoefficientsWarning):
+        tested = edited.term_test(parameter, "age", X_train=case.X)
+    # A test of the zeroed curve has statistic 0, so equality with the fit's is not vacuous.
+    assert fitted.statistic > 1e3 * EPS
+    assert (tested.statistic, tested.rank, tested.p_value) == (
+        fitted.statistic,
+        fitted.rank,
+        fitted.p_value,
+    )
+    before = m.summary(X_train=case.X)
+    with pytest.warns(EditedCoefficientsWarning):
+        after = edited.summary(X_train=case.X)
+    tests = ["edf", "statistic", "rank", "p_value", "se", "note"]
+    pd.testing.assert_frame_equal(after[tests], before[tests])
+    intercept = (after["parameter"] == parameter) & (after["term"] == "(intercept)")
+    np.testing.assert_array_equal(
+        after.loc[intercept, "estimate"], before.loc[intercept, "estimate"] + 0.3
+    )
