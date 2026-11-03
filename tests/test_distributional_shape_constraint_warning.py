@@ -46,11 +46,12 @@ def test_an_unconstrained_spline_does_not_warn():
         ).fit_reml(frame, y, method="efs")
 
 
+_U = 2.0**-53
 C = Constraint.fit
 _BANDS = [f"B{i}" for i in range(6)]
 
 
-def _lss_fit(frame, y, feature, spec, *, discrete=False):
+def _lss_fit_warned(frame, y, feature, spec, *, discrete=False):
     model = model_from_templates(
         family=NegativeBinomialLS(),
         predictors=(Predictor("mean", {feature: spec}), Predictor("theta", {})),
@@ -59,6 +60,11 @@ def _lss_fit(frame, y, feature, spec, *, discrete=False):
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         fitted = model.fit_reml(frame, y, method="efs")
+    return fitted, caught
+
+
+def _lss_fit(frame, y, feature, spec, *, discrete=False):
+    fitted, caught = _lss_fit_warned(frame, y, feature, spec, discrete=discrete)
     ignored = [w for w in caught if issubclass(w.category, ShapeConstraintIgnoredWarning)]
     return fitted, ignored
 
@@ -128,3 +134,41 @@ def test_lss_warns_for_ordered_and_categorical_terms(feature, spec, line):
     _, ignored = _lss_fit(frame, y, feature, spec)
     assert len(ignored) == 1
     assert f"mean:{feature} asked for {line}" in str(ignored[0].message)
+
+
+@pytest.mark.parametrize(
+    ("feature", "plain", "ruled", "grid"),
+    [
+        (
+            "x",
+            Spline(kind="ps", n_knots=6),
+            Spline(kind="ps", n_knots=6, constraint=C.flat.within(25, 60)),
+            pd.DataFrame({"x": np.linspace(2.0, 98.0, 25)}),
+        ),
+        (
+            "band",
+            OrderedCategorical(order=_BANDS, basis=Spline(kind="ps", k=5)),
+            OrderedCategorical(
+                order=_BANDS, basis=Spline(kind="ps", k=5, constraint=C.flat.within("B1", "B4"))
+            ),
+            pd.DataFrame({"band": _BANDS}),
+        ),
+    ],
+    ids=["spline", "ordered"],
+)
+def test_lss_fits_a_flat_stretch_unconstrained_as_it_warns(feature, plain, ruled, grid):
+    """SuperLSS drops every rule, a flat stretch included: the warning says the term is
+    fitted unconstrained, and the fit is the unconstrained fit, with no flat-span warning.
+
+    Mutation: a flat stretch is absorbed into the basis at every build, so without
+    the strip the constrained term fits flat and the curves differ.
+    """
+    frame, y = _lss_rows()
+    free, _ = _lss_fit(frame, y, feature, plain)
+    held, caught = _lss_fit_warned(frame, y, feature, ruled)
+    free_mean = free.predict_parameters(grid)["mean"].to_numpy()
+    held_mean = held.predict_parameters(grid)["mean"].to_numpy()
+    np.testing.assert_allclose(held_mean, free_mean, rtol=0, atol=1e4 * _U * np.max(free_mean))
+    assert np.ptp(np.log(free_mean)) > 0.1, "the free curve moves where the flat would hold it"
+    assert [w for w in caught if issubclass(w.category, ShapeConstraintIgnoredWarning)]
+    assert not [w for w in caught if "holds on" in str(w.message)]

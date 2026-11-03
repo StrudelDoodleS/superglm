@@ -392,8 +392,9 @@ Shape-constrained splines work with `fit_reml()`:
 Automatic lambda estimation is not exact joint constrained REML: it estimates
 the lambdas from an unconstrained REML pass and then refits with the shape
 constraints at those lambdas. Combined rules, stretches, caps and step limits
-take the same route. REML chooses the smoothing without them, then the model is
-refit with them at those smoothing parameters.
+take the same route. REML chooses the smoothing without the shapes, caps and step
+limits, then the model is refit with them at those smoothing parameters. A flat
+stretch is part of the term's basis, so REML already holds it.
 
 ### With a random effect
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -16,9 +17,13 @@ from superglm._frame import EagerFrame
 from superglm._predictor_compiler import CompiledPredictorDesign, compile_predictor_design
 from superglm.distributional.family import ParameterSpec
 from superglm.distributional.weights import ResolvedLikelihoodWeights
-from superglm.features.constraint import rules_of
+from superglm.features._spline_config import clear_shape_rules
+from superglm.features.categorical import Categorical
+from superglm.features.constraint import ConstraintRules, rules_of
 from superglm.features.factor_smooth import FactorSmooth
+from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.random_effect import validate_declared_nesting
+from superglm.features.spline import _SplineBase
 from superglm.group_matrix import (
     CrossMatrixExecutionPlan,
     DesignMatrix,
@@ -45,6 +50,31 @@ def _constrained_features(predictor: Predictor) -> list[tuple[str, str, str]]:
         if rules:
             found.append((name, rules.describe(), rules.rules[0].mode))
     return found
+
+
+def _without_shape_rules(predictor: Predictor) -> Predictor:
+    """``predictor`` with every shape rule removed from copies of the features that carry one.
+
+    SuperLSS applies no shape rule. A flat stretch is absorbed into the basis at every
+    spline build, so a feature must be built without its rules to be fitted without them.
+    """
+    if not _constrained_features(predictor):
+        return predictor
+    features = {}
+    for name, spec in predictor.features.items():
+        if rules_of(spec):
+            spec = copy.deepcopy(spec)
+            if isinstance(spec, OrderedCategorical):
+                bases = (spec._spline_obj, spec._spline)
+            else:
+                bases = (spec,)
+            for basis in bases:
+                if isinstance(basis, _SplineBase):
+                    clear_shape_rules(basis)
+                elif isinstance(basis, Categorical):
+                    basis._constraint_rules = ConstraintRules(())
+        features[name] = spec
+    return replace(predictor, features=features)
 
 
 @dataclass(frozen=True)
@@ -540,6 +570,7 @@ def compile_predictors(
                 ShapeConstraintIgnoredWarning,
                 stacklevel=3,
             )
+    predictor_tuple = tuple(_without_shape_rules(predictor) for predictor in predictor_tuple)
     _validate_predictor_order(parameter_tuple, predictor_tuple)
     boundary_tuple = (
         tuple(() for _ in predictor_tuple)

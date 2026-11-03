@@ -169,6 +169,14 @@ def _normalize_constraint(
     return constraint, constraint.describe(), "fit"
 
 
+def clear_shape_rules(spec: Any) -> None:
+    """Remove every shape rule from a spline spec, as if it were built without ``constraint``."""
+    rules, kind, mode = _normalize_constraint(None)
+    spec.constraint_rules = rules
+    spec.constraint_kind = spec.monotone = kind
+    spec.constraint_mode = spec.monotone_mode = mode
+
+
 def fit_time_select_message(rules: ConstraintRules) -> str:
     """Why ``select=True`` cannot meet fit-time ``rules``, and what to do instead."""
     refusal = "Fit-time shape constraints are not supported with select=True. "
