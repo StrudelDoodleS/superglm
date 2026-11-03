@@ -137,9 +137,10 @@ For exact edges, use one of these:
   flat on the range and changes the basis. See
   [Polynomial ranges](specify-features.md#polynomial-ranges-polynomial_ranges).
   A term with polynomial ranges cannot also carry a shape rule.
-- Knots at the stretch edges, set with `knots=[...]`. This keeps the shape
-  rules. In the example above the ages run from 10 to 85, so nine knots fall
-  at 25 and 40 and the fit does not warn.
+- Knots at the stretch edges, set with `knots=[...]` or by choosing
+  `n_knots`. This keeps the shape rules. In the example above the ages run
+  from 10 to 85. `n_knots=9` puts evenly spaced knots 7.5 apart, so two of
+  them land on 25 and 40 and the fit does not warn.
 
 ### Caps
 
@@ -161,8 +162,8 @@ curve.min(), curve.max()  # inside 0.6 and 1.8, to solver tolerance
 ```
 
 - A cap is measured on the printed curve, not on the raw coefficients.
-- For a spline, the printed curve is the native one. It averages to
-  relativity 1 over the training rows.
+- For a spline, the printed curve is the native one. Its log relativity
+  averages to 0 over the training rows, so its geometric mean is 1.
 - For a categorical or an ordered categorical, the cap is measured against the
   base level, whose relativity is 1.
 - A cap needs a log link and is refused under any other link, because only
@@ -202,9 +203,13 @@ pd.Series(ti.relativity, index=ti.levels)
 separate limit down, as in `C.max_step(0.15, 0.10)`, allows 15% up and 10%
 down. Both are fractions, `up > 0` and `0 < down < 1`.
 
-- `max_step` applies only to ordered categoricals, and it limits the step
-  between the levels. To limit steps on a numeric feature, band it with
-  `OrderedCategorical` first. On a spline term `max_step` is refused.
+- `down` defaults to `up`. When `up` is 1 or more, give `down` explicitly:
+  `C.max_step(1.0)` is refused, while `C.max_step(1.0, 0.5)` fits.
+- A term takes at most one `max_step`.
+- `max_step` applies only to ordered categoricals, where it limits the step
+  between the levels.
+- On a spline term `max_step` is refused. To limit steps on a numeric
+  feature, band it with `OrderedCategorical` first.
 - `max_step` needs a log link, like a cap.
 - Shape rules and `flat` bind on the whole level axis, as stated under
   [Constraints on an `OrderedCategorical`](#constraints-on-an-orderedcategorical-bind-on-the-whole-level-axis).
@@ -261,7 +266,7 @@ model.fit(df, y)
   [QP-Backed Shape Fits](#qp-backed-shape-fits).
 - `Constraint.postfit` takes only a single shape over the whole range.
   Combinations, stretches and caps are fit-time only.
-- `SuperLSS` does not enforce these rules yet. It warns and fits the term
+- `SuperLSS` does not enforce these rules. It warns and fits the term
   unconstrained.
 
 ## Linear Predictor Semantics
@@ -432,7 +437,10 @@ These combinations are intentionally guarded:
 - `kind="ns"` fit-time shape constraints
 - `Constraint.fit.convex` or `Constraint.fit.concave` on a `PSpline` or
   `BSplineSmooth` with `degree > 3`
-
+- a direction rule on a stretch, such as `C.increasing.below(5)`, on a spline
+  of degree 1
+- a curvature rule on a stretch, such as `C.convex.above(5)`, on a spline of
+  degree 2 or less
 - `Constraint.fit.cap` or `Constraint.fit.max_step` under any link but log
 - `Constraint.fit.cap` or `Constraint.fit.max_step` on an `OrderedCategorical`
   with special levels

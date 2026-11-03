@@ -421,6 +421,14 @@ def _install_execution_doubles(monkeypatch) -> dict[str, object]:
     return results
 
 
+def _constrain_page_bands() -> list[str]:
+    """``bands`` as the first block of constrain-a-smooth.md defines it, for its later blocks."""
+    page = (_ROOT / "docs" / "how-to" / "constrain-a-smooth.md").read_text(encoding="utf-8")
+    match = re.search(r"^bands = (\[.*\])$", page, flags=re.MULTILINE)
+    assert match is not None, "constrain-a-smooth.md no longer defines bands on one line"
+    return ast.literal_eval(match.group(1))
+
+
 def _documentation_namespace(results: dict[str, object]) -> dict[str, object]:
     """Supply the data and prior-result context assumed by narrative snippets."""
     n_rows = 20
@@ -461,7 +469,7 @@ def _documentation_namespace(results: dict[str, object]) -> dict[str, object]:
     namespace.update(
         {
             "C": superglm.Constraint.fit,
-            "bands": ["18-25", "26-35", "36-45", "46-55", "56-65", "66-75", "76-85", "86+"],
+            "bands": _constrain_page_bands(),
             "X": frame,
             "X_train": frame,
             "X_validation": frame,
