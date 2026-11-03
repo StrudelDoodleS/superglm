@@ -14,6 +14,7 @@ from superglm.editor import EditorSession
 from superglm.editor.lss import RELATIVITY, DisplayTransform, display_for
 from superglm.editor.lss.apply import lss_model_with_edits
 from superglm.editor.lss.availability import LSS_UNAVAILABLE
+from superglm.editor.operations import isotonic_values
 from superglm.editor.payloads import session_payload
 from tests._lss_editor_fixtures import EPS, gamma_case, lognormal_case, nb_case, open_case
 from tests.test_editor import editor_frame, editor_model  # noqa: F401
@@ -242,7 +243,8 @@ def test_display_fixture_is_current():
 
 
 def _shown_after(operation, key="theta:age"):
-    """The shown curve before and after ``operation`` on every point of an NB spread term.
+    """The shown curve before and after ``operation`` on every point of an NB spread term,
+    its display transform and the term's weights.
 
     A dip at the middle point is drawn first, so the curve both rises and falls.
     """
@@ -258,29 +260,35 @@ def _shown_after(operation, key="theta:age"):
         before = transform.to_display(session.terms[key].edited_log_effect.copy())
         widget._operate(operation, key)
         after = transform.to_display(session.terms[key].edited_log_effect)
-        return before, after, transform
+        return before, after, transform, session.terms[key].weights
     finally:
         widget.close()
 
 
 @pytest.mark.parametrize(("operation", "factor"), [("shift_up", 1.05), ("shift_down", 0.95)])
 def test_shift_moves_a_falling_display_the_way_it_names(operation, factor):
-    before, after, transform = _shown_after(operation)
+    before, after, _, _ = _shown_after(operation)
     np.testing.assert_allclose(after / before, factor, rtol=1e3 * EPS, atol=0.0)
 
 
 @pytest.mark.parametrize(("operation", "sign"), [("increasing", 1.0), ("decreasing", -1.0)])
 def test_monotone_fit_makes_the_shown_curve_monotone(operation, sign):
-    before, after, _ = _shown_after(operation)
+    before, after, transform, weights = _shown_after(operation)
     # The curve rises and falls, so each fit has to move it.
     assert np.any(np.diff(before) < 0.0) and np.any(np.diff(before) > 0.0)
     steps = sign * np.diff(after)
     assert np.all(steps >= -1e3 * EPS * np.max(np.abs(after)))
+    # 1/theta falls as the effect rises: the shown fit is the effect's fit the other way.
+    effect = transform.from_display(before)
+    other = "decreasing" if operation == "increasing" else "increasing"
+    index = np.arange(effect.size, dtype=np.intp)
+    expected = isotonic_values(effect, index, weights, other)
+    np.testing.assert_allclose(after, transform.to_display(expected), rtol=1e3 * EPS, atol=0.0)
 
 
 @pytest.mark.parametrize(("operation", "pick"), [("snap_highest", np.max), ("snap_lowest", np.min)])
 def test_snap_takes_the_shown_extreme(operation, pick):
-    before, after, _ = _shown_after(operation)
+    before, after, _, _ = _shown_after(operation)
     np.testing.assert_allclose(after, pick(before), rtol=1e3 * EPS, atol=0.0)
 
 
