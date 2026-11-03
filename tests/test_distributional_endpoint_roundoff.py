@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import pickle
+import warnings
 from dataclasses import replace
 
 import numpy as np
@@ -28,8 +29,10 @@ from superglm import (
     ti,
 )
 from superglm._frame import as_eager_frame
+from superglm.diagnostics.convergence import ConvergenceWarning
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.layout import build_stacked_layout
+from superglm.distributional.posterior import posterior_covariance
 from superglm.distributional.predictor import compile_predictors
 from superglm.distributional.results.solver import (
     DenseSolverConfig,
@@ -474,8 +477,13 @@ def test_a_stationary_endgame_keeps_an_exact_face_beside_a_capped_tensor_margin(
     endgame stationary with ``mean:x1#wiggle`` on an exact face and the tensor
     margin ``mean:x1:x2#margin_x1`` at the cap. A margin that shares its block
     cannot join a face, so the sole-cap rule alone retracted the face and the
-    fit stopped ``endpoint_revalidation_failed``. Mutation check: without the
-    waiver this fit retracts.
+    fit stopped ``endpoint_revalidation_failed``. The refreshed Fellner--Schall
+    evidence then nominates that margin, and the revalidation refit moves the
+    coefficients by a rounding, so the gradient the stop published must be
+    retaken at the published fit for the corrected covariance to replay it.
+    Mutation checks: without the waiver this fit retracts; without the
+    nomination rule it keeps ``unresolved_upper_bound`` nonempty; without the
+    retaken gradient the corrected covariance falls back to the fixed one.
     """
     frame, eta, rng = release_differential.make_data(4000, 5155)
     response = rng.gamma(3.0, np.exp(0.5 * eta + 1.0) / 3.0)
@@ -502,7 +510,13 @@ def test_a_stationary_endgame_keeps_an_exact_face_beside_a_capped_tensor_margin(
         pytest.skip("this build's endgame left no cap beside an exact face")
     assert smoothing.convergence_reason == "stationary"
     assert smoothing.converged is True
+    assert smoothing.unresolved_upper_bound == ()
     assert set(model.result_.exact_face_components) == promoted
+    fitted = model._require_fitted()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        corrected = posterior_covariance(fitted, kind="corrected")
+    assert np.all(np.diag(corrected) >= np.diag(posterior_covariance(fitted, kind="fixed")))
     loaded = pickle.loads(pickle.dumps(model))._require_fitted().smoothing
     assert loaded is not None
     assert loaded.convergence_reason == "stationary"
@@ -513,8 +527,10 @@ def test_a_stationary_endgame_voids_a_refreshed_cap_nomination(monkeypatch) -> N
 
     An exact-face revalidation after a stationary endgame refreshes the
     Fellner--Schall evidence, and that evidence can nominate a capped component
-    whose exact gradient the endgame found flat. The fit still stops stationary.
-    Mutation check: without the rule the stationary result kept the nomination.
+    outside the face whose exact gradient the endgame found flat. The nomination
+    is forced here on every component outside the face, all of which that
+    gradient judged. The fit still stops stationary. Mutation check: without the
+    rule the stationary result kept the nomination.
     """
     import superglm.distributional.smoothing.loop as loop
 
@@ -531,10 +547,11 @@ def test_a_stationary_endgame_voids_a_refreshed_cap_nomination(monkeypatch) -> N
 
     def nominating(layout, lambdas, fit, config, *, face=None):
         evidence = fresh(layout, lambdas, fit, config, face=face)
-        capped = tuple(name for name, value in lambdas.items() if value == config.maximum_lambda)
-        if stationary and face is not None and capped and evidence.maximum > 0.0:
-            nominated.append(capped)
-            return replace(evidence, unresolved_upper_bound=capped)
+        if stationary and face is not None:
+            outside = evidence.estimated_names
+            assert outside and not set(outside) & set(face.component_names)
+            nominated.append(outside)
+            return replace(evidence, unresolved_upper_bound=outside)
         return evidence
 
     monkeypatch.setattr(loop, "run_newton_endgame", flagged_endgame)
@@ -551,11 +568,83 @@ def test_a_stationary_endgame_voids_a_refreshed_cap_nomination(monkeypatch) -> N
     )
     model.fit_reml(frame, response, outer="efs+newton")
     smoothing = model._require_fitted().smoothing
-    assert nominated
+    assert nominated, "the fixture's stationary endgame revalidates an exact face"
     assert smoothing is not None
     assert smoothing.convergence_reason == "stationary"
     assert smoothing.converged is True
     assert smoothing.unresolved_upper_bound == ()
+
+
+def _flagged_generalized_pareto_model() -> SuperLSS:
+    """The release differential's mid GeneralizedParetoLSS model, as in the tests above."""
+    family = GeneralizedParetoLSS()
+    return SuperLSS(
+        family,
+        family.scale(
+            s("x1", kind="cr", k=8), cat("c1"), s("x2", kind="cr", k=6), re("c2"), ti("x1", "x2")
+        ),
+        family.shape(s("x2", kind="cr", k=5)),
+        discrete=True,
+    )
+
+
+def test_a_stationary_endgame_revalidates_its_face_beside_another_cap(monkeypatch) -> None:
+    """The sole-cap waiver, forced: the terminal recheck sees another cap outside the face.
+
+    A tensor margin at the cap beside a scalar face is the case it covers. Here
+    the recheck is told the face's component is not the sole cap, on a fixture
+    whose endgame ends stationary with an exact face. That endgame's exact
+    gradient certified every other cap, so the face is kept. Mutation check:
+    without the waiver the recheck retracts the face and the fit stops
+    ``endpoint_revalidation_failed``.
+    """
+    import superglm.distributional.smoothing.loop as loop
+
+    recheck = loop._recheck_exact_face
+    sole_cap = smoothing_faces._is_sole_cap_outside_face
+    waivers: list[bool] = []
+
+    def not_sole(*args, **kwargs) -> bool:
+        sole_cap(*args, **kwargs)
+        return False
+
+    def recheck_beside_another_cap(*args, **kwargs):
+        waivers.append(kwargs["other_caps_stationary"])
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(smoothing_faces, "_is_sole_cap_outside_face", not_sole)
+            return recheck(*args, **kwargs)
+
+    monkeypatch.setattr(loop, "_recheck_exact_face", recheck_beside_another_cap)
+    frame, response = _flagged_generalized_pareto_problem()
+    model = _flagged_generalized_pareto_model().fit_reml(frame, response)
+    smoothing = model._require_fitted().smoothing
+    assert smoothing is not None
+    assert waivers == [True], "the fixture's stationary endgame revalidates an exact face"
+    assert smoothing.convergence_reason == "stationary"
+    promoted = {name for item in smoothing.history for name in item.activated_face_components}
+    assert promoted and set(model.result_.exact_face_components) == promoted
+
+
+def test_the_iteration_budget_does_not_refuse_a_stationary_endgames_face_check() -> None:
+    """``max_reml_iter`` counts search iterations; the terminal face revalidation is not one.
+
+    The fit is refitted with exactly the budget its own search used. Mutation
+    check: when the revalidation counted against the budget, the refit stopped
+    ``max_iterations`` with its face never revalidated.
+    """
+    frame, response = _flagged_generalized_pareto_problem()
+    reference = _flagged_generalized_pareto_model().fit_reml(frame, response)
+    smoothing = reference._require_fitted().smoothing
+    assert smoothing is not None and smoothing.convergence_reason == "stationary"
+    searched = len(smoothing.history)
+    while searched and smoothing.history[searched - 1].revalidated_face_components:
+        searched -= 1
+    assert searched < len(smoothing.history), "the fixture's stop revalidates an exact face"
+    refit = _flagged_generalized_pareto_model().fit_reml(frame, response, max_reml_iter=searched)
+    again = refit._require_fitted().smoothing
+    assert again is not None
+    assert again.convergence_reason == "stationary"
+    assert refit.result_.exact_face_components == reference.result_.exact_face_components
 
 
 def _null_direction_problem(offset: float = -2.0e8):

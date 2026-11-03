@@ -302,8 +302,8 @@ restored.term_inference("mean", "x", X_train=frame)
 Bands and tests treat the smoothing parameters as fixed at their estimates.
 Passing `covariance="corrected"` asks instead for the first-order correction of
 Wood, Pya and Säfken (2016). It is formed about a stationary point. For every
-family except the two-piece ones, the default smoothing search stops at one
-when it converges. A stationary fit can use a trusted smoothing Hessian
+family except the two-piece ones, the default smoothing search usually stops at
+one; `smoothing_convergence_reason_ == "stationary"` says it did. A stationary fit can use a trusted smoothing Hessian
 published by the Newton endgame, or authenticate the terminal fit and replay
 that Hessian once from retained training rows. The replay is ephemeral: it does
 not mutate, cache, or republish fit state. A fit whose smoothing did not stop at

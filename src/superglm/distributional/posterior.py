@@ -604,7 +604,13 @@ def _resolved_posterior_covariance(
         return covariance, "corrected"
     if open_stop is not None:
         warnings.warn(
-            lss_corrected_covariance_nonstationary_message(open_stop),
+            lss_corrected_covariance_nonstationary_message(
+                open_stop,
+                newton_can_help=smoothing.config.outer == "efs"
+                and getattr(
+                    getattr(fitted.family, "capabilities", None), "continuous_curvature", True
+                ),
+            ),
             ConvergenceWarning,
             stacklevel=3,
         )

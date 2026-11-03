@@ -239,9 +239,11 @@ def test_negative_binomial_book_sample_finishes_instead_of_refusing(frequency_bo
     spline coefficients near 2e5, the solver stalled there, and the terminal
     observed curvature stayed indefinite with no Fisher fallback. The fit now
     returns and predicts finite means, and both routes end on Fisher
-    curvature, disclosed. The dense route converges; the binned route stops
-    with a smoothing parameter at its cap (lambda_cap_unresolved), also
-    disclosed. The test pins the disclosures, not those outcomes.
+    curvature, disclosed. The sample has a separated cell and most rows at the
+    Poisson limit; under the default Newton endgame both routes stop
+    unconverged (objective_rejected), and plain EFS stops with a smoothing
+    parameter at its cap (lambda_cap_unresolved), all disclosed. The test pins
+    the disclosures, not those outcomes.
     """
     from superglm import NegativeBinomialLS, SuperLSS, cat, s
 

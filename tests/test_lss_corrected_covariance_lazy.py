@@ -783,14 +783,33 @@ def test_derivative_replay_failure_is_disclosed_with_its_root_cause(
         ("endpoint_revalidation_failed", False),
     ],
 )
+@pytest.mark.parametrize("newton_can_help", [True, False])
 def test_the_newton_remedy_is_offered_only_to_stops_it_can_improve(
-    reason: str, advises_newton: bool
+    reason: str, advises_newton: bool, newton_can_help: bool
 ) -> None:
-    """A stop the efs+newton endgame itself produced is not told to refit with it."""
-    message = lss_corrected_covariance_nonstationary_message(reason)
+    """A stop the efs+newton endgame itself produced is not told to refit with it.
+
+    Nor is a fit that already ran the endgame, or one whose family's curvature
+    jumps (``newton_can_help=False``).
+    """
+    message = lss_corrected_covariance_nonstationary_message(
+        reason, newton_can_help=newton_can_help
+    )
     assert f"reason {reason!r}" in message
-    assert ("outer='efs+newton'" in message) is advises_newton
+    assert ("outer='efs+newton'" in message) is (advises_newton and newton_can_help)
     assert "model.diagnose()" in message
+
+
+def test_a_fellner_schall_stop_of_an_endgame_fit_is_not_told_to_run_the_endgame(
+    stationary_case,
+) -> None:
+    """Under the default an outward practical plateau can stop an efs+newton fit."""
+    fitted, _ = stationary_case
+    assert fitted.smoothing is not None and fitted.smoothing.config.outer == "efs+newton"
+    altered = _with_smoothing_stop(fitted, reason="practical_plateau", converged=True)
+    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point") as record:
+        posterior_covariance(altered, kind="corrected")
+    assert not any("outer='efs+newton'" in str(item.message) for item in record)
 
 
 @pytest.mark.parametrize("defect", [TypeError, AttributeError, KeyError, IndexError])
@@ -1338,6 +1357,8 @@ def test_an_efs_fit_is_corrected_about_its_own_stop() -> None:
     with pytest.warns(ConvergenceWarning, match="not at a certified stationary point") as record:
         corrected = posterior_covariance(fitted, kind="corrected")
     assert [f"reason {reason!r}" in str(item.message) for item in record] == [True]
+    # A plain Fellner--Schall stop on a smooth family is offered the endgame.
+    assert "outer='efs+newton'" in str(record[0].message)
     assert np.all(np.isfinite(corrected))
     np.testing.assert_array_equal(corrected, corrected.T)
     posterior_module._posterior_covariance_factor(corrected)

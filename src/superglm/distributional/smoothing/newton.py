@@ -700,7 +700,10 @@ def run_newton_endgame(
     tolerance = float(config.tolerance)
     lower_log = math.log(config.minimum_lambda)
     released = {} if upper_bounds is None else dict(upper_bounds)
-    remaining = config.max_newton_iterations if budget is None else int(budget)
+    if budget is not None:
+        remaining = int(budget)
+    else:
+        remaining = config.max_newton_iterations or config.max_iterations
     fitter = _TrialFitter(
         family,
         layout,
@@ -1139,6 +1142,39 @@ def run_newton_endgame(
             face=current.face,
             evidence=evidence,
             terminal_fit_index=fit_indices[-1],
+        )
+
+
+def published_gradient(
+    family: DistributionalFamily,
+    layout: StackedLayout,
+    y: NDArray,
+    likelihood_plan: FamilyLikelihoodPlan,
+    *,
+    lambdas: Mapping[str, float],
+    fit: DenseSolverResult,
+    efs_config: DistributionalEFSConfig,
+    phase_recorder: FitPhaseRecorder | None,
+    reuse_session: _DenseObservedReuseSession,
+) -> LamlDerivatives:
+    """The endgame's gradient pass at ``fit``, on the matrices its replay uses."""
+    dense = (
+        bounded_predictor_matrices(layout, chunk_size=min(fit.resolved_chunk_size, 4096))
+        if fit.resolved_chunk_size is not None
+        else reuse_session.dense_matrices(layout, phase_recorder=phase_recorder)
+    )
+    with measure_phase(phase_recorder, _ENDGAME_PHASE):
+        return laml_derivatives(
+            family,
+            layout,
+            y,
+            likelihood_plan,
+            lambdas=lambdas,
+            fit=fit,
+            dense_matrices=dense,
+            step=efs_config.derivative_step,
+            want_hessian=False,
+            curvature="terminal",
         )
 
 

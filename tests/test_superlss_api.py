@@ -13,7 +13,13 @@ import pandas as pd
 import pytest
 
 from superglm import SuperLSS, bind_predictor, s, term
-from superglm.distributional import GammaLS, GaussianLS, Predictor, TwoPieceNormalLSS
+from superglm.distributional import (
+    GammaLS,
+    GaussianLS,
+    Predictor,
+    TwoPieceLogNormalLSS,
+    TwoPieceNormalLSS,
+)
 from superglm.distributional import TweedieLSS as _TweedieLSS
 from superglm.distributional import api as api_module
 from superglm.distributional import model as model_module
@@ -1617,6 +1623,34 @@ def test_fit_reml_outer_default_follows_curvature_continuity_and_is_validated() 
     kinked = two_piece._require_fitted().smoothing
     assert kinked is not None
     assert kinked.config.outer == "efs"
+    assert TwoPieceLogNormalLSS().capabilities.continuous_curvature is False
+    # An explicit outer outranks the family's default in both directions.
+    two_piece.fit_reml(frame, response, outer="efs+newton")
+    forced = two_piece._require_fitted().smoothing
+    assert forced is not None
+    assert forced.config.outer == "efs+newton"
+
+
+def test_the_default_endgame_spends_the_requested_iteration_budget() -> None:
+    """``max_reml_iter`` bounds warm-up and endgame together; the endgame has no budget of its own.
+
+    Small log steps from a far start need many Newton iterations. Mutation
+    check: with the endgame's former fixed budget of 20 the fit stopped
+    ``max_iterations`` at lambda 122 instead of about 0.09.
+    """
+    x = np.linspace(-1.0, 1.0, 200)
+    response = np.sin(3.0 * np.pi * x) + np.random.default_rng(42).normal(0.0, 0.2, 200)
+    frame = pd.DataFrame({"x": x})
+    family = GaussianLS()
+    model = SuperLSS(family, family.location(s("x", kind="cr", k=10)), family.scale())
+    model.fit_reml(frame, response, initial_lambda=1000.0, max_log_step=0.1, max_reml_iter=300)
+    smoothing = model._require_fitted().smoothing
+    assert smoothing is not None
+    assert smoothing.config.outer == "efs+newton"
+    assert smoothing.convergence_reason == "stationary"
+    assert smoothing.newton_iterations > 20
+    assert smoothing.iterations <= 300
+    assert smoothing.lambdas["location:x#wiggle"] < 1.0
 
 
 @pytest.mark.parametrize(

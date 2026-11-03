@@ -432,6 +432,35 @@ def test_size_reaching_its_poisson_limit_during_selection_still_converges() -> N
     assert smoothing.converged, smoothing.convergence_reason
 
 
+def test_size_reaching_its_poisson_limit_under_the_default_is_disclosed() -> None:
+    """The default (Newton endgame) on the Poisson-limit book: finite, and disclosed if open.
+
+    Here the endgame can end ``gradient_unresolved``: the size direction of the
+    Poisson group is flat to its certificate. The fit must still predict and
+    publish a finite covariance, and an open stop must warn. A later fix that
+    converges here changes this test deliberately.
+    """
+    frame, response, log_exposure = _poisson_group_fixture()
+    family = NegativeBinomialLS()
+    model = SuperLSS(
+        family,
+        family.mean(s("x", kind="cr", k=8)),
+        family.theta(s("z", kind="cr", k=5), cat("g")),
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(frame, response, offsets={"mean": log_exposure})
+
+    fitted = model._require_fitted()
+    smoothing = fitted.fit_state.smoothing
+    assert smoothing.config.outer == "efs+newton"
+    disclosed = any(issubclass(item.category, ConvergenceWarning) for item in caught)
+    assert smoothing.converged or disclosed, smoothing.convergence_reason
+    prediction = np.asarray(model.predict(frame, offsets={"mean": log_exposure}))
+    assert np.all(np.isfinite(prediction))
+    assert np.all(np.isfinite(fitted.covariance))
+
+
 def test_fisher_fallback_on_overdispersed_data_is_disclosed(monkeypatch) -> None:
     """An NB2 fit that ends on Fisher information says so, as master's refusal did.
 
