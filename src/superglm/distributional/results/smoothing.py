@@ -125,20 +125,19 @@ def _revalidated_endpoint_directions(
 class DistributionalEFSResult:
     """Complete inner and outer histories for one safeguarded EFS fit.
 
-    ``terminal_raw_max_log_step`` retains its serialized compatibility name,
-    but stores the fresh convergence authority: normalized stationarity for a
-    finite target, augmented only by a direction that is actionable at the
-    configured upper cap or that identifies working infinity.
+    ``terminal_raw_max_log_step`` keeps its serialized name but stores the
+    convergence authority: normalized stationarity for a finite target,
+    augmented only by a direction actionable at the upper cap or identifying
+    working infinity.
 
     A ``stationary`` result is the Newton endgame's: its authority is the
-    exact LAML gradient in log lambda, ``terminal_gradient`` with its
-    finite-difference certificate, projected onto the box
-    (``terminal_projected_gradient_norm`` within ``tolerance * (1 + |F|)``);
-    the Fellner--Schall residual is no longer the certificate there and may
-    exceed the tolerance.  ``smoothing_hessian`` is the exact Hessian at that
-    point over ``terminal_gradient``'s names.  ``beyond_cap_components``
-    names components the bracketed search released above ``maximum_lambda``
-    (never above ``maximum_lambda_conditioning``).
+    exact LAML gradient in log lambda, ``terminal_gradient``, projected onto
+    the box (``terminal_projected_gradient_norm`` within
+    ``tolerance * (1 + |F|)``); the Fellner--Schall residual may then exceed
+    the tolerance. ``smoothing_hessian`` is the exact Hessian at that point
+    over ``terminal_gradient``'s names. ``beyond_cap_components`` names
+    components released above ``maximum_lambda`` (never above
+    ``maximum_lambda_conditioning``).
     """
 
     config: DistributionalEFSConfig
@@ -312,12 +311,9 @@ class DistributionalEFSResult:
                 for item in self.history
             )
             and self.fallback_count == 0
-            # The cap never certifies under the Newton authority: a stationary
-            # outcome voids the Fellner--Schall nomination that would have
-            # produced an endpoint decision, so a component resting at the configured
-            # maximum is stationary at a box bound, not a certified infinity.  The
-            # Fellner--Schall path assesses every cap-resting nomination itself and keeps
-            # its contract for a finite optimum that sits exactly at the cap.
+            # The cap never certifies under the Newton authority: a component
+            # resting at the configured maximum is stationary at a box bound.
+            # The Fellner--Schall path assesses cap-resting nominations itself.
             and not (
                 self.convergence_reason == "stationary"
                 and any(

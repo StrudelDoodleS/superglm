@@ -817,17 +817,12 @@ class FactorSmooth:
     ) -> tuple[int, ...]:
         """Record what the fit's data identify of each ``sz`` level (#432); return the separated.
 
-        A level whose positive-weight rows hold fewer distinct ``x`` values than the
-        penalty's null space ``N_P`` has polynomial-deviation directions the data
-        cannot tell from the main effect (``layout.sz_level_identification``).  A level
-        whose unpenalized line separates the response (``boundaries``: the family's
-        response boundaries at infinite ``eta``) has no finite line along the span of
-        its directions of recession (``diagnostics.separation.separated_factor_smooth_spans``).
-        Both stay out of the population curve (``_population_map``).
-
-        With the ``"null"`` penalty (``select=True``, #444) every level is identified
-        and the population curve is the main effect; only a weightless level is
-        recorded, and it is predicted at the population curve.
+        A level whose positive-weight rows hold fewer distinct ``x`` values than the penalty's null
+        space ``N_P`` is thin (``layout.sz_level_identification``); one whose unpenalized line
+        separates the response at the family's ``boundaries`` is separated
+        (``diagnostics.separation.separated_factor_smooth_spans``). Both stay out of the population
+        curve (``_population_map``). Under the ``"null"`` penalty (``select=True``) every level is
+        identified and only a weightless level is recorded, predicted at the population curve.
         """
         from superglm.diagnostics.separation import separated_factor_smooth_spans
         from superglm.solvers._structured.layout import sz_level_identification
@@ -1030,27 +1025,15 @@ class FactorSmooth:
     def _population_map(self) -> tuple[NDArray, NDArray] | None:
         """``(levels, V)``: the population offset ``c = sum_i V_i beta_{levels_i}`` (natural basis).
 
-        A thin level ``t`` leaves a part ``r_t`` of its polynomial deviation free:
-        shifting every level by ``-R / K`` and the main effect by ``+R / K`` (``R =
-        sum_t r_t``) keeps the sum-to-zero constraint, every other level's curve and
-        every level's fit at its own rows; a separated level's line walks the same way
-        without bound.  The population curve is therefore ``main + b(x)' c`` with ``c``
-        the polynomial part of the mean of the levels the data identify, ``c = P_N
-        sum_{l in I} beta_l / |I|`` (``P_N = N_P N_P'``), which does not depend on the
-        fit's point along the family.  This is the constraint without the levels left
-        out, as mgcv drops unused factor levels and lme4 predicts the population for an
-        unseen level.  ``V`` is one ``(k, k)`` matrix shared by the levels, or one per
-        level.
-
-        With every level separated or thin there is no such mean, and the population is
-        the canonical point of the family where each level's free part is zero,
-        ``Pi_t (beta_t + s_t - S / K) = 0`` (``Pi_t`` the orthogonal projector on
-        ``_unidentified_directions()[t]``, ``S = sum_t s_t``): ``S = -(I - M / K)^+
-        sum_t Pi_t beta_t`` with ``M = sum_t Pi_t``, unique when no direction of
-        ``N_P`` is free in every level, and ``c = S / K``.  Each level is then predicted
-        by its own projector (``_free_projectors``) about that population.  A model
-        saved before the spans were recorded keeps its separated levels' mean there
-        (``_spans_recorded``).  ``None`` when no level is left out.
+        Thin and separated levels leave free parts that shift each level by ``-R / K`` and the main
+        effect by ``+R / K`` without changing a fit, so the population curve ``main + b(x)' c`` uses
+        the identified levels ``I``: ``c = P_N sum_{l in I} beta_l / |I|``, ``P_N = N_P N_P'`` (as
+        mgcv drops unused levels and lme4 predicts an unseen one). With none identified,
+        ``c = S / K``, ``S = -(I - M / K)^+ sum_t Pi_t beta_t``, ``M = sum_t Pi_t``, ``Pi_t`` the
+        projector on ``_unidentified_directions()[t]``; unique when no ``N_P`` direction is free in
+        every level. A model saved before spans were recorded keeps its separated levels' mean
+        (``_spans_recorded``). ``V`` is one ``(k, k)`` matrix or one per level; ``None`` when no
+        level is left out.
         """
         if not self._has_population_offset:
             return None
@@ -1111,16 +1094,12 @@ class FactorSmooth:
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         """``(blocks', c)``: each level's coefficients as predicted, and the population offset.
 
-        A thin level keeps what its rows identify and takes the population's part in
-        the directions they leave free, ``beta_t - P_t (beta_t - c)`` (``P_t`` from
-        ``_free_projectors``): along the family this moves the level's prediction by
-        ``-R / K`` as the main effect moves by ``+R / K``, and ``b(x)' P_t = 0`` keeps
-        the fit at its own rows.  A separated level takes the population's part along
-        its directions of recession by the same rule: the fit's coefficients there are
-        where the walk stopped, and the rest of its line is what the limiting
-        conditional model identifies (Correia, Guimaraes & Zylkin 2021, Proposition 3).
-        A level without weight, or whose every row separates (``_levels_at_population``),
-        is predicted at the population value.  Every other level keeps its coefficients.
+        A thin level keeps what its rows identify and takes the population's part in the directions
+        they leave free, ``beta_t - P_t (beta_t - c)`` (``P_t`` from ``_free_projectors``;
+        ``b(x)' P_t = 0`` keeps its fit). A separated level does the same along its directions of
+        recession, the rest of its line being what the limiting conditional model identifies
+        (Correia, Guimaraes & Zylkin 2021, Proposition 3). A weightless or wholly separated level
+        (``_levels_at_population``) is predicted at the population value; others keep theirs.
         """
         coefficients = np.array(blocks, dtype=np.float64, copy=True)
         offset = self._population_offset(coefficients)
@@ -1144,20 +1123,13 @@ class FactorSmooth:
     ) -> tuple[NDArray[np.float64], tuple]:
         """Score the term as predicted when some level stays out of the population (#432).
 
-        Returns the term's contribution and the levels among the rows that are thin,
-        separated or without weight.  Each level takes its ``_identified_blocks``
-        coefficients; an unseen level, and every row under ``population``, the
-        population offset ``b(x)' c``.
-
-        ``level_constants`` is a redundant unpenalized term's contribution at each
-        level of the group (a SuperLSS predictor's ``Categorical``), which the term's
-        own per-level constant aliases.  The rule reads each level's line with its
-        constant, ``beta_l + a_l 1``, and the contribution returned is the predicted
-        line less ``a_l``, so the two terms together predict as this term would alone;
-        under ``population`` a known level's row gives ``a_l`` back too.  A level the
-        rule leaves alone is scored from its own coefficients.  A term that does not
-        fold its group's main term (``_folds_group_term``; none in a model saved before
-        0.41) ignores ``level_constants``.
+        Returns the contribution and the thin, separated or weightless levels among the rows. Each
+        level takes its ``_identified_blocks`` coefficients; an unseen level, and every row under
+        ``population``, takes the population offset ``b(x)' c``. ``level_constants`` is a redundant
+        unpenalized term's per-level contribution (a SuperLSS predictor's ``Categorical``): the rule
+        reads each line as ``beta_l + a_l 1`` and returns it less ``a_l``, so the two terms predict
+        as this one would alone (under ``population`` a known level gives ``a_l`` back too). A term
+        that does not fold its group's main term (``_folds_group_term``) ignores it.
         """
         if not self._folds_group_term:
             level_constants = None

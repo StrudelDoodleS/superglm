@@ -423,20 +423,17 @@ def _merge_weights(total: float, chunk_weight: float) -> tuple[float, float, flo
 
 
 def _anchored_weighted_moments(chunks, W: NDArray, p: int) -> tuple[NDArray, NDArray, NDArray]:
-    """Raw Gram, ``X'W1`` and the centred Gram, the latter merged from chunk co-moments, in one traversal.
+    """Raw Gram, ``X'W1`` and the centred Gram (merged from chunk co-moments) in one traversal.
 
-    Each weighted chunk is centred about its own weighted mean as an exact pair ``(hi, lo)``
-    (``mode_score.corrected_two_pass_pair``; Chan, Golub and LeVeque 1983), rows ``(x - hi) - lo``,
-    and co-moments merge by the pairwise update ``C = C_a + C_b + m d d'``, ``m = w_a w_b /
-    (w_a + w_b)`` (Chan et al. 1979; weighted multivariate form: Pebay, Terriberry, Kolla and
-    Bennett 2016, *Comput. Stat.* 31:1305). ``d = (hi_b - hi_a) + (lo_b - lo_a)`` is exact within
-    a factor two (Sterbenz) and otherwise rounds at ``u |d|``; the running mean stays an exact pair
-    moved from the heavier side by the lighter side's share of ``d`` and added by TwoSum;
-    ``m d d'`` is the outer product of ``sqrt(m) d`` (``_merge_weights``) so nothing over- or
-    underflows that the term's own value does not. A diagonal entry (non-negative terms) is
-    accurate to ``O(gamma_{n + K})`` relative, ``K`` the chunks; an off-diagonal one to that times
-    ``sqrt(C_ii C_jj)``. No row is shifted by another chunk's mean (a global anchor rounds a far
-    chunk to nothing). Working weights are non-negative; a weightless chunk adds nothing.
+    Each chunk is centred about its weighted mean as an exact pair ``(hi, lo)``
+    (``mode_score.corrected_two_pass_pair``; Chan, Golub and LeVeque 1983); co-moments merge by
+    ``C = C_a + C_b + m d d'``, ``m = w_a w_b / (w_a + w_b)`` (Chan et al. 1979; Pebay,
+    Terriberry, Kolla and Bennett 2016). ``d = (hi_b - hi_a) + (lo_b - lo_a)`` is exact within a
+    factor two (Sterbenz), else rounds at ``u |d|``; the running mean stays an exact pair (TwoSum)
+    and ``m d d'`` is the outer product of ``sqrt(m) d``, so nothing over- or underflows that the
+    term does not. A diagonal entry is accurate to ``O(gamma_{n + K})`` relative, ``K`` the
+    chunks, an off-diagonal one to that times ``sqrt(C_ii C_jj)``. Weights are non-negative and
+    no row is shifted by another chunk's mean.
     """
     from superglm.solvers.mode_score import corrected_two_pass_pair
 

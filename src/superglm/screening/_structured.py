@@ -405,15 +405,12 @@ def _profiled_curvature_trace(
     """``tr(V_eff)`` as an exact sum of squared residual norms.
 
     For emitted level ``q`` the Schur-complement trace is
-    ``||R_q (N + A_-q)||_F^2 + ||R_-q A_q||_F^2``, with ``N`` the null action of
-    :func:`_representative_projection`. Summed over levels this is ``tr(V - C' M^+ C)``
-    as a sum of nonnegative terms, so it stays representable when the mains absorb all
-    but round-off of the interaction. ``R_-q`` is a QR compaction of a prefix and a
-    precomputed suffix of row factors, never a subtraction from a global Gram; work and
-    memory are linear in the level count.
-
-    ``keep_factors``, an ``(len(level_rows), k, k)`` output array, receives each ``R_q``
-    on the forward pass so the ladder does not need a third chunked QR.
+    ``||R_q (N + A_-q)||_F^2 + ||R_-q A_q||_F^2``, ``N`` the null action of
+    :func:`_representative_projection`; summed over levels this is ``tr(V - C' M^+ C)`` as
+    nonnegative terms, representable when the mains absorb all but round-off. ``R_-q`` is a QR
+    compaction of prefix and suffix row factors, never a subtraction from a global Gram; work
+    and memory are linear in the level count. ``keep_factors``, an ``(len(level_rows), k, k)``
+    output, receives each ``R_q`` so the ladder needs no third chunked QR.
     """
     B = np.asarray(B, dtype=np.float64)
     W_cell = np.asarray(W_cell, dtype=np.float64)
@@ -574,23 +571,15 @@ def spline_cat_moments(
 class _PairGeometry:
     """Everything the ladder needs that does not depend on ``lambda``.
 
-    ``V_eff`` is the Gram of a residualized design (Frisch-Waugh-Lovell): with
-    ``Zc_q`` level ``q``'s centered rows, ``J = blockdiag(Zc_q)``, ``P`` the projector
-    onto the residualized overlap span ``Abar = Q R`` and ``Psi_q = Q_q' Zc_q``,
-
-        V_eff = J'(I - P)J = blockdiag(D_q) - Psi'Psi,
-        A(lambda) = blockdiag(N_q) - Psi'Psi,    N_q = D_q + lambda S_a.
-
-    ``Psi`` is bounded by the data scale because ``Q`` is orthonormal; the
-    replaced form went through a pseudo-inverse of a Gram and carried
-    ``kappa(Abar)^2``. ``coupling`` is the ``(k_a, r)`` map from a level's row factor
-    into the shared overlap coordinates (``Psi_q = (R_q coupling)' R_q``) and
-    ``base_gram`` a factor of ``sum_b Q_b' Q_b`` over the unemitted levels.
-
-    ``ceiling = L * k_a`` counts the filter factors summed, each in ``[0, 1]``, so it
-    bounds ``edf`` without a rank decision. The tighter ``rank(V_eff)`` was tried and
-    rejected: every O(L) numerical rank can come out low and refuse true values (12
-    against a low-edge ``edf`` of 17.618 on a 7-level ``cr(5)`` pair).
+    ``V_eff`` is the Gram of a residualized design (Frisch-Waugh-Lovell): with ``Zc_q`` level
+    ``q``'s centered rows, ``J = blockdiag(Zc_q)``, ``P`` the projector onto the overlap span
+    ``Abar = Q R`` and ``Psi_q = Q_q' Zc_q``, ``V_eff = J'(I - P)J = blockdiag(D_q) - Psi'Psi``
+    and ``A(lambda) = blockdiag(N_q) - Psi'Psi``, ``N_q = D_q + lambda S_a``; ``Psi`` is bounded
+    by the data scale as ``Q`` is orthonormal. ``coupling`` maps a level's row factor into the
+    overlap coordinates (``Psi_q = (R_q coupling)' R_q``); ``base_gram`` factors
+    ``sum_b Q_b' Q_b`` over unemitted levels. ``ceiling = L * k_a`` counts the filter factors,
+    each in ``[0, 1]``, bounding ``edf`` without a rank decision (an O(L) numerical rank can
+    come out low and refuse true values).
     """
 
     U_eff: NDArray  # (L, k_a)      the profiled score
@@ -609,17 +598,13 @@ class _PairGeometry:
 def _profile(p: SplineCatPair) -> _PairGeometry:
     """The whole lambda-independent half of the work.
 
-    The profiled score is the Frisch-Waugh-Lovell residual on the overlap span,
-    ``U_eff = g - Psi'(Q'zw)``, with ``g_q = Zc_q' zw_q`` the within-level centered
-    score; no Gram is inverted and the weight is never a denominator. One orthonormal
-    basis for the residualized overlap span comes from a TSQR over the per-level row
-    factors (``[0 | R_q]`` per emitted level, ``overlap_rows`` for the rest),
-    rank-revealed by an SVD at the ``matrix_rank`` cut ``max(shape) eps s_max`` on the
-    factor's singular values (Wood, *JRSS-B* 73:3-36, 2011, sec. 3.3.1; Gill et al.,
-    *Math. Comp.* 28, 1974, sec. 5.2). Nothing is ``L``-sized.
-
-    Raises :class:`_UnstableStructuredEDFError` if the penalty projection was not
-    round-off or the overlap basis does not close within its bound.
+    The profiled score is the Frisch-Waugh-Lovell residual ``U_eff = g - Psi'(Q'zw)``,
+    ``g_q = Zc_q' zw_q``; no Gram is inverted and the weight is never a denominator. The overlap
+    span's orthonormal basis comes from a TSQR over the per-level row factors, rank-revealed at
+    the ``matrix_rank`` cut ``max(shape) eps s_max`` (Wood, *JRSS-B* 73:3-36, 2011, sec. 3.3.1;
+    Gill et al., *Math. Comp.* 28, 1974, sec. 5.2). Nothing is ``L``-sized. Raises
+    :class:`_UnstableStructuredEDFError` if the penalty projection was not round-off or the
+    overlap basis does not close within its bound.
     """
     L, k_a = p.dims
 
@@ -744,16 +729,13 @@ def _block_inverse_factors(triangular: NDArray) -> NDArray:
 def _psd_clip_allowance(n: int, scale: float, closure: float) -> float:
     """Largest negative eigenvalue an exactly-PSD block can show at ``scale``.
 
-    ``_psd_factor``'s ``max(w, 0)`` (Higham, *LAA* 103, 1988) is right for round-off
-    but equally clips a block made indefinite by a misfired deflation, so the caller
-    refuses beyond this allowance. It is ``8 n eps scale + closure``: ``eigh`` is
-    within ``n eps ||M||_2`` (*LAPACK Users' Guide*, 3rd ed., sec. 4.7), and ``W_q``
-    reaches it through three chained products (Higham, *ASNA* 2nd ed., Thm 3.5),
-    rounded up to 8. ``scale`` is ``max(||M||_2, ||H^+||_2)``: ``Xi``'s own norm can be
-    ``2 eps`` for a fully absorbed direction, so a relative test would pass trivially.
-    ``closure`` is the measured ``sum_q Q_q' Q_q - I`` residual; ``W_q`` is PSD only to
-    the extent it holds, moving an eigenvalue by ``closure * ||H^+||``, which dominates
-    ``eps`` terms by three orders on the starved fixture.
+    ``_psd_factor``'s ``max(w, 0)`` (Higham, *LAA* 103, 1988) also clips a block made indefinite
+    by a misfired deflation, so the caller refuses beyond ``8 n eps scale + closure``: ``eigh``
+    is within ``n eps ||M||_2`` (*LAPACK Users' Guide*, 3rd ed., sec. 4.7) and ``W_q`` reaches it
+    through three chained products (Higham, *ASNA* 2nd ed., Thm 3.5), rounded up to 8.
+    ``scale = max(||M||_2, ||H^+||_2)``, as ``Xi``'s own norm can be ``2 eps``. ``closure`` is
+    the measured ``sum_q Q_q' Q_q - I`` residual, which moves an eigenvalue by
+    ``closure * ||H^+||``.
     """
     return _PSD_CLIP_FACTOR * max(int(n), 1) * float(np.finfo(np.float64).eps) * np.maximum(
         scale, 0.0
@@ -777,19 +759,14 @@ def _psd_factor(M: NDArray) -> tuple[NDArray, NDArray, NDArray]:
 def _orthonormality_bound(n_terms: int, rank: int, conditioning: float) -> float:
     """A priori bound on ``||sum_q Q_q' Q_q - I_r||_2``, used only to refuse, never to cut.
 
-    The residual answers one question: did the identity every bound here rests on hold
-    to the accuracy its arithmetic predicts? Householder QR loses orthogonality at
-    ``O(m rank^(3/2) eps)`` with no condition number (Higham, *ASNA* 2nd ed., Lemma 19.3
-    and eq. 19.13; Yamamoto et al., *ETNA* 44:306-326, 2015, sec. 5.1.1), but these
-    ``Q_q = R_q V Sigma^-1`` are not stored reflectors; this is the ``A R^-1`` route,
-    with error ``O(eps kappa)``. Over 1382 profiles x 14 configurations the residual
-    reaches 2077x ``n_terms eps`` and at most 0.408x ``n_terms eps kappa``, so the
-    bound is linear in the stacked row count and in the retained basis's
-    ``conditioning``. The constant :data:`_ORTHONORMALITY_FACTOR` is calibrated
-    (Higham calls it "a small integer constant"), with ``rank^(3/2)`` folded in; ``ps``
-    and starved ``bs`` sweeps to rank 54 stay under 0.011 of the bound. ``conditioning``
-    is read off singular values far above the rank cut and varies 1.7e-4 relative across
-    configurations, so the bound is reproducible, though not bit-identical.
+    It checks that the identity every bound here rests on holds to the accuracy its arithmetic
+    predicts. Householder QR loses orthogonality at ``O(m rank^(3/2) eps)`` (Higham, *ASNA* 2nd
+    ed., Lemma 19.3 and eq. 19.13; Yamamoto et al., *ETNA* 44:306-326, 2015, sec. 5.1.1), but
+    ``Q_q = R_q V Sigma^-1`` is the ``A R^-1`` route, with error ``O(eps kappa)``, so the bound
+    is linear in the stacked row count and in the retained basis's ``conditioning``.
+    :data:`_ORTHONORMALITY_FACTOR` is a calibrated constant (Higham's "small integer constant")
+    with ``rank^(3/2)`` folded in. ``conditioning`` is read off singular values far above the
+    rank cut, so the bound is reproducible, though not bit-identical.
     """
     eps = float(np.finfo(np.float64).eps)
     return (
@@ -803,21 +780,15 @@ def _orthonormality_bound(n_terms: int, rank: int, conditioning: float) -> float
 def _absorption_floor(n_terms: int, rank: int) -> float:
     """Cut below which a singular value of ``H``'s factor is not resolvable.
 
-    A convention, not a bound (clause 3 of the module policy). It separates a direction
-    the pencil does not resolve (clause 1 contributes zero) from one it does (dropping
-    it costs a whole degree of freedom). It is a function of dimensions and ``eps``
-    alone, so it is identical on every kernel and thread setting; the residual it
-    replaced varied 1.81x across microkernels (issue #280).
-
-    ``H = I_r - Psi N^+ Psi'`` is delivered as ``R_H' R_H``, so the cut applies to a
-    singular value: ``sqrt(d eps)`` is the ``matrix_rank`` convention ``d eps`` carried
-    onto the Gram scale (Weyl; Golub and Van Loan, 4th ed., Cor. 2.4.4), plus the
-    TSQR's own additive ``d eps`` (Higham, *ASNA*, eq. 19.13), inert at the dimensions
-    reached. It is absolute where LAPACK's ``RCOND * sigma_max`` is relative. Since
-    ``sigma_max(R_H) <= 1`` it can over-deflate on a mostly-absorbed border and never
-    under-deflate; :data:`_ABSORPTION_MARGIN` does not catch that. A relative cut would
-    depend on the data again, and the a priori :func:`_orthonormality_bound` as a cut
-    deflates the only direction of ``_near_absorbed_cells``, so it stays a refusal.
+    A convention, not a bound: it separates a direction the pencil does not resolve (adding
+    zero) from one it does (a whole degree of freedom), and depends on dimensions and ``eps``
+    alone, so it is identical on every kernel and thread setting. ``H`` is delivered as
+    ``R_H' R_H``, so ``sqrt(d eps)`` carries the ``matrix_rank`` convention ``d eps`` onto a
+    singular value (Weyl; Golub and Van Loan, 4th ed., Cor. 2.4.4), plus the TSQR's additive
+    ``d eps`` (Higham, *ASNA*, eq. 19.13). It is absolute, not LAPACK's relative
+    ``RCOND * sigma_max``; as ``sigma_max(R_H) <= 1`` it can over-deflate a mostly-absorbed
+    border but never under-deflate. :func:`_orthonormality_bound` as a cut would deflate the
+    only direction of ``_near_absorbed_cells``, so it stays a refusal.
     """
     eps = float(np.finfo(np.float64).eps)
     dimension = max(int(n_terms), int(rank), 1)
@@ -975,21 +946,15 @@ def _filter_factor_sum(
 ) -> tuple[float, float, float, float]:
     """``(T, edf, clip bound, cut margin)`` at one lambda, all from one QR per level.
 
-    ``T = U_eff' A^+ U_eff`` and ``edf = tr(A^+ V_eff)`` are read off the same block-angular
-    factorization (issue #298). With ``B = N^+ + N^+ Psi' H^+ Psi N^+`` (equal to ``A^+`` on
-    ``range(A)``) and ``z_q = T_q^+' u_q``, ``T = sum_q ||z_q||^2 + ||H^(+/2) v||^2``, and
-    ``edf = sum over ALL levels of ||F_q chol(W_q)||_F^2`` with ``F_q = [Zc_q | Q_q]``,
-    ``W_q = M_q' A^+ M_q`` (closing because ``sum_q Q_q' Q_q = I_r``): every term is a squared norm
-    (Wood's ``tr(F) = ||K||_F^2``, *JRSS-B* 73, 2011, sec. 3.6, App. H).
-
-    Per emitted level one QR of ``[[R_q, Phi_q], [sqrt(lam) rootS, 0]]`` gives ``T_q, Y_q, X_q``
-    with ``T_q' T_q = D_q + lam S_a``; summing ``X`` gives ``H = I_r - Psi N^+ Psi'`` without
-    subtraction (Golub and Plemmons, *LAA* 34, 1980; Gill et al., *Math. Comp.* 28, 1974, sec. 5.2).
-    The contraction ``K_q = R_q T_q^+`` is done before the inverse (``||K_q|| <= 1``, while
-    ``||T_q^+||^2`` reaches 1e17 on a starved pair). Two chunked passes, each bounded by
-    ``_TRACE_CHUNK_DOUBLES``. The third return value, ``sum_q ||F_q||_F^2 ||W_q - W_q+||_2``,
-    bounds in degrees of freedom what :func:`_psd_factor`'s clip removed; :func:`_evaluate` refuses
-    it beyond dust.
+    ``T = U_eff' A^+ U_eff`` and ``edf = tr(A^+ V_eff)`` share one block-angular factorization:
+    with ``B = N^+ + N^+ Psi' H^+ Psi N^+`` (``A^+`` on ``range(A)``) and ``z_q = T_q^+' u_q``,
+    ``T = sum_q ||z_q||^2 + ||H^(+/2) v||^2`` and ``edf = sum_q ||F_q chol(W_q)||_F^2`` over ALL
+    levels, ``F_q = [Zc_q | Q_q]``, ``W_q = M_q' A^+ M_q``: squared norms only (Wood, *JRSS-B*
+    73, 2011, sec. 3.6, App. H). Per emitted level one QR of
+    ``[[R_q, Phi_q], [sqrt(lam) rootS, 0]]`` gives ``T_q' T_q = D_q + lam S_a``; summing ``X``
+    gives ``H = I_r - Psi N^+ Psi'`` without subtraction (Golub and Plemmons, *LAA* 34, 1980).
+    ``K_q = R_q T_q^+`` is contracted before the inverse (``||K_q|| <= 1``). The third value,
+    ``sum_q ||F_q||_F^2 ||W_q - W_q+||_2``, bounds in df what :func:`_psd_factor`'s clip removed.
     """
     L, k_a = p.dims
     r = geometry.overlap_rank
@@ -1214,8 +1179,8 @@ def _filter_factor_sum(
 def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[float, float]:
     """``(T, edf)`` at one lambda, both off one factorization of the design.
 
-    Neither reads ``V``, ``c``, ``m`` or ``border``: a statistic from a pseudo-inverse of
-    the float64 moments beside an edf from row-space factors was issue #298.
+    Neither reads ``V``, ``c``, ``m`` or ``border``, so the statistic and the edf come from
+    the same row-space factors, never one from a pseudo-inverse of the float64 moments.
     """
     return _checked_evaluation(geometry, lam, _filter_factor_sum(p, geometry, lam))
 

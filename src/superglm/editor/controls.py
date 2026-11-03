@@ -478,19 +478,14 @@ def _certification_bound(level_basis, base_row, coefficient_map, beta, inner) ->
     """Per level, how far two float64 evaluations of the base-relative curve can differ.
 
     The reported effect is ``fl(fl(b_i M) beta) - fl(fl(b_0 M) beta)``; ours is
-    ``fl(b_i fl(M beta) - fl(b_0 fl(M beta)))``.  Each is within
-    ``gamma_{K+p+3} (1 + |b_i|_1) (a_i + a_0)`` of the exact value, where
-    ``a_i = |b_i| |M| |beta|`` (Higham 2002, sections 3.1 and 3.5), plus the
-    SCOP column-mean constant's magnitude when the fit carries one.  Twice
-    that, with a ``gamma`` count that also covers forming ``a_i``, keeps the
-    computed bound an upper bound.
-
-    That bound is relative and rounds to zero for subnormal effects. Under
-    gradual underflow each product also carries an absolute error of at most
-    ``eta = 2^-1075`` (Demmel 1984), and the four evaluations form at most
-    ``K + p + 1`` products a level, whose errors later operations carry at
-    most ``(1 + |beta|_1)(1 + |b|_1)`` times: ``count (1 + |beta|_1)(1 +
-    |b|_1)`` spacings ``2 eta``, rounded outward, bound the absolute part.
+    ``fl(b_i fl(M beta) - fl(b_0 fl(M beta)))``. Each is within
+    ``gamma_{K+p+3} (1 + |b_i|_1) (a_i + a_0)`` of the exact value, ``a_i = |b_i| |M| |beta|``
+    (Higham 2002, secs. 3.1 and 3.5), plus the SCOP column-mean constant's magnitude when the
+    fit carries one; twice that, with a ``gamma`` count covering forming ``a_i``, stays an upper
+    bound. Under gradual underflow each product also carries an absolute error of at most
+    ``eta = 2^-1075`` (Demmel 1984); with at most ``K + p + 1`` products a level,
+    ``(K + p + 1)(1 + |beta|_1)(1 + |b|_1)`` spacings ``2 eta``, rounded outward, bound the
+    absolute part.
     """
     columns = level_basis.shape[1]
     weights = np.abs(coefficient_map) @ np.abs(beta)

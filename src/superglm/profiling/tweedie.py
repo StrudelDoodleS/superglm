@@ -55,39 +55,23 @@ from superglm.reml.observed_geometry import (
 from superglm.solvers.mode_score import linear_predictor
 
 # Candidate REML fits only rank powers; the published refit at p_hat runs at the
-# tight publication default. At this bar a candidate's mean NLL was within
-# 2.5e-6 relative of a reml_tol = 1e-11 fit, typically 1e-10 to 1e-7, on the
-# characterisation REML books at p in {1.3, 1.5, 1.7}.
+# tight publication default.
 _SEARCH_REML_TOL = 1e-6
 # A recorded value's error per unit of its fit's certificate (_Candidate.error).
-# A REML fit certifies its objective V to tol (1 + |V|), not the likelihood: the
-# NLL errs through the smoothing parameters' residual error, two-sided and first
-# order, by |J' H_V^-1| times the certificate, J = d(n nll)/d log lambda. That
-# ratio has no bound in theory; it is measured: at most 5.4 over 198 candidate fits
-# at reml_tol = 1e-6 against 1e-11 fits (five book shapes, 3k to 100k rows, p in
-# {1.3, 1.5, 1.7}; benchmarks/tweedie_candidate_noise.py reproduces both ratios).
-# A ratio set too low costs a spurious caution; one set too high can only widen
-# an interval: a lower point the floor ignores leaves the centre at most the floor
-# above the minimum, and {2 n (nll - nll_hat) <= cutoff} is then {2 n (nll -
-# nll_min) <= cutoff + drop}, a superset of the interval from the minimum. At
-# reml_tol = 1e-6 the floor at p_hat is 1.4 in the statistic on a smooth
-# 100k-row book and 5.8 on the flat-lambda fixture at 100k rows.
+# A REML fit certifies its objective V, not the likelihood: the NLL errs first
+# order by |J' H_V^-1| times the certificate, J = d(n nll)/d log lambda, a ratio
+# with no theoretical bound, calibrated by benchmarks/tweedie_candidate_noise.py.
+# Too low costs a spurious caution; too high only widens an interval.
 _CANDIDATE_ERROR_RATIO = 8.0
 # A fit without a REML objective certifies its penalized objective's relative
-# change to the model's tol; the NLL errs first order through the penalty's
-# gradient, by a ratio the solver's rate of convergence sets: fast for Fisher
-# scoring (Osborne 1992), linear for proximal block descent (Tseng & Yun 2009).
-# Replaying estimate_p's warm-started evaluations and continuing each fit to
-# tol 1e-13 (1.2k to 100k rows): Fisher scoring, the route with no active
-# selection penalty and no shape constraint, measured at most 9.0e-4, at the
-# smallest tol that returns each fit. The proximal route of a selection penalty
-# (0.21, tol 1e-4 to 1e-10) and a shape constraint's route (0.14 at tol 1e-6,
-# rising to 6.7 at 1e-9) keep _CANDIDATE_ERROR_RATIO.
+# change; the NLL's error ratio follows the solver's rate: fast for Fisher
+# scoring (Osborne 1992), linear for proximal block descent (Tseng & Yun 2009),
+# so selection-penalty and shape-constrained routes keep _CANDIDATE_ERROR_RATIO.
 _SCORING_ERROR_RATIO = 2e-3
-# The interval may reach past the default search bounds (1.05, 1.95), as
-# master's did; the series is exact from p = 1.001 to 1.99 (its 50-digit oracle).
+# The interval may reach past the default search bounds (1.05, 1.95); the series
+# is exact from p = 1.001 to 1.99.
 _CI_BOUNDS = (1.02, 1.98)
-# Endpoints are reported to three decimals; master located them to the same 1e-4.
+# Endpoints are reported to three decimals.
 _CI_XTOL = 1e-4
 
 
@@ -110,7 +94,7 @@ class _Candidate:
     # A REML candidate also needs its smoothing-parameter iterations to settle.
     reml_converged: bool = True
     # Bound on the recorded mean NLL's error: the fit's certificate in mean-NLL
-    # units times its measured ratio (_CANDIDATE_ERROR_RATIO, _SCORING_ERROR_RATIO);
+    # units times its calibrated ratio (_CANDIDATE_ERROR_RATIO, _SCORING_ERROR_RATIO);
     # an infeasible power has none.
     error: float = math.nan
 
@@ -225,8 +209,8 @@ class _PowerProfile:
         # Each candidate's REML convergence is recorded in the search result
         # (``reml_converged``), so a candidate does not warn on its own.
         clone._suppress_convergence_warning = True
-        # Nor does it take the exact path's cached-W pre-solve: a changed start
-        # would move the selected power, unmeasured against ``xatol``.
+        # Nor does it take the cached-W pre-solve: a changed start would move the
+        # selected power.
         clone._in_power_search = True
         self.X, self.y, self.w, self.offset = X, y, sample_weight, offset
         # fit_reml refuses a selection penalty.
@@ -236,10 +220,8 @@ class _PowerProfile:
     def _fit_reml(self, p: float) -> tuple[NDArray, bool, Any]:
         clone = self.clone
         clone.family = Tweedie(p)
-        # No lambda warm start. The REML engines now honour a mapping
-        # lambda2_init, so a previous candidate's lambdas would change where
-        # this fit starts; adopting it here needs its own measurement of the
-        # selected power against ``xatol`` first.
+        # No lambda warm start: a previous candidate's lambdas would change where
+        # this fit starts, and so the selected power.
         clone.fit_reml(
             self.X,
             self.y,
@@ -263,7 +245,7 @@ class _PowerProfile:
         else:
             from superglm.model import base
 
-            # predict's values without its warning: a library evaluation (#440 review)
+            # predict's values without its user-facing warning
             mu = base.predict_exact(clone, self.X, self.offset, warn=False)
         # None for a model with no REML-eligible term: fit_reml is an ordinary fit.
         return mu, bool(clone.result.converged), clone._reml_result
@@ -286,10 +268,8 @@ def _clone_profile_model(model, X, sample_weight):
         profile_model._degree = model._degree
         profile_model._categorical_base = model._categorical_base
         profile_model._auto_detect_features(X, sample_weight)
-    # Fit attempts rematerialize immutable constructor intent. The private
-    # runtime copies above therefore need one matching configuration snapshot;
-    # otherwise a resolved custom interaction falls back to its shorthand when
-    # the profile model enters a transactional fit workspace.
+    # Fit attempts rematerialize constructor intent, so snapshot the runtime
+    # copies above, or a resolved custom interaction falls back to its shorthand.
     profile_model._config = type(profile_model._config).capture(profile_model)
     profile_model._config_revision += 1
     return profile_model

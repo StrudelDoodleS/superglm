@@ -57,22 +57,15 @@ class REMLResult:
     objective_history: list[float] | None = None  # REML objective per outer step
     curvature_source: str | None = None  # retained coefficient-Hessian geometry
     termination_reason: str | None = None  # outer-optimizer terminal condition
-    # The final coefficient refit's termination reason when that refit, at the
-    # selected smoothing parameters, did not meet its convergence certificate
-    # (``converged`` is then False whatever ``termination_reason`` says), or
-    # None.
+    # The final refit's termination reason when it missed its convergence
+    # certificate (``converged`` is then False), else None.
     terminal_refit_termination: str | None = None
-    # Smoothing parameters at which the penalized maximum held rows on the
-    # boundary of the family's mean space (a binomial/log probability of 1),
-    # each restored to an interior start by the exact engine
-    # (``reml.direct``): the search was confined to the smoothing parameters
-    # that have an interior mode.
+    # Smoothing parameters whose penalized maximum sat on the mean-space
+    # boundary (a binomial/log probability of 1) and that ``reml.direct``
+    # restored to an interior start.
     mean_space_restorations: int = 0
-    # Fit-invariant Tweedie saturated-density state built by the optimizer.
-    # Carried so the terminal REML evaluations in finalize re-enter the SAME
-    # per-fit phi cache the search filled, instead of rebuilding a cold one and
-    # re-solving an already-solved (Dp, Mp).  Excluded from equality and repr:
-    # it is a memo, not part of the result's identity.
+    # The search's fit-invariant Tweedie saturated-density cache, reused by the
+    # terminal REML evaluations. A memo, so excluded from equality and repr.
     tweedie_scale_data: object | None = field(default=None, repr=False, compare=False)
 
 
@@ -110,12 +103,9 @@ def _map_centred_state_between_bases(
 ) -> tuple[float, NDArray] | None:
     """A warm centred state ``(alpha, c)`` read with ``_map_beta_between_bases``' coefficients.
 
-    A rebuilt block (a new matrix: a new reparametrization) has new columns,
-    so its centre no longer applies: its ``c' beta`` at the old coefficients
-    ``beta`` moves into ``alpha`` and its centre becomes zero, where the
-    mapped coefficients read the same function on the new columns.  A block
-    the rebuild reuses (every non-spline block, every dense column) keeps its
-    centre and coefficients bit for bit, so no offset is ever cancelled.
+    A rebuilt block has new columns, so its ``c' beta`` at the old ``beta``
+    moves into ``alpha`` and its centre becomes zero. A reused block keeps
+    its centre and coefficients bit for bit.
     """
     if centred is None:
         return None

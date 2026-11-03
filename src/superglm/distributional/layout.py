@@ -95,10 +95,9 @@ class StackedLayout:
         object.__setattr__(self, "coefficient_names", tuple(self.coefficient_names))
         object.__setattr__(self, "penalties", tuple(self.penalties))
 
-        # ``_center_selected_smooths`` addresses ``design.group_matrices`` with an
-        # index taken from ``groups``, so the two must stay index-parallel.  Nothing
-        # in the layout consumes the pairing, but this is the one place the
-        # assembled state is checked, so the count check stays.
+        # ``_center_selected_smooths`` indexes ``design.group_matrices`` by an
+        # index from ``groups``, so the two must stay index-parallel; this is the
+        # one place the assembled state is checked.
         for state in self.predictors:
             if len(state.design.group_matrices) != len(state.groups):
                 raise ValueError(
@@ -189,9 +188,8 @@ def _copy_component(
     group_index: int,
     group_sl: slice,
 ) -> PenaltyComponent:
-    # ``dataclasses.replace`` carries every field the source component declares.
-    # Enumerating them by hand here is what silently dropped ``penalty_kind``,
-    # ``repeat_count`` and ``block_width`` when master widened the contract.
+    # ``dataclasses.replace`` carries every field the source component declares,
+    # so a field added to the contract cannot be dropped here.
     return replace(
         component,
         name=name,

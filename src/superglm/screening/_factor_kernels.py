@@ -60,21 +60,14 @@ def _combine_row_factors(left: NDArray, right: NDArray) -> NDArray:
 def _penalty_root(S_a: NDArray) -> tuple[NDArray, float, float]:
     """``rootS`` with ``rootS' rootS`` a PSD matrix within ``eigh``'s bar of ``S_a``.
 
-    Returns the factor, the spectral-norm distance the drop branch moved ``S_a``,
-    and the cut that branch used, so the caller decides on the same bar.
-
-    An eigenvalue inside ``eigh``'s own error bar ``n eps ||S||_2`` (*LAPACK Users'
-    Guide*, 3rd ed., SIAM 1999, sec. 4.7) has an unresolved sign, so it is taken at
-    its magnitude: clipping to zero would make a published ``edf0`` depend on the
-    rounding. This is a perturbation of at most ``2 n eps ||S||_2``, not the nearest
-    PSD matrix, which is ``max(w, 0)`` (Higham, *Linear Algebra Appl.* 103, 1988).
-    An eigenvalue below ``-n eps ||S||_2`` is a real negative direction: it is
-    dropped, and the largest such magnitude is returned so ``_profile`` refuses on
-    the same cut. The distance is spectral because only the Frobenius norm makes
-    the PSD projection nonexpansive (Goulart, Nakatsukasa and Rontsis,
-    arXiv:1908.01606, sec. 2.2).
-
-    Dropping a direction frees it (filter factor 1), so ``edf`` can only go up.
+    Returns the factor, the spectral distance the drop branch moved ``S_a`` and its cut, so the
+    caller decides on the same bar. An eigenvalue inside ``n eps ||S||_2`` (*LAPACK Users'
+    Guide*, 3rd ed., sec. 4.7) has an unresolved sign and is taken at its magnitude, so a
+    published ``edf0`` does not depend on rounding (at most ``2 n eps ||S||_2``, not Higham's
+    1988 nearest PSD matrix). One below ``-n eps ||S||_2`` is a real negative direction: it is
+    dropped and its largest magnitude returned so ``_profile`` refuses on the same cut. The
+    distance is spectral (Goulart, Nakatsukasa and Rontsis, arXiv:1908.01606, sec. 2.2).
+    Dropping frees a direction (filter factor 1), so ``edf`` can only go up.
     """
     lifted, Q, dropped, unresolved = _penalty_spectrum(S_a)
     keep = lifted > 0.0

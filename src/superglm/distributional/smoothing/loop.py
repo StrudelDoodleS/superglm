@@ -1369,13 +1369,10 @@ def fit_distributional_efs(
             )
         if terminal_evidence.estimated_names != estimated_names:
             raise RuntimeError("estimated smoothing names changed inside one EFS fit")
-        # The step test alone is a first-order quantity on a harmonic tail; the
-        # objective it exists to settle can be flat for many iterations before
-        # the step is. Require both a flat objective and a contracting step, so
-        # a stalled line search cannot nominate a plateau reason. Fresh
-        # evidence above remains the strict stopping authority.  The practical
-        # policy below intentionally accepts its separate sustained plateau
-        # while preserving the larger strict residual in the result.
+        # The step test alone is first-order on a harmonic tail, so require both
+        # a flat objective and a contracting step before nominating a plateau.
+        # The practical policy below accepts its own sustained plateau and keeps
+        # the larger strict residual in the result.
         plateau_run = plateau_run + 1 if objective_change <= outer_config.plateau_tolerance else 0
         plateau_qualified = (
             plateau_run >= outer_config.plateau_iterations
@@ -1422,11 +1419,9 @@ def fit_distributional_efs(
             )
         ):
             return _result(converged=True, reason="practical_plateau")
-        # A practical plateau is an interior stop.  While any estimated
-        # component sits at the cap with outward pressure, or is a working
-        # infinity, the top of the loop owns the next decision: it either
-        # promotes an exact face or refuses with a named reason.  Returning
-        # here would publish a worse point one iteration early.
+        # A practical plateau is an interior stop: while a component sits at the
+        # cap with outward pressure or is a working infinity, the top of the loop
+        # decides (promote an exact face, or refuse with a named reason).
         if (
             outer_config.practical_convergence
             and current_face is None

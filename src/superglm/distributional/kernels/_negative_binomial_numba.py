@@ -628,15 +628,12 @@ _RESCALE_BY = 2.0**-300
 def _size_information_row(mean: float, size: float, max_terms: int) -> tuple[float, int]:
     """``theta**2 I_theta_theta`` of one NB2 law, and the series terms it took.
 
-    ``I = (1/theta) sum_{j>=1} P(Y > j) j / ((theta + j)**2 (theta + j - 1))``,
-    equal to Lawless's (1987, eq. 2.8) form but with non-negative terms, so the
-    Poisson limit does not cancel; summed by parts (via
-    ``E[Y/(theta + Y - 1)] = p``) it is ``sum_{y>=2} P(y) C(y-1)``,
-    ``C(k) = sum_{j<=k} j theta/((theta+j)**2 (theta+j-1))``, one forward pmf pass.
-
-    The tail past ``y`` is at most ``P(y) (C(y-1) r/(1-r) + r/(4 (theta+y-1)
-    (1-r)**2))`` with ``r = p max(1, (theta+y)/(y+1))``; the series stops when
-    that is at most ``u`` times the partial sum. ``P(y)`` is carried as
+    ``I = (1/theta) sum_{j>=1} P(Y > j) j / ((theta + j)**2 (theta + j - 1))``, Lawless's
+    (1987, eq. 2.8) form with non-negative terms so the Poisson limit does not cancel. Summed
+    by parts it is ``sum_{y>=2} P(y) C(y-1)``, one forward pmf pass, with
+    ``C(k) = sum_{j<=k} j theta/((theta+j)**2 (theta+j-1))``. The tail past ``y`` is at most
+    ``P(y) (C(y-1) r/(1-r) + r/(4 (theta+y-1) (1-r)**2))``, ``r = p max(1, (theta+y)/(y+1))``;
+    the series stops when that is at most ``u`` times the partial sum. ``P(y)`` is carried as
     ``v 2**e`` so it never underflows. ``terms = -1`` when ``max_terms`` runs out.
     """
     p = mean / (mean + size)

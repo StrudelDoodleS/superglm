@@ -38,8 +38,8 @@ PENALTIES = ("ssp", "none")
 # The ``knot_strategy=`` rules a spline takes: "uniform", or a data-driven one.
 KNOT_STRATEGIES = ("uniform", *QUANTILE_STRATEGIES)
 # The ``shape_engine=`` values a spline takes. Every fit-time shape constraint
-# fits on the QP on the raw rows; "scop" names the engine 0.41.0 used for a
-# P-spline, accepted with ``warn_scop_retired`` and fitted on the QP.
+# fits on the QP; "scop" (the retired P-spline engine) is accepted with
+# ``warn_scop_retired`` and fitted on the QP.
 SHAPE_ENGINES = ("qp", "scop")
 
 
@@ -50,10 +50,10 @@ class SCOPRetiredWarning(UserWarning):
 def warn_scop_retired(*, saved: bool = False, moves_fit: bool = True) -> None:
     """Warn that SCOP is retired, at the caller's line outside superglm.
 
-    ``saved`` is a P-spline a model fitted on SCOP before the option existed;
-    otherwise the declaration passed ``shape_engine="scop"``. ``moves_fit`` is
-    False where 0.41.0 never fitted the term on SCOP (no fit-time constraint,
-    or a basis other than a P-spline), so nothing about the fit changes.
+    ``saved`` is a P-spline a model fitted on SCOP; otherwise the declaration
+    passed ``shape_engine="scop"``. ``moves_fit`` is False where SCOP never
+    fitted the term (no fit-time constraint, or a basis other than a
+    P-spline), so the fit does not change.
     """
     if saved:
         subject = "This P-spline was fitted on the SCOP shape engine, which is retired"
@@ -75,10 +75,8 @@ def warn_scop_retired(*, saved: bool = False, moves_fit: bool = True) -> None:
 def _iter_knots(knots: Any) -> list[Any]:
     """Flatten a knots argument to a plain list without numeric coercion.
 
-    A scalar (plain number, numpy scalar, or 0-d array) is one knot: the
-    numeric branch always accepted it through ``np.asarray(...).ravel()``, so
-    the name probe must not turn it into a TypeError. A bare string is one
-    NAME, never a character sequence.
+    A scalar (plain number, numpy scalar, or 0-d array) is one knot, and a
+    bare string is one name, never a character sequence.
     """
     if isinstance(knots, np.ndarray):
         return list(knots.ravel())
@@ -242,9 +240,8 @@ def configure_knots(
     boundary: tuple[float, float] | None,
 ) -> None:
     """Set an unfitted spline spec's knot configuration: stated knots, or a count and a rule."""
-    # Stated knots make the rule moot, and it was never read then. A rule the
-    # placement does not know places uniform knots, as it always has, and says
-    # so, since it may be a typo.
+    # Stated knots make the rule moot. An unknown rule places uniform knots and
+    # says so, since it may be a typo.
     if knots is None and knot_strategy not in KNOT_STRATEGIES:
         warnings.warn(
             f"knot_strategy={knot_strategy!r} is not one of {KNOT_STRATEGIES}; it was "
@@ -254,11 +251,9 @@ def configure_knots(
             skip_file_prefixes=(_PACKAGE_DIRECTORY,),
         )
     if knots is not None and _knots_contain_names(knots):
-        # Level-name knots: resolvable only against an OrderedCategorical's
-        # declared levels, so resolution is deferred to that host (which
-        # rewrites ``_explicit_knots`` on its own deep copy).  A numeric-axis
-        # build refuses them loudly in ``place_knots``.  Numeric entries in a
-        # mixed list stay axis VALUES, exactly as they are without names.
+        # Level-name knots resolve only against an OrderedCategorical's declared
+        # levels, so the host resolves them on its own copy; a numeric-axis
+        # build refuses them in ``place_knots``. Numeric entries stay axis values.
         named = [k for k in _iter_knots(knots)]
         spec.n_knots = len(named)
         spec._explicit_knots = None

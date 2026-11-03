@@ -453,21 +453,13 @@ def _apply_piecewise_term(
     groups: list[GroupSlice],
     term: EditableTerm,
 ) -> None:
-    """Assign knot values straight into the coefficient block -- no least squares.
+    """Assign knot values straight into the coefficient block, with no least squares.
 
-    ``term.x`` is the knot vector, so the editable targets are already one
-    value per coefficient and the projection every other continuous term needs
-    would be an identity solve computed the slow, inexact way.
-
-    It also keeps the ``Categorical`` path's freedom from #236 for free.  The
-    targets are base-relative, so a projection's implied intercept is short by
-    exactly ``f(base)``; here ``target[base] == 0`` holds by construction, a
-    null edit therefore yields ``base_value == 0`` and ``_adjust_intercept``
-    returns without touching anything.  Dragging the base handle to ``d`` is
-    the one edit that moves every coefficient: it re-bases the term, shifting
-    each coefficient by ``-d`` and the intercept by ``+d``.  Predictions stay
-    local even then, because the hats are a partition of unity and the two
-    shifts cancel to ``d * h_base(x)``.
+    ``term.x`` is the knot vector, so the targets are one value per coefficient and need no
+    projection. They are base-relative with ``target[base] == 0``, so a null edit gives
+    ``base_value == 0`` and ``_adjust_intercept`` does nothing. Dragging the base handle to
+    ``d`` re-bases the term (every coefficient ``-d``, the intercept ``+d``); predictions stay
+    local because the hats are a partition of unity and the shifts cancel to ``d * h_base(x)``.
     """
     target = native_log_effect_values(term)
     knots = spec._knots

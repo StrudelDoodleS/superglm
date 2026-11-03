@@ -45,20 +45,16 @@ _ORDINARY_TYPES = (DenseGroupMatrix, CategoricalGroupMatrix)
 def automatic_global_moment_budget(
     family: object, likelihood_plan: object, layout: StackedLayout
 ) -> int | None:
-    """Admit the measured large mixed-layout scope without scanning arrays.
+    """Admit the large mixed-layout scope without scanning arrays.
 
-    The initial scope requires at least 262144 rows and at most one histogram
-    cell to initialize per four potential row updates. These limits describe
-    the measured workload; they are not a general performance crossover.
-    Only adapters declaring deterministic replay, their exact bound-plan and
-    resolved-weight types, and audited exact link types may retry the ordinary
-    chunk stream after numerical refusal. Custom links or weights keep one
-    ordinary stream because replay could change their state and thus the
-    likelihood being evaluated.
-
-    The builder independently validates storage, support authority, numerical
-    domain and the additional 64 MiB allowance. Lossless CSR/support subclasses
-    keep the per-pass contraction until their global representation is supported.
+    The scope requires at least 262144 rows and at most one histogram cell to
+    initialize per four potential row updates; these bound the workload the
+    route was validated on, not a general crossover. Only adapters declaring
+    deterministic replay, with their exact bound-plan, resolved-weight and
+    link types, may retry the ordinary chunk stream after numerical refusal;
+    custom links or weights keep one stream, since replay could change their
+    state. The builder separately validates storage, support, domain and the
+    64 MiB allowance.
     """
     contract = _likelihood_reuse_contract(family)
     if (
@@ -102,18 +98,14 @@ def automatic_global_moment_budget(
 
 
 def _mixed_small_group_layout(layout: StackedLayout) -> bool:
-    """Whether every predictor holds the measured mixed small-group layout.
+    """Whether every predictor holds the mixed small-group layout.
 
     Every predictor with slopes must contain dense numeric, categorical,
-    stored spline and spline-by-category groups, each at most 32 columns.
-    Intercept-only predictors may accompany that mix. These are conservative
-    scope limits for the measured small-group workload, not speed crossovers.
-    Tensor, SCOP, FactorSmooth, other sparse formats and custom subclasses keep
-    the per-pass contraction.
-
-    This selector reads only types and dimensions; the builder remains the
-    authority for actual workspace size, storage and numerical-domain refusal.
-    It constructs no plans, scans no arrays and populates no design caches.
+    stored spline and spline-by-category groups, each at most 32 columns;
+    intercept-only predictors may accompany it. Tensor, FactorSmooth, other
+    sparse formats and custom subclasses keep the per-pass contraction. Reads
+    only types and dimensions; the builder remains the authority for
+    workspace size, storage and numerical-domain refusal.
     """
     if type(layout) is not StackedLayout:
         return False

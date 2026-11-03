@@ -30,15 +30,13 @@ if TYPE_CHECKING:
 def _range_shift(weights: NDArray) -> int | None:
     """``k`` with every nonzero of ``2**k * weights`` in ``[2**-128, 2**128]``, or ``None``.
 
-    The exact-moment gate (``_ssp_gram_needs_exact``) admits operands in
-    that range; a finite float64 vector spanning at most 255 binades gets
-    there by a power of two.  ``None`` otherwise (a non-finite entry spans
-    the whole exponent range).
+    That range is what the exact-moment gate (``_ssp_gram_needs_exact``)
+    admits; a finite float64 vector spanning at most 255 binades gets there by
+    a power of two.
     """
     weights = np.asarray(weights)
-    # The type, not dtype equality: the extended float compares equal to
-    # float64 where it is binary64 (macOS ARM64, Windows), and a direct call
-    # with it keeps the exact route there, as on master.
+    # The type, not dtype equality: longdouble compares equal to float64 where
+    # it is binary64 (macOS ARM64, Windows) and must keep the exact route.
     if weights.dtype.type is not np.float64 or weights.ndim != 1:
         return None
     low, high = _float64_operand_exponent_bounds(_scan_form(weights.reshape(-1, 1)))
@@ -50,30 +48,14 @@ def _range_shift(weights: NDArray) -> int | None:
 def _shifted_moments(compute, factors: tuple, weights: tuple, owners: tuple) -> tuple | None:
     """The ordinary route's moments of out-of-range weights, at a power-of-two shift.
 
-    Rows whose fitted mean runs to zero carry working weights far below the
-    gate's ``2**-128`` beside ordinary ones, and the gate then sends the
-    whole block to the exact rational route.  Every moment here is linear in
-    one weight vector (``owners[i]`` indexes it), so this computes the
-    ordinary route on ``w' = 2**k w`` and returns ``2**-k`` times its result.
-
-    **Error.**  With every operand in the gate's range no product underflows
-    or overflows (the gate's own argument), so each operation of the route
-    obeys ``fl(x op y) = (x op y)(1 + d)``, ``|d| <= u``: bin sums of at most
-    ``n`` rows, one product with the support, and a length-``m`` contraction
-    over the bins give ``|M^(w') - M(w')| <= gamma_{n+m} |S|'(|S| o |w'|_b)``
-    entrywise (Higham 2002, eq. 3.5 and sec. 4.2), ``S`` the support and
-    ``|w|_b`` the bin sums of ``|w|``.  Scaling by ``2**k`` is exact, and the
-    shift back is taken only where it is too (it shifts forward to the same
-    bits: no result went subnormal), so ``M^ = 2**-k M^(w')`` meets
-    ``|M^ - M(w)| <= gamma_{n+m} |S|'(|S| o |w|_b)``: the bound the route
-    has for any in-range ``w``, homogeneous in ``w``, and against the same
-    support ``S = fl(B R)`` (or the certified one).
-
-    Only for float64 factors the gate admits (or a support the caller
-    certified) and weights whose span the shift can place: ``k`` puts every
-    nonzero weight in ``[2**-127, 2**128)``, inside the gate, so only the
-    factors can fail it.  Otherwise ``None`` and the caller keeps the exact
-    route.
+    Each moment is linear in one weight vector (``owners[i]`` indexes it),
+    so the ordinary route runs on ``w' = 2**k w`` and returns ``2**-k`` times
+    its result. Inside the gate's range nothing underflows, so bin sums of
+    ``n`` rows and a length-``m`` contraction give the route's usual bound
+    ``|M^ - M(w)| <= gamma_{n+m} |S|'(|S| o |w|_b)`` (Higham 2002, eq. 3.5);
+    both power-of-two shifts are exact, the back-shift checked to round-trip.
+    ``None`` when the factors fail the gate or the weights' span cannot be
+    placed; the caller then keeps the exact route.
     """
     # Uncertified factors only: a support the execution plan certified
     # arrives as ``factors=()``, admitted by the plan's own dtype test.
@@ -103,10 +85,8 @@ def _shifted_moments(compute, factors: tuple, weights: tuple, owners: tuple) -> 
 class DiscretizedSSPGroupMatrix:
     """Discretized SSP group matrix: stores dense B_unique + bin index.
 
-    Instead of a sparse (n, K) basis matrix, stores a dense (n_bins, K) matrix
-    evaluated at bin centers plus an (n,) index array mapping observations to bins.
-    All operations aggregate weights by bin first, reducing O(n) matrix work
-    to O(n_bins) + O(n) scatter/gather.
+    The (n_bins, K) basis at bin centres plus an (n,) row-to-bin index.
+    Operations aggregate weights by bin first.
     """
 
     __slots__ = (
@@ -153,9 +133,8 @@ class DiscretizedSSPGroupMatrix:
         _support: NDArray | None = None,
         _support_factors_in_range: bool = False,
     ) -> NDArray:
-        # Project before accumulation: raw moments can cancel after R_inv.
-        # Only the execution layer's same-call native-float64 B/R check may
-        # certify factors. A supplied projection alone is not a certificate.
+        # Project before accumulation: raw moments can cancel after R_inv. Only
+        # the execution layer's same-call float64 check may certify factors.
         factors = () if _support_factors_in_range else (self.B_unique, self.R_inv)
         if _ssp_gram_needs_exact(*factors, W):
             # Weights alone out of range take the ordinary route at a
@@ -195,11 +174,9 @@ class DiscretizedSSPGroupMatrix:
     ) -> tuple[NDArray, NDArray, NDArray]:
         """Compute gram(W), rmatvec(W), rmatvec(Wz) with shared bincount.
 
-        Returns (gram, XtW, XtWz) — single O(n) pass for both aggregations.
-        Factor certification is private to the execution layer's same-call
-        native-float64 check; weights and RHS always retain their own checks.
-        A batched caller whose ``Wz`` is ``W`` passes W's bin sums, formed in
-        a pass shared with its other weight vectors, as ``_bin_sums``.
+        Returns (gram, XtW, XtWz). Only the execution layer may certify the
+        factors; weights and RHS keep their own checks. A batched caller whose
+        ``Wz`` is ``W`` passes W's bin sums as ``_bin_sums``.
         """
         factors = () if _support_factors_in_range else (self.B_unique, self.R_inv)
         if _ssp_gram_needs_exact(*factors, W, Wz):
@@ -239,9 +216,7 @@ class DiscretizedSSPGroupMatrix:
         return (self.B_unique @ self.R_inv)[self.bin_idx]
 
     def row_subset(self, idx: NDArray) -> DiscretizedSSPGroupMatrix:
-        # type(self) rather than the parent: a subclass carries semantics the
-        # parent does not (lossless support vs binning), and subsetting must not
-        # silently downcast it.
+        # type(self): subsetting must not downcast a lossless-support subclass.
         sub = type(self)(self.B_unique, self.R_inv, self.bin_idx[idx])
         sub.omega = self.omega
         sub.projection = self.projection
@@ -254,17 +229,10 @@ class DiscretizedSSPGroupMatrix:
 class DiscretizedSCOPGroupMatrix:
     """Discretized SCOP group matrix: bin-level centered SCOP design.
 
-    The retired SCOP engine built this for a discrete fit, up to 0.41.0. It
-    stays so that a model saved with one loads and its saved design still
-    works; nothing builds one now.
-
-    Stores the centered SCOP design matrix evaluated at bin centers ``(n_bins, q_eff)``
-    plus a bin-index array ``(n,)`` mapping observations to bins.  SCOP terms bypass
-    SSP reparametrisation, so there is no ``R_inv`` — the columns are already in
-    solver space (the centered B @ Sigma block with column 0 dropped).
-
-    Operations follow the same scatter/gather pattern as DiscretizedSSPGroupMatrix
-    but without the R_inv sandwich.
+    Kept so a model the retired SCOP engine fitted (0.41.0 or earlier) loads;
+    nothing builds one now. Stores the centred SCOP design at bin centres
+    ``(n_bins, q_eff)``, already in solver space (no ``R_inv``), plus the
+    ``(n,)`` row-to-bin index.
     """
 
     __slots__ = (
@@ -388,8 +356,7 @@ class DiscretizedSplineCategoricalGroupMatrix:
         return dict_state, slot_state
 
     def __setstate__(self, state):
-        # Older learned matrices have no lookup slots. Rebuild lazily after
-        # restoring owned indices; NumPy pickle does not retain readonly flags.
+        # The lookup is rebuilt lazily; NumPy pickle does not keep readonly flags.
         dict_state, slot_state = state
         if dict_state is not None:
             self.__dict__.update(dict_state)
@@ -479,9 +446,7 @@ class DiscretizedSplineCategoricalGroupMatrix:
         else:
             pos_sub = np.empty(0, dtype=np.intp)
             bin_idx_level = np.empty(0, dtype=np.intp)
-        # type(self) rather than the parent: a subclass carries semantics the
-        # parent does not (lossless support vs binning), and subsetting must not
-        # silently downcast it.
+        # type(self): subsetting must not downcast a lossless-support subclass.
         sub = type(self)(
             self.B_unique,
             self.R_inv,
@@ -504,21 +469,13 @@ class DiscretizedSplineCategoricalGroupMatrix:
 class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
     """Discretized tensor interaction with factored Kronecker structure.
 
-    Like DiscretizedSSPGroupMatrix but stores the factored marginal bases
-    (B1_unique, B2_unique) and marginal bin indices (idx1, idx2) instead
-    of only the materialized Kronecker product B_joint.  Gram, matvec,
-    and rmatvec operations exploit the product structure for O(n_bins1 *
-    K1^2 * K2^2) instead of O(n_pairs * (K1*K2)^2).
+    Also stores the marginal bases (B1_unique, B2_unique) and bin indices
+    (idx1, idx2), so Gram, matvec and rmatvec use the product structure;
+    ``self.B_unique`` keeps the joint basis for paths that do not.
 
-    The materialized B_joint is still kept as ``self.B_unique`` (inherited)
-    for fallback compatibility in any code path that doesn't know about
-    the factored representation.
-
-    ``raw_channels`` is the raw B-spline band of the two margins (see
-    ``TensorRawChannels``) when the build found one narrower than the centred
-    joint row, else ``None``; the tensor x tensor cross-Gram accumulates in
-    it. Subsets and lambda rebuilds carry it through only while the marginal
-    tables still match the construction-time copies.
+    ``raw_channels`` is the margins' raw B-spline band (``TensorRawChannels``)
+    when narrower than the centred joint row, else ``None``; it survives
+    subsets and rebuilds only while the marginal tables are unchanged.
     """
 
     __slots__ = (
@@ -573,8 +530,8 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         return dict_state, slot_state
 
     def __setstate__(self, state):
-        # Missing legacy acceleration metadata uses the dense stage. Never
-        # certify a saved raw band against newly snapshotted marginal tables.
+        # Defaults for pickles without these slots: the dense stage runs, and a
+        # saved band is never certified against newly snapshotted tables.
         dict_state, slot_state = state
         if dict_state is not None:
             self.__dict__.update(dict_state)
@@ -602,9 +559,8 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
     def cell_csr(self) -> tuple[NDArray, NDArray]:
         """The rows sorted by grid cell, ``(ptr, order)`` as ``_cell_csr`` returns them.
 
-        The public indices may be replaced or mutated through shared arrays.
-        Check their cell membership and stable row order before reuse. This
-        costs one allocation-free scan, rather than retained index snapshots.
+        The public indices may be mutated through shared arrays, so the cache
+        is checked by one allocation-free scan before reuse.
         """
         if self._cell_csr is not None and not _cell_csr_matches(
             *self._cell_csr, self.idx1, self.idx2, self.n_bins1, self.n_bins2
@@ -617,29 +573,24 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
     def _factored_gram_raw(self, w_grid: NDArray) -> NDArray:
         """Compute the raw tensor Gram, ordered by j1 * K2 + j2.
 
-        Contract the stored marginal row outer products. The usual route uses
-        two ordinary GEMMs without a bin-grid-by-basis weighted workspace.
+        Contracts the marginal row outer products, usually by two GEMMs.
         """
         B1, B2 = self.B1_unique_t, self.B2_unique_t
         K1, K2 = B1.shape[1], B2.shape[1]
         n1, n2 = B1.shape[0], B2.shape[0]
-        # B1's outer table and the raw coefficient Gram occur in both routes.
-        # Retain the old contraction when the second outer table would cost
-        # more workspace, as can happen with a wide second marginal basis.
+        # Reassociate through B2's outer table only when it costs no more
+        # workspace than the weighted contraction (a wide second margin).
         left_cells = n2 * K1 * K1
         right_cells = n1 * K2 * K2
         outer_cells = n2 * K2 * K2
         old_cells = n1 * n2 * K2 + right_cells
         B1_outer = (B1[:, :, None] * B1[:, None, :]).reshape(n1, K1 * K1)
         # Forming B2's outer product before weighting changes integer/float32
-        # promotion. Keep the original arithmetic for other operand dtypes.
+        # promotion, so only float64 operands reassociate.
         float64_inputs = B1.dtype == B2.dtype == w_grid.dtype == np.float64
-        # Five original factors contribute to each raw Gram term. Bounding
-        # nonzero magnitudes by 2**(+/-128) prevents exponent overflow even for
-        # two sums with 64-bit index-sized dimensions (640 + 126 < 1024).
-        # This prevents new range failures from reassociation; cancellation
-        # still follows ordinary floating-point arithmetic. Extreme inputs
-        # retain the previous weighting order, including its finite results.
+        # Five factors make each raw Gram term: nonzeros within 2**(+/-128)
+        # cannot overflow even through two 2**63-term sums (640 + 126 < 1024).
+        # Operands outside that range keep the weighting-first order.
         reassociate = (
             float64_inputs
             and outer_cells + min(left_cells, right_cells) <= old_cells
@@ -648,8 +599,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
             and _tensor_operand_in_reassociation_range(_scan_form(w_grid))
         )
         if reassociate:
-            # Marginal tables can be mutable aliases. Recompute these small
-            # products instead of retaining a cache that could become stale.
+            # Marginal tables can be mutable aliases: recompute, never cache.
             B2_outer = (B2[:, :, None] * B2[:, None, :]).reshape(n2, K2 * K2)
             if right_cells <= left_cells:
                 G_K1K1_K2K2 = B1_outer.T @ (w_grid @ B2_outer)
@@ -693,9 +643,8 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         p_g = self.shape[1]
         K1, K2 = B1.shape[1], B2.shape[1]
 
-        # When the observed tensor support is small, evaluating on the unique
-        # support pairs and scattering back to observations is much cheaper
-        # than building an (n, K2) temporary via the factored observation path.
+        # Small observed support: evaluate on the unique pairs and scatter,
+        # instead of an (n, K2) temporary on the factored path.
         direct_pair_cost = n_pairs * p_g
         factored_obs_cost = B1.shape[0] * p_g + n_obs * K2
         if direct_pair_cost <= factored_obs_cost:
@@ -704,8 +653,8 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
 
         u = (self.R_inv @ v).reshape(K1, K2)
         B1u = B1 @ u  # (n_bins1, K2)
-        # Sequential accumulation in the fused kernel has a different range
-        # from NumPy's pairwise sum. Preserve the old sum for extreme operands.
+        # The fused kernel sums sequentially, so its range differs from NumPy's
+        # pairwise sum; extreme operands keep NumPy's.
         if (
             B1u.dtype == B2.dtype == np.float64
             and _tensor_operand_in_reassociation_range(_scan_form(B1u))
@@ -742,15 +691,10 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
 class SupportCompressedSplineCategoricalGroupMatrix(DiscretizedSplineCategoricalGroupMatrix):
     """Exact ``spline_cat`` basis stored one row per distinct row.
 
-    Numerically identical to :class:`SplineCategoricalGroupMatrix` over the same
-    basis; only the storage differs.  Kept distinct from its binned parent for
-    the same reason :class:`SupportCompressedSSPGroupMatrix` is: ``discrete=True``
-    is a lossy fREML path and this is not, so ``bin_idx_level`` here indexes
-    exact distinct rows of the shared spline basis rather than bins.
-
-    The support is shared across the levels of the categorical parent -- one
-    dense ``(n_support, p_b)`` block for the whole term -- while each level
-    keeps its own row index into it.
+    Numerically identical to :class:`SplineCategoricalGroupMatrix`; only the
+    storage differs. Distinct from its binned parent because it is lossless:
+    ``bin_idx_level`` indexes exact distinct rows, not bins. The levels share
+    one ``(n_support, p_b)`` support, each with its own row index into it.
     """
 
     __slots__ = ()
@@ -763,11 +707,9 @@ class SupportCompressedSplineCategoricalGroupMatrix(DiscretizedSplineCategorical
 class SupportCompressedSSPGroupMatrix(DiscretizedSSPGroupMatrix):
     """Exact SSP basis stored one row per distinct row.
 
-    Numerically identical to :class:`SparseSSPGroupMatrix` over the same basis;
-    only the storage differs.  Kept distinct from its binned parent because
-    ``discrete=True`` is a lossy fREML path and this is not: no binning occurs
-    and no discretisation error is introduced, so ``bin_idx`` here indexes exact
-    distinct rows rather than bins.
+    Numerically identical to :class:`SparseSSPGroupMatrix`; only the storage
+    differs. Distinct from its binned parent because it is lossless:
+    ``bin_idx`` indexes exact distinct rows, not bins.
     """
 
     __slots__ = ()

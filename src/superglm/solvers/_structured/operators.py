@@ -779,14 +779,10 @@ def _schur_cross_traces(
 
     With ``W_i = O_i U`` and ``T_i = U' W_i`` each trace splits exactly into
     ``tr(Z_local O_i Z_local O_j) + tr(R W_i' Z_local W_j) + tr(R W_j' Z_local W_i)
-    + tr(R T_i R T_j)``.  ``Z_local`` lives on the structured rows only, so the
-    middle pair needs just ``W`` there (``borders``) and ``Z_local W R``,
-    which ``weight`` forms one direction at a time so that only one is alive
-    beside the stack; ``cores`` holds ``R T_i``.  Every pair is then two inner
-    products, O(Kq + q^2), where re-forming both ``H^-1 O`` products per pair
-    (diagonal plus low rank of width 4q-5q) cost O(p q^2) Grams (Wood 2008,
-    Appendix C: store per-parameter products, read pairwise traces off them
-    with ``tr(AB) = sum(A * B')``).
+    + tr(R T_i R T_j)``. ``Z_local`` lives on the structured rows only, so the middle pair needs
+    ``W`` there (``borders``) and ``Z_local W R``, which ``weight`` forms one direction at a time;
+    ``cores`` holds ``R T_i``. Each pair is then two inner products, O(Kq + q^2) (Wood 2008,
+    App. C: store per-parameter products, read pairwise traces with ``tr(AB) = sum(A * B')``).
     """
     m = len(cores)
     flat = borders.reshape(m, -1)

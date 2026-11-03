@@ -82,18 +82,13 @@ def _replace_result_beta(model, beta) -> None:
 def _term_publishes_a_centred_contribution(model, groups) -> bool:
     """Whether the published basis for this term asserts a zero-mean contribution.
 
-    Runtime canonicalization records a per-group ``column_means`` for every term it
-    registered and the public intercept carries ``means @ beta`` for them, so a
-    registered term's published contribution has mean zero by construction and a
-    repair cannot move it.  An unregistered term has no such invariant to assert.
-
-    Membership is decided by ``hasattr(spec, "_basis_matrix")``, which an
-    ``OrderedCategorical`` fails because it wraps the spline that carries the
-    matrix; with ``select=True`` its columns genuinely do not sum to zero, and the
-    check must not refuse repairs for a zero mean the term never claimed (#311).
-    For a term the check does clear, its quantity is zero for every ``delta``; the
-    discriminating guards (certificate feasibility, objective against the zero-term
-    fallback) run on this term regardless.
+    Runtime canonicalization records ``column_means`` for every term it registered and the
+    public intercept carries ``means @ beta``, so a registered term's contribution has mean zero
+    and a repair cannot move it; an unregistered one asserts nothing. Membership is
+    ``hasattr(spec, "_basis_matrix")``, which an ``OrderedCategorical`` fails (it wraps the
+    spline), so its ``select=True`` columns that do not sum to zero cannot refuse a repair
+    (#311). The other guards (certificate feasibility, objective against the zero-term
+    fallback) run on every term regardless.
     """
     runtime_state = getattr(model, "_runtime_canonical_state", None)
     if not isinstance(runtime_state, dict):

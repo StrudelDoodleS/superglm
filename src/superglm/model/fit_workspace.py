@@ -20,11 +20,10 @@ _SUBCLASS_STATE_NAMES = "_fit_workspace_subclass_state_names"
 def _copy_subclass_state(public_model, work_model) -> None:
     """Copy constructor-owned extension state into an isolated fit attempt.
 
-    ``ModelConfig`` intentionally owns only the base ``SuperGLM`` contract.
-    On a subclass's first fit, the clean materialized dictionary therefore
-    provides an exact baseline from which constructor-added attributes can be
-    identified. Remembering those names avoids mistaking later fitted buffers
-    for subclass state on refits.
+    ``ModelConfig`` owns only the base ``SuperGLM`` contract, so on a
+    subclass's first fit the attributes absent from the clean materialized
+    dictionary are its constructor state. The names are remembered so later
+    fitted buffers are not mistaken for subclass state.
     """
     tracked_names = getattr(public_model, _SUBCLASS_STATE_NAMES, None)
     if tracked_names is None:
@@ -45,10 +44,8 @@ def _copy_subclass_state(public_model, work_model) -> None:
 
     base_names = set(work_model.__dict__)
 
-    # One memo preserves aliases between extension attributes. Mapping the
-    # source model itself also keeps self-references and stored bound methods
-    # attached to the private workspace rather than recursively cloning the
-    # complete public model (including any prior fitted buffers).
+    # One memo keeps aliases between extension attributes; mapping the source
+    # model to the workspace keeps self-references from cloning the public model.
     memo = {id(public_model): work_model}
     scalar_types = (type(None), bool, int, float, complex, str, bytes)
     for name in base_names:

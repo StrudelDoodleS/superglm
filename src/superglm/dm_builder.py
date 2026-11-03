@@ -1,12 +1,8 @@
-"""Design-matrix building helpers.
+"""Design-matrix building: R_inv, discretization, feature auto-detection,
+interaction dispatch and the main builder.
 
-Contains the private DM construction functions extracted from SuperGLM.model:
-R_inv computation, discretization helpers, feature auto-detection, interaction
-dispatch, and the main design-matrix builder.
-
-All functions take explicit state (specs, feature_order, lambda2, etc.) rather
-than accessing ``self``, making them independently testable and keeping
-model.py focused on orchestration.
+Every function takes explicit state (specs, feature_order, lambda2, ...) rather
+than a model instance.
 """
 
 from __future__ import annotations
@@ -102,11 +98,8 @@ def compute_R_inv(
     R = chol(B'WB/n + λΩ + εI)^T, then R_inv = R^{-1} so that the SSP basis
     X_ssp = B @ R_inv has near-identity X'WX regardless of λ.
 
-    The normaliser is the weight sum over *every* row, including rows on which
-    this block is identically zero. That is what puts each block's assembled
-    ``X'WX`` on the same scale, which is the conditioning property SSP exists
-    to deliver; normalising a zero-filled block by its own rows' weight sum
-    instead would shrink it against every other column of the normal equations.
+    The normaliser is the weight sum over every row, including rows where the
+    block is zero, so every block's ``X'WX`` sits on the same scale.
     """
     lam2 = _resolve_lambda2(lambda2)
     total = float(np.sum(sample_weight))
@@ -250,11 +243,9 @@ def _discretize_spline_column(
 ) -> tuple[NDArray, NDArray]:
     """Discretize on the positive-frequency support and map every fit row.
 
-    Zero-frequency rows need a valid bin index because the design retains its
-    physical row count, but they must not widen or otherwise change the
-    learned support. Mapping those inactive rows to the nearest active support
-    point is consistent with clipped spline evaluation and cannot affect the
-    weighted fit.
+    Zero-frequency rows keep a valid bin index (the design keeps its physical
+    row count) but do not shape the support: they map to the nearest active
+    support point, as clipped spline evaluation would.
     """
     values = np.asarray(x, dtype=np.float64).ravel()
     if geometry_weight is None:
@@ -351,10 +342,8 @@ def _spec_kind(spec: FeatureSpec) -> str:
     if isinstance(spec, Categorical):
         return "categorical"
     if isinstance(spec, OrderedCategorical):
-        # Always the smooth. The old non-spline arm returned "categorical" for a
-        # step spec, but `add_interaction` -- the only caller -- refuses an
-        # OrderedCategorical without an inner spline before it reaches here, so
-        # that arm was strictly dead and would have rotted silently.
+        # Always the smooth: ``add_interaction`` refuses an OrderedCategorical
+        # without an inner spline before it reaches here.
         return "spline"
     return type(spec).__name__
 
@@ -446,22 +435,14 @@ def _shared_row_support(B_csr, supports: dict | None):
 def _build_ssp_group(B_csr, R_inv, supports: dict | None = None, row_support=None):
     """Cheapest exact representation of a factored SSP block.
 
-    ``row_support`` is what its term found (``GroupInfo.row_support``): a
-    support, stored in place of scanning ``B_csr``, which a tensor leaves
-    ``None``; or the gates' decline, which that scan would repeat.
-
-    Compression is lossless deduplication of repeated rows; it never bins and is
-    independent of ``discrete=True``.  Declines whenever the measured cost model
-    says the current CSR path is cheaper.  The support byte budget does not
-    decline a support whose compressed group fits in the bytes of the CSR
-    basis that a decline keeps instead.
-
-    Groups sharing a basis through ``supports`` stay inside that one-group
-    charge together.  The gate charges ``S + 8n`` retained (support block,
-    row index) plus ``2 * 8 * n_support * p`` for the projected support and
-    its weighted copy a Gram forms, ``p <= p_b``.  Shared, the block and
-    index are held once, and the subgroups' widths sum to the basis width
-    (null plus range space), so their Gram products total at most ``2S``.
+    ``row_support`` is what its term found (``GroupInfo.row_support``), else
+    ``None`` to scan ``B_csr``.  Compression is lossless row deduplication,
+    never binning, independent of ``discrete=True``; it declines when the
+    cost model says CSR is cheaper.  The gate charges ``S + 8n`` retained
+    (support block, row index) plus ``2 * 8 * n_support * p`` for the Gram's
+    projected support and weighted copy.  Groups sharing a basis through
+    ``supports`` hold the block and index once, and their widths sum to the
+    basis width, so their Gram products total at most ``2S``.
     """
     from superglm._group_matrix._group_matrix_discretized import (
         SupportCompressedSSPGroupMatrix,
@@ -480,20 +461,12 @@ def _build_ssp_group(B_csr, R_inv, supports: dict | None = None, row_support=Non
 def _build_unpenalized_sparse_group(B_csr, n_cols: int):
     """Cheapest exact representation of an unpenalized sparse block.
 
-    Reached only for groups that opt in via ``GroupInfo.supports_row_compression``
-    (today: ``Piecewise``).  The routing is opt-in because the compressed
-    container is a ``DiscretizedSSPGroupMatrix`` subclass, and re-routing every
-    unpenalized sparse group through it silently disabled the tabmat split and
-    changed design_summary/partition reporting for shipped term types
-    (``CategoricalInteraction``, two-level ``OrderedCategorical`` steps) that
-    never asked for it.
-
-    The same lossless row-dedup gate as ``_build_ssp_group``: repeated rows are
-    the norm for heaped rating variables (a ``Piecewise`` hat basis above all),
-    and deduplication never bins, so exactness survives.  The identity
-    reparameterisation makes the compressed container a plain factored design;
-    its ``omega`` stays ``None``, which every penalty consumer reads as
-    unpenalized.  Declines to the plain CSR wrapper whenever the measured cost
+    Only for groups that opt in via ``GroupInfo.supports_row_compression``
+    (``Piecewise``): the compressed container is a ``DiscretizedSSPGroupMatrix``
+    subclass, which would change the tabmat split and design reporting of
+    other term types.  The same lossless row-dedup gate as
+    ``_build_ssp_group``, with an identity reparameterisation and ``omega``
+    ``None`` (unpenalized); declines to the plain CSR wrapper when the cost
     model says compression would not pay.
     """
     from superglm._group_matrix._group_matrix_discretized import (
@@ -525,22 +498,16 @@ def refuse_unsupported_interaction_parents(
     ``FactorSmooth``, which builds its own marginal and reads its group as
     labels.  A parent absent from ``specs`` is left to the caller's own check.
 
-    ``ranged_margins`` lets a parent with polynomial ranges through, as
-    SuperLSS's declared interactions always did. Its margin keeps the ranges
-    (``interaction_spline_spec`` keeps a ranged ``cr`` parent's constrained
-    basis rather than the cardinal one), so the fitted predictor stays
-    polynomial on them.
+    ``ranged_margins`` (SuperLSS) lets a parent with polynomial ranges through;
+    its margin keeps the ranges, so the fitted predictor stays polynomial on
+    them.
     """
     from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.spline import _SplineBase
 
-    # An OrderedCategorical without an inner spline can only be a pre-0.24
-    # pickle of the removed step mode; every spec this version constructs has
-    # one.  It cannot parent an interaction -- one-hot geometry has no
-    # marginal smooth to cross with -- and a specials term is refused for the
-    # analogous reason: its free levels have no spline-axis position.  Refuse
-    # at registration; otherwise the pair only fails much later, mid
-    # design-matrix build, after the caller has already committed a fit.
+    # An OrderedCategorical without an inner spline (an old pickle's step mode)
+    # has no marginal smooth to cross with, and a specials term's free levels
+    # have no spline-axis position: refuse both here, not mid-build.
     for parent in (feat1, feat2):
         spec = specs.get(parent)
         if isinstance(spec, OrderedCategorical) and (
@@ -572,11 +539,8 @@ def refuse_unsupported_interaction_parents(
                 "with; use basis=Spline(...) for an interactable ordinal parent, or "
                 "a Categorical feature for level-by-level structure."
             )
-        # Both margins keep the ranges in an interaction (a ranged cr parent
-        # keeps its constrained basis). SuperGLM still refuses a ranged parent,
-        # as it always did: allowing it would be new behaviour, and the
-        # interaction screen's probe (keep_ranges=False) would then need the
-        # constrained basis too. SuperLSS, which always fitted them, passes
+        # SuperGLM refuses a ranged parent: its interaction screen's probe
+        # (keep_ranges=False) has no constrained basis.  SuperLSS passes
         # ranged_margins.
         spline = spec._spline if isinstance(spec, OrderedCategorical) else spec
         if isinstance(spline, _SplineBase) and spline.polynomial_ranges:
@@ -647,35 +611,12 @@ def _priced_group_dimension(
 ) -> tuple[int, int | None]:
     """``(p_g, penalty_dim)``: what the penalty prices a group at, and its stamp.
 
-    A spec that withholds columns the design cannot identify -- an
-    interaction cell no row occupies, or one that is an exact linear
-    combination of the main effects beside it -- reports the width the term
-    SPANS through ``info.penalty_width``.  ``group_pricing`` decides what the
-    penalty and the df ledger do with that report:
-
-    - ``"rank"`` (default): price at the emitted width, the group's
-      identifiable dimension.  The ``sqrt(p_g)`` convention is calibrated to
-      the df of the group's score statistic under a standing full-rank
-      assumption (Yuan & Lin 2006 orthonormalise each block, and their
-      two-way ANOVA example carries ``(I-1)(J-1)``, not ``I*J``; Meier, van
-      de Geer & Buhlmann 2008 name the quantity ``df_g`` and count a 4-level
-      factor as 3).  A structurally-zero column contributes nothing to that
-      score (Lounici, Pontil, Tsybakov & van de Geer 2011 build the penalty
-      level from trace/eigenvalue functionals of the group Gram), and the
-      rank-deficient generalisations price the identifiable space only
-      (Breheny & Huang 2015 sec. 2.1 fit "in a lower-dimensional parameter
-      space"; Simon & Tibshirani 2012's ridged weight gives a zero singular
-      value exactly zero df).  The stamp is ``None`` so
-      ``GroupSlice.penalty_size`` follows the emitted width everywhere the
-      weight and the df ledger read it.
-    - ``"spanned"``: price at the width the term spans (the historical
-      behaviour), so withholding a structurally dead column changes nothing
-      the penalty or the df ledger sees, and pruning is a pure
-      reparametrisation of the fit.
-
-    Both consumers -- the group-lasso ``sqrt(p_g)`` weight and the
-    Breheny-Huang df allocation -- read this one decision, so they cannot
-    disagree about whether a dead column is a parameter.
+    ``info.penalty_width`` is the width the term spans when its spec withholds columns the
+    design cannot identify. ``"rank"`` (default) prices at the emitted, identifiable width with
+    stamp ``None``, calibrating the ``sqrt(p_g)`` weight to the group's identifiable df (Yuan &
+    Lin 2006; Meier, van de Geer & Buhlmann 2008; Breheny & Huang 2015, sec. 2.1).
+    ``"spanned"`` prices at the spanned width, so pruning a dead column is a pure
+    reparametrisation. The group-lasso weight and the Breheny-Huang df allocation both read it.
     """
     if info.penalty_width is None or group_pricing == "rank":
         return int(n_cols), None
@@ -955,12 +896,9 @@ def _process_info(
     if info.structural_ranks is not None and hasattr(gm, "structural_ranks"):
         gm.structural_ranks = info.structural_ranks
 
-    # ── Compose constraints into solver coordinates ──
-    # Constraints from build() are in post-identifiability space (after projection).
-    # R_inv_local maps projected -> solver coords (SSP transform only).
-    # Main-effect QP constraints are rebuilt once from raw rows and the full
-    # R_inv in the feature loop below; this provisional composition preserves
-    # the generic GroupInfo contract for other callers.
+    # Compose constraints into solver coordinates: build() gives them after
+    # projection, and R_inv_local maps projected -> solver (SSP only).
+    # Main-effect QP constraints are rebuilt from raw rows in the feature loop.
     if info.constraints is not None and R_inv_local is not None:
         info.constraints = info.constraints.compose(R_inv_local)
     # raw_to_solver_map from build() is the identifiability projection (raw -> projected).
@@ -1014,15 +952,11 @@ def build_design_matrix(
     ``interaction_order`` (resolves pending), ``pending_interactions``
     (empties it), and ``specs`` (via set_reparametrisation calls).
 
-    ``alias_prune`` controls only the *aliased*-cell half of categorical
-    interaction pruning.  Dropping an aliased cell picks one representative
-    of a rank deficiency that spans the interaction and its parent main
-    effect; that is a free choice exactly while the solver's rank convention
-    is what picks it.  A group selection penalty picks a different one -- the
-    representative minimising the group norms -- so the caller passes False
-    whenever a nonzero lambda1 will reach this block.  Empty cells are
-    unconditional: their columns are identically zero in the weighted
-    geometry, so no penalty can prefer any other representative.
+    ``alias_prune`` controls only aliased-cell pruning of categorical
+    interactions: dropping one picks a representative of the rank deficiency,
+    which a group selection penalty would pick differently, so the caller
+    passes False whenever a nonzero lambda1 reaches this block.  Empty cells
+    are always pruned: their columns are zero in the weighted geometry.
 
     ``separation`` controls the build-time separated-cell scan (see
     :mod:`superglm.diagnostics.separation`): ``"warn"`` (default) names the
@@ -1032,11 +966,10 @@ def build_design_matrix(
     nonzero lambda1 will reach this fit, else ``None``; terms that penalty
     targets have bounded optima and are exempt from the scan.
 
-    ``group_pricing`` decides the dimension the selection penalty and the
-    fallback df ledger price a group at when its spec emits fewer columns
-    than the term spans: ``"rank"`` (default) prices the emitted,
-    identifiable width; ``"spanned"`` reproduces the historical behaviour of
-    pricing the width the term spans.  See ``_priced_group_dimension``.
+    ``group_pricing`` decides the width the selection penalty and df ledger
+    price a group at when its spec emits fewer columns than the term spans:
+    ``"rank"`` (default) the emitted width, ``"spanned"`` the spanned width
+    (``_priced_group_dimension``).
 
     ``weight_semantics`` decides what ``sample_weight`` says about a row, and
     reaches the build in two places: which weights a strict-positivity check
@@ -1071,26 +1004,11 @@ def build_design_matrix(
         response_boundaries(distribution, link) if separation != "ignore" else ()
     )
 
-    # Frequency weights are replication mass, so they shape the same support as
-    # literally repeated rows and learned geometry follows them.  Prior weights
-    # say how precisely a row was measured, not how many rows there are, so
-    # spline knot placement and discretized-bin geometry stay functions of
-    # physical rows only.  That physical-rows rule covers every MODEL-geometry
-    # learner: _SplineBase knot placement, and Piecewise int-mode quantile
-    # placement and base='most_exposed' selection (explicit-breaks mode is
-    # unaffected -- stated knots do not move).  Polynomial standardization
-    # deliberately follows sample_weight under either contract, because
-    # orthonormalization is inference/selection geometry (the spanned column
-    # space is weight-invariant; unpenalized fits are identical), not model
-    # geometry like knot placement.
-    #
-    # "Physical rows" still excludes a row carrying no weight.  Under the prior
-    # contract ``w = 0`` says the row was observed with infinite variance --
-    # not observed at all -- so it must no more shape a boundary or a quantile
-    # than a zero replication count does.  Passing the indicator rather than
-    # ``None`` says exactly that, and it is all-ones (hence identical to
-    # ``None``) wherever the weights are strictly positive, which is every
-    # Tweedie prior fit.
+    # Frequency weights are replicated rows, so learned geometry follows them.
+    # Prior weights are precisions, so model geometry (knot placement,
+    # discretized bins, Piecewise quantiles and base='most_exposed') follows
+    # the physical rows of positive weight.  Polynomial standardization follows
+    # sample_weight under both: it spans the same column space either way.
     physical_rows = weight_semantics == PRIOR_WEIGHTS
     geometry_weight = knot_geometry_weight(sample_weight, weight_semantics)
 
@@ -1238,16 +1156,11 @@ def _group_has_lambda(gm, g, lambdas):
     return False
 
 
-# Discrete tensor interactions are deliberately *not* constrained against one
-# another.  ``ti()`` marginals are already centered, so two terms sharing a
-# marginal — ``ti(a, b) + ti(a, c)``, the standard mgcv functional-ANOVA
-# pattern — span distinct, jointly identifiable surfaces.  A cross-Gram null
-# space is also the wrong instrument for cross-term aliasing: it keeps the
-# directions a tensor shares *least* with its neighbours, so on a holey joint
-# support (correlated marginals, common in insurance data) it retains that
-# tensor's numerically null subspace and discards the whole fitted surface.
-# The exact path builds the full span and lets the penalty and shared rank
-# policy handle degenerate directions; the discrete path must match it.
+# Discrete tensor interactions are not constrained against one another: ``ti()``
+# marginals are centred, so ``ti(a, b) + ti(a, c)`` span jointly identifiable
+# surfaces, and a cross-Gram null space would keep the directions a tensor
+# shares least, discarding the fitted surface on a holey joint support.  As on
+# the exact path, the penalty and shared rank policy handle degenerate directions.
 
 
 def rebuild_design_matrix_with_lambdas(
@@ -1356,12 +1269,9 @@ def rebuild_design_matrix_with_lambdas(
                 new_gms.append(gm)
                 continue
             if gm.omega_components is not None and gm.projection is None:
-                # Discrete tensor interactions are emitted in fixed centered
-                # tensor coordinates with explicit marginal penalty components.
-                # Lambda updates should change S(lambda), not rebuild the
-                # packed design/R_inv. This mirrors mgcv bam(discrete=TRUE),
-                # where the packed marginal/index representation is fixed
-                # while smoothing parameters move.
+                # Discrete tensors keep fixed centred coordinates with explicit
+                # marginal penalties: a lambda update changes S(lambda), not the
+                # packed design, as in mgcv bam(discrete=TRUE).
                 new_gms.append(gm)
                 continue
             lam, omega_eff, has_comp = _resolve_group_lambda(gm, g, lambdas)
