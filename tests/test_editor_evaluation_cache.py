@@ -289,8 +289,10 @@ def test_training_split_pearson_uses_the_stable_kernel(excluded_weight):
 def test_verified_training_rows_score_without_prediction_warnings():
     """The fit's own rows score quietly, as ``metrics()`` does, with the same values.
 
-    A thin ``sz`` level makes public ``predict`` warn; the fit already
-    reported it, and ``metrics()`` on the same rows stays quiet.
+    Structured REML reports the thin ``sz`` level during fitting and public
+    ``predict`` warns again; verified training metrics stay quiet. Force that
+    backend: ``auto`` chooses the dense solver for this small fixture, whose
+    fit records the thin level without emitting the structured disclosure.
     """
     from superglm import FactorSmooth, Spline
     from superglm.types import LambdaPolicy
@@ -307,10 +309,12 @@ def test_verified_training_rows_score_without_prediction_warnings():
             )
         ],
         selection_penalty=0.0,
+        direct_solve="structured",
     )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    with pytest.warns(UserWarning, match=r"basis='sz'.*no weight: thin\."):
         model.fit_reml(X, y)
+    assert model.result.direct_backend == "structured"
+    assert model._reml_profile["structured_thin_levels"] == ("thin",)
     with pytest.warns(UserWarning, match="sz"):
         model.predict(X)
 
@@ -318,8 +322,8 @@ def test_verified_training_rows_score_without_prediction_warnings():
         warnings.simplefilter("error", UserWarning)
         metrics = compute_dataset_metrics(model, EvaluationDataset("train", "Train", X, y))
         core = model.metrics(X, y)
-
-    assert metrics["deviance"] == core.deviance
+        for name in _METRIC_NAMES:
+            assert metrics[name] == getattr(core, name), name
 
 
 @pytest.mark.parametrize("mutated", ["response", "weights"])

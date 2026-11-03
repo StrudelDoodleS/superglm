@@ -44,7 +44,7 @@ from superglm.distributional.posterior import (
 from superglm.distributional.prediction_design import _required_columns
 from superglm.distributional.terms import (
     _column_levels,
-    _fitted_level_spec,
+    _fitted_level_specs,
     _level_inputs,
     _numeric_range,
     _reference_value,
@@ -282,7 +282,7 @@ def _covariate_grid(
     return (
         np.array(
             _level_inputs(
-                _fitted_level_spec(fitted, covariate), labels, frame.column_array(covariate)
+                _fitted_level_specs(fitted, covariate), labels, frame.column_array(covariate)
             ),
             dtype=object,
         ),
@@ -330,7 +330,9 @@ def _sweep_frame(
         if name == covariate:
             data[name] = np.asarray(sweep)
         elif frame.column_kind(name) == "numeric":
-            data[name] = np.full(width, float(reference[name]), dtype=float)
+            # Not through float: an integer level label past 2**53 would round
+            # onto another label.
+            data[name] = np.full(width, reference[name])
         else:
             data[name] = np.array([reference[name]] * width, dtype=object)
     return pd.DataFrame(data)

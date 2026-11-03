@@ -959,8 +959,11 @@ The scan reads only what the data decide before the fit:
   censored claim's probability runs along either depends on the fitted
   location and on the other one.
 
-Ordered-categorical smooths, a normal or log-normal scale on a link other
-than its default, and predictors on links such as sqrt, inverse or power are
+Ordered-categorical smooths and a normal or log-normal scale on a link other
+than its default are not scanned. On a sqrt or power link only the censoring
+side that walks to an end the link reaches as its predictor runs off is
+scanned: right-censored rows under sqrt or a positive power, left-censored
+rows under a negative power. Predictors of a custom family on those links are
 not scanned. The scan does not cover all separation patterns, and
 `fit.curvature_indefinite` is a curvature diagnostic, not a separation detector.
 The absence of either warning does not rule out separation.

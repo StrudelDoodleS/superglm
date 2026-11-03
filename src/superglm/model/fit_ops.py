@@ -907,6 +907,20 @@ def _warn_unresolved_rows(model) -> None:
         warnings.warn(message, WeakIdentificationWarning, stacklevel=4)
 
 
+def _warn_mean_space_boundary(model) -> None:
+    """Say in plain words that a fit holds rows at a fitted probability of 0 or 1.
+
+    Rows a direction the factorization truncates carries to the boundary are
+    named by ``_warn_unresolved_rows`` instead.
+    """
+    result = model._result
+    if result.termination_reason != "mean_space_boundary" or result.mean_space_boundary_unresolved:
+        return
+    from superglm.diagnostics.convergence import warn_coefficient_nonconvergence
+
+    warn_coefficient_nonconvergence(result)
+
+
 def _prime_fit_caches(
     model,
     *,
@@ -1558,6 +1572,7 @@ def _fit_in_workspace(
     )
     runtime_canonicalize.canonicalize_fitted_model(model)
     _warn_unresolved_rows(model)
+    _warn_mean_space_boundary(model)
 
     model._last_fit_meta = {"method": "fit", "discrete": model._discrete}
     _maybe_release_fit_state(model)
@@ -1851,17 +1866,17 @@ def fit_reml(
     )
     _install_fit_state(model, candidate)
     _record_reml_terminal_best_effort(model, debug_recorder)
-    warn_published_reml_nonconvergence(model, stacklevel=3)
+    warn_published_reml_nonconvergence(model)
     return model
 
 
-def warn_published_reml_nonconvergence(model, *, stacklevel: int) -> None:
+def warn_published_reml_nonconvergence(model) -> None:
     """Warn once that a published fit_reml fit stopped unconverged.
 
     Called after the state it describes is public, by ``fit_reml`` and the
     REML publication refits of ``estimate_p`` and ``estimate_theta``.
     Candidate fits set ``_suppress_convergence_warning`` and disclose
-    convergence in their own result. ``stacklevel`` counts from the caller.
+    convergence in their own result. The warning names the caller's line.
     """
     if getattr(model, "_suppress_convergence_warning", False):
         return
@@ -1872,11 +1887,11 @@ def warn_published_reml_nonconvergence(model, *, stacklevel: int) -> None:
 
     reml_result = getattr(model, "_reml_result", None)
     if reml_result is not None:
-        warn_reml_nonconvergence(reml_result, stacklevel=stacklevel + 1)
+        warn_reml_nonconvergence(reml_result)
     else:
         # No REML-eligible groups: fit_reml fell back to the plain coefficient
         # fit, whose own convergence must not go unreported.
-        warn_coefficient_nonconvergence(getattr(model, "_result", None), stacklevel=stacklevel + 1)
+        warn_coefficient_nonconvergence(getattr(model, "_result", None))
 
 
 def _record_reml_terminal_best_effort(model, debug_recorder) -> None:

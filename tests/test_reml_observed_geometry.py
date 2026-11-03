@@ -3640,7 +3640,9 @@ class TestModeCertifiesAtTheRoundOffFloor:
         assert model._reml_profile["reml_terminal_mode_certified"] is True
         assert np.all(np.isfinite(model.predict(frame, offset=offset)))
 
-        monkeypatch.setattr(direct_module, "stopped_on_iteration_budget", lambda result: False)
+        monkeypatch.setattr(
+            direct_module, "stopped_on_iteration_budget", lambda result, link=None: False
+        )
         with pytest.raises(ObservedModeNotConvergedError):
             self._model().fit_reml(frame, y, sample_weight=weight, offset=offset, max_reml_iter=30)
 

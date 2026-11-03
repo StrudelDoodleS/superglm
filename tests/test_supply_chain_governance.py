@@ -351,6 +351,12 @@ def test_dev_ci_keeps_browser_and_non_test_checks_independent():
     assert "pytest tests/editor/" in browser_job
 
 
+def test_pre_commit_ruff_matches_the_project_pin():
+    (pin,) = re.findall(r'"ruff==([^"]+)"', _read("pyproject.toml"))
+    (rev,) = re.findall(r"ruff-pre-commit\s+rev: (\S+)", _read(".pre-commit-config.yaml"))
+    assert rev == f"v{pin}", "the Ruff hook and the dev environment must run one Ruff"
+
+
 def test_pre_push_pytest_uses_uv_dev_environment():
     config = _read(".pre-commit-config.yaml")
     pytest_hook = config.split("- id: pytest", maxsplit=1)[1]

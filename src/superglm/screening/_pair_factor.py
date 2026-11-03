@@ -507,8 +507,14 @@ def numeric_cat_factor(
     # publishes ``statistic 12.4322500000, edf0 1.0``.  A row with no weight
     # may cost nothing, and multiplying by its zero afterwards is not the same
     # promise as never admitting its value.
-    reference = np.zeros(n_g, dtype=np.float64)
     weighted = w > 0.0
+    # A weighted ``|z|`` from 2**1022 up can overflow ``z - reference`` while
+    # the weighted rows and moments fit in float64, so the level is centred in
+    # ``z / 4`` there.  Dividing by a power of two is exact; the two entries in
+    # ``z``'s units are scaled back below, and the scale cancels from the rest.
+    scale = 4.0 if np.max(np.abs(z), where=weighted, initial=0.0) >= 2.0**1022 else 1.0
+    z = z / scale
+    reference = np.zeros(n_g, dtype=np.float64)
     reference[codes_g[weighted]] = z[weighted]
     shifted = np.zeros_like(z)
     np.subtract(z, reference[codes_g], out=shifted, where=weighted)
@@ -524,9 +530,9 @@ def numeric_cat_factor(
     spread = m2 > 0.0
     factors = np.zeros((n_g, 3, 3), dtype=np.float64)
     factors[:, 0, 0] = root_w0
-    factors[:, 0, 1] = root_w0 * zbar
+    factors[:, 0, 1] = root_w0 * zbar * scale
     factors[:, 0, 2] = np.divide(s0, root_w0, out=np.zeros_like(s0), where=positive)
-    factors[:, 1, 1] = root_m2
+    factors[:, 1, 1] = root_m2 * scale
     factors[:, 1, 2] = np.divide(c1, root_m2, out=np.zeros_like(c1), where=spread)
     # THE RESIDUAL, ACCUMULATED RATHER THAN SUBTRACTED, AND IT COSTS NO EXTRA
     # PASS.  ``rho`` closes the level's factor: the level's response energy

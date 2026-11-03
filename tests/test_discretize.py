@@ -1539,16 +1539,15 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         with pytest.raises(ValueError, match="not a usable factor"):
             model.discretization_impact(df, y, n_bins=3, features=["a:b"])
 
-    def test_a_finite_log_surface_survives_an_unrepresentable_factor(self):
+    def test_an_unrepresentable_grid_factor_is_refused_by_name(self):
         """``exp`` of a finite log surface can leave float64; the fit does not.
 
         Both built-ins return ``relativity = exp(log_relativity)``, so a finite
         log surface outside the exponential range comes back as ``0`` or
-        ``inf`` while the fit's own predictor stays perfectly representable.
-        Validating the printed factor would then refuse a diagnostic with
-        nothing wrong with it -- so the log field is taken wherever ``exp`` of
-        it reproduces the factor cell for cell, which an overflowed cell does
-        exactly.
+        ``inf`` while the fit's own predictor stays representable.  The log
+        field is read where ``exp`` of it reproduces the factor, but the
+        approximated mean then leaves float64 as the workbook's product does,
+        and the diagnostic says so rather than clipping it into a number.
         """
         stub = self._Stub()
         base = stub.reconstruct
@@ -1565,10 +1564,8 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         model, df, y = self._model_with(stub)
         assert not np.all(np.isfinite(_huge(np.zeros(1), n_points=3)["relativity"]))
 
-        result = model.discretization_impact(df, y, n_bins=3, features=["a:b"])
-        grid = result.interaction_tables["a:b"]
-        assert np.all(np.isfinite(grid["log_relativity"].to_numpy()))
-        assert int(grid["n_obs"].sum()) == len(df)
+        with pytest.raises(OverflowError, match="non-finite or zero predictions on 300 rows"):
+            model.discretization_impact(df, y, n_bins=3, features=["a:b"])
 
     def test_a_malformed_log_field_falls_through_to_the_printed_factor(self):
         """``log_relativity`` is not part of the grid contract, so it cannot refuse.
@@ -1640,15 +1637,13 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         )
         np.testing.assert_allclose(delta, printed, rtol=_NODE_EXACT_RTOL, atol=0.0)
 
-    def test_one_lost_cell_does_not_hand_the_whole_surface_to_the_log_field(self):
-        """The fallback is per cell, not a switch for the whole grid.
+    def test_a_grid_cell_whose_factor_underflows_is_refused_on_the_rows_it_prices(self):
+        """One cell's factor underflowing to zero prices its rows at zero.
 
-        One cell underflowing to zero is a fact about that cell. The other
-        eight still print a perfectly good factor, and those are the numbers
-        the workbook shows -- so the sweep must keep measuring them from
-        ``relativity`` and reach for the log field only at the cell that lost
-        it. Taking the log surface wholesale instead would report error
-        against nine numbers when only one was ever in question.
+        The other cells print usable factors, but the workbook's product on
+        the rows nearest the lost cell is ``exp(-800)``, which float64 holds
+        only as zero. The diagnostic refuses on exactly those rows rather than
+        clipping their predictor into a finite number.
         """
         stub = self._Stub()
         base = stub.reconstruct
@@ -1657,42 +1652,20 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
             raw = dict(base(beta, n_points=n_points))
             surface = np.array(raw["log_relativity"], dtype=float)
             surface[0, 0] = -800.0  # exp underflows to exactly 0.0
-            relativity = np.exp(surface)
-            assert relativity[0, 0] == 0.0
-            # Everywhere the factor SURVIVED, the log field is a near miss --
-            # close enough for any tolerance, and not what the workbook prints.
-            near_miss = surface * (1 + 1e-10)
-            near_miss[0, 0] = surface[0, 0]  # the lost cell must round-trip
-            raw["relativity"] = relativity
-            raw["log_relativity"] = near_miss
+            raw["relativity"] = np.exp(surface)
+            raw["log_relativity"] = surface
             return raw
 
         stub.reconstruct = _one_lost_cell
         model, df, y = self._model_with(stub)
-        result = model.discretization_impact(df, y, n_bins=3, features=["a:b"])
-
         nodes_a = np.array([1.0, 2.0, 3.0])
         nodes_b = np.array([10.0, 20.0, 30.0])
         i = np.abs(df["a"].to_numpy()[:, None] - nodes_a).argmin(axis=1)
         j = np.abs(df["b"].to_numpy()[:, None] - nodes_b).argmin(axis=1)
-        lost = (i == 0) & (j == 0)
-        assert lost.any(), "the lost cell must be reached"
-        assert (~lost).any(), "surviving cells must be reached"
-
-        delta = np.log(result.predictions / result.original_predictions)
-        # The surviving cells read the factor the workbook prints, exactly --
-        # the near-miss log field never touches them.
-        np.testing.assert_allclose(
-            delta[~lost],
-            (nodes_a[i] + 0.01 * nodes_b[j])[~lost],
-            rtol=_NODE_EXACT_RTOL,
-            atol=0.0,
-        )
-        # The lost cell took the log field rather than ``log(0) == -inf``, so
-        # it stays finite and far below every surviving cell.  Stabilization
-        # clips how far, which is why the bound is an inequality.
-        assert np.all(np.isfinite(delta[lost]))
-        assert delta[lost].max() < delta[~lost].min() - 1.0
+        lost = int(np.count_nonzero((i == 0) & (j == 0)))
+        assert 0 < lost < len(df)
+        with pytest.raises(OverflowError, match=f"zero predictions on {lost} rows"):
+            model.discretization_impact(df, y, n_bins=3, features=["a:b"])
 
     def test_a_grid_reconstructor_without_n_points_is_still_a_grid(self):
         from superglm.diagnostics.discretize import _grid_reconstruction

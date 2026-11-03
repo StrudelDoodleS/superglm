@@ -8,6 +8,7 @@ import pytest
 from superglm import Constraint
 from superglm.features.spline import (
     BSplineSmooth,
+    CardinalCRSpline,
     CubicRegressionSpline,
     NaturalSpline,
     PSpline,
@@ -411,6 +412,16 @@ class TestDefaultKindIsCr:
         message = str(excinfo.value)
         assert f"up to {cap}, so m={cap + 1} cannot apply" in message
         assert f"Pass kind='ps' for a penalty of order {cap + 1}" in message
+
+    @pytest.mark.parametrize("m", [1, (1,)])
+    @pytest.mark.parametrize(
+        "make", [CardinalCRSpline, lambda **kw: Spline(kind="cr_cardinal", **kw)]
+    )
+    def test_cardinal_refuses_a_penalty_order_below_two(self, make, m):
+        """Its penalty is the closed-form second-derivative one: m=1 is refused, not fitted as m=2."""
+        with pytest.raises(ValueError, match=r"only m=2, got m=1\. Pass kind='cr'"):
+            make(n_knots=8, m=m)
+        assert make(n_knots=8, m=(2,))._m_orders == (2,)
 
     def test_penalty_order_maximum_is_read_from_the_class(self, monkeypatch):
         """The refusal takes its cap from ``CubicRegressionSpline._max_penalty_order``,

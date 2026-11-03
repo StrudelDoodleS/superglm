@@ -1138,6 +1138,10 @@ def _weighted_correlation(x: NDArray, y: NDArray, weights: NDArray) -> float:
     positive = weights > 0.0
     x_active = np.asarray(x[positive], dtype=np.float64)
     y_active = np.asarray(y[positive], dtype=np.float64)
+    # Correlation is invariant to positive scale; scaling to unit max keeps the
+    # squared deviations finite for means near the top of the float64 range.
+    x_active = x_active / np.max(np.abs(x_active))
+    y_active = y_active / np.max(np.abs(y_active))
     mass = np.asarray(weights[positive], dtype=np.float64)
     mass /= np.sum(mass, dtype=np.float64)
     x_centered = x_active - float(np.sum(mass * x_active))
@@ -1162,6 +1166,7 @@ def discretization_impact(
     features: list[str] | None = None,
     band_se: float = 1.0,
     band_max_error: float = 0.10,
+    _offset_delta: NDArray | None = None,
 ) -> DiscretizationResult:
     """Analyse the impact of discretizing the smooth terms of a fit.
 
@@ -1171,7 +1176,9 @@ def discretization_impact(
     nearest node of the ``n_bins``-per-axis grid the rating-table export ships
     -- a SAMPLING rather than an averaging, because that block is keyed on axis
     values and a consumer's only available lookup is the nearest one.
-    Predictions are recomputed and compared to the originals.
+    Predictions are recomputed and compared to the originals. Under a log
+    link the approximated mean is not clipped, because the workbook's product
+    is not, and one that is non-finite or zero raises ``OverflowError``.
 
     Both are covered because both are approximations the exported workbook
     carries, and reporting one without the other understates how far the table
@@ -1271,7 +1278,7 @@ def discretization_impact(
 
     beta = result.beta
     from superglm.distributions import clip_mu
-    from superglm.links import stabilize_eta
+    from superglm.links import LogLink, stabilize_eta
     from superglm.model import base
 
     plan = base._prediction_plan(model)
@@ -1365,7 +1372,9 @@ def discretization_impact(
     # For each target feature, compute the delta (binned - smooth)
     tables: dict[str, pd.DataFrame] = {}
     band_diagnostics: dict[str, dict[str, float]] = {}
-    total_delta = np.zeros(n)
+    # The rating-table export bins a requested offset itself and passes the
+    # change in its log factor, which joins the fitted terms' changes.
+    total_delta = np.zeros(n) if _offset_delta is None else np.array(_offset_delta, dtype=float)
     # Under "exact" a covariate's main effect and the spline-by-categorical
     # interactions on it are read on ONE set of bands, so the table keys them
     # alike and every curve it approximates keeps its limit (_joint_exact_bands).
@@ -1641,9 +1650,26 @@ def discretization_impact(
             }
         )
 
-    # Discretized predictions
-    eta_disc = stabilize_eta(eta_orig + total_delta, model._link)
-    predictions = clip_mu(model._link.inverse(eta_disc), model._distribution)
+    # A log-link workbook multiplies its factors with no clip on the predictor
+    # or the mean, so neither is clipped here: clipping would hide the error
+    # where binning removes cancellation between terms.
+    eta_disc = eta_orig + total_delta
+    if isinstance(model._link, LogLink):
+        with np.errstate(over="ignore", under="ignore"):
+            predictions = np.exp(eta_disc)
+        unusable = ~np.isfinite(predictions) | (predictions == 0.0)
+    else:
+        predictions = clip_mu(
+            model._link.inverse(stabilize_eta(eta_disc, model._link)), model._distribution
+        )
+        unusable = ~np.isfinite(predictions)
+    if np.any(unusable):
+        raise OverflowError(
+            f"Discretizing at n_bins={n_bins} gives non-finite or zero predictions on "
+            f"{np.count_nonzero(unusable)} rows, outside float64's range: the binned terms "
+            "no longer cancel the way the fitted terms do. Increase n_bins or exclude those "
+            "terms."
+        )
 
     # Compute metrics
     dist = model._distribution

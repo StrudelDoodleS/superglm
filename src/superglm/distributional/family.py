@@ -690,8 +690,11 @@ class WallDisclosingFamily(Protocol):
         ``pressed`` counts the rows at the (lower, upper) wall that the data press
         against it, and ``clipped`` the rows the link clipped to its last float
         inside it, where no fit can resolve how close they are. ``unresolved``
-        says a direction the fit's rank decision dropped moves clipped rows, so
-        the shape's curvature is lost there.
+        says the fit lost the bounded parameter's curvature at clipped rows,
+        along a direction its rank decision dropped or under a step that still
+        presses them. A hook that also takes ``settled`` is passed
+        ``settled=False`` when the coefficient fit stopped before converging,
+        where an outward step does not establish that the optimum lies at a wall.
         """
         ...
 

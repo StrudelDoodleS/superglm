@@ -695,13 +695,14 @@ def centred_column_expansion(
     ``|p| < 2^-969`` the product's tail lies under ``2^-1074`` and each addend
     loses at most ``2^-1075`` (``two_product``).  The plain product ``fl(d
     beta)``, the term as the fitted predictor scores it (``_score_centred``),
-    is returned beside them for ``CompensatedSum``'s guard.
+    is returned beside them for ``CompensatedSum``'s guard, and its overflow
+    warns as the plain predictor's does.
     """
     with np.errstate(over="ignore", invalid="ignore"):
         difference, difference_error = two_sum(np.asarray(values, dtype=np.float64), -float(centre))
         product, product_error = two_product(difference, float(beta))
         pieces = (product, product_error, difference_error * float(beta))
-        return pieces, difference * float(beta)
+    return pieces, difference * float(beta)
 
 
 @dataclass(frozen=True)
@@ -778,7 +779,9 @@ class CompensatedSum:
     (Claude's review of #453).  Every operation is elementwise and the rows
     independent, so ``value`` replays the addends on just the rows whose
     fallback it needs, recomputing a recomputable source once, and every row
-    reads what a whole-array evaluation gives, bit for bit.
+    reads what a whole-array evaluation gives, bit for bit.  A replay, and a
+    subtraction, re-score terms the sum already scored, so they raise no
+    floating-point warning.
     """
 
     __slots__ = ("addends", "error", "remainder", "start", "total")
@@ -793,10 +796,10 @@ class CompensatedSum:
     def _join(self, addend: _Addend) -> _Addend:
         data = addend.data()
         n = self.total.shape[0]
-        with np.errstate(over="ignore", invalid="ignore"):
-            for lo in range(0, n, _CHUNK):
-                rows = slice(lo, min(lo + _CHUNK, n))
-                pieces, _ = addend.expand(data, rows)
+        for lo in range(0, n, _CHUNK):
+            rows = slice(lo, min(lo + _CHUNK, n))
+            pieces, _ = addend.expand(data, rows)
+            with np.errstate(over="ignore", invalid="ignore"):
                 for piece in pieces:
                     self.total[rows], error = two_sum(self.total[rows], piece)
                     self.error[rows] += error
@@ -813,7 +816,8 @@ class CompensatedSum:
 
     def subtract(self, addend: _Addend) -> None:
         """Add ``addend`` negated: a term an earlier ``add`` returned, or a ``constant_addend``."""
-        self._join(addend.negated())
+        with np.errstate(over="ignore", invalid="ignore"):
+            self._join(addend.negated())
 
     def copy(self) -> CompensatedSum:
         twin = CompensatedSum.__new__(CompensatedSum)
@@ -849,11 +853,14 @@ class CompensatedSum:
         expanded = np.ones(rows.size, dtype=bool)
         with np.errstate(over="ignore", invalid="ignore"):
             for addend in self.addends:
-                pieces, value = addend.expand(addend.data(), rows)
-                for piece in pieces:
-                    plain = plain + piece
-                    expanded &= np.isfinite(piece)
-                original = original + value
+                data = addend.data()
+                for lo in range(0, rows.size, _CHUNK):
+                    chunk = slice(lo, lo + _CHUNK)
+                    pieces, value = addend.expand(data, rows[chunk])
+                    for piece in pieces:
+                        plain[chunk] += piece
+                        expanded[chunk] &= np.isfinite(piece)
+                    original[chunk] += value
             start = self.start if self.start.ndim == 0 else self.start[rows]
             return np.where(expanded, start + (self.remainder + plain), start + original)
 

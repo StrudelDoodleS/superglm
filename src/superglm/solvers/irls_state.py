@@ -204,17 +204,14 @@ def link_domain_violation(
             return bool(np.any((eta_unclipped <= 0.0) & (weights > 0.0)))
 
         return violates
-    if (
-        family is not None
-        and isinstance(link, IdentityLink)
-        and not isinstance(family, Gaussian | Binomial)
-    ):
+    if family is not None and isinstance(link, IdentityLink) and not isinstance(family, Gaussian):
+        upper = 1.0 if isinstance(family, Binomial) else np.inf
 
-        def mean_not_positive(eta_unclipped: NDArray, weights: NDArray) -> bool:
+        def mean_outside(eta_unclipped: NDArray, weights: NDArray) -> bool:
             mean = link.inverse(np.array(eta_unclipped, dtype=float))
-            return bool(np.any((mean <= 0.0) & (weights > 0.0)))
+            return bool(np.any(((mean <= 0.0) | (mean >= upper)) & (weights > 0.0)))
 
-        return mean_not_positive
+        return mean_outside
     return None
 
 
@@ -235,11 +232,20 @@ def mean_space_boundary_rows(
     likelihood, and a state holding such a row is at the boundary of the
     parameter space ``{beta : X beta + offset < 0}``, where the maximum is
     not a stationary point (Donoghoe & Marschner 2018, J. Stat. Softw.
-    86(9), sections 2 and 4.1).
+    86(9), sections 2 and 4.1).  A binomial/identity row whose mean
+    ``link.inverse(eta)`` ``clip_mu`` replaces, at either end, is at the boundary of ``{beta : 0 < X beta +
+    offset < 1}`` in the same way (Donoghoe & Marschner 2014, Comput. Stat.
+    Data Anal. 80).
     """
-    if mean_space_violation(family, link) is None:
+    eta = np.asarray(eta_unclipped)
+    if mean_space_violation(family, link) is not None:
+        boundary = eta >= _BINOMIAL_LOG_CAP_ETA
+    elif isinstance(family, Binomial) and isinstance(link, IdentityLink):
+        mean = link.inverse(np.array(eta, dtype=float))
+        boundary = (mean <= _BINOMIAL_CLIP_MU_EPS) | (mean >= 1.0 - _BINOMIAL_CLIP_MU_EPS)
+    else:
         return 0
-    return int(np.count_nonzero((eta_unclipped >= _BINOMIAL_LOG_CAP_ETA) & (weights > 0.0)))
+    return int(np.count_nonzero(boundary & (weights > 0.0)))
 
 
 def mean_space_clipped_rows(
@@ -375,6 +381,8 @@ def interior_start_intercept(
     until the smallest positive-weight ``eta`` is ``level``, that link's
     intercept-only start ``g(mean)``, when that level is inside the domain;
     so is an identity-link start of a family whose means are positive.  A
+    binomial/identity start that alignment leaves above 1 is centred on 1/2
+    instead, inside (0, 1) whenever its span is narrower.  A
     constant offset ``c`` then starts at ``intercept - c``, the no-offset start shifted with the
     optimum.  A start already inside is left alone, so a fit without an
     offset starts exactly as before.
@@ -395,7 +403,14 @@ def interior_start_intercept(
         bottom = float(np.min(eta[weights > 0.0]))
         if not math.isfinite(bottom):
             return float(intercept)
-        return float(intercept) + (float(level) - bottom)
+        shift = float(level) - bottom
+        if outside(eta + shift, weights):
+            # Only a two-sided domain, the binomial's (0, 1), is still crossed.
+            top = float(np.max(eta[weights > 0.0]))
+            centre = float(link.link(np.array([0.5]))[0]) - 0.5 * (bottom + top)
+            if math.isfinite(centre) and not outside(eta + centre, weights):
+                shift = centre
+        return float(intercept) + shift
     return float(intercept)
 
 

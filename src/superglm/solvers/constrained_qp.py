@@ -356,20 +356,21 @@ def _certifies_kkt_point(
     active: list[int],
     tol: float,
     abs_A: NDArray,
-) -> bool:
-    """Whether ``beta`` passes the complete KKT certificate on ``active`` as it stands.
+) -> tuple[bool, int | None]:
+    """Whether ``beta`` passes the complete KKT certificate on ``active``, and the row to release.
 
     Primal feasibility, stationarity with multipliers no more negative than
     their allowance, and complementarity: the three tests the small-step
-    branch of ``solve_constrained_qp`` converges on, read without dropping a
-    row or repairing ``beta``.
+    branch of ``solve_constrained_qp`` converges on, read without repairing
+    ``beta``. A multiplier below its allowance names the working position
+    the face must release, as the small-step branch releases it.
     """
     if not _is_feasible(A, beta, b, tol, abs_A=abs_A):
-        return False
+        return False, None
     stationary, drop_idx, multipliers = _stationarity_certificate(H, g, beta, A[active], tol)
     if not stationary or drop_idx is not None:
-        return False
-    return _complementarity_certificate(H, g, beta, A[active], b[active], multipliers, tol)
+        return False, drop_idx
+    return _complementarity_certificate(H, g, beta, A[active], b[active], multipliers, tol), None
 
 
 def _is_feasible(
@@ -441,6 +442,24 @@ def _complementarity_certificate(
     error = _roundoff_tolerance(len(beta) + len(dual)) * (dual @ row_action)
     gap = dual @ np.abs(rows @ x - bounds)
     return bool(np.isfinite(gap) and gap <= tol * energy + error)
+
+
+def _solve_saddle_direct(KKT: NDArray, rhs: NDArray) -> NDArray:
+    """LU solve of a full-rank saddle system, symmetrically equilibrated by powers of two first.
+
+    LU is normwise backward stable, so on a saddle matrix whose rows span many
+    decades the small rows' equations carry the large rows' rounding, which the
+    per-coefficient certificate refuses. LAPACK's ``xSYEQUB`` (Livne and Golub,
+    Numer. Algorithms 35, 2004, binormalization) reads ``|K|``, symmetric
+    whatever the constraint blocks' signs, and returns power-of-two ``D``:
+    ``D K D`` and ``D rhs`` are the same equations, unrounded. A scale it cannot
+    form (a zero row, or ``|K|`` sums past the binary64 range) leaves the raw
+    solve, and a singular one the caller's least-squares fallback.
+    """
+    scale, _, _, info = scipy.linalg.lapack.dsyequb(KKT)
+    if info != 0 or not np.all(np.isfinite(scale) & (scale > 0.0)):
+        return np.linalg.solve(KKT, rhs)
+    return np.linalg.solve(KKT * scale[:, None] * scale[None, :], rhs * scale) * scale
 
 
 def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
@@ -980,6 +999,19 @@ def solve_constrained_qp(
     at_face_minimum = False
 
     for it in range(max_iter):
+        if at_face_minimum and not kkt_may_be_singular:
+            # Read before the next saddle solve, whose step a pass discards.
+            # A negative multiplier releases its row (Nocedal and Wright 2006,
+            # Algorithm 16.3): re-solving the same face repeats the same step.
+            at_face_minimum = False
+            certified, release = _certifies_kkt_point(H_sym, g, beta, A, b, active, tol, abs_A)
+            if certified:
+                return _result(beta, active, it + 1, converged=True)
+            if release is not None:
+                active.pop(release)
+                basis.delete(release)
+                continue
+        at_face_minimum = False
         # --- Equality-constrained subproblem on active set ---
         if len(active) == 0:
             # No active constraints — unconstrained step.  beta_unc is the same
@@ -1029,7 +1061,7 @@ def solve_constrained_qp(
                     sol = _solve_saddle_least_squares(KKT, rhs)
                 else:
                     try:
-                        sol = np.linalg.solve(KKT, rhs)
+                        sol = _solve_saddle_direct(KKT, rhs)
                     except np.linalg.LinAlgError:
                         # Singular KKT: the same equilibrated least-squares
                         # solve as the branch above.
@@ -1043,16 +1075,6 @@ def solve_constrained_qp(
         # KKT point cancellation in ``g - H @ beta`` leaves O(eps |beta|) steps.
         relative_step = step / np.maximum(1.0, np.abs(beta))
         small_step = bool(np.linalg.norm(relative_step) < tol)
-        if (
-            at_face_minimum
-            and not small_step
-            and not kkt_may_be_singular
-            and _certifies_kkt_point(H_sym, g, beta, A, b, active, tol, abs_A)
-        ):
-            # The complete certificate, so a pass means the same here as at a
-            # small step; a failure changes nothing and the loop steps on.
-            return _result(beta, active, it + 1, converged=True)
-        at_face_minimum = False
         if small_step:
             stationary, drop_idx, multipliers = _stationarity_certificate(
                 H_sym, g, beta, A[active], tol

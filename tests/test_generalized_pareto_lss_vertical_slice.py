@@ -13,13 +13,18 @@ from scipy import stats
 from scipy.special import expit
 
 from superglm import Spline
+from superglm._frame import as_eager_frame
 from superglm.diagnostics.convergence import ConvergenceWarning
 from superglm.distributional import Predictor
 from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.kernels import generalized_pareto as gp
+from superglm.distributional.layout import build_stacked_layout
+from superglm.distributional.predictor import compile_predictors
+from superglm.distributional.solver import fit_dense_fixed_lambda
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.features import Numeric, RandomEffect
+from tests._distributional_weights import resolved_prior
 from tests._generalized_pareto_lss_oracles import fit_scale_regression, profile_shape
 from tests.bound_predictor_fixtures import model_from_templates
 
@@ -356,6 +361,7 @@ def test_rows_an_offset_clips_get_the_float64_statement_and_no_data_claim():
         model.fit(frame, y, offsets={"shape": np.repeat([0.0, 40.0], 1_000)})
     (message,) = _wall_messages(model)
     assert "1000 of 2000 rows" in message and "the data put the shape" not in message
+    assert "not reliable" not in message
 
 
 def test_an_interior_shape_clipped_by_its_own_predictor_gets_only_the_float64_statement():
@@ -369,6 +375,7 @@ def test_an_interior_shape_clipped_by_its_own_predictor_gets_only_the_float64_st
     ).fit(pd.DataFrame({"x": x}), y, inner_tol=1.0e-12)
     (message,) = _wall_messages(model)
     assert "float64 can represent" in message and "the data put the shape" not in message
+    assert "not reliable" not in message
 
 
 @pytest.mark.parametrize("inner_tol", [1.0e-4, 1.0e-5])
@@ -382,6 +389,56 @@ def test_an_interior_fit_stopped_at_a_loose_tolerance_is_not_disclosed(inner_tol
         predictors=(Predictor("scale", {}), Predictor("shape", {"x": Numeric()})),
     ).fit(pd.DataFrame({"x": x}), y, inner_tol=inner_tol)
     assert not _wall_messages(model)
+
+
+def test_an_interior_fit_stopped_by_the_iteration_cap_does_not_blame_the_data():
+    # the fit above needs 12 iterations; at 8 its step still carries rows towards the wall
+    x = np.linspace(-1.0, 1.0, 5_000)
+    shape = expit(20.0 * x)
+    y = np.expm1(-shape * np.log(np.random.default_rng(4).random(5_000))) / shape
+    model = model_from_templates(
+        family=GeneralizedParetoLSS(),
+        predictors=(Predictor("scale", {}), Predictor("shape", {"x": Numeric()})),
+    )
+    with pytest.warns(ConvergenceWarning):
+        model.fit(pd.DataFrame({"x": x}), y, max_inner_iter=8)
+    assert not model.result_.coefficient_converged
+    (message,) = _wall_messages(model)
+    assert "has not converged" in message and "the data put the shape" not in message
+
+
+def test_a_wall_hook_without_settled_still_discloses_an_unfinished_fit():
+    class OwnHook(GeneralizedParetoLSS):
+        def wall_disclosure(self, pressed, clipped, n_rows, *, unresolved=False):
+            return "own: " + super().wall_disclosure(
+                pressed, clipped, n_rows, unresolved=unresolved
+            )
+
+    y = np.expm1(-1.5 * np.log(np.random.default_rng(8).random(600))) / 1.5
+    model = model_from_templates(
+        family=OwnHook(), predictors=(Predictor("scale", {}), Predictor("shape", {}))
+    )
+    with pytest.warns(ConvergenceWarning):
+        model.fit(pd.DataFrame({"x": np.zeros(600)}), y, max_inner_iter=8)
+    assert not model.result_.coefficient_converged
+    (message,) = _wall_messages(model)
+    assert message.startswith("own: ")
+
+
+@pytest.mark.parametrize("cap", [8, 12])
+def test_a_pressed_fit_stopped_by_the_iteration_cap_keeps_its_wall_disclosure(cap):
+    rng = np.random.default_rng(8)
+    x = rng.uniform(-1.0, 1.0, 3_000)
+    y = np.exp(0.4 + 0.7 * np.sin(np.pi * x)) * np.expm1(-1.5 * np.log(rng.random(3_000))) / 1.5
+    model = model_from_templates(
+        family=GeneralizedParetoLSS(),
+        predictors=(Predictor("scale", {"x": Numeric()}), Predictor("shape", {})),
+    )
+    with pytest.warns(ConvergenceWarning):
+        model.fit(pd.DataFrame({"x": x}), y, max_inner_iter=cap)
+    (message,) = _wall_messages(model)
+    assert "3000 of 3000 rows have a tail shape at the upper wall 1" in message
+    assert "infinite" in message and "not reliable" in message
 
 
 def test_a_refit_stopped_at_a_loose_tolerance_is_not_disclosed(monkeypatch):
@@ -533,22 +590,46 @@ def test_near_collinear_shape_covariates_at_an_interior_optimum_are_not_disclose
     assert not _wall_messages(model)
 
 
-def test_a_pressed_shape_run_to_the_last_float_keeps_the_standard_error_caveat():
-    # REML at a tight tolerance runs a heavy tail's shape to the last float below one, where
-    # the rank decision drops the shape and its standard errors carry no shape uncertainty
-    rng = np.random.default_rng(11)
-    y = stats.genpareto(3.0).rvs(2_000, random_state=rng)
-    frame = pd.DataFrame({"x": rng.uniform(size=2_000)})
-    model = model_from_templates(
-        family=GeneralizedParetoLSS(),
-        predictors=(Predictor("scale", {"x": Spline(kind="cr", k=6)}), Predictor("shape", {})),
+def test_a_zero_derivative_clip_with_a_dropped_shape_direction_keeps_the_standard_error_caveat():
+    from superglm.distributional.fit_state import _wall_disclosure
+
+    # Start at the event: g=0 is interior and g=1 has eta=40+logit(0.3). The
+    # coefficients are supplied because the default least-squares start absorbs
+    # even this row-varying offset in the group coefficient.
+    u = (np.arange(200) + 0.5) / 200
+    y = np.tile(np.expm1(-0.3 * np.log(u)) / 0.3, 2)
+    g = np.repeat([0.0, 1.0], 200)
+    family = GeneralizedParetoLSS()
+    weights = resolved_prior(np.ones(len(y)))
+    layout = build_stacked_layout(
+        compile_predictors(
+            as_eager_frame(pd.DataFrame({"g": g})),
+            weights,
+            family.parameters,
+            (Predictor("scale", {}), Predictor("shape", {"g": Numeric()})),
+            offsets={"shape": 40.0 * g},
+        )
     )
-    with pytest.warns(ConvergenceWarning, match="float64 can represent"):
-        model.fit_reml(frame, y, inner_tol=1.0e-12)
-    shape = model.predict_parameters(frame)["shape"].to_numpy()
-    assert np.all(shape == np.nextafter(1.0, 0.0))
-    (message,) = _wall_messages(model)
-    assert "not reliable" in message
+    initial = np.array([0.0, np.log(0.3 / 0.7), 0.0])
+    link = layout.predictor("shape").link
+    initial_eta = initial[1] + 40.0 * g
+    assert np.all(link.inverse(initial_eta[g == 1.0]) == np.nextafter(1.0, 0.0))
+    assert np.all(link.deriv_inverse(initial_eta[g == 1.0]) == 0.0)
+    result = fit_dense_fixed_lambda(
+        family,
+        layout,
+        y,
+        family.bind_likelihood(y, weights, COMPLETE_OBSERVATION),
+        np.zeros((3, 3)),
+        initial=initial,
+    )
+    assert result.converged
+    assert result.terminal_rank.rank == 2 < len(result.coefficients)
+    assert np.all(result.theta[g == 1.0, 1] == np.nextafter(1.0, 0.0))
+    assert np.all((result.theta[g == 0.0, 1] > 0.1) & (result.theta[g == 0.0, 1] < 0.9))
+    message = _wall_disclosure(family, result, layout)
+    assert "200 of 400 rows" in message
+    assert "float64 can represent" in message and "not reliable" in message
 
 
 def test_a_pressed_row_clipped_below_a_narrow_wall_keeps_the_standard_error_caveat():

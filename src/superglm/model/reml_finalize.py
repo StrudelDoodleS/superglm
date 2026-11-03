@@ -753,7 +753,7 @@ def finalize_reml_fit(
         terminal_evaluation = terminal_value
         best.objective = terminal_evaluation.value
     if terminal_curvature == "observed" and not qp_passthrough:
-        if not final_pirls.converged and not stopped_on_iteration_budget(final_pirls):
+        if not final_pirls.converged and not stopped_on_iteration_budget(final_pirls, model._link):
             # Typed: a structural failure is one more point a power search
             # scores infeasible; a mode short of the certificate is published
             # as not converged (``terminal_certified``).

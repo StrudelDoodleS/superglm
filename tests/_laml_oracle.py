@@ -2,8 +2,12 @@
 
 Refit at ``rho_k +- h`` from the base fit's coefficients with a tight inner
 tolerance, take the central difference of ``joint_laplace_objective`` on a step
-ladder, and report the order-4 Richardson estimate of the finest pair with the
-difference between the two finest central differences as its resolution.
+ladder, and report the order-4 Richardson estimate of the finest pair. Its
+resolution is Ridders' error estimate (Ridders 1982; Press et al., *Numerical
+Recipes*, 3rd ed., sec. 5.7): the larger of the finest pair's difference and
+the change from the coarser pair's Richardson estimate. The second term
+catches a probe whose objective moves by a few 1e-8, which shifts one central
+difference by about that over ``2h`` while the finest pair still agrees.
 A probe whose rank method, rank or curvature source differs from the base
 fit is refused: the objective is not a smooth function of lambda across such
 a seam and the difference would be noise.
@@ -78,5 +82,6 @@ def oracle_gradient(
 
     g = [central(h) for h in steps]
     richardson = (4.0 * g[-1] - g[-2]) / 3.0
-    resolution = abs(g[-1] - g[-2])
+    coarser = (4.0 * g[-2] - g[-3]) / 3.0
+    resolution = max(abs(g[-1] - g[-2]), abs(richardson - coarser))
     return OracleGradient(value=float(richardson), resolution=float(resolution))

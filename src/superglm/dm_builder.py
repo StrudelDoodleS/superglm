@@ -21,6 +21,7 @@ from superglm._predictor_compiler import (
     CompiledPredictorDesign,
     compile_predictor_design,
 )
+from superglm._roundoff import PENALTY_RANK_CUT, UNIT_ROUNDOFF
 from superglm._utils import _validate_strict_prior_weights
 from superglm.distributions import Distribution, Tweedie, resolve_distribution
 from superglm.group_matrix import (
@@ -109,9 +110,7 @@ def compute_R_inv(
         G = np.asarray((B.multiply(sample_weight[:, None]).T @ B).todense()) / total
     else:
         G = (B * sample_weight[:, None]).T @ B / total
-    M = G + lam2 * omega + np.eye(omega.shape[0]) * 1e-8
-    R = np.linalg.cholesky(M).T
-    return np.linalg.inv(R)
+    return _whitening_map(G, omega, lam2)
 
 
 def compute_projected_R_inv(
@@ -133,11 +132,50 @@ def compute_projected_R_inv(
         G_full = np.asarray((B.multiply(sample_weight[:, None]).T @ B).todense()) / total
     else:
         G_full = (B * sample_weight[:, None]).T @ B / total
-    G_sub = projection.T @ G_full @ projection
-    n_sub = penalty_sub.shape[0]
-    M_sub = G_sub + lam2 * penalty_sub + np.eye(n_sub) * 1e-8
-    R_sub = np.linalg.cholesky(M_sub).T
-    return np.linalg.inv(R_sub)
+    return _whitening_map(projection.T @ G_full @ projection, penalty_sub, lam2)
+
+
+def _whitening_map(G: NDArray, omega: NDArray, lam2: float) -> NDArray:
+    """``R^-1`` with ``R'R = G + lam2 Omega + 1e-8 I``: the SSP basis.
+
+    Formed, ``lam2 Omega`` rounds by ``u lam2 ||Omega||`` on its null space
+    too, where only ``G`` and the ridge hold the sum positive, so near
+    ``lam2 = 1e14`` the sum can be indefinite.  It is then factored in
+    ``Omega``'s eigenbasis, found without ``lam2``, with the eigenvalues
+    under the component's rank cut set to zero: positive definite at any
+    ``lam2`` (Wood, Pya & Safken 2016, JASA 111, sec. 3.1.1).
+    """
+    ridge = np.eye(omega.shape[0]) * 1e-8
+    try:
+        return np.linalg.inv(np.linalg.cholesky(G + lam2 * omega + ridge).T)
+    except np.linalg.LinAlgError:
+        values, vectors = np.linalg.eigh(omega)
+        values = np.where(values > PENALTY_RANK_CUT * max(values[-1], 1e-12), values, 0.0)
+        rotated = vectors.T @ G @ vectors + np.diag(lam2 * values) + ridge
+        return vectors @ np.linalg.inv(np.linalg.cholesky(rotated).T)
+
+
+def _dominant_penalty_eigenbasis(
+    info: GroupInfo, sample_weight: NDArray, lambda2: float | dict
+) -> NDArray | None:
+    """The eigenbasis of a raw block's penalty where it outweighs the data by ``1/sqrt(u)``.
+
+    In the block's own coordinates ``lambda Omega`` then rounds into its null
+    space by ``u lambda ||Omega||``, past ``sqrt(u)`` of the data's curvature
+    there.  In the eigenbasis, found without lambda, the null space lies on
+    coordinate axes and keeps the formed penalty to second order (Wood, Pya
+    & Safken 2016, sec. 3.1.1), and the penalty dominates every range
+    direction, so the turn costs the data's column scaling nothing.
+    """
+    omega = info.penalty_matrix
+    if omega is None or info.columns is None or len(info.penalty_components or ()) > 1:
+        return None
+    penalty = _resolve_lambda2(lambda2) * float(np.max(np.diag(omega)))
+    columns = sp.csr_matrix(info.columns)
+    data = float(np.max(columns.multiply(columns).T @ sample_weight, initial=0.0))
+    if penalty * np.sqrt(UNIT_ROUNDOFF) <= data:
+        return None
+    return np.linalg.eigh(omega)[1]
 
 
 def should_discretize(spec: FeatureSpec, model_discrete: bool) -> bool:
@@ -639,6 +677,7 @@ def _process_info(
     tensor_build: DiscreteTensorBuildResult | None = None,
     tensor_id: int = -1,
     ssp_supports: dict | None = None,
+    eigenbasis_turn: bool = True,
 ) -> tuple[GroupMatrix, NDArray | None, int]:
     """Compute R_inv and construct a GroupMatrix from a single GroupInfo.
 
@@ -646,6 +685,7 @@ def _process_info(
     is the R_inv column block (for collecting into combined R_inv) or None
     if no reparametrization was applied.  ``ssp_supports`` is shared by the
     calls of one term, so subgroups over one basis share its row support.
+    ``eigenbasis_turn=False`` keeps a raw block in its declared coordinates.
     """
     use_discrete = B_unique is not None
     use_tensor = tensor_build is not None
@@ -748,9 +788,12 @@ def _process_info(
             R_inv_local = compute_projected_R_inv(B_for, P, info.penalty_matrix, exp_for, lambda2)
             R_inv = P @ R_inv_local
         else:
-            R_inv = P
-            # No SSP reparametrization — projected space IS solver space
-            R_inv_local = None
+            R_inv_local = (
+                _dominant_penalty_eigenbasis(info, sample_weight, lambda2)
+                if eigenbasis_turn
+                else None
+            )
+            R_inv = P if R_inv_local is None else P @ R_inv_local
         n_cols = R_inv.shape[1]
         omega_full = P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None
         if use_tensor:
@@ -1011,6 +1054,17 @@ def build_design_matrix(
     # sample_weight under both: it spans the same column space either way.
     physical_rows = weight_semantics == PRIOR_WEIGHTS
     geometry_weight = knot_geometry_weight(sample_weight, weight_semantics)
+    # The eigenbasis turn is orthogonal within a block, so it keeps the
+    # selection penalty's objective only when that penalty reads each group
+    # through its norm; an elementwise L1 part, or a penalty not known to,
+    # keeps the declared coordinates.
+    from superglm.penalties import GroupElasticNet, GroupLasso, Ridge, SparseGroupLasso
+
+    eigenbasis_turn = (
+        selection_penalty is None
+        or isinstance(selection_penalty, (Ridge, GroupLasso, GroupElasticNet))
+        or (isinstance(selection_penalty, SparseGroupLasso) and selection_penalty.alpha == 0)
+    )
 
     compiled = compile_predictor_design(
         X,
@@ -1034,6 +1088,7 @@ def build_design_matrix(
         alias_prune=alias_prune,
         own_specs=False,
         separation_response=y,
+        eigenbasis_turn=eigenbasis_turn,
     )
     separation_records = compiled.separation_records
     from superglm.features.categorical import Categorical

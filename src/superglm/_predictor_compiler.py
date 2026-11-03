@@ -187,6 +187,7 @@ def compile_predictor_design(
     first_tensor_id: int = 0,
     ranged_margins: bool = False,
     separation_response: NDArray | None = None,
+    eigenbasis_turn: bool = True,
 ) -> CompiledPredictorDesign:
     """Compile an owned design without resolving scalar likelihood concerns.
 
@@ -205,7 +206,8 @@ def compile_predictor_design(
     their smooth continuation while it builds, recording ``("curve", name,
     curves)``.  ``group_pricing`` and ``alias_prune`` are as
     ``build_design_matrix`` documents them; ``ranged_margins`` as
-    ``refuse_unsupported_interaction_parents``.
+    ``refuse_unsupported_interaction_parents``.  ``eigenbasis_turn=False``
+    keeps every raw block in its declared coordinates (``_process_info``).
 
     ``first_tensor_id`` numbers this design's discrete tensors from that
     value; equal ids share marginals, so a caller pairing two compiled designs
@@ -444,6 +446,7 @@ def compile_predictor_design(
                 sample_weight=sample_weight,
                 exposure_agg=exposure_agg,
                 lambda2=lambda2,
+                eigenbasis_turn=eigenbasis_turn,
             )
             qp_info = cast(GroupInfo, info)
             if qp_info.monotone_engine == "qp":
@@ -668,6 +671,7 @@ def compile_predictor_design(
             lambda2=lambda2,
             tensor_build=tensor_build,
             tensor_id=tensor_id,
+            eigenbasis_turn=eigenbasis_turn,
         )
         processed: list[tuple[Any, GroupInfo, GroupMatrix, NDArray | None, int]] = []
         if not isinstance(result, list):

@@ -52,6 +52,7 @@ from superglm.solvers.irls_state import (
     _poisson_sqrt_halving_budget,
     _select_irls_trial,
     _stable_penalized_deviance_delta,
+    link_domain_violation,
     mean_space_boundary_rows,
 )
 from superglm.solvers.mode_score import (
@@ -1100,6 +1101,7 @@ def _fit_pirls_inner(
         family=family,
         link=link,
     )
+    outside_link_domain = link_domain_violation(link, family)
 
     # Initialize intercept
     if intercept_init is not None:
@@ -1581,6 +1583,13 @@ def _fit_pirls_inner(
                 base,
                 S,
                 nonsmooth_penalty=nonsmooth_merit,
+            ),
+            # the link's domain is convex: halving from a state inside it stays inside
+            invalid_state=(
+                None
+                if outside_link_domain is None
+                or outside_link_domain(committed.eta_unclipped, weights)
+                else lambda candidate: outside_link_domain(candidate.eta_unclipped, weights)
             ),
         )
         retained = committed if decision.step_rejected else trial_cache[decision.alpha]

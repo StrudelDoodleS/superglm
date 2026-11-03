@@ -639,15 +639,19 @@ def observed_mode_certification_bar() -> float:
     return MODE_CERTIFICATION_BAR
 
 
-def stopped_on_iteration_budget(result: Any) -> bool:
+def stopped_on_iteration_budget(result: Any, link: Any = None) -> bool:
     """Did PIRLS stop short of its certificate without a structural failure?
 
     True for ``"max_iter"``, ``"step_rejected"`` and ``"score_stagnated"``:
     an uncertified mode the caller discloses as not converged, never refuses.
+    So is ``"mean_space_boundary"`` under the identity ``link``: its step
+    halving keeps every binomial mean inside (0, 1), so the state is finite.
     Every other termination reason is something the mode score cannot judge
     and keeps its own handling.
     """
-    return result.termination_reason in ("max_iter", "step_rejected", "score_stagnated")
+    return result.termination_reason in ("max_iter", "step_rejected", "score_stagnated") or (
+        result.termination_reason == "mean_space_boundary" and isinstance(link, IdentityLink)
+    )
 
 
 class ObservedGeometryInfeasibleError(ValueError):

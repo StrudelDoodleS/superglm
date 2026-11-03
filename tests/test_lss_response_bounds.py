@@ -49,7 +49,7 @@ from superglm.distributional.weights import (
     WeightContract,
     resolve_likelihood_weights,
 )
-from superglm.links import IdentityLink
+from superglm.links import IdentityLink, PowerLink
 
 _U = 2.0**-53
 
@@ -585,6 +585,28 @@ def test_per_row_bounds_and_zero_weight_rows_follow_the_retained_rows():
     )  # fmt: skip
     reference = _fit(family, paid[10:], censored=censored[10:])
     assert dropped == pytest.approx(reference, rel=1e-10)
+
+
+@pytest.mark.parametrize(
+    "column",
+    [list, np.array, functools.partial(pd.Series, dtype="Float64")],
+    ids=["list", "object", "Float64"],
+)
+@pytest.mark.parametrize("missing", [pd.NA, np.nan, None], ids=["NA", "NaN", "None"])
+def test_a_missing_bound_is_read_only_on_a_retained_row(column, missing):
+    y = np.arange(-2.0, 3.0)
+    weights = [0.0, 1.0, 1.0, 1.0, 1.0]
+    family = GaussianLS()
+
+    def bounds(limit, row):
+        values = [limit] * 5
+        values[row] = missing
+        return column(values)
+
+    dropped = _fit(family, y, sample_weight=weights, truncation=(bounds(-3.0, 0), None))
+    assert dropped == pytest.approx(_fit(family, y[1:], truncation=(-3.0, None)), rel=1e-12)
+    with pytest.raises(ValueError, match=r"1 row\(s\) have a missing .*first at input row 1"):
+        _fit(family, y, sample_weight=weights, truncation=(None, bounds(3.0, 1)))
 
 
 def test_flags_on_rows_the_fit_drops_are_never_read():
@@ -1809,6 +1831,46 @@ def test_a_link_that_reaches_its_range_end_keeps_a_censored_level_its_estimate()
     fitted = model.predict_parameters(pd.DataFrame({"g": ["a", "b"]}))
     np.testing.assert_allclose(fitted["location"], [eta_a**2, eta_b**2], atol=1e-6)
     np.testing.assert_allclose(fitted["scale"], np.exp(log_scale), rtol=1e-5)
+
+
+@pytest.mark.parametrize(
+    ("family", "parameter", "link", "side"),
+    [
+        (GaussianLS(), "location", "sqrt", "right"),
+        (GeneralizedParetoLSS(), "scale", PowerLink(-1.0), "left"),
+        (GeneralizedParetoLSS(), "scale", PowerLink(0.5), "right"),
+    ],
+    ids=["sqrt-right", "negative-power-left", "power-right"],
+)
+def test_a_censored_level_walking_to_an_end_only_infinity_reaches_is_reported(
+    family, parameter, link, side
+):
+    # sqrt and a positive power reach 0 at a finite eta but infinity only as eta
+    # grows, so a level whose rows are all right-censored has no finite estimate;
+    # a negative power reaches 0 only as eta grows, so a left-censored level has none.
+    X = pd.DataFrame({"g": ["a"] * 40 + ["b"] * 10})
+    y = np.r_[np.tile([1.0, 3.0], 20), np.ones(10)]
+    predictors = {name.name: getattr(family, name.name)() for name in family.parameters}
+    predictors[parameter] = getattr(family, parameter)(cat("g", base="a"), link=link)
+    model = SuperLSS(family, *predictors.values(), separation="error")
+    with pytest.raises(SeparationError, match=rf"'{parameter}:g'.*only {side}-censored rows: 'b'"):
+        model.fit(X, y, censored=["none"] * 40 + [side] * 10)
+
+
+def test_a_family_s_own_flags_are_not_read_on_one_side_of_a_sqrt_link():
+    # a family's own flags declare no direction, so the scan cannot pick a side
+    class OwnFlags(GaussianLS):
+        def censored_recession(self, bounds):
+            return super().censored_recession(bounds)
+
+    family = OwnFlags()
+    location = family.location(cat("g", base="a"), link="sqrt")
+    model = SuperLSS(family, location, family.scale(), separation="error")
+    X = pd.DataFrame({"g": ["a"] * 40 + ["b"] * 10})
+    y = np.r_[np.tile([1.0, 3.0], 20), np.ones(10)]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, censored=["none"] * 40 + ["right"] * 10)
 
 
 def test_every_row_censored_without_an_intercept_separates_only_its_free_levels():
