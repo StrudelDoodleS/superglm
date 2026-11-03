@@ -122,7 +122,7 @@ class TermInference:
     level_is_special: NDArray[np.bool_] | None = None
 
     # Monotonicity
-    monotone: str | None = None  # "increasing", "decreasing", or None
+    monotone: str | None = None  # the term's rules as written, e.g. "increasing & concave", or None
     monotone_repaired: bool = False
 
     # CI alpha used

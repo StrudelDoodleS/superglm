@@ -688,14 +688,18 @@ class OrderedCategorical:
         return self._basis_spline.penalty
 
     # ── Declared shape constraint ──────────────────────────────────
-    # Forwarded because shape engines read ``getattr(spec, "constraint_kind",
-    # ...)`` on the feature spec, which for an ordered term is this wrapper.
+    # Forwarded because shape engines call ``rules_of(spec)`` on the feature
+    # spec, which for an ordered term is this wrapper. ``getattr`` with a
+    # default, because a Piecewise or Polynomial inner basis takes no constraint.
     # They forward the basis as declared (``_declared_basis``), not the built
     # inner spline: a build places the declaration (``_place_basis_rules``),
     # moving stretch ends to level values on the inner spline and leaving the
     # cap and step limit on this wrapper, where they bind at the levels.
-    # The legacy ``monotone`` spelling is not forwarded; new readers must use
-    # the canonical name.
+    # The legacy ``monotone`` spelling is not forwarded: ``rules_of`` reads
+    # the rule objects first and a saved model's kind and mode second; a new
+    # reader calls ``rules_of``. One reader spells the kind itself:
+    # ``_spline_subclass_ops.build_shape_constraints_raw`` reads a bare
+    # ``spec.constraint_kind``, safe because ``spec`` there is always a spline.
 
     @property
     def constraint_kind(self) -> str | None:

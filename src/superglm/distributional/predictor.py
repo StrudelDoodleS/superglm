@@ -16,6 +16,7 @@ from superglm._frame import EagerFrame
 from superglm._predictor_compiler import CompiledPredictorDesign, compile_predictor_design
 from superglm.distributional.family import ParameterSpec
 from superglm.distributional.weights import ResolvedLikelihoodWeights
+from superglm.features.constraint import rules_of
 from superglm.features.factor_smooth import FactorSmooth
 from superglm.features.random_effect import validate_declared_nesting
 from superglm.group_matrix import (
@@ -37,14 +38,12 @@ class ShapeConstraintIgnoredWarning(UserWarning):
 
 
 def _constrained_features(predictor: Predictor) -> list[tuple[str, str, str]]:
-    """``(feature, kind, mode)`` for every feature spec carrying a shape constraint."""
+    """``(feature, rules, mode)`` for every feature spec carrying shape rules, as written."""
     found: list[tuple[str, str, str]] = []
     for name, spec in predictor.features.items():
-        inner = getattr(spec, "basis", spec)
-        kind = getattr(inner, "constraint_kind", getattr(inner, "monotone", None))
-        if kind is not None:
-            mode = getattr(inner, "constraint_mode", getattr(inner, "monotone_mode", "postfit"))
-            found.append((name, str(kind), str(mode)))
+        rules = rules_of(spec)
+        if rules:
+            found.append((name, rules.describe(), rules.rules[0].mode))
     return found
 
 
@@ -533,10 +532,10 @@ def compile_predictors(
     if not all(isinstance(predictor, Predictor) for predictor in predictor_tuple):
         raise TypeError("predictors must contain only Predictor values")
     for predictor in predictor_tuple:
-        for feature, kind, mode in _constrained_features(predictor):
+        for feature, rules, mode in _constrained_features(predictor):
             warnings.warn(
                 f"SuperLSS ignores shape constraints: {predictor.name}:{feature} asked for "
-                f"{kind} ({mode}); the distributional path has no constraint machinery yet, "
+                f"{rules} ({mode}); the distributional path has no constraint machinery yet, "
                 "so the smooth is fitted unconstrained",
                 ShapeConstraintIgnoredWarning,
                 stacklevel=3,

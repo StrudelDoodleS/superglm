@@ -17,23 +17,13 @@ from superglm.features._spline_multi_penalty import build_multi_m_components
 from superglm.features._spline_penalties import structural_penalty_ranks
 from superglm.features._spline_select import build_select
 from superglm.features._spline_subclass_ops import prepare_shape_rules
-from superglm.features.constraint import rules_of
+from superglm.features.constraint import CONSTRAINT_KINDS, rules_of
 from superglm.types import GroupInfo, TensorMarginalInfo
-
-
-def _constraint_kind(spec: Any) -> str | None:
-    """Return the canonical shape token, falling back to legacy fields if needed."""
-    return getattr(spec, "constraint_kind", getattr(spec, "monotone", None))
-
-
-def _constraint_mode(spec: Any) -> str:
-    """Return the canonical shape mode, falling back to legacy fields if needed."""
-    return getattr(spec, "constraint_mode", getattr(spec, "monotone_mode", "postfit"))
 
 
 def _uses_fit_time_shape_constraints(spec: Any) -> bool:
     """Whether the spec requests any fit-time shape-constrained build path."""
-    return _constraint_kind(spec) is not None and _constraint_mode(spec) == "fit"
+    return any(rule.mode == "fit" for rule in rules_of(spec))
 
 
 def shape_engine(spec: Any) -> Literal["qp"] | None:
@@ -134,12 +124,20 @@ def _warn_if_saved_on_scop(spec: Any) -> None:
 
 def _raise_if_unsupported_fit_shape_constraint(spec: Any) -> None:
     """Reject fit-time shape constraints that no current engine can build."""
-    kind = _constraint_kind(spec)
-    if _uses_fit_time_shape_constraints(spec) and shape_engine(spec) is None:
+    if not _uses_fit_time_shape_constraints(spec) or shape_engine(spec) is not None:
+        return
+    rules = rules_of(spec)
+    only = rules.rules[0]
+    if len(rules) == 1 and only.kind in CONSTRAINT_KINDS and only.stretch == (None, None):
         raise NotImplementedError(
-            f"Fit-time {kind} constraints are not implemented yet. "
-            f"Use Constraint.postfit.{kind} instead."
+            f"Fit-time {only.kind} constraints are not implemented yet. "
+            f"Use Constraint.postfit.{only.kind} instead."
         )
+    raise NotImplementedError(
+        f"Fit-time {rules.describe()} constraints are not implemented for this spline kind yet. "
+        "Constraint.postfit repairs one whole-curve shape and cannot take them; "
+        "use kind='cr', kind='ps' or kind='bs', or drop the rules."
+    )
 
 
 def training_basis_mean(spec: Any, x: NDArray) -> NDArray:

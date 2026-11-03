@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.features.constraint import rules_of
 from superglm.inference._metrics_design import MetricsDesign, factor_from_gram, weighted_moments
 from superglm.inference.covariance import (
     covariance_quadratic_form,
@@ -595,10 +596,10 @@ def build_coef_rows(
                         knot_strategy=s_knot_strat,
                         boundary=s_bnd,
                         difference_penalty=s_penalty,
-                        # The wrapper's own forward. It raises on a step-mode pickle, which is safe because
-                        # ``spec.reconstruct(...)`` and ``spec.basis_kind`` above already raise the migration
-                        # error first.
-                        monotone=spec.constraint_kind,
+                        # The wrapper forwards its basis's rules, and raises on a step-mode pickle, which is
+                        # safe because ``spec.reconstruct(...)`` and ``spec.basis_kind`` above already raise
+                        # the migration error first.
+                        monotone=rules_of(spec).describe() or None,
                         monotone_engine=g.monotone_engine,
                         monotone_repaired=g.feature_name in _mono_repairs,
                     )
@@ -735,7 +736,7 @@ def build_coef_rows(
 
         if isinstance(spec, _SplineBase):
             is_linear_subgroup = g.subgroup_type == "linear"
-            _mono_dir = getattr(spec, "monotone", None)
+            _mono_dir = rules_of(spec).describe() or None
             _mono_engine = g.monotone_engine
             _mono_repaired = g.feature_name in _mono_repairs
             if active:

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.features.constraint import rules_of
 from superglm.inference._term_covariance import (
     feature_se_from_cov,
     piecewise_knot_covariance,
@@ -519,7 +520,7 @@ def term_inference(
                 edf=edf,
                 smoothing_lambda=lam,
                 spline=spline_meta,
-                monotone=getattr(spec, "monotone", None),
+                monotone=rules_of(spec).describe() or None,
                 monotone_repaired=False,  # caller can override if repairs exist
                 alpha=alpha,
             ),
