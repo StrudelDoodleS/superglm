@@ -626,16 +626,23 @@ def test_a_stationary_endgame_revalidates_its_face_beside_another_cap(monkeypatc
     assert promoted and set(model.result_.exact_face_components) == promoted
 
 
-@pytest.mark.parametrize("retake", ["published", "unavailable"])
+@pytest.mark.parametrize("retake", ["published", "unavailable", "declined"])
 def test_a_revalidated_stationary_stop_publishes_derivatives_at_its_fit(
     monkeypatch, retake: str
 ) -> None:
     """The stationary derivatives are retaken at the fit the face revalidation published.
 
-    The corrected covariance replays its gradient at that fit and compares.
-    When the retake fails, the stop keeps the endgame's derivatives and any
-    covariance it returns is finite and disclosed. Mutation check: without the
-    retake there is no pass at the published fit.
+    The corrected covariance replays its gradient at that fit and compares, so
+    a retaken gradient always agrees with its replay. The covariance's separate
+    positive-definiteness gate may still decline the correction here: the
+    shape smooth ends near the lambda cap with a curvature of about 3e-8 of the
+    largest, and where the endgame leaves that flat direction varies by
+    platform; the declined case forces that refusal. When the retake fails,
+    the stop keeps the endgame's derivatives. In every case the corrected
+    covariance is finite, and it falls back to the fixed one only with a
+    disclosure. Mutation checks: without the retake there is no pass at the
+    published fit, and a fallback without its ConvergenceWarning fails the
+    declined case.
     """
     import superglm.distributional.smoothing.loop as loop
 
@@ -656,13 +663,27 @@ def test_a_revalidated_stationary_stop_publishes_derivatives_at_its_fit(
     assert smoothing is not None and smoothing.convergence_reason == "stationary"
     assert smoothing.history[-1].revalidated_face_components
     assert len(fits) == 1 and fits[0] is smoothing.terminal_fit
+    if retake == "declined":
+        import superglm.distributional.posterior as posterior
+
+        def declined(*args, **kwargs):
+            raise RuntimeError("the smoothing Hessian is not positive definite")
+
+        monkeypatch.setattr(posterior, "_trusted_smoothing_hessian", declined)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         corrected = posterior_covariance(fitted, kind="corrected")
     assert np.all(np.isfinite(corrected))
-    disclosures = [item for item in caught if issubclass(item.category, ConvergenceWarning)]
+    disclosures = [
+        str(item.message) for item in caught if issubclass(item.category, ConvergenceWarning)
+    ]
     if retake == "published":
-        assert not disclosures, [str(item.message) for item in disclosures]
+        assert not any("disagree with the stored terminal gradient" in m for m in disclosures), (
+            disclosures
+        )
+    fell_back = any("corrected covariance is unavailable" in m for m in disclosures)
+    assert fell_back or retake != "declined", disclosures
+    assert fell_back == np.array_equal(corrected, posterior_covariance(fitted, kind="fixed"))
 
 
 def test_a_revalidated_face_keeps_the_endgames_published_hessian(monkeypatch) -> None:
