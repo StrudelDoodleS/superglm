@@ -229,9 +229,9 @@ class DistributionalEFSIteration:
     # produced their step, the largest Hessian certificate on the active set
     # (``None`` on a pass that formed no exact Hessian: a quasi-Newton step
     # from the reused memory or a bracket step), the
-    # projected-gradient norm judged for convergence, and the ridge that
-    # made the active Hessian positive definite (``None`` for a BFGS or
-    # bracket step).  A convergence check that makes no trial fit is not an
+    # projected-gradient norm judged for convergence, and the largest
+    # eigenvalue raise that made the active Hessian positive definite
+    # (``0.0`` when it already was, ``None`` for a BFGS or bracket step).  A convergence check that makes no trial fit is not an
     # iteration and leaves no record.
     stage: Literal["efs", "newton"] = "efs"
     step_source: Literal["efs", "newton", "bfgs", "bracket"] = "efs"

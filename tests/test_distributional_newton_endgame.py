@@ -6,6 +6,7 @@ in ``test_budget_is_no_worse_than_practical_efs``.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import pickle
 
@@ -52,6 +53,23 @@ def test_newton_direction_is_descent_and_capped() -> None:
     assert ridge2 == 0.0 and np.max(np.abs(step2)) == pytest.approx(0.1)  # proportional cap
     frozen, _ = newton_direction(g, h, np.array([True, False, True]), max_log_step=5.0)
     assert frozen[1] == 0.0
+
+
+def test_newton_direction_modifies_only_the_indefinite_directions() -> None:
+    # Q |Lambda| Q' (Gill, Murray and Wright): the positive direction keeps its full
+    # Newton step; a ridge large enough to make the block definite would damp it too.
+    g = np.array([0.4, 0.05])
+    step, raised = newton_direction(
+        g, np.diag([2.0, -0.5]), np.array([True, True]), max_log_step=5.0
+    )
+    assert step == pytest.approx([-0.2, -0.1], rel=1e-12)
+    assert raised == pytest.approx(1.0, rel=1e-12)
+    coupled = np.array([[1.0, 2.0], [2.0, 1.0]])  # eigenvalues 3 and -1
+    values, vectors = np.linalg.eigh(coupled)
+    expected = -(vectors @ ((vectors.T @ g) / np.abs(values)))
+    step, raised = newton_direction(g, coupled, np.array([True, True]), max_log_step=5.0)
+    assert step == pytest.approx(expected, rel=1e-12) and float(g @ step) < 0.0
+    assert raised == pytest.approx(2.0, rel=1e-12)
 
 
 def test_bfgs_update_keeps_positive_definiteness_under_bad_curvature() -> None:
@@ -417,6 +435,37 @@ def test_endgame_forms_a_hessian_only_when_it_steps(monkeypatch) -> None:
     assert calls[0] is False and calls[-1] is False
     assert sum(calls) == len(with_hessian)
     assert newton.smoothing_hessian is None
+
+
+def test_a_modified_hessian_seeds_no_reusable_memory(monkeypatch) -> None:
+    """An indefinite exact Hessian steps by its absolute-eigenvalue modification, and the
+    next step forms the exact Hessian again instead of a quasi-Newton step from a memory
+    whose curvature the modification reversed in sign."""
+    from superglm.distributional.smoothing import newton as newton_module
+
+    real = newton_module.laml_derivatives
+    hessian_passes: list[int] = []
+
+    def indefinite_first_hessian(*args, **kwargs):
+        out = real(*args, **kwargs)
+        if out.hessian is None:
+            return out
+        hessian_passes.append(1)
+        if len(hessian_passes) > 1:
+            return out
+        hessian = np.array(out.hessian)
+        # Coupling two diagonals at twice their geometric mean makes the pair indefinite;
+        # the diagonal, and with it the certificate verdict, is unchanged.
+        hessian[0, 1] = hessian[1, 0] = 2.0 * math.sqrt(hessian[0, 0] * hessian[1, 1])
+        return dataclasses.replace(out, hessian=hessian)
+
+    monkeypatch.setattr(newton_module, "laml_derivatives", indefinite_first_hessian)
+    result = _newton_stop("gaussian")
+    assert result.convergence_reason == "stationary"
+    steps = [it for it in result.history if it.stage == "newton"]
+    assert steps[0].step_source == "newton" and steps[0].newton_ridge > 0.0
+    assert steps[1].step_source == "newton" and steps[1].hessian_certificate is not None
+    assert steps[1].newton_ridge == 0.0
 
 
 def test_stationary_handoff_never_forms_a_hessian(monkeypatch) -> None:

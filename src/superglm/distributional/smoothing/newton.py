@@ -1,8 +1,9 @@
 """Newton endgame primitives for the smoothing loop.
 
 Damped Newton on the exact LAML gradient and Hessian in log lambda: the step
-(Wood, Pya and Säfken 2016 §3.1.2 diagonal preconditioning, a growing ridge
-until the active Hessian is positive definite, the scalar path's proportional
+(Wood, Pya and Säfken 2016 §3.1.2 diagonal preconditioning; an indefinite
+active Hessian replaced by its absolute-eigenvalue modification, Gill, Murray
+and Wright 1981 as Wood 2008 §3.4 applies it; the scalar path's proportional
 cap), the damped-BFGS fallback (Nocedal and Wright 2006 §18.3, Powell damping
 on the inverse update), the hand-off rule from the Fellner–Schall warm-up, and
 the bracketed root search in ``tau = 1/lambda`` beyond the cap (Brent's method,
@@ -77,7 +78,6 @@ HANDOFF_REASONS = frozenset(
 NO_HANDOFF_REASONS = frozenset(
     {"fixed_only", "coefficient_not_converged", "endpoint_revalidation_failed"}
 )
-INITIAL_RIDGE = 1.0e-8
 BRACKET_WIDTH = 1.0e-3
 
 
@@ -121,41 +121,38 @@ def _capped(step: NDArray[np.float64], max_log_step: float) -> NDArray[np.float6
     return step
 
 
+def _absolute_eigen(
+    hessian: NDArray[np.float64],
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """Eigenvalues, eigenvectors and the absolute eigenvalues floored at ``1e-8`` of the largest."""
+    values, vectors = np.linalg.eigh(0.5 * (hessian + hessian.T))
+    floor = max(float(np.max(np.abs(values), initial=0.0)) * 1.0e-8, np.finfo(np.float64).tiny)
+    return values, vectors, np.maximum(np.abs(values), floor)
+
+
 def newton_direction(
     gradient: NDArray,
     hessian: NDArray,
     active: NDArray,
     *,
     max_log_step: float,
-    ridge_growth: float = 10.0,
-    max_ridge_attempts: int = 20,
 ) -> tuple[NDArray[np.float64], float]:
-    """Return the capped Newton step on the active set and the ridge used.
+    """Return the capped Newton step on the active set and the eigenvalue raise it needed.
 
-    The active block is scaled by ``D = diag(|h_ii|^-1/2)`` (WPS16 §3.1.2),
-    factored by Cholesky with a ridge ``0, 1e-8, 1e-7, ...`` until positive
-    definite, solved, rescaled and capped proportionally; inactive components
-    get a zero step.  The ridge is ``0.0`` when the Hessian was already
-    positive definite.
+    A positive definite active block is scaled by ``D = diag(|h_ii|^-1/2)``
+    (WPS16 §3.1.2), factored by Cholesky and solved.  An indefinite one is
+    replaced by ``Q |Lambda| Q'`` with the eigenvalues floored at ``1e-8`` of
+    the largest (Gill, Murray and Wright 1981, as Wood 2008 §3.4 applies it to
+    the smoothness criterion), so only its indefinite directions change and the
+    step is a descent direction.  The step is capped proportionally; inactive
+    components get a zero step.  The second value is the largest eigenvalue
+    raise, ``0.0`` when the block was already positive definite.
     """
     g = _finite_vector(gradient, name="gradient")
     size = g.size
     h = _finite_matrix(hessian, name="hessian", size=size)
     mask = _active_mask(active, size=size)
     cap = _validated_cap(max_log_step)
-    if (
-        isinstance(ridge_growth, bool)
-        or not isinstance(ridge_growth, int | float)
-        or not math.isfinite(ridge_growth)
-        or ridge_growth <= 1.0
-    ):
-        raise ValueError("ridge_growth must be a finite float above one")
-    if (
-        isinstance(max_ridge_attempts, bool)
-        or not isinstance(max_ridge_attempts, int)
-        or max_ridge_attempts < 0
-    ):
-        raise ValueError("max_ridge_attempts must be a non-negative integer")
     step = np.zeros(size, dtype=np.float64)
     index = np.flatnonzero(mask)
     if index.size == 0:
@@ -164,24 +161,20 @@ def newton_direction(
     sub_hessian = h[np.ix_(index, index)]
     scale = 1.0 / np.sqrt(np.maximum(np.abs(np.diag(sub_hessian)), np.finfo(np.float64).tiny))
     scaled = (scale[:, None] * sub_hessian) * scale[None, :]
-    identity = np.eye(index.size)
-    ridge = 0.0
-    factor: NDArray[np.float64] | None = None
-    for _attempt in range(max_ridge_attempts + 1):
-        try:
-            factor = np.linalg.cholesky(scaled + ridge * identity)
-        except np.linalg.LinAlgError:
-            ridge = INITIAL_RIDGE if ridge == 0.0 else ridge * ridge_growth
-            continue
-        break
-    if factor is None:
-        raise np.linalg.LinAlgError("the active Hessian could not be made positive definite")
-    solved = cho_solve((factor, True), scale * sub_gradient)
-    direction = -(scale * solved)
+    try:
+        factor = np.linalg.cholesky(scaled)
+    except np.linalg.LinAlgError:
+        values, vectors, modified = _absolute_eigen(sub_hessian)
+        direction = -(vectors @ ((vectors.T @ sub_gradient) / modified))
+        raised = float(np.max(modified - values))
+    else:
+        solved = cho_solve((factor, True), scale * sub_gradient)
+        direction = -(scale * solved)
+        raised = 0.0
     if not np.all(np.isfinite(direction)):
         raise np.linalg.LinAlgError("the Newton direction is not finite")
     step[index] = direction
-    return _capped(step, cap), float(ridge)
+    return _capped(step, cap), raised
 
 
 def bfgs_direction(
@@ -629,9 +622,7 @@ def newton_iteration_record(
 
 def _positive_definite_inverse(hessian: NDArray[np.float64]) -> NDArray[np.float64]:
     """Modified-Newton inverse: negative and tiny eigenvalues floored in magnitude."""
-    values, vectors = np.linalg.eigh(0.5 * (hessian + hessian.T))
-    floor = max(float(np.max(np.abs(values), initial=0.0)) * 1.0e-8, np.finfo(np.float64).tiny)
-    adjusted = np.maximum(np.abs(values), floor)
+    _values, vectors, adjusted = _absolute_eigen(hessian)
     inverse = (vectors / adjusted) @ vectors.T
     return 0.5 * (inverse + inverse.T)
 
@@ -688,8 +679,9 @@ def run_newton_endgame(
     the curvature arms on the secant-updated memory of the last exact Hessian
     (the Fellner–Schall diagonal before one exists).  Only when it must step
     does it need a Hessian: the memory's quasi-Newton step when the memory
-    holds, else one exact Hessian pass reusing the gradient pass's stencils
-    (damped BFGS when that Hessian's certificate fails), with Armijo
+    holds (it was seeded from a positive definite exact Hessian), else one
+    exact Hessian pass reusing the gradient pass's stencils (damped BFGS when
+    that Hessian's certificate fails), with Armijo
     backtracking through warm-started fits; a refused quasi-Newton step is
     retried from the same point with a fresh exact Hessian.  ``upper_bounds``
     raises the box for components released beyond the cap.  Iterations and
@@ -739,8 +731,10 @@ def run_newton_endgame(
         accepted_count = 1
     consecutive_provenance_changes = 0
     # The quasi-Newton memory ``B ~ H^-1``, secant-updated with every accepted
-    # step. Seeded from a trusted exact Hessian it is reused until a step from
-    # it is refused; a fallback memory keeps updating but is not reused.
+    # step. Seeded from a trusted exact Hessian that was positive definite on
+    # the active set it is reused until a step from it is refused; a memory
+    # seeded from a modified Hessian, or a fallback memory, keeps updating but
+    # is not reused.
     inverse_memory: NDArray[np.float64] | None = None
     memory_reusable = False
     last_good_hessian: NDArray[np.float64] | None = None
@@ -997,7 +991,11 @@ def run_newton_endgame(
                     ridge = float(ridge_value)
                     last_good_hessian = hessian
                     inverse_memory = _positive_definite_inverse(hessian)
-                    memory_reusable = True
+                    # |Lambda| reverses the curvature of every direction it
+                    # flipped, so a memory seeded from it misjudges the next
+                    # step there: that step forms the exact Hessian again, as
+                    # modified Newton does at every iteration (Wood 2008 §3.4).
+                    memory_reusable = ridge == 0.0
                     step_source = "newton"
                 else:
                     if inverse_memory is None:
