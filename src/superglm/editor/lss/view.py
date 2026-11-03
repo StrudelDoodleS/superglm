@@ -196,6 +196,10 @@ class LSSModelView:
         )
         return lss_term_inference(name, effect, self._specs[name], with_se=with_se)
 
+    def data_columns(self) -> tuple[str, ...]:
+        """The data columns the model reads: every predictor's features and interaction parents."""
+        return _required_columns(self._fitted.compiled_predictors)
+
     def reference_row(self) -> pd.DataFrame:
         """One row with every column the model reads at its training centre.
 
@@ -205,9 +209,11 @@ class LSSModelView:
         """
         if self._reference_row is None:
             frame = as_eager_frame(self.X_train)
-            columns = _required_columns(self._fitted.compiled_predictors)
             self._reference_row = pd.DataFrame(
-                {name: [_reference_value(self._fitted, frame, name)] for name in columns}
+                {
+                    name: [_reference_value(self._fitted, frame, name)]
+                    for name in self.data_columns()
+                }
             )
         return self._reference_row.copy()
 

@@ -64,32 +64,32 @@ def lss_dataset_metrics(model: Any, dataset) -> dict[str, float]:
     sum of ``model.scores`` contributions over the library's aggregation mass:
     the total weight under frequency weights, the number of scored rows under
     prior weights, whose rows already score their own weighted law.
-    ``actual_expected`` is ``sum(w * y) / sum(w * mean)``. A family without a
-    distribution function has no CRPS, which is then NaN. A split
+    ``actual_expected`` is ``sum(w * y) / sum(w * mean)``. Every metric reads
+    the rows scoring retains, so a zero-weight row is never predicted. A family
+    without a distribution function has no CRPS, which is then NaN. A split
     ``lss_split_reason`` refuses scores NaN throughout.
     """
     lss = _fitted(model)
     if lss_split_reason(lss, dataset) is not None:
         return dict.fromkeys(LSS_METRIC_LABELS, float("nan"))
-    offsets = dataset.offset
     weights = dataset.sample_weight
     y = np.asarray(dataset.y, dtype=np.float64).ravel()
     w = np.ones(y.size) if weights is None else np.asarray(weights, dtype=np.float64).ravel()
-    kwargs = {"sample_weight": weights, "offsets": offsets}
-    mass = float(
-        _scoring_rows(lss._require_fitted(), dataset.X, y, **kwargs).aggregation_mass.sum()
-    )
+    kwargs = {"sample_weight": weights, "offsets": dataset.offset}
+    rows = _scoring_rows(lss._require_fitted(), dataset.X, y, **kwargs)
+    mass = float(rows.aggregation_mass.sum())
     log = lss.scores(dataset.X, y, which=("log",), **kwargs)["log"]
     try:
         crps = lss.scores(dataset.X, y, which=("crps",), **kwargs)["crps"]
         crps_score = float(np.nansum(crps) / mass)
     except NotImplementedError:
         crps_score = float("nan")
-    mean = np.asarray(lss.predict(dataset.X, offsets=offsets), dtype=np.float64)
+    mean = np.asarray(lss.predict(rows.frame.native, offsets=rows.offsets), dtype=np.float64)
+    kept = w[rows.positions]
     return {
         "log_score": float(np.nansum(log) / mass),
         "crps": crps_score,
-        "actual_expected": float(np.sum(w * y) / np.sum(w * mean)),
+        "actual_expected": float(np.sum(kept * rows.response) / np.sum(kept * mean)),
     }
 
 

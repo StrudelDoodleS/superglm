@@ -33,7 +33,7 @@ from superglm.editor.evaluation import EvaluationDataset, training_export_datase
 from superglm.editor.jobs import JobCancelledError
 from superglm.editor.lss.availability import require_available, session_refit_reason
 from superglm.editor.lss.validation import offset_departs, stack_offsets
-from superglm.editor.lss.view import column_of, is_lss
+from superglm.editor.lss.view import LSSModelView, column_of, is_lss
 from superglm.editor.refit import EXPLICIT_PENALTY_ATTRIBUTE, fit_refit_model
 from superglm.editor.terms import resolve_refit_method
 from superglm.features.categorical import Categorical, _codes_against, _grouping_labels
@@ -350,17 +350,32 @@ def _unstackable_reason(datasets: Sequence[EvaluationDataset]) -> str | None:
     unweighted fit data keeps weights of 1), but beside log exposure it would
     fit the rows that lack it on exposure 1, silently.
     """
-    for name, column, neutral in _STACKED_COLUMNS:
-        lack = [dataset.name for dataset in datasets if getattr(dataset, name) is None]
+    for column, values, neutral in _stacked_parts(datasets):
+        lack = [dataset.name for dataset, value in zip(datasets, values) if value is None]
         have = [
             dataset.name
-            for dataset in datasets
-            if getattr(dataset, name) is not None
-            and offset_departs(getattr(dataset, name), neutral)
+            for dataset, value in zip(datasets, values)
+            if value is not None and offset_departs(value, neutral)
         ]
         if lack and have:
             return FINAL_SPLIT_MISSING.format(column=column, have=have[0], lack=lack[0])
     return None
+
+
+def _stacked_parts(datasets: Sequence[EvaluationDataset]):
+    """Each stacked column as (its name, one value per split, its neutral value).
+
+    A SuperLSS's offsets are one column per parameter: a split whose mapping
+    lacks a parameter lacks that parameter's offsets.
+    """
+    for name, column, neutral in _STACKED_COLUMNS:
+        values = [getattr(dataset, name) for dataset in datasets]
+        keys = dict.fromkeys(key for value in values if isinstance(value, Mapping) for key in value)
+        if not keys:
+            yield column, values, neutral
+        for key in keys:
+            parts = [value.get(key) if isinstance(value, Mapping) else None for value in values]
+            yield f"{key} {column}", parts, neutral
 
 
 # ── Relativities by fold ─────────────────────────────────────────
@@ -1253,7 +1268,12 @@ def _stacked_columns(frames, template) -> tuple[list[str], dict[str, str]]:
     levels the kept model matches. uint64 is left alone (pandas would stack it
     beside a signed integer as float64).
     """
-    names = list(_fingerprint_columns(template, frames[0]))
+    # A SuperLSS view names its columns; a SuperGLM reads its declared features.
+    names = list(
+        template.data_columns()
+        if isinstance(template, LSSModelView)
+        else _fingerprint_columns(template, frames[0])
+    )
     levels = _label_columns(template)
     casts: dict[str, str] = {}
     for name in names:

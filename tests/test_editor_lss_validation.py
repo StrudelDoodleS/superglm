@@ -7,10 +7,12 @@ import io
 
 import joblib
 import numpy as np
+import pandas as pd
 import pytest
 from scipy import integrate, stats
 
 from superglm import LogNormalLS, SuperLSS, cat, s
+from superglm.editor import edit
 from superglm.editor.cv import capture_cv_run, capture_final_fit, final_fit_reason, run_final_fit
 from superglm.editor.errors import EditorValueError
 from superglm.editor.lss.availability import LSS_UNAVAILABLE, SESSION_TOOLS
@@ -91,6 +93,23 @@ def _lognormal_crps(sigma, mu, y):
         above = integrate.quad(lambda x: law.sf(x) ** 2, y_, np.inf, epsabs=0, epsrel=1e-10)[0]
         out.append(below + above)
     return np.array(out)
+
+
+def test_a_zero_weight_row_is_neither_predicted_nor_scored(frequency_lognormal):
+    case = frequency_lognormal
+    split = holdout_rows(case, 120)
+    split = dataclasses.replace(split, sample_weight=np.ceil(split.sample_weight))
+    # One more row with weight zero, a missing covariate and a missing response.
+    extra = split.X.iloc[[0]].assign(age=np.nan)
+    padded = dataclasses.replace(
+        split,
+        X=pd.concat([split.X, extra], ignore_index=True),
+        y=np.append(split.y, np.nan),
+        sample_weight=np.append(split.sample_weight, 0.0),
+    )
+    got = lss_dataset_metrics(case.model, padded)
+    want = lss_dataset_metrics(case.model, split)
+    assert got == pytest.approx(want, rel=64 * EPS)
 
 
 def test_prior_weighted_split_is_averaged_over_rows_not_weight():
@@ -231,6 +250,26 @@ def test_final_fit_stacks_parameter_offsets(monkeypatch):
     np.testing.assert_array_equal(
         offsets["mean"], np.concatenate([case.offsets["mean"], split.offset["mean"]])
     )
+
+
+def test_final_fit_refuses_a_split_missing_one_parameters_offsets():
+    case = nb_case()
+    split = dataclasses.replace(holdout_rows(case, 100), sample_weight=None)
+    session = open_case(case, validation_data=(split.X, split.y, None, {}))
+    reason = final_fit_reason(session)
+    assert reason is not None and "needs mean offsets on both or on neither" in reason
+    with pytest.raises(EditorValueError, match="needs mean offsets on both"):
+        capture_final_fit(session)
+
+
+def test_final_fit_reads_only_the_columns_the_model_uses():
+    case = lognormal_case()
+    split = dataclasses.replace(holdout_rows(case, 150), sample_weight=None)
+    # A column the model never reads, present in the training rows only.
+    X = case.X.assign(row_id=np.arange(len(case.y)))
+    session = edit(case.model, train_data=(X, case.y), validation_data=(split.X, split.y))
+    final = run_final_fit(capture_final_fit(session), _Context())
+    assert final.n_rows == len(case.y) + 150
 
 
 @pytest.mark.filterwarnings("ignore::superglm.distributional.revision.EditedCoefficientsWarning")

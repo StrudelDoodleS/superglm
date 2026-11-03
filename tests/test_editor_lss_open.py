@@ -55,6 +55,21 @@ def _truncated_model():
     return model, X, y
 
 
+@functools.cache
+def _linked_model(scale_link: str | None, mean_link: str | None = None):
+    """A small gamma fit with the scale (and optionally the mean) on a stated link."""
+    rng = np.random.default_rng(20261103)
+    X = pd.DataFrame({"age": rng.uniform(18.0, 90.0, 400)})
+    y = rng.gamma(4.0, 100.0 * (1.0 + X["age"].to_numpy() / 90.0))
+    family = GammaLS()
+    model = SuperLSS(
+        family,
+        family.mean(s("age", k=5), link=mean_link),
+        family.scale(link=scale_link),
+    )
+    return model.fit_reml(X, y), X, y
+
+
 def _unfitted_tweedie():
     family = TweedieLSS()
     return SuperLSS(family, family.mu(), family.phi(), family.p())
@@ -182,6 +197,14 @@ def _refusal(case_id):
             "120 truncated and 5 censored rows."
         )
         return model, {"train_data": (X, y)}, EditorValueError, message
+    if case_id == "link":
+        model, X, y = _linked_model("logit")
+        message = (
+            "The editor draws every parameter through its family's default link; this model "
+            "fits 'scale' on another link. Refit it without link= on 'scale' to open it in "
+            "the editor."
+        )
+        return model, {"train_data": (X, y)}, EditorValueError, message
     if case_id == "no-train-data":
         message = (
             "Opening a SuperLSS model needs its training rows: pass "
@@ -214,6 +237,7 @@ def _refusal(case_id):
         "location-form",
         "unfitted",
         "truncated",
+        "link",
         "no-train-data",
         "centering",
         "offsets-array",
@@ -227,6 +251,12 @@ def test_refusals(case_id, request):
         model = request.getfixturevalue("editor_model")
     with pytest.raises(error, match=f"^{re.escape(message)}$"):
         edit(model, **keywords)
+
+
+def test_a_link_named_but_equal_to_the_default_still_opens():
+    model, X, y = _linked_model(None, mean_link="log")
+    session = edit(model, train_data=(X, y))
+    assert "mean:age" in session.terms
 
 
 def test_refusals_follow_the_documented_order():
