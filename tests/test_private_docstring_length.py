@@ -1,7 +1,8 @@
 """Private docstrings in ``src/superglm`` stay at 12 lines or fewer, except those allowlisted.
 
 "Private" means the name: a function, method or class whose own name, or an enclosing one's,
-starts with an underscore. A public name inside an underscore module is not checked.
+starts with an underscore; a dunder such as ``__init__`` does not count on its own. A public
+name inside an underscore module is not checked.
 
 The allowlist is a ratchet: an entry records its docstring's exact length, so a trimmed
 docstring lowers its count in the same commit and a longer one fails.

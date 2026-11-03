@@ -895,22 +895,21 @@ class SuperGLM:
         exceptional (one empty ``cat_cat`` cell or one singleton level does
         it) and is settled by a rank cut on that factor.  A cubic-work gate
         caps ``k`` at the FLOOR of ``(1000 * max_cells)^(1/3)`` for an
-        unpenalized block
-        and of ``(500 * max_cells)^(1/3)`` for a penalized one, whose ladder
-        can bisect: 1709 and 1357 at the default.  Take the floor — at
-        ``max_cells`` 1e4 the penalized root is 170.998 and the cap is 170,
-        not 171.  That cap is NOT a constant — ``max_cells`` sets it and
-        nothing else does.  Penalized ceilings: 1357 at 5e6, 793 at 1e6, 368
-        at 1e5, 292 at 5e4, 170 at 1e4, with an allocation gate
-        ``k <= 2 * sqrt(max_cells)`` binding instead below ``max_cells``
-        ~3906 (the crossover is ~15625 for an unpenalized block, so a wide
+        unpenalized block and of ``(500 * max_cells)^(1/3)`` for a penalized
+        one, whose ladder can bisect: 1709 and 1357 at the default.  Take the
+        floor — at ``max_cells`` 1e4 the penalized root is 170.998 and the cap
+        is 170, not 171.  That cap is NOT a constant — ``max_cells`` sets it
+        and nothing else does.  Penalized ceilings: 1357 at 5e6, 793 at 1e6,
+        368 at 1e5, 292 at 5e4, 170 at 1e4, with an allocation gate
+        ``k <= 2 * sqrt(max_cells)`` binding instead below ``max_cells`` ~3906
+        (the crossover is ~15625 for an unpenalized block, so a wide
         ``cat_cat`` reaches the allocation gate at a ``max_cells`` four times
         larger).  Family, link, ``phi``, penalty order, basis kind, prior
-        weights and the ``edf0`` ladder move none of it; only the block's
-        own width does, and for ``spline_cat`` that width is ``k_spline``
-        times the factor's CONTRAST count — the levels that
-        carry a column, not the declared universe, since a level with no
-        effective training rows is pinned to base and contributes none.
+        weights and the ``edf0`` ladder move none of it; only the block's own
+        width does, and for ``spline_cat`` that width is ``k_spline`` times
+        the factor's CONTRAST count — the levels that carry a column, not the
+        declared universe, since a level with no effective training rows is
+        pinned to base and contributes none.
 
         Which kernel scores a pair follows from that.  The dense path gets
         first refusal and keeps every pair it can score exactly.  A
@@ -951,17 +950,15 @@ class SuperGLM:
         contrasts) at the default, counted the same way as the
         ``spline_cat`` threshold above — gets a NaN row, and raising
         ``max_cells`` computes it exactly.  Screening always probes exact
-        bases, so a pair whose
-        confirmatory refit would discretize LOSSILY is flagged
-        ``approx=True`` to make that support-discretization gap, the same
-        class as the quantile fallback, visible in the output.  The flag
-        applies the refit's own gate, which
-        differs by kind: a ``ti`` refit bins its marginals only when BOTH
-        parents resolve to fit-time discretization, a ``spline_cat`` refit
-        bins its spline margin whenever that ONE parent does, and the
+        bases, so a pair whose confirmatory refit would discretize LOSSILY is
+        flagged ``approx=True`` to make that support-discretization gap, the
+        same class as the quantile fallback, visible in the output.  The flag
+        applies the refit's own gate, which differs by kind: a ``ti`` refit
+        bins its marginals only when BOTH parents resolve to fit-time
+        discretization, a ``spline_cat`` refit bins its spline margin whenever
+        that ONE parent does, and the
         ``cat_cat``/``numeric_cat``/``numeric_numeric`` refits bin nothing.
-        Lossless binning returns the exact support and stays
-        ``approx=False``.
+        Lossless binning returns the exact support and stays ``approx=False``.
         Pairs already fitted as an interaction of any class are excluded from
         the sweep.  The statistic is a ranking device, not a calibrated
         p-value: confirm the top-ranked pairs by refitting them as the
