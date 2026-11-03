@@ -62,7 +62,7 @@ def lss_refit_with_drafts(
     or rows without the offsets or weights it was fitted with, are refused. The
     source is not changed.
     """
-    reason = refit_reason(view, sample_weight, offsets)
+    reason = refit_reason(view, sample_weight, offsets, y)
     if reason is not None:
         raise EditorValueError(reason)
     _require_replayable(view.lss, method, options)

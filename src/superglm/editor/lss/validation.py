@@ -78,12 +78,13 @@ def lss_dataset_metrics(model: Any, dataset) -> dict[str, float]:
     kwargs = {"sample_weight": weights, "offsets": dataset.offset}
     rows = _scoring_rows(lss._require_fitted(), dataset.X, y, **kwargs)
     mass = float(rows.aggregation_mass.sum())
-    log = lss.scores(dataset.X, y, which=("log",), **kwargs)["log"]
     try:
-        crps = lss.scores(dataset.X, y, which=("crps",), **kwargs)["crps"]
-        crps_score = float(np.nansum(crps) / mass)
+        scores = lss.scores(dataset.X, y, which=("log", "crps"), **kwargs)
+        crps_score = float(np.nansum(scores["crps"]) / mass)
     except NotImplementedError:
+        scores = lss.scores(dataset.X, y, which=("log",), **kwargs)
         crps_score = float("nan")
+    log = scores["log"]
     mean = np.asarray(lss.predict(rows.frame.native, offsets=rows.offsets), dtype=np.float64)
     kept = w[rows.positions]
     return {

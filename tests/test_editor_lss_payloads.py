@@ -211,10 +211,17 @@ def test_glm_payload_has_no_parameter_fields(editor_model):  # noqa: F811
     assert term["y_label"] == "relativity" and term["title"] == "x_spline"
 
 
+#: Effects each transform is pinned at. The log-normal CV multiplies a relative
+#: error in its scale s by about s**2, so its row stops where s**2 stays small
+#: enough for a 64-eps comparison across exp implementations.
+_EFFECTS = [-6.0, -1.5, -0.25, 0.0, 0.25, 1.5, 3.0]
+_LOGNORMAL_EFFECTS = _EFFECTS[:-1]
+
+
 def _fixture_content() -> dict:
-    effects = [-6.0, -1.5, -0.25, 0.0, 0.25, 1.5, 3.0]
     out = {}
     for transform in _transforms():
+        effects = _LOGNORMAL_EFFECTS if transform.kind == "lognormal_cv" else _EFFECTS
         values = transform.to_display(effects)
         entry = {
             **transform.to_payload(),

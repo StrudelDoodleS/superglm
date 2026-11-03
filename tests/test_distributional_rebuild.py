@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import LogNormalLS, SuperLSS, s, ti
+from superglm import GammaLS, LogNormalLS, SuperLSS, s, ti
 from tests._lss_editor_fixtures import EPS, lognormal_case, nb_case
 
 
@@ -162,6 +162,19 @@ def test_offsets_replay_on_a_count_model():
     before = _vector(case.model)
     scale = np.linalg.norm(before)
     np.testing.assert_allclose(_vector(again), before, rtol=0, atol=1e3 * EPS * before.size * scale)
+
+
+def test_a_bounded_fit_is_not_replayed():
+    rng = np.random.default_rng(20261103)
+    X = pd.DataFrame({"age": rng.uniform(18.0, 90.0, 150)})
+    y = rng.gamma(4.0, 100.0, 150)
+    censored = np.zeros(150, dtype=bool)
+    censored[:6] = True
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(s("age", k=5)), family.scale())
+    model.fit_reml(X, y, truncation=(1.0, None), censored=censored)
+    with pytest.raises(ValueError, match="fitted with truncated or censored rows"):
+        model._clone_with_replaced_terms({})
 
 
 def test_replay_without_settings_raises():

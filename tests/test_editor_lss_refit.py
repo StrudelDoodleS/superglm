@@ -25,6 +25,7 @@ from superglm.editor.lss.availability import (
     OFFSETS_NOT_GIVEN,
     SESSION_TOOLS,
     TERM_TOOLS,
+    WEIGHTS_DIFFER,
     WEIGHTS_NOT_GIVEN,
     lss_availability,
 )
@@ -609,6 +610,27 @@ def test_a_model_fitted_with_weights_cannot_refit_without_them(replays):
         assert "refit" not in weighted._state()["unavailable"]
     finally:
         weighted.close()
+
+
+def test_the_opened_spread_curve_keeps_the_opened_models_level_after_a_refit():
+    session = open_case(lognormal_case())
+    opened = session.model
+    before = session_payload(session)["scale:age"]["original_y"]
+    session.stage_structural("collapse", "scale:region", {"levels": ["R5", "R6"]})
+    session.refit_pending()
+    # The refit moves the spread's level at the reference row ...
+    moved = session.model.reference_eta("scale:age") - opened.reference_eta("scale:age")
+    assert abs(moved) > 1e-6
+    # ... and the opened curve is still the CV the opened model gives.
+    after = session_payload(session)["scale:age"]["original_y"]
+    np.testing.assert_allclose(after, before, rtol=64 * EPS, atol=0.0)
+
+
+def test_a_model_opened_with_other_weights_cannot_refit(replays):
+    case = weighted_case()
+    session = edit(case.model, train_data=(case.X, case.y, 2.0 * case.sample_weight))
+    _refit_and_final_fit_refuse(session, WEIGHTS_DIFFER)
+    assert replays == []
 
 
 def test_evidence_routes_answer_calmly_for_tools_a_superlss_does_not_offer():

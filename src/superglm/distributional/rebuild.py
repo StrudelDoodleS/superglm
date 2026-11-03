@@ -117,8 +117,22 @@ def _filtered_settings(
     return kept
 
 
+BOUNDED_FIT_NOT_REPLAYED = (
+    "This model was fitted with truncated or censored rows, and a replay records no bounds, "
+    "so it would fit the complete-data likelihood instead. Refit it with fit() or fit_reml() "
+    "and the same truncation= and censored=."
+)
+
+
 def clone_with_replaced_terms(source: Any, replacements: Mapping[str, Any]) -> Any:
-    """An unfitted copy of ``source`` with the named terms' specs replaced."""
+    """An unfitted copy of ``source`` with the named terms' specs replaced.
+
+    A source fitted on truncated or censored rows is refused: its replay would
+    drop the bounds and fit another likelihood.
+    """
+    state = None if source._model is None else source._model.fit_state
+    if state is not None and (state.truncated_row_count or state.censored_row_count):
+        raise ValueError(BOUNDED_FIT_NOT_REPLAYED)
     templates = _replaced_templates(source, replacements)
     family = source._family
     clone = type(source)(

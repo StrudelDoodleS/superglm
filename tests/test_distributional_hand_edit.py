@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import re
 import warnings
 
@@ -332,6 +333,22 @@ def test_posterior_bounds_contain_the_estimate_of_an_edited_model(builder, param
         case.X, ("parameter", parameter), n_draws=400, seed=3, offsets=case.offsets
     )
     assert (bounds["estimate"] > fit_bounds["upper"]).all()
+
+
+def test_draws_from_one_model_are_refused_by_another_edit_of_it():
+    case = lognormal_case()
+    edited = _edited_by_intercept_shift(case, "scale")
+    other_edit = _edited_by_intercept_shift(case, "mean")
+    models = (case.model, edited, other_edit)
+    rows, quantity = case.X.iloc[:5], ("parameter", "scale")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", EditedCoefficientsWarning)
+        draws = [model.posterior_draws(16, seed=3) for model in models]
+        for model, own in zip(models, draws, strict=True):
+            model.posterior_bounds(rows, quantity, draws=own)
+        for (model, _), (_, other) in itertools.permutations(zip(models, draws, strict=True), 2):
+            with pytest.raises(ValueError, match="belong to a different fit or revision"):
+                model.posterior_bounds(rows, quantity, draws=other)
 
 
 @pytest.mark.parametrize(("builder", "parameter"), CASES)

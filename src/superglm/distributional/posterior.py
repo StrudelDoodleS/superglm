@@ -13,6 +13,7 @@ integral above the level (Acerbi and Tasche 2002, *J. Banking Finance* 26(7)).
 
 from __future__ import annotations
 
+import hashlib
 import warnings
 from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass, field
@@ -774,8 +775,23 @@ def _posterior_draws_from_covariance(
         covariance_kind=covariance,
         seed=int(seed),
         coefficient_names=tuple(fitted.layout.coefficient_names),
-        provenance=(fitted.fit_state.result.fit_id, fitted.fit_state.revision),
+        provenance=_draw_provenance(fitted),
     )
+
+
+def _draw_provenance(fitted: Any) -> tuple[str, int]:
+    """The (fit identifier, revision) stamped on draws and checked when they are reused.
+
+    Draws are centred on the coefficients the model predicts with, so a hand
+    edit names its coefficients in the identifier: draws from the fit, or from
+    another edit, are refused by an edited model and the other way round.
+    """
+    state = fitted.fit_state
+    identifier = state.result.fit_id
+    if state.hand_edit is not None:
+        coefficients = np.ascontiguousarray(state.hand_edit.coefficients, dtype=np.float64)
+        identifier = f"{identifier}+edit:{hashlib.sha256(coefficients.tobytes()).hexdigest()[:16]}"
+    return identifier, state.revision
 
 
 def posterior_draws(
@@ -841,10 +857,7 @@ def posterior_parameters(
     layout = fitted.layout
     if draws.coefficient_names != tuple(layout.coefficient_names):
         raise ValueError("draw coefficient names do not match the fitted layout")
-    if draws.provenance is not None and draws.provenance != (
-        fitted.fit_state.result.fit_id,
-        fitted.fit_state.revision,
-    ):
+    if draws.provenance is not None and draws.provenance != _draw_provenance(fitted):
         raise ValueError("posterior draws belong to a different fit or revision")
 
     frame = as_eager_frame(X)

@@ -13,6 +13,9 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
 
+import numpy as np
+
+from superglm.distributional.weights import resolve_likelihood_weights
 from superglm.editor.errors import EditorValueError
 from superglm.editor.lss.view import LSSModelView, is_lss
 
@@ -106,12 +109,20 @@ WEIGHTS_NOT_GIVEN = (
 )
 
 
-def refit_reason(model: Any, sample_weight: Any, offsets: Any) -> str | None:
+WEIGHTS_DIFFER = (
+    "This model was fitted with other sample weights than the editor's training rows carry, so "
+    "Refit and Final fit would fit a different model. Open the editor with the rows and "
+    "weights the model was fitted on: train_data=(X, y, sample_weight, offsets)."
+)
+
+
+def refit_reason(model: Any, sample_weight: Any, offsets: Any, y: Any = None) -> str | None:
     """Why a SuperLSS (or the editor's view of one) cannot be refitted on these rows; None if it can.
 
     A replay needs the settings the fit recorded, which a model saved by an
     earlier superglm lacks, and the offsets and weights the fit was given: rows
-    without them would refit a different model, silently.
+    without them would refit a different model, silently. With the response
+    ``y``, the weights must also resolve to the fit's own.
     """
     lss = model.lss if isinstance(model, LSSModelView) else model
     if lss._fit_settings is None:
@@ -129,6 +140,8 @@ def refit_reason(model: Any, sample_weight: Any, offsets: Any) -> str | None:
     provenance = state.weight_provenance
     if sample_weight is None and not (provenance.all_unit and provenance.dropped_count == 0):
         return WEIGHTS_NOT_GIVEN
+    if y is not None and _weights_differ(state, sample_weight, np.asarray(y).size):
+        return WEIGHTS_DIFFER
     return None
 
 
@@ -139,7 +152,19 @@ def session_refit_reason(session: Any) -> str | None:
     train = session._evaluation_data.get("train")
     if train is None:
         return refit_reason(session.model, None, None)
-    return refit_reason(session.model, train.sample_weight, train.offset)
+    return refit_reason(session.model, train.sample_weight, train.offset, train.y)
+
+
+def _weights_differ(state: Any, sample_weight: Any, n_rows: int) -> bool:
+    """Whether ``sample_weight`` on ``n_rows`` rows resolves to another root than the fit's.
+
+    The fit records the digest of its resolved weights, so one pass over the
+    rows' weights shows whether a replay would fit the same likelihood.
+    """
+    resolved = resolve_likelihood_weights(
+        sample_weight, n_observations=n_rows, contract=state.weight_contract
+    )
+    return resolved.provenance.root_digest != state.weight_provenance.root_digest
 
 
 def session_availability(session: Any) -> dict[str, str]:

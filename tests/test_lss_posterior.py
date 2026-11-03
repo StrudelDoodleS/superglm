@@ -716,7 +716,9 @@ def _covariance_shim(covariance: np.ndarray) -> SimpleNamespace:
             n_coefficients=width,
         ),
         smoothing=None,
-        fit_state=SimpleNamespace(result=SimpleNamespace(fit_id="covariance-shim"), revision=1),
+        fit_state=SimpleNamespace(
+            result=SimpleNamespace(fit_id="covariance-shim"), revision=1, hand_edit=None
+        ),
     )
 
 
