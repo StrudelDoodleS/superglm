@@ -530,14 +530,27 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         n_rows: int,
         *,
         unresolved: bool = False,
+        settled: bool = True,
     ) -> str | None:
         """Say what a tail shape at each wall does to the fitted law.
 
         ``pressed`` counts the rows, at the (lower, upper) wall, that the data
         press against it; ``clipped`` counts the rows the link clipped to its
         last float inside it, whatever put them there. ``unresolved`` says the
-        fit lost the shape's curvature at clipped rows.
+        fit lost the shape's curvature at clipped rows, along a direction its
+        rank decision dropped or under a step that still presses them. A fit
+        that is not ``settled`` stopped before converging, so its outward step
+        does not establish that the data put the shape at the wall.
         """
+
+        def cause(where: str) -> str:
+            if settled:
+                return f"the data put the shape {where} it, so"
+            return (
+                "the coefficient fit has not converged and is still moving the shape towards "
+                f"it, so whether the data put it {where} the wall is not settled; if they do,"
+            )
+
         n_lower, n_upper = pressed
         clipped_lower, clipped_upper = clipped
         lower_remedy = (
@@ -564,7 +577,7 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
                 )
             findings.append(
                 f"{n_upper} of {n_rows} rows have a tail shape at the upper wall "
-                f"{self.shape_upper:g}: the data put the shape at or beyond it, so {consequence}"
+                f"{self.shape_upper:g}: {cause('at or beyond')} {consequence}"
             )
         if clipped_upper:
             if self.shape_upper == 1.0:
@@ -586,8 +599,8 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         if n_lower:
             findings.append(
                 f"{n_lower} of {n_rows} rows have a tail shape at the lower wall "
-                f"{self.shape_lower:g}: the data put the shape at or below it, so the tail is "
-                f"set by the wall rather than the data. {lower_remedy}"
+                f"{self.shape_lower:g}: {cause('at or below')} the tail is set by the wall "
+                f"rather than the data. {lower_remedy}"
             )
         if clipped_lower:
             findings.append(

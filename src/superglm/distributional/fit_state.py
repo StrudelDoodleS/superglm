@@ -7,6 +7,7 @@ import math
 import operator
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from inspect import signature
 from types import MappingProxyType
 from typing import Any
 
@@ -568,7 +569,7 @@ def _wall_disclosure(
     float before a wall has no derivative left for either test; the family
     says what that means for its functionals, whatever put the row there, and
     whether the shape's curvature is lost there, along a dropped direction or
-    under a step that still presses the row.
+    under a step that still presses the row. An unfinished fit's pressed rows are unsettled.
     """
     rows = wall_rows(family, layout, solver_result.coefficients, solver_result.theta)
     if rows is None:
@@ -618,6 +619,9 @@ def _wall_disclosure(
     # held by rounding, so the shape's standard errors are not reliable there either
     unresolved |= pressed & clipped
     pressed &= rows.near & ~clipped
+    settled = {}
+    if not solver_result.converged and "settled" in signature(family.wall_disclosure).parameters:
+        settled["settled"] = False
     return family.wall_disclosure(
         (
             int(np.count_nonzero(pressed & ~rows.upper_side)),
@@ -629,6 +633,7 @@ def _wall_disclosure(
         ),
         rows.state.design.n,
         unresolved=bool(np.any(unresolved)),
+        **settled,
     )
 
 
