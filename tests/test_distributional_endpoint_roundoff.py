@@ -576,7 +576,7 @@ def test_a_stationary_endgame_voids_a_refreshed_cap_nomination(monkeypatch) -> N
     assert smoothing.unresolved_upper_bound == ()
 
 
-def _flagged_generalized_pareto_model() -> SuperLSS:
+def _flagged_generalized_pareto_model(**shape_options) -> SuperLSS:
     """The release differential's mid GeneralizedParetoLSS model, as in the tests above."""
     family = GeneralizedParetoLSS()
     return SuperLSS(
@@ -584,7 +584,7 @@ def _flagged_generalized_pareto_model() -> SuperLSS:
         family.scale(
             s("x1", kind="cr", k=8), cat("c1"), s("x2", kind="cr", k=6), re("c2"), ti("x1", "x2")
         ),
-        family.shape(s("x2", kind="cr", k=5)),
+        family.shape(s("x2", kind="cr", k=5, **shape_options)),
         discrete=True,
     )
 
@@ -595,8 +595,10 @@ def test_a_stationary_endgame_revalidates_its_face_beside_another_cap(monkeypatc
     A tensor margin at the cap beside a scalar face is the case it covers. Here
     the recheck is told the face's component is not the sole cap, on a fixture
     whose endgame ends stationary with an exact face. That endgame's exact
-    gradient certified every other cap, so the face is kept. Mutation check:
-    without the waiver the recheck retracts the face and the fit stops
+    gradient certified every other cap, so the face is kept. The shape smooth
+    is held below the cap so the face is a scalar one: at the cap the two
+    components can form a joint face, which takes another route. Mutation
+    check: without the waiver the recheck retracts the face and the fit stops
     ``endpoint_revalidation_failed``.
     """
     import superglm.distributional.smoothing.loop as loop
@@ -617,7 +619,9 @@ def test_a_stationary_endgame_revalidates_its_face_beside_another_cap(monkeypatc
 
     monkeypatch.setattr(loop, "_recheck_exact_face", recheck_beside_another_cap)
     frame, response = _flagged_generalized_pareto_problem()
-    model = _flagged_generalized_pareto_model().fit_reml(frame, response, outer="efs+newton")
+    model = _flagged_generalized_pareto_model(lambda_policy=LambdaPolicy.fixed(9.99e9)).fit_reml(
+        frame, response, outer="efs+newton"
+    )
     smoothing = model._require_fitted().smoothing
     assert smoothing is not None
     assert waivers == [True], "the fixture's stationary endgame revalidates an exact face"
