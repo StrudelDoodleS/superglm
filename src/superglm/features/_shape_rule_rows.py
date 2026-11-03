@@ -156,6 +156,12 @@ def _zero_regions(knots: NDArray, flats: list[tuple[float, float]]) -> list[tupl
     return merged
 
 
+def flat_zero_regions(knots: NDArray, pieces: list[ShapePiece]) -> list[tuple[float, float]]:
+    """Where the flat pieces hold the curve constant: every whole knot span they touch, merged."""
+    flats = [(a, b) for kind, a, b in pieces if kind == "flat"]
+    return _zero_regions(np.asarray(knots, dtype=np.float64), flats)
+
+
 def _held_at_zero(lo: NDArray, hi: NDArray, zero: list[tuple[float, float]]) -> NDArray:
     """Which supports [lo, hi] overlap a stretch where ``f'`` is held at zero."""
     held = np.zeros(np.shape(lo), dtype=bool)
@@ -253,6 +259,7 @@ def shape_rows(
 __all__ = [
     "ShapePiece",
     "derivative_value_row",
+    "flat_zero_regions",
     "refined_derivative_rows",
     "shape_pieces",
     "shape_rows",

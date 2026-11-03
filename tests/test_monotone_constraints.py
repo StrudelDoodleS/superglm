@@ -225,3 +225,25 @@ class TestCRSMonotoneConstraints:
         """NaturalSpline does not accept monotone parameter."""
         with pytest.raises(TypeError):
             NaturalSpline(n_knots=8, constraint=Constraint.fit.increasing)
+
+
+@pytest.mark.parametrize("kind", ["increasing", "decreasing", "convex", "concave"])
+@pytest.mark.parametrize("basis", [PSpline, BSplineSmooth, CubicRegressionSpline])
+def test_single_rule_rows_bit_identical(basis, kind):
+    """A single full-range rule builds master's rows, bit for bit."""
+    from superglm.features import _spline_constraints
+    from superglm.features._spline_subclass_ops import build_shape_constraints_raw
+
+    spec = basis(n_knots=8, constraint=getattr(Constraint.fit, kind))
+    spec.build(np.random.default_rng(3).uniform(-2.0, 5.0, 300))
+    if kind in ("increasing", "decreasing"):
+        master = _spline_constraints.build_monotone_difference_constraints(spec._n_basis, kind)
+    else:
+        master = _spline_constraints.build_curvature_difference_constraints(
+            spec._knots, spec.degree, kind, domain=(spec._lo, spec._hi)
+        )
+        if basis is CubicRegressionSpline:
+            master = LinearConstraintSet(A=master.A[1:-1], b=np.zeros(master.A.shape[0] - 2))
+    rows = build_shape_constraints_raw(spec)
+    assert np.array_equal(rows.A, master.A)
+    assert np.array_equal(rows.b, master.b)

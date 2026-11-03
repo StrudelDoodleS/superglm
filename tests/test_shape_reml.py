@@ -388,3 +388,100 @@ def test_slack_constraint_with_a_random_effect_reproduces_the_free_fit(
     constrained_re = constrained.random_effects("group")
     assert constrained_re.variance_component == pytest.approx(free_re.variance_component, rel=rel)
     assert constrained.result.deviance == pytest.approx(free.result.deviance, rel=rel)
+
+
+_C = Constraint.fit
+_U_RULES = _C.decreasing.below(25) & _C.flat.within(25, 40) & _C.increasing.above(40)
+
+
+def _driver_ages(n: int = 20_000, seed: int = 43) -> tuple[pd.DataFrame, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    age = rng.integers(17, 81, n).astype(np.float64)
+    eta = np.where(age < 25, 0.08 * (25 - age), np.where(age > 40, 0.02 * (age - 40), 0.0))
+    return pd.DataFrame({"age": age}), rng.poisson(np.exp(eta))
+
+
+def _assert_u_rules_hold(model) -> None:
+    from superglm.constraints import shape_derivative_matrix
+
+    group = next(group for group in model._groups if group.name == "age")
+    beta = model.result.beta[group.sl]
+    grid = np.linspace(17.0, 80.0, 2000)
+    f = shape_derivative_matrix(model._specs["age"], grid, 0) @ beta
+    slope = shape_derivative_matrix(model._specs["age"], grid, 1) @ beta
+    tol = 1e3 * 2.0**-53 * np.max(np.abs(f))
+    assert np.max(slope[grid <= 25.0]) <= tol
+    assert np.ptp(f[(grid >= 25.0) & (grid <= 40.0)]) <= tol
+    assert np.min(slope[grid >= 40.0]) >= -tol
+
+
+def _fit_recording_rows(monkeypatch, discrete: bool):
+    """``fit_reml`` on the U rules, recording every raw row build and the strip."""
+    from superglm.features import _spline_subclass_ops
+    from superglm.model import fit_ops
+
+    builds, stripped_after = [], []
+    build_rows = _spline_subclass_ops.build_shape_constraints_raw
+    strip = fit_ops.strip_qp_constraints
+
+    def recording_build(spec):
+        rows = build_rows(spec)
+        builds.append(rows)
+        return rows
+
+    def recording_strip(groups):
+        stripped_after.append(len(builds))
+        return strip(groups)
+
+    monkeypatch.setattr(_spline_subclass_ops, "build_shape_constraints_raw", recording_build)
+    monkeypatch.setattr(fit_ops, "strip_qp_constraints", recording_strip)
+    X, y = _driver_ages()
+    model = SuperGLM(
+        family="poisson",
+        discrete=discrete,
+        features={"age": Spline(kind="bs", k=12, constraint=_U_RULES)},
+    )
+    with pytest.warns(UserWarning, match="holds on") as seen:
+        model.fit_reml(X, y)
+    assert sum("holds on" in str(w.message) for w in seen) == 1
+    return model, builds, stripped_after
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "discrete"])
+def test_rules_survive_reml_strip_restore(monkeypatch, discrete):
+    model, builds, stripped_after = _fit_recording_rows(monkeypatch, discrete)
+    index = next(i for i, group in enumerate(model._groups) if group.name == "age")
+    group = model._groups[index]
+
+    assert model._reml_lambdas["age"] > 0.0
+    # Rows were built before the strip and rebuilt after it, identically.
+    assert len(stripped_after) == 1 and 0 < stripped_after[0] < len(builds)
+    for rows in builds[1:]:
+        assert np.array_equal(rows.A, builds[0].A)
+        assert np.array_equal(rows.b, builds[0].b)
+    restored = builds[0].compose(model._dm.group_matrices[index].R_inv)
+    assert np.array_equal(group.constraints.A, restored.A)
+    _assert_u_rules_hold(model)
+
+
+def test_rules_discrete_path():
+    X, y = _driver_ages()
+    raw, models = {}, {}
+    for discrete in (False, True):
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=discrete,
+            features={"age": Spline(kind="bs", k=12, constraint=_U_RULES)},
+        )
+        with pytest.warns(UserWarning, match="holds on"):
+            model.fit(X, y)
+        raw[discrete] = model._specs["age"]._build_monotone_constraints_raw()
+        models[discrete] = model
+    assert np.array_equal(raw[True].A, raw[False].A)
+    assert np.array_equal(raw[True].b, raw[False].b)
+    model = models[True]
+    index = next(i for i, group in enumerate(model._groups) if group.name == "age")
+    expected = raw[True].compose(model._dm.group_matrices[index].R_inv)
+    assert np.array_equal(model._groups[index].constraints.A, expected.A)
+    _assert_u_rules_hold(model)

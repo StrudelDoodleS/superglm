@@ -109,8 +109,10 @@ def _uses_span_jump_constraints(spec: _SplineBase, kind: str) -> bool:
 
 def _has_natural_curvature_boundaries(spec: _SplineBase, kind: str) -> bool:
     """Whether endpoint curvature is structurally fixed to zero."""
+    from superglm.features._spline_subclass_ops import has_natural_ends
+
     return kind in {"convex", "concave"} and (
-        getattr(spec, "_Z", None) is not None or getattr(spec, "_cr_M", None) is not None
+        has_natural_ends(spec) or getattr(spec, "_cr_M", None) is not None
     )
 
 
