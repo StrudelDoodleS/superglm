@@ -349,7 +349,8 @@ class _TableRows:
     values), without forming ``S`` again for every chunk.
     """
 
-    def __init__(self, state: PredictorState) -> None:
+    def __init__(self, state: PredictorState, chunk_size: int) -> None:
+        self.chunk_size = chunk_size
         self._terms = _terms(state, 0)
         block = state.coefficient_slice
         self.shape = (state.design.n, block.stop - block.start)
@@ -764,7 +765,11 @@ def _gradient_pass(
     n_observations, k_parameters = eta.shape
     matrices = _validated_matrices(layout, dense_matrices, n_observations)
     if binned_layout(layout):
-        matrices = tuple(_TableRows(state) for state in layout.predictors)
+        # Chunk by the fit's own row budget, as its bounded matrices and the
+        # corrected-covariance replay do, so memory stays bounded and every caller
+        # at this fit sums in the same order.
+        chunk_size = min(_ROW_CHUNK, fit.resolved_chunk_size or _ROW_CHUNK)
+        matrices = tuple(_TableRows(state, chunk_size) for state in layout.predictors)
     slices = tuple(state.coefficient_slice for state in layout.predictors)
     links = tuple(state.link for state in layout.predictors)
     width = layout.n_coefficients

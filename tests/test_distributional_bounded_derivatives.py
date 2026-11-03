@@ -20,6 +20,7 @@ from superglm.distributional.smoothing.derivatives import LamlDerivativeWorkspac
 from superglm.distributional.smoothing.endpoint_direction import _curvature_packed
 from superglm.distributional.smoothing.penalty_face import build_penalty_face
 from superglm.distributional.solver.assembly import dense_predictor_matrices
+from superglm.distributional.solver.binned_passes import binned_layout
 from superglm.distributional.solver.solver import _DenseObservedReuseSession, fit_dense_fixed_lambda
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.features import Spline
@@ -196,7 +197,8 @@ def test_bounded_derivatives_match_identical_compiled_design(
         dense_matrices=bounded,
         reuse=workspace,
     )
-    assert seen and max(seen) == chunk
+    # A binned layout's passes gather rows from bin tables, never the caller's chunks.
+    assert not seen if binned_layout(layout) else seen and max(seen) == chunk
     assert actual.names == expected.names
     assert actual.provenance == expected.provenance
     assert actual.evaluations + gradient.evaluations == expected.evaluations
