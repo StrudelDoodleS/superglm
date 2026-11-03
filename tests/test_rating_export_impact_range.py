@@ -115,6 +115,48 @@ def test_export_refuses_nonfinite_selected_approximation_even_without_sweep(impa
         build_rating_table_payload(model, X, y, n_bins=1, impact_bins=impact_bins)
 
 
+def test_a_comparison_rung_float64_cannot_hold_is_recorded_not_raised():
+    """Only the exported resolution refuses; a coarser comparison rung is disclosed.
+
+    Two cancelling pairs keep every block's factor inside exp(+-500), while
+    one bin leaves both Numeric slopes uncancelled, past float64's range.
+    """
+    rng = np.random.default_rng(12)
+    x = np.repeat(np.r_[-1.0, np.linspace(0.7, 1.0, 9)], 30)
+    w = np.roll(x, 15)
+    X = pd.DataFrame(
+        {
+            "x": x,
+            "w": w,
+            "z": x + rng.uniform(-0.005, 0.005, len(x)),
+            "v": w + rng.uniform(-0.005, 0.005, len(x)),
+        }
+    )
+    y = np.exp(0.2 + 240.0 * (X.x - X.z + X.w - X.v).to_numpy())
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "x": Polynomial(degree=1),
+            "w": Polynomial(degree=1),
+            "z": Numeric(),
+            "v": Numeric(),
+        },
+        selection_penalty=0,
+        tol=1e-10,
+    ).fit(X, y)
+    payload = build_rating_table_payload(
+        model, X, y, n_bins=100, bin_strategy="uniform", impact_bins=(1,)
+    )
+    sheet = payload.discretization_impact
+    coarse = sheet.loc[sheet.n_bins == 1]
+    assert set(coarse.feature) == {"x", "w"}
+    assert np.isinf(coarse.max_abs_prediction_change_pct).all()
+    assert coarse.note.str.contains("non-finite or zero predictions").all()
+    # Ten distinct values in 100 bins: the exported workbook reproduces the fit.
+    assert np.isfinite(sheet.loc[sheet.exported].max_abs_prediction_change_pct).all()
+    np.testing.assert_allclose(_workbook_predictions(payload, X), model.predict(X), rtol=1e-10)
+
+
 class _OverflowGrid:
     """Finite emitted factors whose joint approximation is unrepresentable."""
 

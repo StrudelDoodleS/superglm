@@ -1958,16 +1958,16 @@ def _impact_sweep(
 ) -> pd.DataFrame:
     """One row per approximated block per swept resolution.
 
-    ``exported_n_bins`` is folded into the swept set and marked, because
-    without it the sheet can describe every resolution EXCEPT the one the
-    reader is holding (the defaults are ``n_bins=150`` against
-    ``impact_bins=(20, 50, 100, 200, 250)``).  Each rung is an INDEPENDENT
-    measurement: successive nearest-node grids are not nested, so a finer one
-    need not sit closer to a given row.  The ``exported`` column marks theirs.
+    ``exported_n_bins`` joins the swept set, marked ``exported``: without it
+    the sheet can describe every resolution EXCEPT the one the reader holds
+    (defaults ``n_bins=150`` against ``impact_bins=(20, 50, 100, 200, 250)``).
+    Each rung is an INDEPENDENT measurement: nearest-node grids are not nested,
+    so a finer one need not sit closer to a given row.
 
-    An empty ``impact_bins`` skips the ladder and leaves the sheet empty, but
-    the exported resolution is still evaluated, because declining the
-    disclosure cannot make a non-finite approximation exportable.  A
+    An empty ``impact_bins`` leaves the sheet empty, but the exported
+    resolution is still evaluated: declining the disclosure cannot make a
+    non-finite approximation exportable, and only that rung refuses one; a
+    comparison rung records an infinite change and the reason in ``note``.  A
     ``binned_offset`` is binned at each resolution as its block is, and the
     change in its log factor joins the terms' changes under its own row.
     """
@@ -1987,18 +1987,33 @@ def _impact_sweep(
             )
             blocks[block.name] = block.table
             offset_delta = np.log(applied) - offset_arr
-        result = model.discretization_impact(
-            X,
-            y,
-            sample_weight=sample_weight,
-            offset=offset,
-            n_bins=int(n_bins),
-            bin_strategy=bin_strategy,
-            features=features,
-            band_se=band_se,
-            band_max_error=band_max_error,
-            _offset_delta=offset_delta,
-        )
+        try:
+            result = model.discretization_impact(
+                X,
+                y,
+                sample_weight=sample_weight,
+                offset=offset,
+                n_bins=int(n_bins),
+                bin_strategy=bin_strategy,
+                features=features,
+                band_se=band_se,
+                band_max_error=band_max_error,
+                _offset_delta=offset_delta,
+            )
+        except OverflowError as error:
+            # Only the exported resolution refuses; a comparison rung float64
+            # cannot hold is recorded as an unbounded change.
+            if int(n_bins) == exported_n_bins:
+                raise
+            unbounded = {
+                "n_bins": int(n_bins),
+                "exported": False,
+                "mean_abs_prediction_change_pct": np.inf,
+                "max_abs_prediction_change_pct": np.inf,
+                "note": str(error),
+            }
+            rows.extend({**unbounded, "feature": name} for name in [*features, *blocks])
+            continue
         if not impact_bins:
             return _empty_impact_frame()
         for feature, table in {**result.tables, **blocks}.items():
