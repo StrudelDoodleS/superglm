@@ -7,7 +7,10 @@
  * read the payload's ``spline_view`` the same way.
  */
 
+import { shiftDisplay } from "./display.js";
+
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
+/** @typedef {import('../api/contracts.js').DisplaySpec} DisplaySpec */
 
 /**
  * The spline lines to draw for ``term``, or null to join its points as usual.
@@ -58,16 +61,18 @@ export function contributionX(term) {
 
 /**
  * The drawn spline after one coefficient moves by ``deltaLog``: each grid
- * value scales by ``exp(row * deltaLog)``, the same rule the drag preview
- * applies to the level dots.
+ * value moves by ``row * deltaLog`` on the effect scale (a relativity scales
+ * by ``exp(row * deltaLog)``), the same rule the drag preview applies to the
+ * level dots.
  *
- * @param {number[]} baseCurve relativities on the grid before the drag
+ * @param {number[]} baseCurve display values on the grid before the drag
  * @param {number[]} gridRow the moved basis function on the grid
- * @param {number} deltaLog the coefficient's change on the log scale
+ * @param {number} deltaLog the coefficient's change on the effect scale
+ * @param {DisplaySpec} [spec] the term's display unit; absent means relativity
  * @returns {number[]}
  */
-export function shiftedCurve(baseCurve, gridRow, deltaLog) {
+export function shiftedCurve(baseCurve, gridRow, deltaLog, spec) {
   return baseCurve.map((value, index) =>
-    Math.max(1e-12, value * Math.exp((Number(gridRow[index]) || 0) * deltaLog))
+    Math.max(1e-12, shiftDisplay(spec, value, Number(gridRow[index]) || 0, deltaLog))
   );
 }

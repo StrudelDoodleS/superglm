@@ -270,6 +270,15 @@
  * @property {boolean} fits_levels
  */
 /**
+ * How a SuperLSS term's effect on the linear predictor is shown and edited:
+ * `reference_eta` is the parameter's link value at the reference point and
+ * `floor` the scale floor of a log-normal spread.
+ * @typedef {Object} DisplaySpec
+ * @property {'relativity'|'lognormal_cv'|'gamma_cv'|'inverse_theta'} kind
+ * @property {number} reference_eta
+ * @property {number} floor
+ */
+/**
  * @typedef {Object} TermPayload
  * @property {string} kind
  * @property {string} term_type
@@ -294,6 +303,16 @@
  * @property {TermKnots|null} [knots] the term's knots and the Knots tool's state
  * @property {boolean} [unsmoothed] whether the term has smoothing the Unsmoothed
  *   toggle can switch off: a spline
+ * @property {DisplaySpec} [display] SuperLSS terms only: the unit of `y`; absent means relativity
+ * @property {number} [baseline] SuperLSS terms only: the display value where the term's effect is zero
+ * @property {string} [y_label]
+ * @property {'relativity'|'times'|'plain'} [y_format]
+ * @property {string} [x_label]
+ * @property {string} [title]
+ * @property {string} [parameter]
+ * @property {string} [parameter_label]
+ * @property {string} [parameter_role]
+ * @property {string} [term_label]
  */
 /**
  * A spline term fitted with its smoothing switched off (/unsmoothed). Its line
