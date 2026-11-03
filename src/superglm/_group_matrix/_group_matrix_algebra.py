@@ -38,6 +38,7 @@ from ._group_matrix_kernels import (
     _scan_form,
     _sorted_intersection,
     _ssp_gram_needs_exact,
+    _support_rows_stack_add,
     _support_weighted_bincount_2d,
     _tensor_operand_in_reassociation_range,
     _weighted_bincount_2d,
@@ -648,7 +649,8 @@ def _rows_table(gm_i, gm_j):
 
     Li and Wood's (2020) right accumulation, ``T = sum_rows w S_j[k_j]`` by
     ``k_i``, contracted as ``S_i' T``; the side whose table is smaller sums.
-    None unless both groups are float64 supports whose ``S = B R`` forms in range.
+    None unless both groups are float64 supports whose ``S = B R`` forms in range
+    and stays below 2**22, the margin the pass's release limit leaves.
     """
     from ..group_matrix import (
         DiscretizedSSPGroupMatrix,
@@ -671,6 +673,10 @@ def _rows_table(gm_i, gm_j):
     transposed = gm_j.n_bins * gm_i.shape[1] < gm_i.n_bins * gm_j.shape[1]
     disc, other = (gm_j, gm_i) if transposed else (gm_i, gm_j)
     support = other.B_unique @ other.R_inv
+    # The release limit bounds the summed weights by 2**1000, leaving 2**22 for
+    # the support rows they multiply.
+    if _operand_exponent_bounds(support)[1] > 22:
+        return None
     nbytes = 8 * int(disc.n_bins) * support.shape[1]
     return (
         nbytes,
@@ -684,8 +690,9 @@ def _add_rows_stack(support, transposed: bool, table, gm_i, gm_j, W: NDArray) ->
     disc, other = (gm_j, gm_i) if transposed else (gm_i, gm_j)
     if table is None:
         table = np.zeros((disc.n_bins, support.shape[1], W.shape[1]))
-    rows = _native(support[other.bin_idx])
-    _weighted_bincount_2d_stack_add(table, _native(disc.bin_idx), _native(W), rows)
+    _support_rows_stack_add(
+        table, _native(disc.bin_idx), _native(W), _native(support), _native(other.bin_idx)
+    )
     return table
 
 

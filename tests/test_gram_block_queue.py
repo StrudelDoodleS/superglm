@@ -213,6 +213,12 @@ def _kernel_calls():
             )
             or out
         ),
+        "_support_rows_stack_add": lambda: (
+            kernels._support_rows_stack_add(
+                out := np.zeros((n1, 5, 2)), idx1, np.column_stack((W, Wz)), table2, idx2
+            )
+            or out
+        ),
         "_rows_weighted_bincount_2d": lambda: kernels._rows_weighted_bincount_2d(
             rows_a, idx2[rows_a], W, dense, n2
         ),

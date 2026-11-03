@@ -475,3 +475,110 @@ def test_rounding_counts_bound_each_kernel_against_exact_sums(monkeypatch):
 
 def test_rounding_counts_are_none_off_a_binned_layout():
     assert bp.binned_rounding_counts(_layout(2, discrete=False)[0], 1) is None
+
+
+# Range guards on the associations the kernels choose for themselves.
+
+
+@pytest.mark.parametrize("guarded", [True, False], ids=["guarded", "mutation-unguarded"])
+def test_leverage_table_keeps_the_rows_order_where_right_first_would_underflow(
+    guarded, monkeypatch
+):
+    """``S_t = 2**128 [[1,0],[0,1],[1,1]]``, ``S_u = 2**-128 I`` and ``V = 2**-1000 I``:
+    the cost model picks the right-first table, whose ``V S_u'`` underflows to 0.
+
+    The rows' own order, ``(S_t V) S_u'``, keeps every partial product normal, and
+    the first row's cross leverage is exactly 2**-1000. Mutation check: dropping
+    the range check takes right-first and reads 0.
+    """
+    if not guarded:
+        monkeypatch.setattr(bp, "_cross_factors_in_range", lambda *operands: True)
+    t = bp._Term(slice(0, 2), None, 2.0**128 * np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]))
+    u = bp._Term(slice(2, 4), None, 2.0**-128 * np.eye(2))
+    reader = bp._pair_reader(t, u, 2.0**-1000 * np.eye(2), 6, [1 << 20])
+    codes = {t: np.array([0, 1, 2, 0, 1, 2]), u: np.array([0, 1, 0, 1, 0, 1])}
+    got = reader(codes, {})
+    assert bool(abs(got[0] - 2.0**-1000) <= 4 * U * 2.0**-1000) is guarded
+
+
+def test_support_rows_beyond_the_release_margin_keep_no_rows_table():
+    """A right accumulation sums ``w S_j`` with the weights bounded only by the release
+    limit, 2**1000, so a support at 2**128 could overflow it: that pair keeps no rows
+    table, and its blocks take the joint or per-block routes with their own range rules.
+    """
+    from superglm._group_matrix._group_matrix_discretized import DiscretizedSSPGroupMatrix
+
+    bins = np.arange(6)
+    large = DiscretizedSSPGroupMatrix(np.full((6, 1), 2.0**64), np.array([[2.0**64]]), bins)
+    small = DiscretizedSSPGroupMatrix(np.full((6, 1), 2.0**-128), np.array([[1.0]]), bins)
+    # The summing side's partner is the large support in this order.
+    assert algebra._rows_table(small, large) is None
+    assert algebra._rows_table(large, small) is not None
+    unit = DiscretizedSSPGroupMatrix(np.full((6, 1), 0.5), np.array([[1.0]]), bins)
+    assert algebra._rows_table(unit, unit) is not None
+
+
+def _compressed_layout():
+    """An exact-mode layout on integer covariates, which compresses each spline to its supports."""
+    rng = np.random.default_rng(3)
+    n = 1500
+    frame = as_eager_frame(
+        pd.DataFrame(
+            {
+                "a": rng.integers(18, 60, n).astype(float),
+                "b": rng.integers(0, 12, n).astype(float),
+                "d": rng.normal(size=n),
+                "g": rng.choice(list("abc"), n),
+                "h": rng.choice(list("pqrs"), n),
+            }
+        )
+    )
+    family = GaussianLS()
+    names = [parameter.name for parameter in family.parameters]
+    predictors = [
+        Predictor(
+            names[0],
+            {
+                "a": Spline(kind="cr", n_knots=6),
+                "g": Categorical(base="a"),
+                "h": Categorical(base="p"),
+                "d": Numeric(),
+            },
+            interaction_specs={"a:h": SplineCategorical("a", "h")},
+        ),
+        Predictor(names[1], {"b": Spline(kind="cr", n_knots=5), "h": Categorical(base="p")}),
+    ]
+    compiled = compile_predictors(
+        frame, resolved_prior(np.ones(n)), family.parameters, predictors, model_discrete=False
+    )
+    layout = build_stacked_layout(compiled)
+    matrices = dense_predictor_matrices(layout)
+    return layout, matrices, tuple(state.coefficient_slice for state in layout.predictors), rng
+
+
+def test_support_compressed_layouts_equal_the_dense_rows(split_blocks):
+    """Exact fits on few-valued covariates keep support-compressed splines and levels,
+    which ``binned_layout`` admits: every kernel matches the dense rows on them."""
+    layout, matrices, slices, rng = _compressed_layout()
+    kinds = {type(g).__name__ for state in layout.predictors for g in state.design.group_matrices}
+    assert {
+        "SupportCompressedSSPGroupMatrix",
+        "SupportCompressedSplineCategoricalGroupMatrix",
+    } <= kinds
+    assert bp.binned_layout(layout)
+    n, width = matrices[0].shape[0], layout.n_coefficients
+    factor = rng.normal(size=(width, width))
+    inverse = factor @ factor.T / width
+    reference = _leverage_blocks(matrices, slices, inverse)
+    magnitude = _leverage_blocks(tuple(map(np.abs, matrices)), slices, np.abs(inverse))
+    assert _excess(bp.binned_leverage_blocks(layout, inverse), reference, magnitude, width) <= 0.0
+    packed = rng.normal(size=(n, 4, 3))
+    got = bp.binned_cross_grams(layout, lambda start, stop: packed[start:stop], width)
+    reference = _cross_all(matrices, slices, packed, width)
+    magnitude = _cross_all(tuple(map(np.abs, matrices)), slices, np.abs(packed), width)
+    assert _excess(got, reference, magnitude, n) <= 0.0
+    for q, matrix in enumerate(matrices):
+        D = rng.normal(size=(matrix.shape[1], 5))
+        dot = bp.design_dot_rows(layout, q, D, 31, 900)
+        dot_magnitude = np.abs(matrix[31:900]) @ np.abs(D)
+        assert _excess(dot, matrix[31:900] @ D, dot_magnitude, matrix.shape[1]) <= 0.0

@@ -31,7 +31,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._group_matrix._group_matrix_algebra import StackedPassTables
+from superglm._group_matrix._group_matrix_algebra import StackedPassTables, _cross_factors_in_range
 from superglm._group_matrix._group_matrix_core import ONE_HOT_CODE_TYPES, DenseGroupMatrix
 from superglm._group_matrix._group_matrix_discretized import (
     DiscretizedSplineCategoricalGroupMatrix,
@@ -206,10 +206,13 @@ def _pair_reader(t: _Term, u: _Term, V: NDArray, n: int, budget: list[int]) -> C
     fits = cells <= _CELL_CAP and 8 * cells <= budget[0]
     if (t.one_hot and u.one_hot) or (fits and (hot or table_cost <= rows_cost)):
         budget[0] -= 8 * cells
-        if left_first <= right_first:
-            G = _left(u, _left(t, V).T).T
-        else:
+        # Right-first reassociates the rows' (x_t V) x_u; it runs only where every
+        # partial product stays normal, else the rows' own order forms the table.
+        factors = [term.table for term in (t, u) if not term.one_hot]
+        if right_first < left_first and _cross_factors_in_range(V, *factors):
             G = _left(t, _left(u, V.T).T)
+        else:
+            G = _left(u, _left(t, V).T).T
         flat = np.ascontiguousarray(G).ravel()
         return lambda codes, values: flat[codes[t] * m_u + codes[u]]
     if u.one_hot or (not t.one_hot and p_t < p_u):
@@ -233,7 +236,8 @@ def binned_leverage_blocks(layout: StackedLayout, inverse: NDArray) -> NDArray[n
     """``G_i = X_i H^-1 X_i'`` packed ``(n, K(K+1)/2)``, or None off a binned layout.
 
     The same output as ``_leverage_blocks`` on the layout's predictor matrices:
-    channel ``(l, r)`` holds ``x_l,i' inverse[l, r] x_r,i``.
+    channel ``(l, r)`` holds ``x_l,i' inverse[l, r] x_r,i``. ``inverse`` is
+    symmetric: a diagonal channel reads ``2 V_tu`` for each off-diagonal term pair.
     """
     if not binned_layout(layout):
         return None
@@ -298,7 +302,8 @@ def binned_cross_grams(
     called first for ``[0, 0)``, whose ``m`` sizes the blocks within the
     contraction allowance, then once per block in row order. Each component
     runs the binned assembly without a score, over pass tables stacked across
-    the components (``StackedPassTables``) in what the block leaves.
+    the components (``StackedPassTables``) in what the block leaves. A
+    non-finite result is None, as the leverage blocks' is.
     """
     if not binned_layout(layout):
         return None
@@ -353,7 +358,8 @@ def binned_cross_grams(
         plans = block_plans(layout, panels, start, stop)
         for k, accumulator in enumerate(accumulators):
             accumulator.add_block(plans, None, np.ascontiguousarray(packed[:, k, :].T))
-    return np.stack([accumulator.finish().data_curvature for accumulator in accumulators])
+    out = np.stack([accumulator.finish().data_curvature for accumulator in accumulators])
+    return out if np.all(np.isfinite(out)) else None
 
 
 @dataclass(frozen=True)

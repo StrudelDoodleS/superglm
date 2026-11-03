@@ -626,6 +626,17 @@ def _weighted_bincount_2d_stack_add(out, bin_idx, W, M):
 
 
 @njit(cache=True, nogil=True)
+def _support_rows_stack_add(out, bin_idx, W, support, other_idx):
+    """``_weighted_bincount_2d_stack_add`` of ``support[other_idx]``, read through the codes."""
+    for i in range(len(bin_idx)):
+        row = out[bin_idx[i]]
+        s = support[other_idx[i]]
+        for c in range(s.shape[0]):
+            for k in range(W.shape[1]):
+                row[c, k] += W[i, k] * s[c]
+
+
+@njit(cache=True, nogil=True)
 def _rows_weighted_bincount_2d(rows, bin_idx, W, M, n_bins):
     """``_weighted_bincount_2d`` of the rows ``rows``: row ``rows[k]`` adds into ``bin_idx[k]``."""
     n_cols = M.shape[1]
@@ -1351,6 +1362,7 @@ _POOLED_BLOCK_KERNELS = (
     _csr_weighted_cross,
     _weighted_bincount_2d,
     _weighted_bincount_2d_stack_add,
+    _support_rows_stack_add,
     _rows_weighted_bincount_2d,
     _level_weighted_bincount_2d,
     _support_weighted_bincount_2d,
@@ -1463,6 +1475,9 @@ def _warmup_group_matrix_kernels() -> None:
     # Stacked pass tables add every component's read-only rows at once.
     _disc_disc_2d_hist_stack_add(np.zeros((2, 2, 2)), frozen_codes, frozen_codes, frozen_matrix)
     _weighted_bincount_2d_stack_add(np.zeros((2, 2, 2)), frozen_codes, frozen_matrix, frozen_matrix)
+    _support_rows_stack_add(
+        np.zeros((2, 2, 2)), frozen_codes, frozen_matrix, frozen_matrix, frozen_codes
+    )
     _disc_disc_2d_hist_channels(codes, codes, codes, values, matrix, 2, 2)
     cell_ptr, cell_order = _cell_csr(codes, codes, 2, 2)
     _cell_csr_matches(cell_ptr, cell_order, codes, codes, 2, 2)
