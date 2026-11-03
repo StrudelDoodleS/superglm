@@ -234,13 +234,14 @@ def _likelihood_row_floats(k_parameters: int, row_floats: int) -> int:
 def layout_chunk_size(layout: StackedLayout, chunk_size: ChunkSize) -> int:
     """:func:`resolve_chunk_size` for a layout's rows, predictors and chunk designs.
 
-    A layout that streams in ranges contracts each chunk as it arrives, so an
-    automatic chunk may instead take the contraction allowance its pass
-    tables leave (``pass_table_bytes``), up to ``AUTO_STREAM_MAX_ROWS`` rows:
-    fewer chunks spread each pass's fixed work over more rows. An allowance
-    that holds every row is one block, which keeps no tables. Its likelihood
-    arrays then hold at most that many rows of the floats
-    :func:`_likelihood_row_floats` counts.
+    A block contracts whole chunks, so an automatic chunk holds no more rows
+    than the contraction allowance (``contraction_row_bytes``). A layout that
+    streams in ranges contracts each chunk as it arrives, so its chunk may
+    instead take the allowance its pass tables leave (``pass_table_bytes``),
+    up to ``AUTO_STREAM_MAX_ROWS`` rows: fewer chunks spread each pass's fixed
+    work over more rows. An allowance that holds every row is one block, which
+    keeps no tables. Its likelihood arrays then hold at most that many rows of
+    the floats :func:`_likelihood_row_floats` counts.
     """
     n = layout.predictors[0].design.n
     k = len(layout.predictors)
@@ -248,16 +249,17 @@ def layout_chunk_size(layout: StackedLayout, chunk_size: ChunkSize) -> int:
         return resolve_chunk_size(n, k, chunk_size)
     floats = chunk_row_floats(layout)
     rows = resolve_chunk_size(n, k, "auto", row_floats=floats)
-    if not _streams_in_ranges(layout):
-        return rows
     panels = predictor_panels(layout)
     row_bytes = contraction_row_bytes(layout, panels)
     if row_bytes is None:
         return rows
+    fits = max(1, AUTO_CONTRACTION_MEMORY_BYTES // row_bytes)
+    if not _streams_in_ranges(layout):
+        return min(rows, fits)
     if n <= AUTO_STREAM_MAX_ROWS and n * row_bytes <= AUTO_CONTRACTION_MEMORY_BYTES:
         return n
     stream = (AUTO_CONTRACTION_MEMORY_BYTES - pass_table_bytes(layout, panels)) // row_bytes
-    return max(rows, min(n, AUTO_STREAM_MAX_ROWS, stream))
+    return min(fits, max(rows, min(n, AUTO_STREAM_MAX_ROWS, stream)))
 
 
 def _resolve_fitting_chunk_size(family, layout, likelihood_plan, chunk_size):

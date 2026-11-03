@@ -374,14 +374,40 @@ def test_a_range_streamed_chunk_takes_the_allowance_its_pass_tables_leave(monkey
     assert chunking.layout_chunk_size(layout, "auto") == n
     monkeypatch.setattr(chunking, "AUTO_CONTRACTION_MEMORY_BYTES", n * row_bytes - 1)
     assert chunking.layout_chunk_size(layout, "auto") == (n * row_bytes - 1 - tables) // row_bytes
-    # Never fewer rows than the likelihood rule, nor more than the pass or the stream cap.
+    # Never fewer rows than the likelihood rule while a chunk fits the allowance, nor more
+    # than the pass or the stream cap.
     monkeypatch.setattr(chunking, "AUTO_CONTRACTION_MEMORY_BYTES", tables)
-    assert chunking.layout_chunk_size(layout, "auto") == floor
+    assert chunking.layout_chunk_size(layout, "auto") == min(floor, max(1, tables // row_bytes))
     monkeypatch.setattr(chunking, "AUTO_CONTRACTION_MEMORY_BYTES", 1 << 40)
     assert chunking.layout_chunk_size(layout, "auto") == n
     monkeypatch.setattr(chunking, "AUTO_STREAM_MAX_ROWS", floor + 1)
     assert chunking.layout_chunk_size(layout, "auto") == floor + 1
     assert chunking.layout_chunk_size(layout, 5) == 5
+
+
+@pytest.mark.parametrize("in_ranges", [True, False], ids=["range-streamed", "copied"])
+def test_an_automatic_chunk_fits_the_contraction_allowance(monkeypatch, in_ranges) -> None:
+    """A chunk the likelihood rule would size past the contraction allowance is cut to it.
+
+    A block contracts whole chunks, so a chunk wider than the allowance would
+    form one block past it, as 1,024 dense columns at 100,000 rows did: 32,768
+    rows and a 256 MiB weighted copy against 64 MiB. Mutation check: taking the
+    likelihood rule's rows when they exceed the allowance fails both cases.
+    """
+    _, layout, _, _, _, _, _ = _problem()
+    monkeypatch.setattr(chunking, "_streams_in_ranges", lambda layout: in_ranges)
+    n = layout.predictors[0].design.n
+    panels = predictor_panels(layout)
+    row_bytes = chunking.contraction_row_bytes(layout, panels)
+    floor = chunking.resolve_chunk_size(
+        n, len(layout.predictors), "auto", row_floats=chunking.chunk_row_floats(layout)
+    )
+    assert floor > 10
+    allowance = 10 * row_bytes + row_bytes // 2
+    monkeypatch.setattr(chunking, "AUTO_CONTRACTION_MEMORY_BYTES", allowance)
+    rows = chunking.layout_chunk_size(layout, "auto")
+    assert rows == 10
+    assert chunking.contraction_block_rows(n, row_bytes, rows) * row_bytes <= allowance
 
 
 def test_contraction_blocks_hold_whole_chunks_within_the_byte_and_row_budgets() -> None:
