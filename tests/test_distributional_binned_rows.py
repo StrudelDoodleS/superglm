@@ -170,6 +170,33 @@ def test_exact_route_layouts_have_no_reader():
         br.BinnedRows(layout)
 
 
+@pytest.mark.parametrize("kind", ["table", "dense"])
+def test_a_non_finite_design_is_refused_as_the_dense_rows_refuse_it(problem, kind, monkeypatch):
+    """A non-finite support table or dense column raises the dense rows' ``ValueError``."""
+    from superglm._group_matrix._group_matrix_core import DenseGroupMatrix
+
+    original = br._terms
+
+    def poisoned(state):
+        terms = list(original(state))
+        for i, term in enumerate(terms):
+            if kind == "table" and type(term.group).__name__ == "DiscretizedSSPGroupMatrix":
+                table = term.table.copy()
+                table[0, 0] = np.inf
+                terms[i] = br._Term(term.columns, term.group, table)
+                break
+            if kind == "dense" and type(term.group) is DenseGroupMatrix:
+                M = np.array(term.group.M, dtype=np.float64)
+                M[0, 0] = np.nan
+                terms[i] = br._Term(term.columns, DenseGroupMatrix(M), None)
+                break
+        return tuple(terms)
+
+    monkeypatch.setattr(br, "_terms", poisoned)
+    with pytest.raises(ValueError, match="must be finite"):
+        br.BinnedRows(problem[0])
+
+
 def test_rows_outside_the_design_are_refused(problem):
     reader = br.binned_rows(problem[0])
     for start, stop in ((-1, 3), (5, 4), (0, N + 1)):

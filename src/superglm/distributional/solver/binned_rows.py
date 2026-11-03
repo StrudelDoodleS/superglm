@@ -118,7 +118,8 @@ class BinnedRows:
     ``rows(q, start, stop)`` is ``X_q[start:stop]`` as dense C-order float64.
     Owner: the pass that builds it, for that pass; the tables depend only on the
     layout's fixed bases, so nothing invalidates them while it lives. Build it
-    with :func:`binned_rows`, which declines a layout that is not binned.
+    with :func:`binned_rows`, which declines a layout that is not binned. A
+    non-finite table or dense group raises as the dense rows' design check does.
     """
 
     __slots__ = ("_terms", "_widths", "n")
@@ -127,6 +128,14 @@ class BinnedRows:
         if not binned_layout(layout):
             raise ValueError("BinnedRows needs a binned layout; see binned_rows")
         self._terms = tuple(_terms(state) for state in layout.predictors)
+        for state, terms in zip(layout.predictors, self._terms, strict=True):
+            values = (
+                term.group.M if type(term.group) is DenseGroupMatrix else term.table
+                for term in terms
+                if term.table is not None or type(term.group) is DenseGroupMatrix
+            )
+            if not all(np.all(np.isfinite(value)) for value in values):
+                raise ValueError(f"design for predictor {state.name!r} must be finite")
         self._widths = tuple(
             state.coefficient_slice.stop - state.coefficient_slice.start
             for state in layout.predictors
