@@ -18,6 +18,7 @@ from superglm.features.constraint import (
     RULE_KINDS,
     ConstraintRules,
     ConstraintSpec,
+    postfit_token,
 )
 from superglm.types import LambdaPolicy
 
@@ -168,6 +169,18 @@ def _normalize_constraint(
     return constraint, constraint.describe(), "fit"
 
 
+def fit_time_select_message(rules: ConstraintRules) -> str:
+    """Why ``select=True`` cannot meet fit-time ``rules``, and what to do instead."""
+    refusal = "Fit-time shape constraints are not supported with select=True. "
+    token = postfit_token(rules)
+    if token:
+        return f"{refusal}Use select=False or {token}."
+    return (
+        f"{refusal}Use select=False; Constraint.postfit repairs one whole-curve shape "
+        f"and cannot take {rules.describe()}."
+    )
+
+
 def initialize_spec(
     spec: Any,
     *,
@@ -204,11 +217,16 @@ def initialize_spec(
             f"{curvature[0]} curve; use degree>=1"
         )
     if constraint_mode == "fit" and curvature and degree > 3:
+        token = postfit_token(rules)
+        advice = (
+            f"degree<=3 or {token}"
+            if token
+            else f"degree<=3 (Constraint.postfit cannot take {rules.describe()})"
+        )
         raise NotImplementedError(
             "Fit-time convex/concave constraints require degree <= 3. "
             "For higher degrees, non-negative derivative control coefficients "
-            "are sufficient but not necessary for global curvature; use "
-            "degree<=3 or a Constraint.postfit.* token."
+            f"are sufficient but not necessary for global curvature; use {advice}."
         )
 
     spec.constraint_rules = rules

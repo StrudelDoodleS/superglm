@@ -20,6 +20,7 @@ from superglm.editor._types import EditableTerm
 from superglm.editor.collapse import _require_not_interaction_parent
 from superglm.editor.errors import EditorValueError
 from superglm.editor.knots import LEVEL_OPERATIONS, _hosted, _numeric_declaration
+from superglm.features.constraint import postfit_token, rules_of
 from superglm.features.ordered_categorical import OrderedCategorical, _spline_kind_name
 from superglm.features.rebuild import (
     CUBIC_KINDS,
@@ -88,6 +89,11 @@ _SELECT_RANGES = (
 _SELECT_CONSTRAINT = (
     "Shrinkage cannot be combined with a shape constraint the fit enforces, which {term!r} "
     "has; leave Shrink off, or apply the constraint after the fit (Constraint.postfit) in code."
+)
+_SELECT_RULES = (
+    "Shrinkage cannot be combined with the shape rules the fit enforces, which {term!r} has "
+    "({rules}); leave Shrink off. Constraint.postfit repairs one whole-curve shape and cannot "
+    "take them."
 )
 _POLICY_NULL = (
     'The lambda_policy of {term!r} sets the shrinkage penalty ("null"), which it has only '
@@ -283,8 +289,10 @@ def _select_refusal(name: str, source: _SplineBase, kind: str, select: bool) -> 
         return _SELECT_NS.format(term=name)
     if source.polynomial_ranges:
         return _SELECT_RANGES.format(term=name)
-    if source.constraint_kind is not None and source.constraint_mode == "fit":
-        return _SELECT_CONSTRAINT.format(term=name)
+    rules = rules_of(source)
+    if any(rule.mode == "fit" for rule in rules):
+        template = _SELECT_CONSTRAINT if postfit_token(rules) else _SELECT_RULES
+        return template.format(term=name, rules=rules.describe())
     if kind in ("ps", "bs") and max(orders) > 2:
         need = "2 or less"
     elif kind == "cr_cardinal" and orders != (2,):

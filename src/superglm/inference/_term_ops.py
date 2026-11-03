@@ -395,6 +395,7 @@ def term_inference(
                 smooth_curve=curve,
                 level_is_special=level_is_special,
                 spline=spline_meta,
+                monotone=rules_of(spec).describe() or None,
                 alpha=alpha,
             )
             if spec._grouping is not None:
@@ -577,6 +578,7 @@ def term_inference(
                 centering_mode="base_level",
                 edf=edf,
                 smoothing_lambda=lam,
+                monotone=rules_of(spec).describe() or None,
                 alpha=alpha,
             ),
             centering,

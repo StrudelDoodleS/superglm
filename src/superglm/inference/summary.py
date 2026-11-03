@@ -133,6 +133,30 @@ def _profile_nll_cell(info: dict[str, Any], key: str) -> tuple[str, str]:
     return ("Profile NLL", f"{info[key]:.4f}") if key in info else ("", "")
 
 
+def _rules_text(row: _CoefRow) -> str:
+    """A term's rule line: its rules as written, the engine, and a repair marker.
+
+    The term test, ref_df and curve SE band are withheld for a repaired term rather
+    than printed against the unconstrained fit's reference distribution; the marker
+    says so, or the row reads as a term that simply had no test.
+    """
+    text = f"mono={row.monotone}"
+    if row.monotone_engine is not None:
+        text += f" ({row.monotone_engine})"
+    if row.monotone_repaired:
+        text += ", repaired (inference withheld)"
+    return text
+
+
+def _level_rule_notes(rows: list[_CoefRow]) -> dict[str, str]:
+    """The rule line of each term shown as level rows, which have no spline row to carry it."""
+    notes: dict[str, str] = {}
+    for row in rows:
+        if row.monotone is not None and not row.is_spline:
+            notes.setdefault(row.group, _rules_text(row))
+    return notes
+
+
 _SIG_LEGEND = "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
 # The column tag and the note that defines it, shared with ``superglm.export.summary``.
 # The note states what the rule establishes. The first branch is a volume test, a
@@ -558,6 +582,7 @@ class ModelSummary:
         lines.append(_thin())
 
         # Coefficient rows with group separators
+        level_rules = _level_rule_notes(display_rows)
         prev_group = None
         for row in display_rows:
             # Emit group separator when the group changes (blank rows for breathing room)
@@ -566,6 +591,8 @@ class ModelSummary:
                     lines.append(_row(""))
                 lines.append(_group_sep(row.group))
                 lines.append(_row(""))
+                if row.group in level_rules:
+                    lines.append(_row(f"  {level_rules[row.group]}"))
             prev_group = row.group
 
             if row.structured_kind is not None:
@@ -608,14 +635,7 @@ class ModelSummary:
                 if has_test and row.curve_se_min is not None and not np.isnan(row.curve_se_min):
                     detail_parts.append(f"curve SE: {row.curve_se_min:.2f}-{row.curve_se_max:.2f}")
                 if row.monotone is not None:
-                    mono_str = f"mono={row.monotone}"
-                    if row.monotone_engine is not None:
-                        mono_str += f" ({row.monotone_engine})"
-                    if row.monotone_repaired:
-                        # The term test, ref_df and curve SE band are withheld for a repaired term (not printed
-                        # against the unconstrained fit's reference distribution); say so beside the marker.
-                        mono_str += ", repaired (inference withheld)"
-                    detail_parts.append(mono_str)
+                    detail_parts.append(_rules_text(row))
                 detail_str = ", ".join(detail_parts)
 
                 if has_test:
@@ -972,6 +992,7 @@ class ModelSummary:
             "padding:2px 8px;text-align:left;font-weight:bold;color:#555;"
             "border-top:1px solid #bbb;border-bottom:none;font-size:12px;"
         )
+        level_rules = _level_rule_notes(display_rows)
         prev_group = None
         for row in display_rows:
             if row.group and row.group != prev_group:
@@ -979,6 +1000,11 @@ class ModelSummary:
                     f'<tr><td colspan="{ncols}" style="{group_sep_style}">'
                     f"{html_escape(row.group)}</td></tr>"
                 )
+                if row.group in level_rules:
+                    parts.append(
+                        f'<tr><td colspan="{ncols}" style="padding:0 8px 2px;'
+                        f'font-size:11px;color:#555;">{html_escape(level_rules[row.group])}</td></tr>'
+                    )
             prev_group = row.group
 
             if row.structured_kind is not None:
@@ -1029,17 +1055,7 @@ class ModelSummary:
                         f"curve SE: {row.curve_se_min:.2f}&ndash;{row.curve_se_max:.2f}"
                     )
                 if row.monotone is not None:
-                    mono_str = f"mono={row.monotone}"
-                    if row.monotone_engine is not None:
-                        mono_str += f" ({row.monotone_engine})"
-                    if row.monotone_repaired:
-                        # The term test, ref_df and the curve SE band are
-                        # WITHHELD for a repaired term rather than printed
-                        # against the unconstrained fit's reference
-                        # distribution -- say which, beside the marker, or the
-                        # row reads as a term that simply had no test.
-                        mono_str += ", repaired (inference withheld)"
-                    detail_parts.append(mono_str)
+                    detail_parts.append(html_escape(_rules_text(row)))
                 detail_str = ", ".join(detail_parts)
                 detail_html = (
                     f"<br><span style='font-size:11px;'>{detail_str}</span>" if detail_str else ""

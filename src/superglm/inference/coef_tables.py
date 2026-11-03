@@ -833,6 +833,7 @@ def build_coef_rows(
             gedf = _get_group_edf_map()
             cat_edf = gedf.get(g.name, 0.0) if active else 0.0
             diag = _level_diag.get(g.name, {})
+            cat_rules = rules_of(spec).describe() or None
             for i, level in enumerate(spec._non_base):
                 coef_val = float(b_g[i])
                 se_val = float(se_g[i])
@@ -853,6 +854,8 @@ def build_coef_rows(
                         level_exposure_share=exp_share_i,
                         quasi_separated=thin_i,
                         advisory_trigger="thin_level" if thin_i else "",
+                        monotone=cat_rules,
+                        monotone_engine=g.monotone_engine if cat_rules else None,
                     )
                 )
 

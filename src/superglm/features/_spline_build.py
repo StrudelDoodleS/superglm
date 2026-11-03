@@ -8,7 +8,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._group_matrix import _group_matrix_support as row_supports
-from superglm.features._spline_config import clear_scop_state, warn_scop_retired
+from superglm.features._spline_config import (
+    clear_scop_state,
+    fit_time_select_message,
+    warn_scop_retired,
+)
 from superglm.features._spline_identifiability import (
     apply_identifiability_for_spec,
     build_identifiability_projection_for_spec,
@@ -17,7 +21,7 @@ from superglm.features._spline_multi_penalty import build_multi_m_components
 from superglm.features._spline_penalties import structural_penalty_ranks
 from superglm.features._spline_select import build_select
 from superglm.features._spline_subclass_ops import prepare_shape_rules
-from superglm.features.constraint import CONSTRAINT_KINDS, rules_of
+from superglm.features.constraint import postfit_token, rules_of
 from superglm.types import GroupInfo, TensorMarginalInfo
 
 
@@ -127,11 +131,10 @@ def _raise_if_unsupported_fit_shape_constraint(spec: Any) -> None:
     if not _uses_fit_time_shape_constraints(spec) or shape_engine(spec) is not None:
         return
     rules = rules_of(spec)
-    only = rules.rules[0]
-    if len(rules) == 1 and only.kind in CONSTRAINT_KINDS and only.stretch == (None, None):
+    token = postfit_token(rules)
+    if token:
         raise NotImplementedError(
-            f"Fit-time {only.kind} constraints are not implemented yet. "
-            f"Use Constraint.postfit.{only.kind} instead."
+            f"Fit-time {rules.describe()} constraints are not implemented yet. Use {token} instead."
         )
     raise NotImplementedError(
         f"Fit-time {rules.describe()} constraints are not implemented for this spline kind yet. "
@@ -231,10 +234,7 @@ def build_group_info(
 
     if _uses_fit_time_shape_constraints(spec):
         if spec.select:
-            raise NotImplementedError(
-                "Fit-time shape constraints are not supported with "
-                "select=True. Use select=False or Constraint.postfit.*."
-            )
+            raise NotImplementedError(fit_time_select_message(rules_of(spec)))
 
     x = np.asarray(x, dtype=np.float64).ravel()
     spec._place_knots(x, sample_weight)

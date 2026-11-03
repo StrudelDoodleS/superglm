@@ -10,6 +10,7 @@ collections existed. SuperLSS warns by rule in test_distributional_shape_constra
 from __future__ import annotations
 
 import copy
+import html
 import pickle
 import warnings
 from pathlib import Path
@@ -18,7 +19,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Constraint, OrderedCategorical, Spline, SuperGLM
+from superglm import Categorical, Constraint, OrderedCategorical, Spline, SuperGLM
 from superglm.editor import EditorSession
 from superglm.editor.errors import EditorValueError
 from superglm.export._ppform import extract_ppform
@@ -134,6 +135,54 @@ def test_coef_tables_ordered_and_spline_agree(rules):
     assert lines == {"x": rules.describe(), "band": rules.describe()}
 
 
+def _rule_lines(model, term: str, line: str) -> None:
+    """``term``'s rule line is in its term inference, the console summary and the HTML summary."""
+    assert model.term_inference(term, with_se=False).monotone == line
+    summary = model.summary()
+    assert f"mono={line}" in str(summary)
+    assert html.escape(f"mono={line}") in summary._repr_html_()
+
+
+@pytest.mark.parametrize(
+    "rules", [C.increasing & C.cap(0.8, 1.25), C.increasing], ids=["collection", "single"]
+)
+def test_summary_shows_the_rules_of_an_ordered_term(rules):
+    """An ordered term hosts its rules on a basis; its summary row and inference still say them."""
+    basis = Spline(kind="ps", k=5, constraint=rules)
+    model, _, _ = _fit({"band": OrderedCategorical(order=_BANDS, basis=basis)})
+    _rule_lines(model, "band", rules.describe())
+
+
+def test_summary_shows_the_cap_of_a_categorical():
+    """A capped categorical has no spline row: its rule line sits under the term's heading."""
+    model, X, y = _fit({"region": Categorical(constraint=C.cap(0.8, 1.25))})
+    _rule_lines(model, "region", "cap(0.8, 1.25)")
+    lines = str(model.summary()).splitlines()
+    (note,) = [i for i, text in enumerate(lines) if "mono=cap(0.8, 1.25) (qp)" in text]
+    heading = next(i for i, text in enumerate(lines) if " region " in text and "╡" in text)
+    first_level = next(i for i, text in enumerate(lines) if text.lstrip("║ ").startswith("region["))
+    assert heading < note < first_level
+    rows = [row for row in model.metrics(X, y)._build_coef_rows() if row.group == "region"]
+    assert rows and {row.monotone for row in rows} == {"cap(0.8, 1.25)"}
+
+
+def test_terms_without_rules_print_no_rule_line():
+    """A term with no rules, or an uncapped categorical, shows no line, row field or engine."""
+    model, X, y = _fit(
+        {
+            "x": Spline(kind="ps", k=7),
+            "band": OrderedCategorical(order=_BANDS, basis=Spline(kind="ps", k=5)),
+            "region": Categorical(),
+        }
+    )
+    for term in ("x", "band", "region"):
+        assert model.term_inference(term, with_se=False).monotone is None
+    rows = model.metrics(X, y)._build_coef_rows()
+    assert {(row.monotone, row.monotone_engine) for row in rows} == {(None, None)}
+    summary = model.summary()
+    assert "mono=" not in str(summary) and "mono=" not in summary._repr_html_()
+
+
 # -- The editor -----------------------------------------------------------------------
 
 _NO_NS = (
@@ -143,6 +192,11 @@ _NO_NS = (
 _NO_SHRINK = (
     "Shrinkage cannot be combined with a shape constraint the fit enforces, which {term!r} "
     "has; leave Shrink off, or apply the constraint after the fit (Constraint.postfit) in code."
+)
+_NO_SHRINK_RULES = (
+    "Shrinkage cannot be combined with the shape rules the fit enforces, which {term!r} has "
+    "({rules}); leave Shrink off. Constraint.postfit repairs one whole-curve shape and cannot "
+    "take them."
 )
 
 
@@ -172,14 +226,15 @@ def _editor_term(term: str, rules):
     ],
 )
 def test_editor_refusals_with_collections(term, one, many):
-    """A collection is refused Shrink and a natural spline exactly as one rule is."""
-    expected = (_NO_NS.format(term=term), _NO_SHRINK.format(term=term))
-    for rules in (one, many):
+    """A collection is refused Shrink and a natural spline as one rule is, with advice that holds."""
+    cases = (
+        (one, _NO_SHRINK.format(term=term)),
+        (many, _NO_SHRINK_RULES.format(term=term, rules=many.describe())),
+    )
+    for rules, shrink in cases:
         model, session = _editor_term(term, rules)
-        assert (
-            _refused(session, term, {"kind": "ns"}),
-            _refused(session, term, {"select": True}),
-        ) == expected
+        assert _refused(session, term, {"kind": "ns"}) == _NO_NS.format(term=term)
+        assert _refused(session, term, {"select": True}) == shrink
         assert shape_unavailable_reason(model, term) == (
             "Remove the term's shape constraint to add shaped ranges."
         )
@@ -311,3 +366,36 @@ def test_unsupported_fit_time_rules_advise_what_the_basis_can_take():
         assert f"Fit-time {rules.describe()} constraints are not implemented" in text
         assert "Constraint.postfit." not in text, text
         assert "kind='cr'" in text and "kind='ps'" in text and "kind='bs'" in text
+
+
+def _refusal_text(where: str, rules) -> str:
+    """The NotImplementedError a spline or ordered term meets for ``rules`` at ``where``."""
+    with pytest.raises(NotImplementedError) as refused:
+        if where == "degree":
+            Spline(kind="ps", n_knots=8, degree=4, constraint=rules)
+        elif where == "spline-select":
+            X, y = _age_rows()
+            spec = Spline(kind="ps", n_knots=8, select=True, constraint=rules)
+            SuperGLM(family="poisson", features={"age": spec}).fit(X, y)
+        else:
+            frame, counts = _rows()
+            basis = Spline(kind="ps", k=5, select=True, constraint=rules)
+            band = OrderedCategorical(order=_BANDS, basis=basis)
+            SuperGLM(family="poisson", features={"band": band}).fit(frame, counts)
+    return str(refused.value)
+
+
+@pytest.mark.parametrize(
+    ("where", "single", "many"),
+    [
+        ("spline-select", C.increasing, C.increasing & C.concave),
+        ("ordered-select", C.increasing, C.increasing & C.cap(0.8, 1.25)),
+        ("degree", C.convex, C.increasing & C.convex),
+    ],
+)
+def test_postfit_advice_is_given_only_where_it_is_true(where, single, many):
+    """Constraint.postfit is offered for one whole-curve shape, not for a combination or a cap."""
+    refused = _refusal_text(where, many)
+    assert "Constraint.postfit." not in refused, refused
+    assert f"cannot take {many.describe()}" in refused, refused
+    assert f"Constraint.postfit.{single.kind}" in _refusal_text(where, single)

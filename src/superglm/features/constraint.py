@@ -283,4 +283,16 @@ def rules_of(spec: Any) -> ConstraintRules:
     return ConstraintRules((ConstraintSpec(mode, kind),))
 
 
+def postfit_token(rules: ConstraintRules) -> str | None:
+    """The ``Constraint.postfit`` token that repairs ``rules`` after the fit, or None.
+
+    A post-fit repair projects one whole-curve monotone or curvature shape. A
+    combination, a stretch, a flat stretch, a cap or a step limit has no post-fit form.
+    """
+    only = rules.rules[0] if len(rules) == 1 else None
+    if only is None or only.kind not in CONSTRAINT_KINDS or only.stretch != (None, None):
+        return None
+    return f"Constraint.postfit.{only.kind}"
+
+
 __all__ = ["Constraint", "ConstraintRules", "ConstraintSpec", "RULE_KINDS", "rules_of"]

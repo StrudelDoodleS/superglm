@@ -764,7 +764,7 @@ class OrderedCategorical:
         neither stretches nor level rules leaves the inner spline as built, so
         a single full-range rule builds the rows it always has.
         """
-        from superglm.features._spline_config import _normalize_constraint
+        from superglm.features._spline_config import _normalize_constraint, fit_time_select_message
 
         self._refuse_level_rules()
         level, shape = rules_of(self).split(_LEVEL_RULE_KINDS)
@@ -773,10 +773,7 @@ class OrderedCategorical:
             return
         inner = cast(Any, self._basis_spline)  # ty: the constraint fields are set per instance
         if level and inner.select:
-            raise NotImplementedError(
-                "Fit-time shape constraints are not supported with "
-                "select=True. Use select=False or Constraint.postfit.*."
-            )
+            raise NotImplementedError(fit_time_select_message(rules_of(self)))
         self._refuse_stretches_in_levels(shape)
         rules, kind, mode = _normalize_constraint(shape.resolve(self._stretch_end_value))
         inner.constraint_rules = rules
