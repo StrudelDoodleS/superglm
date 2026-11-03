@@ -460,6 +460,8 @@ def _documentation_namespace(results: dict[str, object]) -> dict[str, object]:
     }
     namespace.update(
         {
+            "C": superglm.Constraint.fit,
+            "bands": ["18-25", "26-35", "36-45", "46-55", "56-65", "66-75", "76-85", "86+"],
             "X": frame,
             "X_train": frame,
             "X_validation": frame,

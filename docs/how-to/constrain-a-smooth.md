@@ -194,7 +194,7 @@ model = SuperGLM(
 model.fit(df, y)
 
 ti = model.term_inference("band", with_se=False)
-dict(zip(ti.levels, ti.relativity))
+pd.Series(ti.relativity, index=ti.levels)
 ```
 
 `C.max_step(up, down)` keeps every ratio between adjacent bands inside
@@ -229,7 +229,7 @@ model = SuperGLM(
 model.fit(df, y)
 
 ti = model.term_inference("region", with_se=False)
-dict(zip(ti.levels, ti.relativity))
+pd.Series(ti.relativity, index=ti.levels)
 ```
 
 `cat("region", constraint=C.cap(0.8, 1.25))` is the same declaration in the
