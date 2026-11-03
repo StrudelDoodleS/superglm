@@ -580,6 +580,7 @@ def test_workers_stop_at_the_total_over_the_largest_unsplit_block(monkeypatch):
             return self
 
     monkeypatch.setattr(parallel, "pool_workers", lambda n_units, task_bytes: 8)
+    monkeypatch.setattr(parallel, "section_threads", lambda: 8)
     for split_largest, expected in ((False, 2), (True, 8)):
         profile: dict = {}
         with block_queue_config(min_cost=0):
@@ -605,6 +606,7 @@ def test_workers_stop_at_the_queue_cost_over_its_per_task_overhead(monkeypatch):
             return self
 
     monkeypatch.setattr(parallel, "pool_workers", lambda n_units, task_bytes: 16)
+    monkeypatch.setattr(parallel, "section_threads", lambda: 16)
     for multiple, expected in ((0.5, None), (1, 2), (7, 8)):
         tasks = [
             BlockTask(
@@ -622,6 +624,33 @@ def test_workers_stop_at_the_queue_cost_over_its_per_task_overhead(monkeypatch):
         profile = {}
         queue.run_block_tasks(tasks, Cache(), profile)
         assert profile.get("block_pool_workers") == 16
+
+
+def test_a_dispatch_bound_queue_runs_on_no_more_than_numbas_thread_count(monkeypatch):
+    """SuperLSS's row block queue keeps the cap its pooled sections had: numba's
+    thread count, which ``numba.set_num_threads`` sets. A queue that does not bound
+    its dispatch keeps every worker ``pool_workers`` gives. Mutation check: without
+    the ``section_threads`` cap the bounded queue takes Amdahl's eight workers."""
+    import numba
+
+    class Cache:
+        _batch = None
+        _profile = None
+
+        def worker_view(self, shared, profile, work_queue):
+            return self
+
+    monkeypatch.setattr(parallel, "pool_workers", lambda n_units, task_bytes: 16)
+    monkeypatch.setattr(parallel, "resolve_n_jobs", lambda: 16)
+    monkeypatch.setattr(numba, "get_num_threads", lambda: 2)
+    tasks = [
+        BlockTask(index, 7 * queue._TASK_OVERHEAD_COST, 1, lambda c, p: None, lambda v: None)
+        for index in range(40)
+    ]
+    for dispatch_bound, expected in ((True, 2), (False, 16)):
+        profile: dict = {}
+        queue.run_block_tasks(tasks, Cache(), profile, dispatch_bound=dispatch_bound)
+        assert profile.get("block_pool_workers") == expected
 
 
 @pytest.fixture

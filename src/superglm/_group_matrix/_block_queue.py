@@ -22,16 +22,19 @@ blocks "in order of decreasing computational cost".  This module does that:
 - **Workers.**  ``_parallel.pool_workers``: ``n_jobs`` capped by the task
   count and by ``max_memory`` over the largest task's working set.  A queue
   that bounds its dispatch (``dispatch_bound``, the SuperLSS row block's,
-  where the overhead was measured) is also capped by the total cost over
+  where the overhead was measured) runs on at most ``section_threads()``,
+  numba's thread count as the SuperLSS sections it replaced did, and is
+  capped by the total cost over
   the largest unsplit task's (no schedule finishes before that task, and
   LPT on that many workers finishes within twice its cost; Graham 1969),
   and by the queue's cost over its serial part: every task pays a fixed
   ``_TASK_OVERHEAD_COST`` of dispatch under the GIL, and a queue whose
   serial fraction is ``s`` runs at most ``1 / s`` times faster on any
   number of workers (Amdahl 1967), so further workers would only contend
-  for the GIL, and a queue no pool can make twice as fast runs serially.  One parallelism level: BLAS runs on one thread for the whole
-  assembly (``pooled_blas_threads``), and the block kernels are ``nogil``
-  and never ``prange``.
+  for the GIL, and a queue no pool can make twice as fast runs serially.
+  One parallelism level: BLAS runs on one thread for the whole assembly
+  (``pooled_blas_threads``), and the block kernels are ``nogil`` and never
+  ``prange``.
 - **Determinism.**  A task's arithmetic does not depend on which worker runs
   it or what ran before it: shared entries are formed once and are the
   serial values (``_SharedEntries``), scratch is per worker, and each block
@@ -338,6 +341,7 @@ def run_block_tasks(
         resolve_max_memory,
         retained_bytes,
         section_executor,
+        section_threads,
     )
 
     override = _override.get()
@@ -353,6 +357,7 @@ def run_block_tasks(
     else:
         workers = pool_workers(len(units), max(task.nbytes for task in tasks))
     if dispatch_bound and workers > 1 and override.workers is None:
+        workers = min(workers, section_threads())
         largest_unsplit = max((task.cost for task in tasks if not task.split_bytes), default=0.0)
         overhead = len(tasks) * _TASK_OVERHEAD_COST
         amdahl = (total + overhead) / overhead
