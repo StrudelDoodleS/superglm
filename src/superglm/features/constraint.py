@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import numbers
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -31,7 +32,7 @@ def _fmt(x: float | str) -> str:
 def _check_end(x: float | str | None) -> None:
     if x is None or isinstance(x, str):
         return
-    if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x):
+    if isinstance(x, bool) or not isinstance(x, numbers.Real) or not math.isfinite(x):
         raise ValueError(f"a stretch end must be a finite number or a band label, got {x!r}")
 
 
@@ -66,6 +67,11 @@ class ConstraintSpec:
         _check_end(lo)
         _check_end(hi)
         if lo is not None and hi is not None:
+            if lo == hi:
+                raise ValueError(
+                    f"within({_fmt(lo)}, {_fmt(hi)}) starts and ends at the same point, which "
+                    "leaves no stretch; give two different ends"
+                )
             numeric = not isinstance(lo, str) and not isinstance(hi, str)
             if numeric and not lo < hi:
                 raise ValueError(
@@ -145,13 +151,13 @@ class ConstraintRules:
     def __repr__(self) -> str:
         return " & ".join(repr(r) for r in self.rules)
 
-    def split(self, kinds: frozenset[str]) -> tuple[ConstraintRules, ConstraintRules]:
+    def _split(self, kinds: frozenset[str]) -> tuple[ConstraintRules, ConstraintRules]:
         """The rules whose kind is in ``kinds``, then the rest."""
         chosen = tuple(r for r in self.rules if r.kind in kinds)
         rest = tuple(r for r in self.rules if r.kind not in kinds)
         return ConstraintRules(chosen), ConstraintRules(rest)
 
-    def resolve(self, position: Callable[[float | str], float]) -> ConstraintRules:
+    def _resolve(self, position: Callable[[float | str], float]) -> ConstraintRules:
         """Replace every stretch end by ``position(end)``, then re-check the rules."""
 
         def place(x: float | str | None) -> float | None:

@@ -565,8 +565,9 @@ class PSpline(_BSplineBase):
 
     knots : array-like or None
         Explicit interior knot positions.
-    constraint : ConstraintSpec or None
-        Public shape-constraint token. Use ``Constraint.fit.increasing``,
+    constraint : ConstraintSpec, ConstraintRules or None
+        Public shape-constraint token, or fit-time rules joined with ``&``
+        into a ``ConstraintRules``. Use ``Constraint.fit.increasing``,
         ``Constraint.fit.decreasing``, ``Constraint.fit.convex``,
         ``Constraint.fit.concave``, ``Constraint.postfit.increasing``,
         ``Constraint.postfit.decreasing``, ``Constraint.postfit.convex``, or
@@ -688,8 +689,9 @@ class BSplineSmooth(_IntegratedPenaltySpline, _BSplineBase):
         If True, add double-penalty shrinkage (null + range space).
     knots : array-like or None
         Explicit interior knot positions.
-    constraint : ConstraintSpec or None
-        Public shape-constraint token. Use ``Constraint.fit.increasing``,
+    constraint : ConstraintSpec, ConstraintRules or None
+        Public shape-constraint token, or fit-time rules joined with ``&``
+        into a ``ConstraintRules``. Use ``Constraint.fit.increasing``,
         ``Constraint.fit.decreasing``, ``Constraint.fit.convex``,
         ``Constraint.fit.concave``, ``Constraint.postfit.increasing``,
         ``Constraint.postfit.decreasing``, ``Constraint.postfit.convex``, or
@@ -851,8 +853,9 @@ class CubicRegressionSpline(_IntegratedPenaltySpline):
 
     Parameters
     ----------
-    constraint : ConstraintSpec or None
-        Public shape-constraint token. Use ``Constraint.fit.increasing``,
+    constraint : ConstraintSpec, ConstraintRules or None
+        Public shape-constraint token, or fit-time rules joined with ``&``
+        into a ``ConstraintRules``. Use ``Constraint.fit.increasing``,
         ``Constraint.fit.decreasing``, ``Constraint.fit.convex``,
         ``Constraint.fit.concave``, or any of the corresponding
         ``Constraint.postfit.*`` kinds. Fit-time constraints apply on the
@@ -986,7 +989,7 @@ class CardinalCRSpline(_SplineBase):
         If True, decompose into linear + wiggly subgroups (double penalty).
     knots : array-like or None
         Explicit interior knot positions.
-    constraint : ConstraintSpec or None
+    constraint : ConstraintSpec, ConstraintRules or None
         Public shape-constraint token. Cardinal CR splines support
         ``Constraint.postfit.increasing``, ``Constraint.postfit.decreasing``,
         ``Constraint.postfit.convex``, and ``Constraint.postfit.concave``.

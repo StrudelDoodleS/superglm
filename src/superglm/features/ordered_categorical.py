@@ -767,7 +767,7 @@ class OrderedCategorical:
         from superglm.features._spline_config import _normalize_constraint, fit_time_select_message
 
         self._refuse_level_rules()
-        level, shape = rules_of(self).split(_LEVEL_RULE_KINDS)
+        level, shape = rules_of(self)._split(_LEVEL_RULE_KINDS)
         self._level_rules = level
         if not level and all(rule.stretch == (None, None) for rule in shape):
             return
@@ -775,7 +775,7 @@ class OrderedCategorical:
         if level and inner.select:
             raise NotImplementedError(fit_time_select_message(rules_of(self)))
         self._refuse_stretches_in_levels(shape)
-        rules, kind, mode = _normalize_constraint(shape.resolve(self._stretch_end_value))
+        rules, kind, mode = _normalize_constraint(shape._resolve(self._stretch_end_value))
         inner.constraint_rules = rules
         inner.constraint_kind = inner.monotone = kind
         inner.constraint_mode = inner.monotone_mode = mode
@@ -784,23 +784,45 @@ class OrderedCategorical:
         )
 
     def _refuse_stretches_in_levels(self, shape: ConstraintRules) -> None:
-        """Refuse reversed or overlapping stretches, in level labels, before they are resolved.
+        """Refuse empty, reversed or overlapping stretches in level labels, before resolving.
 
-        ``ConstraintRules.resolve`` would refuse both too, but in axis values.
-        Overlap is checked within the direction, curvature and flat groups, as
-        ``ConstraintRules.validate`` checks it; stretches that only touch at a
-        level do not overlap.
+        Resolving would refuse each of them too, but in axis values. A stretch
+        is empty when its ends name one level, or when it lies below the first
+        level or above the last. Overlap is checked within the direction,
+        curvature and flat groups, as ``ConstraintRules.validate`` checks it;
+        stretches that only touch at a level do not overlap.
         """
         levels = sorted(self._smooth_levels, key=self._level_to_value.__getitem__)
         name = {float(self._level_to_value[level]): level for level in levels}
+        first, last = (
+            float(self._level_to_value[levels[0]]),
+            float(self._level_to_value[levels[-1]]),
+        )
         spans = []
         for rule in shape:
             lo = -np.inf if rule.lo is None else self._stretch_end_value(rule.lo)
             hi = np.inf if rule.hi is None else self._stretch_end_value(rule.hi)
+            if lo == hi:
+                raise ValueError(
+                    f"{rule.describe()} starts and ends at level {name[lo]!r}, which leaves no "
+                    "stretch; end it at a later level"
+                )
             if rule.lo is not None and rule.hi is not None and not lo < hi:
                 raise ValueError(
                     f"{rule.describe()} needs its first level before its second in level "
                     "order; swap the ends or use a single below/above"
+                )
+            if hi <= first:
+                raise ValueError(
+                    f"{rule.describe()} ends at the first level, {levels[0]!r}, so the stretch "
+                    "holds no step between levels; end it at a later level, or drop .below to "
+                    "apply the rule on every level"
+                )
+            if lo >= last:
+                raise ValueError(
+                    f"{rule.describe()} starts at the last level, {levels[-1]!r}, so the "
+                    "stretch holds no step between levels; start it at an earlier level, or "
+                    "drop .above to apply the rule on every level"
                 )
             spans.append((rule, lo, hi))
         for group in _DIRECTION_KINDS, _CURVATURE_KINDS, ("flat",):
@@ -843,6 +865,14 @@ class OrderedCategorical:
                     f"stretch end {end!r} names level {matched!r}, which the grouping merges "
                     f"into group {group!r} with {members!r}; end the stretch at the group "
                     f"label {group!r}"
+                )
+            straddle = self._straddling_group(texts.index(matched))
+            if straddle is not None:
+                label, held = straddle
+                raise ValueError(
+                    f"stretch end {end!r} names level {matched!r}, and group {label!r} holds "
+                    f"levels {held!r} on both sides of it, so no stretch can end there; end "
+                    "the stretch at a level outside that group, or group its levels on one side"
                 )
         if matched in texts:
             position = self._grouped_break_position(texts.index(matched), parameter="stretch end")
@@ -1047,21 +1077,32 @@ class OrderedCategorical:
                 "stated kink -- regrouping it is a spec change, not an edit. Ungroup "
                 "those levels, or restate the term without this break."
             )
+        straddle = self._straddling_group(declared_position)
+        if straddle is not None:
+            other_label, other_members = straddle
+            raise ValueError(
+                f"OrderedCategorical grouping straddles the stated {parameter} at "
+                f"level {str(level)!r}: group {other_label!r} spans "
+                f"{other_members!r}, which sit on both sides of "
+                "it. Group within one segment, or restate the term without this "
+                "break."
+            )
+        smooth_texts = [str(lev) for lev in self._smooth_levels]
+        return smooth_texts.index(label)
+
+    def _straddling_group(self, declared_position: int) -> tuple[str, list[str]] | None:
+        """The group whose levels sit on both sides of a declared level, if one does."""
+        grouping = self._grouping
+        if grouping is None:
+            return None
         position_of = {str(lev): index for index, lev in enumerate(self._declared_smooth_levels)}
         for other_label, other_members in grouping.group_to_originals.items():
             member_positions = [position_of[str(m)] for m in other_members if str(m) in position_of]
             if len(member_positions) > 1 and min(member_positions) < declared_position < max(
                 member_positions
             ):
-                raise ValueError(
-                    f"OrderedCategorical grouping straddles the stated {parameter} at "
-                    f"level {str(level)!r}: group {str(other_label)!r} spans "
-                    f"{[str(m) for m in other_members]!r}, which sit on both sides of "
-                    "it. Group within one segment, or restate the term without this "
-                    "break."
-                )
-        smooth_texts = [str(lev) for lev in self._smooth_levels]
-        return smooth_texts.index(label)
+                return str(other_label), [str(m) for m in other_members]
+        return None
 
     def _resolve_inner_piecewise(self, piecewise: Piecewise) -> None:
         """Resolve a Piecewise inner basis onto the level-position axis."""

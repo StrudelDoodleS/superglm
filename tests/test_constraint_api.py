@@ -3,6 +3,7 @@
 import pickle
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from superglm import (
@@ -12,6 +13,7 @@ from superglm import (
     ConstraintSpec,
     PSpline,
     Spline,
+    SuperGLM,
     features,
 )
 from superglm.features.constraint import RULE_KINDS, rules_of
@@ -129,21 +131,21 @@ def test_label_stretches_are_kept_and_compared_only_after_resolve():
     assert overlapping.rules[0].stretch == ("young", "old")
     overlapping.validate()  # labels are not compared before resolve
     with pytest.raises(ValueError, match=r"\[40, 60\]"):
-        overlapping.resolve(position)
+        overlapping._resolve(position)
     disjoint = C.increasing.below("mid") & C.decreasing.above("mid")
-    assert [r.stretch for r in disjoint.resolve(position)] == [(None, 40.0), (40.0, None)]
+    assert [r.stretch for r in disjoint._resolve(position)] == [(None, 40.0), (40.0, None)]
 
 
 def test_resolve_refuses_labels_that_land_out_of_order():
     rules = ConstraintRules((C.increasing.within("old", "young"),))
     rules.validate()
     with pytest.raises(ValueError, match="lo < hi"):
-        rules.resolve({"young": 20.0, "old": 60.0}.__getitem__)
+        rules._resolve({"young": 20.0, "old": 60.0}.__getitem__)
 
 
 def test_split_partitions_by_kind_preserving_order():
     rules = C.increasing & C.cap(0.5, 2) & C.concave & C.max_step(0.2)
-    shape, rest = rules.split(frozenset({"increasing", "concave"}))
+    shape, rest = rules._split(frozenset({"increasing", "concave"}))
     assert [r.kind for r in shape] == ["increasing", "concave"]
     assert [r.kind for r in rest] == ["cap", "max_step"]
     assert isinstance(shape, ConstraintRules) and isinstance(rest, ConstraintRules)
@@ -175,7 +177,11 @@ def test_describe_cap_and_max_step():
         (lambda: (C.flat.within(10, 30) & C.flat.within(20, 40)).validate(), r"\[20, 30\]"),
         (lambda: rules_of_flat().validate(), "needs a stretch"),
         (lambda: C.flat.within(40, 25), "lo < hi"),
-        (lambda: C.flat.within(25, 25), "lo < hi"),
+        (
+            lambda: C.flat.within(25, 25),
+            r"^within\(25, 25\) starts and ends at the same point, which leaves no stretch; "
+            "give two different ends$",
+        ),
         (lambda: C.increasing.below(5).above(1), "already has a stretch"),
         (lambda: C.cap(0.5, 2).below(1), "whole curve"),
         (lambda: C.increasing.below(float("nan")), "finite"),
@@ -188,6 +194,19 @@ def test_describe_cap_and_max_step():
 def test_refusals(bad, match):
     with pytest.raises(ValueError, match=match):
         bad()
+
+
+@pytest.mark.parametrize("end", [np.int64(5), np.float32(2.5), np.float64(4.0)])
+def test_numpy_scalar_stretch_ends_are_accepted(end):
+    """Mutation: the end check accepted only built-in int and float."""
+    assert C.increasing.below(end).hi == end
+    assert C.increasing.within(end, 10).lo == end
+
+
+@pytest.mark.parametrize("end", [np.float64("nan"), np.float32("inf"), np.True_, True])
+def test_non_finite_and_boolean_stretch_ends_are_refused(end):
+    with pytest.raises(ValueError, match="a stretch end must be a finite number or a band label"):
+        C.increasing.below(end)
 
 
 def rules_of_flat():
@@ -287,6 +306,23 @@ def test_a_rule_collection_never_fits_with_rules_dropped():
     spec = Spline(kind="ps", k=12, constraint=C.increasing & C.max_step(0.2))
     with pytest.raises(ValueError, match="band the feature with OrderedCategorical"):
         spec.build(x)
+
+
+def test_max_step_on_a_spline_is_refused_for_its_missing_levels_before_its_link():
+    """A term that cannot take a step limit says so, not that the link is wrong.
+
+    Mutation: with the link checked first, the identity-link fit names the link.
+    """
+    rng = np.random.default_rng(3)
+    X = pd.DataFrame({"x": rng.uniform(0.0, 1.0, 500)})
+    spline = Spline(kind="ps", k=8, constraint=C.increasing & C.max_step(0.2))
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": spline})
+    with pytest.raises(
+        ValueError,
+        match=r"^Feature 'x': max_step\(0\.2\) limits the step between adjacent levels, and a "
+        r"spline term has no levels; band the feature with OrderedCategorical",
+    ):
+        model.fit(X, rng.normal(size=500))
 
 
 def test_per_rule_degree_checks():
