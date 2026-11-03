@@ -491,7 +491,11 @@ def test_a_binomial_logit_fit_lands_where_the_derivative_grams_land(monkeypatch,
       compared through the fit it moves, its own ``|delta|`` plus the
       second-order remainder of an exponential approach, ``|delta|^2 / 2``;
     - the linear predictor on the fitted rows and the EDF move by the
-      first-order images of those steps (``_fit_sensitivities``).
+      first-order images of those steps (``_fit_sensitivities``);
+    - every bound is first order, with ``H`` the last outer Hessian the Grams'
+      fit formed, one Newton step before its stop, so each is doubled: a
+      rounding variant that lets one route stop an iteration sooner lands
+      just past the undoubled bound.
 
     Mutation: the leverage route's gradient correction halved (its stationary
     point moves).
@@ -514,6 +518,7 @@ def test_a_binomial_logit_fit_lands_where_the_derivative_grams_land(monkeypatch,
     live = ~frozen
     step = np.where(frozen, np.abs(delta) * (1.0 + 0.5 * np.abs(delta)), 0.0)
     step[live] = np.abs(np.linalg.inv(hessian[np.ix_(live, live)])) @ np.full(live.sum(), 2 * bar)
+    step *= 2.0
     assert np.all(np.abs(delta[live]) <= step[live])
 
     J, edf = _fit_sensitivities(grams)
