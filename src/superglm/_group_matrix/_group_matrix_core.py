@@ -64,6 +64,19 @@ class DenseGroupMatrix:
         return DenseGroupMatrix(self.M[idx])
 
 
+class OrdinaryPanelGroupMatrix(DenseGroupMatrix):
+    """One row block's dense, small categorical and intercept columns as one dense matrix.
+
+    Built by the binned SuperLSS assembly for each row block, as a split
+    matrix stacks its dense parts (tabmat's ``SplitMatrix``): its block with
+    another panel or dense group is one weighted product, and its block with
+    a binned, level or category group one pass that sums its rows by bin
+    (``_cross_gram``). A plain dense group otherwise.
+    """
+
+    __slots__ = ()
+
+
 class SparseGroupMatrix:
     """Sparse CSR group matrix wrapper."""
 

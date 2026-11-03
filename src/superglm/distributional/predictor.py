@@ -13,7 +13,6 @@ import scipy.sparse as sp
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame
-from superglm._parallel import parallel_config
 from superglm._predictor_compiler import CompiledPredictorDesign, compile_predictor_design
 from superglm.distributional.family import ParameterSpec
 from superglm.distributional.weights import ResolvedLikelihoodWeights
@@ -190,25 +189,42 @@ class PredictorExecutionPlan:
     def diagonal_moment(
         self,
         weights: NDArray,
+        *,
+        _factors=None,
     ) -> NDArray[np.float64]:
-        """Return one symmetric ``X.T @ diag(weights) @ X`` predictor block."""
-        # Serial Gram blocks: SuperLSS takes no ``n_jobs``, so its assembly
-        # starts no pool beside the family kernels' own threads.
-        with parallel_config(n_jobs=1):
-            moments = self.design.execution_plan.moments(
-                weights,
-                include_xtw=self.intercept,
-                signed=True,
-            )
+        """Return one symmetric ``X.T @ diag(weights) @ X`` predictor block.
+
+        ``_factors`` are the assembly's shared products (``MatrixExecutionPlan.moments``).
+        """
+        moments = self.design.execution_plan.moments(
+            weights,
+            include_xtw=self.intercept,
+            signed=True,
+            _factors=_factors,
+        )
+        return self._diagonal_block(weights, moments.gram, moments.xtw)
+
+    def diagonal_tasks(self, weights: NDArray, *, channel: int):
+        """``(tasks, finish)``: :meth:`diagonal_moment`'s block tasks, then ``finish()`` its block.
+
+        ``weights`` must be a finite row vector. The tasks run on the caller's
+        queue, whose cache keys pass tables by ``(channel, left, right)``.
+        """
+        gram, xtw, tasks = self.design.execution_plan.signed_moment_tasks(
+            weights, include_xtw=self.intercept, channel=channel
+        )
+        return tasks, lambda: self._diagonal_block(weights, gram, xtw)
+
+    def _diagonal_block(self, weights, gram, xtw) -> NDArray[np.float64]:
         slope_start = int(self.intercept)
         result = np.zeros((self.width, self.width), dtype=np.float64)
         if self.intercept:
             weight_values = self._validated_vector(weights, label="curvature channel")
             result[0, 0] = np.sum(weight_values, dtype=np.float64)
-            assert moments.xtw is not None
-            result[0, 1:] = moments.xtw
-            result[1:, 0] = moments.xtw
-        result[slope_start:, slope_start:] = moments.gram
+            assert xtw is not None
+            result[0, 1:] = xtw
+            result[1:, 0] = xtw
+        result[slope_start:, slope_start:] = gram
 
         # Copy one triangle so symmetry is bit-for-bit exact without a second
         # matrix-product evaluation or a global post-hoc average.
@@ -219,6 +235,8 @@ class PredictorExecutionPlan:
         self,
         right: PredictorExecutionPlan,
         weights: NDArray,
+        *,
+        _factors=None,
     ) -> NDArray[np.float64]:
         """Return one rectangular cross-predictor weighted moment."""
         if not isinstance(right, PredictorExecutionPlan):
@@ -227,7 +245,23 @@ class PredictorExecutionPlan:
             self.design.execution_plan,
             right.design.execution_plan,
         )
-        slopes = cross_plan.cross_moment(weights, signed=True)
+        slopes = cross_plan.cross_moment(weights, signed=True, _factors=_factors)
+        return self._cross_block(right, weights, slopes)
+
+    def cross_tasks(self, right: PredictorExecutionPlan, weights: NDArray, *, channel: int):
+        """``(tasks, finish)``: :meth:`cross_moment`'s pair tasks, then ``finish()`` its block.
+
+        ``weights`` must be a finite row vector, as for :meth:`diagonal_tasks`.
+        """
+        cross_plan = CrossMatrixExecutionPlan(
+            self.design.execution_plan,
+            right.design.execution_plan,
+        )
+        slopes = np.zeros(cross_plan.shape, dtype=np.float64)
+        tasks = cross_plan.cross_tasks(weights, slopes, channel=channel)
+        return tasks, lambda: self._cross_block(right, weights, slopes)
+
+    def _cross_block(self, right, weights, slopes) -> NDArray[np.float64]:
         weight_values = np.asarray(weights, dtype=np.float64)
         result = np.zeros((self.width, right.width), dtype=np.float64)
         left_start = int(self.intercept)

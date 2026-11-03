@@ -207,6 +207,12 @@ def _kernel_calls():
             data, indices, indptr, other.data, other.indices, other.indptr, W, 6, 4
         ),
         "_weighted_bincount_2d": lambda: kernels._weighted_bincount_2d(idx1, W, dense, n1),
+        "_rows_weighted_bincount_2d": lambda: kernels._rows_weighted_bincount_2d(
+            rows_a, idx2[rows_a], W, dense, n2
+        ),
+        "_level_weighted_bincount_2d": lambda: kernels._level_weighted_bincount_2d(
+            other_codes, W, dense, levels
+        ),
         "_support_weighted_bincount_2d": lambda: (
             kernels._support_weighted_bincount_2d(
                 out := np.zeros((n2, 3)), idx2, W, support, idx1, 1
@@ -217,6 +223,15 @@ def _kernel_calls():
             data, indices, indptr, 6, idx1, W, n1
         ),
         "_disc_disc_2d_hist": lambda: kernels._disc_disc_2d_hist(idx1, idx2, W, n1, n2),
+        "_disc_disc_2d_hist_add": lambda: (
+            kernels._disc_disc_2d_hist_add(out := np.zeros((n1, n2)), idx1, idx2, W) or out
+        ),
+        "_rows_disc_disc_2d_hist_add": lambda: (
+            kernels._rows_disc_disc_2d_hist_add(
+                out := np.zeros((n1, n2)), rows_b, idx1, idx2[rows_b], W
+            )
+            or out
+        ),
         "_disc_disc_2d_hist_channels": lambda: kernels._disc_disc_2d_hist_channels(
             idx1, idx2, idx2, W, table2, n1, n2
         ),
@@ -365,7 +380,6 @@ def test_categorical_blocks_sum_their_levels_without_np_bincount(monkeypatch):
 def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
     from superglm._group_matrix import _group_matrix_support
     from superglm.distributional.kernels import _negative_binomial_numba, _tweedie_numba
-    from superglm.distributional.solver import _batched_moments
     from superglm.features import interaction
     from superglm.reml import _leverage_rows
 
@@ -378,7 +392,6 @@ def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
         + _group_matrix_support._POOLED_SUPPORT_KERNELS
         + _tweedie_numba._POOLED_ROW_KERNELS
         + _negative_binomial_numba._POOLED_ROW_KERNELS
-        + _batched_moments._POOLED_TARGET_KERNELS
     )
     pooled = {id(kernel) for kernel in pooled_kernels}
     for kernel in pooled_kernels:
@@ -395,7 +408,7 @@ def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
     }
     assert not released
     # One parallelism level: no kernel starts numba's own threads (SuperLSS's
-    # row kernels and batched moments run on the worker pool).
+    # row kernels and Gram block queues run on the worker pool).
     parallel = {
         f"{module.__name__}.{name}"
         for module in list(sys.modules.values())
@@ -541,7 +554,114 @@ def test_a_pooled_worker_holds_no_finished_block():
     assert max(held) <= 2
 
 
-def test_largest_first_with_tiny_tasks_batched_and_the_oversized_pair_split(monkeypatch):
+def test_workers_stop_at_the_total_over_the_largest_unsplit_block(monkeypatch):
+    """No schedule ends before its largest unsplit block, and LPT on ``ceil(total / largest)``
+    workers ends within twice it (Graham 1969), so more workers only contend."""
+
+    def tasks(split_largest: bool) -> list[BlockTask]:
+        costs = (8, 1, 1, 1, 1)
+        return [
+            BlockTask(
+                index,
+                cost * 4 * queue._TASK_OVERHEAD_COST,
+                1,
+                lambda cache, profile: None,
+                lambda value: None,
+                split_bytes=1 if split_largest and index == 0 else 0,
+            )
+            for index, cost in enumerate(costs)
+        ]
+
+    class Cache:
+        _batch = None
+        _profile = None
+
+        def worker_view(self, shared, profile, work_queue):
+            return self
+
+    monkeypatch.setattr(parallel, "pool_workers", lambda n_units, task_bytes: 8)
+    monkeypatch.setattr(parallel, "section_threads", lambda: 8)
+    for split_largest, expected in ((False, 2), (True, 8)):
+        profile: dict = {}
+        with block_queue_config(min_cost=0):
+            queue.run_block_tasks(tasks(split_largest), Cache(), profile, dispatch_bound=True)
+        # Twelve units of work: a whole 8 caps two workers; split, the largest whole is 1.
+        assert profile["block_pool_workers"] == expected
+
+
+def test_workers_stop_at_the_queue_cost_over_its_per_task_overhead(monkeypatch):
+    """Every task dispatches under the GIL, so a queue whose serial part is ``s`` of
+    its cost runs at most ``1 / s`` times faster (Amdahl): 40 tasks of one overhead
+    each keep two workers busy, of seven overheads each eight, and of half an
+    overhead each, which no pool can make twice as fast, run serially. A queue
+    that does not bound its dispatch (the scalar Gram's, the REML moments') keeps
+    every worker ``pool_workers`` gives. Mutation check: capping every queue
+    leaves the unbounded queues with fewer workers."""
+
+    class Cache:
+        _batch = None
+        _profile = None
+
+        def worker_view(self, shared, profile, work_queue):
+            return self
+
+    monkeypatch.setattr(parallel, "pool_workers", lambda n_units, task_bytes: 16)
+    monkeypatch.setattr(parallel, "section_threads", lambda: 16)
+    for multiple, expected in ((0.5, None), (1, 2), (7, 8)):
+        tasks = [
+            BlockTask(
+                index,
+                multiple * queue._TASK_OVERHEAD_COST,
+                1,
+                lambda cache, profile: None,
+                lambda value: None,
+            )
+            for index in range(40)
+        ]
+        profile: dict = {}
+        queue.run_block_tasks(tasks, Cache(), profile, dispatch_bound=True)
+        assert profile.get("block_pool_workers") == expected
+        profile = {}
+        queue.run_block_tasks(tasks, Cache(), profile)
+        assert profile.get("block_pool_workers") == 16
+
+
+def test_a_dispatch_bound_queue_runs_on_no_more_than_numbas_thread_count(monkeypatch):
+    """SuperLSS's row block queue keeps the cap its pooled sections had: numba's
+    thread count, which ``numba.set_num_threads`` sets. A queue that does not bound
+    its dispatch keeps every worker ``pool_workers`` gives. Mutation check: without
+    the ``section_threads`` cap the bounded queue takes Amdahl's eight workers."""
+    import numba
+
+    class Cache:
+        _batch = None
+        _profile = None
+
+        def worker_view(self, shared, profile, work_queue):
+            return self
+
+    monkeypatch.setattr(parallel, "pool_workers", lambda n_units, task_bytes: 16)
+    monkeypatch.setattr(parallel, "resolve_n_jobs", lambda: 16)
+    monkeypatch.setattr(numba, "get_num_threads", lambda: 2)
+    tasks = [
+        BlockTask(index, 7 * queue._TASK_OVERHEAD_COST, 1, lambda c, p: None, lambda v: None)
+        for index in range(40)
+    ]
+    for dispatch_bound, expected in ((True, 2), (False, 16)):
+        profile: dict = {}
+        queue.run_block_tasks(tasks, Cache(), profile, dispatch_bound=dispatch_bound)
+        assert profile.get("block_pool_workers") == expected
+
+
+@pytest.fixture
+def sub_overhead_costs(monkeypatch):
+    """Synthetic tasks far below one task's overhead test ordering and splits, not that cap."""
+    monkeypatch.setattr(queue, "_TASK_OVERHEAD_COST", 1)
+
+
+def test_largest_first_with_tiny_tasks_batched_and_the_oversized_pair_split(
+    monkeypatch, sub_overhead_costs
+):
     def tasks() -> list[BlockTask]:
         small = queue._TINY_COST / 4
         costs = (1, 10, 1, 80, 1, 1, 9)
@@ -587,7 +707,7 @@ def test_largest_first_with_tiny_tasks_batched_and_the_oversized_pair_split(monk
     assert parts == {104: [1, 1, 1, 4, 1, 1, 1], 103: [1] * 7}
 
 
-def test_blocks_split_at_once_share_one_memory_budget(monkeypatch):
+def test_blocks_split_at_once_share_one_memory_budget(monkeypatch, sub_overhead_costs):
     """Each split adds one histogram, and every split block's parts can run at once.
 
     Two pairs of 40 small units in 86, each above the eight-worker bound of
@@ -636,7 +756,7 @@ def test_blocks_split_at_once_share_one_memory_budget(monkeypatch):
     }
 
 
-def test_split_headroom_leaves_the_fits_retained_tables_alone(monkeypatch):
+def test_split_headroom_leaves_the_fits_retained_tables_alone(monkeypatch, sub_overhead_costs):
     """Splits share only what the fit's retained tables and the workers leave of ``max_memory``.
 
     Eight one-byte tasks and one 100-byte split fit a budget of 108 bytes,

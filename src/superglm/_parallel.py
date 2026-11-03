@@ -24,8 +24,8 @@ overrides both for one context.
 
 The pooled kernels are the data-rank factor's TSQR leaves, the Gram's blocks,
 the lookup tables' sweeps, block products and leverages, the solved-row stop
-passes, the interaction terms' builds, and SuperLSS's row kernels and batched
-global moments.  :func:`pooled_map` serves the stop passes and interaction
+passes, the interaction terms' builds, and SuperLSS's row kernels.
+:func:`pooled_map` serves the stop passes and interaction
 builds; the SuperLSS kernels run on :func:`pooled_for` (through
 :func:`pooled_row_blocks` for rows), whose tasks are too short for an
 executor's dispatch; the others start executors of their own, sized by
@@ -187,13 +187,14 @@ def fit_pool() -> Iterator[None]:
 
     Starting and joining a pool costs about the same as a few milliseconds of
     kernel, which a SuperLSS fit pays hundreds of times (a Tweedie or negative
-    binomial row kernel per iteration, a batched moment pass per chunk).
-    Inside this scope :func:`pooled_map` runs on one executor and
-    :func:`pooled_for` on one crew of threads, each started by its first
-    section and shut down when the scope ends, instead of starting one per
-    call.  Owner: this scope; lifetime: the fit.  A section that runs on
-    one of these threads (a nested map) starts its own executor, so a nested
-    section cannot wait on threads its caller holds.  Nothing
+    binomial row kernel per iteration, a row block's Gram queue per contraction).
+    Inside this scope :func:`pooled_map` and the Gram's block queue
+    (:func:`section_executor`) run on one executor and :func:`pooled_for` on
+    one crew of threads, each started by its first section and shut down when
+    the scope ends, instead of starting one per call.  Owner: this scope;
+    lifetime: the fit.  A section that runs on one of these threads (a nested
+    map) starts its own executor, so a nested section cannot wait on threads
+    its caller holds.  Nothing
     changes numerically: a section's partition never depends on the workers.
     """
     if _fit_threads.get() is not None:
@@ -206,6 +207,23 @@ def fit_pool() -> Iterator[None]:
     finally:
         _fit_threads.reset(token)
         threads.close()
+
+
+@contextmanager
+def section_executor(workers: int, name: str) -> Iterator:
+    """An executor for one section's ``workers`` jobs: the fit's (:func:`fit_pool`), else its own.
+
+    A section that runs on one of the fit's threads starts its own, as a nested
+    :func:`pooled_map` does, so it cannot wait on threads its caller holds.
+    """
+    fit_threads = _fit_threads.get()
+    if fit_threads is not None and not getattr(_on_pool_thread, "inside", False):
+        yield fit_threads.executor()
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=name) as pool:
+        yield pool
 
 
 @contextmanager

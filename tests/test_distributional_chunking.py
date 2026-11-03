@@ -32,6 +32,8 @@ from superglm.distributional.predictor import (
 )
 from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.solver import fit_dense_fixed_lambda
+from superglm.distributional.solver._ordinary_packing import predictor_panels
+from superglm.distributional.solver.assembly import pass_table_bytes
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
@@ -246,17 +248,11 @@ def _history_values(result, name: str) -> np.ndarray:
 
 
 def test_auto_chunk_selector_has_stable_release_identity_and_budget() -> None:
-    assert chunking.AUTO_CHUNK_SELECTOR == "distributional-auto-v1"
+    assert chunking.AUTO_CHUNK_SELECTOR == "distributional-auto-v3"
     assert chunking.AUTO_CHUNK_MEMORY_BYTES == 8_388_608
-    assert (
-        chunking.resolve_chunk_size(
-            100_000,
-            2,
-            "auto",
-            p_coefficients=25,
-        )
-        == 19_784
-    )
+    # 53 floats a row fit 19,784 rows; 28 fit 37,449, above the contraction row cap.
+    assert chunking.resolve_chunk_size(100_000, 2, "auto", row_floats=25) == 19_784
+    assert chunking.resolve_chunk_size(100_000, 2, "auto") == chunking.AUTO_CONTRACTION_MAX_ROWS
 
 
 @pytest.mark.parametrize(
@@ -280,6 +276,7 @@ def test_chunk_sizes_match_dense_objective_geometry_steps_and_predictions(
     )
     if chunk_size == "auto":
         monkeypatch.setattr(chunking, "AUTO_CHUNK_MEMORY_BYTES", 1_024)
+        monkeypatch.setattr(chunking, "AUTO_STREAM_MAX_ROWS", 1)
 
     actual = fit_dense_fixed_lambda(
         family,
@@ -355,6 +352,64 @@ def test_row_chunk_iterator_covers_rows_once_and_validates_sizes(
         tuple(chunking.iter_row_chunks(8, True))
 
 
+def test_a_range_streamed_chunk_takes_the_allowance_its_pass_tables_leave(monkeypatch) -> None:
+    _, layout, _, _, _, _, _ = _problem()
+    assert chunking._streams_in_ranges(layout)
+    n = layout.predictors[0].design.n
+    panels = predictor_panels(layout)
+    row_bytes = chunking.contraction_row_bytes(layout, panels)
+    tables = pass_table_bytes(layout, panels)
+    assert tables > 0
+    monkeypatch.setattr(chunking, "AUTO_CHUNK_MEMORY_BYTES", 640)
+    floor = chunking.resolve_chunk_size(
+        n, len(layout.predictors), "auto", row_floats=chunking.chunk_row_floats(layout)
+    )
+    assert floor + 3 < n
+    assert tables + (floor + 3) * row_bytes < n * row_bytes
+    # The allowance holds the tables and exactly ``floor + 3`` rows of the contraction.
+    monkeypatch.setattr(chunking, "AUTO_CONTRACTION_MEMORY_BYTES", tables + (floor + 3) * row_bytes)
+    assert chunking.layout_chunk_size(layout, "auto") == floor + 3
+    # An allowance holding every row is one block, which keeps no tables to charge.
+    monkeypatch.setattr(chunking, "AUTO_CONTRACTION_MEMORY_BYTES", n * row_bytes)
+    assert chunking.layout_chunk_size(layout, "auto") == n
+    monkeypatch.setattr(chunking, "AUTO_CONTRACTION_MEMORY_BYTES", n * row_bytes - 1)
+    assert chunking.layout_chunk_size(layout, "auto") == (n * row_bytes - 1 - tables) // row_bytes
+    # Never fewer rows than the likelihood rule while a chunk fits the allowance, nor more
+    # than the pass or the stream cap.
+    monkeypatch.setattr(chunking, "AUTO_CONTRACTION_MEMORY_BYTES", tables)
+    assert chunking.layout_chunk_size(layout, "auto") == min(floor, max(1, tables // row_bytes))
+    monkeypatch.setattr(chunking, "AUTO_CONTRACTION_MEMORY_BYTES", 1 << 40)
+    assert chunking.layout_chunk_size(layout, "auto") == n
+    monkeypatch.setattr(chunking, "AUTO_STREAM_MAX_ROWS", floor + 1)
+    assert chunking.layout_chunk_size(layout, "auto") == floor + 1
+    assert chunking.layout_chunk_size(layout, 5) == 5
+
+
+@pytest.mark.parametrize("in_ranges", [True, False], ids=["range-streamed", "copied"])
+def test_an_automatic_chunk_fits_the_contraction_allowance(monkeypatch, in_ranges) -> None:
+    """A chunk the likelihood rule would size past the contraction allowance is cut to it.
+
+    A block contracts whole chunks, so a chunk wider than the allowance would
+    form one block past it, as 1,024 dense columns at 100,000 rows did: 32,768
+    rows and a 256 MiB weighted copy against 64 MiB. Mutation check: taking the
+    likelihood rule's rows when they exceed the allowance fails both cases.
+    """
+    _, layout, _, _, _, _, _ = _problem()
+    monkeypatch.setattr(chunking, "_streams_in_ranges", lambda layout: in_ranges)
+    n = layout.predictors[0].design.n
+    panels = predictor_panels(layout)
+    row_bytes = chunking.contraction_row_bytes(layout, panels)
+    floor = chunking.resolve_chunk_size(
+        n, len(layout.predictors), "auto", row_floats=chunking.chunk_row_floats(layout)
+    )
+    assert floor > 10
+    allowance = 10 * row_bytes + row_bytes // 2
+    monkeypatch.setattr(chunking, "AUTO_CONTRACTION_MEMORY_BYTES", allowance)
+    rows = chunking.layout_chunk_size(layout, "auto")
+    assert rows == 10
+    assert chunking.contraction_block_rows(n, row_bytes, rows) * row_bytes <= allowance
+
+
 def test_contraction_blocks_hold_whole_chunks_within_the_byte_and_row_budgets() -> None:
     # A wide row: the byte budget binds.
     row_bytes = 8 * 4_000
@@ -382,6 +437,11 @@ def test_contraction_row_bytes_count_the_buffer_and_each_groups_owned_rows() -> 
     # Five channels, four gathers and the row indices, the dense column's weighted copy,
     # row views for splines.
     assert chunking.contraction_row_bytes(layout) == 8 * (2 + 3 + 5 + 1)
+    # The stream holds each predictor's running sum and one range product at a
+    # time; a chunk that copied its designs would own the numeric column and
+    # each spline's bin codes, not a coefficient-wide row.
+    assert chunking.chunk_row_floats(layout) == 2 + 2
+    assert chunking._chunk_design_floats(layout) == 1 + 1 + 1 < layout.n_coefficients
 
 
 def test_layouts_with_uncounted_groups_contract_one_chunk_at_a_time() -> None:
@@ -437,7 +497,7 @@ def test_grouped_geometry_contracts_each_channel_once_per_block(
             lambda n, k, rows: min(n, chunks_per_block * rows),
         )
     contracted = []
-    for name in ("diagonal_moment", "cross_moment"):
+    for name in ("diagonal_tasks", "cross_tasks"):
         original = getattr(PredictorExecutionPlan, name)
 
         def counted(self, *args, _original=original, **kwargs):
@@ -445,12 +505,11 @@ def test_grouped_geometry_contracts_each_channel_once_per_block(
             return _original(self, *args, **kwargs)
 
         monkeypatch.setattr(PredictorExecutionPlan, name, counted)
-    rebuilt = []
+    rebuilt, copied = [], []
     row_design = chunking._row_design
 
     def counted_rows(state, rows, *, copy=True):
-        if not copy:
-            rebuilt.append(rows.stop - rows.start)
+        (copied if copy else rebuilt).append(rows.stop - rows.start)
         return row_design(state, rows, copy=copy)
 
     monkeypatch.setattr(chunking, "_row_design", counted_rows)
@@ -460,8 +519,10 @@ def test_grouped_geometry_contracts_each_channel_once_per_block(
     block = 137 if chunks_per_block is None else 19 * chunks_per_block
     starts = range(0, 137, block)
     assert contracted == [min(block, 137 - start) for start in starts for _ in "abc"]
-    # One-chunk blocks contract the chunk's own plans; longer blocks build row views.
-    expected = [] if block in (19, 137) else [min(block, 137 - start) for start in starts]
+    # The stream builds no chunk designs; a block shorter than the pass reads
+    # row views of the layout's designs.
+    assert copied == []
+    expected = [] if block == 137 else [min(block, 137 - start) for start in starts]
     assert rebuilt == [rows for rows in expected for _ in layout.predictors]
     eps = np.finfo(np.float64).eps
     for name in ("score_data", "data_curvature"):

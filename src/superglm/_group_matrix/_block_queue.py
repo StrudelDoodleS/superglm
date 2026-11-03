@@ -20,8 +20,19 @@ blocks "in order of decreasing computational cost".  This module does that:
   covers every split block's extra histogram (``split_bytes``) at once.
   Other blocks always run whole.
 - **Workers.**  ``_parallel.pool_workers``: ``n_jobs`` capped by the task
-  count and by ``max_memory`` over the largest task's working set.  One
-  parallelism level: BLAS runs on one thread for the whole assembly
+  count and by ``max_memory`` over the largest task's working set.  A queue
+  that bounds its dispatch (``dispatch_bound``, the SuperLSS row block's,
+  where the overhead was measured) runs on at most ``section_threads()``,
+  numba's thread count as the SuperLSS sections it replaced did, and is
+  capped by the total cost over
+  the largest unsplit task's (no schedule finishes before that task, and
+  LPT on that many workers finishes within twice its cost; Graham 1969),
+  and by the queue's cost over its serial part: every task pays a fixed
+  ``_TASK_OVERHEAD_COST`` of dispatch under the GIL, and a queue whose
+  serial fraction is ``s`` runs at most ``1 / s`` times faster on any
+  number of workers (Amdahl 1967), so further workers would only contend
+  for the GIL, and a queue no pool can make twice as fast runs serially.
+  One parallelism level: BLAS runs on one thread for the whole assembly
   (``pooled_blas_threads``), and the block kernels are ``nogil`` and never
   ``prange``.
 - **Determinism.**  A task's arithmetic does not depend on which worker runs
@@ -43,7 +54,6 @@ import math
 import threading
 from collections import deque
 from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -57,11 +67,14 @@ from ._group_matrix_algebra import (
     _SharedEntries,
 )
 
-# Work units are estimated multiply-adds and row visits, about a nanosecond
-# each in the block kernels.  A queue round trip costs tens of microseconds,
-# and starting a pool about a tenth of a millisecond a worker.
+# Work units are estimated multiply-adds and row visits.  A queue round trip
+# costs tens of microseconds, and starting a pool about a tenth of a
+# millisecond a worker.
 _TINY_COST = 1 << 16
 _MIN_POOLED_COST = 1 << 22
+# A task's fixed cost beside its kernels, its dispatch and set-up under the
+# GIL: about 50 us, which the kernels run about 2**20 units in.
+_TASK_OVERHEAD_COST = 1 << 20
 # Transient row-length arrays a block route may hold at once: weight and
 # index gathers, a weighted column (three float64-sized vectors).
 _ROW_BYTES = 24
@@ -312,6 +325,8 @@ def run_block_tasks(
     tasks: list[BlockTask],
     cache: _BlockWeightCache,
     profile: dict[str, Any] | None,
+    *,
+    dispatch_bound: bool = False,
 ) -> None:
     """Run every task and place its block: serially in task order, or on a pool.
 
@@ -321,7 +336,13 @@ def run_block_tasks(
     places its blocks as it forms them.
     """
     from superglm._blas_threads import pooled_blas_threads
-    from superglm._parallel import pool_workers, resolve_max_memory, retained_bytes
+    from superglm._parallel import (
+        pool_workers,
+        resolve_max_memory,
+        retained_bytes,
+        section_executor,
+        section_threads,
+    )
 
     override = _override.get()
     units = _units(tasks)
@@ -335,6 +356,14 @@ def run_block_tasks(
         workers = 1
     else:
         workers = pool_workers(len(units), max(task.nbytes for task in tasks))
+    if dispatch_bound and workers > 1 and override.workers is None:
+        workers = min(workers, section_threads())
+        largest_unsplit = max((task.cost for task in tasks if not task.split_bytes), default=0.0)
+        overhead = len(tasks) * _TASK_OVERHEAD_COST
+        amdahl = (total + overhead) / overhead
+        lpt = total / largest_unsplit if largest_unsplit > 0 else amdahl
+        # A pool that cannot halve the queue's time costs about what it saves.
+        workers = 1 if amdahl < 2 else min(workers, math.ceil(min(amdahl, lpt)))
 
     # Every split block's parts can run at once, each block holding one more
     # histogram, so the splits share what the fit's retained tables and the
@@ -362,7 +391,7 @@ def run_block_tasks(
         shared = _SharedEntries()
         queue = _WorkQueue(units)
         profiles = [None if profile is None else {} for _ in range(workers)]
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="superglm-gram") as pool:
+        with section_executor(workers, "superglm-gram") as pool:
             # Each worker runs in its own copy of the caller's context, which
             # carries np.errstate and the held-warning scope as serial has them.
             futures = [

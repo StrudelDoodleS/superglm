@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from time import perf_counter
 
 import numpy as np
 from numpy.typing import NDArray
 
+from ._block_queue import BlockTask, block_bytes, block_cost, split_bytes
 from ._group_matrix_algebra import (
     _BlockWeightCache,
     _cross_gram,
@@ -75,8 +77,13 @@ class CrossMatrixExecutionPlan:
         *,
         signed: bool = True,
         profile: dict | None = None,
+        _factors=None,
     ) -> NDArray[np.float64]:
-        """Return ``X_left.T @ diag(weights) @ X_right`` in global coordinates."""
+        """Return ``X_left.T @ diag(weights) @ X_right`` in global coordinates.
+
+        ``_factors`` (a ``PassFactors``) shares fixed-factor products with the
+        other moments calls of one assembly.
+        """
         if not isinstance(signed, bool):
             raise TypeError("signed must be bool")
         try:
@@ -98,7 +105,7 @@ class CrossMatrixExecutionPlan:
             _profile_count(profile, key, 0)
         started = perf_counter() if profile is not None else 0.0
         result = np.zeros(self.shape, dtype=np.float64)
-        cache = _BlockWeightCache(profile)
+        cache = _BlockWeightCache(profile, _factors)
         for pair, left_group, right_group in self._pair_entries:
             category = f"{type(left_group).__name__}__{type(right_group).__name__}"
             _profile_count(profile, f"cross_pair_{category}_calls")
@@ -110,6 +117,7 @@ class CrossMatrixExecutionPlan:
                 W,
                 cache,
                 pair_profile,
+                (pair.left.index, pair.right.index),
             )
             if profile is not None:
                 assert pair_profile is not None
@@ -121,6 +129,33 @@ class CrossMatrixExecutionPlan:
             _profile_elapsed(profile, f"cross_pair_{category}_s", pair_started)
         _profile_elapsed(profile, "cross_total_s", started)
         return result
+
+    def cross_tasks(self, weights: NDArray, result: NDArray, *, channel: int) -> list[BlockTask]:
+        """The block tasks of :meth:`cross_moment`, each writing its pair into ``result``.
+
+        For a caller that runs several moments calls' tasks on one queue
+        (``run_block_tasks``), with one cache whose pass tables take
+        ``(channel, left, right)`` keys. ``weights`` must already be a finite
+        row vector; each pair runs the kernel ``cross_moment`` runs.
+        """
+        tasks: list[BlockTask] = []
+        for pair, left_group, right_group in self._pair_entries:
+            key = (channel, pair.left.index, pair.right.index)
+
+            def place(cross, pair=pair) -> None:
+                result[pair.left.columns, pair.right.columns] = cross
+
+            tasks.append(
+                BlockTask(
+                    index=len(tasks),
+                    cost=block_cost(left_group, right_group, self.n),
+                    nbytes=block_bytes(left_group, right_group, self.n),
+                    run=partial(_cross_gram, left_group, right_group, weights, table_key=key),
+                    place=place,
+                    split_bytes=split_bytes(left_group, right_group, self.n),
+                )
+            )
+        return tasks
 
 
 __all__ = ["CrossGroupPair", "CrossMatrixExecutionPlan"]

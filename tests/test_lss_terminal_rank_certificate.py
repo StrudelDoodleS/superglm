@@ -990,7 +990,8 @@ def test_row_pass_agrees_with_the_rows_on_every_group_type(terminal, monkeypatch
     model = SuperLSS(family, location, family.scale(s("x1")), discrete=True)
     lambdas = {name: 10.0 for name in _penalty_names(model, frame, y.to_numpy())}
     decisions.clear()
-    monkeypatch.setattr(chunking, "AUTO_CHUNK_MEMORY_BYTES", 64 * 1024)
+    monkeypatch.setattr(chunking, "AUTO_CHUNK_MEMORY_BYTES", 32 * 1024)
+    monkeypatch.setattr(chunking, "AUTO_STREAM_MAX_ROWS", 1)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model.fit(frame, y.to_numpy(), lambdas=lambdas)

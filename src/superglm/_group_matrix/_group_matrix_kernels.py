@@ -616,6 +616,34 @@ def _weighted_bincount_2d(bin_idx, W, M, n_bins):
 
 
 @njit(cache=True, nogil=True)
+def _rows_weighted_bincount_2d(rows, bin_idx, W, M, n_bins):
+    """``_weighted_bincount_2d`` of the rows ``rows``: row ``rows[k]`` adds into ``bin_idx[k]``."""
+    n_cols = M.shape[1]
+    result = np.zeros((n_bins, n_cols))
+    for k in range(len(rows)):
+        r = rows[k]
+        b = bin_idx[k]
+        w = W[r]
+        for c in range(n_cols):
+            result[b, c] += w * M[r, c]
+    return result
+
+
+@njit(cache=True, nogil=True)
+def _level_weighted_bincount_2d(codes, W, M, n_levels):
+    """``_weighted_bincount_2d`` by category codes; a code outside ``[0, n_levels)`` adds nothing."""
+    n_cols = M.shape[1]
+    result = np.zeros((n_levels, n_cols))
+    for i in range(len(codes)):
+        code = codes[i]
+        if 0 <= code < n_levels:
+            w = W[i]
+            for c in range(n_cols):
+                result[code, c] += w * M[i, c]
+    return result
+
+
+@njit(cache=True, nogil=True)
 def _support_weighted_bincount_2d(out, bin_idx, W, B_unique, support_idx, col_start):
     """Add ``W[i] * B_unique[support_idx[i], col_start + c]`` into ``out[bin_idx[i], c]``.
 
@@ -731,6 +759,21 @@ def _disc_disc_2d_hist(bin_idx_i, bin_idx_j, W, n_bins_i, n_bins_j):
     for obs in range(n):
         result[np.uint64(bin_idx_i[obs]), np.uint64(bin_idx_j[obs])] += W[obs]
     return result
+
+
+@njit(cache=True, nogil=True)
+def _disc_disc_2d_hist_add(out, bin_idx_i, bin_idx_j, W):
+    """Add ``_disc_disc_2d_hist``'s sums into ``out``, in the same row order."""
+    for obs in range(len(W)):
+        out[np.uint64(bin_idx_i[obs]), np.uint64(bin_idx_j[obs])] += W[obs]
+
+
+@njit(cache=True, nogil=True)
+def _rows_disc_disc_2d_hist_add(out, rows, bin_idx_i, bin_idx_j, W):
+    """Add the rows ``rows`` into ``out``: row ``rows[k]`` at ``(bin_idx_i[rows[k]], bin_idx_j[k])``."""
+    for k in range(len(rows)):
+        r = rows[k]
+        out[np.uint64(bin_idx_i[r]), np.uint64(bin_idx_j[k])] += W[r]
 
 
 @njit(cache=True)
@@ -1282,9 +1325,13 @@ _POOLED_BLOCK_KERNELS = (
     _csr_weighted_gram,
     _csr_weighted_cross,
     _weighted_bincount_2d,
+    _rows_weighted_bincount_2d,
+    _level_weighted_bincount_2d,
     _support_weighted_bincount_2d,
     _csr_weighted_bincount,
     _disc_disc_2d_hist,
+    _disc_disc_2d_hist_add,
+    _rows_disc_disc_2d_hist_add,
     _disc_disc_2d_hist_channels,
     _gather_cell_order,
     _cell_hist_raw_kron,
@@ -1372,12 +1419,20 @@ def _warmup_group_matrix_kernels() -> None:
     _weighted_hist_channels(codes, None, matrix, 0, 2, 2, 1)
     _weighted_hist_channels(codes, codes, matrix, 0, 2, 2, 2)
     _weighted_bincount_2d(codes, frozen_values, frozen_matrix, 2)
+    # Panel crosses pass every operand read-only (``_native``).
+    _rows_weighted_bincount_2d(frozen_codes, frozen_codes, frozen_values, frozen_matrix, 2)
+    _level_weighted_bincount_2d(frozen_codes, frozen_values, frozen_matrix, 2)
     # Support crosses pass read-only C-contiguous operands and a fresh output.
     _support_weighted_bincount_2d(
         np.zeros((2, 2)), frozen_codes, frozen_values, frozen_matrix, frozen_codes, 0
     )
     _csr_weighted_bincount(values, csr_indices, csr_indptr, 2, codes, values, 2)
     _disc_disc_2d_hist(codes, codes, frozen_values, 2, 2)
+    # Pass tables add a block's read-only rows into the table they own.
+    _disc_disc_2d_hist_add(np.zeros((2, 2)), frozen_codes, frozen_codes, frozen_values)
+    _rows_disc_disc_2d_hist_add(
+        np.zeros((2, 2)), frozen_codes, frozen_codes, frozen_codes, frozen_values
+    )
     _disc_disc_2d_hist_channels(codes, codes, codes, values, matrix, 2, 2)
     cell_ptr, cell_order = _cell_csr(codes, codes, 2, 2)
     _cell_csr_matches(cell_ptr, cell_order, codes, codes, 2, 2)

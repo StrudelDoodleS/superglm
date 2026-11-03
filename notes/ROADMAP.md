@@ -344,12 +344,14 @@ over on small layouts. The terminal rank is certified against the rounding of
 forming the curvature (`RankPolicy` v5), so block length no longer decides it:
 where the decision is certified (`certified=True`), an exact alias reads
 rank-deficient at any chunk length, where master can report it estimable.
-Keeping each block's bin-pair tables and contracting them once per pass is the
-next speed step. Global moments stays: on the million-row C1 fixture the per-pass
-route takes 22.9 s against 11.1 s, because pair-by-pair contraction rescans
-the rows once for each of its 465 group pairs. Retiring global moments needs
-the per-pass route to match it there first; pooling the group pairs on threads
-alone takes one assembly from 1.40 to 0.72 s on 8 cores, against 0.48 s.
+[PR #579](https://github.com/StrudelDoodleS/superglm/pull/579) keeps each
+pass's by-bin tables and joint histograms across blocks and contracts them once
+per pass, packs ordinary columns into one panel per predictor, and runs a row
+block's Gram pairs as one block queue. Global moments is retired with it: the
+per-pass route met the C1 gate it was kept for, 10.4 s against master's 11.4 s
+at default threads (median of two), with coefficients within 8.5e-17 relative,
+held-out parameters within 2.6e-16, and the same 11 inner and 5 smoothing
+iterations.
 
 The user judged the 8% one-thread time advantage over exact insufficient and
 explicitly selected further latency reduction on 2026-09-09. Single-fit wall

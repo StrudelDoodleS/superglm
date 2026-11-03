@@ -247,9 +247,17 @@ class MatrixExecutionPlan:
     def _scatter_vector(target: NDArray, columns: NDArray, values: NDArray) -> None:
         target[columns] = np.asarray(values, dtype=np.float64)
 
-    def _compressed_signed_gram(self, weights: NDArray, *, profile: dict | None) -> NDArray:
+    def _compressed_signed_gram(
+        self, weights: NDArray, *, profile: dict | None, _factors=None
+    ) -> NDArray:
         """Return a signed Gram without the general weighted-moment dispatch."""
         gram = np.zeros((self.p, self.p), dtype=np.float64)
+        tasks = self._signed_gram_tasks(weights, gram)
+        run_block_tasks(tasks, _BlockWeightCache(profile, _factors), profile)
+        return gram
+
+    def _signed_gram_tasks(self, weights: NDArray, gram: NDArray, channel=None) -> list[BlockTask]:
+        """The block tasks of :meth:`_compressed_signed_gram`, writing into ``gram``."""
         tasks: list[BlockTask] = []
         for left_index, left_group in enumerate(self.group_matrices):
             tasks.append(
@@ -262,9 +270,26 @@ class MatrixExecutionPlan:
                 )
             )
             for right_index in range(left_index + 1, self._n_groups):
-                tasks.append(self._cross_task(len(tasks), left_index, right_index, weights, gram))
-        run_block_tasks(tasks, _BlockWeightCache(profile), profile)
-        return gram
+                tasks.append(
+                    self._cross_task(len(tasks), left_index, right_index, weights, gram, channel)
+                )
+        return tasks
+
+    def signed_moment_tasks(
+        self, weights: NDArray, *, include_xtw: bool, channel: int
+    ) -> tuple[NDArray, NDArray | None, list[BlockTask]]:
+        """``(gram, xtw, tasks)``: ``moments(weights, include_xtw=..., signed=True)`` once the tasks run.
+
+        For a caller that runs several moments calls' tasks on one queue
+        (``run_block_tasks``), with one cache whose pass tables take
+        ``(channel, left, right)`` keys. ``weights`` must already be a finite
+        row vector. Any ordinary partition's products are formed here.
+        """
+        if not include_xtw and not self._ordinary_indices:
+            gram = np.zeros((self.p, self.p), dtype=np.float64)
+            return gram, None, self._signed_gram_tasks(weights, gram, channel)
+        gram, xtw, _rhs, tasks = self._moment_tasks(weights, (), include_xtw, True, None, channel)
+        return gram, xtw, tasks
 
     def _place_signed_diagonal(self, left_index, gram, block) -> None:
         columns = self._group_columns[left_index]
@@ -308,8 +333,13 @@ class MatrixExecutionPlan:
         include_xtw: bool = False,
         signed: bool = False,
         profile: dict | None = None,
+        _factors=None,
     ) -> WeightedMoments:
-        """Validate inputs and return weighted products through this plan."""
+        """Validate inputs and return weighted products through this plan.
+
+        ``_factors`` (a ``PassFactors``) shares fixed-factor products with the
+        other moments calls of one assembly.
+        """
         return self._moments_impl(
             weights,
             rhs=rhs,
@@ -317,6 +347,7 @@ class MatrixExecutionPlan:
             signed=signed,
             profile=profile,
             validate_inputs=True,
+            _factors=_factors,
         )
 
     def _fixed_support_cache(self) -> _BlockWeightCache | None:
@@ -544,12 +575,19 @@ class MatrixExecutionPlan:
     def _diagonal_task_values(self, left_index, W, rhs_vectors, want_xtw, signed, cache, profile):
         return self._diagonal_values(left_index, W, rhs_vectors, want_xtw, signed, cache, profile)
 
-    def _cross_task(self, task_index, left_index, right_index, W, gram) -> BlockTask:
-        """A queue task forming ``X_left' W X_right`` and placing it and its transpose."""
+    def _cross_task(self, task_index, left_index, right_index, W, gram, channel=None) -> BlockTask:
+        """A queue task forming ``X_left' W X_right`` and placing it and its transpose.
+
+        Its pass-table key is ``(left, right)``, or ``(channel, left, right)``
+        when the task runs beside other channels' tasks on one cache.
+        """
         left_group = self.group_matrices[left_index]
         right_group = self.group_matrices[right_index]
         left_columns = self._group_columns[left_index]
         right_columns = self._group_columns[right_index]
+        table_key = (
+            (left_index, right_index) if channel is None else (channel, left_index, right_index)
+        )
 
         def place(cross) -> None:
             gram[left_columns, right_columns] = cross
@@ -559,7 +597,9 @@ class MatrixExecutionPlan:
             index=task_index,
             cost=block_cost(left_group, right_group, self.n),
             nbytes=block_bytes(left_group, right_group, self.n),
-            run=lambda cache, profile: _cross_gram(left_group, right_group, W, cache, profile),
+            run=lambda cache, profile: _cross_gram(
+                left_group, right_group, W, cache, profile, table_key
+            ),
             place=place,
             split_bytes=split_bytes(left_group, right_group, self.n),
         )
@@ -574,6 +614,7 @@ class MatrixExecutionPlan:
         profile: dict | None,
         validate_inputs: bool,
         _cache: _BlockWeightCache | None = None,
+        _factors=None,
     ) -> WeightedMoments:
         """Return a Gram and transpose products through one hybrid plan.
 
@@ -599,11 +640,20 @@ class MatrixExecutionPlan:
             and not self._ordinary_indices
         ):
             return WeightedMoments(
-                gram=self._compressed_signed_gram(W, profile=profile),
+                gram=self._compressed_signed_gram(W, profile=profile, _factors=_factors),
                 xtw=None,
                 xt_rhs=(),
             )
 
+        gram, xtw, xt_rhs, tasks = self._moment_tasks(W, rhs_vectors, include_xtw, signed, profile)
+        if tasks:
+            cache = _BlockWeightCache(profile, _factors) if _cache is None else _cache
+            run_block_tasks(tasks, cache, profile)
+        return WeightedMoments(gram=gram, xtw=xtw, xt_rhs=tuple(xt_rhs))
+
+    def _moment_tasks(self, W, rhs_vectors, include_xtw, signed, profile, channel=None):
+        """``(gram, xtw, xt_rhs, tasks)``: the ordinary partition's products formed now, and
+        the block tasks that write every other block of :meth:`_moments_impl`'s result."""
         ordinary_split = self._get_ordinary_split()
         ordinary_is_full = ordinary_split is not None and len(self._ordinary_indices) == len(
             self.group_matrices
@@ -652,9 +702,8 @@ class MatrixExecutionPlan:
                     )
             _profile_elapsed(profile, "block_tabmat_s", ordinary_start)
             if ordinary_is_full:
-                return WeightedMoments(gram=gram, xtw=xtw, xt_rhs=tuple(xt_rhs))
+                return gram, xtw, xt_rhs, []
 
-        cache = _BlockWeightCache(profile) if _cache is None else _cache
         tasks: list[BlockTask] = []
         for left_index, left_group in enumerate(self.group_matrices):
             left_is_ordinary = ordinary_split is not None and self._ordinary_mask[left_index]
@@ -680,7 +729,7 @@ class MatrixExecutionPlan:
             for right_index in range(left_index + 1, self._n_groups):
                 if left_is_ordinary and self._ordinary_mask[right_index]:
                     continue
-                tasks.append(self._cross_task(len(tasks), left_index, right_index, W, gram))
-        run_block_tasks(tasks, cache, profile)
-
-        return WeightedMoments(gram=gram, xtw=xtw, xt_rhs=tuple(xt_rhs))
+                tasks.append(
+                    self._cross_task(len(tasks), left_index, right_index, W, gram, channel)
+                )
+        return gram, xtw, xt_rhs, tasks
