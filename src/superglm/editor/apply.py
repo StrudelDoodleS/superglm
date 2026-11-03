@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 
 from superglm._utils import weighted_row_sum
 from superglm.editor.errors import EditorValueError
+from superglm.editor.lss.view import is_lss
 from superglm.editor.terms import native_log_effect_values
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
@@ -154,7 +155,14 @@ def apply_edits_to_model_copy_with_data(
     carrying edits onto another fit (``carry.model_with_edited_curves``),
     where such a level is one that fit never saw: it keeps its pin and the
     rest of the term is edited.
+
+    A SuperLSS is revised from the rows its view holds; ``X``, ``y``,
+    ``sample_weight`` and ``offset`` are not read.
     """
+    if is_lss(model):
+        from superglm.editor.lss.apply import lss_model_with_edits
+
+        return lss_model_with_edits(model, terms, keep_pinned=keep_pinned)
     changed_terms = [
         term
         for term in terms.values()
@@ -216,6 +224,10 @@ def apply_edits_to_model_copy_with_data(
 
 def materialize_edit_request(request):
     """Construct an edited model from an immutable session snapshot."""
+    if is_lss(request.base_model):
+        from superglm.editor.lss.apply import lss_model_with_edits
+
+        return lss_model_with_edits(request.base_model, request.terms)
     kwargs = {}
     if request.dataset is not None:
         kwargs = {
