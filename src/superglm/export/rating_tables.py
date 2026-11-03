@@ -2795,28 +2795,37 @@ def build_rating_table_payload(
     # rather than the coefficients they came from.
     _require_usable_relativities_export(main_effects, interactions)
 
-    impact = _impact_sweep(
-        model,
-        frame,
-        y_arr,
-        sample_weight,
-        offset=export_offset,
-        impact_bins=impact_bins,
-        bin_strategy=bin_strategy,
-        binned_offset=export_offset is not None
-        and offset_source is None
-        and offset_kind == "binned",
-        exported_n_bins=int(n_bins),
-        band_se=band_se,
-        band_max_error=band_max_error,
-        # Both lists, because both are approximated, and BOTH read off the
-        # blocks that were built rather than re-derived from the specs -- so a
-        # term the workbook carries exactly cannot be reported as approximated.
-        # The ``selected`` call above names the main effects, and under
-        # ``"exact"`` the spline-by-categorical interactions banded with them,
-        # whose tables become their blocks; the grids are not in it.
-        features=_binned_continuous_names(main_effects) + _gridded_interaction_names(interactions),
-    )
+    # Both lists, because both are approximated, and BOTH read off the
+    # blocks that were built rather than re-derived from the specs -- so a
+    # term the workbook carries exactly cannot be reported as approximated.
+    # The ``selected`` call above names the main effects, and under
+    # ``"exact"`` the spline-by-categorical interactions banded with them,
+    # whose tables become their blocks; the grids are not in it.
+    swept = _binned_continuous_names(main_effects) + _gridded_interaction_names(interactions)
+    binned_offset = export_offset is not None and offset_source is None and offset_kind == "binned"
+    # With no comparison rung the sweep only re-evaluates the exported one,
+    # which ``selected`` already did unless the sweep approximates more.
+    if (
+        not impact_bins
+        and not binned_offset
+        and set(swept) == set(binned_continuous + companion_names)
+    ):
+        impact = _empty_impact_frame()
+    else:
+        impact = _impact_sweep(
+            model,
+            frame,
+            y_arr,
+            sample_weight,
+            offset=export_offset,
+            impact_bins=impact_bins,
+            bin_strategy=bin_strategy,
+            binned_offset=binned_offset,
+            exported_n_bins=int(n_bins),
+            band_se=band_se,
+            band_max_error=band_max_error,
+            features=swept,
+        )
     return RatingTablePayload(
         base_relativity=_base_relativity(
             float(

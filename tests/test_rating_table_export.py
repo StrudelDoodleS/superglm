@@ -827,17 +827,28 @@ def test_default_impact_sweep_bins():
     assert set(sheet["feature"]) == {"age"}
 
 
-def test_an_empty_impact_bins_still_means_no_sweep():
+def test_an_empty_impact_bins_still_means_no_sweep(monkeypatch):
     """The opt-out survives folding the exported resolution in.
 
     ``impact_bins=()`` is how a caller asks for the tables without paying for
     the analysis, and five call sites in this suite use it that way.  Folding
     ``n_bins`` into the swept set exists so the ladder describes the shipped
     table -- not so a caller who declined the ladder is handed one anyway, at
-    the full default 150 bins.
+    the full default 150 bins.  With no grid and no binned offset, the one
+    pass that bins the exported spline is the only one.
     """
     model, X, y, w = _fit_export_model()
+    calls = []
+    evaluate = model.discretization_impact
+
+    def counted(*args, **kwargs):
+        calls.append(kwargs["n_bins"])
+        return evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(model, "discretization_impact", counted)
     payload = build_rating_table_payload(model, X, y, sample_weight=w, impact_bins=())
+
+    assert calls == [150]
 
     assert payload.discretization_impact.empty
     assert list(payload.discretization_impact.columns)[:4] == [
