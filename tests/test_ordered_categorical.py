@@ -1060,3 +1060,59 @@ class TestOrderedCategoricalShapeDispatch:
         )
         with pytest.raises(RuntimeError, match="raw constraint geometry"):
             spec._build_monotone_constraints_raw()
+
+
+_LEVEL_VALUES = {level: float(level) for level in range(10)}
+
+
+def _rising_bands(n: int = 20_000, seed: int = 47) -> tuple[pd.DataFrame, np.ndarray]:
+    """Poisson rows on levels 0..9 whose relativity rises to about 3."""
+    rng = np.random.default_rng(seed)
+    band = rng.integers(0, 10, n)
+    return pd.DataFrame({"band": band}), rng.poisson(np.exp(1.5 * (band / 9.0) ** 3))
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [Constraint.fit.cap(0.6, 1.8), Constraint.fit.increasing & Constraint.fit.max_step(0.2)],
+    ids=["cap", "max_step"],
+)
+@pytest.mark.parametrize("family", ["poisson", "gaussian"])
+def test_level_rules_on_ordered_basis_are_refused(rule, family):
+    """A cap or step limit on an ordered term's basis is refused at fit, naming the feature.
+
+    Its rows would be stated against the basis spline's native centre while the
+    term prints against its base level. Mutation: before the refusal the
+    Poisson cap fit printed relativities up to 2.38, and the identity-link one
+    fitted with no refusal.
+    """
+    X, y = _rising_bands()
+    model = SuperGLM(
+        family=family,
+        selection_penalty=0.0,
+        features={
+            "band": OrderedCategorical(
+                values=_LEVEL_VALUES, basis=Spline(kind="ps", k=6, constraint=rule)
+            )
+        },
+    )
+    with pytest.raises(
+        ValueError, match=r"Feature 'band': .* on an OrderedCategorical is not supported yet"
+    ):
+        model.fit(X, y.astype(float))
+
+
+def test_ordered_term_reads_its_basis_rule_objects():
+    from superglm.features.constraint import rules_of
+
+    C = Constraint.fit
+    rules = C.increasing & C.cap(0.6, 1.8)
+    spec = OrderedCategorical(values=_LEVEL_VALUES, basis=Spline(kind="ps", k=6, constraint=rules))
+    assert [rule.kind for rule in rules_of(spec)] == ["increasing", "cap"]
+    # The basis spline is never built with the cap, so it emits no cap rows.
+    with pytest.raises(ValueError, match="on an OrderedCategorical is not supported yet"):
+        spec.build(np.arange(10).repeat(20))
+    shaped = OrderedCategorical(
+        values=_LEVEL_VALUES, basis=Spline(kind="ps", k=6, constraint=C.increasing & C.concave)
+    )
+    assert shaped.build(np.arange(10).repeat(20)).constraints.A.shape[0] > 0

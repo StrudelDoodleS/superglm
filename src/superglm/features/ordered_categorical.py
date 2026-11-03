@@ -27,6 +27,7 @@ from superglm.features.categorical import (
     _validate_categorical_levels,
     _validate_missing_only,
 )
+from superglm.features.constraint import ConstraintRules, rules_of
 from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
 from superglm.types import GroupInfo, LinearConstraintSet
@@ -701,6 +702,29 @@ class OrderedCategorical:
         inner = self._basis_spline
         return getattr(inner, "constraint_mode", getattr(inner, "monotone_mode", "postfit"))
 
+    @property
+    def constraint_rules(self) -> ConstraintRules:
+        """The rule objects declared on the inner basis; empty for a basis that takes none.
+
+        ``rules_of`` reads these, so an ordered term answers with real rule
+        kinds rather than the describe-string ``constraint_kind`` forwards.
+        """
+        return getattr(self._basis_spline, "constraint_rules", ConstraintRules(()))
+
+    def _refuse_level_rules(self) -> None:
+        """Refuse a cap or step limit on the basis: no rows state it against the base level.
+
+        The ordered term prints against its base level, while the basis spline
+        would state a cap against its own native centre, so the printed
+        relativities would leave the cap.
+        """
+        held = next((rule for rule in rules_of(self) if rule.kind in ("cap", "max_step")), None)
+        if held is not None:
+            raise ValueError(
+                f"{held.describe()} on an OrderedCategorical is not supported yet; "
+                "remove it from the basis spline"
+            )
+
     def shape_axis(self, x: NDArray) -> tuple[NDArray, NDArray[np.bool_]]:
         """The inner basis' numeric axis, and the rows that sit on it.
 
@@ -1145,6 +1169,7 @@ class OrderedCategorical:
 
         inner = self._basis_spline
         if isinstance(inner, _SplineBase):
+            self._refuse_level_rules()
             try:
                 return inner.build(numeric, sample_weight=sample_weight)
             except OneValueError:

@@ -1274,23 +1274,29 @@ def _validate_rule_fit_conflicts(model) -> None:
     link (the rating-table export refuses other links for the same reason).
     A capped spline that extends linearly past its training range is capped
     on that range only, so the fit warns once per feature that its tails are
-    not. Reads every main-effect and interaction spec.
+    not. Reads every main-effect and interaction spec by its rule objects; a
+    spec whose rows cannot state a cap or step limit yet refuses it first
+    (``_refuse_level_rules``).
     """
     from superglm._predictor_compiler import _feature_named_messages
     from superglm.features.constraint import rules_of
     from superglm.links import LogLink, resolve_link
 
-    capped = {
-        name: spec
-        for name, spec in itertools.chain(model._specs.items(), model._interaction_specs.items())
-        if any(rule.kind == "cap" for rule in rules_of(spec))
-    }
-    if not capped:
-        return
-    link = resolve_link(configured_link(model), resolve_distribution(configured_family(model)))
-    for name, spec in capped.items():
-        cap = next(rule for rule in rules_of(spec) if rule.kind == "cap")
+    link = None
+    for name, spec in itertools.chain(model._specs.items(), model._interaction_specs.items()):
+        rules = rules_of(spec)
+        if not any(rule.kind in ("cap", "max_step") for rule in rules):
+            continue
         with _feature_named_messages(name):
+            refuse_level_rules = getattr(spec, "_refuse_level_rules", None)
+            if refuse_level_rules is not None:
+                refuse_level_rules()
+            cap = next((rule for rule in rules if rule.kind == "cap"), None)
+            if cap is None:
+                continue
+            if link is None:
+                family = resolve_distribution(configured_family(model))
+                link = resolve_link(configured_link(model), family)
             if not isinstance(link, LogLink):
                 raise ValueError(
                     f"{cap.describe()} bounds printed relativities, which need a log link; "
