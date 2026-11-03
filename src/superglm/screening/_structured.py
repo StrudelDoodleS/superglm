@@ -1179,8 +1179,8 @@ def _filter_factor_sum(
 def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[float, float]:
     """``(T, edf)`` at one lambda, both off one factorization of the design.
 
-    Neither reads ``V``, ``c``, ``m`` or ``border``: a statistic from a pseudo-inverse of
-    the float64 moments beside an edf from row-space factors was issue #298.
+    Neither reads ``V``, ``c``, ``m`` or ``border``, so the statistic and the edf come from
+    the same row-space factors, never one from a pseudo-inverse of the float64 moments.
     """
     return _checked_evaluation(geometry, lam, _filter_factor_sum(p, geometry, lam))
 

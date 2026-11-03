@@ -536,7 +536,7 @@ def compile_predictors(
     ):
         link = resolve_predictor_link(parameter, predictor)
         # RandomEffect(nested_in=) is a statement about the training rows,
-        # checked where they are first bound (one-engine design §3.13).
+        # checked where they are first bound.
         validate_declared_nesting(predictor.features, X.column_array)
         compiled = compile_predictor_design(
             X,

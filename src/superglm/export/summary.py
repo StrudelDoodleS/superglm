@@ -16,9 +16,8 @@ from superglm.features.ordered_categorical import (
 from superglm.features.spline import _SplineBase
 from superglm.inference._term_helpers import spline_groups
 
-# The legend's wording is imported rather than restated: it was a second string
-# literal here, and that is how it came to describe a rule neither module
-# implements (issue #239).
+# The legend's wording is imported from ``inference.summary`` rather than
+# restated, so the console and the export cannot drift apart.
 from superglm.inference.summary import _LOW_CREDIBILITY_NOTE_BODY, _editor_notes
 from superglm.model.fit_state import fitted_penalty
 from superglm.solvers.rank import selected_group_name_set
@@ -230,11 +229,10 @@ def _canonical_level_row_names(model: SuperGLM) -> set[str]:
         groups = [group for group in model._groups if group.feature_name == feature_name]
         if isinstance(spec, OrderedCategorical):
             if spec.basis != "spline":
-                # The dropped-base row set this used to build is step geometry.
-                # The 0.24.0 removal took the coverage for it with the mode, so
-                # leaving the arm live meant a restored step artifact silently
-                # exported a wrong-shaped row set. Refuse with the migration
-                # sentence, as every other surviving step path does.
+                # A non-spline basis here is a restored step artifact, whose
+                # dropped-base row set no current fit builds; refuse with the
+                # migration sentence, as every other step path does, rather
+                # than export a wrong-shaped row set.
                 raise AttributeError(
                     f"Cannot canonicalise level row names for {feature_name!r}: "
                     f"{_STEP_MODE_REMOVED_MESSAGE}"
@@ -299,15 +297,11 @@ def _level_row_kind(row: _CoefRow) -> str:
 def _significance(p_value: float | None) -> str:
     """The p-value's own code, and nothing else.
 
-    The low-credibility advisory used to be returned from here instead of the
-    stars, which made the exported workbook say that a flagged row had no
-    significance to report.  It is not a verdict on the estimate -- the rule
-    behind it reads a level's rows and weight, or a
-    standard error's size against the model's typical one, and never the
-    p-value -- so a level can legitimately be both ``***`` and flagged.  The
-    console has always shown them as independent columns; the payload now
-    does the same, carrying the advisory in ``warning`` where it already had a
-    column of its own (issue #239).
+    The low-credibility advisory is not a verdict on the estimate: its rule
+    reads a level's rows and weight, or a standard error's size against the
+    model's typical one, and never the p-value, so a level can be both
+    ``***`` and flagged.  The payload carries the advisory in ``warning``,
+    its own column, as the console shows the two side by side.
     """
     if p_value is None:
         return ""
