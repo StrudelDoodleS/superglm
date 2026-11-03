@@ -1040,6 +1040,11 @@ class CardinalCRSpline(_SplineBase):
             m=m,
             lambda_policy=lambda_policy,
         )
+        if self._m_orders != (2,):
+            raise ValueError(
+                "CardinalCRSpline penalises the squared second derivative, so it takes only "
+                f"m=2, got m={self._m_orders[0]}. Pass kind='cr' for a penalty of that order."
+            )
         self._cr_knots: NDArray | None = None
         self._cr_M: NDArray | None = None
         self._cr_S: NDArray | None = None
@@ -1125,8 +1130,8 @@ def Spline(
 
     With no ``kind`` the spline is a cubic regression spline, ``"cr"`` (a
     P-spline, ``"ps"``, before 0.40). ``"cr"`` and ``"cr_cardinal"`` are always
-    cubic and refuse a ``degree`` other than 3, and take penalty orders ``m`` up
-    to 3 and 2; pass ``kind="ps"`` (or ``"bs"`` for another degree) beyond
+    cubic and refuse a ``degree`` other than 3; ``cr`` takes penalty orders ``m`` up
+    to 3 and ``cr_cardinal`` only 2. Pass ``kind="ps"`` (or ``"bs"`` for another degree) beyond
     those. A spline with no kind that ``cr`` cannot serve (a ``degree`` other
     than 3 or a penalty order above 3) builds as ``"ps"``, as before 0.40,
     with a ``UserWarning``;
