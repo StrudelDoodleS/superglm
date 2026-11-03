@@ -220,8 +220,22 @@ def test_flat_rows_hold_the_slope_at_zero_and_drop_held_rows(rules):
         (_open_knots(), C.flat.within(30, 30.5) & C.flat.within(31, 32), False),
         (_clamped_knots(), C.flat.within(17, 20), True),
         (_clamped_knots(), C.flat.within(70, 80) & C.convex.below(70), True),
+        (
+            _open_knots(),
+            C.flat.within(_open_knots()[5], _open_knots()[6])
+            & C.flat.within(_open_knots()[7], _open_knots()[8]),
+            False,
+        ),
+        (_open_knots(), C.flat.within(30, 31) & C.flat.within(41, 42), False),
     ],
-    ids=["touching", "same-span", "natural-start", "natural-end"],
+    ids=[
+        "touching",
+        "same-span",
+        "natural-start",
+        "natural-end",
+        "one-span-apart-on-knots",
+        "one-span-apart",
+    ],
 )
 def test_flat_rows_are_independent(knots, rules, natural_ends):
     pieces = shape_pieces(rules, LO, HI)
@@ -240,6 +254,33 @@ def test_flat_rows_are_independent(knots, rules, natural_ends):
             if kind == "flat":
                 slope = BSpline(knots, Z @ c, DEGREE)(np.linspace(a, b, 200), nu=1)
                 assert np.max(np.abs(slope)) <= 1e3 * U * scale
+
+
+@pytest.mark.parametrize(
+    ("knots", "natural_ends"),
+    [(_open_knots(), False), (_clamped_knots(), True)],
+    ids=["open", "natural"],
+)
+def test_random_flat_sets_give_independent_rows(knots, natural_ends):
+    rng = np.random.default_rng(4)
+    for _ in range(50):
+        ends = np.sort(rng.uniform(LO, HI, size=(rng.integers(1, 4), 2)), axis=1)
+        pieces = [("flat", float(a), float(b)) for a, b in ends if a < b]
+        _, flat = shape_rows(knots, DEGREE, pieces, natural_ends=natural_ends)
+        equalities = flat
+        if natural_ends:
+            natural = [derivative_value_row(knots, DEGREE, x, 2) for x in (LO, HI)]
+            equalities = np.vstack([flat, *natural])
+        assert _rank(equalities) == equalities.shape[0]
+        Q, _ = np.linalg.qr(equalities.T, mode="complete")
+        c = Q[:, equalities.shape[0] :] @ rng.normal(size=K - equalities.shape[0])
+        # Magnitude of f' from the coefficients: the null space can be the constants alone.
+        scale = DEGREE * np.max(np.abs(c)) / np.min(np.diff(np.unique(knots)))
+        for _, a, b in pieces:
+            # The effective zero region: the whole knot spans the stretch meets.
+            x = np.linspace(knots[knots <= a].max(), knots[knots >= b].min(), 200)
+            slope = BSpline(knots, c, DEGREE)(x, nu=1)
+            assert np.max(np.abs(slope)) <= 1e3 * U * scale
 
 
 def test_pieces_split_around_flat():

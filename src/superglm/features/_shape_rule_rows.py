@@ -144,7 +144,7 @@ def _zero_regions(knots: NDArray, flats: list[tuple[float, float]]) -> list[tupl
     """Where flat stretches hold ``f'`` at zero: the knot spans they meet, merged.
 
     Regions that touch or overlap are merged, since ``f'`` is zero on their
-    union, so each region's equality rows are independent of the others'.
+    union.
     """
     spans = sorted((knots[knots <= a].max(), knots[knots >= b].min()) for a, b in flats)
     merged: list[tuple[float, float]] = []
@@ -164,14 +164,28 @@ def _held_at_zero(lo: NDArray, hi: NDArray, zero: list[tuple[float, float]]) -> 
     return held
 
 
-def _flat_rows(knots: NDArray, degree: int, s: float, e: float, natural_ends: bool) -> NDArray:
-    """Rows holding ``f' = 0`` on the zero region [s, e], less any a natural end implies."""
-    rows = refined_derivative_rows(knots, degree, 1, s, e)
-    keep = np.ones(rows.shape[0], dtype=bool)
+def _flat_rows(
+    knots: NDArray, degree: int, zero: list[tuple[float, float]], natural_ends: bool
+) -> NDArray:
+    """Rows holding ``f' = 0`` on the zero regions, less any a natural end implies.
+
+    Each region is a union of whole knot spans, and B-splines are linearly
+    independent on every span, so ``f' = 0`` there exactly when every
+    first-derivative coefficient ``d_j = degree (c[j+1] - c[j]) / (t[j+degree+1]
+    - t[j+1])`` whose support meets a region is zero. Those rows are a subset of
+    a full-row-rank difference operator, so they are independent however the
+    regions sit. A natural spline's ``f''`` at an end of its clamped base
+    interval is a combination of the two derivative coefficients there, so a
+    region reaching that end drops the second.
+    """
+    n_basis = len(knots) - degree - 1
+    spans = knots[degree + 1 : degree + n_basis] - knots[1:n_basis]
+    D = degree * np.diff(np.eye(n_basis), axis=0) / spans[:, None]
+    held = _held_at_zero(knots[1:n_basis], knots[degree + 1 : degree + n_basis], zero)
     if natural_ends:
-        keep[1] &= s != knots[degree]
-        keep[-2] &= e != knots[len(knots) - degree - 1]
-    return rows[keep]
+        held[1] &= not any(s == knots[degree] for s, _ in zero)
+        held[-2] &= not any(e == knots[n_basis] for _, e in zero)
+    return D[held]
 
 
 def shape_rows(
@@ -187,8 +201,8 @@ def shape_rows(
 
     A polynomial that is constant on part of a knot span is constant on all
     of it, so a flat stretch holds ``f'`` and ``f''`` at zero on every knot
-    span it meets. The flat rows ``E`` state ``f' = 0`` on those spans, merged
-    where they touch, which is the same condition with independent rows.
+    span it meets. The flat rows ``E`` state ``f' = 0`` on those spans through
+    the spline's own derivative coefficients, which keeps them independent.
 
     Inequality rows the equalities already hold at zero are dropped, since
     they compose to round-off and degrade the QP's active set: every refined
@@ -199,8 +213,7 @@ def shape_rows(
     at the ends of the knot vector's base interval, where a natural spline
     (clamped at its range) puts its boundary conditions: a curvature piece
     drops its coefficient there, and a zero region reaching that end drops the
-    flat row the boundary row implies (the second coefficient, which with the
-    first fixes ``f''`` at the end).
+    flat row the boundary row implies.
     """
     knots = np.asarray(knots, dtype=np.float64)
     n_basis = len(knots) - degree - 1
@@ -233,8 +246,7 @@ def shape_rows(
         blocks.append(sign * rows[keep])
     A = np.vstack(blocks)
     A = A / np.max(np.abs(A), axis=1, keepdims=True) if A.shape[0] else A
-    flat_rows = [_flat_rows(knots, degree, s, e, natural_ends) for s, e in zero]
-    E = np.vstack([np.zeros((0, n_basis)), *flat_rows])
+    E = _flat_rows(knots, degree, zero, natural_ends)
     return LinearConstraintSet(A=A, b=np.zeros(A.shape[0])), E
 
 
