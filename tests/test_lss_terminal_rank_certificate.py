@@ -721,10 +721,12 @@ def test_a_column_far_from_zero_is_kept_in_any_units(monkeypatch, discrete, orig
     )
 
 
-@pytest.mark.parametrize("constant", [1e6, 1e9])
+@pytest.mark.parametrize(
+    ("constant", "last_bit"), [(1e6, False), (1e9, False), (0.1, True)], ids=["1e6", "1e9", "0.1"]
+)
 @pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
 def test_a_constant_column_beside_an_intercept_is_refitted_as_an_alias(
-    monkeypatch, discrete, constant
+    monkeypatch, discrete, constant, last_bit
 ):
     """``x = c`` on every row: centred it is a zero column, and it is still an alias.
 
@@ -736,6 +738,8 @@ def test_a_constant_column_beside_an_intercept_is_refitted_as_an_alias(
     alone the alias reads 0 / 0, and the drifted state is published; the raw
     dropped score, ``c`` times the retained one, refuses the refit at ``c = 1e9``,
     and did at ``c = 1e6`` on Linux ARM64, where the retained score stopped larger.
+    At ``c = 0.1`` alternate rows hold the next float, so the centred square is
+    rounding, not zero: read on it, not uncentred, the multiplier refuses the refit.
     """
     import superglm.distributional.solver.solver as solver
 
@@ -758,7 +762,10 @@ def test_a_constant_column_beside_an_intercept_is_refitted_as_an_alias(
 
     monkeypatch.setattr(solver, "_initial_coefficients", drifted)
     reference = fitted({"w": w})
-    result = fitted({"w": w, "x": np.full(3000, constant)})
+    column = np.full(3000, constant)
+    if last_bit:
+        column[1::2] = np.nextafter(constant, np.inf)
+    result = fitted({"w": w, "x": column})
     assert result.converged and result.terminal_rank.rank == 3
     assert result.coefficients[2] == 0.0
     np.testing.assert_allclose(result.coefficients[[0, 1, 3]], reference.coefficients, atol=1e-6)

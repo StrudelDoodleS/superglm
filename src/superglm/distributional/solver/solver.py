@@ -1640,8 +1640,8 @@ def _reduced_fit_is_stationary(
     multiplier vanishes (Lawson and Hanson 1974, ch. 23), read net of the retained
     score, ``d = N_J^-T N'g`` with ``N`` the dropped null basis: ``X N`` and ``S N``
     vanish for an alias, so ``d`` is rounding. Each ``d_j`` is read per unit of its
-    column's spread, a relative gradient (Dennis and Schnabel 1983, sec. 7.2) on the
-    design test's centred unit columns, so no unit or origin decides the refit.
+    column's RMS spread, centred beside an intercept as the design test centres it: a
+    relative gradient (Dennis and Schnabel 1983, sec. 7.2), so no unit or origin decides.
     """
     if not run.converged:
         return False
