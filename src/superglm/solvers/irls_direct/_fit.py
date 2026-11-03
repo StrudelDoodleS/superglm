@@ -73,6 +73,7 @@ from superglm.solvers.irls_state import (
     _IRLSState,
     interior_start_intercept,
     link_domain_violation,
+    mean_space_boundary_rows,
     mean_space_violation,
 )
 from superglm.solvers.mode_score import (
@@ -1690,6 +1691,12 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     "constrained-QP KKT certificate; fit is not converged."
                 )
 
+        # A binomial/identity state holding rows at a clipped probability is on the
+        # mean-space boundary, whatever stopped the loop (``mean_space_boundary_rows``).
+        if self.mean_space is None and mean_space_boundary_rows(
+            family, link, eta_unclipped, weights
+        ):
+            converged, termination_reason = False, "mean_space_boundary"
         # A returned state with a row outside the link's domain is no fitted model,
         # whatever stopped the loop (``link_domain_violation``), and its reason
         # says so: a caller never reads it as a mode short of its certificate.
@@ -1702,8 +1709,9 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             warnings.warn(
                 "The coefficient fit returns its last iterate, not converged: some rows' "
                 f"linear predictor lies outside the range the {type(link).__name__} allows "
-                f"a {type(family).__name__} mean. This link may not suit these data; a log "
-                "link cannot leave that range.",
+                f"a {type(family).__name__} mean. This link may not suit these data; a "
+                f"{'logit' if isinstance(family, Binomial) else 'log'} link cannot leave that "
+                "range.",
                 ConvergenceWarning,
                 stacklevel=4,
             )
@@ -1793,7 +1801,13 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             centred_intercept=retained.centred_intercept,
             state_center=None if retained.centred_intercept is None else self._state_center,
             centred_intercept_lo=self.centred_intercept_lo,
-            mean_space_boundary_rows=0 if mean_space is None else mean_space.boundary_rows,
+            mean_space_boundary_rows=(
+                mean_space.boundary_rows
+                if mean_space is not None
+                else mean_space_boundary_rows(self.family, self.link, self.eta_unclipped, weights)
+                if self.termination_reason == "mean_space_boundary"
+                else 0
+            ),
             mean_space_true_mode=bool(
                 self.converged and mean_space is not None and mean_space.true_confirmed
             ),

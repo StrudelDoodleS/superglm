@@ -1726,8 +1726,8 @@ class TestDirectSolverBasic:
         """Given the family, the identity link's domain is the family's mean space.
 
         A positive-weight row at ``eta <= 0`` is outside it for every family
-        ``clip_mu`` floors; Gaussian and binomial means are not held there,
-        and the link alone keeps no domain.
+        ``clip_mu`` floors, and a binomial row at ``eta >= 1`` as well;
+        Gaussian means are not held, and the link alone keeps no domain.
         """
         from superglm.distributions import (
             Binomial,
@@ -1745,8 +1745,10 @@ class TestDirectSolverBasic:
             assert outside is not None
             assert outside(np.array([0.5, 0.0]), np.array([1.0, 1.0]))
             assert not outside(np.array([0.5, -1.0]), np.array([1.0, 0.0]))
-        for family in (Gaussian(), Binomial()):
-            assert link_domain_violation(IdentityLink(), family) is None
+        outside = link_domain_violation(IdentityLink(), Binomial())
+        assert outside(np.array([0.5, 1.0]), np.array([1.0, 1.0]))
+        assert not outside(np.array([0.5, 1.5]), np.array([1.0, 0.0]))
+        assert link_domain_violation(IdentityLink(), Gaussian()) is None
         assert link_domain_violation(IdentityLink()) is None
 
     def test_an_identity_subclass_keeps_the_domain_of_its_own_inverse(self):

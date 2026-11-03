@@ -1,0 +1,121 @@
+"""Binomial/identity fits stay inside the binomial mean space.
+
+The identity link maps the line onto itself, so the parameter space is
+``{beta : 0 < X beta + offset < 1}`` and the maximum can lie on its boundary
+(Donoghoe & Marschner 2014, Comput. Stat. Data Anal. 80).  Step halving keeps
+every trial inside, as R's glm and glm2 halve a step with an invalid mean
+(Marschner 2011, R Journal 3(2)), and a state holding rows at a clipped
+probability is reported as not converged, never refused.
+"""
+
+from __future__ import annotations
+
+import warnings
+
+import numpy as np
+import pandas as pd
+import pytest
+from scipy.optimize import LinearConstraint, minimize
+from scipy.special import xlogy
+
+from superglm import Categorical, ConvergenceWarning, Numeric, Spline, SuperGLM
+
+
+def _eta(model):
+    return model._dm.matvec(model.result.beta) + model.result.intercept
+
+
+def _constrained_mle(x, y):
+    """Fitted probabilities of ``a + b x`` maximising the binomial likelihood inside (0, 1)."""
+    design = np.column_stack([np.ones(len(x)), x])
+
+    def negative(beta):
+        mu = design @ beta
+        return -np.mean(xlogy(y, mu) + xlogy(1.0 - y, 1.0 - mu))
+
+    def gradient(beta):
+        mu = design @ beta
+        return design.T @ ((1.0 - y) / (1.0 - mu) - y / mu) / len(y)
+
+    result = minimize(
+        negative,
+        np.array([0.5, 0.0]),
+        jac=gradient,
+        constraints=LinearConstraint(design, 1e-12, 1.0 - 1e-12),
+        method="SLSQP",
+        options={"ftol": 1e-14, "maxiter": 500},
+    )
+    assert result.success, result.message
+    return design @ result.x
+
+
+@pytest.mark.parametrize(
+    ("direct_solve", "selection_penalty"),
+    [("auto", 0.0), ("qr", 0.0), ("auto", 0.01)],
+    ids=["direct", "qr", "selection"],
+)
+def test_a_maximum_on_the_boundary_is_feasible_and_not_converged(direct_solve, selection_penalty):
+    # The constrained maximum of y = (0, 0, 1, 1) on x = (0, 1/3, 2/3, 1) is
+    # p = x: rows 0 and 3 sit on the boundary, where the score does not vanish.
+    X = pd.DataFrame({"x": np.linspace(0.0, 1.0, 4)})
+    model = SuperGLM(
+        family="binomial",
+        link="identity",
+        selection_penalty=selection_penalty,
+        direct_solve=direct_solve,
+        features={"x": Numeric()},
+    )
+    with pytest.warns(ConvergenceWarning, match="probability of 0 or 1"):
+        model.fit(X, np.array([0.0, 0.0, 1.0, 1.0]))
+    assert not model.result.converged
+    assert model.result.termination_reason == "mean_space_boundary"
+    assert model.result.mean_space_boundary_rows == 2
+    eta = _eta(model)
+    assert np.all((eta > 0.0) & (eta < 1.0))
+    np.testing.assert_allclose(model.predict(X), X["x"].to_numpy(), atol=1e-6)
+
+
+@pytest.mark.parametrize(("seed", "interior"), [(0, False), (2, True)])
+def test_a_fit_reaches_the_constrained_maximum_inside_the_space(seed, interior):
+    # p = x puts the maximum on the boundary for seed 0 and just inside it for seed 2
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(0.0, 1.0, 2000)
+    y = rng.binomial(1, x).astype(float)
+    X = pd.DataFrame({"x": x})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ConvergenceWarning)
+        model = SuperGLM(
+            family="binomial", link="identity", selection_penalty=0, features={"x": Numeric()}
+        ).fit(X, y)
+    assert model.result.converged is interior
+    eta = _eta(model)
+    assert np.all((eta > 0.0) & (eta < 1.0))
+    # the default deviance tolerance, 1e-6, leaves the probabilities about 2e-4 short
+    np.testing.assert_allclose(model.predict(X), _constrained_mle(x, y), atol=1e-3)
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+def test_reml_returns_a_boundary_maximum_disclosed_rather_than_refused(discrete):
+    # Level c's responses are all 0, so every smoothing parameter leaves its
+    # lowest row on the boundary.
+    rng = np.random.default_rng(1)
+    x = rng.uniform(0.0, 1.0, 1500)
+    g = rng.choice(["a", "b", "c"], 1500)
+    y = rng.binomial(1, 0.3 + 0.3 * x).astype(float)
+    y[g == "c"] = 0.0
+    model = SuperGLM(
+        family="binomial",
+        link="identity",
+        discrete=discrete,
+        features={"x": Spline(n_knots=8), "g": Categorical()},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(pd.DataFrame({"x": x, "g": g}), y)
+    assert not model.result.converged
+    assert model.result.termination_reason == "mean_space_boundary"
+    assert np.all((_eta(model) > 0.0) & (_eta(model) < 1.0))
+    assert any(
+        issubclass(item.category, ConvergenceWarning) and "boundary" in str(item.message)
+        for item in caught
+    )

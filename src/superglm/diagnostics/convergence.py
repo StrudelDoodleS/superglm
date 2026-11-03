@@ -138,7 +138,7 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
     if boundary:
         message += (
             " The penalized maximum lies on the boundary of the family's mean space (a "
-            "fitted probability of 1 under the binomial log link) at the selected smoothing "
+            "binomial fitted probability of 0 or 1) at the selected smoothing "
             "parameters: the model has no interior optimum there, so more iterations will "
             "not make it converge. A link whose means stay inside (0, 1), such as logit, "
             "has one."

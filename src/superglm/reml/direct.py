@@ -826,9 +826,12 @@ def optimize_direct_reml(
         # Saefken 2016, sec. 3.1). Raise every estimated penalty in doubling
         # log-steps (Nocedal & Wright 2006, sec. 3.5) until a cold refit is
         # interior; a boundary state is no start. Trials are simply rejected.
+        # A binomial/identity boundary state is feasible, and is disclosed instead.
         restoration_step = 1.0
         rho_at_boundary = rho_clipped
-        while pirls_result.termination_reason == "mean_space_boundary":
+        while pirls_result.termination_reason == "mean_space_boundary" and isinstance(
+            link, LogLink
+        ):
             if not bool(np.any(estimated_mask & (rho_clipped < log_hi))):
                 raise ObservedModeNotConvergedError(
                     _mean_space_boundary_message(
@@ -880,7 +883,7 @@ def optimize_direct_reml(
         # geometry's mode score below is a diagnostic only.
         candidate_mode_stationary = bool(pirls_result.converged)
         if use_observed_geometry:
-            if not pirls_result.converged and not stopped_on_iteration_budget(pirls_result):
+            if not pirls_result.converged and not stopped_on_iteration_budget(pirls_result, link):
                 # Typed so a power search routes around the point. Reasons
                 # here are structural failures, never budget exhaustion.
                 raise ObservedModeNotConvergedError(hint=mode_certification_hint(distribution))
@@ -1548,7 +1551,9 @@ def optimize_direct_reml(
             # runs, is what establishes stationarity.
             trial_mode_stationary = bool(trial_result.converged)
             if use_observed_geometry:
-                if not trial_result.converged and not stopped_on_iteration_budget(trial_result):
+                if not trial_result.converged and not stopped_on_iteration_budget(
+                    trial_result, link
+                ):
                     step *= 0.5
                     continue
                 _t_geometry = _time.perf_counter()
