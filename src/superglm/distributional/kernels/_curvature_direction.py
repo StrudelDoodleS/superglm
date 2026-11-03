@@ -33,6 +33,12 @@ from collections.abc import Callable, Mapping
 import numpy as np
 from numpy.typing import NDArray
 
+#: Rows per block when ``m`` stacked directions share one state evaluation: the
+#: ``m``-fold scratch then stays near ``STACKED_ROW_CHUNK * m`` doubles per
+#: intermediate whatever the row count, and a block is long enough that numpy's
+#: per-call cost stays small beside the row arithmetic.
+STACKED_ROW_CHUNK = 32768
+
 #: ``inner[m][(c, idx)]`` is ``d^m phi_c / d x_idx`` for a sorted index tuple
 #: ``idx`` of length ``m``; entries left out are structurally zero.
 InnerDerivatives = Mapping[int, Mapping[tuple[int, tuple[int, ...]], NDArray[np.float64] | float]]
@@ -263,26 +269,31 @@ def separable_inner_derivatives(
 
 
 def third_from_hessian_direction(
-    hessian_direction: Callable[[NDArray[np.float64]], NDArray[np.float64]],
+    hessian_direction: Callable[[NDArray[np.float64], slice], NDArray[np.float64]],
     n_rows: int,
     k_parameters: int,
 ) -> NDArray[np.float64]:
     """Packed natural third derivatives from a family's ``dH(v)`` on the natural axes.
 
-    ``dH(e_k)[i, j]`` is ``L_ijk``, so the ``K`` axes, stacked ``(K, n, K)``
-    into one call of ``hessian_direction``, give every distinct third derivative.
+    ``dH(e_k)[i, j]`` is ``L_ijk``, so the ``K`` axes, stacked ``(K, b, K)``
+    into one call ``hessian_direction(axes, rows)`` per block of ``b <=
+    STACKED_ROW_CHUNK`` rows, give every distinct third derivative with scratch
+    bounded by the block.
     """
     pairs = packed_tuples(k_parameters, 2)
     triples = {key: column for column, key in enumerate(packed_tuples(k_parameters, 3))}
     third = np.empty((n_rows, len(triples)), dtype=np.float64)
-    axes = np.zeros((k_parameters, n_rows, k_parameters), dtype=np.float64)
-    for k in range(k_parameters):
-        axes[k, :, k] = 1.0
-    packed = np.asarray(hessian_direction(axes), dtype=np.float64)
-    for k in range(k_parameters):
-        for column, (i, j) in enumerate(pairs):
-            if j <= k:
-                third[:, triples[(i, j, k)]] = packed[k, :, column]
+    chunk = max(1, min(STACKED_ROW_CHUNK, n_rows))
+    for start in range(0, n_rows, chunk):
+        rows = slice(start, min(start + chunk, n_rows))
+        axes = np.zeros((k_parameters, rows.stop - start, k_parameters), dtype=np.float64)
+        for k in range(k_parameters):
+            axes[k, :, k] = 1.0
+        packed = np.asarray(hessian_direction(axes, rows), dtype=np.float64)
+        for k in range(k_parameters):
+            for column, (i, j) in enumerate(pairs):
+                if j <= k:
+                    third[rows, triples[(i, j, k)]] = packed[k, :, column]
     return third
 
 
@@ -343,6 +354,7 @@ def predictor_curvature_second_direction(
 
 
 __all__ = [
+    "STACKED_ROW_CHUNK",
     "InnerDerivatives",
     "compose_derivatives",
     "curvature_second_direction",

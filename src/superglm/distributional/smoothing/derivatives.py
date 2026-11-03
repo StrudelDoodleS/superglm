@@ -23,6 +23,7 @@ from typing import Literal, cast
 import numpy as np
 from numpy.typing import NDArray
 
+import superglm.distributional.kernels._curvature_direction as curvature_kernels
 from superglm.distributional._row_design import (
     BoundedPredictorMatrix,
     PredictorMatrix,
@@ -418,7 +419,9 @@ def _analytic_first_derivative(
     links (NB2 and GammaLS accept only their log links) or refuses a row on any
     axis (a two-piece row on its join); the caller then differences.  A family
     with ``stacked_curvature_directions`` takes the ``K`` axes stacked, so its
-    state is evaluated once per pass rather than once per axis.
+    state is evaluated once per pass rather than once per axis, over blocks of
+    ``STACKED_ROW_CHUNK`` rows so that its ``K``-fold scratch is bounded by the
+    block, not the row count.
     """
     if not isinstance(
         family, (PredictorCurvatureDirectionalFamily, CertifiedCurvatureDirectionalFamily)
@@ -426,8 +429,13 @@ def _analytic_first_derivative(
         return None
     channels = k_parameters * (k_parameters + 1) // 2
 
-    def derivative(unit: NDArray[np.float64]) -> _CertifiedRows:
-        analytic = analytic_curvature_direction(family, y, eta, unit, links, likelihood_plan)
+    def derivative(
+        y_rows: NDArray,
+        eta_rows: NDArray[np.float64],
+        unit: NDArray[np.float64],
+        plan_rows: FamilyLikelihoodPlan,
+    ) -> _CertifiedRows:
+        analytic = analytic_curvature_direction(family, y_rows, eta_rows, unit, links, plan_rows)
         if analytic is None:
             raise UnsupportedLikelihoodContractError("the family refused these links")
         expected = (*unit.shape[:-1], channels)
@@ -444,15 +452,36 @@ def _analytic_first_derivative(
             raise LamlDerivativeError("family returned an invalid curvature-direction certificate")
         return values, certificate
 
-    units = np.zeros((k_parameters, n_observations, k_parameters), dtype=np.float64)
-    for q in range(k_parameters):
-        units[q, :, q] = 1.0
+    def axis_units(rows: int) -> NDArray[np.float64]:
+        units = np.zeros((k_parameters, rows, k_parameters), dtype=np.float64)
+        for q in range(k_parameters):
+            units[q, :, q] = 1.0
+        return units
+
     try:
         if getattr(family, "stacked_curvature_directions", False) is True:
-            values, certificate = derivative(units)
+            chunk = min(curvature_kernels.STACKED_ROW_CHUNK, n_observations)
+            if chunk == n_observations:
+                values, certificate = derivative(y, eta, axis_units(chunk), likelihood_plan)
+            else:
+                values = np.empty((k_parameters, n_observations, channels), dtype=np.float64)
+                certificate = np.empty_like(values)
+                units = axis_units(chunk)
+                for start in range(0, n_observations, chunk):
+                    stop = min(start + chunk, n_observations)
+                    if stop - start != chunk:
+                        units = axis_units(stop - start)
+                    plan_rows = likelihood_plan.take(np.arange(start, stop, dtype=np.intp))
+                    values[:, start:stop], certificate[:, start:stop] = derivative(
+                        y[start:stop], eta[start:stop], units, plan_rows
+                    )
             axes = [(values[q], certificate[q]) for q in range(k_parameters)]
         else:
-            axes = [derivative(unit) for unit in units]
+            axes = []
+            for q in range(k_parameters):
+                unit = np.zeros((n_observations, k_parameters), dtype=np.float64)
+                unit[:, q] = 1.0
+                axes.append(derivative(y, eta, unit, likelihood_plan))
     except (
         TypeError,
         ValueError,

@@ -611,15 +611,24 @@ def test_hessian_certificate_costs_no_absolute_assembly(monkeypatch) -> None:
 _U = 2.0**-53
 
 
+@pytest.mark.parametrize("blocked", [False, True], ids=["one block", "row blocks"])
 @pytest.mark.parametrize("kind", ["gaussian", "gamma"])
-def test_stacked_axis_directions_reproduce_the_per_axis_pass(kind) -> None:
-    """A family with ``stacked_curvature_directions`` takes the K axes in one call.
+def test_stacked_axis_directions_reproduce_the_per_axis_pass(kind, blocked, monkeypatch) -> None:
+    """A family with ``stacked_curvature_directions`` takes the K axes in one call per row block.
 
-    The same family without the flag takes one call per axis.  Every row and
-    direction runs the same arithmetic either way, so the gradient, Hessian
-    and both certificates agree within ``8 u`` of their largest entry.
+    The same family without the flag takes one call per axis over all rows.
+    Every row and direction runs the same arithmetic either way, so the
+    gradient, Hessian and both certificates agree within ``8 u`` of their
+    largest entry.
     """
+    from superglm.distributional.kernels import _curvature_direction as curvature_kernels
+
     family, layout, y, plan, lambdas, fit, _config, session = _interior_case(kind, "observed")
+    n, k = fit.eta.shape
+    # Three blocks, the last one shorter, or the whole case in one block.
+    chunk = n // 3 + 1 if blocked else curvature_kernels.STACKED_ROW_CHUNK
+    assert blocked or n <= chunk
+    monkeypatch.setattr(curvature_kernels, "STACKED_ROW_CHUNK", chunk)
     shapes: list[tuple[int, ...]] = []
 
     class _Counted(type(family)):
@@ -636,9 +645,8 @@ def test_stacked_axis_directions_reproduce_the_per_axis_pass(kind) -> None:
         return cls(scale_floor=family.scale_floor) if kind == "gaussian" else cls()
 
     common = dict(lambdas=lambdas, fit=fit, dense_matrices=session.dense_matrices(layout))
-    n, k = fit.eta.shape
     stacked = laml_derivatives(make(_Counted), layout, y, plan, **common)
-    assert shapes == [(k, n, k)]
+    assert shapes == [(k, min(chunk, n - start), k) for start in range(0, n, chunk)]
     shapes.clear()
     per_axis = laml_derivatives(make(_PerAxis), layout, y, plan, **common)
     assert shapes == [(n, k)] * k
@@ -760,3 +768,46 @@ def test_stacked_curvature_directions_match_one_direction_at_a_time(name, bounde
             assert np.all(
                 np.abs(stacked_certificate[index] - certificate) <= 4 * _U * np.max(certificate)
             ), index
+
+
+@pytest.mark.parametrize("bounded", [False, True], ids=["complete", "bounded"])
+def test_generalized_pareto_natural_thirds_are_row_blocked(bounded, monkeypatch) -> None:
+    """The Hessian pass's stacked natural thirds over row blocks equal one block over all rows.
+
+    Each row's thirds use only that row, so blocks of 7 rows reproduce the
+    single block within ``4 u`` of each pair's largest entry, values and
+    certificate, on complete and on truncated and censored rows.
+    """
+    from superglm.distributional.families import GeneralizedParetoLSS
+    from superglm.distributional.families import generalized_pareto as family_module
+    from superglm.distributional.kernels import _curvature_direction as curvature_kernels
+    from superglm.distributional.smoothing.derivatives import _analytic_second_derivatives
+    from superglm.distributional.smoothing.endpoint_direction import DEFAULT_STEP
+
+    family = GeneralizedParetoLSS()
+    rng = np.random.default_rng(29)
+    n = 40
+    y, eta = _stacked_rows(family, n, rng)
+    links = tuple(spec.default_link for spec in family.parameters)
+    weights = resolve_likelihood_weights(None, n_observations=n, contract=WeightContract("prior"))
+    observation = _bounded_observation(y, rng) if bounded else COMPLETE_OBSERVATION
+    plan = family.bind_likelihood(y, weights, observation)
+    shapes: list[tuple[int, ...]] = []
+    original = family_module.scale_hessian_direction
+
+    def counted(response, scale, shape, direction, multiplier):
+        shapes.append(np.shape(direction))
+        return original(response, scale, shape, direction, multiplier)
+
+    monkeypatch.setattr(family_module, "scale_hessian_direction", counted)
+    results = []
+    for chunk in (n, 7):
+        monkeypatch.setattr(curvature_kernels, "STACKED_ROW_CHUNK", chunk)
+        shapes.clear()
+        results.append(_analytic_second_derivatives(family, y, eta, links, plan, step=DEFAULT_STEP))
+        assert shapes == [(2, min(chunk, n - start), 2) for start in range(0, n, chunk)]
+    (whole_values, whole_certificate), (blocked_values, blocked_certificate) = results
+    for pair, want in whole_values.items():
+        assert np.all(np.abs(blocked_values[pair] - want) <= 4 * _U * np.max(np.abs(want))), pair
+        bar = 4 * _U * np.max(whole_certificate[pair])
+        assert np.all(np.abs(blocked_certificate[pair] - whole_certificate[pair]) <= bar), pair

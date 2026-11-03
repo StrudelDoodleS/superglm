@@ -481,9 +481,10 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         windows_valid = np.ones(len(response), dtype=bool)
 
         def natural_derivatives(theta: NDArray, natural_a: NDArray, natural_b: NDArray):
+            multiplier = bound.multiplier
             third = natural_third_from_direction(
-                lambda v: scale_hessian_direction(
-                    response, theta[:, 0], theta[:, 1], v, bound.multiplier
+                lambda v, rows: scale_hessian_direction(
+                    response[rows], theta[rows, 0], theta[rows, 1], v, multiplier[rows]
                 ),
                 len(response),
                 2,

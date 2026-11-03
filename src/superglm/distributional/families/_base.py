@@ -273,7 +273,7 @@ def link_inner_derivatives(*derivatives: NDArray[np.float64]):
 
 
 def natural_third_from_direction(hessian_direction, n_rows: int, k_parameters: int):
-    """Packed natural third derivatives from one call of ``dH(v)`` on the stacked natural axes."""
+    """Packed natural third derivatives from ``dH(v, rows)`` on the stacked natural axes, per row block."""
     from superglm.distributional.kernels._curvature_direction import (
         third_from_hessian_direction,
     )
