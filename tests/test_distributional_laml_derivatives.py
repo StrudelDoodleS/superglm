@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import functools
 import math
+import warnings
 from dataclasses import replace
 
 import numpy as np
@@ -942,6 +943,60 @@ def _binned_fit(family, frame, y, predictors, discrete: bool):
     plan = family.bind_likelihood(rows.response, rows.likelihood_weights, COMPLETE_OBSERVATION)
     options = dict(lambdas=dict(model.smoothing.lambdas), fit=model.smoothing.terminal_fit)
     return family, model.layout, rows.response, plan, options
+
+
+def test_the_corrected_covariance_replay_builds_no_dense_design_on_a_binned_layout(
+    monkeypatch,
+) -> None:
+    """The bin-table route reads its own rows, so the replay does not form the n x p design for it.
+
+    An unchunked exact-mode fit on integer covariates is the route that formed it. The
+    correction equals the one the dense matrices give, bit for bit. Mutation check:
+    choosing the matrices by the chunk size alone builds the design once.
+    """
+    from superglm.distributional import posterior as posterior_module
+    from superglm.distributional.solver.binned_rows import binned_layout
+
+    family, frame, y, predictors, discrete = _compressed_case()
+    model = fit_dense_distributional(
+        frame,
+        np.asarray(y, dtype=np.float64),
+        family=family,
+        predictors=predictors,
+        weight_contract=WeightContract("prior"),
+        efs_config=DistributionalEFSConfig(max_iterations=4, outer="efs"),
+        discrete=discrete,
+        n_bins=24,
+    )
+    assert binned_layout(model.layout)
+    assert model.smoothing.terminal_fit.resolved_chunk_size is None
+    dense_design = posterior_module.dense_predictor_matrices
+    replay = posterior_module.laml_derivatives
+    builds: list[bool] = []
+    replays: list[bool] = []
+
+    def counted_design(layout):
+        builds.append(True)
+        return dense_design(layout)
+
+    def counted_replay(*args, **kwargs):
+        replays.append(True)
+        return replay(*args, **kwargs)
+
+    monkeypatch.setattr(posterior_module, "dense_predictor_matrices", counted_design)
+    monkeypatch.setattr(posterior_module, "laml_derivatives", counted_replay)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        corrected = posterior_module.posterior_covariance(model, kind="corrected")
+    assert replays == [True] and not builds
+
+    monkeypatch.setattr(posterior_module, "binned_layout", lambda layout: False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        from_dense = posterior_module.posterior_covariance(model, kind="corrected")
+    assert replays == [True, True] and builds == [True]
+    assert not np.array_equal(corrected, model.covariance)
+    np.testing.assert_array_equal(corrected, from_dense)
 
 
 def _binned_family(family, authority: str):
