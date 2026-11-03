@@ -1,0 +1,199 @@
+"""Rows for shape rules confined to a stretch [a, b] of a B-spline curve.
+
+A rule on [a, b] is stated on the coefficients of ``f^(order)`` after ``a`` and
+``b`` are inserted into the derivative spline's knot vector to full
+multiplicity (knot insertion; Lyche & Mørken, *Spline Methods*, ch. 4). The
+refined space contains ``f^(order)`` exactly and splits at ``a`` and ``b``, so
+its coefficients on [a, b] bound ``f^(order)`` there (partition of unity) and
+constrain nothing outside the stretch. Their first and last coefficients are
+the values of ``f^(order)`` at ``a`` and ``b``.
+
+Inequality rows follow the full-range builders in ``_spline_constraints``:
+``A @ c >= 0`` means the rule holds, decreasing and concave rows are negated,
+and each row is scaled by its largest entry.
+"""
+
+from __future__ import annotations
+
+import warnings
+
+import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
+from numpy.typing import NDArray
+from scipy.interpolate import BSpline
+
+from superglm.features._spline_ranges import derivative_design
+from superglm.features.constraint import ConstraintRules, ConstraintSpec
+from superglm.types import LinearConstraintSet
+
+ShapePiece = tuple[str, float, float]
+
+_SIGN = {"increasing": 1.0, "decreasing": -1.0, "convex": 1.0, "concave": -1.0}
+_DIRECTION = ("increasing", "decreasing")
+_CURVATURE = ("convex", "concave")
+
+
+def derivative_value_row(knots: NDArray, degree: int, x: float, order: int) -> NDArray:
+    """The row ``r`` with ``r @ c = f^(order)(x)``."""
+    return derivative_design(knots, degree, np.array([float(x)]), order)[0]
+
+
+def _refined(
+    knots: NDArray, degree: int, order: int, lo: float, hi: float
+) -> tuple[NDArray, NDArray]:
+    """The rows of :func:`refined_derivative_rows` and their clamped knot vector."""
+    p = degree - order
+    if p < 1:
+        raise ValueError(
+            f"a shape rule on a stretch needs a spline of degree {order + 1} or more, got "
+            f"degree {degree}; raise the degree (degree=3 is a cubic)"
+        )
+    knots = np.asarray(knots, dtype=np.float64)
+    t_r = knots[order : len(knots) - order]
+    inner = t_r[(t_r > lo) & (t_r < hi)]
+    t_ref = np.concatenate([np.full(p + 1, lo), inner, np.full(p + 1, hi)])
+    tau = sliding_window_view(t_ref[1:-1], p).mean(axis=1)
+    B_ref = BSpline.design_matrix(tau, t_ref, p).toarray()
+    return np.linalg.solve(B_ref, derivative_design(knots, degree, tau, order)), t_ref
+
+
+def refined_derivative_rows(
+    knots: NDArray, degree: int, order: int, lo: float, hi: float
+) -> NDArray:
+    """Rows ``R`` with ``R @ c`` the coefficients of ``f^(order)`` on [lo, hi].
+
+    The coefficients are those of the degree ``p = degree - order`` spline on
+    the derivative knots ``knots[order:-order]`` refined by ``lo`` and ``hi``
+    at multiplicity ``p + 1``, keeping the basis functions supported in
+    [lo, hi]. Full multiplicity makes the refined space a direct sum of the
+    pieces left of, inside and right of the stretch, so the kept coefficients
+    are found by collocating on [lo, hi] alone, at the Greville abscissae of
+    its clamped knot vector (Schoenberg–Whitney holds there; de Boor, *A
+    Practical Guide to Splines*, ch. XIII). Collocating the whole refined space
+    at once would repeat the abscissa at each split point and is singular.
+    ``f^(order)`` must be continuous at ``hi``, which holds when the knot
+    multiplicity there is at most ``p``, as for every simple interior knot.
+    """
+    return _refined(knots, degree, order, lo, hi)[0]
+
+
+def _outside(a: float, b: float, holes: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """[a, b] less the union of ``holes``, as non-empty intervals."""
+    parts = []
+    for s, e in sorted(holes):
+        if s > a:
+            parts.append((a, min(s, b)))
+        a = max(a, e)
+    parts.append((a, b))
+    return [(s, e) for s, e in parts if s < e]
+
+
+def shape_pieces(rules: ConstraintRules | ConstraintSpec, lo: float, hi: float) -> list[ShapePiece]:
+    """The direction, curvature and flat rules as numeric pieces on [lo, hi].
+
+    Open ends become ``lo`` or ``hi``. A stretch reaching past the range is
+    clipped with a warning; one with no overlap is refused. Direction and
+    curvature pieces are split around flat pieces, where a flat curve already
+    satisfies them. Caps and step limits are not pieces and are skipped.
+    """
+    if isinstance(rules, ConstraintSpec):
+        rules = ConstraintRules((rules,))
+    pieces = []
+    for rule in rules:
+        if rule.kind not in _DIRECTION + _CURVATURE + ("flat",):
+            continue
+        if isinstance(rule.lo, str) or isinstance(rule.hi, str):
+            raise ValueError(
+                f"{rule.describe()} ends at a band label, which only an ordered categorical "
+                "feature can place; give the stretch in the feature's own values"
+            )
+        a = lo if rule.lo is None else float(rule.lo)
+        b = hi if rule.hi is None else float(rule.hi)
+        if not (a < hi and b > lo):
+            raise ValueError(
+                f"{rule.describe()} lies outside the feature's range [{lo:g}, {hi:g}]; "
+                "move the stretch inside the range or drop the rule"
+            )
+        if a < lo or b > hi:
+            a, b = max(a, lo), min(b, hi)
+            warnings.warn(
+                f"{rule.describe()} reaches past the feature's range [{lo:g}, {hi:g}]; "
+                f"the rule applies on [{a:g}, {b:g}]",
+                UserWarning,
+                stacklevel=2,
+            )
+        pieces.append((rule.kind, a, b))
+    flats = [(a, b) for kind, a, b in pieces if kind == "flat"]
+    split = [
+        (kind, s, e) for kind, a, b in pieces if kind != "flat" for s, e in _outside(a, b, flats)
+    ]
+    return split + [("flat", a, b) for a, b in flats]
+
+
+def _held_at_zero(lo: NDArray, hi: NDArray, zero: list[tuple[float, float]]) -> NDArray:
+    """Which supports [lo, hi] overlap a stretch where ``f'`` is held at zero."""
+    held = np.zeros(np.shape(lo), dtype=bool)
+    for s, e in zero:
+        held |= (lo < e) & (hi > s)
+    return held
+
+
+def shape_rows(
+    knots: NDArray, degree: int, pieces: list[ShapePiece], *, natural_ends: bool
+) -> tuple[LinearConstraintSet, NDArray]:
+    """Inequality rows ``A @ c >= 0`` and flat equality rows ``E @ c = 0``.
+
+    A direction piece with a curvature piece on the same stretch keeps one
+    end-slope row: with ``f'`` monotone on [a, b], its sign there is its sign
+    at one end (increasing & concave: ``f'(b) >= 0``; increasing & convex:
+    ``f'(a) >= 0``; decreasing & convex: ``f'(b) <= 0``; decreasing & concave:
+    ``f'(a) <= 0``).
+
+    Rows the equalities already hold at zero are dropped, since they compose
+    to round-off and degrade the QP's active set. A polynomial that is constant
+    on part of a knot span is constant on all of it, so a flat stretch holds
+    ``f'`` and ``f''`` at zero on every knot span it meets, and with them every
+    refined coefficient whose basis function is active there. With
+    ``natural_ends``, ``f''`` is held at zero at the ends of the knot vector's
+    base interval, where a natural spline (clamped at its range) puts its
+    boundary conditions, so a curvature piece drops its coefficient there.
+    """
+    knots = np.asarray(knots, dtype=np.float64)
+    n_basis = len(knots) - degree - 1
+    flats = [(a, b) for kind, a, b in pieces if kind == "flat"]
+    zero = [(knots[knots <= a].max(), knots[knots >= b].min()) for a, b in flats]
+    ends = (knots[degree], knots[n_basis])
+    curvature = {(a, b): kind for kind, a, b in pieces if kind in _CURVATURE}
+
+    blocks = [np.zeros((0, n_basis))]
+    for kind, a, b in pieces:
+        if kind == "flat":
+            continue
+        sign = _SIGN[kind]
+        if kind in _DIRECTION and (a, b) in curvature:
+            end = b if sign * _SIGN[curvature[(a, b)]] < 0 else a
+            if not any(s <= end <= e for s, e in zero):
+                blocks.append(sign * derivative_value_row(knots, degree, end, 1)[None, :])
+            continue
+        order = 1 if kind in _DIRECTION else 2
+        rows, t_ref = _refined(knots, degree, order, a, b)
+        m = rows.shape[0]
+        keep = ~_held_at_zero(t_ref[:m], t_ref[degree - order + 1 :], zero)
+        if order == 2 and natural_ends:
+            keep[0] &= a != ends[0]
+            keep[-1] &= b != ends[1]
+        blocks.append(sign * rows[keep])
+    A = np.vstack(blocks)
+    A = A / np.max(np.abs(A), axis=1, keepdims=True) if A.shape[0] else A
+    flat_rows = [refined_derivative_rows(knots, degree, 1, a, b) for a, b in flats]
+    E = np.vstack([np.zeros((0, n_basis)), *flat_rows])
+    return LinearConstraintSet(A=A, b=np.zeros(A.shape[0])), E
+
+
+__all__ = [
+    "ShapePiece",
+    "derivative_value_row",
+    "refined_derivative_rows",
+    "shape_pieces",
+    "shape_rows",
+]
