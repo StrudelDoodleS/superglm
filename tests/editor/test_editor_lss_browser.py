@@ -8,9 +8,11 @@ from urllib.parse import urlsplit
 import joblib
 import pytest
 from tests.editor._chart_layout import wait_for_chart_to_fit
+from tests.editor.test_editor_workspace_browser import select_chart_tool
 
 from superglm import SuperLSS
 from superglm.editor import widget as widget_module
+from superglm.editor.lss.availability import LSS_UNAVAILABLE
 
 pytest.importorskip("playwright.sync_api")
 pytestmark = pytest.mark.browser
@@ -151,3 +153,41 @@ def test_joblib_export_keeps_history(open_lss_editor_page):
     assert type(loaded) is SuperLSS
     assert [record["predictor"] for record in loaded._editor_history] == ["scale"]
     assert loaded._editor_history[0]["term"] == "scale:age"
+
+
+def test_tools_the_session_does_not_offer_are_neither_requested_nor_offered(open_lss_editor_page):
+    requested: list[str] = []
+
+    def record(page):
+        page.on("request", lambda request: requested.append(urlsplit(request.url).path))
+
+    with open_lss_editor_page(selected_term="scale:region", prepare=record) as (page, _session):
+        state = LSS_UNAVAILABLE
+        metrics, summary = page.locator("#metricGrid"), page.locator("#summaryFrame")
+        page.wait_for_function(
+            "() => ['metricGrid', 'summaryFrame'].every("
+            "id => document.getElementById(id)?.dataset.freshness === 'unavailable')"
+        )
+        assert metrics.inner_text() == state["metrics"]
+        assert summary.inner_text() == state["summary"]
+        assert metrics.get_attribute("aria-busy") == summary.get_attribute("aria-busy") == "false"
+
+        # An edit schedules the evidence the page shows; none of it is these routes.
+        select_chart_tool(page, "Select")
+        with page.expect_response(_posted("/select")):
+            page.locator("#chart .point").nth(2).click()
+        page.locator("#selectionMenu").wait_for(state="visible")
+        with page.expect_response(_posted("/op")):
+            page.get_by_role("button", name="Increase selection", exact=True).click()
+        page.locator("#historyTab").click()
+        page.locator("#summaryTab").click()
+
+        assert page.locator(".evidence-retry:visible").count() == 0
+        table = page.locator('#termViewToggle [data-term-view="table"]')
+        assert table.is_disabled()
+        assert table.get_attribute("data-popover-body") == state["rating_table"]
+        refit_offset = page.locator("#refitOffset")
+        assert refit_offset.is_disabled()
+        assert refit_offset.get_attribute("title") == state["refit_offset"]
+        assert not {"/summary", "/metrics", "/rating_table"} & set(requested)
+        assert "/op" in requested

@@ -31,7 +31,7 @@ from superglm.editor.carry import model_with_edited_curves, weighted_mean
 from superglm.editor.errors import EditorClientError, EditorValueError
 from superglm.editor.evaluation import EvaluationDataset, training_export_dataset
 from superglm.editor.jobs import JobCancelledError
-from superglm.editor.lss.availability import require_available
+from superglm.editor.lss.availability import require_available, session_refit_reason
 from superglm.editor.lss.validation import offset_departs, stack_offsets
 from superglm.editor.lss.view import column_of, is_lss
 from superglm.editor.refit import EXPLICIT_PENALTY_ATTRIBUTE, fit_refit_model
@@ -339,7 +339,7 @@ def final_fit_reason(session) -> str | None:
     datasets = final_fit_datasets(session)
     if not datasets:
         return NO_FINAL_ROWS
-    return _unstackable_reason(datasets)
+    return session_refit_reason(session) or _unstackable_reason(datasets)
 
 
 def _unstackable_reason(datasets: Sequence[EvaluationDataset]) -> str | None:
@@ -1107,7 +1107,11 @@ class FinalFitPlan(_Plan):
 def capture_final_fit(session) -> FinalFitPlan:
     """Capture Final fit's inputs; refuse without training rows, or rows that cannot stack."""
     datasets = final_fit_datasets(session)
-    reason = _unstackable_reason(datasets) if datasets else NO_FINAL_ROWS
+    reason = (
+        (session_refit_reason(session) or _unstackable_reason(datasets))
+        if datasets
+        else NO_FINAL_ROWS
+    )
     if reason is not None:
         raise EditorValueError(reason)
     return FinalFitPlan(

@@ -14,7 +14,7 @@ from types import MappingProxyType
 from typing import Any
 
 from superglm.editor.errors import EditorValueError
-from superglm.editor.lss.view import is_lss
+from superglm.editor.lss.view import LSSModelView, is_lss
 
 LSS_UNAVAILABLE: Mapping[str, str] = MappingProxyType(
     {
@@ -66,6 +66,17 @@ def require_available(model: object, tool: str) -> None:
         raise EditorValueError(LSS_UNAVAILABLE[tool])
 
 
+def unavailable_evidence(model: object, tool: str, **fields: Any) -> dict[str, Any] | None:
+    """The calm payload an evidence route answers for a tool a SuperLSS does not offer, else None.
+
+    ``fields`` (the revision, request sequence and source) are echoed so the
+    page files the answer like any other; ``error`` is the tool's sentence.
+    """
+    if not is_lss(model):
+        return None
+    return {"available": False, **fields, "error": LSS_UNAVAILABLE[tool]}
+
+
 def lss_availability(term_payload: dict[str, Any]) -> dict[str, Any]:
     """``term_payload`` with the shape tool's reason, and each term tool's reason listed."""
     return {
@@ -79,6 +90,62 @@ def lss_availability(term_payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def session_availability() -> dict[str, str]:
-    """The reason for each tool of the whole session, for the editor state of a SuperLSS."""
-    return {tool: LSS_UNAVAILABLE[tool] for tool in SESSION_TOOLS}
+NO_FIT_SETTINGS = (
+    "This model has no recorded fit settings, so the editor cannot refit it. Fit it again with "
+    "this version of superglm, then open it in the editor."
+)
+OFFSETS_NOT_GIVEN = (
+    "This model was fitted with offsets for {names}, and the editor has none for {them}, so "
+    "Refit and Final fit would leave {them} out. Open the editor with "
+    "train_data=(X, y, sample_weight, offsets), with offsets a dict such as {{'{first}': ...}}."
+)
+WEIGHTS_NOT_GIVEN = (
+    "This model was fitted with sample weights, and the editor has none, so Refit and Final fit "
+    "would give every row weight 1. Open the editor with "
+    "train_data=(X, y, sample_weight, offsets)."
+)
+
+
+def refit_reason(model: Any, sample_weight: Any, offsets: Any) -> str | None:
+    """Why a SuperLSS (or the editor's view of one) cannot be refitted on these rows; None if it can.
+
+    A replay needs the settings the fit recorded, which a model saved by an
+    earlier superglm lacks, and the offsets and weights the fit was given: rows
+    without them would refit a different model, silently.
+    """
+    lss = model.lss if isinstance(model, LSSModelView) else model
+    if lss._fit_settings is None:
+        return NO_FIT_SETTINGS
+    state = lss._model.fit_state
+    missing = [
+        name
+        for name, semantics in state.null_model.offset_semantics.items()
+        if semantics != "zero_offset" and (offsets is None or name not in offsets)
+    ]
+    if missing:
+        names = ", ".join(repr(name) for name in missing)
+        them = "it" if len(missing) == 1 else "them"
+        return OFFSETS_NOT_GIVEN.format(names=names, them=them, first=missing[0])
+    provenance = state.weight_provenance
+    if sample_weight is None and not (provenance.all_unit and provenance.dropped_count == 0):
+        return WEIGHTS_NOT_GIVEN
+    return None
+
+
+def session_refit_reason(session: Any) -> str | None:
+    """Why the editor cannot refit its SuperLSS on its training rows; None for a SuperGLM."""
+    if not is_lss(session.model):
+        return None
+    train = session._evaluation_data.get("train")
+    if train is None:
+        return refit_reason(session.model, None, None)
+    return refit_reason(session.model, train.sample_weight, train.offset)
+
+
+def session_availability(session: Any) -> dict[str, str]:
+    """The reason for each tool of the whole session that is off, for a SuperLSS's editor state."""
+    off = {tool: LSS_UNAVAILABLE[tool] for tool in SESSION_TOOLS}
+    reason = session_refit_reason(session)
+    if reason is not None:
+        off["refit"] = off["final_fit"] = reason
+    return off

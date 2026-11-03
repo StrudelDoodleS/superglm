@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import functools
+import pickle
 
 import numpy as np
 import pytest
@@ -13,16 +15,21 @@ from superglm.distributional.terms import _resolve_term, _term_design
 from superglm.editor import EditorSession, edit
 from superglm.editor import staging as staging_module
 from superglm.editor._types import PendingStep
+from superglm.editor.cv import capture_final_fit, final_fit_reason
 from superglm.editor.errors import EditorValueError
 from superglm.editor.lss import LSSModelView
 from superglm.editor.lss.apply import lss_model_with_edits
 from superglm.editor.lss.availability import (
     LSS_UNAVAILABLE,
+    NO_FIT_SETTINGS,
+    OFFSETS_NOT_GIVEN,
     SESSION_TOOLS,
     TERM_TOOLS,
+    WEIGHTS_NOT_GIVEN,
     lss_availability,
 )
 from superglm.editor.lss.refit import lss_probe_build, lss_refit_with_drafts
+from superglm.editor.metrics import metrics_payload
 from superglm.editor.payloads import session_payload
 from tests._lss_editor_fixtures import (
     EPS,
@@ -358,7 +365,6 @@ def _routes():
         "refit_offset": lambda s, w: w._refit_offset(),
         "profile_distribution": lambda s, w: w._start_profile_distribution_job("scale"),
         "rating_table": lambda s, w: w._rating_table("mean:age"),
-        "summary": lambda s, w: w._summary("in_force"),
         "export_structure": lambda s, w: w._export_bytes("structure"),
         "export_xlsx": lambda s, w: w._export_bytes("xlsx"),
     }
@@ -395,7 +401,7 @@ def test_unavailable_tools_refuse_with_their_reason(tool):
 
 
 @pytest.mark.parametrize(
-    "tool", ["profile_distribution", "rating_table", "summary", "export_structure", "export_xlsx"]
+    "tool", ["profile_distribution", "rating_table", "export_structure", "export_xlsx"]
 )
 def test_the_other_session_tools_refuse_with_their_reason(tool):
     session = open_case(lognormal_case())
@@ -525,3 +531,112 @@ def test_collapse_then_edit_an_ordered_term():
     expected = target.predict_link(case.X)[parameter].to_numpy()
     np.testing.assert_allclose(got, expected, rtol=0.0, atol=bound)
     assert np.abs(got - view.lss.predict_link(case.X)[parameter].to_numpy()).max() > 10 * bound
+
+
+def _without_fit_settings(model: SuperLSS) -> SuperLSS:
+    """``model`` as a pickle from before fit settings were recorded loads: no instance entry."""
+    old = copy.copy(model)
+    del old.__dict__["_fit_settings"]
+    restored = pickle.loads(pickle.dumps(old))
+    assert "_fit_settings" not in restored.__dict__ and restored._fit_settings is None
+    return restored
+
+
+def _refit_and_final_fit_refuse(session, reason):
+    widget = session.widget()
+    try:
+        state = widget._state()
+        assert state["unavailable"]["refit"] == reason
+        assert state["unavailable"]["final_fit"] == reason
+        assert state["final_fit_plan"] == {"available": False, "reason": reason}
+        assert final_fit_reason(session) == reason
+        with pytest.raises(EditorValueError) as info:
+            capture_final_fit(session)
+        assert info.value.public_message == reason
+        session.stage_structural("knots", "mean:age", KNOTS)
+        with pytest.raises(EditorValueError) as info:
+            session.refit_pending()
+        assert info.value.public_message == reason
+        assert len(session.pending) == 1
+    finally:
+        widget.close()
+
+
+def test_a_model_without_recorded_fit_settings_opens_but_cannot_refit(replays):
+    case = lognormal_case()
+    old = FitCase(_without_fit_settings(case.model), case.X, case.y, None, None)
+    session = open_case(old)
+    assert (
+        session_payload(session)["scale:age"]["y"]
+        == session_payload(open_case(case))["scale:age"]["y"]
+    )
+    _refit_and_final_fit_refuse(session, NO_FIT_SETTINGS)
+    assert replays == []
+
+
+def test_a_model_fitted_with_offsets_cannot_refit_without_them(replays):
+    case = nb_case()
+    session = edit(case.model, train_data=(case.X, case.y))
+    _refit_and_final_fit_refuse(
+        session, OFFSETS_NOT_GIVEN.format(names="'mean'", them="it", first="mean")
+    )
+    assert replays == []
+    with_offsets = open_case(case).widget()
+    try:
+        assert "refit" not in with_offsets._state()["unavailable"]
+    finally:
+        with_offsets.close()
+
+
+@functools.cache
+def weighted_case() -> FitCase:
+    """The gamma case refitted with row weights and the case's smoothing strengths."""
+    base = gamma_case()
+    weights = np.random.default_rng(20261106).uniform(0.5, 2.0, base.y.size)
+    model = base.model._clone_with_replaced_terms({}).fit(
+        base.X, base.y, sample_weight=weights, lambdas=dict(base.model.smoothing_parameters_)
+    )
+    return FitCase(model, base.X, base.y, weights, None)
+
+
+def test_a_model_fitted_with_weights_cannot_refit_without_them(replays):
+    case = weighted_case()
+    session = edit(case.model, train_data=(case.X, case.y))
+    _refit_and_final_fit_refuse(session, WEIGHTS_NOT_GIVEN)
+    assert replays == []
+    weighted = open_case(case).widget()
+    try:
+        assert "refit" not in weighted._state()["unavailable"]
+    finally:
+        weighted.close()
+
+
+def test_evidence_routes_answer_calmly_for_tools_a_superlss_does_not_offer():
+    session = open_case(lognormal_case())
+    widget = session.widget()
+    try:
+        state = widget._state()
+        revision = session.model_revision
+        summary = widget._summary("in_force", request_sequence=7)
+        assert summary == {
+            "available": False,
+            "model_revision": revision,
+            "request_sequence": 7,
+            "source": "in_force",
+            "level_display": "expanded",
+            "error": LSS_UNAVAILABLE["summary"],
+        }
+        metrics = widget._metrics("deviance", request_sequence=8)
+        assert metrics == {
+            "available": False,
+            "model_revision": revision,
+            "request_sequence": 8,
+            "metric": "deviance",
+            "source": "in_force",
+            "error": LSS_UNAVAILABLE["metrics"],
+        }
+        assert state["unavailable"]["summary"] == summary["error"]
+        assert state["unavailable"]["metrics"] == metrics["error"]
+        assert metrics_payload(session, "deviance")["error"] == LSS_UNAVAILABLE["metrics"]
+    finally:
+        widget.close()

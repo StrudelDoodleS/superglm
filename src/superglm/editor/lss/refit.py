@@ -18,6 +18,7 @@ from superglm.distributional.api import SuperLSS
 from superglm.distributional.predictor import compile_predictors
 from superglm.distributional.weights import resolve_likelihood_weights
 from superglm.editor.errors import EditorValueError
+from superglm.editor.lss.availability import refit_reason
 from superglm.editor.lss.view import LSSModelView, split_key
 from superglm.editor.refit import fit_refit_model
 
@@ -57,8 +58,13 @@ def lss_refit_with_drafts(
     The copy replays the source's fit on ``X``, ``y``, ``sample_weight`` and
     ``offsets`` (a dict by parameter). ``method`` and ``options`` (``lambda1``,
     ``lambda2`` and fit keywords) may only repeat what the source was fitted with;
-    ``...`` stands for an option not given. The source is not changed.
+    ``...`` stands for an option not given. A model that records no fit settings,
+    or rows without the offsets or weights it was fitted with, are refused. The
+    source is not changed.
     """
+    reason = refit_reason(view, sample_weight, offsets)
+    if reason is not None:
+        raise EditorValueError(reason)
     _require_replayable(view.lss, method, options)
     refit = view.lss._clone_with_replaced_terms(drafts)
     fit_refit_model(

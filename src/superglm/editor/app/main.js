@@ -805,8 +805,18 @@ function renderFinalFitRun() {
   finalFitRunNote.hidden = !note;
 }
 
-// A session tool the model does not offer: its export format is disabled, and
-// hovering the card says why, in the server's words.
+/**
+ * The server's reason the session does not offer `tool`, or null when it does.
+ * A tool listed is neither requested nor offered.
+ * @param {string} tool
+ */
+function toolOff(tool) {
+  return store.getState().remote.snapshot?.unavailable?.[tool] ?? null;
+}
+
+// A session tool the model does not offer: its export format and its controls
+// are disabled, hovering them says why in the server's words, and its evidence
+// panel shows that sentence instead of asking for it.
 function renderSessionAvailability(unavailable) {
   for (const input of exportFormatInputs) {
     const reason = unavailable[`export_${input.value}`];
@@ -817,9 +827,54 @@ function renderSessionAvailability(unavailable) {
     if (reason) card.title = reason;
     else card.removeAttribute("title");
   }
+  offerControl(refitOffset, unavailable.refit_offset);
+  for (const input of summaryLevelDisplayInputs) offerControl(input, unavailable.summary);
+  offerControl(termViewToggle.querySelector('[data-term-view="table"]'), unavailable.rating_table);
+  if (unavailable.rating_table && store.getState().view.termView === "table") {
+    actions.patchView({ termView: "chart" });
+  }
+  renderMetricsEvidence(store.getState().request.evidence.metrics);
+  renderSummaryEvidence(store.getState().request.evidence.summary);
+}
+
+/**
+ * Disable `control` while `reason` says the session does not offer it, with
+ * the reason as its hover text; its own hover text comes back when it is offered.
+ * @param {Element|null} control @param {string|undefined} reason
+ */
+function offerControl(control, reason) {
+  if (!(control instanceof HTMLButtonElement || control instanceof HTMLInputElement)) return;
+  control.disabled = Boolean(reason);
+  const data = control.dataset;
+  if (data.popoverBody === undefined && data.offeredBody === undefined) {
+    if (reason) control.title = reason;
+    else control.removeAttribute("title");
+    return;
+  }
+  if (data.offeredBody === undefined) data.offeredBody = data.popoverBody;
+  data.popoverBody = reason || data.offeredBody;
+}
+
+/**
+ * An evidence panel for a tool the session does not offer: the server's
+ * sentence in muted text, not busy, and no Retry.
+ * @param {string} reason @param {HTMLElement} frame @param {HTMLElement} statusNode
+ * @param {HTMLElement|null} retryButton @param {string} className
+ */
+function renderToolOff(reason, frame, statusNode, retryButton, className) {
+  frame.setAttribute("aria-busy", "false");
+  frame.dataset.freshness = "unavailable";
+  const note = document.createElement("div");
+  note.className = className;
+  note.textContent = reason;
+  frame.replaceChildren(note);
+  statusNode.dataset.freshness = "unavailable";
+  statusNode.textContent = "";
+  if (retryButton) retryButton.hidden = true;
 }
 
 async function refreshMetricsView() {
+  if (toolOff("metrics")) return;
   await actions.refreshEvidence("metrics", "/metrics", {
     metric: "deviance",
     source: "in_force"
@@ -834,6 +889,7 @@ function summaryRequestPayload() {
 }
 
 async function refreshSummaryView() {
+  if (toolOff("summary")) return;
   await actions.refreshEvidence("summary", "/summary", summaryRequestPayload());
 }
 
@@ -1386,7 +1442,8 @@ function selectAppBarRenderState(state) {
     canRevert: Boolean(snapshot && revertAvailable(snapshot)),
     busy: state.request.mutation.status === "running",
     pendingCount: selectPendingSteps(state).length,
-    hiddenViews: snapshot?.capabilities?.cv === false ? "cv" : ""
+    hiddenViews: snapshot?.capabilities?.cv === false ? "cv" : "",
+    refitReason: snapshot?.unavailable?.refit ?? null
   };
 }
 
@@ -1398,7 +1455,8 @@ function sameAppBarRenderState(next, previous) {
     next.canRevert === previous.canRevert &&
     next.busy === previous.busy &&
     next.pendingCount === previous.pendingCount &&
-    next.hiddenViews === previous.hiddenViews;
+    next.hiddenViews === previous.hiddenViews &&
+    next.refitReason === previous.refitReason;
 }
 
 function renderAppBarState(state) {
@@ -1417,7 +1475,8 @@ function renderAppBarState(state) {
     refitButton: refitPendingAction,
     refitCount: refitPendingCount,
     pendingCount: state.pendingCount,
-    hiddenViews: state.hiddenViews ? [state.hiddenViews] : []
+    hiddenViews: state.hiddenViews ? [state.hiddenViews] : [],
+    refitReason: state.refitReason
   });
 }
 
@@ -1579,6 +1638,11 @@ async function retryFailedMutation() {
 }
 
 function renderMetricsEvidence(evidence) {
+  const off = toolOff("metrics");
+  if (off) {
+    renderToolOff(off, metricGrid, metricFreshness, metricRetry, "metric-pending");
+    return;
+  }
   const busy = evidence.status === "updating";
   metricGrid.setAttribute("aria-busy", busy ? "true" : "false");
   metricGrid.dataset.freshness = evidence.status;
@@ -1628,6 +1692,11 @@ function renderReportEvidence(evidence, activeView) {
 }
 
 function renderSummaryEvidence(evidence, previous = null) {
+  const off = toolOff("summary");
+  if (off) {
+    renderToolOff(off, summaryFrame, summaryStatus, summaryRetry, "summary-empty");
+    return;
+  }
   const state = store.getState();
   const revision = state.remote.snapshot?.model_revision;
   const evidenceMatchesRevision = evidence.revision === revision;
@@ -2197,6 +2266,7 @@ for (const input of summaryLevelDisplayInputs) {
   input.addEventListener("change", () => {
     if (!input.checked) return;
     actions.patchView({ summaryLevelDisplay: input.value });
+    if (toolOff("summary")) return;
     actions.schedulePanelEvidence(
       "summary",
       "/summary",
@@ -2214,7 +2284,10 @@ basisToggle.addEventListener("click", () => {
 contribPlay.addEventListener("click", startContributionBuild);
 
 bindTermViewToggle(termViewToggle, {
-  onChange: (termView) => actions.patchView({ termView })
+  onChange: (termView) => {
+    if (termView === "table" && toolOff("rating_table")) return;
+    actions.patchView({ termView });
+  }
 });
 
 handleCount.addEventListener("input", () => {

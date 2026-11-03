@@ -44,9 +44,13 @@ export function specialActions(term, labels) {
   // The reference once the waiting changes apply: one staged to move frees this one.
   const reference = term.pending?.reference ?? term.reference?.level ?? null;
   const holdsReference = reference !== null && labels.includes(String(reference));
+  // A term that does not offer special levels shows Make special disabled, with the reason.
+  const off = term.unavailable?.special ?? null;
   return {
     make: noneSpecial
-      ? { visible: true, enabled: !holdsReference, reason: holdsReference ? REFERENCE_STAYS : null }
+      ? off
+        ? { visible: true, enabled: false, reason: off }
+        : { visible: true, enabled: !holdsReference, reason: holdsReference ? REFERENCE_STAYS : null }
       : hidden,
     back: allSpecial
       ? (labels.every((label) => returnable.has(label))

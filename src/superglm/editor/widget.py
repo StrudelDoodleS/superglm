@@ -58,6 +58,7 @@ from superglm.editor.lss.availability import (
     LSS_CAPABILITIES,
     require_available,
     session_availability,
+    unavailable_evidence,
 )
 from superglm.editor.lss.display import shown_rises
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload
@@ -278,7 +279,7 @@ class EditorWidget:
                 },
             }
             if is_lss(self.session.model):
-                state["unavailable"] = session_availability()
+                state["unavailable"] = session_availability(self.session)
                 state["capabilities"] = dict(LSS_CAPABILITIES)
                 # The Final fit panel's own button reads whether the fit can run.
                 reason = final_fit_reason(self.session)
@@ -483,8 +484,17 @@ class EditorWidget:
         model_revision: int | None = None,
         request_sequence: int | None = None,
     ) -> dict[str, Any]:
-        require_available(self.session.model, "metrics")
         selected_source = "in_force" if source is None or source == "selected" else source
+        calm = unavailable_evidence(
+            self.session.model,
+            "metrics",
+            model_revision=self.session.model_revision,
+            request_sequence=request_sequence,
+            metric=metric,
+            source=selected_source,
+        )
+        if calm is not None:
+            return calm
         with self._lock:
             current_revision = self.session.model_revision
             if model_revision is not None and int(model_revision) != current_revision:
@@ -598,12 +608,21 @@ class EditorWidget:
         model_revision: int | None = None,
         request_sequence: int | None = None,
     ) -> dict[str, Any]:
-        require_available(self.session.model, "summary")
         if source == "selected":
             source = "in_force"
         if source in {"edited", "collapse"}:
             source = "in_force"
         source = source if source in {"original", "in_force", "refit"} else "in_force"
+        calm = unavailable_evidence(
+            self.session.model,
+            "summary",
+            model_revision=self.session.model_revision,
+            request_sequence=request_sequence,
+            source=source,
+            level_display=level_display,
+        )
+        if calm is not None:
+            return calm
 
         with self._lock:
             current_revision = self.session.model_revision

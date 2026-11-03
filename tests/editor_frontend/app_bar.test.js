@@ -380,3 +380,23 @@ test("arrow keys step over a hidden tab, in both directions and at the ends", (t
   assert.equal(tabs[2].focused, 0);
   binding.destroy();
 });
+
+test("Refit stays disabled with its reason when the model cannot be refitted here", () => {
+  const root = new FakeElement("nav");
+  const buttons = {
+    undoButton: new FakeButton(),
+    redoButton: new FakeButton(),
+    revertButton: new FakeButton(),
+    refreshButton: new FakeButton(),
+    refitButton: new FakeButton(),
+    refitCount: new FakeElement("span"),
+  };
+  const reason = "This model has no recorded fit settings, so the editor cannot refit it.";
+  renderAppBar({
+    root, activeView: "editor", ...buttons, undoLabel: null, redoLabel: null,
+    canRevert: false, busy: false, pendingCount: 2, refitReason: reason,
+  });
+  assert.equal(buttons.refitButton.disabled, true);
+  assert.equal(buttons.refitButton.dataset.popoverBody, reason);
+  assert.equal(buttons.refitCount.textContent, "2");
+});

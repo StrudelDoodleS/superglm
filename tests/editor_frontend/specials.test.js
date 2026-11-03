@@ -103,3 +103,10 @@ test("the line joining the free levels breaks at a level with none, and skips a 
   assert.deepEqual(freeLevelLine(grouped, collapsed), { x: [0, 1, 2], y: [0.9, 1.2, 1.1] });
   assert.equal(freeLevelLine(null, expanded), null);
 });
+
+test("a term that does not offer special levels shows Make special disabled with the reason", () => {
+  const reason = "Special levels are not available for SuperLSS terms.";
+  const term = ordered({ unavailable: { special: reason } });
+  assert.deepEqual(specialActions(term, ["C", "D"]).make, { visible: true, enabled: false, reason });
+  assert.deepEqual(specialActions(ordered(), ["C", "D"]).make, { visible: true, enabled: true, reason: null });
+});

@@ -118,10 +118,11 @@ export function bindAppBar({
  * @param {boolean} options.busy
  * @param {number} options.pendingCount how many structural changes wait for Refit
  * @param {readonly string[]} [options.hiddenViews] views whose tabs the model does not offer
+ * @param {string|null} [options.refitReason] why the model cannot be refitted here; null when it can
  */
 export function renderAppBar({
   root, activeView, undoButton, redoButton, revertButton, refreshButton, refitButton, refitCount,
-  undoLabel, redoLabel, canRevert, busy, pendingCount, hiddenViews = [],
+  undoLabel, redoLabel, canRevert, busy, pendingCount, hiddenViews = [], refitReason = null,
 }) {
   for (const element of root.querySelectorAll('[role="tab"]')) {
     if (!(element instanceof HTMLButtonElement)) continue;
@@ -137,24 +138,25 @@ export function renderAppBar({
   redoButton.dataset.popoverBody = redoLabel === null ? "Nothing to redo." : `Redo: ${redoLabel}`;
   revertButton.disabled = !canRevert;
   refreshButton.disabled = busy;
-  renderRefit(refitButton, refitCount, pendingCount, busy);
+  renderRefit(refitButton, refitCount, pendingCount, busy, refitReason);
 }
 
 /**
  * Refit is quiet while nothing waits and the one filled action while changes
- * do. Its badge and its name carry the count.
+ * do. Its badge and its name carry the count. A model that cannot be refitted
+ * here keeps Refit disabled, and its hover text says why.
  * @param {HTMLButtonElement} button @param {HTMLElement} count
- * @param {number} pending @param {boolean} busy
+ * @param {number} pending @param {boolean} busy @param {string|null} reason
  */
-function renderRefit(button, count, pending, busy) {
+function renderRefit(button, count, pending, busy, reason) {
   const waiting = pending > 0;
   const changes = `${pending} ${pending === 1 ? "change" : "changes"}`;
-  button.disabled = busy || !waiting;
+  button.disabled = busy || !waiting || reason !== null;
   button.classList.toggle("has-pending", waiting);
   button.setAttribute("aria-label", waiting ? `Refit, ${changes} waiting` : "Refit, nothing waiting");
-  button.dataset.popoverBody = waiting
+  button.dataset.popoverBody = reason ?? (waiting
     ? `Apply ${changes} in one fit. Hand edits on terms whose structure did not change are kept.`
-    : NOTHING_WAITING;
+    : NOTHING_WAITING);
   count.hidden = !waiting;
   count.textContent = String(pending);
 }

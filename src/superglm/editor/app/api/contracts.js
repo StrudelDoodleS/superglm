@@ -320,6 +320,7 @@
  * @property {string} [parameter_label]
  * @property {string} [parameter_role]
  * @property {string} [term_label]
+ * @property {Record<string, string>} [unavailable] SuperLSS terms only: the reason for each term tool that is off
  */
 /**
  * A spline term fitted with its smoothing switched off (/unsmoothed). Its line

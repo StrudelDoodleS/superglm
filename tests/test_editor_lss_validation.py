@@ -148,9 +148,7 @@ def test_cv_run_is_refused_for_superlss():
         with pytest.raises(EditorValueError) as info:
             widget._report("cv")
         assert info.value.public_message == LSS_UNAVAILABLE["cv"]
-        with pytest.raises(EditorValueError) as info:
-            widget._metrics("deviance")
-        assert info.value.public_message == LSS_UNAVAILABLE["metrics"]
+        assert widget._metrics("deviance")["error"] == LSS_UNAVAILABLE["metrics"]
         with pytest.raises(EditorValueError) as info:
             widget._job_start("cv")
         assert info.value.public_message == LSS_UNAVAILABLE["cv"]
