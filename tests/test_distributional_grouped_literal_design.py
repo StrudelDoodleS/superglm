@@ -9,9 +9,12 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 
+import superglm._group_matrix._block_queue as block_queue
 import superglm._group_matrix._group_matrix_algebra as algebra
+import superglm._parallel as parallel
 from superglm._frame import as_eager_frame
 from superglm._group_matrix import _group_matrix_core
+from superglm._group_matrix._block_queue import block_queue_config
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import Predictor, PredictorExecutionPlan, compile_predictors
@@ -325,6 +328,108 @@ def test_pass_tables_are_contracted_before_their_sums_could_leave_the_range(monk
     # The tables hold the first block and are contracted before the second;
     # the other three blocks contract their own four pairs.
     assert len(contracted) == 4 + 3 * 4
+
+
+def test_a_block_of_several_chunks_contracts_the_tables_before_the_next_could_pass_the_range(
+    monkeypatch,
+):
+    """Blocks of two chunks release the pass tables once the next block's sums could pass 2**1000.
+
+    The first 16-row block's sums stay below the limit, so it adds into the
+    tables; the next 13 rows could take them past it, so ``contract()``
+    contracts the tables before that block and the block contracts its own
+    pairs. Mutation check: without the range check in ``contract()`` the
+    tables sum both blocks and contract once, four contractions instead of
+    eight, and none before the second block.
+    """
+    layout, literal, score, curvature = _mixed_problem()
+    score *= 2.0**995
+    curvature *= 2.0**995
+    peak = max(np.max(np.abs(score)), np.max(np.abs(curvature)))
+    assert 16 * peak <= chunks._BLOCK_SUM_LIMIT < 29 * peak
+    monkeypatch.setattr(chunks, "contraction_block_rows", lambda n, row_bytes, rows: 2 * rows)
+    contracted = _by_bin_contractions(monkeypatch)
+    joint, histograms = _joint_contractions(monkeypatch)
+    # By-bin contractions made before each block adds its rows.
+    before = []
+    original = chunks.GroupedGeometryAccumulator.add_block
+
+    def block(self, plans, *args, **kwargs):
+        before.append((plans[0].design.n, len(contracted)))
+        return original(self, plans, *args, **kwargs)
+
+    monkeypatch.setattr(chunks.GroupedGeometryAccumulator, "add_block", block)
+    _assert_geometry(*_assemble(monkeypatch, problem=(layout, literal, score, curvature)))
+    # Each block is contracted whole; the first block's four by-bin and five
+    # joint tables are contracted before the second, which forms its own.
+    assert before == [(16, 0), (13, 4)]
+    assert len(contracted) == 4 + 4
+    assert sorted(joint) == ["level"] * 2 + ["level_t"] * 2 + ["supports"]
+    assert len(histograms) == 5
+
+
+def _table_adds(monkeypatch):
+    """Each block's add into a kept pass table, recorded as whether a pool worker made it."""
+    adds = []
+    original = algebra.PassTables.add
+
+    def counted(self, key, gm_i, gm_j, W, cache):
+        kept = original(self, key, gm_i, gm_j, W, cache)
+        if kept:
+            adds.append(cache._shared is not None)
+        return kept
+
+    monkeypatch.setattr(algebra.PassTables, "add", counted)
+    return adds
+
+
+@pytest.mark.parametrize("chunks_per_block", [1, 2])
+@pytest.mark.parametrize("extended", [False, True], ids=["mixed", "extended"])
+def test_pass_tables_filled_on_a_pool_keep_the_serial_bits(monkeypatch, chunks_per_block, extended):
+    """Pass tables filled by four pool workers give the serial score and curvature to the bit.
+
+    Each block's queue (level and panel pairs, the by-bin and joint table
+    adds, the score and formation tasks) runs on four workers, each adding
+    into the tables through its own view of the cache; every key is written by
+    its own task, so the pooled pass is the serial one. The extended problem
+    puts random-effect and exact-level groups in the same queue. Mutation
+    check: a worker view that drops its table adds, or a worker add that
+    overwrites the earlier blocks' sums as a lost update would, changes the
+    curvature's bits.
+    """
+    monkeypatch.setattr(
+        chunks, "contraction_block_rows", lambda n, row_bytes, rows: chunks_per_block * rows
+    )
+    # Every task its own unit, and no task's overhead serial, so blocks this
+    # small still reach the pool.
+    monkeypatch.setattr(block_queue, "_TINY_COST", 0.0)
+    monkeypatch.setattr(block_queue, "_TASK_OVERHEAD_COST", 1)
+    adds = _table_adds(monkeypatch)
+    workers = []
+    original_section = parallel.section_executor
+
+    def recorded(count, name):
+        workers.append(count)
+        return original_section(count, name)
+
+    monkeypatch.setattr(parallel, "section_executor", recorded)
+    runs = []
+    for config in ({"workers": 1}, {"workers": 4, "min_cost": 0}):
+        adds.clear()
+        workers.clear()
+        with block_queue_config(**config):
+            result, *_ = _assemble(monkeypatch, problem=_mixed_problem(extended=extended))
+        runs.append((result, list(adds), list(workers)))
+    (serial, serial_adds, serial_workers), (pooled, pooled_adds, pooled_workers) = runs
+    # Every block adds into each kept table: the mixed problem's four by-bin
+    # and five joint pairs, or the extended problem's twenty-four.
+    blocks = -(-4 // chunks_per_block)
+    assert len(serial_adds) == (24 if extended else 9) * blocks
+    assert not any(serial_adds) and not serial_workers
+    assert pooled_adds == [True] * len(serial_adds) and max(pooled_workers) > 1
+    for name in ("score_data", "data_curvature"):
+        actual, expected = getattr(pooled, name), getattr(serial, name)
+        assert np.array_equal(actual.view(np.uint64), expected.view(np.uint64)), name
 
 
 def test_an_assembly_projects_each_support_once(monkeypatch):
