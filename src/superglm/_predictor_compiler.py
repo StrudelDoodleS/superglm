@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame
 from superglm._parallel import pooled_map
-from superglm.features._spline_build import shape_engine
+from superglm.features._spline_build import qp_geometry, shape_engine
 from superglm.features._spline_penalties import structural_penalty_ranks
 from superglm.features.categorical import Categorical
 from superglm.features.factor_smooth import FactorSmooth
@@ -315,16 +315,9 @@ def compile_predictor_design(
             exposure_agg = np.bincount(bin_idx, weights=sample_weight, minlength=len(bin_centers))
 
             # ── QP monotone constraint metadata (coefficient-space, survives discretization) ──
-            constraints = None
-            monotone_engine = None
-            raw_to_solver_map = None
-            if engine == "qp":
-                cs_raw = spec._build_monotone_constraints_raw()
-                constraints = (
-                    cs_raw.compose(projection_penalty) if projection_penalty is not None else cs_raw
-                )
-                monotone_engine = "qp"
-                raw_to_solver_map = projection_penalty
+            constraints, monotone_engine, raw_to_solver_map = qp_geometry(
+                spec, engine, projection_penalty
+            )
 
             if getattr(spec, "select", False):
                 n_null = 1

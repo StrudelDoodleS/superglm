@@ -22,7 +22,7 @@ from superglm.features._spline_penalties import structural_penalty_ranks
 from superglm.features._spline_select import build_select
 from superglm.features._spline_subclass_ops import prepare_shape_rules
 from superglm.features.constraint import postfit_token, rules_of
-from superglm.types import GroupInfo, TensorMarginalInfo
+from superglm.types import GroupInfo, LinearConstraintSet, TensorMarginalInfo
 
 
 def _uses_fit_time_shape_constraints(spec: Any) -> bool:
@@ -141,6 +141,24 @@ def _raise_if_unsupported_fit_shape_constraint(spec: Any) -> None:
         "Constraint.postfit repairs one whole-curve shape and cannot take them; "
         "use kind='cr', kind='ps' or kind='bs', or drop the rules."
     )
+
+
+def qp_geometry(
+    spec: Any, engine: str | None, projection: NDArray | None
+) -> tuple[LinearConstraintSet | None, str | None, NDArray | None]:
+    """The QP rows, engine tag and raw-to-solver map a built group carries, or three Nones.
+
+    A group with no inequality row has no work for the QP and takes the ordinary
+    route: a term whose rules all went into its basis (a flat stretch) holds them
+    there, and a constrained group would be refused under a selection penalty and
+    fitted by the direct solver for nothing.
+    """
+    if engine != "qp":
+        return None, None, None
+    raw = spec._build_monotone_constraints_raw()
+    if raw.A.shape[0] == 0:
+        return None, None, None
+    return (raw if projection is None else raw.compose(projection)), "qp", projection
 
 
 def training_basis_mean(spec: Any, x: NDArray) -> NDArray:
@@ -293,15 +311,7 @@ def build_group_info(
     if _is_unpenalised(omega):
         omega, penalty_components = None, None
 
-    constraints = None
-    monotone_engine = None
-    raw_to_solver_map = None
-    if engine == "qp":
-        constraints = spec._build_monotone_constraints_raw()
-        if projection is not None:
-            constraints = constraints.compose(projection)
-        monotone_engine = "qp"
-        raw_to_solver_map = projection
+    constraints, monotone_engine, raw_to_solver_map = qp_geometry(spec, engine, projection)
 
     info = GroupInfo(
         columns=basis,

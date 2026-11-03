@@ -271,9 +271,11 @@ model.fit(df, y)
   Combinations, stretches and caps are fit-time only.
 - `SuperLSS` does not enforce these rules. It warns and fits the term
   unconstrained.
-- `fit_path()` does not enforce them either. It warns once, naming every term
-  with a fit-time rule, and fits those terms unconstrained; refit with `fit()`
-  or `fit_reml()` to enforce the rules.
+- `fit_path()` does not enforce shapes, caps or step limits either. It warns
+  once, naming every term whose rules it ignores, and fits those terms
+  unconstrained; refit with `fit()` or `fit_reml()` to enforce the rules. A flat
+  stretch is part of the term's basis, so it still holds on the path and is not
+  named.
 
 ## Linear Predictor Semantics
 

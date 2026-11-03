@@ -548,3 +548,44 @@ def test_flat_leaving_a_span_free_still_fits():
         warnings.simplefilter("ignore", UserWarning)  # the stretch widens to whole knot spans
         model = SuperGLM(family="poisson", features={"x": spec}).fit_reml(pd.DataFrame({"x": x}), y)
     assert model.result.converged
+
+
+def _poisson_rows(n: int, seed: int = 11) -> tuple[pd.DataFrame, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(0.0, 10.0, n)
+    return pd.DataFrame({"x": x}), rng.poisson(np.exp(0.3 * np.sin(x))).astype(float)
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+def test_flat_only_term_takes_the_ordinary_route_under_a_selection_penalty(discrete):
+    """A term whose rules all went into its basis has no inequality row for the QP.
+
+    It builds as an unconstrained group (no rows, no engine), so fit() with a
+    selection penalty fits it and the flat still holds through the basis. Beside
+    another rule it keeps its rows and is still refused there. Mutation: the term
+    built as a QP group with an empty row set, which fit() refused under the penalty.
+    """
+    X, y = _poisson_rows(5_000)
+    flat = C.flat.within(3.0, 7.0)
+
+    def model_of(rules):
+        spec = Spline(kind="ps", k=12, constraint=rules)
+        return SuperGLM(
+            family="poisson", selection_penalty=0.01, discrete=discrete, features={"x": spec}
+        )
+
+    model = model_of(flat)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # the stretch widens to whole knot spans
+        model.fit(X, y)
+    [group] = model._groups
+    assert group.constraints is None and group.monotone_engine is None
+    assert discrete == type(model._dm.group_matrices[0]).__name__.startswith("Discretized")
+    eta = np.log(model.predict(pd.DataFrame({"x": np.linspace(3.5, 6.5, 30)})))
+    assert np.ptp(eta) <= 1e6 * U * np.max(np.abs(eta))
+    with (
+        warnings.catch_warnings(),
+        pytest.raises(NotImplementedError, match=r"Fit-time constraints on \['x'\]"),
+    ):
+        warnings.simplefilter("ignore", UserWarning)
+        model_of(C.decreasing.below(3.0) & flat).fit(X, y)
