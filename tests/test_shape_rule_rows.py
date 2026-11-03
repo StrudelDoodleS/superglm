@@ -295,6 +295,14 @@ def test_rules_on_a_held_gap_keep_no_row_the_equalities_hold(layout, natural_end
     equalities = np.vstack([flat, *natural])
     Q, _ = np.linalg.qr(equalities.T, mode="complete")
     Z = Q[:, equalities.shape[0] :]
+    # Both directions: the rows kept are exactly the rows of the same pieces,
+    # built without the flats, that survive the flats' null space.
+    others = [piece for piece in pieces if piece[0] != "flat"]
+    plain, _ = shape_rows(knots, DEGREE, others, domain=(LO, HI), natural_ends=natural_ends)
+    vanishing = np.linalg.norm(plain.A @ Z, axis=1) <= 1e3 * U * np.linalg.norm(plain.A, axis=1)
+    assert vanishing.any()
+    kept = [r for r in plain.A if any(np.array_equal(r, k) for k in rows.A)]
+    assert len(kept) == rows.A.shape[0] == np.count_nonzero(~vanishing)
     if rows.A.shape[0]:
         assert np.min(np.linalg.norm(rows.A @ Z, axis=1)) > 1e-3
 

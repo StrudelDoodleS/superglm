@@ -363,6 +363,18 @@ def test_flat_on_a_degree_zero_spline_is_refused():
     Spline(kind="ps", n_knots=6, degree=1, constraint=C.flat.within(3, 7))
 
 
+@pytest.mark.parametrize("rules", [C.cap(0.8, 1.2), C.increasing & C.cap(0.8, 1.2)])
+def test_degree_zero_spline_with_a_cap_builds(rules):
+    """A degree-0 spline has no slope coefficients, so with no flat rule nothing is held flat.
+
+    Mutation: every span read as held, the whole-range flat refusal fired with no
+    flat rule to name, and the build failed unpacking an empty list.
+    """
+    spec = Spline(kind="ps", n_knots=6, degree=0, constraint=rules)
+    info = spec.build(np.linspace(0.0, 10.0, 200))
+    assert info.constraints is not None and info.constraints.A.shape[0] > 0
+
+
 def test_ranges_with_rules_still_refused():
     from superglm import PolynomialRange
 

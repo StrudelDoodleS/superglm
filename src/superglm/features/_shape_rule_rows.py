@@ -208,9 +208,12 @@ def held_flat_regions(
     them.
     """
     knots = np.asarray(knots, dtype=np.float64)
+    zero = flat_zero_regions(knots, pieces)
+    if not zero:
+        return []
     n_basis = len(knots) - degree - 1
     lo, hi = knots[1:n_basis], knots[degree + 1 : degree + n_basis]
-    held = _held_at_zero(lo, hi, flat_zero_regions(knots, pieces))
+    held = _held_at_zero(lo, hi, zero)
     if natural_ends:
         held[:2] = held[:2].any()
         held[-2:] = held[-2:].any()
