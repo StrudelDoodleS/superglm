@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import pickle
 import re
 import warnings
@@ -196,6 +197,69 @@ def test_fit_path_names_every_ruled_feature_in_one_warning():
         model.fit_path(X, y, lambda_seq=[0.1, 0.001])
     [warned] = [w for w in record if issubclass(w.category, ShapeConstraintIgnoredWarning)]
     assert "'region' (cap(0.7, 1.5)), 'x' (increasing)" in str(warned.message)
+
+
+_NOT_ENFORCED = "not enforced: fit_path"
+
+
+@pytest.mark.parametrize(
+    ("feature", "make", "line"),
+    [
+        ("region", lambda: Categorical(constraint=C.cap(0.7, 1.5)), "cap(0.7, 1.5)"),
+        ("x", lambda: Spline(kind="ps", k=8, constraint=C.increasing), "increasing"),
+        (
+            "region",
+            lambda: OrderedCategorical(
+                order=_LEVELS,
+                basis=Spline(kind="ps", k=5, constraint=C.increasing & C.max_step(0.2)),
+            ),
+            "increasing & max_step(0.2)",
+        ),
+    ],
+    ids=["categorical-cap", "spline-increasing", "ordered-step"],
+)
+def test_rule_lines_say_a_path_did_not_enforce_its_rules(feature, make, line):
+    """After fit_path the summary, the term inference and the metrics rows say so; after fit() not.
+
+    Mutation: the rule line kept the build's ``(qp)`` after a path that ignored the rule.
+    """
+    X, y = _region_rows(n=4_000, x=True)
+    path = SuperGLM(family="poisson", features={feature: make()})
+    with pytest.warns(ShapeConstraintIgnoredWarning):
+        path.fit_path(X, y, lambda_seq=[0.1, 0.001])
+    summary = path.summary()
+    assert f"mono={line} ({_NOT_ENFORCED})" in str(summary)
+    assert "(qp)" not in str(summary)
+    assert f"mono={html.escape(line)} ({_NOT_ENFORCED})" in summary._repr_html_()
+    assert path.term_inference(feature, with_se=False).monotone == f"{line} ({_NOT_ENFORCED})"
+    rows = path.metrics(X, y)._build_coef_rows()
+    assert {row.monotone_engine for row in rows if row.monotone} == {_NOT_ENFORCED}
+    fitted = SuperGLM(family="poisson", selection_penalty=0.0, features={feature: make()}).fit(X, y)
+    assert f"mono={line} (qp)" in str(fitted.summary())
+    assert fitted.term_inference(feature, with_se=False).monotone == line
+
+
+def test_rule_lines_keep_a_flat_stretch_out_of_the_not_enforced_mark():
+    """A flat stretch holds on the path: alone its line is plain, beside another rule it is said to hold."""
+    X, y = _region_rows(n=4_000, x=True)
+    flat = C.flat.within(0.3, 0.7)
+    alone = SuperGLM(family="poisson", features={"x": Spline(kind="ps", k=12, constraint=flat)})
+    beside_rules = C.decreasing.below(0.3) & flat
+    beside = SuperGLM(
+        family="poisson", features={"x": Spline(kind="ps", k=12, constraint=beside_rules)}
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        alone.fit_path(X, y, lambda_seq=[0.1, 0.001])
+        beside.fit_path(X, y, lambda_seq=[0.1, 0.001])
+    assert f"mono={flat.describe()}" in str(alone.summary())
+    assert "not enforced" not in str(alone.summary())
+    assert alone.term_inference("x", with_se=False).monotone == flat.describe()
+    note = f"{_NOT_ENFORCED}; a flat stretch still holds"
+    assert f"mono={beside_rules.describe()} ({note})" in str(beside.summary())
+    assert (
+        beside.term_inference("x", with_se=False).monotone == f"{beside_rules.describe()} ({note})"
+    )
 
 
 def test_fit_path_holds_a_flat_stretch_and_says_so_only_beside_an_ignored_rule():

@@ -273,9 +273,10 @@ model.fit(df, y)
   unconstrained.
 - `fit_path()` does not enforce shapes, caps or step limits either. It warns
   once, naming every term whose rules it ignores, and fits those terms
-  unconstrained; refit with `fit()` or `fit_reml()` to enforce the rules. A flat
-  stretch is part of the term's basis, so it still holds on the path and is not
-  named.
+  unconstrained; refit with `fit()` or `fit_reml()` to enforce the rules. The
+  summary and `term_inference()` mark those rule lines `not enforced: fit_path`.
+  A flat stretch is part of the term's basis, so it still holds on the path and
+  is not named.
 
 ## Linear Predictor Semantics
 

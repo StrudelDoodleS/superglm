@@ -133,6 +133,20 @@ def _profile_nll_cell(info: dict[str, Any], key: str) -> tuple[str, str]:
     return ("Profile NLL", f"{info[key]:.4f}") if key in info else ("", "")
 
 
+#: The engine tag of a rule line whose rules a ``fit_path`` fit did not enforce.
+NOT_ENFORCED_ON_PATH = "not enforced: fit_path"
+
+
+def unenforced_rules_tag(rules: Any) -> str:
+    """The engine tag for ``rules`` a ``fit_path`` fit left unenforced.
+
+    A flat stretch is part of the term's basis and still holds on the path; the
+    tag says so when the rules carry one.
+    """
+    flat = any(rule.kind == "flat" for rule in rules)
+    return NOT_ENFORCED_ON_PATH + ("; a flat stretch still holds" if flat else "")
+
+
 def _rules_text(row: _CoefRow) -> str:
     """A term's rule line: its rules as written, the engine, and a repair marker.
 
