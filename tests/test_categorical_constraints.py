@@ -9,7 +9,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, Constraint, Spline, SuperGLM, cat, collapse_levels
+from superglm import (
+    Categorical,
+    Constraint,
+    OrderedCategorical,
+    Spline,
+    SuperGLM,
+    cat,
+    collapse_levels,
+)
 from superglm.features.constraint import ConstraintRules, rules_of
 
 C = Constraint.fit
@@ -111,6 +119,53 @@ def test_categorical_cap_refused_under_identity_link():
     X, y = _region_rows(n=2_000)
     with pytest.raises(ValueError, match=r"Feature 'region': cap\(0\.7, 1\.5\).*log link"):
         _fit(X, y, Categorical(constraint=C.cap(0.7, 1.5)), family="gaussian")
+
+
+@pytest.mark.parametrize(
+    ("feature", "spec", "rules"),
+    [
+        ("region", Categorical(base="A", constraint=C.cap(0.7, 1.5)), "cap(0.7, 1.5)"),
+        ("x", Spline(kind="ps", k=6, constraint=C.increasing), "increasing"),
+        ("x", Spline(kind="ps", k=6, constraint=C.flat.within(3, 7)), "flat.within(3, 7)"),
+        (
+            "region",
+            OrderedCategorical(
+                order=_LEVELS,
+                basis=Spline(kind="ps", k=5, constraint=C.increasing & C.max_step(0.2)),
+            ),
+            "increasing & max_step(0.2)",
+        ),
+    ],
+    ids=["categorical-cap", "spline-increasing", "spline-flat", "ordered-step"],
+)
+def test_fit_path_refuses_fit_time_rules(feature, spec, rules):
+    """The path solver takes no constraint rows, so fit_path refuses any fit-time rule.
+
+    Mutation: fit_path published the unconstrained path, the capped categorical
+    printing B near 2.5 against its cap of 1.5.
+    """
+    X, y = _region_rows(n=2_000, x=True)
+    X["x"] = X["x"] * 10.0
+    model = SuperGLM(family="poisson", features={feature: spec})
+    with pytest.raises(NotImplementedError) as refusal:
+        model.fit_path(X, y, lambda_seq=[0.1, 0.001])
+    message = str(refusal.value)
+    assert f"fit_path() cannot hold the fit-time rules on {feature!r}: {rules}" in message
+    assert "fit_reml()" in message and "drop" in message
+
+
+def test_fit_path_still_runs_with_no_fit_time_rule():
+    """Terms without a fit-time rule, a post-fit shape included, take the path as before."""
+    X, y = _region_rows(n=2_000, x=True)
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "region": Categorical(base="A"),
+            "x": Spline(kind="ps", k=6, constraint=Constraint.postfit.increasing),
+        },
+    )
+    model.fit_path(X, y, lambda_seq=[0.1, 0.001])
+    assert model.result.converged
 
 
 def test_categorical_cap_under_reml():

@@ -1317,6 +1317,29 @@ def _validate_rule_fit_conflicts(model) -> None:
                 )
 
 
+def _reject_fit_time_rules_on_path(model) -> None:
+    """Refuse a fit-time shape rule on ``fit_path``, whose solver takes no constraint rows.
+
+    The path sweeps a selection penalty through PIRLS, which neither the constrained
+    QP route nor ``fit()`` with ``selection_penalty > 0`` supports; it would publish
+    the unconstrained path. Reads every main-effect and interaction spec by its rule
+    objects (spline, ordered and categorical terms alike). A post-fit shape applies
+    after the fit and is not refused.
+    """
+    from superglm.features.constraint import rules_of
+
+    for name, spec in itertools.chain(model._specs.items(), model._interaction_specs.items()):
+        held = [rule for rule in rules_of(spec) if rule.mode == "fit"]
+        if held:
+            raise NotImplementedError(
+                f"fit_path() cannot hold the fit-time rules on {name!r}: "
+                f"{' & '.join(rule.describe() for rule in held)}. The path sweeps a selection "
+                "penalty, which no constrained solver takes, so it would ignore them. Use "
+                "fit_reml() or fit() with selection_penalty=0 to keep the rules, or drop "
+                "them to fit the path"
+            )
+
+
 def _uses_direct_solver(model, penalty, has_lambda1_targets) -> bool:
     """Whether `_solve_coefficients` takes the direct IRLS route rather than BCD."""
     return any(group.constraints is not None for group in model._groups) or (
@@ -1602,6 +1625,7 @@ def _fit_path_in_workspace(
     )
 
     _auto_detect_specs_if_needed(model, X, sample_weight_ref)
+    _reject_fit_time_rules_on_path(model)
     _validate_rule_fit_conflicts(model)
     # A path sweeps lambda1 over a positive grid on ONE design, so the design
     # has to be the one a positive lambda1 requires, whatever the model was
