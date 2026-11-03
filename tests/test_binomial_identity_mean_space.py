@@ -74,14 +74,28 @@ def test_a_maximum_on_the_boundary_is_feasible_and_not_converged(direct_solve, s
         direct_solve=direct_solve,
         features={"x": Numeric()},
     )
-    with pytest.warns(ConvergenceWarning, match="probability of 0 or 1"):
+    with pytest.warns(ConvergenceWarning, match="probability of 0 or 1") as caught:
         model.fit(X, np.array([0.0, 0.0, 1.0, 1.0]))
+    assert [item.filename for item in caught] == [__file__]
+    assert "logit link" in model.diagnostics()["_model"]["convergence_note"]
     assert not model.result.converged
     assert model.result.termination_reason == "mean_space_boundary"
     assert model.result.mean_space_boundary_rows == 2
     eta = _eta(model)
     assert np.all((eta > 0.0) & (eta < 1.0))
     np.testing.assert_allclose(model.predict(X), X["x"].to_numpy(), atol=1e-6)
+
+
+def test_fit_reml_without_smoothing_gives_the_boundary_advice():
+    # No term carries a smoothing parameter, so fit_reml fits the coefficients once.
+    X = pd.DataFrame({"x": np.linspace(0.0, 1.0, 4)})
+    model = SuperGLM(
+        family="binomial", link="identity", selection_penalty=0, features={"x": Numeric()}
+    )
+    with pytest.warns(ConvergenceWarning, match="logit link") as caught:
+        model.fit_reml(X, np.array([0.0, 0.0, 1.0, 1.0]))
+    assert model.result.termination_reason == "mean_space_boundary"
+    assert {item.filename for item in caught} == {__file__}
 
 
 @pytest.mark.parametrize(("seed", "interior"), [(0, False), (2, True)])

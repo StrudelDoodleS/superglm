@@ -916,17 +916,9 @@ def _warn_mean_space_boundary(model) -> None:
     result = model._result
     if result.termination_reason != "mean_space_boundary" or result.mean_space_boundary_unresolved:
         return
-    from superglm.diagnostics.convergence import ConvergenceWarning
+    from superglm.diagnostics.convergence import warn_coefficient_nonconvergence
 
-    warnings.warn(
-        f"The fit holds {result.mean_space_boundary_rows} row(s) at a fitted probability of 0 "
-        "or 1, the boundary of the model's parameter space. Its maximum lies on that boundary "
-        "rather than inside it, so the fit is reported as not converged and its standard "
-        "errors there are not reliable. A logit link keeps every probability inside (0, 1); "
-        "a categorical level whose responses are all 0 or all 1 can also be merged.",
-        ConvergenceWarning,
-        stacklevel=4,
-    )
+    warn_coefficient_nonconvergence(result)
 
 
 def _prime_fit_caches(
