@@ -26,6 +26,7 @@ from superglm._roundoff import EPS as _EPS
 from superglm.distributional.kernels._common import (
     readonly,
     readonly_bool,
+    stacked_direction,
     validated_derivative_order,
 )
 from superglm.distributional.kernels._curvature_direction import mean_form_hessian_direction
@@ -585,6 +586,16 @@ def shape_term_d1(shape: NDArray) -> NDArray[np.float64]:
     return out
 
 
+def _natural_direction(direction: NDArray, n_rows: int) -> NDArray[np.float64]:
+    return stacked_direction(
+        direction,
+        n_rows,
+        3,
+        GeneralizedGammaDomainError,
+        "natural direction must be a finite n-by-3 array",
+    )
+
+
 def location_hessian_direction(
     response: NDArray,
     mu: NDArray,
@@ -606,6 +617,8 @@ def location_hessian_direction(
     * ``T_QQQ = f'(Q) + w^5 T4(u)`` with ``f`` the Hessian's shape term.
 
     Rows whose ``e^u`` overflows are invalid in the Hessian and return zero.
+    A stacked direction ``(m, n, 3)`` gives ``(m, n, 6)`` on one evaluation
+    of the ten third derivatives.
     """
     y = _positive_vector(response, name="response")
     mu_values = _vector(mu, name="mu")
@@ -614,9 +627,7 @@ def location_hessian_direction(
     m = _positive_vector(multiplier, name="multiplier")
     if any(values.shape != y.shape for values in (mu_values, sigma_values, q, m)):
         raise GeneralizedGammaDomainError("generalized gamma row arrays must have the same shape")
-    nu = np.asarray(direction, dtype=_FLOAT)
-    if nu.shape != (len(y), 3) or not np.all(np.isfinite(nu)):
-        raise GeneralizedGammaDomainError("natural direction must be a finite n-by-3 array")
+    nu = _natural_direction(direction, len(y))
     w = (np.log(y) - mu_values) / sigma_values
     u = q * w
     with np.errstate(over="ignore", invalid="ignore"):
@@ -637,18 +648,18 @@ def location_hessian_direction(
         t_ssq = -w2 * w * (2.0 * u2 + e) / s2
         t_sqq = w2 * w2 * v2 / s1
         t_qqq = shape_term_d1(q) + w2 * w2 * w * t4
-        vm, vs, vq = nu[:, 0], nu[:, 1], nu[:, 2]
-        result = np.empty((len(y), 6), dtype=_FLOAT)
-        result[:, 0] = t_mmm * vm + t_mms * vs + t_mmq * vq
-        result[:, 1] = t_mms * vm + t_mss * vs + t_msq * vq
-        result[:, 2] = t_mmq * vm + t_msq * vs + t_mqq * vq
-        result[:, 3] = t_mss * vm + t_sss * vs + t_ssq * vq
-        result[:, 4] = t_msq * vm + t_ssq * vs + t_sqq * vq
-        result[:, 5] = t_mqq * vm + t_sqq * vs + t_qqq * vq
+        vm, vs, vq = nu[..., 0], nu[..., 1], nu[..., 2]
+        result = np.empty((*nu.shape[:-1], 6), dtype=_FLOAT)
+        result[..., 0] = t_mmm * vm + t_mms * vs + t_mmq * vq
+        result[..., 1] = t_mms * vm + t_mss * vs + t_msq * vq
+        result[..., 2] = t_mmq * vm + t_msq * vs + t_mqq * vq
+        result[..., 3] = t_mss * vm + t_sss * vs + t_ssq * vq
+        result[..., 4] = t_msq * vm + t_ssq * vs + t_sqq * vq
+        result[..., 5] = t_mqq * vm + t_sqq * vs + t_qqq * vq
         result *= m[:, None]
     # Only the rows the Hessian flags invalid (``e^u`` overflows) publish zero;
     # a valid row that overflows stays non-finite so the caller refuses it.
-    result[~np.isfinite(e)] = 0.0
+    result[..., ~np.isfinite(e), :] = 0.0
     return result
 
 
@@ -1192,7 +1203,8 @@ def mean_hessian_direction(
 
     The location-form direction chained through ``mu = log m - log C(sigma, Q)``
     (see ``mean_form_hessian_direction``); rows whose mean does not exist are
-    invalid in the Hessian and return zero.
+    invalid in the Hessian and return zero.  The direction may be stacked, as
+    for :func:`location_hessian_direction`.
     """
     y = _positive_vector(response, name="response")
     m = _positive_vector(mean, name="mean")
@@ -1201,10 +1213,8 @@ def mean_hessian_direction(
     weight = _positive_vector(multiplier, name="multiplier")
     if any(values.shape != y.shape for values in (m, sigma_values, q, weight)):
         raise GeneralizedGammaDomainError("generalized gamma row arrays must have the same shape")
-    nu = np.asarray(direction, dtype=_FLOAT)
-    if nu.shape != (len(y), 3) or not np.all(np.isfinite(nu)):
-        raise GeneralizedGammaDomainError("natural direction must be a finite n-by-3 array")
-    result = np.zeros((len(y), 6), dtype=_FLOAT)
+    nu = _natural_direction(direction, len(y))
+    result = np.zeros((*nu.shape[:-1], 6), dtype=_FLOAT)
     exists = mean_exists(sigma_values, q)
     if not np.any(exists):
         return result
@@ -1224,11 +1234,11 @@ def mean_hessian_direction(
             (c_s, c_q),
             (c_ss, c_sq, c_qq),
             _log_mean_loading_third(se, qe),
-            nu[exists],
+            nu[..., exists, :],
         )
         direction_exists *= we[:, None]
-    direction_exists[~np.asarray(base.valid)] = 0.0
-    result[exists] = direction_exists
+    direction_exists[..., ~np.asarray(base.valid), :] = 0.0
+    result[..., exists, :] = direction_exists
     return result
 
 

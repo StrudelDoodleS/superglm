@@ -249,6 +249,9 @@ class GammaLS(MeanPredictor, ScalePredictor):
     SuperLSS : Construct and fit a model with these predictors.
     """
 
+    # Its curvature directions take stacked (m, n, K) directions on one state evaluation.
+    stacked_curvature_directions: ClassVar[bool] = True
+
     @property
     def parameters(self) -> tuple[ParameterSpec, ...]:
         return (
@@ -491,7 +494,7 @@ class GammaLS(MeanPredictor, ScalePredictor):
         third, kept, valid = _bounded_predictor_share(gamma_plan, eta, 3)
         direction = np.asarray(eta_direction, dtype=np.float64)
         result = np.where(kept[:, None], complete, 0.0) - contract_third(third, direction)
-        result[~valid] = 0.0
+        result[..., ~valid, :] = 0.0
         return readonly(result)
 
     def predictor_curvature_second_directional_derivative(

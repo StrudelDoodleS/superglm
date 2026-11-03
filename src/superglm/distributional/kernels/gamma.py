@@ -1075,13 +1075,13 @@ def _gamma_predictor_curvature_channels(
     j_residual = _scaled_trigamma_residual(shape)
     j_log_derivative = _scaled_trigamma_log_derivative(shape)
     b = _stable_row_sum(a_residual, ad)
-    mean_direction = direction[:, 0]
-    scale_direction = direction[:, 1]
-    result = np.empty((len(response), 3), dtype=_FLOAT)
+    mean_direction = direction[..., 0]
+    scale_direction = direction[..., 1]
+    result = np.empty((*direction.shape[:-1], 3), dtype=_FLOAT)
     with np.errstate(over="ignore", invalid="ignore"):
-        result[:, 0] = -multiplier * az * (mean_direction + 2.0 * scale_direction)
-        result[:, 1] = 2.0 * multiplier * (-az * mean_direction - 2.0 * at * scale_direction)
-        result[:, 2] = (
+        result[..., 0] = -multiplier * az * (mean_direction + 2.0 * scale_direction)
+        result[..., 1] = 2.0 * multiplier * (-az * mean_direction - 2.0 * at * scale_direction)
+        result[..., 2] = (
             4.0
             * multiplier
             * (-at * mean_direction - 2.0 * (b + j_residual + j_log_derivative) * scale_direction)
@@ -1098,7 +1098,10 @@ def gamma_predictor_curvature_directional(
     weights: NDArray,
     semantics: WeightSemantics,
 ) -> NDArray[np.float64]:
-    """Return the directional curvature of the Gamma predictor."""
+    """Return the directional curvature of the Gamma predictor.
+
+    A stacked direction ``(m, n, 2)`` gives ``(m, n, 3)`` on one evaluation of the state.
+    """
 
     response_values = _as_positive_vector(response, name="response")
     weight_semantics = validated_semantics(semantics)
@@ -1115,7 +1118,8 @@ def gamma_predictor_curvature_directional(
     expected = (len(response_values), 2)
     if (
         predictors.shape != expected
-        or direction.shape != expected
+        or direction.ndim not in (2, 3)
+        or direction.shape[-2:] != expected
         or not np.all(np.isfinite(predictors))
         or not np.all(np.isfinite(direction))
     ):

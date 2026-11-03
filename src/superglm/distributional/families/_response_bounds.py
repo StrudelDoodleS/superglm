@@ -285,17 +285,21 @@ def bounded_share(
 
 
 def contract_third(third: NDArray, direction: NDArray) -> NDArray[np.float64]:
-    """Packed ``sum_k T_ijk v_k`` from packed third derivatives and a direction ``(n, K)``."""
-    k_parameters = direction.shape[1]
+    """Packed ``sum_k T_ijk v_k`` from packed third derivatives and a direction ``(n, K)``.
+
+    A stacked direction ``(m, n, K)`` gives ``(m, n, K(K+1)/2)``.
+    """
+    k_parameters = direction.shape[-1]
     column = {key: index for index, key in enumerate(packed_tuples(k_parameters, 3))}
-    return np.column_stack(
+    return np.stack(
         [
             sum(
-                third[:, column[tuple(sorted((i, j, k)))]] * direction[:, k]
+                third[:, column[tuple(sorted((i, j, k)))]] * direction[..., k]
                 for k in range(k_parameters)
             )
             for i, j in packed_tuples(k_parameters, 2)
-        ]
+        ],
+        axis=-1,
     )
 
 

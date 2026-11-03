@@ -394,8 +394,10 @@ _CertifiedRows = tuple[NDArray[np.float64], NDArray[np.float64]]
 class _AnalyticFirst:
     """A family's analytic derivatives along every parameter axis.
 
-    ``axes[q]`` is ``(values, certificate)`` along ``e_q``. All axes are
-    evaluated first, so one refused axis sends the whole pass to differences.
+    ``axes[q]`` is ``(values, certificate)`` along ``e_q``: the slice
+    ``-l[:, :, q]`` of the row's third-derivative tensor in the predictors.
+    All axes are evaluated first, so one refused axis sends the whole pass to
+    differences.
     """
 
     axes: tuple[_CertifiedRows, ...]
@@ -414,18 +416,21 @@ def _analytic_first_derivative(
 
     ``None`` when the family does not implement the protocol, refuses these
     links (NB2 and GammaLS accept only their log links) or refuses a row on any
-    axis (a two-piece row on its join); the caller then differences.
+    axis (a two-piece row on its join); the caller then differences.  A family
+    with ``stacked_curvature_directions`` takes the ``K`` axes stacked, so its
+    state is evaluated once per pass rather than once per axis.
     """
     if not isinstance(
         family, (PredictorCurvatureDirectionalFamily, CertifiedCurvatureDirectionalFamily)
     ):
         return None
-    expected = (n_observations, k_parameters * (k_parameters + 1) // 2)
+    channels = k_parameters * (k_parameters + 1) // 2
 
     def derivative(unit: NDArray[np.float64]) -> _CertifiedRows:
         analytic = analytic_curvature_direction(family, y, eta, unit, links, likelihood_plan)
         if analytic is None:
             raise UnsupportedLikelihoodContractError("the family refused these links")
+        expected = (*unit.shape[:-1], channels)
         values, certificate = analytic
         if values.shape != expected or not np.all(np.isfinite(values)):
             raise LamlDerivativeError("family returned an invalid curvature direction")
@@ -439,12 +444,15 @@ def _analytic_first_derivative(
             raise LamlDerivativeError("family returned an invalid curvature-direction certificate")
         return values, certificate
 
-    axes = []
+    units = np.zeros((k_parameters, n_observations, k_parameters), dtype=np.float64)
+    for q in range(k_parameters):
+        units[q, :, q] = 1.0
     try:
-        for q in range(k_parameters):
-            unit = np.zeros((n_observations, k_parameters), dtype=np.float64)
-            unit[:, q] = 1.0
-            axes.append(derivative(unit))
+        if getattr(family, "stacked_curvature_directions", False) is True:
+            values, certificate = derivative(units)
+            axes = [(values[q], certificate[q]) for q in range(k_parameters)]
+        else:
+            axes = [derivative(unit) for unit in units]
     except (
         TypeError,
         ValueError,

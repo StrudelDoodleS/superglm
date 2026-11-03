@@ -691,7 +691,9 @@ def _finite_output(
     name: str,
     error: type[NegativeBinomialNumericalDomainError],
 ) -> None:
-    finite_rows = np.all(np.isfinite(values.reshape(len(values), -1)), axis=1)
+    # Stacked directions (m, n, C) report the data row, not the direction.
+    rows = np.moveaxis(values, -2, 0) if values.ndim == 3 else values
+    finite_rows = np.all(np.isfinite(rows.reshape(len(rows), -1)), axis=1)
     if not np.all(finite_rows):
         row = int(np.flatnonzero(~finite_rows)[0])
         raise error(f"negative-binomial {name} at row {row} is not finite in the numerical domain")
@@ -943,7 +945,8 @@ def negative_binomial_certified_predictor_curvature_directional(
     near Poisson), and it enters only the ``bb`` entry, multiplied by
     ``d_b``; so the certificate is ``|d_b| e`` on ``bb``, rounded upward once
     for the one rounded product, and zero on ``aa`` and ``ab``, whose third
-    derivatives are closed forms.
+    derivatives are closed forms.  A stacked direction ``(m, n, 2)`` gives
+    ``(m, n, 3)`` values and certificate on one evaluation of the thirds.
     """
 
     try:
@@ -954,7 +957,8 @@ def negative_binomial_certified_predictor_curvature_directional(
     expected = (len(np.asarray(counts)), 2)
     if (
         predictors.shape != expected
-        or direction.shape != expected
+        or direction.ndim not in (2, 3)
+        or direction.shape[-2:] != expected
         or not np.all(np.isfinite(predictors))
         or not np.all(np.isfinite(direction))
     ):
@@ -963,16 +967,16 @@ def negative_binomial_certified_predictor_curvature_directional(
         mean = np.exp(predictors[:, 0])
         theta = np.exp(predictors[:, 1])
     third, error = negative_binomial_log_third_derivatives(counts, mean, theta, weights, semantics)
-    along_mean, along_theta = direction[:, 0], direction[:, 1]
-    result = np.empty((len(mean), 3), dtype=_FLOAT)
+    along_mean, along_theta = direction[..., 0], direction[..., 1]
+    result = np.empty((*direction.shape[:-1], 3), dtype=_FLOAT)
     with np.errstate(over="ignore", invalid="ignore"):
-        result[:, 0] = -(third[:, 0] * along_mean + third[:, 1] * along_theta)
-        result[:, 1] = -(third[:, 1] * along_mean + third[:, 2] * along_theta)
-        result[:, 2] = -(third[:, 2] * along_mean + third[:, 3] * along_theta)
+        result[..., 0] = -(third[:, 0] * along_mean + third[:, 1] * along_theta)
+        result[..., 1] = -(third[:, 1] * along_mean + third[:, 2] * along_theta)
+        result[..., 2] = -(third[:, 2] * along_mean + third[:, 3] * along_theta)
     _finite_output(result, "curvature direction", NegativeBinomialDerivativeRepresentationError)
     certificate = np.zeros_like(result)
     with np.errstate(over="ignore"):
-        certificate[:, 2] = np.nextafter(np.abs(along_theta) * error, np.inf)
+        certificate[..., 2] = np.nextafter(np.abs(along_theta) * error, np.inf)
     _finite_output(
         certificate, "curvature-direction bound", NegativeBinomialDerivativeRepresentationError
     )

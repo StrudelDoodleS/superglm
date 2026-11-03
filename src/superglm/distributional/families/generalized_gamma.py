@@ -238,6 +238,9 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
     where the mean does not exist in the location form.
     """
 
+    # Its curvature directions take stacked (m, n, K) directions on one state evaluation.
+    stacked_curvature_directions: ClassVar[bool] = True
+
     parametrisation: Parametrisation = "mean"
     scale_floor: float = 0.01
 
@@ -537,7 +540,7 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
         if np.all(windows_valid):
             return result
         result = result.copy()
-        result[~windows_valid] = 0.0
+        result[..., ~windows_valid, :] = 0.0
         return readonly(result)
 
     def predictor_curvature_second_directional_derivative(

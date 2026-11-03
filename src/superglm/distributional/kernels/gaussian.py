@@ -295,15 +295,15 @@ def _gaussian_predictor_curvature_channels(
         normalizer_mass = weights
     residual_mass = weights
     residual = response - predictors[:, 0]
-    location_direction = direction[:, 0]
-    scale_direction = direction[:, 1]
-    result = np.empty((len(response), 3), dtype=np.float64)
+    location_direction = direction[..., 0]
+    scale_direction = direction[..., 1]
+    result = np.empty((*direction.shape[:-1], 3), dtype=np.float64)
     with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
         inverse_scale = 1.0 / scale
         inverse_scale_2 = inverse_scale * inverse_scale
         scale_ratio = scale_increment * inverse_scale
         scaled_residual = residual * inverse_scale
-        result[:, 0] = (
+        result[..., 0] = (
             -2.0
             * residual_mass
             * scale_increment
@@ -314,7 +314,7 @@ def _gaussian_predictor_curvature_channels(
         one_minus_ratio = floor * inverse_scale
         one_minus_two_ratio = (floor - scale_increment) * inverse_scale
         one_minus_three_ratio = (floor - 2.0 * scale_increment) * inverse_scale
-        result[:, 1] = (
+        result[..., 1] = (
             2.0
             * residual_mass
             * scale_increment
@@ -322,7 +322,7 @@ def _gaussian_predictor_curvature_channels(
             * inverse_scale_2
             * (-location_direction + residual * one_minus_three_ratio * scale_direction)
         )
-        result[:, 2] = (
+        result[..., 2] = (
             -2.0
             * residual_mass
             * residual
@@ -353,7 +353,10 @@ def gaussian_predictor_curvature_directional(
     *,
     scale_floor: float,
 ) -> NDArray[np.float64]:
-    """Return the directional curvature of the Gaussian predictor."""
+    """Return the directional curvature of the Gaussian predictor.
+
+    A stacked direction ``(m, n, 2)`` gives ``(m, n, 3)`` on one evaluation of the state.
+    """
 
     response_values, weight_values = _aligned_vectors(
         (response, "response"),
@@ -372,7 +375,8 @@ def gaussian_predictor_curvature_directional(
     expected = (len(response_values), 2)
     if (
         predictors.shape != expected
-        or direction.shape != expected
+        or direction.ndim not in (2, 3)
+        or direction.shape[-2:] != expected
         or not np.all(np.isfinite(predictors))
         or not np.all(np.isfinite(direction))
     ):

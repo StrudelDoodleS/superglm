@@ -239,6 +239,9 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
     the response mean in both forms.
     """
 
+    # Its curvature directions take stacked (m, n, K) directions on one state evaluation.
+    stacked_curvature_directions: ClassVar[bool] = True
+
     parametrisation: Parametrisation = "mean"
     scale_floor: float = 0.01
 
@@ -521,7 +524,7 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
         third, kept, valid = self._bounded_share(bound, response, eta, 3)
         direction = np.asarray(eta_direction, dtype=np.float64)
         result = np.where(kept[:, None], complete, 0.0) - contract_third(third, direction)
-        result[~valid] = 0.0
+        result[..., ~valid, :] = 0.0
         return readonly(result)
 
     def predictor_curvature_second_directional_derivative(

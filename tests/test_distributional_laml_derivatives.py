@@ -604,3 +604,159 @@ def test_hessian_certificate_costs_no_absolute_assembly(monkeypatch) -> None:
     family, layout, y, plan, lambdas, fit, dense = _legacy_case("gamma", "finite-difference")
     laml_derivatives(family, layout, y, plan, lambdas=lambdas, fit=fit, dense_matrices=dense)
     assert calls == [False]
+
+
+# --- Derivative-pass cost: the family's state once per pass, not once per axis --
+
+_U = 2.0**-53
+
+
+@pytest.mark.parametrize("kind", ["gaussian", "gamma"])
+def test_stacked_axis_directions_reproduce_the_per_axis_pass(kind) -> None:
+    """A family with ``stacked_curvature_directions`` takes the K axes in one call.
+
+    The same family without the flag takes one call per axis.  Every row and
+    direction runs the same arithmetic either way, so the gradient, Hessian
+    and both certificates agree within ``8 u`` of their largest entry.
+    """
+    family, layout, y, plan, lambdas, fit, _config, session = _interior_case(kind, "observed")
+    shapes: list[tuple[int, ...]] = []
+
+    class _Counted(type(family)):
+        def predictor_curvature_directional_derivative(self, y, eta, direction, links, plan):
+            shapes.append(np.shape(direction))
+            return super().predictor_curvature_directional_derivative(
+                y, eta, direction, links, plan
+            )
+
+    class _PerAxis(_Counted):
+        stacked_curvature_directions = False
+
+    def make(cls):
+        return cls(scale_floor=family.scale_floor) if kind == "gaussian" else cls()
+
+    common = dict(lambdas=lambdas, fit=fit, dense_matrices=session.dense_matrices(layout))
+    n, k = fit.eta.shape
+    stacked = laml_derivatives(make(_Counted), layout, y, plan, **common)
+    assert shapes == [(k, n, k)]
+    shapes.clear()
+    per_axis = laml_derivatives(make(_PerAxis), layout, y, plan, **common)
+    assert shapes == [(n, k)] * k
+    for name in ("gradient", "gradient_certificate", "hessian", "hessian_certificate"):
+        got, want = getattr(stacked, name), getattr(per_axis, name)
+        assert np.all(np.abs(got - want) <= 8 * _U * np.max(np.abs(want))), name
+
+
+def _stacked_family_cases():
+    from superglm.distributional.families import (
+        GeneralizedGammaLSS,
+        GeneralizedParetoLSS,
+        LogNormalLS,
+        NegativeBinomialLS,
+        TweedieLSS,
+        TwoPieceLogNormalLSS,
+        TwoPieceNormalLSS,
+    )
+
+    return {
+        "gaussian": GaussianLS,
+        "gamma": GammaLS,
+        "log-normal (mean)": LogNormalLS,
+        "log-normal (location)": lambda: LogNormalLS(parametrisation="location"),
+        "negative binomial": NegativeBinomialLS,
+        "tweedie": TweedieLSS,
+        "generalized gamma (mean)": GeneralizedGammaLSS,
+        "generalized gamma (location)": lambda: GeneralizedGammaLSS(parametrisation="location"),
+        "generalized pareto": GeneralizedParetoLSS,
+        "two-piece log-normal (mean)": TwoPieceLogNormalLSS,
+        "two-piece log-normal (location)": lambda: TwoPieceLogNormalLSS(parametrisation="location"),
+        "two-piece normal": TwoPieceNormalLSS,
+    }
+
+
+def _stacked_rows(family, n: int, rng):
+    """A response and a predictor state inside the family's domain."""
+    kind = type(family).__name__
+    if kind in ("GaussianLS", "TwoPieceNormalLSS"):
+        y = rng.normal(1.0, 1.0, n)
+    elif kind == "NegativeBinomialLS":
+        y = rng.poisson(2.0, n).astype(float)
+    elif kind == "TweedieLSS":
+        y = rng.gamma(2.0, 1.0, n) * (rng.uniform(size=n) < 0.6)
+    else:
+        y = np.exp(rng.normal(0.5, 0.6, n))
+    eta = rng.normal(0.0, 0.3, (n, len(family.parameters)))
+    if kind in ("GaussianLS", "TwoPieceNormalLSS"):
+        eta[:, 0] += 1.0
+    if kind == "GeneralizedGammaLSS":
+        eta[:, 2] = rng.uniform(-0.1, 0.8, n)
+    return y, eta
+
+
+#: Families whose likelihood takes truncated and censored rows.
+_BOUNDED_CASES = (
+    "gamma",
+    "gaussian",
+    "generalized gamma (location)",
+    "generalized gamma (mean)",
+    "generalized pareto",
+    "log-normal (location)",
+    "log-normal (mean)",
+)
+
+
+def _bounded_observation(y, rng):
+    """A fifth of the rows right-censored, some truncated below or above."""
+    from superglm.distributional.family import bounded_observation
+    from superglm.distributional.observation import ResponseBounds
+
+    n = len(y)
+    side = np.where(rng.uniform(size=n) < 0.2, 1, 0)
+    lower = np.where(rng.uniform(size=n) < 0.3, y - 0.5 * np.abs(y) - 0.1, -np.inf)
+    if np.all(y > 0.0):
+        lower = np.where(np.isfinite(lower), np.maximum(lower, 0.0), lower)
+    upper = np.where((rng.uniform(size=n) < 0.3) & (side == 0), y + np.abs(y) + 0.1, np.inf)
+    return bounded_observation(ResponseBounds.from_arrays(lower, upper, side))
+
+
+@pytest.mark.parametrize(
+    ("name", "bounded"),
+    [(name, False) for name in sorted(_stacked_family_cases())]
+    + [(name, True) for name in _BOUNDED_CASES],
+)
+def test_stacked_curvature_directions_match_one_direction_at_a_time(name, bounded) -> None:
+    """``(m, n, K)`` directions on one state evaluation equal ``m`` single calls.
+
+    The K parameter axes the LAML pass asks for and three random directions,
+    per family, on complete rows and, where the family takes them, on
+    truncated and censored rows: within ``4 u`` of each direction's largest
+    entry (values and, for NB2, its certificate).
+    """
+    from superglm.distributional.smoothing.endpoint_direction import (
+        analytic_curvature_direction,
+    )
+
+    family = _stacked_family_cases()[name]()
+    assert family.stacked_curvature_directions is True
+    rng = np.random.default_rng(23)
+    n = 400
+    y, eta = _stacked_rows(family, n, rng)
+    links = tuple(spec.default_link for spec in family.parameters)
+    k = len(links)
+    weights = resolve_likelihood_weights(None, n_observations=n, contract=WeightContract("prior"))
+    observation = _bounded_observation(y, rng) if bounded else COMPLETE_OBSERVATION
+    plan = family.bind_likelihood(y, weights, observation)
+    directions = np.concatenate(
+        [np.repeat(np.eye(k)[:, None, :], n, axis=1), rng.normal(size=(3, n, k))]
+    )
+    stacked, stacked_certificate = analytic_curvature_direction(
+        family, y, eta, directions, links, plan
+    )
+    assert stacked.shape == (len(directions), n, k * (k + 1) // 2)
+    for index, direction in enumerate(directions):
+        single, certificate = analytic_curvature_direction(family, y, eta, direction, links, plan)
+        assert np.all(np.abs(stacked[index] - single) <= 4 * _U * np.max(np.abs(single))), index
+        if certificate is not None:
+            assert np.all(
+                np.abs(stacked_certificate[index] - certificate) <= 4 * _U * np.max(certificate)
+            ), index

@@ -1414,7 +1414,11 @@ def _tweedie_hessian_direction_rows(
     result: NDArray[np.float64],
     statuses: NDArray[np.int64],
 ):
-    """Packed ``dH(v)`` in ``(mu, phi, p)`` on rows ``start..stop``, with each row's status."""
+    """Packed ``dH(v)`` in ``(mu, phi, p)`` on rows ``start..stop``, with each row's status.
+
+    ``direction`` is ``(m, n, 3)`` and ``result`` ``(m, n, 6)``: each row's
+    third derivatives are formed once and contracted with all ``m`` directions.
+    """
     for row in range(start, stop):
         coefficients = np.empty(10, dtype=np.float64)
         rho = math.log(dispersion[row])
@@ -1429,16 +1433,17 @@ def _tweedie_hessian_direction_rows(
         statuses[row] = status
         if status != KERNEL_OK:
             continue
-        v_m = direction[row, 0]
-        v_f = direction[row, 1]
-        v_p = direction[row, 2]
         t_mmm, t_mmf, t_mmp, t_mff, t_mfp, t_mpp, t_fff, t_ffp, t_fpp, t_ppp = t
-        result[row, 0] = multiplier * (t_mmm * v_m + t_mmf * v_f + t_mmp * v_p)
-        result[row, 1] = multiplier * (t_mmf * v_m + t_mff * v_f + t_mfp * v_p)
-        result[row, 2] = multiplier * (t_mmp * v_m + t_mfp * v_f + t_mpp * v_p)
-        result[row, 3] = multiplier * (t_mff * v_m + t_fff * v_f + t_ffp * v_p)
-        result[row, 4] = multiplier * (t_mfp * v_m + t_ffp * v_f + t_fpp * v_p)
-        result[row, 5] = multiplier * (t_mpp * v_m + t_fpp * v_f + t_ppp * v_p)
+        for index in range(direction.shape[0]):
+            v_m = direction[index, row, 0]
+            v_f = direction[index, row, 1]
+            v_p = direction[index, row, 2]
+            result[index, row, 0] = multiplier * (t_mmm * v_m + t_mmf * v_f + t_mmp * v_p)
+            result[index, row, 1] = multiplier * (t_mmf * v_m + t_mff * v_f + t_mfp * v_p)
+            result[index, row, 2] = multiplier * (t_mmp * v_m + t_mfp * v_f + t_mpp * v_p)
+            result[index, row, 3] = multiplier * (t_mff * v_m + t_fff * v_f + t_ffp * v_p)
+            result[index, row, 4] = multiplier * (t_mfp * v_m + t_ffp * v_f + t_fpp * v_p)
+            result[index, row, 5] = multiplier * (t_mpp * v_m + t_fpp * v_f + t_ppp * v_p)
 
 
 # ---------------------------------------------------------------- fourth order
