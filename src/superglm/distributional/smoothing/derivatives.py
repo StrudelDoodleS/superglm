@@ -11,6 +11,11 @@ default. ``curvature="terminal"`` differentiates the accepted substitute
 instead (expected information, or each row block projected onto the
 semidefinite cone; Wood, Pya and Säfken 2016 §3.3.1, Wood and Fasiolo 2017 §3),
 a first-order approximation to the true derivative.
+
+On a binned layout (``binned_passes.binned_layout``) the passes read each
+predictor's rows from its bin tables, formed once per pass (``_TableRows``),
+whatever matrices the caller gave: the same values a bounded row chunk forms,
+so every caller at one fit gets the same bits as the dense row chunks.
 """
 
 from __future__ import annotations
@@ -38,7 +43,7 @@ from superglm.distributional.family import (
     PredictorCurvatureDirectionalFamily,
     PredictorCurvatureSecondDirectionalFamily,
 )
-from superglm.distributional.layout import StackedLayout
+from superglm.distributional.layout import PredictorState, StackedLayout
 from superglm.distributional.results.endpoint_evidence import ANALYTIC_DIRECTION_AUTHORITY
 from superglm.distributional.results.solver import DenseSolverResult
 from superglm.distributional.smoothing.endpoint_direction import (
@@ -59,6 +64,7 @@ from superglm.distributional.smoothing.endpoint_laml import (
 from superglm.distributional.smoothing.face_efs import projected_component_states
 from superglm.distributional.smoothing.objective import _component_states, _estimated_names
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
+from superglm.distributional.solver.binned_passes import _codes, _terms, binned_layout
 from superglm.distributional.solver.derivatives import (
     nearest_semidefinite_curvature,
     transform_natural_information,
@@ -333,6 +339,37 @@ def _cross_all(
         if left != right:
             result[:, slices[right], slices[left]] += np.transpose(block, (0, 2, 1))
     return 0.5 * (result + np.transpose(result, (0, 2, 1)))
+
+
+class _TableRows:
+    """A binned predictor's rows, gathered from bin tables formed once.
+
+    Row ``i`` holds what ``BoundedPredictorMatrix`` forms for it (``S = B R`` at
+    its bin, a level's zero off its rows, a one-hot code, the intercept, dense
+    values), without forming ``S`` again for every chunk.
+    """
+
+    def __init__(self, state: PredictorState) -> None:
+        self._terms = _terms(state, 0)
+        block = state.coefficient_slice
+        self.shape = (state.design.n, block.stop - block.start)
+        if not all(term.table is None or np.all(np.isfinite(term.table)) for term in self._terms):
+            raise ValueError(f"design for predictor {state.name!r} must be finite")
+
+    def __getitem__(self, rows: slice) -> NDArray[np.float64]:
+        start, stop, _ = rows.indices(self.shape[0])
+        out = np.zeros((stop - start, self.shape[1]), dtype=np.float64)
+        for term in self._terms:
+            if term.dense:
+                out[:, term.columns] = term.group.M[start:stop]
+                continue
+            codes = _codes(term, start, stop)
+            if term.one_hot:
+                hit = np.flatnonzero(codes < term.columns.stop - term.columns.start)
+                out[hit, term.columns.start + codes[hit]] = 1.0
+            else:
+                out[:, term.columns] = term.table[codes]
+        return out
 
 
 def _leverage_blocks(
@@ -726,6 +763,8 @@ def _gradient_pass(
     eta = np.asarray(fit.eta, dtype=np.float64)
     n_observations, k_parameters = eta.shape
     matrices = _validated_matrices(layout, dense_matrices, n_observations)
+    if binned_layout(layout):
+        matrices = tuple(_TableRows(state) for state in layout.predictors)
     slices = tuple(state.coefficient_slice for state in layout.predictors)
     links = tuple(state.link for state in layout.predictors)
     width = layout.n_coefficients

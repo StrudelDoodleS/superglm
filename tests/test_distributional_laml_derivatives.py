@@ -811,3 +811,199 @@ def test_generalized_pareto_natural_thirds_are_row_blocked(bounded, monkeypatch)
         assert np.all(np.abs(blocked_values[pair] - want) <= 4 * _U * np.max(np.abs(want))), pair
         bar = 4 * _U * np.max(whole_certificate[pair])
         assert np.all(np.abs(blocked_certificate[pair] - whole_certificate[pair]) <= bar), pair
+
+
+# --- Binned layouts: every caller reads the rows from the layout's bin tables --
+
+_LAML_RESULTS = ("gradient", "gradient_certificate", "hessian", "hessian_certificate")
+# The group kinds each binned fixture holds.
+_BINNED_KINDS = {
+    "K2": {
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedSplineCategoricalGroupMatrix",
+        "CategoricalGroupMatrix",
+        "RandomEffectGroupMatrix",
+        "DenseGroupMatrix",
+    },
+    "compressed": {
+        "SupportCompressedSSPGroupMatrix",
+        "SupportCompressedSplineCategoricalGroupMatrix",
+        "CategoricalGroupMatrix",
+        "DenseGroupMatrix",
+    },
+}
+_BINNED_KINDS["K3"] = _BINNED_KINDS["K2"]
+
+
+def _compressed_case():
+    """An exact-mode fit on integer covariates, which compresses each spline to its supports."""
+    from superglm.features import Categorical, Numeric
+    from superglm.features.interaction import SplineCategorical
+
+    n = 1500
+    rng = np.random.default_rng(3)
+    frame = pd.DataFrame(
+        {
+            "a": rng.integers(18, 60, n).astype(float),
+            "b": rng.integers(0, 12, n).astype(float),
+            "d": rng.normal(size=n),
+            "g": rng.choice(list("abc"), n),
+            "h": rng.choice(list("pqrs"), n),
+        }
+    )
+    y = (
+        np.sin(frame["a"] / 9)
+        + 0.2 * (frame["g"] == "b")
+        + rng.normal(size=n) * np.exp(-0.5 + 0.05 * frame["b"])
+    )
+    predictors = [
+        Predictor(
+            "location",
+            {
+                "a": Spline(kind="cr", n_knots=6),
+                "g": Categorical(base="a"),
+                "h": Categorical(base="p"),
+                "d": Numeric(),
+            },
+            interaction_specs={"a:h": SplineCategorical("a", "h")},
+        ),
+        Predictor("scale", {"b": Spline(kind="cr", n_knots=5), "h": Categorical(base="p")}),
+    ]
+    return GaussianLS(), frame, y, predictors, False
+
+
+@functools.cache
+def _binned_case(case: str):
+    """A binned fit: discretised, with a tensor, a categorical, a random effect, a level and a
+    dense term (``K2``, ``K3``), or exact mode on integer covariates (``compressed``)."""
+    from superglm.distributional.families import GeneralizedGammaLSS
+    from superglm.features import Categorical, Numeric, RandomEffect
+    from superglm.features.interaction import SplineCategorical, TensorInteraction
+
+    if case == "compressed":
+        family, frame, y, predictors, discrete = _compressed_case()
+        return _binned_fit(family, frame, y, predictors, discrete)
+    k_parameters = int(case[1])
+    n = 900
+    rng = np.random.default_rng(61 + k_parameters)
+    frame = pd.DataFrame(
+        {
+            "x": rng.uniform(-1, 1, n),
+            "z": rng.uniform(-1, 1, n),
+            "d": rng.normal(size=n),
+            "g": rng.choice(list("abc"), n),
+            "h": rng.choice(list("pq"), n),
+            "r": rng.choice([f"l{i}" for i in range(12)], n),
+        }
+    )
+    signal = np.sin(2 * frame["x"]) + 0.5 * frame["z"] * frame["x"] + 0.3 * (frame["g"] == "b")
+    if k_parameters == 2:
+        family = GaussianLS()
+        y = signal + np.exp(-0.5 + 0.3 * frame["z"]) * rng.normal(size=n)
+    else:
+        family = GeneralizedGammaLSS()
+        y = np.exp(0.4 * signal + 0.3 * rng.normal(size=n))
+    names = [parameter.name for parameter in family.parameters]
+    predictors = [
+        Predictor(
+            names[0],
+            {
+                "x": Spline(kind="cr", n_knots=6),
+                "z": Spline(kind="cr", n_knots=5),
+                "g": Categorical(base="a"),
+                "d": Numeric(),
+                "r": RandomEffect(),
+            },
+            interaction_specs={"x:z": TensorInteraction("x", "z", n_knots=(4, 4))},
+        ),
+        Predictor(
+            names[1],
+            {"x": Spline(kind="cr", n_knots=5), "h": Categorical(base="p")},
+            interaction_specs={"x:h": SplineCategorical("x", "h")},
+        ),
+    ]
+    if k_parameters == 3:
+        predictors.append(Predictor(names[2], {"z": Spline(kind="cr", n_knots=4)}))
+    return _binned_fit(family, frame, y, predictors, True)
+
+
+def _binned_fit(family, frame, y, predictors, discrete: bool):
+    model = fit_dense_distributional(
+        frame,
+        np.asarray(y, dtype=np.float64),
+        family=family,
+        predictors=predictors,
+        weight_contract=WeightContract("prior"),
+        efs_config=DistributionalEFSConfig(max_iterations=4, outer="efs"),
+        discrete=discrete,
+        n_bins=24,
+    )
+    rows = model.fit_state.retained_rows
+    plan = family.bind_likelihood(rows.response, rows.likelihood_weights, COMPLETE_OBSERVATION)
+    options = dict(lambdas=dict(model.smoothing.lambdas), fit=model.smoothing.terminal_fit)
+    return family, model.layout, rows.response, plan, options
+
+
+def _binned_family(family, authority: str):
+    if authority == "analytic":
+        return family
+    differenced = type(
+        "Differenced",
+        (type(family),),
+        {
+            "predictor_curvature_directional_derivative": None,
+            "predictor_curvature_second_directional_derivative": None,
+        },
+    )
+    return differenced()
+
+
+@pytest.mark.parametrize("authority", ["analytic", "finite-difference"])
+@pytest.mark.parametrize("case", ["K2", "K3", "compressed"])
+def test_binned_layout_derivatives_equal_the_dense_row_chunks(case, authority, monkeypatch) -> None:
+    """Rows read from the bin tables are the values a bounded chunk forms, so the gradient,
+    Hessian and both certificates are those of the dense row chunks, bit for bit. The
+    fixtures hold every binned group kind, and the differenced pass nonzero certificates."""
+    from superglm.distributional._row_design import bounded_predictor_matrices
+    from superglm.distributional.smoothing import derivatives as derivatives_module
+    from superglm.distributional.solver.binned_passes import binned_layout
+
+    family, layout, y, plan, options = _binned_case(case)
+    family = _binned_family(family, authority)
+    assert binned_layout(layout)
+    kinds = {type(g).__name__ for state in layout.predictors for g in state.design.group_matrices}
+    assert kinds >= _BINNED_KINDS[case]
+    matrices = bounded_predictor_matrices(layout)
+    binned = laml_derivatives(family, layout, y, plan, dense_matrices=matrices, **options)
+    monkeypatch.setattr(derivatives_module, "binned_layout", lambda layout: False)
+    dense = laml_derivatives(family, layout, y, plan, dense_matrices=matrices, **options)
+    assert binned.third_derivative_authority == dense.third_derivative_authority
+    assert bool(np.max(binned.hessian_certificate) > 1e-9) is (authority == "finite-difference")
+    for name in (*_LAML_RESULTS, "fs_gradient", "penalty_hessian"):
+        np.testing.assert_array_equal(getattr(binned, name), getattr(dense, name), err_msg=name)
+
+
+@pytest.mark.parametrize("case", ["K2", "K3", "compressed"])
+def test_binned_layout_derivatives_never_read_the_callers_rows(case, monkeypatch) -> None:
+    """The layout decides the rows: materialised matrices and bounded chunks of 97 rows (whose
+    dense route rounds differently) give the same bits, and no bounded chunk is formed."""
+    from superglm.distributional._row_design import (
+        BoundedPredictorMatrix,
+        bounded_predictor_matrices,
+    )
+    from superglm.distributional.solver.assembly import dense_predictor_matrices
+
+    family, layout, y, plan, options = _binned_case(case)
+    family = _binned_family(family, "finite-difference")
+    materialised = laml_derivatives(
+        family, layout, y, plan, dense_matrices=dense_predictor_matrices(layout), **options
+    )
+
+    def forbidden(self, rows):
+        pytest.fail("a binned layout's derivative pass read the caller's bounded rows")
+
+    monkeypatch.setattr(BoundedPredictorMatrix, "__getitem__", forbidden)
+    bounded = bounded_predictor_matrices(layout, chunk_size=97)
+    chunked = laml_derivatives(family, layout, y, plan, dense_matrices=bounded, **options)
+    for name in _LAML_RESULTS:
+        np.testing.assert_array_equal(getattr(chunked, name), getattr(materialised, name), name)

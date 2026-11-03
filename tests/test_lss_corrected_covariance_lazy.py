@@ -249,6 +249,59 @@ def test_retained_stationary_fit_replays_exact_hessian_without_mutation(stationa
     assert fitted.smoothing.smoothing_hessian is None
 
 
+def test_binned_stationary_fit_replays_the_stored_terminal_gradient(monkeypatch) -> None:
+    """A discretised fit's replay reads the rows its endgame read, whatever matrices it
+    builds (here chunks of 97 rows, which the dense route sums in another order), so its
+    gradient is the stored terminal gradient bit for bit and the correction forms."""
+    from superglm.distributional._row_design import bounded_predictor_matrices
+    from superglm.distributional.solver.binned_passes import binned_layout
+
+    rng = np.random.default_rng(7351)
+    x = rng.uniform(-1.0, 1.0, 900)
+    response = 0.6 * np.sin(2.4 * x) + np.exp(-1.0 + 0.5 * np.cos(1.8 * x)) * rng.standard_normal(
+        len(x)
+    )
+    fitted = (
+        model_from_templates(
+            family=GaussianLS(),
+            predictors=[
+                Predictor("location", {"x": Spline("cr", k=7)}),
+                Predictor("scale", {"x": Spline("cr", k=5)}),
+            ],
+            discrete=True,
+        )
+        .fit_reml(pd.DataFrame({"x": x}), response, outer="efs+newton")
+        ._require_fitted()
+    )
+    assert binned_layout(fitted.layout)
+    assert fitted.smoothing is not None and fitted.smoothing.convergence_reason == "stationary"
+    # Without a published Hessian the correction replays and checks the stored gradient.
+    smoothing = dataclasses.replace(
+        fitted.smoothing, smoothing_hessian=None, smoothing_hessian_certificate=None
+    )
+    state = dataclasses.replace(fitted.fit_state, smoothing=smoothing)
+    replaying = DenseDistributionalModel(family=fitted.family, _fit_state=state)
+    replays: list[LamlDerivatives] = []
+
+    def recorded(*args, **kwargs) -> LamlDerivatives:
+        replays.append(real_laml_derivatives(*args, **kwargs))
+        return replays[-1]
+
+    def chunks_of_97(layout, chunk_size=None):
+        return bounded_predictor_matrices(layout, chunk_size=97)
+
+    monkeypatch.setattr(posterior_module, "laml_derivatives", recorded)
+    monkeypatch.setattr(posterior_module, "bounded_predictor_matrices", chunks_of_97)
+    monkeypatch.setattr(posterior_module, "dense_predictor_matrices", chunks_of_97)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        covariance = posterior_covariance(replaying, kind="corrected")
+    (replayed,) = replays
+    stored = smoothing.terminal_gradient
+    np.testing.assert_array_equal(replayed.gradient, [stored[name] for name in replayed.names])
+    assert np.all(np.isfinite(covariance))
+
+
 def test_compact_fit_discloses_the_conditional_covariance(stationary_case) -> None:
     fitted, _ = stationary_case
     compact_state = dataclasses.replace(fitted.fit_state, retained_rows=None)
