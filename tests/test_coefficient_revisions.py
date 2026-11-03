@@ -815,6 +815,46 @@ def test_a_slope_edit_past_the_float_range_predicts_its_clipped_limit_far_out(si
         assert np.array_equal(model.predict(far), expected), label
 
 
+def test_a_marked_predictor_warns_when_its_slope_product_overflows():
+    """``(x - c) beta`` past the float range raises numpy's overflow warning, as v0.36.0 did (#456).
+
+    The expansion's exact pieces are formed with overflow ignored; the plain
+    product, the term as the predictor scores it, is not.
+    """
+    _, edited, _, _ = _far_slope_edit("poisson", 1e308)
+    with pytest.warns(RuntimeWarning, match="overflow encountered in multiply"):
+        edited.predict(pd.DataFrame({"x": [1e300, -1e300]}))
+
+
+def test_a_fallback_replays_its_addends_in_row_chunks(monkeypatch):
+    """Rows whose running total overflows replay each addend ``_CHUNK`` rows at a time (#456).
+
+    Each recomputed source is scored once for the sum and once for its replay.
+    """
+    from superglm.solvers import mode_score
+
+    monkeypatch.setattr(mode_score, "_CHUNK", 3)
+    sizes, expand = [], mode_score._Addend.expand
+
+    def record(self, data, rows):
+        sizes.append(len(np.arange(len(data))[rows]))
+        return expand(self, data, rows)
+
+    monkeypatch.setattr(mode_score._Addend, "expand", record)
+    calls = [0, 0, 0]
+    total = mode_score.CompensatedSum(1e308, 0.25, n=11)
+    for index, value in enumerate([1e308, 0.0, -1e308]):
+
+        def source(index=index, value=value):
+            calls[index] += 1
+            return np.full(11, value)
+
+        total.add(source)
+    np.testing.assert_array_equal(total.value(), np.full(11, 1e308))
+    assert max(sizes) <= 3
+    assert calls == [2, 2, 2]
+
+
 @pytest.mark.parametrize("sign", [1.0, -1.0], ids=["up", "down"])
 def test_holdout_drop_term_beside_a_slope_past_the_float_range_reads_zero(sign):
     """Dropping a finite term at rows where another overflows changes nothing, as on v0.36.0.
