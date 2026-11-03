@@ -227,3 +227,21 @@ test("New levels is disabled, with the reason in its popover, while the choice c
   assert.equal(n.select.disabled, false);
   assert.equal(n.wrap.dataset.popoverBody, STRUCTURE_HELP.new_levels.body);
 });
+
+test("a SuperLSS term shows its own title and no average-edit relativity", () => {
+  const nodes = {
+    nameNode: new FakeNode(),
+    kindNode: new FakeNode(),
+    edfNode: new FakeNode(),
+    referenceNode: new FakeNode(),
+    statusNode: new FakeNode(),
+  };
+  const term = {
+    ...TERM,
+    title: "Spread: age",
+    display: { kind: "gamma_cv", reference_eta: -0.6, floor: 0 },
+  };
+  renderContextBar(nodes, { name: "age", term, selectionSize: 2 });
+  assert.equal(nodes.nameNode.textContent, "Spread: age");
+  assert.equal(nodes.statusNode.textContent, "2 of 10 selected · selected exposure 25%");
+});

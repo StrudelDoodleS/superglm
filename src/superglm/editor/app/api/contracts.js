@@ -37,6 +37,10 @@
  * @property {number} [time] when the step was made, in Unix seconds
  * @property {string|null} [note] the analyst's note, saved with the exported model
  * @property {"applied"|"waiting"|"edit"} [status]
+ * @property {string|null} [predictor] SuperLSS only: the family parameter the step acted in
+ * @property {string} [predictor_label] SuperLSS only: the history chip, "Average" or "Spread"
+ * @property {string} [term_label] SuperLSS only: the bare feature name, without its parameter prefix
+ * @property {boolean} [display_decreasing] SuperLSS only: the shown curve falls as the recorded effect rises
  */
 /**
  * @typedef {Object} GroupDisplayPayload
@@ -216,6 +220,9 @@
  * @property {Record<string, unknown>} params
  * @property {string|null} note
  * @property {number} time Unix seconds
+ * @property {string|null} [predictor] SuperLSS only: the family parameter the step acts in
+ * @property {string} [predictor_label] SuperLSS only: "Average" or "Spread"
+ * @property {string} [term_label] SuperLSS only: the bare feature name
  */
 /**
  * What a term's waiting changes make of it at the next Refit: its groups by
@@ -270,6 +277,15 @@
  * @property {boolean} fits_levels
  */
 /**
+ * How a SuperLSS term's effect on the linear predictor is shown and edited:
+ * `reference_eta` is the parameter's link value at the reference point and
+ * `floor` the scale floor of a log-normal spread.
+ * @typedef {Object} DisplaySpec
+ * @property {'relativity'|'lognormal_cv'|'gamma_cv'|'inverse_theta'} kind
+ * @property {number} reference_eta
+ * @property {number} floor
+ */
+/**
  * @typedef {Object} TermPayload
  * @property {string} kind
  * @property {string} term_type
@@ -294,6 +310,17 @@
  * @property {TermKnots|null} [knots] the term's knots and the Knots tool's state
  * @property {boolean} [unsmoothed] whether the term has smoothing the Unsmoothed
  *   toggle can switch off: a spline
+ * @property {DisplaySpec} [display] SuperLSS terms only: the unit of `y`; absent means relativity
+ * @property {number} [baseline] SuperLSS terms only: the display value where the term's effect is zero
+ * @property {string} [y_label]
+ * @property {'relativity'|'times'|'plain'} [y_format]
+ * @property {string} [x_label]
+ * @property {string} [title]
+ * @property {string} [parameter]
+ * @property {string} [parameter_label]
+ * @property {string} [parameter_role]
+ * @property {string} [term_label]
+ * @property {Record<string, string>} [unavailable] SuperLSS terms only: the reason for each term tool that is off
  */
 /**
  * A spline term fitted with its smoothing switched off (/unsmoothed). Its line
@@ -369,6 +396,9 @@
  * @property {PendingStep[]} [pending]
  * @property {{available:boolean, stale:boolean}} [final_fit] whether Export can offer the Final fit model
  * @property {number} [fit_token] changes only when the fitted model in force is replaced
+ * @property {{cv:boolean, final_fit:boolean}} [capabilities] SuperLSS sessions only: what the session offers
+ * @property {{available:boolean, reason:string|null}} [final_fit_plan] SuperLSS sessions only: whether Final fit can run now, and the sentence for why not
+ * @property {Record<string, string>} [unavailable] SuperLSS sessions only: the reason for each session tool that is off
  */
 /**
  * @typedef {Object} StructuralTransitionTiming

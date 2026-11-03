@@ -121,7 +121,7 @@ def test_cancellation_uses_the_same_admitted_state_for_every_route(admitted_prob
                         problem.probe,
                         predictor,
                         layout,
-                        SimpleNamespace(coefficients=beta),
+                        beta,
                         layout.predictors[predictor.parameter_index].offset[:7],
                     )
                     for predictor in problem.compiled

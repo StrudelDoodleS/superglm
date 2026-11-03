@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib
 import math
 import operator
@@ -76,11 +77,13 @@ from superglm.distributional.posterior import (
     posterior_predictive,
 )
 from superglm.distributional.predictor import Predictor
+from superglm.distributional.rebuild import clone_with_replaced_terms, fit_settings, replay_fit
 from superglm.distributional.residuals import ResidualKind, ResidualSet, compute_residuals
 from superglm.distributional.results.endpoint_evidence import EFSConvergenceReason
 from superglm.distributional.results.fit import DistributionalFitResult
 from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.results.solver import DenseSolverConfig
+from superglm.distributional.revision import EditedCoefficientsWarning, revised_model
 from superglm.distributional.separation import validate_separation_policy
 from superglm.distributional.surfaces import (
     DensityFan,
@@ -411,6 +414,9 @@ class SuperLSS:
     frames must contain the declared columns.
     """
 
+    # The keywords of the last fit() or fit_reml() call; see `rebuild.fit_settings`.
+    _fit_settings: Mapping[str, Any] | None = None
+
     def __init__(
         self,
         family: DistributionalFamily,
@@ -686,7 +692,8 @@ class SuperLSS:
         fit_reml : Estimate smoothing parameters as part of the fit.
         """
         with fit_record(self, "fit", locals()):
-            return self._fit(
+            settings = fit_settings("fit", locals())
+            fitted = self._fit(
                 X,
                 y,
                 sample_weight=sample_weight,
@@ -702,6 +709,8 @@ class SuperLSS:
                 truncation=truncation,
                 censored=censored,
             )
+            self._fit_settings = settings
+            return fitted
 
     def fit_reml(
         self,
@@ -779,7 +788,8 @@ class SuperLSS:
                 or initial_lambda <= 0.0
             ):
                 raise ValueError("initial_lambda must be None or a finite positive number")
-            return self._fit(
+            settings = fit_settings("fit_reml", locals())
+            fitted = self._fit(
                 X,
                 y,
                 sample_weight=sample_weight,
@@ -812,6 +822,28 @@ class SuperLSS:
                 truncation=truncation,
                 censored=censored,
             )
+            self._fit_settings = settings
+            return fitted
+
+    def _clone_with_replaced_terms(self, replacements: Mapping[str, Any]) -> SuperLSS:
+        """An unfitted copy with the terms keyed ``"<parameter>:<term>"`` replaced.
+
+        Values are unfitted feature specs. The copy keeps the family, the
+        constructor settings, the other terms' templates (interactions included)
+        and the source's fit settings, less the fixed smoothing strengths of the
+        replaced terms.
+        """
+        return clone_with_replaced_terms(self, replacements)
+
+    def _replay_fit(
+        self,
+        X: FrameLike | EagerFrame,
+        y: NDArray,
+        sample_weight: NDArray | None = None,
+        offsets: Mapping[str, NDArray] | None = None,
+    ) -> SuperLSS:
+        """Fit with the carried settings, by ``fit`` or ``fit_reml`` as the source was."""
+        return replay_fit(self, X, y, sample_weight, offsets)
 
     def _require_fitted(self) -> DenseDistributionalModel:
         if self._model is None:
@@ -896,6 +928,48 @@ class SuperLSS:
     @property
     def result_(self) -> DistributionalFitResult:
         return self._require_fitted().fitted_result
+
+    @property
+    def _hand_edited_terms(self) -> tuple[str, ...]:
+        """Qualified names of the terms whose coefficients were edited by hand."""
+        edit = self._require_fitted().fit_state.hand_edit
+        return () if edit is None else edit.edited_terms
+
+    def _with_revised_coefficients(
+        self,
+        coefficients: NDArray,
+        *,
+        edited_terms: Sequence[str],
+        X_train: FrameLike | EagerFrame | None = None,
+    ) -> SuperLSS:
+        """Return a model that predicts with ``coefficients``; this one is unchanged.
+
+        ``coefficients`` is the full vector in the fit's layout. It may differ
+        from the fit's only inside ``edited_terms`` (qualified names such as
+        ``"scale:age"``), at their parameters' intercepts, and in the terms of
+        earlier revisions. Predictions, term effects, ``coef_`` and
+        ``coef_by_predictor_`` follow the edit; ``result_``, ``covariance_``, term
+        tests and the rest of the inference describe the fit. An edit may write a
+        non-zero value onto a coefficient the fit publishes at zero as aliased;
+        its standard error stays 0. The fitted rows are recomputed from the
+        training frame attached, else ``X_train``.
+        """
+        frame = self._training_frame if X_train is None else X_train
+        revised = revised_model(self._require_fitted(), coefficients, edited_terms, frame)
+        copied = copy.copy(self)
+        copied._model = revised
+        return copied
+
+    def _warn_if_hand_edited(self) -> None:
+        """Say once, from the caller's line, that the inference quoted predates the edit."""
+        edited = self._hand_edited_terms
+        if edited:
+            warnings.warn(
+                f"Coefficients of {', '.join(edited)} were edited by hand; "
+                "standard errors, bands and tests are from the fit before the edit.",
+                EditedCoefficientsWarning,
+                stacklevel=3,
+            )
 
     def predict_link(
         self,
@@ -1524,7 +1598,7 @@ class SuperLSS:
         not survive pickling, so a restored model must be given
         ``X_train=``.
         """
-        return term_effect(
+        effect = term_effect(
             self._require_fitted(),
             self._term_training_frame(X_train),
             parameter,
@@ -1532,6 +1606,8 @@ class SuperLSS:
             covariance=covariance,
             **kwargs,
         )
+        self._warn_if_hand_edited()
+        return effect
 
     def term_test(
         self,
@@ -1551,7 +1627,7 @@ class SuperLSS:
         it evaluates on the training frame, so a restored model needs
         ``X_train=``.
         """
-        return term_test(
+        test = term_test(
             self._require_fitted(),
             self._term_training_frame(X_train),
             parameter,
@@ -1559,6 +1635,8 @@ class SuperLSS:
             covariance=covariance,
             **kwargs,
         )
+        self._warn_if_hand_edited()
+        return test
 
     def summary(
         self,
@@ -1574,11 +1652,13 @@ class SuperLSS:
         holds a single coefficient.  It reads the training frame the same way
         :meth:`term_test` does, so a restored model needs ``X_train=``.
         """
-        return summary_table(
+        table = summary_table(
             self._require_fitted(),
             self._term_training_frame(X_train),
             covariance=covariance,
         )
+        self._warn_if_hand_edited()
+        return table
 
     # -- the posterior primitive ----------------------------------------- #
 
@@ -1600,10 +1680,13 @@ class SuperLSS:
         smoothing did not stop stationary is corrected about its own point
         with a ``ConvergenceWarning``; where no correction can be formed the
         draws use the fixed covariance, say so in a ``ConvergenceWarning``,
-        and carry ``covariance_kind="fixed"``.  One draw set can be reused
-        across quantities.
+        and carry ``covariance_kind="fixed"``.  After a hand edit the draws are
+        centred on the edit and keep the fit's covariance.  One draw set can be
+        reused across quantities.
         """
-        return posterior_draws(self._require_fitted(), n_draws, covariance=covariance, seed=seed)
+        draws = posterior_draws(self._require_fitted(), n_draws, covariance=covariance, seed=seed)
+        self._warn_if_hand_edited()
+        return draws
 
     def posterior_bounds(
         self,
@@ -1625,13 +1708,15 @@ class SuperLSS:
         such slot and the call is refused.
         """
         self._refuse_frequency_row_law(sample_weight)
-        return posterior_bounds(
+        bounds = posterior_bounds(
             self._require_fitted(),
             X,
             quantity,
             weights=self._prior_law_weight(sample_weight),
             **kwargs,
         )
+        self._warn_if_hand_edited()
+        return bounds
 
     def posterior_predictive(
         self,
@@ -1651,13 +1736,15 @@ class SuperLSS:
         rather than simulating a law the weight does not describe.
         """
         self._refuse_frequency_row_law(sample_weight)
-        return posterior_predictive(
+        simulated = posterior_predictive(
             self._require_fitted(),
             X,
             n_draws,
             weights=self._prior_law_weight(sample_weight),
             **kwargs,
         )
+        self._warn_if_hand_edited()
+        return simulated
 
     # -- surfaces, spread and the book ----------------------------------- #
 
@@ -1678,13 +1765,15 @@ class SuperLSS:
         coherent with one another.  ``weights`` here are per swept point, not
         per training row: they state the exposure the curve is priced at.
         """
-        return risk_curves(
+        curves = risk_curves(
             self._require_fitted(),
             self._term_training_frame(X_train),
             reference,
             covariate,
             **kwargs,
         )
+        self._warn_if_hand_edited()
+        return curves
 
     def density_fan(
         self,
@@ -1762,13 +1851,15 @@ class SuperLSS:
         refused under frequency semantics, which has no row-law slot.
         """
         self._refuse_frequency_row_law(sample_weight)
-        return portfolio(
+        book = portfolio(
             self._require_fitted(),
             X,
             weights=self._prior_law_weight(sample_weight),
             offsets=offsets,
             **kwargs,
         )
+        self._warn_if_hand_edited()
+        return book
 
     # -- figures and their payloads -------------------------------------- #
 

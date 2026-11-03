@@ -20,13 +20,13 @@ from superglm.editor._types import EditableTerm
 from superglm.editor.collapse import _require_not_interaction_parent
 from superglm.editor.errors import EditorValueError
 from superglm.editor.knots import LEVEL_OPERATIONS, _hosted, _numeric_declaration
+from superglm.editor.lss.view import column_of, interaction_users
 from superglm.features.constraint import postfit_token, rules_of
 from superglm.features.ordered_categorical import OrderedCategorical, _spline_kind_name
 from superglm.features.rebuild import (
     CUBIC_KINDS,
     EDITOR_BASIS_ATTRIBUTE,
     declared_spline,
-    interaction_users,
     pristine_basis,
     rebased_spline,
     source_spline,
@@ -210,7 +210,7 @@ def basis_feature_spec(
     except (ValueError, NotImplementedError) as exc:
         raise EditorValueError(_NOT_BUILT.format(name=_NAMES[kind], term=name)) from exc
     setattr(basis, EDITOR_BASIS_ATTRIBUTE, True)
-    replacement = _hosted(spec, basis, name, X) if ordered else basis
+    replacement = _hosted(spec, basis, column_of(model, name), X) if ordered else basis
     if kind != current:
         label = f"kind {kind} in {name}"
     else:

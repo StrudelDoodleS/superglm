@@ -794,3 +794,15 @@ test("each term with a change waiting for refit is named once", () => {
   assert.deepEqual(selectWaitingTerms(createInitialEditorState(confirmed)), ["region", "age"]);
   assert.deepEqual(selectWaitingTerms(createInitialEditorState(snapshot(7))), []);
 });
+
+test("an evidence panel whose tool the session does not offer is never requested", () => {
+  const offered = snapshot(4);
+  const state = createInitialEditorState({
+    ...offered,
+    unavailable: { summary: "No summary here.", metrics: "No metrics here." },
+  });
+  assert.deepEqual(selectVisibleEvidencePanels(state), []);
+  const onlySummary = createInitialEditorState({ ...offered, unavailable: { summary: "No summary here." } });
+  assert.deepEqual(selectVisibleEvidencePanels(onlySummary), ["metrics"]);
+  assert.deepEqual(selectVisibleEvidencePanels(patchView(state, { activeView: "validation" })), ["report"]);
+});

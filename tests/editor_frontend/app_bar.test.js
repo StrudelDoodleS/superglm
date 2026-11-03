@@ -335,3 +335,68 @@ test("R refits what is waiting, except while typing, with a modifier, in a dialo
   refitButton.emit("click");
   assert.equal(refits, 3);
 });
+
+test("arrow keys step over a hidden tab, in both directions and at the ends", (t) => {
+  const originalButton = globalThis.HTMLButtonElement;
+  const originalDocument = globalThis.document;
+  globalThis.HTMLButtonElement = FakeButton;
+  globalThis.document = new FakeElement("document");
+  t.after(() => {
+    if (originalButton === undefined) delete globalThis.HTMLButtonElement;
+    else globalThis.HTMLButtonElement = originalButton;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  });
+  const tab = (view, hidden = false) => {
+    const button = new FakeButton();
+    button.dataset.view = view;
+    button.hidden = hidden;
+    button.focused = 0;
+    button.focus = () => { button.focused += 1; };
+    return button;
+  };
+  const tabs = [tab("editor"), tab("validation"), tab("cv", true), tab("final")];
+  const root = new FakeElement("nav");
+  root.querySelectorAll = () => tabs;
+  const views = [];
+  const binding = bindAppBar({
+    root,
+    undoButton: new FakeButton(),
+    redoButton: new FakeButton(),
+    revertButton: new FakeButton(),
+    refreshButton: new FakeButton(),
+    refitButton: new FakeButton(),
+    onView: (view) => views.push(view),
+    onUndo: () => {}, onRedo: () => {}, onRevert: () => {}, onRefresh: () => {}, onRefit: () => {},
+  });
+  const press = (from, key) => root.emit("keydown", { key, target: tabs[from] });
+
+  press(1, "ArrowRight");
+  press(3, "ArrowLeft");
+  press(3, "ArrowRight");
+  press(0, "ArrowLeft");
+  press(0, "End");
+  assert.deepEqual(views, ["final", "validation", "editor", "final", "final"]);
+  assert.equal(tabs[2].focused, 0);
+  binding.destroy();
+});
+
+test("Refit stays disabled with its reason when the model cannot be refitted here", () => {
+  const root = new FakeElement("nav");
+  const buttons = {
+    undoButton: new FakeButton(),
+    redoButton: new FakeButton(),
+    revertButton: new FakeButton(),
+    refreshButton: new FakeButton(),
+    refitButton: new FakeButton(),
+    refitCount: new FakeElement("span"),
+  };
+  const reason = "This model has no recorded fit settings, so the editor cannot refit it.";
+  renderAppBar({
+    root, activeView: "editor", ...buttons, undoLabel: null, redoLabel: null,
+    canRevert: false, busy: false, pendingCount: 2, refitReason: reason,
+  });
+  assert.equal(buttons.refitButton.disabled, true);
+  assert.equal(buttons.refitButton.dataset.popoverBody, reason);
+  assert.equal(buttons.refitCount.textContent, "2");
+});

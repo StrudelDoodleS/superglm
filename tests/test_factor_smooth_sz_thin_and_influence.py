@@ -2830,8 +2830,6 @@ def _assert_superlss_trading_the_group_term_moves_nothing(fitted, probe, terms, 
     ``|D| |beta|`` before and after, and four times the moved pattern read
     through each term's constant (Higham 2002, sections 3.1, 3.5 and 7.1).
     """
-    from types import SimpleNamespace
-
     from superglm._frame import as_eager_frame
     from superglm.distributional.model import _predict_one_eta
     from superglm.distributional.prediction_design import (
@@ -2858,9 +2856,8 @@ def _assert_superlss_trading_the_group_term_moves_nothing(fitted, probe, terms, 
         full = np.array(coefficients, copy=True)
         full[state.coefficient_slice] = values
         offset = np.zeros(len(probe))
-        result = SimpleNamespace(coefficients=full)
         frame = as_eager_frame(probe)
-        return np.asarray(_predict_one_eta(frame, predictor, fitted.layout, result, offset))
+        return np.asarray(_predict_one_eta(frame, predictor, fitted.layout, full, offset))
 
     for name, spec in zip(terms, specs, strict=True):
         d = rng.normal(size=len(main))

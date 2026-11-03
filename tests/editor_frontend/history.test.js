@@ -271,3 +271,62 @@ test("a timeline holding only the marker, or none at all, says nothing happened 
     assert.equal(node.innerHTML, '<div class="history-empty">Nothing yet.</div>');
   }
 });
+
+test("an LSS entry carries its parameter as a chip before the bare term name; a GLM entry has no chip", () => {
+  const node = { innerHTML: "" };
+  const lss = {
+    kind: "edit", status: "edit", id: "4e5f607", time: at(15, 0), note: null,
+    label: "Shift 3 – 5", term: "scale:age", term_label: "age", operation: "shift",
+    predictor: "scale", predictor_label: "Spread", redo: false,
+  };
+  const average = { ...lss, id: "5f60718", predictor: "mean", predictor_label: "Average" };
+  renderHistory([lss, average, TIMELINE[0], { kind: "marker" }], node);
+
+  const spread = row(node, "4e5f607");
+  assert.match(
+    spread,
+    /<div class="history-meta"><span class="parameter-chip" data-role="spread">Spread<\/span> age · edit<\/div>/,
+  );
+  assert.match(row(node, "5f60718"), /<span class="parameter-chip" data-role="average">Average<\/span> age · edit/);
+  assert.doesNotMatch(spread, /scale:age/);
+
+  const glm = row(node, "0a1b2c3");
+  assert.doesNotMatch(glm, /parameter-chip/);
+  assert.match(glm, /<div class="history-meta">curve · edit<\/div>/);
+});
+
+test("a chip's text is escaped, and a marker-like entry with a chip but no term still shows it", () => {
+  const node = { innerHTML: "" };
+  renderHistory([
+    { kind: "pending", status: "waiting", id: "6071829", time: at(15, 1), note: null,
+      label: "Refit", operation: "refit", predictor: "scale", predictor_label: "<b>Spread</b>", redo: false },
+    { kind: "marker" },
+  ], node);
+  const html = row(node, "6071829");
+  assert.match(html, /&lt;b&gt;Spread&lt;\/b&gt;/);
+  assert.doesNotMatch(html, /<b>Spread/);
+});
+
+test("an edit on a curve shown falling in its effect is named by the shown direction", () => {
+  const node = { innerHTML: "" };
+  const base = {
+    kind: "edit", status: "edit", time: at(15, 2), note: null, term: "theta:age",
+    term_label: "age", predictor: "theta", predictor_label: "Spread", redo: false,
+  };
+  renderHistory([
+    { ...base, id: "7182930", label: "shift theta:age", operation: "shift",
+      params: { delta: -0.0488, lo: 30, hi: 40 }, display_decreasing: true },
+    { ...base, id: "8293041", label: "isotonic theta:age", operation: "isotonic",
+      params: { direction: "decreasing", lo: 30, hi: 40 }, display_decreasing: true },
+    { ...base, id: "9304152", label: "snap_lowest theta:age", operation: "snap_lowest",
+      params: { lo: 30, hi: 40 }, display_decreasing: true },
+    { ...base, id: "a415263", label: "shift theta:age", operation: "shift",
+      params: { delta: -0.0488, lo: 30, hi: 40 }, display_decreasing: false },
+    { kind: "marker" },
+  ], node);
+  const label = (id) => row(node, id).match(/class="history-label">([^<]*)</)[1];
+  assert.equal(label("7182930"), "Increase 30 – 40");
+  assert.equal(label("8293041"), "Make increasing 30 – 40");
+  assert.equal(label("9304152"), "Snap to highest 30 – 40");
+  assert.equal(label("a415263"), "Decrease 30 – 40");
+});

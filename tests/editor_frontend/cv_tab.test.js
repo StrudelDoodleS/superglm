@@ -638,3 +638,21 @@ test("short level labels stay level, long ones turn", () => {
   const regions = Array.from({ length: 40 }, (_unused, index) => `Region ${index}`);
   assert.equal(count(levelChartMarkup(term(regions)), /rotate\(/g), 40);
 });
+
+test("a refused start is handed to onError with the kind and the server's words", async () => {
+  const errors = [];
+  const tab = createCVTab({
+    frame: fakeFrame(),
+    client: {
+      async jobStart() {
+        throw new Error("Final fit needs train or validation rows.");
+      }
+    },
+    onJobSettled: () => {},
+    onError: (kind, message) => errors.push([kind, message]),
+    pause: async () => {}
+  });
+  tab.render(cvPayload());
+  await tab.start("final_fit");
+  assert.deepEqual(errors, [["final_fit", "Final fit needs train or validation rows."]]);
+});

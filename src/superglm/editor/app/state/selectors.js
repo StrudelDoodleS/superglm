@@ -102,9 +102,12 @@ export function selectEvidenceNeedsRefresh(state, panel) {
  */
 export function selectVisibleEvidencePanels(state, { summaryCommitted = false } = {}) {
   if (state.view.activeView !== "editor") return ["report"];
-  const panels = /** @type {EvidencePanel[]} */ (["metrics"]);
+  // A panel whose tool the session does not offer is never requested.
+  const off = state.remote.snapshot?.unavailable ?? {};
+  const panels = /** @type {EvidencePanel[]} */ (off.metrics ? [] : ["metrics"]);
   if (
     !summaryCommitted &&
+    !off.summary &&
     state.view.inspectorOpen &&
     state.view.inspectorPane === "summary"
   ) {

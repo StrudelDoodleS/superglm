@@ -873,7 +873,8 @@ def _prepare_term_test(
 
     qualified, state, term_slice = _resolve_term(fitted, parameter, term)
     frame = as_eager_frame(X_train)
-    beta = np.asarray(fitted.coefficients, dtype=np.float64)[term_slice]
+    # A test is of the fit: a hand edit moves the curve, not the evidence behind it.
+    beta = np.asarray(fitted.fitted_result.coefficients, dtype=np.float64)[term_slice]
     edf = float(fitted.inference.term_edf[qualified])
 
     parent = term.removesuffix(_SPECIAL_SUFFIX) if isinstance(term, str) else term
@@ -1046,8 +1047,13 @@ def summary_table(
     ``"corrected covariance unavailable: fixed shown"``, because its ``se``,
     statistic and p-value are then the conditional ones. Notes join with
     ``"; "``, and a row with none reads ``""``.
+
+    After a hand edit, ``estimate`` is the coefficient the model predicts with;
+    ``se``, the statistic, the p-value and the notes describe the fit before the
+    edit, as its standard errors do.
     """
     beta = np.asarray(fitted.coefficients, dtype=np.float64)
+    fit_beta = np.asarray(fitted.fitted_result.coefficients, dtype=np.float64)
     frame = as_eager_frame(X_train)
     convergence_note = _convergence_note(fitted)
     prepared_tests: dict[str, _PreparedTermTest] = {}
@@ -1077,10 +1083,11 @@ def summary_table(
         if state.intercept_index is not None:
             row = _intercept_row(
                 state,
-                beta,
+                fit_beta,
                 matrix,
                 fitted.inference.intercept_edf,
             )
+            row["estimate"] = float(beta[state.intercept_index])
             row["note"] = _join_notes(row["note"], convergence_note, covariance_note)
             rows.append(row)
         for qualified, term_slice in fitted.layout.term_slices.items():
@@ -1112,7 +1119,9 @@ def summary_table(
                         else float("nan")
                     ),
                     "note": _join_notes(
-                        _absorption_note(fitted, state.name, term, outcome.edf, beta[term_slice]),
+                        _absorption_note(
+                            fitted, state.name, term, outcome.edf, fit_beta[term_slice]
+                        ),
                         convergence_note,
                         covariance_note,
                         _negative_edf_note(outcome.edf),

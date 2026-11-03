@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 from superglm.editor.cv import FINAL_NOT_RUN, cv_report_payload
 from superglm.editor.evaluation import evaluation_datasets
+from superglm.editor.lss.validation import LSS_METRIC_LABELS, lss_split_reason
+from superglm.editor.lss.view import is_lss
 from superglm.editor.metrics import METRIC_LABELS, compute_dataset_metrics
 from superglm.editor.summaries import summary_payload
 
@@ -18,6 +21,13 @@ _REPORT_METRICS = (
     "pearson_chi2",
     "effective_df",
 )
+
+
+def report_metrics(model) -> dict[str, str]:
+    """The metrics a report shows for ``model``, with their labels."""
+    if is_lss(model):
+        return dict(LSS_METRIC_LABELS)
+    return {metric: METRIC_LABELS[metric] for metric in _REPORT_METRICS}
 
 
 def validation_report_payload(
@@ -38,7 +48,7 @@ def validation_report_payload(
         "report": "validation",
         "title": "Validation Report",
         "note": _validation_note(session, splits),
-        "metric_labels": {metric: METRIC_LABELS[metric] for metric in _REPORT_METRICS},
+        "metric_labels": report_metrics(session.model),
         "splits": splits,
         "cv_report": getattr(session, "cv_report", None),
         "can_run_cv": False,
@@ -58,6 +68,11 @@ def final_fit_report_payload(
     if splits is None:
         splits = _split_metrics(widget.session)
     revision = widget.session.model_revision if model_revision is None else int(model_revision)
+    summary = (
+        {}
+        if is_lss(widget.session.model)
+        else {"summary": summary_payload(widget, "in_force", model_override=model_override)}
+    )
     return {
         "available": bool(splits),
         "model_revision": revision,
@@ -68,9 +83,9 @@ def final_fit_report_payload(
             "Current in-force model report. Structural edits are reflected in the "
             "feature definition; manual coefficient edits keep inference stale."
         ),
-        "metric_labels": {metric: METRIC_LABELS[metric] for metric in _REPORT_METRICS},
+        "metric_labels": report_metrics(widget.session.model),
         "splits": splits,
-        "summary": summary_payload(widget, "in_force", model_override=model_override),
+        **summary,
         "can_run_cv": False,
         "final_fit": _final_fit_section(widget, final_fit, model_revision=revision),
     }
@@ -80,7 +95,10 @@ def _final_fit_section(widget, final_fit, *, model_revision: int) -> dict[str, A
     """The Final fit on train and validation rows, once one has run."""
     if final_fit is None:
         return {"available": False, "note": FINAL_NOT_RUN}
-    summary = summary_payload(widget, "in_force", model_override=final_fit.model)
+    if is_lss(final_fit.model):
+        compact = None
+    else:
+        compact = summary_payload(widget, "in_force", model_override=final_fit.model).get("compact")
     return {
         "available": True,
         "stale": final_fit.model_revision != model_revision,
@@ -90,7 +108,7 @@ def _final_fit_section(widget, final_fit, *, model_revision: int) -> dict[str, A
         # Waiting changes are never in a Final fit, and staging or undoing one
         # leaves the model revision alone, so the count is the one waiting now.
         "pending": len(widget.session.pending),
-        "summary": summary.get("compact"),
+        "summary": compact,
     }
 
 
@@ -127,23 +145,35 @@ def report_payload(
 def split_metrics_payload(
     datasets,
     metric_pairs: dict[str, tuple[dict[str, float], dict[str, float]]],
+    metrics: Iterable[str] = _REPORT_METRICS,
+    model=None,
 ) -> list[dict[str, Any]]:
-    """Assemble split rows from cached original/current scalar pairs."""
+    """Assemble split rows from cached original/current scalar pairs.
+
+    A split a SuperLSS ``model`` cannot score is a row with ``available``
+    False and the reason as ``error``.
+    """
+    metrics = tuple(metrics)
     rows: list[dict[str, Any]] = []
     for dataset in datasets:
         original, edited = metric_pairs[dataset.name]
+        identity = {
+            "name": dataset.name,
+            "label": dataset.label,
+            "n_obs": dataset.n_obs,
+            "source": dataset.source,
+        }
+        reason = lss_split_reason(model, dataset) if is_lss(model) else None
+        if reason is not None:
+            rows.append({**identity, "available": False, "error": reason})
+            continue
         rows.append(
             {
-                "name": dataset.name,
-                "label": dataset.label,
-                "n_obs": dataset.n_obs,
-                "source": dataset.source,
+                **identity,
                 "metrics": {
-                    "original": {metric: original[metric] for metric in _REPORT_METRICS},
-                    "edited": {metric: edited[metric] for metric in _REPORT_METRICS},
-                    "delta": {
-                        metric: edited[metric] - original[metric] for metric in _REPORT_METRICS
-                    },
+                    "original": {metric: original[metric] for metric in metrics},
+                    "edited": {metric: edited[metric] for metric in metrics},
+                    "delta": {metric: edited[metric] - original[metric] for metric in metrics},
                 },
             }
         )
@@ -160,7 +190,9 @@ def _split_metrics(session) -> list[dict[str, Any]]:
         original = compute_dataset_metrics(reference_model, dataset)
         edited = compute_dataset_metrics(edited_model, dataset)
         metric_pairs[dataset.name] = (original, edited)
-    return split_metrics_payload(evaluation_datasets(session), metric_pairs)
+    return split_metrics_payload(
+        evaluation_datasets(session), metric_pairs, report_metrics(reference_model), reference_model
+    )
 
 
 def _validation_note(session, splits: list[dict[str, Any]]) -> str:

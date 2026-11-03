@@ -26,6 +26,7 @@ from superglm.dm_builder import knot_geometry_weight, resolve_discrete_n_bins, s
 from superglm.editor._types import EditableTerm
 from superglm.editor.collapse import _require_not_interaction_parent
 from superglm.editor.errors import EditorValueError
+from superglm.editor.lss.view import column_of, interaction_users
 from superglm.features._spline_penalties import difference_penalty_kind
 from superglm.features._spline_ranges import RangeError
 from superglm.features.ordered_categorical import OrderedCategorical
@@ -34,7 +35,6 @@ from superglm.features.rebuild import (
     SHAPE_FROZEN_ATTRIBUTE,
     base_names_level,
     declared_spline,
-    interaction_users,
     pristine_basis,
     rebuilt_ordered_spec,
     respaced_spline,
@@ -307,7 +307,7 @@ def knots_feature_spec(
         setattr(basis, EDITOR_KNOTS_ATTRIBUTE, True)
     else:
         basis.__dict__.pop(EDITOR_KNOTS_ATTRIBUTE, None)
-    replacement = _hosted(spec, basis, name, X) if ordered else basis
+    replacement = _hosted(spec, basis, column_of(model, name), X) if ordered else basis
     placed, strategy = _placed_knots(model, name, replacement, X, sample_weight)
     if form == "rule" and params["strategy"] != "uniform" and strategy == "uniform":
         raise EditorValueError(
@@ -453,7 +453,9 @@ def _collapsed(model, name: str, spec, source, params, X, sample_weight, count: 
             source, n_knots=fewer, knot_strategy=strategy, knot_alpha=float(alpha)
         )
         replacement = (
-            _hosted(spec, basis, name, X) if isinstance(spec, OrderedCategorical) else basis
+            _hosted(spec, basis, column_of(model, name), X)
+            if isinstance(spec, OrderedCategorical)
+            else basis
         )
         if _placed_knots(model, name, replacement, X, sample_weight)[1] != "uniform":
             most = fewer
@@ -472,7 +474,8 @@ def _crowded_value(model, name: str, spec, X, sample_weight) -> str:
     """ "(60% of its rows are at 18)" for a numeric term's most shared value; empty otherwise."""
     if isinstance(spec, OrderedCategorical):
         return ""
-    x = np.asarray(as_eager_frame(X).column_array(name), dtype=np.float64).ravel()
+    column = as_eager_frame(X).column_array(column_of(model, name))
+    x = np.asarray(column, dtype=np.float64).ravel()
     weights = knot_geometry_weight(sample_weight, model._weight_semantics)
     keep = np.isfinite(x) if weights is None else np.isfinite(x) & (np.asarray(weights) > 0)
     values, mass = np.unique(x[keep], return_counts=True)
@@ -596,15 +599,15 @@ def _numeric_declaration(model, name: str, draft_spec) -> _SplineBase:
     return declared
 
 
-def _hosted(spec: OrderedCategorical, basis, name: str, X) -> OrderedCategorical:
+def _hosted(spec: OrderedCategorical, basis, column: str, X) -> OrderedCategorical:
     """A fresh ordered term around ``basis``, keeping order, specials, grouping and base."""
     frame = as_eager_frame(X)
-    frame.require_columns((name,))
+    frame.require_columns((column,))
     return rebuilt_ordered_spec(
         spec,
         grouping=getattr(spec, "_grouping", None),
         base=spec.base,
-        data=frame.column_array(name),
+        data=frame.column_array(column),
         basis=basis,
         level=base_names_level(spec),
     )
@@ -649,7 +652,8 @@ def _require_weights_shape(weights: NDArray | None, rows: int) -> None:
 def _placed_spline(model, name: str, replacement, X, sample_weight, *, raw: bool):
     """A copy of ``replacement``'s spline with its knots placed on the refit's data."""
     probe = copy.deepcopy(replacement)
-    column = as_eager_frame(X).column_array(name)
+    label = column_of(model, name)
+    column = as_eager_frame(X).column_array(label)
     reporting = None if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
     _require_weights_shape(reporting, len(column))
     # The fit's own rule for the weights that place knots.
@@ -666,7 +670,7 @@ def _placed_spline(model, name: str, replacement, X, sample_weight, *, raw: bool
                 x = np.asarray(column, dtype=np.float64).ravel()
                 keep = np.isfinite(x)
                 binned = should_discretize(probe, model._discrete)
-                n_bins = resolve_discrete_n_bins(name, probe, model._n_bins) if binned else None
+                n_bins = resolve_discrete_n_bins(label, probe, model._n_bins) if binned else None
                 probe._place_knots(x[keep], None if weights is None else weights[keep], n_bins)
                 built = probe
     except RangeError as exc:

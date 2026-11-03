@@ -56,6 +56,11 @@ from superglm.editor.level_order import (
     level_order_for_labels,
     level_order_for_target,
 )
+from superglm.editor.lss.availability import require_available
+from superglm.editor.lss.open import open_lss
+from superglm.editor.lss.refit import lss_refit_with_drafts
+from superglm.editor.lss.terms import lss_editable_terms
+from superglm.editor.lss.view import LSSModelView, is_lss
 from superglm.editor.operations import (
     anchored_smooth_values,
     isotonic_values,
@@ -234,6 +239,7 @@ class EditorSession:
         cv_report: Any = None,
         cv: CrossValidationResult | None = None,
         cv_data=None,
+        amount_unit: str | None = None,
     ) -> EditorSession:
         """Build an editor session from fitted 1D main-effect inference.
 
@@ -242,7 +248,31 @@ class EditorSession:
         offset]])`` rows its folds index. Without ``cv_data`` the train data
         is used when its row count matches the folds. ``cv_report`` is the
         older free-form report the Validation tab shows.
+
+        A :class:`~superglm.SuperLSS` model needs ``train_data``, with its
+        offsets a dict keyed by parameter name. Its terms are keyed
+        ``"<parameter>:<term>"``; a bare column name opens that column's term
+        in every parameter. ``amount_unit`` names the currency or unit of the
+        response.
         """
+        if is_lss(model):
+            return open_lss(
+                cls,
+                model,
+                terms,
+                n_points=n_points,
+                centering=centering,
+                with_se=with_se,
+                train_data=train_data,
+                validation_data=validation_data,
+                test_data=test_data,
+                cv_report=cv_report,
+                cv=cv,
+                cv_data=cv_data,
+                amount_unit=amount_unit,
+            )
+        if amount_unit is not None:
+            raise EditorValueError("amount_unit applies to SuperLSS models.")
         if getattr(model, "_result", None) is None:
             raise RuntimeError("Model must be fitted before creating an editor session.")
 
@@ -290,6 +320,10 @@ class EditorSession:
         with_se: bool,
         train_data=None,
     ) -> dict[str, EditableTerm]:
+        if is_lss(model):
+            return lss_editable_terms(
+                model, names, n_points=n_points, with_se=with_se, train=train_data
+            )
         editable: dict[str, EditableTerm] = {}
         # The rows a shape refit reads (_resolve_refit_data).
         refit_data = (
@@ -1017,6 +1051,7 @@ class EditorSession:
         edited terms should be treated as fixed rating factors. If ``terms`` is
         omitted, all changed terms in the session are used.
         """
+        require_available(self.model, "refit_offset")
         names = self._resolve_offset_terms(terms)
         X_ref = self._resolve_offset_frame(X)
         frame = as_eager_frame(X_ref)
@@ -1058,6 +1093,7 @@ class EditorSession:
         the returned model is therefore for the refitted remaining terms, not
         for the manually edited offset curves.
         """
+        require_available(self.model, "refit_offset")
         if self.model is None:
             raise RuntimeError("Cannot refit without a source model.")
         names = self._resolve_offset_terms(terms)
@@ -1116,6 +1152,7 @@ class EditorSession:
         **profile_kwargs: Any,
     ):
         """Explicitly re-estimate a distribution parameter for the in-force model."""
+        require_available(self.model, "profile_distribution")
         if self.model is None:
             raise RuntimeError("Cannot reprofile without a source model.")
         if self.pending:
@@ -1451,6 +1488,20 @@ class EditorSession:
         )
         if y_ref is None:
             raise RuntimeError("Fit response data was not retained on the source model.")
+        if is_lss(self.model):
+            refit_model = lss_refit_with_drafts(
+                self.model,
+                drafts,
+                X=X_ref,
+                y=y_ref,
+                sample_weight=sample_weight_ref,
+                offsets=base_offset,
+                method=method,
+                lambda1=lambda1,
+                lambda2=lambda2,
+                **fit_kwargs,
+            )
+            return refit_model, refit_model._fit_settings["method"]
         refit_model = clone_with_replaced_features(
             self.model, drafts, lambda1=lambda1, lambda2=lambda2
         )
@@ -1543,8 +1594,11 @@ class EditorSession:
         """Replace the editable in-force model while retaining the original reference model.
 
         Display level reorders carry over unless ``level_orders`` replaces them.
-        Edits and waiting changes do not carry over.
+        Edits and waiting changes do not carry over. A SuperLSS is wrapped in the
+        view of the model in force, over the same rows.
         """
+        if is_lss(self.model) and not isinstance(model, LSSModelView):
+            model = self.model.with_model(model)
         train_data = self._evaluation_data.get("train")
         new_terms = self._editable_terms_from_model(
             model,
@@ -2074,13 +2128,15 @@ def edit(
     test_data=None,
     cv: CrossValidationResult | None = None,
     cv_data=None,
+    amount_unit: str | None = None,
 ) -> EditorSession:
     """Create an editor session for a fitted model.
 
     The split data are ``(X, y[, sample_weight[, offset]])`` tuples.
     ``cv`` is a :func:`superglm.cross_validate` result for the
     Cross-validation tab and ``cv_data`` the rows its folds index; see
-    :meth:`EditorSession.from_model`.
+    :meth:`EditorSession.from_model`, which also describes opening a
+    :class:`~superglm.SuperLSS` model (``amount_unit``).
     """
     return EditorSession.from_model(
         model,
@@ -2093,4 +2149,5 @@ def edit(
         test_data=test_data,
         cv=cv,
         cv_data=cv_data,
+        amount_unit=amount_unit,
     )

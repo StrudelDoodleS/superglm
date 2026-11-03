@@ -803,6 +803,7 @@ export function cvTabMarkup(payload, state) {
  * @param {HTMLElement} options.frame
  * @param {JobClient} options.client
  * @param {(kind:JobKind, job:JobStatus)=>unknown} options.onJobSettled
+ * @param {(kind:JobKind, message:string)=>unknown} [options.onError] a start, status or cancel request that failed
  * @param {(ms:number)=>Promise<void>} [options.pause]
  * @param {()=>boolean} [options.isShown]
  */
@@ -810,6 +811,7 @@ export function createCVTab({
   frame,
   client,
   onJobSettled,
+  onError = () => {},
   pause = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
   isShown = () => true
 }) {
@@ -857,6 +859,7 @@ export function createCVTab({
   function refuse(kind, error) {
     state.errors[kind] = error instanceof Error ? error.message : String(error);
     renderToolbar();
+    onError(kind, state.errors[kind]);
   }
 
   /** @param {JobKind} kind @param {string} jobId */

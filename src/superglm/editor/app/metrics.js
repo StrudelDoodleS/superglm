@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { fmt, fmtSigned } from "./format.js";
 
 const metricKeys = [
@@ -12,7 +13,7 @@ const metricKeys = [
 
 // Which way is better for each metric; EDF is a size, neither.
 const higherIsBetter = new Set(["log_likelihood", "explained_deviance"]);
-const lowerIsBetter = new Set(["deviance", "aic", "aicc", "bic", "pearson_chi2"]);
+const lowerIsBetter = new Set(["deviance", "aic", "aicc", "bic", "pearson_chi2", "log_score", "crps"]);
 
 /**
  * Whether a change in `metric` of `delta` is better, worse, or neutral.

@@ -22,6 +22,12 @@
   /* The selection orange set as text, the anchor's tags: its own hue
      darkened to 4.9:1 on --surface, where --orange is 3.6:1. */
   --orange-text: #c2490a;
+  /* The ground of an orange chip, under --orange-text at 4.5:1. */
+  --orange-soft: #fff3ea;
+  /* The marks of a family's two parameters, average and spread: hues apart
+     under colour-vision deficiency, each 3:1 on the ground. */
+  --param-average: #2457c5;
+  --param-spread: #ea580c;
   --red: #d6402b;
   --yellow: #f4b942;
   --yellow-border: #d9a12c;

@@ -13,6 +13,7 @@ integral above the level (Acerbi and Tasche 2002, *J. Banking Finance* 26(7)).
 
 from __future__ import annotations
 
+import hashlib
 import warnings
 from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass, field
@@ -49,6 +50,7 @@ from superglm.distributional.prediction_design import (
     build_joint_prediction_design,
     warn_population_levels,
 )
+from superglm.distributional.revision import CORRECTED_COVARIANCE_NEEDS_THE_FIT
 from superglm.distributional.smoothing.derivatives import LamlDerivatives, laml_derivatives
 from superglm.distributional.solver.assembly import dense_predictor_matrices
 from superglm.reml.multi_penalty import (
@@ -577,6 +579,8 @@ def _resolved_posterior_covariance(
         return covariance, "fixed"
     if kind != "corrected":
         raise ValueError("covariance must be 'fixed' or 'corrected'")
+    if fitted.fit_state.hand_edit is not None:
+        raise ValueError(CORRECTED_COVARIANCE_NEEDS_THE_FIT)
 
     smoothing = fitted.smoothing
     if smoothing is None or smoothing.convergence_reason == "fixed_only":
@@ -752,9 +756,13 @@ def _posterior_draws_from_covariance(
     covariance: CovarianceKind = "fixed",
     seed: int = 42,
 ) -> PosteriorDraws:
-    """Draw coefficients from one already-resolved posterior covariance."""
+    """Draw coefficients from one already-resolved posterior covariance.
+
+    The draws are centred on the coefficients the model predicts with, so a
+    hand-edited model's draws, bounds and predictions describe the same curve.
+    """
     resolved = np.asarray(matrix, dtype=np.float64)
-    beta = np.asarray(fitted.result.coefficients, dtype=np.float64)
+    beta = np.asarray(fitted.prediction_coefficients, dtype=np.float64)
     if resolved.shape != (len(beta), len(beta)):
         raise ValueError("the posterior covariance does not match the fitted coefficients")
 
@@ -767,8 +775,23 @@ def _posterior_draws_from_covariance(
         covariance_kind=covariance,
         seed=int(seed),
         coefficient_names=tuple(fitted.layout.coefficient_names),
-        provenance=(fitted.fit_state.result.fit_id, fitted.fit_state.revision),
+        provenance=_draw_provenance(fitted),
     )
+
+
+def _draw_provenance(fitted: Any) -> tuple[str, int]:
+    """The (fit identifier, revision) stamped on draws and checked when they are reused.
+
+    Draws are centred on the coefficients the model predicts with, so a hand
+    edit names its coefficients in the identifier: draws from the fit, or from
+    another edit, are refused by an edited model and the other way round.
+    """
+    state = fitted.fit_state
+    identifier = state.result.fit_id
+    if state.hand_edit is not None:
+        coefficients = np.ascontiguousarray(state.hand_edit.coefficients, dtype=np.float64)
+        identifier = f"{identifier}+edit:{hashlib.sha256(coefficients.tobytes()).hexdigest()[:16]}"
+    return identifier, state.revision
 
 
 def posterior_draws(
@@ -779,6 +802,9 @@ def posterior_draws(
     seed: int = 42,
 ) -> PosteriorDraws:
     """Draw coefficients from ``N(beta_hat, V)`` with a checked eigen square root.
+
+    ``beta_hat`` is what the model predicts with; after a hand edit that is the
+    edit, with the fit's ``V``.
 
     ``V`` may be rank deficient: zero-variance rows stay zero, and a negative
     mode is clipped only when a bounded reconstruction shows the covariance
@@ -831,10 +857,7 @@ def posterior_parameters(
     layout = fitted.layout
     if draws.coefficient_names != tuple(layout.coefficient_names):
         raise ValueError("draw coefficient names do not match the fitted layout")
-    if draws.provenance is not None and draws.provenance != (
-        fitted.fit_state.result.fit_id,
-        fitted.fit_state.revision,
-    ):
+    if draws.provenance is not None and draws.provenance != _draw_provenance(fitted):
         raise ValueError("posterior draws belong to a different fit or revision")
 
     frame = as_eager_frame(X)

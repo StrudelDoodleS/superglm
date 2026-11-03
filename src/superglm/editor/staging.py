@@ -43,6 +43,9 @@ from superglm.editor.knots import (
     probe_build,
     stated_knots_refusal,
 )
+from superglm.editor.lss.availability import require_available
+from superglm.editor.lss.refit import lss_probe_build
+from superglm.editor.lss.view import is_lss, predictor_of
 from superglm.editor.shapes import shaped_feature_spec
 from superglm.editor.specials import special_feature_spec
 from superglm.editor.unseen import require_group_kept
@@ -129,6 +132,8 @@ _REFIT_AT_ONCE = {
     "knots": "set_knots",
     "basis": "set_basis",
 }
+# The operations a SuperLSS refuses, by the tool whose sentence says why.
+_LSS_TOOL = {"shape": "shape", "special": "special", "on_curve": "special"}
 _CANNOT_FIT = (
     "{change} cannot be fitted on the data the refit reads. Undo the change it builds on, "
     "or choose another."
@@ -236,6 +241,7 @@ def stage_structural(
         draft_spec=replacement,
         history_position=len(session.history),
         metadata=dict(metadata),
+        predictor=predictor_of(session.model, term),
     )
     session.pending.append(step)
     session._end_redo()
@@ -456,8 +462,8 @@ def editor_history_records(session: EditorSession) -> list[dict[str, Any]]:
     """The timeline up to now, oldest first, as an exported model's ``_editor_history``.
 
     One dict per edit, waiting change and applied step: id, time (ISO 8601,
-    UTC), operation, term, message, note, status and predictor (None until
-    the SuperLSS editor names one). What Redo would put back is not history.
+    UTC), operation, term, message, note, status and predictor (the SuperLSS
+    parameter of the term, else None). What Redo would put back is not history.
     """
     done, _ = timeline_items(session)
     return [
@@ -469,7 +475,7 @@ def editor_history_records(session: EditorSession) -> list[dict[str, Any]]:
             "message": item.label,
             "note": session.step_notes.get(item.step_id),
             "status": status,
-            "predictor": getattr(item, "predictor", None),
+            "predictor": predictor_of(session.model, item.term),
         }
         for item, status in done
     ]
@@ -573,7 +579,8 @@ def _require_fits(session, operation, term, replacement, metadata, X, sample_wei
         if refusal is not None:
             raise EditorValueError(refusal)
     try:
-        probe_build(session.model, term, replacement, X, sample_weight)
+        probe = lss_probe_build if is_lss(session.model) else probe_build
+        probe(session.model, term, replacement, X, sample_weight)
     except EditorClientError:
         raise
     except ValueError as exc:
@@ -621,6 +628,8 @@ def _draft_for(
     sample_weight=None,
 ):
     """``operation``'s builder on the term's draft: the replacement spec and its metadata."""
+    if operation in _LSS_TOOL:
+        require_available(session.model, _LSS_TOOL[operation])
     draft = _waiting_draft(session, editable.name)
     if operation == "collapse":
         return collapsed_feature_spec(

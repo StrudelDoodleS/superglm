@@ -20,6 +20,10 @@ class FakeDocument {
   createElement(tagName) {
     return new FakeElement(tagName, this);
   }
+
+  createElementNS(_namespace, tagName) {
+    return new FakeElement(tagName, this);
+  }
 }
 
 class FakeElement {
@@ -383,4 +387,69 @@ test("the waiting dot sits right after the term's name, ahead of its kind and ED
   );
   const name = row.children.find((part) => part.className === "feature-row-name");
   assert.equal(row.children[row.children.indexOf(name) + 1].className, "feature-row-waiting");
+});
+
+const LSS_TERMS = {
+  "mean:age": {
+    kind: "spline", term_type: "spline", effective_df: 4, x: [0, 1, 2], y: [1, 2, 1.5], levels: null,
+    parameter: "mean", parameter_label: "Average", parameter_role: "average", term_label: "age",
+  },
+  "scale:age": {
+    kind: "spline", term_type: "spline", effective_df: 3, x: [0, 1, 2], y: [0.5, 0.4, 0.6], levels: null,
+    parameter: "scale", parameter_label: "Spread", parameter_role: "spread", term_label: "age",
+    baseline: 0.5,
+  },
+  "scale:region": {
+    kind: "categorical", term_type: "categorical", effective_df: 2, x: [0, 1], y: [0.5, 0.7],
+    levels: ["N", "S"],
+    parameter: "scale", parameter_label: "Spread", parameter_role: "spread", term_label: "region",
+    baseline: 0.5,
+  },
+};
+const LSS_GROUPS = [
+  ["Average", ["mean:age"], "average"],
+  ["Spread", ["scale:age", "scale:region"], "spread"],
+];
+
+test("parameter groups head their rows with their label and role; rows show the bare feature name and a mini curve", () => {
+  const { nodes, render, rows } = fixture();
+  render({ groups: LSS_GROUPS, terms: LSS_TERMS, activeTerm: "scale:age" });
+
+  const [average, spread] = nodes.rows.children;
+  assert.deepEqual(
+    [average, spread].map((section) => [section.children[0].textContent, section.dataset.role]),
+    [["Average", "average"], ["Spread", "spread"]],
+  );
+  assert.equal(spread.children[0].dataset.role, "spread");
+  assert.deepEqual(rows().map((row) => row.dataset.term), ["mean:age", "scale:age", "scale:region"]);
+  assert.deepEqual(
+    rows().map((row) => row.children.find((part) => part.className === "feature-row-name").textContent),
+    ["age", "age", "region"],
+  );
+  for (const row of rows()) {
+    const curves = row.children.filter((part) => part.tagName === "SVG");
+    assert.equal(curves.length, 1);
+    assert.match(curves[0].getAttribute("class"), /\bmini-curve\b/);
+    assert.equal(curves[0].getAttribute("aria-hidden"), "true");
+  }
+  const [lineRow, , barRow] = rows();
+  const drawn = (row) => row.children.find((part) => part.tagName === "SVG").children.map((n) => n.tagName);
+  assert.deepEqual(drawn(lineRow), ["PATH"]);
+  assert.deepEqual(drawn(barRow), ["RECT", "RECT"]);
+});
+
+test("the search matches the bare feature name, not the parameter prefix of its key", () => {
+  const { nodes, render, rows } = fixture();
+  render({ groups: LSS_GROUPS, terms: LSS_TERMS, activeTerm: "mean:age", query: "scale" });
+  assert.deepEqual(rows(), []);
+  render({ groups: LSS_GROUPS, terms: LSS_TERMS, activeTerm: "mean:age", query: "reg" });
+  assert.deepEqual(rows().map((row) => row.dataset.term), ["scale:region"]);
+  assert.equal(nodes.rows.children[0].dataset.role, "spread");
+});
+
+test("a SuperGLM list draws no mini curves and no role", () => {
+  const { nodes, render, rows } = fixture();
+  render();
+  assert.ok(rows().every((row) => row.children.every((part) => part.tagName !== "SVG")));
+  assert.ok(nodes.rows.children.every((section) => section.dataset.role === undefined));
 });

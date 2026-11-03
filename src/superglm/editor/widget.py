@@ -33,6 +33,7 @@ from superglm.editor.cv import (
     FinalFit,
     capture_cv_run,
     capture_final_fit,
+    final_fit_reason,
     run_cv,
     run_final_fit,
 )
@@ -52,6 +53,14 @@ from superglm.editor.evaluation_cache import (
 from superglm.editor.evidence import EvidenceCoordinator, EvidenceKey
 from superglm.editor.io import jsonable
 from superglm.editor.jobs import JobContext, JobRunner
+from superglm.editor.lss import display_for, is_lss
+from superglm.editor.lss.availability import (
+    LSS_CAPABILITIES,
+    require_available,
+    session_availability,
+    unavailable_evidence,
+)
+from superglm.editor.lss.display import directed_operation
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
 from superglm.editor.notebook import NotebookTransport, notebook_view_class
@@ -62,7 +71,7 @@ from superglm.editor.payloads import (
     undo_redo_payload,
 )
 from superglm.editor.rating_preview import PREVIEW_IMPACT_BINS, RatingPreview
-from superglm.editor.reports import report_payload, split_metrics_payload
+from superglm.editor.reports import report_metrics, report_payload, split_metrics_payload
 from superglm.editor.server import EditorAppServer, create_editor_app
 from superglm.editor.summaries import offset_label_payload, summary_payload
 from superglm.inference.summary_levels import validate_level_display
@@ -269,6 +278,12 @@ class EditorWidget:
                     and self._final_fit.model_revision != self.session.model_revision,
                 },
             }
+            if is_lss(self.session.model):
+                state["unavailable"] = session_availability(self.session)
+                state["capabilities"] = dict(LSS_CAPABILITIES)
+                # The Final fit panel's own button reads whether the fit can run.
+                reason = final_fit_reason(self.session)
+                state["final_fit_plan"] = {"available": reason is None, "reason": reason}
             self._state_generation += 1
             state["state_generation"] = self._state_generation
             state["chart_generation"] = self._chart_generation
@@ -295,10 +310,11 @@ class EditorWidget:
             if term is not None:
                 self._select_term(term)
             target = self.selected_term
+            operation, sign = directed_operation(self.session.model, target, operation)
             if operation == "shift_up":
-                self.session.shift(target, float(np.log(1.05)))
+                self.session.shift(target, sign * float(np.log(1.05)))
             elif operation == "shift_down":
-                self.session.shift(target, float(np.log(0.95)))
+                self.session.shift(target, sign * float(np.log(0.95)))
             elif operation in {"isotonic_increasing", "increasing"}:
                 self.session.isotonic(target, "increasing")
             elif operation in {"isotonic_decreasing", "decreasing"}:
@@ -351,8 +367,8 @@ class EditorWidget:
             if values is None:
                 self.session.shift(term, float(delta))
             else:
-                rel = np.maximum(np.asarray(values, dtype=np.float64), 1e-12)
-                self.session.set_values(term, indices, np.log(rel))
+                shown = display_for(self.session.model, term, self.session.terms)
+                self.session.set_values(term, indices, shown.from_display(values))
             self._invalidate_refit()
             self._chart_generation += 1
             return self._state()
@@ -372,7 +388,9 @@ class EditorWidget:
             self.session.move_control_point(
                 term,
                 int(handle_index),
-                float(np.log(max(value, 1e-12))),
+                float(
+                    display_for(self.session.model, term, self.session.terms).from_display(value)
+                ),
                 n_handles=self.control_counts.get(term),
             )
             self._invalidate_refit()
@@ -400,8 +418,11 @@ class EditorWidget:
             weights = np.asarray(editable.weights[idx], dtype=np.float64)
         if float(np.sum(weights)) <= 0.0:
             weights = None
-        value = float(np.average(np.exp(editable.edited_log_effect[idx]), weights=weights))
-        self.session.set_values(term, idx, np.full(idx.size, np.log(max(value, 1e-12))))
+        shown = display_for(self.session.model, term, self.session.terms)
+        value = float(
+            np.average(shown.to_display(editable.edited_log_effect[idx]), weights=weights)
+        )
+        self.session.set_values(term, idx, np.full(idx.size, shown.from_display(value)))
 
     def _current_model_for_evidence(self):
         """Resolve one current model without materializing under the widget lock."""
@@ -461,6 +482,16 @@ class EditorWidget:
         request_sequence: int | None = None,
     ) -> dict[str, Any]:
         selected_source = "in_force" if source is None or source == "selected" else source
+        calm = unavailable_evidence(
+            self.session.model,
+            "metrics",
+            model_revision=self.session.model_revision,
+            request_sequence=request_sequence,
+            metric=metric,
+            source=selected_source,
+        )
+        if calm is not None:
+            return calm
         with self._lock:
             current_revision = self.session.model_revision
             if model_revision is not None and int(model_revision) != current_revision:
@@ -579,6 +610,16 @@ class EditorWidget:
         if source in {"edited", "collapse"}:
             source = "in_force"
         source = source if source in {"original", "in_force", "refit"} else "in_force"
+        calm = unavailable_evidence(
+            self.session.model,
+            "summary",
+            model_revision=self.session.model_revision,
+            request_sequence=request_sequence,
+            source=source,
+            level_display=level_display,
+        )
+        if calm is not None:
+            return calm
 
         with self._lock:
             current_revision = self.session.model_revision
@@ -635,6 +676,7 @@ class EditorWidget:
             if model_revision is not None and int(model_revision) != current_revision:
                 return _superseded_payload(int(model_revision), request_sequence)
         if report == "cv":
+            require_available(self.session.model, "cv")
             payload = report_payload(self, report, request_sequence=request_sequence)
             with self._lock:
                 if payload["model_revision"] != self.session.model_revision:
@@ -659,7 +701,7 @@ class EditorWidget:
                 )
 
         summary_model = edited_model
-        if report == "final" and self.session.edited_terms():
+        if report == "final" and self.session.edited_terms() and not is_lss(reference_model):
             fit_dataset = training_export_dataset(self.session)
             metrics_dataset = default_metrics_dataset(self.session)
             if fit_dataset is not None and (
@@ -682,7 +724,9 @@ class EditorWidget:
             if edited is None:
                 return _superseded_payload(revision, request_sequence)
             metric_pairs[eval_dataset.name] = (original, edited)
-        splits = split_metrics_payload(datasets, metric_pairs)
+        splits = split_metrics_payload(
+            datasets, metric_pairs, report_metrics(reference_model), reference_model
+        )
         payload = report_payload(
             self,
             report,
@@ -700,6 +744,8 @@ class EditorWidget:
     def _export_bytes(self, format: str, filename: str | None = None) -> ExportResult:
         """Build one validated export from one captured model revision."""
         canonical_format = _normalise_export_format(format)
+        if canonical_format in {"structure", "xlsx"}:
+            require_available(self.session.model, f"export_{canonical_format}")
         safe_name = _safe_export_filename(canonical_format, filename)
 
         validation_scope: str | None = None
@@ -832,6 +878,7 @@ class EditorWidget:
         Built once per model revision, outside the lock like the export, and
         reused while the revision stands.
         """
+        require_available(self.session.model, "rating_table")
         with self._lock:
             if term not in self.session.terms:
                 raise EditorKeyError(f"Unknown editable term: {term!r}")
@@ -950,6 +997,7 @@ class EditorWidget:
         *,
         level_display: str = "expanded",
     ) -> dict[str, Any]:
+        require_available(self.session.model, "refit_offset")
         level_display = validate_level_display(level_display)
         with self._lock:
             terms = self.session.edited_terms()
@@ -999,6 +1047,7 @@ class EditorWidget:
         **options: Any,
     ) -> dict[str, Any]:
         """Start a distribution-parameter profile job and return its status payload."""
+        require_available(self.session.model, "profile_distribution")
         level_display = validate_level_display(level_display)
         with self._profile_condition:
             self._profile_job_counter += 1
@@ -1159,7 +1208,19 @@ class EditorWidget:
     ) -> dict[str, Any]:
         with self._lock:
             summary_start = time.perf_counter()
-            summary = jsonable(summary_payload(self, "in_force", level_display=level_display))
+            # A model without a summary (a SuperLSS) answers with the calm payload its route gives.
+            calm = unavailable_evidence(
+                self.session.model,
+                "summary",
+                model_revision=self.session.model_revision,
+                source="in_force",
+                level_display=level_display,
+            )
+            summary = (
+                calm
+                if calm is not None
+                else jsonable(summary_payload(self, "in_force", level_display=level_display))
+            )
             summary_end = time.perf_counter()
             state_start = time.perf_counter()
             state = jsonable(self._state())

@@ -1,3 +1,4 @@
+import { formatDisplay, showsRelativity } from "./chart/display.js";
 import { fmt } from "./format.js";
 import {
   anchorMarks,
@@ -196,7 +197,7 @@ export function drawChart(term, selection, context) {
   exposureLayer(svg, view, sx, margin, innerW, innerH, exposure, waitingSlots(waitingBrackets));
   for (const tick of ticks(yMin, yMax, tickCount(innerH, 70))) {
     line(svg, margin.left, sy(tick), margin.left + innerW, sy(tick), "grid");
-    text(svg, margin.left - 8, sy(tick) + 4, fmt(tick), "tick-label", "end");
+    text(svg, margin.left - 8, sy(tick) + 4, formatDisplay(term, tick), "tick-label", "end");
   }
   if (categoricalLayout) {
     for (const tick of categoricalLayout.ticks) {
@@ -228,8 +229,9 @@ export function drawChart(term, selection, context) {
       text(svg, tickX, tickY, tick.label, "tick-label", "middle");
     }
   }
-  // The baseline at relativity one: the level an edit is judged against.
-  const baseline = Math.min(Math.max(1, yMin), yMax);
+  // The baseline, where the term's own effect is zero (relativity one for a
+  // SuperGLM term): the level an edit is judged against.
+  const baseline = Math.min(Math.max(term.baseline ?? 1, yMin), yMax);
   line(svg, margin.left, sy(baseline), margin.left + innerW, sy(baseline), "zero");
   line(svg, margin.left, margin.top + innerH, margin.left + innerW, margin.top + innerH, "axis");
 
@@ -260,7 +262,7 @@ export function drawChart(term, selection, context) {
       band(svg, x, view.ci_lower_y, view.ci_upper_y, sx, sy, "ci");
     }
   }
-  if (visualMode === "handles" && context.showContrib && context.showContrib()) {
+  if (visualMode === "handles" && showsRelativity(term) && context.showContrib && context.showContrib()) {
     basisContributions(svg, term, sx, sy, buildActive);
   }
   if (visualMode === "handles" && buildProgress !== null) {
@@ -649,9 +651,16 @@ function pointTooltipLines(term, i) {
   const exposure = Array.isArray(term.weights) ? term.weights[i] : null;
   return [
     label,
-    `Relativity: ${fmt(term.y[i])}`,
+    showsRelativity(term)
+      ? `Relativity: ${fmt(term.y[i])}`
+      : `${yTooltipLabel(term)}: ${formatDisplay(term, term.y[i])}`,
     `Exposure: ${fmt(exposure)}`
   ];
+}
+
+function yTooltipLabel(term) {
+  const label = term.y_label;
+  return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
 function pointLabel(term, i) {

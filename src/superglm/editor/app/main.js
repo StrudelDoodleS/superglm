@@ -1,3 +1,4 @@
+import { canShowContributions, showsRelativity } from "./chart/display.js";
 import { EditorAPIError, editorClient } from "./api/client.js";
 import {
   bindPointLens,
@@ -74,6 +75,8 @@ import {
   renderFeatureList,
   storeFeatureListOpen
 } from "./views/feature_list.js";
+import { hasParameters, parameterGroups } from "./views/feature_groups.js";
+import { finalFitFailure, finalFitRunState } from "./views/final_fit_run.js";
 import { renderHelpDrawer } from "./views/help_drawer.js";
 import {
   bindKnotBar,
@@ -140,6 +143,8 @@ const reportTitle = document.getElementById("reportTitle");
 const reportStatus = document.getElementById("reportStatus");
 const reportFreshness = document.getElementById("reportFreshness");
 const reportRetry = document.getElementById("reportRetry");
+const finalFitRun = document.getElementById("finalFitRun");
+const finalFitRunNote = document.getElementById("finalFitRunNote");
 const reportFrame = document.getElementById("reportFrame");
 const svg = document.getElementById("chart");
 const selectionMenu = document.getElementById("selectionMenu");
@@ -301,9 +306,17 @@ const evidenceTiming = createEvidenceTimingTracker({
 const cvTab = createCVTab({
   frame: reportFrame,
   client: editorClient,
-  onJobSettled: async (kind) => {
-    if (kind === "final_fit") await actions.refreshFromPythonWhenIdle();
+  onJobSettled: async (kind, job) => {
+    if (kind === "final_fit") {
+      finalFitRunError = finalFitFailure(job);
+      await actions.refreshFromPythonWhenIdle();
+    }
     await refreshActiveReport();
+  },
+  onError: (kind, message) => {
+    if (kind !== "final_fit") return;
+    finalFitRunError = message;
+    renderFinalFitRun();
   },
   isShown: () => store.getState().view.activeView === "cv"
 });
@@ -775,7 +788,93 @@ bindExportDialog({
   }
 });
 
+// The Final fit panel's button follows the snapshot's plan (can it run, and why not).
+let finalFitRunning = false;
+let finalFitRunError = "";
+
+function renderFinalFitRun() {
+  if (!finalFitRun || !finalFitRunNote) return;
+  const { disabled, hint, note } = finalFitRunState({
+    final: store.getState().remote.snapshot?.final_fit_plan ?? null,
+    running: finalFitRunning,
+    error: finalFitRunError
+  });
+  finalFitRun.disabled = disabled;
+  finalFitRun.dataset.popoverBody = hint;
+  finalFitRunNote.textContent = note;
+  finalFitRunNote.hidden = !note;
+}
+
+/**
+ * The server's reason the session does not offer `tool`, or null when it does.
+ * A tool listed is neither requested nor offered.
+ * @param {string} tool
+ */
+function toolOff(tool) {
+  return store.getState().remote.snapshot?.unavailable?.[tool] ?? null;
+}
+
+// A session tool the model does not offer: its export format and its controls
+// are disabled, hovering them says why in the server's words, and its evidence
+// panel shows that sentence instead of asking for it.
+function renderSessionAvailability(unavailable) {
+  for (const input of exportFormatInputs) {
+    const reason = unavailable[`export_${input.value}`];
+    if (reason === undefined) continue;
+    input.disabled = Boolean(reason);
+    const card = input.closest("label");
+    if (!card) continue;
+    if (reason) card.title = reason;
+    else card.removeAttribute("title");
+  }
+  offerControl(refitOffset, unavailable.refit_offset);
+  summaryLevelDisplayInputs.forEach((input) => offerControl(input, unavailable.summary));
+  offerControl(termViewToggle.querySelector('[data-term-view="table"]'), unavailable.rating_table);
+  if (unavailable.rating_table && store.getState().view.termView === "table") {
+    actions.patchView({ termView: "chart" });
+  }
+  renderMetricsEvidence(store.getState().request.evidence.metrics);
+  renderSummaryEvidence(store.getState().request.evidence.summary);
+}
+
+/**
+ * Disable `control` while `reason` says the session does not offer it, with
+ * the reason as its hover text; its own hover text comes back when it is offered.
+ * @param {Element|null} control @param {string|undefined} reason
+ */
+function offerControl(control, reason) {
+  if (!(control instanceof HTMLButtonElement || control instanceof HTMLInputElement)) return;
+  control.disabled = Boolean(reason);
+  const data = control.dataset;
+  if (data.popoverBody === undefined && data.offeredBody === undefined) {
+    if (reason) control.title = reason;
+    else control.removeAttribute("title");
+    return;
+  }
+  if (data.offeredBody === undefined) data.offeredBody = data.popoverBody;
+  data.popoverBody = reason || data.offeredBody;
+}
+
+/**
+ * An evidence panel for a tool the session does not offer: the server's
+ * sentence in muted text, not busy, and no Retry.
+ * @param {string} reason @param {HTMLElement} frame @param {HTMLElement} statusNode
+ * @param {HTMLElement|null} retryButton @param {string} className
+ */
+function renderToolOff(reason, frame, statusNode, retryButton, className) {
+  frame.setAttribute("aria-busy", "false");
+  frame.dataset.freshness = "unavailable";
+  const note = document.createElement("div");
+  note.className = className;
+  note.textContent = reason;
+  frame.replaceChildren(note);
+  statusNode.dataset.freshness = "unavailable";
+  statusNode.textContent = "";
+  if (retryButton) retryButton.hidden = true;
+}
+
 async function refreshMetricsView() {
+  if (toolOff("metrics")) return;
   await actions.refreshEvidence("metrics", "/metrics", {
     metric: "deviance",
     source: "in_force"
@@ -790,6 +889,7 @@ function summaryRequestPayload() {
 }
 
 async function refreshSummaryView() {
+  if (toolOff("summary")) return;
   await actions.refreshEvidence("summary", "/summary", summaryRequestPayload());
 }
 
@@ -1042,8 +1142,13 @@ function formatMilliseconds(value) {
   return `${(number / 1000).toFixed(2)} s`;
 }
 
+// The views a model offers: a SuperLSS session has no Cross-validation tab.
+function offeredViews(snapshot) {
+  return snapshot?.capabilities?.cv === false ? ["validation", "final"] : ["validation", "cv", "final"];
+}
+
 async function showView(view) {
-  const activeView = ["validation", "cv", "final"].includes(view) ? view : "editor";
+  const activeView = offeredViews(store.getState().remote.snapshot).includes(view) ? view : "editor";
   actions.patchView({ activeView });
   if (activeView === "editor") {
     scheduleVisibleEvidenceCatchUp();
@@ -1226,10 +1331,20 @@ function renderChartOnly() {
   drawChart(term, selection, chartContext);
 }
 
-function termCatalogueKey(terms) {
-  return groupedTerms(terms).map(
+// A distributional model groups its features by family parameter.
+function featureGroups(terms) {
+  return hasParameters(terms)
+    ? parameterGroups(terms).map((group) => [group.label, group.terms, group.role])
+    : groupedTerms(terms);
+}
+
+// The mini curves of a distributional model follow every edit, so its key
+// carries the chart generation.
+function termCatalogueKey(terms, chartGeneration) {
+  const groups = featureGroups(terms).map(
     ([group, names]) => `${group}\u0000${names.join("\u0000")}`
   ).join("\u0001");
+  return hasParameters(terms) ? `${groups}\u0002${chartGeneration ?? 0}` : groups;
 }
 
 // The revision stands in for every row's EDF, which only a refit changes; a
@@ -1238,7 +1353,7 @@ function selectFeatureListRenderState(state) {
   const snapshot = selectSnapshot(state);
   return {
     ready: snapshot !== null,
-    catalogueKey: snapshot ? termCatalogueKey(snapshot.terms || {}) : "",
+    catalogueKey: snapshot ? termCatalogueKey(snapshot.terms || {}, snapshot.chart_generation) : "",
     revision: selectModelRevision(state),
     activeTerm: selectActiveTermName(state),
     waiting: selectWaitingTerms(state).join("\u0000")
@@ -1257,7 +1372,7 @@ function renderFeatureListState() {
   const state = store.getState();
   const terms = selectSnapshot(state)?.terms ?? {};
   renderFeatureList(featureListNodes, {
-    groups: groupedTerms(terms),
+    groups: featureGroups(terms),
     terms,
     activeTerm: selectActiveTermName(state),
     query: featureQuery,
@@ -1326,7 +1441,9 @@ function selectAppBarRenderState(state) {
     redoLabel: snapshot?.undo_redo.redo ?? null,
     canRevert: Boolean(snapshot && revertAvailable(snapshot)),
     busy: state.request.mutation.status === "running",
-    pendingCount: selectPendingSteps(state).length
+    pendingCount: selectPendingSteps(state).length,
+    hiddenViews: snapshot?.capabilities?.cv === false ? "cv" : "",
+    refitReason: snapshot?.unavailable?.refit ?? null
   };
 }
 
@@ -1337,7 +1454,9 @@ function sameAppBarRenderState(next, previous) {
     next.redoLabel === previous.redoLabel &&
     next.canRevert === previous.canRevert &&
     next.busy === previous.busy &&
-    next.pendingCount === previous.pendingCount;
+    next.pendingCount === previous.pendingCount &&
+    next.hiddenViews === previous.hiddenViews &&
+    next.refitReason === previous.refitReason;
 }
 
 function renderAppBarState(state) {
@@ -1355,20 +1474,34 @@ function renderAppBarState(state) {
     busy: state.busy,
     refitButton: refitPendingAction,
     refitCount: refitPendingCount,
-    pendingCount: state.pendingCount
+    pendingCount: state.pendingCount,
+    hiddenViews: state.hiddenViews ? [state.hiddenViews] : [],
+    refitReason: state.refitReason
   });
 }
 
 function selectActiveViewRenderState(state) {
-  return { ready: state.remote.snapshot !== null, activeView: state.view.activeView };
+  return {
+    ready: state.remote.snapshot !== null,
+    activeView: state.view.activeView,
+    finalFitHere: state.remote.snapshot?.capabilities?.cv === false,
+    finalFitPlan: state.remote.snapshot?.final_fit_plan ?? null
+  };
 }
 
 function sameActiveViewRenderState(next, previous) {
-  return next.ready === previous.ready && next.activeView === previous.activeView;
+  return next.ready === previous.ready && next.activeView === previous.activeView &&
+    next.finalFitHere === previous.finalFitHere &&
+    JSON.stringify(next.finalFitPlan) === JSON.stringify(previous.finalFitPlan);
 }
 
-function renderActiveViewState({ ready, activeView }) {
+// Without a Cross-validation tab, the Final fit panel starts the final fit.
+function renderActiveViewState({ ready, activeView, finalFitHere }) {
   if (!ready) return;
+  if (finalFitRun) {
+    finalFitRun.hidden = !(finalFitHere && activeView === "final");
+    renderFinalFitRun();
+  }
   renderAppView(activeView);
   renderReportEvidence(store.getState().request.evidence.report, activeView);
 }
@@ -1505,6 +1638,11 @@ async function retryFailedMutation() {
 }
 
 function renderMetricsEvidence(evidence) {
+  const off = toolOff("metrics");
+  if (off) {
+    renderToolOff(off, metricGrid, metricFreshness, metricRetry, "metric-pending");
+    return;
+  }
   const busy = evidence.status === "updating";
   metricGrid.setAttribute("aria-busy", busy ? "true" : "false");
   metricGrid.dataset.freshness = evidence.status;
@@ -1554,6 +1692,11 @@ function renderReportEvidence(evidence, activeView) {
 }
 
 function renderSummaryEvidence(evidence, previous = null) {
+  const off = toolOff("summary");
+  if (off) {
+    renderToolOff(off, summaryFrame, summaryStatus, summaryRetry, "summary-empty");
+    return;
+  }
   const state = store.getState();
   const revision = state.remote.snapshot?.model_revision;
   const evidenceMatchesRevision = evidence.revision === revision;
@@ -1878,7 +2021,8 @@ function updateHandleCount(term) {
   const controls = term.controls;
   const active = visualMode() === "handles" && controls && controls.count;
   handleCountWrap.hidden = !active;
-  const canShowContrib = active && Array.isArray(controls.basis) && controls.basis.length > 0;
+  const canShowContrib = active && showsRelativity(term) &&
+    Array.isArray(controls.basis) && controls.basis.length > 0;
   basisToggle.hidden = !canShowContrib;
   contribPlay.hidden = !canShowContrib;
   contribTools.hidden = !canShowContrib;
@@ -1929,17 +2073,6 @@ function applyTermDefaults(term) {
   if (!Object.keys(patch).length) return false;
   actions.patchView(patch);
   return true;
-}
-
-function canShowContributions(term) {
-  const controls = term && term.controls;
-  return Boolean(
-    controls &&
-    Array.isArray(controls.basis) &&
-    controls.basis.length > 0 &&
-    Array.isArray(controls.build_basis) &&
-    controls.build_basis.length > 0
-  );
 }
 
 function buildDurationMs() {
@@ -2133,6 +2266,7 @@ for (const input of summaryLevelDisplayInputs) {
   input.addEventListener("change", () => {
     if (!input.checked) return;
     actions.patchView({ summaryLevelDisplay: input.value });
+    if (toolOff("summary")) return;
     actions.schedulePanelEvidence(
       "summary",
       "/summary",
@@ -2150,7 +2284,10 @@ basisToggle.addEventListener("click", () => {
 contribPlay.addEventListener("click", startContributionBuild);
 
 bindTermViewToggle(termViewToggle, {
-  onChange: (termView) => actions.patchView({ termView })
+  onChange: (termView) => {
+    if (termView === "table" && toolOff("rating_table")) return;
+    actions.patchView({ termView });
+  }
 });
 
 handleCount.addEventListener("input", () => {
@@ -2202,6 +2339,19 @@ if (metricRetry) {
 }
 if (summaryRetry) {
   summaryRetry.addEventListener("click", () => { void actions.retryEvidence("summary"); });
+}
+if (finalFitRun) {
+  finalFitRun.addEventListener("click", async () => {
+    finalFitRunning = true;
+    finalFitRunError = "";
+    renderFinalFitRun();
+    try {
+      await cvTab.start("final_fit");
+    } finally {
+      finalFitRunning = false;
+      renderFinalFitRun();
+    }
+  });
 }
 if (reportRetry) {
   reportRetry.addEventListener("click", () => { void actions.retryEvidence("report"); });
@@ -2286,6 +2436,10 @@ store.subscribe(
   selectFeatureListRenderState,
   renderFeatureListState,
   sameFeatureListRenderState
+);
+store.subscribe(
+  (state) => JSON.stringify(state.remote.snapshot?.unavailable ?? {}),
+  (unavailable) => renderSessionAvailability(JSON.parse(unavailable))
 );
 store.subscribe(selectHistoryRenderState, renderHistoryState, sameHistoryRenderState);
 store.subscribe(selectAppBarRenderState, renderAppBarState, sameAppBarRenderState);

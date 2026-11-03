@@ -1,3 +1,4 @@
+import { fromDisplay, reachableDisplay, shiftDisplay } from "./chart/display.js";
 import { shiftedCurve } from "./chart/ordered_spline.js";
 
 // A press that moves no further than this many SVG units in x and in y is a
@@ -181,7 +182,7 @@ export function bindInteractions(context) {
         term.controls.y[drag.index] = value;
       }
       if (term.controls && term.controls.log_effect) {
-        const logValue = Math.log(Math.max(value, 1e-12));
+        const logValue = fromDisplay(term.display, value);
         term.controls.log_effect[drag.index] = logValue;
         if (term.controls.build_log_effect && term.controls.basis_index) {
           const buildIndex = term.controls.basis_index[drag.index];
@@ -551,8 +552,8 @@ function displayedTermValue(term, displayIndex, context) {
 
 function updateDraggedSourceValues(term, drag, context) {
   for (let k = 0; k < drag.affectedIndices.length; k++) {
-    term.y[drag.affectedIndices[k]] = Math.max(
-      1e-12,
+    term.y[drag.affectedIndices[k]] = reachableDisplay(
+      term.display,
       drag.affectedValues[k] + drag.delta
     );
   }
@@ -767,8 +768,9 @@ function svgPoint(context, event) {
 
 function yFromPoint(context, point) {
   const { yMin, yMax, margin, innerH } = context.svg._scale;
-  return Math.max(
-    1e-12,
+  const term = context.currentTerm();
+  return reachableDisplay(
+    term && term.display,
     yMax - ((point.y - margin.top) / Math.max(innerH, 1e-12)) * (yMax - yMin)
   );
 }
@@ -881,18 +883,16 @@ function clampPanRange(min, max, baseMin, baseMax) {
 }
 
 function previewControlCurve(term, drag, value) {
-  // Raw-basis handles can preview by applying the moved basis contribution in
-  // relativity space. Fallback handles post to Python before exact rebuilding.
+  // Raw-basis handles can preview by applying the moved basis contribution to
+  // the effect. Fallback handles post to Python before exact rebuilding.
   if (!drag.basis || !drag.baseY || drag.basis.length !== drag.baseY.length) return;
-  const start = Math.max(drag.startValue, 1e-12);
-  const next = Math.max(value, 1e-12);
-  const deltaLog = Math.log(next) - Math.log(start);
+  const deltaLog = fromDisplay(term.display, value) - fromDisplay(term.display, drag.startValue);
   for (let i = 0; i < term.y.length; i++) {
-    term.y[i] = Math.max(1e-12, drag.baseY[i] * Math.exp(drag.basis[i] * deltaLog));
+    term.y[i] = Math.max(1e-12, shiftDisplay(term.display, drag.baseY[i], drag.basis[i], deltaLog));
   }
   if (term.spline_view && drag.gridBasis && drag.baseCurve &&
       drag.gridBasis.length === drag.baseCurve.length) {
-    term.spline_view.y = shiftedCurve(drag.baseCurve, drag.gridBasis, deltaLog);
+    term.spline_view.y = shiftedCurve(drag.baseCurve, drag.gridBasis, deltaLog, term.display);
   }
 }
 

@@ -1,30 +1,38 @@
 // @ts-check
 
+import { sparkline } from "../chart/sparkline.js";
 import { fmtEdf } from "../format.js";
 
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
-/** @typedef {[string, string[]]} FeatureGroup */
+/**
+ * A heading and its terms; a distributional model's group also names the
+ * parameter's role, which colours the heading and the rows' mini curves.
+ * @typedef {[string, string[]]|[string, string[], "average"|"spread"]} FeatureGroup
+ */
 /** @typedef {{terms:Record<string, TermPayload>, activeTerm:string, tabStop:string|undefined, waiting:ReadonlySet<string>}} RowState */
 
 const STORAGE_KEY = "superglm.editor.featureList";
 const STEP_KEYS = new Set(["ArrowUp", "ArrowDown", "Home", "End"]);
+const SVG_NS = "http://www.w3.org/2000/svg";
+const MINI_CURVE = { width: 96, height: 16 };
 
 /**
- * Keep the features whose name contains the query, ignoring case; a group left
- * empty drops out. An empty query returns the groups untouched.
+ * Keep the features whose displayed name contains the query, ignoring case; a
+ * group left empty drops out. An empty query returns the groups untouched.
  *
  * @param {FeatureGroup[]} groups
  * @param {string} query
+ * @param {(name:string)=>string} [label] the name a feature is shown and searched by
  * @returns {FeatureGroup[]}
  */
-export function filterFeatures(groups, query) {
+export function filterFeatures(groups, query, label = (name) => name) {
   const needle = query.trim().toLowerCase();
   if (!needle) return groups;
   /** @type {FeatureGroup[]} */
   const kept = [];
-  for (const [group, names] of groups) {
-    const matches = names.filter((name) => name.toLowerCase().includes(needle));
-    if (matches.length) kept.push([group, matches]);
+  for (const [group, names, ...role] of groups) {
+    const matches = names.filter((name) => label(name).toLowerCase().includes(needle));
+    if (matches.length) kept.push(/** @type {FeatureGroup} */ ([group, matches, ...role]));
   }
   return kept;
 }
@@ -119,10 +127,10 @@ export function renderFeatureList(
 ) {
   root.dataset.open = String(open);
   toggle.setAttribute("aria-expanded", String(open));
-  strip.textContent = activeTerm;
+  strip.textContent = stripLabel(terms[activeTerm], activeTerm);
 
   const doc = root.ownerDocument;
-  const visible = filterFeatures(groups, query);
+  const visible = filterFeatures(groups, query, (name) => terms[name]?.term_label ?? name);
   const names = visible.flatMap(([, groupNames]) => groupNames);
   const tabStop = names.includes(activeTerm) ? activeTerm : names[0];
   const focused = doc.activeElement;
@@ -132,7 +140,7 @@ export function renderFeatureList(
 
   /** @type {RowState} */
   const rowState = { terms, activeTerm, tabStop, waiting };
-  rows.replaceChildren(...visible.map(([group, groupNames]) => featureGroup(doc, group, groupNames, rowState)));
+  rows.replaceChildren(...visible.map(([group, groupNames, role]) => featureGroup(doc, group, groupNames, role, rowState)));
   if (query.trim() && names.length === 0) {
     const notice = doc.createElement("p");
     notice.className = "feature-empty";
@@ -170,13 +178,17 @@ export function storeFeatureListOpen(open, storage) {
   }
 }
 
-/** @param {Document} doc @param {string} group @param {string[]} names @param {RowState} rowState */
-function featureGroup(doc, group, names, rowState) {
+/**
+ * @param {Document} doc @param {string} group @param {string[]} names
+ * @param {"average"|"spread"|undefined} role @param {RowState} rowState
+ */
+function featureGroup(doc, group, names, role, rowState) {
   const section = doc.createElement("section");
   section.className = "feature-group";
   const title = doc.createElement("h3");
   title.className = "feature-group-title";
   title.textContent = group;
+  if (role) section.dataset.role = title.dataset.role = role;
   section.append(title, ...names.map((name) => featureRow(doc, name, rowState)));
   return section;
 }
@@ -190,13 +202,55 @@ function featureRow(doc, name, { terms, activeTerm, tabStop, waiting }) {
   row.dataset.term = name;
   row.tabIndex = name === tabStop ? 0 : -1;
   if (name === activeTerm) row.setAttribute("aria-current", "true");
-  row.append(span(doc, "feature-row-name", name));
+  row.append(span(doc, "feature-row-name", term.term_label ?? name));
   if (waiting.has(name)) row.append(waitingDot(doc));
+  if (term.parameter_role !== undefined) row.append(miniCurve(doc, term));
   row.append(
     span(doc, "feature-row-kind", term.term_type || term.kind || "term"),
     span(doc, "feature-row-edf", edfLabel(term.effective_df)),
   );
   return row;
+}
+
+/**
+ * The active feature as the collapsed strip names it: a distributional
+ * model's feature carries its parameter, since one name is in two groups.
+ * @param {TermPayload|undefined} term @param {string} name
+ */
+function stripLabel(term, name) {
+  if (!term?.term_label) return name;
+  return term.parameter_label ? `${term.term_label} · ${term.parameter_label}` : term.term_label;
+}
+
+/**
+ * The feature's effect drawn small, in its parameter's colour. It repeats what
+ * the row's name and kind already say, so it is hidden from assistive tech.
+ * @param {Document} doc @param {TermPayload} term
+ */
+function miniCurve(doc, term) {
+  const { width, height } = MINI_CURVE;
+  const svg = doc.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "mini-curve");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("width", String(width));
+  svg.setAttribute("height", String(height));
+  svg.setAttribute("aria-hidden", "true");
+  const curve = sparkline(term, MINI_CURVE);
+  if (curve.kind === "line") {
+    const path = doc.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", curve.d);
+    svg.append(path);
+    return svg;
+  }
+  for (const bar of curve.bars) {
+    const rect = doc.createElementNS(SVG_NS, "rect");
+    rect.setAttribute("x", String(bar.x));
+    rect.setAttribute("y", String(bar.y));
+    rect.setAttribute("width", String(bar.w));
+    rect.setAttribute("height", String(bar.h));
+    svg.append(rect);
+  }
+  return svg;
 }
 
 /** An amber dot right after the name of a term with a change waiting for Refit. @param {Document} doc */

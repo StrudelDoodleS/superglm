@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { escapeHTML, fmt, fmtSigned } from "./format.js";
 import { metricDirection } from "./metrics.js";
 import { cvSourceLine } from "./views/cv_tab.js";
@@ -30,8 +31,18 @@ export function renderReport(payload, { reportTitle, reportStatus, reportFrame }
   reportFrame.innerHTML = `${splitSection}${cvSection}${summarySection}${finalFitSection}`;
 }
 
+// A SuperGLM report shows the fixed metric columns; a model whose report
+// names other metrics (a SuperLSS scores by log score and CRPS) shows those.
+function metricColumns(labels) {
+  const named = Object.keys(labels);
+  return named.length && !named.some((metric) => reportMetricKeys.includes(metric))
+    ? named
+    : reportMetricKeys;
+}
+
 function renderSplitSection(payload) {
   const labels = payload.metric_labels || {};
+  const columns = metricColumns(labels);
   return `
     <section class="report-section">
       <h3>Split Metrics</h3>
@@ -39,38 +50,44 @@ function renderSplitSection(payload) {
         <thead>
           <tr>
             <th>Split</th>
-            ${reportMetricKeys.map((metric) => `<th>${escapeHTML(labels[metric] || metric)}</th>`).join("")}
+            ${columns.map((metric) => `<th>${escapeHTML(labels[metric] || metric)}</th>`).join("")}
           </tr>
         </thead>
         <tbody>
-          ${(payload.splits || []).map((split) => renderSplitRow(split)).join("")}
+          ${(payload.splits || []).map((split) => renderSplitRow(split, columns)).join("")}
         </tbody>
       </table>
     </section>
   `;
 }
 
-function renderSplitRow(split) {
+// A split the model cannot score carries its reason instead of metrics.
+function renderSplitRow(split, columns) {
   const metrics = split.metrics || {};
   const edited = metrics.edited || {};
   const delta = metrics.delta || {};
+  const cells = split.available === false
+    ? `<td class="report-note" colspan="${columns.length}">${escapeHTML(split.error || "")}</td>`
+    : columns.map((metric) => renderMetricCell(metric, edited[metric], delta[metric])).join("");
   return `
     <tr>
       <td>
         <strong>${escapeHTML(split.label || split.name || "")}</strong>
         <span class="report-delta">${escapeHTML(String(split.n_obs || 0))} rows</span>
       </td>
-      ${reportMetricKeys.map((metric) => renderMetricCell(metric, edited[metric], delta[metric])).join("")}
+      ${cells}
     </tr>
   `;
 }
 
 function renderMetricCell(metric, value, delta) {
   const direction = metricDirection(metric, Number(delta));
+  // A score the model cannot compute (CRPS of a count model) arrives as null.
+  const shownDelta = Number.isFinite(delta) ? fmtSigned(delta) : "--";
   return `
     <td>
-      ${escapeHTML(fmt(value))}
-      <span class="report-delta" data-direction="${direction}">Δ ${escapeHTML(fmtSigned(delta))}</span>
+      ${escapeHTML(Number.isFinite(value) ? fmt(value) : "--")}
+      <span class="report-delta" data-direction="${direction}">Δ ${escapeHTML(shownDelta)}</span>
     </td>
   `;
 }
@@ -193,15 +210,20 @@ function renderFinalFit(finalFit) {
       <table class="report-table" aria-label="Final fit on all rows">
         <tbody>
           <tr><th>Rows</th><td>${escapeHTML(formatValue(finalFit.n_rows))}</td></tr>
-          <tr><th>Method</th><td>${escapeHTML(formatValue(model.method))}</td></tr>
-          <tr><th>Total EDF</th><td>${escapeHTML(formatValue(model.effective_df))}</td></tr>
-          <tr><th>Deviance</th><td>${escapeHTML(formatValue(model.deviance))}</td></tr>
-          <tr><th>AIC</th><td>${escapeHTML(formatValue(model.aic))}</td></tr>
-          <tr><th>BIC</th><td>${escapeHTML(formatValue(model.bic))}</td></tr>
+          ${finalFit.summary ? summaryRows(model) : ""}
         </tbody>
       </table>
     </section>
   `;
+}
+
+function summaryRows(model) {
+  return `
+          <tr><th>Method</th><td>${escapeHTML(formatValue(model.method))}</td></tr>
+          <tr><th>Total EDF</th><td>${escapeHTML(formatValue(model.effective_df))}</td></tr>
+          <tr><th>Deviance</th><td>${escapeHTML(formatValue(model.deviance))}</td></tr>
+          <tr><th>AIC</th><td>${escapeHTML(formatValue(model.aic))}</td></tr>
+          <tr><th>BIC</th><td>${escapeHTML(formatValue(model.bic))}</td></tr>`;
 }
 
 function formatValue(value) {

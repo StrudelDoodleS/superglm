@@ -13,6 +13,9 @@ from superglm.editor.evaluation import (
     _validate_evaluation_weights,
     named_metrics_dataset,
 )
+from superglm.editor.lss.availability import unavailable_evidence
+from superglm.editor.lss.validation import lss_dataset_metrics
+from superglm.editor.lss.view import is_lss
 from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.solvers.working_rows import pearson_chi2
 
@@ -71,6 +74,16 @@ def metrics_payload(
     # prediction diagnostics; structural refits are fitted-model metrics.
     metric = metric if metric in METRIC_LABELS else "deviance"
     revision = session.model_revision if model_revision is None else int(model_revision)
+    calm = unavailable_evidence(
+        session.model,
+        "metrics",
+        model_revision=revision,
+        request_sequence=request_sequence,
+        metric=metric,
+        source=source,
+    )
+    if calm is not None:
+        return calm
     reference_model = getattr(session, "reference_model", session.model)
     if reference_model is None:
         return {
@@ -114,6 +127,8 @@ def compute_dataset_metrics(model, dataset: EvaluationDataset) -> dict[str, floa
     report, ``predict``'s warnings), as in ``model.metrics``.  The predicted
     values are the same either way.
     """
+    if is_lss(model):
+        return lss_dataset_metrics(model, dataset)
     validated_weights = _validate_evaluation_weights(
         dataset.sample_weight,
         dataset.n_obs,

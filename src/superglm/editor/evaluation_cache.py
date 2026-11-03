@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 from superglm.editor._types import EditableTerm
 from superglm.editor.evaluation import EvaluationDataset
+from superglm.editor.lss.validation import lss_metric_signature
+from superglm.editor.lss.view import is_lss
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,8 @@ class DatasetMetricRequest:
 
 def model_metric_signature(model) -> tuple[Any, ...]:
     """Return the fitted state that can change scalar model metrics."""
+    if is_lss(model):
+        return lss_metric_signature(model)
     family = model._distribution
     link = model._link
     return (

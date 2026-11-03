@@ -64,6 +64,15 @@
   color: var(--muted);
 }
 
+/* A parameter group's heading takes its parameter's colour. */
+.feature-group-title[data-role="average"] {
+  color: var(--blue);
+}
+
+.feature-group-title[data-role="spread"] {
+  color: var(--orange-text);
+}
+
 .feature-group-title::first-letter,
 .metric-caption::first-letter {
   text-transform: uppercase;
@@ -122,6 +131,99 @@
   grid-row: 2;
   grid-column: 3;
   font-variant-numeric: tabular-nums;
+}
+
+/* The mini curve takes the third line, in its parameter's colour. */
+.mini-curve {
+  grid-row: 3;
+  grid-column: 1 / -1;
+  margin-top: 3px;
+  width: 96px;
+  height: 16px;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.mini-curve path {
+  stroke-width: 1.5;
+}
+
+.mini-curve rect {
+  stroke: none;
+}
+
+.feature-group[data-role="average"] .mini-curve path {
+  stroke: var(--param-average);
+}
+
+.feature-group[data-role="average"] .mini-curve rect {
+  fill: var(--param-average);
+}
+
+.feature-group[data-role="spread"] .mini-curve path {
+  stroke: var(--param-spread);
+}
+
+.feature-group[data-role="spread"] .mini-curve rect {
+  fill: var(--param-spread);
+}
+
+/* The parameter chip before a history row's term name. */
+.parameter-chip {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 16px;
+}
+
+.parameter-chip[data-role="average"] {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.parameter-chip[data-role="spread"] {
+  background: var(--orange-soft);
+  color: var(--orange-text);
+}
+
+/* The Final fit panel's own button, where there is no Cross-validation tab. */
+.final-fit-run {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--blue);
+  border-radius: var(--radius-md);
+  background: var(--blue);
+  color: var(--surface);
+  font-weight: 600;
+}
+
+.final-fit-run[hidden] {
+  display: none;
+}
+
+.final-fit-run-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: 420px;
+}
+
+.final-fit-run-note {
+  text-align: right;
+}
+
+.final-fit-run-note[hidden] {
+  display: none;
+}
+
+.final-fit-run:disabled {
+  opacity: 0.6;
 }
 
 /* A term with a change waiting for Refit carries an amber dot right after its name. */
