@@ -14,6 +14,7 @@ import tests.test_distributional_endpoint_laml as endpoint_tests
 from superglm import (
     GaussianLS,
     GeneralizedParetoLSS,
+    LambdaPolicy,
     Numeric,
     Predictor,
     Spline,
@@ -436,6 +437,11 @@ def test_capped_generalized_pareto_fit_revalidates_its_exact_face() -> None:
     At the 1e10 cap the rounding of ``P b`` exceeds the 1e-12 relative score
     tolerance, so the exact-face revalidation passed or failed on round-off and
     this fit stopped with ``endpoint_revalidation_failed``.
+
+    The shape smooth's parameter is held just below the cap, so the scale
+    smooth is the sole capped component. Selected, it ends either 1.5e-8 below
+    the cap or exactly on it, depending on the summation order; exactly on it,
+    two components share the cap and the face recheck retracts.
     """
     frame, response = _flagged_generalized_pareto_problem()
     family = GeneralizedParetoLSS()
@@ -444,7 +450,7 @@ def test_capped_generalized_pareto_fit_revalidates_its_exact_face() -> None:
         family.scale(
             s("x1", kind="cr", k=8), cat("c1"), s("x2", kind="cr", k=6), re("c2"), ti("x1", "x2")
         ),
-        family.shape(s("x2", kind="cr", k=5)),
+        family.shape(s("x2", kind="cr", k=5, lambda_policy=LambdaPolicy.fixed(9.99e9))),
         discrete=True,
     )
     model.fit_reml(frame, response, outer="efs+newton")
