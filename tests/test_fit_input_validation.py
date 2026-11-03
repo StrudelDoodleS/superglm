@@ -30,8 +30,6 @@ from superglm.distributions import (
     validate_response,
 )
 from superglm.model.input_validation import validate_fit_input, validate_x_columns
-from superglm.model.reml_setup import scop_group_spec
-from superglm.types import GroupSlice
 
 ENTRYPOINTS = ("fit", "fit_path", "fit_reml")
 
@@ -713,22 +711,8 @@ def test_omitted_plot_terms_and_explicit_none_label_are_distinct() -> None:
     assert model.plot(None, ci=None, show_density=False) is not None
 
 
-@pytest.mark.parametrize("label", [0, False, None])
-def test_scop_group_spec_uses_falsey_feature_name_exactly(label) -> None:
-    spec = object()
-    group = GroupSlice(
-        name="display-name",
-        start=0,
-        end=1,
-        feature_name=label,
-        monotone_engine="scop",
-    )
-
-    assert scop_group_spec({label: spec}, group) is spec
-
-
 @pytest.mark.parametrize("label", [0, None], ids=["zero", "none"])
-def test_fixed_scop_lambda_uses_falsey_feature_label(label) -> None:
+def test_fixed_shape_constrained_lambda_uses_falsey_feature_label(label) -> None:
     x = np.linspace(0.0, 1.0, 80)
     X = pd.DataFrame({label: x})
     y = x**2
@@ -740,13 +724,12 @@ def test_fixed_scop_lambda_uses_falsey_feature_label(label) -> None:
                 n_knots=6,
                 constraint=Constraint.fit.increasing,
                 lambda_policy=LambdaPolicy.fixed(1.7),
-                shape_engine="scop",
             )
         },
     ).fit_reml(X, y)
     group = next(group for group in model._groups if group.feature_name == label)
 
-    assert model._reml_lambdas[group.name] == pytest.approx(1.7)
+    assert model._reml_lambdas[f"{group.name}:wiggle"] == pytest.approx(1.7)
 
 
 @pytest.mark.parametrize("label", [0, None], ids=["zero", "none"])

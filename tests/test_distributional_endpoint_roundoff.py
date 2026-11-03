@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import pickle
 from dataclasses import replace
 
 import numpy as np
@@ -73,7 +72,7 @@ def test_endpoint_revalidation_projection_roundoff_has_an_arithmetic_bound() -> 
 
     bound = smoothing_faces._endpoint_revalidation_projection_bound(face, canonical)
 
-    assert bound is not None
+    assert bound is not None and bound > 0.0
     assert movement <= bound
 
 
@@ -189,90 +188,6 @@ def test_endpoint_revalidation_records_material_state_refusal(
     assert terminal_event.endpoint_assessment_failure_reason == "endpoint_state_changed"
 
 
-def test_result_rejects_a_within_bound_state_change_receipt(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = 0
-    real_check = smoothing_faces._check_face_direction
-    real_fit = smoothing_faces._fit_endpoint_authority_stationary
-    inject_result = False
-    injected = False
-
-    def inject_endpoint_result(*args: object, **kwargs: object):
-        nonlocal injected
-        fit = real_fit(*args, **kwargs)  # type: ignore[arg-type]
-        if inject_result and not injected and kwargs.get("face") is not None:
-            endpoint_face = kwargs["face"]
-            assert endpoint_face is not None
-            assert endpoint_face.null_basis.shape[1] > 0
-            injected = True
-            fit = replace(
-                fit,
-                coefficients=fit.coefficients + 1.0e-6 * endpoint_face.null_basis[:, 0],
-            )
-        return fit
-
-    def material_refusal(*args: object, **kwargs: object):
-        nonlocal calls, inject_result
-        calls += 1
-        if calls == 2:
-            np.testing.assert_array_equal(kwargs["endpoint_initial"], kwargs["initial"])
-            inject_result = True
-        try:
-            return real_check(*args, **kwargs)  # type: ignore[arg-type]
-        finally:
-            inject_result = False
-
-    monkeypatch.setattr(
-        smoothing_faces, "_fit_endpoint_authority_stationary", inject_endpoint_result
-    )
-    monkeypatch.setattr(smoothing_faces, "_check_face_direction", material_refusal)
-    _values = endpoint_tests._gamma_isolated_cap_face_problem()
-    smoothing = _values[-1]
-    retraction = next(item for item in smoothing.history if item.deactivated_face_components)
-    cap_index, endpoint_index = retraction.coefficient_fit_indices[:2]
-    cap_fit = smoothing.coefficient_fits[cap_index]
-    endpoint_fit = smoothing.coefficient_fits[endpoint_index]
-    source_fit = smoothing.coefficient_fits[retraction.source_fit_index]
-    assert endpoint_fit.coefficient_face is not None
-    within_bound = replace(
-        endpoint_fit,
-        coefficients=source_fit.coefficients
-        + 1.0e-14 * endpoint_fit.coefficient_face.null_basis[:, 0],
-    )
-    fits = list(smoothing.coefficient_fits)
-
-    # Beside a numerically stationary cap, a replay that stepped changed the
-    # endpoint state only beyond the refit envelope.
-    assert _assessment_is_numerically_stationary(cap_fit, retraction.coefficient_tolerances[0])
-    fits[endpoint_index] = replace(within_bound, iterations=within_bound.iterations + 1)
-    with pytest.raises(ValueError, match="within the refit envelope"):
-        replace(smoothing, coefficient_fits=tuple(fits))
-    # The strict rule a saved v0.40.0 result was made under refused any
-    # stepped replay beside a strictly stationary cap.
-    fits[cap_index] = replace(cap_fit, terminal_score=np.zeros_like(cap_fit.terminal_score))
-    with pytest.raises(ValueError, match="within the refit envelope"):
-        replace(smoothing, coefficient_fits=tuple(fits))
-    replace(smoothing, coefficient_fits=tuple(fits), rounding_floor_stationarity=False)
-
-    # Beside a cap that is not stationary, direct face authority also needs
-    # full observed rank.
-    fits[cap_index] = endpoint_tests._score_above_rounding_floor(cap_fit)
-    fits[endpoint_index] = within_bound
-    with pytest.raises(ValueError, match="within the refit envelope"):
-        replace(smoothing, coefficient_fits=tuple(fits))
-
-    assert endpoint_fit.terminal_reduced_rank is not None
-    bad_rank = replace(
-        endpoint_fit.terminal_reduced_rank,
-        rank=endpoint_fit.terminal_reduced_rank.rank - 1,
-    )
-    bad_endpoint = replace(endpoint_fit, terminal_reduced_rank=bad_rank)
-    fits[endpoint_index] = bad_endpoint
-    with pytest.raises(ValueError, match="full observed rank"):
-        replace(smoothing, coefficient_fits=tuple(fits))
-
-
 def _capped_spline_problem():
     """A Gaussian location spline with its smoothing parameter at the cap."""
     family = GaussianLS()
@@ -301,7 +216,11 @@ def _capped_spline_problem():
 
 
 def _capped_spline_fit(
-    *, max_iterations: int, initial: np.ndarray | None = None, curvature: str = "observed"
+    *,
+    max_iterations: int,
+    initial: np.ndarray | None = None,
+    curvature: str = "observed",
+    tolerance: float = 1.0e-12,
 ) -> DenseSolverResult:
     family, layout, response, plan, lambdas = _capped_spline_problem()
     return fit_dense_fixed_lambda(
@@ -313,7 +232,7 @@ def _capped_spline_fit(
         initial=initial,
         config=DenseSolverConfig(
             max_iterations=max_iterations,
-            tolerance=1.0e-12,
+            tolerance=tolerance,
             coefficient_curvature=curvature,  # type: ignore[arg-type]
         ),
     )
@@ -327,13 +246,28 @@ def _one_ulp_from(fit: DenseSolverResult) -> np.ndarray:
     return start
 
 
-def test_a_capped_fit_stops_at_its_rounding_floor() -> None:
-    """Kills stepping on round-off once the score is within its rounding floor."""
+def _floor_start() -> np.ndarray:
+    """One ulp from the capped fit polished to a 1000x tighter tolerance.
+
+    An endpoint that only just met the tolerance leaves its one-ulp neighbour's
+    Newton correction near the objective bound, and other BLAS builds stop at
+    other such endpoints; polishing first starts the move from rounding level.
+    """
     fit = _capped_spline_fit(max_iterations=150)
     assert fit.converged is True
-    start = _one_ulp_from(fit)
+    polished = _capped_spline_fit(max_iterations=150, initial=fit.coefficients, tolerance=1.0e-15)
+    assert polished.converged is True
+    return _one_ulp_from(polished)
 
-    replay = _capped_spline_fit(max_iterations=150, initial=start)
+
+def test_a_capped_fit_stops_at_its_rounding_floor() -> None:
+    """Kills stepping on round-off once the score is within its rounding floor."""
+    start = _floor_start()
+
+    # At 1e-10 the one-ulp score is still ~1000x the bare tolerance, while the
+    # certified decrement sits ~250x inside its limit on every BLAS kernel; at
+    # 1e-12 that margin is 2-3x and some builds step.
+    replay = _capped_spline_fit(max_iterations=150, initial=start, tolerance=1.0e-10)
 
     tolerance = replay.config.tolerance
     assert replay.convergence_reason == "score"
@@ -349,7 +283,7 @@ def test_endpoint_authority_does_not_polish_a_score_within_its_rounding_floor(
 ) -> None:
     """Kills a Newton polish that can only follow round-off."""
     family, layout, response, plan, lambdas = _capped_spline_problem()
-    start = _one_ulp_from(_capped_spline_fit(max_iterations=150))
+    start = _floor_start()
     real_fit = smoothing_authority._fit_fixed_state
     calls = 0
 
@@ -359,7 +293,10 @@ def test_endpoint_authority_does_not_polish_a_score_within_its_rounding_floor(
         return real_fit(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(smoothing_authority, "_fit_fixed_state", counted_fit)
-    config = smoothing_authority._face_authority_config(DenseSolverConfig())
+    # At 1e-10, as in the replay test above, the certificate has margin on every BLAS kernel.
+    config = replace(
+        smoothing_authority._face_authority_config(DenseSolverConfig()), tolerance=1.0e-10
+    )
     fit = smoothing_authority._fit_endpoint_authority_stationary(
         family,
         layout,
@@ -416,9 +353,7 @@ def test_numerical_stationarity_admits_a_score_within_its_rounding_floor() -> No
 def test_endpoint_revalidation_accepts_a_stepped_replay_within_the_refit_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Kills demanding a zero-step replay beside a numerically stationary cap, and
-    accepting one beside a strictly stationary cap in a result saved before the
-    rounding-floor rule."""
+    """Kills demanding a zero-step replay beside a numerically stationary cap."""
     calls = 0
     real_check = smoothing_faces._check_face_direction
     real_fit = smoothing_faces._fit_endpoint_authority_stationary
@@ -466,16 +401,6 @@ def test_endpoint_revalidation_accepts_a_stepped_replay_within_the_refit_envelop
     assert endpoint_fit.iterations > 0
     assert not np.array_equal(endpoint_fit.coefficients, source_fit.coefficients)
     assert smoothing.terminal_fit is endpoint_fit
-
-    # The strict rule a saved result was made with requires the source's exact
-    # projection for every replay beside a strictly stationary cap.
-    fits = list(smoothing.coefficient_fits)
-    fits[revalidation.coefficient_fit_indices[0]] = replace(
-        cap_fit, terminal_score=np.zeros_like(cap_fit.terminal_score)
-    )
-    replace(smoothing, coefficient_fits=tuple(fits))
-    with pytest.raises(ValueError, match="changed the canonical endpoint state"):
-        replace(smoothing, coefficient_fits=tuple(fits), rounding_floor_stationarity=False)
 
 
 def _flagged_generalized_pareto_problem() -> tuple[pd.DataFrame, np.ndarray]:
@@ -531,14 +456,6 @@ def test_capped_generalized_pareto_fit_revalidates_its_exact_face() -> None:
     # differential's objective tolerance.
     released = -395.1090527
     assert smoothing.objective <= released + 1.0e-5 * (1.0 + abs(released))
-
-    # Saving keeps the rule the receipts were made under. Its face and cap fits
-    # are stationary only within their rounding floors, so a load that read the
-    # result as made before the floor would validate it under the strict rule.
-    loaded = pickle.loads(pickle.dumps(model))._require_fitted().smoothing
-    assert loaded is not None
-    assert loaded.rounding_floor_stationarity is True
-    assert replace(loaded).convergence_reason == "stationary"
 
 
 def _null_direction_problem(offset: float = -2.0e8):
@@ -621,8 +538,6 @@ def test_a_score_inside_its_floor_that_a_newton_step_removes_is_not_stationary()
         fit, terminal_score=score, converged=False, convergence_reason="max_iterations"
     )
     assert not _assessment_is_numerically_stationary(unconverged, tolerance)
-    with pytest.raises(ValueError, match="rounding floor"):
-        replace(fit, terminal_score=score, convergence_reason="score")
 
 
 def _cancelled_score_problem():
@@ -732,8 +647,6 @@ def test_a_floor_stop_holds_for_every_score_its_rounding_admits(
     )
     assert _assessment_retained_kkt_ratio(unconverged) > tolerance
     assert not _assessment_is_numerically_stationary(unconverged, tolerance)
-    with pytest.raises(ValueError, match="rounding floor"):
-        replace(fit, terminal_score=score, convergence_reason="score")
 
 
 def test_a_rounding_floor_stop_needs_unfallbacked_observed_curvature() -> None:
@@ -764,15 +677,13 @@ def test_a_rounding_floor_stop_needs_unfallbacked_observed_curvature() -> None:
     assert not _assessment_is_numerically_stationary(
         replace(unconverged, terminal_curvature=fallback), tolerance
     )
-    with pytest.raises(ValueError, match="rounding floor"):
-        replace(within, terminal_curvature=fallback)
 
 
 def test_a_fisher_scoring_solve_does_not_take_the_rounding_floor_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Kills certifying a floor stop on Fisher information instead of observed curvature."""
-    start = _one_ulp_from(_capped_spline_fit(max_iterations=150))
+    start = _floor_start()
     real_floor = solver_module._score_within_rounding_floor
     calls = 0
 

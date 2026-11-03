@@ -336,7 +336,6 @@ def test_direct_sqrt_irls_computes_objective_scale_once_per_fit(monkeypatch) -> 
         compute_rank_info=False,
         _compute_fit_statistics=False,
         _compute_reml_geometry=False,
-        _compute_scop_postfit_inference=False,
         weight_semantics="frequency",
     )
 

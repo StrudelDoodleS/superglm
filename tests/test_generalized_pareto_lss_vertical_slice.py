@@ -384,6 +384,39 @@ def test_an_interior_fit_stopped_at_a_loose_tolerance_is_not_disclosed(inner_tol
     assert not _wall_messages(model)
 
 
+def test_a_refit_stopped_at_a_loose_tolerance_is_not_disclosed(monkeypatch):
+    # the interior fit above beside a near scale alias, whose refit on the retained
+    # coefficients is forced to start where a fresh fit starts: it stops at 1e-4 with a step
+    # still carrying rows towards the wall, and is continued as the first run is. Mutation
+    # check: without that continuation, 1899 of 5000 rows are disclosed at the upper wall.
+    import superglm.distributional.solver.solver as solver
+
+    initial = solver._initial_coefficients
+
+    def from_scratch(context, state, rank, retained, phase_recorder):
+        coefficients = np.array(initial(context))
+        coefficients[retained.dropped] = 0.0
+        return solver._evaluate_state(context, coefficients, phase_recorder=phase_recorder)
+
+    monkeypatch.setattr(solver, "_representative_state", from_scratch)
+    x = np.linspace(-1.0, 1.0, 5_000)
+    shape = expit(20.0 * x)
+    y = np.expm1(-shape * np.log(np.random.default_rng(4).random(5_000))) / shape
+    z = np.random.default_rng(6).uniform(size=5_000)
+    frame = pd.DataFrame(
+        {"x": x, "z": z, "z2": z + 1.0e-8 * np.random.default_rng(5).standard_normal(5_000)}
+    )
+    model = model_from_templates(
+        family=GeneralizedParetoLSS(),
+        predictors=(
+            Predictor("scale", {"z": Numeric(), "z2": Numeric()}),
+            Predictor("shape", {"x": Numeric()}),
+        ),
+    ).fit(frame, y, inner_tol=1.0e-4)
+    assert model.result_.rank < len(model.result_.coefficients)
+    assert not _wall_messages(model)
+
+
 @pytest.mark.parametrize("inner_tol", [1.0e-4, 1.0e-5])
 def test_a_shape_whose_optimum_lies_just_beyond_the_wall_is_disclosed(inner_tol):
     # the unrestricted shape is about 1.0000067, so a loose stop leaves a step of only about 0.49
@@ -419,6 +452,68 @@ def test_a_pressed_group_whose_direction_the_rank_decision_drops_is_disclosed(he
     assert model.result_.rank < len(model.result_.coefficients)
     (message,) = _wall_messages(model)
     assert "1000 of 2000 rows" in message and "the data put the shape" in message
+
+
+def test_a_shape_at_the_last_float_beside_a_scale_alias_keeps_its_caveat():
+    # the coefficient fit drops z2 - 2 z, which the design aliases, and the shape at the last
+    # float below one, which only the link flattens: zero is no optimum for the second, so
+    # neither is refitted. Both are forced: the alias is exact, and at the last float the
+    # shape's equilibrated curvature is about 1e-2 of the rank cut, where a shape the wall step
+    # stops short of it sits at the cut. Mutation check: refitting a span that holds an alias,
+    # and keeping the refit, loses the caveat.
+    rng = np.random.default_rng(11)
+    y = stats.genpareto(3.0).rvs(2_000, random_state=rng)
+    frame = pd.DataFrame({"x": rng.uniform(size=2_000), "z": rng.uniform(size=2_000)})
+    frame["z2"] = 2.0 * frame["z"]
+    scale = {"x": Spline(kind="cr", k=6), "z": Numeric(), "z2": Numeric()}
+    model = model_from_templates(
+        family=GeneralizedParetoLSS(),
+        predictors=(Predictor("scale", scale), Predictor("shape", {})),
+    )
+    with pytest.warns(ConvergenceWarning, match="float64 can represent"):
+        model.fit_reml(frame, y, inner_tol=1.0e-12)
+    assert model.result_.coefficient_converged
+    assert model.result_.rank == len(model.result_.coefficients) - 2
+    assert np.all(model.predict_parameters(frame)["shape"].to_numpy() == np.nextafter(1.0, 0.0))
+    (message,) = _wall_messages(model)
+    assert "not reliable" in message
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+def test_a_group_code_far_from_zero_fits_the_shapes_of_the_centred_code(discrete):
+    # coded 1000 + {1, 0.7}, the groups' shape slope is collinear with the intercept only in
+    # uncentred coordinates: the rank drops it with the pressed group's wall, and a refit
+    # without it puts both groups at one shape, 0.886, which the data refute
+    rng = np.random.default_rng(8)
+    pressed = np.expm1(-1.5 * np.log(rng.random(1_000))) / 1.5
+    interior = np.expm1(-0.3 * np.log(rng.random(1_000))) / 0.3
+    y = np.concatenate([pressed, interior])
+
+    def fitted(shift):
+        # 1001 - 1000 and 1000.7 - 1000 are exact (Sterbenz), so both fits read the same data
+        frame = pd.DataFrame({"g": np.repeat([1001.0, 1000.7], 1_000) - shift})
+        model = model_from_templates(
+            family=GeneralizedParetoLSS(),
+            predictors=(Predictor("scale", {"g": Numeric()}), Predictor("shape", {"g": Numeric()})),
+            discrete=discrete,
+        )
+        with pytest.warns(ConvergenceWarning, match="at the upper wall 1"):
+            model.fit(frame, y, inner_tol=1.0e-7)
+        return model, model.predict_parameters(frame.iloc[[0, 1_000]])["shape"].to_numpy()
+
+    (offset, shapes), (centred, reference) = fitted(0.0), fitted(1000.0)
+    assert offset.result_.coefficient_converged
+    (message,) = _wall_messages(offset)
+    assert "1000 of 2000 rows" in message
+    # The score stop bounds each coefficient's score by tol (1 + |f|); a group's score is
+    # that times the code's leverage on the intercept, (1001 + 1) / 0.3, and moves the
+    # interior shape by the score over n I(xi) dxi/deta, I = 2 / ((1 + xi)(1 + 2 xi)) the
+    # shape's Fisher information per row and xi (1 - xi) the bounded logit's slope.
+    xi = reference[1]
+    fisher = 2.0 / ((1.0 + xi) * (1.0 + 2.0 * xi))
+    stop = 1.0e-7 * (1.0 + abs(centred.result_.log_likelihood)) * 1002.0 / 0.3
+    assert shapes[1] == pytest.approx(xi, abs=stop / (1_000 * fisher * xi * (1.0 - xi)))
+    assert shapes[0] == pytest.approx(reference[0], abs=1.0e-6)  # both pressed onto the wall
 
 
 def test_near_collinear_shape_covariates_at_an_interior_optimum_are_not_disclosed():

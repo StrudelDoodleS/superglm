@@ -27,9 +27,6 @@ from superglm.distributional.results.solver import (
     DenseSolverConfig,
     DenseSolverResult,
     _assessment_is_numerically_stationary,
-    _dense_penalty_fingerprint,
-    _PenaltyAssessmentContext,
-    fit_time_face_geometry,
 )
 from superglm.distributional.smoothing.acceleration import WindowedTypeIIAnderson
 from superglm.distributional.smoothing.authority import (
@@ -46,7 +43,6 @@ from superglm.distributional.smoothing.evidence import (
     _fresh_raw_evidence,
     _FreshRawEvidence,
     _lower_bound_pressure,
-    _saturated_names,
 )
 from superglm.distributional.smoothing.faces import (
     _assess_joint_face_directions,
@@ -129,7 +125,6 @@ def _trial_laplace_objective(
         raise
 
 
-@fit_time_face_geometry()
 def _efs_result(
     *,
     layout: StackedLayout,
@@ -199,13 +194,6 @@ def _efs_result(
         newton_iterations=sum(item.stage == "newton" for item in history),
         bfgs_fallback_iterations=sum(item.step_source == "bfgs" for item in history),
         beyond_cap_components=tuple(beyond_cap_components),
-        rounding_floor_stationarity=True,
-        _penalty_assessment_context=_PenaltyAssessmentContext.from_layout(
-            layout,
-            faces=tuple(
-                fit.coefficient_face for fit in coefficient_fits if fit.coefficient_face is not None
-            ),
-        ),
     )
 
 
@@ -370,7 +358,7 @@ def fit_distributional_efs(
         nonlocal current_lambdas, current_fit, current_objective, terminal_fit_index
         nonlocal terminal_evidence, endgame_outcome, endgame_stationary, pending_cap, newton_budget
         nonlocal plateau_run, practical_run, plateau_qualified
-        nonlocal previous_accepted_step, saturated_run
+        nonlocal previous_accepted_step
         if newton_budget <= 0:
             return _result(converged=False, reason="max_iterations")
         outcome = run_newton_endgame(
@@ -414,7 +402,6 @@ def fit_distributional_efs(
             practical_run = 0
             plateau_qualified = False
             previous_accepted_step = math.inf
-            saturated_run = dict.fromkeys(estimated_names, 0)
             if accelerator is not None:
                 accelerator.reset()
             return None
@@ -548,7 +535,6 @@ def fit_distributional_efs(
     practical_run = 0
     plateau_qualified = False
     previous_accepted_step = math.inf
-    saturated_run: dict[str, int] = dict.fromkeys(estimated_names, 0)
     accelerator = (
         WindowedTypeIIAnderson(
             history=outer_config.acceleration_history,
@@ -722,7 +708,6 @@ def fit_distributional_efs(
             practical_run = 0
             plateau_qualified = False
             previous_accepted_step = math.inf
-            saturated_run = dict.fromkeys(estimated_names, 0)
             if accelerator is not None:
                 accelerator.reset()
             continue
@@ -853,9 +838,6 @@ def fit_distributional_efs(
                             terminal_endpoint_directions=terminal_endpoint_directions,
                         )
                     else:
-                        rollback_penalty_fingerprint = _dense_penalty_fingerprint(
-                            layout.penalty_matrix(current_lambdas)
-                        )
                         rollback_initial = (
                             current_fit.coefficients
                             if not joint_attempt.assessment_fits
@@ -909,7 +891,6 @@ def fit_distributional_efs(
                             ),
                             coefficient_tolerance=joint_attempt.coefficient_tolerance,
                             assessment_fits=rollback_fits,
-                            joint_rollback_penalty_fingerprint=(rollback_penalty_fingerprint),
                         )
                         history.append(
                             _face_retraction_iteration(
@@ -1069,24 +1050,10 @@ def fit_distributional_efs(
         iteration_number = len(history) + 1
         source_fit_index = terminal_fit_index
         with measure_phase(phase_recorder, "efs_update_backtracking"):
-            components = terminal_evidence.components
             plain_update = terminal_evidence.update
             if plain_update is None:
                 raise RuntimeError("estimated smoothing components require a raw EFS update")
             max_proposed_step = _maximum_step(plain_update, estimated_names)
-            saturated = _saturated_names(
-                components,
-                plain_update,
-                estimated_names,
-                outer_config.boundary_saturation,
-            )
-            for name in estimated_names:
-                saturated_run[name] = saturated_run[name] + 1 if name in saturated else 0
-            nominations = frozenset(
-                name
-                for name in estimated_names
-                if saturated_run[name] >= outer_config.boundary_iterations
-            )
 
         acceleration_outcome = "disabled"
         acceleration_refusal_reason = None
@@ -1152,7 +1119,6 @@ def fit_distributional_efs(
             plain_update.trace_terms,
             missing=0.0,
         )
-        boundary_nominations = tuple(name for name in estimated_names if name in nominations)
 
         accelerated_values = None
         trial_config = (
@@ -1325,7 +1291,6 @@ def fit_distributional_efs(
                     coefficient_fit_indices=tuple(attempted_fit_indices),
                     accepted_fit_index=None,
                     coefficient_tolerances=tuple(attempted_tolerances),
-                    boundary_nominations=boundary_nominations,
                     update_curvature=current_fit.terminal_curvature,
                     accepted_curvature=None,
                 )
@@ -1386,7 +1351,6 @@ def fit_distributional_efs(
                 coefficient_fit_indices=tuple(attempted_fit_indices),
                 accepted_fit_index=accepted_fit_index,
                 coefficient_tolerances=tuple(attempted_tolerances),
-                boundary_nominations=boundary_nominations,
                 update_curvature=current_fit.terminal_curvature,
                 accepted_curvature=accepted_fit.terminal_curvature,
             )
@@ -1405,13 +1369,10 @@ def fit_distributional_efs(
             )
         if terminal_evidence.estimated_names != estimated_names:
             raise RuntimeError("estimated smoothing names changed inside one EFS fit")
-        # The step test alone is a first-order quantity on a harmonic tail; the
-        # objective it exists to settle can be flat for many iterations before
-        # the step is. Require both a flat objective and a contracting step, so
-        # a stalled line search cannot nominate a plateau reason. Fresh
-        # evidence above remains the strict stopping authority.  The practical
-        # policy below intentionally accepts its separate sustained plateau
-        # while preserving the larger strict residual in the result.
+        # The step test alone is first-order on a harmonic tail, so require both
+        # a flat objective and a contracting step before nominating a plateau.
+        # The practical policy below accepts its own sustained plateau and keeps
+        # the larger strict residual in the result.
         plateau_run = plateau_run + 1 if objective_change <= outer_config.plateau_tolerance else 0
         plateau_qualified = (
             plateau_run >= outer_config.plateau_iterations
@@ -1458,11 +1419,9 @@ def fit_distributional_efs(
             )
         ):
             return _result(converged=True, reason="practical_plateau")
-        # A practical plateau is an interior stop.  While any estimated
-        # component sits at the cap with outward pressure, or is a working
-        # infinity, the top of the loop owns the next decision: it either
-        # promotes an exact face or refuses with a named reason.  Returning
-        # here would publish a worse point one iteration early.
+        # A practical plateau is an interior stop: while a component sits at the
+        # cap with outward pressure or is a working infinity, the top of the loop
+        # decides (promote an exact face, or refuse with a named reason).
         if (
             outer_config.practical_convergence
             and current_face is None

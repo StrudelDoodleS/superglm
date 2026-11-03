@@ -76,18 +76,13 @@ class QPResult:
 def _null_space_mass(decomposition: RankDecomposition, g: NDArray) -> tuple[float, float]:
     """Split ``g``'s share of ``null(H)`` into its structural and spectral parts.
 
-    The normal equations are consistent exactly when ``g`` is orthogonal to
-    ``null(H)``, so project ``g`` onto the decomposition's null basis rather
-    than read a solve residual, which the retained condition number amplifies.
-    The basis holds exact unit vectors on structurally zero columns and the
-    spectral directions ``D^-1 V_discarded`` on the scaled ones; their row
-    supports are disjoint, so the two masses are thresholded separately.
-
-    ``g`` is first scaled by a power of two (exact) so that both norms lie in
-    ``[0.5, sqrt(width)]``: ``x.dot(x)`` inside ``np.linalg.norm`` otherwise
-    underflows to 0 or overflows to inf and silently hides a breach.
-
-    Returns ``(structural_mass, spectral_mass)``, each as a share of ``||g||``.
+    The normal equations are consistent exactly when ``g`` is orthogonal to ``null(H)``, so
+    ``g`` is projected on the null basis rather than read from a solve residual, which the
+    retained condition amplifies. The basis holds exact unit vectors on structurally zero
+    columns and ``D^-1 V_discarded`` on the scaled ones, with disjoint row supports. ``g`` is
+    first scaled by a power of two (exact) so both norms lie in ``[0.5, sqrt(width)]`` and
+    neither underflows to 0 or overflows to inf, hiding a breach. Returns
+    ``(structural_mass, spectral_mass)``, each as a share of ``||g||``.
     """
     largest = float(np.max(np.abs(g), initial=0.0))
     if largest == 0.0:
@@ -114,17 +109,12 @@ def _null_space_mass(decomposition: RankDecomposition, g: NDArray) -> tuple[floa
 def _consistency_floor(decomposition: RankDecomposition) -> float:
     """Largest spectral null mass the decomposition's own roundoff can manufacture.
 
-    The computed spectral null basis is accurate to about ``eps`` times the
-    retained condition number, so a consistent ``g`` still projects onto it by
-    that much; the floor scales with that condition so that a well-posed but
-    ill-conditioned rank-deficient system stays solvable. Sensitivity falls
-    gradually with the condition and is lost once the floor saturates at 1
-    (about ``1e14``); the test then fails open rather than refuse a solvable
-    system. The structural half uses ``_STRUCTURAL_CONSISTENCY_FLOOR``.
-
-    The condition here is on the Gram scale (an eigenvalue ratio), not the
-    factor scale of ``pre_truncation_condition``. ``retained_values is None``
-    means nothing spectral was dropped (the Cholesky paths).
+    The computed spectral null basis is accurate to about ``eps`` times the retained condition
+    (an eigenvalue ratio on the Gram scale, not ``pre_truncation_condition``'s factor scale), so
+    the floor scales with it and a well-posed ill-conditioned rank-deficient system stays
+    solvable; once the floor saturates at 1 (about ``1e14``) the test fails open rather than
+    refuse a solvable system. The structural half uses ``_STRUCTURAL_CONSISTENCY_FLOOR``;
+    ``retained_values is None`` means nothing spectral was dropped (the Cholesky paths).
     """
     retained = decomposition.retained_values
     if retained is None or retained.size == 0:
@@ -284,20 +274,14 @@ def _stationarity_certificate(
 ) -> tuple[bool, int | None, NDArray]:
     """Certify a nonnegative dual force in homogeneous stationarity units.
 
-    Normalize each constraint row before finding its multiplier, and normalize
-    the objective by the absolute actions of H beta and g. With M=A_active.T
-    in those coordinates, |M^+| maps score-action uncertainty to multiplier
-    uncertainty. A multiplier below that allowance releases its constraint.
-    The clipped, nonnegative multipliers must then reproduce stationarity;
-    an uncertain sign alone never supplies a success certificate.
-
-    The test is per coefficient, against that coefficient's own actions, but
-    an ordinary least-squares multiplier fit leaves a residual of rounding
-    size relative to the largest coefficient. ``coordinate_weighted`` fits
-    the multipliers in the test's own units instead, each coefficient's
-    equation divided by ``max(|H||beta|, |g|)`` there. That matters where the
-    active rows touch coefficients orders of magnitude apart: a shape term
-    at a very large smoothing parameter, in coordinates scaled by it.
+    Constraint rows are normalized before their multipliers are found, and the objective by the
+    absolute actions of ``H beta`` and ``g``; with ``M = A_active.T`` in those coordinates,
+    ``|M^+|`` maps score-action uncertainty to multiplier uncertainty, and a multiplier below
+    that allowance releases its constraint. The clipped multipliers must then reproduce
+    stationarity; an uncertain sign never certifies success. ``coordinate_weighted`` fits the
+    multipliers in the per-coefficient test's units (each equation divided by
+    ``max(|H||beta|, |g|)``), which matters when active rows touch coefficients orders of
+    magnitude apart, such as a shape term at a very large smoothing parameter.
     """
     active_matrix = np.asarray(active_matrix, dtype=float)
     products, h_action, g_values, _, _ = _constraint_actions(H, beta, g, common=True)
@@ -461,20 +445,14 @@ def _complementarity_certificate(
 def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
     """Least-squares solve of a saddle system, symmetrically equilibrated first.
 
-    ``lstsq``'s cutoff is relative to the largest singular value, so on an
-    unscaled saddle matrix a large ``H`` pushes every constraint direction
-    under it (``H = diag(1e16, 0)``, ``A = [[1, 1]]`` keeps rank 1 of 3).
-    One pass of symmetric equilibration ``D K D`` with
-    ``D = diag(1 / sqrt(row inf-norm))`` (the first Ruiz step; Ruiz 2001)
-    makes the cutoff separate directions by conditioning. ``|K|`` is symmetric,
-    so the scaling preserves the saddle structure. Every equilibrated entry
-    satisfies ``|K_ij| / sqrt(m_i m_j) <= 1``; the right-hand side and the
-    unscaled solution carry no such bound. A zero row keeps scale 1.
-
-    The solution is minimum-norm in the equilibrated coordinates. ``rcond``
-    stays at ``lstsq``'s default: an active constraint pins a near-null ``H``
-    direction at the constraint's scale, so the policy's ``gram_rcond`` would
-    not change what is retained there.
+    ``lstsq``'s cutoff is relative to the largest singular value, so on an unscaled saddle
+    matrix a large ``H`` hides every constraint direction (``H = diag(1e16, 0)``,
+    ``A = [[1, 1]]`` keeps rank 1 of 3). One symmetric equilibration ``D K D``,
+    ``D = diag(1 / sqrt(row inf-norm))`` (the first Ruiz step; Ruiz 2001), makes the cutoff
+    separate directions by conditioning and keeps the saddle structure; equilibrated entries
+    satisfy ``|K_ij| / sqrt(m_i m_j) <= 1``, and a zero row keeps scale 1. The solution is
+    minimum-norm in equilibrated coordinates. ``rcond`` stays at ``lstsq``'s default, since an
+    active constraint pins a near-null ``H`` direction at the constraint's scale.
     """
     row_norm = np.abs(KKT).max(axis=1)
     nonzero = row_norm > 0.0
@@ -564,16 +542,13 @@ def _raises_working_rank(
 ) -> bool:
     """Whether ``A[row]`` is numerically independent of the working rows.
 
-    Working-set rows must stay linearly independent to keep the KKT matrix
-    nonsingular (Nocedal and Wright 2006, section 16.5; Gill and Wong, Math.
-    Prog. Comp. 7, 2015, section 2). In exact arithmetic a dependent row cannot
-    block, since ``A_w @ step = 0``; only rounding makes it appear to.
-
-    The decision is ``decompose_factor``'s rank rule on unit-norm columns
-    ``[A_w.T, a]``: dependent when ``sigma_(k+1) <= sqrt(2 u) * sigma_1``. That
-    clears the SVD error bound ``p(m, n) u sigma_1`` (*LAPACK Users' Guide*,
-    3rd ed., section 4.9) while ``max(p, k + 1) < 2**27``. ``working_rank``
-    caches the working set's rank by its index tuple.
+    Working-set rows must stay independent to keep the KKT matrix nonsingular (Nocedal and
+    Wright 2006, sec. 16.5; Gill and Wong, Math. Prog. Comp. 7, 2015, sec. 2); in exact
+    arithmetic a dependent row cannot block, since ``A_w @ step = 0``. The decision is
+    ``decompose_factor``'s rank rule on unit-norm columns ``[A_w.T, a]``: dependent when
+    ``sigma_(k+1) <= sqrt(2 u) * sigma_1``, which clears the SVD error bound
+    ``p(m, n) u sigma_1`` (*LAPACK Users' Guide*, 3rd ed., sec. 4.9) while
+    ``max(p, k + 1) < 2**27``. ``working_rank`` caches each working set's rank by index tuple.
     """
     if not active:
         return True

@@ -15,7 +15,7 @@ from superglm.group_matrix import (
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
 )
-from superglm.types import GroupSlice, LambdaPolicy
+from superglm.types import GroupSlice
 
 
 def collect_reml_groups(
@@ -93,21 +93,13 @@ def warm_start_lambdas(
 ) -> dict[str, float]:
     """Estimated components a mapping ``lambda2_init`` starts the REML search from.
 
-    A mapping keyed by component name (or by group name, which then starts every
-    component of that group) is a warm start: the engines bootstrap there instead
-    of at their own cold seeds. A scalar ``lambda2_init`` is not a warm start --
-    it keeps its historical meaning, an anchor the cold bootstrap may move away
-    from -- so cold fits are unchanged. Names the mapping does not cover stay
-    cold; fixed-policy components are never started from it.
-
-    A penalty block (a group's components, such as a tensor product's margins)
-    starts warm only whole: when the mapping names some of a block's estimated
-    components but not all, the whole block starts cold, with a
-    ``UserWarning``, as ``live_reml_lambdas`` keeps it for cross-validation (a
+    A mapping keyed by component or group name is a warm start; a scalar is
+    an anchor the cold bootstrap may move away from. Unnamed and fixed-policy
+    components stay cold. A penalty block starts warm only whole, since a
     half-warm block's penalty spread can defeat the bootstrap's
-    log-determinant). A key that names no component or group of the model
-    (``other_names`` adds the model's other terms, such as its monotone ones)
-    is ignored with a ``UserWarning``.
+    log-determinant; a partly named block starts cold and an unknown key
+    (``other_names`` adds the model's other terms) is ignored, each with a
+    ``UserWarning``.
     """
     if not isinstance(lambda2_init, Mapping):
         return {}
@@ -159,26 +151,12 @@ def warm_start_lambdas(
 def live_reml_lambdas(model: Any) -> dict[str, float]:
     """A fitted model's smoothing parameters, less those it left on a flat plateau.
 
-    The warm start for a refit on similar data. Two kinds of component start
-    cold instead, because a search started where they ended cannot reach the
-    new data's optimum:
-
-    - one the Newton engines froze as inferentially flat, where the
-      criterion's gradient and curvature vanish. Measured: a fold
-      warm-started on a tensor margin's plateau converged to an objective
-      1.05 worse, interaction EDF 1.00 against 2.10;
-    - one a SCOP suppression hold covered at the final iterate
-      (``REMLResult.flat_components``): a flat end of the criterion. Measured,
-      under the earlier decrease hold on ``tr(H^-1 S_j)``: folds warm-started
-      at the first fold's LogDensity lambda kept it exactly, term EDF 0.7 and
-      1.2 below the cold folds, whose own optima were 4 and 8 times lower.
-
-    A component that shares its penalty block with others (a tensor product's
-    margins) starts cold with all of them when any one is left out: a half-warm
-    block, one margin at the cold seed beside another at its fitted value, has
-    a penalty whose spread the bootstrap's log-determinant cannot certify.
-    Measured on the cleaned freMTPL2 book: every fold after a first fold that
-    left the VehAge margin out failed with ``PenaltyNumericalError``.
+    The warm start for a refit on similar data. A search started on a flat
+    plateau cannot reach the new data's optimum, so components the Newton
+    engines froze as flat, and a SCOP-era result's ``flat_components``, start
+    cold. A penalty block (a tensor product's margins) starts cold whole when
+    any of its components does: a half-warm block's penalty spread defeats
+    the bootstrap's log-determinant.
     """
     reml = model._reml_result
     flat = set(getattr(reml, "flat_components", None) or ())
@@ -197,98 +175,17 @@ def live_reml_lambdas(model: Any) -> dict[str, float]:
     }
 
 
-def scop_fixed_lambda_value(spec: Any) -> float | None:
-    """Return a fixed SCOP lambda value, or None if it should be estimated."""
-    lambda_policy = getattr(spec, "_lambda_policy", None)
-    if lambda_policy is None:
-        return None
-    if isinstance(lambda_policy, LambdaPolicy):
-        return float(lambda_policy.value) if lambda_policy.mode == "fixed" else None
-
-    unknown = set(lambda_policy) - {"wiggle"}
-    if unknown:
-        raise ValueError(
-            f"lambda_policy contains unknown component names: {unknown}. Valid names: ['wiggle']"
-        )
-
-    wiggle_policy = lambda_policy.get("wiggle", LambdaPolicy.estimate())
-    return float(wiggle_policy.value) if wiggle_policy.mode == "fixed" else None
-
-
-def scop_group_spec(groupspecs: Mapping[Any, Any], group: GroupSlice) -> Any | None:
-    """Return the feature spec backing a SCOP-constrained group."""
-    return groupspecs.get(group.feature_name)
-
-
-def inject_fixed_scop_lambdas(
-    groups: list[GroupSlice],
-    specs: dict[str, Any],
-    lambdas: dict[str, float],
-) -> bool:
-    """Inject fixed lambdas for SCOP-constrained groups and report whether any remain unfixed."""
-    any_unfixed_scop = False
-    for group in groups:
-        if group.monotone_engine != "scop" or not group.penalized:
-            continue
-        spec = scop_group_spec(specs, group)
-        if spec is None:
-            any_unfixed_scop = True
-            continue
-        fixed_value = scop_fixed_lambda_value(spec)
-        if fixed_value is None:
-            any_unfixed_scop = True
-            continue
-        lambdas[group.name] = fixed_value
-    return any_unfixed_scop
-
-
-def promote_estimated_scop_lambdas(
-    groups: list[GroupSlice],
-    specs: dict[str, Any],
-    lambdas: dict[str, float],
-    estimated_names: set[str],
-    default_lambda: float | Mapping[str, float],
-) -> dict[str, float]:
-    """Add unfixed SCOP-constrained groups to the estimated-lambda set.
-
-    Returns the SCOP groups a mapping ``default_lambda`` warm-starts (see
-    :func:`warm_start_lambdas`). A mapping without the group's name leaves it
-    at the scalar default the SCOP engine seeds cold anyway; the value stored
-    is always a float, never the mapping itself.
-    """
-    warm: dict[str, float] = {}
-    for group in groups:
-        if group.monotone_engine != "scop" or not group.penalized:
-            continue
-        spec = scop_group_spec(specs, group)
-        fixed_value = scop_fixed_lambda_value(spec)
-        if fixed_value is not None:
-            continue
-        estimated_names.add(group.name)
-        if isinstance(default_lambda, Mapping):
-            if group.name in default_lambda:
-                warm[group.name] = _warm_value(group.name, default_lambda[group.name])
-                lambdas[group.name] = warm[group.name]
-            else:
-                lambdas[group.name] = 0.1
-        else:
-            lambdas[group.name] = default_lambda
-    return warm
-
-
-def constraint_engine_flags(groups: list[GroupSlice]) -> tuple[bool, bool, bool]:
-    """Return whether any, QP, or SCOP fit-time constrained groups are present."""
+def constraint_engine_flags(groups: list[GroupSlice]) -> tuple[bool, bool]:
+    """Return whether any, and any QP, fit-time constrained groups are present."""
     has_any = False
     has_qp = False
-    has_scop = False
     for group in groups:
         engine = group.monotone_engine
         if engine is None:
             continue
         has_any = True
         has_qp = has_qp or engine == "qp"
-        has_scop = has_scop or engine == "scop"
-    return has_any, has_qp, has_scop
+    return has_any, has_qp
 
 
 def strip_qp_constraints(groups: list[GroupSlice]) -> list[tuple[int, Any, Any]]:

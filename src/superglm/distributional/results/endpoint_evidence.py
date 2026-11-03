@@ -3,12 +3,8 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
 from dataclasses import dataclass
-from numbers import Real
 from typing import Literal
-
-import numpy as np
 
 CoefficientCurvature = Literal["fisher", "observed"]
 
@@ -32,6 +28,10 @@ ConvergenceReason = Literal[
     "resolution_limited_stationarity",
     "max_iterations",
     "line_search_failed",
+    # The certified terminal rank does not keep the coefficients the stop was reached
+    # on: it dropped a direction the formed matrix kept, or a reduced fit could not
+    # start from, or end on, its representative.
+    "rank_reduced_at_stop",
     # No damping of the coefficient curvature gave a certified ascent direction.
     "no_ascent_direction",
 ]
@@ -124,10 +124,6 @@ class EndpointDirectionEvidence:
     coefficient_tolerance: float | None = None
 
     def __post_init__(self) -> None:
-        if self.authority_identifier not in DIRECTION_AUTHORITIES:
-            raise ValueError("unknown endpoint direction authority")
-        if self.decision not in {"endpoint", "finite", "unresolved"}:
-            raise ValueError("invalid endpoint direction decision")
         for name in (
             "endpoint_objective",
             "analytic_derivative",
@@ -138,40 +134,11 @@ class EndpointDirectionEvidence:
             "lower_bound",
             "upper_bound",
         ):
-            value = getattr(self, name)
-            if (
-                not isinstance(value, Real)
-                or isinstance(value, bool)
-                or not np.isfinite(float(value))
-            ):
-                raise ValueError(f"{name} must be finite")
-            object.__setattr__(self, name, float(value))
-        fit_indices = tuple(self.fit_indices)
-        if fit_indices:
-            if (
-                len(fit_indices) != 2
-                or any(
-                    isinstance(index, bool) or not isinstance(index, int) or index < 0
-                    for index in fit_indices
-                )
-                or tuple(sorted(fit_indices)) != fit_indices
-                or len(set(fit_indices)) != len(fit_indices)
-            ):
-                raise ValueError("endpoint evidence must index its cap and endpoint fits")
-            if self.coefficient_tolerance is None:
-                raise ValueError("indexed endpoint evidence requires a coefficient tolerance")
-            coefficient_tolerance = _finite_positive(
-                self.coefficient_tolerance,
-                name="coefficient_tolerance",
-            )
-        else:
-            if self.coefficient_tolerance is not None:
-                raise ValueError("unindexed endpoint evidence cannot carry a tolerance")
-            coefficient_tolerance = None
-        if not self._derived_authority_matches():
-            raise ValueError("derived endpoint direction evidence is internally inconsistent")
-        object.__setattr__(self, "fit_indices", fit_indices)
-        object.__setattr__(self, "coefficient_tolerance", coefficient_tolerance)
+            object.__setattr__(self, name, float(getattr(self, name)))
+        object.__setattr__(self, "fit_indices", tuple(self.fit_indices))
+        if self.coefficient_tolerance is not None:
+            tolerance = _finite_positive(self.coefficient_tolerance, name="coefficient_tolerance")
+            object.__setattr__(self, "coefficient_tolerance", tolerance)
 
     def _derived_authority_matches(self) -> bool:
         if self.authority_identifier not in DIRECTION_AUTHORITIES:
@@ -207,79 +174,14 @@ class JointEndpointDirectionEvidence:
     coefficient_tolerance: float | None = None
 
     def __post_init__(self) -> None:
-        if self.authority_identifier not in JOINT_DIRECTION_AUTHORITIES:
-            raise ValueError("unknown joint endpoint direction authority")
-        if not isinstance(self.component_directions, Sequence) or isinstance(
-            self.component_directions,
-            str | bytes,
-        ):
-            raise TypeError("component_directions must be an ordered sequence")
-        raw_directions = tuple(self.component_directions)
-        component_directions: list[tuple[str, EndpointDirectionEvidence]] = []
-        for item in raw_directions:
-            if not isinstance(item, tuple | list) or len(item) != 2:
-                raise TypeError("each joint endpoint direction must be a name-evidence pair")
-            name, direction = item
-            if not isinstance(name, str) or not name:
-                raise ValueError("joint endpoint component names must be non-empty strings")
-            if not isinstance(direction, EndpointDirectionEvidence):
-                raise TypeError(
-                    "joint endpoint directions must contain EndpointDirectionEvidence values"
-                )
-            component_directions.append((name, direction))
-        normalized = tuple(component_directions)
-        if len(normalized) < 2:
-            raise ValueError("joint endpoint evidence requires at least two components")
-        component_names = tuple(name for name, _direction in normalized)
-        if len(set(component_names)) != len(component_names):
-            raise ValueError("joint endpoint component names must be unique")
-        if any(
-            direction.fit_indices or direction.coefficient_tolerance is not None
-            for _name, direction in normalized
-        ):
-            raise ValueError("joint endpoint inner directions must remain unindexed")
-        objective_bits = float(normalized[0][1].endpoint_objective).hex()
-        if any(
-            float(direction.endpoint_objective).hex() != objective_bits
-            for _name, direction in normalized[1:]
-        ):
-            raise ValueError("joint directions must share the same endpoint objective")
-        expected_joint = (
-            JOINT_ANALYTIC_DIRECTION_AUTHORITY
-            if all(
-                direction.authority_identifier == ANALYTIC_DIRECTION_AUTHORITY
-                for _name, direction in normalized
-            )
-            else JOINT_FINITE_DIFFERENCE_DIRECTION_AUTHORITY
+        object.__setattr__(
+            self,
+            "component_directions",
+            tuple((name, direction) for name, direction in self.component_directions),
         )
-        if self.authority_identifier != expected_joint:
-            raise ValueError("joint endpoint direction authority does not match its components")
-
-        endpoint_fit_index = self.endpoint_fit_index
-        coefficient_tolerance = self.coefficient_tolerance
-        if endpoint_fit_index is None:
-            if coefficient_tolerance is not None:
-                raise ValueError("unindexed joint endpoint evidence cannot carry a tolerance")
-            coefficient_tolerance = None
-        else:
-            if (
-                isinstance(endpoint_fit_index, bool)
-                or not isinstance(endpoint_fit_index, int)
-                or endpoint_fit_index < 0
-            ):
-                raise ValueError("endpoint_fit_index must be a non-negative integer")
-            if coefficient_tolerance is None:
-                raise ValueError("indexed joint endpoint evidence requires a coefficient tolerance")
-            coefficient_tolerance = _finite_positive(
-                coefficient_tolerance,
-                name="coefficient_tolerance",
-            )
-
-        object.__setattr__(self, "component_directions", normalized)
-        object.__setattr__(self, "endpoint_fit_index", endpoint_fit_index)
-        object.__setattr__(self, "coefficient_tolerance", coefficient_tolerance)
-        if not self._derived_authority_matches():
-            raise ValueError("derived joint endpoint evidence is internally inconsistent")
+        if self.coefficient_tolerance is not None:
+            tolerance = _finite_positive(self.coefficient_tolerance, name="coefficient_tolerance")
+            object.__setattr__(self, "coefficient_tolerance", tolerance)
 
     @property
     def component_names(self) -> tuple[str, ...]:

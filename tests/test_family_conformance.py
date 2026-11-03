@@ -71,9 +71,12 @@ from superglm.reml.observed_geometry import (
     observed_row_error_scale,
 )
 from superglm.reml.penalty_algebra import build_penalty_matrix
+from superglm.solvers._structured.nested import (
+    NestedSchurFactor,
+    ProfiledNestedSchurFactor,
+)
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.mode_score import linear_predictor
-from superglm.solvers.structured import NestedSchurFactor, ProfiledNestedSchurFactor
 from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import GroupSlice, PenaltyComponent
 from tests.test_signed_rows import _companion_bound, _exact_hessian, _exact_reference

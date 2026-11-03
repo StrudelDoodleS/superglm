@@ -9,7 +9,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame
-from superglm.inference.term import SmoothCurve, TermInference
+from superglm.inference._term_types import SmoothCurve, TermInference
 from superglm.plotting.common import (
     _exposure_kde,
     _kde_2d,
@@ -213,11 +213,9 @@ def _main_effect_density_dataframe(
     if ti.kind in ("spline", "polynomial", "piecewise"):
         x_grid = np.asarray(ti.x, dtype=np.float64)
         if ti.kind == "piecewise" and x_grid.size >= 2:
-            # A piecewise ti.x is the knot vector -- as few as three points --
-            # which is the right grid for coefficients but not for a density:
-            # a KDE sampled at the knots can miss every mode between them.
-            # Build an independent dense grid over the plotted domain, the
-            # same treatment the other continuous kinds get.
+            # A piecewise ti.x is the knot vector, the right grid for coefficients
+            # but not for a density (a KDE at the knots can miss every mode), so
+            # build a dense grid over the plotted domain as for other kinds.
             x_grid = np.linspace(float(x_grid[0]), float(x_grid[-1]), 200)
         x_vals = X.column_array(ti.name, dtype=np.float64)
         density = _exposure_kde(x_vals, sample_weight, x_grid)

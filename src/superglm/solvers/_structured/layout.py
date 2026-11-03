@@ -38,25 +38,18 @@ _FS_ONE_HOT_TYPES = (CategoricalGroupMatrix, RandomEffectGroupMatrix)
 
 @dataclass(frozen=True, eq=False)
 class FactorSmoothLeafLayout:
-    """Design partition of one ``fs`` FactorSmooth term beside its border (one-engine design §3.4).
+    """Design partition of one ``fs`` FactorSmooth term beside its border.
 
-    A depth-1 block tree under the super-root: each FactorSmooth level is a
-    leaf carrying ``k`` coefficients, and every other group joins the border
-    (``_border_partition``).  ``leaf_order`` holds the rows sorted by level
-    (stable) and ``leaf_starts`` ``(K + 1,)`` each level's start in it, so a
-    level's rows are contiguous in the leaf pass.  ``leaf_rows`` writes every
-    border block as dense rows in that order (one-hot blocks from their
-    codes, so no border block is densified whole), and ``basis_table`` is a
-    discrete term's support rows in the natural basis.  The border fields
-    (``small_*``, ``local_groups``, ``dense_small_matrix``) are
-    ``_border_partition``'s.
+    A depth-1 block tree: each level is a leaf of ``k`` coefficients, and
+    every other group joins the border (``_border_partition``).
+    ``leaf_order`` holds the rows stably sorted by level and ``leaf_starts``
+    ``(K + 1,)`` each level's start, so a level's rows are contiguous.
 
-    Caches (the cached properties and the lineage entries): the cached
-    properties are owned by this immutable layout, which lives in its design's
-    layout cache and is never pickled; the lineage entries by the shared
-    nesting cache.  They depend on the design only (codes, basis, border
-    matrices; prior weights for the centres), never on a working weight,
-    lambda or penalty; the leaf memo alone is keyed by the exact working rows.
+    Caches: the cached properties are owned by this immutable layout (held in
+    its design's layout cache, never pickled), the lineage entries by the
+    shared nesting cache.  All depend on the design only (prior weights for
+    the centres), never on working weights, lambda or penalty; the leaf memo
+    alone is keyed by the exact working rows.
     """
 
     dominant_group_index: int
@@ -71,11 +64,8 @@ class FactorSmoothLeafLayout:
     small_execution_plan: MatrixExecutionPlan | None
     leaf_order: NDArray
     leaf_starts: NDArray
-    # The lineage's nesting cache (``selection.shared_nesting_cache``): the level
-    # order, the sorted basis, the support table, the prior-weight centres and
-    # the leaf memo live there (``block_leaves._lineage_slot``), matched on the
-    # objects they depend on (``lineage_sources``), so a lambda rebuild of the
-    # design that keeps them shares them.
+    # The lineage's nesting cache, matched on ``lineage_sources``, so a lambda
+    # rebuild of the design that keeps those objects shares its entries.
     lineage_cache: dict = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -106,14 +96,12 @@ class FactorSmoothLeafLayout:
         return len(self.small_indices)
 
     def thin_levels(self, prior_weights: NDArray | None) -> tuple:
-        """The ``sz`` levels with fewer than ``m`` distinct weighted ``x`` values (design decision 4).
+        """The ``sz`` levels with fewer than ``m`` distinct weighted ``x`` values.
 
-        Beside the required global Spline such a level makes an exact alias of
-        the main-effect polynomial (the penalty's null space, dimension ``m``)
-        with its deviation: flagged and kept, never refused.  Distinct ``x``
-        values are distinct basis rows among the level's rows of positive
-        prior weight.  A disclosure only: it routes nothing.  Held in the
-        lineage cache, keyed by the sources and the prior weights.
+        Such a level aliases the main-effect polynomial (the penalty's null
+        space, dimension ``m``) with its deviation: flagged and kept, never
+        refused.  A disclosure only; it routes nothing.  Held in the lineage
+        cache, keyed by the sources and the prior weights.
         """
         levels, _ = self.thin_level_counts(prior_weights)
         return tuple(self.dominant.levels[level] for level in levels)
@@ -121,10 +109,9 @@ class FactorSmoothLeafLayout:
     def thin_level_counts(self, prior_weights: NDArray | None) -> tuple[NDArray, NDArray]:
         """``(levels, distinct)``: the thin levels' codes and their distinct weighted ``x`` counts.
 
-        The structure ``thin_levels`` names, by code: the balance tree builds
-        each thin level's exact data-null directions from it (``balance_tree``,
-        the penalized aliases).  Held in the lineage cache, keyed by the
-        sources and the prior weights.
+        The balance tree builds each thin level's exact data-null directions
+        from it.  Held in the lineage cache, keyed by the sources and the prior
+        weights.
         """
         dominant = self.dominant
         n = len(self.leaf_order)
@@ -188,10 +175,8 @@ class FactorSmoothLeafLayout:
     def lineage_sources(self) -> tuple:
         """The objects the leaf data depend on besides the working rows (lineage-cache keys).
 
-        The term's codes and basis arrays and every border matrix: a lambda
-        rebuild of the design that passes them through unchanged shares every
-        design-only cache and the leaf memo; one that re-creates any of them
-        (an SSP border block re-parameterized) misses, correctly.
+        A lambda rebuild that passes them through unchanged shares every
+        design-only cache and the leaf memo; one that re-creates any misses.
         """
         dominant = self.dominant
         basis = (dominant.B_unique, dominant.bin_idx) if dominant.is_discrete else (dominant.B,)
@@ -342,10 +327,10 @@ def build_nested_structured_layout(
     chain_group_indices: tuple[int, ...],
     nesting_cache: dict | None = None,
 ) -> NestedStructuredLayout:
-    """Build the tree and border partitions of one nested RandomEffect chain (§4).
+    """Build the tree and border partitions of one nested RandomEffect chain.
 
     ``chain_group_indices`` runs coarsest to finest.  Every consecutive pair
-    must pass the strict-nesting count test (§3.7); a level reused under
+    must pass the strict-nesting count test; a level reused under
     several parents is refused with the instruction to build the interaction
     code, as lme4 documents for implicit nesting.  Unobserved child levels
     point at parent 0.  ``nesting_cache`` is the nesting cache (see
@@ -365,8 +350,8 @@ def build_nested_structured_layout(
             raise ValueError(f"Nested chain group {group.name!r} is not a RandomEffect term.")
         if group.size != matrix.n_levels:
             raise ValueError(f"Nested chain group {group.name!r} slice does not match its levels.")
-        if group.constraints is not None or group.scop_reparameterization is not None:
-            raise ValueError(f"Nested chain group {group.name!r} carries constraints or SCOP.")
+        if group.constraints is not None:
+            raise ValueError(f"Nested chain group {group.name!r} carries constraints.")
         members[index] = matrix
     cache = {} if nesting_cache is None else nesting_cache
     key = ("nested_tree", chain, tuple((group.name, group.start, group.end) for group in groups))
@@ -562,9 +547,8 @@ def sz_level_identification(
     A level whose rows of positive weight hold ``d < m`` distinct ``x``
     values cannot tell the directions of ``N_P`` its rows do not see from the
     main effect: the trailing ``m - d`` right singular vectors of its distinct
-    rows on ``N_P`` (``_penalized_aliases`` takes the same ``f``), all of
-    ``N_P`` without weight.  Backend independent: it reads the design and the
-    prior weights alone, so a gram fit records what the balance tree names.
+    rows on ``N_P``, all of ``N_P`` without weight.  It reads the design and
+    prior weights alone, so every backend records the same levels.
     """
     null_space = _sz_penalty_null_space(dominant)
     null_space.setflags(write=False)
@@ -672,7 +656,7 @@ def get_structured_layout(
     """
     dominant = dm.group_matrices[dominant_group_index]
     if isinstance(dominant, FactorSmoothGroupMatrix):
-        # fs: a depth-1 block tree; sz: the balance tree over the same leaves (§3.4, §3.5)
+        # fs: a depth-1 block tree; sz: the balance tree over the same leaves
         return get_factor_smooth_leaf_layout(dm, groups, dominant_group_index=dominant_group_index)
     if not chain_group_indices:
         raise ValueError(
@@ -706,7 +690,7 @@ def structured_design_matvec(
     """Apply a grouped design while fusing a cached dense-small partition.
 
     A nested chain applies the leaf matrix to the path sums ``M beta_tree``
-    (§6), one O(n + n_nodes) pass.
+    in one O(n + n_nodes) pass.
     """
     values = np.asarray(beta, dtype=np.float64)
     width = len(layout.small_indices) + layout.structured_indices.size
@@ -740,7 +724,7 @@ def structured_design_rmatvec(
 ) -> NDArray:
     """Apply a grouped design transpose with one cached dense-small product.
 
-    A nested chain takes the subtree sums ``M'`` of the leaf transpose (§6).
+    A nested chain takes the subtree sums ``M'`` of the leaf transpose.
     """
     values = np.asarray(rows, dtype=np.float64)
     dominant = _structured_row_matrix(layout, group_matrices)

@@ -104,12 +104,9 @@ class Predictor:
             for parent in parents:
                 check_column_label(parent)
             if isinstance(interaction, FactorSmooth):
-                # It reads its variable and group columns itself and builds
-                # without their specs, as in SuperGLM; requiring them as
-                # features forced a main effect on the group, whose level
-                # intercepts the factor smooth already spans. An sz term
-                # still needs a term on its variable: its deviations sum to
-                # zero, so that term carries the population curve.
+                # It reads its variable and group columns itself, as in
+                # SuperGLM, so neither needs a feature. An sz term still needs a
+                # term on its variable, which carries the population curve.
                 if interaction.basis == "sz" and interaction.variable not in owned_features:
                     raise ValueError(
                         f"FactorSmooth {interaction.name!r} with basis='sz' needs a term on "
@@ -301,34 +298,18 @@ class _ParameterLinkDefaults:
 def _centering_target(spec: Any) -> Any:
     """Return the spec whose ``transform`` evaluates the basis being centered.
 
-    The centering constant is subtracted at predict time inside the spline
-    runtime, which reads it off the spec it is evaluating.  For a numeric-axis
-    ``Spline`` that is the feature spec itself; for a hosted basis
-    (``OrderedCategorical(basis=Spline(...))``) the feature spec is the wrapper
-    and it delegates every numeric path to its inner spline, so the constant
-    has to land there or the predict-time half of the hook silently never
-    fires.
+    The predict-time constant is read off the spec being evaluated: the
+    feature spec for a numeric-axis ``Spline``, the inner spline for a hosted
+    basis (``OrderedCategorical(basis=Spline(...))``), which the wrapper
+    delegates every numeric path to.
     """
     if not hasattr(type(spec), "_basis_spline"):
         return spec
     if list(getattr(spec, "_active_special_cols", ())):
-        # An ACTIVE special's rows are structural zeros in the smooth block.
-        # Centering would shift them off zero at fit time and leave them at
-        # zero at predict time, because the wrapper zero-fills them after the
-        # inner basis has already subtracted the constant. Refuse rather than
-        # ship the mismatch. Such a term also compiles to two groups, which the
-        # caller refuses separately -- but on a message that says nothing about
-        # specials=, so the refusal is spelled out here.
-        #
-        # The test is the ACTIVE list, not ``has_specials``: a declared special
-        # with no effective training rows is pinned, emits no indicator column,
-        # and -- because ``fit`` requires strictly positive weights -- can only
-        # be pinned by being absent from the training column altogether. There
-        # are then no special rows to hold a structural zero, the block is the
-        # one an identical spec without ``specials=`` would build, and the
-        # constant lands on the inner spline exactly as it does there. Refusing
-        # that shape would fail a model on the fold where a rare level happens
-        # not to appear.
+        # An active special's rows are structural zeros in the smooth block,
+        # which centering would shift at fit time but not at predict time, so
+        # refuse. A pinned special (absent from training) leaves the block an
+        # identical spec without ``specials=`` would build, so it is allowed.
         raise ValueError(
             "a centered select smooth cannot declare an active specials= level; "
             "drop specials= or select=False on the inner basis"
@@ -391,9 +372,8 @@ def _center_selected_smooths(
             centered = SparseSSPGroupMatrix(sp.csr_matrix(basis - basis_mean), matrix.R_inv)
         elif type(matrix) in (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix):
             # Both storages are one row per distinct design row plus an index;
-            # they differ only in whether that row set was binned. Rebuild
-            # through ``type(matrix)`` so a lossless support block is not
-            # silently downcast to the lossy binned parent.
+            # rebuild through ``type(matrix)`` so a lossless support block is not
+            # downcast to the binned parent.
             compressed = cast(DiscretizedSSPGroupMatrix, matrix)
             source = compressed
             support_weight = np.bincount(
@@ -590,7 +570,7 @@ def compile_predictors(
     ):
         link = resolve_predictor_link(parameter, predictor)
         # RandomEffect(nested_in=) is a statement about the training rows,
-        # checked where they are first bound (one-engine design §3.13).
+        # checked where they are first bound.
         validate_declared_nesting(predictor.features, X.column_array)
         compiled = compile_predictor_design(
             X,

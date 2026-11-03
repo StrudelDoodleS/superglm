@@ -357,7 +357,7 @@ def test_summary_export_does_not_label_structured_metadata_as_wald_test(
             },
             selection_penalty=0.0,
             direct_solve="structured",
-        ).fit_reml(X, y, runtime_validation="skip")
+        ).fit_reml(X, y)
         term_name = "group"
     else:
         policies = {
@@ -372,7 +372,7 @@ def test_summary_export_does_not_label_structured_metadata_as_wald_test(
             ],
             selection_penalty=0.0,
             direct_solve="structured",
-        ).fit_reml(X, y, runtime_validation="skip")
+        ).fit_reml(X, y)
         term_name = "x:group:fs"
 
     payload = build_summary_export_payload(model)
@@ -429,7 +429,7 @@ def test_rating_table_export_rejects_structured_terms_before_impact(
         interactions=interactions,
         selection_penalty=0.0,
         direct_solve="gram",
-    ).fit_reml(X, y, runtime_validation="skip")
+    ).fit_reml(X, y)
 
     monkeypatch.setattr(
         model,
@@ -467,7 +467,7 @@ def test_rating_table_export_reports_every_unsupported_structured_term():
         ],
         selection_penalty=0.0,
         direct_solve="gram",
-    ).fit_reml(X, y, runtime_validation="skip")
+    ).fit_reml(X, y)
 
     with pytest.raises(NotImplementedError) as exc_info:
         build_rating_table_payload(model, X, y)

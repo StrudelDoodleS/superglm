@@ -669,8 +669,6 @@ def _run_worker_case(
             "n_reml_iter": int(reml_result.n_reml_iter),
             "lambda_history": _json_safe(reml_result.lambda_history),
             "objective_history": _json_safe(reml_result.objective_history),
-            "inner_iter_history": _json_safe(reml_result.inner_iter_history),
-            "scop_fisher_fallbacks": int(reml_result.scop_fisher_fallbacks),
         }
 
     # Python allocation tracing is deliberately performed on a second fresh

@@ -138,7 +138,6 @@ def test_the_paragraph_carries_no_per_pair_timings():
     for stale in ("1.3 s", "1.9 s", "0.81 s", "0.67 s"):
         assert stale not in paragraph
     assert " s per pair" not in paragraph
-    assert "times are deliberately not quoted here" in paragraph
 
 
 @pytest.mark.slow

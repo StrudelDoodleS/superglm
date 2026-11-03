@@ -25,10 +25,8 @@ logger = logging.getLogger(__name__)
 class PublicationModeError(RuntimeError):
     """The publication refit could not certify a penalized coefficient mode.
 
-    Subclasses ``RuntimeError`` so pre-existing broad handlers keep working;
-    the dedicated type lets callers route this recoverable certifiability
-    condition without string matching. The certification failure that caused
-    it is chained as ``__cause__``.
+    A ``RuntimeError`` subclass, so broad handlers still catch it; the
+    certification failure that caused it is chained as ``__cause__``.
     """
 
 
@@ -36,11 +34,9 @@ def _publication_mode_failure(exc, *, parameter, value, decoupled) -> Publicatio
     """Turn a mode-certification failure at the publish refit into guidance.
 
     The search either never evaluated REML at the selected point (a decoupled
-    p search, and every theta search -- alternating ML fits) or evaluated it
-    under trial smoothing parameters that differ from the final ones, so
-    publication is where this can first surface. Left untranslated, the
-    caller gets an internal certification message with no mention of which
-    point failed or what to do about it.
+    p search, every theta search) or did so under other smoothing parameters,
+    so publication is where this first surfaces; the message names the point
+    and the ways out.
     """
     score = getattr(exc, "relative_max", float("inf"))
     achieved = (
@@ -85,10 +81,8 @@ def _publication_mode_failure(exc, *, parameter, value, decoupled) -> Publicatio
                 "from the failing region."
             )
         else:
-            # A coupled caller already passed fit_mode='reml'; the search
-            # certified this point and the publication refit still cannot, so
-            # recommending the coupled search again would recommend the
-            # configuration that just failed.
+            # A coupled search already ran fit_mode='reml', so do not
+            # recommend the configuration that just failed.
             options = (
                 f"  Options: fit_mode='fit' publishes the ML fit at the selected "
                 f"{parameter}; or restrict p_bounds away from the failing region."
@@ -233,8 +227,7 @@ def _resolve_power_request(
 def _publication_reml_budget(max_reml_iter, publish_mode: str, fit_mode) -> int | None:
     """Outer-iteration budget of the REML publication refit; candidate fits keep their own.
 
-    ``None`` stays ``None``: the refit resolves it per engine, as ``fit_reml``
-    does (20 for the Newton engines, 100 for the SCOP engine).
+    ``None`` stays ``None``: the refit resolves it as ``fit_reml`` does (20).
     """
     if max_reml_iter is None:
         return None
@@ -328,10 +321,8 @@ def _publish_profiled_family(
         from superglm.model import fit_ops
 
         fit_ops._record_reml_terminal_best_effort(model, debug_recorder)
-        # The publication refit is a fit_reml fit the caller receives: it
-        # warns once, as fit_reml does, while the search's discarded
-        # candidates stay silent. stacklevel 4 reaches the caller of
-        # SuperGLM.estimate_p / estimate_theta.
+        # The published refit warns once, as fit_reml does; stacklevel 4
+        # reaches the caller of SuperGLM.estimate_p / estimate_theta.
         fit_ops.warn_published_reml_nonconvergence(model, stacklevel=4)
     return published
 
@@ -388,9 +379,8 @@ def _install_tweedie_profile(final_model, *, X, y, offset, result) -> None:
     cache and warnings: an interval computed through the returned result must
     not reach the model's summary.
     """
-    # The canonical public mean: on a discretized model the internal design's
-    # matvec is a binned approximation of it.  predict's values without its
-    # warning, which is the user's, not this library evaluation's (#440 review)
+    # The canonical public mean (a discretized design's matvec only
+    # approximates it): predict's values, without predict's user-facing warning.
     from superglm.model import base
 
     _synchronize_tweedie_profile_refit(
@@ -431,10 +421,8 @@ def _replace_pirls_phi(result, phi):
 def _reprofile_published_dispersion(result, y_arr, weights, mu) -> None:
     """Profile phi at the PUBLISHED mean; the searched curve keeps search_nll for the CI.
 
-    The search profiled phi at its candidates' means, which the publication
-    refit does not reproduce: a decoupled run publishes under another regime,
-    a coupled one at the tight publication bar. Carrying the search's phi
-    across would report a dispersion of coefficients the caller never receives.
+    The publication refit does not reproduce the candidates' means, so the
+    search's phi would describe coefficients the caller never receives.
     """
     solved = profile_phi_at(y_arr, mu, weights, result.p_hat)
     result.phi_hat = solved.phi
@@ -457,10 +445,8 @@ def _synchronize_tweedie_profile_refit(model, y, public_mu, profile_result) -> N
         model._link,
         weight_semantics=model_weight_semantics(model),
     )
-    # One published fit, one mean: the summary statistics describe the same
-    # mean the published dispersion was profiled at. Splitting them would
-    # publish a hybrid -- public-mean phi inside binned-mean likelihood,
-    # Pearson chi-square and explained deviance.
+    # The summary statistics describe the mean the published dispersion was
+    # profiled at.
     fit_stats = _compute_fit_stats(
         y,
         public_mu,
@@ -618,11 +604,9 @@ def _resolve_profile_fit_mode(model, fit_mode: str, *, parameter: str = "fit_mod
 def _validate_profile_selection_mode(model, resolved_mode: str) -> None:
     """Fail doomed profile requests before allocating a profile workspace.
 
-    Each regime preflights its own final-fit restrictions. The ordinary-fit
-    side matters most for reverse coupling (search REML, publish ML): the
-    features the publication fit rejects (RandomEffect, FactorSmooth,
-    lambda_policy) would otherwise be discovered only after the entire
-    multi-candidate search has run to a guaranteed failure.
+    Each regime preflights its own final-fit restrictions, so features an ML
+    publication rejects (RandomEffect, FactorSmooth, lambda_policy) fail
+    before the search rather than after it.
     """
     if resolved_mode != "fit_reml":
         from superglm.model import fit_ops

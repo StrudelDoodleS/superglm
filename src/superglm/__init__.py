@@ -53,7 +53,7 @@ from superglm.distributional.families.two_piece import (
 from superglm.distributional.predictor import Predictor
 from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
 from superglm.export import RatingTableBaseNotRepresentableError, export_rating_tables
-from superglm.features._spline_config import SplineOptionWarning
+from superglm.features._spline_config import SCOPRetiredWarning, SplineOptionWarning
 from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.categorical import Categorical
 from superglm.features.constraint import Constraint
@@ -94,20 +94,20 @@ from superglm.features.spline import (
     Spline,
     n_knots_from_k,
 )
+from superglm.inference._term_types import (
+    InteractionInference,
+    TermInference,
+)
+from superglm.inference._term_types import (
+    SmoothCurve as SmoothCurve,
+)
+from superglm.inference._term_types import (
+    SplineMetadata as SplineMetadata,
+)
 from superglm.inference.factor_smooths import FactorSmoothResult
 from superglm.inference.metrics import ModelMetrics
 from superglm.inference.random_effects import RandomEffectResult
 from superglm.inference.summary import ModelSummary
-from superglm.inference.term import (
-    InteractionInference,
-    TermInference,
-)
-from superglm.inference.term import (
-    SmoothCurve as SmoothCurve,
-)
-from superglm.inference.term import (
-    SplineMetadata as SplineMetadata,
-)
 from superglm.links import (
     CauchitLink,
     CloglogLink,
@@ -192,15 +192,12 @@ def warmup() -> None:
     later sessions load them from there.
 
     It compiles the kernels of every family and route, ``RandomEffect`` and
-    ``FactorSmooth`` terms included (about a minute on an empty cache, under a
-    second against a filled one). Two groups of kernels compile on first use
-    instead, because few fits reach them and they take seconds to compile: the
-    third and fourth derivatives a ``SuperLSS`` fit needs only when a smoothing
-    parameter reaches its endpoint, and a fit's diagnostics (a diagnostic
-    plot's smoother, a structured ``FactorSmooth`` fit's hat diagonal), and
-    so do a few fallbacks that rarely run. Each then joins the cache like the
-    rest. Numba keys its cache to the CPU model,
-    so a cache built on one node type compiles again on another.
+    ``FactorSmooth`` terms included: about a minute on an empty cache, under a
+    second against a filled one. Kernels few fits reach compile on first use
+    instead and then join the cache: the third and fourth derivatives a
+    ``SuperLSS`` fit needs only at a smoothing-parameter endpoint, a fit's
+    diagnostics, and a few rarely run fallbacks. Numba keys its cache to the
+    CPU model, so a cache built on one node type compiles again on another.
     See the how-to *Starting fast on ephemeral clusters*.
     """
     from superglm._group_matrix._group_matrix_kernels import _warmup_group_matrix_kernels
@@ -218,7 +215,6 @@ def warmup() -> None:
     from superglm.solvers._exact_sums import _warmup_exact_sums
     from superglm.solvers._structured.block_leaves import _warmup_factor_smooth
     from superglm.solvers._structured.leaf_kernels import _warmup_leaf_kernels
-    from superglm.solvers.scop_newton import _warmup_scop
 
     _warmup_tweedie()
     _warmup_tweedie_series()
@@ -233,7 +229,6 @@ def warmup() -> None:
     _warmup_gamma()
     _warmup_declared_bounds()
     _warmup_negative_binomial()
-    _warmup_scop()
     _warmup_leaf_kernels()
     _warmup_factor_smooth()
     from superglm._numba_compile import forget_compiles
@@ -241,12 +236,9 @@ def warmup() -> None:
     forget_compiles()
 
 
-# The root export list is the reviewed public surface and is pinned by
-# tests/test_public_api_snapshot.py: adding or removing a name here edits that
-# list in the same pull request. Objects the library builds on the user's
-# behalf (auto-detected interaction types, constraint machinery, term-inference
-# parts) are importable from their modules and from this namespace but are not
-# exports.
+# The reviewed public surface, pinned by tests/test_public_api_snapshot.py.
+# Objects the library builds on the user's behalf (auto-detected interaction
+# types, constraint machinery, term-inference parts) are importable, not exported.
 __all__ = [
     "families",
     "warmup",
@@ -346,6 +338,7 @@ __all__ = [
     "ConvergenceWarning",
     "FactorSmoothGroupTermWarning",
     "RedundantInteractionWarning",
+    "SCOPRetiredWarning",
     "SplineOptionWarning",
     "SeparationError",
     "SeparationWarning",

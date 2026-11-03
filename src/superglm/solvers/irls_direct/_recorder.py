@@ -8,30 +8,30 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from superglm.solvers._structured.selection import (
+    record_auto_backend_decision,
+)
 from superglm.solvers.irls_state import _IRLSState
 from superglm.solvers.pirls import (
     IterationDiagnostics,
     TerminationReason,
     _extreme_weight_indices,
 )
-from superglm.solvers.structured import record_auto_backend_decision
 
 if TYPE_CHECKING:
     from superglm.solvers.irls_direct._fit import _IRLSDirectFit
 
-# the package's logger: its records keep the name they had when the solver was one module
+# One logger for the whole package, so every submodule's records share its name.
 logger = logging.getLogger(__package__)
 
 
 class _IRLSDirectRecorder:
     """What one direct IRLS fit discloses about itself besides its result.
 
-    The trace (evaluations, state commits and step decisions, each payload built
-    only when the trace is on), the per-iteration diagnostics and their extrema,
-    the level-2 debug rows, the phase timers and profile counters, the stop rule's
-    numbers and the backend disclosure.  It holds no reference to the fit: a method
-    that reads the fit's state is handed the fit, so the recorder never keeps the
-    fit's arrays alive.
+    The trace (each payload built only when the trace is on), per-iteration
+    diagnostics and extrema, level-2 debug rows, phase timers, profile counters
+    and the backend disclosure.  It holds no reference to the fit, so it never
+    keeps the fit's arrays alive.
     """
 
     __slots__ = (
@@ -68,16 +68,11 @@ class _IRLSDirectRecorder:
         # Strictly wider than ``record_diagnostics``, so the per-iteration extrema
         # this gates are always bound by the time a diagnostics row is built.
         self.capture_extrema = fit.record_diagnostics or self.record_debug_rows
-        # Always an empty list; only ``record_diagnostics`` decides whether rows are
-        # appended and whether it is published on the result.
+        # ``record_diagnostics`` decides whether rows are appended and published.
         self.iteration_log: list[IterationDiagnostics] = []
-        # Phase timing accumulators.  ``t_eta`` is the time forming the eta of
-        # every state the fit evaluates (from its coefficients, or a line-search
-        # trial's from its endpoints'), its clip and its mean (``eta_formed``).
-        # The timers nest, so they are not summed: a proposal or trial the line
-        # search evaluates is timed inside its evaluation window, so its eta time
-        # is part of ``t_deviance`` and ``t_deviance_eval`` too, while the SCOP
-        # proposal's predictor is formed outside that window.
+        # Phase timers.  They nest, so do not sum them: ``t_eta`` (forming each
+        # evaluated state's eta and mean) also counts inside ``t_deviance`` and
+        # ``t_deviance_eval``.
         self.t_working = 0.0
         self.t_gram = 0.0
         self.t_solve = 0.0
@@ -186,7 +181,7 @@ class _IRLSDirectRecorder:
         """The loop's clock starts: ``irls_total_s`` runs from here to ``stop``.
 
         Every phase time counts inside that window, so a state evaluated before
-        it (a SCOP fit's starting state) leaves ``irls_eta_s`` untouched.
+        it leaves ``irls_eta_s`` untouched.
         """
         self.t_eta = 0.0
         self.t_start = time.perf_counter()
@@ -199,9 +194,8 @@ class _IRLSDirectRecorder:
         convergence_tolerance = fit.convergence_tolerance
         termination_reason, working_rows = fit.termination_reason, fit.working_rows
         newton_score = fit.newton_score
-        # the weight extrema and their rows read the working rows' own curvature, the
-        # weights ``w_ratio`` is formed on (``_IRLSDirectFit._working``): observed
-        # under observed-Newton curvature, never the mean space's Newton rows
+        # Weight extrema read the working rows' own curvature (observed under
+        # observed-Newton curvature), never the mean space's Newton rows.
         W = working_rows.weights
         if self.trace_enabled:
             assert self.trace_run is not None
@@ -243,10 +237,7 @@ class _IRLSDirectRecorder:
         working_eta_clipped = False
         eta_clipped = False
         if self.capture_extrema:
-            # Each of these is read again by the diagnostics row below, which
-            # only runs when ``capture_extrema`` is true (see its definition).
-            # Bind once: they are O(n) passes over arrays nothing mutates
-            # between here and the append.
+            # O(n) passes, bound once for the diagnostics row below.
             working_eta_min = float(np.min(fit.working_eta))
             working_eta_max = float(np.max(fit.working_eta))
             working_eta_min_unclipped = float(np.min(fit.working_eta_unclipped))
@@ -261,7 +252,6 @@ class _IRLSDirectRecorder:
             )
             eta_clipped = bool(eta_min_unclipped < eta_min or eta_max_unclipped > eta_max)
 
-        # Record per-iteration diagnostics
         if self.record_diagnostics:
             top_idx, bot_idx = _extreme_weight_indices(W)
             w_min = float(W.min())
@@ -356,7 +346,6 @@ class _IRLSDirectRecorder:
                 "rank_truncated": fit.rank_truncated,
                 "cond_estimate": float(fit._cond_est),
                 "used_svd_fallback": bool(fit._used_svd),
-                "has_scop": bool(fit._has_scop),
                 "working_curvature": (
                     fit.working_rows.curvature_source if fit.newton_score is None else "observed"
                 ),
@@ -406,8 +395,8 @@ class _IRLSDirectRecorder:
                     int(index) for index in np.flatnonzero(true_residual.excluded)
                 )
             elif _last_mode_residual is not None:
-                # §3.8, §3.9: the stop rule's last score, whether a derived floor
-                # bound it, and the slopes it flagged weakly identified and kept.
+                # The stop rule's last score, whether a derived floor bound it,
+                # and the slopes it flagged weakly identified and kept.
                 profile["irls_mode_score"] = mode_bar * _last_mode_residual.ratio()
                 profile["irls_mode_bar"] = mode_bar
                 profile["irls_mode_floor_binding"] = _last_mode_residual.floor_binding
@@ -441,8 +430,8 @@ class _IRLSDirectRecorder:
                 )
                 border_certificate = getattr(structured_factor, "border_certificate", None)
                 if border_certificate is not None:
-                    # §3.6 step 5: every null direction the border factorization
-                    # truncated, disclosed with its certificate.
+                    # Every null direction the border factorization truncated,
+                    # disclosed with its certificate.
                     profile["structured_border_rank"] = border_certificate.rank
                     profile["structured_border_tau"] = border_certificate.tau
                     profile["structured_border_verification_decrements"] = (

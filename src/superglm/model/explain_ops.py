@@ -5,9 +5,7 @@ from __future__ import annotations
 import dataclasses
 import warnings
 
-from superglm.inference._term_covariance import (
-    simultaneous_bands as _simultaneous_bands,
-)
+from superglm.inference._term_covariance import simultaneous_band_and_critical_value
 from superglm.inference._term_model_ops import (
     drop1 as _drop1,
 )
@@ -213,7 +211,7 @@ def simultaneous_bands(model, feature, *, alpha=0.05, n_sim=10_000, n_points=200
     from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
 
     _ensure_factor_smooth_levels_recorded(model)
-    return _simultaneous_bands(
+    bands, _ = simultaneous_band_and_critical_value(
         feature,
         result=model.result,
         groups=model._groups,
@@ -225,6 +223,7 @@ def simultaneous_bands(model, feature, *, alpha=0.05, n_sim=10_000, n_points=200
         n_points=n_points,
         seed=seed,
     )
+    return bands
 
 
 def term_inference(

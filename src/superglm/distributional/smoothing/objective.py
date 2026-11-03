@@ -10,9 +10,10 @@ from typing import cast
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import UNIT_ROUNDOFF, gamma_up
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.results.iteration import DistributionalEFSConfig
-from superglm.distributional.results.solver import DenseSolverResult, _record_penalty_objective
+from superglm.distributional.results.solver import DenseSolverResult
 from superglm.distributional.smoothing.endpoint_laml import evaluate_endpoint_laplace
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.smoothing.proposals import _scaled_proposal
@@ -58,9 +59,6 @@ def joint_laplace_objective(
     )
     if not math.isfinite(objective):
         raise ValueError("joint Laplace objective is non-finite")
-    _record_penalty_objective(
-        layout, result, lambdas=lambdas, evaluation=penalty_evaluation, objective=float(objective)
-    )
     return float(objective)
 
 
@@ -325,22 +323,18 @@ def _stable_isolated_gfs_update(
     """Replace cancellation-prone GFS quotients where an exact identity applies.
 
     For one isolated penalty S with range projector P and penalized curvature
-    H = A + λS, cyclicity of the trace gives
-
-        rank(S) - λ tr(H⁻¹S) = tr(P H⁻¹ A).
-
-    The left side loses relative accuracy as λ grows because it subtracts two
-    quantities tending to ``rank(S)``.  The right side evaluates the same
-    positive residual degrees of freedom without that subtraction.  The
-    identity is used only for a full-rank fit and a penalty whose coefficient
-    slice overlaps no other penalty; shared-penalty blocks retain the generic
-    update until they have an equally strong joint identity.
+    H = A + λS, ``rank(S) - λ tr(H⁻¹S) = tr(P H⁻¹ A)``; the right side avoids
+    the left's cancellation between two numbers near ``rank(S)`` as λ grows.
+    It is used only for a full-rank fit and a penalty whose slice overlaps no
+    other; shared-penalty blocks keep the generic update.  A rank decided from
+    the rows evaluates it against the matrix it inverts
+    (:func:`_representative_numerator`).
     """
-    if fit.coefficient_face is not None or fit.terminal_rank.rank != len(fit.coefficients):
+    rank = fit.terminal_rank
+    if fit.coefficient_face is not None or rank.rank != len(fit.coefficients):
         return update, frozenset()
 
-    data_curvature = fit.terminal_data_curvature
-    penalized_curvature = fit.terminal_penalized_curvature
+    grey = rank.grey_columns if rank.row_decided else None
     epsilon = np.finfo(np.float64).eps
     stable_raw_steps: dict[str, float] = {}
     stable_quadratics: dict[str, float] = {}
@@ -394,45 +388,14 @@ def _stable_isolated_gfs_update(
         )
         if numerical_rank == 0 or abs(component.rank - numerical_rank) > rank_tolerance:
             continue
-        projector = vectors[:, active] @ vectors[:, active].T
-
-        # Authenticate the projector identity before using its non-cancelling
-        # form.  A truncated inverse or unresolved solve is not silently
-        # promoted into convergence authority.
-        identity_product = inverse[block, :] @ penalized_curvature[:, block]
-        identity_trace = float(np.trace(projector @ identity_product))
-        absolute_product = np.abs(inverse[block, :]) @ np.abs(penalized_curvature[:, block])
-        identity_scale = float(np.sum(np.abs(projector) * absolute_product.T))
-        identity_bound = (
-            1024.0
-            * max(len(fit.coefficients), 1)
-            * epsilon
-            * max(
-                1.0,
-                abs(component.rank),
-                identity_scale,
-            )
+        resolved = (
+            _formed_numerator(component, fit, inverse, vectors[:, active])
+            if grey is None
+            else _representative_numerator(component, fit, grey, vectors[:, active], values[active])
         )
-        if (
-            not math.isfinite(identity_trace)
-            or not math.isfinite(identity_bound)
-            or abs(identity_trace - component.rank) > identity_bound
-        ):
+        if resolved is None:
             continue
-
-        residual_product = inverse[block, :] @ data_curvature[:, block]
-        numerator = float(np.trace(projector @ residual_product))
-        absolute_data_product = np.abs(inverse[block, :]) @ np.abs(data_curvature[:, block])
-        numerator_scale = float(np.sum(np.abs(projector) * absolute_data_product.T))
-        numerator_bound = (
-            1024.0
-            * max(len(fit.coefficients), 1)
-            * epsilon
-            * max(
-                numerator_scale,
-                np.finfo(np.float64).tiny,
-            )
-        )
+        numerator, numerator_bound = resolved
         # Squaring in the penalty range avoids cancellation against its null space.
         range_beta = vectors[:, active].T @ fit.coefficients[block]
         quadratic = float(np.dot(values[active], range_beta * range_beta))
@@ -492,6 +455,136 @@ def _stable_isolated_gfs_update(
         ),
         frozenset(stable_raw_steps),
     )
+
+
+def _formed_numerator(
+    component: EFSComponentState,
+    fit: DenseSolverResult,
+    inverse: NDArray[np.float64],
+    range_basis: NDArray[np.float64],
+) -> tuple[float, float] | None:
+    """``tr(P H⁻¹ A)`` from the formed curvatures and its bound; ``None`` if unauthenticated."""
+    block = component.coefficient_slice
+    margin = 1024.0 * max(len(fit.coefficients), 1) * np.finfo(np.float64).eps
+    projector = range_basis @ range_basis.T
+    # Authenticate the projector identity before using its non-cancelling
+    # form.  A truncated inverse or unresolved solve is not silently
+    # promoted into convergence authority.
+    penalized_curvature = fit.terminal_penalized_curvature
+    identity_product = inverse[block, :] @ penalized_curvature[:, block]
+    identity_trace = float(np.trace(projector @ identity_product))
+    absolute_product = np.abs(inverse[block, :]) @ np.abs(penalized_curvature[:, block])
+    identity_scale = float(np.sum(np.abs(projector) * absolute_product.T))
+    identity_bound = margin * max(1.0, abs(component.rank), identity_scale)
+    if (
+        not math.isfinite(identity_trace)
+        or not math.isfinite(identity_bound)
+        or abs(identity_trace - component.rank) > identity_bound
+    ):
+        return None
+
+    data_curvature = fit.terminal_data_curvature
+    residual_product = inverse[block, :] @ data_curvature[:, block]
+    numerator = float(np.trace(projector @ residual_product))
+    absolute_data_product = np.abs(inverse[block, :]) @ np.abs(data_curvature[:, block])
+    numerator_scale = float(np.sum(np.abs(projector) * absolute_data_product.T))
+    return numerator, margin * max(numerator_scale, np.finfo(np.float64).tiny)
+
+
+def _representative_numerator(
+    component: EFSComponentState,
+    fit: DenseSolverResult,
+    grey: NDArray[np.bool_],
+    range_basis: NDArray[np.float64],
+    range_values: NDArray[np.float64],
+) -> tuple[float, float]:
+    """``tr(P G⁻¹ A)`` for the matrix a row-decided rank inverts, and its bound.
+
+    With dual bases ``W'E = I`` and the penalty's range ``U diag(s) U'``,
+    ``tr(P G⁻¹ A) = Σ_j α_j' U'(A w_j) / r_j``, ``α_j = U'w_j``.  The grey
+    columns, evaluated from the rows, take the representative's own
+    ``A w_j = r_j e_j - λ S w_j``, so their share is ``α_j'ε_j - λ α_j'
+    diag(s) α_j / r_j`` with ``ε_j = U'e_j``: squaring in the range keeps
+    ``S``'s null space out of the subtraction (Wood, Pya and Säfken 2016,
+    Suppl. C).  The bound is written in ``u`` in the comment below.
+    """
+    # Bound, in u (Higham 2002, eq. 3.5 per dot product). Other columns: 2048 p u
+    # times the absolute products, which covers the eigenvector residual, plus the
+    # grey block's coupling V_g Z', at most ||ε_g||_F ||Z||_F ||α_j / r_j||_F.
+    # A grey column, with a = |U|'|w_j|, b = |U|'|e_j|, α~ = |α| + γ_m a and
+    # ε~ = |ε| + γ_m b (m the block width): γ_m (α~'b + a'ε~ + 2 λ s'(a α~) / r_j)
+    # + γ_(k+3) (α~'ε~ + λ s'α~² / r_j), plus λ α~'|R|'|w_j| / r_j for the
+    # eigensolver residual R = S U - U diag(s), within γ_(m+1) (|S||U| + |U|
+    # diag(s)). Every term is a product with α or ε, so a grey column in S's null
+    # space keeps a bound at rounding level. At full rank W E' = I, so
+    # rank(S) = tr(P W E') needs no authentication.
+    rank = fit.terminal_rank
+    block = component.coefficient_slice
+    solution = np.asarray(rank.solution_basis, dtype=np.float64)
+    retained = np.asarray(rank.retained_values, dtype=np.float64)
+    top = ~grey
+    width, count = range_basis.shape
+    absolute_basis = np.abs(range_basis)
+    alpha = range_basis.T @ solution[block, :]
+
+    top_solution = solution[:, top]
+    data_rows = fit.terminal_data_curvature[block, :]
+    data_top = range_basis.T @ (data_rows @ top_solution)
+    top_share = float(np.sum(np.sum(alpha[:, top] * data_top, axis=0) / retained[top]))
+    top_size = (absolute_basis.T @ np.abs(solution[block][:, top])) * (
+        absolute_basis.T @ (np.abs(data_rows) @ np.abs(top_solution))
+    )
+    top_scale = float(np.sum(np.sum(top_size, axis=0) / retained[top]))
+
+    lam = component.lambda_value
+    grey_solution = solution[block][:, grey]
+    grey_factor = np.asarray(rank.estimable_functional_basis, dtype=np.float64)[block][:, grey]
+    grey_alpha = alpha[:, grey]
+    grey_epsilon = range_basis.T @ grey_factor
+    weight = lam / retained[grey]
+    grey_share = float(
+        np.sum(
+            np.sum(grey_alpha * grey_epsilon, axis=0)
+            - weight * (range_values @ (grey_alpha * grey_alpha))
+        )
+    )
+
+    gamma_m = gamma_up(width)
+    penalty = component.penalty
+    residual_size = np.abs(penalty @ range_basis - range_basis * range_values) + gamma_up(
+        width + 1
+    ) * (np.abs(penalty) @ absolute_basis + absolute_basis * range_values)
+    a = absolute_basis.T @ np.abs(grey_solution)
+    b = absolute_basis.T @ np.abs(grey_factor)
+    alpha_size = np.abs(grey_alpha) + gamma_m * a
+    epsilon_size = np.abs(grey_epsilon) + gamma_m * b
+    grey_bound = (
+        gamma_m
+        * (
+            np.sum(alpha_size * b + a * epsilon_size, axis=0)
+            + 2.0 * weight * (range_values @ (a * alpha_size))
+        )
+        + gamma_up(count + 3)
+        * (
+            np.sum(alpha_size * epsilon_size, axis=0)
+            + weight * (range_values @ (alpha_size * alpha_size))
+        )
+        + weight * np.sum(alpha_size * (residual_size.T @ np.abs(grey_solution)), axis=0)
+    )
+    # ``coupling`` is ``||Z||_F`` relative to the largest formed eigenvalue.
+    coupling = float((rank.grey_subspace or {}).get("coupling", math.inf))
+    coupling *= float(np.max(retained[top], initial=0.0))
+    coupling_bound = (
+        float(np.linalg.norm(epsilon_size))
+        * coupling
+        * float(np.linalg.norm(alpha[:, top] / retained[top]))
+    )
+    bound = (
+        2048.0 * len(fit.coefficients) * UNIT_ROUNDOFF * max(top_scale, np.finfo(np.float64).tiny)
+        + coupling_bound
+        + float(np.sum(grey_bound))
+    ) * (1.0 + gamma_up(width + count + 16))
+    return top_share + grey_share, bound
 
 
 def _maximum_step(update: EFSUpdateResult, estimated_names: tuple[str, ...]) -> float:

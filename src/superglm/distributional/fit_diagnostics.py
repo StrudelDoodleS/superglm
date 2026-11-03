@@ -333,6 +333,10 @@ def _not_converged_finding(
             "No damping of the coefficient curvature gave a certified ascent direction, so the "
             "solver stopped at its last accepted coefficients."
             if reason == "no_ascent_direction"
+            else "The rank certificate removed a direction the solver's stop kept, or kept one "
+            "the reduced fit dropped, so that stop could not be validated on the coefficients "
+            "the certificate keeps. The fitted values are the last accepted iterate."
+            if reason == "rank_reduced_at_stop"
             else "The reported parameter state did not satisfy its governing fit contract."
         ),
         caveats=("This evidence does not identify a statistical cause for the failure.",),
@@ -348,6 +352,10 @@ def _not_converged_finding(
             "where the family supplies expected information, coefficient_curvature='fisher' "
             "give the solver an ascent direction?"
             if reason == "no_ascent_direction"
+            else "Are two or more coefficients aliased (one a linear combination of others)? "
+            "Would dropping or merging the terms involved, or adding a penalty on them, let the "
+            "stop be validated?"
+            if reason == "rank_reduced_at_stop"
             else f"Which data or configuration change lets the {loop} loop satisfy its declared "
             "convergence contract?"
         ),

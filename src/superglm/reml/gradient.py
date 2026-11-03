@@ -21,6 +21,9 @@ from superglm.reml.penalty_algebra import (
     penalty_component_matvec,
     penalty_component_quadratic,
 )
+from superglm.solvers._structured.operators import (
+    CompactSymmetricOperator,
+)
 from superglm.solvers.hessian_factor import (
     DenseHessianFactor,
     DerivativeCrossTraceFactor,
@@ -28,7 +31,6 @@ from superglm.solvers.hessian_factor import (
     as_hessian_factor,
 )
 from superglm.solvers.pirls import PIRLSResult
-from superglm.solvers.structured import CompactSymmetricOperator
 from superglm.types import PenaltyComponent
 
 
@@ -95,12 +97,9 @@ def reml_direct_hessian(
     penalty_ranks: dict[str, float] | None = None,
     penalty_caches: dict | None = None,
     pirls_result: PIRLSResult | None = None,
-    # The declared weight contract's likelihood size, not the physical row
-    # count -- `sum(w)` under `"frequency"`, the positive-row count under
-    # `"prior"`. It is the `n` in this Hessian's `0.5 * (n - M_p) * log(D)`
-    # scale term, and it must match the `n` the OBJECTIVE uses for that same
-    # term or the Newton step is inconsistent with the surface it steps on.
-    # Float, because `sum(w)` is not an integer.
+    # The weight contract's likelihood size (`sum(w)` under "frequency", the
+    # positive-row count under "prior"): the `n` of the scale term, which must
+    # match the objective's `n`.
     n_obs: float = 0.0,
     phi_hat: float = 1.0,
     penalty_nullity: float | None = None,
@@ -144,12 +143,8 @@ def reml_direct_hessian(
     hess = np.zeros((m, m))
     use_compact_trace = dH_extra is None or dense_inverse is None
 
-    # Pre-compute log-det derivatives for multi-penalty groups.
-    # r_logdet: first derivative d(log|S|_+)/drho_i
-    # h_logdet: second derivative d2(log|S|_+)/(drho_i drho_j)
-    # For single-penalty, r_i = rank and h_ii = rank (they're equal).
-    # For shared-block multi-penalty, h_ij is non-trivial and needed
-    # to correct the Hessian curvature for the anisotropy directions.
+    # First and second derivatives of log|S|_+ in rho. Single penalties have
+    # r_i = rank and no cross term; shared blocks need h_ij for the anisotropy.
     r_logdet, h_logdet = compute_logdet_s_derivatives(
         lambdas,
         penalties,
@@ -191,10 +186,8 @@ def reml_direct_hessian(
             quad_per_group.append(0.0)
             s_beta_list.append(np.zeros(p))
 
-    # Every direction is lambda_i Omega_i (+ dH_i).  A factor that owns its cross
-    # traces returns all of them from one call, choosing for its own structure
-    # between forming each H^-1 (lambda_i Omega_i + dH_i) once and sparse
-    # pairwise traces; the others are traced pair by pair below.
+    # Every direction is lambda_i Omega_i (+ dH_i). A factor that owns its cross
+    # traces returns them all from one call; others are traced pair by pair.
     if isinstance(factor, DerivativeCrossTraceFactor):
         directions = []
         for i, pc in enumerate(penalties):
@@ -282,10 +275,8 @@ def reml_direct_hessian(
             r_i = penalty_ranks.get(penalties[i].name, 0.0)
         hess[i, i] += gradient[i] + 0.5 * r_i
 
-    # Shared-block log|S|_+ Hessian correction: -0.5 * d2(log|S|_+)/(drho_i drho_j).
-    # For single-penalty, h_logdet = 0 (log|lambda*Omega|_+ is linear in rho), so this
-    # is a no-op. For shared-block multi-penalty, the non-zero cross-terms
-    # give the Newton step proper curvature for the anisotropy directions.
+    # Shared-block log|S|_+ correction -0.5 d2(log|S|_+)/(drho_i drho_j); zero
+    # for single penalties, where log|lambda Omega|_+ is linear in rho.
     for (name_i, name_j), h_ij in h_logdet.items():
         if h_ij == 0.0:
             continue
@@ -319,8 +310,7 @@ def reml_direct_hessian(
                     coefficient_width=p,
                 )
             else:
-                # Compatibility for synthetic/non-direct callers that do not
-                # carry identified full-H metadata.
+                # Callers without identified full-H rank metadata.
                 M_p = compute_total_penalty_rank(
                     penalties,
                     tensor_pair_evaluations=tensor_pair_evaluations,

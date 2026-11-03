@@ -38,7 +38,7 @@ def test_fixed_lambda_gaussian_fit_matches_explicit_penalized_least_squares() ->
         direct_solve="gram",
     )
 
-    model.fit_reml(X, y, max_reml_iter=2, runtime_validation="skip")
+    model.fit_reml(X, y, max_reml_iter=2)
 
     design = model._dm.toarray()
     augmented = np.column_stack([np.ones(len(X)), design])
@@ -81,7 +81,6 @@ def test_estimated_lambda_dense_factor_smooth_fit_is_finite(family: str) -> None
         y,
         max_reml_iter=8,
         reml_tol=1e-5,
-        runtime_validation="skip",
     )
 
     assert np.all(np.isfinite(model.result.beta))

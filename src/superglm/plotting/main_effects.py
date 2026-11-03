@@ -46,79 +46,7 @@ from superglm.plotting.group_display import (
 )
 
 if TYPE_CHECKING:
-    from superglm.inference.term import TermInference
-
-
-def plot_relativities(
-    terms: list[TermInference],
-    *,
-    model=None,
-    X: FrameLike | None = None,
-    sample_weight: NDArray | None = None,
-    ncols: int = 2,
-    figsize: tuple[float, float] | None = None,
-    with_ci: bool = True,
-    interval: str | None = "pointwise",
-    show_exposure: bool = True,
-    show_knots: bool = False,
-    title: str | None = None,
-    subtitle: str | None = None,
-    grouped_level_display: str = "auto",
-) -> Figure:
-    """Create a grid of relativity plots from ``TermInference`` objects.
-
-    Parameters
-    ----------
-    terms : list[TermInference]
-        Per-term inference objects from :meth:`SuperGLM.term_inference`.
-    X : pandas or eager Polars DataFrame, optional
-        Training data for observation-support strips.
-    sample_weight : array-like, optional
-        Weights for the display-density overlay: replication
-        weights or Tweedie EDM prior weights.
-    ncols : int
-        Number of subplot columns (default 2).
-    figsize : tuple, optional
-        Figure size.  Auto-sized if *None*.
-    with_ci : bool
-        When *False*, forces ``interval=None`` (no bands).
-    interval : {"pointwise", "simultaneous", "both", None}
-        ``"pointwise"``: blue pointwise CI band only.
-        ``"simultaneous"``: grey-blue simultaneous band only.
-        ``"both"``: nested (simultaneous outside, pointwise inside).
-        ``None``: no uncertainty bands.
-        For categorical/numeric terms, ``"simultaneous"`` and ``"both"``
-        silently fall back to pointwise CI.
-    show_exposure : bool
-        Show support below each panel: density for continuous terms, weight
-        or count bars for categorical terms (default *True*).
-    show_knots : bool
-        Show interior knot positions as minor x-axis ticks (default *False*).
-    title, subtitle : str, optional
-        Figure-level title and subtitle.
-
-    Returns
-    -------
-    matplotlib.figure.Figure
-    """
-    if not with_ci:
-        interval = None
-    frame = None if X is None else as_eager_frame(X)
-
-    return _plot_relativities_new(
-        terms,
-        model=model,
-        X=frame,
-        sample_weight=sample_weight,
-        ncols=ncols,
-        figsize=figsize,
-        interval=interval,
-        show_exposure=show_exposure,
-        show_knots=show_knots,
-        title=title,
-        subtitle=subtitle,
-        grouped_level_display=grouped_level_display,
-    )
+    from superglm.inference._term_types import TermInference
 
 
 # ── New TermInference-based plotting ─────────────────────────────
@@ -592,15 +520,9 @@ def _plot_ordered_spline_panel(
             ax_support.axvline(divider, linestyle=":", linewidth=_REF_LW, color=_REF_COLOR)
 
     _set_level_ticks(ax if ax_support is None else ax_support, levels, x_pos)
-    # The markers and the fitted curve need not span the same range, so the
-    # limits are the UNION of the marker padding and the curve's own extent and
-    # neither can clip the other.  Which way they disagree depends on the panel:
-    # in ``expanded`` mode the markers sit at the declared level values while
-    # the curve spans the fitted axis (group means), so a leading or trailing
-    # merge leaves the curve short of the outermost markers -- ggplot2's
-    # ``geom_smooth(fullrange=FALSE)`` default, where the smoothing line is not
-    # expanded to the range of the plot.  A detached ``specials=`` block reaches
-    # past the curve on the other side.
+    # The limits are the union of the marker padding and the curve's extent, so
+    # neither clips the other: in ``expanded`` mode a merged end group leaves
+    # the curve short of the outer markers, and a ``specials=`` block reaches past it.
     lo = float(x_pos.min()) - spacing / 2.0
     hi = float(x_pos.max()) + spacing / 2.0
     if curve is not None:
@@ -661,14 +583,15 @@ def _plot_categorical_panel_vertical(
     _style_matplotlib_axis(ax, title=ti.name)
 
 
-def _plot_relativities_new(
+def plot_relativities(
     terms: list[TermInference],
     *,
     model=None,
-    X: EagerFrame | None = None,
+    X: FrameLike | None = None,
     sample_weight: NDArray | None = None,
     ncols: int = 2,
     figsize: tuple[float, float] | None = None,
+    with_ci: bool = True,
     interval: str | None = "pointwise",
     show_exposure: bool = True,
     show_knots: bool = False,
@@ -676,7 +599,45 @@ def _plot_relativities_new(
     subtitle: str | None = None,
     grouped_level_display: str = "auto",
 ) -> Figure:
-    """TermInference-based relativity grid with the new visual language."""
+    """Create a grid of relativity plots from ``TermInference`` objects.
+
+    Parameters
+    ----------
+    terms : list[TermInference]
+        Per-term inference objects from :meth:`SuperGLM.term_inference`.
+    X : pandas or eager Polars DataFrame, optional
+        Training data for observation-support strips.
+    sample_weight : array-like, optional
+        Weights for the display-density overlay: replication
+        weights or Tweedie EDM prior weights.
+    ncols : int
+        Number of subplot columns (default 2).
+    figsize : tuple, optional
+        Figure size.  Auto-sized if *None*.
+    with_ci : bool
+        When *False*, forces ``interval=None`` (no bands).
+    interval : {"pointwise", "simultaneous", "both", None}
+        ``"pointwise"``: blue pointwise CI band only.
+        ``"simultaneous"``: grey-blue simultaneous band only.
+        ``"both"``: nested (simultaneous outside, pointwise inside).
+        ``None``: no uncertainty bands.
+        For categorical/numeric terms, ``"simultaneous"`` and ``"both"``
+        silently fall back to pointwise CI.
+    show_exposure : bool
+        Show support below each panel: density for continuous terms, weight
+        or count bars for categorical terms (default *True*).
+    show_knots : bool
+        Show interior knot positions as minor x-axis ticks (default *False*).
+    title, subtitle : str, optional
+        Figure-level title and subtitle.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    if not with_ci:
+        interval = None
+    X = None if X is None else as_eager_frame(X)
     import matplotlib.pyplot as plt
 
     n = len(terms)

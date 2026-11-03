@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 import numpy as np
@@ -55,11 +55,6 @@ class StackedLayout:
     coefficient_names: tuple[str, ...]
     term_slices: Mapping[str, slice]
     penalties: tuple[PenaltyComponent, ...]
-    # Scalar producer evidence lasts for this layout's fit. Replacing a layout
-    # starts a new journal; no evaluations or dense fit objects are cached.
-    _penalty_objective_receipts: dict[tuple, object] = field(
-        default_factory=dict, init=False, repr=False, compare=False
-    )
 
     def __post_init__(self) -> None:
         predictor_names = tuple(state.name for state in self.predictors)
@@ -100,10 +95,9 @@ class StackedLayout:
         object.__setattr__(self, "coefficient_names", tuple(self.coefficient_names))
         object.__setattr__(self, "penalties", tuple(self.penalties))
 
-        # ``_center_selected_smooths`` addresses ``design.group_matrices`` with an
-        # index taken from ``groups``, so the two must stay index-parallel.  Nothing
-        # in the layout consumes the pairing, but this is the one place the
-        # assembled state is checked, so the count check stays.
+        # ``_center_selected_smooths`` indexes ``design.group_matrices`` by an
+        # index from ``groups``, so the two must stay index-parallel; this is the
+        # one place the assembled state is checked.
         for state in self.predictors:
             if len(state.design.group_matrices) != len(state.groups):
                 raise ValueError(
@@ -194,9 +188,8 @@ def _copy_component(
     group_index: int,
     group_sl: slice,
 ) -> PenaltyComponent:
-    # ``dataclasses.replace`` carries every field the source component declares.
-    # Enumerating them by hand here is what silently dropped ``penalty_kind``,
-    # ``repeat_count`` and ``block_width`` when master widened the contract.
+    # ``dataclasses.replace`` carries every field the source component declares,
+    # so a field added to the contract cannot be dropped here.
     return replace(
         component,
         name=name,

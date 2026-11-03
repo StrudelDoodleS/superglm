@@ -23,7 +23,7 @@ from superglm.solvers.rank import RankDecomposition, decompose_factor
 if TYPE_CHECKING:
     from superglm.solvers.irls_direct._fit import _IRLSDirectFit
 
-# the package's logger: its records keep the name they had when the solver was one module
+# One logger for the whole package, so every submodule's records share its name.
 logger = logging.getLogger(__package__)
 
 
@@ -43,10 +43,8 @@ def _sqrt_penalty_augmented(S: NDArray, p: int) -> NDArray:
 def _centred_rows(X: NDArray, system: CenteredSystem) -> NDArray:
     """``X`` centred about the system's exact centre pair, ``(X - hi) - lo``.
 
-    A dense column at an offset is centred about its anchor exactly and then
-    by the small remainder (``centered_system.weighted_mean_pair``); about the
-    rounded ``mean_x`` the QR's data block would carry ``sqrt(W) d`` per row,
-    ``d`` that rounding (issue #430).
+    Centring about the rounded ``mean_x`` alone would leave ``sqrt(W) d`` per
+    row in the QR's data block, ``d`` that rounding (issue #430).
     """
     centre, centre_lo = system.centre_pair()
     rows = X - centre
@@ -56,13 +54,11 @@ def _centred_rows(X: NDArray, system: CenteredSystem) -> NDArray:
 class _IRLSDirectQRStep(_IRLSDirectStep):
     """The fit's step under ``direct_solve="qr"``: a QR factor of ``[sqrt(W) X~; sqrt(S)]``.
 
-    Taken when the fit has no linear constraints and no SCOP group.  It
-    materialises the dense ``(n, p)`` design and the penalty's square root once,
-    at setup, and keeps them, and the iteration's decomposition, whose truncated
-    directions the true-score certificate judges (``certificate_inputs``); it
-    keeps no reference to the fit, whose state each method is handed.  Each
-    iteration profiles the intercept out (the centred system's means) and
-    solves the slopes from the factor, timed as the solve.
+    For fits with no linear constraints.  Materialises the dense ``(n, p)``
+    design and the penalty's square root once, at setup; each iteration
+    profiles the intercept out and solves the slopes from the factor.  Holds
+    the iteration's decomposition for the true-score certificate, and no
+    reference to the fit.
     """
 
     __slots__ = ("_X_full", "_L_aug", "_held_rank")
@@ -102,7 +98,7 @@ class _IRLSDirectQRStep(_IRLSDirectStep):
 
     def certificate_inputs(self) -> tuple:
         """The iteration's decomposition: the certificate judges its truncated directions."""
-        return self._held_rank, None, None, None
+        return self._held_rank, None
 
     def data_rank(self, centered_final: CenteredSystem, W: NDArray) -> RankDecomposition:
         """The retained fit's data rank, from the factor of its weighted, centred dense rows."""

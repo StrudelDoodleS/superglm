@@ -129,7 +129,7 @@ class _IRLSDirectTrialSearch:
     (``_IRLSDirectQPStep.retained_converged``) and, on a rejected step,
     restores the active set the iteration started from.
 
-    ``search(fit, it)`` writes what the SCOP step's own search writes: the
+    ``search(fit, it)`` writes the
     retained state and its ``eta``, ``mu`` and deviance, ``beta`` and
     ``intercept``, the decision, ``n_halvings``, ``step_rejected`` and
     ``proposal_state``.  The unit keeps nothing: no reference to the fit.

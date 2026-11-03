@@ -17,13 +17,17 @@ from superglm.group_matrix import (
 from superglm.model.reml_setup import collect_reml_groups
 from superglm.reml.discrete import _solve_cached_profiled_system
 from superglm.reml.penalty_algebra import build_penalty_context
-from superglm.solvers.irls_direct import fit_irls_direct
-from superglm.solvers.structured import (
-    NestedStructuredSystem,
-    build_nested_structured_layout,
-    build_nested_structured_system,
+from superglm.solvers._structured.assembly import (
     solve_cached_nested_structured,
 )
+from superglm.solvers._structured.layout import (
+    build_nested_structured_layout,
+)
+from superglm.solvers._structured.moments import (
+    NestedStructuredSystem,
+    build_nested_structured_system,
+)
+from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.types import GroupSlice, PenaltyComponent
 
 

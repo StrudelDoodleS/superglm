@@ -36,6 +36,8 @@ from superglm.distributional.solver.packing import packed_pairs
 from superglm.features import Numeric
 from superglm.features.interaction import SplineCategorical
 
+from ._traced_memory import own_traced_peak
+
 
 @pytest.fixture
 def terminal(monkeypatch):
@@ -131,17 +133,216 @@ def test_exact_alias_is_certified_rank_deficient(terminal, monkeypatch, constant
     assert result.terminal_rank.rank == 2
     assert result.terminal_curvature.certified is True
     assert result.terminal_curvature.grey_k == 1
-    assert calls == [1]
+    # One row pass per terminal decision: the stopped state's, and the reduced
+    # fit's when Newton steps left the alias nonzero.
+    assert calls in ([1], [1, 1])
     standard_errors = np.sqrt(np.diag(np.asarray(model.covariance_)))
     assert standard_errors[0] == pytest.approx(0.008, abs=4e-4)
     # The formed decision keeps the alias, through the shortcut on constant weights.
     formed = _main(decisions, 3)[0].decomposition
     assert formed.rank == 3
     assert formed.method == ("cholesky" if constant else "gram_eigh")
+    # The dropped level takes the representative value with the variance it publishes.
+    assert result.terminal_rank.structural_aliases.tolist() == [False, True, False]
+    assert result.coefficients[1] == 0.0 and standard_errors[1] == 0.0
 
     _uncertified(monkeypatch)
     model, frame, y, weights = _alias(constant)
     assert _fit(model, frame, y, weights).terminal_rank.rank == 3
+
+
+# mgcv 1.9.3, black box: gam(list(y ~ u + x + g, ~ 1), family = gaulss()) on
+# _alias_parity_frame() written to CSV; rank 4 of 5, gb dropped. Location
+# coefficient and its Vp diagonal, as (Intercept), u, x, gb.
+_MGCV_ALIAS_PARITY = (
+    (0.99920138097021116, 0.00020324934623268122),
+    (0.31834249904033862, 0.00012462321096326823),
+    (0.69742210600496091, 0.00052712207151484308),
+    (0.0, 0.0),
+)
+
+
+def _alias_parity_frame():
+    """``x = 1[g = b]`` beside the categorical ``g`` and a numeric ``u``: rank 4 of 5."""
+    rng = np.random.default_rng(20261102)
+    n = 2000
+    b = rng.uniform(size=n) < 0.4
+    u = rng.standard_normal(n)
+    y = 1.0 + 0.3 * u + 0.7 * b + 0.5 * rng.standard_normal(n)
+    return pd.DataFrame({"u": u, "x": b.astype(float), "g": np.where(b, "b", "a")}), y
+
+
+@pytest.mark.parametrize("discrete", [True, False], ids=["chunked", "dense"])
+def test_aliased_coefficients_take_the_representative_value(monkeypatch, discrete):
+    """A dropped alias is published at zero, as mgcv publishes it, with the same predictions.
+
+    The start is moved 3 along the alias direction, as an uncertified Newton
+    step can move it, so the fit ends with ``x`` and ``g_b`` 3 away from the
+    representative unless the terminal state is projected onto it. Mutation
+    check: without the projection ``g_b`` stays near -3 with SE 0.
+    """
+    import superglm.distributional.solver.solver as solver
+
+    start = solver._initial_coefficients
+
+    def drifted(context):
+        coefficients = np.array(start(context))
+        if context.layout.n_coefficients == 5:
+            coefficients[2:4] += (3.0, -3.0)
+        return coefficients
+
+    monkeypatch.setattr(solver, "_initial_coefficients", drifted)
+    frame, y = _alias_parity_frame()
+
+    def fitted():
+        family = GaussianLS(scale_floor=0)
+        location = family.location(term("u", Numeric()), term("x", Numeric()), cat("g", base="a"))
+        model = SuperLSS(family, location, family.scale(), discrete=discrete)
+        result = _fit(model, frame, y)
+        return model, result, np.asarray(model.predict(frame), dtype=np.float64).ravel()
+
+    model, result, prediction = fitted()
+    assert result.terminal_rank.rank == 4 and result.converged
+    coefficients, variances = result.coefficients, np.diag(np.asarray(model.covariance_))
+    for index, (value, variance) in enumerate(_MGCV_ALIAS_PARITY):
+        assert coefficients[index] == pytest.approx(value, rel=1e-7, abs=1e-12)
+        assert variances[index] == pytest.approx(variance, rel=1e-6, abs=0.0)
+    assert coefficients[3] == 0.0 and variances[3] == 0.0
+    assert model.result_.total_effective_df == pytest.approx(4.0, abs=1e-9)
+
+    monkeypatch.setattr(solver, "_representative_state", lambda context, state, *args: state)
+    _, drifted_result, drifted_prediction = fitted()
+    assert abs(drifted_result.coefficients[3]) > 1.0
+    scale = np.sum(np.abs(drifted_result.coefficients)) * max(1.0, float(np.max(np.abs(frame.u))))
+    np.testing.assert_allclose(prediction, drifted_prediction, rtol=0, atol=64 * 2.0**-53 * scale)
+
+
+# mgcv 1.9.3, black box: gam(list(y ~ x + z, ~ 1), family = gaulss()) on _near_alias()
+# written to CSV; rank 3 of 4, z dropped. Location coefficient and its Vp diagonal, as
+# (Intercept), x, z.
+_MGCV_NEAR_ALIAS = (
+    (1.0071311150156979, 8.3063594167458155e-05),
+    (0.49569104718142049, 8.3718800662953594e-05),
+    (0.0, 0.0),
+)
+
+
+def _near_alias(discrete):
+    """``z = x + 1e-8 h`` and a ``3e-6 h`` signal: the certified rank, 3 of 4, drops ``z``."""
+    draws = np.random.default_rng(11).standard_normal((8, 3000))
+    h, x = draws[4], draws[5]
+    frame = pd.DataFrame({"x": x, "z": x + 1e-8 * h})
+    y = 1.0 + 0.5 * x + 3e-6 * h + 0.5 * draws[7]
+    family = GaussianLS(scale_floor=0)
+    location = family.location(term("x", Numeric()), term("z", Numeric()))
+    return SuperLSS(family, location, family.scale(), discrete=discrete), frame, y
+
+
+@pytest.mark.parametrize("drift", [0.0, 1e6], ids=["as_fitted", "drifted_start"])
+@pytest.mark.parametrize("discrete", [True, False], ids=["chunked", "dense"])
+def test_a_near_alias_publishes_the_reduced_fit(monkeypatch, discrete, drift):
+    """The certified rank drops a near alias, and the fit is refitted without it, as mgcv is.
+
+    Newton steps on the formed curvature wander along ``x - z`` (to about
+    1950 on the dense route), and moving to the representative costs more
+    objective than the fit's tolerance: the direction carries a little
+    information below the certified rank. The fit repeats the Newton
+    iteration on the retained coefficients from the projected start;
+    ``drifted_start`` moves the start 1e6 along ``x - z`` so that it takes
+    steps. Mutation checks: keeping the drifted state when the projection
+    costs objective publishes x = 1953.7 on the dense route; publishing the
+    projection without the reduced steps misses mgcv's variances by 8e-5
+    (chunked) and fails the stop's check (dense) on the drifted start.
+    """
+    import superglm.distributional.solver.solver as solver
+
+    start = solver._initial_coefficients
+
+    def drifted(context):
+        coefficients = np.array(start(context))
+        if context.layout.n_coefficients == 4:
+            coefficients[1:3] += (drift, -drift)
+        return coefficients
+
+    monkeypatch.setattr(solver, "_initial_coefficients", drifted)
+    model, frame, y = _near_alias(discrete)
+    result = _fit(model, frame, y)
+    assert result.converged and result.terminal_rank.rank == 3
+    coefficients, variances = result.coefficients, np.diag(np.asarray(model.covariance_))
+    for index, (value, variance) in enumerate(_MGCV_NEAR_ALIAS):
+        assert coefficients[index] == pytest.approx(value, rel=1e-7, abs=1e-12)
+        assert variances[index] == pytest.approx(variance, rel=1e-6, abs=0.0)
+    assert coefficients[2] == 0.0 and variances[2] == 0.0
+
+
+@pytest.mark.parametrize("discrete", [True, False], ids=["chunked", "dense"])
+def test_a_near_alias_is_refitted_whatever_the_stop(monkeypatch, discrete):
+    """The design, not the stop, decides the refit: a run forced to stop short is refitted too.
+
+    Every run on the full coefficients reports ``max_iterations``; the
+    reduced fit from the projection converges to mgcv's values. Mutation
+    check: refitting only converged fits publishes the stopped state.
+    """
+    import dataclasses
+
+    import superglm.distributional.solver.solver as solver
+
+    run = solver._run_iterations
+
+    def stopped_short(context, *args, **kwargs):
+        result = run(context, *args, **kwargs)
+        if context.retained is not None:
+            return result
+        return dataclasses.replace(result, converged=False, reason="max_iterations")
+
+    monkeypatch.setattr(solver, "_run_iterations", stopped_short)
+    model, frame, y = _near_alias(discrete)
+    result = _fit(model, frame, y)
+    assert result.converged and result.terminal_rank.rank == 3
+    for index, (value, _) in enumerate(_MGCV_NEAR_ALIAS):
+        assert result.coefficients[index] == pytest.approx(value, rel=1e-7, abs=1e-12)
+
+
+@pytest.mark.parametrize("event", ["no_start", "rank_moved"])
+def test_a_reduced_fit_off_its_representative_says_so(monkeypatch, event):
+    """A drifted alias whose reduced fit cannot be the published representative is disclosed.
+
+    Forced: the projected start has no finite likelihood (``no_start``), or
+    the rank certified at the reduced fit's end keeps every coefficient
+    (``rank_moved``: the formed decision, which keeps the alias). Mutation
+    check: without the check, ``rank_moved`` reports convergence and
+    ``no_start`` raises.
+    """
+    import superglm.distributional.solver.solver as solver
+
+    start, certify = solver._initial_coefficients, solver._certified_terminal_curvature
+    decided = []
+
+    def drifted(context):
+        coefficients = np.array(start(context))
+        if context.layout.n_coefficients == 5:
+            coefficients[2:4] += (3.0, -3.0)
+        return coefficients
+
+    def certified_once(context, state, curvature, *args):
+        if context.layout.n_coefficients == 5:
+            decided.append(state.coefficients)
+            if len(decided) > 1:
+                return curvature
+        return certify(context, state, curvature, *args)
+
+    monkeypatch.setattr(solver, "_initial_coefficients", drifted)
+    if event == "no_start":
+        monkeypatch.setattr(solver, "_representative_state", lambda *args: None)
+    else:
+        _formed_keeps_the_alias(monkeypatch, eigensolver=False)
+        monkeypatch.setattr(solver, "_certified_terminal_curvature", certified_once)
+    frame, y = _alias_parity_frame()
+    family = GaussianLS(scale_floor=0)
+    location = family.location(term("u", Numeric()), term("x", Numeric()), cat("g", base="a"))
+    result = _fit(SuperLSS(family, location, family.scale(), discrete=False), frame, y)
+    assert not result.converged and result.convergence_reason == "rank_reduced_at_stop"
+    assert result.terminal_rank.rank == (4 if event == "no_start" else 5)
 
 
 def test_well_conditioned_fit_reads_no_rows(terminal):
@@ -334,6 +535,364 @@ def test_offset_column_keeps_its_rank(terminal):
     assert result.terminal_rank.rank == 3
     assert result.terminal_curvature.certified is True
     assert result.terminal_rank.grey_subspace["retained"] == 1.0
+
+
+_FAMILIES = (
+    "GaussianLS", "GammaLS", "LogNormalLS", "NegativeBinomialLS", "TweedieLSS",
+    "GeneralizedGammaLSS", "GeneralizedParetoLSS", "TwoPieceNormalLSS", "TwoPieceLogNormalLSS",
+)  # fmt: skip
+
+
+def _offset_fit(name, discrete, *, centred=False, offset=1e6, **fit_kwargs):
+    """``x = offset + z`` beside the first predictor's intercept, ``z ~ N(0, 1)``, or ``x - offset``.
+
+    ``x - offset`` is exact (Sterbenz), so the centred fit reads the same data.
+    """
+    import superglm
+
+    rng = np.random.default_rng(7)
+    n = 3000
+    z = rng.standard_normal(n)
+    if name == "GaussianLS":
+        y = 1.0 + 0.3 * z + rng.normal(0.0, 0.5, n)
+    elif name == "TwoPieceNormalLSS":
+        sign = np.where(rng.uniform(size=n) < 0.6, -1.0, 2.0)
+        y = 1.0 + 0.3 * z + sign * np.abs(rng.normal(0.0, 0.5, n))
+    elif name == "NegativeBinomialLS":
+        y = rng.negative_binomial(1.5, 1.5 / (1.5 + np.exp(0.3 * z))).astype(float)
+    elif name == "TweedieLSS":
+        counts = rng.poisson(np.exp(0.3 * z + 0.5) * 0.5)
+        y = np.array([rng.gamma(2.0, 1.0, count).sum() for count in counts])
+    elif name == "GeneralizedParetoLSS":
+        y = rng.pareto(4.0, n) * np.exp(0.09 * z) + 1e-3
+    else:
+        y = rng.gamma(3.0, np.exp(0.15 * z + 1.0) / 3.0)
+    family = getattr(superglm, name)()
+    names = ["mu", "phi", "p"] if name == "TweedieLSS" else [p.name for p in family.parameters]
+    declarations = [getattr(family, names[0])(term("x", Numeric()))]
+    declarations += [getattr(family, helper)() for helper in names[1:]]
+    model = SuperLSS(family, *declarations, discrete=discrete)
+    x = offset + z
+    model.fit(pd.DataFrame({"x": x - offset if centred else x}), y, **fit_kwargs)
+    return model._require_fitted().fit_state.solver_result
+
+
+def _slope_tolerance(fit) -> float:
+    """``4 kappa u``, ``kappa`` the curvature's condition number (its factor's, squared).
+
+    The weakest direction of ``[1, offset + z]`` is almost all intercept; its
+    error of about ``kappa u ||beta||`` reaches the slope through a component of
+    ``1 / offset``, and ``||beta|| ~ offset |slope|``, so the slope's relative
+    error is about ``kappa u``.
+    """
+    return 4.0 * fit.terminal_curvature.condition_estimate**2 * np.finfo(np.float64).eps / 2
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+def test_an_offset_column_converges_in_a_few_newton_steps(discrete):
+    """``x = 1e5 + N(0, 1)`` beside an intercept converges, unshifted, to the centred fit's slope.
+
+    The curvature's condition number is about ``4e10``, so a backward-stable
+    Newton solve leaves a residual near ``u ||H|| ||s||``, above a fixed
+    fraction of the score, and the step is accepted on its backward error.
+    Mutation check: on the relative test alone every step takes a Levenberg
+    shift, and the dense fit stops at ``max_iterations`` with the slope 1%
+    off; the chunked one needs 76 to 90 iterations.
+    """
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        offset = _offset_fit("GaussianLS", discrete, offset=1e5)
+        centred = _offset_fit("GaussianLS", discrete, offset=1e5, centred=True)
+    assert offset.converged and centred.converged
+    assert offset.iterations <= 12
+    assert offset.coefficients[1] == pytest.approx(
+        centred.coefficients[1], rel=_slope_tolerance(offset)
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "discrete"),
+    [(name, True) for name in _FAMILIES] + [("GaussianLS", False)],
+    ids=[f"{name}-chunked" for name in _FAMILIES] + ["GaussianLS-dense"],
+)
+def test_an_offset_column_at_the_edge_of_float64_converges_or_says_why(name, discrete):
+    """``x = 1e6 + N(0, 1)``: the centred fit's slope, or a warning that names the conditioning.
+
+    At a condition number of about ``4e12`` the stop is resolution-limited, so
+    whether it certifies depends on the platform's rounding; a fit that does
+    not certify must warn and name the cause, never stop silently. Mutation
+    check: on the relative residual test alone seven of these ten fits stop
+    at ``max_iterations`` with a thirtieth of the slope. The slope is checked
+    whether or not the fit certifies, since that mutant still warns.
+    """
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ConvergenceWarning)
+        offset = _offset_fit(name, discrete)
+    named = [w for w in caught if "condition number is about" in str(w.message)]
+    assert offset.converged or named
+    centred = _offset_fit(name, discrete, centred=True)
+    assert offset.coefficients[1] == pytest.approx(
+        centred.coefficients[1], rel=_slope_tolerance(offset)
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "discrete"),
+    [(name, True) for name in _FAMILIES] + [("GaussianLS", False)],
+    ids=[f"{name}-chunked" for name in _FAMILIES] + ["GaussianLS-dense"],
+)
+def test_an_offset_column_the_rank_drops_is_not_refitted_away(name, discrete):
+    """``x = 3e7 + N(0, 1)``: the rank drops the slope with the intercept, but the data resolve it.
+
+    The column is collinear with the intercept only in uncentred coordinates,
+    so the centred design test refuses the refit and the stopped state is
+    published with its disclosure. Mutation check: on uncentred column norms
+    with the refit accepted, the slope is published at zero, and on the dense
+    route as a converged fit with no warning.
+    """
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ConvergenceWarning)
+        offset = _offset_fit(name, discrete, offset=3e7)
+    named = [w for w in caught if "condition number is about" in str(w.message)]
+    assert offset.coefficients[1] != 0.0
+    assert offset.converged or named
+
+
+@pytest.mark.parametrize("units", [1e-7, 1.0, 1e7])
+@pytest.mark.parametrize("origin", [3e7, 1e13])
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+def test_a_column_far_from_zero_is_kept_in_any_units(monkeypatch, discrete, origin, units):
+    """``x = c (o + z)``: no unit ``c`` makes the slope an alias of the intercept.
+
+    The fit starts at the centred fit's optimum, so the rank drops a slope away
+    from zero. The design test reads the column centred, where it is ordinary,
+    so the slope is never refitted away; at ``o = 1e13`` float64 cancels the
+    centred square, which then counts as zero. The slope's ``4 kappa u`` bound
+    is about 1.6 relative at ``o = 3e7`` and vacuous at 1e13, so what the test
+    pins is the decision: no refit, and a slope off zero. Mutation checks: on
+    uncentred column norms ``c = 1e-7`` publishes a zero slope as converged, its
+    score inside the stop's ``tol (1 + |f|)``, and every ``c`` runs a refit;
+    taking the cancelled square as computed does the first at ``o = 1e13``.
+    """
+    import superglm.distributional.solver.solver as solver
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    rng = np.random.default_rng(11)
+    z = rng.standard_normal(3000)
+    y = 1.0 + 0.7 * z + rng.normal(0.0, 0.5, 3000)
+
+    def fitted(x):
+        family = GaussianLS(scale_floor=0)
+        location = family.location(term("x", Numeric()))
+        model = SuperLSS(family, location, family.scale(), discrete=discrete)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ConvergenceWarning)
+            model.fit(pd.DataFrame({"x": x}), y)
+        return model._require_fitted().fit_state.solver_result, caught
+
+    centred, _ = fitted(z)
+    start, run, reduced = solver._initial_coefficients, solver._run_iterations, []
+
+    def at_the_optimum(context):
+        coefficients = np.array(start(context))
+        if context.layout.n_coefficients == 3:
+            level, slope, scale = centred.coefficients
+            coefficients[:] = (level - origin * slope, slope / units, scale)
+        return coefficients
+
+    def recorded(context, *args, **kwargs):
+        reduced.append(context.retained is not None)
+        return run(context, *args, **kwargs)
+
+    monkeypatch.setattr(solver, "_initial_coefficients", at_the_optimum)
+    monkeypatch.setattr(solver, "_run_iterations", recorded)
+    offset, caught = fitted(units * (origin + z))
+    assert not any(reduced) and offset.terminal_rank.rank == 2
+    assert offset.coefficients[1] != 0.0
+    assert offset.converged or [w for w in caught if "condition number is about" in str(w.message)]
+    assert offset.coefficients[1] * units == pytest.approx(
+        centred.coefficients[1], rel=_slope_tolerance(offset)
+    )
+
+
+@pytest.mark.parametrize(
+    ("constant", "last_bit"), [(1e6, False), (1e9, False), (0.1, True)], ids=["1e6", "1e9", "0.1"]
+)
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+def test_a_constant_column_beside_an_intercept_is_refitted_as_an_alias(
+    monkeypatch, discrete, constant, last_bit
+):
+    """``x = c`` on every row: centred it is a zero column, and it is still an alias.
+
+    Its direction ``X N`` vanishes to rounding, so it is an alias whatever the
+    coordinates, and the fit is refitted without it from a start moved 3 along
+    it. The fit without the column bounds the agreement: each stops with its
+    score inside ``tol (1 + |f|)``, which moves a coefficient by about that
+    times ``sigma^2 / n``, here 3e-8. Mutation checks: on centred column norms
+    alone the alias reads 0 / 0, and the drifted state is published; the raw
+    dropped score, ``c`` times the retained one, refuses the refit at ``c = 1e9``,
+    and did at ``c = 1e6`` on Linux ARM64, where the retained score stopped larger.
+    At ``c = 0.1`` alternate rows hold the next float, so the centred square is
+    rounding, not zero: read on it, not uncentred, the multiplier refuses the refit.
+    """
+    import superglm.distributional.solver.solver as solver
+
+    rng = np.random.default_rng(3)
+    w = rng.standard_normal(3000)
+    y = 1.0 + 0.5 * w + rng.normal(0.0, 0.5, 3000)
+    start = solver._initial_coefficients
+
+    def drifted(context):
+        coefficients = np.array(start(context))
+        if context.layout.n_coefficients == 4:
+            coefficients[[0, 2]] += (-3.0 * constant, 3.0)
+        return coefficients
+
+    def fitted(columns):
+        family = GaussianLS(scale_floor=0)
+        location = family.location(*(term(name, Numeric()) for name in columns))
+        model = SuperLSS(family, location, family.scale(), discrete=discrete)
+        return _fit(model, pd.DataFrame(columns), y)
+
+    monkeypatch.setattr(solver, "_initial_coefficients", drifted)
+    reference = fitted({"w": w})
+    column = np.full(3000, constant)
+    if last_bit:
+        column[1::2] = np.nextafter(constant, np.inf)
+    result = fitted({"w": w, "x": column})
+    assert result.converged and result.terminal_rank.rank == 3
+    assert result.coefficients[2] == 0.0
+    np.testing.assert_allclose(result.coefficients[[0, 1, 3]], reference.coefficients, atol=1e-6)
+
+
+@pytest.mark.parametrize("factor", [2.0**30, 1e9])
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+def test_a_scaled_copy_of_a_column_is_refitted_as_an_alias(monkeypatch, discrete, factor):
+    """``z = c x``: an exact alias in any units, refitted from a start moved 3 along it.
+
+    The raw dropped score is ``c`` times the retained one, which the stop leaves
+    anywhere inside its tolerance. Net of it the multiplier is rounding, ``c``
+    times the dot products' unless ``c`` is a power of two, and ``z``'s spread,
+    ``c`` times ``x``'s, takes that out. So the refit is kept and matches the fit
+    on ``x`` alone, within the constant-column test's 3e-8. Mutation check: on
+    the raw dropped score the refit is refused and ``z`` is published nonzero.
+    """
+    import superglm.distributional.solver.solver as solver
+
+    rng = np.random.default_rng(11)
+    x = rng.standard_normal(3000)
+    y = 1.0 + 0.7 * x + rng.normal(0.0, 0.5, 3000)
+    start = solver._initial_coefficients
+
+    def drifted(context):
+        coefficients = np.array(start(context))
+        if context.layout.n_coefficients == 4:
+            coefficients[[1, 2]] += (3.0, -3.0 / factor)
+        return coefficients
+
+    def fitted(columns):
+        family = GaussianLS(scale_floor=0)
+        location = family.location(*(term(name, Numeric()) for name in columns))
+        model = SuperLSS(family, location, family.scale(), discrete=discrete)
+        return _fit(model, pd.DataFrame(columns), y)
+
+    monkeypatch.setattr(solver, "_initial_coefficients", drifted)
+    reference = fitted({"x": x})
+    result = fitted({"x": x, "z": factor * x})
+    assert result.converged and result.terminal_rank.rank == 3
+    assert result.coefficients[2] == 0.0
+    np.testing.assert_allclose(result.coefficients[[0, 1, 3]], reference.coefficients, atol=1e-6)
+
+
+def _square_far_from_zero(monkeypatch, discrete, units, response):
+    """``x = c (1e4 + z)`` beside ``x^2``, fitted with ``y`` scaled by ``response``.
+
+    Returns the solver result and whether a reduced run ran.
+    """
+    import superglm.distributional.solver.solver as solver
+
+    rng = np.random.default_rng(5)
+    z = rng.standard_normal(3000)
+    y = response * (1.0 + 0.5 * z + 0.1 * z**2 + rng.normal(0.0, 0.5, 3000))
+    x = units * (1e4 + z)
+    run, reduced = solver._run_iterations, []
+
+    def recorded(context, *args, **kwargs):
+        reduced.append(context.retained is not None)
+        return run(context, *args, **kwargs)
+
+    monkeypatch.setattr(solver, "_run_iterations", recorded)
+    family = GaussianLS(scale_floor=0)
+    location = family.location(term("x", Numeric()), term("x2", Numeric()))
+    model = SuperLSS(family, location, family.scale(), discrete=discrete)
+    return _fit(model, pd.DataFrame({"x": x, "x2": x**2}), y), any(reduced)
+
+
+@pytest.mark.parametrize(("units", "response"), [(1.0, 1.0), (1e-4, 1.0), (1.0, 100.0)])
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+def test_a_column_beside_its_square_far_from_zero_keeps_both(
+    monkeypatch, discrete, units, response
+):
+    """``x = c (1e4 + z)`` beside ``x^2``: centred they stay collinear, but the data resolve them.
+
+    On centred unit columns the pair's direction has ``rho`` about 5e-5, far above
+    the 1e-7 at which a design has a linear dependency, so no refit runs in any
+    units of ``x`` or ``y`` and the stopped state stands, its square nonzero.
+    Mutation check: on ``rho <= cutoff ** (1/4)`` the refit runs, and at
+    ``y = 100 (...)`` the dropped multiplier keeps it, publishing the square at zero.
+    """
+    result, reduced = _square_far_from_zero(monkeypatch, discrete, units, response)
+    assert not reduced
+    assert result.terminal_rank.rank < result.terminal_rank.width
+    assert np.all(result.coefficients[:3] != 0.0)
+
+
+@pytest.mark.parametrize("units", [1.0, 1e-4])
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+def test_a_refit_the_dropped_multiplier_refuses_keeps_the_stopped_state(
+    monkeypatch, discrete, units
+):
+    """The x / x^2 pair forced past the design test: the dropped multiplier refuses its refit.
+
+    Read per unit of the square's spread, the multiplier is about 495 times the
+    stop's bar in any units ``c``, so the published coefficients are the stopped
+    state's, those of the same fit with no refit. Mutation checks: accepting every
+    refit publishes the square at zero, and so does reading the multiplier in the
+    column's own units at ``c = 1e-4``.
+    """
+    import superglm.distributional.solver.solver as solver
+
+    monkeypatch.setattr(solver, "_drops_design_aliases", lambda layout, rank: True)
+    result, reduced = _square_far_from_zero(monkeypatch, discrete, units, 1.0)
+    assert reduced
+    monkeypatch.setattr(solver, "_drops_design_aliases", lambda layout, rank: False)
+    unreduced, _ = _square_far_from_zero(monkeypatch, discrete, units, 1.0)
+    assert np.all(result.coefficients[:3] != 0.0)
+    np.testing.assert_array_equal(result.coefficients, unreduced.coefficients)
+
+
+def test_an_ill_conditioned_fixed_lambda_fit_that_stops_short_warns_and_names_the_cause():
+    """``fit`` warns when its unconverged coefficient fit's curvature is past certification.
+
+    A well-conditioned one stopped by ``max_inner_iter`` discloses without a
+    warning (``test_distributional_public_face.py``). Mutation check: without
+    the conditioning clause ``fit`` stops silently, ``result_.converged`` its
+    only disclosure.
+    """
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    with pytest.warns(ConvergenceWarning, match="condition number is about") as caught:
+        result = _offset_fit("GaussianLS", True, max_inner_iter=1)
+    assert not result.converged
+    message = str(caught[0].message)
+    assert "(subtract its mean before fitting)" in message
+    assert "nearly linear combinations of one another (drop or combine them)" in message
 
 
 def test_formation_statistics_on_negative_diagonal_channels(terminal):
@@ -610,8 +1169,6 @@ def test_tensor_row_pass_forms_no_bin_grid():
     The whole grid's absolute rows would be ``512**2`` rows of 16 columns
     (32 MiB); the margins and a 4,000-row block are well under 4 MiB.
     """
-    import tracemalloc
-
     from superglm._frame import as_eager_frame
     from superglm.distributional.layout import build_stacked_layout
     from superglm.distributional.predictor import Predictor, compile_predictors
@@ -643,13 +1200,9 @@ def test_tensor_row_pass_forms_no_bin_grid():
     absolute = _formation.abs_group(tensor)
     values = rng.uniform(0, 1, (tensor.shape[1], 2))
     rows = rng.uniform(0, 1, (4000, 2))
-    tracemalloc.start()
-    try:
-        products = absolute.matvec(1000, 5000, values)
-        transposed = absolute.rmatvec(1000, 5000, rows)
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
+    peak, (products, transposed) = own_traced_peak(
+        lambda: (absolute.matvec(1000, 5000, values), absolute.rmatvec(1000, 5000, rows))
+    )
     assert peak < 4 * 2**20
     # Against the block's own absolute rows, formed from the margins.
     first = np.abs(np.asarray(tensor.B1_unique_t))[tensor.idx1[1000:5000]]
@@ -871,6 +1424,7 @@ def test_a_row_decided_fit_keeps_the_stable_saturated_smoothing_step(terminal):
             initial_lambda=1e10,
             max_lambda=1e12,
             practical_reml=False,
+            outer="efs",
         )
     result = model._require_fitted().fit_state.solver_result
     assert result.terminal_rank.row_decided
@@ -885,18 +1439,11 @@ def test_a_dense_block_statistic_holds_one_copy_of_its_rows():
     Mutation check: squaring an absolute copy holds two copies, about twice
     the rows' bytes.
     """
-    import tracemalloc
-
     from superglm._group_matrix._group_matrix_core import DenseGroupMatrix
 
     matrix = np.random.default_rng(0).normal(size=(20_000, 64))
     weights = np.random.default_rng(1).uniform(0.0, 2.0, len(matrix))
     absolute = _formation.abs_group(DenseGroupMatrix(matrix))
-    tracemalloc.start()
-    try:
-        squares = absolute.square_partial(0, len(matrix), weights)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+    peak, squares = own_traced_peak(absolute.square_partial, 0, len(matrix), weights)
     np.testing.assert_allclose(squares, (matrix * matrix).T @ weights, rtol=1e-12)
     assert peak < 1.5 * matrix.nbytes

@@ -1771,16 +1771,13 @@ def _size_biased_log_tail_ratio(
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Log ``E[Y; Y > y_p] / ((1 - p) E[Y])`` and ``w_p``, through the uniform tail.
 
-    The size-biased law ``y f(y) / E[Y]`` is the generalized gamma at gamma
-    shape ``kappa + sigma/Q`` (Stacy 1962), i.e. Prentice shape
-    ``Q' = Q / sqrt(1 + sigma Q)`` with
-    ``{Y > y_p} = {W' > (w_p - log1p(sigma Q)/Q) sqrt(1 + sigma Q)}``. Both
-    tails use :func:`gg_log_tail_jets` (Temme's uniform expansion near
-    ``Q = 0``), so nothing divides by ``Q``.
-
-    ``w_p`` solves ``log S(w) = log(1 - p)`` (``log F(w) = log p`` below the
-    median) by Newton from ``z - Q (z^2 + 2)/6``; log-concavity makes the
-    iteration monotone after one step. Unresolved rows are NaN.
+    The size-biased law ``y f(y) / E[Y]`` is the generalized gamma at gamma shape
+    ``kappa + sigma/Q`` (Stacy 1962), Prentice shape ``Q' = Q / sqrt(1 + sigma Q)``, with
+    ``{Y > y_p} = {W' > (w_p - log1p(sigma Q)/Q) sqrt(1 + sigma Q)}``. Both tails use
+    :func:`gg_log_tail_jets` (Temme's uniform expansion near ``Q = 0``), so nothing divides by
+    ``Q``. ``w_p`` solves ``log S(w) = log(1 - p)`` (``log F(w) = log p`` below the median) by
+    Newton from ``z - Q (z^2 + 2)/6``, monotone after one step by log-concavity. Unresolved
+    rows are NaN.
     """
     z = special.ndtri(probabilities)
     w = z - shape * (z * z + 2.0) / 6.0

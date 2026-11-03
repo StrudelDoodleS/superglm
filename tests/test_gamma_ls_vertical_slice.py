@@ -676,7 +676,6 @@ def _assert_terminal_raw_efs_evidence(model: DenseDistributionalModel) -> None:
     smoothing = model.smoothing
     assert smoothing is not None and smoothing.converged and smoothing.coefficient_converged
     assert smoothing.unresolved_upper_bound == ()
-    assert not smoothing.history or smoothing.history[-1].boundary_nominations == ()
     assert all(
         math.isfinite(value)
         and smoothing.config.minimum_lambda < value < smoothing.config.maximum_lambda

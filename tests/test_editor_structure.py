@@ -43,7 +43,12 @@ from superglm.editor.widget import EditorWidget
 from superglm.export.summary import build_summary_export_payload
 from superglm.features.rebuild import current_ranges
 from superglm.features.spline import _SplineBase
-from tests.test_editor import _editor_token_header, _post_json
+from tests.test_editor import (
+    _editor_token_header,
+    _post_json,
+    _post_refit_at_once,
+    _refit_at_once,
+)
 
 
 @pytest.fixture
@@ -117,7 +122,7 @@ def test_state_names_what_undo_and_redo_would_take(region_model):
     try:
         assert widget._state()["undo_redo"] == {"undo": None, "redo": None}
         session.select_levels("region", ["B", "C"])
-        envelope = widget._collapse_levels("region", "fit")
+        envelope = _refit_at_once(widget, "collapse", "region")
         assert envelope["state"]["undo_redo"] == {"undo": "collapse B + C in region", "redo": None}
         # An edit after the step is what Undo takes first.
         widget._select("region", [0])
@@ -591,7 +596,7 @@ def test_widget_http_set_reference_returns_transition_envelope(region_model):
     session = EditorSession.from_model(model, terms=["region"])
     widget = session.widget()
     try:
-        payload = _post_json(f"{widget.url}/set_reference", {"term": "region", "level": "C"})
+        payload = _post_refit_at_once(widget, "set_reference", "region", {"level": "C"})
         assert set(payload) == {"state", "summary", "timing"}
         assert payload["timing"]["operation"] == "set_reference"
         assert payload["state"]["terms"]["region"]["reference"] == {
@@ -616,9 +621,7 @@ def test_widget_http_collapse_reads_keep_reference_from_the_body(body, reference
     widget = session.widget()
     try:
         _post_json(f"{widget.url}/select", {"term": "region", "indices": [2, 3]})
-        payload = _post_json(
-            f"{widget.url}/collapse_levels", {"term": "region", "method": "fit", **body}
-        )
+        payload = _post_refit_at_once(widget, "collapse", "region", **body)
         assert payload["state"]["terms"]["region"]["reference"] == reference
     finally:
         widget.close()
@@ -637,23 +640,21 @@ def test_widget_http_ungroup_reads_keep_reference_from_the_body(body, reference)
     widget = session.widget()
     try:
         _post_json(f"{widget.url}/select", {"term": "region", "indices": [3]})
-        payload = _post_json(
-            f"{widget.url}/ungroup_levels", {"term": "region", "method": "fit", **body}
-        )
+        payload = _post_refit_at_once(widget, "ungroup", "region", **body)
         assert payload["state"]["terms"]["region"]["reference"] == reference
     finally:
         widget.close()
 
 
-@pytest.mark.parametrize("route", ["collapse_levels", "ungroup_levels"])
-def test_widget_http_refuses_a_keep_reference_that_is_not_a_boolean(region_model, route):
+@pytest.mark.parametrize("operation", ["collapse", "ungroup"])
+def test_widget_http_refuses_a_keep_reference_that_is_not_a_boolean(region_model, operation):
     model, _ = region_model
     session = EditorSession.from_model(model, terms=["region"])
     widget = session.widget()
     try:
         session.select_levels("region", ["B", "C"])
         with pytest.raises(urllib.error.HTTPError) as error:
-            _post_json(f"{widget.url}/{route}", {"term": "region", "keep_reference": "no"})
+            _post_refit_at_once(widget, operation, "region", keep_reference="no")
         assert error.value.code == 400
         assert json.loads(error.value.read().decode("utf-8")) == {
             "error": "keep_reference must be true or false."
@@ -1482,9 +1483,7 @@ def test_widget_http_shape_range_returns_transition_envelope(aged):
     session = EditorSession.from_model(model, terms=["age", "region"])
     widget = session.widget()
     try:
-        payload = _post_json(
-            f"{widget.url}/shape_range", {"term": "age", "lo": 30, "hi": 45.0, "degree": 1}
-        )
+        payload = _post_refit_at_once(widget, "shape", "age", {"lo": 30, "hi": 45.0, "degree": 1})
         assert set(payload) == {"state", "summary", "timing"}
         assert payload["timing"]["operation"] == "shape_range"
         assert payload["state"]["undo_redo"]["undo"] == "Line 30–45 in age"
@@ -1545,7 +1544,8 @@ def test_widget_http_shape_range_answers_refusals_with_intentional_messages(aged
         message = _SHAPE_REFUSED
     try:
         with pytest.raises(urllib.error.HTTPError) as error:
-            _post_json(f"{widget.url}/shape_range", body)
+            params = {key: value for key, value in body.items() if key != "term"}
+            _post_refit_at_once(widget, "shape", body["term"], params)
         assert error.value.code == 400
         assert json.loads(error.value.read().decode("utf-8")) == {"error": message}
         assert session.model is model and session.structure_history == []
@@ -1815,7 +1815,7 @@ def test_widget_http_revert_to_original_returns_transition_envelope(region_model
     widget = session.widget()
     try:
         session.select_levels("region", ["B", "C"])
-        widget._collapse_levels("region", "fit")
+        _refit_at_once(widget, "collapse", "region")
         payload = _post_json(f"{widget.url}/revert_to_original", {})
         assert set(payload) == {"state", "summary", "timing"}
         assert payload["timing"]["operation"] == "revert_to_original"

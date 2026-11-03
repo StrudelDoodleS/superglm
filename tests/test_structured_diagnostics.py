@@ -83,7 +83,7 @@ def _fit_structured_diagnostic_case(
             direct_solve="structured",
         )
 
-    model.fit_reml(X, y, max_reml_iter=2, runtime_validation="skip")
+    model.fit_reml(X, y, max_reml_iter=2)
     return model, X, y
 
 

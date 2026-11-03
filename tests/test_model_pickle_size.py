@@ -62,26 +62,10 @@ def _scop_fit(retain_fit_state):
         family="gaussian",
         selection_penalty=0.0,
         features={
-            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing, shape_engine="scop"),
+            "x": PSpline(n_knots=7, constraint=Constraint.fit.increasing),
             "band": Categorical(),
         },
         retain_fit_state=retain_fit_state,
     )
     model.fit(frame, y)
     return model
-
-
-@pytest.mark.parametrize("retain_fit_state", [True, False])
-def test_scop_fit_pickles_no_data_gram_after_its_first_inference(retain_fit_state):
-    """The fit's Gram is 8 p^2 bytes the SCOP branch of the inference must take."""
-    model = _scop_fit(retain_fit_state)
-    assert model._solver_result.scop_inference is not None
-    if retain_fit_state:
-        model.summary()
-    rank_info = model._solver_result.rank_info
-    assert rank_info.data_gram is None
-    size = len(pickle.dumps(model))
-    p = len(rank_info.mean_x)
-    # a held Gram (as the first hand-off commit left it on SCOP fits) would add 8 p^2 bytes
-    object.__setattr__(rank_info, "data_gram", np.zeros((p, p)))
-    assert len(pickle.dumps(model)) >= size + 8 * p * p

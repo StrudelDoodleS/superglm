@@ -3,31 +3,17 @@
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, as_eager_frame
-from superglm.distributions import clip_mu
-from superglm.features.ordered_categorical import resolve_interaction_parent_of
-from superglm.links import stabilize_eta
-from superglm.solvers.mode_score import linear_predictor, two_sum
+from superglm.solvers.mode_score import two_sum
 from superglm.solvers.pirls import PIRLSResult
 
 _RUNTIME_MEAN_CHUNK_SIZE = 8192
-
-
-@dataclass(frozen=True)
-class CanonicalizationDiagnostics:
-    """Diagnostics for the runtime canonicalization pass."""
-
-    max_abs_eta_delta: float
-    max_abs_mu_delta: float
-    intercept_shift: float
-    term_means_before: dict[str, float]
-    term_means_after: dict[str, float]
 
 
 @dataclass(frozen=True)
@@ -110,22 +96,6 @@ def _group_column_means(group_matrix, n_rows: int) -> NDArray[np.float64]:
     """Compute unweighted training-row column means for one fitted block."""
     ones = np.ones(n_rows, dtype=np.float64)
     return np.asarray(group_matrix.rmatvec(ones), dtype=np.float64) / float(n_rows)
-
-
-def _term_contribution(
-    model,
-    solver: PIRLSResult,
-    group_indices: tuple[int, ...],
-) -> NDArray[np.float64]:
-    """Evaluate one fitted term on the training rows in solver space."""
-    contribution = np.zeros(model._dm.n, dtype=np.float64)
-    for idx in group_indices:
-        group = model._groups[idx]
-        contribution += np.asarray(
-            model._dm.group_matrices[idx].matvec(solver.beta[group.sl]),
-            dtype=np.float64,
-        )
-    return contribution
 
 
 def _term_group_metadata(model, group_indices: tuple[int, ...]) -> list[dict[str, Any]]:
@@ -294,11 +264,6 @@ def _compile_runtime_terms(
             )
 
         shift = _term_shift_from_groups(solver, groups)
-        mean_before = (
-            float(shift)
-            if can_materialize
-            else float(np.mean(_term_contribution(model, solver, group_indices)))
-        )
         applied_to_public_model = _materialize_public_term(term_kind, spec, mode, groups)
 
         if applied_to_public_model:
@@ -310,109 +275,10 @@ def _compile_runtime_terms(
             "applied_to_public_model": applied_to_public_model,
             "group_indices": group_indices,
             "groups": groups,
-            "term_mean_before": mean_before,
-            "term_mean_after": None,
             "intercept_shift": float(shift),
         }
 
     return term_states, public_intercept_shift
-
-
-def _live_public_runtime_state(
-    model,
-    public_result: PIRLSResult,
-) -> tuple[dict[str, NDArray[np.float64]], NDArray[np.float64], NDArray[np.float64]]:
-    """Evaluate the training rows through the live public scoring contract."""
-    from superglm.model import base
-
-    X_ref = model._fit_X_ref
-    if X_ref is None:
-        raise RuntimeError("Training feature reference is required for runtime diagnostics")
-    frame = as_eager_frame(X_ref)
-
-    plan = base._build_prediction_plan(model)
-    beta_all = public_result.beta
-    # eta through the published scoring contract (``base._predict_eta``): a
-    # term whose dense columns keep a centre enters centred; the per-term
-    # contributions stay raw, since their means are what canonicalization moves.
-    intercept, centre, intercept_lo = base.prediction_centred_state(public_result)
-    eta = base.start_eta(len(frame), intercept, intercept_lo)
-    contributions: dict[str, NDArray[np.float64]] = {}
-
-    def published(term: dict[str, Any], contribution: NDArray[np.float64]) -> NDArray:
-        if centre is not None and np.any(centre[term["beta_idx"]] != 0.0):
-            return base._centred_term_contribution(term, frame, beta_all, centre[term["beta_idx"]])
-        return contribution
-
-    for term in plan["features"]:
-        if term["name"] in model._interaction_specs:
-            continue
-        values = frame.column_array(term["name"])
-        beta = beta_all[term["beta_idx"]]
-        contribution = np.asarray(
-            base._score_feature(term["spec"], values, beta),
-            dtype=np.float64,
-        ).ravel()
-        contributions[term["name"]] = contribution
-        eta += published(term, contribution)
-
-    for term in plan["interactions"]:
-        if term["name"] in model._specs:
-            continue
-        spec = term["spec"]
-        left_name, right_name = spec.parent_names
-        beta = beta_all[term["beta_idx"]]
-        _, left = resolve_interaction_parent_of(
-            spec, model._specs.get(left_name), frame.column_array(left_name)
-        )
-        _, right = resolve_interaction_parent_of(
-            spec, model._specs.get(right_name), frame.column_array(right_name)
-        )
-        contribution = np.asarray(
-            base._score_interaction(spec, left, right, beta),
-            dtype=np.float64,
-        ).ravel()
-        contributions[term["name"]] = contribution
-        eta += published(term, contribution)
-
-    eta = base.finish_eta(eta, intercept, intercept_lo)
-    if model._fit_offset is not None:
-        eta = eta + model._fit_offset
-
-    eta = stabilize_eta(eta, model._link)
-    mu = clip_mu(model._link.inverse(eta), model._distribution)
-    return contributions, eta, mu
-
-
-def _compute_public_parity_diagnostics(
-    model,
-    solver: PIRLSResult,
-    public_result: PIRLSResult,
-    term_states: dict[str, dict[str, Any]],
-    intercept_shift: float,
-) -> tuple[CanonicalizationDiagnostics, dict[str, float]]:
-    """Compute diagnostics from the live public runtime state."""
-    eta_before = stabilize_eta(linear_predictor(model._dm, solver, model._fit_offset), model._link)
-    mu_before = clip_mu(model._link.inverse(eta_before), model._distribution)
-
-    contributions_after, eta_after, mu_after = _live_public_runtime_state(model, public_result)
-    live_term_means_after = {
-        term_name: float(np.mean(contributions_after[term_name]))
-        for term_name in term_states
-        if term_name in contributions_after
-    }
-
-    diagnostics = CanonicalizationDiagnostics(
-        max_abs_eta_delta=float(np.max(np.abs(eta_after - eta_before))) if eta_before.size else 0.0,
-        max_abs_mu_delta=float(np.max(np.abs(mu_after - mu_before))) if mu_before.size else 0.0,
-        intercept_shift=float(intercept_shift),
-        term_means_before={
-            term_name: float(term_state["term_mean_before"])
-            for term_name, term_state in term_states.items()
-        },
-        term_means_after=live_term_means_after,
-    )
-    return diagnostics, live_term_means_after
 
 
 def _solver_to_public_state(
@@ -433,25 +299,12 @@ def _public_centred_state(
 ) -> tuple[float | None, NDArray[np.float64] | None, float | None]:
     """The solver's centred state ``(alpha, c, alpha_lo)`` read in the public coordinates.
 
-    The fit's predictor is ``eta = alpha + (X - 1 c') beta`` (one-engine
-    design §3.8, ``mode_score.linear_predictor``), free of the cancellation a
-    dense column's offset forces between ``X beta`` and the raw intercept.
-    Prediction differences a column about its centre only where the term
-    scores its raw columns that way (``base.scores_centred``: a numeric
-    column, or the product of two, the columns that can sit at an offset far
-    above their spread), on a ``DenseGroupMatrix`` block.  Every other
-    column's entries are bounded by its basis, so its ``(m - c)' beta`` is
-    folded into ``alpha`` once here and it is scored as it is, ``m`` the
-    training means a materialized public term's columns lose
-    (``_apply_r_inv_centering``).  Exact algebra: ``alpha_pub + (X_pub - 1
-    c_pub') beta`` is the solver's predictor.  A compensated solver intercept
-    ``(alpha, alpha_lo)`` keeps its remainder, plus the rounding of the fold
-    (a TwoSum), also when no column keeps a centre (the public centre is then
-    zero and every term is scored as it is).  ``(None, None, None)`` when the
-    solver carries no centred state, or carries no remainder and no such
-    column keeps a centre, so the model predicts from its raw intercept
-    exactly as before.  A model saved before the remainder existed carries
-    none, and predicts as it did.
+    The fit's predictor is ``eta = alpha + (X - 1 c') beta`` (``mode_score.linear_predictor``),
+    free of the cancellation between ``X beta`` and the raw intercept. Only a
+    ``DenseGroupMatrix`` column its term scores centred (``base.scores_centred``) keeps its
+    centre; every other column's ``(m - c)' beta`` is folded into ``alpha`` once, its rounding
+    kept in ``alpha_lo`` by TwoSum. Returns ``(None, None, None)`` when there is no centred
+    state, or no remainder and no kept centre, so the model predicts from its raw intercept.
     """
     from superglm.group_matrix import DenseGroupMatrix
     from superglm.model.base import scores_centred
@@ -478,9 +331,7 @@ def _public_centred_state(
     public_centre = np.where(dense & differenced & (centre != 0.0), centre - shifts, 0.0)
     alpha_lo = getattr(solver, "centred_intercept_lo", None)
     # A compensated intercept keeps its pair even when every column folds into
-    # it (a zero public centre): the remainder is part of the fit's predictor,
-    # and the raw intercept alone predicted it away from the deviance and scale
-    # the fit published.
+    # it: the remainder is part of the fit's predictor.
     if not np.any(public_centre != 0.0) and alpha_lo is None:
         return None, None, None
     alpha_public, alpha_public_lo = _fold_public_pair(
@@ -537,7 +388,7 @@ def _build_public_result(solver: PIRLSResult, state: dict[str, Any]) -> PIRLSRes
     return public_result
 
 
-def canonicalize_fitted_model(model, *, validate: bool = True) -> None:
+def canonicalize_fitted_model(model) -> None:
     """Finalize the public runtime result after solver-space fitting completes."""
     from superglm.model import base
 
@@ -554,39 +405,11 @@ def canonicalize_fitted_model(model, *, validate: bool = True) -> None:
         "centred_intercept_lo": centred_intercept_lo,
     }
     public_result = _build_public_result(solver, state)
-    if validate:
-        diagnostics, live_term_means_after = _compute_public_parity_diagnostics(
-            model,
-            solver,
-            public_result,
-            term_states,
-            public_intercept_shift,
-        )
-        diagnostics_state = asdict(diagnostics)
-    else:
-        live_term_means_after = {}
-        diagnostics_state = {
-            "max_abs_eta_delta": float("nan"),
-            "max_abs_mu_delta": float("nan"),
-            "intercept_shift": float(public_intercept_shift),
-            "term_means_before": {
-                term_name: float(term_state["term_mean_before"])
-                for term_name, term_state in term_states.items()
-            },
-            "term_means_after": {},
-            "skipped": True,
-        }
-
-    for term_name, term_state in term_states.items():
-        if term_state["applied_to_public_model"]:
-            term_state["term_mean_after"] = live_term_means_after.get(term_name)
-
     solver_to_public, solver_to_public_complete = _solver_to_public_state(model, term_states)
 
     model._result = public_result
     model._runtime_canonical_state = {
         "terms": term_states,
-        "diagnostics": diagnostics_state,
         "intercept_shift": float(public_intercept_shift),
         "solver_to_public": solver_to_public,
         "solver_to_public_complete": solver_to_public_complete,

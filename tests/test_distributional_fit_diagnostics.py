@@ -25,9 +25,7 @@ from superglm.distributional.predictor import Predictor
 from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.results.solver import (
     DenseSolverConfig,
-    _validate_objective_and_step_certificate,
 )
-from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.distributional.weights import WeightContract
 from superglm.features import Numeric, RandomEffect, Spline
 
@@ -828,42 +826,6 @@ def test_curvature_fallbacks_make_converged_result_uncertified_and_report_source
     assert f"{expected_count} curvature {fallback_word}" in fallback.observed
 
 
-def test_fallback_cannot_replace_the_only_objective_and_step_certificate() -> None:
-    config = DenseSolverConfig(tolerance=1.0e-9)
-    # For l(beta) = -1 - beta**2/2 at beta = -4*tol, the score exceeds
-    # its tolerance while the observed Newton decrement is much smaller.
-    score = np.array([4.0 * config.tolerance])
-    objective = -1.0 - 0.5 * float(score @ score)
-    assert float(np.max(np.abs(score))) / (1.0 + abs(objective)) > config.tolerance
-    observed = CurvatureTelemetry(
-        requested_source="observed",
-        actual_source="observed",
-        reason=None,
-        minimum_eigenvalue=1.0,
-        rank=1,
-        condition_estimate=1.0,
-        fallback_count=0,
-        matrix_kind="penalized",
-    )
-    inputs = dict(
-        config=config,
-        converged=True,
-        score=score,
-        penalized_curvature=np.eye(1),
-        penalized_objective=objective,
-        face=None,
-    )
-    _validate_objective_and_step_certificate(terminal_curvature=observed, **inputs)
-    fallback = replace(
-        observed,
-        actual_source="fisher",
-        reason="observed_curvature_not_usable",
-        fallback_count=1,
-    )
-    with pytest.raises(ValueError, match="retained score or unfallbacked observed curvature"):
-        _validate_objective_and_step_certificate(terminal_curvature=fallback, **inputs)
-
-
 def test_lambda_cap_unresolved_is_per_qualified_component_with_refusal_evidence(
     unresolved_cap_model,
 ) -> None:
@@ -1339,3 +1301,18 @@ def test_stationary_stop_is_described_as_the_reml_optimum() -> None:
     text = report.render(detail="full")
     assert "REML optimum" in text and "projected gradient" in text
     assert not [f for f in report.findings if f.code == "smoothing.persistent_upward_drift"]
+
+
+def test_rank_reduced_stop_finding_names_the_stop_and_an_action() -> None:
+    from superglm.distributional.fit_diagnostics import _not_converged_finding
+
+    finding = _not_converged_finding(
+        loop="coefficient",
+        reason="rank_reduced_at_stop",
+        iterations=0,
+        provenance="solver_history",
+    )
+
+    assert "'rank_reduced_at_stop'" in finding.observed
+    assert "rank certificate" in finding.interpretation
+    assert "aliased" in finding.actions[0].question

@@ -550,7 +550,7 @@ def test_reml_fit_shrinks_a_declared_unobserved_level_to_the_population() -> Non
         direct_solve="gram",
     )
 
-    model.fit_reml(X, y, max_reml_iter=2, runtime_validation="skip")
+    model.fit_reml(X, y, max_reml_iter=2)
 
     assert len(model.result.beta) == 3 * 6
     assert np.all(np.isfinite(model.result.beta))

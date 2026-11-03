@@ -6,6 +6,7 @@ Each distribution provides V(mu) (variance function) and d(y, mu)
 
 from __future__ import annotations
 
+import warnings
 from typing import Protocol, runtime_checkable
 
 import numpy as np
@@ -13,7 +14,7 @@ from numpy.typing import NDArray
 from scipy.special import betaln, gammaln
 
 # ── Numerical guard constants for positive-mean families ─────────
-_POSITIVE_INIT_MIN = 1e-12  # floor for initial_mean (replaces 0.1 pseudo-response)
+_POSITIVE_INIT_MIN = 1e-12  # floor for initial_mean
 _POSITIVE_MU_MIN = 1e-50  # clip_mu lower bound (log → eta ≈ -115)
 _POSITIVE_MU_MAX = 1e50  # clip_mu upper bound (log → eta ≈ +115)
 _VARIANCE_FLOOR = 1e-100  # V(mu) floor for IRLS working weights
@@ -86,9 +87,8 @@ def _gamma_log_density(y: NDArray, mu: NDArray, shape: NDArray | float) -> NDArr
             )
             density[stable] = normalizer - deviance
         except ValueError:
-            # Preserve the scalar API's previous nonfinite disposition for
-            # out-of-domain or unrepresentable rows; one such row must not
-            # prevent stable evaluation of the other carried rows.
+            # Fall back row by row, so one out-of-domain or unrepresentable row
+            # takes the scalar API's nonfinite value without blocking the rest.
             for local, index in enumerate(np.flatnonzero(stable)):
                 try:
                     _, _, deviance = _scaled_ratio_terms(
@@ -435,12 +435,9 @@ class NegativeBinomial:
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         """NB2 unit deviance."""
         theta = self.theta
-        # np.where evaluates both branches on every row: at a y = 0 row with
-        # a trial step's large mu, 1e-300 / mu underflows and the unselected
-        # branch takes log(0) and 0 * -inf, warning about values the result
-        # never reads. A selected row a trial step leaves non-finite is the
-        # solver's to judge from the deviance it returns, as for Gamma.
-        # errstate changes no value.
+        # np.where evaluates both branches on every row; errstate silences
+        # warnings from the unselected branch (log(0) at y = 0 with a large
+        # trial mu) and changes no value.
         with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
             d = np.where(
                 y > 0,
@@ -684,33 +681,16 @@ def prior_weight_log_density(
 ) -> NDArray | None:
     """Return the per-row EDM prior-weight log density, or None for a custom family.
 
-    Each shipped family is closed under the EDM prior-weight construction --
-    ``w Y`` is a member of the same family at parameters scaled by ``w`` -- so
-    every form below is exact rather than a quasi-likelihood, and each reduces
-    to the family's own ``log_likelihood`` at ``w == 1``.  A zero-weight row
-    contributes exactly zero: it carries no information, and several of the
-    forms below are not finite at ``w = 0`` because their normalizer sits at a
-    gamma-function pole.
-
-    "Exact" is unqualified for Gaussian, Gamma and Tweedie, whose supports are
-    continuous, and for Binomial, where ``validate_response`` pins
-    ``y in {0, 1}`` and the scaled coefficient is then exactly 1.  For Poisson
-    and the negative binomial it holds **on the family's lattice**, where
-    ``w * y`` is a non-negative integer -- which is the canonical case here,
-    ``y = count / exposure`` with ``w = exposure``.  Off the lattice
-    ``validate_response`` requires only ``y >= 0``, and the ``gammaln`` factor
-    is then a Gamma-function interpolation of the counting density rather than
-    a density.  For Poisson the interpolated part depends only on ``(y, w)``,
-    so it moves the reported log-likelihood, AIC and BIC and nothing else; for
-    the negative binomial the ``Gamma(w y + w theta) / Gamma(w theta)`` factor
-    is theta-dependent, so it reaches ``theta_hat`` too.
-
-    The mean-dependent part is *identical* to the frequency form in every case:
-    prior weighting scales the same sufficient statistic, which is why the two
-    contracts share a score equation and a ``beta_hat``.  What differs is the
-    normalizer, and -- for the estimated-scale families -- how ``phi`` enters
-    it.  That is the whole of the reported log-likelihood's dependence on the
-    contract, and hence of AIC's and BIC's.
+    Each shipped family is closed under the EDM prior-weight construction
+    (``w Y`` is in the same family at parameters scaled by ``w``), so each form
+    is exact and reduces to the family's ``log_likelihood`` at ``w == 1``. A
+    zero-weight row contributes exactly zero. For Poisson and the negative
+    binomial exactness holds on the lattice where ``w * y`` is a non-negative
+    integer (``y = count / exposure``, ``w = exposure``); off it the
+    ``gammaln`` factor interpolates the counting density, which moves the
+    reported log-likelihood (and, for NB, ``theta_hat``). The mean-dependent
+    part equals the frequency form in every case, so both contracts share
+    ``beta_hat``; only the normalizer differs.
     """
     w = np.asarray(weights, dtype=np.float64)
     if isinstance(family, Gaussian):
@@ -764,11 +744,9 @@ def prior_weight_log_density(
         )
         return contribution
     if isinstance(family, Binomial):
-        # w is the trial count and y the success proportion, which is R's
-        # documented binomial convention.  On this family's own domain
-        # y in {0, 1} the binomial coefficient is exactly 1, so the prior and
-        # frequency forms coincide; the general expression is kept because it
-        # is what makes that agreement a derivation rather than a coincidence.
+        # w is the trial count and y the success proportion (R's binomial
+        # convention). On y in {0, 1} the coefficient is exactly 1, so the prior
+        # and frequency forms coincide.
         mu_safe = np.clip(mu, 1e-15, 1 - 1e-15)
         wy = w * y
         contribution = (
@@ -835,19 +813,12 @@ def weighted_log_likelihood(
     density = prior_weight_log_density(family, y, mu, weights, phi)
     if density is not None:
         return float(np.sum(density, dtype=np.float64))
-    # At unit weight there is no mismatch to warn about: the two contracts are
-    # the same likelihood, so the family's own `log_likelihood` IS the prior
-    # form rather than a substitute for it. Warning here fired on every
-    # ordinary unweighted custom-family fit -- twice, since the null likelihood
-    # is computed too -- and turned into a hard failure under `-W error`.
-    # Zero-weight rows are carried through the same test because they
-    # contribute nothing under either reading.
+    # At unit weight (zero-weight rows included) the two contracts are the same
+    # likelihood, so there is no mismatch to report.
     carried = np.asarray(weights, dtype=np.float64)
     if np.all((carried == 0.0) | (carried == 1.0)) or not report_contract:
         return float(family.log_likelihood(y, mu, weights, phi))
-    from superglm import _held_warnings
-
-    _held_warnings.warn(
+    warnings.warn(
         f"{type(family).__name__} is not a SuperGLM-shipped family, so its EDM "
         "prior-weight normalizer cannot be derived here. Its own log_likelihood "
         "is being used unchanged, which reports sum(w * log f(y; mu, phi)) -- "

@@ -12,10 +12,26 @@ import pytest
 from superglm.distributions import Poisson
 from superglm.reml.gradient import reml_direct_hessian
 from superglm.solvers._structured import block_leaves as leaves_module
+from superglm.solvers._structured.assembly import (
+    build_augmented_structured_factor,
+    build_penalized_structured_operator,
+    solve_cached_structured,
+)
 from superglm.solvers._structured.block_leaves import (
     FactorSmoothLeafFactor,
     FactorSmoothPenalizedOperator,
     ProfiledFactorSmoothLeafFactor,
+)
+from superglm.solvers._structured.geometry import (
+    centered_operator_coefficient_estimable,
+)
+from superglm.solvers._structured.operators import (
+    BlockSymmetricOperator,
+    CenteredBlockOperator,
+    LowRankSymmetricOperator,
+    SumBlockOperator,
+    SymmetricBlockOperator,
+    materialize_compact_operator,
 )
 from superglm.solvers.hessian_factor import (
     DenseHessianFactor,
@@ -24,18 +40,6 @@ from superglm.solvers.hessian_factor import (
     _component_omega,
 )
 from superglm.solvers.rank import decompose_factor, decompose_gram, needs_factor_certification
-from superglm.solvers.structured import (
-    BlockSymmetricOperator,
-    CenteredBlockOperator,
-    LowRankSymmetricOperator,
-    SumBlockOperator,
-    SymmetricBlockOperator,
-    build_augmented_structured_factor,
-    build_penalized_structured_operator,
-    centered_operator_coefficient_estimable,
-    materialize_compact_operator,
-    solve_cached_structured,
-)
 from superglm.types import PenaltyComponent
 from tests._leaf_systems import leaf_system_from_rows
 
@@ -135,13 +139,6 @@ def test_a_non_finite_low_rank_part_is_refused_as_curvature(part, bad) -> None:
         LowRankSymmetricOperator(basis=basis, core=core)
 
 
-def test_structured_solver_module_exists():
-    assert importlib.util.find_spec("superglm.solvers.structured") is not None
-    structured = import_module("superglm.solvers.structured")
-    assert callable(structured.build_structured_system)
-    assert callable(structured.build_augmented_structured_factor)
-
-
 def test_hessian_factor_module_exists():
     assert importlib.util.find_spec("superglm.solvers.hessian_factor") is not None
     hessian_factor = import_module("superglm.solvers.hessian_factor")
@@ -157,12 +154,6 @@ def test_dense_hessian_factor_and_protocol_are_available():
 
     assert hasattr(factors, "HessianFactor")
     assert hasattr(factors, "DenseHessianFactor")
-
-
-def test_symmetric_block_operator_is_available():
-    structured = import_module("superglm.solvers.structured")
-
-    assert hasattr(structured, "SymmetricBlockOperator")
 
 
 def test_symmetric_block_operator_is_frozen_and_owns_read_only_arrays():

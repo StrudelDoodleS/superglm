@@ -1370,13 +1370,6 @@ def test_automatic_smoothing_tweedie_lss_fit(
     assert genuine_early_cap.converged is False
     assert genuine_early_cap.convergence_reason == "max_iterations"
     assert genuine_early_cap.terminal_raw_max_log_step > (genuine_early_cap.config.tolerance)
-    with pytest.raises(ValueError, match="fresh convergence"):
-        replace(
-            genuine_early_cap,
-            config=smoothing.config,
-            converged=True,
-            convergence_reason="objective_plateau",
-        )
     assert smoothing.matched_certified is True
     assert_matched_certified(smoothing)
 

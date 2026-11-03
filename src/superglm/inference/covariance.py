@@ -1,18 +1,10 @@
-"""Covariance accessors and penalised-Hessian penalty assembly.
+"""Covariance accessors and penalty assembly for the penalised Hessian.
 
-Extracted from ``metrics.py`` to break the inference <-> metrics circular
-dependency.  These functions depend only on numpy, scipy, group_matrix, and
-types — they have no dependency on inference results or metrics classes.
-
-The module no longer assembles or decomposes a penalised Hessian.
-``_penalised_xtwx_inv`` and ``_penalised_xtwx_inv_gram`` used to build
-``(X'WX + S)`` here and take its pseudo-inverse; both were dead in production
-and were removed.  The accessors below still apply an inverse, but only
-through a factorisation handed to them.  Coefficient covariance is published by
-``model/state_ops.py`` and ``inference/metrics.py``, which consult
-``decompose_gram_if_authoritative`` and fall back to a streamed observation
-factor themselves.  ``_active_penalty_matrix`` -- the ``S`` half of that
-assembly -- stayed, because those two are its callers.
+These depend only on numpy, scipy, group_matrix and types, so inference and
+metrics can both import them. The accessors apply an inverse only through a
+factorisation handed to them; coefficient covariance is published by
+``model/state_ops.py`` and ``inference/metrics.py``, which call
+``_active_penalty_matrix`` for the ``S`` half.
 """
 
 from __future__ import annotations
@@ -27,11 +19,13 @@ from superglm.group_matrix import (
     SplineCategoricalGroupMatrix,
 )
 from superglm.solvers._structured.balance_tree import ProfiledSumToZeroTreeFactor
-from superglm.solvers.hessian_factor import HessianFactor, _expanded_component_omega
-from superglm.solvers.structured import (
+from superglm.solvers._structured.block_leaves import (
     ProfiledFactorSmoothLeafFactor,
+)
+from superglm.solvers._structured.nested import (
     ProfiledNestedSchurFactor,
 )
+from superglm.solvers.hessian_factor import HessianFactor, _expanded_component_omega
 from superglm.types import GroupSlice
 
 
@@ -332,36 +326,22 @@ def _second_diff_penalty(p: int) -> NDArray:
     return D2.T @ D2
 
 
-def _active_penalty_matrix(
+def _active_penalty_components(
     group_matrices: list,
     groups: list[GroupSlice],
     active_groups: list[GroupSlice],
     lambda2: float | dict[str, float],
     *,
-    S_override: NDArray | None = None,
     reml_penalties: list | None = None,
-) -> NDArray:
-    """Build ``S`` directly in compact active coordinates."""
+):
+    """Yield ``(columns, lam, omega)`` for each nonzero term of ``S = sum_k lam_k S_k``.
+
+    ``columns`` is the term's slice in compact active coordinates and
+    ``omega`` its ``S_k`` there; ``None`` is the identity on the slice.
+    """
     from superglm.reml.penalty_algebra import ssp_penalty_matrix
 
-    p_active = sum(group.size for group in active_groups)
-    if p_active == 0:
-        return np.empty((0, 0), dtype=np.float64)
-
     active_by_name = {group.name: group for group in active_groups}
-    if S_override is not None:
-        selected_columns = np.asarray(
-            [
-                column
-                for group in groups
-                if group.name in active_by_name
-                for column in range(group.start, group.end)
-            ],
-            dtype=np.intp,
-        )
-        return np.asarray(S_override[np.ix_(selected_columns, selected_columns)], dtype=np.float64)
-
-    S = np.zeros((p_active, p_active), dtype=np.float64)
     if reml_penalties is not None:
         represented_group_indices = {component.group_index for component in reml_penalties}
         for component in reml_penalties:
@@ -373,24 +353,18 @@ def _active_penalty_matrix(
             if lam == 0:
                 continue
             if component.penalty_kind == "identity":
-                indices = np.arange(
-                    active_group.start,
-                    active_group.end,
-                    dtype=np.intp,
-                )
-                S[indices, indices] += lam
+                yield active_group.sl, lam, None
                 continue
             omega = (
                 component.omega_ssp
                 if component.omega_ssp is not None
                 else ssp_penalty_matrix(gm.R_inv, component.omega_raw)
             )
-            omega = _expanded_component_omega(
-                component,
-                omega,
-                active_group.size,
+            yield (
+                active_group.sl,
+                lam,
+                _expanded_component_omega(component, omega, active_group.size),
             )
-            S[active_group.sl, active_group.sl] += lam * omega
 
         for group_index, group in enumerate(groups):
             if group_index in represented_group_indices:
@@ -400,10 +374,8 @@ def _active_penalty_matrix(
                 continue
             lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
             if lam > 0:
-                S[active_group.sl, active_group.sl] += (
-                    lam * group.scop_reparameterization.penalty_matrix()
-                )
-        return S
+                yield active_group.sl, lam, group.scop_reparameterization.penalty_matrix()
+        return
 
     for gm, group in zip(group_matrices, groups, strict=True):
         active_group = active_by_name.get(group.name)
@@ -424,9 +396,7 @@ def _active_penalty_matrix(
                     lam_j = resolve_component_lambda(lambda2, group.name, suffix)
                     if lam_j == 0:
                         continue
-                    S[active_group.sl, active_group.sl] += lam_j * ssp_penalty_matrix(
-                        gm.R_inv, omega_j
-                    )
+                    yield active_group.sl, lam_j, ssp_penalty_matrix(gm.R_inv, omega_j)
                 continue
             lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
             if lam == 0:
@@ -434,12 +404,80 @@ def _active_penalty_matrix(
             omega = gm.omega
             if omega is None:
                 omega = _second_diff_penalty(gm.R_inv.shape[0])
-            S[active_group.sl, active_group.sl] += lam * ssp_penalty_matrix(gm.R_inv, omega)
+            yield active_group.sl, lam, ssp_penalty_matrix(gm.R_inv, omega)
         elif group.scop_reparameterization is not None:
             lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
             if lam == 0:
                 continue
-            S[active_group.sl, active_group.sl] += (
-                lam * group.scop_reparameterization.penalty_matrix()
-            )
+            yield active_group.sl, lam, group.scop_reparameterization.penalty_matrix()
+
+
+def _active_penalty_matrix(
+    group_matrices: list,
+    groups: list[GroupSlice],
+    active_groups: list[GroupSlice],
+    lambda2: float | dict[str, float],
+    *,
+    S_override: NDArray | None = None,
+    reml_penalties: list | None = None,
+) -> NDArray:
+    """Build ``S`` directly in compact active coordinates."""
+    p_active = sum(group.size for group in active_groups)
+    if p_active == 0:
+        return np.empty((0, 0), dtype=np.float64)
+
+    if S_override is not None:
+        active_names = {group.name for group in active_groups}
+        selected_columns = np.asarray(
+            [
+                column
+                for group in groups
+                if group.name in active_names
+                for column in range(group.start, group.end)
+            ],
+            dtype=np.intp,
+        )
+        return np.asarray(S_override[np.ix_(selected_columns, selected_columns)], dtype=np.float64)
+
+    S = np.zeros((p_active, p_active), dtype=np.float64)
+    for columns, lam, omega in _active_penalty_components(
+        group_matrices, groups, active_groups, lambda2, reml_penalties=reml_penalties
+    ):
+        if omega is None:
+            indices = np.arange(columns.start, columns.stop, dtype=np.intp)
+            S[indices, indices] += lam
+        else:
+            S[columns, columns] += lam * omega
     return S
+
+
+def _active_penalty_root(
+    group_matrices: list,
+    groups: list[GroupSlice],
+    active_groups: list[GroupSlice],
+    lambda2: float | dict[str, float],
+    *,
+    reml_penalties: list | None = None,
+) -> NDArray:
+    """``P = [sqrt(lam_1) R_1; sqrt(lam_2) R_2; ...]``, ``P'P = S``, from each term's own root.
+
+    ``R_k = penalty_factor(S_k)`` resolves each term at its own scale, and
+    the identity's root is ``I`` on its slice.  The root of the summed ``S``
+    cuts at ``n eps ||S||``, so a term below ``eps`` times another is lost
+    even where it is the only curvature, as on a face the dominant term
+    leaves free.  Stacking the scaled roots never forms the sum, the special
+    case of Wood's (2011, JRSS-B 73(1), sec. 3.1 and app. B) similarity
+    transform needed by a product ``PZ``: no truncation acts across terms.
+    """
+    from superglm.solvers.centered_system import penalty_factor
+
+    p_active = sum(group.size for group in active_groups)
+    rows = [np.empty((0, p_active), dtype=np.float64)]
+    for columns, lam, omega in _active_penalty_components(
+        group_matrices, groups, active_groups, lambda2, reml_penalties=reml_penalties
+    ):
+        root = np.eye(columns.stop - columns.start) if omega is None else penalty_factor(omega)
+        embedded = np.zeros((root.shape[0], p_active), dtype=np.float64)
+        embedded[:, columns] = np.sqrt(lam) * root
+        rows.append(embedded)
+    return np.vstack(rows)

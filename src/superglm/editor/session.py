@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -22,7 +23,6 @@ from superglm.editor._types import (
 )
 from superglm.editor.collapse import (
     collapsed_feature_spec,
-    ungroup_label,
     ungrouped_feature_spec,
 )
 from superglm.editor.controls import (
@@ -148,6 +148,15 @@ def _explicit_penalties(model, lambda1, lambda2) -> dict[str, Any]:
         if value is not ...
     )
     return explicit
+
+
+def _warn_refit_with(name: str, replacement: str) -> None:
+    warnings.warn(
+        f"EditorSession.{name} is deprecated and will be removed in a future release; "
+        f"use EditorSession.{replacement}, which refits and records the change as one step.",
+        FutureWarning,
+        stacklevel=3,
+    )
 
 
 class EditorSession:
@@ -1174,7 +1183,11 @@ class EditorSession:
         that takes it in; ``False`` lets the declared base policy choose again.
         ``refit_kwargs`` are ``X``, ``y``, ``sample_weight``, ``offset``,
         ``method``, ``lambda1``, ``lambda2`` and fit keywords.
+
+        Deprecated: use :meth:`replace_with_collapsed_levels`, which records the
+        change as one step.
         """
+        _warn_refit_with("refit_with_collapsed_levels", "replace_with_collapsed_levels")
         editable = self._require_term(term)
         idx = self._require_selection(term)
         try:
@@ -1227,7 +1240,11 @@ class EditorSession:
 
         ``keep_reference`` holds the in-force reference; a reference group that
         loses members follows the members that stay.
+
+        Deprecated: use :meth:`replace_with_ungrouped_levels`, which records the
+        change as one step.
         """
+        _warn_refit_with("refit_with_ungrouped_levels", "replace_with_ungrouped_levels")
         editable = self._require_term(term)
         idx = self._require_selection(term)
         return self._refit_replacing(
@@ -1243,35 +1260,18 @@ class EditorSession:
     ):
         """Ungroup the selected levels and refit at once, as one structural step.
 
-        With nothing waiting and no New levels choice since the latest step, an
-        ungroup that removes the model's last collapsed group reuses the fit
-        from before that step instead of refitting, when that model had none
-        and its term is the one the ungroup would fit, reference included, on
-        the same rows, with the same method and at the penalties the ungroup
-        would record as given: it is exactly the result.
+        An ungroup that reproduces the fit from before the latest step puts
+        that fit back instead of refitting, as ``staging.stage_and_refit``
+        states.
         """
-        if not self.pending:
-            model = self._pre_collapse_model(term, keep_reference=keep_reference, **refit_kwargs)
-            if model is not None:
-                # Read after the shortcut has validated the selection against a
-                # grouped term, in the sorted order the ungrouped spec uses.
-                label = ungroup_label(term, staging.selected_labels(self, term))
-                staging.put_in_force(
-                    self,
-                    model,
-                    restructured={term},
-                    at_once=True,
-                    operation="ungroup_levels",
-                    term=term,
-                    label=label,
-                )
-                return model
         params = {"levels": staging.selected_labels(self, term)}
         return staging.stage_and_refit(
             self, "ungroup", term, params, keep_reference=keep_reference, **refit_kwargs
         )
 
-    def _pre_collapse_model(self, term: str, *, keep_reference: bool, **kwargs: Any):
+    def _pre_collapse_model(
+        self, term: str, idx: NDArray[np.intp], *, keep_reference: bool, **kwargs: Any
+    ):
         """The model before the latest step, when this ungroup reproduces it exactly.
 
         Only a step that did nothing but collapse ``term``'s levels qualifies,
@@ -1285,7 +1285,9 @@ class EditorSession:
             return None
         if any((change.term, change.operation) != (term, "collapse") for change in step.changes):
             return None
-        replacement = self._ungrouped_replacement(term, keep_reference=keep_reference, **kwargs)
+        replacement = self._ungrouped_replacement(
+            term, idx, keep_reference=keep_reference, **kwargs
+        )
         if self._has_collapsed_level_groups_after_replacement(term, replacement):
             return None
         previous = step.state.model
@@ -1304,8 +1306,10 @@ class EditorSession:
             return None
         return previous if _fits_again(replacement, previous._specs[term]) else None
 
-    def _ungrouped_replacement(self, term: str, *, keep_reference: bool, **kwargs: Any):
-        """The spec this ungroup refits ``term`` with."""
+    def _ungrouped_replacement(
+        self, term: str, idx: NDArray[np.intp], *, keep_reference: bool, **kwargs: Any
+    ):
+        """The spec ungrouping the levels at display indices ``idx`` refits ``term`` with."""
         X_ref, _, _, _ = self._resolve_refit_data(
             kwargs.get("X"),
             kwargs.get("y"),
@@ -1315,7 +1319,7 @@ class EditorSession:
         replacement, _ = ungrouped_feature_spec(
             self.model,
             self._require_term(term),
-            self._require_selection(term),
+            idx,
             X=X_ref,
             keep_reference=keep_reference,
         )

@@ -42,8 +42,9 @@ class PenaltyCache:
 class REMLResult:
     """Result of REML smoothing parameter estimation.
 
-    Cleanup histories, when present, are accepted post-update snapshots from
-    each outer REML iteration.
+    A result a model fitted on the retired SCOP engine (0.41.0 or earlier)
+    also carries that engine's fields, such as ``scop_newton_fallback``,
+    which the diagnostics read with ``getattr``.
     """
 
     lambdas: dict[str, float]  # group_name -> estimated lambda_j
@@ -52,72 +53,20 @@ class REMLResult:
     converged: bool
     lambda_history: list[dict[str, float]] = field(default_factory=list)
     objective: float | None = None
-    reml_penalties: list | None = None  # merged SSP + SCOP PenaltyComponents
-    scop_states: dict | None = None  # converged SCOP state for objective reproduction
-    inner_iter_history: list[int] | None = None  # PIRLS iters per outer EFS step
+    reml_penalties: list | None = None  # merged PenaltyComponents
     objective_history: list[float] | None = None  # REML objective per outer step
     curvature_source: str | None = None  # retained coefficient-Hessian geometry
     termination_reason: str | None = None  # outer-optimizer terminal condition
-    scop_step_norms: list[dict[str, float]] | None = None  # per-group Newton step_norm per step
-    scop_fisher_fallbacks: int = 0  # total Fisher-fallback count
-    managed_cleanup_names: list[str] | None = None  # SCOP names handled by managed cleanup
-    managed_cleanup_frozen_names: list[str] | None = None  # final managed frozen set
-    # First 1-based outer iteration where the managed frozen set changed
-    # from the previous accepted iteration.
-    managed_cleanup_freeze_iter: int | None = None
-    # Accepted post-update active managed names per outer step.
-    managed_cleanup_active_history: list[list[str]] | None = None
-    # Accepted post-update frozen managed names per outer step.
-    managed_cleanup_frozen_history: list[list[str]] | None = None
-    # SCOP components a suppression hold covered at the published mode: those at
-    # a flat end of the criterion, where the residual EDF is under 0.05, or
-    # (a penalty other penalties cover) d log|S|+ / d rho_j is under 0.05
-    # with the slope asking for a decrease under 0.05 as well
-    # (``scop_efs._scop_suppression_holds``). There the criterion cannot say
-    # which way the new data's optimum lies, so these are left out of warm
-    # starts.
-    flat_components: list[str] | None = None
-    # The SCOP outer step taken at each iteration ("newton", "efs",
-    # "efs_fisher": an EFS step at an iterate where a block's inner solve or
-    # the joint geometry fell back to Fisher curvature, which leaves the
-    # Newton Jacobian without its reparameterisation terms, or
-    # "efs_uncorrected": an EFS step at an observed iterate where those terms
-    # could not be formed, not finite or under a map other than exp), and why and at
-    # which iteration (0: before the first) the run handed itself to EFS, or
-    # None when Newton ran throughout. Reasons: "requested",
-    # "multi_scop_cleanup", "scale_profile", "newton_system", and three for a
-    # Newton step none of whose forward trials the LAML accepted:
-    # "line_search_first_iteration" (EFS took over in place at the first
-    # iteration), "line_search" (the search restarted from the bootstrap with
-    # EFS steps at that iteration, and the histories hold the Newton
-    # iterations followed by the restarted search's), and "line_search_at_cap"
-    # (no iteration was left to restart in: the run stopped there on
-    # ``max_reml_iter``).
-    scop_outer_steps: list[str] | None = None
-    scop_newton_fallback: str | None = None
-    scop_newton_fallback_iter: int | None = None
-    # The final coefficient refit's termination reason when that refit, at the
-    # selected smoothing parameters, did not meet its convergence certificate
-    # (``converged`` is then False whatever ``termination_reason`` says), or
-    # None.
+    # The final refit's termination reason when it missed its convergence
+    # certificate (``converged`` is then False), else None.
     terminal_refit_termination: str | None = None
-    # Smoothing parameters at which the penalized maximum held rows on the
-    # boundary of the family's mean space (a binomial/log probability of 1),
-    # each restored to an interior start by the exact engine
-    # (``reml.direct``): the search was confined to the smoothing parameters
-    # that have an interior mode.
+    # Smoothing parameters whose penalized maximum sat on the mean-space
+    # boundary (a binomial/log probability of 1) and that ``reml.direct``
+    # restored to an interior start.
     mean_space_restorations: int = 0
-    # Fit-invariant Tweedie saturated-density state built by the optimizer.
-    # Carried so the terminal REML evaluations in finalize re-enter the SAME
-    # per-fit phi cache the search filled, instead of rebuilding a cold one and
-    # re-solving an already-solved (Dp, Mp).  Excluded from equality and repr:
-    # it is a memo, not part of the result's identity.
+    # The search's fit-invariant Tweedie saturated-density cache, reused by the
+    # terminal REML evaluations. A memo, so excluded from equality and repr.
     tweedie_scale_data: object | None = field(default=None, repr=False, compare=False)
-    # The components the smoothing search started from their warm values
-    # (``lambda2_init``), sorted: the SCOP engine empties it when its bootstrap
-    # had no certified mode at the warm start and retried at Hessian-scaled
-    # values. None where the engine does not record it.
-    warm_start_components: list[str] | None = None
 
 
 def _map_beta_between_bases(
@@ -154,12 +103,9 @@ def _map_centred_state_between_bases(
 ) -> tuple[float, NDArray] | None:
     """A warm centred state ``(alpha, c)`` read with ``_map_beta_between_bases``' coefficients.
 
-    A rebuilt block (a new matrix: a new reparametrization) has new columns,
-    so its centre no longer applies: its ``c' beta`` at the old coefficients
-    ``beta`` moves into ``alpha`` and its centre becomes zero, where the
-    mapped coefficients read the same function on the new columns.  A block
-    the rebuild reuses (every non-spline block, every dense column) keeps its
-    centre and coefficients bit for bit, so no offset is ever cancelled.
+    A rebuilt block has new columns, so its ``c' beta`` at the old ``beta``
+    moves into ``alpha`` and its centre becomes zero. A reused block keeps
+    its centre and coefficients bit for bit.
     """
     if centred is None:
         return None

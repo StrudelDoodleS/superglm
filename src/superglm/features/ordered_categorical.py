@@ -1,24 +1,12 @@
 """OrderedCategorical feature: ordered categories with an inner shape basis.
 
-Actuarial pricing data frequently contains continuous variables that have been
-pre-binned into ordered categories (e.g. age bands "18-25", "26-35", ...).
-This feature type respects the ordering: it maps the category labels to
-numeric values and builds a shape on those values, so adjacent levels borrow
-strength from each other.
-
-``basis=`` is the one configuration channel and takes the shape itself:
-
-- ``Spline(...)`` -- the penalized smooth (the historical mode, and the
-  default when ``basis`` is omitted);
-- ``Piecewise(...)`` -- stated kinks on the level axis, breaks stated as band
-  names (or integer positions), optionally with per-segment ``degrees=``;
-- ``Polynomial(...)`` -- exposure-weighted orthogonal ordinal contrasts on the
-  level positions, with ``powers=`` subsets.
-
-The removed alternatives -- the scalar shortcuts ``kind``/``n_knots``/
-``degree``/``select``/``penalty`` and the one-hot ``basis="step"`` mode with
-its D1'D1 first-difference penalty -- are gone as of 0.24.0; a spec restored
-from before the removal fails loudly at first use (see ``_basis_spline``).
+Continuous variables often arrive pre-binned into ordered bands (age bands
+"18-25", "26-35", ...). This feature maps the band labels to numeric values
+and fits a shape over them, so adjacent levels borrow strength. ``basis=``
+takes the shape: ``Spline(...)`` (the penalized smooth, the default),
+``Piecewise(...)`` (stated kinks, breaks named by band) or ``Polynomial(...)``
+(weighted orthogonal ordinal contrasts on the level positions). A pickled
+step-mode spec fails at first use (see ``_basis_spline``).
 """
 
 from __future__ import annotations
@@ -47,9 +35,8 @@ if TYPE_CHECKING:  # Spline imports this module at runtime; keep the cycle type-
     from superglm.features.spline import _SplineBase
 
 
-# One migration sentence for every path that refuses a step-mode spec. Shared
-# rather than repeated so the editor's refusal and the ``_basis_spline`` refusal
-# cannot drift into naming different replacements.
+# One migration sentence for every path that refuses a step-mode spec, so the
+# editor's refusal and ``_basis_spline``'s name the same replacement.
 _STEP_MODE_REMOVED_MESSAGE = (
     "Step mode was removed in 0.24.0, so a spec built or pickled "
     "before the removal cannot be used; rebuild it with "
@@ -57,9 +44,8 @@ _STEP_MODE_REMOVED_MESSAGE = (
     "Categorical(...) for independent level effects."
 )
 
-# Stable leading clause of the knot-clamp warning. editor/collapse.py filters
-# the warning off its internal clone by matching this prefix, so the two must
-# move together -- hence one constant rather than two copies of the wording.
+# Stable leading clause of the knot-clamp warning; editor/collapse.py filters
+# its internal clone's warning by this prefix.
 _CLAMP_WARNING_PREFIX = "OrderedCategorical: n_knots exceeds the level count"
 
 
@@ -89,22 +75,10 @@ def _spline_kind_name(spline: Any) -> str:
 def _declared_matcher(declared_levels: list[Any], *, numeric_strings: bool = False):
     """Return a function mapping a raw column value onto the level it denotes.
 
-    An ``OrderedCategorical`` has TWO sources for a level's identity -- the
-    ``order=``/``values=`` declaration and the data column -- and they need not
-    spell it the same way. Declared ``9`` against a float column is ``"9"`` on one
-    side and ``"9.0"`` on the other, and those never compare equal. Every site
-    that then asks "is this level known / special / the base" answers no, in a
-    different way each time: a crash, a silent no-op, a guard that fails open.
-
-    The declaration is canonical. This maps the DATA onto it, once, at the edge,
-    so no site downstream has to know two spellings exist.
-
-    Numeric matching applies only when the raw value is not a string. That is the
-    line between ``9.0`` (a number the column happens to store as a float, which
-    denotes declared ``9``) and ``"001"`` (a string whose leading zeros are part
-    of its identity, and which must NOT be matched by declared ``1``). Zero-padded
-    identifiers are common enough in pricing data that collapsing them would be a
-    worse bug than the one this fixes.
+    The declaration is canonical: data spelled differently (``9.0`` against a
+    declared ``9``) is mapped onto it once, here. Numeric matching applies only
+    to non-string raw values, so ``"001"`` is never claimed by a declared ``1``;
+    leading zeros are identity in policy and vehicle codes.
     """
     by_text: dict[str, Any] = {}
     by_value: dict[float, Any] = {}
@@ -125,28 +99,19 @@ def _declared_matcher(declared_levels: list[Any], *, numeric_strings: bool = Fal
         if text in by_text:
             return by_text[text]
         if isinstance(raw, str) and not numeric_strings:
-            # A raw STRING is its own identity. "001" must never be claimed by a
-            # declared 1: leading zeros are meaningful in a policy or vehicle
-            # code. Only the grouping path opts in, because a LevelGrouping's
-            # labels are stringified DATA rather than user-authored strings.
+            # A raw string is its own identity. Only the grouping path opts in,
+            # because a LevelGrouping's labels are stringified data.
             return raw
-        # Only a value equal to the SAME number counts. "9" and 9.0 are both
-        # the number 9, so they match. A raw string reaches here only when the
-        # caller opted in with numeric_strings; otherwise it was returned above,
-        # so a declared 1 never claims "001". That is the whole safety property
-        # -- leading zeros are identity in a policy or vehicle code, and
-        # collapsing them would be a worse bug than the one this fixes.
+        # Only a value equal to the same number counts ("9" and 9.0 match).
         try:
             value = float(raw)
         except (TypeError, ValueError):
             return raw
         if value not in by_value:
             return raw
-        # Only now is ambiguity a problem: `order=["1", "1.0"]` are distinct
-        # labels and both are reachable by their exact spellings. It is a raw
-        # value that matches NEITHER exactly, yet equals both numerically, that
-        # cannot be resolved -- so refuse then, rather than refusing the
-        # declaration outright and rejecting models that are perfectly fittable.
+        # Ambiguity matters only for a raw value that matches no spelling exactly
+        # yet equals two numerically (`order=["1", "1.0"]`); refuse that value,
+        # not the declaration.
         if value in ambiguous:
             raise ValueError(
                 f"Level {raw!r} is ambiguous: the declared levels spell the value {value} "
@@ -154,11 +119,8 @@ def _declared_matcher(declared_levels: list[Any], *, numeric_strings: bool = Fal
                 "levels consistently, or supply the level under one of its exact spellings."
             )
         matched = by_value[value]
-        # float() is lossy past 2**53, so two distinct integers can land on one
-        # value. When both sides are real numbers, confirm the match in their own
-        # domain -- Python compares int to float exactly, so this costs one
-        # comparison and makes the rule exact rather than approximate. A
-        # string-mediated match (a grouping label) has only the float to go on.
+        # float() is lossy past 2**53; when both sides are real numbers, confirm
+        # the match exactly (Python compares int to float exactly).
         if not isinstance(raw, str) and not isinstance(matched, str) and raw != matched:
             return raw
         return matched
@@ -169,38 +131,12 @@ def _declared_matcher(declared_levels: list[Any], *, numeric_strings: bool = Fal
 def group_axis_position(member_values: Sequence[float]) -> float:
     """Where a merged group sits on the numeric level axis: the MEAN of its members.
 
-    THE one definition of that convention.  It is read by the spec, which uses
-    it to place the group on the axis the basis is evaluated on, and by the
-    display collapse in ``plotting/group_display.py``, which uses it to put a
-    collapsed marker back where the fit is.  Those two agreed everywhere except
-    the case below, and a marker half a level width from its own fitted value is
-    not something either half can detect on its own, so they now share this.
-
-    Why the mean, and not the value of the member the group happens to be NAMED
-    after (issue #326).  The named-member reading was never a convention; it was
-    a lookup shortcut for the singleton identity groups that make up most of any
-    grouping, where the member's value and the group's mean are the same number.
-    It only ever diverged when the label collided with a member -- and there it
-    made the FIT depend on a LABEL.  Measured on ten evenly spaced levels
-    merging one interior pair: ``{"Mi001": [...]}`` and ``{"Mi001+Mi002": [...]}``
-    declare the same partition, yet placed the group at 0.1111 against 0.1667
-    and moved every reported relativity, by up to 1.45e-02 in log-relativity.
-    A group label is metadata -- it names a row in a rating table -- so renaming
-    a group must not move the model.  The mean is label-invariant, is what a
-    singleton group already resolved to, and is what the display half has
-    documented all along.
-
-    To place a group somewhere else, say it: declare ``values=`` so that the
-    members share the position the group should sit at.  The mean of equal
-    values is that value exactly, so ``values={"Mi001": 0.1, "Mi002": 0.1, ...}``
-    with ``{"Mi001": ["Mi001", "Mi002"]}`` puts the group at 0.1 with no
-    special case anywhere.  That is the explicit route, and it is exact.
-
-    Not used for a ``Piecewise``/``Polynomial`` inner basis, whose axis is level
-    POSITIONS ``0..L-1``: there a group IS one band with one coordinate, and
-    every member maps to it (``_install_position_axis``).  The two agree anyway
-    -- the mean of a group's member positions is that single shared position --
-    so the display collapse below needs no branch for it.
+    The one definition, shared by the spec (placing the group on the basis
+    axis) and the display collapse in ``plotting/group_display.py`` (placing
+    its marker). The mean is label-invariant, so renaming a group never moves
+    the fit (issue #326). To place a group elsewhere, declare ``values=`` with
+    equal values for its members. Not used for a ``Piecewise``/``Polynomial``
+    inner basis, whose axis is level positions and where a group is one band.
     """
     return float(np.mean(np.asarray(member_values, dtype=np.float64)))
 
@@ -269,24 +205,16 @@ def _require_two_smooth_levels(smooth_levels: list[str], special_set: set[str]) 
 def _require_no_grouped_specials(grouping: Any, special_set: set[str]) -> None:
     """Refuse a grouping that merges a special into any other level.
 
-    Merging a special into an ordered group would smooth it after all, while
-    ``_specials`` still reports it free — an inconsistent spec with no error.
-    Merging two specials is refused for the same reason the editor refuses it
-    (``_require_no_special_members``): the group label would have to replace
-    both members in ``specials=``.  Renaming a single special under a new group
-    label is refused for the same reason: the renamed level joins the smooth
-    with no numeric position while ``specials=`` still names the original.
-    Only a group that leaves its level untouched (label identical to its one
-    member) is exempt.
+    Merging a special into an ordered group would smooth it while ``_specials``
+    still reports it free. Merging two specials, or renaming one under a new
+    label, is refused because ``specials=`` would no longer name it. Only a
+    group whose label equals its one member is exempt.
     """
     if not special_set or grouping is None:
         return
-    # A grouping must also COVER every special. One that simply omits it passes
-    # construction (``_known_levels`` re-adds the special), and then build()'s
-    # ``map(original_to_group)`` yields NaN for those rows: the special mask
-    # misses them and they reach ``_map_to_numeric`` as NaN, dying inside scipy
-    # with "Array must not contain infs or nans" -- a message that says nothing
-    # about the grouping that caused it.
+    # A grouping must also cover every special: one that omits it maps those
+    # rows to NaN, which would otherwise fail deep in scipy without naming the
+    # grouping.
     covered = {
         str(member) for originals in grouping.group_to_originals.values() for member in originals
     }
@@ -373,43 +301,26 @@ class OrderedCategorical:
             OrderedCategorical(order=[...], basis=Spline(kind="cr", k=6))
 
         Omitting ``basis`` gives the default cubic regression spline,
-        ``Spline(kind="cr", n_knots=5, penalty="ssp", select=False)``
-        (a P-spline before 0.40).  In either form ``n_knots`` is clamped to
-        ``n_levels - 1`` with a warning.  ``Spline(knots=[...])`` may state
-        knots as BAND NAMES (``knots=["Mi060", "Mi066"]``): each name resolves
-        to that level's VALUE on the smooth's axis at construction --
-        smooth-at-stated-breaks needs no new device, because a spline IS the
-        C1 piecewise polynomial.  Numeric entries stay axis values, so both
-        spellings live on one scale.
+        ``Spline(kind="cr", n_knots=5, penalty="ssp", select=False)``.  In
+        either form ``n_knots`` is clamped to ``n_levels - 1`` with a
+        warning.  ``Spline(knots=[...])`` may state knots as band names
+        (``knots=["Mi060", "Mi066"]``), each resolving to that level's value
+        on the smooth's axis; numeric entries stay axis values.
 
-        ``Piecewise(breaks=[...])`` gives stated kinks with NO smoothing
-        penalty -- an unpenalized main block, exactly like the ``specials=``
-        block.  The inner basis evaluates on level positions ``0..L-1``
-        (declared order; ``values=`` still sets the order but not the
-        spacing).  Breaks are stated as band names, with integer positions as
-        the escape hatch; ``degrees=[...]`` states one polynomial degree per
-        segment (``0`` = flat/grouped tail), value-continuous at every seam by
-        construction.  Rating-table export stays one row per band at any
-        degree, which is why per-segment degrees are legal here and only
-        here.  ``Piecewise``'s ``extrapolation`` parameter is inert on the
-        level axis -- every level lies inside ``[0, L-1]`` by construction, so
-        no policy ever binds -- and is deliberately ignored rather than
-        refused.
+        ``Piecewise(breaks=[...])`` gives stated kinks with no smoothing
+        penalty, an unpenalized main block like the ``specials=`` block.  It
+        evaluates on level positions ``0..L-1`` (``values=`` sets the order
+        but not the spacing).  Breaks are band names, with integer positions
+        as the escape hatch; ``degrees=[...]`` states one polynomial degree per
+        segment (``0`` = flat tail), value-continuous at every seam.  Rating
+        tables stay one row per band at any degree.  ``extrapolation`` is
+        inert here, since every level lies inside ``[0, L-1]``.
 
-        ``Polynomial(powers=[...])`` gives classical orthogonal ordinal
-        contrasts (the ``contr.poly`` device) built on the level positions and
-        orthonormalized against the training exposure -- SAS ``ORPOL``'s
-        weighted construction inside a modeling term.  Classical trend
-        practice keeps lower-order contrasts under a significant higher-order
-        one (the hierarchical convention); ``powers=`` deliberately allows
-        non-contiguous subsets, each orthogonal component individually in or
-        out.  Each stated power reports its own clean-z summary row -- a
-        main-effect property the segmented ``Piecewise`` deliberately does
-        not claim.
-
-        The legacy strings ``"spline"`` and ``"step"``, and the scalar
-        shortcut parameters ``kind``, ``n_knots``, ``degree``, ``select`` and
-        ``penalty``, were removed in 0.24.0.
+        ``Polynomial(powers=[...])`` gives orthogonal ordinal contrasts (the
+        ``contr.poly`` device) on the level positions, orthonormalized against
+        the training exposure (SAS ``ORPOL``'s weighted construction).
+        ``powers=`` may be a non-contiguous subset, and each stated power
+        reports its own z row in the summary.
     base : str
         Reporting reference level. ``"most_exposed"`` (default), ``"first"``,
         or a specific level name. This changes only the reported relativities
@@ -444,17 +355,15 @@ class OrderedCategorical:
         Categorical(base="most_exposed")
     """
 
-    # Whether `base=` names a band although it reads "first" or "most_exposed".
-    # Only a rebuild sets it, for a reference a fit resolved or a user chose. A
-    # class attribute so a spec pickled before it existed reads False.
+    # Whether `base=` names a band although it reads "first" or "most_exposed";
+    # set only by a rebuild. A class attribute so older pickles read False.
     _base_is_level: bool = False
 
     def __setstate__(self, state: dict) -> None:
-        """Restore a pickle; a spec saved before ``specials=`` (0.19, #235) has none.
+        """Restore a pickle; a spec saved before ``specials=`` existed has none.
 
-        Its ``_ordered_levels`` were its smooth levels, grouped when grouped,
-        and no level was held out of the smooth: the state ``specials=None``
-        builds, which scores exactly as that release scored.
+        Its ``_ordered_levels`` were its smooth levels and no level was held
+        out: the state ``specials=None`` builds.
         """
         if "_specials" not in state:
             state["_specials"] = []
@@ -480,24 +389,19 @@ class OrderedCategorical:
             raise ValueError("Must specify either 'values' or 'order'.")
 
         self._specials: list[str] = []
-        # The declarations as given, positionally aligned with `_specials`.
-        # `_special_mask` needs them: the string view alone cannot match a
-        # non-str label against a numeric column (9.0 renders as "9.0").
+        # The declarations as given, aligned with `_specials`: `_special_mask`
+        # needs them to match a non-str label against a numeric column.
         self._special_raw: list[Any] = []
         if specials is not None:
-            # Level labels live in `str` space throughout this file (grouping
-            # coerces too), so coerce here or a non-str special silently fails
-            # to pop from order=/values= and gets smoothed as well as claimed.
+            # Level labels live in `str` space throughout this file, so a
+            # non-str special must be coerced to pop from order=/values=.
             for raw_lev in specials:
                 lev = str(raw_lev)
                 if lev in self._specials:
                     raise ValueError(f"Duplicate special level {lev!r} in 'specials'.")
-                # The string forms of 9 and 9.0 differ ("9" vs "9.0"), so the
-                # check above lets both through -- but `_special_mask` matches a
-                # non-str special on RAW equality too, and 9 == 9.0, so both
-                # indicator columns claim exactly the same rows. That is two
-                # collinear unpenalized coefficients, and the pair is
-                # unidentifiable however the solve resolves it.
+                # "9" and "9.0" differ as strings but `_special_mask` also
+                # matches raw values, and 9 == 9.0: both indicators would claim
+                # the same rows, two collinear unpenalized coefficients.
                 clash = next((prev for prev in self._special_raw if prev == raw_lev), None)
                 if clash is not None:
                     raise ValueError(
@@ -507,24 +411,19 @@ class OrderedCategorical:
                     )
                 self._specials.append(lev)
                 self._special_raw.append(raw_lev)
-        # How each special is REPORTED: the label its domain spells it with, so it
-        # sits in the same namespace as the smooth levels. Defaults to the raw
-        # declaration and is refined below if the domain names it differently.
+        # How each special is reported: the label its domain spells it with, in
+        # the same namespace as the smooth levels. Refined below.
         self._special_display: list[Any] = list(self._special_raw)
         special_set = set(self._specials)
-        # Ungrouped OrderedCategorical validates raw column labels, so a special
-        # declared as `9` must be admissible in both the raw and the string form
-        # its mask matches on; otherwise the level is rejected as unseen.
+        # A special declared as `9` must be admissible in both the raw and the
+        # string form its mask matches on, or it is rejected as unseen.
         known_special_labels: set[Any] = set(special_set)
         if specials is not None:
             known_special_labels |= set(specials)
 
         if special_set:
-            # Match on BOTH views, because `_special_mask` does. A str-only test
-            # keeps 9.0 in the smooth when the special was declared as 9 ("9.0" !=
-            # "9"), while the mask still claims those rows numerically -- so the
-            # level ends up both smoothed and free: a phantom spline position no
-            # row occupies, and the same level reported twice.
+            # Match on both views, as `_special_mask` does, or the level ends up
+            # both smoothed and free.
             raw_specials = list(self._special_raw)
 
             def _is_special(label: Any) -> bool:
@@ -535,12 +434,9 @@ class OrderedCategorical:
                     for raw in raw_specials
                 )
 
-            # Report a special under the label its DOMAIN uses, not the coerced
-            # string. Smooth levels are reported with their raw `order=`/`values=`
-            # labels, and rating tables, editor weights and exposure bars aggregate
-            # row weights by the column's own labels before looking them up by the
-            # reported level -- so a special reported as "9" beside neighbours
-            # reported as 1.0, 2.0 comes back with zero weight and zero exposure.
+            # Report a special under its domain's label, not the coerced string:
+            # rating tables, editor weights and exposure bars look rows up by the
+            # column's own labels.
             domain = list(values) if values is not None else list(order)
             for matched in domain:
                 if not _is_special(matched):
@@ -559,9 +455,8 @@ class OrderedCategorical:
             else:
                 order = [lev for lev in order if not _is_special(lev)]
 
-        # Whether the caller named a basis at all. Only the clamp warning reads
-        # it: on the default path there is no `Spline` in the caller's source to
-        # point at, so the remedy has to be spelled out rather than assumed.
+        # Whether the caller named a basis; the clamp warning spells out the
+        # remedy when there is no `Spline` in the caller's source to point at.
         basis_was_explicit = basis is not None
         if basis is None:
             # The default smooth: a cubic regression spline, as Spline's default is.
@@ -577,30 +472,21 @@ class OrderedCategorical:
             raise ValueError(
                 f"basis must be a Spline, Piecewise or Polynomial object, or None; got {basis!r}"
             )
-        # Deep-copy rather than alias: `_spline_obj` is the pristine declaration
-        # editor/collapse.py rebuilds from when a grouping is undone, so it has
-        # to stay pinned to what was passed HERE. Aliasing let a caller mutate
-        # their own Spline after construction and silently change what a later
-        # collapse cloned, while the fitted `_spline` -- already its own copy --
-        # kept the original geometry. The same rule covers all three basis
-        # types; the attribute keeps its historical name.
+        # Deep-copy: `_spline_obj` is the pristine declaration editor/collapse.py
+        # rebuilds from when a grouping is undone, so a caller mutating their
+        # object afterwards must not change it.
         self._spline_obj: _SplineBase | Piecewise | Polynomial = copy.deepcopy(basis)
         self._basis_was_explicit = basis_was_explicit
-        # Vestigial constant. dm_builder, screening, report, export and editor
-        # code still branch on this string; collapsing those readers is a
-        # deferred cleanup. Kept as a plain instance attribute so that a
-        # pre-0.24 step-mode pickle retains its own "step" value and the
-        # `_basis_spline` failure names what the spec actually was.
+        # Vestigial: dm_builder, screening, report, export and editor still
+        # branch on this string. An instance attribute so a step-mode pickle
+        # keeps "step" and `_basis_spline` names it.
         self.basis = "spline"
 
         self.base = base
         self._smooth_levels: list[str] = []
-        # Levels as REPORTED, in block order: the smooth levels under their
-        # `order=`/`values=` labels, then the specials under `_special_display`
-        # (the domain's own label, not the string-coerced `_specials`). One
-        # namespace, because `reconstruct()["levels"]` is spelled the same way
-        # and every downstream row name, weight lookup and membership test joins
-        # the two lists on equality.
+        # Levels as reported, in block order: smooth levels under their
+        # `order=`/`values=` labels, then specials under `_special_display`.
+        # Downstream row names, weights and membership tests join on equality.
         self._ordered_levels: list[Any] = []
 
         # Derive smooth levels and numeric values
@@ -614,17 +500,12 @@ class OrderedCategorical:
             vals = np.linspace(0.0, 1.0, n) if n > 1 else np.array([0.0])
             self._level_to_value = dict(zip(order, vals.tolist()))
         self._ordered_levels = list(self._smooth_levels)
-        # The declared smooth levels, in order, BEFORE any grouping replaces
-        # them: the namespace breaks/knots stated as names (or positions)
-        # resolve against, so a collapse re-resolves the same declaration
-        # rather than a moving target.
+        # The declared smooth levels before grouping: the namespace named
+        # breaks/knots resolve against, stable across a collapse.
         self._declared_smooth_levels: list[Any] = list(self._smooth_levels)
 
-        # Level labels must be distinct AS STRINGS. The grouping layer is
-        # string-keyed by construction and every report joins on str(), so
-        # `order=[1, "1", 2]` cannot be represented: one of the two silently wins
-        # every lookup and the other can never be fitted or scored. Refuse rather
-        # than pick.
+        # Level labels must be distinct as strings: grouping and every report
+        # join on str(), so `order=[1, "1", 2]` cannot be represented.
         _texts = [str(level) for level in self._ordered_levels]
         _dupes = sorted({t for t in _texts if _texts.count(t) > 1})
         if _dupes:
@@ -634,31 +515,17 @@ class OrderedCategorical:
                 "two levels cannot share one; declare them with distinct labels."
             )
 
-        # Grouping: validate and store. A grouping is built FROM DATA, so its
-        # labels are in the column's spelling while everything here is in the
-        # declaration's. Re-spell it once, so the whole spec lives in one
-        # namespace and no downstream site has to reconcile them again -- the
-        # editor previously carried its own copy of this, and the direct
-        # `grouping=` path carried none.
-        # A special is spelled as the term reports it (9.0 beside 1.0 for
-        # specials=[9]): rows canonicalise to that spelling and every report
-        # joins on it, so a grouping spelling it "9" would cover none of them.
+        # A grouping is built from data, so re-spell it once into the
+        # declaration's namespace. A special is spelled as the term reports it
+        # (9.0 beside 1.0 for specials=[9]), since rows canonicalise to that.
         grouping = _regroup_to_declared(grouping, self._ordered_levels + self._special_display)
         grouped_specials = {str(level) for level in self._special_display}
-        # RESERVED SEAM -- penalized collapse (L1 fusion), not built. Gertheiss
-        # & Tutz (2010), "Sparse modeling of categorial explanatory variables",
-        # Ann. Appl. Stat. 4(4):2150-2180: an L1 penalty on adjacent
-        # level-effect differences fuses bands data-adaptively -- the penalized
-        # cousin of the editor's /collapse_levels loop, whose stated form is
-        # exactly this `grouping=`. If that spelling is ever wanted it attaches
-        # here as its own mode (e.g. `fuse=`) beside `basis=`; the stated-
-        # structure bases below answer a different question and must not grow
-        # a penalty path.
+        # Penalized collapse (L1 fusion of adjacent levels; Gertheiss & Tutz,
+        # Ann. Appl. Stat. 4(4), 2010) would attach here as its own mode beside
+        # `basis=`; the stated-structure bases must not grow a penalty path.
         self._grouping = grouping
-        # Before the numeric-position check below: a grouping that merges or
-        # renames a special is wrong for a specific, explainable reason, and
-        # that reason is more useful than the generic 'no numeric position'
-        # symptom it would otherwise produce first.
+        # Before the numeric-position check: merging or renaming a special has
+        # a more specific error than 'no numeric position'.
         _require_no_grouped_specials(grouping, grouped_specials)
         _require_no_group_named_as_special(
             grouping,
@@ -670,48 +537,28 @@ class OrderedCategorical:
         )
         self._original_level_to_value: dict[str, float] | None = None
         if grouping is not None:
-            # Preserve original level→value mapping for plot expansion
-            # Keyed the same way as the regrouped levels. `_expand_grouped_term`
-            # indexes this map with the grouping's (string) level names for the
-            # smooth-curve expansion, so leaving it on the declared objects
-            # raises KeyError out of the public term_inference path -- which the
-            # direct-grouping regression missed by only exercising predict().
+            # Original level->value map for plot expansion, keyed by the
+            # grouping's string level names as `_expand_grouped_term` reads it.
             _match = _declared_matcher(
                 self._ordered_levels + list(self._specials), numeric_strings=True
             )
             orig_ltv = {str(_match(k)): v for k, v in self._level_to_value.items()}
             self._original_level_to_value = orig_ltv
-            # Build level_to_value for grouped levels: one position per group,
-            # always ``group_axis_position`` over the group's MEMBERS, never the
-            # label's own value. See that function for why (issue #326) -- in
-            # short, the label shortcut this replaced made the fit depend on
-            # what the group was CALLED.
-            # A LevelGrouping is string-keyed by construction, while `values=`/
-            # `order=` keys are the declared objects (ints, floats). Join on text
-            # so `order=[1, 2, 3]` meets a grouping spelling them "1", "2", "3";
-            # a plain `in` test silently found nothing and left the map empty,
-            # which surfaced much later as "Array must not contain infs or nans".
+            # One position per group, `group_axis_position` over its members.
+            # A LevelGrouping is string-keyed while `values=`/`order=` keys are
+            # the declared objects, so join on text.
             by_text = {str(k): v for k, v in orig_ltv.items()}
             grouped_ltv = {}
             for glev in grouping.grouped_levels:
-                # ``.get``, not ``[]``: ``LevelGrouping`` is a public dataclass a
-                # caller can build by hand, and a label missing from
-                # ``group_to_originals`` should reach the named error below
-                # rather than a bare KeyError from inside a comprehension.
+                # ``.get``: a hand-built LevelGrouping may miss a label, which
+                # should reach the named error below, not a bare KeyError.
                 originals = grouping.group_to_originals.get(glev, [glev])
                 vals = [by_text[str(o)] for o in originals if str(o) in by_text]
                 if vals:
                     grouped_ltv[glev] = group_axis_position(vals)
-                # A group is only AT its members' mean if every member has a
-                # declared value. Filtering silently and averaging the rest puts
-                # the group at the mean of a SUBSET -- a coordinate the declared
-                # partition never asks for -- and the model fits there. Measured
-                # on `order=["A","B","C","D"]` against a column that also holds
-                # "E", grouped `{"CDE": ["C","D","E"]}`: the group landed at
-                # mean(v_C, v_D) = 0.8333, the fit succeeded, and the mistake
-                # surfaced two modules away as a bare `KeyError: 'E'` out of
-                # `_expand_grouped_term`. Named here instead, beside the group
-                # that caused it.
+                # A group sits at its members' mean only if every member has a
+                # declared value; averaging a subset would fit at a coordinate
+                # the partition never asks for, so refuse here.
                 undeclared = [str(o) for o in originals if str(o) not in by_text]
                 if vals and undeclared and str(glev) not in grouped_specials:
                     raise ValueError(
@@ -723,9 +570,7 @@ class OrderedCategorical:
                         f"{sorted(by_text)}. Declare those levels, or leave them out "
                         "of the grouping."
                     )
-            # Specials are exempt by construction: a free level never receives a
-            # coordinate on the spline's axis, so having no numeric position is
-            # correct for them and only for them.
+            # Specials are exempt: a free level has no coordinate on the axis.
             missing = [
                 g
                 for g in grouping.grouped_levels
@@ -748,10 +593,8 @@ class OrderedCategorical:
         self._ordered_levels = list(self._smooth_levels) + list(self._special_display)
         self._n_levels = len(self._smooth_levels)
 
-        # Piecewise/Polynomial inner bases evaluate on level POSITIONS 0..L-1,
-        # not on the values= spacing: their whole point is structure stated in
-        # band vocabulary (a break at "Mi060", the quadratic ordinal contrast),
-        # and band vocabulary is positional. values= still fixes the ORDER.
+        # Piecewise/Polynomial bases evaluate on level positions 0..L-1, since
+        # band vocabulary is positional; values= still fixes the order.
         if not isinstance(self._spline_obj, _SplineBase):
             self._install_position_axis()
 
@@ -768,24 +611,16 @@ class OrderedCategorical:
         self._base_level: str = ""
         self._non_base: list[str] = []
 
-        # Per-build state for thin specials. A declared special with no effective
-        # training rows is PINNED rather than refused: no indicator column is
-        # emitted (an all-zero one is an unidentifiable coefficient), the level
-        # keeps its identity in `_specials`/`_known_levels`/`_ordered_levels`, and
-        # its rows score at zero contribution. `_active_specials` indexes
-        # `_specials` and is the emitted column order; `_pinned_specials` holds
-        # the display labels of the rest, for reporting.
+        # A declared special with no effective training rows is pinned: no
+        # indicator column, its identity kept, its rows scoring zero.
+        # `_active_specials` indexes `_specials` in emitted column order;
+        # `_pinned_specials` holds the display labels of the rest.
         self._pinned_specials: list[Any] = []
         self._active_specials: list[int] = list(range(len(self._specials)))
 
-        # Stamped by the design-matrix builder per build: True under the prior
-        # contract, where hosted Piecewise MODEL geometry (int-mode placement,
-        # most_exposed base) must follow physical rows exactly as the
-        # numeric-axis terms do.  The build then derives the positive-row
-        # indicator from its own weights -- passing ``None`` instead would
-        # count a zero-weight row that shapes no top-level boundary.  Read with
-        # a getattr default so pre-existing pickles stay valid and direct
-        # spec-API builds keep the replication reading.
+        # Stamped per build by the design-matrix builder: True under the prior
+        # contract, where hosted Piecewise geometry follows physical rows and
+        # the build derives the positive-row indicator from its own weights.
         self._inner_geometry_physical_rows: bool = False
 
         # The inner spline this wrapper owns and delegates to (deferred until
@@ -797,27 +632,11 @@ class OrderedCategorical:
     def _basis_spline(self) -> _SplineBase:
         """The inner spline, narrowed to non-None.
 
-        ``__init__`` always builds ``_spline``, so on any spec constructed by
-        this version of the class the narrowing is a no-op. ``None`` here means
-        the instance bypassed ``__init__`` -- in practice, a pickle of the
-        step mode that 0.24.0 removed, whose ``__dict__`` restores without a
-        ``_spline``. Every numeric path (build, transform, score, reconstruct,
-        set_reparametrisation) funnels through this property, so such a spec
-        fails loudly at first use instead of scoring silently wrong.
-
-        The ``AttributeError`` TYPE IS LOAD-BEARING, and not in the direction
-        it looks. ``AttributeError`` is the one exception ``getattr(spec, name,
-        default)`` swallows, so a reader spelled that way takes its default on a
-        step pickle rather than refusing -- and ``hasattr(spec, "n_knots")``
-        already answers ``False`` here rather than raising. What makes the
-        fails-loud guarantee hold is therefore the completeness of the numeric
-        funnel above, NOT the exception type: a step spec dies at build /
-        transform / score before any such reader can matter. Do not "harden" a
-        reader by wrapping these properties in ``getattr`` with a default --
-        that is precisely how the hole reopens. A dedicated exception type
-        would make the refusal un-swallowable; that is deferred, and belongs
-        with the vestigial ``self.basis`` cleanup and its remaining readers
-        (``_spec_kind``, ``_deferral_reason``) rather than on its own.
+        ``None`` means the instance bypassed ``__init__`` (a pickle of the
+        removed step mode). Every numeric path funnels through this property,
+        so such a spec fails at first use. ``getattr(spec, name, default)``
+        swallows the ``AttributeError``, so do not wrap readers in a
+        defaulting ``getattr``: completeness of the funnel is the guarantee.
         """
         spline = self._spline
         if spline is None:
@@ -828,14 +647,8 @@ class OrderedCategorical:
         return spline
 
     # ── Derived spline metadata ────────────────────────────────────
-    # Read-only views of the inner spline's configuration. These were
-    # constructor parameters until 0.24.0 and survive only as derived
-    # attributes. No superglm code path reads them any more --
-    # editor/collapse.py now clones ``_spline_obj``/``_basis_spline``, which is
-    # the pristine caller-supplied spline rather than these post-clamp views --
-    # so they are retained as stable public API for external readers
-    # (notebooks, reporting code, anything that introspected the old
-    # constructor parameters), not as an internal dependency.
+    # Read-only views of the inner spline's configuration, kept as public API
+    # for external readers; no superglm code path reads them.
 
     @property
     def kind(self) -> str:
@@ -863,52 +676,21 @@ class OrderedCategorical:
         return self._basis_spline.penalty
 
     # ── Declared shape constraint ──────────────────────────────────
-    # NOT derived views like the block above: these two are read by the
-    # engines that ACT on a shape declaration. Every such reader spells the
-    # lookup ``getattr(spec, "constraint_kind", ...)`` against the FEATURE
-    # spec, which for an ordered term is this wrapper rather than the spline
-    # the caller wrote the constraint on -- so without the forward a declared
-    # constraint reads back as absent and its engine silently skips the term.
-    # ``getattr`` with a default rather than the inner property, because a
-    # Piecewise or Polynomial inner basis takes no constraint at all and must
-    # answer "none declared" rather than raise.
-    #
-    # The legacy spelling (``monotone``/``monotone_mode``) is DELIBERATELY not
-    # forwarded. Every canonical reader spells
-    # ``getattr(spec, "constraint_kind", getattr(spec, "monotone", None))``,
-    # reading the canonical name first, so forwarding the pair below already
-    # answers all of them; adding the legacy pair would put a deprecated
-    # spelling onto a public surface that never had one, and give the wrapper
-    # two names to keep in step. The consequence to know: a reader spelling
-    # ONLY ``getattr(spec, "monotone", None)`` gets ``None`` from an ordered
-    # term. Two do -- both inside ``isinstance(spec, _SplineBase)`` branches
-    # that an ordered term cannot enter, so neither can observe the gap. A new
-    # reader must use the canonical name.
-    #
-    # One more belongs in this register because it fails differently:
-    # ``_spline_subclass_ops`` spells ``getattr(spec, "constraint_kind", None)
-    # or spec.monotone`` -- a BARE attribute fallback, not a ``getattr``
-    # default. Reached with an ordered term whose inner basis declares nothing,
-    # it would raise ``AttributeError`` rather than answer ``None``. Safe today
-    # only because ``spec`` there is ``self`` on a spline, never a wrapper; it
-    # is listed because a loud gap is the one worth knowing about.
+    # Forwarded because shape engines read ``getattr(spec, "constraint_kind",
+    # ...)`` on the feature spec, which for an ordered term is this wrapper.
+    # The legacy ``monotone`` spelling is not forwarded; new readers must use
+    # the canonical name.
 
     @property
     def constraint_kind(self) -> str | None:
         """Shape token declared on the inner basis (``"increasing"``, ...).
 
-        The constraint binds on the WHOLE LEVEL AXIS, not only on the ``L``
-        fitted level values -- a stated contract, and deliberately conservative.
-        Every published method for a monotone ordinal effect constrains the
-        level effects directly (Rufibach, *Comput. Statist. Data Anal.*
-        54(6):1442-1456, 2010, Sec. 5; Barlow, Bartholomew, Bremner & Brunk,
-        1972); none constrains a curve between category positions, and the
-        interval version is strictly stronger, since coefficient sign
-        conditions are "sufficient but not necessary" for a monotone effect
-        (Hofner, Kneib & Hothorn, *Statist. Comput.* 26:1-14, 2016, Sec. 3.3)
-        and no proper linear-inequality basis exists for monotone CUBICS at all
-        (Meyer, *Ann. Appl. Statist.* 2(3):1013-1033, 2008, Sec. 2). See
-        ``docs/how-to/constrain-a-smooth.md`` for the measured cost.
+        The constraint binds on the whole level axis, not only at the ``L``
+        level values: conservative, since published monotone-ordinal methods
+        constrain the level effects (Rufibach, CSDA 54(6), 2010, Sec. 5) and
+        sign conditions are sufficient but not necessary (Hofner, Kneib &
+        Hothorn, Stat. Comput. 26, 2016, Sec. 3.3). See
+        ``docs/how-to/constrain-a-smooth.md``.
         """
         inner = self._basis_spline
         return getattr(inner, "constraint_kind", getattr(inner, "monotone", None))
@@ -922,16 +704,11 @@ class OrderedCategorical:
     def shape_axis(self, x: NDArray) -> tuple[NDArray, NDArray[np.bool_]]:
         """The inner basis' numeric axis, and the rows that sit on it.
 
-        A shape constraint on an ordered term is stated over the inner spline's
-        level-score axis, not over the label column the frame carries. Engines
-        that read a raw numeric column off the frame therefore cannot read this
-        term's; they have to resolve the axis through the wrapper, exactly as
-        ``transform`` does.
-
-        The returned mask is not decoration: a ``specials=`` level is fitted as
-        a free effect with no coordinate on the smooth's axis, so its rows are
-        absent from the first return value and a caller carrying per-row weights
-        must drop the same rows to keep them aligned.
+        A shape constraint is stated over the inner spline's level-score axis,
+        so engines must resolve it through the wrapper as ``transform`` does.
+        ``specials=`` rows have no coordinate and are absent from the first
+        return value; the mask lets a caller drop the same rows from per-row
+        weights.
         """
         labels = self._resolved_labels(x)
         if not self.has_specials:
@@ -942,30 +719,11 @@ class OrderedCategorical:
     def _build_monotone_constraints_raw(self) -> LinearConstraintSet:
         """Forward the inner spline's raw monotone geometry to the builder.
 
-        ``build`` delegates to the inner spline, so the ``GroupInfo`` that comes
-        back is stamped ``monotone_engine="qp"`` by the SPLINE. The builder then
-        asks for the matching raw geometry off the FEATURE spec -- the same
-        object for a plain ``Spline``, this wrapper for an ``OrderedCategorical``
-        -- and without this forward it finds nothing and reports the geometry as
-        unavailable. Only QP bases take that branch; a ``ps`` declared with
-        ``shape_engine="scop"`` routes through SCOP and never does.
-
-        The constraint is stated in the inner spline's own coefficient space,
-        which is the space the returned design lives in, so it needs no
-        remapping. Level scores ascend with level order by construction, so
-        "increasing" means increasing across the declared levels.
-
-        Defined unconditionally, which is what makes the guard below load-
-        bearing: the builder decides whether raw geometry exists by asking
-        ``getattr(spec, "_build_monotone_constraints_raw", None)``, and that
-        question is answered by the WRAPPER, which always has the method, not
-        by the basis, which may not. Its ``RuntimeError`` backstop can
-        therefore never fire on an ordered term, so the same refusal has to be
-        raised here -- naming the basis that cannot supply the geometry rather
-        than surfacing as an ``AttributeError`` from one frame deeper. No
-        engine routes such a basis to the QP branch today: the stamp is set
-        only where the raw builder is already known to exist, on the inner
-        spline. This keeps the failure legible if one ever does.
+        The builder asks for raw geometry off the feature spec, which here is
+        the wrapper; the constraint is already in the inner spline's
+        coefficient space, which the design lives in. Because the wrapper
+        always has this method, the builder's own backstop cannot fire, so the
+        refusal for a basis without the geometry is raised here.
         """
         inner = self._basis_spline
         raw_builder = getattr(inner, "_build_monotone_constraints_raw", None)
@@ -1006,10 +764,8 @@ class OrderedCategorical:
     def _install_position_axis(self) -> None:
         """Map levels to positions 0..L-1 for a Piecewise/Polynomial inner basis.
 
-        Runs after grouping resolution, so grouped levels take consecutive
-        positions in fitted order and the original declaration keeps its own
-        position map for plot expansion and editor round-trips (an original
-        level sits AT its group's position -- one band, one coordinate).
+        Runs after grouping resolution: grouped levels take consecutive
+        positions, and each original level sits at its group's position.
         """
         self._level_to_value = {
             level: float(position) for position, level in enumerate(self._smooth_levels)
@@ -1067,11 +823,9 @@ class OrderedCategorical:
     def _grouped_break_position(self, declared_position: int, *, parameter: str) -> int:
         """Map a declared-level position through the grouping, guarding breaks.
 
-        The locked collapse-times-breaks rule: a grouping that ABSORBS a stated
-        break level (merges it with any neighbour) or STRADDLES it (spans
-        levels on both sides) refuses loudly, naming the break and the
-        offending group; grouping entirely within a segment stays allowed. A
-        renamed singleton group follows the rename.
+        A grouping that absorbs a stated break level or straddles it refuses,
+        naming both; grouping within a segment is allowed, and a renamed
+        singleton group follows the rename.
         """
         level = self._declared_smooth_levels[declared_position]
         if self._grouping is None:
@@ -1110,9 +864,8 @@ class OrderedCategorical:
         piecewise.upper = float(n - 1)
         breaks = piecewise.breaks
         if isinstance(breaks, int | np.integer):
-            # Int-mode exploration places breaks from the data's positions;
-            # there is nothing stated to resolve or to guard a collapse
-            # against. degrees= with int-mode is already refused upstream.
+            # Int-mode places breaks from the data; there is nothing stated to
+            # resolve or guard.
             return
         stated = list(breaks)
         resolved: list[int] = []
@@ -1164,12 +917,9 @@ class OrderedCategorical:
     def _resolve_spline_named_knots(self, spline: _SplineBase) -> None:
         """Resolve ``Spline(knots=[...])`` band names to level values.
 
-        The same vocabulary as Piecewise breaks -- a spline IS the C1
-        piecewise polynomial, so smooth-at-stated-breaks is a spline with its
-        knots stated by name. Names resolve to the named level's value on the
-        smooth's axis; numeric entries stay axis values. The collapse guard
-        applies to the NAMED knots only: a numeric knot states a coordinate,
-        not a band identity.
+        Names resolve to the named level's value on the smooth's axis; numeric
+        entries stay axis values. The collapse guard applies to named knots
+        only, since a numeric knot states a coordinate, not a band.
         """
         named = getattr(spline, "_named_knots", None)
         if named is None:
@@ -1194,14 +944,9 @@ class OrderedCategorical:
         spline._explicit_knots = np.asarray(values, dtype=np.float64)
         spline._named_knots = None
         spline.n_knots = len(values)
-        # Re-run the explicit-boundary validation the numeric spelling gets at
-        # construction: initialize_spec coerced boundary= with _explicit_knots
-        # still None on the named branch, so the strictly-inside check never
-        # ran, and the two spellings of the same knots must refuse
-        # identically. A knot resolving to the DATA boundary (the first or
-        # last level, with no boundary= stated) is deliberately NOT guarded,
-        # asymmetrically with Piecewise breaks: a boundary spline knot is
-        # redundant, not wrong, and the numeric spelling accepts it too.
+        # Re-run the strictly-inside boundary check the numeric spelling got at
+        # construction, so both spellings refuse identically. A knot at the data
+        # boundary is redundant, not wrong, and is accepted as numerically.
         from superglm.features._spline_config import _coerce_boundary
 
         spline._explicit_boundary = _coerce_boundary(
@@ -1248,9 +993,8 @@ class OrderedCategorical:
             if self._basis_was_explicit:
                 remedy = f"Pass basis=Spline(kind={kind!r}, n_knots={effective}) instead."
             else:
-                # `basis=` was omitted, so naming "the Spline you passed" would
-                # point at source the caller never wrote. Say where the number
-                # came from, then give them the declaration that silences it.
+                # `basis=` was omitted: say where the number came from and give
+                # the declaration that silences it.
                 remedy = (
                     f"No basis= was given, so this is the default "
                     f"Spline(kind={kind!r}, n_knots={requested}); pass "
@@ -1275,11 +1019,9 @@ class OrderedCategorical:
     def _choose_base(self, x: NDArray, sample_weight: NDArray | None) -> None:
         """Choose the base level for relativities.
 
-        Specials are excluded: the base anchors every reported relativity and
-        must lie on the smooth. On a real book a MISSING band is often the most
-        exposed level, so ``most_exposed`` would otherwise select it. A
-        ``base=`` a rebuild marked as a band (``_base_is_level``) names that
-        band, even when it reads "first" or "most_exposed".
+        Specials are excluded: the base anchors every relativity and must lie
+        on the smooth. A ``base=`` a rebuild marked as a band
+        (``_base_is_level``) names that band even when it reads "first".
         """
         if self._base_level and self._base_level in self._smooth_levels:
             return
@@ -1295,11 +1037,8 @@ class OrderedCategorical:
         elif policy == "first":
             self._base_level = self._smooth_levels[0]
         else:
-            # `base=` is the user's own spelling of a level and need not match the
-            # declaration's: `base="1"` against `order=[1, 2, 3]` is the same seam
-            # as everywhere else. Left unreconciled it does not raise loudly in
-            # every path -- the collapse path silently re-bases to another group,
-            # which changes every reported relativity.
+            # `base=` is the user's spelling and need not match the declaration
+            # (`base="1"` against `order=[1, 2, 3]`), so canonicalise it.
             resolved = _declared_matcher(list(self._smooth_levels))(self.base)
             if resolved in self._smooth_levels:
                 self._base_level = resolved
@@ -1330,13 +1069,10 @@ class OrderedCategorical:
     ) -> GroupInfo | list[GroupInfo]:
         """Build design columns from ordered categorical data.
 
-        With ``specials=``, returns two GroupInfos in a fixed order: the
-        penalized spline block first, the unpenalized special-indicator block
-        second. Downstream metadata readers select by ``subgroup_type``, but
-        the order is part of the contract — ``_split_beta`` and ``transform``
-        both assume it. The free block covers the specials that have effective
-        rows in THIS fit; when every declared special is pinned there is no
-        second block and one GroupInfo comes back.
+        With ``specials=``, returns two GroupInfos: the penalized spline block,
+        then the unpenalized special-indicator block, an order ``_split_beta``
+        and ``transform`` rely on. When every special is pinned there is no
+        second block.
         """
         return self._build_with_geometry(
             x,
@@ -1400,12 +1136,8 @@ class OrderedCategorical:
     ) -> GroupInfo | list[GroupInfo]:
         """Build the inner basis on the mapped numeric axis.
 
-        ``sample_weight`` is the learned-state stream chosen by the caller and
-        every inner basis consumes it exactly. Distributional compilation
-        supplies physical retained rows under a prior contract and literal
-        replication mass under a frequency contract. Scalar compilation keeps
-        its historical Polynomial standardization stream; direct spec-API
-        callers retain the same control by supplying (or omitting) the stream.
+        ``sample_weight`` is the learned-state stream the caller chose, and
+        every inner basis consumes it exactly.
         """
         from dataclasses import replace
 
@@ -1425,17 +1157,10 @@ class OrderedCategorical:
                 ) from None
         info = inner.build(numeric, sample_weight=sample_weight)
         if isinstance(info, GroupInfo):
-            # Structurally unpenalized main block for BOTH parametric bases --
-            # the same convention as the specials block, which is exactly an
-            # unpenalized second block, so the two-block contract generalizes
-            # rather than breaks. Polynomial is flipped too, deliberately
-            # diverging from the numeric-axis term's group-selection contract:
-            # the reported vocabulary here is plain whole-term Wald plus clean
-            # per-power z rows, and both are invalid the moment lambda1
-            # shrinkage touches the block. Row compression stays off for the
-            # hosted case: the support-compressed container was built and
-            # verified for the numeric-axis term, and its composition with the
-            # ordered wrapper is unverified.
+            # Both parametric bases are an unpenalized main block, like the
+            # specials block. Polynomial is too, unlike the numeric-axis term:
+            # its Wald and per-power z rows are invalid under lambda1 shrinkage.
+            # Row compression stays off; it is verified for the numeric-axis term.
             info = replace(info, penalized=False, supports_row_compression=False)
         return info
 
@@ -1451,16 +1176,11 @@ class OrderedCategorical:
             return self._build_inner_info(self._map_to_numeric(x), geometry_weight)
 
         special_mask = self._special_mask(x)
-        # The DECLARED mask splits the design, not the active one: a pinned
-        # special has no coordinate on the spline axis either, so its rows must
-        # stay out of the smooth and carry zero in both blocks -- the dense
-        # spelling of the categorical kernel's -1 sink.
+        # The declared mask splits the design: a pinned special has no
+        # coordinate either, so its rows carry zero in both blocks.
         ordered_mask = np.asarray(~special_mask.any(axis=1), dtype=bool)
-        # Effective observation, the same rule as Categorical's zero-count pin:
-        # rows when unweighted, total weight otherwise. Presence alone is not
-        # enough, because it is X'WX that has to see the indicator -- a special
-        # carried only by zero-weight rows contributes nothing to it and its
-        # unpenalized coefficient is exactly as unidentifiable as an absent one.
+        # Effective observation, as Categorical's zero-count pin: rows when
+        # unweighted, total weight otherwise; zero-weight rows leave X'WX blind.
         if reporting_weight is None:
             effective = special_mask.sum(axis=0).astype(np.float64)
         else:
@@ -1481,10 +1201,8 @@ class OrderedCategorical:
                 stacklevel=2,
             )
 
-        # The identifiability constraint is a column sum over the rows present, so
-        # the spline must be built on exactly the rows its block is nonzero on.
-        # Building over all rows would break 1'(B@Z) = 0 once the special rows are
-        # zeroed, and would let a fabricated coordinate reach knot placement.
+        # The identifiability constraint is a column sum over present rows, so
+        # the spline is built only on the rows its block is nonzero on.
         ordered_numeric = self._map_to_numeric(x[ordered_mask])
         ordered_geometry_weight = (
             None
@@ -1492,9 +1210,8 @@ class OrderedCategorical:
             else np.asarray(geometry_weight, dtype=np.float64).ravel()[ordered_mask]
         )
         spline_info = self._build_inner_info(ordered_numeric, ordered_geometry_weight)
-        # build() is declared as returning one GroupInfo or a list of them; the
-        # spline bases reachable from here return exactly one, and _expand_rows and
-        # the two-block contract both assume it. Say so rather than indexing on faith.
+        # The spline bases reachable here return exactly one GroupInfo, which
+        # the two-block contract assumes.
         if not isinstance(spline_info, GroupInfo):
             raise TypeError(
                 f"OrderedCategorical specials require a single-group spline basis; "
@@ -1503,17 +1220,12 @@ class OrderedCategorical:
         spline_info = self._expand_rows(spline_info, ordered_mask)
 
         if not self._active_specials:
-            # Every declared special pinned: there is no free block to emit. A
-            # zero-column GroupInfo would instead put an empty group into every
-            # slice, penalty and selection list downstream, so the term returns
-            # the shape it has without specials -- which is what it now is.
+            # Every special pinned: no free block, and the term has the shape it
+            # has without specials (a zero-column group would leak downstream).
             return spline_info
-        # A row carries at most one special -- they are distinct levels of one
-        # column, and grouping may not merge them -- so this block is one-hot
-        # and codes describe it exactly.  Carried as cat_codes rather than CSR
-        # so the group reaches the structured kernels: a sparse block here is
-        # enough on its own to disqualify a whole design from the packed
-        # centering path and send it to the chunked dense fallback.
+        # A row carries at most one special, so this block is one-hot and is
+        # carried as cat_codes: a sparse block would disqualify the design from
+        # the structured kernels and the packed centering path.
         active = special_mask[:, self._active_specials]
         special_codes = np.where(active.any(axis=1), active.argmax(axis=1), -1).astype(
             np.intp, copy=False
@@ -1533,18 +1245,10 @@ class OrderedCategorical:
     def _special_mask(self, x: NDArray) -> NDArray[np.bool_]:
         """(n, n_specials) boolean membership matrix, column j == self._specials[j].
 
-        ``self._specials`` is string-coerced at construction (so a special
-        listed as ``9`` still pops out of ``order=``/``values=``), so the
-        column is compared through a string view — otherwise construction and
-        build disagree and the special's rows fall through to the smooth.
-
-        The string view alone is not enough: a float column renders ``9.0`` as
-        ``"9.0"``, which never equals the declared ``"9"``, so a special
-        declared as a non-str is matched against its raw label as well. That
-        comparison runs through pandas, which yields element-wise ``False``
-        when the column's dtype cannot hold the label rather than raising.
-        A grouped term's labels are strings spelled as the special is reported
-        (``"9.0"``), so that spelling matches as well.
+        Compared through a string view, since ``_specials`` is string-coerced,
+        and against the raw label for non-str declarations (a float column
+        renders ``9.0`` as ``"9.0"``). pandas yields ``False`` when the dtype
+        cannot hold the label. Grouped labels are spelled as reported.
         """
         raw = pd.Series(np.asarray(x).ravel())
         labels = raw.astype(str).to_numpy()
@@ -1560,9 +1264,8 @@ class OrderedCategorical:
     def _active_special_cols(self) -> list[int]:
         """Indices into ``_specials`` of the indicator columns this fit emits.
 
-        Read through ``getattr`` because it is per-build state: a spec pickled
-        before thin-special pinning has no such attribute, and one that has never
-        been built has every declared special active.
+        Per-build state: an older pickle or an unbuilt spec has every declared
+        special active.
         """
         active = getattr(self, "_active_specials", None)
         if active is None:
@@ -1579,16 +1282,9 @@ class OrderedCategorical:
     ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
         """Split a full-width feature coefficient vector into its two blocks.
 
-        Callers throughout inference concatenate every GroupSlice of a feature
-        and hand the result here; the block order is the documented build()
-        contract — spline first, specials second.
-
-        The width check is an equality, not a lower bound: the realistic bad
-        input is the spline block alone, which is *longer* than ``n_special``
-        and would otherwise be split silently, reinterpreting its last
-        coefficients as free level effects. ``_spline_n_cols()`` tracks the
-        inner spline's current width in both the pre-reparametrisation and the
-        post-fit state, so equality is well-defined at every call site.
+        Block order is the build() contract: spline first, specials second. The
+        width check is an equality, because the spline block alone is longer
+        than ``n_special`` and would otherwise split silently.
         """
         beta = np.asarray(beta, dtype=np.float64).ravel()
         if not self.has_specials:
@@ -1721,18 +1417,12 @@ class OrderedCategorical:
         raw["log_relativity"] = raw["log_relativity"] - base_shift
         raw["relativity"] = np.exp(raw["log_relativity"])
 
-        # Report specials under their domain labels so every entry in `levels` is
-        # in the same namespace as the smooth levels and as the raw column. Read
-        # `_ordered_levels` rather than re-deriving the concatenation: the two
-        # lists are joined on equality downstream (canonical row names come from
-        # one, coefficient row names from the other), and re-deriving is how they
-        # came to be spelled differently in the first place.
+        # Report specials under their domain labels; read `_ordered_levels`
+        # rather than re-deriving it, since the two lists are joined on equality.
         all_levels = list(self._ordered_levels)
-        # A pinned special has no coefficient because it had no data, not because
-        # it is unknown, so it reports the zero contribution the model actually
-        # predicts for it -- which on the base-anchored scale is -f(base), just
-        # like a free level fitted at zero. Re-inflating here rather than
-        # shortening `levels` keeps every declared level in the rating table.
+        # A pinned special reports the zero contribution the model predicts for
+        # it, -f(base) on the base-anchored scale, so every declared level stays
+        # in the rating table.
         special_effects = np.zeros(len(self._specials), dtype=np.float64)
         special_effects[self._active_special_cols] = np.asarray(special_beta, dtype=np.float64)
         all_log_rels = np.concatenate([level_log_rels, special_effects - base_shift])
@@ -1776,12 +1466,9 @@ def resolve_interaction_parent(spec: Any, x: NDArray) -> tuple[Any, NDArray]:
             "feature for unsmoothed level effects."
         )
     if spec.basis_kind != "spline":
-        # The interaction classes cross a penalized marginal SMOOTH: their
-        # penalty plumbing, screening margins and margin predictions all read
-        # spline geometry off the parent. A Piecewise/Polynomial inner basis is
-        # an unpenalized parametric block; handing it over would half-support
-        # the pair. Refuse at resolution as the backstop -- registration
-        # already refuses in dm_builder.
+        # Interactions cross a penalized marginal smooth; a Piecewise/Polynomial
+        # basis is an unpenalized parametric block. Backstop for the refusal
+        # in dm_builder.
         raise NotImplementedError(
             f"OrderedCategorical(basis={type(spec._basis_spline).__name__}(...)) "
             "cannot parent an interaction: the interaction machinery crosses a "
@@ -1789,38 +1476,18 @@ def resolve_interaction_parent(spec: Any, x: NDArray) -> tuple[Any, NDArray]:
             "parametric block. Use basis=Spline(...) for an interactable ordinal "
             "parent, or a Categorical feature for level-by-level structure."
         )
-    # `_resolved_labels`, not a fourth copy of it. This preamble was written out
-    # again here with the leading `_canonical` MISSING, so the interaction path
-    # matched levels by raw equality while `transform`/`score`/`shape_axis`
-    # matched them in the declaration's namespace: a band declared `"3"` against
-    # an int64 column denoted level `"3"` on three paths and nothing at all on
-    # the fourth, and the same model that fitted as a main effect refused as an
-    # interaction parent, naming the levels it rejected beside the
-    # identical-looking levels it wanted.
-    #
-    # Safe to canonicalize HERE because the one caller that must NOT remap --
-    # `FactorSmooth`, whose second parent is a grouping column read as labels --
-    # returns from `resolve_interaction_parent_of` before reaching this function
-    # at all.
-    #
-    # _basis_spline rather than _spline: a pre-0.24 step-mode pickle has no
-    # inner spline, and the property refuses it loudly instead of handing the
-    # caller ``None`` as a parent spec.
+    # Canonicalising is safe here because `FactorSmooth`, whose grouping parent
+    # is read as labels, returns from `resolve_interaction_parent_of` first.
     return spec._basis_spline, spec._map_to_numeric(spec._resolved_labels(x))
 
 
 def resolve_interaction_parent_of(ispec: Any, spec: Any, x: NDArray) -> tuple[Any, NDArray]:
     """``resolve_interaction_parent`` for a parent OF a given interaction.
 
-    Identical to it for every interaction that reads both parents as
-    *marginal* columns.  ``FactorSmooth`` does not: its second parent is a
-    GROUPING column, read as labels and factorized into the term's own level
-    set.  Mapping a spline-mode ``OrderedCategorical`` main on that column to
-    its level scores would silently re-key that identity — ``_levels`` becomes
-    ``[0.0, 0.25, ...]`` instead of ``['18-25', ...]`` — and every by-label
-    lookup the term's inference exposes would fail on the fitted labels.  Its
-    variable parent is numeric and carries no OC form either, so a
-    ``FactorSmooth`` takes both columns as the frame carries them.
+    Identical to it except for ``FactorSmooth``, whose second parent is a
+    grouping column read as labels: mapping it to level scores would re-key
+    the term's levels, so a ``FactorSmooth`` takes both columns as the frame
+    carries them.
     """
     from superglm.features.factor_smooth import FactorSmooth
 

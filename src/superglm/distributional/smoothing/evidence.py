@@ -124,38 +124,3 @@ def _lower_bound_pressure(
         for name in evidence.estimated_names
         if lambdas[name] == config.minimum_lambda and raw_log_steps[name] < -config.tolerance
     )
-
-
-def _saturated_names(
-    components: tuple[EFSComponentState, ...],
-    update: EFSUpdateResult,
-    estimated_names: tuple[str, ...],
-    threshold: float,
-) -> frozenset[str]:
-    """Names saturated at a large lambda AND still being pushed upward.
-
-    ``lambda_j tr(H^-1 S_j) / r_j`` is bounded above by one and approaches it as
-    ``lambda_j -> inf``, because the penalty then dominates its own block; an
-    interior component settles strictly below one because the data curvature
-    keeps a share.  Saturation alone is a statement about the current lambda,
-    not about the optimum: a fit started above a finite optimum is saturated
-    while walking DOWN toward it.  What distinguishes the infinity drift is its
-    direction -- the fixed point keeps proposing lambda increases forever -- so
-    a name counts only while its proposed log step is positive.  A threshold of
-    one disables the classification.
-    """
-    if threshold >= 1.0:
-        return frozenset()
-    estimated = set(estimated_names)
-    saturated: set[str] = set()
-    for component in components:
-        if component.name not in estimated or component.rank <= 0.0:
-            continue
-        trace = update.trace_terms.get(component.name)
-        if trace is None:
-            continue
-        if update.raw_log_steps.get(component.name, 0.0) <= 0.0:
-            continue
-        if component.lambda_value * float(trace) / component.rank > threshold:
-            saturated.add(component.name)
-    return frozenset(saturated)

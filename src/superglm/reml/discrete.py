@@ -77,6 +77,22 @@ from superglm.reml.scale import (
     profile_gaussian_reml_scale,
     profile_tweedie_reml_scale,
 )
+from superglm.solvers._structured.assembly import (
+    solve_cached_structured,
+)
+from superglm.solvers._structured.balance_tree import (
+    SumToZeroLeafSystem,
+)
+from superglm.solvers._structured.block_leaves import (
+    FactorSmoothLeafSystem,
+)
+from superglm.solvers._structured.moments import (
+    NestedStructuredSystem,
+)
+from superglm.solvers._structured.selection import (
+    record_auto_backend_decision,
+    resolve_structured_backend,
+)
 from superglm.solvers.dispersion import lazy_likelihood_size
 from superglm.solvers.hessian_factor import as_hessian_factor
 from superglm.solvers.irls_direct import (
@@ -92,14 +108,6 @@ from superglm.solvers.mode_score import (
 )
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
-from superglm.solvers.structured import (
-    FactorSmoothLeafSystem,
-    NestedStructuredSystem,
-    SumToZeroLeafSystem,
-    record_auto_backend_decision,
-    resolve_structured_backend,
-    solve_cached_structured,
-)
 from superglm.solvers.working_rows import fisher_working_weights, null_fit_eta
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -109,56 +117,15 @@ def _profiled_formation_error(
 ) -> NDArray:
     """``g`` with ``|dH_ij| <= sqrt(g_i g_j)`` between the cached ``H_c`` and its exact value.
 
-    ``H_c = X_c' W X_c + S`` is positive semidefinite by construction (``W >=
-    0`` is checked where the centred system is built, and every penalty block
-    is formed as a Gram), so the only negative curvature it can show is the
-    rounding of its formation, which the eigensolver's bar in
-    ``decompose_gram`` leaves out.
-
-    Every route that builds the centred data Gram ``G``
-    (``solvers.centered_system``) sums at most ``n`` row terms per entry,
-    ``W_r x_ri x_rj`` about zero or about a centre.  Whatever the summation
-    tree (rows into bins, bins into cells), a term meets at most ``n - 1``
-    additions and three products: ``gamma_{n+2} sum_r W_r |x_ri x_rj| <=
-    gamma_{n+2} sqrt(M_i M_j)`` (Higham 2002, eq. 3.13, and Cauchy-Schwarz),
-    ``M_i`` the second moment about the centre used.  A raw-moment rung then
-    subtracts ``a a' / s``, ``a = X'W1``, whose formed ``a`` and ``s`` add
-    ``2 gamma_{n+1} + gamma_{n-1}`` of ``t_i t_j / s <= sqrt(R_ii R_jj)``,
-    ``t = |X|'W1``, ``R_ii = sum_r W_r x_ri^2``.  It admits a column only
-    when ``s mean_i^2 <= C_ii`` (``_raw_centering_admitted``), so there ``M_i
-    = R_ii <= 2 C_ii``; on a centred route ``M_i`` is ``C_ii`` to within
-    rounding.  Hence
-    ``|dG_ij| <= 5 gamma_{n+4} sqrt(M_i M_j)``, ``M_i = min(R_ii, 2 C_ii)``:
-    four for the first-order terms, the fifth holding the subtraction's, the
-    symmetrisation's and the second-order terms while ``n u < 1/5``.  A
-    penalty block is the Gram of a root (``penalty_algebra.ssp_penalty_matrix``,
-    or a component's retained eigenpairs), within ``gamma_r sqrt(S_ii
-    S_jj)``, ``r <= p``, then scaled and accumulated: ``gamma_{2p+2}``.
-    ``G + S`` rounds once more, ``gamma_2 sqrt(d_i d_j)``.  Forming ``g``
-    rounds at most nine times per term, taken as nine more counts in each
-    ``gamma`` (``gamma_j (1 + gamma_k) <= gamma_{j+k}``, Higham, Lemma 3.3).
-
-    A kernel that applies a basis transform after accumulating (the
-    spline-by-categorical blocks, ``R' (B'WB) R``, and the tensor grids)
-    multiplies ``|B||R|`` rather than the column, so this under-estimates its
-    rounding by the ratio of ``sum_b w_b (|B_b||R|)_i^2`` to the column's own
-    moment (up to 166, median 1.3 to 2, on the freMTPL2 Density x Area
-    supports).  An under-estimate can only refuse a semidefinite matrix, as
-    the eigensolver's bar alone did, never accept one its rounding cannot
-    explain.
-
-    Measured on the freMTPL2 Density x Area fit (678,013 rows), where Area A
-    and B each sit in one Density bin: the Categorical x spline-by-categorical
-    cross block summed each row's ``W_r B_k`` while the diagonals scale the
-    level's summed weight, and over 103,957 rows the two rounded ``5.5e4 u``
-    and ``6.5e3 u`` from the exact sum, far past the ``sqrt(n) u`` a
-    probabilistic bound assumes.  Against an extended-precision reference
-    ``||dE||_2`` was ``5.9e-12`` and the smallest scaled eigenvalue
-    ``-1.8e-12``, against the eigensolver's bar of ``2.4e-13``; this bound
-    gives ``2.5e-8``.  That cross now scales the level's binned weight
-    (``_cross_gram_categorical_spline_categorical``), which leaves ``-5e-16``,
-    inside the bar on either sign; this bound remains the gate for the
-    residues that change does not remove.
+    ``H_c = X_c' W X_c + S`` is PSD by construction, so its only negative curvature is rounding.
+    A centred-Gram entry of at most ``n`` three-product terms is within ``gamma_{n+2}
+    sqrt(M_i M_j)`` (Higham 2002, eq. 3.13, and Cauchy-Schwarz), ``M_i`` the second moment about
+    the centre. A raw-moment rung's ``a a' / s`` adds ``2 gamma_{n+1} + gamma_{n-1}`` of
+    ``sqrt(R_ii R_jj)`` and admits a column only when ``s mean_i^2 <= C_ii``, so
+    ``|dG_ij| <= 5 gamma_{n+4} sqrt(M_i M_j)``, ``M_i = min(R_ii, 2 C_ii)``, while ``n u < 1/5``.
+    A penalty block adds ``gamma_{2p+2} sqrt(S_ii S_jj)``, ``G + S`` adds ``gamma_2 sqrt(d_i d_j)``
+    and forming ``g`` adds nine to each count (Higham 2002, Lemma 3.3). An under-estimate only
+    refuses a semidefinite matrix, never accepts one its rounding cannot explain.
     """
     p = int(np.size(mean_x))
     data = np.maximum(np.diag(centered_XtWX), 0.0)
@@ -185,16 +152,12 @@ def _solve_cached_profiled_system(
 ) -> tuple[NDArray, float, float, int]:
     """Solve one cached trial in the authoritative intercept-profiled geometry.
 
-    The stable centered data Gram and RHS are invariant while working weights
-    are cached.  Each lambda candidate therefore needs only one ``p x p``
-    decomposition of ``H_c = X_c' W X_c + S``.  The same decomposition solves
-    the coefficients, applies the shared retained-rank policy, and supplies
-    ``log(sum(W)) + log|H_c|_+`` for Wood's REML/LAML criterion.
-
-    With ``n_rows`` (the design's row count) a negative eigenvalue of ``H_c``
-    within its formation rounding (``_profiled_formation_error``) is taken
-    as the semidefinite matrix it was formed from rather than refused;
-    ``disclosure["formation_limited"]`` then counts the trial.
+    With working weights cached, each lambda needs one ``p x p``
+    decomposition of ``H_c = X_c' W X_c + S``, which solves the coefficients,
+    applies the retained-rank policy and gives ``log(sum(W)) + log|H_c|_+``.
+    With ``n_rows``, a negative eigenvalue within formation rounding
+    (``_profiled_formation_error``) is taken as semidefinite and counted in
+    ``disclosure["formation_limited"]``.
     """
     if not np.isfinite(sum_W) or sum_W <= 0.0:
         raise ValueError("cached sum_W must be positive and finite")
@@ -261,19 +224,12 @@ def _solve_cached_profiled_system(
 
 
 def _cached_centred_intercept(mean_z: float, offset_mean: NDArray, beta: NDArray) -> float:
-    """A cached trial's centred intercept ``alpha = mean_z - (mean_x - c)' beta`` (design §3.8).
+    """A cached trial's centred intercept ``alpha = mean_z - (mean_x - c)' beta``.
 
-    The profiled intercept about the fixed centre ``c``, formed as the PIRLS
-    centred system forms it (``irls_direct``), so a cached trial and a full
-    fit with the same ``beta`` hold the same state.  Recovering it from the
-    raw intercept, ``(mean_z - mean_x' beta) + c' beta``, cancels
-    ``|mean_x|' |beta|``: at a 1e10 column translation that leaves an error
-    near ``u 1e10 |beta| ~ 1e-6`` in every row's eta, which moved the
-    Gaussian REML objective of the cached trial by 1.1e-7 (CI, OpenBLAS
-    Haswell kernels).  ``offset_mean = mean_x - c`` is the PIRLS's own,
-    formed on centred rows (``mode_score.centre_offset_mean``): the
-    difference of the two rounded means rounds at ``u |c|``, 2.7e-12 in the
-    intercept at a 1e6 offset.
+    Formed as the PIRLS centred system forms it, so a cached trial and a full
+    fit with the same ``beta`` hold the same state; the raw intercept would
+    cancel ``|mean_x|' |beta|``. ``offset_mean = mean_x - c`` is the PIRLS's
+    own, formed on centred rows (``mode_score.centre_offset_mean``).
     """
     offset_mean = np.asarray(offset_mean, dtype=np.float64)
     return float(mean_z) - math.fsum(offset_mean * np.asarray(beta, dtype=np.float64))
@@ -375,13 +331,11 @@ def _damped_tensor_newton_step(
     ``g . delta < 0`` for every nonzero gradient and ``mu >= 0``. Unlike
     coordinate clipping, damping preserves that descent property.
 
-    Try the undamped step first, then bracket a feasible damping value
-    using ``|delta|_2 <= |g|_2 / mu`` and refine its infeasible/feasible
-    bracket on ``log mu``. Individual constraint values need not be
-    monotone in mu, so this finds neither the smallest feasible damping
-    globally nor the exact box-constrained minimizer. Each trial costs
-    ``O(q^2)`` on the active subspace. Return the step, damping value and
-    binding constraints. See the September 19 tensor-step research note.
+    Tries the undamped step, then brackets a feasible damping with
+    ``|delta|_2 <= |g|_2 / mu`` and bisects on ``log mu``. Constraints need
+    not be monotone in mu, so this is neither the smallest feasible damping
+    nor the box-constrained minimizer. Returns the step, damping and binding
+    constraints.
     """
     vt_g = eigvecs.T @ grad_sub
 
@@ -440,21 +394,13 @@ def random_effect_seed_lambda(
 ) -> float | None:
     """A random effect's bootstrap smoothing parameter: its levels' mean information.
 
-    Wood, Pya & Saefken (2016, JASA 111, sec. 3.1, outer step 1) start the
-    search where each term's effective degrees of freedom lie away from their
-    extremes; mgcv's ``initial.sp`` documentation states the same goal per
-    penalized coefficient, reached by a crude e.d.f. approximation, and
-    targets an average of 1/2.  The approximation is the diagonal one,
-    ``edf_g = A_gg / (A_gg + lambda)`` for the identity penalty, with ``A``
-    the intercept-centred Fisher Gram at the intercept-only fit given the
-    offset (``information``, its working weights): a level's own rows give
-    ``A_gg = d_g (1 - d_g / sum W)``, ``d_g`` their summed weight.  ``lambda
-    = tr(A) / q``, the mean over the ``q`` levels, puts the typical level at
-    1/2.  ``A`` carries the units of the prior weights, and of the response
-    to the power ``2 - p`` under a log link with variance ``mu**p``, as the
-    REML optimum ``phi / sigma_b**2`` does, so the seed moves with them, as
-    ``_hessian_scaled_bootstrap_lambdas`` reasons for a SCOP block.
-    Returns None where the mean is not a positive finite number.
+    The search starts with each term's effective degrees of freedom away from
+    their extremes (Wood, Pya & Saefken 2016, JASA 111, sec. 3.1; mgcv's
+    ``initial.sp`` documentation targets an average of 1/2). With the diagonal
+    approximation ``edf_g = A_gg / (A_gg + lambda)``, ``A`` the
+    intercept-centred Fisher Gram at the intercept-only fit (``A_gg = d_g
+    (1 - d_g / sum W)``), ``lambda = tr(A) / q`` puts the typical level at
+    1/2 in the units of the REML optimum. None unless positive and finite.
     """
     level_weight = np.asarray(group_matrix.rmatvec(information), dtype=np.float64)
     total = float(np.sum(information))
@@ -480,28 +426,18 @@ def bootstrap_seed_lambdas(
 ) -> dict[str, float]:
     """The smoothing parameters the Newton engines' bootstrap fit is taken at.
 
-    Cold, these are seeds, followed by one Fellner-Schall step from that fit:
-    1e-4, an almost-unpenalized fit, except for
+    Cold seeds, followed by one Fellner-Schall step: 1e-4 (almost
+    unpenalized), except
 
-    - interaction components, a strong 1.0, as their rich tensor bases can
-      explode under an almost-unpenalized fit;
-    - random effects (``RandomEffectGroupMatrix``), their levels' mean
-      information (``random_effect_seed_lambda``), which puts the typical
-      level's effective degrees of freedom at 1/2 in any units.  Unpenalized,
-      a level its own rows do not identify has a posterior variance of order
-      ``1 / lambda`` -- a parent of a nested effect, aliased with its
-      children's indicators, or a level its responses separate (all zero
-      under a log link) -- so the step's trace term outweighs the squared
-      coefficients and it returns about ``lambda`` times a constant, still at
-      the unpenalized end the Newton step then has to leave.  Where the
-      intercept-only fit has no valid mode (``null_fit_eta`` returns None),
-      they keep the cold 1e-4.
+    - interaction components, 1.0, as rich tensor bases can explode
+      unpenalized;
+    - random effects, their levels' mean information
+      (``random_effect_seed_lambda``), since an unidentified level near zero
+      penalty makes the Fellner-Schall step return about ``lambda`` times a
+      constant; 1e-4 when the intercept-only fit has no valid mode.
 
-    A warm start (``warm_lambdas``, a previous fit's estimates) replaces the
-    seed of each component it names, and, when present, fixed-policy
-    components are bootstrapped at their fixed value, so the bootstrap fit is
-    the warm start's own coefficient mode and the first Newton step is taken
-    from there.
+    ``warm_lambdas`` replaces the seed of each component it names, and
+    fixed-policy components start at their fixed value.
     """
     seeds = {pc.name: (1.0 if ":" in pc.group_name else 1e-4) for pc in penalties}
     cold_random_effects = [
@@ -566,8 +502,6 @@ def optimize_discrete_reml_cached_w(
     direct_solve: str = "auto",
     pirls_tol: float = 1e-6,
     max_pirls_iter: int = 100,
-    # Legacy kwargs accepted but ignored (removed in POI rewrite)
-    max_analytical_per_w: int = 30,
     select_snap: bool = True,
     reml_penalties: list[PenaltyComponent] | None = None,
     estimated_names: set[str] | None = None,
@@ -588,22 +522,12 @@ def optimize_discrete_reml_cached_w(
     the run once one working-model update moves the objective by less than
     that fraction of its scale.
 
-    Performance Oriented Iteration (mgcv bam-style): interleaves one
-    PIRLS step (W update) with one Newton lambda step on the working
-    model's REML criterion. Line search re-solves the cached, stably centered
-    profiled-intercept system analytically (O(p^3), no data pass) for each
-    trial lambda.
-
-    Typically converges in 5-15 total iterations instead of the old
-    nested architecture's 200+ analytical iterations.
-
-    Note: this is a faster approximate optimizer.  On models with many
-    noise features (p >> n_signal), Newton-POI may converge to a
-    slightly different REML stationary point than the old Fellner-Schall
-    fixed-point path.  The REML surface is flat in noise-feature
-    directions, and Newton settles at a nearby minimum where noise
-    lambdas are large but not maximally penalized.  Deviance drift is
-    typically <0.1% relative (guarded by test_wide_poisson_poi_quality).
+    Performance Oriented Iteration (Wood 2011, sec. 6.2; mgcv ``bam``): one
+    PIRLS step (W update) then one Newton lambda step on the working model's
+    REML criterion; the line search re-solves the cached centred system
+    (O(p^3), no data pass) per trial. Where the REML surface is flat in noise
+    directions it may stop at a nearby stationary point with large but not
+    maximal noise lambdas.
     """
 
     # The declared contract's likelihood size (``lazy_likelihood_size``).
@@ -628,13 +552,9 @@ def optimize_discrete_reml_cached_w(
         sample_weight,
         weight_semantics=weight_semantics,
     )
-    # The REML curvature is a function of the family and link
-    # (``classify_binned_reml_curvature``): observed where the exact route's
-    # is and the observed rows are never negative, Fisher otherwise.  The
-    # performance iteration's working model carries it (Newton rows,
-    # ``fit_irls_direct``'s ``_working_newton``), the result reports it, and
-    # the terminal refit and objective (``reml_finalize``) score it, so the
-    # criterion the optimizer steps on is the one published.
+    # The REML curvature is a function of family and link
+    # (``classify_binned_reml_curvature``); the working model, the result and
+    # the terminal refit all use it, so the criterion stepped on is published.
     reml_curvature = classify_binned_reml_curvature(distribution, link)
     working_newton = reml_curvature == "observed"
     group_names = [pc.name for pc in penalties]
@@ -671,15 +591,13 @@ def optimize_discrete_reml_cached_w(
         estimated_mask = np.ones(m, dtype=bool)
     log_lo, log_hi = np.log(LAMBDA_FLOOR), np.log(LAMBDA_CEILING)
     p = dm.p
-    # The Laplace approximation's identified part (design §3.9,
-    # ``reml.identified``): decided once, from the design and prior weights.
+    # The Laplace approximation's identified part (``reml.identified``):
+    # decided once, from the design and prior weights.
     identified = IdentifiedLaplace.for_design(
         dm, sample_weight, penalties, y=y, distribution=distribution, link=link
     )
-    # The cached trials' linear predictor about the fixed prior-weighted
-    # centre (one-engine design §3.8), as every PIRLS state is: a column
-    # translated by 1e10 otherwise costs eta ~1e-6 per row in X beta against
-    # the raw intercept, and the true objective that accepts a trial with it.
+    # The cached trials' linear predictor is about the fixed prior-weighted
+    # centre, as every PIRLS state is, so a large column offset cannot cancel.
     trial_centre = prior_weighted_centre(dm, sample_weight)
     structured_decision = resolve_structured_backend(
         list(dm.group_matrices),
@@ -717,13 +635,9 @@ def optimize_discrete_reml_cached_w(
     _n_linesearch_full_evals = 0
     _n_dead_line_searches = 0
     _n_refused_structured_trials = 0
-    # A trial whose unclipped predictor leaves the link's domain (eta <= 0 under
-    # an inverse link, a non-positive identity mean of a positive-mean family)
-    # has no REML objective: it would be scored on clipped means of about 1e12
-    # or 1e-50 (``stabilize_eta``, ``clip_mu``), and accepting it would move the smoothing
-    # parameters on a number that is not the criterion.  It is refused like any
-    # other trial.  No trial state warm-starts a solve: each iteration ends by
-    # replacing the warm state with the candidate's own PIRLS state.
+    # A trial whose unclipped predictor leaves the link's domain has no REML
+    # objective (it would be scored on clipped means) and is refused. No trial
+    # state warm-starts a solve.
     domain_violation = link_domain_violation(link, distribution)
     _n_domain_refused_trials = 0
     # score-test stops refused because a concave shoulder was live
@@ -735,10 +649,7 @@ def optimize_discrete_reml_cached_w(
     _tensor_post_stall_unlocked = False
     _prev_tensor_v: float | None = None
     # === Bootstrap: one FP step from the seeds ===
-    # Main effects bootstrap almost unpenalized, interaction components from a
-    # materially stronger seed, random effects at their levels' mean
-    # information, and a warm start at its own lambdas
-    # (``bootstrap_seed_lambdas``).
+    # Seeds from ``bootstrap_seed_lambdas``.
     boot_lambdas = bootstrap_seed_lambdas(
         penalties,
         warm_lambdas,
@@ -964,19 +875,14 @@ def optimize_discrete_reml_cached_w(
 
     # === POI loop: one PIRLS step + one Newton lambda step ===
     prev_obj = np.inf
-    # Frozen directions from the previous iteration's active-set decision:
-    # the stop criterion judges the ACTIVE set. An inferentially flat frozen
-    # direction keeps a tiny persistent gradient forever (that is what makes
-    # it flat), and counting it would spin the loop doing nothing until
-    # max_reml_iter with every informative direction long determined.
+    # The stop judges the active set only: a flat frozen direction keeps a
+    # tiny gradient forever, and counting it would spin to max_reml_iter.
     stop_criterion_frozen_d = None
     for poi_iter in range(max_reml_iter):
         rho_clipped = np.clip(rho, log_lo, log_hi)
-        # The shared-tensor path's trust region: every log-lambda coordinate
-        # within base_cap and each shared pair's half-difference within cap_v,
-        # widened after one accepted full step.  A concave shoulder's step
-        # and the step bound its stopping test reads are that box's edge, so
-        # the shoulder stays inside the region the rest of the step uses.
+        # The shared-tensor trust region: coordinates within base_cap, shared
+        # pairs' half-differences within cap_v, widened after one accepted full
+        # step. A concave shoulder's step is that box's edge.
         base_cap = 1.0 if not _tensor_post_stall_unlocked else 2.5
         cap_v = 0.25 if not _tensor_post_stall_unlocked else 1.0
         shoulder_step = base_cap if use_tensor_linesearch else max_newton_step
@@ -1032,11 +938,8 @@ def optimize_discrete_reml_cached_w(
             weight_semantics=weight_semantics,
         )
         _t_pirls += _time.perf_counter() - _t0
-        # The candidate is ONE working-model update. Its own convergence
-        # flag says whether that update changed anything: when it did not,
-        # the working model has settled at these lambdas and the next
-        # iteration would recompute the same gradient, Hessian and step --
-        # the discrete analogue of the exact engine's stationary mode.
+        # The candidate is one working-model update; its convergence flag says
+        # the working model has settled at these lambdas (a stationary mode).
         candidate_mode_stationary = bool(pirls_result.converged)
         candidate_group_matrices = dm.group_matrices
         warm_beta = pirls_result.beta.copy()
@@ -1044,7 +947,7 @@ def optimize_discrete_reml_cached_w(
         warm_centred = centred_warm_start(pirls_result)
         warm_deviance = float(pirls_result.deviance)
 
-        # the identified part of the Laplace approximation (design §3.9); a
+        # the identified part of the Laplace approximation; a
         # dense one restricts the centred Hessian this PIRLS decomposed
         full_inverse = XtWX_S_inv
         full_dense = None if use_structured else dense_hessian(cache)
@@ -1060,9 +963,8 @@ def optimize_discrete_reml_cached_w(
         c_mean_x = cache["mean_x"]
         c_mean_z = cache["mean_z"]
         c_sum_W = cache["sum_W"]
-        # The cached trials hold the candidate PIRLS's centred state (design
-        # §3.8): its centre, and its working means' offset from that centre
-        # formed on centred rows (``mode_score.centre_offset_mean``).
+        # The cached trials hold the candidate PIRLS's centred state: its
+        # centre and its means' offset from it (``mode_score.centre_offset_mean``).
         cand_centre = (
             trial_centre if pirls_result.state_center is None else pirls_result.state_center
         )
@@ -1200,9 +1102,7 @@ def optimize_discrete_reml_cached_w(
             inverse_phi=inverse_phi,
             tensor_pair_evaluations=cand_tensor_pair_evals,
         )
-        # The convergence decision belongs to this evaluated candidate.
-        # Do not construct or install another Newton step before deciding
-        # whether these exact lambdas are terminal.
+        # Decide whether these lambdas are terminal before any new Newton step.
         proj_grad_d = project_reml_gradient(
             grad,
             rho_clipped,
@@ -1282,12 +1182,8 @@ def optimize_discrete_reml_cached_w(
                 break
         prev_obj = obj
 
-        # Active-set: freeze components with negligible gradient and Hessian.
-        # The gradient/curvature bars live with the classifier's calibration
-        # in reml/convergence.py. (The discrete engine's 1e-12 tolerance
-        # floor once made a tolerance-coupled bar 1e-13 -- three decades
-        # below where its own flat directions live; the shared floor and
-        # curvature-relative arm close that.)
+        # Active-set: freeze components with negligible gradient and Hessian
+        # (bars in reml/convergence.py).
         direction_ranks = direction_penalty_ranks(penalties, penalty_ranks)
         freeze_decision = freeze_flat_directions(
             proj_grad_d,
@@ -1323,14 +1219,9 @@ def optimize_discrete_reml_cached_w(
                 # two-evaluation convergence contract.
                 continue
             if not (obj_change < _tol * score_scale_d):
-                # POI performs ONE working-model update per outer
-                # iteration, so an early all-frozen verdict can be
-                # measured at a nonstationary coefficient mode -- the
-                # objective is still moving, and the next W update can
-                # unfreeze what this one froze. All directions frozen
-                # means rho stops moving, so continuing is a pure PIRLS
-                # settle at the same lambdas; grant the exit only once
-                # the objective arm agrees the mode has stabilized.
+                # One working-model update per iteration, so an all-frozen
+                # verdict can come at a nonstationary mode; exit only once the
+                # objective arm agrees the mode has stabilized.
                 continue
             converged = True
             termination_reason = "active_set_stationary"
@@ -1358,11 +1249,8 @@ def optimize_discrete_reml_cached_w(
         gdot_newton = float(grad @ delta)
         gdot_damped = gdot_newton
         if use_tensor_linesearch and active_idx_d.size:
-            # Bound log-lambda coordinates and each shared pair's difference
-            # by damping the whole step. The coordinate bound also bounds
-            # each pair's mean. Widen after one accepted full step so a
-            # finite margin can move when its partner approaches infinity.
-            # Frozen coordinates stay outside the active subspace.
+            # Damp the whole step to the trust region; widened after one full
+            # step so a margin can move as its partner approaches infinity.
             delta_newton = delta
             delta, trust_mu, trust_binding = _damped_tensor_newton_step(
                 eigvecs_h,
@@ -1377,11 +1265,8 @@ def optimize_discrete_reml_cached_w(
                 cap_v,
             )
             gdot_damped = float(grad @ delta)
-            # Descent holds by construction; the only admissible slack is
-            # the round-off of the dot product itself. A violation means
-            # the eigen floor or the active set is inconsistent with the
-            # gradient, and continuing would hand the line search a step
-            # it can never accept: name the state instead of stalling.
+            # Descent holds by construction up to the dot product's round-off;
+            # a violation is an inconsistent eigen floor or active set: raise.
             descent_slack = 1e-12 * float(np.sum(np.abs(grad * delta)))
             if gdot_damped > descent_slack:
                 raise RuntimeError(
@@ -1443,30 +1328,17 @@ def optimize_discrete_reml_cached_w(
         halving_count = 0
         had_feasible_trial = False
         evaluated_feasible_trial = False
-        # Every feasible trial pays for a cached solve and true objective.
-        # With A = H_pd + mu I and delta = -A^-1 g, H <= A gives
-        # delta' H delta <= -g' delta. Thus the quadratic predicts descent
-        # at every 0 < step <= 1; it cannot filter these damped steps.
-        # Keep the full budget because higher-order objective terms can
-        # still require a small step, regardless of that local prediction.
+        # With A = H_pd + mu I, delta = -A^-1 g, the quadratic predicts descent
+        # at every step in (0, 1], so it cannot filter damped steps; higher
+        # order terms can still need a small one, so keep the full budget.
         local_max_halving = max_halving
         if use_tensor_linesearch and max_delta < 1e-12:
             local_max_halving = 0
-        # The relaxed Armijo condition for an objective with evaluation noise
-        # (Shi, Xie, Byrd & Nocedal 2022, SIAM J. Optim. 32(1) 29-55;
-        # Hamaguchi, Marumo & Takeda 2026, arXiv 2603.10642, eq. 4):
-        # accept f(rho + a d) <= f(rho) + Delta.  The stopping rule declares
-        # an objective change below ``resolution = tol (1 + |V|)`` to be no
-        # change, so when the whole step predicts a decrease -g'd below it the
-        # comparison carries no information the rule uses: near the optimum
-        # -g'd fell to 1.7e-14, below one ulp of V = 40.76, and a strict
-        # ``trial < obj`` then compared rounding, halving to steps of 2^-24
-        # chosen by it until the iteration budget ran out (Gamma/log discrete
-        # on OpenBLAS Haswell kernels, |g| stuck at 1.9e-7 against a bar of
-        # 4.2e-8).  There a trial is accepted unless it is worse by more than
-        # that resolution; the gradient (accurate: it fell to 3.6e-9 after the
-        # full step) keeps the convergence decision.  Every step whose
-        # predicted decrease the objective can resolve keeps the strict test.
+        # Relaxed Armijo for a noisy objective (Shi, Xie, Byrd & Nocedal 2022,
+        # SIAM J. Optim. 32(1); Hamaguchi, Marumo & Takeda 2026, arXiv
+        # 2603.10642, eq. 4): when the predicted decrease -g'd is below the stop
+        # resolution ``tol (1 + |V|)``, accept a trial no worse than that
+        # resolution, leaving the decision to the gradient. Otherwise strict.
         resolution = _tol * score_scale_d
         unresolvable_step = -float(grad @ delta) <= resolution
         for _ls in range(local_max_halving):
@@ -1525,11 +1397,8 @@ def optimize_discrete_reml_cached_w(
                         log_det_H_trial = identified.log_det(trial_factor, log_det_H_trial)
                         hessian_rank_trial = identified.rank(hessian_rank_trial, trial_factor)
                 except StructuredSolverError:
-                    # A trial the factor cannot certify supplies no objective:
-                    # keep the retained state and try a shorter step towards
-                    # it, under every direct_solve, as the exact engine does
-                    # for a trial whose geometry is infeasible.  No other
-                    # solver is tried; a candidate the factor refuses raises.
+                    # A trial the factor cannot certify has no objective: try a
+                    # shorter step, as the exact engine does; no other solver.
                     _n_refused_structured_trials += 1
                     step *= 0.5
                     halving_count += 1
@@ -1539,10 +1408,8 @@ def optimize_discrete_reml_cached_w(
                 factor_centre = cached_solution.state_center
                 if factor_alpha is None or factor_centre is None:  # pragma: no cover - invariant
                     raise RuntimeError("Structured cached solve omitted its centred state.")
-                # the factor's centred alpha about its border centre, carried to
-                # the candidate's centre (the same c0, exactly zero apart) and
-                # never taken back from the rounded raw intercept, which cancels
-                # c' beta at a column's offset (1e16: max_reml_iter, lambda 2.84% off)
+                # the factor's centred alpha, carried to the candidate's centre;
+                # never from the raw intercept, which cancels c' beta at an offset
                 centred_intercept_trial = float(factor_alpha) + math.fsum(
                     (cand_centre - factor_centre) * beta_trial
                 )
@@ -1670,9 +1537,8 @@ def optimize_discrete_reml_cached_w(
             _tensor_post_stall_unlocked = True
 
         if not accepted:
-            # Every trial was rejected, so retain the evaluated candidate.
-            # Installing an unscored fallback here can make a max-iteration
-            # refit report lambdas that were never accepted by the criterion.
+            # Every trial was rejected: keep the evaluated candidate, never an
+            # unscored fallback the criterion did not accept.
             rho = rho_clipped
 
         if use_tensor_linesearch:
@@ -1719,35 +1585,12 @@ def optimize_discrete_reml_cached_w(
                 _prev_tensor_v = tensor_log_ratio
 
         if use_tensor_linesearch and not accepted and had_feasible_trial:
-            # A dead line search on the shared-tensor path: every feasible
-            # trial was rejected. The exit mirrors the exact engine's
-            # (direct.py): the active gradient of the CURRENT active set --
-            # the set this dead step actually moved -- is classified by
-            # classify_dead_feasible_exit, which grants converged_at_precision
-            # only when every active gradient is under the precision asked
-            # for, or (within a decade of that bar) the undamped Newton step
-            # predicts a decrease below the stop resolution, AND a true
-            # objective was evaluated and rejected, and names an honest
-            # line_search_failed otherwise. Two things differ from the
-            # exact engine, both because this engine's
-            # candidate is ONE working-model update rather than a converged
-            # PIRLS. First, the break waits for candidate_mode_stationary:
-            # a dead search at an unsettled working model is not evidence
-            # of a fixed point -- the gate measured a real additive binomial
-            # fit whose every dead search (candidate PIRLS unconverged at
-            # each) was followed by an accepted step once the next
-            # working-model update moved the gradient at unchanged rho,
-            # and breaking there published a different model, not the same
-            # one sooner. A settled working model at unchanged rho means
-            # the next iteration would recompute the same gradient, Hessian
-            # and step and reject it again; on the measured synthetic stall
-            # the flag turned true at the second dead search and the state
-            # then repeated, digit for digit, for 27 iterations. Second, the
-            # exit is confined to this path: the generic path keeps
-            # iterating through a dead search, as measured, and its numbers
-            # are untouched. A first-iteration exit is withheld like every
-            # other converged exit here, so a loose tolerance cannot bypass
-            # the two-evaluation contract.
+            # A dead line search on the shared-tensor path exits as the exact
+            # engine's does (``classify_dead_feasible_exit`` on the current
+            # active set), but only once the working model is settled
+            # (``candidate_mode_stationary``): before that, the next update can
+            # move the gradient at unchanged rho. The generic path iterates on,
+            # and no exit is granted at the first iteration.
             _n_dead_line_searches += 1
             if poi_iter > 0 and candidate_mode_stationary:
                 active_grad_norm = (
@@ -1776,8 +1619,7 @@ def optimize_discrete_reml_cached_w(
                     evaluated_trial=evidence,
                     predicted_decrease=predicted_decrease,
                 )
-                # Second order gates the score-test exit only (exact engine
-                # says why; test_a_dead_search_beside_a_live_shoulder_certifies).
+                # Second order gates the score-test exit only, as in direct.py.
                 converged = termination_reason == "converged_at_precision"
                 if profile is not None:
                     profile["reml_dead_line_search"] = {
@@ -1929,15 +1771,9 @@ def optimize_discrete_reml_cached_w(
     )
     _t0 = _time.perf_counter()
     final_cache: dict | None = {} if identified and not use_structured else None
-    # No rank metadata: this state's ``rank_info`` would be dead.  The
-    # objective below reads the penalised geometry (``log_det_H``,
-    # ``reml_hessian_rank``) and the centred moments, which the REML geometry
-    # summary carries with the same values (``objective.reml_laml_objective``);
-    # the only consumer of the returned state is ``finalize_reml_fit``, whose
-    # direct route (the only one that reaches this optimizer) refits at these
-    # lambdas and publishes the refit's ``rank_info`` and objective.  Asking
-    # for it cost an O(n p^2) data-rank factor whenever the unpenalised Gram
-    # could not certify itself -- one of two per fit on the real book.
+    # No rank metadata: the objective reads the REML geometry summary, and
+    # ``finalize_reml_fit`` refits and publishes its own ``rank_info``, so an
+    # O(n p^2) data-rank factor here would be wasted.
     final_result, final_inv, final_xtwx = fit_irls_direct(
         X=dm,
         y=y,
@@ -1999,9 +1835,8 @@ def optimize_discrete_reml_cached_w(
         tweedie_scale_data=tweedie_scale_data,
     )
     _t_objective += _time.perf_counter() - _t0
-    # Always use the final refit -- it is the authoritative result from
-    # full IRLS convergence at the converged lambdas.  The working-model
-    # surrogates from the POI loop (n_iter=0) must not leak out.
+    # Publish the final refit; the POI loop's working-model surrogates must
+    # not leak out.
     best_obj = final_obj
     best_lambdas = final_lambdas.copy()
     best_pirls = final_result
@@ -2042,9 +1877,8 @@ def optimize_discrete_reml_cached_w(
         profile["reml_n_structured_cache_solves"] = _n_structured_cache_solves
         profile["reml_block_structured_cache_solve_s"] = _t_block_structured_cache_solve
         profile["reml_n_block_structured_cache_solves"] = _n_block_structured_cache_solves
-        # Lambda-only Schur re-solves consume cached O(q² + Kq) moments.
-        # Objective evaluation may score eta separately, but the solve itself
-        # never traverses row-scale design data.
+        # Lambda-only Schur re-solves read cached O(q² + Kq) moments, never
+        # row-scale design data.
         profile["reml_structured_cache_data_passes"] = 0
         profile["reml_block_structured_cache_data_passes"] = 0
         profile["reml_linesearch_full_obj_s"] = _t_linesearch_full_obj

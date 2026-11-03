@@ -818,7 +818,7 @@ def needs_factor_certification(
     change and is not carried by this field.
 
     Twenty-one direct call sites remain, across nine modules -- seven in
-    ``solvers/_structured/geometry.py``, five in ``reml/scop_geometry.py``, two
+    ``solvers/_structured/geometry.py``, five in the retired SCOP geometry, two
     each in ``reml/observed_geometry.py`` and ``reml/objective.py``, and one
     each in ``solvers/irls_direct.py``, ``solvers/constrained_qp.py``,
     ``reml/discrete.py``, ``model/state_ops.py`` and ``inference/metrics.py``.
@@ -966,6 +966,10 @@ class RankDecomposition:
     # (``decompose_symmetric_deflated``, and ``decompose_gram`` given a
     # ``formation_bound``); ``None`` for a Gram or full-factor decomposition.
     grey_subspace: Mapping[str, float] | None = None
+    # Which columns of the published bases (``retained_values`` order) were
+    # evaluated from the rows (:func:`decompose_symmetric_deflated`'s kept grey
+    # directions); ``None`` for every other decomposition.
+    grey_columns: NDArray | None = None
 
     @property
     def width(self) -> int:
@@ -3467,9 +3471,10 @@ def decompose_symmetric_deflated(
     factor_top = top + vectors[:, :grey] @ correction.T if grey else top
     factor_vectors = np.hstack((rotated[:, kept], factor_top))
     retained_values = np.concatenate((sigma[kept], top_values))
+    from_rows = np.arange(retained_values.size) < np.count_nonzero(kept)
     order = np.argsort(retained_values, kind="stable")
     inverse_vectors, factor_vectors = inverse_vectors[:, order], factor_vectors[:, order]
-    retained_values = retained_values[order]
+    retained_values, from_rows = retained_values[order], from_rows[order]
     discarded = corrected[:, ~kept]
     if discarded.shape[1]:
         discarded = np.linalg.qr(discarded)[0]
@@ -3520,6 +3525,7 @@ def decompose_symmetric_deflated(
             estimable_functional_basis=_freeze(estimable_basis),
             retained_values=_freeze(retained_values),
             grey_subspace=dict(info),
+            grey_columns=_freeze(from_rows, dtype=bool) if grey else None,
         )
 
     if 0 < rank < n_active:

@@ -333,16 +333,13 @@ def _global_log_phi(rows: TweedieRows, deviance: float, nullity: float) -> PhiSo
 def _lattice_bands(p: float, curvature: float, sizes: NDArray) -> tuple[NDArray, NDArray]:
     """Peak indices [low, high] over which K rows sharing a phase can bend Q; high = 0 if none.
 
-    A row's density carries the Poisson-summation lattice term (as in
-    `saddlepoint_switch`) 2 exp(-2 pi^2 Var J) cos(2 pi j), Var J ~ j / (a + 1),
-    whose phase turns at rate 2 pi j per unit log phi, j = |c w| / ((a + 1) phi).
-    It bends Q by at most rho(j) = 8 pi^2 j^2 exp(-k j), k = 2 pi^2 / (a + 1),
-    and only for j >= 1: below one term of the series dominates and the phase
-    does not turn. K rows of one phase bend Q by K rho(j). The band is where
-    that reaches a quarter of ``curvature``, the deviance term's D / (2 phi) at
-    the Newton root ((N - M) / 2 at the saddlepoint's minimum), a margin for the
-    leading-term model: the roots of j exp(-k j / 2) = c, c^2 = curvature /
-    (32 pi^2 K), are j = -(2 / k) W(-k c / 2) on the two real branches of Lambert's W.
+    A row's Poisson-summation lattice term (as in `saddlepoint_switch`)
+    2 exp(-2 pi^2 Var J) cos(2 pi j), Var J ~ j / (a + 1), turns at rate 2 pi j per unit
+    log phi, j = |c w| / ((a + 1) phi), and bends Q by at most rho(j) = 8 pi^2 j^2 exp(-k j),
+    k = 2 pi^2 / (a + 1), and only for j >= 1. The band is where K rho(j) reaches a quarter of
+    ``curvature`` (D / (2 phi) at the Newton root, (N - M) / 2 at the saddlepoint's minimum):
+    the roots of j exp(-k j / 2) = c, c^2 = curvature / (32 pi^2 K), are
+    j = -(2 / k) W(-k c / 2) on the two real branches of Lambert's W.
     """
     k = 2.0 * math.pi**2 * (p - 1.0)
     argument = -0.5 * k * np.sqrt(curvature / (32.0 * math.pi**2 * sizes))

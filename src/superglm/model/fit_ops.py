@@ -42,21 +42,16 @@ from superglm.model.reml_execute import (
     record_reml_terminal,
     resolve_max_reml_iter,
     run_fixed_monotone_reml,
-    run_scop_efs_reml,
 )
 from superglm.model.reml_finalize import (
     _build_reml_reporting_support_state,
     finalize_reml_fit,
 )
-from superglm.model.reml_ops import (
-    model_optimize_direct_reml,
-    model_optimize_efs_reml,
-)
+from superglm.model.reml_ops import model_optimize_direct_reml
 from superglm.model.reml_setup import (
     collect_reml_groups,
     constraint_engine_flags,
     initialize_component_lambdas,
-    inject_fixed_scop_lambdas,
     live_reml_lambdas,
     restore_qp_constraints,
     strip_qp_constraints,
@@ -72,13 +67,11 @@ from superglm.types import FitStats
 logger = logging.getLogger(__name__)
 
 _VALID_REML_INTERACTION_MODES = {"full", "fast_candidate"}
-_VALID_RUNTIME_VALIDATION_MODES = {"auto", "full", "skip"}
 _FAST_CANDIDATE_REML_ITER_CAP = 5
 # Screening candidates are ranked, never published; under the 5-iteration cap
 # the tight publication default cannot buy determination -- it only burns an
 # extra Newton iteration and flips converged flags in screening logs.
 _FAST_CANDIDATE_REML_TOL = 1e-6
-_AUTO_RUNTIME_VALIDATION_MAX_ROWS = 100_000
 
 __all__ = [
     "PathResult",
@@ -86,7 +79,6 @@ __all__ = [
     "fit_path",
     "fit_reml",
     "model_optimize_direct_reml",
-    "model_optimize_efs_reml",
 ]
 
 
@@ -105,19 +97,16 @@ class PathResult:
     ``coef_path`` and ``intercept_path`` are each point's public coefficients
     and raw intercept, and ``deviance_path`` its fitted deviance.  Rebuilding
     a point's predictor as ``X @ coef_path[i] + intercept_path[i]`` cancels
-    each numeric column's offset ``c`` against the raw intercept ``alpha -
-    c' beta``.  The product and the intercept each round at about ``2^-53
-    |c' beta|``, so a row errs by about ``2^-52 |c' beta|``, or ``2^-52 c /
-    s`` of the term's effect, ``s`` the column's spread.  A year (``c / s``
-    near 300) or an epoch time in seconds over months stays within about
-    ``1e-13`` of the effect; only an offset many orders of magnitude above
-    the spread loses visible digits, such as a raw ID or a nanosecond
-    timestamp over a few seconds (tenths of the effect at 1e16 over a spread
-    of 6).  The fitted model predicts at the last point with the centred
-    predictor.  To predict at point ``i``, refit at
-    ``selection_penalty=lambda_seq[i]``: the refit reproduces the point to the
-    solver's ``tol``, not exactly, because it starts cold instead of from the
-    previous point.
+    each numeric column's offset ``c`` against the raw intercept, so a row
+    errs by about ``2u |c' beta|`` (``u = 2**-53``), or ``2u c / s`` of the
+    term's effect for a column of spread ``s``.  The ratio ``c / s`` decides
+    it, not the units: a year (``c / s`` near 300) or an epoch time in seconds
+    over months stays near ``1e-13`` of the effect, while an offset many orders
+    of magnitude above the spread (a raw ID, or a timestamp over a spread of
+    seconds or less) loses visible digits.  The fitted model predicts at the
+    last point with the centred predictor; to predict at point ``i``, refit at
+    ``selection_penalty=lambda_seq[i]``, which reproduces the point to the
+    solver's ``tol``.
     """
 
     lambda_seq: NDArray  # shape (n_lambda,)
@@ -224,21 +213,12 @@ def _reject_random_effect_selection_fit(model, method: str) -> None:
 
 
 def _claim_free_categorical_levels(values: NDArray, spec, positive: NDArray, valid: NDArray) -> int:
-    """Count FITTED levels carrying exposure but no positively weighted response.
+    """Count fitted levels carrying exposure but no positively weighted response.
 
-    Two corrections over a set difference on the raw column, both mirroring
-    what the build-time scan already does (:mod:`superglm.diagnostics.separation`):
-
-    * levels are read AFTER ``grouping=`` is applied, so a caller who takes
-      this warning's own advice and collapses the offending level is not told
-      again about a level that no longer carries a coefficient;
-    * a level counts as occupied only through positive-weight rows, since a
-      zero-weight row contributes no likelihood and its level is pinned to
-      base at build time rather than estimated.
-
-    The grouping is applied from ``original_to_group`` directly rather than
-    through ``_categorical_build_labels``, because this runs BEFORE the build
-    and the spec has not learned its level universe yet.
+    As the build-time scan (:mod:`superglm.diagnostics.separation`) does,
+    levels are read after ``grouping=`` (from ``original_to_group``, since the
+    spec has no level universe before the build), and a level is occupied
+    only through positive-weight rows.
     """
     labels = np.asarray(values).ravel()
     grouping = getattr(spec, "_grouping", None)
@@ -257,15 +237,11 @@ def _claim_free_categorical_levels(values: NDArray, spec, positive: NDArray, val
 
 
 def _check_random_effect_nesting(model, X) -> None:
-    """Validate declared nesting and name near-nested pairs on the training rows (§3.13).
+    """Validate declared nesting and name near-nested pairs on the training rows.
 
-    ``RandomEffect(nested_in=)`` is checked here, where the training rows are
-    first bound, once per REML entry point (``fit_reml``, ``estimate_theta``,
-    ``estimate_p``; the ``estimate_p`` search's candidate fits, which run
-    ``fit_reml`` on a clone of the same rows, are marked as checked): a row
-    that breaks it is an error.  An undeclared pair that
-    nests on all but a few rows is named once, in a warning that never changes
-    the fit (``features.random_effect.near_nesting_notes``).
+    Runs once per REML entry point. A row that breaks ``RandomEffect(nested_in=)``
+    is an error; an undeclared pair that nests on all but a few rows is named
+    once, in a warning that never changes the fit.
     """
     import warnings
 
@@ -281,17 +257,10 @@ def _random_effect_separation_hazard(model, X, y, sample_weight) -> str | None:
 
     A ``Categorical`` level with exposure but no positive response has no
     finite MLE under a log link with a zero-mass family (Tweedie ``1<p<2``,
-    Poisson): its unpenalised coefficient drifts toward ``-inf`` while the
-    marginal likelihood goes nearly flat in any neighbouring ``RandomEffect``
-    variance. On such designs the REML variance component is poorly
-    determined, and for the estimated-scale Tweedie criterion additionally
-    biased upward (the current criterion profiles the dispersion with a
-    Gaussian-style deviance count in which every zero row participates; the
-    exact Tweedie likelihood carries no per-observation ``log(phi)`` term for
-    zero rows, so on zero-heavy data the criterion under-weights shrinkage
-    relative to exact-likelihood REML). Returns the warning message, or
-    ``None`` when the configuration is not affected. ``OrderedCategorical``
-    levels are spline-penalised and are deliberately out of scope.
+    Poisson), and the marginal likelihood goes nearly flat in a neighbouring
+    ``RandomEffect`` variance, which is then poorly determined (and, for
+    estimated-scale Tweedie, biased upward). Returns the warning message, or
+    ``None``. ``OrderedCategorical`` levels are spline-penalised, so out of scope.
     """
     from superglm.distributions import Poisson
     from superglm.features.categorical import Categorical
@@ -354,125 +323,6 @@ def _random_effect_separation_hazard(model, X, y, sample_weight) -> str | None:
     )
 
 
-def _reject_structured_fit_constraints(model) -> None:
-    """Refuse the one structured/constrained pairing that does not reach a mode.
-
-    This used to refuse every fit-time shape constraint that shared a model with
-    a ``RandomEffect`` or a ``FactorSmooth``. That was scope containment from the
-    release which introduced both terms, not a derived result, and it was far
-    wider than the algebra requires. A variance component and a smoothing
-    parameter are the same object to the extended Fellner-Schall update (Wood &
-    Fasiolo, 2017, Biometrics 73(4):1071-1081), whose founding case in Fellner
-    (1986) is a penalty assembled from identity blocks -- exactly what a random
-    effect contributes. Shape-constrained additive *mixed* models are the
-    documented, supported combination in the reference implementation (Pya
-    Arnqvist, 2024, arXiv:2403.09438 section 3).
-
-    What the refusal was really standing in for was a plumbing defect: the EFS
-    lambda step read ``PenaltyComponent.omega_ssp`` directly, which is ``None``
-    for an identity penalty, so a random effect arrived at a matmul as a 0-d
-    operand. That is fixed at the read: the EFS step now reduces through
-    ``penalty_algebra.penalty_component_quadratic`` and ``penalty_component_trace``,
-    which are kind-aware and never materialize a structured penalty.
-
-    What survives is one specification, not one pair of term types: a SCOP
-    constraint on a column that a ``basis="fs"`` factor smooth also spans. An
-    ``fs`` factor smooth carries its own main effect, so such a model states that
-    effect twice -- once confined to a shape cone and once free. The free copy
-    absorbs whatever the constrained copy is forbidden to do, the two compensate
-    for each other, and no coefficient mode is reached.
-
-    A factor smooth spans BOTH its parents, and the duplication is reachable on
-    either. Along ``variable`` the free copy is the marginal smooth (measured
-    0/7); along ``group`` it is the per-level null-space blocks, which are a
-    per-level effect of the grouping column, reachable when that column carries
-    an ``OrderedCategorical`` SCOP constraint (measured 0/6). Testing only
-    ``variable`` would let the second through. Declaration refuses only a
-    ``Categorical`` or ``RandomEffect`` on a factor smooth's group and warns
-    about any other term there, so an ``OrderedCategorical`` SCOP term on the
-    group reaches this branch from a new declaration, as well as from an older
-    pickle or ``clone_unfitted`` (``ModelConfig.materialize``).
-
-    Everything adjacent converges (7/7 each): ``basis="sz"``, which excludes the
-    main effect and so states it once; and an ``fs`` factor smooth sharing
-    neither parent with a constrained term. The unconstrained version of the
-    duplicated model converges too, which is what localises this to constrained
-    duplication rather than to duplication or to SCOP-with-FactorSmooth.
-
-    Selection stays on the DECLARATION rather than the spec's type, which is what
-    lets a constraint declared on a spline inside a wrapper such as
-    ``OrderedCategorical`` be seen at all.
-    """
-    from superglm.features._spline_build import (
-        _uses_fit_time_shape_constraints,
-        shape_engine,
-    )
-    from superglm.features.factor_smooth import FactorSmooth
-    from superglm.features.ordered_categorical import OrderedCategorical
-
-    def _engine_spec(spec):
-        """The spec that answers the engine question, not merely the declaration.
-
-        ``OrderedCategorical`` delegates its build to an inner spline, and it is
-        the inner basis that picks the engine: a ``ps`` declared with
-        ``shape_engine="scop"`` routes through SCOP. The wrapper defines
-        ``_build_monotone_constraints_raw`` unconditionally -- deliberately, so
-        the builder can find raw geometry through it -- and defines no SCOP
-        method, so asking the wrapper reports QP for every basis including the
-        SCOP ones. Resolve to the inner spline before asking.
-
-        A pre-0.24 step pickle never reaches this function: the declaration test
-        above reads ``constraint_kind`` through ``getattr(spec, name, default)``,
-        which is the one spelling that swallows the ``AttributeError``
-        ``_basis_spline`` raises, so such a spec answers ``None`` and is filtered
-        out before the engine question is asked. The direct read here is
-        therefore not what protects that case -- do not read it as a refusal of
-        step pickles, which the guard does not perform. It is written directly
-        only because there is no default that would be correct if one did arrive.
-        """
-        return spec._basis_spline if isinstance(spec, OrderedCategorical) else spec
-
-    scop_constrained = [
-        name
-        for name, spec in model._specs.items()
-        if _uses_fit_time_shape_constraints(spec) and shape_engine(_engine_spec(spec)) == "scop"
-    ]
-    if not scop_constrained:
-        return
-
-    # A main-effect-carrying factor smooth duplicates a constrained effect on
-    # EITHER of its two axes, so test both parents. Along ``variable`` the
-    # duplicate is the marginal smooth; along ``group`` it is the per-level
-    # null-space blocks, which are a per-level effect of the grouping column.
-    # Both were measured non-convergent (0/7 and 0/6). ``sz`` excludes the main
-    # effect, and a factor smooth sharing neither parent states nothing twice.
-    constrained_set = set(scop_constrained)
-    duplicated = [
-        (sorted(set(spec.parent_names) & constrained_set, key=repr), name)
-        for name, spec in model._interaction_specs.items()
-        if isinstance(spec, FactorSmooth)
-        and spec.basis == "fs"
-        and set(spec.parent_names) & constrained_set
-    ]
-    if not duplicated:
-        return
-
-    joined = ", ".join(
-        f"{iname!r} (sharing shape-constrained {', '.join(repr(p) for p in parents)})"
-        for parents, iname in duplicated
-    )
-    raise NotImplementedError(
-        f"fit-time SCOP shape constraints are not supported with FactorSmooth "
-        f"term(s) {joined}; a basis='fs' factor smooth carries its own main "
-        "effect, so the constrained variable's effect is stated twice -- once "
-        "confined to the shape cone and once free -- and no coefficient mode is "
-        "reached. Use basis='sz', which excludes the main effect, or the QP engine "
-        "(drop shape_engine='scop'), or a post-fit shape constraint. A factor "
-        "smooth of any other variable is unaffected, and a RandomEffect carries no "
-        "such restriction."
-    )
-
-
 def _compute_null_mu(
     y: NDArray,
     weights: NDArray,
@@ -490,10 +340,9 @@ def _compute_null_mu(
     has_offset = offset is not None and not np.all(offset == 0)
     if has_offset and isinstance(link, SqrtLink):
         assert offset is not None
-        # The inverse sqrt link has two eta branches. A single Fisher-scoring
-        # start can converge to the wrong offset-dependent local solution, so
-        # use the same line-searched direct IRLS solver as a public
-        # intercept-only fit.
+        # The inverse sqrt link has two eta branches, so one Fisher-scoring start
+        # can reach the wrong offset-dependent solution; use the line-searched
+        # direct IRLS solver of a public intercept-only fit.
         from superglm.group_matrix import DesignMatrix
 
         null_design = DesignMatrix([], n=len(y), p=0)
@@ -514,7 +363,6 @@ def _compute_null_mu(
             _return_working_system=True,
             _compute_fit_statistics=False,
             _compute_reml_geometry=False,
-            _compute_scop_postfit_inference=False,
             weight_semantics=weight_semantics,
         )
         eta_null = stabilize_eta(null_result.intercept + offset, link)
@@ -586,10 +434,9 @@ def _compute_fit_stats(
     if isinstance(distribution, Tweedie):
         from superglm._tweedie import tweedie_logpdf_pair
 
-        # The prior contract puts the weight inside the compound-Poisson
-        # density; the frequency contract evaluates the unit-weight density and
-        # counts each row w times.  The Pearson numerator below scales with the
-        # weight under either reading, so only this pair moves.
+        # Prior weights enter the compound-Poisson density; frequency weights
+        # count the unit-weight density w times. The Pearson numerator scales
+        # with w under either, so only this pair moves.
         replication = weight_semantics == "frequency"
         fitted_logpdf, null_logpdf = tweedie_logpdf_pair(
             y,
@@ -648,10 +495,9 @@ def _required_fit_columns(model) -> tuple[str, ...]:
     names = [*configured_feature_names, *(config.splines or ())]
     for _, interaction in config.interaction_templates:
         names.extend(interaction.parent_names)
-    # Preserve the interaction API's more specific configuration error for an
-    # explicit feature mapping, which defines a closed feature universe.  The
-    # spline shorthand only names columns to smooth; every other X column is
-    # still eligible for auto-detection when the fit workspace is built.
+    # An explicit feature mapping is a closed universe and keeps the interaction
+    # API's more specific error; under the spline shorthand every other column
+    # stays eligible for auto-detection.
     configured_features = set(configured_feature_names) if config.splines is None else set()
     for left, right in config.interactions:
         if configured_features:
@@ -742,10 +588,8 @@ def _store_fit_arrays(model, sample_weight, offset, y=None):
     model._fit_weights = np.array(sample_weight)
     model._fit_offset = np.array(offset) if offset is not None else None
     model._fit_used_offset = offset is not None
-    # Survives fit-state release (unlike the arrays), so consumers that
-    # default to the fit's weights can tell "unweighted fit" apart from
-    # "weighted fit whose arrays were released" and refuse to silently
-    # substitute unit weights in the latter case.
+    # Survives fit-state release, so consumers defaulting to the fit's weights
+    # can tell an unweighted fit from one whose weights were released.
     model._fit_used_weights = bool(np.any(model._fit_weights != 1.0))
     _record_unidentified_factor_smooth_levels(model, model._fit_weights, y)
     return model._fit_weights, model._fit_offset
@@ -758,17 +602,13 @@ _FIT_WARNING_STACKLEVEL = 5
 
 
 def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, stacklevel=None):
-    """Record, on each ``sz`` FactorSmooth spec, what this design identifies of its levels (#432).
+    """Record, on each ``sz`` FactorSmooth spec, what this design identifies of its levels.
 
-    Read from the built design, the prior weights and the response, for
-    every backend, so prediction treats the levels alike whichever solver
-    fitted them.  Levels whose unpenalized line separates the response are
-    named in a ``SeparationWarning`` (never refused: the population curve
-    leaves them out, ``FactorSmooth._population_map``), unless the model's
-    ``separation`` is ``"ignore"``; a population fixed by the canonical
-    convention is named in a ``UserWarning``.
-    Each names the term's remedy, ``select=True`` (#444): a term that
-    selects its lines has none of these, and nothing here warns for it.
+    Read from the built design, prior weights and response for every backend,
+    so prediction treats the levels alike whichever solver fitted them. Levels
+    whose line separates the response get a ``SeparationWarning`` unless
+    ``separation="ignore"`` (never refused; the population curve leaves them
+    out), and a canonically fixed population a ``UserWarning``.
     """
     import warnings
 
@@ -807,15 +647,12 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
 
 
 def _ensure_factor_smooth_levels_recorded(model) -> None:
-    """Record the ``sz`` levels of a model saved before the record existed (#440 review).
+    """Record the ``sz`` levels of a model pickled before the record existed.
 
-    A pickle from v0.35.0 or earlier carries no record and would predict its
-    thin levels at the fit's arbitrary point.  The fit's design and prior
-    weights, which such a model keeps, rebuild it at the first prediction,
-    under the conventions of the release that rebuilt it (the orthogonal
-    projector, no group-term fold); its response is not kept, so separated
-    lines stay in its population.
-    Without them the model cannot be repaired and says so.
+    The kept design and prior weights rebuild the record at the first
+    prediction, under the current conventions; the response is not kept, so
+    separated lines stay in the population. A model without them cannot be
+    repaired and says so.
     """
     import warnings
 
@@ -863,7 +700,6 @@ def _make_reml_debug_recorder(
     reml_groups,
     has_constraints: bool,
     has_qp_constraints: bool,
-    has_scop_constraints: bool,
     max_reml_iter: int,
     reml_tol: float | None,
     pirls_tol: float,
@@ -894,7 +730,6 @@ def _make_reml_debug_recorder(
             "reml_group_names": [group.name for _, group in reml_groups],
             "has_constraints": bool(has_constraints),
             "has_qp_constraints": bool(has_qp_constraints),
-            "has_scop_constraints": bool(has_scop_constraints),
             "max_reml_iter": int(max_reml_iter),
             # None = engine default; the resolved value is an engine concern.
             "reml_tol": None if reml_tol is None else float(reml_tol),
@@ -911,10 +746,8 @@ def _fetch_or_build_design(model, X, y, sample_weight, offset, cache: dict):
     The design matrix depends on the frame, the feature specs, and the
     weights -- never on the family's power -- so candidate fits at different
     powers share one build. Distribution and link DO depend on the family and
-    are re-resolved on every hit. The cache self-verifies with a fixed-probe
-    matvec: a served design that no longer reproduces its stored probe answer
-    is dropped and rebuilt rather than trusted. Arrays are handed out as
-    copies, matching the fresh arrays an uncached build returns per fit.
+    are re-resolved on every hit. A served design that fails its fixed-probe
+    matvec check is rebuilt. Arrays are handed out as copies.
     """
     from superglm._blas_threads import allow_wide_design
     from superglm.distributions import resolve_distribution
@@ -931,11 +764,9 @@ def _fetch_or_build_design(model, X, y, sample_weight, offset, cache: dict):
             model._link = resolve_link(configured_link(model), distribution)
             model._groups = cache["groups"]
             model._dm = dm
-            # The build also teaches the spec objects (seen levels, spline
-            # reparametrisations, tensor marginal geometry) and resolves
-            # pending interactions; a fresh workspace materializes untaught
-            # constructor templates, so restore the taught specs -- main
-            # effects AND interactions -- alongside the design they describe.
+            # The build also taught the specs (levels, reparametrisations,
+            # tensor geometry) and resolved pending interactions; restore them
+            # with the design they describe.
             model._specs = cache["specs"]
             model._interaction_specs = cache["interaction_specs"]
             model._interaction_order = cache["interaction_order"]
@@ -949,14 +780,10 @@ def _fetch_or_build_design(model, X, y, sample_weight, offset, cache: dict):
         cache.clear()
 
     y_out, w_out, off_out = model_build_design_matrix(model, X, y, sample_weight, offset)
-    has_constrained_group, _, _ = constraint_engine_flags(model._groups)
+    has_constrained_group, _ = constraint_engine_flags(model._groups)
     if has_constrained_group:
-        # The constrained REML path mutates GroupSlice objects in place
-        # (strip_qp_constraints / restore_qp_constraints recompose against
-        # the current group matrix), and the fixed-probe check certifies only
-        # the design's matvec -- it cannot see a mutated group. Until the
-        # bitwise-equivalence evidence covers constrained fixtures, the cache
-        # stands down and every candidate builds fresh.
+        # The constrained REML path mutates GroupSlice objects in place, which
+        # the fixed-probe check cannot see, so every candidate builds fresh.
         return y_out, w_out, off_out
     probe = np.random.default_rng(0x5D).standard_normal(model._dm.p)
     cache.update(
@@ -995,57 +822,10 @@ def _resolve_interaction_reml_mode(model, interaction_mode: str, max_reml_iter: 
     }
 
 
-def _validate_runtime_validation_mode(runtime_validation: str | bool) -> None:
-    """Validate the runtime-validation mode before expensive fit work starts."""
-    if isinstance(runtime_validation, bool):
-        return
-    if runtime_validation not in _VALID_RUNTIME_VALIDATION_MODES:
-        valid = ", ".join(sorted(_VALID_RUNTIME_VALIDATION_MODES))
-        raise ValueError(
-            f"runtime_validation must be one of {{{valid}}} or a bool, got {runtime_validation!r}"
-        )
-
-
-def _resolve_runtime_validation(
-    runtime_validation: str | bool,
-    *,
-    n_rows: int,
-    interaction_candidate_active: bool,
-) -> tuple[bool, str]:
-    """Resolve runtime parity validation for post-fit canonicalization."""
-    _validate_runtime_validation_mode(runtime_validation)
-    if isinstance(runtime_validation, bool):
-        return bool(runtime_validation), "explicit_full" if runtime_validation else "explicit_skip"
-
-    if runtime_validation == "full":
-        return True, "explicit_full"
-    if runtime_validation == "skip":
-        return False, "explicit_skip"
-
-    if interaction_candidate_active:
-        return False, "fast_candidate"
-    if n_rows > _AUTO_RUNTIME_VALIDATION_MAX_ROWS:
-        return False, "large_fit"
-    return True, "auto_full"
-
-
-def _canonicalize_fitted_model(
-    model,
-    profile: dict,
-    *,
-    runtime_validation: str | bool,
-    n_rows: int,
-) -> None:
-    """Canonicalize the public runtime state and profile validation cost."""
-    validate_runtime, reason = _resolve_runtime_validation(
-        runtime_validation,
-        n_rows=n_rows,
-        interaction_candidate_active=bool(profile.get("interaction_candidate_active", False)),
-    )
-    profile["fit_runtime_canonicalize_validate"] = bool(validate_runtime)
-    profile["fit_runtime_canonicalize_validate_reason"] = reason
+def _canonicalize_fitted_model(model, profile: dict) -> None:
+    """Canonicalize the public runtime state and profile its cost."""
     t0 = time.perf_counter()
-    runtime_canonicalize.canonicalize_fitted_model(model, validate=validate_runtime)
+    runtime_canonicalize.canonicalize_fitted_model(model)
     profile["fit_runtime_canonicalize_s"] = time.perf_counter() - t0
     _warn_unresolved_rows(model)
 
@@ -1311,22 +1091,12 @@ def _refine_nb_theta_to_reml_fixed_point(
     """Re-estimate auto NB theta at the REML fit and alternate to a fixed point.
 
     ``_maybe_estimate_nb_theta`` calibrates theta before REML runs, at the
-    model's configured smoothing. Lack-of-fit at that smoothing is absorbed
-    into overdispersion, biasing theta downward by however far the truth is
-    from what the configured penalty can follow, while the REML lambda itself
-    is almost theta-insensitive. This helper removes the freeze bias by
-    alternating a safeguarded theta profile solve at the REML fitted mean
-    with a warm-started ``fit_reml`` at the updated theta until theta is
-    stationary — the fixed point of the alternating scheme of Venables &
-    Ripley (2002, ch. 7.4) with the penalized fit taking the place of the
-    GLM fit. Joint Newton over (theta, log-lambda) in the LAML criterion
-    (Wood, Pya & Saefken 2016) is the eventual destination; the alternation
-    reaches the same fixed point for these coordinates without new
-    derivative machinery.
-
-    The published family and ``_nb_profile_result`` always describe the fit
-    that is installed: on exit, ``family.theta`` is the theta of the final
-    refit and the profile result is republished against its fitted mean.
+    model's configured smoothing, where lack of fit biases theta downward.
+    This alternates a theta profile solve at the REML fitted mean with a
+    warm-started ``fit_reml`` until theta is stationary: the alternating
+    scheme of Venables & Ripley (2002, ch. 7.4) with the penalized fit in
+    place of the GLM fit. On exit ``family.theta`` and ``_nb_profile_result``
+    describe the installed final refit.
     """
 
     import pandas as pd
@@ -1350,11 +1120,8 @@ def _refine_nb_theta_to_reml_fixed_point(
         return debug_recorder
 
     theta = float(family.theta)
-    # The joint alternation re-estimates theta against the same likelihood the
-    # calibration estimate used. Resolving the contract once here keeps the
-    # score, the recorded NLLs and the published result on one reading; letting
-    # any of them fall back to the parameter default would silently overwrite
-    # a prior-contract theta with a frequency-contract one.
+    # One weight contract for the score, the recorded NLLs and the published
+    # result, the one the calibration estimate used.
     weight_semantics = model_weight_semantics(model)
     rows = nb_seed.evaluations.to_dict("records")
     refits = 0
@@ -1414,12 +1181,8 @@ def _refine_nb_theta_to_reml_fixed_point(
             "profile result reports converged=False."
         )
         warn_caller(warned[-1], NBThetaBoundWarning)
-    # The published flag must describe the PUBLISHED state. Theta being
-    # stationary at an unfinished REML fit is not a joint fixed point: if the
-    # final (warm-started) attempt exhausted max_reml_iter, lambda never
-    # reached the optimum theta was measured against, and claiming
-    # converged=True there is the same defect class this release exists to
-    # remove - a clamped/unfinished estimate reporting success.
+    # Converged only at a joint fixed point: theta stationary at a REML fit
+    # that itself converged.
     final_reml = getattr(model, "_reml_result", None)
     reml_converged = bool(getattr(final_reml, "converged", False))
     refreshed = replace(
@@ -1449,10 +1212,9 @@ def _install_deferred_rank_info(model) -> None:
     """Compute the published fit's deferred rank metadata and attach it to its results.
 
     ``finalize_reml_fit`` leaves the computation with the model when
-    ``_defer_rank_info`` is set; it is a pure function of that fit's final
-    state, so the metadata is what the fit would have attached inline. The
-    solver, public and REML results share the one ``RankInfo``, as they do
-    when it is computed inline. Neither attribute reaches the public model.
+    ``_defer_rank_info`` is set; it is a pure function of the final state, so
+    the solver, public and REML results share the ``RankInfo`` the fit would
+    have attached inline.
     """
     model.__dict__.pop("_defer_rank_info", None)
     deferred = model.__dict__.pop("_deferred_rank_info", None)
@@ -1503,17 +1265,12 @@ def _reject_monotone_fit_conflicts(model, penalty, has_lambda1_targets) -> None:
             "Monotone fit-time constraints are not supported with selection_penalty > 0. "
             "Set selection_penalty=0 or fit unconstrained and call model.monotonize()."
         )
-    monotone_engines = {g.monotone_engine for g in model._groups if g.monotone_engine is not None}
-    if len(monotone_engines) > 1:
-        raise NotImplementedError("SCOP + QP monotone terms in the same model are not supported.")
 
 
 def _uses_direct_solver(model, penalty, has_lambda1_targets) -> bool:
     """Whether `_solve_coefficients` takes the direct IRLS route rather than BCD."""
-    return (
-        any(group.constraints is not None for group in model._groups)
-        or any(group.monotone_engine == "scop" for group in model._groups)
-        or (penalty.lambda1 is not None and (penalty.lambda1 == 0 or not has_lambda1_targets))
+    return any(group.constraints is not None for group in model._groups) or (
+        penalty.lambda1 is not None and (penalty.lambda1 == 0 or not has_lambda1_targets)
     )
 
 
@@ -1908,7 +1665,6 @@ def fit_reml(
     max_pirls_iter=100,
     lambda2_init=None,
     interaction_mode="full",
-    runtime_validation="auto",
     verbose=False,
     w_correction_order=1,
 ):
@@ -1938,10 +1694,8 @@ def fit_reml(
     validated_inputs = (X, y, sample_weight, offset)
     family_intent = configured_family(model)
     nb_auto = isinstance(family_intent, NegativeBinomial) and family_intent.theta == "auto"
-    # Auto-theta fits alternate theta with warm-started REML refits after the
-    # first attempt, and the refinement reads the fitted rows between refits.
-    # Force row retention on the private workspace for that window; the
-    # durable retention intent is restored (and honored) before publication.
+    # Auto-theta refinement reads the fitted rows between refits, so the
+    # workspace retains them; the durable retention intent applies at publication.
     workspace = FitWorkspace.start(
         model,
         mode="fit_reml",
@@ -1955,7 +1709,6 @@ def fit_reml(
         pirls_tol=pirls_tol,
         max_pirls_iter=max_pirls_iter,
         interaction_mode=interaction_mode,
-        runtime_validation=runtime_validation,
         verbose=verbose,
         w_correction_order=w_correction_order,
     )
@@ -2018,13 +1771,10 @@ def fit_reml(
 def warn_published_reml_nonconvergence(model, *, stacklevel: int) -> None:
     """Warn once that a published fit_reml fit stopped unconverged.
 
-    Returned, not refused, and never silent: called after the state it
-    describes is public, by ``fit_reml`` and by the REML publication refit of
-    ``estimate_p`` and ``estimate_theta``. Internal candidate fits (the Tweedie
-    power search) set ``_suppress_convergence_warning``: they disclose
-    convergence in their own result instead of warning per candidate.
-    ``stacklevel`` counts from the caller of this function, as
-    ``warnings.warn`` does.
+    Called after the state it describes is public, by ``fit_reml`` and the
+    REML publication refits of ``estimate_p`` and ``estimate_theta``.
+    Candidate fits set ``_suppress_convergence_warning`` and disclose
+    convergence in their own result. ``stacklevel`` counts from the caller.
     """
     if getattr(model, "_suppress_convergence_warning", False):
         return
@@ -2045,10 +1795,8 @@ def warn_published_reml_nonconvergence(model, *, stacklevel: int) -> None:
 def _record_reml_terminal_best_effort(model, debug_recorder) -> None:
     """Emit a post-install terminal without letting diagnostic I/O escape."""
     try:
-        # The dictionary swap above is the sole public commit point.  Trace
-        # persistence is external diagnostic I/O and cannot be part of that
-        # transaction, so a sink failure must not make a successful fit look
-        # like a failed operation after its state has already been installed.
+        # The fit is already installed; a trace-sink failure must not make it
+        # look failed.
         record_reml_terminal(model, debug_recorder)
     except Exception:
         try:
@@ -2079,7 +1827,6 @@ def _fit_reml_in_workspace(
     max_pirls_iter=100,
     lambda2_init=None,
     interaction_mode="full",
-    runtime_validation="auto",
     verbose=False,
     w_correction_order=1,
     durable_retain_fit_state: bool | None = None,
@@ -2101,7 +1848,6 @@ def _fit_reml_in_workspace(
     model.__dict__.pop("_deferred_rank_info", None)
 
     _auto_detect_specs_if_needed(model, X, sample_weight_ref)
-    _reject_structured_fit_constraints(model)
     _maybe_estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
     configured_smoothing = configured_lambda2(model)
 
@@ -2111,10 +1857,9 @@ def _fit_reml_in_workspace(
     _profile: dict = {}
     _profile.update(
         _resolve_interaction_reml_mode(
-            model, interaction_mode, resolve_max_reml_iter(max_reml_iter, engine="newton")
+            model, interaction_mode, resolve_max_reml_iter(max_reml_iter)
         )
     )
-    _validate_runtime_validation_mode(runtime_validation)
     effective_max_reml_iter = _profile["effective_max_reml_iter"]
     if _profile["interaction_candidate_active"] and reml_tol is None:
         reml_tol = _FAST_CANDIDATE_REML_TOL
@@ -2133,17 +1878,7 @@ def _fit_reml_in_workspace(
     _clear_fit_inference_caches(model)
 
     reml_groups = collect_reml_groups(model._groups, model._dm.group_matrices)
-    _has_monotone, _has_qp_monotone, _has_scop_monotone = constraint_engine_flags(model._groups)
-    if _has_qp_monotone and _has_scop_monotone:
-        raise NotImplementedError("SCOP + QP monotone terms in the same model are not supported.")
-    if max_reml_iter is None and _has_scop_monotone:
-        # The SCOP engine steps by Fellner-Schall: its own, larger default cap.
-        _profile.update(
-            _resolve_interaction_reml_mode(
-                model, interaction_mode, resolve_max_reml_iter(None, engine="step")
-            )
-        )
-        effective_max_reml_iter = _profile["effective_max_reml_iter"]
+    _has_monotone, _has_qp_monotone = constraint_engine_flags(model._groups)
     _profile["max_reml_iter_defaulted"] = max_reml_iter is None
     debug_recorder = _make_reml_debug_recorder(
         model,
@@ -2151,7 +1886,6 @@ def _fit_reml_in_workspace(
         reml_groups=reml_groups,
         has_constraints=_has_monotone,
         has_qp_constraints=_has_qp_monotone,
-        has_scop_constraints=_has_scop_monotone,
         max_reml_iter=effective_max_reml_iter,
         reml_tol=reml_tol,
         pirls_tol=pirls_tol,
@@ -2183,12 +1917,7 @@ def _fit_reml_in_workspace(
             sample_weight_ref=sample_weight_ref,
             offset_ref=offset_ref,
         )
-        _canonicalize_fitted_model(
-            model,
-            _profile,
-            runtime_validation=runtime_validation,
-            n_rows=len(y),
-        )
+        _canonicalize_fitted_model(model, _profile)
         model._last_fit_meta = {"method": "fit_reml", "discrete": model._discrete}
         _maybe_release_fit_state(model)
         return debug_recorder
@@ -2204,12 +1933,9 @@ def _fit_reml_in_workspace(
     # Initialize per-component lambdas (penalty-indexed, not term-indexed)
     # Partition into fixed (policy.mode == "fixed") and estimated components.
     lam_init = lambda2_init if lambda2_init is not None else configured_smoothing
-    # A mapping lambda2_init (a previous fit's ``reml_diagnostics()["lambdas"]``)
-    # is a warm start the engines bootstrap from; a scalar keeps its cold meaning.
-    # Under a mapping, every component it does not warm-start -- unnamed, or in
-    # a block it names only in part -- starts exactly as a fit without it: the
-    # engines read these values too (the tensor bootstrap caps its first step
-    # around them), so a refused warm value left here still steered the fit.
+    # A mapping lambda2_init is a warm start; every component it does not
+    # warm-start starts exactly as without it, since the engines read these
+    # values too (the tensor bootstrap caps its first step around them).
     lambdas, estimated_names = initialize_component_lambdas(
         reml_penalties,
         configured_smoothing if isinstance(lambda2_init, Mapping) else lam_init,
@@ -2221,7 +1947,6 @@ def _fit_reml_in_workspace(
         other_names=[group.name for group in model._groups],
     )
     lambdas.update(warm_lambdas)
-    _any_unfixed_scop = inject_fixed_scop_lambdas(model._groups, model._specs, lambdas)
 
     # QP monotone with auto lambda → two-stage passthrough heuristic:
     # Stage 1: run unconstrained REML (temporarily strip QP constraints)
@@ -2236,16 +1961,14 @@ def _fit_reml_in_workspace(
     if _qp_passthrough:
         _qp_saved_state = strip_qp_constraints(model._groups)
         _qp_stripped = True
-        _has_monotone, _has_qp_monotone, _has_scop_monotone = constraint_engine_flags(model._groups)
+        _has_monotone, _has_qp_monotone = constraint_engine_flags(model._groups)
 
     try:
-        # Direct IRLS when lambda1=0 or unset (no L1 penalty -> no BCD needed)
+        # ``resolve_selection_penalty_for_reml`` above refused any selection
+        # penalty, so every REML fit takes the direct IRLS route.
         offset_arr = offset if offset is not None else np.zeros(len(y))
-        lam1 = penalty.lambda1
-        use_direct = lam1 is None or lam1 == 0 or not model_has_lambda1_targets(model)
 
-        log_message = None
-        if _has_monotone and not _any_unfixed_scop and not estimated_names:
+        if _has_monotone and not estimated_names:
             run_fixed_monotone_reml(
                 model,
                 y=y,
@@ -2260,34 +1983,6 @@ def _fit_reml_in_workspace(
                 total_start=_t_total_start,
                 debug_recorder=debug_recorder,
             )
-            log_message = f"fit_reml (monotone, fixed lambdas): lambdas={lambdas}"
-        elif _any_unfixed_scop or (_has_scop_monotone and estimated_names):
-            best = run_scop_efs_reml(
-                model,
-                y=y,
-                sample_weight=sample_weight,
-                offset=offset,
-                offset_arr=offset_arr,
-                lambdas=lambdas,
-                estimated_names=estimated_names,
-                lam_init=lam_init,
-                warm_lambdas=warm_lambdas,
-                reml_penalties=reml_penalties,
-                max_reml_iter=effective_max_reml_iter,
-                reml_tol=reml_tol,
-                pirls_tol=pirls_tol,
-                max_pirls_iter=max_pirls_iter,
-                verbose=verbose,
-                profile=_profile,
-                total_start=_t_total_start,
-                compute_fit_stats=_compute_fit_stats,
-                debug_recorder=debug_recorder,
-            )
-            log_message = (
-                f"REML SCOP EFS converged={best.converged} in {best.n_reml_iter} iters, "
-                f"lambdas={best.lambdas}"
-            )
-        if log_message is not None:
             model._reporting_support_state = _build_reml_reporting_support_state(
                 model,
                 result=model._solver_result,
@@ -2304,21 +1999,15 @@ def _fit_reml_in_workspace(
                 offset_ref=offset_ref,
                 y_arr=y,
             )
-            _canonicalize_fitted_model(
-                model,
-                _profile,
-                runtime_validation=runtime_validation,
-                n_rows=len(y),
-            )
-            logger.info(log_message)
+            _canonicalize_fitted_model(model, _profile)
+            logger.info(f"fit_reml (monotone, fixed lambdas): lambdas={lambdas}")
             _maybe_release_fit_state(model)
             return debug_recorder
 
-        if use_direct and estimated_names and not model._discrete:
+        if estimated_names and not model._discrete:
             _warn_slow_exact_reml(model, lambdas)
         best = optimize_reml_best(
             model,
-            use_direct=use_direct,
             y=y,
             sample_weight=sample_weight,
             offset_arr=offset_arr,
@@ -2336,14 +2025,12 @@ def _fit_reml_in_workspace(
             pirls_tol=pirls_tol,
             max_pirls_iter=max_pirls_iter,
             model_optimize_direct_reml=model_optimize_direct_reml,
-            model_optimize_efs_reml=model_optimize_efs_reml,
             debug_recorder=debug_recorder,
             warm_lambdas=warm_lambdas,
         )
         lambdas, n_reml_iter, converged = finalize_reml_fit(
             model,
             best=best,
-            use_direct=use_direct,
             reml_groups=reml_groups,
             reml_penalties=(
                 best.reml_penalties if best.reml_penalties is not None else reml_penalties
@@ -2373,12 +2060,7 @@ def _fit_reml_in_workspace(
         )
         _profile["fit_prime_caches_s"] = _time.perf_counter() - _t0
 
-        _canonicalize_fitted_model(
-            model,
-            _profile,
-            runtime_validation=runtime_validation,
-            n_rows=len(y),
-        )
+        _canonicalize_fitted_model(model, _profile)
 
         logger.info(f"REML converged={converged} in {n_reml_iter} iters, lambdas={lambdas}")
         _t0 = _time.perf_counter()

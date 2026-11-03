@@ -38,27 +38,21 @@ interpreted on the linear predictor / relativity scale.
 
 ## Engine Selection
 
-`Constraint.fit.*` fits on the constrained QP for every spline kind. A
-`PSpline` can opt into the SCOP engine instead with `shape_engine="scop"`:
+`Constraint.fit.*` fits on the constrained QP for every spline kind:
 
 | Feature spec | Fit-time kinds | Engine | Notes |
 |---|---|---|---|
 | `PSpline(...)` | increasing/decreasing at supported degrees; convex/concave only when `degree <= 3` | QP | the same rows as `BSplineSmooth`, with the P-spline difference penalty |
-| `PSpline(..., shape_engine="scop")` | increasing/decreasing at supported degrees; convex/concave only when `degree <= 3` | SCOP | exact and `discrete=True` paths, integrated constrained `fit_reml()` |
 | `BSplineSmooth(...)` | increasing/decreasing at supported degrees; convex/concave only when `degree <= 3` | QP | constrained solve on the B-spline smooth basis |
 | `CubicRegressionSpline(...)` | increasing/decreasing/convex/concave | QP | inherently cubic; knot-spacing-aware constraints on the natural cubic regression spline basis |
 
 Specifically:
 
 - `PSpline(..., constraint=Constraint.fit.*)` uses QP
-- `PSpline(..., constraint=Constraint.fit.*, shape_engine="scop")` uses SCOP;
-  `Spline(kind="ps", ..., shape_engine="scop")` is the same term
 - `BSplineSmooth(..., constraint=Constraint.fit.*)` uses QP
 - `CubicRegressionSpline(..., constraint=Constraint.fit.*)` uses QP
 - `Spline(..., constraint=Constraint.fit.*)` with no `kind` is a cubic
   regression spline, so it uses QP.
-- A `PSpline` saved by a release before `shape_engine` existed was fitted on
-  SCOP. It loads, predicts and refits on SCOP.
 
 On the QP a monotone P-spline holds the first differences of its B-spline
 coefficients to one sign. By de Boor's derivative formula the curve's slope is
@@ -72,6 +66,26 @@ increasing/decreasing constraints, but not `Constraint.fit.convex` or
 `Constraint.fit.concave`. `CubicRegressionSpline` is always degree three.
 This restriction does not apply to the separate `Constraint.postfit.*` repair
 workflow.
+
+### Models fitted on SCOP
+
+Releases up to 0.41.0 fitted a shape-constrained `PSpline` on SCOP, the shape
+constrained P-spline reparameterization of Pya and Wood (2015). That engine is
+retired:
+
+- A `PSpline`, or a `Spline(kind="ps")`, declared with a `Constraint.fit.*`
+  and no `shape_engine` (the code 0.41.0 ran) now fits on the QP with no
+  warning. Its curve and smoothing parameter differ from those 0.41.0 gave.
+- `shape_engine="scop"` is still accepted. It warns that SCOP is retired and
+  fits the constraint on the QP, so the fitted curve and its smoothing
+  parameter differ from those 0.41.0 gave. Drop the argument to silence the
+  warning.
+- A model saved with a SCOP term still loads, predicts, summarizes and exports
+  as it was saved.
+- Refitting such a model fits the term on the QP and warns once; a model
+  refitted and saved again no longer warns. A spline declared with no kind
+  beside a SCOP term (0.41.0 fitted it as `ps` on SCOP) refits as the `cr` it
+  declares, with the same warning.
 
 ## QP-Backed Shape Fits
 
@@ -116,74 +130,21 @@ Statistics* 40(2), 2012, Theorem 3).
 - Under `fit_reml()`, the published scale is still the REML estimate, which
   does not read the face.
 
-## SCOP-Backed Shape Fits
-
-Use `PSpline(..., constraint=Constraint.fit.*, shape_engine="scop")` when you
-want the SCOP path.
-
-```python
-from superglm import Constraint, PSpline, SuperGLM
-
-model = SuperGLM(
-    family="gaussian",
-    selection_penalty=0.0,
-    features={
-        "x": PSpline(
-            n_knots=10,
-            degree=3,
-            constraint=Constraint.fit.convex,
-            shape_engine="scop",
-        ),
-    },
-)
-model.fit_reml(df, y)
-```
-
-This works with both exact and `discrete=True` fitting paths. Choose it when
-you want smoothing parameters estimated under the constraint (see REML
-Semantics).
-
 ## REML Semantics
 
-Solver-backed shape splines can be used with `fit_reml()`, but the REML
-semantics are different for SCOP and QP:
+Shape-constrained splines work with `fit_reml()`:
 
-| Path | `fit_reml()` with fixed lambdas | `fit_reml()` with automatic lambda estimation |
-|---|---|---|
-| SCOP (`PSpline(..., constraint=Constraint.fit.*, shape_engine="scop")`) | supported within the degree limits above | integrated constrained REML / EFS path |
-| QP (`PSpline(...)`, `BSplineSmooth(...)`, `CubicRegressionSpline(...)` with `constraint=Constraint.fit.*`) | supported within the degree limits above | passthrough heuristic: unconstrained REML followed by constrained refit |
+| `fit_reml()` with fixed lambdas | `fit_reml()` with automatic lambda estimation |
+|---|---|
+| supported within the degree limits above | unconstrained REML followed by a constrained refit |
 
-The important nuance is that "SCOP works with REML but QP does not" is too
-strong. QP-constrained terms do work with `fit_reml()`. The difference is that
-automatic lambda estimation on the QP path is not exact joint constrained REML;
-it estimates lambdas from an unconstrained REML pass and then refits with the
-shape constraints at those lambdas.
-
-For large data, you can also combine the SCOP path with `discrete=True`:
-
-```python
-from superglm import Constraint, PSpline, SuperGLM
-
-model = SuperGLM(
-    family="gaussian",
-    selection_penalty=0.0,
-    discrete=True,
-    features={
-        "x": PSpline(
-            n_knots=10,
-            constraint=Constraint.fit.concave,
-            shape_engine="scop",
-        ),
-    },
-)
-model.fit_reml(df, y)
-```
-
-Fixed-lambda shape-constrained REML works for both SCOP and QP paths.
+Automatic lambda estimation is not exact joint constrained REML: it estimates
+the lambdas from an unconstrained REML pass and then refits with the shape
+constraints at those lambdas.
 
 ### With a random effect
 
-A shape constraint and a `RandomEffect` can share a model on either engine:
+A shape constraint and a `RandomEffect` can share a model:
 
 ```python
 from superglm import Constraint, PSpline, RandomEffect, SuperGLM
@@ -219,20 +180,6 @@ These combinations are intentionally guarded:
 
 - fit-time shape constraints with `selection_penalty > 0`
 - fit-time shape constraints with `select=True`
-- mixed SCOP and QP constrained engines in the same model
-- a **SCOP** fit-time constraint on a column that a `basis="fs"` `FactorSmooth`
-  also spans — **either** of its two parents. An `fs` factor smooth includes its
-  own main effect, so such a model states that effect twice, once confined to
-  the shape cone and once free, and reaches no coefficient mode. Along the
-  smoothed variable the free copy is the marginal smooth; along the grouping
-  column it is the per-level null-space blocks, which is reachable when that
-  column carries an `OrderedCategorical` constraint. Use `basis="sz"`, which
-  excludes the main effect, or the QP engine. Nothing adjacent is
-  restricted: a factor smooth sharing neither parent with a constrained term is
-  fine, and so is a `RandomEffect` on either engine. Note that an
-  `OrderedCategorical` is classified by its inner basis, so
-  `basis=Spline(kind="ps", shape_engine="scop")` is a SCOP term and every other
-  basis a QP one
 - `kind="ns"` fit-time shape constraints
 - `Constraint.fit.convex` or `Constraint.fit.concave` on a `PSpline` or
   `BSplineSmooth` with `degree > 3`
@@ -362,8 +309,6 @@ today.
 - choose solver-backed monotone / curvature constraints when the business rule
   is part of the actual tariff design
 - the QP fits constrained splines of every kind, P-splines included
-- opt a P-spline into SCOP with `shape_engine="scop"` when you want its
-  integrated automatic lambda estimation in `fit_reml()`
 - keep `selection_penalty=0` for these workflows
 - validate the fitted shape on a prediction grid before signing off
 - interpret the constraint on the linear predictor scale

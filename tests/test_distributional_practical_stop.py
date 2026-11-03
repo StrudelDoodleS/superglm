@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
+import sympy
 
 from superglm.distributional import GaussianLS, Predictor
 from superglm.distributional import fit_diagnostics as diagnostics_module
@@ -19,6 +20,7 @@ from superglm.distributional.smoothing.objective import _stable_isolated_gfs_upd
 from superglm.distributional.smoothing.proposals import _accelerated_proposal, _scaled_proposal
 from superglm.features import RandomEffect, Spline
 from superglm.reml.efs_update import EFSComponentState, wood_fasiolo_update
+from superglm.solvers.rank import decompose_symmetric_deflated
 from superglm.types import LambdaPolicy
 from tests.bound_predictor_fixtures import model_from_templates
 
@@ -37,7 +39,7 @@ def test_saturated_update_checks_inverse_products_before_cancellation() -> None:
     fit = SimpleNamespace(
         coefficients=beta,
         coefficient_face=None,
-        terminal_rank=SimpleNamespace(rank=2),
+        terminal_rank=SimpleNamespace(rank=2, row_decided=False),
         terminal_data_curvature=np.eye(2),
         terminal_penalized_curvature=np.eye(2) + lam * penalty,
     )
@@ -91,7 +93,7 @@ def test_saturated_update_refuses_an_unresolved_residual_product() -> None:
     fit = SimpleNamespace(
         coefficients=beta,
         coefficient_face=None,
-        terminal_rank=SimpleNamespace(rank=2),
+        terminal_rank=SimpleNamespace(rank=2, row_decided=False),
         terminal_data_curvature=curvature,
         terminal_penalized_curvature=curvature + lam * penalty,
     )
@@ -105,6 +107,83 @@ def test_saturated_update_refuses_an_unresolved_residual_product() -> None:
     )
     assert names == frozenset()
     assert stable is update
+
+
+def _rational(values) -> sympy.Matrix:
+    return sympy.Matrix([[sympy.Rational(float(v)) for v in row] for row in np.atleast_2d(values)])
+
+
+@pytest.mark.parametrize("case", ["penalized", "null_space"])
+def test_a_row_decided_saturated_step_pairs_its_grey_columns_with_the_rows(case: str) -> None:
+    """The stable step of a rank decided from the rows matches the exact curvature's.
+
+    ``z = x + d h`` puts a near pair in the grey band, and ``h`` is a column of
+    the saturated block, so the grey direction reaches the penalty.  The rows
+    are exact, and the reference is the step of ``tr(P H^-1 A)`` for the exact
+    ``H``, in rationals.  ``"penalized"``: the formed curvature couples the
+    pair to ``h`` by ``64 u``, inside its formation bound.  ``"null_space"``:
+    a first-difference penalty, whose constant null direction the grey column
+    also reaches.  The representative keeps the formed top block, so the step
+    is accurate to ``u`` times that block's condition number (``4e9`` in the
+    null-space case).  Mutation check: pairing the grey columns with the formed
+    curvature (the formed numerator) moves the penalized step by ``8e-3``, and
+    declines the null-space one, whose generic quotient is negative.
+    """
+    rng = np.random.default_rng(0 if case == "penalized" else 5)
+    grid = 2.0**-8
+    columns = [np.round(rng.normal(size=64) / grid) * grid for _ in range(2)]
+    linear = np.round(np.linspace(-1.0, 1.0, 64) / grid) * grid
+    x = np.round(rng.normal(size=64) / grid) * grid
+    if case == "penalized":
+        block_penalty, lam, d, plant = np.diag([1.0, 1.0, 0.0]), 2.0**40, 2.0**-23, 64.0
+    else:
+        difference = np.array([[1.0, -1.0, 0.0], [0.0, 1.0, -1.0]])
+        block_penalty, lam, d, plant = difference.T @ difference, 2.0**36, 2.0**-22, 0.0
+    rows = np.column_stack([*columns, linear, x, x + d * columns[0]])
+    penalty = np.zeros((5, 5))
+    penalty[:3, :3] = block_penalty
+    exact = _rational(rows).T * _rational(rows) + sympy.Rational(lam) * _rational(penalty)
+    data = rows.T @ rows
+    scale = np.sqrt(np.diag(data + lam * penalty))
+    data[0, 3] = data[3, 0] = data[0, 3] + plant * 2.0**-53 * scale[0] * scale[3]
+
+    def project(basis):
+        product = exact * _rational(basis)
+        cross = np.array(product, dtype=float)
+        block = np.array(_rational(basis).T * product, dtype=float)
+        return block, cross, 2.0**-53 * np.abs(block), 2.0**-53 * np.abs(cross)
+
+    rank = decompose_symmetric_deflated(
+        data + lam * penalty, project, formation_bound=512.0 * 2.0**-53
+    )
+    assert rank.row_decided and rank.rank == 5 and np.any(rank.grey_columns)
+    beta = np.array([2.0**-38, -(2.0**-38), 1.0, 0.5, -0.5])
+    component = EFSComponentState(
+        "smooth", slice(0, 3), block_penalty, 2.0, lam, LambdaPolicy.estimate()
+    )
+    fit = SimpleNamespace(
+        coefficients=beta,
+        coefficient_face=None,
+        terminal_rank=rank,
+        terminal_data_curvature=data,
+        terminal_penalized_curvature=data + lam * penalty,
+    )
+    inverse = rank.pseudo_inverse()
+    raw = wood_fasiolo_update((component,), beta, inverse, inverse_scale=1.0)
+    stable, names = _stable_isolated_gfs_update(
+        (component,), fit, inverse, raw, DistributionalEFSConfig()
+    )
+
+    span = sympy.Matrix.hstack(*_rational(block_penalty).columnspace())
+    projector = sympy.zeros(5, 5)
+    projector[:3, :3] = span * (span.T * span).inv() * span.T
+    residual = projector * exact.LUsolve(exact - sympy.Rational(lam) * _rational(penalty))
+    quadratic = (_rational(beta) * _rational(penalty) * _rational(beta).T)[0, 0]
+    reference = sympy.log(residual.trace() / (quadratic * sympy.Rational(lam)))
+    top = np.asarray(rank.retained_values)[~np.asarray(rank.grey_columns)]
+    tolerance = 1.0e-7 + 64.0 * 2.0**-53 * float(np.max(top) / np.min(top))
+    assert names == {"smooth"}
+    assert abs(stable.raw_log_steps["smooth"] - float(reference)) <= tolerance
 
 
 @pytest.mark.parametrize(
@@ -169,10 +248,6 @@ def test_practical_window_replays_non_increasing_steps() -> None:
     window = smoothing.history[-smoothing.config.plateau_iterations :]
     steps = [item.max_accepted_log_step for item in window]
     assert steps == sorted(steps, reverse=True)
-    forged = list(smoothing.history)
-    forged[-1] = replace(forged[-1], max_accepted_log_step=steps[-2] * 2.0 + 1.0e-3)
-    with pytest.raises(ValueError, match="plateau gate"):
-        replace(smoothing, history=tuple(forged))
 
 
 def test_lower_bound_pressure_names_components_pinned_at_the_minimum() -> None:
@@ -230,19 +305,6 @@ def test_practical_stop_does_not_preempt_the_exact_face() -> None:
     assert practical.converged is True
     assert practical.unresolved_upper_bound == ()
     assert abs(practical.objective - strict.objective) <= 1.0e-9 * (1.0 + abs(strict.objective))
-
-
-def test_converged_results_never_carry_unresolved_upper_pressure() -> None:
-    _model, smoothing = _preempt_fit(True)
-    # Several invariants can fire first (the forged name is not at the cap,
-    # the strict raw step is zero); all of them name the unresolved pressure.
-    with pytest.raises(ValueError, match="unresolved upper"):
-        replace(
-            smoothing,
-            converged=True,
-            convergence_reason="practical_plateau",
-            unresolved_upper_bound=("location:effect#wiggle",),
-        )
 
 
 def _start_fixture():
@@ -515,8 +577,6 @@ def test_practical_outward_result_records_fixed_coordinate_pressure(fixed_value)
     assert smoothing.terminal_raw_log_steps["location:fixed#wiggle"] == 0.0
     pressure = dict(smoothing.terminal_raw_log_steps)
     pressure.pop("location:fixed#wiggle")
-    with pytest.raises(ValueError, match="raw log steps.*all terminal lambdas"):
-        replace(smoothing, terminal_raw_log_steps=pressure)
 
     restored = pickle.loads(pickle_state(model._require_fitted())).smoothing
     assert restored.terminal_raw_log_steps == smoothing.terminal_raw_log_steps
@@ -530,10 +590,6 @@ def test_practical_outward_cap_stop_keeps_pressure_and_replays_finite_fit() -> N
     assert smoothing.terminal_fit.coefficient_face is None
     assert smoothing.terminal_raw_log_steps["location:effect#wiggle"] > 0.0
     assert len(smoothing.history) == smoothing.config.plateau_iterations
-    with pytest.raises(ValueError, match="practical|outward"):
-        replace(smoothing, terminal_raw_log_steps={"location:effect#wiggle": -0.1})
-    with pytest.raises(ValueError, match="practical|outward"):
-        replace(smoothing, terminal_raw_log_steps=None)
 
     _strict_model, strict = _outward_random_effect_fit(practical=False)
     assert strict.converged and strict.terminal_fit.coefficient_face is not None

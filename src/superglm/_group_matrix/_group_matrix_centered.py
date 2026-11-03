@@ -1005,18 +1005,13 @@ def _anchor_support_gram_rhs(
 ) -> tuple[NDArray, NDArray, NDArray] | None:
     """Anchor-centred compact supports, their Grams and cross-Grams by joint histogram.
 
-    One row pass (``_disc_disc_2d_hist``) per pair of groups, except within a
-    tensor's derived family (``_derived_support_family``): a group whose codes are a
-    function of the tensor's cell codes takes every cross-Gram from the tensor's
-    tables (``_add_family_cross``).
-
-    **Error.**  Each cross entry is ``sum_r W_r s(r)_j t(r)_k`` (``W >= 0``) of two
-    computed centred supports.  Either route meets two multiplications and at most
-    ``n + n_t + n_c`` additions per term, so it lies within ``gamma_K sum_r W_r
-    |s(r)_j| |t(r)_k|`` of the exact value with ``K`` that count plus two (Higham
-    2002, secs. 3.1 and 4.2), and the routes differ by at most twice that.  The
-    supports, means, diagonal blocks, right-hand side and every block outside the
-    family are bitwise those of the per-pair route.
+    One row pass (``_disc_disc_2d_hist``) per pair of groups, except that a group whose codes
+    are a function of a tensor's cell codes takes its cross-Grams from the tensor's tables
+    (``_derived_support_family``, ``_add_family_cross``). Either route forms each cross entry
+    ``sum_r W_r s(r)_j t(r)_k`` (``W >= 0``) within ``gamma_K sum_r W_r |s(r)_j| |t(r)_k|``, ``K``
+    the two products plus at most ``n + n_t + n_c`` additions per term (Higham 2002, secs. 3.1
+    and 4.2), so the routes differ by at most twice that. Everything outside the family is
+    bitwise the per-pair route.
     """
     # Reject an oversized support BEFORE materialising it.  A categorical block's
     # anchor support is a dense ``(K+1, K)`` identity with an O(K^3) Gram, and for a

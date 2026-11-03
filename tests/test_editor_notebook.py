@@ -355,16 +355,8 @@ def test_the_route_classes_are_pinned():
         "/control",
         "/control_count",
         "/refit_offset",
-        "/profile_distribution",
-        "/collapse_levels",
-        "/ungroup_levels",
-        "/special_levels",
-        "/knots",
-        "/basis",
         "/reorder_levels",
         "/revert_to_original",
-        "/set_reference",
-        "/shape_range",
         "/stage",
         "/refit_pending",
         "/set_unseen",
@@ -377,7 +369,6 @@ def test_the_route_classes_are_pinned():
         "/rating_table",
         "/free_levels",
         "/unsmoothed",
-        "/save_model",
         "/export_file",
         "/open_directory",
         "/save_directory",
@@ -404,7 +395,7 @@ def test_messages_that_are_not_requests_are_ignored(notebook_widget):
     _widget, view = notebook_widget
     view.handler(view, {"type": "something else", "id": 9}, [])
     view.handler(view, ["not", "a", "request"], [])
-    _request(view, 10, "GET", "/health")
+    _request(view, 10, "GET", "/state")
     content, _body = _reply(view)
     assert content["id"] == 10 and view.outbox.empty()
 
@@ -419,7 +410,7 @@ def test_closing_the_widget_closes_its_view_and_stops_answering(session_model, m
     widget = EditorSession.from_model(session_model).widget(mode="notebook")
     widget.close()
     assert view.closed
-    _request(view, 11, "GET", "/health")
+    _request(view, 11, "GET", "/state")
     with pytest.raises(queue.Empty):
         view.outbox.get(timeout=0.5)
 
@@ -469,11 +460,11 @@ def test_the_real_view_answers_through_anywidget_and_displays_as_a_widget(sessio
         view.send = lambda content, buffers=None: sent.put((content, buffers))
         # anywidget's own message dispatch, as a kernel delivers a page's message.
         view._handle_custom_msg(
-            {"type": notebook.REQUEST, "id": 1, "method": "GET", "url": "/health", "headers": []},
+            {"type": notebook.REQUEST, "id": 1, "method": "GET", "url": "/state", "headers": []},
             [],
         )
         content, buffers = sent.get(timeout=30.0)
-        assert (content["status"], json.loads(bytes(buffers[0]))) == (200, {"ok": True})
+        assert content["status"] == 200 and "terms" in json.loads(bytes(buffers[0]))
         assert view.bundle["entry"] == "main.js"
 
         data, _metadata = formatters.DisplayFormatter().format(widget)

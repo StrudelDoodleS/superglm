@@ -285,7 +285,36 @@ class EvaluationDesign:
         return _anchored_weighted_moments(self.iter_dense_chunks, W, self.p)
 
 
-MetricsDesign = DesignMatrix | EvaluationDesign | NDArray
+class ProjectedDesign:
+    """A design's rows projected on a face ``Z``, ``x_i' Z``, one bounded block at a time.
+
+    A constrained fit's covariance on its active face is ``Z (Z' M Z)^+ Z'``.
+    Weights far apart can put curvature off the face that is ``1e15`` or more
+    times the curvature on it, and a quadratic form of that covariance with
+    full rows, or its product with the full data Gram, then cancels at that
+    ratio times ``u``.  Rows projected before any product carry only their own
+    rounding, ``gamma_p |x_i|' |Z|``, so leverage and EDF are read here.
+    """
+
+    def __init__(self, design: MetricsDesign, basis: NDArray):
+        self._design = design
+        self._basis = np.asarray(basis, dtype=np.float64)
+        self.n = int(design.shape[0])
+        self.p = int(self._basis.shape[1])
+        self.shape = (self.n, self.p)
+
+    def iter_dense_chunks(self) -> Iterator[tuple[int, int, NDArray]]:
+        for start, stop, block in iter_dense_chunks(self._design):
+            yield start, stop, block @ self._basis
+
+    def weighted_moments(self, W: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+        W = np.asarray(W, dtype=np.float64)
+        if W.shape != (self.n,):
+            raise ValueError("working weights must match projected design rows")
+        return _anchored_weighted_moments(self.iter_dense_chunks, W, self.p)
+
+
+MetricsDesign = DesignMatrix | EvaluationDesign | ProjectedDesign | NDArray
 
 
 def centered_gram_from_moments(gram: NDArray, xtw1: NDArray, sum_w: float) -> NDArray:
@@ -304,7 +333,7 @@ def centered_gram_from_moments(gram: NDArray, xtw1: NDArray, sum_w: float) -> ND
 
 def iter_dense_chunks(design: MetricsDesign) -> Iterator[tuple[int, int, NDArray]]:
     """Yield bounded dense row blocks from grouped or evaluation designs."""
-    if isinstance(design, EvaluationDesign):
+    if isinstance(design, EvaluationDesign | ProjectedDesign):
         yield from design.iter_dense_chunks()
         return
 
@@ -394,20 +423,17 @@ def _merge_weights(total: float, chunk_weight: float) -> tuple[float, float, flo
 
 
 def _anchored_weighted_moments(chunks, W: NDArray, p: int) -> tuple[NDArray, NDArray, NDArray]:
-    """Raw Gram, ``X'W1`` and the centred Gram, the latter merged from chunk co-moments, in one traversal.
+    """Raw Gram, ``X'W1`` and the centred Gram (merged from chunk co-moments) in one traversal.
 
-    Each weighted chunk is centred about its own weighted mean as an exact pair ``(hi, lo)``
-    (``mode_score.corrected_two_pass_pair``; Chan, Golub and LeVeque 1983), rows ``(x - hi) - lo``,
-    and co-moments merge by the pairwise update ``C = C_a + C_b + m d d'``, ``m = w_a w_b /
-    (w_a + w_b)`` (Chan et al. 1979; weighted multivariate form: Pebay, Terriberry, Kolla and
-    Bennett 2016, *Comput. Stat.* 31:1305). ``d = (hi_b - hi_a) + (lo_b - lo_a)`` is exact within
-    a factor two (Sterbenz) and otherwise rounds at ``u |d|``; the running mean stays an exact pair
-    moved from the heavier side by the lighter side's share of ``d`` and added by TwoSum;
-    ``m d d'`` is the outer product of ``sqrt(m) d`` (``_merge_weights``) so nothing over- or
-    underflows that the term's own value does not. A diagonal entry (non-negative terms) is
-    accurate to ``O(gamma_{n + K})`` relative, ``K`` the chunks; an off-diagonal one to that times
-    ``sqrt(C_ii C_jj)``. No row is shifted by another chunk's mean (a global anchor rounds a far
-    chunk to nothing). Working weights are non-negative; a weightless chunk adds nothing.
+    Each chunk is centred about its weighted mean as an exact pair ``(hi, lo)``
+    (``mode_score.corrected_two_pass_pair``; Chan, Golub and LeVeque 1983); co-moments merge by
+    ``C = C_a + C_b + m d d'``, ``m = w_a w_b / (w_a + w_b)`` (Chan et al. 1979; Pebay,
+    Terriberry, Kolla and Bennett 2016). ``d = (hi_b - hi_a) + (lo_b - lo_a)`` is exact within a
+    factor two (Sterbenz), else rounds at ``u |d|``; the running mean stays an exact pair (TwoSum)
+    and ``m d d'`` is the outer product of ``sqrt(m) d``, so nothing over- or underflows that the
+    term does not. A diagonal entry is accurate to ``O(gamma_{n + K})`` relative, ``K`` the
+    chunks, an off-diagonal one to that times ``sqrt(C_ii C_jj)``. Weights are non-negative and
+    no row is shifted by another chunk's mean.
     """
     from superglm.solvers.mode_score import corrected_two_pass_pair
 
@@ -462,7 +488,7 @@ def _anchored_weighted_moments(chunks, W: NDArray, p: int) -> tuple[NDArray, NDA
 def weighted_moments(design: MetricsDesign, W: NDArray) -> tuple[NDArray, NDArray, NDArray]:
     """Return raw Gram, intercept cross-product, and centered data Gram."""
     W = np.asarray(W, dtype=np.float64)
-    if isinstance(design, EvaluationDesign):
+    if isinstance(design, EvaluationDesign | ProjectedDesign):
         return design.weighted_moments(W)
 
     if isinstance(design, np.ndarray):

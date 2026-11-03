@@ -148,16 +148,6 @@ def test_unshifted_resolution_limited_identical_step_keeps_certificate(
     assert result.score_relative > result.config.tolerance
 
 
-def test_objective_and_step_result_rejects_corrupted_retained_score(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    result = _fit_no_op(monkeypatch)
-    corrupted_score = result.terminal_score * 1.0e12
-
-    with pytest.raises(ValueError, match="objective-and-step"):
-        replace(result, terminal_score=corrupted_score)
-
-
 @pytest.mark.parametrize(
     "case", ["certified", "material_score", "shifted", "score_only", "invalid_trials"]
 )

@@ -19,6 +19,22 @@ model per era of terms that gained predict-time state after the saver.  The
 0.41 audit found those terms' pickles failing at predict until
 ``__setstate__`` restored the state their saver scored with.  Their API is the
 one these releases share, so ``data`` and the records stay identical in form.
+
+Run with v0.41.0 (``git worktree add <dir> v0.41.0``) and
+``tests/fixtures/saved_v0_41_0`` as the output, it writes a spline declared
+with no kind beside a constrained ``PSpline``, which 0.40.0 and 0.41.0 fitted
+as a ``ps`` on SCOP while the model kept the kindless declaration, and the
+same two cases inside an ``OrderedCategorical``: a ``ps`` basis 0.41.0 fitted
+on SCOP, and a basis declared with no kind that it fitted as one.
+
+Run from a detached master 71b133b2 worktree, the last master with the SCOP
+engine, which still reads ``0.41.0`` as its version, the saver is named:
+
+    PYTHONPATH=<dir>/src python scripts/make_saved_v040_fixtures.py \
+        tests/fixtures/saved_master_71b133b2 master-71b133b2
+
+It writes a ``PSpline`` declared with ``shape_engine="scop"``, which such a
+build pickles with that value rather than the class default.
 """
 
 from __future__ import annotations
@@ -134,6 +150,8 @@ LEGACY_SAVERS = {
     "0.17.0": ("spline_cat",),
     "0.18.0": ("ordered_cat",),
     "0.25.0": ("spline_cat",),
+    "0.41.0": ("kindless_beside_scop", "ordered_ps_on_scop", "ordered_kindless_beside_scop"),
+    "master-71b133b2": ("pspline_explicit_scop",),
 }
 BANDS = list("ABCDE")
 LEGACY_ROWS = 60
@@ -142,22 +160,53 @@ LEGACY_ROWS = 60
 def _legacy_case(name: str):
     """``(features, interactions)`` of one legacy record."""
     spline = sg.Spline(kind="cr", k=5)
+    if name == "pspline_explicit_scop":
+        increasing = sg.Constraint.fit.increasing
+        return {"x": sg.PSpline(n_knots=5, constraint=increasing, shape_engine="scop")}, None
+    if name == "kindless_beside_scop":
+        increasing = sg.Constraint.fit.increasing
+        return {
+            "x": sg.Spline(constraint=increasing),
+            "z": sg.PSpline(n_knots=6, constraint=increasing),
+        }, None
+    if name == "ordered_ps_on_scop":
+        increasing = sg.Constraint.fit.increasing
+        basis = sg.Spline(kind="ps", k=5, constraint=increasing)
+        return {
+            "x": sg.Spline(constraint=increasing),
+            "band": sg.OrderedCategorical(order=BANDS, basis=basis),
+        }, None
+    if name == "ordered_kindless_beside_scop":
+        increasing = sg.Constraint.fit.increasing
+        basis = sg.Spline(constraint=increasing)
+        return {
+            "band": sg.OrderedCategorical(order=BANDS, basis=basis),
+            "z": sg.PSpline(n_knots=6, constraint=increasing),
+        }, None
     if name == "ordered_cat":
         return {"band": sg.OrderedCategorical(order=BANDS), "x": spline}, None
     return {"x": spline, "c": sg.Categorical()}, [("x", "c")]
 
 
-def main_legacy(out: str) -> None:
+def _explicit_scop_data() -> tuple[pd.DataFrame, np.ndarray]:
+    """A rising Poisson rate whose QP REML refit converges, so a refit can be held silent."""
+    x = np.linspace(0.0, 1.0, 100)
+    y = np.random.default_rng(123).poisson(np.exp(0.4 + 1.3 * x)).astype(float)
+    return pd.DataFrame({"x": x}), y
+
+
+def main_legacy(out: str, saver: str) -> None:
     os.makedirs(out, exist_ok=True)
     warnings.simplefilter("ignore")
     frame, responses = data(n=LEGACY_ROWS)
     frame["band"] = np.array(BANDS, dtype=object)[
         np.minimum(frame["x"].to_numpy() // 2, 4).astype(int)
     ]
-    y = responses["poisson"]
-    for name in LEGACY_SAVERS[sg.__version__]:
+    for name in LEGACY_SAVERS[saver]:
         features, interactions = _legacy_case(name)
-        rows = frame[list(features)]
+        rows, y = frame[list(features)], responses["poisson"]
+        if name == "pspline_explicit_scop":
+            rows, y = _explicit_scop_data()
         model = sg.SuperGLM(family="poisson", features=features, interactions=interactions)
         model.fit_reml(rows, y)
         record = {
@@ -172,9 +221,9 @@ def main_legacy(out: str) -> None:
             pickle.dump(record, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
-def main(out: str) -> None:
-    if sg.__version__ in LEGACY_SAVERS:
-        return main_legacy(out)
+def main(out: str, saver: str | None = None) -> None:
+    if saver is not None or sg.__version__ in LEGACY_SAVERS:
+        return main_legacy(out, saver or sg.__version__)
     assert sg.__version__ == "0.40.0", sg.__version__
     os.makedirs(out, exist_ok=True)
     warnings.simplefilter("ignore")
@@ -216,4 +265,4 @@ def main(out: str) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    main(*sys.argv[1:3])

@@ -11,13 +11,12 @@ from scipy import sparse
 from superglm import Constraint, CubicRegressionSpline, Numeric, SuperGLM
 from superglm._fit_trace import TraceRun
 from superglm._group_matrix import _group_matrix_centered as raw_centering
-from superglm.distributions import Gamma, Gaussian, Poisson
+from superglm.distributions import Gamma, Poisson
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix, SparseSSPGroupMatrix
-from superglm.links import IdentityLink, LogLink
+from superglm.links import LogLink
 from superglm.reml import direct, observed_geometry
 from superglm.solvers import centered_system
 from superglm.solvers.irls_direct import _fit as irls_direct
-from superglm.solvers.scop import build_scop_solver_reparam
 from superglm.types import GroupSlice, LinearConstraintSet, PenaltyComponent
 
 
@@ -346,34 +345,6 @@ def test_positive_initial_data_reuse_remains_local_and_validated(attempts, monke
     assert hits == [False, True]
     assert policy.raw_moment_eligible is None
     assert all(attempts)
-
-
-def test_scop_cannot_retain_the_fixed_coordinate_policy(attempts):
-    fixture = _fixture()
-    policy = centered_system.TabmatCenteringState()
-    _fit(fixture, policy)
-    reparam = build_scop_solver_reparam(q_raw=2, kind="increasing")
-    irls_direct.fit_irls_direct(
-        np.array([[-1.0], [1.0]]),
-        np.array([-1.0, 1.0]),
-        np.ones(2),
-        Gaussian(),
-        IdentityLink(),
-        [GroupSlice("shape", 0, 1, monotone_engine="scop", scop_reparameterization=reparam)],
-        lambda2=0.0,
-        beta_init=np.ones(1),
-        intercept_init=0.0,
-        max_iter=1,
-        S_override=np.zeros((1, 1)),
-        scop_state_init={0: {"beta_eff": np.zeros(1), "S_scop": np.zeros((1, 1))}},
-        _compute_scop_postfit_inference=False,
-        weight_semantics="frequency",
-        _raw_moment_policy=policy,
-    )
-    assert policy._raw_moment_owners == ()
-    before = len(attempts)
-    _fit(fixture, policy)
-    assert len(attempts) > before
 
 
 def test_gamma_observed_geometry_does_not_share_fisher_policy(attempts, monkeypatch):

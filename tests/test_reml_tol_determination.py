@@ -9,11 +9,8 @@ smoothing parameter, and with it every published standard error, is still
 moving: on the fixture below the worst coefficient SE shifts by ~92% between
 the default fit and a tight one, with predictions essentially unchanged.
 
-The resolution is engine-scoped. The Newton engines (exact and discrete
-cached-W) use the compound bar and get a tight default. The EFS-family engines
-(the step-criterion loops in efs.py / runner.py / scop_efs.py) already stop on
-a lambda-change bound -- tightening them buys no determination and their
-linear convergence would pay heavily -- so their default stays put. Power
+The Newton engines (exact and discrete cached-W) use the compound bar and get
+a tight default. Power
 search candidate fits only rank powers (their objective is determined to ~1e-8
 even at the loose bar), so they keep the loose tolerance explicitly and the
 publication refit repays determination once.
@@ -72,16 +69,13 @@ class TestPublishedFitDetermination:
         frame, y, weights, offset, features = _flat_lambda_fixture()
 
         default_fit = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        default_fit.fit_reml(
-            frame, y, sample_weight=weights, offset=offset, runtime_validation="skip"
-        )
+        default_fit.fit_reml(frame, y, sample_weight=weights, offset=offset)
         tight = SuperGLM(family=families.tweedie(p=1.5), features=features)
         tight.fit_reml(
             frame,
             y,
             sample_weight=weights,
             offset=offset,
-            runtime_validation="skip",
             reml_tol=1e-11,
         )
 
@@ -94,28 +88,19 @@ class TestPublishedFitDetermination:
 
 
 class TestEngineScopedTolerance:
-    def test_resolver_maps_the_sentinel_per_engine(self):
-        from superglm.model.reml_execute import (
-            NEWTON_REML_TOL_DEFAULT,
-            STEP_REML_TOL_DEFAULT,
-            resolve_reml_tol,
-        )
+    def test_resolver_maps_the_sentinel_to_the_newton_default(self):
+        from superglm.model.reml_execute import NEWTON_REML_TOL_DEFAULT, resolve_reml_tol
 
         assert NEWTON_REML_TOL_DEFAULT == 1e-9
-        assert STEP_REML_TOL_DEFAULT == 1e-6
-        assert resolve_reml_tol(None, engine="newton") == NEWTON_REML_TOL_DEFAULT
-        assert resolve_reml_tol(None, engine="step") == STEP_REML_TOL_DEFAULT
-        assert resolve_reml_tol(2.5e-7, engine="newton") == 2.5e-7
-        assert resolve_reml_tol(2.5e-7, engine="step") == 2.5e-7
-        with pytest.raises(ValueError):
-            resolve_reml_tol(None, engine="brent")
+        assert resolve_reml_tol(None) == NEWTON_REML_TOL_DEFAULT
+        assert resolve_reml_tol(2.5e-7) == 2.5e-7
 
     def test_newton_engine_receives_the_tight_default(self, monkeypatch):
         seen = _spy_optimizer_tols(monkeypatch)
         frame, y, features = _small_search_fixture()
 
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
 
         assert seen == [1e-9]
 
@@ -141,7 +126,7 @@ class TestEngineScopedTolerance:
                     "x2": _Spline(kind="cr", n_knots=6),
                 },
             )
-            model.fit_reml(frame, y, runtime_validation="skip", reml_tol=tol)
+            model.fit_reml(frame, y, reml_tol=tol)
             return model._reml_result
 
         floored = fit(1e-15)
@@ -155,7 +140,7 @@ class TestEngineScopedTolerance:
         frame, y, features = _small_search_fixture()
 
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        model.fit_reml(frame, y, runtime_validation="skip", reml_tol=2.5e-7)
+        model.fit_reml(frame, y, reml_tol=2.5e-7)
 
         assert seen == [2.5e-7]
 
@@ -188,7 +173,7 @@ class TestCandidateGradePaths:
             features={"x1": _Spline(kind="cr", n_knots=6), "x2": _Spline(kind="cr", n_knots=6)},
             interactions=[("x1", "x2")],
         )
-        model.fit_reml(frame, y, interaction_mode="fast_candidate", runtime_validation="skip")
+        model.fit_reml(frame, y, interaction_mode="fast_candidate")
 
         assert seen == [1e-6]
 
@@ -203,9 +188,7 @@ class TestCandidateGradePaths:
             features={"x1": _Spline(kind="cr", n_knots=6), "x2": _Spline(kind="cr", n_knots=6)},
             interactions=[("x1", "x2")],
         )
-        model.fit_reml(
-            frame, y, interaction_mode="fast_candidate", runtime_validation="skip", reml_tol=3e-8
-        )
+        model.fit_reml(frame, y, interaction_mode="fast_candidate", reml_tol=3e-8)
 
         assert seen == [3e-8]
 
@@ -214,11 +197,10 @@ class TestEngineSeamSentinels:
     """Every model-bound engine wrapper resolves the sentinel for the engine
     it actually forwards to.
 
-    Each forwards to exactly one engine whose loop would TypeError on a
-    verbatim None (direct.py floats the tolerance; efs.py compares against
-    it), so the wrapper owns the resolution.  ``model_optimize_direct_reml``
-    and ``model_optimize_efs_reml`` are injected into ``optimize_reml_best``,
-    which is how production fits reach them.
+    It forwards to an engine whose loop would TypeError on a verbatim None
+    (direct.py floats the tolerance), so the wrapper owns the resolution.
+    ``model_optimize_direct_reml`` is injected into ``optimize_reml_best``,
+    which is how production fits reach it.
     """
 
     @staticmethod
@@ -233,33 +215,6 @@ class TestEngineSeamSentinels:
             _active_set=None,
             _discrete=False,
         )
-
-    def test_efs_seam_resolves_the_step_default(self, monkeypatch):
-        import superglm.reml.efs as efs_module
-        from superglm.model import reml_ops
-
-        captured: list[float] = []
-
-        def fake_optimize(*args, **kwargs):
-            captured.append(kwargs["reml_tol"])
-            return "RESULT", "DM"
-
-        monkeypatch.setattr(efs_module, "optimize_efs_reml", fake_optimize)
-        monkeypatch.setattr(reml_ops, "configured_penalty", lambda model: None)
-        for reml_tol in (None, 3e-7):
-            reml_ops.model_optimize_efs_reml(
-                self._seam_model(),
-                None,
-                None,
-                None,
-                [],
-                {},
-                {},
-                max_reml_iter=1,
-                reml_tol=reml_tol,
-                verbose=False,
-            )
-        assert captured == [1e-6, 3e-7]
 
     def test_direct_seam_resolves_the_newton_default(self, monkeypatch):
         from superglm.model import reml_ops
@@ -480,7 +435,7 @@ class TestFreezeDiagnostics:
         profile the way the resolved tolerance already is."""
         frame, y, features = _small_search_fixture()
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
 
         profile = model._reml_profile
         freeze = profile["reml_freeze_decision"]
@@ -552,7 +507,7 @@ class TestFreezeRevalidation:
                 "x2": Spline(kind="cr", n_knots=8),
             },
         )
-        model.fit_reml(frame, y, runtime_validation="skip", max_reml_iter=200)
+        model.fit_reml(frame, y, max_reml_iter=200)
 
         r = model._reml_result
         assert r.converged
@@ -592,7 +547,7 @@ class TestFreezeRevalidation:
                 "x2": Spline(kind="cr", n_knots=8),
             },
         )
-        model.fit_reml(frame, y, runtime_validation="skip", max_reml_iter=200)
+        model.fit_reml(frame, y, max_reml_iter=200)
 
         assert model._reml_profile.get("reml_freeze_revalidated") is True
         freeze = model._reml_profile["reml_freeze_decision"]
@@ -626,7 +581,7 @@ class TestFreezeRevalidation:
                 "x2": Spline(kind="cr", n_knots=8),
             },
         )
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
 
         r = model._reml_result
         assert r.converged
@@ -655,7 +610,7 @@ class TestFreezeRevalidation:
                 },
                 **kwargs,
             )
-            model.fit_reml(frame, y, runtime_validation="skip")
+            model.fit_reml(frame, y)
             return model._reml_result
 
         exhausted = fit(max_iter=1)
@@ -705,7 +660,7 @@ class TestFreezeRevalidation:
                     "x2": Spline(kind="cr", n_knots=8),
                 },
             )
-            model.fit_reml(frame, y, runtime_validation="skip", **kwargs)
+            model.fit_reml(frame, y, **kwargs)
             return model._reml_result
 
         reference = fit()
@@ -716,9 +671,7 @@ class TestFreezeRevalidation:
                 "x2": Spline(kind="cr", n_knots=8),
             },
         )
-        starved_model.fit_reml(
-            frame, y, runtime_validation="skip", reml_tol=1e-5, max_pirls_iter=1, pirls_tol=1e-15
-        )
+        starved_model.fit_reml(frame, y, reml_tol=1e-5, max_pirls_iter=1, pirls_tol=1e-15)
         starved = starved_model._reml_result
 
         assert starved.converged and reference.converged
@@ -751,7 +704,7 @@ class TestFreezeRevalidation:
                 "x2": Spline(kind="cr", n_knots=6),
             },
         )
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
 
         freeze = model._reml_profile["reml_freeze_decision"]
         status = dict(zip(freeze["names"], zip(freeze["estimated"], freeze["frozen"])))
@@ -784,7 +737,7 @@ class TestAllFixedLambdaDiagnostics:
             },
             **kwargs,
         )
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
 
         assert model._reml_result.termination_reason == "fixed_lambdas"
         freeze = model._reml_profile["reml_freeze_decision"]
@@ -837,7 +790,7 @@ class TestFlatDirectionFloor:
                 "x2": Spline(kind="cr", n_knots=8),
             },
         )
-        model.fit_reml(frame, y, runtime_validation="skip", max_reml_iter=200)
+        model.fit_reml(frame, y, max_reml_iter=200)
 
         r = model._reml_result
         freeze = model._reml_profile["reml_freeze_decision"]
@@ -884,7 +837,6 @@ class TestFlatDirectionFloor:
             frame,
             y,
             sample_weight=np.ones(n),
-            runtime_validation="skip",
             reml_tol=1e-11,
             max_reml_iter=200,
         )
@@ -918,7 +870,7 @@ class TestFlatDirectionFloor:
             400_000, informative_smooths=True
         )
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        model.fit_reml(frame, y, sample_weight=weights, offset=offset, runtime_validation="skip")
+        model.fit_reml(frame, y, sample_weight=weights, offset=offset)
 
         r = model._reml_result
         freeze = model._reml_profile["reml_freeze_decision"]
@@ -959,7 +911,7 @@ class TestFlatDirectionFloor:
             family="poisson",
             features={"g": RandomEffect(), "x": Spline(kind="cr", n_knots=5)},
         )
-        model.fit_reml(frame, y, runtime_validation="skip")
+        model.fit_reml(frame, y)
 
         r = model._reml_result
         freeze = model._reml_profile["reml_freeze_decision"]
@@ -982,7 +934,7 @@ class TestFlatDirectionFloor:
         real signal — and f7 5.5e-2."""
         frame, y, weights, offset, features = _flat_lambda_fixture(informative_smooths=True)
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        model.fit_reml(frame, y, sample_weight=weights, offset=offset, runtime_validation="skip")
+        model.fit_reml(frame, y, sample_weight=weights, offset=offset)
 
         r = model._reml_result
         freeze = model._reml_profile["reml_freeze_decision"]
@@ -990,150 +942,6 @@ class TestFlatDirectionFloor:
         assert r.converged
         assert not frozen["f6"]
         assert not frozen["f7"]
-
-
-class TestSCOPPlateauExit:
-    """The EFS plateau exit may not pre-empt an actively contracting fit.
-
-    The plateau road (``obj_rel < 1e-6 and max_change < 0.01``) used fixed
-    thresholds with no notion of progress, so it granted ``converged=True``
-    at the identical point for reml_tol 1e-6 through 1e-11. Measured on the
-    4000-row monotone fixture (2026-08-07): the EFS tail contracts at ratio
-    ~0.6 per iteration with lambda still walking one percent per iteration
-    -- and the plateau fired mid-walk at iteration 5. Its honest role is
-    the step-engine analog of ``converged_at_precision``: classify the
-    endgame where steps have STOPPED contracting (noise-floor stall,
-    measured ratio ~1.05 on the 400-row variant), never an exit taken
-    while iterations are still buying precision.
-    """
-
-    @staticmethod
-    def _monotone_fixture(n):
-        from superglm import Constraint, CubicRegressionSpline
-
-        rng = np.random.default_rng(11)
-        x1 = rng.uniform(0, 1, n)
-        x2 = rng.uniform(0, 1, n)
-        eta = 0.3 + 1.1 * np.log1p(3.0 * x1) + 0.35 * np.sin(2 * np.pi * x2)
-        y = rng.poisson(np.exp(eta)).astype(float)
-        frame = pd.DataFrame({"x1": x1, "x2": x2})
-        features = {
-            "x1": Spline(
-                kind="ps", n_knots=8, constraint=Constraint.fit.increasing, shape_engine="scop"
-            ),
-            "x2": CubicRegressionSpline(n_knots=8),
-        }
-        return frame, y, features
-
-    def test_the_stall_verdict_bounds_the_extrapolated_remaining_movement(self):
-        """A ratio just under 1 is still a geometric tail: at r=0.95 with
-        max_change at the 0.01 plateau cap, max_change*r/(1-r) says ~19% of
-        the lambda movement remains -- 'stalled' may not forfeit that. The
-        bound only defers the plateau in the r in [0.9, 1) band; at r >= 1
-        no geometric extrapolation exists and the non-contracting steps are
-        the machinery noise floor itself, the plateau's honest target."""
-        from superglm.reml.scop_efs import _scop_plateau_remaining_movement_bounded
-
-        assert _scop_plateau_remaining_movement_bounded(0.009, 1.05)
-        assert not _scop_plateau_remaining_movement_bounded(0.009, 0.95)
-        assert _scop_plateau_remaining_movement_bounded(0.002, 0.95)
-        assert _scop_plateau_remaining_movement_bounded(0.004, 0.9)
-        assert not _scop_plateau_remaining_movement_bounded(0.009, 0.9)
-
-    def test_the_stall_verdict_is_a_bounded_noise_band(self):
-        """Two trajectories the consecutive-ratio counter got wrong: an
-        oscillating noise floor (1e-5, 2e-5, 1e-5) resets the counter on
-        every down-leg and never plateaus, exhausting max_reml_iter on a
-        flat fit -- while an expanding tail (0.002, 0.004, 0.008; the
-        same-sign adaptive alpha deliberately grows) counts every ratio
-        above 0.9 as a stall and plateaus while movement accelerates.
-        Stall evidence is a bounded band: the last three accepted steps
-        within 2x of their own minimum, with the geometric tail still
-        gated by the extrapolated remaining movement."""
-        from superglm.reml.scop_efs import _scop_plateau_steps_stalled
-
-        assert _scop_plateau_steps_stalled([1e-5, 2e-5, 1e-5], 0.5)
-        assert not _scop_plateau_steps_stalled([0.002, 0.004, 0.008], 2.0)
-        assert not _scop_plateau_steps_stalled([0.01, 0.006, 0.0036], 0.6)
-        assert not _scop_plateau_steps_stalled([2e-5, 1e-5], 0.5)
-        assert not _scop_plateau_steps_stalled([0.01, 0.0095, 0.009], 0.95)
-        assert _scop_plateau_steps_stalled([0.002, 0.0019, 0.0018], 0.95)
-        # A gradual expander INSIDE the band is still expansion, not noise:
-        # every step grew, so movement is accelerating and the stall is
-        # deferred until the trajectory turns. An increasing noise window
-        # (chance ordering at the floor) is deferred the same single
-        # iteration and stalls once it turns.
-        assert not _scop_plateau_steps_stalled([0.004, 0.005, 0.006], 1.2)
-        assert not _scop_plateau_steps_stalled([1e-5, 1.5e-5, 2e-5], 1.33)
-        assert _scop_plateau_steps_stalled([2e-5, 1.9e-5, 1.85e-5], 0.97)
-        # A sawtooth expander -- one transient down-step inside the band,
-        # then +54% -- is still material recent growth, not a stall.
-        assert not _scop_plateau_steps_stalled([0.004, 0.0039, 0.006], 1.54)
-        # Persistent 10%-per-iteration growth (+21% across the window) is
-        # BELOW the single-window resolution limit: the multi-SCOP cleanup
-        # endgame's legitimate limit-cycle stall carries measured growth
-        # legs at ratio 1.199 per step, so a bar tight enough to reject
-        # this trajectory defers that real stall to max_reml_iter. In the
-        # sub-resolution band the remaining-movement cap is the guarantee.
-        assert _scop_plateau_steps_stalled([0.004, 0.0044, 0.00484], 1.1)
-        # The cleanup cycle's measured stalling window -- post-excursion,
-        # growth leg at ratio 1.199 -- stalls; its pure three-leg growth
-        # window (net 1.437) correctly defers within the same cycle.
-        assert _scop_plateau_steps_stalled([2.628e-4, 1.574e-4, 1.887e-4], 1.199)
-        assert not _scop_plateau_steps_stalled([1.054e-4, 1.264e-4, 1.515e-4], 1.199)
-        # A single noise up-leg at the measured 1.05 ratio still stalls.
-        assert _scop_plateau_steps_stalled([1.9e-5, 1.85e-5, 1.95e-5], 1.05)
-        # Equal steps carry 1e-16-relative exp/log jitter that can order
-        # itself increasingly; a jitter-increase is a stall, not expansion.
-        jittered = [0.0049999999999998969, 0.0049999999999999958, 0.0050000000000000582]
-        assert _scop_plateau_steps_stalled(jittered, 1.0)
-
-    def test_the_plateau_does_not_preempt_a_contracting_tail(self):
-        """Pre-fix, this fit exited objective_plateau at iteration 5 with
-        the lambda still moving a percent per iteration; the gated plateau
-        keeps iterating until progress genuinely stops (or the strict road
-        is reached), whichever the machinery supports."""
-        frame, y, features = self._monotone_fixture(4_000)
-        model = SuperGLM(family="poisson", features=features)
-        model.fit_reml(frame, y, runtime_validation="skip", reml_tol=1e-9, max_reml_iter=40)
-
-        r = model._reml_result
-        assert r.converged
-        assert str(r.termination_reason) in {"lambda_tolerance", "objective_plateau"}
-        assert int(r.n_reml_iter) > 6
-
-    def test_the_strict_road_wins_when_the_tolerance_is_reachable(self):
-        """Exit ordering: a reachable reml_tol terminates as lambda_tolerance,
-        not as a plateau classification."""
-        frame, y, features = self._monotone_fixture(400)
-        model = SuperGLM(family="poisson", features=features)
-        model.fit_reml(frame, y, runtime_validation="skip", reml_tol=1e-3)
-
-        r = model._reml_result
-        assert r.converged
-        assert str(r.termination_reason) == "lambda_tolerance"
-
-    def test_an_unreachable_tolerance_classifies_as_plateau(self, monkeypatch):
-        """Below the machinery noise floor (steps stall near 2e-5 on this
-        fixture), the honest exit is the plateau classification with
-        converged=True -- the step-engine converged_at_precision. The EFS
-        step's floor: the Newton step reaches this tolerance on this fixture."""
-        import functools
-
-        import superglm.reml.scop_efs as scop_efs
-
-        monkeypatch.setattr(
-            scop_efs,
-            "optimize_scop_efs_reml",
-            functools.partial(scop_efs.optimize_scop_efs_reml, _outer_step="efs"),
-        )
-        frame, y, features = self._monotone_fixture(400)
-        model = SuperGLM(family="poisson", features=features)
-        model.fit_reml(frame, y, runtime_validation="skip", reml_tol=1e-11, max_reml_iter=60)
-
-        r = model._reml_result
-        assert r.converged
-        assert str(r.termination_reason) == "objective_plateau"
 
 
 class TestPublicationREMLBudget:
@@ -1181,47 +989,6 @@ class TestPublicationREMLBudget:
         assert len(disclosed) == 1
         assert disclosed[0].filename == __file__
         assert bool(candidates) == (search_fit_mode == "reml")
-
-    @pytest.mark.parametrize("estimate", ["p", "theta"])
-    def test_an_unset_budget_resolves_per_engine(self, estimate):
-        """An unset budget is ``fit_reml``'s: 100 outer iterations for a SCOP model.
-
-        It read as 20, so the publication refit of a model with a monotone
-        (SCOP) term stopped at 20 outer iterations where ``fit_reml`` and the
-        search's own REML candidates run to 100, and warned of a cap the
-        caller never set; ``estimate_theta`` takes no budget at all and had
-        the same 20. Mutation check: 7ed61b05 published 20 for both.
-        """
-        from superglm import Constraint
-
-        rng = np.random.default_rng(3)
-        n = 500
-        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n), "z": rng.uniform(0.0, 1.0, n)})
-        mean = np.exp(0.2 + 0.8 * frame["x"] + 0.3 * np.sin(6.0 * frame["z"])).to_numpy()
-        features = {
-            "x": Spline(kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"),
-            "z": Spline(kind="ps", k=8),
-        }
-        if estimate == "p":
-            counts = rng.poisson(mean)
-            y = np.array([rng.gamma(2.0, 0.5, count).sum() for count in counts])
-            model = SuperGLM(
-                family=families.tweedie(p=1.5),
-                selection_penalty=0.0,
-                discrete=True,
-                features=features,
-            )
-            model.estimate_p(frame, y, fit_mode="reml", search_fit_mode="fit")
-        else:
-            y = rng.poisson(mean * rng.gamma(2.0, 0.5, n)).astype(float)
-            model = SuperGLM(
-                family=families.nb2(theta=1.0),
-                selection_penalty=0.0,
-                discrete=True,
-                features=features,
-            )
-            model.estimate_theta(frame, y, fit_mode="reml")
-        assert model.reml_diagnostics()["profile"]["effective_max_reml_iter"] == 100
 
     def test_a_pure_ml_publication_refuses_the_reml_budget(self):
         frame, y, features = _small_search_fixture()
@@ -1425,7 +1192,6 @@ class TestDeadSearchNewtonDecrement:
                 y,
                 lambda2_init={"x": 1e-3},
                 max_reml_iter=5,
-                runtime_validation="skip",
             )
 
         first_trial = max(abs(np.log(evaluated[1][k] / evaluated[0][k])) for k in evaluated[0])
@@ -1529,7 +1295,6 @@ class TestDeadSearchNewtonDecrement:
             y,
             reml_tol=tol,
             max_reml_iter=max_reml_iter,
-            runtime_validation="skip",
         )
         by_iteration: dict[int, list[float]] = {}
         for iteration, alpha in trials:

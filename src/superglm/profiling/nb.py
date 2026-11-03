@@ -656,16 +656,13 @@ class NBProfileResult:
 def _restate_v0_35(saved: dict[str, Any]) -> dict[str, Any]:
     """The fields of an ``NBProfileResult`` unpickled from superglm 0.35.0, in this layout.
 
-    v0.35.0 kept each interval as a ``(lower, upper)`` tuple in ``_ci_cache``
-    and no endpoint status: a side whose likelihood-ratio statistic never
-    reached its cutoff was returned at the end of its search range,
-    ``min(0.01, theta_hat / 100)`` below and ``max(500, theta_hat * 100)``
-    above (``_CI_RANGE``, unchanged since), so a side at that end is censored.
-    Its iterates (``cache``: theta to six significant digits, then NLL, the
-    last at the published mean) become ``evaluations``.  The saved response,
-    mean and weights are kept, so an interval at another level is inverted on
-    the same fixed-mean profile; v0.35.0 recorded no estimation bound, so that
-    interval's search range is not stopped at one.
+    v0.35.0 kept intervals as ``(lower, upper)`` tuples in ``_ci_cache`` with no endpoint
+    status; a side that never reached its cutoff returned the end of its search range
+    (``_CI_RANGE``: ``min(0.01, theta_hat / 100)`` below, ``max(500, theta_hat * 100)`` above),
+    so a side at that end is censored. Its ``cache`` iterates (theta to six significant digits,
+    then NLL) become ``evaluations``. The saved response, mean and weights are kept, so another
+    level's interval inverts the same fixed-mean profile, its search range not stopped at an
+    estimation bound.
     """
     theta_hat = float(saved["theta_hat"])
     ends = (min(_CI_RANGE[0], theta_hat / 100.0), max(_CI_RANGE[1], theta_hat * 100.0))

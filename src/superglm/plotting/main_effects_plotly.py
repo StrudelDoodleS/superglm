@@ -10,7 +10,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
-from superglm.inference.term import TermInference
+from superglm.inference._term_types import TermInference
 from superglm.plotting.common import (
     _EXP_EDGE_LW,
     _LINE_WIDTH,

@@ -792,6 +792,30 @@ class TestREMLSelectionPenaltyRejected:
         with pytest.raises(ValueError, match="does not support selection penalties"):
             model.fit_reml(X, y, max_reml_iter=12, verbose=True)
 
+    @pytest.mark.parametrize("selection_penalty", [0.01, "auto"])
+    def test_fit_reml_refuses_a_selection_penalty_before_any_work(self, selection_penalty):
+        """Every selection penalty is refused before the design is built.
+
+        ``fit_reml`` has one REML route, the direct-IRLS Newton engines: the
+        scalar EFS route for a selection penalty was removed because this
+        refusal made it unreachable. A fit that got past it would reach no
+        engine built for a selection penalty, so it must not start. Mutation
+        check: with ``validate_selection_penalty_for_reml`` returning without
+        raising, the fit runs and both assertions fail.
+        """
+        rng = np.random.default_rng(5)
+        x = rng.uniform(0.0, 10.0, 300)
+        y = rng.poisson(np.exp(0.2 + 0.3 * np.sin(x))).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=selection_penalty,
+            features={"x": Spline(kind="cr", k=8)},
+        )
+        with pytest.raises(ValueError, match="does not support selection penalties"):
+            model.fit_reml(pd.DataFrame({"x": x}), y)
+        assert getattr(model, "_dm", None) is None
+        assert getattr(model, "_reml_result", None) is None
+
 
 class TestREMLFallbacks:
     def test_fit_reml_intercept_only_matches_plain_fit(self, caplog):
@@ -2469,9 +2493,7 @@ class TestREMLWarmStart:
                 selection_penalty=0.0,
                 discrete=True,
                 features={
-                    "BonusMalus": Spline(
-                        kind="ps", k=10, constraint=Constraint.fit.increasing, shape_engine="scop"
-                    ),
+                    "BonusMalus": Spline(kind="ps", k=10, constraint=Constraint.fit.increasing),
                     "DrivAge": Spline(kind="ps", k=8),
                     "VehAge": Spline(kind="ps", k=8),
                     "VehGas": Categorical(base="most_exposed"),
@@ -2742,37 +2764,14 @@ class TestREMLNonConvergenceDisclosure:
         )
         assert reml_nonconvergence_message(revised) is None
 
-    @pytest.mark.parametrize("engine", ["discrete", "direct", "scop_newton", "scop_efs"])
-    def test_converged_fits_raise_no_convergence_warning(self, engine, monkeypatch):
+    @pytest.mark.parametrize("engine", ["discrete", "direct"])
+    def test_converged_fits_raise_no_convergence_warning(self, engine):
         """The fits that stop on a converged reason run with ConvergenceWarning
-        raised as an error, on each engine and each SCOP outer step."""
-        import functools
-
-        import superglm.reml.scop_efs as scop_efs_module
+        raised as an error, on each engine."""
         from superglm import ConvergenceWarning
 
         X, y = _two_smooth_poisson(n=1500)
-        if engine.startswith("scop"):
-            if engine == "scop_efs":
-                real = scop_efs_module.optimize_scop_efs_reml
-                monkeypatch.setattr(
-                    scop_efs_module,
-                    "optimize_scop_efs_reml",
-                    functools.partial(real, _outer_step="efs"),
-                )
-            model = SuperGLM(
-                family="poisson",
-                selection_penalty=0.0,
-                discrete=True,
-                features={
-                    "x1": Spline(
-                        kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"
-                    ),
-                    "x2": Spline(kind="ps", k=8),
-                },
-            )
-        else:
-            model = _two_smooth_model(engine == "discrete")
+        model = _two_smooth_model(engine == "discrete")
         with warnings.catch_warnings():
             warnings.simplefilter("error", ConvergenceWarning)
             model.fit_reml(X, y)
@@ -2831,30 +2830,6 @@ class TestREMLNonConvergenceDisclosure:
             warnings.simplefilter("error", ConvergenceWarning)
             model.fit_reml(X, y)
         assert model.diagnostics()["_model"]["converged"] is True
-
-    def test_the_default_cap_is_engine_specific(self):
-        """20 for the Newton engines, 100 for the SCOP engine's linear EFS steps.
-
-        Mutation check: master capped the SCOP engine at 20, which measured
-        14-57 outer iterations on freMTPL2 SCOP fits.
-        """
-        X, y = _two_smooth_poisson(n=1500)
-        newton = _two_smooth_model(True).fit_reml(X, y)
-        assert newton.reml_diagnostics()["profile"]["effective_max_reml_iter"] == 20
-        scop = SuperGLM(
-            family="poisson",
-            selection_penalty=0.0,
-            discrete=True,
-            features={
-                "x1": Spline(
-                    kind="ps", k=8, constraint=Constraint.fit.increasing, shape_engine="scop"
-                ),
-                "x2": Spline(kind="ps", k=8),
-            },
-        ).fit_reml(X, y)
-        assert scop.reml_diagnostics()["profile"]["effective_max_reml_iter"] == 100
-        explicit = _two_smooth_model(True).fit_reml(X, y, max_reml_iter=50)
-        assert explicit.reml_diagnostics()["profile"]["effective_max_reml_iter"] == 50
 
 
 def _ten_penalty_poisson(n=3000, seed=1):
@@ -2927,7 +2902,7 @@ class TestExactPresolve:
         14 iterations; from the pre-solve's 11 cached-W updates it converges in
         4, to an objective 1.8e-5 lower (both stops within reml_tol)."""
         model, X, y = _ten_penalty_poisson()
-        info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        info = model.fit_reml(X, y).reml_diagnostics()
         assert info["profile"]["reml_presolve_n_iter"] > 0
         assert info["n_presolve_iter"] == info["profile"]["reml_presolve_n_iter"]
         assert info["converged"]
@@ -2951,7 +2926,7 @@ class TestExactPresolve:
 
         monkeypatch.setattr(direct_module, "fit_irls_direct", recorded)
         model, X, y = _ten_penalty_poisson()
-        info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        info = model.fit_reml(X, y).reml_diagnostics()
         assert info["profile"]["reml_presolve_n_iter"] > 0
         assert "bootstrap" not in phases
         assert "candidate" in phases
@@ -2968,7 +2943,7 @@ class TestExactPresolve:
             if cap == "fast_candidate"
             else {"max_reml_iter": 5}
         )
-        info = model.fit_reml(X, y, runtime_validation="skip", **kwargs).reml_diagnostics()
+        info = model.fit_reml(X, y, **kwargs).reml_diagnostics()
         assert "reml_presolve_n_iter" not in info["profile"]
         assert info["n_presolve_iter"] == 0
 
@@ -2980,7 +2955,7 @@ class TestExactPresolve:
         updates = []
         for tol in (None, 1e-5):
             model, X, y = _ten_penalty_poisson()
-            info = model.fit_reml(X, y, runtime_validation="skip", reml_tol=tol)
+            info = model.fit_reml(X, y, reml_tol=tol)
             updates.append(info.reml_diagnostics()["profile"]["reml_presolve_n_iter"])
         assert updates[0] == updates[1]
 
@@ -3025,7 +3000,7 @@ class TestExactPresolve:
 
         monkeypatch.setattr(direct_module, "freeze_flat_directions", hold_all_first)
         model, X, y = _ten_penalty_poisson()
-        info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        info = model.fit_reml(X, y).reml_diagnostics()
         assert info["n_presolve_iter"] > 0
         assert info["converged"]
         names = info["profile"]["reml_freeze_decision"]["names"]
@@ -3056,7 +3031,7 @@ class TestExactPresolve:
                 "c1": Categorical(),
             },
         )
-        info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        info = model.fit_reml(X, y).reml_diagnostics()
         monkeypatch.setattr(reml_ops_module, "optimize_direct_reml", real_direct)
         return info
 
@@ -3148,7 +3123,7 @@ class TestExactPresolve:
 
         monkeypatch.setattr(direct_module, "reml_laml_objective", recorded)
         model, X, y = _ten_penalty_poisson()
-        model.fit_reml(X, y, runtime_validation="skip")
+        model.fit_reml(X, y)
         self._fit_stall_gamma(monkeypatch)
         assert evaluations
         u = 2.0**-53
@@ -3183,7 +3158,7 @@ class TestExactPresolve:
 
         def fit():
             model, X, y = _ten_penalty_poisson()
-            return model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+            return model.fit_reml(X, y).reml_diagnostics()
 
         plain = fit()
         self._count_every_decrease_as_rounding(monkeypatch)
@@ -3295,7 +3270,7 @@ class TestExactPresolveScope:
                 interactions=[("x3", "g")],
                 **kwargs,
             )
-            return model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+            return model.fit_reml(X, y).reml_diagnostics()
 
         info = fit()
         assert len(info["lambdas"]) >= 8
@@ -3336,7 +3311,7 @@ class TestExactPresolveScope:
             return real_presolve(*args, **kw)
 
         monkeypatch.setattr(direct_module, "optimize_discrete_reml_cached_w", counted)
-        fitted = model().fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        fitted = model().fit_reml(X, y).reml_diagnostics()
         assert len(fitted["lambdas"]) >= 8
         assert presolves == []
 
@@ -3347,7 +3322,7 @@ class TestExactPresolveScope:
             return real_direct(*args, **kw)
 
         monkeypatch.setattr(reml_ops_module, "optimize_direct_reml", without_presolve)
-        plain = model().fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        plain = model().fit_reml(X, y).reml_diagnostics()
         assert fitted["lambdas"] == plain["lambdas"]
         assert fitted["objective"] == plain["objective"]
 
@@ -3400,7 +3375,7 @@ class TestExactPresolveScope:
             features=_ten_penalty_features(False),
             interactions=[("x3", "g")],
         )
-        info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+        info = model.fit_reml(X, y).reml_diagnostics()
         assert calls and all(presolve is False for presolve in calls)
         assert info["n_presolve_iter"] == 0
         assert "_nb_theta_search" not in vars(model)
@@ -3429,6 +3404,6 @@ class TestExactPresolveScope:
                 features=_ten_penalty_features(False),
                 interactions=[("x3", "g")],
             )
-            info = model.fit_reml(X, y, runtime_validation="skip").reml_diagnostics()
+            info = model.fit_reml(X, y).reml_diagnostics()
             routes.append(info["n_presolve_iter"] > 0)
         assert routes == [link == "log"] * 3

@@ -1,18 +1,11 @@
 """Optional REML iteration tracing written to a debug directory.
 
-An exact fit that starts from the cached-weights pre-solve runs that
-pre-solve untraced: the stream carries one ``step_decision`` event for it
-(channel ``reml``, purpose ``reml_presolve``: updates, objective, lambdas,
-wall time), and its REML evaluations start after it.  Such a fit has no
-bootstrap state in the stream either; its first candidate starts from the
-pre-solve's mode.  Where such a fit stops on a decrease within the
-evaluations' rounding, a ``step_decision`` event (purpose
-``reml_rounding_stall``: the decrease and its rounding bound) records that
-the last accepted trial was discarded.  A search that discards an accepted
-shorter step whose decrease no quadratic criterion rejecting the full step
-allows records the same, as a ``step_decision`` event of purpose
-``reml_inconsistent_decrease`` (the decrease, the trial's step and the
-predicted decrease).
+A cached-weights pre-solve runs untraced and appears as one ``step_decision``
+event (channel ``reml``, purpose ``reml_presolve``); the REML evaluations, with
+no bootstrap state, start after it.  A discarded accepted trial is recorded as
+a ``step_decision`` event of purpose ``reml_rounding_stall`` (decrease within
+rounding) or ``reml_inconsistent_decrease`` (decrease no quadratic criterion
+allows).
 """
 
 from __future__ import annotations
@@ -27,7 +20,7 @@ from typing import Any
 from superglm._fit_trace import SCHEMA_VERSION, JSONLTraceSink, TraceRun
 
 TraceRow = dict[str, Any]
-TRACE_SUFFIXES = ("reml", "pirls", "scop")
+TRACE_SUFFIXES = ("reml", "pirls")
 
 
 @dataclass
@@ -50,7 +43,6 @@ class REMLDebugRun:
     metadata: TraceRow
     reml_rows: list[TraceRow]
     pirls_rows: list[TraceRow]
-    scop_rows: list[TraceRow]
     events: list[TraceRow]
 
     def artifact_path(self, suffix: str) -> Path:
@@ -64,7 +56,6 @@ class REMLDebugRun:
             "run": self.artifact_path("run.json"),
             "reml": self.artifact_path("reml.jsonl"),
             "pirls": self.artifact_path("pirls.jsonl"),
-            "scop": self.artifact_path("scop.jsonl"),
         }
 
     @property
@@ -234,7 +225,6 @@ def load_reml_debug_run(base_dir: Path, run_id: str) -> REMLDebugRun:
         metadata=_load_json(run_path),
         reml_rows=_compatibility_rows(channel_rows["reml"]),
         pirls_rows=_compatibility_rows(channel_rows["pirls"]),
-        scop_rows=_compatibility_rows(channel_rows["scop"]),
         events=events,
     )
 
@@ -265,9 +255,6 @@ def summarize_reml_debug_run(run: REMLDebugRun) -> TraceRow:
         for row in run.reml_rows
         if row.get("lambda_max_delta") is not None
     ]
-    scop_step_norms = [
-        float(row["step_norm"]) for row in run.scop_rows if row.get("step_norm") is not None
-    ]
     final_phase_rows = [
         row
         for row in run.pirls_rows
@@ -288,7 +275,6 @@ def summarize_reml_debug_run(run: REMLDebugRun) -> TraceRow:
         "n_groups": _int_or_none(run.metadata.get("n_groups")),
         "has_constraints": bool(run.metadata.get("has_constraints", False)),
         "has_qp_constraints": bool(run.metadata.get("has_qp_constraints", False)),
-        "has_scop_constraints": bool(run.metadata.get("has_scop_constraints", False)),
         "reml_iterations": _int_or_none(reml_last.get("iteration")) or 0,
         "final_objective_before": _float_or_none(reml_last.get("objective_before")),
         "final_objective_after": _float_or_none(reml_last.get("objective_after")),
@@ -298,13 +284,8 @@ def summarize_reml_debug_run(run: REMLDebugRun) -> TraceRow:
         "plateau_converged": bool(reml_last.get("plateau_converged", False)),
         "n_reml_rows": len(run.reml_rows),
         "n_pirls_rows": len(run.pirls_rows),
-        "n_scop_rows": len(run.scop_rows),
         "final_pirls_iteration": _int_or_none(final_pirls_row.get("iteration")),
         "final_pirls_deviance": _float_or_none(final_pirls_row.get("deviance")),
-        "max_scop_step_norm": max(scop_step_norms) if scop_step_norms else None,
-        "scop_fisher_fallbacks": sum(
-            bool(row.get("used_fisher_fallback", False)) for row in run.scop_rows
-        ),
         "final_lambdas_json": json.dumps(final_lambdas, sort_keys=True),
         "estimated_names_json": json.dumps(reml_last.get("estimated_names", [])),
     }

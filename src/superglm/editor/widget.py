@@ -23,7 +23,7 @@ from typing import Any, Literal
 import numpy as np
 
 from superglm.editor import metrics as metrics_module
-from superglm.editor import persistence, rating_preview
+from superglm.editor import persistence, rating_preview, staging
 from superglm.editor.apply import materialize_edit_request
 from superglm.editor.cv import (
     FINAL_NOT_RUN,
@@ -697,22 +697,6 @@ class EditorWidget:
                 return _superseded_payload(revision, request_sequence)
         return payload
 
-    def _save_model(
-        self,
-        *,
-        directory: str | None = None,
-        filename: str | None = None,
-        path: str | None = None,
-    ) -> dict[str, Any]:
-        payload = self._export_file(
-            "joblib",
-            directory="." if directory is None else directory,
-            filename=filename,
-            path=path,
-        )
-        payload["message"] = f"Saved edited model to {payload['path']}"
-        return payload
-
     def _export_bytes(self, format: str, filename: str | None = None) -> ExportResult:
         """Build one validated export from one captured model revision."""
         canonical_format = _normalise_export_format(format)
@@ -1223,126 +1207,6 @@ class EditorWidget:
                 level_display=level_display,
             )
 
-    def _collapse_levels(
-        self,
-        term: str | None = None,
-        method: str = "auto",
-        *,
-        level_display: str = "expanded",
-        keep_reference: bool = True,
-    ) -> dict[str, Any]:
-        return self._structural_step(
-            "collapse_levels",
-            lambda target: self.session.replace_with_collapsed_levels(
-                target, method=method, keep_reference=keep_reference
-            ),
-            term=term,
-            level_display=level_display,
-        )
-
-    def _ungroup_levels(
-        self,
-        term: str | None = None,
-        method: str = "auto",
-        *,
-        level_display: str = "expanded",
-        keep_reference: bool = True,
-    ) -> dict[str, Any]:
-        return self._structural_step(
-            "ungroup_levels",
-            lambda target: self.session.replace_with_ungrouped_levels(
-                target, method=method, keep_reference=keep_reference
-            ),
-            term=term,
-            level_display=level_display,
-        )
-
-    def _set_reference(
-        self,
-        term: str,
-        level: str,
-        method: str = "auto",
-        *,
-        level_display: str = "expanded",
-    ) -> dict[str, Any]:
-        return self._structural_step(
-            "set_reference",
-            lambda target: self.session.replace_with_reference_level(target, level, method=method),
-            term=term,
-            level_display=level_display,
-        )
-
-    def _special_levels(
-        self,
-        term: str,
-        levels: list[str],
-        *,
-        special: bool = True,
-        method: str = "auto",
-        level_display: str = "expanded",
-    ) -> dict[str, Any]:
-        """Take levels off an ordered term's curve, or put them back, and refit at once."""
-        return self._structural_step(
-            "special_levels" if special else "on_curve_levels",
-            lambda target: self.session.replace_with_special_levels(
-                target, levels, special=special, method=method
-            ),
-            term=term,
-            level_display=level_display,
-        )
-
-    def _knots(
-        self,
-        term: str,
-        params: dict[str, Any],
-        *,
-        method: str = "auto",
-        level_display: str = "expanded",
-    ) -> dict[str, Any]:
-        """Change a spline term's knots and refit at once."""
-        return self._structural_step(
-            "set_knots",
-            lambda target: self.session.replace_with_knots(target, params, method=method),
-            term=term,
-            level_display=level_display,
-        )
-
-    def _basis(
-        self,
-        term: str,
-        params: dict[str, Any],
-        *,
-        method: str = "auto",
-        level_display: str = "expanded",
-    ) -> dict[str, Any]:
-        """Change a spline term's kind or shrinkage and refit at once."""
-        return self._structural_step(
-            "set_basis",
-            lambda target: self.session.replace_with_basis(target, params, method=method),
-            term=term,
-            level_display=level_display,
-        )
-
-    def _shape_range(
-        self,
-        term: str,
-        *,
-        lo: str | float,
-        hi: str | float,
-        degree: int,
-        join: str = "tangent",
-        method: str = "auto",
-        level_display: str = "expanded",
-    ) -> dict[str, Any]:
-        return self._structural_step(
-            "shape_range",
-            lambda target: self.session.replace_with_shaped_range(
-                target, lo=lo, hi=hi, degree=degree, join=join, method=method
-            ),
-            term=term,
-            level_display=level_display,
-        )
-
     def _stage(
         self,
         operation: str,
@@ -1351,12 +1215,25 @@ class EditorWidget:
         *,
         keep_reference: bool = True,
         level_display: str = "expanded",
+        refit: bool = False,
     ) -> dict[str, Any]:
         """Stage one structural change and return its transition envelope.
 
         Nothing is fitted, so the model revision, its evidence and any
         fixed-offset refit all stand; only the chart redraws what waits.
+        With ``refit``, as Settings' "Refit after every structural change"
+        asks, the change is staged and every waiting change refitted at once:
+        one step, which one Undo takes back.
         """
+        if refit:
+            return self._structural_step(
+                staging._REFIT_AT_ONCE.get(operation, operation),
+                lambda target: staging.stage_and_refit(
+                    self.session, operation, target, params, keep_reference=keep_reference
+                ),
+                term=term,
+                level_display=level_display,
+            )
         level_display = validate_level_display(level_display)
         with self._lock:
             operation_start = time.perf_counter()

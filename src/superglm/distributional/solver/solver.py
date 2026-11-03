@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 
 import superglm.distributional.solver.certificate as rank_certificate
 import superglm.distributional.solver.chunks as chunking
+from superglm._roundoff import gamma
 from superglm.distributional.family import (
     DistributionalFamily,
     ExpectedInformationFamily,
@@ -32,6 +33,7 @@ from superglm.distributional.results.endpoint_evidence import (
 from superglm.distributional.results.solver import (
     DenseSolverConfig,
     DenseSolverResult,
+    RetainedCoordinates,
     SolverIteration,
     _newton_decrement_is_certified,
     _resolution_limited_decrement_is_within_objective_ulp,
@@ -108,6 +110,9 @@ class _SolverContext:
     dense_matrices: tuple[NDArray[np.float64], ...] | None
     coefficient_face: PenaltyFace | None
     likelihood_cache: _LikelihoodCache | None = None
+    # Set only for the reduced fit after a rank-deficient terminal decision:
+    # Newton steps then move the representative's retained coefficients alone.
+    retained: RetainedCoordinates | None = None
     # The penalty's nonzero entries in row-major order. Derived, never passed:
     # __post_init__ rebuilds them with every context, including one that
     # dataclasses.replace derives with a new penalty.
@@ -785,10 +790,16 @@ def _relative_score(score: NDArray, objective: float) -> float:
     return float(np.linalg.norm(score, ord=np.inf) / (1.0 + abs(objective)))
 
 
+def _subspace(context: _SolverContext) -> PenaltyFace | RetainedCoordinates | None:
+    """The coordinates Newton steps move: a penalty face, or a representative's retained ones."""
+    return context.coefficient_face if context.retained is None else context.retained
+
+
 def _optimization_score(context: _SolverContext, score: NDArray) -> NDArray[np.float64]:
-    if context.coefficient_face is None:
+    subspace = _subspace(context)
+    if subspace is None:
         return np.asarray(score, dtype=np.float64)
-    return context.coefficient_face.reduce_vector(score)
+    return subspace.reduce_vector(score)
 
 
 def _optimization_score_relative(
@@ -852,7 +863,7 @@ def _objective_and_step_is_certified(
             score=certificate_geometry.score_penalized,
             penalized_curvature=certificate_geometry.penalized_curvature,
             penalized_objective=state.penalized_optimizing_log_likelihood,
-            face=context.coefficient_face,
+            face=_subspace(context),
             tolerance=config.tolerance,
         ),
         observed_geometry,
@@ -866,6 +877,35 @@ def _policy_curvature(
     if context.coefficient_face is None:
         return np.asarray(matrix, dtype=np.float64)
     return context.coefficient_face.reduce_matrix(matrix)
+
+
+def _solve_residual(
+    system: NDArray,
+    step: NDArray,
+    score: NDArray,
+    decomposition: RankDecomposition,
+    tolerance: float,
+) -> float:
+    """The solve's relative residual ``||H s - g|| / max(1, ||g||)``, or its backward error.
+
+    A backward-stable solve leaves a residual of about ``u ||H|| ||s||``,
+    which exceeds any fixed fraction of ``||g||`` once ``||H|| ||s|| >> ||g||``,
+    as for a column far from zero beside an intercept. An untruncated solve that misses
+    ``tolerance`` on the relative test is read by its normwise backward error
+    ``||r|| / (||H|| ||s|| + ||g||)`` instead (Rigal and Gaches, *J. ACM* 14,
+    1967; Higham 2002, Thm 7.1): the relative perturbation of ``H`` and ``g``
+    it solves exactly, with ``||H||_2`` taken at its largest column norm, a
+    lower bound. A truncated solve keeps the relative test, since its
+    residual also holds the score outside the retained range.
+    """
+    residual = float(np.linalg.norm(system @ step - score))
+    score_norm = float(np.linalg.norm(score))
+    relative = residual / max(1.0, score_norm)
+    if relative <= tolerance or decomposition.rank_truncated or not np.isfinite(relative):
+        return relative
+    curvature_norm = float(np.max(np.linalg.norm(system, axis=0), initial=0.0))
+    scale = curvature_norm * float(np.linalg.norm(step)) + score_norm
+    return residual / scale if scale > 0.0 else relative
 
 
 def _solve_direction(
@@ -891,8 +931,8 @@ def _solve_direction(
         )
         if decomposition is not None:
             step = decomposition.solve(score)
-            residual = float(
-                np.linalg.norm(matrix @ step - score) / max(1.0, float(np.linalg.norm(score)))
+            residual = _solve_residual(
+                matrix, step, score, decomposition, config.residual_tolerance
             )
             directional_derivative = float(score @ step)
             ascent_floor = (
@@ -924,9 +964,7 @@ def _solve_direction(
             continue
         if not np.all(np.isfinite(step)):
             continue
-        residual = float(
-            np.linalg.norm(system @ step - score) / max(1.0, float(np.linalg.norm(score)))
-        )
+        residual = _solve_residual(system, step, score, decomposition, config.residual_tolerance)
         directional_derivative = float(score @ step)
         ascent_floor = (
             np.finfo(float).eps * float(np.linalg.norm(score)) * float(np.linalg.norm(step))
@@ -947,7 +985,7 @@ def _solve_coefficient_direction(
     score: NDArray,
     config: DenseSolverConfig,
 ) -> _Direction:
-    face = context.coefficient_face
+    face = _subspace(context)
     if face is None:
         return _solve_direction(matrix, score, config)
     reduced = _solve_direction(
@@ -1076,7 +1114,7 @@ def _run_iterations(
                 coefficients=state.coefficients,
                 score=geometry.score_penalized,
                 penalized_curvature=geometry.penalized_curvature,
-                face=context.coefficient_face,
+                face=_subspace(context),
                 objective=state.penalized_optimizing_log_likelihood,
                 tolerance=config.tolerance,
             )
@@ -1512,6 +1550,146 @@ def _certified_terminal_curvature(
         return replace(curvature, telemetry=replace(curvature.telemetry, certified=False))
 
 
+# R's lm.fit and qr tolerance for a linear dependency among a design's columns.
+_DESIGN_DEPENDENCY_TOLERANCE = 1e-7
+
+
+def _drops_design_aliases(layout: StackedLayout, rank: RankDecomposition) -> bool:
+    """Whether every direction ``rank`` drops is a near-dependency of the design itself.
+
+    ``X N ~ 0`` is an alias; a direction only the weights flatten is a likelihood boundary
+    (Lesaffre and Marx 1993). ``rho = ||X N|| / ||C N||`` on unit columns (Belsley, Kuh and
+    Welsch 1980) centred beside an intercept (Marquardt and Snee 1975), so no unit, origin
+    or response decides. The span is one when ``rho <= 1e-7`` on all of it, R's ``lm.fit``
+    and ``qr`` tolerance for a linear dependency, or when ``X N`` is rounding, ``2 k
+    gamma_k`` of the uncentred norms (a constant column, 0 / 0 centred). A centred square
+    within its cancellation, ``3 gamma_{n+2} sum x^2`` (Chan, Golub and LeVeque 1983),
+    counts as zero, which can only refuse an alias. Columns are scaled to unit maximum (the
+    test is basis-free); a non-finite span is not an alias.
+    """
+    null = rank.null_basis()
+    null = null / np.max(np.abs(null), axis=0)
+    width = null.shape[1]
+    design_gram = np.zeros((width, width))
+    scale_gram = np.zeros((width, width))
+    rounding_gram = np.zeros((width, width))
+    for state in layout.predictors:
+        local = null[state.coefficient_slice]
+        if not np.any(local):
+            continue
+        design = state.design
+        squared = np.concatenate(
+            [np.diag(group.gram(np.ones(design.n))) for group in design.group_matrices] or [[]]
+        )
+        intercept = state.intercept_index is not None
+        if intercept:
+            squared = np.concatenate(([float(design.n)], squared))
+        slopes = local[int(intercept) :]
+        for column in range(width):
+            projected = np.full(design.n, local[0, column] if intercept else 0.0)
+            if design.p:
+                projected += design.matvec(slopes[:, column])
+            back = design.rmatvec(projected) if design.p else np.empty(0)
+            if intercept:
+                back = np.concatenate(([projected.sum()], back))
+            design_gram[:, column] += local.T @ back
+        rounding_gram += local.T @ (squared[:, None] * local)
+        if intercept:
+            means = design.rmatvec(np.ones(design.n)) / design.n if design.p else squared[1:]
+            centred = squared[1:] - design.n * means**2
+            centred[centred <= 3.0 * gamma(design.n + 2) * squared[1:]] = 0.0
+            squared[1:] = centred
+            local = np.vstack((local[:1] + means @ slopes, slopes))
+        scale_gram += local.T @ (squared[:, None] * local)
+    resolution = (2.0 * null.shape[0] * gamma(null.shape[0])) ** 2
+    difference = (
+        0.5 * (design_gram + design_gram.T)
+        - _DESIGN_DEPENDENCY_TOLERANCE**2 * scale_gram
+        - resolution * rounding_gram
+    )
+    return bool(np.all(np.isfinite(difference)) and np.linalg.eigvalsh(difference)[-1] <= 0.0)
+
+
+def _column_spread(layout: StackedLayout, index: int) -> float:
+    """Root-mean-square of coefficient ``index``'s column, about its mean beside an intercept.
+
+    A column constant to within its centred square's cancellation, ``3 gamma_{n+2}``
+    of its square (Chan, Golub and LeVeque 1983), the intercept's included, is read
+    about zero, as the design test reads it.
+    """
+    state = next(s for s in layout.predictors if index < s.coefficient_slice.stop)
+    local = index - state.coefficient_slice.start - (state.intercept_index is not None)
+    if local < 0:
+        return 1.0
+    unit = np.zeros(state.design.p)
+    unit[local] = 1.0
+    column = state.design.matvec(unit)
+    squared = float(column @ column)
+    centred = float(np.sum((column - column.mean()) ** 2))
+    if state.intercept_index is None or centred <= 3.0 * gamma(state.design.n + 2) * squared:
+        centred = squared
+    return float(np.sqrt(centred / state.design.n))
+
+
+def _reduced_fit_is_stationary(
+    run: _OptimizationRun,
+    retained: RetainedCoordinates,
+    rank: RankDecomposition,
+    layout: StackedLayout,
+    config: DenseSolverConfig,
+) -> bool:
+    """Whether a fit on the retained coefficients is also stationary for the full problem.
+
+    The optimum under ``beta_J = 0`` is the full problem's when that constraint's
+    multiplier vanishes (Lawson and Hanson 1974, ch. 23), read net of the retained
+    score, ``d = N_J^-T N'g`` with ``N`` the dropped null basis: ``X N`` and ``S N``
+    vanish for an alias, so ``d`` is rounding. Each ``d_j`` is read per unit of its
+    column's RMS spread, centred beside an intercept as the design test centres it: a
+    relative gradient (Dennis and Schnabel 1983, sec. 7.2), so no unit or origin decides.
+    """
+    if not run.converged:
+        return False
+    null = rank.null_basis()
+    null = null / np.max(np.abs(null), axis=0)
+    score = np.asarray(run.geometry.score_penalized, dtype=np.float64)
+    try:
+        multiplier = np.linalg.solve(null[retained.dropped].T, null.T @ score)
+    except np.linalg.LinAlgError:
+        return False
+    spread = np.array([_column_spread(layout, int(j)) for j in np.flatnonzero(retained.dropped)])
+    multiplier = np.divide(multiplier, spread, out=multiplier, where=spread > 0.0)
+    objective = run.state.penalized_optimizing_log_likelihood
+    return _relative_score(multiplier, objective) <= config.tolerance
+
+
+def _representative_state(
+    context: _SolverContext,
+    state: _AcceptedState,
+    rank: RankDecomposition,
+    retained: RetainedCoordinates,
+    phase_recorder: FitPhaseRecorder | None,
+) -> _AcceptedState | None:
+    """The terminal state projected onto its certified representative: the reduced fit's start.
+
+    Newton steps decide their rank uncertified and can leave ``beta``
+    anywhere along the null space the terminal decision drops. The
+    representative is ``beta - N N_J^-1 beta_J``, ``N`` the null basis of
+    the penalized curvature: ``beta_J = 0``, and an exact alias's predictors
+    and penalty move by rounding alone, so it is already the reduced
+    optimum. ``None`` when ``N_J`` is singular or the likelihood there is
+    not finite.
+    """
+    dropped = retained.dropped
+    null = rank.null_basis()
+    try:
+        along = np.linalg.solve(null[dropped], state.coefficients[dropped])
+    except np.linalg.LinAlgError:
+        return None
+    coefficients = state.coefficients - null @ along
+    coefficients[dropped] = 0.0
+    return _evaluate_state(context, coefficients, phase_recorder=phase_recorder)
+
+
 def _fit_dense_fixed_lambda_core(
     family: DistributionalFamily,
     layout: StackedLayout,
@@ -1629,7 +1807,6 @@ def _fit_dense_fixed_lambda_core(
     objective_relative_change = run.objective_relative_change
     step_relative = run.step_relative
     observed_geometry = run.observed_geometry
-    del run
 
     def adopt(run: _OptimizationRun) -> None:
         nonlocal state, coefficient_geometry, converged, reason, score_relative
@@ -1643,10 +1820,17 @@ def _fit_dense_fixed_lambda_core(
         objective_relative_change = run.objective_relative_change
         step_relative = run.step_relative
 
-    if converged and _wall_step_unsettled(context, state, coefficient_geometry, solver_config):
+    def settled(
+        run_context: _SolverContext, stopped: _OptimizationRun, start_iteration: int
+    ) -> _OptimizationRun | None:
         # Continue a fit stopped with a row still moving towards a wall, at a
         # hundredth of the tolerance: a pressed fit keeps moving, an interior one
         # settles. Only a continuation that converges replaces the stop.
+        if not (
+            stopped.converged
+            and _wall_step_unsettled(run_context, stopped.state, stopped.geometry, solver_config)
+        ):
+            return None
         continuation_config = replace(
             solver_config,
             max_iterations=solver_config.terminal_retry_iterations,
@@ -1656,183 +1840,250 @@ def _fit_dense_fixed_lambda_core(
             # timed with the terminal retry, so a fit that runs both records the phase twice
             with measure_phase(phase_recorder, "terminal_observed_retry_fallback"):
                 continued = _run_iterations(
-                    context,
-                    state,
+                    run_context,
+                    stopped.state,
                     continuation_config,
-                    initial_geometry=(coefficient_geometry if state.derivatives is None else None),
+                    initial_geometry=(
+                        stopped.geometry if stopped.state.derivatives is None else None
+                    ),
                     stop_policy=stop_policy,
-                    start_iteration=len(history),
+                    start_iteration=start_iteration,
                     phase_recorder=phase_recorder,
                 )
         except DenseSolverError:
-            continued = None
-        if continued is not None and continued.converged:
-            adopt(continued)
-            observed_geometry = continued.observed_geometry
-        del continued
+            return None
+        return continued if continued.converged else None
+
+    continued = settled(context, run, len(history))
+    del run
+    if continued is not None:
+        adopt(continued)
+        observed_geometry = continued.observed_geometry
+    del continued
 
     with measure_phase(phase_recorder, "terminal_observed_retry_fallback"):
-        observed_geometry = _geometry_from(
-            context,
-            state,
-            "observed",
-            solver_config,
-            coefficient_geometry,
-            observed_geometry,
-            phase_recorder,
-        )
-        fisher_available = context.fisher_family is not None
-        requested_terminal_curvature = observed_geometry.penalized_curvature
-        terminal_fisher_geometry: DenseJointGeometry | None = None
-        # Filled only if the policy asks for its last fallback.
-        terminal_semidefinite_geometry: list[DenseJointGeometry] = []
-        if context.coefficient_face is not None and context.coefficient_face.reduced_width == 0:
-            empty_matrix = _readonly(np.zeros((0, 0), dtype=np.float64))
-            empty_rank = decompose_gram(empty_matrix)
-            curvature = CurvatureDecision(
-                matrix=empty_matrix,
-                decomposition=empty_rank,
-                telemetry=CurvatureTelemetry(
-                    requested_source="observed",
-                    actual_source="observed",
-                    reason=None,
-                    minimum_eigenvalue=0.0,
-                    rank=0,
-                    condition_estimate=None,
-                    fallback_count=0,
-                    matrix_kind="penalized",
-                ),
-                retry_required=False,
-                state=CurvaturePolicyState(),
-            )
-        else:
-            curvature = resolve_curvature(
+        # The stopped state's decision, and after a rank-deficient one the reduced fit's.
+        reduced: RetainedCoordinates | None = None
+        iteration_context = context
+        while True:
+            observed_geometry = _geometry_from(
+                context,
+                state,
                 "observed",
-                _policy_curvature(context, requested_terminal_curvature),
-                state=CurvaturePolicyState(),
-                matrix_kind="penalized",
-            )
-        if curvature.retry_required:
-            retry_tolerance = max(
-                solver_config.tolerance * solver_config.terminal_retry_tolerance_factor,
-                10.0 * np.finfo(np.float64).eps,
-            )
-            retry_config = replace(
                 solver_config,
-                max_iterations=solver_config.terminal_retry_iterations,
-                tolerance=retry_tolerance,
+                coefficient_geometry,
+                observed_geometry,
+                phase_recorder,
             )
-            try:
-                retry = _run_iterations(
-                    context,
-                    state,
-                    retry_config,
-                    initial_geometry=(coefficient_geometry if state.derivatives is None else None),
+            fisher_available = context.fisher_family is not None
+            requested_terminal_curvature = observed_geometry.penalized_curvature
+            terminal_fisher_geometry: DenseJointGeometry | None = None
+            # Filled only if the policy asks for its last fallback.
+            terminal_semidefinite_geometry: list[DenseJointGeometry] = []
+            if context.coefficient_face is not None and context.coefficient_face.reduced_width == 0:
+                empty_matrix = _readonly(np.zeros((0, 0), dtype=np.float64))
+                empty_rank = decompose_gram(empty_matrix)
+                curvature = CurvatureDecision(
+                    matrix=empty_matrix,
+                    decomposition=empty_rank,
+                    telemetry=CurvatureTelemetry(
+                        requested_source="observed",
+                        actual_source="observed",
+                        reason=None,
+                        minimum_eigenvalue=0.0,
+                        rank=0,
+                        condition_estimate=None,
+                        fallback_count=0,
+                        matrix_kind="penalized",
+                    ),
+                    retry_required=False,
+                    state=CurvaturePolicyState(),
+                )
+            else:
+                curvature = resolve_curvature(
+                    "observed",
+                    _policy_curvature(context, requested_terminal_curvature),
+                    state=CurvaturePolicyState(),
+                    matrix_kind="penalized",
+                )
+            if curvature.retry_required:
+                retry_tolerance = max(
+                    solver_config.tolerance * solver_config.terminal_retry_tolerance_factor,
+                    10.0 * np.finfo(np.float64).eps,
+                )
+                retry_config = replace(
+                    solver_config,
+                    max_iterations=solver_config.terminal_retry_iterations,
+                    tolerance=retry_tolerance,
+                )
+                try:
+                    retry = _run_iterations(
+                        iteration_context,
+                        state,
+                        retry_config,
+                        initial_geometry=(
+                            coefficient_geometry if state.derivatives is None else None
+                        ),
+                        stop_policy=stop_policy,
+                        start_iteration=len(history),
+                        phase_recorder=phase_recorder,
+                    )
+                except DenseSolverError:
+                    # The mandatory tighter attempt has still occurred.  Preserve the
+                    # accepted state and let the explicit curvature policy record the
+                    # Fisher fallback rather than relabeling a failed solve as success.
+                    retry = None
+                if retry is not None and retry.reason == "no_ascent_direction":
+                    # A retry that ran out of ascent directions is a failed solve
+                    # too, handled as one: the main run's state and verdict stand.
+                    retry = None
+                if retry is not None:
+                    adopt(retry)
+                    observed_geometry = _geometry_from(
+                        context,
+                        state,
+                        "observed",
+                        retry_config,
+                        coefficient_geometry,
+                        retry.observed_geometry,
+                        phase_recorder,
+                    )
+                    del retry
+                fisher_matrix = None
+                # A dense reused endpoint (or failed retry) carries no row derivatives,
+                # so evaluate it once more at the same coefficients for row geometry.
+                fallback_state = state
+                if context.chunk_size is None and state.derivatives is None:
+                    evaluated = _evaluate_state(
+                        context,
+                        state.coefficients,
+                        phase_recorder=phase_recorder,
+                    )
+                    if evaluated is not None:
+                        fallback_state = evaluated
+                if fisher_available:
+                    try:
+                        fisher_geometry = _geometry_from(
+                            context,
+                            fallback_state,
+                            "fisher",
+                            retry_config,
+                            coefficient_geometry,
+                            None,
+                            phase_recorder,
+                        )
+                    except (_NumericalEvaluationError, FloatingPointError, OverflowError):
+                        # Expected information the family cannot represent at this
+                        # state is no fallback; the semidefinite one below is.
+                        fisher_geometry = None
+                    if fisher_geometry is not None:
+                        terminal_fisher_geometry = fisher_geometry
+                        fisher_matrix = fisher_geometry.penalized_curvature
+
+                def _nearest_semidefinite() -> NDArray[np.float64]:
+                    geometry = _measured_geometry(
+                        context,
+                        fallback_state,
+                        "nearest_semidefinite",
+                        phase_recorder,
+                    )
+                    terminal_semidefinite_geometry.append(geometry)
+                    return _policy_curvature(context, geometry.penalized_curvature)
+
+                requested_terminal_curvature = observed_geometry.penalized_curvature
+                curvature = resolve_curvature(
+                    "observed",
+                    _policy_curvature(context, requested_terminal_curvature),
+                    fisher_matrix=(
+                        None if fisher_matrix is None else _policy_curvature(context, fisher_matrix)
+                    ),
+                    semidefinite_fallback=_nearest_semidefinite,
+                    state=curvature.state,
+                    matrix_kind="penalized",
+                )
+            if (
+                curvature.retry_required
+                or curvature.matrix is None
+                or curvature.decomposition is None
+            ):
+                raise RuntimeError("terminal curvature policy did not reach an accepted result")
+
+            if curvature.telemetry.actual_source == "fisher":
+                if terminal_fisher_geometry is None:
+                    raise RuntimeError("Fisher fallback is missing its full curvature geometry")
+                accepted_geometry = terminal_fisher_geometry
+            elif curvature.telemetry.actual_source == "nearest_semidefinite":
+                accepted_geometry = terminal_semidefinite_geometry[0]
+            else:
+                accepted_geometry = observed_geometry
+            if not (
+                context.coefficient_face is not None and context.coefficient_face.reduced_width == 0
+            ):
+                curvature = _certified_terminal_curvature(
+                    context, state, curvature, accepted_geometry, phase_recorder
+                )
+            decomposition = curvature.decomposition
+            if decomposition is None:  # the certificate keeps an accepted decomposition
+                raise RuntimeError("terminal rank certificate lost the accepted decomposition")
+            terminal_data_curvature = np.asarray(
+                accepted_geometry.data_curvature,
+                dtype=np.float64,
+            )
+            terminal_penalized_curvature = np.asarray(
+                accepted_geometry.penalized_curvature,
+                dtype=np.float64,
+            )
+            if reduced is not None or context.coefficient_face is not None:
+                break
+            # Coefficients the design aliases are dropped (Wood, Pya and Saefken 2016,
+            # sec. 3.1.2). A direction only the weights flatten keeps its state.
+            reduced = RetainedCoordinates.of(decomposition)
+            if (
+                reduced is None
+                or not np.any(state.coefficients[reduced.dropped])
+                or not _drops_design_aliases(context.layout, decomposition)
+            ):
+                reduced = None
+                break
+            # Repeat the Newton iteration to convergence on the retained coefficients,
+            # then decide the curvature at its end.
+            start = _representative_state(context, state, decomposition, reduced, phase_recorder)
+            if start is None:
+                converged, reason = False, "rank_reduced_at_stop"
+                break
+            iteration_context = replace(context, retained=reduced)
+            reduced_runs = [
+                _run_iterations(
+                    iteration_context,
+                    start,
+                    solver_config,
                     stop_policy=stop_policy,
                     start_iteration=len(history),
                     phase_recorder=phase_recorder,
                 )
-            except DenseSolverError:
-                # The mandatory tighter attempt has still occurred.  Preserve the
-                # accepted state and let the explicit curvature policy record the
-                # Fisher fallback rather than relabeling a failed solve as success.
-                retry = None
-            if retry is not None and retry.reason == "no_ascent_direction":
-                # A retry that ran out of ascent directions is a failed solve
-                # too, handled as one: the main run's state and verdict stand.
-                retry = None
-            if retry is not None:
-                adopt(retry)
-                observed_geometry = _geometry_from(
-                    context,
-                    state,
-                    "observed",
-                    retry_config,
-                    coefficient_geometry,
-                    retry.observed_geometry,
-                    phase_recorder,
-                )
-                del retry
-            fisher_matrix = None
-            # A dense reused endpoint (or failed retry) carries no row derivatives,
-            # so evaluate it once more at the same coefficients for row geometry.
-            fallback_state = state
-            if context.chunk_size is None and state.derivatives is None:
-                evaluated = _evaluate_state(
-                    context,
-                    state.coefficients,
-                    phase_recorder=phase_recorder,
-                )
-                if evaluated is not None:
-                    fallback_state = evaluated
-            if fisher_available:
-                try:
-                    fisher_geometry = _geometry_from(
-                        context,
-                        fallback_state,
-                        "fisher",
-                        retry_config,
-                        coefficient_geometry,
-                        None,
-                        phase_recorder,
-                    )
-                except (_NumericalEvaluationError, FloatingPointError, OverflowError):
-                    # Expected information the family cannot represent at this
-                    # state is no fallback; the semidefinite one below is.
-                    fisher_geometry = None
-                if fisher_geometry is not None:
-                    terminal_fisher_geometry = fisher_geometry
-                    fisher_matrix = fisher_geometry.penalized_curvature
-
-            def _nearest_semidefinite() -> NDArray[np.float64]:
-                geometry = _measured_geometry(
-                    context,
-                    fallback_state,
-                    "nearest_semidefinite",
-                    phase_recorder,
-                )
-                terminal_semidefinite_geometry.append(geometry)
-                return _policy_curvature(context, geometry.penalized_curvature)
-
-            requested_terminal_curvature = observed_geometry.penalized_curvature
-            curvature = resolve_curvature(
-                "observed",
-                _policy_curvature(context, requested_terminal_curvature),
-                fisher_matrix=(
-                    None if fisher_matrix is None else _policy_curvature(context, fisher_matrix)
-                ),
-                semidefinite_fallback=_nearest_semidefinite,
-                state=curvature.state,
-                matrix_kind="penalized",
+            ]
+            continued = settled(
+                iteration_context, reduced_runs[0], len(history) + len(reduced_runs[0].history)
             )
-        if curvature.retry_required or curvature.matrix is None or curvature.decomposition is None:
-            raise RuntimeError("terminal curvature policy did not reach an accepted result")
-
-        if curvature.telemetry.actual_source == "fisher":
-            if terminal_fisher_geometry is None:
-                raise RuntimeError("Fisher fallback is missing its full curvature geometry")
-            accepted_geometry = terminal_fisher_geometry
-        elif curvature.telemetry.actual_source == "nearest_semidefinite":
-            accepted_geometry = terminal_semidefinite_geometry[0]
-        else:
-            accepted_geometry = observed_geometry
-        if not (
-            context.coefficient_face is not None and context.coefficient_face.reduced_width == 0
+            if continued is not None:
+                reduced_runs.append(continued)
+            if not _reduced_fit_is_stationary(
+                reduced_runs[-1], reduced, decomposition, context.layout, solver_config
+            ):
+                # The data resolve a dropped direction: the stopped state and its decision stand.
+                reduced = None
+                break
+            for reduced_run in reduced_runs:
+                adopt(reduced_run)
+            observed_geometry = reduced_runs[-1].observed_geometry
+            del reduced_runs, continued
+        # The reduced fit's stop holds on the coefficients it moved, and the rank
+        # certified at its end must keep exactly those.
+        aliases = decomposition.structural_aliases
+        if reduced is not None and (
+            aliases is None or not np.array_equal(aliases, reduced.dropped)
         ):
-            curvature = _certified_terminal_curvature(
-                context, state, curvature, accepted_geometry, phase_recorder
-            )
-        decomposition = curvature.decomposition
-        if decomposition is None:  # the certificate keeps an accepted decomposition
-            raise RuntimeError("terminal rank certificate lost the accepted decomposition")
-        terminal_data_curvature = np.asarray(
-            accepted_geometry.data_curvature,
-            dtype=np.float64,
-        )
-        terminal_penalized_curvature = np.asarray(
-            accepted_geometry.penalized_curvature,
-            dtype=np.float64,
-        )
+            converged, reason = False, "rank_reduced_at_stop"
         if context.coefficient_face is None:
             terminal_rank = decomposition
             terminal_reduced_rank = None
@@ -1841,21 +2092,19 @@ def _fit_dense_fixed_lambda_core(
             terminal_reduced_rank = decomposition
             terminal_rank = face.lift_rank_decomposition(terminal_reduced_rank)
         terminal_score_geometry = observed_geometry
-        penalty_value = _half_penalty_quadratic(
-            context.penalty, state.coefficients, context.penalty_entries
-        )
-        if context.chunk_size is None:
-            if state.eta is None or state.theta is None:
-                raise RuntimeError("dense terminal state is missing predictor values")
-            terminal_eta = state.eta
-            terminal_theta = state.theta
-        else:
-            with measure_phase(phase_recorder, "likelihood_evaluation"):
-                terminal_eta, terminal_theta = chunking.materialize_terminal_predictions(
-                    context.layout,
-                    state.coefficients,
-                    chunk_size=context.chunk_size,
-                )
+        # A certified rank that dropped a retained direction; an uncertified band that
+        # kept every direction is left to the validator below.
+        if (
+            reason == "resolution_limited_stationarity"
+            and context.coefficient_face is not None
+            and terminal_reduced_rank is not None
+            and (
+                terminal_reduced_rank.rank < context.coefficient_face.reduced_width
+                or terminal_reduced_rank.rank_truncated
+            )
+        ):
+            converged = False
+            reason = "rank_reduced_at_stop"
         if reason == "resolution_limited_stationarity":
             try:
                 _validate_resolution_limited_stationarity(
@@ -1871,6 +2120,18 @@ def _fit_dense_fixed_lambda_core(
             except ValueError:
                 converged = False
                 reason = "line_search_failed"
+
+        if context.chunk_size is None:
+            if state.eta is None or state.theta is None:
+                raise RuntimeError("dense terminal state is missing predictor values")
+            terminal_eta, terminal_theta = state.eta, state.theta
+        else:
+            with measure_phase(phase_recorder, "likelihood_evaluation"):
+                terminal_eta, terminal_theta = chunking.materialize_terminal_predictions(
+                    context.layout,
+                    state.coefficients,
+                    chunk_size=context.chunk_size,
+                )
         result = DenseSolverResult(
             config=solver_config,
             family_likelihood_plan_identifier=context.likelihood_plan.plan_identifier,
@@ -1885,7 +2146,9 @@ def _fit_dense_fixed_lambda_core(
             optimizing_log_likelihood=state.optimizing_log_likelihood,
             parameter_independent_carrier=state.parameter_independent_carrier,
             log_likelihood=state.log_likelihood,
-            penalty_value=penalty_value,
+            penalty_value=_half_penalty_quadratic(
+                context.penalty, state.coefficients, context.penalty_entries
+            ),
             penalized_optimizing_log_likelihood=state.penalized_optimizing_log_likelihood,
             penalized_log_likelihood=state.penalized_log_likelihood,
             terminal_score=terminal_score_geometry.score_penalized,

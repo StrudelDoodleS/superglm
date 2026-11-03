@@ -75,6 +75,11 @@ from superglm.reml.scale import (
     profile_tweedie_reml_scale,
 )
 from superglm.reml.w_derivatives import reml_w_correction, validate_w_correction_order
+from superglm.solvers._structured.selection import (
+    record_auto_backend_decision,
+    resolve_structured_backend,
+    select_structured_group,
+)
 from superglm.solvers.centered_system import (
     TabmatCenteringState,
     _FisherDataReuse,
@@ -84,69 +89,35 @@ from superglm.solvers.dispersion import lazy_likelihood_size
 from superglm.solvers.hessian_factor import DenseHessianFactor, as_hessian_factor
 from superglm.solvers.irls_direct import StructuredSolverError, fit_irls_direct
 from superglm.solvers.mode_score import centred_warm_start, mode_certification_bar
-from superglm.solvers.structured import (
-    record_auto_backend_decision,
-    resolve_structured_backend,
-    select_structured_group,
-)
 from superglm.types import GroupSlice, PenaltyComponent
 
-# The solve ceiling and the certification bar both live in observed_geometry
-# now, shared with the terminal publication gate in model/reml_finalize.py so
-# the two can never drift apart.
+# The solve ceiling lives in observed_geometry, shared with the terminal
+# publication gate in model/reml_finalize.py.
 _OBSERVED_PIRLS_TOL_CEILING = OBSERVED_PIRLS_TOL_CEILING
 
-# One leverage pass replaces one derivative Gram per penalty. Mixed
-# spline/categorical timings cross over at four penalties on the reference host;
-# below that, the specialized Gram route remains cheaper.
+# One leverage pass replaces one derivative Gram per penalty; below four
+# penalties the Gram route is cheaper.
 _LEVERAGE_MIN_PENALTIES = 4
-# The pre-solve (``presolve``) hands the exact loop a start, not a result: it
-# stops once a working-model update moves the objective by less than this
-# fraction of its scale.  On freMTPL2 (1 to 10 interaction pairs) the cached-W
-# objective then oscillates at 1e-9 of its scale for several more updates
-# without moving the exact loop's iteration count; at 1e-6 it stopped early
-# enough on 3 pairs to cost three more exact iterations.
+# The pre-solve hands the exact loop a start, not a result: it stops once a
+# working-model update moves the objective by less than this fraction of its
+# scale.
 _PRESOLVE_OBJECTIVE_TOL = 1e-7
-# The pre-solve's stopping tolerance is never looser than this (a tighter
-# caller tolerance passes through): its freeze and stop bars scale with it,
-# and a loose caller tolerance (1e-5) took the cached-W loop 20 updates where
-# 1e-9 took 16 on freMTPL2 (3 pairs), for a start the exact loop then
-# corrects anyway.
+# The pre-solve's tolerance is never looser than this (a tighter caller
+# tolerance passes through): its freeze and stop bars scale with it.
 _PRESOLVE_REML_TOL = 1e-9
-# The automatic pre-solve (``presolve=None``) runs on a cold exact fit with at
-# least this many estimated smoothing parameters.  Each exact iteration pays
-# a weight-correction pass whose cost grows with that count; measured
-# single-threaded, off/on wall: 0.75 .. 0.96 with 2 parameters, 0.81 .. 1.14
-# with 6 (n = 1,800 / 20,000), 3.0 with 10 (n = 3,000 / 30,000).
+# The automatic pre-solve runs on a cold exact fit with at least this many
+# estimated smoothing parameters, as each exact iteration's weight-correction
+# pass grows with that count.
 _PRESOLVE_MIN_ESTIMATED = 8
-# Nor under a short iteration cap: the pre-solve takes up to the fit's own
-# ``max_reml_iter`` cached-W updates before the exact loop (7 to 16 measured
-# on freMTPL2 and the test fixtures), so a caller capping the search below
-# this many iterations -- interaction_mode="fast_candidate" caps it at 5 --
-# would get up to twice the work it budgeted for.
+# Nor under a shorter iteration cap: the pre-solve takes up to
+# ``max_reml_iter`` updates itself, which would double a capped budget.
 _PRESOLVE_MIN_REML_ITER = 10
-# It also runs only for the family/link pairs below, with no RandomEffect or
-# FactorSmooth term the structured solvers could take.  On each pair the
-# cached-W working model carries the exact loop's curvature (Fisher on a
-# canonical link; observed rows where ``concave_observed_rows`` declares them,
-# #500), and on freMTPL2 with four interaction pairs (27 smoothing parameters)
-# it pays.  Single-threaded seconds, cold start / pre-solve, and the published
-# objective's excess over a certified reference optimum: Tweedie/log 95 / 58,
-# 0.052 / 0.018; Gamma/log 14 / 11, 0.010 / 0.004; binomial logit 207 / 127,
-# 0.041 / 0.018; probit 108 / 66, 0.056 / 0.028; cloglog 137 / 70, 0.049 /
-# 0.023; NB2/log (theta 1) 141 / 74, 0.055 / 0.024; Poisson/log, pre-solved
-# before this first-step rule, 46 / 37, 0.049 / 0.021.  Elsewhere it chooses
-# its start on curvature the exact loop does not use (a Fisher working model
-# beside observed curvature), carries a boundary coefficient into the exact
-# fit without the mean-space restoration (binomial with the log link), takes a
-# backend route whose parity with the dense one is untested past a few
-# smoothing parameters, or does not pay: a constant-weight Gaussian identity
-# fit's cached-W criterion is already the exact one (6 s cold, 9 s
-# pre-solved), and Gamma with the inverse link measured 13 s against 16 s.
-# The pairs are exact types, so a Tweedie power search, whose link stays fixed
-# while its power moves through a canonical point of a power link, keeps one
-# route; its candidates, and an estimated-theta NB2 alternation's fits, keep
-# the plain cold start in any case (``model.reml_ops``).
+# Only for these exact family/link types, with no RandomEffect or FactorSmooth
+# term the structured solvers could take: on them the cached-W working model
+# carries the exact loop's curvature (Fisher on a canonical link, observed rows
+# where ``concave_observed_rows`` declares them) and the pre-solve pays.
+# Tweedie power-search candidates and estimated-theta NB2 fits start cold
+# (``model.reml_ops``).
 _PRESOLVE_PAIRS = frozenset(
     {
         (Poisson, LogLink),
@@ -158,36 +129,15 @@ _PRESOLVE_PAIRS = frozenset(
         (NegativeBinomial, LogLink),
     }
 )
-# The other first-order fits keep the derivative Grams, and with them the
-# outer Hessian's weight-product term, until those Grams cost real time: one
-# ``p x p`` Gram per smoothing parameter is ``m n p^2`` multiply-adds per REML
-# iteration against ``n p^2`` for the one-pass route that forms the gradient and
-# the first-order Hessian terms (``reml_w_correction(leverage_hessian=True)``).
-# Wood (2011, sec. 3.5.1) prices exact second derivatives at ``O(M n p^2)`` and
-# first derivatives at ``O(n p^2)``, and prefers the cheaper scheme only for
-# large ``M``.  1e11 is about two seconds a REML iteration on the reference host
-# (a freMTPL2 fit with one interaction pair is 2.7e11); below it a fit keeps the
-# exact first-order Hessian and its established path.  The bar reads the dense
-# cost on either backend, so a model the structured solvers can fit makes one
-# decision on both: above it a structured factor forms the same exact gradient
-# from its augmented factor's row quadratic forms, and both backends leave the
-# W(rho) cross terms out of the Newton model (``gradient_terms_only``).
-# Binomial/logit is the exception: on the dense factor it takes the leverage
-# route at any work and never forms the cross terms, while a structured factor
-# keeps its Grams below the bar and forms the cross terms at its candidate stop
-# above it.  Its two backends then build different Newton models, the dense one
-# chosen for cost and to keep the model of the pass it took before, not to
-# match the structured one; they meet at the REML optimum (the W(rho)
-# correction in ``optimize_direct_reml``).
-# Wood's prices hold for a dense design.  A random effect's or factor smooth's
-# Grams are block-sparse, a few columns a row, so a model the structured
-# solvers can fit (``structured_alternative``) takes the leverage route only
-# where its solved-row pass is sparse too (``reads_row_supports``: every group
-# a dense column or an indexed support, its tables within the design's own
-# budget, never the machine's memory); elsewhere that pass is the dense
-# ``n p^2`` product, dearer than its Grams.  Every other model, a random
-# effect beside a group the structured selection rejects included, is priced
-# as a dense design.
+# First-order fits keep the derivative Grams (``m n p^2`` multiply-adds per
+# iteration) until they pass this work, then take the one-pass leverage route
+# (``n p^2``, ``reml_w_correction(leverage_hessian=True)``); Wood (2011, sec.
+# 3.5.1) prices the two schemes the same way. The bar reads the dense cost on
+# either backend, so a structured-capable model decides alike on both, and
+# above it both leave the W(rho) cross terms out (``gradient_terms_only``).
+# Binomial/logit on a dense factor takes the leverage route at any work.
+# A structured-capable model takes it only where its solved-row pass is sparse
+# too (``reads_row_supports``); every other model is priced as dense.
 _LEVERAGE_HESSIAN_MIN_GRAM_WORK = 1.0e11
 
 
@@ -199,9 +149,7 @@ def _usable_w_correction(correction, args: tuple, kwargs: dict, distribution):
         raise ObservedModeNotConvergedError(
             f"REML W(rho) correction has no usable curvature at this point: {error}",
             hint=mode_certification_hint(distribution),
-            # PIRLS reached a mode here; the correction built from it
-            # is what failed, so the published wording must not assert
-            # a PIRLS failure.
+            # PIRLS reached a mode; the wording must not claim it did not.
             infeasible_detail="the W(rho) correction has no usable curvature",
         ) from error
 
@@ -244,9 +192,8 @@ def _escalates_to_exact_hessian(
 ) -> bool:
     """Whether two slow reversals in a row, at a rate that cannot finish in time, switch Hessians.
 
-    Linear convergence at ``contraction`` a step reaches the score bar within
-    the iterations left in the common case, and the search then finishes as it
-    always has on the order-1 Hessian.
+    A linear rate that reaches the score bar within the iterations left keeps
+    the order-1 Hessian.
     """
     if step_reversals < 2 or not slow_reversal:
         return False
@@ -259,11 +206,8 @@ def _backtracked_rate_cannot_finish(
 ) -> bool:
     """Whether Newton steps taken at fraction ``step`` cannot reach the score bar in time.
 
-    A Newton step taken at ``step`` leaves about ``1 - step`` of the gradient,
-    a linear rate; the score bar is then ``ln(bar / |g|) / ln(1 - step)``
-    iterations away, as ``_escalates_to_exact_hessian`` reasons from a measured
-    rate.  A rate that finishes within the iterations left is left to the
-    score test.
+    A step at ``step`` leaves about ``1 - step`` of the gradient, so the bar
+    is ``ln(bar / |g|) / ln(1 - step)`` iterations away.
     """
     if gradient_norm <= score_bar or not 0.0 < step < 1.0:
         return False
@@ -317,7 +261,6 @@ def optimize_direct_reml(
     verbose: bool,
     penalty_caches: dict | None = None,
     profile: dict | None = None,
-    max_analytical_per_w: int = 30,
     select_snap: bool = True,
     direct_solve: str = "auto",
     w_correction_order: int = 1,
@@ -336,30 +279,15 @@ def optimize_direct_reml(
     seeds the bootstrap and the first Newton iterate of every component it
     names; the rest bootstrap cold (``discrete.bootstrap_seed_lambdas``).
 
-    A cold exact fit (no warm start) with at least ``_PRESOLVE_MIN_ESTIMATED``
-    estimated smoothing parameters, a family/link pair in ``_PRESOLVE_PAIRS``,
-    no structured-solver term and an iteration cap of at least
-    ``_PRESOLVE_MIN_REML_ITER`` first runs the cached-W performance
-    iteration (``optimize_discrete_reml_cached_w``) on this same lossless
-    design until its objective settles, and the exact Newton loop starts
-    from its smoothing parameters and coefficients: mgcv's ``outerPIsteps``
-    (performance-iteration steps that initialize the outer iteration), taken
-    to the cached-W fixed point.  The exact loop's gradient is unchanged.
-    Its first step holds no direction its curvature can place, and an
-    accepted decrease within the two evaluations' rounding counts as no
-    decrease, so the dead-search certificate decides that stop.
+    A cold exact fit meeting the pre-solve rule (``_PRESOLVE_*``) first runs
+    the cached-W performance iteration on this same design to its fixed
+    point, as mgcv's ``outerPIsteps`` initialize the outer iteration, and the
+    exact loop starts from its smoothing parameters and coefficients.
     ``presolve`` overrides the rule for tests only.
 
-    Two algorithm variants depending on ``discrete``:
-
-    **Exact path** (``discrete=False``):
-        W(rho)-corrected direct REML with gradient, Hessian, line search.
-
-    **Discrete path** (``discrete=True``):
-        Cached-W fREML optimizer (fewer data passes), delegated to
-        ``optimize_discrete_reml_cached_w``.  This deliberately uses the
-        BAM-style cached working/Fisher curvature approximation and bypasses
-        ordinary observed-Hessian LAML for noncanonical links.
+    ``discrete=False`` runs W(rho)-corrected direct REML; ``discrete=True``
+    delegates to ``optimize_discrete_reml_cached_w``, the bam-style cached-W
+    optimizer.
     """
 
     # The declared contract's likelihood size (``lazy_likelihood_size``).
@@ -373,11 +301,9 @@ def optimize_direct_reml(
     )
     w_correction_order = validate_w_correction_order(w_correction_order)
     if discrete:
-        # The cached-W branch is the BAM-style performance iteration: it holds
-        # W fixed within a step (no dW/drho term), so it does not reach the
-        # exact route's optimum.  Its criterion is the binned rule's
-        # (``classify_binned_reml_curvature``): Wood's observed-Hessian LAML for
-        # Gamma/log, Tweedie/log, NB2/log, probit and cloglog, Fisher otherwise.
+        # The cached-W branch holds W fixed within a step (no dW/drho term), so
+        # it does not reach the exact optimum; its curvature follows
+        # ``classify_binned_reml_curvature``.
         return optimize_discrete_reml_cached_w(
             dm,
             distribution,
@@ -395,7 +321,6 @@ def optimize_direct_reml(
             verbose=verbose,
             penalty_caches=penalty_caches,
             profile=profile,
-            max_analytical_per_w=max_analytical_per_w,
             select_snap=select_snap,
             direct_solve=direct_solve,
             reml_penalties=penalties,
@@ -437,15 +362,9 @@ def optimize_direct_reml(
     )
     use_structured = structured_decision.use_structured
     record_auto_backend_decision(profile, direct_solve, structured_decision)
-    # A model the structured solvers can also fit builds, on the dense solver
-    # too, the Newton model a structured factor builds: the derivative Grams
-    # below the leverage work bar, and above it the exact gradient without the
-    # W(rho) cross terms (``gradient_terms_only``), which both form at a
-    # candidate stop, where its design reads row supports.  Both backends then
-    # take the same REML path (tests/test_factor_smooth_structured_parity.py,
-    # tests/test_nested_structured_fit.py), except for binomial/logit, whose
-    # dense solver takes the leverage route at any work and forms no cross term
-    # (``_LEVERAGE_HESSIAN_MIN_GRAM_WORK``).
+    # A structured-capable model builds the same Newton model on the dense
+    # solver as a structured factor does, so both backends take one REML path
+    # (except binomial/logit, ``_LEVERAGE_HESSIAN_MIN_GRAM_WORK``).
     structured_alternative = (
         select_structured_group(list(dm.group_matrices), groups, mode="auto").group_index
         is not None
@@ -468,32 +387,25 @@ def optimize_direct_reml(
     log_lo, log_hi = np.log(LAMBDA_FLOOR), np.log(LAMBDA_CEILING)
     max_newton_step = 5.0
     _tol = reml_tol
-    # One-engine design §3.8: every PIRLS the criterion reads certifies its
-    # mode at the bar this stopping tolerance needs (``mode_score``).
+    # Every PIRLS the criterion reads certifies its mode at the bar this
+    # stopping tolerance needs (``mode_score``).
     mode_bar = mode_certification_bar(reml_tol)
-    # The Laplace approximation's identified part (design §3.9,
-    # ``reml.identified``): decided once, from the design and prior weights.
+    # The Laplace approximation's identified part (``reml.identified``):
+    # decided once, from the design and prior weights.
     identified = IdentifiedLaplace.for_design(
         dm, sample_weight, penalties, y=y, distribution=distribution, link=link
     )
     # A dense Fisher evaluation's identified part restricts the centred
     # Hessian its PIRLS decomposed; the cache holds it (no extra pass).
     identified_dense = bool(identified) and not use_structured
-    # One-engine design §3.8: every PIRLS the criterion is evaluated at stops
-    # on the certificate's own centred score over the identified coefficients.
-    # A deviance change is blind to a coefficient whose rows carry a small
-    # share of the likelihood, while its log-curvature enters log|H| at full
-    # weight: the objective then moved with every warm start (stage-0
-    # verifier census, raw_1e8 binomial).  A linearly constrained or SCOP
-    # mode is certified by its inner QP/KKT state and keeps the deviance stop.
+    # PIRLS stops on the certificate's centred score: a deviance change is
+    # blind to a coefficient with a small likelihood share whose curvature
+    # enters log|H| at full weight. A linearly constrained mode keeps the
+    # deviance stop, certified by its inner QP/KKT state.
     pirls_convergence = (
         "mode_score"
         if use_observed_geometry
-        or not any(
-            getattr(group, "constraints", None) is not None
-            or getattr(group, "monotone_engine", None) == "scop"
-            for group in groups
-        )
+        or not any(getattr(group, "constraints", None) is not None for group in groups)
         else "deviance"
     )
 
@@ -508,10 +420,8 @@ def optimize_direct_reml(
     best_obj = np.inf
     best_lambdas = lambdas.copy()
     best_pirls = None
-    # In-loop candidate and trial fits skip per-fit rank metadata: the REML
-    # gradient and objective read the O(p) geometry summary instead, and the
-    # published statistics come from the terminal refit.  Diagnostic runs keep
-    # full statistics so trace rows stay complete.
+    # In-loop fits skip rank metadata (the O(p) geometry summary suffices;
+    # the terminal refit publishes); diagnostic runs keep it for the trace.
     loop_fit_statistics = trace_run is not None or debug_recorder is not None
     # Converged state of the accepted line-search trial, reusable as the next
     # iteration's candidate when the lambda signature is unchanged.
@@ -540,22 +450,16 @@ def optimize_direct_reml(
     _n_stop_cross_passes = 0
     _t_linesearch = 0.0
     _n_linesearch_fits = 0
-    # Only a rejected general raw-centering route crosses coefficient fits.
-    # This owner dies with the optimizer; outside/finalization fits stay fresh.
+    # Owned by this optimizer: only a rejected raw-centering route crosses fits.
     raw_moment_policy = TabmatCenteringState()
     fisher_data_reuse = _FisherDataReuse()
-    # One flag for the fit's PIRLS solves: once a Gamma/log solve has had to
-    # leave Fisher scoring for Newton (``fit_irls_direct``), the solves after
-    # it start on Newton, since the same data and nearby smoothing parameters
-    # give Fisher the same trouble.  A fit whose Fisher solves converge never
-    # sets it.
+    # Once a Gamma/log solve leaves Fisher scoring for Newton
+    # (``fit_irls_direct``), later solves start on Newton.
     newton_latch = [False]
 
     # === Pre-solve: cached-W performance iteration on this same design ===
-    # The cached-W loop (no dW/drho term) is cheap per iteration and covers
-    # the far-from-optimum phase in which exact Newton spends most of its
-    # iterations.  Its fixed point is a start, never a result: the exact loop
-    # below evaluates, steps and stops on the exact criterion from there.
+    # The cheap cached-W loop covers the far-from-optimum phase; its fixed
+    # point is a start, and the exact loop decides from there.
     presolve_beta: NDArray | None = None
     presolve_intercept: float | None = None
     presolve_centred: tuple[float, NDArray] | None = None
@@ -639,10 +543,7 @@ def optimize_direct_reml(
                     profile[f"presolve_{key}"] = value
 
     # === Bootstrap: one FP step from the seeds ===
-    # Main effects bootstrap almost unpenalized, interaction components from a
-    # materially stronger seed, random effects at their levels' mean
-    # information, and a warm start at its own lambdas
-    # (``bootstrap_seed_lambdas``).
+    # Seeds from ``bootstrap_seed_lambdas``.
     boot_lambdas = bootstrap_seed_lambdas(
         penalties,
         warm_lambdas,
@@ -656,9 +557,7 @@ def optimize_direct_reml(
         offset=offset_arr,
         weight_semantics=weight_semantics,
     )
-    # After the pre-solve every estimated component starts warm, so the
-    # bootstrap would fit the mode the first candidate fits again at the same
-    # lambdas: the candidate starts from the pre-solve's mode instead.
+    # After the pre-solve the first candidate starts from its mode; no bootstrap.
     skip_bootstrap = presolve_beta is not None
     if skip_bootstrap:
         S_boot = None
@@ -797,9 +696,8 @@ def optimize_direct_reml(
         r_j = pc.rank if pc.rank > 0 else (penalty_ranks[pc.name] if penalty_ranks else 0.0)
         denom = boot_inv_phi * quad + trace_term
         lam_fp = r_j / denom if denom > 1e-12 else 1.0
-        # Snap degenerate select=True null-space penalties to upper bound.
-        # When quad << trace, the FP update is degenerate
-        # (any lambda is approx a fixed point).  Snap breaks it.
+        # Snap degenerate select=True null-space penalties to the upper bound:
+        # with quad << trace any lambda is nearly a fixed point.
         if (
             select_snap
             and pc.component_type == "selection"
@@ -880,26 +778,14 @@ def optimize_direct_reml(
 
     n_mean_space_restorations = 0
     prev_obj = np.inf
-    # Frozen directions from the previous iteration's active-set decision:
-    # the stop criterion judges the ACTIVE set. An inferentially flat frozen
-    # direction keeps a tiny persistent gradient forever (that is what makes
-    # it flat), and counting it would spin the loop doing nothing until
-    # max_reml_iter with every informative direction long determined.
+    # The stop judges the active set only: a flat frozen direction keeps a
+    # tiny gradient forever, and counting it would spin to max_reml_iter.
     stop_criterion_frozen = None
-    # The order-1 outer Hessian leaves out the d2W terms, so its Newton steps
-    # converge only linearly where they omit real curvature (Nocedal and
-    # Wright 2006, theorem 3.6): a step that keeps reversing while the
-    # gradient shrinks by less than half a step is overshooting by a factor
-    # the model gets wrong (measured: a Poisson log lambda alternating
-    # +-0.02 with its gradient contracting 0.87 a step, 34 iterations to
-    # 1e-9 against 15 with the exact Hessian). After two such steps in a row
-    # in the endgame (the objective settled to the square root of the
-    # tolerance, where a Newton step would square the error), each decreasing
-    # the objective no more than its quadratic model predicted (a larger
-    # decrease is not curvature but a moving mode, as a separated level
-    # drifting to its bound), and when that rate would not reach the score
-    # bar in the iterations left, the search takes the exact Hessian (Wood
-    # 2011, full Newton) where the family and link supply it.
+    # The order-1 Hessian omits the d2W terms, so its Newton steps converge
+    # only linearly where that curvature is real (Nocedal & Wright 2006, thm
+    # 3.6). After two slow reversals in a row (``_slow_reversal``) at a rate
+    # that cannot reach the score bar in time, the search takes the exact
+    # Hessian (Wood 2011) where the family and link supply it.
     try:
         exact_hessian_available = not discrete and w_correction_order == 1
         if exact_hessian_available:
@@ -935,19 +821,11 @@ def optimize_direct_reml(
             pirls_result, XtWX_S_inv, XtWX, S_cand, cand_dense = fit_candidate(
                 cand_lambdas, warm_beta, warm_intercept, n_iter, warm_centred
             )
-        # No interior mode at these lambdas: the penalized maximum holds rows
-        # at the boundary of the family's mean space, where it is constrained,
-        # not stationary, and the Laplace approximation (Wood, Pya & Saefken
-        # 2016, JASA 111, section 3.1: a positive definite maximum of a
-        # regular likelihood) does not exist.  Raising every estimated
-        # penalty moves the mode towards the unpenalized fit, so the outer
-        # iteration restores an interior start along that direction, in
-        # doubling log-steps (the bracketing phase of a line search, Nocedal
-        # & Wright 2006, section 3.5).  Each refit starts cold: a state at
-        # the boundary is no start, since its rows' Fisher weights
-        # mu / (1 - mu) pin them there and their working response
-        # eta + (1 - mu) / mu is never inside.  A line-search trial without
-        # an interior mode is rejected as any uncertified trial is.
+        # No interior mode: the penalized maximum holds rows on the mean-space
+        # boundary, where the Laplace approximation does not exist (Wood, Pya &
+        # Saefken 2016, sec. 3.1). Raise every estimated penalty in doubling
+        # log-steps (Nocedal & Wright 2006, sec. 3.5) until a cold refit is
+        # interior; a boundary state is no start. Trials are simply rejected.
         restoration_step = 1.0
         rho_at_boundary = rho_clipped
         while pirls_result.termination_reason == "mean_space_boundary":
@@ -997,21 +875,14 @@ def optimize_direct_reml(
                 XtWX_S_inv,
                 cand_dense,
             )
-        # What proves this mode stationary is PIRLS's own stop: the mode
-        # certificate (``convergence="mode_score"``, one-engine design §3.8)
-        # on every route that has one, the deviance stop for a linearly
-        # constrained or SCOP mode.  A budget-exhausted candidate is therefore
-        # not stationary on any path; the observed geometry's mode score below
-        # is recorded as a diagnostic and never raises this flag.
+        # Stationarity is PIRLS's own stop: the mode certificate, or the
+        # deviance stop for a linearly constrained mode. The observed
+        # geometry's mode score below is a diagnostic only.
         candidate_mode_stationary = bool(pirls_result.converged)
         if use_observed_geometry:
             if not pirls_result.converged and not stopped_on_iteration_budget(pirls_result):
-                # Typed so a power search can score this point infeasible and
-                # route around it, exactly as it does the certification
-                # failure below. Every reason that still lands here names a
-                # structural failure the mode score cannot speak to -- an
-                # infeasible constrained mode, a missing inner-QP certificate,
-                # a non-finite deviance. Budget exhaustion alone does not.
+                # Typed so a power search routes around the point. Reasons
+                # here are structural failures, never budget exhaustion.
                 raise ObservedModeNotConvergedError(hint=mode_certification_hint(distribution))
             _t0 = _time.perf_counter()
             try:
@@ -1037,22 +908,9 @@ def optimize_direct_reml(
                     ),
                 )
             except ObservedGeometryInfeasibleError as exc:
-                # A budget-exhausted iterate now reaches this build, and an
-                # iterate still mid-descent can carry observed information the
-                # geometry refuses outright -- non-finite rows, a non-positive
-                # intercept curvature. The line search already guards the same
-                # call (it halves its step); here there is no step to halve, so
-                # retype instead. A bare ValueError would escape every
-                # `except ObservedModeNotCertifiedError` and kill a power
-                # search that only needed to score this point infeasible.
-                #
-                # Only that one refusal is retyped. The build's other ValueErrors
-                # report a violated caller contract -- a misshapen design, a bad
-                # derivative_order, a penalty that is not PSD -- and catching
-                # them here told the user PIRLS had reached no penalized mode at
-                # this point, blaming the data's conditioning for a bug in the
-                # call and inviting a power search to route quietly around it.
-                # They now surface as the bugs they are.
+                # An infeasible geometry has no step to halve here, so retype it
+                # for power searches to route around. The build's other
+                # ValueErrors are caller-contract bugs and stay bare.
                 _t_observed_geometry += _time.perf_counter() - _t0
                 raise ObservedModeNotConvergedError(
                     "observed REML geometry refused the penalized coefficient mode "
@@ -1083,17 +941,8 @@ def optimize_direct_reml(
                     bar=mode_bar,
                 )
             except ObservedGeometryInfeasibleError as exc:
-                # An unusable score is the same kind of statement as the
-                # unusable geometry just above: this iterate has no penalized
-                # mode worth differentiating through. The answer is a shorter
-                # step or a point scored infeasible, never a failed fit, and
-                # there being no step to halve here it gets the same retype --
-                # a bare ValueError would walk past every
-                # `except ObservedModeNotCertifiedError` and kill a power search
-                # that only needed to route around this point. The score's other
-                # ValueErrors stay bare for the same reason the build's do: rows
-                # that do not match the design or a penalty in the wrong
-                # coordinates are bugs in the call, not conditioning.
+                # An unusable score gets the same retype as the geometry above;
+                # the score's other ValueErrors are caller bugs and stay bare.
                 raise ObservedModeNotConvergedError(
                     "observed REML mode score refused the penalized coefficient mode "
                     f"at this point: {exc}",
@@ -1104,13 +953,9 @@ def optimize_direct_reml(
                 _accepted_observed_mode_residual_max,
                 mode_score.relative_max,
             )
-            # The certificate is PIRLS's own stop residual at the mode it
-            # returned (``convergence="mode_score"``, one-engine design §3.8):
-            # ``candidate_mode_stationary`` above already reads it.  A mode
-            # that misses the bar is never refused (owner decision 3,
-            # 2026-09-30): it cannot authorise a convergence exit, so a fit
-            # that never certifies ends not converged and says so.  The
-            # geometry's own score is kept as a diagnostic.
+            # A mode that misses the bar is never refused: it cannot authorise a
+            # convergence exit, so a fit that never certifies ends not converged
+            # and says so. The geometry's score is kept as a diagnostic.
 
         _t0 = _time.perf_counter()
         objective_evaluation = reml_laml_objective(
@@ -1148,8 +993,7 @@ def optimize_direct_reml(
             penalty_nullity = objective_evaluation.penalty_nullity
             profiled_scale = objective_evaluation.profiled_scale
         else:
-            # Compatibility for lightweight test/instrumentation callbacks
-            # that replace the public objective with a scalar-returning stub.
+            # A test or instrumentation stub may return a bare scalar.
             obj = float(objective_evaluation)
             profiled_scale = None
         if not scale_known:
@@ -1243,18 +1087,9 @@ def optimize_direct_reml(
         w_correction_kwargs: dict[str, Any] = {}
         if not discrete:
             # Binomial/logit on a dense factor takes the leverage route at any
-            # work and keeps the Newton model and the stop of the pass it took
-            # before: the exact gradient without the W(rho) cross terms
-            # (``gradient_terms_only``), at every iteration and at a candidate
-            # stop (``table_route``).  Its derivative Grams cost 3 to 5 times one
-            # leverage pass on a design without lookups or with a factor smooth
-            # (single-threaded, freMTPL2 and synthetic continuous designs), so it
-            # does not keep them below the bar as every other family does.  A
-            # different Newton model moves where its fits stop along flat
-            # directions, where a smoothing parameter heads to working infinity
-            # (Wood, Pya & Saefken 2016, sec. 3.1), by more than the stop's
-            # objective tolerance, and the cross terms at the stop cost one more
-            # solved-row pass, about one iteration's W(rho) work.
+            # work, with the exact gradient and no W(rho) cross terms
+            # (``gradient_terms_only``), at every iteration and at the stop:
+            # its derivative Grams cost several leverage passes.
             leverage_ready = w_correction_order == 1 and len(penalties) >= _LEVERAGE_MIN_PENALTIES
             binomial_logit = bool(
                 leverage_ready
@@ -1272,29 +1107,11 @@ def optimize_direct_reml(
                     and sparse_leverage
                 )
             )
-            # The correction is built from this iterate's weight derivatives, so
-            # a LinAlgError out of it says the same thing the geometry seams do:
-            # no usable curvature at this point. The only LinAlgError reachable
-            # from here is a compact operator refusing its blocks -- naming the
-            # reachable set rather than `w_derivatives`' current habits, because
-            # it is the reachable set that makes this narrow enough not to
-            # swallow a structural complaint. Structural refusals on this path
-            # are ValueError/TypeError and still propagate bare.
-            #
-            # Deliberately NOT gated on `use_observed_geometry`. The correction
-            # runs on the Fisher path too, and Tweedie + PowerLink is canonical
-            # wherever power == 1 - p, so the curvature flips to "fisher" there
-            # and no observed geometry is built. That point is not exotic and
-            # not rare: `_search_brent` evaluates both `p_bounds` outright
-            # before the optimiser runs, so PowerLink(-0.05) against the default
-            # (1.05, 1.95) crosses on the FIRST evaluation; the grid methods
-            # cross at any node equal to 1 - power; and a plain fit_reml at
-            # Tweedie(p=1.5) + PowerLink(-0.5) -- the canonical parameterisation
-            # -- crosses with no search at all. Gating here would make the same
-            # failure routable at one power and fatal at its neighbour, and at a
-            # bound would kill the search before it evaluated anything. The
-            # message stays curvature-neutral for the same reason: it is
-            # reached with `geometry is None`.
+            # A LinAlgError from the correction (a compact operator refusing
+            # its blocks) means no usable curvature here, so it is retyped;
+            # structural ValueError/TypeError propagate bare. Not gated on
+            # `use_observed_geometry`: Tweedie + PowerLink turns Fisher at the
+            # canonical power, and the same failure must stay routable there.
             w_correction_args = (dm, link, groups, pirls_result, reml_inverse, cand_lambdas)
             w_correction_kwargs = {
                 "penalty_caches": penalty_caches,
@@ -1329,20 +1146,16 @@ def optimize_direct_reml(
             _n_w_correction += 1
             grad_w_correction = w_corr[0]
             dH_extra = w_corr[1]
-            # Second order: the second-derivative terms.  The leverage route:
-            # the first-order cross terms its pass formed in place of
-            # ``dH_extra``.  Either is an (m, m) term added to the Hessian.
+            # Second order's d2W terms, or the leverage route's first-order cross
+            # terms: either is an (m, m) term added to the Hessian.
             dH2_cross = w_corr[2] if len(w_corr) > 2 else None
             grad = grad_partial + grad_w_correction
         else:
             grad = grad_partial.copy()
             dH_extra = None
             dH2_cross = None
-        # The leverage route's gradient-only Newton model (term-pair tables, a
-        # structured factor's row forms, or ``gradient_terms_only``): an exact
-        # gradient and no W(rho) cross terms (``reml_w_correction``), which its
-        # candidate stop forms below; binomial/logit's stop reads its Newton
-        # model's Hessian, as before.
+        # The leverage route's gradient-only Newton model forms its W(rho)
+        # cross terms at the candidate stop below (binomial/logit excepted).
         table_route = (
             leverage_hessian
             and not binomial_logit
@@ -1390,14 +1203,9 @@ def optimize_direct_reml(
 
         prev_obj = obj
 
-        # Wood outer-Hessian update.  With ``w_correction_order=2`` this
-        # includes the exact available second curvature derivatives; the
-        # default order 1 is an exact objective/gradient with a modified
-        # (quasi-Newton) Hessian.  Wood (2011) eq. 6.2 writes the
-        # diagonal dS_i/dρ_i term as g_i + 0.5*r_i, where g_i is the fixed-W
-        # gradient.  The W(rho) terms are differentiated separately through
-        # dH_extra and dH2_cross; using the total gradient here would add the
-        # first-order W correction twice on the diagonal.
+        # Wood (2011) eq. 6.2's diagonal term g_i + 0.5 r_i takes the fixed-W
+        # gradient: the W(rho) terms enter through dH_extra and dH2_cross, and
+        # the total gradient would count them twice.
         def outer_hessian() -> NDArray:
             return reml_direct_hessian(
                 dm.group_matrices,
@@ -1418,32 +1226,15 @@ def optimize_direct_reml(
             )
 
         revalidated_hess = None
-        # A loose reml_tol can be satisfied by an iteration whose starved
-        # candidate PIRLS never certified: the compound criterion's
-        # objective and gradient were then measured at a nonstationary
-        # beta and prove nothing about the profile objective -- the same
-        # evidence standard the line search and the all-frozen exit
-        # enforce. Withholding the accept is benign: rho's step is tiny
-        # here, so the following iterations are warm-started PIRLS
-        # settles, and the exit fires once the mode certifies (measured:
-        # one extra outer iteration on the starved fixture, landing
-        # 7e-4 -> 8e-7 off the reference lambdas).
+        # An uncertified candidate's objective and gradient prove nothing, so
+        # the stop waits until the mode certifies (warm-started settles).
         mode_certified = trial_counts_as_precision_evidence(candidate_mode_stationary, obj)
         if candidate_convergence.converged and mode_certified:
-            # On the gradient-only route the Newton model leaves out the W(rho) cross
-            # terms -(P + P')/2, P_ij = tr(H^-1 S_i H^-1 C_j), whose diagonal
-            # -P_ii has no fixed sign.  The stop's second-order check and its
-            # freeze decision read the v0.40.0 leverage route's Hessian
-            # instead: one solved-row pass (on a structured factor, its
-            # derivative operators' cross traces) forms the cross terms here, at
-            # the candidate stop only.  A stop they refuse steps on that Hessian
-            # too, as v0.40.0 did: the step's own freeze then keeps the
-            # directions the revalidation reactivated.  (Stepping on the
-            # gradient-only Hessian refroze them, and the next stop was refused
-            # again: on the 10-pair freMTPL2 fit two directions whose curvature
-            # straddles the freeze bar, 0.0033 and 0.0030 without the cross
-            # terms and 0.0038 and 0.0040 with them against 0.0035, held
-            # gradients of 5e-4 and 1.7e-3 through ten refused stops.)
+            # The gradient-only Newton model omits -(P + P')/2, whose diagonal
+            # has no fixed sign, so the stop's second-order check and freeze read
+            # a Hessian with the cross terms, formed here by one solved-row pass.
+            # A refused stop steps on that Hessian too, so its freeze keeps the
+            # directions the check reactivated.
             stop_cross = None
             if table_route:
                 _t0 = _time.perf_counter()
@@ -1489,10 +1280,8 @@ def optimize_direct_reml(
         _t0 = _time.perf_counter()
         hess = revalidated_hess if revalidated_hess is not None else outer_hessian()
         if use_structured and not (np.all(np.isfinite(hess)) and np.all(np.isfinite(grad))):
-            # Prior weights at the edge of the float64 range can take the
-            # structured factor's trace terms out of range (measured at a
-            # uniform weight of 1e-200); no Newton step exists, so this is the
-            # structured path's one clear error rather than eigh's.
+            # Prior weights near float64's range edge can make the trace terms
+            # non-finite; no Newton step exists, so raise a clear error.
             raise StructuredSolverError(
                 "The structured solver cannot proceed: the REML outer gradient or Hessian "
                 "is not finite at these smoothing parameters. This should not happen for a "
@@ -1516,15 +1305,10 @@ def optimize_direct_reml(
         frozen = freeze_decision.frozen
         shoulder = np.asarray(freeze_decision.shoulder, dtype=bool)
         if outer == 0 and presolve_beta is not None:
-            # The pre-solve's point is the working model's fixed point, which
-            # lacks the dW/drho term (#500), so no direction has yet been shown
-            # flat on the exact criterion: the first exact step is a Newton step
-            # on every direction whose curvature puts a minimum within the step
-            # bound.  Held there, a weakly identified one kept the working
-            # model's placement, its exact gradient under the freeze bar
-            # (measured: a spline-by-brand term at log lambda 9.8 against the
-            # optimum's 8.9, Tweedie/log on freMTPL2).  A direction held at a
-            # bound, or with no minimum in reach, stays held.
+            # The pre-solve's fixed point lacks the dW/drho term, so no direction
+            # is yet shown flat on the exact criterion: the first exact step
+            # moves every direction whose curvature puts a minimum within the
+            # step bound. Directions at a bound or with none in reach stay held.
             diagonal = np.diagonal(hess)
             in_reach = (
                 estimated_mask
@@ -1547,8 +1331,7 @@ def optimize_direct_reml(
             )
             if shoulder.any():
                 # Every iteration that steps a shoulder, with its signed
-                # gradient and curvature: the last freeze decision alone
-                # forgets a shoulder read earlier in the fit.
+                # gradient and curvature.
                 idx = np.flatnonzero(shoulder)
                 profile.setdefault("reml_shoulder_reads", []).append(
                     {
@@ -1570,32 +1353,18 @@ def optimize_direct_reml(
                 trial_counts_as_precision_evidence(candidate_mode_stationary, obj)
                 and obj_change < _tol * score_scale
             ):
-                # The Fisher path admits a PIRLS-exhausted candidate, so an
-                # all-frozen verdict can be measured at a nonstationary
-                # beta with the objective still moving. All frozen means
-                # rho stops moving, so deferring is a warm-started PIRLS
-                # settle at the same lambdas -- the stationary exit fires
-                # only for a stationary mode with a stable objective
-                # (measured: warm-start chaining makes the max_iter=1
-                # all-null fixture identical to the reference by the time
-                # this exit fires, so the gate defers nothing there).
+                # An all-frozen verdict at a nonstationary candidate defers to a
+                # warm-started settle at the same lambdas.
                 continue
-            # All components frozen -- converged. Usually the compound
-            # criterion fires first (an all-frozen mask zeroes the next
-            # iteration's stop gradient), so this exit needs every
-            # direction to cross the freeze bar in the same iteration
-            # that the objective is still moving -- a genuinely all-flat
-            # model, not the common endgame.
+            # All components frozen: converged (a genuinely all-flat model; the
+            # compound criterion usually fires first).
             converged = True
             termination_reason = "active_set_stationary"
             break
 
         # Modified Newton: eigendecompose, flip negatives, floor small eigenvalues.
-        # A concave shoulder takes its trust-region step instead: the model
-        # decreases without bound along negative curvature, so the step lies
-        # on the region's boundary (More & Sorensen 1979), here the step cap,
-        # in the descent direction.  A flipped-curvature Newton step on an
-        # exponential shoulder moves one e-fold per iteration.
+        # A concave shoulder instead steps to the trust-region boundary (the
+        # step cap) downhill (More & Sorensen 1979).
         newton_idx = np.where(~frozen & ~shoulder)[0] if shoulder.any() else active_idx
         delta = np.zeros(m)
         if newton_idx.size:
@@ -1684,8 +1453,7 @@ def optimize_direct_reml(
         # allows
         full_step_rejected = False
         inconsistent_decrease: float | None = None
-        # The synchronous search owns fixed design coordinates and warm state.
-        # Its rejected trials may share initial data, never their penalties.
+        # Rejected trials may share initial data, never their penalties.
         _initial_data_reuse = (
             _InitialDataReuse()
             if not use_observed_geometry and debug_recorder is None and trace_run is None
@@ -1770,13 +1538,8 @@ def optimize_direct_reml(
                         trial_dense,
                     )
             except StructuredSolverError:
-                # A trial the structured factor refuses (a tree pivot within
-                # its certified uncertainty, a border block that is not
-                # positive definite, ...) supplies no objective: keep the
-                # retained state and try a shorter step towards it, as the
-                # discrete driver does and as a trial whose observed geometry
-                # is infeasible is handled below.  No other solver is tried;
-                # a refused candidate or bootstrap fit still raises.
+                # A trial the structured factor refuses has no objective: try a
+                # shorter step. No other solver; a refused candidate still raises.
                 _n_refused_structured_trials += 1
                 step *= 0.5
                 continue
@@ -1813,13 +1576,8 @@ def optimize_direct_reml(
                         ),
                     )
                 except ObservedGeometryInfeasibleError:
-                    # A shorter step is the answer to a trial iterate the
-                    # geometry refuses, so this rejection is a real line-search
-                    # outcome and is counted as one. It is deliberately the only
-                    # refusal handled here: a violated caller contract does not
-                    # improve at half the step, and halving would retry the same
-                    # malformed call until the line search ran out of trials and
-                    # reported the bug as a conditioning failure.
+                    # An infeasible trial geometry is a line-search rejection;
+                    # caller-contract errors do not improve at half the step.
                     _t_observed_geometry += _time.perf_counter() - _t_geometry
                     _observed_mode_rejected_trial_count += 1
                     step *= 0.5
@@ -1852,19 +1610,8 @@ def optimize_direct_reml(
                         bar=mode_bar,
                     )
                 except ObservedGeometryInfeasibleError:
-                    # A score this trial iterate makes unusable says exactly
-                    # what the refused geometry above says: there is no
-                    # penalized mode here worth differentiating through. Both
-                    # are answered by a shorter step, never by failing the fit,
-                    # so this takes the same door and is counted as the
-                    # line-search rejection it is. Nothing is recorded in
-                    # `_rejected_trial_observed_mode_residual_max`: the score
-                    # refused before producing a residual, exactly as the
-                    # geometry refusal above has none to record. And as there,
-                    # only that one refusal backtracks -- the score's other
-                    # ValueErrors report rows that do not match the design or a
-                    # penalty in the wrong coordinates, which no shorter step
-                    # improves.
+                    # An unusable trial score is a rejection like the geometry
+                    # above, with no residual to record; other ValueErrors stay bare.
                     _observed_mode_rejected_trial_count += 1
                     step *= 0.5
                     continue
@@ -1905,9 +1652,7 @@ def optimize_direct_reml(
                     return_evaluation=True,
                 )
             except PenaltyNumericalError:
-                # A refused trial supplies no objective or precision evidence.
-                # Keep the retained state and try a shorter step. The current
-                # candidate's objective and caller-contract errors still raise.
+                # A refused trial has no objective: try a shorter step.
                 step *= 0.5
                 continue
             trial_obj = (
@@ -1974,24 +1719,14 @@ def optimize_direct_reml(
                 )
                 == "converged_at_precision"
             ):
-                # Along the Newton step, ``g' delta = -2 P`` with ``P`` the
-                # model's predicted decrease, so a quadratic criterion whose
-                # stationary trial rejected the full step has curvature above
-                # ``4 P (1 - c)`` and decreases by at most ``2 P alpha (1 - (1 -
-                # c) alpha)`` at step ``alpha``.  A shorter step accepted with
-                # a larger decrease is then taken as the evaluations' error, as
-                # a warm-started inner solve's error in the objective grows
-                # with its step.  A criterion that is not quadratic along the
-                # step can decrease by more, so the decrease discarded is at
-                # most the stop resolution, which the score test treats as no
-                # change.  Where ``P`` is below that resolution too and the
-                # dead-search certificate holds, the step is discarded and the
-                # search ends as a dead one does, when taking it -- a fraction
-                # of the Newton step an iteration, a linear rate -- cannot
-                # reach the score bar in the iterations left (Shi, Xie, Byrd &
-                # Nocedal 2022, SIAM J. Optim. 32(1), sec. 4.1: where errors
-                # are large relative to the gradient the line search is
-                # expected to fail).
+                # With ``g' delta = -2 P``, a quadratic criterion that rejected
+                # the full step decreases by at most ``2 P alpha (1 - (1 - c)
+                # alpha)`` at ``alpha``; a larger accepted decrease, within the
+                # stop resolution, is evaluation error. Where ``P`` is below that
+                # resolution, the dead-search certificate holds and the linear
+                # rate cannot reach the score bar in time, the step is discarded
+                # and the search ends as a dead one (Shi, Xie, Byrd & Nocedal
+                # 2022, SIAM J. Optim. 32(1), sec. 4.1).
                 inconsistent_decrease = float(obj - trial_obj)
                 if trace_run is not None and trace_run.enabled:
                     # The trial's evaluation event above reads accepted; this
@@ -2026,19 +1761,9 @@ def optimize_direct_reml(
                 )
                 == "converged_at_precision"
             ):
-                # A decrease within the two evaluations' rounding is no decrease:
-                # the search is as dead as one that rejected every trial, and the
-                # dead-search certificate judges the candidate.  From the
-                # pre-solve's start the loop begins at the working model's
-                # optimum, where accepting it would keep the loop stepping on
-                # rounding while a gradient whose own error exceeds the score bar
-                # keeps the score test from firing (measured: a Gamma/log fit took
-                # 15 more iterations of 10-ulp decreases, its gradient 1.5 times
-                # the bar).  A cold search keeps its path: in the release
-                # differential's corpus 29 of 407 cold exact fits accepted such a
-                # decrease and then gained up to 7.5e-8 more before the score test
-                # ended them.  Where the certificate refuses, the step is taken as
-                # before.
+                # From the pre-solve's start, a decrease within the two
+                # evaluations' rounding is no decrease: the dead-search
+                # certificate judges the candidate, else the step is taken.
                 unresolved_decrease = float(obj - trial_obj)
                 stall_roundoff = float(obj_roundoff + trial_roundoff)
                 if trace_run is not None and trace_run.enabled:
@@ -2070,11 +1795,8 @@ def optimize_direct_reml(
                 warm_beta = trial_result.beta.copy()
                 warm_intercept = float(trial_result.intercept)
                 warm_centred = centred_warm_start(trial_result)
-                # The accepted line-search state has already paid for a full
-                # PIRLS solve and objective evaluation.  It is therefore a
-                # valid retained candidate even when this is the final outer
-                # iteration; waiting until the next loop would silently
-                # discard a guaranteed improvement at ``max_reml_iter``.
+                # The accepted trial is a valid retained candidate even on the
+                # final iteration, so ``max_reml_iter`` keeps its improvement.
                 if trial_obj < best_obj:
                     best_obj = float(trial_obj)
                     best_lambdas = trial_lambdas.copy()
@@ -2082,16 +1804,8 @@ def optimize_direct_reml(
                     if outer == max_reml_iter - 1:
                         lambda_history.append(trial_lambdas.copy())
                         objective_history.append(float(trial_obj))
-                # The accepted trial's lambdas become the next iteration's
-                # candidate lambdas, and the candidate refit at the top of the
-                # loop solves the identical penalised system. Carry the
-                # converged state forward instead of recomputing it — but only
-                # a STATIONARY state: on the Fisher path an Armijo-accepted
-                # trial that exhausted max_pirls_iter is nonstationary, and
-                # reusing it would put the next gradient/Hessian at the wrong
-                # coefficients instead of warm-start refitting them.  Stationary
-                # means PIRLS's own stop (``trial_mode_stationary`` above), on
-                # every path: the geometry's mode score is a diagnostic.
+                # Carry a stationary accepted state forward as the next candidate
+                # (same penalised system); a nonstationary one is refitted.
                 if trial_mode_stationary:
                     _carry_forward = (
                         trial_lambdas.copy(),
@@ -2118,32 +1832,15 @@ def optimize_direct_reml(
             rho = rho_clipped
             _t_linesearch += _time.perf_counter() - _t0
             if not had_feasible_trial:
-                # All projected coordinates are stationary at a bound.
-                # Re-evaluate this same point once so the compound objective
-                # criterion can confirm stability without redundant trial fits.
+                # Every projected coordinate is at a bound: re-evaluate once so
+                # the compound criterion can confirm stability.
                 continue
-            # The fully converged exact objective rejected every feasible
-            # trial. If every direction in the CURRENT active set -- the set
-            # this dead step actually moved -- has its gradient below the
-            # precision actually asked for (the resolved tolerance, never
-            # tighter than the achievable-precision floor), the optimum is
-            # resolved and the dead line search is the proof, not a
-            # failure: the predicted decrease from a sub-bar gradient is
-            # quadratically below candidate-machinery noise, so the last
-            # decades of an ultra-tight bar do not exist to be closed. The
-            # objective's own history is no veto here: the last accepted
-            # step belongs to a since-frozen flat direction whenever one
-            # just crossed the freeze bar, and a dead feasible search
-            # already states that no further objective progress exists. A
-            # genuinely undetermined stall keeps its active gradient orders
-            # above the bar and stays an honest failure. The same holds in
-            # objective units: when the Newton model of the active set
-            # predicts a decrease below the stop resolution (half the
-            # squared decrement of the uncapped step just tried, its
-            # Hessian unmodified), the optimum is resolved with the gradient
-            # above its bar but within a decade of it -- #459 measured that
-            # decrease at 1.2e-8 against evaluation noise of 4.2e-7, so
-            # rounding alone decided whether the full step was accepted.
+            # Every feasible trial was rejected. The optimum is resolved when
+            # every gradient of the current active set is below the precision
+            # asked for (never tighter than the achievable floor), or within a
+            # decade of it with the active set's Newton model predicting a
+            # decrease below the stop resolution (#459); otherwise
+            # line_search_failed (``classify_dead_feasible_exit``).
             dead_evidence = evaluated_feasible_trial and trial_counts_as_precision_evidence(
                 candidate_mode_stationary, obj
             )
@@ -2178,18 +1875,9 @@ def optimize_direct_reml(
                     "inconsistent_decrease": inconsistent_decrease,
                 }
             # The second-order check (``concave_live_directions``) gates the
-            # score-test exit only.  A shoulder here is flat by construction,
-            # its gradient under the precision floor this exit certifies, and
-            # over the shortest step just rejected (5/128 in log lambda) its
-            # model promises at most 0.041 times that floor: about four times
-            # the objective's resolution at the default reml_tol (1e-9), and
-            # 4e-9 / reml_tol times it at a tighter one.  A decrease the
-            # rejected trials have just failed to show is no ground to refuse
-            # a certified point.  (The native-Windows flip of
-            # test_sz_aliased_levels_converge_under_reml[one_row] first blamed
-            # on refusing here was the unsigned shoulder read the signed rule
-            # removes.)  test_a_dead_search_beside_a_live_shoulder_certifies
-            # pins this exit beside a shoulder on both engines.
+            # score-test exit only: a shoulder here has its gradient under the
+            # certified floor, and the rejected trials have just failed to show
+            # the decrease its model promises.
             converged = termination_reason == "converged_at_precision"
             break
         _t_linesearch += _time.perf_counter() - _t0

@@ -5,11 +5,17 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from superglm.solvers.structured import (
-    SumToZeroBlockOperator,
-    SumToZeroLeafSystem,
-    _orthonormal_column_span,
+from superglm.solvers._structured.assembly import (
     build_penalized_sum_to_zero_operator,
+)
+from superglm.solvers._structured.balance_tree import (
+    SumToZeroLeafSystem,
+)
+from superglm.solvers._structured.geometry import (
+    _orthonormal_column_span,
+)
+from superglm.solvers._structured.operators import (
+    SumToZeroBlockOperator,
     compact_operator_diagonal,
     materialize_compact_operator,
 )

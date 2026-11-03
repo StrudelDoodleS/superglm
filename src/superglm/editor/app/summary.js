@@ -11,11 +11,7 @@ import {
 
 /** @typedef {import('./api/contracts.js').EmptyStructuralRequest} EmptyStructuralRequest */
 /** @typedef {import('./api/contracts.js').KnotParams} KnotParams */
-/** @typedef {import('./api/contracts.js').KnotsRequest} KnotsRequest */
 /** @typedef {import('./api/contracts.js').BasisParams} BasisParams */
-/** @typedef {import('./api/contracts.js').BasisRequest} BasisRequest */
-/** @typedef {import('./api/contracts.js').SetReferenceRequest} SetReferenceRequest */
-/** @typedef {import('./api/contracts.js').ShapeRangeRequest} ShapeRangeRequest */
 /** @typedef {import('./api/contracts.js').StageRequest} StageRequest */
 
 const PROFILE_ESTIMATE_LABELS = { p: "p_hat", theta: "theta_hat" };
@@ -267,49 +263,6 @@ export function refitPendingTransition(count) {
     path: "/refit_pending",
     payload: {}
   };
-}
-
-/**
- * The same change refitted at once, through its operation's own route, as
- * Settings' "Refit after every structural change" asks. Python stages it and
- * refits every waiting change in one fit: one step, which one Undo takes
- * back, refused with the operation's own sentences. Collapse and ungroup act
- * on the selection Python holds, the one their levels were read from.
- * @param {{name:string, payload:StageRequest}} staged a descriptor from stageCollapse,
- *   stageUngroup, stageReference, stageShapeRange, stageSpecial, stageOnCurve, stageKnots
- *   or stageBasis
- * @returns {{name:string, path:string,
- *   payload:{term:string, method:string}|SetReferenceRequest|ShapeRangeRequest
- *     |SpecialLevelsRequest|KnotsRequest|BasisRequest}}
- */
-export function refitAtOnceTransition({ name, payload: { operation, term, params } }) {
-  const method = "auto";
-  switch (operation) {
-    case "collapse":
-      return { name, path: "/collapse_levels", payload: { term, method } };
-    case "ungroup":
-      return { name, path: "/ungroup_levels", payload: { term, method } };
-    case "set_reference":
-      return { name, path: "/set_reference", payload: { term, level: params.level, method } };
-    case "special":
-    case "on_curve": {
-      const levels = /** @type {string[]} */ (params.levels);
-      const special = operation === "special";
-      return { name, path: "/special_levels", payload: { term, levels, special, method } };
-    }
-    case "knots": {
-      const knots = /** @type {KnotParams} */ (params);
-      return { name, path: "/knots", payload: { term, params: knots, method } };
-    }
-    case "basis": {
-      const basis = /** @type {BasisParams} */ (params);
-      return { name, path: "/basis", payload: { term, params: basis, method } };
-    }
-    default: {
-      const { lo, hi, degree, join } = params;
-      return { name, path: "/shape_range", payload: { term, lo, hi, degree, join, method } };
-    }
-  }
 }
 
 /** @returns {{name:string, path:string, payload:EmptyStructuralRequest}} */

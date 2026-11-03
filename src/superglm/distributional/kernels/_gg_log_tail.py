@@ -229,17 +229,6 @@ def gg_log_tail(w, q, upper, order, out, scratch):
 
 
 @njit(cache=True)
-def _composed_rows(w, q, upper, order, out):
-    scratch = np.empty((_ROWS, _N))
-    flat = scratch.reshape(_ROWS * _N)
-    for row in range(w.shape[0]):
-        if math.isfinite(w[row]) and math.isfinite(q[row]) and q[row] != 0.0:
-            _composed_log_tail(w[row], q[row], upper[row], order, out[row], flat)
-        else:
-            _fill_nan(out[row])
-
-
-@njit(cache=True)
 def _log_tail_rows(w, q, upper, order, out):
     scratch = np.empty((_ROWS, _N))
     for row in range(w.shape[0]):

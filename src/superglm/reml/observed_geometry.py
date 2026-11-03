@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import os
+import warnings
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -17,7 +19,6 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_centered import centered_gram_rhs
-from superglm._roundoff import gamma as _gamma
 from superglm.distributions import (
     _VARIANCE_FLOOR,
     Binomial,
@@ -49,6 +50,43 @@ from superglm.reml.penalty_algebra import (
     penalty_product_rounding,
     total_penalty_matvec,
 )
+from superglm.solvers._structured.assembly import (
+    build_augmented_structured_factor,
+    build_penalized_structured_operator,
+)
+from superglm.solvers._structured.balance_tree import (
+    ProfiledSumToZeroTreeFactor,
+    SumToZeroLeafSystem,
+    SumToZeroPenalizedOperator,
+    SumToZeroTreeFactor,
+)
+from superglm.solvers._structured.block_leaves import (
+    FactorSmoothLeafFactor,
+    FactorSmoothLeafSystem,
+    FactorSmoothPenalizedOperator,
+    ProfiledFactorSmoothLeafFactor,
+)
+from superglm.solvers._structured.layout import (
+    get_structured_layout,
+)
+from superglm.solvers._structured.moments import (
+    NestedStructuredSystem,
+    build_structured_system,
+)
+from superglm.solvers._structured.nested import (
+    NestedSchurFactor,
+    ProfiledNestedSchurFactor,
+)
+from superglm.solvers._structured.operators import (
+    BlockSymmetricOperator,
+    CenteredBlockOperator,
+    CompactSymmetricOperator,
+    SumToZeroBlockOperator,
+    compact_operator_diagonal,
+)
+from superglm.solvers._structured.state import (
+    centred_data_operator,
+)
 from superglm.solvers.centered_system import (
     TabmatCenteringState,
     build_centered_system,
@@ -65,36 +103,11 @@ from superglm.solvers.mode_score import (
 )
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import decompose_factor, decompose_gram, needs_factor_certification
-from superglm.solvers.structured import (
-    BlockSymmetricOperator,
-    CenteredBlockOperator,
-    CompactSymmetricOperator,
-    FactorSmoothLeafFactor,
-    FactorSmoothLeafSystem,
-    FactorSmoothPenalizedOperator,
-    NestedSchurFactor,
-    NestedStructuredSystem,
-    ProfiledFactorSmoothLeafFactor,
-    ProfiledNestedSchurFactor,
-    ProfiledSumToZeroTreeFactor,
-    SumToZeroBlockOperator,
-    SumToZeroLeafSystem,
-    SumToZeroPenalizedOperator,
-    SumToZeroTreeFactor,
-    build_augmented_structured_factor,
-    build_penalized_structured_operator,
-    build_structured_system,
-    centred_data_operator,
-    compact_operator_diagonal,
-    get_structured_layout,
-)
 from superglm.types import GroupSlice, PenaltyComponent
 
 
 def _readonly(values: NDArray, *, dtype: Any = np.float64) -> NDArray:
-    # Every caller passes either a newly computed array or an already-frozen
-    # centered-system array.  Avoid duplicating O(n) curvature rows and O(p²)
-    # geometry at this short-lived outer-iteration boundary.
+    # Callers pass fresh or already-frozen arrays, so no copy is needed.
     result = np.asarray(values, dtype=dtype)
     result.setflags(write=False)
     return result
@@ -166,9 +179,7 @@ def _variance_third_derivative(distribution: Any, mu: NDArray) -> NDArray:
             )
         result = protocol(mu)
     result = np.asarray(result, dtype=np.float64)
-    # Split for the same reason as `_deriv4_inverse`: only a custom
-    # `variance_third_derivative` can return the wrong shape, and that is the
-    # family's protocol broken, not something this mu did.
+    # As in `_deriv4_inverse`: a wrong shape is a custom family's bug.
     if result.shape != mu.shape:
         raise ValueError(
             "distribution.variance_third_derivative must return an array shaped like mu"
@@ -349,16 +360,11 @@ def observed_row_error_scale(
 ) -> NDArray:
     """Per-row scale ``e_r >= |w_r|`` of the rounding in the observed rows ``observed``.
 
-    One-engine design §3.3 and signed-rows note §1: an observed row is formed
-    as ``w0 (u^2/V + (y - mu) (a - b))`` with ``a = u^2 V'/V^2`` and ``b =
-    v/V``, so its computed value is accurate to a few ulps of ``w0 (|u^2/V| +
-    |y - mu| (|a| + |b|))``, not of ``|w|``: where the terms cancel (``a - b``
-    vanishes identically on a canonical pair, the whole row on a zero weight)
-    the rounding sits at the scale of the terms.
-    The closed-form log-link rows of ``_compute_observed_row_bundle`` are sums
-    of non-negative terms, so there ``e = w``.  The factor charges its running
-    error bound with ``sum_r e_r`` (``moments._nested_pass``).  Never below
-    ``|observed|``, so the scale bounds the row itself.
+    A row ``w0 (u^2/V + (y - mu) (a - b))``, ``a = u^2 V'/V^2``, ``b = v/V``,
+    is accurate to a few ulps of ``w0 (|u^2/V| + |y - mu| (|a| + |b|))``, not
+    of ``|w|``, since the terms can cancel. The closed-form log-link rows are
+    sums of non-negative terms, so there ``e = w``. The factor charges its
+    error bound with ``sum_r e_r`` (``moments._nested_pass``).
     """
     y, mu, eta, sample_weight = _validate_rows(y, mu, eta, sample_weight)
     observed = np.asarray(observed, dtype=np.float64)
@@ -383,7 +389,6 @@ def observed_row_error_scale(
 
 
 REMLCurvature = Literal["fisher", "observed"]
-SCOPREMLCurvature = REMLCurvature
 
 _BUILTIN_REML_DISTRIBUTIONS = (
     Gaussian,
@@ -437,6 +442,38 @@ def _builtin_fisher_equals_observed(distribution: Any, link: Any) -> bool:
     return False
 
 
+# Frames under this directory are superglm's own; a warning skips them to land
+# on the caller's line.
+_PACKAGE_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# The 0.41.0 name of ``reml_curvature``, still honoured: same argument, same
+# 'fisher' or 'observed' answer.
+_LEGACY_CURVATURE_HOOK = "scop_reml_curvature"
+_warned_legacy_curvature: set[type] = set()
+
+
+def _curvature_hook(owner: Any, hook_name: str) -> Any:
+    """``owner``'s curvature declaration, reading the 0.41.0 name where only it exists."""
+    hook = getattr(owner, hook_name, None)
+    if callable(hook) or hook_name != "reml_curvature":
+        return hook
+    legacy = getattr(owner, _LEGACY_CURVATURE_HOOK, None)
+    if not callable(legacy):
+        return None
+    owner_type = type(owner)
+    if owner_type not in _warned_legacy_curvature:
+        _warned_legacy_curvature.add(owner_type)
+        warnings.warn(
+            f"{owner_type.__name__} declares its REML curvature through "
+            f"{_LEGACY_CURVATURE_HOOK}, which the retired SCOP shape engine read; the "
+            "hook is now reml_curvature, with the same argument and values. Rename "
+            f"{_LEGACY_CURVATURE_HOOK} to reml_curvature to silence this warning.",
+            FutureWarning,
+            skip_file_prefixes=(_PACKAGE_DIRECTORY,),
+        )
+    return legacy
+
+
 def _explicit_curvature_protocol(
     distribution: Any,
     link: Any,
@@ -445,10 +482,10 @@ def _explicit_curvature_protocol(
     description: str,
 ) -> REMLCurvature | None:
     declarations: list[str] = []
-    distribution_hook = getattr(distribution, hook_name, None)
+    distribution_hook = _curvature_hook(distribution, hook_name)
     if callable(distribution_hook):
         declarations.append(str(distribution_hook(link)))
-    link_hook = getattr(link, hook_name, None)
+    link_hook = _curvature_hook(link, hook_name)
     if callable(link_hook):
         declarations.append(str(link_hook(distribution)))
     if not declarations:
@@ -484,21 +521,13 @@ def classify_reml_curvature(distribution: Any, link: Any) -> REMLCurvature:
 def classify_binned_reml_curvature(distribution: Any, link: Any) -> REMLCurvature:
     """The REML curvature of the binned (``discrete=True``) route: a function of family and link.
 
-    Observed where the exact route's is (``classify_reml_curvature``) and
-    the pair is declared to have observed working rows that stay
-    non-negative in floating point (``concave_observed_rows``: Gamma/log,
-    Tweedie/log, NB2/log, binomial probit and cloglog).  The performance
-    iteration fits a working linear model, which needs non-negative
-    weights; penalized quasi-likelihood works with the expected information
-    for that reason, and the two coincide only for canonical links (Wood,
-    Pya & Saefken 2016, JASA 111(516)).  Every other pair is Fisher in the
-    optimizer and in the published criterion: the canonical pairs, where
-    the two are equal; Gaussian/log and binomial/cauchit, whose observed
-    rows go negative; binomial/log, whose maximum can sit on the mean-space
-    boundary (the clip holds rows there, and an event row has no
-    curvature); every other non-canonical built-in pair, not yet declared
-    (Poisson/sqrt, Gamma/identity, Tweedie with a non-canonical power
-    link); and custom families and links, by default.
+    Observed where the exact route's is and the pair declares observed rows
+    that stay non-negative in floating point (``concave_observed_rows``:
+    Gamma/log, Tweedie/log, NB2/log, binomial probit and cloglog), since the
+    performance iteration's working linear model needs non-negative weights
+    (Wood, Pya & Saefken 2016, JASA 111(516)). Every other pair is Fisher,
+    including binomial/log, whose maximum can sit on the mean-space boundary,
+    and custom families and links.
     """
     from superglm.solvers.working_rows import concave_observed_rows
 
@@ -552,86 +581,6 @@ def validate_observed_derivative_capability(
         )
 
 
-def classify_scop_reml_curvature(distribution: Any, link: Any) -> SCOPREMLCurvature:
-    """Select the coefficient Hessian used by shape-constrained LAML.
-
-    Fisher rows are valid only for built-in combinations whose residual
-    curvature term vanishes analytically.  Other built-in combinations use
-    exact order-zero observed rows.  Custom families or links must opt in via
-    ``scop_reml_curvature(counterpart)`` so an unverified Fisher approximation
-    can never be presented as Pya--Wood geometry.
-    """
-    distribution_is_builtin = type(distribution) in _BUILTIN_REML_DISTRIBUTIONS
-    link_is_builtin = type(link) in _BUILTIN_REML_LINKS
-    if distribution_is_builtin and link_is_builtin:
-        return "fisher" if _builtin_fisher_equals_observed(distribution, link) else "observed"
-
-    declared = _explicit_curvature_protocol(
-        distribution,
-        link,
-        hook_name="scop_reml_curvature",
-        description="SCOP REML",
-    )
-    if declared is not None:
-        return declared
-    raise NotImplementedError(
-        "custom family/link combinations require an explicit SCOP REML curvature protocol; "
-        "define scop_reml_curvature(counterpart) returning 'fisher' or 'observed'"
-    )
-
-
-def compute_scop_observed_information_weights(
-    distribution: Any,
-    link: Any,
-    y: NDArray,
-    mu: NDArray,
-    eta: NDArray,
-    sample_weight: NDArray,
-) -> NDArray:
-    """Return exact non-negative observed rows supported by SCOP moment kernels."""
-    y, mu, eta, sample_weight = _validate_rows(y, mu, eta, sample_weight)
-    distribution_hook = getattr(distribution, "scop_observed_information_weights", None)
-    link_hook = getattr(link, "scop_observed_information_weights", None)
-    if callable(distribution_hook) and callable(link_hook):
-        raise ValueError("family and link both define SCOP observed-information row protocols")
-    if callable(distribution_hook):
-        observed = distribution_hook(link, y, mu, eta, sample_weight)
-    elif callable(link_hook):
-        observed = link_hook(distribution, y, mu, eta, sample_weight)
-    else:
-        observed = compute_observed_information_weights(
-            distribution,
-            link,
-            y,
-            mu,
-            eta,
-            sample_weight,
-        )
-    observed = np.asarray(observed, dtype=np.float64)
-    if observed.shape != y.shape or not np.all(np.isfinite(observed)):
-        raise ValueError("SCOP observed-information rows must be finite and match y")
-    if np.any(observed < 0.0):
-        # A row whose terms cancel (a binomial/log event row's is zero) is
-        # computed to the rounding of its terms' sizes (``observed_row_error_scale``),
-        # so its sign there is the platform's rounding (-1.1e-16 and -2.2e-16 on
-        # the macOS, Windows and ARM64 runners).  The generic row ``w (u^2/V +
-        # (y - mu)(u^2 V'/V^2 - v/V))`` takes about ten roundings for ``a =
-        # u^2 V'/V^2``, four for ``b = v/V``, five more for ``a - b``, ``y - mu``,
-        # the product, the sum and ``w``, and ``u``, ``v`` and ``mu`` each carry
-        # one library call's own error, 22 in all: within ``gamma_22`` of that
-        # scale the row is zero.  A row negative beyond it is signed and refused.
-        scale = observed_row_error_scale(distribution, link, y, mu, eta, sample_weight, observed)
-        rounding = (observed < 0.0) & (-observed <= _gamma(22) * scale)
-        observed = np.where(rounding, 0.0, observed)
-        if np.any(observed < 0.0):
-            minimum = float(np.min(observed))
-            raise ValueError(
-                "signed observed-information rows are not supported by the current stable SCOP "
-                f"moment kernels (minimum row={minimum:.3e})"
-            )
-    return observed
-
-
 @dataclass(frozen=True)
 class ObservedREMLGeometry:
     """Observed slope geometry after stable profiling of the intercept."""
@@ -652,19 +601,14 @@ class ObservedREMLGeometry:
 
 @dataclass(frozen=True)
 class ObservedModeScore:
-    """Penalized likelihood score and a unitless KKT residual (one-engine design §3.8, §3.9).
+    """Penalized likelihood score and a unitless KKT residual.
 
-    ``relative_max`` is the certificate's score: the bar the score was taken
-    at (``observed_penalized_mode_score``'s ``bar``, which every REML caller
-    sets to ``mode_score.mode_certification_bar(reml_tol)``) times the largest
-    ``relative / bar_effective`` over the intercept and the identified slopes,
-    so it exceeds that bar exactly when the mode is not certified
-    (``mode_score.ModeResidual.ratio``).
-    ``raw_relative_max`` is the largest relative score over every coefficient,
-    weakly identified ones included; ``weakly_identified`` holds the slope
-    indices flagged and kept (§3.9); ``floor_binding`` says a derived
-    backward-error floor raised the bar for an identified coefficient, which
-    the fit discloses.
+    ``relative_max`` is the bar times the largest ``relative / bar_effective``
+    over the intercept and identified slopes, so it exceeds the bar exactly
+    when the mode is not certified. ``raw_relative_max`` covers every
+    coefficient; ``weakly_identified`` holds the slopes flagged and kept;
+    ``floor_binding`` says a backward-error floor raised the bar for an
+    identified coefficient, which the fit discloses.
     """
 
     intercept: float
@@ -685,13 +629,10 @@ OBSERVED_PIRLS_TOL_CEILING = 1e-10
 def observed_mode_certification_bar() -> float:
     """The bar at the default REML tolerance: ``mode_score.MODE_CERTIFICATION_BAR``.
 
-    ``observed_penalized_mode_score`` uses it only when no ``bar`` is passed.
-    Every REML driver and the terminal refit pass the tolerance-derived bar
-    ``mode_score.mode_certification_bar(reml_tol)`` (``REML_TOL_BAR_RATIO``
-    times ``reml_tol``, clipped; one-engine design §3.8), one bar for the
-    PIRLS stop and the certificate of that fit, so ``reml_tol`` moves the bar
-    and ``pirls_tol`` does not: a point that certified as a candidate cannot
-    fail publication solely because the caller tightened ``pirls_tol``.
+    Used only when no ``bar`` is passed. REML callers pass
+    ``mode_score.mode_certification_bar(reml_tol)``, one bar for the PIRLS
+    stop and the certificate, so ``reml_tol`` moves it and ``pirls_tol`` does
+    not.
     """
     from superglm.solvers.mode_score import MODE_CERTIFICATION_BAR
 
@@ -701,23 +642,10 @@ def observed_mode_certification_bar() -> float:
 def stopped_on_iteration_budget(result: Any) -> bool:
     """Did PIRLS stop short of its certificate without a structural failure?
 
-    PIRLS stops on the certificate's own score (``convergence="mode_score"``,
-    one-engine design §3.8), so ``converged`` IS the certificate at the mode
-    it returns.  It can stop short of the bar two ways that say nothing
-    structural about the point: the iteration budget ran out
-    (``"max_iter"``), the objective line search found no descent left
-    (``"step_rejected"``), or the score stopped contracting
-    (``"score_stagnated"``): the last two are where an iterate at its
-    limiting accuracy ends.  Both hand an uncertified mode on, and the caller
-    discloses it as not converged; it is never refused (owner decision 3,
-    2026-09-30).
-
-    Every OTHER termination reason names something the mode score cannot
-    judge -- an infeasible constrained mode, a missing inner-QP KKT
-    certificate, a non-finite deviance, a state outside the link's domain --
-    and keeps its own door.
-
-    ``reml/scop_efs.py`` runs its own criterion and does not defer here.
+    True for ``"max_iter"``, ``"step_rejected"`` and ``"score_stagnated"``:
+    an uncertified mode the caller discloses as not converged, never refuses.
+    Every other termination reason is something the mode score cannot judge
+    and keeps its own handling.
     """
     return result.termination_reason in ("max_iter", "step_rejected", "score_stagnated")
 
@@ -725,49 +653,28 @@ def stopped_on_iteration_budget(result: Any) -> bool:
 class ObservedGeometryInfeasibleError(ValueError):
     """No usable observed geometry exists AT THIS ITERATE.
 
-    Non-finite observed rows, a non-positive intercept curvature, an
-    indefinite penalized Hessian: statements about the coefficients that were
-    handed in, which a shorter step or a different lambda can clear. A caller
-    sweeping many points reads this as "no penalized mode here" and routes
-    around the point instead of failing the fit.
-
-    A caller-contract violation -- a misshapen design, a ``derivative_order``
-    outside 0-2, a penalty that is not PSD -- deliberately stays a bare
-    ``ValueError``. No iterate can clear one, and reporting it as a point the
-    fit could not reach buries the bug that caused it.
-
-    Subclasses ``ValueError`` so existing handlers keep working.
+    Non-finite observed rows, a non-positive intercept curvature or an
+    indefinite penalized Hessian: a shorter step or another lambda can clear
+    it, so a sweeping caller routes around the point. A caller-contract
+    violation (misshapen design, non-PSD penalty) stays a bare ``ValueError``.
     """
 
 
 class ObservedModeNotCertifiedError(RuntimeError):
     """The penalized mode is not accurate enough to differentiate through.
 
-    Raised where observed REML geometry needs implicit differentiation and the
-    achieved mode score misses the certification bar. This is a statement about
-    one ``(data, power, lambda)`` point, not about the model: a power search can
-    meet the bar comfortably across most of its range and miss it at isolated
-    powers. Callers that evaluate many
-    such points should treat it as an infeasible point rather than a failure,
-    which is why it is distinguishable from a bare ``RuntimeError``.
-
-    Subclasses ``RuntimeError`` so existing handlers keep working.
+    Raised when observed REML geometry needs implicit differentiation and the
+    mode score misses the certification bar. It concerns one ``(data, power,
+    lambda)`` point, not the model, so a caller evaluating many points treats
+    it as an infeasible point. Subclasses ``RuntimeError``.
     """
 
     def __init__(self, relative_max: float, tolerance: float, *, hint: str = "") -> None:
         self.relative_max = float(relative_max)
         self.tolerance = float(tolerance)
         self.hint = hint
-        # The body stays family-agnostic. Observed geometry is the DEFAULT here
-        # -- only canonical-link pairs take the Fisher branch -- so this reaches
-        # gamma/log, gaussian/log, poisson/sqrt, nb2/log, binomial/probit and
-        # every custom link. Advice naming one family's parameters would be
-        # wrong for most callers who see it, so a family-specific `hint` is
-        # supplied by the raise site, which holds the distribution.
-        #
-        # Deliberately absent everywhere: "loosen or tighten `tol`". The achieved
-        # score is set by conditioning and does not move with it, and tightening
-        # used to make matters strictly worse by raising this bar in step.
+        # Family-agnostic: the raise site, which holds the distribution, adds
+        # any family `hint`. No `tol` advice: conditioning sets the score.
         message = (
             "REML could not certify the penalized coefficient mode: score "
             f"{self.relative_max:.3e} exceeds the {self.tolerance:.3e} needed to "
@@ -789,28 +696,13 @@ _NO_MODE_DETAIL = "no converged penalized mode"
 class ObservedModeNotConvergedError(ObservedModeNotCertifiedError):
     """No mode score exists here, as opposed to one that missed the bar.
 
-    That is the operational difference from the parent, and it is what both
-    consumers branch on: the parent carries a finite ``relative_max`` (a score
-    was computed and fell short), this pins it non-finite (there is no score to
-    quote). ``profile_ops`` and the Tweedie profile both test
-    ``np.isfinite(relative_max)`` to choose between quoting a number and
-    describing a condition.
-
-    To a power search the two are one situation -- this point yields no REML
-    objective we are entitled to report -- so this subclasses the certification
-    error and every handler that routes the parent around routes this too. It
-    is NOT a plain ``RuntimeError`` sibling, deliberately: ``optimize_direct_reml``
-    raises bare ``RuntimeError`` for genuine invariant violations that must
-    propagate, so no caller should ever be tempted into a blanket catch.
-
-    Why there is no score splits two ways, and the split is published. Most
-    raise sites mean PIRLS never reached a mode, which is what the default
-    wording says. The rest reached a mode and could not form something from it
-    -- a geometry build, a mode score, the W(rho) correction. Those pass
-    ``infeasible_detail`` naming the stage that refused, because the default
-    otherwise asserts a PIRLS failure that did not happen, and that assertion
-    reaches the user through ``_publication_mode_failure``. Routing is
-    identical either way; only the published wording differs.
+    ``relative_max`` is non-finite here, finite on the parent; readers test
+    ``np.isfinite(relative_max)`` to choose between quoting a score and
+    describing a condition. A subclass of the certification error, so every
+    handler that routes the parent around routes this too, while bare
+    ``RuntimeError`` invariant violations still propagate.
+    ``infeasible_detail`` names the stage that refused when PIRLS did reach
+    a mode (a geometry build, a mode score, the W(rho) correction).
     """
 
     def __init__(
@@ -820,16 +712,11 @@ class ObservedModeNotConvergedError(ObservedModeNotCertifiedError):
         hint: str = "",
         infeasible_detail: str | None = None,
     ) -> None:
-        # No mode exists, so no score was achieved. The attributes exist so
-        # parent-typed handlers can format them; non-finite is the signal to
-        # describe the condition rather than quote a score.
+        # No score: the attributes exist for parent-typed handlers.
         self.relative_max = float("inf")
         self.tolerance = float("nan")
         self.hint = hint
-        # None, not a default string: readers resolve it with `or`, so "did this
-        # site override?" is structural. A value comparison against the default
-        # would have to be repeated at every reader and would silently split the
-        # two published surfaces if one reader was updated and the other was not.
+        # None, not the default string: readers resolve it with `or`.
         self.infeasible_detail = infeasible_detail
         body = message or (
             "observed REML requires a converged penalized coefficient mode "
@@ -843,9 +730,7 @@ class ObservedModeNotConvergedError(ObservedModeNotCertifiedError):
 def mode_certification_hint(distribution: Any) -> str:
     """Name a parameterisation the caller chose and could change, if one exists.
 
-    Returns empty for families with no such knob. A caller staring at a
-    conditioning failure is better served by silence than by a plausible remedy
-    that has not been shown to work.
+    Empty for families with no such knob: no untested remedy is offered.
     """
     if isinstance(distribution, Tweedie):
         return (
@@ -882,17 +767,12 @@ def observed_penalized_mode_score(
 ) -> ObservedModeScore:
     """Evaluate the full penalized score at a proposed Laplace mode.
 
-    Fisher scoring and Newton iteration target the same score root, but a
-    deviance-change stopping rule alone does not certify that the root is
-    accurate enough for implicit differentiation.  This residual is evaluated
-    from the retained coefficients and is scale-relative in both intercept and
-    slope equations, by ``mode_score.penalized_mode_residual``: centred rows by
-    type, a derived backward-error floor per coefficient, and the weakly
-    identified coefficients (and those the geometry's factor truncated as
-    such) flagged, kept and left out of the certificate (one-engine design
-    §3.8, §3.9).  PIRLS stops on the same quantity (``convergence="mode_score"``).
-    ``excluded`` adds the slopes the fit's Laplace approximation leaves out
-    (``reml.identified``) to that class.
+    A deviance-change stop does not certify the root accurately enough for
+    implicit differentiation. The residual (``mode_score.penalized_mode_residual``)
+    is scale-relative in intercept and slopes, with a backward-error floor per
+    coefficient; weakly identified coefficients, and the ``excluded`` slopes
+    the Laplace approximation leaves out, are flagged and kept out of the
+    certificate. PIRLS stops on the same quantity.
     """
     y = np.asarray(y, dtype=np.float64)
     sample_weight = np.asarray(sample_weight, dtype=np.float64)
@@ -914,13 +794,9 @@ def observed_penalized_mode_score(
     dmu_deta = np.asarray(link.deriv_inverse(geometry.eta), dtype=np.float64)
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         row_score = sample_weight * (y - geometry.mu) * dmu_deta / variance
-    # Nothing an accepted geometry certifies bounds this quotient. The build
-    # checks the observed rows, beta, and the weight sum -- different
-    # expressions over the same iterate -- while `stabilize_eta` leaves a sqrt
-    # eta as large as 6.7e153 and `clip_mu` hands Gaussian means back uncapped.
-    # A Gaussian/sqrt iterate at eta near 1e150 therefore keeps every observed
-    # row finite and still overflows this residual times a derivative. That is
-    # this point having no usable penalized mode, not a malformed call.
+    # An accepted geometry does not bound this quotient: finite observed rows
+    # can still overflow residual times derivative (Gaussian/sqrt at eta ~1e150),
+    # which means no usable mode at this point, not a malformed call.
     if not np.all(np.isfinite(row_score)):
         raise ObservedGeometryInfeasibleError("penalized mode score is not finite")
 
@@ -957,11 +833,9 @@ def observed_penalized_mode_score(
     excluded_mask[list(excluded_indices)] = True
     excluded_mask[np.asarray(excluded, dtype=np.intp)] = True
     bar = observed_mode_certification_bar() if bar is None else float(bar)
-    # The floors read the mode's intercept about mean_x and its centred rows
-    # X~ beta.  A centred state (design §3.8) reads them from its own alpha
-    # and (X - 1 c') beta and the offset of mean_x from c, formed on centred
-    # rows (``centre_offset_mean``); from the raw intercept and X beta they
-    # cancel c' beta at a column's offset, u |c' beta| in alpha and every row.
+    # The floors read the intercept about mean_x and the centred rows X~ beta.
+    # A centred state forms them from its own alpha and (X - 1 c') beta, since
+    # the raw ones cancel c' beta at a large offset.
     alpha_c = getattr(result, "centred_intercept", None)
     centre = getattr(result, "state_center", None)
     if alpha_c is None or centre is None:
@@ -1039,10 +913,9 @@ def _stable_signed_mean_pair(
 
     The mean is ``anchor + lo`` from the corrected two-pass algorithm
     (``mode_score.corrected_two_pass_pair``), never from large raw moments.
-    A ``DenseGroupMatrix`` column keeps the pair ``(anchor, lo)`` so its
-    rows centre as ``(x - hi) - lo`` (``centered_system.weighted_mean_pair``,
-    issue #430); every other column centres about the rounded mean, ``lo =
-    0``.  ``lo`` is ``None`` without a dense column.
+    A ``DenseGroupMatrix`` column keeps the pair so its rows centre as
+    ``(x - hi) - lo``; other columns centre about the rounded mean
+    (``lo = 0``). ``lo`` is ``None`` without a dense column.
     """
     anchor, offset_mean = _stable_signed_offset(dm, weights, sum_w)
     mean = anchor + offset_mean
@@ -1058,10 +931,8 @@ def _stable_signed_offset(
     """``(anchor, lo)``: the signed weighted mean as an exact pair, every column.
 
     The anchor is the rounded mean from a pass shifted by the first row that
-    carries weight, never row 0 as such: a zero-weight row 0 far from the
-    data set the remainder's scale (``x = [0, 1e16 - 2, 1e16, 1e16 + 2]`` at
-    ``w = [0, -0.1, 1, 1]`` read a centred Gram of 3.6 for 1.0526, and moving
-    that row last moved a Gaussian/log REML objective by 0.29).
+    carries weight, never row 0 as such: a zero-weight row far from the data
+    would set the remainder's scale.
     """
     if dm.p == 0:
         return np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.float64)
@@ -1079,19 +950,12 @@ def _stable_signed_offset(
 def schur_curvature_is_negative(eigenvalues: NDArray, certificate) -> bool:
     """Whether a structured factor's scaled Schur eigenvalues prove negative curvature.
 
-    ``eigenvalues`` are the computed eigenvalues of the factor's Jacobi-scaled
-    deflated border matrix and ``certificate`` its ``BorderCertificate``.  An
-    eigenvalue below minus ``certificate.curvature_floor(||Q_s||_2)`` (the
-    certified uncertainty ``tau`` plus the eigensolver's rounding, ``2 width
-    eps ||Q_s||_2``) is negative curvature the factor's own certificate calls
-    material.  The gate is the stricter of the two checks on that matrix,
-    not a copy of the factor's: its floor is below the factor's step-4 floor
-    ``tau + 2 n_live^2 eps`` whenever ``width ||Q_s||_2 < n_live^2``, and
-    step 4 tests the smallest Ritz value, which bounds the smallest
-    eigenvalue only from above.  It runs only on a factor step 4 accepted, so
-    it never admits what the factor refuses, and each refusal it adds
-    certifies an indefinite observed Hessian, which a certified maximum
-    cannot have.
+    ``eigenvalues`` are those of the factor's Jacobi-scaled deflated border
+    matrix, ``certificate`` its ``BorderCertificate``. An eigenvalue below
+    ``-certificate.curvature_floor(||Q_s||_2)`` (the certified uncertainty
+    ``tau`` plus eigensolver rounding ``2 width eps ||Q_s||_2``) is material
+    negative curvature. Run only on a factor its own check accepted, so each
+    refusal certifies an indefinite observed Hessian.
     """
     values = np.asarray(eigenvalues, dtype=np.float64)
     if not values.size:
@@ -1121,14 +985,11 @@ def build_observed_reml_geometry(
 ) -> ObservedREMLGeometry:
     """Build Wood's observed LAML Hessian without altering fit inference state.
 
-    Non-negative observed rows use the shared centered-system execution layer,
-    including its Tabmat/discrete kernels.  The uncommon negative-row case
-    uses bounded, compensated centered chunks; the final penalized curvature
-    must still be positive semidefinite for a valid Laplace mode.  A random
-    effect's nested chain (``structured_chain_group_indices``, ending with
-    ``structured_group_index``; a lone level is a chain of one) builds the
-    nested factor through the same refusal seams; a FactorSmooth term needs
-    no chain.
+    Non-negative rows use the shared centered-system execution layer; signed
+    rows use bounded, compensated centred chunks, and the penalized curvature
+    must still be PSD. A random effect's nested chain
+    (``structured_chain_group_indices``) builds the nested factor through the
+    same refusal seams.
     """
     y = np.asarray(y, dtype=np.float64)
     sample_weight = np.asarray(sample_weight, dtype=np.float64)
@@ -1140,9 +1001,8 @@ def build_observed_reml_geometry(
         if penalty.shape != (dm.p, dm.p) or not np.all(np.isfinite(penalty)):
             raise ValueError("penalty must be a finite square matrix in slope coordinates")
         penalty = 0.5 * (penalty + penalty.T)
-        # S is a Gaussian-prior precision and must be PSD.  The shared centered
-        # solver may project tiny round-off in a declared-PSD system, so reject a
-        # materially invalid penalty before entering that path.
+        # S is a Gaussian-prior precision: reject a materially non-PSD penalty
+        # before the centred solver projects away round-off.
         decompose_gram(penalty)
     elif (
         structured_group_index is None
@@ -1158,10 +1018,8 @@ def build_observed_reml_geometry(
         raise ValueError("derivative_order must be 0, 1, or 2")
 
     beta = np.asarray(result.beta, dtype=np.float64)
-    # A beta of the wrong width is a PIRLSResult fitted against some other
-    # design, which no iterate of this one could produce; non-finite entries
-    # are this iterate having diverged. Only the second is a point to route
-    # around.
+    # A wrong-width beta belongs to another design (a bug); a non-finite one
+    # is this iterate diverging, a point to route around.
     if beta.shape != (dm.p,):
         raise ValueError("result.beta must match the design columns")
     if not np.all(np.isfinite(beta)):
@@ -1171,14 +1029,9 @@ def build_observed_reml_geometry(
 
     eta = stabilize_eta(linear_predictor(dm, result, offset_arr), link)
     mu = link.inverse(eta)
-    # A binomial/log state certified on the model's own score
-    # (``PIRLSResult.mean_space_true_mode``) is the model's mode: its
-    # curvature and weight derivatives are the model's, at the unclipped mean.
-    # At the clip an event row below the floor, whose observed curvature is
-    # zero, read about -5e-5 at eta = -26 and -2e-2 at eta = -20.  A
-    # zero-weight row is no part of that mode (PIRLS never holds its eta in
-    # the mean space) and keeps the clip: unclipped, its mean can pass one,
-    # where the variance floor overflows its derivatives.
+    # A binomial/log mode certified on the model's own score
+    # (``mean_space_true_mode``) is read at the unclipped mean; only its
+    # zero-weight rows keep the clip, whose unclipped mean can pass one.
     if getattr(result, "mean_space_true_mode", False):
         held = ~(np.asarray(sample_weight, dtype=np.float64) > 0.0)
         if np.any(held):
@@ -1214,10 +1067,8 @@ def build_observed_reml_geometry(
             dominant_group_index=structured_group_index,
             chain_group_indices=structured_chain_group_indices,
         )
-        # Same split as the factor build below, one step earlier: the structured
-        # operators refuse non-finite blocks with a LinAlgError, and everything
-        # else they check -- slice widths, partitions, penalty geometry -- is a
-        # ValueError no iterate can cause and must stay bare.
+        # Structured operators raise LinAlgError for non-finite blocks (the
+        # iterate); their ValueErrors are caller bugs and stay bare.
         try:
             system = build_structured_system(
                 list(dm.group_matrices),
@@ -1236,25 +1087,14 @@ def build_observed_reml_geometry(
             raise ObservedGeometryInfeasibleError(
                 "structured observed geometry has no usable blocks at the fitted coefficients"
             ) from error
-        # The `sum_w` certified above is an fsum over scaled rows; the structured
-        # moments carry their own plain `np.sum` of the same rows, which is a
-        # different number. This branch is entered before the non-negative
-        # split, so signed observed rows under a non-canonical link can leave
-        # the two disagreeing in sign at the knife edge -- and it is this one
-        # that the centering divides by below and that the three profiled
-        # factors reject as a bare ValueError. So the quantity is tested where
-        # it is born rather than by retyping their refusal: their remaining
-        # checks (the augmented width, where the intercept sits) are invariants
-        # of the construction immediately below, and catching those would report
-        # an assembly bug here as a point the fit could not reach.
+        # The structured moments' own `sum_w` can differ in sign from the one
+        # certified above for signed rows; it is the one the centring divides
+        # by, so it is tested here rather than by retyping the factors' refusal.
         if not np.isfinite(system.sum_w) or system.sum_w <= 0.0:
             raise ObservedGeometryInfeasibleError(
                 "structured observed intercept curvature must have a positive finite sum"
             )
-        # The penalized operator is built from the same block types, so it
-        # carries the same split and needs the same seam. Reaching it takes more
-        # than the raw build does -- the penalized D is D + lambda*S, so the
-        # penalty term has to go non-finite too -- but it is the same one line.
+        # The penalized operator has the same block types and the same seam.
         try:
             penalized = build_penalized_structured_operator(
                 system,
@@ -1273,9 +1113,8 @@ def build_observed_reml_geometry(
         xtw[system.operator.structured_indices] = system.xtw_structured
         mean_x = xtw / system.sum_w
         if isinstance(system, FactorSmoothLeafSystem | SumToZeroLeafSystem):
-            # on the c0-shifted moments (design §3.2): the mode score's centred
-            # scale reads this diagonal, which the raw moments cancel to noise
-            # for a column with a large offset
+            # On the c0-shifted moments: the mode score's centred scale reads
+            # this diagonal, which raw moments cancel to noise at a large offset.
             data_gram = centred_data_operator(system)
             raw = data_gram.raw
             small, local = (
@@ -1304,29 +1143,11 @@ def build_observed_reml_geometry(
                 total=system.sum_w,
                 center=mean_x,
             )
-        # This construction is where the structured path actually refuses an
-        # iterate: the sum-to-zero and Schur factors reject a level whose local
-        # curvature is negative or non-finite while they are being built, before
-        # any factor object exists to carry a flag. Under a non-canonical link
-        # the observed rows carry a signed residual term, so a mid-line-search
-        # beta reaches that refusal routinely.
-        #
-        # Those factors speak two dialects, and only one of them is about this
-        # iterate. LinAlgError is what they raise for what the numbers did, and
-        # they raise it ahead of the structural checks a non-finite block would
-        # otherwise trip. That ordering is load-bearing and it is now uniform:
-        # every operator and factor on this branch -- sum-to-zero and block
-        # alike, raw and penalized -- tests its blocks for finiteness before it
-        # tests them for symmetry, because a NaN fails `np.allclose` against its
-        # own transpose and would otherwise be reported as an asymmetric block.
-        #
-        # Their plain ValueErrors say something else entirely: partitions that
-        # disagree, a C of the wrong shape, level labels that do not match K.
-        # Unlike the dense build below this branch runs with `penalty is None`,
-        # where the preamble has checked only that the compact inputs are
-        # PRESENT and nothing about their shapes, so catching ValueError here
-        # (LinAlgError subclasses it) would relabel a misassembled operator as a
-        # point the fit could not reach and bury it.
+        # The factors refuse a level with negative or non-finite curvature by
+        # LinAlgError, raised before any structural check (finiteness before
+        # symmetry, since NaN fails `np.allclose`). Their plain ValueErrors are
+        # misassembled inputs, which the preamble does not check here, so only
+        # LinAlgError is retyped as an infeasible point.
         try:
             augmented_factor, _ = build_augmented_structured_factor(system, penalized)
         except np.linalg.LinAlgError as error:
@@ -1334,11 +1155,9 @@ def build_observed_reml_geometry(
                 "the structured solver refused the observed REML coefficient Hessian "
                 f"({error}); the fitted coefficients do not define a valid Laplace mode"
             ) from error
-        # The unsupported-geometry guard runs ahead of the eigencheck, so an
-        # unrecognised factor reaches the TypeError that names it rather than
-        # an AttributeError.  Every factor exposes its curvature on the
-        # Jacobi-scaled Schur complement where its rank decisions are taken
-        # (§3.7).
+        # Guard before the eigencheck, so an unknown factor gets a TypeError
+        # naming it. Curvature is read on the Jacobi-scaled Schur complement,
+        # where the factor takes its rank decisions.
         if not isinstance(  # pragma: no cover - structured dispatch invariant
             augmented_factor,
             FactorSmoothLeafFactor | SumToZeroTreeFactor | NestedSchurFactor,
@@ -1347,9 +1166,7 @@ def build_observed_reml_geometry(
         try:
             schur_eigenvalues = augmented_factor.scaled_schur_eigenvalues()
         except np.linalg.LinAlgError as error:
-            # An eigensolver that will not converge on this Schur complement
-            # is a statement about the iterate's curvature, not about the
-            # call, so it scores the point infeasible rather than escaping.
+            # Non-convergence here describes the iterate's curvature: infeasible.
             raise ObservedGeometryInfeasibleError(
                 "observed REML Schur complement has no usable eigendecomposition "
                 "at the fitted coefficients"
@@ -1404,15 +1221,8 @@ def build_observed_reml_geometry(
     if nonnegative:
         if penalty is None:  # pragma: no cover - dense branch invariant
             raise RuntimeError("Dense observed geometry is missing its penalty.")
-        # Retyping whatever this call refuses is safe only because the preamble
-        # above has already checked every caller-supplied thing it validates --
-        # the row count against `dm.n`, the penalty's shape, its PSD-ness. What
-        # is left for it to reject belongs to the iterate: working weights that
-        # are not finite or not non-negative, or a weight sum that collapses.
-        # The same argument licenses the blanket wrap at the factor
-        # certification below, and nowhere else in this function -- the
-        # structured build above catches only LinAlgError precisely because no
-        # such preamble stands behind it.
+        # The preamble has validated every caller input this call checks, so
+        # what it can still refuse belongs to the iterate; retyping is safe.
         try:
             centered = build_centered_system(
                 dm=dm,
@@ -1434,9 +1244,7 @@ def build_observed_reml_geometry(
         if penalty is None:  # pragma: no cover - dense branch invariant
             raise RuntimeError("Dense observed geometry is missing its penalty.")
         mean_x, centre, centre_lo = _stable_signed_mean_pair(dm, observed_w, sum_w)
-        # No retype seam on this branch: `centered_gram_rhs` validates shapes
-        # only -- two row counts and a column count this function supplies
-        # itself -- so it has nothing iterate-conditioned left to refuse.
+        # No retype: `centered_gram_rhs` checks only shapes supplied here.
         data_gram, _ = centered_gram_rhs(
             dm=dm,
             W=observed_w,
@@ -1454,10 +1262,7 @@ def build_observed_reml_geometry(
             "the fitted coefficients do not define a valid Laplace mode"
         ) from error
     if nonnegative and needs_factor_certification(decomposition):
-        # The same licence as the centered-system wrap above: this factor is
-        # assembled from rows and a penalty the preamble has already validated,
-        # so a non-finite factor or a retained basis that will not resolve
-        # describes the weighted geometry at these coefficients.
+        # As above: the inputs are validated, so a refusal is the iterate's.
         try:
             factor_certified = decompose_factor(
                 grouped_augmented_factor(

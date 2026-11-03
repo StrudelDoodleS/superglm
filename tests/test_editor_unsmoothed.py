@@ -16,7 +16,7 @@ from superglm.editor import unsmoothed as unsmoothed_module
 from superglm.editor.errors import EditorValueError
 from superglm.editor.payloads import session_payload
 from superglm.editor.unsmoothed import unsmoothed_job, unsmoothed_lambdas
-from tests.test_editor import _post_json
+from tests.test_editor import _post_json, _post_refit_at_once
 from tests.test_editor_special_levels import (
     BANDS,
     _book,
@@ -127,7 +127,7 @@ def test_the_line_is_kept_through_a_hand_edit_and_dropped_by_a_refit(spline_book
         reference = next(
             level for level in ("A", "B", "C") if level != model._specs["area"]._base_level
         )
-        _post_json(f"{widget.url}/set_reference", {"term": "area", "level": reference})
+        _post_refit_at_once(widget, "set_reference", "area", {"level": reference})
         assert session.model is not model
         again = _post_json(f"{widget.url}/unsmoothed", {"term": "age"})
         assert again["fit_token"] == widget._state()["fit_token"] != token

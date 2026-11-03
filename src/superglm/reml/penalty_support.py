@@ -101,17 +101,12 @@ def _validated_matrix(matrix: NDArray) -> NDArray:
 def _gapped_rank_mask(retained: NDArray, rcond: float) -> NDArray:
     """Keep the eigenvalues above ``rcond * max``, refusing a cut without a gap.
 
-    The Gram cut in ``decompose_gram`` sits at the eigensolver's resolution
-    ``p(n) eps ||A||_2`` (LAPACK Users' Guide, 3rd ed., sec. 4.7). A penalty
-    formed as a product, such as a spline penalty restricted by boundary
-    constraints, carries its own formation round-off in its exact null space
-    at that same scale, so the floor cut decides the sign of that round-off
-    and the rank can differ between BLAS builds. A numerical rank is
-    well-determined only inside a gap of the spectrum (Golub, Klema and
-    Stewart, Stanford TR STAN-CS-76-559, 1976; Golub and Van Loan, Matrix
-    Computations, 4th ed., 2013, sec. 5.4.1): here no retained eigenvalue may
-    lie within ``certification_band`` of the cut on either side, otherwise
-    ``PenaltyNumericalError`` asks the caller for its own fallback.
+    The Gram cut sits at the eigensolver's resolution ``p(n) eps ||A||_2`` (LAPACK Users' Guide,
+    3rd ed., sec. 4.7), the scale of a product-formed penalty's round-off in its null space, so
+    a floor cut would decide that round-off's sign per BLAS build. A numerical rank is
+    well-determined only inside a spectral gap (Golub, Klema and Stewart 1976; Golub and Van
+    Loan, 4th ed., sec. 5.4.1): no retained eigenvalue may lie within ``certification_band`` of
+    the cut, else ``PenaltyNumericalError`` asks the caller for its own fallback.
     """
     from superglm.solvers.rank import SHARED_RANK_POLICY
 

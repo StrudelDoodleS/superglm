@@ -444,9 +444,15 @@ def certify_terminal_rank(
     info = dict(certified.grey_subspace or {})
     if info.get("capped") or info.get("projection_failed"):
         certified = replace(decision.decomposition, grey_subspace=info)
+    # A rank-deficient decision reports the condition before truncation, which a
+    # formed factorisation that stopped at its first rejected pivot does not measure.
+    condition = float(certified.pre_truncation_condition)
+    if certified.rank == certified.width or not math.isfinite(condition):
+        condition = decision.telemetry.condition_estimate
     telemetry = replace(
         decision.telemetry,
         rank=int(certified.rank),
+        condition_estimate=condition,
         grey_k=int(info.get("k", 0.0)),
         certified=bool(info.get("certified", 0.0)),
     )

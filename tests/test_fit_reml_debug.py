@@ -4,7 +4,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from superglm import Constraint, LambdaPolicy, PSpline, SuperGLM
+from superglm import Constraint, PSpline, SuperGLM
 
 
 @pytest.fixture(autouse=True)
@@ -22,12 +22,12 @@ def _make_demo_data() -> tuple[pd.DataFrame, object]:
     return x, y
 
 
-def _make_scop_model() -> SuperGLM:
+def _make_constrained_model() -> SuperGLM:
     return SuperGLM(
         family="gaussian",
         selection_penalty=0.0,
         discrete=True,
-        features={"x": PSpline(n_knots=8, constraint=Constraint.fit.convex, shape_engine="scop")},
+        features={"x": PSpline(n_knots=8, constraint=Constraint.fit.convex)},
     )
 
 
@@ -47,7 +47,7 @@ def test_debug_level_zero_emits_no_reml_trace(tmp_path: Path, monkeypatch):
     set_debug_level(0)
 
     x, y = _make_demo_data()
-    model = _make_scop_model()
+    model = _make_constrained_model()
     model.fit_reml(x, y, max_reml_iter=4)
 
     assert not list(tmp_path.glob("*run.json"))
@@ -273,179 +273,6 @@ def test_terminal_trace_and_logging_failures_cannot_escape_after_install(monkeyp
     assert model._fit_revision == 1
 
 
-def test_debug_level_two_writes_reml_trace_files(tmp_path: Path, monkeypatch):
-    from superglm._debug import set_debug_level
-
-    monkeypatch.setenv("SUPERGLM_DEBUG_DIR", str(tmp_path))
-    set_debug_level(2)
-
-    x, y = _make_demo_data()
-    model = _make_scop_model()
-    model.fit_reml(x, y, max_reml_iter=4)
-
-    run_files = list(tmp_path.glob("*run.json"))
-    reml_files = list(tmp_path.glob("*reml.jsonl"))
-    pirls_files = list(tmp_path.glob("*pirls.jsonl"))
-    scop_files = list(tmp_path.glob("*scop.jsonl"))
-
-    assert run_files
-    assert reml_files
-    assert pirls_files
-    assert scop_files
-
-    run_payload = json.loads(run_files[0].read_text(encoding="utf-8"))
-    assert run_payload["debug_level"] == 2
-    assert run_payload["method"] == "fit_reml"
-
-    reml_rows = [
-        json.loads(line)
-        for line in reml_files[0].read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    assert reml_rows
-    assert any(row.get("iteration", 0) >= 1 for row in reml_rows)
-
-    pirls_rows = [
-        json.loads(line)
-        for line in pirls_files[0].read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    assert pirls_rows
-    assert any(row.get("iteration", 0) >= 1 for row in pirls_rows)
-
-    scop_rows = [
-        json.loads(line)
-        for line in scop_files[0].read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    assert scop_rows
-    assert any(row.get("step_norm", -1.0) >= 0.0 for row in scop_rows)
-
-
-def test_scop_debug_records_actual_candidate_states_and_one_installed_terminal(
-    tmp_path: Path,
-    monkeypatch,
-):
-    """SCOP must participate in the same canonical trace contract as direct REML."""
-    from superglm._debug import set_debug_level
-    from superglm.model.reml_debug import load_reml_debug_run
-
-    monkeypatch.setenv("SUPERGLM_DEBUG_DIR", str(tmp_path))
-    set_debug_level(2)
-
-    x, y = _make_demo_data()
-    model = _make_scop_model()
-    model.fit_reml(x, y, max_reml_iter=3)
-
-    run_file = next(tmp_path.glob("*run.json"))
-    run_id = run_file.name.removesuffix("_run.json")
-    run = load_reml_debug_run(tmp_path, run_id)
-    assert [event["sequence"] for event in run.events] == list(range(1, len(run.events) + 1))
-    pirls_state_ids = {
-        event["payload"]["state_id"]
-        for event in run.events
-        if event["channel"] == "pirls" and event["event_kind"] == "evaluation"
-    }
-    outer = [
-        event
-        for event in run.events
-        if event["channel"] == "reml" and event["event_kind"] == "evaluation"
-    ]
-    assert outer
-    assert all(event["payload"]["state_id"] in pirls_state_ids for event in outer)
-    assert all(event["payload"]["effective_df"] is None for event in outer)
-    terminals = [
-        event
-        for event in run.events
-        if event["channel"] == "reml"
-        and event["event_kind"] == "terminal"
-        and event["purpose"] == "fit_reml"
-    ]
-    assert len(terminals) == 1
-    payload = terminals[0]["payload"]
-    assert payload["state_id"] == model._solver_result.state_id
-    assert payload["objective"] == pytest.approx(model._reml_result.objective)
-    assert payload["lambdas"] == pytest.approx(model._reml_lambdas)
-    assert payload["dispersion"] == pytest.approx(model._solver_result.phi)
-    assert payload["effective_df"] == pytest.approx(model._solver_result.effective_df)
-
-
-@pytest.mark.parametrize("family", ["gaussian", "poisson"])
-def test_fixed_scop_terminal_trace_identifies_its_single_evaluated_mode(
-    tmp_path: Path,
-    monkeypatch,
-    family: str,
-):
-    """Fixed-lambda objective, coefficients, scale, and terminal share one identity."""
-    import numpy as np
-
-    from superglm._debug import set_debug_level
-    from superglm.model.reml_debug import load_reml_debug_run
-
-    monkeypatch.setenv("SUPERGLM_DEBUG_DIR", str(tmp_path))
-    set_debug_level(2)
-    rng = np.random.default_rng(20260801)
-    x = np.linspace(0.0, 1.0, 180)
-    frame = pd.DataFrame({"x": x})
-    y = (
-        0.2 + 1.3 * x + rng.normal(0.0, 0.12, len(x))
-        if family == "gaussian"
-        else rng.poisson(np.exp(-0.4 + 1.0 * x))
-    )
-    model = SuperGLM(
-        family=family,
-        selection_penalty=0.0,
-        discrete=True,
-        features={
-            "x": PSpline(
-                n_knots=7,
-                constraint=Constraint.fit.increasing,
-                lambda_policy=LambdaPolicy(mode="fixed", value=1.5),
-                shape_engine="scop",
-            )
-        },
-    )
-
-    model.fit_reml(frame, y)
-
-    run_file = next(tmp_path.glob("*run.json"))
-    run_id = run_file.name.removesuffix("_run.json")
-    run = load_reml_debug_run(tmp_path, run_id)
-    fixed_evaluations = [
-        event
-        for event in run.events
-        if event["channel"] == "reml"
-        and event["event_kind"] == "evaluation"
-        and event["purpose"] == "reml_fixed"
-    ]
-    terminals = [
-        event
-        for event in run.events
-        if event["channel"] == "reml"
-        and event["event_kind"] == "terminal"
-        and event["purpose"] == "fit_reml"
-    ]
-
-    assert len(fixed_evaluations) == 1
-    assert len(terminals) == 1
-    evaluated = fixed_evaluations[0]["payload"]
-    terminal = terminals[0]["payload"]
-    assert model._reml_result.termination_reason == "fixed_lambdas"
-    assert model._reml_result.pirls_result is model._solver_result
-    assert evaluated["state_id"] == terminal["state_id"] == model._solver_result.state_id
-    assert (
-        evaluated["evaluation_id"]
-        == terminal["evaluation_id"]
-        == model._solver_result.evaluation_id
-    )
-    assert evaluated["objective"] == pytest.approx(model._reml_result.objective)
-    assert terminal["objective"] == pytest.approx(model._reml_result.objective)
-    assert evaluated["lambdas"] == pytest.approx(model._reml_lambdas)
-    assert terminal["lambdas"] == pytest.approx(model._reml_lambdas)
-    assert evaluated["dispersion"] == pytest.approx(model._solver_result.phi)
-    assert terminal["dispersion"] == pytest.approx(model._solver_result.phi)
-
-
 def test_profiled_theta_reml_emits_terminal_only_after_final_install(tmp_path, monkeypatch):
     """The profile wrapper must close the canonical trace of its installed REML refit."""
     import numpy as np
@@ -503,7 +330,7 @@ def test_debug_trace_summarises_the_presolve_before_the_reml_events(tmp_path: Pa
     monkeypatch.setenv("SUPERGLM_DEBUG_DIR", str(tmp_path))
     set_debug_level(2)
     model, x, y = _ten_penalty_poisson()
-    model.fit_reml(x, y, runtime_validation="skip")
+    model.fit_reml(x, y)
 
     run_file = next(tmp_path.glob("*run.json"))
     run = load_reml_debug_run(tmp_path, run_file.name.removesuffix("_run.json"))

@@ -28,13 +28,15 @@ from fractions import Fraction
 import numpy as np
 import pytest
 
-from superglm.solvers.irls_direct import _build_iterate_factor
-from superglm.solvers.structured import (
+from superglm.solvers._structured.assembly import (
     build_augmented_nested_factor,
-    build_nested_structured_system,
     build_penalized_structured_operator,
     solve_augmented_normal_equations,
 )
+from superglm.solvers._structured.moments import (
+    build_nested_structured_system,
+)
+from superglm.solvers.irls_direct import _build_iterate_factor
 from tests.test_nested_structured_plumbing import (
     CHAIN,
     VARIANT,
@@ -318,7 +320,9 @@ def test_a_refused_observed_iterate_takes_a_levenberg_shift_and_its_step() -> No
 
 def _centred_leaf_case(basis: str):
     """An fs or sz leaf system on signed rows whose border carries a centre ``c0 != 0``."""
-    from superglm.solvers.structured import FactorSmoothPenalizedOperator
+    from superglm.solvers._structured.block_leaves import (
+        FactorSmoothPenalizedOperator,
+    )
     from tests._leaf_systems import leaf_system_from_rows
     from tests.test_factor_smooth_leaf_factor import _rows
     from tests.test_sum_to_zero_tree_factor import _case
@@ -365,8 +369,10 @@ def test_a_shifted_leaf_step_keeps_its_intercept_in_the_centred_coordinate(basis
     roundings of terms no larger than ``|alpha|`` and ``|c0|' |b|``, so
     ``gamma_{q+4} (|alpha| + 2 |c0|' |b|)`` bounds them.
     """
+    from superglm.solvers._structured.assembly import (
+        build_augmented_structured_factor,
+    )
     from superglm.solvers.irls_direct import _levenberg_shifted_leaf_operator
-    from superglm.solvers.structured import build_augmented_structured_factor
 
     system, penalized, centre = _centred_leaf_case(basis)
     shifted, shift_of = _levenberg_shifted_leaf_operator(penalized, 1e-2, system)

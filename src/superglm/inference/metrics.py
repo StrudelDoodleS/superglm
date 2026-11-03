@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from functools import cached_property
+from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -16,6 +16,7 @@ from superglm.group_matrix import DesignMatrix
 from superglm.inference._metrics_design import (
     EvaluationDesign,
     MetricsDesign,
+    ProjectedDesign,
     augmented_row_quadratic_forms,
     factor_from_gram,
     iter_dense_chunks,
@@ -26,6 +27,7 @@ from superglm.inference._metrics_design import (
 from superglm.inference.coef_tables import build_basis_detail, build_coef_rows  # noqa: F401
 from superglm.inference.covariance import (  # noqa: F401
     _active_penalty_matrix,
+    _active_penalty_root,
     _second_diff_penalty,
     covariance_selected_block,
     covariance_selected_diagonal,
@@ -61,6 +63,7 @@ from superglm.solvers.rank import (
     decompose_gram,
     decompose_gram_if_authoritative,
     diagonal_of_square,
+    face_pseudo_inverse,
     selected_group_name_set,
     streamed_weighted_factor,
 )
@@ -149,10 +152,15 @@ def _profiled_augmented_covariance(
     sum_w: float,
     *,
     profile_rank=None,
+    face: NDArray | None = None,
 ) -> NDArray:
-    """Invert after profiling the intercept, then map back to raw coordinates."""
+    """Invert after profiling the intercept, then map back to raw coordinates.
+
+    On a constrained fit's active face ``Z``, ``profile_rank`` decomposes
+    ``Z'(D + S)Z`` and the slope block is ``Z (Z'(D + S)Z)^+ Z'``.
+    """
     profiled_inverse = (
-        profile_rank.pseudo_inverse()
+        face_pseudo_inverse(profile_rank, face)
         if profile_rank is not None
         else decompose_gram(data_gram + penalty).pseudo_inverse()
     )
@@ -249,21 +257,44 @@ def _certified_data_rank(
     )
 
 
+def _penalized_factor(
+    design: MetricsDesign,
+    W: NDArray,
+    penalty: NDArray,
+    *,
+    centred: bool = False,
+    root: NDArray | None = None,
+) -> NDArray:
+    """``[sqrt(W) X; P]`` with ``P'P = S``, its rows centred on the weighted mean when ``centred``.
+
+    ``P`` is ``root`` when given, else ``penalty_factor(S)``.
+    """
+    center, center_lo = _centre_pair(design, W) if centred else (None, None)
+    factor = streamed_weighted_factor(
+        iter_dense_chunks(design),
+        W,
+        center=center,
+        center_lo=center_lo,
+    )
+    smooth_factor = penalty_factor(penalty) if root is None else root
+    if smooth_factor.shape[0]:
+        factor = np.vstack((factor, smooth_factor))
+    return factor
+
+
 def _certified_coefficient_rank(
     design: MetricsDesign,
     W: NDArray,
     raw_gram: NDArray,
     penalty: NDArray,
+    *,
+    root: NDArray | None = None,
 ):
     """Certify ambiguous raw penalized geometry with observation rows."""
     decomposition = decompose_gram_if_authoritative(raw_gram + penalty)
     if decomposition is not None:
         return decomposition
-    factor = streamed_weighted_factor(iter_dense_chunks(design), W)
-    smooth_factor = penalty_factor(penalty)
-    if smooth_factor.shape[0]:
-        factor = np.vstack((factor, smooth_factor))
-    return decompose_factor(factor)
+    return decompose_factor(_penalized_factor(design, W, penalty, root=root))
 
 
 def _certified_profile_rank(
@@ -273,6 +304,8 @@ def _certified_profile_rank(
     xtw1: NDArray,
     penalty: NDArray,
     data_rank,
+    *,
+    root: NDArray | None = None,
 ):
     """Return the certified centered Hessian decomposition for covariance."""
     if not np.any(penalty):
@@ -280,17 +313,37 @@ def _certified_profile_rank(
     decomposition = decompose_gram_if_authoritative(data_gram + penalty)
     if decomposition is not None:
         return decomposition
-    center, center_lo = _centre_pair(design, W)
-    factor = streamed_weighted_factor(
-        iter_dense_chunks(design),
-        W,
-        center=center,
-        center_lo=center_lo,
+    return decompose_factor(_penalized_factor(design, W, penalty, centred=True, root=root))
+
+
+def _face_ranks(design: MetricsDesign, W: NDArray, root: NDArray, face: NDArray):
+    """``Z'(X'WX + S)Z`` and ``Z'(D + S)Z`` decomposed from the rows projected on the face ``Z``.
+
+    Returns the projected rows, their centred Gram ``Z'DZ`` and the two decompositions, for
+    ``face_pseudo_inverse``, each certified as the unconstrained one is. Rows are projected
+    before any product (``ProjectedDesign``): ``Z' M Z`` from the full Gram carries ``u`` times
+    the curvature off the face, which no factorization detects while it stays definite. The
+    face penalty is ``(PZ)'(PZ)`` from the stacked root ``P'P = S`` (``_active_penalty_root``),
+    PSD and the penalty's factor: ``Z'SZ`` formed directly cancels to rounding of either sign in
+    the null space, and a root of the summed ``S`` loses a term below rounding of another.
+    """
+    rows = ProjectedDesign(design, face)
+    raw_gram, xtw1, data_gram = weighted_moments(rows, W)
+    projected_penalty = root @ face
+    face_penalty = projected_penalty.T @ projected_penalty
+    face_penalty = 0.5 * face_penalty + 0.5 * face_penalty.T
+    coefficient = _certified_coefficient_rank(
+        rows, W, raw_gram, face_penalty, root=projected_penalty
     )
-    smooth_factor = penalty_factor(penalty)
-    if smooth_factor.shape[0]:
-        factor = np.vstack((factor, smooth_factor))
-    return decompose_factor(factor)
+    data_rank = (
+        None
+        if np.any(face_penalty)
+        else _certified_data_rank(rows, W, data_gram, xtw1, face_penalty)
+    )
+    profile = _certified_profile_rank(
+        rows, W, data_gram, xtw1, face_penalty, data_rank, root=projected_penalty
+    )
+    return rows, data_gram, coefficient, profile
 
 
 def _coefficient_estimability(
@@ -334,6 +387,21 @@ def _requires_wood_inference(model, active_groups: list[GroupSlice]) -> bool:
     return False
 
 
+def _keeps_constrained_covariance(result) -> bool:
+    """Whether a fit's covariance is its shape constraints' active face's.
+
+    A QP fit whose shape rows bind records its active face on its rank record
+    (``RankInfo.face``, from the rows ``irls_direct._binding_rows`` reads as
+    binding at the fit).  Its covariance is the equality-constrained fit's on
+    that face, so the training rows, recognised by content, read the fit's
+    own record, and other rows re-form it on that face.
+    """
+    if getattr(result, "scop_inference", None) is not None:
+        return True
+    rank_info = getattr(result, "rank_info", None)
+    return rank_info is not None and getattr(rank_info, "face", None) is not None
+
+
 class ModelMetrics:
     """Post-fit diagnostics for a SuperGLM model.
 
@@ -366,7 +434,11 @@ class ModelMetrics:
     or a pickled model, are recognised as the training rows only when the
     model keeps a structured or shape-constrained covariance.  Otherwise
     leverage is re-formed on the rows passed, which for a discrete fit can
-    differ slightly from its binned fit.
+    differ slightly from its binned fit.  For a fit whose shape constraints
+    bind, the re-formed inverse is restricted to the fit's active face:
+    with ``Z`` a basis of the coefficients the binding rows leave free, it
+    is ``Z (Z' (X' W X + S) Z)^+ Z'`` on the rows passed, and with no row
+    binding ``Z = I``, the unconstrained fit's.
     """
 
     def __init__(
@@ -441,10 +513,9 @@ class ModelMetrics:
             # content fingerprint of X, y, weights and offset. Only a fit whose metrics always read
             # its retained covariance (structured or shape-constrained) then reads the fit design;
             # a dense fit re-forms everything on the supplied rows.
-            keeps_fit_covariance = (
-                retained_linear_state(model) is not None
-                or getattr(self._result, "scop_inference", None) is not None
-            )
+            keeps_fit_covariance = retained_linear_state(
+                model
+            ) is not None or _keeps_constrained_covariance(self._result)
             self._fit_geometry_matches = bool(
                 self._uses_fit_design
                 and fit_weights is not None
@@ -818,6 +889,18 @@ class ModelMetrics:
     # ── Influence diagnostics (lazy) ──────────────────────────────
 
     @cached_property
+    def _reads_retained_covariance(self) -> bool:
+        """Whether this evaluation reads the fit's retained covariance and EDF.
+
+        A compact fit on its own rows, and a fit that kept a SCOP covariance
+        on any rows.
+        """
+        return (
+            self._uses_compact_fit_inference
+            or getattr(self._result, "scop_inference", None) is not None
+        )
+
+    @cached_property
     def _active_info(
         self,
     ) -> tuple[MetricsDesign, NDArray, NDArray, NDArray, list[GroupSlice]]:
@@ -851,8 +934,12 @@ class ModelMetrics:
             )
 
         uses_fitted_rank = self._working_weights_match_fit(W)
-        scop_inference = getattr(self._result, "scop_inference", None)
-        if scop_inference is not None or self._uses_compact_fit_inference:
+        # The training rows of a constrained fit, by identity or by content,
+        # read its face through its rank record below, as the fit itself does.
+        constrained_training_rows = (
+            _keeps_constrained_covariance(self._result) and self._fit_geometry_matches
+        )
+        if self._reads_retained_covariance:
             fit_inference = self._model._fit_inference_info
             inverse = fit_inference["XtWX_inv"]
             augmented = fit_inference["XtWX_inv_aug"]
@@ -895,7 +982,11 @@ class ModelMetrics:
                     self.__dict__["_coefficient_estimable"] = np.ones(len(beta), dtype=bool)
             return X_a, W, inverse, augmented, active_groups
 
-        if not self._uses_fit_design:
+        # Re-formed on other rows or weights, a constrained fit's inverse is
+        # restricted to the face its binding rows leave free; ``None``
+        # (nothing binds, or no shape rows) is the unconstrained inverse.
+        face = getattr(rank_info, "face", None)
+        if not (self._uses_fit_design or constrained_training_rows):
             selected_columns, active_groups = _selected_group_state(
                 self._result,
                 self._groups,
@@ -903,13 +994,9 @@ class ModelMetrics:
             )
             X_a = EvaluationDesign(self._model, self._X, selected_columns)
             lam2 = fitted_lambda2(self._model)
-            S_active = _active_penalty_matrix(
-                self._model._dm.group_matrices,
-                self._groups,
-                active_groups,
-                lam2,
-                reml_penalties=getattr(self._model, "_reml_penalties", None),
-            )
+            penalty_terms = (self._model._dm.group_matrices, self._groups, active_groups, lam2)
+            reml_penalties = getattr(self._model, "_reml_penalties", None)
+            S_active = _active_penalty_matrix(*penalty_terms, reml_penalties=reml_penalties)
             XtWX, XtW1, centered_data_gram = weighted_moments(X_a, W)
             self.__dict__["_active_centered_data_gram"] = centered_data_gram
             data_rank = _certified_data_rank(X_a, W, centered_data_gram, XtW1, S_active)
@@ -919,22 +1006,24 @@ class ModelMetrics:
                 active_groups,
                 len(beta),
             )
-            inverse = _certified_coefficient_rank(X_a, W, XtWX, S_active).pseudo_inverse()
-            profile_rank = _certified_profile_rank(
+            inverse, profile_rank = self._reformed_ranks(
                 X_a,
                 W,
-                centered_data_gram,
+                XtWX,
                 XtW1,
+                centered_data_gram,
                 S_active,
                 data_rank,
+                face,
+                partial(_active_penalty_root, *penalty_terms, reml_penalties=reml_penalties),
             )
-
             augmented = _profiled_augmented_covariance(
                 centered_data_gram,
                 S_active,
                 XtW1,
                 float(np.sum(W)),
                 profile_rank=profile_rank,
+                face=face,
             )
             return X_a, W, inverse, augmented, active_groups
 
@@ -952,15 +1041,10 @@ class ModelMetrics:
         )
         X_a = _grouped_active_design(self._model, active_groups)
         lam2 = fitted_lambda2(self._model)
-        S_active = _active_penalty_matrix(
-            self._dm.group_matrices,
-            self._groups,
-            active_groups,
-            lam2,
-            reml_penalties=getattr(self._model, "_reml_penalties", None),
-        )
+        penalty_terms = (self._dm.group_matrices, self._groups, active_groups, lam2)
+        reml_penalties = getattr(self._model, "_reml_penalties", None)
+        S_active = _active_penalty_matrix(*penalty_terms, reml_penalties=reml_penalties)
         XtWX, XtW1, centered_data_gram = weighted_moments(X_a, W)
-        inverse = _certified_coefficient_rank(X_a, W, XtWX, S_active).pseudo_inverse()
         self.__dict__["_active_centered_data_gram"] = centered_data_gram
         data_rank = _certified_data_rank(X_a, W, centered_data_gram, XtW1, S_active)
         self.__dict__["_coefficient_estimable"] = _coefficient_estimability(
@@ -969,13 +1053,16 @@ class ModelMetrics:
             active_groups,
             len(beta),
         )
-        profile_rank = _certified_profile_rank(
+        inverse, profile_rank = self._reformed_ranks(
             X_a,
             W,
-            centered_data_gram,
+            XtWX,
             XtW1,
+            centered_data_gram,
             S_active,
             data_rank,
+            face,
+            partial(_active_penalty_root, *penalty_terms, reml_penalties=reml_penalties),
         )
         augmented = _profiled_augmented_covariance(
             centered_data_gram,
@@ -983,9 +1070,49 @@ class ModelMetrics:
             XtW1,
             float(np.sum(W)),
             profile_rank=profile_rank,
+            face=face,
         )
         augmented = _public_augmented_covariance(self._model, augmented, active_groups)
         return X_a, W, inverse, augmented, active_groups
+
+    def _reformed_ranks(
+        self, X_a, W, XtWX, XtW1, centered_data_gram, S_active, data_rank, face, penalty_root
+    ):
+        """The re-formed coefficient inverse and the profiled decomposition, on ``face`` if any.
+
+        Without a face, ``(X'WX + S)^+`` and the decomposition of ``D + S``.
+        On one, ``Z (Z'(X'WX + S)Z)^+ Z'`` and the decomposition of ``Z'(D +
+        S)Z``, both from the rows projected on it and the penalty's stacked
+        root ``penalty_root()`` (``_face_ranks``), which are kept for
+        leverage and EDF (``_face_projection``).
+        """
+        if face is None:
+            inverse = _certified_coefficient_rank(X_a, W, XtWX, S_active).pseudo_inverse()
+            profile_rank = _certified_profile_rank(
+                X_a, W, centered_data_gram, XtW1, S_active, data_rank
+            )
+            return inverse, profile_rank
+        rows, face_gram, coefficient_rank, profile_rank = _face_ranks(X_a, W, penalty_root(), face)
+        self.__dict__["_face_profile"] = (rows, face, profile_rank, face_gram)
+        return face_pseudo_inverse(coefficient_rank, face), profile_rank
+
+    @cached_property
+    def _face_projection(self) -> tuple[ProjectedDesign, NDArray, NDArray, NDArray] | None:
+        """The rows passed on the fit's active face ``Z``, for an inverse re-formed on it.
+
+        ``(XZ, Z, (Z'(D + S)Z)^+, Z'DZ)``: the rows projected on the face, the
+        face, the pseudo-inverse of the profiled decomposition the face
+        covariance was formed from, and the centred data Gram of the
+        projected rows.  Leverage and EDF are read in these coordinates
+        (``ProjectedDesign``).  ``None`` when no face restricts the re-formed
+        inverse, whose leverage and EDF are read in full coordinates.
+        """
+        _ = self._active_info
+        stored = self.__dict__.get("_face_profile")
+        if stored is None:
+            return None
+        rows, face, profile_rank, face_gram = stored
+        return rows, face, profile_rank.pseudo_inverse(), face_gram
 
     @cached_property
     def _active_R_factor(self) -> NDArray:
@@ -1002,10 +1129,7 @@ class ModelMetrics:
         if X_a.shape[1] == 0:
             return np.empty((0, 0))
 
-        if (
-            getattr(self._result, "scop_inference", None) is not None
-            or self._uses_compact_fit_inference
-        ):
+        if self._reads_retained_covariance:
             return self._model._fit_inference_info["R_a"]
 
         if self._working_weights_match_fit(W):
@@ -1026,16 +1150,24 @@ class ModelMetrics:
         if X_a.shape[1] == 0:
             return np.array([]), np.array([])
 
-        if (
-            getattr(self._result, "scop_inference", None) is not None
-            or self._uses_compact_fit_inference
-        ):
+        if self._reads_retained_covariance:
             inference = self._model._fit_inference_info
             return inference["edf"], inference["edf1"]
 
         if self._working_weights_match_fit(W):
             inference = self._model._fit_inference_info
             return inference["edf"], inference["edf1"]
+
+        projection = self._face_projection
+        if projection is not None:
+            # ``Z M Z'``, ``M = (Z'(D + S)Z)^+ Z'DZ``: the face fit's influence,
+            # without the coupling to the curvature off the face, whose
+            # diagonal sums to zero over each term
+            # (``irls_direct._face_factor_edf``)
+            _, face, inverse, data_gram = projection
+            influence = face @ (inverse @ data_gram) @ face.T
+            edf = np.diag(influence).copy()
+            return edf, 2.0 * edf - diagonal_of_square(influence)
 
         data_gram = self._active_centered_data_gram
         profile_inverse = self._active_info[3][1:, 1:]
@@ -1058,7 +1190,9 @@ class ModelMetrics:
         to a column shift, sums to the model's edf, and is the ``h`` in ``phi (1 - h_i)`` for
         Cook's distance and standardized residuals. A structured fit evaluates the quadratic
         forms in the augmented factor's centred coordinates; other covariances centre rows on
-        the shifted working-weighted mean (``weighted_center``).
+        the shifted working-weighted mean (``weighted_center``), and one re-formed on a
+        constrained fit's active face evaluates them on the rows projected on it
+        (``_face_projection``).
         """
         X_a, W, _, augmented, _ = self._active_info
         W = np.asarray(W, dtype=np.float64)
@@ -1069,7 +1203,12 @@ class ModelMetrics:
             return np.clip(W / sum_w, 0.0, 1.0)
         factor = getattr(augmented, "augmented_factor", None)
         forms = getattr(factor, "row_quadratic_forms", None)
-        if forms is not None:
+        projection = self._face_projection
+        if projection is not None:
+            rows, _, inverse, _ = projection
+            center = weighted_center(rows, W)
+            h = W / sum_w + W * quadratic_form_diagonal(rows, inverse, center=center)
+        elif forms is not None:
             h = W * augmented_row_quadratic_forms(X_a, forms)
         else:
             slopes = getattr(augmented, "slopes", None)
@@ -1262,23 +1401,16 @@ class ModelMetrics:
         *,
         phi_scale: bool = True,
     ) -> dict[str, Any]:
-        """SE of the log-relativity curve/levels for a feature.
+        """SE of the log-relativity curve/levels for a feature, from the coefficient covariance.
 
-        Propagates the covariance of the fitted coefficients through the
-        feature's design matrix to produce SEs on the interpretable scale.
-
-        For splines: returns ``{x, se_log_relativity}`` on a grid.
-        For categoricals: returns ``{levels, se_log_relativity}`` per level.
-        For numerics: returns ``{se_coef}``.
-
-        Uses the same quasi-likelihood dispersion as
-        :attr:`coefficient_se` when ``phi_scale=True``.
+        Splines return ``{x, se_log_relativity}`` on a grid, categoricals
+        ``{levels, se_log_relativity}``, numerics ``{se_coef}``. ``phi_scale=True`` uses the
+        quasi-likelihood dispersion of :attr:`coefficient_se`.
 
         Parameters
         ----------
         name : str
-            Feature name (e.g. "DrivAge"). For select=True splines with multiple
-            subgroups, all subgroups are gathered automatically.
+            Feature name (e.g. "DrivAge"); a ``select=True`` spline's subgroups are gathered.
         """
         from superglm.features.categorical import Categorical
         from superglm.features.numeric import Numeric
@@ -1436,8 +1568,11 @@ class ModelMetrics:
         R_a = None
         edf = None
         edf1 = None
-        if _requires_wood_inference(self._model, active_groups):
+        wood_inference = _requires_wood_inference(self._model, active_groups)
+        if wood_inference:
             R_a = self._active_R_factor
+        # a re-formed face covariance reads its EDF on the projected rows
+        if wood_inference or self._face_projection is not None:
             edf, edf1 = self._influence_edf
         uses_fitted_rank = self._working_weights_match_fit(W)
         selected_names = {group.name for group in active_groups}

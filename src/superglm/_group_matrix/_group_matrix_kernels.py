@@ -356,21 +356,13 @@ def _exact_projected_rows(indptr, columns, entries, coefficients):
 def _exact_ssp_moments(basis, transform, weights, weighted_rhs=None, *, bin_indices=None):
     """Round the requested source-factor moments once on exceptional inputs.
 
-    Finite binary64 entries are exact dyadic rationals.  Accumulating ``X' W X =
-    R'(B' M B)R`` and optional ``X' W = R'(B' m)`` / ``X' Wz`` over them (``M`` the
-    bin or row masses) avoids an overflowing raw Gram, reciprocal basis or bin
-    mass.  No rank or regularization decision is made here.  The target is the
-    represented product ``B R`` before floating-point multiplication rounds it.
-
-    This is an exact dot product rounded once (Kulisch's long accumulator): a
-    shared binary scale per source operand makes every inner operation an integer
-    one, with widths bounded by binary64's exponent span; only final outputs use
-    Fraction rounding.  Error-free transformations (Ogita, Rump & Oishi 2005) need
-    products clear of underflow, which is the range that sends operands here, and
-    Demmel & Hida's accumulator is not correctly rounded.  Bin and row sums are
-    vectorised (``_exact_bin_sums``), the Gram is accumulated over each active row's
-    support (``_exact_gram_moments``) and the transform touches only its nonzeros
-    (``_exact_congruence``).  Ordinary operands never use this path.
+    Accumulates ``X' W X = R'(B' M B)R`` and optional ``X' W = R'(B' m)`` / ``X' Wz`` (``M`` the
+    bin or row masses) as exact dot products rounded once (Kulisch's long accumulator), so no
+    raw Gram, reciprocal basis or bin mass overflows; the target is the represented product
+    ``B R`` before rounding. A shared binary scale per operand makes every inner operation an
+    integer one, and only final outputs use Fraction rounding. Error-free transformations
+    (Ogita, Rump & Oishi 2005) need products clear of underflow, the range that sends operands
+    here. No rank or regularization decision is made here; ordinary operands never use it.
     """
     weights = np.asarray(weights)
     if bin_indices is None:
@@ -842,9 +834,9 @@ def _gather_cell_order(order, bin1, bin2):
     """Permute a partner's channel bins into a grid's cell order.
 
     Two sequential passes so that the cell loop streams every input;
-    gathering through ``order`` inside the cell loop instead cost as much as
-    the dense kernel it replaces (31.5 against 30.3 ms, measured), the kernel
-    being latency-bound on dependent random reads.  The weights take the same
+    gathering through ``order`` inside the cell loop costs as much as the
+    dense kernel it replaces, the kernel being latency-bound on dependent
+    random reads.  The weights take the same
     permutation once per grid tensor per build (``_BlockWeightCache``).
     """
     n = order.shape[0]
@@ -870,7 +862,7 @@ def _cell_hist_raw_kron(ptr, bin1, bin2, w, offsets1, values1, offsets2, values2
     width = out.shape[1]
     acc = np.zeros(width)
     # Explicit loops for the zeroing and the copy: numba's slice assignment
-    # made the whole kernel 2.5x slower (17.6 against 7.1 ms, measured).
+    # makes the whole kernel more than twice as slow.
     for cell in range(ptr.shape[0] - 1):
         for column in range(width):
             acc[column] = 0.0
@@ -906,8 +898,8 @@ def _cell_csr(idx1, idx2, n_bins1, n_bins2):
 
     Returns ``(ptr, order)``: ``order[ptr[c]:ptr[c + 1]]`` are the rows of cell
     ``c`` in ascending row order, so a sum over a cell runs in one fixed order
-    whatever visits it.  O(n + cells); ``np.argsort(kind="stable")`` on the
-    same 300,000 rows measured 24x slower.
+    whatever visits it.  O(n + cells), against O(n log n) for
+    ``np.argsort(kind="stable")``.
     """
     n_cells = n_bins1 * n_bins2
     ptr = np.zeros(n_cells + 1, dtype=np.int64)

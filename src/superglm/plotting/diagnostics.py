@@ -187,18 +187,13 @@ def _simulate_response(
     *,
     weight_semantics: str,
 ) -> NDArray | None:
-    """Simulate one response vector from the fitted model.
+    """Simulate one response vector from the fitted model, or None for an unsupported family.
 
-    A replication weight does not alter a row's response distribution, so the
-    frequency contract simulates every family at ``w = 1``; a prior weight is
-    part of the row's distribution and stays in the draw. The draws must come
-    from exactly the marginals ``_quantile_residuals`` inverts (Gaussian
-    ``phi / w`` variance, Gamma ``w / phi`` shape, the ``w``-scaled Poisson and
-    negative binomial lattice, binomial ``w``-trial probability), or a correct
-    fit falls outside its own envelope.
-
-    Returns None if the family is not supported (caller should degrade
-    gracefully).
+    A replication weight does not alter a row's distribution, so the frequency contract
+    simulates at ``w = 1``; a prior weight stays in the draw. Draws come from exactly the
+    marginals ``_quantile_residuals`` inverts (Gaussian ``phi / w`` variance, Gamma ``w / phi``
+    shape, the ``w``-scaled Poisson and negative binomial lattice, binomial ``w`` trials), or a
+    correct fit falls outside its own envelope.
     """
     from superglm.distributions import (
         Binomial,

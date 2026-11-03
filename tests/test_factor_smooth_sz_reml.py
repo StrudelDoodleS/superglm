@@ -15,9 +15,13 @@ from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.observed_geometry import build_observed_reml_geometry
 from superglm.reml.w_derivatives import reml_w_correction
-from superglm.solvers.structured import (
-    FactorSmoothLeafLayout,
+from superglm.solvers._structured.balance_tree import (
     ProfiledSumToZeroTreeFactor,
+)
+from superglm.solvers._structured.layout import (
+    FactorSmoothLeafLayout,
+)
+from superglm.solvers._structured.operators import (
     materialize_compact_operator,
 )
 
@@ -90,7 +94,6 @@ def test_fixed_lambda_sz_structured_fit_matches_dense(
         offset=offset,
         max_reml_iter=2,
         pirls_tol=1e-10,
-        runtime_validation="skip",
     )
     structured = _model(
         family=family,
@@ -103,7 +106,6 @@ def test_fixed_lambda_sz_structured_fit_matches_dense(
         offset=offset,
         max_reml_iter=2,
         pirls_tol=1e-10,
-        runtime_validation="skip",
     )
 
     np.testing.assert_allclose(structured.result.beta, dense.result.beta, atol=6e-8)
@@ -149,7 +151,6 @@ def test_sz_structured_full_runtime_geometry_validation() -> None:
         offset=offset,
         max_reml_iter=2,
         pirls_tol=1e-10,
-        runtime_validation="full",
     )
 
     assert model.result.direct_backend == "structured"
@@ -169,7 +170,6 @@ def test_sz_compact_observed_geometry_uses_public_positive_definiteness() -> Non
         offset=offset,
         max_reml_iter=2,
         pirls_tol=1e-10,
-        runtime_validation="skip",
     )
     structured_index = next(
         index
@@ -213,7 +213,6 @@ def test_estimated_sz_lambda_structured_reml_matches_dense(discrete: bool) -> No
         max_reml_iter=7,
         reml_tol=1e-6,
         pirls_tol=1e-10,
-        runtime_validation="skip",
     )
     structured = _model(
         family="poisson",
@@ -228,7 +227,6 @@ def test_estimated_sz_lambda_structured_reml_matches_dense(discrete: bool) -> No
         max_reml_iter=7,
         reml_tol=1e-6,
         pirls_tol=1e-10,
-        runtime_validation="skip",
     )
     name = "x:group:sz:wiggle"
 
@@ -266,7 +264,6 @@ def test_sz_structured_reml_derivatives_and_working_weight_correction_match_dens
         offset=offset,
         max_reml_iter=2,
         pirls_tol=1e-10,
-        runtime_validation="skip",
     )
     common = dict(
         X=model._dm,
@@ -374,7 +371,6 @@ def test_sz_lambda_derivatives_match_central_finite_differences() -> None:
         offset=offset,
         max_reml_iter=2,
         pirls_tol=1e-11,
-        runtime_validation="skip",
     )
     factor_name = "x:group:sz:wiggle"
     penalty_names = [component.name for component in model._reml_penalties]
@@ -504,7 +500,6 @@ def test_sz_structured_fit_uses_tabmat_small_partition_without_dense_dominant(
         sample_weight=weights,
         offset=offset,
         max_reml_iter=2,
-        runtime_validation="skip",
     )
 
     # the balance tree's leaf layout (one-engine design §3.5): its row pass

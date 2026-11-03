@@ -221,6 +221,66 @@ def test_ordinary_reml_curvature_classifier_requires_consistent_custom_protocol(
         classify_reml_curvature(InvalidDistribution(), CustomLink())
 
 
+def test_saved_scop_curvature_hook_declares_ordinary_reml_curvature(monkeypatch) -> None:
+    """A family that declares only 0.41.0's ``scop_reml_curvature`` fits a formerly-SCOP spline.
+
+    The SCOP route read that hook; the spline now fits on ordinary REML, whose
+    hook is ``reml_curvature`` with the same argument and values. The old name
+    still declares the geometry, with one FutureWarning naming the family, and
+    the fit equals the one with the hook spelled the new way.
+    """
+    import warnings
+
+    import pandas as pd
+
+    from superglm import Constraint, PSpline, SCOPRetiredWarning, SuperGLM
+    from superglm.reml import observed_geometry
+
+    monkeypatch.setattr(observed_geometry, "_warned_legacy_curvature", set())
+
+    class LegacyCurvaturePoisson(Poisson):
+        def scop_reml_curvature(self, link):
+            return "fisher"
+
+    class RenamedCurvaturePoisson(Poisson):
+        def reml_curvature(self, link):
+            return "fisher"
+
+    x = np.linspace(0.0, 1.0, 100)
+    y = np.random.default_rng(123).poisson(np.exp(0.4 + 1.3 * x))
+    X = pd.DataFrame({"x": x})
+
+    def fit(family):
+        model = SuperGLM(
+            family=family,
+            selection_penalty=0,
+            features={
+                "x": PSpline(n_knots=5, constraint=Constraint.fit.increasing, shape_engine="scop")
+            },
+        )
+        model.fit_reml(X, y)
+        return model
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        warnings.simplefilter("ignore", SCOPRetiredWarning)
+        legacy = fit(LegacyCurvaturePoisson())
+        fit(LegacyCurvaturePoisson())
+    future = [w for w in caught if issubclass(w.category, FutureWarning)]
+    assert len(future) == 1, [str(w.message) for w in future]
+    message = str(future[0].message)
+    assert "LegacyCurvaturePoisson" in message and "reml_curvature" in message
+    assert future[0].filename == __file__
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SCOPRetiredWarning)
+        warnings.simplefilter("error", FutureWarning)
+        renamed = fit(RenamedCurvaturePoisson())
+
+    assert legacy.result.converged and legacy._reml_result.converged
+    np.testing.assert_array_equal(legacy.predict(X), renamed.predict(X))
+
+
 def test_gamma_log_observed_rows_match_glum_and_likelihood_finite_difference() -> None:
     """Gamma/log has observed rows w*y/mu, not constant Fisher rows w."""
     distribution = Gamma()
@@ -2776,7 +2836,6 @@ def test_a_structured_factor_that_refuses_an_iterate_is_scored_not_raised() -> N
         offset=offset,
         max_reml_iter=2,
         pirls_tol=1e-10,
-        runtime_validation="skip",
     )
     structured_index = next(
         i
@@ -2864,7 +2923,7 @@ def test_a_structural_refusal_from_the_structured_factor_is_not_relabelled(
             "lvl": RandomEffect(levels=[f"L{i}" for i in range(n_levels)]),
         },
         direct_solve="structured",
-    ).fit_reml(frame, y, max_reml_iter=2, runtime_validation="skip")
+    ).fit_reml(frame, y, max_reml_iter=2)
     structured_index = next(
         i
         for i, matrix in enumerate(model._dm.group_matrices)
@@ -2995,7 +3054,6 @@ def test_exact_reml_routes_all_noncanonical_builtins_through_observed_geometry(
         max_reml_iter=2,
         reml_tol=1e-12,
         pirls_tol=1e-9,
-        runtime_validation="skip",
         w_correction_order=2,
     )
 
@@ -3032,7 +3090,6 @@ def test_discrete_bam_path_bypasses_ordinary_observed_geometry(
         pd.DataFrame({"x": x}),
         y,
         max_reml_iter=2,
-        runtime_validation="skip",
         w_correction_order=2,
     )
 
@@ -3074,7 +3131,6 @@ def test_custom_order2_observed_capability_fails_before_first_pirls(
             pd.DataFrame({"x": x}),
             y,
             max_reml_iter=2,
-            runtime_validation="skip",
             w_correction_order=2,
         )
 
@@ -4168,7 +4224,7 @@ def _structured_random_effect_build():
                 "lvl": RandomEffect(levels=[f"L{i}" for i in range(n_levels)]),
             },
             direct_solve="structured",
-        ).fit_reml(frame, y, max_reml_iter=2, runtime_validation="skip")
+        ).fit_reml(frame, y, max_reml_iter=2)
     structured_index = next(
         i
         for i, matrix in enumerate(model._dm.group_matrices)

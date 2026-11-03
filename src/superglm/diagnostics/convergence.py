@@ -211,7 +211,30 @@ def lss_nonconvergence_message(fitted_result: Any, smoothing_reason: str | None)
         "errors are those of the last accepted iterate; an effective degree of freedom "
         "can then be negative. model.diagnose() explains the stop. Refit with other "
         "starting smoothing parameters (initial_lambda or lambdas), or simplify the "
-        "terms it names, before reading the summary."
+        "terms it names, before reading the summary." + lss_ill_conditioned_note(fitted_result)
+    )
+
+
+def lss_ill_conditioned_note(fitted_result: Any) -> str:
+    """The cause, when an unconverged coefficient fit's curvature resolves under half of float64's digits.
+
+    ``condition_estimate`` is the equilibrated curvature's on the factor
+    scale, so the curvature's own is its square. Past ``u**-0.5`` the
+    curvature resolves fewer than half of float64's digits, and the stop
+    certificate, which carries ``||H^-1||``, can miss the fit's tolerance at
+    a point the iteration has reached.
+    """
+    if bool(getattr(fitted_result, "coefficient_converged", True)):
+        return ""
+    telemetry = getattr(fitted_result, "curvature_telemetry", None)
+    factor = getattr(telemetry, "condition_estimate", None)
+    if factor is None or not factor**2 > 2.0**26.5:
+        return ""
+    return (
+        f" The coefficient curvature's condition number is about {factor**2:.0e}. The usual "
+        "causes are a numeric column far from zero relative to its spread, beside an intercept "
+        "(subtract its mean before fitting), and columns that are nearly linear combinations "
+        "of one another (drop or combine them)."
     )
 
 

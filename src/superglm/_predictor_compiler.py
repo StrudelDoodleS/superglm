@@ -2,12 +2,8 @@
 
 This module owns feature and interaction build state.  It deliberately knows
 nothing about responses, distributions, links, or offsets; scalar SuperGLM
-adapts those concerns in :mod:`superglm.dm_builder`.
-
-The build body below is lifted verbatim from ``dm_builder.build_design_matrix``
-so the two stay diffable: ``compile_predictor_design`` binds the cloned graph
-to the same names that function uses, which keeps the region byte-identical
-and makes any future drift a one-command comparison.
+adapts those concerns in :mod:`superglm.dm_builder`, which calls
+:func:`compile_predictor_design` for its design build.
 """
 
 from __future__ import annotations
@@ -62,15 +58,12 @@ class CompiledPredictorDesign:
     feature_order: tuple[str, ...]
     interaction_specs: Mapping[str, Any]
     interaction_order: tuple[str, ...]
-    # Terms the build-time separation scan must look at, in build order.  The
-    # scan itself needs the response, so it stays with the caller that owns
-    # one; this module only records what it saw while the specs learned their
-    # levels.
+    # Terms the build-time separation scan must look at, in build order; the
+    # caller, which owns the response, runs the scan.
     separation_records: tuple[tuple, ...] = ()
     # Each scanned Categorical's row codes from its build, by term name, until
-    # that term's scan pops them.  They are scan scratch, not model state: a
-    # fitted SuperLSS keeps its compiled predictors, so pickling leaves them out.
-    # An init field, so ``dataclasses.replace`` carries them to the new design.
+    # that term's scan pops them: scan scratch, left out of pickles, and an init
+    # field so ``dataclasses.replace`` carries them.
     scan_codes: dict[str, NDArray] = field(default_factory=dict, repr=False, compare=False)
 
     def __getstate__(self) -> dict[str, Any]:
@@ -174,52 +167,31 @@ def compile_predictor_design(
 ) -> CompiledPredictorDesign:
     """Compile an owned design without resolving scalar likelihood concerns.
 
-    ``geometry_weight`` carries the caller's model-geometry rule: the weights
-    learned geometry follows, which is an all-rows indicator (or ``None``)
-    when it must follow physical rows rather than weight mass, and
-    ``sample_weight`` otherwise.  ``physical_rows`` states that same rule as
-    the boolean the hosted specs are stamped with.  Both are decided by the
-    caller's weight contract, so the caller owns them and this module stays
-    family neutral. ``polynomial_weight`` is separate because the two callers
-    intentionally differ: distributional predictors classify a learned
-    Polynomial QR as data-derived geometry, while scalar SuperGLM preserves
-    its historical likelihood-weight standardization.
+    ``geometry_weight`` is the weights learned geometry follows (an all-rows
+    indicator or ``None`` for physical rows, else ``sample_weight``), and
+    ``physical_rows`` the same rule as the boolean hosted specs are stamped
+    with; the caller's weight contract decides both.  ``polynomial_weight``,
     ``categorical_reporting_weight`` and ``ordered_reporting_weight`` are
-    likewise explicit: scalar reporting keeps
-    selecting ``base='most_exposed'`` by likelihood/sample mass while the
-    ordered inner basis consumes its caller-selected geometry stream.
+    separate because scalar and distributional callers assign those to
+    different geometries.
 
-    ``separation_boundaries`` is the caller's response-boundary tuple, empty
-    when no scan is wanted; the terms it makes this build record come back on
-    ``CompiledPredictorDesign.separation_records`` for the caller to scan once
-    it pairs them with a response.  ``separation_response``, when the caller
-    has one, lets a spline-by-factor term scan its levels' curves while it
-    builds them, because it acts on what it finds: a level's curve directions
-    only a separated covariate range sees are held at their smooth
-    continuation (``SplineCategorical._hold_separated_levels``), and the
-    finding comes back as a ``("curve", name, curves)`` record.  ``group_pricing`` and ``alias_prune`` are
-    passed through to the dimension pricing and the categorical-interaction
-    pruning exactly as ``build_design_matrix`` documents them.
-
-    ``ranged_margins`` lets a declared interaction take a parent with
-    polynomial ranges (``refuse_unsupported_interaction_parents``), as
-    SuperLSS always allowed.
+    ``separation_boundaries`` is the caller's response-boundary tuple (empty
+    for no scan); the recorded terms come back on
+    ``CompiledPredictorDesign.separation_records``.  ``separation_response``
+    lets a spline-by-factor term hold a level's separated curve directions at
+    their smooth continuation while it builds, recording ``("curve", name,
+    curves)``.  ``group_pricing`` and ``alias_prune`` are as
+    ``build_design_matrix`` documents them; ``ranged_margins`` as
+    ``refuse_unsupported_interaction_parents``.
 
     ``first_tensor_id`` numbers this design's discrete tensors from that
-    value. Groups with equal ids are parts of one tensor and share its
-    marginals, which selects their cross-Gram route, so a caller that pairs
-    two compiled designs in one Gram numbers them apart.
-
-    ``own_specs`` selects who holds the learned state.  The default clones the
-    whole graph, which a frozen predictor needs because it may not write to the
-    specs its caller handed it.  Scalar SuperGLM passes ``False`` and keeps
-    ``build_design_matrix``'s documented in-place contract, which also spares it
-    a full spec deepcopy on every REML rebuild and every CV fold.
+    value; equal ids share marginals, so a caller pairing two compiled designs
+    in one Gram numbers them apart.  ``own_specs=True`` (default) clones the
+    spec graph, as a frozen predictor needs; scalar SuperGLM passes ``False``
+    for ``build_design_matrix``'s in-place contract.
     """
-    # dm_builder imports this module at module scope, so these must stay inside
-    # the function body.  Hoisting them to the header is a partially-initialized
-    # -module ImportError on `import superglm`, and because they arrive in one
-    # statement a single missing name takes the whole block down with it.
+    # dm_builder imports this module at module scope, so these stay local:
+    # hoisted, they raise a partially-initialized-module ImportError.
     from superglm.dm_builder import (
         _discretize_spline_column,
         _priced_group_dimension,
@@ -251,14 +223,9 @@ def compile_predictor_design(
             pending_interactions,
         )
     else:
-        # The parameters are annotated with the widest types a caller may
-        # hand over, but declining ownership asks for more than reading:
-        # the build writes learned state back through these containers and
-        # empties ``pending_interactions``, so ``own_specs=False`` requires
-        # the caller's own mutable ``dict``/``list``.  That is what
-        # ``dm_builder.build_design_matrix`` -- the only non-owning caller --
-        # declares and passes; the casts state the extra requirement here
-        # rather than narrowing the signature the owning path does not need.
+        # ``own_specs=False`` writes learned state back through these containers
+        # and empties ``pending_interactions``, so it needs the caller's own
+        # mutable ``dict``/``list``; the casts state that requirement.
         specs = cast("dict[str, FeatureSpec]", specs)
         feature_order = cast("list[str]", feature_order)
         interaction_specs = cast("dict[str, Any]", interaction_specs)
@@ -273,12 +240,9 @@ def compile_predictor_design(
 
     for name in feature_order:
         spec = specs[name]
-        # The physical-rows rule reaches HOSTED model geometry too: an
-        # OrderedCategorical hands its caller-selected stream to the inner
-        # basis, and a hosted Piecewise's int-mode placement and most_exposed
-        # base are as much model geometry as the numeric term's. Polynomial's
-        # stream stays explicit and separate because scalar and distributional
-        # callers intentionally assign its learned QR to different geometries.
+        # The physical-rows rule reaches hosted model geometry too (an
+        # OrderedCategorical's inner basis, a hosted Piecewise); Polynomial's
+        # stream stays separate, as the docstring says.
         if isinstance(spec, OrderedCategorical):
             spec._inner_geometry_physical_rows = physical_rows
         x_col = X.column_array(name)
@@ -311,9 +275,7 @@ def compile_predictor_design(
         bin_idx = None
         exposure_agg = None
 
-        constraint_kind = getattr(spec, "constraint_kind", getattr(spec, "monotone", None))
         engine = shape_engine(spec)
-        _scop_discrete = use_discrete and engine == "scop"
 
         if use_discrete:
             n_bins_feat = resolve_discrete_n_bins(name, spec, n_bins_config)
@@ -340,69 +302,7 @@ def compile_predictor_design(
                 monotone_engine = "qp"
                 raw_to_solver_map = projection_penalty
 
-            if _scop_discrete:
-                # ── SCOP monotone + discrete: bin-level centered design ──
-                from superglm.solvers.scop import build_scop_reparam, build_scop_solver_reparam
-
-                q_raw = spec._n_basis
-                raw_reparam = build_scop_reparam(
-                    q_raw,
-                    kind=constraint_kind,
-                    knots=spec._knots,
-                    degree=spec.degree,
-                    domain=(spec._lo, spec._hi),
-                )
-                X_sigma_unique = B_unique @ raw_reparam.Sigma  # (n_bins, K)
-
-                # Center in model-geometry mass: physical retained rows for a
-                # prior contract, literal expanded-row mass for frequency.
-                if feature_build_weight is None:
-                    bin_geometry_mass = np.bincount(
-                        bin_idx,
-                        minlength=len(bin_centers),
-                    )
-                else:
-                    bin_geometry_mass = np.bincount(
-                        bin_idx,
-                        weights=feature_build_weight,
-                        minlength=len(bin_centers),
-                    )
-                drop_dim = 1
-                X_shape_unique = X_sigma_unique[:, drop_dim:]
-                col_means = (X_shape_unique.T @ bin_geometry_mass) / np.sum(
-                    bin_geometry_mass,
-                    dtype=np.float64,
-                )
-                X_centered_unique = X_shape_unique - col_means  # (n_bins, q_eff)
-
-                # Store on spec for predict-time transform
-                spec._scop_Sigma = raw_reparam.Sigma
-                setattr(spec, "_scop_null_dim", drop_dim)
-                spec._scop_col_means = col_means
-
-                solver_reparam = build_scop_solver_reparam(
-                    q_raw,
-                    kind=constraint_kind,
-                    knots=spec._knots,
-                    degree=spec.degree,
-                    domain=(spec._lo, spec._hi),
-                )
-                S_scop = solver_reparam.penalty_matrix()
-                q_eff = X_centered_unique.shape[1]
-
-                infos = [
-                    GroupInfo(
-                        columns=X_centered_unique,  # bin-level centered design
-                        n_cols=q_eff,
-                        penalty_matrix=S_scop,
-                        reparametrize=False,
-                        penalized=True,
-                        scop_reparameterization=solver_reparam,
-                        monotone_engine="scop",
-                    )
-                ]
-
-            elif getattr(spec, "select", False):
+            if getattr(spec, "select", False):
                 n_null = 1
                 n_range = spec._U_range.shape[1]
                 n_combined = n_null + n_range
@@ -471,12 +371,8 @@ def compile_predictor_design(
                 infos[0].structural_ranks = structural_penalty_ranks(spec, infos[0])
         else:
             try:
-                # Capture build-time warnings so they can be re-emitted with
-                # the feature name.  The errors below already get this
-                # treatment; the warnings (Piecewise int-mode collapse and
-                # thin segments above all -- the failure modes most likely to
-                # reach production silently) were unattributable the moment a
-                # model held two terms of the same spec type.
+                # Capture build-time warnings to re-emit them with the feature
+                # name, as the errors below are.
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter("always")
                     if isinstance(spec, OrderedCategorical):
@@ -523,15 +419,9 @@ def compile_predictor_design(
             # and the GroupSlices exist for the penalty exemption.
             separation_records.append(("cat", name, spec, x_col))
 
-        # Resolve lambda_policies from the spec onto each GroupInfo.
-        # build() does this internally, but the discrete path constructs
-        # GroupInfo manually and needs an explicit resolution step.
-        #
-        # For single-penalty discrete groups, build_penalty_components uses
-        # the multi-penalty path (omega_components with "wiggle" suffix) when
-        # penalty_components is set. We need to ensure penalty_components is
-        # populated for single-penalty terms with lambda_policy, matching
-        # what build() does for non-discrete terms.
+        # The discrete path builds GroupInfo itself, so resolve the spec's
+        # lambda_policies onto it as build() does, populating
+        # penalty_components for single-penalty terms with a lambda_policy.
         if hasattr(spec, "_lambda_policy") and spec._lambda_policy is not None:
             for info in infos:
                 if info.lambda_policies is None:
@@ -589,7 +479,6 @@ def compile_predictor_design(
                     subgroup_type=info.subgroup_name,
                     constraints=info.constraints,
                     monotone_engine=info.monotone_engine,
-                    scop_reparameterization=info.scop_reparameterization,
                 )
             )
             col_offset += n_cols
