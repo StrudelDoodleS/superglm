@@ -44,11 +44,50 @@ def _assessment_unchanged_failed_cap(
         source is not None
         and source.converged
         and not cap.converged
-        and cap.convergence_reason == "line_search_failed"
+        and cap.convergence_reason in ("line_search_failed", "rank_reduced_at_stop")
         and cap.iterations == 0
         and not cap.history
         and np.array_equal(cap.coefficients, source.coefficients)
     )
+
+
+@dataclass(frozen=True)
+class RetainedCoordinates:
+    """The coefficients ``K`` a rank-deficient representative keeps; the dropped ``J`` are zero.
+
+    The representative inverts the curvature's ``K`` block and gives ``J``
+    zeros, so its fit is the reduced problem on ``K`` (Wood, Pya and Saefken
+    2016, sec. 3.1.2), whose score and curvature are the ``K`` entries of the
+    full ones. The basis ``I[:, K]`` makes every reduction and lift exact.
+    """
+
+    dropped: NDArray[np.bool_]
+
+    @classmethod
+    def of(cls, rank: RankDecomposition) -> RetainedCoordinates | None:
+        """``rank``'s retained coordinates; ``None`` unless it is a rank-deficient representative."""
+        aliases = rank.structural_aliases
+        if aliases is None or rank.rank == rank.width:
+            return None
+        if np.count_nonzero(aliases) != rank.width - rank.rank:
+            return None
+        return cls(np.array(aliases, dtype=bool))
+
+    @property
+    def null_basis(self) -> NDArray[np.float64]:
+        return np.eye(self.dropped.size)[:, ~self.dropped]
+
+    def reduce_vector(self, values: NDArray) -> NDArray[np.float64]:
+        return np.asarray(values, dtype=np.float64)[~self.dropped]
+
+    def reduce_matrix(self, values: NDArray) -> NDArray[np.float64]:
+        kept = ~self.dropped
+        return np.asarray(values, dtype=np.float64)[np.ix_(kept, kept)]
+
+    def lift_vector(self, values: NDArray) -> NDArray[np.float64]:
+        lifted = np.zeros(self.dropped.size)
+        lifted[~self.dropped] = values
+        return lifted
 
 
 def _score_within_rounding_floor(
@@ -58,7 +97,7 @@ def _score_within_rounding_floor(
     coefficients: NDArray,
     score: NDArray,
     penalized_curvature: NDArray,
-    face: PenaltyFace | None,
+    face: PenaltyFace | RetainedCoordinates | None,
     objective: float,
     tolerance: float,
 ) -> bool:
@@ -298,6 +337,9 @@ class SolverIteration:
     levenberg_shift: float
     rank: int
     condition_estimate: float | None
+    # ``||H s - g|| / max(1, ||g||)``, or, for an untruncated solve that misses the
+    # residual tolerance on it, the normwise backward error ``||H s - g|| /
+    # (||H|| ||s|| + ||g||)`` that accepted it (``solver._solve_residual``).
     solve_residual: float
 
 
@@ -314,7 +356,7 @@ def _newton_decrement_is_certified(
     score: NDArray[np.float64],
     penalized_curvature: NDArray[np.float64],
     penalized_objective: float,
-    face: PenaltyFace | None,
+    face: PenaltyFace | RetainedCoordinates | None,
     tolerance: float,
     score_error: NDArray[np.float64] | None = None,
 ) -> bool:

@@ -1051,6 +1051,52 @@ def test_private_resolution_limited_stationarity_refuses_each_missing_gate(
         )
 
 
+@pytest.mark.parametrize(
+    ("flag", "reason"),
+    [
+        ("rank_truncated", "rank_reduced_at_stop"),
+        ("resolution_limited", "line_search_failed"),
+        ("used_svd_fallback", "line_search_failed"),
+    ],
+)
+def test_private_resolution_limited_stop_names_a_terminal_rank_that_dropped_a_direction(
+    monkeypatch: pytest.MonkeyPatch, flag: str, reason: str
+) -> None:
+    """Kills reporting a rank-disqualified stop as a failed line search, and the reverse.
+
+    Only a certificate that cut a direction names ``rank_reduced_at_stop``; an
+    uncertified rank that kept the one retained column is a failed search.
+    """
+    family, layout, response, likelihood_plan, lambdas, face, initial, config = (
+        _resolution_limited_face_problem()
+    )
+    real_certify = solver_module._certified_terminal_curvature
+
+    def drop_a_direction(*args: object, **kwargs: object):
+        decision = real_certify(*args, **kwargs)  # type: ignore[arg-type]
+        rank = decision.decomposition
+        assert rank is not None
+        assert rank.rank == rank.width == 1
+        # The one-column retained system cannot lose a column and stay liftable,
+        # so a flag on the full rank decides which reason the stop takes.
+        return replace(decision, decomposition=replace(rank, **{flag: True}))
+
+    monkeypatch.setattr(solver_module, "_certified_terminal_curvature", drop_a_direction)
+    result = solver_module._fit_dense_fixed_lambda_score_only(
+        family,  # type: ignore[arg-type]
+        layout,
+        response,
+        likelihood_plan,  # type: ignore[arg-type]
+        layout.penalty_matrix(lambdas),
+        initial=initial,
+        config=config,
+        coefficient_face=face,
+    )
+
+    assert result.converged is False
+    assert result.convergence_reason == reason
+
+
 def test_resolution_limited_decrement_encloses_subnormal_dot_underflow() -> None:
     """Kills a relative-only dot error bound and duplicate live/result predicates."""
     tiny = np.nextafter(0.0, np.inf)

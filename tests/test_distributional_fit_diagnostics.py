@@ -1301,3 +1301,18 @@ def test_stationary_stop_is_described_as_the_reml_optimum() -> None:
     text = report.render(detail="full")
     assert "REML optimum" in text and "projected gradient" in text
     assert not [f for f in report.findings if f.code == "smoothing.persistent_upward_drift"]
+
+
+def test_rank_reduced_stop_finding_names_the_stop_and_an_action() -> None:
+    from superglm.distributional.fit_diagnostics import _not_converged_finding
+
+    finding = _not_converged_finding(
+        loop="coefficient",
+        reason="rank_reduced_at_stop",
+        iterations=0,
+        provenance="solver_history",
+    )
+
+    assert "'rank_reduced_at_stop'" in finding.observed
+    assert "rank certificate" in finding.interpretation
+    assert "aliased" in finding.actions[0].question

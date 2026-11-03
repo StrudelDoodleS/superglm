@@ -216,7 +216,11 @@ def _capped_spline_problem():
 
 
 def _capped_spline_fit(
-    *, max_iterations: int, initial: np.ndarray | None = None, curvature: str = "observed"
+    *,
+    max_iterations: int,
+    initial: np.ndarray | None = None,
+    curvature: str = "observed",
+    tolerance: float = 1.0e-12,
 ) -> DenseSolverResult:
     family, layout, response, plan, lambdas = _capped_spline_problem()
     return fit_dense_fixed_lambda(
@@ -228,7 +232,7 @@ def _capped_spline_fit(
         initial=initial,
         config=DenseSolverConfig(
             max_iterations=max_iterations,
-            tolerance=1.0e-12,
+            tolerance=tolerance,
             coefficient_curvature=curvature,  # type: ignore[arg-type]
         ),
     )
@@ -242,13 +246,28 @@ def _one_ulp_from(fit: DenseSolverResult) -> np.ndarray:
     return start
 
 
-def test_a_capped_fit_stops_at_its_rounding_floor() -> None:
-    """Kills stepping on round-off once the score is within its rounding floor."""
+def _floor_start() -> np.ndarray:
+    """One ulp from the capped fit polished to a 1000x tighter tolerance.
+
+    An endpoint that only just met the tolerance leaves its one-ulp neighbour's
+    Newton correction near the objective bound, and other BLAS builds stop at
+    other such endpoints; polishing first starts the move from rounding level.
+    """
     fit = _capped_spline_fit(max_iterations=150)
     assert fit.converged is True
-    start = _one_ulp_from(fit)
+    polished = _capped_spline_fit(max_iterations=150, initial=fit.coefficients, tolerance=1.0e-15)
+    assert polished.converged is True
+    return _one_ulp_from(polished)
 
-    replay = _capped_spline_fit(max_iterations=150, initial=start)
+
+def test_a_capped_fit_stops_at_its_rounding_floor() -> None:
+    """Kills stepping on round-off once the score is within its rounding floor."""
+    start = _floor_start()
+
+    # At 1e-10 the one-ulp score is still ~1000x the bare tolerance, while the
+    # certified decrement sits ~250x inside its limit on every BLAS kernel; at
+    # 1e-12 that margin is 2-3x and some builds step.
+    replay = _capped_spline_fit(max_iterations=150, initial=start, tolerance=1.0e-10)
 
     tolerance = replay.config.tolerance
     assert replay.convergence_reason == "score"
@@ -264,7 +283,7 @@ def test_endpoint_authority_does_not_polish_a_score_within_its_rounding_floor(
 ) -> None:
     """Kills a Newton polish that can only follow round-off."""
     family, layout, response, plan, lambdas = _capped_spline_problem()
-    start = _one_ulp_from(_capped_spline_fit(max_iterations=150))
+    start = _floor_start()
     real_fit = smoothing_authority._fit_fixed_state
     calls = 0
 
@@ -274,7 +293,10 @@ def test_endpoint_authority_does_not_polish_a_score_within_its_rounding_floor(
         return real_fit(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(smoothing_authority, "_fit_fixed_state", counted_fit)
-    config = smoothing_authority._face_authority_config(DenseSolverConfig())
+    # At 1e-10, as in the replay test above, the certificate has margin on every BLAS kernel.
+    config = replace(
+        smoothing_authority._face_authority_config(DenseSolverConfig()), tolerance=1.0e-10
+    )
     fit = smoothing_authority._fit_endpoint_authority_stationary(
         family,
         layout,
@@ -661,7 +683,7 @@ def test_a_fisher_scoring_solve_does_not_take_the_rounding_floor_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Kills certifying a floor stop on Fisher information instead of observed curvature."""
-    start = _one_ulp_from(_capped_spline_fit(max_iterations=150))
+    start = _floor_start()
     real_floor = solver_module._score_within_rounding_floor
     calls = 0
 

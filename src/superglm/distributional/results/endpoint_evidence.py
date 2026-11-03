@@ -28,6 +28,10 @@ ConvergenceReason = Literal[
     "resolution_limited_stationarity",
     "max_iterations",
     "line_search_failed",
+    # The certified terminal rank does not keep the coefficients the stop was reached
+    # on: it dropped a direction the formed matrix kept, or a reduced fit could not
+    # start from, or end on, its representative.
+    "rank_reduced_at_stop",
     # No damping of the coefficient curvature gave a certified ascent direction.
     "no_ascent_direction",
 ]

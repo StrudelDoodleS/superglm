@@ -324,7 +324,7 @@ def _fit_endpoint_authority_stationary(
     score_only_refit = bool(
         (
             not fit.converged
-            and fit.convergence_reason == "line_search_failed"
+            and fit.convergence_reason in ("line_search_failed", "rank_reduced_at_stop")
             and fit.iterations == 0
         )
         or (fit.converged and fit.convergence_reason == "objective_and_step")

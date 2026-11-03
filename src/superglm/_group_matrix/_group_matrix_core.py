@@ -827,6 +827,7 @@ _DENSE_LEVEL_SATURATION = 0.9
 
 # Bound observation-dependent scratch, independently of the p-by-p products.
 _MAX_SSP_GRAM_WORKSPACE_BYTES = 64 << 20
+_SSP_PRODUCT_ROWS = 4096
 
 
 def _ssp_projection_cancels(raw: NDArray, transform: NDArray, gram: NDArray) -> bool:
@@ -891,9 +892,9 @@ def _saturated_ssp_gram(basis: sp.csr_matrix, weights: NDArray) -> NDArray | Non
                 break
     bytes_per_row = width * basis.data.dtype.itemsize
     if not dense_view:
-        # A copied CSR slice, its dense rendering and a weighted dense block.
+        # A copied CSR slice and its dense rendering; the weighted rows are sub-block scratch.
         # Charge both index dtypes, including the extra terminal row pointer.
-        bytes_per_row = width * (3 * basis.data.dtype.itemsize + index_bytes) + pointer_bytes
+        bytes_per_row = width * (2 * basis.data.dtype.itemsize + index_bytes) + pointer_bytes
     block_rows = (budget - pointer_bytes) // bytes_per_row
     if block_rows < 1:
         return None
@@ -908,13 +909,27 @@ def _saturated_ssp_gram(basis: sp.csr_matrix, weights: NDArray) -> NDArray | Non
                 return None
         else:
             dense = basis[start:stop].toarray()
-        block_gram = (dense * weights[start:stop, None]).T @ dense
+        block_gram = _weighted_dense_gram(dense, weights[start:stop])
         del dense  # Release copied rows before rendering the next block.
         if raw_gram is None:
             raw_gram = block_gram
         else:
             raw_gram += block_gram
     return raw_gram
+
+
+def _weighted_dense_gram(dense: NDArray, weights: NDArray) -> NDArray:
+    """``dense' diag(weights) dense``, weighting ``_SSP_PRODUCT_ROWS`` rows at a time.
+
+    The weighted rows are scratch of one sub-block, so a block of rows holds its
+    dense rows (a view or one copy) and never a second copy beside them.
+    """
+    rows = dense[:_SSP_PRODUCT_ROWS]
+    gram = (rows * weights[:_SSP_PRODUCT_ROWS, None]).T @ rows
+    for start in range(_SSP_PRODUCT_ROWS, dense.shape[0], _SSP_PRODUCT_ROWS):
+        rows = dense[start : start + _SSP_PRODUCT_ROWS]
+        gram += (rows * weights[start : start + _SSP_PRODUCT_ROWS, None]).T @ rows
+    return gram
 
 
 def _dense_if_saturated(block) -> NDArray | None:
