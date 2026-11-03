@@ -728,6 +728,7 @@ def _geometry(
         curvature,
         penalty=context.penalty,
         coefficients=state.coefficients,
+        validated_penalty=True,
     )
 
 

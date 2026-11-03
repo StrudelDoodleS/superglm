@@ -229,8 +229,13 @@ def _assemble_dense_geometry_from_matrices(
     *,
     penalty: NDArray,
     coefficients: NDArray,
+    validated_penalty: bool = False,
 ) -> DenseJointGeometry:
-    """Assemble the dense reference from predictor matrices retained by a caller."""
+    """Assemble the dense reference from predictor matrices retained by a caller.
+
+    ``validated_penalty`` says ``penalty`` is already :func:`validated_dense_penalty`'s
+    output, as a solver context's is.
+    """
     coefficient_values = _validated_coefficients(coefficients, layout)
     n_observations = matrices[0].shape[0]
     k_parameters = len(matrices)
@@ -240,7 +245,9 @@ def _assemble_dense_geometry_from_matrices(
         n_observations=n_observations,
         k_parameters=k_parameters,
     )
-    penalty_matrix = validated_dense_penalty(penalty, layout.n_coefficients)
+    penalty_matrix = (
+        penalty if validated_penalty else validated_dense_penalty(penalty, layout.n_coefficients)
+    )
 
     score_data = np.zeros(layout.n_coefficients, dtype=np.float64)
     data_curvature = np.zeros(

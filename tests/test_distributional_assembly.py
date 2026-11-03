@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 import superglm.distributional.solver.assembly as assembly_module
+import superglm.distributional.solver.solver as solver_module
 from superglm._frame import as_eager_frame
 from superglm.distributional.family import ParameterSpec, ParameterSupport
 from superglm.distributional.layout import build_stacked_layout
@@ -20,6 +21,7 @@ from superglm.distributional.solver.assembly import (
 from superglm.features import Numeric
 
 from ._distributional_weights import resolved_prior
+from .test_distributional_support_predictions import _support_problem
 
 
 def _parameter(name: str, link: str = "identity") -> ParameterSpec:
@@ -296,6 +298,38 @@ def test_a_dense_assembly_forms_its_formation_statistics_only_when_read(monkeypa
     formation = geometry.formed()
     assert geometry.formed() is formation and len(formed) == 1
     assert formation == original(layout, matrices, curvature)
+
+
+def test_a_dense_fit_validates_its_penalty_once(monkeypatch) -> None:
+    """Kills validating the context's already-validated penalty again at every geometry."""
+    family, layout, response, plan, initial = _support_problem(False)
+    calls = []
+    original = assembly_module.validated_dense_penalty
+
+    def counted(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(assembly_module, "validated_dense_penalty", counted)
+    monkeypatch.setattr(solver_module, "validated_dense_penalty", counted)
+    penalty = np.eye(layout.n_coefficients)
+    fitted = solver_module.fit_dense_fixed_lambda(
+        family, layout, response, plan, penalty, initial=initial, chunk_size=None
+    )
+    assert fitted.iterations > 1 and len(calls) == 1
+
+    # Unvalidated input still gets the checks.
+    asymmetric = penalty.copy()
+    asymmetric[0, 1] = 1.0
+    with pytest.raises(ValueError, match="penalty must be symmetric"):
+        assembly_module._assemble_dense_geometry_from_matrices(
+            layout,
+            dense_predictor_matrices(layout),
+            np.zeros((layout.predictors[0].design.n, 2)),
+            np.ones((layout.predictors[0].design.n, 3)),
+            penalty=asymmetric,
+            coefficients=np.zeros(layout.n_coefficients),
+        )
 
 
 def test_dense_predictor_evaluation_includes_intercepts_slopes_and_offsets() -> None:
