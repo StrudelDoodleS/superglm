@@ -10,6 +10,7 @@ import pytest
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.smoothing import endpoint_laml as endpoint
 from superglm.distributional.smoothing.penalty_face import build_penalty_face
+from superglm.distributional.smoothing.penalty_geometry import _PenaltyEvaluationMemo
 from superglm.group_matrix import DenseGroupMatrix
 from superglm.reml import penalty_algebra as algebra
 from superglm.types import GroupSlice, PenaltyComponent
@@ -186,3 +187,18 @@ def test_joint_face_map_bound_encloses_finite_nonorthogonality_and_zero_rank():
         algebra._joint_near_isometry_volume_error(
             np.zeros((1, 2)), rank=1, root_rows=1, components=1
         )
+
+
+def test_the_penalty_memo_answers_only_its_own_layout_face_and_lambdas():
+    """Kills handing a state the evaluation of another layout, face or lambda vector."""
+    memo = _PenaltyEvaluationMemo()
+    layout, face, evaluation = object(), object(), object()
+    assert memo.get(layout, {"a": 1.0}, face) is None
+    memo.put(layout, {"a": 1.0}, face, evaluation)
+    assert memo.get(layout, {"a": 1.0}, face) is evaluation
+    assert memo.get(layout, {"a": 2.0}, face) is None
+    assert memo.get(object(), {"a": 1.0}, face) is None
+    assert memo.get(layout, {"a": 1.0}, object()) is None
+    memo.put(layout, {"a": 2.0}, face, replacement := object())
+    assert memo.get(layout, {"a": 2.0}, face) is replacement
+    assert memo.get(layout, {"a": 1.0}, face) is None

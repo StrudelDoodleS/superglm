@@ -83,6 +83,7 @@ from superglm.distributional.smoothing.objective import (
     rank_matched_objectives,
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace, PenaltyFaceError
+from superglm.distributional.smoothing.penalty_geometry import _PenaltyEvaluationMemo
 from superglm.distributional.smoothing.proposals import (
     _accelerated_proposal,
     _acceleration_provenance,
@@ -116,10 +117,13 @@ def _trial_laplace_objective(
     layout: StackedLayout,
     lambdas: Mapping[str, float],
     face: PenaltyFace | None,
+    penalty_memo: _PenaltyEvaluationMemo | None = None,
 ) -> float | None:
     """Reject an uncertifiable penalty trial without changing accepted state."""
     try:
-        return _laplace_objective(result, layout=layout, lambdas=lambdas, face=face)
+        return _laplace_objective(
+            result, layout=layout, lambdas=lambdas, face=face, penalty_memo=penalty_memo
+        )
     except PenaltyNumericalError:
         return None
     except EndpointLaplaceError as exc:
@@ -221,6 +225,7 @@ def fit_distributional_efs(
     if not isinstance(outer_config, DistributionalEFSConfig):
         raise TypeError("efs_config must be DistributionalEFSConfig")
     reuse_session = _DenseObservedReuseSession()
+    penalty_memo = _PenaltyEvaluationMemo()
 
     with measure_phase(phase_recorder, "layout_penalty_assembly"):
         current_lambdas, initial = prepare_distributional_initialization(
@@ -1221,6 +1226,7 @@ def fit_distributional_efs(
                         layout=layout,
                         lambdas=trial_lambdas,
                         face=current_face,
+                        penalty_memo=penalty_memo,
                     )
                 if (
                     trial_objective is not None
@@ -1290,6 +1296,7 @@ def fit_distributional_efs(
                         layout=layout,
                         lambdas=trial_lambdas,
                         face=current_face,
+                        penalty_memo=penalty_memo,
                     )
                 if trial_objective is not None and _within_ceiling(
                     current_fit, current_objective, trial_fit, trial_objective, outer_config
@@ -1403,6 +1410,7 @@ def fit_distributional_efs(
                 current_fit,
                 outer_config,
                 face=current_face,
+                penalty_memo=penalty_memo,
             )
         if terminal_evidence.estimated_names != estimated_names:
             raise RuntimeError("estimated smoothing names changed inside one EFS fit")

@@ -34,6 +34,7 @@ from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.smoothing.penalty_geometry import (
     EndpointLaplaceError,
     _finite_penalty_evaluation_from_components,
+    _PenaltyEvaluationMemo,
 )
 from superglm.distributional.smoothing.penalty_geometry import (
     _projected_penalty_group_indices as _projected_penalty_group_indices,
@@ -560,6 +561,7 @@ def evaluate_endpoint_laplace(
     layout: StackedLayout,
     lambdas: Mapping[str, float],
     face: PenaltyFace,
+    penalty_memo: _PenaltyEvaluationMemo | None = None,
 ) -> EndpointLaplaceEvaluation:
     """Evaluate negative LAML on an exact, already-fitted coefficient face."""
     if not isinstance(result, DenseSolverResult):
@@ -573,6 +575,8 @@ def evaluate_endpoint_laplace(
         lambdas=lambdas,
         face=face,
     )
+    if penalty_memo is not None:
+        penalty_memo.put(layout, lambdas, face, penalty_evaluation)
     projected_penalty = ProjectedPenaltyLogDet(
         component_names=tuple(penalty_evaluation.gradient),
         rank=penalty_evaluation.rank,

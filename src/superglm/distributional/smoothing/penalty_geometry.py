@@ -18,6 +18,29 @@ class EndpointLaplaceError(ValueError):
     """Raised when a fit cannot prove the supplied endpoint provenance."""
 
 
+class _PenaltyEvaluationMemo:
+    """The last projected penalty evaluation of one smoothing fit.
+
+    The objective of a state forms it and the same state's evidence needs it again.
+    Owner: the smoothing loop; lifetime: that loop; the next evaluation replaces it.
+    A lookup matches only the same layout and face objects and equal lambda values.
+    """
+
+    __slots__ = ("_entry",)
+
+    def __init__(self) -> None:
+        self._entry: tuple | None = None
+
+    def put(self, layout, lambdas, face, evaluation: _PenaltyLogdetEvaluation) -> None:
+        self._entry = (layout, face, dict(lambdas), evaluation)
+
+    def get(self, layout, lambdas, face) -> _PenaltyLogdetEvaluation | None:
+        entry = self._entry
+        if entry and entry[0] is layout and entry[1] is face and entry[2] == dict(lambdas):
+            return entry[3]
+        return None
+
+
 def _finite_penalty_evaluation_from_components(
     *, components: tuple[PenaltyComponent, ...], resolved: Mapping[str, float], face: PenaltyFace
 ) -> _PenaltyLogdetEvaluation:

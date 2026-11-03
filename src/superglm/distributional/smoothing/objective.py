@@ -16,6 +16,7 @@ from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.results.solver import DenseSolverResult
 from superglm.distributional.smoothing.endpoint_laml import evaluate_endpoint_laplace
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
+from superglm.distributional.smoothing.penalty_geometry import _PenaltyEvaluationMemo
 from superglm.distributional.smoothing.proposals import _scaled_proposal
 from superglm.reml.efs_update import EFSComponentState, EFSUpdateResult
 from superglm.reml.penalty_algebra import (
@@ -214,6 +215,7 @@ def _laplace_objective(
     layout: StackedLayout,
     lambdas: Mapping[str, float],
     face: PenaltyFace | None,
+    penalty_memo: _PenaltyEvaluationMemo | None = None,
 ) -> float:
     if face is None:
         return joint_laplace_objective(result, layout=layout, lambdas=lambdas)
@@ -222,6 +224,7 @@ def _laplace_objective(
         layout=layout,
         lambdas=lambdas,
         face=face,
+        penalty_memo=penalty_memo,
     ).objective
 
 
