@@ -113,3 +113,21 @@ def test_a_nonfinite_gap_variance_is_disclosed_as_unmeasured(monkeypatch):
     )
     assert variances is None
     assert note == free_levels._UNMEASURED
+
+
+def test_a_record_with_a_face_but_no_face_rows_reads_its_rows_from_the_constraints():
+    """A record from before fits kept ``face_rows`` can still carry ``face``."""
+    constraints = SimpleNamespace(n_constraints=1, A=np.array([[1.0, -1.0, 0.0]]), b=np.zeros(1))
+    group = SimpleNamespace(name="t", start=0, end=3, constraints=constraints)
+    record = SimpleNamespace(face=_active_face_basis(constraints.A), face_rows=None)
+    model = SimpleNamespace(
+        _groups=[group],
+        result=SimpleNamespace(beta=np.zeros(3)),
+        _solver_pirls_result=lambda: SimpleNamespace(rank_info=record),
+    )
+    move = _on_binding_face(
+        model, [group], lambda v: v, SimpleNamespace(p=3), None, data_gram=np.eye(3)
+    )
+    assert move is not None
+    # The binding row theta_0 = theta_1 holds: I - r r' / (r' r) on (1, 0, 0).
+    np.testing.assert_allclose(move(np.array([1.0, 0.0, 0.0])), [0.5, 0.5, 0.0], atol=1e-12)

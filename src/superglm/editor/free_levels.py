@@ -569,12 +569,12 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
     recorded = getattr(record, "face_rows", None)
     face = getattr(record, "face", None)
     width = X.p
+    # The record's columns of the active terms; an inactive term's
+    # coefficients are zero, so its rows drop.
+    columns = np.concatenate(
+        [np.arange(full[group.name].start, full[group.name].end) for group in active]
+    )
     if recorded is not None:
-        # Over the active columns; an inactive term's coefficients are zero,
-        # so its rows drop.
-        columns = np.concatenate(
-            [np.arange(full[group.name].start, full[group.name].end) for group in active]
-        )
         R = recorded[:, columns]
         R = R[np.any(R != 0.0, axis=1)]
     else:
