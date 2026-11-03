@@ -587,6 +587,28 @@ def test_per_row_bounds_and_zero_weight_rows_follow_the_retained_rows():
     assert dropped == pytest.approx(reference, rel=1e-10)
 
 
+@pytest.mark.parametrize(
+    "column",
+    [list, np.array, functools.partial(pd.Series, dtype="Float64")],
+    ids=["list", "object", "Float64"],
+)
+@pytest.mark.parametrize("missing", [pd.NA, np.nan, None], ids=["NA", "NaN", "None"])
+def test_a_missing_bound_is_read_only_on_a_retained_row(column, missing):
+    y = np.arange(-2.0, 3.0)
+    weights = [0.0, 1.0, 1.0, 1.0, 1.0]
+    family = GaussianLS()
+
+    def bounds(limit, row):
+        values = [limit] * 5
+        values[row] = missing
+        return column(values)
+
+    dropped = _fit(family, y, sample_weight=weights, truncation=(bounds(-3.0, 0), None))
+    assert dropped == pytest.approx(_fit(family, y[1:], truncation=(-3.0, None)), rel=1e-12)
+    with pytest.raises(ValueError, match=r"1 row\(s\) have a missing .*first at input row 1"):
+        _fit(family, y, sample_weight=weights, truncation=(None, bounds(3.0, 1)))
+
+
 def test_flags_on_rows_the_fit_drops_are_never_read():
     # Rows 0 and 5 carry zero weight and invalid flags; the fit, its scores
     # and its residuals are those of the retained rows alone.

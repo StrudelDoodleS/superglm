@@ -128,18 +128,29 @@ def _pair(value: BoundPair, name: str) -> tuple[object, object]:
     return value[0], value[1]
 
 
-def _side_array(value: object, n_rows: int, *, absent: float, name: str) -> NDArray[np.float64]:
+def _side_array(value: object, n_rows: int, *, absent: float, name: str) -> NDArray:
+    """One side's bounds broadcast to ``n_rows`` and shape-checked, read later by ``_floats``."""
     if value is None:
         return np.full(n_rows, absent, dtype=np.float64)
     try:
-        array = np.asarray(value, dtype=np.float64)
+        array = np.asarray(value)
     except (TypeError, ValueError) as exc:
         raise TypeError(f"{name} must be a number or one number per row") from exc
     if array.ndim == 0:
-        return np.full(n_rows, float(array), dtype=np.float64)
+        return np.full(n_rows, array.item(), dtype=array.dtype)
     if array.shape != (n_rows,):
         raise ValueError(f"{name} must be a number or one number per row ({n_rows} rows)")
-    return np.array(array, dtype=np.float64, copy=True)
+    return np.array(array, copy=True)
+
+
+def _floats(bound: NDArray, name: str) -> NDArray[np.float64]:
+    """Retained bounds as floats; a missing entry (NaN, ``pd.NA`` or ``None``) reads as NaN."""
+    try:
+        if bound.dtype == object:
+            bound = np.where(pd.isna(bound), np.nan, bound)
+        return np.asarray(bound, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be a number or one number per row") from exc
 
 
 def _first_rows(mask: NDArray[np.bool_], positions: NDArray) -> str:
@@ -229,8 +240,8 @@ def unvalidated_bound_arrays(
 
     Returns ``(truncation lower, truncation upper, censored flags)``, with
     infinite entries for open truncation sides, before any row selection.  The
-    flags are read by :func:`resolve_response_bounds`, on the retained rows
-    only, so a row the fit drops may carry any flag.
+    bounds and flags are read by :func:`resolve_response_bounds`, on the
+    retained rows only, so a row the fit drops may carry any value.
     """
     if truncation is None and censored is None:
         return None
@@ -266,8 +277,9 @@ def resolve_response_bounds(
     if arrays is None:
         return None
     values = np.asarray(response, dtype=np.float64)
-    t_lower, t_upper, flags = arrays
-    side = _censored_sides(flags, positions)
+    t_lower = _floats(arrays[0], "truncation lower bound")
+    t_upper = _floats(arrays[1], "truncation upper bound")
+    side = _censored_sides(arrays[2], positions)
     for bound in (t_lower, t_upper):
         _refuse_rows(np.isnan(bound), positions, "have a missing (NaN) bound; use None or inf")
     _refuse_rows(
