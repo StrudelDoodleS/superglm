@@ -1765,13 +1765,15 @@ class SuperLSS:
         coherent with one another.  ``weights`` here are per swept point, not
         per training row: they state the exposure the curve is priced at.
         """
-        return risk_curves(
+        curves = risk_curves(
             self._require_fitted(),
             self._term_training_frame(X_train),
             reference,
             covariate,
             **kwargs,
         )
+        self._warn_if_hand_edited()
+        return curves
 
     def density_fan(
         self,
@@ -1849,13 +1851,15 @@ class SuperLSS:
         refused under frequency semantics, which has no row-law slot.
         """
         self._refuse_frequency_row_law(sample_weight)
-        return portfolio(
+        book = portfolio(
             self._require_fitted(),
             X,
             weights=self._prior_law_weight(sample_weight),
             offsets=offsets,
             **kwargs,
         )
+        self._warn_if_hand_edited()
+        return book
 
     # -- figures and their payloads -------------------------------------- #
 

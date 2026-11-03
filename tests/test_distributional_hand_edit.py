@@ -295,6 +295,10 @@ def _posterior_calls(model: SuperLSS, case, parameter: str):
         calls["posterior_predictive"] = lambda: model.posterior_predictive(
             rows, 16, seed=3, offsets=offsets
         )
+        calls["risk_curves"] = lambda: model.risk_curves(
+            case.X.iloc[0], "age", X_train=case.X, quantiles=(0.5,), n_points=5, n_draws=32
+        )
+        calls["portfolio"] = lambda: model.portfolio(rows, n_draws=16, seed=3, offsets=offsets)
     return calls
 
 
