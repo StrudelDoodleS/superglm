@@ -250,9 +250,9 @@ def _by_bin_contractions(monkeypatch):
     contracted = []
     original = algebra._by_bin_contraction
 
-    def counted(gm, cache, table):
+    def counted(gm, cache, table, **kwargs):
         contracted.append(table.shape)
-        return original(gm, cache, table)
+        return original(gm, cache, table, **kwargs)
 
     monkeypatch.setattr(algebra, "_by_bin_contraction", counted)
     return contracted

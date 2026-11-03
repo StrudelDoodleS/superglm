@@ -121,21 +121,18 @@ def _cross_operand_bounds(operand: NDArray) -> tuple[int, int]:
     return min(0, lo), max(0, hi) + sum((max(1, size) - 1).bit_length() for size in operand.shape)
 
 
-def _cross_factors_in_range(
-    *operands: NDArray, cache=None, support_factors=(), bounds: tuple[int, int] = (0, 0)
-) -> bool:
+def _cross_factors_in_range(*operands: NDArray, cache=None, support_factors=()) -> bool:
     """Bound every partial cross product and reduction, not just its result.
 
     Negative and positive exponent bounds are summed separately so each partial
     product stays normal; the product of operand dimensions overbounds reduction
     lengths in either association.  Cancellation still follows ordinary rounded
     arithmetic.  ``weight_range`` is looked up optionally: centered assembly uses a
-    weight-grid-only cache without it.  ``bounds`` is one more operand's
-    contribution, given already reduced.
+    weight-grid-only cache without it.
     """
     weight_range = getattr(cache, "weight_range", None)
     support_range = getattr(cache, "support_range", None)
-    lower, upper = bounds
+    lower = upper = 0
     for operand in operands:
         if operand.dtype != np.float64:
             return False
@@ -447,8 +444,27 @@ def _add_by_bin(transposed: bool, aggregate, table, gm_i, gm_j, W: NDArray, cach
     return table
 
 
+def _table_projects(cache, table: NDArray, *gms) -> bool:
+    """Whether a pass table contracts with its supports projected, ``S = B R``.
+
+    Each ``S`` must form in range, bounded by its ``B`` and ``R``, and ``S' T``
+    or ``S_i' H S_j`` must not overflow, bounded by the ``S`` and the table
+    themselves. Underflow there costs at most 2**-1075 absolute per product,
+    and nothing rescales it, so the table's low exponents, which cancellation
+    across blocks can push far below any block's, do not refuse it; in the raw
+    association ``R`` would rescale that underflow.
+    """
+    upper = _cross_operand_bounds(table)[1]
+    for gm in gms:
+        factors = (gm.B_unique, gm.R_inv)
+        if not _cross_factors_in_range(*factors, cache=cache, support_factors=factors):
+            return False
+        upper += cache.support_range(cache.solver_support(gm))[1]
+    return upper <= 1022
+
+
 def _by_bin_block(disc, transposed: bool, table: NDArray, cache) -> NDArray:
-    result = _by_bin_contraction(disc, cache, table)
+    result = _by_bin_contraction(disc, cache, table, projects=_table_projects(cache, table, disc))
     return result.T if transposed else result
 
 
@@ -490,23 +506,13 @@ def _joint_table_kind(gm_i, gm_j) -> str | None:
     return None
 
 
-def _add_joint(kind: str, table, gm_i, gm_j, W: NDArray, cache):
-    """Add one block's rows into a joint histogram ``H``: the support's bins by the other's.
-
-    A support pair's table is ``(H, lowest, highest, rows)``: the exponent bounds
-    of the weights summed into ``H`` and their count, which decide its
-    contraction as one block's weights do (``_joint_block``), because ``H`` can
-    cancel to entries far below any row's weight.
-    """
+def _add_joint(kind: str, table, gm_i, gm_j, W: NDArray, cache) -> NDArray:
+    """Add one block's rows into a joint histogram ``H``: the support's bins by the other's."""
     if kind == "supports":
-        weight_range = getattr(cache, "weight_range", None)
-        lo, hi = _cross_operand_bounds(W[:, None]) if weight_range is None else weight_range(W)[1]
-        hi -= (max(1, len(W)) - 1).bit_length()
         if table is None:
-            table = (np.zeros((gm_i.n_bins, gm_j.n_bins)), lo, hi, 0)
-        H, lowest, highest, rows = table
-        _disc_disc_2d_hist_add(H, _native(gm_i.bin_idx), _native(gm_j.bin_idx), _native(W))
-        return H, min(lowest, lo), max(highest, hi), rows + len(W)
+            table = np.zeros((gm_i.n_bins, gm_j.n_bins))
+        _disc_disc_2d_hist_add(table, _native(gm_i.bin_idx), _native(gm_j.bin_idx), _native(W))
+        return table
     disc, level = (gm_i, gm_j) if kind == "level" else (gm_j, gm_i)
     if table is None:
         table = np.zeros((disc.n_bins, level.n_bins))
@@ -520,18 +526,15 @@ def _add_joint(kind: str, table, gm_i, gm_j, W: NDArray, cache):
     return table
 
 
-def _joint_block(kind: str, gm_i, gm_j, table, cache) -> NDArray:
+def _joint_block(kind: str, gm_i, gm_j, H: NDArray, cache) -> NDArray:
     """``S_i' H S_j``, associated as ``_cross_gram``'s histogram routes contract a block."""
     if kind == "supports":
-        H, lowest, highest, rows = table
-        factors = (gm_i.B_unique, gm_i.R_inv, gm_j.B_unique, gm_j.R_inv)
-        weights = (lowest, highest + (max(1, rows) - 1).bit_length())
-        if _cross_factors_in_range(*factors, cache=cache, support_factors=factors, bounds=weights):
+        if _table_projects(cache, H, gm_i, gm_j):
             return np.dot(np.dot(cache.solver_support(gm_i).T, H), cache.solver_support(gm_j))
         raw = np.dot(np.dot(gm_i.B_unique.T, H), gm_j.B_unique)
         return gm_i.R_inv.T @ raw @ gm_j.R_inv
     disc, level = (gm_i, gm_j) if kind == "level" else (gm_j, gm_i)
-    raw = np.dot(np.dot(disc.B_unique.T, table), level.B_unique)
+    raw = np.dot(np.dot(disc.B_unique.T, H), level.B_unique)
     result = disc.R_inv.T @ raw @ level.R_inv
     return result if kind == "level" else result.T
 
@@ -2539,9 +2542,20 @@ def _cross_gram_by_columns(
     return result
 
 
-def _by_bin_contraction(gm: DiscretizedSSPGroupMatrix, cache, WX_agg: NDArray) -> NDArray:
-    """``X_gm' W X_other`` from ``WX_agg``, the other group's weighted columns summed by gm's bins."""
-    support, transform = _cross_support(gm, cache, WX_agg)
+def _by_bin_contraction(
+    gm: DiscretizedSSPGroupMatrix, cache, WX_agg: NDArray, *, projects: bool | None = None
+) -> NDArray:
+    """``X_gm' W X_other`` from ``WX_agg``, the other group's weighted columns summed by gm's bins.
+
+    ``projects`` is a pass table's decision (``_table_projects``); otherwise a
+    block's own aggregate decides on its raw chain's range (``_cross_support``).
+    """
+    if projects is None:
+        support, transform = _cross_support(gm, cache, WX_agg)
+    else:
+        support, transform = (
+            (cache.solver_support(gm), None) if projects else (gm.B_unique, gm.R_inv)
+        )
     result = support.T @ WX_agg
     return result if transform is None else transform.T @ result
 

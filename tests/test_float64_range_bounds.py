@@ -221,25 +221,31 @@ def test_range_scans_serve_every_operand_form_with_one_signature(tmp_path):
     assert completed.returncode == 0, completed.stderr
 
 
-def test_a_kept_support_histogram_decides_its_projection_on_the_rows_weights():
-    """A pass table's joint histogram can cancel to entries no row weight is near,
-    so its contraction is decided on the weights summed into it, as one block's is.
+@pytest.mark.parametrize("rows", [2, 2**15])
+def test_a_kept_support_histogram_projects_unless_projection_could_overflow(rows):
+    """A pass table's joint histogram projects its supports whenever each ``S = B R``
+    forms in range and ``S_i' H S_j`` cannot overflow, whatever ``H``'s low entries.
 
-    Two rows of bin 0 weigh 1 and -(1 - 2**-52), in separate blocks, so
-    ``H[0, 0] = 2**-52`` exactly. The supports are 2**-508 with ``R = 2**500``:
-    projected first, every partial product is normal and the block exact; raw,
-    ``B_i' H B_j`` is about 2**-1068 and keeps seven bits before ``R`` rescales it.
-    Mutation check: deciding on ``H``'s exponents takes the raw route, about 0.3% off.
+    Bin 0's one row per block weighs 1, then -(1 - 2**-52), so ``H[0, 0] = 2**-52``
+    exactly; every other row weighs 1 in bin 2, where the supports are zero. The
+    supports are 2**-508 with ``R = 2**500``. Projected first, every partial
+    product is normal and the block exact; raw, ``B_i' H B_j`` is about 2**-1068
+    and keeps seven bits before ``R`` rescales it, about 0.3% off. Blocks of
+    2**15 rows sit on the bound's upper edge, which the pass's 2**16 rows pass.
+    Mutation check: deciding on ``H``'s exponents with the raw chain's bound
+    fails both cases, and on the weights with the pass's row count the second.
     """
     from fractions import Fraction
 
     from superglm._group_matrix._group_matrix_discretized import DiscretizedSSPGroupMatrix
 
-    bins = np.array([0, 2])
+    bins = np.full(rows, 2)
+    bins[0] = 0
     R = np.array([[2.0**500]])
     gm_i = DiscretizedSSPGroupMatrix(np.array([[1.2], [0.0], [0.0]]) * 2.0**-508, R, bins)
     gm_j = DiscretizedSSPGroupMatrix(np.array([[1.0], [2.0], [0.0]]) * 2.0**-508, R, bins)
-    blocks = (np.array([1.0, 1.0]), np.array([-(1.0 - 2.0**-52), 1.0]))
+    blocks = [np.ones(rows), np.ones(rows)]
+    blocks[1][0] = -(1.0 - 2.0**-52)
     tables = algebra.PassTables(1 << 20)
     tables.reserve((0, 0, 1), gm_i, gm_j)
     for W in blocks:
@@ -248,5 +254,37 @@ def test_a_kept_support_histogram_decides_its_projection_on_the_rows_weights():
     x_i = Fraction(gm_i.B_unique[0, 0]) * Fraction(R[0, 0])
     x_j = Fraction(gm_j.B_unique[0, 0]) * Fraction(R[0, 0])
     exact = sum(Fraction(W[0]) for W in blocks) * x_i * x_j
+    u = np.finfo(np.float64).eps / 2
+    assert key == (0, 0, 1) and abs(Fraction(block[0, 0]) - exact) <= 4 * u * abs(exact)
+
+
+def test_a_kept_by_bin_table_projects_unless_projection_could_overflow():
+    """A pass's by-bin table ``T`` projects its support whenever ``S = B R`` forms in
+    range and ``S' T`` cannot overflow, though the summed ``T`` cancels far below.
+
+    One row per block against a dense column of ones weighs (1 + 2**-52) * 2**-500,
+    then -2**-500, so ``T = 2**-552``. The support is 1.2 * 2**-522 with
+    ``R = 2**522 / 1.2``, so ``S`` is about 1 and ``S' T`` exact to one rounding.
+    Raw, ``B' T`` rounds to the smallest subnormal before ``R`` rescales it, 1/6
+    off. Mutation check: deciding on the summed ``T`` with the raw chain's bound
+    takes the raw route.
+    """
+    from fractions import Fraction
+
+    from superglm._group_matrix._group_matrix_core import DenseGroupMatrix
+    from superglm._group_matrix._group_matrix_discretized import DiscretizedSSPGroupMatrix
+
+    disc = DiscretizedSSPGroupMatrix(
+        np.array([[1.2 * 2.0**-522]]), np.array([[2.0**522 / 1.2]]), np.array([0])
+    )
+    dense = DenseGroupMatrix(np.array([[1.0]]))
+    blocks = (np.array([(1.0 + 2.0**-52) * 2.0**-500]), np.array([-(2.0**-500)]))
+    tables = algebra.PassTables(1 << 20)
+    tables.reserve((0, 0, 1), disc, dense)
+    for W in blocks:
+        assert tables.add((0, 0, 1), disc, dense, W, algebra._BlockWeightCache(None))
+    ((key, block),) = tables.contracted(None)
+    support = Fraction(disc.B_unique[0, 0]) * Fraction(disc.R_inv[0, 0])
+    exact = sum(Fraction(W[0]) for W in blocks) * support
     u = np.finfo(np.float64).eps / 2
     assert key == (0, 0, 1) and abs(Fraction(block[0, 0]) - exact) <= 4 * u * abs(exact)
