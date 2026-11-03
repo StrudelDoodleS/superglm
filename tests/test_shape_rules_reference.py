@@ -27,11 +27,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.interpolate import BSpline
+from scipy.linalg import null_space
 from scipy.optimize import LinearConstraint, minimize, nnls
 
 import superglm.solvers.irls_direct._finalise as irls_finalise
 from superglm import Constraint, Spline, SuperGLM
 from superglm.constraints import shape_derivative_matrix
+from superglm.solvers.irls_direct._qp import _QP_FEASIBILITY_TOL
 from superglm.types import LambdaPolicy
 
 C = Constraint.fit
@@ -253,6 +256,8 @@ def _scam_case(scam_fixture, shape):
     fourth-last at the data range; ours takes the six inside as its interior
     knots.  Its open knot vector pads the range by 0.001 of it where scam's
     starts at the data, so the two bases differ outside the knots inside.
+    The IRLS tolerance is tightened from ``1e-6`` to ``1e-10`` so the fit
+    sits at its optimum, not at its stop.
     """
     case = scam_fixture[shape]
     rules = SCAM_SHAPES[shape][0]
@@ -265,7 +270,11 @@ def _scam_case(scam_fixture, shape):
     X = pd.DataFrame({"x": x})
     spline = Spline(kind="ps", knots=knots[4:-4], constraint=rules)
     model = SuperGLM(
-        family="poisson", selection_penalty=0.0, spline_penalty=0.0, features={"x": spline}
+        family="poisson",
+        selection_penalty=0.0,
+        spline_penalty=0.0,
+        tol=1e-10,
+        features={"x": spline},
     ).fit(X, y)
     assert model.result.converged
     return case, x, y, model
@@ -284,9 +293,13 @@ def test_scam_shapes_hold(scam_fixture, shape):
     _, slope_sign, curvature_sign = SCAM_SHAPES[shape]
     spec = model._specs["x"]
     grid = np.linspace(spec._lo, spec._hi, 2000)
-    tol = 1e3 * U * np.max(np.abs(_native_curve(model, "x", grid, 0)))
-    assert np.min(slope_sign * _native_curve(model, "x", grid, 1)) >= -tol
-    assert np.min(curvature_sign * _native_curve(model, "x", grid, 2)) >= -tol
+    beta = model.result.beta[next(g for g in model._groups if g.name == "x").sl]
+    for sign, order in ((slope_sign, 1), (curvature_sign, 2)):
+        # a derivative's rows hold to the QP's feasibility tolerance, and its
+        # evaluation to rounding, each relative to the sum of its absolute terms
+        derivative = shape_derivative_matrix(spec, grid, order)
+        scale = np.abs(derivative) @ np.abs(beta)
+        assert np.all(sign * (derivative @ beta) >= -(_QP_FEASIBILITY_TOL + 1e3 * U) * scale)
     # the oracle's own values have the shape at the data (checks the fixture, not our code)
     _assert_shape_at_points(x, case["linear_predictor"], slope_sign, curvature_sign)
     ours = _poisson_deviance(y, model.predict(pd.DataFrame({"x": x})))
@@ -294,42 +307,130 @@ def test_scam_shapes_hold(scam_fixture, shape):
     assert ours <= scam * (1.0 + 1e3 * U)
 
 
-# scam 1.2.23 at sp=0 stops above the optimum of its own problem on three of
-# the four datasets: solving its stated conditions (signed first and second
-# differences of the coefficients, on its knots) with trust-constr gives a
-# lower deviance than scam's (micv and mdcv: ours, to 1e-8; micx: 428.59894,
-# ours 428.59884 with the end-slope row), and tightening scam.control's
-# devtol.fit and steptol.fit to 1e-13 leaves scam's deviance unchanged.
-# Measured: max |mu / mu_scam - 1| and the deviances, ours against scam's.
-_SCAM_STALLS = {
-    "micv": "max rel 1.38e-1 at x = 0.000665; deviance 429.8287 against 430.4398",
-    "micx": "max rel 4.08e-2 at x = 0.000966; deviance 428.5988 against 428.6233",
-    "mdcv": "max rel 5.96e-2 at x = 0.995959; deviance 421.8743 against 422.0504",
-}
+def _scams_stated_problem(case, slope_sign, curvature_sign, families=("slope", "curvature")):
+    """Fitted means of scam's stated problem, solved exactly on scam's reported basis.
+
+    Pya and Wood (2015) hold a shape through signed first differences of the
+    B-spline coefficients (the slope) and signed second differences (the
+    curvature).  This minimises the Poisson deviance over the coefficients of
+    the cubic B-spline basis on the fixture's knots, which sums to one and so
+    carries the intercept, subject to the ``families`` of those conditions,
+    with trust-constr's tolerances tightened as in ``_general_solver``.
+    """
+    x = np.asarray(case["data"]["x"], dtype=np.float64)
+    y = np.asarray(case["data"]["y"], dtype=np.float64)
+    basis = BSpline.design_matrix(x, np.asarray(case["knots"], dtype=np.float64), 3).toarray()
+    identity = np.eye(basis.shape[1])
+    rows = {
+        "slope": slope_sign * np.diff(identity, 1, axis=0),
+        "curvature": curvature_sign * np.diff(identity, 2, axis=0),
+    }
+    A = np.vstack([rows[family] for family in families])
+
+    def objective(beta):
+        eta = basis @ beta
+        return float(np.sum(np.exp(eta) - y * eta))
+
+    def jacobian(beta):
+        return basis.T @ (np.exp(basis @ beta) - y)
+
+    def hessian(beta):
+        return (basis.T * np.exp(basis @ beta)) @ basis
+
+    result = minimize(
+        objective,
+        np.full(basis.shape[1], np.log(np.mean(y))),
+        jac=jacobian,
+        hess=hessian,
+        method="trust-constr",
+        constraints=[LinearConstraint(A, 0.0, np.inf)],
+        options={
+            "gtol": 1e-14,
+            "xtol": 1e-18,
+            "barrier_tol": 1e-18,
+            "initial_barrier_parameter": 1e-6,
+            "initial_barrier_tolerance": 1e-6,
+            "maxiter": 20000,
+        },
+    )
+    assert result.status in (1, 2), result.message
+    # Newton on the face the interior point identified (Nocedal and Wright,
+    # Numerical Optimization, 2nd ed., 2006, section 16.5): its barrier leaves
+    # the edge coefficients, which few rows see, ~1e-6 short of the optimum.
+    beta = result.x
+    on_face = A @ beta <= 1e-6 * (np.abs(A) @ np.abs(beta))
+    face = null_space(A[on_face])
+    beta = face @ (face.T @ beta)
+    for _ in range(50):
+        step = np.linalg.solve(face.T @ hessian(beta) @ face, face.T @ jacobian(beta))
+        beta = beta - face @ step
+        if np.max(np.abs(face @ step)) <= 1e3 * U * np.max(np.abs(beta)):
+            break
+    # the face is the optimum's: feasible off it, non-negative multipliers on it
+    scale = np.abs(A) @ np.abs(beta)
+    assert np.all(A @ beta >= -1e3 * U * scale)
+    multipliers = np.linalg.lstsq(A[on_face].T, jacobian(beta), rcond=None)[0]
+    assert np.all(multipliers >= -1e-8 * np.max(np.abs(multipliers), initial=1.0))
+    return np.exp(basis @ beta)
 
 
-@pytest.mark.parametrize(
-    "shape",
-    [
-        pytest.param(
-            shape,
-            marks=pytest.mark.xfail(
-                shape in _SCAM_STALLS,
-                reason=f"scam stops short of its optimum: {_SCAM_STALLS.get(shape)}",
-                raises=AssertionError,
-                strict=True,
-            ),
-        )
-        for shape in sorted(SCAM_SHAPES)
-    ],
-)
-def test_scam_shapes_agree(scam_fixture, shape):
-    """Our fitted means are scam's to 2e-2 relative.
+@pytest.fixture(scope="module")
+def exact_solves(scam_fixture) -> dict[str, np.ndarray]:
+    return {
+        shape: _scams_stated_problem(scam_fixture[shape], *SCAM_SHAPES[shape][1:])
+        for shape in SCAM_SHAPES
+    }
+
+
+@pytest.mark.parametrize("shape", sorted(SCAM_SHAPES))
+def test_matches_scams_stated_problem_solved_exactly(scam_fixture, exact_solves, shape):
+    """Our fit is the optimum of scam's stated problem, or a better one where ours admits more.
+
+    On micv, mdcv and mdcx our fit meets the paper's conditions and its
+    fitted means are the exact solve's to 1e-5 relative (measured: 2e-11 at
+    most, once our fit's tolerance is tightened to 1e-10; at the default 1e-6
+    it stops 7e-6 short on micv, along the edge coefficients few rows see).
+    On micx our
+    end-slope row admits curves whose first coefficient difference is
+    negative while the curve still increases on the data range (ours: -0.04),
+    so our feasible set is larger and our deviance is at most the solve's.
+    """
+    case, x, y, model = _scam_case(scam_fixture, shape)
+    ours = model.predict(pd.DataFrame({"x": x}))
+    exact = exact_solves[shape]
+    if shape == "micx":
+        deviance = _poisson_deviance(y, exact)
+        assert _poisson_deviance(y, ours) <= deviance * (1.0 + 1e3 * U)
+    else:
+        np.testing.assert_allclose(ours, exact, rtol=1e-5, atol=0.0)
+
+
+# scam's convergence tolerance (scam.control's devtol.fit default): a reported
+# deviance within it of the exact solve's has reached scam's stated optimum
+_SCAM_OPTIMUM_RTOL = 1e-7
+
+
+@pytest.mark.parametrize("shape", sorted(SCAM_SHAPES))
+def test_scam_shapes_agree(scam_fixture, exact_solves, shape):
+    """Our fitted means are scam's to 2e-2 relative wherever scam reached its stated optimum.
 
     Loose by design: the two hold the shape through different sufficient
-    conditions, and the bases differ outside the shared knots.
+    conditions on different bases.  Where scam's reported deviance sits
+    above the exact solve of its stated problem by more than its own
+    convergence tolerance, its means are not that problem's answer and are
+    not compared; the test then asserts that scam stopped short.  scam
+    1.2.23 at sp=0 does so on three of the four datasets, by deviance gaps of
+    0.611 (micv, 430.4398 against 429.8287), 0.0244 (micx, 428.6233 against
+    428.5989) and 0.176 (mdcv, 422.0504 against 421.8743), and leaves its
+    deviance unchanged when devtol.fit and steptol.fit are tightened to
+    1e-13; mdcx reaches its optimum (gap 2e-7) and is compared.
     """
-    case, x, _, model = _scam_case(scam_fixture, shape)
-    np.testing.assert_allclose(
-        model.predict(pd.DataFrame({"x": x})), case["fitted_values"], rtol=2e-2, atol=0.0
-    )
+    case, x, y, model = _scam_case(scam_fixture, shape)
+    fitted = np.asarray(case["fitted_values"], dtype=np.float64)
+    # the reported deviance is the fitted means' (checks the fixture's pairing)
+    assert _poisson_deviance(y, fitted) == pytest.approx(case["deviance"], rel=1e3 * U)
+    optimum = _poisson_deviance(y, exact_solves[shape])
+    if case["deviance"] - optimum > _SCAM_OPTIMUM_RTOL * optimum:
+        assert shape != "mdcx"
+        return
+    np.testing.assert_allclose(model.predict(pd.DataFrame({"x": x})), fitted, rtol=2e-2, atol=0.0)
