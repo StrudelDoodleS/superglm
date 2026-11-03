@@ -51,6 +51,7 @@ SESSION_TOOLS = (
     "summary",
     "export_structure",
     "export_xlsx",
+    "save_session",
 )
 
 

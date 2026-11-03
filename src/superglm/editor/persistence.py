@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from superglm._frame import as_eager_frame
+from superglm.distributional.api import SuperLSS
 from superglm.editor.apply import materialize_edit_request
 from superglm.editor.errors import EditorValueError
 from superglm.editor.io import (
@@ -22,6 +23,8 @@ from superglm.editor.io import (
     term_to_payload,
     validate_loaded_term,
 )
+from superglm.editor.lss.availability import require_available
+from superglm.editor.lss.view import LSSModelView
 from superglm.model import SuperGLM
 
 if TYPE_CHECKING:
@@ -69,6 +72,11 @@ def _slice_rows(values: Any, indices: np.ndarray):
 
 def _validate_artifact_contract(model, loaded_model) -> None:
     """Validate cheap fitted-model invariants after a joblib round trip."""
+    if isinstance(model, SuperLSS):
+        from superglm.editor.lss.persistence import validate_lss_artifact
+
+        validate_lss_artifact(model, loaded_model)
+        return
     try:
         if not isinstance(loaded_model, SuperGLM) or type(loaded_model) is not type(model):
             raise ValueError("loaded object has the wrong model type")
@@ -134,17 +142,23 @@ def serialize_validated_model(
         )
 
     indices = _spread_row_indices(n_rows, max_rows)
-    X_rows = _slice_rows(dataset.X, indices)
-    offset_rows = None if dataset.offset is None else _slice_rows(dataset.offset, indices)
     try:
-        original_predictions = np.asarray(
-            model.predict(X_rows, offset=offset_rows),
-            dtype=np.float64,
-        )
-        loaded_predictions = np.asarray(
-            loaded_model.predict(X_rows, offset=offset_rows),
-            dtype=np.float64,
-        )
+        if isinstance(model, SuperLSS):
+            from superglm.editor.lss.persistence import lss_prediction_rows
+
+            original_predictions = lss_prediction_rows(model, dataset, max_rows)
+            loaded_predictions = lss_prediction_rows(loaded_model, dataset, max_rows)
+        else:
+            X_rows = _slice_rows(dataset.X, indices)
+            offset_rows = None if dataset.offset is None else _slice_rows(dataset.offset, indices)
+            original_predictions = np.asarray(
+                model.predict(X_rows, offset=offset_rows),
+                dtype=np.float64,
+            )
+            loaded_predictions = np.asarray(
+                loaded_model.predict(X_rows, offset=offset_rows),
+                dtype=np.float64,
+            )
         valid_predictions = (
             original_predictions.shape == loaded_predictions.shape
             and np.all(np.isfinite(original_predictions))
@@ -204,7 +218,7 @@ def with_editor_history(model, records: list[dict[str, Any]]):
     The copy shares every fitted attribute and owns only the new one, so the
     in-force or cached model the editor holds is never changed.
     """
-    exported = copy.copy(model)
+    exported = copy.copy(model.lss if isinstance(model, LSSModelView) else model)
     exported._editor_history = [dict(record) for record in records]
     return exported
 
@@ -245,6 +259,7 @@ def save_session(session, path: str | Path) -> None:
     """
     from superglm.editor.unseen import UnseenChoice
 
+    require_available(session.model, "save_session")
     payload = {
         "format": "superglm.editor.v1",
         "n_points": session.n_points,

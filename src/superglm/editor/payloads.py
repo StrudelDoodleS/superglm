@@ -21,6 +21,7 @@ from superglm.editor.group_display import build_group_display
 from superglm.editor.knots import knots_payload, pending_knots
 from superglm.editor.lss import DisplayTransform, display_for, is_lss, lss_term_fields
 from superglm.editor.lss.availability import lss_availability
+from superglm.editor.lss.display import lss_history_fields
 from superglm.editor.lss.tool_payloads import lss_shape_payload
 from superglm.editor.shapes import shape_payload, waiting_ranges
 from superglm.editor.terms import term_from_inference
@@ -118,6 +119,7 @@ def timeline_payload(session) -> list[dict[str, Any]]:
     """
     done, undone = session.timeline_items()
     notes = getattr(session, "step_notes", {})
+    lss = is_lss(getattr(session, "model", None))
     entries: list[dict[str, Any]] = []
     parent: str | None = None
     for position, pair in enumerate([*done, None, *undone]):
@@ -133,6 +135,8 @@ def timeline_payload(session) -> list[dict[str, Any]]:
             status=status,
         )
         parent = entry.get("hash", parent)
+        if lss:
+            entry.update(lss_history_fields(session.model, entry.get("term")))
         entries.append(entry)
     return entries
 
@@ -140,6 +144,7 @@ def timeline_payload(session) -> list[dict[str, Any]]:
 def pending_payload(session) -> list[dict[str, Any]]:
     """The structural changes waiting for a Refit, oldest first."""
     notes = getattr(session, "step_notes", {})
+    lss = is_lss(getattr(session, "model", None))
     return [
         {
             "id": step.step_id,
@@ -149,6 +154,7 @@ def pending_payload(session) -> list[dict[str, Any]]:
             "params": _json_safe(step.params),
             "note": notes.get(step.step_id),
             "time": float(step.created_at),
+            **(lss_history_fields(session.model, step.term) if lss else {}),
         }
         for step in getattr(session, "pending", ())
     ]

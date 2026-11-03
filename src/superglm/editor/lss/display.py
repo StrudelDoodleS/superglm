@@ -155,6 +155,15 @@ def display_for(model: object, key: str) -> DisplayTransform:
     return DisplayTransform(kind, model.reference_eta(key), floor)
 
 
+def lss_history_fields(view: LSSModelView, key: str | None) -> dict[str, str]:
+    """The parameter, its chip and the term a history entry names; empty for no term."""
+    if key is None:
+        return {}
+    parameter, label = split_key(key)
+    chip = parameter_display(view.family, parameter, response=view.response).chip
+    return {"predictor": parameter, "predictor_label": chip, "term_label": label}
+
+
 def lss_term_fields(view: LSSModelView, key: str, term: object) -> dict[str, object]:
     """The payload fields a SuperLSS term carries beyond a SuperGLM term's.
 

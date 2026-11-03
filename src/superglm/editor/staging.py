@@ -462,8 +462,8 @@ def editor_history_records(session: EditorSession) -> list[dict[str, Any]]:
     """The timeline up to now, oldest first, as an exported model's ``_editor_history``.
 
     One dict per edit, waiting change and applied step: id, time (ISO 8601,
-    UTC), operation, term, message, note, status and predictor (None until
-    the SuperLSS editor names one). What Redo would put back is not history.
+    UTC), operation, term, message, note, status and predictor (the SuperLSS
+    parameter of the term, else None). What Redo would put back is not history.
     """
     done, _ = timeline_items(session)
     return [
@@ -475,7 +475,7 @@ def editor_history_records(session: EditorSession) -> list[dict[str, Any]]:
             "message": item.label,
             "note": session.step_notes.get(item.step_id),
             "status": status,
-            "predictor": getattr(item, "predictor", None),
+            "predictor": predictor_of(session.model, item.term),
         }
         for item, status in done
     ]
