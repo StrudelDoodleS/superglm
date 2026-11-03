@@ -123,7 +123,11 @@ def test_leverage_blocks_equal_the_dense_rows(problem, split_blocks, monkeypatch
     assert _excess(got, reference, magnitude, width) <= 0.0
 
 
-def test_cross_grams_equal_the_dense_rows_with_one_producer_call_per_block(problem, split_blocks):
+@pytest.mark.parametrize("block", [97, N], ids=["blocks", "one-block"])
+def test_cross_grams_equal_the_dense_rows_with_one_producer_call_per_block(
+    problem, monkeypatch, block
+):
+    monkeypatch.setattr(bp, "contraction_block_rows", lambda n, row_bytes, chunk: block)
     layout, matrices, slices, rng = problem
     k_parameters = len(matrices)
     width = layout.n_coefficients
@@ -139,7 +143,7 @@ def test_cross_grams_equal_the_dense_rows_with_one_producer_call_per_block(probl
     magnitude = _cross_all(tuple(map(np.abs, matrices)), slices, np.abs(packed), width)
     assert _excess(got, reference, magnitude, N) <= 0.0
     np.testing.assert_array_equal(got, np.transpose(got, (0, 2, 1)))
-    assert calls == [(start, min(start + 97, N)) for start in range(0, N, 97)]
+    assert calls == [(start, min(start + block, N)) for start in range(0, N, block)]
 
 
 @pytest.mark.parametrize("rows", [(0, N), (13, 13), (31, 500)])
