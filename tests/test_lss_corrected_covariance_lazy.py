@@ -856,7 +856,7 @@ def test_the_newton_remedy_is_offered_only_to_stops_it_can_improve(
 def test_a_fellner_schall_stop_of_an_endgame_fit_is_not_told_to_run_the_endgame(
     stationary_case,
 ) -> None:
-    """Under the default an outward practical plateau can stop an efs+newton fit."""
+    """An outward practical plateau can stop an efs+newton fit."""
     fitted, _ = stationary_case
     assert fitted.smoothing is not None and fitted.smoothing.config.outer == "efs+newton"
     altered = _with_smoothing_stop(fitted, reason="practical_plateau", converged=True)
@@ -1401,7 +1401,7 @@ def test_fisher_fallback_corrected_covariance_is_computed_and_disclosed(
 
 
 def _efs_fit(*, retain_rows: bool) -> tuple[SuperLSS, pd.DataFrame]:
-    """An ``outer="efs"`` fit: Fellner--Schall stops, never certified stationary."""
+    """A default ``outer="efs"`` fit: Fellner--Schall stops, never certified stationary."""
     rng = np.random.default_rng(7351)
     x = rng.uniform(-1.0, 1.0, 320)
     frame = pd.DataFrame({"x": x})
@@ -1414,13 +1414,13 @@ def _efs_fit(*, retain_rows: bool) -> tuple[SuperLSS, pd.DataFrame]:
             Predictor("location", {"x": Spline("cr", k=7)}),
             Predictor("scale", {"x": Spline("cr", k=5)}),
         ],
-    ).fit_reml(frame, response, retain_rows=retain_rows, outer="efs")
+    ).fit_reml(frame, response, retain_rows=retain_rows)
     smoothing = model._require_fitted().smoothing
     assert smoothing is not None and smoothing.convergence_reason != "stationary"
     return model, frame
 
 
-def test_an_efs_fit_is_corrected_about_its_own_stop() -> None:
+def test_a_default_efs_fit_is_corrected_about_its_own_stop() -> None:
     """The parent refused every ``outer="efs"`` fit ("requires a converged stationary ...")."""
     model, frame = _efs_fit(retain_rows=True)
     fitted = model._require_fitted()

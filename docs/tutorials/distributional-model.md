@@ -4,7 +4,7 @@ jupytext:
     extension: .md
     format_name: myst
     format_version: 0.13
-    jupytext_version: 1.19.5
+    jupytext_version: 1.19.1
 kernelspec:
   display_name: Python 3
   language: python
@@ -122,14 +122,15 @@ put the declarations in any order; names identify their parameters.
 ## Fit the model
 
 ```{code-cell} ipython3
-model.fit_reml(X_train, y_train)
+model.fit_reml(X_train, y_train, outer="efs+newton")
 print(model.summary())
 print(model.diagnose())
 ```
 
-`fit_reml` estimates the coefficients and smoothing parameters jointly. It
-moves the smoothing parameters with Fellner–Schall updates first, then with
-Newton steps until it reaches a stationary point.
+`fit_reml` estimates the coefficients and smoothing parameters jointly.
+`outer="efs+newton"` adds Newton refinement to the smoothing updates. On this
+example, the default EFS updates stop after rejecting a proposal; the
+refinement reaches a stationary fit with the same convergence tolerances.
 `diagnose()` reports the stopping evidence. Use `fit` when you want to hold
 smoothing parameters fixed. Both fitting methods update the model and return it.
 
@@ -170,7 +171,7 @@ constant_scale = SuperLSS(
     family,
     family.location(s("age", kind="cr", k=8), cat("region")),
     family.scale(),
-).fit_reml(X_train, y_train)
+).fit_reml(X_train, y_train, outer="efs+newton")
 
 held_out_loss = pd.Series(
     {

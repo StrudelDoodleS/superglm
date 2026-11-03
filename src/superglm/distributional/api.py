@@ -758,9 +758,9 @@ class SuperLSS:
         point of the LAML over the smoothing-parameter box (Wood, Pya and Saefken
         2016, section 3.1); ``smoothing_convergence_reason_`` and
         ``smoothing_certified_`` report how it stopped. The default ``None``
-        chooses ``"efs+newton"``, except for families whose curvature jumps
-        (``TwoPieceNormalLSS`` and ``TwoPieceLogNormalLSS``), which get
-        ``"efs"`` because Newton's smoothness assumption fails there.
+        runs ``"efs"`` for every family. Newton's smoothness assumption fails
+        where a family's curvature jumps (``TwoPieceNormalLSS`` and
+        ``TwoPieceLogNormalLSS``), so the endgame is not advised there.
         ``max_reml_iter`` bounds the smoothing iterations, Fellner-Schall and
         Newton together.
 
@@ -789,13 +789,7 @@ class SuperLSS:
         """
         if outer is None:
             # Resolved before the fit record reads the arguments, so it names what ran.
-            outer = (
-                "efs+newton"
-                if getattr(
-                    getattr(self._family, "capabilities", None), "continuous_curvature", True
-                )
-                else "efs"
-            )
+            outer = "efs"
         with fit_record(self, "fit_reml", locals()):
             if method != "efs":
                 raise NotImplementedError("SuperLSS currently supports only method='efs'")

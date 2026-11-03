@@ -272,8 +272,8 @@ class FamilyCapabilities:
     ``"censored_truncated"`` observation contract: truncated and censored rows.
     ``continuous_curvature`` declares that the log density's curvature in the
     natural parameters is continuous. Newton steps in log smoothing parameters
-    assume it (Wood, Pya and Saefken 2016, section 3), so ``SuperLSS.fit_reml``
-    adds its Newton endgame by default only for such families.
+    assume it (Wood, Pya and Saefken 2016, section 3), so the corrected-covariance
+    warning suggests refitting with ``outer="efs+newton"`` only for such families.
     """
 
     max_derivative_order: int

@@ -234,7 +234,6 @@ def test_plateau_and_exact_face_keep_replay_authority(practical):
             reml_plateau_tol=1e-6,
             practical_reml=practical,
             retain_history_rows=retain_history_rows,
-            outer="efs",
         )
         models.append(model._model)
     left, right = (model.smoothing for model in models)

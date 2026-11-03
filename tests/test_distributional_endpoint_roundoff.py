@@ -617,7 +617,7 @@ def test_a_stationary_endgame_revalidates_its_face_beside_another_cap(monkeypatc
 
     monkeypatch.setattr(loop, "_recheck_exact_face", recheck_beside_another_cap)
     frame, response = _flagged_generalized_pareto_problem()
-    model = _flagged_generalized_pareto_model().fit_reml(frame, response)
+    model = _flagged_generalized_pareto_model().fit_reml(frame, response, outer="efs+newton")
     smoothing = model._require_fitted().smoothing
     assert smoothing is not None
     assert waivers == [True], "the fixture's stationary endgame revalidates an exact face"
@@ -691,7 +691,7 @@ def test_a_revalidated_stationary_stop_publishes_derivatives_at_its_fit(
 
     monkeypatch.setattr(loop, "published_derivatives", spy)
     frame, response = _flagged_generalized_pareto_problem()
-    model = _flagged_generalized_pareto_model().fit_reml(frame, response)
+    model = _flagged_generalized_pareto_model().fit_reml(frame, response, outer="efs+newton")
     fitted = model._require_fitted()
     smoothing = fitted.smoothing
     assert smoothing is not None and smoothing.convergence_reason == "stationary"
@@ -742,7 +742,9 @@ def test_a_revalidated_face_keeps_the_endgames_published_hessian(monkeypatch) ->
 
     monkeypatch.setattr(loop, "run_newton_endgame", with_hessian)
     frame, response = _flagged_generalized_pareto_problem()
-    model = _flagged_generalized_pareto_model().fit_reml(frame, response, retain_rows=False)
+    model = _flagged_generalized_pareto_model().fit_reml(
+        frame, response, retain_rows=False, outer="efs+newton"
+    )
     fitted = model._require_fitted()
     smoothing = fitted.smoothing
     assert smoothing is not None and smoothing.convergence_reason == "stationary"
@@ -762,14 +764,16 @@ def test_the_iteration_budget_does_not_refuse_a_stationary_endgames_face_check()
     ``max_iterations`` with its face never revalidated.
     """
     frame, response = _flagged_generalized_pareto_problem()
-    reference = _flagged_generalized_pareto_model().fit_reml(frame, response)
+    reference = _flagged_generalized_pareto_model().fit_reml(frame, response, outer="efs+newton")
     smoothing = reference._require_fitted().smoothing
     assert smoothing is not None and smoothing.convergence_reason == "stationary"
     searched = len(smoothing.history)
     while searched and smoothing.history[searched - 1].revalidated_face_components:
         searched -= 1
     assert searched < len(smoothing.history), "the fixture's stop revalidates an exact face"
-    refit = _flagged_generalized_pareto_model().fit_reml(frame, response, max_reml_iter=searched)
+    refit = _flagged_generalized_pareto_model().fit_reml(
+        frame, response, max_reml_iter=searched, outer="efs+newton"
+    )
     again = refit._require_fitted().smoothing
     assert again is not None
     assert again.convergence_reason == "stationary"

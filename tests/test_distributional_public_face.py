@@ -65,7 +65,7 @@ def test_a_non_converged_fit_warns_and_its_summary_says_so(monkeypatch) -> None:
     family = GaussianLS()
     model = SuperLSS(family, family.location(s("x", kind="cr", k=6)), family.scale())
     with pytest.warns(ConvergenceWarning, match="did not converge"):
-        model.fit_reml(frame, response, max_reml_iter=1, practical_reml=False, outer="efs")
+        model.fit_reml(frame, response, max_reml_iter=1, practical_reml=False)
     assert model.result_.converged is False
     notes = model.summary()["note"]
     assert all("fit not converged" in note for note in notes)

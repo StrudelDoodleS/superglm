@@ -1597,20 +1597,26 @@ def _small_gaussian_reml_model() -> tuple[SuperLSS, pd.DataFrame, np.ndarray]:
     return model, frame, response
 
 
-def test_fit_reml_outer_default_follows_curvature_continuity_and_is_validated() -> None:
+def test_fit_reml_outer_defaults_to_efs_for_every_family_and_is_validated() -> None:
+    """The fit records the outer that ran: ``None`` and an omitted outer both record ``"efs"``."""
     model, frame, response = _small_gaussian_reml_model()
     model.fit_reml(frame, response)
     smoothing = model._require_fitted().smoothing
     assert smoothing is not None
-    assert smoothing.config.outer == "efs+newton"
+    assert smoothing.config.outer == "efs"
+    assert model._fit_settings["outer"] == "efs"
     with pytest.raises(ValueError, match="outer"):
         model.fit_reml(frame, response, outer="newton")
-    efs_model, _, _ = _small_gaussian_reml_model()
-    efs_model.fit_reml(frame, response, outer="efs")
-    efs = efs_model._require_fitted().smoothing
-    assert efs is not None
-    assert efs.config.outer == "efs"
-    # The two-piece curvature jumps at the join, so its default stays Fellner-Schall.
+    model.fit_reml(frame, response, outer=None)
+    assert model._require_fitted().smoothing.config.outer == "efs"
+    assert model._fit_settings["outer"] == "efs"
+    newton_model, _, _ = _small_gaussian_reml_model()
+    newton_model.fit_reml(frame, response, outer="efs+newton")
+    newton = newton_model._require_fitted().smoothing
+    assert newton is not None
+    assert newton.config.outer == "efs+newton"
+    assert newton_model._fit_settings["outer"] == "efs+newton"
+    # The two-piece curvature jumps at the join; its default is Fellner-Schall too.
     family = TwoPieceNormalLSS()
     assert family.capabilities.continuous_curvature is False
     two_piece = SuperLSS(
@@ -1624,7 +1630,7 @@ def test_fit_reml_outer_default_follows_curvature_continuity_and_is_validated() 
     assert kinked is not None
     assert kinked.config.outer == "efs"
     assert TwoPieceLogNormalLSS().capabilities.continuous_curvature is False
-    # An explicit outer outranks the family's default in both directions.
+    # An explicit outer still runs the endgame there.
     two_piece.fit_reml(frame, response, outer="efs+newton")
     forced = two_piece._require_fitted().smoothing
     assert forced is not None
@@ -1646,9 +1652,9 @@ def test_a_spent_iteration_budget_leaves_the_fellner_schall_stop_in_place(
 ) -> None:
     """With no iterations left a hand-off keeps the EFS stop instead of reporting max_iterations.
 
-    The default is made to hand off only once the plain EFS stop qualifies, on
+    The endgame is made to hand off only once the plain EFS stop qualifies, on
     the last iteration ``max_reml_iter`` allows. Loose plateau tolerances force
-    the interior practical plateau, the stop a default fit reaches. Mutation
+    the interior practical plateau, the stop a practical fit reaches. Mutation
     check: when the strict-stop or practical-plateau hand-off checked only the
     endgame's own budget, the fit stopped ``max_iterations``.
     """
@@ -1673,7 +1679,7 @@ def test_a_spent_iteration_budget_leaves_the_fellner_schall_stop_in_place(
 
     monkeypatch.setattr(loop, "should_hand_off", record)
     spare, _, _ = _small_gaussian_reml_model()
-    spare.fit_reml(frame, response, max_reml_iter=last + 1, **options)
+    spare.fit_reml(frame, response, max_reml_iter=last + 1, outer="efs+newton", **options)
     assert (plain.convergence_reason, last) in requested
     monkeypatch.undo()
 
@@ -1687,9 +1693,9 @@ def test_a_spent_iteration_budget_leaves_the_fellner_schall_stop_in_place(
         )
 
     monkeypatch.setattr(loop, "should_hand_off", at_the_stop)
-    default, _, _ = _small_gaussian_reml_model()
-    default.fit_reml(frame, response, max_reml_iter=last, **options)
-    smoothing = default._require_fitted().smoothing
+    newton, _, _ = _small_gaussian_reml_model()
+    newton.fit_reml(frame, response, max_reml_iter=last, outer="efs+newton", **options)
+    smoothing = newton._require_fitted().smoothing
     assert smoothing is not None
     assert smoothing.config.outer == "efs+newton"
     assert smoothing.converged
@@ -1697,7 +1703,7 @@ def test_a_spent_iteration_budget_leaves_the_fellner_schall_stop_in_place(
     assert smoothing.newton_iterations == 0
 
 
-def test_the_default_endgame_spends_the_requested_iteration_budget() -> None:
+def test_the_endgame_spends_the_requested_iteration_budget() -> None:
     """``max_reml_iter`` bounds warm-up and endgame together; the endgame has no budget of its own.
 
     Small log steps from a far start need many Newton iterations. Mutation
@@ -1709,7 +1715,14 @@ def test_the_default_endgame_spends_the_requested_iteration_budget() -> None:
     frame = pd.DataFrame({"x": x})
     family = GaussianLS()
     model = SuperLSS(family, family.location(s("x", kind="cr", k=10)), family.scale())
-    model.fit_reml(frame, response, initial_lambda=1000.0, max_log_step=0.1, max_reml_iter=300)
+    model.fit_reml(
+        frame,
+        response,
+        initial_lambda=1000.0,
+        max_log_step=0.1,
+        max_reml_iter=300,
+        outer="efs+newton",
+    )
     smoothing = model._require_fitted().smoothing
     assert smoothing is not None
     assert smoothing.config.outer == "efs+newton"

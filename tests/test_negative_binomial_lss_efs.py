@@ -421,7 +421,7 @@ def test_size_reaching_its_poisson_limit_during_selection_still_converges() -> N
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit_reml(frame, response, offsets={"mean": log_exposure}, outer="efs")
+        model.fit_reml(frame, response, offsets={"mean": log_exposure})
 
     smoothing = model._require_fitted().fit_state.smoothing
     ranks = {fit.terminal_rank.rank for fit in smoothing.coefficient_fits}
@@ -432,8 +432,8 @@ def test_size_reaching_its_poisson_limit_during_selection_still_converges() -> N
     assert smoothing.converged, smoothing.convergence_reason
 
 
-def test_size_reaching_its_poisson_limit_under_the_default_is_disclosed() -> None:
-    """The default (Newton endgame) on the Poisson-limit book: finite, and disclosed if open.
+def test_size_reaching_its_poisson_limit_under_the_endgame_is_disclosed() -> None:
+    """The Newton endgame on the Poisson-limit book: finite, and disclosed if open.
 
     Here the endgame can end ``gradient_unresolved``: the size direction of the
     Poisson group is flat to its certificate. The fit must still predict and
@@ -448,7 +448,7 @@ def test_size_reaching_its_poisson_limit_under_the_default_is_disclosed() -> Non
     )
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        model.fit_reml(frame, response, offsets={"mean": log_exposure})
+        model.fit_reml(frame, response, offsets={"mean": log_exposure}, outer="efs+newton")
 
     fitted = model._require_fitted()
     smoothing = fitted.fit_state.smoothing
