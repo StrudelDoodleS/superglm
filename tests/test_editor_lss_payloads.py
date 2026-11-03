@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from superglm import GammaLS, Numeric, SuperLSS, term
 from superglm.editor import EditorSession, edit
 from superglm.editor.controls import ORDERED_SPLINE_UNAVAILABLE
 from superglm.editor.lss import RELATIVITY, DisplayTransform, display_for
@@ -62,6 +63,23 @@ def test_gamma_scale_is_its_cv():
     scale = _parameter_at(case, session, term, "scale")
     np.testing.assert_allclose(term["y"], scale, rtol=TOLERANCE)
     assert (term["y_label"], term["y_format"]) == ("coefficient of variation", "times")
+
+
+def test_a_spread_band_far_from_the_link_origin_brackets_its_curve():
+    # Each band end lies about 2000 from zero on the link scale, past where exp clips it.
+    rng = np.random.default_rng(578)
+    t = np.linspace(0.0, 1.0, 360)
+    X = pd.DataFrame({"x": 1000.0 + t})
+    y = rng.gamma(np.exp(2.0 - 2.0 * t), np.exp(1.0) * np.exp(-2.0 + 2.0 * t))
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(), family.scale(term("x", Numeric()))).fit_reml(X, y)
+    term_payload = session_payload(edit(model, train_data=(X, y)))["scale:x"]
+    curve = np.asarray(term_payload["y"])
+    lower = np.asarray(term_payload["ci_lower_y"])
+    upper = np.asarray(term_payload["ci_upper_y"])
+    assert np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))
+    assert np.all(lower <= curve) and np.all(curve <= upper)
+    assert np.all(upper > lower)
 
 
 def test_nb_theta_is_shown_inverted():

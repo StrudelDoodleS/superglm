@@ -27,7 +27,9 @@ class LSSTermInference:
     """The fields ``term_from_inference`` reads, for one term of one predictor.
 
     ``log_relativity`` is the link-scale effect. The interval is stored as
-    ``exp`` of its link-scale ends, which ``term_from_inference`` reads back.
+    ``exp`` of its link-scale ends, which ``term_from_inference`` reads back,
+    and as the ends themselves, which the editable term keeps: ``exp`` clips an
+    end beyond the float64 range, as a native effect far from zero can be.
     """
 
     name: str
@@ -43,6 +45,8 @@ class LSSTermInference:
     smoothing_lambda: float | dict[str, float] | None
     monotone: str | None
     spline: SplineMetadata | None
+    ci_lower_log_effect: NDArray[np.float64] | None = None
+    ci_upper_log_effect: NDArray[np.float64] | None = None
     smooth_curve: None = None
 
 
@@ -86,6 +90,8 @@ def lss_term_inference(
         log_relativity=effect.effect[take],
         ci_lower=_safe_exp(effect.lower[take]) if with_se else None,
         ci_upper=_safe_exp(effect.upper[take]) if with_se else None,
+        ci_lower_log_effect=np.array(effect.lower[take], dtype=np.float64) if with_se else None,
+        ci_upper_log_effect=np.array(effect.upper[take], dtype=np.float64) if with_se else None,
         active=True,
         centering_mode="native",
         edf=effect.edf,
@@ -105,7 +111,10 @@ def lss_editable_terms(
     """
     editable: dict[str, EditableTerm] = {}
     for key in keys:
-        term = term_from_inference(view.term_inference(key, with_se=with_se, n_points=n_points))
+        inference = view.term_inference(key, with_se=with_se, n_points=n_points)
+        term = term_from_inference(inference)
+        term.ci_lower_log_effect = inference.ci_lower_log_effect
+        term.ci_upper_log_effect = inference.ci_upper_log_effect
         term.metadata["term_type"] = term_type_from_spec(view._specs[key])
         if term.metadata["term_type"] == "piecewise":
             # A carried edit reads whether the term holds flat or continues its end slopes.
