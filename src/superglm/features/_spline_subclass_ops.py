@@ -90,23 +90,10 @@ def _fmt_end(x: float) -> str:
 
 
 def _natural_flat_extent(spec: Any, lo: float, hi: float) -> tuple[float, float]:
-    """Where a flat zero region [lo, hi] holds a cubic with natural ends constant.
-
-    A natural end holds ``f''`` at zero at the end of the knot vector's base
-    interval. A zero region that begins at the first interior knot leaves the
-    boundary span a cubic with ``f'' = 0`` at both of its ends, so ``f''`` is
-    zero on it, and with ``f' = 0`` at the knot the curve is constant there
-    too. The same holds at the right end.
-    """
-    if spec.degree != 3 or not has_natural_ends(spec):
-        return lo, hi
-    knots = spec._knots
-    n_basis = len(knots) - spec.degree - 1
-    if lo == knots[spec.degree + 1]:
-        lo = knots[spec.degree]
-    if hi == knots[n_basis - 1]:
-        hi = knots[n_basis]
-    return lo, hi
+    """Where a flat zero region [lo, hi] holds ``spec`` constant, its natural ends included."""
+    return _shape_rule_rows.natural_flat_extent(
+        spec._knots, spec.degree, lo, hi, natural_ends=has_natural_ends(spec)
+    )
 
 
 def _warn_widened_flats(spec: Any, pieces: list, *, stacklevel: int) -> None:

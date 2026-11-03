@@ -221,6 +221,51 @@ def test_flat_rows_hold_the_slope_at_zero_and_drop_held_rows(rules):
     assert np.min(np.linalg.norm(rows.A @ Z, axis=1)) > 1e-3
 
 
+def _natural_knot(i: int) -> float:
+    """The ``i``-th interior knot of ``_clamped_knots`` (negative ``i`` counts from the last)."""
+    return float(_clamped_knots()[DEGREE + 1 : -DEGREE - 1][i])
+
+
+# A zero region that starts (ends) at the first (last) interior knot of a natural
+# spline also holds the boundary span flat beside it, so the rows on that span
+# are held at zero too. ``a`` below sits in the first interior span, ``b`` in the last.
+_A = 0.5 * (_natural_knot(0) + _natural_knot(1))
+_B = 0.5 * (_natural_knot(-2) + _natural_knot(-1))
+
+
+@pytest.mark.parametrize(
+    "rules",
+    [
+        C.decreasing.below(_A) & C.flat.within(_A, 50),
+        C.flat.within(45, _B) & C.increasing.above(_B),
+        C.increasing & C.concave & C.flat.within(_A, 50),
+        C.increasing & C.concave & C.flat.within(45, _B),
+        C.convex & C.flat.within(_A, _B),
+        C.decreasing.below(_A) & C.flat.within(_A, _B) & C.increasing.above(_B),
+    ],
+    ids=["start", "end", "paired-start", "paired-end", "curvature-both", "both-ends"],
+)
+def test_natural_ends_keep_no_row_the_equalities_hold(rules):
+    """Every inequality row survives the flat rows and the natural boundary rows.
+
+    ``Z`` is the null space of both equalities; a row whose component in ``Z`` is
+    round-off would compose to noise and enter the QP as a half-space through the
+    origin in an arbitrary direction. Mutation: the zero region was not widened by
+    the boundary span a natural end holds flat, so the row for that span survived
+    (norm about 2e-16 after composition).
+    """
+    knots = _clamped_knots()
+    pieces = shape_pieces(rules, LO, HI)
+    rows, flat = shape_rows(knots, DEGREE, pieces, domain=(LO, HI), natural_ends=True)
+    natural = [derivative_value_row(knots, DEGREE, x, 2) for x in (LO, HI)]
+    equalities = np.vstack([flat, *natural])
+    assert _rank(equalities) == equalities.shape[0]
+    Q, _ = np.linalg.qr(equalities.T, mode="complete")
+    Z = Q[:, equalities.shape[0] :]
+    if rows.A.shape[0]:
+        assert np.min(np.linalg.norm(rows.A @ Z, axis=1)) > 1e-3
+
+
 @pytest.mark.parametrize(
     ("knots", "rules", "natural_ends"),
     [
