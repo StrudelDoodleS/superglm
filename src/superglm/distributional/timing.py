@@ -122,7 +122,7 @@ class _FitWindow:
         self.stop_reading = 0.0
 
     def snapshot(self) -> FitPhaseSnapshot:
-        """The window's own timings; ``fit_total`` is the fit's span, whatever enclosed it."""
+        """The window's own timings, including parts of enclosing caller phases."""
 
         zero = {name: 0.0 for name in PHASE_NAMES}
         start = self.start if self.start is not None else (zero, zero, zero, zero)
@@ -131,7 +131,6 @@ class _FitWindow:
             {name: after[name] - before[name] for name in PHASE_NAMES}
             for before, after in zip(start, stop, strict=True)
         )
-        seconds["fit_total"] = self.stop_reading - self.start_reading
         return FitPhaseSnapshot(
             seconds=seconds,
             counts={name: int(counts[name]) for name in PHASE_NAMES},
@@ -160,6 +159,7 @@ class FitPhaseRecorder:
         self._manual = {name: 0.0 for name in PHASE_NAMES}
         self._counts = {name: 0 for name in PHASE_NAMES}
         self._open: list[str] = []
+        self._open_started: dict[str, float] = {}
         self._last_reading = 0.0
         self._starting: list[_FitWindow] = []
 
@@ -211,6 +211,8 @@ class FitPhaseRecorder:
 
         phase = _validate_phase(name)
         started = self._read_clock()
+        if phase not in self._open_started:
+            self._open_started[phase] = started
         self._open.append(phase)
         try:
             yield
@@ -221,6 +223,8 @@ class FitPhaseRecorder:
                 # Context managers close in reverse order, so this observation
                 # is the innermost open one.
                 self._open.pop()
+                if phase not in self._open:
+                    self._open_started.pop(phase)
             # Python's profiler counts cumulative time only at the outermost
             # call of a recursive function; a phase nested in itself does too,
             # so its inclusive seconds cannot exceed the time it was open.
@@ -232,8 +236,16 @@ class FitPhaseRecorder:
             self._counts[phase] += 1
 
     def _state(self) -> tuple[dict[str, float], ...]:
+        # Completed observations alone omit a caller's still-open phase from
+        # a per-fit window. Include its elapsed portion at the last reading,
+        # once per recursive name, without reading the clock again. Taking
+        # differences at the two window boundaries excludes caller time
+        # before and after this fit.
+        seconds = dict(self._seconds)
+        for name, started in self._open_started.items():
+            seconds[name] += self._last_reading - started
         return (
-            dict(self._seconds),
+            seconds,
             dict(self._exclusive),
             dict(self._manual),
             {name: float(count) for name, count in self._counts.items()},
