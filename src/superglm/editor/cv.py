@@ -32,7 +32,7 @@ from superglm.editor.errors import EditorClientError, EditorValueError
 from superglm.editor.evaluation import EvaluationDataset, training_export_dataset
 from superglm.editor.jobs import JobCancelledError
 from superglm.editor.lss.availability import require_available, session_refit_reason
-from superglm.editor.lss.validation import offset_departs, stack_offsets
+from superglm.editor.lss.validation import lss_split_reason, offset_departs, stack_offsets
 from superglm.editor.lss.view import LSSModelView, column_of, is_lss
 from superglm.editor.refit import EXPLICIT_PENALTY_ATTRIBUTE, fit_refit_model
 from superglm.editor.terms import resolve_refit_method
@@ -339,7 +339,31 @@ def final_fit_reason(session) -> str | None:
     datasets = final_fit_datasets(session)
     if not datasets:
         return NO_FINAL_ROWS
-    return session_refit_reason(session) or _unstackable_reason(datasets)
+    return (
+        session_refit_reason(session)
+        or _unstackable_reason(datasets)
+        or _split_reason(session, datasets)
+    )
+
+
+def _split_reason(session, datasets: Sequence[EvaluationDataset]) -> str | None:
+    """The first split a SuperLSS cannot fit with its weights or responses; None for a SuperGLM.
+
+    A split the model cannot score with its weights or responses cannot be fitted
+    with them either. The answer is kept on the view with the splits it was read for.
+    """
+    view = session.model
+    if not isinstance(view, LSSModelView):
+        return None
+    cached = view._final_split_reason
+    if (
+        cached is None
+        or len(cached[0]) != len(datasets)
+        or any(held is not dataset for held, dataset in zip(cached[0], datasets))
+    ):
+        reasons = (lss_split_reason(view, dataset) for dataset in datasets)
+        view._final_split_reason = (tuple(datasets), next(filter(None, reasons), None))
+    return view._final_split_reason[1]
 
 
 def _unstackable_reason(datasets: Sequence[EvaluationDataset]) -> str | None:
@@ -1134,7 +1158,11 @@ def capture_final_fit(session) -> FinalFitPlan:
     """Capture Final fit's inputs; refuse without training rows, or rows that cannot stack."""
     datasets = final_fit_datasets(session)
     reason = (
-        (session_refit_reason(session) or _unstackable_reason(datasets))
+        (
+            session_refit_reason(session)
+            or _unstackable_reason(datasets)
+            or _split_reason(session, datasets)
+        )
         if datasets
         else NO_FINAL_ROWS
     )

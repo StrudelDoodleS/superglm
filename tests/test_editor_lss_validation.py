@@ -378,6 +378,44 @@ def test_a_split_whose_weights_the_fit_cannot_take_is_shown_unavailable(report):
         widget.close()
 
 
+def test_final_fit_is_refused_for_a_split_whose_weights_the_fit_cannot_take(frequency_lognormal):
+    case = frequency_lognormal
+    split = holdout_rows(case, 100)
+    session = open_case(case, validation_data=(split.X, split.y, split.sample_weight))
+    message = (
+        "The Validation split cannot be scored with its weights: frequency weights must be "
+        "exact non-negative integers. Pass weights of the kind the model was fitted with, "
+        "or the split without weights."
+    )
+    assert final_fit_reason(session) == message
+    with pytest.raises(EditorValueError) as info:
+        capture_final_fit(session)
+    assert info.value.public_message == message
+
+
+def test_the_state_reads_the_final_fit_splits_once_per_model(monkeypatch):
+    import superglm.editor.cv as cv
+
+    case = gamma_case()
+    split = holdout_rows(case, 60)
+    session = open_case(case, validation_data=(split.X, split.y))
+    calls = []
+    check = cv.lss_split_reason
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return check(*args, **kwargs)
+
+    monkeypatch.setattr(cv, "lss_split_reason", counted)
+    widget = session.widget()
+    try:
+        widget._state()
+        widget._state()
+    finally:
+        widget.close()
+    assert len(calls) == 2
+
+
 def test_final_fit_reads_only_the_columns_the_model_uses():
     case = lognormal_case()
     split = dataclasses.replace(holdout_rows(case, 150), sample_weight=None)

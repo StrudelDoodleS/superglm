@@ -150,10 +150,11 @@ class LSSModelView:
             )
         )
         self._reference_row: pd.DataFrame | None = None
-        # Why Refit cannot run on the session's training rows, with the rows it was read for.
-        # Owned by this view: one fitted model, over training rows a session never changes;
-        # a Refit makes a new view.
+        # Why Refit cannot run on the session's training rows, and why Final fit cannot fit
+        # its splits, each with the splits it was read for. Owned by this view: one fitted
+        # model, over splits a session never changes; a Refit makes a new view.
         self._refit_reason: tuple[Any, str | None] | None = None
+        self._final_split_reason: tuple[tuple[Any, ...], str | None] | None = None
         self._reference_etas: dict[str, float] = {}
         # Each term's sweep, by its arguments. Owned by this view for the same reason:
         # no entry goes stale, and a caller gets its own copy.

@@ -112,11 +112,11 @@ def _refuse_unopenable(lss, train_data, centering: str) -> None:
             "The editor opens models fitted without truncation or censoring; this model has "
             f"{state.truncated_row_count} truncated and {state.censored_row_count} censored rows."
         )
-    unnamed = next((name for name in _data_columns(lss) if not isinstance(name, str)), None)
-    if unnamed is not None:
+    unnamed = [name for name in _data_columns(lss) if not isinstance(name, str)]
+    if unnamed:
         raise EditorValueError(
             "The editor names each SuperLSS term '<parameter>:<column>', so it opens models "
-            f"whose columns are named by strings; this model reads column {unnamed!r}. Rename "
+            f"whose columns are named by strings; this model reads column {unnamed[0]!r}. Rename "
             "the column to a string and refit to open it in the editor."
         )
     overridden = _overridden_link(lss)

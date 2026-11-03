@@ -72,12 +72,12 @@ def _linked_model(scale_link: str | None, mean_link: str | None = None):
 
 
 @functools.cache
-def _integer_column_model():
+def _unnamed_column_model(label):
     rng = np.random.default_rng(20261103)
-    X = pd.DataFrame({0: rng.uniform(18.0, 90.0, 300)})
+    X = pd.DataFrame({label: rng.uniform(18.0, 90.0, 300)})
     y = rng.gamma(4.0, 100.0, 300)
     family = GammaLS()
-    model = SuperLSS(family, family.mean(superglm.term(0, Numeric())), family.scale())
+    model = SuperLSS(family, family.mean(superglm.term(label, Numeric())), family.scale())
     return model.fit_reml(X, y), X, y
 
 
@@ -228,12 +228,13 @@ def _refusal(case_id):
             "120 truncated and 5 censored rows."
         )
         return model, {"train_data": (X, y)}, EditorValueError, message
-    if case_id == "column-name":
-        model, X, y = _integer_column_model()
+    if case_id in ("column-name", "column-name-none"):
+        label = 0 if case_id == "column-name" else None
+        model, X, y = _unnamed_column_model(label)
         message = (
             "The editor names each SuperLSS term '<parameter>:<column>', so it opens models "
-            "whose columns are named by strings; this model reads column 0. Rename the column "
-            "to a string and refit to open it in the editor."
+            f"whose columns are named by strings; this model reads column {label!r}. Rename the "
+            "column to a string and refit to open it in the editor."
         )
         return model, {"train_data": (X, y)}, EditorValueError, message
     if case_id == "link":
@@ -283,6 +284,7 @@ def _refusal(case_id):
         "unfitted",
         "truncated",
         "column-name",
+        "column-name-none",
         "link",
         "no-train-data",
         "centering",
