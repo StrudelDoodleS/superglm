@@ -207,18 +207,6 @@ def _kernel_calls():
             data, indices, indptr, other.data, other.indices, other.indptr, W, 6, 4
         ),
         "_weighted_bincount_2d": lambda: kernels._weighted_bincount_2d(idx1, W, dense, n1),
-        "_weighted_bincount_2d_stack_add": lambda: (
-            kernels._weighted_bincount_2d_stack_add(
-                out := np.zeros((n1, 3, 2)), idx1, np.column_stack((W, Wz)), dense
-            )
-            or out
-        ),
-        "_support_rows_stack_add": lambda: (
-            kernels._support_rows_stack_add(
-                out := np.zeros((n1, 5, 2)), idx1, np.column_stack((W, Wz)), table2, idx2
-            )
-            or out
-        ),
         "_rows_weighted_bincount_2d": lambda: kernels._rows_weighted_bincount_2d(
             rows_a, idx2[rows_a], W, dense, n2
         ),
@@ -241,12 +229,6 @@ def _kernel_calls():
         "_rows_disc_disc_2d_hist_add": lambda: (
             kernels._rows_disc_disc_2d_hist_add(
                 out := np.zeros((n1, n2)), rows_b, idx1, idx2[rows_b], W
-            )
-            or out
-        ),
-        "_disc_disc_2d_hist_stack_add": lambda: (
-            kernels._disc_disc_2d_hist_stack_add(
-                out := np.zeros((n1, levels, 2)), idx1, other_codes, np.column_stack((W, Wz))
             )
             or out
         ),

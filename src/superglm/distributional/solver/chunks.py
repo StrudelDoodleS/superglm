@@ -1016,33 +1016,6 @@ def contraction_block_rows(n_observations: int, row_bytes: int | None, chunk_row
     return min(n_observations, chunks_per_block * chunk_rows)
 
 
-def block_plans(layout: StackedLayout, panels, start: int, stop: int):
-    """Each predictor's execution plan over rows ``[start, stop)``, reading row views.
-
-    A predictor with a panel (``predictor_panels``) packs its panel first; a
-    plan over every row with no panel is the layout's own.
-    """
-    if start == 0 and stop == layout.predictors[0].design.n and all(p is None for p in panels):
-        return _grouped_predictor_plans(layout)
-    indices = np.arange(start, stop, dtype=np.intp)
-    indices.setflags(write=False)
-    rows = RowChunk(start=start, stop=stop, indices=indices)
-    plans = []
-    for state, panel in zip(layout.predictors, panels, strict=True):
-        if panel is None:
-            design = _row_design(state, rows, copy=False)
-            plans.append(PredictorExecutionPlan(design, state.intercept_index is not None))
-            continue
-        groups = state.design.group_matrices
-        rest = []
-        for index in panel.rest:
-            child = group_row_range(groups[index], start, stop, copy=False)
-            rest.append(groups[index].row_subset(indices) if child is None else child)
-        design = panel.packed_design(panel.panel(state.design, start, stop), rest, stop - start)
-        plans.append(PredictorExecutionPlan(design, False))
-    return tuple(plans)
-
-
 def assemble_chunked_geometry(
     family: DistributionalFamily,
     layout: StackedLayout,
@@ -1076,6 +1049,7 @@ def assemble_chunked_geometry(
         # A pass of one block forms each group pair's own product, as the
         # unchunked assembly does; panels, like tables, serve passes of many.
         panels = (None,) * k_parameters
+    packed = any(panel is not None for panel in panels)
     table_budget = AUTO_CONTRACTION_MEMORY_BYTES - (row_bytes or 0) * block_rows
     tables = PassTables(table_budget) if block_rows < n_observations and table_budget > 0 else None
     # A block of one chunk out of several contracts that chunk's rows as it
@@ -1103,7 +1077,25 @@ def assemble_chunked_geometry(
         summed[1] = peak
 
     def row_plans(start: int, stop: int):
-        return block_plans(layout, panels, start, stop)
+        if start == 0 and stop == n_observations and not packed:
+            return _grouped_predictor_plans(layout)
+        indices = np.arange(start, stop, dtype=np.intp)
+        indices.setflags(write=False)
+        rows = RowChunk(start=start, stop=stop, indices=indices)
+        plans = []
+        for state, panel in zip(layout.predictors, panels, strict=True):
+            if panel is None:
+                design = _row_design(state, rows, copy=False)
+                plans.append(PredictorExecutionPlan(design, state.intercept_index is not None))
+                continue
+            groups = state.design.group_matrices
+            rest = []
+            for index in panel.rest:
+                child = group_row_range(groups[index], start, stop, copy=False)
+                rest.append(groups[index].row_subset(indices) if child is None else child)
+            design = panel.packed_design(panel.panel(state.design, start, stop), rest, stop - start)
+            plans.append(PredictorExecutionPlan(design, False))
+        return tuple(plans)
 
     formation_cost = k_parameters * (k_parameters + 1) // 2 + sum(
         len(state.design.group_matrices) for state in layout.predictors

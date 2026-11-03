@@ -13,7 +13,6 @@ from superglm._group_matrix._group_matrix_algebra import (
     PassTables,
     _BlockWeightCache,
     _pass_table,
-    _StackedComponent,
 )
 from superglm._group_matrix._group_matrix_core import OrdinaryPanelGroupMatrix
 from superglm.distributional.layout import StackedLayout
@@ -332,7 +331,7 @@ class GroupedGeometryAccumulator:
         *,
         penalty: NDArray,
         coefficients: NDArray,
-        tables: PassTables | _StackedComponent | None = None,
+        tables: PassTables | None = None,
         panels: tuple[PredictorPanel | None, ...] | None = None,
     ) -> None:
         reference_plans = _grouped_predictor_plans(layout)
@@ -470,7 +469,7 @@ class GroupedGeometryAccumulator:
     def add_block(
         self,
         plans: tuple[PredictorExecutionPlan, ...],
-        score_eta: NDArray | None,
+        score_eta: NDArray,
         curvature: NDArray,
         *,
         beside: BlockTask | None = None,
@@ -482,10 +481,10 @@ class GroupedGeometryAccumulator:
         ``beside`` (another product of the caller's over the block's rows) run
         as one queue (``run_block_tasks``), on the pool when their work
         warrants it; each channel's block is the one
-        :meth:`add_curvature_channel` adds. ``score_eta`` None adds no score.
+        :meth:`add_curvature_channel` adds.
         """
         plan_tuple = self._validated_plans(plans)
-        score = None if score_eta is None else self._validated_score(plan_tuple, score_eta)
+        score = self._validated_score(plan_tuple, score_eta)
         channels = np.asarray(curvature, dtype=np.float64)
         expected = (len(self._pairs), plan_tuple[0].design.n)
         if channels.shape != expected or not np.all(np.isfinite(channels)):
@@ -508,18 +507,15 @@ class GroupedGeometryAccumulator:
             finishers.append(finish)
         n_rows = plan_tuple[0].design.n
         side = [] if beside is None else [beside]
-        if score is None:
-            self._score_chunks += 1
-        else:
-            side.append(
-                BlockTask(
-                    index=0,
-                    cost=float(n_rows * sum(self._expected_widths)),
-                    nbytes=8 * n_rows,
-                    run=lambda _cache, _profile: self._score_products(plan_tuple, score),
-                    place=self._place_score,
-                )
+        side.append(
+            BlockTask(
+                index=0,
+                cost=float(n_rows * sum(self._expected_widths)),
+                nbytes=8 * n_rows,
+                run=lambda _cache, _profile: self._score_products(plan_tuple, score),
+                place=self._place_score,
             )
+        )
         for task in side:
             task.index = len(tasks)
             tasks.append(task)
@@ -550,11 +546,6 @@ class GroupedGeometryAccumulator:
             columns = self._group_columns[right_index][right]
             self._curvature[rows, columns] += block
             self._curvature[columns, rows] += block.T
-
-    def curvature_is_finite(self) -> bool:
-        """Whether the curvature summed so far, its pass tables contracted, is finite."""
-        self.release_tables()
-        return bool(np.all(np.isfinite(self._curvature)))
 
     def finish(self) -> DenseJointGeometry:
         """Validate complete channel coverage and publish immutable geometry."""
