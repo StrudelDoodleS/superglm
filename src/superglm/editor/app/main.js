@@ -828,7 +828,7 @@ function renderSessionAvailability(unavailable) {
     else card.removeAttribute("title");
   }
   offerControl(refitOffset, unavailable.refit_offset);
-  for (const input of summaryLevelDisplayInputs) offerControl(input, unavailable.summary);
+  summaryLevelDisplayInputs.forEach((input) => offerControl(input, unavailable.summary));
   offerControl(termViewToggle.querySelector('[data-term-view="table"]'), unavailable.rating_table);
   if (unavailable.rating_table && store.getState().view.termView === "table") {
     actions.patchView({ termView: "chart" });
