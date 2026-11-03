@@ -50,6 +50,12 @@ def _coefficients_of(knots: np.ndarray, f) -> np.ndarray:
     return np.linalg.lstsq(B, f(x), rcond=None)[0]
 
 
+def _rank(rows: np.ndarray) -> int:
+    """Numerical row rank of ``rows`` scaled to unit length, at 64 u of the largest singular value."""
+    sigma = np.linalg.svd(rows / np.linalg.norm(rows, axis=1, keepdims=True), compute_uv=False)
+    return int(np.count_nonzero(sigma > 64 * U * max(rows.shape) * sigma[0]))
+
+
 def _slack(A: np.ndarray, c: np.ndarray) -> np.ndarray:
     """Per-row rounding allowance for ``A @ c``."""
     return 1e3 * U * (np.abs(A) @ np.abs(c))
@@ -175,15 +181,20 @@ def test_natural_ends_drop_the_pinned_curvature_rows():
         C.increasing & C.convex & C.flat.within(25, 40),
         C.decreasing.below(25) & C.concave & C.flat.within(25, 40),
         C.increasing & C.flat.within(30, 31),
+        C.increasing & C.flat.within(_open_knots()[6], _open_knots()[8]),
+        C.convex & C.flat.within(_open_knots()[6], _open_knots()[8]),
     ],
-    ids=["paired", "one-side", "narrow"],
+    ids=["paired", "one-side", "narrow", "on-knots-direction", "on-knots-curvature"],
 )
 def test_flat_rows_hold_the_slope_at_zero_and_drop_held_rows(rules):
     knots = _open_knots()
     pieces = shape_pieces(rules, LO, HI)
     (a, b) = next((a, b) for kind, a, b in pieces if kind == "flat")
     rows, flat = shape_rows(knots, DEGREE, pieces, natural_ends=False)
-    np.testing.assert_array_equal(flat, refined_derivative_rows(knots, DEGREE, 1, a, b))
+    # E states f' = 0 on the knot spans the stretch meets: the same condition
+    # as the stretch's own rows, with as many independent rows.
+    stretch = refined_derivative_rows(knots, DEGREE, 1, a, b)
+    assert _rank(flat) == flat.shape[0] == stretch.shape[0] == _rank(np.vstack([flat, stretch]))
     Q, _ = np.linalg.qr(flat.T, mode="complete")
     Z = Q[:, flat.shape[0] :]  # coefficients the flat equalities allow
     x = np.linspace(a, b, 500)
@@ -200,6 +211,35 @@ def test_flat_rows_hold_the_slope_at_zero_and_drop_held_rows(rules):
     kept = [r for r in plain.A if any(np.array_equal(r, k) for k in rows.A)]
     assert len(kept) == rows.A.shape[0] == np.count_nonzero(~vanishing)
     assert np.min(np.linalg.norm(rows.A @ Z, axis=1)) > 1e-3
+
+
+@pytest.mark.parametrize(
+    ("knots", "rules", "natural_ends"),
+    [
+        (_open_knots(), C.flat.within(25, 40) & C.flat.within(40, 50), False),
+        (_open_knots(), C.flat.within(30, 30.5) & C.flat.within(31, 32), False),
+        (_clamped_knots(), C.flat.within(17, 20), True),
+        (_clamped_knots(), C.flat.within(70, 80) & C.convex.below(70), True),
+    ],
+    ids=["touching", "same-span", "natural-start", "natural-end"],
+)
+def test_flat_rows_are_independent(knots, rules, natural_ends):
+    pieces = shape_pieces(rules, LO, HI)
+    _, flat = shape_rows(knots, DEGREE, pieces, natural_ends=natural_ends)
+    equalities = flat
+    if natural_ends:
+        natural = [derivative_value_row(knots, DEGREE, x, 2) for x in (LO, HI)]
+        equalities = np.vstack([flat, *natural])
+    assert _rank(equalities) == equalities.shape[0]
+    # Same condition as before: every flat stretch still has f' = 0.
+    Q, _ = np.linalg.qr(equalities.T, mode="complete")
+    Z = Q[:, equalities.shape[0] :]
+    for c in np.random.default_rng(3).normal(size=(5, Z.shape[1])):
+        scale = np.max(np.abs(BSpline(knots, Z @ c, DEGREE)(np.linspace(LO, HI, 500), nu=1)))
+        for kind, a, b in pieces:
+            if kind == "flat":
+                slope = BSpline(knots, Z @ c, DEGREE)(np.linspace(a, b, 200), nu=1)
+                assert np.max(np.abs(slope)) <= 1e3 * U * scale
 
 
 def test_pieces_split_around_flat():
@@ -221,6 +261,14 @@ def test_stretch_clipped_and_refused():
         pieces = shape_pieces(C.increasing.within(70, 90), LO, HI)
     assert len(record) == 1
     assert pieces == [("increasing", 70.0, 80.0)]
+
+
+def test_messages_name_the_feature_and_warn_at_the_caller():
+    with pytest.raises(ValueError, match=r"^feature 'age': increasing\.above\(90\)"):
+        shape_pieces(C.increasing.above(90), LO, HI, feature="age")
+    with pytest.warns(UserWarning, match=r"^feature 'age': convex\.within") as record:
+        shape_pieces(C.convex.within(70, 90), LO, HI, feature="age", stacklevel=1)
+    assert record[0].filename == __file__
 
 
 def test_label_ends_refused():

@@ -88,14 +88,24 @@ def _outside(a: float, b: float, holes: list[tuple[float, float]]) -> list[tuple
     return [(s, e) for s, e in parts if s < e]
 
 
-def shape_pieces(rules: ConstraintRules | ConstraintSpec, lo: float, hi: float) -> list[ShapePiece]:
+def shape_pieces(
+    rules: ConstraintRules | ConstraintSpec,
+    lo: float,
+    hi: float,
+    *,
+    feature: str | None = None,
+    stacklevel: int = 1,
+) -> list[ShapePiece]:
     """The direction, curvature and flat rules as numeric pieces on [lo, hi].
 
     Open ends become ``lo`` or ``hi``. A stretch reaching past the range is
     clipped with a warning; one with no overlap is refused. Direction and
     curvature pieces are split around flat pieces, where a flat curve already
     satisfies them. Caps and step limits are not pieces and are skipped.
+    ``feature`` names the feature in messages; ``stacklevel`` counts frames
+    above this function for the clipping warning, 1 being its caller.
     """
+    where = "" if feature is None else f"feature {feature!r}: "
     if isinstance(rules, ConstraintSpec):
         rules = ConstraintRules((rules,))
     pieces = []
@@ -104,23 +114,23 @@ def shape_pieces(rules: ConstraintRules | ConstraintSpec, lo: float, hi: float) 
             continue
         if isinstance(rule.lo, str) or isinstance(rule.hi, str):
             raise ValueError(
-                f"{rule.describe()} ends at a band label, which only an ordered categorical "
+                f"{where}{rule.describe()} ends at a band label, which only an ordered categorical "
                 "feature can place; give the stretch in the feature's own values"
             )
         a = lo if rule.lo is None else float(rule.lo)
         b = hi if rule.hi is None else float(rule.hi)
         if not (a < hi and b > lo):
             raise ValueError(
-                f"{rule.describe()} lies outside the feature's range [{lo:g}, {hi:g}]; "
+                f"{where}{rule.describe()} lies outside the feature's range [{lo:g}, {hi:g}]; "
                 "move the stretch inside the range or drop the rule"
             )
         if a < lo or b > hi:
             a, b = max(a, lo), min(b, hi)
             warnings.warn(
-                f"{rule.describe()} reaches past the feature's range [{lo:g}, {hi:g}]; "
+                f"{where}{rule.describe()} reaches past the feature's range [{lo:g}, {hi:g}]; "
                 f"the rule applies on [{a:g}, {b:g}]",
                 UserWarning,
-                stacklevel=2,
+                stacklevel=stacklevel + 1,
             )
         pieces.append((rule.kind, a, b))
     flats = [(a, b) for kind, a, b in pieces if kind == "flat"]
@@ -130,12 +140,38 @@ def shape_pieces(rules: ConstraintRules | ConstraintSpec, lo: float, hi: float) 
     return split + [("flat", a, b) for a, b in flats]
 
 
+def _zero_regions(knots: NDArray, flats: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Where flat stretches hold ``f'`` at zero: the knot spans they meet, merged.
+
+    Regions that touch or overlap are merged, since ``f'`` is zero on their
+    union, so each region's equality rows are independent of the others'.
+    """
+    spans = sorted((knots[knots <= a].max(), knots[knots >= b].min()) for a, b in flats)
+    merged: list[tuple[float, float]] = []
+    for s, e in spans:
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
 def _held_at_zero(lo: NDArray, hi: NDArray, zero: list[tuple[float, float]]) -> NDArray:
     """Which supports [lo, hi] overlap a stretch where ``f'`` is held at zero."""
     held = np.zeros(np.shape(lo), dtype=bool)
     for s, e in zero:
         held |= (lo < e) & (hi > s)
     return held
+
+
+def _flat_rows(knots: NDArray, degree: int, s: float, e: float, natural_ends: bool) -> NDArray:
+    """Rows holding ``f' = 0`` on the zero region [s, e], less any a natural end implies."""
+    rows = refined_derivative_rows(knots, degree, 1, s, e)
+    keep = np.ones(rows.shape[0], dtype=bool)
+    if natural_ends:
+        keep[1] &= s != knots[degree]
+        keep[-2] &= e != knots[len(knots) - degree - 1]
+    return rows[keep]
 
 
 def shape_rows(
@@ -149,19 +185,27 @@ def shape_rows(
     ``f'(a) >= 0``; decreasing & convex: ``f'(b) <= 0``; decreasing & concave:
     ``f'(a) <= 0``).
 
-    Rows the equalities already hold at zero are dropped, since they compose
-    to round-off and degrade the QP's active set. A polynomial that is constant
-    on part of a knot span is constant on all of it, so a flat stretch holds
-    ``f'`` and ``f''`` at zero on every knot span it meets, and with them every
-    refined coefficient whose basis function is active there. With
-    ``natural_ends``, ``f''`` is held at zero at the ends of the knot vector's
-    base interval, where a natural spline (clamped at its range) puts its
-    boundary conditions, so a curvature piece drops its coefficient there.
+    A polynomial that is constant on part of a knot span is constant on all
+    of it, so a flat stretch holds ``f'`` and ``f''`` at zero on every knot
+    span it meets. The flat rows ``E`` state ``f' = 0`` on those spans, merged
+    where they touch, which is the same condition with independent rows.
+
+    Inequality rows the equalities already hold at zero are dropped, since
+    they compose to round-off and degrade the QP's active set: every refined
+    coefficient whose basis function is active on a zero region, and, at a
+    piece end inside a closed zero region, the first ``p`` coefficients, which
+    are fixed by ``f^(order)`` and its ``p - 1`` derivatives there (continuous
+    at a simple knot, so zero). With ``natural_ends``, ``f''`` is held at zero
+    at the ends of the knot vector's base interval, where a natural spline
+    (clamped at its range) puts its boundary conditions: a curvature piece
+    drops its coefficient there, and a zero region reaching that end drops the
+    flat row the boundary row implies (the second coefficient, which with the
+    first fixes ``f''`` at the end).
     """
     knots = np.asarray(knots, dtype=np.float64)
     n_basis = len(knots) - degree - 1
     flats = [(a, b) for kind, a, b in pieces if kind == "flat"]
-    zero = [(knots[knots <= a].max(), knots[knots >= b].min()) for a, b in flats]
+    zero = _zero_regions(knots, flats)
     ends = (knots[degree], knots[n_basis])
     curvature = {(a, b): kind for kind, a, b in pieces if kind in _CURVATURE}
 
@@ -177,15 +221,19 @@ def shape_rows(
             continue
         order = 1 if kind in _DIRECTION else 2
         rows, t_ref = _refined(knots, degree, order, a, b)
-        m = rows.shape[0]
-        keep = ~_held_at_zero(t_ref[:m], t_ref[degree - order + 1 :], zero)
+        m, p = rows.shape[0], degree - order
+        keep = ~_held_at_zero(t_ref[:m], t_ref[p + 1 :], zero)
+        if any(s <= a <= e for s, e in zero):
+            keep[:p] = False
+        if any(s <= b <= e for s, e in zero):
+            keep[m - p :] = False
         if order == 2 and natural_ends:
             keep[0] &= a != ends[0]
             keep[-1] &= b != ends[1]
         blocks.append(sign * rows[keep])
     A = np.vstack(blocks)
     A = A / np.max(np.abs(A), axis=1, keepdims=True) if A.shape[0] else A
-    flat_rows = [refined_derivative_rows(knots, degree, 1, a, b) for a, b in flats]
+    flat_rows = [_flat_rows(knots, degree, s, e, natural_ends) for s, e in zero]
     E = np.vstack([np.zeros((0, n_basis)), *flat_rows])
     return LinearConstraintSet(A=A, b=np.zeros(A.shape[0])), E
 
