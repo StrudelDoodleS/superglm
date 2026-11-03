@@ -228,8 +228,8 @@ def test_a_kept_support_histogram_decides_its_projection_on_the_rows_weights():
     Two rows of bin 0 weigh 1 and -(1 - 2**-52), in separate blocks, so
     ``H[0, 0] = 2**-52`` exactly. The supports are 2**-508 with ``R = 2**500``:
     projected first, every partial product is normal and the block exact; raw,
-    ``B_i' H B_j`` is about 2**-1068 and keeps six bits before ``R`` rescales it.
-    Mutation check: deciding on ``H``'s exponents takes the raw route, about 1% off.
+    ``B_i' H B_j`` is about 2**-1068 and keeps seven bits before ``R`` rescales it.
+    Mutation check: deciding on ``H``'s exponents takes the raw route, about 0.3% off.
     """
     from fractions import Fraction
 
