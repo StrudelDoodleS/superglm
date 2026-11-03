@@ -708,7 +708,9 @@ class EditorWidget:
             if edited is None:
                 return _superseded_payload(revision, request_sequence)
             metric_pairs[eval_dataset.name] = (original, edited)
-        splits = split_metrics_payload(datasets, metric_pairs, report_metrics(reference_model))
+        splits = split_metrics_payload(
+            datasets, metric_pairs, report_metrics(reference_model), reference_model
+        )
         payload = report_payload(
             self,
             report,

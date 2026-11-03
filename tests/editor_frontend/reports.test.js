@@ -66,3 +66,21 @@ test("a Final fit of a SuperLSS model with no summary lists its rows and not emp
   assert.match(html, /<th>Rows<\/th><td>900<\/td>/);
   assert.doesNotMatch(html, /Deviance<\/th>|AIC<\/th>|BIC<\/th>|NaN|null/);
 });
+
+test("a split the model cannot score shows its reason across the metric columns", () => {
+  const reason = "The Validation split cannot be scored with its weights. <Reason>.";
+  const html = render({
+    ...LSS_REPORT,
+    splits: [
+      { name: "validation", label: "Validation", n_obs: 100, available: false, error: reason },
+      ...LSS_REPORT.splits.map((row) => ({ ...row, name: "test", label: "Test" })),
+    ],
+  });
+  assert.match(
+    html,
+    /<td class="report-note" colspan="3">The Validation split cannot be scored with its weights\. &lt;Reason&gt;\.<\/td>/,
+  );
+  assert.doesNotMatch(html, /NaN|null|undefined/);
+  // The other split keeps its metrics.
+  assert.match(html, /data-direction="better">Δ -0\.05</);
+});

@@ -7,7 +7,7 @@ from typing import Any
 
 from superglm.editor.cv import FINAL_NOT_RUN, cv_report_payload
 from superglm.editor.evaluation import evaluation_datasets
-from superglm.editor.lss.validation import LSS_METRIC_LABELS
+from superglm.editor.lss.validation import LSS_METRIC_LABELS, lss_split_reason
 from superglm.editor.lss.view import is_lss
 from superglm.editor.metrics import METRIC_LABELS, compute_dataset_metrics
 from superglm.editor.summaries import summary_payload
@@ -146,18 +146,30 @@ def split_metrics_payload(
     datasets,
     metric_pairs: dict[str, tuple[dict[str, float], dict[str, float]]],
     metrics: Iterable[str] = _REPORT_METRICS,
+    model=None,
 ) -> list[dict[str, Any]]:
-    """Assemble split rows from cached original/current scalar pairs."""
+    """Assemble split rows from cached original/current scalar pairs.
+
+    A split a SuperLSS ``model`` cannot score is a row with ``available``
+    False and the reason as ``error``.
+    """
     metrics = tuple(metrics)
     rows: list[dict[str, Any]] = []
     for dataset in datasets:
         original, edited = metric_pairs[dataset.name]
+        identity = {
+            "name": dataset.name,
+            "label": dataset.label,
+            "n_obs": dataset.n_obs,
+            "source": dataset.source,
+        }
+        reason = lss_split_reason(model, dataset) if is_lss(model) else None
+        if reason is not None:
+            rows.append({**identity, "available": False, "error": reason})
+            continue
         rows.append(
             {
-                "name": dataset.name,
-                "label": dataset.label,
-                "n_obs": dataset.n_obs,
-                "source": dataset.source,
+                **identity,
                 "metrics": {
                     "original": {metric: original[metric] for metric in metrics},
                     "edited": {metric: edited[metric] for metric in metrics},
@@ -179,7 +191,7 @@ def _split_metrics(session) -> list[dict[str, Any]]:
         edited = compute_dataset_metrics(edited_model, dataset)
         metric_pairs[dataset.name] = (original, edited)
     return split_metrics_payload(
-        evaluation_datasets(session), metric_pairs, report_metrics(reference_model)
+        evaluation_datasets(session), metric_pairs, report_metrics(reference_model), reference_model
     )
 
 

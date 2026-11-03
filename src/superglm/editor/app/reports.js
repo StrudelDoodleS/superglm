@@ -61,17 +61,21 @@ function renderSplitSection(payload) {
   `;
 }
 
+// A split the model cannot score carries its reason instead of metrics.
 function renderSplitRow(split, columns) {
   const metrics = split.metrics || {};
   const edited = metrics.edited || {};
   const delta = metrics.delta || {};
+  const cells = split.available === false
+    ? `<td class="report-note" colspan="${columns.length}">${escapeHTML(split.error || "")}</td>`
+    : columns.map((metric) => renderMetricCell(metric, edited[metric], delta[metric])).join("");
   return `
     <tr>
       <td>
         <strong>${escapeHTML(split.label || split.name || "")}</strong>
         <span class="report-delta">${escapeHTML(String(split.n_obs || 0))} rows</span>
       </td>
-      ${columns.map((metric) => renderMetricCell(metric, edited[metric], delta[metric])).join("")}
+      ${cells}
     </tr>
   `;
 }

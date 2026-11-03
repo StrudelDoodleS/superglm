@@ -15,6 +15,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributional.checks.scores import _scoring_rows
+from superglm.distributional.family import COMPLETE_OBSERVATION
+from superglm.distributional.weights import (
+    UnsupportedLikelihoodContractError,
+    resolve_likelihood_weights,
+)
 from superglm.editor.lss.view import LSSModelView
 
 LSS_METRIC_LABELS = {
@@ -28,6 +33,31 @@ def _fitted(model: Any):
     return model.lss if isinstance(model, LSSModelView) else model
 
 
+def lss_split_reason(model: Any, dataset) -> str | None:
+    """Why ``dataset`` cannot be scored by a SuperLSS (or the editor's view of one); None if it can.
+
+    The split's weights are resolved under the fit's weight contract and bound
+    to its family, as scoring does: a family with no law for those weights,
+    such as non-unit prior weights on the log-normal, refuses them.
+    """
+    lss = _fitted(model)
+    y = np.asarray(dataset.y, dtype=np.float64).ravel()
+    resolved = resolve_likelihood_weights(
+        dataset.sample_weight,
+        n_observations=y.size,
+        contract=lss._require_fitted().fit_state.weight_contract,
+    )
+    try:
+        lss.family.bind_likelihood(y[resolved.input_positions], resolved, COMPLETE_OBSERVATION)
+    except UnsupportedLikelihoodContractError as exc:
+        detail = str(exc).rstrip(".")
+        return (
+            f"The {dataset.label} split cannot be scored with its weights. "
+            f"{detail[:1].upper()}{detail[1:]}."
+        )
+    return None
+
+
 def lss_dataset_metrics(model: Any, dataset) -> dict[str, float]:
     """Score ``dataset`` with a SuperLSS (or the editor's view of one).
 
@@ -36,9 +66,12 @@ def lss_dataset_metrics(model: Any, dataset) -> dict[str, float]:
     the total weight under frequency weights, the number of scored rows under
     prior weights, whose rows already score their own weighted law.
     ``actual_expected`` is ``sum(w * y) / sum(w * mean)``. A family without a
-    distribution function has no CRPS, which is then NaN.
+    distribution function has no CRPS, which is then NaN. A split
+    ``lss_split_reason`` refuses scores NaN throughout.
     """
     lss = _fitted(model)
+    if lss_split_reason(lss, dataset) is not None:
+        return dict.fromkeys(LSS_METRIC_LABELS, float("nan"))
     offsets = dataset.offset
     weights = dataset.sample_weight
     y = np.asarray(dataset.y, dtype=np.float64).ravel()

@@ -311,3 +311,29 @@ def test_state_carries_the_final_fit_plan_for_superlss_only(editor_model):  # no
         assert "final_fit_plan" not in glm._state()
     finally:
         glm.close()
+
+
+@pytest.mark.parametrize("make", [lognormal_case, nb_case])
+@pytest.mark.parametrize("report", ["validation", "final"])
+def test_a_split_whose_weights_the_family_refuses_is_shown_unavailable(make, report):
+    # Non-unit prior weights have no law under a non-reproductive family or NB2 counts.
+    case = make()
+    split = holdout_rows(case, 100)
+    session = open_case(case, validation_data=(split.X, split.y, split.sample_weight, split.offset))
+    widget = session.widget()
+    try:
+        payload = widget._report(report)
+        rows = {row["name"]: row for row in payload["splits"]}
+        refused = rows["validation"]
+        assert refused["available"] is False and "metrics" not in refused
+        assert refused["error"].startswith(
+            "The Validation split cannot be scored with its weights. "
+        )
+        assert refused["error"].endswith(".")
+        assert type(case.model.family).__name__ in refused["error"] or "weight" in refused["error"]
+        assert "available" not in rows["train"]
+        assert np.isfinite(rows["train"]["metrics"]["edited"]["log_score"])
+        again = {row["name"]: row for row in widget._report(report)["splits"]}
+        assert again["validation"] == refused
+    finally:
+        widget.close()
