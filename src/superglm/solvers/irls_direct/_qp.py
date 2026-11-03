@@ -44,17 +44,13 @@ def _solve_constrained_qp_with_cold_retry(
     A: NDArray,
     b: NDArray,
     active_set_init: list[int] | None,
-    *,
-    degeneracy_retry: bool = True,
 ) -> QPResult:
     """Retry a failed warm active set without weakening the KKT contract.
 
     A warm active set is only a hint: near a boundary, rounding can make the
     warm solve withhold its KKT certificate where a cold start certifies.  A
-    failed warm solve is retried cold; if the result is still uncertified, one
-    more cold solve runs with the degenerate-vertex safeguards (issue #472).
-    A retry replaces the first result only when it certifies.
-    ``degeneracy_retry=False`` skips the safeguarded attempt.
+    failed warm solve is retried cold, and the retry replaces the first result
+    only when it certifies.
     """
     result = solve_constrained_qp(
         H,
@@ -73,17 +69,6 @@ def _solve_constrained_qp_with_cold_retry(
         )
         if cold_result.converged:
             return cold_result
-    if degeneracy_retry and not result.converged:
-        safeguarded = solve_constrained_qp(
-            H,
-            g,
-            A,
-            b,
-            active_set_init=None,
-            _degeneracy_safeguards=True,
-        )
-        if safeguarded.converged:
-            return safeguarded
     return result
 
 
@@ -130,14 +115,14 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
     Each iteration solves the centred normal equations (intercept profiled
     out) subject to the stacked constraints, warm-started from the last active
     set.  The step keeps the constraint system, the active sets, the proposal's
-    and retained state's KKT certificates and the retry latches, and no
+    and retained state's KKT certificates and the report latch, and no
     reference to the fit.  The line search writes ``retained_converged`` and,
     on a rejected step, restores the starting active set.
     """
 
     __slots__ = (
         "A_all b_all abs_A_all active_set committed_active_set proposal_converged"
-        " retained_converged _degeneracy_retry_failed _reported_nonconvergence _zero_bounded"
+        " retained_converged _reported_nonconvergence _zero_bounded"
     ).split()
     backend = "gram"
     finalise = _finalise_centred
@@ -160,8 +145,6 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
         # A constrained fit-entry state has not been certified by the inner QP.
         self.proposal_converged = False
         self.retained_converged = False
-        # the #472 retry is off after a failure, until a solve certifies
-        self._degeneracy_retry_failed = False
         # transient note once; terminal authority is separate
         self._reported_nonconvergence = False
         # Under a link whose domain is bounded at zero (``link_domain_violation``)
@@ -199,7 +182,6 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
                 self.A_all,
                 self.b_all,
                 active_set,
-                degeneracy_retry=not self._degeneracy_retry_failed,
             )
         except ValueError as error:
             if not self._zero_bounded:
@@ -222,9 +204,6 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
             fit.intercept = proposal_centred_intercept - math.fsum(_state_center * beta)
         self.proposal_converged = bool(qp_result.converged)
         self.active_set = qp_result.active_set
-        # The degenerate-vertex retry costs a full solve, so it stays off while
-        # the QP keeps failing; a certified solve re-arms it.
-        self._degeneracy_retry_failed = not qp_result.converged
         # Reported once per fit; the retained state is judged in ``_finish``.
         if not qp_result.converged and not self._reported_nonconvergence:
             self._reported_nonconvergence = True
