@@ -124,7 +124,10 @@ is free.
 `C.flat` holds the curve level on a stretch.
 
 - `flat` needs a stretch, such as `C.flat.within(25, 40)`. A flat rule over
-  the whole range is refused.
+  the whole range is refused, and so is a stretch that widens to every knot
+  span: the term would have no effect, so remove it.
+- `flat` needs a spline of degree 1 or more. On a degree-0 spline, put knots at
+  the stretch edges or band the feature with `OrderedCategorical`.
 - A flat stretch covers every whole knot span it touches. When a stretch
   edge is not a knot, the fit warns and names the interval it actually
   flattens.
@@ -446,7 +449,10 @@ These combinations are intentionally guarded:
 - `Constraint.fit.cap` or `Constraint.fit.max_step` on an `OrderedCategorical`
   with special levels
 - `Constraint.fit.max_step` on a spline term
-- `Constraint.fit.flat` with no stretch
+- `Constraint.fit.flat` with no stretch, or with a stretch that holds every knot
+  span of the term
+- `Constraint.fit.flat` on a spline of degree 0
+- `fit_path()` on a term with any fit-time rule
 - `polynomial_ranges=` on a term that also has a shape constraint
 - a shape rule other than a cap on a `Categorical`
 
