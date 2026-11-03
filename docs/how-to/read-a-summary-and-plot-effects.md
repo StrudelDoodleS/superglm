@@ -399,11 +399,9 @@ grid's *cells*, so an interaction swept at 20 reports 400 where a main effect re
 columns are **joint** over everything discretized at that resolution — within one `n_bins` group only
 `feature` and `actual_bins` vary.
 
-One approximation the workbook can carry is outside that measurement, so the sheet is a bound on
-the terms it lists rather than on every factor in the book. An **offset multiplier** block asked for
-as `offset_kind="binned"` is not swept
-([#314](https://github.com/StrudelDoodleS/superglm/issues/314)) — under the default there is no
-offset approximation left to sweep.
+An **offset multiplier** block asked for as `offset_kind="binned"` is swept too, under its own
+`Offset Multiplier` row, and its approximation is part of the joint metrics; under the default the
+offset is exported exactly and there is nothing to sweep.
 
 The sheet's discretized prediction is the workbook's own unclipped product. If that product
 overflows or underflows to zero on some row at the exported `n_bins`, the export stops with an

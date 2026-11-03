@@ -851,10 +851,8 @@ def test_the_per_unit_offset_block_reproduces_predict_on_every_row(centering):
     as an absence: the module's shared ``_fit`` fixtures and
     ``_grid_interaction_frame`` are offset-free by construction, so the
     centering sweeps and the impact-sheet equalities built on them do not see
-    an offset block of any kind.  The last of those is deliberate -- the sweep
-    does not measure the binned offset multiplier (issue #314), which is why
-    ``test_the_sheets_prediction_change_is_the_whole_workbooks_error`` asserts
-    its fixture used no offset at all.  Giving those fixtures an offset would
+    an offset block of any kind; the binned offset's sweep is pinned in
+    ``test_rating_export_impact_range.py``.  Giving those fixtures an offset would
     move every number in this module for a reason that has nothing to do with
     this block, so the coverage is added here instead: the evaluator is shared,
     and the centering sweep runs over it.
@@ -2462,10 +2460,8 @@ def test_the_sheets_prediction_change_is_the_whole_workbooks_error():
     everywhere else in this module, so what is compared is what a consumer
     holds.
 
-    The fixture is deliberately offset-free.  The binned offset multiplier
-    block is the one approximation the sweep does not cover (issue #314), so
-    the equality below is over a workbook whose every approximated factor the
-    sheet does measure -- which is the claim, stated at its true scope.
+    The fixture is offset-free; the binned offset multiplier's share of the
+    sheet is pinned in ``test_rating_export_impact_range.py``.
     """
     model, X, y = _grid_interaction_frame()
     assert not rating_tables._fit_used_offset(model)

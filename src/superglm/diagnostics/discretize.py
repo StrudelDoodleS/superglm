@@ -1166,6 +1166,7 @@ def discretization_impact(
     features: list[str] | None = None,
     band_se: float = 1.0,
     band_max_error: float = 0.10,
+    _offset_delta: NDArray | None = None,
 ) -> DiscretizationResult:
     """Analyse the impact of discretizing the smooth terms of a fit.
 
@@ -1371,7 +1372,9 @@ def discretization_impact(
     # For each target feature, compute the delta (binned - smooth)
     tables: dict[str, pd.DataFrame] = {}
     band_diagnostics: dict[str, dict[str, float]] = {}
-    total_delta = np.zeros(n)
+    # The rating-table export bins a requested offset itself and passes the
+    # change in its log factor, which joins the fitted terms' changes.
+    total_delta = np.zeros(n) if _offset_delta is None else np.array(_offset_delta, dtype=float)
     # Under "exact" a covariate's main effect and the spline-by-categorical
     # interactions on it are read on ONE set of bands, so the table keys them
     # alike and every curve it approximates keeps its limit (_joint_exact_bands).

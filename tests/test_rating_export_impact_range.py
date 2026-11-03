@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Numeric, Polynomial, SuperGLM
+from superglm import Categorical, Numeric, Polynomial, SuperGLM
 from superglm.export.rating_tables import build_rating_table_payload
 
 _INTERVAL = re.compile(r"^\[([^,]+), ([^\]\)]+)[\]\)]$")
@@ -151,3 +151,67 @@ def test_export_refuses_nonfinite_joint_grid_approximation_without_sweep(impact_
     model._prediction_plan = None
     with pytest.raises(OverflowError, match="non-finite or zero predictions"):
         build_rating_table_payload(model, X, y, n_bins=2, impact_bins=impact_bins)
+
+
+def _offset_fit(*, continuous):
+    rng = np.random.default_rng(314)
+    n = 240
+    X = pd.DataFrame({"region": rng.choice(["A", "B"], n)})
+    features = {"region": Categorical(base="first")}
+    offset = np.log(np.linspace(1.0, 4.0, n))
+    eta = -0.4 + 0.25 * (X.region.to_numpy() == "B") + offset
+    if continuous:
+        X["x"] = rng.uniform(-1.0, 1.0, n)
+        features["x"] = Polynomial(degree=2)
+        eta += 0.8 * X.x.to_numpy() ** 2 - 0.5 * X.x.to_numpy()
+    weights = rng.integers(1, 5, n).astype(float)
+    y = rng.poisson(np.exp(eta)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        features=features,
+        selection_penalty=0,
+        weight_semantics="frequency",
+        tol=1e-10,
+    ).fit(X, y, sample_weight=weights, offset=offset)
+    assert model.result.converged
+    return model, X, y, weights, offset
+
+
+@pytest.mark.parametrize("continuous", [False, True])
+@pytest.mark.parametrize("strategy", ["exposure_quantile", "uniform", "winsorized"])
+def test_binned_offset_is_included_in_joint_workbook_impact(continuous, strategy):
+    """Omitting the offset delta breaks both offset-only and mixed workbooks."""
+    model, X, y, weights, offset = _offset_fit(continuous=continuous)
+    payload = build_rating_table_payload(
+        model,
+        X,
+        y,
+        sample_weight=weights,
+        n_bins=5,
+        impact_bins=(3,),
+        bin_strategy=strategy,
+        offset_kind="binned",
+    )
+    sheet = payload.discretization_impact
+    expected_features = {"Offset Multiplier", "x"} if continuous else {"Offset Multiplier"}
+    assert set(sheet.feature) == expected_features
+    assert set(sheet.n_bins) == {3, 5}
+    offset_rows = sheet.loc[sheet.feature == "Offset Multiplier"]
+    assert offset_rows.actual_bins.tolist() == [3, 5]
+    rated = _workbook_predictions(payload, X, offset=offset)
+    fitted = model.predict(X, offset=offset)
+    assert np.max(np.abs(rated / fitted - 1)) > 0.05
+    _assert_joint_impact(payload, fitted, rated, y, weights)
+
+
+def test_default_continuous_offset_stays_exact_and_is_not_reported_as_binned():
+    model, X, y, weights, offset = _offset_fit(continuous=False)
+    payload = build_rating_table_payload(
+        model, X, y, sample_weight=weights, n_bins=5, impact_bins=(5,)
+    )
+    rated = _workbook_predictions(payload, X, offset=offset)
+    np.testing.assert_allclose(rated, model.predict(X, offset=offset), rtol=5e-14)
+    assert payload.discretization_impact.empty
+    assert next(block for block in payload.main_effects if "offset" in block.kind).kind == (
+        "offset_per_unit"
+    )

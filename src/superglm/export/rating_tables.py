@@ -1374,7 +1374,13 @@ def _offset_multiplier_block(
             )
             return RatingTableBlock(name="Offset Multiplier", kind="offset", table=table)
         return _offset_per_unit_block_from_multiplier(multiplier, sample_weight)
+    return _binned_offset_block(multiplier, weights, n_bins, bin_strategy)[0]
 
+
+def _binned_offset_block(
+    multiplier: NDArray, weights: NDArray, n_bins: int, bin_strategy: str
+) -> tuple[RatingTableBlock, NDArray]:
+    """The binned offset summary, and the factor its interval lookup gives each row."""
     from superglm.diagnostics.discretize import _compute_edges
 
     edges = _compute_edges(multiplier, weights, n_bins, bin_strategy)
@@ -1425,11 +1431,9 @@ def _offset_multiplier_block(
                 "Weight": exposure,
             }
         )
-    return RatingTableBlock(
-        name="Offset Multiplier",
-        kind="offset",
-        table=pd.DataFrame(rows),
-    )
+    table = pd.DataFrame(rows)
+    block = RatingTableBlock(name="Offset Multiplier", kind="offset", table=table)
+    return block, table["Relativity"].to_numpy(dtype=np.float64)[bin_idx]
 
 
 class OffsetRelationError(ValueError):
@@ -1947,6 +1951,7 @@ def _impact_sweep(
     impact_bins: tuple[int, ...],
     bin_strategy: str,
     features: list[str],
+    binned_offset: bool,
     exported_n_bins: int,
     band_se: float,
     band_max_error: float,
@@ -1955,24 +1960,33 @@ def _impact_sweep(
 
     ``exported_n_bins`` is folded into the swept set and marked, because
     without it the sheet can describe every resolution EXCEPT the one the
-    reader is holding.  The defaults are ``n_bins=150`` against
-    ``impact_bins=(20, 50, 100, 200, 250)``, so without the fold-in a reader
-    would take one of the ladder's numbers for their own.  Each rung is an
-    INDEPENDENT measurement, not a point on a curve guaranteed to fall: a finer
-    grid shrinks the worst-case bound, but successive nearest-node grids are
-    not nested, so a nearer node can carry a value further from a given row.
-    The ``exported`` column says which row is theirs, and it is the one to
-    read.
+    reader is holding (the defaults are ``n_bins=150`` against
+    ``impact_bins=(20, 50, 100, 200, 250)``).  Each rung is an INDEPENDENT
+    measurement: successive nearest-node grids are not nested, so a finer one
+    need not sit closer to a given row.  The ``exported`` column marks theirs.
 
     An empty ``impact_bins`` skips the ladder and leaves the sheet empty, but
     the exported resolution is still evaluated, because declining the
-    disclosure cannot make a non-finite approximation exportable.
+    disclosure cannot make a non-finite approximation exportable.  A
+    ``binned_offset`` is binned at each resolution as its block is, and the
+    change in its log factor joins the terms' changes under its own row.
     """
     rows: list[dict[str, float | int | str]] = []
-    if not features:
+    if not features and not binned_offset:
         return _empty_impact_frame()
 
     for n_bins in sorted(dict.fromkeys((*impact_bins, exported_n_bins))):
+        blocks: dict[str, pd.DataFrame] = {}
+        offset_delta = None
+        if binned_offset:
+            offset_arr = np.asarray(offset, dtype=np.float64)
+            with np.errstate(over="ignore", under="ignore"):
+                multiplier = np.exp(offset_arr)
+            block, applied = _binned_offset_block(
+                multiplier, _weights_array(len(X), sample_weight), int(n_bins), bin_strategy
+            )
+            blocks[block.name] = block.table
+            offset_delta = np.log(applied) - offset_arr
         result = model.discretization_impact(
             X,
             y,
@@ -1983,10 +1997,11 @@ def _impact_sweep(
             features=features,
             band_se=band_se,
             band_max_error=band_max_error,
+            _offset_delta=offset_delta,
         )
         if not impact_bins:
             return _empty_impact_frame()
-        for feature, table in result.tables.items():
+        for feature, table in {**result.tables, **blocks}.items():
             row: dict[str, float | int | str] = {
                 "n_bins": int(n_bins),
                 "exported": int(n_bins) == exported_n_bins,
@@ -2260,11 +2275,11 @@ def build_rating_table_payload(
     blocks that were actually built, so the sheet names every one of those
     four and its metrics are joint over them.
 
-    "Fitted terms" is the scope, not "every factor the workbook carries": an
-    OFFSET MULTIPLIER block requested as ``offset_kind="binned"`` is
-    approximated too, is measured above at 8.86e-02, and is not swept, because
-    it is not a fitted term and has no prediction-plan entry.  See the paragraph
-    on issue #314 further down.
+    An OFFSET MULTIPLIER block requested as ``offset_kind="binned"`` is
+    approximated too (measured above at 8.86e-02) and is swept beside them:
+    each resolution bins the offset as the block does, and the change in its
+    log factor joins the terms' changes under an ``Offset Multiplier`` row,
+    even when every fitted term is categorical (issue #314).
 
     The interaction's share is a SAMPLING rather than a binning, and it is the
     larger of the two differences between the sheet's two row kinds.  A binned
@@ -2303,15 +2318,7 @@ def build_rating_table_payload(
     hides the error where binning removes cancellation between terms (issue
     #313).
 
-    The bound is over the TERMS the sheet lists, not over every factor the
-    workbook carries, and two limits on it are tracked rather than fixed
-    here.  A binned OFFSET MULTIPLIER block -- reachable now only by asking for
-    ``offset_kind="binned"``, and measured above at 8.86e-02 -- is not swept at
-    all, and the sweep passes the exact offset into every call, so a
-    categorical-only model exported that way gets an empty sheet beside a binned
-    offset block (issue #314).  Under the default the empty sheet is CORRECT for
-    the offset: there is no offset approximation left in the workbook to
-    measure.  And for a
+    One limit on the bound is tracked rather than fixed here.  For a
     grid whose parent is a spline-mode ``OrderedCategorical``, the block is a
     DISCLOSURE rather than a lookup: ``_continuous_interaction_block`` prints
     the axis in mapped-score space while a consumer holds the level label, and
@@ -2781,6 +2788,9 @@ def build_rating_table_payload(
         offset=export_offset,
         impact_bins=impact_bins,
         bin_strategy=bin_strategy,
+        binned_offset=export_offset is not None
+        and offset_source is None
+        and offset_kind == "binned",
         exported_n_bins=int(n_bins),
         band_se=band_se,
         band_max_error=band_max_error,
