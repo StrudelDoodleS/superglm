@@ -19,7 +19,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 
-from superglm import Spline, SuperLSS
+from superglm import Spline, SuperLSS, TwoPieceNormalLSS, s
 from superglm.diagnostics.convergence import (
     ConvergenceWarning,
     lss_corrected_covariance_nonstationary_message,
@@ -806,6 +806,27 @@ def test_a_fellner_schall_stop_of_an_endgame_fit_is_not_told_to_run_the_endgame(
     """Under the default an outward practical plateau can stop an efs+newton fit."""
     fitted, _ = stationary_case
     assert fitted.smoothing is not None and fitted.smoothing.config.outer == "efs+newton"
+    altered = _with_smoothing_stop(fitted, reason="practical_plateau", converged=True)
+    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point") as record:
+        posterior_covariance(altered, kind="corrected")
+    assert not any("outer='efs+newton'" in str(item.message) for item in record)
+
+
+def test_a_two_piece_fit_is_not_told_to_run_the_endgame() -> None:
+    """A two-piece curvature jumps at the join, so its open stop gets no Newton remedy.
+
+    The default Fellner-Schall fit is relabelled to a stop the remedy would
+    otherwise address. Mutation check: deciding the advice by the fitted outer
+    alone offered ``outer='efs+newton'``.
+    """
+    rng = np.random.default_rng(7351)
+    x = rng.uniform(-1.0, 1.0, 320)
+    frame = pd.DataFrame({"x": x})
+    response = 0.6 * np.sin(2.4 * x) + np.exp(-1.0) * rng.standard_normal(len(x))
+    family = TwoPieceNormalLSS()
+    model = SuperLSS(family, family.location(s("x", kind="cr", k=6)), family.scale(), family.skew())
+    fitted = model.fit_reml(frame, response)._require_fitted()
+    assert fitted.smoothing is not None and fitted.smoothing.config.outer == "efs"
     altered = _with_smoothing_stop(fitted, reason="practical_plateau", converged=True)
     with pytest.warns(ConvergenceWarning, match="not at a certified stationary point") as record:
         posterior_covariance(altered, kind="corrected")

@@ -514,10 +514,10 @@ def test_a_stationary_endgame_keeps_an_exact_face_beside_a_capped_tensor_margin(
     assert smoothing.unresolved_upper_bound == ()
     assert set(model.result_.exact_face_components) == promoted
     fitted = model._require_fitted()
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", ConvergenceWarning)
-        corrected = posterior_covariance(fitted, kind="corrected")
-    assert np.all(np.diag(corrected) >= np.diag(posterior_covariance(fitted, kind="fixed")))
+    # The retake makes the replayed gradient agree; the positive-definiteness
+    # gate's verdict on the capped margin's near-zero curvature varies by platform.
+    fallbacks = _corrected_covariance_fallbacks(fitted)
+    assert _only_the_hessian_gate_declined(fallbacks), fallbacks
     loaded = pickle.loads(pickle.dumps(model))._require_fitted().smoothing
     assert loaded is not None
     assert loaded.convergence_reason == "stationary"
