@@ -190,20 +190,14 @@ def _fewest_then_least(s, w, tol, *, count_only: bool = False) -> Any:
     """Fewest bands meeting ``tol``, then least weighted squared error at their factors.
 
     ``s`` and ``tol`` are ``(n, m)`` for ``m`` curves sharing the bands, or 1-D for one. Returns
-    each band's start and its factor per curve, or with ``count_only`` just the band count (all
-    that testing a cap needs). A band is allowed when every curve's factor meets that curve's
-    tolerances and costs the sum of the curves' squared errors, so the recursion over the last
-    band's start is Bellman's. For each end ``j`` candidate starts run leftwards until some
-    tolerance window ``[max(s - tol), min(s + tol)]`` empties (it only shrinks as a band grows);
-    the pass is O(n W m) for windows of W starts, O(n^2 m) worst, memory O(n m). The mean test is
-    not hereditary and the best count is not monotone in ``j``, so every open start is tested.
-
-    Comparisons are made in the frame shifted by ``s[j]`` and a band is accepted only when its
-    computed mean clears the window by more than the rounding error, so every accepted band keeps
-    every value within tolerance; a mean meeting a zero-width window exactly is rejected unless
-    the band is a plateau. A band also needs a double meeting every tolerance in it to carry as
-    its factor. Its cost is ``M2 + W (factor - mean)**2`` with ``M2`` kept by West's (1979)
-    weighted update, whose rounding grows like ``k kappa u`` (Chan, Golub and LeVeque 1983).
+    each band's start and its factor per curve, or with ``count_only`` just the band count. A
+    band is allowed when every curve's factor meets its tolerances and costs the curves' summed
+    squared errors; the recursion over the last band's start is Bellman's, O(n W m) for windows
+    of W starts. The mean test is not hereditary, so every open start is tested. A band is
+    accepted only when its computed mean (shifted by ``s[j]``) clears the window by more than
+    the rounding error and a double meeting every tolerance can carry as its factor. Its cost
+    ``M2 + W (factor - mean)**2`` keeps ``M2`` by West's (1979) weighted update, whose rounding
+    grows like ``k kappa u`` (Chan, Golub and LeVeque 1983).
     """
     one_curve = s.ndim == 1
     if one_curve:

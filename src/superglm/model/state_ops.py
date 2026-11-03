@@ -206,7 +206,7 @@ def _legacy_rank_state(model, solver, W: NDArray):
     )
     raw_gram, _, _, _ = centered.raw_weighted_moments()
     coefficient_rank = decompose_gram_if_authoritative(raw_gram + curvature)
-    # rows centred about the system's exact centre pair (issue #430)
+    # rows centred about the system's exact centre pair
     centre, centre_lo = centered.centre_pair()
     # The fit's route (``rank.decide_data_rank``); unpenalized, the data rank
     # is also the profile rank below, so the full factor decides it, as in
@@ -437,8 +437,8 @@ def _structured_covariance_state(
         state.profiled_factor,
         intercept_shift=shift,
     )
-    # The slope covariance M_ss, the slope block of the augmented inverse
-    # (design §3.6): no raw-coordinate coefficient factor exists.
+    # The slope covariance M_ss, the slope block of the augmented inverse: no
+    # raw-coordinate coefficient factor exists.
     return augmented.slopes, augmented, active_groups
 
 
@@ -534,10 +534,8 @@ def _structured_small_data_factor(operator: CenteredBlockOperator) -> MappedColu
 def fit_inference_info(model):
     """All coefficient-space inference quantities for model.summary().
 
-    Self-contained: computes working weights W, then uses the gram path
-    (per-group gram blocks + p³ inversion) instead of materialising the
-    full n×p active design matrix.  This makes model.summary() O(n + p³)
-    instead of O(n·p²).
+    Forms the working weights W and per-group Gram blocks rather than the
+    n×p active design, so model.summary() is O(n + p³).
 
     Returns a dict with:
         W : (n,) working weights

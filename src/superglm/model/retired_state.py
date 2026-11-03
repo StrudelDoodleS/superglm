@@ -1,14 +1,12 @@
-"""Saved models whose structured solver state was retired (one-engine design §3.12, decision 13).
+"""Saved models whose structured solver state was retired.
 
 ``SuperGLM.__setstate__`` drops a retained linear system that names a retired
-class (``solvers._structured.retired``) and marks the model.  Predictions,
-coefficients and relativities never read that state.  The first inference call
-reads it through ``retained_linear_state``, which rebuilds it with the current
-engine at the saved coefficients and smoothing parameters -- one pass at the
-saved working weights and one factorization (a random effect's nested chain, a
-lone level a chain of one; the fs leaf factor; or the balance tree of an sz
-term) -- with a one-time notice.  A model that did not retain its fit state
-cannot be rebuilt, and the call says so and asks for a refit.
+class (``solvers._structured.retired``) and marks the model; predictions,
+coefficients and relativities never read it.  The first inference call
+rebuilds it through ``retained_linear_state`` with the current engine at the
+saved coefficients and smoothing parameters (one pass, one factorization),
+with a one-time notice.  A model that did not retain its fit state asks for a
+refit.
 """
 
 from __future__ import annotations
@@ -36,13 +34,11 @@ def mark_retired_linear_state(model) -> None:
 
 
 def release_retired_tweedie_state(model) -> None:
-    """``SuperGLM.__setstate__``'s part for the v0.35.0 Tweedie classes #422 retired.
+    """``SuperGLM.__setstate__``'s part for the retired v0.35.0 Tweedie classes.
 
-    A REML fit kept its saturated-density memo on the REML result; it is a
-    cache that only the fit's own terminal evaluations read, so it is dropped.
-    Predictions, coefficients and standard errors never read it.  (A saved
-    ``estimate_p`` or ``estimate_theta`` result restates itself on load, in
-    its own ``__setstate__``.)
+    A REML fit's saturated-density memo is read only by the fit's own terminal
+    evaluations, so it is dropped. A saved ``estimate_p`` or
+    ``estimate_theta`` result restates itself in its own ``__setstate__``.
     """
     from superglm.solvers._structured.retired import RetiredStructuredState
 

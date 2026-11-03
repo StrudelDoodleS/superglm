@@ -520,15 +520,9 @@ def _plot_ordered_spline_panel(
             ax_support.axvline(divider, linestyle=":", linewidth=_REF_LW, color=_REF_COLOR)
 
     _set_level_ticks(ax if ax_support is None else ax_support, levels, x_pos)
-    # The markers and the fitted curve need not span the same range, so the
-    # limits are the UNION of the marker padding and the curve's own extent and
-    # neither can clip the other.  Which way they disagree depends on the panel:
-    # in ``expanded`` mode the markers sit at the declared level values while
-    # the curve spans the fitted axis (group means), so a leading or trailing
-    # merge leaves the curve short of the outermost markers -- ggplot2's
-    # ``geom_smooth(fullrange=FALSE)`` default, where the smoothing line is not
-    # expanded to the range of the plot.  A detached ``specials=`` block reaches
-    # past the curve on the other side.
+    # The limits are the union of the marker padding and the curve's extent, so
+    # neither clips the other: in ``expanded`` mode a merged end group leaves
+    # the curve short of the outer markers, and a ``specials=`` block reaches past it.
     lo = float(x_pos.min()) - spacing / 2.0
     hi = float(x_pos.max()) + spacing / 2.0
     if curve is not None:

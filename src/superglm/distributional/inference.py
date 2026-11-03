@@ -214,18 +214,12 @@ def _columns(solve, matrix: NDArray) -> NDArray[np.float64]:
 def _influence(result: DenseSolverResult) -> NDArray[np.float64]:
     """``F = G^+ D`` for the matrix the terminal decomposition inverts.
 
-    Where the terminal rank was decided from the rows (``row_decided``;
-    ``certificate.py``), the decomposition inverts ``G_rep = E diag(r) E'``,
-    its estimable basis and retained values, not the formed ``G``. The two
-    differ in the directions read from the rows by more than a stored float64
-    matrix resolves of their eigenvalues, so ``G^+ D``
-    with the formed ``D`` is inconsistent there. ``F`` is then ``G^+ G_rep -
-    G^+ S``: the projector ``W E'`` of the decomposition's own matrix (``W``
-    its solution basis) and the exact penalty, so an unpenalized retained
-    direction contributes exactly one.
-    Under a face, the formed ``G`` supplies the columns outside the face's
-    span: ``F = N P N' + G^+ G (I - N N') - G^+ S``, which equals ``G^+ D`` when
-    ``N' G N`` is the matrix decomposed.  Every other fit takes ``G^+ D``.
+    Where the terminal rank was decided from the rows (``row_decided``), the decomposition
+    inverts ``G_rep = E diag(r) E'``, which the formed float64 ``G`` does not resolve, so
+    ``F = G^+ G_rep - G^+ S``: the decomposition's projector ``W E'`` (``W`` its solution basis)
+    and the exact penalty, so an unpenalized retained direction contributes exactly one. Under
+    a face, ``F = N P N' + G^+ G (I - N N') - G^+ S``, which equals ``G^+ D`` when ``N' G N`` is
+    the matrix decomposed. Every other fit takes ``G^+ D``.
     """
     face = result.coefficient_face
     decomposition = result.terminal_rank if face is None else result.terminal_reduced_rank

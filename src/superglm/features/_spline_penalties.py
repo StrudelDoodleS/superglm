@@ -30,31 +30,15 @@ def build_difference_penalty(n_basis: int, order: int) -> NDArray:
 def _general_difference_penalty(knots: NDArray, degree: int, order: int) -> tuple[NDArray, str]:
     """General difference penalty for B-spline coefficients on any knot vector.
 
-    Li and Cao, "General P-splines for non-uniform B-splines" (2022,
-    arXiv:2201.06808, section 2): each difference step divides by the span of the
-    derivative's B-spline, ``(t[j+d-k] - t[j]) / (d - k)`` with ``d = degree + 1``,
-    so ``D_m beta`` holds the B-spline coefficients of the m-th derivative and the
-    null space is the polynomials of degree below ``order`` however the knots are
-    spaced.
-
-    The penalty is scaled to the standard one's largest eigenvalue for the same
-    basis size, so a fixed ``spline_penalty`` weighs it as it weighs the standard
-    penalty; on evenly spaced knots the scale factor is one to rounding.  Knots
-    clustered on a short stretch spread its eigenvalues past what float64 holds, so
-    it is kept only while its entries are finite and the condition of its nonzero
-    spectrum (largest eigenvalue over the ``order + 1``-th smallest) is at most
-    ``_CONDITION_LIMIT = 1/sqrt(eps)``, the condition past which the shared rank
-    policy (``solvers/rank.py``, ``warning_condition``) starts to ask for a factor
-    certificate.  The limit is on the general penalty's own absolute condition, not
-    relative to the standard penalty's, because the fit's numerics see the absolute
-    one.  Past the limit the term takes the standard difference factor with the
-    polynomials of degree below ``order`` projected out, ``Delta_m (I - Q Q')`` with
-    ``Q`` an orthonormal basis of their B-spline coefficients: the null space is
-    still exactly the polynomials, the scale and spread are the standard penalty's,
-    and the penalty is a Gram of its factor.
-
-    Returns ``(penalty, kind)`` with ``kind`` ``"general"`` or ``"projected"``; the
-    spec records which in ``difference_penalty_kind``.
+    Li and Cao (2022, arXiv:2201.06808, sec. 2): each difference step divides by the span
+    ``(t[j+d-k] - t[j]) / (d - k)``, ``d = degree + 1``, so ``D_m beta`` holds the m-th
+    derivative's B-spline coefficients and the null space is the polynomials of degree below
+    ``order`` on any knots. Scaled to the standard penalty's largest eigenvalue, it is kept while
+    finite with nonzero-spectrum condition (largest over ``order + 1``-th smallest eigenvalue)
+    at most ``_CONDITION_LIMIT = 1/sqrt(eps)``, where ``solvers/rank.py`` starts to ask for a
+    certificate. Past it the term takes ``Delta_m (I - Q Q')``, ``Q`` an orthonormal basis of
+    those polynomials' coefficients: same null space, the standard scale and spread, a Gram of
+    its factor. Returns ``(penalty, kind)``, ``kind`` ``"general"`` or ``"projected"``.
     """
     t = np.asarray(knots, dtype=np.float64)
     d = degree + 1
@@ -247,7 +231,7 @@ def structural_derivative_penalty(
 
     A sum of positive semidefinite blocks has the null space of every positive
     weighting of them, so this has the penalty's exact rank without the
-    ``width**-3`` spread a narrow interval gives the penalty's eigenvalues.
+    ``width**(1 - 2 * order)`` spread a narrow interval gives the penalty's eigenvalues.
     """
     K = len(knots) - degree - 1
     knots, bounds = _unit_knots(knots, degree, excluded, intervals)
@@ -275,7 +259,7 @@ def structural_penalty_ranks(spec: Any, info: Any) -> dict[str, int] | None:
 
     An integrated derivative penalty's null space is the polynomials of degree below
     its order wherever the knots are, so its rank is a property of the construction,
-    not of its spectrum (which spreads as ``width**-3``); smoothers declare it with
+    not of its spectrum (which spreads as ``width**(1 - 2 * order)``); smoothers declare it with
     the penalty (mgcv ``smooth.construct`` ``rank`` and ``null.space.dim``; Wood,
     Pya and Saefken, JASA 111, 2016, section 3.1.1).  Each penalty in ``info`` is
     ``T' S T`` for the raw penalty ``S`` and projection ``T``, so ``T' structural T``

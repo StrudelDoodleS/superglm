@@ -421,16 +421,13 @@ def _materialization_logdet_bound(
 def _certified_congruence(basis: NDArray, matrix: NDArray) -> tuple[NDArray, NDArray]:
     """``B' S B`` for the symmetric part ``S`` of ``W``, and an upward enclosure of its error.
 
-    A quadratic form sees only ``S``; ``fl((W + W') / 2)`` is ``W`` itself when
-    ``W`` is symmetric and otherwise costs one rounding, ``|S^ - S| <= u |S^|
-    / (1 - u)``, carried through ``|B|' . |B|``. Each product is formed by
-    ``_matmul_enclosed`` and sharpened entrywise by Dot2 (``_refine_product``;
-    Ogita, Rump and Oishi 2005), and the first product's enclosure is carried
-    through the second: ``|T^ B^ - S B| <= E_M + E_T |B|`` with ``T^ = fl(B' S)``.
-    Plain products would leave ``gamma_{2n} |B|' |S| |B|``, which on a skewed
-    spline penalty exceeds the eigenvalue a tail direction keeps. The exact
-    product is symmetric, so one computed triangle is mirrored under the
-    larger of the two mirrored enclosures.
+    A quadratic form sees only ``S``; forming it costs at most one rounding,
+    ``|S^ - S| <= u |S^| / (1 - u)``, carried through ``|B|' . |B|``. Each product comes from
+    ``_matmul_enclosed`` sharpened entrywise by Dot2 (``_refine_product``; Ogita, Rump and Oishi
+    2005), the first product's enclosure carried through the second:
+    ``|T^ B^ - S B| <= E_M + E_T |B|``, ``T^ = fl(B' S)``. Plain products would leave
+    ``gamma_{2n} |B|' |S| |B|``, more than a skewed spline penalty's tail eigenvalue. One
+    computed triangle is mirrored under the larger of the two mirrored enclosures.
     """
     basis = np.asarray(basis, dtype=np.float64)
     matrix = np.asarray(matrix, dtype=np.float64)
@@ -849,23 +846,14 @@ def _stored_factor_bound(
 ) -> float:
     """Bound ``||H_k J - F_k||_F`` summed over components, or 0 when unresolved.
 
-    ``H_k = sqrt(lambda_k) R_k`` is a weighted root. The correction formed
-    ``A_k``, within ``B_k`` of ``H_k J_old``, its QR factor ``U``, and by
-    substitution the stored factors ``F_k U = A_k`` and the inverse root
-    ``J U = J_old``. With the residuals ``P = J_old - J U`` and
-    ``Q_k = A_k - F_k U``, exactly
-
-        H_k J - F_k = ((H_k J_old - A_k) - H_k P + Q_k) U^{-1}.
-
-    Higham (2002), Theorem 8.5, applied row by row, gives ``|P| <= gamma_r
-    |J| |U|`` and ``|Q_k| <= gamma_r |F_k| |U|`` for rank ``r``, plus one
-    half subnormal per product and per quotient under gradual underflow.
-    ``H_k P`` is the representation error of the rounded ``J``: a reference
-    action of ``J`` meets it in full however accurate its own dot products
-    are, and it is large when ``|H_k| |J|`` far exceeds ``|H_k J|``. With
-    ``D = sign(diag U)``, ``||U^{-1}||_2 <= 1 / (1 - ||I - D U||_F)``
-    (Golub and Van Loan, 4th ed., Lemma 2.3.3). Without that bound the
-    function charges nothing, so the caller's comparison stays strict.
+    With ``H_k = sqrt(lambda_k) R_k``, the correction's ``A_k`` (within ``B_k`` of ``H_k J_old``),
+    its QR factor ``U``, ``F_k U = A_k``, ``J U = J_old``, ``P = J_old - J U`` and
+    ``Q_k = A_k - F_k U``, exactly ``H_k J - F_k = ((H_k J_old - A_k) - H_k P + Q_k) U^{-1}``.
+    Higham (2002, Thm 8.5) row by row gives ``|P| <= gamma_r |J| |U|`` and
+    ``|Q_k| <= gamma_r |F_k| |U|`` for rank ``r``, plus half a subnormal per product and quotient
+    under gradual underflow; ``H_k P``, the rounded ``J``'s representation error, is met in full
+    by any reference. With ``D = sign(diag U)``, ``||U^{-1}||_2 <= 1 / (1 - ||I - D U||_F)``
+    (Golub and Van Loan, 4th ed., Lemma 2.3.3); without that bound nothing is charged.
     """
     upper = evidence.upper
     rank = len(upper)
@@ -1254,23 +1242,13 @@ def _direct_sum_summary(
 ) -> _PenaltySummary | None:
     """The affine log-lambda identity for components whose ranges form a direct sum.
 
-    When the component roots ``R_k`` (``r_k`` independent rows each) stack to
-    exactly the support rank ``r``, ``R Q`` is square for the support basis
-    ``Q``, and with ``Lambda = diag(lambda_k I_{r_k})``
-
-        log|Q' S(lambda) Q| = log|det(Lambda)| + log|det(R Q)|**2
-                            = sum_k r_k log(lambda_k) + log|Q' S(1) Q|,
-
-    by multiplicativity of the determinant. The derivatives in
-    ``log(lambda)`` are ``r_k`` with a zero Hessian, as ``tr(S^- S_k) =
-    rank(S_k) / lambda_k`` for non-overlapping penalties (Wood and Fasiolo,
-    2017, section 2), and the root-error term is the unit-weight one, because
-    exact roots obeying the same rank pattern satisfy the same identity. A
-    ``select=True`` pair (Marra and Wood, 2011) is the standard case. At a
-    large weight ratio the general evaluation's root has condition the square
-    root of that ratio and can miss its accuracy contract; the unit-weight one
-    carries no ratio. ``None`` when the identity does not apply, or at unit
-    weights.
+    When the roots ``R_k`` (``r_k`` independent rows each) stack to the support rank, ``R Q`` is
+    square for the support basis ``Q`` and, by multiplicativity of the determinant,
+    ``log|Q' S(lambda) Q| = sum_k r_k log(lambda_k) + log|Q' S(1) Q|``: derivatives ``r_k``, a
+    zero Hessian (Wood and Fasiolo 2017, sec. 2) and the unit-weight root-error term. A
+    ``select=True`` pair (Marra and Wood 2011) is the standard case; at a large weight ratio the
+    general root's condition is the ratio's square root, which this avoids. ``None`` when the
+    identity does not apply, or at unit weights.
     """
     roots = support.component_roots
     if (

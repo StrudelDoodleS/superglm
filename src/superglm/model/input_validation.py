@@ -36,10 +36,8 @@ class FractionalFrequencyWeightWarning(UserWarning):
 _UNIT_WEIGHT_TOLERANCE = 1e-9
 
 #: What the caller is doing with theta, which decides how far an interpolated
-#: density reaches.  Deriving this from the family alone is not enough: an
-#: auto-theta fit replaces ``theta`` with a number once it finishes, so the
-#: fitted family is indistinguishable from a fixed-theta one at evaluation --
-#: and at evaluation nothing is refitted, so nothing but the likelihood moves.
+#: density reaches. The family alone cannot say: a finished auto-theta fit
+#: carries a numeric theta, and scoring it refits nothing.
 THETA_FIXED = "fixed"  #: given constant, or an already-fitted model being scored
 THETA_ESTIMATED = "estimated"  #: profiled and fed back into IRLS (an auto fit)
 
@@ -47,29 +45,18 @@ THETA_ESTIMATED = "estimated"  #: profiled and fed back into IRLS (an auto fit)
 def _interpolated_density_reach(family, *, theta_role: str) -> str:
     """How far an interpolated counting density reaches into the results.
 
-    The same question wherever a counting family evaluates ``gammaln`` at a
-    fractional argument, so it is answered in one place -- but the answer needs
-    to know what the caller is doing, not only which family it holds.
-
-    ``THETA_FIXED``
-        theta is a given constant, or the model is already fitted and is only
-        being scored.  The score equation is unchanged and nothing is refitted,
-        so only the reported likelihood moves.  Claiming that ``theta_hat`` and
-        its interval are affected here is false twice over: a fixed-theta model
-        has no ``theta_hat``, and an evaluation does not produce one.
-    ``THETA_ESTIMATED``
-        theta is profiled and then re-enters ``V(mu)``, the IRLS working
-        weights and the unit deviance, as in an auto-theta fit or
-        ``estimate_theta``.  The estimates move as well.
+    It applies wherever a counting family evaluates ``gammaln`` at a fractional
+    argument.  Under ``THETA_FIXED`` (a given theta, or a fitted model being
+    scored) only the reported likelihood moves; under ``THETA_ESTIMATED`` theta
+    is profiled and re-enters ``V(mu)`` and the IRLS weights, so the estimates
+    move too.
     """
     if not isinstance(family, NegativeBinomial):
         return " Coefficients, fitted means and deviance are unaffected."
     if theta_role == THETA_FIXED:
-        # Nothing is estimated here, so there is no theta_hat to be affected --
-        # but the interpolated NB factor Gamma(wy + w theta) / Gamma(w theta)
-        # is theta-dependent regardless, so any theta inference later drawn
-        # from this likelihood inherits the interpolation. Say that without
-        # asserting an estimate this call never produced.
+        # No theta_hat here, but the interpolated NB factor
+        # Gamma(wy + w theta) / Gamma(w theta) is theta-dependent, so any theta
+        # inference drawn from this likelihood inherits the interpolation.
         return (
             " Coefficients, fitted means and deviance are unaffected. The "
             "interpolated factor is theta-dependent, so any profile of theta "
@@ -99,20 +86,12 @@ def _warn_frequency_counting_response(
 ) -> None:
     """Warn when a replicated counting response is not a whole count.
 
-    Under ``"frequency"`` the likelihood is ``w log f(y; mu)``: the weight
-    multiplies an ordinary per-row density rather than entering it, so it
-    cannot rescue a response the family does not support.  Poisson and the
-    negative binomial live on the non-negative integers, and a fractional
-    ``y`` evaluates ``gammaln`` at a fractional argument -- finite, smooth, and
-    not a probability.  The reported log-likelihood, AIC and BIC are then a
-    quasi-likelihood, and randomized quantile residuals invert the CDF at a
-    count that cannot occur.
+    Under ``"frequency"`` the likelihood is ``w log f(y; mu)``, so the weight
+    cannot rescue a fractional response to Poisson or the negative binomial:
+    ``gammaln`` at a fractional argument is not a probability, and the reported
+    log-likelihood, AIC and BIC are a quasi-likelihood.
     """
-    # Carried rows only, as every sibling check in this module already does.
-    # A zero replication count is a row that appears no times and contributes
-    # exactly zero to the likelihood, so its response cannot put anything off
-    # the lattice -- warning about it would reject an otherwise valid fit
-    # under -W error over a row the fit ignores.
+    # Carried rows only: a zero replication count contributes nothing.
     carried = weights > 0.0
     values = y[carried]
     count = int(np.count_nonzero(_not_a_whole_number(values)))
@@ -139,26 +118,13 @@ def _warn_frequency_counting_response(
 def _warn_prior_weighted_binomial(weights: NDArray) -> None:
     """Warn when a prior-weighted binomial response cannot normalise.
 
-    The prior construction is ``w Y ~ Binomial(w, mu)``, whose support is
-    ``{0, 1/w, ..., 1}`` -- but ``validate_response`` pins ``y`` to ``{0, 1}``,
-    so the only reachable outcomes are "no successes" and "all ``w``
-    successes". Their masses are ``(1 - mu)**w`` and ``mu**w``, which sum to 1
-    **only at w == 1**: at ``w = 3, mu = 0.4`` they sum to 0.28, and at
-    fractional ``w`` they exceed 1 (``sqrt(mu) + sqrt(1 - mu)``). The binomial
-    coefficient is exactly 1 at both endpoints, which makes each term look
-    exact in isolation and is why this is easy to miss -- but an exact
-    coefficient is not a normalised distribution.
-
-    So unlike Poisson and the negative binomial, where only a non-integral
-    ``w * y`` leaves the lattice, EVERY non-unit prior weight on a binomial
-    response reports a sub- or super-probability.
+    The prior construction is ``w Y ~ Binomial(w, mu)``, but ``y`` is pinned
+    to ``{0, 1}``, so only the outcomes with masses ``(1 - mu)**w`` and
+    ``mu**w`` are reachable, and they sum to 1 only at ``w == 1``. Unlike
+    Poisson and the negative binomial, every non-unit prior weight on a
+    binomial response therefore reports a sub- or super-probability.
     """
-    # Carried rows only. A zero weight is admitted for every non-Tweedie
-    # family, and the binomial branch of `prior_weight_log_density` returns
-    # exactly 0.0 there -- so a fit whose every carried row is w == 1 has an
-    # ordinary Bernoulli likelihood, and warning that it is "not an exact
-    # density" would be false about that fit. Counting the zero rows would also
-    # inflate the figure when the warning does fire legitimately.
+    # Carried rows only: a zero-weight binomial row has log density exactly 0.0.
     off = (weights > 0.0) & (np.abs(weights - 1.0) > _UNIT_WEIGHT_TOLERANCE)
     count = int(np.count_nonzero(off))
     if count == 0:
@@ -182,19 +148,11 @@ def _warn_prior_weighted_binomial(weights: NDArray) -> None:
 def _check_frequency_counts(weights: NDArray, weight_semantics: str) -> None:
     """Warn when a declared replication count is not a whole number.
 
-    ``"frequency"`` says row ``i`` appears ``w_i`` times, so the likelihood is
-    ``w_i log f(y_i; mu_i, phi)`` and the residual d.f. are ``sum(w) - edf``.
-    Neither statement survives a fractional count: a row cannot appear 0.4
-    times, and ``sum(w)`` stops being a number of observations. The arithmetic
-    still evaluates, so the fit publishes likelihood criteria and REML results
-    that look exact and are not.
-
-    This warns rather than raises. The frequency contract reproduces the
-    pre-``weight_semantics`` behaviour bit for bit, and that behaviour accepted
-    fractional weights -- refusing them now would break code that worked before
-    the contract was declared, to protect a criterion rather than an estimate.
-    Under ``"prior"`` a fractional weight is entirely well defined, which is
-    the whole point of the default, so this fires only on the other reading.
+    ``"frequency"`` says row ``i`` appears ``w_i`` times, which a fractional
+    count cannot, so the likelihood criteria and the ``sum(w) - edf``
+    residual d.f. are no longer exact. It warns rather than raises because
+    the contract has always accepted fractional weights; under ``"prior"``
+    they are well defined and nothing fires.
     """
     if weight_semantics != FREQUENCY_WEIGHTS:
         return
@@ -305,20 +263,10 @@ def _finite_vector(
 def _reject_unhashable_values(name: object, values: NDArray) -> None:
     """Raise unless every element of an object column can serve as a level.
 
-    Everything downstream keys on these values -- level tables, encoders,
-    interaction keys -- so "does it hash" is the whole question, and asking it
-    with `hash` itself is the only answer that cannot drift from what those
-    callers will do. Column-wide dtype inference is not a substitute: pandas
-    labels by `isinstance`, so a `string` column may still hold a `str`
-    subclass that sets `__hash__ = None`, and a tuple of scalars may still
-    nest an unhashable member.
-
-    How the answer is collected is what makes it affordable. `deque(...,
-    maxlen=0)` drives the map in C and discards each result, so a column costs
-    one `hash` call per element and runs no Python bytecode at all, where the
-    scan this replaced ran a Python-level predicate per row. A power search
-    re-validates every configured column on every candidate fit, which is
-    enough repetition for that difference to outweigh the fits it guards.
+    Level tables, encoders and interaction keys all hash these values, so the
+    test is `hash` itself; dtype inference cannot see a `str` subclass with
+    `__hash__ = None` or a tuple nesting an unhashable member. `deque(...,
+    maxlen=0)` drives the map in C, one `hash` call per element.
     """
     try:
         deque(map(hash, values), maxlen=0)
@@ -410,11 +358,7 @@ def validate_fit_input(
     )
     offset_arr = None if offset is None else _finite_vector("offset", offset, n_rows)
     validate_response(y_arr, family)
-    # Both contract checks run only once every ordinary validation has passed.
-    # They describe a likelihood that is about to be computed, so on input that
-    # will never reach one they are noise -- and under ``-W error`` a warning
-    # raised here would surface *instead of* the ValueError the caller needs to
-    # see, reporting a quasi-likelihood for a negative Poisson response rather
-    # than the negative response.
+    # Contract warnings run after every ordinary validation, so under -W error
+    # they never mask the ValueError for invalid input.
     check_weight_contract(y_arr, weight_arr, family, weight_semantics, theta_role=theta_role)
     return ValidatedFitInput(frame, y_arr, weight_arr, offset_arr)

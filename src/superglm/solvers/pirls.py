@@ -138,10 +138,8 @@ def _extreme_weight_indices(
 ) -> tuple[NDArray[np.intp], NDArray[np.intp]]:
     """Indices of the k largest and k smallest working weights, each ordered by W.
 
-    ``np.argpartition`` requires ``-n <= kth < n``.  When ``W.size <= k`` the
-    bottom partition must use ``k - 1``: it selects the same k smallest entries
-    and stays in bounds for every k in [1, W.size].  The top partition is
-    already safe because ``-k >= -W.size``.
+    The bottom partition uses ``kth = k - 1``, which ``np.argpartition``
+    accepts for every ``k`` in ``[1, W.size]``.
     """
     k = min(k, W.size)
     top_idx = np.argpartition(W, -k)[-k:]
@@ -179,15 +177,10 @@ class _FrozenResultMapping(Mapping[object, object]):
 class REMLGeometrySummary:
     """Cheap centered-system moments retained for in-loop REML consumers.
 
-    Carries exactly what the exact-REML gradient and objective otherwise read
-    from ``rank_info``: the weighted column means, the working-weight sum, and
-    the data-gram column scales feeding the signed-gram stability policy.
-    Populating it is O(p) from quantities the solve already holds, which lets
-    the optimizer loop skip per-fit rank certification without changing what
-    either consumer sees.  ``mean_hi`` and ``mean_lo`` are the system's dense
-    centre pair (``CenteredSystem.mean_hi``/``mean_lo``, ``None`` without
-    one), which the weight derivative's profiled design reads instead of
-    forming the pair again from the same weights.
+    Exactly what the exact-REML gradient and objective would otherwise read
+    from ``rank_info``, in O(p), so the optimizer loop can skip per-fit rank
+    certification.  ``mean_hi`` and ``mean_lo`` are the system's dense centre
+    pair (``None`` without one).
     """
 
     mean_x: NDArray
@@ -197,28 +190,13 @@ class REMLGeometrySummary:
     mean_lo: NDArray | None = None
 
 
-# Every value ``termination_reason`` may hold except the marker stamped after
-# the fit, non-terminal sentinel included -- so the set is neither "what the
-# loops write" nor "what the field holds", and reading it as either misleads.
-# The vocabulary lives here because this module declares both fields that carry
-# it, and both loops assign into a local of this type, so a reason invented
-# inside a loop is a type error on the line that invents it rather than a novel
-# string reaching the consumers that switch on the field. ``continue`` is the
-# sentinel: it labels an iteration that ended without ending the loop, so it
-# reaches the per-iteration diagnostics and the trace but never a result, which
-# carries only a reason that actually ended the fit. ``score_stagnated`` ends a
-# solve whose certificate score stopped contracting short of its bar: a
-# ``convergence="mode_score"`` solve's, or a binomial/log fit's own score at
-# the stops it refused (``irls_direct``: the iterate is at its limiting
-# accuracy; the mode is published as not converged, never refused).
-# ``link_domain_infeasible`` ends a solve whose returned state has a row outside
-# the link's domain (``irls_state.link_domain_violation``): no fitted model at
-# all, whatever stopped the loop, so no caller reads it as a mode.
-# The gap runs the other way exactly once, and deliberately: the fitted-state
-# invalidation path stamps a synthetic marker of its own over the field through
-# a dynamic ``setattr`` this annotation cannot see, and that records a revision
-# rather than a reason a loop stopped, so it stays out of the vocabulary even
-# though the field does hold it at runtime.
+# Every reason a solver loop may record, so a reason invented inside a loop is
+# a type error.  ``continue`` labels an iteration that did not end the loop: it
+# reaches diagnostics and the trace, never a result.  ``score_stagnated`` ends a
+# solve whose certificate score stopped contracting short of its bar (published
+# as not converged, never refused).  ``link_domain_infeasible`` means the
+# returned state has a row outside the link's domain.  The fitted-state
+# invalidation marker, stamped later by ``setattr``, is deliberately not here.
 type TerminationReason = Literal[
     "constraint_infeasible",
     "constraint_kkt_incomplete",
@@ -307,11 +285,9 @@ class PIRLSResult:
     log_det_H: float | None = None  # noqa: N815
     reml_hessian_rank: int | None = None
     reml_geometry: REMLGeometrySummary | None = None
-    # Centered slope-system decomposition, retained only when the caller
-    # opts in. Factor-L retention seam for RFC-2/RFC-7 consumers (route
-    # solves through the factor instead of a materialized p x p
-    # pseudo-inverse); RFC-12b, its original motivation, is retired per
-    # audit 2026-07-28 §J.6. Dense exact path only.
+    # Centred slope-system decomposition, retained only when the caller opts
+    # in, so consumers solve through the factor, not a p x p pseudo-inverse.
+    # Dense exact path only.
     reml_slope_decomposition: RankDecomposition | None = None
     rank_info: RankInfo | None = None
     state_id: int | None = None
@@ -327,7 +303,7 @@ class PIRLSResult:
     # expected Fisher curvature while EDF uses the full-Newton latent Hessian.
     scop_geometry: object | None = None
     scop_inference: object | None = None
-    # The centred PIRLS state (one-engine design §3.8): ``eta = centred_intercept
+    # The centred PIRLS state: ``eta = centred_intercept
     # + (X - 1 state_center') beta + offset`` (``mode_score.linear_predictor``),
     # free of a column's offset; ``intercept = centred_intercept -
     # state_center' beta`` is its raw-coordinate reading.  ``None`` where the
@@ -337,14 +313,12 @@ class PIRLSResult:
     # A published Gaussian identity fit's ``alpha_lo``: the predictor is the
     # compensated pair ``centred_intercept + ((X - 1 state_center') beta +
     # centred_intercept_lo)`` (``mode_score.centred_intercept_remainder``).
-    # ``None`` for every other fit, which evaluates as before.
+    # ``None`` for every other fit.
     centred_intercept_lo: float | None = None
-    # A revision carried a centred column's change into the pair
-    # (``fit_state._carry_revised_columns``): the pair is then evaluated as one
-    # compensated sum of ``centred_intercept``, every column's exact centred
-    # product and ``centred_intercept_lo`` (``mode_score.linear_predictor``,
-    # ``model.base.EtaSum``), whatever the family.  ``False`` for every fit, which
-    # evaluates as above, bit for bit.
+    # True after a revision carried a centred column's change into the pair
+    # (``fit_state._carry_revised_columns``): eta is then one compensated sum of
+    # ``centred_intercept``, each column's centred product and
+    # ``centred_intercept_lo``.  ``False`` for every fit.
     centred_sum_compensated: bool = False
     # Positive-weight rows the returned state holds at the boundary of the
     # family's mean space (``irls_state.mean_space_boundary_rows``), or, when
@@ -356,24 +330,17 @@ class PIRLSResult:
     # The boundary verdict came from such truncated rows, not from rows the
     # clip holds (``irls_direct``; ``TruncatedDirection.boundary``).
     mean_space_boundary_unresolved: bool = False
-    # The returned state was certified on the binomial/log true score
-    # (``irls_direct``): its stop was that certificate under Newton steps, or
-    # a Fisher stop it confirmed while the clip held a row.  The state is the
-    # model's own penalized mode, where the clipped objective need not be
+    # The returned state was certified on the binomial/log true score: it is
+    # the model's own penalized mode, where the clipped objective need not be
     # stationary, so a criterion read at it uses the model's own likelihood
-    # and curvature (``reml.objective.reml_laml_objective``,
-    # ``reml.observed_geometry.build_observed_reml_geometry``).
+    # and curvature.
     mean_space_true_mode: bool = False
-    # Rows a direction the factorization truncated moves, each judged on those
-    # rows (``mode_score.truncated_direction_ratio``): at their own maximum
-    # (weakly identified), beyond float64's resolution, rising towards the
-    # boundary, or along a direction the basis cannot resolve
-    # (``unresolved_basis``, naming the rows it visibly moves, possibly none);
-    # the fit is not converged in all but the first.  The judgement of the
-    # returned state when it was judged (``irls_direct``), the only one that
-    # decides the verdict; otherwise, for a fit that is not converged, the
-    # latest judgement that found any, each record marked ``earlier`` as
-    # history; otherwise empty.
+    # Rows moved by a direction the factorization truncated, each judged
+    # (``mode_score.truncated_direction_ratio``): weakly identified, beyond
+    # float64's resolution, rising towards the boundary, or unresolved by the
+    # basis; all but the first mean not converged.  The returned state's
+    # judgement when it was judged, else (unconverged) the latest that found
+    # any, marked ``earlier``; else empty.
     truncated_directions: tuple = ()
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -457,11 +424,9 @@ def _freeze_result_arrays(value: object, memo: dict[int, object]) -> object:
         return existing
 
     if isinstance(value, RankInfo):
-        # Rank geometry is intentionally shared by the public and solver
-        # projections.  Freeze this metadata graph in place so deepcopy and
-        # pickle round-trips preserve that identity instead of retaining two
-        # potentially O(p²) decompositions.  This runs only at a publication
-        # boundary or on a private copied/unpickled graph.
+        # The public and solver projections share rank geometry; freezing in
+        # place keeps that identity through deepcopy and pickle instead of two
+        # O(p^2) decompositions.
         memo[id(value)] = value
         for item in fields(value):
             object.__setattr__(
@@ -517,14 +482,10 @@ def _freeze_result_arrays(value: object, memo: dict[int, object]) -> object:
 def _dense_rows_buffer(dm: DesignMatrix, groups: list[GroupSlice]) -> dict[int, NDArray]:
     """One ``(n, k)`` buffer per dense group, for its rows centred about the outer iteration's mean.
 
-    ``_dense_group_centring`` writes the rows ``fl(x - a)`` there in the pass
-    that forms the group's moments, and the block updates of that outer
-    iteration read them instead of forming them again.  One copy of the dense
-    columns:
-    - owner: one ``_fit_pirls_inner`` call;
-    - lifetime: that call; each outer iteration overwrites the rows;
-    - invalidation: the outer iteration's weights, which set ``a``; its
-      centring entries, and nothing else, read the rows.
+    ``_dense_group_centring`` writes the rows ``fl(x - a)`` there, and that
+    outer iteration's block updates read them.  Owner: one
+    ``_fit_pirls_inner`` call; lifetime: that call, each outer iteration
+    overwriting the rows; invalidation: the outer iteration's weights.
     """
     return {
         index: np.empty((dm.n, matrix.shape[1]), dtype=np.float64)
@@ -543,22 +504,12 @@ def _dense_group_centring(
     """Per group, ``(design, hi, lo, gram, score, rows)`` for a ``DenseGroupMatrix`` about its ``W``-weighted mean.
 
     ``None`` for every other group, and ``None`` overall without a dense
-    group or a positive weight total.  Rows ``(x - hi) - lo`` are the group's
-    columns centred about their working-weighted mean, so ``X~' W 1 = 0`` and
-    the unpenalized intercept separates from the group (Friedman, Hastie &
-    Tibshirani 2010, J. Stat. Softw. 33(1), §2 and §2.6: "we always center
-    each predictor variable", and the intercept, not regularized, is then the
-    mean).
-
-    Every dense group takes the corrected two-pass algorithm, as the gram
-    route's split does (``centered_system._attach_dense_split``): pass one
-    rounds the mean, ``hi`` (``centered_system.dense_anchor``); pass two forms
-    the rows ``x - hi`` once and from them ``e``, the Gram and ``score = sum W
-    z (x - hi)`` for a ``response`` ``z`` (``None`` without one;
-    ``centered_system.anchored_dense_moments``), writing the rows into the
-    group's ``buffer`` when one is given (``rows``, else ``None``).  ``lo = e /
-    sum W`` and ``gram`` is Björck's corrected Gram
-    (``centered_system.two_pass_centred_gram``).
+    group or a positive weight total.  Centring makes ``X~' W 1 = 0``, so the
+    unpenalized intercept separates (Friedman, Hastie & Tibshirani 2010, J.
+    Stat. Softw. 33(1), section 2.6).  The moments use the corrected two-pass
+    algorithm (``centered_system.two_pass_centred_gram``): ``hi`` the rounded
+    mean, ``lo`` the second pass's correction, ``score = sum W z (x - hi)`` (``None`` without a
+    ``response``), ``rows`` the buffer written, else ``None``.
     """
     matrices = dm.group_matrices
     if not any(type(matrix) is DenseGroupMatrix for matrix in matrices):
@@ -643,12 +594,9 @@ def _compute_group_hessians(
 ) -> tuple[list[float], list[NDArray]]:
     """Return per-group smooth Hessians and their Lipschitz constants.
 
-    The smooth block Hessian is ``X_g' diag(W) X_g + S_gg``.  No
-    conditioning ridge is added: doing so changes the fitted objective.  The
-    matrices are also reused by the exact Ridge block solver.
-
-    For typical group sizes (p_g <= 20) this is trivially cheap.
-    Total cost is O(n * p) across all groups.
+    The smooth block Hessian is ``X_g' diag(W) X_g + S_gg``, with no
+    conditioning ridge, which would change the fitted objective.  The exact
+    Ridge block solver reuses the matrices.
     """
     hessians = _build_group_hessians(gms, W, groups, S, centring=centring)
     L_groups = [_block_lipschitz(hessian) for hessian in hessians]
@@ -949,16 +897,9 @@ def _composite_kkt_violation(
     weights_changed = (
         L_groups is None or curvature_weights is None or not np.array_equal(W, curvature_weights)
     )
-    # A dense column's score and curvature are read about its working mean, by
-    # type, as every other certificate reads them (issue #430).  Raw, the
-    # intercept's residual times the column's offset hid an unresolved slope,
-    # and the raw curvature, ``offset^2`` times the weight, shrank the proximal
-    # step to nothing: at a 1e12 offset a Gaussian fit reported convergence
-    # after one iteration with its slope at 1e-24 for 0.2.  The intercept is
-    # unpenalized, so at its stationary point the centred and raw scores agree.
-    # Each dense group's score and curvature come from its corrected two-pass
-    # (``_dense_group_centring``), and no raw product of the group is formed;
-    # its curvature is always that Gram's, whatever ``L_groups`` holds.
+    # A dense column's score and curvature are read about its working mean
+    # (issue #430): raw, a large column offset hides an unresolved slope.  The
+    # intercept is unpenalized, so at stationarity centred and raw scores agree.
     weighted_residual = W * working_residual
     dense_centring = _dense_group_centring(dm, groups, W, working_residual)
     if dense_centring is None:
@@ -1068,9 +1009,10 @@ def _add_selection_local_curvature(
     Ridge contributes its ordinary quadratic Hessian.  For a nonzero group
     lasso block, the Hessian of ``lambda * weight * ||beta_g||`` is the
     tangential projector ``lambda * weight / ||beta_g|| * (I - uu')``.
-    This is the local sensitivity geometry used by the general-design group
-    lasso degrees-of-freedom formula.  Custom penalty subclasses retain the
-    historical protocol fallback rather than inheriting built-in semantics.
+    ``GroupElasticNet`` adds both: ``(1 - alpha) * lambda`` on the diagonal
+    and the projector scaled by ``alpha``.  This is the geometry of the
+    general-design group-lasso degrees of freedom.  The check is on exact
+    type, so other penalties and subclasses of these three add nothing.
     """
     width = sum(group.size for group in active_groups)
     if curvature.shape != (width, width):
@@ -1174,8 +1116,7 @@ def _fit_pirls_inner(
     n_groups = len(groups)
     can_zero_groups = penalty_can_zero_groups(penalty)
     any_dense_group = any(type(gm) is DenseGroupMatrix for gm in gms)
-    # One-engine design §3.8, as irls_direct keeps it: beside a dense column the
-    # state is (alpha, beta) about the fixed prior-weighted centre c0, eta =
+    # As in irls_direct, beside a dense column the state is (alpha, beta) about the fixed prior-weighted centre c0, eta =
     # alpha + (X - 1 c0') beta + offset, and the raw intercept alpha - c0' beta
     # is only its reading.  ``intercept`` below is then that centred alpha.
     state_center = prior_weighted_centre(dm, weights) if any_dense_group else None
@@ -1240,9 +1181,8 @@ def _fit_pirls_inner(
         The composite objective is ``0.5 * D + 0.5 * b' S b + penalty.eval(b)``
         and the merit tracked here is twice it, on the deviance scale, so the
         nonsmooth term enters at ``2 *``.  The recorded ``penalized_deviance``
-        and the line search's merit delta must agree on that factor or the
-        search would optimize a different objective than the one it records --
-        the exact incoherence this shared closure exists to prevent.
+        and the line search's merit delta share this closure so they agree on
+        that factor.
         """
         return 2.0 * float(penalty.eval(values, groups))
 
@@ -1411,11 +1351,8 @@ def _fit_pirls_inner(
         z = working_rows.response
 
         # A dense group is updated in coordinates centred about its exact pair
-        # (issue #430): its score and curvature are those of the centred rows,
-        # and a step d moves eta by X~ d, the intercept absorbing -(hi + lo)' d.
-        # Raw, the intercept and a column at offset m with spread s shared a
-        # curvature (m^2 + s^2) sum W, and block coordinate descent shrank the
-        # slope's error by only m^2 / (m^2 + s^2) per sweep.
+        # (issue #430), the intercept absorbing -(hi + lo)' d.  Raw, a column at
+        # offset m with spread s would converge at only m^2 / (m^2 + s^2) per sweep.
         dense_centring = (
             _dense_group_centring(dm, groups, W, buffer=dense_rows) if any_dense_group else None
         )
@@ -1704,12 +1641,9 @@ def _fit_pirls_inner(
             iteration_converged = convergence_value < tol
 
         # A state that would converge with rows at the mean-space boundary is
-        # not a mode: their capped mean makes the deviance flat there, and the
-        # maximum it approaches is constrained, not stationary.  The direct
-        # solver never calls such a state converged (``fit_irls_direct``); this
-        # route did, with fitted binomial/log probabilities above one (#431).
-        # The loop stops where it would have converged, with that verdict, so
-        # the step decision and state commit below carry it.
+        # not a mode: the maximum it approaches is constrained, not stationary
+        # (#431).  The loop stops there with that verdict, which the step
+        # decision and state commit below carry.
         boundary_rows = 0
         if iteration_converged:
             boundary_rows = mean_space_boundary_rows(family, link, retained.eta_unclipped, weights)
@@ -1890,13 +1824,9 @@ def _fit_pirls_inner(
         f"{t_elapsed:.2f}s total"
     )
 
-    # Runtime separation backstop (issue #341), mirroring irls_direct: a
-    # retained predictor pinned at the link's overflow guard, or an exhausted
-    # budget with a frozen objective, both under an exploded working-weight
-    # range, mark a coefficient drifting to +/-infinity.  Reachable here only
-    # for groups the selection penalty does not bound (penalty_features
-    # restrictions); cell separation in those groups is already named at
-    # build time, so this catches what the design scan cannot see.
+    # Runtime separation backstop (issue #341): a predictor pinned at the link's
+    # overflow guard, or an exhausted budget with a frozen objective, under an
+    # exploded weight range, marks a coefficient drifting to infinity.
     if separation != "ignore" and np.isfinite(dev):
         from superglm.diagnostics.separation import (
             EXTREME_WEIGHT_RATIO,
@@ -2011,11 +1941,10 @@ def _fit_pirls_inner(
         penalty=selected_penalty,
     )
     # The certificates centre their rows exactly as the Gram did: a dense
-    # column about its exact pair (issue #430).  About the one-float mean a
-    # column at 1e16 certified a rank one above the Gram's.
+    # column about its exact pair (issue #430), so both decide the same rank.
     centre, centre_lo = centered.centre_pair()
     # Unpenalized, the data rank is also the Hessian's, whose decomposition
-    # the standard errors read: it keeps the full factor route, as before.
+    # the standard errors read: it keeps the full factor route.
     data_rank = decide_data_rank(
         centered.data_gram,
         lambda: decompose_factor(
@@ -2074,20 +2003,10 @@ def _fit_pirls_inner(
         ):
             group_edf[original_group.name] = float(np.sum(selected_edf[selected_group.sl]))
     else:
-        # Preserve Breheny-Huang (2009) group-lasso EDF allocation.
-        #
-        # The ``p_g`` of ``p_g - (p_g - 1) * shrink`` is the same group
-        # dimension the ``sqrt(p_g)`` weight is built from, and both read
-        # ``GroupSlice.penalty_size`` so they cannot disagree.  Whether that
-        # dimension is the group's identifiable rank (the emitted width;
-        # ``group_pricing="rank"``, the default) or the width the term spans
-        # (``"spanned"``, the historical behaviour) is decided once at build
-        # time by ``dm_builder._priced_group_dimension``; under ``"rank"``
-        # the ``penalty_dim`` stamp is absent and ``penalty_size`` is simply
-        # the emitted width.  The per-column allocation on the last line
-        # divides by the EMITTED width on purpose: ``effective_df`` is a sum
-        # over emitted columns, so only that denominator makes the columns
-        # add back up to ``df_group``.
+        # Breheny & Huang (2009) group-lasso EDF.  ``p_g`` reads
+        # ``GroupSlice.penalty_size``, as the ``sqrt(p_g)`` weight does.  The
+        # per-column share divides by the emitted width, so the columns sum
+        # back to ``df_group``.
         lam = penalty.lambda1 if penalty.lambda1 is not None else 0.0
         for is_selected, group in zip(group_selected, groups, strict=True):
             if not is_selected:
@@ -2135,13 +2054,9 @@ def _fit_pirls_inner(
     )
     phi = pearson_sum / df_resid
 
-    # The retained state's centred intercept and the centre it is read about
-    # (one-engine design §3.8), published as irls_direct publishes them: the
-    # deviance above is that predictor's, and ``mode_score.linear_predictor``
-    # and prediction read it.  The raw ``intercept = alpha - c' beta`` cancels
-    # at a column's offset (issue #430: at 1e16 a fit of deviance 0.172
-    # predicted a squared error of 2.58).  Proximal fits carry no compensated
-    # remainder, so ``centred_intercept_lo`` stays ``None``.
+    # The retained centred intercept and its centre, which prediction reads;
+    # the raw ``intercept = alpha - c' beta`` cancels at a column's offset
+    # (issue #430).  Proximal fits carry no ``centred_intercept_lo``.
     return PIRLSResult(
         beta=beta,
         intercept=intercept,

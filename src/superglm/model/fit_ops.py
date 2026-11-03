@@ -97,19 +97,16 @@ class PathResult:
     ``coef_path`` and ``intercept_path`` are each point's public coefficients
     and raw intercept, and ``deviance_path`` its fitted deviance.  Rebuilding
     a point's predictor as ``X @ coef_path[i] + intercept_path[i]`` cancels
-    each numeric column's offset ``c`` against the raw intercept ``alpha -
-    c' beta``.  The product and the intercept each round at about ``2^-53
-    |c' beta|``, so a row errs by about ``2^-52 |c' beta|``, or ``2^-52 c /
-    s`` of the term's effect, ``s`` the column's spread.  A year (``c / s``
-    near 300) or an epoch time in seconds over months stays within about
-    ``1e-13`` of the effect; only an offset many orders of magnitude above
-    the spread loses visible digits, such as a raw ID or a nanosecond
-    timestamp over a few seconds (tenths of the effect at 1e16 over a spread
-    of 6).  The fitted model predicts at the last point with the centred
-    predictor.  To predict at point ``i``, refit at
-    ``selection_penalty=lambda_seq[i]``: the refit reproduces the point to the
-    solver's ``tol``, not exactly, because it starts cold instead of from the
-    previous point.
+    each numeric column's offset ``c`` against the raw intercept, so a row
+    errs by about ``2u |c' beta|`` (``u = 2**-53``), or ``2u c / s`` of the
+    term's effect for a column of spread ``s``.  The ratio ``c / s`` decides
+    it, not the units: a year (``c / s`` near 300) or an epoch time in seconds
+    over months stays near ``1e-13`` of the effect, while an offset many orders
+    of magnitude above the spread (a raw ID, or a timestamp over a spread of
+    seconds or less) loses visible digits.  The fitted model predicts at the
+    last point with the centred predictor; to predict at point ``i``, refit at
+    ``selection_penalty=lambda_seq[i]``, which reproduces the point to the
+    solver's ``tol``.
     """
 
     lambda_seq: NDArray  # shape (n_lambda,)
@@ -216,21 +213,12 @@ def _reject_random_effect_selection_fit(model, method: str) -> None:
 
 
 def _claim_free_categorical_levels(values: NDArray, spec, positive: NDArray, valid: NDArray) -> int:
-    """Count FITTED levels carrying exposure but no positively weighted response.
+    """Count fitted levels carrying exposure but no positively weighted response.
 
-    Two corrections over a set difference on the raw column, both mirroring
-    what the build-time scan already does (:mod:`superglm.diagnostics.separation`):
-
-    * levels are read AFTER ``grouping=`` is applied, so a caller who takes
-      this warning's own advice and collapses the offending level is not told
-      again about a level that no longer carries a coefficient;
-    * a level counts as occupied only through positive-weight rows, since a
-      zero-weight row contributes no likelihood and its level is pinned to
-      base at build time rather than estimated.
-
-    The grouping is applied from ``original_to_group`` directly rather than
-    through ``_categorical_build_labels``, because this runs BEFORE the build
-    and the spec has not learned its level universe yet.
+    As the build-time scan (:mod:`superglm.diagnostics.separation`) does,
+    levels are read after ``grouping=`` (from ``original_to_group``, since the
+    spec has no level universe before the build), and a level is occupied
+    only through positive-weight rows.
     """
     labels = np.asarray(values).ravel()
     grouping = getattr(spec, "_grouping", None)
@@ -249,15 +237,11 @@ def _claim_free_categorical_levels(values: NDArray, spec, positive: NDArray, val
 
 
 def _check_random_effect_nesting(model, X) -> None:
-    """Validate declared nesting and name near-nested pairs on the training rows (§3.13).
+    """Validate declared nesting and name near-nested pairs on the training rows.
 
-    ``RandomEffect(nested_in=)`` is checked here, where the training rows are
-    first bound, once per REML entry point (``fit_reml``, ``estimate_theta``,
-    ``estimate_p``; the ``estimate_p`` search's candidate fits, which run
-    ``fit_reml`` on a clone of the same rows, are marked as checked): a row
-    that breaks it is an error.  An undeclared pair that
-    nests on all but a few rows is named once, in a warning that never changes
-    the fit (``features.random_effect.near_nesting_notes``).
+    Runs once per REML entry point. A row that breaks ``RandomEffect(nested_in=)``
+    is an error; an undeclared pair that nests on all but a few rows is named
+    once, in a warning that never changes the fit.
     """
     import warnings
 
@@ -273,17 +257,10 @@ def _random_effect_separation_hazard(model, X, y, sample_weight) -> str | None:
 
     A ``Categorical`` level with exposure but no positive response has no
     finite MLE under a log link with a zero-mass family (Tweedie ``1<p<2``,
-    Poisson): its unpenalised coefficient drifts toward ``-inf`` while the
-    marginal likelihood goes nearly flat in any neighbouring ``RandomEffect``
-    variance. On such designs the REML variance component is poorly
-    determined, and for the estimated-scale Tweedie criterion additionally
-    biased upward (the current criterion profiles the dispersion with a
-    Gaussian-style deviance count in which every zero row participates; the
-    exact Tweedie likelihood carries no per-observation ``log(phi)`` term for
-    zero rows, so on zero-heavy data the criterion under-weights shrinkage
-    relative to exact-likelihood REML). Returns the warning message, or
-    ``None`` when the configuration is not affected. ``OrderedCategorical``
-    levels are spline-penalised and are deliberately out of scope.
+    Poisson), and the marginal likelihood goes nearly flat in a neighbouring
+    ``RandomEffect`` variance, which is then poorly determined (and, for
+    estimated-scale Tweedie, biased upward). Returns the warning message, or
+    ``None``. ``OrderedCategorical`` levels are spline-penalised, so out of scope.
     """
     from superglm.distributions import Poisson
     from superglm.features.categorical import Categorical
@@ -363,10 +340,9 @@ def _compute_null_mu(
     has_offset = offset is not None and not np.all(offset == 0)
     if has_offset and isinstance(link, SqrtLink):
         assert offset is not None
-        # The inverse sqrt link has two eta branches. A single Fisher-scoring
-        # start can converge to the wrong offset-dependent local solution, so
-        # use the same line-searched direct IRLS solver as a public
-        # intercept-only fit.
+        # The inverse sqrt link has two eta branches, so one Fisher-scoring start
+        # can reach the wrong offset-dependent solution; use the line-searched
+        # direct IRLS solver of a public intercept-only fit.
         from superglm.group_matrix import DesignMatrix
 
         null_design = DesignMatrix([], n=len(y), p=0)
@@ -458,10 +434,9 @@ def _compute_fit_stats(
     if isinstance(distribution, Tweedie):
         from superglm._tweedie import tweedie_logpdf_pair
 
-        # The prior contract puts the weight inside the compound-Poisson
-        # density; the frequency contract evaluates the unit-weight density and
-        # counts each row w times.  The Pearson numerator below scales with the
-        # weight under either reading, so only this pair moves.
+        # Prior weights enter the compound-Poisson density; frequency weights
+        # count the unit-weight density w times. The Pearson numerator scales
+        # with w under either, so only this pair moves.
         replication = weight_semantics == "frequency"
         fitted_logpdf, null_logpdf = tweedie_logpdf_pair(
             y,
@@ -520,10 +495,9 @@ def _required_fit_columns(model) -> tuple[str, ...]:
     names = [*configured_feature_names, *(config.splines or ())]
     for _, interaction in config.interaction_templates:
         names.extend(interaction.parent_names)
-    # Preserve the interaction API's more specific configuration error for an
-    # explicit feature mapping, which defines a closed feature universe.  The
-    # spline shorthand only names columns to smooth; every other X column is
-    # still eligible for auto-detection when the fit workspace is built.
+    # An explicit feature mapping is a closed universe and keeps the interaction
+    # API's more specific error; under the spline shorthand every other column
+    # stays eligible for auto-detection.
     configured_features = set(configured_feature_names) if config.splines is None else set()
     for left, right in config.interactions:
         if configured_features:
@@ -614,10 +588,8 @@ def _store_fit_arrays(model, sample_weight, offset, y=None):
     model._fit_weights = np.array(sample_weight)
     model._fit_offset = np.array(offset) if offset is not None else None
     model._fit_used_offset = offset is not None
-    # Survives fit-state release (unlike the arrays), so consumers that
-    # default to the fit's weights can tell "unweighted fit" apart from
-    # "weighted fit whose arrays were released" and refuse to silently
-    # substitute unit weights in the latter case.
+    # Survives fit-state release, so consumers defaulting to the fit's weights
+    # can tell an unweighted fit from one whose weights were released.
     model._fit_used_weights = bool(np.any(model._fit_weights != 1.0))
     _record_unidentified_factor_smooth_levels(model, model._fit_weights, y)
     return model._fit_weights, model._fit_offset
@@ -630,17 +602,13 @@ _FIT_WARNING_STACKLEVEL = 5
 
 
 def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, stacklevel=None):
-    """Record, on each ``sz`` FactorSmooth spec, what this design identifies of its levels (#432).
+    """Record, on each ``sz`` FactorSmooth spec, what this design identifies of its levels.
 
-    Read from the built design, the prior weights and the response, for
-    every backend, so prediction treats the levels alike whichever solver
-    fitted them.  Levels whose unpenalized line separates the response are
-    named in a ``SeparationWarning`` (never refused: the population curve
-    leaves them out, ``FactorSmooth._population_map``), unless the model's
-    ``separation`` is ``"ignore"``; a population fixed by the canonical
-    convention is named in a ``UserWarning``.
-    Each names the term's remedy, ``select=True`` (#444): a term that
-    selects its lines has none of these, and nothing here warns for it.
+    Read from the built design, prior weights and response for every backend,
+    so prediction treats the levels alike whichever solver fitted them. Levels
+    whose line separates the response get a ``SeparationWarning`` unless
+    ``separation="ignore"`` (never refused; the population curve leaves them
+    out), and a canonically fixed population a ``UserWarning``.
     """
     import warnings
 
@@ -679,15 +647,12 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
 
 
 def _ensure_factor_smooth_levels_recorded(model) -> None:
-    """Record the ``sz`` levels of a model saved before the record existed (#440 review).
+    """Record the ``sz`` levels of a model pickled before the record existed.
 
-    A pickle from v0.35.0 or earlier carries no record and would predict its
-    thin levels at the fit's arbitrary point.  The fit's design and prior
-    weights, which such a model keeps, rebuild it at the first prediction,
-    under the conventions of the release that rebuilt it (the orthogonal
-    projector, no group-term fold); its response is not kept, so separated
-    lines stay in its population.
-    Without them the model cannot be repaired and says so.
+    The kept design and prior weights rebuild the record at the first
+    prediction, under the current conventions; the response is not kept, so
+    separated lines stay in the population. A model without them cannot be
+    repaired and says so.
     """
     import warnings
 
@@ -781,10 +746,8 @@ def _fetch_or_build_design(model, X, y, sample_weight, offset, cache: dict):
     The design matrix depends on the frame, the feature specs, and the
     weights -- never on the family's power -- so candidate fits at different
     powers share one build. Distribution and link DO depend on the family and
-    are re-resolved on every hit. The cache self-verifies with a fixed-probe
-    matvec: a served design that no longer reproduces its stored probe answer
-    is dropped and rebuilt rather than trusted. Arrays are handed out as
-    copies, matching the fresh arrays an uncached build returns per fit.
+    are re-resolved on every hit. A served design that fails its fixed-probe
+    matvec check is rebuilt. Arrays are handed out as copies.
     """
     from superglm._blas_threads import allow_wide_design
     from superglm.distributions import resolve_distribution
@@ -801,11 +764,9 @@ def _fetch_or_build_design(model, X, y, sample_weight, offset, cache: dict):
             model._link = resolve_link(configured_link(model), distribution)
             model._groups = cache["groups"]
             model._dm = dm
-            # The build also teaches the spec objects (seen levels, spline
-            # reparametrisations, tensor marginal geometry) and resolves
-            # pending interactions; a fresh workspace materializes untaught
-            # constructor templates, so restore the taught specs -- main
-            # effects AND interactions -- alongside the design they describe.
+            # The build also taught the specs (levels, reparametrisations,
+            # tensor geometry) and resolved pending interactions; restore them
+            # with the design they describe.
             model._specs = cache["specs"]
             model._interaction_specs = cache["interaction_specs"]
             model._interaction_order = cache["interaction_order"]
@@ -821,12 +782,8 @@ def _fetch_or_build_design(model, X, y, sample_weight, offset, cache: dict):
     y_out, w_out, off_out = model_build_design_matrix(model, X, y, sample_weight, offset)
     has_constrained_group, _ = constraint_engine_flags(model._groups)
     if has_constrained_group:
-        # The constrained REML path mutates GroupSlice objects in place
-        # (strip_qp_constraints / restore_qp_constraints recompose against
-        # the current group matrix), and the fixed-probe check certifies only
-        # the design's matvec -- it cannot see a mutated group. Until the
-        # bitwise-equivalence evidence covers constrained fixtures, the cache
-        # stands down and every candidate builds fresh.
+        # The constrained REML path mutates GroupSlice objects in place, which
+        # the fixed-probe check cannot see, so every candidate builds fresh.
         return y_out, w_out, off_out
     probe = np.random.default_rng(0x5D).standard_normal(model._dm.p)
     cache.update(
@@ -1134,22 +1091,12 @@ def _refine_nb_theta_to_reml_fixed_point(
     """Re-estimate auto NB theta at the REML fit and alternate to a fixed point.
 
     ``_maybe_estimate_nb_theta`` calibrates theta before REML runs, at the
-    model's configured smoothing. Lack-of-fit at that smoothing is absorbed
-    into overdispersion, biasing theta downward by however far the truth is
-    from what the configured penalty can follow, while the REML lambda itself
-    is almost theta-insensitive. This helper removes the freeze bias by
-    alternating a safeguarded theta profile solve at the REML fitted mean
-    with a warm-started ``fit_reml`` at the updated theta until theta is
-    stationary — the fixed point of the alternating scheme of Venables &
-    Ripley (2002, ch. 7.4) with the penalized fit taking the place of the
-    GLM fit. Joint Newton over (theta, log-lambda) in the LAML criterion
-    (Wood, Pya & Saefken 2016) is the eventual destination; the alternation
-    reaches the same fixed point for these coordinates without new
-    derivative machinery.
-
-    The published family and ``_nb_profile_result`` always describe the fit
-    that is installed: on exit, ``family.theta`` is the theta of the final
-    refit and the profile result is republished against its fitted mean.
+    model's configured smoothing, where lack of fit biases theta downward.
+    This alternates a theta profile solve at the REML fitted mean with a
+    warm-started ``fit_reml`` until theta is stationary: the alternating
+    scheme of Venables & Ripley (2002, ch. 7.4) with the penalized fit in
+    place of the GLM fit. On exit ``family.theta`` and ``_nb_profile_result``
+    describe the installed final refit.
     """
 
     import pandas as pd
@@ -1173,11 +1120,8 @@ def _refine_nb_theta_to_reml_fixed_point(
         return debug_recorder
 
     theta = float(family.theta)
-    # The joint alternation re-estimates theta against the same likelihood the
-    # calibration estimate used. Resolving the contract once here keeps the
-    # score, the recorded NLLs and the published result on one reading; letting
-    # any of them fall back to the parameter default would silently overwrite
-    # a prior-contract theta with a frequency-contract one.
+    # One weight contract for the score, the recorded NLLs and the published
+    # result, the one the calibration estimate used.
     weight_semantics = model_weight_semantics(model)
     rows = nb_seed.evaluations.to_dict("records")
     refits = 0
@@ -1237,12 +1181,8 @@ def _refine_nb_theta_to_reml_fixed_point(
             "profile result reports converged=False."
         )
         warn_caller(warned[-1], NBThetaBoundWarning)
-    # The published flag must describe the PUBLISHED state. Theta being
-    # stationary at an unfinished REML fit is not a joint fixed point: if the
-    # final (warm-started) attempt exhausted max_reml_iter, lambda never
-    # reached the optimum theta was measured against, and claiming
-    # converged=True there is the same defect class this release exists to
-    # remove - a clamped/unfinished estimate reporting success.
+    # Converged only at a joint fixed point: theta stationary at a REML fit
+    # that itself converged.
     final_reml = getattr(model, "_reml_result", None)
     reml_converged = bool(getattr(final_reml, "converged", False))
     refreshed = replace(
@@ -1272,10 +1212,9 @@ def _install_deferred_rank_info(model) -> None:
     """Compute the published fit's deferred rank metadata and attach it to its results.
 
     ``finalize_reml_fit`` leaves the computation with the model when
-    ``_defer_rank_info`` is set; it is a pure function of that fit's final
-    state, so the metadata is what the fit would have attached inline. The
-    solver, public and REML results share the one ``RankInfo``, as they do
-    when it is computed inline. Neither attribute reaches the public model.
+    ``_defer_rank_info`` is set; it is a pure function of the final state, so
+    the solver, public and REML results share the ``RankInfo`` the fit would
+    have attached inline.
     """
     model.__dict__.pop("_defer_rank_info", None)
     deferred = model.__dict__.pop("_deferred_rank_info", None)
@@ -1755,10 +1694,8 @@ def fit_reml(
     validated_inputs = (X, y, sample_weight, offset)
     family_intent = configured_family(model)
     nb_auto = isinstance(family_intent, NegativeBinomial) and family_intent.theta == "auto"
-    # Auto-theta fits alternate theta with warm-started REML refits after the
-    # first attempt, and the refinement reads the fitted rows between refits.
-    # Force row retention on the private workspace for that window; the
-    # durable retention intent is restored (and honored) before publication.
+    # Auto-theta refinement reads the fitted rows between refits, so the
+    # workspace retains them; the durable retention intent applies at publication.
     workspace = FitWorkspace.start(
         model,
         mode="fit_reml",
@@ -1834,13 +1771,10 @@ def fit_reml(
 def warn_published_reml_nonconvergence(model, *, stacklevel: int) -> None:
     """Warn once that a published fit_reml fit stopped unconverged.
 
-    Returned, not refused, and never silent: called after the state it
-    describes is public, by ``fit_reml`` and by the REML publication refit of
-    ``estimate_p`` and ``estimate_theta``. Internal candidate fits (the Tweedie
-    power search) set ``_suppress_convergence_warning``: they disclose
-    convergence in their own result instead of warning per candidate.
-    ``stacklevel`` counts from the caller of this function, as
-    ``warnings.warn`` does.
+    Called after the state it describes is public, by ``fit_reml`` and the
+    REML publication refits of ``estimate_p`` and ``estimate_theta``.
+    Candidate fits set ``_suppress_convergence_warning`` and disclose
+    convergence in their own result. ``stacklevel`` counts from the caller.
     """
     if getattr(model, "_suppress_convergence_warning", False):
         return
@@ -1861,10 +1795,8 @@ def warn_published_reml_nonconvergence(model, *, stacklevel: int) -> None:
 def _record_reml_terminal_best_effort(model, debug_recorder) -> None:
     """Emit a post-install terminal without letting diagnostic I/O escape."""
     try:
-        # The dictionary swap above is the sole public commit point.  Trace
-        # persistence is external diagnostic I/O and cannot be part of that
-        # transaction, so a sink failure must not make a successful fit look
-        # like a failed operation after its state has already been installed.
+        # The fit is already installed; a trace-sink failure must not make it
+        # look failed.
         record_reml_terminal(model, debug_recorder)
     except Exception:
         try:
@@ -2001,12 +1933,9 @@ def _fit_reml_in_workspace(
     # Initialize per-component lambdas (penalty-indexed, not term-indexed)
     # Partition into fixed (policy.mode == "fixed") and estimated components.
     lam_init = lambda2_init if lambda2_init is not None else configured_smoothing
-    # A mapping lambda2_init (a previous fit's ``reml_diagnostics()["lambdas"]``)
-    # is a warm start the engines bootstrap from; a scalar keeps its cold meaning.
-    # Under a mapping, every component it does not warm-start -- unnamed, or in
-    # a block it names only in part -- starts exactly as a fit without it: the
-    # engines read these values too (the tensor bootstrap caps its first step
-    # around them), so a refused warm value left here still steered the fit.
+    # A mapping lambda2_init is a warm start; every component it does not
+    # warm-start starts exactly as without it, since the engines read these
+    # values too (the tensor bootstrap caps its first step around them).
     lambdas, estimated_names = initialize_component_lambdas(
         reml_penalties,
         configured_smoothing if isinstance(lambda2_init, Mapping) else lam_init,

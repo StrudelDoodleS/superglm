@@ -156,14 +156,10 @@ def _source_groups(levels: list[str], grouping: Any) -> list[dict[str, Any]]:
 def _collapse_array(values: NDArray | None, groups: list[list[int]]) -> NDArray | None:
     """Average a per-level quantity onto its display groups.
 
-    A group's members carry identical values -- they are one parameter -- so
-    this mean is a projection rather than a summary.  It is not, however, the
-    IDENTITY on those doubles: averaging k equal doubles is exact when k is a
-    power of two and not in general otherwise (``np.mean([0.1, 0.1, 0.1])`` is
-    ``0.10000000000000002``; 17421 of 20000 random doubles survive a 3-member
-    collapse, all survive a 2- or 4-member one).  So a test on the expand ->
-    collapse round trip wants a derived tolerance here, and exact equality only
-    on ``level_x``, which is exact by construction.
+    A group's members carry identical values, so this is a projection. It is
+    exact in floating point only for power-of-two group sizes
+    (``np.mean([0.1, 0.1, 0.1])`` is ``0.10000000000000002``), so round-trip
+    tests need a tolerance except on ``level_x``, which is exact.
     """
     if values is None:
         return None
@@ -189,27 +185,13 @@ def _collapsed_smooth_curve(
 ) -> SmoothCurve | None:
     """Keep the fitted curve and move each marker to its group's own position.
 
-    The curve itself is never rebuilt: collapsing levels is a display
-    operation, and re-interpolating through the collapsed markers would
-    draw a shape the model never fitted.
-
-    Where a group sits is ``group_axis_position`` -- the ONE definition of that
-    convention, shared with the spec that placed the group there in the first
-    place (``features/ordered_categorical.py``).  This half used to spell the
-    mean out itself, which agreed with the spec on every grouping but one and
-    left issue #326's marker half a level width from its own fitted value.
-    Sharing the function is what makes the collapse the exact inverse of the
-    expansion rather than a second implementation that happens to match.  So
-    does the ORDER: ``_source_groups`` builds each group's indices by iterating
-    ``grouping.group_to_originals[label]``, which is the list the spec sums in
-    too, so ``group_axis_position`` sees the same values in the same order on
-    both sides and the round trip is bitwise rather than lucky.  Reordering
-    ``_source_groups`` would break that with nothing to show for it.
-
-    ``level_x`` covers the smoothed levels only, so an all-special group has no
-    position on the curve's axis and is dropped here rather than indexed into
-    ``level_x``.  The renderers place those markers from ``level_is_special``,
-    which ``_collapse_special_mask`` keeps parallel to the display levels.
+    The curve is never rebuilt: re-interpolating through collapsed markers
+    would draw a shape the model never fitted. A group sits at
+    ``group_axis_position``, the definition the spec uses, summed in the same
+    order (``_source_groups`` iterates ``group_to_originals[label]``), so the
+    round trip is bitwise; do not reorder ``_source_groups``. An all-special
+    group has no position on the curve's axis and is dropped; the renderers
+    place it from ``level_is_special``.
     """
     curve = ti.smooth_curve
     if curve is None:

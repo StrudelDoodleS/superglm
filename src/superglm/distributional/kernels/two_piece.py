@@ -497,16 +497,11 @@ def _log_mean_loading_third(
     """``log K``'s derivatives through third order in ``(sigma, eps)``.
 
     Piece derivatives use ``g'' = r + (a - 2r) r (r - a)`` (left) and
-    ``g'' = -r + (a + 2r) r (a + r)`` (right), ``r`` the piece's inverse Mills
-    ratio. With weights ``w_j = e^(L_j - log K)`` and ``D = L2 - L1``:
-
-    * ``K_ab = E[L_ab] + w1 w2 D_a D_b``,
-    * ``K_abc = E[L_abc] + w1 w2 (D_ab D_c + D_ac D_b + D_bc D_a)
-      + w1 w2 (w1 - w2) D_a D_b D_c``,
-
-    the mixture cumulants from centred piece derivatives, which avoid the
-    cancellation of the raw-moment form when one piece dominates;
-    ``w1 - w2 = tanh((L1 - L2)/2)``.
+    ``g'' = -r + (a + 2r) r (a + r)`` (right), ``r`` the piece's inverse Mills ratio. With
+    ``w_j = e^(L_j - log K)``, ``D = L2 - L1`` and ``w1 - w2 = tanh((L1 - L2)/2)``, the centred
+    mixture cumulants, which avoid raw-moment cancellation when one piece dominates, are
+    ``K_ab = E[L_ab] + w1 w2 D_a D_b`` and
+    ``K_abc = E[L_abc] + w1 w2 (D_ab D_c + D_ac D_b + D_bc D_a) + w1 w2 (w1 - w2) D_a D_b D_c``.
 
     Returns ``(K_s, K_e, K_ss, K_se, K_ee, K_sss, K_sse, K_see, K_eee)``.
     """

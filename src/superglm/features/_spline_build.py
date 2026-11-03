@@ -82,15 +82,12 @@ def held_splines(spec: Any) -> list[Any]:
 def mark_kindless_saved_on_scop(model) -> None:
     """Mark each kindless declaration that ``model``'s saved fit built as a SCOP P-spline.
 
-    0.40.0 and 0.41.0 fitted a spline declared with no kind beside a
-    constrained P-spline as a ``ps`` on SCOP, and kept the kindless
-    declaration as the model's template.  Every refit now builds that
-    declaration as it reads, a ``cr`` on the QP, as a fresh fit of the same
-    spec does, so its first build warns as a saved SCOP P-spline does.  An
-    ordered term's declared basis is marked alike, and its fitted spec takes
-    the declaration back as its ``_spline_obj``, which 0.41.0 replaced by the
-    ``ps``, so the editor clones the ``cr`` too.  Its built ``_spline`` stays
-    the ``ps``, which predicts as saved.
+    A spline declared with no kind beside a constrained P-spline was once
+    fitted as a ``ps`` on SCOP. Every refit now builds the declaration as it
+    reads (a ``cr`` on the QP), so its first build warns. An ordered term's
+    declared basis is marked alike and its fitted spec takes the declaration
+    back as ``_spline_obj``; its built ``_spline`` stays the ``ps``, which
+    predicts as saved.
     """
     import copy
 

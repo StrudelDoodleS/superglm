@@ -59,10 +59,9 @@ def _scatter_centered_variance(
 
     A categorical level table and an ordered-categorical step table are both
     ``V = A Cov A'`` for a selection ``A``; ``row_of_column[j]`` is the row
-    coefficient ``j`` lands on, and the rows it never names -- the base level,
-    and any pinned level fixed at zero -- carry a zero row of ``V``.  Under
-    ``native`` that is why their SE is zero; under centering it is why they
-    come back at exactly ``p'Vp``, which is the point of the fix.
+    coefficient ``j`` lands on, and rows it never names (the base, any pinned
+    level) carry a zero row of ``V``: SE zero under ``native``, ``p'Vp`` under
+    centering.
     """
     weights = np.full(covariance_block.shape[0], 1.0 / n_rows, dtype=np.float64)
     column = covariance_block @ weights
@@ -224,13 +223,9 @@ def feature_se_from_cov(
 ) -> NDArray:
     """Compute feature-level SEs from a precomputed covariance matrix.
 
-    ``center=True`` returns the errors of the MEAN-CENTERED report instead:
-    the reported vector is then the estimable contrast ``C b`` with
-    ``C = I - 11'/L``, whose covariance is ``C V C'``, so the errors are a
-    different quantity rather than the same one shifted.  It is the same
-    dispatch because the map from coefficients to report is the same map; only
-    the quadratic form it is evaluated in changes.  An inactive term returns
-    zeros either way -- ``C 0 C'`` is ``0``.
+    ``center=True`` returns the errors of the mean-centered report, the
+    estimable contrast ``C b`` with ``C = I - 11'/L`` and covariance
+    ``C V C'``. An inactive term returns zeros either way.
     """
     from superglm.features.categorical import Categorical
     from superglm.features.numeric import Numeric
@@ -296,10 +291,8 @@ def feature_se_from_cov(
         if isinstance(spec, RandomEffect):
             return np.zeros(len(spec._levels))
         if isinstance(spec, Piecewise):
-            # One SE per KNOT, base included -- the same length as the term's
-            # log_relativity vector.  The zeros(1) fallback below would leave a
-            # dropped piecewise term's CI arrays a different length from its
-            # values, which every downstream renderer zips against.
+            # One SE per knot, base included, so the CI arrays match the term's
+            # log_relativity vector, which every renderer zips against.
             return np.zeros(spec._knots.size)
         return np.zeros(1)
 
@@ -376,11 +369,10 @@ def feature_se_from_cov(
         return se_all
 
     if isinstance(spec, Piecewise):
-        # ``_raw_basis_matrix`` at the knots is the identity, so restricting it
-        # to the retained columns is the identity padded with a zero row at the
-        # base knot.  Going through the basis rather than indexing the diagonal
-        # keeps this branch a plain quadratic form: the base knot's SE is 0
-        # because its contrast against itself is, not because it was special-cased.
+        # ``_raw_basis_matrix`` at the knots is the identity; its retained
+        # columns are the identity with a zero row at the base knot.  Going
+        # through the basis keeps this a plain quadratic form, so the base
+        # knot's SE is 0 without a special case.
         M = np.asarray(
             spec._raw_basis_matrix(spec._knots)[:, spec._non_base_indices], dtype=np.float64
         )
@@ -462,18 +454,13 @@ def simultaneous_band_and_critical_value(
 ) -> tuple[pd.DataFrame, float]:
     """Simultaneous confidence bands for a spline feature, and their critical value.
 
-    The critical value is the simulated quantile itself: backing it out of the
-    exponentiated endpoints loses it once ``c * se`` is below their rounding.
-
-    ``center=True`` bands the MEAN-CENTERED curve.  The critical value is the
-    quantile of ``max_x |f(x)| / se(x)`` over the whole grid, and centering
-    changes both the numerator and the denominator, so it is a different
-    number rather than the same one applied to shifted values -- which is why
-    it is computed here through the centered map rather than reused.  A curve
-    an ``sz`` term moves onto its population curve (``interaction_specs``,
-    #432) is banded on that curve: its values carry ``b(x)' c`` and its
-    draws the curve's covariance ``V_f`` (``_population_curve_map``).  Every
-    covariance is drawn through its principal square root (``_principal_root``).
+    The critical value is the simulated quantile itself, since backing it out
+    of exponentiated endpoints loses it below their rounding. ``center=True``
+    bands the mean-centered curve, whose quantile of ``max_x |f(x)| / se(x)``
+    differs, so it is computed through the centered map. A curve an ``sz``
+    term moves onto its population curve is banded on that curve with its
+    covariance ``V_f`` (``_population_curve_map``). Every covariance is drawn
+    through its principal square root (``_principal_root``).
     """
     from scipy.stats import norm
 

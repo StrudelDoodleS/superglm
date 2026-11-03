@@ -63,18 +63,13 @@ def _recenter_term(
 ) -> TermInference:
     """Apply mean centering to a TermInference if requested.
 
-    Shifts log-relativities so the geometric mean of relativities is 1; numeric terms (single
-    value) are skipped. The shift is the mean of the same fitted coefficients the term reports,
-    so the centered vector is the contrast ``C b``, ``C = I - 11'/L``, with covariance
-    ``C V C'`` (a change of identifiability constraint); translating the intervals by
-    ``exp(-shift)`` with unchanged errors is valid only for a known shift. ``se_centered`` is
-    that propagated error, supplied by the caller holding the coefficient covariance; a term
-    publishing the covariance of its own reported vector (``knot_covariance``) needs none.
-    Every row of ``C`` sums to zero, so each error is independent of which level the fit
-    dropped (Firth, *JSS* 5(4), 2000, section 5.1); errors are redistributed, not inflated.
-
-    The subtracted constant is recorded on ``centering_shift`` (0.0 on every early return) for
-    callers, such as the rating-table export, that must put it back.
+    Shifts log-relativities so the relativities' geometric mean is 1 (single-value numeric
+    terms are skipped). The centred vector is the contrast ``C b``, ``C = I - 11'/L``, with
+    covariance ``C V C'``; each row of ``C`` sums to zero, so the errors do not depend on the
+    dropped level (Firth, *JSS* 5(4), 2000, sec. 5.1). ``se_centered`` is that propagated error
+    from a caller holding the covariance; a term publishing its own vector's covariance
+    (``knot_covariance``) needs none. The shift is recorded on ``centering_shift`` (0.0 on every
+    early return) for callers, such as the rating-table export, that must put it back.
     """
     if centering == "native" or ti.log_relativity is None:
         return ti
@@ -241,23 +236,14 @@ def _expand_grouped_term(
 ) -> TermInference:
     """Expand a grouped TermInference back to all original levels.
 
-    Each original level gets the relativity, SE and CI of its group. The display curve is never
-    rebuilt: ``x``, ``log_relativity``, ``relativity``, ``se_log_relativity``, ``ci_lower`` and
-    ``ci_upper`` pass through untouched, and only ``level_x`` (marker positions, metadata)
-    moves so each original level has its own marker. Interpolating a fresh curve through the
-    expanded markers (issue #282) misdrew the fitted function and could carry no band, since a
-    PCHIP slope limiter is not a linear functional of beta. The fitted function is drawn over its
-    own range with its own pointwise band (Nychka, *JASA* 83, 1988; Marra and Wood, *Scand. J.
-    Statist.* 39(1), 2012). In ``expanded`` mode a leading or trailing merge therefore leaves
-    the curve short of the outermost markers (as ggplot2's ``geom_smooth`` default); per-level
-    CIs remain the quantities a rate filing is read on. Those CIs are uncorrected for multiple
-    comparison, honest one at a time and optimistic as a family.
-
-    ``group_axis_position`` and the collapse take the mean of the same members in the same
-    order (``grouping.group_to_originals[label]``), so ``level_x`` round-trips bitwise;
-    reordering either iteration would break that. Per-level quantities round-trip only to one
-    rounding (averaging k identical doubles is exact only for k a power of two), so assert them
-    with a derived tolerance.
+    Each original level gets its group's relativity, SE and CI (uncorrected for multiple
+    comparison). The display curve (``x``, ``log_relativity``, ``relativity``,
+    ``se_log_relativity``, ``ci_lower``, ``ci_upper``) is never rebuilt, since a curve through
+    the markers is not linear in beta and has no band (Nychka, *JASA* 83, 1988; Marra and Wood,
+    *Scand. J. Statist.* 39(1), 2012); only ``level_x`` moves, so an end merge leaves the curve
+    short of the outer markers. ``group_axis_position`` and the collapse average the same
+    members in the same order (``grouping.group_to_originals[label]``), so ``level_x``
+    round-trips bitwise; other per-level quantities round-trip only to one rounding.
     """
     if ti.levels is None:
         raise ValueError("Grouped term expansion requires categorical levels.")

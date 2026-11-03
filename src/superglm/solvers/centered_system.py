@@ -622,17 +622,13 @@ def _outward_cut(relative: float, norm: float) -> float:
 def _equilibrated_block_root(block: NDArray) -> NDArray | None:
     """``penalty_factor``'s root of a coupled block, cut on its Jacobi equilibration.
 
-    The cut is the eigensolver's resolution ``n_b eps ||A_b||_2``, accumulated
-    outward (``_outward_cut``). Every penalty this package forms is a sum of
-    Gram, eigen-reconstruction or exact integer/Kronecker forms, so an exact
-    null of the construction is lifted only by rounding entrywise within
-    ``gamma_m sqrt(S_ii S_jj)`` (Higham 2002, eq. 3.5); the worst-case
-    ``n_b gamma_m`` cut would drop curvature the eigensolver resolves.
-
-    ``None`` where the block is not PSD at that resolution: a non-positive
-    diagonal, or an eigenvalue of ``D S_b D`` below
-    ``-max(100 eps ||D S_b D||_2, cut)``, the bar ``rank.decompose_gram``
-    refuses as materially indefinite.
+    The cut is the eigensolver's resolution ``n_b eps ||A_b||_2``, accumulated outward
+    (``_outward_cut``): every penalty here is a sum of Gram, eigen-reconstruction or exact
+    integer/Kronecker forms, so rounding lifts an exact null only within
+    ``gamma_m sqrt(S_ii S_jj)`` entrywise (Higham 2002, eq. 3.5), and the worst-case
+    ``n_b gamma_m`` cut would drop curvature the eigensolver resolves. ``None`` where the block
+    is not PSD at that resolution: a non-positive diagonal, or an eigenvalue of ``D S_b D``
+    below ``-max(100 eps ||D S_b D||_2, cut)``, the bar ``rank.decompose_gram`` refuses.
     """
     from superglm.solvers.rank import _eigensolver_relative_bar
 

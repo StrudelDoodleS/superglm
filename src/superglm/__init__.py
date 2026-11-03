@@ -192,15 +192,12 @@ def warmup() -> None:
     later sessions load them from there.
 
     It compiles the kernels of every family and route, ``RandomEffect`` and
-    ``FactorSmooth`` terms included (about a minute on an empty cache, under a
-    second against a filled one). Two groups of kernels compile on first use
-    instead, because few fits reach them and they take seconds to compile: the
-    third and fourth derivatives a ``SuperLSS`` fit needs only when a smoothing
-    parameter reaches its endpoint, and a fit's diagnostics (a diagnostic
-    plot's smoother, a structured ``FactorSmooth`` fit's hat diagonal), and
-    so do a few fallbacks that rarely run. Each then joins the cache like the
-    rest. Numba keys its cache to the CPU model,
-    so a cache built on one node type compiles again on another.
+    ``FactorSmooth`` terms included: about a minute on an empty cache, under a
+    second against a filled one. Kernels few fits reach compile on first use
+    instead and then join the cache: the third and fourth derivatives a
+    ``SuperLSS`` fit needs only at a smoothing-parameter endpoint, a fit's
+    diagnostics, and a few rarely run fallbacks. Numba keys its cache to the
+    CPU model, so a cache built on one node type compiles again on another.
     See the how-to *Starting fast on ephemeral clusters*.
     """
     from superglm._group_matrix._group_matrix_kernels import _warmup_group_matrix_kernels
@@ -239,12 +236,9 @@ def warmup() -> None:
     forget_compiles()
 
 
-# The root export list is the reviewed public surface and is pinned by
-# tests/test_public_api_snapshot.py: adding or removing a name here edits that
-# list in the same pull request. Objects the library builds on the user's
-# behalf (auto-detected interaction types, constraint machinery, term-inference
-# parts) are importable from their modules and from this namespace but are not
-# exports.
+# The reviewed public surface, pinned by tests/test_public_api_snapshot.py.
+# Objects the library builds on the user's behalf (auto-detected interaction
+# types, constraint machinery, term-inference parts) are importable, not exported.
 __all__ = [
     "families",
     "warmup",

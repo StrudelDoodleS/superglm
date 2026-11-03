@@ -145,23 +145,13 @@ class GroupInfo:
     penalty_matrix: NDArray | None = None  # (p_g, p_g) for SSP, else None
     reparametrize: bool = False  # whether to apply SSP transform
     penalized: bool = True  # whether this group is subject to the penalty
-    # Opt-in: the builder may losslessly deduplicate this group's repeated
-    # sparse rows into a support-compressed container.  Set only by specs
-    # whose repeated rows are the norm (Piecewise).  A producer that emits
-    # ``cat_codes`` does not need this and must not set it -- one code per row
-    # already IS the compressed form, and the builder routes it to a
-    # CategoricalGroupMatrix.  Everything else keeps the plain CSR
-    # representation, its tabmat-split eligibility and its design_summary
-    # reporting; do not widen this flag to a producer merely because its rows
-    # repeat.
+    # Opt-in lossless deduplication of repeated sparse rows, for specs whose
+    # rows repeat as the norm (Piecewise). A ``cat_codes`` producer is already
+    # compressed and must not set it; everything else keeps plain CSR.
     supports_row_compression: bool = False
-    # The design builder's own spline and tensor builds find the row support
-    # of the basis on its rows per covariate value or occupied cell
-    # (``detect_cell_support``): ``(B_unique, row_index)``, or ``"declined"``
-    # when its gates decline it.  The builder stores either in place of
-    # scanning ``columns``, which a tensor with a support leaves ``None``;
-    # ``None`` here leaves the scan to the builder.  A public ``build()``
-    # never sets it.
+    # The basis's row support from the builder's own spline and tensor builds
+    # (``detect_cell_support``): ``(B_unique, row_index)``, ``"declined"``, or
+    # ``None`` to leave the scan of ``columns`` to the builder.
     row_support: tuple[NDArray, NDArray] | Literal["declined"] | None = None
     cat_codes: NDArray | None = None  # (n,) integer codes for categorical features
     # select=True subgroup support for double-penalty decomposition
@@ -181,7 +171,7 @@ class GroupInfo:
     structural_ranks: dict[str, int] | None = None
     # Optional per-component lambda control; keys match penalty_components suffixes.
     lambda_policies: dict[str, LambdaPolicy] | None = None
-    # Monotone constraint metadata (Phase 2 QP engine).
+    # Monotone constraint metadata (QP engine).
     # constraints are in post-identifiability space after build(); they become
     # solver-ready only after the DM builder composes with R_inv.
     constraints: LinearConstraintSet | None = None
@@ -208,7 +198,7 @@ class GroupInfo:
     # Structured terms retain compact geometry for specialized solvers.
     structured_kind: Literal["random_effect", "factor_smooth"] | None = None
     # A random effect's declared parent feature (``RandomEffect(nested_in=)``):
-    # its nested chain always passes through it (one-engine design §3.13).
+    # its nested chain always passes through it.
     random_effect_nested_in: Hashable | None = None
     # Compact all-level factor-smooth geometry.  The repeated penalties stay
     # at marginal ``block_size x block_size`` dimensions rather than being
@@ -223,18 +213,9 @@ class GroupInfo:
     factor_smooth_transform: NDArray | None = None
     factor_smooth_levels: tuple[Any, ...] | None = None
     repeated_penalty_components: tuple[tuple[str, NDArray], ...] | None = None
-    # The width this term SPANS, reported when a spec emits fewer columns
-    # than that (an empty or exactly aliased interaction cell withheld as
-    # structurally unidentifiable).  ``n_cols`` is the emitted width and
-    # always governs the block's algebra.  The builder decides what the
-    # penalty does with this report via ``group_pricing``
-    # (``dm_builder._priced_group_dimension``): under ``"rank"`` (default)
-    # the ``sqrt(p_g)`` group-lasso weight and the Breheny-Huang df
-    # allocation price the emitted, identifiable width and this report is
-    # informational; under ``"spanned"`` they price this width, so that
-    # withholding a dead column changes nothing the penalty sees.  ``None``
-    # means "the emitted width", right for every spec that emits what it
-    # spans.
+    # The width this term spans, when a spec emits fewer columns (``n_cols``,
+    # which governs the algebra) by withholding unidentifiable cells. Only
+    # ``group_pricing="spanned"`` prices the penalty at it; ``None`` = emitted.
     penalty_width: int | None = None
 
     def __post_init__(self):
@@ -341,12 +322,8 @@ class GroupSlice:
     # The retired SCOP engine's map, on a model 0.41.0 or earlier fitted
     # (``solvers/scop.py``); inference reads its penalty. Nothing sets it now.
     scop_reparameterization: SCOPSolverReparam | None = None
-    # Dimension the penalty prices this group at; ``None`` means ``size``.
-    # Stamped only under ``group_pricing="spanned"`` builds, where it carries
-    # ``GroupInfo.penalty_width`` (the width the term spans) for a spec that
-    # withheld columns the design cannot identify; under the default
-    # ``"rank"`` pricing it stays ``None`` and the penalty follows the
-    # emitted width.  Read it through ``penalty_size``, never directly.
+    # Dimension the penalty prices this group at, set only under
+    # ``group_pricing="spanned"``; read it through ``penalty_size``.
     penalty_dim: int | None = None
 
     def __post_init__(self):
@@ -361,13 +338,10 @@ class GroupSlice:
     def penalty_size(self) -> int:
         """Group dimension for penalty and degree-of-freedom purposes.
 
-        Equals :attr:`size` unless the build ran under
-        ``group_pricing="spanned"`` and the spec emitted fewer columns than
-        the term spans because the missing ones are structurally
-        unidentifiable.  Use this wherever ``p_g`` enters a penalty formula
-        -- the group-lasso ``sqrt(p_g)`` weight, the Breheny-Huang df
-        allocation -- and :attr:`size` wherever the block's own algebra is
-        meant.
+        Equals :attr:`size` unless a ``group_pricing="spanned"`` build withheld
+        unidentifiable columns. Use it wherever ``p_g`` enters a penalty formula
+        (the ``sqrt(p_g)`` weight, the Breheny-Huang df) and :attr:`size` for
+        the block's own algebra.
         """
         return self.size if self.penalty_dim is None else int(self.penalty_dim)
 
@@ -463,9 +437,8 @@ class TensorRawChannels:
 class DiscreteTensorBuildResult:
     """Return type for TensorInteraction.build_discrete().
 
-    Carries the materialized Kronecker product (for fallback compatibility)
-    alongside the factored marginal bases and bin indices (for the fast
-    DiscretizedTensorGroupMatrix path).
+    Carries the materialized Kronecker product alongside the factored
+    marginal bases and bin indices that DiscretizedTensorGroupMatrix uses.
     """
 
     infos: GroupInfo | list[GroupInfo]
@@ -483,8 +456,7 @@ class DiscreteTensorBuildResult:
 class FitStats:
     """Scalar fit statistics computed at end of fit()/fit_reml().
 
-    Stores everything ``summary()`` needs so that the model no longer
-    has to cache training arrays (``_train_y``, ``_train_mu``).
+    Stores everything ``summary()`` needs without the training arrays.
     """
 
     log_likelihood: float
@@ -493,16 +465,10 @@ class FitStats:
     explained_deviance: float
     pearson_chi2: float
     n_obs: int
-    #: The declared contract's likelihood size -- ``sum(w)`` under
-    #: ``"frequency"``, the positive-row count under ``"prior"``.  Recorded at
-    #: fit time because a released fit (``retain_fit_state=False``) drops the
-    #: weights, and reconstructing it from an all-ones stand-in silently
-    #: reports ``n`` for a prior fit carrying zero weights.  Defaults to None
-    #: so fits pickled before this field restore unchanged.
+    #: The declared contract's likelihood size (``sum(w)`` under "frequency",
+    #: the positive-row count under "prior"), kept because a released fit drops
+    #: the weights. None on fits pickled before the field.
     likelihood_size: float | None = None
-    #: Whether the fit carried non-unit weights.  Not derivable from
-    #: ``likelihood_size``: under ``"prior"`` that size is the positive-row
-    #: count, which equals ``n_obs`` for any strictly positive weighting
-    #: however uneven.  Reported so a released fit still names the contract
-    #: that produced its numbers.
+    #: Whether the fit carried non-unit weights, which ``likelihood_size``
+    #: cannot say under "prior".
     weighted: bool | None = None

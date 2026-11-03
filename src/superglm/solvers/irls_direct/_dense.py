@@ -15,20 +15,14 @@ if TYPE_CHECKING:
 
 
 class _IRLSDirectDenseStep(_IRLSDirectStep):
-    """The fit's step on the Gram path when it has no linear constraint: Cholesky or a certified factor.
+    """The Gram-path step for a fit with no linear constraint: Cholesky or a certified factor.
 
-    Chosen in ``_IRLSDirectFit._setup_systems`` when the fit takes none of the
-    QR, structured and QP routes.  Each iteration forms the centred normal
-    equations, the intercept profiled out, through the fit's centred system and
-    its caches, and solves them by Cholesky where the Gram certifies its own
-    rank, else through the factor certificate of the grouped augmented design
-    (``certify_centered_factor``).  Under the mean space's Newton steps the
-    score enters the right-hand side and the step is an increment
-    (``_IRLSDirectMeanSpaceOverlay``).  It keeps the iteration's decomposition,
-    whose truncated directions the true-score certificate judges
-    (``certificate_inputs``), and no reference to the fit, whose state each
-    method is handed; its rank metadata takes the module route, which may be
-    deferred.
+    Solves the centred normal equations (intercept profiled out) by Cholesky
+    where the Gram certifies its own rank, else through the factor certificate
+    of the grouped augmented design (``certify_centered_factor``).  Under the
+    mean space's Newton steps the score enters the right-hand side and the step
+    is an increment.  Holds the iteration's decomposition for the true-score
+    certificate, and no reference to the fit.
     """
 
     __slots__ = ("_held_rank",)
@@ -45,9 +39,8 @@ class _IRLSDirectDenseStep(_IRLSDirectStep):
         W, dm, newton_score = fit.W, fit.dm, fit.newton_score
         centered = fit.get_centered_system(W, z_off)
         if newton_score is not None:
-            # the score in the right-hand side (the step itself is the
-            # increment below, from the same X~' u; the stored system is the
-            # one it solved)
+            # The score enters the right-hand side; the step is the increment
+            # below, and the stored system is the one it solved.
             centered, data_score = fit.mean_space.centred_rhs(centered, newton_score, dm)
         fit._last_working_centered = centered
         fit.recorder.t_gram += time.perf_counter() - _t0

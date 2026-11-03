@@ -27,15 +27,11 @@ class _ConstraintKindNamespace:
 
 
 class _ConstraintNamespace:
-    """
-    The shape constraints a feature can carry, reached through ``Constraint``.
+    """The shape constraints a feature can carry, reached through ``Constraint``.
 
-    Two namespaces say when a constraint is imposed. ``Constraint.fit``
-    enforces the shape inside the fit, so the fitted coefficients already
-    satisfy it; ``Constraint.postfit`` repairs the shape after an
-    unconstrained fit. Each namespace offers the same four members:
-    ``increasing``, ``decreasing``, ``convex`` and ``concave``, every one of
-    them a :class:`ConstraintSpec`.
+    ``Constraint.fit`` enforces the shape inside the fit, so the fitted coefficients satisfy it;
+    ``Constraint.postfit`` repairs the shape after an unconstrained fit. Each offers
+    ``increasing``, ``decreasing``, ``convex`` and ``concave``, each a :class:`ConstraintSpec`.
 
     Examples
     --------

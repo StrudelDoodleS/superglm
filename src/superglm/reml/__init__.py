@@ -18,7 +18,7 @@ References
 - Wood & Fasiolo (2017): A generalized Fellner-Schall method for smoothing
   parameter optimization. Biometrics 73(4), 1071-1081.
 
-# Internal submodules: import siblings directly, not through this __init__.
+Internal submodules import their siblings directly, not through this package.
 """
 
 from superglm.reml.direct import optimize_direct_reml  # noqa: F401

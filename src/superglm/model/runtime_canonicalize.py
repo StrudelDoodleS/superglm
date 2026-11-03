@@ -299,25 +299,12 @@ def _public_centred_state(
 ) -> tuple[float | None, NDArray[np.float64] | None, float | None]:
     """The solver's centred state ``(alpha, c, alpha_lo)`` read in the public coordinates.
 
-    The fit's predictor is ``eta = alpha + (X - 1 c') beta`` (one-engine
-    design §3.8, ``mode_score.linear_predictor``), free of the cancellation a
-    dense column's offset forces between ``X beta`` and the raw intercept.
-    Prediction differences a column about its centre only where the term
-    scores its raw columns that way (``base.scores_centred``: a numeric
-    column, or the product of two, the columns that can sit at an offset far
-    above their spread), on a ``DenseGroupMatrix`` block.  Every other
-    column's entries are bounded by its basis, so its ``(m - c)' beta`` is
-    folded into ``alpha`` once here and it is scored as it is, ``m`` the
-    training means a materialized public term's columns lose
-    (``_apply_r_inv_centering``).  Exact algebra: ``alpha_pub + (X_pub - 1
-    c_pub') beta`` is the solver's predictor.  A compensated solver intercept
-    ``(alpha, alpha_lo)`` keeps its remainder, plus the rounding of the fold
-    (a TwoSum), also when no column keeps a centre (the public centre is then
-    zero and every term is scored as it is).  ``(None, None, None)`` when the
-    solver carries no centred state, or carries no remainder and no such
-    column keeps a centre, so the model predicts from its raw intercept
-    exactly as before.  A model saved before the remainder existed carries
-    none, and predicts as it did.
+    The fit's predictor is ``eta = alpha + (X - 1 c') beta`` (``mode_score.linear_predictor``),
+    free of the cancellation between ``X beta`` and the raw intercept. Only a
+    ``DenseGroupMatrix`` column its term scores centred (``base.scores_centred``) keeps its
+    centre; every other column's ``(m - c)' beta`` is folded into ``alpha`` once, its rounding
+    kept in ``alpha_lo`` by TwoSum. Returns ``(None, None, None)`` when there is no centred
+    state, or no remainder and no kept centre, so the model predicts from its raw intercept.
     """
     from superglm.group_matrix import DenseGroupMatrix
     from superglm.model.base import scores_centred
@@ -344,9 +331,7 @@ def _public_centred_state(
     public_centre = np.where(dense & differenced & (centre != 0.0), centre - shifts, 0.0)
     alpha_lo = getattr(solver, "centred_intercept_lo", None)
     # A compensated intercept keeps its pair even when every column folds into
-    # it (a zero public centre): the remainder is part of the fit's predictor,
-    # and the raw intercept alone predicted it away from the deviance and scale
-    # the fit published.
+    # it: the remainder is part of the fit's predictor.
     if not np.any(public_centre != 0.0) and alpha_lo is None:
         return None, None, None
     alpha_public, alpha_public_lo = _fold_public_pair(

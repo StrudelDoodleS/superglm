@@ -997,16 +997,14 @@ def _border_bound(
 ) -> NDArray:
     """The running bound ``U`` ``(q - 1,)`` of the profiled border Schur complement.
 
-    ``|dQ_ij| <= sqrt(U_i U_j)`` to first order, each rounding charged where
-    it is made with the exact sensitivity of the profiled ``Q``: ``e~_u e~_u'``
-    to a node's weight and ``Delta e~_u' + e~_u Delta'`` to its carried
-    deviation, ``e~_u = e_u[1:] - c_eff e_u[0]``. With
-    ``gamma_Q = (n_nodes + q + 10) eps`` and the row pass's ``gamma_weight``,
-    ``gamma_scatter``, it charges the accumulation of ``Q``, the leaf rows
-    (``(gamma_scatter + gamma_weight) absolute + 2 gamma_weight sum E e~^2``)
-    and each internal node's sums. Rank-two terms are majorized by
-    ``eta^2 / t + t e~^2`` (``_balanced_rank_two``) and the child sums by
-    Cauchy-Schwarz. For rows ``w >= 0`` the bound is within a small constant of
+    ``|dQ_ij| <= sqrt(U_i U_j)`` to first order, each rounding charged where made with the
+    profiled ``Q``'s exact sensitivity: ``e~_u e~_u'`` to a node's weight and
+    ``Delta e~_u' + e~_u Delta'`` to its carried deviation, ``e~_u = e_u[1:] - c_eff e_u[0]``.
+    With ``gamma_Q = (n_nodes + q + 10) eps`` and the row pass's ``gamma_weight``,
+    ``gamma_scatter``, it charges ``Q``'s accumulation, the leaf rows
+    (``(gamma_scatter + gamma_weight) absolute + 2 gamma_weight sum E e~^2``) and each internal
+    node's sums; rank-two terms are majorized by ``eta^2 / t + t e~^2`` (``_balanced_rank_two``),
+    child sums by Cauchy-Schwarz. For ``w >= 0`` it is within a small constant of
     ``gamma_Q (absolute + sum |s| d^2)``. Streams once over each level's ``e``.
     """
     gamma_Q, gamma_weight, gamma_scatter = gammas
