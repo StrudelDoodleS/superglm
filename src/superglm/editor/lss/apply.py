@@ -83,7 +83,7 @@ def _edit_at_reference(view: LSSModelView, term: EditableTerm) -> float:
     if cached is not None and cached[0] == stamp:
         return cached[1]
     try:
-        state, term_slice, block, shift = _term_block(view, term, keep_pinned=True)
+        state, term_slice, block, shift = _term_block(view, term, keep_pinned=False)
     except EditorValueError:
         # An edit the model cannot take moves no other curve; writing it refuses with its reason.
         return 0.0

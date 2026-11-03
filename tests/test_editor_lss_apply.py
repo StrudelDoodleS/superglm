@@ -14,7 +14,7 @@ from superglm.editor import edit
 from superglm.editor.apply import _term_weights, materialize_edit_request
 from superglm.editor.errors import EditorValueError
 from superglm.editor.lss import split_key
-from superglm.editor.lss.apply import lss_model_with_edits
+from superglm.editor.lss.apply import lss_model_with_edits, reference_shift
 from superglm.features.ordered_categorical import OrderedCategorical
 from tests._lss_editor_fixtures import (
     EPS,
@@ -277,6 +277,23 @@ def test_pinned_level_is_refused_unless_carried():
     moved = after - model.predict_link(rows)["scale"]
     np.testing.assert_allclose(moved[:-1], 0.2, rtol=0.0, atol=64 * EPS * np.abs(after).max())
     assert moved.iloc[-1] == moved.iloc[0]  # the pinned level still reads as the base
+
+
+def test_an_edit_the_session_refuses_moves_no_other_spread_curve():
+    case = lognormal_case()
+    family = LogNormalLS()
+    declared = cat("region", levels=[*REGIONS, "R9"])
+    with pytest.warns(UserWarning, match="pinned to base"):
+        model = SuperLSS(
+            family, family.mean(s("age", k=6)), family.scale(s("age", k=5), declared)
+        ).fit_reml(case.X, case.y, outer="efs+newton")
+    session = edit(model, train_data=(case.X, case.y, None, None))
+    term = session.terms["scale:region"]
+    term.edited_log_effect = term.original_log_effect + 0.2
+
+    with pytest.raises(EditorValueError, match=r"R9"):
+        lss_model_with_edits(session.model, session.terms)
+    assert reference_shift(session.model, session.terms, "scale:age") == 0.0
 
 
 def test_a_parameter_without_an_intercept_refuses_its_edits():
