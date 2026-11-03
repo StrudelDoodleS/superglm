@@ -765,6 +765,33 @@ def test_a_constant_column_beside_an_intercept_is_refitted_as_an_alias(
 
 
 @pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+def test_a_scaled_copy_of_a_column_is_refitted_as_an_alias(discrete):
+    """``z = 2^30 x``: an exact alias whatever its units.
+
+    The raw dropped score is ``2^30`` times the retained one, which the stop
+    leaves anywhere inside its tolerance; net of the retained score the
+    multiplier is rounding, so the refit is kept and matches the fit on ``x``
+    alone, within the ``3e-8`` of the constant-column test. Mutation check: on
+    the raw dropped score the refit is refused and ``z`` is published nonzero.
+    """
+    rng = np.random.default_rng(11)
+    x = rng.standard_normal(3000)
+    y = 1.0 + 0.7 * x + rng.normal(0.0, 0.5, 3000)
+
+    def fitted(columns):
+        family = GaussianLS(scale_floor=0)
+        location = family.location(*(term(name, Numeric()) for name in columns))
+        model = SuperLSS(family, location, family.scale(), discrete=discrete)
+        return _fit(model, pd.DataFrame(columns), y)
+
+    reference = fitted({"x": x})
+    result = fitted({"x": x, "z": 2.0**30 * x})
+    assert result.converged and result.terminal_rank.rank == 3
+    assert result.coefficients[2] == 0.0
+    np.testing.assert_allclose(result.coefficients[[0, 1, 3]], reference.coefficients, atol=1e-6)
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
 def test_a_column_beside_its_square_far_from_zero_keeps_both(discrete):
     """``x = 1e4 + z`` beside ``x^2``: centred they stay collinear, but the data resolve them.
 
