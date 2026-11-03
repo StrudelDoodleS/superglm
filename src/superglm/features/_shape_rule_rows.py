@@ -216,12 +216,35 @@ def natural_flat_extent(
 def held_flat_regions(
     knots: NDArray, degree: int, pieces: list[ShapePiece], *, natural_ends: bool
 ) -> list[tuple[float, float]]:
-    """Where the flat pieces hold the curve constant, a natural end's boundary span included."""
+    """Where the flat pieces hold the curve constant: the knot spans whose slope is held at zero.
+
+    ``f'`` vanishes on a knot span exactly when every first-derivative
+    coefficient active there is zero. The flat rows hold every coefficient whose
+    support meets a zero region (:func:`flat_zero_regions`). A natural end holds
+    ``f''`` at zero, a multiple of the difference of the two end coefficients, so
+    holding either holds both. The curve is therefore also constant on the
+    boundary span beside a zero region that starts at a natural spline's first
+    interior knot, and on a gap between two zero regions fewer than ``degree``
+    knot spans wide, since every coefficient active in such a gap meets one of
+    them.
+    """
     knots = np.asarray(knots, dtype=np.float64)
-    return [
-        natural_flat_extent(knots, degree, s, e, natural_ends=natural_ends)
-        for s, e in flat_zero_regions(knots, pieces)
-    ]
+    n_basis = len(knots) - degree - 1
+    lo, hi = knots[1:n_basis], knots[degree + 1 : degree + n_basis]
+    held = _held_at_zero(lo, hi, flat_zero_regions(knots, pieces))
+    if natural_ends:
+        held[:2] = held[:2].any()
+        held[-2:] = held[-2:].any()
+    edges = np.unique(knots[degree : n_basis + 1])
+    regions: list[tuple[float, float]] = []
+    for s, e in zip(edges[:-1], edges[1:], strict=True):
+        if not held[(lo < e) & (hi > s)].all():
+            continue
+        if regions and regions[-1][1] == s:
+            regions[-1] = (regions[-1][0], e)
+        else:
+            regions.append((s, e))
+    return regions
 
 
 def flat_covers_curve(
@@ -229,14 +252,13 @@ def flat_covers_curve(
 ) -> bool:
     """Whether the flat pieces hold every first-derivative coefficient at zero.
 
-    The curve is then constant, and its one free column is confounded with the
-    intercept.
+    The curve is then constant on the whole base interval, and its one free
+    column is confounded with the intercept.
     """
     knots = np.asarray(knots, dtype=np.float64)
     n_basis = len(knots) - degree - 1
-    zero = held_flat_regions(knots, degree, pieces, natural_ends=natural_ends)
-    held = _held_at_zero(knots[1:n_basis], knots[degree + 1 : degree + n_basis], zero)
-    return bool(zero) and bool(held.all())
+    regions = held_flat_regions(knots, degree, pieces, natural_ends=natural_ends)
+    return regions == [(knots[degree], knots[n_basis])]
 
 
 def _held_at_zero(lo: NDArray, hi: NDArray, zero: list[tuple[float, float]]) -> NDArray:

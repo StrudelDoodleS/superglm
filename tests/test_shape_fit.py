@@ -261,6 +261,28 @@ def test_natural_cr_flat_warning_names_the_flat_boundary_span():
     assert np.ptp(f) > 0.5  # the curve rises beyond the flat
 
 
+def test_flats_under_degree_spans_apart_warn_that_the_gap_is_flat():
+    """Two flat stretches fewer than ``degree`` knot spans apart hold the gap flat, and say so.
+
+    Every slope coefficient active on [40, 50] meets the zero region [30, 40] or
+    [50, 60], so the cubic is constant on [30, 60]. Mutation: every stretch end
+    is a knot, so no warning fired.
+    """
+    X, y = _driver_ages()
+    spec = CubicRegressionSpline(
+        knots=[20.0, 30.0, 40.0, 50.0, 60.0, 70.0],
+        constraint=C.flat.within(30, 40) & C.flat.within(50, 60),
+    )
+    model = SuperGLM(family="poisson", selection_penalty=0.0, features={"age": spec})
+    with pytest.warns(
+        UserWarning,
+        match=r"flat\.within\(30, 40\) & flat\.within\(50, 60\) holds on \[30, 60\], .*gap",
+    ):
+        model.fit(X, y)
+    f = _native_curve(model, "age", np.linspace(30.0, 60.0, 500), 0)
+    assert np.ptp(f) <= 1e3 * U * np.max(np.abs(f))
+
+
 def test_natural_cr_with_flat_keeps_end_curvature_rows():
     x = np.linspace(17.0, 80.0, 500)
     knots = [25.0, 30.0, 35.0, 40.0, 50.0, 60.0, 70.0]

@@ -89,13 +89,6 @@ def _fmt_end(x: float) -> str:
     return f"{x:.6g}"
 
 
-def _natural_flat_extent(spec: Any, lo: float, hi: float) -> tuple[float, float]:
-    """Where a flat zero region [lo, hi] holds ``spec`` constant, its natural ends included."""
-    return _shape_rule_rows.natural_flat_extent(
-        spec._knots, spec.degree, lo, hi, natural_ends=has_natural_ends(spec)
-    )
-
-
 def _shown_and_held(spec: Any, rule: Any, lo: float, hi: float) -> tuple[Any, str]:
     """A flat rule and the ground it holds on [lo, hi], in the term's own words.
 
@@ -112,32 +105,39 @@ def _shown_and_held(spec: Any, rule: Any, lo: float, hi: float) -> tuple[Any, st
 
 
 def _warn_widened_flats(spec: Any, pieces: list, *, stacklevel: int) -> None:
-    """Warn once when a flat stretch holds on more than it states, naming where it holds.
+    """Warn once when flat stretches hold on more than they state, naming where they hold.
 
-    It does when an end is not a knot (the whole knot spans it touches) or
-    when a natural end holds the boundary span flat beside it
-    (``_natural_flat_extent``). An end at the feature's boundary is exact:
-    the curve is read on its range. An ordered term's basis
-    (``_axis_levels``) names its ends and the levels the stretch holds on
-    rather than their values.
+    They do when an end is not a knot (the whole knot spans it touches), when a
+    natural end holds the boundary span flat beside them, and when two sit fewer
+    than ``degree`` knot spans apart, which holds the gap between them flat
+    (``held_flat_regions``). An end at the feature's boundary is exact: the
+    curve is read on its range. An ordered term's basis (``_axis_levels``)
+    names its ends and the levels the stretch holds on rather than their values.
     """
     levels = spec._axis_levels
     label = {} if levels is None else dict(levels)
     flat_rules = [rule for rule in rules_of(spec) if rule.kind == "flat"]
     flat_pieces = [piece for piece in pieces if piece[0] == "flat"]
+    zero = _shape_rule_rows.flat_zero_regions(spec._knots, pieces)
+    regions = _shape_rule_rows.held_flat_regions(
+        spec._knots, spec.degree, pieces, natural_ends=has_natural_ends(spec)
+    )
     widened = []
-    for rule, piece in zip(flat_rules, flat_pieces, strict=True):
-        zero = _shape_rule_rows.flat_zero_regions(spec._knots, [piece])[0]
-        lo, hi = _natural_flat_extent(spec, *zero)
-        extended = (lo, hi) != zero
-        lo, hi = max(lo, spec._lo), min(hi, spec._hi)
-        _, a, b = piece
+    for s, e in regions:
+        inside = [z for z in zero if s <= z[0] and z[1] <= e]
+        held_flats = [
+            (rule, a, b)
+            for rule, (_, a, b) in zip(flat_rules, flat_pieces, strict=True)
+            if s <= a and b <= e
+        ]
+        extended = s < inside[0][0] or e > inside[-1][1]
+        ends = dict.fromkeys(end for _, a, b in held_flats for end in (a, b))
         missing = [
             repr(label[end]) if end in label else _fmt_end(end)
-            for end in (a, b)
+            for end in ends
             if end not in (spec._lo, spec._hi) and not np.any(spec._knots == end)
         ]
-        if not missing and not extended:
+        if not missing and not extended and len(inside) == 1:
             continue
         reason = "the whole knot spans it touches"
         fixes = []
@@ -151,8 +151,13 @@ def _warn_widened_flats(spec: Any, pieces: list, *, stacklevel: int) -> None:
         if extended:
             reason += " and the boundary span its natural end holds flat beside them"
             fixes.append("put a knot inside the boundary span to keep it free")
-        shown, held = _shown_and_held(spec, rule, lo, hi)
-        widened.append(f"{shown.describe()} holds on {held}, {reason}; {'; '.join(fixes)}")
+        if len(inside) > 1:
+            reason += f" and the gap between them, under {spec.degree} knot spans wide"
+            fixes.append(f"leave at least {spec.degree} knot spans between flat stretches")
+        lo, hi = max(s, spec._lo), min(e, spec._hi)
+        shown = [_shown_and_held(spec, rule, lo, hi)[0].describe() for rule, _, _ in held_flats]
+        held = _shown_and_held(spec, held_flats[0][0], lo, hi)[1]
+        widened.append(f"{' & '.join(shown)} holds on {held}, {reason}; {'; '.join(fixes)}")
     if widened:
         warnings.warn("; ".join(widened), UserWarning, stacklevel=stacklevel + 1)
 
@@ -176,14 +181,18 @@ def _refuse_flat_over_curve(spec: Any, pieces: list) -> None:
     lo, hi = max(regions[0][0], spec._lo), min(regions[-1][1], spec._hi)
     flat_rules = [rule for rule in rules_of(spec) if rule.kind == "flat"]
     shown, held = zip(*(_shown_and_held(spec, rule, lo, hi) for rule in flat_rules), strict=True)
-    natural = regions != _shape_rule_rows.flat_zero_regions(spec._knots, pieces)
+    zero = _shape_rule_rows.flat_zero_regions(spec._knots, pieces)
+    natural = regions[0][0] < zero[0][0] or regions[-1][1] > zero[-1][1]
+    gaps = len(zero) > 1
     raise ValueError(
         f"{' & '.join(rule.describe() for rule in shown)} holds the curve flat on {held[0]}, "
         "the whole knot spans it touches"
         + (" and the boundary spans its natural ends hold flat beside them" if natural else "")
+        + (f" and the gaps between them, under {spec.degree} knot spans wide" if gaps else "")
         + ", which is the feature's whole range and leaves the term with no effect; remove the "
         "term, or narrow the stretch to leave part of the range free"
         + (", or put a knot inside a boundary span" if natural else "")
+        + (f", or leave at least {spec.degree} knot spans between flat stretches" if gaps else "")
     )
 
 

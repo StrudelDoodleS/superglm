@@ -284,6 +284,33 @@ def test_flat_covers_the_curve_when_its_zero_region_and_natural_ends_reach_every
     )
 
 
+@pytest.mark.parametrize(("gap", "merged"), [(DEGREE - 1, True), (DEGREE, False)])
+def test_a_gap_under_degree_spans_between_flats_is_held_flat(gap, merged):
+    """A gap of fewer than ``degree`` knot spans between two zero regions is flat too.
+
+    Every slope coefficient active in it meets a region; at ``degree`` spans one
+    does not. Checked against the curves the flat rows leave, whose slope
+    vanishes on the gap exactly when the regions merge. Mutation: the regions
+    stayed apart at ``degree - 1`` spans.
+    """
+    from superglm.features._shape_rule_rows import held_flat_regions
+
+    knots = _open_knots()
+    t = knots[DEGREE + 1 : -DEGREE - 1]
+    pieces = shape_pieces(C.flat.within(t[0], t[1]) & C.flat.within(t[1 + gap], t[2 + gap]), LO, HI)
+    regions = held_flat_regions(knots, DEGREE, pieces, natural_ends=False)
+    apart = [(t[0], t[1]), (t[1 + gap], t[2 + gap])]
+    assert regions == ([(t[0], t[2 + gap])] if merged else apart)
+    _, flat = shape_rows(knots, DEGREE, pieces, domain=(LO, HI), natural_ends=False)
+    Q, _ = np.linalg.qr(flat.T, mode="complete")
+    Z = Q[:, flat.shape[0] :]
+    gap_grid, grid = np.linspace(t[1], t[1 + gap], 200), np.linspace(LO, HI, 500)
+    for c in np.random.default_rng(5).normal(size=(5, Z.shape[1])):
+        curve = BSpline(knots, Z @ c, DEGREE)
+        scale = np.max(np.abs(curve(grid, nu=1)))
+        assert (np.max(np.abs(curve(gap_grid, nu=1))) <= 1e3 * U * scale) == merged
+
+
 @pytest.mark.parametrize(
     ("knots", "rules", "natural_ends"),
     [
