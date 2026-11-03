@@ -102,6 +102,10 @@ def test_initial_lambda_is_not_dropped_by_an_unrelated_replacement():
     clone = model._clone_with_replaced_terms({"scale:age": s("age", k=4)})
     assert clone._fit_settings["initial_lambda"] == 0.5
     assert clone._fit_settings["lambdas"] == {}
+    # An empty mapping replays: the replaced term's strength is estimated again.
+    again = _refit(case, clone)
+    assert again._fit_settings["lambdas"] == {}
+    assert again.smoothing_parameters_["scale:age#wiggle"] != 2.0
 
 
 def test_interaction_terms_cannot_be_replaced():

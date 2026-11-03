@@ -305,7 +305,7 @@ class DenseDistributionalModel:
 
     @property
     def prediction_coefficients(self) -> NDArray[np.float64]:
-        """The coefficients predictions and posterior draws use: the hand edit's, else ``result``'s."""
+        """What predictions and posterior draws use: the hand edit's, else ``result``'s."""
         edit = self._fit_state.hand_edit
         return self.result.coefficients if edit is None else edit.coefficients
 

@@ -112,7 +112,11 @@ def _recomputed_rows(
     edit: HandEdit,
     X_train: FrameLike | EagerFrame | None,
 ) -> Any:
-    """The retained rows with fitted ``eta`` and parameters taken at the edit."""
+    """The retained rows with fitted ``eta`` and parameters taken at the edit.
+
+    They are evaluated through the prediction design, so on a discrete fit they
+    are the exact design's values, not the binned ones the fit itself used.
+    """
     if X_train is None:
         raise ValueError(NO_TRAINING_FRAME)
     eta = model.predict_eta_at(
