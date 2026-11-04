@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import warnings
 
 import numpy as np
@@ -12,6 +13,7 @@ from sklearn.model_selection import KFold
 from superglm import (
     Categorical,
     GammaLS,
+    GaussianLS,
     NegativeBinomialLS,
     Spline,
     SuperGLM,
@@ -455,7 +457,7 @@ def test_a_fit_on_truncated_rows_is_refused_before_any_fold():
         cross_validate(fitted, X, y, cv=KFold(3), fit_mode="fit_reml")
 
 
-def test_a_crps_that_cannot_be_resolved_costs_only_the_crps(monkeypatch):
+def test_a_crps_that_cannot_be_resolved_costs_only_the_crps(monkeypatch, caplog):
     import superglm.distributional.cross_validation as module
 
     def unresolved(*args, **kwargs):
@@ -463,7 +465,38 @@ def test_a_crps_that_cannot_be_resolved_costs_only_the_crps(monkeypatch):
 
     monkeypatch.setattr(module, "_retained_crps", unresolved)
     X, y = _rows()
-    result = cross_validate(_gamma(), X, y, cv=KFold(3, shuffle=True, random_state=2))
+    logger = "superglm.distributional.cross_validation"
+    with caplog.at_level(logging.WARNING, logger=logger):
+        result = cross_validate(_gamma(), X, y, cv=KFold(3, shuffle=True, random_state=2))
     assert np.isnan(result.fold_scores["crps"]).all()
     for name in ("nll", "gini", "actual_expected"):
         assert np.isfinite(result.fold_scores[name]).all()
+    assert caplog.text.count("numeric CRPS tail is unresolved") == 3
+
+
+def test_a_prediction_that_fails_is_not_read_as_an_unresolved_crps(monkeypatch):
+    X, y = _rows()
+    model = _gamma().fit(X, y, lambdas=LAMBDAS)
+
+    def refuses(*args, **kwargs):
+        raise ValueError("this level cannot be read")
+
+    monkeypatch.setattr(type(model._require_fitted()), "predict_parameters", refuses)
+    with pytest.raises(ValueError, match="cannot be read"):
+        _POOLED_PARTS["crps"](model, X, y)
+
+
+def test_a_negative_total_has_no_gini_and_its_ratio_still_pools():
+    X, y = _rows()
+    family = GaussianLS()
+    result = cross_validate(
+        SuperLSS(family, family.location(cat("region")), family.scale()),
+        X,
+        y - y.max() - 1.0,
+        cv=FOLDS,
+        scoring=("gini", "actual_expected"),
+        error_score="raise",
+    )
+    assert result.fold_scores["gini"].isna().all()
+    assert result.fold_scores["actual_expected"].notna().all()
+    assert result.pooled_scores["actual_expected"] == pytest.approx(1.0, abs=0.05)

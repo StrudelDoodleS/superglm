@@ -451,4 +451,6 @@ def test_a_declared_level_absent_from_the_rows_is_read_as_its_own_value():
     ).fit_reml(X, case.y)
     session = edit(model, train_data=(X, case.y))
     payload = _panel(session, "grade")
-    assert {row["label"] for row in payload["rows"]} >= {"3"}
+    row = [row["label"] for row in payload["rows"]].index("3")
+    own_value = model.predict_link(X.iloc[:1].assign(grade=3)).to_numpy()[0]
+    np.testing.assert_allclose(payload["eta"]["fitted"]["rows"][row], own_value, rtol=1e-12)

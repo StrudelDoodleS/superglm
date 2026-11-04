@@ -465,6 +465,13 @@ def test_run_cv_keeps_a_folds_scores_when_actual_expected_is_undefined(monkeypat
     assert np.isfinite(run.result.fold_scores["nll"]).all()
 
 
+def test_run_cv_pools_a_ratio_of_negative_totals(monkeypatch, lognormal_cv):
+    monkeypatch.setitem(_POOLED_PARTS, "actual_expected", lambda *args, **kwargs: (-1.0, -2.0))
+    session = open_case(lognormal_case(), cv=lognormal_cv)
+    run = run_cv(capture_cv_run(session), _Context())
+    assert run.result.pooled_scores["actual_expected"] == pytest.approx(0.5)
+
+
 def test_run_cv_names_a_level_outside_an_ordered_term():
     case = lognormal_case()
     family = LogNormalLS()

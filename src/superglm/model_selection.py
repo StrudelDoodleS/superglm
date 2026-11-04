@@ -714,7 +714,9 @@ def cross_validate(
     fit_mode : {"fit", "fit_reml"}, optional
         By default ``"fit"`` for a SuperGLM. A SuperLSS has no configured
         smoothing to hold fixed, so its default is ``"fit_reml"``, or ``"fit"``
-        when ``fit_kwargs`` gives ``lambdas``.
+        when ``fit_kwargs`` gives ``lambdas``. On an unfitted SuperLSS with
+        smooth terms, ``"fit"`` needs those ``lambdas``: without them every
+        fold fails, and each failure is logged.
         Which fit method to call on each fold estimator. ``"fit"`` holds the
         smoothing parameters fixed; ``"fit_reml"`` selects them again on each
         fold's training rows.
@@ -1007,7 +1009,7 @@ def cross_validate(
     pooled_scores = {
         name: pooled_numerators[name] / pooled_denominators[name]
         for name in pooled_numerators
-        if pooled_denominators[name] > 0.0
+        if pooled_denominators[name] != 0.0
     }
     std_scores = {c: float(fold_scores[c].std(ddof=0)) for c in all_score_cols}
 

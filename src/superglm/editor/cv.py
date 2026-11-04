@@ -1265,7 +1265,7 @@ class _FoldRecorder:
         return {
             name: numerator / denominator
             for name, (numerator, denominator) in self._totals.items()
-            if denominator > 0.0
+            if denominator != 0.0
         }
 
 

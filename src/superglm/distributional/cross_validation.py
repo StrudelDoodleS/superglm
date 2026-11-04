@@ -9,6 +9,7 @@ ratio of sums, so ``cross_validate`` pools it across folds the same way.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from typing import Any
 
@@ -28,6 +29,8 @@ from superglm.distributional.weights import (
 from superglm.model.binding_ops import bind_feature_templates
 from superglm.validation import _normalized_gini
 
+logger = logging.getLogger(__name__)
+
 
 def _nll_parts(model, X, y, *, sample_weight=None, offset=None) -> tuple[float, float]:
     """Total negative log-likelihood and the rows' likelihood size."""
@@ -40,14 +43,20 @@ def _crps_parts(model, X, y, *, sample_weight=None, offset=None) -> tuple[float,
     """Total CRPS and the rows' likelihood size.
 
     NaN for a family with no distribution function, or where the numeric route
-    cannot resolve the integral, so the fold keeps its other scores.
+    cannot resolve the integral, so the fold keeps its other scores. The mean CRPS
+    then leaves that fold out, so the reason is logged. A prediction that fails is
+    not one of these: it fails the fold.
     """
     fitted = model._require_fitted()
     rows = _scoring_rows(fitted, X, y, sample_weight=sample_weight, offsets=offset)
     mass = rows.aggregation_mass
+    theta = np.asarray(
+        fitted.predict_parameters(rows.frame, offsets=rows.offsets), dtype=np.float64
+    )
     try:
-        scores = _retained_crps(fitted, rows, method="auto", n_nodes=64)
-    except (NotImplementedError, UnsupportedLikelihoodContractError, ValueError):
+        scores = _retained_crps(fitted, rows, method="auto", n_nodes=64, theta=theta)
+    except (NotImplementedError, UnsupportedLikelihoodContractError, ValueError) as refusal:
+        logger.warning("A fold has no CRPS, and the mean CRPS leaves it out: %s", refusal)
         return float("nan"), float(mass.sum())
     return float(np.sum(mass * scores)), float(mass.sum())
 
@@ -73,9 +82,15 @@ def _actual_expected_parts(model, X, y, *, sample_weight=None, offset=None) -> t
 
 
 def _gini(model, X, y, *, sample_weight=None, offset=None) -> float:
-    """Normalized Gini of the conditional mean."""
+    """Normalized Gini of the conditional mean; NaN where the rows' total is not positive.
+
+    It measures how the mean orders a share of a positive total, so with none
+    there is no such share to order, on a response that can be negative or a
+    fold with no claims.
+    """
     response, mean, weights = _scored_means(model, X, y, sample_weight, offset)
-    return _normalized_gini(response, mean, weights)
+    total = np.sum(response) if weights is None else np.sum(weights * response)
+    return _normalized_gini(response, mean, weights) if total > 0.0 else float("nan")
 
 
 def parts_ratio(numerator: float, denominator: float) -> float:
