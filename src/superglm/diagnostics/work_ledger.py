@@ -200,7 +200,7 @@ class _Target:
     name: str
     cost: Callable
     role: str = LIBRARY
-    also: tuple[str, ...] = ()  # other modules that expose the same object
+    also: tuple[str, ...] = ()  # compiled twins of a scipy.linalg module, by short name
     input: str | None = None  # keyword whose array is hashed; default: the first array argument
 
     @property
@@ -289,8 +289,8 @@ _LSS_ASSEMBLY = "superglm.distributional.solver.assembly"
 TARGETS: tuple[_Target, ...] = (
     *_library("numpy.linalg", _NUMPY),
     *_library("scipy.linalg", _SCIPY),
-    *_library("scipy.linalg.lapack", _LAPACK, also=("scipy.linalg._flapack",)),
-    *_library("scipy.linalg.blas", (("dsyrk", _syrk),), also=("scipy.linalg._fblas",)),
+    *_library("scipy.linalg.lapack", _LAPACK, also=("_flapack",)),
+    *_library("scipy.linalg.blas", (("dsyrk", _syrk),), also=("_fblas",)),
     _Target("superglm.solvers.rank", "_leaf_qr", _qr),
     _Target("superglm.solvers.rank", "decompose_gram", _no_flops, COMPOSITE),
     _Target("superglm.solvers.rank", "decompose_gram_if_authoritative", _no_flops, COMPOSITE),
@@ -712,7 +712,7 @@ def work_ledger() -> Iterator[WorkLedger]:
             wrapper = _wrap(target, original)
             places = [(holder, target.name)]
             for name in target.also:
-                twin = importlib.import_module(name)
+                twin = importlib.import_module("scipy.linalg." + name)
                 if getattr(twin, target.name, None) is original:
                     places.append((twin, target.name))
             if not isinstance(holder, type):
