@@ -240,6 +240,7 @@ function miniCurve(doc, term) {
     const path = doc.createElementNS(SVG_NS, "path");
     path.setAttribute("d", curve.d);
     svg.append(path);
+    if (curve.reference) svg.append(referenceDot(doc, curve.reference));
     return svg;
   }
   for (const bar of curve.bars) {
@@ -248,9 +249,23 @@ function miniCurve(doc, term) {
     rect.setAttribute("y", String(bar.y));
     rect.setAttribute("width", String(bar.w));
     rect.setAttribute("height", String(bar.h));
+    if (bar.reference) {
+      rect.setAttribute("class", "mini-reference");
+      rect.setAttribute("rx", String(bar.h / 2));
+    }
     svg.append(rect);
   }
   return svg;
+}
+
+/** The reference level's mark on a line. @param {Document} doc @param {{x:number, y:number}} point */
+function referenceDot(doc, { x, y }) {
+  const dot = doc.createElementNS(SVG_NS, "circle");
+  dot.setAttribute("class", "mini-reference");
+  dot.setAttribute("cx", String(x));
+  dot.setAttribute("cy", String(y));
+  dot.setAttribute("r", "1.75");
+  return dot;
 }
 
 /** An amber dot right after the name of a term with a change waiting for Refit. @param {Document} doc */

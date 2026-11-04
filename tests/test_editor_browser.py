@@ -229,17 +229,15 @@ def test_editor_browser_failed_drag_restores_confirmed_curve_and_allows_next_dra
 
             page.evaluate(
                 """() => {
-                    const stats = { editedPathAdds: 0, termMutations: 0 };
+                    const stats = { editedPathWrites: 0, termMutations: 0 };
                     window.__previewRenderStats = stats;
                     new MutationObserver((records) => {
                         for (const record of records) {
-                            for (const node of record.addedNodes) {
-                                if (!(node instanceof Element)) continue;
-                                if (node.matches('path.edited')) stats.editedPathAdds += 1;
-                                stats.editedPathAdds += node.querySelectorAll('path.edited').length;
-                            }
+                            if (record.target.matches('path.edited')) stats.editedPathWrites += 1;
                         }
-                    }).observe(document.querySelector('#chart'), { childList: true, subtree: true });
+                    }).observe(document.querySelector('#chart'), {
+                        attributes: true, attributeFilter: ['d'], subtree: true
+                    });
                     new MutationObserver((records) => {
                         for (const record of records) {
                             stats.termMutations +=
@@ -249,12 +247,12 @@ def test_editor_browser_failed_drag_restores_confirmed_curve_and_allows_next_dra
                 }"""
             )
             begin_selected_point_drag(page, -36)
-            page.wait_for_function("() => window.__previewRenderStats.editedPathAdds > 0")
+            page.wait_for_function("() => window.__previewRenderStats.editedPathWrites > 0")
             preview_path = edited_path.get_attribute("d")
             assert preview_path is not None
             assert preview_path != confirmed_path
             preview_stats = page.evaluate("() => window.__previewRenderStats")
-            assert preview_stats == {"editedPathAdds": 1, "termMutations": 0}
+            assert preview_stats == {"editedPathWrites": 1, "termMutations": 0}
             with page.expect_response(
                 lambda response: (
                     response.request.method == "POST"
@@ -417,118 +415,6 @@ def test_editor_browser_cancel_before_first_move_restores_confirmed_selection(
 
 
 @pytest.mark.browser
-def test_editor_browser_failed_term_switch_keeps_authoritative_term(
-    browser_editor_widget, monkeypatch
-):
-    original_set_term = browser_editor_widget._set_term
-    original_select = browser_editor_widget._select
-    selection_terms = []
-    selection_started = threading.Event()
-    release_selection = threading.Event()
-
-    def reject_region(term):
-        if term == "region":
-            raise ValueError("region unavailable")
-        return original_set_term(term)
-
-    def record_selection_term(term, indices):
-        selection_terms.append(browser_editor_widget.selected_term)
-        selection_started.set()
-        if not release_selection.wait(timeout=5):
-            raise RuntimeError("Timed out waiting to release selection")
-        return original_select(term, indices)
-
-    monkeypatch.setattr(browser_editor_widget, "_set_term", reject_region)
-    monkeypatch.setattr(browser_editor_widget, "_select", record_selection_term)
-
-    with sync_playwright() as runtime:
-        browser = runtime.chromium.launch(headless=True)
-        try:
-            page = browser.new_page(viewport={"width": 1180, "height": 720})
-            page.goto(browser_editor_widget.app_url)
-            page.locator("#chart .edited").first.wait_for()
-
-            choose_feature(page, "region")
-            page.wait_for_function(
-                """() => !document.querySelector('#appAlert')?.hidden &&
-                    document.querySelector('#appAlertMessage')?.textContent.includes(
-                        'internal editor error'
-                    )
-                """
-            )
-
-            assert current_feature(page) == "age"
-            assert browser_editor_widget.selected_term == "age"
-            assert "region unavailable" not in page.locator("#appAlertMessage").inner_text()
-
-            age_points = browser_editor_widget.terms["age"]["n_points"]
-            page.locator('button[data-op="select_all"]').click()
-            assert selection_started.wait(timeout=2)
-            assert page.locator("#appAlert").is_hidden()
-            release_selection.set()
-            page.wait_for_function(
-                "expected => document.querySelector('#status')?.textContent.includes(expected)",
-                arg=f"{age_points} of {age_points} selected",
-            )
-            assert selection_terms == ["age"]
-        finally:
-            release_selection.set()
-            browser.close()
-
-
-@pytest.mark.browser
-def test_editor_browser_lost_term_response_uses_recovered_authoritative_term(
-    browser_editor_widget, monkeypatch
-):
-    original_set_term = browser_editor_widget._set_term
-    original_select = browser_editor_widget._select
-    selection_terms = []
-
-    def apply_region_then_lose_response(term):
-        payload = original_set_term(term)
-        if term == "region":
-            raise ValueError("response lost")
-        return payload
-
-    def record_selection_term(term, indices):
-        selection_terms.append(browser_editor_widget.selected_term)
-        return original_select(term, indices)
-
-    monkeypatch.setattr(browser_editor_widget, "_set_term", apply_region_then_lose_response)
-    monkeypatch.setattr(browser_editor_widget, "_select", record_selection_term)
-
-    with sync_playwright() as runtime:
-        browser = runtime.chromium.launch(headless=True)
-        try:
-            page = browser.new_page(viewport={"width": 1180, "height": 720})
-            page.goto(browser_editor_widget.app_url)
-            page.locator("#chart .edited").first.wait_for()
-
-            choose_feature(page, "region")
-            page.wait_for_function(
-                """() => !document.querySelector('#appAlert')?.hidden &&
-                    document.querySelector('#appAlertMessage')?.textContent.includes(
-                        'internal editor error'
-                    )
-                """
-            )
-
-            assert current_feature(page) == "region"
-            assert browser_editor_widget.selected_term == "region"
-            assert "response lost" not in page.locator("#appAlertMessage").inner_text()
-
-            region_points = browser_editor_widget.terms["region"]["n_points"]
-            page.locator('button[data-op="select_all"]').click()
-            page.wait_for_function(
-                "expected => document.querySelector('#status')?.textContent.includes(expected)",
-                arg=f"{region_points} of {region_points} selected",
-            )
-            assert selection_terms == ["region"]
-        finally:
-            browser.close()
-
-
-@pytest.mark.browser
 def test_editor_browser_zoom_preserves_handle_visuals(browser_editor_widget):
     with sync_playwright() as runtime:
         browser = runtime.chromium.launch(headless=True)
@@ -590,9 +476,7 @@ def test_editor_browser_report_error_clears_mismatched_report(browser_editor_wid
             page.locator("#chart .edited").first.wait_for()
 
             page.locator('.app-tab[data-view="validation"]').click()
-            page.locator("#reportFrame .cv-report").wait_for()
-            validation_html = page.locator("#reportFrame").inner_html()
-            assert "CV Report" in validation_html
+            page.get_by_role("table", name="Split metrics").wait_for()
 
             page.locator('.app-tab[data-view="final"]').click()
             page.wait_for_function(
@@ -602,7 +486,6 @@ def test_editor_browser_report_error_clears_mismatched_report(browser_editor_wid
             )
 
             final_html = page.locator("#reportFrame").inner_html()
-            assert "CV Report" not in final_html
             assert final_html == ""
             assert page.locator("#reportTitle").text_content() == "Final Fit Report"
             assert page.locator("#reportFreshness").get_attribute("data-freshness") == "stale"

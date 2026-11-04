@@ -13,7 +13,10 @@ import {
   patchView as patchViewState,
   setPreviewTerm
 } from "../../src/superglm/editor/app/state/store.js";
-import { selectCurrentSelection } from "../../src/superglm/editor/app/state/selectors.js";
+import {
+  selectActiveTermName,
+  selectCurrentSelection
+} from "../../src/superglm/editor/app/state/selectors.js";
 
 /** @typedef {import('../../src/superglm/editor/app/api/contracts.js').EditorState} EditorState */
 
@@ -140,47 +143,6 @@ test("initialize commits the authoritative snapshot and view patches stay local"
   assert.strictEqual(store.getState().remote, remote);
 });
 
-test("a delayed selection response cannot overwrite a newer initialized chart", async () => {
-  const confirmed = {
-    ...snapshot(2), state_generation: 10, chart_generation: 3
-  };
-  const delayedSelection = {
-    ...snapshot(2), state_generation: 11, chart_generation: 3
-  };
-  delayedSelection.selection.age = [1];
-  const initialized = {
-    ...snapshot(2), state_generation: 12, chart_generation: 4
-  };
-  initialized.terms.age = { ...initialized.terms.age, y: [1.5] };
-  initialized.selection.age = [2];
-  const selectionResponse = deferred();
-  const store = createEditorStore(createInitialEditorState(confirmed));
-  const actions = createEditorActions({
-    store,
-    client: {
-      postJSON: () => selectionResponse.promise,
-      getState: async () => initialized
-    }
-  });
-
-  const pendingSelection = actions.executeSelectionMutation({ term: "age", indices: [1] });
-  assert.deepEqual(store.getState().view.selectionPreview, { term: "age", indices: [1] });
-  await actions.initialize();
-  actions.patchView({
-    preview: { term: "age", payload: termPayload(), selection: [3] },
-    selectionPreview: { term: "age", indices: [3] }
-  });
-  selectionResponse.resolve(delayedSelection);
-  const result = await pendingSelection;
-
-  assert.deepEqual(result, { ok: true, snapshot: delayedSelection });
-  assert.strictEqual(store.getState().remote.snapshot, initialized);
-  assert.equal(store.getState().remote.chartEpoch, 1);
-  assert.equal(store.getState().view.preview, null);
-  assert.equal(store.getState().view.selectionPreview, null);
-  assert.deepEqual(selectCurrentSelection(store.getState()), [2]);
-});
-
 test("successful mutation commits once and schedules only a new revision", async () => {
   const store = createEditorStore(createInitialEditorState(snapshot(0)));
   /** @type {number[]} */
@@ -279,167 +241,6 @@ test("an undo that changes only the waiting list re-requests the stale report", 
   assert.deepEqual(scheduled, [[2, { immediate: true, onlyStale: true }]]);
 });
 
-test("selection mutation normalizes semantic no-ops without posting", async () => {
-  const confirmed = snapshot(2);
-  confirmed.selection.age = [1, 2];
-  const store = createEditorStore(createInitialEditorState(confirmed));
-  let postCalls = 0;
-  const actions = createEditorActions({
-    store,
-    client: {
-      postJSON: async () => {
-        postCalls += 1;
-        return snapshot(2);
-      },
-      getState: async () => confirmed
-    }
-  });
-
-  const result = await actions.executeSelectionMutation({
-    term: "age",
-    indices: [2, 1, 2]
-  });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.skipped, true);
-  assert.equal(postCalls, 0);
-  assert.strictEqual(store.getState().remote.snapshot, confirmed);
-  assert.equal(store.getState().view.selectionPreview, null);
-});
-
-test("selection mutation posts equal indices when it changes the authoritative term", async () => {
-  const confirmed = snapshot(2);
-  confirmed.selection.age = [1, 2];
-  confirmed.terms.region = termPayload();
-  confirmed.selection.region = [1, 2];
-  const response = snapshot(2);
-  response.selected_term = "region";
-  response.terms.region = termPayload();
-  response.selection.age = [1, 2];
-  response.selection.region = [1, 2];
-  /** @type {Array<{path:string, payload:Record<string, unknown>}>} */
-  const requests = [];
-  const store = createEditorStore(createInitialEditorState(confirmed));
-  const actions = createEditorActions({
-    store,
-    client: {
-      postJSON: async (path, payload) => {
-        requests.push({ path, payload });
-        return response;
-      },
-      getState: async () => confirmed
-    }
-  });
-
-  const result = await actions.executeSelectionMutation({
-    term: "region",
-    indices: [2, 1]
-  });
-
-  assert.equal(result.ok, true);
-  assert.deepEqual(requests, [
-    { path: "/select", payload: { term: "region", indices: [1, 2] } }
-  ]);
-  assert.equal(store.getState().remote.snapshot?.selected_term, "region");
-});
-
-test("selection mutation installs provisional state before posting and commits without evidence", async () => {
-  const confirmed = snapshot(2);
-  const response = snapshot(2);
-  response.selection.age = [1, 2];
-  const pendingResponse = deferred();
-  const store = createEditorStore(createInitialEditorState(confirmed));
-  /** @type {Array<{path:string, payload:Record<string, unknown>}>} */
-  const requests = [];
-  /** @type {number[]} */
-  const scheduled = [];
-  const actions = createEditorActions({
-    store,
-    client: {
-      postJSON: (path, payload) => {
-        requests.push({ path, payload });
-        assert.deepEqual(selectCurrentSelection(store.getState()), [1, 2]);
-      assert.deepEqual(store.getState().request.mutation, {
-        status: "running", operation: "select", error: null, blocking: false
-      });
-        return pendingResponse.promise;
-      },
-      getState: async () => confirmed
-    },
-    scheduleVisibleEvidence: (revision) => { scheduled.push(revision); }
-  });
-
-  const pending = actions.executeSelectionMutation({ term: "age", indices: [2, 1, 2] });
-
-  assert.deepEqual(selectCurrentSelection(store.getState()), [1, 2]);
-  assert.deepEqual(store.getState().view.selectionPreview, {
-    term: "age", indices: [1, 2]
-  });
-  pendingResponse.resolve(response);
-  const result = await pending;
-
-  assert.deepEqual(result, { ok: true, snapshot: response });
-  assert.deepEqual(requests, [{ path: "/select", payload: { term: "age", indices: [1, 2] } }]);
-  assert.equal(store.getState().view.selectionPreview, null);
-  assert.deepEqual(selectCurrentSelection(store.getState()), [1, 2]);
-  assert.deepEqual(store.getState().request.mutation, {
-    status: "idle", operation: null, error: null
-  });
-  assert.deepEqual(scheduled, []);
-});
-
-test("failed selection mutation rolls back through same-revision selection recovery", async () => {
-  const confirmed = snapshot(2);
-  const recovered = snapshot(2);
-  const store = createEditorStore(createInitialEditorState(confirmed));
-  const actions = createEditorActions({
-    store,
-    client: {
-      postJSON: async () => { throw new Error("selection offline"); },
-      getState: async () => recovered
-    }
-  });
-
-  const result = await actions.executeSelectionMutation({ term: "age", indices: [3, 1] });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.error.message, "selection offline");
-  assert.equal(store.getState().view.selectionPreview, null);
-  assert.deepEqual(selectCurrentSelection(store.getState()), [0]);
-  assert.strictEqual(store.getState().remote.snapshot, recovered);
-  assert.equal(store.getState().remote.chartEpoch, 0);
-  assert.deepEqual(store.getState().request.recovery?.retry, {
-    name: "select",
-    path: "/select",
-    payload: { term: "age", indices: [1, 3] }
-  });
-});
-
-test("selection recovery falls back to a full commit after a revision change", async () => {
-  const confirmed = snapshot(2);
-  const recovered = snapshot(3);
-  recovered.selection.age = [4];
-  const store = createEditorStore(createInitialEditorState(confirmed));
-  const actions = createEditorActions({
-    store,
-    client: {
-      postJSON: async () => { throw new Error("response lost"); },
-      getState: async () => recovered
-    }
-  });
-
-  const result = await actions.executeSelectionMutation({ term: "age", indices: [4] });
-
-  assert.equal(result.ok, false);
-  assert.strictEqual(store.getState().remote.snapshot, recovered);
-  assert.strictEqual(store.getState().remote.snapshot?.terms, recovered.terms);
-  assert.notStrictEqual(store.getState().remote.snapshot?.terms, confirmed.terms);
-  assert.equal(store.getState().view.selectionPreview, null);
-  assert.deepEqual(selectCurrentSelection(store.getState()), [4]);
-  assert.equal(store.getState().remote.summary?.available, false);
-  assert.equal(store.getState().remote.chartEpoch, 1);
-});
-
 test("a running mutation suppresses ordinary and structural duplicate submissions", async () => {
   const pendingResponse = deferred();
   const store = createEditorStore(createInitialEditorState(snapshot(0)));
@@ -457,7 +258,6 @@ test("a running mutation suppresses ordinary and structural duplicate submission
 
   const first = actions.executeStateMutation({ name: "shift", path: "/op", payload: {} });
   const second = await actions.executeStateMutation({ name: "shift", path: "/op", payload: {} });
-  const selection = await actions.executeSelectionMutation({ term: "age", indices: [2] });
   const structural = await actions.executeStructuralMutation({
     name: "collapse levels",
     path: "/stage",
@@ -467,9 +267,6 @@ test("a running mutation suppresses ordinary and structural duplicate submission
   assert.equal(second.ok, false);
   assert.equal(second.skipped, true);
   assert.ok(second.error instanceof Error);
-  assert.equal(selection.ok, false);
-  assert.equal(selection.skipped, true);
-  assert.ok(selection.error instanceof Error);
   assert.equal(structural.ok, false);
   assert.equal(structural.skipped, true);
   assert.ok(structural.error instanceof Error);
@@ -1530,79 +1327,6 @@ test("mutation retry replays its stored descriptor", async () => {
   ]);
 });
 
-test("selection retry routes through provisional selection semantics", async () => {
-  const confirmed = snapshot(2);
-  const response = snapshot(2);
-  response.selection.age = [1, 3];
-  let calls = 0;
-  /** @type {Array<{path:string, payload:Record<string, unknown>}>} */
-  const requests = [];
-  const store = createEditorStore(createInitialEditorState(confirmed));
-  const actions = createEditorActions({
-    store,
-    client: {
-      postJSON: async (path, payload) => {
-        calls += 1;
-        requests.push({ path, payload });
-        if (calls === 1) throw new Error("once");
-        assert.deepEqual(store.getState().view.selectionPreview, {
-          term: "age", indices: [1, 3]
-        });
-        return response;
-      },
-      getState: async () => snapshot(2)
-    }
-  });
-
-  await actions.executeSelectionMutation({ term: "age", indices: [3, 1] });
-  const result = await actions.retryMutation();
-
-  assert.equal(result.ok, true);
-  assert.strictEqual(store.getState().remote.snapshot, response);
-  assert.equal(store.getState().remote.chartEpoch, 0);
-  assert.deepEqual(selectCurrentSelection(store.getState()), [1, 3]);
-  assert.deepEqual(requests, [
-    { path: "/select", payload: { term: "age", indices: [1, 3] } },
-    { path: "/select", payload: { term: "age", indices: [1, 3] } }
-  ]);
-});
-
-test("selection retry settles an applied response-loss recovery without posting again", async () => {
-  const confirmed = snapshot(2);
-  const applied = snapshot(2);
-  applied.selection.age = [1, 3];
-  let postCalls = 0;
-  const store = createEditorStore(createInitialEditorState(confirmed));
-  const actions = createEditorActions({
-    store,
-    client: {
-      postJSON: async () => {
-        postCalls += 1;
-        throw new Error("response lost");
-      },
-      getState: async () => applied
-    }
-  });
-
-  const failed = await actions.executeSelectionMutation({ term: "age", indices: [3, 1] });
-  assert.equal(failed.ok, false);
-  assert.deepEqual(selectCurrentSelection(store.getState()), [1, 3]);
-  assert.equal(store.getState().request.mutation.status, "error");
-  assert.ok(store.getState().request.recovery?.retry);
-  const recoveredSnapshot = store.getState().remote.snapshot;
-
-  const retried = await actions.retryMutation();
-
-  assert.deepEqual(retried, { ok: true, snapshot: recoveredSnapshot });
-  assert.equal(postCalls, 1);
-  assert.deepEqual(store.getState().request.mutation, {
-    status: "idle", operation: null, error: null
-  });
-  assert.equal(store.getState().request.recovery, null);
-  assert.equal(store.getState().view.selectionPreview, null);
-  assert.deepEqual(selectCurrentSelection(store.getState()), [1, 3]);
-});
-
 test("dismiss and missing retries are deterministic", async () => {
   const store = createEditorStore(createInitialEditorState(snapshot(1)));
   const actions = createEditorActions({
@@ -1639,7 +1363,6 @@ test("action module exposes only the controller factory, paint helper, and exact
   assert.deepEqual(Object.keys(actionsModule).sort(), ["createEditorActions", "nextPaint"]);
   assert.deepEqual(Object.keys(actions).sort(), [
     "dismissRecovery",
-    "executeSelectionMutation",
     "executeStateMutation",
     "executeStructuralMutation",
     "initialize",
@@ -1650,6 +1373,8 @@ test("action module exposes only the controller factory, paint helper, and exact
     "retryEvidence",
     "retryMutation",
     "schedulePanelEvidence",
+    "setActiveTerm",
+    "setSelection",
     "showNotice"
   ]);
 });
@@ -1991,4 +1716,309 @@ test("a note that fails keeps its alert, and the action that waited for it does 
   assert.deepEqual(posted, ["/note"]);
   // The note's own alert stays, with its Retry.
   assert.equal(store.getState().request.recovery?.retry?.path, "/note");
+});
+
+/** Timers the test fires by hand. */
+function manualTimers() {
+  /** @type {Set<{callback:()=>void}>} */
+  const timers = new Set();
+  return {
+    /** @param {()=>void} callback */
+    setTimer: (callback) => {
+      const timer = { callback };
+      timers.add(timer);
+      return timer;
+    },
+    /** @param {{callback:()=>void}} timer */
+    clearTimer: (timer) => { timers.delete(timer); },
+    fire: () => {
+      const due = [...timers];
+      timers.clear();
+      for (const timer of due) timer.callback();
+    },
+    pending: () => timers.size
+  };
+}
+
+const settled = () => new Promise((resolve) => setImmediate(resolve));
+
+/** @param {number} [revision] */
+function twoTermSnapshot(revision = 2) {
+  const value = snapshot(revision);
+  value.terms.age = { ...termPayload(), n_points: 6 };
+  value.terms.region = { ...termPayload(), n_points: 6 };
+  value.selection.region = [1];
+  return value;
+}
+
+/**
+ * @param {ReturnType<typeof twoTermSnapshot>} confirmed
+ * @param {(path:string, payload:Record<string, unknown>)=>unknown} [answer]
+ * @param {()=>unknown} [read]
+ */
+function viewHarness(confirmed, answer = () => ({ ok: true }), read = () => confirmed) {
+  const timers = manualTimers();
+  const store = createEditorStore(createInitialEditorState(confirmed));
+  /** @type {Array<{path:string, payload:Record<string, unknown>}>} */
+  const requests = [];
+  let stateReads = 0;
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async (path, payload) => {
+        requests.push({ path, payload });
+        return answer(path, payload);
+      },
+      getState: async () => {
+        stateReads += 1;
+        return read();
+      }
+    },
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer
+  });
+  return { actions, store, requests, timers, stateReads: () => stateReads };
+}
+
+test("a selection shows at once and Python hears the newest, quietly, after the delay", async () => {
+  const { actions, store, requests, timers, stateReads } = viewHarness(twoTermSnapshot());
+
+  actions.setSelection("age", [2, 1, 2]);
+  assert.deepEqual(selectCurrentSelection(store.getState()), [1, 2]);
+  assert.equal(store.getState().remote.chartEpoch, 0);
+  assert.deepEqual(requests, []);
+
+  actions.setSelection("age", [3]);
+  assert.deepEqual(selectCurrentSelection(store.getState()), [3]);
+  timers.fire();
+  await settled();
+
+  assert.deepEqual(requests, [
+    { path: "/select", payload: { term: "age", indices: [3], quiet: true } }
+  ]);
+  assert.equal(stateReads(), 0);
+  assert.equal(store.getState().request.mutation.status, "idle");
+});
+
+test("a selection already shown sends nothing", async () => {
+  const { actions, requests, timers } = viewHarness(twoTermSnapshot());
+
+  actions.setSelection("age", [0, 0]);
+
+  assert.equal(timers.pending(), 0);
+  await settled();
+  assert.deepEqual(requests, []);
+});
+
+test("switching feature shows it and its selection with no state request", async () => {
+  const { actions, store, requests, timers, stateReads } = viewHarness(twoTermSnapshot());
+
+  actions.setActiveTerm("region");
+
+  assert.equal(selectActiveTermName(store.getState()), "region");
+  assert.deepEqual(selectCurrentSelection(store.getState()), [1]);
+  assert.equal(store.getState().remote.chartEpoch, 0);
+  assert.deepEqual(requests, []);
+  timers.fire();
+  await settled();
+  assert.deepEqual(requests, [
+    { path: "/select", payload: { term: "region", indices: [1], quiet: true } }
+  ]);
+  assert.equal(stateReads(), 0);
+});
+
+test("an edit waits until Python has the view it was made on", async () => {
+  const held = deferred();
+  const confirmed = twoTermSnapshot();
+  const { actions, requests, timers } = viewHarness(
+    confirmed,
+    (path) => (path === "/select" ? held.promise : twoTermSnapshot(3))
+  );
+
+  actions.setSelection("age", [3]);
+  timers.fire();
+  actions.setSelection("age", [4]);
+  const edit = actions.executeStateMutation({ name: "shift", path: "/op", payload: {} });
+  await settled();
+
+  assert.deepEqual(requests.map(({ path }) => path), ["/select"]);
+  held.resolve({ ok: true });
+  assert.equal((await edit).ok, true);
+  assert.deepEqual(requests.map(({ path, payload }) => [path, payload.indices]), [
+    ["/select", [3]],
+    ["/select", [4]],
+    ["/op", undefined]
+  ]);
+  assert.equal(timers.pending(), 0);
+});
+
+test("a view that did not arrive stops the edit, and Retry sends the view and then the edit", async () => {
+  let online = false;
+  const { actions, store, requests } = viewHarness(
+    twoTermSnapshot(),
+    () => {
+      if (!online) throw new Error("offline");
+      return twoTermSnapshot(3);
+    },
+    () => { throw new Error("offline"); }
+  );
+
+  actions.setSelection("age", [3]);
+  const failed = await actions.executeStateMutation({ name: "shift", path: "/op", payload: {} });
+
+  assert.equal(failed.ok, false);
+  assert.deepEqual(requests.map(({ path }) => path), ["/select"]);
+  assert.match(store.getState().request.recovery?.message ?? "", /could not be sent/);
+  assert.deepEqual(selectCurrentSelection(store.getState()), [3]);
+
+  online = true;
+  requests.length = 0;
+  assert.equal((await actions.retryMutation()).ok, true);
+  assert.deepEqual(requests.map(({ path }) => path), ["/select", "/op"]);
+});
+
+test("a structural edit that could not send its view says so, not that its outcome is uncertain", async () => {
+  const { actions, store, requests } = viewHarness(
+    twoTermSnapshot(),
+    () => { throw new Error("offline"); },
+    () => { throw new Error("offline"); }
+  );
+
+  actions.setSelection("age", [3]);
+  const result = await actions.executeStructuralMutation({
+    name: "collapse levels", path: "/stage", payload: {}
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(requests.map(({ path }) => path), ["/select"]);
+  assert.match(store.getState().request.recovery?.message ?? "", /could not be sent/);
+});
+
+test("a selection made during an edit survives its reply and is sent again", async () => {
+  const reply = deferred();
+  const { actions, store, requests, timers } = viewHarness(
+    twoTermSnapshot(),
+    (path) => (path === "/op" ? reply.promise : { ok: true })
+  );
+
+  const edit = actions.executeStateMutation({ name: "shift", path: "/op", payload: {} });
+  await settled();
+  assert.equal(store.getState().request.mutation.status, "running");
+  actions.setSelection("age", [5]);
+  assert.deepEqual(selectCurrentSelection(store.getState()), [5]);
+  timers.fire();
+  await settled();
+
+  reply.resolve(twoTermSnapshot(3));
+  assert.equal((await edit).ok, true);
+
+  assert.equal(store.getState().remote.snapshot?.model_revision, 3);
+  assert.deepEqual(selectCurrentSelection(store.getState()), [5]);
+  timers.fire();
+  await settled();
+  assert.deepEqual(
+    requests.filter(({ path }) => path === "/select").map(({ payload }) => payload.indices),
+    [[5], [5]]
+  );
+});
+
+test("a selection made during an edit keeps only the points the term still has", async () => {
+  const reply = deferred();
+  const { actions, store, requests, timers } = viewHarness(
+    twoTermSnapshot(),
+    (path) => (path === "/op" ? reply.promise : { ok: true })
+  );
+
+  const edit = actions.executeStateMutation({ name: "collapse", path: "/op", payload: {} });
+  await settled();
+  actions.setSelection("age", [1, 5]);
+  const shrunk = twoTermSnapshot(3);
+  shrunk.terms.age = { ...shrunk.terms.age, n_points: 3 };
+  reply.resolve(shrunk);
+  await edit;
+
+  assert.deepEqual(selectCurrentSelection(store.getState()), [1]);
+  timers.fire();
+  await settled();
+  assert.deepEqual(requests.at(-1)?.payload.indices, [1]);
+});
+
+test("a view Python refuses is dropped, and the page re-reads Python's selection", async () => {
+  const confirmed = twoTermSnapshot();
+  const { actions, store, requests, timers, stateReads } = viewHarness(
+    confirmed,
+    () => { throw Object.assign(new Error("Selection indices out of range"), { status: 400 }); }
+  );
+
+  actions.setSelection("age", [3]);
+  timers.fire();
+  await settled();
+  await settled();
+
+  assert.deepEqual(requests.map(({ path }) => path), ["/select"]);
+  assert.equal(stateReads(), 1);
+  assert.deepEqual(selectCurrentSelection(store.getState()), [0]);
+  assert.equal(timers.pending(), 0);
+  assert.equal(store.getState().request.recovery?.message, "Selection indices out of range");
+  assert.equal(store.getState().request.recovery?.retry, null);
+});
+
+test("a newer view replaces one that did not arrive, which is never sent again", async () => {
+  const { actions, requests, timers } = viewHarness(twoTermSnapshot(), (path, payload) => {
+    if (path === "/select" && /** @type {number[]} */ (payload.indices)[0] === 3) {
+      throw new Error("lost");
+    }
+    return path === "/select" ? { ok: true } : twoTermSnapshot(3);
+  });
+
+  actions.setSelection("age", [3]);
+  timers.fire();
+  actions.setSelection("age", [4]);
+  timers.fire();
+  await settled();
+  await actions.executeStateMutation({ name: "shift", path: "/op", payload: {} });
+
+  assert.deepEqual(requests.map(({ path, payload }) => [path, payload.indices]), [
+    ["/select", [3]],
+    ["/select", [4]],
+    ["/op", undefined]
+  ]);
+});
+
+test("a failed edit that adopts Python's state forgets the view it could not send", async () => {
+  let online = false;
+  const confirmed = twoTermSnapshot();
+  const { actions, store, requests, timers } = viewHarness(
+    confirmed,
+    () => {
+      if (!online) throw new Error("offline");
+      return twoTermSnapshot(3);
+    }
+  );
+
+  actions.setSelection("age", [3]);
+  await actions.executeStateMutation({ name: "shift", path: "/op", payload: {} });
+  assert.deepEqual(selectCurrentSelection(store.getState()), [0]);
+  assert.equal(timers.pending(), 0);
+
+  online = true;
+  requests.length = 0;
+  await actions.executeStateMutation({ name: "shift", path: "/op", payload: {} });
+  assert.deepEqual(requests.map(({ path }) => path), ["/op"]);
+});
+
+test("a new selection takes back the Retry offered for an edit on the old one", async () => {
+  const { actions, store } = viewHarness(
+    twoTermSnapshot(),
+    () => { throw new Error("offline"); },
+    () => { throw new Error("offline"); }
+  );
+
+  await actions.executeStateMutation({ name: "shift", path: "/op", payload: {} });
+  assert.ok(store.getState().request.recovery?.retry);
+
+  actions.setSelection("age", [3]);
+
+  assert.equal(store.getState().request.recovery, null);
+  assert.equal(store.getState().request.mutation.status, "idle");
 });

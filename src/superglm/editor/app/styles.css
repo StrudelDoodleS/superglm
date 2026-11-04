@@ -37,7 +37,7 @@
 }
 .app-busy-card span {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
 }
 .busy-spinner {
   width: 22px;
@@ -142,7 +142,7 @@ input[type="number"] {
 .group-display-toggle select,
 .new-levels-control select {
   min-width: 104px;
-  height: 26px;
+  height: var(--control-height);
   padding: 0 4px;
   border-color: var(--border);
   color: var(--text);
@@ -249,7 +249,7 @@ input[type="number"] {
   padding: 6px 4px 0;
   border-top: 1px solid var(--border);
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   /* The one-line status must not set the plot column's minimum width. */
   overflow: hidden;
 }
@@ -292,7 +292,7 @@ input[type="number"] {
   align-items: center;
   max-width: calc(100% - 16px);
   padding: 4px 6px;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   background: var(--surface);
   box-shadow: 0 6px 22px color-mix(in srgb, var(--ink) 13%, transparent), 0 0 0 1px var(--hairline);
   overflow: visible;
@@ -306,7 +306,7 @@ input[type="number"] {
   flex: 0 0 auto;
   padding-left: 4px;
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: var(--font-size-xs);
   font-weight: 600;
   letter-spacing: 0.02em;
   pointer-events: auto;
@@ -321,8 +321,8 @@ input[type="number"] {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
+  width: var(--control-height-lg);
+  height: var(--control-height-lg);
   padding: 0;
   border: 0;
   border-radius: var(--radius-md);
@@ -387,7 +387,7 @@ input[type="number"] {
 }
 .selection-submenu .selection-item {
   width: 32px;
-  height: 30px;
+  height: var(--control-height);
 }
 /* The join toggle: a two-state control after the shape icons. */
 .join-toggle {
@@ -396,17 +396,17 @@ input[type="number"] {
   gap: 2px;
   padding: 2px;
   border-radius: var(--radius-md);
-  background: var(--surface-subtle);
+  background: var(--surface-hover);
   pointer-events: auto;
 }
 .join-option {
   display: grid;
   width: 30px;
-  height: 26px;
+  height: var(--control-height-sm);
   place-items: center;
   padding: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted);
 }
@@ -432,7 +432,7 @@ input[type="number"] {
   border-bottom: 1px solid var(--border);
 }
 .sidepanel-tab {
-  height: 30px;
+  height: var(--control-height-lg);
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -481,7 +481,7 @@ input[type="number"] {
   margin: 0 0 3px;
   padding: 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   line-height: 1.1;
 }
 .summary-level-segments {
@@ -507,9 +507,9 @@ input[type="number"] {
 .summary-level-segments span {
   display: block;
   padding: 4px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: var(--font-size-sm);
   line-height: 1.2;
   text-align: center;
 }
@@ -528,7 +528,7 @@ input[type="number"] {
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 30px;
+  height: var(--control-height);
   margin-bottom: 8px;
   padding: 0 8px;
   border: 1px solid var(--border);
@@ -562,12 +562,12 @@ input[type="number"] {
 .summary-search-count {
   flex: none;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   white-space: nowrap;
 }
 .summary-frame mark {
   padding: 0 1px;
-  border-radius: 2px;
+  border-radius: var(--radius-xs);
   background: color-mix(in srgb, var(--yellow) 45%, transparent);
   color: inherit;
 }
@@ -578,23 +578,26 @@ input[type="number"] {
   gap: 6px;
   margin-bottom: 8px;
 }
-.summary-filter {
+.summary-filter,
+.distribution-segments {
   display: inline-flex;
   gap: 2px;
   padding: 2px;
   border-radius: var(--radius-md);
   background: var(--surface-hover);
 }
-.summary-filter button {
-  height: 24px;
+.summary-filter button,
+.distribution-segments button {
+  height: var(--control-height-sm);
   padding: 0 10px;
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
 }
-.summary-filter button[aria-pressed="true"] {
+.summary-filter button[aria-pressed="true"],
+.distribution-segments button[aria-pressed="true"] {
   background: var(--surface);
   color: var(--text);
   font-weight: 600;
@@ -606,7 +609,7 @@ input[type="number"] {
   gap: 4px;
   margin-left: auto;
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: var(--font-size-sm);
 }
 .summary-follow-icon {
   width: 13px;
@@ -640,12 +643,12 @@ input[type="number"] {
 .summary-chip {
   display: inline-flex;
   align-items: center;
-  height: 22px;
+  height: var(--control-height-sm);
   padding: 0 8px;
-  border-radius: 11px;
+  border-radius: var(--radius-pill);
   background: var(--surface);
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   white-space: nowrap;
 }
 .summary-tiles {
@@ -662,24 +665,24 @@ input[type="number"] {
 }
 .summary-tile span {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
 }
 .summary-tile strong {
   overflow: hidden;
   font-family: var(--font-mono);
-  font-size: 13px;
-  font-weight: 500;
+  font-size: var(--font-size-md);
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 #summaryStatus {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   margin: 0 0 6px;
 }
 .summary-note {
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: var(--font-size-sm);
   line-height: 1.4;
   margin: 0 0 8px;
 }
@@ -704,7 +707,7 @@ input[type="number"] {
 }
 .history-empty {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
 }
 .history-section-title {
   display: flex;
@@ -712,7 +715,7 @@ input[type="number"] {
   gap: 6px;
   margin: 8px 2px 4px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   font-weight: 600;
 }
 .history-section-title::before {
@@ -733,7 +736,7 @@ input[type="number"] {
 .history-section-hint {
   margin: -2px 2px 4px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
 }
 .history-list {
   display: grid;
@@ -764,23 +767,23 @@ input[type="number"] {
   min-width: 0;
 }
 .history-label {
-  font-size: 13px;
+  font-size: var(--font-size-md);
   font-weight: 600;
   overflow-wrap: anywhere;
 }
 .history-meta {
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: var(--font-size-sm);
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
 .history-undo-chip {
   flex: 0 0 auto;
   padding: 0 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--blue-soft);
   color: var(--blue);
-  font-size: 11.5px;
+  font-size: var(--font-size-sm);
   line-height: 20px;
   white-space: nowrap;
 }
@@ -790,7 +793,7 @@ input[type="number"] {
   justify-items: end;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: var(--font-size-xs);
   line-height: 1.35;
 }
 .history-id {
@@ -800,7 +803,7 @@ input[type="number"] {
 .history-note-edit.icon-button {
   flex: 0 0 auto;
   width: 24px;
-  height: 24px;
+  height: var(--control-height-sm);
   border-color: transparent;
   background: transparent;
   color: var(--muted);
@@ -826,7 +829,7 @@ input[type="number"] {
   gap: 6px;
   margin: 5px 0 0;
   color: var(--text);
-  font-size: 12.5px;
+  font-size: var(--font-size-md);
   font-style: italic;
   overflow-wrap: anywhere;
 }
@@ -837,7 +840,7 @@ input[type="number"] {
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 28px;
+  height: var(--control-height);
   margin-top: 6px;
   padding: 0 8px;
   border: 1px solid var(--blue);
@@ -849,12 +852,12 @@ input[type="number"] {
 .history-note-input[type="text"] {
   flex: 1 1 auto;
   min-width: 0;
-  height: 24px;
+  height: var(--control-height-sm);
   padding: 0;
   border: 0;
   background: transparent;
   color: var(--text);
-  font-size: 12.5px;
+  font-size: var(--font-size-md);
 }
 .history-note-input:focus-visible {
   outline: none;
@@ -862,13 +865,13 @@ input[type="number"] {
 .history-foot {
   margin: 8px 2px 0;
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: var(--font-size-sm);
 }
 
 /* The compact coefficient summary. */
 .summary-frame table {
   max-width: 100%;
-  font-size: 11px !important;
+  font-size: var(--font-size-xs) !important;
 }
 .compact-summary {
   display: grid;
@@ -889,14 +892,14 @@ input[type="number"] {
 }
 .summary-fact span {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   line-height: 1.3;
 }
 .summary-fact strong {
   min-width: 0;
   overflow-wrap: anywhere;
   color: var(--text);
-  font-size: 11.5px;
+  font-size: var(--font-size-sm);
   font-weight: 600;
   line-height: 1.3;
   text-align: right;
@@ -906,7 +909,7 @@ input[type="number"] {
   width: 100%;
   table-layout: fixed;
   border-collapse: collapse;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   font-variant-numeric: tabular-nums;
 }
 .summary-table th,
@@ -975,7 +978,7 @@ input[type="number"] {
   padding: 8px 4px 3px;
   border-bottom: 1px solid var(--border);
   color: var(--text);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   font-weight: 600;
   text-align: left;
 }
@@ -997,7 +1000,7 @@ input[type="number"] {
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   font-weight: 400;
   text-align: left;
 }
@@ -1035,7 +1038,7 @@ input[type="number"] {
 .summary-section-kind,
 .summary-section-edf {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   white-space: nowrap;
 }
 .summary-section-edf {
@@ -1047,8 +1050,8 @@ input[type="number"] {
 .summary-waiting,
 .summary-p-chip {
   padding: 1px 6px;
-  border-radius: 9px;
-  font-size: 10.5px;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-xs);
   white-space: nowrap;
 }
 .summary-waiting {
@@ -1071,7 +1074,7 @@ input[type="number"] {
   display: inline-block;
   margin-top: 1px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--font-size-xs);
   font-style: normal;
 }
 .summary-number {
@@ -1080,7 +1083,7 @@ input[type="number"] {
   white-space: nowrap;
 }
 .se-cell {
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1095,14 +1098,14 @@ input[type="number"] {
 .se-cell.sig-unknown, .summary-p-chip.sig-unknown { background: var(--surface-hover); color: var(--muted); }
 .se-cell.sig-reference { background: transparent; color: var(--muted); }
 .sig-code {
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0;
 }
 /* The advisory keeps its own column rather than taking over the SE cell's
    colour: significance and low credibility are independent findings
    (issue #239). */
 .advisory-code {
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0;
 }
 .summary-level-groups {
@@ -1111,7 +1114,7 @@ input[type="number"] {
   padding: 8px 10px;
   border-radius: var(--radius-md);
   color: var(--text);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   line-height: 1.35;
   background: var(--surface);
 }
@@ -1132,11 +1135,11 @@ input[type="number"] {
 }
 .summary-level-group-id {
   color: var(--blue);
-  font-weight: 700;
+  font-weight: 600;
 }
 .raw-summary {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
 }
 .raw-summary summary {
   cursor: pointer;
@@ -1174,7 +1177,7 @@ input[type="number"] {
   flex: 0 0 100%;
   padding: 0 4px 2px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
 }
 .metric-item {
   display: grid;
@@ -1192,7 +1195,7 @@ input[type="number"] {
 .metric-item-name {
   overflow: hidden;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   line-height: 16px;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -1202,7 +1205,7 @@ input[type="number"] {
   align-items: center;
   gap: 4px;
   color: var(--muted);
-  font-size: 15px;
+  font-size: var(--font-size-lg);
   font-weight: 600;
   line-height: 22px;
   font-variant-numeric: tabular-nums;
@@ -1222,7 +1225,7 @@ input[type="number"] {
   display: flex;
   gap: 6px;
   overflow: hidden;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   line-height: 16px;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
@@ -1237,7 +1240,7 @@ input[type="number"] {
 }
 .metric-pending {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   line-height: 22px;
 }
 
@@ -1259,13 +1262,13 @@ input[type="number"] {
 }
 .report-header h2 {
   margin: 0 0 2px;
-  font-size: 17px;
+  font-size: var(--font-size-xl);
   font-weight: 600;
 }
 .report-header p {
   margin: 0;
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--font-size-md);
 }
 .report-frame {
   min-height: 0;
@@ -1281,18 +1284,18 @@ input[type="number"] {
 }
 .report-section h3 {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--font-size-md);
   font-weight: 600;
 }
 .report-note {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
 }
 .report-table {
   width: 100%;
   border-collapse: collapse;
   table-layout: fixed;
-  font-size: 12.5px;
+  font-size: var(--font-size-md);
   font-variant-numeric: tabular-nums;
 }
 .report-table th,
@@ -1316,7 +1319,7 @@ input[type="number"] {
 .report-delta {
   display: block;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
 }
 .report-delta[data-direction="better"] { color: var(--better); }
 .report-delta[data-direction="worse"] { color: var(--worse); }
@@ -1331,7 +1334,7 @@ input[type="number"] {
 .report-subsection h4 {
   margin: 4px 0 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   font-weight: 600;
 }
 .cv-report pre {
@@ -1342,7 +1345,7 @@ input[type="number"] {
   padding: 8px 10px;
   background: var(--surface-subtle);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   user-select: text;
   -webkit-user-select: text;
 }
@@ -1375,28 +1378,24 @@ input[type="number"] {
 .point-layer[data-dense="true"] .point:not(.selected):not(.near):not(:hover) {
   opacity: 0;
 }
-.point-layer .point {
-  transition: opacity 120ms ease;
-}
 /* The selection anchor: a ring the point sits in, and a tag naming the
    gesture and the x, here and at a Shift-click span's far end. The tags step
    aside while the pointer drags. */
 .anchor-ring { fill: var(--surface); stroke: var(--orange); stroke-width: 2.4; pointer-events: none; }
 .anchor-tag { pointer-events: none; }
 .anchor-tag-box { fill: var(--surface); stroke: var(--orange); stroke-width: 1; }
-.anchor-tag-label { fill: var(--orange-text); font-size: 11px; font-weight: 600; }
+.anchor-tag-label { fill: var(--orange-text); font-size: var(--font-size-xs); font-weight: 600; }
 .chart-shell[data-dragging="true"] .anchor-tag { display: none; }
 .point-tooltip { pointer-events: none; }
 .point-tooltip rect {
   fill: color-mix(in srgb, var(--surface) 97%, transparent);
   stroke: var(--border);
   stroke-width: 1;
-  filter: drop-shadow(0 3px 10px color-mix(in srgb, var(--ink) 16%, transparent));
 }
 .point-tooltip-label,
 .point-tooltip-value {
   fill: var(--text);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
 }
 .level-group-link {
   fill: none;
@@ -1411,7 +1410,7 @@ input[type="number"] {
   pointer-events: none;
 }
 .level-group-label {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   font-weight: 600;
   paint-order: stroke;
   stroke: var(--surface);
@@ -1457,10 +1456,9 @@ input[type="number"] {
   stroke-width: 1;
   pointer-events: none;
 }
-.label { fill: var(--muted); font-size: 12px; }
-.tick-label { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
-.tick-label.small { font-size: 10px; }
-.legend { fill: var(--muted); font-size: 11px; }
+.label { fill: var(--muted); font-size: var(--font-size-sm); }
+.tick-label { fill: var(--muted); font-size: var(--font-size-xs); font-variant-numeric: tabular-nums; }
+.legend { fill: var(--muted); font-size: var(--font-size-xs); }
 .legend-swatch { fill: var(--yellow); fill-opacity: 0.45; stroke: none; }
 svg text:not(.x-tick-label) {
   pointer-events: none;

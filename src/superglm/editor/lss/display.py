@@ -44,7 +44,13 @@ _Y_LABELS: dict[Kind, str] = {
     "relativity": "relativity",
     "lognormal_cv": "coefficient of variation",
     "gamma_cv": "coefficient of variation",
-    "inverse_theta": "1/theta",
+    "inverse_theta": "overdispersion (1/θ)",
+}
+# What a spread parameter's fold curve is a relativity of: its own log-link value.
+_FOLD_VALUES: dict[Kind, str] = {
+    "lognormal_cv": "relativity of σ",
+    "gamma_cv": "relativity of the coefficient of variation",
+    "inverse_theta": "relativity of overdispersion (1/θ)",
 }
 _Y_FORMATS: dict[Kind, str] = {
     "relativity": "relativity",
@@ -74,6 +80,45 @@ def parameter_display(parameter: str) -> ParameterDisplay:
             "and 'theta'."
         )
     return ParameterDisplay(parameter, _GENERIC_LABELS[role], _CHIPS[role], role, _COLOURS[role])
+
+
+@dataclass(frozen=True)
+class FoldTermDisplay:
+    """How the Cross-validation tab shows a term.
+
+    ``label`` names it anywhere and ``short`` within its ``group``'s list; ``sign``
+    is the way up its log curve is drawn, and ``value`` what the curve shows. A term
+    of a SuperGLM has no group.
+    """
+
+    label: str
+    short: str
+    sign: float = 1.0
+    group: str | None = None
+    role: Role | None = None
+    value: str = "relativity"
+
+
+def fold_chart_display(key: str, family: object = None) -> FoldTermDisplay:
+    """How the Cross-validation tab shows the SuperLSS term ``key`` of a ``family`` model.
+
+    A theta curve is drawn as the 1/theta the editor shows, so higher means more
+    spread on every spread curve.
+    """
+    parameter, column = split_key(key)
+    shown = parameter_display(parameter)
+    value = "relativity"
+    if shown.role == "spread":
+        kind = next((kind for cls, kind in SPREAD_KINDS.items() if isinstance(family, cls)), None)
+        value = "relativity of the spread" if kind is None else _FOLD_VALUES[kind]
+    return FoldTermDisplay(
+        label=f"{column} · {shown.label}",
+        short=column,
+        sign=-1.0 if parameter == "theta" else 1.0,
+        group=shown.label,
+        role=shown.role,
+        value=value,
+    )
 
 
 @dataclass(frozen=True)

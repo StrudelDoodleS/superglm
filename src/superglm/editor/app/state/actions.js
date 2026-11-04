@@ -2,15 +2,13 @@
 
 import {
   beginEvidence,
+  commitLocalView,
   commitRemote,
-  commitSelectionRemote,
   commitStructuralTransition,
   completeEvidence,
   failEvidence,
   normalizeSelectionIndices,
   patchView as patchViewState,
-  selectionIndicesEqual,
-  setSelectionPreview,
   waitingListChanged
 } from "./store.js";
 import { selectModelRevision } from "./selectors.js";
@@ -163,6 +161,9 @@ const STRUCTURAL_REFRESH_INCOMPLETE =
 const EVIDENCE_DEBOUNCE_MS = 150;
 const NOTE_PATH = "/note";
 const NOTE_NOT_SAVED = "A History note did not save, so the next action did not run.";
+const VIEW_SEND_DELAY_MS = 250;
+const VIEW_NOT_SENT =
+  "The current selection could not be sent, so this action did not run. Check the connection and try again.";
 
 /** @param {()=>void|Promise<void>} hook @returns {Promise<void>} */
 async function notifyTimingHook(hook) {
@@ -238,6 +239,108 @@ export function createEditorActions({
     return saving;
   }
 
+  // The term a page shows and its selection are the page's: a click draws them at
+  // once and Python hears in the background, the newest view after any on their way.
+  // Python reads them for an edit and for a reload, so an edit first waits until it
+  // has the view the edit was made on, and a reply older than the page's latest view
+  // keeps that view (optimistic replication, last writer wins).
+  /** @type {{term:string, indices:number[]}|null} */
+  let latestView = null;
+  /** @type {{term:string, indices:number[]}|null} */
+  let unsentView = null;
+  let viewsMade = 0;
+  /** @type {any} */
+  let viewTimer = null;
+  /** @type {Promise<boolean>} */
+  let viewSends = Promise.resolve(true);
+
+  function forgetUnsentView() {
+    unsentView = null;
+    if (viewTimer !== null) clearTimer(viewTimer);
+    viewTimer = null;
+  }
+
+  /** @param {{term:string, indices:number[]}} view */
+  function holdUnsentView(view) {
+    forgetUnsentView();
+    unsentView = view;
+    viewTimer = setTimer(() => {
+      viewTimer = null;
+      void sendUnsentView();
+    }, VIEW_SEND_DELAY_MS);
+  }
+
+  /**
+   * A view Python refuses names something it no longer has, so the page re-reads it. One
+   * that did not arrive is sent again by the next edit, unless a newer view replaces it.
+   * @returns {Promise<boolean>} whether Python has the page's latest view
+   */
+  function sendUnsentView() {
+    const view = unsentView;
+    if (view === null) return viewSends;
+    forgetUnsentView();
+    const send = viewSends.then(async () => {
+      try {
+        await client.postJSON("/select", { ...view, quiet: true });
+        return true;
+      } catch (value) {
+        if (isRefusal(value)) {
+          showNotice(normalizeError(value).message);
+          void refreshFromPythonWhenIdle();
+        } else if (view === latestView) {
+          unsentView = view;
+        }
+        return false;
+      }
+    });
+    viewSends = send;
+    // A failure stops the edits waiting on this send, and no later one.
+    void send.then(() => {
+      if (viewSends === send) viewSends = Promise.resolve(true);
+    });
+    return send;
+  }
+
+  /**
+   * A reply to a request older than the page's latest view still shows that view, and
+   * Python hears it again in case the same reply moved the selection.
+   * @param {EditorState} state @param {number} made `viewsMade` when the request began
+   * @returns {EditorState}
+   */
+  function withLatestView(state, made) {
+    if (latestView === null || (viewsMade === made && unsentView === null)) return state;
+    const term = state.remote.snapshot?.terms[latestView.term];
+    if (!term) {
+      forgetUnsentView();
+      return state;
+    }
+    const size = term.n_points ?? Infinity;
+    latestView = {
+      term: latestView.term,
+      indices: latestView.indices.filter((index) => index < size)
+    };
+    holdUnsentView(latestView);
+    return commitLocalView(state, latestView.term, latestView.indices);
+  }
+
+  /** @param {string} term @param {number[]} indices */
+  function setSelection(term, indices) {
+    const before = store.getState();
+    const selection = normalizeSelectionIndices(indices);
+    store.update((state) => commitLocalView(state, term, selection));
+    if (store.getState() === before) return;
+    latestView = { term, indices: selection };
+    viewsMade += 1;
+    holdUnsentView(latestView);
+    // A Retry offered for an edit would now apply to another selection.
+    dismissRecovery();
+  }
+
+  /** @param {string} term */
+  function setActiveTerm(term) {
+    setSelection(term, store.getState().remote.snapshot?.selection[term] ?? []);
+  }
+
   /** @param {RecoveryRequestState|null} recovery */
   function finishStructuralMutation(recovery) {
     try {
@@ -264,13 +367,10 @@ export function createEditorActions({
    * @param {unknown} error
    * @param {string} operation
    * @param {MutationDescriptor|null} retry
-   * @param {(state:EditorState, snapshot:EditorSnapshot)=>EditorState} [commitRecovered]
    * @param {boolean} [refused]
    * @returns {Promise<{ok:false, error:Error}>}
    */
-  async function recoverMutation(
-    error, operation, retry, commitRecovered = commitRemote, refused = false
-  ) {
+  async function recoverMutation(error, operation, retry, refused = false) {
     const normalizedError = normalizeError(error);
     /** @type {EditorSnapshot|null} */
     let recovered = null;
@@ -286,7 +386,8 @@ export function createEditorActions({
       const currentRevision = state.remote.snapshot?.model_revision ?? -1;
       let restored;
       if (recovered && recovered.model_revision > currentRevision) {
-        restored = commitRecovered(
+        forgetUnsentView();
+        restored = commitRemote(
           {
             ...state,
             remote: {
@@ -300,11 +401,12 @@ export function createEditorActions({
       } else if (
         recovered && retry !== null && recovered.model_revision === currentRevision
       ) {
-        restored = commitRecovered(state, recovered);
+        forgetUnsentView();
+        restored = commitRemote(state, recovered);
       } else {
         restored = {
           ...state,
-          view: { ...state.view, preview: null, selectionPreview: null }
+          view: { ...state.view, preview: null }
         };
       }
       return {
@@ -338,6 +440,8 @@ export function createEditorActions({
     if (store.getState().request.mutation.status === "running") {
       return skippedMutation("An editor mutation is already running.");
     }
+    const made = viewsMade;
+    await sendUnsentView();
     let candidate;
     try {
       candidate = await client.getState();
@@ -348,7 +452,7 @@ export function createEditorActions({
       return { ok: false, error: new Error("Python returned an editor state this page cannot read.") };
     }
     const snapshot = /** @type {EditorSnapshot} */ (candidate);
-    store.update((state) => commitRemote(state, snapshot));
+    store.update((state) => withLatestView(commitRemote(state, snapshot), made));
     void Promise.resolve(scheduleVisibleEvidence(snapshot.model_revision, { immediate: true }))
       .catch(() => {});
     return { ok: true, snapshot };
@@ -417,6 +521,11 @@ export function createEditorActions({
       }
     }));
 
+    const made = viewsMade;
+    if (holdsEditor && !(await sendUnsentView())) {
+      return recoverMutation(new Error(VIEW_NOT_SENT), name, descriptor);
+    }
+
     /** @type {EditorSnapshot} */
     let snapshot;
     try {
@@ -426,7 +535,7 @@ export function createEditorActions({
     }
 
     store.update((state) => {
-      const committed = commitRemote(state, snapshot);
+      const committed = withLatestView(commitRemote(state, snapshot), made);
       return {
         ...committed,
         request: {
@@ -449,96 +558,6 @@ export function createEditorActions({
     } catch {
       // Evidence refresh is independent of the already-confirmed mutation.
     }
-    return { ok: true, snapshot };
-  }
-
-  /**
-   * @param {{term:string, indices:number[]}} selection
-   * @param {{settleNoop?:boolean}} [options]
-   * @returns {Promise<ActionResult>}
-   */
-  async function executeSelectionMutation(
-    { term, indices },
-    { settleNoop = false } = {}
-  ) {
-    if (noteSave && !(await afterNoteSave())) return skippedMutation(NOTE_NOT_SAVED);
-    if (store.getState().request.mutation.status === "running") {
-      return skippedMutation("An editor mutation is already running.");
-    }
-
-    const normalized = normalizeSelectionIndices(indices);
-    const currentSnapshot = store.getState().remote.snapshot;
-    const currentSelection = normalizeSelectionIndices(
-      currentSnapshot?.selection[term] ?? []
-    );
-    if (
-      currentSnapshot?.selected_term === term &&
-      selectionIndicesEqual(currentSelection, normalized)
-    ) {
-      if (settleNoop) {
-        store.update((state) => ({
-          ...state,
-          view: { ...state.view, selectionPreview: null },
-          request: {
-            ...state.request,
-            mutation: { status: "idle", operation: null, error: null },
-            recovery: null
-          }
-        }));
-        return { ok: true, snapshot: currentSnapshot };
-      }
-      return skippedMutation("The editor selection is already current.");
-    }
-
-    /** @type {MutationDescriptor} */
-    const descriptor = {
-      name: "select",
-      path: "/select",
-      payload: snapshotPayload({ term, indices: normalized })
-    };
-    store.update((state) => {
-      const previewed = setSelectionPreview(state, term, normalized);
-      return {
-        ...previewed,
-        request: {
-          ...previewed.request,
-          mutation: {
-            status: "running",
-            operation: "select",
-            error: null,
-            blocking: false
-          },
-          recovery: null
-        }
-      };
-    });
-
-    /** @type {EditorSnapshot} */
-    let snapshot;
-    try {
-      snapshot = /** @type {EditorSnapshot} */ (
-        await client.postJSON(descriptor.path, descriptor.payload)
-      );
-    } catch (value) {
-      return recoverMutation(
-        value,
-        descriptor.name,
-        descriptor,
-        commitSelectionRemote
-      );
-    }
-
-    store.update((state) => {
-      const committed = commitSelectionRemote(state, snapshot);
-      return {
-        ...committed,
-        request: {
-          ...committed.request,
-          mutation: { status: "idle", operation: null, error: null },
-          recovery: null
-        }
-      };
-    });
     return { ok: true, snapshot };
   }
 
@@ -571,6 +590,12 @@ export function createEditorActions({
       }
     }));
 
+    const made = viewsMade;
+    if (!(await sendUnsentView())) {
+      await notifyTimingHook(onRequestSettled);
+      return recoverMutation(new Error(VIEW_NOT_SENT), name, null, true);
+    }
+
     /** @type {StructuralTransitionEnvelope} */
     let envelope;
     /** @type {unknown} */
@@ -579,7 +604,7 @@ export function createEditorActions({
       response = await client.postJSON(path, requestPayload);
     } catch (value) {
       await notifyTimingHook(onRequestSettled);
-      return recoverMutation(value, name, null, commitRemote, isRefusal(value));
+      return recoverMutation(value, name, null, isRefusal(value));
     }
     await notifyTimingHook(onRequestSettled);
     try {
@@ -590,7 +615,7 @@ export function createEditorActions({
 
     const stateBeforeCommit = store.getState();
     try {
-      store.update((state) => commitStructuralTransition(state, envelope));
+      store.update((state) => withLatestView(commitStructuralTransition(state, envelope), made));
     } catch (value) {
       if (store.getState() === stateBeforeCommit) return recoverMutation(value, name, null);
       finishStructuralMutation({ message: STRUCTURAL_REFRESH_INCOMPLETE, retry: null });
@@ -715,12 +740,6 @@ export function createEditorActions({
     if (!retry) {
       return Promise.resolve(skippedMutation("No failed editor mutation is available to retry."));
     }
-    if (retry.name === "select") {
-      return executeSelectionMutation({
-        term: /** @type {string} */ (retry.payload.term),
-        indices: /** @type {number[]} */ (retry.payload.indices)
-      }, { settleNoop: true });
-    }
     return executeStateMutation(retry);
   }
 
@@ -764,7 +783,8 @@ export function createEditorActions({
     initialize,
     refreshFromPython,
     refreshFromPythonWhenIdle,
-    executeSelectionMutation,
+    setSelection,
+    setActiveTerm,
     executeStateMutation,
     executeStructuralMutation,
     refreshEvidence,

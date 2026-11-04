@@ -178,9 +178,9 @@ def _curve_block(
     rows = rows.iloc[np.zeros(len(grid), dtype=np.intp)].reset_index(drop=True)
     rows[label] = grid
     design = _term_design(view._fitted, rows, state, term_slice)
-    shift, block = _projection(
-        design, native_log_effect_values(term), editor_apply._term_weights(term)
-    )
+    fitted = np.asarray(view._fitted.coefficients, dtype=np.float64)[term_slice]
+    target = native_log_effect_values(term) + float(view.reference_design(term.name) @ fitted)
+    shift, block = _projection(design, target, editor_apply._term_weights(term))
     return block, shift
 
 

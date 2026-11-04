@@ -117,12 +117,11 @@ export function bindAppBar({
  * @param {boolean} options.canRevert
  * @param {boolean} options.busy
  * @param {number} options.pendingCount how many structural changes wait for Refit
- * @param {readonly string[]} [options.hiddenViews] views whose tabs the model does not offer
  * @param {string|null} [options.refitReason] why the model cannot be refitted here; null when it can
  */
 export function renderAppBar({
   root, activeView, undoButton, redoButton, revertButton, refreshButton, refitButton, refitCount,
-  undoLabel, redoLabel, canRevert, busy, pendingCount, hiddenViews = [], refitReason = null,
+  undoLabel, redoLabel, canRevert, busy, pendingCount, refitReason = null,
 }) {
   for (const element of root.querySelectorAll('[role="tab"]')) {
     if (!(element instanceof HTMLButtonElement)) continue;
@@ -130,7 +129,6 @@ export function renderAppBar({
     element.classList.toggle("active", active);
     element.setAttribute("aria-selected", String(active));
     element.tabIndex = active ? 0 : -1;
-    element.hidden = hiddenViews.includes(element.dataset.view ?? "");
   }
   undoButton.disabled = undoLabel === null;
   undoButton.dataset.popoverBody = undoLabel === null ? "Nothing to undo." : `Undo: ${undoLabel}`;

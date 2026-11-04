@@ -24,7 +24,7 @@ export const TOOL_HELP = Object.freeze({
   }),
   zoom: Object.freeze({
     title: "Zoom",
-    body: "Drag a box to zoom. The mouse wheel zooms in every mode.",
+    body: "Drag a box or use the mouse wheel to zoom. In other tools, hold Ctrl or Cmd with the wheel, or pinch.",
     shortcut: "Z",
   }),
   handles: Object.freeze({
@@ -71,13 +71,13 @@ export const OPERATION_HELP = Object.freeze({
   }),
   increasing: Object.freeze({
     title: "Make increasing",
-    body: "The closest non-decreasing curve to the selection, weighted by exposure. It is not tied "
-      + "to the points either side, so it can leave a step at an edge.",
+    body: "Hold the highest value so far until the curve passes it, so the selection never falls. "
+      + "It starts from the first selected point, so it can leave a step at an edge.",
   }),
   decreasing: Object.freeze({
     title: "Make decreasing",
-    body: "The closest non-increasing curve to the selection, weighted by exposure. It is not tied "
-      + "to the points either side, so it can leave a step at an edge.",
+    body: "Hold the lowest value so far until the curve drops below it, so the selection never rises. "
+      + "It starts from the first selected point, so it can leave a step at an edge.",
   }),
   level_left: Object.freeze({
     title: "Level from left",
@@ -265,14 +265,25 @@ export const HELP_SECTIONS = Object.freeze([
     title: "SuperLSS models",
     items: Object.freeze([
       "A SuperLSS model has more than one curve per feature. The feature list groups them by what they describe: the average (blue) and the spread (orange). A feature that acts in both appears in both groups, with a small curve of its effect on each row.",
-      "Edit an average curve as a relativity, as in any other model. A spread curve is shown in the units of that spread: the coefficient of variation for the log-normal and gamma families, or 1/theta for the negative binomial. Moving a spread point sets the spread to the value you drag to; a value the model cannot reach settles on the nearest one it can.",
-      "On a spread curve, Increase and Decrease move the selected points by about 5% of the value shown, and Make increasing, Make decreasing and the snaps act on the curve as drawn: on a 1/theta curve, Increase raises 1/theta.",
+      "Edit an average curve as a relativity, as in any other model. A spread curve is shown in the units of that spread: the coefficient of variation for the log-normal and gamma families, or overdispersion (1/θ) for the negative binomial. Moving a spread point sets the spread to the value you drag to; a value the model cannot reach settles on the nearest one it can.",
+      "On a spread curve, Increase and Decrease move the selected points by about 5% of the value shown, and Make increasing, Make decreasing and the snaps act on the curve as drawn: on an overdispersion curve, Increase raises overdispersion.",
       "A spread curve reads the spread at the reference row under the model as edited. Editing another spread curve of the same parameter can therefore move it away from its original line, though its own points are unchanged.",
       "Refit keeps the hand edits made in this session. A model exported with hand edits and opened again holds those edits in its coefficients, and Refit estimates those terms again from the data.",
       "History marks each step with the parameter it acted in. Undo, Redo, Revert and Refit cover both parameters in one history.",
-      "There is no Cross-validation tab: cross-validation is not available for SuperLSS models. Compare fits in the Validation tab, which scores each split by log score, CRPS and actual over expected, and use Run final fit in the Final Fit tab to refit on all rows.",
+      "The Validation tab scores each split by log score, CRPS and actual over expected. Pass a cross_validate() result to edit(model, cv=result) to score the same model across folds on the Cross-validation tab, where every average and spread curve has its relativities by fold, listed under those two headings with the average curves first. A spread curve is a relativity of what the family models: the coefficient of variation for the gamma, σ for the log-normal, and overdispersion (1/θ) for the negative binomial, so higher means more spread on every one. Final fit runs from that tab as well.",
       "Shaped ranges are off: a SuperLSS fit ignores shape constraints, so a shaped range would not hold after Refit. The same goes for special levels, the Unsmoothed line, free levels and new-level choices.",
       "The rating table, coefficient summary and the SuperGLM export formats are off too. Their hover text says why. Export an edited SuperLSS model as joblib, which keeps its history.",
+    ]),
+  }),
+  Object.freeze({
+    title: "Distribution panel",
+    items: Object.freeze([
+      "Under a SuperLSS chart, the distribution panel draws the distribution of the response at each value or level of the feature, with every other feature fixed at the reference row its caption names: a numeric feature at its median, any other at its most frequent level, and every offset at zero. A categorical feature shows its 12 levels with the most exposure, and the caption says when there are more.",
+      "A count model draws no distribution in this panel yet; the panel says so in place of the chart.",
+      "The line marks an amount or a percentile. Drag it, use the slider, or type in its box: an amount such as 25k, €25,000 or 1.5m, or a percentile such as 99.5th or 1 in 200. Each row then reads the chance of a value above the amount, or the amount at the percentile.",
+      "A comma is always a thousands separator, so 1,5m reads as 15,000,000. Write a decimal with a point, as in 1.5m.",
+      "When the line cannot be drawn where you asked, a note under it says why. An amount off the amount axis is drawn at the axis edge and the readouts keep your amount; a gamma spread above a coefficient of variation of 20 is drawn at 20, the largest the panel computes.",
+      "While you drag a curve, the panel previews the new distributions in the browser; when you let go, it redraws from the edited model.",
     ]),
   }),
   Object.freeze({
@@ -290,7 +301,8 @@ export const HELP_SECTIONS = Object.freeze([
   Object.freeze({
     title: "Navigation",
     items: Object.freeze([
-      "Mouse wheel: zoom",
+      "Ctrl or Cmd with the mouse wheel, or a pinch: zoom",
+      "Mouse wheel alone: scrolls when there is more below the chart, otherwise zooms",
       "Shift-drag or middle-drag: pan",
       "Home: reset zoom",
     ]),
@@ -329,7 +341,7 @@ export const HELP_SECTIONS = Object.freeze([
       "Each fold keeps its colour and its place within a level, fold 1 leftmost. Hover or focus a fold in a chart's legend to pick it out; a fold with no value at a level, one it never saw, leaves a gap there.",
       "Run CV on current model refits the current structure on the same folds and puts your hand edits back on each fold before scoring. It waits while changes wait for Refit, and needs the rows the folds were drawn on: cv_data=, or train data with the same row count.",
       "Final fit on all rows refits the current structure on train and validation rows and puts your hand edits back; the test split stays held out. Export then offers it as Final fit model.",
-      "Both run in the background with a Cancel button. A job whose model changed while it ran is not kept.",
+      "Both run in the background with a Cancel button, so you can keep working. A pill beside the tabs shows how far a job has got on every tab, and how it ended; click it to open the job's tab. While Run CV runs, each fold's scores land on the cards and in the table as it finishes. A job whose model changed while it ran is not kept.",
     ]),
   }),
   Object.freeze({

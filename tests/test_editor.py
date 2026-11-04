@@ -837,41 +837,72 @@ def _numeric_term_session(values, weights):
     return EditorSession(model=None, terms={"x": term})
 
 
-def test_isotonic_is_exposure_weighted_pooling_of_the_run():
-    # Pool-adjacent-violators by hand: (0.8, -0.2) at weights (1, 3) pool to
-    # 0.05 and (0.6, 0.1) to 0.35; the neighbours 0.0 and 0.2 take no part.
-    session = _numeric_term_session(
-        [0.0, 0.8, -0.2, 0.6, 0.1, 0.5, 0.2], [5.0, 1.0, 3.0, 1.0, 1.0, 2.0, 5.0]
-    )
-    session.select_indices("x", range(1, 6))
+def test_making_a_hump_increasing_holds_its_peak_until_the_curve_passes_it():
+    values = [0.0, 0.2, 0.5, 0.3, 0.1, 0.4, 0.7, 0.2]
+    session = _numeric_term_session(values, [5.0, 1.0, 3.0, 1.0, 1.0, 2.0, 5.0, 1.0])
+    session.select_indices("x", range(1, 7))
     session.isotonic("x", direction="increasing")
 
     after = session.terms["x"].edited_log_effect
-    np.testing.assert_allclose(after[1:6], [0.05, 0.05, 0.35, 0.35, 0.5], atol=1e-12)
-    weights = session.terms["x"].weights[1:6]
-    assert np.average(after[1:6], weights=weights) == pytest.approx(
-        np.average([0.8, -0.2, 0.6, 0.1, 0.5], weights=weights)
-    )
+    np.testing.assert_array_equal(after, [0.0, 0.2, 0.5, 0.5, 0.5, 0.5, 0.7, 0.2])
 
 
-def test_isotonic_does_not_lift_a_dip_to_a_higher_neighbour():
-    # A decreasing edit whose selection ends partway up a dip: the dip and the
-    # rise pool to their mean, leaving a step up into the neighbour, instead
-    # of the whole stretch being lifted to the neighbour's 0.03.
-    session = _numeric_term_session([0.10, 0.05, -0.02, -0.05, -0.04, 0.0, 0.03], np.ones(7))
-    session.select_indices("x", range(1, 6))
+def test_making_a_dip_decreasing_holds_its_trough_until_the_curve_drops_below_it():
+    session = _numeric_term_session([0.5, 0.2, 0.4, 0.3, 0.1, 0.25], np.ones(6))
     session.isotonic("x", direction="decreasing")
 
     after = session.terms["x"].edited_log_effect
-    np.testing.assert_allclose(after[1:6], [0.05, -0.02, -0.03, -0.03, -0.03], atol=1e-12)
-    assert after[5] < after[6]
+    np.testing.assert_array_equal(after, [0.5, 0.2, 0.2, 0.2, 0.1, 0.1])
 
 
-def test_isotonic_weights_an_unexposed_run_equally():
-    session = _numeric_term_session([0.0, 0.3, -0.1, 0.0], [1.0, 0.0, 0.0, 1.0])
-    session.select_indices("x", [1, 2])
+@pytest.mark.parametrize(
+    ("direction", "on_the_right_side"),
+    [("increasing", np.greater_equal), ("decreasing", np.less_equal)],
+)
+def test_a_monotone_edit_keeps_points_in_order_and_moves_only_the_others(
+    direction, on_the_right_side
+):
+    values = np.sin(np.linspace(0.0, 9.0, 60)) + np.linspace(0.0, 0.5, 60)
+    session = _numeric_term_session(values, np.ones(60))
+    session.isotonic("x", direction=direction)
+
+    after = session.terms["x"].edited_log_effect.copy()
+    steps = np.diff(after) if direction == "increasing" else -np.diff(after)
+    assert np.all(steps >= 0.0)
+    assert np.all(on_the_right_side(after, values))
+    pick = np.maximum if direction == "increasing" else np.minimum
+    in_order = values == pick.accumulate(values)
+    assert in_order.sum() > 1
+    np.testing.assert_array_equal(after[in_order], values[in_order])
+
+    session.isotonic("x", direction=direction)
+    np.testing.assert_array_equal(session.terms["x"].edited_log_effect, after)
+
+
+def test_a_monotone_edit_does_not_ignore_or_read_exposure():
+    values = [0.0, 0.8, -0.2, 0.6]
+    results = []
+    for weights in ([1.0, 1.0, 1.0, 1.0], [100.0, 1.0, 0.0, 7.0]):
+        session = _numeric_term_session(values, weights)
+        session.isotonic("x", direction="increasing")
+        results.append(session.terms["x"].edited_log_effect.copy())
+    np.testing.assert_array_equal(results[0], results[1])
+
+
+def test_a_monotone_edit_does_not_lift_a_run_to_a_higher_neighbour():
+    session = _numeric_term_session([0.5, 0.1, 0.0, 0.2, 0.9], np.ones(5))
+    session.select_indices("x", range(1, 4))
     session.isotonic("x", direction="increasing")
-    np.testing.assert_allclose(session.terms["x"].edited_log_effect[1:3], [0.1, 0.1], atol=1e-12)
+    after = session.terms["x"].edited_log_effect
+    np.testing.assert_array_equal(after, [0.5, 0.1, 0.1, 0.2, 0.9])
+
+
+def test_a_monotone_edit_treats_each_run_of_a_selection_on_its_own():
+    session = _numeric_term_session([0.4, 0.1, 0.9, 0.2, 0.0, 0.3], np.ones(6))
+    session.select_indices("x", [0, 1, 4, 5])
+    session.isotonic("x", direction="increasing")
+    after = session.terms["x"].edited_log_effect
+    np.testing.assert_array_equal(after, [0.4, 0.4, 0.9, 0.2, 0.0, 0.3])
 
 
 def test_isotonic_neighbor_anchors_constrain_without_pinning_to_both_sides():
@@ -6529,8 +6560,8 @@ def test_editor_collapsed_group_display_does_not_reuse_expanded_group_geometry()
     root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
     chart_js = (root / "chart.js").read_text()
 
-    assert "drawCollapsedLevelGroups(svg, view, sx, sy)" in chart_js
-    assert "else drawLevelGroups(svg, view, sx, sy)" in chart_js
+    assert "drawCollapsedLevelGroups(scene, view, sx, sy)" in chart_js
+    assert "else drawLevelGroups(scene, view, sx, sy)" in chart_js
     assert "term.displayIsGroup" in chart_js
 
 
@@ -6589,7 +6620,10 @@ def test_editor_chart_points_have_relativity_exposure_tooltips():
     assert "pointTooltipLines(term, i)" in chart_js
     assert "Relativity: ${fmt(term.y[i])}" in chart_js
     assert "Exposure: ${fmt(exposure)}" in chart_js
-    assert "showPointTooltip(svg, circle, pointTooltipLines(term, i))" in chart_js
+    assert (
+        "showPointTooltip(svg, point, pointTooltipLines(view, Number(point.dataset.index)))"
+        in chart_js
+    )
     assert "hidePointTooltip(svg)" in chart_js
     assert "point-tooltip" in css
 

@@ -290,15 +290,11 @@ def ordered_spline_geometry(model, term: EditableTerm) -> OrderedSplineGeometry 
     the coefficients mean, and a fitted curve that does not reproduce the
     reported level effects to round-off is refused rather than drawn.
     """
-    from superglm.editor.lss.view import LSSModelView
     from superglm.features.ordered_categorical import OrderedCategorical
 
     spec = None if model is None else getattr(model, "_specs", {}).get(term.name)
     if not isinstance(spec, OrderedCategorical) or spec.basis_kind != "spline":
         return None
-    # A SuperLSS term is edited level by level; its spline handles read SuperGLM groups.
-    if isinstance(model, LSSModelView):
-        return ORDERED_SPLINE_UNAVAILABLE
     if spec._grouping is not None:
         return ORDERED_SPLINE_GROUPED
     inner = spec._basis_spline
@@ -319,14 +315,7 @@ def ordered_spline_geometry(model, term: EditableTerm) -> OrderedSplineGeometry 
     starts = np.arange(positions.size - 1, dtype=np.float64)
     grid_x = np.concatenate([(starts[:, None] + fractions).ravel(), [positions.size - 1.0]])
     base = np.array([spec._level_to_value[spec._base_level]], dtype=np.float64)
-    beta = np.concatenate(
-        [
-            np.asarray(model.result.beta, dtype=np.float64)[group.sl]
-            for group in model._groups
-            if group.feature_name == term.name
-        ]
-    )
-    spline_beta, _ = spec._split_beta(beta)
+    spline_beta, _ = spec._split_beta(_term_coefficients(model, term.name))
     try:
         level_basis = _as_dense_matrix(inner._basis_matrix(positions))
         grid_basis = _as_dense_matrix(inner._basis_matrix(grid_positions))
@@ -359,6 +348,19 @@ def ordered_spline_geometry(model, term: EditableTerm) -> OrderedSplineGeometry 
         live=live,
         fitted=fitted,
         n_points=int(term.size),
+    )
+
+
+def _term_coefficients(model, name: str) -> NDArray[np.float64]:
+    """The fitted coefficients of the term ``name``; a SuperLSS's view reads its own layout."""
+    if hasattr(model, "term_coefficients"):
+        return model.term_coefficients(name)
+    return np.concatenate(
+        [
+            np.asarray(model.result.beta, dtype=np.float64)[group.sl]
+            for group in model._groups
+            if group.feature_name == name
+        ]
     )
 
 

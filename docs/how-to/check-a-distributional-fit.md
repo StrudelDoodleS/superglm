@@ -453,6 +453,31 @@ the book; a candidate that wins overall and loses on the largest segment is
 a candidate to look at again.
 ```
 
+To score a model on rows no fit has seen, across the whole book, cross-validate
+it. Each fold fits on its training rows, choosing its own smoothing, and is
+scored on its held-out rows:
+
+```python
+from sklearn.model_selection import KFold
+
+from superglm import cross_validate
+
+folds = cross_validate(
+    model, frame, y, cv=KFold(5, shuffle=True, random_state=7),
+    sample_weight=exposure, fit_mode="fit_reml", return_estimators=True,
+)
+folds.fold_scores    # one row per fold: its scores, EDF, fit time and convergence
+folds.mean_scores    # "nll" (the log score), "crps", "gini" and "actual_expected"
+folds.pooled_scores  # the same over all held-out rows, as ratios of sums
+```
+
+Offsets are a dict by parameter, as in `fit`. The `"nll"` of a SuperLSS and of a
+SuperGLM are the same quantity, so the two can be compared on the same folds.
+`std_scores` says how far the folds spread. It is not a standard error of the
+mean, because the folds share training rows (Bates, Hastie and Tibshirani 2024).
+Pass the result to `superglm.editor.edit(model, cv=folds)` to see it on the
+Cross-validation tab, with each term drawn by fold.
+
 The continuous ranked probability score is available in closed form for the
 Gaussian, gamma and log-normal families (the catalogue of Jordan, Krüger and
 Lerch 2019) and by quantile-score integration for other supported families.

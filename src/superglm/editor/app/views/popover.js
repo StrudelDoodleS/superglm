@@ -3,6 +3,8 @@
 import { helpForElement } from "./help_content.js";
 
 export const TOOLTIP_SHOW_DELAY_MS = 350;
+// Reaching another target this soon after a tooltip closes shows its tooltip at once.
+export const TOOLTIP_SWITCH_WINDOW_MS = 300;
 
 /** @typedef {(callback: () => void, delay: number) => number} SetTimer */
 /** @typedef {(timer: number) => void} ClearTimer */
@@ -23,11 +25,17 @@ export class PopoverDelay {
     this.onHide = onHide;
     /** @type {number | null} */
     this.timer = null;
+    /** @type {number | null} */
+    this.switchTimer = null;
     this.visible = false;
   }
 
   pointerEnter() {
     this.cancel();
+    if (this.switchTimer !== null) {
+      this.show();
+      return;
+    }
     this.timer = this.setTimer(() => this.show(), TOOLTIP_SHOW_DELAY_MS);
   }
 
@@ -41,13 +49,16 @@ export class PopoverDelay {
     this.show();
   }
 
+  /** Close on purpose: the next tooltip waits its delay. */
   escape() {
     this.cancel();
     this.hide();
+    this.endSwitch();
   }
 
   show() {
     this.timer = null;
+    this.endSwitch();
     if (this.visible) return;
     this.visible = true;
     this.onShow();
@@ -57,6 +68,15 @@ export class PopoverDelay {
     if (!this.visible) return;
     this.visible = false;
     this.onHide();
+    this.switchTimer = this.setTimer(() => {
+      this.switchTimer = null;
+    }, TOOLTIP_SWITCH_WINDOW_MS);
+  }
+
+  endSwitch() {
+    if (this.switchTimer === null) return;
+    this.clearTimer(this.switchTimer);
+    this.switchTimer = null;
   }
 
   cancel() {
@@ -130,7 +150,7 @@ export function bindPopovers({ root, popover }) {
   }
 
   function show() {
-    if (!target) return;
+    if (!target?.isConnected) return;
     const help = helpForElement(target);
     if (!help) return;
 
@@ -141,13 +161,12 @@ export function bindPopovers({ root, popover }) {
 
     const anchor = target.getBoundingClientRect();
     const box = popover.getBoundingClientRect();
-    const left = Math.max(
-      8,
-      Math.min(
-        window.innerWidth - box.width - 8,
-        anchor.left + anchor.width / 2 - box.width / 2,
-      ),
-    );
+    // Tooltips of one row of buttons share an edge, so moving along it only changes the text.
+    const group = target.closest("[data-popover-group]");
+    const wanted = group
+      ? group.getBoundingClientRect().right - box.width
+      : anchor.left + anchor.width / 2 - box.width / 2;
+    const left = Math.max(8, Math.min(window.innerWidth - box.width - 8, wanted));
     const below = anchor.bottom + 8;
     const top =
       below + box.height <= window.innerHeight - 8
@@ -164,6 +183,11 @@ export function bindPopovers({ root, popover }) {
 
   /** @param {Event} event */
   function onPointerOver(event) {
+    // A target re-rendered away sends no pointerout, and its tooltip would stay.
+    if (hoveredTarget && !hoveredTarget.isConnected) {
+      hoveredTarget = null;
+      syncTarget(false);
+    }
     const next = candidate(event.target);
     if (!next || next === hoveredTarget) return;
     hoveredTarget = next;
@@ -175,6 +199,10 @@ export function bindPopovers({ root, popover }) {
     if (!hoveredTarget) return;
     const related = event instanceof PointerEvent ? event.relatedTarget : null;
     if (related instanceof Node && hoveredTarget.contains(related)) return;
+    // Between the buttons of a row the tooltip stays until the next one takes over.
+    if (related instanceof Node && hoveredTarget.closest("[data-popover-group]")?.contains(related)) {
+      return;
+    }
     hoveredTarget = null;
     syncTarget(false);
   }
@@ -197,7 +225,7 @@ export function bindPopovers({ root, popover }) {
   }
 
   function dismiss() {
-    delay.pointerLeave();
+    delay.escape();
     if (target) target.removeAttribute("aria-describedby");
     target = null;
     hoveredTarget = null;

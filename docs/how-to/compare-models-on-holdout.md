@@ -16,7 +16,8 @@ after the model is already chosen.
 
 `cross_validate()` is the main comparison tool. For REML pricing models, call
 it with `fit_mode="fit_reml"` so each fold uses the same fitting story as the
-final model.
+final model. It takes a `SuperLSS` too; see
+[Check a distributional fit](check-a-distributional-fit.md#5-how-do-candidates-compare).
 
 The fitting examples on this page assume a Poisson rate response
 (`y = claim_count / exposure`) fitted with `weight_semantics="frequency"`, for

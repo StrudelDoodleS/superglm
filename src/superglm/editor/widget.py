@@ -33,7 +33,7 @@ from superglm.editor.cv import (
     FinalFit,
     capture_cv_run,
     capture_final_fit,
-    final_fit_reason,
+    headline_score,
     run_cv,
     run_final_fit,
 )
@@ -55,12 +55,12 @@ from superglm.editor.io import jsonable
 from superglm.editor.jobs import JobContext, JobRunner
 from superglm.editor.lss import display_for, is_lss
 from superglm.editor.lss.availability import (
-    LSS_CAPABILITIES,
     require_available,
     session_availability,
     unavailable_evidence,
 )
 from superglm.editor.lss.display import directed_operation
+from superglm.editor.lss.panel import NOT_SUPERLSS, distribution_panel_payload
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
 from superglm.editor.notebook import NotebookTransport, notebook_view_class
@@ -271,6 +271,8 @@ class EditorWidget:
                 # With the live edits, this says whether Revert has anything to
                 # change: a structural step or a re-profile each make it False.
                 "in_force_is_original": self.session.model is self.session.reference_model,
+                # A job still running when the page loads, for its progress to pick up.
+                "jobs_running": self._running_jobs(),
                 # Export offers the Final fit model while it is current.
                 "final_fit": {
                     "available": self._final_fit is not None,
@@ -280,10 +282,6 @@ class EditorWidget:
             }
             if is_lss(self.session.model):
                 state["unavailable"] = session_availability(self.session)
-                state["capabilities"] = dict(LSS_CAPABILITIES)
-                # The Final fit panel's own button reads whether the fit can run.
-                reason = final_fit_reason(self.session)
-                state["final_fit_plan"] = {"available": reason is None, "reason": reason}
             self._state_generation += 1
             state["state_generation"] = self._state_generation
             state["chart_generation"] = self._chart_generation
@@ -299,10 +297,19 @@ class EditorWidget:
             self._select_term(term)
             return self._state()
 
-    def _select(self, term: str, indices: list[int]) -> dict[str, Any]:
+    def _note_view(self, term: str, indices: list[int]) -> dict[str, Any]:
+        """Record the term a page shows and its selection, which the page itself owns.
+
+        An edit reads the selection from the session, and a reload starts from it.
+        """
         with self._lock:
             self._select_term(term)
             self.session.select_indices(term, indices)
+        return {"ok": True}
+
+    def _select(self, term: str, indices: list[int]) -> dict[str, Any]:
+        with self._lock:
+            self._note_view(term, indices)
             return self._state()
 
     def _operate(self, operation: str, term: str | None = None) -> dict[str, Any]:
@@ -676,7 +683,6 @@ class EditorWidget:
             if model_revision is not None and int(model_revision) != current_revision:
                 return _superseded_payload(int(model_revision), request_sequence)
         if report == "cv":
-            require_available(self.session.model, "cv")
             payload = report_payload(self, report, request_sequence=request_sequence)
             with self._lock:
                 if payload["model_revision"] != self.session.model_revision:
@@ -871,6 +877,18 @@ class EditorWidget:
             raise EditorValueError(found)
         assert found is not None
         return {**found, "fit_token": token}
+
+    def _distribution(self, feature: str) -> dict[str, Any]:
+        """The distribution panel's data for ``feature``, the model in force beside the fitted one."""
+        if not is_lss(self.session.model):
+            raise EditorValueError(NOT_SUPERLSS)
+        model, revision = self._current_model_for_evidence()
+        if model is None:
+            return _superseded_payload(revision, None)
+        with self._lock:
+            if revision != self.session.model_revision:
+                return _superseded_payload(revision, None)
+            return distribution_panel_payload(self.session, feature, edited=model)
 
     def _rating_table(self, term: str) -> dict[str, Any]:
         """``term``'s block of the Excel rating table, for the Table view.
@@ -1163,6 +1181,10 @@ class EditorWidget:
             work, publish = starter()
         return self._jobs.status(self._jobs.start(kind, work, publish))
 
+    def _running_jobs(self) -> list[dict[str, Any]]:
+        latest = (self._jobs.latest(kind) for kind in self._job_starters)
+        return [job for job in latest if job is not None and job["status"] == "running"]
+
     def _cv_job(self):
         """Run CV on the in-force structure; the caller holds the lock."""
         plan = capture_cv_run(self.session)
@@ -1173,7 +1195,11 @@ class EditorWidget:
                     raise EditorValueError(SUPERSEDED)
                 self._cv_run = run
             self._notify_changed()
-            return {"model_revision": plan.model_revision, "n_folds": len(plan.folds)}
+            return {
+                "model_revision": plan.model_revision,
+                "n_folds": len(plan.folds),
+                "headline": headline_score(plan.model, run.result),
+            }
 
         return (lambda context: run_cv(plan, context)), publish
 

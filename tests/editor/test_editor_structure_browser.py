@@ -275,8 +275,7 @@ def test_feature_search_filters_the_list_and_opens_the_first_match(open_editor_p
 
         search.fill("TERR")
         assert [row.get_attribute("data-term") for row in rows.all()] == ["territory"]
-        with page.expect_response(_posted("/term")):
-            search.press("Enter")
+        search.press("Enter")
         page.wait_for_function(
             "() => document.querySelector('#status')?.dataset.term === 'territory'"
         )

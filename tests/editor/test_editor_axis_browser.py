@@ -96,13 +96,7 @@ def test_identical_categorical_redraw_reuses_text_measurements(open_editor_page,
             }"""
         )
 
-        with page.expect_response(
-            lambda response: (
-                response.request.method == "POST"
-                and response.url.split("?", maxsplit=1)[0].endswith("/term")
-            )
-        ):
-            choose_feature(page, "long_category")
+        choose_feature(page, "long_category")
         page.wait_for_function(
             "term => document.querySelector('#status')?.dataset.term === term",
             arg="long_category",
@@ -143,7 +137,7 @@ def test_a_narrow_chart_labels_and_measures_levels_one_whole_step_apart(open_edi
 def test_zoom_between_categories_does_not_draw_an_out_of_domain_tick(open_editor_page):
     with open_editor_page(selected_term="territory") as (page, _session):
         zoom = page.locator("#chart").evaluate(
-            """svg => {
+            """async svg => {
                 for (let index = 0; index < 24; index += 1) {
                     const scale = svg._scale;
                     const x = scale.margin.left
@@ -160,6 +154,9 @@ def test_zoom_between_categories_does_not_draw_an_out_of_domain_tick(open_editor
                         clientY: client.y,
                         deltaY: -1,
                     }));
+                    await new Promise(resolve => requestAnimationFrame(
+                        () => requestAnimationFrame(resolve)
+                    ));
                 }
                 return { xMin: svg._scale.xMin, xMax: svg._scale.xMax };
             }"""
@@ -167,3 +164,30 @@ def test_zoom_between_categories_does_not_draw_an_out_of_domain_tick(open_editor
 
         assert 0 < zoom["xMin"] < zoom["xMax"] < 1
         assert page.locator("#chart .x-tick-label").count() == 0
+
+
+def test_the_ticks_of_one_frame_zoom_to_the_smallest_range_rather_than_being_refused(
+    open_editor_page,
+):
+    with open_editor_page(selected_term="territory") as (page, _session):
+        ratio = page.locator("#chart").evaluate(
+            """async svg => {
+                const box = svg.getBoundingClientRect();
+                for (let index = 0; index < 300; index += 1) {
+                    svg.dispatchEvent(new WheelEvent('wheel', {
+                        bubbles: true,
+                        cancelable: true,
+                        clientX: box.left + box.width / 2,
+                        clientY: box.top + box.height / 2,
+                        deltaY: -1,
+                    }));
+                }
+                await new Promise(resolve => requestAnimationFrame(
+                    () => requestAnimationFrame(resolve)
+                ));
+                const scale = svg._scale;
+                return (scale.xMax - scale.xMin) / (scale.baseXMax - scale.baseXMin);
+            }"""
+        )
+
+        assert abs(ratio - 1 / 200) < 1e-9

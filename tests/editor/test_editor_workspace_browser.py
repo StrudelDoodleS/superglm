@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+import numpy as np
 import pytest
 from tests.editor._chart_layout import wait_for_chart_to_fit
 from tests.editor._editor_waits import hold_requests, wait_for_interception
@@ -198,26 +199,26 @@ def test_selection_noop_empty_box_preserves_chart_without_posting(open_editor_pa
         } == {"brush"}
 
 
-def test_selection_incremental_feedback_precedes_delayed_backend_success(open_editor_page):
+def test_a_click_draws_its_selection_before_python_hears_of_it(open_editor_page):
     with open_editor_page() as (page, session):
         select_chart_tool(page, "Select")
         initial_revision = session.model_revision
-        select_requests = []
+        other_requests = []
         page.on(
             "request",
-            lambda request: select_requests.append(request) if is_select_request(request) else None,
+            lambda request: (
+                other_requests.append(request.url)
+                if request.url.split("?", maxsplit=1)[0].rsplit("/", 1)[-1] in {"state", "term"}
+                else None
+            ),
         )
         held_routes = hold_requests(page, "**/select")
         remember_selection_dom(page)
         point = page.locator("#chart circle.point[data-index]").first
         selected_index = int(point.get_attribute("data-index"))
 
-        with page.expect_request(is_select_request):
-            point.click()
+        point.click()
 
-        held_routes.wait()
-        assert len(held_routes) == 1
-        assert session.selection("curve").tolist() == []
         page.wait_for_function(
             """index => {
                 const point = document.querySelector(
@@ -229,31 +230,90 @@ def test_selection_incremental_feedback_precedes_delayed_backend_success(open_ed
             }""",
             arg=selected_index,
         )
+        assert session.selection("curve").tolist() == []
         assert selection_dom_is_unchanged(page)
 
+        held_routes.wait()
+        assert len(held_routes) == 1
+        assert held_routes[0].request.post_data_json == {
+            "term": "curve",
+            "indices": [selected_index],
+            "quiet": True,
+        }
         with page.expect_response(
             lambda response: is_select_request(response.request)
         ) as response_info:
-            backend_response = held_routes[0].fetch()
-            payload = backend_response.json()
-            payload["terms"]["curve"]["impact"] = {
-                **payload["terms"]["curve"]["impact"],
-                "weighted_mean_relativity": 1.23,
-                "selected_weight_share": 0.45,
-            }
-            held_routes[0].fulfill(response=backend_response, json=payload)
+            held_routes[0].continue_()
 
-        assert response_info.value.status == 200
-        page.wait_for_function("() => document.querySelector('#appBusyOverlay')?.hidden")
-        assert "average edit relativity 1.23x" in page.locator("#status").inner_text()
-        assert "selected exposure 45%" in page.locator("#status").inner_text()
+        assert response_info.value.json() == {"ok": True}
         assert session.selection("curve").tolist() == [selected_index]
         assert session.model_revision == initial_revision
-        assert len(select_requests) == 1
+        assert other_requests == []
         assert selection_dom_is_unchanged(page)
 
 
-def test_failed_delayed_selection_recovers_without_rebuilding_chart(open_editor_page):
+def test_a_second_click_before_the_first_reaches_python_lands(open_editor_page):
+    with open_editor_page(n_points=30) as (page, session):
+        select_chart_tool(page, "Select")
+        hold_requests(page, "**/select")
+        points = (
+            page.locator('#chart circle.point[data-index="2"]'),
+            page.locator('#chart circle.point[data-index="4"]'),
+        )
+        points[0].click()
+        points[1].click()
+
+        page.wait_for_function(
+            """() => {
+                const selected = document.querySelectorAll('#chart circle.point.selected');
+                return selected.length === 1 && selected[0].dataset.index === '4';
+            }"""
+        )
+        assert session.selection("curve").tolist() == []
+
+
+def test_switching_feature_asks_python_for_no_state(open_editor_page, choose_feature):
+    with open_editor_page() as (page, session):
+        requests = []
+        page.on(
+            "request",
+            lambda request: requests.append(
+                request.url.split("?", maxsplit=1)[0].rsplit("/", 1)[-1]
+            ),
+        )
+        with page.expect_response(lambda response: is_select_request(response.request)) as reply:
+            choose_feature(page, "territory")
+        page.wait_for_function(
+            "() => document.querySelector('#status')?.dataset.term === 'territory'"
+        )
+
+        assert reply.value.json() == {"ok": True}
+        assert "state" not in requests and "term" not in requests
+        assert requests.count("select") == 1
+        assert session.selection("territory").tolist() == []
+
+
+def test_the_selected_share_the_page_computes_is_the_one_python_computes(open_editor_page):
+    with open_editor_page() as (page, session):
+        select_chart_tool(page, "Select")
+        with page.expect_response(lambda response: is_select_request(response.request)):
+            page.locator('#chart circle.point[data-index="1"]').click()
+        local = page.evaluate("() => window.__superglmTest.currentImpact().selected_weight_share")
+
+        python = page.evaluate(
+            """async () => {
+                const token = new URLSearchParams(location.search).get('token');
+                const reply = await fetch('/state', { headers: { 'X-SuperGLM-Editor-Token': token } });
+                return (await reply.json()).terms.curve.impact.selected_weight_share;
+            }"""
+        )
+
+        assert 0 < python < 1
+        size = session.terms["curve"].size
+        assert abs(local - python) <= size * np.finfo(np.float64).eps * python
+
+
+def test_a_selection_python_refuses_goes_back_and_says_why(open_editor_page):
     with open_editor_page() as (page, session):
         # The error banner this test raises takes a row above the editor, and a
         # chart whose panel shrinks is redrawn at its new size. Pin the panel at
@@ -289,6 +349,7 @@ def test_failed_delayed_selection_recovers_without_rebuilding_chart(open_editor_
         assert request_info.value.post_data_json == {
             "term": term,
             "indices": [candidate_index],
+            "quiet": True,
         }
         page.wait_for_function(
             """index => {
@@ -315,7 +376,7 @@ def test_failed_delayed_selection_recovers_without_rebuilding_chart(open_editor_
             )
         ) as recovery_response:
             held_routes[0].fulfill(
-                status=500,
+                status=400,
                 content_type="application/json",
                 body='{"error":"Selection rejected for browser test."}',
             )
@@ -330,10 +391,42 @@ def test_failed_delayed_selection_recovers_without_rebuilding_chart(open_editor_
         )
 
         assert "Selection rejected for browser test." in alert.inner_text()
-        assert page.locator("#appAlertRetry").is_visible()
+        assert page.locator("#appAlertRetry").is_hidden()
         assert selection_visual_state(page) == authoritative_visuals
         assert session.selection(term).tolist() == authoritative_selection
-        assert selection_dom_is_unchanged(page)
+
+
+def test_a_selection_that_did_not_arrive_stays_shown_and_the_next_edit_sends_it(open_editor_page):
+    with open_editor_page() as (page, session):
+        select_chart_tool(page, "Select")
+        term = session.terms["curve"]
+        before = term.edited_log_effect.copy()
+        hold_requests_once = hold_requests(page, "**/select")
+        point = page.locator('#chart circle.point[data-index="2"]')
+
+        with page.expect_request(is_select_request):
+            point.click()
+        hold_requests_once.wait()
+        with page.expect_response(lambda response: is_select_request(response.request)):
+            hold_requests_once[0].fulfill(
+                status=500, content_type="application/json", body='{"error":"lost"}'
+            )
+        page.unroute("**/select")
+        assert page.locator("#appAlert").is_hidden()
+        assert session.selection("curve").tolist() == []
+        assert page.locator("#chart circle.point.selected").count() == 1
+
+        order = []
+        page.on(
+            "request",
+            lambda request: order.append(request.url.split("?", maxsplit=1)[0].rsplit("/", 1)[-1]),
+        )
+        page.get_by_role("button", name="Increase selection", exact=True).click()
+        page.wait_for_function("() => !document.querySelector('#undoAction').disabled")
+
+        assert order.index("select") < order.index("op")
+        assert session.selection("curve").tolist() == [2]
+        assert np.flatnonzero(term.edited_log_effect != before).tolist() == [2]
 
 
 def test_collapsed_categorical_selection_posts_exact_source_indices_without_redraw(
@@ -371,6 +464,7 @@ def test_collapsed_categorical_selection_posts_exact_source_indices_without_redr
         assert request_info.value.post_data_json == {
             "term": "territory",
             "indices": source_indices,
+            "quiet": True,
         }
         assert session.selection("territory").tolist() == []
         page.wait_for_function(
@@ -435,6 +529,7 @@ def test_expanded_group_members_remain_individually_selectable_for_regrouping(
         assert response_info.value.request.post_data_json == {
             "term": "territory",
             "indices": [source_index],
+            "quiet": True,
         }
         page.wait_for_function("() => document.querySelector('#appBusyOverlay')?.hidden")
         assert session.selection("territory").tolist() == [source_index]
@@ -545,16 +640,11 @@ def test_selection_menu_does_not_block_adjacent_modifier_selection(open_editor_p
 
 
 def _click_selects(page, point, modifiers=(), timeout=30000) -> None:
-    """Click, wait for its /select, and let the page settle before the next click.
-
-    A selection posts without the busy overlay, and a click that lands while
-    one is still running is skipped, so the next click waits for it.
-    """
+    """Click and wait until Python has the selection the click drew."""
     with page.expect_response(
         lambda response: is_select_request(response.request), timeout=timeout
     ):
         point.click(modifiers=list(modifiers))
-    page.wait_for_function("() => window.__superglmTest?.mutationStatus?.() !== 'running'")
 
 
 def test_click_shift_click_selects_a_span_and_ctrl_click_toggles_on_a_spline(open_editor_page):
@@ -942,8 +1032,8 @@ def test_selection_palette_wraps_inside_narrow_notebook_viewport(open_editor_pag
         assert layout["documentWidth"] <= baseline_document_width, layout
         assert layout["buttons"]
         for button in layout["buttons"]:
-            assert button["width"] == pytest.approx(34, abs=0.5)
-            assert button["height"] == pytest.approx(34, abs=0.5)
+            assert button["width"] == pytest.approx(32, abs=0.5)
+            assert button["height"] == pytest.approx(32, abs=0.5)
             assert button["insideMenu"] is True
             assert button["insideChart"] is True
             assert button["hit"] is True
@@ -1048,21 +1138,10 @@ def test_ordinary_mutations_never_show_the_global_busy_overlay(open_editor_page,
             held_control[0].continue_()
         page.unroute("**/control")
 
-        held_term = hold_requests(page, "**/term")
-        with page.expect_request(
-            lambda request: request.method == "POST" and request.url.endswith("/term")
-        ):
-            choose_feature(page, "territory")
-
-        held_term.wait()
-        assert len(held_term) == 1
+        choose_feature(page, "territory")
         assert page.locator("#appBusyOverlay").is_hidden()
         assert page.locator("#editorView").get_attribute("inert") is None
         assert page.evaluate("document.activeElement?.id") != "appBusyAnnouncement"
-        with page.expect_response(
-            lambda response: response.request.method == "POST" and response.url.endswith("/term")
-        ):
-            held_term[0].continue_()
 
 
 def test_term_change_does_not_rewrite_unrelated_editor_panels(open_editor_page, choose_feature):
@@ -1086,10 +1165,7 @@ def test_term_change_does_not_rewrite_unrelated_editor_panels(open_editor_page, 
             }"""
         )
 
-        with page.expect_response(
-            lambda response: response.request.method == "POST" and response.url.endswith("/term")
-        ):
-            choose_feature(page, "territory")
+        choose_feature(page, "territory")
         page.wait_for_function(
             "() => document.querySelector('#status')?.dataset.term === 'territory'"
         )
@@ -1157,7 +1233,8 @@ def test_contribution_frames_update_only_the_chart_scene(open_editor_page):
                 const before = window.__contributionBoundaryNodes;
                 const options = Array.from(document.querySelectorAll('#featureRows [data-term]'));
                 return {
-                    chartChanged: !before.chart.isConnected,
+                    chartChanged: document.querySelector('#chart path.edited') === null
+                        && document.querySelector('#chart .basis-build') !== null,
                     toolStable: before.tool === document.querySelector('#toolRail [data-tool]'),
                     statusStable: before.statusText === document.querySelector('#status')?.firstChild,
                     handleCountStable: before.handleCountText
@@ -1183,6 +1260,54 @@ def test_contribution_frames_update_only_the_chart_scene(open_editor_page):
             "playDisabled": True,
         }
         select_chart_tool(page, "Select")
+
+
+def test_a_handle_drag_keeps_the_chart_and_rewrites_the_curve_in_place(open_editor_page):
+    with open_editor_page() as (page, _session):
+        select_chart_tool(page, "Handles")
+        handle = page.locator("#chart .control-handle").nth(3)
+        handle.wait_for()
+        page.evaluate(
+            """() => {
+                window.__drawn = {
+                    original: document.querySelector('#chart path.original'),
+                    edited: document.querySelector('#chart path.edited'),
+                    grid: document.querySelector('#chart line.grid'),
+                    curve: document.querySelector('#chart path.edited').getAttribute('d'),
+                };
+            }"""
+        )
+        box = handle.bounding_box()
+        x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x, y - 40, steps=4)
+        page.wait_for_function(
+            "window.__drawn.curve !== document.querySelector('#chart path.edited').getAttribute('d')"
+        )
+        assert page.evaluate(
+            """() => [
+                window.__drawn.original === document.querySelector('#chart path.original'),
+                window.__drawn.edited === document.querySelector('#chart path.edited'),
+                window.__drawn.grid === document.querySelector('#chart line.grid'),
+            ]"""
+        ) == [True, True, True]
+        page.dispatch_event("#chart", "pointercancel")
+        page.mouse.up()
+
+
+def test_a_zoom_leaves_out_the_hidden_points_until_the_wheel_rests(open_editor_page):
+    with open_editor_page() as (page, _session):
+        page.locator("#chart .point-layer[data-dense='true']").wait_for(state="attached")
+        points = "document.querySelectorAll('#chart circle.point').length"
+        drawn = page.evaluate(points)
+        chart = page.locator("#chart").bounding_box()
+        page.mouse.move(chart["x"] + chart["width"] / 2, chart["y"] + chart["height"] / 2)
+        page.mouse.wheel(0, -100)
+        page.wait_for_function(f"{points} < {drawn}")
+        # The wheel rests: every point is a click target again, where the zoom left it.
+        page.wait_for_function(f"{points} === {drawn}")
+        assert page.evaluate("document.querySelector('#chart')._gesture") is False
 
 
 def test_summary_updating_status_preserves_confirmed_table_nodes(open_editor_page):
@@ -1401,13 +1526,7 @@ def test_application_bar_undo_and_redo_follow_one_timeline_across_terms(
         page.get_by_role("button", name="Increase selection").click()
         page.wait_for_function("() => !document.querySelector('#undoAction').disabled")
 
-        with page.expect_response(
-            lambda response: (
-                response.request.method == "POST"
-                and response.url.split("?", maxsplit=1)[0].endswith("/term")
-            )
-        ):
-            choose_feature(page, "territory")
+        choose_feature(page, "territory")
         # Another term is shown, and Undo still takes the curve's edit, by name.
         undo = page.get_by_role("button", name="Undo edit")
         assert undo.is_enabled()
@@ -2135,13 +2254,7 @@ def test_handles_tool_is_disabled_only_when_the_term_has_no_controls(
         )
         assert handles.is_disabled()
 
-        with page.expect_response(
-            lambda response: (
-                response.request.method == "POST"
-                and response.url.split("?", maxsplit=1)[0].endswith("/term")
-            )
-        ):
-            choose_feature(page, "curve")
+        choose_feature(page, "curve")
         page.wait_for_function(
             "term => document.querySelector('#status')?.dataset.term === term", arg="curve"
         )
@@ -2163,7 +2276,9 @@ def test_same_term_control_loss_falls_back_to_select_before_drawing(open_editor_
         assert handles.get_attribute("aria-checked") == "true"
 
         def remove_controls(route):
-            response = route.fetch()
+            # Asks for every term, so the reply holds the one this changes.
+            headers = {**route.request.headers, "x-superglm-editor-known-state": "none"}
+            response = route.fetch(headers=headers)
             payload = response.json()
             payload["terms"]["curve"]["controls"] = None
             route.fulfill(response=response, json=payload)

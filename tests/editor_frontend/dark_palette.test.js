@@ -278,6 +278,12 @@ const SVG_TEXT_ON_GROUND = {
   "cv-tick": ["--surface-subtle"],
   "cv-level": ["--surface-subtle"],
   "cv-axis-title": ["--surface-subtle"],
+  // The distribution panel's ridges and fan sit on the workspace; the line's
+  // amount is a light label on a dark pill.
+  "dist-title": ["--surface"],
+  "dist-muted": ["--surface"],
+  "dist-readout": ["--surface"],
+  "dist-pill-label": ["--text"],
 };
 
 test("every SVG text fill keeps 4.5:1 on the ground it is drawn on, in both themes", () => {

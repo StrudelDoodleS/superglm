@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -120,6 +121,21 @@ def resolve_level_bindings(
 
     # Terms that declare their own universe (OrderedCategorical) or hold no
     # universe at all (numeric, spline) never grow the hook.
+    return bind_feature_templates(templates, frame, sample_weight, strict=strict)
+
+
+def bind_feature_templates(
+    templates: Sequence[tuple[Any, Any]],
+    frame: EagerFrame,
+    sample_weight,
+    *,
+    strict: bool = False,
+) -> dict[Any, Any]:
+    """Bind each of ``templates``, ``(column, spec)`` pairs, on the full frame.
+
+    See :func:`resolve_level_bindings`, which reads a SuperGLM's templates; a
+    SuperLSS passes each predictor's.
+    """
     bindable = [(name, spec) for name, spec in templates if hasattr(spec, "resolve_binding")]
     if strict:
         frame.require_columns(tuple(name for name, _ in bindable))

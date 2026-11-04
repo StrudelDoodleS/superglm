@@ -10,13 +10,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import GammaLS, Numeric, SuperLSS, term
+from superglm import GammaLS, Numeric, OrderedCategorical, Spline, SuperLSS, term
+from superglm.distributional.terms import _resolve_term, _term_design
 from superglm.editor import EditorSession, edit
-from superglm.editor.controls import ORDERED_SPLINE_UNAVAILABLE
 from superglm.editor.lss import RELATIVITY, DisplayTransform, display_for
 from superglm.editor.lss.apply import lss_model_with_edits
 from superglm.editor.lss.availability import LSS_UNAVAILABLE
-from superglm.editor.operations import isotonic_values
+from superglm.editor.operations import running_extreme_values
 from superglm.editor.payloads import session_payload
 from tests._lss_editor_fixtures import EPS, gamma_case, lognormal_case, nb_case, open_case
 from tests.test_editor import editor_frame, editor_model  # noqa: F401
@@ -88,7 +88,7 @@ def test_nb_theta_is_shown_inverted():
     term = session_payload(session)["theta:age"]
     theta = _parameter_at(case, session, term, "theta")
     np.testing.assert_allclose(term["y"], 1.0 / theta, rtol=TOLERANCE)
-    assert (term["y_label"], term["y_format"]) == ("1/theta", "plain")
+    assert (term["y_label"], term["y_format"]) == ("overdispersion (1/θ)", "plain")
     # 1/theta falls as the effect rises, so the interval's ends are the other way round.
     assert np.all(np.asarray(term["ci_lower_y"]) <= np.asarray(term["y"]) + TOLERANCE)
     assert np.all(np.asarray(term["ci_upper_y"]) >= np.asarray(term["y"]) - TOLERANCE)
@@ -261,15 +261,83 @@ def _fixture_content() -> dict:
     return out
 
 
-def test_an_ordered_spline_term_opens_with_its_handles_off():
-    from tests.test_editor_lss_apply import ordered_case
+def _ordered_gamma_session():
+    """A gamma model with an ordered spline term on both parameters, on the fit's rows."""
+    rng = np.random.default_rng(20261104)
+    order = ["low", "mid", "high", "top", "peak"]
+    band = rng.choice(order, 1500, p=[0.35, 0.3, 0.2, 0.1, 0.05])
+    X = pd.DataFrame({"band": band})
+    position = X["band"].map({level: index for index, level in enumerate(order)}).to_numpy()
+    cv = np.exp(-0.5 + 0.1 * position)
+    y = rng.gamma(1.0 / cv**2, np.exp(1.0 + 0.2 * position) * cv**2)
+    family = GammaLS()
+    basis = Spline(kind="cr", k=4)
+    model = SuperLSS(
+        family,
+        family.mean(term("band", OrderedCategorical(order=order, basis=basis))),
+        family.scale(term("band", OrderedCategorical(order=order, basis=basis))),
+    ).fit_reml(X, y)
+    return edit(model, train_data=(X, y)), order
 
-    case = ordered_case()
-    session = edit(case.model, train_data=(case.X, case.y))
-    term = session_payload(session)["scale:region"]
-    assert term["spline_view"]["available"] is False
-    assert term["spline_view"]["reason"] == ORDERED_SPLINE_UNAVAILABLE
-    assert len(term["y"]) == len(term["levels"])
+
+@pytest.mark.parametrize("key", ["mean:band", "scale:band"])
+def test_an_ordered_term_reads_no_effect_at_its_reference_level(key):
+    session, _ = _ordered_gamma_session()
+    term_payload = session_payload(session)[key]
+    base = term_payload["levels"].index(term_payload["reference"]["level"])
+    np.testing.assert_allclose(
+        term_payload["y"][base], term_payload["baseline"], rtol=TOLERANCE, atol=0.0
+    )
+
+
+def test_an_ordered_spread_curve_reads_the_model_at_each_level():
+    session, order = _ordered_gamma_session()
+    term_payload = session_payload(session)["scale:band"]
+    rows = pd.DataFrame({"band": order})
+    predicted = np.exp(session.model.lss.predict_link(rows)["scale"].to_numpy())
+    np.testing.assert_allclose(term_payload["y"], predicted, rtol=64 * TOLERANCE, atol=0.0)
+
+
+@pytest.mark.parametrize("key", ["mean:band", "scale:band"])
+def test_an_ordered_spline_handle_writes_the_weighted_projection_of_its_curve(key):
+    session, order = _ordered_gamma_session()
+    term_payload = session_payload(session)[key]
+    assert term_payload["spline_view"]["available"] is True
+    assert term_payload["spline_view"]["fits_levels"] is True
+    controls = session.control_points(key)
+    middle = len(controls["log_effect"]) // 2
+    session.move_control_point(key, middle, controls["log_effect"][middle] + 0.3)
+
+    edited = session.terms[key]
+    moved = edited.edited_log_effect - edited.original_log_effect
+    assert np.max(np.abs(moved)) > 0.01
+
+    parameter = key.split(":")[0]
+    rows = pd.DataFrame({"band": order})
+    view = session.model
+    before = view.lss.predict_link(rows)[parameter].to_numpy()
+    after = lss_model_with_edits(view, session.terms).predict_link(rows)[parameter].to_numpy()
+
+    # The model holds what the term's columns and the intercept can carry of the curve.
+    _, state, term_slice = _resolve_term(view._fitted, parameter, "band")
+    columns = np.column_stack(
+        [np.ones(len(order)), _term_design(view._fitted, rows, state, term_slice)]
+    )
+    root = np.sqrt(np.asarray(edited.weights, dtype=np.float64))[:, None]
+    carried, *_ = np.linalg.lstsq(root * columns, root[:, 0] * moved, rcond=None)
+    np.testing.assert_allclose(after - before, columns @ carried, rtol=0.0, atol=1e-9)
+    assert np.abs(after - before).max() > 0.01
+
+
+def test_a_small_edit_of_an_ordered_term_moves_the_model_by_that_much():
+    session, order = _ordered_gamma_session()
+    view = session.model
+    edited = session.terms["scale:band"]
+    edited.edited_log_effect = edited.original_log_effect + 1e-9
+    rows = pd.DataFrame({"band": order})
+    before = view.lss.predict_link(rows)["scale"].to_numpy()
+    after = lss_model_with_edits(view, session.terms).predict_link(rows)["scale"].to_numpy()
+    np.testing.assert_allclose(after - before, 1e-9, rtol=0.0, atol=1e-11)
 
 
 def test_display_fixture_is_current():
@@ -319,7 +387,7 @@ def test_shift_moves_a_falling_display_the_way_it_names(operation, factor):
 
 @pytest.mark.parametrize(("operation", "sign"), [("increasing", 1.0), ("decreasing", -1.0)])
 def test_monotone_fit_makes_the_shown_curve_monotone(operation, sign):
-    before, after, transform, weights = _shown_after(operation)
+    before, after, transform, _ = _shown_after(operation)
     # The curve rises and falls, so each fit has to move it.
     assert np.any(np.diff(before) < 0.0) and np.any(np.diff(before) > 0.0)
     steps = sign * np.diff(after)
@@ -328,7 +396,7 @@ def test_monotone_fit_makes_the_shown_curve_monotone(operation, sign):
     effect = transform.from_display(before)
     other = "decreasing" if operation == "increasing" else "increasing"
     index = np.arange(effect.size, dtype=np.intp)
-    expected = isotonic_values(effect, index, weights, other)
+    expected = running_extreme_values(effect, index, other)
     np.testing.assert_allclose(after, transform.to_display(expected), rtol=1e3 * EPS, atol=0.0)
 
 

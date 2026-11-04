@@ -28,6 +28,20 @@
      under colour-vision deficiency, each 3:1 on the ground. */
   --param-average: #2457c5;
   --param-spread: #ea580c;
+  /* The distribution panel: the ridges' lines and translucent fills below
+     and beyond the line, and the density fan's ramps, which rise from
+     --surface through three steps of one hue each, the first at 2:1 on the
+     ground. The lines take the parameter pair's colours, 3:1 on the ground. */
+  --ridge-line: var(--param-average);
+  --ridge-tail-line: var(--param-spread);
+  --ridge-fill: #86a9f0;
+  --ridge-tail-fill: #f59a5f;
+  --fan-blue-1: #8fb0ec;
+  --fan-blue-2: #6b93e0;
+  --fan-blue-3: #4a75d4;
+  --fan-orange-1: #f7955c;
+  --fan-orange-2: #ee6a24;
+  --fan-orange-3: #d9520f;
   --red: #d6402b;
   --yellow: #f4b942;
   --yellow-border: #d9a12c;
@@ -120,14 +134,25 @@
   --switch-dots: rgba(21, 23, 28, 0.2);
   --font-sans: "Source Sans 3", "Segoe UI", Helvetica, Arial, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* Sizes come from these scales. Radii by what a thing is: a mark, what sits
+     inside a control, a control or a track, a card, a pill. */
+  --font-size-xs: 11px;
+  --font-size-sm: 12px;
+  --font-size-md: 13px;
+  --font-size-lg: 15px;
+  --font-size-xl: 18px;
+  --radius-xs: 2px;
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 10px;
+  --radius-pill: 999px;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
+  --control-height-sm: 24px;
   --control-height: 28px;
+  --control-height-lg: 32px;
   --feature-list-width: 200px;
   --inspector-width: 340px;
   --tooltip-delay-ms: 350ms;
@@ -149,8 +174,13 @@ body {
   margin: 0;
   background: var(--surface);
   color: var(--text);
-  font: 13px/1.4 var(--font-sans);
+  font: var(--font-size-md)/1.4 var(--font-sans);
   -webkit-font-smoothing: antialiased;
+}
+
+strong,
+b {
+  font-weight: 600;
 }
 
 button,

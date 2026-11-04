@@ -13,7 +13,7 @@ import {
   knotVector
 } from "./knot_basis.js";
 import { knotIndex, knotPx } from "./knot_marks.js";
-import { el } from "./svg.js";
+import { el, patchChildren } from "./svg.js";
 
 /** @typedef {import('./knot_marks.js').KnotFrame} KnotFrame */
 /** @typedef {import('./knot_marks.js').KnotUi} KnotUi */
@@ -113,15 +113,18 @@ function bumpPath(frame, grid, values, height) {
 
 /**
  * Draw the overlay into the chart's basis layer, which chart.js puts beneath
- * the curve, replacing what it held; the gestures redraw it as a knot moves.
+ * the curve, patching what it held; the gestures redraw it as a knot moves.
  * @param {SVGSVGElement|SVGElement} svg @param {KnotFrame|null} frame @param {Readonly<KnotUi>} ui
  */
 export function drawKnotBasis(svg, frame, ui) {
-  const layer = svg.querySelector(":scope > .knot-basis-layer");
-  if (!layer) return;
-  layer.replaceChildren();
+  const target = svg.querySelector(":scope > .knot-basis-layer");
+  if (!target) return;
   const overlay = frame ? basisOverlay(frame, ui) : null;
-  if (!overlay || !frame) return;
+  if (!overlay || !frame) {
+    target.replaceChildren();
+    return;
+  }
+  const layer = el("g", {});
   const height = basisBandHeight(frame);
   // A translucent backing mutes the exposure beneath, so the bumps read on either theme.
   layer.appendChild(el("rect", {
@@ -145,4 +148,5 @@ export function drawKnotBasis(svg, frame, ui) {
       ...(reached ? { style: `--knot-basis: var(--basis-${index % BASIS_PALETTE_SIZE})` } : {})
     }));
   }
+  patchChildren(target, layer);
 }

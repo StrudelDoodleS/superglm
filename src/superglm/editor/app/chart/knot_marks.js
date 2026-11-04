@@ -9,7 +9,7 @@
 
 import { AT_LEAST_ONE, knotAxis, knotTagText, shownKnots } from "../knots.js";
 import { labelWidth } from "./shape_overlay.js";
-import { el, line, text } from "./svg.js";
+import { el, line, patchNode, text } from "./svg.js";
 
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
 /** @typedef {import('../knots.js').KnotAxis} KnotAxis */
@@ -319,7 +319,7 @@ function classes(...names) {
 }
 
 /**
- * Draw the knot layer, replacing the one drawn before; null takes it away.
+ * Draw the knot layer, patching the one drawn before; null takes it away.
  * The gestures call this as a knot is dragged, without redrawing the chart.
  * @param {SVGSVGElement|SVGElement} svg @param {KnotFrame|null} frame @param {Readonly<KnotUi>} ui
  */
@@ -337,8 +337,7 @@ export function drawKnotLayer(svg, frame, ui) {
   // Where no knot moves or arrives by hand, the axis and the knots say why on hover.
   /** @type {Record<string, string>} */
   const why = evenOnly === null ? {} : { "data-popover-title": "Knots", "data-popover-body": evenOnly };
-  if (old) old.replaceWith(layer);
-  else svg.insertBefore(layer, svg.querySelector(":scope > .legend-layer"));
+  if (!old) svg.insertBefore(layer, svg.querySelector(":scope > .legend-layer"));
   const { left, right, axisY, top } = frame;
   if (layout.band) {
     layer.appendChild(el("rect", {
@@ -404,10 +403,11 @@ export function drawKnotLayer(svg, frame, ui) {
     layer.appendChild(el("path", { class: "knot-add", d: diamond(layout.adding, axisY, GHOST_RADIUS) }));
   }
   if (layout.tag) drawTag(layer, layout.tag, axisY);
+  if (old) patchNode(old, layer);
 }
 
 /**
- * The dark tag over a knot; in the document before it is measured.
+ * The dark tag over a knot.
  * @param {SVGElement} layer @param {{px:number, text:string}} tag @param {number} axisY
  */
 function drawTag(layer, tag, axisY) {

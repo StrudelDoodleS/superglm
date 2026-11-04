@@ -31,9 +31,6 @@ export function selectCurrentTerm(state) {
 /** @param {EditorState} state */
 export function selectCurrentSelection(state) {
   const active = selectActiveTermName(state);
-  if (state.view.selectionPreview?.term === active) {
-    return state.view.selectionPreview.indices;
-  }
   const snapshot = selectSnapshot(state);
   return snapshot?.selection[active] ?? EMPTY_SELECTION;
 }

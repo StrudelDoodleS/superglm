@@ -9,9 +9,8 @@ import * as storeModule from "../../src/superglm/editor/app/state/store.js";
 
 const {
   beginEvidence,
-  clearSelectionPreview,
+  commitLocalView,
   commitRemote,
-  commitSelectionRemote,
   commitStructuralTransition,
   completeEvidence,
   createEditorStore,
@@ -20,7 +19,6 @@ const {
   normalizeSelectionIndices,
   patchView,
   selectionIndicesEqual,
-  setSelectionPreview,
   setPreviewTerm
 } = storeModule;
 const {
@@ -200,78 +198,64 @@ test("store keeps confirmed remote data separate from a chart preview", () => {
   });
 });
 
-test("selection preview starts empty and normalizes provisional indices", () => {
-  const initial = createInitialEditorState(snapshot(3));
-
-  assert.equal(initial.view.selectionPreview, null);
+test("selection indices normalize and compare in order", () => {
   assert.deepEqual(normalizeSelectionIndices([4, 2, 2]), [2, 4]);
   assert.equal(selectionIndicesEqual([2, 4], [2, 4]), true);
   assert.equal(selectionIndicesEqual([2, 4], [4, 2]), false);
-
-  const previewed = setSelectionPreview(initial, "age", [4, 2, 2]);
-  assert.deepEqual(previewed.view.selectionPreview, { term: "age", indices: [2, 4] });
-  assert.deepEqual(selectCurrentSelection(previewed), [2, 4]);
-  assert.deepEqual(selectCurrentSelection(clearSelectionPreview(previewed)), [0]);
 });
 
-test("selection preview overrides only the active term", () => {
-  const confirmed = snapshot(3);
-  confirmed.terms.region = { ...confirmed.terms.age, y: [2] };
-  confirmed.selection.region = [7];
-  let state = setSelectionPreview(createInitialEditorState(confirmed), "region", [5, 3]);
+/** A snapshot of two terms; `age` carries its weights and impact. */
+function viewSnapshot(weights = [1, 3, 6], total = 10) {
+  const value = snapshot(3);
+  value.terms.age = {
+    ...value.terms.age,
+    n_points: 3,
+    weights,
+    impact: { total_weight: total, selected_weight_share: 0.1 }
+  };
+  value.terms.region = { ...value.terms.age, y: [2] };
+  value.selection.age = [0];
+  value.selection.region = [2];
+  return value;
+}
 
-  assert.deepEqual(selectCurrentSelection(state), [0]);
+test("a local view shows the term and its selection and leaves the chart epoch and other terms", () => {
+  const confirmed = viewSnapshot();
+  const state = createInitialEditorState(confirmed);
 
-  state = patchView(state, { activeTerm: "region" });
-  assert.deepEqual(selectCurrentSelection(state), [3, 5]);
+  const shown = commitLocalView(state, "region", [2, 1, 1]);
+
+  assert.equal(selectActiveTermName(shown), "region");
+  assert.equal(shown.remote.snapshot?.selected_term, "region");
+  assert.deepEqual(selectCurrentSelection(shown), [1, 2]);
+  assert.equal(shown.remote.chartEpoch, state.remote.chartEpoch);
+  assert.strictEqual(shown.remote.snapshot?.terms.age, confirmed.terms.age);
+  assert.deepEqual(confirmed.selection.region, [2]);
 });
 
-test("selection commit accepts authoritative payload without advancing the chart epoch", () => {
-  const confirmed = snapshot(3);
-  const initial = {
-    ...createInitialEditorState(confirmed),
-    remote: { snapshot: confirmed, summary: null, chartEpoch: 7 }
-  };
-  const previewed = setSelectionPreview(initial, "age", [4, 2, 2]);
-  const response = snapshot(3);
-  response.selection.age = [2, 4];
-  response.terms.age.impact = {
-    weighted_mean_relativity: 1.23,
-    selected_weight_share: 0.45
-  };
+test("a local view of what is already shown, or of an unknown term, changes nothing", () => {
+  const state = createInitialEditorState(viewSnapshot());
 
-  const committed = commitSelectionRemote(previewed, response);
-
-  assert.equal(committed.view.selectionPreview, null);
-  assert.strictEqual(committed.remote.snapshot, response);
-  assert.equal(committed.remote.chartEpoch, 7);
-  assert.deepEqual(committed.remote.snapshot?.terms.age.impact, response.terms.age.impact);
-  assert.deepEqual(selectCurrentSelection(committed), [2, 4]);
+  assert.strictEqual(commitLocalView(state, "age", [0, 0]), state);
+  assert.strictEqual(commitLocalView(state, "nope", [1]), state);
 });
 
-test("selection commit performs a full commit when chart geometry changed at one revision", () => {
-  const confirmed = {
-    ...snapshot(3), state_generation: 8, chart_generation: 4
-  };
-  const response = {
-    ...snapshot(3), state_generation: 9, chart_generation: 5
-  };
-  response.selection.age = [2, 4];
-  const base = createInitialEditorState(confirmed);
-  const initial = setSelectionPreview({
-    ...base,
-    remote: { ...base.remote, chartEpoch: 7 }
-  }, "age", [2, 4]);
+test("a local view keeps the selected share as Python computes it", () => {
+  /** @param {number[]} weights @param {number} total @param {number[]} indices */
+  const share = (weights, total, indices) => commitLocalView(
+    createInitialEditorState(viewSnapshot(weights, total)), "age", indices
+  ).remote.snapshot?.terms.age.impact?.selected_weight_share;
 
-  const committed = commitSelectionRemote(initial, response);
-
-  assert.strictEqual(committed.remote.snapshot, response);
-  assert.equal(committed.remote.chartEpoch, 8);
-  assert.equal(committed.view.selectionPreview, null);
+  assert.equal(share([1, 3, 6], 10, [1, 2]), 0.9);
+  assert.equal(share([1, 3, 6], 10, []), 0);
+  // Unusable weights count one per point, as in _positive_weights.
+  assert.equal(share([0, 0, 0], 3, [1, 2]), 2 / 3);
+  assert.equal(share([1, 3], 3, [2]), 1 / 3);
+  assert.equal(share([1, 3, 6], 0, [1]), 0);
 });
 
-test("older generated snapshots cannot rewind either remote commit path", () => {
-  for (const commit of [commitRemote, commitSelectionRemote]) {
+test("older generated snapshots cannot rewind a remote commit", () => {
+  for (const commit of [commitRemote]) {
     const current = {
       ...snapshot(3), state_generation: 12, chart_generation: 6
     };
@@ -281,7 +265,6 @@ test("older generated snapshots cannot rewind either remote commit path", () => 
     stale.terms.age = { ...stale.terms.age, y: [0.5] };
     let state = createInitialEditorState(current);
     state = setPreviewTerm(state, "age", { ...current.terms.age, y: [1.5] });
-    state = setSelectionPreview(state, "age", [4]);
     const remote = state.remote;
 
     const committed = commit(state, stale);
@@ -290,7 +273,6 @@ test("older generated snapshots cannot rewind either remote commit path", () => 
     assert.strictEqual(committed.remote.snapshot, current);
     assert.equal(committed.remote.chartEpoch, 0);
     assert.equal(committed.view.preview, null);
-    assert.equal(committed.view.selectionPreview, null);
   }
 });
 
@@ -309,8 +291,7 @@ test("an older structural envelope cannot bypass generated snapshot ordering", (
     remote: { ...state.remote, summary },
     view: {
       ...state.view,
-      preview: { term: "age", payload: current.terms.age, selection: [1] },
-      selectionPreview: { term: "age", indices: [1] }
+      preview: { term: "age", payload: current.terms.age, selection: [1] }
     }
   };
   const remote = state.remote;
@@ -321,34 +302,16 @@ test("an older structural envelope cannot bypass generated snapshot ordering", (
   assert.strictEqual(committed.remote.snapshot, current);
   assert.strictEqual(committed.remote.summary, summary);
   assert.equal(committed.view.preview, null);
-  assert.equal(committed.view.selectionPreview, null);
-});
-
-test("selection commit falls back to a full commit when revision or selected term changes", () => {
-  for (const response of [snapshot(4), { ...snapshot(3), selected_term: "region" }]) {
-    const base = createInitialEditorState(snapshot(3));
-    const initial = setSelectionPreview({
-      ...base,
-      remote: { ...base.remote, chartEpoch: 4 }
-    }, "age", [2]);
-    const committed = commitSelectionRemote(initial, response);
-
-    assert.strictEqual(committed.remote.snapshot, response);
-    assert.equal(committed.remote.chartEpoch, 5);
-    assert.equal(committed.view.selectionPreview, null);
-  }
 });
 
 test("remote commit clears preview and preserves valid view state", () => {
   let state = createInitialEditorState(snapshot());
   state = patchView(state, { mode: "move", showCi: true });
   state = setPreviewTerm(state, "age", { ...snapshot().terms.age, y: [1.4] });
-  state = setSelectionPreview(state, "age", [3]);
   state = commitRemote(state, snapshot(1));
   assert.equal(state.view.mode, "move");
   assert.equal(state.view.showCi, true);
   assert.equal(state.view.preview, null);
-  assert.equal(state.view.selectionPreview, null);
   assert.equal(selectActiveTermName(state), "age");
   assert.deepEqual(selectCurrentSelection(state), [0]);
 });
@@ -740,9 +703,8 @@ test("selectors expose confirmed state defaults and per-term display overrides",
 test("state modules expose only their requested public symbols", () => {
   assert.deepEqual(Object.keys(storeModule).sort(), [
     "beginEvidence",
-    "clearSelectionPreview",
+    "commitLocalView",
     "commitRemote",
-    "commitSelectionRemote",
     "commitStructuralTransition",
     "completeEvidence",
     "createEditorStore",
@@ -752,7 +714,6 @@ test("state modules expose only their requested public symbols", () => {
     "patchView",
     "selectionIndicesEqual",
     "setPreviewTerm",
-    "setSelectionPreview",
     "waitingListChanged"
   ]);
   assert.deepEqual(Object.keys(selectors).sort(), [

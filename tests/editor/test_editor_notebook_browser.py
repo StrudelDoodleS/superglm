@@ -297,15 +297,13 @@ def test_an_operation_edits_the_term_its_own_output_shows(
         second.locator("#selectionMenu").wait_for(state="visible")
 
         # The first output moves Python's selected term to territory.
-        seen = len(view.requests)
         choose_feature(first, "territory")
         first.locator('button[data-op="select_all"]').click()
         first.locator("#selectionMenu").wait_for(state="visible")
-        for _ in range(100):  # the second output's re-read of the session
-            if "GET /state" in view.requests[seen:]:
+        for _ in range(100):  # the first output tells Python in the background
+            if len(curve_session.selection("territory")) == 10:
                 break
             page.wait_for_timeout(50)
-        assert "GET /state" in view.requests[seen:]
         assert len(curve_session.selection("territory")) == 10
 
         # The second output still shows curve, and its operation edits curve.
@@ -417,3 +415,21 @@ def test_run_cv_reports_its_job_over_widget_messages(chromium_browser, monkeypat
         frame.locator('#reportFrame [data-cv-start="cv"]').click()
         frame.locator('#reportFrame .cv-card-row[data-origin="run"]').first.wait_for()
         assert frame.locator('#reportFrame .cv-card-row[data-origin="run"]').count() == 3
+
+
+def test_a_plain_wheel_over_an_outputs_chart_leaves_the_notebook_scrolling(
+    chromium_browser, curve_session, monkeypatch
+):
+    with _notebook_editor(chromium_browser, curve_session, monkeypatch) as (
+        _page,
+        frame,
+        _w,
+        _view,
+    ):
+        wheel = """(chart, ctrlKey) => !chart.dispatchEvent(new WheelEvent('wheel', {
+            deltaY: -100, ctrlKey, bubbles: true, cancelable: true,
+        }))"""
+        chart = frame.locator("#chart")
+        chart.locator("path.edited").first.wait_for()
+        assert chart.evaluate(wheel, False) is False
+        assert chart.evaluate(wheel, True) is True

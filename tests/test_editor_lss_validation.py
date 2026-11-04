@@ -1,4 +1,4 @@
-"""Validation scores, Final fit and the capabilities of an edited SuperLSS."""
+"""Validation scores and Final fit of an edited SuperLSS."""
 
 from __future__ import annotations
 
@@ -24,11 +24,10 @@ from superglm import (
     term,
 )
 from superglm.editor import edit
-from superglm.editor.cv import capture_cv_run, capture_final_fit, final_fit_reason, run_final_fit
+from superglm.editor.cv import FINAL_NOT_RUN, capture_final_fit, final_fit_reason, run_final_fit
 from superglm.editor.errors import EditorValueError
 from superglm.editor.lss.availability import (
     LSS_UNAVAILABLE,
-    SESSION_TOOLS,
     WEIGHTS_DIFFER,
     session_refit_reason,
 )
@@ -173,23 +172,12 @@ def test_spread_edit_moves_log_score_but_not_actual_expected():
     assert row["metrics"]["delta"]["log_score"] == edited["log_score"] - original["log_score"]
 
 
-def test_cv_run_is_refused_for_superlss():
-    session = open_case(lognormal_case())
-    with pytest.raises(EditorValueError) as info:
-        capture_cv_run(session)
-    assert info.value.public_message == LSS_UNAVAILABLE["cv"]
-    widget = session.widget()
+def test_split_comparison_stays_off_for_superlss():
+    widget = open_case(lognormal_case()).widget()
     try:
-        with pytest.raises(EditorValueError) as info:
-            widget._report("cv")
-        assert info.value.public_message == LSS_UNAVAILABLE["cv"]
         assert widget._metrics("deviance")["error"] == LSS_UNAVAILABLE["metrics"]
-        with pytest.raises(EditorValueError) as info:
-            widget._job_start("cv")
-        assert info.value.public_message == LSS_UNAVAILABLE["cv"]
-        assert {"metrics", "cv"} <= set(SESSION_TOOLS)
         unavailable = widget._state()["unavailable"]
-        assert unavailable["cv"] == LSS_UNAVAILABLE["cv"]
+        assert "cv" not in unavailable
         assert unavailable["metrics"] == LSS_UNAVAILABLE["metrics"]
     finally:
         widget.close()
@@ -414,7 +402,7 @@ def test_final_fit_is_refused_for_a_split_whose_weights_the_fit_cannot_take(freq
     assert info.value.public_message == message
 
 
-def test_the_state_reads_the_final_fit_splits_once_per_model(monkeypatch):
+def test_polling_the_state_reads_no_final_fit_split(monkeypatch):
     import superglm.editor.cv as cv
 
     case = gamma_case()
@@ -434,7 +422,7 @@ def test_the_state_reads_the_final_fit_splits_once_per_model(monkeypatch):
         widget._state()
     finally:
         widget.close()
-    assert len(calls) == 2
+    assert calls == []
 
 
 def test_final_fit_reads_only_the_columns_the_model_uses():
@@ -448,6 +436,34 @@ def test_final_fit_reads_only_the_columns_the_model_uses():
 
 
 @pytest.mark.filterwarnings("ignore::superglm.distributional.revision.EditedCoefficientsWarning")
+def test_a_final_fit_scores_the_test_split_it_held_out():
+    case = lognormal_case()
+    validation = dataclasses.replace(holdout_rows(case, 150), sample_weight=None)
+    test = dataclasses.replace(holdout_rows(case, 100), sample_weight=None)
+    session = open_case(
+        case, validation_data=(validation.X, validation.y), test_data=(test.X, test.y)
+    )
+
+    final = run_final_fit(capture_final_fit(session), _Context())
+
+    assert final.test_scores == lss_dataset_metrics(final.model, session._evaluation_data["test"])
+    assert np.isfinite(final.test_scores["log_score"])
+
+
+def test_a_final_fit_with_no_test_split_has_no_test_scores():
+    session = open_case(lognormal_case())
+    assert run_final_fit(capture_final_fit(session), _Context()).test_scores is None
+
+
+def test_a_final_fit_report_before_a_run_names_this_tab():
+    widget = open_case(lognormal_case()).widget()
+    try:
+        note = widget._report("final")["final_fit"]["note"]
+    finally:
+        widget.close()
+    assert note == FINAL_NOT_RUN
+
+
 def test_the_widget_runs_final_fit_and_exports_it():
     case = lognormal_case()
     split = dataclasses.replace(holdout_rows(case, 150), sample_weight=None)
@@ -460,7 +476,7 @@ def test_the_widget_runs_final_fit_and_exports_it():
         report = widget._report("final")
         assert report["final_fit"]["available"] is True
         assert report["final_fit"]["n_rows"] == 750
-        assert report["final_fit"]["carried"] == ["scale:age"]
+        assert report["final_fit"]["carried"] == ["age · Spread"]
         assert "summary" not in report
         assert list(report["metric_labels"]) == list(LSS_METRIC_LABELS)
         result = widget._export_bytes("final")
@@ -482,47 +498,6 @@ def test_final_fit_report_before_a_run_has_no_summary():
         widget.close()
     assert "summary" not in payload
     assert payload["final_fit"]["available"] is False
-
-
-def test_capabilities_only_for_superlss(editor_model):  # noqa: F811
-    widget = open_case(lognormal_case()).widget()
-    try:
-        assert widget._state()["capabilities"] == {"cv": False, "final_fit": True}
-    finally:
-        widget.close()
-    from superglm.editor import edit
-
-    glm = edit(editor_model).widget()
-    try:
-        assert "capabilities" not in glm._state()
-    finally:
-        glm.close()
-
-
-def test_state_carries_the_final_fit_plan_for_superlss_only(editor_model):  # noqa: F811
-    # Available: the fit rows and a validation split with the same columns.
-    case = nb_case()
-    split = holdout_rows(case, 100)
-    ready = open_case(case, validation_data=(split.X, split.y, None, split.offset)).widget()
-    # Unavailable: the validation split lacks the offsets the train rows hold.
-    lacking = open_case(case, validation_data=(split.X, split.y, None, None))
-    blocked = lacking.widget()
-    try:
-        assert final_fit_reason(ready.session) is None
-        assert ready._state()["final_fit_plan"] == {"available": True, "reason": None}
-        reason = final_fit_reason(lacking)
-        assert reason is not None
-        assert blocked._state()["final_fit_plan"] == {"available": False, "reason": reason}
-    finally:
-        ready.close()
-        blocked.close()
-    from superglm.editor import edit
-
-    glm = edit(editor_model).widget()
-    try:
-        assert "final_fit_plan" not in glm._state()
-    finally:
-        glm.close()
 
 
 @pytest.mark.parametrize("report", ["validation", "final"])

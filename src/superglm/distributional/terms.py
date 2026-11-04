@@ -613,6 +613,36 @@ def _sweep(
     return pd.DataFrame(data), grid, names
 
 
+def _reference_row(
+    spec: Any, levels: tuple[str, ...] | None, design: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """The row of ``design``, one row per level, at the term's reference level; else zeros.
+
+    An effect by level is a contrast with this row. A term whose columns are
+    centred on fitting reads a constant there, which the intercept carries.
+    """
+    base = str(getattr(spec, "_base_level", ""))
+    if levels is None or base not in levels:
+        return np.zeros(design.shape[1], dtype=np.float64)
+    return design[levels.index(base)]
+
+
+def _reference_design(
+    fitted: Any,
+    frame: EagerFrame,
+    parameter: str,
+    term: str,
+    state: Any,
+    *term_slices: slice,
+) -> NDArray[np.float64]:
+    """The term's own columns at its reference level, or zeros for a term with none."""
+    spec = _compiled_spec(fitted, parameter, term)
+    if spec is None or _level_domain(spec) is None:
+        return np.zeros(sum(block.stop - block.start for block in term_slices), dtype=np.float64)
+    evaluation, _, levels = _sweep(fitted, frame, parameter, term, 2)
+    return _reference_row(spec, levels, _term_design(fitted, evaluation, state, *term_slices))
+
+
 def _term_design(
     fitted: Any,
     evaluation_frame: FrameLike | EagerFrame,
@@ -726,9 +756,10 @@ def term_effect(
 
     A term whose free levels sit in a ``<parameter>:<term>:special`` block --
     an ``OrderedCategorical`` fitted with ``specials=`` -- reports both blocks
-    together: each special level reads its own coefficient and standard error
-    from that block and its covariance, ``special`` marks which levels those
-    are, and ``edf`` and ``lambdas`` cover the union.  Read on the smooth block
+    together: each special level reads its own coefficient from that block, less
+    the curve at the reference level, with that contrast's standard error;
+    ``special`` marks which levels those are, and ``edf`` and ``lambdas`` cover
+    the union.  Read on the smooth block
     alone a special level would come back as an exact zero with no band, which
     is the one number the model does not claim for it.
     """
@@ -774,7 +805,9 @@ def _prepare_term_effect(
     special_slice = fitted.layout.term_slices.get(special_name)
     blocks = (term_slice,) if special_slice is None else (term_slice, special_slice)
     names = (qualified,) if special_slice is None else (qualified, special_name)
+    spec = _compiled_spec(fitted, parameter, term)
     design = _term_design(fitted, evaluation, state, *blocks)
+    design = design - _reference_row(spec, levels, design)
     columns = _coefficient_columns(*blocks)
     beta = np.asarray(fitted.coefficients, dtype=np.float64)
     effect = design @ beta[columns]
@@ -785,7 +818,6 @@ def _prepare_term_effect(
         draw_count = _posterior_draw_count(n_sim)
         resolved_seed = int(seed)
 
-    spec = _compiled_spec(fitted, parameter, term)
     special: tuple[bool, ...] | None = None
     if special_slice is not None:
         marked = set(_special_domain(spec))

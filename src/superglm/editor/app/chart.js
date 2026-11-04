@@ -2,6 +2,7 @@ import { formatDisplay, showsRelativity } from "./chart/display.js";
 import { fmt } from "./format.js";
 import {
   anchorMarks,
+  anchorMarksIn,
   createAnchorMarks,
   placeAnchorMarks,
   spanRange
@@ -24,7 +25,7 @@ import {
   splitLabelGraphemes
 } from "./chart/geometry.js";
 import { contributionX, levelPolyline, splineCurves } from "./chart/ordered_spline.js";
-import { el, line, text } from "./chart/svg.js";
+import { el, line, patchChildren, setAttributes, text } from "./chart/svg.js";
 import { freeLevelLine, freeLevelMarks, waitingSpecials } from "./specials.js";
 import { unsmoothedRange, unsmoothedRuns, unsmoothedSeries } from "./unsmoothed.js";
 
@@ -81,19 +82,20 @@ export function groupedTerms(terms) {
 }
 
 export function drawChart(term, selection, context) {
-  // Full redraw renderer. The Python state payload is authoritative; this
-  // module only turns the current payload into SVG plus scale metadata used by
-  // interactions.js.
+  // The Python state payload is authoritative; this module only turns the
+  // current payload into SVG plus scale metadata used by interactions.js. It
+  // draws the whole chart into a detached scene and patches the live chart to
+  // match, so a frame costs the browser only what changed.
   const { svg } = context;
+  const scene = el("svg", {});
   const visualMode = context.visualMode();
-  svg.innerHTML = "";
   svg._anchorMarks = null;
   svg._knotFrame = null;
   // Draw at the chart's own CSS-pixel size so nothing is scaled: text keeps
   // its nominal size and the plot fills its panel. A hidden chart, or a DOM
   // without layout, draws at the fallback size.
   const { width, height } = chartSize(svg.clientWidth, svg.clientHeight);
-  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  setAttributes(svg, { viewBox: `0 0 ${width} ${height}` });
   const baseMargin = { left: 58, right: 46, top: 28, bottom: 52 };
   const view = resolveDisplayTerm(
     term,
@@ -113,6 +115,7 @@ export function drawChart(term, selection, context) {
   const previous = view.previous_y || null;
   const exposure = view.exposure || null;
   if (!y.length) {
+    svg.replaceChildren();
     svg.dataset.axisMeasurementCount = "0";
     return;
   }
@@ -142,7 +145,7 @@ export function drawChart(term, selection, context) {
   };
   const innerW = width - margin.left - margin.right;
   const innerH = height - margin.top - margin.bottom;
-  definePlotClip(svg, margin, innerW, innerH);
+  definePlotClip(scene, margin, innerW, innerH);
   const ciValues = context.showCi() && view.ci_lower_y && view.ci_upper_y
     ? [...view.ci_lower_y, ...view.ci_upper_y]
     : [];
@@ -191,21 +194,22 @@ export function drawChart(term, selection, context) {
   const yMax = zoom ? zoom.yMax : baseYMax;
   const sx = (v) => margin.left + ((v - xMin) / Math.max(xMax - xMin, 1e-12)) * innerW;
   const sy = (v) => margin.top + innerH - ((v - yMin) / Math.max(yMax - yMin, 1e-12)) * innerH;
+  const scaleKey = [xMin, xMax, yMin, yMax, margin.left, margin.top, innerW, innerH].join();
 
   // Draw back-to-front: exposure context, axes/grid, reference intervals, then
   // curves and interactive handles/points.
-  exposureLayer(svg, view, sx, margin, innerW, innerH, exposure, waitingSlots(waitingBrackets));
+  exposureLayer(scene, view, sx, margin, innerW, innerH, exposure, waitingSlots(waitingBrackets), scaleKey);
   for (const tick of ticks(yMin, yMax, tickCount(innerH, 70))) {
-    line(svg, margin.left, sy(tick), margin.left + innerW, sy(tick), "grid");
-    text(svg, margin.left - 8, sy(tick) + 4, formatDisplay(term, tick), "tick-label", "end");
+    line(scene, margin.left, sy(tick), margin.left + innerW, sy(tick), "grid");
+    text(scene, margin.left - 8, sy(tick) + 4, formatDisplay(term, tick), "tick-label", "end");
   }
   if (categoricalLayout) {
     for (const tick of categoricalLayout.ticks) {
       const tickX = sx(Number(tick.value));
       const tickY = margin.top + innerH + 18;
-      line(svg, tickX, margin.top + innerH, tickX, margin.top + innerH + 5, "tick");
+      line(scene, tickX, margin.top + innerH, tickX, margin.top + innerH + 5, "tick");
       const tickLabel = text(
-        svg,
+        scene,
         tickX,
         tickY,
         tick.displayLabel,
@@ -225,63 +229,63 @@ export function drawChart(term, selection, context) {
     for (const tick of continuousXTicks(xMin, xMax, innerW)) {
       const tickX = sx(tick.value);
       const tickY = margin.top + innerH + 20;
-      line(svg, tickX, margin.top + innerH, tickX, margin.top + innerH + 5, "tick");
-      text(svg, tickX, tickY, tick.label, "tick-label", "middle");
+      line(scene, tickX, margin.top + innerH, tickX, margin.top + innerH + 5, "tick");
+      text(scene, tickX, tickY, tick.label, "tick-label", "middle");
     }
   }
   // The baseline, where the term's own effect is zero (relativity one for a
   // SuperGLM term): the level an edit is judged against.
   const baseline = Math.min(Math.max(term.baseline ?? 1, yMin), yMax);
-  line(svg, margin.left, sy(baseline), margin.left + innerW, sy(baseline), "zero");
-  line(svg, margin.left, margin.top + innerH, margin.left + innerW, margin.top + innerH, "axis");
+  line(scene, margin.left, sy(baseline), margin.left + innerW, sy(baseline), "zero");
+  line(scene, margin.left, margin.top + innerH, margin.left + innerW, margin.top + innerH, "axis");
 
   text(
-    svg,
+    scene,
     margin.left + innerW / 2,
     categoricalLayout ? categoricalLayout.titleY + bracketRow : height - 12,
     term.x_label,
     "label x-axis-title",
     "middle"
   );
-  const yLabel = text(svg, 14, margin.top + innerH / 2, term.y_label, "label", "middle");
+  const yLabel = text(scene, 14, margin.top + innerH / 2, term.y_label, "label", "middle");
   yLabel.setAttribute("transform", `rotate(-90 14 ${margin.top + innerH / 2})`);
   // Shaped ranges sit above the grid and beneath the curves; a Build animation
   // shows the basis alone.
-  if (!buildActive) drawShapeOverlay(svg, { term, view, sx, margin, innerW, innerH });
-  if (!buildActive) drawPendingRanges(svg, { term, view, sx, margin, innerW, innerH });
+  if (!buildActive) drawShapeOverlay(scene, { term, view, sx, margin, innerW, innerH });
+  if (!buildActive) drawPendingRanges(scene, { term, view, sx, margin, innerW, innerH });
   // The basis a knot change reshapes goes here, beneath the curves; the knot
   // layer's frame and gesture fill it once they are known.
-  svg.appendChild(el("g", { class: "knot-basis-layer", "clip-path": "url(#plotClip)" }));
+  scene.appendChild(el("g", { class: "knot-basis-layer", "clip-path": "url(#plotClip)" }));
 
   const freeLevels = buildActive ? null : (context.freeLevels?.() ?? null);
   const freeMarks = freeLevelMarks(freeLevels, view);
   if (context.showCi() && view.ci_lower_y && view.ci_upper_y) {
     if (view.levels) {
-      errorBars(svg, x, view.ci_lower_y, view.ci_upper_y, sx, sy);
+      errorBars(scene, x, view.ci_lower_y, view.ci_upper_y, sx, sy);
     } else {
-      band(svg, x, view.ci_lower_y, view.ci_upper_y, sx, sy, "ci");
+      band(scene, x, view.ci_lower_y, view.ci_upper_y, sx, sy, "ci", scaleKey);
     }
   }
   if (visualMode === "handles" && showsRelativity(term) && context.showContrib && context.showContrib()) {
-    basisContributions(svg, term, sx, sy, buildActive);
+    basisContributions(scene, term, sx, sy, buildActive);
   }
   if (visualMode === "handles" && buildProgress !== null) {
     const progress = Math.min(Math.max(Number(buildProgress) || 0, 0), 1);
     const buildCurve = buildAccumulationCurve(term, progress);
-    drawActiveBasis(svg, term, buildCurve.activeIndex, sx, sy);
-    path(svg, buildCurve.x, buildCurve.y, sx, sy, "basis-build-halo");
-    const build = path(svg, buildCurve.x, buildCurve.y, sx, sy, "basis-build");
+    drawActiveBasis(scene, term, buildCurve.activeIndex, sx, sy);
+    path(scene, buildCurve.x, buildCurve.y, sx, sy, "basis-build-halo");
+    const build = path(scene, buildCurve.x, buildCurve.y, sx, sy, "basis-build");
     build.setAttribute("data-progress", progress.toFixed(4));
     build.setAttribute("data-active-basis", String(buildCurve.activeIndex));
     build.setAttribute("style", `stroke: ${mixBuildColor(progress)}`);
   }
   if (freeMarks.length) {
-    drawFreeLevels(svg, freeMarks, freeLevelLine(freeLevels, view), {
+    drawFreeLevels(scene, freeMarks, freeLevelLine(freeLevels, view), {
       sx, sy, yMin, yMax, intervals: context.showCi()
     });
   }
-  if (!buildActive) drawTermLines(svg, { x, y, original, previous, spline, sx, sy });
-  if (unsmoothed && unsmoothedLine) drawUnsmoothed(svg, unsmoothed, unsmoothedLine, sx, sy);
+  if (!buildActive) drawTermLines(scene, { x, y, original, previous, spline, sx, sy, scaleKey });
+  if (unsmoothed && unsmoothedLine) drawUnsmoothed(scene, unsmoothed, unsmoothedLine, sx, sy);
   const displaySelected = displaySelection(view, selection);
   const selectedBounds = selectionBounds(x, y, displaySelected, sx, sy, margin, innerW, innerH);
   const handlesMode = visualMode === "handles" && term.controls;
@@ -289,14 +293,14 @@ export function drawChart(term, selection, context) {
   // gestures, so the selection palette stays away.
   const paletteOff = Boolean(handlesMode) || visualMode === "knots";
   const plot = { top: margin.top, height: innerH };
-  if (!handlesMode && selectedBounds) drawSelectionBounds(svg, selectedBounds, plot);
+  if (!handlesMode && selectedBounds) drawSelectionBounds(scene, selectedBounds, plot);
   if (!handlesMode) {
-    if (view.displayIsCollapsed) drawCollapsedLevelGroups(svg, view, sx, sy);
-    else drawLevelGroups(svg, view, sx, sy);
+    if (view.displayIsCollapsed) drawCollapsedLevelGroups(scene, view, sx, sy);
+    else drawLevelGroups(scene, view, sx, sy);
   }
   if (waitingBrackets.length && categoricalLayout) {
-    drawPendingGroupRings(svg, waitingGroups, { view, sx, sy, color: levelGroupColor });
-    drawPendingGroupBrackets(svg, waitingBrackets, {
+    drawPendingGroupRings(scene, waitingGroups, { view, sx, sy, color: levelGroupColor });
+    drawPendingGroupBrackets(scene, waitingBrackets, {
       view,
       sx,
       top: categoricalLayout.labelsBottom,
@@ -313,35 +317,43 @@ export function drawChart(term, selection, context) {
   if (!handlesMode) {
     pointLayer = el("g", {
       class: "point-layer",
+      // One clip for the layer: a clip on each circle is one more thing to paint per point.
+      "clip-path": "url(#plotInteractionClip)",
       "data-dense": String(basePoints.size > DENSE_POINT_COUNT),
       // In Knots mode the points are marks only, and a dense curve's stay hidden.
       "data-knots": String(visualMode === "knots")
     });
-    svg.appendChild(pointLayer);
+    scene.appendChild(pointLayer);
+    const lensX = basePoints.size > DENSE_POINT_COUNT ? (svg._lensX ?? null) : null;
+    // A hidden point is a click target, and nothing is clicked during a zoom
+    // or a pan, so the gesture leaves those out and redraws them when it ends.
+    const hiddenWait = Boolean(svg._gesture) && basePoints.size > DENSE_POINT_COUNT;
     for (const i of visiblePoints) {
       if (displaySelected.has(i)) selectedPoints.push(i);
-      else unselectedPoints.push(i);
+      else if (!hiddenWait || (lensX !== null && Math.abs(sx(x[i]) - lensX) <= LENS_HALF_WIDTH)) {
+        unselectedPoints.push(i);
+      }
     }
     for (const i of unselectedPoints) {
-      drawPoint(svg, pointLayer, view, x, y, sx, sy, i, false, !basePoints.has(i));
+      drawPoint(pointLayer, x, y, sx, sy, i, false, !basePoints.has(i), lensX);
     }
     for (const i of selectedPoints) {
-      drawPoint(svg, pointLayer, view, x, y, sx, sy, i, true, !basePoints.has(i));
+      drawPoint(pointLayer, x, y, sx, sy, i, true, !basePoints.has(i), lensX);
     }
   } else {
     // An ordered spline keeps its level dots on the curve beside the handles;
     // they read the drag preview's values, so they move with the curve.
-    if (spline && !buildActive) drawSplineLevelDots(svg, x, y, sx, sy);
-    drawControlHandles(svg, term, sx, sy, margin, innerH);
+    if (spline && !buildActive) drawSplineLevelDots(scene, x, y, sx, sy);
+    drawControlHandles(scene, term, sx, sy, margin, innerH);
   }
-  if (!handlesMode && !buildActive) drawWaitingSpecials(svg, term, view, sx, sy);
+  if (!handlesMode && !buildActive) drawWaitingSpecials(scene, term, view, sx, sy);
   // The anchor is marked where points are drawn; a Build animation, which
   // shows the basis alone, marks none.
-  svg._anchorMarks = pointLayer && !buildActive ? createAnchorMarks(svg, pointLayer) : null;
-  placeChartAnchorMarks(svg, view, selection, context, {
+  const marks = pointLayer && !buildActive ? createAnchorMarks(scene, pointLayer) : null;
+  placeChartAnchorMarks(marks, view, selection, context, {
     sx, sy, x, y, xMin, xMax, margin, innerW, innerH
   });
-  applyPlotClip(svg);
+  applyPlotClip(scene);
   // The knots: ticks under the axis in every mode, handles in Knots mode. A
   // collapsed display's axis is not the one they sit on.
   svg._knotFrame = view.displayIsCollapsed || buildActive
@@ -355,10 +367,10 @@ export function drawChart(term, selection, context) {
         bottom: height
       }, visualMode === "knots");
   const knotUi = context.knotUi ? context.knotUi() : NO_KNOT_GESTURE;
-  drawKnotLayer(svg, svg._knotFrame, knotUi);
-  drawKnotBasis(svg, svg._knotFrame, knotUi);
+  drawKnotLayer(scene, svg._knotFrame, knotUi);
+  drawKnotBasis(scene, svg._knotFrame, knotUi);
   const legendLayer = el("g", { class: "legend-layer" });
-  svg.appendChild(legendLayer);
+  scene.appendChild(legendLayer);
   legend(legendLayer, width - 10, 13, {
     originalProjected: view.displayIsCollapsed,
     hasPrevious: Boolean(previous),
@@ -371,6 +383,8 @@ export function drawChart(term, selection, context) {
       : null
   });
 
+  patchChildren(svg, scene);
+  svg._anchorMarks = marks ? anchorMarksIn(svg) : null;
   svg._scale = {
     sx, sy, x, y, xMin, xMax, yMin, yMax,
     baseXMin, baseXMax, baseYMin, baseYMax,
@@ -378,7 +392,10 @@ export function drawChart(term, selection, context) {
     displayToSourceIndices: view.displayToSourceIndices,
     displayIsCollapsed: view.displayIsCollapsed
   };
-  svg._selectionView = { term, view, handlesMode, paletteOff, pointLayer };
+  svg._selectionView = {
+    term, view, handlesMode, paletteOff,
+    pointLayer: pointLayer ? svg.querySelector(":scope > .point-layer") : null
+  };
   positionSelectionMenu(svg, context.selectionMenu, paletteOff ? null : selectedBounds);
 }
 
@@ -420,18 +437,16 @@ export function updateChartSelection(term, selection, context) {
         index >= view.y.length
       ) continue;
       const point = drawPoint(
-        svg,
         pointLayer,
-        view,
         view.x,
         view.y,
         scale.sx,
         scale.sy,
         index,
         true,
-        true
+        true,
+        svg._lensX ?? null
       );
-      point.setAttribute("clip-path", "url(#plotInteractionClip)");
       selectedPoints.push(point);
     }
   }
@@ -454,7 +469,7 @@ export function updateChartSelection(term, selection, context) {
       );
   updateSelectionBounds(svg, bounds, { top: scale.margin.top, height: scale.innerH });
   positionSelectionMenu(svg, context.selectionMenu, paletteOff ? null : bounds);
-  placeChartAnchorMarks(svg, view, selection, context, scale);
+  placeChartAnchorMarks(svg._anchorMarks, view, selection, context, scale);
 }
 
 /**
@@ -471,12 +486,12 @@ export function selectionSpanRange(term, selection, context) {
   );
 }
 
-function placeChartAnchorMarks(svg, view, selection, context, scale) {
-  if (!svg._anchorMarks) return;
+function placeChartAnchorMarks(nodes, view, selection, context, scale) {
+  if (!nodes) return;
   const marks = anchorMarks(
     view, context.selectedTerm(), context.selectionAnchor(), context.selectionSpan(), selection
   );
-  placeAnchorMarks(svg._anchorMarks, marks, scale);
+  placeAnchorMarks(nodes, marks, scale);
 }
 
 /**
@@ -495,8 +510,36 @@ export function bindPointLens(svg) {
       point.classList.toggle("near", near);
     }
   };
-  svg.addEventListener("pointermove", (event) => reveal(svgPointerX(svg, event)));
-  svg.addEventListener("pointerleave", () => reveal(null));
+  const follow = (pointerX) => {
+    // Kept for the next draw, which marks the points near it as it draws them.
+    svg._lensX = pointerX;
+    reveal(pointerX);
+  };
+  // A press owns the pointer: the lens waits, rather than measure a chart the drag just redrew.
+  svg.addEventListener("pointermove", (event) => {
+    if (!event.buttons) follow(svgPointerX(svg, event));
+  });
+  svg.addEventListener("pointerleave", () => follow(null));
+}
+
+/**
+ * The tooltip of the point under the pointer. Bound once; the drawn circles
+ * change underneath, and a redraw takes the tooltip away until the next move.
+ * @param {SVGSVGElement} svg
+ */
+export function bindPointTooltip(svg) {
+  svg.addEventListener("pointermove", (event) => {
+    const point = event.target.closest?.("circle.point[data-index]");
+    const view = svg._selectionView?.view;
+    if (!point || !view) {
+      hidePointTooltip(svg);
+      return;
+    }
+    const shown = svg.querySelector(":scope > .point-tooltip");
+    if (shown && shown.getAttribute("data-for-point") === point.dataset.index) return;
+    showPointTooltip(svg, point, pointTooltipLines(view, Number(point.dataset.index)));
+  });
+  svg.addEventListener("pointerleave", () => hidePointTooltip(svg));
 }
 
 function svgPointerX(svg, event) {
@@ -599,7 +642,6 @@ function applyPlotClip(svg) {
     ".free-level",
     ".unsmoothed",
     ".unsmoothed-dot",
-    ".point",
     ".spline-level-dot",
     ".control-stem",
     ".control-handle"
@@ -607,7 +649,7 @@ function applyPlotClip(svg) {
   for (const node of svg.querySelectorAll(clipped)) {
     node.setAttribute("clip-path", "url(#plotClip)");
   }
-  for (const node of svg.querySelectorAll(".point,.control-handle")) {
+  for (const node of svg.querySelectorAll(".control-handle")) {
     node.setAttribute("clip-path", "url(#plotInteractionClip)");
   }
 }
@@ -627,21 +669,16 @@ function basePointIndices(term) {
   return term.handle_indices || term.x.map((_, i) => i);
 }
 
-function drawPoint(svg, pointLayer, term, x, y, sx, sy, i, selected, supplemental = false) {
+function drawPoint(pointLayer, x, y, sx, sy, i, selected, supplemental, lensX) {
+  const cx = sx(x[i]);
+  const near = lensX !== null && Math.abs(cx - lensX) <= LENS_HALF_WIDTH;
   const attrs = {
-    cx: sx(x[i]), cy: sy(y[i]), r: selected ? 4.6 : 3.4,
-    class: selected ? "point selected" : "point",
+    cx, cy: sy(y[i]), r: selected ? 4.6 : 3.4,
+    class: `point${selected ? " selected" : ""}${near ? " near" : ""}`,
     "data-index": i
   };
   if (supplemental) attrs["data-selection-supplemental"] = "true";
   const circle = el("circle", attrs);
-  circle.addEventListener("pointerenter", () => {
-    showPointTooltip(svg, circle, pointTooltipLines(term, i));
-  });
-  circle.addEventListener("pointermove", () => {
-    showPointTooltip(svg, circle, pointTooltipLines(term, i));
-  });
-  circle.addEventListener("pointerleave", () => hidePointTooltip(svg));
   pointLayer.appendChild(circle);
   return circle;
 }
@@ -681,7 +718,7 @@ function showPointTooltip(svg, target, lines) {
   const { width: svgWidth, height: svgHeight } = svg.viewBox.baseVal;
   const x = Math.max(8, Math.min(svgWidth - width - 8, cx + 12));
   const y = Math.max(8, Math.min(svgHeight - height - 8, cy - height - 12));
-  const group = el("g", { class: "point-tooltip" });
+  const group = el("g", { class: "point-tooltip", "data-for-point": target.dataset.index });
   group.appendChild(el("rect", { x, y, width, height, rx: 4, ry: 4 }));
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
     const node = text(
@@ -692,7 +729,7 @@ function showPointTooltip(svg, target, lines) {
       lineIndex === 0 ? "point-tooltip-label" : "point-tooltip-value",
       "start"
     );
-    if (lineIndex === 0) node.setAttribute("font-weight", "700");
+    if (lineIndex === 0) node.setAttribute("font-weight", "600");
   }
   svg.appendChild(group);
 }
@@ -850,15 +887,15 @@ function drawControlHandles(svg, term, sx, sy, margin, innerH) {
 
 // An ordered spline draws its curves on the level-axis grid and leaves its
 // special levels as lone dots; every other term joins its points.
-function drawTermLines(svg, { x, y, original, previous, spline, sx, sy }) {
+function drawTermLines(svg, { x, y, original, previous, spline, sx, sy, scaleKey }) {
   const join = (values) => (spline ? levelPolyline(x, values, spline.levelIndices) : { x, y: values });
   const originalLine = spline && spline.originalY
     ? { x: spline.x, y: spline.originalY }
     : join(original);
-  path(svg, originalLine.x, originalLine.y, sx, sy, "original");
+  stablePath(svg, originalLine.x, originalLine.y, sx, sy, "original", scaleKey);
   if (previous) {
     const previousLine = join(previous);
-    path(svg, previousLine.x, previousLine.y, sx, sy, "previous-edit");
+    stablePath(svg, previousLine.x, previousLine.y, sx, sy, "previous-edit", scaleKey);
   }
   const editedLine = spline && spline.y ? { x: spline.x, y: spline.y } : join(y);
   path(svg, editedLine.x, editedLine.y, sx, sy, "edited");
@@ -1107,9 +1144,8 @@ function positionSelectionMenu(svg, selectionMenu, bounds) {
     left: Math.max(limits.minLeft, Math.min(limits.maxLeft, candidate.left)),
     top: Math.max(limits.minTop, Math.min(limits.maxTop, candidate.top))
   }));
-  // Read every point's box once: the candidates are scored against the same points.
-  const pointBoxes = [...svg.querySelectorAll("circle.point[data-index]")]
-    .map((point) => point.getBoundingClientRect());
+  // Worked out once from the scale: the candidates are scored against the same points.
+  const pointBoxes = curvePointBoxes(svg);
   let best = positioned[0];
   let bestIntersections = selectionMenuPointIntersections(pointBoxes, parentBox, menuBox, best);
   for (const candidate of positioned.slice(1)) {
@@ -1161,6 +1197,19 @@ function plotLimits(svg, scale, parentBox, menuBox, pad, fallback) {
   };
   const fits = limits.maxLeft >= limits.minLeft && limits.maxTop >= limits.minTop;
   return fits ? limits : fallback;
+}
+
+// Each point's box on the screen, at the selected size.
+function curvePointBoxes(svg) {
+  const scale = svg._scale;
+  if (!scale) return [];
+  const radius = 4.6;
+  const boxes = [];
+  for (let i = 0; i < scale.y.length; i++) {
+    const { x, y } = svgClientPoint(svg, scale.sx(scale.x[i]), scale.sy(scale.y[i]));
+    boxes.push({ left: x - radius, right: x + radius, top: y - radius, bottom: y + radius });
+  }
+  return boxes;
 }
 
 // The points the palette must not cover: every point on the curve, shown or
@@ -1332,7 +1381,7 @@ function ticks(min, max, n) {
   return Array.from({ length: n }, (_, i) => min + i * step);
 }
 
-function exposureLayer(svg, term, sx, margin, innerW, innerH, exposure, waiting = new Map()) {
+function exposureLayer(svg, term, sx, margin, innerW, innerH, exposure, waiting, scaleKey) {
   // Exposure uses a secondary visual scale inside the plot area. It is
   // contextual, not part of the relativity y-axis scale.
   if (!exposure || !exposure.y || !exposure.y.length) return;
@@ -1344,7 +1393,7 @@ function exposureLayer(svg, term, sx, margin, innerW, innerH, exposure, waiting 
   const maxH = innerH / 3;
   const exposureY = (v) => yBase - maxH * v / maxWeight;
   if (exposure.kind === "density") {
-    exposureDensity(svg, x, exposure.y, sx, exposureY, yBase);
+    exposureDensity(svg, x, exposure.y, sx, exposureY, yBase, scaleKey);
   } else {
     const nominalW = x.length > 1
       ? Math.min(Math.abs(sx(x[1]) - sx(x[0])) * 0.7, innerW / 12)
@@ -1375,8 +1424,8 @@ function exposureLayer(svg, term, sx, margin, innerW, innerH, exposure, waiting 
   exposureAxis(svg, margin.left + innerW, yBase, maxH, maxWeight);
 }
 
-function exposureDensity(svg, x, y, sx, exposureY, yBase) {
-  const top = x.map((v, i) => `${i === 0 ? "M" : "L"} ${sx(v).toFixed(2)} ${exposureY(y[i]).toFixed(2)}`).join(" ");
+function exposureDensity(svg, x, y, sx, exposureY, yBase, scaleKey) {
+  const top = stableString(y, x, scaleKey, () => curveString(x, y, sx, exposureY));
   const right = `L ${sx(x[x.length - 1]).toFixed(2)} ${yBase.toFixed(2)}`;
   const left = `L ${sx(x[0]).toFixed(2)} ${yBase.toFixed(2)} Z`;
   svg.appendChild(el("path", { d: `${top} ${right} ${left}`, class: "exposure-density" }));
@@ -1391,24 +1440,49 @@ function exposureAxis(svg, x, yBase, maxH, maxWeight) {
   for (const value of [0, maxWeight]) {
     const y = yBase - maxH * value / maxWeight;
     line(svg, x, y, x + 4, y, "exposure-axis");
-    text(svg, x + 7, y + 3.5, fmt(value), "tick-label small", "start");
+    text(svg, x + 7, y + 3.5, fmt(value), "tick-label", "start");
   }
 }
 
+function curveString(x, y, sx, sy) {
+  return x.map((v, i) => `${i === 0 ? "M" : "L"} ${sx(v).toFixed(2)} ${sy(y[i]).toFixed(2)}`).join(" ");
+}
+
 function path(svg, x, y, sx, sy, cls) {
-  const d = x.map((v, i) => `${i === 0 ? "M" : "L"} ${sx(v).toFixed(2)} ${sy(y[i]).toFixed(2)}`).join(" ");
-  const node = el("path", { d, class: cls });
+  const node = el("path", { d: curveString(x, y, sx, sy), class: cls });
   svg.appendChild(node);
   return node;
 }
 
-function band(svg, x, lower, upper, sx, sy, cls) {
-  const top = x.map((v, i) => `${i === 0 ? "M" : "L"} ${sx(v).toFixed(2)} ${sy(upper[i]).toFixed(2)}`).join(" ");
-  const bottom = x.slice().reverse().map((v, revI) => {
-    const i = x.length - 1 - revI;
-    return `L ${sx(v).toFixed(2)} ${sy(lower[i]).toFixed(2)}`;
-  }).join(" ");
-  svg.appendChild(el("path", { d: `${top} ${bottom} Z`, class: cls }));
+// The strings of series a drag leaves alone: the reference curves, the
+// intervals and the exposure, never the edited curve, which it writes in
+// place. Each lives as long as its series' array, and holds while that array's
+// x and the chart's scales are the ones it was drawn with.
+const stableStrings = new WeakMap();
+
+function stableString(series, x, scaleKey, build) {
+  const known = stableStrings.get(series);
+  if (known && known.x === x && known.scaleKey === scaleKey) return known.d;
+  const d = build();
+  stableStrings.set(series, { x, scaleKey, d });
+  return d;
+}
+
+function stablePath(svg, x, y, sx, sy, cls, scaleKey) {
+  const d = stableString(y, x, scaleKey, () => curveString(x, y, sx, sy));
+  svg.appendChild(el("path", { d, class: cls }));
+}
+
+function band(svg, x, lower, upper, sx, sy, cls, scaleKey) {
+  const d = stableString(lower, x, scaleKey, () => {
+    const top = curveString(x, upper, sx, sy);
+    const bottom = x.slice().reverse().map((v, revI) => {
+      const i = x.length - 1 - revI;
+      return `L ${sx(v).toFixed(2)} ${sy(lower[i]).toFixed(2)}`;
+    }).join(" ");
+    return `${top} ${bottom} Z`;
+  });
+  svg.appendChild(el("path", { d, class: cls }));
 }
 
 // Each level fitted free, behind the curve, as its relativity to the

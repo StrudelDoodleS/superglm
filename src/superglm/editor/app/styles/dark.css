@@ -32,6 +32,20 @@
   --orange-soft: #3a2a1c;
   --param-average: #6b93d9;
   --param-spread: #dd6a12;
+  /* The distribution panel: the ridges' lines follow the parameter pair,
+     the fills take the same hues under their opacity, and the fan's ramps
+     rise from the dark ground to lighter steps, the top one inside the dark
+     mark band like the lines. */
+  --ridge-line: var(--param-average);
+  --ridge-tail-line: var(--param-spread);
+  --ridge-fill: #6b93d9;
+  --ridge-tail-fill: #dd6a12;
+  --fan-blue-1: #3f5f9e;
+  --fan-blue-2: #5578bd;
+  --fan-blue-3: #6b93d9;
+  --fan-orange-1: #8a4a1c;
+  --fan-orange-2: #b2581a;
+  --fan-orange-3: #dd6a12;
   --red: #fb4934;
   --yellow: #d79921;
   --yellow-border: #d79921;

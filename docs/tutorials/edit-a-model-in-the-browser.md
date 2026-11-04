@@ -98,8 +98,9 @@ with each term's kind and effective degrees of freedom. The current term is high
   - Drag a box to select the points inside it. **Select all** selects the whole term.
 - **Move** drags selected relativities. The curve previews immediately and Python confirms the edit
   when the pointer is released.
-- **Zoom** drags a box. The mouse wheel zooms around the pointer in every mode, Shift-drag or a
-  middle-button drag pans, and Home restores the fitted extent.
+- **Zoom** drags a box, and the mouse wheel zooms around the pointer. In the other tools the wheel
+  scrolls the page when there is more below the chart, so hold Ctrl or Cmd with the wheel, or pinch,
+  to zoom there. Shift-drag or a middle-button drag pans, and Home restores the fitted extent.
 - **Handles** edits a spline through fixed-x control handles. In Handles mode, when the fitted
   term exposes its basis, **Contrib** shows each basis function's contribution and **Build**
   animates them into the spline. Settings sets how long Build takes.
@@ -767,7 +768,7 @@ The tab shows:
 - a header naming the folds, the splitter, the rows and where the result came from;
 - **Performance across folds**: each score's mean, with one dot per fold;
 - **Folds**: each fold's train and test rows, scores, EDF, fit time and whether it converged;
-- **Relativities across folds**: every term, least stable first, with a search box. *spread* is
+- **Relativities across folds**: every term, least stable first, with a search box. *fold gap* is
   the mean distance of a fold's curve from the fold average, and *min r* the lowest correlation of
   a fold with it.
 
@@ -793,6 +794,21 @@ with. Both jobs estimate what the opened model declares they estimate: a
 `selection_penalty="auto"`, smoothing that a `fit_reml` fit estimates, or a negative binomial
 `theta="auto"` is chosen again on each fold's rows and on the Final fit's rows, after a Refit too.
 A job whose model changed while it ran is not kept; run it again.
+
+Both run in the background, so you can keep working. A pill beside the tabs shows how far a job has
+got on every tab, and how it ended; click it to open the job's tab. While Run CV runs, each fold's
+scores land on the cards and in the fold table as it finishes. When the folds split the rows, as
+K-fold does, the **Held out** column shows the piece of the book each fold scored, and **Rounds**
+shows how much smoothing search a `fit_reml` fold took, which is usually why one fold is slower.
+
+A SuperLSS model works the same way: pass `cross_validate(model, X_train, y_train, cv=folds,
+fit_mode="fit_reml", return_estimators=True)` as `cv=`, with no `scoring=` argument. Its folds are
+scored by log score, CRPS, Gini and actual over expected; a family with no distribution function,
+such as the negative binomial, has no CRPS. Its `offset` is a dict by parameter, and its fold curves
+are listed under **Average** and then **Spread**, the least stable first in each. A spread curve is a
+relativity of what the family models: the coefficient of variation for the gamma, σ for the
+log-normal, and overdispersion (1/θ) for the negative binomial, so higher always means more spread. See
+[Check a distributional fit](../how-to/check-a-distributional-fit.md#5-how-do-candidates-compare).
 
 Run CV is disabled, with the reason on hover, when it cannot use the rows:
 
