@@ -6,6 +6,7 @@ nothing. Only a fold's held-out rows need one prediction each.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from typing import Any
 
@@ -19,6 +20,8 @@ from superglm.model.fit_state import fitted_lambda2
 from superglm.model.reml_setup import collect_reml_groups
 from superglm.model_selection import _fingerprint_columns, _take_offset, fold_adapter
 from superglm.reml.penalty_algebra import build_penalty_components
+
+_LOGGER = logging.getLogger(__name__)
 
 # EDF this close to the unpenalized part of a term reads as that shape.
 SHAPE_MARGIN = 0.05
@@ -144,16 +147,30 @@ def _lss_trace(lss) -> dict[str, Any]:
     }
 
 
-def _glm_penalties(model) -> list[tuple[Any, float]]:
-    """Each smoothing penalty of a fit with its value, searched or held fixed."""
+def _glm_penalties(model) -> list[tuple[Any, float]] | None:
+    """Each smoothing penalty of a fit with its value, searched or held fixed.
+
+    None where a fit with no search released the design that says which terms
+    it penalised. A group-wide key sets every penalty of its group that is not
+    listed by its full name, as it does in the solver.
+    """
     reml = getattr(model, "_reml_result", None)
     if reml is not None:
         penalties = getattr(model, "_reml_penalties", None) or reml.reml_penalties or ()
         return [(item, float(reml.lambdas[item.name])) for item in penalties]
+    if model._dm is None:
+        return None
     matrices = model._dm.group_matrices
     fixed = fitted_lambda2(model)
     return [
-        (item, float(fixed.get(item.name, 0.0) if isinstance(fixed, Mapping) else fixed))
+        (
+            item,
+            float(
+                fixed.get(item.name, fixed.get(item.group_name, 0.0))
+                if isinstance(fixed, Mapping)
+                else fixed
+            ),
+        )
         for item in build_penalty_components(matrices, collect_reml_groups(model._groups, matrices))
     ]
 
@@ -183,8 +200,19 @@ def _glm_terms(model, *, searched: bool) -> dict[Hashable, dict[str, Any]]:
         name = group.feature_name
         width[name] = width.get(name, 0) + group.end - group.start
         edf[name] = edf.get(name, 0.0) + group_edf.get(group.name, 0.0)
+    recorded = _glm_penalties(model)
+    if recorded is None:
+        return {
+            name: {
+                "edf": float(edf[name]),
+                "lambda": None,
+                "shape": "unrecorded",
+                "at_limit": False,
+            }
+            for name in width
+        }
     penalties: dict[Hashable, list[tuple[Any, float]]] = {}
-    for penalty, value in _glm_penalties(model):
+    for penalty, value in recorded:
         penalties.setdefault(owner[penalty.group_name], []).append((penalty, value))
     return {
         name: _glm_cell(edf[name], width[name], penalties.get(name, ()), searched=searched)
@@ -292,7 +320,8 @@ def supplied_fold_traces(cv, rows) -> list[dict[str, Any]]:
     """A trace per fold of a result that kept its fold models; held-out rows when ``rows`` match.
 
     A fold that failed kept no model, so it has no trace. A result that kept no
-    fold indices says neither a fold's size nor which rows it held out.
+    fold indices says neither a fold's size nor which rows it held out. A fold
+    that cannot be read is logged and left out, so the others still show.
     """
     traces = []
     times = cv.fold_scores["fit_time_s"] if "fit_time_s" in cv.fold_scores else None
@@ -300,15 +329,19 @@ def supplied_fold_traces(cv, rows) -> list[dict[str, Any]]:
         if model is None:
             continue
         train, test = (None, None) if cv.fold_indices is None else cv.fold_indices[index]
-        trace = fit_trace(
-            model,
-            fit_id=f"fold-{index + 1}",
-            label=f"Fold {index + 1}",
-            n_rows=None if train is None else len(train),
-            seconds=None if times is None else float(times.iloc[index]),
-        )
-        if rows is not None and test is not None:
-            trace["worst_rows"] = held_out_worst_rows(model, rows, np.asarray(test))
+        try:
+            trace = fit_trace(
+                model,
+                fit_id=f"fold-{index + 1}",
+                label=f"Fold {index + 1}",
+                n_rows=None if train is None else len(train),
+                seconds=None if times is None else float(times.iloc[index]),
+            )
+            if rows is not None and test is not None:
+                trace["worst_rows"] = held_out_worst_rows(model, rows, np.asarray(test))
+        except Exception:
+            _LOGGER.warning("Fold %d has no Diagnose trace.", index + 1, exc_info=True)
+            continue
         traces.append(trace)
     return traces
 

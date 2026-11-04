@@ -136,6 +136,11 @@ test("a term whose penalty leaves more than a line says simplest shape, tinted",
   assert.match(termMatrixMarkup(payload([simplest]), "fold-1"), /data-shape="simplest" title="smoothed to the simplest shape its penalty allows, smoothing 1\.00e\+10">2\.00/);
 });
 
+test("a fit that released its design says its smoothing was not kept", () => {
+  const released = fit("model", "This model", { terms: { "mean:area": { edf: 2.5, lambda: null, shape: "unrecorded", at_limit: false } } });
+  assert.match(termMatrixMarkup(payload([released]), "model"), /title="smoothing not kept: this fit used retain_fit_state=False">2\.50/);
+});
+
 test("a term one fit lacks reads as a dash", () => {
   const partial = fit("fold-1", "Fold 1", { terms: { "mean:area": { edf: 5, lambda: null, shape: "unsmoothed", at_limit: false } } });
   assert.match(termMatrixMarkup(payload([partial]), "fold-1"), /<td class="diagnose-cell">--<\/td>/);

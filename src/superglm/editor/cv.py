@@ -729,6 +729,13 @@ def cv_report_payload(widget, *, request_sequence: int | None = None) -> dict[st
     return cv_tab_payload(view, jobs=jobs, request_sequence=request_sequence)
 
 
+def _untraced_note(expected: Sequence[int], folds: Sequence[dict[str, Any]]) -> str:
+    """A sentence naming the folds that kept no trace; empty when every one did."""
+    traced = {fit["id"] for fit in folds}
+    missing = [f"Fold {number}" for number in expected if f"fold-{number}" not in traced]
+    return f" No trace for {', '.join(missing)}: see the log." if missing else ""
+
+
 def diagnose_report_payload(widget, *, request_sequence: int | None = None) -> dict[str, Any]:
     """The ``diagnose`` report: captured under the widget lock, built outside it.
 
@@ -744,14 +751,14 @@ def diagnose_report_payload(widget, *, request_sequence: int | None = None) -> d
         rows = session.cv_check.rows
         kept = widget._diagnose_folds
         same_fit = _same_fit(model, session.reference_model)
-    if run is not None and run.fold_fits:
+    if run is not None:
         folds = list(run.fold_fits)
         source = (
             "Folds from Run CV on the current model."
             if run.model_revision == revision
             else "Folds from Run CV on an earlier version of this model. "
             "Press Run CV to see the current one."
-        )
+        ) + _untraced_note(range(1, len(run.result.fold_scores) + 1), folds)
     elif supplied is None:
         folds, source = [], "This model only: pass a cross_validate() result to see its folds."
     elif supplied.estimators is None:
@@ -771,6 +778,8 @@ def diagnose_report_payload(widget, *, request_sequence: int | None = None) -> d
             if same_fit
             else "Folds as supplied with edit(model, cv=result), from the model as first opened. "
             "Press Run CV to see the current one."
+        ) + _untraced_note(
+            [i + 1 for i, fold in enumerate(supplied.estimators) if fold is not None], folds
         )
     return diagnose_tab_payload(
         model,

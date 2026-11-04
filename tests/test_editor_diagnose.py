@@ -148,8 +148,34 @@ def test_a_superglm_term_reads_only_the_smoothing_it_owns():
     )
     assert terms["region"]["lambda"] is None
     assert terms["group"]["lambda"] == lambdas["group"]
-    for name in terms:
-        assert terms[name]["edf"] == pytest.approx(model._group_edf[name])
+    for name in ("age", "size"):
+        assert terms[name]["edf"] == pytest.approx(model.term_inference(name, with_se=False).edf)
+    assert terms["age:size"]["edf"] == pytest.approx(model._group_edf["age:size"])
+
+
+def test_a_group_wide_fixed_smoothing_reaches_each_of_its_penalties():
+    X, y = _rows()
+    model = SuperGLM(family="gamma", terms=[s("age", k=6), s("size", k=5), ti("age", "size")])
+    model.lambda2 = {"age": 1.0, "size": 1.0, "age:size": 5.0}
+    terms = fit_trace(model.fit(X, y), fit_id="model", label="This model")["terms"]
+    assert terms["age:size"]["lambda"] == 5.0
+    assert terms["age"]["lambda"] == 1.0
+
+
+def test_a_fit_that_released_its_design_says_its_smoothing_was_not_kept():
+    X, y = _rows()
+    fixed = SuperGLM(
+        family="gamma", terms=[s("age", k=6)], spline_penalty=1000.0, retain_fit_state=False
+    ).fit(X, y)
+    cell = fit_trace(fixed, fit_id="model", label="This model")["terms"]["age"]
+    assert cell["shape"] == "unrecorded"
+    assert cell["lambda"] is None
+    assert cell["edf"] == pytest.approx(fixed.term_inference("age", with_se=False).edf)
+    searched = SuperGLM(family="gamma", terms=[s("age", k=6)], retain_fit_state=False).fit_reml(
+        X, y
+    )
+    terms = fit_trace(searched, fit_id="model", label="This model")["terms"]
+    assert terms["age"]["lambda"] == searched._reml_result.lambdas["age"]
 
 
 def test_a_searched_term_s_shape_reads_its_own_penalty_s_null_space(monkeypatch):
@@ -365,6 +391,34 @@ def test_fold_models_with_no_fold_indices_are_traced_without_rows():
     assert "worst_rows" not in traces[0]
 
 
+def test_a_supplied_fold_that_cannot_be_read_leaves_the_tab_open(monkeypatch):
+    model, X, y = _glm()
+    cv = cross_validate(
+        model,
+        X,
+        y,
+        cv=KFold(3, shuffle=True, random_state=1),
+        fit_mode="fit_reml",
+        return_estimators=True,
+    )
+    session = edit(model, train_data=(X, y), cv=cv)
+    real = fit_trace
+
+    def refuses_one(fitted, *, fit_id, **kwargs):
+        if fit_id == "fold-2":
+            raise ValueError("this fold cannot be read")
+        return real(fitted, fit_id=fit_id, **kwargs)
+
+    monkeypatch.setattr("superglm.editor.diagnose.fit_trace", refuses_one)
+    widget = session.widget()
+    try:
+        payload = widget._report("diagnose")
+    finally:
+        widget.close()
+    assert [fit["id"] for fit in payload["fits"]] == ["model", "fold-1", "fold-3"]
+    assert payload["note"].endswith("No trace for Fold 2: see the log.")
+
+
 def test_a_result_with_no_fold_models_shows_this_model_and_says_why():
     model, X, y = _glm()
     cv = cross_validate(model, X, y, cv=KFold(3, shuffle=True, random_state=1))
@@ -460,3 +514,14 @@ def test_a_fold_that_cannot_be_traced_keeps_its_scores(monkeypatch, target):
     run = run_cv(capture_cv_run(session), _Context())
     assert run.fold_fits == ()
     assert np.isfinite(run.result.fold_scores["deviance"]).all()
+    monkeypatch.undo()
+    widget = session.widget()
+    widget._cv_run = run
+    try:
+        payload = widget._report("diagnose")
+    finally:
+        widget.close()
+    assert [fit["id"] for fit in payload["fits"]] == ["model"]
+    assert payload["note"] == (
+        "Folds from Run CV on the current model. No trace for Fold 1, Fold 2, Fold 3: see the log."
+    )

@@ -805,10 +805,11 @@ The **Diagnose** tab shows how each fit's smoothing search went, read from what 
 so opening it refits nothing:
 
 - **Fits**: rounds, the round the search settled by, fit time, why it stopped and how much REML the
-  last half of its rounds gained. A fold that took at least twice the middle fold's rounds is marked
-  *slow*, here and in the fold table, whose mark opens that fold in this tab.
+  last half of its rounds gained. A fold that took at least twice the middle fold's rounds, and at
+  least ten, is marked *slow*, here and in the fold table, whose mark opens that fold in this tab.
 - **Smoothing by term**: every fit's effective degrees of freedom side by side. A tint means the fit
-  left the term straight or smoothed it away, and a dot means it reached the smoothing limit.
+  left the term at the simplest shape its penalty allows, a straight line for most splines, or
+  smoothed it away. A dot means the fit records that it reached the smoothing limit.
 - **Search path**: how much REML each fit still had to gain at each round.
 - **What the fit reports** and **Time by phase**: a SuperLSS's `diagnose()` findings and work profile.
   A SuperGLM has neither.

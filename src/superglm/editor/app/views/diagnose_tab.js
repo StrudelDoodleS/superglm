@@ -7,7 +7,7 @@ import { clockText, foldColour } from "./cv_tab.js";
  * @typedef {object} DiagnoseCell
  * @property {number} edf
  * @property {number|null} lambda
- * @property {"curve"|"straight"|"simplest"|"flat"|"unsmoothed"} shape
+ * @property {"curve"|"straight"|"simplest"|"flat"|"unsmoothed"|"unrecorded"} shape
  * @property {boolean} at_limit
  */
 /**
@@ -56,6 +56,7 @@ const SHAPE_WORDS = Object.freeze({
   simplest: "smoothed to the simplest shape its penalty allows",
   flat: "smoothed away",
   unsmoothed: "no smoothing",
+  unrecorded: "smoothing not kept: this fit used retain_fit_state=False",
 });
 
 /** @param {number|null|undefined} value @param {number} digits */
