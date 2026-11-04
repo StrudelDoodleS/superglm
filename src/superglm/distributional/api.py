@@ -770,7 +770,8 @@ class SuperLSS:
         (``TwoPieceNormalLSS`` and ``TwoPieceLogNormalLSS``): Newton's smoothness
         assumption fails there, so they run ``"efs"`` and the endgame is not advised.
         ``max_reml_iter`` bounds the smoothing iterations, Fellner-Schall and
-        Newton together.
+        Newton together. A default finish that stalls on an exact face is not
+        counted, so such a fit can do up to 16 further iterations of work.
 
         ``practical_reml`` stops the Fellner--Schall loop after sustained
         negligible objective and fitted-parameter movement. Set it to ``False``

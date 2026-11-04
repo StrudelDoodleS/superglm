@@ -177,9 +177,23 @@ def _assert_the_plateau_stood(smoothing, plain):
 )
 def test_a_finish_that_stalled_leaves_the_fit_at_its_plateau(monkeypatch, kind):
     """A plateau held where the finish started says nothing about where it stalled."""
-    calls = _spy_on_the_endgame(
-        monkeypatch, lambda outcome: dataclasses.replace(outcome, kind=kind)
-    )
+
+    def moved_then_stalled(outcome):
+        kwargs = calls[-1]
+        history, fits = kwargs["history"], kwargs["coefficient_fits"]
+        history.append(dataclasses.replace(history[-1], iteration=len(history) + 1, stage="newton"))
+        fits.append(fits[0])
+        state = kwargs["state"]
+        moved = dataclasses.replace(
+            state,
+            lambdas={name: 2.0 * value for name, value in state.lambdas.items()},
+            fit=fits[0],
+            objective=state.objective - 1.0,
+            terminal_fit_index=len(fits) - 1,
+        )
+        return dataclasses.replace(outcome, kind=kind, state=moved)
+
+    calls = _spy_on_the_endgame(monkeypatch, moved_then_stalled)
     model, frame, response = _two_smooth_gaussian()
     model.fit_reml(frame, response)
     plain_model, _, _ = _two_smooth_gaussian()
@@ -206,8 +220,9 @@ def test_a_finish_that_moved_far_and_was_rejected_does_not_relabel_where_it_stal
             family, family.scale(s("x", kind="cr", k=7)), family.shape(s("z", kind="cr", k=5))
         )
         fits[outer] = model.fit_reml(frame, response, outer=outer)._require_fitted().smoothing
-    if fits[None].convergence_reason != "stationary":
-        _assert_the_plateau_stood(fits[None], fits["efs"])
+    if fits[None].convergence_reason == "stationary":
+        pytest.skip("this build's finish reaches stationarity from this plateau")
+    _assert_the_plateau_stood(fits[None], fits["efs"])
 
 
 def _forced_face_plateau_fit(monkeypatch, outcome):
@@ -242,7 +257,7 @@ def test_a_finish_on_a_face_that_cannot_reach_stationary_leaves_the_stop_to_the_
     assert len(calls) == 1
     assert calls[0]["state"].face is not None
     assert smoothing.convergence_reason != "practical_plateau"
-    # The search went back to Fellner--Schall with the accepted Newton state.
+    # The search went back to Fellner--Schall from the plateau's state.
     assert smoothing.history[-1].stage == "efs"
     assert smoothing.terminal_gradient is None
     if smoothing.converged:

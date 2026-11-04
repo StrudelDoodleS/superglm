@@ -450,7 +450,8 @@ def fit_distributional_efs(
         if budget <= 0:
             return _result(converged=False, reason="max_iterations")
         entry = _endgame_state()
-        entry_fits, entry_iterations = list(coefficient_fits), len(history)
+        entry_fits = list(coefficient_fits) if _plateau_finishes() else []
+        entry_iterations = len(history)
         outcome = run_newton_endgame(
             family,
             layout,

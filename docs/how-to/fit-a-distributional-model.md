@@ -1080,9 +1080,10 @@ of the coefficient-covariance difference is not a percentage error in every
 prediction interval. The [completion comparison](https://github.com/StrudelDoodleS/superglm/blob/master/benchmarks/lss_newton_completion.md)
 records examples where stricter search helps and where it remains unresolved.
 
-If fresh LAML gradients become unavailable after an accepted endgame fit, the
-solver retains that fit and resumes EFS for the remaining outer iterations,
-with further Newton handoffs disabled. Unavailable terminal derivative fields
+Under `outer="efs+newton"`, if fresh LAML gradients become unavailable after an
+accepted endgame fit, the solver retains that fit and resumes EFS for the
+remaining outer iterations, with further Newton handoffs disabled. Under the
+default, a finish whose gradients become unavailable leaves the fit at its plateau. Unavailable terminal derivative fields
 are cleared. A state already released beyond the configured upper bounds keeps
 an explicit `derivative_unavailable` stop instead of being clipped into the EFS box.
 Hessian-only failures retain the BFGS fallback.
