@@ -90,7 +90,12 @@ def _gini(model, X, y, *, sample_weight=None, offset=None) -> float:
     """
     response, mean, weights = _scored_means(model, X, y, sample_weight, offset)
     total = np.sum(response) if weights is None else np.sum(weights * response)
-    return _normalized_gini(response, mean, weights) if total > 0.0 else float("nan")
+    if total > 0.0:
+        return _normalized_gini(response, mean, weights)
+    logger.warning(
+        "A fold's total response is not positive, so it has no Gini, and the mean Gini leaves it out."
+    )
+    return float("nan")
 
 
 def parts_ratio(numerator: float, denominator: float) -> float:

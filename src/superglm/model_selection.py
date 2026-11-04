@@ -719,14 +719,13 @@ def cross_validate(
     groups : array-like, optional
         Group labels forwarded to ``cv.split()``.
     fit_mode : {"fit", "fit_reml"}, optional
-        By default ``"fit"`` for a SuperGLM. A SuperLSS has no configured
-        smoothing to hold fixed, so its default is ``"fit_reml"``, or ``"fit"``
-        when ``fit_kwargs`` gives ``lambdas``. On an unfitted SuperLSS with
-        smooth terms, ``"fit"`` needs those ``lambdas``: without them every
-        fold fails, and each failure is logged.
         Which fit method to call on each fold estimator. ``"fit"`` holds the
         smoothing parameters fixed; ``"fit_reml"`` selects them again on each
-        fold's training rows.
+        fold's training rows. By default ``"fit"`` for a SuperGLM. A SuperLSS
+        has no configured smoothing to hold fixed, so its default is
+        ``"fit_reml"``, or ``"fit"`` when ``fit_kwargs`` gives ``lambdas``. On
+        an unfitted SuperLSS with smooth terms, ``"fit"`` needs those
+        ``lambdas``: without them every fold fails, and each failure is logged.
     scoring : str, callable, or sequence thereof, optional
         Metrics to evaluate. Built-in for a SuperGLM: ``"deviance"``, ``"nll"``,
         ``"gini"``; ``"deviance"`` by default. Built-in for a SuperLSS:
@@ -739,7 +738,9 @@ def cross_validate(
         ``"frequency"``, the count of positive-weight rows under ``"prior"``, so
         the NLL of the two model types can be compared on the same folds.
         ``"actual_expected"`` is ``sum(w * y) / sum(w * mean)``. Gini remains a
-        separately weighted ranking metric.
+        separately weighted ranking metric. On a SuperLSS, a fold whose total
+        response is not positive has no Gini: it reads NaN, and the mean leaves
+        it out, as it does a CRPS that cannot be resolved. Both are logged.
         Callables must follow ``scorer(model, X, y, *, sample_weight, offset) -> float | dict``.
     return_estimators : bool
         If True, keep the fitted model from each fold.

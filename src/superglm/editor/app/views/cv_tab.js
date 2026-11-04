@@ -574,7 +574,7 @@ export function foldTableMarkup(payload, job = null) {
     const slow = fold !== null && !result.live && result.folds.length >= 3 && isNumber(value) && value >= 10 && value >= 2 * middle;
     if (!slow) return `<td>${fixedText(value, 0)}</td>`;
     return `<td><button type="button" class="cv-rounds-mark" data-diagnose-open="fold-${fold + 1}"
-      data-popover-title="Slow fold" data-popover-body="This fold's search took at least twice the rounds of the middle fold. Open it in Diagnose.">${fixedText(value, 0)}</button></td>`;
+      data-popover-title="Slow fold" data-popover-body="This fold's search took at least ten rounds, and at least twice the rounds of the middle fold. Open it in Diagnose.">${fixedText(value, 0)}</button></td>`;
   };
   const finished = result.folds.map((fold, index) => `<tr>
       <td><span class="cv-fold-swatch" style="${foldSwatchStyle(foldNumber(fold, index))}"></span>Fold ${fold.fold + 1}</td>
