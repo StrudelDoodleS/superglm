@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
@@ -27,8 +28,7 @@ from superglm.solvers.rank import _symmetric_part
 # A dense Gram's row block. Fixed, so the partition and its rounding do not depend
 # on the workers.
 _GRAM_BLOCK_ROWS = 2048
-# The most blocks a channel holds until their row-order sum: 64 Grams, against the
-# whole weighted design a single product holds.
+# The most blocks a channel splits into, which bounds the additions its sum makes.
 _GRAM_MAX_BLOCKS = 64
 # Multiply-adds below which a dense channel stays one general product (under a ms).
 _GRAM_POOL_COST = 1 << 24
@@ -246,7 +246,9 @@ def _gram_rows(left: NDArray, right: NDArray, weights: NDArray, start: int, stop
 def _gram_channel_tasks(left: NDArray, right: NDArray, weights: NDArray, block_rows: int):
     """One channel's row-block tasks and its ``finish``, the blocks' sum in row order.
 
-    A channel below ``_GRAM_POOL_COST`` is one general product and has no tasks.
+    A channel below ``_GRAM_POOL_COST`` is one general product and has no tasks. A
+    placed block joins a running total as soon as the blocks before it have, so the
+    channel holds its total and only the blocks that finished out of order.
     """
     n_rows = weights.shape[0]
     cells = left.shape[1] * right.shape[1]
@@ -255,11 +257,24 @@ def _gram_channel_tasks(left: NDArray, right: NDArray, weights: NDArray, block_r
         return [], lambda: whole
     spans = [(start, min(start + block_rows, n_rows)) for start in range(0, n_rows, block_rows)]
     parts: list[NDArray | None] = [None] * len(spans)
+    lock = threading.Lock()
+    total: NDArray | None = None
+    added = 0
+
+    def place(slot: int, block: NDArray) -> None:
+        nonlocal total, added
+        with lock:
+            parts[slot] = block
+            while added < len(parts) and (ready := parts[added]) is not None:
+                parts[added] = None
+                added += 1
+                if total is None:
+                    total = ready
+                else:
+                    total += ready
 
     def finish() -> NDArray:
-        total = parts[0]
-        for part in parts[1:]:
-            total += part
+        assert total is not None and added == len(parts)
         return total
 
     tasks = [
@@ -268,7 +283,7 @@ def _gram_channel_tasks(left: NDArray, right: NDArray, weights: NDArray, block_r
             cost=float((stop - start) * cells),
             nbytes=8 * ((stop - start) * right.shape[1] + cells),
             run=lambda _cache, _profile, a=start, b=stop: _gram_rows(left, right, weights, a, b),
-            place=partial(parts.__setitem__, slot),
+            place=partial(place, slot),
         )
         for slot, (start, stop) in enumerate(spans)
     ]

@@ -609,9 +609,8 @@ def _resolved_posterior_covariance(
             lss_corrected_covariance_nonstationary_message(
                 open_stop,
                 newton_can_help=smoothing.config.outer != "efs+newton"
-                and smoothing.newton_iterations == 0
                 and getattr(
-                    getattr(fitted.family, "capabilities", None), "continuous_curvature", True
+                    getattr(fitted.family, "capabilities", None), "continuous_curvature", False
                 ),
             ),
             ConvergenceWarning,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tracemalloc
+import weakref
 from dataclasses import replace
 
 import numpy as np
@@ -478,6 +479,30 @@ def test_wide_dense_gram_is_the_same_at_every_worker_count(weights: str) -> None
         literal = matrices[left].T @ (channel_weights * matrices[right])
         magnitude = np.abs(matrices[left]).T @ (np.abs(channel_weights) * np.abs(matrices[right]))
         assert np.all(np.abs(pooled[channel] - literal) <= _gamma(n_rows) * magnitude)
+
+
+def test_the_dense_gram_keeps_a_running_total_rather_than_every_block(monkeypatch) -> None:
+    real_rows = assembly_module._gram_rows
+    formed = []
+    most_alive = 0
+
+    def spy(*args):
+        nonlocal most_alive
+        most_alive = max(most_alive, sum(block() is not None for block in formed))
+        block = real_rows(*args)
+        formed.append(weakref.ref(block))
+        return block
+
+    monkeypatch.setattr(assembly_module, "_gram_rows", spy)
+    rng = np.random.default_rng(29)
+    matrix = rng.standard_normal((6 * assembly_module._GRAM_BLOCK_ROWS, 130))
+    weights = rng.standard_normal((matrix.shape[0], 1))
+
+    with block_queue_config(workers=1):
+        (block,) = _dense_channel_blocks((matrix,), weights, [(0, 0)])
+
+    assert len(formed) == 6 and most_alive == 1
+    assert block.shape == (130, 130)
 
 
 def test_a_narrow_dense_channel_stays_one_general_product(monkeypatch) -> None:

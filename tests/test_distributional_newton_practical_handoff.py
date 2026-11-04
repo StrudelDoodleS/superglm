@@ -9,12 +9,13 @@ import pandas as pd
 import pytest
 
 from superglm import ConvergenceWarning, GaussianLS, SuperLSS, re, s
-from superglm.distributional import Predictor, TweedieLSS
+from superglm.distributional import GeneralizedParetoLSS, Predictor, TweedieLSS
 from superglm.distributional.model import fit_dense_distributional
 from superglm.distributional.posterior import posterior_covariance
 from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.results.solver import DenseSolverConfig
 from superglm.distributional.smoothing import loop
+from superglm.distributional.smoothing import newton as newton_module
 from superglm.distributional.weights import WeightContract
 from tests.test_distributional_endpoint_direction import (
     _cap_start,
@@ -153,32 +154,148 @@ def test_a_plateau_on_an_exact_face_finishes_on_the_components_off_it(monkeypatc
         retain_rows=True,
     ).smoothing
 
-    (call,) = calls
-    assert "mean:x#wiggle" in call["state"].face.component_names
-    assert smoothing.convergence_reason == "stationary"
+    assert "mean:x#wiggle" in calls[0]["state"].face.component_names
     assert "mean:x#wiggle" in smoothing.terminal_fit.coefficient_face.component_names
+    assert smoothing.convergence_reason != "practical_plateau"
 
 
-@pytest.mark.parametrize("kind", ["gradient_unresolved", "max_iterations", "objective_rejected"])
-def test_a_finish_that_cannot_reach_stationary_keeps_the_plateau(monkeypatch, kind):
+def _assert_the_plateau_stood(smoothing, plain):
+    assert smoothing.converged
+    assert smoothing.convergence_reason == "practical_plateau"
+    assert not smoothing.matched_certified
+    assert smoothing.newton_iterations == 0
+    assert smoothing.objective == plain.objective
+    assert dict(smoothing.lambdas) == dict(plain.lambdas)
+    assert smoothing.iterations == plain.iterations
+    assert len(smoothing.coefficient_fits) == len(plain.coefficient_fits)
+    assert smoothing.terminal_fit.eta is not None
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["gradient_unresolved", "max_iterations", "objective_rejected", "derivative_unavailable"],
+)
+def test_a_finish_that_stalled_leaves_the_fit_at_its_plateau(monkeypatch, kind):
+    """A plateau held where the finish started says nothing about where it stalled."""
     calls = _spy_on_the_endgame(
         monkeypatch, lambda outcome: dataclasses.replace(outcome, kind=kind)
     )
     model, frame, response = _two_smooth_gaussian()
     model.fit_reml(frame, response)
+    plain_model, _, _ = _two_smooth_gaussian()
+    plain_model.fit_reml(frame, response, outer="efs")
 
     fitted = model._require_fitted()
-    smoothing = fitted.smoothing
     assert len(calls) == 1
-    assert smoothing.converged
-    assert smoothing.convergence_reason == "practical_plateau"
-    assert not smoothing.matched_certified
-    assert smoothing.newton_iterations >= 1
-    # The endgame has run, so the disclosure does not send the user back to it.
-    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point") as record:
+    _assert_the_plateau_stood(fitted.smoothing, plain_model._require_fitted().smoothing)
+    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point"):
         corrected = posterior_covariance(fitted, kind="corrected")
-    assert not any("efs+newton" in str(item.message) for item in record)
     assert np.all(np.isfinite(corrected))
+
+
+def test_a_finish_that_moved_far_and_was_rejected_does_not_relabel_where_it_stalled():
+    """Where Newton is rejected far from the plateau, the published state is the plateau's."""
+    rng = np.random.default_rng(2)
+    x, z = rng.uniform(-1.0, 1.0, (2, 100))
+    response = rng.pareto(3.0, 100) * np.exp(0.21 * np.sin(2.6 * x)) + 0.001
+    frame = pd.DataFrame({"x": x, "z": z})
+    family = GeneralizedParetoLSS()
+    fits = {}
+    for outer in (None, "efs"):
+        model = SuperLSS(
+            family, family.scale(s("x", kind="cr", k=7)), family.shape(s("z", kind="cr", k=5))
+        )
+        fits[outer] = model.fit_reml(frame, response, outer=outer)._require_fitted().smoothing
+    if fits[None].convergence_reason != "stationary":
+        _assert_the_plateau_stood(fits[None], fits["efs"])
+
+
+def _forced_face_plateau_fit(monkeypatch, outcome):
+    calls = _spy_on_the_endgame(monkeypatch, outcome)
+    frame, mu = _linear_x_fixture(seed=6)
+    smoothing = fit_dense_distributional(
+        frame,
+        _tweedie_response(mu, seed=6),
+        family=TweedieLSS(),
+        predictors=(_mean_predictor(), Predictor("dispersion", {}), Predictor("power", {})),
+        weight_contract=WeightContract("prior"),
+        lambdas=_cap_start(),
+        config=DenseSolverConfig(
+            max_iterations=150, tolerance=1.0e-9, coefficient_curvature="observed"
+        ),
+        efs_config=DistributionalEFSConfig(
+            max_iterations=40, tolerance=1.0e-12, practical_convergence=True, outer="efs+finish"
+        ),
+        retain_rows=True,
+    ).smoothing
+    return calls, smoothing
+
+
+def test_a_finish_on_a_face_that_cannot_reach_stationary_leaves_the_stop_to_the_strict_test(
+    monkeypatch,
+):
+    """Only the strict stop revalidates a face, so a plateau cannot publish one unchecked."""
+    calls, smoothing = _forced_face_plateau_fit(
+        monkeypatch, lambda outcome: dataclasses.replace(outcome, kind="max_iterations")
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["state"].face is not None
+    assert smoothing.convergence_reason != "practical_plateau"
+    # The search went back to Fellner--Schall with the accepted Newton state.
+    assert smoothing.history[-1].stage == "efs"
+    assert smoothing.terminal_gradient is None
+    if smoothing.converged:
+        assert tuple(smoothing.terminal_endpoint_directions) == tuple(
+            smoothing.terminal_fit.coefficient_face.component_names
+        )
+
+
+def test_a_gradient_within_reml_tol_at_a_cap_is_not_cap_pressure(monkeypatch):
+    """The finish stops an order tighter than ``reml_tol``; the cap decision stays at it."""
+    stop_bar = 1e-4
+    real_endgame = loop.run_newton_endgame
+    real_derivatives = newton_module.laml_derivatives
+    outward = {}
+    verdicts = {}
+
+    def forced_gradient(*args, **kwargs):
+        derivatives = real_derivatives(*args, **kwargs)
+        gradient = np.zeros_like(derivatives.gradient)
+        gradient[derivatives.names.index(outward["name"])] = outward["value"]
+        return dataclasses.replace(
+            derivatives,
+            gradient=gradient,
+            gradient_certificate=np.zeros_like(derivatives.gradient_certificate),
+        )
+
+    def judge_then_run(*args, **kwargs):
+        state = kwargs["state"]
+        assert kwargs["cap_tolerance"] == state_tolerance
+        outward["name"] = next(iter(state.lambdas))
+        outward["value"] = -5.0 * stop_bar * (1.0 + abs(state.objective))
+        with monkeypatch.context() as forced:
+            forced.setattr(newton_module, "laml_derivatives", forced_gradient)
+            for label, cap_tolerance in (("stop bar", None), ("reml_tol", 10.0 * stop_bar)):
+                verdicts[label] = real_endgame(
+                    *args,
+                    **{
+                        **kwargs,
+                        "efs_config": dataclasses.replace(kwargs["efs_config"], tolerance=stop_bar),
+                        "cap_tolerance": cap_tolerance,
+                        "upper_bounds": {outward["name"]: state.lambdas[outward["name"]]},
+                        "history": list(kwargs["history"]),
+                        "coefficient_fits": list(kwargs["coefficient_fits"]),
+                    },
+                ).kind
+        return real_endgame(*args, **kwargs)
+
+    monkeypatch.setattr(loop, "run_newton_endgame", judge_then_run)
+    state_tolerance = 1e-6
+    model, frame, response = _two_smooth_gaussian()
+    model.fit_reml(frame, response, reml_tol=state_tolerance)
+
+    assert verdicts == {"stop bar": "cap_pressure", "reml_tol": "stationary"}
 
 
 def test_a_finish_that_finds_cap_pressure_discloses_it(monkeypatch):

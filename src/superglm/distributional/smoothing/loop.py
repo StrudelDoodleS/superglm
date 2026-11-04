@@ -347,7 +347,8 @@ def fit_distributional_efs(
 
         Fellner--Schall has no exact-gradient test, and its plateau can leave V several
         stationarity bars short, so ``"efs+finish"`` ends with Wood, Pya and Saefken's
-        (2016) Newton iteration on the components off the active face.
+        (2016) Newton iteration on the components off the active face. A finish that
+        cannot reach stationarity leaves the fit at its plateau.
         """
         return outer_config.outer == "efs+finish"
 
@@ -423,21 +424,39 @@ def fit_distributional_efs(
             terminal_fit_index=terminal_fit_index,
         )
 
+    def _resume_fellner_schall() -> None:
+        """Keep the accepted fit; drop what cannot describe the next EFS step.
+
+        Disabling handoff bounds the recovery by the ordinary outer budget.
+        """
+        nonlocal endgame_outcome, endgame_stationary, pending_cap, newton_budget
+        nonlocal plateau_run, practical_run, plateau_qualified, previous_accepted_step
+        endgame_outcome = None
+        endgame_stationary = False
+        pending_cap = None
+        newton_budget = 0
+        plateau_run = 0
+        practical_run = 0
+        plateau_qualified = False
+        previous_accepted_step = math.inf
+        if accelerator is not None:
+            accelerator.reset()
+
     def _run_endgame() -> DistributionalEFSResult | None:
         """Run the endgame from the accepted state; a result ends the fit, ``None`` continues."""
         nonlocal current_lambdas, current_fit, current_objective, terminal_fit_index
         nonlocal terminal_evidence, endgame_outcome, endgame_stationary, pending_cap, newton_budget
-        nonlocal plateau_run, practical_run, plateau_qualified
-        nonlocal previous_accepted_step
         budget = _endgame_budget()
         if budget <= 0:
             return _result(converged=False, reason="max_iterations")
+        entry = _endgame_state()
+        entry_fits, entry_iterations = list(coefficient_fits), len(history)
         outcome = run_newton_endgame(
             family,
             layout,
             y,
             likelihood_plan,
-            state=_endgame_state(),
+            state=entry,
             solver_config=inner_config,
             efs_config=endgame_config,
             chunk_size=chunk_size,
@@ -447,7 +466,15 @@ def fit_distributional_efs(
             coefficient_fits=coefficient_fits,
             upper_bounds=beyond_cap,
             budget=budget,
+            cap_tolerance=outer_config.tolerance,
         )
+        stalled = _plateau_finishes() and outcome.kind not in ("stationary", "cap_pressure")
+        if stalled:
+            # The plateau held where the finish started, not where it stalled, so a
+            # finish that cannot reach stationarity leaves the search where it was.
+            coefficient_fits[:] = entry_fits
+            del history[entry_iterations:]
+            outcome = replace(outcome, state=entry, derivatives=None)
         newton_budget -= outcome.newton_iterations
         endgame_outcome = outcome
         state = outcome.state
@@ -456,25 +483,20 @@ def fit_distributional_efs(
         current_objective = state.objective
         terminal_fit_index = state.terminal_fit_index
         terminal_evidence = state.evidence
-        if outcome.kind == "derivative_unavailable":
-            # Preserve the accepted coefficient fit, but abandon derivatives
-            # and acceleration memory that cannot describe the next EFS step.
-            # Disabling handoff makes recovery bounded by the ordinary outer
-            # budget even if derivatives remain unavailable on every call.
+        if stalled:
             endgame_outcome = None
-            endgame_stationary = False
-            pending_cap = None
-            newton_budget = 0
+            if current_face is None:
+                return _result(converged=True, reason="practical_plateau")
+            # Only the strict stop revalidates a face, so a face's search carries on.
+            _resume_fellner_schall()
+            return None
+        if outcome.kind == "derivative_unavailable":
             if beyond_cap:
                 # EFS proposals use the original finite box and cannot safely
                 # continue from a component released above that box.
+                endgame_outcome = None
                 return _result(converged=False, reason="derivative_unavailable")
-            plateau_run = 0
-            practical_run = 0
-            plateau_qualified = False
-            previous_accepted_step = math.inf
-            if accelerator is not None:
-                accelerator.reset()
+            _resume_fellner_schall()
             return None
         if outcome.kind == "stationary":
             # The exact gradient is the authority now: no component is at the cap
@@ -491,9 +513,6 @@ def fit_distributional_efs(
                 unresolved_upper_bound=tuple(name for name in current_lambdas if name in nominated),
             )
             return None
-        if _plateau_finishes():
-            # The plateau already held; a finish that could not go further keeps it.
-            return _result(converged=True, reason="practical_plateau")
         return _result(converged=False, reason=outcome.kind)
 
     def _bracket_after_refusal(
@@ -1498,7 +1517,7 @@ def fit_distributional_efs(
         # with a named reason). A promotion restarts the plateau's count.
         if (
             outer_config.practical_convergence
-            and (current_face is None or _plateau_finishes())
+            and (current_face is None or (_plateau_finishes() and _endgame_budget() > 0))
             and practical_run >= outer_config.plateau_iterations
             and terminal_evidence.maximum > outer_config.tolerance
             and not terminal_evidence.unresolved_upper_bound

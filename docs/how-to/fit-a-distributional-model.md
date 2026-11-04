@@ -998,7 +998,8 @@ Fellner–Schall fixed-point iteration alone, safeguarded by objective
 backtracking. The default, `outer="efs+finish"`, runs that iteration until the
 objective and fitted parameters stop moving, then finishes with the Newton
 endgame described below, at a tenth of `reml_tol` and for at most 16 iterations.
-A finish that cannot go further keeps the plateau stop. `TwoPieceNormalLSS` and
+A finish that cannot reach a stationary point leaves the fit at its plateau.
+`TwoPieceNormalLSS` and
 `TwoPieceLogNormalLSS` default to `outer="efs"`. Set `outer="efs+newton"` for a
 two-stage search with a shorter warm-up, which hands over on any Fellner–Schall
 stop:

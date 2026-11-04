@@ -304,14 +304,14 @@ class _SharedEntries:
 
 
 class PassFactors:
-    """Weight-free products of fixed design factors, shared by the moments calls of one assembly.
+    """Weight-free products of fixed design factors, shared by an owner's moments calls.
 
     Each support projection ``B_unique @ R_inv`` and each factor's exponent
-    bounds is formed once per assembly instead of once per moments call, row
-    block and channel. Owner: the assembly that creates it; lifetime: that
-    assembly. Entries are keyed by their source arrays' identities and retain
-    those arrays, so no identity is reused while its entry lives, and an
-    assembly reads its design's factors without changing them.
+    bounds is formed once per owner instead of once per moments call, row block
+    and channel. Owner: the assembly or solver session that creates it; lifetime:
+    that owner's. Entries are keyed by their source arrays' identities and retain
+    those arrays, so no identity is reused while its entry lives, and an assembly
+    reads its design's factors without changing them.
     """
 
     __slots__ = ("projections", "ranges")
@@ -724,7 +724,8 @@ class _BlockWeightCache:
         """Cache a fixed factor's complete cross-bound contributions.
 
         Weighted partners may be reused scratch and must not enter this cache.
-        A fresh assembly observes mutations to the live support factors.
+        An entry lasts as long as the :class:`PassFactors` holding it, whose owner
+        reads its design's factors without changing them.
         """
         entry, _formed = self._once(
             self._support_ranges, id(factor), lambda: (factor, _cross_operand_bounds(factor))
@@ -802,11 +803,11 @@ class _BlockWeightCache:
     def solver_support(self, gm: DiscretizedSSPGroupMatrix) -> NDArray:
         """Project each live support once within this synchronous assembly.
 
-        Keys retain the owning blocks. A new moments call creates a new cache,
-        so changed factors, weights, subsets and reparameterizations cannot
-        reuse a previous assembly's projection; an assembly's
-        :class:`PassFactors` serves every row block whose groups share the
-        factors.
+        Keys retain the owning blocks. A new moments call creates a new cache, so
+        changed weights and subsets cannot reuse a previous call's support, and a
+        reparameterization has new factor arrays, which key their own projection.
+        The :class:`PassFactors` serves every row block whose groups share the
+        factors, for its owner's lifetime.
         """
         factors = self._factors
         support, formed = self._once(

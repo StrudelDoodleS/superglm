@@ -670,6 +670,7 @@ def run_newton_endgame(
     coefficient_fits: list[DenseSolverResult],
     upper_bounds: Mapping[str, float] | None = None,
     budget: int | None = None,
+    cap_tolerance: float | None = None,
 ) -> NewtonEndgameOutcome:
     """Damped Newton on the exact LAML gradient from an accepted smoothing state.
 
@@ -684,12 +685,15 @@ def run_newton_endgame(
     that Hessian's certificate fails), with Armijo
     backtracking through warm-started fits; a refused quasi-Newton step is
     retried from the same point with a fresh exact Hessian.  ``upper_bounds``
-    raises the box for components released beyond the cap.  Iterations and
-    trial fits are appended to ``history`` and ``coefficient_fits`` as the
+    raises the box for components released beyond the cap.  ``cap_tolerance``
+    is the bar for outward pressure at a bound, so a search tighter than
+    ``reml_tol`` can keep that bar at ``reml_tol``; ``None`` reads the config's.
+    Iterations and trial fits are appended to ``history`` and ``coefficient_fits`` as the
     loop's own are; a convergence check that makes no trial leaves no record.
     """
     config = efs_config
     tolerance = float(config.tolerance)
+    cap_bar = tolerance if cap_tolerance is None else float(cap_tolerance)
     lower_log = math.log(config.minimum_lambda)
     released = {} if upper_bounds is None else dict(upper_bounds)
     if budget is not None:
@@ -888,7 +892,7 @@ def run_newton_endgame(
                 name
                 for k, name in enumerate(names)
                 if current.lambdas[name] == upper_lambda(name)
-                and gradient[k] < -tolerance * score_scale
+                and gradient[k] < -cap_bar * score_scale
             )
             if caps:
                 return finish("cap_pressure", published, norm, caps)
