@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from superglm.editor.cv import FINAL_NOT_RUN, cv_report_payload
+from superglm.editor.cv import FINAL_NOT_RUN, cv_report_payload, diagnose_report_payload
 from superglm.editor.evaluation import evaluation_datasets
 from superglm.editor.lss.display import fold_chart_display
 from superglm.editor.lss.validation import LSS_METRIC_LABELS, lss_split_reason
@@ -130,6 +130,8 @@ def report_payload(
     """Dispatch a named report for the local editor app."""
     if report == "cv":
         return cv_report_payload(widget, request_sequence=request_sequence)
+    if report == "diagnose":
+        return diagnose_report_payload(widget, request_sequence=request_sequence)
     if report == "final":
         return final_fit_report_payload(
             widget,

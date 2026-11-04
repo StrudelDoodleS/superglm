@@ -554,6 +554,7 @@ class _GLMFolds:
     default_scoring = ("deviance",)
     scorers = _BUILTIN_SCORERS
     pooled_parts = _POOLED_PARTS
+    row_cost_label = "Deviance"
     unsliced_fit_kwargs: frozenset[str] = frozenset()
     fold_fit_kwargs: Mapping[str, Any] = {}
 
@@ -600,6 +601,12 @@ class _GLMFolds:
         # A model with no REML-eligible groups legitimately fits without
         # smoothing selection (``_reml_result`` is None): nothing to warm-start.
         return None if getattr(est, "_reml_result", None) is None else live_reml_lambdas(est)
+
+    def row_costs(self, est, X, y, sample_weight, offset) -> NDArray[np.float64]:
+        """Each row's weighted unit deviance."""
+        mu = est.predict(X, offset=offset)
+        unit = est._distribution.deviance_unit(np.asarray(y, dtype=np.float64), mu)
+        return unit if sample_weight is None else np.asarray(sample_weight) * unit
 
     def predict(self, est, X, offset) -> NDArray[np.float64]:
         return est.predict(X, offset=offset)

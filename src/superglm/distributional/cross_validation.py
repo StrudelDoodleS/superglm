@@ -155,6 +155,8 @@ class LSSFolds:
     # A fold is read for its predictions and curves, not its training diagnostics.
     fold_fit_kwargs: Mapping[str, Any] = {"retain_rows": False}
 
+    row_cost_label = "Log score"
+
     def __init__(self, model) -> None:
         self.model = model
 
@@ -261,6 +263,14 @@ class LSSFolds:
             for name, value in estimator.smoothing_parameters_.items()
             if name.rpartition("#")[0] not in cold_terms
         }
+
+    def row_costs(self, estimator, X, y, sample_weight, offset) -> NDArray[np.float64]:
+        """Each row's log score; a row of zero weight scores nothing."""
+        fitted = estimator._require_fitted()
+        rows = _scoring_rows(fitted, X, y, sample_weight=sample_weight, offsets=offset)
+        costs = np.zeros(rows.n_observations, dtype=np.float64)
+        costs[rows.positions] = _retained_log_score(fitted, rows)
+        return costs
 
     def predict(self, estimator, X, offset) -> NDArray[np.float64]:
         return estimator.predict(X, offsets=offset)

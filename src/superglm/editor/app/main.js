@@ -71,6 +71,7 @@ import {
   renderNewLevelsControl
 } from "./views/context_bar.js";
 import { createCVTab } from "./views/cv_tab.js";
+import { createDiagnoseTab } from "./views/diagnose_tab.js";
 import { bindExportDialog } from "./views/export_dialog.js";
 import {
   bindFeatureList,
@@ -326,7 +327,15 @@ const cvTab = createCVTab({
     await refreshActiveReport();
   },
   onJobChange: () => renderPill(),
+  onDiagnose: (fitId) => {
+    diagnoseTab.select(fitId);
+    void showView("diagnose");
+  },
   isShown: () => store.getState().view.activeView === "cv"
+});
+const diagnoseTab = createDiagnoseTab({
+  frame: reportFrame,
+  isShown: () => store.getState().view.activeView === "diagnose"
 });
 
 // The pill names a background job on every tab. One that has ended stays until
@@ -1170,7 +1179,7 @@ function formatMilliseconds(value) {
 }
 
 async function showView(view) {
-  const activeView = ["validation", "cv", "final"].includes(view) ? view : "editor";
+  const activeView = ["validation", "cv", "final", "diagnose"].includes(view) ? view : "editor";
   actions.patchView({ activeView });
   if (activeView === "editor") {
     scheduleVisibleEvidenceCatchUp();
@@ -1858,7 +1867,8 @@ function renderMetricsEvidence(evidence) {
 const REPORT_TITLES = Object.freeze({
   validation: "Validation Report",
   cv: "Cross-validation",
-  final: "Final Fit Report"
+  final: "Final Fit Report",
+  diagnose: "Diagnose"
 });
 
 function renderReportEvidence(evidence, activeView) {
@@ -1868,7 +1878,7 @@ function renderReportEvidence(evidence, activeView) {
   if (activeView === "editor") return;
   const payloadMatchesView = evidence.payload !== null && evidence.payload.report === activeView;
   if (payloadMatchesView) {
-    renderReport(evidence.payload, { reportTitle, reportStatus, reportFrame }, cvTab);
+    renderReport(evidence.payload, { reportTitle, reportStatus, reportFrame }, cvTab, diagnoseTab);
   } else {
     reportTitle.textContent = REPORT_TITLES[activeView] || REPORT_TITLES.validation;
     reportFrame.innerHTML = "";

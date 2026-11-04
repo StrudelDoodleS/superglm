@@ -1,0 +1,172 @@
+/* diagnose.css: the Diagnose tab (views/diagnose_tab.js). It takes the report
+   panel's layout from cv.css; every colour is a token, so dark.css restyles it. */
+
+.diagnose-scroll {
+  overflow-x: auto;
+}
+.diagnose-table td,
+.diagnose-table th {
+  white-space: nowrap;
+}
+.diagnose-table .diagnose-text {
+  white-space: normal;
+  text-align: left;
+}
+.diagnose-table tr[data-selected="true"] td,
+.diagnose-matrix th[data-selected="true"] {
+  background: var(--surface-subtle);
+}
+.diagnose-fit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  height: auto;
+  min-height: 0;
+  min-width: 0;
+}
+.diagnose-fit:hover {
+  background: var(--surface-hover);
+}
+.diagnose-fit[aria-pressed="true"] {
+  font-weight: 600;
+}
+.diagnose-swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.diagnose-slow {
+  border-radius: var(--radius-pill);
+  padding: 0 6px;
+  background: var(--sig-weak-bg);
+  color: var(--sig-weak-fg);
+  font-size: var(--font-size-xs);
+}
+.diagnose-term {
+  text-align: left;
+  font-weight: 400;
+}
+.diagnose-group th {
+  text-align: left;
+  color: var(--muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+.diagnose-group th[data-role="average"] {
+  color: var(--blue);
+}
+.diagnose-group th[data-role="spread"] {
+  color: var(--orange-text);
+}
+.diagnose-cell[data-shape="straight"],
+.diagnose-cell[data-shape="flat"] {
+  background: var(--sig-weak-bg);
+  color: var(--sig-weak-fg);
+}
+.diagnose-cell[data-shape="unsmoothed"] {
+  color: var(--muted);
+}
+.diagnose-limit {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-left: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: middle;
+}
+.diagnose-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  color: var(--muted);
+  font-size: var(--font-size-sm);
+}
+.diagnose-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.diagnose-chart {
+  display: block;
+  width: 100%;
+  max-width: 1100px;
+  height: auto;
+}
+.diagnose-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.diagnose-line {
+  fill: none;
+  stroke-width: 1;
+  stroke-opacity: 0.55;
+  stroke-linejoin: round;
+}
+.diagnose-line[data-selected="true"] {
+  stroke-width: 2.25;
+  stroke-opacity: 1;
+}
+.diagnose-phases {
+  display: grid;
+  gap: 4px;
+  max-width: 820px;
+}
+.diagnose-phase {
+  display: grid;
+  grid-template-columns: 260px minmax(80px, 1fr) 70px 40px;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--font-size-sm);
+}
+.diagnose-phase > span:nth-child(n + 3) {
+  text-align: right;
+  font-family: var(--font-mono);
+}
+.diagnose-bar {
+  display: block;
+  height: 8px;
+}
+.diagnose-bar i {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-xs);
+  background: var(--blue);
+}
+.diagnose-findings {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.diagnose-findings li {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 10px;
+  font-size: var(--font-size-sm);
+}
+.diagnose-findings p {
+  margin: 2px 0 0;
+}
+.diagnose-severity {
+  color: var(--muted);
+}
+.diagnose-findings li[data-severity="warning"] .diagnose-severity {
+  color: var(--sig-weak-fg);
+}
+.diagnose-findings li[data-severity="error"] .diagnose-severity {
+  color: var(--danger);
+}
+.diagnose-findings strong {
+  font-weight: 600;
+}

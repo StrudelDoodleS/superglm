@@ -1498,6 +1498,7 @@ def test_application_bar_exposes_views_undo_redo_and_export(open_editor_page):
             "Validation",
             "Cross-validation",
             "Final Fit",
+            "Diagnose",
         ]
         assert page.get_by_role("button", name="Undo edit").is_disabled()
         assert page.get_by_role("button", name="Redo edit").is_disabled()

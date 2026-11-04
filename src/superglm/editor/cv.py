@@ -32,6 +32,12 @@ from superglm.distributional.api import SuperLSS
 from superglm.distributional.cross_validation import parts_ratio
 from superglm.distributions import NegativeBinomial
 from superglm.editor.carry import model_with_edited_curves, weighted_mean
+from superglm.editor.diagnose import (
+    diagnose_tab_payload,
+    fit_trace,
+    supplied_fold_traces,
+    worst_rows,
+)
 from superglm.editor.errors import EditorClientError, EditorValueError
 from superglm.editor.evaluation import EvaluationDataset, training_export_dataset
 from superglm.editor.jobs import JobCancelledError
@@ -277,6 +283,7 @@ class CVRun:
     terms: list[dict[str, Any]]
     model_revision: int
     carried: tuple[str, ...]
+    fold_fits: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -720,6 +727,49 @@ def cv_report_payload(widget, *, request_sequence: int | None = None) -> dict[st
         view = capture_cv_view(widget.session, run=widget._cv_run, final_fit=widget._final_fit)
     jobs = {kind: widget._jobs.latest(kind) for kind in JOB_KINDS}
     return cv_tab_payload(view, jobs=jobs, request_sequence=request_sequence)
+
+
+def diagnose_report_payload(widget, *, request_sequence: int | None = None) -> dict[str, Any]:
+    """The ``diagnose`` report: captured under the widget lock, built outside it.
+
+    A finished Run CV kept its folds' traces; a supplied result's are read once
+    and kept, since its fold models and rows do not change.
+    """
+    with widget._lock:
+        session = widget.session
+        model = session.model
+        revision = session.model_revision
+        run = widget._cv_run
+        supplied = session.cv
+        rows = session.cv_check.rows
+        kept = widget._diagnose_folds
+    frame = None if rows is None else as_eager_frame(rows.X)
+    columns = () if frame is None else _fingerprint_columns(getattr(model, "lss", model), frame)
+    if run is not None and run.fold_fits:
+        folds, source = list(run.fold_fits), "Folds from Run CV on the current model."
+    elif supplied is None:
+        folds, source = [], "This model only: pass a cross_validate() result to see its folds."
+    elif supplied.estimators is None:
+        folds = []
+        source = (
+            "This model only: the supplied folds kept no models. Pass return_estimators=True to "
+            "cross_validate(), or press Run CV, to see them."
+        )
+    else:
+        if kept is None or kept[0] is not supplied:
+            kept = (supplied, supplied_fold_traces(supplied, rows))
+            with widget._lock:
+                widget._diagnose_folds = kept
+        folds, source = kept[1], "Folds as supplied with edit(model, cv=result)."
+    return diagnose_tab_payload(
+        model,
+        folds=folds,
+        source=source,
+        display=_term_display(model),
+        columns=columns,
+        model_revision=revision,
+        request_sequence=request_sequence,
+    )
 
 
 def cv_tab_payload(
@@ -1179,6 +1229,7 @@ def run_cv(plan: CVRunPlan, context) -> CVRun:
         ),
         model_revision=plan.model_revision,
         carried=tuple(sorted(plan.edited)),
+        fold_fits=tuple(recorder.fold_fits),
     )
 
 
@@ -1203,7 +1254,9 @@ class _FoldRecorder:
         self._totals = {
             name: [0.0, 0.0] for name in plan.scoring if name in self._scorers.pooled_parts
         }
+        self._columns = _fingerprint_columns(plan.template, self._frame)
         self.curves: dict[int, dict[str, NDArray[np.float64]]] = {}
+        self.fold_fits: list[dict[str, Any]] = []
 
     @property
     def fold_number(self) -> int:
@@ -1219,8 +1272,15 @@ class _FoldRecorder:
     def score(self, model, X, y, *, sample_weight=None, offset=None) -> dict[str, float]:
         fit_time_s = time.perf_counter() - self._fold_started
         fit = self._scorers.fit_summary(model, self._plan.fit_mode)
+        train, test = self._plan.folds[self._fold]
+        trace = fit_trace(
+            model,
+            fit_id=f"fold-{self.fold_number}",
+            label=f"Fold {self.fold_number}",
+            n_rows=len(train),
+            seconds=fit_time_s,
+        )
         if self._plan.edited:
-            train = self._plan.folds[self._fold][0]
             model = model_with_edited_curves(
                 model,
                 self._plan.edited,
@@ -1248,7 +1308,10 @@ class _FoldRecorder:
             self._totals[name][0] += numerator
             self._totals[name][1] += denominator
         self.curves[self._fold] = fold_log_curves(model, self._plan.terms)
-        train, test = self._plan.folds[self._fold]
+        trace["worst_rows"] = worst_rows(
+            self._scorers, model, X, y, sample_weight, offset, test, self._columns
+        )
+        self.fold_fits.append(trace)
         self._context.progress(
             "fold_done",
             fold=self.fold_number,

@@ -568,14 +568,21 @@ export function foldTableMarkup(payload, job = null) {
   const rounds = results.some((run) => run.folds.some((fold) => isNumber(fold.n_reml_iter)));
   const heldCell = (/** @type {number} */ fold, /** @type {"done"|"now"|"waiting"} */ stage) =>
     (picture ? `<td class="cv-held-col">${heldOutCells(count, fold, stage)}</td>` : "");
-  const roundsCell = (/** @type {unknown} */ value) => (rounds ? `<td>${fixedText(value, 0)}</td>` : "");
+  const middle = [...result.folds.map((fold) => fold.n_reml_iter ?? 0)].sort((a, b) => a - b)[Math.floor(result.folds.length / 2)] ?? 0;
+  const roundsCell = (/** @type {unknown} */ value, /** @type {number|null} */ fold = null) => {
+    if (!rounds) return "";
+    const slow = fold !== null && !result.live && result.folds.length >= 3 && isNumber(value) && value >= 10 && value >= 2 * middle;
+    if (!slow) return `<td>${fixedText(value, 0)}</td>`;
+    return `<td><button type="button" class="cv-rounds-mark" data-diagnose-open="fold-${fold + 1}"
+      data-popover-title="Slow fold" data-popover-body="This fold's search took at least twice the rounds of the middle fold. Open it in Diagnose.">${fixedText(value, 0)}</button></td>`;
+  };
   const finished = result.folds.map((fold, index) => `<tr>
       <td><span class="cv-fold-swatch" style="${foldSwatchStyle(foldNumber(fold, index))}"></span>Fold ${fold.fold + 1}</td>
       ${heldCell(foldNumber(fold, index), "done")}
       <td>${countText(fold.n_train)}</td><td>${countText(fold.n_test)}</td>
       ${names.map((name) => `<td>${metricText(fold.scores[name])}</td>`).join("")}
       <td>${fixedText(fold.effective_df, 1)}</td>
-      ${roundsCell(fold.n_reml_iter)}
+      ${roundsCell(fold.n_reml_iter, fold.fold)}
       <td>${isNumber(fold.fit_time_s) ? `${fold.fit_time_s.toFixed(2)} s` : "--"}</td>
       <td data-converged="${fold.converged}">${fold.converged ? "yes" : "no"}</td>
     </tr>`);
@@ -936,6 +943,7 @@ export function cvTabMarkup(payload, state) {
  * @param {JobClient} options.client
  * @param {(kind:JobKind, job:JobStatus)=>unknown} options.onJobSettled
  * @param {()=>unknown} [options.onJobChange] any job's status changed
+ * @param {(fitId:string)=>unknown} [options.onDiagnose] a slow fold's mark was clicked
  * @param {(ms:number)=>Promise<void>} [options.pause]
  * @param {()=>boolean} [options.isShown]
  */
@@ -944,6 +952,7 @@ export function createCVTab({
   client,
   onJobSettled,
   onJobChange = () => {},
+  onDiagnose = () => {},
   pause = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
   isShown = () => true
 }) {
@@ -1083,6 +1092,11 @@ export function createCVTab({
   /** @param {Event} event */
   function onClick(event) {
     const target = event.target instanceof Element ? event.target : null;
+    const diagnose = target?.closest("[data-diagnose-open]");
+    if (diagnose instanceof HTMLElement) {
+      onDiagnose(diagnose.dataset.diagnoseOpen ?? "");
+      return;
+    }
     const starter = target?.closest("[data-cv-start]");
     const canceller = target?.closest("[data-cv-cancel]");
     const termButton = target?.closest("[data-cv-term]");

@@ -335,6 +335,14 @@ export const HELP_SECTIONS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    title: "Diagnose",
+    items: Object.freeze([
+      "The Diagnose tab shows how each fit's smoothing search went, from what the fits recorded, so opening it refits nothing. It lists this model and, when folds are available, each fold.",
+      "Smoothing by term puts every fit's effective degrees of freedom side by side, so a fold that left a term straight when the others curve it stands out. Search path shows how much REML each fit still had to gain at each round: a long tail near the bottom is rounds that bought almost nothing.",
+      "A slow or unusual fold is often not a fault in the fit. A term's best smoothing can be effectively infinite, and one fold can differ because of a few large rows it held out, which Rows that cost the most lists. Compare the folds' scores before reading much into one curve.",
+    ]),
+  }),
+  Object.freeze({
     title: "Cross-validation",
     items: Object.freeze([
       "Pass a cross_validate() result to edit(model, cv=result). The tab shows each fold's scores and, when the result kept its fold models (return_estimators=True), every term's relativities by fold, least stable first.",
