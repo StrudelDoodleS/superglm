@@ -68,6 +68,7 @@
   color: var(--orange-text);
 }
 .diagnose-cell[data-shape="straight"],
+.diagnose-cell[data-shape="simplest"],
 .diagnose-cell[data-shape="flat"] {
   background: var(--sig-weak-bg);
   color: var(--sig-weak-fg);

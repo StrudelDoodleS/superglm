@@ -14,6 +14,8 @@ import {
   worstRowsMarkup,
 } from "../../src/superglm/editor/app/views/diagnose_tab.js";
 
+import { foldColour } from "../../src/superglm/editor/app/views/cv_tab.js";
+
 /** @typedef {import('../../src/superglm/editor/app/views/diagnose_tab.js').DiagnoseFit} DiagnoseFit */
 /** @typedef {import('../../src/superglm/editor/app/views/diagnose_tab.js').DiagnosePayload} DiagnosePayload */
 
@@ -52,7 +54,6 @@ function payload(fits) {
       { name: "mean:area", label: "area · Average", short: "area", group: "Average", role: "average" },
       { name: "theta:age", label: "age · Spread", short: "age", group: "Spread", role: "spread" },
     ],
-    columns: ["age", "area"],
     cost_label: "Log score",
   };
 }
@@ -92,6 +93,22 @@ test("the tab opens on the slowest fold unless one is asked for", () => {
   assert.equal(chosenFit(payload([fit("model", "This model")]), "").id, "model");
 });
 
+test("the tab opens on the fold with the most rounds, marked slow or not", () => {
+  const rounds = (/** @type {number[]} */ counts) => payload([
+    fit("model", "This model", { rounds: 500 }),
+    ...counts.map((count, index) => fit(`fold-${index + 1}`, `Fold ${index + 1}`, { rounds: count })),
+  ]);
+  assert.equal(chosenFit(rounds([12, 25, 40, 12, 12]), "").id, "fold-3");
+  assert.equal(chosenFit(rounds([12, 14, 15]), "").id, "fold-3");
+  assert.equal(chosenFit(rounds([0, 0, 0]), "").id, "model");
+});
+
+test("a fold keeps its own colour when an earlier fold failed", () => {
+  const html = fitsTableMarkup(payload([fit("model", "This model"), fit("fold-2", "Fold 2")]), "model");
+  assert.match(html, new RegExp(`background: ${foldColour(1).replace(/[()]/g, "\\$&")}`));
+  assert.doesNotMatch(html, new RegExp(`background: ${foldColour(0).replace(/[()]/g, "\\$&")}`));
+});
+
 test("the fits table names why each search stopped and marks the slow fold", () => {
   const html = fitsTableMarkup(book(), "fold-2");
   assert.match(html, /REML stopped improving/);
@@ -109,9 +126,14 @@ test("a fit with no timing or rows reads as dashes", () => {
 test("the term matrix tints the fold that went straight and says why on hover", () => {
   const html = termMatrixMarkup(book(), "fold-2");
   assert.match(html, /data-shape="straight" title="smoothed to a straight line, smoothing 3\.60e\+6, at the smoothing limit">1\.00<span class="diagnose-limit"/);
-  assert.match(html, /data-shape="curve" title="curved, smoothing 1\.05">3\.48/);
+  assert.match(html, /data-shape="curve" title="shaped by the data, smoothing 1\.05">3\.48/);
   assert.match(html, /data-shape="unsmoothed" title="no smoothing">5\.00/);
   assert.ok(html.indexOf(">Average<") < html.indexOf(">Spread<"));
+});
+
+test("a term whose penalty leaves more than a line says simplest shape, tinted", () => {
+  const simplest = fit("fold-1", "Fold 1", { terms: { "theta:age": { edf: 2, lambda: 1e10, shape: "simplest", at_limit: false } } });
+  assert.match(termMatrixMarkup(payload([simplest]), "fold-1"), /data-shape="simplest" title="smoothed to the simplest shape its penalty allows, smoothing 1\.00e\+10">2\.00/);
 });
 
 test("a term one fit lacks reads as a dash", () => {
@@ -133,7 +155,16 @@ test("the search path puts a settled round on the floor, not below the chart", (
 });
 
 test("a fit with no search draws no search path", () => {
-  assert.equal(searchPathMarkup(payload([fit("model", "This model", { path: [] })]), "model"), "");
+  assert.equal(searchPathMarkup(payload([fit("model", "This model", { rounds: 0, path: [] })]), "model"), "");
+});
+
+test("a fit that searched but kept no path says so, beside any that kept one", () => {
+  const alone = searchPathMarkup(payload([fit("model", "This model", { path: [] })]), "model");
+  assert.match(alone, /Not recorded by this fit's search: This model\./);
+  assert.doesNotMatch(alone, /<svg/);
+  const beside = searchPathMarkup(payload([fit("model", "This model", { path: [] }), fit("fold-1", "Fold 1")]), "model");
+  assert.match(beside, /Not recorded by this fit's search: This model\./);
+  assert.equal((beside.match(/class="diagnose-line"/g) ?? []).length, 1);
 });
 
 test("phases give seconds and share, widest bar full", () => {
@@ -166,12 +197,13 @@ test("worst rows list a fold's rows; this model points at the folds", () => {
   const data = book();
   assert.match(worstRowsMarkup(data, data.fits[0]), /pick a fold/);
   const withRows = fit("fold-1", "Fold 1", {
-    worst_rows: [{ row: 19471, cost: 12.5, response: 11, predicted: 0.05, weight: 1, values: [65, "A"] }],
+    worst_rows: { columns: ["age", "area"], rows: [{ row: 19471, cost: 12.5, response: 11, predicted: 0.05, weight: 1, values: [65, "A"] }] },
   });
   const html = worstRowsMarkup(data, withRows);
   assert.match(html, /<td>19471<\/td><td>12\.500<\/td>/);
   assert.match(html, /<th>Log score<\/th>/);
   assert.match(html, /<td>A<\/td>/);
+  assert.match(html, /<th>age<\/th><th>area<\/th>/);
   assert.match(worstRowsMarkup(data, fit("fold-1", "Fold 1")), /not available here/);
 });
 

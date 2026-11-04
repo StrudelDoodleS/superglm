@@ -743,10 +743,15 @@ def diagnose_report_payload(widget, *, request_sequence: int | None = None) -> d
         supplied = session.cv
         rows = session.cv_check.rows
         kept = widget._diagnose_folds
-    frame = None if rows is None else as_eager_frame(rows.X)
-    columns = () if frame is None else _fingerprint_columns(getattr(model, "lss", model), frame)
+        same_fit = _same_fit(model, session.reference_model)
     if run is not None and run.fold_fits:
-        folds, source = list(run.fold_fits), "Folds from Run CV on the current model."
+        folds = list(run.fold_fits)
+        source = (
+            "Folds from Run CV on the current model."
+            if run.model_revision == revision
+            else "Folds from Run CV on an earlier version of this model. "
+            "Press Run CV to see the current one."
+        )
     elif supplied is None:
         folds, source = [], "This model only: pass a cross_validate() result to see its folds."
     elif supplied.estimators is None:
@@ -760,13 +765,18 @@ def diagnose_report_payload(widget, *, request_sequence: int | None = None) -> d
             kept = (supplied, supplied_fold_traces(supplied, rows))
             with widget._lock:
                 widget._diagnose_folds = kept
-        folds, source = kept[1], "Folds as supplied with edit(model, cv=result)."
+        folds = kept[1]
+        source = (
+            "Folds as supplied with edit(model, cv=result)."
+            if same_fit
+            else "Folds as supplied with edit(model, cv=result), from the model as first opened. "
+            "Press Run CV to see the current one."
+        )
     return diagnose_tab_payload(
         model,
         folds=folds,
         source=source,
         display=_term_display(model),
-        columns=columns,
         model_revision=revision,
         request_sequence=request_sequence,
     )
@@ -1272,14 +1282,8 @@ class _FoldRecorder:
     def score(self, model, X, y, *, sample_weight=None, offset=None) -> dict[str, float]:
         fit_time_s = time.perf_counter() - self._fold_started
         fit = self._scorers.fit_summary(model, self._plan.fit_mode)
+        fold_fit = model
         train, test = self._plan.folds[self._fold]
-        trace = fit_trace(
-            model,
-            fit_id=f"fold-{self.fold_number}",
-            label=f"Fold {self.fold_number}",
-            n_rows=len(train),
-            seconds=fit_time_s,
-        )
         if self._plan.edited:
             model = model_with_edited_curves(
                 model,
@@ -1308,10 +1312,7 @@ class _FoldRecorder:
             self._totals[name][0] += numerator
             self._totals[name][1] += denominator
         self.curves[self._fold] = fold_log_curves(model, self._plan.terms)
-        trace["worst_rows"] = worst_rows(
-            self._scorers, model, X, y, sample_weight, offset, test, self._columns
-        )
-        self.fold_fits.append(trace)
+        self._keep_trace(fold_fit, fit_time_s, model, X, y, sample_weight, offset)
         self._context.progress(
             "fold_done",
             fold=self.fold_number,
@@ -1323,6 +1324,29 @@ class _FoldRecorder:
             **fit,
         )
         return scores
+
+    def _keep_trace(self, fold_fit, fit_time_s, scored, X, y, sample_weight, offset) -> None:
+        """Keep what the Diagnose tab shows of this fold. It decides nothing about the scores."""
+        train, test = self._plan.folds[self._fold]
+        try:
+            trace = fit_trace(
+                fold_fit,
+                fit_id=f"fold-{self.fold_number}",
+                label=f"Fold {self.fold_number}",
+                n_rows=len(train),
+                seconds=fit_time_s,
+            )
+            trace["worst_rows"] = worst_rows(
+                self._scorers, scored, X, y, sample_weight, offset, test, self._columns
+            )
+        except Exception:
+            _LOGGER.warning(
+                "Fold %d keeps its scores but has no Diagnose trace.",
+                self.fold_number,
+                exc_info=True,
+            )
+            return
+        self.fold_fits.append(trace)
 
     def pooled_scores(self) -> dict[str, float]:
         return {

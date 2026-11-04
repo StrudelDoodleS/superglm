@@ -7,7 +7,7 @@ import { clockText, foldColour } from "./cv_tab.js";
  * @typedef {object} DiagnoseCell
  * @property {number} edf
  * @property {number|null} lambda
- * @property {"curve"|"straight"|"flat"|"unsmoothed"} shape
+ * @property {"curve"|"straight"|"simplest"|"flat"|"unsmoothed"} shape
  * @property {boolean} at_limit
  */
 /**
@@ -35,7 +35,7 @@ import { clockText, foldColour } from "./cv_tab.js";
  * @property {Record<string, DiagnoseCell>} terms
  * @property {{name:string, seconds:number, share:number}[]} phases
  * @property {{severity:string, headline:string, observed:string, question:string|null}[]} findings
- * @property {DiagnoseRow[]} [worst_rows]
+ * @property {{columns: string[], rows: DiagnoseRow[]}} [worst_rows]
  */
 /**
  * @typedef {object} DiagnosePayload
@@ -44,7 +44,6 @@ import { clockText, foldColour } from "./cv_tab.js";
  * @property {string} note
  * @property {DiagnoseFit[]} fits
  * @property {{name:string, label:string, short:string, group:string|null, role:string|null}[]} terms
- * @property {string[]} columns
  * @property {string} cost_label
  */
 
@@ -52,8 +51,9 @@ import { clockText, foldColour } from "./cv_tab.js";
 const PATH_FLOOR = 1e-3;
 const CHART = Object.freeze({ width: 1100, height: 260, left: 56, right: 14, top: 14, bottom: 36 });
 const SHAPE_WORDS = Object.freeze({
-  curve: "curved",
+  curve: "shaped by the data",
   straight: "smoothed to a straight line",
+  simplest: "smoothed to the simplest shape its penalty allows",
   flat: "smoothed away",
   unsmoothed: "no smoothing",
 });
@@ -68,9 +68,9 @@ function head(title, hint) {
   return `<div class="cv-section-head"><h3>${escapeHTML(title)}</h3><span class="cv-hint">${escapeHTML(hint)}</span></div>`;
 }
 
-/** @param {DiagnoseFit} fit @param {number} index the fit's place, this model first */
-function fitColour(fit, index) {
-  return fit.id === "model" ? "var(--text)" : foldColour(index - 1);
+/** The fold's own colour, as on the Cross-validation tab, whichever folds failed. @param {DiagnoseFit} fit */
+function fitColour(fit) {
+  return fit.id === "model" ? "var(--text)" : foldColour(Number(fit.id.slice("fold-".length)) - 1);
 }
 
 /**
@@ -98,9 +98,9 @@ function pressed(fit, selected) {
  */
 export function fitsTableMarkup(payload, selected) {
   const slow = slowFits(payload.fits);
-  const rows = payload.fits.map((fit, index) => `<tr data-selected="${pressed(fit, selected)}">
+  const rows = payload.fits.map((fit) => `<tr data-selected="${pressed(fit, selected)}">
       <td><button type="button" class="diagnose-fit" data-diagnose-fit="${escapeHTML(fit.id)}" aria-pressed="${pressed(fit, selected)}">
-        <span class="diagnose-swatch" style="background: ${fitColour(fit, index)}"></span>${escapeHTML(fit.label)}</button></td>
+        <span class="diagnose-swatch" style="background: ${fitColour(fit)}"></span>${escapeHTML(fit.label)}</button></td>
       <td>${fit.rows === null ? "--" : fit.rows.toLocaleString("en")}</td>
       <td>${fit.rounds}${slow.has(fit.id) ? ' <span class="diagnose-slow">slow</span>' : ""}</td>
       <td>${fit.settled_round === null ? "--" : fit.settled_round}</td>
@@ -149,7 +149,7 @@ export function termMatrixMarkup(payload, selected) {
     return `${heading}<tr><th scope="row" class="diagnose-term">${escapeHTML(term.short)}</th>${cells}</tr>`;
   }).join("");
   return `<section class="report-section">
-    ${head("Smoothing by term", "Effective degrees of freedom. Tinted: smoothed to a straight line or away. Dot: at the smoothing limit. Hover for the smoothing.")}
+    ${head("Smoothing by term", "Effective degrees of freedom. Tinted: smoothed to its simplest shape or away. Dot: at the smoothing limit. Hover for the smoothing.")}
     <div class="diagnose-scroll"><table class="report-table diagnose-table diagnose-matrix" aria-label="Smoothing by term">
       <thead><tr><th class="diagnose-term">Term</th>${columns}</tr></thead>
       <tbody>${rows}</tbody>
@@ -162,11 +162,14 @@ export function termMatrixMarkup(payload, selected) {
  * @param {DiagnosePayload} payload @param {string} selected
  */
 export function searchPathMarkup(payload, selected) {
-  const traced = payload.fits.map((fit, index) => ({ fit, index })).filter(({ fit }) => fit.path.length >= 2);
-  if (!traced.length) return "";
+  const traced = payload.fits.filter((fit) => fit.path.length >= 2);
+  const unrecorded = payload.fits.filter((fit) => fit.rounds > 0 && fit.path.length < 2).map((fit) => fit.label);
+  const hint = unrecorded.length ? ` Not recorded by this fit's search: ${unrecorded.join(", ")}.` : "";
+  const heading = head("Search path", `REML still to gain at each round. A long tail near the bottom is rounds that bought almost nothing.${hint}`);
+  if (!traced.length) return unrecorded.length ? `<section class="report-section">${heading}</section>` : "";
   const { width, height, left, right, top, bottom } = CHART;
-  const rounds = Math.max(...traced.map(({ fit }) => fit.path.length - 1));
-  const largest = Math.max(...traced.map(({ fit }) => Math.max(...fit.path.map((value) => value - fit.path[fit.path.length - 1]))));
+  const rounds = Math.max(...traced.map((fit) => fit.path.length - 1));
+  const largest = Math.max(...traced.map((fit) => Math.max(...fit.path.map((value) => value - fit.path[fit.path.length - 1]))));
   const decades = Math.max(1, Math.ceil(Math.log10(Math.max(largest, PATH_FLOOR * 10))));
   const lowest = Math.log10(PATH_FLOOR);
   const x = (/** @type {number} */ round) => left + (round / Math.max(rounds, 1)) * (width - left - right);
@@ -181,16 +184,16 @@ export function searchPathMarkup(payload, selected) {
   const steps = Array.from({ length: 5 }, (_, part) => Math.round((part * rounds) / 4));
   const xTicks = [...new Set(steps)].map((round) => `<text class="cv-tick" x="${x(round).toFixed(1)}" y="${height - bottom + 16}" text-anchor="middle">${round}</text>`).join("");
   // The fit in view draws last, so nothing crosses over it.
-  const ordered = [...traced].sort((a, b) => Number(a.fit.id === selected) - Number(b.fit.id === selected));
-  const lines = ordered.map(({ fit, index }) => {
+  const ordered = [...traced].sort((a, b) => Number(a.id === selected) - Number(b.id === selected));
+  const lines = ordered.map((fit) => {
     const final = fit.path[fit.path.length - 1];
     const d = fit.path.map((value, round) => `${round === 0 ? "M" : "L"}${x(round).toFixed(1)},${y(value - final).toFixed(1)}`).join(" ");
-    return `<path class="diagnose-line" data-selected="${pressed(fit, selected)}" d="${d}" style="stroke: ${fitColour(fit, index)}"><title>${escapeHTML(`${fit.label}: ${fit.rounds} rounds`)}</title></path>`;
+    return `<path class="diagnose-line" data-selected="${pressed(fit, selected)}" d="${d}" style="stroke: ${fitColour(fit)}"><title>${escapeHTML(`${fit.label}: ${fit.rounds} rounds`)}</title></path>`;
   }).join("");
-  const legend = traced.map(({ fit, index }) => `<span class="diagnose-key"><span class="diagnose-swatch" style="background: ${fitColour(fit, index)}"></span>${escapeHTML(fit.label)}</span>`).join("");
+  const legend = traced.map((fit) => `<span class="diagnose-key"><span class="diagnose-swatch" style="background: ${fitColour(fit)}"></span>${escapeHTML(fit.label)}</span>`).join("");
   const axis = `<text class="cv-axis-title" x="${left}" y="${height - 4}">Round</text>`;
   return `<section class="report-section">
-    ${head("Search path", "REML still to gain at each round. A long tail near the bottom is rounds that bought almost nothing.")}
+    ${heading}
     <div class="diagnose-legend">${legend}</div>
     <svg class="diagnose-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="REML still to gain at each round, by fit">${grid}${xTicks}${lines}${axis}</svg>
   </section>`;
@@ -233,8 +236,8 @@ export function worstRowsMarkup(payload, fit) {
   if (!fit.worst_rows) {
     return `<section class="report-section">${head("Rows that cost the most", "These folds' rows are not available here, so this fold's worst rows cannot be listed.")}</section>`;
   }
-  const columns = payload.columns.map((name) => `<th>${escapeHTML(name)}</th>`).join("");
-  const rows = fit.worst_rows.map((row) => `<tr><td>${row.row}</td><td>${fixed(row.cost, 3)}</td><td>${escapeHTML(fmt(row.response))}</td>
+  const columns = fit.worst_rows.columns.map((name) => `<th>${escapeHTML(name)}</th>`).join("");
+  const rows = fit.worst_rows.rows.map((row) => `<tr><td>${row.row}</td><td>${fixed(row.cost, 3)}</td><td>${escapeHTML(fmt(row.response))}</td>
       <td>${escapeHTML(fmt(row.predicted))}</td><td>${row.weight === null ? "--" : escapeHTML(fmt(row.weight))}</td>
       ${row.values.map((value) => `<td>${escapeHTML(typeof value === "number" ? fmt(value) : String(value))}</td>`).join("")}</tr>`).join("");
   return `<section class="report-section">
@@ -247,15 +250,16 @@ export function worstRowsMarkup(payload, fit) {
 }
 
 /**
- * The fit in view: the one asked for while it exists, else the slowest fold,
- * which is why the tab is usually open, else this model.
+ * The fit in view: the one asked for while it exists, else the fold whose
+ * search took the most rounds, which is why the tab is usually open, else
+ * this model when no fold searched.
  * @param {DiagnosePayload} payload @param {string} wanted
  */
 export function chosenFit(payload, wanted) {
   const asked = payload.fits.find((fit) => fit.id === wanted);
   if (asked) return asked;
-  const slow = slowFits(payload.fits);
-  return payload.fits.find((fit) => slow.has(fit.id)) ?? payload.fits[0];
+  const folds = payload.fits.filter((fit) => fit.id !== "model" && fit.rounds > 0);
+  return folds.reduce((slowest, fit) => (fit.rounds > slowest.rounds ? fit : slowest), folds[0] ?? payload.fits[0]);
 }
 
 /** @param {DiagnosePayload} payload @param {string} wanted */
