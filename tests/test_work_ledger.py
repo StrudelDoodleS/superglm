@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import importlib
+import subprocess
+import sys
+import threading
+import types
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -101,6 +107,33 @@ def test_a_one_row_or_one_border_change_is_an_update_candidate_and_a_rebuild_is_
     assert flagged(base, base * 1.0001) == 0
 
 
+def _flagged_updates(*matrices):
+    with work_ledger() as ledger:
+        for matrix in matrices:
+            np.linalg.eigvalsh(matrix)
+    return ledger.find("numpy.linalg.eigvalsh")[0].update_candidates
+
+
+def test_dropping_or_inserting_an_interior_row_and_column_is_an_update_candidate():
+    """The saddle system ``[[H, -A'], [A, 0]]`` loses a constraint that is not the last one."""
+    p = 8
+    H = np.eye(p) + 0.5 * np.ones((p, p)) / p  # constant diagonal
+    A = np.random.default_rng(30).normal(size=(3, p))
+
+    def saddle(rows):
+        return np.block([[H, -rows.T], [rows, np.zeros((len(rows), len(rows)))]])
+
+    kkt3, kkt2 = saddle(A), saddle(A[[0, 2]])
+    assert _flagged_updates(kkt3, kkt2) == 1
+    assert _flagged_updates(kkt2, kkt3) == 1
+
+    flat = np.full((6, 6), 0.1) + 1.9 * np.eye(6)  # every diagonal entry equal
+    inserted = np.insert(np.insert(flat, 2, 0.0, axis=0), 2, 0.0, axis=1)
+    inserted[2, 2] = 2.0
+    assert _flagged_updates(flat, inserted) == 1
+    assert _flagged_updates(inserted, flat) == 1
+
+
 def test_calls_inside_a_library_routine_are_not_counted_again():
     matrix = _spd(10, 6)
     with work_ledger() as ledger:
@@ -113,14 +146,74 @@ def test_calls_inside_a_library_routine_are_not_counted_again():
     }
 
 
-def test_only_the_last_input_of_each_call_site_is_kept():
+def test_only_the_last_input_of_each_call_site_is_kept_and_dropped_on_exit():
     with work_ledger() as ledger:
         for seed in range(30):
             np.linalg.cholesky(_spd(40, seed))
             np.linalg.eigvalsh(_spd(40, seed))
+        assert len(ledger._last) == 2
+        assert ledger._last_bytes == sum(kept.nbytes for kept in ledger._last.values())
 
-    assert len(ledger._last) == 2
-    assert ledger._last_bytes == sum(kept.nbytes for kept in ledger._last.values())
+    assert (ledger._last, ledger._last_bytes, ledger._seen) == ({}, 0, {})
+    assert ledger.count("numpy.linalg.cholesky") == 30  # the rows stay
+
+
+def test_the_input_budget_evicts_the_oldest_site_and_an_oversize_input_is_not_copied(monkeypatch):
+    monkeypatch.setattr(work_ledger_module, "_INPUT_BYTES", 14_000)  # holds four 20x20 copies
+    matrix = _spd(20, 0)
+    with work_ledger() as ledger:
+        for name in ("cholesky", "eigvalsh", "eigh", "svd", "inv", "qr"):
+            getattr(np.linalg, name)(matrix)  # looked up inside the block, where it is wrapped
+        kept = {site[0] for site in ledger._last}
+        assert ledger._last_bytes <= 14_000
+        assert kept == {f"numpy.linalg.{name}" for name in ("eigh", "svd", "inv", "qr")}
+
+    with work_ledger() as oversize:
+        np.linalg.cholesky(_spd(40, 1))  # 12,800 bytes, over a quarter of the budget
+        assert oversize._last == {}
+    assert oversize.find("numpy.linalg.cholesky")[0].untracked == 1
+
+
+def test_a_call_site_is_compared_with_its_own_previous_input_not_a_neighbour_in_the_function():
+    def one_row_changed(matrix):
+        changed = matrix.copy()
+        changed[2, :] += 1.0
+        changed[:, 2] = changed[2, :]
+        return changed
+
+    def two_sites(first, second):
+        np.linalg.eigvalsh(first)
+        np.linalg.eigvalsh(second)
+
+    first, second = _spd(10, 20), _spd(10, 21)
+    with work_ledger() as ledger:
+        two_sites(first, second)
+        two_sites(one_row_changed(first), one_row_changed(second))
+
+    assert ledger.find("numpy.linalg.eigvalsh")[0].update_candidates == 2
+
+
+def test_the_same_value_under_another_keyword_is_another_input():
+    matrix = _spd(6, 22)
+    with work_ledger() as ledger:
+        scipy.linalg.cholesky(matrix.copy(), lower=True)
+        scipy.linalg.cholesky(matrix.copy(), overwrite_a=True)
+
+    assert ledger.find("scipy.linalg.cholesky")[0].repeated == 0
+
+
+def test_an_r_only_qr_costs_half_of_one_that_forms_q_and_syrk_reads_trans_by_position():
+    matrix = np.random.default_rng(23).normal(size=(60, 6))
+
+    def flops(call):
+        with work_ledger() as ledger:
+            call()
+        return ledger.rows()[0].flops
+
+    assert flops(lambda: np.linalg.qr(matrix)) == 2 * flops(lambda: np.linalg.qr(matrix, mode="r"))
+    assert flops(lambda: scipy.linalg.blas.dsyrk(1.0, matrix, 0.0, np.zeros((6, 6)), 1)) == (
+        60 * 6 * 7
+    )
 
 
 def test_every_declared_entry_point_resolves_and_is_put_back_after_an_exception():
@@ -212,3 +305,93 @@ def test_the_report_names_each_operation_once_per_caller():
     assert text.count("numpy.linalg.cholesky") == 1
     assert "repeat" in text and "update" in text
     assert ledger.as_dict()["rows"][0]["count"] == 3
+
+
+def test_a_routine_reached_through_the_warm_get_funcs_cache_is_recorded():
+    """SciPy memoizes ``get_blas_funcs``; a lookup before the block holds the original routine."""
+    matrix = np.random.default_rng(9).normal(size=(30, 6))
+    scipy.linalg.get_blas_funcs("syrk", (matrix,))  # warms the cache outside the block
+
+    with work_ledger() as ledger:
+        scipy.linalg.get_blas_funcs("syrk", (matrix,))(1.0, matrix.T)
+
+    assert ledger.count("scipy.linalg.blas.dsyrk") == 1
+
+
+def test_no_wrapper_stays_in_the_get_funcs_cache_after_the_block():
+    """A first lookup inside the block must not leave the wrapper in SciPy's memo for the process."""
+    code = (
+        "import numpy as np, scipy.linalg\n"
+        "from superglm.diagnostics.work_ledger import work_ledger\n"
+        "a = np.eye(3) * 2.0\n"
+        "with work_ledger():\n"
+        "    scipy.linalg.cholesky(a)\n"
+        "    scipy.linalg.get_blas_funcs('syrk', (a,))\n"
+        "memos = [scipy.linalg.get_lapack_funcs.memo, scipy.linalg.get_blas_funcs.memo]\n"
+        "assert not [v for memo in memos for v in memo.values() if hasattr(v, '__wrapped__')]\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=300)
+
+
+def test_a_warm_get_funcs_cache_is_back_after_the_block():
+    matrix = np.random.default_rng(24).normal(size=(30, 6))
+    syrk = scipy.linalg.get_blas_funcs("syrk", (matrix,))
+    with work_ledger():
+        scipy.linalg.get_blas_funcs("syrk", (matrix,))
+    assert scipy.linalg.get_blas_funcs("syrk", (matrix,)) is syrk
+
+
+def test_a_module_imported_during_the_block_does_not_keep_the_wrapper(tmp_path, monkeypatch):
+    (tmp_path / "late_ledger_module.py").write_text("from numpy.linalg import cholesky\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    original = np.linalg.cholesky
+    try:
+        with work_ledger():
+            late = importlib.import_module("late_ledger_module")
+            assert late.cholesky is not original
+        assert late.cholesky is original
+    finally:
+        sys.modules.pop("late_ledger_module", None)
+
+
+def test_bookkeeping_on_worker_threads_is_not_taken_from_the_wall_clock():
+    matrix = np.random.default_rng(25).normal(size=(5000, 1))
+    with work_ledger() as ledger:
+        threads = [
+            threading.Thread(target=np.linalg.qr, args=(matrix,), kwargs={"mode": "r"})
+            for _ in range(8)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    assert ledger.count("numpy.linalg.qr") == 8
+    assert ledger.bookkeeping > 0 and ledger.main_bookkeeping == 0
+    assert ledger.errors == []
+
+
+def test_exclusive_seconds_leave_out_the_listed_operations_inside(monkeypatch):
+    import superglm.solvers.rank as rank
+
+    clock = [0.0]
+    monkeypatch.setattr(
+        work_ledger_module, "time", types.SimpleNamespace(perf_counter=lambda: clock[0])
+    )
+
+    def eigh(matrix):
+        clock[0] += 2.0
+
+    def decompose_gram(matrix):
+        clock[0] += 1.0
+        np.linalg.eigh(matrix)
+        clock[0] += 4.0
+
+    monkeypatch.setattr(np.linalg, "eigh", eigh)
+    monkeypatch.setattr(rank, "decompose_gram", decompose_gram)
+    with work_ledger() as ledger:
+        rank.decompose_gram(_spd(5, 26))
+
+    assert ledger.find("decompose_gram")[0].seconds == 5.0
+    assert ledger.find("numpy.linalg.eigh")[0].seconds == 2.0
+    assert ledger.elapsed == 7.0

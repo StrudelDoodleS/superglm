@@ -99,14 +99,14 @@ def tweedie_p_fit(frame):
     )
 
 
-def capped_levels_fit(_frame, levels=1000):
-    """The fit of issue #589: every level of a 1,000-level category carries a cap."""
+def capped_levels_fit(_frame, levels=1000, n=None):
+    """The fit of issue #589: every level of a category carries a cap (1,000 levels, 80,000 rows)."""
     import pandas as pd
 
     from superglm import Constraint
 
     rng = np.random.default_rng(20261104)
-    n = CAPPED_ROWS
+    n = n or CAPPED_ROWS
     area = rng.integers(levels, size=n)
     relativity = rng.normal(0.0, 0.6, levels)
     age = rng.uniform(size=n)
@@ -169,18 +169,21 @@ def main(argv=None):
     parser.add_argument("--json", default=None, help="append the JSON line to this file")
     parser.add_argument("--top", type=int, default=25)
     args = parser.parse_args(argv)
-    data_dir = fremtpl2_data.find_data_dir(args.data_dir)
     if args.case == "capped-1000":
-        frame = None
-    elif args.case == "shape-a":
-        frame, _ = shape_rules.load_split(data_dir, args.rows)
+        frame = None  # synthetic data: no book needed
     else:
-        frame = load_book(data_dir, args.rows)
+        data_dir = fremtpl2_data.find_data_dir(args.data_dir)
+        if args.case == "shape-a":
+            frame, _ = shape_rules.load_split(data_dir, args.rows)
+        else:
+            frame = load_book(data_dir, args.rows)
     run = RUNNERS[args.case]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         if frame is not None:
             run(frame.iloc[:WARMUP_ROWS])
+        else:
+            capped_levels_fit(None, levels=50, n=WARMUP_ROWS)  # compiles the kernels
         started = time.perf_counter()
         with work_ledger() as ledger:
             run(frame)

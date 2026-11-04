@@ -12,22 +12,29 @@ decompositions, Gram builds and passes over the rows) with thin wrappers, and
 puts every one back on exit, including after an exception.  Nothing in a
 production code path changes, so a fit outside the block pays nothing.  A
 name imported with ``from ... import`` is replaced where it is used: every
-loaded ``superglm`` module is searched for a binding to the original.
+loaded ``superglm`` module is searched for a binding to the original, and a
+module imported during the block is searched again on exit.  SciPy's
+``get_lapack_funcs`` / ``get_blas_funcs`` caches are emptied on entry, so the
+routines they hand out are the wrappers, and refilled with their old contents
+on exit.
 
 Each wrapped call is recorded under ``(operation, caller)``: its count, the
 largest input shape, a flop estimate, its own seconds (children subtracted)
 and two flags:
 
-* **repeated**: the input is bit-for-bit one that operation has seen before;
+* **repeated**: the input is one that operation has seen before: arrays equal
+  bit for bit, numbers and strings equal under the same argument name, other
+  objects the same object (CPython can reuse the address of a freed object, so
+  such an argument can make a repeat appear that is not one);
 * **update candidate**: the input differs from the previous input at the same
-  call site by one row or column (a row and its column, for a symmetric
+  call site (file and line) by one row or column (a row and its column, for a symmetric
   matrix), or by one bordering row and column.  Such a result could have been
   updated from the previous one for O(n^2) work instead of rebuilt for
   O(n^3) (Gill, Golub, Murray and Saunders 1974; Davis and Hager 2005).
 
 Inputs are hashed and the last input per call site is kept only while the
-ledger is on; the copies share a fixed byte budget, and an input too large for
-it is hashed but not compared.  Flop counts follow LAPACK Working Note 41 for
+block is open; the copies share a fixed byte budget, an input too large for
+it is hashed but not compared, and the copies and digests are dropped on exit.  Flop counts follow LAPACK Working Note 41 for
 the factorisations and are order-of-magnitude constants for the eigensolver and
 SVD; a pass over the rows counts as dense, so it overstates a binned pass.
 """
@@ -47,6 +54,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
+import scipy.linalg
 
 __all__ = ["LedgerRow", "WorkLedger", "work_ledger"]
 
@@ -84,18 +92,42 @@ def _lu(first, args, kwargs, result):
     return batch * (hi * lo**2 - lo**3 / 3.0)
 
 
-def _qr(first, args, kwargs, result):
+def _qr_flops(first, forms_q: bool) -> float:
     batch, m, n = _dims(first)
     lo, hi = min(m, n), max(m, n)
-    mode = kwargs.get("mode", args[3] if len(args) > 3 else None)
-    forms_q = mode not in ("r", "raw")
     return batch * (2.0 * hi * lo**2 - 2.0 * lo**3 / 3.0) * (2.0 if forms_q else 1.0)
 
 
-def _eigh(first, args, kwargs, result):
-    _, _, n = _dims(first)
-    values_only = bool(kwargs.get("eigvals_only") or kwargs.get("compute_v") is False)
-    return _dims(first)[0] * (4.0 / 3.0 if values_only else 9.0) * n**3
+def _qr_at(mode_position: int, default: str):
+    """``qr(a, ...)`` forms Q unless its ``mode`` (at ``mode_position`` or by keyword) is R-only."""
+
+    def cost(first, args, kwargs, result):
+        mode = kwargs.get("mode", args[mode_position] if len(args) > mode_position else default)
+        return _qr_flops(first, mode not in ("r", "raw"))
+
+    return cost
+
+
+def _qr_factor_only(first, args, kwargs, result):
+    return _qr_flops(first, False)
+
+
+def _eigen_flops(first, values_only: bool) -> float:
+    """About 4/3 n^3 for eigenvalues alone and 9 n^3 with vectors (order of magnitude)."""
+    batch, _, n = _dims(first)
+    return batch * (4.0 / 3.0 if values_only else 9.0) * n**3
+
+
+def _eigh_vectors(first, args, kwargs, result):
+    return _eigen_flops(first, False)
+
+
+def _eigh_scipy(first, args, kwargs, result):
+    return _eigen_flops(first, bool(kwargs.get("eigvals_only", args[3] if len(args) > 3 else 0)))
+
+
+def _eigh_lapack(first, args, kwargs, result):
+    return _eigen_flops(first, not kwargs.get("compute_v", args[1] if len(args) > 1 else 1))
 
 
 def _eigvalsh(first, args, kwargs, result):
@@ -142,7 +174,7 @@ def _factor_update(first, args, kwargs, result):
 def _syrk(first, args, kwargs, result):
     _, rows, columns = _dims(first)
     inner, order = (
-        (rows, columns) if kwargs.get("trans", args[5] if len(args) > 5 else 0) else (columns, rows)
+        (rows, columns) if kwargs.get("trans", args[4] if len(args) > 4 else 0) else (columns, rows)
     )
     return float(inner) * order * (order + 1)
 
@@ -216,8 +248,8 @@ def _library(owner, names_costs, also=()):
 
 _NUMPY = (
     ("cholesky", _cholesky),
-    ("qr", _qr),
-    ("eigh", _eigh),
+    ("qr", _qr_at(1, "reduced")),
+    ("eigh", _eigh_vectors),
     ("eigvalsh", _eigvalsh),
     ("svd", _svd),
     ("solve", _solve),
@@ -233,8 +265,8 @@ _SCIPY = (
     ("cho_factor", _cholesky),
     ("lu_factor", _lu),
     ("lu", _lu),
-    ("qr", _qr),
-    ("eigh", _eigh),
+    ("qr", _qr_at(3, "full")),
+    ("eigh", _eigh_scipy),
     ("eigvalsh", _eigvalsh),
     ("svd", _svd),
     ("svdvals", _svd),
@@ -242,7 +274,7 @@ _SCIPY = (
     ("inv", _inverse),
     ("lstsq", _svd),
     ("pinv", _svd),
-    ("pinvh", _eigh),
+    ("pinvh", _eigh_vectors),
     ("orth", _svd),
     ("qr_insert", _factor_update),
     ("qr_delete", _factor_update),
@@ -254,11 +286,11 @@ _LAPACK = (
     ("dpotri", _inverse),
     ("dtrtri", _triangular_inverse),
     ("dgetrf", _lu),
-    ("dgeqrf", _qr),
+    ("dgeqrf", _qr_factor_only),
     ("dgesdd", _svd),
     ("dgejsv", _svd),
-    ("dsyevd", _eigh),
-    ("dsyevr", _eigh),
+    ("dsyevd", _eigh_lapack),
+    ("dsyevr", _eigh_lapack),
 )
 
 _CENTERED = "superglm._group_matrix._group_matrix_centered"
@@ -291,7 +323,7 @@ TARGETS: tuple[_Target, ...] = (
     *_library("scipy.linalg", _SCIPY),
     *_library("scipy.linalg.lapack", _LAPACK, also=("_flapack",)),
     *_library("scipy.linalg.blas", (("dsyrk", _syrk),), also=("_fblas",)),
-    _Target("superglm.solvers.rank", "_leaf_qr", _qr),
+    _Target("superglm.solvers.rank", "_leaf_qr", _qr_factor_only),
     _Target("superglm.solvers.rank", "decompose_gram", _no_flops, COMPOSITE),
     _Target("superglm.solvers.rank", "decompose_gram_if_authoritative", _no_flops, COMPOSITE),
     _Target("superglm.solvers.rank", "decompose_gram_deflated", _no_flops, COMPOSITE),
@@ -368,13 +400,15 @@ class WorkLedger:
     """The record of one ``work_ledger()`` block."""
 
     elapsed: float = 0.0
-    bookkeeping: float = 0.0  # seconds spent hashing and recording, not fitting
+    bookkeeping: float = 0.0  # seconds spent hashing and recording, summed over threads
+    main_bookkeeping: float = 0.0  # the part spent on the thread that opened the block
     skipped: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)  # ledger faults; the fit ran regardless
     _rows: dict[tuple[str, str], LedgerRow] = field(default_factory=dict, repr=False)
     _seen: dict[str, dict[bytes, None]] = field(default_factory=dict, repr=False)
-    _last: dict[tuple[str, str], np.ndarray] = field(default_factory=dict, repr=False)
+    _last: dict[tuple, np.ndarray] = field(default_factory=dict, repr=False)
     _last_bytes: int = field(default=0, repr=False)
+    _owner: int = field(default=0, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def rows(self) -> list[LedgerRow]:
@@ -422,7 +456,7 @@ class WorkLedger:
         operations called inside it.
         """
         total_flops = self.total_flops() or 1.0
-        elapsed = (self.elapsed - self.bookkeeping) or 1.0
+        elapsed = max(self.elapsed - self.main_bookkeeping, 1e-9)
         lines = [
             f"{'operation':<34}{'called from':<46}{'count':>7}{'repeat':>8}{'update':>8}"
             f"{'largest input':>16}{'Gflop':>10}{'flop %':>8}{'time %':>8}"
@@ -447,7 +481,8 @@ class WorkLedger:
                 )
         listed = sum(row.seconds for row in self._rows.values())
         lines.append(
-            f"fit {elapsed:.2f} s (ledger bookkeeping {self.bookkeeping:.2f} s not counted); "
+            f"fit {elapsed:.2f} s (ledger bookkeeping {self.bookkeeping:.2f} s, "
+            f"{self.main_bookkeeping:.2f} s of it on the main thread, not counted); "
             f"listed operations {listed:.2f} s; estimated {total_flops / 1e9:.1f} Gflop"
         )
         return "\n".join(lines)
@@ -455,11 +490,12 @@ class WorkLedger:
     # -- recording ---------------------------------------------------------
 
     def _record(self, target, prepared, result, seconds):
-        first, cost_input, tag, caller, via = prepared
+        first, cost_input, tag, caller, via, where = prepared
         shape = tuple(first.shape) if first is not None else ()
         flops = target.cost(first, *cost_input, result)
         digest, snapshot, oversize = tag
         site = (target.kind, caller)
+        place = (target.kind, *where)
         with self._lock:
             row = self._rows.get(site)
             if row is None:
@@ -472,16 +508,22 @@ class WorkLedger:
             if digest is None:
                 return
             seen = self._seen.setdefault(target.kind, {})
-            previous = self._last.get(site)
+            previous = self._last.get(place)
             if digest in seen:
                 row.repeated += 1
             elif previous is not None and snapshot is not None:
                 row.update_candidates += _differs_by_one_line(previous, snapshot)
             row.untracked += oversize
-            self._keep(site, snapshot)
+            self._keep(place, snapshot)
             seen[digest] = None
             if len(seen) > _DIGESTS_PER_OPERATION:
                 del seen[next(iter(seen))]
+
+    def _release_inputs(self) -> None:
+        """Drop the copies and digests; the rows stay."""
+        self._last.clear()
+        self._last_bytes = 0
+        self._seen.clear()
 
     def _keep(self, site, snapshot) -> None:
         old = self._last.pop(site, None)
@@ -531,14 +573,14 @@ def _differs_by_one_line(previous: np.ndarray, current: np.ndarray) -> bool:
     big, small = (current, previous) if d_rows + d_cols > 0 else (previous, current)
     bordered = [axis for axis, d in enumerate((d_rows, d_cols)) if d]
     if len(bordered) == 2:
-        diagonal = min(small.shape)
-        mismatch = np.flatnonzero(np.diag(big)[:diagonal] != np.diag(small)[:diagonal])
-        candidates = [int(mismatch[0])] if mismatch.size else []
-        candidates.append(diagonal)
-        return any(
-            np.array_equal(np.delete(np.delete(big, i, axis=0), i, axis=1), small)
-            for i in candidates
-            if i < min(big.shape)
+        lead = min(small.shape)
+        unequal = big[:lead, :lead] != small[:lead, :lead]
+        # Rows and columns before a deleted line agree whatever the diagonal holds, so the
+        # first index whose leading principal block differs is the deleted one.
+        lines = np.tril(unequal).any(axis=1) | np.triu(unequal).any(axis=0)
+        index = int(np.argmax(lines)) if lines.any() else lead
+        return index < min(big.shape) and np.array_equal(
+            np.delete(np.delete(big, index, axis=0), index, axis=1), small
         )
     axis = bordered[0]
     index = _first_mismatch(big, small, axis)
@@ -551,9 +593,9 @@ def _fingerprint(arrays, tokens, first) -> tuple[bytes | None, np.ndarray | None
         return None, None, 0
     hasher = hashlib.blake2b(digest_size=_HASH_BYTES)
     hasher.update("|".join(tokens).encode())
-    for array in arrays:
+    for label, array in arrays:
         data = np.ascontiguousarray(array)
-        hasher.update(f"{data.shape}{data.dtype.str}".encode())
+        hasher.update(f"{label}{data.shape}{data.dtype.str}".encode())
         hasher.update(data.reshape(-1).view(np.uint8))
     if first is None or first.ndim != 2:
         return hasher.digest(), None, 0
@@ -563,13 +605,17 @@ def _fingerprint(arrays, tokens, first) -> tuple[bytes | None, np.ndarray | None
 
 
 _THIS_FILE = __file__
-_LIBRARY_MARKERS = (f"{'site-packages'}/numpy", f"{'site-packages'}/scipy")
+_LIBRARY_PACKAGES = ("numpy", "scipy")
 
 
-def _callers() -> tuple[str, str]:
-    """The nearest two ``superglm`` (else nearest non-library) frames above the wrapper."""
+def _callers() -> tuple[str, str, tuple[str, int]]:
+    """The nearest two ``superglm`` (else nearest non-library) functions above the wrapper.
+
+    Also the file and line of the nearest one: the call site the update flag compares within.
+    """
     frame = sys._getframe(2)
     found: list[str] = []
+    where = None
     fallback = None
     while frame is not None and len(found) < 2:
         filename = frame.f_code.co_filename
@@ -578,15 +624,18 @@ def _callers() -> tuple[str, str]:
         if module.startswith("superglm") and filename != _THIS_FILE:
             if not found or found[-1] != label:
                 found.append(label)
+                where = where or (filename, frame.f_lineno)
         elif (
             fallback is None
             and filename != _THIS_FILE
-            and not any(m in filename for m in _LIBRARY_MARKERS)
+            and module.partition(".")[0] not in _LIBRARY_PACKAGES
         ):
-            fallback = label
+            fallback = (label, (filename, frame.f_lineno))
         frame = frame.f_back
-    caller = found[0] if found else (fallback or "<unknown>")
-    return caller, found[1] if len(found) > 1 else ""
+    if found:
+        return found[0], found[1] if len(found) > 1 else "", where
+    label, where = fallback or ("<unknown>", ("", 0))
+    return label, "", where
 
 
 class _State(threading.local):
@@ -599,26 +648,30 @@ _ACTIVE: WorkLedger | None = None
 _STATE = _State()
 
 
-def _inputs(values, named: Any = None):
-    """``(arrays, tokens, first)``: the arrays among ``values``, a token for every other value.
+def _inputs(pairs, named: Any = None):
+    """``(arrays, tokens, first)`` from ``(label, value)`` pairs: labelled arrays, a token per other value.
 
-    A list or tuple contributes its arrays.  Numbers and strings enter the digest by value
-    (``mode="r"`` is a different operation), other objects by identity.  ``first`` is the
-    array that update detection compares: ``named`` when given, else the first array.
+    A list or tuple contributes its arrays.  The label (a position or a keyword) is part of
+    the digest, so the same value under another keyword is another input.  Numbers and
+    strings enter by value (``mode="r"`` is a different operation) and other objects by
+    identity.  ``first`` is the array update detection compares: ``named`` when given, else
+    the first array.
     """
-    arrays: list[np.ndarray] = []
+    arrays: list[tuple[str, np.ndarray]] = []
     tokens: list[str] = []
-    for value in values:
-        for item in value if isinstance(value, (list, tuple)) else (value,):
+    for label, value in pairs:
+        many = isinstance(value, (list, tuple))
+        for j, item in enumerate(value if many else (value,)):
+            tag = f"{label}[{j}]" if many else str(label)
             if isinstance(item, np.ndarray):
-                arrays.append(item)
+                arrays.append((tag, item))
             elif isinstance(item, (bool, int, float, str, type(None))):
-                tokens.append(repr(item))
+                tokens.append(f"{tag}={item!r}")
             else:
-                tokens.append(f"{type(item).__name__}@{id(item)}")
+                tokens.append(f"{tag}={type(item).__name__}@{id(item)}")
     if isinstance(named, (list, tuple)) and named:
         named = named[0]
-    first = named if isinstance(named, np.ndarray) else (arrays[0] if arrays else None)
+    first = named if isinstance(named, np.ndarray) else (arrays[0][1] if arrays else None)
     return arrays, tokens, first
 
 
@@ -626,13 +679,13 @@ def _prepare(target: _Target, signature, args, kwargs):
     """What one call needs recorded, read before the call (which may overwrite its inputs)."""
     if signature is None:
         cost_input = (args, kwargs)
-        arrays, tokens, first = _inputs((*args, *kwargs.values()))
+        arrays, tokens, first = _inputs([*enumerate(args), *kwargs.items()])
     else:
         bound = signature.bind_partial(*args, **kwargs).arguments
         cost_input = ((), bound)
-        arrays, tokens, first = _inputs(bound.values(), bound.get(target.input))
-    caller, via = _callers()
-    return first, cost_input, _fingerprint(arrays, tokens, first), caller, via
+        arrays, tokens, first = _inputs(bound.items(), bound.get(target.input))
+    caller, via, where = _callers()
+    return first, cost_input, _fingerprint(arrays, tokens, first), caller, via, where
 
 
 def _wrap(target: _Target, original):
@@ -671,7 +724,10 @@ def _wrap(target: _Target, original):
             except Exception as error:
                 ledger.errors.append(f"{target.kind}: {error!r}")
             spent = preparing + time.perf_counter() - recording
-            ledger.bookkeeping += spent
+            with ledger._lock:
+                ledger.bookkeeping += spent
+                if threading.get_ident() == ledger._owner:
+                    ledger.main_bookkeeping += spent
             if state.stack:
                 state.stack[-1].child_seconds += spent
 
@@ -684,20 +740,58 @@ def _resolve(owner: str):
     return getattr(holder, class_name) if class_name else holder
 
 
+def _get_funcs_memos() -> list[tuple[str, dict]]:
+    """SciPy's lookup caches, which hold the routines ``get_lapack_funcs`` and ``get_blas_funcs`` found."""
+    found = []
+    for name in ("get_lapack_funcs", "get_blas_funcs"):
+        memo = getattr(getattr(scipy.linalg, name), "memo", None)
+        found.append((name, memo if isinstance(memo, dict) else None))
+    return found
+
+
+def _restore_strays(wrappers: dict[int, Any]) -> None:
+    """Put the original back wherever a loaded module still holds a wrapper.
+
+    A module first imported while the block was open binds the wrapper by ``from ... import``;
+    it was not in the snapshot taken on entry.
+    """
+    for module in list(sys.modules.values()):
+        namespace = getattr(module, "__dict__", None)
+        if not isinstance(namespace, dict):
+            continue
+        for key, value in list(namespace.items()):
+            original = wrappers.get(id(value))
+            if original is not None and value is not original:
+                namespace[key] = original
+
+
 @contextmanager
 def work_ledger() -> Iterator[WorkLedger]:
-    """Record the expensive work of every fit run inside the block."""
+    """Record the expensive work of every fit run inside the block.
+
+    On exit every replaced entry point is back, SciPy's lookup caches hold what they held on
+    entry, and the ledger has dropped the input copies it kept.
+    """
     global _ACTIVE
     if _ACTIVE is not None:
         raise RuntimeError("a work ledger is already recording; nest no ledgers")
     ledger = WorkLedger()
+    ledger._owner = threading.get_ident()
     undo: list[tuple[Any, str, Any]] = []
+    wrappers: dict[int, Any] = {}
+    keep_alive: list[Any] = []  # keeps each wrapper's id from being reused
+    memos = _get_funcs_memos()
+    saved_memos = [(memo, dict(memo)) for _, memo in memos if memo is not None]
+    ledger.skipped += [f"scipy.linalg.{name}.memo" for name, memo in memos if memo is None]
     superglm_modules = [
         module
         for name, module in list(sys.modules.items())
         if name.startswith("superglm") and name != __name__ and module is not None
     ]
     try:
+        # A warm cache would hand back the original routines; a cold one is filled with wrappers.
+        for memo, _ in saved_memos:
+            memo.clear()
         for target in TARGETS:
             try:
                 holder = _resolve(target.owner)
@@ -710,6 +804,8 @@ def work_ledger() -> Iterator[WorkLedger]:
                 ledger.skipped.append(target.kind)
                 continue
             wrapper = _wrap(target, original)
+            wrappers[id(wrapper)] = original
+            keep_alive.append(wrapper)
             places = [(holder, target.name)]
             for name in target.also:
                 twin = importlib.import_module("scipy.linalg." + name)
@@ -735,3 +831,8 @@ def work_ledger() -> Iterator[WorkLedger]:
         _ACTIVE = None
         for place, name, original in reversed(undo):
             setattr(place, name, original)
+        _restore_strays(wrappers)
+        for memo, before in saved_memos:
+            memo.clear()
+            memo.update(before)
+        ledger._release_inputs()
