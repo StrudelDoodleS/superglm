@@ -204,6 +204,13 @@ def _efs_result(
     )
 
 
+# The plateau finish's bar as a fraction of the plateau's stationarity tolerance.
+_FINISH_TOLERANCE = 0.1
+# The Newton iterations a plateau finish may spend. A finish past this count is on a
+# fit whose exact gradient gives it no quick way down, which keeps its plateau.
+_FINISH_ITERATIONS = 16
+
+
 def fit_distributional_efs(
     family: DistributionalFamily,
     layout: StackedLayout,
@@ -320,11 +327,29 @@ def fit_distributional_efs(
     endgame_stationary = False
     pending_cap: NewtonEndgameOutcome | None = None
     newton_budget = (
-        outer_config.max_iterations
+        (_FINISH_ITERATIONS if outer_config.outer == "efs+finish" else outer_config.max_iterations)
         if outer_config.max_newton_iterations is None
         else outer_config.max_newton_iterations
     )
+    # ``"efs+finish"`` finishes a plateau on the exact gradient, an order tighter than
+    # the plateau's own bar.
+    endgame_config = (
+        replace(
+            outer_config, outer="efs+newton", tolerance=_FINISH_TOLERANCE * outer_config.tolerance
+        )
+        if outer_config.outer == "efs+finish"
+        else outer_config
+    )
     beyond_cap: dict[str, float] = {}
+
+    def _plateau_finishes() -> bool:
+        """Whether a practical plateau hands to the endgame rather than stopping.
+
+        Fellner--Schall has no exact-gradient test, and its plateau can leave V several
+        stationarity bars short, so ``"efs+finish"`` ends with Wood, Pya and Saefken's
+        (2016) Newton iteration on the components off the active face.
+        """
+        return outer_config.outer == "efs+finish"
 
     def _endgame_budget() -> int:
         """The endgame iterations left: ``max_iterations`` bounds warm-up and endgame together."""
@@ -414,7 +439,7 @@ def fit_distributional_efs(
             likelihood_plan,
             state=_endgame_state(),
             solver_config=inner_config,
-            efs_config=outer_config,
+            efs_config=endgame_config,
             chunk_size=chunk_size,
             phase_recorder=phase_recorder,
             reuse_session=reuse_session,
@@ -466,6 +491,9 @@ def fit_distributional_efs(
                 unresolved_upper_bound=tuple(name for name in current_lambdas if name in nominated),
             )
             return None
+        if _plateau_finishes():
+            # The plateau already held; a finish that could not go further keeps it.
+            return _result(converged=True, reason="practical_plateau")
         return _result(converged=False, reason=outcome.kind)
 
     def _bracket_after_refusal(
@@ -1464,22 +1492,26 @@ def fit_distributional_efs(
             )
         ):
             return _result(converged=True, reason="practical_plateau")
-        # A practical plateau is an interior stop: while a component sits at the
-        # cap with outward pressure or is a working infinity, the top of the loop
-        # decides (promote an exact face, or refuse with a named reason).
+        # A practical plateau is an interior stop of the components off the active
+        # face: while one sits at the cap with outward pressure or is a working
+        # infinity, the top of the loop decides (promote an exact face, or refuse
+        # with a named reason). A promotion restarts the plateau's count.
         if (
             outer_config.practical_convergence
-            and current_face is None
+            and (current_face is None or _plateau_finishes())
             and practical_run >= outer_config.plateau_iterations
             and terminal_evidence.maximum > outer_config.tolerance
             and not terminal_evidence.unresolved_upper_bound
             and not terminal_evidence.working_infinity
         ):
-            if _endgame_budget() > 0 and should_hand_off(
-                "practical_plateau",
-                max_accepted_step=max_accepted_step,
-                iterations=len(history),
-                config=outer_config,
+            if _endgame_budget() > 0 and (
+                _plateau_finishes()
+                or should_hand_off(
+                    "practical_plateau",
+                    max_accepted_step=max_accepted_step,
+                    iterations=len(history),
+                    config=outer_config,
+                )
             ):
                 endgame_result = _run_endgame()
                 if endgame_result is not None:

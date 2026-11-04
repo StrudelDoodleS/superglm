@@ -70,8 +70,9 @@ class DistributionalEFSConfig:
     acceleration_history: int = 5
     acceleration_max_amplification: float = 8.0
     # The outer method. ``"efs"`` is the Fellner--Schall fixed point;
-    # ``"efs+newton"`` adds a Newton endgame after the warm-up.
-    outer: Literal["efs", "efs+newton"] = "efs"
+    # ``"efs+finish"`` runs it to a practical plateau and finishes with a Newton
+    # endgame; ``"efs+newton"`` hands to that endgame after a warm-up.
+    outer: Literal["efs", "efs+finish", "efs+newton"] = "efs"
     handoff_step: float = 0.5
     handoff_iterations: int = 10
     # An optional cap on the endgame's own iterations (``None``: what remains of
@@ -148,8 +149,8 @@ class DistributionalEFSConfig:
             raise ValueError("backtrack_factor must lie strictly between zero and one")
         if self.acceleration not in ("none", "multisecant"):
             raise ValueError("acceleration must be 'none' or 'multisecant'")
-        if self.outer not in ("efs", "efs+newton"):
-            raise ValueError("outer must be 'efs' or 'efs+newton'")
+        if self.outer not in ("efs", "efs+finish", "efs+newton"):
+            raise ValueError("outer must be 'efs', 'efs+finish' or 'efs+newton'")
         newton_cap = self.max_newton_iterations
         if newton_cap is not None and (
             isinstance(newton_cap, bool) or not isinstance(newton_cap, int) or newton_cap < 1

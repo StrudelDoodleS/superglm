@@ -560,7 +560,7 @@ def posterior_covariance(fitted: Any, *, kind: CovarianceKind = "fixed") -> NDAr
     never cached).
 
     A fit not stopped at a certified stationary point (every ``outer="efs"``
-    fit) gets the correction about its fitted point, with a
+    fit, and a default fit whose plateau stood) gets the correction about its fitted point, with a
     ``ConvergenceWarning``. Where no correction can be formed, the fixed
     covariance is returned with a ``ConvergenceWarning`` naming the cause (as
     mgcv's ``vcov(unconditional=TRUE)`` falls back to ``Vp``). A fit with no
@@ -608,7 +608,8 @@ def _resolved_posterior_covariance(
         warnings.warn(
             lss_corrected_covariance_nonstationary_message(
                 open_stop,
-                newton_can_help=smoothing.config.outer == "efs"
+                newton_can_help=smoothing.config.outer != "efs+newton"
+                and smoothing.newton_iterations == 0
                 and getattr(
                     getattr(fitted.family, "capabilities", None), "continuous_curvature", True
                 ),

@@ -350,7 +350,10 @@ def test_bound_smooth_interaction_compilation_and_fit_forwarding(discrete, reml,
         assert kwargs["config"] == DenseSolverConfig(max_iterations=100, tolerance=1.0e-7)
         assert kwargs["efs_config"] == (
             DistributionalEFSConfig(
-                max_iterations=3, initial_lambda=None, practical_convergence=True
+                max_iterations=3,
+                initial_lambda=None,
+                practical_convergence=True,
+                outer="efs+finish",
             )
             if reml
             else None
