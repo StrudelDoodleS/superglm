@@ -495,7 +495,7 @@ def test_lognormal_transform_carries_the_family_floor():
     assert (RELATIVITY.y_label, RELATIVITY.y_format) == ("relativity", "relativity")
     assert RELATIVITY.floor == 0.0 and RELATIVITY.reference_eta == 0.0
     inverse = DisplayTransform("inverse_theta")
-    assert (inverse.y_label, inverse.y_format) == ("1/theta", "plain")
+    assert (inverse.y_label, inverse.y_format) == ("overdispersion (1/θ)", "plain")
 
 
 @pytest.mark.parametrize("kind", ["relativity", "lognormal_cv", "gamma_cv", "inverse_theta"])

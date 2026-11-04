@@ -4,6 +4,7 @@ import { escapeHTML, fmt } from "../format.js";
 
 /** @typedef {import('../api/contracts.js').CVReportPayload} CVReportPayload */
 /** @typedef {import('../api/contracts.js').CVResultPayload} CVResultPayload */
+/** @typedef {import('../api/contracts.js').CVFoldRow} CVFoldRow */
 /** @typedef {import('../api/contracts.js').CVTermItem} CVTermItem */
 /** @typedef {import('../api/contracts.js').CVFoldCurve} CVFoldCurve */
 /** @typedef {import('../api/contracts.js').JobKind} JobKind */
@@ -27,7 +28,6 @@ export const JOB_KINDS = Object.freeze(["cv", "final_fit"]);
 const POLL_MS = 250;
 const CHART = Object.freeze({ width: 760, height: 320, left: 56, right: 18, top: 30, bottom: 66 });
 const JOB_NAMES = Object.freeze({ cv: "Run CV", final_fit: "Final fit" });
-const SHORT_METRICS = Object.freeze({ deviance: "Deviance", gini: "Gini", nll: "NLL" });
 const RUN_CV_HELP = "Refit the current structure on each stored fold, put your hand edits back "
   + "exactly as set, and score the held-out rows.";
 const FINAL_FIT_HELP = "Refit the current structure on train and validation rows and put your "
@@ -44,9 +44,11 @@ function isNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+// Four decimals on a score near one; two once it runs to hundreds, like a CRPS in money.
 /** @param {unknown} value */
 function metricText(value) {
-  return isNumber(value) ? value.toFixed(4) : "--";
+  if (!isNumber(value)) return "--";
+  return value.toFixed(Math.abs(value) >= 100 ? 2 : 4);
 }
 
 /** @param {unknown} value */
@@ -66,9 +68,11 @@ function px(value) {
 
 /** The folds with a palette of their own; later folds take the trace colours. */
 const FOLD_SLOTS = 5;
+/** Past this many folds the table's picture of them stops being readable. */
+const MAX_HELD_CELLS = 12;
 
 /** @param {number} fold the fold's 0-based number */
-function foldColour(fold) {
+export function foldColour(fold) {
   return fold < FOLD_SLOTS ? `var(--fold-${fold})` : `var(--trace-${fold % 10})`;
 }
 
@@ -100,6 +104,74 @@ function foldNumber(fold, index) {
   return Number.isInteger(fold.fold) ? /** @type {number} */ (fold.fold) : index;
 }
 
+/** @param {unknown} seconds */
+export function clockText(seconds) {
+  if (!isNumber(seconds)) return "";
+  const whole = Math.floor(seconds);
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+/**
+ * How far a Run CV has got: the folds finished, and how many there are.
+ * @param {JobStatus|null|undefined} job
+ */
+export function foldProgress(job) {
+  const progress = job?.progress ?? [];
+  const done = progress.filter((entry) => entry.phase === "fold_done");
+  const counted = progress.filter((entry) => entry.phase === "fold" || entry.phase === "fold_done");
+  return { done, nFolds: /** @type {number} */ (counted[counted.length - 1]?.n_folds ?? 0) };
+}
+
+/**
+ * A running Run CV as a result: the scores of the folds finished so far.
+ * Null when there is no such run, or it has not reached its first fold.
+ * @param {CVReportPayload} payload @param {JobStatus|null|undefined} job
+ * @returns {CVResultPayload|null}
+ */
+export function liveRun(payload, job) {
+  if (job?.kind !== "cv" || job.status !== "running") return null;
+  const { done, nFolds } = foldProgress(job);
+  if (!nFolds) return null;
+  /** @type {Record<string, number>} */
+  const mean = {};
+  /** @type {Record<string, number>} */
+  const std = {};
+  const rows = done.map((entry) => /** @type {CVFoldRow} */ (/** @type {unknown} */ ({ ...entry, fold: Number(entry.fold) - 1 })));
+  for (const { name } of payload.metrics) {
+    const values = rows.map((row) => row.scores[name]).filter(isNumber);
+    if (!values.length) continue;
+    const centre = values.reduce((sum, value) => sum + value, 0) / values.length;
+    mean[name] = centre;
+    if (values.length > 1) {
+      std[name] = Math.sqrt(values.reduce((sum, value) => sum + (value - centre) ** 2, 0) / values.length);
+    }
+  }
+  return {
+    label: "Current model",
+    origin: "run",
+    model_revision: null,
+    stale: false,
+    live: true,
+    n_folds: nFolds,
+    held_out: payload.results.some((result) => result.held_out),
+    folds: rows,
+    mean,
+    std,
+    pooled: {},
+  };
+}
+
+/**
+ * The results the tab draws: while Run CV runs, its folds so far take the
+ * place of the last run's.
+ * @param {CVReportPayload} payload @param {JobStatus|null|undefined} job
+ * @returns {CVResultPayload[]}
+ */
+function shownResults(payload, job) {
+  const live = liveRun(payload, job);
+  return live ? [...payload.results.filter((result) => result.origin !== "run"), live] : payload.results;
+}
+
 /** @param {string} value @returns {JobKind} */
 function jobKind(value) {
   return value === "final_fit" ? "final_fit" : "cv";
@@ -125,8 +197,9 @@ export function cvSourceLine(payload) {
  * @param {CVTermItem[]} terms @param {string} query
  */
 export function filterTerms(terms, query) {
+  // The same text the term list shows and highlights.
   const needle = query.trim().toLowerCase();
-  return needle ? terms.filter((term) => term.name.toLowerCase().includes(needle)) : terms;
+  return needle ? terms.filter((term) => termLabel(term).toLowerCase().includes(needle)) : terms;
 }
 
 /**
@@ -194,6 +267,7 @@ export function jobLine(kind, job) {
   if (job.cancel_requested) return `${name}: cancelling after this step…`;
   const last = job.progress[job.progress.length - 1];
   if (last?.phase === "fold") return `${name}: fold ${last.fold} of ${last.n_folds}…`;
+  if (last?.phase === "fold_done") return `${name}: fold ${last.fold} of ${last.n_folds} finished…`;
   if (last?.phase === "fitting") return `${name}: fitting ${countText(last.n_rows)} rows…`;
   if (last?.phase === "carrying") return `${name}: putting the hand edits back…`;
   if (last?.phase === "curves") return `${name}: reading the fold curves…`;
@@ -386,8 +460,14 @@ function median(values) {
   return sorted.length % 2 ? sorted[Math.floor(middle)] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
+/** @param {{lower_is_better:boolean|null}} metric */
+function betterDirection(metric) {
+  if (metric.lower_is_better === null) return "closer to 1";
+  return metric.lower_is_better ? "lower" : "higher";
+}
+
 /**
- * @param {{name:string, label:string, lower_is_better:boolean}} metric
+ * @param {{name:string, label:string, lower_is_better:boolean|null}} metric
  * @param {CVResultPayload[]} results
  */
 function metricCard(metric, results) {
@@ -430,8 +510,9 @@ function metricCard(metric, results) {
         + `<title>Mean: ${metricText(mean)}${meanOff ? ", off the strip" : ""}</title></path>`
       : "";
     const pooledText = isNumber(pooled) ? ` · pooled ${metricText(pooled)}` : "";
-    return `<div class="cv-card-row" data-origin="${result.origin}">
-      <div class="cv-card-value"><span class="cv-card-label">${escapeHTML(result.label)}</span>
+    const label = result.live ? `${result.label}, ${result.folds.length} of ${result.n_folds}` : result.label;
+    return `<div class="cv-card-row" data-origin="${result.origin}"${result.live ? " data-live" : ""}>
+      <div class="cv-card-value"><span class="cv-card-label">${escapeHTML(label)}</span>
         <strong>${metricText(mean)}</strong>
         <span class="cv-card-spread">± ${metricText(result.std[metric.name])}${pooledText}</span></div>
       <svg class="cv-strip" viewBox="0 0 220 24" role="img"
@@ -441,51 +522,100 @@ function metricCard(metric, results) {
   }).join("");
   const pinned = strip.pinned ? " · far-off folds at the strip's ends" : "";
   return `<div class="cv-card"><div class="cv-card-title">${escapeHTML(metric.label)}
-    <span>· ${metric.lower_is_better ? "lower" : "higher"} is better${pinned}</span></div>${rows}</div>`;
+    <span>· ${betterDirection(metric)} is better${pinned}</span></div>${rows}</div>`;
 }
 
 /**
  * One card per metric: mean ± sd and pooled for each run, one dot per fold.
- * @param {CVReportPayload} payload
+ * @param {CVReportPayload} payload @param {JobStatus|null} [job] a Run CV, to draw its folds so far
  */
-export function performanceMarkup(payload) {
+export function performanceMarkup(payload, job = null) {
   const head = sectionHead("Performance across folds", "each dot is a fold; the bar is the mean");
-  if (!payload.results.length) {
-    return `<section class="report-section">${head}<div class="report-note">${escapeHTML(payload.note)}</div></section>`;
+  const results = shownResults(payload, job);
+  if (!results.length) {
+    return `<section class="report-section" data-cv-performance>${head}<div class="report-note">${escapeHTML(payload.note)}</div></section>`;
   }
-  const cards = payload.metrics.map((metric) => metricCard(metric, payload.results)).join("");
-  return `<section class="report-section cv-performance">${head}<div class="cv-cards">${cards}</div></section>`;
+  const cards = payload.metrics.map((metric) => metricCard(metric, results)).join("");
+  return `<section class="report-section cv-performance" data-cv-performance>${head}<div class="cv-cards">${cards}</div></section>`;
+}
+
+/**
+ * A fold as the whole book in pieces: the piece it holds out in its colour,
+ * the rest in grey. They pulse while the fold is fitting, since how long a
+ * fit will take is not known in advance.
+ * @param {number} count @param {number} fold @param {"done"|"now"|"waiting"} stage
+ */
+function heldOutCells(count, fold, stage) {
+  const cells = Array.from({ length: count }, (_, index) => (index === fold
+    ? `<i class="is-out" style="${foldSwatchStyle(fold)}"></i>`
+    : "<i></i>")).join("");
+  return `<span class="cv-held" data-stage="${stage}" style="grid-template-columns: repeat(${count}, var(--cv-held-cell))">${cells}</span>`;
 }
 
 /**
  * The latest run's folds: rows, scores, EDF, fit time and convergence. A
- * score a fold could not compute reads as --.
- * @param {CVReportPayload} payload
+ * score a fold could not compute reads as --. While Run CV runs, the folds to
+ * come have a row each, and the one fitting shows its time so far.
+ * @param {CVReportPayload} payload @param {JobStatus|null} [job] a Run CV, to draw its folds so far
  */
-export function foldTableMarkup(payload) {
-  const result = payload.results[payload.results.length - 1];
+export function foldTableMarkup(payload, job = null) {
+  const results = shownResults(payload, job);
+  const result = results[results.length - 1];
   if (!result) return "";
   const names = payload.metrics.map((metric) => metric.name);
-  const label = (/** @type {string} */ name) =>
-    SHORT_METRICS[/** @type {keyof typeof SHORT_METRICS} */ (name)] ?? name;
-  const rows = result.folds.map((fold, index) => `<tr>
+  const count = result.n_folds ?? result.folds.length;
+  const picture = Boolean(result.held_out) && count <= MAX_HELD_CELLS;
+  const rounds = results.some((run) => run.folds.some((fold) => isNumber(fold.n_reml_iter)));
+  const heldCell = (/** @type {number} */ fold, /** @type {"done"|"now"|"waiting"} */ stage) =>
+    (picture ? `<td class="cv-held-col">${heldOutCells(count, fold, stage)}</td>` : "");
+  const roundsCell = (/** @type {unknown} */ value) => (rounds ? `<td>${fixedText(value, 0)}</td>` : "");
+  const finished = result.folds.map((fold, index) => `<tr>
       <td><span class="cv-fold-swatch" style="${foldSwatchStyle(foldNumber(fold, index))}"></span>Fold ${fold.fold + 1}</td>
+      ${heldCell(foldNumber(fold, index), "done")}
       <td>${countText(fold.n_train)}</td><td>${countText(fold.n_test)}</td>
       ${names.map((name) => `<td>${metricText(fold.scores[name])}</td>`).join("")}
       <td>${fixedText(fold.effective_df, 1)}</td>
+      ${roundsCell(fold.n_reml_iter)}
       <td>${isNumber(fold.fit_time_s) ? `${fold.fit_time_s.toFixed(2)} s` : "--"}</td>
       <td data-converged="${fold.converged}">${fold.converged ? "yes" : "no"}</td>
-    </tr>`).join("");
+    </tr>`);
+  const spent = result.folds.reduce((sum, fold) => sum + (isNumber(fold.fit_time_s) ? fold.fit_time_s : 0), 0);
+  const blanks = names.map(() => "<td>--</td>").join("");
+  const pending = result.live
+    ? Array.from({ length: count - result.folds.length }, (_, offset) => {
+      const fold = result.folds.length + offset;
+      const stage = offset === 0 ? "now" : "waiting";
+      const soFar = offset === 0 && isNumber(job?.elapsed_s) ? `${Math.max(0, Math.floor(job.elapsed_s - spent))} s` : "--";
+      return `<tr data-stage="${stage}">
+      <td><span class="cv-fold-swatch" style="${foldSwatchStyle(fold)}"></span>Fold ${fold + 1}</td>
+      ${heldCell(fold, stage)}
+      <td>--</td><td>--</td>${blanks}<td>--</td>${roundsCell(null)}<td>${soFar}</td><td>--</td>
+    </tr>`;
+    })
+    : [];
+  const rows = [...finished, ...pending].join("");
   const summary = names.map((name) =>
     `<td>${metricText(result.mean[name])} ± ${metricText(result.std[name])}</td>`).join("");
-  return `<section class="report-section">
-    ${sectionHead("Folds", result.label)}
+  const hint = picture ? `${result.label}. Each fold fits on the grey pieces and scores its coloured one.` : result.label;
+  return `<section class="report-section" data-cv-folds>
+    ${sectionHead("Folds", hint)}
     <table class="report-table cv-fold-table" aria-label="Fold scores">
-      <thead><tr><th>Fold</th><th>Train rows</th><th>Test rows</th>
-        ${names.map((name) => `<th>${escapeHTML(label(name))}</th>`).join("")}
-        <th>EDF</th><th>Fit time</th><th>Converged</th></tr></thead>
-      <tbody>${rows}<tr class="cv-mean-row"><td>Mean ± sd</td><td></td><td></td>${summary}<td></td><td></td><td></td></tr></tbody>
+      <thead><tr><th>Fold</th>${picture ? '<th class="cv-held-col">Held out</th>' : ""}<th>Train rows</th><th>Test rows</th>
+        ${payload.metrics.map((metric) => `<th>${escapeHTML(metric.short)}</th>`).join("")}
+        <th>EDF</th>${rounds ? '<th data-popover-title="Rounds" data-popover-body="Rounds of smoothing search the fold took. A fold that took many more than the others took longer to settle on its smoothing.">Rounds</th>' : ""}<th>Fit time</th><th>Converged</th></tr></thead>
+      <tbody>${rows}<tr class="cv-mean-row"><td>Mean ± sd</td>${picture ? "<td></td>" : ""}<td></td><td></td>${summary}<td></td>${rounds ? "<td></td>" : ""}<td></td><td></td></tr></tbody>
     </table></section>`;
+}
+
+/** @param {{name:string, label?:string}} term */
+function termLabel(term) {
+  return term.label ?? term.name;
+}
+
+/** @param {CVTermItem} term @param {CVTermItem|undefined} previous */
+function groupHeading(term, previous) {
+  if (!term.group || term.group === previous?.group) return "";
+  return `<div class="feature-group-title" data-role="${term.role ?? ""}">${escapeHTML(term.group)}</div>`;
 }
 
 /** @param {string} name @param {string} query */
@@ -497,20 +627,21 @@ function highlighted(name, query) {
   return `${escapeHTML(name.slice(0, at))}<mark>${escapeHTML(name.slice(at, end))}</mark>${escapeHTML(name.slice(end))}`;
 }
 
-// A hand edit Run CV put back on every fold has no spread to show.
+// A hand edit Run CV put back on every fold has no fold gap to show.
 const HELD = `<span class="cv-term-held" data-popover-title="Hand-edited"
       data-popover-body="The same curve on every fold.">held</span>`;
 
 /**
- * The term list: name, spread and min r, each term a button that shows its chart.
+ * The term list: name, fold gap and min r, each term a button that shows its chart.
+ * The server keeps a group's terms together, and a heading starts each group.
  * @param {CVTermItem[]} terms @param {string} current @param {string} query
  */
 export function termListMarkup(terms, current, query) {
   if (!terms.length) return '<div class="report-note">No terms match.</div>';
-  return terms.map((term) => `<button type="button" class="cv-term" data-cv-term="${escapeHTML(term.name)}"
-      aria-current="${term.name === current}">
-      <span class="cv-term-name">${highlighted(term.name, query)}</span>
-      ${term.held ? HELD : `<span>${fixedText(term.spread, 3)}</span><span>${fixedText(term.min_correlation, 2)}</span>`}</button>`).join("");
+  return terms.map((term, index) => `${groupHeading(term, terms[index - 1])}<button type="button" class="cv-term" data-cv-term="${escapeHTML(term.name)}"
+      data-role="${term.role ?? ""}" aria-current="${term.name === current}">
+      <span class="cv-term-name" title="${escapeHTML(termLabel(term))}">${highlighted(term.short ?? termLabel(term), query)}</span>
+      ${term.held ? HELD : `<span>${fixedText(term.fold_gap, 3)}</span><span>${fixedText(term.min_correlation, 2)}</span>`}</button>`).join("");
 }
 
 /**
@@ -524,7 +655,7 @@ function frameMarkup(term, y, ticks) {
       y1="${px(y(tick))}" y2="${px(y(tick))}"></line>
     <text class="cv-tick" x="${left - 6}" y="${px(y(tick) + 4)}" text-anchor="end">${escapeHTML(fmt(tick))}</text>`).join("")
     + `<line class="zero" x1="${left}" x2="${width - right}" y1="${px(y(1))}" y2="${px(y(1))}"></line>`
-    + `<text class="cv-axis-title" x="${left}" y="16">${escapeHTML(term.name)} · relativity</text>`;
+    + `<text class="cv-axis-title" x="${left}" y="16">${escapeHTML(termLabel(term))} · ${escapeHTML(term.value_label ?? "relativity")}</text>`;
 }
 
 /**
@@ -626,7 +757,7 @@ export function levelChartMarkup(term) {
       text-anchor="${rotate ? "end" : "middle"}"${rotate ? ` transform="rotate(-40 ${px(x(index))} ${base + 16})"` : ""}>
       ${escapeHTML(level.length > 14 ? `${level.slice(0, 13)}…` : level)}<title>${escapeHTML(level)}</title></text>`).join("");
   return `${legendMarkup(term)}<svg class="cv-chart-svg" viewBox="0 0 ${width} ${height}" role="img"
-      aria-label="${escapeHTML(`${term.name} relativities by fold`)}">
+      aria-label="${escapeHTML(`${termLabel(term)} relativities by fold`)}">
     ${frameMarkup(term, y, ticks)}${bars}${whiskers}${dots}${levelTicks(term.fit, "cv-fit")}
     ${term.edited ? levelTicks(term.edited, "cv-edited") : ""}${labels}</svg>`;
 }
@@ -720,7 +851,7 @@ export function curveChartMarkup(term) {
   const xTicks = niceTicks(first, last, 6).map((tick) => `<text class="cv-tick" x="${px(x(tick))}"
       y="${base + 16}" text-anchor="middle">${escapeHTML(fmt(tick))}</text>`).join("");
   return `${legendMarkup(term)}<svg class="cv-chart-svg" viewBox="0 0 ${width} ${height}" role="img"
-      aria-label="${escapeHTML(`${term.name} relativities by fold`)}">
+      aria-label="${escapeHTML(`${termLabel(term)} relativities by fold`)}">
     ${frameMarkup(term, y, ticks)}<path class="exposure-density" d="${exposure}Z"></path>
     <path class="cv-envelope" d="${band}"></path>${lines}
     <path class="cv-fit-line" d="${line(term.fit)}"></path>
@@ -752,7 +883,7 @@ function currentTerm(terms, name) {
 }
 
 /**
- * The searchable term list ranked by spread, and the chosen term's chart.
+ * The searchable term list ranked by fold gap, and the chosen term's chart.
  * @param {CVReportPayload} payload @param {CVTabState} state
  */
 export function relativitiesMarkup(payload, state) {
@@ -776,9 +907,9 @@ export function relativitiesMarkup(payload, state) {
       <div class="cv-term-panel">
         <input id="cvTermSearch" class="cv-search" type="search" placeholder="Search terms"
           aria-label="Search terms" value="${escapeHTML(state.query)}">
-        <div class="cv-term-head" aria-hidden="true"><span>Least stable first</span><span>spread</span><span>min r</span></div>
+        <div class="cv-term-head" aria-hidden="true"><span>Least stable first</span><span>fold gap</span><span>min r</span></div>
         <div class="cv-term-list" data-cv-term-list>${termListMarkup(shown, current?.name ?? "", state.query)}</div>
-        <p class="cv-hint">spread: mean distance of a fold's curve from the fold average. min r: lowest fold correlation with it, -- when a fold's curve is flat.</p>
+        <p class="cv-hint">fold gap: mean distance of a fold's curve from the fold average. min r: lowest fold correlation with it, -- when a fold's curve is flat.</p>
       </div>
       <div class="cv-chart" data-cv-chart>${current ? chartMarkup(current) : ""}</div>
     </div></section>`;
@@ -789,7 +920,8 @@ export function relativitiesMarkup(payload, state) {
  * @param {CVReportPayload} payload @param {CVTabState} state
  */
 export function cvTabMarkup(payload, state) {
-  return toolbarMarkup(payload, state) + performanceMarkup(payload) + foldTableMarkup(payload)
+  const job = state.jobs.cv;
+  return toolbarMarkup(payload, state) + performanceMarkup(payload, job) + foldTableMarkup(payload, job)
     + relativitiesMarkup(payload, state);
 }
 
@@ -803,7 +935,7 @@ export function cvTabMarkup(payload, state) {
  * @param {HTMLElement} options.frame
  * @param {JobClient} options.client
  * @param {(kind:JobKind, job:JobStatus)=>unknown} options.onJobSettled
- * @param {(kind:JobKind, message:string)=>unknown} [options.onError] a start, status or cancel request that failed
+ * @param {()=>unknown} [options.onJobChange] any job's status changed
  * @param {(ms:number)=>Promise<void>} [options.pause]
  * @param {()=>boolean} [options.isShown]
  */
@@ -811,7 +943,7 @@ export function createCVTab({
   frame,
   client,
   onJobSettled,
-  onError = () => {},
+  onJobChange = () => {},
   pause = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
   isShown = () => true
 }) {
@@ -831,6 +963,7 @@ export function createCVTab({
       ? search.selectionStart
       : null;
     frame.innerHTML = cvTabMarkup(payload, state);
+    toolbarDrawn = toolbarMarkup(payload, state);
     const next = frame.querySelector("#cvTermSearch");
     if (caret !== null && next instanceof HTMLInputElement) {
       next.focus();
@@ -838,11 +971,32 @@ export function createCVTab({
     }
   }
 
+  let toolbarDrawn = "";
   function renderToolbar() {
     if (!payload || !isShown()) return;
     const toolbar = frame.querySelector("[data-cv-toolbar]");
     if (!toolbar) return renderAll();
-    toolbar.outerHTML = toolbarMarkup(payload, state);
+    // A poll usually changes nothing here, and a replaced button loses its hover.
+    const next = toolbarMarkup(payload, state);
+    if (next === toolbarDrawn && toolbar.isConnected) return;
+    toolbarDrawn = next;
+    toolbar.outerHTML = next;
+  }
+
+  // The cards and the fold table, as a running Run CV moves on: once a second at most,
+  // or when a fold finishes.
+  let liveDrawn = "";
+  function renderLive() {
+    const job = state.jobs.cv;
+    if (!payload || !isShown() || job?.status !== "running") return;
+    const key = `${job.job_id}|${foldProgress(job).done.length}|${Math.floor(job.elapsed_s ?? 0)}`;
+    if (key === liveDrawn) return;
+    liveDrawn = key;
+    const performance = frame.querySelector("[data-cv-performance]");
+    const folds = frame.querySelector("[data-cv-folds]");
+    if (!performance || !folds) return renderAll();
+    performance.outerHTML = performanceMarkup(payload, job);
+    folds.outerHTML = foldTableMarkup(payload, job);
   }
 
   function renderTerms() {
@@ -859,7 +1013,6 @@ export function createCVTab({
   function refuse(kind, error) {
     state.errors[kind] = error instanceof Error ? error.message : String(error);
     renderToolbar();
-    onError(kind, state.errors[kind]);
   }
 
   /** @param {JobKind} kind @param {string} jobId */
@@ -873,6 +1026,8 @@ export function createCVTab({
         state.jobs[kind] = newerJob(state.jobs[kind], /** @type {JobStatus} */ (await client.jobStatus(jobId)));
         job = state.jobs[kind];
         renderToolbar();
+        renderLive();
+        onJobChange();
       }
       if (job?.job_id === jobId) await onJobSettled(kind, job);
     } catch (error) {
@@ -903,6 +1058,7 @@ export function createCVTab({
     }
     state.jobs[kind] = job;
     renderToolbar();
+    onJobChange();
     try {
       await poll(kind, job.job_id);
     } catch (error) {
@@ -918,6 +1074,7 @@ export function createCVTab({
       await client.jobCancel(job.job_id);
       state.jobs[kind] = { ...job, cancel_requested: true };
       renderToolbar();
+      onJobChange();
     } catch (error) {
       refuse(kind, error);
     }
@@ -997,7 +1154,15 @@ export function createCVTab({
         if (job?.status === "running") void poll(kind, job.job_id);
       }
       renderAll();
+      onJobChange();
     },
+    /** Follow a job already running, as when the page loads partway through. @param {JobStatus} job */
+    watch(job) {
+      state.jobs[job.kind] = newerJob(state.jobs[job.kind], job);
+      if (state.jobs[job.kind]?.status === "running") void poll(job.kind, job.job_id);
+      onJobChange();
+    },
+    jobs: () => state.jobs,
     start,
     cancel,
     destroy() {

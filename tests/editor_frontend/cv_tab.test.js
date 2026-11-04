@@ -10,6 +10,10 @@ import {
   cvTabMarkup,
   exposureProfile,
   filterTerms,
+  foldProgress,
+  foldTableMarkup,
+  liveRun,
+  performanceMarkup,
   foldEnvelope,
   highlightFold,
   jobLine,
@@ -45,7 +49,7 @@ const brand = Object.freeze({
   ],
   fit: [1.15, 0.85, 1.02],
   edited: null,
-  spread: 0.05,
+  fold_gap: 0.05,
   min_correlation: 0.9
 });
 
@@ -61,7 +65,7 @@ const age = Object.freeze({
   ],
   fit: [1.45, 1.02, 0.89, 1.05],
   edited: [1.3, 1.02, 0.89, 1.05],
-  spread: 0.01,
+  fold_gap: 0.01,
   min_correlation: 0.99
 });
 
@@ -76,8 +80,8 @@ function cvPayload(overrides = {}) {
     run_cv: { available: true, reason: null, note: null },
     final_fit: { available: true, reason: null, note: null, done: false, stale: false, n_rows: null },
     metrics: [
-      { name: "deviance", label: "Mean deviance", lower_is_better: true },
-      { name: "gini", label: "Gini", lower_is_better: false }
+      { name: "deviance", label: "Mean deviance", short: "Deviance", lower_is_better: true },
+      { name: "gini", label: "Gini", short: "Gini", lower_is_better: false }
     ],
     results: [{
       label: "As supplied",
@@ -212,7 +216,7 @@ test("far-off folds are pinned at the strip's ends, and the rest spread across i
     mean: { deviance: values.reduce((a, b) => a + b, 0) / values.length }, std: { deviance: 0 }, pooled: {}
   });
   const markup = cvTabMarkup(cvPayload({
-    metrics: [{ name: "deviance", label: "Mean deviance", lower_is_better: true }],
+    metrics: [{ name: "deviance", label: "Mean deviance", short: "Deviance", lower_is_better: true }],
     results: [result("As supplied", "supplied", supplied), result("Current model", "run", current)]
   }), idle());
   assert.match(markup, /lower is better · far-off folds at the strip's ends/);
@@ -223,7 +227,7 @@ test("far-off folds are pinned at the strip's ends, and the rest spread across i
   assert.match(markup, /Fold 3: [^<]*, off the strip<\/title>/);
   // A steady run's mean, a rounding above its folds, stays with them.
   const steady = cvTabMarkup(cvPayload({
-    metrics: [{ name: "deviance", label: "Mean deviance", lower_is_better: true }],
+    metrics: [{ name: "deviance", label: "Mean deviance", short: "Deviance", lower_is_better: true }],
     results: [result("As supplied", "supplied", [0.08, 0.09, 3.0e10]), result("Current model", "run", [0.1, 0.1, 0.1])]
   }), idle());
   const runRow = steady.slice(steady.indexOf('data-origin="run"'));
@@ -231,7 +235,7 @@ test("far-off folds are pinned at the strip's ends, and the rest spread across i
   assert.doesNotMatch(runRow, /class="cv-mean is-off"/);
   // Two far-off folds at one end share one ring that names both.
   const twice = cvTabMarkup(cvPayload({
-    metrics: [{ name: "deviance", label: "Mean deviance", lower_is_better: true }],
+    metrics: [{ name: "deviance", label: "Mean deviance", short: "Deviance", lower_is_better: true }],
     results: [result("As supplied", "supplied", [63.4, 3.0e10, 2.0e10, 62.8, 62.9]), result("Current model", "run", current)]
   }), idle());
   const rings = [...twice.matchAll(/class="cv-card-dot is-off"[^>]*><title>([^<]*)<\/title>/g)];
@@ -602,12 +606,12 @@ test("a fold's colour follows its number in the cards and the fold table", () =>
 });
 
 test("a term whose spread could not be measured reads as --", () => {
-  const markup = termListMarkup([{ ...brand, spread: null, min_correlation: null }], "VehBrand", "");
+  const markup = termListMarkup([{ ...brand, fold_gap: null, min_correlation: null }], "VehBrand", "");
   assert.equal(count(markup, /<span>--<\/span>/g), 2);
 });
 
 test("a hand-edited term held on every fold reads as held, and says why on hover", () => {
-  const held = { ...age, held: true, spread: null, min_correlation: null };
+  const held = { ...age, held: true, fold_gap: null, min_correlation: null };
   const [measured, edited] = termListMarkup([brand, held], "VehBrand", "").split("<button").slice(1);
   assert.match(measured, /<span>0\.050<\/span><span>0\.90<\/span>/);
   assert.match(edited, /<span class="cv-term-held" data-popover-title="Hand-edited"\s+data-popover-body="The same curve on every fold\.">held<\/span>/);
@@ -639,20 +643,181 @@ test("short level labels stay level, long ones turn", () => {
   assert.equal(count(levelChartMarkup(term(regions)), /rotate\(/g), 40);
 });
 
-test("a refused start is handed to onError with the kind and the server's words", async () => {
-  const errors = [];
+test("a score with a target says closer to 1 is better, and a term shows its label", () => {
+  const payload = cvPayload();
+  payload.metrics = [{ name: "gini", label: "Actual / expected", short: "A/E", lower_is_better: null }];
+  assert.match(performanceMarkup(payload), /closer to 1 is better/);
+  assert.match(foldTableMarkup(payload), /<th>A\/E<\/th>/);
+  const terms = [{ name: "mean:age", label: "age · Average", fold_gap: 0.1, min_correlation: 0.9 }];
+  assert.match(termListMarkup(terms, "mean:age", ""), /age · Average/);
+  assert.deepEqual(filterTerms(terms, "average"), terms);
+  assert.deepEqual(filterTerms(terms, "spread"), []);
+});
+
+test("terms of a parameter are listed under one heading, each by its short name", () => {
+  const term = (name, short, group, role) => ({
+    name, short, group, role, label: `${short} · ${group}`, fold_gap: 0.1, min_correlation: 0.9
+  });
+  const terms = [
+    term("mean:age", "age", "Average", "average"),
+    term("mean:area", "area", "Average", "average"),
+    term("scale:age", "age", "Spread", "spread")
+  ];
+  const html = termListMarkup(terms, "scale:age", "");
+  assert.deepEqual([...html.matchAll(/feature-group-title" data-role="(\w+)">(\w+)</g)].map((m) => [m[1], m[2]]),
+    [["average", "Average"], ["spread", "Spread"]]);
+  assert.ok(html.indexOf(">Average<") < html.indexOf('data-cv-term="mean:area"'));
+  assert.ok(html.indexOf('data-cv-term="mean:area"') < html.indexOf(">Spread<"));
+  assert.match(html, /cv-term-name" title="age · Spread">age</);
+  assert.match(html, /data-role="spread" aria-current="true"/);
+  // Searching a group's name keeps its terms; the others and their heading go.
+  const spread = termListMarkup(filterTerms(terms, "spread"), "", "spread");
+  assert.doesNotMatch(spread, />Average</);
+  assert.match(spread, />Spread</);
+});
+
+test("a term with no group has no heading", () => {
+  const html = termListMarkup([{ name: "age", fold_gap: 0.1, min_correlation: 0.9 }], "age", "");
+  assert.doesNotMatch(html, /feature-group-title/);
+  assert.match(html, /cv-term-name" title="age">age</);
+});
+
+test("a score in the hundreds drops to two decimals so its row stays on one line", () => {
+  const payload = cvPayload();
+  payload.results[0].mean.gini = 1007.6765;
+  payload.results[0].std.gini = 56.7853;
+  assert.match(foldTableMarkup(payload), /1007\.68 ± 56\.7853/);
+  payload.results[0].std.gini = 156.7853;
+  assert.match(foldTableMarkup(payload), /1007\.68 ± 156\.79/);
+});
+
+/** A Run CV partway through: fold 1 finished of 3, fold 2 fitting, 90 s in. */
+function runningJob() {
+  return {
+    job_id: "cv-1",
+    kind: "cv",
+    status: "running",
+    elapsed_s: 90.4,
+    result: null,
+    progress: [
+      { phase: "fold", fold: 1, n_folds: 3 },
+      {
+        phase: "fold_done",
+        fold: 1,
+        n_folds: 3,
+        n_train: 200,
+        n_test: 100,
+        fit_time_s: 60,
+        converged: true,
+        effective_df: 9.5,
+        n_reml_iter: 42,
+        scores: { deviance: 0.5, gini: 0.3 },
+      },
+      { phase: "fold", fold: 2, n_folds: 3 },
+    ],
+  };
+}
+
+test("a running Run CV is a result of the folds finished so far", () => {
+  const run = liveRun(cvPayload(), runningJob());
+  assert.equal(run.live, true);
+  assert.equal(run.n_folds, 3);
+  assert.deepEqual(run.folds.map((fold) => fold.fold), [0]);
+  assert.equal(run.mean.deviance, 0.5);
+  // One fold has no spread to show, and the pooled scores wait for the whole run.
+  assert.equal(run.std.deviance, undefined);
+  assert.deepEqual(run.pooled, {});
+  assert.equal(liveRun(cvPayload(), { ...runningJob(), status: "done" }), null);
+  assert.equal(liveRun(cvPayload(), null), null);
+  assert.equal(liveRun(cvPayload(), { ...runningJob(), progress: [] }), null);
+  assert.deepEqual(foldProgress(runningJob()).nFolds, 3);
+});
+
+test("the spread of the folds so far is the population sd, as the finished result gives", () => {
+  const job = runningJob();
+  job.progress.push({ ...job.progress[1], fold: 2, scores: { deviance: 0.7, gini: 0.3 } });
+  const run = liveRun(cvPayload(), job);
+  assert.ok(Math.abs(run.mean.deviance - 0.6) < 1e-12);
+  assert.ok(Math.abs(run.std.deviance - 0.1) < 1e-12);
+});
+
+test("the cards take the folds finished so far in place of the last run", () => {
+  const payload = cvPayload();
+  if (!payload.results.some((result) => result.origin === "run")) {
+    payload.results.push({ ...payload.results[0], origin: "run", label: "Current model" });
+  }
+  const html = performanceMarkup(payload, runningJob());
+  assert.match(html, /Current model, 1 of 3/);
+  assert.equal((html.match(/data-live/g) ?? []).length, payload.metrics.length);
+  assert.doesNotMatch(performanceMarkup(payload), /data-live/);
+  assert.equal(
+    (html.match(/data-origin="run"/g) ?? []).length,
+    payload.metrics.length,
+    "a live run replaces an earlier run rather than adding a third row",
+  );
+});
+
+test("the fold table has a row for every fold while the run goes, and no invented progress", () => {
+  const payload = cvPayload();
+  payload.results.forEach((result) => { result.held_out = true; });
+  const html = foldTableMarkup(payload, runningJob());
+  assert.equal((html.match(/data-stage="now"/g) ?? []).length, 2);
+  assert.match(html, /<tr data-stage="waiting">/);
+  assert.match(html, /Fold 3/);
+  // 90.4 s in, less the 60 s fold 1 took.
+  assert.match(html, /<td>30 s<\/td>/);
+  assert.match(html, /<th class="cv-held-col">Held out<\/th>/);
+  assert.match(html, /Rounds<\/th>/);
+  assert.doesNotMatch(html, /\d+%/);
+});
+
+test("each fold holds out its own piece, and the picture needs folds that split the rows", () => {
+  const payload = cvPayload();
+  payload.results.forEach((result) => { result.held_out = true; });
+  const html = foldTableMarkup(payload);
+  const rows = [...html.matchAll(/<span class="cv-held"[^>]*>(.*?)<\/span>/g)].map((match) =>
+    [...match[1].matchAll(/<i( class="is-out")?/g)].map((cell) => Boolean(cell[1])));
+  assert.ok(rows.length > 1);
+  rows.forEach((cells, fold) => {
+    assert.equal(cells.length, rows.length);
+    assert.deepEqual(cells.flatMap((out, index) => (out ? [index] : [])), [fold]);
+  });
+  payload.results.forEach((result) => { result.held_out = false; });
+  assert.doesNotMatch(foldTableMarkup(payload), /Held out/);
+});
+
+test("a job already running when the page loads is followed", async () => {
+  const seen = [];
+  let answered = 0;
   const tab = createCVTab({
     frame: fakeFrame(),
     client: {
-      async jobStart() {
-        throw new Error("Final fit needs train or validation rows.");
-      }
+      async jobStatus() {
+        answered += 1;
+        return { ...runningJob(), status: "done" };
+      },
     },
+    onJobSettled: (kind, job) => seen.push([kind, job.status]),
+    pause: async () => {},
+  });
+  tab.watch(runningJob());
+  assert.equal(tab.jobs().cv.status, "running");
+  await new Promise((resolve) => { setTimeout(resolve, 0); });
+  assert.equal(answered, 1);
+  assert.deepEqual(seen, [["cv", "done"]]);
+});
+
+test("a poll that changes nothing leaves the toolbar's buttons in place", async () => {
+  const frame = fakeFrame();
+  const tab = createCVTab({
+    frame,
+    client: { async jobStatus() { return { ...runningJob(), status: "done" }; } },
     onJobSettled: () => {},
-    onError: (kind, message) => errors.push([kind, message]),
-    pause: async () => {}
+    pause: async () => {},
   });
   tab.render(cvPayload());
-  await tab.start("final_fit");
-  assert.deepEqual(errors, [["final_fit", "Final fit needs train or validation rows."]]);
+  const drawn = frame.innerHTML;
+  assert.ok(drawn.length > 0);
+  tab.render(cvPayload());
+  assert.equal(frame.innerHTML, drawn);
 });

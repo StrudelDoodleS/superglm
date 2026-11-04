@@ -152,3 +152,94 @@ test("client job calls post to the job routes", async () => {
     { url: "/job_cancel", body: { job_id: "cv-1" } }
   ]);
 });
+
+const KNOWN_STATE = "X-SuperGLM-Editor-Known-State";
+
+/** @param {unknown[]} replies answered in order @returns the client and what it sent */
+function replyingClient(replies) {
+  /** @type {Array<{path:string, known:string|null}>} */
+  const sent = [];
+  const client = createEditorClient({
+    fetchImpl: async (url, options) => {
+      sent.push({ path: String(url), known: new Headers(options?.headers).get(KNOWN_STATE) });
+      return new Response(JSON.stringify(replies.shift()), { status: 200 });
+    }
+  });
+  return { client, sent };
+}
+
+/** @param {number} generation @param {Record<string, unknown>} terms @param {Record<string, string>} versions */
+function cutState(generation, terms, versions) {
+  return { state_generation: generation, selected_term: "a", terms, term_versions: versions };
+}
+
+test("a state reply that leaves a term out takes it from the client's copy, the same object", async () => {
+  const { client, sent } = replyingClient([
+    cutState(1, { a: { y: [1] }, b: { y: [2] } }, { a: "a1", b: "b1" }),
+    cutState(2, { b: { y: [3] } }, { a: "a1", b: "b2" })
+  ]);
+
+  const first = /** @type {any} */ (await client.getState());
+  const second = /** @type {any} */ (await client.getState());
+
+  assert.deepEqual(sent.map(({ known }) => known), ["none", "1"]);
+  assert.strictEqual(second.terms.a, first.terms.a);
+  assert.deepEqual(second.terms.b, { y: [3] });
+  assert.deepEqual(Object.keys(second.terms), ["a", "b"]);
+});
+
+test("a state inside a reply merges the same way and the rest of the reply is kept", async () => {
+  const { client } = replyingClient([
+    cutState(1, { a: { y: [1] }, b: { y: [2] } }, { a: "a1", b: "b1" }),
+    { ok: true, summary: "kept", state: cutState(2, {}, { a: "a1", b: "b1" }) }
+  ]);
+
+  const first = /** @type {any} */ (await client.getState());
+  const reply = /** @type {any} */ (await client.postJSON("/note", {}));
+
+  assert.equal(reply.summary, "kept");
+  assert.strictEqual(reply.state.terms.b, first.terms.b);
+});
+
+test("a term the copy holds at another version asks for every term", async () => {
+  const { client, sent } = replyingClient([
+    cutState(1, { a: { y: [1] }, b: { y: [2] } }, { a: "a1", b: "b1" }),
+    cutState(3, {}, { a: "a2", b: "b1" }),
+    cutState(4, { a: { y: [9] }, b: { y: [2] } }, { a: "a2", b: "b1" })
+  ]);
+
+  await client.getState();
+  const healed = /** @type {any} */ (await client.postJSON("/op", {}));
+
+  assert.deepEqual(sent, [
+    { path: "/state", known: "none" },
+    { path: "/op", known: "1" },
+    { path: "/state", known: "none" }
+  ]);
+  assert.equal(healed.state_generation, 4);
+  assert.deepEqual(healed.terms.a, { y: [9] });
+});
+
+test("an older reply arriving late does not move the copy back", async () => {
+  const { client, sent } = replyingClient([
+    cutState(5, { a: { y: [5] } }, { a: "a5" }),
+    cutState(4, { a: { y: [4] } }, { a: "a4" }),
+    cutState(6, {}, { a: "a5" })
+  ]);
+
+  await client.getState();
+  const late = /** @type {any} */ (await client.getState());
+  const next = /** @type {any} */ (await client.getState());
+
+  assert.deepEqual(late.terms.a, { y: [4] });
+  assert.deepEqual(sent.map(({ known }) => known), ["none", "5", "5"]);
+  assert.deepEqual(next.terms.a, { y: [5] });
+});
+
+test("a reply that names no versions passes through unchanged", async () => {
+  const plain = { state_generation: 1, terms: { a: { y: [1] } } };
+  const { client } = replyingClient([plain, { ok: true }]);
+
+  assert.deepEqual(await client.getState(), plain);
+  assert.deepEqual(await client.postJSON("/select", {}), { ok: true });
+});

@@ -21,7 +21,7 @@
 .feature-search {
   flex: 1 1 auto;
   min-width: 0;
-  height: 26px;
+  height: var(--control-height);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 0 8px;
@@ -37,7 +37,7 @@
   flex: 0 0 auto;
   display: grid;
   width: 22px;
-  height: 26px;
+  height: var(--control-height);
   place-items: center;
   padding: 0;
   border: 0;
@@ -59,7 +59,7 @@
 
 .feature-group-title {
   margin: 8px 6px 2px;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   font-weight: 600;
   color: var(--muted);
 }
@@ -116,7 +116,7 @@
 .feature-row-kind,
 .feature-row-edf {
   overflow: hidden;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--muted);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -169,12 +169,17 @@
   fill: var(--param-spread);
 }
 
+/* The reference level sets the zero, so it is not in its parameter's colour. */
+.feature-group .mini-curve rect.mini-reference {
+  fill: var(--text);
+}
+
 /* The parameter chip before a history row's term name. */
 .parameter-chip {
   display: inline-block;
   padding: 0 6px;
-  border-radius: 999px;
-  font-size: 10.5px;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-xs);
   font-weight: 600;
   line-height: 16px;
 }
@@ -187,43 +192,6 @@
 .parameter-chip[data-role="spread"] {
   background: var(--orange-soft);
   color: var(--orange-text);
-}
-
-/* The Final fit panel's own button, where there is no Cross-validation tab. */
-.final-fit-run {
-  display: inline-flex;
-  align-items: center;
-  height: 32px;
-  padding: 0 12px;
-  border: 1px solid var(--blue);
-  border-radius: var(--radius-md);
-  background: var(--blue);
-  color: var(--surface);
-  font-weight: 600;
-}
-
-.final-fit-run[hidden] {
-  display: none;
-}
-
-.final-fit-run-group {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 6px;
-  max-width: 420px;
-}
-
-.final-fit-run-note {
-  text-align: right;
-}
-
-.final-fit-run-note[hidden] {
-  display: none;
-}
-
-.final-fit-run:disabled {
-  opacity: 0.6;
 }
 
 /* A term with a change waiting for Refit carries an amber dot right after its name. */
@@ -331,7 +299,7 @@
 
 .help-section h3 {
   margin: 12px 0 4px;
-  font-size: 13px;
+  font-size: var(--font-size-md);
   font-weight: 600;
 }
 
@@ -374,7 +342,7 @@
 .settings-heading {
   margin: 6px 2px 0;
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: var(--font-size-sm);
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -385,7 +353,7 @@
   align-items: flex-start;
   gap: 12px;
   padding: 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--surface);
 }
 
@@ -397,13 +365,13 @@
 }
 
 .setting-title {
-  font-size: 13px;
+  font-size: var(--font-size-md);
   font-weight: 600;
 }
 
 .setting-hint {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
 }
 
 .setting-switch,
@@ -415,7 +383,7 @@
   height: 20px;
   padding: 0;
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--radius-pill);
   background: var(--border-strong);
 }
 
@@ -454,7 +422,7 @@
 .settings-timing {
   margin-top: 2px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   line-height: 1.45;
 }
 
@@ -468,7 +436,7 @@
 
 .evidence-freshness {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   line-height: 1.35;
 }
 
@@ -487,9 +455,9 @@
 
 .evidence-retry {
   flex: 0 0 auto;
-  height: 24px;
+  height: var(--control-height-sm);
   padding: 0 8px;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
 }
 
 .status-bar .evidence-status-row {

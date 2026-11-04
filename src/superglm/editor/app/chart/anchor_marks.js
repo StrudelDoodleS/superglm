@@ -165,6 +165,24 @@ export function createAnchorMarks(svg, pointLayer) {
 }
 
 /**
+ * The marks as they stand in `svg`, once a scene they were drawn in is patched into it.
+ * @param {Element} svg
+ */
+export function anchorMarksIn(svg) {
+  /** @param {"anchor"|"end"} role @returns {MarkNodes} */
+  const nodes = (role) => {
+    const tag = /** @type {SVGElement} */ (svg.querySelector(`.anchor-tag[data-role="${role}"]`));
+    return {
+      ring: /** @type {SVGElement} */ (svg.querySelector(`.anchor-ring[data-role="${role}"]`)),
+      tag,
+      box: /** @type {SVGElement} */ (tag.querySelector(".anchor-tag-box")),
+      label: /** @type {SVGElement} */ (tag.querySelector(".anchor-tag-label"))
+    };
+  };
+  return { anchor: nodes("anchor"), end: nodes("end") };
+}
+
+/**
  * Move each mark's ring and tag to its point, or hide them: a mark with no
  * point, or with its point zoomed out of view, shows nothing. A tag stays
  * inside the plot, and goes above its point where it would leave the plot's

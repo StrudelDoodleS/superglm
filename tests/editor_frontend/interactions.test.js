@@ -39,8 +39,8 @@ function selectionHarness({ displayIsCollapsed, displayToSourceIndices = undefin
     mode: () => "select",
     selectedTerm: () => "feature",
     actions: {
-      async executeSelectionMutation(payload) {
-        mutations.push(payload);
+      setSelection(term, indices) {
+        mutations.push({ term, indices });
       },
     },
   };
@@ -71,6 +71,7 @@ function moveHarness({ mutationResult, levelGroups = [], mode = "move" }) {
   const listeners = new Map();
   const previews = [];
   const mutations = [];
+  const frames = [];
   let clears = 0;
   const svg = {
     _scale: {
@@ -104,6 +105,7 @@ function moveHarness({ mutationResult, levelGroups = [], mode = "move" }) {
       previews.push({ preview, selection });
     },
     clearPreviewTerm() { clears += 1; },
+    onDragFrame(term, preview) { frames.push({ term, preview }); },
     actions: {
       async executeStateMutation(descriptor) {
         mutations.push(descriptor);
@@ -118,6 +120,7 @@ function moveHarness({ mutationResult, levelGroups = [], mode = "move" }) {
     term,
     previews,
     mutations,
+    frames,
     get clears() { return clears; },
     async drag(displayIndex, clientY = 40) {
       const event = {
@@ -177,6 +180,18 @@ test("a skipped handle drag clears its private curve preview", async () => {
 
   assert.equal(harness.previews.length > 0, true);
   assert.equal(harness.clears, 1);
+});
+
+test("every drag frame reports the dragged term and its preview", async () => {
+  for (const mode of ["move", "handles"]) {
+    const harness = moveHarness({ mutationResult: { ok: true, snapshot: {} }, mode });
+
+    await harness.drag(0);
+
+    assert.equal(harness.frames.length, 1, mode);
+    assert.equal(harness.frames[0].term, "feature", mode);
+    assert.equal(harness.frames[0].preview, harness.previews.at(-1).preview, mode);
+  }
 });
 
 test("expanded structural groups move together without widening individual selection", async () => {
@@ -248,10 +263,9 @@ function gestureHarness({
     setPreviewTerm() {},
     clearPreviewTerm() {},
     actions: {
-      async executeSelectionMutation(payload) {
-        mutations.push(payload);
-        state.selection = new Set(payload.indices);
-        return { ok: true };
+      setSelection(term, indices) {
+        mutations.push({ term, indices });
+        state.selection = new Set(indices);
       },
     },
   };

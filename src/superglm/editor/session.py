@@ -63,8 +63,8 @@ from superglm.editor.lss.terms import lss_editable_terms
 from superglm.editor.lss.view import LSSModelView, is_lss
 from superglm.editor.operations import (
     anchored_smooth_values,
-    isotonic_values,
     monotone_clamp_values,
+    running_extreme_values,
 )
 from superglm.editor.refit import EXPLICIT_PENALTY_ATTRIBUTE, fit_refit_model
 from superglm.editor.shapes import shape_support
@@ -649,14 +649,15 @@ class EditorSession:
         return self
 
     # Smoothing anchors selected runs to adjacent unselected values so it does
-    # not create jumps at selection edges; isotonic regression does not.
+    # not create jumps at selection edges; a monotone edit does not.
     def isotonic(self, term: str, direction: str = "increasing") -> EditorSession:
-        """Apply exposure-weighted isotonic regression to selected values.
+        """Make selected values monotone by holding the highest value so far, or the lowest.
 
-        Each contiguous run becomes the closest monotone sequence to itself,
-        not tied to its unselected neighbours, so the edit can step at a
-        selection edge. A categorical term clamps instead. If no points are
-        selected, the operation applies to the whole term.
+        Each contiguous run holds its running extreme until the curve passes it
+        (``running_extreme_values``), not tied to its unselected neighbours, so
+        the edit can step at a selection edge. A categorical term also clamps to
+        the level before the run. If no points are selected, the operation
+        applies to the whole term.
         """
         if direction not in ("increasing", "decreasing"):
             raise EditorValueError(
@@ -668,12 +669,7 @@ class EditorSession:
         if editable.levels is not None:
             after = monotone_clamp_values(editable.edited_log_effect, idx, direction)
         else:
-            after = isotonic_values(
-                editable.edited_log_effect,
-                idx,
-                None if editable.weights is None else editable.weights,
-                direction,
-            )
+            after = running_extreme_values(editable.edited_log_effect, idx, direction)
         self._commit(term, "isotonic", idx, before, after, {"direction": direction})
         return self
 

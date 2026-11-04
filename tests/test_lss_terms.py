@@ -27,6 +27,7 @@ from superglm.distributional.terms import (
 from superglm.features.factor_smooth import FactorSmooth
 from superglm.features.interaction import TensorInteraction
 from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.random_effect import RandomEffect
 from tests.bound_predictor_fixtures import model_from_templates
 
 SUMMARY_COLUMNS = (
@@ -311,6 +312,52 @@ def test_effect_serialises_to_plain_json(fit_case) -> None:
         assert isinstance(value, list | float | int | str | type(None))
 
 
+@pytest.mark.parametrize("basis", [None, Spline("cr", k=3)], ids=["levels", "spline"])
+def test_ordered_effect_is_a_contrast_with_its_reference_level(basis) -> None:
+    rng = np.random.default_rng(20261104)
+    order = ["low", "mid", "high", "top"]
+    band = rng.choice(order, 600, p=[0.4, 0.3, 0.2, 0.1])
+    frame = pd.DataFrame({"band": band})
+    position = frame["band"].map({level: index for index, level in enumerate(order)}).to_numpy()
+    y = 0.4 * position + rng.normal(0.0, 0.2, band.size)
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=[
+            Predictor("location", {"band": OrderedCategorical(order=order, basis=basis)}),
+            Predictor("scale", {}),
+        ],
+    ).fit_reml(frame, y)
+    fitted = model._require_fitted()
+    spec = fitted.compiled_predictors[0].compiled.specs["band"]
+
+    effect = term_effect(fitted, frame, "location", "band")
+
+    base = effect.levels.index(spec._base_level)
+    assert effect.effect[base] == 0.0
+    assert effect.se[base] == 0.0
+    # Against the fit's own predictor at each level, which holds the term's centring.
+    eta = model.predict_link(pd.DataFrame({"band": list(effect.levels)}))["location"].to_numpy()
+    tolerance = 64 * np.finfo(np.float64).eps * max(1.0, float(np.max(np.abs(eta))))
+    np.testing.assert_allclose(effect.effect, eta - eta[base], rtol=0.0, atol=tolerance)
+
+
+def test_a_random_effect_has_no_reference_level_even_with_an_empty_label() -> None:
+    rng = np.random.default_rng(42)
+    groups = np.repeat(["", "a", "b"], 80)
+    means = pd.Series(groups).map({"": 2.0, "a": 0.0, "b": -2.0}).to_numpy()
+    frame = pd.DataFrame({"group": groups})
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=[Predictor("location", {"group": RandomEffect()}), Predictor("scale", {})],
+    ).fit_reml(frame, means + rng.normal(0.0, 0.5, groups.size))
+
+    effect = term_effect(model._require_fitted(), frame, "location", "group")
+
+    empty = list(effect.levels).index("")
+    assert effect.effect[empty] > 1.0
+    assert effect.se[empty] > 0.0
+
+
 def test_categorical_effect_serialises_its_levels(fit_case) -> None:
     fitted, frame = fit_case
     payload = term_effect(fitted, frame, "location", "g", simultaneous=False).to_json()
@@ -578,12 +625,21 @@ def test_special_levels_carry_their_own_effect_and_error(specials_case) -> None:
     assert effect.levels == (*_SPECIAL_LEVELS, "MISSING")
     assert effect.special == (False, False, False, False, False, True)
 
+    # Its own coefficient, read against the reference level as every other level is.
+    smooth_slice = fitted.layout.term_slices["location:band"]
     special_slice = fitted.layout.term_slices["location:band:special"]
-    coefficient = float(np.asarray(fitted.coefficients)[special_slice][0])
+    beta = np.asarray(fitted.coefficients)
+    coefficient = float(beta[special_slice][0])
     assert abs(coefficient) > 0.1
-    assert float(effect.effect[-1]) == pytest.approx(coefficient)
+    base = fitted.compiled_predictors[0].compiled.specs["band"]._base_level
+    _, state, _ = terms_module._resolve_term(fitted, "location", "band")
+    rows = frame.iloc[[0, 0]].assign(band=[base, "MISSING"]).reset_index(drop=True)
+    design = terms_module._term_design(fitted, rows, state, smooth_slice, special_slice)
+    contrast = float((design[1] - design[0]) @ np.r_[beta[smooth_slice], beta[special_slice]])
+    assert float(design[1][-1]) == 1.0
+    assert float(effect.effect[-1]) == pytest.approx(contrast)
     assert float(effect.se[-1]) > 0.0
-    assert float(effect.lower[-1]) < coefficient < float(effect.upper[-1])
+    assert float(effect.lower[-1]) < contrast < float(effect.upper[-1])
     assert np.all(effect.se[:-1] >= 0.0)
 
     assert effect.edf == pytest.approx(

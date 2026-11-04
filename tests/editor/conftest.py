@@ -129,10 +129,11 @@ def _open_session_page(
         arg=first_term,
     )
     if selected_term != first_term:
+        # Tests go on to read and change the session, so Python has to have the term.
         with page.expect_response(
             lambda response: (
                 response.request.method == "POST"
-                and response.url.split("?", maxsplit=1)[0].endswith("/term")
+                and response.url.split("?", maxsplit=1)[0].endswith("/select")
             )
         ):
             choose_feature(page, selected_term)
@@ -212,11 +213,12 @@ def open_lss_editor_page(chromium_browser, lss_browser_case):
         viewport: dict[str, int] | None = None,
         selected_term: str = "mean:age",
         prepare: Callable[[object], None] | None = None,
+        cv=None,
     ) -> Iterator[tuple[object, EditorSession]]:
         resources = ExitStack()
         opened.append(resources)
         try:
-            session = open_case(lss_browser_case)
+            session = open_case(lss_browser_case, cv=cv)
             page = _open_session_page(
                 resources,
                 chromium_browser,

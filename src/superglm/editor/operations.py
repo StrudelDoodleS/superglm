@@ -6,25 +6,17 @@ import numpy as np
 from numpy.typing import NDArray
 
 
-def isotonic_values(
-    y_all: NDArray,
-    idx: NDArray[np.intp],
-    weights_all: NDArray | None,
-    direction: str,
-) -> NDArray:
-    """Exposure-weighted isotonic regression of each contiguous run of ``idx``.
+def running_extreme_values(y_all: NDArray, idx: NDArray[np.intp], direction: str) -> NDArray:
+    """Hold each contiguous run of ``idx`` at its highest value so far, or lowest when decreasing.
 
-    The closest monotone sequence to the run in weighted least squares
-    (Barlow et al. 1972), as GAM Changer does. The run is not tied to its
-    unselected neighbours: where the curve turns just outside the selection,
-    the edit can leave a step at the edge rather than lift or press the
-    whole stretch to the neighbour's level.
+    Increasing, this is the smallest non-decreasing curve on or above the run: a non-decreasing
+    ``g >= y`` has ``g[i] >= g[j] >= y[j]`` for every ``j <= i``. Decreasing, it is the largest
+    non-increasing curve on or below it. A point already in order stays exactly where it is, and
+    a run starts from its own first value, so it is not moved to an unselected neighbour's level
+    and can leave a step at an edge.
     """
-    weights = None if weights_all is None else np.asarray(weights_all, dtype=np.float64)
-    return _apply_runs(
-        idx,
-        lambda run: _isotonic_run(y_all[run], None if weights is None else weights[run], direction),
-    )
+    accumulate = np.maximum.accumulate if direction == "increasing" else np.minimum.accumulate
+    return _apply_runs(idx, lambda run: accumulate(y_all[run]))
 
 
 def anchored_smooth_values(
@@ -54,15 +46,6 @@ def _apply_runs(idx: NDArray[np.intp], transform) -> NDArray:
         after[offset : offset + run.size] = values
         offset += run.size
     return after
-
-
-def _isotonic_values(y: NDArray, weights: NDArray | None, direction: str) -> NDArray:
-    from sklearn.isotonic import IsotonicRegression
-
-    increasing = direction == "increasing"
-    x = np.arange(len(y), dtype=np.float64)
-    ir = IsotonicRegression(increasing=increasing, out_of_bounds="clip")
-    return np.asarray(ir.fit_transform(x, y, sample_weight=weights), dtype=np.float64)
 
 
 def _monotone_clamp_run(y_all: NDArray, run: NDArray[np.intp], direction: str) -> NDArray:
@@ -157,13 +140,6 @@ def _taper_smooth_edges(
 def _clamp_boundary_jump(value: float, original: float, anchor: float) -> float:
     max_jump = abs(original - anchor)
     return float(np.clip(value, anchor - max_jump, anchor + max_jump))
-
-
-def _isotonic_run(y: NDArray, weights: NDArray | None, direction: str) -> NDArray:
-    """One run's fit; a run with no positive exposure is weighted equally."""
-    if weights is not None and not np.any(weights > 0):
-        weights = None
-    return _isotonic_values(np.asarray(y, dtype=np.float64), weights, direction)
 
 
 def _contiguous_runs(idx: NDArray[np.intp]) -> list[NDArray[np.intp]]:

@@ -97,3 +97,23 @@ test("a SuperGLM metric the report has no value for shows a dash and no change",
   assert.match(deviance, /^\s*--\s*<span class="report-delta" data-direction="neutral">Δ --<\/span>/);
   assert.doesNotMatch(html, /NaN|null|undefined/);
 });
+
+test("a Final fit lists its scores on the held-out test split, skipping one the model cannot compute", () => {
+  const html = render({
+    report: "final",
+    available: true,
+    metric_labels: LSS_REPORT.metric_labels,
+    splits: LSS_REPORT.splits,
+    final_fit: {
+      available: true, stale: false, n_rows: 900, splits: ["train", "validation"], carried: [],
+      test_scores: { log_score: 0.205, crps: null, actual_expected: 0.981 },
+    },
+  });
+  assert.match(html, /<th>Test Log score<\/th><td>0\.205<\/td>/);
+  assert.match(html, /<th>Test Actual \/ expected<\/th><td>0\.981<\/td>/);
+  assert.doesNotMatch(html, /Test CRPS|null|NaN/);
+});
+
+test("a validation report with no supplied CV report has no empty section for one", () => {
+  assert.doesNotMatch(render(LSS_REPORT), /CV Report|No CV report/);
+});

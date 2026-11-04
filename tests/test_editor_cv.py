@@ -535,7 +535,7 @@ def test_cv_report_shows_a_supplied_result_least_stable_first(cv_frame, cv_fit):
     assert relativities["origin"] == "supplied"
     # A linear term is one slope, so it has no curve to compare.
     assert {item["name"] for item in relativities["terms"]} == {"age", "region"}
-    spreads = [item["spread"] for item in relativities["terms"]]
+    spreads = [item["fold_gap"] for item in relativities["terms"]]
     assert spreads == sorted(spreads, reverse=True)
     region = next(item for item in relativities["terms"] if item["name"] == "region")
     assert list(pd.unique(X["region"])) != ["A", "B", "C"]
@@ -549,7 +549,9 @@ def test_cv_report_shows_a_supplied_result_least_stable_first(cv_frame, cv_fit):
         # (2u|c|) and this mean (gamma_6): about 21u|c| + 2u <= 23u max(1, |c|).
         tol = 64 * _U * max(1.0, np.max(np.abs(log_values)))
         assert abs(np.average(log_values, weights=weights)) <= tol
-    assert region["spread"] == _summarize_against_fold_mean(curves, weights)["rmse_to_mean"].mean()
+    assert (
+        region["fold_gap"] == _summarize_against_fold_mean(curves, weights)["rmse_to_mean"].mean()
+    )
 
 
 @pytest.mark.parametrize("unseen", ["error", "base"])
@@ -727,8 +729,10 @@ def test_cv_report_gives_a_fold_that_never_saw_a_level_a_gap_there(rare_level, h
         # As in the supplied-result test: about 21u|c| + 2u <= 23u max(1, |c|).
         assert abs(centre) <= 64 * _U * max(1.0, np.max(np.abs(log_values[shared])))
     # The spread is the summary of the curves as reported, so it is equal bit for bit.
-    assert np.isfinite(region["spread"])
-    assert region["spread"] == _summarize_against_fold_mean(curves, weights)["rmse_to_mean"].mean()
+    assert np.isfinite(region["fold_gap"])
+    assert (
+        region["fold_gap"] == _summarize_against_fold_mean(curves, weights)["rmse_to_mean"].mean()
+    )
 
 
 @pytest.mark.filterwarnings(_EXPECTED_PIN)
@@ -1032,10 +1036,10 @@ def test_run_cv_job_puts_the_hand_edits_back_on_every_fold(cv_frame, cv_fit, fit
     for fold in region["folds"]:
         np.testing.assert_allclose(fold["values"], region["edited"], rtol=64 * _U)
     # Its spread measures nothing, so region reads as held, after the measured terms.
-    assert (region["held"], region["spread"], region["min_correlation"]) == (True, None, None)
+    assert (region["held"], region["fold_gap"], region["min_correlation"]) == (True, None, None)
     age, held = report["relativities"]["terms"]
     assert (age["name"], age["held"], held["name"]) == ("age", False, "region")
-    assert age["spread"] > 0.0
+    assert age["fold_gap"] > 0.0
 
 
 def test_least_stable_first_puts_a_term_without_a_spread_after_the_measured_ones():
@@ -1048,10 +1052,10 @@ def test_least_stable_first_puts_a_term_without_a_spread_after_the_measured_ones
     from superglm.editor.cv import _least_stable_first
 
     items = [
-        {"name": "stable", "held": False, "spread": 0.0},
-        {"name": "block", "held": False, "spread": float("nan")},
-        {"name": "wavy", "held": False, "spread": 0.31604010556933493},
-        {"name": "dropped", "held": True, "spread": float("nan")},
+        {"name": "stable", "role": None, "held": False, "fold_gap": 0.0},
+        {"name": "block", "role": None, "held": False, "fold_gap": float("nan")},
+        {"name": "wavy", "role": None, "held": False, "fold_gap": 0.31604010556933493},
+        {"name": "dropped", "role": None, "held": True, "fold_gap": float("nan")},
     ]
 
     ordered = [item["name"] for item in sorted(items, key=_least_stable_first)]
@@ -1074,7 +1078,7 @@ def test_min_r_is_unavailable_when_a_fold_curve_is_flat(cv_fit):
 
     [age] = fold_term_items({"age": term}, fold_curves)
 
-    assert age["spread"] > 0.0
+    assert age["fold_gap"] > 0.0
     assert np.isnan(age["min_correlation"])
 
 
@@ -1179,7 +1183,8 @@ def test_run_cv_cancelled_mid_run_publishes_nothing(cv_frame, cv_fit, fit_rows, 
         widget.close()
 
     assert finished["status"] == "cancelled"
-    assert [entry["fold"] for entry in finished["progress"]] == [1, 2]
+    starts = [entry["fold"] for entry in finished["progress"] if entry["phase"] == "fold"]
+    assert starts == [1, 2]
     assert len(fit_rows) == 1
     assert [result["origin"] for result in report["results"]] == ["supplied"]
     assert report["relativities"]["origin"] == "supplied"

@@ -2,6 +2,7 @@ import { canShowContributions, showsRelativity } from "./chart/display.js";
 import { EditorAPIError, editorClient } from "./api/client.js";
 import {
   bindPointLens,
+  bindPointTooltip,
   drawChart,
   groupedTerms,
   selectionSpanRange,
@@ -21,6 +22,7 @@ import { createEditorActions } from "./state/actions.js";
 import {
   selectActiveTermName,
   selectCurrentSelection,
+  selectCurrentTerm,
   selectEvidenceNeedsRefresh,
   selectGroupDisplayMode,
   selectModelRevision,
@@ -61,6 +63,7 @@ import {
 import { freeLevelsShown, specialActions } from "./specials.js";
 import { unsmoothedEntry, unsmoothedToggle, withUnsmoothed } from "./unsmoothed.js";
 import { CLICK_SLOP, bindInteractions } from "./interactions.js";
+import { previewEta } from "./distribution/preview.js";
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
 import {
   placeTermViewToggle,
@@ -76,7 +79,6 @@ import {
   storeFeatureListOpen
 } from "./views/feature_list.js";
 import { hasParameters, parameterGroups } from "./views/feature_groups.js";
-import { finalFitFailure, finalFitRunState } from "./views/final_fit_run.js";
 import { renderHelpDrawer } from "./views/help_drawer.js";
 import {
   bindKnotBar,
@@ -92,6 +94,7 @@ import {
   renderJoinToggle,
   storeShapeJoin
 } from "./views/join_toggle.js";
+import { jobPillState, pillJob, renderJobPill } from "./views/job_pill.js";
 import { bindPopovers } from "./views/popover.js";
 import {
   bindSettingsPane,
@@ -108,6 +111,16 @@ import {
   waitingCounts
 } from "./views/summary_view.js";
 import { mountThemeSwitch } from "./views/theme.js";
+import {
+  DISTRIBUTION_FAILED,
+  DISTRIBUTION_LOADING,
+  DISTRIBUTION_SUPERSEDED,
+  DISTRIBUTION_UNDRAWABLE,
+  defaultLineState,
+  distributionFailure,
+  renderDistributionMessage,
+  renderDistributionPanel
+} from "./views/distribution_panel.js";
 import {
   RATING_TABLE_FAILED,
   RATING_TABLE_LOADING,
@@ -143,14 +156,13 @@ const reportTitle = document.getElementById("reportTitle");
 const reportStatus = document.getElementById("reportStatus");
 const reportFreshness = document.getElementById("reportFreshness");
 const reportRetry = document.getElementById("reportRetry");
-const finalFitRun = document.getElementById("finalFitRun");
-const finalFitRunNote = document.getElementById("finalFitRunNote");
 const reportFrame = document.getElementById("reportFrame");
 const svg = document.getElementById("chart");
 const selectionMenu = document.getElementById("selectionMenu");
 const plotColumn = document.querySelector(".plot-column");
 const termViewToggle = document.getElementById("termViewToggle");
 const ratingTableFrame = document.getElementById("ratingTableFrame");
+const distributionPanel = document.getElementById("distributionPanel");
 const featureListNodes = Object.freeze({
   root: document.getElementById("featureList"),
   search: document.getElementById("featureSearch"),
@@ -306,20 +318,33 @@ const evidenceTiming = createEvidenceTimingTracker({
 const cvTab = createCVTab({
   frame: reportFrame,
   client: editorClient,
-  onJobSettled: async (kind, job) => {
+  onJobSettled: async (kind) => {
     if (kind === "final_fit") {
-      finalFitRunError = finalFitFailure(job);
       await actions.refreshFromPythonWhenIdle();
     }
+    renderPill();
     await refreshActiveReport();
   },
-  onError: (kind, message) => {
-    if (kind !== "final_fit") return;
-    finalFitRunError = message;
-    renderFinalFitRun();
-  },
+  onJobChange: () => renderPill(),
   isShown: () => store.getState().view.activeView === "cv"
 });
+
+// The pill names a background job on every tab. One that has ended stays until
+// its tab has been opened.
+const jobPill = document.getElementById("jobPill");
+let pillSeenJob = "";
+
+function renderPill() {
+  if (!jobPill) return;
+  const job = pillJob(cvTab.jobs());
+  const pill = jobPillState(job, job?.job_id === pillSeenJob);
+  if (job && job.status !== "running" && pill?.view === store.getState().view.activeView) {
+    pillSeenJob = job.job_id;
+    renderJobPill(jobPill, null);
+    return;
+  }
+  renderJobPill(jobPill, pill);
+}
 
 const undo = () => actions.executeStateMutation({
   name: "undo",
@@ -469,6 +494,26 @@ syncViewport();
 // redraw never changes the chart's layout, so it cannot loop. A hidden chart
 // keeps its drawing until it is shown again.
 new ResizeObserver(redrawChartToFit).observe(svg);
+
+// The distribution panel is drawn at its own width, and its fan's colours are
+// read from the theme, so a new width or theme redraws it.
+let distributionWidth = 0;
+new ResizeObserver(() => {
+  if (distributionPanel.clientWidth === distributionWidth) return;
+  distributionWidth = distributionPanel.clientWidth;
+  renderDistribution();
+}).observe(distributionPanel);
+new MutationObserver(renderDistribution).observe(document.documentElement, {
+  attributes: true,
+  attributeFilter: ["data-theme"]
+});
+// In view once more of the panel shows than the controls at the column's foot.
+new IntersectionObserver(([entry]) => {
+  distributionInView = entry.isIntersecting;
+  if (!distributionInView) return;
+  if (distributionRequestDue) refreshDistribution(selectDistributionRequest(store.getState()));
+  else if (distributionStale) scheduleDistributionRender();
+}, { root: plotColumn, rootMargin: "0px 0px -60px 0px" }).observe(distributionPanel);
 
 // The toolbar's rows change with its width and its fonts, not with where the
 // Chart / Table switch stands, which changes only its height; so a width that
@@ -788,23 +833,6 @@ bindExportDialog({
   }
 });
 
-// The Final fit panel's button follows the snapshot's plan (can it run, and why not).
-let finalFitRunning = false;
-let finalFitRunError = "";
-
-function renderFinalFitRun() {
-  if (!finalFitRun || !finalFitRunNote) return;
-  const { disabled, hint, note } = finalFitRunState({
-    final: store.getState().remote.snapshot?.final_fit_plan ?? null,
-    running: finalFitRunning,
-    error: finalFitRunError
-  });
-  finalFitRun.disabled = disabled;
-  finalFitRun.dataset.popoverBody = hint;
-  finalFitRunNote.textContent = note;
-  finalFitRunNote.hidden = !note;
-}
-
 /**
  * The server's reason the session does not offer `tool`, or null when it does.
  * A tool listed is neither requested nor offered.
@@ -1075,9 +1103,8 @@ function restoreFocusAfterBusy(opener) {
 if (new URLSearchParams(window.location.search).get("test") === "1") {
   window.__superglmTest = Object.freeze({
     setAppBusy,
-    // A selection posts without the busy overlay; tests wait on this before
-    // the next click, which a running mutation would skip.
-    mutationStatus: () => store.getState().request.mutation.status
+    mutationStatus: () => store.getState().request.mutation.status,
+    currentImpact: () => selectCurrentTerm(store.getState())?.impact
   });
 }
 
@@ -1142,13 +1169,8 @@ function formatMilliseconds(value) {
   return `${(number / 1000).toFixed(2)} s`;
 }
 
-// The views a model offers: a SuperLSS session has no Cross-validation tab.
-function offeredViews(snapshot) {
-  return snapshot?.capabilities?.cv === false ? ["validation", "final"] : ["validation", "cv", "final"];
-}
-
 async function showView(view) {
-  const activeView = offeredViews(store.getState().remote.snapshot).includes(view) ? view : "editor";
+  const activeView = ["validation", "cv", "final"].includes(view) ? view : "editor";
   actions.patchView({ activeView });
   if (activeView === "editor") {
     scheduleVisibleEvidenceCatchUp();
@@ -1221,6 +1243,21 @@ function renderChartWorkspace() {
     }
   );
   renderKnotStatusLine();
+  placeTermViewToggleOnChange();
+  renderDistribution();
+}
+
+// The switch's place depends on what the toolbar holds, and its own observer follows its width.
+// Measuring forces a layout of the page, too much for each step of a zoom that changes neither.
+let placedToolbar = null;
+function placeTermViewToggleOnChange() {
+  const toolbar = [
+    contextBar.textContent,
+    contextBar.querySelectorAll("[hidden]").length,
+    plotColumn.classList.contains("is-table-view")
+  ].join("|");
+  if (toolbar === placedToolbar) return;
+  placedToolbar = toolbar;
   placeTermViewToggle(contextBar, termViewToggle, contribTools);
 }
 
@@ -1321,6 +1358,177 @@ async function refreshRatingTable({ table, term, revision }) {
   if (sequence === ratingTableSequence) renderRatingTable(ratingTableFrame, model);
 }
 
+// The distribution panel, SuperLSS sessions only: the last payload drawn and
+// the line on it, which the panel's controls change and which carries over
+// from one feature to the next.
+let distributionPayload = null;
+let distributionLine = null;
+let distributionSequence = 0;
+let distributionFrame = 0;
+// The request key the drawn payload answered. While a curve is dragged the panel draws the
+// predictors the drag implies, computed in the browser, and only against a payload that answers
+// the current key: a drag that starts while a refetch is due leaves the panel as it is. The
+// commit's new key refetches the panel once and that reply replaces the preview; a drag that
+// ends with the key unchanged goes back to the payload's edited predictors.
+let distributionPayloadRequest = null;
+let distributionPreview = null;
+let distributionDrawn = null;
+let distributionStale = false;
+let distributionInView = false;
+// Each feature's reply for the model and chart in force, so going back to a feature
+// asks again only after an edit. Below the fold the request waits to be scrolled to.
+const distributionReplies = new Map();
+let distributionRepliesFor = "";
+let distributionRequestDue = false;
+
+// The editor state of a SuperLSS session lists the tools it does not offer; a
+// SuperGLM state has no such list.
+function isLssSession(snapshot) {
+  return snapshot?.unavailable !== undefined;
+}
+
+function selectDistributionRequest(state) {
+  const snapshot = state.remote.snapshot;
+  return {
+    lss: isLssSession(snapshot),
+    term: selectActiveTermName(state),
+    generation: snapshot?.chart_generation ?? 0,
+    revision: selectModelRevision(state)
+  };
+}
+
+function sameDistributionRequest(next, previous) {
+  return next.lss === previous.lss &&
+    next.term === previous.term &&
+    next.generation === previous.generation &&
+    next.revision === previous.revision;
+}
+
+// One request per feature and chart generation; a reply that a newer request
+// has overtaken is dropped. A server refusal shows its own message, which says
+// what to change. A superseded reply or a failure to answer shows a message
+// with Retry, as the evidence panels do, and Retry asks again for the
+// feature in view.
+async function refreshDistribution(request) {
+  const { lss, term, revision } = request;
+  plotColumn.classList.toggle("has-distribution", lss);
+  distributionPanel.hidden = !lss;
+  if (!lss || !term || revision < 0) return;
+  const sequence = ++distributionSequence;
+  const repliesFor = `${request.generation}:${revision}`;
+  if (repliesFor !== distributionRepliesFor) {
+    distributionReplies.clear();
+    distributionRepliesFor = repliesFor;
+  }
+  // The first draw gives the column its height, so it does not wait.
+  distributionRequestDue = distributionDrawn !== null && !distributionInView;
+  if (distributionRequestDue) return;
+  let response = distributionReplies.get(term) ?? null;
+  let failure = null;
+  if (!response) {
+    if (!distributionPayload) renderDistributionMessage(distributionPanel, DISTRIBUTION_LOADING);
+    try {
+      response = await editorClient.distribution(term);
+    } catch (error) {
+      failure = distributionFailure(error);
+    }
+    if (sequence !== distributionSequence) return;
+    if (response && response.status !== "superseded") distributionReplies.set(term, response);
+  }
+  distributionPreview = null;
+  if (!failure && response?.status === "superseded") {
+    failure = { message: DISTRIBUTION_SUPERSEDED, retry: true };
+  }
+  if (!failure && !response) failure = { message: DISTRIBUTION_FAILED, retry: true };
+  if (failure) {
+    distributionPayload = null;
+    renderDistributionMessage(
+      distributionPanel,
+      failure.message,
+      failure.retry ? retryDistribution : null
+    );
+    return;
+  }
+  distributionPayload = response;
+  distributionPayloadRequest = request;
+  distributionLine ??= defaultLineState(response);
+  renderDistribution();
+}
+
+function retryDistribution() {
+  refreshDistribution(selectDistributionRequest(store.getState()));
+}
+
+// One panel draw per animation frame, however many changes arrive in it.
+function scheduleDistributionRender() {
+  if (distributionFrame) return;
+  distributionFrame = requestAnimationFrame(() => {
+    distributionFrame = 0;
+    renderDistribution();
+  });
+}
+
+const distributionHandlers = {
+  onChange(next) {
+    distributionLine = next;
+    scheduleDistributionRender();
+  }
+};
+
+// A drag frame of term `key`: the panel draws `dragged` against the term the store confirmed.
+function previewDistribution(key, dragged) {
+  if (distributionPanel.hidden || !distributionPayload || !distributionInView) return;
+  const state = store.getState();
+  if (!sameDistributionRequest(selectDistributionRequest(state), distributionPayloadRequest)) return;
+  const committed = state.remote.snapshot?.terms?.[key];
+  if (!committed) return;
+  distributionPreview = previewEta(distributionPayload, key, committed, dragged);
+  scheduleDistributionRender();
+}
+
+function endDistributionPreview(cleared) {
+  if (!cleared || !distributionPreview) return;
+  const request = selectDistributionRequest(store.getState());
+  if (!sameDistributionRequest(request, distributionPayloadRequest)) return;
+  distributionPreview = null;
+  renderDistribution();
+}
+
+// The panel draws inside the chart's render and the store's notify loop, so
+// nothing it throws may escape: it shows the panel's own message instead.
+function renderDistribution() {
+  if (distributionPanel.hidden || !distributionPayload || !distributionLine) return;
+  const inputs = [
+    distributionPayload,
+    distributionLine,
+    distributionPreview,
+    distributionWidth,
+    document.documentElement.getAttribute("data-theme")
+  ];
+  // The same inputs draw the same panel, whatever else made the workspace render.
+  if (distributionDrawn && inputs.every((input, i) => input === distributionDrawn[i])) return;
+  // Below the fold it waits until it is scrolled to. The first draw gives the column its height.
+  if (distributionDrawn && !distributionInView) {
+    distributionStale = true;
+    return;
+  }
+  distributionDrawn = inputs;
+  distributionStale = false;
+  try {
+    renderDistributionPanel(
+      distributionPanel,
+      distributionPayload,
+      distributionLine,
+      distributionHandlers,
+      distributionPreview ?? "edited",
+      distributionWidth
+    );
+  } catch (error) {
+    console.error(error);
+    renderDistributionMessage(distributionPanel, DISTRIBUTION_UNDRAWABLE);
+  }
+}
+
 function renderChartOnly() {
   const state = store.getState();
   const term = currentTerm();
@@ -1396,7 +1604,6 @@ function selectChartRenderState(state) {
     showFreeLevels: view.showFreeLevels,
     showUnsmoothed: view.showUnsmoothed,
     unsmoothed: view.unsmoothed,
-    zoom: view.zoomByTerm[activeTerm] || null,
     groupMode: Object.prototype.hasOwnProperty.call(view.groupModeByTerm, activeTerm)
       ? view.groupModeByTerm[activeTerm]
       : null
@@ -1415,7 +1622,6 @@ function sameChartRenderState(next, previous) {
     next.showFreeLevels === previous.showFreeLevels &&
     next.showUnsmoothed === previous.showUnsmoothed &&
     next.unsmoothed === previous.unsmoothed &&
-    next.zoom === previous.zoom &&
     next.groupMode === previous.groupMode;
 }
 
@@ -1442,7 +1648,6 @@ function selectAppBarRenderState(state) {
     canRevert: Boolean(snapshot && revertAvailable(snapshot)),
     busy: state.request.mutation.status === "running",
     pendingCount: selectPendingSteps(state).length,
-    hiddenViews: snapshot?.capabilities?.cv === false ? "cv" : "",
     refitReason: snapshot?.unavailable?.refit ?? null
   };
 }
@@ -1455,7 +1660,6 @@ function sameAppBarRenderState(next, previous) {
     next.canRevert === previous.canRevert &&
     next.busy === previous.busy &&
     next.pendingCount === previous.pendingCount &&
-    next.hiddenViews === previous.hiddenViews &&
     next.refitReason === previous.refitReason;
 }
 
@@ -1475,7 +1679,6 @@ function renderAppBarState(state) {
     refitButton: refitPendingAction,
     refitCount: refitPendingCount,
     pendingCount: state.pendingCount,
-    hiddenViews: state.hiddenViews ? [state.hiddenViews] : [],
     refitReason: state.refitReason
   });
 }
@@ -1483,26 +1686,18 @@ function renderAppBarState(state) {
 function selectActiveViewRenderState(state) {
   return {
     ready: state.remote.snapshot !== null,
-    activeView: state.view.activeView,
-    finalFitHere: state.remote.snapshot?.capabilities?.cv === false,
-    finalFitPlan: state.remote.snapshot?.final_fit_plan ?? null
+    activeView: state.view.activeView
   };
 }
 
 function sameActiveViewRenderState(next, previous) {
-  return next.ready === previous.ready && next.activeView === previous.activeView &&
-    next.finalFitHere === previous.finalFitHere &&
-    JSON.stringify(next.finalFitPlan) === JSON.stringify(previous.finalFitPlan);
+  return next.ready === previous.ready && next.activeView === previous.activeView;
 }
 
-// Without a Cross-validation tab, the Final fit panel starts the final fit.
-function renderActiveViewState({ ready, activeView, finalFitHere }) {
+function renderActiveViewState({ ready, activeView }) {
   if (!ready) return;
-  if (finalFitRun) {
-    finalFitRun.hidden = !(finalFitHere && activeView === "final");
-    renderFinalFitRun();
-  }
   renderAppView(activeView);
+  renderPill();
   renderReportEvidence(store.getState().request.evidence.report, activeView);
 }
 
@@ -2165,6 +2360,8 @@ const interactions = bindInteractions({
   setSelectionSpan,
   setPreviewTerm: setInteractionPreview,
   clearPreviewTerm: clearInteractionPreview,
+  onDragFrame: previewDistribution,
+  redrawChart: renderChartOnly,
   setZoom,
   clearZoom,
   actions,
@@ -2190,21 +2387,12 @@ bindKnotBar(knotBarNodes, {
   }
 });
 bindPointLens(svg);
+bindPointTooltip(svg);
 // The anchor's tags step aside while the pointer drags on the chart.
 bindDragWatch(svg, document.querySelector(".chart-shell"), CLICK_SLOP);
 
-async function selectFeature(term) {
-  if (term === selectedTerm()) return;
-  const result = await executeStateMutation("/term", { term });
-  if (result.ok) {
-    actions.patchView({ activeTerm: term });
-    return;
-  }
-  const snapshot = store.getState().remote.snapshot;
-  const authoritativeTerm = snapshot?.selected_term;
-  if (authoritativeTerm && snapshot.terms[authoritativeTerm]) {
-    actions.patchView({ activeTerm: authoritativeTerm });
-  }
+function selectFeature(term) {
+  if (term !== selectedTerm()) actions.setActiveTerm(term);
 }
 
 bindFeatureList(featureListNodes, {
@@ -2307,10 +2495,7 @@ for (const button of document.querySelectorAll("button[data-op]")) {
     if (operation === "select_all") {
       const term = currentTerm();
       if (!term) return;
-      await actions.executeSelectionMutation({
-        term: selectedTerm(),
-        indices: term.x.map((_, index) => index)
-      });
+      actions.setSelection(selectedTerm(), term.x.map((_, index) => index));
       return;
     }
     stopContributionBuild();
@@ -2339,19 +2524,6 @@ if (metricRetry) {
 }
 if (summaryRetry) {
   summaryRetry.addEventListener("click", () => { void actions.retryEvidence("summary"); });
-}
-if (finalFitRun) {
-  finalFitRun.addEventListener("click", async () => {
-    finalFitRunning = true;
-    finalFitRunError = "";
-    renderFinalFitRun();
-    try {
-      await cvTab.start("final_fit");
-    } finally {
-      finalFitRunning = false;
-      renderFinalFitRun();
-    }
-  });
 }
 if (reportRetry) {
   reportRetry.addEventListener("click", () => { void actions.retryEvidence("report"); });
@@ -2429,9 +2601,23 @@ for (const button of shapeButtons) {
 }
 
 
+jobPill?.addEventListener("click", () => {
+  void showView(jobPill.dataset.view || "cv");
+});
+store.subscribe(
+  (state) => state.remote.snapshot?.jobs_running ?? [],
+  (jobs) => {
+    for (const job of jobs) cvTab.watch(job);
+  },
+  (left, right) => left.map((job) => job.job_id).join() === right.map((job) => job.job_id).join()
+);
 store.subscribe(selectChartRenderState, () => renderChartWorkspace(), sameChartRenderState);
+// A zoom moves nothing outside the plot.
+store.subscribe((state) => state.view.zoomByTerm[selectActiveTermName(state)] || null, renderChartOnly);
 store.subscribe(selectUnsmoothedNeed, requestUnsmoothed, sameUnsmoothedNeed);
 store.subscribe(selectRatingTableRequest, refreshRatingTable, sameRatingTableRequest);
+store.subscribe(selectDistributionRequest, refreshDistribution, sameDistributionRequest);
+store.subscribe((state) => state.view.preview === null, endDistributionPreview);
 store.subscribe(
   selectFeatureListRenderState,
   renderFeatureListState,

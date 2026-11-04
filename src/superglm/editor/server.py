@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import socket
 import threading
@@ -18,19 +19,29 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from superglm.editor.assets import app_asset_content_type, read_app_asset
 from superglm.editor.errors import EditorClientError, EditorValueError
 from superglm.editor.io import jsonable
+from superglm.editor.term_delta import KNOWN_STATE_HEADER, TermDeltas
 
 _LOGGER = logging.getLogger(__name__)
+
+# How this request's state reply is cut to what its client lacks, where it asked.
+_state_reply: contextvars.ContextVar[Callable[[Any], Any] | None] = contextvars.ContextVar(
+    "superglm_editor_state_reply", default=None
+)
 
 
 def create_editor_app(widget: Any) -> FastAPI:
     """Create the local HTTP app that binds browser routes to an editor widget."""
     app = FastAPI(title="SuperGLM Editor", docs_url=None, redoc_url=None, openapi_url=None)
+    term_deltas = TermDeltas()
 
     @app.middleware("http")
     async def require_editor_token(request: Request, call_next):
         if _is_public_path(request.url.path):
             return await call_next(request)
         if _request_token(request) == getattr(widget, "_token", None):
+            known = request.headers.get(KNOWN_STATE_HEADER)
+            if known is not None:
+                _state_reply.set(lambda payload: term_deltas.reply(payload, known))
             return await call_next(request)
         return _json_response({"error": "invalid or missing editor token"}, status_code=403)
 
@@ -67,8 +78,10 @@ def create_editor_app(widget: Any) -> FastAPI:
 
     @app.post("/select")
     def select(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        # The browser's own note of its view asks for no state in reply.
+        answer = widget._note_view if payload.get("quiet") is True else widget._select
         return _guarded_json(
-            lambda: widget._select(
+            lambda: answer(
                 str(_required(payload, "term")),
                 _number_list(payload, "indices", _int),
             )
@@ -173,6 +186,10 @@ def create_editor_app(widget: Any) -> FastAPI:
     @app.post("/rating_table")
     def rating_table(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(lambda: widget._rating_table(str(_required(payload, "term"))))
+
+    @app.post("/distribution")
+    def distribution(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(lambda: widget._distribution(str(_required(payload, "feature"))))
 
     @app.get("/download_export")
     def download_export(format: str = "joblib", filename: str | None = None) -> Response:
@@ -404,8 +421,10 @@ def _guarded_json(
     response_metadata: dict[str, Any] | None = None,
 ) -> Response:
     metadata = {} if response_metadata is None else dict(response_metadata)
+    reply = _state_reply.get()
     try:
-        return _json_response(factory())
+        payload = factory()
+        return _json_response(payload if reply is None else reply(payload))
     except EditorClientError as exc:
         return _json_response(
             {**metadata, "error": exc.public_message},

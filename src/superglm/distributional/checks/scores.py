@@ -685,17 +685,22 @@ def _retained_crps(
     method: CrpsMethod,
     n_nodes: int,
     threshold: float | None = None,
+    theta: NDArray[np.float64] | None = None,
 ) -> NDArray[np.float64]:
-    """Return the unaggregated CRPS of each retained row's predictive law."""
+    """Return the unaggregated CRPS of each retained row's predictive law.
+
+    ``theta`` is the rows' predicted parameters where the caller already has them.
+    """
     if rows.bounds is not None:
         raise NotImplementedError(
             "the CRPS family of scores is for complete rows; some rows are truncated or "
             "censored, and only the log score supports them (use which=('log',) in "
             "score_table)"
         )
-    theta = np.asarray(
-        fitted.predict_parameters(rows.frame, offsets=rows.offsets), dtype=np.float64
-    )
+    if theta is None:
+        theta = np.asarray(
+            fitted.predict_parameters(rows.frame, offsets=rows.offsets), dtype=np.float64
+        )
     row_law = _row_law(fitted, rows)
     if threshold is not None:
         return crps_numeric(

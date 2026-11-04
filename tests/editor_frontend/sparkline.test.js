@@ -46,12 +46,70 @@ test("categorical terms give bars measured from the baseline, signed by their si
   const zero = up.y + up.h; // above the baseline: the bar's bottom edge sits on it
   assert.ok(Math.abs(down.y - zero) < 1e-9); // below: its top edge does
   assert.ok(up.h > 0 && down.h > 0 && Math.abs(up.h - down.h) < 1e-9);
-  assert.equal(level.h, 0);
+  // A level at no effect is a short mark centred on the baseline.
+  assert.ok(level.h > 0 && level.h < up.h);
+  assert.ok(Math.abs(level.y + level.h / 2 - zero) < 1e-9);
   assert.ok(up.x < level.x && level.x < down.x);
   for (const bar of curve.bars) {
     assert.ok(bar.x >= 0 && bar.x + bar.w <= SIZE.width);
     assert.ok(bar.y >= 0 && bar.y + bar.h <= SIZE.height);
   }
+});
+
+test("every level shows, however close to no effect, and the reference level is flagged", () => {
+  const term = {
+    kind: "categorical",
+    term_type: "categorical",
+    x: [0, 1, 2, 3],
+    y: [1, 1.0001, 3, 0.9999],
+    levels: ["base", "near", "far", "under"],
+    baseline: 1,
+    reference: { level: "base", policy: "most_exposed" },
+  };
+  const bars = sparkline(term, SIZE).bars;
+  assert.deepEqual(bars.map((bar) => bar.reference), [true, false, false, false]);
+  for (const bar of bars) {
+    assert.ok(bar.h >= 1.5, `level height ${bar.h}`);
+    assert.ok(bar.y >= 0 && bar.y + bar.h <= SIZE.height);
+  }
+  assert.ok(bars[0].h > bars[1].h);
+  // Without a reference level, nothing is flagged.
+  const plain = sparkline({ ...term, reference: null }, SIZE).bars;
+  assert.ok(plain.every((bar) => !bar.reference));
+});
+
+test("a level with a real effect keeps its true height, a reference moved by an edit too", () => {
+  const term = {
+    kind: "categorical",
+    term_type: "categorical",
+    x: [0, 1],
+    y: [2, 1],
+    levels: ["base", "other"],
+    baseline: 1,
+    reference: { level: "base", policy: "pinned" },
+  };
+  const [moved] = sparkline(term, SIZE).bars;
+  assert.ok(moved.reference);
+  assert.ok(moved.h > 3);
+  const zero = sparkline(term, SIZE).bars[1];
+  assert.ok(Math.abs(moved.y + moved.h - (zero.y + zero.h / 2)) < 1e-9);
+});
+
+test("a grouped reference flags every member of its group", () => {
+  const bars = sparkline(
+    {
+      kind: "categorical",
+      term_type: "categorical",
+      x: [0, 1, 2],
+      y: [1, 1.4, 1],
+      levels: ["a", "b", "c"],
+      baseline: 1,
+      reference: { level: "a+c", policy: "kept" },
+      level_groups: [{ label: "a+c", indices: [0, 2] }],
+    },
+    SIZE,
+  ).bars;
+  assert.deepEqual(bars.map((bar) => bar.reference), [true, false, true]);
 });
 
 test("bars default to a baseline of 1, and a zero baseline measures coefficient-like values from 0", () => {
@@ -81,4 +139,27 @@ test("non-finite values are skipped", () => {
     SIZE,
   );
   assert.equal(points(curve.d).length, 2);
+});
+
+test("an ordered categorical's line marks its reference level", () => {
+  const curve = sparkline(
+    {
+      x: [0, 1, 2],
+      y: [1, 1.5, 2],
+      levels: ["low", "mid", "high"],
+      term_type: "ordered categorical",
+      reference: { level: "mid", policy: "most_exposed" },
+    },
+    { width: 100, height: 20 },
+  );
+  assert.equal(curve.kind, "line");
+  if (curve.kind !== "line") return;
+  assert.deepEqual(curve.reference, { x: 50, y: 10 });
+});
+
+test("a curve with no levels has no reference mark", () => {
+  const curve = sparkline({ x: [0, 1], y: [1, 2], levels: null, term_type: "spline" }, { width: 100, height: 20 });
+  assert.equal(curve.kind, "line");
+  if (curve.kind !== "line") return;
+  assert.equal(curve.reference, undefined);
 });

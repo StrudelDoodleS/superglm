@@ -4,6 +4,8 @@ import { shiftedCurve } from "./chart/ordered_spline.js";
 // A press that moves no further than this many SVG units in x and in y is a
 // click; past it, a drag. The chart draws at its own CSS-pixel size, so an SVG
 // unit is a pixel.
+// How long after its last tick a wheel counts as at rest.
+const WHEEL_REST_MS = 160;
 export const CLICK_SLOP = 3;
 // A click this close to the drawn curve, between its points, picks the point
 // nearest by x.
@@ -191,6 +193,7 @@ export function bindInteractions(context) {
       }
       previewControlCurve(term, drag, value);
       context.setPreviewTerm(drag.term, term, Array.from(context.currentSelection()));
+      context.onDragFrame(drag.term, drag.preview);
       return;
     }
     if (interaction.pointDrag) {
@@ -200,6 +203,7 @@ export function bindInteractions(context) {
       drag.delta = value - drag.startValue;
       updateDraggedSourceValues(term, drag, context);
       context.setPreviewTerm(drag.term, term, Array.from(drag.selection));
+      context.onDragFrame(drag.term, drag.preview);
       return;
     }
     if (interaction.orderDrag) {
@@ -221,6 +225,7 @@ export function bindInteractions(context) {
   async function onPointerUp(event) {
     if (interaction.panDrag) {
       interaction.panDrag = null;
+      endGesture(context);
       return;
     }
     if (interaction.shiftPress) {
@@ -304,22 +309,40 @@ export function bindInteractions(context) {
     interaction.pendingClickIndex = null;
     interaction.toggleClick = false;
     if (movedPastClickSlop(start, point)) {
-      await context.actions.executeSelectionMutation({
-        term: context.selectedTerm(),
-        indices: sourceIndicesForDisplayIndices(context, indicesInBox(context, start, point))
-      });
+      context.actions.setSelection(
+        context.selectedTerm(),
+        sourceIndicesForDisplayIndices(context, indicesInBox(context, start, point))
+      );
       return;
     }
     // A click on empty space changes nothing.
     const target = pressed ?? curveIndexNear(context, start);
-    if (target !== null) await clickPoint(context, target, toggle);
+    if (target !== null) clickPoint(context, target, toggle);
   }
 
+  // A wheel can tick faster than the chart draws: the ticks of a frame make one zoom.
+  let wheelFrame = 0;
+  let wheelFactor = 1;
+  let wheelPoint = null;
+
+  // A zoom draws without the chart's hidden points, until the wheel rests.
+  let wheelRest = 0;
+
   function onWheel(event) {
-    if (!context.currentTerm() || !svg._scale) return;
+    if (!context.currentTerm() || !svg._scale || !wheelZooms(context, event)) return;
     event.preventDefault();
-    const factor = event.deltaY < 0 ? 0.82 : 1.22;
-    zoomAround(context, svgPoint(context, event), factor);
+    svg._gesture = true;
+    clearTimeout(wheelRest);
+    wheelRest = setTimeout(() => endGesture(context), WHEEL_REST_MS);
+    wheelFactor *= event.deltaY < 0 ? 0.82 : 1.22;
+    wheelPoint = svgPoint(context, event);
+    if (wheelFrame) return;
+    wheelFrame = requestAnimationFrame(() => {
+      wheelFrame = 0;
+      const factor = wheelFactor;
+      wheelFactor = 1;
+      if (svg._scale) zoomAround(context, wheelPoint, factor);
+    });
   }
 
   function onPointerCancel() {
@@ -348,9 +371,31 @@ export function bindInteractions(context) {
       svg.removeEventListener("pointercancel", onPointerCancel);
       svg.removeEventListener("lostpointercapture", onLostPointerCapture);
       svg.removeEventListener("wheel", onWheel, wheelOptions);
+      cancelAnimationFrame(wheelFrame);
+      wheelFrame = 0;
       cancelActiveInteraction(context, interaction);
     }
   };
+}
+
+// A scroll that passes over the chart moves the page and leaves the zoom, as in cooperative
+// gesture handling on a map. Ctrl or Cmd with the wheel always zooms, and so does a trackpad pinch,
+// which browsers send as a wheel with ctrlKey. A plain wheel zooms in the Zoom tool, and where the
+// page has nowhere to scroll.
+function wheelZooms(context, event) {
+  if (event.ctrlKey || event.metaKey || context.mode() === "zoom") return true;
+  return !pageCanScroll(context.svg);
+}
+
+// A page in an iframe, a notebook's output among them, scrolls whatever holds it.
+function pageCanScroll(svg) {
+  if (window.parent !== window) return true;
+  for (let node = svg.parentElement; node; node = node.parentElement) {
+    if (node.scrollHeight > node.clientHeight && /auto|scroll/.test(getComputedStyle(node).overflowY)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function hasActiveInteraction(interaction) {
@@ -369,6 +414,7 @@ function hasActiveInteraction(interaction) {
 
 function cancelActiveInteraction(context, interaction) {
   const hadPreview = Boolean(interaction.pointDrag || interaction.controlDrag);
+  if (interaction.panDrag) endGesture(context);
   if (interaction.brush) interaction.brush.remove();
   clearBoxZoom(interaction);
   clearOrderDropPreview(interaction);
@@ -408,14 +454,14 @@ function movedPastClickSlop(start, point) {
 
 // A click on one display point selects it alone, or with Ctrl/Cmd toggles it,
 // and either way makes it the anchor of the next Shift-click.
-async function clickPoint(context, displayIndex, toggle) {
+function clickPoint(context, displayIndex, toggle) {
   const term = context.selectedTerm();
   const source = sourceIndicesForDisplayIndices(context, [displayIndex]);
   context.setSelectionAnchor({ term, index: source[0] });
-  await context.actions.executeSelectionMutation({
+  context.actions.setSelection(
     term,
-    indices: toggle ? toggleSourceSelection(context.currentSelection(), source) : source
-  });
+    toggle ? toggleSourceSelection(context.currentSelection(), source) : source
+  );
 }
 
 // A Shift-click selects every display point between the anchor and this one
@@ -423,11 +469,11 @@ async function clickPoint(context, displayIndex, toggle) {
 // anchor on this term it is a plain click. The span is kept, by source index,
 // before it is selected, so the chart can tag its far end and the status line
 // name its range while the selection is that span.
-async function shiftClickPoint(context, displayIndex) {
+function shiftClickPoint(context, displayIndex) {
   const term = context.selectedTerm();
   const anchor = anchorDisplayIndex(context, term);
   if (anchor === null) {
-    await clickPoint(context, displayIndex, false);
+    clickPoint(context, displayIndex, false);
     return;
   }
   const indices = sourceIndicesForDisplayIndices(
@@ -440,7 +486,7 @@ async function shiftClickPoint(context, displayIndex) {
     to: sourceIndicesForDisplayIndices(context, [displayIndex])[0],
     indices
   });
-  await context.actions.executeSelectionMutation({ term, indices });
+  context.actions.setSelection(term, indices);
 }
 
 // The anchor is a source index, so it survives a switch between the expanded
@@ -782,6 +828,11 @@ function dataFromPoint(context, point) {
   return { x, y };
 }
 
+function endGesture(context) {
+  context.svg._gesture = false;
+  context.redrawChart?.();
+}
+
 function zoomAround(context, point, factor) {
   // Zoom is stored per term. The base ranges come from the current payload and
   // act as hard bounds so users can always get home.
@@ -792,11 +843,16 @@ function zoomAround(context, point, factor) {
   const yRange = scale.yMax - scale.yMin;
   const minXRange = (scale.baseXMax - scale.baseXMin) / 200;
   const minYRange = (scale.baseYMax - scale.baseYMin) / 200;
+  // A frame's ticks arrive as one factor, which stops at the smallest range.
+  const tightest = Math.max(minXRange / xRange, minYRange / yRange);
+  if (factor < tightest) {
+    if (tightest >= 1) return;
+    factor = tightest;
+  }
   let xMin = center.x - (center.x - scale.xMin) * factor;
   let xMax = center.x + (scale.xMax - center.x) * factor;
   let yMin = center.y - (center.y - scale.yMin) * factor;
   let yMax = center.y + (scale.yMax - center.y) * factor;
-  if (xMax - xMin < minXRange || yMax - yMin < minYRange) return;
   if (factor > 1 &&
       xRange >= scale.baseXMax - scale.baseXMin &&
       yRange >= scale.baseYMax - scale.baseYMin) {
@@ -835,6 +891,7 @@ function beginPan(context, interaction, start) {
   // began, so a Shift press that turns into a pan keeps the ground it covered.
   if (!context.svg._scale) return false;
   const scale = context.svg._scale;
+  context.svg._gesture = true;
   interaction.panDrag = {
     start,
     xMin: scale.xMin,

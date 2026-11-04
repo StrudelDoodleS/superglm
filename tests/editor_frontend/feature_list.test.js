@@ -436,6 +436,10 @@ test("parameter groups head their rows with their label and role; rows show the 
   const drawn = (row) => row.children.find((part) => part.tagName === "SVG").children.map((n) => n.tagName);
   assert.deepEqual(drawn(lineRow), ["PATH"]);
   assert.deepEqual(drawn(barRow), ["RECT", "RECT"]);
+  // A level at no effect still draws a mark.
+  const heights = barRow.children.find((part) => part.tagName === "SVG").children
+    .map((node) => Number(node.getAttribute("height")));
+  assert.ok(heights.every((height) => height > 0), String(heights));
 });
 
 test("the search matches the bare feature name, not the parameter prefix of its key", () => {

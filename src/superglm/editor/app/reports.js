@@ -27,7 +27,7 @@ export function renderReport(payload, { reportTitle, reportStatus, reportFrame }
   const splitSection = renderSplitSection(payload);
   const cvSection = payload.report === "validation" ? renderCVSection(payload.cv_report) : "";
   const summarySection = payload.report === "final" ? renderFinalSummary(payload.summary) : "";
-  const finalFitSection = payload.report === "final" ? renderFinalFit(payload.final_fit) : "";
+  const finalFitSection = payload.report === "final" ? renderFinalFit(payload.final_fit, payload.metric_labels) : "";
   reportFrame.innerHTML = `${splitSection}${cvSection}${summarySection}${finalFitSection}`;
 }
 
@@ -93,14 +93,7 @@ function renderMetricCell(metric, value, delta) {
 }
 
 function renderCVSection(cvReport) {
-  if (cvReport === null || cvReport === undefined) {
-    return `
-      <section class="report-section cv-report">
-        <h3>CV Report</h3>
-        <div class="report-note">No CV report supplied.</div>
-      </section>
-    `;
-  }
+  if (cvReport === null || cvReport === undefined) return "";
   return `
     <section class="report-section cv-report">
       <h3>CV Report</h3>
@@ -186,12 +179,12 @@ function waitingNotIncluded(count) {
   return `${count} waiting ${count === 1 ? "change is" : "changes are"} not included.`;
 }
 
-function renderFinalFit(finalFit) {
+function renderFinalFit(finalFit, labels = {}) {
   if (!finalFit) return "";
   if (!finalFit.available) {
     return `
       <section class="report-section final-fit">
-        <h3>Final Fit on All Rows</h3>
+        <h3>Final Fit</h3>
         <div class="report-note">${escapeHTML(finalFit.note || "")}</div>
       </section>
     `;
@@ -205,16 +198,26 @@ function renderFinalFit(finalFit) {
   ].filter(Boolean);
   return `
     <section class="report-section final-fit">
-      <h3>Final Fit on All Rows</h3>
+      <h3>Final Fit</h3>
       ${notes.map((note) => `<div class="report-note">${escapeHTML(note)}</div>`).join("")}
-      <table class="report-table" aria-label="Final fit on all rows">
+      <table class="report-table" aria-label="Final fit">
         <tbody>
           <tr><th>Rows</th><td>${escapeHTML(formatValue(finalFit.n_rows))}</td></tr>
           ${finalFit.summary ? summaryRows(model) : ""}
+          ${testScoreRows(finalFit.test_scores, labels)}
         </tbody>
       </table>
     </section>
   `;
+}
+
+// The Final fit's scores on the test split it held out, skipping a score the model has no way to compute.
+function testScoreRows(scores, labels) {
+  return Object.entries(scores || {})
+    .filter(([, value]) => Number.isFinite(value))
+    .map(([metric, value]) => `
+          <tr><th>Test ${escapeHTML(labels[metric] || metric)}</th><td>${escapeHTML(fmt(value))}</td></tr>`)
+    .join("");
 }
 
 function summaryRows(model) {

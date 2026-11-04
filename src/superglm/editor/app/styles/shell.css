@@ -73,6 +73,81 @@ body {
   align-items: center;
 }
 
+/* A background job's progress, on every tab. It takes nothing from the page. */
+.job-pill {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+  margin-left: 12px;
+  padding: 0 10px 0 9px;
+  border: 1px solid var(--blue);
+  border-radius: var(--radius-pill);
+  background: var(--blue-soft);
+  color: var(--text);
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.job-pill[hidden] {
+  display: none;
+}
+.job-pill[data-tone="finished"] {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+}
+.job-pill[data-tone="failed"] {
+  border-color: var(--danger);
+  background: var(--surface);
+  color: var(--danger);
+}
+.job-pill-ticks {
+  display: flex;
+  gap: 2px;
+}
+.job-pill-ticks:empty {
+  display: none;
+}
+.job-pill-ticks i {
+  width: 10px;
+  height: 7px;
+  border-radius: var(--radius-xs);
+  background: var(--border-strong);
+  opacity: 0.45;
+}
+.job-pill-ticks i[data-fill="done"] {
+  opacity: 1;
+}
+.job-pill-ticks i[data-fill="now"] {
+  background: var(--blue);
+  opacity: 1;
+  animation: job-pill-now 1.4s ease-in-out infinite;
+}
+@keyframes job-pill-now {
+  50% {
+    opacity: 0.35;
+  }
+}
+.job-pill-time {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+.job-pill-time:empty {
+  display: none;
+}
+@media (max-width: 980px) {
+  .job-pill-time {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .job-pill-ticks i[data-fill="now"] {
+    animation: none;
+  }
+}
+
 .app-tabs,
 .app-actions {
   display: flex;
@@ -89,11 +164,11 @@ body {
   flex: none;
   box-sizing: content-box;
   width: 76px;
-  height: 32px;
+  height: var(--control-height-lg);
   margin: 0 6px 0 2px;
   padding: 0;
   border: 2.5px solid var(--text);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background-color: var(--switch-track);
   background-image: radial-gradient(circle, var(--switch-dots) 1.1px, transparent 1.4px);
   background-size: 5px 5px;
@@ -109,7 +184,7 @@ body {
   top: 9.5px;
   max-width: 38px;
   overflow: hidden;
-  font: 15px/1 Bangers, Impact, "Arial Black", sans-serif;
+  font: var(--font-size-lg)/1 Bangers, Impact, "Arial Black", sans-serif;
   letter-spacing: 0.06em;
   white-space: nowrap;
 }
@@ -292,7 +367,7 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 30px;
+  height: var(--control-height-lg);
   padding: 0 10px 0 9px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -312,10 +387,10 @@ body {
   min-width: 18px;
   height: 18px;
   padding: 0 5px;
-  border-radius: 9px;
+  border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--surface) 22%, transparent);
   font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-size: var(--font-size-sm);
   line-height: 18px;
   text-align: center;
 }
@@ -368,6 +443,24 @@ body {
   min-height: 360px;
 }
 
+/* A SuperLSS session's distribution panel lies below the chart, metrics and
+   status, outside the grid, so they fill the column as in any other session.
+   The column scrolls to the panel, whose controls show at the foot of the
+   first screen. */
+.plot-column.has-distribution {
+  position: relative;
+  overflow-y: auto;
+  padding-bottom: 40px;
+}
+
+.plot-column.has-distribution > .distribution-panel {
+  position: absolute;
+  top: calc(100% - 34px);
+  right: 0;
+  left: 0;
+  padding-bottom: 12px;
+}
+
 /* One toolbar above the chart: tool modes, the term, its view options. */
 .context-bar {
   display: flex;
@@ -414,18 +507,18 @@ body {
   display: inline-flex;
   gap: 2px;
   padding: 2px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--surface-subtle);
 }
 
 .tool-rail button {
   display: grid;
   width: 30px;
-  height: 26px;
+  height: var(--control-height);
   place-items: center;
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted);
 }
@@ -563,7 +656,7 @@ body {
   min-width: 30px;
   border-inline: 1px solid var(--border);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   font-variant-numeric: tabular-nums;
   line-height: calc(var(--control-height) - 2px);
   text-align: center;
@@ -580,7 +673,7 @@ body {
 }
 .knot-field select {
   min-width: 132px;
-  height: 26px;
+  height: var(--control-height);
   padding: 0 4px;
   border-color: var(--border);
   color: var(--text);
@@ -621,16 +714,16 @@ body {
 }
 .knot-field input {
   width: 58px;
-  height: 26px;
+  height: var(--control-height);
   border-color: var(--border);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
 }
 #status kbd {
   padding: 0 4px;
   border: 1px solid var(--border-strong);
   border-bottom-width: 2px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
 }

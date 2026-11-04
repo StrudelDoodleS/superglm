@@ -25,6 +25,7 @@ from superglm.distributional.prediction_design import _required_columns
 from superglm.distributional.terms import (
     _coefficient_columns,
     _compiled_predictor,
+    _reference_design,
     _reference_value,
     _resolve_term,
     _term_design,
@@ -128,6 +129,9 @@ class LSSModelView:
         self.lss = lss
         self.X_train = X_train
         self.amount_unit = amount_unit
+        # Each term's sweep, by its arguments: a view is of one fit, so no entry goes
+        # stale, and a caller gets its own copy.
+        self._term_inferences: dict[tuple[str, bool, int, str], Any] = {}
         self.family = lss.family
         self._fitted = fitted
         specs: dict[str, Any] = {}
@@ -150,6 +154,7 @@ class LSSModelView:
             )
         )
         self._reference_row: pd.DataFrame | None = None
+        self._reference_designs: dict[str, NDArray[np.float64]] = {}
         # Why Refit cannot run on the session's training rows, and why Final fit cannot fit
         # its splits, each with the splits it was read for. Owned by this view: one fitted
         # model, over splits a session never changes; a Refit makes a new view.
@@ -187,6 +192,16 @@ class LSSModelView:
     def with_model(self, lss: SuperLSS) -> LSSModelView:
         """A view of ``lss``, another fit of the same model, over the same rows."""
         return LSSModelView(lss, self.X_train, amount_unit=self.amount_unit)
+
+    def term_coefficients(self, key: str) -> NDArray[np.float64]:
+        """The fitted coefficients of the term ``key`` names, as its spec scores them."""
+        parameter, term = split_key(key)
+        qualified, _state, term_slice = _resolve_term(self._fitted, parameter, term)
+        special = self._fitted.layout.term_slices.get(f"{qualified}{_SPECIAL_SUFFIX}")
+        blocks = (term_slice,) if special is None else (term_slice, special)
+        return np.asarray(self._fitted.coefficients, dtype=np.float64)[
+            _coefficient_columns(*blocks)
+        ]
 
     def term_inference(
         self,
@@ -245,9 +260,21 @@ class LSSModelView:
             special = self._fitted.layout.term_slices.get(f"{qualified}{_SPECIAL_SUFFIX}")
             blocks = (term_slice,) if special is None else (term_slice, special)
             row = self.reference_row()
-            design = _term_design(self._fitted, row, state, *blocks)
+            design = _term_design(self._fitted, row, state, *blocks) - self.reference_design(key)
             beta = np.asarray(self._fitted.coefficients, dtype=np.float64)
             own = float((design @ beta[_coefficient_columns(*blocks)])[0])
             eta = float(self.lss.predict_link(row)[parameter].iloc[0])
             self._reference_etas[key] = eta - own
         return self._reference_etas[key]
+
+    def reference_design(self, key: str) -> NDArray[np.float64]:
+        """The term's own columns at its reference level, which its shown effect is measured from."""
+        if key not in self._reference_designs:
+            parameter, term = split_key(key)
+            qualified, state, term_slice = _resolve_term(self._fitted, parameter, term)
+            special = self._fitted.layout.term_slices.get(f"{qualified}{_SPECIAL_SUFFIX}")
+            blocks = (term_slice,) if special is None else (term_slice, special)
+            self._reference_designs[key] = _reference_design(
+                self._fitted, as_eager_frame(self.X_train), parameter, term, state, *blocks
+            )
+        return self._reference_designs[key]

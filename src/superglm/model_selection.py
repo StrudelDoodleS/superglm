@@ -18,6 +18,8 @@ from numpy.typing import NDArray
 
 from superglm._frame import FrameLike, as_eager_frame
 from superglm._utils import weighted_row_sum
+from superglm.distributional.api import SuperLSS
+from superglm.distributional.cross_validation import LSSFolds, parts_ratio
 from superglm.distributions import Tweedie, weighted_log_likelihood
 
 # The full-frame binding pass lives in a neutral module so the public
@@ -63,10 +65,11 @@ class CrossValidationResult:
         points or either is flat there, as for a term a fold's penalty zeroes.
         A fold's distance to the fold mean is NaN where it shares no point
         with another fold: the mean is taken where two or more folds have a
-        value.
+        value. ``None`` for a SuperLSS, whose fold curves
+        ``superglm.editor.edit(model, cv=result)`` draws.
     oof_predictions : ndarray or None
-        Out-of-fold predictions (response scale), same length as *y*.
-        ``None`` unless ``return_oof=True``.
+        Out-of-fold predictions (response scale; a SuperLSS's conditional
+        mean), same length as *y*. ``None`` unless ``return_oof=True``.
     estimators : list or None
         Fitted model per fold. ``None`` unless ``return_estimators=True``.
     n_rows : int or None
@@ -158,6 +161,8 @@ class CrossValidationResult:
         """
         if self.estimators is None:
             raise RuntimeError("return_estimators=True is required for plot_terms_by_fold().")
+        if any(isinstance(model, SuperLSS) for model in self.estimators):
+            raise ValueError(_NO_LSS_FOLD_PLOT)
 
         from superglm.plotting.comparison import plot_term_comparison
 
@@ -205,6 +210,11 @@ class CrossValidationResult:
         )
 
 
+_NO_LSS_FOLD_PLOT = (
+    "plot_terms_by_fold() draws SuperGLM folds. To compare a SuperLSS model's terms across folds, "
+    "pass this result to superglm.editor.edit(model, cv=result): its Cross-validation tab draws "
+    "each term by fold."
+)
 _FOLD_ROWS = (
     "{name} has {rows:,} rows, but the folds were drawn on {expected:,}; pass the data given "
     "to cross_validate."
@@ -241,6 +251,8 @@ def _fingerprint_columns(model, frame) -> tuple[str, ...]:
     replay needs only the rows the model reads to be the same, so a column it
     never reads stays out of the fingerprint and may hold anything.
     """
+    if isinstance(model, SuperLSS):
+        return LSSFolds(model).read_columns()
     if not getattr(model, "_features_explicit", False):
         return tuple(sorted(frame.columns, key=repr))
     names = [*model._specs]
@@ -261,13 +273,16 @@ def _data_fingerprint(X, y, sample_weight=None, offset=None, columns=None) -> st
     when ``None``) in name order, each as its name and :func:`_column_bytes`,
     so swapped features change it and reordered columns do not. Unit weights
     stand in for ``sample_weight=None`` and zeros for ``offset=None``, as every
-    scorer reads them. Every variable-length part carries its length.
+    scorer reads them. Every variable-length part carries its length. Offsets
+    by parameter (a SuperLSS's) follow as each parameter's name and values, in
+    name order, leaving out any that are all zero, as no offset is.
     """
     frame = as_eager_frame(X)
     response = np.asarray(y, dtype=np.float64).ravel()
     n = response.size
     weights = np.ones(n) if sample_weight is None else sample_weight
-    offsets = np.zeros(n) if offset is None else offset
+    by_parameter = offset if isinstance(offset, Mapping) else {}
+    offsets = np.zeros(n) if offset is None or isinstance(offset, Mapping) else offset
     names = sorted(frame.columns if columns is None else columns, key=repr)
     frame.require_columns(tuple(names))
     digest = hashlib.sha256(_framed(b"superglm.cv-fingerprint"))
@@ -279,6 +294,11 @@ def _data_fingerprint(X, y, sample_weight=None, offset=None, columns=None) -> st
         digest.update(_column_bytes(frame, name))
     for column in (response, weights, offsets):
         digest.update(np.ascontiguousarray(column, dtype="<f8").ravel().tobytes())
+    for name in sorted(by_parameter):
+        values = np.ascontiguousarray(by_parameter[name], dtype="<f8").ravel()
+        if np.any(values != 0.0):
+            digest.update(_framed(repr(name).encode("utf-8")))
+            digest.update(values.tobytes())
     return digest.hexdigest()
 
 
@@ -517,10 +537,103 @@ _POOLED_PARTS: dict[str, Callable] = {
 }
 
 
+class _GLMFolds:
+    """How ``cross_validate`` clones, fits, reads and scores a SuperGLM's folds."""
+
+    offset_argument = "offset"
+    warm_argument = "lambda2_init"
+    default_warm_start = True
+
+    @staticmethod
+    def default_fit_mode(fit_kwargs: Mapping[str, Any]) -> str:
+        return "fit"
+
+    def refuse_fit(self, fit_mode: str, fit_kwargs: Mapping[str, Any]) -> None:
+        """A SuperGLM holds its configured penalties fixed, so every fit mode can run."""
+
+    default_scoring = ("deviance",)
+    scorers = _BUILTIN_SCORERS
+    pooled_parts = _POOLED_PARTS
+    unsliced_fit_kwargs: frozenset[str] = frozenset()
+    fold_fit_kwargs: Mapping[str, Any] = {}
+
+    def __init__(self, model) -> None:
+        self.model = model
+
+    def weights_must_be_positive(self) -> bool:
+        return isinstance(self.model._distribution, Tweedie) and (
+            model_weight_semantics(self.model) == "prior"
+        )
+
+    def coerce_offset(self, offset, n: int) -> NDArray[np.float64]:
+        offset = np.asarray(offset, dtype=np.float64)
+        if len(offset) != n:
+            raise ValueError(f"offset length {len(offset)} != y length {n}")
+        return offset
+
+    def level_bindings(self, frame, sample_weight) -> dict[Any, Any]:
+        """One level vocabulary for every fold; a ``bind_levels`` binding on a wider frame outranks it."""
+        existing = dict(getattr(getattr(self.model, "_config", None), "level_bindings", None) or ())
+        return {**_resolve_level_bindings(self.model, frame, sample_weight), **existing}
+
+    def estimator(self, bindings: Mapping[Any, Any]):
+        est = _clone_model(self.model)
+        if bindings:
+            est._config = est._config.with_value(level_bindings=tuple(bindings.items()))
+        return est
+
+    def fit_summary(self, est, fit_mode: str) -> dict[str, Any]:
+        # Under fit_reml the fold's convergence is its smoothing selection's
+        # as well as its final coefficient fit's: PIRLS converging at
+        # lambdas REML never settled is not a converged fold.
+        reml = getattr(est, "_reml_result", None) if fit_mode == "fit_reml" else None
+        summary = {
+            "converged": bool(est._result.converged) and (reml is None or bool(reml.converged)),
+            "n_iter": est._result.n_iter,
+            "effective_df": est._result.effective_df,
+        }
+        if fit_mode == "fit_reml":
+            summary["n_reml_iter"] = 0 if reml is None else int(reml.n_reml_iter)
+        return summary
+
+    def live_lambdas(self, est) -> dict[str, float] | None:
+        # A model with no REML-eligible groups legitimately fits without
+        # smoothing selection (``_reml_result`` is None): nothing to warm-start.
+        return None if getattr(est, "_reml_result", None) is None else live_reml_lambdas(est)
+
+    def predict(self, est, X, offset) -> NDArray[np.float64]:
+        return est.predict(X, offset=offset)
+
+    def curve_similarity(self, estimators, X, sample_weight) -> dict[str, Any]:
+        from superglm.plotting.curve_similarity import build_cv_curve_similarity
+
+        return build_cv_curve_similarity(
+            models=estimators,
+            X=X,
+            sample_weight=sample_weight,
+            n_points=200,
+        )
+
+
+def fold_adapter(model) -> _GLMFolds | LSSFolds:
+    """What ``cross_validate`` and the editor's Run CV read of ``model``'s folds."""
+    return LSSFolds(model) if isinstance(model, SuperLSS) else _GLMFolds(model)
+
+
+def _take_offset(offset, rows: NDArray):
+    """``offset`` at ``rows``: an array, or arrays by parameter."""
+    if offset is None:
+        return None
+    if isinstance(offset, Mapping):
+        return {name: values[rows] for name, values in offset.items()}
+    return offset[rows]
+
+
 def _resolve_scorers(
     scoring: str | Callable | Sequence[str | Callable],
+    builtin: Mapping[str, Callable] = _BUILTIN_SCORERS,
 ) -> dict[str, Callable]:
-    """Normalize *scoring* into a {name: callable} dict."""
+    """Normalize *scoring* into a {name: callable} dict, naming scorers from ``builtin``."""
     if isinstance(scoring, str):
         scoring = (scoring,)
     elif callable(scoring) and not isinstance(scoring, list | tuple):
@@ -530,13 +643,11 @@ def _resolve_scorers(
     unnamed_count = 0
     for s in scoring:
         if isinstance(s, str):
-            if s not in _BUILTIN_SCORERS:
+            if s not in builtin:
                 raise ValueError(
-                    f"Unknown scorer {s!r}. "
-                    f"Built-in scorers: {list(_BUILTIN_SCORERS)}. "
-                    f"Or pass a callable."
+                    f"Unknown scorer {s!r}. Built-in scorers: {list(builtin)}. Or pass a callable."
                 )
-            resolved[s] = _BUILTIN_SCORERS[s]
+            resolved[s] = builtin[s]
         elif callable(s):
             name = getattr(s, "__name__", None) or f"scorer_{unnamed_count}"
             if name in resolved:
@@ -562,21 +673,21 @@ def cross_validate(
     *,
     cv,
     sample_weight: NDArray | None = None,
-    offset: NDArray | None = None,
+    offset: NDArray | Mapping[str, NDArray] | None = None,
     groups: NDArray | None = None,
-    fit_mode: str = "fit",
-    scoring: str | Callable | Sequence[str | Callable] = ("deviance",),
+    fit_mode: str | None = None,
+    scoring: str | Callable | Sequence[str | Callable] | None = None,
     return_estimators: bool = False,
     return_oof: bool = False,
     error_score: float | str = np.nan,
     fit_kwargs: Mapping[str, Any] | None = None,
-    warm_start: bool = True,
+    warm_start: bool | None = None,
 ) -> CrossValidationResult:
-    """Cross-validate a SuperGLM model with a pluggable splitter.
+    """Cross-validate a SuperGLM or SuperLSS model with a pluggable splitter.
 
     Parameters
     ----------
-    model : SuperGLM
+    model : SuperGLM or SuperLSS
         An unfitted (or fitted) model. A fresh clone is created for each fold;
         the input model is never mutated.
     X : pandas or eager Polars DataFrame
@@ -595,18 +706,33 @@ def cross_validate(
         Under ``"prior"`` they state a precision,
         ``Var(Y_i) = phi * V(mu_i) / w_i``; a Tweedie fit additionally
         requires them finite and strictly positive.
-    offset : array-like, optional
-        Offset term, sliced per fold.
+    offset : array-like, or mapping of str to array-like for a SuperLSS, optional
+        Offset term, sliced per fold. A SuperLSS takes one array per family
+        parameter, keyed by parameter name as in its ``offsets`` argument.
     groups : array-like, optional
         Group labels forwarded to ``cv.split()``.
-    fit_mode : {"fit", "fit_reml"}
-        Which fit method to call on each fold estimator.
-    scoring : str, callable, or sequence thereof
-        Metrics to evaluate. Built-in: ``"deviance"``, ``"nll"``, ``"gini"``.
-        Built-in deviance and NLL divide their weighted totals by the
-        likelihood size the declared contract implies: ``sum(sample_weight)``
-        under ``"frequency"``, the count of positive-weight rows under
-        ``"prior"``. Gini remains a separately weighted ranking metric.
+    fit_mode : {"fit", "fit_reml"}, optional
+        By default ``"fit"`` for a SuperGLM. A SuperLSS has no configured
+        smoothing to hold fixed, so its default is ``"fit_reml"``, or ``"fit"``
+        when ``fit_kwargs`` gives ``lambdas``. On an unfitted SuperLSS with
+        smooth terms, ``"fit"`` needs those ``lambdas``: without them every
+        fold fails, and each failure is logged.
+        Which fit method to call on each fold estimator. ``"fit"`` holds the
+        smoothing parameters fixed; ``"fit_reml"`` selects them again on each
+        fold's training rows.
+    scoring : str, callable, or sequence thereof, optional
+        Metrics to evaluate. Built-in for a SuperGLM: ``"deviance"``, ``"nll"``,
+        ``"gini"``; ``"deviance"`` by default. Built-in for a SuperLSS:
+        ``"nll"``, ``"crps"``, ``"gini"``, ``"actual_expected"``, all of them by
+        default. A family with no distribution function has no ``"crps"``, so it
+        is left out by default and NaN if asked for. A SuperLSS has no single
+        mean predictor to take a deviance of. Built-in
+        deviance, NLL and CRPS divide their weighted totals by the likelihood
+        size the declared contract implies: ``sum(sample_weight)`` under
+        ``"frequency"``, the count of positive-weight rows under ``"prior"``, so
+        the NLL of the two model types can be compared on the same folds.
+        ``"actual_expected"`` is ``sum(w * y) / sum(w * mean)``. Gini remains a
+        separately weighted ranking metric.
         Callables must follow ``scorer(model, X, y, *, sample_weight, offset) -> float | dict``.
     return_estimators : bool
         If True, keep the fitted model from each fold.
@@ -617,36 +743,62 @@ def cross_validate(
     fit_kwargs : mapping, optional
         Extra keyword arguments for every fold's fit call, for example
         ``{"max_reml_iter": 100}``. ``sample_weight`` and ``offset`` come
-        from the split and cannot be set here.
-    warm_start : bool, default True
+        from the split and cannot be set here. Nor can a SuperLSS's
+        ``truncation`` and ``censored``: its folds are scored on complete rows.
+    warm_start : bool, optional
         Under ``fit_mode="fit_reml"``, start every fold after the first
         converged one from that fold's smoothing parameters
-        (``lambda2_init``), so later folds take fewer outer iterations.
-        Components frozen as flat start cold, with the rest of their penalty
-        block. Each fold still searches to its own convergence test. Set
-        ``False`` to start every fold cold; a ``lambda2_init`` in
-        ``fit_kwargs`` takes precedence for every fold.
+        (``lambda2_init``, or ``lambdas`` for a SuperLSS). Components frozen as
+        flat start cold, with the rest of their penalty block. Each fold still
+        searches to its own convergence test. ``True`` by default for a
+        SuperGLM, whose later folds then take fewer outer iterations. ``False``
+        by default for a SuperLSS: its Fellner-Schall search can take longer
+        from another fold's parameters than from its own data-scaled start, and
+        can reach its iteration limit. That argument in ``fit_kwargs`` takes
+        precedence for every fold.
 
     Returns
     -------
     CrossValidationResult
         Per-fold scores, mean/std aggregates, and optionally out-of-fold
         predictions and fitted estimators.
+
+    Notes
+    -----
+    Everything a fit estimates is estimated inside its fold, and the scores
+    read held-out rows only. ``std_scores`` describes how the folds spread; it
+    is not a standard error of the mean, because folds share training rows
+    (Bates, Hastie and Tibshirani, 2024).
     """
     # ── Validation ────────────────────────────────────────────────
+    folds = fold_adapter(model)
     if not hasattr(cv, "split") or not callable(cv.split):
         raise TypeError("cv must be a splitter object with a .split() method")
 
+    fit_kwargs = dict(fit_kwargs or {})
+    if fit_mode is None:
+        fit_mode = folds.default_fit_mode(fit_kwargs)
     if fit_mode not in ("fit", "fit_reml"):
         raise ValueError(f"fit_mode must be 'fit' or 'fit_reml', got {fit_mode!r}")
-    fit_kwargs = dict(fit_kwargs or {})
-    reserved_fit_kwargs = {"sample_weight", "offset"} & set(fit_kwargs)
+    folds.refuse_fit(fit_mode, fit_kwargs)
+    reserved_fit_kwargs = {"sample_weight", folds.offset_argument} & set(fit_kwargs)
     if reserved_fit_kwargs:
         raise ValueError(
             f"fit_kwargs cannot set {sorted(reserved_fit_kwargs)}: cross_validate slices "
             "sample_weight and offset per fold; pass them as its own arguments"
         )
-    reml_warm_start = warm_start and fit_mode == "fit_reml" and "lambda2_init" not in fit_kwargs
+    unsliced_fit_kwargs = folds.unsliced_fit_kwargs & set(fit_kwargs)
+    if unsliced_fit_kwargs:
+        raise ValueError(
+            f"fit_kwargs cannot set {sorted(unsliced_fit_kwargs)}: cross_validate fits and "
+            "scores complete rows; validate a truncated or censored fit on a held-out split "
+            "with model.scores(X, y, which=('log',), truncation=..., censored=...)"
+        )
+    if warm_start is None:
+        warm_start = folds.default_warm_start
+    reml_warm_start = (
+        warm_start and fit_mode == "fit_reml" and folds.warm_argument not in fit_kwargs
+    )
     warm_lambdas: dict[str, float] | None = None
 
     y = np.asarray(y, dtype=np.float64)
@@ -670,30 +822,28 @@ def cross_validate(
             raise ValueError("sample_weight must contain only real numeric values") from exc
         if not np.all(np.isfinite(sample_weight)):
             raise ValueError("sample_weight must contain only finite values")
-        if isinstance(model._distribution, Tweedie) and (model_weight_semantics(model) == "prior"):
+        if folds.weights_must_be_positive():
             if np.any(sample_weight <= 0.0):
                 raise ValueError("Tweedie sample_weight must be strictly positive")
         elif np.any(sample_weight < 0.0):
             raise ValueError("sample_weight must be nonnegative")
 
     if offset is not None:
-        offset = np.asarray(offset, dtype=np.float64)
-        if len(offset) != n:
-            raise ValueError(f"offset length {len(offset)} != y length {n}")
+        offset = folds.coerce_offset(offset, n)
 
     if groups is not None:
         groups = np.asarray(groups)
         if len(groups) != n:
             raise ValueError(f"groups length {len(groups)} != y length {n}")
 
-    scorers = _resolve_scorers(scoring)
+    scorers = _resolve_scorers(folds.default_scoring if scoring is None else scoring, folds.scorers)
     score_names = list(scorers.keys())
 
     # One level vocabulary for every fold, resolved before the split, so a level
-    # missing from a training fold does not fail it at predict time. A
-    # ``bind_levels`` binding on a wider frame outranks this one.
-    existing = dict(getattr(getattr(model, "_config", None), "level_bindings", None) or ())
-    level_bindings = {**_resolve_level_bindings(model, frame, sample_weight), **existing}
+    # missing from a training fold does not fail it at predict time.
+    level_bindings = folds.level_bindings(frame, sample_weight)
+    # A model that cannot be copied is refused here, not once per fold.
+    folds.estimator(level_bindings)
 
     # ── Fold loop ─────────────────────────────────────────────────
     fold_records: list[dict[str, Any]] = []
@@ -701,15 +851,15 @@ def cross_validate(
     estimators_list: list | None = [] if return_estimators else None
     oof: NDArray | None = np.full(n, np.nan) if return_oof else None
     pooled_numerators: dict[str, float] = {
-        name: 0.0 for name in score_names if name in _POOLED_PARTS
+        name: 0.0 for name in score_names if name in folds.pooled_parts
     }
     pooled_denominators: dict[str, float] = {
-        name: 0.0 for name in score_names if name in _POOLED_PARTS
+        name: 0.0 for name in score_names if name in folds.pooled_parts
     }
     # Score columns a callable wrote last in some scored fold are not built-in,
     # whatever their name; a fold that failed partway is left out.
     not_built_in = {
-        name for name, scorer in scorers.items() if scorer is not _BUILTIN_SCORERS.get(name)
+        name for name, scorer in scorers.items() if scorer is not folds.scorers.get(name)
     }
 
     for fold_i, (train_idx, test_idx) in enumerate(cv.split(X, y, groups)):
@@ -730,53 +880,42 @@ def cross_validate(
         y_test = y[test_idx]
         sw_train = sample_weight[train_idx] if sample_weight is not None else None
         sw_test = sample_weight[test_idx] if sample_weight is not None else None
-        off_train = offset[train_idx] if offset is not None else None
-        off_test = offset[test_idx] if offset is not None else None
+        off_train = _take_offset(offset, train_idx)
+        off_test = _take_offset(offset, test_idx)
 
         try:
             # Clone and fit
-            est = _clone_model(model)
-            if level_bindings:
-                est._config = est._config.with_value(level_bindings=tuple(level_bindings.items()))
+            est = folds.estimator(level_bindings)
             t0 = time.perf_counter()
             fit_fn = getattr(est, fit_mode)
-            fold_kwargs = dict(fit_kwargs)
+            fold_kwargs = {**folds.fold_fit_kwargs, **fit_kwargs}
             # An empty mapping starts nothing warm (every component of the
             # first converged fold was left on a flat plateau): those folds
             # keep the model's own configured start, and read cold.
             warm_this_fold = bool(reml_warm_start and warm_lambdas)
             if warm_this_fold:
-                fold_kwargs["lambda2_init"] = warm_lambdas
-            fit_fn(X_train, y_train, sample_weight=sw_train, offset=off_train, **fold_kwargs)
-            record["fit_time_s"] = time.perf_counter() - t0
-            # Under fit_reml the fold's convergence is its smoothing selection's
-            # as well as its final coefficient fit's: PIRLS converging at
-            # lambdas REML never settled is not a converged fold.
-            reml = getattr(est, "_reml_result", None) if fit_mode == "fit_reml" else None
-            record["converged"] = bool(est._result.converged) and (
-                reml is None or bool(reml.converged)
+                fold_kwargs[folds.warm_argument] = warm_lambdas
+            fit_fn(
+                X_train,
+                y_train,
+                sample_weight=sw_train,
+                **{folds.offset_argument: off_train},
+                **fold_kwargs,
             )
-            record["n_iter"] = est._result.n_iter
-            record["effective_df"] = est._result.effective_df
+            record["fit_time_s"] = time.perf_counter() - t0
+            record.update(folds.fit_summary(est, fit_mode))
             if fit_mode == "fit_reml":
-                record["n_reml_iter"] = 0 if reml is None else int(reml.n_reml_iter)
                 record["warm_started"] = warm_this_fold
-                # A model with no REML-eligible groups legitimately fits without
-                # smoothing selection (``_reml_result`` is None): nothing to warm-start.
-                if (
-                    reml_warm_start
-                    and warm_lambdas is None
-                    and record["converged"]
-                    and reml is not None
-                ):
-                    warm_lambdas = live_reml_lambdas(est)
+                if reml_warm_start and warm_lambdas is None and record["converged"]:
+                    warm_lambdas = folds.live_lambdas(est)
 
             # Score
             t1 = time.perf_counter()
             written_by_builtin: dict[str, bool] = {}
+            fold_parts: dict[str, tuple[float, float]] = {}
             for sname, sfn in scorers.items():
-                pooled_fn = _POOLED_PARTS.get(sname)
-                if pooled_fn is not None and sfn is _BUILTIN_SCORERS.get(sname):
+                pooled_fn = folds.pooled_parts.get(sname)
+                if pooled_fn is not None and sfn is folds.scorers.get(sname):
                     # One evaluation per fold: the per-fold score is the pooled
                     # parts' quotient. Only the built-in scorer itself takes
                     # this route, never a custom callable of the same name.
@@ -787,10 +926,9 @@ def cross_validate(
                         sample_weight=sw_test,
                         offset=off_test,
                     )
-                    record[sname] = float(numerator / denominator)
+                    record[sname] = parts_ratio(numerator, denominator)
                     written_by_builtin[sname] = True
-                    pooled_numerators[sname] += numerator
-                    pooled_denominators[sname] += denominator
+                    fold_parts[sname] = (numerator, denominator)
                     continue
                 result = sfn(
                     est,
@@ -810,23 +948,26 @@ def cross_validate(
                     written_by_builtin.update(dict.fromkeys(result, False))
                 else:
                     record[sname] = float(result)
-                    written_by_builtin[sname] = sfn is _BUILTIN_SCORERS.get(sname)
-                    pooled_fn = _POOLED_PARTS.get(sname)
+                    written_by_builtin[sname] = sfn is folds.scorers.get(sname)
+                    pooled_fn = folds.pooled_parts.get(sname)
                     if pooled_fn is not None:
-                        numerator, denominator = pooled_fn(
+                        fold_parts[sname] = pooled_fn(
                             est,
                             X_test,
                             y_test,
                             sample_weight=sw_test,
                             offset=off_test,
                         )
-                        pooled_numerators[sname] += numerator
-                        pooled_denominators[sname] += denominator
             record["score_time_s"] = time.perf_counter() - t1
 
             # OOF predictions
             if oof is not None:
-                oof[test_idx] = est.predict(X_test, offset=off_test)
+                oof[test_idx] = folds.predict(est, X_test, off_test)
+
+            # Only a fold that scored completely joins the pooled totals.
+            for sname, (numerator, denominator) in fold_parts.items():
+                pooled_numerators[sname] += numerator
+                pooled_denominators[sname] += denominator
 
             if estimators_list is not None:
                 estimators_list.append(est)
@@ -868,20 +1009,13 @@ def cross_validate(
     pooled_scores = {
         name: pooled_numerators[name] / pooled_denominators[name]
         for name in pooled_numerators
-        if pooled_denominators[name] > 0.0
+        if pooled_denominators[name] != 0.0
     }
     std_scores = {c: float(fold_scores[c].std(ddof=0)) for c in all_score_cols}
 
     curve_similarity = None
     if estimators_list is not None:
-        from superglm.plotting.curve_similarity import build_cv_curve_similarity
-
-        curve_similarity = build_cv_curve_similarity(
-            models=estimators_list,
-            X=X,
-            sample_weight=sample_weight,
-            n_points=200,
-        )
+        curve_similarity = folds.curve_similarity(estimators_list, X, sample_weight)
 
     columns = _fingerprint_columns(model, frame)
     try:

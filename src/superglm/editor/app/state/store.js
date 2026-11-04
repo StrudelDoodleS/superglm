@@ -29,7 +29,6 @@ export function createInitialEditorState(snapshot = null) {
       inspectorPane: "summary",
       inspectorOpen: true,
       preview: null,
-      selectionPreview: null,
       selectionAnchor: null,
       selectionSpan: null
     },
@@ -145,23 +144,59 @@ export function selectionIndicesEqual(left, right) {
   return left.every((value, index) => value === right[index]);
 }
 
-/** @param {EditorState} state @param {string} term @param {number[]} indices */
-export function setSelectionPreview(state, term, indices) {
-  const normalized = normalizeSelectionIndices(indices);
-  const current = state.view.selectionPreview;
+/**
+ * The share of a term's weight that a selection holds, as Python computes it: from the
+ * term's weights where any is positive, else from one per point.
+ * @param {TermPayload} term @param {number} total @param {number[]} indices
+ */
+function selectedWeightShare(term, total, indices) {
+  if (!(total > 0)) return 0;
+  const weights = term.weights;
+  const usable = weights?.length === term.n_points && weights.some((weight) => weight > 0);
+  let selected = 0;
+  for (const index of indices) selected += usable ? weights[index] : 1;
+  return selected / total;
+}
+
+/** @param {TermPayload} term @param {number[]} indices @returns {TermPayload} */
+function withSelectedShare(term, indices) {
+  const { impact } = term;
+  if (!impact) return term;
+  const share = selectedWeightShare(term, impact.total_weight ?? 0, indices);
+  if (impact.selected_weight_share === share) return term;
+  return { ...term, impact: { ...impact, selected_weight_share: share } };
+}
+
+/**
+ * Show a term and its selection. These are the page's to decide and need no reply: the
+ * chart keeps its epoch, and createEditorActions tells Python in the background.
+ * @param {EditorState} state @param {string} term @param {number[]} indices
+ */
+export function commitLocalView(state, term, indices) {
+  const snapshot = state.remote.snapshot;
+  const payload = snapshot?.terms[term];
+  if (!snapshot || !payload) return state;
+  const selection = normalizeSelectionIndices(indices);
   if (
-    current?.term === term &&
-    selectionIndicesEqual(current.indices, normalized)
+    snapshot.selected_term === term &&
+    state.view.activeTerm === term &&
+    selectionIndicesEqual(snapshot.selection[term] ?? [], selection)
   ) {
     return state;
   }
-  return patchView(state, { selectionPreview: { term, indices: normalized } });
-}
-
-/** @param {EditorState} state */
-export function clearSelectionPreview(state) {
-  if (state.view.selectionPreview === null) return state;
-  return patchView(state, { selectionPreview: null });
+  return {
+    ...state,
+    remote: {
+      ...state.remote,
+      snapshot: {
+        ...snapshot,
+        selected_term: term,
+        selection: { ...snapshot.selection, [term]: selection },
+        terms: { ...snapshot.terms, [term]: withSelectedShare(payload, selection) }
+      }
+    },
+    view: { ...state.view, activeTerm: term }
+  };
 }
 
 /** @param {EditorSnapshot|null} current @param {EditorSnapshot} incoming */
@@ -179,7 +214,7 @@ function isOlderGeneratedSnapshot(current, incoming) {
 function clearRemotePreviews(state) {
   return {
     ...state,
-    view: { ...state.view, preview: null, selectionPreview: null }
+    view: { ...state.view, preview: null }
   };
 }
 
@@ -267,41 +302,13 @@ export function commitRemote(state, snapshot) {
       summary: state.remote.summary,
       chartEpoch: state.remote.chartEpoch + 1
     },
-    view: { ...state.view, preview: null, selectionPreview: null, selectionAnchor },
+    view: { ...state.view, preview: null, selectionAnchor },
     request
   };
   return {
     ...candidate,
     view: { ...candidate.view, activeTerm: selectActiveTermName(candidate) }
   };
-}
-
-/** @param {EditorState} state @param {EditorSnapshot} snapshot */
-export function commitSelectionRemote(state, snapshot) {
-  const current = state.remote.snapshot;
-  if (isOlderGeneratedSnapshot(current, snapshot)) {
-    return clearRemotePreviews(state);
-  }
-  const hasChartGenerations = Number.isInteger(current?.chart_generation) &&
-    Number.isInteger(snapshot.chart_generation);
-  const sameChart = hasChartGenerations
-    ? current?.chart_generation === snapshot.chart_generation
-    : current?.model_revision === snapshot.model_revision;
-  if (
-    current &&
-    sameChart &&
-    current.selected_term === snapshot.selected_term
-  ) {
-    return {
-      ...state,
-      remote: {
-        ...state.remote,
-        snapshot
-      },
-      view: { ...state.view, selectionPreview: null }
-    };
-  }
-  return commitRemote(state, snapshot);
 }
 
 /** @param {EditorState} state @param {StructuralTransitionEnvelope} envelope */

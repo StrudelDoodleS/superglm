@@ -420,3 +420,16 @@ def test_session_to_model_uses_offsets_by_parameter():
     refit_offsets = session._resolve_refit_data(None, None, None, None)[3]
     assert refit_offsets.keys() == case.offsets.keys()
     np.testing.assert_array_equal(refit_offsets["mean"], case.offsets["mean"])
+
+
+def test_an_ordered_spline_term_opens_in_the_widget():
+    # Its handles read the term's coefficients from the SuperLSS layout.
+    session = open_case(ordered_case())
+    widget = session.widget()
+    try:
+        term = widget._state()["terms"]["scale:region"]
+    finally:
+        widget.close()
+    assert term["term_type"] == "ordered categorical"
+    assert term["levels"] == list(REGIONS)
+    assert isinstance(term["spline_view"]["available"], bool)

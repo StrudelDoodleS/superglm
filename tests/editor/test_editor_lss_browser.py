@@ -7,11 +7,12 @@ from urllib.parse import urlsplit
 
 import joblib
 import pytest
+from sklearn.model_selection import KFold
+from tests._lss_editor_fixtures import lognormal_case
 from tests.editor._chart_layout import wait_for_chart_to_fit
 from tests.editor.test_editor_workspace_browser import select_chart_tool
 
-from superglm import SuperLSS
-from superglm.editor import widget as widget_module
+from superglm import SuperLSS, cross_validate
 from superglm.editor.lss.availability import LSS_UNAVAILABLE
 
 pytest.importorskip("playwright.sync_api")
@@ -86,40 +87,109 @@ def test_spread_curve_axis_and_drag(open_lss_editor_page):
         assert chip.get_attribute("data-role") == "spread"
 
 
-def test_cv_tab_hidden_and_final_fit_offered(open_lss_editor_page):
-    with open_lss_editor_page() as (page, session):
-        assert page.locator("#cvTab").is_hidden()
-        assert page.locator("#validationTab").is_visible()
-        assert page.locator("#finalTab").is_visible()
+def test_cv_tab_draws_folds_and_runs_cv_and_final_fit(open_lss_editor_page):
+    case = lognormal_case()
+    cv = cross_validate(
+        case.model,
+        case.X,
+        case.y,
+        cv=KFold(3, shuffle=True, random_state=4),
+        fit_mode="fit_reml",
+        return_estimators=True,
+        error_score="raise",
+    )
+    with open_lss_editor_page(cv=cv) as (page, _session):
+        page.locator("#cvTab").click()
+        frame = page.locator("#reportFrame")
+        frame.locator(".cv-card").first.wait_for()
+        titles = frame.locator(".cv-card-title").all_inner_texts()
+        assert [title.split("\n")[0].split(" ·")[0] for title in titles] == [
+            "Log score",
+            "CRPS",
+            "Gini",
+            "Actual / expected",
+        ]
+        assert "closer to 1 is better" in titles[3]
+        assert frame.locator(".cv-fold-table tbody tr").count() == 4
+        assert "A/E" in frame.locator(".cv-fold-table thead").inner_text()
+        terms = frame.locator(".cv-term-list")
+        assert terms.locator(".feature-group-title").all_inner_texts() == ["Average", "Spread"]
+        listed = terms.locator(".cv-term").evaluate_all("els => els.map(e => e.dataset.cvTerm)")
+        assert [key.split(":")[0] for key in listed] == ["mean"] * 3 + ["scale"] * 2
+        assert (
+            "age" in frame.locator('.cv-term[data-cv-term="scale:age"] .cv-term-name').inner_text()
+        )
+        assert page.locator("#finalFitRun").count() == 0
 
-        # Arrow keys step Validation -> Final Fit, past the tab that is not offered.
-        page.locator("#validationTab").focus()
-        page.keyboard.press("ArrowRight")
-        assert page.evaluate("document.activeElement?.id") == "finalTab"
-        page.keyboard.press("ArrowRight")
-        assert page.evaluate("document.activeElement?.id") == "editorTab"
-        page.keyboard.press("ArrowLeft")
-        page.keyboard.press("ArrowLeft")
-        assert page.evaluate("document.activeElement?.id") == "validationTab"
+        # The table draws the folds: each holds out its own piece of the book.
+        assert frame.locator(".cv-held").count() == 3
+        assert frame.locator(".cv-held .is-out").count() == 3
+        assert "Rounds" in frame.locator(".cv-fold-table thead").inner_text()
 
-        page.locator("#finalTab").click()
-        run = page.locator("#finalFitRun")
-        run.wait_for(state="visible")
-        # The model was opened with its rows, so the plan offers the fit.
-        assert widget_module.final_fit_reason(session) is None
+        pill = page.locator("#jobPill")
+        assert pill.is_hidden()
+        run = frame.get_by_role("button", name="Run CV on current model")
         assert run.is_enabled()
-        assert page.locator("#finalFitRunNote").is_hidden()
+        # Leaving the tab while it runs: the pill carries on and says how it ended.
+        run.click()
+        page.locator("#editorTab").click()
+        pill.wait_for(state="visible", timeout=30000)
+        page.wait_for_function(
+            "() => /Run CV finished: Log score/.test(document.querySelector('#jobPill').innerText)",
+            timeout=60000,
+        )
+        pill.click()
+        assert page.locator("#cvTab").get_attribute("aria-selected") == "true"
+        frame.locator('[data-origin="run"]').first.wait_for(timeout=60000)
+        assert "Current model" in frame.locator(".cv-card").first.inner_text()
+        pill.wait_for(state="hidden", timeout=30000)
 
-
-def test_final_fit_button_follows_the_plan_reason(open_lss_editor_page, monkeypatch):
-    reason = "Final fit needs a validation split. Give the editor one, then open it again."
-    monkeypatch.setattr(widget_module, "final_fit_reason", lambda session: reason)
-    with open_lss_editor_page() as (page, _session):
+        frame.get_by_role("button", name="Final fit on all rows").click()
+        page.wait_for_function(
+            "() => /Final fit finished/.test(document.querySelector('#reportFrame').innerText)",
+            timeout=60000,
+        )
         page.locator("#finalTab").click()
-        run = page.locator("#finalFitRun")
-        run.wait_for(state="visible")
-        assert run.is_disabled()
-        assert run.get_attribute("data-popover-body") == reason
+        frame.get_by_text("Refitted on", exact=False).first.wait_for()
+
+
+def test_toolbar_tooltips_stay_in_one_place_along_the_row(open_lss_editor_page):
+    with open_lss_editor_page() as (page, _session):
+        popover = page.locator("#uiPopover")
+        edges = {}
+        for button in ("#revertAction", "#refreshAction", "#revertAction"):
+            page.locator(button).hover()
+            popover.wait_for(state="visible")
+            box = popover.bounding_box()
+            title = popover.locator("[data-popover-heading]").inner_text()
+            edges.setdefault(button, []).append((title, box["x"] + box["width"], box["y"]))
+        assert edges["#revertAction"][0][0] == "Revert to original model"
+        assert edges["#refreshAction"][0][0] == "Refresh from Python"
+        assert edges["#revertAction"][0][1:] == edges["#refreshAction"][0][1:]
+        assert edges["#revertAction"][1][1:] == edges["#refreshAction"][0][1:]
+
+        # In the gap between two buttons it stays open; away from the row it closes.
+        revert = page.locator("#revertAction").bounding_box()
+        refresh = page.locator("#refreshAction").bounding_box()
+        gap_x = (revert["x"] + revert["width"] + refresh["x"]) / 2
+        assert revert["x"] + revert["width"] < gap_x < refresh["x"]
+        page.mouse.move(gap_x, revert["y"] + revert["height"] / 2)
+        assert popover.is_visible()
+        page.mouse.move(4, 400)
+        popover.wait_for(state="hidden")
+
+
+def test_a_tooltip_does_not_outlive_a_button_re_rendered_away(open_lss_editor_page):
+    with open_lss_editor_page() as (page, _session):
+        popover = page.locator("#uiPopover")
+        page.locator("#refreshAction").hover()
+        popover.wait_for(state="visible")
+        page.evaluate("""() => {
+          const button = document.getElementById('refreshAction');
+          button.replaceWith(button.cloneNode(true));
+        }""")
+        page.mouse.move(4, 400)
+        popover.wait_for(state="hidden")
 
 
 def test_joblib_export_keeps_history(open_lss_editor_page):

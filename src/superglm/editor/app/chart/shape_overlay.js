@@ -3,7 +3,7 @@
 // shape, drawn beneath the curve so the pinned stretch reads as part of the plot.
 
 import { shapeRangeDescription, shapeRangeExtent } from "../shapes.js";
-import { el, text } from "./svg.js";
+import { el, measureLabel, text } from "./svg.js";
 
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
 /** @typedef {import('../shapes.js').DisplayAxis} DisplayAxis */
@@ -59,11 +59,11 @@ export function drawShapeOverlay(svg, { term, view, sx, margin, innerW, innerH }
 }
 
 /**
- * A drawn label's width: measured where the SVG has layout, else estimated.
+ * A label's width: measured where there is layout, else estimated.
  * @param {SVGElement} label
  */
 export function labelWidth(label) {
-  const measure = /** @type {{getComputedTextLength?:()=>number}} */ (label).getComputedTextLength;
-  const measured = typeof measure === "function" ? measure.call(label) : 0;
-  return measured > 0 ? measured : (label.textContent || "").length * 6.5;
+  const value = label.textContent || "";
+  const measured = measureLabel(label.getAttribute("class") || "", value);
+  return measured > 0 ? measured : value.length * 6.5;
 }

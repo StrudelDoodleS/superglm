@@ -3,6 +3,26 @@
 /** @typedef {(input:RequestInfo|URL, init?:RequestInit)=>Promise<Response>} FetchImpl */
 /** @typedef {{token?:string, fetchImpl?:FetchImpl}} EditorClientOptions */
 
+const KNOWN_STATE_HEADER = "X-SuperGLM-Editor-Known-State";
+const NO_KNOWN_STATE = "none";
+
+/**
+ * @typedef {Object} CutState a state reply that names each term's version and may leave
+ *   out the terms this client already holds at that version
+ * @property {number} state_generation
+ * @property {Record<string, unknown>} terms
+ * @property {Record<string, string>} term_versions
+ */
+
+/** @param {unknown} value @returns {value is CutState} */
+function isCutState(value) {
+  if (value === null || typeof value !== "object") return false;
+  const state = /** @type {Record<string, unknown>} */ (value);
+  return Number.isInteger(state.state_generation) &&
+    state.terms !== null && typeof state.terms === "object" &&
+    state.term_versions !== null && typeof state.term_versions === "object";
+}
+
 export class EditorAPIError extends Error {
   /**
    * @param {string} message
@@ -68,11 +88,55 @@ export function createEditorClient({
     return { ...options, headers };
   }
 
-  /** @param {string} path @param {RequestInit} [options] @returns {Promise<unknown>} */
-  async function requestJSON(path, options = {}) {
+  /** @param {string} path @param {RequestInit} options @returns {Promise<unknown>} */
+  async function sendJSON(path, options) {
     const response = await fetchImpl(path, withEditorToken(options));
     if (!response.ok) throw await responseError(response);
     return response.json();
+  }
+
+  // The page's copy of every term, as of the newest state reply it has merged. A
+  // reply leaves out the terms unchanged since the reply this names, so an unchanged
+  // term keeps its object from one snapshot to the next. Terms are never written to
+  // in place: a drag edits a clone.
+  /** @type {{generation:number, terms:Record<string, unknown>, versions:Record<string, string>}|null} */
+  let replica = null;
+
+  /**
+   * @param {CutState} state
+   * @returns {CutState|null} the state with every term, or null where the copy holds
+   *   another version of a term the reply left out
+   */
+  function mergedState(state) {
+    /** @type {Record<string, unknown>} */
+    const terms = {};
+    for (const [name, version] of Object.entries(state.term_versions)) {
+      if (name in state.terms) terms[name] = state.terms[name];
+      else if (replica?.versions[name] === version) terms[name] = replica.terms[name];
+      else return null;
+    }
+    if (!replica || state.state_generation >= replica.generation) {
+      replica = { generation: state.state_generation, terms, versions: state.term_versions };
+    }
+    return { ...state, terms };
+  }
+
+  /** @param {CutState} state a copy that cannot complete it asks for every term */
+  async function wholeState(state) {
+    return mergedState(state) ?? mergedState(/** @type {CutState} */ (await sendJSON("/state", {
+      headers: { [KNOWN_STATE_HEADER]: NO_KNOWN_STATE }
+    })));
+  }
+
+  /** @param {string} path @param {RequestInit} [options] @returns {Promise<unknown>} */
+  async function requestJSON(path, options = {}) {
+    const headers = new Headers(options.headers || {});
+    headers.set(KNOWN_STATE_HEADER, replica ? String(replica.generation) : NO_KNOWN_STATE);
+    const reply = await sendJSON(path, { ...options, headers });
+    if (isCutState(reply)) return wholeState(reply);
+    const state = /** @type {{state?:unknown}|null} */ (reply)?.state;
+    if (isCutState(state)) return { .../** @type {object} */ (reply), state: await wholeState(state) };
+    return reply;
   }
 
   /** @param {string} path @param {Record<string, unknown>} payload */
@@ -111,6 +175,15 @@ export function createEditorClient({
     return postJSON("/unsmoothed", { term });
   }
 
+  /**
+   * The distribution panel's data for one feature of a SuperLSS session.
+   * @param {string} feature a data column or a term key such as "scale:age"
+   * @returns {Promise<unknown>} a DistributionPanelResponse, or a superseded reply
+   */
+  function distribution(feature) {
+    return postJSON("/distribution", { feature });
+  }
+
   /** @param {string} kind "cv" or "final_fit" */
   function jobStart(kind) {
     return postJSON("/job_start", { kind });
@@ -127,8 +200,8 @@ export function createEditorClient({
   }
 
   return {
-    requestJSON, postJSON, requestBlob, getState, ratingTable, freeLevels, unsmoothed, jobStart,
-    jobStatus, jobCancel
+    requestJSON, postJSON, requestBlob, getState, ratingTable, freeLevels, unsmoothed,
+    distribution, jobStart, jobStatus, jobCancel
   };
 }
 

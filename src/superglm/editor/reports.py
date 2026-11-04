@@ -7,6 +7,7 @@ from typing import Any
 
 from superglm.editor.cv import FINAL_NOT_RUN, cv_report_payload
 from superglm.editor.evaluation import evaluation_datasets
+from superglm.editor.lss.display import fold_chart_display
 from superglm.editor.lss.validation import LSS_METRIC_LABELS, lss_split_reason
 from superglm.editor.lss.view import is_lss
 from superglm.editor.metrics import METRIC_LABELS, compute_dataset_metrics
@@ -104,11 +105,15 @@ def _final_fit_section(widget, final_fit, *, model_revision: int) -> dict[str, A
         "stale": final_fit.model_revision != model_revision,
         "n_rows": final_fit.n_rows,
         "splits": list(final_fit.splits),
-        "carried": list(final_fit.carried),
+        "carried": [
+            fold_chart_display(name).label if is_lss(final_fit.model) else name
+            for name in final_fit.carried
+        ],
         # Waiting changes are never in a Final fit, and staging or undoing one
         # leaves the model revision alone, so the count is the one waiting now.
         "pending": len(widget.session.pending),
         "summary": compact,
+        "test_scores": final_fit.test_scores,
     }
 
 
@@ -203,7 +208,7 @@ def _validation_note(session, splits: list[dict[str, Any]]) -> str:
         return "No explicit split data supplied; metrics are in-sample on retained fit data."
     if "validation" not in explicit:
         return "No validation split supplied; live editor metrics fall back to train data."
-    return "Split metrics are display-only evidence; CV fitting is supplied outside the editor."
+    return "Each split scored by the model as edited. Δ is the change from the last fit."
 
 
 __all__ = [

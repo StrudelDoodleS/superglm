@@ -40,13 +40,8 @@ LSS_UNAVAILABLE: Mapping[str, str] = MappingProxyType(
         "export_xlsx": "This export is for SuperGLM models; export a SuperLSS model as joblib.",
         "save_session": "Session files hold SuperGLM models. Export the edited SuperLSS model as "
         "joblib; it keeps its history.",
-        "cv": "Cross-validation is not available for SuperLSS models; Final fit refits on all "
-        "rows.",
     }
 )
-
-# What the frontend reads to hide a tab: no cross-validation, but Final fit.
-LSS_CAPABILITIES: Mapping[str, bool] = MappingProxyType({"cv": False, "final_fit": True})
 
 # The tools tied to one term, listed on that term's payload.
 TERM_TOOLS = ("shape", "special", "free_levels", "unsmoothed", "unseen")
@@ -57,7 +52,6 @@ SESSION_TOOLS = (
     "rating_table",
     "summary",
     "metrics",
-    "cv",
     "export_structure",
     "export_xlsx",
     "save_session",

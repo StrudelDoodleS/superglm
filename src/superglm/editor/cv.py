@@ -16,8 +16,10 @@ Every refusal is a fixed sentence (``editor/errors.py``).
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -26,13 +28,22 @@ from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
 from superglm.diagnostics.separation import SeparationError
+from superglm.distributional.api import SuperLSS
+from superglm.distributional.cross_validation import parts_ratio
 from superglm.distributions import NegativeBinomial
 from superglm.editor.carry import model_with_edited_curves, weighted_mean
 from superglm.editor.errors import EditorClientError, EditorValueError
 from superglm.editor.evaluation import EvaluationDataset, training_export_dataset
 from superglm.editor.jobs import JobCancelledError
-from superglm.editor.lss.availability import require_available, session_refit_reason
-from superglm.editor.lss.validation import lss_split_reason, offset_departs, stack_offsets
+from superglm.editor.lss.availability import session_refit_reason
+from superglm.editor.lss.display import FoldTermDisplay, fold_chart_display
+from superglm.editor.lss.validation import (
+    LSS_METRIC_LABELS,
+    lss_dataset_metrics,
+    lss_split_reason,
+    offset_departs,
+    stack_offsets,
+)
 from superglm.editor.lss.view import LSSModelView, column_of, is_lss
 from superglm.editor.refit import EXPLICIT_PENALTY_ATTRIBUTE, fit_refit_model
 from superglm.editor.terms import resolve_refit_method
@@ -48,14 +59,14 @@ from superglm.features.rebuild import (
 )
 from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
 from superglm.model_selection import (
-    _BUILTIN_SCORERS,
-    _POOLED_PARTS,
     FINGERPRINT_VERSION,
     CrossValidationResult,
     _data_fingerprint,
     _fingerprint_columns,
     _fold_row_count,
+    _take_offset,
     cross_validate,
+    fold_adapter,
 )
 from superglm.plotting.comparison import _feature_beta, _score_levels
 from superglm.plotting.curve_similarity import _summarize_against_fold_mean
@@ -187,13 +198,34 @@ FINAL_SOLVER_FAILED = (
 FINAL_NOT_RUN = "Run Final fit on all rows, on the Cross-validation tab, first."
 FINAL_STALE = "The model changed after the final fit. Run Final fit on all rows again."
 
+# name, label, column heading, and whether lower is better (None: closer to 1 is).
 _METRICS = (
-    ("deviance", "Mean deviance", True),
-    ("gini", "Gini", False),
-    ("nll", "Negative log-likelihood", True),
+    ("deviance", "Mean deviance", "Deviance", True),
+    ("gini", "Gini", "Gini", False),
+    ("nll", "Negative log-likelihood", "NLL", True),
 )
-_DEFAULT_SCORING = tuple(name for name, _label, _lower in _METRICS)
-_FOLD_COLUMNS = ("fold", "n_train", "n_test", "fit_time_s", "converged", "n_iter", "effective_df")
+# The labels the Validation tab gives the same scores.
+_LSS_METRICS = (
+    ("nll", LSS_METRIC_LABELS["log_score"], LSS_METRIC_LABELS["log_score"], True),
+    ("crps", LSS_METRIC_LABELS["crps"], LSS_METRIC_LABELS["crps"], True),
+    ("gini", "Gini", "Gini", False),
+    ("actual_expected", LSS_METRIC_LABELS["actual_expected"], "A/E", None),
+)
+_FOLD_COLUMNS = (
+    "fold",
+    "n_train",
+    "n_test",
+    "fit_time_s",
+    "converged",
+    "n_iter",
+    "effective_df",
+    "n_reml_iter",
+)
+
+
+def _metrics_of(model) -> tuple[tuple[str, str, str, bool | None], ...]:
+    """The scores the tab shows and Run CV computes for ``model``."""
+    return _LSS_METRICS if is_lss(model) else _METRICS
 
 
 def waiting_sentence(count: int) -> str:
@@ -257,6 +289,8 @@ class FinalFit:
     splits: tuple[str, ...]
     carried: tuple[str, ...]
     pending: int
+    # A SuperLSS has no coefficient summary: its scores on the held-out test split, if it has one.
+    test_scores: dict[str, float] | None = None
 
 
 # ── The supplied result and its rows ─────────────────────────────
@@ -312,7 +346,9 @@ def run_cv_reason(session) -> str | None:
         return session.cv_check.reason
     builtin = session.cv.builtin_scores
     if builtin is not None:
-        others = [name for name in _replayed_scores(session.cv) if name not in builtin]
+        others = [
+            name for name in _replayed_scores(session.cv, session.model) if name not in builtin
+        ]
         if others:
             return OTHER_SCORERS.format(names=others)
     if session.pending:
@@ -450,13 +486,15 @@ def fold_log_curves(model, terms: Mapping[str, EditableTerm]) -> dict[str, NDArr
     kind, is left out of that term.
     """
     curves: dict[str, NDArray[np.float64]] = {}
+    # A SuperLSS fold's terms are read through the view; no sweep needs its rows here.
+    reader = LSSModelView(model, None) if isinstance(model, SuperLSS) else model
     for name, term in terms.items():
         grid = _term_grid(term)
-        if grid is None or name not in model._specs:
+        if grid is None or name not in reader._specs:
             continue
-        spec = model._specs[name]
+        spec = reader._specs[name]
         try:
-            beta = _feature_beta(model, name)
+            beta = reader.term_coefficients(name) if is_lss(reader) else _feature_beta(reader, name)
             if grid.kind == "levels":
                 points = _levels_as_taken(spec, grid)
                 values = _score_levels(spec, points, beta)
@@ -488,16 +526,23 @@ def _levels_as_taken(spec, grid: _TermGrid) -> NDArray:
     )
 
 
+def _plain_display(name: str) -> FoldTermDisplay:
+    """A SuperGLM term is shown by its name, a relativity the right way up, in no group."""
+    return FoldTermDisplay(label=name, short=name)
+
+
 def fold_term_items(
     terms: Mapping[str, EditableTerm],
     fold_curves: Mapping[int, Mapping[str, NDArray[np.float64]]],
     *,
     held: Collection[str] = (),
+    display: Callable[[str], FoldTermDisplay] = _plain_display,
 ) -> list[dict[str, Any]]:
-    """One chart entry per term, least stable first, then the terms ``held``.
+    """One chart entry per term: the average terms before the spread terms, and
+    within those the least stable first, then the terms ``held``.
 
     Every curve is re-centred on its exposure-weighted mean log and shown as
-    a relativity. A term's ``spread`` is the mean over folds of
+    a relativity. A term's ``fold_gap`` is the mean over folds of
     ``rmse_to_mean`` on that scale, and ``min_correlation`` the lowest
     ``correlation_to_mean`` (``plotting.curve_similarity``), or NaN when a
     fold has none (a fold that dropped the term has a flat curve). A level a
@@ -506,6 +551,8 @@ def fold_term_items(
 
     A ``held`` term is a hand edit Run CV put back on every fold: the same
     curve on each, so it carries neither measure and follows the measured terms.
+
+    ``display`` says how each term is shown (:class:`FoldTermDisplay`).
     """
     items = []
     for name, term in terms.items():
@@ -516,28 +563,37 @@ def fold_term_items(
             if name in by_term
         }
         if grid is not None and curves:
-            items.append(_term_item(name, term, grid, curves, held=name in held))
+            items.append(_term_item(name, term, grid, curves, held=name in held, display=display))
     items.sort(key=_least_stable_first)
     return items
 
 
-def _least_stable_first(item: dict[str, Any]) -> tuple[int, float, str]:
-    """Measured terms by falling spread, then those without one, then the held terms.
+def _least_stable_first(item: dict[str, Any]) -> tuple[bool, int, float, str]:
+    """Spread terms after the rest; then measured terms by falling fold gap, those
+    without one, and the held terms.
 
-    By name within each. A spread is unavailable (NaN) where no fold shares
+    By name within each. A fold gap is unavailable (NaN) where no fold shares
     a point with another, and NaN does not order against a number.
     """
+    after_average = item["role"] == "spread"
     if item["held"]:
-        return (2, 0.0, item["name"])
-    spread = item["spread"]
-    if spread is None or not np.isfinite(spread):
-        return (1, 0.0, item["name"])
-    return (0, -spread, item["name"])
+        return (after_average, 2, 0.0, item["name"])
+    fold_gap = item["fold_gap"]
+    if fold_gap is None or not np.isfinite(fold_gap):
+        return (after_average, 1, 0.0, item["name"])
+    return (after_average, 0, -fold_gap, item["name"])
 
 
 def _term_item(
-    name: str, term: EditableTerm, grid: _TermGrid, curves, *, held: bool
+    name: str,
+    term: EditableTerm,
+    grid: _TermGrid,
+    curves,
+    *,
+    held: bool,
+    display: Callable[[str], FoldTermDisplay],
 ) -> dict[str, Any]:
+    shown = display(name)
     weights = (
         np.ones(grid.order.size, dtype=np.float64)
         if term.weights is None
@@ -552,7 +608,7 @@ def _term_item(
     def centred(log_values) -> NDArray[np.float64]:
         values = np.asarray(log_values, dtype=np.float64)
         points = shared if shared.any() else ~np.isnan(values)
-        return np.exp(values - weighted_mean(values[points], weights[points]))
+        return np.exp(shown.sign * (values - weighted_mean(values[points], weights[points])))
 
     folds = {f"Fold {index + 1}": centred(values) for index, values in curves.items()}
     vs_mean = None if held else _summarize_against_fold_mean(folds, weights)
@@ -561,6 +617,11 @@ def _term_item(
     changed = not np.allclose(edited, fit, rtol=0.0, atol=1e-14)
     return {
         "name": name,
+        "label": shown.label,
+        "short": shown.short,
+        "group": shown.group,
+        "role": shown.role,
+        "value_label": shown.value,
         "kind": grid.kind,
         "x": None if grid.kind == "levels" else grid.points,
         "levels": grid.labels,
@@ -572,7 +633,7 @@ def _term_item(
         "fit": centred(fit),
         "edited": centred(edited) if changed else None,
         "held": held,
-        "spread": None if vs_mean is None else float(vs_mean["rmse_to_mean"].mean()),
+        "fold_gap": None if vs_mean is None else float(vs_mean["rmse_to_mean"].mean()),
         "min_correlation": (
             None if vs_mean is None else float(vs_mean["correlation_to_mean"].min(skipna=False))
         ),
@@ -598,6 +659,15 @@ class CVTabView:
     final_reason: str | None
     has_validation: bool
     replay_note: str | None = None
+    metrics: tuple[tuple[str, str, str, bool | None], ...] = _METRICS
+    display: Callable[[str], FoldTermDisplay] = _plain_display
+
+
+def _same_fit(model, reference) -> bool:
+    """Whether two models are one fit: a SuperLSS session holds its own view of each."""
+    if is_lss(model):
+        return model.lss is reference.lss
+    return model is reference
 
 
 def capture_cv_view(session, *, run: CVRun | None, final_fit: FinalFit | None) -> CVTabView:
@@ -609,12 +679,15 @@ def capture_cv_view(session, *, run: CVRun | None, final_fit: FinalFit | None) -
         run=run,
         final_fit=final_fit,
         model_revision=session.model_revision,
-        model_changed=session.model is not session.reference_model or bool(session.edited_terms()),
+        model_changed=not _same_fit(session.model, session.reference_model)
+        or bool(session.edited_terms()),
         pending=len(session.pending),
         run_reason=run_cv_reason(session),
         replay_note=_replay_note(session),
         final_reason=final_fit_reason(session),
         has_validation="validation" in session._evaluation_data,
+        metrics=_metrics_of(session.model),
+        display=_term_display(session.model),
     )
 
 
@@ -625,15 +698,20 @@ def _replay_note(session) -> str | None:
     notes = []
     if session.cv.fit_mode is None:
         notes.append(NO_FIT_MODE.format(method=_replay_method(session)))
-    replayed = _replayed_scores(session.cv)
+    replayed = _replayed_scores(session.cv, session.model)
     if session.cv.builtin_scores is None and replayed:
         notes.append(NO_SCORERS.format(names=list(replayed)))
     return " ".join(notes) or None
 
 
-def _replayed_scores(cv: CrossValidationResult) -> tuple[str, ...]:
+def _replayed_scores(cv: CrossValidationResult, model) -> tuple[str, ...]:
     """The score columns of ``cv`` that Run CV computes again: those named like a built-in."""
-    return tuple(name for name in _DEFAULT_SCORING if name in cv.fold_scores.columns)
+    return tuple(name for name, *_ in _metrics_of(model) if name in cv.fold_scores.columns)
+
+
+def _term_display(model) -> Callable[[str], FoldTermDisplay]:
+    """How the tab shows a term of ``model``."""
+    return partial(fold_chart_display, family=model.family) if is_lss(model) else _plain_display
 
 
 def cv_report_payload(widget, *, request_sequence: int | None = None) -> dict[str, Any]:
@@ -654,7 +732,9 @@ def cv_tab_payload(
     results = []
     if view.supplied is not None:
         results.append(
-            _result_payload(view.supplied, "As supplied", "supplied", None, view.model_changed)
+            _result_payload(
+                view.supplied, "As supplied", "supplied", None, view.model_changed, view.metrics
+            )
         )
     run = view.run
     if run is not None:
@@ -665,6 +745,7 @@ def cv_tab_payload(
                 "run",
                 run.model_revision,
                 run.model_revision != view.model_revision,
+                view.metrics,
             )
         )
     final = view.final_fit
@@ -695,8 +776,8 @@ def cv_tab_payload(
             "n_rows": None if final is None else final.n_rows,
         },
         "metrics": [
-            {"name": name, "label": label, "lower_is_better": lower}
-            for name, label, lower in _METRICS
+            {"name": name, "label": label, "short": short, "lower_is_better": lower}
+            for name, label, short, lower in view.metrics
             if any(name in result["mean"] for result in results)
         ],
         "results": results,
@@ -724,8 +805,10 @@ def _result_payload(
     origin: str,
     model_revision: int | None,
     stale: bool,
+    metrics: tuple[tuple[str, str, str, bool | None], ...],
 ) -> dict[str, Any]:
-    names = [name for name, _label, _lower in _METRICS if name in result.fold_scores.columns]
+    names = [name for name, *_ in metrics if name in result.fold_scores.columns]
+    held_out = _folds_partition_rows(result)
     folds = [
         {
             **{column: record.get(column) for column in _FOLD_COLUMNS},
@@ -738,6 +821,7 @@ def _result_payload(
         "origin": origin,
         "model_revision": model_revision,
         "stale": bool(stale),
+        "held_out": held_out,
         "folds": folds,
         "mean": {name: result.mean_scores.get(name) for name in names},
         "std": {name: result.std_scores.get(name) for name in names},
@@ -745,6 +829,24 @@ def _result_payload(
             name: result.pooled_scores[name] for name in names if name in result.pooled_scores
         },
     }
+
+
+def _folds_partition_rows(result: CrossValidationResult) -> bool:
+    """Whether every row is held out by exactly one fold, as the tab's picture of the folds says."""
+    folds = result.fold_indices
+    if not folds:
+        return False
+    rows = _fold_row_count(result.n_rows, folds)
+    held = np.concatenate([np.asarray(test, dtype=np.intp) for _train, test in folds])
+    return bool(np.all(np.bincount(held, minlength=rows) == 1))
+
+
+def headline_score(model, result: CrossValidationResult) -> dict[str, Any] | None:
+    """The first score the tab lists for ``model``, with its label, to say how a run ended."""
+    for name, label, *_ in _metrics_of(model):
+        if name in result.mean_scores:
+            return {"label": label, "value": result.mean_scores[name]}
+    return None
 
 
 def _relativities(view: CVTabView) -> dict[str, Any]:
@@ -776,7 +878,7 @@ def _relativities(view: CVTabView) -> dict[str, Any]:
         "origin": "supplied",
         "stale": view.model_changed,
         "note": None,
-        "terms": fold_term_items(view.terms, curves),
+        "terms": fold_term_items(view.terms, curves, display=view.display),
     }
 
 
@@ -816,13 +918,12 @@ class CVRunPlan(_Plan):
 
 def capture_cv_run(session) -> CVRunPlan:
     """Capture Run CV's inputs; refuse with the tab's reason while it is disabled."""
-    require_available(session.model, "cv")
     reason = run_cv_reason(session)
     if reason is not None:
         raise EditorValueError(reason)
     cv = session.cv
     terms = {name: term.copy() for name, term in session.terms.items()}
-    supplied = _replayed_scores(cv)
+    supplied = _replayed_scores(cv, session.model)
     return CVRunPlan(
         model=session.model,
         template=_declared_template(session),
@@ -839,7 +940,7 @@ def capture_cv_run(session) -> CVRunPlan:
         # predates both, so its folds were fitted cold with no extra arguments.
         warm_start=bool(cv.warm_start),
         fit_kwargs=dict(cv.fit_kwargs or {}),
-        scoring=supplied or _DEFAULT_SCORING,
+        scoring=supplied or tuple(name for name, *_ in _metrics_of(session.model)),
         splitter=cv.splitter,
         n_points=session.n_points,
     )
@@ -1020,11 +1121,22 @@ def run_cv(plan: CVRunPlan, context) -> CVRun:
     # on (a test-only row is scored as new levels); a missing label is refused
     # when scoring too, so those are checked on every row a fold reads.
     frame = as_eager_frame(plan.rows.X)
+    lss = is_lss(plan.model)
     read = np.unique(np.concatenate([np.concatenate(fold) for fold in plan.folds]))
-    _require_valued_labels(plan.template, frame.take_rows(read), "Run CV")
     fitted = np.unique(np.concatenate([train for train, _test in plan.folds]))
-    X_fitted = frame.take_rows(fitted)
-    template = _covering_template(plan.template, X_fitted, "Run CV")
+    if lss and plan.rows.sample_weight is not None:
+        # A SuperLSS drops a zero-weight row before it reads the row's labels.
+        weights = np.asarray(plan.rows.sample_weight)
+        read, fitted = read[weights[read] > 0.0], fitted[weights[fitted] > 0.0]
+    # A SuperLSS template is an unfitted copy; its view names the columns the terms read.
+    _require_valued_labels(plan.model if lss else plan.template, frame.take_rows(read), "Run CV")
+    if lss:
+        covering = _covering_replacements(plan.model, frame.take_rows(fitted), "Run CV")
+        template = (
+            plan.model.lss._clone_with_replaced_terms(covering) if covering else plan.template
+        )
+    else:
+        template = _covering_template(plan.template, frame.take_rows(fitted), "Run CV")
     recorder = _FoldRecorder(plan, context)
     try:
         result = cross_validate(
@@ -1062,7 +1174,9 @@ def run_cv(plan: CVRunPlan, context) -> CVRun:
             splitter=plan.splitter,
             builtin_scores=plan.scoring,
         ),
-        terms=fold_term_items(plan.terms, recorder.curves, held=plan.edited),
+        terms=fold_term_items(
+            plan.terms, recorder.curves, held=plan.edited, display=_term_display(plan.model)
+        ),
         model_revision=plan.model_revision,
         carried=tuple(sorted(plan.edited)),
     )
@@ -1082,9 +1196,13 @@ class _FoldRecorder:
         self._plan = plan
         self._context = context
         self._fold = -1
+        self._fold_started = 0.0
         self._frame = as_eager_frame(plan.rows.X)
         self._y = np.asarray(plan.rows.y, dtype=np.float64)
-        self._totals = {name: [0.0, 0.0] for name in plan.scoring if name in _POOLED_PARTS}
+        self._scorers = fold_adapter(plan.template)
+        self._totals = {
+            name: [0.0, 0.0] for name in plan.scoring if name in self._scorers.pooled_parts
+        }
         self.curves: dict[int, dict[str, NDArray[np.float64]]] = {}
 
     @property
@@ -1096,8 +1214,11 @@ class _FoldRecorder:
         self._context.progress("fold", fold=index + 1, n_folds=len(self._plan.folds))
         self._context.check()
         self._fold = index
+        self._fold_started = time.perf_counter()
 
     def score(self, model, X, y, *, sample_weight=None, offset=None) -> dict[str, float]:
+        fit_time_s = time.perf_counter() - self._fold_started
+        fit = self._scorers.fit_summary(model, self._plan.fit_mode)
         if self._plan.edited:
             train = self._plan.folds[self._fold][0]
             model = model_with_edited_curves(
@@ -1106,34 +1227,45 @@ class _FoldRecorder:
                 self._frame.take_rows(train),
                 self._y[train],
                 _take(self._plan.rows.sample_weight, train),
-                _take(self._plan.rows.offset, train),
+                _take_offset(self._plan.rows.offset, train),
                 n_points=self._plan.n_points,
             )
         scores: dict[str, float] = {}
         parts: dict[str, tuple[float, float]] = {}
         for name in self._plan.scoring:
-            pooled = _POOLED_PARTS.get(name)
+            pooled = self._scorers.pooled_parts.get(name)
             if pooled is None:
-                scorer = _BUILTIN_SCORERS[name]
+                scorer = self._scorers.scorers[name]
                 scores[name] = float(
                     scorer(model, X, y, sample_weight=sample_weight, offset=offset)
                 )
                 continue
             numerator, denominator = pooled(model, X, y, sample_weight=sample_weight, offset=offset)
             parts[name] = (numerator, denominator)
-            scores[name] = numerator / denominator
+            scores[name] = parts_ratio(numerator, denominator)
         # Only a fold that scored completely joins the pooled totals.
         for name, (numerator, denominator) in parts.items():
             self._totals[name][0] += numerator
             self._totals[name][1] += denominator
         self.curves[self._fold] = fold_log_curves(model, self._plan.terms)
+        train, test = self._plan.folds[self._fold]
+        self._context.progress(
+            "fold_done",
+            fold=self.fold_number,
+            n_folds=len(self._plan.folds),
+            n_train=len(train),
+            n_test=len(test),
+            fit_time_s=fit_time_s,
+            scores=scores,
+            **fit,
+        )
         return scores
 
     def pooled_scores(self) -> dict[str, float]:
         return {
             name: numerator / denominator
             for name, (numerator, denominator) in self._totals.items()
-            if denominator > 0.0
+            if denominator != 0.0
         }
 
 
@@ -1149,6 +1281,7 @@ class FinalFitPlan(_Plan):
     """Everything Final fit reads."""
 
     datasets: tuple[EvaluationDataset, ...]
+    test: EvaluationDataset | None
     edited: dict[str, EditableTerm]
     pending: int
     n_points: int
@@ -1173,6 +1306,7 @@ def capture_final_fit(session) -> FinalFitPlan:
         template=_declared_template(session),
         model_revision=session.model_revision,
         datasets=datasets,
+        test=session._evaluation_data.get("test"),
         edited={name: session.terms[name].copy() for name in session.edited_terms()},
         pending=len(session.pending),
         n_points=session.n_points,
@@ -1232,6 +1366,7 @@ def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
         splits=tuple(dataset.name for dataset in plan.datasets),
         carried=tuple(sorted(plan.edited)),
         pending=plan.pending,
+        test_scores=lss_dataset_metrics(model, plan.test) if lss and plan.test else None,
     )
 
 

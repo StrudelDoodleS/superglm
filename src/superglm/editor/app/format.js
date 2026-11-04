@@ -11,11 +11,25 @@ export function fmt(value) {
   else if (abs < 1) digits = 3;
   else if (abs < 10) digits = 2;
   else digits = 1;
-  return value.toLocaleString("en-US", {
-    useGrouping: false,
-    maximumFractionDigits: digits,
-    minimumFractionDigits: 0
-  });
+  return plainFormatter(digits).format(value);
+}
+
+/** @type {Map<number, Intl.NumberFormat>} */
+const PLAIN_FORMATTERS = new Map();
+
+// Building a formatter costs far more than using one, and axes format on every frame of a drag.
+/** @param {number} digits */
+function plainFormatter(digits) {
+  let formatter = PLAIN_FORMATTERS.get(digits);
+  if (!formatter) {
+    formatter = new Intl.NumberFormat("en-US", {
+      useGrouping: false,
+      maximumFractionDigits: digits,
+      minimumFractionDigits: 0
+    });
+    PLAIN_FORMATTERS.set(digits, formatter);
+  }
+  return formatter;
 }
 
 /**

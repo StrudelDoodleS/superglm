@@ -197,6 +197,8 @@ class JobRunner:
     def _snapshot(job: dict[str, Any]) -> dict[str, Any]:
         snapshot = {key: value for key, value in job.items() if key != "publishing"}
         snapshot["progress"] = list(job["progress"])
+        # The browser's clock may differ from this machine's, so it is told how long.
+        snapshot["elapsed_s"] = (job["finished_at"] or time.time()) - job["started_at"]
         return jsonable(snapshot)
 
 

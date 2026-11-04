@@ -33,13 +33,13 @@
 }
 .profile-dialog-head h2 {
   margin: 0 0 2px;
-  font-size: 15px;
+  font-size: var(--font-size-lg);
   font-weight: 600;
 }
 .profile-dialog-head p {
   margin: 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
 }
 .profile-dialog-head button {
   flex: 0 0 auto;
@@ -56,14 +56,14 @@
 .profile-options label {
   min-width: 0;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--font-size-xs);
   line-height: 1.2;
 }
 .profile-options select,
 .profile-options input {
   width: 100%;
   min-width: 0;
-  height: 28px;
+  height: var(--control-height);
   margin-top: 2px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
@@ -84,7 +84,7 @@
 .export-format-group legend {
   margin-bottom: var(--space-1);
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--font-size-xs);
 }
 .export-format-grid {
   display: grid;
@@ -122,12 +122,12 @@
   gap: 2px;
 }
 .export-format-card strong {
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   line-height: 1.25;
 }
 .export-format-card small {
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--font-size-xs);
   line-height: 1.35;
 }
 .export-pending-note {
@@ -136,7 +136,7 @@
   border-radius: var(--radius-md);
   background: var(--sig-weak-bg);
   color: var(--sig-weak-fg);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   font-weight: 600;
 }
 .export-fields {
@@ -148,12 +148,12 @@
 .export-fields label {
   min-width: 0;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--font-size-xs);
   line-height: 1.2;
 }
 .export-fields input {
   width: 100%;
-  height: 28px;
+  height: var(--control-height);
   margin-top: 2px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
@@ -174,7 +174,7 @@
   margin-top: var(--space-1);
   overflow-wrap: anywhere;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   user-select: text;
   -webkit-user-select: text;
 }
@@ -216,7 +216,7 @@
   gap: 8px;
   align-items: center;
   margin-bottom: 4px;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
 }
 .profile-progress-head span {
   color: var(--muted);
@@ -231,7 +231,7 @@
   height: 9px;
   border: 2px solid var(--border);
   border-top-color: var(--blue);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   animation: profile-spin 0.75s linear infinite;
 }
 @keyframes profile-spin {
@@ -249,7 +249,7 @@
   border-radius: var(--radius-sm);
   padding: 6px;
   background: var(--surface);
-  font-size: 10px;
+  font-size: var(--font-size-xs);
 }
 .profile-estimate {
   display: grid;
@@ -260,7 +260,7 @@
 }
 .profile-estimate strong {
   color: var(--text);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
 }
 .profile-estimate span,
 .profile-estimate em {
@@ -278,12 +278,12 @@
 .profile-legend-swatch {
   width: 10px;
   height: 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
 }
 .profile-legend-item strong {
   overflow: hidden;
   color: var(--text);
-  font-size: 10px;
+  font-size: var(--font-size-xs);
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -292,7 +292,7 @@
   grid-column: 2;
   margin-top: -2px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: var(--font-size-xs);
   font-style: normal;
 }
 .profile-legend-best strong {
@@ -337,7 +337,7 @@
 }
 .profile-trace-best-label {
   fill: var(--blue);
-  font-size: 10px;
+  font-size: var(--font-size-xs);
   font-weight: 600;
   paint-order: stroke;
   stroke: var(--surface);
@@ -350,7 +350,7 @@
   margin-top: 5px;
   max-height: 82px;
   overflow: hidden;
-  font-size: 10px;
+  font-size: var(--font-size-xs);
   font-variant-numeric: tabular-nums;
 }
 .profile-trace-row {

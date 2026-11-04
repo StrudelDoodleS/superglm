@@ -51,6 +51,7 @@
 /**
  * @typedef {Object} ImpactPayload
  * @property {number} [weighted_mean_relativity]
+ * @property {number} [total_weight]
  * @property {number} [selected_weight_share]
  */
 /**
@@ -287,6 +288,7 @@
  */
 /**
  * @typedef {Object} TermPayload
+ * @property {number[]} [weights] each point's weight; the selected share's numerator
  * @property {string} kind
  * @property {string} term_type
  * @property {number[]} x
@@ -376,6 +378,42 @@
  * @property {number} model_revision
  */
 /**
+ * A parameter's link as the browser inverts it: exp(eta), or floor + exp(eta).
+ * @typedef {{kind:"log"} | {kind:"floored_log", floor:number}} DistributionLink
+ */
+/**
+ * @typedef {Object} DistributionParameter
+ * @property {string} name the model's parameter name
+ * @property {string} label
+ * @property {"average"|"spread"} role
+ * @property {DistributionLink} link
+ */
+/**
+ * Link-scale predictors, one row per panel row or fan column, in `parameters` order.
+ * @typedef {{rows:number[][], columns:number[][]}} DistributionEta
+ */
+/**
+ * The /distribution response (SuperLSS sessions only): one feature's rows and
+ * fan columns with every other feature at the reference row, each with the
+ * fitted and the edited model's predictors. `kind` "empty" draws only
+ * `empty_reason`; its `amount_axis` is null. A reply overtaken by a newer
+ * model revision is `{status:"superseded", model_revision}` instead.
+ * @typedef {Object} DistributionPanelResponse
+ * @property {string} feature
+ * @property {"lognormal_mean"|"gamma"|"negative_binomial"} family
+ * @property {"numeric"|"levels"|"empty"} kind
+ * @property {string|null} empty_reason
+ * @property {Array<{label:string, x:number|null, level:string|null}>} rows
+ * @property {Array<{x:number|null, level:string|null}>} columns
+ * @property {DistributionParameter[]} parameters
+ * @property {Record<string, string>} term_keys each parameter's term for this feature
+ * @property {{fitted:DistributionEta, edited:DistributionEta}} eta
+ * @property {{min_log10:number, max_log10:number, clipped_below:boolean}|null} amount_axis
+ * @property {string|null} amount_unit
+ * @property {Array<{column:string, value:unknown}>} reference the other features' values
+ * @property {string|null} cap_note
+ */
+/**
  * What Undo and Redo would take next, edits and structural steps alike; null
  * when there is nothing.
  * @typedef {Object} UndoRedo
@@ -387,6 +425,8 @@
  * @property {number} model_revision
  * @property {number} [state_generation]
  * @property {number} [chart_generation]
+ * @property {Record<string, string>} [term_versions] each term's version, by which the
+ *   API client completes a reply that leaves out the terms it already holds
  * @property {string} selected_term
  * @property {Record<string, TermPayload>} terms
  * @property {Record<string, number[]>} selection
@@ -395,9 +435,8 @@
  * @property {boolean} in_force_is_original
  * @property {PendingStep[]} [pending]
  * @property {{available:boolean, stale:boolean}} [final_fit] whether Export can offer the Final fit model
+ * @property {JobStatus[]} [jobs_running] jobs still running when this state was read
  * @property {number} [fit_token] changes only when the fitted model in force is replaced
- * @property {{cv:boolean, final_fit:boolean}} [capabilities] SuperLSS sessions only: what the session offers
- * @property {{available:boolean, reason:string|null}} [final_fit_plan] SuperLSS sessions only: whether Final fit can run now, and the sentence for why not
  * @property {Record<string, string>} [unavailable] SuperLSS sessions only: the reason for each session tool that is off
  */
 /**
@@ -460,7 +499,6 @@
  * @property {'summary'|'history'|'settings'|'help'} inspectorPane
  * @property {boolean} inspectorOpen
  * @property {{term:string, payload:TermPayload, selection:number[]}|null} preview
- * @property {{term:string, indices:number[]}|null} selectionPreview
  * @property {{term:string, index:number}|null} selectionAnchor the point the next
  *   Shift-click spans from: a source index of `term`, set by a click or a Ctrl/Cmd-click
  * @property {{term:string, from:number, to:number, indices:number[]}|null} selectionSpan
@@ -496,7 +534,7 @@
 /** @typedef {'cv'|'final_fit'} JobKind */
 /**
  * A background job's status (/job_start, /job_status). ``progress`` entries
- * carry a ``phase`` ("fold", "curves", "fitting", "carrying") and its details.
+ * carry a ``phase`` ("fold", "fold_done", "curves", "fitting", "carrying") and its details.
  * @typedef {Object} JobStatus
  * @property {string} job_id
  * @property {JobKind} kind
@@ -505,6 +543,8 @@
  * @property {Record<string, unknown>|null} result
  * @property {string|null} [error]
  * @property {boolean} [cancel_requested]
+ * @property {number} [started_at]
+ * @property {number} [elapsed_s]
  */
 /**
  * @typedef {Object} CVFoldRow
@@ -514,6 +554,7 @@
  * @property {number|null} fit_time_s
  * @property {boolean} converged
  * @property {number|null} effective_df
+ * @property {number|null} [n_reml_iter] rounds of smoothing search, under fit_reml
  * @property {Record<string, number|null>} scores
  */
 /**
@@ -523,6 +564,9 @@
  * @property {'supplied'|'run'} origin
  * @property {number|null} model_revision
  * @property {boolean} stale
+ * @property {boolean} [held_out] every row is held out by exactly one fold
+ * @property {boolean} [live] a run still going: its folds so far
+ * @property {number} [n_folds] how many folds a live run has in all
  * @property {CVFoldRow[]} folds
  * @property {Record<string, number|null>} mean
  * @property {Record<string, number|null>} std
@@ -539,6 +583,10 @@
  * exposure-weighted mean log; levels in the model's order.
  * @typedef {Object} CVTermItem
  * @property {string} name
+ * @property {string} [label] how the tab names the term; its name when absent
+ * @property {string} [short] its name within its group's list
+ * @property {string|null} [group] the heading it is listed under; a SuperGLM term has none
+ * @property {'average'|'spread'|null} [role]
  * @property {'levels'|'continuous'} kind
  * @property {number[]|null} x
  * @property {string[]|null} levels
@@ -546,8 +594,9 @@
  * @property {CVFoldCurve[]} folds
  * @property {number[]} fit
  * @property {number[]|null} edited
- * @property {boolean} [held] a hand edit Run CV put back on every fold; it has no spread
- * @property {number|null} spread
+ * @property {string} [value_label] what the curve is a relativity of
+ * @property {boolean} [held] a hand edit Run CV put back on every fold; it has no fold gap
+ * @property {number|null} fold_gap
  * @property {number|null} min_correlation
  */
 /**
@@ -561,7 +610,7 @@
  * @property {number} pending
  * @property {{available:boolean, reason:string|null, note:string|null}} run_cv
  * @property {{available:boolean, reason:string|null, note:string|null, done:boolean, stale:boolean, n_rows:number|null}} final_fit
- * @property {Array<{name:string, label:string, lower_is_better:boolean}>} metrics
+ * @property {Array<{name:string, label:string, short:string, lower_is_better:boolean|null}>} metrics a null direction means closer to 1 is better
  * @property {CVResultPayload[]} results
  * @property {{available:boolean, origin:string|null, stale:boolean, note:string|null, terms:CVTermItem[]}} relativities
  * @property {Record<JobKind, JobStatus|null>} jobs
