@@ -554,6 +554,7 @@ class _GLMFolds:
     default_scoring = ("deviance",)
     scorers = _BUILTIN_SCORERS
     pooled_parts = _POOLED_PARTS
+    row_cost_label = "Deviance"
     unsliced_fit_kwargs: frozenset[str] = frozenset()
     fold_fit_kwargs: Mapping[str, Any] = {}
 
@@ -600,6 +601,12 @@ class _GLMFolds:
         # A model with no REML-eligible groups legitimately fits without
         # smoothing selection (``_reml_result`` is None): nothing to warm-start.
         return None if getattr(est, "_reml_result", None) is None else live_reml_lambdas(est)
+
+    def row_costs(self, est, X, y, sample_weight, offset) -> NDArray[np.float64]:
+        """Each row's weighted unit deviance."""
+        mu = est.predict(X, offset=offset)
+        unit = est._distribution.deviance_unit(np.asarray(y, dtype=np.float64), mu)
+        return unit if sample_weight is None else np.asarray(sample_weight) * unit
 
     def predict(self, est, X, offset) -> NDArray[np.float64]:
         return est.predict(X, offset=offset)
@@ -712,14 +719,13 @@ def cross_validate(
     groups : array-like, optional
         Group labels forwarded to ``cv.split()``.
     fit_mode : {"fit", "fit_reml"}, optional
-        By default ``"fit"`` for a SuperGLM. A SuperLSS has no configured
-        smoothing to hold fixed, so its default is ``"fit_reml"``, or ``"fit"``
-        when ``fit_kwargs`` gives ``lambdas``. On an unfitted SuperLSS with
-        smooth terms, ``"fit"`` needs those ``lambdas``: without them every
-        fold fails, and each failure is logged.
         Which fit method to call on each fold estimator. ``"fit"`` holds the
         smoothing parameters fixed; ``"fit_reml"`` selects them again on each
-        fold's training rows.
+        fold's training rows. By default ``"fit"`` for a SuperGLM. A SuperLSS
+        has no configured smoothing to hold fixed, so its default is
+        ``"fit_reml"``, or ``"fit"`` when ``fit_kwargs`` gives ``lambdas``. On
+        an unfitted SuperLSS with smooth terms, ``"fit"`` needs those
+        ``lambdas``: without them every fold fails, and each failure is logged.
     scoring : str, callable, or sequence thereof, optional
         Metrics to evaluate. Built-in for a SuperGLM: ``"deviance"``, ``"nll"``,
         ``"gini"``; ``"deviance"`` by default. Built-in for a SuperLSS:
@@ -732,7 +738,9 @@ def cross_validate(
         ``"frequency"``, the count of positive-weight rows under ``"prior"``, so
         the NLL of the two model types can be compared on the same folds.
         ``"actual_expected"`` is ``sum(w * y) / sum(w * mean)``. Gini remains a
-        separately weighted ranking metric.
+        separately weighted ranking metric. On a SuperLSS, a fold whose total
+        response is not positive has no Gini: it reads NaN, and the mean leaves
+        it out, as it does a CRPS that cannot be resolved. Both are logged.
         Callables must follow ``scorer(model, X, y, *, sample_weight, offset) -> float | dict``.
     return_estimators : bool
         If True, keep the fitted model from each fold.

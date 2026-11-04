@@ -12,7 +12,7 @@ const reportMetricKeys = [
   "effective_df"
 ];
 
-export function renderReport(payload, { reportTitle, reportStatus, reportFrame }, cvTab = null) {
+export function renderReport(payload, { reportTitle, reportStatus, reportFrame }, cvTab = null, diagnoseTab = null) {
   reportTitle.textContent = payload.title || "Report";
   if (payload.report === "cv" && cvTab) {
     reportStatus.textContent = cvSourceLine(payload);
@@ -20,6 +20,10 @@ export function renderReport(payload, { reportTitle, reportStatus, reportFrame }
     return;
   }
   reportStatus.textContent = payload.note || "";
+  if (payload.report === "diagnose" && diagnoseTab) {
+    diagnoseTab.render(payload);
+    return;
+  }
   if (!payload.available) {
     reportFrame.innerHTML = `<div class="summary-empty">${escapeHTML(payload.note || "Report unavailable.")}</div>`;
     return;

@@ -32,6 +32,12 @@ from superglm.distributional.api import SuperLSS
 from superglm.distributional.cross_validation import parts_ratio
 from superglm.distributions import NegativeBinomial
 from superglm.editor.carry import model_with_edited_curves, weighted_mean
+from superglm.editor.diagnose import (
+    diagnose_tab_payload,
+    fit_trace,
+    supplied_fold_traces,
+    worst_rows,
+)
 from superglm.editor.errors import EditorClientError, EditorValueError
 from superglm.editor.evaluation import EvaluationDataset, training_export_dataset
 from superglm.editor.jobs import JobCancelledError
@@ -277,6 +283,7 @@ class CVRun:
     terms: list[dict[str, Any]]
     model_revision: int
     carried: tuple[str, ...]
+    fold_fits: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -720,6 +727,68 @@ def cv_report_payload(widget, *, request_sequence: int | None = None) -> dict[st
         view = capture_cv_view(widget.session, run=widget._cv_run, final_fit=widget._final_fit)
     jobs = {kind: widget._jobs.latest(kind) for kind in JOB_KINDS}
     return cv_tab_payload(view, jobs=jobs, request_sequence=request_sequence)
+
+
+def _untraced_note(expected: Sequence[int], folds: Sequence[dict[str, Any]]) -> str:
+    """A sentence naming the folds that kept no trace; empty when every one did."""
+    traced = {fit["id"] for fit in folds}
+    missing = [f"Fold {number}" for number in expected if f"fold-{number}" not in traced]
+    return f" No trace for {', '.join(missing)}: see the log." if missing else ""
+
+
+def diagnose_report_payload(widget, *, request_sequence: int | None = None) -> dict[str, Any]:
+    """The ``diagnose`` report: captured under the widget lock, built outside it.
+
+    A finished Run CV kept its folds' traces; a supplied result's are read once
+    and kept, since its fold models and rows do not change.
+    """
+    with widget._lock:
+        session = widget.session
+        model = session.model
+        revision = session.model_revision
+        run = widget._cv_run
+        supplied = session.cv
+        rows = session.cv_check.rows
+        kept = widget._diagnose_folds
+        same_fit = _same_fit(model, session.reference_model)
+    if run is not None:
+        folds = list(run.fold_fits)
+        source = (
+            "Folds from Run CV on the current model."
+            if run.model_revision == revision
+            else "Folds from Run CV on an earlier version of this model. "
+            "Press Run CV to see the current one."
+        ) + _untraced_note(range(1, len(run.result.fold_scores) + 1), folds)
+    elif supplied is None:
+        folds, source = [], "This model only: pass a cross_validate() result to see its folds."
+    elif supplied.estimators is None:
+        folds = []
+        source = (
+            "This model only: the supplied folds kept no models. Pass return_estimators=True to "
+            "cross_validate(), or press Run CV, to see them."
+        )
+    else:
+        if kept is None or kept[0] is not supplied:
+            kept = (supplied, supplied_fold_traces(supplied, rows))
+            with widget._lock:
+                widget._diagnose_folds = kept
+        folds = kept[1]
+        source = (
+            "Folds as supplied with edit(model, cv=result)."
+            if same_fit
+            else "Folds as supplied with edit(model, cv=result), from the model as first opened. "
+            "Press Run CV to see the current one."
+        ) + _untraced_note(
+            [i + 1 for i, fold in enumerate(supplied.estimators) if fold is not None], folds
+        )
+    return diagnose_tab_payload(
+        model,
+        folds=folds,
+        source=source,
+        display=_term_display(model),
+        model_revision=revision,
+        request_sequence=request_sequence,
+    )
 
 
 def cv_tab_payload(
@@ -1179,6 +1248,7 @@ def run_cv(plan: CVRunPlan, context) -> CVRun:
         ),
         model_revision=plan.model_revision,
         carried=tuple(sorted(plan.edited)),
+        fold_fits=tuple(recorder.fold_fits),
     )
 
 
@@ -1203,7 +1273,9 @@ class _FoldRecorder:
         self._totals = {
             name: [0.0, 0.0] for name in plan.scoring if name in self._scorers.pooled_parts
         }
+        self._columns = _fingerprint_columns(plan.template, self._frame)
         self.curves: dict[int, dict[str, NDArray[np.float64]]] = {}
+        self.fold_fits: list[dict[str, Any]] = []
 
     @property
     def fold_number(self) -> int:
@@ -1219,8 +1291,9 @@ class _FoldRecorder:
     def score(self, model, X, y, *, sample_weight=None, offset=None) -> dict[str, float]:
         fit_time_s = time.perf_counter() - self._fold_started
         fit = self._scorers.fit_summary(model, self._plan.fit_mode)
+        fold_fit = model
+        train, test = self._plan.folds[self._fold]
         if self._plan.edited:
-            train = self._plan.folds[self._fold][0]
             model = model_with_edited_curves(
                 model,
                 self._plan.edited,
@@ -1248,7 +1321,7 @@ class _FoldRecorder:
             self._totals[name][0] += numerator
             self._totals[name][1] += denominator
         self.curves[self._fold] = fold_log_curves(model, self._plan.terms)
-        train, test = self._plan.folds[self._fold]
+        self._keep_trace(fold_fit, fit_time_s, model, X, y, sample_weight, offset)
         self._context.progress(
             "fold_done",
             fold=self.fold_number,
@@ -1260,6 +1333,29 @@ class _FoldRecorder:
             **fit,
         )
         return scores
+
+    def _keep_trace(self, fold_fit, fit_time_s, scored, X, y, sample_weight, offset) -> None:
+        """Keep what the Diagnose tab shows of this fold. It decides nothing about the scores."""
+        train, test = self._plan.folds[self._fold]
+        try:
+            trace = fit_trace(
+                fold_fit,
+                fit_id=f"fold-{self.fold_number}",
+                label=f"Fold {self.fold_number}",
+                n_rows=len(train),
+                seconds=fit_time_s,
+            )
+            trace["worst_rows"] = worst_rows(
+                self._scorers, scored, X, y, sample_weight, offset, test, self._columns
+            )
+        except Exception:
+            _LOGGER.warning(
+                "Fold %d keeps its scores but has no Diagnose trace.",
+                self.fold_number,
+                exc_info=True,
+            )
+            return
+        self.fold_fits.append(trace)
 
     def pooled_scores(self) -> dict[str, float]:
         return {

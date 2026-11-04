@@ -486,17 +486,19 @@ def test_a_prediction_that_fails_is_not_read_as_an_unresolved_crps(monkeypatch):
         _POOLED_PARTS["crps"](model, X, y)
 
 
-def test_a_negative_total_has_no_gini_and_its_ratio_still_pools():
+def test_a_negative_total_has_no_gini_and_its_ratio_still_pools(caplog):
     X, y = _rows()
     family = GaussianLS()
-    result = cross_validate(
-        SuperLSS(family, family.location(cat("region")), family.scale()),
-        X,
-        y - y.max() - 1.0,
-        cv=FOLDS,
-        scoring=("gini", "actual_expected"),
-        error_score="raise",
-    )
+    with caplog.at_level(logging.WARNING, logger="superglm.distributional.cross_validation"):
+        result = cross_validate(
+            SuperLSS(family, family.location(cat("region")), family.scale()),
+            X,
+            y - y.max() - 1.0,
+            cv=FOLDS,
+            scoring=("gini", "actual_expected"),
+            error_score="raise",
+        )
     assert result.fold_scores["gini"].isna().all()
+    assert caplog.text.count("has no Gini") == 3
     assert result.fold_scores["actual_expected"].notna().all()
     assert result.pooled_scores["actual_expected"] == pytest.approx(1.0, abs=0.05)

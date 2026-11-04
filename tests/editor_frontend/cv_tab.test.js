@@ -786,6 +786,27 @@ test("each fold holds out its own piece, and the picture needs folds that split 
   assert.doesNotMatch(foldTableMarkup(payload), /Held out/);
 });
 
+/** @param {number[]} rounds */
+function roundsPayload(rounds) {
+  const payload = cvPayload();
+  const result = payload.results[payload.results.length - 1];
+  const template = result.folds[0];
+  result.folds = rounds.map((n_reml_iter, fold) => ({ ...template, fold, n_reml_iter }));
+  result.n_folds = rounds.length;
+  return payload;
+}
+
+test("a fold with at least twice the middle fold's rounds links to Diagnose", () => {
+  const html = foldTableMarkup(roundsPayload([11, 42, 13, 11, 12]));
+  assert.match(html, /data-diagnose-open="fold-2"/);
+  assert.equal((html.match(/data-diagnose-open/g) ?? []).length, 1);
+});
+
+test("a short search or too few folds gets no mark", () => {
+  assert.doesNotMatch(foldTableMarkup(roundsPayload([2, 9, 3])), /data-diagnose-open/);
+  assert.doesNotMatch(foldTableMarkup(roundsPayload([10, 80])), /data-diagnose-open/);
+});
+
 test("a job already running when the page loads is followed", async () => {
   const seen = [];
   let answered = 0;

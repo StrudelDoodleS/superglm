@@ -175,6 +175,7 @@ class EditorWidget:
         # The Cross-validation tab's results, each kept with the revision it
         # ran on: a newer revision marks them stale rather than dropping them.
         self._cv_run: CVRun | None = None
+        self._diagnose_folds: tuple[Any, list[dict[str, Any]]] | None = None
         self._final_fit: FinalFit | None = None
         # Run CV and Final fit: one background job of each kind at a time.
         # A starter captures a job's inputs under the widget lock and returns
@@ -682,7 +683,7 @@ class EditorWidget:
             current_revision = self.session.model_revision
             if model_revision is not None and int(model_revision) != current_revision:
                 return _superseded_payload(int(model_revision), request_sequence)
-        if report == "cv":
+        if report in ("cv", "diagnose"):
             payload = report_payload(self, report, request_sequence=request_sequence)
             with self._lock:
                 if payload["model_revision"] != self.session.model_revision:

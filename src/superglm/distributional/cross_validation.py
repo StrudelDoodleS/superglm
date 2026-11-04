@@ -90,7 +90,12 @@ def _gini(model, X, y, *, sample_weight=None, offset=None) -> float:
     """
     response, mean, weights = _scored_means(model, X, y, sample_weight, offset)
     total = np.sum(response) if weights is None else np.sum(weights * response)
-    return _normalized_gini(response, mean, weights) if total > 0.0 else float("nan")
+    if total > 0.0:
+        return _normalized_gini(response, mean, weights)
+    logger.warning(
+        "A fold's total response is not positive, so it has no Gini, and the mean Gini leaves it out."
+    )
+    return float("nan")
 
 
 def parts_ratio(numerator: float, denominator: float) -> float:
@@ -154,6 +159,8 @@ class LSSFolds:
     unsliced_fit_kwargs = frozenset({"truncation", "censored"})
     # A fold is read for its predictions and curves, not its training diagnostics.
     fold_fit_kwargs: Mapping[str, Any] = {"retain_rows": False}
+
+    row_cost_label = "Log score"
 
     def __init__(self, model) -> None:
         self.model = model
@@ -261,6 +268,14 @@ class LSSFolds:
             for name, value in estimator.smoothing_parameters_.items()
             if name.rpartition("#")[0] not in cold_terms
         }
+
+    def row_costs(self, estimator, X, y, sample_weight, offset) -> NDArray[np.float64]:
+        """Each row's log score; a row of zero weight scores nothing."""
+        fitted = estimator._require_fitted()
+        rows = _scoring_rows(fitted, X, y, sample_weight=sample_weight, offsets=offset)
+        costs = np.zeros(rows.n_observations, dtype=np.float64)
+        costs[rows.positions] = _retained_log_score(fitted, rows)
+        return costs
 
     def predict(self, estimator, X, offset) -> NDArray[np.float64]:
         return estimator.predict(X, offsets=offset)

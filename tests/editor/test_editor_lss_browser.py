@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import io
 from urllib.parse import urlsplit
 
@@ -151,6 +152,71 @@ def test_cv_tab_draws_folds_and_runs_cv_and_final_fit(open_lss_editor_page):
         )
         page.locator("#finalTab").click()
         frame.get_by_text("Refitted on", exact=False).first.wait_for()
+
+
+def test_diagnose_tab_lists_the_fits_and_switches_between_them(open_lss_editor_page):
+    case = lognormal_case()
+    cv = cross_validate(
+        case.model,
+        case.X,
+        case.y,
+        cv=KFold(3, shuffle=True, random_state=0),
+        fit_mode="fit_reml",
+        return_estimators=True,
+        error_score="raise",
+    )
+    with open_lss_editor_page(cv=cv) as (page, _session):
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.locator("#diagnoseTab").click()
+        frame = page.locator("#reportFrame")
+        frame.locator(".diagnose-table").first.wait_for()
+        assert page.locator("#diagnoseTab").get_attribute("aria-selected") == "true"
+        fits = frame.locator("[data-diagnose-fit]")
+        assert fits.all_inner_texts() == ["This model", "Fold 1", "Fold 2", "Fold 3"]
+        assert frame.locator(".diagnose-matrix .diagnose-group th").all_inner_texts() == [
+            "Average",
+            "Spread",
+        ]
+        assert frame.locator(".diagnose-line").count() == 4
+        assert frame.locator(".diagnose-phase").count() > 0
+
+        fits.nth(2).click()
+        pressed = frame.locator('[data-diagnose-fit][aria-pressed="true"]')
+        assert pressed.inner_text() == "Fold 2"
+        assert "Fold 2's held-out rows" in frame.inner_text()
+        assert frame.locator('table[aria-label="Rows that cost the most"] tbody tr').count() == 10
+        # A poll or a return to the tab keeps the fit in view.
+        page.locator("#cvTab").click()
+        page.locator("#reportFrame .cv-card").first.wait_for()
+        page.locator("#diagnoseTab").click()
+        frame.locator(".diagnose-table").first.wait_for()
+        assert frame.locator('[data-diagnose-fit][aria-pressed="true"]').inner_text() == "Fold 2"
+        assert errors == []
+
+
+def test_a_slow_fold_s_mark_opens_it_in_diagnose(open_lss_editor_page):
+    case = lognormal_case()
+    cv = cross_validate(
+        case.model,
+        case.X,
+        case.y,
+        cv=KFold(3, shuffle=True, random_state=0),
+        fit_mode="fit_reml",
+        return_estimators=True,
+        error_score="raise",
+    )
+    slow = dataclasses.replace(cv, fold_scores=cv.fold_scores.assign(n_reml_iter=[10, 40, 10]))
+    with open_lss_editor_page(cv=slow) as (page, _session):
+        page.locator("#cvTab").click()
+        frame = page.locator("#reportFrame")
+        frame.locator(".cv-card").first.wait_for()
+        marks = frame.locator("[data-diagnose-open]")
+        assert marks.count() == 1
+        marks.first.click()
+        frame.locator(".diagnose-table").first.wait_for()
+        assert page.locator("#diagnoseTab").get_attribute("aria-selected") == "true"
+        assert frame.locator('[data-diagnose-fit][aria-pressed="true"]').inner_text() == "Fold 2"
 
 
 def test_toolbar_tooltips_stay_in_one_place_along_the_row(open_lss_editor_page):

@@ -801,6 +801,22 @@ scores land on the cards and in the fold table as it finishes. When the folds sp
 K-fold does, the **Held out** column shows the piece of the book each fold scored, and **Rounds**
 shows how much smoothing search a `fit_reml` fold took, which is usually why one fold is slower.
 
+The **Diagnose** tab shows how each fit's smoothing search went, read from what the fits recorded,
+so opening it refits nothing:
+
+- **Fits**: rounds, the round the search settled by, fit time, why it stopped and how much REML the
+  last half of its rounds gained. A fold that took at least twice the middle fold's rounds, and at
+  least ten, is marked *slow*, here and in the fold table, whose mark opens that fold in this tab.
+- **Smoothing by term**: every fit's effective degrees of freedom side by side. A tint means the fit
+  left the term at the simplest shape its penalty allows, a straight line for most splines, or
+  smoothed it away. A dot means the fit records that it reached the smoothing limit.
+- **Search path**: how much REML each fit still had to gain at each round.
+- **What the fit reports** and **Time by phase**: a SuperLSS's `diagnose()` findings and work profile.
+  A SuperGLM has neither.
+- **Rows that cost the most**: the held-out rows the fold's own fit predicted worst.
+
+Folds come from Run CV, or from a supplied result with `return_estimators=True`.
+
 A SuperLSS model works the same way: pass `cross_validate(model, X_train, y_train, cv=folds,
 fit_mode="fit_reml", return_estimators=True)` as `cv=`, with no `scoring=` argument. Its folds are
 scored by log score, CRPS, Gini and actual over expected; a family with no distribution function,

@@ -379,17 +379,33 @@
 
 /* The tab takes the report panel's whole width, and the panel scrolls as one
    page: the header goes up with the cards instead of staying over them. */
-.report-panel[data-report="cv"] {
+.report-panel[data-report="cv"],
+.report-panel[data-report="diagnose"] {
   overflow: auto;
   grid-template-rows: auto auto;
   align-content: start;
 }
 .report-panel[data-report="cv"] .report-header,
-.report-panel[data-report="cv"] .report-frame {
+.report-panel[data-report="cv"] .report-frame,
+.report-panel[data-report="diagnose"] .report-header,
+.report-panel[data-report="diagnose"] .report-frame {
   max-width: none;
 }
-.report-panel[data-report="cv"] .report-frame {
+.report-panel[data-report="cv"] .report-frame,
+.report-panel[data-report="diagnose"] .report-frame {
   overflow: visible;
+}
+.cv-rounds-mark {
+  border: 0;
+  border-radius: var(--radius-pill);
+  padding: 0 7px;
+  background: var(--sig-weak-bg);
+  color: var(--sig-weak-fg);
+  font: inherit;
+  cursor: pointer;
+  height: auto;
+  min-height: 0;
+  min-width: 0;
 }
 
 /* Translucent yellow over the dark ground reads dim, as on the editor's
