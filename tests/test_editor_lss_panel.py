@@ -12,8 +12,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import LogNormalLS, SuperLSS, cat
-from superglm.editor import notebook
+from superglm import Categorical, GammaLS, LogNormalLS, SuperLSS, cat, term
+from superglm.editor import edit, notebook
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.lss.apply import lss_model_with_edits
 from superglm.editor.lss.panel import distribution_panel_payload, link_spec
@@ -438,3 +438,17 @@ def test_a_spread_curve_and_its_ridges_agree_after_another_term_is_edited():
     shown = np.log([curve["y"][curve["levels"].index(row["level"])] for row in panel["rows"]])
     np.testing.assert_allclose(shown, edited, rtol=0, atol=_tolerance(session, edited))
     np.testing.assert_allclose(edited - fitted, 0.3, rtol=0, atol=_tolerance(session, edited))
+
+
+def test_a_declared_level_absent_from_the_rows_is_read_as_its_own_value():
+    case = gamma_case()
+    X = case.X.assign(grade=np.resize([1, 2], len(case.y)))
+    family = GammaLS()
+    model = SuperLSS(
+        family,
+        family.mean(term("grade", Categorical(levels=[1, 2, 3]))),
+        family.scale(),
+    ).fit_reml(X, case.y)
+    session = edit(model, train_data=(X, case.y))
+    payload = _panel(session, "grade")
+    assert {row["label"] for row in payload["rows"]} >= {"3"}

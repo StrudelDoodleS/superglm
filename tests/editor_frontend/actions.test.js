@@ -1827,6 +1827,20 @@ test("switching feature shows it and its selection with no state request", async
   assert.equal(stateReads(), 0);
 });
 
+test("switching feature inside the delay still tells Python the first feature's selection", async () => {
+  const { actions, requests, timers } = viewHarness(twoTermSnapshot());
+
+  actions.setSelection("age", [3]);
+  actions.setActiveTerm("region");
+  timers.fire();
+  await settled();
+
+  assert.deepEqual(requests, [
+    { path: "/select", payload: { term: "age", indices: [3], quiet: true } },
+    { path: "/select", payload: { term: "region", indices: [1], quiet: true } }
+  ]);
+});
+
 test("an edit waits until Python has the view it was made on", async () => {
   const held = deferred();
   const confirmed = twoTermSnapshot();

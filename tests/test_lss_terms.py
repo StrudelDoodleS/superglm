@@ -27,6 +27,7 @@ from superglm.distributional.terms import (
 from superglm.features.factor_smooth import FactorSmooth
 from superglm.features.interaction import TensorInteraction
 from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.random_effect import RandomEffect
 from tests.bound_predictor_fixtures import model_from_templates
 
 SUMMARY_COLUMNS = (
@@ -338,6 +339,23 @@ def test_ordered_effect_is_a_contrast_with_its_reference_level(basis) -> None:
     eta = model.predict_link(pd.DataFrame({"band": list(effect.levels)}))["location"].to_numpy()
     tolerance = 64 * np.finfo(np.float64).eps * max(1.0, float(np.max(np.abs(eta))))
     np.testing.assert_allclose(effect.effect, eta - eta[base], rtol=0.0, atol=tolerance)
+
+
+def test_a_random_effect_has_no_reference_level_even_with_an_empty_label() -> None:
+    rng = np.random.default_rng(42)
+    groups = np.repeat(["", "a", "b"], 80)
+    means = pd.Series(groups).map({"": 2.0, "a": 0.0, "b": -2.0}).to_numpy()
+    frame = pd.DataFrame({"group": groups})
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=[Predictor("location", {"group": RandomEffect()}), Predictor("scale", {})],
+    ).fit_reml(frame, means + rng.normal(0.0, 0.5, groups.size))
+
+    effect = term_effect(model._require_fitted(), frame, "location", "group")
+
+    empty = list(effect.levels).index("")
+    assert effect.effect[empty] > 1.0
+    assert effect.se[empty] > 0.0
 
 
 def test_categorical_effect_serialises_its_levels(fit_case) -> None:

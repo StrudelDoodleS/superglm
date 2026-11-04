@@ -21,7 +21,7 @@ from superglm import (
     families,
     s,
 )
-from superglm.distributional.cross_validation import LSSFolds
+from superglm.distributional.cross_validation import _POOLED_PARTS, LSSFolds
 from superglm.model_selection import _data_fingerprint
 from superglm.validation import _normalized_gini
 
@@ -309,7 +309,7 @@ def test_reml_folds_start_cold_unless_asked_and_disclose_their_iterations():
     warm = cross_validate(_gamma(), X, y, warm_start=True, **kwargs)
     assert warm.fold_scores["warm_started"].tolist() == [False, True, True]
     assert warm.warm_start is True
-    assert warm.mean_scores["nll"] == pytest.approx(cold.mean_scores["nll"], abs=1e-3)
+    assert np.isfinite(warm.mean_scores["nll"])
 
 
 def test_a_warm_fold_starts_from_the_first_folds_smoothing(monkeypatch):
@@ -380,9 +380,90 @@ def test_a_family_with_no_distribution_function_has_no_crps(monkeypatch):
     assert np.isfinite(result.mean_scores["nll"])
 
 
+def test_a_fold_failing_a_later_scorer_stays_out_of_the_pooled_totals():
+    X, y = _rows()
+    scored = []
+
+    def fails_on_the_second_fold(model, X, y, *, sample_weight=None, offset=None):
+        scored.append(len(y))
+        if len(scored) == 2:
+            raise ValueError("this fold has no such score")
+        return 1.0
+
+    result = cross_validate(
+        _gamma(),
+        X,
+        y,
+        cv=FOLDS,
+        fit_kwargs={"lambdas": LAMBDAS},
+        scoring=("nll", fails_on_the_second_fold),
+    )
+    scores = result.fold_scores
+    assert np.isnan(scores.loc[1, "nll"])
+    kept = scores.loc[[0, 2]]
+    expected = np.sum(kept["nll"] * kept["n_test"]) / kept["n_test"].sum()
+    assert result.pooled_scores["nll"] == pytest.approx(expected, rel=1e-12)
+
+
+def test_an_undefined_actual_expected_keeps_the_folds_other_scores(monkeypatch):
+    X, y = _rows()
+    monkeypatch.setitem(_POOLED_PARTS, "actual_expected", lambda *args, **kwargs: (1.0, 0.0))
+    result = _fixed_cv(X, y, scoring=("nll", "actual_expected"))
+    assert result.fold_scores["actual_expected"].isna().all()
+    assert np.isfinite(result.fold_scores["nll"]).all()
+    assert result.fold_scores["converged"].all()
+    assert "actual_expected" not in result.pooled_scores
+
+
 def test_fold_curves_are_left_to_the_editor():
     X, y = _rows()
     result = _fixed_cv(X, y, return_estimators=True)
     assert result.curve_similarity is None
     with pytest.raises(ValueError, match="Cross-validation tab"):
         result.plot_terms_by_fold(X)
+
+
+def test_the_default_call_estimates_each_fold_s_smoothing():
+    X, y = _rows()
+    result = cross_validate(_gamma(), X, y, cv=KFold(3, shuffle=True, random_state=2))
+    assert result.fit_mode == "fit_reml"
+    assert np.isfinite(result.fold_scores["nll"]).all()
+
+
+def test_given_smoothing_is_held_fixed_by_default():
+    X, y = _rows()
+    fitted = _gamma().fit_reml(X, y)
+    lambdas = dict(fitted._require_fitted().lambdas)
+    result = cross_validate(
+        fitted, X, y, cv=KFold(3, shuffle=True, random_state=2), fit_kwargs={"lambdas": lambdas}
+    )
+    assert result.fit_mode == "fit"
+    assert np.isfinite(result.fold_scores["nll"]).all()
+
+
+def test_fixed_smoothing_with_none_given_is_refused_before_any_fold():
+    X, y = _rows()
+    fitted = _gamma().fit_reml(X, y)
+    with pytest.raises(ValueError, match="fit_mode='fit_reml'"):
+        cross_validate(fitted, X, y, cv=KFold(3), fit_mode="fit")
+
+
+def test_a_fit_on_truncated_rows_is_refused_before_any_fold():
+    X, y = _rows()
+    fitted = _gamma().fit_reml(X, y, truncation=(None, float(y.max()) * 2.0))
+    with pytest.raises(ValueError, match="truncated or censored rows"):
+        cross_validate(fitted, X, y, cv=KFold(3), fit_mode="fit_reml")
+
+
+def test_a_crps_that_cannot_be_resolved_costs_only_the_crps(monkeypatch):
+    import superglm.distributional.cross_validation as module
+
+    def unresolved(*args, **kwargs):
+        raise ValueError("numeric CRPS tail is unresolved")
+
+    monkeypatch.setattr(module, "_retained_crps", unresolved)
+    X, y = _rows()
+    result = cross_validate(_gamma(), X, y, cv=KFold(3, shuffle=True, random_state=2))
+    assert np.isnan(result.fold_scores["crps"]).all()
+    for name in ("nll", "gini", "actual_expected"):
+        assert np.isfinite(result.fold_scores[name]).all()

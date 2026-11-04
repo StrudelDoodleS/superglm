@@ -262,6 +262,8 @@ export function createEditorActions({
 
   /** @param {{term:string, indices:number[]}} view */
   function holdUnsentView(view) {
+    // A view of another term holds that term's selection, which this one would lose.
+    if (unsentView !== null && unsentView.term !== view.term) void sendUnsentView();
     forgetUnsentView();
     unsentView = view;
     viewTimer = setTimer(() => {

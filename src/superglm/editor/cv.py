@@ -29,6 +29,7 @@ from numpy.typing import NDArray
 from superglm._frame import as_eager_frame
 from superglm.diagnostics.separation import SeparationError
 from superglm.distributional.api import SuperLSS
+from superglm.distributional.cross_validation import parts_ratio
 from superglm.distributions import NegativeBinomial
 from superglm.editor.carry import model_with_edited_curves, weighted_mean
 from superglm.editor.errors import EditorClientError, EditorValueError
@@ -1122,12 +1123,19 @@ def run_cv(plan: CVRunPlan, context) -> CVRun:
     frame = as_eager_frame(plan.rows.X)
     lss = is_lss(plan.model)
     read = np.unique(np.concatenate([np.concatenate(fold) for fold in plan.folds]))
+    fitted = np.unique(np.concatenate([train for train, _test in plan.folds]))
+    if lss and plan.rows.sample_weight is not None:
+        # A SuperLSS drops a zero-weight row before it reads the row's labels.
+        weights = np.asarray(plan.rows.sample_weight)
+        read, fitted = read[weights[read] > 0.0], fitted[weights[fitted] > 0.0]
     # A SuperLSS template is an unfitted copy; its view names the columns the terms read.
     _require_valued_labels(plan.model if lss else plan.template, frame.take_rows(read), "Run CV")
     if lss:
-        template = plan.template
+        covering = _covering_replacements(plan.model, frame.take_rows(fitted), "Run CV")
+        template = (
+            plan.model.lss._clone_with_replaced_terms(covering) if covering else plan.template
+        )
     else:
-        fitted = np.unique(np.concatenate([train for train, _test in plan.folds]))
         template = _covering_template(plan.template, frame.take_rows(fitted), "Run CV")
     recorder = _FoldRecorder(plan, context)
     try:
@@ -1234,7 +1242,7 @@ class _FoldRecorder:
                 continue
             numerator, denominator = pooled(model, X, y, sample_weight=sample_weight, offset=offset)
             parts[name] = (numerator, denominator)
-            scores[name] = numerator / denominator
+            scores[name] = parts_ratio(numerator, denominator)
         # Only a fold that scored completely joins the pooled totals.
         for name, (numerator, denominator) in parts.items():
             self._totals[name][0] += numerator

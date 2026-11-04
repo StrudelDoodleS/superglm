@@ -621,10 +621,10 @@ def _reference_row(
     An effect by level is a contrast with this row. A term whose columns are
     centred on fitting reads a constant there, which the intercept carries.
     """
-    base = str(getattr(spec, "_base_level", ""))
-    if levels is None or base not in levels:
+    base = getattr(spec, "_base_level", None)
+    if levels is None or base is None or str(base) not in levels:
         return np.zeros(design.shape[1], dtype=np.float64)
-    return design[levels.index(base)]
+    return design[levels.index(str(base))]
 
 
 def _reference_design(

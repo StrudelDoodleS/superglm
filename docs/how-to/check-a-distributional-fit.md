@@ -468,7 +468,7 @@ folds = cross_validate(
 )
 folds.fold_scores    # one row per fold: its scores, EDF, fit time and convergence
 folds.mean_scores    # "nll" (the log score), "crps", "gini" and "actual_expected"
-folds.pooled_scores  # the same over all held-out rows, as ratios of sums
+folds.pooled_scores  # nll, crps and actual_expected over all held-out rows, as ratios of sums
 ```
 
 Offsets are a dict by parameter, as in `fit`. The `"nll"` of a SuperLSS and of a

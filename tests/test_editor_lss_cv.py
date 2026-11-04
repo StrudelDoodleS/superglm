@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 from sklearn.model_selection import KFold
@@ -13,10 +15,12 @@ from superglm import (
     OrderedCategorical,
     Spline,
     SuperLSS,
+    cat,
     cross_validate,
     s,
     term,
 )
+from superglm.distributional.cross_validation import _POOLED_PARTS
 from superglm.editor import edit
 from superglm.editor.carry import model_with_edited_curves
 from superglm.editor.cv import (
@@ -30,6 +34,7 @@ from superglm.editor.cv import (
 )
 from superglm.editor.errors import EditorValueError
 from superglm.editor.lss.display import fold_chart_display
+from superglm.editor.lss.view import LSSModelView
 from superglm.model_selection import _take_offset
 from tests._lss_editor_fixtures import REGIONS, gamma_case, lognormal_case, nb_case, open_case
 
@@ -131,9 +136,13 @@ def test_fold_curves_are_each_fold_models_own_term_effects(case, fixture, reques
                 parameter, column, X_train=fitted.X.iloc[train], simultaneous=False
             )
             if term.levels is None:
-                # The sweep's own grid; the tab reads it on the editor's.
+                # The tab's reader on the sweep's own grid reads what inference reports.
+                reader = LSSModelView(fold, None)
+                own_grid = reader._specs[key].score(effect.x, reader.term_coefficients(key))
+                assert np.ptp(np.asarray(own_grid) - effect.effect) < 1e-9
+                # And the tab reads the editor's grid: the sweep is fine enough to follow it.
                 expected = np.interp(term.x, effect.x, effect.effect)
-                assert values == pytest.approx(expected, abs=2e-2)
+                assert np.ptp(values - expected) < 2e-2
             else:
                 by_level = dict(zip(effect.levels, effect.effect, strict=True))
                 position = {label: i for i, label in enumerate(term.levels)}
@@ -428,3 +437,49 @@ def test_offsets_are_taken_by_rows_whatever_their_shape():
 )
 def test_a_fold_curve_says_what_it_is_a_relativity_of(family, key, value):
     assert fold_chart_display(key, family=family).value == value
+
+
+def test_run_cv_reads_no_label_of_a_row_of_zero_weight():
+    case = lognormal_case()
+    X = case.X.copy()
+    X["region"] = X["region"].astype(object)
+    X.loc[X.index[0], "region"] = None
+    weights = np.ones(len(case.y))
+    weights[0] = 0.0
+    family = LogNormalLS()
+    model = SuperLSS(family, family.mean(s("age", k=6), cat("region")), family.scale())
+    model.fit_reml(X, case.y, sample_weight=weights)
+    cv = cross_validate(
+        model, X, case.y, cv=FOLDS, sample_weight=weights, fit_mode="fit_reml", error_score="raise"
+    )
+    session = edit(model, train_data=(X, case.y, weights), cv=cv)
+    run = run_cv(capture_cv_run(session), _Context())
+    assert np.isfinite(run.result.fold_scores["nll"]).all()
+
+
+def test_run_cv_keeps_a_folds_scores_when_actual_expected_is_undefined(monkeypatch, lognormal_cv):
+    monkeypatch.setitem(_POOLED_PARTS, "actual_expected", lambda *args, **kwargs: (1.0, 0.0))
+    session = open_case(lognormal_case(), cv=lognormal_cv)
+    run = run_cv(capture_cv_run(session), _Context())
+    assert run.result.fold_scores["actual_expected"].isna().all()
+    assert np.isfinite(run.result.fold_scores["nll"]).all()
+
+
+def test_run_cv_names_a_level_outside_an_ordered_term():
+    case = lognormal_case()
+    family = LogNormalLS()
+    ordered = OrderedCategorical(order=list(REGIONS), basis=Spline(kind="cr", k=4))
+    model = SuperLSS(family, family.mean(term("region", ordered)), family.scale()).fit_reml(
+        case.X, case.y, outer="efs+newton"
+    )
+    cv_rows = case.X.assign(region=case.X["region"].astype(object))
+    cv_rows.loc[cv_rows.index[:40], "region"] = "elsewhere"
+    cv = cross_validate(model, case.X, case.y, cv=FOLDS, fit_mode="fit_reml")
+    session = edit(
+        model,
+        train_data=(case.X, case.y),
+        cv=dataclasses.replace(cv, data_fingerprint=None, fingerprint_version=None),
+        cv_data=(cv_rows, case.y),
+    )
+    with pytest.raises(EditorValueError, match="outside its ordered levels"):
+        run_cv(capture_cv_run(session), _Context())

@@ -19,7 +19,7 @@ from numpy.typing import NDArray
 from superglm._frame import FrameLike, as_eager_frame
 from superglm._utils import weighted_row_sum
 from superglm.distributional.api import SuperLSS
-from superglm.distributional.cross_validation import LSSFolds
+from superglm.distributional.cross_validation import LSSFolds, parts_ratio
 from superglm.distributions import Tweedie, weighted_log_likelihood
 
 # The full-frame binding pass lives in a neutral module so the public
@@ -543,6 +543,14 @@ class _GLMFolds:
     offset_argument = "offset"
     warm_argument = "lambda2_init"
     default_warm_start = True
+
+    @staticmethod
+    def default_fit_mode(fit_kwargs: Mapping[str, Any]) -> str:
+        return "fit"
+
+    def refuse_fit(self, fit_mode: str, fit_kwargs: Mapping[str, Any]) -> None:
+        """A SuperGLM holds its configured penalties fixed, so every fit mode can run."""
+
     default_scoring = ("deviance",)
     scorers = _BUILTIN_SCORERS
     pooled_parts = _POOLED_PARTS
@@ -667,7 +675,7 @@ def cross_validate(
     sample_weight: NDArray | None = None,
     offset: NDArray | Mapping[str, NDArray] | None = None,
     groups: NDArray | None = None,
-    fit_mode: str = "fit",
+    fit_mode: str | None = None,
     scoring: str | Callable | Sequence[str | Callable] | None = None,
     return_estimators: bool = False,
     return_oof: bool = False,
@@ -703,7 +711,10 @@ def cross_validate(
         parameter, keyed by parameter name as in its ``offsets`` argument.
     groups : array-like, optional
         Group labels forwarded to ``cv.split()``.
-    fit_mode : {"fit", "fit_reml"}
+    fit_mode : {"fit", "fit_reml"}, optional
+        By default ``"fit"`` for a SuperGLM. A SuperLSS has no configured
+        smoothing to hold fixed, so its default is ``"fit_reml"``, or ``"fit"``
+        when ``fit_kwargs`` gives ``lambdas``.
         Which fit method to call on each fold estimator. ``"fit"`` holds the
         smoothing parameters fixed; ``"fit_reml"`` selects them again on each
         fold's training rows.
@@ -762,9 +773,12 @@ def cross_validate(
     if not hasattr(cv, "split") or not callable(cv.split):
         raise TypeError("cv must be a splitter object with a .split() method")
 
+    fit_kwargs = dict(fit_kwargs or {})
+    if fit_mode is None:
+        fit_mode = folds.default_fit_mode(fit_kwargs)
     if fit_mode not in ("fit", "fit_reml"):
         raise ValueError(f"fit_mode must be 'fit' or 'fit_reml', got {fit_mode!r}")
-    fit_kwargs = dict(fit_kwargs or {})
+    folds.refuse_fit(fit_mode, fit_kwargs)
     reserved_fit_kwargs = {"sample_weight", folds.offset_argument} & set(fit_kwargs)
     if reserved_fit_kwargs:
         raise ValueError(
@@ -826,6 +840,8 @@ def cross_validate(
     # One level vocabulary for every fold, resolved before the split, so a level
     # missing from a training fold does not fail it at predict time.
     level_bindings = folds.level_bindings(frame, sample_weight)
+    # A model that cannot be copied is refused here, not once per fold.
+    folds.estimator(level_bindings)
 
     # ── Fold loop ─────────────────────────────────────────────────
     fold_records: list[dict[str, Any]] = []
@@ -894,6 +910,7 @@ def cross_validate(
             # Score
             t1 = time.perf_counter()
             written_by_builtin: dict[str, bool] = {}
+            fold_parts: dict[str, tuple[float, float]] = {}
             for sname, sfn in scorers.items():
                 pooled_fn = folds.pooled_parts.get(sname)
                 if pooled_fn is not None and sfn is folds.scorers.get(sname):
@@ -907,10 +924,9 @@ def cross_validate(
                         sample_weight=sw_test,
                         offset=off_test,
                     )
-                    record[sname] = float(numerator / denominator)
+                    record[sname] = parts_ratio(numerator, denominator)
                     written_by_builtin[sname] = True
-                    pooled_numerators[sname] += numerator
-                    pooled_denominators[sname] += denominator
+                    fold_parts[sname] = (numerator, denominator)
                     continue
                 result = sfn(
                     est,
@@ -933,20 +949,23 @@ def cross_validate(
                     written_by_builtin[sname] = sfn is folds.scorers.get(sname)
                     pooled_fn = folds.pooled_parts.get(sname)
                     if pooled_fn is not None:
-                        numerator, denominator = pooled_fn(
+                        fold_parts[sname] = pooled_fn(
                             est,
                             X_test,
                             y_test,
                             sample_weight=sw_test,
                             offset=off_test,
                         )
-                        pooled_numerators[sname] += numerator
-                        pooled_denominators[sname] += denominator
             record["score_time_s"] = time.perf_counter() - t1
 
             # OOF predictions
             if oof is not None:
                 oof[test_idx] = folds.predict(est, X_test, off_test)
+
+            # Only a fold that scored completely joins the pooled totals.
+            for sname, (numerator, denominator) in fold_parts.items():
+                pooled_numerators[sname] += numerator
+                pooled_denominators[sname] += denominator
 
             if estimators_list is not None:
                 estimators_list.append(est)

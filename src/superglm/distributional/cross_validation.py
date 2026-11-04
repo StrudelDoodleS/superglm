@@ -37,13 +37,17 @@ def _nll_parts(model, X, y, *, sample_weight=None, offset=None) -> tuple[float, 
 
 
 def _crps_parts(model, X, y, *, sample_weight=None, offset=None) -> tuple[float, float]:
-    """Total CRPS and the rows' likelihood size; NaN for a family with no distribution function."""
+    """Total CRPS and the rows' likelihood size.
+
+    NaN for a family with no distribution function, or where the numeric route
+    cannot resolve the integral, so the fold keeps its other scores.
+    """
     fitted = model._require_fitted()
     rows = _scoring_rows(fitted, X, y, sample_weight=sample_weight, offsets=offset)
     mass = rows.aggregation_mass
     try:
         scores = _retained_crps(fitted, rows, method="auto", n_nodes=64)
-    except (NotImplementedError, UnsupportedLikelihoodContractError):
+    except (NotImplementedError, UnsupportedLikelihoodContractError, ValueError):
         return float("nan"), float(mass.sum())
     return float(np.sum(mass * scores)), float(mass.sum())
 
@@ -74,10 +78,14 @@ def _gini(model, X, y, *, sample_weight=None, offset=None) -> float:
     return _normalized_gini(response, mean, weights)
 
 
+def parts_ratio(numerator: float, denominator: float) -> float:
+    """A score from its parts; NaN where a zero denominator leaves it undefined."""
+    return float(numerator / denominator) if denominator != 0.0 else float("nan")
+
+
 def _parts_quotient(parts):
     def score(model, X, y, *, sample_weight=None, offset=None) -> float:
-        numerator, denominator = parts(model, X, y, sample_weight=sample_weight, offset=offset)
-        return numerator / denominator
+        return parts_ratio(*parts(model, X, y, sample_weight=sample_weight, offset=offset))
 
     return score
 
@@ -103,6 +111,28 @@ class LSSFolds:
     # A Fellner-Schall search can take longer from another fold's smoothing than from
     # its own data-scaled start, and can reach its iteration limit.
     default_warm_start = False
+
+    @staticmethod
+    def default_fit_mode(fit_kwargs: Mapping[str, Any]) -> str:
+        """``fit`` holds given smoothing fixed; with none given, each fold estimates its own."""
+        return "fit" if "lambdas" in fit_kwargs else "fit_reml"
+
+    def refuse_fit(self, fit_mode: str, fit_kwargs: Mapping[str, Any]) -> None:
+        """Refuse a fixed-smoothing fit that names no smoothing for a fitted model's penalties."""
+        if fit_mode != "fit" or "lambdas" in fit_kwargs or self.model._model is None:
+            return
+        missing = [
+            component.name
+            for component in self.model._model.layout.penalties
+            if component.lambda_policy is None or component.lambda_policy.mode != "fixed"
+        ]
+        if missing:
+            raise ValueError(
+                f"fit_mode='fit' holds smoothing fixed, but {missing} have none set. Use "
+                "fit_mode='fit_reml' to estimate it in each fold, or pass "
+                "fit_kwargs={'lambdas': {...}}."
+            )
+
     scorers = _SCORERS
     pooled_parts = _POOLED_PARTS
     # Bounds per row belong to a fit and to its scores; a fold's held-out scores have none.

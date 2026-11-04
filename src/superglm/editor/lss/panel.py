@@ -38,6 +38,7 @@ from superglm.distributional.families import (
 )
 from superglm.editor._types import EditableTerm
 from superglm.editor.errors import EditorKeyError, EditorValueError
+from superglm.editor.lss.apply import _native_levels
 from superglm.editor.lss.display import parameter_display
 from superglm.editor.lss.view import LSSModelView, lss_key
 from superglm.links import Link, LogLink
@@ -143,8 +144,11 @@ def _level_sweep(view: LSSModelView, column: str, term: EditableTerm) -> dict[st
     assert term.levels is not None and term.weights is not None
     kept = sorted(np.argsort(-term.weights, kind="stable")[:MAX_LEVELS])
     levels = [term.levels[i] for i in kept]
-    # A label is the text of a training value; a declared level absent from the rows stands for itself.
-    present = {str(v): v for v in pd.unique(as_eager_frame(view.X_train).column_array(column))}
+    # A label is the text of a training value, or of a declared level absent from the rows.
+    present = {
+        **_native_levels(view._specs[term.name]),
+        **{str(v): v for v in pd.unique(as_eager_frame(view.X_train).column_array(column))},
+    }
     capped = len(term.levels) > MAX_LEVELS
     return {
         "rows": [{"label": level, "x": None, "level": level} for level in levels],
