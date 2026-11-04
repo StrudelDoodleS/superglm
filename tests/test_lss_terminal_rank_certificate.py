@@ -26,6 +26,7 @@ import pandas as pd
 import pytest
 
 import superglm.distributional.solver._formation as _formation
+import superglm.distributional.solver.assembly as assembly
 import superglm.distributional.solver.certificate as certificate
 import superglm.distributional.solver.chunks as chunking
 import superglm.distributional.solver.curvature as curvature_module
@@ -946,6 +947,25 @@ def test_formation_statistics_on_negative_diagonal_channels(terminal):
         [state.coefficient_slice for state in layout.predictors],
     )
     assert 0.0 < bound < 1e-9
+
+
+def test_a_dense_fit_forms_its_statistics_once_per_terminal_decision(terminal, monkeypatch):
+    """Kills forming them at every geometry the fit assembles, read or not."""
+    decisions, _ = terminal
+    formed = []
+    original = assembly.dense_formation
+
+    def counted(*args):
+        formed.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(assembly, "dense_formation", counted)
+    x = np.random.default_rng(4).uniform(0, 1, 3000)
+    y = np.exp(1.0 + x) + np.random.default_rng(5).normal(0.0, 0.3, 3000)
+    family = GaussianLS()
+    model = SuperLSS(family, family.location(term("x", Numeric())), family.scale(), discrete=False)
+    _fit(model, pd.DataFrame({"x": x}), y)
+    assert decisions and len(formed) == len(decisions)
 
 
 def _penalty_names(model, frame, y):

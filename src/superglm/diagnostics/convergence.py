@@ -325,8 +325,8 @@ def lss_corrected_covariance_substitute_message(source: str) -> str:
     )
 
 
-# The Fellner-Schall stops of an outer='efs' fit are the ones the endgame can improve on,
-# on a family with continuous curvature; an outer='efs+newton' fit already ran it.
+# The Fellner-Schall stops are the ones the endgame can improve on, on a family with
+# continuous curvature; an outer='efs+newton' fit already ran it.
 _NONSTATIONARY_DEFAULT = "model.diagnose() explains the stop."
 _NONSTATIONARY_REMEDY = dict.fromkeys(
     ("lambda_change", "objective_plateau", "practical_plateau"),
@@ -339,7 +339,7 @@ def lss_corrected_covariance_nonstationary_message(reason: str, *, newton_can_he
     """What a corrected covariance means when smoothing did not stop at a certified stationary point.
 
     ``newton_can_help`` says whether refitting with the Newton endgame is advice
-    worth giving: the fit ran plain Fellner-Schall on a family whose curvature is
+    worth giving: the fit stopped on Fellner-Schall on a family whose curvature is
     continuous.
     """
     remedy = _NONSTATIONARY_REMEDY.get(reason) if newton_can_help else None

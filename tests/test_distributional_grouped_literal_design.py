@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 import numpy as np
@@ -276,6 +277,28 @@ def test_by_bin_tables_are_contracted_once_per_pass(monkeypatch, chunks_per_bloc
     assert len(contracted) == (4 if kept else 4 * blocks)
 
 
+def test_pass_tables_contract_on_the_pool_with_the_serial_result(monkeypatch):
+    problem = _mixed_problem()
+    monkeypatch.setattr(chunks, "contraction_block_rows", lambda n, row_bytes, rows: 2 * rows)
+    original = algebra._by_bin_contraction
+    threads = []
+
+    def recorded(gm, cache, table, **kwargs):
+        threads.append(threading.current_thread().name)
+        return original(gm, cache, table, **kwargs)
+
+    monkeypatch.setattr(algebra, "_by_bin_contraction", recorded)
+    with block_queue_config(workers=1):
+        serial = _assemble(monkeypatch, problem=problem)[0]
+    threads.clear()
+    monkeypatch.setattr(block_queue, "_TINY_COST", 0)
+    with block_queue_config(workers=3, min_cost=0):
+        pooled = _assemble(monkeypatch, problem=problem)[0]
+
+    assert threads and all(name.startswith("superglm-gram") for name in threads)
+    np.testing.assert_array_equal(pooled.data_curvature, serial.data_curvature)
+
+
 def _joint_contractions(monkeypatch):
     contracted, histograms = [], []
     original_block, original_hist = algebra._joint_block, algebra._disc_disc_2d_hist
@@ -463,6 +486,50 @@ def test_an_assembly_projects_each_support_once(monkeypatch):
     assert len(supports) == 2
     assert len(formed) == len(set(formed)) and supports <= set(formed) <= supports | levels
     assert all(calls.count(key) >= 4 for key in supports)
+
+
+def test_assemblies_sharing_factors_project_each_support_once(monkeypatch):
+    layout, _literal, score, curvature = _mixed_problem()
+    monkeypatch.setattr(chunks, "contraction_block_rows", lambda n, row_bytes, rows: rows)
+    monkeypatch.setattr(
+        chunks,
+        "iter_likelihood_chunks",
+        lambda *args, **kwargs: _stream(layout, score, curvature),
+    )
+    formed = []
+    original = algebra.PassFactors.projection
+
+    def counted(self, B_unique, R_inv):
+        if (id(B_unique), id(R_inv)) not in self.projections:
+            formed.append(1)
+        return original(self, B_unique, R_inv)
+
+    monkeypatch.setattr(algebra.PassFactors, "projection", counted)
+
+    def assemble(factors):
+        return chunks.assemble_chunked_geometry(
+            None,
+            layout,
+            None,
+            None,
+            np.linspace(-0.2, 0.1, layout.n_coefficients),
+            penalty=np.diag(np.linspace(0, 0.3, layout.n_coefficients)),
+            chunk_size=8,
+            curvature_source="observed",
+            pass_factors=factors,
+        )
+
+    alone = assemble(None)
+    per_assembly = len(formed)
+    del formed[:]
+    shared = algebra.PassFactors()
+    first, second = assemble(shared), assemble(shared)
+    # The second assembly finds every support projected; the geometry is the same bits.
+    assert per_assembly > 0 and len(formed) == per_assembly
+    for name in ("score_data", "data_curvature"):
+        for result in (first, second):
+            actual, expected = getattr(result, name), getattr(alone, name)
+            assert np.array_equal(actual.view(np.uint64), expected.view(np.uint64)), name
 
 
 def _arrays(group):

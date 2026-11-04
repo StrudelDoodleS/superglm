@@ -15,6 +15,7 @@ from superglm.distributional.smoothing.objective import (
     _stable_isolated_gfs_update,
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
+from superglm.distributional.smoothing.penalty_geometry import _PenaltyEvaluationMemo
 from superglm.reml.efs_update import EFSComponentState, EFSUpdateResult, wood_fasiolo_update
 
 
@@ -37,13 +38,19 @@ def _fresh_raw_evidence(
     config: DistributionalEFSConfig,
     *,
     face: PenaltyFace | None = None,
+    penalty_memo: _PenaltyEvaluationMemo | None = None,
 ) -> _FreshRawEvidence:
     """Rebuild the proposal and normalized stationarity residual at one fit."""
 
     components = (
         _component_states(layout, lambdas)
         if face is None
-        else projected_component_states(layout=layout, lambdas=lambdas, face=face)
+        else projected_component_states(
+            layout=layout,
+            lambdas=lambdas,
+            face=face,
+            evaluation=None if penalty_memo is None else penalty_memo.get(layout, lambdas, face),
+        )
     )
     estimated_names = _estimated_names(components)
     if not components:

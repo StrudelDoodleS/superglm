@@ -83,6 +83,7 @@ from superglm.distributional.smoothing.objective import (
     rank_matched_objectives,
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace, PenaltyFaceError
+from superglm.distributional.smoothing.penalty_geometry import _PenaltyEvaluationMemo
 from superglm.distributional.smoothing.proposals import (
     _accelerated_proposal,
     _acceleration_provenance,
@@ -116,10 +117,13 @@ def _trial_laplace_objective(
     layout: StackedLayout,
     lambdas: Mapping[str, float],
     face: PenaltyFace | None,
+    penalty_memo: _PenaltyEvaluationMemo | None = None,
 ) -> float | None:
     """Reject an uncertifiable penalty trial without changing accepted state."""
     try:
-        return _laplace_objective(result, layout=layout, lambdas=lambdas, face=face)
+        return _laplace_objective(
+            result, layout=layout, lambdas=lambdas, face=face, penalty_memo=penalty_memo
+        )
     except PenaltyNumericalError:
         return None
     except EndpointLaplaceError as exc:
@@ -200,6 +204,13 @@ def _efs_result(
     )
 
 
+# The plateau finish's bar as a fraction of the plateau's stationarity tolerance.
+_FINISH_TOLERANCE = 0.1
+# The Newton iterations a plateau finish may spend. A finish past this count is on a
+# fit whose exact gradient gives it no quick way down, which keeps its plateau.
+_FINISH_ITERATIONS = 16
+
+
 def fit_distributional_efs(
     family: DistributionalFamily,
     layout: StackedLayout,
@@ -221,6 +232,7 @@ def fit_distributional_efs(
     if not isinstance(outer_config, DistributionalEFSConfig):
         raise TypeError("efs_config must be DistributionalEFSConfig")
     reuse_session = _DenseObservedReuseSession()
+    penalty_memo = _PenaltyEvaluationMemo()
 
     with measure_phase(phase_recorder, "layout_penalty_assembly"):
         current_lambdas, initial = prepare_distributional_initialization(
@@ -315,11 +327,30 @@ def fit_distributional_efs(
     endgame_stationary = False
     pending_cap: NewtonEndgameOutcome | None = None
     newton_budget = (
-        outer_config.max_iterations
+        (_FINISH_ITERATIONS if outer_config.outer == "efs+finish" else outer_config.max_iterations)
         if outer_config.max_newton_iterations is None
         else outer_config.max_newton_iterations
     )
+    # ``"efs+finish"`` finishes a plateau on the exact gradient, an order tighter than
+    # the plateau's own bar.
+    endgame_config = (
+        replace(
+            outer_config, outer="efs+newton", tolerance=_FINISH_TOLERANCE * outer_config.tolerance
+        )
+        if outer_config.outer == "efs+finish"
+        else outer_config
+    )
     beyond_cap: dict[str, float] = {}
+
+    def _plateau_finishes() -> bool:
+        """Whether a practical plateau hands to the endgame rather than stopping.
+
+        Fellner--Schall has no exact-gradient test, and its plateau can leave V several
+        stationarity bars short, so ``"efs+finish"`` ends with Wood, Pya and Saefken's
+        (2016) Newton iteration on the components off the active face. A finish that
+        cannot reach stationarity leaves the fit at its plateau.
+        """
+        return outer_config.outer == "efs+finish"
 
     def _endgame_budget() -> int:
         """The endgame iterations left: ``max_iterations`` bounds warm-up and endgame together."""
@@ -393,23 +424,42 @@ def fit_distributional_efs(
             terminal_fit_index=terminal_fit_index,
         )
 
+    def _resume_fellner_schall() -> None:
+        """Keep the accepted fit; drop what cannot describe the next EFS step.
+
+        Disabling handoff bounds the recovery by the ordinary outer budget.
+        """
+        nonlocal endgame_outcome, endgame_stationary, pending_cap, newton_budget
+        nonlocal plateau_run, practical_run, plateau_qualified, previous_accepted_step
+        endgame_outcome = None
+        endgame_stationary = False
+        pending_cap = None
+        newton_budget = 0
+        plateau_run = 0
+        practical_run = 0
+        plateau_qualified = False
+        previous_accepted_step = math.inf
+        if accelerator is not None:
+            accelerator.reset()
+
     def _run_endgame() -> DistributionalEFSResult | None:
         """Run the endgame from the accepted state; a result ends the fit, ``None`` continues."""
         nonlocal current_lambdas, current_fit, current_objective, terminal_fit_index
         nonlocal terminal_evidence, endgame_outcome, endgame_stationary, pending_cap, newton_budget
-        nonlocal plateau_run, practical_run, plateau_qualified
-        nonlocal previous_accepted_step
         budget = _endgame_budget()
         if budget <= 0:
             return _result(converged=False, reason="max_iterations")
+        entry = _endgame_state()
+        entry_fits = list(coefficient_fits) if _plateau_finishes() else []
+        entry_iterations = len(history)
         outcome = run_newton_endgame(
             family,
             layout,
             y,
             likelihood_plan,
-            state=_endgame_state(),
+            state=entry,
             solver_config=inner_config,
-            efs_config=outer_config,
+            efs_config=endgame_config,
             chunk_size=chunk_size,
             phase_recorder=phase_recorder,
             reuse_session=reuse_session,
@@ -417,7 +467,15 @@ def fit_distributional_efs(
             coefficient_fits=coefficient_fits,
             upper_bounds=beyond_cap,
             budget=budget,
+            cap_tolerance=outer_config.tolerance,
         )
+        stalled = _plateau_finishes() and outcome.kind not in ("stationary", "cap_pressure")
+        if stalled:
+            # The plateau held where the finish started, not where it stalled, so a
+            # finish that cannot reach stationarity leaves the search where it was.
+            coefficient_fits[:] = entry_fits
+            del history[entry_iterations:]
+            outcome = replace(outcome, state=entry, derivatives=None)
         newton_budget -= outcome.newton_iterations
         endgame_outcome = outcome
         state = outcome.state
@@ -426,25 +484,20 @@ def fit_distributional_efs(
         current_objective = state.objective
         terminal_fit_index = state.terminal_fit_index
         terminal_evidence = state.evidence
-        if outcome.kind == "derivative_unavailable":
-            # Preserve the accepted coefficient fit, but abandon derivatives
-            # and acceleration memory that cannot describe the next EFS step.
-            # Disabling handoff makes recovery bounded by the ordinary outer
-            # budget even if derivatives remain unavailable on every call.
+        if stalled:
             endgame_outcome = None
-            endgame_stationary = False
-            pending_cap = None
-            newton_budget = 0
+            if current_face is None:
+                return _result(converged=True, reason="practical_plateau")
+            # Only the strict stop revalidates a face, so a face's search carries on.
+            _resume_fellner_schall()
+            return None
+        if outcome.kind == "derivative_unavailable":
             if beyond_cap:
                 # EFS proposals use the original finite box and cannot safely
                 # continue from a component released above that box.
+                endgame_outcome = None
                 return _result(converged=False, reason="derivative_unavailable")
-            plateau_run = 0
-            practical_run = 0
-            plateau_qualified = False
-            previous_accepted_step = math.inf
-            if accelerator is not None:
-                accelerator.reset()
+            _resume_fellner_schall()
             return None
         if outcome.kind == "stationary":
             # The exact gradient is the authority now: no component is at the cap
@@ -1221,6 +1274,7 @@ def fit_distributional_efs(
                         layout=layout,
                         lambdas=trial_lambdas,
                         face=current_face,
+                        penalty_memo=penalty_memo,
                     )
                 if (
                     trial_objective is not None
@@ -1290,6 +1344,7 @@ def fit_distributional_efs(
                         layout=layout,
                         lambdas=trial_lambdas,
                         face=current_face,
+                        penalty_memo=penalty_memo,
                     )
                 if trial_objective is not None and _within_ceiling(
                     current_fit, current_objective, trial_fit, trial_objective, outer_config
@@ -1403,6 +1458,7 @@ def fit_distributional_efs(
                 current_fit,
                 outer_config,
                 face=current_face,
+                penalty_memo=penalty_memo,
             )
         if terminal_evidence.estimated_names != estimated_names:
             raise RuntimeError("estimated smoothing names changed inside one EFS fit")
@@ -1456,22 +1512,26 @@ def fit_distributional_efs(
             )
         ):
             return _result(converged=True, reason="practical_plateau")
-        # A practical plateau is an interior stop: while a component sits at the
-        # cap with outward pressure or is a working infinity, the top of the loop
-        # decides (promote an exact face, or refuse with a named reason).
+        # A practical plateau is an interior stop of the components off the active
+        # face: while one sits at the cap with outward pressure or is a working
+        # infinity, the top of the loop decides (promote an exact face, or refuse
+        # with a named reason). A promotion restarts the plateau's count.
         if (
             outer_config.practical_convergence
-            and current_face is None
+            and (current_face is None or (_plateau_finishes() and _endgame_budget() > 0))
             and practical_run >= outer_config.plateau_iterations
             and terminal_evidence.maximum > outer_config.tolerance
             and not terminal_evidence.unresolved_upper_bound
             and not terminal_evidence.working_infinity
         ):
-            if _endgame_budget() > 0 and should_hand_off(
-                "practical_plateau",
-                max_accepted_step=max_accepted_step,
-                iterations=len(history),
-                config=outer_config,
+            if _endgame_budget() > 0 and (
+                _plateau_finishes()
+                or should_hand_off(
+                    "practical_plateau",
+                    max_accepted_step=max_accepted_step,
+                    iterations=len(history),
+                    config=outer_config,
+                )
             ):
                 endgame_result = _run_endgame()
                 if endgame_result is not None:

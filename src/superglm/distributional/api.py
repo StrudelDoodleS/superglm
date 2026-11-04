@@ -249,6 +249,12 @@ def _coefficient_curvature(
     return cast(Literal["fisher", "observed"], requested)
 
 
+def _default_outer(family: Any) -> Literal["efs", "efs+finish"]:
+    """The Newton finish needs continuous curvature; a family declaring nothing runs plain EFS."""
+    capabilities = getattr(family, "capabilities", None)
+    return "efs+finish" if getattr(capabilities, "continuous_curvature", False) else "efs"
+
+
 def _positive_n_bins(value: Any, *, name: str) -> int:
     if isinstance(value, bool):
         raise TypeError(f"{name} must be a positive integer")
@@ -739,7 +745,7 @@ class SuperLSS:
         retain_history_rows: bool = False,
         practical_reml_parameter_tol: float = 1.0e-3,
         reml_plateau_tol: float = 1.0e-7,
-        outer: Literal["efs", "efs+newton"] | None = None,
+        outer: Literal["efs", "efs+finish", "efs+newton"] | None = None,
         phase_recorder: FitPhaseRecorder | None = None,
         truncation: BoundPair = None,
         censored: CensoredRows = None,
@@ -753,16 +759,19 @@ class SuperLSS:
         are as in :meth:`fit`. This method updates the model and returns it.
 
         ``outer`` selects the smoothing optimiser. ``"efs"`` runs generalised
-        Fellner-Schall updates. ``"efs+newton"`` follows them with Newton steps
-        on the LAML gradient and Hessian in log lambda, aiming for a stationary
-        point of the LAML over the smoothing-parameter box (Wood, Pya and Saefken
-        2016, section 3.1); ``smoothing_convergence_reason_`` and
-        ``smoothing_certified_`` report how it stopped. The default ``None``
-        runs ``"efs"`` for every family. Newton's smoothness assumption fails
-        where a family's curvature jumps (``TwoPieceNormalLSS`` and
-        ``TwoPieceLogNormalLSS``), so the endgame is not advised there.
+        Fellner-Schall updates alone. ``"efs+finish"`` runs them to a practical
+        plateau, then finishes with Newton steps on the LAML gradient and Hessian
+        in log lambda, aiming for a stationary point of the LAML over the
+        smoothing-parameter box (Wood, Pya and Saefken 2016, section 3.1).
+        ``"efs+newton"`` hands to those Newton steps after a shorter warm-up, on
+        any Fellner-Schall stop. ``smoothing_convergence_reason_`` and
+        ``smoothing_certified_`` report how a fit stopped. The default ``None``
+        runs ``"efs+finish"``, except where a family's curvature jumps
+        (``TwoPieceNormalLSS`` and ``TwoPieceLogNormalLSS``): Newton's smoothness
+        assumption fails there, so they run ``"efs"`` and the endgame is not advised.
         ``max_reml_iter`` bounds the smoothing iterations, Fellner-Schall and
-        Newton together.
+        Newton together. A default finish that stalls on an exact face is not
+        counted, so such a fit can do up to 16 further iterations of work.
 
         ``practical_reml`` stops the Fellner--Schall loop after sustained
         negligible objective and fitted-parameter movement. Set it to ``False``
@@ -789,12 +798,12 @@ class SuperLSS:
         """
         if outer is None:
             # Resolved before the fit record reads the arguments, so it names what ran.
-            outer = "efs"
+            outer = _default_outer(self._family)
         with fit_record(self, "fit_reml", locals()):
             if method != "efs":
                 raise NotImplementedError("SuperLSS currently supports only method='efs'")
-            if outer not in ("efs", "efs+newton"):
-                raise ValueError("outer must be None, 'efs' or 'efs+newton'")
+            if outer not in ("efs", "efs+finish", "efs+newton"):
+                raise ValueError("outer must be None, 'efs', 'efs+finish' or 'efs+newton'")
             if initial_lambda is not None and (
                 isinstance(initial_lambda, bool)
                 or not isinstance(initial_lambda, int | float)

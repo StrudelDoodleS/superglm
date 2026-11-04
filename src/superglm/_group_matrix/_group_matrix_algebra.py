@@ -304,14 +304,14 @@ class _SharedEntries:
 
 
 class PassFactors:
-    """Weight-free products of fixed design factors, shared by the moments calls of one assembly.
+    """Weight-free products of fixed design factors, shared by an owner's moments calls.
 
     Each support projection ``B_unique @ R_inv`` and each factor's exponent
-    bounds is formed once per assembly instead of once per moments call, row
-    block and channel. Owner: the assembly that creates it; lifetime: that
-    assembly. Entries are keyed by their source arrays' identities and retain
-    those arrays, so no identity is reused while its entry lives, and an
-    assembly reads its design's factors without changing them.
+    bounds is formed once per owner instead of once per moments call, row block
+    and channel. Owner: the assembly or solver session that creates it; lifetime:
+    that owner's. Entries are keyed by their source arrays' identities and retain
+    those arrays, so no identity is reused while its entry lives, and an assembly
+    reads its design's factors without changing them.
     """
 
     __slots__ = ("projections", "ranges")
@@ -364,7 +364,7 @@ class PassTables:
         table = _pass_table(gm_i, gm_j)
         if table is not None and table[0] <= self._remaining:
             self._remaining -= table[0]
-            self._entries[key] = [None, table[1], table[2]]
+            self._entries[key] = [None, table[1], table[2], table[3]]
 
     def add(self, key, gm_i, gm_j, W, cache) -> bool:
         """Add one block's rows into ``key``'s table; False when the pair keeps none."""
@@ -374,17 +374,28 @@ class PassTables:
         entry[0] = entry[1](entry[0], gm_i, gm_j, W, cache)
         return True
 
+    def drain(self) -> list[tuple]:
+        """Release every kept pair with rows: ``(key, table, contract, width)``."""
+        entries, self._entries = self._entries, {}
+        return [
+            (key, table, contract, width)
+            for key, (table, _add, contract, width) in entries.items()
+            if table is not None
+        ]
+
     def contracted(self, factors: PassFactors | None):
         """Yield ``(key, X_left' W X_right)`` for every kept pair, releasing its table."""
         cache = _BlockWeightCache(None, factors)
-        while self._entries:
-            key, (table, _add, contract) = self._entries.popitem()
-            if table is not None:
-                yield key, contract(table, cache)
+        for key, table, contract, _width in self.drain():
+            yield key, contract(table, cache)
 
 
 def _pass_table(gm_i, gm_j):
-    """``(bytes, add, contract)`` of the pair's pass table, or None when it keeps none."""
+    """``(bytes, add, contract, width)`` of the pair's pass table, or None when it keeps none.
+
+    ``width`` is the support columns its contraction multiplies the table by, for
+    the block queue's cost model only.
+    """
     for disc, other, transposed in ((gm_i, gm_j, False), (gm_j, gm_i, True)):
         if _pass_table_pair(disc, other):
             if not _agg_by_bin_fits(other, disc.n_bins):
@@ -400,12 +411,18 @@ def _pass_table(gm_i, gm_j):
                 nbytes,
                 partial(_add_by_bin, transposed, aggregate),
                 partial(_by_bin_block, disc, transposed),
+                int(disc.shape[1]),
             )
     kind = _joint_table_kind(gm_i, gm_j)
     if kind is None:
         return None
     nbytes = 8 * int(gm_i.n_bins) * int(gm_j.n_bins)
-    return nbytes, partial(_add_joint, kind), partial(_joint_block, kind, gm_i, gm_j)
+    return (
+        nbytes,
+        partial(_add_joint, kind),
+        partial(_joint_block, kind, gm_i, gm_j),
+        int(gm_i.shape[1]),
+    )
 
 
 def _pass_table_pair(disc, other) -> bool:
@@ -707,7 +724,8 @@ class _BlockWeightCache:
         """Cache a fixed factor's complete cross-bound contributions.
 
         Weighted partners may be reused scratch and must not enter this cache.
-        A fresh assembly observes mutations to the live support factors.
+        An entry lasts as long as the :class:`PassFactors` holding it, whose owner
+        reads its design's factors without changing them.
         """
         entry, _formed = self._once(
             self._support_ranges, id(factor), lambda: (factor, _cross_operand_bounds(factor))
@@ -785,11 +803,11 @@ class _BlockWeightCache:
     def solver_support(self, gm: DiscretizedSSPGroupMatrix) -> NDArray:
         """Project each live support once within this synchronous assembly.
 
-        Keys retain the owning blocks. A new moments call creates a new cache,
-        so changed factors, weights, subsets and reparameterizations cannot
-        reuse a previous assembly's projection; an assembly's
-        :class:`PassFactors` serves every row block whose groups share the
-        factors.
+        Keys retain the owning blocks. A new moments call creates a new cache, so
+        changed weights and subsets cannot reuse a previous call's support, and a
+        reparameterization has new factor arrays, which key their own projection.
+        The :class:`PassFactors` serves every row block whose groups share the
+        factors, for its owner's lifetime.
         """
         factors = self._factors
         support, formed = self._once(

@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 
 import superglm.distributional.solver.certificate as rank_certificate
 import superglm.distributional.solver.chunks as chunking
+from superglm._group_matrix._group_matrix_algebra import PassFactors
 from superglm._roundoff import gamma
 from superglm.distributional.family import (
     DistributionalFamily,
@@ -110,6 +111,7 @@ class _SolverContext:
     dense_matrices: tuple[NDArray[np.float64], ...] | None
     coefficient_face: PenaltyFace | None
     likelihood_cache: _LikelihoodCache | None = None
+    pass_factors: PassFactors | None = None
     # Set only for the reduced fit after a rank-deficient terminal decision:
     # Newton steps then move the representative's retained coefficients alone.
     retained: RetainedCoordinates | None = None
@@ -165,6 +167,16 @@ class _DenseObservedReuseSession:
         self._likelihood: (
             tuple[DistributionalFamily, FamilyLikelihoodPlan, _LikelihoodCache | None] | None
         ) = None
+        self._pass_factors = PassFactors()
+
+    def pass_factors(self) -> PassFactors:
+        """The weight-free design products every chunked assembly of this session shares.
+
+        Owner: this session; lifetime: the session's fit. An entry is keyed by the
+        identities of the design's support arrays, which it retains, and depends on
+        no weight, penalty or coefficient, so nothing invalidates it.
+        """
+        return self._pass_factors
 
     def likelihood_cache(
         self, family: DistributionalFamily, plan: FamilyLikelihoodPlan
@@ -390,8 +402,10 @@ def _validated_context(
         family, layout, root_likelihood_plan, chunk_size
     )
     likelihood_cache = None
+    pass_factors = None
     if resolved_chunk_size is not None:
         dense_matrices = None
+        pass_factors = PassFactors() if _reuse_session is None else _reuse_session.pass_factors()
         likelihood_cache = (
             build_likelihood_cache(family, root_likelihood_plan)
             if _reuse_session is None
@@ -422,6 +436,7 @@ def _validated_context(
         dense_matrices=dense_matrices,
         coefficient_face=coefficient_face,
         likelihood_cache=likelihood_cache,
+        pass_factors=pass_factors,
     )
 
 
@@ -603,6 +618,7 @@ def _evaluate_fused_trial(
                 chunk_size=context.chunk_size,
                 curvature_source=source,
                 likelihood_cache=context.likelihood_cache,
+                pass_factors=context.pass_factors,
             )
     except chunking._TrialDerivativeError:
         return None
@@ -698,6 +714,7 @@ def _geometry(
             chunk_size=context.chunk_size,
             curvature_source=source,
             likelihood_cache=context.likelihood_cache,
+            pass_factors=context.pass_factors,
         )
     if state.derivatives is None:
         raise RuntimeError("dense accepted state is missing derivative geometry")
@@ -711,6 +728,7 @@ def _geometry(
         curvature,
         penalty=context.penalty,
         coefficients=state.coefficients,
+        validated_penalty=True,
     )
 
 
@@ -1506,7 +1524,7 @@ def _certified_terminal_curvature(
     keeps the formed decision, marked uncertified: the fit is disclosed, never
     refused.
     """
-    formation = geometry.formation
+    formation = geometry.formed()
     if formation is None:
         return curvature
     source = curvature.telemetry.actual_source
@@ -2173,7 +2191,7 @@ def _fit_dense_fixed_lambda_core(
                 reuse_owner,
                 context=context,
                 score_data=terminal_score_geometry.score_data,
-                formation=terminal_score_geometry.formation,
+                formation=terminal_score_geometry.formed(),
             )
         return result
 

@@ -272,8 +272,9 @@ class FamilyCapabilities:
     ``"censored_truncated"`` observation contract: truncated and censored rows.
     ``continuous_curvature`` declares that the log density's curvature in the
     natural parameters is continuous. Newton steps in log smoothing parameters
-    assume it (Wood, Pya and Saefken 2016, section 3), so the corrected-covariance
-    warning suggests refitting with ``outer="efs+newton"`` only for such families.
+    assume it (Wood, Pya and Saefken 2016, section 3), so only such families default
+    to ``outer="efs+finish"`` and are told to refit with ``outer="efs+newton"`` by the
+    corrected-covariance warning.
     """
 
     max_derivative_order: int

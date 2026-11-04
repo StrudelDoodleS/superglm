@@ -9,6 +9,7 @@ import pytest
 import superglm.distributional as distributional
 import superglm.distributional.families as distributional_families
 import superglm.distributional.fit_state as fit_state_module
+import superglm.distributional.smoothing.evidence as evidence_module
 from superglm import Spline
 from superglm.distributional import GammaLS, Predictor
 from superglm.distributional.families.negative_binomial import NegativeBinomialLS
@@ -217,3 +218,37 @@ def test_public_gamma_reml_exposes_an_exact_face_at_the_default_lambda_cap(
     parameters = model.predict_parameters(frame).to_numpy()
     assert np.all(np.isfinite(parameters))
     assert np.all(parameters > 0.0)
+
+
+def test_a_face_fit_reuses_the_objectives_penalty_evaluation_for_its_evidence(monkeypatch) -> None:
+    """Kills forming the projected penalty evaluation twice for the state its objective scored."""
+    x = np.repeat(np.linspace(-1.0, 1.0, 24), 12)
+    group = np.tile(np.repeat(["a", "b", "c"], 4), 24)
+    factors = np.tile(np.tile([0.62, 0.84, 1.16, 1.38], 3), 24)
+    response = np.exp(0.45 + 0.48 * np.sin(np.pi * x) + 0.18 * x) * factors
+    frame = pd.DataFrame({"x": x, "group": group})
+    given = []
+    real = evidence_module.projected_component_states
+
+    def recording(**kwargs):
+        given.append(kwargs["evaluation"] is not None)
+        return real(**kwargs)
+
+    monkeypatch.setattr(evidence_module, "projected_component_states", recording)
+    model = model_from_templates(
+        family=GammaLS(),
+        predictors=(
+            Predictor("mean", {"x": Spline(kind="cr", n_knots=5)}),
+            Predictor("scale", {"group": RandomEffect()}),
+        ),
+    ).fit_reml(
+        frame,
+        response,
+        lambdas={"mean:x#wiggle": 0.5, "scale:group#wiggle": 1.0e10},
+        max_reml_iter=120,
+        reml_tol=1.0e-3,
+        max_inner_iter=150,
+        inner_tol=1.0e-9,
+    )
+    assert model.exact_face_components_ == ("scale:group#wiggle",)
+    assert any(given)

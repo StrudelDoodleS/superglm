@@ -546,8 +546,8 @@ def test_a_stationary_endgame_voids_a_refreshed_cap_nomination(monkeypatch) -> N
             stationary.append(True)
         return outcome
 
-    def nominating(layout, lambdas, fit, config, *, face=None):
-        evidence = fresh(layout, lambdas, fit, config, face=face)
+    def nominating(layout, lambdas, fit, config, *, face=None, **options):
+        evidence = fresh(layout, lambdas, fit, config, face=face, **options)
         if stationary and face is not None:
             outside = evidence.estimated_names
             assert outside and not set(outside) & set(face.component_names)

@@ -182,6 +182,8 @@ class _ObservedOnlyGaussian:
 def test_missing_expected_information_uses_bounded_numeric_fallback():
     result = _fit_start(family=_ObservedOnlyGaussian())
     assert result.initial_lambdas["location:x#wiggle"] == 0.1
+    # A family that declares no capabilities keeps plain Fellner--Schall.
+    assert result.config.outer == "efs"
     bounded = _fit_start(family=_ObservedOnlyGaussian(), max_lambda=0.01)
     assert bounded.initial_lambdas["location:x#wiggle"] == 0.01
 

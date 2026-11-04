@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 
 import numpy as np
 from numpy.typing import NDArray
@@ -22,6 +25,14 @@ from superglm.distributional.solver._ordinary_packing import PredictorPanel
 from superglm.distributional.solver.packing import packed_pairs
 from superglm.solvers.rank import _symmetric_part
 
+# A dense Gram's row block. Fixed, so the partition and its rounding do not depend
+# on the workers.
+_GRAM_BLOCK_ROWS = 2048
+# The most blocks a channel splits into, which bounds the additions its sum makes.
+_GRAM_MAX_BLOCKS = 64
+# Multiply-adds below which a dense channel stays one general product (under a ms).
+_GRAM_POOL_COST = 1 << 24
+
 
 def _readonly(values: NDArray) -> NDArray[np.float64]:
     result = np.array(values, dtype=np.float64, copy=True)
@@ -34,7 +45,9 @@ class DenseJointGeometry:
     """Score and data/penalized curvature in the global coefficient layout.
 
     ``formation`` holds the data curvature's formation statistics when the
-    assembly recorded them, for the terminal rank certificate.
+    assembly recorded them, for the terminal rank certificate. A dense assembly
+    defers them as a callable that :meth:`formed` runs on first use, so only
+    the geometry the certificate reads pays for them.
     """
 
     score_data: NDArray[np.float64]
@@ -42,7 +55,15 @@ class DenseJointGeometry:
     data_curvature: NDArray[np.float64]
     penalty: NDArray[np.float64]
     penalized_curvature: NDArray[np.float64]
-    formation: CurvatureFormation | None = field(default=None, compare=False, repr=False)
+    formation: CurvatureFormation | Callable[[], CurvatureFormation] | None = field(
+        default=None, compare=False, repr=False
+    )
+
+    def formed(self) -> CurvatureFormation | None:
+        """The formation statistics, formed on first use if the assembly deferred them."""
+        if callable(self.formation):
+            object.__setattr__(self, "formation", self.formation())
+        return self.formation
 
     def __post_init__(self) -> None:
         score_data = _readonly(self.score_data)
@@ -209,6 +230,94 @@ def validated_dense_penalty(penalty: NDArray, width: int) -> NDArray[np.float64]
     return _symmetric_part(values)
 
 
+def _gram_rows(left: NDArray, right: NDArray, weights: NDArray, start: int, stop: int) -> NDArray:
+    """``left' diag(weights) right`` over one row block.
+
+    A diagonal block of nonnegative weights is the crossproduct of its root-weighted
+    rows, which BLAS ``syrk`` forms in about two thirds of a general product's time.
+    """
+    rows, row_weights = left[start:stop], weights[start:stop]
+    if left is right and row_weights.min() >= 0.0:
+        scaled = np.sqrt(row_weights)[:, None] * rows
+        return np.dot(scaled.T, scaled)
+    return np.dot(rows.T, row_weights[:, None] * right[start:stop])
+
+
+def _gram_channel_tasks(left: NDArray, right: NDArray, weights: NDArray, block_rows: int):
+    """One channel's row-block tasks and its ``finish``, the blocks' sum in row order.
+
+    A channel below ``_GRAM_POOL_COST`` is one general product and has no tasks. A
+    placed block joins a running total as soon as the blocks before it have, so the
+    channel holds its total and only the blocks that finished out of order.
+    """
+    n_rows = weights.shape[0]
+    cells = left.shape[1] * right.shape[1]
+    if n_rows <= block_rows or n_rows * cells < _GRAM_POOL_COST:
+        whole = left.T @ (weights[:, None] * right)
+        return [], lambda: whole
+    spans = [(start, min(start + block_rows, n_rows)) for start in range(0, n_rows, block_rows)]
+    parts: list[NDArray | None] = [None] * len(spans)
+    lock = threading.Lock()
+    total: NDArray | None = None
+    added = 0
+
+    def place(slot: int, block: NDArray) -> None:
+        nonlocal total, added
+        with lock:
+            parts[slot] = block
+            while added < len(parts) and (ready := parts[added]) is not None:
+                parts[added] = None
+                added += 1
+                if total is None:
+                    total = ready
+                else:
+                    total += ready
+
+    def finish() -> NDArray:
+        assert total is not None and added == len(parts)
+        return total
+
+    tasks = [
+        BlockTask(
+            index=0,
+            cost=float((stop - start) * cells),
+            nbytes=8 * ((stop - start) * right.shape[1] + cells),
+            run=lambda _cache, _profile, a=start, b=stop: _gram_rows(left, right, weights, a, b),
+            place=partial(place, slot),
+        )
+        for slot, (start, stop) in enumerate(spans)
+    ]
+    return tasks, finish
+
+
+def _dense_channel_blocks(
+    matrices: tuple[NDArray[np.float64], ...],
+    curvature: NDArray,
+    channels: list[tuple[int, int]],
+) -> list[NDArray]:
+    """Every channel's ``X_l' diag(w) X_r``, a wide channel's over fixed row blocks on the pool.
+
+    The partition depends only on the row count, each block runs on one BLAS thread
+    and the blocks are summed in row order, so the result is the same at every
+    worker count (Li and Wood 2020, sec. 4).
+    """
+    n_rows = curvature.shape[0]
+    block_rows = max(_GRAM_BLOCK_ROWS, -(-n_rows // _GRAM_MAX_BLOCKS))
+    tasks: list[BlockTask] = []
+    finishers = []
+    for channel_index, (left_index, right_index) in enumerate(channels):
+        channel_tasks, finish = _gram_channel_tasks(
+            matrices[left_index], matrices[right_index], curvature[:, channel_index], block_rows
+        )
+        for task in channel_tasks:
+            task.index = len(tasks)
+            tasks.append(task)
+        finishers.append(finish)
+    if tasks:
+        run_block_tasks(tasks, _BlockWeightCache(), None, dispatch_bound=True)
+    return [finish() for finish in finishers]
+
+
 def _assemble_dense_geometry_from_matrices(
     layout: StackedLayout,
     matrices: tuple[NDArray[np.float64], ...],
@@ -217,8 +326,13 @@ def _assemble_dense_geometry_from_matrices(
     *,
     penalty: NDArray,
     coefficients: NDArray,
+    validated_penalty: bool = False,
 ) -> DenseJointGeometry:
-    """Assemble the dense reference from predictor matrices retained by a caller."""
+    """Assemble the dense reference from predictor matrices retained by a caller.
+
+    ``validated_penalty`` says ``penalty`` is already :func:`validated_dense_penalty`'s
+    output, as a solver context's is.
+    """
     coefficient_values = _validated_coefficients(coefficients, layout)
     n_observations = matrices[0].shape[0]
     k_parameters = len(matrices)
@@ -228,7 +342,9 @@ def _assemble_dense_geometry_from_matrices(
         n_observations=n_observations,
         k_parameters=k_parameters,
     )
-    penalty_matrix = validated_dense_penalty(penalty, layout.n_coefficients)
+    penalty_matrix = (
+        penalty if validated_penalty else validated_dense_penalty(penalty, layout.n_coefficients)
+    )
 
     score_data = np.zeros(layout.n_coefficients, dtype=np.float64)
     data_curvature = np.zeros(
@@ -238,11 +354,11 @@ def _assemble_dense_geometry_from_matrices(
     for state, matrix in zip(layout.predictors, matrices, strict=True):
         score_data[state.coefficient_slice] = matrix.T @ score[:, state.parameter_index]
 
-    for channel_index, (left_index, right_index) in enumerate(packed_pairs(k_parameters)):
+    channels = packed_pairs(k_parameters)
+    blocks = _dense_channel_blocks(matrices, curvature, channels)
+    for (left_index, right_index), block in zip(channels, blocks, strict=True):
         left_state = layout.predictors[left_index]
         right_state = layout.predictors[right_index]
-        weights = curvature[:, channel_index]
-        block = matrices[left_index].T @ (weights[:, None] * matrices[right_index])
         data_curvature[left_state.coefficient_slice, right_state.coefficient_slice] = block
         if left_index != right_index:
             data_curvature[right_state.coefficient_slice, left_state.coefficient_slice] = block.T
@@ -256,7 +372,7 @@ def _assemble_dense_geometry_from_matrices(
         data_curvature=data_curvature,
         penalty=penalty_matrix,
         penalized_curvature=penalized_curvature,
-        formation=dense_formation(layout, matrices, curvature),
+        formation=partial(dense_formation, layout, matrices, curvature),
     )
 
 
@@ -318,8 +434,9 @@ class GroupedGeometryAccumulator:
     """Accumulate row-block score and curvature into coefficient space.
 
     Every moments call of the assembly shares one :class:`PassFactors`, so a
-    support is projected once per assembly rather than once per row block and
-    channel; it is released when the geometry is published. ``tables`` keeps
+    support is projected once rather than once per row block and channel;
+    ``factors`` is the caller's, shared by its assemblies, else the assembly's
+    own, released when the geometry is published. ``tables`` keeps
     the by-bin aggregates of the blocks it admits across row blocks and
     contracts each once (:meth:`release_tables`); its pairs are admitted here,
     in the serial order, so the blocks of :meth:`add_block` may run on a pool.
@@ -333,6 +450,7 @@ class GroupedGeometryAccumulator:
         coefficients: NDArray,
         tables: PassTables | None = None,
         panels: tuple[PredictorPanel | None, ...] | None = None,
+        factors: PassFactors | None = None,
     ) -> None:
         reference_plans = _grouped_predictor_plans(layout)
         self._layout = layout
@@ -348,7 +466,7 @@ class GroupedGeometryAccumulator:
         self._channel_chunks = np.zeros(len(self._pairs), dtype=np.intp)
         self._score_chunks = 0
         self._finished = False
-        self._factors: PassFactors | None = PassFactors()
+        self._factors: PassFactors | None = PassFactors() if factors is None else factors
         self._tables = tables
         # A predictor with a panel (``predictor_panels``) is accumulated in its
         # packed column order, the panel's columns first, and ``finish``
@@ -536,16 +654,37 @@ class GroupedGeometryAccumulator:
         self._channel_chunks[channel_index] += 1
 
     def release_tables(self) -> None:
-        """Contract the pass tables into the curvature; later blocks contract their own."""
+        """Contract the pass tables into the curvature; later blocks contract their own.
+
+        One queue over the pairs. A pair's part of the curvature holds nothing
+        else, so the result does not depend on the workers or their order.
+        """
         tables, self._tables = self._tables, None
         if tables is None:
             return
-        for (channel_index, left, right), block in tables.contracted(self._factors):
-            left_index, right_index = self._pairs[channel_index]
-            rows = self._group_columns[left_index][left]
-            columns = self._group_columns[right_index][right]
+        tasks = [self._table_task(index, *entry) for index, entry in enumerate(tables.drain())]
+        if tasks:
+            run_block_tasks(
+                tasks, _BlockWeightCache(None, self._factors), None, dispatch_bound=True
+            )
+
+    def _table_task(self, index: int, key, table: NDArray, contract, width: int) -> BlockTask:
+        channel_index, left, right = key
+        left_index, right_index = self._pairs[channel_index]
+        rows = self._group_columns[left_index][left]
+        columns = self._group_columns[right_index][right]
+
+        def place(block: NDArray) -> None:
             self._curvature[rows, columns] += block
             self._curvature[columns, rows] += block.T
+
+        return BlockTask(
+            index=index,
+            cost=float(table.size * width),
+            nbytes=table.nbytes,
+            run=lambda cache, _profile: contract(table, cache),
+            place=place,
+        )
 
     def finish(self) -> DenseJointGeometry:
         """Validate complete channel coverage and publish immutable geometry."""

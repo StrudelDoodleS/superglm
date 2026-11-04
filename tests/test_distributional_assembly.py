@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tracemalloc
+import weakref
 from dataclasses import replace
 
 import numpy as np
@@ -8,11 +9,14 @@ import pandas as pd
 import pytest
 
 import superglm.distributional.solver.assembly as assembly_module
+import superglm.distributional.solver.solver as solver_module
 from superglm._frame import as_eager_frame
+from superglm._group_matrix._block_queue import block_queue_config
 from superglm.distributional.family import ParameterSpec, ParameterSupport
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import Predictor, compile_predictors
 from superglm.distributional.solver.assembly import (
+    _dense_channel_blocks,
     _evaluate_predictors_from_matrices,
     assemble_grouped_geometry,
     dense_predictor_matrices,
@@ -20,6 +24,7 @@ from superglm.distributional.solver.assembly import (
 from superglm.features import Numeric
 
 from ._distributional_weights import resolved_prior
+from .test_distributional_support_predictions import _support_problem
 
 
 def _parameter(name: str, link: str = "identity") -> ParameterSpec:
@@ -267,6 +272,69 @@ def test_retained_dense_geometry_matches_literal_augmented_products(
         assert not result.data_curvature.flags.writeable
 
 
+def test_a_dense_assembly_forms_its_formation_statistics_only_when_read(monkeypatch) -> None:
+    """Kills forming the certificate's statistics for every geometry, read or not."""
+    layout, frame = _layout()
+    n = len(frame)
+    rng = np.random.default_rng(3)
+    score_eta = rng.normal(size=(n, 2))
+    curvature = rng.uniform(0.5, 1.5, size=(n, 3))
+    matrices = dense_predictor_matrices(layout)
+    formed = []
+    original = assembly_module.dense_formation
+
+    def counted(*args):
+        formed.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(assembly_module, "dense_formation", counted)
+    geometry = assembly_module._assemble_dense_geometry_from_matrices(
+        layout,
+        matrices,
+        score_eta,
+        curvature,
+        penalty=np.diag([0.0, 0.4, 0.7, 0.0, 1.2]),
+        coefficients=rng.normal(size=5),
+    )
+    assert formed == []
+
+    formation = geometry.formed()
+    assert geometry.formed() is formation and len(formed) == 1
+    assert formation == original(layout, matrices, curvature)
+
+
+def test_a_dense_fit_validates_its_penalty_once(monkeypatch) -> None:
+    """Kills validating the context's already-validated penalty again at every geometry."""
+    family, layout, response, plan, initial = _support_problem(False)
+    calls = []
+    original = assembly_module.validated_dense_penalty
+
+    def counted(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(assembly_module, "validated_dense_penalty", counted)
+    monkeypatch.setattr(solver_module, "validated_dense_penalty", counted)
+    penalty = np.eye(layout.n_coefficients)
+    fitted = solver_module.fit_dense_fixed_lambda(
+        family, layout, response, plan, penalty, initial=initial, chunk_size=None
+    )
+    assert fitted.iterations > 1 and len(calls) == 1
+
+    # Unvalidated input still gets the checks.
+    asymmetric = penalty.copy()
+    asymmetric[0, 1] = 1.0
+    with pytest.raises(ValueError, match="penalty must be symmetric"):
+        assembly_module._assemble_dense_geometry_from_matrices(
+            layout,
+            dense_predictor_matrices(layout),
+            np.zeros((layout.predictors[0].design.n, 2)),
+            np.ones((layout.predictors[0].design.n, 3)),
+            penalty=asymmetric,
+            coefficients=np.zeros(layout.n_coefficients),
+        )
+
+
 def test_dense_predictor_evaluation_includes_intercepts_slopes_and_offsets() -> None:
     layout, frame = _layout()
     coefficients = np.array([0.2, -0.3, 0.5, -0.4, 0.8])
@@ -387,3 +455,87 @@ def test_assembler_rejects_channel_coefficient_and_layout_shape_mismatches() -> 
         _evaluate_predictors_from_matrices(
             broken_layout, np.zeros(5), dense_predictor_matrices(broken_layout)
         )
+
+
+@pytest.mark.parametrize("weights", ["nonnegative", "mixed"])
+def test_wide_dense_gram_is_the_same_at_every_worker_count(weights: str) -> None:
+    rng = np.random.default_rng(19)
+    n_rows = 2 * assembly_module._GRAM_BLOCK_ROWS + 5
+    matrices = (rng.standard_normal((n_rows, 130)), rng.standard_normal((n_rows, 40)))
+    curvature = rng.standard_normal((n_rows, 3))
+    if weights == "nonnegative":
+        curvature[:, 0] = np.abs(curvature[:, 0])
+        curvature[::7, 0] = 0.0
+    channels = [(0, 0), (0, 1), (1, 1)]
+
+    with block_queue_config(workers=1):
+        serial = _dense_channel_blocks(matrices, curvature, channels)
+    with block_queue_config(workers=4):
+        pooled = _dense_channel_blocks(matrices, curvature, channels)
+
+    for channel, (left, right) in enumerate(channels):
+        np.testing.assert_array_equal(pooled[channel], serial[channel])
+        channel_weights = curvature[:, channel, None]
+        literal = matrices[left].T @ (channel_weights * matrices[right])
+        magnitude = np.abs(matrices[left]).T @ (np.abs(channel_weights) * np.abs(matrices[right]))
+        assert np.all(np.abs(pooled[channel] - literal) <= _gamma(n_rows) * magnitude)
+
+
+def test_the_dense_gram_keeps_a_running_total_rather_than_every_block(monkeypatch) -> None:
+    real_rows = assembly_module._gram_rows
+    formed = []
+    most_alive = 0
+
+    def spy(*args):
+        nonlocal most_alive
+        most_alive = max(most_alive, sum(block() is not None for block in formed))
+        block = real_rows(*args)
+        formed.append(weakref.ref(block))
+        return block
+
+    monkeypatch.setattr(assembly_module, "_gram_rows", spy)
+    rng = np.random.default_rng(29)
+    matrix = rng.standard_normal((6 * assembly_module._GRAM_BLOCK_ROWS, 130))
+    weights = rng.standard_normal((matrix.shape[0], 1))
+
+    with block_queue_config(workers=1):
+        (block,) = _dense_channel_blocks((matrix,), weights, [(0, 0)])
+
+    assert len(formed) == 6 and most_alive == 1
+    assert block.shape == (130, 130)
+
+
+def test_a_narrow_dense_channel_stays_one_general_product(monkeypatch) -> None:
+    def no_queue(*_args, **_kwargs):
+        raise AssertionError("a narrow channel uses no block queue")
+
+    monkeypatch.setattr(assembly_module, "run_block_tasks", no_queue)
+    rng = np.random.default_rng(23)
+    matrix = rng.standard_normal((3 * assembly_module._GRAM_BLOCK_ROWS, 5))
+    weights = rng.standard_normal((matrix.shape[0], 1))
+
+    (block,) = _dense_channel_blocks((matrix,), weights, [(0, 0)])
+
+    np.testing.assert_array_equal(block, matrix.T @ (weights * matrix))
+
+
+@pytest.mark.parametrize(
+    ("n_rows", "blocks"),
+    [(300_000, assembly_module._GRAM_MAX_BLOCKS), (2 * assembly_module._GRAM_BLOCK_ROWS + 5, 3)],
+)
+def test_the_dense_gram_partition_follows_the_row_count(monkeypatch, n_rows, blocks) -> None:
+    run = assembly_module.run_block_tasks
+    seen = []
+
+    def counted(tasks, *args, **kwargs):
+        seen.append(len(tasks))
+        run(tasks, *args, **kwargs)
+
+    monkeypatch.setattr(assembly_module, "run_block_tasks", counted)
+    monkeypatch.setattr(assembly_module, "_GRAM_POOL_COST", 1)
+    matrix = np.ones((n_rows, 2))
+
+    (block,) = _dense_channel_blocks((matrix,), np.ones((n_rows, 1)), [(0, 0)])
+
+    assert seen == [blocks]
+    np.testing.assert_array_equal(block, np.full((2, 2), float(n_rows)))

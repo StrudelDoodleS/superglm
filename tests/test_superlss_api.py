@@ -1597,17 +1597,20 @@ def _small_gaussian_reml_model() -> tuple[SuperLSS, pd.DataFrame, np.ndarray]:
     return model, frame, response
 
 
-def test_fit_reml_outer_defaults_to_efs_for_every_family_and_is_validated() -> None:
-    """The fit records the outer that ran: ``None`` and an omitted outer both record ``"efs"``."""
+def test_fit_reml_outer_defaults_to_the_finish_and_is_validated() -> None:
+    """The fit records the outer that ran: ``None`` and an omitted outer record the finish."""
     model, frame, response = _small_gaussian_reml_model()
     model.fit_reml(frame, response)
     smoothing = model._require_fitted().smoothing
     assert smoothing is not None
-    assert smoothing.config.outer == "efs"
-    assert model._fit_settings["outer"] == "efs"
+    assert smoothing.config.outer == "efs+finish"
+    assert model._fit_settings["outer"] == "efs+finish"
     with pytest.raises(ValueError, match="outer"):
         model.fit_reml(frame, response, outer="newton")
     model.fit_reml(frame, response, outer=None)
+    assert model._require_fitted().smoothing.config.outer == "efs+finish"
+    assert model._fit_settings["outer"] == "efs+finish"
+    model.fit_reml(frame, response, outer="efs")
     assert model._require_fitted().smoothing.config.outer == "efs"
     assert model._fit_settings["outer"] == "efs"
     newton_model, _, _ = _small_gaussian_reml_model()
@@ -1616,7 +1619,7 @@ def test_fit_reml_outer_defaults_to_efs_for_every_family_and_is_validated() -> N
     assert newton is not None
     assert newton.config.outer == "efs+newton"
     assert newton_model._fit_settings["outer"] == "efs+newton"
-    # The two-piece curvature jumps at the join; its default is Fellner-Schall too.
+    # The two-piece curvature jumps at the join; its default is plain Fellner-Schall.
     family = TwoPieceNormalLSS()
     assert family.capabilities.continuous_curvature is False
     two_piece = SuperLSS(

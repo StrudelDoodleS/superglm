@@ -1414,13 +1414,13 @@ def _efs_fit(*, retain_rows: bool) -> tuple[SuperLSS, pd.DataFrame]:
             Predictor("location", {"x": Spline("cr", k=7)}),
             Predictor("scale", {"x": Spline("cr", k=5)}),
         ],
-    ).fit_reml(frame, response, retain_rows=retain_rows)
+    ).fit_reml(frame, response, retain_rows=retain_rows, outer="efs")
     smoothing = model._require_fitted().smoothing
     assert smoothing is not None and smoothing.convergence_reason != "stationary"
     return model, frame
 
 
-def test_a_default_efs_fit_is_corrected_about_its_own_stop() -> None:
+def test_a_plain_efs_fit_is_corrected_about_its_own_stop() -> None:
     """The parent refused every ``outer="efs"`` fit ("requires a converged stationary ...")."""
     model, frame = _efs_fit(retain_rows=True)
     fitted = model._require_fitted()

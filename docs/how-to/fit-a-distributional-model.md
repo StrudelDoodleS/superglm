@@ -877,10 +877,10 @@ bounds and is called without them.
 
 `GaussianLS`, `LogNormalLS`, `GammaLS`, `GeneralizedGammaLSS` and
 `GeneralizedParetoLSS` take these bounds; the other families refuse them. When
-the Newton endgame of smoothing selection runs (`outer="efs+newton"`), it uses
+the Newton endgame of smoothing selection runs, it uses
 closed-form third and fourth derivatives of these rows for `GammaLS` and
 `GeneralizedGammaLSS`, as it does for complete rows; for the other three it
-differences the curvature instead. The default `outer="efs"` needs neither.
+differences the curvature instead. `outer="efs"` needs neither.
 
 A window that keeps only a small share of the law, such as a body truncated
 above at its own 5% point, says little about the law beyond the bound: the fit
@@ -993,9 +993,16 @@ duplicated in `lambdas`. Every other penalty component needs a supplied value fo
 
 `fit_reml()` estimates every component whose policy is `LambdaPolicy.estimate()`
 by minimising the negative Laplace-approximate marginal likelihood (LAML) in
-log λ over the box `[1e-6, max_lambda]`. The default `outer="efs"` uses the
-generalised Fellner–Schall fixed-point iteration, safeguarded by objective
-backtracking. Set `outer="efs+newton"` to opt into a two-stage search:
+log λ over the box `[1e-6, max_lambda]`. `outer="efs"` uses the generalised
+Fellner–Schall fixed-point iteration alone, safeguarded by objective
+backtracking. The default, `outer="efs+finish"`, runs that iteration until the
+objective and fitted parameters stop moving, then finishes with the Newton
+endgame described below, at a tenth of `reml_tol` and for at most 16 iterations.
+A finish that cannot reach a stationary point leaves the fit at its plateau.
+`TwoPieceNormalLSS` and
+`TwoPieceLogNormalLSS` default to `outer="efs"`. Set `outer="efs+newton"` for a
+two-stage search with a shorter warm-up, which hands over on any Fellner–Schall
+stop:
 
 1. **Warm-up.** The generalised Fellner–Schall (EFS) fixed-point iteration of
    Wood and Fasiolo (2017), safeguarded by objective backtracking, moves λ from
@@ -1027,10 +1034,13 @@ the fixed-point residual below `reml_tol` without scaling it by the objective,
 so it is much stricter than the endgame's bar, and the plateau stop is off
 while any term sits at `max_lambda`. On fits where some terms are not needed,
 so that their λ climb to the cap, it often runs to `max_reml_iter`, and the
-terms it leaves at the cap can change with rounding. With the endgame such
-fits usually stop at a stationary point instead, at a cost in fit time that
-depends on the model: on some fits it is faster than the warm-up alone, on
-others slower. The endgame is not advised
+terms it leaves at the cap can change with rounding. The default finish stops
+such fits at a stationary point once they reach a plateau, usually in far fewer
+iterations. A fit that stops some other way first, such as with a term whose
+λ wants to pass the cap, keeps that stop. `outer="efs+newton"` also takes those
+fits to the endgame, at a cost in fit time that depends on the model: on some
+fits it is faster than the warm-up alone, on others slower. The endgame is not
+advised
 for `TwoPieceNormalLSS` and `TwoPieceLogNormalLSS`, whose row curvature jumps
 where the two pieces join: Newton's quadratic model assumes a smooth objective
 (Wood, Pya and Säfken 2016), and in our checks the endgame stopped short of a
@@ -1070,17 +1080,19 @@ of the coefficient-covariance difference is not a percentage error in every
 prediction interval. The [completion comparison](https://github.com/StrudelDoodleS/superglm/blob/master/benchmarks/lss_newton_completion.md)
 records examples where stricter search helps and where it remains unresolved.
 
-If fresh LAML gradients become unavailable after an accepted endgame fit, the
-solver retains that fit and resumes EFS for the remaining outer iterations,
-with further Newton handoffs disabled. Unavailable terminal derivative fields
+Under `outer="efs+newton"`, if fresh LAML gradients become unavailable after an
+accepted endgame fit, the solver retains that fit and resumes EFS for the
+remaining outer iterations, with further Newton handoffs disabled. Under the
+default, a finish whose gradients become unavailable leaves the fit at its plateau. Unavailable terminal derivative fields
 are cleared. A state already released beyond the configured upper bounds keeps
 an explicit `derivative_unavailable` stop instead of being clipped into the EFS box.
 Hessian-only failures retain the BFGS fallback.
 
-With the default `outer="efs"`, `practical_reml=True` permits a sustained
-objective-and-parameter plateau to stop the fit. `smoothing_convergence_reason_`
-reports how the search ended. `stationary` is the optional endgame's converged
-stop; `lambda_change` and `objective_plateau` are the Fellner–Schall fixed
+With `outer="efs"`, `practical_reml=True` permits a sustained
+objective-and-parameter plateau to stop the fit, and under the default it starts
+the finish. `smoothing_convergence_reason_` reports how the search ended.
+`stationary` is the endgame's converged stop; `practical_plateau` is a plateau
+that stood; `lambda_change` and `objective_plateau` are the Fellner–Schall fixed
 point's. `gradient_unresolved` carries evaluated gradient evidence whose
 certificate cannot resolve stationarity. `derivative_unavailable` means fresh
 derivative evaluation failed at a retained fit already released above the cap;
