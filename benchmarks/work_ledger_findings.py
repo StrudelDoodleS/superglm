@@ -9,6 +9,8 @@ Cases (every fit is preceded by an untimed 3,000-row fit that compiles the kerne
     shape-a        configuration A of ``shape_rules_fit_cost.py`` (three monotone rules)
     lss-nb         SuperLSS, negative binomial location-scale, three splines per parameter
     tweedie        Tweedie(1.5) pure premium, claim cost per year of exposure, ``fit_reml``
+    tweedie-p      the same model through ``estimate_p`` (use ``--rows 100000``)
+    capped-1000    issue #589: 1,000 capped category levels on synthetic data, one fit
 
 The ledger lives in ``superglm.diagnostics.work_ledger``; this script only builds
 the fits.  Claim counts are recounted from the severity file as in
@@ -37,7 +39,8 @@ from superglm import Categorical, PSpline, SuperGLM, SuperLSS  # noqa: E402
 from superglm.diagnostics.work_ledger import work_ledger  # noqa: E402
 
 WARMUP_ROWS = 3000
-CASES = ("glm-exact", "glm-discrete", "shape-a", "lss-nb", "tweedie")
+CAPPED_ROWS = 80_000
+CASES = ("glm-exact", "glm-discrete", "shape-a", "lss-nb", "tweedie", "tweedie-p", "capped-1000")
 
 
 def load_book(data_dir, rows):
@@ -86,6 +89,39 @@ def tweedie_fit(frame):
     )
 
 
+def tweedie_p_fit(frame):
+    from superglm import families
+
+    exposure = frame["Exposure"].to_numpy(np.float64)
+    y = frame["ClaimTotal"].to_numpy(np.float64) / exposure
+    SuperGLM(family=families.tweedie(p=1.5), features=plain_features()).estimate_p(
+        frame, y, sample_weight=exposure
+    )
+
+
+def capped_levels_fit(_frame, levels=1000):
+    """The fit of issue #589: every level of a 1,000-level category carries a cap."""
+    import pandas as pd
+
+    from superglm import Constraint
+
+    rng = np.random.default_rng(20261104)
+    n = CAPPED_ROWS
+    area = rng.integers(levels, size=n)
+    relativity = rng.normal(0.0, 0.6, levels)
+    age = rng.uniform(size=n)
+    eta = np.log(0.15) + relativity[area] + 0.5 * np.sin(2 * np.pi * age)
+    y = rng.poisson(np.exp(eta)).astype(float)
+    frame = pd.DataFrame({"area": [f"a{i}" for i in area], "age": age})
+    SuperGLM(
+        family="poisson",
+        features={
+            "area": Categorical(constraint=Constraint.fit.cap(0.7, 1.4)),
+            "age": PSpline(n_knots=8),
+        },
+    ).fit_reml(frame, y)
+
+
 def shape_a_fit(frame):
     shape_rules.fit_model(shape_rules.build_features("A"), frame, "fit_reml", False)
 
@@ -120,6 +156,8 @@ RUNNERS = {
     "shape-a": shape_a_fit,
     "lss-nb": lss_fit,
     "tweedie": tweedie_fit,
+    "tweedie-p": tweedie_p_fit,
+    "capped-1000": capped_levels_fit,
 }
 
 
@@ -132,23 +170,32 @@ def main(argv=None):
     parser.add_argument("--top", type=int, default=25)
     args = parser.parse_args(argv)
     data_dir = fremtpl2_data.find_data_dir(args.data_dir)
-    if args.case == "shape-a":
+    if args.case == "capped-1000":
+        frame = None
+    elif args.case == "shape-a":
         frame, _ = shape_rules.load_split(data_dir, args.rows)
     else:
         frame = load_book(data_dir, args.rows)
     run = RUNNERS[args.case]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        run(frame.iloc[:WARMUP_ROWS])
+        if frame is not None:
+            run(frame.iloc[:WARMUP_ROWS])
         started = time.perf_counter()
         with work_ledger() as ledger:
             run(frame)
         wall = time.perf_counter() - started
-    print(f"{args.case}: {len(frame)} rows, wall {wall:.1f} s with the ledger on")
+    rows = len(frame) if frame is not None else CAPPED_ROWS
+    print(f"{args.case}: {rows} rows, wall {wall:.1f} s with the ledger on")
     print(ledger.report(top=args.top))
     if ledger.errors or ledger.skipped:
         print("ledger faults:", ledger.errors, "unresolved entry points:", ledger.skipped)
-    record = {"case": args.case, "rows": len(frame), "wall_with_ledger_s": wall, **ledger.as_dict()}
+    record = {
+        "case": args.case,
+        "rows": rows,
+        "wall_with_ledger_s": wall,
+        **ledger.as_dict(),
+    }
     print(json.dumps(record))
     if args.json:
         with open(args.json, "a", encoding="utf-8") as handle:
