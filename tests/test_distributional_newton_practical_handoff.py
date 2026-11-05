@@ -26,7 +26,7 @@ from tests.test_distributional_endpoint_direction import (
 from tests.test_distributional_practical_stop import _preempt_fixture
 
 
-@pytest.mark.parametrize("outer", ["efs", "efs+newton"])
+@pytest.mark.parametrize("outer", ["efs", "efs+newton", "efs+finish"])
 @pytest.mark.parametrize("budget", [3, 4, 20])
 def test_outward_practical_plateau_can_finish_before_newton(monkeypatch, outer, budget):
     """A sustained finite plateau needs no remaining budget for an exact face.
@@ -169,6 +169,38 @@ def _assert_the_plateau_stood(smoothing, plain):
     assert smoothing.iterations == plain.iterations
     assert len(smoothing.coefficient_fits) == len(plain.coefficient_fits)
     assert smoothing.terminal_fit.eta is not None
+
+
+def test_the_outward_stop_and_the_interior_stop_reach_one_stationary_point(monkeypatch):
+    """Rounding can decide which of the two a fit meets first, so it must not decide the answer.
+    Mutation check: an outward stop with no finish publishes its plateau uncertified."""
+    interior, frame, response = _two_smooth_gaussian()
+    interior.fit_reml(frame, response)
+    calls = _spy_on_the_endgame(monkeypatch)
+    monkeypatch.setattr(loop, "_practical_outward_window", lambda **kwargs: True)
+    outward, _, _ = _two_smooth_gaussian()
+    outward.fit_reml(frame, response)
+
+    reference, smoothing = interior._require_fitted().smoothing, outward._require_fitted().smoothing
+    (call,) = calls
+    assert call["efs_config"].outer == "efs+newton"
+    assert smoothing.convergence_reason == reference.convergence_reason == "stationary"
+    assert smoothing.matched_certified
+    assert smoothing.objective == pytest.approx(reference.objective, abs=1e-6)
+
+
+def test_an_outward_stop_keeps_its_plateau_when_the_finish_stalls(monkeypatch):
+    calls = _spy_on_the_endgame(
+        monkeypatch, lambda outcome: dataclasses.replace(outcome, kind="gradient_unresolved")
+    )
+    monkeypatch.setattr(loop, "_practical_outward_window", lambda **kwargs: True)
+    model, frame, response = _two_smooth_gaussian()
+    model.fit_reml(frame, response)
+
+    smoothing = model._require_fitted().smoothing
+    assert len(calls) == 1
+    assert smoothing.convergence_reason == "practical_plateau"
+    assert not smoothing.matched_certified
 
 
 @pytest.mark.parametrize(

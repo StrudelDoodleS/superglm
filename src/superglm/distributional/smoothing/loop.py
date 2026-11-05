@@ -1492,7 +1492,7 @@ def fit_distributional_efs(
         # A finite profile can also settle while a penalty continues moving
         # outward. Require substantial accepted probes before this policy may
         # preempt the next cap or endpoint decision; retain the raw pressure.
-        if (
+        outward_plateau = (
             outer_config.practical_convergence
             and current_face is None
             and terminal_evidence.maximum > outer_config.tolerance
@@ -1510,22 +1510,28 @@ def fit_distributional_efs(
                 },
                 config=outer_config,
             )
-        ):
-            return _result(converged=True, reason="practical_plateau")
+        )
         # A practical plateau is an interior stop of the components off the active
         # face: while one sits at the cap with outward pressure or is a working
         # infinity, the top of the loop decides (promote an exact face, or refuse
-        # with a named reason). A promotion restarts the plateau's count.
+        # with a named reason). A promotion restarts the plateau's count. Either
+        # plateau hands to a finish where one is available, so both reach the same
+        # stationary point and rounding cannot choose between them.
+        interior = (
+            not terminal_evidence.unresolved_upper_bound and not terminal_evidence.working_infinity
+        )
+        finishes = _plateau_finishes() and _endgame_budget() > 0
+        if outward_plateau and not (finishes and interior):
+            return _result(converged=True, reason="practical_plateau")
         if (
             outer_config.practical_convergence
-            and (current_face is None or (_plateau_finishes() and _endgame_budget() > 0))
-            and practical_run >= outer_config.plateau_iterations
+            and (current_face is None or finishes)
+            and (outward_plateau or practical_run >= outer_config.plateau_iterations)
             and terminal_evidence.maximum > outer_config.tolerance
-            and not terminal_evidence.unresolved_upper_bound
-            and not terminal_evidence.working_infinity
+            and interior
         ):
             if _endgame_budget() > 0 and (
-                _plateau_finishes()
+                finishes
                 or should_hand_off(
                     "practical_plateau",
                     max_accepted_step=max_accepted_step,
