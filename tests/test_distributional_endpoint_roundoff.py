@@ -359,7 +359,9 @@ def test_endpoint_authority_keeps_a_polish_that_meets_the_contract_its_source_fa
     polished_score = np.zeros_like(fit.terminal_score)
     polished_score[np.argmax(rounding)] = 0.5 * rounding.max()
 
-    def scripted_fit(*args: object, initial: np.ndarray, score_only: bool = False, **kwargs: object):
+    def scripted_fit(
+        *args: object, initial: np.ndarray, score_only: bool = False, **kwargs: object
+    ):
         if not score_only:
             return source
         return replace(
