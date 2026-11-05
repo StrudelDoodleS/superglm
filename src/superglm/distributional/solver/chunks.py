@@ -70,7 +70,7 @@ AUTO_CHUNK_SELECTOR = "distributional-auto-v3"
 AUTO_CHUNK_MEMORY_BYTES = 8 * 1024 * 1024
 AUTO_CONTRACTION_MEMORY_BYTES = 64 * 1024 * 1024
 # The most rows the likelihood rule gives an automatic chunk.
-AUTO_CONTRACTION_MAX_ROWS = 2**15
+AUTO_CHUNK_MAX_ROWS = 2**15
 # The longest automatic chunk of a layout that streams in ranges
 # (``layout_chunk_size``).
 AUTO_STREAM_MAX_ROWS = 2**16
@@ -200,7 +200,7 @@ def resolve_chunk_size(
 
     ``row_floats`` counts the floats a chunk's designs own per row, beyond the
     likelihood's own channels. An automatic bound holds at most
-    ``AUTO_CONTRACTION_MAX_ROWS`` rows.
+    ``AUTO_CHUNK_MAX_ROWS`` rows.
     """
     rows = _positive_integer(n_observations, name="n_observations")
     parameters = _positive_integer(k_parameters, name="k_parameters")
@@ -214,7 +214,7 @@ def resolve_chunk_size(
         raise ValueError("row_floats must be a non-negative integer")
     if chunk_size == "auto":
         budget_rows = AUTO_CHUNK_MEMORY_BYTES // (8 * _likelihood_row_floats(parameters, width))
-        return min(rows, AUTO_CONTRACTION_MAX_ROWS, max(1, int(budget_rows)))
+        return min(rows, AUTO_CHUNK_MAX_ROWS, max(1, int(budget_rows)))
     if isinstance(chunk_size, str):
         raise ValueError("chunk_size string must be 'auto'")
     return min(rows, _positive_integer(chunk_size, name="chunk_size"))

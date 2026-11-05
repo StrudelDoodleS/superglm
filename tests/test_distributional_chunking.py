@@ -252,7 +252,7 @@ def test_auto_chunk_selector_has_stable_release_identity_and_budget() -> None:
     assert chunking.AUTO_CHUNK_MEMORY_BYTES == 8_388_608
     # 53 floats a row fit 19,784 rows; 28 fit 37,449, above the contraction row cap.
     assert chunking.resolve_chunk_size(100_000, 2, "auto", row_floats=25) == 19_784
-    assert chunking.resolve_chunk_size(100_000, 2, "auto") == chunking.AUTO_CONTRACTION_MAX_ROWS
+    assert chunking.resolve_chunk_size(100_000, 2, "auto") == chunking.AUTO_CHUNK_MAX_ROWS
 
 
 @pytest.mark.parametrize(
