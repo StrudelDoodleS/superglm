@@ -1159,6 +1159,12 @@ to its cap with the gradient still pointing outward, the fit reports
 cases the fit keeps the stop described above. Fits can remain
 start-dependent; vary `initial_lambda` when comparing solutions.
 
+A search can also push a penalty to its cap long before any plateau. If the
+exact-face check does not settle that penalty, `efs+finish` and `efs+newton` ask
+the exact gradient next, so the fit reports `lambda_cap_unresolved` only if the
+gradient leaves the penalty unresolved too. Plain `outer="efs"` has no exact
+gradient and reports it at once.
+
 ```python
 model.fit_reml(X_train, y_train)
 

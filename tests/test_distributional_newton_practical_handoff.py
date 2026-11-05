@@ -257,7 +257,7 @@ def test_a_finish_that_moved_far_and_was_rejected_does_not_relabel_where_it_stal
     _assert_the_plateau_stood(fits[None], fits["efs"])
 
 
-def _forced_face_plateau_fit(monkeypatch, outcome):
+def _forced_face_plateau_fit(monkeypatch, outcome, outer="efs+finish"):
     calls = _spy_on_the_endgame(monkeypatch, outcome)
     frame, mu = _linear_x_fixture(seed=6)
     smoothing = fit_dense_distributional(
@@ -271,11 +271,48 @@ def _forced_face_plateau_fit(monkeypatch, outcome):
             max_iterations=150, tolerance=1.0e-9, coefficient_curvature="observed"
         ),
         efs_config=DistributionalEFSConfig(
-            max_iterations=40, tolerance=1.0e-12, practical_convergence=True, outer="efs+finish"
+            max_iterations=40, tolerance=1.0e-12, practical_convergence=True, outer=outer
         ),
         retain_rows=True,
     ).smoothing
     return calls, smoothing
+
+
+def _refuse_every_exact_face(monkeypatch):
+    monkeypatch.setattr(loop, "_try_joint_exact_face", lambda *args, **kwargs: (None, None))
+    monkeypatch.setattr(loop, "_try_exact_face", lambda *args, **kwargs: (None, None))
+
+
+@pytest.mark.parametrize("outer", ["efs+newton", "efs+finish"])
+def test_a_refused_cap_lets_the_exact_gradient_decide_first(monkeypatch, outer):
+    """A nomination is Fellner--Schall's proposal; the exact gradient answers it before a refusal.
+    Mutation check: a finish that returns at the refusal never reaches the endgame."""
+    _refuse_every_exact_face(monkeypatch)
+    calls, _ = _forced_face_plateau_fit(monkeypatch, lambda outcome: outcome, outer)
+
+    assert calls
+    assert calls[0]["state"].evidence.unresolved_upper_bound
+
+
+def test_plain_efs_has_no_gradient_to_answer_a_refused_cap(monkeypatch):
+    _refuse_every_exact_face(monkeypatch)
+    calls, smoothing = _forced_face_plateau_fit(monkeypatch, lambda outcome: outcome, "efs")
+
+    assert not calls
+    assert smoothing.convergence_reason == "lambda_cap_unresolved"
+
+
+def test_a_stall_on_a_refused_cap_stays_unresolved(monkeypatch):
+    """No plateau held and a stall decides nothing about the nominated cap.
+    Mutation check: returning the plateau's stop here reports convergence that never happened."""
+    _refuse_every_exact_face(monkeypatch)
+    calls, smoothing = _forced_face_plateau_fit(
+        monkeypatch, lambda outcome: dataclasses.replace(outcome, kind="max_iterations")
+    )
+
+    assert len(calls) == 1
+    assert smoothing.convergence_reason == "lambda_cap_unresolved"
+    assert not smoothing.converged
 
 
 def test_a_finish_on_a_face_that_cannot_reach_stationary_leaves_the_stop_to_the_strict_test(

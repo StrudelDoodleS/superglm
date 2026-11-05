@@ -486,9 +486,10 @@ def fit_distributional_efs(
         terminal_evidence = state.evidence
         if stalled:
             endgame_outcome = None
-            if current_face is None:
+            if current_face is None and not terminal_evidence.unresolved_upper_bound:
                 return _result(converged=True, reason="practical_plateau")
-            # Only the strict stop revalidates a face, so a face's search carries on.
+            # Only the strict stop revalidates a face, and a stall decides nothing about
+            # a nominated cap, so both carry on with the finish spent.
             _resume_fellner_schall()
             return None
         if outcome.kind == "derivative_unavailable":
@@ -680,7 +681,7 @@ def fit_distributional_efs(
                     _reuse_session=reuse_session,
                 )
             if promotion is None:
-                if outer_config.outer == "efs+newton" and pending_cap is None:
+                if outer_config.outer != "efs" and pending_cap is None:
                     if _endgame_budget() > 0 and estimated_names:
                         # The FS proposal nominated this cap; the exact gradient decides
                         # before a refusal is recorded (these assessment fits are dropped).
