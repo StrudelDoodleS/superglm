@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tracemalloc
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -331,6 +333,37 @@ def test_a_dense_term_or_too_many_table_cells_keep_the_row_products(monkeypatch)
     assert reader.leverages(inverse, slices) is not None
     monkeypatch.setattr(br, "_LEVERAGE_MAX_CELLS", 1)
     assert reader.leverages(inverse, slices) is None
+
+
+def test_a_wide_random_effect_is_declined_before_any_table_is_formed():
+    """30,000 levels hold 4.5e8 cells past the budget, so the leverage declines holding next to
+    nothing. Mutation check: forming the categorical's identity first holds 7.2 GB here."""
+    n = 30_000
+    frame = as_eager_frame(
+        pd.DataFrame({"r": [f"l{i}" for i in range(n)], "x": np.linspace(-1, 1, n)})
+    )
+    family = GaussianLS()
+    names = [parameter.name for parameter in family.parameters]
+    compiled = compile_predictors(
+        frame,
+        resolved_prior(np.ones(n)),
+        family.parameters,
+        [
+            Predictor(names[0], {"x": Spline(kind="cr", n_knots=5), "r": RandomEffect()}),
+            Predictor(names[1], {}),
+        ],
+        model_discrete=True,
+        n_bins_config=24,
+    )
+    layout = build_stacked_layout(compiled)
+    reader = br.binned_rows(layout)
+    slices = tuple(state.coefficient_slice for state in layout.predictors)
+    tracemalloc.start()
+    try:
+        assert reader.leverages(None, slices) is None
+        assert tracemalloc.get_traced_memory()[1] < 1 << 20
+    finally:
+        tracemalloc.stop()
 
 
 def test_leverages_keep_their_bits_at_every_worker_count():

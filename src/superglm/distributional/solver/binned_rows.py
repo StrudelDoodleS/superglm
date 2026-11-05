@@ -124,12 +124,19 @@ def _table_codes(term: _Term, start: int, stop: int) -> NDArray[np.intp]:
     return codes
 
 
-def _lookup_table(term: _Term) -> NDArray[np.float64]:
-    """The table the term's rows read: its ``S = B R``, or a categorical's identity over a zero row."""
+def _table_rows(term: _Term) -> int:
+    """How many rows the term's lookup table has; a categorical's is its identity over a zero row."""
     if type(term.group) in ONE_HOT_CODE_TYPES:
-        width = term.columns.stop - term.columns.start
-        return np.vstack((np.eye(width), np.zeros((1, width))))
-    return term.table
+        return term.columns.stop - term.columns.start + 1
+    return term.table.shape[0]
+
+
+def _table_times(term: _Term, values: NDArray) -> NDArray[np.float64]:
+    """``T values`` for the term's lookup table; a categorical's forms no identity."""
+    if type(term.group) in ONE_HOT_CODE_TYPES:
+        # A categorical's base level reads its code past the last column: a zero row.
+        return np.vstack((values, np.zeros((1, values.shape[1]))))
+    return term.table @ values
 
 
 class RowProducts:
@@ -143,11 +150,8 @@ class RowProducts:
             local = coefficients[term.columns]
             if type(term.group) is DenseGroupMatrix:
                 self._dense.append((term.group.M, local))
-            elif type(term.group) in ONE_HOT_CODE_TYPES:
-                # A categorical's base level reads its code past the last column: a zero row.
-                self._gathers.append((term, np.vstack((local, np.zeros((1, local.shape[1]))))))
             else:
-                self._gathers.append((term, term.table @ local))
+                self._gathers.append((term, _table_times(term, local)))
         self._width = coefficients.shape[1]
         self.n = n
 
@@ -224,19 +228,21 @@ class BinnedRows:
         terms = [(q, term) for q, predictor in enumerate(self._terms) for term in predictor]
         if any(type(term.group) is DenseGroupMatrix for _, term in terms):
             return None
-        tables = [_lookup_table(term) for _, term in terms]
-        sizes = [table.shape[0] for table in tables]
-        if (sum(sizes) ** 2 + sum(size**2 for size in sizes)) // 2 > _LEVERAGE_MAX_CELLS:
+        sizes = [_table_rows(term) for _, term in terms]
+        cells = (sum(sizes) ** 2 + sum(size**2 for size in sizes)) // 2
+        if cells > _LEVERAGE_MAX_CELLS:
             return None
         channels = {pair: index for index, pair in enumerate(packed_pairs(len(self._terms)))}
-        flat = np.empty((sum(sizes) ** 2 + sum(size**2 for size in sizes)) // 2, dtype=np.float64)
+        flat = np.empty(cells, dtype=np.float64)
         pairs, offset = [], 0
-        for t, ((q, term_t), table_t) in enumerate(zip(terms, tables, strict=True)):
+        for t, (q, term_t) in enumerate(terms):
             columns_t = _shifted(term_t.columns, slices[q])
             for u in range(t, len(terms)):
                 r, term_u = terms[u]
-                block = table_t @ inverse[columns_t, _shifted(term_u.columns, slices[r])]
-                block = block @ tables[u].T
+                block = _table_times(
+                    term_t, inverse[columns_t, _shifted(term_u.columns, slices[r])]
+                )
+                block = _table_times(term_u, block.T).T
                 flat[offset : offset + block.size] = (
                     2.0 * block if q == r and t != u else block
                 ).ravel()
