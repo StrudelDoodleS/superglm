@@ -481,6 +481,23 @@ def test_wide_dense_gram_is_the_same_at_every_worker_count(weights: str) -> None
         assert np.all(np.abs(pooled[channel] - literal) <= _gamma(n_rows) * magnitude)
 
 
+def test_the_dense_gram_charges_its_dispatch_in_multiply_adds(monkeypatch) -> None:
+    """Its task costs are multiply-adds, so it stays off the row-visit overhead."""
+    seen = []
+    run = assembly_module.run_block_tasks
+
+    def spy(tasks, cache, profile, *, dispatch_bound=False, row_visits=False):
+        seen.append((dispatch_bound, row_visits))
+        run(tasks, cache, profile, dispatch_bound=dispatch_bound, row_visits=row_visits)
+
+    monkeypatch.setattr(assembly_module, "run_block_tasks", spy)
+    n_rows = 2 * assembly_module._GRAM_BLOCK_ROWS + 5
+    rows = np.ones((n_rows, 130))
+    with block_queue_config(workers=1):
+        _dense_channel_blocks((rows,), np.ones((n_rows, 1)), [(0, 0)])
+    assert seen == [(True, False)]
+
+
 def test_the_dense_gram_keeps_a_running_total_rather_than_every_block(monkeypatch) -> None:
     real_rows = assembly_module._gram_rows
     formed = []

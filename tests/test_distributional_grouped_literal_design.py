@@ -19,7 +19,7 @@ from superglm._group_matrix._block_queue import block_queue_config
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import Predictor, PredictorExecutionPlan, compile_predictors
-from superglm.distributional.solver import chunks
+from superglm.distributional.solver import assembly, chunks
 from superglm.features import Categorical, Numeric, RandomEffect, Spline
 from superglm.group_matrix import DiscretizedSSPGroupMatrix
 
@@ -275,6 +275,21 @@ def test_by_bin_tables_are_contracted_once_per_pass(monkeypatch, chunks_per_bloc
     # form 4 or 2 blocks; kept tables contract once per pass.
     blocks = -(-4 // chunks_per_block)
     assert len(contracted) == (4 if kept else 4 * blocks)
+
+
+def test_pass_tables_charge_their_contraction_in_multiply_adds(monkeypatch):
+    """A row pass's blocks are row visits; contracting the pass tables is multiply-adds."""
+    seen = []
+    run = assembly.run_block_tasks
+
+    def spy(tasks, cache, profile, *, dispatch_bound=False, row_visits=False):
+        seen.append(row_visits)
+        run(tasks, cache, profile, dispatch_bound=dispatch_bound, row_visits=row_visits)
+
+    monkeypatch.setattr(assembly, "run_block_tasks", spy)
+    monkeypatch.setattr(chunks, "contraction_block_rows", lambda n, row_bytes, rows: 2 * rows)
+    _assemble(monkeypatch, problem=_mixed_problem())
+    assert set(seen) == {True, False}
 
 
 def test_pass_tables_contract_on_the_pool_with_the_serial_result(monkeypatch):

@@ -21,14 +21,16 @@ blocks "in order of decreasing computational cost".  This module does that:
   Other blocks always run whole.
 - **Workers.**  ``_parallel.pool_workers``: ``n_jobs`` capped by the task
   count and by ``max_memory`` over the largest task's working set.  A queue
-  that bounds its dispatch (``dispatch_bound``, the SuperLSS row block's,
-  where the overhead was measured) runs on at most ``section_threads()``,
-  numba's thread count as the SuperLSS sections it replaced did, and is
-  capped by the total cost over
+  that bounds its dispatch (``dispatch_bound``, SuperLSS's row blocks, dense
+  channels and pass tables, where the overhead was measured) runs on at most
+  ``section_threads()``, numba's thread count as the SuperLSS sections it
+  replaced did, and is capped by the total cost over
   the largest unsplit task's (no schedule finishes before that task, and
   LPT on that many workers finishes within twice its cost; Graham 1969),
-  and by the queue's cost over its serial part: every task pays a fixed
-  ``_TASK_OVERHEAD_COST`` of dispatch under the GIL, and a queue whose
+  and by the queue's cost over its serial part: every task pays a fixed cost
+  of dispatch under the GIL, in the queue's own units (``_TASK_OVERHEAD_COST``
+  of multiply-adds, ``_ROW_TASK_OVERHEAD_COST`` of row visits on a
+  ``row_visits`` queue), and a queue whose
   serial fraction is ``s`` runs at most ``1 / s`` times faster on any
   number of workers (Amdahl 1967), so further workers would only contend
   for the GIL, and a queue no pool can make twice as fast runs serially.

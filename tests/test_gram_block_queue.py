@@ -615,6 +615,28 @@ def test_a_whole_pass_block_of_the_book_takes_the_pool(monkeypatch):
     assert profile["block_pool_workers"] == 7
 
 
+def test_a_dense_gram_of_20000_rows_keeps_its_dispatch_in_multiply_adds(monkeypatch):
+    """Absolute costs, so the constant is pinned: 30 blocks of 1.8M multiply-adds run in under a
+    millisecond each and keep three workers. Mutation check: row-visit units allow 29."""
+
+    class Cache:
+        _batch = None
+        _profile = None
+
+        def worker_view(self, shared, profile, work_queue):
+            return self
+
+    monkeypatch.setattr(parallel, "pool_workers", lambda n_units, task_bytes: 32)
+    monkeypatch.setattr(parallel, "section_threads", lambda: 32)
+    tasks = [
+        BlockTask(index, 1.8e6, 1, lambda cache, profile: None, lambda value: None)
+        for index in range(30)
+    ]
+    profile: dict = {}
+    queue.run_block_tasks(tasks, Cache(), profile, dispatch_bound=True)
+    assert profile["block_pool_workers"] == 3
+
+
 def test_workers_stop_at_the_queue_cost_over_its_per_task_overhead(monkeypatch):
     """Every task dispatches under the GIL, so a queue whose serial part is ``s`` of
     its cost runs at most ``1 / s`` times faster (Amdahl): 40 tasks of one overhead
