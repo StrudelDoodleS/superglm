@@ -753,6 +753,7 @@ def prepare_distributional_fit_state(
         response,
         likelihood_plan=null_plan,
         config=requested_solver_config,
+        chunk_size=requested_chunk_size,
     )
     compact_null = _compact_null(null)
     del null_plan
