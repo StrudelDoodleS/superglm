@@ -239,8 +239,6 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
 
     # Its curvature directions take stacked (m, n, K) directions on one state evaluation.
     stacked_curvature_directions: ClassVar[bool] = True
-    # The compiled row kernels run on the pool, so the chunk stream stays on one thread.
-    pools_rows: ClassVar[bool] = True
 
     default_prediction_name = "conditional_mean"
     capabilities = _CAPABILITIES

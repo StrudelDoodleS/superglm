@@ -552,10 +552,11 @@ def _evaluated_chunks(family, evaluate, n_observations, chunk_rows, *, held_floa
     Each row's likelihood is its own term, so a family whose kernels are array code
     runs its chunks on the pool. The chunks depend only on the row count and are
     reduced in row order, so the bits are the same at every worker count (Li and
-    Wood 2020, sec. 4). A family that pools rows inside its kernels keeps that one
-    level, and a chunk too short to repay waking a worker stays on the calling
-    thread. ``held_floats`` is what a result holds per row: results wait for the
-    consumer a window at a time, within the contraction allowance.
+    Wood 2020, sec. 4). A family whose kernels are compiled row loops pools their
+    rows instead, and a chunk too short to repay waking a worker stays on the calling
+    thread; there is one level of parallelism either way. ``held_floats`` is what a
+    result holds per row: results wait for the consumer a window at a time, within
+    the contraction allowance.
     """
     chunks = iter_row_chunks(n_observations, chunk_rows)
     if getattr(family, "pools_rows", False) or chunk_rows < _MIN_POOLED_CHUNK_ROWS:
@@ -563,9 +564,16 @@ def _evaluated_chunks(family, evaluate, n_observations, chunk_rows, *, held_floa
         return
     window = max(1, AUTO_CONTRACTION_MEMORY_BYTES // (8 * held_floats * chunk_rows))
     workers = min(resolve_n_jobs(), _ARRAY_CHUNK_WORKERS)
+
+    def evaluate_at_one_level(rows):
+        with parallel_config(n_jobs=1):
+            return evaluate(rows)
+
     for group in itertools.batched(chunks, window):
         with parallel_config(n_jobs=workers):
-            results = pooled_for(evaluate, list(group), _CHUNK_SCRATCH_ROW_BYTES * chunk_rows)
+            results = pooled_for(
+                evaluate_at_one_level, list(group), _CHUNK_SCRATCH_ROW_BYTES * chunk_rows
+            )
         for index, result in enumerate(results):
             results[index] = None
             yield result

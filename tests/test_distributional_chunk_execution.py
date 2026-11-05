@@ -227,6 +227,7 @@ _ARRAY_FAMILIES = (
     GammaLS,
     LogNormalLS,
     GeneralizedParetoLSS,
+    NegativeBinomialLS,
     TwoPieceNormalLSS,
     TwoPieceLogNormalLSS,
 )
@@ -247,6 +248,8 @@ def _family_problem(family_type):
         )
     )
     response = 0.5 + np.exp(np.sin(3.0 * x))
+    if family_type is NegativeBinomialLS:
+        response = np.round(response)
     plan = family.bind_likelihood(response, weights, COMPLETE_OBSERVATION)
     return family, layout, response, plan, np.full(layout.n_coefficients, 0.05)
 
@@ -345,9 +348,25 @@ def test_the_stream_pools_only_where_it_repays(monkeypatch, pools_rows, chunk_ro
         assert not sections
 
 
-def test_only_the_compiled_families_pool_their_own_rows():
-    assert TweedieLSS.pools_rows and NegativeBinomialLS.pools_rows
-    assert GeneralizedGammaLSS.pools_rows
+def test_a_stream_worker_keeps_a_nested_row_pool_on_its_own_thread():
+    """Mutation check: a kernel's own pool would start threads for every chunk."""
+    widths = []
+
+    def record_width(rows):
+        widths.append(resolve_n_jobs())
+        return rows.start
+
+    with parallel_config(n_jobs=64):
+        list(
+            chunking._evaluated_chunks(
+                SimpleNamespace(pools_rows=False), record_width, 8 * 8192, 8192, held_floats=8
+            )
+        )
+    assert widths == [1] * 8
+
+
+def test_only_the_compiled_row_loops_pool_their_own_rows():
+    assert TweedieLSS.pools_rows and GeneralizedGammaLSS.pools_rows
     assert not any(getattr(family, "pools_rows", False) for family in _ARRAY_FAMILIES)
 
 
