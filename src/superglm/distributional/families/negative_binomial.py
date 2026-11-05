@@ -216,10 +216,6 @@ def _factorial_carrier(count, weights, semantics) -> NDArray[np.float64]:
 
 
 _CAPABILITIES = FamilyCapabilities(2, True, False, False, False, True)
-_PARAMETERS = (
-    ParameterSpec("mean", LogLink(), "mean", ParameterSupport(lower=0.0), "observed"),
-    ParameterSpec("theta", LogLink(), "size", ParameterSupport(lower=0.0), "observed"),
-)
 
 
 @dataclass(frozen=True)
@@ -246,7 +242,6 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
     # The compiled row kernels run on the pool, so the chunk stream stays on one thread.
     pools_rows: ClassVar[bool] = True
 
-    parameters = _PARAMETERS
     default_prediction_name = "conditional_mean"
     capabilities = _CAPABILITIES
     # The expected information is only the terminal curvature fallback; starting
@@ -255,6 +250,13 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
     # Any curvature fallback gets this family's Poisson-boundary diagnosis,
     # which checks the data itself.
     diagnoses_any_curvature_fallback: ClassVar[bool] = True
+
+    @property
+    def parameters(self) -> tuple[ParameterSpec, ...]:
+        return (
+            ParameterSpec("mean", LogLink(), "mean", ParameterSupport(lower=0.0), "observed"),
+            ParameterSpec("theta", LogLink(), "size", ParameterSupport(lower=0.0), "observed"),
+        )
 
     def to_config(self) -> dict[str, object]:
         return {"type": "NegativeBinomialLS", "parameterization": "nb2_mean_theta"}

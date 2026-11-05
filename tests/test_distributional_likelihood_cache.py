@@ -20,6 +20,7 @@ from superglm import (
     TwoPieceLogNormalLSS,
     TwoPieceNormalLSS,
 )
+from superglm.distributional.binding import _snapshot_family
 from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
@@ -80,6 +81,13 @@ def test_repeated_ranges_call_legacy_take_once(family_type, semantics, monkeypat
     assert second is first
     assert calls == 1
     assert cache.hits == 1 and cache.misses == 1
+
+
+@pytest.mark.parametrize("family_type", _FAMILIES, ids=lambda family: family.__name__)
+def test_a_models_own_copy_of_each_family_is_admitted(family_type):
+    """Kills a family whose model-owned snapshot gains state the cache's audit refuses."""
+    family, plan = _problem(family_type)
+    assert _build(_snapshot_family(family), plan) is not None
 
 
 @pytest.mark.parametrize("family_type", _FAMILIES, ids=lambda family: family.__name__)
