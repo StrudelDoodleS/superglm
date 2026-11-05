@@ -920,7 +920,7 @@ def _gamma_initial_target(
         multiplier = np.ones(len(response), dtype=_FLOAT) if semantics == "prior" else weights
         with np.errstate(over="raise", invalid="raise"):
             terms = multiplier * (a_residual + a_deviance)
-        target = math.fsum(terms)
+        target = math.fsum(terms.tolist())
     except (FloatingPointError, OverflowError, ValueError):
         return None
     return target if math.isfinite(target) else None
@@ -952,8 +952,13 @@ def _refine_gamma_initial_rho(
     if left_target is None or right_target is None or left_target >= 0.0 or right_target <= 0.0:
         return None
 
+    # Brent's method starts by reading both ends of its bracket, known from the search above.
+    known = {left: left_target, right: right_target}
+
     def target(rho: float) -> float:
-        value = _gamma_initial_target(response, mean, weights, semantics, rho)
+        value = known.pop(rho, None)
+        if value is None:
+            value = _gamma_initial_target(response, mean, weights, semantics, rho)
         if value is None:
             raise ArithmeticError("Gamma initial target is not representable here")
         return value

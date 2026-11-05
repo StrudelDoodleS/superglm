@@ -437,7 +437,8 @@ def test_initial_target_evaluates_identical_shapes_once(
 def test_initial_shape_reaches_its_root_within_a_few_row_evaluations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Each evaluation reads every row. Mutation check: bisection takes about 28."""
+    """Each evaluation reads every row. Mutation checks: bisection takes about 28, and a Brent
+    start that rereads its bracket evaluates two shapes twice."""
     rng = np.random.default_rng(20261105)
     response = rng.gamma(2.0, 1.5, 400)
     weights = np.ones(400)
@@ -454,6 +455,7 @@ def test_initial_shape_reaches_its_root_within_a_few_row_evaluations(
     rho = gamma_kernel._refine_gamma_initial_rho(response, mean, weights, "prior", root + 0.3)
 
     assert len(calls) <= 14
+    assert len(set(calls)) == len(calls)
     assert rho == pytest.approx(root, abs=1e-6)
 
 

@@ -31,7 +31,7 @@ from superglm._group_matrix._group_matrix_discretized import (
     SupportCompressedSSPGroupMatrix,
 )
 from superglm._group_matrix._group_matrix_range import group_range_matvec, group_row_range
-from superglm._parallel import parallel_config, pooled_for, section_threads
+from superglm._parallel import parallel_config, pooled_for
 from superglm.distributional.family import (
     DistributionalFamily,
     ExpectedInformationFamily,
@@ -569,17 +569,18 @@ def _evaluated_chunks(family, evaluate, n_observations, chunk_rows, *, held_floa
         yield from map(evaluate, chunks)
         return
     window = max(1, AUTO_CONTRACTION_MEMORY_BYTES // (8 * held_floats * chunk_rows))
-    workers = min(section_threads(), _ARRAY_CHUNK_WORKERS)
 
     def evaluate_at_one_level(rows):
         with parallel_config(n_jobs=1):
             return evaluate(rows)
 
     for group in itertools.batched(chunks, window):
-        with parallel_config(n_jobs=workers):
-            results = pooled_for(
-                evaluate_at_one_level, list(group), _CHUNK_SCRATCH_ROW_BYTES * chunk_rows
-            )
+        results = pooled_for(
+            evaluate_at_one_level,
+            list(group),
+            _CHUNK_SCRATCH_ROW_BYTES * chunk_rows,
+            max_workers=_ARRAY_CHUNK_WORKERS,
+        )
         for index, result in enumerate(results):
             results[index] = None
             yield result

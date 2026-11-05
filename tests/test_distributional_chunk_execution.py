@@ -22,9 +22,10 @@ from superglm import (
     TweedieLSS,
     TwoPieceLogNormalLSS,
     TwoPieceNormalLSS,
+    _parallel,
 )
 from superglm._frame import as_eager_frame
-from superglm._parallel import parallel_config, resolve_n_jobs, section_threads
+from superglm._parallel import parallel_config, resolve_n_jobs
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.layout import build_stacked_layout
@@ -338,9 +339,9 @@ def test_the_stream_pools_only_where_it_repays(monkeypatch, family, chunk_rows, 
     sections = []
     pooled_for = chunking.pooled_for
 
-    def spy(fn, items, item_bytes):
-        sections.append((len(items), resolve_n_jobs()))
-        return pooled_for(fn, items, item_bytes)
+    def spy(fn, items, item_bytes, **kwargs):
+        sections.append((len(items), kwargs["max_workers"]))
+        return pooled_for(fn, items, item_bytes, **kwargs)
 
     monkeypatch.setattr(chunking, "pooled_for", spy)
     with parallel_config(n_jobs=64):
@@ -356,28 +357,55 @@ def test_the_stream_pools_only_where_it_repays(monkeypatch, family, chunk_rows, 
         assert not sections
 
 
+def _helpers_started(monkeypatch):
+    started = []
+    grow = _parallel._Crew.grow
+
+    def recording(self, count):
+        started.append(count)
+        grow(self, count)
+
+    monkeypatch.setattr(_parallel._Crew, "grow", recording)
+    return started
+
+
 def test_the_stream_keeps_to_numbas_thread_count(monkeypatch):
     """SuperLSS has no ``n_jobs``, so Numba's count is its thread setting. Mutation check: a stream
-    reading ``resolve_n_jobs`` runs 8 threads here."""
+    that sets its own ``n_jobs`` skips the cap and starts four helpers here."""
     import numba
 
     monkeypatch.setenv("SUPERGLM_N_JOBS", "16")
     monkeypatch.setattr(numba, "get_num_threads", lambda: 2)
-    widths = []
-    pooled_for = chunking.pooled_for
-
-    def spy(fn, items, item_bytes):
-        widths.append(section_threads())
-        return pooled_for(fn, items, item_bytes)
-
-    monkeypatch.setattr(chunking, "pooled_for", spy)
+    started = _helpers_started(monkeypatch)
     list(
         chunking._evaluated_chunks(
             GammaLS(), lambda rows: rows.start, 8 * 8192, 8192, held_floats=8
         )
     )
-    assert widths
-    assert set(widths) == {2}
+    assert max(started) == 1
+
+
+def test_a_stream_window_narrows_itself_and_not_the_fits_crew(monkeypatch):
+    """A window can be the fit's first section, and the negative binomial's finish kernels use
+    every core later. Mutation checks: a stream that sets its own ``n_jobs`` builds the crew at 8
+    threads, and one with no limit starts 15 helpers here."""
+    crews = []
+    started = _helpers_started(monkeypatch)
+    build = _parallel._Crew.__init__
+
+    def recording(self, size, started=0):
+        crews.append(size)
+        build(self, size, started)
+
+    monkeypatch.setattr(_parallel._Crew, "__init__", recording)
+    with parallel_config(n_jobs=16), _parallel.fit_pool():
+        list(
+            chunking._evaluated_chunks(
+                GammaLS(), lambda rows: rows.start, 32 * 8192, 8192, held_floats=8
+            )
+        )
+    assert crews == [16]
+    assert max(started) == chunking._ARRAY_CHUNK_WORKERS - 1
 
 
 @pytest.mark.parametrize("range_geometry", [False, True], ids=["copied-designs", "row-ranges"])
@@ -396,9 +424,9 @@ def test_a_window_counts_the_designs_its_chunks_hold(monkeypatch, range_geometry
     windows = []
     pooled_for = chunking.pooled_for
 
-    def spy(fn, items, item_bytes):
+    def spy(fn, items, item_bytes, **kwargs):
         windows.append(len(items))
-        return pooled_for(fn, items, item_bytes)
+        return pooled_for(fn, items, item_bytes, **kwargs)
 
     monkeypatch.setattr(chunking, "pooled_for", spy)
     with parallel_config(n_jobs=4):
