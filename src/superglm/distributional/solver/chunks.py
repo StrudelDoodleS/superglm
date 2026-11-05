@@ -31,7 +31,7 @@ from superglm._group_matrix._group_matrix_discretized import (
     SupportCompressedSSPGroupMatrix,
 )
 from superglm._group_matrix._group_matrix_range import group_range_matvec, group_row_range
-from superglm._parallel import parallel_config, pooled_for, resolve_n_jobs
+from superglm._parallel import parallel_config, pooled_for, section_threads
 from superglm.distributional.family import (
     DistributionalFamily,
     ExpectedInformationFamily,
@@ -42,6 +42,7 @@ from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.solver._formation import FormationAccumulator
+from superglm.distributional.solver._likelihood_cache import _BUILTIN_FAMILIES
 from superglm.distributional.solver._ordinary_packing import predictor_panels
 from superglm.distributional.solver.assembly import (
     DenseJointGeometry,
@@ -549,21 +550,26 @@ def _take_likelihood_rows(plan, rows, likelihood_cache, lock):
 def _evaluated_chunks(family, evaluate, n_observations, chunk_rows, *, held_floats):
     """``[evaluate(rows), ...]`` over the row chunks, yielded in row order.
 
-    Each row's likelihood is its own term, so a family whose kernels are array code
-    runs its chunks on the pool. The chunks depend only on the row count and are
-    reduced in row order, so the bits are the same at every worker count (Li and
-    Wood 2020, sec. 4). A family whose kernels are compiled row loops pools their
-    rows instead, and a chunk too short to repay waking a worker stays on the calling
-    thread; there is one level of parallelism either way. ``held_floats`` is what a
-    result holds per row: results wait for the consumer a window at a time, within
-    the contraction allowance.
+    Each row's likelihood is its own term, so a package family whose kernels are
+    array code runs its chunks on the pool. The chunks depend only on the row count
+    and are reduced in row order, so the bits are the same at every worker count (Li
+    and Wood 2020, sec. 4). A family whose kernels are compiled row loops pools their
+    rows instead; there is one level of parallelism either way. A chunk too short to
+    repay waking a worker stays on the calling thread, and so does a family from
+    outside the package, whose ``evaluate_natural`` never promised to be thread-safe.
+    ``held_floats`` is what a result holds per row: results wait for the consumer a
+    window at a time, within the contraction allowance.
     """
     chunks = iter_row_chunks(n_observations, chunk_rows)
-    if getattr(family, "pools_rows", False) or chunk_rows < _MIN_POOLED_CHUNK_ROWS:
+    if (
+        type(family) not in _BUILTIN_FAMILIES
+        or getattr(family, "pools_rows", False)
+        or chunk_rows < _MIN_POOLED_CHUNK_ROWS
+    ):
         yield from map(evaluate, chunks)
         return
     window = max(1, AUTO_CONTRACTION_MEMORY_BYTES // (8 * held_floats * chunk_rows))
-    workers = min(resolve_n_jobs(), _ARRAY_CHUNK_WORKERS)
+    workers = min(section_threads(), _ARRAY_CHUNK_WORKERS)
 
     def evaluate_at_one_level(rows):
         with parallel_config(n_jobs=1):
@@ -730,13 +736,17 @@ def iter_likelihood_chunks(
         )
 
     k_parameters = len(layout.predictors)
+    # eta, theta, score, packed curvature and the two likelihood rows, and the
+    # predictor designs a chunk copied for itself.
+    held_floats = 3 * k_parameters + k_parameters * (k_parameters + 1) // 2 + 2
+    if range_plans is None:
+        held_floats += _chunk_design_floats(layout)
     yield from _evaluated_chunks(
         family,
         evaluate,
         len(response),
         layout_chunk_size(layout, chunk_size),
-        # eta, theta, score, packed curvature and the two likelihood rows.
-        held_floats=3 * k_parameters + k_parameters * (k_parameters + 1) // 2 + 2,
+        held_floats=held_floats,
     )
 
 

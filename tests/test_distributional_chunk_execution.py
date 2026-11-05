@@ -24,7 +24,7 @@ from superglm import (
     TwoPieceNormalLSS,
 )
 from superglm._frame import as_eager_frame
-from superglm._parallel import parallel_config, resolve_n_jobs
+from superglm._parallel import parallel_config, resolve_n_jobs, section_threads
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.layout import build_stacked_layout
@@ -318,12 +318,21 @@ def test_a_failure_on_the_pool_names_the_first_failing_chunk(monkeypatch):
     assert refused.value.rows.start == 64
 
 
+class _FamilyFromOutsideThePackage(GammaLS):
+    """A subclass can change ``evaluate_natural``, which never promised to be thread-safe."""
+
+
 @pytest.mark.parametrize(
-    ("pools_rows", "chunk_rows", "pooled"),
-    [(True, 8192, False), (False, 8192, True), (False, 16, False)],
-    ids=["family-pools-its-rows", "array-kernels", "short-chunks"],
+    ("family", "chunk_rows", "pooled"),
+    [
+        (TweedieLSS(), 8192, False),
+        (GammaLS(), 8192, True),
+        (GammaLS(), 16, False),
+        (_FamilyFromOutsideThePackage(), 8192, False),
+    ],
+    ids=["family-pools-its-rows", "array-kernels", "short-chunks", "family-from-outside"],
 )
-def test_the_stream_pools_only_where_it_repays(monkeypatch, pools_rows, chunk_rows, pooled):
+def test_the_stream_pools_only_where_it_repays(monkeypatch, family, chunk_rows, pooled):
     """Results come back in row order, a window at a time, on at most the array kernels' workers."""
     monkeypatch.setattr(chunking, "AUTO_CONTRACTION_MEMORY_BYTES", 16 * 8 * chunk_rows)
     sections = []
@@ -334,7 +343,6 @@ def test_the_stream_pools_only_where_it_repays(monkeypatch, pools_rows, chunk_ro
         return pooled_for(fn, items, item_bytes)
 
     monkeypatch.setattr(chunking, "pooled_for", spy)
-    family = SimpleNamespace(pools_rows=pools_rows)
     with parallel_config(n_jobs=64):
         starts = list(
             chunking._evaluated_chunks(
@@ -348,6 +356,68 @@ def test_the_stream_pools_only_where_it_repays(monkeypatch, pools_rows, chunk_ro
         assert not sections
 
 
+def test_the_stream_keeps_to_numbas_thread_count(monkeypatch):
+    """SuperLSS has no ``n_jobs``, so Numba's count is its thread setting. Mutation check: a stream
+    reading ``resolve_n_jobs`` runs 8 threads here."""
+    import numba
+
+    monkeypatch.setenv("SUPERGLM_N_JOBS", "16")
+    monkeypatch.setattr(numba, "get_num_threads", lambda: 2)
+    widths = []
+    pooled_for = chunking.pooled_for
+
+    def spy(fn, items, item_bytes):
+        widths.append(section_threads())
+        return pooled_for(fn, items, item_bytes)
+
+    monkeypatch.setattr(chunking, "pooled_for", spy)
+    list(
+        chunking._evaluated_chunks(
+            GammaLS(), lambda rows: rows.start, 8 * 8192, 8192, held_floats=8
+        )
+    )
+    assert widths
+    assert set(widths) == {2}
+
+
+@pytest.mark.parametrize("range_geometry", [False, True], ids=["copied-designs", "row-ranges"])
+def test_a_window_counts_the_designs_its_chunks_hold(monkeypatch, range_geometry):
+    """Chunks that copy their designs keep them until the consumer reads them. Mutation check:
+    counting only the channels holds a longer window of copies."""
+    family, layout, response, plan, coefficients = _family_problem(GammaLS)
+    chunk_rows = 16
+    channels = 3 * 2 + 3 + 2
+    designs = chunking._chunk_design_floats(layout)
+    assert designs > 0
+    held = channels if range_geometry else channels + designs
+    allowance = 8 * chunk_rows * channels * (channels + designs)
+    monkeypatch.setattr(chunking, "AUTO_CONTRACTION_MEMORY_BYTES", allowance)
+    monkeypatch.setattr(chunking, "_MIN_POOLED_CHUNK_ROWS", 1)
+    windows = []
+    pooled_for = chunking.pooled_for
+
+    def spy(fn, items, item_bytes):
+        windows.append(len(items))
+        return pooled_for(fn, items, item_bytes)
+
+    monkeypatch.setattr(chunking, "pooled_for", spy)
+    with parallel_config(n_jobs=4):
+        chunks = list(
+            chunking.iter_likelihood_chunks(
+                family,
+                layout,
+                response,
+                plan,
+                coefficients,
+                chunk_size=chunk_rows,
+                curvature_source="observed",
+                _range_geometry=range_geometry,
+            )
+        )
+    assert windows[0] == allowance // (8 * held * chunk_rows)
+    assert sum(windows) == len(chunks)
+
+
 def test_a_stream_worker_keeps_a_nested_row_pool_on_its_own_thread():
     """Mutation check: a kernel's own pool would start threads for every chunk."""
     widths = []
@@ -358,9 +428,7 @@ def test_a_stream_worker_keeps_a_nested_row_pool_on_its_own_thread():
 
     with parallel_config(n_jobs=64):
         list(
-            chunking._evaluated_chunks(
-                SimpleNamespace(pools_rows=False), record_width, 8 * 8192, 8192, held_floats=8
-            )
+            chunking._evaluated_chunks(GammaLS(), record_width, 8 * 8192, 8192, held_floats=8)
         )
     assert widths == [1] * 8
 
