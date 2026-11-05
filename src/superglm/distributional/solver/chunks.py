@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 import operator
+import threading
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Literal
@@ -29,6 +31,7 @@ from superglm._group_matrix._group_matrix_discretized import (
     SupportCompressedSSPGroupMatrix,
 )
 from superglm._group_matrix._group_matrix_range import group_range_matvec, group_row_range
+from superglm._parallel import parallel_config, pooled_for, resolve_n_jobs
 from superglm.distributional.family import (
     DistributionalFamily,
     ExpectedInformationFamily,
@@ -74,6 +77,14 @@ AUTO_CHUNK_MAX_ROWS = 2**15
 # The longest automatic chunk of a layout that streams in ranges
 # (``layout_chunk_size``).
 AUTO_STREAM_MAX_ROWS = 2**16
+# A row chunk shorter than this stays on the calling thread: at about a microsecond
+# a row in array kernels, waking a worker costs a measurable share of its work.
+_MIN_POOLED_CHUNK_ROWS = 2**12
+# A chunk's transient arrays while its family kernels run, per row.
+_CHUNK_SCRATCH_ROW_BYTES = 1024
+# Array kernels hold the GIL between NumPy calls, so past a handful of workers they
+# wait on one another and run slower.
+_ARRAY_CHUNK_WORKERS = 8
 
 # Retained snapshots plus support vectors per pass; refresh uses bounded scratch.
 # No observation-sized predictions are retained here.
@@ -86,24 +97,39 @@ class _SupportPredictions:
     def __init__(self):
         self.entries = {}
         self.nbytes = 0
+        self._lock = threading.Lock()
 
     def __call__(self, group, beta):
         key = id(group)
         source = (group.B_unique, group.R_inv, beta)
-        entry = self.entries.get(key)
-        if entry is not None:
-            snapshots, values = entry
-            if all(np.array_equal(a, b) for a, b in zip(source, snapshots, strict=True)):
+
+        def held():
+            entry = self.entries.get(key)
+            if entry is not None and all(
+                np.array_equal(a, b) for a, b in zip(source, entry[0], strict=True)
+            ):
+                return entry[1]
+            return None
+
+        values = held()
+        if values is not None:
+            return values
+        # Row chunks may run on the pool: a miss is formed once, and a hit reads an
+        # entry that is never written after it is published.
+        with self._lock:
+            values = held()
+            if values is not None:
                 return values
-            self.nbytes -= sum(a.nbytes for a in snapshots) + values.nbytes
-            del self.entries[key]
-            del entry, snapshots, values
-        values = group.B_unique @ (group.R_inv @ beta)
-        size = sum(a.nbytes for a in source) + values.nbytes
-        if size <= _SUPPORT_PREDICTION_BYTES - self.nbytes:
-            self.entries[key] = (tuple(a.copy() for a in source), values)
-            self.nbytes += size
-        return values
+            entry = self.entries.pop(key, None)
+            if entry is not None:
+                self.nbytes -= sum(a.nbytes for a in entry[0]) + entry[1].nbytes
+                del entry
+            values = group.B_unique @ (group.R_inv @ beta)
+            size = sum(a.nbytes for a in source) + values.nbytes
+            if size <= _SUPPORT_PREDICTION_BYTES - self.nbytes:
+                self.entries[key] = (tuple(a.copy() for a in source), values)
+                self.nbytes += size
+            return values
 
 
 def _support_range(group, rows, beta, support_predictions):
@@ -513,10 +539,36 @@ def _validate_chunk_inputs(
     return response, likelihood_plan, _validated_coefficients(layout, coefficients)
 
 
-def _take_likelihood_rows(plan, rows, likelihood_cache):
+def _take_likelihood_rows(plan, rows, likelihood_cache, lock):
     if likelihood_cache is None:
         return plan.take(rows.indices)
-    return likelihood_cache.take(plan, rows.indices, start=rows.start, stop=rows.stop)
+    with lock:
+        return likelihood_cache.take(plan, rows.indices, start=rows.start, stop=rows.stop)
+
+
+def _evaluated_chunks(family, evaluate, n_observations, chunk_rows, *, held_floats):
+    """``[evaluate(rows), ...]`` over the row chunks, yielded in row order.
+
+    Each row's likelihood is its own term, so a family whose kernels are array code
+    runs its chunks on the pool. The chunks depend only on the row count and are
+    reduced in row order, so the bits are the same at every worker count (Li and
+    Wood 2020, sec. 4). A family that pools rows inside its kernels keeps that one
+    level, and a chunk too short to repay waking a worker stays on the calling
+    thread. ``held_floats`` is what a result holds per row: results wait for the
+    consumer a window at a time, within the contraction allowance.
+    """
+    chunks = iter_row_chunks(n_observations, chunk_rows)
+    if getattr(family, "pools_rows", False) or chunk_rows < _MIN_POOLED_CHUNK_ROWS:
+        yield from map(evaluate, chunks)
+        return
+    window = max(1, AUTO_CONTRACTION_MEMORY_BYTES // (8 * held_floats * chunk_rows))
+    workers = min(resolve_n_jobs(), _ARRAY_CHUNK_WORKERS)
+    for group in itertools.batched(chunks, window):
+        with parallel_config(n_jobs=workers):
+            results = pooled_for(evaluate, list(group), _CHUNK_SCRATCH_ROW_BYTES * chunk_rows)
+        for index, result in enumerate(results):
+            results[index] = None
+            yield result
 
 
 def iter_likelihood_chunks(
@@ -561,7 +613,9 @@ def iter_likelihood_chunks(
             PredictorExecutionPlan(state.design, state.intercept_index is not None)
             for state in layout.predictors
         )
-    for rows in iter_row_chunks(len(response), layout_chunk_size(layout, chunk_size)):
+    take_lock = threading.Lock()
+
+    def evaluate(rows: RowChunk) -> LikelihoodChunk:
         if range_plans is None:
             eta, plans = _predictor_chunk(
                 layout,
@@ -587,7 +641,7 @@ def iter_likelihood_chunks(
             if _recover_derivative_failure:
                 raise _TrialDerivativeError(str(exc), rows=rows, plans=plans) from exc
             raise
-        child_plan = _take_likelihood_rows(plan, rows, likelihood_cache)
+        child_plan = _take_likelihood_rows(plan, rows, likelihood_cache, take_lock)
         if len(child_plan.weights.values) != len(rows.indices):
             raise UnsupportedLikelihoodContractError(
                 "family likelihood slicing returned the wrong number of rows"
@@ -656,7 +710,7 @@ def iter_likelihood_chunks(
             if _recover_derivative_failure:
                 raise _TrialDerivativeError(str(exc), rows=rows, plans=plans) from exc
             raise
-        yield LikelihoodChunk(
+        return LikelihoodChunk(
             rows=rows,
             plans=plans,
             eta=eta,
@@ -666,6 +720,16 @@ def iter_likelihood_chunks(
             score_eta=transformed.score_eta,
             curvature_packed=curvature,
         )
+
+    k_parameters = len(layout.predictors)
+    yield from _evaluated_chunks(
+        family,
+        evaluate,
+        len(response),
+        layout_chunk_size(layout, chunk_size),
+        # eta, theta, score, packed curvature and the two likelihood rows.
+        held_floats=3 * k_parameters + k_parameters * (k_parameters + 1) // 2 + 2,
+    )
 
 
 def evaluate_chunked_log_likelihood(
@@ -686,10 +750,10 @@ def evaluate_chunked_log_likelihood(
         likelihood_plan,
         coefficients,
     )
-    optimizing_total = 0.0
-    carrier_total = 0.0
     support_predictions = _SupportPredictions()
-    for rows in iter_row_chunks(len(response), layout_chunk_size(layout, chunk_size)):
+    take_lock = threading.Lock()
+
+    def evaluate(rows: RowChunk) -> tuple[float, float]:
         eta = _predictor_values(
             layout,
             coefficient_values,
@@ -698,7 +762,7 @@ def evaluate_chunked_log_likelihood(
             support_predictions=support_predictions,
         )
         theta = _theta_chunk(layout, eta)
-        child_plan = _take_likelihood_rows(plan, rows, likelihood_cache)
+        child_plan = _take_likelihood_rows(plan, rows, likelihood_cache, take_lock)
         if len(child_plan.weights.values) != len(rows.indices):
             raise UnsupportedLikelihoodContractError(
                 "family likelihood slicing returned the wrong number of rows"
@@ -715,8 +779,22 @@ def evaluate_chunked_log_likelihood(
             )
         if natural.valid is not None and not np.all(natural.valid):
             raise ValueError("chunk contains an invalid likelihood state")
-        optimizing_total += float(np.sum(natural.optimizing_log_likelihood, dtype=np.float64))
-        carrier_total += float(np.sum(natural.parameter_independent_carrier, dtype=np.float64))
+        return (
+            float(np.sum(natural.optimizing_log_likelihood, dtype=np.float64)),
+            float(np.sum(natural.parameter_independent_carrier, dtype=np.float64)),
+        )
+
+    optimizing_total = 0.0
+    carrier_total = 0.0
+    for optimizing, carrier in _evaluated_chunks(
+        family,
+        evaluate,
+        len(response),
+        layout_chunk_size(layout, chunk_size),
+        held_floats=1,
+    ):
+        optimizing_total += optimizing
+        carrier_total += carrier
     return ChunkedLikelihoodSums(
         optimizing_log_likelihood=optimizing_total,
         parameter_independent_carrier=carrier_total,

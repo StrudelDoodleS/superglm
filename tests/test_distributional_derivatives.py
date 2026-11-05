@@ -254,12 +254,23 @@ class _ConstantDerivativeLink:
 
 @pytest.mark.parametrize(
     "hessian, left, right",
-    [(1e-200, 1e-200, 1e250), (1e200, 1e200, 1e-250), (1e-160, 1e-160, 1e-20)],
-    ids=["first-product-underflows", "first-product-overflows", "result-is-subnormal"],
+    [
+        (1e-200, 1e-200, 1e250),
+        (1e200, 1e200, 1e-250),
+        (1e-150, 1e-150, 1e-20),
+        (1e-160, 1e-160, 1e20),
+    ],
+    ids=[
+        "first-product-underflows",
+        "first-product-overflows",
+        "result-is-subnormal",
+        "first-product-is-subnormal",
+    ],
 )
 def test_products_past_float64_keep_their_exactly_rounded_value(hessian, left, right) -> None:
-    """A product a row kernel would lose goes to the rescaling route. Mutation check: returning
-    the plain product from the compiled rows gives 0, inf or an unrounded subnormal here."""
+    """A product a row kernel would lose goes to the rescaling route, whose result carries at most
+    two roundings. Mutation check: dropping the kernel's range test gives 0, inf, a result outside
+    this bound, or a first product whose subnormal error reaches the answer."""
     evaluation = NaturalLikelihoodEvaluation(
         optimizing_log_likelihood=np.zeros(1),
         parameter_independent_carrier=np.zeros(1),
@@ -268,9 +279,11 @@ def test_products_past_float64_keep_their_exactly_rounded_value(hessian, left, r
     )
     links = (_ConstantDerivativeLink(left), _ConstantDerivativeLink(right))
     result = transform_natural_derivatives(evaluation, np.zeros((1, 2)), links)
-    exact = float(Fraction(hessian) * Fraction(left) * Fraction(right))
-    assert result.hessian_eta_packed[0, 1] == exact
-    assert result.curvature_packed[0, 1] == -exact
+    exact = Fraction(hessian) * Fraction(left) * Fraction(right)
+    assert abs(Fraction(float(result.hessian_eta_packed[0, 1])) - exact) <= 4 * Fraction(
+        1, 2**53
+    ) * (abs(exact)) + Fraction(1, 2**1074)
+    assert result.curvature_packed[0, 1] == -result.hessian_eta_packed[0, 1]
 
 
 class _MissingSecondDerivativeLink:

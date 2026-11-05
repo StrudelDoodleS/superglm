@@ -201,7 +201,7 @@ def _scaled_triple_product(
     return result
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _chain_rule_rows(
     score, hessian, first, second, left, right, tiny, upper, score_eta, hessian_eta, curvature
 ):  # pragma: no cover - compiled
@@ -234,6 +234,9 @@ def _chain_rule_rows(
             hessian_eta[i, c] = value
             curvature[i, c] = -value
     return True
+
+
+_POOLED_ROW_KERNELS = (_chain_rule_rows,)
 
 
 def _warmup_chain_rule() -> None:
