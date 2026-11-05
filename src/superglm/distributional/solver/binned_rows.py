@@ -32,6 +32,7 @@ from superglm._group_matrix._group_matrix_discretized import (
 )
 from superglm._group_matrix._group_matrix_range import _category_rows
 from superglm._group_matrix._lookup_tables import gather_channels
+from superglm._parallel import resolve_max_memory
 from superglm.distributional.layout import PredictorState, StackedLayout
 from superglm.distributional.solver.packing import packed_pairs
 from superglm.group_matrix import DesignMatrix
@@ -222,15 +223,17 @@ class BinnedRows:
         ``G_i[q, r] = sum_t sum_u M_tu[c_t(i), c_u(i)]`` with ``M_tu = T_t V_tu
         T_u'``, ``t`` over predictor ``q``'s terms and ``u`` over ``r``'s; a
         diagonal channel reads each unordered pair once at twice its table. A
-        dense term or more than ``_LEVERAGE_MAX_CELLS`` table cells return None,
-        and the caller forms the rows.
+        dense term, more than ``_LEVERAGE_MAX_CELLS`` table cells, or an index and
+        tables past a quarter of ``max_memory`` (as ``lookup_plan`` bounds its own)
+        return None, and the caller forms the rows.
         """
         terms = [(q, term) for q, predictor in enumerate(self._terms) for term in predictor]
         if any(type(term.group) is DenseGroupMatrix for _, term in terms):
             return None
         sizes = [_table_rows(term) for _, term in terms]
         cells = (sum(sizes) ** 2 + sum(size**2 for size in sizes)) // 2
-        if cells > _LEVERAGE_MAX_CELLS:
+        index_bytes = 4 * len(terms) * self.n
+        if cells > _LEVERAGE_MAX_CELLS or 8 * cells + index_bytes > resolve_max_memory() // 4:
             return None
         channels = {pair: index for index, pair in enumerate(packed_pairs(len(self._terms)))}
         flat = np.empty(cells, dtype=np.float64)

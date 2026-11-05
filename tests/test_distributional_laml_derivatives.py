@@ -837,9 +837,10 @@ _BINNED_KINDS["K3"] = _BINNED_KINDS["K2"]
 # Without a dense term the leverage reads its term-pair tables.
 _BINNED_KINDS["K2-lookup"] = _BINNED_KINDS["K2"] - {"DenseGroupMatrix"}
 _BINNED_KINDS["K3-lookup"] = _BINNED_KINDS["K2-lookup"]
+_BINNED_KINDS["compressed-lookup"] = _BINNED_KINDS["compressed"] - {"DenseGroupMatrix"}
 
 
-def _compressed_case():
+def _compressed_case(dense: bool = True):
     """An exact-mode fit on integer covariates, which compresses each spline to its supports."""
     from superglm.features import Categorical, Numeric
     from superglm.features.interaction import SplineCategorical
@@ -867,7 +868,7 @@ def _compressed_case():
                 "a": Spline(kind="cr", n_knots=6),
                 "g": Categorical(base="a"),
                 "h": Categorical(base="p"),
-                "d": Numeric(),
+                **({"d": Numeric()} if dense else {}),
             },
             interaction_specs={"a:h": SplineCategorical("a", "h")},
         ),
@@ -885,8 +886,8 @@ def _binned_case(case: str):
     from superglm.features import Categorical, Numeric, RandomEffect
     from superglm.features.interaction import SplineCategorical, TensorInteraction
 
-    if case == "compressed":
-        family, frame, y, predictors, discrete = _compressed_case()
+    if case.startswith("compressed"):
+        family, frame, y, predictors, discrete = _compressed_case(dense=case == "compressed")
         return _binned_fit(family, frame, y, predictors, discrete)
     k_parameters = int(case[1])
     n = 900
@@ -1018,7 +1019,9 @@ def _binned_family(family, authority: str):
 
 
 @pytest.mark.parametrize("authority", ["analytic", "finite-difference"])
-@pytest.mark.parametrize("case", ["K2", "K3", "K2-lookup", "K3-lookup", "compressed"])
+@pytest.mark.parametrize(
+    "case", ["K2", "K3", "K2-lookup", "K3-lookup", "compressed", "compressed-lookup"]
+)
 def test_binned_layout_derivatives_equal_the_dense_row_chunks(case, authority, monkeypatch) -> None:
     """The passes form no rows, so they sum the dense row chunks' terms in another order: the
     gradient, Hessian and both certificates agree within rounding of the problem's scale. The
@@ -1063,7 +1066,9 @@ def test_row_blocks_of_the_family_derivatives_change_no_bit(case, monkeypatch) -
         np.testing.assert_array_equal(getattr(blocks, name), getattr(whole, name), name)
 
 
-@pytest.mark.parametrize("case", ["K2", "K3", "K2-lookup", "K3-lookup", "compressed"])
+@pytest.mark.parametrize(
+    "case", ["K2", "K3", "K2-lookup", "K3-lookup", "compressed", "compressed-lookup"]
+)
 def test_binned_layout_derivatives_never_read_the_callers_rows(case, monkeypatch) -> None:
     """The layout decides the rows: materialised matrices and bounded chunks of 97 rows (whose
     dense route rounds differently) give the same bits, and no bounded chunk is formed."""

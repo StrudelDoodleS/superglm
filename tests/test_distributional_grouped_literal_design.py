@@ -426,7 +426,7 @@ def test_pass_tables_filled_on_a_pool_keep_the_serial_bits(monkeypatch, chunks_p
     # Every task its own unit, and no task's overhead serial, so blocks this
     # small still reach the pool.
     monkeypatch.setattr(block_queue, "_TINY_COST", 0.0)
-    monkeypatch.setattr(block_queue, "_TASK_OVERHEAD_COST", 1)
+    monkeypatch.setattr(block_queue, "_ROW_TASK_OVERHEAD_COST", 1)
     adds = _table_adds(monkeypatch)
     workers = []
     original_section = parallel.section_executor

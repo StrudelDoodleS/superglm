@@ -591,8 +591,9 @@ def test_workers_stop_at_the_total_over_the_largest_unsplit_block(monkeypatch):
 
 def test_a_whole_pass_block_of_the_book_takes_the_pool(monkeypatch):
     """The shape measured on the 678,007-row book: 78 row passes, a formation task of 18 row
-    visits and a score task of 13, fastest on about seven workers. Mutation check: an overhead of
-    ``2**20`` units serialises it, and a score task costed ``n P`` caps it at two or three."""
+    visits and a score task of 13, fastest on about seven workers. Mutation check: charging a row
+    pass's dispatch in multiply-add units, ``2**20``, serialises it. The score task's own cost is
+    pinned by ``test_the_score_task_costs_its_row_passes_not_its_columns``."""
 
     class Cache:
         _batch = None
@@ -610,7 +611,7 @@ def test_a_whole_pass_block_of_the_book_takes_the_pool(monkeypatch):
         for index, cost in enumerate(costs)
     ]
     profile: dict = {}
-    queue.run_block_tasks(tasks, Cache(), profile, dispatch_bound=True)
+    queue.run_block_tasks(tasks, Cache(), profile, dispatch_bound=True, row_visits=True)
     assert profile["block_pool_workers"] == 7
 
 
@@ -644,12 +645,10 @@ def test_workers_stop_at_the_queue_cost_over_its_per_task_overhead(monkeypatch):
             for index in range(40)
         ]
         profile: dict = {}
-        with block_queue_config(min_cost=0):
-            queue.run_block_tasks(tasks, Cache(), profile, dispatch_bound=True)
+        queue.run_block_tasks(tasks, Cache(), profile, dispatch_bound=True)
         assert profile.get("block_pool_workers") == expected
         profile = {}
-        with block_queue_config(min_cost=0):
-            queue.run_block_tasks(tasks, Cache(), profile)
+        queue.run_block_tasks(tasks, Cache(), profile)
         assert profile.get("block_pool_workers") == 16
 
 

@@ -326,7 +326,7 @@ def test_chunked_discrete_curvature_pools_its_gram_blocks_bitwise(monkeypatch) -
     # Every block its own unit, and no task's overhead serial, so a chunk this
     # small still reaches the pool.
     monkeypatch.setattr(block_queue, "_TINY_COST", 0.0)
-    monkeypatch.setattr(block_queue, "_TASK_OVERHEAD_COST", 1)
+    monkeypatch.setattr(block_queue, "_ROW_TASK_OVERHEAD_COST", 1)
     frame, y, weights, offsets, family, _ = _fixture("gaussian", "frequency")
     # The pooled sections of the chunked curvature's row blocks, by their worker counts.
     workers: list[int] = []

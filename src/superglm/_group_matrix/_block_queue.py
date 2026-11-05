@@ -73,9 +73,11 @@ from ._group_matrix_algebra import (
 _TINY_COST = 1 << 16
 _MIN_POOLED_COST = 1 << 22
 # A task's fixed cost beside its kernels, its dispatch and set-up under the
-# GIL: about 200 us on a whole-pass block, which the kernels run about 2**16
-# units in.
-_TASK_OVERHEAD_COST = 1 << 16
+# GIL: about 50 us, which the kernels run about 2**20 units in.
+_TASK_OVERHEAD_COST = 1 << 20
+# The same on a queue of row passes (``row_visits``), whose units are row visits
+# of a few nanoseconds each, not multiply-adds: about 200 us is about 2**16 units.
+_ROW_TASK_OVERHEAD_COST = 1 << 16
 # Transient row-length arrays a block route may hold at once: weight and
 # index gathers, a weighted column (three float64-sized vectors).
 _ROW_BYTES = 24
@@ -334,6 +336,7 @@ def run_block_tasks(
     profile: dict[str, Any] | None,
     *,
     dispatch_bound: bool = False,
+    row_visits: bool = False,
 ) -> None:
     """Run every task and place its block: serially in task order, or on a pool.
 
@@ -366,7 +369,7 @@ def run_block_tasks(
     if dispatch_bound and workers > 1 and override.workers is None:
         workers = min(workers, section_threads())
         largest_unsplit = max((task.cost for task in tasks if not task.split_bytes), default=0.0)
-        overhead = len(tasks) * _TASK_OVERHEAD_COST
+        overhead = len(tasks) * (_ROW_TASK_OVERHEAD_COST if row_visits else _TASK_OVERHEAD_COST)
         amdahl = (total + overhead) / overhead
         lpt = total / largest_unsplit if largest_unsplit > 0 else amdahl
         # A pool that cannot halve the queue's time costs about what it saves.

@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from superglm._frame import as_eager_frame
+from superglm._parallel import parallel_config
 from superglm.distributional import GaussianLS, TweedieLSS
 from superglm.distributional._row_design import BoundedPredictorMatrix
 from superglm.distributional.layout import build_stacked_layout
@@ -116,7 +117,7 @@ def test_rows_equal_the_dense_design_rows(problem, rows):
         assert _within(got, matrix[start:stop], matrix.shape[1])
 
 
-def _compressed_layout():
+def _compressed_layout(dense: bool = True):
     """An exact-mode layout on integer covariates, which compresses each spline to its supports."""
     rng = np.random.default_rng(3)
     n = 1500
@@ -140,7 +141,7 @@ def _compressed_layout():
                 "a": Spline(kind="cr", n_knots=6),
                 "g": Categorical(base="a"),
                 "h": Categorical(base="p"),
-                "d": Numeric(),
+                **({"d": Numeric()} if dense else {}),
             },
             interaction_specs={"a:h": SplineCategorical("a", "h")},
         ),
@@ -269,9 +270,10 @@ def test_the_score_task_costs_its_row_passes_not_its_columns(monkeypatch):
     queued = []
     run = assembly.run_block_tasks
 
-    def spy(tasks, cache, profile, *, dispatch_bound=False):
+    def spy(tasks, cache, profile, *, dispatch_bound=False, row_visits=False):
+        assert dispatch_bound and row_visits
         queued.extend(tasks)
-        run(tasks, cache, profile, dispatch_bound=dispatch_bound)
+        run(tasks, cache, profile, dispatch_bound=dispatch_bound, row_visits=row_visits)
 
     monkeypatch.setattr(assembly, "run_block_tasks", spy)
     width = layout.n_coefficients
@@ -306,16 +308,19 @@ def _inverse(layout, rng):
 def _dense_leverages(matrices, slices, inverse):
     """``G_i`` from the dense rows, in packed order: the reference the tables must reproduce."""
     pairs = br.packed_pairs(len(matrices))
-    blocks = np.empty((N, len(pairs)))
+    blocks = np.empty((len(matrices[0]), len(pairs)))
     for channel, (left, right) in enumerate(pairs):
         product = matrices[left] @ inverse[slices[left], slices[right]]
         blocks[:, channel] = np.einsum("ij,ij->i", product, matrices[right])
     return blocks
 
 
-@pytest.mark.parametrize("k_parameters", [2, 3], ids=["K2", "K3"])
-def test_leverages_equal_the_dense_row_products(k_parameters):
-    layout, matrices, slices, rng = _layout(k_parameters, dense=False)
+@pytest.mark.parametrize("case", ["K2", "K3", "compressed"])
+def test_leverages_equal_the_dense_row_products(case):
+    if case == "compressed":
+        layout, matrices, slices, rng = _compressed_layout(dense=False)
+    else:
+        layout, matrices, slices, rng = _layout(int(case[1]), dense=False)
     inverse = _inverse(layout, rng)
     got = br.binned_rows(layout).leverages(inverse, slices)
     reference = _dense_leverages(matrices, slices, inverse)
@@ -323,7 +328,7 @@ def test_leverages_equal_the_dense_row_products(k_parameters):
     assert _within(got, reference, layout.n_coefficients)
 
 
-def test_a_dense_term_or_too_many_table_cells_keep_the_row_products(monkeypatch):
+def test_a_dense_term_or_too_many_table_bytes_keep_the_row_products(monkeypatch):
     layout, _matrices, slices, rng = _layout(2)
     inverse = _inverse(layout, rng)
     assert br.binned_rows(layout).leverages(inverse, slices) is None
@@ -331,6 +336,8 @@ def test_a_dense_term_or_too_many_table_cells_keep_the_row_products(monkeypatch)
     inverse = _inverse(layout, rng)
     reader = br.binned_rows(layout)
     assert reader.leverages(inverse, slices) is not None
+    with parallel_config(max_memory=1 << 16):
+        assert reader.leverages(inverse, slices) is None
     monkeypatch.setattr(br, "_LEVERAGE_MAX_CELLS", 1)
     assert reader.leverages(inverse, slices) is None
 
@@ -367,8 +374,6 @@ def test_a_wide_random_effect_is_declined_before_any_table_is_formed():
 
 
 def test_leverages_keep_their_bits_at_every_worker_count():
-    from superglm._parallel import parallel_config
-
     layout, _matrices, slices, rng = _layout(3, dense=False)
     inverse = _inverse(layout, rng)
     reader = br.binned_rows(layout)
