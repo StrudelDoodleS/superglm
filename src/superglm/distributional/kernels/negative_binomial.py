@@ -435,23 +435,28 @@ def initialize_negative_binomial(
     mean = _initial_mean(count_values, weight_values, weight_semantics)
     moment = _moment_theta_candidate(response_values, weight_values, weight_semantics, mean)
     poisson_like = mean * _POISSON_LIKE_INITIAL_THETA_FACTOR
+    # At one mean and one size, a row depends only on its count and weight.
+    check_counts, check_weights = count_values, weight_values
+    if np.all(weight_values == weight_values[0]):
+        check_counts = np.unique(count_values)
+        check_weights = np.full(check_counts.size, weight_values[0])
     last_error: ValueError | None = None
     for candidate in (poisson_like,) if moment is None else (moment, poisson_like):
-        theta = np.column_stack(
-            (np.full(len(response_values), mean), np.full(len(response_values), candidate))
-        )
         try:
             evaluate_negative_binomial_rows(
-                count_values,
-                theta[:, 0],
-                theta[:, 1],
-                weight_values,
+                check_counts,
+                np.full(check_counts.size, mean),
+                np.full(check_counts.size, candidate),
+                check_weights,
                 weight_semantics,
                 derivative_order=2,
             )
         except ValueError as exc:
             last_error = exc
             continue
+        theta = np.column_stack(
+            (np.full(len(response_values), mean), np.full(len(response_values), candidate))
+        )
         return readonly(theta, dtype=np.dtype(np.float64), shape=(len(response_values), 2))
     raise NegativeBinomialInitializationError(
         "NB2 initialization exhausted its candidates"

@@ -51,6 +51,56 @@ def test_nb2_initializer_and_poisson_evidence_accept_only_primitive_rows() -> No
 
 
 @pytest.mark.parametrize(
+    ("weights", "rows_checked"),
+    [(np.ones(400), 9), (np.arange(400) % 3 + 1.0, 400)],
+    ids=["equal-weights", "varying-weights"],
+)
+def test_nb2_start_check_reads_one_row_per_count_when_weights_are_equal(
+    monkeypatch: pytest.MonkeyPatch, weights: np.ndarray, rows_checked: int
+) -> None:
+    """Kills reading every row when one per count decides it, or dropping a row's own weight."""
+    counts = np.arange(400) % 9
+    response = counts.astype(np.float64)
+    evaluate = nb_kernel.evaluate_negative_binomial_rows
+    seen = []
+
+    def spy(rows, *args, **kwargs):
+        seen.append(len(rows))
+        return evaluate(rows, *args, **kwargs)
+
+    monkeypatch.setattr(nb_kernel, "evaluate_negative_binomial_rows", spy)
+    theta = nb_kernel.initialize_negative_binomial(response, counts, weights, "frequency")
+
+    assert seen == [rows_checked]
+    assert theta.shape == (400, 2)
+
+
+def test_nb2_start_falls_back_when_the_check_refuses_its_first_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    counts = np.arange(400) % 9
+    response = counts.astype(np.float64)
+    weights = np.ones(400)
+    first = nb_kernel.initialize_negative_binomial(response, counts, weights, "frequency")
+    evaluate = nb_kernel.evaluate_negative_binomial_rows
+    candidates = []
+
+    def refuse_the_first(rows, mean, theta, *args, **kwargs):
+        candidates.append(theta[0])
+        if len(candidates) == 1:
+            raise ValueError("refused")
+        return evaluate(rows, mean, theta, *args, **kwargs)
+
+    monkeypatch.setattr(nb_kernel, "evaluate_negative_binomial_rows", refuse_the_first)
+    fallback = nb_kernel.initialize_negative_binomial(response, counts, weights, "frequency")
+
+    assert len(candidates) == 2
+    assert candidates[0] == first[0, 1]
+    assert np.all(fallback[:, 1] == candidates[1])
+    assert candidates[1] != candidates[0]
+
+
+@pytest.mark.parametrize(
     ("response", "counts", "weights"),
     [
         ([0.0, 1.0, 2.0, 4.0], np.array([0, 1, 2, 4]), np.ones(4)),

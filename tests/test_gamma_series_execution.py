@@ -11,6 +11,7 @@ from functools import lru_cache
 import numpy as np
 import pytest
 from scipy import special
+from scipy.optimize import brentq
 
 from superglm.distributional.kernels import gamma as gamma_kernel
 
@@ -431,6 +432,29 @@ def test_initial_target_evaluates_identical_shapes_once(
     target = gamma_kernel._gamma_initial_target(response, 2.0, weights, semantics, -3.0)
     assert target is not None
     assert batch_sizes == [1]
+
+
+def test_initial_shape_reaches_its_root_within_a_few_row_evaluations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each evaluation reads every row. Mutation check: bisection takes about 28."""
+    rng = np.random.default_rng(20261105)
+    response = rng.gamma(2.0, 1.5, 400)
+    weights = np.ones(400)
+    mean = float(np.mean(response))
+    target = gamma_kernel._gamma_initial_target
+    root = brentq(lambda rho: target(response, mean, weights, "prior", rho), -5.0, 5.0, xtol=1e-12)
+    calls = []
+
+    def counted(*args):
+        calls.append(args[-1])
+        return target(*args)
+
+    monkeypatch.setattr(gamma_kernel, "_gamma_initial_target", counted)
+    rho = gamma_kernel._refine_gamma_initial_rho(response, mean, weights, "prior", root + 0.3)
+
+    assert len(calls) <= 14
+    assert rho == pytest.approx(root, abs=1e-6)
 
 
 def test_initial_target_does_not_approximate_nearby_shapes(monkeypatch: pytest.MonkeyPatch) -> None:
