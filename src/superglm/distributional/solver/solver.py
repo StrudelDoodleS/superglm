@@ -1283,6 +1283,10 @@ def _run_iterations(
                     )
                 except (ValueError, np.linalg.LinAlgError):
                     retained_correction = None
+            # The Newton correction's predicted gain is below what the objective can
+            # represent and no distinct trial verified a gain, so no line search on the
+            # objective can make progress (Tisseur 2001, eq. 2.35: the residual stops at
+            # its evaluation error). How far the trials shrank says nothing more.
             resolution_limited = bool(
                 stop_policy == "score_only"
                 and context.coefficient_face is not None
@@ -1299,7 +1303,6 @@ def _run_iterations(
                 )
                 and distinct_finite_trial_evaluated
                 and not distinct_trial_improved
-                and reached_identical_candidate
             )
             return finish(
                 resolution_limited,

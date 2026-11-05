@@ -949,7 +949,7 @@ def test_private_score_only_solver_reports_resolution_limited_stationarity_hones
         "rank_loss",
         "levenberg_shift",
         "predictor_cap",
-        "no_identical_candidate",
+        "no_distinct_trial",
     ],
 )
 def test_private_resolution_limited_stationarity_refuses_each_missing_gate(
@@ -1023,7 +1023,13 @@ def test_private_resolution_limited_stationarity_refuses_each_missing_gate(
 
         monkeypatch.setattr(solver_module, "_cap_predictor_step", shorten_step)
     else:
-        config = replace(config, max_backtracks=1)
+        real_solve_direction = solver_module._solve_coefficient_direction
+
+        def stationary_direction(*args: object, **kwargs: object):
+            direction = real_solve_direction(*args, **kwargs)  # type: ignore[arg-type]
+            return replace(direction, step=np.zeros_like(direction.step))
+
+        monkeypatch.setattr(solver_module, "_solve_coefficient_direction", stationary_direction)
 
     result = solver_module._fit_dense_fixed_lambda_score_only(
         family,  # type: ignore[arg-type]
@@ -1138,6 +1144,33 @@ def test_resolution_limited_decrement_encloses_subnormal_dot_underflow() -> None
         np.array([1.0]),
         1.0,
     )
+
+
+def test_private_resolution_limit_does_not_wait_for_a_bit_identical_candidate() -> None:
+    """Kills deciding the limit by how far the trials shrank before a coefficient stopped moving."""
+    (
+        family,
+        layout,
+        response,
+        likelihood_plan,
+        lambdas,
+        face,
+        initial,
+        config,
+    ) = _resolution_limited_face_problem()
+    result = solver_module._fit_dense_fixed_lambda_score_only(
+        family,  # type: ignore[arg-type]
+        layout,
+        response,
+        likelihood_plan,  # type: ignore[arg-type]
+        layout.penalty_matrix(lambdas),
+        initial=initial,
+        config=replace(config, max_backtracks=1),
+        coefficient_face=face,
+    )
+
+    assert result.converged is True
+    assert result.convergence_reason == "resolution_limited_stationarity"
 
 
 def test_private_resolution_limited_stationarity_refuses_a_rejected_distinct_improvement(
