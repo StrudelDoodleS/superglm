@@ -457,11 +457,7 @@ def _fit_endpoint_authority_stationary(
         face=face,
     ):
         return fit
-    polished_kkt = _endpoint_retained_kkt_relative(polished)
-    if (
-        not _assessment_is_numerically_stationary(polished, config.tolerance)
-        or polished_kkt >= source_kkt
-    ):
+    if not _assessment_is_numerically_stationary(polished, config.tolerance):
         return fit
 
     coefficient_bound = _endpoint_candidate_refit_bound(

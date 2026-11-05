@@ -323,6 +323,58 @@ def test_endpoint_authority_does_not_polish_a_score_within_its_rounding_floor(
     assert _assessment_is_numerically_stationary(fit, config.tolerance)
 
 
+def test_endpoint_authority_keeps_a_polish_that_meets_the_contract_its_source_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kills keeping a source that fails stationarity because a passing polish's raw score is larger."""
+    family, layout, response, plan, lambdas = _capped_spline_problem()
+    # At 1e-10, as in the replay test above, the certificate has margin on every BLAS kernel.
+    config = replace(
+        smoothing_authority._face_authority_config(DenseSolverConfig()), tolerance=1.0e-10
+    )
+    arguments = {
+        "lambdas": lambdas,
+        "face": None,
+        "config": config,
+        "chunk_size": None,
+        "phase_recorder": None,
+    }
+    fit = smoothing_authority._fit_fixed_state(
+        family, layout, response, plan, initial=_floor_start(), **arguments
+    )
+    assert fit.converged is True
+    objective = fit.penalized_optimizing_log_likelihood
+    assert objective is not None
+    nonzeros = np.count_nonzero(fit.penalty, axis=1)
+    unit_roundoff = 0.5 * np.finfo(np.float64).eps
+    rounding = nonzeros * unit_roundoff * (np.abs(fit.penalty) @ np.abs(fit.coefficients))
+
+    # A score on an unpenalized row has no floor: above the bar, this fit fails the contract.
+    source_score = np.zeros_like(fit.terminal_score)
+    source_score[np.flatnonzero(nonzeros == 0)[0]] = 2.0 * config.tolerance * (1.0 + abs(objective))
+    source = replace(fit, terminal_score=source_score, convergence_reason="objective_and_step")
+    assert not _assessment_is_numerically_stationary(source, config.tolerance)
+
+    # A larger score on the stiffest penalized row is inside that row's floor.
+    polished_score = np.zeros_like(fit.terminal_score)
+    polished_score[np.argmax(rounding)] = 0.5 * rounding.max()
+
+    def scripted_fit(*args: object, initial: np.ndarray, score_only: bool = False, **kwargs: object):
+        if not score_only:
+            return source
+        return replace(
+            fit, coefficients=initial, terminal_score=polished_score, convergence_reason="score"
+        )
+
+    monkeypatch.setattr(smoothing_authority, "_fit_fixed_state", scripted_fit)
+    result = smoothing_authority._fit_endpoint_authority_stationary(
+        family, layout, response, plan, initial=fit.coefficients, **arguments
+    )
+
+    assert _assessment_retained_kkt_ratio(result) > _assessment_retained_kkt_ratio(source)
+    assert _assessment_is_numerically_stationary(result, config.tolerance)
+
+
 def test_numerical_stationarity_admits_a_score_within_its_rounding_floor() -> None:
     """Kills the bare relative score test and a floor taken from another coordinate."""
     fit = _capped_spline_fit(max_iterations=150)
