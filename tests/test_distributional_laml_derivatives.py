@@ -834,6 +834,9 @@ _BINNED_KINDS = {
     },
 }
 _BINNED_KINDS["K3"] = _BINNED_KINDS["K2"]
+# Without a dense term the leverage reads its term-pair tables.
+_BINNED_KINDS["K2-lookup"] = _BINNED_KINDS["K2"] - {"DenseGroupMatrix"}
+_BINNED_KINDS["K3-lookup"] = _BINNED_KINDS["K2-lookup"]
 
 
 def _compressed_case():
@@ -876,7 +879,8 @@ def _compressed_case():
 @functools.cache
 def _binned_case(case: str):
     """A binned fit: discretised, with a tensor, a categorical, a random effect, a level and a
-    dense term (``K2``, ``K3``), or exact mode on integer covariates (``compressed``)."""
+    dense term (``K2``, ``K3``; ``-lookup``: no dense term), or exact mode on integer covariates
+    (``compressed``)."""
     from superglm.distributional.families import GeneralizedGammaLSS
     from superglm.features import Categorical, Numeric, RandomEffect
     from superglm.features.interaction import SplineCategorical, TensorInteraction
@@ -912,7 +916,7 @@ def _binned_case(case: str):
                 "x": Spline(kind="cr", n_knots=6),
                 "z": Spline(kind="cr", n_knots=5),
                 "g": Categorical(base="a"),
-                "d": Numeric(),
+                **({} if case.endswith("lookup") else {"d": Numeric()}),
                 "r": RandomEffect(),
             },
             interaction_specs={"x:z": TensorInteraction("x", "z", n_knots=(4, 4))},
@@ -1014,10 +1018,10 @@ def _binned_family(family, authority: str):
 
 
 @pytest.mark.parametrize("authority", ["analytic", "finite-difference"])
-@pytest.mark.parametrize("case", ["K2", "K3", "compressed"])
+@pytest.mark.parametrize("case", ["K2", "K3", "K2-lookup", "K3-lookup", "compressed"])
 def test_binned_layout_derivatives_equal_the_dense_row_chunks(case, authority, monkeypatch) -> None:
-    """Rows read from the bin tables are the values a bounded chunk forms, so the gradient,
-    Hessian and both certificates are those of the dense row chunks, bit for bit. The
+    """The passes form no rows, so they sum the dense row chunks' terms in another order: the
+    gradient, Hessian and both certificates agree within rounding of the problem's scale. The
     fixtures hold every binned group kind, and the differenced pass nonzero certificates."""
     from superglm.distributional._row_design import bounded_predictor_matrices
     from superglm.distributional.smoothing import derivatives as derivatives_module
@@ -1035,10 +1039,31 @@ def test_binned_layout_derivatives_equal_the_dense_row_chunks(case, authority, m
     assert binned.third_derivative_authority == dense.third_derivative_authority
     assert bool(np.max(binned.hessian_certificate) > 1e-9) is (authority == "finite-difference")
     for name in (*_LAML_RESULTS, "fs_gradient", "penalty_hessian"):
-        np.testing.assert_array_equal(getattr(binned, name), getattr(dense, name), err_msg=name)
+        reference = getattr(dense, name)
+        tolerance = 2.0**-53 * 64 * layout.n_coefficients * np.max(np.abs(reference), initial=1.0)
+        np.testing.assert_allclose(
+            getattr(binned, name), reference, rtol=0.0, atol=tolerance, err_msg=name
+        )
 
 
-@pytest.mark.parametrize("case", ["K2", "K3", "compressed"])
+@pytest.mark.parametrize("case", ["K2-lookup", "K3-lookup"])
+def test_row_blocks_of_the_family_derivatives_change_no_bit(case, monkeypatch) -> None:
+    """A stacked family's third and fourth derivatives run in row blocks, which bound their
+    scratch; its rows are independent, so the blocks leave the results as one call gives them."""
+    from superglm.distributional._row_design import bounded_predictor_matrices
+    from superglm.distributional.kernels import _curvature_direction as curvature_kernels
+
+    family, layout, y, plan, options = _binned_case(case)
+    assert family.stacked_curvature_directions is True
+    matrices = bounded_predictor_matrices(layout)
+    whole = laml_derivatives(family, layout, y, plan, dense_matrices=matrices, **options)
+    monkeypatch.setattr(curvature_kernels, "STACKED_ROW_CHUNK", 97)
+    blocks = laml_derivatives(family, layout, y, plan, dense_matrices=matrices, **options)
+    for name in _LAML_RESULTS:
+        np.testing.assert_array_equal(getattr(blocks, name), getattr(whole, name), name)
+
+
+@pytest.mark.parametrize("case", ["K2", "K3", "K2-lookup", "K3-lookup", "compressed"])
 def test_binned_layout_derivatives_never_read_the_callers_rows(case, monkeypatch) -> None:
     """The layout decides the rows: materialised matrices and bounded chunks of 97 rows (whose
     dense route rounds differently) give the same bits, and no bounded chunk is formed."""

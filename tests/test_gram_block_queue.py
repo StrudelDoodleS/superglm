@@ -589,6 +589,31 @@ def test_workers_stop_at_the_total_over_the_largest_unsplit_block(monkeypatch):
         assert profile["block_pool_workers"] == expected
 
 
+def test_a_whole_pass_block_of_the_book_takes_the_pool(monkeypatch):
+    """The shape measured on the 678,007-row book: 78 row passes, a formation task of 18 row
+    visits and a score task of 13, fastest on about seven workers. Mutation check: an overhead of
+    ``2**20`` units serialises it, and a score task costed ``n P`` caps it at two or three."""
+
+    class Cache:
+        _batch = None
+        _profile = None
+
+        def worker_view(self, shared, profile, work_queue):
+            return self
+
+    monkeypatch.setattr(parallel, "pool_workers", lambda n_units, task_bytes: 16)
+    monkeypatch.setattr(parallel, "section_threads", lambda: 16)
+    n = 678_007
+    costs = [float(n)] * 78 + [18.0 * n, 13.0 * n]
+    tasks = [
+        BlockTask(index, cost, 1, lambda cache, profile: None, lambda value: None)
+        for index, cost in enumerate(costs)
+    ]
+    profile: dict = {}
+    queue.run_block_tasks(tasks, Cache(), profile, dispatch_bound=True)
+    assert profile["block_pool_workers"] == 7
+
+
 def test_workers_stop_at_the_queue_cost_over_its_per_task_overhead(monkeypatch):
     """Every task dispatches under the GIL, so a queue whose serial part is ``s`` of
     its cost runs at most ``1 / s`` times faster (Amdahl): 40 tasks of one overhead
@@ -619,10 +644,12 @@ def test_workers_stop_at_the_queue_cost_over_its_per_task_overhead(monkeypatch):
             for index in range(40)
         ]
         profile: dict = {}
-        queue.run_block_tasks(tasks, Cache(), profile, dispatch_bound=True)
+        with block_queue_config(min_cost=0):
+            queue.run_block_tasks(tasks, Cache(), profile, dispatch_bound=True)
         assert profile.get("block_pool_workers") == expected
         profile = {}
-        queue.run_block_tasks(tasks, Cache(), profile)
+        with block_queue_config(min_cost=0):
+            queue.run_block_tasks(tasks, Cache(), profile)
         assert profile.get("block_pool_workers") == 16
 
 

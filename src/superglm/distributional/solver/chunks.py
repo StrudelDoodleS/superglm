@@ -69,14 +69,10 @@ CurvatureSource = Literal["observed", "fisher", "nearest_semidefinite"]
 AUTO_CHUNK_SELECTOR = "distributional-auto-v3"
 AUTO_CHUNK_MEMORY_BYTES = 8 * 1024 * 1024
 AUTO_CONTRACTION_MEMORY_BYTES = 64 * 1024 * 1024
-# The longest run of rows a contraction block of several chunks sums. Bin and
-# level sums run sequentially, so their rounding grows with the run; this keeps
-# it at the scale the automatic likelihood chunk sums over on a small layout
-# (about 2**15 rows). It does not reproduce the chunk stream's rounding on every
-# layout.
+# The most rows the likelihood rule gives an automatic chunk.
 AUTO_CONTRACTION_MAX_ROWS = 2**15
-# The longest automatic chunk of a layout that streams in ranges, which
-# contracts each chunk as it arrives (``layout_chunk_size``).
+# The longest automatic chunk of a layout that streams in ranges
+# (``layout_chunk_size``).
 AUTO_STREAM_MAX_ROWS = 2**16
 
 # Retained snapshots plus support vectors per pass; refresh uses bounded scratch.
@@ -203,9 +199,8 @@ def resolve_chunk_size(
     """Resolve an explicit or memory-budgeted row bound.
 
     ``row_floats`` counts the floats a chunk's designs own per row, beyond the
-    likelihood's own channels. An automatic bound holds at most the
-    contraction row cap, so a chunk that contracts its own rows sums no
-    longer runs than a block.
+    likelihood's own channels. An automatic bound holds at most
+    ``AUTO_CONTRACTION_MAX_ROWS`` rows.
     """
     rows = _positive_integer(n_observations, name="n_observations")
     parameters = _positive_integer(k_parameters, name="k_parameters")
@@ -1001,20 +996,16 @@ def _channel_peak(*channels: NDArray[np.float64]) -> float:
 
 
 def contraction_block_rows(n_observations: int, row_bytes: int | None, chunk_rows: int) -> int:
-    """Rows contracted at once: whole likelihood chunks within the byte and row budgets.
+    """Rows contracted at once: whole likelihood chunks within the contraction allowance.
 
-    A block holds at least one chunk, so a single chunk larger than either
-    budget forms its own block, as does every chunk of an uncounted layout.
+    Binned crossproducts amortise over a block's rows (Li and Wood 2020,
+    Algorithm 1), so a block takes all the chunks the allowance holds. A block
+    holds at least one chunk, so a single chunk larger than the allowance forms
+    its own block, as does every chunk of an uncounted layout.
     """
     if row_bytes is None:
         return min(n_observations, chunk_rows)
-    chunks_per_block = max(
-        1,
-        min(
-            AUTO_CONTRACTION_MEMORY_BYTES // (row_bytes * chunk_rows),
-            AUTO_CONTRACTION_MAX_ROWS // chunk_rows,
-        ),
-    )
+    chunks_per_block = max(1, AUTO_CONTRACTION_MEMORY_BYTES // (row_bytes * chunk_rows))
     return min(n_observations, chunks_per_block * chunk_rows)
 
 
@@ -1036,28 +1027,29 @@ def assemble_chunked_geometry(
 
     Binned crossproducts amortise only when each bin-pair weight table is
     contracted once over many rows (Li and Wood 2020, Algorithm 1). The
-    chunks stream score and packed curvature channels into a bounded buffer,
-    and the group plans contract each block of chunks once; a block covers
-    every row up to the byte and row budgets. A pass of several blocks keeps
-    the by-bin and joint tables its pass tables admit, each block adding its
-    own, and contracts them once, within the allowance the block leaves.
+    chunks stream score and packed curvature channels into a buffer, and the
+    group plans contract each block of chunks once; a block covers every row
+    up to the allowance. A pass of several blocks keeps the by-bin and joint
+    tables its pass tables admit, each block adding its own, and contracts
+    them once, within the allowance the block leaves.
     """
     n_observations = layout.predictors[0].design.n
     k_parameters = len(layout.predictors)
     chunk_rows = layout_chunk_size(layout, chunk_size)
-    panels = predictor_panels(layout)
-    row_bytes = contraction_row_bytes(layout, panels)
+    row_bytes = contraction_row_bytes(layout)
     block_rows = contraction_block_rows(n_observations, row_bytes, chunk_rows)
-    if block_rows >= n_observations:
-        # A pass of one block forms each group pair's own product, as the
-        # unchunked assembly does; panels, like tables, serve passes of many.
-        panels = (None,) * k_parameters
-    packed = any(panel is not None for panel in panels)
-    table_budget = AUTO_CONTRACTION_MEMORY_BYTES - (row_bytes or 0) * block_rows
-    tables = PassTables(table_budget) if block_rows < n_observations and table_budget > 0 else None
     # A block of one chunk out of several contracts that chunk's rows as it
     # arrives, so nothing is buffered.
     per_chunk = block_rows <= chunk_rows < n_observations
+    # A block of many rows forms each group pair's own product, as the unchunked
+    # assembly does; panels, like tables, serve a pass of many short blocks.
+    panels = (None,) * k_parameters
+    if per_chunk:
+        panels = predictor_panels(layout)
+        row_bytes = contraction_row_bytes(layout, panels)
+    packed = any(panel is not None for panel in panels)
+    table_budget = AUTO_CONTRACTION_MEMORY_BYTES - (row_bytes or 0) * block_rows
+    tables = PassTables(table_budget) if block_rows < n_observations and table_budget > 0 else None
     buffered = 0 if per_chunk else block_rows
     score = np.empty((buffered, k_parameters), dtype=np.float64)
     # Channel-major, so each contracted channel is one contiguous row vector.

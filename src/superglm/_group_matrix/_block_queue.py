@@ -73,8 +73,9 @@ from ._group_matrix_algebra import (
 _TINY_COST = 1 << 16
 _MIN_POOLED_COST = 1 << 22
 # A task's fixed cost beside its kernels, its dispatch and set-up under the
-# GIL: about 50 us, which the kernels run about 2**20 units in.
-_TASK_OVERHEAD_COST = 1 << 20
+# GIL: about 200 us on a whole-pass block, which the kernels run about 2**16
+# units in.
+_TASK_OVERHEAD_COST = 1 << 16
 # Transient row-length arrays a block route may hold at once: weight and
 # index gathers, a weighted column (three float64-sized vectors).
 _ROW_BYTES = 24
@@ -159,6 +160,12 @@ def diagonal_cost(gm, n: int) -> float:
     """Estimated work of a diagonal block."""
     r, m, p = _side(gm, n)
     return n * (1.0 + r) + float(m) * p * p
+
+
+def score_cost(gm, n: int) -> float:
+    """Estimated work of one group's score product: a row pass, then its bins through its basis."""
+    r, m, p = _side(gm, n)
+    return n * (1.0 + r) + float(m) * p
 
 
 def _aggregate_bytes(gm_i, gm_j, n: int) -> int:
@@ -431,6 +438,7 @@ __all__ = [
     "diagonal_bytes",
     "diagonal_cost",
     "run_block_tasks",
+    "score_cost",
     "split_bytes",
     "splittable_pair",
 ]

@@ -10,7 +10,7 @@ from functools import partial
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._group_matrix._block_queue import BlockTask, run_block_tasks
+from superglm._group_matrix._block_queue import BlockTask, run_block_tasks, score_cost
 from superglm._group_matrix._group_matrix_algebra import (
     PassFactors,
     PassTables,
@@ -430,6 +430,21 @@ def pass_table_bytes(layout: StackedLayout, panels: tuple[PredictorPanel | None,
     )
 
 
+def grouped_curvature(
+    layout: StackedLayout, channels: NDArray, *, factors: PassFactors | None = None
+) -> NDArray[np.float64]:
+    """``sum_r X_r' C_r X_r`` for packed row channels ``(K(K+1)/2, n)`` of any sign, as one block."""
+    width = layout.n_coefficients
+    accumulator = GroupedGeometryAccumulator(
+        layout,
+        penalty=np.zeros((width, width), dtype=np.float64),
+        coefficients=np.zeros(width, dtype=np.float64),
+        factors=factors,
+    )
+    accumulator.add_block(_grouped_predictor_plans(layout), None, channels)
+    return accumulator._curvature
+
+
 class GroupedGeometryAccumulator:
     """Accumulate row-block score and curvature into coefficient space.
 
@@ -587,7 +602,7 @@ class GroupedGeometryAccumulator:
     def add_block(
         self,
         plans: tuple[PredictorExecutionPlan, ...],
-        score_eta: NDArray,
+        score_eta: NDArray | None,
         curvature: NDArray,
         *,
         beside: BlockTask | None = None,
@@ -599,10 +614,10 @@ class GroupedGeometryAccumulator:
         ``beside`` (another product of the caller's over the block's rows) run
         as one queue (``run_block_tasks``), on the pool when their work
         warrants it; each channel's block is the one
-        :meth:`add_curvature_channel` adds.
+        :meth:`add_curvature_channel` adds. ``score_eta`` None adds no score.
         """
         plan_tuple = self._validated_plans(plans)
-        score = self._validated_score(plan_tuple, score_eta)
+        score = None if score_eta is None else self._validated_score(plan_tuple, score_eta)
         channels = np.asarray(curvature, dtype=np.float64)
         expected = (len(self._pairs), plan_tuple[0].design.n)
         if channels.shape != expected or not np.all(np.isfinite(channels)):
@@ -625,15 +640,20 @@ class GroupedGeometryAccumulator:
             finishers.append(finish)
         n_rows = plan_tuple[0].design.n
         side = [] if beside is None else [beside]
-        side.append(
-            BlockTask(
-                index=0,
-                cost=float(n_rows * sum(self._expected_widths)),
-                nbytes=8 * n_rows,
-                run=lambda _cache, _profile: self._score_products(plan_tuple, score),
-                place=self._place_score,
+        if score is not None:
+            side.append(
+                BlockTask(
+                    index=0,
+                    cost=sum(
+                        n_rows * int(plan.intercept)
+                        + sum(score_cost(group, n_rows) for group in plan.design.group_matrices)
+                        for plan in plan_tuple
+                    ),
+                    nbytes=8 * n_rows,
+                    run=lambda _cache, _profile: self._score_products(plan_tuple, score),
+                    place=self._place_score,
+                )
             )
-        )
         for task in side:
             task.index = len(tasks)
             tasks.append(task)

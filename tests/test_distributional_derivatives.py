@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 
 import numpy as np
 import pytest
@@ -206,6 +207,61 @@ def test_diagonal_chain_term_uses_natural_score_and_second_inverse_derivative() 
 
     np.testing.assert_allclose(result.hessian_eta_packed[:, 0], expected_hessian)
     np.testing.assert_allclose(result.curvature_packed[:, 0], -expected_hessian)
+
+
+def test_chain_rule_rows_hold_the_bits_of_the_rescaling_route(monkeypatch) -> None:
+    """The compiled rows and the route they fall back to are one computation, read-only either way."""
+    from superglm.distributional.solver import derivatives as chain
+
+    links, eta, _weights, _objective, evaluation = _quadratic_fixture()
+    compiled = transform_natural_derivatives(evaluation, eta, links)
+    monkeypatch.setattr(chain, "_chain_rule_rows", lambda *args: False)
+    rescaled = transform_natural_derivatives(evaluation, eta, links)
+    for name in ("score_eta", "hessian_eta_packed", "curvature_packed"):
+        np.testing.assert_array_equal(getattr(compiled, name), getattr(rescaled, name))
+        assert not getattr(compiled, name).flags.writeable
+    np.testing.assert_array_equal(compiled.valid, evaluation.valid)
+
+
+@dataclass(frozen=True)
+class _ConstantDerivativeLink:
+    first: float
+
+    def link(self, mu: np.ndarray) -> np.ndarray:
+        return mu
+
+    def inverse(self, eta: np.ndarray) -> np.ndarray:
+        return eta
+
+    def deriv(self, mu: np.ndarray) -> np.ndarray:
+        return np.ones_like(mu)
+
+    def deriv_inverse(self, eta: np.ndarray) -> np.ndarray:
+        return np.full_like(eta, self.first)
+
+    def deriv2_inverse(self, eta: np.ndarray) -> np.ndarray:
+        return np.zeros_like(eta)
+
+
+@pytest.mark.parametrize(
+    "hessian, left, right",
+    [(1e-200, 1e-200, 1e250), (1e200, 1e200, 1e-250), (1e-160, 1e-160, 1e-20)],
+    ids=["first-product-underflows", "first-product-overflows", "result-is-subnormal"],
+)
+def test_products_past_float64_keep_their_exactly_rounded_value(hessian, left, right) -> None:
+    """A product a row kernel would lose goes to the rescaling route. Mutation check: returning
+    the plain product from the compiled rows gives 0, inf or an unrounded subnormal here."""
+    evaluation = NaturalLikelihoodEvaluation(
+        optimizing_log_likelihood=np.zeros(1),
+        parameter_independent_carrier=np.zeros(1),
+        score=np.zeros((1, 2)),
+        hessian_packed=np.array([[0.0, hessian, 0.0]]),
+    )
+    links = (_ConstantDerivativeLink(left), _ConstantDerivativeLink(right))
+    result = transform_natural_derivatives(evaluation, np.zeros((1, 2)), links)
+    exact = float(Fraction(hessian) * Fraction(left) * Fraction(right))
+    assert result.hessian_eta_packed[0, 1] == exact
+    assert result.curvature_packed[0, 1] == -exact
 
 
 class _MissingSecondDerivativeLink:

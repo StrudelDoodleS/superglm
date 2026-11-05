@@ -1,4 +1,4 @@
-"""A binned layout's rows gathered from its bin tables equal its dense design rows, reading no dense rows."""
+"""A binned layout's rows and row products, read from its bin tables, equal the dense design's."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ U = 2.0**-53
 N = 640
 
 
-def _layout(k_parameters: int, discrete: bool = True):
+def _layout(k_parameters: int, discrete: bool = True, dense: bool = True):
     rng = np.random.default_rng(8810 + k_parameters)
     frame = as_eager_frame(
         pd.DataFrame(
@@ -46,14 +46,18 @@ def _layout(k_parameters: int, discrete: bool = True):
                 "x": Spline(kind="cr", n_knots=6),
                 "z": Spline(kind="cr", n_knots=5),
                 "g": Categorical(base="a"),
-                "d": Numeric(),
+                **({"d": Numeric()} if dense else {}),
                 "r": RandomEffect(),
             },
             interaction_specs={"x:z": TensorInteraction("x", "z", n_knots=(4, 4))},
         ),
         Predictor(
             names[1],
-            {"x": Spline(kind="cr", n_knots=5), "h": Categorical(base="p"), "d": Numeric()},
+            {
+                "x": Spline(kind="cr", n_knots=5),
+                "h": Categorical(base="p"),
+                **({"d": Numeric()} if dense else {}),
+            },
             interaction_specs={"x:h": SplineCategorical("x", "h")},
         ),
     ]
@@ -254,7 +258,111 @@ def test_rows_repeat_their_bits(problem):
         np.testing.assert_array_equal(first.rows(q, 7, 300), second.rows(q, 7, 300))
 
 
+def test_the_score_task_costs_its_row_passes_not_its_columns(monkeypatch):
+    """``X' v`` reads each row once per group, then its bins through its basis. Mutation check:
+    a cost of rows times columns makes this the queue's largest task and caps the pool."""
+    from superglm.distributional.solver import assembly
+
+    layout, _matrices, _slices, _rng = _layout(2, dense=False)
+    queued = []
+    run = assembly.run_block_tasks
+
+    def spy(tasks, cache, profile, *, dispatch_bound=False):
+        queued.extend(tasks)
+        run(tasks, cache, profile, dispatch_bound=dispatch_bound)
+
+    monkeypatch.setattr(assembly, "run_block_tasks", spy)
+    width = layout.n_coefficients
+    accumulator = assembly.GroupedGeometryAccumulator(
+        layout, penalty=np.zeros((width, width)), coefficients=np.zeros(width)
+    )
+    plans = assembly._grouped_predictor_plans(layout)
+    accumulator.add_block(plans, np.zeros((N, 2)), np.zeros((3, N)))
+    score = queued[-1]
+    assert score.cost < N * width
+
+
+def test_row_products_equal_the_dense_rows_times_the_coefficients(problem):
+    layout, matrices, _slices, rng = problem
+    reader = br.binned_rows(layout)
+    for q, matrix in enumerate(matrices):
+        coefficients = rng.normal(size=(matrix.shape[1], 3))
+        products = reader.row_products(q, coefficients)
+        for rows in (slice(0, N), slice(13, 13), slice(31, 500)):
+            reference = matrix[rows] @ coefficients
+            got = products(rows)
+            assert got.shape == reference.shape
+            assert _within(got, reference, matrix.shape[1])
+
+
+def _inverse(layout, rng):
+    """A symmetric positive definite stand-in for ``H^-1`` on the whole layout."""
+    root = rng.normal(size=(layout.n_coefficients, layout.n_coefficients))
+    return root @ root.T / layout.n_coefficients + np.eye(layout.n_coefficients)
+
+
+def _dense_leverages(matrices, slices, inverse):
+    """``G_i`` from the dense rows, in packed order: the reference the tables must reproduce."""
+    pairs = br.packed_pairs(len(matrices))
+    blocks = np.empty((N, len(pairs)))
+    for channel, (left, right) in enumerate(pairs):
+        product = matrices[left] @ inverse[slices[left], slices[right]]
+        blocks[:, channel] = np.einsum("ij,ij->i", product, matrices[right])
+    return blocks
+
+
+@pytest.mark.parametrize("k_parameters", [2, 3], ids=["K2", "K3"])
+def test_leverages_equal_the_dense_row_products(k_parameters):
+    layout, matrices, slices, rng = _layout(k_parameters, dense=False)
+    inverse = _inverse(layout, rng)
+    got = br.binned_rows(layout).leverages(inverse, slices)
+    reference = _dense_leverages(matrices, slices, inverse)
+    assert got.shape == reference.shape
+    assert _within(got, reference, layout.n_coefficients)
+
+
+def test_a_dense_term_or_too_many_table_cells_keep_the_row_products(monkeypatch):
+    layout, _matrices, slices, rng = _layout(2)
+    inverse = _inverse(layout, rng)
+    assert br.binned_rows(layout).leverages(inverse, slices) is None
+    layout, _matrices, slices, rng = _layout(2, dense=False)
+    inverse = _inverse(layout, rng)
+    reader = br.binned_rows(layout)
+    assert reader.leverages(inverse, slices) is not None
+    monkeypatch.setattr(br, "_LEVERAGE_MAX_CELLS", 1)
+    assert reader.leverages(inverse, slices) is None
+
+
+def test_leverages_keep_their_bits_at_every_worker_count():
+    from superglm._parallel import parallel_config
+
+    layout, _matrices, slices, rng = _layout(3, dense=False)
+    inverse = _inverse(layout, rng)
+    reader = br.binned_rows(layout)
+    with parallel_config(n_jobs=1):
+        serial = reader.leverages(inverse, slices)
+    with parallel_config(n_jobs=4):
+        pooled = reader.leverages(inverse, slices)
+    np.testing.assert_array_equal(serial, pooled)
+
+
 # Mutation checks: the comparison fails against a deliberately broken reader.
+
+
+def test_mutation_leverage_reading_each_pair_at_its_table_once_fails(monkeypatch):
+    """A diagonal channel holds both orders of a pair: its table at twice its value."""
+    layout, matrices, slices, rng = _layout(2, dense=False)
+    inverse = _inverse(layout, rng)
+    original = br.gather_channels
+
+    def halved(codes, pairs, flat, channels):
+        out = original(codes, pairs, flat, channels)
+        one_read = pairs[pairs[:, 1] != pairs[:, 2]]
+        return out - 0.5 * original(codes, one_read, flat, channels)
+
+    monkeypatch.setattr(br, "gather_channels", halved)
+    got = br.binned_rows(layout).leverages(inverse, slices)
+    assert not _within(got, _dense_leverages(matrices, slices, inverse), layout.n_coefficients)
 
 
 def test_mutation_off_level_rows_reading_a_bin_fail(problem, monkeypatch):

@@ -410,18 +410,19 @@ def test_an_automatic_chunk_fits_the_contraction_allowance(monkeypatch, in_range
     assert chunking.contraction_block_rows(n, row_bytes, rows) * row_bytes <= allowance
 
 
-def test_contraction_blocks_hold_whole_chunks_within_the_byte_and_row_budgets() -> None:
-    # A wide row: the byte budget binds.
+def test_contraction_blocks_hold_whole_chunks_within_the_byte_allowance() -> None:
     row_bytes = 8 * 4_000
     rows = chunking.contraction_block_rows(10**9, row_bytes, 100)
     assert rows % 100 == 0
     assert rows * row_bytes <= chunking.AUTO_CONTRACTION_MEMORY_BYTES < (rows + 100) * row_bytes
-    # A narrow row: the row budget binds.
-    row_bytes = 8 * 40
-    rows = chunking.contraction_block_rows(10**9, row_bytes, 4_000)
-    assert rows % 4_000 == 0
-    assert rows <= chunking.AUTO_CONTRACTION_MAX_ROWS < rows + 4_000
+    # A block takes every chunk the allowance holds, so its bin-pair tables amortise
+    # over many rows. Mutation check: the former cap of 2**15 rows contracts each
+    # 2**16-row chunk of a pass alone, about three times slower on a 678,007-row book.
+    row_bytes = 8 * 20
+    assert chunking.contraction_block_rows(678_007, row_bytes, 65_536) == 6 * 65_536
+    assert chunking.contraction_block_rows(300_000, row_bytes, 65_536) == 300_000
     assert chunking.contraction_block_rows(100, row_bytes, 100) == 100
+    # A chunk past the allowance is its own block.
     assert chunking.contraction_block_rows(10**9, row_bytes, 10**8) == 10**8
 
 

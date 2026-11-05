@@ -12,10 +12,11 @@ instead (expected information, or each row block projected onto the
 semidefinite cone; Wood, Pya and Säfken 2016 §3.3.1, Wood and Fasiolo 2017 §3),
 a first-order approximation to the true derivative.
 
-On a binned layout (``binned_rows.binned_layout``) the passes read each
-predictor's rows from its bin tables, formed once per pass (``BinnedRows``),
-whatever matrices the caller gave: the same values a bounded row chunk forms,
-so every caller at one fit gets the same bits as the dense row chunks.
+On a binned layout (``binned_rows.binned_layout``) the passes form no design
+rows, whatever matrices the caller gave: leverages and predictor directions read
+per-term tables formed once per pass (``BinnedRows``), ``X' v`` is the layout's
+own score product and each ``X' V X`` is one Gram of its row channels, so every
+caller at one fit sums in the same order.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 import superglm.distributional.kernels._curvature_direction as curvature_kernels
+from superglm._group_matrix._group_matrix_algebra import PassFactors
 from superglm.distributional._row_design import (
     BoundedPredictorMatrix,
     PredictorMatrix,
@@ -64,6 +66,7 @@ from superglm.distributional.smoothing.endpoint_laml import (
 from superglm.distributional.smoothing.face_efs import projected_component_states
 from superglm.distributional.smoothing.objective import _component_states, _estimated_names
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
+from superglm.distributional.solver.assembly import _grouped_predictor_plans, grouped_curvature
 from superglm.distributional.solver.binned_rows import BinnedRows, binned_rows
 from superglm.distributional.solver.derivatives import (
     nearest_semidefinite_curvature,
@@ -358,12 +361,62 @@ class _TableRows:
         return self._tables.rows(self._q, start, stop)
 
 
+def _binned_crosses(
+    layout: StackedLayout,
+    tables: BinnedRows,
+    first: list[NDArray[np.float64]],
+    directions: NDArray[np.float64],
+    slices: tuple[slice, ...],
+) -> NDArray[np.float64]:
+    """``X' V_k X`` as ``(m, P, P)``: one Gram per direction, ``V_k = sum_q (X_q beta_k) D1_q``.
+
+    The Grams share one set of pass factors, so each support is projected once.
+    """
+    width = layout.n_coefficients
+    crosses = np.empty((directions.shape[1], width, width), dtype=np.float64)
+    factors = PassFactors()
+    every_row = slice(0, tables.n)
+    for k in range(directions.shape[1]):
+        weights = np.zeros_like(first[0])
+        for q, derivative in enumerate(first):
+            weights += (
+                tables.row_products(q, directions[slices[q], k : k + 1])(every_row) * derivative
+            )
+        if not np.all(np.isfinite(weights)):
+            raise LamlDerivativeError("a row weight of the Hessian's crossproduct is not finite")
+        crosses[k] = grouped_curvature(layout, weights.T, factors=factors)
+    return crosses
+
+
+def _absolute_contraction(
+    tables: BinnedRows,
+    directions: NDArray[np.float64],
+    row_weights: NDArray[np.float64],
+    slices: tuple[slice, ...],
+    chunk: int,
+) -> NDArray[np.float64]:
+    """``sum_q |X_q directions|' row_weights[:, q]``; all-zero weights read no row."""
+    total = np.zeros(directions.shape[1], dtype=np.float64)
+    if not np.any(row_weights):
+        return total
+    for q, block in enumerate(slices):
+        products = tables.row_products(q, directions[block])
+        for start in range(0, tables.n, chunk):
+            rows = slice(start, min(start + chunk, tables.n))
+            total += np.abs(products(rows)).T @ row_weights[rows, q]
+    return total
+
+
 def _leverage_blocks(
     matrices: tuple[PredictorMatrix, ...],
     slices: tuple[slice, ...],
     inverse: NDArray[np.float64],
+    tables: BinnedRows | None = None,
 ) -> NDArray[np.float64]:
     """``G_i = X_i H^-1 X_i^T`` for every row, packed ``(n, K(K+1)/2)``."""
+    blocks = None if tables is None else tables.leverages(inverse, slices)
+    if blocks is not None:
+        return blocks
     k_parameters = len(matrices)
     pairs = packed_pairs(k_parameters)
     blocks = np.empty((matrices[0].shape[0], len(pairs)), dtype=np.float64)
@@ -427,6 +480,11 @@ class _AnalyticFirst:
     axes: tuple[_CertifiedRows, ...]
 
 
+def _no_error(values: NDArray[np.float64]) -> NDArray[np.float64]:
+    """A closed form's certificate: zero on every row, a read-only view holding no memory."""
+    return np.broadcast_to(np.float64(0.0), values.shape)
+
+
 def _analytic_first_derivative(
     family: DistributionalFamily,
     y: NDArray,
@@ -466,7 +524,7 @@ def _analytic_first_derivative(
         if values.shape != expected or not np.all(np.isfinite(values)):
             raise LamlDerivativeError("family returned an invalid curvature direction")
         if certificate is None:
-            return values, np.zeros_like(values)
+            return values, _no_error(values)
         if (
             certificate.shape != expected
             or not np.all(np.isfinite(certificate))
@@ -488,16 +546,20 @@ def _analytic_first_derivative(
                 values, certificate = derivative(y, eta, axis_units(chunk), likelihood_plan)
             else:
                 values = np.empty((k_parameters, n_observations, channels), dtype=np.float64)
-                certificate = np.empty_like(values)
+                certificate = _no_error(values)
                 units = axis_units(chunk)
                 for start in range(0, n_observations, chunk):
                     stop = min(start + chunk, n_observations)
                     if stop - start != chunk:
                         units = axis_units(stop - start)
                     plan_rows = likelihood_plan.take(np.arange(start, stop, dtype=np.intp))
-                    values[:, start:stop], certificate[:, start:stop] = derivative(
+                    values[:, start:stop], row_certificate = derivative(
                         y[start:stop], eta[start:stop], units, plan_rows
                     )
+                    if np.any(row_certificate):
+                        if not certificate.flags.writeable:
+                            certificate = np.zeros_like(values)
+                        certificate[:, start:stop] = row_certificate
             axes = [(values[q], certificate[q]) for q in range(k_parameters)]
         else:
             axes = []
@@ -534,10 +596,12 @@ def _analytic_second_derivatives(
 ):
     """The family's analytic second derivatives of the curvature along every axis pair.
 
-    One stacked call over the ``K(K+1)/2`` pairs; ``step`` is the differenced
-    pass's step, used as a near-kink certificate's reach. Returns
-    ``(D2, C2)`` like :func:`_second_derivatives`, or ``None`` (the caller
-    then differences) when the family cannot supply them.
+    Stacked over the ``K(K+1)/2`` pairs, a family with
+    ``stacked_curvature_directions`` in blocks of ``STACKED_ROW_CHUNK`` rows so
+    that its scratch is bounded by the block; ``step`` is the differenced pass's
+    step, used as a near-kink certificate's reach. Returns ``(D2, C2)`` like
+    :func:`_second_derivatives`, or ``None`` (the caller then differences) when
+    the family cannot supply them.
     """
     if not isinstance(
         family,
@@ -552,26 +616,42 @@ def _analytic_second_derivatives(
     for index, (q, r) in enumerate(pairs):
         first[index, 0, q] = 1.0
         second[index, 0, r] = 1.0
-    try:
-        analytic = analytic_curvature_second_direction(
-            family, y, eta, first, second, links, likelihood_plan, step=step
+    stacked = getattr(family, "stacked_curvature_directions", False) is True
+    chunk = min(curvature_kernels.STACKED_ROW_CHUNK, n_observations) if stacked else n_observations
+    channels = k_parameters * (k_parameters + 1) // 2
+    values = np.empty((len(pairs), n_observations, channels), dtype=np.float64)
+    certificate = _no_error(values)
+    for start in range(0, n_observations, chunk):
+        stop = min(start + chunk, n_observations)
+        plan_rows = (
+            likelihood_plan
+            if chunk == n_observations
+            else likelihood_plan.take(np.arange(start, stop, dtype=np.intp))
         )
-    except (TypeError, ValueError, FloatingPointError, OverflowError):
-        return None
-    if analytic is None:
-        return None
-    values, certificate = analytic
-    expected = (len(pairs), n_observations, k_parameters * (k_parameters + 1) // 2)
-    if values.shape != expected or not np.all(np.isfinite(values)):
-        return None
-    if certificate is None:
-        certificate = np.zeros_like(values)
-    elif (
-        certificate.shape != expected
-        or not np.all(np.isfinite(certificate))
-        or np.any(certificate < 0.0)
-    ):
-        return None
+        try:
+            analytic = analytic_curvature_second_direction(
+                family, y[start:stop], eta[start:stop], first, second, links, plan_rows, step=step
+            )
+        except (TypeError, ValueError, FloatingPointError, OverflowError):
+            return None
+        if analytic is None:
+            return None
+        row_values, row_certificate = analytic
+        expected = (len(pairs), stop - start, channels)
+        if row_values.shape != expected or not np.all(np.isfinite(row_values)):
+            return None
+        values[:, start:stop] = row_values
+        if row_certificate is None:
+            continue
+        if (
+            row_certificate.shape != expected
+            or not np.all(np.isfinite(row_certificate))
+            or np.any(row_certificate < 0.0)
+        ):
+            return None
+        if not certificate.flags.writeable:
+            certificate = np.zeros_like(values)
+        certificate[:, start:stop] = row_certificate
     return (
         {pair: values[index] for index, pair in enumerate(pairs)},
         {pair: certificate[index] for index, pair in enumerate(pairs)},
@@ -628,6 +708,8 @@ class _GradientPass:
     lambdas: dict[str, float]
     step: float
     source_matrices: tuple[object, ...]
+    layout: StackedLayout
+    tables: BinnedRows | None
     estimated: tuple[EFSComponentState, ...]
     rank_hessian: dict[tuple[str, str], float]
     penalty_hessian_error: NDArray[np.float64]
@@ -821,7 +903,7 @@ def _gradient_pass(
     beta_k = [-(inverse @ (lambda_values[k] * penalty_beta[k])) for k in range(count)]
     coefficient_directions = np.column_stack(beta_k)
     weights = _packed_weights(k_parameters)
-    weighted_blocks = _leverage_blocks(matrices, slices, inverse) * weights
+    weighted_blocks = _leverage_blocks(matrices, slices, inverse, tables) * weights
     absolute_weighted_blocks = np.abs(weighted_blocks)
     diagonal_channels = [
         channel for channel, (left, right) in enumerate(packed_pairs(k_parameters)) if left == right
@@ -841,13 +923,22 @@ def _gradient_pass(
     third_vector = np.zeros(width, dtype=np.float64)
     gradient_certificate = np.zeros(count, dtype=np.float64)
     chunk = matrix_row_chunk(matrices, _ROW_CHUNK)
-    for start in range(0, n_observations, chunk):
-        rows = slice(start, min(start + chunk, n_observations))
-        for q in range(k_parameters):
-            matrix = matrices[q][rows]
-            third_vector[slices[q]] += matrix.T @ first_leverage[rows, q]
-            directions = matrix @ coefficient_directions[slices[q]]
-            gradient_certificate += np.abs(directions).T @ certificate_leverage[rows, q]
+    if tables is None:
+        for start in range(0, n_observations, chunk):
+            rows = slice(start, min(start + chunk, n_observations))
+            for q in range(k_parameters):
+                matrix = matrices[q][rows]
+                third_vector[slices[q]] += matrix.T @ first_leverage[rows, q]
+                directions = matrix @ coefficient_directions[slices[q]]
+                gradient_certificate += np.abs(directions).T @ certificate_leverage[rows, q]
+    else:
+        if not np.all(np.isfinite(first_leverage)):
+            raise LamlDerivativeError("a row contraction of the third derivative is not finite")
+        for q, plan in enumerate(_grouped_predictor_plans(layout)):
+            third_vector[slices[q]] = plan.score(first_leverage[:, q])
+        gradient_certificate = _absolute_contraction(
+            tables, coefficient_directions, certificate_leverage, slices, chunk
+        )
     fs_gradient = 0.5 * quadratic + 0.5 * trace - 0.5 * ranks
     gradient = fs_gradient + 0.5 * (third_vector @ coefficient_directions)
     gradient_certificate *= 0.5
@@ -902,6 +993,8 @@ def _gradient_pass(
         lambdas=dict(lambdas),
         step=step,
         source_matrices=tuple(dense_matrices),
+        layout=layout,
+        tables=tables,
         estimated=estimated,
         rank_hessian=rank_hessian,
         penalty_hessian_error=penalty_hessian_error,
@@ -994,14 +1087,28 @@ def _hessian_pass(gradient_pass: _GradientPass, *, reused: bool) -> LamlDerivati
     fourth_trace = np.zeros((count, count), dtype=np.float64)
     fourth_certificate = np.zeros((count, count), dtype=np.float64)
     chunk = matrix_row_chunk(matrices, _ROW_CHUNK)
+    products = (
+        None
+        if p.tables is None
+        else [
+            p.tables.row_products(q, p.coefficient_directions[slices[q]])
+            for q in range(k_parameters)
+        ]
+    )
     for start in range(0, n_observations, chunk):
         rows = slice(start, min(start + chunk, n_observations))
-        local = tuple(matrix[rows] for matrix in matrices)
-        directions = [local[q] @ p.coefficient_directions[slices[q]] for q in range(k_parameters)]
+        if products is None:
+            local = tuple(matrix[rows] for matrix in matrices)
+            directions = [
+                local[q] @ p.coefficient_directions[slices[q]] for q in range(k_parameters)
+            ]
+            packed = np.zeros((rows.stop - rows.start, count, channels), dtype=np.float64)
+        else:
+            directions = [products[q](rows) for q in range(k_parameters)]
         absolute_directions = [np.abs(direction) for direction in directions]
-        packed = np.zeros((rows.stop - rows.start, count, channels), dtype=np.float64)
         for q in range(k_parameters):
-            packed += directions[q][:, :, None] * first[q][rows, None, :]
+            if products is None:
+                packed += directions[q][:, :, None] * first[q][rows, None, :]
             certificate_weight = (first_certificate[q][rows] @ weights) * leverage_trace[rows]
             hessian_error_norm += absolute_directions[q].T @ certificate_weight
             for r in range(k_parameters):
@@ -1014,7 +1121,10 @@ def _hessian_pass(gradient_pass: _GradientPass, *, reused: bool) -> LamlDerivati
                 fourth_certificate += (
                     absolute_directions[q] * second_certificate_leverage[:, None]
                 ).T @ absolute_directions[r]
-        crosses += _cross_all(local, slices, packed, width)
+        if products is None:
+            crosses += _cross_all(local, slices, packed, width)
+    if products is not None:
+        crosses = _binned_crosses(p.layout, p.tables, first, p.coefficient_directions, slices)
     hessians = [embedded[k] + crosses[k] for k in range(count)]
     products = [inverse @ hessians[k] for k in range(count)]
 
@@ -1065,14 +1175,19 @@ def _hessian_pass(gradient_pass: _GradientPass, *, reused: bool) -> LamlDerivati
         right_hand_sides[:, index] = right_hand_side
     pair_directions = -(inverse @ right_hand_sides)
     third_values = third_vector @ pair_directions
-    third_certificate = np.zeros(len(pairs), dtype=np.float64)
-    for start in range(0, n_observations, chunk):
-        rows = slice(start, min(start + chunk, n_observations))
-        for q in range(k_parameters):
-            third_certificate += (
-                np.abs(matrices[q][rows] @ pair_directions[slices[q]]).T
-                @ certificate_leverage[rows, q]
-            )
+    if p.tables is not None:
+        third_certificate = _absolute_contraction(
+            p.tables, pair_directions, certificate_leverage, slices, chunk
+        )
+    else:
+        third_certificate = np.zeros(len(pairs), dtype=np.float64)
+        for start in range(0, n_observations, chunk):
+            rows = slice(start, min(start + chunk, n_observations))
+            for q in range(k_parameters):
+                third_certificate += (
+                    np.abs(matrices[q][rows] @ pair_directions[slices[q]]).T
+                    @ certificate_leverage[rows, q]
+                )
     hessian = np.empty((count, count))
     hessian_certificate = np.empty((count, count))
     for index, (k, ell) in enumerate(pairs):
