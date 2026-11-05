@@ -11,19 +11,46 @@ import weakref
 import numpy as np
 import pytest
 
+from superglm import (
+    GeneralizedGammaLSS,
+    GeneralizedParetoLSS,
+    LogNormalLS,
+    NegativeBinomialLS,
+    TweedieLSS,
+    TwoPieceLogNormalLSS,
+    TwoPieceNormalLSS,
+)
 from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 
+_FAMILIES = (
+    GaussianLS,
+    GammaLS,
+    GeneralizedGammaLSS,
+    GeneralizedParetoLSS,
+    LogNormalLS,
+    NegativeBinomialLS,
+    TweedieLSS,
+    TwoPieceLogNormalLSS,
+    TwoPieceNormalLSS,
+)
+# A value each family's natural parameter accepts.
+_THETA = {"shape": 0.4, "skew": 0.1, "power": 1.5, "xi": 0.1}
+
 
 def _problem(family_type=GaussianLS, semantics="prior", n=80):
     family = family_type()
-    values = np.linspace(0.8, 1.2, n) if semantics == "prior" else np.arange(n) % 3 + 1
+    # A family with no reproductive law takes unit prior weights only.
+    prior = np.linspace(0.8, 1.2, n) if family_type in (GaussianLS, GammaLS) else np.ones(n)
+    values = prior if semantics == "prior" else np.arange(n) % 3 + 1
     weights = resolve_likelihood_weights(
         values, n_observations=n, contract=WeightContract(semantics)
     )
     y = np.linspace(1.0, 2.0, n)
+    if family_type is NegativeBinomialLS:
+        y = np.round(y)
     return family, family.bind_likelihood(y, weights, COMPLETE_OBSERVATION)
 
 
@@ -32,7 +59,7 @@ def _build(family, plan, **kwargs):
     return module.build_likelihood_cache(family, plan, **kwargs)
 
 
-@pytest.mark.parametrize("family_type", [GaussianLS, GammaLS])
+@pytest.mark.parametrize("family_type", _FAMILIES, ids=lambda family: family.__name__)
 @pytest.mark.parametrize("semantics", ["prior", "frequency"])
 def test_repeated_ranges_call_legacy_take_once(family_type, semantics, monkeypatch):
     family, plan = _problem(family_type, semantics)
@@ -55,7 +82,7 @@ def test_repeated_ranges_call_legacy_take_once(family_type, semantics, monkeypat
     assert cache.hits == 1 and cache.misses == 1
 
 
-@pytest.mark.parametrize("family_type", [GaussianLS, GammaLS])
+@pytest.mark.parametrize("family_type", _FAMILIES, ids=lambda family: family.__name__)
 @pytest.mark.parametrize("semantics", ["prior", "frequency"])
 def test_cached_child_is_numerically_the_legacy_prepared_likelihood(family_type, semantics):
     family, plan = _problem(family_type, semantics)
@@ -69,7 +96,14 @@ def test_cached_child_is_numerically_the_legacy_prepared_likelihood(family_type,
             getattr(actual.weights, name), getattr(expected.weights, name)
         )
     y = np.linspace(1.0, 2.0, 80)[indices]
-    theta = np.column_stack((np.full(len(indices), 1.4), np.full(len(indices), 0.6)))
+    if family_type is NegativeBinomialLS:
+        y = np.round(y)
+    theta = np.column_stack(
+        [
+            np.full(len(indices), _THETA.get(spec.name, 1.4 - 0.8 * position))
+            for position, spec in enumerate(family.parameters)
+        ]
+    )
     reference = family.evaluate_natural(y, theta, expected)
     evaluated = family.evaluate_natural(y, theta, actual)
     for name in (

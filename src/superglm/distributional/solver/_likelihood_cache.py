@@ -16,6 +16,25 @@ import numpy as np
 
 from superglm.distributional.families.gamma import GammaLikelihoodPlan, GammaLS
 from superglm.distributional.families.gaussian import GaussianLikelihoodPlan, GaussianLS
+from superglm.distributional.families.generalized_gamma import (
+    GeneralizedGammaLikelihoodPlan,
+    GeneralizedGammaLSS,
+)
+from superglm.distributional.families.generalized_pareto import (
+    GeneralizedParetoLikelihoodPlan,
+    GeneralizedParetoLSS,
+)
+from superglm.distributional.families.log_normal import LogNormalLikelihoodPlan, LogNormalLS
+from superglm.distributional.families.negative_binomial import (
+    NegativeBinomialLikelihoodPlan,
+    NegativeBinomialLS,
+)
+from superglm.distributional.families.tweedie import TweedieLikelihoodPlan, TweedieLSS
+from superglm.distributional.families.two_piece import (
+    TwoPieceLikelihoodPlan,
+    TwoPieceLogNormalLSS,
+    TwoPieceNormalLSS,
+)
 from superglm.distributional.family import (
     ObservationContract,
     _likelihood_reuse_contract,
@@ -28,11 +47,27 @@ from superglm.distributional.weights import (
     WeightProvenance,
 )
 
-_DATACLASSES = (
+_BUILTIN_FAMILIES = (
     GaussianLS,
     GammaLS,
+    GeneralizedGammaLSS,
+    GeneralizedParetoLSS,
+    LogNormalLS,
+    NegativeBinomialLS,
+    TweedieLSS,
+    TwoPieceLogNormalLSS,
+    TwoPieceNormalLSS,
+)
+_DATACLASSES = (
+    *_BUILTIN_FAMILIES,
     GaussianLikelihoodPlan,
     GammaLikelihoodPlan,
+    GeneralizedGammaLikelihoodPlan,
+    GeneralizedParetoLikelihoodPlan,
+    LogNormalLikelihoodPlan,
+    NegativeBinomialLikelihoodPlan,
+    TweedieLikelihoodPlan,
+    TwoPieceLikelihoodPlan,
     ResolvedLikelihoodWeights,
     WeightProvenance,
     WeightContract,
@@ -217,15 +252,15 @@ def _is_builtin_gaussian_gamma(family: object) -> bool:
 def _eligible(family, plan):
     contract = _likelihood_reuse_contract(family)
     return (
-        _is_builtin_gaussian_gamma(family)
+        type(family) in _BUILTIN_FAMILIES
         and contract is not None
-        and contract.deterministic_chunk_replay
         and type(plan) is contract.plan_type
         and _prepared_field_modes(plan, contract) is not None
         and type(plan.weights) is ResolvedLikelihoodWeights
         and type(plan.weights.provenance) is WeightProvenance
         and type(plan.weights.provenance.contract) is WeightContract
-        and type(plan.observation) is ObservationContract
+        # Tweedie's and the negative binomial's plans hold no censoring contract.
+        and (not hasattr(plan, "observation") or type(plan.observation) is ObservationContract)
     )
 
 
