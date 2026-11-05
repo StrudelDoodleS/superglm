@@ -486,9 +486,10 @@ def fit_distributional_efs(
         terminal_evidence = state.evidence
         if stalled:
             endgame_outcome = None
-            if current_face is None:
+            if current_face is None and not terminal_evidence.unresolved_upper_bound:
                 return _result(converged=True, reason="practical_plateau")
-            # Only the strict stop revalidates a face, so a face's search carries on.
+            # Only the strict stop revalidates a face, and a stall decides nothing about
+            # a nominated cap, so both carry on with the finish spent.
             _resume_fellner_schall()
             return None
         if outcome.kind == "derivative_unavailable":
@@ -680,7 +681,7 @@ def fit_distributional_efs(
                     _reuse_session=reuse_session,
                 )
             if promotion is None:
-                if outer_config.outer == "efs+newton" and pending_cap is None:
+                if outer_config.outer != "efs" and pending_cap is None:
                     if _endgame_budget() > 0 and estimated_names:
                         # The FS proposal nominated this cap; the exact gradient decides
                         # before a refusal is recorded (these assessment fits are dropped).
@@ -1492,7 +1493,7 @@ def fit_distributional_efs(
         # A finite profile can also settle while a penalty continues moving
         # outward. Require substantial accepted probes before this policy may
         # preempt the next cap or endpoint decision; retain the raw pressure.
-        if (
+        outward_plateau = (
             outer_config.practical_convergence
             and current_face is None
             and terminal_evidence.maximum > outer_config.tolerance
@@ -1510,22 +1511,29 @@ def fit_distributional_efs(
                 },
                 config=outer_config,
             )
-        ):
-            return _result(converged=True, reason="practical_plateau")
+        )
         # A practical plateau is an interior stop of the components off the active
         # face: while one sits at the cap with outward pressure or is a working
-        # infinity, the top of the loop decides (promote an exact face, or refuse
-        # with a named reason). A promotion restarts the plateau's count.
+        # infinity, an outward plateau stops here and otherwise the top of the loop
+        # decides (promote an exact face, or refuse with a named reason). A promotion
+        # restarts the plateau's count. Off the cap, either plateau hands to a finish
+        # where one is available, so which of the two a fit meets first does not
+        # decide its outcome.
+        interior = (
+            not terminal_evidence.unresolved_upper_bound and not terminal_evidence.working_infinity
+        )
+        finishes = _plateau_finishes() and _endgame_budget() > 0
+        if outward_plateau and not (finishes and interior):
+            return _result(converged=True, reason="practical_plateau")
         if (
             outer_config.practical_convergence
-            and (current_face is None or (_plateau_finishes() and _endgame_budget() > 0))
-            and practical_run >= outer_config.plateau_iterations
+            and (current_face is None or finishes)
+            and (outward_plateau or practical_run >= outer_config.plateau_iterations)
             and terminal_evidence.maximum > outer_config.tolerance
-            and not terminal_evidence.unresolved_upper_bound
-            and not terminal_evidence.working_infinity
+            and interior
         ):
             if _endgame_budget() > 0 and (
-                _plateau_finishes()
+                finishes
                 or should_hand_off(
                     "practical_plateau",
                     max_accepted_step=max_accepted_step,

@@ -598,6 +598,8 @@ class TweedieLSS(TweediePredictors):
 
     # Its curvature directions take stacked (m, n, K) directions on one state evaluation.
     stacked_curvature_directions: ClassVar[bool] = True
+    # The compiled row kernels run on the pool, so the chunk stream stays on one thread.
+    pools_rows: ClassVar[bool] = True
 
     power_lower: float = 1.05
     power_upper: float = 1.95

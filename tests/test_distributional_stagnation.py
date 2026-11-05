@@ -148,9 +148,81 @@ def test_unshifted_resolution_limited_identical_step_keeps_certificate(
     assert result.score_relative > result.config.tolerance
 
 
-@pytest.mark.parametrize(
-    "case", ["certified", "material_score", "shifted", "score_only", "invalid_trials"]
-)
+def _one_ulp_noise_problem(monkeypatch: pytest.MonkeyPatch):
+    """A correctable score whose every trial objective reads one ulp worse."""
+    family, _, layout, face, _, _, config, penalty = _no_op_problem()
+    response = np.array([-1.0, 0.0, 1.0])
+    plan = family.bind_likelihood(response, resolved_prior(np.ones(3)), COMPLETE_OBSERVATION)
+    initial = face.project(np.array([4e-9, 0, 0, 0]))
+    real_evaluate = solver_module._evaluate_state
+    objective = {}
+
+    def one_ulp_worse_trial(context, coefficients, **kwargs):
+        state = real_evaluate(context, coefficients, **kwargs)
+        assert state is not None
+        if np.array_equal(coefficients, initial):
+            objective["initial"] = state.penalized_optimizing_log_likelihood
+            return state
+        return replace(
+            state, penalized_optimizing_log_likelihood=np.nextafter(objective["initial"], -np.inf)
+        )
+
+    monkeypatch.setattr(solver_module, "_evaluate_state", one_ulp_worse_trial)
+
+    def fit():
+        return solver_module._fit_dense_fixed_lambda_score_only(
+            family,
+            layout,
+            response,
+            plan,
+            penalty,
+            initial=initial,
+            config=replace(config, tolerance=1e-12, max_iterations=8),
+            coefficient_face=face,
+        )
+
+    return fit, initial
+
+
+def test_a_correction_the_objective_cannot_see_is_judged_on_the_score(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kills letting objective round-off refuse a Newton correction that fixes the score."""
+    fit, initial = _one_ulp_noise_problem(monkeypatch)
+    result = fit()
+
+    assert result.converged is True
+    assert result.convergence_reason == "score"
+    assert result.score_relative <= result.config.tolerance
+    assert not np.array_equal(result.coefficients, initial)
+
+
+@pytest.mark.parametrize(("factor", "accepted"), [(0.75, False), (0.25, True)])
+def test_refinement_continues_only_while_the_score_halves(
+    monkeypatch: pytest.MonkeyPatch, factor: float, accepted: bool
+) -> None:
+    """Kills continuing on any decrease, and refusing a correction that halved the score."""
+    fit, initial = _one_ulp_noise_problem(monkeypatch)
+    real_geometry = solver_module._measured_geometry
+    first_score = []
+
+    def scaled_score(context, state, source, recorder):
+        geometry = real_geometry(context, state, source, recorder)
+        if np.array_equal(state.coefficients, initial):
+            first_score.append(geometry.score_penalized)
+            return geometry
+        return replace(geometry, score_penalized=factor * first_score[0])
+
+    monkeypatch.setattr(solver_module, "_measured_geometry", scaled_score)
+    result = fit()
+
+    assert result.converged is True
+    assert result.convergence_reason == "resolution_limited_stationarity"
+    assert result.iterations == int(accepted)
+    assert np.array_equal(result.coefficients, initial) is (not accepted)
+
+
+@pytest.mark.parametrize("case", ["certified", "material_score", "shifted", "invalid_trials"])
 def test_exhausted_distinct_trials_still_require_stationarity_certificate(
     monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
@@ -190,12 +262,7 @@ def test_exhausted_distinct_trials_still_require_stationarity_certificate(
             return replace(original_direction(*args, **kwargs), levenberg_shift=1.0)
 
         monkeypatch.setattr(solver_module, "_solve_coefficient_direction", shifted_direction)
-    fit = (
-        solver_module._fit_dense_fixed_lambda_score_only
-        if case == "score_only"
-        else fit_dense_fixed_lambda
-    )
-    result = fit(
+    result = fit_dense_fixed_lambda(
         family,
         layout,
         response,

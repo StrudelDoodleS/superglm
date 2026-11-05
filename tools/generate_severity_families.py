@@ -722,7 +722,12 @@ def _callee_digest(dispatchers) -> str:
 _CALLEE_LINE = re.compile(r'^_CALLEE_DIGEST = "[^"]*"$', re.MULTILINE)
 # Kernel modules outside ``_declared`` that call compiled functions of another
 # file: each carries the digest of those it imports, so editing one recompiles it.
-PRIMITIVE_CALLERS = ("_incomplete_gamma", "_tweedie_numba", "_gg_log_tail")
+PRIMITIVE_CALLERS = (
+    "_incomplete_gamma",
+    "_tweedie_numba",
+    "_gg_log_tail",
+    "_generalized_gamma_numba",
+)
 
 
 def stamped_callers() -> dict[Path, str]:

@@ -110,6 +110,7 @@ def test_kernels_import_no_distributional_module_or_contract() -> None:
             "kernels._response_tails",
             "kernels.generalized_gamma",
         },
+        "_generalized_gamma_numba.py": {"kernels._tweedie_numba"},
         "_gg_log_tail.py": {"kernels._gg_uniform_tail", "kernels._incomplete_gamma"},
         "_incomplete_gamma.py": {"kernels._severity_primitives"},
         "_tweedie_numba.py": {"kernels._fourth_generated", "kernels._severity_primitives"},
@@ -117,6 +118,7 @@ def test_kernels_import_no_distributional_module_or_contract() -> None:
         "gamma.py": {"kernels._common", *chain},
         "generalized_gamma.py": {
             "kernels._common",
+            "kernels._generalized_gamma_numba",
             "kernels._gg_log_tail",
             "kernels._gg_uniform_tail",
             "kernels.gamma",

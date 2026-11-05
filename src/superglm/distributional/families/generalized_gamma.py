@@ -240,6 +240,8 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
 
     # Its curvature directions take stacked (m, n, K) directions on one state evaluation.
     stacked_curvature_directions: ClassVar[bool] = True
+    # The compiled row kernels run on the pool, so the chunk stream stays on one thread.
+    pools_rows: ClassVar[bool] = True
 
     parametrisation: Parametrisation = "mean"
     scale_floor: float = 0.01

@@ -9,6 +9,7 @@ import numpy as np
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 from scipy import special
+from scipy.optimize import brentq
 
 from superglm._roundoff import EPS as _EPS
 from superglm.distributional.kernels._common import (
@@ -919,7 +920,7 @@ def _gamma_initial_target(
         multiplier = np.ones(len(response), dtype=_FLOAT) if semantics == "prior" else weights
         with np.errstate(over="raise", invalid="raise"):
             terms = multiplier * (a_residual + a_deviance)
-        target = math.fsum(terms)
+        target = math.fsum(terms.tolist())
     except (FloatingPointError, OverflowError, ValueError):
         return None
     return target if math.isfinite(target) else None
@@ -951,23 +952,24 @@ def _refine_gamma_initial_rho(
     if left_target is None or right_target is None or left_target >= 0.0 or right_target <= 0.0:
         return None
 
-    for _ in range(256):
-        tolerance = _INITIAL_RHO_RTOL * max(1.0, abs(left), abs(right))
-        if right - left <= tolerance:
-            return left + 0.5 * (right - left)
-        rho = left + 0.5 * (right - left)
-        if rho in (left, right):
-            return rho
-        target = _gamma_initial_target(response, mean, weights, semantics, rho)
-        if target is None:
-            return None
-        if target < 0.0:
-            left = rho
-        elif target > 0.0:
-            right = rho
-        else:
-            return rho
-    return None
+    # Brent's method starts by reading both ends of its bracket, known from the search above.
+    known = {left: left_target, right: right_target}
+
+    def target(rho: float) -> float:
+        value = known.pop(rho, None)
+        if value is None:
+            value = _gamma_initial_target(response, mean, weights, semantics, rho)
+        if value is None:
+            raise ArithmeticError("Gamma initial target is not representable here")
+        return value
+
+    # Each evaluation reads every row, and the target is smooth in rho, so this takes
+    # Brent's method (Brent 1973, ch. 4) over bisection.
+    tolerance = _INITIAL_RHO_RTOL * max(1.0, abs(left), abs(right))
+    try:
+        return float(brentq(target, left, right, xtol=tolerance, maxiter=256))
+    except (ArithmeticError, RuntimeError):
+        return None
 
 
 def _executable_gamma_initial_state(

@@ -6,12 +6,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import superglm.distributional.fit_state as fit_state_module
 import superglm.distributional.null_model as null_module
 from superglm._frame import as_eager_frame
 from superglm.distributional.families.gaussian import GaussianLS, LowerBoundedLogLink
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.inference import compute_joint_inference
 from superglm.distributional.layout import StackedLayout, build_stacked_layout
+from superglm.distributional.model import fit_dense_distributional
 from superglm.distributional.null_model import NullModelFitError, fit_joint_null_model
 from superglm.distributional.predictor import Predictor, compile_predictors
 from superglm.distributional.results.solver import DenseSolverConfig
@@ -86,6 +88,43 @@ def _likelihood_plan(
         contract=WeightContract(semantics=semantics),  # type: ignore[arg-type]
     )
     return family.bind_likelihood(response, resolved, COMPLETE_OBSERVATION)
+
+
+def test_a_null_fit_streams_its_rows_when_asked_and_keeps_its_answer() -> None:
+    """Kills a null fit that reads every row as one array after a fit that streamed them."""
+    frame, response, _ = _fixture()
+    family = GaussianLS(scale_floor=0.07)
+    layout = _source_layout(frame, family, np.ones(len(frame)))
+    plan = _likelihood_plan(family, response, np.ones(len(response)), semantics="prior")
+
+    whole = fit_joint_null_model(family, layout, response, likelihood_plan=plan)
+    streamed = fit_joint_null_model(family, layout, response, likelihood_plan=plan, chunk_size=16)
+
+    assert whole.result.resolved_chunk_size is None
+    assert streamed.result.resolved_chunk_size == 16
+    assert streamed.objective == pytest.approx(whole.objective, rel=1e-12)
+
+
+def test_a_fit_hands_its_chunk_size_to_its_null_fit(monkeypatch: pytest.MonkeyPatch) -> None:
+    frame, response, _ = _fixture()
+    seen = []
+    real_null_fit = fit_state_module.fit_joint_null_model
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs["chunk_size"])
+        return real_null_fit(*args, **kwargs)
+
+    monkeypatch.setattr(fit_state_module, "fit_joint_null_model", spy)
+    fit_dense_distributional(
+        frame,
+        response,
+        family=GaussianLS(scale_floor=0.07),
+        predictors=(Predictor("location", {"x": Numeric()}), Predictor("scale", {"z": Numeric()})),
+        weight_contract=WeightContract("prior"),
+        chunk_size=32,
+    )
+
+    assert seen == [32]
 
 
 def test_weighted_and_unweighted_null_fits_use_the_shared_joint_solver(

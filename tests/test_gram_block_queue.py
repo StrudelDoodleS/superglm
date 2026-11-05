@@ -379,7 +379,12 @@ def test_categorical_blocks_sum_their_levels_without_np_bincount(monkeypatch):
 
 def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
     from superglm._group_matrix import _group_matrix_support
-    from superglm.distributional.kernels import _negative_binomial_numba, _tweedie_numba
+    from superglm.distributional.kernels import (
+        _generalized_gamma_numba,
+        _negative_binomial_numba,
+        _tweedie_numba,
+    )
+    from superglm.distributional.solver import derivatives as chain_rule
     from superglm.features import interaction
     from superglm.reml import _leverage_rows
 
@@ -392,6 +397,8 @@ def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
         + _group_matrix_support._POOLED_SUPPORT_KERNELS
         + _tweedie_numba._POOLED_ROW_KERNELS
         + _negative_binomial_numba._POOLED_ROW_KERNELS
+        + _generalized_gamma_numba._POOLED_ROW_KERNELS
+        + chain_rule._POOLED_ROW_KERNELS
     )
     pooled = {id(kernel) for kernel in pooled_kernels}
     for kernel in pooled_kernels:
@@ -587,6 +594,54 @@ def test_workers_stop_at_the_total_over_the_largest_unsplit_block(monkeypatch):
             queue.run_block_tasks(tasks(split_largest), Cache(), profile, dispatch_bound=True)
         # Twelve units of work: a whole 8 caps two workers; split, the largest whole is 1.
         assert profile["block_pool_workers"] == expected
+
+
+def test_a_whole_pass_block_of_the_book_takes_the_pool(monkeypatch):
+    """The shape measured on the 678,007-row book: 78 row passes, a formation task of 18 row
+    visits and a score task of 13, fastest on about seven workers. Mutation check: charging a row
+    pass's dispatch in multiply-add units, ``2**20``, serialises it. The score task's own cost is
+    pinned by ``test_the_score_task_costs_its_row_passes_not_its_columns``."""
+
+    class Cache:
+        _batch = None
+        _profile = None
+
+        def worker_view(self, shared, profile, work_queue):
+            return self
+
+    monkeypatch.setattr(parallel, "pool_workers", lambda n_units, task_bytes: 16)
+    monkeypatch.setattr(parallel, "section_threads", lambda: 16)
+    n = 678_007
+    costs = [float(n)] * 78 + [18.0 * n, 13.0 * n]
+    tasks = [
+        BlockTask(index, cost, 1, lambda cache, profile: None, lambda value: None)
+        for index, cost in enumerate(costs)
+    ]
+    profile: dict = {}
+    queue.run_block_tasks(tasks, Cache(), profile, dispatch_bound=True, row_visits=True)
+    assert profile["block_pool_workers"] == 7
+
+
+def test_a_dense_gram_of_20000_rows_keeps_its_dispatch_in_multiply_adds(monkeypatch):
+    """Absolute costs, so the constant is pinned: 30 blocks of 1.8M multiply-adds run in under a
+    millisecond each and keep three workers. Mutation check: row-visit units allow 29."""
+
+    class Cache:
+        _batch = None
+        _profile = None
+
+        def worker_view(self, shared, profile, work_queue):
+            return self
+
+    monkeypatch.setattr(parallel, "pool_workers", lambda n_units, task_bytes: 32)
+    monkeypatch.setattr(parallel, "section_threads", lambda: 32)
+    tasks = [
+        BlockTask(index, 1.8e6, 1, lambda cache, profile: None, lambda value: None)
+        for index in range(30)
+    ]
+    profile: dict = {}
+    queue.run_block_tasks(tasks, Cache(), profile, dispatch_bound=True)
+    assert profile["block_pool_workers"] == 3
 
 
 def test_workers_stop_at_the_queue_cost_over_its_per_task_overhead(monkeypatch):

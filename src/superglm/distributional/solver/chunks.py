@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 import operator
+import threading
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Literal
@@ -29,6 +31,7 @@ from superglm._group_matrix._group_matrix_discretized import (
     SupportCompressedSSPGroupMatrix,
 )
 from superglm._group_matrix._group_matrix_range import group_range_matvec, group_row_range
+from superglm._parallel import parallel_config, pooled_for
 from superglm.distributional.family import (
     DistributionalFamily,
     ExpectedInformationFamily,
@@ -39,6 +42,7 @@ from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.solver._formation import FormationAccumulator
+from superglm.distributional.solver._likelihood_cache import _BUILTIN_FAMILIES
 from superglm.distributional.solver._ordinary_packing import predictor_panels
 from superglm.distributional.solver.assembly import (
     DenseJointGeometry,
@@ -69,15 +73,19 @@ CurvatureSource = Literal["observed", "fisher", "nearest_semidefinite"]
 AUTO_CHUNK_SELECTOR = "distributional-auto-v3"
 AUTO_CHUNK_MEMORY_BYTES = 8 * 1024 * 1024
 AUTO_CONTRACTION_MEMORY_BYTES = 64 * 1024 * 1024
-# The longest run of rows a contraction block of several chunks sums. Bin and
-# level sums run sequentially, so their rounding grows with the run; this keeps
-# it at the scale the automatic likelihood chunk sums over on a small layout
-# (about 2**15 rows). It does not reproduce the chunk stream's rounding on every
-# layout.
-AUTO_CONTRACTION_MAX_ROWS = 2**15
-# The longest automatic chunk of a layout that streams in ranges, which
-# contracts each chunk as it arrives (``layout_chunk_size``).
+# The most rows the likelihood rule gives an automatic chunk.
+AUTO_CHUNK_MAX_ROWS = 2**15
+# The longest automatic chunk of a layout that streams in ranges
+# (``layout_chunk_size``).
 AUTO_STREAM_MAX_ROWS = 2**16
+# A row chunk shorter than this stays on the calling thread: at about a microsecond
+# a row in array kernels, waking a worker costs a measurable share of its work.
+_MIN_POOLED_CHUNK_ROWS = 2**12
+# A chunk's transient arrays while its family kernels run, per row.
+_CHUNK_SCRATCH_ROW_BYTES = 1024
+# Array kernels hold the GIL between NumPy calls, so past a handful of workers they
+# wait on one another and run slower.
+_ARRAY_CHUNK_WORKERS = 8
 
 # Retained snapshots plus support vectors per pass; refresh uses bounded scratch.
 # No observation-sized predictions are retained here.
@@ -90,24 +98,39 @@ class _SupportPredictions:
     def __init__(self):
         self.entries = {}
         self.nbytes = 0
+        self._lock = threading.Lock()
 
     def __call__(self, group, beta):
         key = id(group)
         source = (group.B_unique, group.R_inv, beta)
-        entry = self.entries.get(key)
-        if entry is not None:
-            snapshots, values = entry
-            if all(np.array_equal(a, b) for a, b in zip(source, snapshots, strict=True)):
+
+        def held():
+            entry = self.entries.get(key)
+            if entry is not None and all(
+                np.array_equal(a, b) for a, b in zip(source, entry[0], strict=True)
+            ):
+                return entry[1]
+            return None
+
+        values = held()
+        if values is not None:
+            return values
+        # Row chunks may run on the pool: a miss is formed once, and a hit reads an
+        # entry that is never written after it is published.
+        with self._lock:
+            values = held()
+            if values is not None:
                 return values
-            self.nbytes -= sum(a.nbytes for a in snapshots) + values.nbytes
-            del self.entries[key]
-            del entry, snapshots, values
-        values = group.B_unique @ (group.R_inv @ beta)
-        size = sum(a.nbytes for a in source) + values.nbytes
-        if size <= _SUPPORT_PREDICTION_BYTES - self.nbytes:
-            self.entries[key] = (tuple(a.copy() for a in source), values)
-            self.nbytes += size
-        return values
+            entry = self.entries.pop(key, None)
+            if entry is not None:
+                self.nbytes -= sum(a.nbytes for a in entry[0]) + entry[1].nbytes
+                del entry
+            values = group.B_unique @ (group.R_inv @ beta)
+            size = sum(a.nbytes for a in source) + values.nbytes
+            if size <= _SUPPORT_PREDICTION_BYTES - self.nbytes:
+                self.entries[key] = (tuple(a.copy() for a in source), values)
+                self.nbytes += size
+            return values
 
 
 def _support_range(group, rows, beta, support_predictions):
@@ -203,9 +226,8 @@ def resolve_chunk_size(
     """Resolve an explicit or memory-budgeted row bound.
 
     ``row_floats`` counts the floats a chunk's designs own per row, beyond the
-    likelihood's own channels. An automatic bound holds at most the
-    contraction row cap, so a chunk that contracts its own rows sums no
-    longer runs than a block.
+    likelihood's own channels. An automatic bound holds at most
+    ``AUTO_CHUNK_MAX_ROWS`` rows.
     """
     rows = _positive_integer(n_observations, name="n_observations")
     parameters = _positive_integer(k_parameters, name="k_parameters")
@@ -219,7 +241,7 @@ def resolve_chunk_size(
         raise ValueError("row_floats must be a non-negative integer")
     if chunk_size == "auto":
         budget_rows = AUTO_CHUNK_MEMORY_BYTES // (8 * _likelihood_row_floats(parameters, width))
-        return min(rows, AUTO_CONTRACTION_MAX_ROWS, max(1, int(budget_rows)))
+        return min(rows, AUTO_CHUNK_MAX_ROWS, max(1, int(budget_rows)))
     if isinstance(chunk_size, str):
         raise ValueError("chunk_size string must be 'auto'")
     return min(rows, _positive_integer(chunk_size, name="chunk_size"))
@@ -518,10 +540,50 @@ def _validate_chunk_inputs(
     return response, likelihood_plan, _validated_coefficients(layout, coefficients)
 
 
-def _take_likelihood_rows(plan, rows, likelihood_cache):
+def _take_likelihood_rows(plan, rows, likelihood_cache, lock):
     if likelihood_cache is None:
         return plan.take(rows.indices)
-    return likelihood_cache.take(plan, rows.indices, start=rows.start, stop=rows.stop)
+    with lock:
+        return likelihood_cache.take(plan, rows.indices, start=rows.start, stop=rows.stop)
+
+
+def _evaluated_chunks(family, evaluate, n_observations, chunk_rows, *, held_floats):
+    """``[evaluate(rows), ...]`` over the row chunks, yielded in row order.
+
+    Each row's likelihood is its own term, so a package family whose kernels are
+    array code runs its chunks on the pool. The chunks depend only on the row count
+    and are reduced in row order, so the bits are the same at every worker count (Li
+    and Wood 2020, sec. 4). A family whose kernels are compiled row loops pools their
+    rows instead; there is one level of parallelism either way. A chunk too short to
+    repay waking a worker stays on the calling thread, and so does a family from
+    outside the package, whose ``evaluate_natural`` never promised to be thread-safe.
+    ``held_floats`` is what a result holds per row: results wait for the consumer a
+    window at a time, within the contraction allowance.
+    """
+    chunks = iter_row_chunks(n_observations, chunk_rows)
+    if (
+        type(family) not in _BUILTIN_FAMILIES
+        or getattr(family, "pools_rows", False)
+        or chunk_rows < _MIN_POOLED_CHUNK_ROWS
+    ):
+        yield from map(evaluate, chunks)
+        return
+    window = max(1, AUTO_CONTRACTION_MEMORY_BYTES // (8 * held_floats * chunk_rows))
+
+    def evaluate_at_one_level(rows):
+        with parallel_config(n_jobs=1):
+            return evaluate(rows)
+
+    for group in itertools.batched(chunks, window):
+        results = pooled_for(
+            evaluate_at_one_level,
+            list(group),
+            _CHUNK_SCRATCH_ROW_BYTES * chunk_rows,
+            max_workers=_ARRAY_CHUNK_WORKERS,
+        )
+        for index, result in enumerate(results):
+            results[index] = None
+            yield result
 
 
 def iter_likelihood_chunks(
@@ -566,7 +628,9 @@ def iter_likelihood_chunks(
             PredictorExecutionPlan(state.design, state.intercept_index is not None)
             for state in layout.predictors
         )
-    for rows in iter_row_chunks(len(response), layout_chunk_size(layout, chunk_size)):
+    take_lock = threading.Lock()
+
+    def evaluate(rows: RowChunk) -> LikelihoodChunk:
         if range_plans is None:
             eta, plans = _predictor_chunk(
                 layout,
@@ -592,7 +656,7 @@ def iter_likelihood_chunks(
             if _recover_derivative_failure:
                 raise _TrialDerivativeError(str(exc), rows=rows, plans=plans) from exc
             raise
-        child_plan = _take_likelihood_rows(plan, rows, likelihood_cache)
+        child_plan = _take_likelihood_rows(plan, rows, likelihood_cache, take_lock)
         if len(child_plan.weights.values) != len(rows.indices):
             raise UnsupportedLikelihoodContractError(
                 "family likelihood slicing returned the wrong number of rows"
@@ -661,7 +725,7 @@ def iter_likelihood_chunks(
             if _recover_derivative_failure:
                 raise _TrialDerivativeError(str(exc), rows=rows, plans=plans) from exc
             raise
-        yield LikelihoodChunk(
+        return LikelihoodChunk(
             rows=rows,
             plans=plans,
             eta=eta,
@@ -671,6 +735,20 @@ def iter_likelihood_chunks(
             score_eta=transformed.score_eta,
             curvature_packed=curvature,
         )
+
+    k_parameters = len(layout.predictors)
+    # eta, theta, score, packed curvature and the two likelihood rows, and the
+    # predictor designs a chunk copied for itself.
+    held_floats = 3 * k_parameters + k_parameters * (k_parameters + 1) // 2 + 2
+    if range_plans is None:
+        held_floats += _chunk_design_floats(layout)
+    yield from _evaluated_chunks(
+        family,
+        evaluate,
+        len(response),
+        layout_chunk_size(layout, chunk_size),
+        held_floats=held_floats,
+    )
 
 
 def evaluate_chunked_log_likelihood(
@@ -691,10 +769,10 @@ def evaluate_chunked_log_likelihood(
         likelihood_plan,
         coefficients,
     )
-    optimizing_total = 0.0
-    carrier_total = 0.0
     support_predictions = _SupportPredictions()
-    for rows in iter_row_chunks(len(response), layout_chunk_size(layout, chunk_size)):
+    take_lock = threading.Lock()
+
+    def evaluate(rows: RowChunk) -> tuple[float, float]:
         eta = _predictor_values(
             layout,
             coefficient_values,
@@ -703,7 +781,7 @@ def evaluate_chunked_log_likelihood(
             support_predictions=support_predictions,
         )
         theta = _theta_chunk(layout, eta)
-        child_plan = _take_likelihood_rows(plan, rows, likelihood_cache)
+        child_plan = _take_likelihood_rows(plan, rows, likelihood_cache, take_lock)
         if len(child_plan.weights.values) != len(rows.indices):
             raise UnsupportedLikelihoodContractError(
                 "family likelihood slicing returned the wrong number of rows"
@@ -720,8 +798,22 @@ def evaluate_chunked_log_likelihood(
             )
         if natural.valid is not None and not np.all(natural.valid):
             raise ValueError("chunk contains an invalid likelihood state")
-        optimizing_total += float(np.sum(natural.optimizing_log_likelihood, dtype=np.float64))
-        carrier_total += float(np.sum(natural.parameter_independent_carrier, dtype=np.float64))
+        return (
+            float(np.sum(natural.optimizing_log_likelihood, dtype=np.float64)),
+            float(np.sum(natural.parameter_independent_carrier, dtype=np.float64)),
+        )
+
+    optimizing_total = 0.0
+    carrier_total = 0.0
+    for optimizing, carrier in _evaluated_chunks(
+        family,
+        evaluate,
+        len(response),
+        layout_chunk_size(layout, chunk_size),
+        held_floats=1,
+    ):
+        optimizing_total += optimizing
+        carrier_total += carrier
     return ChunkedLikelihoodSums(
         optimizing_log_likelihood=optimizing_total,
         parameter_independent_carrier=carrier_total,
@@ -1001,20 +1093,16 @@ def _channel_peak(*channels: NDArray[np.float64]) -> float:
 
 
 def contraction_block_rows(n_observations: int, row_bytes: int | None, chunk_rows: int) -> int:
-    """Rows contracted at once: whole likelihood chunks within the byte and row budgets.
+    """Rows contracted at once: whole likelihood chunks within the contraction allowance.
 
-    A block holds at least one chunk, so a single chunk larger than either
-    budget forms its own block, as does every chunk of an uncounted layout.
+    Binned crossproducts amortise over a block's rows (Li and Wood 2020,
+    Algorithm 1), so a block takes all the chunks the allowance holds. A block
+    holds at least one chunk, so a single chunk larger than the allowance forms
+    its own block, as does every chunk of an uncounted layout.
     """
     if row_bytes is None:
         return min(n_observations, chunk_rows)
-    chunks_per_block = max(
-        1,
-        min(
-            AUTO_CONTRACTION_MEMORY_BYTES // (row_bytes * chunk_rows),
-            AUTO_CONTRACTION_MAX_ROWS // chunk_rows,
-        ),
-    )
+    chunks_per_block = max(1, AUTO_CONTRACTION_MEMORY_BYTES // (row_bytes * chunk_rows))
     return min(n_observations, chunks_per_block * chunk_rows)
 
 
@@ -1036,28 +1124,29 @@ def assemble_chunked_geometry(
 
     Binned crossproducts amortise only when each bin-pair weight table is
     contracted once over many rows (Li and Wood 2020, Algorithm 1). The
-    chunks stream score and packed curvature channels into a bounded buffer,
-    and the group plans contract each block of chunks once; a block covers
-    every row up to the byte and row budgets. A pass of several blocks keeps
-    the by-bin and joint tables its pass tables admit, each block adding its
-    own, and contracts them once, within the allowance the block leaves.
+    chunks stream score and packed curvature channels into a buffer, and the
+    group plans contract each block of chunks once; a block covers every row
+    up to the allowance. A pass of several blocks keeps the by-bin and joint
+    tables its pass tables admit, each block adding its own, and contracts
+    them once, within the allowance the block leaves.
     """
     n_observations = layout.predictors[0].design.n
     k_parameters = len(layout.predictors)
     chunk_rows = layout_chunk_size(layout, chunk_size)
-    panels = predictor_panels(layout)
-    row_bytes = contraction_row_bytes(layout, panels)
+    row_bytes = contraction_row_bytes(layout)
     block_rows = contraction_block_rows(n_observations, row_bytes, chunk_rows)
-    if block_rows >= n_observations:
-        # A pass of one block forms each group pair's own product, as the
-        # unchunked assembly does; panels, like tables, serve passes of many.
-        panels = (None,) * k_parameters
-    packed = any(panel is not None for panel in panels)
-    table_budget = AUTO_CONTRACTION_MEMORY_BYTES - (row_bytes or 0) * block_rows
-    tables = PassTables(table_budget) if block_rows < n_observations and table_budget > 0 else None
     # A block of one chunk out of several contracts that chunk's rows as it
     # arrives, so nothing is buffered.
     per_chunk = block_rows <= chunk_rows < n_observations
+    # A block of many rows forms each group pair's own product, as the unchunked
+    # assembly does; panels, like tables, serve a pass of many short blocks.
+    panels = (None,) * k_parameters
+    if per_chunk:
+        panels = predictor_panels(layout)
+        row_bytes = contraction_row_bytes(layout, panels)
+    packed = any(panel is not None for panel in panels)
+    table_budget = AUTO_CONTRACTION_MEMORY_BYTES - (row_bytes or 0) * block_rows
+    tables = PassTables(table_budget) if block_rows < n_observations and table_budget > 0 else None
     buffered = 0 if per_chunk else block_rows
     score = np.empty((buffered, k_parameters), dtype=np.float64)
     # Channel-major, so each contracted channel is one contiguous row vector.

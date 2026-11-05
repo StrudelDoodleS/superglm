@@ -8,16 +8,23 @@ contract.
 from __future__ import annotations
 
 import operator
+from collections.abc import Callable
 from typing import Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
+
+from superglm._parallel import pooled_row_blocks
 
 WeightSemantics = Literal["prior", "frequency"]
 DerivativeOrder = Literal[0, 1, 2]
 FLOAT = np.float64
 
 _DERIVATIVE_ORDER_MESSAGE = "derivative_order must be an integer from zero through two"
+# Below this many rows a batch runs as one serial block; above it, blocks of
+# PARALLEL_BLOCK rows run on the worker pool.
+PARALLEL_MIN_ROWS = 5_000
+PARALLEL_BLOCK = 1024
 
 
 class _NumericalEvaluationError(ValueError):
@@ -100,11 +107,26 @@ def validated_derivative_order(value: object) -> DerivativeOrder:
     return order
 
 
+def pooled_rows(kernel: Callable[[int, int], tuple[int, int]], n_rows: int) -> tuple[int, int]:
+    """Run ``kernel(start, stop)`` over the rows: one block below ``PARALLEL_MIN_ROWS``,
+    else blocks of ``PARALLEL_BLOCK`` on the worker pool.  The first failure in
+    row order, ``(status, row)``, or ``(0, -1)``; status 0 is success."""
+    if n_rows < PARALLEL_MIN_ROWS:
+        return kernel(0, n_rows) if n_rows else (0, -1)
+    for status, row in pooled_row_blocks(kernel, n_rows, PARALLEL_BLOCK):
+        if status != 0:
+            return status, row
+    return 0, -1
+
+
 __all__ = [
     "FLOAT",
+    "PARALLEL_BLOCK",
+    "PARALLEL_MIN_ROWS",
     "DerivativeOrder",
     "WeightSemantics",
     "float64_vector",
+    "pooled_rows",
     "positive_weights",
     "readonly",
     "readonly_bool",

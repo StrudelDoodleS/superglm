@@ -19,7 +19,9 @@ from numpy.typing import NDArray
 import superglm.distributional.kernels._tweedie_numba as _compiled
 from superglm._parallel import pooled_row_blocks
 from superglm.distributional.kernels._common import (
+    PARALLEL_BLOCK,
     WeightSemantics,
+    pooled_rows,
     readonly,
     stacked_direction,
     validated_derivative_order,
@@ -31,10 +33,6 @@ _MIN_POWER = 1.05
 _MAX_POWER = 1.95
 _DEFAULT_MAX_TERMS = 100_000
 _DEFAULT_LOG_CUTOFF = 37.0
-# Below this many rows a batch runs as one serial block; above it, blocks of
-# _PARALLEL_BLOCK rows run on the worker pool.
-_PARALLEL_MIN_ROWS = 5_000
-_PARALLEL_BLOCK = 1024
 
 _RowsKernel = Callable[..., tuple[int, int]]
 _FillKernel = Callable[..., None]
@@ -281,18 +279,6 @@ def _raise_compiled_refusal(*, status: int, failing_row: int, max_terms: int) ->
 # cache) on first endgame use, not in ``superglm.warmup()``: few fits reach it.
 
 
-def _pooled_rows(kernel: Callable[[int, int], tuple[int, int]], n_rows: int) -> tuple[int, int]:
-    """Run ``kernel(start, stop)`` over the rows: one block below ``_PARALLEL_MIN_ROWS``,
-    else blocks of ``_PARALLEL_BLOCK`` on the worker pool.  The first failure in
-    row order, ``(status, row)``, or ``(KERNEL_OK, -1)``."""
-    if n_rows < _PARALLEL_MIN_ROWS:
-        return kernel(0, n_rows) if n_rows else (int(_compiled.KERNEL_OK), -1)
-    for status, row in pooled_row_blocks(kernel, n_rows, _PARALLEL_BLOCK):
-        if status != _compiled.KERNEL_OK:
-            return status, row
-    return int(_compiled.KERNEL_OK), -1
-
-
 def _first_failure(statuses: NDArray[np.int64]) -> tuple[int, int]:
     """``(status, row)`` of the first row whose status is not ``KERNEL_OK``, else ``(OK, -1)``."""
     failing = np.flatnonzero(statuses != _compiled.KERNEL_OK)
@@ -376,7 +362,7 @@ def evaluate_tweedie_rows(
     n_rows = len(normalized[0])
     values, scores, hessians, terms, valid = _batch_outputs(n_rows, order)
     weight_mode = 0 if semantics == "prior" else 1
-    status, failing_row = _pooled_rows(
+    status, failing_row = pooled_rows(
         lambda start, stop: _evaluate_tweedie_batch_rows(
             *normalized, weight_mode, order, native_max_terms, cutoff,
             start, stop, values, scores, hessians, terms,
@@ -458,7 +444,7 @@ def tweedie_hessian_direction(
             start, stop, result, statuses,
         ),
         n_rows,
-        _PARALLEL_BLOCK,
+        PARALLEL_BLOCK,
     )  # fmt: skip
     status, failing_row = _first_failure(statuses)
     if status != _compiled.KERNEL_OK:
@@ -511,7 +497,7 @@ def tweedie_natural_fourth(
             *normalized, weight_mode, native_max_terms, cutoff, start, stop, result, statuses
         ),
         n_rows,
-        _PARALLEL_BLOCK,
+        PARALLEL_BLOCK,
     )
     status, failing_row = _first_failure(statuses)
     if status != _compiled.KERNEL_OK:

@@ -26,7 +26,7 @@ from tests.test_distributional_endpoint_direction import (
 from tests.test_distributional_practical_stop import _preempt_fixture
 
 
-@pytest.mark.parametrize("outer", ["efs", "efs+newton"])
+@pytest.mark.parametrize("outer", ["efs", "efs+newton", "efs+finish"])
 @pytest.mark.parametrize("budget", [3, 4, 20])
 def test_outward_practical_plateau_can_finish_before_newton(monkeypatch, outer, budget):
     """A sustained finite plateau needs no remaining budget for an exact face.
@@ -171,6 +171,38 @@ def _assert_the_plateau_stood(smoothing, plain):
     assert smoothing.terminal_fit.eta is not None
 
 
+def test_the_outward_stop_and_the_interior_stop_reach_one_stationary_point(monkeypatch):
+    """Rounding can decide which of the two a fit meets first, so it must not decide the answer.
+    Mutation check: an outward stop with no finish publishes its plateau uncertified."""
+    interior, frame, response = _two_smooth_gaussian()
+    interior.fit_reml(frame, response)
+    calls = _spy_on_the_endgame(monkeypatch)
+    monkeypatch.setattr(loop, "_practical_outward_window", lambda **kwargs: True)
+    outward, _, _ = _two_smooth_gaussian()
+    outward.fit_reml(frame, response)
+
+    reference, smoothing = interior._require_fitted().smoothing, outward._require_fitted().smoothing
+    (call,) = calls
+    assert call["efs_config"].outer == "efs+newton"
+    assert smoothing.convergence_reason == reference.convergence_reason == "stationary"
+    assert smoothing.matched_certified
+    assert smoothing.objective == pytest.approx(reference.objective, abs=1e-6)
+
+
+def test_an_outward_stop_keeps_its_plateau_when_the_finish_stalls(monkeypatch):
+    calls = _spy_on_the_endgame(
+        monkeypatch, lambda outcome: dataclasses.replace(outcome, kind="gradient_unresolved")
+    )
+    monkeypatch.setattr(loop, "_practical_outward_window", lambda **kwargs: True)
+    model, frame, response = _two_smooth_gaussian()
+    model.fit_reml(frame, response)
+
+    smoothing = model._require_fitted().smoothing
+    assert len(calls) == 1
+    assert smoothing.convergence_reason == "practical_plateau"
+    assert not smoothing.matched_certified
+
+
 @pytest.mark.parametrize(
     "kind",
     ["gradient_unresolved", "max_iterations", "objective_rejected", "derivative_unavailable"],
@@ -225,7 +257,7 @@ def test_a_finish_that_moved_far_and_was_rejected_does_not_relabel_where_it_stal
     _assert_the_plateau_stood(fits[None], fits["efs"])
 
 
-def _forced_face_plateau_fit(monkeypatch, outcome):
+def _forced_face_plateau_fit(monkeypatch, outcome, outer="efs+finish"):
     calls = _spy_on_the_endgame(monkeypatch, outcome)
     frame, mu = _linear_x_fixture(seed=6)
     smoothing = fit_dense_distributional(
@@ -239,11 +271,48 @@ def _forced_face_plateau_fit(monkeypatch, outcome):
             max_iterations=150, tolerance=1.0e-9, coefficient_curvature="observed"
         ),
         efs_config=DistributionalEFSConfig(
-            max_iterations=40, tolerance=1.0e-12, practical_convergence=True, outer="efs+finish"
+            max_iterations=40, tolerance=1.0e-12, practical_convergence=True, outer=outer
         ),
         retain_rows=True,
     ).smoothing
     return calls, smoothing
+
+
+def _refuse_every_exact_face(monkeypatch):
+    monkeypatch.setattr(loop, "_try_joint_exact_face", lambda *args, **kwargs: (None, None))
+    monkeypatch.setattr(loop, "_try_exact_face", lambda *args, **kwargs: (None, None))
+
+
+@pytest.mark.parametrize("outer", ["efs+newton", "efs+finish"])
+def test_a_refused_cap_lets_the_exact_gradient_decide_first(monkeypatch, outer):
+    """A nomination is Fellner--Schall's proposal; the exact gradient answers it before a refusal.
+    Mutation check: a finish that returns at the refusal never reaches the endgame."""
+    _refuse_every_exact_face(monkeypatch)
+    calls, _ = _forced_face_plateau_fit(monkeypatch, lambda outcome: outcome, outer)
+
+    assert calls
+    assert calls[0]["state"].evidence.unresolved_upper_bound
+
+
+def test_plain_efs_has_no_gradient_to_answer_a_refused_cap(monkeypatch):
+    _refuse_every_exact_face(monkeypatch)
+    calls, smoothing = _forced_face_plateau_fit(monkeypatch, lambda outcome: outcome, "efs")
+
+    assert not calls
+    assert smoothing.convergence_reason == "lambda_cap_unresolved"
+
+
+def test_a_stall_on_a_refused_cap_stays_unresolved(monkeypatch):
+    """No plateau held and a stall decides nothing about the nominated cap.
+    Mutation check: returning the plateau's stop here reports convergence that never happened."""
+    _refuse_every_exact_face(monkeypatch)
+    calls, smoothing = _forced_face_plateau_fit(
+        monkeypatch, lambda outcome: dataclasses.replace(outcome, kind="max_iterations")
+    )
+
+    assert len(calls) == 1
+    assert smoothing.convergence_reason == "lambda_cap_unresolved"
+    assert not smoothing.converged
 
 
 def test_a_finish_on_a_face_that_cannot_reach_stationary_leaves_the_stop_to_the_strict_test(
@@ -313,13 +382,19 @@ def test_a_gradient_within_reml_tol_at_a_cap_is_not_cap_pressure(monkeypatch):
     assert verdicts == {"stop bar": "cap_pressure", "reml_tol": "stationary"}
 
 
-def test_a_finish_that_finds_cap_pressure_discloses_it(monkeypatch):
+@pytest.mark.parametrize("outward", [False, True], ids=["interior-stop", "outward-stop"])
+def test_a_finish_that_finds_cap_pressure_discloses_it(monkeypatch, outward):
+    """Both stops report the same outcome, so rounding between them cannot choose one.
+    Mutation check: an outward finish counting cap pressure as a stall keeps its plateau."""
+
     def at_the_cap(outcome):
         return dataclasses.replace(
             outcome, kind="cap_pressure", cap_pressure=("location:x#wiggle",)
         )
 
     calls = _spy_on_the_endgame(monkeypatch, at_the_cap)
+    if outward:
+        monkeypatch.setattr(loop, "_practical_outward_window", lambda **kwargs: True)
     model, frame, response = _two_smooth_gaussian()
     model.fit_reml(frame, response)
 

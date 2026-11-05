@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 
 import numpy as np
+from numba import njit
 from numpy.typing import NDArray
 
 from superglm.distributional.family import NaturalLikelihoodEvaluation
@@ -79,6 +80,30 @@ class PredictorLikelihoodEvaluation:
         object.__setattr__(self, "hessian_eta_packed", hessian)
         object.__setattr__(self, "curvature_packed", curvature)
         object.__setattr__(self, "valid", valid)
+
+    @classmethod
+    def _formed(
+        cls,
+        evaluation: NaturalLikelihoodEvaluation,
+        score_eta: NDArray[np.float64],
+        hessian_eta_packed: NDArray[np.float64],
+        curvature_packed: NDArray[np.float64],
+    ) -> PredictorLikelihoodEvaluation:
+        """Publish arrays the chain rule owns and has already checked, without a copy."""
+        result = object.__new__(cls)
+        fields = (
+            ("optimizing_log_likelihood", evaluation.optimizing_log_likelihood),
+            ("parameter_independent_carrier", evaluation.parameter_independent_carrier),
+            ("score_eta", score_eta),
+            ("hessian_eta_packed", hessian_eta_packed),
+            ("curvature_packed", curvature_packed),
+            ("valid", evaluation.valid),
+        )
+        for name, value in fields:
+            if value is not None:
+                value.setflags(write=False)
+            object.__setattr__(result, name, value)
+        return result
 
     @property
     def reported_log_likelihood(self) -> NDArray[np.float64]:
@@ -176,6 +201,53 @@ def _scaled_triple_product(
     return result
 
 
+@njit(cache=True, nogil=True)
+def _chain_rule_rows(
+    score, hessian, first, second, left, right, tiny, upper, score_eta, hessian_eta, curvature
+):  # pragma: no cover - compiled
+    """The chain rule's rows; ``False`` at the first product :func:`_scaled_triple_product` rescales.
+
+    Each channel multiplies and adds in the order ``transform_natural_derivatives``
+    writes, so a row this finishes holds the same bits as that route's.
+    """
+    for i in range(hessian.shape[0]):
+        for q in range(score.shape[1]):
+            value = score[i, q] * first[i, q]
+            if not np.isfinite(value):
+                return False
+            score_eta[i, q] = value
+        for c in range(hessian.shape[1]):
+            x = hessian[i, c]
+            y = first[i, left[c]]
+            z = first[i, right[c]]
+            partial = x * y
+            value = partial * z
+            if x != 0.0 and y != 0.0 and z != 0.0:
+                if not (tiny <= abs(partial) <= upper * 2.0 and tiny <= abs(value) < upper):
+                    return False
+            else:
+                value = 0.0
+            if left[c] == right[c]:
+                value = value + score[i, left[c]] * second[i, left[c]]
+                if not np.isfinite(value):
+                    return False
+            hessian_eta[i, c] = value
+            curvature[i, c] = -value
+    return True
+
+
+_POOLED_ROW_KERNELS = (_chain_rule_rows,)
+
+
+def _warmup_chain_rule() -> None:
+    """Compile the chain rule's rows for the operands a fit passes: empty, read-only family arrays."""
+    frozen = np.zeros((0, 0), dtype=np.float64)
+    frozen.setflags(write=False)
+    rows = np.zeros((0, 0), dtype=np.float64)
+    pairs = np.zeros(0, dtype=np.int64)
+    _chain_rule_rows(frozen, frozen, rows, rows, pairs, pairs, 1.0, 1.0, rows, rows, rows)
+
+
 def transform_natural_derivatives(
     evaluation: NaturalLikelihoodEvaluation,
     eta: NDArray,
@@ -210,9 +282,30 @@ def transform_natural_derivatives(
             parameter_index=parameter_index,
         )
 
+    pairs = packed_pairs(k_parameters)
+    natural_score = np.ascontiguousarray(evaluation.score)
+    natural_hessian = np.ascontiguousarray(evaluation.hessian_packed)
+    score_eta = np.empty_like(first)
+    hessian_eta = np.empty_like(natural_hessian)
+    curvature = np.empty_like(natural_hessian)
+    finite = np.finfo(np.float64)
+    if _chain_rule_rows(
+        natural_score,
+        natural_hessian,
+        first,
+        second,
+        np.array([pair[0] for pair in pairs], dtype=np.int64),
+        np.array([pair[1] for pair in pairs], dtype=np.int64),
+        float(finite.tiny),
+        float(finite.max) / 2.0,
+        score_eta,
+        hessian_eta,
+        curvature,
+    ):
+        return PredictorLikelihoodEvaluation._formed(evaluation, score_eta, hessian_eta, curvature)
+
     score_eta = evaluation.score * first
-    hessian_eta = np.empty_like(evaluation.hessian_packed)
-    for packed_index, (left, right) in enumerate(packed_pairs(k_parameters)):
+    for packed_index, (left, right) in enumerate(pairs):
         transformed = _scaled_triple_product(
             evaluation.hessian_packed[:, packed_index], first[:, left], first[:, right]
         )

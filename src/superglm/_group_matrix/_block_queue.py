@@ -21,14 +21,16 @@ blocks "in order of decreasing computational cost".  This module does that:
   Other blocks always run whole.
 - **Workers.**  ``_parallel.pool_workers``: ``n_jobs`` capped by the task
   count and by ``max_memory`` over the largest task's working set.  A queue
-  that bounds its dispatch (``dispatch_bound``, the SuperLSS row block's,
-  where the overhead was measured) runs on at most ``section_threads()``,
-  numba's thread count as the SuperLSS sections it replaced did, and is
-  capped by the total cost over
+  that bounds its dispatch (``dispatch_bound``, SuperLSS's row blocks, dense
+  channels and pass tables, where the overhead was measured) runs on at most
+  ``section_threads()``, numba's thread count as the SuperLSS sections it
+  replaced did, and is capped by the total cost over
   the largest unsplit task's (no schedule finishes before that task, and
   LPT on that many workers finishes within twice its cost; Graham 1969),
-  and by the queue's cost over its serial part: every task pays a fixed
-  ``_TASK_OVERHEAD_COST`` of dispatch under the GIL, and a queue whose
+  and by the queue's cost over its serial part: every task pays a fixed cost
+  of dispatch under the GIL, in the queue's own units (``_TASK_OVERHEAD_COST``
+  of multiply-adds, ``_ROW_TASK_OVERHEAD_COST`` of row visits on a
+  ``row_visits`` queue), and a queue whose
   serial fraction is ``s`` runs at most ``1 / s`` times faster on any
   number of workers (Amdahl 1967), so further workers would only contend
   for the GIL, and a queue no pool can make twice as fast runs serially.
@@ -75,6 +77,9 @@ _MIN_POOLED_COST = 1 << 22
 # A task's fixed cost beside its kernels, its dispatch and set-up under the
 # GIL: about 50 us, which the kernels run about 2**20 units in.
 _TASK_OVERHEAD_COST = 1 << 20
+# The same on a queue of row passes (``row_visits``), whose units are row visits
+# of a few nanoseconds each, not multiply-adds: about 200 us is about 2**16 units.
+_ROW_TASK_OVERHEAD_COST = 1 << 16
 # Transient row-length arrays a block route may hold at once: weight and
 # index gathers, a weighted column (three float64-sized vectors).
 _ROW_BYTES = 24
@@ -159,6 +164,12 @@ def diagonal_cost(gm, n: int) -> float:
     """Estimated work of a diagonal block."""
     r, m, p = _side(gm, n)
     return n * (1.0 + r) + float(m) * p * p
+
+
+def score_cost(gm, n: int) -> float:
+    """Estimated work of one group's score product: a row pass, then its bins through its basis."""
+    r, m, p = _side(gm, n)
+    return n * (1.0 + r) + float(m) * p
 
 
 def _aggregate_bytes(gm_i, gm_j, n: int) -> int:
@@ -327,6 +338,7 @@ def run_block_tasks(
     profile: dict[str, Any] | None,
     *,
     dispatch_bound: bool = False,
+    row_visits: bool = False,
 ) -> None:
     """Run every task and place its block: serially in task order, or on a pool.
 
@@ -359,7 +371,7 @@ def run_block_tasks(
     if dispatch_bound and workers > 1 and override.workers is None:
         workers = min(workers, section_threads())
         largest_unsplit = max((task.cost for task in tasks if not task.split_bytes), default=0.0)
-        overhead = len(tasks) * _TASK_OVERHEAD_COST
+        overhead = len(tasks) * (_ROW_TASK_OVERHEAD_COST if row_visits else _TASK_OVERHEAD_COST)
         amdahl = (total + overhead) / overhead
         lpt = total / largest_unsplit if largest_unsplit > 0 else amdahl
         # A pool that cannot halve the queue's time costs about what it saves.
@@ -431,6 +443,7 @@ __all__ = [
     "diagonal_bytes",
     "diagonal_cost",
     "run_block_tasks",
+    "score_cost",
     "split_bytes",
     "splittable_pair",
 ]

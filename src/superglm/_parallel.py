@@ -568,11 +568,14 @@ def pooled_map(fn: Callable, items: list, item_bytes: int) -> Generator:
                 pool.shutdown(wait=True)
 
 
-def pooled_for(fn: Callable, items: list, item_bytes: int) -> list:
+def pooled_for(
+    fn: Callable, items: list, item_bytes: int, *, max_workers: int | None = None
+) -> list:
     """``[fn(item), ...]`` in item order, the calling thread working beside its helpers.
 
-    At most ``pool_workers`` threads, capped by :func:`section_threads`.  For
-    sections of many short tasks, where :func:`pooled_map` spends more waking
+    At most ``pool_workers`` threads, capped by :func:`section_threads` and by
+    ``max_workers``, which narrows this section alone and leaves the fit's crew
+    at the fit's width.  For sections of many short tasks, where :func:`pooled_map` spends more waking
     workers and collecting futures than a task runs.  The caller and its helpers
     claim items in order from one counter, and only about half as many helpers as
     items are woken.  Each item's result goes to its own slot, so the list is the
@@ -590,6 +593,8 @@ def pooled_for(fn: Callable, items: list, item_bytes: int) -> list:
 
     count = len(items)
     workers = min(pool_workers(count, item_bytes), section_threads())
+    if max_workers is not None:
+        workers = min(workers, max_workers)
     with pooled_blas_threads():
         if workers <= 1 or count <= 1:
             return [fn(item) for item in items]

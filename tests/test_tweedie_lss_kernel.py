@@ -14,6 +14,7 @@ from numba.core.dispatcher import Dispatcher  # type: ignore[import-untyped]
 from scipy.special import polygamma
 
 from superglm._parallel import parallel_config, pooled_row_blocks
+from superglm.distributional.kernels import _common as kernel_common
 from tests._distributional_family_kernels import tweedie as tweedie_kernel
 from tests._tweedie_lss_oracles import (
     CENTERED_RHO_MOMENT_ORACLE,
@@ -118,7 +119,7 @@ def test_ordinary_720_row_batch_uses_serial_nopython_boundary(
     def forbidden_pool(*_args):
         raise AssertionError("ordinary batch ran on the worker pool")
 
-    monkeypatch.setattr(tweedie_kernel, "pooled_row_blocks", forbidden_pool)
+    monkeypatch.setattr(kernel_common, "pooled_row_blocks", forbidden_pool)
     rows = 720
     result = evaluate_tweedie_rows(
         *_dispatch_inputs(rows),
@@ -151,7 +152,7 @@ def test_production_dispatch_switches_at_measured_crossover_with_exact_outputs(
         pooled.append(n_rows)
         return pooled_row_blocks(kernel, n_rows, block_rows)
 
-    monkeypatch.setattr(tweedie_kernel, "pooled_row_blocks", recorded)
+    monkeypatch.setattr(kernel_common, "pooled_row_blocks", recorded)
     result = evaluate_tweedie_rows(
         *arrays,
         "prior",

@@ -17,6 +17,7 @@ from superglm.distributional.family import DistributionalFamily, FamilyLikelihoo
 from superglm.distributional.layout import PredictorState, StackedLayout
 from superglm.distributional.results.endpoint_evidence import ConvergenceReason
 from superglm.distributional.results.solver import DenseSolverConfig, DenseSolverResult
+from superglm.distributional.solver.chunks import ChunkSize
 from superglm.distributional.solver.solver import fit_dense_fixed_lambda
 from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.distributional.weights import (
@@ -220,12 +221,13 @@ def fit_joint_null_model(
     *,
     likelihood_plan: FamilyLikelihoodPlan,
     config: DenseSolverConfig | None = None,
+    chunk_size: ChunkSize | None = None,
 ) -> JointNullModel:
     """Fit one intercept per family parameter under the already-bound likelihood.
 
-    A fit that stops short of convergence is returned as it stands, with
-    ``converged=False`` and the solver's convergence reason; the caller
-    discloses it.
+    ``chunk_size`` is the fit's own, so the null fit streams its rows when the fit
+    does. A fit that stops short of convergence is returned as it stands, with
+    ``converged=False`` and the solver's convergence reason; the caller discloses it.
     """
     if not isinstance(family, DistributionalFamily):
         raise TypeError("family must implement DistributionalFamily")
@@ -261,6 +263,7 @@ def fit_joint_null_model(
         likelihood_plan,
         penalty,
         config=solver_config,
+        chunk_size=chunk_size,
     )
     links = {state.name: state.link for state in layout.predictors}
     offsets = {state.name: state.offset for state in layout.predictors}

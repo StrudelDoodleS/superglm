@@ -22,14 +22,29 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import optimize, special
 
+import superglm.distributional.kernels._generalized_gamma_numba as _compiled
 from superglm._roundoff import EPS as _EPS
 from superglm.distributional.kernels._common import (
+    pooled_rows,
     readonly,
     readonly_bool,
     stacked_direction,
     validated_derivative_order,
 )
 from superglm.distributional.kernels._curvature_direction import mean_form_hessian_direction
+from superglm.distributional.kernels._generalized_gamma_numba import (
+    _BERNOULLI,
+    _HALF_LOG_TWO_PI,
+    _M3_A_COEFFICIENTS,
+    _M3_B_COEFFICIENTS,
+    _M3_SERIES_RADIUS,
+    _STIRLING_SWITCH,
+    _U_SERIES_RADIUS,
+    _U_SERIES_TERMS,
+    _V_SERIES_RADIUS,
+    _V_SERIES_TERMS,
+    _ZERO_SHAPE,
+)
 from superglm.distributional.kernels._gg_log_tail import gg_log_tail_jets
 from superglm.distributional.kernels._gg_uniform_tail import Q_MAX as _UNIFORM_SHAPE
 from superglm.distributional.kernels.gamma import gamma_shape_plus_one_log_increment
@@ -39,33 +54,10 @@ Parametrisation = Literal["mean", "location"]
 _Evaluator = Callable[[NDArray[np.float64]], NDArray[np.float64]]
 
 _FLOAT = np.float64
-_STIRLING_SWITCH = 8.0
-_U_SERIES_RADIUS = 1.0
-_U_SERIES_TERMS = 25
-_V_SERIES_RADIUS = 0.25
-_V_SERIES_TERMS = 40
-_M3_SERIES_RADIUS = 0.8
-_M3_SERIES_TERMS = 48
-_ZERO_SHAPE = 1.0e-8
 _QUANTILE_NEWTON_STEPS = 40
 _QUANTILE_NEWTON_STEP_RTOL = 2.0**-40
 _TAIL_INVERSE_RTOL = 64.0 * math.sqrt(_EPS)
 _SHIFT_INCREMENT_RTOL = 16.0 * _EPS
-_M3_A_COEFFICIENTS = tuple(1.0 / (2 * j + 3) for j in range(_M3_SERIES_TERMS))
-_M3_B_COEFFICIENTS = tuple((2 * j + 2) / (2 * j + 5) for j in range(_M3_SERIES_TERMS))
-_HALF_LOG_TWO_PI = 0.5 * math.log(2.0 * math.pi)
-_BERNOULLI = (
-    1.0 / 12.0,
-    -1.0 / 360.0,
-    1.0 / 1260.0,
-    -1.0 / 1680.0,
-    1.0 / 1188.0,
-    -691.0 / 360360.0,
-    1.0 / 156.0,
-    -3617.0 / 122400.0,
-    43867.0 / 244188.0,
-    -174611.0 / 125400.0,
-)
 
 
 class GeneralizedGammaDomainError(ValueError):
@@ -424,7 +416,58 @@ def location_rows(
     under unit prior weights).  The carrier ``-log y - log(2 pi)/2`` is left to
     the caller.
     """
-    return _location_rows(response, mu, sigma, shape, multiplier, derivative_order=derivative_order)
+    y = _positive_vector(response, name="response")
+    mu_values = _vector(mu, name="mu")
+    sigma_values = _positive_vector(sigma, name="sigma")
+    q = _vector(shape, name="shape")
+    m = _positive_vector(multiplier, name="multiplier")
+    if any(values.shape != y.shape for values in (mu_values, sigma_values, q, m)):
+        raise GeneralizedGammaDomainError("generalized gamma row arrays must have the same shape")
+    order = validated_derivative_order(derivative_order)
+    return _compiled_rows(y, mu_values, sigma_values, q, m, mean_form=False, order=order)
+
+
+def _compiled_rows(
+    y: NDArray[np.float64],
+    first: NDArray[np.float64],
+    sigma: NDArray[np.float64],
+    q: NDArray[np.float64],
+    multiplier: NDArray[np.float64],
+    *,
+    mean_form: bool,
+    order: int,
+) -> GeneralizedGammaKernelEvaluation:
+    """Validated rows through the compiled kernel, on the pool above ``PARALLEL_MIN_ROWS``."""
+    inputs = tuple(
+        np.require(values, dtype=_FLOAT, requirements=("C", "A", "W"))
+        for values in (y, first, sigma, q, multiplier)
+    )
+    n = len(y)
+    optimizing = np.zeros(n, dtype=_FLOAT)
+    score = np.zeros((n if order >= 1 else 0, 3), dtype=_FLOAT)
+    hessian = np.zeros((n if order == 2 else 0, 6), dtype=_FLOAT)
+    valid = np.zeros(n, dtype=np.bool_)
+    status, _ = pooled_rows(
+        lambda start, stop: _compiled._evaluate_rows(
+            *inputs, mean_form, order, start, stop, optimizing, score, hessian, valid
+        ),
+        n,
+    )
+    if status != _compiled.KERNEL_OK:
+        raise GeneralizedGammaDomainError("generalized gamma mean loading is not representable")
+    return GeneralizedGammaKernelEvaluation(
+        optimizing, score if order >= 1 else None, hessian if order == 2 else None, valid
+    )
+
+
+def _warmup_generalized_gamma() -> None:
+    """Compile the row kernel on no rows; every helper it calls compiles with it."""
+    values = np.zeros(0, dtype=_FLOAT)
+    _compiled._evaluate_rows(
+        values, values, values, values, values, True, 2, 0, 0, values,
+        np.zeros((0, 3), dtype=_FLOAT), np.zeros((0, 6), dtype=_FLOAT),
+        np.zeros(0, dtype=np.bool_),
+    )  # fmt: skip
 
 
 def _location_rows(
@@ -1018,42 +1061,7 @@ def mean_rows(
     if any(values.shape != y.shape for values in (m, sigma_values, q, weight)):
         raise GeneralizedGammaDomainError("generalized gamma row arrays must have the same shape")
     order = validated_derivative_order(derivative_order)
-    exists = mean_exists(sigma_values, q)
-    n = len(y)
-    optimizing = np.zeros(n, dtype=_FLOAT)
-    score = np.zeros((n, 3), dtype=_FLOAT) if order >= 1 else None
-    hessian = np.zeros((n, 6), dtype=_FLOAT) if order == 2 else None
-    valid = np.array(exists, dtype=bool)
-    if np.any(exists):
-        loading, stirling = _log_mean_loading_and_stirling(sigma_values[exists], q[exists])
-        logc, c_s, c_q, c_ss, c_sq, c_qq = loading
-        me = m[exists]
-        base = _location_rows(
-            y[exists],
-            np.log(me) - logc,
-            sigma_values[exists],
-            q[exists],
-            weight[exists],
-            derivative_order=order,
-            stirling=stirling,
-        )
-        optimizing[exists] = base.optimizing_log_likelihood
-        valid[exists] = base.valid
-        if score is not None and base.score is not None:
-            s_mu, s_sig, s_q = base.score[:, 0], base.score[:, 1], base.score[:, 2]
-            score[exists, 0] = s_mu / me
-            score[exists, 1] = s_sig - s_mu * c_s
-            score[exists, 2] = s_q - s_mu * c_q
-            if hessian is not None and base.hessian_packed is not None:
-                h = base.hessian_packed
-                h_mm, h_ms, h_mq, h_ss, h_sq, h_qq = (h[:, i] for i in range(6))
-                hessian[exists, 0] = (h_mm - s_mu) / (me * me)
-                hessian[exists, 1] = (h_ms - h_mm * c_s) / me
-                hessian[exists, 2] = (h_mq - h_mm * c_q) / me
-                hessian[exists, 3] = h_ss - 2.0 * h_ms * c_s + h_mm * c_s * c_s - s_mu * c_ss
-                hessian[exists, 4] = h_sq - h_ms * c_q - h_mq * c_s + h_mm * c_s * c_q - s_mu * c_sq
-                hessian[exists, 5] = h_qq - 2.0 * h_mq * c_q + h_mm * c_q * c_q - s_mu * c_qq
-    return _placeholders_where_invalid(optimizing, score, hessian, valid)
+    return _compiled_rows(y, m, sigma_values, q, weight, mean_form=True, order=order)
 
 
 _PHI_SERIES_RADIUS = 0.5

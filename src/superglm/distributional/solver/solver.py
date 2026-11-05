@@ -888,6 +888,67 @@ def _objective_and_step_is_certified(
     )
 
 
+def _objective_cannot_judge_the_correction(
+    context: _SolverContext,
+    config: DenseSolverConfig,
+    direction: _Direction,
+    step_scale: float,
+    score: NDArray[np.float64],
+    objective: float,
+) -> bool:
+    """Whether a full Newton correction's predicted gain is below the objective's resolution.
+
+    Comparing objective values is then comparing round-off, so a score-only fit
+    judges the correction on the score it leaves (``_refined_geometry``).
+    """
+    decomposition = direction.decomposition
+    if (
+        context.coefficient_face is None
+        or config.coefficient_curvature != "observed"
+        or direction.levenberg_shift != 0.0
+        or decomposition.rank != len(score)
+        or direction.residual > config.residual_tolerance
+        or step_scale != 1.0
+    ):
+        return False
+    try:
+        correction = np.asarray(decomposition.solve(score), dtype=np.float64)
+    except (ValueError, np.linalg.LinAlgError):
+        return False
+    return _resolution_limited_decrement_is_within_objective_ulp(score, correction, objective)
+
+
+def _refined_geometry(
+    context: _SolverContext,
+    config: DenseSolverConfig,
+    candidate: _AcceptedState | None,
+    direction: _Direction,
+    score: NDArray[np.float64],
+    phase_recorder: FitPhaseRecorder | None,
+) -> DenseJointGeometry | None:
+    """The geometry a Newton correction reached, if it at least halved the score.
+
+    Newton's residual falls until it reaches its evaluation error (Tisseur 2001,
+    eq. 2.35), so refinement continues only while the residual halves (LAPACK
+    xGERFS). The residual is measured by the decrement ``g' H^-1 g``, which does
+    not depend on coefficient scale and is quadratic in ``g``: halving ``g`` is a
+    factor of four.
+    """
+    if candidate is None:
+        return None
+    try:
+        refined = _measured_geometry(
+            context, candidate, config.coefficient_curvature, phase_recorder
+        )
+        refined_score = _optimization_score(context, refined.score_penalized)
+        decomposition = direction.decomposition
+        decrement = float(score @ decomposition.solve(score))
+        refined_decrement = float(refined_score @ decomposition.solve(refined_score))
+    except (ValueError, FloatingPointError, OverflowError, np.linalg.LinAlgError):
+        return None
+    return refined if 4.0 * refined_decrement <= decrement else None
+
+
 def _policy_curvature(
     context: _SolverContext,
     matrix: NDArray,
@@ -1165,8 +1226,15 @@ def _run_iterations(
         alpha = 1.0
         backtracks = 0
         distinct_finite_trial_evaluated = False
-        distinct_trial_improved = False
         reached_identical_candidate = False
+        refines = stop_policy == "score_only" and _objective_cannot_judge_the_correction(
+            context,
+            config,
+            direction,
+            step_scale,
+            optimization_score,
+            state.penalized_optimizing_log_likelihood,
+        )
         for attempt in range(config.max_backtracks + 1):
             candidate_coefficients = state.coefficients + alpha * capped_step
             if context.coefficient_face is not None:
@@ -1197,6 +1265,13 @@ def _run_iterations(
                     derivative_order=0 if screen else 2,
                 )
             )
+            if refines:
+                refined = _refined_geometry(
+                    context, config, candidate, direction, optimization_score, phase_recorder
+                )
+                if refined is not None:
+                    accepted, accepted_geometry = candidate, refined
+                break
             directional_derivative = float(geometry.score_penalized @ applied_step)
             required = (
                 state.penalized_optimizing_log_likelihood
@@ -1216,12 +1291,6 @@ def _run_iterations(
                 )
             if candidate is not None:
                 distinct_finite_trial_evaluated = True
-                if stop_policy == "score_only":
-                    distinct_trial_improved = bool(
-                        distinct_trial_improved
-                        or candidate.penalized_optimizing_log_likelihood
-                        > state.penalized_optimizing_log_likelihood
-                    )
             if (
                 candidate is not None
                 and candidate.penalized_optimizing_log_likelihood >= required
@@ -1274,36 +1343,9 @@ def _run_iterations(
                 del measured_observed
                 if certified:
                     return finish(True, "objective_and_step", score_relative, no_step=True)
-            retained_correction: NDArray[np.float64] | None = None
-            if direction.decomposition.rank == len(optimization_score):
-                try:
-                    retained_correction = np.asarray(
-                        direction.decomposition.solve(optimization_score),
-                        dtype=np.float64,
-                    )
-                except (ValueError, np.linalg.LinAlgError):
-                    retained_correction = None
-            resolution_limited = bool(
-                stop_policy == "score_only"
-                and context.coefficient_face is not None
-                and config.coefficient_curvature == "observed"
-                and direction.levenberg_shift == 0.0
-                and direction.decomposition.rank == len(optimization_score)
-                and direction.residual <= config.residual_tolerance
-                and step_scale == 1.0
-                and retained_correction is not None
-                and _resolution_limited_decrement_is_within_objective_ulp(
-                    optimization_score,
-                    retained_correction,
-                    state.penalized_optimizing_log_likelihood,
-                )
-                and distinct_finite_trial_evaluated
-                and not distinct_trial_improved
-                and reached_identical_candidate
-            )
             return finish(
-                resolution_limited,
-                ("resolution_limited_stationarity" if resolution_limited else "line_search_failed"),
+                refines,
+                "resolution_limited_stationarity" if refines else "line_search_failed",
                 score_relative,
             )
 

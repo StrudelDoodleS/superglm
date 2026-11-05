@@ -734,8 +734,8 @@ def prepare_distributional_fit_state(
     requested_solver_config = (
         solver_result.config if smoothing is None else smoothing.coefficient_fits[0].config
     )
-    # Null fitting still evaluates eager rows. Prepare its carrier once at
-    # this compatibility boundary, rather than on each likelihood evaluation.
+    # Prepare the null fit's carrier once at this compatibility boundary,
+    # rather than on each likelihood evaluation.
     null_plan = likelihood_plan
     if (
         type(family) is GaussianLS
@@ -753,6 +753,7 @@ def prepare_distributional_fit_state(
         response,
         likelihood_plan=null_plan,
         config=requested_solver_config,
+        chunk_size=requested_chunk_size,
     )
     compact_null = _compact_null(null)
     del null_plan

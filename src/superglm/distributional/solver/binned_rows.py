@@ -7,6 +7,12 @@ categorical or random effect reads the one-hot row of its code, and the
 intercept reads ``[1]``; dense groups keep their values. :class:`BinnedRows`
 forms each table once, so a pass gathers its row chunks from the tables instead
 of re-forming ``B R`` for every chunk.
+
+A pass that needs only products of the rows reads them without forming a row:
+``X C`` is a sum of gathers from each term's ``T C``, and the leverage ``x_i' V
+y_i`` is a sum of gathers from each term pair's ``T_t V_tu T_u'``, the scattered
+form of GLAM's ``diag(X S X')`` (Currie, Durban and Eilers, *JRSS-B* 68:259, 2006,
+eq. 2.7), so its cost per row does not depend on the number of columns.
 """
 
 from __future__ import annotations
@@ -25,7 +31,10 @@ from superglm._group_matrix._group_matrix_discretized import (
     SupportCompressedSSPGroupMatrix,
 )
 from superglm._group_matrix._group_matrix_range import _category_rows
+from superglm._group_matrix._lookup_tables import gather_channels
+from superglm._parallel import resolve_max_memory
 from superglm.distributional.layout import PredictorState, StackedLayout
+from superglm.distributional.solver.packing import packed_pairs
 from superglm.group_matrix import DesignMatrix
 
 _SUPPORTS = (
@@ -35,6 +44,9 @@ _SUPPORTS = (
 )
 _LEVELS = (DiscretizedSplineCategoricalGroupMatrix, SupportCompressedSplineCategoricalGroupMatrix)
 _GROUPS = (*_SUPPORTS, *_LEVELS, *ONE_HOT_CODE_TYPES, DenseGroupMatrix)
+# Cells the leverage's term-pair tables may hold together; a layout past this
+# (a wide random effect) keeps the row products.
+_LEVERAGE_MAX_CELLS = 1 << 26
 
 
 def binned_layout(layout: StackedLayout) -> bool:
@@ -105,6 +117,55 @@ def _codes(term: _Term, start: int, stop: int) -> NDArray[np.intp]:
     return codes
 
 
+def _table_codes(term: _Term, start: int, stop: int) -> NDArray[np.intp]:
+    """The rows of the term's lookup table that rows ``[start, stop)`` read."""
+    codes = _codes(term, start, stop)
+    if type(term.group) in ONE_HOT_CODE_TYPES:
+        return np.minimum(codes, term.columns.stop - term.columns.start)
+    return codes
+
+
+def _table_rows(term: _Term) -> int:
+    """How many rows the term's lookup table has; a categorical's is its identity over a zero row."""
+    if type(term.group) in ONE_HOT_CODE_TYPES:
+        return term.columns.stop - term.columns.start + 1
+    return term.table.shape[0]
+
+
+def _table_times(term: _Term, values: NDArray) -> NDArray[np.float64]:
+    """``T values`` for the term's lookup table; a categorical's forms no identity."""
+    if type(term.group) in ONE_HOT_CODE_TYPES:
+        # A categorical's base level reads its code past the last column: a zero row.
+        return np.vstack((values, np.zeros((1, values.shape[1]))))
+    return term.table @ values
+
+
+class RowProducts:
+    """``X_q[rows] @ coefficients`` as a call on a row slice, each term's product formed once."""
+
+    __slots__ = ("_dense", "_gathers", "_width", "n")
+
+    def __init__(self, terms: tuple[_Term, ...], coefficients: NDArray, n: int) -> None:
+        self._gathers, self._dense = [], []
+        for term in terms:
+            local = coefficients[term.columns]
+            if type(term.group) is DenseGroupMatrix:
+                self._dense.append((term.group.M, local))
+            else:
+                self._gathers.append((term, _table_times(term, local)))
+        self._width = coefficients.shape[1]
+        self.n = n
+
+    def __call__(self, rows: slice) -> NDArray[np.float64]:
+        start, stop, _ = rows.indices(self.n)
+        out = np.zeros((stop - start, self._width), dtype=np.float64)
+        for term, values in self._gathers:
+            out += values[_table_codes(term, start, stop)]
+        for matrix, local in self._dense:
+            out += matrix[start:stop] @ local
+        return out
+
+
 class BinnedRows:
     """A binned layout's design rows, read from each term's table formed once.
 
@@ -151,6 +212,54 @@ class BinnedRows:
             else:
                 out[:, term.columns] = term.table[_codes(term, start, stop)]
         return out
+
+    def row_products(self, q: int, coefficients: NDArray) -> RowProducts:
+        """``X_q[rows] @ coefficients`` for ``coefficients`` of shape ``(P_q, m)``."""
+        return RowProducts(self._terms[q], coefficients, self.n)
+
+    def leverages(self, inverse: NDArray, slices: tuple[slice, ...]) -> NDArray | None:
+        """``G_i = X_i V X_i'`` for every row, packed ``(n, K(K+1)/2)``; None without a lookup.
+
+        ``G_i[q, r] = sum_t sum_u M_tu[c_t(i), c_u(i)]`` with ``M_tu = T_t V_tu
+        T_u'``, ``t`` over predictor ``q``'s terms and ``u`` over ``r``'s; a
+        diagonal channel reads each unordered pair once at twice its table. A
+        dense term, more than ``_LEVERAGE_MAX_CELLS`` table cells, or an index and
+        tables past a quarter of ``max_memory`` (as ``lookup_plan`` bounds its own)
+        return None, and the caller forms the rows.
+        """
+        terms = [(q, term) for q, predictor in enumerate(self._terms) for term in predictor]
+        if any(type(term.group) is DenseGroupMatrix for _, term in terms):
+            return None
+        sizes = [_table_rows(term) for _, term in terms]
+        cells = (sum(sizes) ** 2 + sum(size**2 for size in sizes)) // 2
+        index_bytes = 4 * len(terms) * self.n
+        if cells > _LEVERAGE_MAX_CELLS or 8 * cells + index_bytes > resolve_max_memory() // 4:
+            return None
+        channels = {pair: index for index, pair in enumerate(packed_pairs(len(self._terms)))}
+        flat = np.empty(cells, dtype=np.float64)
+        pairs, offset = [], 0
+        for t, (q, term_t) in enumerate(terms):
+            columns_t = _shifted(term_t.columns, slices[q])
+            for u in range(t, len(terms)):
+                r, term_u = terms[u]
+                block = _table_times(
+                    term_t, inverse[columns_t, _shifted(term_u.columns, slices[r])]
+                )
+                block = _table_times(term_u, block.T).T
+                flat[offset : offset + block.size] = (
+                    2.0 * block if q == r and t != u else block
+                ).ravel()
+                pairs.append((channels[(q, r)], t, u, offset, sizes[u]))
+                offset += block.size
+        codes = np.empty((len(terms), self.n), dtype=np.int32)
+        for t, (_, term) in enumerate(terms):
+            codes[t] = _table_codes(term, 0, self.n)
+        return gather_channels(codes, np.array(pairs, dtype=np.int64), flat, len(channels))
+
+
+def _shifted(columns: slice, block: slice) -> slice:
+    """A term's columns of its predictor's block, in the coefficients of the whole layout."""
+    return slice(block.start + columns.start, block.start + columns.stop)
 
 
 def binned_rows(layout: StackedLayout) -> BinnedRows | None:

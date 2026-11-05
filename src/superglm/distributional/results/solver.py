@@ -108,8 +108,8 @@ def _score_within_rounding_floor(
     subtraction by ``u |g_i| / (1 - u)`` (Higham 2002, eqs. 3.5 and 3.12);
     reducing to a face adds ``gamma_w |Z|' |g|`` and carries the row bound
     through ``|Z|'``. At a large smoothing parameter this floor exceeds any
-    fixed relative tolerance. The data score's own summation error is left
-    out, so the floor understates the score's rounding.
+    fixed relative tolerance. The data score's own evaluation error is left
+    out, so a score above this floor can still be rounding.
 
     The floor bounds the rounding error; it is not evidence that the score is
     rounding. Along a direction the penalty does not act on, a representable

@@ -1113,7 +1113,41 @@ def _gather_leverages(
             out[r] = 0.0
 
 
+@njit(cache=True, nogil=True)
+def _gather_channels(start, stop, codes, pairs, tables, out):  # pragma: no cover - compiled
+    """``out[r, channel] += tables[offset + k_t(r) m_u + k_u(r)]`` on ``[start, stop)``.
+
+    ``pairs`` holds ``(channel, t, u, offset, m_u)``: one table at a time, each
+    row in the fixed pair order, whatever the block.
+    """
+    for q in range(pairs.shape[0]):
+        channel = pairs[q, 0]
+        ca = codes[pairs[q, 1]]
+        cb = codes[pairs[q, 2]]
+        base = pairs[q, 3]
+        mb = pairs[q, 4]
+        for r in range(start, stop):
+            out[r, channel] += tables[base + ca[r] * mb + cb[r]]
+
+
+def gather_channels(codes: NDArray, pairs: NDArray, tables: NDArray, n_channels: int) -> NDArray:
+    """The per-row channel sums of :func:`_gather_channels`, in fixed blocks of ``_BLOCK_ROWS``.
+
+    Rows run on ``pool_workers`` threads; the result is bitwise the serial one.
+    """
+    n = codes.shape[1]
+    out = np.zeros((n, n_channels), dtype=np.float64)
+
+    def job(start: int):
+        stop = min(start + _BLOCK_ROWS, n)
+        return lambda: _gather_channels(start, stop, codes, pairs, tables, out)
+
+    _pool_run([job(start) for start in range(0, n, _BLOCK_ROWS)], 1 << 12)
+    return out
+
+
 _POOLED_ROW_KERNELS = (
+    _gather_channels,
     _gather_leverages,
     _margins_sweep,
     _hist_sweep,
@@ -1290,6 +1324,7 @@ def _warmup_lookup_tables() -> None:
     i64_2d = np.zeros((0, 0), dtype=np.int64)
     frozen = np.zeros((0, 0), dtype=np.float64)
     frozen.setflags(write=False)
+    _gather_channels(0, 0, codes, i64_2d, f64, f64_2d)
     _margins_sweep(i32, f64, f64, f64, f64)
     _hist_sweep(i32, i32, f64, 0, f64)
     _acc_sweep(i32, i32, f64, f64, i32, i32, 0, f64)

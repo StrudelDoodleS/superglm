@@ -497,8 +497,7 @@ def test_log_mean_loading_exact_lognormal_limit():
         assert _rel(float(value[0]), reference) <= 1.0e-15
 
 
-@pytest.mark.parametrize("order", [0, 1, 2])
-def test_mean_rows_reuses_one_raw_stirling_triplet(monkeypatch, order):
+def test_mean_hessian_direction_reuses_one_raw_stirling_triplet(monkeypatch):
     calls = []
     original = gg._stirling_triplet
 
@@ -508,10 +507,10 @@ def test_mean_rows_reuses_one_raw_stirling_triplet(monkeypatch, order):
 
     monkeypatch.setattr(gg, "_stirling_triplet", counted)
     q = np.array([0.0, 0.5e-8, -0.5e-8, 1 / math.sqrt(8), -1.0])
-    result = gg.mean_rows(
-        np.ones(5), np.ones(5), np.full(5, 0.9), q, np.ones(5), derivative_order=order
+    result = gg.mean_hessian_direction(
+        np.ones(5), np.ones(5), np.full(5, 0.9), q, np.ones((5, 3)), np.ones(5)
     )
-    assert result.valid.all()
+    assert np.all(np.isfinite(result))
     assert len(calls) == 1
 
 
@@ -528,11 +527,13 @@ def test_log_mean_loading_reuses_identical_series_l1(monkeypatch):
     assert len(calls) == 1
 
 
-def test_reused_mean_rows_still_checks_unused_loading_derivatives(monkeypatch):
-    monkeypatch.setattr(gg, "series_m3_d1", lambda v: np.full_like(v, np.nan))
+def test_reused_mean_rows_still_checks_unused_loading_derivatives():
+    """At ``sigma = 1e80`` and ``Q = 0``, ``log C = sigma^2/2`` is finite but ``C_QQ`` overflows."""
+    loading = gg._compiled._log_mean_loading(1e80, 0.0, 1.0, 0.0, 0.0, 0.0)
+    assert np.isfinite(loading[0]) and not np.isfinite(loading[5])
     with pytest.raises(gg.GeneralizedGammaDomainError, match="mean loading is not representable"):
         gg.mean_rows(
-            *[np.array([value]) for value in (1.7, 1.2, 0.8, 0.0, 1.0)], derivative_order=0
+            *[np.array([value]) for value in (1.7, 1.2, 1e80, 0.0, 1.0)], derivative_order=0
         )
 
 
