@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from superglm._frame import as_eager_frame
+from superglm._group_matrix import _lookup_tables as lookup_tables
 from superglm._parallel import parallel_config
 from superglm.distributional import GaussianLS, TweedieLSS
 from superglm.distributional._row_design import BoundedPredictorMatrix
@@ -316,7 +317,8 @@ def _dense_leverages(matrices, slices, inverse):
 
 
 @pytest.mark.parametrize("case", ["K2", "K3", "compressed"])
-def test_leverages_equal_the_dense_row_products(case):
+def test_leverages_equal_the_dense_row_products(case, monkeypatch):
+    monkeypatch.setattr(lookup_tables, "_BLOCK_ROWS", 64)
     if case == "compressed":
         layout, matrices, slices, rng = _compressed_layout(dense=False)
     else:
@@ -373,7 +375,16 @@ def test_a_wide_random_effect_is_declined_before_any_table_is_formed():
         tracemalloc.stop()
 
 
-def test_leverages_keep_their_bits_at_every_worker_count():
+def test_leverages_keep_their_bits_at_every_worker_count(monkeypatch):
+    monkeypatch.setattr(lookup_tables, "_BLOCK_ROWS", 64)
+    started = []
+    pool = lookup_tables.ThreadPoolExecutor
+
+    def spy(*args, **kwargs):
+        started.append(kwargs["max_workers"])
+        return pool(*args, **kwargs)
+
+    monkeypatch.setattr(lookup_tables, "ThreadPoolExecutor", spy)
     layout, _matrices, slices, rng = _layout(3, dense=False)
     inverse = _inverse(layout, rng)
     reader = br.binned_rows(layout)
@@ -381,6 +392,7 @@ def test_leverages_keep_their_bits_at_every_worker_count():
         serial = reader.leverages(inverse, slices)
     with parallel_config(n_jobs=4):
         pooled = reader.leverages(inverse, slices)
+    assert started
     np.testing.assert_array_equal(serial, pooled)
 
 

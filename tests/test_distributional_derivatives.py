@@ -214,7 +214,16 @@ def test_chain_rule_rows_hold_the_bits_of_the_rescaling_route(monkeypatch) -> No
     from superglm.distributional.solver import derivatives as chain
 
     links, eta, _weights, _objective, evaluation = _quadratic_fixture()
+    finished = []
+    kernel = chain._chain_rule_rows
+
+    def spy(*args):
+        finished.append(kernel(*args))
+        return finished[-1]
+
+    monkeypatch.setattr(chain, "_chain_rule_rows", spy)
     compiled = transform_natural_derivatives(evaluation, eta, links)
+    assert finished == [True]
     monkeypatch.setattr(chain, "_chain_rule_rows", lambda *args: False)
     rescaled = transform_natural_derivatives(evaluation, eta, links)
     for name in ("score_eta", "hessian_eta_packed", "curvature_packed"):

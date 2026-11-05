@@ -1025,11 +1025,13 @@ def _binned_family(family, authority: str):
 def test_binned_layout_derivatives_equal_the_dense_row_chunks(case, authority, monkeypatch) -> None:
     """The passes form no rows, so they sum the dense row chunks' terms in another order: the
     gradient, Hessian and both certificates agree within rounding of the problem's scale. The
-    fixtures hold every binned group kind, and the differenced pass nonzero certificates."""
+    fixtures hold every binned group kind, and the differenced pass nonzero certificates. The
+    passes run over several row chunks, so a chunk read from the wrong rows shows."""
     from superglm.distributional._row_design import bounded_predictor_matrices
     from superglm.distributional.smoothing import derivatives as derivatives_module
     from superglm.distributional.solver.binned_rows import binned_layout
 
+    monkeypatch.setattr(derivatives_module, "_ROW_CHUNK", 97)
     family, layout, y, plan, options = _binned_case(case)
     family = _binned_family(family, authority)
     assert binned_layout(layout)
