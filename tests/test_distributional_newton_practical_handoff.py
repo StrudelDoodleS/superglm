@@ -345,13 +345,19 @@ def test_a_gradient_within_reml_tol_at_a_cap_is_not_cap_pressure(monkeypatch):
     assert verdicts == {"stop bar": "cap_pressure", "reml_tol": "stationary"}
 
 
-def test_a_finish_that_finds_cap_pressure_discloses_it(monkeypatch):
+@pytest.mark.parametrize("outward", [False, True], ids=["interior-stop", "outward-stop"])
+def test_a_finish_that_finds_cap_pressure_discloses_it(monkeypatch, outward):
+    """Both stops report the same outcome, so rounding between them cannot choose one.
+    Mutation check: an outward finish counting cap pressure as a stall keeps its plateau."""
+
     def at_the_cap(outcome):
         return dataclasses.replace(
             outcome, kind="cap_pressure", cap_pressure=("location:x#wiggle",)
         )
 
     calls = _spy_on_the_endgame(monkeypatch, at_the_cap)
+    if outward:
+        monkeypatch.setattr(loop, "_practical_outward_window", lambda **kwargs: True)
     model, frame, response = _two_smooth_gaussian()
     model.fit_reml(frame, response)
 

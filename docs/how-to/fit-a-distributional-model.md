@@ -1146,7 +1146,15 @@ This stop reports `practical_plateau`, retains the finite fitted penalties and
 any upper-pressure evidence, and leaves `matched_certified=False`. It is
 observed practical stability, not an exact infinite-penalty face or an error
 bound on inference. Tiny cap excursions retain the existing endpoint checks.
-`practical_reml=False` keeps the strict stopping policy. Fits can remain
+`practical_reml=False` keeps the strict stopping policy.
+
+Under the default `outer="efs+finish"`, a fit with no penalty at its cap runs the
+Newton finish here instead, as it does at any other plateau. It then reports
+`stationary` if the finish reaches a stationary point, and `practical_plateau` if
+the finish stalls. If the finish takes a climbing penalty to its cap with the
+gradient still pointing outward, the fit reports `lambda_cap_unresolved`, unless
+an exact face settles it. A penalty already at its cap keeps the stop described
+above. Fits can remain
 start-dependent; vary `initial_lambda` when comparing solutions.
 
 ```python

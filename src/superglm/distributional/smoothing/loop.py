@@ -1514,9 +1514,9 @@ def fit_distributional_efs(
         # A practical plateau is an interior stop of the components off the active
         # face: while one sits at the cap with outward pressure or is a working
         # infinity, the top of the loop decides (promote an exact face, or refuse
-        # with a named reason). A promotion restarts the plateau's count. Either
-        # plateau hands to a finish where one is available, so both reach the same
-        # stationary point and rounding cannot choose between them.
+        # with a named reason). A promotion restarts the plateau's count. Off the cap,
+        # either plateau hands to a finish where one is available, so which of the two
+        # a fit meets first does not decide its outcome.
         interior = (
             not terminal_evidence.unresolved_upper_bound and not terminal_evidence.working_infinity
         )
