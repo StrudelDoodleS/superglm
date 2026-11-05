@@ -435,9 +435,13 @@ def initialize_negative_binomial(
     mean = _initial_mean(count_values, weight_values, weight_semantics)
     moment = _moment_theta_candidate(response_values, weight_values, weight_semantics, mean)
     poisson_like = mean * _POISSON_LIKE_INITIAL_THETA_FACTOR
-    # At one mean and one size, a row depends only on its count and weight.
+    # At one mean and one size, a row depends only on its count and weight. A sample
+    # past the recurrence budget takes every row, so the kernel refuses it here by name.
     check_counts, check_weights = count_values, weight_values
-    if np.all(weight_values == weight_values[0]):
+    if (
+        np.all(weight_values == weight_values[0])
+        and recurrence_cells(count_values) <= _MAX_RECURRENCE_CELLS
+    ):
         check_counts = np.unique(count_values)
         check_weights = np.full(check_counts.size, weight_values[0])
     last_error: ValueError | None = None

@@ -427,9 +427,7 @@ def test_a_stream_worker_keeps_a_nested_row_pool_on_its_own_thread():
         return rows.start
 
     with parallel_config(n_jobs=64):
-        list(
-            chunking._evaluated_chunks(GammaLS(), record_width, 8 * 8192, 8192, held_floats=8)
-        )
+        list(chunking._evaluated_chunks(GammaLS(), record_width, 8 * 8192, 8192, held_floats=8))
     assert widths == [1] * 8
 
 

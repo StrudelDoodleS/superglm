@@ -100,6 +100,20 @@ def test_nb2_start_falls_back_when_the_check_refuses_its_first_candidate(
     assert candidates[1] != candidates[0]
 
 
+def test_nb2_start_refuses_a_sample_past_the_recurrence_budget_by_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One row per count is under this budget, and the fit's first evaluation would then refuse
+    with no remedy to offer. Mutation check: a start that always reads one row per count passes."""
+    monkeypatch.setattr(nb_kernel, "_MAX_RECURRENCE_CELLS", 100)
+    counts = np.arange(400) % 9
+    response = counts.astype(np.float64)
+    with pytest.raises(nb_kernel.NegativeBinomialInitializationError) as refused:
+        nb_kernel.initialize_negative_binomial(response, counts, np.ones(400), "frequency")
+    remedy = str(refused.value.__cause__)
+    assert "recurrence cells" in remedy and "frequency weights" in remedy and "offset" in remedy
+
+
 @pytest.mark.parametrize(
     ("response", "counts", "weights"),
     [
