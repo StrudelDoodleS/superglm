@@ -1051,6 +1051,39 @@ def test_binned_layout_derivatives_equal_the_dense_row_chunks(case, authority, m
         )
 
 
+def test_a_row_weight_past_float64_stops_the_derivative_not_the_fit(monkeypatch) -> None:
+    """Newton catches ``LamlDerivativeError`` and reports the derivative as unavailable; anything
+    else ends the fit. One row past float64's range forces each of the binned route's guards."""
+    from superglm.distributional._row_design import bounded_predictor_matrices
+    from superglm.distributional.smoothing.derivatives import LamlDerivativeWorkspace
+    from superglm.distributional.solver.binned_rows import BinnedRows
+
+    family, layout, y, plan, options = _binned_case("K2-lookup")
+    common = dict(dense_matrices=bounded_predictor_matrices(layout), **options)
+
+    workspace = LamlDerivativeWorkspace()
+    laml_derivatives(family, layout, y, plan, want_hessian=False, reuse=workspace, **common)
+    first = workspace._pass.first
+    first[0] = first[0].copy()
+    first[0][0] = np.inf
+    with pytest.raises(LamlDerivativeError, match="crossproduct"):
+        laml_derivatives(family, layout, y, plan, reuse=workspace, **common)
+
+    leverages = BinnedRows.leverages
+
+    def overflowing(self, inverse, slices):
+        blocks = leverages(self, inverse, slices).copy()
+        blocks[0] = np.inf
+        return blocks
+
+    monkeypatch.setattr(BinnedRows, "leverages", overflowing)
+    with (
+        np.errstate(invalid="ignore"),
+        pytest.raises(LamlDerivativeError, match="third derivative"),
+    ):
+        laml_derivatives(family, layout, y, plan, **common)
+
+
 @pytest.mark.parametrize("case", ["K2-lookup", "K3-lookup"])
 def test_row_blocks_of_the_family_derivatives_change_no_bit(case, monkeypatch) -> None:
     """A stacked family's third and fourth derivatives run in row blocks, which bound their
