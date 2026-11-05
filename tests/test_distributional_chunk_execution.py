@@ -226,7 +226,6 @@ _ARRAY_FAMILIES = (
     GaussianLS,
     GammaLS,
     LogNormalLS,
-    GeneralizedGammaLSS,
     GeneralizedParetoLSS,
     TwoPieceNormalLSS,
     TwoPieceLogNormalLSS,
@@ -348,6 +347,7 @@ def test_the_stream_pools_only_where_it_repays(monkeypatch, pools_rows, chunk_ro
 
 def test_only_the_compiled_families_pool_their_own_rows():
     assert TweedieLSS.pools_rows and NegativeBinomialLS.pools_rows
+    assert GeneralizedGammaLSS.pools_rows
     assert not any(getattr(family, "pools_rows", False) for family in _ARRAY_FAMILIES)
 
 

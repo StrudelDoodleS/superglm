@@ -206,6 +206,7 @@ def warmup() -> None:
     from superglm._tweedie_series import warmup as _warmup_tweedie_series
     from superglm.distributional.kernels._declared_bounds import _warmup_declared_bounds
     from superglm.distributional.kernels.gamma import _warmup_gamma
+    from superglm.distributional.kernels.generalized_gamma import _warmup_generalized_gamma
     from superglm.distributional.kernels.negative_binomial import _warmup_negative_binomial
     from superglm.distributional.kernels.tweedie import _warmup_tweedie
     from superglm.distributional.solver._ordinary_packing import _warmup_ordinary_packing
@@ -231,6 +232,7 @@ def warmup() -> None:
     _warmup_gamma()
     _warmup_declared_bounds()
     _warmup_negative_binomial()
+    _warmup_generalized_gamma()
     _warmup_leaf_kernels()
     _warmup_factor_smooth()
     from superglm._numba_compile import forget_compiles
