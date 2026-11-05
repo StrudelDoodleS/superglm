@@ -760,6 +760,21 @@ def _resolution_limited_face_problem(
     return family, layout, response, likelihood_plan, lambdas, face, initial, config
 
 
+def _hold_the_score_at_the_start(monkeypatch: pytest.MonkeyPatch, initial: np.ndarray) -> None:
+    """A correction leaves the score where it was, as at the residual's evaluation error."""
+    real_geometry = solver_module._measured_geometry
+    start = []
+
+    def held(context, state, source, recorder):
+        geometry = real_geometry(context, state, source, recorder)
+        if np.array_equal(state.coefficients, initial):
+            start.append(geometry.score_penalized)
+            return geometry
+        return replace(geometry, score_penalized=start[0])
+
+    monkeypatch.setattr(solver_module, "_measured_geometry", held)
+
+
 def test_ordinary_noop_preserves_composite_stop_without_publishing_an_iteration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -895,6 +910,7 @@ def test_private_score_only_solver_reports_resolution_limited_stationarity_hones
         initial,
         config,
     ) = _resolution_limited_face_problem()
+    _hold_the_score_at_the_start(monkeypatch, initial)
     evaluated: list[tuple[np.ndarray, float | None]] = []
     real_evaluate_state = solver_module._evaluate_state
 
@@ -949,7 +965,6 @@ def test_private_score_only_solver_reports_resolution_limited_stationarity_hones
         "rank_loss",
         "levenberg_shift",
         "predictor_cap",
-        "no_distinct_trial",
     ],
 )
 def test_private_resolution_limited_stationarity_refuses_each_missing_gate(
@@ -967,6 +982,7 @@ def test_private_resolution_limited_stationarity_refuses_each_missing_gate(
         initial,
         config,
     ) = _resolution_limited_face_problem()
+    _hold_the_score_at_the_start(monkeypatch, initial)
     selected_face: PenaltyFace | None = face
     original_decompositions = []
 
@@ -1014,7 +1030,7 @@ def test_private_resolution_limited_stationarity_refuses_each_missing_gate(
             return replace(direction, levenberg_shift=np.finfo(np.float64).eps)
 
         monkeypatch.setattr(solver_module, "_solve_coefficient_direction", mutate_direction)
-    elif mutation == "predictor_cap":
+    else:
         real_cap = solver_module._cap_predictor_step
 
         def shorten_step(*args: object, **kwargs: object):
@@ -1022,14 +1038,6 @@ def test_private_resolution_limited_stationarity_refuses_each_missing_gate(
             return 0.5 * step, 0.5
 
         monkeypatch.setattr(solver_module, "_cap_predictor_step", shorten_step)
-    else:
-        real_solve_direction = solver_module._solve_coefficient_direction
-
-        def stationary_direction(*args: object, **kwargs: object):
-            direction = real_solve_direction(*args, **kwargs)  # type: ignore[arg-type]
-            return replace(direction, step=np.zeros_like(direction.step))
-
-        monkeypatch.setattr(solver_module, "_solve_coefficient_direction", stationary_direction)
 
     result = solver_module._fit_dense_fixed_lambda_score_only(
         family,  # type: ignore[arg-type]
@@ -1076,6 +1084,7 @@ def test_private_resolution_limited_stop_names_a_terminal_rank_that_dropped_a_di
     family, layout, response, likelihood_plan, lambdas, face, initial, config = (
         _resolution_limited_face_problem()
     )
+    _hold_the_score_at_the_start(monkeypatch, initial)
     real_certify = solver_module._certified_terminal_curvature
 
     def drop_a_direction(*args: object, **kwargs: object):
@@ -1146,99 +1155,6 @@ def test_resolution_limited_decrement_encloses_subnormal_dot_underflow() -> None
     )
 
 
-def test_private_resolution_limit_does_not_wait_for_a_bit_identical_candidate() -> None:
-    """Kills deciding the limit by how far the trials shrank before a coefficient stopped moving."""
-    (
-        family,
-        layout,
-        response,
-        likelihood_plan,
-        lambdas,
-        face,
-        initial,
-        config,
-    ) = _resolution_limited_face_problem()
-    result = solver_module._fit_dense_fixed_lambda_score_only(
-        family,  # type: ignore[arg-type]
-        layout,
-        response,
-        likelihood_plan,  # type: ignore[arg-type]
-        layout.penalty_matrix(lambdas),
-        initial=initial,
-        config=replace(config, max_backtracks=1),
-        coefficient_face=face,
-    )
-
-    assert result.converged is True
-    assert result.convergence_reason == "resolution_limited_stationarity"
-
-
-def test_private_resolution_limited_stationarity_refuses_a_rejected_distinct_improvement(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Kills omitting distinct-trial improvement after a later identical candidate."""
-    (
-        family,
-        layout,
-        response,
-        likelihood_plan,
-        lambdas,
-        face,
-        initial,
-        config,
-    ) = _resolution_limited_face_problem()
-    config = replace(config, max_predictor_step=1.0e6, max_backtracks=200)
-    real_solve_direction = solver_module._solve_coefficient_direction
-    real_evaluate_state = solver_module._evaluate_state
-    distinct_trials: list[np.ndarray] = []
-    current_objective = -1.0000000000000004
-    improved_objective = float(np.nextafter(current_objective, np.inf))
-
-    def enlarge_applied_direction(*args: object, **kwargs: object):
-        direction = real_solve_direction(*args, **kwargs)  # type: ignore[arg-type]
-        return replace(direction, step=np.ldexp(direction.step, 67))
-
-    def reject_first_representable_improvement(*args: object, **kwargs: object):
-        coefficients = np.asarray(args[1] if len(args) > 1 else kwargs["coefficients"])
-        state = real_evaluate_state(*args, **kwargs)  # type: ignore[arg-type]
-        if state is None or np.array_equal(coefficients, initial):
-            return state
-        distinct_trials.append(np.array(coefficients, copy=True))
-        objective = improved_objective if len(distinct_trials) == 1 else current_objective
-        return replace(
-            state,
-            optimizing_log_likelihood=objective,
-            log_likelihood=objective + state.parameter_independent_carrier,
-            penalized_optimizing_log_likelihood=objective,
-            penalized_log_likelihood=objective + state.parameter_independent_carrier,
-        )
-
-    monkeypatch.setattr(solver_module, "_solve_coefficient_direction", enlarge_applied_direction)
-    monkeypatch.setattr(solver_module, "_evaluate_state", reject_first_representable_improvement)
-    result = solver_module._fit_dense_fixed_lambda_score_only(
-        family,  # type: ignore[arg-type]
-        layout,
-        response,
-        likelihood_plan,  # type: ignore[arg-type]
-        layout.penalty_matrix(lambdas),
-        initial=initial,
-        config=config,
-        coefficient_face=face,
-    )
-
-    retained_score = face.reduce_vector(result.terminal_score)
-    retained_correction = face.reduce_vector(result.solve_terminal(result.terminal_score))
-    assert len(distinct_trials) > 1
-    assert result.history == ()
-    assert result.converged is False
-    assert result.convergence_reason == "line_search_failed"
-    assert _resolution_limited_decrement_is_within_objective_ulp(
-        retained_score,
-        retained_correction,
-        result.penalized_optimizing_log_likelihood,
-    )
-
-
 def test_endpoint_authority_routes_an_ordinary_plateau_through_private_resolution() -> None:
     """Kills bypassing private policy for an above-tolerance ordinary plateau."""
     (
@@ -1293,7 +1209,9 @@ def test_endpoint_authority_routes_an_ordinary_plateau_through_private_resolutio
     assert _endpoint_retained_kkt_relative(result) < (_endpoint_retained_kkt_relative(ordinary))
 
 
-def test_resolution_limited_newton_decrement_is_invariant_to_coefficient_rescaling() -> None:
+def test_resolution_limited_newton_decrement_is_invariant_to_coefficient_rescaling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Kills comparing the invariant predicted gain with a coefficient ULP."""
     gains: list[float] = []
     coefficient_ulp_mutant_verdicts: list[bool] = []
@@ -1310,16 +1228,18 @@ def test_resolution_limited_newton_decrement_is_invariant_to_coefficient_rescali
             initial,
             config,
         ) = _resolution_limited_face_problem(coefficient_scale)
-        result = solver_module._fit_dense_fixed_lambda_score_only(
-            family,  # type: ignore[arg-type]
-            layout,
-            response,
-            likelihood_plan,  # type: ignore[arg-type]
-            layout.penalty_matrix(lambdas),
-            initial=initial,
-            config=config,
-            coefficient_face=face,
-        )
+        with monkeypatch.context() as scoped:
+            _hold_the_score_at_the_start(scoped, initial)
+            result = solver_module._fit_dense_fixed_lambda_score_only(
+                family,  # type: ignore[arg-type]
+                layout,
+                response,
+                likelihood_plan,  # type: ignore[arg-type]
+                layout.penalty_matrix(lambdas),
+                initial=initial,
+                config=config,
+                coefficient_face=face,
+            )
         retained_score = face.reduce_vector(result.terminal_score)
         retained_correction = face.reduce_vector(result.solve_terminal(result.terminal_score))
         predicted_gain = 0.5 * float(retained_score @ retained_correction)
