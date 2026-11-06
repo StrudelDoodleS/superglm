@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from superglm.distributional.families._links import BoundedLogitLink
+from superglm.distributional.families.tweedie import BoundedPowerLink
 from superglm.links import Link
 
 _WALLS = [(0.0, 1.0), (0.2, 0.3), (-0.9, 0.9), (0.0, 0.5), (0.5, 1.0)]
@@ -148,3 +149,46 @@ def test_the_link_is_exported_from_the_families_package():
 
     assert families.BoundedLogitLink is BoundedLogitLink
     assert "BoundedLogitLink" in families.__all__
+
+
+_UNIT_ROUNDOFF = np.finfo(float).eps / 2.0
+_WALL_ETAS = (-36.0, -30.0, -20.0, -10.0, -3.0, -0.7, 0.4, 3.0, 10.0, 20.0, 30.0, 36.0)
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        BoundedPowerLink(),
+        BoundedPowerLink(1.2, 1.7),
+    ],
+    ids=["power-default", "power-narrow"],
+)
+@pytest.mark.parametrize("eta", _WALL_ETAS)
+def test_inverse_derivatives_keep_their_digits_toward_both_walls(link, eta):
+    """Each derivative is within 32 u of mpmath, measured against ``span p q``.
+
+    One ``expit`` costs about four roundings and the factors multiply, so ``span p q`` carries
+    well under 16 u relative error; ``|q - p|``, ``|1 - 6 p q|`` and ``|1 - 12 p q|`` are at most
+    2, so the higher orders hold 32 u of the first derivative's size.  A complement formed as
+    ``1 - p`` loses ``u / q`` relative digits: 4e-2 at eta = 36.
+    """
+    mp = pytest.importorskip("mpmath")
+    with mp.workdps(60):
+        lower, upper = mp.mpf(link.lower), mp.mpf(link.upper)
+
+        def inverse(value):
+            return lower + (upper - lower) / (1 + mp.exp(-value))
+
+        references = [float(mp.diff(inverse, mp.mpf(eta), order)) for order in (1, 2, 3, 4)]
+    got = [
+        float(method(np.array([eta]))[0])
+        for method in (
+            link.deriv_inverse,
+            link.deriv2_inverse,
+            link.deriv3_inverse,
+            link.deriv4_inverse,
+        )
+    ]
+    bound = 32.0 * _UNIT_ROUNDOFF * abs(references[0])
+    for order, (value, reference) in enumerate(zip(got, references, strict=True), start=1):
+        assert abs(value - reference) <= bound, (order, value, reference)

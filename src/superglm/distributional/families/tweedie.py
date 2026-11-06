@@ -143,13 +143,16 @@ class BoundedPowerLink:
         return (self.upper - self.lower) / ((values - self.lower) * (self.upper - values))
 
     def deriv_inverse(self, eta: NDArray) -> NDArray[np.float64]:
-        probability = expit(np.asarray(eta, dtype=np.float64))
-        return (self.upper - self.lower) * probability * (1.0 - probability)
+        """``span p q`` with ``q = 1 - p`` formed as ``expit(-eta)``, exact near the upper wall."""
+        values = np.asarray(eta, dtype=np.float64)
+        return (self.upper - self.lower) * expit(values) * expit(-values)
 
     def deriv2_inverse(self, eta: NDArray) -> NDArray[np.float64]:
-        probability = expit(np.asarray(eta, dtype=np.float64))
-        first = (self.upper - self.lower) * probability * (1.0 - probability)
-        return first * (1.0 - 2.0 * probability)
+        """``span p q (q - p)`` with ``q = expit(-eta)``."""
+        values = np.asarray(eta, dtype=np.float64)
+        probability = expit(values)
+        complement = expit(-values)
+        return (self.upper - self.lower) * probability * complement * (complement - probability)
 
     def deriv3_inverse(self, eta: NDArray) -> NDArray[np.float64]:
         """``span p q (1 - 6 p q)`` with ``q = 1 - p`` formed as ``expit(-eta)``."""
