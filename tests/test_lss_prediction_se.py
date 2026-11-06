@@ -555,6 +555,93 @@ def test_the_bspline_kernel_gives_scipys_design_bits_inside_and_outside_the_knot
     np.testing.assert_array_equal(_basis_kernels.bspline_dense(x, knots, degree), reference)
 
 
+@pytest.mark.parametrize("degree", [1, 2, 3, 4])
+@pytest.mark.parametrize("repeated_interior", [False, True])
+def test_the_python_bspline_rows_are_the_kernels_rows_and_scipys_to_rounding(
+    degree, repeated_interior
+):
+    """A quote's rows are the kernel's bits (both run the same unfused operations in one order).
+
+    SciPy's own build may fuse a multiply and an add where the platform's compiler does, so
+    against SciPy the rows agree to a few ``u`` rather than in bits. Mutation check: dividing
+    through a reciprocal, ``step = p * (1 / (xb - xa))``, changes a share of the rows by an ulp
+    from the kernel's and fails the first assertion.
+    """
+    rng = np.random.default_rng(degree + 10)
+    interior = np.sort(rng.uniform(0.0, 1.0, 7))
+    if repeated_interior:
+        interior[3] = interior[2]
+    knots = np.r_[[0.0] * (degree + 1), interior, [1.0] * (degree + 1)]
+    x = np.r_[rng.uniform(-0.5, 1.5, 100), knots, 0.0, 1.0]
+    rows = _basis_kernels.bspline_dense_python(x, knots, degree)
+    np.testing.assert_array_equal(rows, _basis_kernels.bspline_dense(x, knots, degree))
+    reference = BSpline.design_matrix(x, knots, degree, extrapolate=True).toarray()
+    np.testing.assert_allclose(rows, reference, rtol=0.0, atol=8 * (degree + 1) * U)
+
+
+def test_the_python_cardinal_rows_are_the_kernels_rows_and_the_numpy_evaluation_to_rounding():
+    """Mutation check: writing ``t`` for ``a`` in the first ``+=`` fails both assertions."""
+    rng = np.random.default_rng(15)
+    knots = np.sort(rng.uniform(0.0, 1.0, 9))
+    second_derivative_map = rng.standard_normal((9, 9))
+    x = np.r_[rng.uniform(-0.2, 1.2, 100), knots]
+    rows = _basis_kernels.cardinal_dense_python(x, knots, second_derivative_map)
+    np.testing.assert_array_equal(
+        rows, _basis_kernels.cardinal_dense(x, knots, second_derivative_map)
+    )
+    reference = eval_cardinal_dense(x, knots, second_derivative_map)
+    np.testing.assert_allclose(rows, reference, rtol=0.0, atol=16 * U * np.abs(reference).max())
+
+
+def test_a_quote_compiles_no_basis_kernel_and_a_full_block_reads_them(monkeypatch):
+    """Work counts: a block reaches a kernel only from ``KERNEL_MIN_ROWS`` rows, so no compile or cache load.
+
+    Up to ``SCALAR_MAX_ROWS`` rows the Python rows are read, between the two the library's
+    evaluation. The rows are the same from any of them, to rounding (``basis @ R`` differs in its
+    last bit with the block's row count). Mutation checks: with ``KERNEL_MIN_ROWS`` zero, or the
+    size test taken out of ``_evaluations``, a quote reaches the kernels and the first assertion
+    fails; with ``KERNEL_MIN_ROWS`` past every frame the full block never does and the last
+    fails; with ``SCALAR_MAX_ROWS`` zero a quote never reads the Python rows.
+    """
+    import sys
+
+    kernels = _basis_kernels
+    assert kernels.SCALAR_MAX_ROWS < kernels.KERNEL_MIN_ROWS <= design_module.DESIGN_BLOCK_ROWS
+    model = _fit("spline cat re tensor", discrete=True)
+    reached: dict[str, list[str]] = {"kernel": [], "python": []}
+    for name, route in (
+        ("bspline_dense", "kernel"),
+        ("cardinal_dense", "kernel"),
+        ("bspline_dense_python", "python"),
+        ("cardinal_dense_python", "python"),
+    ):
+        original = getattr(kernels, name)
+
+        def spy(*args, _original=original, _route=route, **kwargs):
+            reached[_route].append(sys._getframe(1).f_code.co_name)
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(kernels, name, spy)
+    block, _ = _frame(kernels.KERNEL_MIN_ROWS, 21, wide=True)
+
+    def routes(rows: int) -> tuple[bool, bool]:
+        for read in reached.values():
+            read.clear()
+        model.predict_link(block.iloc[:rows], se_fit=True)
+        return bool(reached["python"]), bool(reached["kernel"])
+
+    assert routes(1) == (True, False) and routes(kernels.SCALAR_MAX_ROWS) == (True, False)
+    for rows in (kernels.SCALAR_MAX_ROWS + 1, 1000, kernels.KERNEL_MIN_ROWS - 1):
+        assert routes(rows) == (False, False)
+    assert routes(kernels.KERNEL_MIN_ROWS) == (False, True)
+    assert set(reached["kernel"]) == {"dense_basis", "dense_raw_basis"}
+    whole = model.predict_link(block).to_numpy()
+    tolerance = 64 * U * float(np.abs(whole).max())
+    for rows in (1, kernels.SCALAR_MAX_ROWS, 1000):
+        part = model.predict_link(block.iloc[:rows]).to_numpy()
+        np.testing.assert_allclose(part, whole[:rows], rtol=0.0, atol=tolerance)
+
+
 def test_the_cardinal_kernel_is_the_numpy_evaluation_to_rounding():
     rng = np.random.default_rng(5)
     knots = np.sort(rng.uniform(0.0, 1.0, 9))

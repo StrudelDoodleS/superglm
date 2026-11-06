@@ -12,15 +12,32 @@ SciPy's ``BSpline.design_matrix``; the cardinal cubic regression basis is the na
 form of Wood (2017, *Generalized Additive Models*, 2nd ed., section 5.3.1), agreeing with its
 NumPy evaluation to a few ulp. Fits keep the SciPy and NumPy
 evaluations; ``dense_basis`` and ``dense_raw_basis`` are for scoring and designs.
+
+A kernel compiles, or loads from Numba's cache, on the first call that reaches it, which costs
+more than a call below a design block gains. ``dense_basis`` and ``dense_raw_basis`` therefore
+choose by the rows of the block: up to ``SCALAR_MAX_ROWS`` rows (a quote) one row at a time in
+Python, with the kernel's operations in its order; below ``KERNEL_MIN_ROWS`` the SciPy and NumPy
+evaluation; a full design block the kernels. None of the first two needs a compile, and all three
+give the same rows.
 """
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from typing import Any
 
 import numpy as np
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
+
+#: Rows from which a block reads the compiled kernels: the prediction design block
+#: (``DESIGN_BLOCK_ROWS``), where a call gains more than its first compile or cache load costs
+#: within a few calls.
+KERNEL_MIN_ROWS = 8192
+#: Rows up to which a block is evaluated in Python, one row at a time: about 2 microseconds a row
+#: against about 25 for the SciPy sparse construction of any size. A whole prediction costs the
+#: same either way at 16 rows and more with the loop beyond.
+SCALAR_MAX_ROWS = 16
 
 
 @njit(cache=True, nogil=True, error_model="numpy")
@@ -99,6 +116,50 @@ def _cardinal_rows(x, knots, widths, second_derivative_map, out):
 _POOLED_ROW_KERNELS = (_bspline_rows, _cardinal_rows)
 
 
+def bspline_dense_python(x: NDArray, knots: NDArray, degree: int) -> NDArray[np.float64]:
+    """``bspline_dense`` for a few rows, in Python: the kernel's operations in its order."""
+    n_basis = len(knots) - degree - 1
+    knot_list = knots.tolist()
+    points = np.asarray(x, dtype=np.float64).ravel()
+    out = np.zeros((len(points), n_basis))
+    for i, xi in enumerate(points.tolist()):
+        span = min(max(bisect_right(knot_list, xi, degree, n_basis) - 1, degree), n_basis - 1)
+        h = [1.0] + [0.0] * degree
+        for j in range(1, degree + 1):
+            previous = h[:j]
+            h[0] = 0.0
+            for n in range(1, j + 1):
+                xb = knot_list[span + n]
+                xa = knot_list[span + n - j]
+                if xb == xa:
+                    h[n] = 0.0
+                    continue
+                step = previous[n - 1] / (xb - xa)
+                h[n - 1] = h[n - 1] + step * (xb - xi)
+                h[n] = step * (xi - xa)
+        out[i, span - degree : span + 1] = h
+    return out
+
+
+def cardinal_dense_python(x: NDArray, knots: NDArray, second_derivative_map: NDArray) -> NDArray:
+    """``cardinal_dense`` for a few rows, in Python: the kernel's operations in its order."""
+    n_knots = len(knots)
+    knot_list = knots.tolist()
+    points = np.asarray(x, dtype=np.float64).ravel()
+    out = np.empty((len(points), n_knots))
+    for i, xi in enumerate(points.tolist()):
+        j = min(max(bisect_right(knot_list, xi) - 1, 0), n_knots - 2)
+        h = knot_list[j + 1] - knot_list[j]
+        t = (xi - knot_list[j]) / h
+        a = 1.0 - t
+        c1 = h * h * (a * a * a - a) / 6.0
+        c2 = h * h * (t * t * t - t) / 6.0
+        out[i] = c1 * second_derivative_map[j] + c2 * second_derivative_map[j + 1]
+        out[i, j] += a
+        out[i, j + 1] += t
+    return out
+
+
 def bspline_dense(x: NDArray, knots: NDArray, degree: int) -> NDArray[np.float64]:
     """The ``(len(x), len(knots) - degree - 1)`` B-spline basis, extended past the end knots."""
     points = np.ascontiguousarray(x, dtype=np.float64).ravel()
@@ -131,8 +192,17 @@ def _evaluates_by_scipy(spec: Any, spline_base: type, *overrides: type) -> bool:
     return spec.extrapolation != "extend" and any(method is cls._basis_matrix for cls in overrides)
 
 
+def _evaluations(n_rows: int) -> tuple[Any, Any] | None:
+    """``(bspline, cardinal)`` for a block of ``n_rows`` rows, or ``None`` for the library's own."""
+    if n_rows >= KERNEL_MIN_ROWS:
+        return bspline_dense, cardinal_dense
+    if n_rows <= SCALAR_MAX_ROWS:
+        return bspline_dense_python, cardinal_dense_python
+    return None
+
+
 def dense_basis(spec: Any, x: NDArray) -> NDArray:
-    """``spec._basis_matrix(x).toarray()``, from the compiled kernels where the spec allows."""
+    """``spec._basis_matrix(x).toarray()``, from the kernels or the Python rows where the spec allows."""
     from superglm.features import _spline_runtime
     from superglm.features.spline import (
         CardinalCRSpline,
@@ -141,16 +211,18 @@ def dense_basis(spec: Any, x: NDArray) -> NDArray:
         _SplineBase,
     )
 
-    if getattr(spec, "_scop_Sigma", None) is not None:
+    evaluations = _evaluations(np.size(x))
+    if getattr(spec, "_scop_Sigma", None) is not None or evaluations is None:
         return spec._basis_matrix(x).toarray()  # a saved SCOP term keeps its exact route
+    bspline, cardinal = evaluations
     if type(spec) is CardinalCRSpline and spec.extrapolation != "extend":
         x_eval, _ = _spline_runtime.prepare_eval_points(spec, x)
-        rows = cardinal_dense(x_eval, spec._cr_knots, spec._cr_M)
+        rows = cardinal(x_eval, spec._cr_knots, spec._cr_M)
     elif isinstance(spec, _SplineBase) and _evaluates_by_scipy(
         spec, _SplineBase, CubicRegressionSpline, NaturalSpline
     ):
         x_eval, _ = _spline_runtime.prepare_eval_points(spec, x)
-        rows = bspline_dense(x_eval, spec._knots, spec.degree)
+        rows = bspline(x_eval, spec._knots, spec.degree)
     else:
         return spec._basis_matrix(x).toarray()
     # A non-finite row (a NaN covariate, a degenerate cardinal knot vector) is SciPy's and NumPy's to
@@ -162,15 +234,19 @@ def dense_raw_basis(evaluator: Any, x: NDArray) -> NDArray:
     """``evaluator(x)`` for a spec's ``_raw_basis_matrix`` and ``x`` inside its range."""
     from superglm.features.spline import CardinalCRSpline, _SplineBase
 
+    evaluations = _evaluations(np.size(x))
+    if evaluations is None:
+        return np.asarray(evaluator(x), dtype=np.float64)
+    bspline, cardinal = evaluations
     spec = getattr(evaluator, "__self__", None)
     rows = None
     if type(spec) is CardinalCRSpline:
-        rows = cardinal_dense(np.clip(x, spec._lo, spec._hi), spec._cr_knots, spec._cr_M)
+        rows = cardinal(np.clip(x, spec._lo, spec._hi), spec._cr_knots, spec._cr_M)
     elif (
         isinstance(spec, _SplineBase)
         and type(spec)._raw_basis_matrix is _SplineBase._raw_basis_matrix
     ):
-        rows = bspline_dense(np.clip(x, spec._lo, spec._hi), spec._knots, spec.degree)
+        rows = bspline(np.clip(x, spec._lo, spec._hi), spec._knots, spec.degree)
     if rows is not None and np.isfinite(rows).all():
         return rows
     return np.asarray(evaluator(x), dtype=np.float64)

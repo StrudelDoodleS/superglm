@@ -192,9 +192,10 @@ def warmup() -> None:
     later sessions load them from there.
 
     It compiles the kernels of every family and route, ``RandomEffect`` and
-    ``FactorSmooth`` terms included, and the two basis kernels a prediction
-    reads: about a minute on an empty cache, under a second against a filled
-    one. Kernels few fits reach compile on first use
+    ``FactorSmooth`` terms included, and the two basis kernels a prediction of
+    8,192 rows or more reads: about a minute on an empty cache, under a second
+    against a filled one. A smaller prediction compiles nothing, so a service
+    of quotes does not need it. Kernels few fits reach compile on first use
     instead and then join the cache: the third and fourth derivatives a
     ``SuperLSS`` fit needs only at a smoothing-parameter endpoint, a fit's
     diagnostics, and a few rarely run fallbacks. Numba keys its cache to the
