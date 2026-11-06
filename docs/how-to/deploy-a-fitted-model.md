@@ -302,6 +302,132 @@ pred = pipe.predict(score_df)
 That is why the fitted estimator, not a detached transformer, is the thing you
 deploy.
 
+## Running In A Cloud Function
+
+A function platform (Google Cloud Run functions, AWS Lambda, a Databricks
+serving endpoint) starts and stops the processes that run your code. It starts
+a new one after a deploy, when traffic rises past what the running ones can
+take, and after it has shut idle ones down. A request that reaches a process
+that is still starting waits for it: that wait is the cold start. Once the
+process is up it serves many requests, so work done once at start costs
+nothing per request.
+
+### Load the model once per instance, outside the handler
+
+Cloud Run functions run code at global scope once per instance
+([Cloud Run functions: tips](https://docs.cloud.google.com/functions/docs/samples/functions-tips-scopes)),
+and Lambda runs initialization code outside the handler once per execution
+environment
+([Lambda execution environments](https://docs.aws.amazon.com/lambda/latest/operatorguide/execution-environments.html)).
+Put `import superglm` and the model load there, and keep the handler to
+building the rows and predicting:
+
+```py
+import joblib
+import pandas as pd
+
+model = joblib.load("severity.joblib")  # runs once, when the instance starts
+
+
+def handler(request):
+    rows = pd.DataFrame(request.get_json()["rows"])
+    link, se = model.predict_link(rows, se_fit=True)
+    return {"link": link.to_dict("list"), "se": se.to_dict("list")}
+```
+
+### Keep a warm floor with the platform's own setting
+
+A minimum number of instances that the platform keeps running removes the cold
+start for requests that reach them. It does not remove it when traffic rises
+past the minimum, because the platform then starts new instances, and idle
+instances kept for the minimum are billed.
+
+- Cloud Run functions: set a minimum number of instances
+  ([Configure minimum instances](https://cloud.google.com/functions/1stgendocs/configuring/min-instances)).
+- AWS Lambda: configure provisioned concurrency, which keeps execution
+  environments initialized ahead of requests
+  ([Lambda execution environments](https://docs.aws.amazon.com/lambda/latest/operatorguide/execution-environments.html)).
+- Databricks model serving: set a minimum provisioned concurrency and leave
+  scale to zero off. Databricks does not recommend scale to zero for
+  production endpoints, and scaling up from zero usually takes 10 to 20
+  seconds
+  ([Create custom model serving endpoints](https://docs.databricks.com/aws/en/machine-learning/model-serving/create-manage-serving-endpoints)).
+
+### What a cold start costs
+
+Measured on one machine (AMD EPYC 9645, Python 3.13, Numba 0.68, one process
+on a shared 16-core host), for a fitted `SuperLSS` with three predictors and
+229 coefficients, whose file is 151 MiB:
+
+| Step | Time | Resident memory |
+|---|---|---|
+| `import superglm` | 0.004 s | 14 MiB |
+| `joblib.load` of the model, which imports numpy, pandas, SciPy and Numba | 0.8 to 0.9 s | 370 MiB |
+| first `predict_link` of one row | 3 ms | |
+| later `predict_link` of one row (median of 1,500 calls) | 0.9 ms | |
+| later `predict_link(..., se_fit=True)` of one row | 1.8 ms | |
+
+`import superglm` loads nothing until you use a name: plotting, scikit-learn,
+the diagnostics and the fitting code are imported when something asks for
+them. Loading the model is what imports the libraries a prediction needs, so
+that is where the time goes, and the figures do not change with the Numba
+cache.
+
+A prediction of fewer than 8,192 rows compiles nothing. From 8,192 rows up,
+with covariate values that differ from row to row, the first call compiles two
+small kernels: 0.14 s when Numba's cache holds them and 0.65 s when it does
+not. A function that scores single quotes or small batches never reaches them,
+and needs nothing from the next section.
+
+### Ship Numba's cache for large batches
+
+Run one `predict_link` on a batch of 8,192 rows or more, whose numeric values
+differ from row to row, while the image is built, with `NUMBA_CACHE_DIR` set,
+and ship the directory in the image. The cache then holds the two kernels,
+about 100 KiB. Numba keys it
+to the CPU model and features, to the file's contents and to the path superglm
+is installed at; see the
+[Numba notes on caching](https://numba.readthedocs.io/en/stable/developer/caching.html)
+and the how-to *Starting fast on ephemeral clusters* for the same keys at
+cluster scale.
+
+Numba needs a directory it can write to, even to read a cache that is already
+full. On a read-only file system, loading the model stops with `RuntimeError:
+cannot cache function ...: no locator available`, whether `NUMBA_CACHE_DIR`
+names a full cache or names nothing. AWS Lambda container images run on a
+read-only file system with a writable `/tmp`
+([Lambda container images](https://docs.aws.amazon.com/lambda/latest/dg/images-create.html)),
+and on Cloud Run functions the directory holding your source is read-only while
+the temporary directory is an in-memory file system
+([Cloud Run functions execution environment](https://cloud.google.com/functions/docs/concepts/execution-environment),
+[best practices](https://docs.cloud.google.com/run/docs/tips/functions-best-practices)).
+Copy the shipped cache into the writable directory before anything imports
+superglm, and point Numba at the copy:
+
+```py
+import os
+import shutil
+
+shutil.copytree("/opt/numba-cache", "/tmp/numba-cache", dirs_exist_ok=True)
+os.environ["NUMBA_CACHE_DIR"] = "/tmp/numba-cache"
+
+import superglm  # noqa: E402
+```
+
+Measured on a read-only file system with the cache copied to the temporary
+directory this way, the first prediction of 8,192 rows took 0.14 s, against
+0.61 s when no cache had been shipped.
+
+A cache built on one CPU model is not read on another, and a platform may start
+your function on either. The Numba documentation names `NUMBA_CPU_NAME` for a
+cache that has to be read on other CPUs
+([environment variables](https://numba.readthedocs.io/en/stable/reference/envvars.html)).
+Setting `NUMBA_CPU_NAME=generic` when the cache is built and again when the
+function runs worked here: a process that set it read the cache in 0.18 s
+instead of compiling in 0.49 s, a process that did not set it ignored the cache,
+and the 638,007-row prediction took the same 0.54 s with the generic cache as
+with the default one. We have not tried a second CPU model.
+
 ## Executable Round-Trip Checks
 
 ```bash
