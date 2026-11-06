@@ -90,10 +90,11 @@ def channels(jets: tuple[NDArray[np.float64], ...]) -> tuple:
 # magnitude.  Below ``_MAX_INPUT`` a product of at most four reciprocals of inputs, the smallest
 # factor an entry of the order-two jet carries, is at least ``2^-800``, so the powers of the
 # inputs stay finite and normal.  Above ``_MIN_INPUT`` a numerator (an input, or the difference of
-# two, at least a unit in the last place of the smaller one, ``2^-252``) over two squared inputs
-# is at least ``2^-852``, so the partial product an entry forms before its large reciprocal
-# factors multiply it back stays normal.  An input outside the range could leave that product
-# subnormal or zero, where an array route rescales it.
+# two, at least a unit in the last place of the smaller one, ``2^-252``) times an input over a
+# squared input (at least ``2^-600``, as in Gamma's ``weight (mean - y) / mean^2``) is at least
+# ``2^-852``, so the partial product an entry forms before its large reciprocal factors multiply
+# it back stays normal.  An input outside the range could leave that product subnormal or zero,
+# where an array route rescales it.
 _MAX_INPUT = 2.0**200
 _MIN_INPUT = 2.0**-200
 

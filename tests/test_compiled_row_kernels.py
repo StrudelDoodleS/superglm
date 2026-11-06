@@ -385,12 +385,22 @@ def test_a_long_recurrence_is_summed_as_accurately_as_the_array_rows_sum_it(monk
 
 
 @pytest.mark.parametrize(("count", "tolerance"), [(10**7, 1e-8), (10**8, 1e-6)])
-def test_a_long_recurrence_keeps_the_size_curvature(count, tolerance):
-    """The same row at ``10^7`` and ``10^8`` terms: the log-size Hessian reads within ``tolerance``
-    of its mpmath value near ``-1/8``.  Plain left-to-right sums are off by 5e-6 and 9e-5 here, and
-    the array route by 3e-7 and 6e-7.  Mutation checks: a plain loop fails both rows, and blocks
-    joined by a plain add instead of ``TwoSum`` fail the first."""
+def test_a_long_recurrence_keeps_the_size_curvature(monkeypatch, count, tolerance):
+    """The same row at ``10^7`` and ``10^8`` terms, served by the compiled route: the log-size
+    Hessian reads within ``tolerance`` of its mpmath value near ``-1/8``.  Plain left-to-right sums
+    are off by 5e-6 and 9e-5 here, and the array route by 3e-7 and 6e-7.  Mutation checks: a plain
+    loop fails both rows, blocks joined by a plain add instead of ``TwoSum`` fail the first, and a
+    compiled route that declined the row fails both."""
+    route, served = nb_kernel._compiled_rows, []
+
+    def recorded(*args, **kwargs):
+        result = route(*args, **kwargs)
+        served.append(result is not None)
+        return result
+
+    monkeypatch.setattr(nb_kernel, "_compiled_rows", recorded)
     _, _, log_size = _size_channels(_long_row_call(count)(), float(count))
+    assert served and all(served)
     assert log_size == pytest.approx(_size_channels_exact(count, count, count)[2], rel=tolerance)
 
 
