@@ -392,17 +392,27 @@ and the how-to *Starting fast on ephemeral clusters* for the same keys at
 cluster scale.
 
 Numba needs a directory it can write to, even to read a cache that is already
-full. On a read-only file system, loading the model stops with `RuntimeError:
-cannot cache function ...: no locator available`, whether `NUMBA_CACHE_DIR`
-names a full cache or names nothing. AWS Lambda container images run on a
-read-only file system with a writable `/tmp`
+full. AWS Lambda container images run on a read-only file system with a
+writable `/tmp`
 ([Lambda container images](https://docs.aws.amazon.com/lambda/latest/dg/images-create.html)),
 and on Cloud Run functions the directory holding your source is read-only while
 the temporary directory is an in-memory file system
 ([Cloud Run functions execution environment](https://cloud.google.com/functions/docs/concepts/execution-environment),
 [best practices](https://docs.cloud.google.com/run/docs/tips/functions-best-practices)).
-Copy the shipped cache into the writable directory before anything imports
-superglm, and point Numba at the copy:
+
+When `NUMBA_CACHE_DIR` is not set and neither the directory superglm is
+installed in nor your user cache directory can be written to, `import superglm`
+makes a new directory in the temporary directory, readable and writable by you
+alone, points Numba at it, and removes it when the process exits. Loading the
+model works with no setting from you. Nothing Numba compiles outlives the
+process, so the first prediction of 8,192 rows or more compiles its two kernels
+(0.65 s), and a function that scores single quotes or small batches is not
+affected. superglm never changes a `NUMBA_CACHE_DIR` you set, and a directory
+you name there has to be one you can write to.
+
+To keep the benefit of a shipped cache on such a platform, copy it into the
+writable directory before anything imports superglm, and point Numba at the
+copy:
 
 ```py
 import os

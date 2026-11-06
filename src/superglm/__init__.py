@@ -25,6 +25,7 @@ sklearn-compatible API:
 
 import typing as _typing
 
+from superglm import _numba_cache
 from superglm._lazy import attach
 
 if _typing.TYPE_CHECKING:
@@ -330,6 +331,10 @@ _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
         "loss_ratio_chart",
     ),
 }
+
+# A process with no directory Numba can write its compile cache to gets a private temporary one;
+# this runs before anything imports Numba (``superglm._numba_cache``).
+_numba_cache.ensure_cache_location()
 
 __getattr__, __dir__ = attach(__name__, __path__, _LAZY_EXPORTS)
 
