@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from types import MappingProxyType
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -38,11 +40,14 @@ from superglm.distributional.observation import (
     unvalidated_bound_arrays,
 )
 from superglm.distributional.prediction_design import (
+    DESIGN_BLOCK_ROWS,
+    ROW_INDEPENDENT_TERMS,
     _as_contribution,
     _score_feature,
     _score_interaction,
     _term_indices,
     group_level_values,
+    label_columns,
     warn_population_levels,
 )
 from superglm.distributional.predictor import (
@@ -169,36 +174,94 @@ def _prediction_offsets(
     return result
 
 
-def _predict_one_eta(
+@dataclass(frozen=True)
+class _EtaTask:
+    """One term's contribution over ``rows`` of the frame: ``run()`` is ``(values, levels)``."""
+
+    term: str
+    rows: slice
+    run: Callable[[], tuple[NDArray, list]]
+
+
+def _score_term(
+    term: str,
+    n_rows: int,
+    score: Callable[[], NDArray],
+    levels: list | None = None,
+) -> tuple[NDArray, list]:
+    values = score()
+    return _as_contribution(values, n_observations=n_rows, term_name=term), levels or []
+
+
+def _level_effects(effects: NDArray, columns: NDArray) -> NDArray:
+    """``effects`` at each row's column, the last (zero) entry for a row with none."""
+    return effects[columns]
+
+
+def _eta_tasks(
     frame: EagerFrame,
     predictor: CompiledPredictor,
     layout: StackedLayout,
     coefficients: NDArray[np.float64],
-    offset: NDArray,
-    named: list[str] | None = None,
-) -> NDArray[np.float64]:
+    spans: Sequence[slice] | None = None,
+    labels: Mapping[tuple[str, str], NDArray] | None = None,
+) -> list[_EtaTask]:
+    """The scoring tasks of one predictor, in the order its terms are added to eta.
+
+    ``spans`` splits each term made of numeric covariates alone (``ROW_INDEPENDENT_TERMS``) into
+    row ranges that can be scored on any thread; every other term is one task over the frame.
+    """
     state = layout.predictors[predictor.parameter_index]
-    local_coefficients = coefficients[state.coefficient_slice]
     intercept_width = int(state.intercept_index is not None)
-    slopes = local_coefficients[intercept_width:]
-    eta = np.zeros(len(frame), dtype=np.float64)
+    slopes = coefficients[state.coefficient_slice][intercept_width:]
+    whole = slice(0, len(frame))
+    tasks: list[_EtaTask] = []
     assigned = np.zeros(len(slopes), dtype=np.bool_)
+
+    def ranges(spec: Any) -> Sequence[slice]:
+        return spans if spans and type(spec) in ROW_INDEPENDENT_TERMS else (whole,)
 
     for name in predictor.compiled.feature_order:
         indices = _term_indices(predictor.compiled.groups, name)
-        contribution = _score_feature(
-            predictor.compiled.specs[name],
-            frame.column_array(name),
-            slopes[indices],
-        )
-        eta += _as_contribution(contribution, n_observations=len(frame), term_name=name)
+        spec = predictor.compiled.specs[name]
+        column, beta = frame.column_array(name), slopes[indices]
+        coded = None if labels is None else labels.get((predictor.name, name))
+        if coded is not None:
+            # a label term's rows are its level effects, read from the frame's codes
+            tasks.append(
+                _EtaTask(
+                    name,
+                    whole,
+                    partial(
+                        _score_term,
+                        name,
+                        len(frame),
+                        partial(_level_effects, np.append(beta, 0.0), coded),
+                    ),
+                )
+            )
+            assigned[indices] = True
+            continue
+        for rows in ranges(spec):
+            values = column[rows]
+            tasks.append(
+                _EtaTask(
+                    name,
+                    rows,
+                    partial(
+                        _score_term,
+                        name,
+                        len(values),
+                        partial(_score_feature, spec, values, beta),
+                    ),
+                )
+            )
         assigned[indices] = True
 
     for name in predictor.compiled.interaction_order:
         interaction = predictor.compiled.interaction_specs[name]
         indices = _term_indices(predictor.compiled.groups, name)
         left_name, right_name = interaction.parent_names
-        levels: list = []
         group = getattr(interaction, "group", None)
         constants = (
             group_level_values(
@@ -207,31 +270,125 @@ def _predict_one_eta(
             if group in predictor.compiled.feature_order
             else None
         )
-        contribution = _score_interaction(
-            interaction,
-            frame.column_array(left_name),
-            frame.column_array(right_name),
-            slopes[indices],
-            named=levels,
-            level_constants=constants,
-        )
-        if levels and named is not None:
-            named.append(f"{predictor.name} term {name!r} levels {', '.join(map(str, levels))}")
-        eta += _as_contribution(contribution, n_observations=len(frame), term_name=name)
+        left, right = frame.column_array(left_name), frame.column_array(right_name)
+        for rows in ranges(interaction):
+            levels: list = []
+            tasks.append(
+                _EtaTask(
+                    name,
+                    rows,
+                    partial(
+                        _score_term,
+                        name,
+                        rows.stop - rows.start,
+                        partial(
+                            _score_interaction,
+                            interaction,
+                            left[rows],
+                            right[rows],
+                            slopes[indices],
+                            named=levels,
+                            level_constants=constants,
+                        ),
+                        levels,
+                    ),
+                )
+            )
         assigned[indices] = True
 
     if not np.all(assigned):
         missing = np.flatnonzero(~assigned).tolist()
         raise RuntimeError(f"prediction plan did not assign local coefficient columns {missing}")
+    return tasks
+
+
+def _assemble_eta(
+    predictor: CompiledPredictor,
+    layout: StackedLayout,
+    coefficients: NDArray[np.float64],
+    offset: NDArray,
+    tasks: Sequence[_EtaTask],
+    results: Sequence[tuple[NDArray, list]],
+    n_rows: int,
+    named: list[str] | None,
+) -> NDArray[np.float64]:
+    state = layout.predictors[predictor.parameter_index]
+    local_coefficients = coefficients[state.coefficient_slice]
+    intercept_width = int(state.intercept_index is not None)
+    eta = np.zeros(n_rows, dtype=np.float64)
+    for task, (contribution, levels) in zip(tasks, results, strict=True):
+        if levels and named is not None:
+            named.append(
+                f"{predictor.name} term {task.term!r} levels {', '.join(map(str, levels))}"
+            )
+        eta[task.rows] += contribution
     # Match geometry, value screens and terminal materialization: accumulate
     # the ordered slopes first, then add the intercept and finally the offset.
     if intercept_width:
-        if len(slopes):
+        if len(local_coefficients) > 1:
             eta += local_coefficients[0]
         else:
             eta[:] = local_coefficients[0]
     eta += offset
     return _readonly(eta)
+
+
+def _predict_one_eta(
+    frame: EagerFrame,
+    predictor: CompiledPredictor,
+    layout: StackedLayout,
+    coefficients: NDArray[np.float64],
+    offset: NDArray,
+    named: list[str] | None = None,
+) -> NDArray[np.float64]:
+    tasks = _eta_tasks(frame, predictor, layout, coefficients)
+    results = [task.run() for task in tasks]
+    return _assemble_eta(predictor, layout, coefficients, offset, tasks, results, len(frame), named)
+
+
+#: Frames of at least this many rows are scored on the worker pool; a smaller one, which is every
+#: quote, runs inline and starts no thread.
+POOLED_PREDICTION_ROWS = 2 * DESIGN_BLOCK_ROWS
+
+
+def _predict_eta_pooled(
+    frame: EagerFrame,
+    predictors: Sequence[CompiledPredictor],
+    layout: StackedLayout,
+    coefficients: NDArray[np.float64],
+    offsets: Mapping[str, NDArray],
+    named: list[str],
+) -> NDArray[np.float64]:
+    """Every predictor's eta, its terms scored side by side on ``superglm``'s pool.
+
+    Row-range tasks do not depend on the worker count and each row's terms are added in the order
+    ``_predict_one_eta`` adds them, so the result is the same at any ``n_jobs``; a label term is
+    one task over the frame, so it checks its levels and warns once for the frame.
+    """
+    from superglm._parallel import pooled_for
+
+    n = len(frame)
+    spans = [slice(lo, min(lo + DESIGN_BLOCK_ROWS, n)) for lo in range(0, n, DESIGN_BLOCK_ROWS)]
+    labels = label_columns(frame, predictors)
+    per_predictor = [_eta_tasks(frame, p, layout, coefficients, spans, labels) for p in predictors]
+    flat = [task for tasks in per_predictor for task in tasks]
+    results = pooled_for(lambda task: task.run(), flat, DESIGN_BLOCK_ROWS * 8 * 16)
+    columns, start = [], 0
+    for predictor, tasks in zip(predictors, per_predictor, strict=True):
+        columns.append(
+            _assemble_eta(
+                predictor,
+                layout,
+                coefficients,
+                offsets[predictor.name],
+                tasks,
+                results[start : start + len(tasks)],
+                n,
+                named,
+            )
+        )
+        start += len(tasks)
+    return np.column_stack(columns)
 
 
 @dataclass(frozen=True)
@@ -375,19 +532,24 @@ class DenseDistributionalModel:
         )
         frame.require_columns(required_columns)
         named: list[str] = []
-        eta = np.column_stack(
-            tuple(
-                _predict_one_eta(
-                    frame,
-                    predictor,
-                    self.layout,
-                    coefficients,
-                    resolved_offsets[predictor.name],
-                    named,
-                )
-                for predictor in self.compiled_predictors
+        if len(frame) >= POOLED_PREDICTION_ROWS:
+            eta = _predict_eta_pooled(
+                frame, self.compiled_predictors, self.layout, coefficients, resolved_offsets, named
             )
-        )
+        else:
+            eta = np.column_stack(
+                tuple(
+                    _predict_one_eta(
+                        frame,
+                        predictor,
+                        self.layout,
+                        coefficients,
+                        resolved_offsets[predictor.name],
+                        named,
+                    )
+                    for predictor in self.compiled_predictors
+                )
+            )
         warn_population_levels(named)
         return _readonly(eta)
 

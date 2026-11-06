@@ -39,7 +39,9 @@ family defines its own default prediction quantity.
 parameter on its natural scale, one column per name in
 {py:attr}`~superglm.SuperLSS.parameter_names_`, and
 {py:meth}`~superglm.SuperLSS.predict_link` the same columns on the link scale,
-offsets included. {py:meth}`~superglm.SuperLSS.predict_cdf` and
+offsets included. `predict_link(book, se_fit=True)` also returns each column's
+standard error: exact, with no simulation, and quick enough to price a whole
+book row by row. {py:meth}`~superglm.SuperLSS.predict_cdf` and
 {py:meth}`~superglm.SuperLSS.predict_quantile` evaluate the fitted law per
 row. For uncertainty by simulation,
 {py:meth}`~superglm.SuperLSS.posterior_draws` draws coefficients from the

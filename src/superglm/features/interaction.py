@@ -25,6 +25,7 @@ import scipy.sparse as sp
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
+from superglm.features import _basis_kernels
 from superglm.features._spline_config import SplineOptionWarning
 from superglm.features._spline_penalties import _gapped_rank, structural_penalty_ranks
 from superglm.features._spline_select import _certified_range, _null_mask
@@ -1992,6 +1993,7 @@ def _range_spread(margin: TensorMarginalInfo) -> float:
 
 _TENSOR_SCORE_CHUNK_SIZE = 8192
 _TENSOR_SCORE_SAMPLE_SIZE = 4096
+_SMALL_FRAME_ROWS = 16
 _MAX_TENSOR_SCORE_SUPPORT_CELLS = 2_000_000
 
 
@@ -2217,11 +2219,13 @@ class TensorInteraction:
             return marginal_ingredients(clone)
         return marginal_ingredients(spec)
 
-    def _centered_marginal_basis(self, x: NDArray, info: TensorMarginalInfo) -> sp.csr_matrix:
+    def _centered_marginal_dense(self, x: NDArray, info: TensorMarginalInfo) -> NDArray:
         x = np.asarray(x, dtype=np.float64).ravel()
         x_clip = np.clip(x, info.lo, info.hi)
-        B = np.asarray(info.raw_basis_eval(x_clip), dtype=np.float64)
-        return sp.csr_matrix(B @ info.projection)
+        return _basis_kernels.dense_raw_basis(info.raw_basis_eval, x_clip) @ info.projection
+
+    def _centered_marginal_basis(self, x: NDArray, info: TensorMarginalInfo) -> sp.csr_matrix:
+        return sp.csr_matrix(self._centered_marginal_dense(x, info))
 
     def _prepare_marginal_infos(
         self,
@@ -2551,15 +2555,25 @@ class TensorInteraction:
         self._R_inv = R_inv
 
     def transform(self, x1: NDArray, x2: NDArray) -> NDArray:
+        """Design rows: the row-wise Kronecker product of the margins, times ``R_inv``.
+
+        A margin has at most ``degree + 1`` entries per row, but the product with ``R_inv`` is a
+        dense matrix product anyway, so each chunk of rows forms the dense Kronecker rows and
+        multiplies them with one BLAS call, in the memory of one chunk.
+        """
         x1 = np.asarray(x1, dtype=np.float64).ravel()
         x2 = np.asarray(x2, dtype=np.float64).ravel()
-        B1 = self._centered_marginal_basis(x1, self._marginal1)
-        B2 = self._centered_marginal_basis(x2, self._marginal2)
-        T = _row_kron(B1, B2)
-
-        if self._R_inv is not None:
-            return T @ self._R_inv
-        return T.toarray()
+        if x1.shape != x2.shape:
+            raise ValueError("tensor interaction margins must have the same number of rows")
+        width = self._p1 * self._p2 if self._R_inv is None else self._R_inv.shape[1]
+        design = np.empty((len(x1), width), dtype=np.float64)
+        for start in range(0, len(x1), _TENSOR_SCORE_CHUNK_SIZE):
+            stop = min(start + _TENSOR_SCORE_CHUNK_SIZE, len(x1))
+            B1 = self._centered_marginal_dense(x1[start:stop], self._marginal1)
+            B2 = self._centered_marginal_dense(x2[start:stop], self._marginal2)
+            rows = (B1[:, :, None] * B2[:, None, :]).reshape(stop - start, -1)
+            design[start:stop] = rows if self._R_inv is None else rows @ self._R_inv
+        return design
 
     def score(self, x1: NDArray, x2: NDArray, beta: NDArray) -> NDArray:
         """Score the tensor interaction without materialising the row-Kronecker block."""
@@ -2579,9 +2593,12 @@ class TensorInteraction:
         sample_step = max(1, len(x1) // _TENSOR_SCORE_SAMPLE_SIZE)
         sample1 = x1[::sample_step][:_TENSOR_SCORE_SAMPLE_SIZE]
         sample2 = x2[::sample_step][:_TENSOR_SCORE_SAMPLE_SIZE]
-        repeated_support = np.unique(sample1).size <= max(1, sample1.size // 2) and np.unique(
-            sample2
-        ).size <= max(1, sample2.size // 2)
+        # A quote of a few rows has nothing to share: the chunk path below scores it directly.
+        repeated_support = (
+            len(x1) > _SMALL_FRAME_ROWS
+            and np.unique(sample1).size <= max(1, sample1.size // 2)
+            and np.unique(sample2).size <= max(1, sample2.size // 2)
+        )
         if repeated_support:
             support1, inverse1 = np.unique(x1, return_inverse=True)
             support2, inverse2 = np.unique(x2, return_inverse=True)
@@ -2611,19 +2628,13 @@ class TensorInteraction:
         result = np.empty(len(x1), dtype=np.float64)
         for start in range(0, len(x1), _TENSOR_SCORE_CHUNK_SIZE):
             stop = min(start + _TENSOR_SCORE_CHUNK_SIZE, len(x1))
-            B1 = self._centered_marginal_basis(x1[start:stop], self._marginal1)
-            B2 = self._centered_marginal_basis(x2[start:stop], self._marginal2)
+            B1 = self._centered_marginal_dense(x1[start:stop], self._marginal1)
+            B2 = self._centered_marginal_dense(x2[start:stop], self._marginal2)
 
             if self._p1 <= self._p2:
-                tmp = np.asarray(B1 @ C, dtype=np.float64)
-                result[start:stop] = np.asarray(
-                    B2.multiply(tmp).sum(axis=1), dtype=np.float64
-                ).ravel()
+                result[start:stop] = np.einsum("ij,ij->i", B1 @ C, B2)
             else:
-                tmp = np.asarray(B2 @ C.T, dtype=np.float64)
-                result[start:stop] = np.asarray(
-                    B1.multiply(tmp).sum(axis=1), dtype=np.float64
-                ).ravel()
+                result[start:stop] = np.einsum("ij,ij->i", B2 @ C.T, B1)
 
         return result
 

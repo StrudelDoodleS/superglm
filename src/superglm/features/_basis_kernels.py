@@ -1,0 +1,183 @@
+"""Dense spline-basis rows for prediction, from compiled kernels that release the GIL.
+
+A prediction design needs the basis rows themselves, dense and short (``K`` columns), so the
+detour through a SciPy sparse matrix and back costs more than the arithmetic: SciPy builds
+index arrays and a CSR for a row block that is then ``toarray``-ed. These kernels write the
+rows straight into the output, one row at a time, so row blocks run on threads
+(``_parallel.pooled_map``) without the interpreter serialising them.
+
+Cox and de Boor's recurrence in Dierckx's order (1993, *Curve and Surface Fitting with Splines*,
+routine ``fpbspl``) gives the ``degree + 1`` nonzero B-spline values of a row, the same bits as
+SciPy's ``BSpline.design_matrix``; the cardinal cubic regression basis is the natural-spline
+form of Wood (2017, *Generalized Additive Models*, 2nd ed., section 5.3.1), agreeing with its
+NumPy evaluation to a few ulp. Fits keep the SciPy and NumPy
+evaluations; ``dense_basis`` and ``dense_raw_basis`` are for scoring and designs.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import numpy as np
+from numba import njit  # type: ignore[import-untyped]
+from numpy.typing import NDArray
+
+
+@njit(cache=True, nogil=True, error_model="numpy")
+def _bspline_rows(x, knots, degree, n_basis, out):
+    h = np.empty(degree + 2)
+    previous = np.empty(degree + 1)
+    for i in range(x.shape[0]):
+        xi = x[i]
+        # The span with knots[mu] <= x < knots[mu + 1], clamped to the first and last interior
+        # spans: the right end point and any extrapolated point read the end polynomial.
+        low = degree
+        high = n_basis
+        while low < high:
+            middle = (low + high) >> 1
+            if knots[middle] <= xi:
+                low = middle + 1
+            else:
+                high = middle
+        span = low - 1
+        if span < degree:
+            span = degree
+        if span > n_basis - 1:
+            span = n_basis - 1
+        # Dierckx's ``fpbspl`` order of operations, the one SciPy's ``design_matrix`` performs,
+        # so a row is the same bits; a repeated knot gives a zero term, never a division by zero.
+        h[0] = 1.0
+        for j in range(1, degree + 1):
+            for n in range(j):
+                previous[n] = h[n]
+            h[0] = 0.0
+            for n in range(1, j + 1):
+                xb = knots[span + n]
+                xa = knots[span + n - j]
+                if xb == xa:
+                    h[n] = 0.0
+                    continue
+                step = previous[n - 1] / (xb - xa)
+                h[n - 1] = h[n - 1] + step * (xb - xi)
+                h[n] = step * (xi - xa)
+        for k in range(n_basis):
+            out[i, k] = 0.0
+        for k in range(degree + 1):
+            out[i, span - degree + k] = h[k]
+
+
+@njit(cache=True, nogil=True, error_model="numpy")
+def _cardinal_rows(x, knots, widths, second_derivative_map, out):
+    n_knots = knots.shape[0]
+    for i in range(x.shape[0]):
+        xi = x[i]
+        low = 0
+        high = n_knots
+        while low < high:
+            middle = (low + high) >> 1
+            if knots[middle] <= xi:
+                low = middle + 1
+            else:
+                high = middle
+        j = low - 1
+        if j < 0:
+            j = 0
+        if j > n_knots - 2:
+            j = n_knots - 2
+        h = widths[j]
+        t = (xi - knots[j]) / h
+        a = 1.0 - t
+        c1 = h * h * (a * a * a - a) / 6.0
+        c2 = h * h * (t * t * t - t) / 6.0
+        for k in range(n_knots):
+            out[i, k] = c1 * second_derivative_map[j, k] + c2 * second_derivative_map[j + 1, k]
+        out[i, j] += a
+        out[i, j + 1] += t
+
+
+#: The kernels a pooled section runs on its helper threads (``nogil``, never ``prange``).
+_POOLED_ROW_KERNELS = (_bspline_rows, _cardinal_rows)
+
+
+def bspline_dense(x: NDArray, knots: NDArray, degree: int) -> NDArray[np.float64]:
+    """The ``(len(x), len(knots) - degree - 1)`` B-spline basis, extended past the end knots."""
+    points = np.ascontiguousarray(x, dtype=np.float64).ravel()
+    n_basis = len(knots) - degree - 1
+    out = np.empty((len(points), n_basis), dtype=np.float64)
+    _bspline_rows(points, np.ascontiguousarray(knots, dtype=np.float64), degree, n_basis, out)
+    return out
+
+
+def cardinal_dense(x: NDArray, knots: NDArray, second_derivative_map: NDArray) -> NDArray:
+    """The ``(len(x), len(knots))`` cardinal cubic regression basis."""
+    points = np.ascontiguousarray(x, dtype=np.float64).ravel()
+    knot_values = np.ascontiguousarray(knots, dtype=np.float64)
+    out = np.empty((len(points), len(knot_values)), dtype=np.float64)
+    _cardinal_rows(
+        points,
+        knot_values,
+        np.diff(knot_values),
+        np.ascontiguousarray(second_derivative_map, dtype=np.float64),
+        out,
+    )
+    return out
+
+
+def _evaluates_by_scipy(spec: Any, spline_base: type, *overrides: type) -> bool:
+    """Whether ``spec._basis_matrix`` is the SciPy B-spline design (``extend`` aside)."""
+    method = type(spec)._basis_matrix
+    if method is spline_base._basis_matrix:
+        return True
+    return spec.extrapolation != "extend" and any(method is cls._basis_matrix for cls in overrides)
+
+
+def dense_basis(spec: Any, x: NDArray) -> NDArray:
+    """``spec._basis_matrix(x).toarray()``, from the compiled kernels where the spec allows."""
+    from superglm.features import _spline_runtime
+    from superglm.features.spline import (
+        CardinalCRSpline,
+        CubicRegressionSpline,
+        NaturalSpline,
+        _SplineBase,
+    )
+
+    if getattr(spec, "_scop_Sigma", None) is not None:
+        return spec._basis_matrix(x).toarray()  # a saved SCOP term keeps its exact route
+    if type(spec) is CardinalCRSpline and spec.extrapolation != "extend":
+        x_eval, _ = _spline_runtime.prepare_eval_points(spec, x)
+        rows = cardinal_dense(x_eval, spec._cr_knots, spec._cr_M)
+    elif isinstance(spec, _SplineBase) and _evaluates_by_scipy(
+        spec, _SplineBase, CubicRegressionSpline, NaturalSpline
+    ):
+        x_eval, _ = _spline_runtime.prepare_eval_points(spec, x)
+        rows = bspline_dense(x_eval, spec._knots, spec.degree)
+    else:
+        return spec._basis_matrix(x).toarray()
+    # A non-finite row (a NaN covariate, a degenerate cardinal knot vector) is SciPy's and NumPy's to
+    # answer.
+    return rows if np.isfinite(rows).all() else spec._basis_matrix(x).toarray()
+
+
+def dense_raw_basis(evaluator: Any, x: NDArray) -> NDArray:
+    """``evaluator(x)`` for a spec's ``_raw_basis_matrix`` and ``x`` inside its range."""
+    from superglm.features.spline import CardinalCRSpline, _SplineBase
+
+    spec = getattr(evaluator, "__self__", None)
+    rows = None
+    if type(spec) is CardinalCRSpline:
+        rows = cardinal_dense(np.clip(x, spec._lo, spec._hi), spec._cr_knots, spec._cr_M)
+    elif (
+        isinstance(spec, _SplineBase)
+        and type(spec)._raw_basis_matrix is _SplineBase._raw_basis_matrix
+    ):
+        rows = bspline_dense(np.clip(x, spec._lo, spec._hi), spec._knots, spec.degree)
+    if rows is not None and np.isfinite(rows).all():
+        return rows
+    return np.asarray(evaluator(x), dtype=np.float64)
+
+
+def _warmup_basis_kernels() -> None:
+    """Compile both kernels (``superglm.warmup``), so a service's first quote does not."""
+    knots = np.array([0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0])
+    bspline_dense(np.array([0.25, 0.75]), knots, 3)
+    cardinal_dense(np.array([0.25, 0.75]), np.array([0.0, 0.5, 1.0]), np.zeros((3, 3)))

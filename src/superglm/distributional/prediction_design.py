@@ -2,18 +2,44 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import re
+import warnings
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
 import numpy as np
+import scipy.sparse as sp
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import CompiledPredictor
-from superglm.features.factor_smooth import group_term_level_values
+from superglm.features.categorical import UNSEEN_ROUTING_WARNING, Categorical
+from superglm.features.factor_smooth import FactorSmooth, group_term_level_values
+from superglm.features.interaction import (
+    CategoricalInteraction,
+    NumericCategorical,
+    NumericInteraction,
+    PolynomialCategorical,
+    PolynomialInteraction,
+    SplineCategorical,
+    TensorInteraction,
+)
+from superglm.features.numeric import Numeric
+from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.piecewise import Piecewise
+from superglm.features.polynomial import Polynomial
+from superglm.features.random_effect import RandomEffect
+from superglm.features.spline import (
+    BSplineSmooth,
+    CardinalCRSpline,
+    CubicRegressionSpline,
+    NaturalSpline,
+    PSpline,
+)
 from superglm.types import GroupSlice
 
 
@@ -231,7 +257,10 @@ def _assign_term(
         raise RuntimeError(
             f"prediction plan assigned local coefficient columns more than once: {duplicates}"
         )
-    matrix[:, indices] = values
+    if np.all(np.diff(indices) == 1):
+        matrix[:, indices[0] : indices[-1] + 1] = values
+    else:
+        matrix[:, indices] = values
     assigned[indices] = True
 
 
@@ -254,18 +283,250 @@ def _required_columns(predictors: Sequence[CompiledPredictor]) -> tuple[str, ...
     )
 
 
-def build_joint_prediction_design(
-    X: FrameLike | EagerFrame,
-    compiled_predictors: Sequence[CompiledPredictor],
-    layout: StackedLayout,
-    named: list[str] | None = None,
-) -> JointPredictionDesign:
-    """Reconstruct local fitted coefficient designs without mutating term state.
+#: Rows of design built at a time when a frame is streamed: 8192 rows of 204 columns are 13 MB.
+DESIGN_BLOCK_ROWS = 8192
 
-    ``named``, when given, collects the ``sz`` levels the design predicts at
-    the population curve, as ``"<parameter> term '<term>' levels ..."``.
+#: Terms whose ``score`` is ``transform(...) @ beta`` row for row, so one ``transform`` gives every
+#: design column at once. Any other term (a custom spec, an ``sz`` term with levels at the population
+#: curve or folding its group's main term) is read column by column through ``score``, which is exact
+#: for any term linear in its coefficients.
+_TRANSFORM_TERMS = (
+    PSpline,
+    BSplineSmooth,
+    NaturalSpline,
+    CubicRegressionSpline,
+    CardinalCRSpline,
+    Categorical,
+    RandomEffect,
+    Numeric,
+    Polynomial,
+    Piecewise,
+    OrderedCategorical,
+)
+_TRANSFORM_PAIRS = (
+    TensorInteraction,
+    SplineCategorical,
+    PolynomialCategorical,
+    NumericCategorical,
+    CategoricalInteraction,
+    NumericInteraction,
+    PolynomialInteraction,
+)
+
+
+#: Terms whose rows depend on their own covariate values alone: a row range of such a term is scored
+#: apart from the rest, on any thread, and raises or warns of nothing a whole-frame call would not.
+#: Label terms (a ``Categorical``, a random effect, an ordered or factor-smooth term) are not
+#: among them: they check levels against the fitted universe and warn once for the frame.
+ROW_INDEPENDENT_TERMS = (
+    PSpline,
+    BSplineSmooth,
+    NaturalSpline,
+    CubicRegressionSpline,
+    CardinalCRSpline,
+    Numeric,
+    Polynomial,
+    Piecewise,
+    TensorInteraction,
+    NumericInteraction,
+    PolynomialInteraction,
+)
+
+
+@contextmanager
+def _unseen_routing_silenced() -> Iterator[None]:
+    """Drop the unseen-level warning: one block's count is not the frame's, and the caller's
+    whole-frame prediction says it once."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=re.escape(UNSEEN_ROUTING_WARNING))
+        yield
+
+
+def _label_column(spec: Any, column: NDArray) -> NDArray[np.intp]:
+    """The design column of each row's level (``-1`` for none), after the spec's own checks."""
+    if type(spec) is Categorical:
+        resolved = spec._resolve_predict_labels(column)
+        codes = spec._predict_codes(resolved)
+        lookup = np.full(len(spec._levels) + 1, -1, dtype=np.intp)
+        for position, level in enumerate(spec._non_base):
+            lookup[spec._levels.index(level)] = position
+        return lookup[np.where(codes >= 0, codes, len(spec._levels))]
+    return spec._prediction_codes(column)
+
+
+def label_columns(
+    frame: EagerFrame, predictors: Sequence[CompiledPredictor], *, quiet: bool = False
+) -> dict[tuple[str, str], NDArray[np.intp]]:
+    """Each ``Categorical`` and ``RandomEffect`` term's level column per row, coded once for the frame.
+
+    Comparing and looking up object labels holds the GIL, and a block that did it for every
+    term, ``c1`` once for each predictor that carries it, kept the pool's threads in single
+    file. The column is read through the spec's own checks, so it raises and warns as a
+    whole-frame ``score`` does (``quiet`` drops the unseen-level warning, for a caller whose
+    whole-frame prediction gives it); the rows of a block are then a slice of it. Keyed by
+    ``(predictor, term)``; a term that groups levels, or routes unseen ones to a group, is not
+    here and is read from its labels. The frame keeps what it coded: a second call over it, the
+    standard errors after the point predictions, reads the columns back, and a quiet entry
+    never stands in for a call that is to warn.
     """
+    found: dict[tuple[str, str], NDArray[np.intp]] = {}
+    memo = frame._label_columns
+    for predictor in predictors:
+        for name in predictor.compiled.feature_order:
+            spec = predictor.compiled.specs[name]
+            if (
+                type(spec) is Categorical
+                and spec._grouping is None
+                and spec.unseen in ("error", "base")
+            ):
+                key: tuple = (
+                    name,
+                    "label",
+                    spec.unseen,
+                    tuple(spec._levels),
+                    tuple(spec._non_base),
+                )
+            elif type(spec) is RandomEffect:
+                key = (name, "random effect", spec.unseen, tuple(spec._levels))
+            else:
+                continue
+            entry = memo.get(key)
+            if entry is None or (entry[1] and not quiet):
+                with _unseen_routing_silenced() if quiet else nullcontext():
+                    memo[key] = (_label_column(spec, frame.column_array(name)), quiet)
+            found[(predictor.name, name)] = memo[key][0]
+    return found
 
+
+def _term_rows(values: Any, *, n_observations: int, width: int, term_name: str) -> NDArray:
+    block = values.toarray() if sp.issparse(values) else np.asarray(values, dtype=np.float64)
+    if block.shape != (n_observations, width):
+        raise ValueError(f"prediction design for {term_name!r} has an invalid shape")
+    if not np.all(np.isfinite(block)):
+        raise ValueError(f"prediction contribution for {term_name!r} is invalid")
+    return block
+
+
+def _feature_rows(spec: Any, values: NDArray, *, width: int, term_name: str) -> NDArray:
+    if type(spec) in _TRANSFORM_TERMS:
+        return _term_rows(
+            spec.transform(values), n_observations=len(values), width=width, term_name=term_name
+        )
+    return _feature_design(
+        spec, values, width=width, n_observations=len(values), term_name=term_name
+    )
+
+
+def _interaction_rows(
+    predictor: CompiledPredictor,
+    interaction: Any,
+    left: NDArray,
+    right: NDArray,
+    *,
+    width: int,
+    term_name: str,
+    named: list | None,
+) -> NDArray:
+    rows_from_transform = type(interaction) in _TRANSFORM_PAIRS or (
+        type(interaction) is FactorSmooth
+        and not interaction._has_population_offset
+        and not _folds_group_term(predictor, interaction)
+    )
+    if rows_from_transform:
+        return _term_rows(
+            interaction.transform(left, right),
+            n_observations=len(left),
+            width=width,
+            term_name=term_name,
+        )
+    return _interaction_design(
+        interaction,
+        left,
+        right,
+        width=width,
+        n_observations=len(left),
+        term_name=term_name,
+        named=named,
+    )
+
+
+def _predictor_rows(
+    predictor: CompiledPredictor,
+    state: Any,
+    columns: Mapping[Any, NDArray],
+    rows: slice,
+    named: list[str] | None,
+) -> NDArray[np.float64]:
+    """One predictor's local design for the frame rows ``rows``.
+
+    ``columns`` holds each covariate's column and, keyed ``(predictor, term)``, the level columns
+    of ``label_columns``."""
+    n_rows = rows.stop - rows.start
+    width = state.coefficient_slice.stop - state.coefficient_slice.start
+    intercept_width = int(state.intercept_index is not None)
+    if predictor.intercept != bool(intercept_width):
+        raise ValueError("compiled predictor and layout intercept state disagree")
+    matrix = np.zeros((n_rows, width), dtype=np.float64)
+    assigned = np.zeros(width, dtype=np.bool_)
+    if intercept_width:
+        matrix[:, 0] = 1.0
+        assigned[0] = True
+
+    for name in predictor.compiled.feature_order:
+        slope_indices = _term_indices(predictor.compiled.groups, name)
+        labels = columns.get((predictor.name, name))
+        if labels is not None:
+            hot = labels[rows]
+            values = np.zeros((n_rows, len(slope_indices)), dtype=np.float64)
+            present = np.flatnonzero(hot >= 0)
+            values[present, hot[present]] = 1.0
+        else:
+            values = _feature_rows(
+                predictor.compiled.specs[name],
+                columns[name][rows],
+                width=len(slope_indices),
+                term_name=name,
+            )
+        _assign_term(matrix, assigned, slope_indices + intercept_width, values, term_name=name)
+
+    for name in predictor.compiled.interaction_order:
+        interaction = predictor.compiled.interaction_specs[name]
+        slope_indices = _term_indices(predictor.compiled.groups, name)
+        left_name, right_name = interaction.parent_names
+        left, right = columns[left_name][rows], columns[right_name][rows]
+        levels: list = []
+        values = _interaction_rows(
+            predictor,
+            interaction,
+            left,
+            right,
+            width=len(slope_indices),
+            term_name=name,
+            named=levels,
+        )
+        if levels and named is not None:
+            listed = ", ".join(dict.fromkeys(map(str, levels)))
+            named.append(f"{predictor.name} term {name!r} levels {listed}")
+        _assign_term(matrix, assigned, slope_indices + intercept_width, values, term_name=name)
+        _add_group_term_columns(
+            matrix,
+            predictor,
+            interaction,
+            left,
+            right,
+            width=len(slope_indices),
+            intercept_width=intercept_width,
+        )
+
+    if not np.all(assigned):
+        missing = np.flatnonzero(~assigned).tolist()
+        raise RuntimeError(f"prediction plan did not assign local coefficient columns {missing}")
+    return matrix
+
+
+def _validated_predictors(
+    compiled_predictors: Sequence[CompiledPredictor], layout: StackedLayout
+) -> tuple[CompiledPredictor, ...]:
     if not isinstance(layout, StackedLayout):
         raise TypeError("layout must be a StackedLayout")
     predictors = tuple(compiled_predictors)
@@ -277,71 +538,136 @@ def build_joint_prediction_design(
     layout_names = tuple(state.name for state in layout.predictors)
     if predictor_names != layout_names:
         raise ValueError("compiled predictors must follow layout parameter order")
-
-    frame = as_eager_frame(X)
-    frame.require_columns(_required_columns(predictors))
-    local: dict[str, NDArray[np.float64]] = {}
-    for parameter_index, (predictor, state) in enumerate(
-        zip(predictors, layout.predictors, strict=True)
-    ):
+    for parameter_index, predictor in enumerate(predictors):
         if predictor.parameter_index != parameter_index:
             raise ValueError("compiled predictors must follow family parameter order")
-        width = state.coefficient_slice.stop - state.coefficient_slice.start
-        intercept_width = int(state.intercept_index is not None)
-        if predictor.intercept != bool(intercept_width):
-            raise ValueError("compiled predictor and layout intercept state disagree")
-        matrix = np.zeros((len(frame), width), dtype=np.float64)
-        assigned = np.zeros(width, dtype=np.bool_)
-        if intercept_width:
-            matrix[:, 0] = 1.0
-            assigned[0] = True
+    return predictors
 
-        for name in predictor.compiled.feature_order:
-            slope_indices = _term_indices(predictor.compiled.groups, name)
-            indices = slope_indices + intercept_width
-            values = _feature_design(
-                predictor.compiled.specs[name],
-                frame.column_array(name),
-                width=len(slope_indices),
-                n_observations=len(frame),
-                term_name=name,
-            )
-            _assign_term(matrix, assigned, indices, values, term_name=name)
 
-        for name in predictor.compiled.interaction_order:
-            interaction = predictor.compiled.interaction_specs[name]
-            slope_indices = _term_indices(predictor.compiled.groups, name)
-            indices = slope_indices + intercept_width
-            left_name, right_name = interaction.parent_names
-            levels: list = []
-            values = _interaction_design(
-                interaction,
-                frame.column_array(left_name),
-                frame.column_array(right_name),
-                width=len(slope_indices),
-                n_observations=len(frame),
-                term_name=name,
-                named=levels,
-            )
-            if levels and named is not None:
-                listed = ", ".join(dict.fromkeys(map(str, levels)))
-                named.append(f"{predictor.name} term {name!r} levels {listed}")
-            _assign_term(matrix, assigned, indices, values, term_name=name)
-            _add_group_term_columns(
-                matrix,
-                predictor,
-                interaction,
-                frame.column_array(left_name),
-                frame.column_array(right_name),
-                width=len(slope_indices),
-                intercept_width=intercept_width,
+def iter_joint_prediction_design(
+    X: FrameLike | EagerFrame,
+    compiled_predictors: Sequence[CompiledPredictor],
+    layout: StackedLayout,
+    *,
+    start: int = 0,
+    stop: int | None = None,
+    block_rows: int | None = None,
+) -> Iterator[tuple[slice, dict[str, NDArray[np.float64]]]]:
+    """Yield ``(rows, {predictor: local design})`` for blocks of rows ``start:stop`` of ``X``.
+
+    Blocks hold ``block_rows`` rows, ``DESIGN_BLOCK_ROWS`` by default.
+
+    Every term is evaluated once per block, from its own compact form, and no matrix with a row
+    per observation is held: a book is priced in the memory of one block. A block's matrices are
+    its own; the same values as ``build_joint_prediction_design`` on those rows. The
+    unseen-level warning is not given, because a block counts only its own rows: predict the
+    frame once for it.
+    """
+    predictors = _validated_predictors(compiled_predictors, layout)
+    frame = as_eager_frame(X)
+    frame.require_columns(_required_columns(predictors))
+    columns: dict[Any, NDArray] = {
+        name: frame.column_array(name) for name in _required_columns(predictors)
+    }
+    columns.update(label_columns(frame, predictors, quiet=True))
+    first, last = int(start), len(frame) if stop is None else int(stop)
+    if not 0 <= first <= last <= len(frame):
+        raise ValueError("start and stop must select rows of X")
+    step = DESIGN_BLOCK_ROWS if block_rows is None else int(block_rows)
+    if step < 1:
+        raise ValueError("block_rows must be a positive number of rows")
+    for lo in range(first, last, step):
+        rows = slice(lo, min(lo + step, last))
+        with _unseen_routing_silenced():
+            yield (
+                rows,
+                {
+                    state.name: _predictor_rows(predictor, state, columns, rows, None)
+                    for predictor, state in zip(predictors, layout.predictors, strict=True)
+                },
             )
 
-        if not np.all(assigned):
-            missing = np.flatnonzero(~assigned).tolist()
-            raise RuntimeError(
-                f"prediction plan did not assign local coefficient columns {missing}"
-            )
-        local[state.name] = matrix
 
-    return JointPredictionDesign(parameter_names=layout_names, local=local)
+def map_design_blocks(
+    X: FrameLike | EagerFrame,
+    compiled_predictors: Sequence[CompiledPredictor],
+    layout: StackedLayout,
+    fn: Any,
+    *,
+    start: int = 0,
+    stop: int | None = None,
+    block_rows: int | None = None,
+) -> list:
+    """``[fn(rows, {predictor: local design}), ...]`` over blocks of rows, in row order.
+
+    The blocks do not depend on the worker count, so the list is the same at any ``n_jobs``.
+    More than one block runs on ``superglm``'s own pool (``_parallel.pooled_for``, BLAS held at
+    one thread, the calling thread working beside its helpers); one block, which is every
+    quote-sized frame, runs inline and starts nothing. ``fn`` reads its block and returns what
+    it keeps; the unseen-level warning is dropped as in ``iter_joint_prediction_design``. The
+    filter is set once, on the calling thread, since ``warnings.catch_warnings`` is not safe to
+    enter from several threads.
+    """
+    predictors = _validated_predictors(compiled_predictors, layout)
+    frame = as_eager_frame(X)
+    names = _required_columns(predictors)
+    frame.require_columns(names)
+    columns: dict[Any, NDArray] = {name: frame.column_array(name) for name in names}
+    first, last = int(start), len(frame) if stop is None else int(stop)
+    if not 0 <= first <= last <= len(frame):
+        raise ValueError("start and stop must select rows of X")
+    step = DESIGN_BLOCK_ROWS if block_rows is None else int(block_rows)
+    if step < 1:
+        raise ValueError("block_rows must be a positive number of rows")
+    spans = [slice(lo, min(lo + step, last)) for lo in range(first, last, step)]
+
+    def run(rows: slice) -> Any:
+        local = {
+            state.name: _predictor_rows(predictor, state, columns, rows, None)
+            for predictor, state in zip(predictors, layout.predictors, strict=True)
+        }
+        return fn(rows, local)
+
+    columns.update(label_columns(frame, predictors, quiet=True))
+    with _unseen_routing_silenced():
+        if len(spans) <= 1:
+            return [run(rows) for rows in spans]
+        from superglm._parallel import pooled_for
+
+        widest = max(
+            state.coefficient_slice.stop - state.coefficient_slice.start
+            for state in layout.predictors
+        )
+        # a block's design, its product with a covariance block and a copy, 8 bytes each
+        return pooled_for(run, spans, step * widest * 8 * 3)
+
+
+def build_joint_prediction_design(
+    X: FrameLike | EagerFrame,
+    compiled_predictors: Sequence[CompiledPredictor],
+    layout: StackedLayout,
+    named: list[str] | None = None,
+) -> JointPredictionDesign:
+    """Reconstruct local fitted coefficient designs without mutating term state.
+
+    The whole frame as one matrix per predictor; ``iter_joint_prediction_design`` streams large
+    frames. ``named``, when given, collects the ``sz`` levels the design predicts at
+    the population curve, as ``"<parameter> term '<term>' levels ..."``.
+    """
+    predictors = _validated_predictors(compiled_predictors, layout)
+    frame = as_eager_frame(X)
+    frame.require_columns(_required_columns(predictors))
+    columns: dict[Any, NDArray] = {
+        name: frame.column_array(name) for name in _required_columns(predictors)
+    }
+    columns.update(label_columns(frame, predictors))
+    rows = slice(0, len(frame))
+    local = {
+        state.name: _predictor_rows(predictor, state, columns, rows, named)
+        if len(frame)
+        else np.zeros((0, state.coefficient_slice.stop - state.coefficient_slice.start))
+        for predictor, state in zip(predictors, layout.predictors, strict=True)
+    }
+    return JointPredictionDesign(
+        parameter_names=tuple(state.name for state in layout.predictors), local=local
+    )

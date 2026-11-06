@@ -192,8 +192,9 @@ def warmup() -> None:
     later sessions load them from there.
 
     It compiles the kernels of every family and route, ``RandomEffect`` and
-    ``FactorSmooth`` terms included: about a minute on an empty cache, under a
-    second against a filled one. Kernels few fits reach compile on first use
+    ``FactorSmooth`` terms included, and the two basis kernels a prediction
+    reads: about a minute on an empty cache, under a second against a filled
+    one. Kernels few fits reach compile on first use
     instead and then join the cache: the third and fourth derivatives a
     ``SuperLSS`` fit needs only at a smoothing-parameter endpoint, a fit's
     diagnostics, and a few rarely run fallbacks. Numba keys its cache to the
@@ -212,6 +213,7 @@ def warmup() -> None:
     from superglm.distributional.kernels.tweedie import _warmup_tweedie
     from superglm.distributional.solver._ordinary_packing import _warmup_ordinary_packing
     from superglm.distributional.solver.derivatives import _warmup_chain_rule
+    from superglm.features._basis_kernels import _warmup_basis_kernels
     from superglm.features.interaction import _warmup_row_kron
     from superglm.reml._compensated import _warmup_compensated
     from superglm.reml._leverage_rows import _warmup_leverage_rows
@@ -228,6 +230,7 @@ def warmup() -> None:
     _warmup_chain_rule()
     _warmup_support_scans()
     _warmup_row_kron()
+    _warmup_basis_kernels()
     _warmup_lookup_tables()
     _warmup_leverage_rows()
     _warmup_gamma()

@@ -54,7 +54,16 @@ def _validate_missing_only(x: NDArray, *, context: str = "") -> None:
     # `pd.isna` is not the same question (pandas decides nullness by `v != v`, so a
     # self-equal float subclass would pass; and it is true for pd.NA, pd.NaT and
     # non-float NaNs, which are unseen LEVELS the report must name).
-    if any(v is None or (isinstance(v, float) and np.isnan(v)) for v in x):
+    import pandas as pd
+
+    # Whether a column holds a missing value is a property of its distinct values, so the exact
+    # scan reads those: a hash pass of the column keeps one of every equal value (all NaNs of
+    # exact float type are one), and a column of a million rows has a few dozen levels.
+    try:
+        distinct = pd.unique(np.asarray(x).ravel())
+    except TypeError:  # an unhashable label: scan every element, as it would have been
+        distinct = x
+    if any(v is None or (isinstance(v, float) and np.isnan(v)) for v in distinct):
         msg = "Categorical column contains missing values (NaN or None)."
         if context:
             msg = f"[{context}] {msg}"
@@ -166,7 +175,32 @@ def _codes_against(values: NDArray, levels: list) -> NDArray:
     """
     import pandas as pd
 
-    return np.asarray(pd.Index(levels).get_indexer(np.asarray(values)), dtype=np.intp)
+    values = np.asarray(values)
+    position = {level: code for code, level in enumerate(levels)}
+    if values.size <= _DICT_LOOKUP_ROWS:
+        # A quote is a few rows: a dict read per value is faster than building an Index.
+        return np.fromiter(
+            (position.get(value, -1) for value in values.ravel()),
+            dtype=np.intp,
+            count=values.size,
+        ).reshape(values.shape)
+    if values.ndim != 1:
+        return np.asarray(pd.Index(levels).get_indexer(values), dtype=np.intp)
+    # A column holds few distinct labels: hash its rows once (factorize), look the distinct ones up
+    # in the universe, and read each row's code back. A missing value factorizes to -1, absent.
+    row_codes, distinct = pd.factorize(values)
+    distinct_codes = np.fromiter(
+        (position.get(value, -1) for value in distinct), dtype=np.intp, count=len(distinct)
+    )
+    return np.append(distinct_codes, -1)[row_codes]
+
+
+#: Rows up to which a level is looked up in a dict instead of a pandas Index built for the call.
+_DICT_LOOKUP_ROWS = 64
+
+#: Opening of the warning for rows whose level was unseen at fit; a caller that scores a frame in
+#: row blocks filters on it, because each block would count only its own rows.
+UNSEEN_ROUTING_WARNING = "Routing rows with categorical levels unseen at fit"
 
 
 def _warn_unseen_routed(x: NDArray, codes: NDArray, *, group: Any = None) -> None:
@@ -182,7 +216,7 @@ def _warn_unseen_routed(x: NDArray, codes: NDArray, *, group: Any = None) -> Non
         destination = f"the group {group!r} (unseen={group!r})"
         effect = "They take that group's effect."
     warnings.warn(
-        f"Routing rows with categorical levels unseen at fit to {destination}: "
+        f"{UNSEEN_ROUTING_WARNING} to {destination}: "
         f"{novel} over {int(novel_rows.sum())} row(s). {effect}",
         UserWarning,
         stacklevel=3,

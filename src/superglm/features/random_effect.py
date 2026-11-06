@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm.features.categorical import _codes_against
 from superglm.types import GroupInfo, LambdaPolicy
 
 # The values ``unseen=`` and ``missing=`` take.
@@ -179,7 +180,7 @@ class RandomEffect:
     def _prediction_codes(self, x: NDArray) -> NDArray[np.intp]:
         values = np.asarray(x).ravel()
         self.validate_prediction_values(values)
-        codes = pd.Index(self._levels).get_indexer(values).astype(np.intp, copy=False)
+        codes = _codes_against(values, self._levels)
         unseen_mask = codes < 0
         if self.unseen == "error" and np.any(unseen_mask):
             unseen = pd.unique(values[unseen_mask]).tolist()

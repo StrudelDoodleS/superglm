@@ -389,7 +389,7 @@ def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
         _tweedie_numba,
     )
     from superglm.distributional.solver import derivatives as chain_rule
-    from superglm.features import interaction
+    from superglm.features import _basis_kernels, interaction
     from superglm.reml import _leverage_rows
 
     declared_modules = [
@@ -410,6 +410,7 @@ def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
         + tuple(kernel for module in declared_modules for kernel in module._POOLED_ROW_KERNELS)
         + _declared._POOLED_ROW_KERNELS
         + chain_rule._POOLED_ROW_KERNELS
+        + _basis_kernels._POOLED_ROW_KERNELS
     )
     pooled = {id(kernel) for kernel in pooled_kernels}
     for kernel in pooled_kernels:
