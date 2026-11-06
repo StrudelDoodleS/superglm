@@ -85,10 +85,12 @@ def channels(jets: tuple[NDArray[np.float64], ...]) -> tuple:
     return (*jets, None, None)[:3]
 
 
-# The largest input the compiled rows take.  Below it every entry of the order-two jet at
-# unit mass is at least ``2^-800`` (a product of at most four reciprocals of inputs), a
-# normal number, so the row's mass multiplies it without losing digits; the array rows
-# rescale an entry that would be subnormal, which only inputs past it need.
+# The largest input the compiled rows take.  Below it a product of at most four reciprocals of
+# inputs, the smallest factor an entry of the order-two jet carries, is at least ``2^-800``, so
+# the powers of the inputs stay finite and normal.  This bounds the inputs from above only: a
+# numerator itself near ``2^-800``, such as a prior weight or a cancelling difference, can leave
+# an entry subnormal or zero, and the row keeps that value where an array route would rescale it
+# or refuse.
 _MAX_INPUT = 2.0**200
 
 

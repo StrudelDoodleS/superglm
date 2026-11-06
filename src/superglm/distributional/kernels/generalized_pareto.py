@@ -198,7 +198,13 @@ def scale_rows(
 
     jets = density_rows(_declared_pareto, derivative_order, y, (psi, xi), (), weight)
     if jets is not None:
-        return GeneralizedParetoKernelEvaluation(*channels(jets), np.ones(len(y), dtype=bool))
+        value, score, hessian = channels(jets)
+        return GeneralizedParetoKernelEvaluation(
+            readonly(value),
+            None if score is None else readonly(score),
+            None if hessian is None else readonly(hessian),
+            readonly_bool(np.ones(len(y), dtype=bool)),
+        )
     with np.errstate(over="ignore", invalid="ignore"):
         t = y / psi
         z = xi * t

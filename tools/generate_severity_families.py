@@ -665,6 +665,23 @@ def _calls(expressions: list[sp.Expr]):
     return groups
 
 
+_RESIDUAL, _PIECE = sp.Symbol("z"), sp.Symbol("piece")
+
+
+def _bind_piece(expressions: list[sp.Expr]) -> tuple[list[sp.Expr], list[sp.Expr]]:
+    """``expressions`` reading ``z`` and ``side(z)`` as one symbol each, and ``z`` itself if any.
+
+    CSE shares parts of a sum, so left to it one residual comes out under several associations,
+    whose signs can differ within rounding of a join.  One symbol gives a row one piece.
+    """
+    atoms = set().union(*(expression.atoms(side) for expression in expressions))
+    if not atoms:
+        return expressions, []
+    (atom,) = atoms
+    rule = {atom: _PIECE, atom.args[0]: _RESIDUAL}
+    return [expression.xreplace(rule) for expression in expressions], [atom.args[0]]
+
+
 def emit_kernel(
     name: str,
     derived: Derived,
@@ -693,16 +710,22 @@ def emit_kernel(
                 shape = tuple(map(int, size)) if isinstance(size, tuple) else int(size)
                 preamble.append(f"    work = np.empty({shape})")
     expressions = [expression.xreplace(outputs) for expression in expressions]
+    expressions, residuals = _bind_piece(expressions)
     replacements, reduced = sp.cse(
-        arguments + expressions, symbols=sp.numbered_symbols("t"), optimizations="basic"
+        arguments + residuals + expressions, symbols=sp.numbered_symbols("t"), optimizations="basic"
     )
     reduced_arguments, reduced = reduced[: len(arguments)], reduced[len(arguments) :]
+    reduced_residuals, reduced = reduced[: len(residuals)], reduced[len(residuals) :]
     statements = [
         _Statement(
             (symbol,), frozenset(value.free_symbols), [f"{symbol} = {_PRINTER.doprint(value)}"]
         )
-        for symbol, value in replacements
+        for symbol, value in [*replacements, *((_RESIDUAL, z) for z in reduced_residuals)]
     ]
+    if residuals:
+        statements.append(
+            _Statement((_PIECE,), frozenset({_RESIDUAL}), [f"{_PIECE} = side({_RESIDUAL})"])
+        )
     levels = 1 + max(_level(target) for target, _ in targets)
     position = 0
     for g, ((callee, upper, args), atoms) in enumerate(groups.items()):

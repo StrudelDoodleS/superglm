@@ -413,15 +413,16 @@ def _gathered(value, inverse: NDArray[np.int64]):
     return readonly(value[inverse])
 
 
-def _on_distinct(compute, *keys: NDArray[np.float64]):
-    """``compute(*keys)`` at each distinct row of ``keys``, gathered back onto every row.
+def _on_distinct(compute, key: NDArray[np.float64], other: NDArray[np.float64] | None = None):
+    """``compute`` of ``key`` (and ``other``) at each distinct row, gathered back onto every row.
 
     A book has few distinct scales and, with a constant shape, one shape, while the loading and
     the shape terms are functions of those alone. An elementwise ``compute`` gives a row the
     same bits wherever it sits, so this is the per-row evaluation. More than a quarter of the
     rows distinct, or fewer than ``_DEDUPE_MIN_ROWS``, takes the per-row call.
     """
-    arrays = [np.require(key, dtype=_FLOAT, requirements=("C", "A", "W")) for key in keys]
+    keys = (key,) if other is None else (key, other)
+    arrays = [np.require(column, dtype=_FLOAT, requirements=("C", "A", "W")) for column in keys]
     n = len(arrays[0])
     if n >= _DEDUPE_MIN_ROWS:
         count, rows, inverse = _compiled.distinct_pairs(arrays[0], arrays[-1], n // 4)

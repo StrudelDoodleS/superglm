@@ -240,15 +240,20 @@ def test_a_negative_binomial_row_the_kernel_declines_raises_what_the_array_route
 
 
 def test_inputs_past_the_compiled_range_take_the_array_route():
-    """Inputs past ``2^200`` can leave a unit-mass entry subnormal; the array rows rescale it."""
-    scale, mass = np.array([2.0**250]), np.full(1, 2.0**50)
+    """Inputs past ``2^200`` can leave a unit-mass entry subnormal; the array rows rescale it, where
+    the compiled loop with its gate open returns ``-0.0``."""
+    scale, mass = np.array([2.0**550]), np.full(1, 2.0**50)
     zero = np.zeros(1)
     declined = _declared.density_rows(
         _declared.two_piece_location, 2, scale, (zero, scale, zero), (), mass
     )
     assert declined is None
     evaluated = two_piece_kernel.location_rows(scale, zero, scale, zero, mass, derivative_order=2)
-    assert np.all(evaluated.hessian_packed[:, [0, 1, 3]] < 0.0)  # -2^-1050 and -2^-1049: subnormal
+    assert evaluated.hessian_packed[0, [0, 1, 3]].tolist() == [
+        -(2.0**-1050),
+        -(2.0**-1049),
+        -(2.0**-1049),
+    ]
 
 
 def test_the_poisson_limit_is_evaluated_by_the_compiled_rows(monkeypatch):
@@ -369,6 +374,72 @@ def test_a_piece_is_constant_between_the_joins_so_the_join_row_takes_the_right_p
     assert left.hessian_packed[0, 0] == pytest.approx(-1.0 / 1.5**2)
 
 
+def test_a_mean_form_row_at_the_join_reads_one_piece_in_every_channel(monkeypatch):
+    """Within rounding of the join a row's Hessian is the one just right of the join or the one just
+    left of it, never a mix.  The walk crosses the join; the last row held one residual under two
+    associations of opposite sign, which gave a mean-skew entry of 63.13 for 472.19."""
+    scales, skews = np.array([0.06, 0.06, 0.3, 1.0]), np.array([-0.76, 0.5, -0.3, 0.7])
+    join = np.exp(-two_piece_kernel.log_mean_loading(scales, skews)[0])
+    steps = 1.0 + 4.0 * U * np.arange(-6.0, 7.0)
+    y = np.append(np.outer(join, steps).ravel(), 1.0735088995251212)
+    scale = np.append(np.repeat(scales, len(steps)), 0.06)
+    skew = np.append(np.repeat(skews, len(steps)), -0.7641414141414141)
+    mean, mass = np.ones(len(y)), np.ones(len(y))
+
+    def at(response):
+        return _routes(
+            monkeypatch,
+            lambda: two_piece_kernel.mean_rows(
+                response, mean, scale, skew, mass, derivative_order=2
+            ),
+        )
+
+    compiled = at(y)[0].hessian_packed
+    bar = 1e-6 * np.max(np.abs(compiled), axis=1)
+    on_right = np.max(np.abs(compiled - at(y * (1.0 + 1e-9))[1].hessian_packed), axis=1) <= bar
+    on_left = np.max(np.abs(compiled - at(y * (1.0 - 1e-9))[1].hessian_packed), axis=1) <= bar
+    assert np.all(on_right | on_left)
+    assert on_right.any() and on_left.any()
+
+
+@pytest.mark.parametrize(
+    ("y", "mean", "scale", "gap"),
+    [
+        (2.0, 1.5, 0.4, 1e-3),
+        (0.7, 1.5, 1.2, 1e-6),
+        (5.0, 1.5, 0.1, 1e-9),
+        (2.748823756852651, 1.6980435791935413, 0.40914061187914785, 1.4698e-12),
+    ],
+)
+def test_a_mean_form_skew_near_one_keeps_the_hessian_of_its_rows(y, mean, scale, gap):
+    """The array rows' curvature error, ``u/(1 - skew)`` of the row's largest entry, against mpmath.
+    Mutation check: without the skew limit the last row's skew-skew entry reads ``-1.28e8`` for
+    ``0.0295``, and the compiled error of ``u/(1 - skew)^2`` fails every row."""
+    pytest.importorskip("mpmath")
+    from tests import _two_piece_lss_oracles as oracle
+
+    skew = 1.0 - gap
+    columns = (np.array([v]) for v in (y, mean, scale, skew))
+    hessian = two_piece_kernel.mean_rows(*columns, np.ones(1), derivative_order=2).hessian_packed[0]
+    _, exact = oracle.mp_packed(
+        lambda m, s, e: oracle.mp_mean_log_density(y, m, s, e), (mean, scale, skew)
+    )
+    bar = 16.0 * U / gap * np.max(np.abs(exact))
+    assert np.max(np.abs(hessian - np.asarray(exact))) <= bar
+
+
+@pytest.mark.parametrize("case", _CASES)
+def test_rows_are_read_only_down_either_route(monkeypatch, case):
+    for evaluated in _routes(monkeypatch, lambda: _CASES[case]()(2)):
+        for channel in (
+            evaluated.optimizing_log_likelihood,
+            evaluated.score,
+            evaluated.hessian_packed,
+            evaluated.valid,
+        ):
+            assert not channel.flags.writeable
+
+
 # ------------------------------------------------------------------ the range gate, in a fit
 
 
@@ -424,8 +495,9 @@ _UNIT_FREE = ("gamma", "generalized_pareto", "log_normal", "two_piece_log_normal
 def test_a_fit_reads_the_same_down_either_route_of_the_range_gate(case, units):
     """The gate at ``2^200`` picks the route of a call, not the fit: on a response inside it and on
     one past it, a fit with the gate shipped and with it forced the other way agrees on its stop,
-    iterations, EDF, predictions and standard errors.  Mutation checks: a gate that admits every
-    input fails the route counts, and a compiled Hessian 1e-4 too large fails the comparison."""
+    EDF, predictions and standard errors.  Iteration counts are left out: the routes agree to
+    rounding, which can flip one backtrack.  Mutation checks: a gate that admits every input fails
+    the route counts, and a compiled Hessian 1e-4 too large fails the comparison."""
     if units != 1.0 and case not in _UNIT_FREE:
         pytest.skip("an identity-link location is not unit-free: its penalty and bounds are not")
     make, helpers = _GATE_CASES[case]
@@ -440,7 +512,7 @@ def test_a_fit_reads_the_same_down_either_route_of_the_range_gate(case, units):
         assert served[0] > 0 and served[1] == 0 and other[0] == 0 and other[1] > 0
     else:
         assert served[1] > 0 and other[0] > 0 and other[1] == 0
-    for field in ("converged", "smoothing_converged", "n_smoothing_iter", "n_inner_iter"):
+    for field in ("converged", "smoothing_converged"):
         assert getattr(shipped.result_, field) == getattr(forced.result_, field)
     assert shipped.result_.total_effective_df == pytest.approx(
         forced.result_.total_effective_df, rel=1e-6
