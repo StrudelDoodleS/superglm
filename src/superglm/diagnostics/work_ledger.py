@@ -22,10 +22,18 @@ Each wrapped call is recorded under ``(operation, caller)``: its count, the
 largest input shape, a flop estimate, its own seconds (children subtracted)
 and two flags:
 
-* **repeated**: the input is one that operation has seen before: arrays equal
-  bit for bit, numbers and strings equal under the same argument name, other
-  objects the same object (CPython can reuse the address of a freed object, so
-  such an argument can make a repeat appear that is not one);
+* **repeated**: the input is one that operation has seen before.  A call's input is
+  its arrays, bit for bit (shape and dtype included), its numbers and strings
+  by value, and its other arguments by identity; each is compared under the
+  argument it was passed as.  Two calls are one input when every argument
+  matches.  Identity means the same live object: the ledger numbers each object
+  when it first sees it, and a number is never reused, so a new object is a
+  different input wherever CPython happens to place it and a count never
+  depends on an address.  An object that cannot be weakly referenced (a
+  ``dict`` or ``set``) is compared by its type alone.  The ledger does not
+  read an object's state, so a call that receives a new carrier of decisions
+  each time (a per-solve settings record) is never a repeat, and a mutated
+  object is the same input as before;
 * **update candidate**: the input differs from the previous input at the same
   call site (file and line) by one row or column (a row and its column, for a symmetric
   matrix), or by one bordering row and column.  Such a result could have been
@@ -48,6 +56,7 @@ import inspect
 import sys
 import threading
 import time
+import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -390,6 +399,48 @@ class LedgerRow:
         }
 
 
+class _Objects:
+    """Numbers the objects a recorded call receives, in order of first sight, without their addresses.
+
+    A number belongs to one live object and is never issued twice: the weak reference
+    forgets the entry when the object dies, so a later object gets a new number whatever
+    address it lands on.  ``id`` only picks a bucket; objects are told apart with ``is``,
+    so buckets that collide change no number.
+    """
+
+    def __init__(self) -> None:
+        self._buckets: dict[int, list[tuple[weakref.ref, int]]] = {}
+        self._issued = 0
+        self._lock = threading.RLock()  # a weakref callback can run inside ``number``
+
+    def number(self, obj: object) -> int | None:
+        """The object's number, or ``None`` if it cannot be weakly referenced."""
+        key = id(obj)
+        with self._lock:
+            for ref, number in tuple(self._buckets.get(key, ())):
+                if ref() is obj:
+                    return number
+            try:
+                ref = weakref.ref(obj, functools.partial(self._forget, key))
+            except TypeError:
+                return None
+            self._issued += 1
+            self._buckets.setdefault(key, []).append((ref, self._issued))
+            return self._issued
+
+    def _forget(self, key: int, dead: weakref.ref) -> None:
+        with self._lock:
+            bucket = [entry for entry in self._buckets.get(key, ()) if entry[0] is not dead]
+            if bucket:
+                self._buckets[key] = bucket
+            else:
+                self._buckets.pop(key, None)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._buckets.clear()
+
+
 @dataclass
 class _Frame:
     child_seconds: float = 0.0
@@ -408,6 +459,7 @@ class WorkLedger:
     _seen: dict[str, dict[bytes, None]] = field(default_factory=dict, repr=False)
     _last: dict[tuple, np.ndarray] = field(default_factory=dict, repr=False)
     _last_bytes: int = field(default=0, repr=False)
+    _objects: _Objects = field(default_factory=_Objects, repr=False)
     _owner: int = field(default=0, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -524,6 +576,7 @@ class WorkLedger:
         self._last.clear()
         self._last_bytes = 0
         self._seen.clear()
+        self._objects.clear()
 
     def _keep(self, site, snapshot) -> None:
         old = self._last.pop(site, None)
@@ -648,15 +701,16 @@ _ACTIVE: WorkLedger | None = None
 _STATE = _State()
 
 
-def _inputs(pairs, named: Any = None):
+def _inputs(pairs, named: Any = None, objects: _Objects | None = None):
     """``(arrays, tokens, first)`` from ``(label, value)`` pairs: labelled arrays, a token per other value.
 
-    A list or tuple contributes its arrays.  The label (a position or a keyword) is part of
+    A list or tuple contributes its items.  The label (a position or a keyword) is part of
     the digest, so the same value under another keyword is another input.  Numbers and
     strings enter by value (``mode="r"`` is a different operation) and other objects by
-    identity.  ``first`` is the array update detection compares: ``named`` when given, else
-    the first array.
+    their number in ``objects`` (their type alone when they have none).  ``first`` is the
+    array update detection compares: ``named`` when given, else the first array.
     """
+    objects = objects if objects is not None else _Objects()
     arrays: list[tuple[str, np.ndarray]] = []
     tokens: list[str] = []
     for label, value in pairs:
@@ -668,22 +722,25 @@ def _inputs(pairs, named: Any = None):
             elif isinstance(item, (bool, int, float, str, type(None))):
                 tokens.append(f"{tag}={item!r}")
             else:
-                tokens.append(f"{tag}={type(item).__name__}@{id(item)}")
+                number = objects.number(item)
+                tokens.append(
+                    f"{tag}={type(item).__name__}" + ("" if number is None else f"#{number}")
+                )
     if isinstance(named, (list, tuple)) and named:
         named = named[0]
     first = named if isinstance(named, np.ndarray) else (arrays[0][1] if arrays else None)
     return arrays, tokens, first
 
 
-def _prepare(target: _Target, signature, args, kwargs):
+def _prepare(ledger: WorkLedger, target: _Target, signature, args, kwargs):
     """What one call needs recorded, read before the call (which may overwrite its inputs)."""
     if signature is None:
         cost_input = (args, kwargs)
-        arrays, tokens, first = _inputs([*enumerate(args), *kwargs.items()])
+        arrays, tokens, first = _inputs([*enumerate(args), *kwargs.items()], None, ledger._objects)
     else:
         bound = signature.bind_partial(*args, **kwargs).arguments
         cost_input = ((), bound)
-        arrays, tokens, first = _inputs(bound.items(), bound.get(target.input))
+        arrays, tokens, first = _inputs(bound.items(), bound.get(target.input), ledger._objects)
     caller, via, where = _callers()
     return first, cost_input, _fingerprint(arrays, tokens, first), caller, via, where
 
@@ -699,7 +756,7 @@ def _wrap(target: _Target, original):
             return original(*args, **kwargs)
         began = time.perf_counter()
         try:
-            prepared = _prepare(target, signature, args, kwargs)
+            prepared = _prepare(ledger, target, signature, args, kwargs)
         except Exception as error:  # a ledger fault must never change the fit
             ledger.errors.append(f"{target.kind}: {error!r}")
             return original(*args, **kwargs)

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import types
+import weakref
 
 import numpy as np
 import pandas as pd
@@ -84,6 +85,59 @@ def test_mode_and_other_arguments_make_inputs_distinct():
         np.linalg.qr(matrix, mode="r")
 
     assert ledger.find("numpy.linalg.qr")[0].repeated == 0
+
+
+class _Setting:
+    """An object argument: a design or a settings record, whose state the ledger does not read."""
+
+
+def _repeats_of_calls_with_objects(monkeypatch, collide):
+    import superglm.solvers.rank as rank
+
+    monkeypatch.setattr(rank, "decompose_gram", lambda matrix, setting: None)
+    if collide:  # every setting object lands on one address: the strongest case of address reuse
+        monkeypatch.setattr(
+            work_ledger_module,
+            "id",
+            lambda obj: 0 if isinstance(obj, _Setting) else id(obj),
+            raising=False,
+        )
+    matrix = _spd(5, 27)
+    kept, other = _Setting(), _Setting()
+    with work_ledger() as ledger:
+        rank.decompose_gram(matrix, kept)
+        rank.decompose_gram(matrix.copy(), kept)  # equal arrays, the same object: a repeat
+        rank.decompose_gram(matrix, other)  # equal arrays, another live object
+        rank.decompose_gram(_spd(5, 28), kept)  # another array
+        gone = _Setting()
+        rank.decompose_gram(matrix, gone)
+        del gone
+        rank.decompose_gram(matrix, _Setting())  # a new object where the last one was freed
+        rank.decompose_gram(matrix, {"order": 1})
+        rank.decompose_gram(matrix, {"order": 2})  # a dict has no number: its type alone
+    return ledger.count("decompose_gram"), sum(
+        row.repeated for row in ledger.find("decompose_gram")
+    )
+
+
+@pytest.mark.parametrize("collide", [False, True], ids=["real ids", "one id for every object"])
+def test_a_repeat_is_equal_arrays_and_the_same_objects_whatever_address_they_have(
+    monkeypatch, collide
+):
+    # The second call and the second dict repeat; a freed object's successor does not.
+    assert _repeats_of_calls_with_objects(monkeypatch, collide) == (8, 2)
+
+
+def test_the_ledger_does_not_keep_the_objects_it_numbers_alive(monkeypatch):
+    import superglm.solvers.rank as rank
+
+    monkeypatch.setattr(rank, "decompose_gram", lambda matrix, setting: None)
+    setting = _Setting()
+    watcher = weakref.ref(setting)
+    with work_ledger():
+        rank.decompose_gram(_spd(5, 29), setting)
+        del setting
+        assert watcher() is None
 
 
 def test_a_one_row_or_one_border_change_is_an_update_candidate_and_a_rebuild_is_not():
