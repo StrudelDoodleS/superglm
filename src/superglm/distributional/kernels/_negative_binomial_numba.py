@@ -13,10 +13,18 @@ so every worker count gives the same bits.
 
 ``evaluate_rows`` is ``evaluate_negative_binomial_rows``'s array code one row at a
 time: the same domain tests, formulas and certificates, with the recurrence summed
-left to right, within the ``gamma_(2 (count + 128))`` bound the array route's
-channel check allows.  It writes only rows it can certify, and answers any other
-row with ``KERNEL_DECLINED``, which the caller meets by running its array route, whose
-refusals are the package's.
+in blocks of ``RECURRENCE_BLOCK`` terms, each left to right (error at most
+``gamma_(RECURRENCE_BLOCK - 1) sum |t_i|``, Higham, *Accuracy and Stability of
+Numerical Algorithms*, 2nd ed., chapter 4), and the ``B = ceil(n / RECURRENCE_BLOCK)``
+block sums added by cascaded summation with ``TwoSum`` (Ogita, Rump and Oishi, *Accurate
+Sum and Dot Product*, SIAM J. Sci. Comput. 26(6), 2005, Algorithm 4.1; error at most
+``u |sum| + gamma_(B - 1)^2 sum |p_i|``, Proposition 4.5, in their ``eps = u``).  A long
+sum, which the remainder terms added after it cancel, thus keeps an error that no longer
+grows with the count: plain left-to-right sums would give ``gamma_(n - 1) sum |t_i|``.  A
+row of at most ``RECURRENCE_BLOCK`` terms is one block, and its sums are as a plain loop
+gives them.  The kernel writes only rows it can certify, and answers any other row with
+``KERNEL_DECLINED``, which the caller meets by running its array route, whose refusals are
+the package's.
 """
 
 from __future__ import annotations
@@ -47,6 +55,8 @@ DOMAIN_MIN = math.ldexp(1.0, -450)
 DOMAIN_MAX = math.ldexp(1.0, 450)
 POISSON_LIMIT_RATIO = _EPS
 POISSON_SURROGATE_EXPONENT = 60
+# Terms of the recurrence summed left to right before the block joins the running total.
+RECURRENCE_BLOCK = 256
 # The fixed-order series replaces the recurrence where it beats it by its bound.
 SERIES_ORDER = 12
 SERIES_RATIO = 1.0 / 16.0
@@ -807,33 +817,65 @@ def _ratio_remainder_row(ratio: float):
 
 
 @njit(cache=True)
+def _fold(total: float, carry: float, block: float):
+    """``total + block`` rounded, and the rounding's error (``TwoSum``) added to ``carry``."""
+    folded = total + block
+    shift = folded - total
+    return folded, carry + ((total - (folded - shift)) + (block - shift))
+
+
+@njit(cache=True)
 def _recurrence_row(count: int, mean: float, theta: float, order: int, derivatives: bool):
     """The recurrence's sums over ``j < count``: ``(value, natural score, natural Hessian,
-    direct score, direct Hessian)``; the derivative sums only where ``derivatives``."""
+    direct score, direct Hessian)``; the derivative sums only where ``derivatives``.
+
+    Blocks of ``RECURRENCE_BLOCK`` terms are summed left to right and joined by ``_fold``.
+    """
     total = mean + theta
     inverse_total = 1.0 / total
     value = score = hessian = direct_score = direct_hessian = 0.0
-    for index in range(count):
-        offset = float(index)
-        # log1p((j - mean)/total) == log((theta + j)/total); below -1/2 the log1p
-        # argument nears -1 and the quotient form is better conditioned.
-        argument = (offset - mean) / total
-        if argument < -0.5:
-            value += math.log((theta + offset) / total)
-        else:
-            value += math.log1p(argument)
+    value_carry = score_carry = hessian_carry = direct_score_carry = direct_hessian_carry = 0.0
+    for first in range(0, count, RECURRENCE_BLOCK):
+        block_value = block_score = block_hessian = 0.0
+        block_direct_score = block_direct_hessian = 0.0
+        for index in range(first, min(first + RECURRENCE_BLOCK, count)):
+            offset = float(index)
+            # log1p((j - mean)/total) == log((theta + j)/total); below -1/2 the log1p
+            # argument nears -1 and the quotient form is better conditioned.
+            argument = (offset - mean) / total
+            if argument < -0.5:
+                block_value += math.log((theta + offset) / total)
+            else:
+                block_value += math.log1p(argument)
+            if derivatives:
+                inverse_offset = 1.0 / (theta + offset)
+                score_term = (mean - offset) * inverse_offset * inverse_total
+                direct_term = (theta * inverse_offset) * ((mean - offset) / total)
+                block_score += score_term
+                block_direct_score += direct_term
+                if order == 2:
+                    block_hessian += -score_term * (inverse_offset + inverse_total)
+                    block_direct_hessian += direct_term * (
+                        1.0 - theta * inverse_offset - theta * inverse_total
+                    )
+        value, value_carry = _fold(value, value_carry, block_value)
         if derivatives:
-            inverse_offset = 1.0 / (theta + offset)
-            score_term = (mean - offset) * inverse_offset * inverse_total
-            direct_term = (theta * inverse_offset) * ((mean - offset) / total)
-            score += score_term
-            direct_score += direct_term
+            score, score_carry = _fold(score, score_carry, block_score)
+            direct_score, direct_score_carry = _fold(
+                direct_score, direct_score_carry, block_direct_score
+            )
             if order == 2:
-                hessian += -score_term * (inverse_offset + inverse_total)
-                direct_hessian += direct_term * (
-                    1.0 - theta * inverse_offset - theta * inverse_total
+                hessian, hessian_carry = _fold(hessian, hessian_carry, block_hessian)
+                direct_hessian, direct_hessian_carry = _fold(
+                    direct_hessian, direct_hessian_carry, block_direct_hessian
                 )
-    return value, score, hessian, direct_score, direct_hessian
+    return (
+        value + value_carry,
+        score + score_carry,
+        hessian + hessian_carry,
+        direct_score + direct_score_carry,
+        direct_hessian + direct_hessian_carry,
+    )
 
 
 @njit(cache=True)

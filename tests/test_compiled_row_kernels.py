@@ -256,6 +256,79 @@ def test_inputs_past_the_compiled_range_take_the_array_route():
     ]
 
 
+_TINY = float(np.nextafter(_declared._MIN_INPUT, 0.0))
+
+
+@pytest.mark.parametrize(
+    ("column", "inside"),
+    [
+        ([0.0, 1.0], True),  # a zero response or weight is a value, not a small input
+        ([-1.0, 0.0, 1.0, -0.0], True),
+        ([_declared._MIN_INPUT, _declared._MAX_INPUT], True),
+        ([-_declared._MIN_INPUT, -_declared._MAX_INPUT], True),
+        ([_declared._MIN_INPUT, -_declared._MAX_INPUT, 0.0], True),
+        ([], True),
+        ([_TINY, 1.0], False),
+        ([-_TINY, 1.0], False),
+        ([-_TINY, -1.0], False),
+        ([0.0, 1e-300], False),
+        ([1.0, float(np.nextafter(_declared._MAX_INPUT, np.inf))], False),
+        ([1.0, -float(np.nextafter(_declared._MAX_INPUT, np.inf))], False),
+        ([1.0, np.nan], False),
+        ([0.0, np.inf], False),
+        ([-np.inf, -1.0], False),
+    ],
+)
+def test_the_range_gate_takes_zeros_and_magnitudes_between_its_bounds(column, inside):
+    """Mutation checks: a gate without the lower bound fails the small entries, and one that reads
+    a zero as a small input fails the zeros."""
+    assert _declared._within_range((np.array(column, dtype=float),)) is inside
+
+
+def test_a_prior_weight_below_the_range_reads_its_log_link_curvature(monkeypatch):
+    """Shape 16 at a mean of ``2^200``, with a weight of ``2^-676`` and a CV of ``2^-340``.  The
+    mean-CV Hessian entry is ``2^144``, and its log-link entry 16 makes the Hessian indefinite;
+    a compiled loop forms ``weight / mean^2``, which underflows to zero, and reads the entry as 0.
+    The weight is below the gate's lower bound, so the array route evaluates the row.  The
+    reference is the log density's second derivatives in ``(log mean, log CV)``, in mpmath.
+    Mutation check: a gate without the lower bound fails the route and the entry."""
+    mp = pytest.importorskip("mpmath")
+    y, mean, cv, weight = (np.array([2.0**e]) for e in (199, 200, -340, -676))
+    assert _declared.density_rows(_declared.gamma, 2, y, (mean, cv), (weight,), np.ones(1)) is None
+    got = gamma_kernel.evaluate_gamma_rows(y, mean, cv, weight, "prior", derivative_order=2)
+    with mp.workdps(50):
+
+        def log_density(log_mean, log_cv):
+            m, k = mp.exp(log_mean), weight[0] / mp.exp(2 * log_cv)
+            return k * mp.log(k / m) - mp.loggamma(k) + (k - 1) * mp.log(y[0]) - k * y[0] / m
+
+        point = (mp.log(mp.mpf(mean[0])), mp.log(mp.mpf(cv[0])))
+        exact = np.array(
+            [float(mp.diff(log_density, point, order)) for order in ((2, 0), (1, 1), (0, 2))]
+        )
+    m, c = mean[0], cv[0]
+    s, h = got.score[0], got.hessian_packed[0]
+    log_link = np.array([h[0] * m * m + s[0] * m, h[1] * m * c, h[2] * c * c + s[1] * c])
+    assert exact[1] == pytest.approx(16.0, rel=1e-12)
+    assert np.all(np.abs(log_link - exact) <= ROUNDINGS * np.max(np.abs(exact)))
+
+
+def test_zero_responses_and_zero_skews_stay_on_the_compiled_routes(monkeypatch):
+    """A zero response of the Pareto law and a zero location, response and skew of the two-piece
+    law are values, not small inputs: the compiled routes serve the rows (``_routes`` checks it)
+    and agree with the array rows."""
+    ones, zero = np.ones(3), np.zeros(3)
+    pareto = lambda: pareto_kernel.scale_rows(  # noqa: E731
+        np.array([0.0, 2.0, 0.0]), ones, np.array([0.2, -0.1, 0.0]), ones, derivative_order=2
+    )
+    two_piece = lambda: two_piece_kernel.location_rows(  # noqa: E731
+        np.array([-2.0, 0.0, 0.5]), np.array([0.0, 0.0, 1.0]), ones, zero, ones, derivative_order=2
+    )
+    for call in (pareto, two_piece):
+        compiled, array = _routes(monkeypatch, call)
+        _assert_agree(compiled, array, 2)
+
+
 def test_the_poisson_limit_is_evaluated_by_the_compiled_rows(monkeypatch):
     """Size far past the counts: theta channels are exactly zero, as in the array route."""
     counts = np.array([0.0, 1.0, 4.0, 9.0])
@@ -270,6 +343,56 @@ def test_the_poisson_limit_is_evaluated_by_the_compiled_rows(monkeypatch):
     compiled, array = _routes(monkeypatch, call)
     _assert_agree(compiled, array, 2)
     assert np.all(compiled.score[:, 1] == 0.0) and np.all(compiled.hessian_packed[:, 1:] == 0.0)
+
+
+def _size_channels_exact(count, mean, theta):
+    """``(size score, size-size Hessian, log-size Hessian)`` of the NB2 log likelihood at one row,
+    from digamma and trigamma at 50 digits: the large terms cancel, as the kernel's sums do."""
+    mp = pytest.importorskip("mpmath")
+    with mp.workdps(50):
+        c, m, t = (mp.mpf(v) for v in (count, mean, theta))
+        total = m + t
+        score = mp.psi(0, c + t) - mp.psi(0, t) + mp.log(t / total) + 1 - (t + c) / total
+        hessian = mp.psi(1, c + t) - mp.psi(1, t) + 1 / t - 2 / total + (t + c) / total**2
+        return float(score), float(hessian), float(t * t * hessian + t * score)
+
+
+def _size_channels(evaluated, theta):
+    score, hessian = evaluated.score[0, 1], evaluated.hessian_packed[0, 2]
+    return score, hessian, hessian * theta * theta + score * theta
+
+
+def _long_row_call(count):
+    row = tuple(np.array([float(value)]) for value in (count, count, count, 1.0))
+    return lambda: nb_kernel.evaluate_negative_binomial_rows(*row, "prior", derivative_order=2)
+
+
+def test_a_long_recurrence_is_summed_as_accurately_as_the_array_rows_sum_it(monkeypatch):
+    """At ``count = mean = size = 10^6`` the recurrence's large terms cancel against the remainder
+    terms added after them, to a log-size Hessian near ``-1/8``.  Left-to-right sums lose digits in
+    proportion to the count; the array route sums blocks of 256 terms in pairs, and the compiled sums
+    are no less accurate: each channel within twice the array route's error.  Mutation check: a
+    plain loop fails all three channels."""
+    compiled, array = _routes(monkeypatch, _long_row_call(10**6))
+    exact = _size_channels_exact(10**6, 10**6, 10**6)
+    for name, ours, theirs, reference in zip(
+        ("size score", "size Hessian", "log-size Hessian"),
+        _size_channels(compiled, 1e6),
+        _size_channels(array, 1e6),
+        exact,
+        strict=True,
+    ):
+        assert abs(ours - reference) <= 2.0 * abs(theirs - reference), name
+
+
+@pytest.mark.parametrize(("count", "tolerance"), [(10**7, 1e-8), (10**8, 1e-6)])
+def test_a_long_recurrence_keeps_the_size_curvature(count, tolerance):
+    """The same row at ``10^7`` and ``10^8`` terms: the log-size Hessian reads within ``tolerance``
+    of its mpmath value near ``-1/8``.  Plain left-to-right sums are off by 5e-6 and 9e-5 here, and
+    the array route by 3e-7 and 6e-7.  Mutation checks: a plain loop fails both rows, and blocks
+    joined by a plain add instead of ``TwoSum`` fail the first."""
+    _, _, log_size = _size_channels(_long_row_call(count)(), float(count))
+    assert log_size == pytest.approx(_size_channels_exact(count, count, count)[2], rel=tolerance)
 
 
 # ---------------------------------------------------------------- the new declarations, in mpmath

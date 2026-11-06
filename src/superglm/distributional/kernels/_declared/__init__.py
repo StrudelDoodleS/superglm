@@ -85,21 +85,34 @@ def channels(jets: tuple[NDArray[np.float64], ...]) -> tuple:
     return (*jets, None, None)[:3]
 
 
-# The largest input the compiled rows take.  Below it a product of at most four reciprocals of
-# inputs, the smallest factor an entry of the order-two jet carries, is at least ``2^-800``, so
-# the powers of the inputs stay finite and normal.  This bounds the inputs from above only: a
-# numerator itself near ``2^-800``, such as a prior weight or a cancelling difference, can leave
-# an entry subnormal or zero, and the row keeps that value where an array route would rescale it
-# or refuse.
+# The compiled rows take zeros and nonzero inputs from ``_MIN_INPUT`` to ``_MAX_INPUT`` in
+# magnitude.  Below ``_MAX_INPUT`` a product of at most four reciprocals of inputs, the smallest
+# factor an entry of the order-two jet carries, is at least ``2^-800``, so the powers of the
+# inputs stay finite and normal.  Above ``_MIN_INPUT`` a numerator (an input, or the difference of
+# two, at least a unit in the last place of the smaller one, ``2^-252``) over two squared inputs
+# is at least ``2^-852``, so the partial product an entry forms before its large reciprocal
+# factors multiply it back stays normal.  An input outside the range could leave that product
+# subnormal or zero, where an array route rescales it.
 _MAX_INPUT = 2.0**200
+_MIN_INPUT = 2.0**-200
+
+
+def _column_within_range(column: NDArray[np.float64]) -> bool:
+    if column.size == 0:
+        return True
+    low, high = column.min(), column.max()
+    if low >= _MIN_INPUT or high <= -_MIN_INPUT:  # one sign and clear of zero: min and max decide
+        return max(high, -low) <= _MAX_INPUT
+    magnitude = np.abs(column)
+    return bool(
+        magnitude.max() <= _MAX_INPUT
+        and np.min(magnitude, where=magnitude != 0.0, initial=np.inf) >= _MIN_INPUT
+    )
 
 
 def _within_range(columns: tuple) -> bool:
-    """Every column is finite and at most ``_MAX_INPUT`` in magnitude."""
-    return all(
-        column.size == 0 or max(column.max(), -column.min()) <= _MAX_INPUT
-        for column in map(np.asarray, columns)
-    )
+    """Every column is finite, at most ``_MAX_INPUT`` in magnitude and, where nonzero, at least ``_MIN_INPUT``."""
+    return all(map(_column_within_range, map(np.asarray, columns)))
 
 
 def density_rows(
@@ -114,7 +127,7 @@ def density_rows(
 
     ``parameters`` is the natural parameters' columns.  The kernel runs without
     the GIL, so row chunks on the worker pool run side by side.  ``None`` means
-    an input is past ``_MAX_INPUT`` or some row has a non-finite channel, which a
+    an input is outside ``_MIN_INPUT`` to ``_MAX_INPUT`` or some row has a non-finite channel, which a
     caller answers by evaluating the rows with its array route, whose domain is
     wider and whose refusals stay its own.  One sum per channel tests for the
     channels: the sum of finite entries is finite unless it overflows, and then
