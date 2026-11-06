@@ -18,16 +18,20 @@ NumPy, ``math`` and ``kernels._severity_primitives``; SymPy runs here only.
 
 Kernel signatures: ``<law>(Y, P0..PK-1, D0..Dd-1[, M], order, J0..J4)`` with
 ``law`` one of ``density``, ``logsf``, ``logcdf`` (or a declaration's extra
-law), ``Jk`` for ``k > order`` unread (pass ``(0, width)`` arrays); ``P`` the natural
+law), ``Jk`` for ``k > order`` unread (pass ``(0, width)`` arrays, and none above the
+declaration's ``max_order``); ``P`` the natural
 parameters, ``D`` the declaration's per-row data (not differentiated; the
 gamma's prior weight), ``M`` the density's row multiplier (frequency weights);
 ``carrier(Y, D.., M, J0)``.  The loops use ``error_model="numpy"``: a row whose
 channels are not representable gets a non-finite entry, which marks it
-invalid, and never raises.
+invalid, and never raises.  They release the GIL (``nogil=True``) so that row
+chunks on the worker pool run side by side, and each module lists its kernels in
+``_POOLED_ROW_KERNELS``.
 
 Primitives (SymPy rule here, Numba body in ``_severity_primitives``):
 ``softplus``, ``expit``, ``log1mexp``, ``invexpm1``, ``gdev``, ``gnorm``,
-``ratio`` (``y/m`` as one division, printed inline), ``logratio``,
+``ratio`` (``y/m`` as one division, printed inline), ``logratio``, ``side`` (the piece a
+two-piece law is on, whose derivatives are zero),
 ``psires``, ``sres`` (``gnorm``'s derivatives), ``lphi`` (``d^n log Phi``),
 and SymPy's ``loggamma`` and ``polygamma``.  ``polygamma``,
 ``psires`` and ``sres`` of orders ``n <= 3``, and ``lphi`` of ``n <= 4``, at one
@@ -58,6 +62,7 @@ from pathlib import Path
 
 import mpmath as mp
 import sympy as sp
+from sympy.codegen.cfunctions import log1p
 from sympy.core.function import ArgumentIndexError
 from sympy.printing.pycode import PythonCodePrinter
 
@@ -131,6 +136,15 @@ class logratio(sp.Function):  # noqa: N801
         return 1 / y if argindex == 1 else -1 / m
 
 
+class side(sp.Function):  # noqa: N801
+    """``-1`` below zero, else ``1``: the piece a two-piece law is on, constant between its joins."""
+
+    nargs = 1
+
+    def fdiff(self, argindex=1):
+        return sp.S.Zero
+
+
 class gnorm(sp.Function):  # noqa: N801
     nargs = 1
 
@@ -187,6 +201,7 @@ def _mp_psires(n, a):
 MPMATH = {
     "softplus": lambda z: mp.log1p(mp.exp(z)),
     "expit": lambda z: 1 / (1 + mp.exp(-z)),
+    "side": lambda z: -1 if z < 0 else 1,
     "log1mexp": lambda t: mp.log(-mp.expm1(-t)) if t < 1 else mp.log1p(-mp.exp(-t)),
     "invexpm1": lambda t: 1 / mp.expm1(t),
     "gdev": lambda y, m: y / m - 1 - mp.log(y / m),
@@ -279,6 +294,9 @@ class Declaration:
     coordinates: str = "natural"
     # The response's support: "positive", or "real" for a location family.
     support: str = "positive"
+    # The highest jet order the kernels carry; a law whose windows or curvature
+    # directions need no more than the row Hessian stops at 2.
+    max_order: int = MAX_ORDER
     doc: str = ""
 
 
@@ -418,7 +436,95 @@ GENERALIZED_PARETO = Declaration(
     ),
 )
 
-DECLARATIONS = (GAMMA, GAMMA_LOG, NORMAL, GENERALIZED_PARETO)
+
+def _log_normal_mean_log_density(y, mean, scale):
+    """The log-normal in ``(mean, scale)``, ``mu = log(mean) - scale^2/2``, on ``log y``.
+
+    Without ``-log y - log(2 pi)/2``, which the caller's carrier holds.
+    """
+    return -sp.log(scale) - ratio(logratio(y, mean) + scale**2 / 2, scale) ** 2 / 2
+
+
+LOG_NORMAL_MEAN = Declaration(
+    name="log_normal_mean",
+    parameters=("mean", "scale"),
+    log_density=_log_normal_mean_log_density,
+    max_order=2,
+    doc=(
+        "``LogNormalLS``'s row law in its mean form ``(mean, scale)``: the normal\n"
+        "law of ``log y`` at ``mu = log(mean) - scale^2/2``.  The residual\n"
+        "``log(y/mean) + scale^2/2`` is centred by ``logratio``, so a response near\n"
+        "its mean keeps its digits.  Rows only: the windows chain the normal's tails."
+    ),
+)
+
+
+def _two_piece_log_density(scale, skew, residual):
+    """``-log(scale) - u^2/2``, ``u = z/(1 + side(z) skew)``, ``z = residual/scale``."""
+    z = ratio(residual, scale)
+    return -sp.log(scale) - ratio(z, 1 + side(z) * skew) ** 2 / 2
+
+
+TWO_PIECE_LOCATION = Declaration(
+    name="two_piece_location",
+    parameters=("location", "scale", "skew"),
+    real=("location", "skew"),
+    support="real",
+    log_density=lambda y, location, scale, skew: _two_piece_log_density(scale, skew, y - location),
+    max_order=2,
+    doc=(
+        "The epsilon-skew two-piece normal in ``(location, scale, skew)``\n"
+        "(Mudholkar and Hutson 2000; Arellano-Valle, Gomez and Quintana 2005):\n"
+        "``TwoPieceNormalLSS``'s row law, and ``TwoPieceLogNormalLSS``'s on ``log y``.\n"
+        "The piece, ``side(z)`` at ``z = (y - location)/scale``, is constant between\n"
+        "the join at ``z = 0``, where the log density is continuously differentiable\n"
+        "and its Hessian jumps; the right piece starts at the join.  Without the\n"
+        "constant ``-log(2 pi)/2``, which the caller's carrier holds."
+    ),
+)
+
+
+def _log_mean_loading(scale, skew):
+    """``log K(scale, skew)``, ``K = E[exp(scale W)]``, as the log-sum-exp of its two pieces.
+
+    Each piece is ``log(1 -/+ skew) + a^2/2 + log Phi(-/+ a)`` at ``a = scale (1 -/+ skew)``,
+    the log of ``(1 -/+ skew) exp(a^2/2) Phi(-/+ a)``, which stays bounded in the far tail.
+    """
+    left = log1p(-skew) + (scale * (1 - skew)) ** 2 / 2 + lphi(0, -scale * (1 - skew))
+    right = log1p(skew) + (scale * (1 + skew)) ** 2 / 2 + lphi(0, scale * (1 + skew))
+    return left + softplus(right - left)
+
+
+def _two_piece_mean_log_density(y, mean, scale, skew):
+    """The two-piece log-normal in ``(mean, scale, skew)``: ``mu = log(mean) - log K``."""
+    return _two_piece_log_density(scale, skew, logratio(y, mean) + _log_mean_loading(scale, skew))
+
+
+TWO_PIECE_MEAN = Declaration(
+    name="two_piece_mean",
+    parameters=("mean", "scale", "skew"),
+    real=("skew",),
+    log_density=_two_piece_mean_log_density,
+    max_order=2,
+    doc=(
+        "``TwoPieceLogNormalLSS``'s row law in its mean form ``(mean, scale, skew)``:\n"
+        "the two-piece law of ``log y`` at ``mu = log(mean) - log K(scale, skew)``,\n"
+        "``K = E[exp(scale W)]`` the mean loading, whose two pieces are combined by\n"
+        "the log-sum-exp rule with ``log Phi`` from ``log_ndtr_01234``, so it is\n"
+        "finite wherever the pieces are.  The residual ``log(y/mean) + log K`` is\n"
+        "centred by ``logratio``.  Without the carrier's ``-log y - log(2 pi)/2``."
+    ),
+)
+
+DECLARATIONS = (
+    GAMMA,
+    GAMMA_LOG,
+    NORMAL,
+    GENERALIZED_PARETO,
+    LOG_NORMAL_MEAN,
+    TWO_PIECE_LOCATION,
+    TWO_PIECE_MEAN,
+)
 
 
 @dataclass
@@ -465,11 +571,12 @@ def derive(declaration: Declaration) -> Derived:
     density = declaration.log_density(y, *law, *data)
     terms = sp.Add.make_args(density)
     free = [term for term in terms if not term.free_symbols & set(theta)]
-    laws = {"density": jet(sp.Add(*[term for term in terms if term not in free]), theta)}
+    order = declaration.max_order
+    laws = {"density": jet(sp.Add(*[term for term in terms if term not in free]), theta, order)}
     tails = (("logsf", declaration.log_survival), ("logcdf", declaration.log_cdf))
     for kind, function in (*tails, *declaration.extra_laws):
         if function is not None:
-            laws[kind] = jet(function(y, *law, *data), theta)
+            laws[kind] = jet(function(y, *law, *data), theta, order)
     return Derived(declaration, y, theta, data, sp.Add(*free), laws, time.perf_counter() - start)
 
 
@@ -501,7 +608,16 @@ class _Printer(PythonCodePrinter):
         return f"{name}({', '.join(self._print(argument) for argument in expr.args)})"
 
 
-_PRIMITIVE_NAMES = ("softplus", "expit", "log1mexp", "invexpm1", "gdev", "logratio", "gnorm")
+_PRIMITIVE_NAMES = (
+    "softplus",
+    "expit",
+    "log1mexp",
+    "invexpm1",
+    "gdev",
+    "logratio",
+    "gnorm",
+    "side",
+)
 # Jet functions: callee and the number of derivatives ``n = 0..count-1`` it returns.
 _JETS = {
     sp.polygamma: ("polygamma_0123", 4),
@@ -531,7 +647,8 @@ def _calls(expressions: list[sp.Expr]):
     """Group jet-function and engine atoms by argument: ``{(callee, upper, args): {atom: index}}``."""
     groups: dict[tuple, dict[sp.Expr, int]] = {}
     for expression in expressions:
-        for atom in expression.atoms(sp.Function):
+        # In structural order, not set order, so the groups are numbered the same under every hash seed.
+        for atom in sorted(expression.atoms(sp.Function), key=sp.default_sort_key):
             if type(atom) in _JETS:
                 n, argument = atom.args
                 callee, count = _JETS[type(atom)]
@@ -640,7 +757,7 @@ def emit_kernel(
         *_outputs(targets),
     ]
     lines = [
-        "@njit(cache=True, error_model='numpy')",
+        "@njit(cache=True, nogil=True, error_model='numpy')",
         f"def {name}({', '.join(signature)}):",
         *preamble,
         "    for i in range(Y.shape[0]):",
@@ -753,7 +870,10 @@ def render(derived: Derived, primitives_text: str) -> str:
     chunks, engines = [], set()
     for law, channels in derived.laws.items():
         text, used = emit_kernel(
-            law, derived, _jet_targets(channels, MAX_ORDER), multiplied=law == "density"
+            law,
+            derived,
+            _jet_targets(channels, derived.declaration.max_order),
+            multiplied=law == "density",
         )
         chunks.append(text)
         engines |= used
@@ -761,6 +881,9 @@ def render(derived: Derived, primitives_text: str) -> str:
         "carrier", derived, [("J0[i]", derived.carrier)], multiplied=True, parametrised=False
     )
     chunks.append(carrier)
+    # The kernels release the GIL and run on the worker pool, inside a row chunk.
+    kernels = ", ".join([*derived.laws, "carrier"])
+    chunks.append(f"_POOLED_ROW_KERNELS = ({kernels},)\n")
     body = "\n\n".join(chunks)
     primitives = sorted(
         name for name in (*_PRIMITIVE_NAMES, *_JET_COUNT) if re.search(rf"\b{name}\(", body)
@@ -802,7 +925,7 @@ def render(derived: Derived, primitives_text: str) -> str:
         f"DATA = {declaration.data!r}",
         f"COORDINATES = {declaration.coordinates!r}",
         f"LAWS = {tuple(derived.laws)!r}",
-        f"MAX_ORDER = {MAX_ORDER}",
+        f"MAX_ORDER = {declaration.max_order}",
         f'PRIMITIVES_DIGEST = "{hashlib.sha256(primitives_text.encode()).hexdigest()}"',
         f'ENGINES_DIGEST = "{engine_digest}"',
         "",

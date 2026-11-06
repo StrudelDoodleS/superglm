@@ -21,6 +21,8 @@ from superglm.distributional.kernels._common import (
     validated_derivative_order,
     validated_semantics,
 )
+from superglm.distributional.kernels._declared import channels, density_rows
+from superglm.distributional.kernels._declared import gamma as _declared_gamma
 
 _FLOAT = np.float64
 _MIN_FLOAT = np.nextafter(_FLOAT(0.0), _FLOAT(1.0))
@@ -782,6 +784,20 @@ def evaluate_gamma_rows(
     ):
         raise ValueError("Gamma row arrays must have the same shape")
     order = validated_derivative_order(derivative_order)
+    n_rows = len(response_values)
+    ones = np.ones(n_rows)
+    prior = weight_semantics == "prior"
+    # The generated kernel's law has the weight in the shape (prior) or as the row's mass.
+    jets = density_rows(
+        _declared_gamma,
+        order,
+        response_values,
+        (mean_values, scale_values),
+        (weight_values if prior else ones,),
+        ones if prior else weight_values,
+    )
+    if jets is not None:
+        return GammaKernelEvaluation(*channels(jets), np.ones(n_rows, bool))
     shape, multiplier = _shape_from_scale(scale_values, weight_values, weight_semantics)
     normalizer = _gamma_log_normalizer(shape)
     az, at, ad = _scaled_ratio_terms(

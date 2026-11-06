@@ -139,14 +139,13 @@ _FIRST_USE: dict[str, str] = {
                 for module in ("gamma", "gamma_log")
                 for law in ("logsf", "logcdf")
             ),
-            _PRIMITIVES + "logratio",
         ),
         "GammaLS reads a bounded row's tail by the uniform expansion only above shape 1e4 "
         "(cv below 0.01 at unit weight), a response nearly constant in its cell: no census fit "
-        "reaches it (logratio is its centred log(y/mean))",
+        "reaches it",
     ),
     **dict.fromkeys(
-        (_PRIMITIVES + name for name in ("softplus", "expit", "log1mexp", "invexpm1")),
+        (_PRIMITIVES + name for name in ("log1mexp", "invexpm1")),
         "primitives of the declared test laws (Weibull, Burr XII, log-logistic, Lomax); no "
         "public family calls them",
     ),
@@ -190,9 +189,18 @@ _FIRST_USE: dict[str, str] = {
         "the generalized gamma tails' own scalar and array entry points, for tests: bounded "
         "fits reach both engines through gg_log_tail's row kernel",
     ),
-    "superglm.distributional.kernels._declared.generalized_pareto.carrier": (
-        "generated with every declaration, but the generalized Pareto density has no "
-        "parameter-free part, so its windows never read the carrier"
+    **dict.fromkeys(
+        (
+            _DECLARED + f"{module}.carrier"
+            for module in (
+                "generalized_pareto",
+                "log_normal_mean",
+                "two_piece_location",
+                "two_piece_mean",
+            )
+        ),
+        "generated with every declaration, but these densities have no parameter-free part, "
+        "so their rows and windows never read the carrier",
     ),
 }
 

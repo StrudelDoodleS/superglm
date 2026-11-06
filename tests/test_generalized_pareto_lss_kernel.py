@@ -204,6 +204,8 @@ def test_row_hessian_reuses_one_series_power_vector(monkeypatch, order, power_ve
 
     with monkeypatch.context() as patch:
         patch.setattr(gp.np, "ones_like", record)
+        # The power vector belongs to the array route, which the compiled rows would bypass.
+        patch.setattr(gp, "density_rows", lambda *args, **kwargs: None)
         actual = gp.scale_rows(
             np.array([0.0, 0.25, 1.0]),
             np.ones(3),

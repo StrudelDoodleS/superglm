@@ -14,6 +14,8 @@ quantities that a primitive resolves:
   log(1 - exp(-|a|))*, Rmpfr vignette, 2012);
 - ``invexpm1(t) = 1/(e^t - 1)``, written ``e^-t/(1 - e^-t)`` above ``t = 1`` so
   it underflows gradually instead of through an overflowing ``expm1``;
+- ``side(z)``, ``-1`` below zero and ``1`` otherwise: the piece of a two-piece law,
+  constant between its joins, so its derivatives are zero;
 - ``gdev(y, m) = y/m - 1 - log(y/m)``, half the gamma unit deviance, which is
   Loader's ``bd0(m, y)/m``, by his series in ``v = (m - y)/(m + y)`` (Loader,
   *Fast and accurate computation of binomial probabilities*, 2000) for
@@ -168,6 +170,11 @@ def invexpm1(t):
         e = math.exp(-t)
         return e / (1.0 - e)
     return 1.0 / math.expm1(t)
+
+
+@njit(cache=True)
+def side(z):
+    return -1.0 if z < 0.0 else 1.0
 
 
 @njit(cache=True)

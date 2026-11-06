@@ -91,12 +91,14 @@ class _Crew:
     which sections of a few hundred microseconds per task need.  ``size`` is the
     most threads the crew may hold; :meth:`grow` starts them as sections admit
     helpers.  A worker drops every reference to a finished job before reporting it
-    done, since the job's closure holds the section's buffers.
+    done, since the job's closure holds the section's buffers.  Each thread has its own
+    inbox and a section posts its ``k``-th helper to thread ``k``: a thread keeps the
+    arena its scratch grew in for the fit, so narrow sections stay on few threads.
     """
 
     def __init__(self, size: int, started: int = 0) -> None:
         self.size = size
-        self._jobs: queue.SimpleQueue = queue.SimpleQueue()
+        self._inboxes: list[queue.SimpleQueue] = []
         self._lock = threading.Lock()
         self._threads: list[threading.Thread] = []
         try:
@@ -109,16 +111,20 @@ class _Crew:
         """Start threads until the crew holds ``min(count, size)``."""
         with self._lock:
             while len(self._threads) < min(count, self.size):
-                thread = threading.Thread(target=self._run, name="superglm-map-crew", daemon=True)
+                inbox: queue.SimpleQueue = queue.SimpleQueue()
+                thread = threading.Thread(
+                    target=self._run, args=(inbox,), name="superglm-map-crew", daemon=True
+                )
                 # Recorded before it starts: a start interrupted once the thread
                 # runs must still leave it for close to end.
+                self._inboxes.append(inbox)
                 self._threads.append(thread)
                 thread.start()
 
-    def _run(self) -> None:
+    def _run(self, inbox: queue.SimpleQueue) -> None:
         _mark_pool_thread()
         while True:
-            item = self._jobs.get()
+            item = inbox.get()
             if item is None:
                 return
             job, done = item
@@ -129,15 +135,16 @@ class _Crew:
                 del job
                 done.put(None)
 
-    def post(self, job: Callable[[], None], done: queue.SimpleQueue) -> None:
-        """Run ``job`` on a worker, which puts ``None`` on ``done`` once it holds no reference to it."""
-        self._jobs.put((job, done))
+    def post(self, job: Callable[[], None], done: queue.SimpleQueue, slot: int = 0) -> None:
+        """Run ``job`` on thread ``slot``, which puts ``None`` on ``done`` once it holds no reference to it."""
+        self._inboxes[slot].put((job, done))
 
     def close(self) -> None:
         with self._lock:
             threads, self._threads = self._threads, []
-        for _ in threads:
-            self._jobs.put(None)  # one each; a thread that never ran leaves its own unread
+            inboxes, self._inboxes = self._inboxes, []
+        for inbox in inboxes:
+            inbox.put(None)  # a thread that never ran leaves its own unread
         for thread in threads:
             if thread.is_alive():
                 thread.join()
@@ -209,6 +216,11 @@ def fit_pool() -> Iterator[None]:
         threads.close()
 
 
+def on_fit_threads() -> bool:
+    """Whether a section started here runs on the threads its fit keeps (:func:`fit_pool`)."""
+    return _fit_threads.get() is not None and not getattr(_on_pool_thread, "inside", False)
+
+
 @contextmanager
 def section_executor(workers: int, name: str) -> Iterator:
     """An executor for one section's ``workers`` jobs: the fit's (:func:`fit_pool`), else its own.
@@ -216,9 +228,8 @@ def section_executor(workers: int, name: str) -> Iterator:
     A section that runs on one of the fit's threads starts its own, as a nested
     :func:`pooled_map` does, so it cannot wait on threads its caller holds.
     """
-    fit_threads = _fit_threads.get()
-    if fit_threads is not None and not getattr(_on_pool_thread, "inside", False):
-        yield fit_threads.executor()
+    if on_fit_threads():
+        yield _fit_threads.get().executor()
         return
     from concurrent.futures import ThreadPoolExecutor
 
@@ -629,8 +640,8 @@ def pooled_for(
 
         posted = 0
         try:
-            for _ in range(helpers):
-                crew.post(partial(contextvars.copy_context().run, claim), finished)
+            for slot in range(helpers):
+                crew.post(partial(contextvars.copy_context().run, claim), finished, slot)
                 posted += 1
             claim()
         except BaseException as exc:  # an interruption while posting: stop the posted helpers

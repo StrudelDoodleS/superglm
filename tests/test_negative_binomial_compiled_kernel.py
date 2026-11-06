@@ -95,6 +95,8 @@ def test_series_rows_dispatch_to_the_compiled_core(monkeypatch: pytest.MonkeyPat
         return serial(rows, *arguments)
 
     monkeypatch.setattr(compiled, "theta_series_serial", counted)
+    # The series' candidates are the array route's; the compiled rows take them in the kernel.
+    monkeypatch.setattr(nb_kernel, "_compiled_rows", lambda *args, **kwargs: None)
     counts, mean, theta = _stress_rows(3, 7000, max_count=500.0)
     nb_kernel.evaluate_negative_binomial_rows(counts, mean, theta, np.ones(len(counts)), "prior")
     candidates = np.maximum(mean, np.maximum(counts - 1.0, 0.0)) / theta <= nb_kernel._SERIES_RATIO

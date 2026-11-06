@@ -58,6 +58,7 @@ import pytest
 sp = pytest.importorskip("sympy")
 mp = pytest.importorskip("mpmath")
 
+from superglm.distributional.kernels import gamma as gamma_kernel  # noqa: E402
 from superglm.distributional.kernels._declared import gamma as declared_gamma  # noqa: E402
 from superglm.distributional.kernels._declared import law_jets  # noqa: E402
 from superglm.distributional.kernels.gamma import evaluate_gamma_rows  # noqa: E402
@@ -280,7 +281,7 @@ def _gamma_rows():
 
 
 @pytest.mark.parametrize("semantics", ["prior", "frequency"])
-def test_gamma_declaration_reproduces_gamma_ls_rows(semantics: str) -> None:
+def test_gamma_declaration_reproduces_gamma_ls_rows(monkeypatch, semantics: str) -> None:
     """Orders 0-2 of the generated gamma against ``GammaLS``'s hand-written kernel, row by row.
 
     Both are measured against the declaration at 60 digits, in ``u`` of the
@@ -299,6 +300,8 @@ def test_gamma_declaration_reproduces_gamma_ls_rows(semantics: str) -> None:
     y, mean, cv, w = _gamma_rows()
     if semantics == "frequency":
         w = np.ceil(w)
+    # The hand-written array kernel: the compiled route declines.
+    monkeypatch.setattr(gamma_kernel, "density_rows", lambda *args, **kwargs: None)
     hand = evaluate_gamma_rows(y, mean, cv, w, semantics, derivative_order=2)
     ones = np.ones(len(y))
     data, multiplier = ((w,), ones) if semantics == "prior" else ((ones,), w)

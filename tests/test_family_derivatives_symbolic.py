@@ -305,7 +305,10 @@ _MEASURED = {
     "lognormal_mean": (4.2, 4.2, 85.4),
     "nb": (0.8, 1.9, 31.0),
     "twopiece_lognormal_location": (2.2, 2.4, 3.0),
-    "twopiece_lognormal_mean": (1.3, 24.2, 260.8),
+    # At sigma = 0.05 the score carries log K's rounding amplified by 1 / sigma, so a route's error
+    # at one row is a draw from a spread: over 400 rows at that sigma the median is 12 u compiled
+    # and 16 u array, and this row draws 10 u compiled and 1.4 u array.
+    "twopiece_lognormal_mean": (10.3, 24.2, 260.8),
     "twopiece_normal": (2.5, 2.6, 33.9),
     # Tweedie's series (anchored cumulants) cancels its canonical part in the
     # p channels: interior rows (p <= 1.62) lose up to 2e-14 of the Hessian

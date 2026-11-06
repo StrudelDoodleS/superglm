@@ -211,9 +211,16 @@ parameters and every reported number are the same, bit for bit, at any
 `n_jobs`. The environment variables `SUPERGLM_N_JOBS` and
 `SUPERGLM_MAX_MEMORY` set the defaults for every model in a process.
 
-`SuperLSS` has no `n_jobs`. Its row kernels (Tweedie and generalized gamma),
-the row chunks of its other families (on at most 8 threads) and the Gram queue
-of each row block run on at most `SUPERGLM_N_JOBS` threads, and no more than
+`SuperLSS` has no `n_jobs`. Tweedie and generalized gamma run their compiled
+row kernels on pooled row blocks. Gamma, generalized Pareto, log-normal (mean
+form), the two-piece families and negative binomial evaluate row chunks, on at
+most 8 threads, in compiled row loops that release the Python GIL; Gaussian and
+log-normal in its location form evaluate them in NumPy. A family from outside
+the package evaluates its rows on the calling thread. A compiled loop takes
+inputs up to 2^200 in magnitude, and a row it cannot represent goes to the
+array route, which evaluates the same rows to within rounding and keeps its
+errors. The Gram queue of each row block, and every other queue a fit runs on
+its own threads, run on at most `SUPERGLM_N_JOBS` threads, and no more than
 Numba's thread count, which `NUMBA_NUM_THREADS` or
 `numba.set_num_threads()` sets. Numba's count is per
 thread, so call `numba.set_num_threads()` on the thread that runs the fit.

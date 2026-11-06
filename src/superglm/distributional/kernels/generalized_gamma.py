@@ -31,7 +31,6 @@ from superglm.distributional.kernels._common import (
     stacked_direction,
     validated_derivative_order,
 )
-from superglm.distributional.kernels._curvature_direction import mean_form_hessian_direction
 from superglm.distributional.kernels._generalized_gamma_numba import (
     _BERNOULLI,
     _HALF_LOG_TWO_PI,
@@ -396,9 +395,39 @@ def _shape_terms(
     return s0, k2s1, k3s2
 
 
+def _stirling_d1_d2(k: NDArray[np.float64]) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    return stirling_remainder_d1(k), stirling_remainder_d2(k)
+
+
 def _finite_or_raise(name: str, values: NDArray | None) -> None:
     if values is not None and not np.all(np.isfinite(values)):
         raise GeneralizedGammaDomainError(f"generalized gamma {name} is not representable")
+
+
+_DEDUPE_MIN_ROWS = 1024
+
+
+def _gathered(value, inverse: NDArray[np.int64]):
+    if isinstance(value, tuple):
+        return tuple(_gathered(item, inverse) for item in value)
+    return readonly(value[inverse])
+
+
+def _on_distinct(compute, *keys: NDArray[np.float64]):
+    """``compute(*keys)`` at each distinct row of ``keys``, gathered back onto every row.
+
+    A book has few distinct scales and, with a constant shape, one shape, while the loading and
+    the shape terms are functions of those alone. An elementwise ``compute`` gives a row the
+    same bits wherever it sits, so this is the per-row evaluation. More than a quarter of the
+    rows distinct, or fewer than ``_DEDUPE_MIN_ROWS``, takes the per-row call.
+    """
+    arrays = [np.require(key, dtype=_FLOAT, requirements=("C", "A", "W")) for key in keys]
+    n = len(arrays[0])
+    if n >= _DEDUPE_MIN_ROWS:
+        count, rows, inverse = _compiled.distinct_pairs(arrays[0], arrays[-1], n // 4)
+        if count <= n // 4:
+            return _gathered(compute(*(array[rows] for array in arrays)), inverse)
+    return compute(*arrays)
 
 
 def location_rows(
@@ -461,12 +490,17 @@ def _compiled_rows(
 
 
 def _warmup_generalized_gamma() -> None:
-    """Compile the row kernel on no rows; every helper it calls compiles with it."""
+    """Compile the row kernels on no rows; every helper they call compiles with them."""
     values = np.zeros(0, dtype=_FLOAT)
     _compiled._evaluate_rows(
         values, values, values, values, values, True, 2, 0, 0, values,
         np.zeros((0, 3), dtype=_FLOAT), np.zeros((0, 6), dtype=_FLOAT),
         np.zeros(0, dtype=np.bool_),
+    )  # fmt: skip
+    _compiled.distinct_pairs(values, values, 0)
+    _compiled.mean_direction_rows(
+        values, values, np.zeros((0, 6)), np.zeros((0, 9)), np.zeros((1, 0, 3)),
+        np.zeros((1, 0, 6)), 0, 0, np.zeros((1, 0, 6)),
     )  # fmt: skip
 
 
@@ -690,7 +724,7 @@ def location_hessian_direction(
         t_sss = (6.0 * w2 * e1 + 6.0 * w2 * e + w2 * u * e - 2.0) / s3
         t_ssq = -w2 * w * (2.0 * u2 + e) / s2
         t_sqq = w2 * w2 * v2 / s1
-        t_qqq = shape_term_d1(q) + w2 * w2 * w * t4
+        t_qqq = _on_distinct(shape_term_d1, q) + w2 * w2 * w * t4
         vm, vs, vq = nu[..., 0], nu[..., 1], nu[..., 2]
         result = np.empty((*nu.shape[:-1], 6), dtype=_FLOAT)
         result[..., 0] = t_mmm * vm + t_mms * vs + t_mmq * vq
@@ -754,8 +788,9 @@ def location_expected_information(
     zero = np.abs(q) < _ZERO_SHAPE
     safe = np.where(zero, 1.0, q)
     k = 1.0 / (safe * safe)
-    s1 = np.where(zero, 0.0, stirling_remainder_d1(k))
-    s2 = np.where(zero, 0.0, stirling_remainder_d2(k))
+    s1_all, s2_all = _on_distinct(_stirling_d1_d2, k)
+    s1 = np.where(zero, 0.0, s1_all)
+    s2 = np.where(zero, 0.0, s2_all)
     q2 = safe * safe
     a = s1 + q2 / 2.0  # psi(k + 1) - log k
     # psi'(k + 1) + a^2 - Q^2 with its O(Q^2) terms cancelled analytically, using
@@ -1210,7 +1245,7 @@ def mean_hessian_direction(
     """Packed derivative of the mean-form ``(m, sigma, Q)`` Hessian along ``v``.
 
     The location-form direction chained through ``mu = log m - log C(sigma, Q)``
-    (see ``mean_form_hessian_direction``); rows whose mean does not exist are
+    (see ``_generalized_gamma_numba.mean_direction_rows``); rows whose mean does not exist are
     invalid in the Hessian and return zero.  The direction may be stacked, as
     for :func:`location_hessian_direction`.
     """
@@ -1227,26 +1262,40 @@ def mean_hessian_direction(
     if not np.any(exists):
         return result
     ye, me, se, qe, we = (values[exists] for values in (y, m, sigma_values, q, weight))
-    loading, stirling = _log_mean_loading_and_stirling(se, qe)
+    loading, _ = _on_distinct(_log_mean_loading_and_stirling, se, qe)
     logc, c_s, c_q, c_ss, c_sq, c_qq = loading
     location = np.log(me) - logc
     unit = np.ones_like(we)
-    base = _location_rows(ye, location, se, qe, unit, derivative_order=2, stirling=stirling)
+    base = _compiled_rows(ye, location, se, qe, unit, mean_form=False, order=2)
     assert base.score is not None and base.hessian_packed is not None
+    c_sss, c_ssq, c_sqq, c_qqq = _on_distinct(_log_mean_loading_third, se, qe)
+    stacked = nu[..., exists, :].reshape(-1, len(me), 3)
     with np.errstate(over="ignore", invalid="ignore"):
-        direction_exists = mean_form_hessian_direction(
-            me,
-            base.score[:, 0],
-            base.hessian_packed,
-            lambda w: location_hessian_direction(ye, location, se, qe, w, unit),
-            (c_s, c_q),
-            (c_ss, c_sq, c_qq),
-            _log_mean_loading_third(se, qe),
-            nu[..., exists, :],
+        # w = J v: a mean direction moves mu by v_m/m - C_s v_s - C_Q v_Q, the others by themselves.
+        mu_direction = stacked[..., 0] / me - c_s * stacked[..., 1] - c_q * stacked[..., 2]
+        w = np.stack([mu_direction, stacked[..., 1], stacked[..., 2]], axis=-1)
+        packed_location = location_hessian_direction(ye, location, se, qe, w, unit)
+        arguments = tuple(  # contiguous and writeable, the layout warmup compiled
+            np.require(values, dtype=_FLOAT, requirements=("C", "A", "W"))
+            for values in (
+                me,
+                base.score[:, 0],
+                base.hessian_packed,
+                np.column_stack([c_s, c_q, c_ss, c_sq, c_qq, c_sss, c_ssq, c_sqq, c_qqq]),
+                stacked,
+                packed_location,
+            )
+        )
+        direction_exists = np.empty((len(stacked), len(me), 6), dtype=_FLOAT)
+        pooled_rows(
+            lambda start, stop: _compiled.mean_direction_rows(
+                *arguments, start, stop, direction_exists
+            ),
+            len(me),
         )
         direction_exists *= we[:, None]
-    direction_exists[..., ~np.asarray(base.valid), :] = 0.0
-    result[..., exists, :] = direction_exists
+    direction_exists[:, ~np.asarray(base.valid), :] = 0.0
+    result[..., exists, :] = direction_exists.reshape(*nu.shape[:-2], len(me), 6)
     return result
 
 
@@ -1373,7 +1422,12 @@ def location_third_fourth(
         series = [_generated_series(name, u) for name in names]
         values = stack_columns(
             generalized_gamma_location_third_fourth(
-                w, q, sigma_values, shape_term_d1(q), shape_term_d2(q), *series
+                w,
+                q,
+                sigma_values,
+                _on_distinct(shape_term_d1, q),
+                _on_distinct(shape_term_d2, q),
+                *series,
             ),
             len(y),
         )
@@ -1501,13 +1555,13 @@ def mean_location_map(
     """
     from superglm.distributional.kernels._curvature_direction import packed_tuples
 
-    loading, stirling = _log_mean_loading_and_stirling(sigma, shape)
+    loading, stirling = _on_distinct(_log_mean_loading_and_stirling, sigma, shape)
     logc, c_s, c_q, c_ss, c_sq, c_qq = loading
     orders = {1: np.column_stack((c_s, c_q)), 2: np.column_stack((c_ss, c_sq, c_qq))}
     if order >= 3:
-        orders[3] = np.column_stack(_log_mean_loading_third(sigma, shape))
+        orders[3] = np.column_stack(_on_distinct(_log_mean_loading_third, sigma, shape))
     if order >= 4:
-        orders[4] = _log_mean_loading_fourth(sigma, shape)
+        orders[4] = _on_distinct(_log_mean_loading_fourth, sigma, shape)
     inner: dict[int, dict[tuple[int, tuple[int, ...]], NDArray[np.float64] | float]] = {
         1: {(0, (0,)): 1.0 / mean, (1, (1,)): 1.0, (2, (2,)): 1.0},
         2: {(0, (0, 0)): -1.0 / (mean * mean)},
@@ -1584,7 +1638,7 @@ def mean_expected_information(
     if any(values.shape != m.shape for values in (sigma_values, q, weight)):
         raise GeneralizedGammaDomainError("generalized gamma row arrays must have the same shape")
     packed = location_expected_information(sigma_values, q, weight)
-    _, c_s, c_q, _, _, _ = log_mean_loading(sigma_values, q)
+    _, c_s, c_q, _, _, _ = _on_distinct(log_mean_loading, sigma_values, q)
     i_mm, i_ms, i_mq, i_ss, i_sq, i_qq = (packed[:, i] for i in range(6))
     out = np.empty_like(packed)
     out[:, 0] = i_mm / (m * m)

@@ -23,6 +23,7 @@ from superglm._roundoff import SMALLEST_SUBNORMAL as _SUBNORMAL
 from superglm._roundoff import gamma
 from superglm.distributional.kernels._common import (
     WeightSemantics,
+    pooled_rows,
     readonly,
     validated_derivative_order,
 )
@@ -32,8 +33,8 @@ _MAX_EXACT_INTEGER = 2**53
 _MAX_RECURRENCE_CELLS = 200_000_000
 _RECURRENCE_BLOCK_SIZE = 256
 _MAX_RECURRENCE_TILE_CELLS = 65_536
-_DOMAIN_MIN = math.ldexp(1.0, -450)
-_DOMAIN_MAX = math.ldexp(1.0, 450)
+_DOMAIN_MIN = _compiled.DOMAIN_MIN
+_DOMAIN_MAX = _compiled.DOMAIN_MAX
 # The kernel is NB2 at every mean/theta ratio; no ratio is refused.
 #
 # Toward Poisson, NB2 = Poisson + ((y - mean)^2 - y)/(2 theta) + O(theta^-2).
@@ -46,11 +47,11 @@ _DOMAIN_MAX = math.ldexp(1.0, 450)
 # Toward theta/mean -> 0 the value recurrence switches from
 # log1p((j - mean)/(mean + theta)) to log((theta + j)/(mean + theta)) once
 # that argument is below -1/2.
-_POISSON_LIMIT_RATIO = _EPS
-_POISSON_SURROGATE_EXPONENT = 60
+_POISSON_LIMIT_RATIO = _compiled.POISSON_LIMIT_RATIO
+_POISSON_SURROGATE_EXPONENT = _compiled.POISSON_SURROGATE_EXPONENT
 _POISSON_LIKE_INITIAL_THETA_FACTOR = 0.5 / math.sqrt(_EPS)
-_SERIES_ORDER = 12
-_SERIES_RATIO = 1.0 / 16.0
+_SERIES_ORDER = _compiled.SERIES_ORDER
+_SERIES_RATIO = _compiled.SERIES_RATIO
 _POWER_SUM_BERNOULLI = (
     1.0,
     -0.5,
@@ -708,6 +709,53 @@ def _finite_output(
         raise error(f"negative-binomial {name} at row {row} is not finite in the numerical domain")
 
 
+def _compiled_rows(
+    counts: NDArray[np.int64],
+    continuous: tuple[NDArray[np.float64], ...],
+    prior: bool,
+    order: int,
+) -> NegativeBinomialRowEvaluation | None:
+    """The validated rows through the compiled kernel, or ``None`` if it declines a row.
+
+    The kernel declines what the array route refuses, and the array route then raises
+    its own error.  Rows run in blocks on the worker pool, as the series' candidates do.
+    """
+    n_rows = len(counts)
+    mean, theta, weights = (
+        np.require(values, dtype=_FLOAT, requirements=("C", "A", "W")) for values in continuous
+    )
+    counts = np.require(counts, dtype=np.int64, requirements=("C", "A", "W"))
+    optimizing = np.empty(n_rows, dtype=_FLOAT)
+    score = np.empty((n_rows if order >= 1 else 0, 2), dtype=_FLOAT)
+    hessian = np.empty((n_rows if order == 2 else 0, 3), dtype=_FLOAT)
+    status, _ = pooled_rows(
+        lambda start, stop: _compiled.evaluate_rows(
+            counts,
+            mean,
+            theta,
+            weights,
+            prior,
+            order,
+            _SERIES_EXPONENTS,
+            _SERIES_BERNOULLI,
+            start,
+            stop,
+            optimizing,
+            score,
+            hessian,
+        ),
+        n_rows,
+    )
+    if status != _compiled.KERNEL_OK:
+        return None
+    return NegativeBinomialRowEvaluation(
+        optimizing_log_likelihood=optimizing,
+        score=score if order >= 1 else None,
+        hessian_packed=hessian if order == 2 else None,
+        valid=np.ones(n_rows, dtype=np.bool_),
+    )
+
+
 def evaluate_negative_binomial_rows(
     counts: NDArray,
     mean: NDArray,
@@ -730,6 +778,9 @@ def evaluate_negative_binomial_rows(
         counts, mean, theta, weights, semantics, derivative_order
     )
     count_values, mean_values, theta_values, weight_values = arrays
+    compiled = _compiled_rows(integer_counts, arrays[1:], semantics == "prior", order)
+    if compiled is not None:
+        return compiled
     scale, multiplier, effective_mean, effective_theta, total, poisson = _domain(
         mean_values, theta_values, weight_values, semantics, integer_counts
     )
@@ -1203,3 +1254,7 @@ def _warmup_negative_binomial() -> None:
     _compiled._size_information_rows(
         values, values, _MAX_INFORMATION_TERMS_PER_ROW, 0, 0, values, rows
     )
+    _compiled.evaluate_rows(
+        rows, values, values, values, True, 2, _SERIES_EXPONENTS, _SERIES_BERNOULLI, 0, 0,
+        values, np.zeros((0, 2), dtype=_FLOAT), np.zeros((0, 3), dtype=_FLOAT),
+    )  # fmt: skip

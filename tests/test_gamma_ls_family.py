@@ -1067,6 +1067,8 @@ def test_ordinary_gamma_rows_batch_each_scipy_special_function_once(
     monkeypatch.setattr(gamma_kernel.special, "gammaln", counted_gammaln)
     monkeypatch.setattr(gamma_kernel.special, "digamma", counted_digamma)
     monkeypatch.setattr(gamma_kernel.special, "polygamma", counted_polygamma)
+    # SciPy's functions belong to the array route, which the compiled rows would bypass.
+    monkeypatch.setattr(gamma_kernel, "density_rows", lambda *args, **kwargs: None)
     result = family.evaluate_natural(y, theta, plan, derivative_order=2)
 
     assert result.derivative_order == 2

@@ -23,10 +23,10 @@ DATA = ('root',)
 COORDINATES = 'natural'
 LAWS = ('density', 'logsf', 'logcdf')
 MAX_ORDER = 4
-PRIMITIVES_DIGEST = "cb808cedae0b1fe702c3ef6bc4a9ccbc9053541714ce04ee3de9ca566bf00965"
+PRIMITIVES_DIGEST = "9096ccdeeac6f57c224745ea6403abee08bdb4ecbebdaec274482335bb99a3cf"
 ENGINES_DIGEST = ""
 
-@njit(cache=True, error_model='numpy')
+@njit(cache=True, nogil=True, error_model='numpy')
 def density(Y, P0, P1, D0, M, order, J0, J1, J2, J3, J4):
     for i in range(Y.shape[0]):
         y = Y[i]
@@ -65,7 +65,7 @@ def density(Y, P0, P1, D0, M, order, J0, J1, J2, J3, J4):
                         J4[i, 4] = m * (t9*(1.0 - 10.0*t1))
 
 
-@njit(cache=True, error_model='numpy')
+@njit(cache=True, nogil=True, error_model='numpy')
 def logsf(Y, P0, P1, D0, order, J0, J1, J2, J3, J4):
     for i in range(Y.shape[0]):
         y = Y[i]
@@ -108,7 +108,7 @@ def logsf(Y, P0, P1, D0, order, J0, J1, J2, J3, J4):
                         J4[i, 4] = t0*t12*(24.0*c0_1 + 12.0*t10 + t13 + 36.0*t4)
 
 
-@njit(cache=True, error_model='numpy')
+@njit(cache=True, nogil=True, error_model='numpy')
 def logcdf(Y, P0, P1, D0, order, J0, J1, J2, J3, J4):
     for i in range(Y.shape[0]):
         y = Y[i]
@@ -151,10 +151,13 @@ def logcdf(Y, P0, P1, D0, order, J0, J1, J2, J3, J4):
                         J4[i, 4] = t0*t12*(24.0*c0_1 + 12.0*t10 + t13 + 36.0*t4)
 
 
-@njit(cache=True, error_model='numpy')
+@njit(cache=True, nogil=True, error_model='numpy')
 def carrier(Y, D0, M, J0):
     for i in range(Y.shape[0]):
         y = Y[i]
         d0 = D0[i]
         m = M[i]
         J0[i] = m * (log(d0))
+
+
+_POOLED_ROW_KERNELS = (density, logsf, logcdf, carrier,)

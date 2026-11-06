@@ -22,11 +22,16 @@ blocks "in order of decreasing computational cost".  This module does that:
 - **Workers.**  ``_parallel.pool_workers``: ``n_jobs`` capped by the task
   count and by ``max_memory`` over the largest task's working set.  A queue
   that bounds its dispatch (``dispatch_bound``, SuperLSS's row blocks, dense
-  channels and pass tables, where the overhead was measured) runs on at most
-  ``section_threads()``, numba's thread count as the SuperLSS sections it
-  replaced did, and is capped by the total cost over
-  the largest unsplit task's (no schedule finishes before that task, and
-  LPT on that many workers finishes within twice its cost; Graham 1969),
+  channels and pass tables, where the overhead was measured) and every queue
+  on a fit's kept threads (``fit_pool``) run on at most ``section_threads()``,
+  numba's thread count as the SuperLSS sections they replaced did.  A kept
+  thread keeps the arena its scratch grew in, up to twice the largest block
+  the process has freed (glibc's trim threshold), for the rest of the fit, and
+  later queues cycle through every thread an earlier one started, so one wide
+  queue would hold that scratch once per thread.  Such a queue is capped by
+  the total cost over the largest unsplit task's (no schedule finishes before
+  that task, and LPT on that many workers finishes within twice its cost;
+  Graham 1969),
   and by the queue's cost over its serial part: every task pays a fixed cost
   of dispatch under the GIL, in the queue's own units (``_TASK_OVERHEAD_COST``
   of multiply-adds, ``_ROW_TASK_OVERHEAD_COST`` of row visits on a
@@ -349,6 +354,7 @@ def run_block_tasks(
     """
     from superglm._blas_threads import pooled_blas_threads
     from superglm._parallel import (
+        on_fit_threads,
         pool_workers,
         resolve_max_memory,
         retained_bytes,
@@ -368,7 +374,7 @@ def run_block_tasks(
         workers = 1
     else:
         workers = pool_workers(len(units), max(task.nbytes for task in tasks))
-    if dispatch_bound and workers > 1 and override.workers is None:
+    if (dispatch_bound or on_fit_threads()) and workers > 1 and override.workers is None:
         workers = min(workers, section_threads())
         largest_unsplit = max((task.cost for task in tasks if not task.split_bytes), default=0.0)
         overhead = len(tasks) * (_ROW_TASK_OVERHEAD_COST if row_visits else _TASK_OVERHEAD_COST)
