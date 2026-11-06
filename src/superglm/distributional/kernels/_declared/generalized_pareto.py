@@ -3,9 +3,9 @@
 ``GeneralizedParetoLSS``'s row law in ``(scale, shape)``: ``log S =
 -log1p(shape t)/shape`` at ``t = y/scale``, from the survival engine
 ``kernels._pareto_tail``, which is analytic through ``shape = 0``; the
-log density is ``-log(scale + shape y) + log S``, marked at a negative
-shape, which the family's domain excludes.  Every window reads the
-survival function, so there is no log-CDF law.
+log density is ``-log(scale + shape y) + log S``, marked at a shape
+outside ``[0, 1]``, which the family's domain excludes.  Every window
+reads the survival function, so there is no log-CDF law.
 """
 
 # ruff: noqa
@@ -38,7 +38,7 @@ def density(Y, P0, P1, M, order, J0, J1, J2, J3, J4):
         t0 = p0 + p1*y
         gpd_log_survival_into(y/p0, p1, np.bool_(True), order, out0)
         c0_0 = out0[0]
-        J0[i] = m * (c0_0 - log(t0) + at_least(p1, 0.0))
+        J0[i] = m * (c0_0 - log(t0) + at_least(p1, 0.0) + at_least(1.0 - p1, 0.0))
         if order >= 1:
             t1 = (1.0 / (p0 * p0))
             c0_1 = out0[1]

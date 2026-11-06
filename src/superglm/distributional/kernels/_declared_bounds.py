@@ -486,9 +486,12 @@ def gpd_window_jets(
     )
     span = hi - lo
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-        support = psi + xi * np.where(xi < 0.0, hi, lo)
-        reach = span * (1.0 + np.abs(xi)) / support
-    rows = np.flatnonzero((support > 0.0) & (reach <= NARROW_WINDOW))
+        support = psi + xi * lo
+        reach = span * (1.0 + xi) / support
+    # The density kernel marks a shape outside ``[0, 1]`` as the array route's, so such a window
+    # reads its tails.
+    inside = (xi >= 0.0) & (xi <= 1.0)
+    rows = np.flatnonzero(inside & (support > 0.0) & (reach <= NARROW_WINDOW))
     if len(rows) == 0:
         return result
 

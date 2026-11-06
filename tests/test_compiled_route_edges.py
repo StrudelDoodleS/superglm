@@ -16,6 +16,7 @@ import pytest
 
 pytest.importorskip("mpmath")
 
+from superglm.distributional.kernels._declared_bounds import gpd_window_jets  # noqa: E402
 from tests import _route_edges as edges  # noqa: E402
 
 BY_NAME = {route.name: route for route in edges.ROUTES}
@@ -117,6 +118,37 @@ def test_positive_shape_rows_are_compiled_up_to_their_finite_limits():
     for shape in (0.0, 1e-50, 1e-8, 0.5, 1.0):
         for y in (0.0, 1e-30, 1.0, 1e30):
             assert _served("generalized_pareto", y, 1.0, shape, 1.0)
+
+
+def test_a_pareto_shape_past_the_family_domain_takes_the_array_route():
+    """The reviewed row: ``scale/y = 1e-120`` underflows the tail engine's square of it before a
+    shape of ``1e50`` scales it back, which read a scale curvature of ``-2e70`` for ``-1e70``."""
+    assert not _served("generalized_pareto", 1e60, 1e-60, 1e50, 1.0)
+    assert not _served("generalized_pareto", 1.0, 1.0, float(np.nextafter(1.0, 2.0)), 1.0)
+    row = BY_NAME["generalized_pareto"].call(tuple(np.array([v]) for v in (1e60, 1e-60, 1e50, 1.0)))
+    assert row.hessian_packed[0, 0] == pytest.approx(-1e70, rel=1e-3)
+
+
+@pytest.mark.parametrize("shape", [-0.2, 2.0])
+def test_a_narrow_pareto_window_outside_the_family_domain_reads_its_tails(shape):
+    """The density kernel marks such a shape, and the window must not read that mark as its value:
+    ``log(S(lower) - S(upper))`` against mpmath, on a window the quadrature would otherwise take."""
+    mp = pytest.importorskip("mpmath")
+    lower, upper, scale = 1.0, 1.0 + 1e-4, 2.0
+    value = gpd_window_jets(
+        np.array([lower]),
+        np.array([upper]),
+        np.array([scale]),
+        np.array([shape]),
+        order=2,
+    )[0][0]
+    with mp.workdps(60):
+        survival = [
+            (1 + mp.mpf(shape) * mp.mpf(y) / mp.mpf(scale)) ** (-1 / mp.mpf(shape))
+            for y in (lower, upper)
+        ]
+        exact = float(mp.log(survival[0] - survival[1]))
+    assert value == pytest.approx(exact, rel=1e-9)
 
 
 def _edge_rows(name: str):

@@ -429,15 +429,15 @@ PARETO_TAIL = Engine(
 
 
 def _pareto_log_density(y, scale, shape):
-    """Marked below ``shape = 0``, the bound of ``GeneralizedParetoLSS``'s own domain.
+    """Marked outside ``0 <= shape <= 1``, the domain of ``GeneralizedParetoLSS``.
 
     ``log S`` and ``log(scale + shape y)`` are rounded apart and their derivatives nearly cancel
     at a negative shape's finite endpoint, by ``u/gap^3`` of the scale curvature at ``shape = -1``
-    and a gap ``gap = 1 + shape y/scale``, where the array rows form one fraction.
+    and a gap ``gap = 1 + shape y/scale``, where the array rows form one fraction.  A huge shape
+    with a tiny ``scale/y`` underflows the tail engine's square of it before the shape scales it back.
     """
-    return (
-        -sp.log(scale + shape * y) + at_least(shape, 0) + PARETO_TAIL(y / scale, shape, upper=True)
-    )
+    marks = at_least(shape, 0) + at_least(1 - shape, 0)
+    return -sp.log(scale + shape * y) + marks + PARETO_TAIL(y / scale, shape, upper=True)
 
 
 GENERALIZED_PARETO = Declaration(
@@ -450,9 +450,9 @@ GENERALIZED_PARETO = Declaration(
         "``GeneralizedParetoLSS``'s row law in ``(scale, shape)``: ``log S =\n"
         "-log1p(shape t)/shape`` at ``t = y/scale``, from the survival engine\n"
         "``kernels._pareto_tail``, which is analytic through ``shape = 0``; the\n"
-        "log density is ``-log(scale + shape y) + log S``, marked at a negative\n"
-        "shape, which the family's domain excludes.  Every window reads the\n"
-        "survival function, so there is no log-CDF law."
+        "log density is ``-log(scale + shape y) + log S``, marked at a shape\n"
+        "outside ``[0, 1]``, which the family's domain excludes.  Every window\n"
+        "reads the survival function, so there is no log-CDF law."
     ),
 )
 
