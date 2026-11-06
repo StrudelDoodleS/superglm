@@ -575,6 +575,17 @@ def test_a_level_past_a_groups_table_keeps_the_group_routes():
         group.codes = held
 
 
+def test_a_predictor_change_with_a_nan_in_any_block_is_refused(monkeypatch):
+    """Mutation check: take the largest block by Python's ``max``, which keeps its first
+    operand against a NaN, and the NaN of the later block goes unreported."""
+    _family, layout, _response, _plan, coefficients = _problem(GaussianLS())
+    monkeypatch.setattr(chunking, "_joint_predictor_rows", lambda *_a, **_k: [1.0, float("nan")])
+    with pytest.raises(ValueError, match="non-finite"):
+        chunking.maximum_chunked_predictor_change(
+            layout, coefficients, chunk_size="auto", pass_factors=PassFactors()
+        )
+
+
 def test_predictor_passes_read_what_the_chunks_read():
     """The compiled predictors, against the row-range route. Mutation check: an offset read for
     the step, whose change has none, or one group's table left out."""
