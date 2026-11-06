@@ -193,6 +193,57 @@ def test_tweedie_predictor_rows_are_the_chain_rule_of_the_natural_rows(semantics
     assert value == pytest.approx(float(np.sum(natural.log_likelihood)), rel=1e-13)
 
 
+class _CountedLink:
+    """The power link, counting each of its three evaluations."""
+
+    def __init__(self, link):
+        self._link = link
+        self.lower, self.upper = link.lower, link.upper
+        self.calls = 0
+
+    def _counted(self, method, eta):
+        self.calls += 1
+        return getattr(self._link, method)(eta)
+
+    def inverse(self, eta):
+        return self._counted("inverse", eta)
+
+    def deriv_inverse(self, eta):
+        return self._counted("deriv_inverse", eta)
+
+    def deriv2_inverse(self, eta):
+        return self._counted("deriv2_inverse", eta)
+
+
+@pytest.mark.parametrize("shared_power", (True, False), ids=("one_power", "row_powers"))
+def test_the_shared_power_reaches_the_link_once_per_value(shared_power):
+    """Four passes of four blocks, powers a, a, b, a: the link runs once per change of the shared
+    power, and once per block where each row has its own. The rows equal a fresh evaluation.
+    Mutation checks: never refresh the remembered power, or remember a power that rows differ in."""
+    rng = np.random.default_rng(3)
+    n, block = 400, 100
+    y = np.where(rng.random(n) < 0.3, rng.gamma(2.0, 2.0, n), 0.0)
+    weight = rng.random(n) + 0.1
+    eta_mu, eta_phi = rng.normal(0.2, 1.0, n), rng.normal(0.1, 0.5, n)
+    link = _resolved_link(TweedieLSS().parameters[2].default_link)
+    counted = _CountedLink(link)
+    rows = tweedie_kernels.tweedie_predictor_rows(y, weight, "prior", counted, shared_power)
+    shared = {"a": 0.3, "b": -0.6}
+    for pass_power in "aaba":
+        eta_p = np.full(n, shared[pass_power]) if shared_power else rng.normal(0.0, 0.8, n)
+        eta_p[::block] = eta_p[0]  # every block opens on one value, and its rows then part
+        stack = np.empty((9, n))
+        stack[:3] = eta_mu, eta_phi, eta_p
+        fresh_stack = stack.copy()
+        for first in range(0, n, block):
+            fresh = tweedie_kernels.tweedie_predictor_rows(y, weight, "prior", link, shared_power)
+            expected = fresh.evaluate(0, first, first + block, fresh_stack, 2)
+            assert rows.evaluate(0, first, first + block, stack, 2) == expected
+        np.testing.assert_array_equal(stack, fresh_stack)
+    expected_evaluations = 3 if shared_power else 16
+    assert counted.calls == 3 * expected_evaluations
+
+
 def _resolved_link(link):
     from superglm.links import resolve_link
 

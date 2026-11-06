@@ -400,7 +400,7 @@ class TweediePredictorRows:
     with ``completed`` False where any row needs the natural route.
     """
 
-    __slots__ = ("_link", "_mode", "_shared_power", "_weight", "_y")
+    __slots__ = ("_link", "_mode", "_power_rows", "_shared_power", "_weight", "_y")
 
     def __init__(self, y, weight, semantics, power_link, shared_power: bool) -> None:
         self._y = _compiled_operand(y)
@@ -408,14 +408,24 @@ class TweediePredictorRows:
         self._mode = 0 if semantics == "prior" else 1
         self._link = power_link
         self._shared_power = shared_power
+        # The last shared power with the link's three results, which depend on that power
+        # alone; one store, so a worker thread never reads a torn pair.
+        self._power_rows = (math.nan, ())
 
     def evaluate(self, row_start, first, last, stack, derivative_order) -> tuple[bool, float]:
         """Rows ``first..last``, whose predictors ``stack`` holds; see ``_tweedie_predictor_rows``."""
         link = self._link
         eta_p = stack[2, first : first + 1] if self._shared_power else stack[2, first:last]
+        seen = self._power_rows
+        if self._shared_power and seen[0] == eta_p[0]:
+            results = seen[1]
+        else:
+            results = (link.inverse(eta_p), link.deriv_inverse(eta_p), link.deriv2_inverse(eta_p))
+            if self._shared_power:
+                self._power_rows = (float(eta_p[0]), results)
         return _compiled._tweedie_predictor_rows(
             self._y, self._weight, self._mode, row_start, first, last, stack,
-            link.inverse(eta_p), link.deriv_inverse(eta_p), link.deriv2_inverse(eta_p),
+            *results,
             0 if self._shared_power else -1, link.lower, link.upper,
             derivative_order, min(_DEFAULT_MAX_TERMS, _MAX_SAFE_MODE + 1), _DEFAULT_LOG_CUTOFF,
         )  # fmt: skip
