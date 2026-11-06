@@ -24,7 +24,7 @@ DATA = ()
 COORDINATES = 'natural'
 LAWS = ('density',)
 MAX_ORDER = 2
-PRIMITIVES_DIGEST = "9096ccdeeac6f57c224745ea6403abee08bdb4ecbebdaec274482335bb99a3cf"
+PRIMITIVES_DIGEST = "e420b48fd73eccabe52d97ceb47d06588158bbc885e9482cfabbfed36f6b5c58"
 ENGINES_DIGEST = ""
 
 @njit(cache=True, nogil=True, error_model='numpy')

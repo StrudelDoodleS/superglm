@@ -218,9 +218,10 @@ most 8 threads, in compiled row loops that release the Python GIL; Gaussian and
 log-normal in its location form evaluate them in NumPy. A family from outside
 the package evaluates its rows on the calling thread. A compiled loop takes
 zeros and inputs from 2^-200 to 2^200 in magnitude (2^-450 to 2^450 for negative
-binomial) and, for two-piece log-normal in its mean form, a skew up to 0.99. A
-row it cannot represent goes to the array route, which evaluates the same rows
-to within rounding and keeps its errors, and so does a call past those limits.
+binomial) and, for two-piece log-normal in its mean form, a skew up to 0.99 in
+magnitude and a scale of at least 1e-4. A row it cannot represent goes to the
+array route, which evaluates the same rows to within rounding and keeps its
+errors, and so does a call past those limits.
 The Gram queue of each row block, and every other queue a fit runs on
 its own threads, run on at most `SUPERGLM_N_JOBS` threads, and no more than
 Numba's thread count, which `NUMBA_NUM_THREADS` or

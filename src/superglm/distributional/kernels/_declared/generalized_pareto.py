@@ -3,8 +3,9 @@
 ``GeneralizedParetoLSS``'s row law in ``(scale, shape)``: ``log S =
 -log1p(shape t)/shape`` at ``t = y/scale``, from the survival engine
 ``kernels._pareto_tail``, which is analytic through ``shape = 0``; the
-log density is ``-log(scale + shape y) + log S``.  Every window
-reads the survival function, so there is no log-CDF law.
+log density is ``-log(scale + shape y) + log S``, marked at a negative
+shape, which the family's domain excludes.  Every window reads the
+survival function, so there is no log-CDF law.
 """
 
 # ruff: noqa
@@ -15,6 +16,7 @@ from math import exp, expm1, lgamma, log, log1p, sqrt
 import numpy as np
 from numba import njit
 
+from superglm.distributional.kernels._severity_primitives import at_least
 from superglm.distributional.kernels._pareto_tail import gpd_log_survival_into
 
 PARAMETERS = ('scale', 'shape')
@@ -22,7 +24,7 @@ DATA = ()
 COORDINATES = 'natural'
 LAWS = ('density', 'logsf')
 MAX_ORDER = 4
-PRIMITIVES_DIGEST = "9096ccdeeac6f57c224745ea6403abee08bdb4ecbebdaec274482335bb99a3cf"
+PRIMITIVES_DIGEST = "e420b48fd73eccabe52d97ceb47d06588158bbc885e9482cfabbfed36f6b5c58"
 ENGINES_DIGEST = "39420931cc037f929ad46db142e1c475727f08dc2f2b7bc102aa6c811105149a"
 
 @njit(cache=True, nogil=True, error_model='numpy')
@@ -36,7 +38,7 @@ def density(Y, P0, P1, M, order, J0, J1, J2, J3, J4):
         t0 = p0 + p1*y
         gpd_log_survival_into(y/p0, p1, np.bool_(True), order, out0)
         c0_0 = out0[0]
-        J0[i] = m * (c0_0 - log(t0))
+        J0[i] = m * (c0_0 - log(t0) + at_least(p1, 0.0))
         if order >= 1:
             t1 = (1.0 / (p0 * p0))
             c0_1 = out0[1]

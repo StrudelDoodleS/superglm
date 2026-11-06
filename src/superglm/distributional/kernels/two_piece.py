@@ -54,11 +54,6 @@ _FLOAT = np.float64
 _SQRT_2_OVER_PI = math.sqrt(2.0 / math.pi)
 _HALF_LOG_TWO_PI = 0.5 * math.log(2.0 * math.pi)
 _SKEW_INVERSION_MARGIN = 1.0e-6
-# The compiled mean-form rows form the loading's curvature as a difference that cancels
-# ``1/(1 - skew)^2``, so their error grows as ``u/(1 - skew)^2``, where the array rows', whose left
-# piece carries its own small weight, grows as ``u/(1 - skew)``.  At this limit that is about
-# ``1e-12`` of the row's largest entry.  A skew past it needs a widened ``skew_bound``.
-_MAX_COMPILED_SKEW = 0.99
 
 
 class TwoPieceDomainError(ValueError):
@@ -395,9 +390,8 @@ def mean_rows(
     weight = _positive_vector(multiplier, name="multiplier")
     _same_shape(y, m, sigma, eps, weight)
     order = validated_derivative_order(derivative_order)
-    jets = None
-    if eps.max() <= _MAX_COMPILED_SKEW:
-        jets = density_rows(_declared_mean, order, y, (m, sigma, eps), (), weight)
+    # The kernel marks a row past its skew or scale limit, ``tools/generate_severity_families.py``.
+    jets = density_rows(_declared_mean, order, y, (m, sigma, eps), (), weight)
     if jets is not None:
         return TwoPieceKernelEvaluation(*channels(jets), np.ones(len(y), dtype=bool))
     logk, k_s, k_e, k_ss, k_se, k_ee = log_mean_loading(sigma, eps)

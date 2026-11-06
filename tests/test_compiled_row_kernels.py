@@ -113,9 +113,8 @@ def _gamma(semantics):
 
 def _pareto():
     rng, scale, y, _, weight = _rows(3)
-    shape = rng.uniform(-0.15, 0.9, len(y))
+    shape = rng.uniform(0.0, 0.9, len(y))
     shape[::11] = 0.0
-    y = np.where(shape < 0.0, np.minimum(y, -0.95 * scale / np.minimum(shape, -1e-300)), y)
     return lambda order: pareto_kernel.scale_rows(
         y, scale, shape, np.ceil(weight), derivative_order=order
     )
@@ -319,7 +318,7 @@ def test_zero_responses_and_zero_skews_stay_on_the_compiled_routes(monkeypatch):
     and agree with the array rows."""
     ones, zero = np.ones(3), np.zeros(3)
     pareto = lambda: pareto_kernel.scale_rows(  # noqa: E731
-        np.array([0.0, 2.0, 0.0]), ones, np.array([0.2, -0.1, 0.0]), ones, derivative_order=2
+        np.array([0.0, 2.0, 0.0]), ones, np.array([0.2, 0.1, 0.0]), ones, derivative_order=2
     )
     two_piece = lambda: two_piece_kernel.location_rows(  # noqa: E731
         np.array([-2.0, 0.0, 0.5]), np.array([0.0, 0.0, 1.0]), ones, zero, ones, derivative_order=2

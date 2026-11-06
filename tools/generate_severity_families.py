@@ -31,7 +31,8 @@ chunks on the worker pool run side by side, and each module lists its kernels in
 Primitives (SymPy rule here, Numba body in ``_severity_primitives``):
 ``softplus``, ``expit``, ``log1mexp``, ``invexpm1``, ``gdev``, ``gnorm``,
 ``ratio`` (``y/m`` as one division, printed inline), ``logratio``, ``side`` (the piece a
-two-piece law is on, whose derivatives are zero),
+two-piece law is on, whose derivatives are zero), ``at_least`` (a term that marks a row the
+kernel declines, ``0`` or NaN, whose derivatives are zero),
 ``psires``, ``sres`` (``gnorm``'s derivatives), ``lphi`` (``d^n log Phi``),
 and SymPy's ``loggamma`` and ``polygamma``.  ``polygamma``,
 ``psires`` and ``sres`` of orders ``n <= 3``, and ``lphi`` of ``n <= 4``, at one
@@ -145,6 +146,15 @@ class side(sp.Function):  # noqa: N801
         return sp.S.Zero
 
 
+class at_least(sp.Function):  # noqa: N801
+    """``0`` where ``x >= low``, else NaN: the row is marked for the array route, at no other cost."""
+
+    nargs = 2
+
+    def fdiff(self, argindex=1):
+        return sp.S.Zero
+
+
 class gnorm(sp.Function):  # noqa: N801
     nargs = 1
 
@@ -202,6 +212,7 @@ MPMATH = {
     "softplus": lambda z: mp.log1p(mp.exp(z)),
     "expit": lambda z: 1 / (1 + mp.exp(-z)),
     "side": lambda z: -1 if z < 0 else 1,
+    "at_least": lambda x, low: mp.mpf(0) if x >= low else mp.nan,
     "log1mexp": lambda t: mp.log(-mp.expm1(-t)) if t < 1 else mp.log1p(-mp.exp(-t)),
     "invexpm1": lambda t: 1 / mp.expm1(t),
     "gdev": lambda y, m: y / m - 1 - mp.log(y / m),
@@ -418,7 +429,15 @@ PARETO_TAIL = Engine(
 
 
 def _pareto_log_density(y, scale, shape):
-    return -sp.log(scale + shape * y) + PARETO_TAIL(y / scale, shape, upper=True)
+    """Marked below ``shape = 0``, the bound of ``GeneralizedParetoLSS``'s own domain.
+
+    ``log S`` and ``log(scale + shape y)`` are rounded apart and their derivatives nearly cancel
+    at a negative shape's finite endpoint, by ``u/gap^3`` of the scale curvature at ``shape = -1``
+    and a gap ``gap = 1 + shape y/scale``, where the array rows form one fraction.
+    """
+    return (
+        -sp.log(scale + shape * y) + at_least(shape, 0) + PARETO_TAIL(y / scale, shape, upper=True)
+    )
 
 
 GENERALIZED_PARETO = Declaration(
@@ -431,8 +450,9 @@ GENERALIZED_PARETO = Declaration(
         "``GeneralizedParetoLSS``'s row law in ``(scale, shape)``: ``log S =\n"
         "-log1p(shape t)/shape`` at ``t = y/scale``, from the survival engine\n"
         "``kernels._pareto_tail``, which is analytic through ``shape = 0``; the\n"
-        "log density is ``-log(scale + shape y) + log S``.  Every window\n"
-        "reads the survival function, so there is no log-CDF law."
+        "log density is ``-log(scale + shape y) + log S``, marked at a negative\n"
+        "shape, which the family's domain excludes.  Every window reads the\n"
+        "survival function, so there is no log-CDF law."
     ),
 )
 
@@ -495,9 +515,24 @@ def _log_mean_loading(scale, skew):
     return left + softplus(right - left)
 
 
+# Past this skew in magnitude a two-piece mean-form row is the array route's.  The loading's
+# curvature is a difference that cancels ``1/(1 -+ skew)^2``, so the compiled error grows as
+# ``u/(1 - skew)^2`` toward ``+1``, where the array rows' left piece carries its own small weight,
+# and as ``u/(1 + skew)`` toward ``-1``, as the array rows' does.  At this limit that is about
+# ``1e-12`` of the row's largest entry.  A skew past it needs a widened ``skew_bound``.
+_MAX_COMPILED_SKEW = sp.Rational(99, 100)
+# Below this scale too.  ``log K``, of size ``scale``, is rounding of its two pieces, so a score
+# reads ``u/scale^2`` of its row by either formula, about ``1e-8`` here; further down the two
+# routes' rounding differs, and a row's reading would turn on which route its chunk took.  The
+# scale floor that needs this is one a fit sets itself, below the default ``0.01``.
+_MIN_COMPILED_SCALE = sp.Rational(1, 10000)
+
+
 def _two_piece_mean_log_density(y, mean, scale, skew):
     """The two-piece log-normal in ``(mean, scale, skew)``: ``mu = log(mean) - log K``."""
-    return _two_piece_log_density(scale, skew, logratio(y, mean) + _log_mean_loading(scale, skew))
+    residual = logratio(y, mean) + _log_mean_loading(scale, skew)
+    marks = at_least(_MAX_COMPILED_SKEW - sp.Abs(skew), 0) + at_least(scale, _MIN_COMPILED_SCALE)
+    return _two_piece_log_density(scale, skew, residual) + marks
 
 
 TWO_PIECE_MEAN = Declaration(
@@ -512,7 +547,9 @@ TWO_PIECE_MEAN = Declaration(
         "``K = E[exp(scale W)]`` the mean loading, whose two pieces are combined by\n"
         "the log-sum-exp rule with ``log Phi`` from ``log_ndtr_01234``, so it is\n"
         "finite wherever the pieces are.  The residual ``log(y/mean) + log K`` is\n"
-        "centred by ``logratio``.  Without the carrier's ``-log y - log(2 pi)/2``."
+        "centred by ``logratio``.  Marked past a skew of ``99/100`` in magnitude and\n"
+        "below a scale of ``1/10000``.\n"
+        "Without the carrier's ``-log y - log(2 pi)/2``."
     ),
 )
 
@@ -617,6 +654,7 @@ _PRIMITIVE_NAMES = (
     "logratio",
     "gnorm",
     "side",
+    "at_least",
 )
 # Jet functions: callee and the number of derivatives ``n = 0..count-1`` it returns.
 _JETS = {

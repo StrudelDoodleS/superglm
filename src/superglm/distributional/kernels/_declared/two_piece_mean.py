@@ -5,7 +5,9 @@ the two-piece law of ``log y`` at ``mu = log(mean) - log K(scale, skew)``,
 ``K = E[exp(scale W)]`` the mean loading, whose two pieces are combined by
 the log-sum-exp rule with ``log Phi`` from ``log_ndtr_01234``, so it is
 finite wherever the pieces are.  The residual ``log(y/mean) + log K`` is
-centred by ``logratio``.  Without the carrier's ``-log y - log(2 pi)/2``.
+centred by ``logratio``.  Marked past a skew of ``99/100`` in magnitude and
+below a scale of ``1/10000``.
+Without the carrier's ``-log y - log(2 pi)/2``.
 """
 
 # ruff: noqa
@@ -16,14 +18,14 @@ from math import exp, expm1, lgamma, log, log1p, sqrt
 import numpy as np
 from numba import njit
 
-from superglm.distributional.kernels._severity_primitives import expit, log_ndtr_01234, logratio, side, softplus
+from superglm.distributional.kernels._severity_primitives import at_least, expit, log_ndtr_01234, logratio, side, softplus
 
 PARAMETERS = ('mean', 'scale', 'skew')
 DATA = ()
 COORDINATES = 'natural'
 LAWS = ('density',)
 MAX_ORDER = 2
-PRIMITIVES_DIGEST = "9096ccdeeac6f57c224745ea6403abee08bdb4ecbebdaec274482335bb99a3cf"
+PRIMITIVES_DIGEST = "e420b48fd73eccabe52d97ceb47d06588158bbc885e9482cfabbfed36f6b5c58"
 ENGINES_DIGEST = ""
 
 @njit(cache=True, nogil=True, error_model='numpy')
@@ -52,7 +54,7 @@ def density(Y, P0, P1, P2, M, order, J0, J1, J2):
         piece = side(z)
         t12 = p2*piece + 1.0
         t13 = (z/t12)
-        J0[i] = m * (-(1.0 / 2.0)*(t13 * t13) - log(p1))
+        J0[i] = m * (-(1.0 / 2.0)*(t13 * t13) - log(p1) + at_least(p1, (1.0 / 10000.0)) + at_least((99.0 / 100.0) - abs(p2), 0.0))
         if order >= 1:
             t14 = (1.0 / (p0))
             t15 = (1.0 / (p1))
