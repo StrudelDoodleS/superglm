@@ -460,6 +460,8 @@ def optimize_direct_reml(
         if not use_observed_geometry and debug_recorder is None and trace_run is None
         else None
     )
+    # The observed geometry's centred systems, for the same owner and lifetime.
+    geometry_data_reuse = _InitialDataReuse() if use_observed_geometry else None
     # Once a Gamma/log solve leaves Fisher scoring for Newton
     # (``fit_irls_direct``), later solves start on Newton.
     newton_latch = [False]
@@ -908,6 +910,7 @@ def optimize_direct_reml(
                     result=pirls_result,
                     penalty=S_cand,
                     tabmat_state=observed_tabmat_state,
+                    _data_reuse=geometry_data_reuse,
                     derivative_order=w_correction_order,
                     groups=groups if use_structured else None,
                     lambdas=cand_lambdas if use_structured else None,
@@ -1571,6 +1574,7 @@ def optimize_direct_reml(
                         result=trial_result,
                         penalty=S_trial,
                         tabmat_state=observed_tabmat_state,
+                        _data_reuse=geometry_data_reuse,
                         # the identified part rebuilds the structured factor returned here
                         compute_inverse=bool(identified),
                         groups=groups if use_structured else None,

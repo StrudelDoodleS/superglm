@@ -4469,3 +4469,87 @@ def test_terminal_mode_that_cannot_be_scored_is_refused_and_nothing_is_published
 
     assert isinstance(excinfo.value.__cause__, ObservedGeometryInfeasibleError)
     assert_model_behavior_unchanged(model, X, before)
+
+
+def test_a_geometry_at_the_weights_of_the_last_one_reads_that_one_s_centred_data(monkeypatch):
+    # An accepted trial's geometry and the next candidate's at the same coefficients form one
+    # centred system; removing the owner's hand-over forms it twice, a pass over every row.
+    import superglm.reml.observed_geometry as geometry_module
+    from superglm.solvers.centered_system import TabmatCenteringState, _InitialDataReuse
+
+    x = np.linspace(-1.0, 1.0, 30)
+    dm = DesignMatrix([DenseGroupMatrix(np.column_stack([x, x**2]))], n=len(x), p=2)
+    y = np.exp(0.1 + 0.3 * x - 0.2 * x**2) * np.linspace(0.6, 1.5, len(x))
+    builds = []
+    original = geometry_module.build_centered_system
+
+    def counted(**kwargs):
+        builds.append(np.array(kwargs["W"], copy=True))
+        return original(**kwargs)
+
+    monkeypatch.setattr(geometry_module, "build_centered_system", counted)
+    owner, state = _InitialDataReuse(), TabmatCenteringState()
+
+    def geometry(penalty, beta=(0.3, -0.2), reuse=True):
+        return build_observed_reml_geometry(
+            dm=dm,
+            distribution=Gamma(),
+            link=LogLink(),
+            y=y,
+            sample_weight=np.ones(len(x)),
+            offset_arr=np.zeros(len(x)),
+            result=_result(np.array(beta), 0.1),
+            penalty=penalty * np.eye(2),
+            tabmat_state=state,
+            _data_reuse=owner if reuse else None,
+        )
+
+    first = geometry(0.7)
+    again = geometry(0.7)
+    other_penalty = geometry(2.0)  # the data are the penalty's own: a new penalty, the same data
+    assert len(builds) == 1
+    other_point = geometry(0.7, beta=(0.31, -0.2))
+    assert len(builds) == 2 and not np.array_equal(builds[0], builds[1])
+
+    for served, penalty in ((first, 0.7), (again, 0.7), (other_penalty, 2.0)):
+        fresh = geometry(penalty, reuse=False)
+        for field in ("centered_data_gram", "centered_hessian", "mean_x", "weights", "log_det_H"):
+            np.testing.assert_array_equal(getattr(served, field), getattr(fresh, field))
+        np.testing.assert_array_equal(served.hessian_inverse, fresh.hessian_inverse)
+    assert other_point.hessian_rank == first.hessian_rank
+
+
+@pytest.mark.parametrize("family", ["gamma", "tweedie"])
+def test_an_observed_reml_fit_forms_no_geometry_system_twice_at_the_same_weights(
+    monkeypatch, family
+):
+    # By the observed weights themselves: the accepted trial's geometry is the next candidate's.
+    import pandas as pd
+
+    import superglm.reml.observed_geometry as geometry_module
+    from superglm import Categorical, Spline, SuperGLM
+
+    rng = np.random.default_rng(11)
+    n = 600
+    x = rng.uniform(size=n)
+    level = rng.choice(list("abc"), n)
+    mean = np.exp(0.2 + np.sin(3 * x) + 0.3 * (level == "b"))
+    y = rng.gamma(4.0, mean / 4.0)
+    weights_seen = []
+    original = geometry_module.build_centered_system
+
+    def recorded(**kwargs):
+        weights_seen.append(np.array(kwargs["W"], copy=True).tobytes())
+        return original(**kwargs)
+
+    monkeypatch.setattr(geometry_module, "build_centered_system", recorded)
+    model = SuperGLM(
+        family=family if family == "gamma" else Tweedie(p=1.5),
+        link="log",
+        discrete=False,
+        features={"x": Spline(n_knots=6), "level": Categorical()},
+    )
+    model.fit_reml(pd.DataFrame({"x": x, "level": level}), y)
+
+    assert len(weights_seen) > 3
+    assert len(set(weights_seen)) == len(weights_seen)
