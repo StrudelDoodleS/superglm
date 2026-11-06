@@ -142,6 +142,34 @@ def test_a_tweedie_row_with_its_power_on_a_wall_is_the_natural_routes_to_refuse(
         assert not edges.array_rows(route, columns, 3, 6)[1][0]
 
 
+def test_a_tweedie_row_whose_weighted_value_overflows_is_the_natural_routes_to_refuse():
+    """The series finishes at about ``-1e304``, and a frequency of ``2^53`` takes it past float64."""
+    row = (5e-324, 0.0, -700.0, -10.0)
+
+    def value_trial(weight):
+        y, weights = np.array([row[0]]), np.array([weight])
+        rows = edges.tweedie_kernel.tweedie_predictor_rows(
+            y, weights, "frequency", edges._POWER_LINK, False
+        )
+        stack = np.empty((9, 1))
+        stack[:3, 0] = row[1:]
+        return rows.evaluate(0, 0, 1, stack, 0)
+
+    finished, value = value_trial(1.0)
+    assert finished and -1e305 < value < -1e303
+    assert value_trial(2.0**53) == (False, 0.0)
+    with pytest.raises(edges.tweedie_kernel.TweedieNumericalRefusal):
+        edges.tweedie_kernel.evaluate_tweedie_rows(
+            np.array([row[0]]),
+            np.ones(1),
+            np.exp(np.array([row[2]])),
+            edges._POWER_LINK.inverse(np.array([row[3]])),
+            np.array([2.0**53]),
+            "frequency",
+            derivative_order=0,
+        )
+
+
 def test_positive_shape_rows_are_compiled_up_to_their_finite_limits():
     """The limit takes no row of the family's domain: a shape of zero or one, ties and far tails."""
     for shape in (0.0, 1e-50, 1e-8, 0.5, 1.0):
