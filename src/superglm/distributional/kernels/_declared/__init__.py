@@ -15,6 +15,7 @@ from math import comb
 from types import ModuleType
 
 import numpy as np
+from numba import njit
 from numpy.typing import NDArray
 
 
@@ -97,22 +98,26 @@ _MAX_INPUT = 2.0**200
 _MIN_INPUT = 2.0**-200
 
 
-def _column_within_range(column: NDArray[np.float64]) -> bool:
-    if column.size == 0:
-        return True
-    low, high = column.min(), column.max()
-    if low >= _MIN_INPUT or high <= -_MIN_INPUT:  # one sign and clear of zero: min and max decide
-        return max(high, -low) <= _MAX_INPUT
-    magnitude = np.abs(column)
-    return bool(
-        magnitude.max() <= _MAX_INPUT
-        and np.min(magnitude, where=magnitude != 0.0, initial=np.inf) >= _MIN_INPUT
-    )
+@njit(cache=True, nogil=True, error_model="numpy")
+def _column_in_range(column, low, high):
+    """Every entry is zero or from ``low`` to ``high`` in magnitude; a NaN is neither.
+
+    One pass without the GIL and without temporaries: this runs on a worker for each row chunk, and
+    each array call there would give up the GIL and queue to take it back.
+    """
+    inside = True
+    for value in column:
+        magnitude = abs(value)
+        inside &= (magnitude == 0.0) | ((low <= magnitude) & (magnitude <= high))
+    return inside
+
+
+_POOLED_ROW_KERNELS = (_column_in_range,)
 
 
 def _within_range(columns: tuple) -> bool:
     """Every column is finite, at most ``_MAX_INPUT`` in magnitude and, where nonzero, at least ``_MIN_INPUT``."""
-    return all(map(_column_within_range, map(np.asarray, columns)))
+    return all(_column_in_range(column, _MIN_INPUT, _MAX_INPUT) for column in columns)
 
 
 def density_rows(
@@ -133,6 +138,11 @@ def density_rows(
     channels: the sum of finite entries is finite unless it overflows, and then
     the array route evaluates the rows.
     """
+    n_rows = np.shape(response)[0]
+    response = _column(response, n_rows)
+    parameters = tuple(_column(column, n_rows) for column in parameters)
+    data = tuple(_column(column, n_rows) for column in data)
+    multiplier = None if multiplier is None else _column(multiplier, n_rows)
     columns = (response, *parameters, *data, *(() if multiplier is None else (multiplier,)))
     if not _within_range(columns):
         return None

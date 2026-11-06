@@ -408,6 +408,7 @@ def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
         + _negative_binomial_numba._POOLED_ROW_KERNELS
         + _generalized_gamma_numba._POOLED_ROW_KERNELS
         + tuple(kernel for module in declared_modules for kernel in module._POOLED_ROW_KERNELS)
+        + _declared._POOLED_ROW_KERNELS
         + chain_rule._POOLED_ROW_KERNELS
     )
     pooled = {id(kernel) for kernel in pooled_kernels}
