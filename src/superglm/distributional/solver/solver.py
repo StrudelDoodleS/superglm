@@ -474,6 +474,7 @@ def _evaluate_state_unmeasured(
                 coefficient_values,
                 chunk_size=context.chunk_size,
                 likelihood_cache=context.likelihood_cache,
+                pass_factors=context.pass_factors,
             )
             penalty_value = _half_penalty_quadratic(
                 context.penalty, coefficient_values, context.penalty_entries
@@ -581,7 +582,10 @@ def _fused_first_trial_eligible(context: _SolverContext) -> bool:
     contract = _likelihood_reuse_contract(context.family)
     return bool(
         context.chunk_size is not None
-        and _is_builtin_gaussian_gamma(context.family)
+        and (
+            _is_builtin_gaussian_gamma(context.family)
+            or getattr(context.family, "predictor_rows", None) is not None
+        )
         and contract is not None
         and contract.deterministic_chunk_replay
         and type(context.likelihood_plan) is contract.plan_type
@@ -1086,6 +1090,7 @@ def _cap_predictor_step(
             context.layout,
             step,
             chunk_size=context.chunk_size,
+            pass_factors=context.pass_factors,
         )
     else:
         if state.eta is None:
@@ -1478,20 +1483,15 @@ def _reuse_observed_initial_result(
             or not np.array_equal(coefficients, record.coefficients)
         ):
             return None
-        support_predictions = chunking._SupportPredictions()
-        for rows in chunking.iter_row_chunks(len(context.response), context.chunk_size):
-            eta = chunking._predictor_values(
-                context.layout,
-                coefficients,
-                rows,
-                include_offsets=True,
-                support_predictions=support_predictions,
-            )
-            theta = chunking._theta_chunk(context.layout, eta)
-            if not np.array_equal(eta, source.eta[rows.start : rows.stop]) or not np.array_equal(
-                theta, source.theta[rows.start : rows.stop]
-            ):
-                return None
+        if not chunking.predictions_are(
+            context.layout,
+            coefficients,
+            source.eta,
+            source.theta,
+            chunk_size=context.chunk_size,
+            pass_factors=context.pass_factors,
+        ):
+            return None
         score_data = record.score_data
         data_curvature = record.data_curvature
         formation = record.formation
@@ -2191,6 +2191,7 @@ def _fit_dense_fixed_lambda_core(
                     context.layout,
                     state.coefficients,
                     chunk_size=context.chunk_size,
+                    pass_factors=context.pass_factors,
                 )
         result = DenseSolverResult(
             config=solver_config,

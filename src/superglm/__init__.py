@@ -369,6 +369,7 @@ def warmup() -> None:
     from superglm.distributional.kernels.generalized_gamma import _warmup_generalized_gamma
     from superglm.distributional.kernels.negative_binomial import _warmup_negative_binomial
     from superglm.distributional.kernels.tweedie import _warmup_tweedie
+    from superglm.distributional.solver._joint_tables import _warmup_joint_tables
     from superglm.distributional.solver._ordinary_packing import _warmup_ordinary_packing
     from superglm.distributional.solver.derivatives import _warmup_chain_rule
     from superglm.features._basis_kernels import _warmup_basis_kernels
@@ -386,6 +387,7 @@ def warmup() -> None:
     _warmup_exact_sums()
     _warmup_ordinary_packing()
     _warmup_chain_rule()
+    _warmup_joint_tables()
     _warmup_support_scans()
     _warmup_row_kron()
     _warmup_basis_kernels()

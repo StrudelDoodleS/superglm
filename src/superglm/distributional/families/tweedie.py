@@ -36,12 +36,14 @@ from superglm.distributional.family import (
     _validated_derivative_order,
     _validated_parameter_matrix,
 )
+from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.kernels.tweedie import (
     TweedieNumericalRefusal,
     evaluate_tweedie_rows,
     initialize_tweedie,
     tweedie_hessian_direction,
     tweedie_natural_fourth,
+    tweedie_predictor_rows,
 )
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
@@ -727,13 +729,34 @@ class TweedieLSS(TweediePredictors):
                 derivative_order=order,
             )
         except TweedieNumericalRefusal as exc:
-            raise ValueError(f"Tweedie numerical evaluation refused: {exc}") from exc
+            raise _NumericalEvaluationError(f"Tweedie numerical evaluation refused: {exc}") from exc
         return NaturalLikelihoodEvaluation(
             optimizing_log_likelihood=evaluated.log_likelihood,
             parameter_independent_carrier=np.zeros(len(response), dtype=np.float64),
             score=evaluated.score,
             hessian_packed=evaluated.hessian_packed,
             valid=evaluated.valid,
+        )
+
+    def predictor_rows(
+        self, y: NDArray, plan: FamilyLikelihoodPlan, links: Sequence[Link], shared_last: bool
+    ):
+        """Compiled rows in predictor coordinates, or None where these links or rows need
+        :meth:`evaluate_natural`. ``shared_last`` says one power serves every row."""
+        if (
+            len(links) != 3
+            or type(links[0]) is not LogLink
+            or type(links[1]) is not LogLink
+            or type(links[2]) is not BoundedPowerLink
+        ):
+            return None
+        tweedie_plan = _validated_plan(plan, n_observations=len(y))
+        return tweedie_predictor_rows(
+            y,
+            tweedie_plan.weights.values,
+            tweedie_plan.weights.provenance.contract.semantics,
+            links[2],
+            shared_last,
         )
 
     def predictor_curvature_directional_derivative(
@@ -950,4 +973,5 @@ _register_likelihood_reuse_contract(
     TweedieLikelihoodPlan,
     prepared_array_fields=(),
     link_types=(BoundedPowerLink,),
+    deterministic_chunk_replay=True,
 )

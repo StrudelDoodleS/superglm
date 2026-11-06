@@ -445,6 +445,8 @@ def test_public_discrete_dispatches_compressed_signed_chunks(monkeypatch) -> Non
     frame, y, weights, offsets, family, predictors = _fixture("gaussian", "prior")
     monkeypatch.setattr(chunking, "AUTO_CHUNK_MEMORY_BYTES", 8192)
     monkeypatch.setattr(chunking, "AUTO_STREAM_MAX_ROWS", 1)
+    # The group routes, which joint tables leave for designs they cannot hold.
+    monkeypatch.setattr(chunking, "_joint_plan", lambda *_args: None)
     # Two likelihood chunks per contraction block.
     monkeypatch.setattr(chunking, "contraction_block_rows", lambda n, k, rows: min(n, 2 * rows))
     original_moments = MatrixExecutionPlan.signed_moment_tasks

@@ -299,7 +299,13 @@ def _batch_outputs(n_rows: int, order: int) -> tuple[NDArray, ...]:
 
 
 def _warmup_tweedie() -> None:
-    """Compile the batch's row kernel; every helper it calls compiles with it."""
+    """Compile the two row kernels; every helper they call compiles with them."""
+    unit = _compiled_operand(np.ones(1))
+    _compiled._tweedie_predictor_rows(
+        unit, unit, 0, 0, 0, 1, np.zeros((9, 1)),
+        np.array([1.5]), np.ones(1), np.zeros(1),
+        0, _MIN_POWER, _MAX_POWER, 2, _DEFAULT_MAX_TERMS, _DEFAULT_LOG_CUTOFF,
+    )  # fmt: skip
     arrays = tuple(np.array([value], dtype=np.float64) for value in (1.0, 1.2, 0.7, 1.5, 1.0))
     values, scores, hessians, terms, _ = _batch_outputs(1, 2)
     status, failing_row = _evaluate_tweedie_batch_rows(
@@ -384,6 +390,62 @@ def evaluate_tweedie_rows(
         terms=terms,
         valid=valid,
     )
+
+
+class TweediePredictorRows:
+    """A fit's rows in predictor coordinates, for log mean and dispersion and a certified power.
+
+    Owner: the fit session (``PassFactors``); it holds the validated response
+    and weights, which no later pass changes. :meth:`evaluate` declines a block
+    with ``completed`` False where any row needs the natural route.
+    """
+
+    __slots__ = ("_link", "_mode", "_shared_power", "_weight", "_y")
+
+    def __init__(self, y, weight, semantics, power_link, shared_power: bool) -> None:
+        self._y = _compiled_operand(y)
+        self._weight = _compiled_operand(weight)
+        self._mode = 0 if semantics == "prior" else 1
+        self._link = power_link
+        self._shared_power = shared_power
+
+    def evaluate(self, row_start, first, last, stack, derivative_order) -> tuple[bool, float]:
+        """Rows ``first..last``, whose predictors ``stack`` holds; see ``_tweedie_predictor_rows``."""
+        link = self._link
+        eta_p = stack[2, first : first + 1] if self._shared_power else stack[2, first:last]
+        return _compiled._tweedie_predictor_rows(
+            self._y, self._weight, self._mode, row_start, first, last, stack,
+            link.inverse(eta_p), link.deriv_inverse(eta_p), link.deriv2_inverse(eta_p),
+            0 if self._shared_power else -1, link.lower, link.upper,
+            derivative_order, min(_DEFAULT_MAX_TERMS, _MAX_SAFE_MODE + 1), _DEFAULT_LOG_CUTOFF,
+        )  # fmt: skip
+
+
+def _compiled_operand(values) -> NDArray[np.float64]:
+    """``values`` as the read-only C vector the row kernel compiles one signature for."""
+    view = np.ascontiguousarray(values, dtype=np.float64).view()
+    view.flags.writeable = False
+    return view
+
+
+def tweedie_predictor_rows(y, weight, semantics, power_link, shared_power):
+    """The fit's predictor-coordinate rows, or None where a row or power needs the natural route."""
+    window = math.exp(_compiled._ZERO_ROW_WINDOW)
+    values = np.asarray(weight, dtype=np.float64)
+    response = np.asarray(y, dtype=np.float64)
+    if (
+        semantics not in ("prior", "frequency")
+        or not (_MIN_POWER <= power_link.lower and power_link.upper <= _MAX_POWER)
+        or not np.all(np.isfinite(response))
+        or np.any(response < 0.0)
+        or not np.all((values >= 1.0 / window) & (values <= window))
+    ):
+        return None
+    if semantics == "frequency" and (
+        np.any(values != np.floor(values)) or np.any(values > _MAX_EXACT_FREQUENCY)
+    ):
+        return None
+    return TweediePredictorRows(response, values, semantics, power_link, shared_power)
 
 
 def tweedie_hessian_direction(

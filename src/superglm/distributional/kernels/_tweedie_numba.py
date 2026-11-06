@@ -1015,6 +1015,163 @@ def _evaluate_tweedie_batch_rows(
     return KERNEL_OK, np.int64(-1)
 
 
+# ---------------------------------------------------------------- predictor coordinates
+#
+# A fit reads a row's derivatives on its predictors, never on the mean, dispersion
+# or power, so these rows go straight there. With s = 2 - p the zero atom is
+# lam = w exp(s eta_mu - eta_phi) / s, and every channel is lam times a polynomial
+# in eta_mu: one exponential, where the natural route rounds through the mean and
+# dispersion and back. The positive rows keep their series and apply the chain rule.
+
+# Predictors within this of zero stay in range through every product the natural
+# route forms, so its checks cannot refuse such a zero row; weights are held to the
+# same range once per fit. A row outside it declines the pass to the natural route.
+_ZERO_ROW_WINDOW = 100.0
+_CHAIN_TINY = float(np.finfo(np.float64).tiny)
+_CHAIN_UPPER = float(np.finfo(np.float64).max) / 2.0
+# Rows a running sum takes before it folds into the block's total, as numpy's own
+# summation blocks do: the error of the total grows with the block count, not the rows.
+_VALUE_FOLD = 256
+
+
+@njit(cache=True)
+def _chain_term(x: float, y: float, z: float) -> float:
+    """``x y z`` as the natural route's chain rule forms it; NaN where it would rescale."""
+    if x == 0.0 or y == 0.0 or z == 0.0:
+        return 0.0
+    partial = x * y
+    value = partial * z
+    if (
+        _CHAIN_TINY <= abs(partial) <= _CHAIN_UPPER * 2.0
+        and _CHAIN_TINY <= abs(value) < _CHAIN_UPPER
+    ):
+        return value
+    return math.nan
+
+
+@njit(cache=True, nogil=True)
+def _tweedie_predictor_rows(
+    y: NDArray[np.float64],
+    weight: NDArray[np.float64],
+    weight_mode: _Int,
+    row_start: _Int,
+    first: _Int,
+    last: _Int,
+    stack: NDArray[np.float64],
+    power: NDArray[np.float64],
+    power_first: NDArray[np.float64],
+    power_second: NDArray[np.float64],
+    power_mask: _Int,
+    power_lower: float,
+    power_upper: float,
+    derivative_order: _Int,
+    max_terms: _Int,
+    log_cutoff: float,
+) -> tuple[bool, float]:
+    """Rows ``first..last`` of ``stack``: ``(completed, their log-likelihood)``.
+
+    ``stack[k, i]`` holds predictor ``k`` on entry. At order 2 each column
+    leaves holding the packed curvature (mu-mu, mu-phi, mu-p, phi-phi, phi-p,
+    p-p), then the scores (mu, phi, p). ``row_start`` is the column ``0``'s
+    row. ``power_mask`` is 0 when one power serves every row, else -1, each
+    array then running from ``first``. A power not strictly between its walls,
+    a value that is not finite or a derivative the chain rule would rescale
+    leaves ``completed`` False: such a row is the natural route's to refuse.
+    """
+    total = 0.0
+    fold = 0.0
+    current = -1
+    p = s = inverse_s = dp = ddp = 0.0
+    coefficients = np.empty(10, dtype=np.float64)
+    for i in range(first, last):
+        where = (i - first) & power_mask
+        if where != current:
+            current = where
+            p = power[where]
+            if not (power_lower < p < power_upper):
+                return False, 0.0
+            s = 2.0 - p
+            inverse_s = 1.0 / s
+            dp = power_first[where]
+            ddp = power_second[where]
+        row = row_start + i
+        eta_mu = stack[0, i]
+        eta_phi = stack[1, i]
+        response = y[row]
+        if response == 0.0:
+            if not (abs(eta_mu) <= _ZERO_ROW_WINDOW and abs(eta_phi) <= _ZERO_ROW_WINDOW):
+                return False, 0.0
+            lam = weight[row] * math.exp(s * eta_mu - eta_phi) * inverse_s
+            fold -= lam
+            if derivative_order == 2:
+                t = eta_mu - inverse_s
+                s_lam = s * lam
+                t_lam = t * lam
+                stack[0, i] = s * s_lam
+                stack[1, i] = -s_lam
+                stack[2, i] = -eta_mu * s_lam * dp
+                stack[3, i] = lam
+                stack[4, i] = t_lam * dp
+                stack[5, i] = lam * (inverse_s * inverse_s + t * t) * dp * dp - t_lam * ddp
+                stack[6, i] = -s_lam
+                stack[7, i] = lam
+                stack[8, i] = t_lam * dp
+        else:
+            mean = math.exp(eta_mu)
+            phi = math.exp(eta_phi)
+            row_weight = weight[row]
+            rho = eta_phi
+            multiplier = 1.0
+            if weight_mode == 0:
+                rho -= math.log(row_weight)
+            else:
+                multiplier = row_weight
+            evaluated = _positive_row(
+                response, mean, phi, p, rho, derivative_order, max_terms, log_cutoff, coefficients
+            )
+            if evaluated[0] != KERNEL_OK or not math.isfinite(multiplier * evaluated[1]):
+                return False, 0.0
+            fold += multiplier * evaluated[1]
+            if derivative_order == 2:
+                score_mu = multiplier * evaluated[2]
+                score_phi = multiplier * evaluated[3]
+                score_p = multiplier * evaluated[4]
+                hessian_mm = _chain_term(multiplier * evaluated[5], mean, mean) + score_mu * mean
+                hessian_mphi = _chain_term(multiplier * evaluated[6], mean, phi)
+                hessian_mp = _chain_term(multiplier * evaluated[7], mean, dp)
+                hessian_phiphi = _chain_term(multiplier * evaluated[8], phi, phi) + score_phi * phi
+                hessian_phip = _chain_term(multiplier * evaluated[9], phi, dp)
+                hessian_pp = _chain_term(multiplier * evaluated[10], dp, dp) + score_p * ddp
+                score_eta_mu = score_mu * mean
+                score_eta_phi = score_phi * phi
+                score_eta_p = score_p * dp
+                if not (
+                    math.isfinite(hessian_mm)
+                    and math.isfinite(hessian_mphi)
+                    and math.isfinite(hessian_mp)
+                    and math.isfinite(hessian_phiphi)
+                    and math.isfinite(hessian_phip)
+                    and math.isfinite(hessian_pp)
+                    and math.isfinite(score_eta_mu)
+                    and math.isfinite(score_eta_phi)
+                    and math.isfinite(score_eta_p)
+                ):
+                    return False, 0.0
+                stack[0, i] = -hessian_mm
+                stack[1, i] = -hessian_mphi
+                stack[2, i] = -hessian_mp
+                stack[3, i] = -hessian_phiphi
+                stack[4, i] = -hessian_phip
+                stack[5, i] = -hessian_pp
+                stack[6, i] = score_eta_mu
+                stack[7, i] = score_eta_phi
+                stack[8, i] = score_eta_p
+        if (i & (_VALUE_FOLD - 1)) == _VALUE_FOLD - 1:
+            total += fold
+            fold = 0.0
+    return True, total + fold
+
+
 # ---------------------------------------------------------------- third derivatives
 #
 # The analytic directional derivative of the natural Hessian.  The series part
@@ -1781,6 +1938,7 @@ def _tweedie_fourth_rows(
 # only its own rows' outputs.
 _POOLED_ROW_KERNELS = (
     _evaluate_tweedie_batch_rows,
+    _tweedie_predictor_rows,
     _tweedie_hessian_direction_rows,
     _tweedie_fourth_rows,
 )
@@ -1788,6 +1946,7 @@ _POOLED_ROW_KERNELS = (
 
 __all__ = [
     "_evaluate_tweedie_batch_rows",
+    "_tweedie_predictor_rows",
     "_tweedie_fourth_rows",
     "_tweedie_hessian_direction_rows",
 ]

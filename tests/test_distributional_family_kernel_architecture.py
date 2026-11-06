@@ -236,6 +236,7 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
         ADAPTERS / "tweedie.py": {
             "family",
             "weights",
+            "kernels._common",
             "kernels.tweedie",
             "families._base",
             "families._predictors",

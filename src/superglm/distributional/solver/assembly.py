@@ -21,6 +21,7 @@ from superglm._group_matrix._group_matrix_core import OrdinaryPanelGroupMatrix
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.solver._formation import CurvatureFormation, dense_formation
+from superglm.distributional.solver._joint_tables import JointTablePlan, JointTables
 from superglm.distributional.solver._ordinary_packing import PredictorPanel
 from superglm.distributional.solver.packing import packed_pairs
 from superglm.solvers.rank import _symmetric_part
@@ -466,6 +467,7 @@ class GroupedGeometryAccumulator:
         tables: PassTables | None = None,
         panels: tuple[PredictorPanel | None, ...] | None = None,
         factors: PassFactors | None = None,
+        joint: JointTablePlan | None = None,
     ) -> None:
         reference_plans = _grouped_predictor_plans(layout)
         self._layout = layout
@@ -483,6 +485,7 @@ class GroupedGeometryAccumulator:
         self._finished = False
         self._factors: PassFactors | None = PassFactors() if factors is None else factors
         self._tables = tables
+        self._joint = None if joint is None else JointTables(joint)
         # A predictor with a panel (``predictor_panels``) is accumulated in its
         # packed column order, the panel's columns first, and ``finish``
         # permutes the result back: ``order[c]`` is packed column c's coefficient.
@@ -668,6 +671,36 @@ class GroupedGeometryAccumulator:
         for channel_index, finish in enumerate(finishers):
             self._place_channel(channel_index, finish())
 
+    def add_joint_rows(self, start: int, stop: int, stack: NDArray) -> None:
+        """Add rows ``[start, stop)`` to the joint tables; ``stack``'s columns hold their channels.
+
+        A pair's channels take one row pass and the blocks are read once, when
+        the geometry is published.
+        """
+        assert self._joint is not None
+        self._joint.add_rows(start, stop, stack)
+        self.note_joint_rows()
+
+    def note_joint_rows(self) -> None:
+        """Count rows the joint tables have taken, however they reached them."""
+        self._channel_chunks += 1
+        self._score_chunks += 1
+
+    @property
+    def joint_tables(self) -> JointTables | None:
+        return self._joint
+
+    def _read_joint_tables(self) -> None:
+        joint, self._joint = self._joint, None
+        if joint is None:
+            return
+        run_block_tasks(
+            joint.contract_tasks(self._score, self._curvature),
+            _BlockWeightCache(None, self._factors),
+            None,
+            dispatch_bound=True,
+        )
+
     def _place_channel(self, channel_index: int, block: NDArray) -> None:
         left_index, right_index = self._pairs[channel_index]
         left_state = self._layout.predictors[left_index]
@@ -717,6 +750,7 @@ class GroupedGeometryAccumulator:
         if self._score_chunks < 1 or np.any(self._channel_chunks != self._score_chunks):
             raise RuntimeError("every score chunk must contribute every curvature channel")
         self.release_tables()
+        self._read_joint_tables()
         self._finished = True
         self._factors = None
         if self._order is not None:

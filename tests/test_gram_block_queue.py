@@ -388,6 +388,7 @@ def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
         _negative_binomial_numba,
         _tweedie_numba,
     )
+    from superglm.distributional.solver import _joint_tables
     from superglm.distributional.solver import derivatives as chain_rule
     from superglm.features import _basis_kernels, interaction
     from superglm.reml import _leverage_rows
@@ -411,6 +412,7 @@ def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
         + _declared._POOLED_ROW_KERNELS
         + chain_rule._POOLED_ROW_KERNELS
         + _basis_kernels._POOLED_ROW_KERNELS
+        + _joint_tables._POOLED_ROW_KERNELS
     )
     pooled = {id(kernel) for kernel in pooled_kernels}
     for kernel in pooled_kernels:

@@ -535,6 +535,22 @@ class FormationAccumulator:
                 else:
                     partials[position] += partial
 
+    def add_joint_rows(self, rows: int, blocks: int, tables) -> None:
+        """Add rows whose weights' level sums joint tables have formed, in ``blocks`` blocks."""
+        self._rows += rows
+        self._chunks += blocks
+        if not self._design.supported:
+            return
+        for k in range(len(self._design.predictors)):
+            intercept = self._design.predictors[k][0]
+            if intercept is not None:
+                self._majorant[intercept] += tables.majorant_total(k)
+        for k, position, sums in tables.majorant_sums():
+            partials = self._partials[k]
+            partials[position] = (
+                np.array(sums) if partials[position] is None else partials[position] + sums
+            )
+
     def finish(self) -> CurvatureFormation | None:
         if not self._design.supported:
             return None

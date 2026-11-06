@@ -27,12 +27,17 @@ import itertools
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest import mock
 
 import mpmath as mp
 import numpy as np
 
+from superglm.distributional.families.tweedie import BoundedPowerLink, TweedieLSS
+from superglm.distributional.family import (
+    NaturalLikelihoodEvaluation,
+    validated_parameter_matrix,
+)
 from superglm.distributional.kernels import gamma as gamma_kernel
 from superglm.distributional.kernels import generalized_gamma as gg_kernel
 from superglm.distributional.kernels import generalized_pareto as pareto_kernel
@@ -45,6 +50,8 @@ from superglm.distributional.kernels._declared import generalized_pareto as decl
 from superglm.distributional.kernels._declared import log_normal_mean as declared_log_normal
 from superglm.distributional.kernels._declared import two_piece_location as declared_location
 from superglm.distributional.kernels._declared import two_piece_mean as declared_mean
+from superglm.distributional.solver.derivatives import transform_natural_derivatives
+from superglm.links import LogLink
 from tests import _two_piece_lss_oracles as two_piece_oracle
 
 U = 2.0**-53
@@ -386,6 +393,27 @@ def _tweedie_law(prior: bool):
     return bound
 
 
+_POWER_LINK = BoundedPowerLink()
+_PREDICTOR_LINKS = (LogLink(), LogLink(), _POWER_LINK)
+
+
+def _tweedie_predictor_law(prior: bool):
+    """``_tweedie_law`` on the predictors: log mean, log dispersion and logit power."""
+    natural = _tweedie_law(prior)
+
+    def bound(row):
+        law = natural(row)
+        lower, span = mp.mpf(_POWER_LINK.lower), mp.mpf(_POWER_LINK.upper - _POWER_LINK.lower)
+
+        def at(eta_mean, eta_phi, eta_power):
+            share = mp.exp(eta_power) / (1 + mp.exp(eta_power))
+            return law(mp.exp(eta_mean), mp.exp(eta_phi), lower + span * share)
+
+        return at
+
+    return bound
+
+
 # ---------------------------------------------------------------- the grids
 
 
@@ -661,6 +689,109 @@ def _tweedie_grid(large: bool) -> tuple:
     return y[keep], m[keep], d[keep], p[keep], w[keep]
 
 
+def _tweedie_predictor_grid(large: bool) -> tuple:
+    """Zero rows out to the compiled window on every predictor and weight, and series rows.
+
+    Beyond the walk, zero rows where ``eta_mean = 1 / s``: the power's score there is a difference
+    of two terms the natural route rounds separately.
+    """
+    power = (-30.0, -10.0, -3.0, 0.0, 3.0, 10.0, 30.0)
+    near = (-1e-8, 0.0, 1e-8)
+    reach = (1.0, 10.0, 50.0, 100.0)
+    if large:
+        power = (-36.0, -30.0, -20.0, -10.0, -5.0, -3.0, -1.0, -1e-8, 0.0, 1e-8, 1.0, 3.0, 5.0,
+                 10.0, 20.0, 30.0, 36.0)  # fmt: skip
+        near = (-1e-12, -1e-8, -1e-3, 0.0, 1e-12, 1e-8, 1e-3)
+        reach = (0.5, 1.0, 3.0, 10.0, 30.0, 50.0, 90.0, 100.0)
+    axis = sorted({*near, *reach, *(-value for value in reach)})
+    y = (0.0, 1e-2, 1.0, 1e2) if not large else (0.0, 1e-8, 1e-2, 1.0, 1e2, 1e6)
+    weight = (math.exp(-100.0), 1e-3, 1.0, 1e3, math.exp(100.0))
+    if large:
+        weight = (math.exp(-100.0), 1e-30, 1e-3, 1.0, 1e3, 1e30, math.exp(100.0))
+    columns = _product(y, axis, axis, power, weight)
+    gaps = (0.0, -1e-12, 1e-12, -1e-8, 1e-8)
+    p, gap, phi, w = _product(power, gaps, (-1.0, 0.0, 1.0), (1.0, 1e3))
+    tied = np.zeros_like(p), (1.0 + gap) / (2.0 - _POWER_LINK.inverse(p)), phi, p, w
+    y, m, d, p, w = (np.concatenate(pair) for pair in zip(columns, tied, strict=True))
+    # The reference sums the series by hand, as ``_tweedie_grid``'s does.
+    with np.errstate(all="ignore"):
+        rho = d - np.log(w)
+        mode = np.exp((2.0 - _POWER_LINK.inverse(p)) * np.log(np.where(y > 0.0, y, 1.0)) - rho)
+    keep = (y == 0.0) | (mode / (2.0 - _POWER_LINK.inverse(p)) <= 200.0)
+    return y[keep], m[keep], d[keep], p[keep], w[keep]
+
+
+def _tweedie_predictor_call(semantics: str):
+    """The compiled rows one at a time, for each row's value, as a block's kernel call reads them."""
+
+    def call(columns):
+        y, eta_mean, eta_phi, eta_power, weight = columns
+        rows = tweedie_kernel.tweedie_predictor_rows(y, weight, semantics, _POWER_LINK, False)
+        if rows is None:
+            raise _DeclinedError
+        stack = np.empty((9, len(y)))
+        stack[:3] = eta_mean, eta_phi, eta_power
+        value = np.empty(len(y))
+        for i in range(len(y)):
+            completed, value[i] = rows.evaluate(0, i, i + 1, stack, 2)
+            if not completed:
+                raise _DeclinedError
+        return SimpleNamespace(
+            log_likelihood=value, score=stack[6:9].T, hessian_packed=-stack[:6].T,
+            valid=np.ones(len(y), dtype=bool),
+        )  # fmt: skip
+
+    return call
+
+
+def _tweedie_predictor_array(semantics: str):
+    """The family's natural rows through the chain rule: what a chunk reads without compiled rows."""
+
+    def call(columns):
+        y, eta_mean, eta_phi, eta_power, weight = columns
+        eta = np.column_stack((eta_mean, eta_phi, eta_power))
+        theta = validated_parameter_matrix(
+            np.column_stack((np.exp(eta_mean), np.exp(eta_phi), _POWER_LINK.inverse(eta_power))),
+            n_observations=len(y),
+            parameters=TweedieLSS().parameters,
+            family_name="TweedieLSS",
+        )
+        natural = tweedie_kernel.evaluate_tweedie_rows(
+            y, *theta.T, weight, semantics, derivative_order=2
+        )
+        chained = transform_natural_derivatives(
+            NaturalLikelihoodEvaluation(
+                optimizing_log_likelihood=natural.log_likelihood,
+                parameter_independent_carrier=np.zeros(len(y)),
+                score=natural.score,
+                hessian_packed=natural.hessian_packed,
+                valid=natural.valid,
+            ),
+            eta,
+            _PREDICTOR_LINKS,
+        )
+        return SimpleNamespace(
+            log_likelihood=chained.optimizing_log_likelihood, score=chained.score_eta,
+            hessian_packed=-chained.curvature_packed, valid=natural.valid,
+        )  # fmt: skip
+
+    return call
+
+
+def _tweedie_predictor_units(columns: tuple) -> tuple:
+    """Per unit of the power itself: the link's factor would hide the power's own entries."""
+    return (
+        np.ones_like(columns[1]),
+        np.ones_like(columns[2]),
+        1.0 / _POWER_LINK.deriv_inverse(columns[3]),
+    )
+
+
+def _tweedie_predictor_conditioning(columns: tuple) -> np.ndarray:
+    """A zero row's closed form holds the generated kernels' bar and a series row Tweedie's."""
+    return np.where(columns[0] == 0.0, 1.0, TWEEDIE_BAR / BAR)
+
+
 def _gg_array_location(columns):
     y, mu, sigma, q, m = columns
     return gg_kernel._location_rows(y, mu, sigma, q, m, derivative_order=2)
@@ -814,6 +945,28 @@ ROUTES = (
         _frequency(_tweedie_grid),
         bits=lambda row: 160,
         bar=TWEEDIE_BAR,
+    ),
+    Route(
+        "tweedie_predictor_prior",
+        _tweedie_predictor_call("prior"),
+        None,
+        _tweedie_predictor_units,
+        _tweedie_predictor_law(True),
+        _tweedie_predictor_grid,
+        array=_tweedie_predictor_array("prior"),
+        bits=lambda row: 192,
+        conditioning=_tweedie_predictor_conditioning,
+    ),
+    Route(
+        "tweedie_predictor_frequency",
+        _tweedie_predictor_call("frequency"),
+        None,
+        _tweedie_predictor_units,
+        _tweedie_predictor_law(False),
+        _frequency(_tweedie_predictor_grid),
+        array=_tweedie_predictor_array("frequency"),
+        bits=lambda row: 192,
+        conditioning=_tweedie_predictor_conditioning,
     ),
 )
 
