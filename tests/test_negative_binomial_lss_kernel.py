@@ -599,6 +599,8 @@ def test_public_evaluator_wires_direct_log_channel_retention(
         raise RetentionReachedError
 
     monkeypatch.setattr(nb_kernel, "_retain_log_channels", reached)
+    # The array route's wiring: the compiled rows apply the same check in the kernel.
+    monkeypatch.setattr(nb_kernel, "_compiled_rows", lambda *args, **kwargs: None)
     with pytest.raises(RetentionReachedError):
         evaluate_negative_binomial_rows(
             np.array([0]), np.ones(1), np.ones(1), np.ones(1), "prior", derivative_order=1

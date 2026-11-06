@@ -22,6 +22,7 @@ from superglm._parallel import parallel_config
 from superglm.distributional.kernels import _generalized_gamma_numba as compiled
 from superglm.distributional.kernels import generalized_gamma as gg
 from superglm.distributional.kernels._common import PARALLEL_MIN_ROWS
+from superglm.distributional.kernels._curvature_direction import mean_form_hessian_direction
 
 U = 2.0**-53
 ROUNDINGS = 64.0 * U
@@ -274,6 +275,199 @@ def test_rows_that_repeat_a_shape_or_scale_keep_the_bits_of_the_row_alone():
     assert not gg.mean_exists(sigma[4:5], q[4:5])[0]  # a row with no mean sits between repeats
     with pytest.raises(gg.GeneralizedGammaDomainError, match="mean loading"):
         gg.mean_rows(y, first, sigma, q, multiplier, derivative_order=0)
+
+
+def _loading_slot(sigma):
+    """The table slot the kernel's hash gives a scale, from the module's own constants."""
+    bits = int(np.float64(sigma).view(np.int64))
+    product = (bits * int(compiled._HASH_MULTIPLIER)) & (2**64 - 1)
+    return product >> int(compiled._HASH_SHIFT)
+
+
+def _table_rows():
+    """One block that visits every state of the per-block loading table.
+
+    Scales that hash to one slot (a cluster, and one at the table's last slot so the probe
+    wraps), more distinct scales than the table keeps, scales met again after the table
+    stopped taking new ones, and a change of ``Q`` between two visits of the same scale.
+    """
+    by_slot = {}
+    for sigma in 0.15 + 0.0007 * np.arange(6000):
+        by_slot.setdefault(_loading_slot(sigma), []).append(sigma)
+    last = compiled._TABLE_SLOTS - 1
+    cluster = np.array([*by_slot[last][:3], *by_slot[0][:2], *by_slot[17][:3]])
+    distinct = 0.15 + 0.0007 * np.arange(3 * compiled._TABLE_LIVE)
+    keep = compiled._TABLE_LIVE - 84  # fewer than the table keeps, so these are all stored
+    q_scale = [
+        (0.6, np.concatenate([distinct[:keep], cluster, distinct[:keep], cluster])),
+        (0.45, np.concatenate([distinct[:200], cluster, distinct[:keep]])),  # the other Q
+        (0.6, np.concatenate([distinct[keep:], distinct[:keep], cluster, distinct[-9:]])),
+        (-0.5, np.concatenate([distinct[: keep // 2], [2.5, 3.5], cluster, distinct[:50]])),
+    ]
+    q = np.concatenate([np.full(len(sigma), shape) for shape, sigma in q_scale])
+    sigma = np.concatenate([sigma for _, sigma in q_scale])
+    index = np.arange(len(sigma))
+    y = 0.4 + (index % 29.0) / 7.0
+    first = 1.0 + (index % 11.0) / 3.0
+    return y, first, sigma, q, np.ones(len(sigma))
+
+
+@pytest.mark.parametrize("order", [0, 1, 2])
+def test_the_loading_table_serves_every_row_the_bits_of_forming_it_alone(order):
+    """Mutation checks: a table that survives a change of ``Q``, or that matches a scale by its
+    slot alone, hands a row another row's loading."""
+    inputs = _table_rows()
+    y, first, sigma, q, multiplier = inputs
+    assert len({_loading_slot(s) for s in sigma}) < len(set(sigma))  # scales share slots
+    assert len(set(sigma[q == 0.6])) > compiled._TABLE_LIVE
+    assert not np.all(gg.mean_exists(sigma, q))  # rows with no mean sit among the repeats
+    together = _compiled_rows("mean", inputs, order)
+    outputs = [
+        np.zeros(len(y)),
+        np.zeros((len(y), 3)),
+        np.zeros((len(y), 6)),
+        np.zeros(len(y), bool),
+    ]
+    for row in range(len(y)):  # a block of one row starts with an empty table
+        status, _ = compiled._evaluate_rows(
+            y, first, sigma, q, multiplier, True, order, row, row + 1, *outputs
+        )
+        assert status == compiled.KERNEL_OK
+    alone = outputs[3]
+    assert np.array_equal(together.valid, alone) and 0.5 < np.mean(alone) < 1.0
+    assert np.array_equal(together.optimizing_log_likelihood, outputs[0])
+    if order >= 1:
+        assert np.array_equal(together.score, outputs[1])
+    if order == 2:
+        assert np.array_equal(together.hessian_packed, outputs[2])
+
+
+def _repeating_rows(n=3000):
+    """Rows with a few distinct scales and shapes: constant ``Q`` runs, a negative one, ``Q = 0``,
+    and a tail whose mean does not exist."""
+    index = np.arange(n)
+    sigma = 0.3 + (index % 37) / 40.0
+    q = np.full(n, 0.55)
+    q[2000:2600] = -0.45
+    q[2600:2800] = 0.0
+    q[2800:] = -1.2  # sigma |Q| >= 1 for every scale here: no mean
+    y = np.exp(np.random.default_rng(5).normal(0.5, 0.8, n))
+    return y, 1.0 + (index % 11) / 3.0, sigma, q, 1.0 + (index % 3)
+
+
+def _array_mean_direction(y, mean, sigma, q, direction, weight):
+    """The array route's mean-form ``dH(v)``: the location-form direction chained through the
+    loading by ``mean_form_hessian_direction``, whose algebra the compiled assembly ports."""
+    exists = gg.mean_exists(sigma, q)
+    result = np.zeros((*direction.shape[:-1], 6))
+    ye, me, se, qe, we = (values[exists] for values in (y, mean, sigma, q, weight))
+    loading, stirling = gg._log_mean_loading_and_stirling(se, qe)
+    location = np.log(me) - loading[0]
+    unit = np.ones_like(we)
+    base = gg._location_rows(ye, location, se, qe, unit, derivative_order=2, stirling=stirling)
+    rows = mean_form_hessian_direction(
+        me,
+        base.score[:, 0],
+        base.hessian_packed,
+        lambda w: gg.location_hessian_direction(ye, location, se, qe, w, unit),
+        loading[1:3],
+        loading[3:],
+        gg._log_mean_loading_third(se, qe),
+        direction[..., exists, :],
+    )
+    rows *= we[:, None]
+    rows[..., ~base.valid, :] = 0.0
+    result[..., exists, :] = rows
+    return result
+
+
+def test_the_compiled_mean_direction_is_the_chain_rule_of_the_array_route():
+    """Mutation checks: a flipped sign in any term of the third-derivative part, or a dropped
+    ``s_mu mu_ij(v)`` term, moves a channel by far more than the tolerance."""
+    y, mean, sigma, q, weight = _repeating_rows()
+    direction = np.random.default_rng(6).normal(size=(3, len(y), 3))
+    assert 0 < np.sum(~gg.mean_exists(sigma, q)) < len(y)
+    computed = gg.mean_hessian_direction(y, mean, sigma, q, direction, weight)
+    reference = _array_mean_direction(y, mean, sigma, q, direction, weight)
+    assert computed.shape == reference.shape == (3, len(y), 6)
+    assert np.all(computed[:, ~gg.mean_exists(sigma, q)] == 0.0)
+    # Both sum the same terms in another order; the entries cancel by at most their size, which a
+    # channel's largest entry bounds, so the gap is a few tens of ``u`` of that.
+    scale = np.max(np.abs(reference), axis=(0, 1))
+    assert np.max(np.abs(computed - reference) / scale) < 64 * U
+    one = gg.mean_hessian_direction(y, mean, sigma, q, direction[0], weight)
+    assert one.shape == (len(y), 6) and np.array_equal(one, computed[0])
+
+
+def test_rows_with_repeated_scales_and_shapes_are_evaluated_once_each():
+    """The distinct rows alone reach the function, and the gather is its per-row result.
+
+    Mutation check: keys matched on ``sigma`` alone return one shape's rows for another's."""
+    _, _, sigma, q, _ = _repeating_rows()
+    seen = []
+
+    def compute(scale, shape):
+        seen.append(len(scale))
+        return np.sin(scale * shape), (scale + shape, np.column_stack([scale, shape]))
+
+    gathered = gg._on_distinct(compute, sigma, q)
+    distinct = len(np.unique(np.column_stack([sigma, q]), axis=0))
+    assert seen == [distinct] and distinct < len(sigma) // 4
+    assert np.array_equal(gathered[0], np.sin(sigma * q))
+    assert np.array_equal(gathered[1][0], sigma + q)
+    assert np.array_equal(gathered[1][1], np.column_stack([sigma, q]))
+    assert np.array_equal(gg._on_distinct(np.log, sigma), np.log(sigma))
+    seen.clear()
+    many = np.linspace(0.1, 2.0, 2 * gg._DEDUPE_MIN_ROWS)  # all distinct: the per-row call
+    gg._on_distinct(compute, many, many)
+    few = sigma[: gg._DEDUPE_MIN_ROWS - 1]  # too few rows to be worth the table
+    gg._on_distinct(compute, few, few)
+    assert seen == [len(many), len(few)]
+
+
+def _pair_slot(first, second, index_bits):
+    """The distinct-row table's first probe for a pair, from the kernel's hash."""
+    multiplier, mask = int(compiled._HASH_MULTIPLIER), 2**64 - 1
+    a, b = (int(np.float64(value).view(np.int64)) for value in (first, second))
+    return (((a * multiplier + b) & mask) * multiplier & mask) >> (64 - index_bits)
+
+
+def test_the_distinct_row_table_matches_on_both_keys_and_stops_at_its_limit():
+    """Pairs that share one slot, with one key equal, stay distinct. Mutation checks: matching on
+    one key alone merges them."""
+    sigma = np.array([1.0, 2.0, 1.0, 1.0, 2.0, 3.0, 1.0])
+    shape = np.array([0.5, 0.5, 0.5, 0.7, 0.5, 0.5, 0.7])
+    count, rows, inverse = compiled.distinct_pairs(sigma, shape, 7)
+    assert count == 4 and list(rows) == [0, 1, 3, 5] and list(inverse) == [0, 1, 0, 2, 1, 3, 2]
+    assert compiled.distinct_pairs(sigma, shape, 3)[0] == 4  # one past the limit: unfinished
+    home = _pair_slot(1.0, 0.5, 4)  # a limit of 7 gives sixteen slots
+    other_shape = next(q for q in 0.5 + 1e-3 * np.arange(1, 4000) if _pair_slot(1.0, q, 4) == home)
+    other_sigma = next(s for s in 1.0 + 1e-3 * np.arange(1, 4000) if _pair_slot(s, 0.5, 4) == home)
+    sigma = np.array([1.0, 1.0, other_sigma, 1.0, 1.0, other_sigma])
+    shape = np.array([0.5, other_shape, 0.5, 0.5, other_shape, 0.5])
+    count, rows, inverse = compiled.distinct_pairs(sigma, shape, 7)
+    assert count == 3 and list(rows) == [0, 1, 2] and list(inverse) == [0, 1, 2, 0, 1, 2]
+
+
+@pytest.mark.parametrize("name", ["mean_expected_information", "mean_third_fourth"])
+def test_the_distinct_row_gather_gives_the_per_row_bits(name):
+    """The evaluation over 3000 rows (few distinct scales) against thousand-row calls (too few
+    rows to share work): the same bits."""
+    y, mean, sigma, q, weight = _repeating_rows()
+    keep = gg.mean_exists(sigma, q)
+    arguments = (
+        (y, mean, sigma, q, weight) if name == "mean_third_fourth" else (mean, sigma, q, weight)
+    )
+    arguments = tuple(values[keep] for values in arguments)
+    function = getattr(gg, name)
+    whole = function(*arguments)
+    pieces = [
+        function(*(values[start : start + 1000] for values in arguments))
+        for start in range(0, len(arguments[0]), 1000)
+    ]
+    parts = zip(*pieces, strict=True) if isinstance(whole, tuple) else [pieces]
+    for joined, piece in zip(whole if isinstance(whole, tuple) else [whole], parts, strict=True):
+        assert np.array_equal(joined, np.concatenate(piece))
 
 
 def _pool_rows():

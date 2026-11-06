@@ -115,7 +115,7 @@ def test_kernels_import_no_distributional_module_or_contract() -> None:
         "_incomplete_gamma.py": {"kernels._severity_primitives"},
         "_tweedie_numba.py": {"kernels._fourth_generated", "kernels._severity_primitives"},
         "gaussian.py": {"kernels._common", "kernels._weighted", *chain},
-        "gamma.py": {"kernels._common", *chain},
+        "gamma.py": {"kernels._common", "kernels._declared", *chain},
         "generalized_gamma.py": {
             "kernels._common",
             "kernels._generalized_gamma_numba",
@@ -125,10 +125,15 @@ def test_kernels_import_no_distributional_module_or_contract() -> None:
             "kernels.log_normal",
             *chain,
         },
-        "generalized_pareto.py": {"kernels._common", "kernels._weighted", *chain},
-        "log_normal.py": {"kernels._common", "kernels.gaussian", *chain},
+        "generalized_pareto.py": {
+            "kernels._common",
+            "kernels._declared",
+            "kernels._weighted",
+            *chain,
+        },
+        "log_normal.py": {"kernels._common", "kernels._declared", "kernels.gaussian", *chain},
         "negative_binomial.py": {"kernels._common", "kernels._negative_binomial_numba", *chain},
-        "two_piece.py": {"kernels._common", "kernels._weighted", *chain},
+        "two_piece.py": {"kernels._common", "kernels._declared", "kernels._weighted", *chain},
         "tweedie.py": {"kernels._tweedie_numba", "kernels._common"},
     }
     offenders = {

@@ -18,16 +18,21 @@ NumPy, ``math`` and ``kernels._severity_primitives``; SymPy runs here only.
 
 Kernel signatures: ``<law>(Y, P0..PK-1, D0..Dd-1[, M], order, J0..J4)`` with
 ``law`` one of ``density``, ``logsf``, ``logcdf`` (or a declaration's extra
-law), ``Jk`` for ``k > order`` unread (pass ``(0, width)`` arrays); ``P`` the natural
+law), ``Jk`` for ``k > order`` unread (pass ``(0, width)`` arrays, and none above the
+declaration's ``max_order``); ``P`` the natural
 parameters, ``D`` the declaration's per-row data (not differentiated; the
 gamma's prior weight), ``M`` the density's row multiplier (frequency weights);
 ``carrier(Y, D.., M, J0)``.  The loops use ``error_model="numpy"``: a row whose
 channels are not representable gets a non-finite entry, which marks it
-invalid, and never raises.
+invalid, and never raises.  They release the GIL (``nogil=True``) so that row
+chunks on the worker pool run side by side, and each module lists its kernels in
+``_POOLED_ROW_KERNELS``.
 
 Primitives (SymPy rule here, Numba body in ``_severity_primitives``):
 ``softplus``, ``expit``, ``log1mexp``, ``invexpm1``, ``gdev``, ``gnorm``,
-``ratio`` (``y/m`` as one division, printed inline), ``logratio``,
+``ratio`` (``y/m`` as one division, printed inline), ``logratio``, ``side`` (the piece a
+two-piece law is on, whose derivatives are zero), ``at_least`` (a term that marks a row the
+kernel declines, ``0`` or NaN, whose derivatives are zero),
 ``psires``, ``sres`` (``gnorm``'s derivatives), ``lphi`` (``d^n log Phi``),
 and SymPy's ``loggamma`` and ``polygamma``.  ``polygamma``,
 ``psires`` and ``sres`` of orders ``n <= 3``, and ``lphi`` of ``n <= 4``, at one
@@ -58,6 +63,7 @@ from pathlib import Path
 
 import mpmath as mp
 import sympy as sp
+from sympy.codegen.cfunctions import log1p
 from sympy.core.function import ArgumentIndexError
 from sympy.printing.pycode import PythonCodePrinter
 
@@ -131,6 +137,24 @@ class logratio(sp.Function):  # noqa: N801
         return 1 / y if argindex == 1 else -1 / m
 
 
+class side(sp.Function):  # noqa: N801
+    """``-1`` below zero, else ``1``: the piece a two-piece law is on, constant between its joins."""
+
+    nargs = 1
+
+    def fdiff(self, argindex=1):
+        return sp.S.Zero
+
+
+class at_least(sp.Function):  # noqa: N801
+    """``0`` where ``x >= low``, else NaN: the row is marked for the array route, at no other cost."""
+
+    nargs = 2
+
+    def fdiff(self, argindex=1):
+        return sp.S.Zero
+
+
 class gnorm(sp.Function):  # noqa: N801
     nargs = 1
 
@@ -187,6 +211,8 @@ def _mp_psires(n, a):
 MPMATH = {
     "softplus": lambda z: mp.log1p(mp.exp(z)),
     "expit": lambda z: 1 / (1 + mp.exp(-z)),
+    "side": lambda z: -1 if z < 0 else 1,
+    "at_least": lambda x, low: mp.mpf(0) if x >= low else mp.nan,
     "log1mexp": lambda t: mp.log(-mp.expm1(-t)) if t < 1 else mp.log1p(-mp.exp(-t)),
     "invexpm1": lambda t: 1 / mp.expm1(t),
     "gdev": lambda y, m: y / m - 1 - mp.log(y / m),
@@ -279,6 +305,9 @@ class Declaration:
     coordinates: str = "natural"
     # The response's support: "positive", or "real" for a location family.
     support: str = "positive"
+    # The highest jet order the kernels carry; a law whose windows or curvature
+    # directions need no more than the row Hessian stops at 2.
+    max_order: int = MAX_ORDER
     doc: str = ""
 
 
@@ -400,7 +429,15 @@ PARETO_TAIL = Engine(
 
 
 def _pareto_log_density(y, scale, shape):
-    return -sp.log(scale + shape * y) + PARETO_TAIL(y / scale, shape, upper=True)
+    """Marked outside ``0 <= shape <= 1``, the domain of ``GeneralizedParetoLSS``.
+
+    ``log S`` and ``log(scale + shape y)`` are rounded apart and their derivatives nearly cancel
+    at a negative shape's finite endpoint, by ``u/gap^3`` of the scale curvature at ``shape = -1``
+    and a gap ``gap = 1 + shape y/scale``, where the array rows form one fraction.  A huge shape
+    with a tiny ``scale/y`` underflows the tail engine's square of it before the shape scales it back.
+    """
+    marks = at_least(shape, 0) + at_least(1 - shape, 0)
+    return -sp.log(scale + shape * y) + marks + PARETO_TAIL(y / scale, shape, upper=True)
 
 
 GENERALIZED_PARETO = Declaration(
@@ -413,12 +450,118 @@ GENERALIZED_PARETO = Declaration(
         "``GeneralizedParetoLSS``'s row law in ``(scale, shape)``: ``log S =\n"
         "-log1p(shape t)/shape`` at ``t = y/scale``, from the survival engine\n"
         "``kernels._pareto_tail``, which is analytic through ``shape = 0``; the\n"
-        "log density is ``-log(scale + shape y) + log S``.  Every window\n"
+        "log density is ``-log(scale + shape y) + log S``, marked at a shape\n"
+        "outside ``[0, 1]``, which the family's domain excludes.  Every window\n"
         "reads the survival function, so there is no log-CDF law."
     ),
 )
 
-DECLARATIONS = (GAMMA, GAMMA_LOG, NORMAL, GENERALIZED_PARETO)
+
+def _log_normal_mean_log_density(y, mean, scale):
+    """The log-normal in ``(mean, scale)``, ``mu = log(mean) - scale^2/2``, on ``log y``.
+
+    Without ``-log y - log(2 pi)/2``, which the caller's carrier holds.
+    """
+    return -sp.log(scale) - ratio(logratio(y, mean) + scale**2 / 2, scale) ** 2 / 2
+
+
+LOG_NORMAL_MEAN = Declaration(
+    name="log_normal_mean",
+    parameters=("mean", "scale"),
+    log_density=_log_normal_mean_log_density,
+    max_order=2,
+    doc=(
+        "``LogNormalLS``'s row law in its mean form ``(mean, scale)``: the normal\n"
+        "law of ``log y`` at ``mu = log(mean) - scale^2/2``.  The residual\n"
+        "``log(y/mean) + scale^2/2`` is centred by ``logratio``, so a response near\n"
+        "its mean keeps its digits.  Rows only: the windows chain the normal's tails."
+    ),
+)
+
+
+def _two_piece_log_density(scale, skew, residual):
+    """``-log(scale) - u^2/2``, ``u = z/(1 + side(z) skew)``, ``z = residual/scale``."""
+    z = ratio(residual, scale)
+    return -sp.log(scale) - ratio(z, 1 + side(z) * skew) ** 2 / 2
+
+
+TWO_PIECE_LOCATION = Declaration(
+    name="two_piece_location",
+    parameters=("location", "scale", "skew"),
+    real=("location", "skew"),
+    support="real",
+    log_density=lambda y, location, scale, skew: _two_piece_log_density(scale, skew, y - location),
+    max_order=2,
+    doc=(
+        "The epsilon-skew two-piece normal in ``(location, scale, skew)``\n"
+        "(Mudholkar and Hutson 2000; Arellano-Valle, Gomez and Quintana 2005):\n"
+        "``TwoPieceNormalLSS``'s row law, and ``TwoPieceLogNormalLSS``'s on ``log y``.\n"
+        "The piece, ``side(z)`` at ``z = (y - location)/scale``, is constant between\n"
+        "the join at ``z = 0``, where the log density is continuously differentiable\n"
+        "and its Hessian jumps; the right piece starts at the join.  Without the\n"
+        "constant ``-log(2 pi)/2``, which the caller's carrier holds."
+    ),
+)
+
+
+def _log_mean_loading(scale, skew):
+    """``log K(scale, skew)``, ``K = E[exp(scale W)]``, as the log-sum-exp of its two pieces.
+
+    Each piece is ``log(1 -/+ skew) + a^2/2 + log Phi(-/+ a)`` at ``a = scale (1 -/+ skew)``,
+    the log of ``(1 -/+ skew) exp(a^2/2) Phi(-/+ a)``, which stays bounded in the far tail.
+    """
+    left = log1p(-skew) + (scale * (1 - skew)) ** 2 / 2 + lphi(0, -scale * (1 - skew))
+    right = log1p(skew) + (scale * (1 + skew)) ** 2 / 2 + lphi(0, scale * (1 + skew))
+    return left + softplus(right - left)
+
+
+# Past this skew in magnitude a two-piece mean-form row is the array route's.  The loading's
+# curvature is a difference that cancels ``1/(1 -+ skew)^2``, so the compiled error grows as
+# ``u/(1 - skew)^2`` toward ``+1``, where the array rows' left piece carries its own small weight,
+# and as ``u/(1 + skew)`` toward ``-1``, as the array rows' does.  At this limit that is about
+# ``1e-12`` of the row's largest entry.  A skew past it needs a widened ``skew_bound``.
+_MAX_COMPILED_SKEW = sp.Rational(99, 100)
+# Below this scale too.  ``log K``, of size ``scale``, is rounding of its two pieces, so a score
+# reads ``u/scale^2`` of its row by either formula, about ``1e-8`` here; further down the two
+# routes' rounding differs, and a row's reading would turn on which route its chunk took.  The
+# scale floor that needs this is one a fit sets itself, below the default ``0.01``.
+_MIN_COMPILED_SCALE = sp.Rational(1, 10000)
+
+
+def _two_piece_mean_log_density(y, mean, scale, skew):
+    """The two-piece log-normal in ``(mean, scale, skew)``: ``mu = log(mean) - log K``."""
+    residual = logratio(y, mean) + _log_mean_loading(scale, skew)
+    marks = at_least(_MAX_COMPILED_SKEW - sp.Abs(skew), 0) + at_least(scale, _MIN_COMPILED_SCALE)
+    return _two_piece_log_density(scale, skew, residual) + marks
+
+
+TWO_PIECE_MEAN = Declaration(
+    name="two_piece_mean",
+    parameters=("mean", "scale", "skew"),
+    real=("skew",),
+    log_density=_two_piece_mean_log_density,
+    max_order=2,
+    doc=(
+        "``TwoPieceLogNormalLSS``'s row law in its mean form ``(mean, scale, skew)``:\n"
+        "the two-piece law of ``log y`` at ``mu = log(mean) - log K(scale, skew)``,\n"
+        "``K = E[exp(scale W)]`` the mean loading, whose two pieces are combined by\n"
+        "the log-sum-exp rule with ``log Phi`` from ``log_ndtr_01234``, so it is\n"
+        "finite wherever the pieces are.  The residual ``log(y/mean) + log K`` is\n"
+        "centred by ``logratio``.  Marked past a skew of ``99/100`` in magnitude and\n"
+        "below a scale of ``1/10000``.\n"
+        "Without the carrier's ``-log y - log(2 pi)/2``."
+    ),
+)
+
+DECLARATIONS = (
+    GAMMA,
+    GAMMA_LOG,
+    NORMAL,
+    GENERALIZED_PARETO,
+    LOG_NORMAL_MEAN,
+    TWO_PIECE_LOCATION,
+    TWO_PIECE_MEAN,
+)
 
 
 @dataclass
@@ -465,11 +608,12 @@ def derive(declaration: Declaration) -> Derived:
     density = declaration.log_density(y, *law, *data)
     terms = sp.Add.make_args(density)
     free = [term for term in terms if not term.free_symbols & set(theta)]
-    laws = {"density": jet(sp.Add(*[term for term in terms if term not in free]), theta)}
+    order = declaration.max_order
+    laws = {"density": jet(sp.Add(*[term for term in terms if term not in free]), theta, order)}
     tails = (("logsf", declaration.log_survival), ("logcdf", declaration.log_cdf))
     for kind, function in (*tails, *declaration.extra_laws):
         if function is not None:
-            laws[kind] = jet(function(y, *law, *data), theta)
+            laws[kind] = jet(function(y, *law, *data), theta, order)
     return Derived(declaration, y, theta, data, sp.Add(*free), laws, time.perf_counter() - start)
 
 
@@ -501,7 +645,17 @@ class _Printer(PythonCodePrinter):
         return f"{name}({', '.join(self._print(argument) for argument in expr.args)})"
 
 
-_PRIMITIVE_NAMES = ("softplus", "expit", "log1mexp", "invexpm1", "gdev", "logratio", "gnorm")
+_PRIMITIVE_NAMES = (
+    "softplus",
+    "expit",
+    "log1mexp",
+    "invexpm1",
+    "gdev",
+    "logratio",
+    "gnorm",
+    "side",
+    "at_least",
+)
 # Jet functions: callee and the number of derivatives ``n = 0..count-1`` it returns.
 _JETS = {
     sp.polygamma: ("polygamma_0123", 4),
@@ -531,7 +685,8 @@ def _calls(expressions: list[sp.Expr]):
     """Group jet-function and engine atoms by argument: ``{(callee, upper, args): {atom: index}}``."""
     groups: dict[tuple, dict[sp.Expr, int]] = {}
     for expression in expressions:
-        for atom in expression.atoms(sp.Function):
+        # In structural order, not set order, so the groups are numbered the same under every hash seed.
+        for atom in sorted(expression.atoms(sp.Function), key=sp.default_sort_key):
             if type(atom) in _JETS:
                 n, argument = atom.args
                 callee, count = _JETS[type(atom)]
@@ -546,6 +701,23 @@ def _calls(expressions: list[sp.Expr]):
         if any(argument.atoms(sp.Function) & set().union(*groups.values()) for argument in key[2]):
             raise ValueError("a jet or engine argument may not itself call a jet or engine")
     return groups
+
+
+_RESIDUAL, _PIECE = sp.Symbol("z"), sp.Symbol("piece")
+
+
+def _bind_piece(expressions: list[sp.Expr]) -> tuple[list[sp.Expr], list[sp.Expr]]:
+    """``expressions`` reading ``z`` and ``side(z)`` as one symbol each, and ``z`` itself if any.
+
+    CSE shares parts of a sum, so left to it one residual comes out under several associations,
+    whose signs can differ within rounding of a join.  One symbol gives a row one piece.
+    """
+    atoms = set().union(*(expression.atoms(side) for expression in expressions))
+    if not atoms:
+        return expressions, []
+    (atom,) = atoms
+    rule = {atom: _PIECE, atom.args[0]: _RESIDUAL}
+    return [expression.xreplace(rule) for expression in expressions], [atom.args[0]]
 
 
 def emit_kernel(
@@ -576,16 +748,22 @@ def emit_kernel(
                 shape = tuple(map(int, size)) if isinstance(size, tuple) else int(size)
                 preamble.append(f"    work = np.empty({shape})")
     expressions = [expression.xreplace(outputs) for expression in expressions]
+    expressions, residuals = _bind_piece(expressions)
     replacements, reduced = sp.cse(
-        arguments + expressions, symbols=sp.numbered_symbols("t"), optimizations="basic"
+        arguments + residuals + expressions, symbols=sp.numbered_symbols("t"), optimizations="basic"
     )
     reduced_arguments, reduced = reduced[: len(arguments)], reduced[len(arguments) :]
+    reduced_residuals, reduced = reduced[: len(residuals)], reduced[len(residuals) :]
     statements = [
         _Statement(
             (symbol,), frozenset(value.free_symbols), [f"{symbol} = {_PRINTER.doprint(value)}"]
         )
-        for symbol, value in replacements
+        for symbol, value in [*replacements, *((_RESIDUAL, z) for z in reduced_residuals)]
     ]
+    if residuals:
+        statements.append(
+            _Statement((_PIECE,), frozenset({_RESIDUAL}), [f"{_PIECE} = side({_RESIDUAL})"])
+        )
     levels = 1 + max(_level(target) for target, _ in targets)
     position = 0
     for g, ((callee, upper, args), atoms) in enumerate(groups.items()):
@@ -640,7 +818,7 @@ def emit_kernel(
         *_outputs(targets),
     ]
     lines = [
-        "@njit(cache=True, error_model='numpy')",
+        "@njit(cache=True, nogil=True, error_model='numpy')",
         f"def {name}({', '.join(signature)}):",
         *preamble,
         "    for i in range(Y.shape[0]):",
@@ -753,7 +931,10 @@ def render(derived: Derived, primitives_text: str) -> str:
     chunks, engines = [], set()
     for law, channels in derived.laws.items():
         text, used = emit_kernel(
-            law, derived, _jet_targets(channels, MAX_ORDER), multiplied=law == "density"
+            law,
+            derived,
+            _jet_targets(channels, derived.declaration.max_order),
+            multiplied=law == "density",
         )
         chunks.append(text)
         engines |= used
@@ -761,6 +942,9 @@ def render(derived: Derived, primitives_text: str) -> str:
         "carrier", derived, [("J0[i]", derived.carrier)], multiplied=True, parametrised=False
     )
     chunks.append(carrier)
+    # The kernels release the GIL and run on the worker pool, inside a row chunk.
+    kernels = ", ".join([*derived.laws, "carrier"])
+    chunks.append(f"_POOLED_ROW_KERNELS = ({kernels},)\n")
     body = "\n\n".join(chunks)
     primitives = sorted(
         name for name in (*_PRIMITIVE_NAMES, *_JET_COUNT) if re.search(rf"\b{name}\(", body)
@@ -802,7 +986,7 @@ def render(derived: Derived, primitives_text: str) -> str:
         f"DATA = {declaration.data!r}",
         f"COORDINATES = {declaration.coordinates!r}",
         f"LAWS = {tuple(derived.laws)!r}",
-        f"MAX_ORDER = {MAX_ORDER}",
+        f"MAX_ORDER = {declaration.max_order}",
         f'PRIMITIVES_DIGEST = "{hashlib.sha256(primitives_text.encode()).hexdigest()}"',
         f'ENGINES_DIGEST = "{engine_digest}"',
         "",

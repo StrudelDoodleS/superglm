@@ -798,6 +798,56 @@ def test_a_fit_crew_starts_only_the_helpers_a_section_admits():
     assert not crew_threads()
 
 
+def test_a_crew_posts_each_job_to_the_thread_it_names():
+    """Job ``k`` runs on thread ``k``, in whatever order and however often jobs are posted.
+    Mutation check: a post that ignores ``slot`` puts every job on thread 0 and fails at slot 3."""
+    import queue
+    import threading
+
+    from superglm._parallel import _Crew
+
+    crew = _Crew(4, started=4)
+    try:
+        done: queue.SimpleQueue = queue.SimpleQueue()
+        for slot in (3, 0, 2, 1, 2, 3, 0, 1, 1, 2):
+            ran: list[int | None] = []
+            crew.post(lambda ran=ran: ran.append(threading.get_ident()), done, slot)
+            done.get(timeout=20)
+            assert ran == [crew._threads[slot].ident]
+    finally:
+        crew.close()
+
+
+def test_sections_narrower_than_the_fits_crew_run_on_its_first_threads():
+    """Once a wide section has started seven helpers, every section of two helpers runs on threads 0
+    and 1 of the crew, not on whichever thread wakes first: a thread keeps its allocator arena's
+    scratch for the fit, so the crew's other threads would each hold a section's worth. The barrier
+    makes both helpers take part in every section. Mutation check: a post that ignores ``slot``
+    stacks both helpers on thread 0, the barrier breaks and the section raises."""
+    import threading
+
+    from superglm import _parallel
+    from superglm._parallel import fit_pool, parallel_config, pooled_for
+
+    barrier = threading.Barrier(3, timeout=10)
+    helpers: set[int | None] = set()
+    caller = threading.get_ident()
+
+    def meet(item):
+        barrier.wait()
+        if threading.get_ident() != caller:
+            helpers.add(threading.get_ident())
+        return item
+
+    with parallel_config(n_jobs=8, max_memory=2**30), fit_pool():
+        assert pooled_for(lambda item: item, list(range(16)), 1) == list(range(16))
+        crew = _parallel._fit_threads.get().crew()
+        assert len(crew._threads) == 7
+        for _ in range(10):
+            assert pooled_for(meet, [0, 1, 2], 1) == [0, 1, 2]
+        assert helpers == {crew._threads[0].ident, crew._threads[1].ident}
+
+
 def _bounded(call, seconds=20.0):
     """Run ``call`` on a daemon thread; return ``(outcome, exception)`` or fail if it hangs."""
     import threading
@@ -906,12 +956,12 @@ def test_an_interruption_while_posting_helpers_propagates_and_waits_only_for_pos
     post = _parallel._Crew.post
     posts, raised, gate, started, caught = [0], threading.Event(), threading.Event(), [], []
 
-    def interrupting(self, job, done):
+    def interrupting(self, job, done, slot):
         posts[0] += 1
         if posts[0] == 2:
             raised.set()
             raise interrupt
-        post(self, job, done)
+        post(self, job, done, slot)
 
     def fn(item):
         started.append(item)

@@ -22,7 +22,13 @@ from numpy.typing import NDArray
 from scipy import special
 
 from superglm._roundoff import EPS as _EPS
-from superglm.distributional.kernels._common import readonly, readonly_bool
+from superglm.distributional.kernels._common import (
+    readonly,
+    readonly_bool,
+    validated_derivative_order,
+)
+from superglm.distributional.kernels._declared import channels, density_rows
+from superglm.distributional.kernels._declared import log_normal_mean as _declared_mean
 from superglm.distributional.kernels.gaussian import (
     evaluate_gaussian_rows,
     gaussian_expected_information,
@@ -290,6 +296,13 @@ def mean_rows(
     first = _positive_vector(mean, name="mean")
     scale = _positive_vector(sigma, name="sigma")
     _aligned(first, scale)
+    mass = _positive_vector(multiplier, name="multiplier")
+    y = _positive_vector(response, name="response")
+    _aligned(first, y, mass)
+    order = validated_derivative_order(derivative_order)
+    jets = density_rows(_declared_mean, order, y, (first, scale), (), mass)
+    if jets is not None:
+        return LogNormalKernelEvaluation(*channels(jets), np.ones(len(y), dtype=bool))
     _, c_sigma, c_sigma_2 = log_mean_loading(scale)
     base = location_rows(
         response,

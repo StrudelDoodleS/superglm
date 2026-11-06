@@ -33,6 +33,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributional.kernels._common import readonly, readonly_bool, stacked_direction
+from superglm.distributional.kernels._declared import channels, density_rows
+from superglm.distributional.kernels._declared import generalized_pareto as _declared_pareto
 from superglm.distributional.kernels._weighted import weighted_natural_channel
 
 _FLOAT = np.float64
@@ -194,6 +196,15 @@ def scale_rows(
     if derivative_order not in (0, 1, 2):
         raise GeneralizedParetoDomainError("derivative_order must be an integer from zero to two")
 
+    jets = density_rows(_declared_pareto, derivative_order, y, (psi, xi), (), weight)
+    if jets is not None:
+        value, score, hessian = channels(jets)
+        return GeneralizedParetoKernelEvaluation(
+            readonly(value),
+            None if score is None else readonly(score),
+            None if hessian is None else readonly(hessian),
+            readonly_bool(np.ones(len(y), dtype=bool)),
+        )
     with np.errstate(over="ignore", invalid="ignore"):
         t = y / psi
         z = xi * t

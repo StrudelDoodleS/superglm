@@ -8,7 +8,9 @@ infinity or NaN that flags the row, not an exception.
 
 The row kernel is serial and releases the GIL; ``pooled_rows`` runs it over fixed
 row blocks and each row writes only its own outputs, so every worker count gives
-the same bits.
+the same bits. The mean loading and ``log(sigma)`` depend on ``(sigma, Q)`` alone,
+and a book has few distinct scales, so a block keeps what it formed in a small
+table keyed on the bits of ``sigma``: a row reads the same bits as forming them anew.
 """
 
 from __future__ import annotations
@@ -63,17 +65,76 @@ _L1 = tuple((-1.0) ** j / (j + 1) for j in range(_V_SERIES_TERMS))
 _L1_D1 = tuple((-1.0) ** (j + 1) * (j + 1) / (j + 2) for j in range(_V_SERIES_TERMS))
 _L2 = tuple((-1.0) ** (j + 1) / (j + 2) for j in range(_V_SERIES_TERMS))
 
+# One row per power of the argument, one column per function: the fused Horner loops run the
+# independent chains of a function family side by side, each in the order of a loop alone.
+_U_COEFFICIENTS = np.array([_R2, _E1, _T3, _U2, _T3_D1]).T.copy()
+_L_COEFFICIENTS = np.array([_L1, _L1_D1, _L2]).T.copy()
+_M3_COEFFICIENTS = np.array([_M3_A_COEFFICIENTS, _M3_B_COEFFICIENTS]).T.copy()
+
+# The per-block table of mean loadings: open addressing on a multiplicative hash of the bits of
+# sigma, never fuller than three quarters, so a probe always reaches an empty slot.
+_TABLE_SLOTS = 512
+_TABLE_LIVE = 384
+_TABLE_MASK = _TABLE_SLOTS - 1
+_HASH_MULTIPLIER = np.uint64(0x9E3779B97F4A7C15)
+_HASH_SHIFT = np.uint64(64 - 9)
+
 _NO_SCORE = (0.0, 0.0, 0.0)
 _NO_HESSIAN = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
 
 @njit(cache=True, error_model="numpy")
-def _horner(arg, coefficients):
-    """``sum_j c_j arg^j`` by Horner's rule, highest coefficient first."""
-    acc = coefficients[-1]
-    for index in range(len(coefficients) - 2, -1, -1):
-        acc = acc * arg + coefficients[index]
-    return acc
+def _u_series(u, order):
+    """``(R2, E1, T3, U2, T3')`` for ``|u| < 1`` by Horner's rule in ``u``, only what ``order`` reads."""
+    last = _U_SERIES_TERMS - 1
+    r2 = _U_COEFFICIENTS[last, 0]
+    if order == 0:
+        for j in range(last - 1, -1, -1):
+            r2 = r2 * u + _U_COEFFICIENTS[j, 0]
+        return r2, 0.0, 0.0, 0.0, 0.0
+    e1 = _U_COEFFICIENTS[last, 1]
+    t3 = _U_COEFFICIENTS[last, 2]
+    if order == 1:
+        for j in range(last - 1, -1, -1):
+            r2 = r2 * u + _U_COEFFICIENTS[j, 0]
+            e1 = e1 * u + _U_COEFFICIENTS[j, 1]
+            t3 = t3 * u + _U_COEFFICIENTS[j, 2]
+        return r2, e1, t3, 0.0, 0.0
+    u2 = _U_COEFFICIENTS[last, 3]
+    t3d = _U_COEFFICIENTS[last, 4]
+    for j in range(last - 1, -1, -1):
+        r2 = r2 * u + _U_COEFFICIENTS[j, 0]
+        e1 = e1 * u + _U_COEFFICIENTS[j, 1]
+        t3 = t3 * u + _U_COEFFICIENTS[j, 2]
+        u2 = u2 * u + _U_COEFFICIENTS[j, 3]
+        t3d = t3d * u + _U_COEFFICIENTS[j, 4]
+    return r2, e1, t3, u2, t3d
+
+
+@njit(cache=True, error_model="numpy")
+def _l_series(v):
+    """``(L1, L1', L2)`` for ``|v| < 1/4`` by Horner's rule in ``v``."""
+    last = _V_SERIES_TERMS - 1
+    l1 = _L_COEFFICIENTS[last, 0]
+    l1d = _L_COEFFICIENTS[last, 1]
+    l2 = _L_COEFFICIENTS[last, 2]
+    for j in range(last - 1, -1, -1):
+        l1 = l1 * v + _L_COEFFICIENTS[j, 0]
+        l1d = l1d * v + _L_COEFFICIENTS[j, 1]
+        l2 = l2 * v + _L_COEFFICIENTS[j, 2]
+    return l1, l1d, l2
+
+
+@njit(cache=True, error_model="numpy")
+def _m3_series(t2):
+    """``(A(t2), B(t2))``, the atanh series of ``M3`` and of its derivative, by Horner's rule in ``t2``."""
+    last = _M3_SERIES_TERMS - 1
+    a = _M3_COEFFICIENTS[last, 0]
+    b = _M3_COEFFICIENTS[last, 1]
+    for j in range(last - 1, -1, -1):
+        a = a * t2 + _M3_COEFFICIENTS[j, 0]
+        b = b * t2 + _M3_COEFFICIENTS[j, 1]
+    return a, b
 
 
 @njit(cache=True, error_model="numpy")
@@ -147,15 +208,7 @@ def _shape_terms(q):
 def _u_channels(u, e, order):
     """``(R2, E1, T3, U2, T3')`` of ``u = Q w``; inside the series, only what ``order`` reads."""
     if abs(u) < _U_SERIES_RADIUS:
-        r2 = _horner(u, _R2)
-        e1 = t3 = u2 = t3d = 0.0
-        if order >= 1:
-            e1 = _horner(u, _E1)
-            t3 = _horner(u, _T3)
-            if order == 2:
-                u2 = _horner(u, _U2)
-                t3d = _horner(u, _T3_D1)
-        return r2, e1, t3, u2, t3d
+        return _u_series(u, order)
     em1 = math.expm1(u)
     square = u * u
     cube = square * u
@@ -180,9 +233,7 @@ def _log_mean_loading(sigma, q, k, s0k, s1k, s2k):
         inv_q = 1.0 / q
     log1p_v = math.log1p(v)
     if abs(v) < _V_SERIES_RADIUS:
-        l1 = _horner(v, _L1)
-        l1d = _horner(v, _L1_D1)
-        l2 = _horner(v, _L2)
+        l1, l1d, l2 = _l_series(v)
     else:
         l1 = log1p_v / v
         l1d = (v / (1.0 + v) - log1p_v) / (v * v)
@@ -191,8 +242,7 @@ def _log_mean_loading(sigma, q, k, s0k, s1k, s2k):
         # The atanh form of log1p with t = v/(2 + v); B = A'(t)/t.
         t = v / (2.0 + v)
         t2 = t * t
-        a = _horner(t2, _M3_A_COEFFICIENTS)
-        b = _horner(t2, _M3_B_COEFFICIENTS)
+        a, b = _m3_series(t2)
         one = 1.0 - t
         one2 = one * one
         m3 = -0.25 * one2 * a
@@ -232,14 +282,14 @@ def _log_mean_loading(sigma, q, k, s0k, s1k, s2k):
 
 
 @njit(cache=True, error_model="numpy")
-def _location_row(y, mu, sigma, q, m, s0, k2s1, k3s2, order):
+def _location_row(y, mu, sigma, log_sigma, q, m, s0, k2s1, k3s2, order):
     """``(valid, optimizing, score, hessian)`` of one ``(mu, sigma, Q)`` row, unit carrier left out."""
     w = (math.log(y) - mu) / sigma
     u = q * w
     e = math.exp(u)
     r2, e1, t3, u2, t3d = _u_channels(u, e, order)
     w2 = w * w
-    optimizing = m * (-math.log(sigma) - s0 - w2 * r2)
+    optimizing = m * (-log_sigma - s0 - w2 * r2)
     score = _NO_SCORE
     hessian = _NO_HESSIAN
     if order >= 1:
@@ -286,6 +336,61 @@ def _mean_chain(me, score, hessian, c_s, c_q, c_ss, c_sq, c_qq, order):
     )
 
 
+@njit(cache=True, error_model="numpy")
+def distinct_pairs(first_key, second_key, limit):
+    """``(count, rows, inverse)``: the first row of each distinct bit pattern of ``(first, second)``.
+
+    ``inverse[row]`` indexes ``rows``. Past ``limit`` distinct pairs it stops and returns
+    ``count = limit + 1``, with ``rows`` and ``inverse`` unfinished.
+    """
+    n = len(first_key)
+    size = 16
+    index_bits = 4
+    while size < 2 * limit + 2:
+        size *= 2
+        index_bits += 1
+    shift = np.uint64(64 - index_bits)
+    first_bits = first_key.view(np.int64)
+    second_bits = second_key.view(np.int64)
+    table = np.full(size, -1, dtype=np.int64)
+    rows = np.empty(min(n, limit + 1), dtype=np.int64)
+    inverse = np.empty(n, dtype=np.int64)
+    count = 0
+    for row in range(n):
+        mixed = (
+            np.uint64(first_bits[row]) * _HASH_MULTIPLIER + np.uint64(second_bits[row])
+        ) * _HASH_MULTIPLIER
+        slot = np.int64(mixed >> shift)
+        while True:
+            held = table[slot]
+            if held < 0:
+                if count >= limit:
+                    return limit + 1, rows, inverse
+                table[slot] = count
+                rows[count] = row
+                held = count
+                count += 1
+                break
+            first_row = rows[held]
+            if (
+                first_bits[first_row] == first_bits[row]
+                and second_bits[first_row] == second_bits[row]
+            ):
+                break
+            slot = (slot + 1) & (size - 1)
+        inverse[row] = held
+    return count, rows[:count], inverse
+
+
+@njit(cache=True, error_model="numpy")
+def _loading_slot(bits, stamp, keys, generation):
+    """``(slot, found)``: where ``bits`` sits in the live table, or the empty slot it would take."""
+    slot = np.int64((np.uint64(bits) * _HASH_MULTIPLIER) >> _HASH_SHIFT)
+    while stamp[slot] == generation and keys[slot] != bits:
+        slot = (slot + 1) & _TABLE_MASK
+    return slot, stamp[slot] == generation
+
+
 @njit(cache=True, nogil=True, error_model="numpy")
 def _evaluate_rows(
     response: NDArray[np.float64],
@@ -305,14 +410,23 @@ def _evaluate_rows(
     """Rows ``start..stop`` into zeroed outputs: ``(status, failing row)``.
 
     ``first`` is the mean or the location. Only valid rows are written, so the
-    others keep their zero placeholders and ``valid = False``. The shape and
-    loading terms are kept from the row before while its ``Q`` and ``sigma``
-    repeat, the same bits as forming them anew.
+    others keep their zero placeholders and ``valid = False``. The shape terms
+    are kept from the row before while its ``Q`` repeats, and the loading and
+    ``log(sigma)`` from the block's table while ``Q`` is unchanged: the same bits
+    as forming them anew.
     """
     q_previous = 0.0
     k, s0k, s1k, s2k, s0, k2s1, k3s2 = _shape_terms(q_previous)
     sigma_previous = math.nan
+    log_sigma = 0.0
     logc = c_s = c_q = c_ss = c_sq = c_qq = 0.0
+    slots = _TABLE_SLOTS if mean_form else 1
+    stamp = np.zeros(slots, dtype=np.int64)
+    keys = np.empty(slots, dtype=np.int64)
+    entries = np.empty((slots, 7), dtype=np.float64)
+    sigma_bits = sigma.view(np.int64)
+    generation = 1
+    live = 0
     for row in range(start, stop):
         q = shape[row]
         row_sigma = sigma[row]
@@ -320,18 +434,39 @@ def _evaluate_rows(
             k, s0k, s1k, s2k, s0, k2s1, k3s2 = _shape_terms(q)
             q_previous = q
             sigma_previous = math.nan
+            generation += 1  # the table's loadings belong to the shape before
+            live = 0
         location = first[row]
         if mean_form:
             if not (q >= 0.0 or row_sigma * -q < 1.0):  # the mean does not exist
                 continue
             if row_sigma != sigma_previous:
-                logc, c_s, c_q, c_ss, c_sq, c_qq = _log_mean_loading(row_sigma, q, k, s0k, s1k, s2k)
-                if not _all_finite((logc, c_s, c_q, c_ss, c_sq, c_qq)):
-                    return KERNEL_MEAN_LOADING, row
+                slot, found = _loading_slot(sigma_bits[row], stamp, keys, generation)
+                if found:
+                    logc, c_s, c_q = entries[slot, 0], entries[slot, 1], entries[slot, 2]
+                    c_ss, c_sq, c_qq = entries[slot, 3], entries[slot, 4], entries[slot, 5]
+                    log_sigma = entries[slot, 6]
+                else:
+                    logc, c_s, c_q, c_ss, c_sq, c_qq = _log_mean_loading(
+                        row_sigma, q, k, s0k, s1k, s2k
+                    )
+                    if not _all_finite((logc, c_s, c_q, c_ss, c_sq, c_qq)):
+                        return KERNEL_MEAN_LOADING, row
+                    log_sigma = math.log(row_sigma)
+                    if live < _TABLE_LIVE:
+                        stamp[slot] = generation
+                        keys[slot] = sigma_bits[row]
+                        entries[slot, 0], entries[slot, 1], entries[slot, 2] = logc, c_s, c_q
+                        entries[slot, 3], entries[slot, 4], entries[slot, 5] = c_ss, c_sq, c_qq
+                        entries[slot, 6] = log_sigma
+                        live += 1
                 sigma_previous = row_sigma
             location = math.log(location) - logc
+        elif row_sigma != sigma_previous:
+            log_sigma = math.log(row_sigma)
+            sigma_previous = row_sigma
         row_valid, row_value, row_score, row_hessian = _location_row(
-            response[row], location, row_sigma, q, multiplier[row], s0, k2s1, k3s2, order
+            response[row], location, row_sigma, log_sigma, q, multiplier[row], s0, k2s1, k3s2, order
         )
         if not row_valid:
             continue
@@ -357,5 +492,86 @@ def _evaluate_rows(
     return KERNEL_OK, np.int64(-1)
 
 
+@njit(cache=True, nogil=True, error_model="numpy")
+def mean_direction_rows(
+    mean: NDArray[np.float64],
+    score_mu: NDArray[np.float64],
+    hessian: NDArray[np.float64],
+    loading: NDArray[np.float64],
+    direction: NDArray[np.float64],
+    packed_location: NDArray[np.float64],
+    start: int,
+    stop: int,
+    out: NDArray[np.float64],
+):
+    """Mean-form ``dH(v)`` in ``(m, sigma, Q)`` from the location form's, rows ``start..stop``.
+
+    ``mu = log m - log C(sigma, Q)`` has Jacobian ``J`` (identity except the ``mu`` row
+    ``(1/m, -C_s, -C_Q)``) and second and third derivatives only in ``mu``. With
+    ``w = J v``, ``Z_i = sum_k mu_ik v_k`` and ``mu_ij(v) = sum_k mu_ijk v_k``:
+
+        dH(v) = J' dH_loc(w) J + Z (H J)_mu' + (H J)_mu Z' + mu_ij (H w)_mu + s_mu mu_ij(v).
+
+    ``hessian`` is the location Hessian at unit mass, packed ``(n, 6)``, ``loading`` the
+    columns ``C_s, C_Q, C_ss, C_sQ, C_QQ, C_sss, C_ssQ, C_sQQ, C_QQQ``, ``direction`` the
+    mean-form directions ``(d, n, 3)`` and ``packed_location`` the location form's
+    ``dH_loc(w)`` along ``w = J v``, ``(d, n, 6)``. Each row writes its own ``out[:, row]``.
+    """
+    for row in range(start, stop):
+        m = mean[row]
+        c_s, c_q = loading[row, 0], loading[row, 1]
+        c_ss, c_sq, c_qq = loading[row, 2], loading[row, 3], loading[row, 4]
+        c_sss, c_ssq, c_sqq, c_qqq = (
+            loading[row, 5],
+            loading[row, 6],
+            loading[row, 7],
+            loading[row, 8],
+        )
+        h_mm, h_ms, h_mq = hessian[row, 0], hessian[row, 1], hessian[row, 2]
+        # (H J)_mu, and the ``mu`` second derivatives (nonzero only in these entries).
+        g_m = h_mm / m
+        g_s = h_ms - h_mm * c_s
+        g_q = h_mq - h_mm * c_q
+        d_mm = -1.0 / (m * m)
+        for index in range(direction.shape[0]):
+            v_m, v_s, v_q = (
+                direction[index, row, 0],
+                direction[index, row, 1],
+                direction[index, row, 2],
+            )
+            w_m = v_m / m - c_s * v_s - c_q * v_q
+            z_m = d_mm * v_m
+            z_s = -c_ss * v_s - c_sq * v_q
+            z_q = -c_sq * v_s - c_qq * v_q
+            h_w = h_mm * w_m + h_ms * v_s + h_mq * v_q
+            t_mm = 2.0 / (m * m * m) * v_m
+            t_ss = -(c_sss * v_s + c_ssq * v_q)
+            t_sq = -(c_ssq * v_s + c_sqq * v_q)
+            t_qq = -(c_sqq * v_s + c_qqq * v_q)
+            location = packed_location[index, row]
+            # (L J) for the entries J' (L J) reads, L the symmetric matrix of the packed location
+            # direction; J' (L J) is then a row of it at 1/m, -C_s, -C_Q beside the identity rows.
+            lj_00 = location[0] / m
+            lj_01 = location[0] * -c_s + location[1]
+            lj_02 = location[0] * -c_q + location[2]
+            lj_11 = location[1] * -c_s + location[3]
+            lj_12 = location[1] * -c_q + location[4]
+            lj_22 = location[2] * -c_q + location[5]
+            # full = J' (L J) + Z g' + g Z' + mu_ij (H w)_mu + s_mu mu_ij(v), upper triangle.
+            out[index, row, 0] = lj_00 / m + 2.0 * z_m * g_m + d_mm * h_w + score_mu[row] * t_mm
+            out[index, row, 1] = lj_01 / m + z_m * g_s + g_m * z_s
+            out[index, row, 2] = lj_02 / m + z_m * g_q + g_m * z_q
+            out[index, row, 3] = (
+                -c_s * lj_01 + lj_11 + 2.0 * z_s * g_s - c_ss * h_w + score_mu[row] * t_ss
+            )
+            out[index, row, 4] = (
+                -c_s * lj_02 + lj_12 + z_s * g_q + g_s * z_q - c_sq * h_w + score_mu[row] * t_sq
+            )
+            out[index, row, 5] = (
+                -c_q * lj_02 + lj_22 + 2.0 * z_q * g_q - c_qq * h_w + score_mu[row] * t_qq
+            )
+    return KERNEL_OK, np.int64(-1)
+
+
 # The kernels the worker pool runs (``nogil``, never ``prange``).
-_POOLED_ROW_KERNELS = (_evaluate_rows,)
+_POOLED_ROW_KERNELS = (_evaluate_rows, mean_direction_rows)

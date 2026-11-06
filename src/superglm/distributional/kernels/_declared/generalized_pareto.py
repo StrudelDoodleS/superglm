@@ -3,7 +3,8 @@
 ``GeneralizedParetoLSS``'s row law in ``(scale, shape)``: ``log S =
 -log1p(shape t)/shape`` at ``t = y/scale``, from the survival engine
 ``kernels._pareto_tail``, which is analytic through ``shape = 0``; the
-log density is ``-log(scale + shape y) + log S``.  Every window
+log density is ``-log(scale + shape y) + log S``, marked at a shape
+outside ``[0, 1]``, which the family's domain excludes.  Every window
 reads the survival function, so there is no log-CDF law.
 """
 
@@ -15,6 +16,7 @@ from math import exp, expm1, lgamma, log, log1p, sqrt
 import numpy as np
 from numba import njit
 
+from superglm.distributional.kernels._severity_primitives import at_least
 from superglm.distributional.kernels._pareto_tail import gpd_log_survival_into
 
 PARAMETERS = ('scale', 'shape')
@@ -22,10 +24,10 @@ DATA = ()
 COORDINATES = 'natural'
 LAWS = ('density', 'logsf')
 MAX_ORDER = 4
-PRIMITIVES_DIGEST = "cb808cedae0b1fe702c3ef6bc4a9ccbc9053541714ce04ee3de9ca566bf00965"
+PRIMITIVES_DIGEST = "e420b48fd73eccabe52d97ceb47d06588158bbc885e9482cfabbfed36f6b5c58"
 ENGINES_DIGEST = "39420931cc037f929ad46db142e1c475727f08dc2f2b7bc102aa6c811105149a"
 
-@njit(cache=True, error_model='numpy')
+@njit(cache=True, nogil=True, error_model='numpy')
 def density(Y, P0, P1, M, order, J0, J1, J2, J3, J4):
     out0 = np.empty(15)
     for i in range(Y.shape[0]):
@@ -36,7 +38,7 @@ def density(Y, P0, P1, M, order, J0, J1, J2, J3, J4):
         t0 = p0 + p1*y
         gpd_log_survival_into(y/p0, p1, np.bool_(True), order, out0)
         c0_0 = out0[0]
-        J0[i] = m * (c0_0 - log(t0))
+        J0[i] = m * (c0_0 - log(t0) + at_least(p1, 0.0) + at_least(1.0 - p1, 0.0))
         if order >= 1:
             t1 = (1.0 / (p0 * p0))
             c0_1 = out0[1]
@@ -90,7 +92,7 @@ def density(Y, P0, P1, M, order, J0, J1, J2, J3, J4):
                         J4[i, 4] = m * (c0_14 + t17*t19)
 
 
-@njit(cache=True, error_model='numpy')
+@njit(cache=True, nogil=True, error_model='numpy')
 def logsf(Y, P0, P1, order, J0, J1, J2, J3, J4):
     out0 = np.empty(15)
     for i in range(Y.shape[0]):
@@ -144,9 +146,12 @@ def logsf(Y, P0, P1, order, J0, J1, J2, J3, J4):
                         J4[i, 4] = c0_14
 
 
-@njit(cache=True, error_model='numpy')
+@njit(cache=True, nogil=True, error_model='numpy')
 def carrier(Y, M, J0):
     for i in range(Y.shape[0]):
         y = Y[i]
         m = M[i]
         J0[i] = m * (0.0)
+
+
+_POOLED_ROW_KERNELS = (density, logsf, carrier,)

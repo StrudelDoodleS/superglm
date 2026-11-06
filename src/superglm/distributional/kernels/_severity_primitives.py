@@ -14,6 +14,10 @@ quantities that a primitive resolves:
   log(1 - exp(-|a|))*, Rmpfr vignette, 2012);
 - ``invexpm1(t) = 1/(e^t - 1)``, written ``e^-t/(1 - e^-t)`` above ``t = 1`` so
   it underflows gradually instead of through an overflowing ``expm1``;
+- ``side(z)``, ``-1`` below zero and ``1`` otherwise: the piece of a two-piece law,
+  constant between its joins, so its derivatives are zero;
+- ``at_least(x, low)``, ``0`` from ``low`` up and NaN below: added to a log density, it marks a
+  row the kernel declines, with one comparison on every row and zero derivatives;
 - ``gdev(y, m) = y/m - 1 - log(y/m)``, half the gamma unit deviance, which is
   Loader's ``bd0(m, y)/m``, by his series in ``v = (m - y)/(m + y)`` (Loader,
   *Fast and accurate computation of binomial probabilities*, 2000) for
@@ -168,6 +172,16 @@ def invexpm1(t):
         e = math.exp(-t)
         return e / (1.0 - e)
     return 1.0 / math.expm1(t)
+
+
+@njit(cache=True)
+def side(z):
+    return -1.0 if z < 0.0 else 1.0
+
+
+@njit(cache=True)
+def at_least(x, low):
+    return 0.0 if x >= low else math.nan
 
 
 @njit(cache=True)

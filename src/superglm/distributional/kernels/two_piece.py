@@ -37,6 +37,9 @@ from superglm.distributional.kernels._curvature_direction import (
     packed_tuples,
     stack_columns,
 )
+from superglm.distributional.kernels._declared import channels, density_rows
+from superglm.distributional.kernels._declared import two_piece_location as _declared_location
+from superglm.distributional.kernels._declared import two_piece_mean as _declared_mean
 from superglm.distributional.kernels._fourth_generated import (
     two_piece_left_mills,
     two_piece_location_third_fourth,
@@ -173,6 +176,9 @@ def location_rows(
     m = _positive_vector(multiplier, name="multiplier")
     _same_shape(t, mu, sigma, eps, m)
     order = validated_derivative_order(derivative_order)
+    jets = density_rows(_declared_location, order, t, (mu, sigma, eps), (), m)
+    if jets is not None:
+        return TwoPieceKernelEvaluation(*channels(jets), np.ones(len(t), dtype=bool))
     score = None
     hessian = None
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
@@ -384,6 +390,10 @@ def mean_rows(
     weight = _positive_vector(multiplier, name="multiplier")
     _same_shape(y, m, sigma, eps, weight)
     order = validated_derivative_order(derivative_order)
+    # The kernel marks a row past its skew or scale limit, ``tools/generate_severity_families.py``.
+    jets = density_rows(_declared_mean, order, y, (m, sigma, eps), (), weight)
+    if jets is not None:
+        return TwoPieceKernelEvaluation(*channels(jets), np.ones(len(y), dtype=bool))
     logk, k_s, k_e, k_ss, k_se, k_ee = log_mean_loading(sigma, eps)
     base = location_rows(
         np.log(y), np.log(m) - logk, sigma, eps, np.ones_like(weight), derivative_order=order

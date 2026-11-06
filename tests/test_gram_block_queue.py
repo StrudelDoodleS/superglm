@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import contextvars
+import importlib
+import pkgutil
 import sys
 import threading
 import warnings
@@ -380,6 +383,7 @@ def test_categorical_blocks_sum_their_levels_without_np_bincount(monkeypatch):
 def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
     from superglm._group_matrix import _group_matrix_support
     from superglm.distributional.kernels import (
+        _declared,
         _generalized_gamma_numba,
         _negative_binomial_numba,
         _tweedie_numba,
@@ -388,6 +392,11 @@ def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
     from superglm.features import interaction
     from superglm.reml import _leverage_rows
 
+    declared_modules = [
+        importlib.import_module(f"{_declared.__name__}.{module.name}")
+        for module in pkgutil.iter_modules(_declared.__path__)
+    ]
+    assert len(declared_modules) >= 7
     pooled_kernels = (
         kernels._POOLED_BLOCK_KERNELS
         + kernels._POOLED_LEAF_KERNELS
@@ -398,6 +407,8 @@ def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
         + _tweedie_numba._POOLED_ROW_KERNELS
         + _negative_binomial_numba._POOLED_ROW_KERNELS
         + _generalized_gamma_numba._POOLED_ROW_KERNELS
+        + tuple(kernel for module in declared_modules for kernel in module._POOLED_ROW_KERNELS)
+        + _declared._POOLED_ROW_KERNELS
         + chain_rule._POOLED_ROW_KERNELS
     )
     pooled = {id(kernel) for kernel in pooled_kernels}
@@ -706,6 +717,43 @@ def test_a_dispatch_bound_queue_runs_on_no_more_than_numbas_thread_count(monkeyp
         profile: dict = {}
         queue.run_block_tasks(tasks, Cache(), profile, dispatch_bound=dispatch_bound)
         assert profile.get("block_pool_workers") == expected
+
+
+def test_a_queue_on_a_fits_kept_threads_bounds_its_dispatch(monkeypatch):
+    """A kept thread holds its allocator arena's largest freed block for the whole fit, so a
+    queue with no bound of its own starts only the threads the dispatch bound allows there, and
+    every worker ``pool_workers`` gives elsewhere. A section nested on a kept thread starts its
+    own threads, which end with it, and stays wide. Mutation check: without the
+    ``on_fit_threads`` arm the fit's queue starts all sixteen."""
+    import numba
+
+    class Cache:
+        _batch = None
+        _profile = None
+
+        def worker_view(self, shared, profile, work_queue):
+            return self
+
+    monkeypatch.setattr(parallel, "pool_workers", lambda n_units, task_bytes: 16)
+    monkeypatch.setattr(parallel, "resolve_n_jobs", lambda: 16)
+    monkeypatch.setattr(numba, "get_num_threads", lambda: 16)
+    tasks = [
+        BlockTask(index, 7 * queue._TASK_OVERHEAD_COST, 1, lambda c, p: None, lambda v: None)
+        for index in range(40)
+    ]
+
+    def workers() -> int:
+        profile: dict = {}
+        queue.run_block_tasks(tasks, Cache(), profile)
+        return profile["block_pool_workers"]
+
+    assert workers() == 16
+    with parallel.fit_pool():
+        assert workers() == 8  # Amdahl's bound: (40 * 7 + 40) / 40
+        executor = parallel._fit_threads.get().executor()
+        assert len(executor._threads) <= 8
+        context = contextvars.copy_context()
+        assert executor.submit(context.run, workers).result() == 16
 
 
 @pytest.fixture
