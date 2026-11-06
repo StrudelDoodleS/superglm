@@ -475,6 +475,44 @@ def test_pooled_scoring_gives_the_serial_numbers_at_any_worker_count(monkeypatch
     np.testing.assert_allclose(one[1].to_numpy(), serial_se.to_numpy(), rtol=1e-12)
 
 
+def test_a_single_block_call_takes_its_products_on_one_blas_thread_from_a_few_dozen_rows(
+    monkeypatch,
+):
+    """Work counts: from ``BLAS_ONE_THREAD_ROWS`` rows a one-block call enters the one-thread scope.
+
+    A block's ``x V`` product is large enough from there for BLAS to start its threads and too
+    small to gain from them: at 1,000 rows and 16 BLAS threads the median call took 12.9 ms against
+    13.1 at one thread, and the 99th percentile 69 ms against 20. A quote's products are too small
+    to thread, so a quote does not pay for the scope. Mutation checks: with the scope taken out of
+    ``map_design_blocks``'s single-block branch the 1,000-row call never enters it and the first
+    assertion fails; with the size test taken out the quote enters it and the second fails.
+    """
+    import contextlib
+
+    import superglm._blas_threads as blas
+
+    entered = []
+    original = blas.pooled_blas_threads
+
+    @contextlib.contextmanager
+    def counted():
+        entered.append(1)
+        with original():
+            yield
+
+    monkeypatch.setattr(blas, "pooled_blas_threads", counted)
+    model = _fit("spline cat re tensor", discrete=True)
+    rows = design_module.BLAS_ONE_THREAD_ROWS
+    for n in (rows, 1000):
+        entered.clear()
+        link, se = model.predict_link(_frame(n, 30)[0], se_fit=True)
+        assert len(entered) == 1 and np.all(np.isfinite(se.to_numpy()))
+    entered.clear()
+    model.predict_link(_frame(rows - 1, 31)[0], se_fit=True)
+    model.predict_link(_frame(1, 32)[0], se_fit=True)
+    assert entered == []
+
+
 def test_a_quote_starts_no_pool_and_a_book_does(monkeypatch):
     import superglm._parallel as parallel
 

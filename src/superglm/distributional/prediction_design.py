@@ -286,6 +286,11 @@ def _required_columns(predictors: Sequence[CompiledPredictor]) -> tuple[str, ...
 #: Rows of design built at a time when a frame is streamed: 8192 rows of 204 columns are 13 MB.
 DESIGN_BLOCK_ROWS = 8192
 
+#: Rows from which a block that is not pooled holds BLAS at one thread. From there its ``x V``
+#: product is large enough for BLAS to start its threads and too small to gain from them; below it
+#: BLAS runs the product on one thread anyway, and a quote does not pay for the scope.
+BLAS_ONE_THREAD_ROWS = 64
+
 #: Terms whose ``score`` is ``transform(...) @ beta`` row for row, so one ``transform`` gives every
 #: design column at once. Any other term (a custom spec, an ``sz`` term with levels at the population
 #: curve or folding its group's main term) is read column by column through ``score``, which is exact
@@ -603,7 +608,8 @@ def map_design_blocks(
     The blocks do not depend on the worker count, so the list is the same at any ``n_jobs``.
     More than one block runs on ``superglm``'s own pool (``_parallel.pooled_for``, BLAS held at
     one thread, the calling thread working beside its helpers); one block, which is every
-    quote-sized frame, runs inline and starts nothing. ``fn`` reads its block and returns what
+    quote-sized frame, runs inline and starts nothing, with BLAS at one thread from
+    ``BLAS_ONE_THREAD_ROWS`` rows. ``fn`` reads its block and returns what
     it keeps; the unseen-level warning is dropped as in ``iter_joint_prediction_design``. The
     filter is set once, on the calling thread, since ``warnings.catch_warnings`` is not safe to
     enter from several threads.
@@ -631,7 +637,11 @@ def map_design_blocks(
     columns.update(label_columns(frame, predictors, quiet=True))
     with _unseen_routing_silenced():
         if len(spans) <= 1:
-            return [run(rows) for rows in spans]
+            from superglm._blas_threads import pooled_blas_threads
+
+            small = last - first < BLAS_ONE_THREAD_ROWS
+            with nullcontext() if small else pooled_blas_threads():
+                return [run(rows) for rows in spans]
         from superglm._parallel import pooled_for
 
         widest = max(
