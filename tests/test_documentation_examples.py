@@ -398,8 +398,10 @@ def _install_execution_doubles(monkeypatch) -> dict[str, object]:
         superglm.model_selection.cross_validate,
         return_value=results["cross_validation"],
     )
-    monkeypatch.setattr(superglm.model_selection, "cross_validate", cross_validate)
+    # The package root before the module that defines the name: the root reads a name from its
+    # module on first access, so reading it with the module already patched keeps the double.
     monkeypatch.setattr(superglm, "cross_validate", cross_validate)
+    monkeypatch.setattr(superglm.model_selection, "cross_validate", cross_validate)
     lorenz_curve = create_autospec(
         superglm.validation.lorenz_curve,
         return_value=results["lorenz"],

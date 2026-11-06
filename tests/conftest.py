@@ -16,10 +16,21 @@ def pytest_configure(config):
     # pytest-xdist rebuilds workers' warnings by importing their modules in one
     # receiver thread per worker. Threads that first import different
     # subpackages can deadlock on CPython's parent/child import locks and get a
-    # half-initialised module, so a parallel run imports the package here, on
-    # the main thread, before any worker starts. Serial runs skip the cost.
+    # half-initialised module, so a parallel run imports the package's modules
+    # here, on the main thread, before any worker starts: ``import superglm``
+    # alone loads none of them, so every module its names come from is imported.
+    # Serial runs skip the cost.
     if getattr(config.option, "numprocesses", None):
-        import superglm  # noqa: F401
+        import importlib
+
+        import superglm
+
+        for module, names in superglm._LAZY_EXPORTS.items():
+            importlib.import_module(module)
+            # Read every name now, so a test that patches a module before the package root
+            # cannot make the root keep its double: the root reads a name on first access.
+            for name in names:
+                getattr(superglm, name)
     _register_numba_numpy_overloads()
 
 

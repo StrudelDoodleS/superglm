@@ -16,30 +16,66 @@ This module only re-exports.  Patch a name in the submodule that reads it:
 patching it here changes nothing the fit sees.
 """
 
-from superglm.solvers.irls_direct._finalise import (
-    _active_face_basis,
-    _binding_rank,
-    _face_decomposition,
-    _feature_edf,
-)
-from superglm.solvers.irls_direct._fit import (
-    _build_penalty_matrix,
-    _safe_decompose_H,
-    _separation_weight_ratio,
-    fit_irls_direct,
-)
-from superglm.solvers.irls_direct._mean_space import _SUBNORMAL_SPACING, _underflow_allowance
-from superglm.solvers.irls_direct._qp import (
-    _QP_FEASIBILITY_TOL,
-    _binding_rows,
-    _solve_constrained_qp_with_cold_retry,
-)
-from superglm.solvers.irls_direct._structured import (
-    StructuredSolverError,
-    _build_iterate_factor,
-    _levenberg_shifted_leaf_operator,
-    _structured_solver_errors,
-)
+import typing as _typing
+
+from superglm._lazy import attach
+
+if _typing.TYPE_CHECKING:
+    from superglm.solvers.irls_direct._finalise import (
+        _active_face_basis,
+        _binding_rank,
+        _face_decomposition,
+        _feature_edf,
+    )
+    from superglm.solvers.irls_direct._fit import (
+        _build_penalty_matrix,
+        _safe_decompose_H,
+        _separation_weight_ratio,
+        fit_irls_direct,
+    )
+    from superglm.solvers.irls_direct._mean_space import _SUBNORMAL_SPACING, _underflow_allowance
+    from superglm.solvers.irls_direct._qp import (
+        _QP_FEASIBILITY_TOL,
+        _binding_rows,
+        _solve_constrained_qp_with_cold_retry,
+    )
+    from superglm.solvers.irls_direct._structured import (
+        StructuredSolverError,
+        _build_iterate_factor,
+        _levenberg_shifted_leaf_operator,
+        _structured_solver_errors,
+    )
+
+# Each name is read from its module on first access (``superglm._lazy``), so importing the
+# package, or one of its modules, loads only what that module imports.
+_LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
+    "superglm.solvers.irls_direct._finalise": (
+        "_active_face_basis",
+        "_binding_rank",
+        "_face_decomposition",
+        "_feature_edf",
+    ),
+    "superglm.solvers.irls_direct._fit": (
+        "_build_penalty_matrix",
+        "_safe_decompose_H",
+        "_separation_weight_ratio",
+        "fit_irls_direct",
+    ),
+    "superglm.solvers.irls_direct._mean_space": ("_SUBNORMAL_SPACING", "_underflow_allowance"),
+    "superglm.solvers.irls_direct._qp": (
+        "_QP_FEASIBILITY_TOL",
+        "_binding_rows",
+        "_solve_constrained_qp_with_cold_retry",
+    ),
+    "superglm.solvers.irls_direct._structured": (
+        "StructuredSolverError",
+        "_build_iterate_factor",
+        "_levenberg_shifted_leaf_operator",
+        "_structured_solver_errors",
+    ),
+}
+
+__getattr__, __dir__ = attach(__name__, __path__, _LAZY_EXPORTS)
 
 __all__ = [
     "_QP_FEASIBILITY_TOL",

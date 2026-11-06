@@ -9,7 +9,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from scipy.optimize import brentq, minimize_scalar
-from scipy.stats import chi2
 
 # An infeasible point's likelihood-ratio excess. Finite so brentq's
 # interpolation stays finite; a root whose bracket partner is infeasible marks
@@ -149,6 +148,8 @@ def likelihood_ratio_interval(
     cutoff within one step of its outward walk joins that dip to the interval.
     """
     # The upper tail directly: 1 - alpha rounds to 1 for alpha below 1.1e-16.
+    from scipy.stats import chi2
+
     cutoff = float(chi2.isf(alpha, 1))
     recorded = objective.values
     recentrings = 0
@@ -223,6 +224,7 @@ def _infeasible_beyond(recorded, root: float, bound: float) -> bool:
 def profile_plot(values, x_hat, nll_hat, *, scale, alpha, interval, label, ax=None):
     """Likelihood-ratio statistic against the parameter, with the cutoff and the interval."""
     import matplotlib.pyplot as plt
+    from scipy.stats import chi2
 
     if ax is None:
         _, ax = plt.subplots(figsize=(6, 4))

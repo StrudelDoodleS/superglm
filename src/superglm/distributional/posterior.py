@@ -22,7 +22,7 @@ from typing import Any, Literal, cast
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
-from scipy import linalg, stats
+from scipy import linalg
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.diagnostics.convergence import (
@@ -1315,6 +1315,8 @@ def simultaneous_critical_value(
     is always at least the pointwise normal value, and one routine serves term
     effects and risk curves alike.
     """
+    from scipy import stats
+
     coefficients = (
         draws.coefficients
         if isinstance(draws, PosteriorDraws)

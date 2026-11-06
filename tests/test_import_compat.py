@@ -7,6 +7,7 @@ supported.
 """
 
 import ast
+import importlib
 import inspect
 import json
 import os
@@ -65,6 +66,113 @@ def test_toplevel_reexports():
 
     for name in superglm.__all__:
         assert hasattr(superglm, name), f"superglm.{name} not accessible"
+
+
+# ── Lazy package roots ─────────────────────────────────────────
+
+_LAZY_PACKAGES = (
+    "superglm",
+    "superglm.diagnostics",
+    "superglm.inference",
+    "superglm.features",
+    "superglm.reml",
+    "superglm.solvers",
+    "superglm.solvers.irls_direct",
+    "superglm.distributional.solver",
+    "superglm._group_matrix",
+)
+_LIBRARIES = (
+    "numpy",
+    "pandas",
+    "scipy",
+    "numba",
+    "matplotlib",
+    "sklearn",
+    "polars",
+    "tabmat",
+    "pyarrow",
+    "plotly",
+)
+
+
+def _loaded_after(statement: str, watched: tuple[str, ...]) -> list[str]:
+    """The ``watched`` modules a fresh interpreter has imported once ``statement`` has run."""
+    code = f"import sys\n{statement}\nprint([m for m in {watched!r} if m in sys.modules])"
+    completed = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    return ast.literal_eval(completed.stdout.strip())
+
+
+def test_importing_superglm_imports_no_third_party_library():
+    """A name costs its import when it is read, not when the package is imported."""
+    assert _loaded_after("import superglm", _LIBRARIES) == []
+
+
+def test_the_module_a_fitted_model_loads_through_needs_no_plotting_or_fitting_code():
+    """Unpickling a ``SuperLSS`` imports ``superglm.distributional.api`` and what it imports.
+
+    Plotting, scikit-learn, the normal and chi-squared distributions of ``scipy.stats``, the
+    tabmat design backend, and the classic model, summary, diagnostic and profiling code are
+    read when a plot, a summary or a fit asks for them. Mutation checks: restoring
+    ``from scipy import stats`` at the top of ``distributional/posterior.py``, ``import
+    tabmat`` at the top of ``_group_matrix/_group_matrix_tabmat.py``, or the eager imports in
+    ``diagnostics/__init__.py`` puts one of them back and fails this.
+    """
+    libraries = ("matplotlib", "sklearn", "scipy.stats", "tabmat", "polars", "plotly")
+    code = tuple(
+        f"superglm.{name}"
+        for name in (
+            "plotting",
+            "sklearn",
+            "model",
+            "inference",
+            "profiling",
+            "diagnostics.term_diagnostics",
+        )
+    )
+    assert _loaded_after("import superglm.distributional.api", libraries + code) == []
+
+
+def _type_checking_imports(package: str) -> set[tuple[str, str]]:
+    """``(module, name)`` of every import a package keeps under ``typing.TYPE_CHECKING``."""
+    path = Path(__file__).resolve().parents[1] / "src" / Path(*package.split(".")) / "__init__.py"
+    found: set[tuple[str, str]] = set()
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.If) and ast.unparse(node.test) == "_typing.TYPE_CHECKING":
+            for statement in node.body:
+                assert isinstance(statement, ast.ImportFrom)
+                module = statement.module or ""
+                if statement.level:
+                    module = f"{package}.{module}"
+                if module != package:  # ``from superglm import families`` names a submodule
+                    found.update((module, alias.name) for alias in statement.names)
+    return found
+
+
+@pytest.mark.parametrize("package", _LAZY_PACKAGES)
+def test_a_lazy_package_resolves_every_name_to_the_object_its_module_defines(package):
+    """The table the package reads from and the imports a type checker reads are one list.
+
+    Mutation checks: a name dropped from ``_LAZY_EXPORTS``, or added to it without its
+    ``TYPE_CHECKING`` import, fails the first assertion; a name filed under the wrong module
+    fails the second.
+    """
+    module = importlib.import_module(package)
+    table = {(m, name) for m, names in module._LAZY_EXPORTS.items() for name in names}
+    assert table == _type_checking_imports(package)
+    for owner, name in sorted(table):
+        assert getattr(module, name) is getattr(importlib.import_module(owner), name)
+        assert name in dir(module)
+    assert not hasattr(module, "no_such_name")
+
+
+def test_the_root_lists_everything_it_exports_and_every_submodule_resolves():
+    names = dir(superglm)
+    assert set(superglm.__all__) <= set(names)
+    assert {"features", "inference", "families", "solvers"} <= set(names)
+    for name in ("features", "inference", "families", "solvers"):
+        assert getattr(superglm, name) is importlib.import_module(f"superglm.{name}")
 
 
 # Every numba kernel in the package compiles in ``superglm.warmup()``, is

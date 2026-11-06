@@ -22,7 +22,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
-from scipy import special, stats
+from scipy import special
 
 from superglm.distributional._common import json_floats, json_number, readonly_float
 from superglm.distributional.checks.qq import order_statistic_grid
@@ -137,6 +137,8 @@ class WormPayload:
 
 def _moment_row(label: Any, values: NDArray[np.float64]) -> tuple[Any, ...]:
     """Return one Q-statistics record: the four standardised moments of ``values``."""
+    from scipy import stats
+
     n = len(values)
     mean_z = float(np.sqrt(n) * np.mean(values))
     variance_z = np.nan

@@ -23,163 +23,315 @@ sklearn-compatible API:
     model.fit(X, y, sample_weight=weights)
 """
 
-from superglm import families
-from superglm._tweedie import NearPoissonDispersionError, generate_tweedie_cpg, tweedie_logpdf
-from superglm.constraints import (
-    MonotoneRepairer as MonotoneRepairer,
-)
-from superglm.constraints import (
-    MonotoneRepairResult as MonotoneRepairResult,
-)
-from superglm.diagnostics.convergence import ConvergenceWarning
-from superglm.diagnostics.discretize import DiscretizationResult, discretization_impact
-from superglm.diagnostics.fit_cost import SlowFitWarning
-from superglm.diagnostics.fit_report import FitDiagnosticReport
-from superglm.diagnostics.separation import SeparationError, SeparationWarning
-from superglm.diagnostics.spline_checks import SplineRedundancyReport
-from superglm.distributional.api import SuperLSS
-from superglm.distributional.binding import BoundPredictor, bind_predictor
-from superglm.distributional.families.gamma import GammaLS
-from superglm.distributional.families.gaussian import GaussianLS
-from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
-from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
-from superglm.distributional.families.log_normal import LogNormalLS
-from superglm.distributional.families.negative_binomial import NegativeBinomialLS
-from superglm.distributional.families.tweedie import TweedieLSS
-from superglm.distributional.families.two_piece import (
-    TwoPieceLogNormalLSS,
-    TwoPieceNormalLSS,
-)
-from superglm.distributional.predictor import Predictor
-from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
-from superglm.export import RatingTableBaseNotRepresentableError, export_rating_tables
-from superglm.features._spline_config import SCOPRetiredWarning, SplineOptionWarning
-from superglm.features._spline_ranges import PolynomialRange
-from superglm.features.categorical import Categorical
-from superglm.features.constraint import Constraint, ConstraintRules
-from superglm.features.constraint import ConstraintSpec as ConstraintSpec
-from superglm.features.factor_smooth import FactorSmooth, FactorSmoothGroupTermWarning
-from superglm.features.grouping import LevelGrouping, collapse_levels
-from superglm.features.interaction import (
-    CategoricalInteraction as CategoricalInteraction,
-)
-from superglm.features.interaction import (
-    NumericCategorical as NumericCategorical,
-)
-from superglm.features.interaction import (
-    NumericInteraction as NumericInteraction,
-)
-from superglm.features.interaction import (
-    PolynomialCategorical as PolynomialCategorical,
-)
-from superglm.features.interaction import (
-    PolynomialInteraction as PolynomialInteraction,
-)
-from superglm.features.interaction import (
-    SplineCategorical as SplineCategorical,
-)
-from superglm.features.interaction import (
-    TensorInteraction as TensorInteraction,
-)
-from superglm.features.numeric import Numeric
-from superglm.features.ordered_categorical import OrderedCategorical
-from superglm.features.piecewise import Piecewise
-from superglm.features.polynomial import Polynomial
-from superglm.features.random_effect import RandomEffect
-from superglm.features.spline import (
-    BSplineSmooth,
-    CubicRegressionSpline,
-    NaturalSpline,
-    PSpline,
-    Spline,
-    n_knots_from_k,
-)
-from superglm.inference._term_types import (
-    InteractionInference,
-    TermInference,
-)
-from superglm.inference._term_types import (
-    SmoothCurve as SmoothCurve,
-)
-from superglm.inference._term_types import (
-    SplineMetadata as SplineMetadata,
-)
-from superglm.inference.factor_smooths import FactorSmoothResult
-from superglm.inference.metrics import ModelMetrics
-from superglm.inference.random_effects import RandomEffectResult
-from superglm.inference.summary import ModelSummary
-from superglm.links import (
-    CauchitLink,
-    CloglogLink,
-    IdentityLink,
-    InverseLink,
-    InverseSquaredLink,
-    LogitLink,
-    LogLink,
-    NegativeBinomialLink,
-    PowerLink,
-    ProbitLink,
-    SqrtLink,
-)
-from superglm.model import PathResult, SuperGLM
-from superglm.model.input_validation import (
-    FractionalFrequencyWeightWarning,
-    PriorWeightLatticeWarning,
-)
-from superglm.model.profile_ops import PublicationModeError
-from superglm.model_selection import CrossValidationResult, cross_validate
-from superglm.penalties.flavors import Adaptive
-from superglm.penalties.group_elastic_net import GroupElasticNet
-from superglm.penalties.group_lasso import GroupLasso
-from superglm.penalties.ridge import Ridge
-from superglm.penalties.sparse_group_lasso import SparseGroupLasso
-from superglm.plotting import plot_term_comparison
-from superglm.profiling.nb import NBProfileResult, NBThetaBoundWarning
-from superglm.profiling.tweedie import TweedieProfileResult
-from superglm.reml import REMLResult
-from superglm.reml.identified import WeakIdentificationWarning
-from superglm.reml.observed_geometry import (
-    ObservedModeNotCertifiedError,
-    ObservedModeNotConvergedError,
-)
-from superglm.sklearn import SuperGLMClassifier, SuperGLMRegressor
-from superglm.solvers.irls_direct import StructuredSolverError
-from superglm.stats.davies import psum_chisq, satterthwaite
-from superglm.stats.model_tests import (
-    DispersionTestResult,
-    ScoreTestZIResult,
-    VuongTestResult,
-    ZeroInflationResult,
-    dispersion_test,
-    score_test_zi,
-    vuong_test,
-    zero_inflation_index,
-)
-from superglm.stats.wood_pvalue import wood_test_smooth
-from superglm.structure import FeatureStructure, Structure, StructureError, read_structure
-from superglm.terms import (
-    BoundInteraction,
-    BoundTerm,
-    RedundantInteractionWarning,
-    cat,
-    interaction,
-    re,
-    s,
-    term,
-    ti,
-)
-from superglm.types import LambdaPolicy
-from superglm.types import LinearConstraintSet as LinearConstraintSet
-from superglm.validation import (
-    DoubleLiftChartResult,
-    LiftChartResult,
-    LorenzCurveResult,
-    LossRatioChartResult,
-    double_lift_chart,
-    lift_chart,
-    lorenz_curve,
-    loss_ratio_chart,
-)
+import typing as _typing
+
+from superglm._lazy import attach
+
+if _typing.TYPE_CHECKING:
+    from superglm import families
+    from superglm._tweedie import NearPoissonDispersionError, generate_tweedie_cpg, tweedie_logpdf
+    from superglm.constraints import (
+        MonotoneRepairer as MonotoneRepairer,
+    )
+    from superglm.constraints import (
+        MonotoneRepairResult as MonotoneRepairResult,
+    )
+    from superglm.diagnostics.convergence import ConvergenceWarning
+    from superglm.diagnostics.discretize import DiscretizationResult, discretization_impact
+    from superglm.diagnostics.fit_cost import SlowFitWarning
+    from superglm.diagnostics.fit_report import FitDiagnosticReport
+    from superglm.diagnostics.separation import SeparationError, SeparationWarning
+    from superglm.diagnostics.spline_checks import SplineRedundancyReport
+    from superglm.distributional.api import SuperLSS
+    from superglm.distributional.binding import BoundPredictor, bind_predictor
+    from superglm.distributional.families.gamma import GammaLS
+    from superglm.distributional.families.gaussian import GaussianLS
+    from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
+    from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
+    from superglm.distributional.families.log_normal import LogNormalLS
+    from superglm.distributional.families.negative_binomial import NegativeBinomialLS
+    from superglm.distributional.families.tweedie import TweedieLSS
+    from superglm.distributional.families.two_piece import (
+        TwoPieceLogNormalLSS,
+        TwoPieceNormalLSS,
+    )
+    from superglm.distributional.predictor import Predictor
+    from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
+    from superglm.export import RatingTableBaseNotRepresentableError, export_rating_tables
+    from superglm.features._spline_config import SCOPRetiredWarning, SplineOptionWarning
+    from superglm.features._spline_ranges import PolynomialRange
+    from superglm.features.categorical import Categorical
+    from superglm.features.constraint import Constraint, ConstraintRules
+    from superglm.features.constraint import ConstraintSpec as ConstraintSpec
+    from superglm.features.factor_smooth import FactorSmooth, FactorSmoothGroupTermWarning
+    from superglm.features.grouping import LevelGrouping, collapse_levels
+    from superglm.features.interaction import (
+        CategoricalInteraction as CategoricalInteraction,
+    )
+    from superglm.features.interaction import (
+        NumericCategorical as NumericCategorical,
+    )
+    from superglm.features.interaction import (
+        NumericInteraction as NumericInteraction,
+    )
+    from superglm.features.interaction import (
+        PolynomialCategorical as PolynomialCategorical,
+    )
+    from superglm.features.interaction import (
+        PolynomialInteraction as PolynomialInteraction,
+    )
+    from superglm.features.interaction import (
+        SplineCategorical as SplineCategorical,
+    )
+    from superglm.features.interaction import (
+        TensorInteraction as TensorInteraction,
+    )
+    from superglm.features.numeric import Numeric
+    from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.features.piecewise import Piecewise
+    from superglm.features.polynomial import Polynomial
+    from superglm.features.random_effect import RandomEffect
+    from superglm.features.spline import (
+        BSplineSmooth,
+        CubicRegressionSpline,
+        NaturalSpline,
+        PSpline,
+        Spline,
+        n_knots_from_k,
+    )
+    from superglm.inference._term_types import (
+        InteractionInference,
+        TermInference,
+    )
+    from superglm.inference._term_types import (
+        SmoothCurve as SmoothCurve,
+    )
+    from superglm.inference._term_types import (
+        SplineMetadata as SplineMetadata,
+    )
+    from superglm.inference.factor_smooths import FactorSmoothResult
+    from superglm.inference.metrics import ModelMetrics
+    from superglm.inference.random_effects import RandomEffectResult
+    from superglm.inference.summary import ModelSummary
+    from superglm.links import (
+        CauchitLink,
+        CloglogLink,
+        IdentityLink,
+        InverseLink,
+        InverseSquaredLink,
+        LogitLink,
+        LogLink,
+        NegativeBinomialLink,
+        PowerLink,
+        ProbitLink,
+        SqrtLink,
+    )
+    from superglm.model import PathResult, SuperGLM
+    from superglm.model.input_validation import (
+        FractionalFrequencyWeightWarning,
+        PriorWeightLatticeWarning,
+    )
+    from superglm.model.profile_ops import PublicationModeError
+    from superglm.model_selection import CrossValidationResult, cross_validate
+    from superglm.penalties.flavors import Adaptive
+    from superglm.penalties.group_elastic_net import GroupElasticNet
+    from superglm.penalties.group_lasso import GroupLasso
+    from superglm.penalties.ridge import Ridge
+    from superglm.penalties.sparse_group_lasso import SparseGroupLasso
+    from superglm.plotting import plot_term_comparison
+    from superglm.profiling.nb import NBProfileResult, NBThetaBoundWarning
+    from superglm.profiling.tweedie import TweedieProfileResult
+    from superglm.reml import REMLResult
+    from superglm.reml.identified import WeakIdentificationWarning
+    from superglm.reml.observed_geometry import (
+        ObservedModeNotCertifiedError,
+        ObservedModeNotConvergedError,
+    )
+    from superglm.sklearn import SuperGLMClassifier, SuperGLMRegressor
+    from superglm.solvers.irls_direct import StructuredSolverError
+    from superglm.stats.davies import psum_chisq, satterthwaite
+    from superglm.stats.model_tests import (
+        DispersionTestResult,
+        ScoreTestZIResult,
+        VuongTestResult,
+        ZeroInflationResult,
+        dispersion_test,
+        score_test_zi,
+        vuong_test,
+        zero_inflation_index,
+    )
+    from superglm.stats.wood_pvalue import wood_test_smooth
+    from superglm.structure import FeatureStructure, Structure, StructureError, read_structure
+    from superglm.terms import (
+        BoundInteraction,
+        BoundTerm,
+        RedundantInteractionWarning,
+        cat,
+        interaction,
+        re,
+        s,
+        term,
+        ti,
+    )
+    from superglm.types import LambdaPolicy
+    from superglm.types import LinearConstraintSet as LinearConstraintSet
+    from superglm.validation import (
+        DoubleLiftChartResult,
+        LiftChartResult,
+        LorenzCurveResult,
+        LossRatioChartResult,
+        double_lift_chart,
+        lift_chart,
+        lorenz_curve,
+        loss_ratio_chart,
+    )
+
+
+# Importing superglm imports none of this: a name is read from the module that defines it, and a
+# submodule imported, on first access (``superglm._lazy``), so a service that scores a fitted model
+# does not load plotting, diagnostics or scikit-learn. ``__all__`` and every importable name are as
+# before; tests/test_import_compat.py keeps this table equal to the imports above.
+_LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
+    "superglm._tweedie": ("NearPoissonDispersionError", "generate_tweedie_cpg", "tweedie_logpdf"),
+    "superglm.constraints": ("MonotoneRepairResult", "MonotoneRepairer"),
+    "superglm.diagnostics.convergence": ("ConvergenceWarning",),
+    "superglm.diagnostics.discretize": ("DiscretizationResult", "discretization_impact"),
+    "superglm.diagnostics.fit_cost": ("SlowFitWarning",),
+    "superglm.diagnostics.fit_report": ("FitDiagnosticReport",),
+    "superglm.diagnostics.separation": ("SeparationError", "SeparationWarning"),
+    "superglm.diagnostics.spline_checks": ("SplineRedundancyReport",),
+    "superglm.distributional.api": ("SuperLSS",),
+    "superglm.distributional.binding": ("BoundPredictor", "bind_predictor"),
+    "superglm.distributional.families.gamma": ("GammaLS",),
+    "superglm.distributional.families.gaussian": ("GaussianLS",),
+    "superglm.distributional.families.generalized_gamma": ("GeneralizedGammaLSS",),
+    "superglm.distributional.families.generalized_pareto": ("GeneralizedParetoLSS",),
+    "superglm.distributional.families.log_normal": ("LogNormalLS",),
+    "superglm.distributional.families.negative_binomial": ("NegativeBinomialLS",),
+    "superglm.distributional.families.tweedie": ("TweedieLSS",),
+    "superglm.distributional.families.two_piece": ("TwoPieceLogNormalLSS", "TwoPieceNormalLSS"),
+    "superglm.distributional.predictor": ("Predictor",),
+    "superglm.distributions": (
+        "Binomial",
+        "Gamma",
+        "Gaussian",
+        "NegativeBinomial",
+        "Poisson",
+        "Tweedie",
+    ),
+    "superglm.export": ("RatingTableBaseNotRepresentableError", "export_rating_tables"),
+    "superglm.features._spline_config": ("SCOPRetiredWarning", "SplineOptionWarning"),
+    "superglm.features._spline_ranges": ("PolynomialRange",),
+    "superglm.features.categorical": ("Categorical",),
+    "superglm.features.constraint": ("Constraint", "ConstraintRules", "ConstraintSpec"),
+    "superglm.features.factor_smooth": ("FactorSmooth", "FactorSmoothGroupTermWarning"),
+    "superglm.features.grouping": ("LevelGrouping", "collapse_levels"),
+    "superglm.features.interaction": (
+        "CategoricalInteraction",
+        "NumericCategorical",
+        "NumericInteraction",
+        "PolynomialCategorical",
+        "PolynomialInteraction",
+        "SplineCategorical",
+        "TensorInteraction",
+    ),
+    "superglm.features.numeric": ("Numeric",),
+    "superglm.features.ordered_categorical": ("OrderedCategorical",),
+    "superglm.features.piecewise": ("Piecewise",),
+    "superglm.features.polynomial": ("Polynomial",),
+    "superglm.features.random_effect": ("RandomEffect",),
+    "superglm.features.spline": (
+        "BSplineSmooth",
+        "CubicRegressionSpline",
+        "NaturalSpline",
+        "PSpline",
+        "Spline",
+        "n_knots_from_k",
+    ),
+    "superglm.inference._term_types": (
+        "InteractionInference",
+        "SmoothCurve",
+        "SplineMetadata",
+        "TermInference",
+    ),
+    "superglm.inference.factor_smooths": ("FactorSmoothResult",),
+    "superglm.inference.metrics": ("ModelMetrics",),
+    "superglm.inference.random_effects": ("RandomEffectResult",),
+    "superglm.inference.summary": ("ModelSummary",),
+    "superglm.links": (
+        "CauchitLink",
+        "CloglogLink",
+        "IdentityLink",
+        "InverseLink",
+        "InverseSquaredLink",
+        "LogLink",
+        "LogitLink",
+        "NegativeBinomialLink",
+        "PowerLink",
+        "ProbitLink",
+        "SqrtLink",
+    ),
+    "superglm.model": ("PathResult", "SuperGLM"),
+    "superglm.model.input_validation": (
+        "FractionalFrequencyWeightWarning",
+        "PriorWeightLatticeWarning",
+    ),
+    "superglm.model.profile_ops": ("PublicationModeError",),
+    "superglm.model_selection": ("CrossValidationResult", "cross_validate"),
+    "superglm.penalties.flavors": ("Adaptive",),
+    "superglm.penalties.group_elastic_net": ("GroupElasticNet",),
+    "superglm.penalties.group_lasso": ("GroupLasso",),
+    "superglm.penalties.ridge": ("Ridge",),
+    "superglm.penalties.sparse_group_lasso": ("SparseGroupLasso",),
+    "superglm.plotting": ("plot_term_comparison",),
+    "superglm.profiling.nb": ("NBProfileResult", "NBThetaBoundWarning"),
+    "superglm.profiling.tweedie": ("TweedieProfileResult",),
+    "superglm.reml": ("REMLResult",),
+    "superglm.reml.identified": ("WeakIdentificationWarning",),
+    "superglm.reml.observed_geometry": (
+        "ObservedModeNotCertifiedError",
+        "ObservedModeNotConvergedError",
+    ),
+    "superglm.sklearn": ("SuperGLMClassifier", "SuperGLMRegressor"),
+    "superglm.solvers.irls_direct": ("StructuredSolverError",),
+    "superglm.stats.davies": ("psum_chisq", "satterthwaite"),
+    "superglm.stats.model_tests": (
+        "DispersionTestResult",
+        "ScoreTestZIResult",
+        "VuongTestResult",
+        "ZeroInflationResult",
+        "dispersion_test",
+        "score_test_zi",
+        "vuong_test",
+        "zero_inflation_index",
+    ),
+    "superglm.stats.wood_pvalue": ("wood_test_smooth",),
+    "superglm.structure": ("FeatureStructure", "Structure", "StructureError", "read_structure"),
+    "superglm.terms": (
+        "BoundInteraction",
+        "BoundTerm",
+        "RedundantInteractionWarning",
+        "cat",
+        "interaction",
+        "re",
+        "s",
+        "term",
+        "ti",
+    ),
+    "superglm.types": ("LambdaPolicy", "LinearConstraintSet"),
+    "superglm.validation": (
+        "DoubleLiftChartResult",
+        "LiftChartResult",
+        "LorenzCurveResult",
+        "LossRatioChartResult",
+        "double_lift_chart",
+        "lift_chart",
+        "lorenz_curve",
+        "loss_ratio_chart",
+    ),
+}
+
+__getattr__, __dir__ = attach(__name__, __path__, _LAZY_EXPORTS)
 
 
 def warmup() -> None:

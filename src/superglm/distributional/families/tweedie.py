@@ -11,7 +11,6 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import special
 from scipy.special import expit
-from scipy.stats import poisson
 
 from superglm.distributional.families._base import (
     composed_second_direction,
@@ -247,6 +246,8 @@ def _poisson_terms(rate_max: float) -> int:
         )
     if rate_max < _MAX_POISSON_TERMS:
         floor_terms = max(5, int(rate_max + 8.0 * math.sqrt(max(rate_max, 1.0))) + 1)
+        from scipy.stats import poisson
+
         tail_terms = float(poisson.isf(_POISSON_TAIL_TOLERANCE, rate_max))
         if math.isfinite(tail_terms):
             terms = max(floor_terms, int(tail_terms))

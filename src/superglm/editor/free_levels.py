@@ -50,7 +50,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import scipy.linalg.lapack
-from scipy.stats import norm
 
 from superglm._frame import as_eager_frame
 from superglm._roundoff import UNIT_ROUNDOFF
@@ -884,6 +883,8 @@ def _comparison(
     # stands when an unconverged fit holds the flags back, so an interval
     # that misses the curve still means what it says.
     judged_groups = {group for _, group, _, _, judged, _, _ in found if judged}
+    from scipy.stats import norm
+
     z = float(norm.ppf(0.5 + 0.5 * CONFIDENCE ** (1.0 / max(len(judged_groups), 1))))
     pointwise = float(norm.ppf(0.5 + 0.5 * CONFIDENCE))
     # Relativities go where the chart puts the reference: what its centring

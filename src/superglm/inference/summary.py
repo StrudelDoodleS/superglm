@@ -8,7 +8,6 @@ from html import escape as html_escape
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from scipy.stats import norm
 
 if TYPE_CHECKING:
     from superglm.inference.summary_levels import SummaryLevelDisplay
@@ -95,6 +94,8 @@ def _compute_coef_stats(
     """Compute z-value, p-value, and confidence interval."""
     if se <= 0:
         return np.nan, np.nan, np.nan, np.nan
+    from scipy.stats import norm
+
     z = coef / se
     p = 2.0 * (1.0 - norm.cdf(abs(z)))
     q = norm.ppf(1.0 - alpha / 2.0)

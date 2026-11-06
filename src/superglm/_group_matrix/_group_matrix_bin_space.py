@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-import tabmat  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from ._group_matrix_execution import WeightedMoments
@@ -159,6 +158,8 @@ def build_mixed_bin_space_centering_plan(
     p: int,
 ) -> MixedBinSpaceCenteringPlan | None:
     """Build the bounded mixed plan, or return ``None`` for unsupported layouts."""
+    import tabmat  # type: ignore[import-untyped]
+
     from ..group_matrix import (
         CategoricalGroupMatrix,
         DenseGroupMatrix,

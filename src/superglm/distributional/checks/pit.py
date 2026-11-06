@@ -16,7 +16,6 @@ from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy import stats
 
 from superglm.distributional._common import readonly, readonly_float
 from superglm.distributional.residuals import ResidualSet, _sample_residuals
@@ -77,6 +76,8 @@ def pit_payload(residuals: ResidualSet, *, n_bins: int = 20, alpha: float = 0.05
     frequency-weighted row contributes its count of observations to the
     histogram and to the band's ``n``, exactly as literal replication would.
     """
+    from scipy import stats
+
     if not isinstance(residuals, ResidualSet):
         raise TypeError("residuals must be a ResidualSet")
     bins = int(n_bins)

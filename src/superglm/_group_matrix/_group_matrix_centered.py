@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from time import perf_counter
 
 import numpy as np
-import tabmat  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from superglm._blas_threads import release_for_serial_row_passes
@@ -187,6 +186,8 @@ def _try_tabmat_centering(
     preflight: bool,
 ) -> tuple[NDArray, NDArray, NDArray] | None:
     """Use native categorical Tabmat kernels when raw centering is safe."""
+    import tabmat  # type: ignore[import-untyped]
+
     if tabmat_split is None or not any(
         isinstance(component, tabmat.CategoricalMatrix) for component in tabmat_split.matrices
     ):
