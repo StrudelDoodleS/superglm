@@ -39,6 +39,7 @@ from superglm.group_matrix import (
     DesignMatrix,
     GroupMatrix,
     SparseSSPGroupMatrix,
+    SupportCompressedSplineCategoricalGroupMatrix,
     SupportCompressedSSPGroupMatrix,
 )
 from superglm.links import IdentityLink, Link, LogitLink, LogLink, stabilize_eta
@@ -1365,6 +1366,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     DenseGroupMatrix,
                     SparseSSPGroupMatrix,
                     SupportCompressedSSPGroupMatrix,
+                    SupportCompressedSplineCategoricalGroupMatrix,
                 )
                 for gm in gms
             )
@@ -1372,19 +1374,11 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             and self.debug_recorder is None
             and self.trace_run is None
         )
-        # These objects stay live throughout the owner line search. A new design
-        # or warm state cannot consume an entry from the previous coordinates.
+        # These objects stay live throughout the owner's run. A new design
+        # cannot consume an entry from the previous coordinates; the weights and
+        # response an entry serves are compared bit for bit (``_SystemData``).
         self._initial_data_key = (
-            (
-                id(dm),
-                id(dm.execution_plan),
-                id(family),
-                id(link),
-                self.beta.tobytes(),
-                np.float64(self.intercept).tobytes(),
-            )
-            if _initial_data_pending
-            else None
+            (id(dm), id(dm.execution_plan), id(family), id(link)) if _initial_data_pending else None
         )
         self._tabmat_split = _tabmat_split
         self._tabmat_centering_state = _tabmat_centering_state
@@ -1392,15 +1386,24 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         self._raw_moment_policy, self._fisher_data_reuse = _raw_moment_policy, _fisher_data_reuse
         self._initial_data_pending = _initial_data_pending
 
-    def get_centered_system(self, W_current: NDArray, z_off_current: NDArray) -> CenteredSystem:
+    def get_centered_system(
+        self, W_current: NDArray, z_off_current: NDArray, *, retain: bool = False
+    ) -> CenteredSystem:
+        """The centred system at the working weights and response.
+
+        The fit's first system is served from the owner's entries when they hold these weights
+        (``_InitialDataReuse``); ``retain`` hands the built system's data to the owner as the
+        initial system of a fit that starts from this one's end.
+        """
         _tabmat_centering_state, curvature = self._tabmat_centering_state, self.curvature
         # read on every call: the Gamma/log switch turns it off mid-fit
         _can_reuse_weighted_gram = curvature.weighted_gram_reuse
         _constant_centered_cache = self._constant_centered_cache
-        reuse = self._initial_data_reuse if self._initial_data_pending else None
+        initial = self._initial_data_pending
+        reuse = self._initial_data_reuse if initial or (retain and self._initial_data_key) else None
         self._initial_data_pending = False
         before = replace(_tabmat_centering_state) if reuse is not None else None
-        if reuse is not None:
+        if initial:
             reused = reuse.take(
                 self._initial_data_key,
                 W_current,
@@ -1449,8 +1452,17 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             and _tabmat_centering_state.raw_moment_eligible is False
         ):
             self._raw_moment_policy.raw_moment_eligible = False
-        if reuse is not None:
+        if initial:
             reuse.remember(
+                self._initial_data_key,
+                W_current,
+                z_off_current,
+                before,
+                _tabmat_centering_state,
+                system,
+            )
+        if reuse is not None and retain:
+            reuse.retain_final(
                 self._initial_data_key,
                 W_current,
                 z_off_current,
