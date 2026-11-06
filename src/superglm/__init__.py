@@ -26,7 +26,7 @@ sklearn-compatible API:
 import typing as _typing
 
 from superglm import _numba_cache
-from superglm._lazy import attach
+from superglm._lazy import attach as _attach
 
 if _typing.TYPE_CHECKING:
     from superglm import families
@@ -336,7 +336,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
 # this runs before anything imports Numba (``superglm._numba_cache``).
 _numba_cache.ensure_cache_location()
 
-__getattr__, __dir__ = attach(__name__, __path__, _LAZY_EXPORTS)
+__getattr__, __dir__ = _attach(__name__, __path__, _LAZY_EXPORTS)
 
 
 def warmup() -> None:
