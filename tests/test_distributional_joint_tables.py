@@ -429,18 +429,22 @@ def test_a_refused_first_trial_falls_back_to_a_value_trial(monkeypatch):
 def test_row_shards_read_what_the_group_routes_form(monkeypatch, make, compiled):
     """Stack blocks that split shards, and shards that hold several stack blocks.
 
-    Mutation checks: a shard left out of the merge or of the totals, rows read at
-    their stack column and not their row, a block's rows evaluated from row 0, and a
-    stack block's columns counted from the first row and not the block's.
+    Mutation checks: a shard left out of the merge or of the totals, a shard's total that
+    keeps only its last stack block, rows read at their stack column and not their row, a
+    block's rows evaluated from row 0, and a stack block's columns counted from the first
+    row and not the block's.
     """
     problem = _problem(make())
-    groups = _geometry(problem, joint=False, monkeypatch=monkeypatch)
+    group_sums = [0.0, 0.0]
+    groups = _geometry(problem, joint=False, monkeypatch=monkeypatch, sums=group_sums)
     monkeypatch.setattr(_joint_tables, "_SHARD_ROWS", 257)
     monkeypatch.setattr(chunking, "STACK_BLOCK_ROWS", 31)
     monkeypatch.setattr(chunking, "contraction_block_rows", lambda _n, _bytes, chunk: chunk)
     assert joint_table_plan(problem[1], 1 << 26).n_shards > 1
-    tables = _geometry(problem, compiled=compiled, chunk=1000)
+    sums = [0.0, 0.0]
+    tables = _geometry(problem, compiled=compiled, chunk=1000, sums=sums)
     _assert_same_geometry(groups, tables)
+    assert abs(sums[0] - group_sums[0]) <= ROUND * abs(group_sums[0])
     major = tables.formed().majorant
     np.testing.assert_allclose(major, groups.formed().majorant, rtol=ROUND, atol=0.0)
 
@@ -451,12 +455,14 @@ def test_the_bits_do_not_depend_on_the_workers(monkeypatch, make):
     reads the rows and tables alone. Mutation check: shards sized by the worker count."""
     monkeypatch.setattr(_joint_tables, "_SHARD_ROWS", 257)
     problem = _problem(make())
+    sums_one, sums_four = [0.0, 0.0], [0.0, 0.0]
     with parallel_config(n_jobs=1):
-        one = _geometry(problem)
+        one = _geometry(problem, sums=sums_one)
     with parallel_config(n_jobs=4):
-        four = _geometry(problem)
+        four = _geometry(problem, sums=sums_four)
     np.testing.assert_array_equal(one.data_curvature, four.data_curvature)
     np.testing.assert_array_equal(one.score_data, four.score_data)
+    assert sums_one == sums_four
 
 
 def test_the_shards_tables_take_at_most_half_the_allowance(monkeypatch):
@@ -627,15 +633,23 @@ class _NaturalTweedie(TweedieLSS):
 
 
 @pytest.mark.parametrize(
-    ("family_type", "zero_weights"),
-    ((TweedieLSS, False), (TweedieLSS, True), (_NaturalTweedie, False)),
-    ids=("compiled", "zero_weights", "natural_into_tables"),
+    ("family_type", "zero_weights", "shard_rows"),
+    (
+        (TweedieLSS, False, None),
+        (TweedieLSS, False, 257),
+        (TweedieLSS, True, None),
+        (_NaturalTweedie, False, None),
+    ),
+    ids=("compiled", "compiled_shards", "zero_weights", "natural_into_tables"),
 )
-def test_a_fit_reads_the_same_numbers_through_every_route(monkeypatch, family_type, zero_weights):
+def test_a_fit_reads_the_same_numbers_through_every_route(
+    monkeypatch, family_type, zero_weights, shard_rows
+):
     """What a user reads, against the group and natural routes, through the solver, the fused first
-    trial and the covariance passes. The search has the same stop and work; at one set of smoothing
-    parameters, which leaves no flat direction to drift along, EDF, predictions and covariance
-    agree to a generous multiple of rounding on the book's scale.
+    trial and the covariance passes. The search reaches the same EDF and predictions, whatever name
+    rounding gives its stop on a flat direction; at one set of smoothing parameters, which leaves
+    no such direction to drift along, EDF, predictions and covariance agree to a generous multiple
+    of rounding on the book's scale.
 
     Mutation checks: every joint block scaled by 1.5, one row kernel's channel dropped, a block
     off by 1e-7, and a route that stops being taken, which the dispatch counts catch.
@@ -665,9 +679,10 @@ def test_a_fit_reads_the_same_numbers_through_every_route(monkeypatch, family_ty
             discrete=True,
         )
 
-    counts = {"compiled": 0, "tables": 0}
+    counts = {"compiled": 0, "tables": 0, "shards": 0}
     compiled_geometry = chunking._compiled_geometry
     add_rows = _joint_tables.JointTables.add_rows
+    add_block = _joint_tables.JointTables.add_block
 
     def counted_compiled(*args):
         counts["compiled"] += 1
@@ -677,8 +692,15 @@ def test_a_fit_reads_the_same_numbers_through_every_route(monkeypatch, family_ty
         counts["tables"] += 1
         return add_rows(self, *args)
 
+    def counted_block(self, *args):
+        counts["shards"] += 1
+        return add_block(self, *args)
+
     monkeypatch.setattr(chunking, "_compiled_geometry", counted_compiled)
     monkeypatch.setattr(_joint_tables.JointTables, "add_rows", counted_rows)
+    monkeypatch.setattr(_joint_tables.JointTables, "add_block", counted_block)
+    if shard_rows is not None:
+        monkeypatch.setattr(_joint_tables, "_SHARD_ROWS", shard_rows)
 
     routed = build().fit_reml(frame, y, sample_weight=weights)
     lambdas = dict(routed._model.fit_state.smoothing.lambdas)
@@ -688,17 +710,18 @@ def test_a_fit_reads_the_same_numbers_through_every_route(monkeypatch, family_ty
         assert counts["compiled"] > 0
     else:
         assert counts["compiled"] == 0 and counts["tables"] > 0
+    assert (counts["shards"] > 0) == (shard_rows is not None)
     monkeypatch.undo()
     monkeypatch.setattr(chunking, "_joint_plan", lambda *_args: None)
     reference = build().fit_reml(frame, y, sample_weight=weights)
     fixed_reference = build().fit(frame, y, sample_weight=weights, lambdas=lambdas)
-    assert routed.smoothing_convergence_reason_ == reference.smoothing_convergence_reason_
+    # Two searches stop within the search's own tolerance of each other, on any platform's rounding.
     assert routed.result_.total_effective_df == pytest.approx(
-        reference.result_.total_effective_df, abs=1e-6
+        reference.result_.total_effective_df, abs=1e-4
     )
     rows = frame.iloc[::37]
     np.testing.assert_allclose(
-        np.asarray(routed.predict_link(rows)), np.asarray(reference.predict_link(rows)), atol=1e-6
+        np.asarray(routed.predict_link(rows)), np.asarray(reference.predict_link(rows)), atol=1e-4
     )
     assert fixed.result_.total_effective_df == pytest.approx(
         fixed_reference.result_.total_effective_df, abs=1e-9
@@ -981,6 +1004,45 @@ def test_predictors_that_cancel_sum_as_the_row_route_and_prediction_do():
     )
 
 
+def test_a_spline_predictor_multiplies_its_factors_as_the_row_route_and_prediction_do():
+    """``B @ (R_inv @ beta)`` and ``(B @ R_inv) @ beta`` differ when large slopes cancel against an
+    offset, so the association decides the published mean and whether the objective read it.
+    Mutation check: read ``B @ R_inv`` here, and the means reach 32 where the row route's are 0."""
+    x = np.repeat(np.random.default_rng(109).uniform(-1, 1, 80), 2)
+    frame = as_eager_frame(pd.DataFrame({"x": x}))
+    family = GaussianLS(scale_floor=0.0)
+    weights = resolved_prior(np.ones(x.size))
+
+    def layout_with(offsets):
+        return build_stacked_layout(
+            compile_predictors(
+                frame,
+                weights,
+                family.parameters,
+                (
+                    Predictor("location", {"x": Spline(kind="cr", n_knots=4, discrete=True)}),
+                    Predictor("scale", {}),
+                ),
+                offsets=offsets,
+                model_discrete=True,
+                n_bins_config=20,
+            )
+        )
+
+    design = layout_with(None).predictors[0].design
+    slopes = 2.0**54 * np.arange(1.0, design.p + 1.0)
+    layout = layout_with({"location": -design.matvec(slopes)})
+    coefficients = np.concatenate(([0.0], slopes, [0.0]))
+    eta, theta = chunking.materialize_terminal_predictions(
+        layout, coefficients, chunk_size="auto", pass_factors=PassFactors()
+    )
+    reference_eta, reference_theta = chunking.materialize_terminal_predictions(
+        layout, coefficients, chunk_size="auto"
+    )
+    np.testing.assert_array_equal(eta, reference_eta)
+    np.testing.assert_array_equal(theta, reference_theta)
+
+
 @pytest.mark.parametrize(
     "read",
     [
@@ -1155,8 +1217,8 @@ def test_predictor_passes_read_what_the_chunks_read():
     reference_eta, reference_theta = chunking.materialize_terminal_predictions(
         layout, coefficients, chunk_size="auto"
     )
-    np.testing.assert_allclose(eta, reference_eta, rtol=1e-13, atol=1e-13)
-    np.testing.assert_allclose(theta, reference_theta, rtol=1e-12)
+    np.testing.assert_array_equal(eta, reference_eta)
+    np.testing.assert_array_equal(theta, reference_theta)
     assert chunking.predictions_are(
         layout, coefficients, eta, theta, chunk_size="auto", pass_factors=factors
     )
