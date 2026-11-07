@@ -175,30 +175,39 @@ def _codes_against(values: NDArray, levels: list) -> NDArray:
     declared categories, and values outside the universe are exactly what this
     call exists to find. A unique-Index lookup is the supported spelling; every
     call site holds a universe that is unique by construction.
+
+    Levels that are all ``str`` are looked up in a dict, which answers as the Index does. Any
+    other label (bool, number, date, None, NaN) is the Index's to compare, since it decides by
+    dtype what matches what (a bool does not match 1) and a dict does not.
     """
     import pandas as pd
 
     values = np.asarray(values)
     position = {level: code for code, level in enumerate(levels)}
-    if values.size <= _DICT_LOOKUP_ROWS:
-        # A quote is a few rows: a dict read per value is faster than building an Index.
-        return np.fromiter(
-            (position.get(value, -1) for value in values.ravel()),
-            dtype=np.intp,
-            count=values.size,
-        ).reshape(values.shape)
-    if values.ndim != 1:
-        return np.asarray(pd.Index(levels).get_indexer(values), dtype=np.intp)
-    # A column holds few distinct labels: hash its rows once (factorize), look the distinct ones up
-    # in the universe, and read each row's code back. A missing value factorizes to -1, absent.
-    row_codes, distinct = pd.factorize(values)
-    distinct_codes = np.fromiter(
-        (position.get(value, -1) for value in distinct), dtype=np.intp, count=len(distinct)
-    )
-    return np.append(distinct_codes, -1)[row_codes]
+    plain = len(position) == len(levels) and all(type(level) is str for level in levels)
+    if plain and values.ndim <= 1:
+        try:
+            if values.size <= _DICT_LOOKUP_ROWS:
+                # A quote is a few rows: a dict read per value is faster than building an Index.
+                return np.fromiter(
+                    (position.get(value, -1) for value in values.ravel()),
+                    dtype=np.intp,
+                    count=values.size,
+                ).reshape(values.shape)
+            # A column holds few distinct labels: hash its rows once (factorize), look the distinct
+            # ones up in the universe, and read each row's code back. A missing value factorizes to
+            # -1, absent.
+            row_codes, distinct = pd.factorize(values)
+            distinct_codes = np.fromiter(
+                (position.get(value, -1) for value in distinct), dtype=np.intp, count=len(distinct)
+            )
+            return np.append(distinct_codes, -1)[row_codes]
+        except TypeError:  # an unhashable label: the Index answers, or raises as it always did
+            pass
+    return np.asarray(pd.Index(levels).get_indexer(values), dtype=np.intp)
 
 
-#: Rows up to which a level is looked up in a dict instead of a pandas Index built for the call.
+#: Rows up to which a ``str`` level is looked up in a dict instead of a pandas Index built for the call.
 _DICT_LOOKUP_ROWS = 64
 
 #: Opening of the warning for rows whose level was unseen at fit.

@@ -7,6 +7,7 @@ dense matrix, so nothing here shares code with the design builder under test.
 
 from __future__ import annotations
 
+import datetime
 import threading
 import warnings
 
@@ -36,6 +37,7 @@ from superglm.features import (
     FactorSmooth,
     Numeric,
     OrderedCategorical,
+    PSpline,
     Spline,
     SplineCategorical,
     _basis_kernels,
@@ -52,6 +54,7 @@ from superglm.features.interaction import (
 from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
 from superglm.features.random_effect import RandomEffect
+from superglm.features.spline import CubicRegressionSpline
 from tests.bound_predictor_fixtures import model_from_templates
 
 U = np.finfo(np.float64).eps / 2
@@ -692,17 +695,101 @@ def test_standard_errors_of_covariates_of_any_magnitude_equal_the_independent_fo
     assert se.to_numpy()[3, 0] == 0.0
 
 
-@pytest.mark.parametrize("n", [3, 64, 65, 400])
-@pytest.mark.parametrize("levels", [["a", "b", "c", "d"], [3, 1, 2], ["x", 1, 2.5]])
-def test_level_codes_are_the_same_whether_a_dict_or_an_index_reads_them(n, levels):
-    """A quote's rows are looked up in a dict, a book's in a pandas Index: one answer."""
+_NS_1 = pd.Timestamp("2024-01-01 00:00:00.000000001")
+_NS_2 = pd.Timestamp("2024-01-01 00:00:00.000000002")
+_LABEL_UNIVERSES = {
+    "str": ["a", "b", "c", "d"],
+    "digit strings": ["1", "2"],
+    "np.str_": [np.str_("a"), np.str_("b")],
+    "int": [3, 1, 2],
+    "int and zero": [0, 1],
+    "float": [1.5, 2.5],
+    "integral float": [1.0, 2.0],
+    "bool": [True, False],
+    "mixed": ["x", 1, 2.5],
+    "Timestamp": [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")],
+    "nanosecond Timestamp": [_NS_1, _NS_2],
+    "date": [datetime.date(2024, 1, 1), datetime.date(2024, 1, 2)],
+    "Timedelta": [pd.Timedelta("1D"), pd.Timedelta("2D")],
+    "NaN level": [1.0, float("nan")],
+    "None level": ["a", None],
+    "repeated level": ["a", "a"],
+}
+_LABEL_POOL = [
+    "a", "b", "c", "x", "zz", "1", "2", 0, 1, 2, 3, 1.0, 2.0, 1.5, 2.5, True, False, None,
+    float("nan"), pd.NA, pd.NaT, _NS_1, _NS_2, pd.Timestamp("2024-01-01"),
+    pd.Timestamp("2024-01-02"), np.datetime64("2024-01-01"), np.datetime64("2024-01-01", "D"),
+    np.datetime64("2024-01-01T00:00:00.000000001"), datetime.date(2024, 1, 1),
+    pd.Timedelta("1D"), np.timedelta64(1, "D"), np.str_("a"),
+]  # fmt: skip
+_TYPED_TARGETS = {
+    "bool": np.array([True, False, True, False]),
+    "int": np.array([0, 1, 2, 3, 1]),
+    "float": np.array([1.0, 2.0, 1.5, np.nan]),
+    "str": np.array(["a", "b", "zz", "1"]),
+    "datetime64[ns]": np.array(["2024-01-01", "2024-01-02", "NaT"], dtype="datetime64[ns]"),
+    "datetime64[D]": np.array(["2024-01-01", "2024-01-02"], dtype="datetime64[D]"),
+    "timedelta64[ns]": np.array([86_400 * 10**9, 2 * 86_400 * 10**9], dtype="timedelta64[ns]"),
+}
+
+
+def _answer(read):
+    """The array a read gives, or the type of the exception it raises."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            return np.asarray(read(), dtype=np.intp)
+        except Exception as error:
+            return type(error)
+
+
+@pytest.mark.parametrize("n", [1, 3, 64, 65, 400])
+@pytest.mark.parametrize("name", list(_LABEL_UNIVERSES))
+def test_level_codes_are_what_pandas_decides_for_every_label_type(name, n):
+    """A level is found, or not, exactly as ``pd.Index.get_indexer`` decides, whatever its type.
+
+    A dict read ``True == 1`` and compared a ``Timestamp`` with a nanosecond to a hash that its
+    NumPy twin does not share, where the Index does neither: scored with 0 and 1 on a bool column,
+    ``Categorical(unseen='error')`` priced the 1 at its level where master priced it at the
+    base, and nanosecond levels of a ``RandomEffect`` were all unseen. Only levels that are all
+    ``str`` are read from a dict. The targets are the level types' own and every look-alike of
+    them (1, 1.0, True, a Timestamp and a ``datetime64`` of one instant, a ``date``, NaN, None,
+    ``pd.NA``), object and typed. Mutation check: the dict for every universe fails the bool,
+    int, float, date and Timestamp universes.
+    """
     from superglm.features.categorical import _codes_against
 
+    levels = _LABEL_UNIVERSES[name]
     rng = np.random.default_rng(n)
-    pool = [*levels, "unseen", 99, None, pd.NA]
-    values = np.array([pool[i] for i in rng.integers(0, len(pool), n)], dtype=object)
-    expected = np.asarray(pd.Index(levels).get_indexer(values), dtype=np.intp)
-    np.testing.assert_array_equal(_codes_against(values, levels), expected)
+    pool = [*levels, *_LABEL_POOL]
+    targets = {"object": np.array([pool[i] for i in rng.integers(0, len(pool), n)], dtype=object)}
+    targets.update(_TYPED_TARGETS)
+    for kind, values in targets.items():
+        expected = _answer(lambda v=values: pd.Index(levels).get_indexer(np.asarray(v)))
+        actual = _answer(lambda v=values: _codes_against(v, levels))
+        assert type(actual) is type(expected), (name, kind, actual, expected)
+        if isinstance(expected, np.ndarray):
+            np.testing.assert_array_equal(
+                actual, expected, err_msg=f"{name} levels, {kind} targets"
+            )
+        else:
+            assert actual is expected
+
+
+def test_bool_levels_are_not_found_by_the_numbers_they_equal():
+    """The decision this PR keeps from master: ``True`` is not ``1`` to ``Categorical``.
+
+    Whether it should be is a question for its own issue (``Categorical.transform`` compares with
+    ``==`` and would find it); a speed change does not decide it.
+    """
+    from superglm.features.categorical import _codes_against
+
+    np.testing.assert_array_equal(_codes_against(np.array([1, 0, 1]), [True, False]), [-1, -1, -1])
+    np.testing.assert_array_equal(_codes_against(np.array([True, False]), [True, False]), [0, 1])
+    np.testing.assert_array_equal(_codes_against(np.array([True, False]), [1, 0]), [-1, -1])
+    np.testing.assert_array_equal(
+        _codes_against(np.array([_NS_2, _NS_1], dtype=object), [_NS_1, _NS_2]), [1, 0]
+    )
 
 
 def test_level_columns_are_coded_once_per_frame_and_a_quiet_entry_never_silences_a_warning():
@@ -850,3 +937,108 @@ def test_the_cardinal_kernel_is_the_numpy_evaluation_to_rounding():
         rtol=0.0,
         atol=16 * U * scale,
     )
+
+
+def _one_spline_model(spec) -> SuperLSS:
+    rng = np.random.default_rng(3)
+    frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, 400)})
+    y = np.sin(3 * frame["x"].to_numpy()) + 0.2 * rng.standard_normal(400)
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=(Predictor("location", {"x": spec}), Predictor("scale", {})),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return model.fit_reml(frame, y)
+
+
+_ROUTE_ROWS = [1, _basis_kernels.SCALAR_MAX_ROWS + 1, _basis_kernels.KERNEL_MIN_ROWS]
+
+
+@pytest.mark.parametrize("rows", _ROUTE_ROWS, ids=["python rows", "scipy rows", "kernel rows"])
+@pytest.mark.parametrize(
+    ("bad", "extrapolation"), [(np.nan, "clip"), (np.inf, "extend"), (-np.inf, "extend")]
+)
+def test_a_non_finite_covariate_is_refused_by_every_route_as_scipy_refuses_it(
+    rows, bad, extrapolation
+):
+    """A degree-0 B-spline does no arithmetic with its point, so its rows were finite for a NaN.
+
+    The one-hot row of a NaN covariate came out as a finite price on the Python and kernel routes
+    while the SciPy route (17 rows up to a design block) raised ``Array must not contain infs or
+    nans``, so the same row was an error or a price by the size of the call. A non-finite point is
+    now a row of NaN on both, which hands the call to SciPy. Mutation check: the check taken out
+    of ``_bspline_rows`` fails the kernel route, out of ``bspline_dense_python`` the Python one.
+    """
+    model = _one_spline_model(PSpline(n_knots=4, degree=0, m=1, extrapolation=extrapolation))
+    frame = pd.DataFrame({"x": np.linspace(0.05, 0.95, rows)})
+    frame.loc[frame.index[-1], "x"] = bad
+    with pytest.raises(ValueError, match="infs or nans"):
+        model.predict_link(frame)
+    with pytest.raises(ValueError, match="infs or nans"):
+        model.predict_link(frame, se_fit=True)
+    knots = np.array([0.0, 0.0, 0.5, 1.0, 1.0])
+    for degree in (0, 1, 3):
+        for rows_of in (_basis_kernels.bspline_dense, _basis_kernels.bspline_dense_python):
+            result = rows_of(
+                np.array([0.3, bad]), np.r_[[0.0] * degree, 0.0, 0.5, 1.0, [1.0] * degree], degree
+            )
+            assert np.isfinite(result[0]).all() and np.isnan(result[1]).all()
+    with pytest.raises(ValueError, match="infs or nans"):
+        BSpline.design_matrix(np.array([bad]), knots, 1, extrapolate=True)
+
+
+@pytest.mark.parametrize("rows", [1, 5, 17, 100, 8192, 9000])
+def test_error_extrapolation_gives_one_answer_at_every_call_size(rows):
+    """A row a rounding past the end knots is an error on every route for a spline with no padding.
+
+    ``prepare_eval_points`` admits ``error`` rows within ``1e-12`` of the range and a
+    ``CubicRegressionSpline``'s knots end exactly there, so SciPy refuses such a row: master did,
+    at every call size. The Python rows and the kernel clamped it into the end span and priced
+    it (up to 16 distinct values, and from 8,192) while 17 to 8,191 raised. Splines padded past the
+    range and the cardinal basis, whose evaluation never refused, price it the same at every
+    size. Mutation check: ``_refused_by_scipy`` always false fails the first assertion.
+    """
+    regression = _one_spline_model(CubicRegressionSpline(n_knots=6, extrapolation="error"))
+    spec = regression._require_fitted().compiled_predictors[0].compiled.specs["x"]
+    inside = np.linspace(spec._lo, spec._hi, rows)
+    for index, value in ((0, spec._hi + 5e-13), (-1, spec._lo - 5e-13)):
+        points = inside.copy()
+        points[index] = value
+        with pytest.raises(ValueError, match="Out of bounds"):
+            regression.predict_link(pd.DataFrame({"x": points}))
+    for spec_kind in (
+        PSpline(n_knots=6, extrapolation="error"),
+        Spline("cr_cardinal", k=6, extrapolation="error"),
+    ):
+        model = _one_spline_model(spec_kind)
+        built = model._require_fitted().compiled_predictors[0].compiled.specs["x"]
+        points = np.linspace(built._lo, built._hi, rows)
+        points[-1] = built._hi + 5e-13
+        priced = model.predict_link(pd.DataFrame({"x": points})).to_numpy()
+        reference = model.predict_link(pd.DataFrame({"x": points[-1:]})).to_numpy()
+        np.testing.assert_allclose(priced[-1], reference[-1], rtol=0.0, atol=64 * U * 10.0)
+
+
+def test_a_read_only_column_and_a_writable_one_share_each_kernels_one_signature():
+    """Numba compiles one version of a kernel per argument type, read-only arrays included.
+
+    Under pandas 3 Copy-on-Write and Polars a covariate column is a read-only view, so the first
+    block of 8,192 rows or more after ``superglm.warmup()`` (which compiled the writable one)
+    compiled again, 0.1 to 0.65 s inside a request. Every operand is passed read-only. Mutation
+    check: ``_operand`` returning a writable array leaves two signatures.
+    """
+    rng = np.random.default_rng(0)
+    knots = np.array([0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0])
+    points = rng.uniform(0.0, 1.0, 40)
+    frozen = points.copy()
+    frozen.flags.writeable = False
+    strided = rng.uniform(0.0, 1.0, 80)[::2]
+    for column in (points, frozen, strided, points.astype(np.float32).astype(np.float64)):
+        _basis_kernels.bspline_dense(column, knots, 3)
+        _basis_kernels.cardinal_dense(column, np.array([0.0, 0.5, 1.0]), np.zeros((3, 3)))
+    read_only_knots = knots.copy()
+    read_only_knots.flags.writeable = False
+    _basis_kernels.bspline_dense(frozen, read_only_knots, 3)
+    assert len(_basis_kernels._bspline_rows.signatures) == 1
+    assert len(_basis_kernels._cardinal_rows.signatures) == 1

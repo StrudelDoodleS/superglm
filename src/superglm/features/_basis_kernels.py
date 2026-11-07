@@ -7,11 +7,15 @@ rows straight into the output, one row at a time, so row blocks run on threads
 (``_parallel.pooled_map``) without the interpreter serialising them.
 
 Cox and de Boor's recurrence in Dierckx's order (1993, *Curve and Surface Fitting with Splines*,
-routine ``fpbspl``) gives the ``degree + 1`` nonzero B-spline values of a row, the same bits as
-SciPy's ``BSpline.design_matrix``; the cardinal cubic regression basis is the natural-spline
-form of Wood (2017, *Generalized Additive Models*, 2nd ed., section 5.3.1), agreeing with its
-NumPy evaluation to a few ulp. Fits keep the SciPy and NumPy
-evaluations; ``dense_basis`` and ``dense_raw_basis`` are for scoring and designs.
+routine ``fpbspl``) gives the ``degree + 1`` nonzero B-spline values of a row: the operations of
+SciPy's ``BSpline.design_matrix`` in its order, so a row agrees with it to rounding (to the bit
+where the platform's compiler does not fuse a multiply and an add, as clang does on ARM64).
+The cardinal cubic regression basis is the natural-spline form of Wood (2017, *Generalized
+Additive Models*, 2nd ed., section 5.3.1), agreeing with its NumPy evaluation to a few ulp.
+``dense_basis`` serves every ``transform`` of a spline term, so a ``SuperGLM`` fit reads these
+kernels too, from 8,192 rows (its canonicalization calls ``transform``): its designs and
+a cardinal term's column means agree with the SciPy and NumPy ones to those few ulp. A
+``SuperLSS`` fit builds its design another way and never reaches them.
 
 A kernel compiles, or loads from Numba's cache, on the first call that reaches it, which costs
 more than a call below a design block gains. ``dense_basis`` and ``dense_raw_basis`` therefore
@@ -24,6 +28,7 @@ give the same rows.
 from __future__ import annotations
 
 from bisect import bisect_right
+from math import isfinite
 from typing import Any
 
 import numpy as np
@@ -46,6 +51,12 @@ def _bspline_rows(x, knots, degree, n_basis, out):
     previous = np.empty(degree + 1)
     for i in range(x.shape[0]):
         xi = x[i]
+        if not np.isfinite(xi):
+            # A degree-0 row does no arithmetic with its point, so a NaN would read as a finite
+            # one-hot row: a non-finite point is a row of NaN, which sends the call to SciPy.
+            for k in range(n_basis):
+                out[i, k] = np.nan
+            continue
         # The span with knots[mu] <= x < knots[mu + 1], clamped to the first and last interior
         # spans: the right end point and any extrapolated point read the end polynomial.
         low = degree
@@ -123,6 +134,9 @@ def bspline_dense_python(x: NDArray, knots: NDArray, degree: int) -> NDArray[np.
     points = np.asarray(x, dtype=np.float64).ravel()
     out = np.zeros((len(points), n_basis))
     for i, xi in enumerate(points.tolist()):
+        if not isfinite(xi):
+            out[i] = np.nan
+            continue
         span = min(max(bisect_right(knot_list, xi, degree, n_basis) - 1, degree), n_basis - 1)
         h = [1.0] + [0.0] * degree
         for j in range(1, degree + 1):
@@ -160,25 +174,37 @@ def cardinal_dense_python(x: NDArray, knots: NDArray, second_derivative_map: NDA
     return out
 
 
+def _operand(values: Any) -> NDArray[np.float64]:
+    """``values`` as the read-only C float64 array the kernels compile one signature for.
+
+    A covariate column is writable or a read-only view (pandas Copy-on-Write, Polars), and Numba
+    compiles one version of a kernel for each; every operand is passed read-only so one serves both
+    and ``superglm.warmup`` has compiled it.
+    """
+    view = np.ascontiguousarray(values, dtype=np.float64).view()
+    view.flags.writeable = False
+    return view
+
+
 def bspline_dense(x: NDArray, knots: NDArray, degree: int) -> NDArray[np.float64]:
     """The ``(len(x), len(knots) - degree - 1)`` B-spline basis, extended past the end knots."""
-    points = np.ascontiguousarray(x, dtype=np.float64).ravel()
+    points = _operand(np.ravel(x))
     n_basis = len(knots) - degree - 1
     out = np.empty((len(points), n_basis), dtype=np.float64)
-    _bspline_rows(points, np.ascontiguousarray(knots, dtype=np.float64), degree, n_basis, out)
+    _bspline_rows(points, _operand(knots), degree, n_basis, out)
     return out
 
 
 def cardinal_dense(x: NDArray, knots: NDArray, second_derivative_map: NDArray) -> NDArray:
     """The ``(len(x), len(knots))`` cardinal cubic regression basis."""
-    points = np.ascontiguousarray(x, dtype=np.float64).ravel()
-    knot_values = np.ascontiguousarray(knots, dtype=np.float64)
+    points = _operand(np.ravel(x))
+    knot_values = _operand(knots)
     out = np.empty((len(points), len(knot_values)), dtype=np.float64)
     _cardinal_rows(
         points,
         knot_values,
-        np.diff(knot_values),
-        np.ascontiguousarray(second_derivative_map, dtype=np.float64),
+        _operand(np.diff(knot_values)),
+        _operand(second_derivative_map),
         out,
     )
     return out
@@ -190,6 +216,22 @@ def _evaluates_by_scipy(spec: Any, spline_base: type, *overrides: type) -> bool:
     if method is spline_base._basis_matrix:
         return True
     return spec.extrapolation != "extend" and any(method is cls._basis_matrix for cls in overrides)
+
+
+def _refused_by_scipy(spec: Any, points: NDArray) -> bool:
+    """Whether ``BSpline.design_matrix``, which does not extrapolate for ``error``, refuses ``points``.
+
+    It refuses a point outside the base interval ``[t_k, t_n]``. ``prepare_eval_points`` lets
+    ``error`` rows a rounding past the training range through, and a knot vector with no padding
+    (a ``CubicRegressionSpline``'s) ends at that range, so such a row is an error there on every
+    route: the kernels clamp it to the end span instead, and would give it a price.
+    """
+    if spec.extrapolation != "error" or not points.size:
+        return False
+    knots = spec._knots
+    return bool(
+        points.min() < knots[spec.degree] or points.max() > knots[len(knots) - spec.degree - 1]
+    )
 
 
 def _evaluations(n_rows: int) -> tuple[Any, Any] | None:
@@ -222,11 +264,13 @@ def dense_basis(spec: Any, x: NDArray) -> NDArray:
         spec, _SplineBase, CubicRegressionSpline, NaturalSpline
     ):
         x_eval, _ = _spline_runtime.prepare_eval_points(spec, x)
+        if _refused_by_scipy(spec, x_eval):
+            return spec._basis_matrix(x).toarray()
         rows = bspline(x_eval, spec._knots, spec.degree)
     else:
         return spec._basis_matrix(x).toarray()
-    # A non-finite row (a NaN covariate, a degenerate cardinal knot vector) is SciPy's and NumPy's to
-    # answer.
+    # A non-finite row (a NaN or infinite covariate, a degenerate cardinal knot vector) is SciPy's and
+    # NumPy's to answer: SciPy raises for such a point, as it does at every call size.
     return rows if np.isfinite(rows).all() else spec._basis_matrix(x).toarray()
 
 
