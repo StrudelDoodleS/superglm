@@ -96,6 +96,11 @@ def cardinal_boundary_slopes(
 
 def eval_cardinal_basis(x: NDArray, knots: NDArray, M: NDArray) -> sp.csr_matrix:
     """Vectorised cardinal cubic regression spline evaluation."""
+    return sp.csr_matrix(eval_cardinal_dense(x, knots, M))
+
+
+def eval_cardinal_dense(x: NDArray, knots: NDArray, M: NDArray) -> NDArray:
+    """The cardinal basis as a dense ``(len(x), K)`` array, which every row fills."""
     x = np.asarray(x, dtype=np.float64).ravel()
     K = len(knots)
     h = np.diff(knots)
@@ -116,7 +121,7 @@ def eval_cardinal_basis(x: NDArray, knots: NDArray, M: NDArray) -> sp.csr_matrix
     c2 = hj**2 * (t**3 - t) / 6.0
     X += c1[:, None] * M[j, :] + c2[:, None] * M[j + 1, :]
 
-    return sp.csr_matrix(X)
+    return X
 
 
 def linear_tail_cardinal_basis(
@@ -153,5 +158,6 @@ __all__ = [
     "build_cr_penalty_matrices",
     "cardinal_boundary_slopes",
     "eval_cardinal_basis",
+    "eval_cardinal_dense",
     "linear_tail_cardinal_basis",
 ]

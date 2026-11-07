@@ -9,7 +9,6 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
-from scipy.stats import norm
 
 from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR
 from superglm._reporting_state import ReportingSupportState
@@ -339,6 +338,8 @@ def factor_smooth_result(
 
     grid_values = _grid_values(spec, grid)
     basis = spec.marginal_basis(grid_values)
+    from scipy.stats import norm
+
     critical_value = float(norm.ppf(0.5 + confidence_level / 2.0))
     common_diagnostics = {
         "n_levels_without_information": int(np.count_nonzero(~has_information)),

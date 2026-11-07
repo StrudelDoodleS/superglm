@@ -9,7 +9,7 @@ from numpy.typing import NDArray
 from scipy.interpolate import BSpline as BSpl
 
 from superglm._group_matrix._group_matrix_bins import discretize_column
-from superglm.features import _spline_extrapolation, _spline_knots
+from superglm.features import _basis_kernels, _spline_extrapolation, _spline_knots
 from superglm.features._spline_ranges import (
     certify_determined,
     merged_interior_knots,
@@ -198,7 +198,7 @@ def assemble_clamped_knot_vector(spec: Any, interior: NDArray) -> None:
 
 def transform(spec: Any, x: NDArray) -> NDArray:
     """Build the design matrix using knots learned during build()."""
-    basis = spec._basis_matrix(x).toarray()
+    basis = _basis_kernels.dense_basis(spec, x)
     distributional_mean = getattr(spec, "_distributional_basis_mean", None)
     if distributional_mean is not None:
         basis = basis - distributional_mean

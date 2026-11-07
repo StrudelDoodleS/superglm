@@ -50,6 +50,9 @@ class EagerFrame:
     backend: FrameBackend
     _frame: nw.DataFrame | None
     _arrays: dict[object, NDArray] = field(default_factory=dict, repr=False)
+    # Level columns coded for this frame's prediction, kept for the operation (see
+    # ``prediction_design.label_columns``): a second pass over the same frame reads them back.
+    _label_columns: dict[object, Any] = field(default_factory=dict, repr=False)
     _schema: Mapping[str, Any] | None = field(default=None, init=False, repr=False)
     _polars_digests: dict[tuple[object, ...], bytes] = field(
         default_factory=dict, init=False, repr=False

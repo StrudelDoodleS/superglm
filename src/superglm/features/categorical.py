@@ -7,6 +7,9 @@ simultaneously), which is the correct variable selection behavior.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Literal, cast
 
 import numpy as np
@@ -54,7 +57,16 @@ def _validate_missing_only(x: NDArray, *, context: str = "") -> None:
     # `pd.isna` is not the same question (pandas decides nullness by `v != v`, so a
     # self-equal float subclass would pass; and it is true for pd.NA, pd.NaT and
     # non-float NaNs, which are unseen LEVELS the report must name).
-    if any(v is None or (isinstance(v, float) and np.isnan(v)) for v in x):
+    import pandas as pd
+
+    # Whether a column holds a missing value is a property of its distinct values, so the exact
+    # scan reads those: a hash pass of the column keeps one of every equal value (all NaNs of
+    # exact float type are one), and a column of a million rows has a few dozen levels.
+    try:
+        distinct = pd.unique(np.asarray(x).ravel())
+    except TypeError:  # an unhashable label: scan every element, as it would have been
+        distinct = x
+    if any(v is None or (isinstance(v, float) and np.isnan(v)) for v in distinct):
         msg = "Categorical column contains missing values (NaN or None)."
         if context:
             msg = f"[{context}] {msg}"
@@ -163,16 +175,65 @@ def _codes_against(values: NDArray, levels: list) -> NDArray:
     declared categories, and values outside the universe are exactly what this
     call exists to find. A unique-Index lookup is the supported spelling; every
     call site holds a universe that is unique by construction.
+
+    Levels that are all ``str`` are looked up in a dict, which answers as the Index does. Any
+    other label (bool, number, date, None, NaN) is the Index's to compare, since it decides by
+    dtype what matches what (a bool does not match 1) and a dict does not.
     """
     import pandas as pd
 
-    return np.asarray(pd.Index(levels).get_indexer(np.asarray(values)), dtype=np.intp)
+    values = np.asarray(values)
+    position = {level: code for code, level in enumerate(levels)}
+    plain = len(position) == len(levels) and all(type(level) is str for level in levels)
+    if plain and values.ndim <= 1:
+        try:
+            if values.size <= _DICT_LOOKUP_ROWS:
+                # A quote is a few rows: a dict read per value is faster than building an Index.
+                return np.fromiter(
+                    (position.get(value, -1) for value in values.ravel()),
+                    dtype=np.intp,
+                    count=values.size,
+                ).reshape(values.shape)
+            # A column holds few distinct labels: hash its rows once (factorize), look the distinct
+            # ones up in the universe, and read each row's code back. A missing value factorizes to
+            # -1, absent.
+            row_codes, distinct = pd.factorize(values)
+            distinct_codes = np.fromiter(
+                (position.get(value, -1) for value in distinct), dtype=np.intp, count=len(distinct)
+            )
+            return np.append(distinct_codes, -1)[row_codes]
+        except TypeError:  # an unhashable label: the Index answers, or raises as it always did
+            pass
+    return np.asarray(pd.Index(levels).get_indexer(values), dtype=np.intp)
+
+
+#: Rows up to which a ``str`` level is looked up in a dict instead of a pandas Index built for the call.
+_DICT_LOOKUP_ROWS = 64
+
+#: Opening of the warning for rows whose level was unseen at fit.
+UNSEEN_ROUTING_WARNING = "Routing rows with categorical levels unseen at fit"
+
+#: Whether this context gives the unseen-level warning. A caller that scores a frame in row blocks
+#: sets it for the blocks, because each would count only its own rows, and gives the warning once
+#: from a whole-frame call. A context variable belongs to its thread and is inherited by the
+#: helpers a pooled section starts, so no process-wide warning filter is touched.
+_UNSEEN_ROUTING_QUIET: ContextVar[bool] = ContextVar("superglm_unseen_routing_quiet", default=False)
+
+
+@contextmanager
+def unseen_routing_quiet() -> Iterator[None]:
+    """Within this block the calling context does not warn of levels unseen at fit."""
+    token = _UNSEEN_ROUTING_QUIET.set(True)
+    try:
+        yield
+    finally:
+        _UNSEEN_ROUTING_QUIET.reset(token)
 
 
 def _warn_unseen_routed(x: NDArray, codes: NDArray, *, group: Any = None) -> None:
     """Warn once per call for rows with a negative code: routed to base, or to ``group``."""
     novel_rows = codes < 0
-    if not novel_rows.any():
+    if not novel_rows.any() or _UNSEEN_ROUTING_QUIET.get():
         return
     novel = sorted(set(np.asarray(x)[novel_rows].tolist()), key=str)
     if group is None:
@@ -182,7 +243,7 @@ def _warn_unseen_routed(x: NDArray, codes: NDArray, *, group: Any = None) -> Non
         destination = f"the group {group!r} (unseen={group!r})"
         effect = "They take that group's effect."
     warnings.warn(
-        f"Routing rows with categorical levels unseen at fit to {destination}: "
+        f"{UNSEEN_ROUTING_WARNING} to {destination}: "
         f"{novel} over {int(novel_rows.sum())} row(s). {effect}",
         UserWarning,
         stacklevel=3,

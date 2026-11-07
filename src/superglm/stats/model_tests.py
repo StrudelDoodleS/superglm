@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
-from scipy import stats
 from scipy.special import gammaln
 
 from superglm.solvers.dispersion import (
@@ -339,6 +338,8 @@ def score_test_zi(
     -------
     ScoreTestZIResult
     """
+    from scipy import stats
+
     _check_family(model, {"Poisson"}, "score_test_zi")
 
     if sample_weight is not None:
@@ -410,6 +411,8 @@ def dispersion_test(
     -------
     DispersionTestResult
     """
+    from scipy import stats
+
     _check_family(model, {"Poisson"}, "dispersion_test")
 
     if sample_weight is not None:
@@ -496,6 +499,8 @@ def vuong_test(
     -------
     VuongTestResult
     """
+    from scipy import stats
+
     if correction not in {"none", "aic", "bic"}:
         raise ValueError(f"correction must be 'none', 'aic', or 'bic', got {correction!r}.")
 

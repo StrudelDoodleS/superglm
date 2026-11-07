@@ -302,6 +302,175 @@ pred = pipe.predict(score_df)
 That is why the fitted estimator, not a detached transformer, is the thing you
 deploy.
 
+## Running In A Cloud Function
+
+A function platform (Google Cloud Run functions, AWS Lambda, a Databricks
+serving endpoint) starts and stops the processes that run your code. It starts
+a new one after a deploy, when traffic rises past what the running ones can
+take, and after it has shut idle ones down. A request that reaches a process
+that is still starting waits for it: that wait is the cold start. Once the
+process is up it serves many requests, so work done once at start costs
+nothing per request.
+
+### Load the model once per instance, outside the handler
+
+Cloud Run functions run code at global scope once per instance
+([Cloud Run functions: tips](https://docs.cloud.google.com/functions/docs/samples/functions-tips-scopes)),
+and Lambda runs initialization code outside the handler once per execution
+environment
+([Lambda execution environments](https://docs.aws.amazon.com/lambda/latest/operatorguide/execution-environments.html)).
+Put `import superglm` and the model load there, and keep the handler to
+building the rows and predicting:
+
+```py
+import joblib
+import pandas as pd
+
+model = joblib.load("severity.joblib")  # runs once, when the instance starts
+
+
+def handler(request):
+    rows = pd.DataFrame(request.get_json()["rows"])
+    link, se = model.predict_link(rows, se_fit=True)
+    return {"link": link.to_dict("list"), "se": se.to_dict("list")}
+```
+
+A server that answers on several threads should also make one prediction in
+that start-up code, before it serves. superglm loads each of its own modules
+the first time a name needs it, and loads them one thread at a time. It cannot
+make Python's own import locks resolve two threads that import its modules by
+name at once (`import superglm.model` on one thread while another thread first
+reads a name) in a process that has not loaded them yet. A process that forks
+workers while another thread is in a first read waits for that read to finish,
+so the children do not start from a half-loaded module.
+
+### Keep a warm floor with the platform's own setting
+
+A minimum number of instances that the platform keeps running removes the cold
+start for requests that reach them. It does not remove it when traffic rises
+past the minimum, because the platform then starts new instances, and idle
+instances kept for the minimum are billed.
+
+- Cloud Run functions: set a minimum number of instances
+  ([Configure minimum instances](https://cloud.google.com/functions/1stgendocs/configuring/min-instances)).
+- AWS Lambda: configure provisioned concurrency, which keeps execution
+  environments initialized ahead of requests
+  ([Lambda execution environments](https://docs.aws.amazon.com/lambda/latest/operatorguide/execution-environments.html)).
+- Databricks model serving: set a minimum provisioned concurrency and leave
+  scale to zero off. Databricks does not recommend scale to zero for
+  production endpoints, and scaling up from zero usually takes 10 to 20
+  seconds
+  ([Create custom model serving endpoints](https://docs.databricks.com/aws/en/machine-learning/model-serving/create-manage-serving-endpoints)).
+
+### What a cold start costs
+
+Measured on one machine (AMD EPYC 9645, Python 3.13, Numba 0.68, one process
+on a shared 16-core host), for a fitted `SuperLSS` with three predictors and
+229 coefficients, whose file is 151 MiB:
+
+| Step | Time | Resident memory |
+|---|---|---|
+| `import superglm` | 0.004 s | 14 MiB |
+| `joblib.load` of the model, which imports numpy, pandas, SciPy and Numba | 0.8 to 0.9 s | 370 MiB |
+| first `predict_link` of one row | 3 ms | |
+| later `predict_link` of one row (median of 1,500 calls) | 0.9 ms | |
+| later `predict_link(..., se_fit=True)` of one row | 1.8 ms | |
+
+`import superglm` loads nothing until you use a name: plotting, scikit-learn,
+the diagnostics and the fitting code are imported when something asks for
+them. Loading the model is what imports the libraries a prediction needs, so
+that is where the time goes, and the figures do not change with the Numba
+cache.
+
+A prediction of fewer than 8,192 rows compiles nothing. From 8,192 rows up,
+with covariate values that differ from row to row, the first call compiles two
+small kernels: 0.14 s when Numba's cache holds them and 0.65 s when it does
+not. A function that scores single quotes or small batches never reaches them,
+and needs nothing from the next section.
+
+### Ship Numba's cache for large batches
+
+Run one `predict_link` on a batch of 8,192 rows or more, whose numeric values
+differ from row to row, while the image is built, with `NUMBA_CACHE_DIR` set,
+and ship the directory in the image. The cache then holds the two kernels,
+about 100 KiB. Numba keys it
+to the CPU model and features, to the file's contents and to the path superglm
+is installed at; see the
+[Numba notes on caching](https://numba.readthedocs.io/en/stable/developer/caching.html)
+and the how-to *Starting fast on ephemeral clusters* for the same keys at
+cluster scale.
+
+Numba needs a directory it can write to, even to read a cache that is already
+full. AWS Lambda container images run on a read-only file system with a
+writable `/tmp`
+([Lambda container images](https://docs.aws.amazon.com/lambda/latest/dg/images-create.html)),
+and on Cloud Run functions the directory holding your source is read-only while
+the temporary directory is an in-memory file system
+([Cloud Run functions execution environment](https://cloud.google.com/functions/docs/concepts/execution-environment),
+[best practices](https://docs.cloud.google.com/run/docs/tips/functions-best-practices)).
+
+When no cache location is set (no `NUMBA_CACHE_DIR`, no
+`NUMBA_CACHE_LOCATOR_CLASSES`, and none in `numba.config` or
+`.numba_config.yaml`) and neither the directory superglm is installed in nor
+your user cache directory can be written to, `import superglm` makes a new
+directory for the process inside a directory of its own in the temporary
+directory (`superglm-numba-cache-u<your user id>`, made for you alone, mode
+0700, on Linux and macOS), points Numba at it, and removes the new directory
+when the process exits. Loading the model works with no setting from you.
+Nothing Numba compiles outlives the process, so the first prediction of 8,192
+rows or more compiles its two kernels (0.65 s), and a function that scores
+single quotes or small batches is not affected. superglm never changes a cache
+location you set, and a directory you name has to be one you can write to.
+
+Child processes inherit the setting and share the cache while the process that
+made it runs. A child that imports superglm after that process has ended finds
+the directory gone, does not trust a directory that is not private to its user,
+and makes its own. A child that never imports superglm and outlives the
+process can make Numba create the directory again, inside the directory that
+only your user can enter; set `NUMBA_CACHE_DIR` yourself for such children.
+
+If Numba was imported before superglm, superglm tells it through
+`numba.config.CACHE_DIR` and leaves the environment alone, because Numba
+re-reads all its settings when a `NUMBA_` variable changes, which would reset
+any you made in code. A forked child keeps the directory; a new process makes
+its own. If your program changes a `NUMBA_` variable after that, the re-read
+clears the directory too, so set `NUMBA_CACHE_DIR` yourself in that case.
+
+To keep the benefit of a shipped cache on such a platform, copy it into a new
+private directory before anything imports superglm, and point Numba at the
+copy:
+
+```py
+import os
+import shutil
+import tempfile
+
+cache = tempfile.mkdtemp(prefix="numba-cache-")  # new, and readable by you alone
+shutil.copytree("/opt/numba-cache", cache, dirs_exist_ok=True)
+for directory, _, _ in os.walk(cache):  # copytree gives each its source's mode
+    os.chmod(directory, 0o700)
+os.environ["NUMBA_CACHE_DIR"] = cache
+
+import superglm  # noqa: E402
+```
+
+Numba reads this cache with `pickle`, so use a directory that no other user
+can create or write to: not a fixed name such as `/tmp/numba-cache`.
+
+Measured on a read-only file system with the cache copied to the temporary
+directory this way, the first prediction of 8,192 rows took 0.14 s, against
+0.61 s when no cache had been shipped.
+
+A cache built on one CPU model is not read on another, and a platform may start
+your function on either. The Numba documentation names `NUMBA_CPU_NAME` for a
+cache that has to be read on other CPUs
+([environment variables](https://numba.readthedocs.io/en/stable/reference/envvars.html)).
+Setting `NUMBA_CPU_NAME=generic` when the cache is built and again when the
+function runs worked here: a process that set it read the cache in 0.18 s
+instead of compiling in 0.49 s, a process that did not set it ignored the cache,
+and the 638,007-row prediction took the same 0.54 s with the generic cache as
+with the default one. We have not tried a second CPU model.
+
 ## Executable Round-Trip Checks
 
 ```bash

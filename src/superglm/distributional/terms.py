@@ -88,7 +88,6 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
-from scipy import stats
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.diagnostics.convergence import lss_nonconvergence_reason
@@ -715,6 +714,8 @@ def _block_wald(
     parametric group, with the pseudo-inverse taken at the fit's own
     reconciliation tolerance relative to the largest eigenvalue.
     """
+    from scipy import stats
+
     values, vectors = np.linalg.eigh(0.5 * (block + block.T))
     cutoff = tolerance * max(float(np.max(values, initial=0.0)), 0.0)
     keep = values > cutoff
@@ -791,6 +792,8 @@ def _prepare_term_effect(
     simultaneous: bool = True,
 ) -> _PreparedTermEffect:
     """Validate and retain every covariance-independent part of one panel."""
+    from scipy import stats
+
     points = int(n_points)
     if points < 2:
         raise ValueError("n_points must place at least two points on the term's grid")
@@ -1024,6 +1027,8 @@ def _intercept_row(
     matrix: NDArray[np.float64],
     intercept_edf: Mapping[str, float],
 ) -> dict[str, Any]:
+    from scipy import stats
+
     index = state.intercept_index
     estimate = float(beta[index])
     se = math.sqrt(max(float(matrix[index, index]), 0.0))

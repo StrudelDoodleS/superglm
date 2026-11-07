@@ -19,7 +19,6 @@ from typing import Any, NamedTuple
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
-from scipy import stats
 
 from superglm.distributional._common import readonly
 from superglm.distributional.residuals import ResidualSet, _residual_rng, _sample_residuals
@@ -203,6 +202,8 @@ def binned_check(
     and 97.5th percentiles (Fasiolo et al. 2020, extended from the mean to the
     second and third moments).
     """
+    from scipy import stats
+
     boot = int(n_boot)
     if boot < 1:
         raise ValueError("n_boot must be at least one resample")

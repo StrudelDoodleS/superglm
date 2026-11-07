@@ -32,7 +32,6 @@ from superglm.group_matrix import (
     SupportCompressedSSPGroupMatrix,
 )
 from superglm.links import Link, resolve_link
-from superglm.model.reml_setup import collect_reml_groups
 from superglm.reml.penalty_algebra import build_penalty_components
 from superglm.terms import check_column_label, check_column_texts
 from superglm.types import FeatureSpec, PenaltyComponent
@@ -557,6 +556,8 @@ def compile_predictors(
     separate under that predictor's boundaries, as SuperGLM's build does
     (``compile_predictor_design``).
     """
+    from superglm.model.reml_setup import collect_reml_groups
+
     parameter_tuple = tuple(parameters)
     predictor_tuple = tuple(predictors)
     if not parameter_tuple:

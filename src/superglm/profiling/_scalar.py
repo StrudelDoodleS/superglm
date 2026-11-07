@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import math
-import os
-import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from scipy.optimize import brentq, minimize_scalar
-from scipy.stats import chi2
+
+from superglm._warn import warn_caller as warn_caller
 
 # An infeasible point's likelihood-ratio excess. Finite so brentq's
 # interpolation stays finite; a root whose bracket partner is infeasible marks
@@ -22,14 +21,6 @@ _INFEASIBLE = 1e50
 # Times one interval re-centres on a lower point, a budget like maxiter: each
 # pass inverts both sides again, a model fit per evaluation.
 _MAX_RECENTRINGS = 2
-# Frames under this directory are superglm's own; a warning skips them to land
-# on the caller's line however deep the call (Python 3.12, skip_file_prefixes).
-_PACKAGE_PREFIX = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + os.sep
-
-
-def warn_caller(message: str, category: type[Warning] = UserWarning) -> None:
-    """Warn at the first frame outside superglm."""
-    warnings.warn(message, category, skip_file_prefixes=(_PACKAGE_PREFIX,))
 
 
 class RecordedObjective:
@@ -149,6 +140,8 @@ def likelihood_ratio_interval(
     cutoff within one step of its outward walk joins that dip to the interval.
     """
     # The upper tail directly: 1 - alpha rounds to 1 for alpha below 1.1e-16.
+    from scipy.stats import chi2
+
     cutoff = float(chi2.isf(alpha, 1))
     recorded = objective.values
     recentrings = 0
@@ -223,6 +216,7 @@ def _infeasible_beyond(recorded, root: float, bound: float) -> bool:
 def profile_plot(values, x_hat, nll_hat, *, scale, alpha, interval, label, ax=None):
     """Likelihood-ratio statistic against the parameter, with the cutoff and the interval."""
     import matplotlib.pyplot as plt
+    from scipy.stats import chi2
 
     if ax is None:
         _, ax = plt.subplots(figsize=(6, 4))

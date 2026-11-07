@@ -22,7 +22,7 @@ from typing import Any, Literal, cast
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
-from scipy import linalg, stats
+from scipy import linalg
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.diagnostics.convergence import (
@@ -46,10 +46,7 @@ from superglm.distributional.likelihood_identity import rebound_plan_mismatch
 # fit and every prediction path already share; restating its rules here is how
 # an offset contract drifts between two entry points that must agree.
 from superglm.distributional.model import _prediction_offsets
-from superglm.distributional.prediction_design import (
-    build_joint_prediction_design,
-    warn_population_levels,
-)
+from superglm.distributional.prediction_design import map_design_blocks
 from superglm.distributional.revision import CORRECTED_COVARIANCE_NEEDS_THE_FIT
 from superglm.distributional.smoothing.derivatives import LamlDerivatives, laml_derivatives
 from superglm.distributional.solver.assembly import dense_predictor_matrices
@@ -857,8 +854,9 @@ def posterior_parameters(
 
     Each predictor's local prediction design multiplies the draw matrix on the
     link scale, the predictor offset is added there, and the fitted inverse link
-    maps to the natural parameter. The same design and draws serve every
-    chunk; changing chunk sizes may change matrix-product roundoff.
+    maps to the natural parameter. The design is formed in blocks of
+    ``DESIGN_BLOCK_ROWS`` rows, never for the whole frame; changing chunk or
+    block sizes may change matrix-product roundoff.
     """
     if not isinstance(draws, PosteriorDraws):
         raise TypeError("draws must be a PosteriorDraws")
@@ -877,27 +875,41 @@ def posterior_parameters(
     resolved_offsets = _prediction_offsets(
         offsets, tuple(state.name for state in layout.predictors), n_observations
     )
-    named: list[str] = []
-    design = build_joint_prediction_design(frame, fitted.compiled_predictors, layout, named)
     if name_levels:
-        warn_population_levels(named)
+        # Design blocks leave out the unseen-level and population-level notices, since each would
+        # count only its own rows; one whole-frame prediction gives them as a prediction would.
+        fitted.predict_eta(frame)
     coefficients = draws.coefficients
+    parameters = fitted.family.parameters
+
+    def pushforward(rows: slice, local: dict[str, NDArray]) -> list[NDArray]:
+        pieces = []
+        for index, state in enumerate(layout.predictors):
+            eta = coefficients[:, state.coefficient_slice] @ local[state.name].T
+            eta += resolved_offsets[state.name][rows][None, :]
+            with np.errstate(over="ignore", invalid="ignore"):
+                values = np.asarray(state.link.inverse(eta.reshape(-1)), dtype=np.float64)
+            if values.shape != (eta.size,):
+                raise ValueError(f"inverse link for {state.name!r} returned an invalid shape")
+            if not np.all(parameters[index].support.contains(values)):
+                raise ValueError(f"Posterior draws put {state.name} outside its supported range")
+            pieces.append(values.reshape(draws.n_draws, -1))
+        return pieces
 
     for start in range(0, n_observations, rows_per_chunk):
         stop = min(start + rows_per_chunk, n_observations)
-        width = stop - start
-        block = np.empty((draws.n_draws, width, n_parameters), dtype=np.float64)
-        for index, state in enumerate(layout.predictors):
-            local = design.local[state.name][start:stop]
-            eta = local @ coefficients[:, state.coefficient_slice].T
-            eta += resolved_offsets[state.name][start:stop, None]
-            with np.errstate(over="ignore", invalid="ignore"):
-                values = np.asarray(state.link.inverse(eta.T.reshape(-1)), dtype=np.float64)
-            if values.shape != (eta.size,):
-                raise ValueError(f"inverse link for {state.name!r} returned an invalid shape")
-            if not np.all(fitted.family.parameters[index].support.contains(values)):
-                raise ValueError(f"Posterior draws put {state.name} outside its supported range")
-            block[:, :, index] = values.reshape(draws.n_draws, width)
+        block = np.empty((draws.n_draws, stop - start, n_parameters), dtype=np.float64)
+        spans = map_design_blocks(
+            frame,
+            fitted.compiled_predictors,
+            layout,
+            lambda rows, local: (rows, pushforward(rows, local)),
+            start=start,
+            stop=stop,
+        )
+        for rows, pieces in spans:
+            for index, values in enumerate(pieces):
+                block[:, rows.start - start : rows.stop - start, index] = values
         yield slice(start, stop), block
 
 
@@ -1119,6 +1131,68 @@ def posterior_bounds(
     return bounds
 
 
+def link_standard_errors(
+    fitted: Any,
+    X: FrameLike | EagerFrame,
+    *,
+    covariance: CovarianceKind = "fixed",
+) -> NDArray[np.float64]:
+    """Return ``sqrt(x_i' V x_i)`` for every row and predictor, ``V`` the predictor's own block.
+
+    ``x_i`` is the row of the predictor's local design, so this is the exact standard error of
+    the link-scale prediction, with no draws. ``covariance`` is as in ``posterior_covariance``.
+    The quadratic form is taken a block of rows at a time (one ``x V`` product and a row-wise
+    dot), in ``n p^2`` operations and the memory of one block per worker. A variance a roundoff
+    below zero reads as zero. A row whose variance leaves the normal range (a covariate of
+    ``1e200`` squares to infinity, one of ``1e-200`` to zero, though the standard error is an
+    ordinary number) is taken again from its row scaled by a power of two, which is exact:
+    ``sqrt(x' V x) = 2^e sqrt(y' V y)`` with ``y = 2^-e x``.
+    """
+    matrix = posterior_covariance(fitted, kind=covariance)
+    layout = fitted.layout
+    frame = as_eager_frame(X)
+    blocks = [
+        np.ascontiguousarray(matrix[state.coefficient_slice, state.coefficient_slice])
+        for state in layout.predictors
+    ]
+    errors = np.empty((len(frame), len(blocks)), dtype=np.float64)
+
+    def standard_errors(rows: slice, local: dict[str, NDArray]) -> None:
+        for index, state in enumerate(layout.predictors):
+            design = local[state.name]
+            variance = np.einsum("ij,ij->i", design @ blocks[index], design)
+            root = np.sqrt(np.maximum(variance, 0.0))
+            # one comparison of the extremes: the rows out of range are the rare case
+            if not (variance.min() >= _NORMAL_MIN and variance.max() <= _FLOAT_MAX):
+                outside = ~((variance >= _NORMAL_MIN) & (variance <= _FLOAT_MAX))
+                root[outside] = _scaled_roots(design[outside], blocks[index])
+            errors[rows, index] = root
+
+    map_design_blocks(
+        frame, fitted.compiled_predictors, layout, standard_errors, blas_one_thread=True
+    )
+    return errors
+
+
+#: The smallest normal float64 and the largest finite one: a variance outside them has lost its
+#: relative accuracy (or is infinite, or is NaN where an infinity met its opposite).
+_NORMAL_MIN = float(np.finfo(np.float64).tiny)
+_FLOAT_MAX = float(np.finfo(np.float64).max)
+
+
+def _scaled_roots(design: NDArray, block: NDArray) -> NDArray:
+    """``sqrt(x' V x)`` of each row, each row first scaled by the power of two of its largest entry.
+
+    A column with no covariance (a dropped coefficient) is not in the form, so it sets no scale.
+    """
+    active = block.any(axis=0)
+    design, block = design[:, active], block[np.ix_(active, active)]
+    exponent = np.frexp(np.abs(design).max(axis=1, initial=0.0))[1]
+    scaled = np.ldexp(design, -exponent[:, None])
+    variance = np.einsum("ij,ij->i", scaled @ block, scaled)
+    return np.ldexp(np.sqrt(np.maximum(variance, 0.0)), exponent)
+
+
 def _resolved_reduce(reduce: Any) -> Callable[[NDArray], NDArray] | None:
     if reduce is None or callable(reduce):
         return reduce
@@ -1270,6 +1344,8 @@ def simultaneous_critical_value(
     is always at least the pointwise normal value, and one routine serves term
     effects and risk curves alike.
     """
+    from scipy import stats
+
     coefficients = (
         draws.coefficients
         if isinstance(draws, PosteriorDraws)
@@ -1303,6 +1379,7 @@ def simultaneous_critical_value(
 
 __all__ = [
     "PosteriorDraws",
+    "link_standard_errors",
     "posterior_bounds",
     "posterior_covariance",
     "posterior_draws",

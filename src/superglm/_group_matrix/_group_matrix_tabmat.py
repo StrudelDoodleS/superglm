@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 import numpy as np
 import scipy.sparse as sp
-import tabmat  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 _MIN_RAW_SPLINE_TABMAT_ROWS = 8_000
@@ -126,6 +125,8 @@ def _defer_raw_spline_tabmat_plan(
 
 def _build_raw_spline_tabmat_plan(gms, *, n: int) -> RawSplineTabmatPlan | None:
     """Build one combined CSC Tabmat split without materializing ``B @ R_inv``."""
+    import tabmat  # type: ignore[import-untyped]
+
     if not _is_raw_spline_tabmat_centering_candidate(gms, n=n):
         return None
     splines = tuple(group for group in gms if group.shape[1] > 0)
@@ -158,6 +159,8 @@ def _build_raw_spline_tabmat_plan(gms, *, n: int) -> RawSplineTabmatPlan | None:
 
 def _dense_float64(values):
     """Return a solver-compatible dense Tabmat block."""
+    import tabmat  # type: ignore[import-untyped]
+
     array = np.asarray(values, dtype=np.float64)
     if array.ndim == 1:
         array = array[:, None]
@@ -174,6 +177,8 @@ def _tabmat_vector(values):
 
 def _native_categorical_matrix(codes, n_levels: int):
     """Return a native Tabmat block matching SuperGLM's base-sentinel encoding."""
+    import tabmat  # type: ignore[import-untyped]
+
     remapped = np.asarray(codes, dtype=np.int32).copy()
     base_mask = remapped == n_levels
     remapped[~base_mask] += 1
@@ -241,6 +246,8 @@ def _is_retained_tabmat_vector_candidate(gms, *, n: int) -> bool:
 
 def _build_tabmat_split(gms):
     """Build a tabmat SplitMatrix from non-discrete group matrices."""
+    import tabmat  # type: ignore[import-untyped]
+
     from ..group_matrix import (
         CategoricalGroupMatrix,
         DenseGroupMatrix,

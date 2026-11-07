@@ -72,6 +72,7 @@ from superglm.distributional.posterior import (
     PosteriorDraws,
     Quantity,
     _resolved_posterior_covariance,
+    link_standard_errors,
     posterior_bounds,
     posterior_draws,
     posterior_predictive,
@@ -999,19 +1000,38 @@ class SuperLSS:
         X: FrameLike | EagerFrame,
         *,
         offsets: Mapping[str, NDArray] | None = None,
-    ) -> pd.DataFrame:
+        se_fit: bool = False,
+        covariance: CovarianceKind = "fixed",
+    ) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
         """Return each parameter's linear predictor as a DataFrame.
 
         Columns follow ``parameter_names_`` and include any supplied offsets.
         Values are on the link scale, before applying the inverse link. For
         example, Tweedie's ``"mean"`` column contains the log of its mean.
+
+        ``se_fit=True`` returns ``(link, se)``, ``se`` being the standard error of
+        each column's linear predictor, ``sqrt(x' V x)`` for the row ``x`` of that
+        predictor's design and its block ``V`` of the coefficient covariance:
+        exact, with no draws, and an offset does not move it. It is formed a block
+        of rows at a time, one block's design and products per worker, so memory
+        grows with the number of workers (``n_jobs``, capped by ``max_memory``)
+        and not with the rows. ``covariance`` names ``V``, as in ``posterior_bounds``.
         """
-        values = self._require_fitted().predict_eta(X, offsets=offsets)
-        return pd.DataFrame(
-            values,
+        model = self._require_fitted()
+        # One adapter for both passes, so the columns and the coded levels are read from X once.
+        frame = as_eager_frame(X) if se_fit else X
+        values = model.predict_eta(frame, offsets=offsets)
+        index = row_index(X, len(values))
+        link = pd.DataFrame(values, columns=self.parameter_names_, index=index)
+        if not se_fit:
+            return link
+        errors = pd.DataFrame(
+            link_standard_errors(model, frame, covariance=covariance),
             columns=self.parameter_names_,
-            index=row_index(X, len(values)),
+            index=index,
         )
+        self._warn_if_hand_edited()
+        return link, errors
 
     def predict_parameters(
         self,
