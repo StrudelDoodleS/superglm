@@ -103,8 +103,8 @@ def warn_population_levels(named: Sequence[str]) -> None:
     """SuperGLM's prediction warning (``model.base``) for SuperLSS, once per call, on the caller's line."""
     if not named:
         return
+    from superglm._warn import warn_caller
     from superglm.features.factor_smooth import SZ_POPULATION_PREDICTION
-    from superglm.profiling._scalar import warn_caller
 
     warn_caller(SZ_POPULATION_PREDICTION + "; ".join(named) + ".")
 
@@ -360,9 +360,12 @@ def _label_column(spec: Any, column: NDArray) -> NDArray[np.intp]:
     if type(spec) is Categorical:
         resolved = spec._resolve_predict_labels(column)
         codes = spec._predict_codes(resolved)
-        lookup = np.full(len(spec._levels) + 1, -1, dtype=np.intp)
-        for position, level in enumerate(spec._non_base):
-            lookup[spec._levels.index(level)] = position
+        positions = {level: position for position, level in enumerate(spec._non_base)}
+        lookup = np.fromiter(
+            (positions.get(level, -1) for level in (*spec._levels, None)),
+            dtype=np.intp,
+            count=len(spec._levels) + 1,
+        )
         return lookup[np.where(codes >= 0, codes, len(spec._levels))]
     return spec._prediction_codes(column)
 

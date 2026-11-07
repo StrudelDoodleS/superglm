@@ -386,7 +386,8 @@ def _predict_eta_pooled(
         ]
         for p in predictors
     ]
-    task_bytes = DESIGN_BLOCK_ROWS * 8 * 16
+    # Each of these reads its term over the whole frame, in one task.
+    task_bytes = max(n, DESIGN_BLOCK_ROWS) * 8 * 16
     keys = [
         (i, k)
         for i, terms in enumerate(grouped)

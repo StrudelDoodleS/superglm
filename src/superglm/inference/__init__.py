@@ -63,7 +63,7 @@ _MOVED: dict[str, tuple[str, str | None]] = {
 
 def _moved_attribute(module: str, name: str, moved: dict[str, tuple[str, str | None]]):
     """Resolve a re-export this module no longer carries, warning what replaces it."""
-    from superglm.profiling._scalar import warn_caller
+    from superglm._warn import warn_caller
 
     if name not in moved:
         raise AttributeError(f"module {module!r} has no attribute {name!r}")
