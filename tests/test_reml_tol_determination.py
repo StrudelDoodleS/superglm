@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import copy
 import warnings
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -1408,8 +1409,6 @@ class TestDeadSearchNewtonDecrement:
 
 def _compound_test_never_accepts(monkeypatch) -> None:
     """Force the only stop left to be the Newton step, whatever path a BLAS takes."""
-    from dataclasses import replace
-
     from superglm.reml import convergence, direct, discrete
 
     real = convergence.evaluate_reml_candidate
@@ -1538,6 +1537,14 @@ class TestNewtonStepStop:
             return np.where(previously_frozen, 1.0, stop)
 
         monkeypatch.setattr(direct, "mask_frozen_stop_gradient", live)
+        real_resolved = direct.newton_step_resolved
+        held = []
+
+        def spy(*args, **kwargs):
+            held.append(real_resolved(*args, **kwargs))
+            return held[-1]
+
+        monkeypatch.setattr(direct, "newton_step_resolved", spy)
         rng = np.random.default_rng(11)
         n = 4000
         frame = pd.DataFrame({"signal": rng.uniform(size=n), "noise": rng.uniform(size=n)})
@@ -1549,6 +1556,7 @@ class TestNewtonStepStop:
         # Only the stop after a taken step leans on an older freeze; a search that
         # cannot verify its step read the freeze at this very candidate.
         assert frozen_seen
+        assert any(held)
         assert model._reml_profile.get("reml_newton_step_stop", {}).get("step_taken") is not True
 
     def test_a_slow_contraction_does_not_stop_on_the_taken_step(self, monkeypatch):
@@ -1557,15 +1565,47 @@ class TestNewtonStepStop:
 
         _compound_test_never_accepts(monkeypatch)
         real = direct.newton_step_left
-        monkeypatch.setattr(direct, "newton_step_left", lambda *a: max(real(*a), 9.9e-4))
+        reads = []
+
+        def slow(*args):
+            reads.append(None)
+            return max(real(*args), 9.9e-4)
+
+        monkeypatch.setattr(direct, "newton_step_left", slow)
         model = _fit_informative_fixture(discrete=False, max_reml_iter=14)
 
+        assert reads
         assert model._reml_profile.get("reml_newton_step_stop", {}).get("step_taken") is not True
+
+    def test_a_search_that_never_contracted_stays_a_failure(self, monkeypatch):
+        """A dead search also needs a taken step the small one contracted from."""
+        from superglm.reml import direct
+
+        _compound_test_never_accepts(monkeypatch)
+        monkeypatch.setattr(
+            direct, "classify_dead_feasible_exit", lambda *_, **__: "line_search_failed"
+        )
+        monkeypatch.setattr(direct, "newton_step_settled", lambda *_, **__: False)
+        real_resolved, real_objective = direct.newton_step_resolved, direct.reml_laml_objective
+        held = []
+
+        def spy(*args, **kwargs):
+            held.append(real_resolved(*args, **kwargs))
+            return held[-1]
+
+        def objective(*args, **kwargs):
+            evaluation = real_objective(*args, **kwargs)
+            return replace(evaluation, value=evaluation.value + 1.0) if any(held) else evaluation
+
+        monkeypatch.setattr(direct, "newton_step_resolved", spy)
+        monkeypatch.setattr(direct, "reml_laml_objective", objective)
+        model = _fit_informative_fixture(discrete=False)
+
+        assert any(held)
+        assert model.reml_diagnostics()["termination_reason"] == "line_search_failed"
 
     def test_a_step_no_trial_can_verify_stops_where_it_stands(self, monkeypatch):
         """At the noise floor every trial is rejected, which is no evidence against the point."""
-        from dataclasses import replace
-
         from superglm.reml import direct
 
         _compound_test_never_accepts(monkeypatch)

@@ -820,6 +820,8 @@ def optimize_direct_reml(
 
     step_bar = newton_step_stop_bar(_tol)
     held_newton_model: tuple[NDArray, NDArray, float] | None = None
+    held_cross: NDArray | None = None
+    last_accepted_step = 0.0
     for outer in range(max_reml_iter):
         n_iter = outer + 1
         rho_clipped = np.clip(rho, log_lo, log_hi)
@@ -1262,10 +1264,20 @@ def optimize_direct_reml(
             return cross
 
         def held_step_left() -> float:
-            """The Newton step this gradient leaves on the held Hessian."""
+            """The Newton step this gradient leaves on the held Hessian, infinite if unconfirmed.
+
+            The cross-term pass is evidence for an optional stop, so its failure
+            reads as not confirmed, and the search goes on.
+            """
+            nonlocal held_cross
             hessian, index, _ = held_newton_model
-            cross = stop_cross_terms() if table_route else None
-            hessian = hessian if cross is None else hessian + cross[np.ix_(index, index)]
+            if table_route:
+                try:
+                    held_cross = stop_cross_terms()
+                except ObservedModeNotConvergedError:
+                    return np.inf
+            if held_cross is not None:
+                hessian = hessian + held_cross[np.ix_(index, index)]
             return newton_step_left(hessian, grad[index])
 
         def record_step_stop(step_left: float, *, step_taken: bool) -> None:
@@ -1332,6 +1344,12 @@ def optimize_direct_reml(
             termination_reason = "newton_step_tolerance"
             break
         held_newton_model = None
+        if held_cross is not None:
+            # A refused stop steps on the Hessian with the cross terms it paid for.
+            _t0 = _time.perf_counter()
+            revalidated_hess = outer_hessian() + held_cross
+            held_cross = None
+            _t_hessian += _time.perf_counter() - _t0
 
         _t0 = _time.perf_counter()
         hess = revalidated_hess if revalidated_hess is not None else outer_hessian()
@@ -1857,6 +1875,7 @@ def optimize_direct_reml(
                         _accepted_observed_mode_residual_max,
                         trial_mode_residual,
                     )
+                last_accepted_step = float(np.max(np.abs(rho_trial - rho_clipped)))
                 rho = rho_trial
                 warm_beta = trial_result.beta.copy()
                 warm_intercept = float(trial_result.intercept)
@@ -1921,7 +1940,7 @@ def optimize_direct_reml(
                 # definite Hessian and a negligible step. Trials at this floor, refused
                 # or rejected, add none either way, so the point stands.
                 step_left = held_step_left()
-                if step_left <= step_bar:
+                if newton_step_settled(step_left, last_accepted_step, bar=step_bar):
                     record_step_stop(step_left, step_taken=False)
                     termination_reason = "newton_step_tolerance"
             if profile is not None:

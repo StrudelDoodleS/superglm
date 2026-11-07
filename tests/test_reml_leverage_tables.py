@@ -983,3 +983,74 @@ def test_a_dead_search_the_certificate_already_settles_makes_no_extra_pass(monke
     assert counts["passes"] == 0
     assert "reml_newton_step_stop" not in model._reml_profile
     assert model._reml_profile["reml_dead_line_search"]
+
+
+def test_a_pass_made_only_to_confirm_a_stop_cannot_abort_the_fit(monkeypatch):
+    """The pass is evidence for an optional stop, so its failure reads as not confirmed."""
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
+    compound = direct.evaluate_reml_candidate
+    monkeypatch.setattr(
+        direct,
+        "evaluate_reml_candidate",
+        lambda **kwargs: replace(compound(**kwargs), converged=False),
+    )
+    monkeypatch.setattr(
+        direct, "classify_dead_feasible_exit", lambda *_, **__: "line_search_failed"
+    )
+    real = direct.reml_w_correction
+
+    raised = []
+
+    def refuses_without_tables(*args, **kwargs):
+        if not kwargs.get("lookup_tables", True):
+            raised.append(None)
+            raise np.linalg.LinAlgError("no usable curvature")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(direct, "reml_w_correction", refuses_without_tables)
+    model = _poisson_model(1.0e3)
+
+    assert raised
+    assert "reml_newton_step_stop" not in model._reml_profile
+
+
+def test_a_refused_stop_steps_on_the_cross_terms_it_paid_for(monkeypatch):
+    """A refusal reuses its pass, so the Newton step that follows reads those terms."""
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
+    compound = direct.evaluate_reml_candidate
+    monkeypatch.setattr(
+        direct,
+        "evaluate_reml_candidate",
+        lambda **kwargs: replace(compound(**kwargs), converged=False),
+    )
+    monkeypatch.setattr(direct, "newton_step_settled", lambda *_, **__: False)
+    # A wide bar holds a step the line search then takes, so a confirmation runs.
+    monkeypatch.setattr(direct, "newton_step_stop_bar", lambda _: 0.5)
+    marker = 1e-6
+    real_correction = direct._usable_w_correction
+
+    def marked(fn, args, kwargs, distribution):
+        correction = real_correction(fn, args, kwargs, distribution)
+        if kwargs.get("lookup_tables", True):
+            return correction
+        size = correction[2].shape[0]
+        return (*correction[:2], marker * np.eye(size), *correction[3:])
+
+    monkeypatch.setattr(direct, "_usable_w_correction", marked)
+    real_outer, real_freeze = direct.reml_direct_hessian, direct.freeze_flat_directions
+    outer = []
+    extra = []
+
+    def hessian(*args, **kwargs):
+        outer.append(real_outer(*args, **kwargs))
+        return outer[-1]
+
+    def freeze(gradient, hess, *args, **kwargs):
+        extra.append(float(np.max(np.abs(hess - outer[-1]))))
+        return real_freeze(gradient, hess, *args, **kwargs)
+
+    monkeypatch.setattr(direct, "reml_direct_hessian", hessian)
+    monkeypatch.setattr(direct, "freeze_flat_directions", freeze)
+    _poisson_model(1.0e3)
+
+    assert any(value == pytest.approx(marker) for value in extra)

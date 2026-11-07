@@ -2285,12 +2285,12 @@ class TestREMLWarmStart:
         # two stops agree to bar / H_x2x2 (x2's own curvature, read from the
         # cold fit's freeze record; its coupling to x1 is left out).
         # Measured: 1.8e-7 exact, 9.0e-9 discrete, against a bound of 4.0e-6.
-        # A fit stopped on the Newton step sits within that step of the optimum.
+        # A fit stopped on the Newton step is within its bar of the optimum.
         stops = {"score_objective_tolerance", "newton_step_tolerance"}
         assert cold_info["termination_reason"] in stops
         assert warm_info["termination_reason"] in stops
         steps = sum(
-            info["profile"].get("reml_newton_step_stop", {}).get("step_left", 0.0)
+            info["profile"].get("reml_newton_step_stop", {}).get("bar", 0.0)
             for info in (cold_info, warm_info)
         )
         freeze = cold_info["profile"]["reml_freeze_decision"]

@@ -3885,8 +3885,8 @@ def test_reml_with_an_estimated_lambda_minimises_the_models_own_laml() -> None:
     resolution = 2.0 * reml_tol * (1.0 + abs(value)) / curvature + 2.0 * math.sqrt(
         2.0 * noise / curvature
     )
-    # A fit stopped on the Newton step sits within the step it last read.
-    resolution += model._reml_profile.get("reml_newton_step_stop", {}).get("step_left", 0.0)
+    # A fit stopped on the Newton step is within its bar of the optimum.
+    resolution += model._reml_profile.get("reml_newton_step_stop", {}).get("bar", 0.0)
     assert abs(rho_hat - rho_star) <= resolution, (rho_hat, rho_star, resolution)
 
 

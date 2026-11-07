@@ -743,10 +743,12 @@ class SuperGLM:
             active directions, or when Newton's step on those directions is at
             most ``min(1e-3, 1e6 * reml_tol)`` in log lambda on an unmodified
             positive definite Hessian
-            (``termination_reason="newton_step_tolerance"``). The exact engine
-            takes that step and confirms it on the next gradient, or stops where
-            it stands if no trial can verify it; the discrete engine needs two
-            such steps running at a settled working model. A direction whose
+            (``termination_reason="newton_step_tolerance"``), with the distance
+            left, the step over one minus its contraction rate, within that bar.
+            The exact engine takes the step and reads the rate from the next
+            gradient, or from the step before if no trial can verify this one;
+            the discrete engine reads it from two such steps running at a settled
+            working model. A direction whose
             gradient and relative row
             curvature are both negligible is frozen where it stands, as
             recorded in ``reml_diagnostics()`` under
