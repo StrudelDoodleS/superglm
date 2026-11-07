@@ -230,6 +230,7 @@ def test_none_and_true_of_the_raw_moment_flag_build_the_same_system_by_the_same_
         centered_system.TabmatCenteringState(),
         centered_system.TabmatCenteringState(raw_moment_eligible=True),
     ]
+    assert states[0].routes_as(states[1])  # the states the builds start from
     first, second = (
         centered_system.build_centered_system(
             dm=dm, W=W, z_off=z, penalty=np.ones((1, 1)), tabmat_state=state
@@ -239,7 +240,6 @@ def test_none_and_true_of_the_raw_moment_flag_build_the_same_system_by_the_same_
     assert len(tried) == 2 and tried[0] == tried[1]
     for name in ("data_gram", "rhs", "mean_x"):
         np.testing.assert_array_equal(getattr(first, name), getattr(second, name))
-    assert states[0].routes_as(states[1])
 
 
 @pytest.mark.parametrize("subclass", [False, True])
