@@ -314,11 +314,17 @@ class PassFactors:
     reads its design's factors without changing them.
     """
 
-    __slots__ = ("projections", "ranges")
+    __slots__ = ("joint_plans", "projections", "ranges")
 
     def __init__(self) -> None:
         self.projections: dict[tuple[int, int], tuple[NDArray, NDArray, NDArray]] = {}
         self.ranges: dict[int, tuple[NDArray, tuple[int, int]]] = {}
+        # Each set of designs' joint-table plan (``_joint_tables``), keyed by the identities of
+        # the designs and offsets, which it retains; None for designs that keep their own group
+        # routes. Beside it, one entry of compiled rows per family, response, likelihood plan,
+        # joint plan and links, each retained. A session's fits share these, so nothing here
+        # grows with its fits, and nothing invalidates them: none reads a coefficient or penalty.
+        self.joint_plans: dict[tuple, tuple[tuple, Any]] = {}
 
     def projection(self, B_unique: NDArray, R_inv: NDArray) -> NDArray:
         key = (id(B_unique), id(R_inv))

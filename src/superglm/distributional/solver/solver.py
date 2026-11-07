@@ -168,6 +168,21 @@ class _DenseObservedReuseSession:
             tuple[DistributionalFamily, FamilyLikelihoodPlan, _LikelihoodCache | None] | None
         ) = None
         self._pass_factors = PassFactors()
+        self._response: NDArray[np.float64] | None = None
+
+    def canonical_response(self, response: NDArray[np.float64]) -> NDArray[np.float64]:
+        """The session's one copy of a response equal to ``response``.
+
+        Each coefficient fit validates its own immutable copy. Compiled rows retained in
+        ``PassFactors`` key on the response's identity and hold it, so contexts share
+        one array and the session keeps one, not one per coefficient fit. Owner: this
+        session; a response that differs replaces it and takes its own entries.
+        """
+        held = self._response
+        if held is not None and np.array_equal(held, response):
+            return held
+        self._response = response
+        return response
 
     def pass_factors(self) -> PassFactors:
         """The weight-free design products every chunked assembly of this session shares.
@@ -405,7 +420,11 @@ def _validated_context(
     pass_factors = None
     if resolved_chunk_size is not None:
         dense_matrices = None
-        pass_factors = PassFactors() if _reuse_session is None else _reuse_session.pass_factors()
+        if _reuse_session is None:
+            pass_factors = PassFactors()
+        else:
+            pass_factors = _reuse_session.pass_factors()
+            response = _reuse_session.canonical_response(response)
         likelihood_cache = (
             build_likelihood_cache(family, root_likelihood_plan)
             if _reuse_session is None
@@ -474,6 +493,7 @@ def _evaluate_state_unmeasured(
                 coefficient_values,
                 chunk_size=context.chunk_size,
                 likelihood_cache=context.likelihood_cache,
+                pass_factors=context.pass_factors,
             )
             penalty_value = _half_penalty_quadratic(
                 context.penalty, coefficient_values, context.penalty_entries
@@ -581,7 +601,16 @@ def _fused_first_trial_eligible(context: _SolverContext) -> bool:
     contract = _likelihood_reuse_contract(context.family)
     return bool(
         context.chunk_size is not None
-        and _is_builtin_gaussian_gamma(context.family)
+        and (
+            _is_builtin_gaussian_gamma(context.family)
+            or chunking.compiled_rows_serve(
+                context.family,
+                context.layout,
+                context.response,
+                context.likelihood_plan,
+                context.pass_factors,
+            )
+        )
         and contract is not None
         and contract.deterministic_chunk_replay
         and type(context.likelihood_plan) is contract.plan_type
@@ -1086,6 +1115,7 @@ def _cap_predictor_step(
             context.layout,
             step,
             chunk_size=context.chunk_size,
+            pass_factors=context.pass_factors,
         )
     else:
         if state.eta is None:
@@ -1478,20 +1508,15 @@ def _reuse_observed_initial_result(
             or not np.array_equal(coefficients, record.coefficients)
         ):
             return None
-        support_predictions = chunking._SupportPredictions()
-        for rows in chunking.iter_row_chunks(len(context.response), context.chunk_size):
-            eta = chunking._predictor_values(
-                context.layout,
-                coefficients,
-                rows,
-                include_offsets=True,
-                support_predictions=support_predictions,
-            )
-            theta = chunking._theta_chunk(context.layout, eta)
-            if not np.array_equal(eta, source.eta[rows.start : rows.stop]) or not np.array_equal(
-                theta, source.theta[rows.start : rows.stop]
-            ):
-                return None
+        if not chunking.predictions_are(
+            context.layout,
+            coefficients,
+            source.eta,
+            source.theta,
+            chunk_size=context.chunk_size,
+            pass_factors=context.pass_factors,
+        ):
+            return None
         score_data = record.score_data
         data_curvature = record.data_curvature
         formation = record.formation
@@ -2191,6 +2216,7 @@ def _fit_dense_fixed_lambda_core(
                     context.layout,
                     state.coefficients,
                     chunk_size=context.chunk_size,
+                    pass_factors=context.pass_factors,
                 )
         result = DenseSolverResult(
             config=solver_config,

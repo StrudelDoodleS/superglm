@@ -31,7 +31,7 @@ from superglm._group_matrix._group_matrix_discretized import (
     SupportCompressedSSPGroupMatrix,
 )
 from superglm._group_matrix._group_matrix_range import group_range_matvec, group_row_range
-from superglm._parallel import parallel_config, pooled_for
+from superglm._parallel import parallel_config, pooled_for, pooled_row_blocks
 from superglm.distributional.family import (
     DistributionalFamily,
     ExpectedInformationFamily,
@@ -42,6 +42,13 @@ from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.solver._formation import FormationAccumulator
+from superglm.distributional.solver._joint_tables import (
+    MORSEL_ROWS,
+    STACK_BLOCK_ROWS,
+    JointTablePlan,
+    joint_table_plan,
+    stack_in_range,
+)
 from superglm.distributional.solver._likelihood_cache import _BUILTIN_FAMILIES
 from superglm.distributional.solver._ordinary_packing import predictor_panels
 from superglm.distributional.solver.assembly import (
@@ -760,6 +767,7 @@ def evaluate_chunked_log_likelihood(
     *,
     chunk_size: ChunkSize,
     likelihood_cache=None,
+    pass_factors=None,
 ) -> ChunkedLikelihoodSums:
     """Evaluate only the scalar weighted likelihood in bounded row chunks."""
     response, plan, coefficient_values = _validate_chunk_inputs(
@@ -769,6 +777,19 @@ def evaluate_chunked_log_likelihood(
         likelihood_plan,
         coefficients,
     )
+    if pass_factors is not None:
+        joint = _joint_plan(layout, pass_factors)
+        compiled = _compiled_rows(family, layout, y, likelihood_plan, joint, pass_factors)
+        if compiled is not None:
+            tables, constants = joint.predictor_tables(coefficient_values)
+            row_block = min(_COMPILED_ROW_BLOCK, layout_chunk_size(layout, chunk_size))
+            total = _compiled_likelihood(
+                compiled, joint, tables, constants, len(response), row_block
+            )
+            if total is not None:
+                return ChunkedLikelihoodSums(
+                    optimizing_log_likelihood=total, parameter_independent_carrier=0.0
+                )
     support_predictions = _SupportPredictions()
     take_lock = threading.Lock()
 
@@ -1106,6 +1127,134 @@ def contraction_block_rows(n_observations: int, row_bytes: int | None, chunk_row
     return min(n_observations, chunks_per_block * chunk_rows)
 
 
+def _joint_plan(layout: StackedLayout, factors) -> JointTablePlan | None:
+    """The layout's joint-table plan, formed once per set of designs a ``PassFactors`` serves."""
+    if factors is None:
+        return joint_table_plan(layout, AUTO_CONTRACTION_MEMORY_BYTES)
+    # What the plan reads of a layout beside its designs: the offsets and intercept positions.
+    held = tuple((state.design, state.offset) for state in layout.predictors)
+    key = tuple((id(design), id(offset)) for design, offset in held)
+    key += tuple(state.intercept_index for state in layout.predictors)
+    entry = factors.joint_plans.get(key)
+    if entry is None:
+        entry = (held, joint_table_plan(layout, AUTO_CONTRACTION_MEMORY_BYTES))
+        factors.joint_plans[key] = entry
+    return entry[1]
+
+
+# Rows one pool task evaluates. Fixed, so the partition and the summed likelihood's
+# rounding do not depend on the workers.
+_COMPILED_ROW_BLOCK = 2**15
+
+
+def _compiled_rows(family, layout, y, likelihood_plan, joint, factors):
+    """The family's compiled predictor rows for this fit, once per session; None without them.
+
+    Owner: the session's ``PassFactors``; lifetime: the session's fit. The rows read the
+    response, the weights and the links, each fixed for an entry by its key; no weight,
+    penalty or coefficient of a pass reaches them, so nothing invalidates an entry.
+    """
+    hook = getattr(family, "predictor_rows", None)
+    # A subclass may override the likelihood the hook's rows evaluate.
+    if hook is None or type(family) not in _BUILTIN_FAMILIES or joint is None or factors is None:
+        return None
+    links = tuple(state.link for state in layout.predictors)
+    # ``joint`` answers whether one power serves every row. Every context of a session
+    # holds the session's one response (``canonical_response``), so one entry serves them.
+    key = ("rows", id(family), id(y), id(likelihood_plan), id(joint), *map(id, links))
+    entry = factors.joint_plans.get(key)
+    if entry is None:
+        rows = hook(
+            np.asarray(y, dtype=np.float64), likelihood_plan, links, joint.shares_last_predictor
+        )
+        entry = factors.joint_plans[key] = ((family, y, likelihood_plan, joint, links), rows)
+    return entry[1]
+
+
+def compiled_rows_serve(family, layout, y, likelihood_plan, factors) -> bool:
+    """Whether this fit's passes take the family's compiled rows, row declines aside."""
+    if getattr(family, "predictor_rows", None) is None:
+        return False
+    joint = _joint_plan(layout, factors)
+    return _compiled_rows(family, layout, y, likelihood_plan, joint, factors) is not None
+
+
+def _compiled_likelihood(rows, joint, tables, constants, count, block_rows) -> float | None:
+    """Every row's likelihood through the compiled route, each task's total added in row order.
+
+    None where a row needs the family's natural route: its refusal or its rescaled arithmetic.
+    """
+
+    def task(first: int, last: int):
+        scratch = np.empty((len(joint.sides), last - first))
+        joint.fill_predictors(scratch, 0, last - first, first, tables, constants)
+        return rows.evaluate(first, 0, last - first, scratch, 0)
+
+    total = 0.0
+    for completed, value in pooled_row_blocks(task, count, block_rows):
+        if not completed:
+            return None
+        total += value
+    return total
+
+
+def _compiled_geometry(rows, joint, joint_tables, tables, constants) -> float | None:
+    """Every row through the compiled route into the tables; the rows' likelihood, or None.
+
+    None where a row needs the natural route, and shards not yet started are skipped. One
+    task per shard, its stack held to a block of rows, so memory and the bits depend on
+    the shards alone.
+    """
+    if joint.one_table_set:
+        return _compiled_one_table_set(rows, joint, joint_tables, tables, constants)
+    n_rows = joint.index.shape[1]
+    size = joint.shard_rows
+    declined = [False]
+
+    def task(shard: int) -> float:
+        begin, end = shard * size, min((shard + 1) * size, n_rows)
+        stack = np.empty((joint.stack_rows, min(STACK_BLOCK_ROWS, end - begin)))
+        total = 0.0
+        for start in range(begin, end, STACK_BLOCK_ROWS):
+            if declined[0]:
+                break
+            count = min(STACK_BLOCK_ROWS, end - start)
+            joint.fill_predictors(stack, 0, count, start, tables, constants)
+            completed, value = rows.evaluate(start, 0, count, stack, 2)
+            if not completed or not joint_tables.add_block(
+                shard, stack, 0, count, start, joint.n_inputs
+            ):
+                declined[0] = True
+                break
+            total += value
+        return total
+
+    totals = pooled_for(task, list(range(joint.n_shards)), 8 * joint.stack_rows * STACK_BLOCK_ROWS)
+    return None if declined[0] else sum(totals)
+
+
+def _compiled_one_table_set(rows, joint, joint_tables, tables, constants) -> float | None:
+    """:func:`_compiled_geometry` where the tables leave one set: morsels, then a task per table."""
+    n_rows = joint.index.shape[1]
+    stack = np.empty((joint.stack_rows, min(joint.block_rows, n_rows)))
+    total = 0.0
+    for start in range(0, n_rows, joint.block_rows):
+        count = min(joint.block_rows, n_rows - start)
+
+        def morsel(first: int, last: int, start: int = start) -> float | None:
+            joint.fill_predictors(stack, first, last, start, tables, constants)
+            completed, value = rows.evaluate(start, first, last, stack, 2)
+            ready = completed and joint_tables.prepare_rows(stack, first, last, joint.n_inputs)
+            return value if ready else None
+
+        values = pooled_row_blocks(morsel, count, MORSEL_ROWS)
+        if None in values:
+            return None
+        total += sum(values)
+        joint_tables.add_by_table(stack, 0, count, start)
+    return total
+
+
 def assemble_chunked_geometry(
     family: DistributionalFamily,
     layout: StackedLayout,
@@ -1119,6 +1268,7 @@ def assemble_chunked_geometry(
     likelihood_cache=None,
     pass_factors=None,
     _likelihood_sums: list[float] | None = None,
+    _compiled: bool = True,
 ) -> DenseJointGeometry:
     """Stream likelihood chunks into one coefficient-space geometry.
 
@@ -1133,11 +1283,18 @@ def assemble_chunked_geometry(
     n_observations = layout.predictors[0].design.n
     k_parameters = len(layout.predictors)
     chunk_rows = layout_chunk_size(layout, chunk_size)
-    row_bytes = contraction_row_bytes(layout)
+    # Joint tables keep no design rows and contract once per assembly, so a
+    # block's rows hold only its channels and a block may run to what the shards'
+    # tables leave of the allowance.
+    joint = _joint_plan(layout, pass_factors)
+    row_bytes = contraction_row_bytes(layout) if joint is None else 8 * joint.stack_rows
     block_rows = contraction_block_rows(n_observations, row_bytes, chunk_rows)
+    if joint is not None:
+        left = (AUTO_CONTRACTION_MEMORY_BYTES - joint.shard_bytes) // (row_bytes * chunk_rows)
+        block_rows = min(block_rows, max(1, left) * chunk_rows)
     # A block of one chunk out of several contracts that chunk's rows as it
     # arrives, so nothing is buffered.
-    per_chunk = block_rows <= chunk_rows < n_observations
+    per_chunk = joint is None and block_rows <= chunk_rows < n_observations
     # A block of many rows forms each group pair's own product, as the unchunked
     # assembly does; panels, like tables, serve a pass of many short blocks.
     panels = (None,) * k_parameters
@@ -1146,11 +1303,11 @@ def assemble_chunked_geometry(
         row_bytes = contraction_row_bytes(layout, panels)
     packed = any(panel is not None for panel in panels)
     table_budget = AUTO_CONTRACTION_MEMORY_BYTES - (row_bytes or 0) * block_rows
-    tables = PassTables(table_budget) if block_rows < n_observations and table_budget > 0 else None
-    buffered = 0 if per_chunk else block_rows
-    score = np.empty((buffered, k_parameters), dtype=np.float64)
-    # Channel-major, so each contracted channel is one contiguous row vector.
-    curvature = np.empty((k_parameters * (k_parameters + 1) // 2, buffered), dtype=np.float64)
+    tables = (
+        PassTables(table_budget)
+        if joint is None and block_rows < n_observations and table_budget > 0
+        else None
+    )
     accumulator = GroupedGeometryAccumulator(
         layout,
         penalty=penalty,
@@ -1158,6 +1315,7 @@ def assemble_chunked_geometry(
         tables=tables,
         panels=panels,
         factors=pass_factors,
+        joint=joint,
     )
     # The stream evaluates rows in ranges and builds no chunk designs; each
     # block reads its rows from the layout's own designs.
@@ -1165,6 +1323,49 @@ def assemble_chunked_geometry(
     # Rows and channel peak the pass tables have summed; a table entry sums at
     # most that many rows of that size.
     summed = [0, 0.0]
+    # Rows the joint tables took, for the certificate's statistics.
+    joint_rows = [0]
+
+    def published() -> DenseJointGeometry:
+        if joint is not None:
+            accumulator.joint_tables.merge()
+        if joint_rows[0]:
+            formation.add_joint_rows(joint_rows[0], joint.n_shards, accumulator.joint_tables)
+        return with_formation(accumulator.finish(), formation.finish())
+
+    compiled = (
+        _compiled_rows(family, layout, y, likelihood_plan, joint, pass_factors)
+        if _compiled and curvature_source == "observed"
+        else None
+    )
+    if compiled is not None:
+        tables_, constants = joint.predictor_tables(np.asarray(coefficients, dtype=np.float64))
+        total = _compiled_geometry(compiled, joint, accumulator.joint_tables, tables_, constants)
+        if total is None:
+            accumulator.joint_tables.release()
+            return assemble_chunked_geometry(
+                family, layout, y, likelihood_plan, coefficients, penalty=penalty,
+                chunk_size=chunk_size, curvature_source=curvature_source,
+                likelihood_cache=likelihood_cache, pass_factors=pass_factors,
+                _likelihood_sums=_likelihood_sums, _compiled=False,
+            )  # fmt: skip
+        accumulator.note_joint_rows()
+        joint_rows[0] = n_observations
+        if _likelihood_sums is not None:
+            _likelihood_sums[0] += total
+        return published()
+
+    buffered = 0 if per_chunk else block_rows
+    n_channels = k_parameters * (k_parameters + 1) // 2
+    # Channel-major, so each contracted channel is one contiguous row vector. A joint
+    # block keeps its score channels after them, for one array to read.
+    stack = np.empty((n_channels if joint is None else joint.stack_rows, buffered))
+    curvature = stack[:n_channels]
+    score = (
+        np.empty((buffered, k_parameters), dtype=np.float64)
+        if joint is None
+        else stack[n_channels : joint.n_inputs]
+    )
 
     def keep_tables_in_range(rows: int, peak: float) -> None:
         peak = max(summed[1], peak)
@@ -1211,8 +1412,14 @@ def assemble_chunked_geometry(
     def contract(start: int, stop: int) -> None:
         filled = stop - start
         step = filled
+        if joint is not None and stack_in_range(stack[: joint.n_inputs], filled):
+            accumulator.add_joint_rows(start, stop, stack)
+            joint_rows[0] += filled
+            return
+        # Channels at the edge of float64's range keep the group routes, in their score layout.
+        block_score = score[:filled] if joint is None else score[:, :filled].T
         if tables is not None or filled > chunk_rows:
-            peak = _channel_peak(score[:filled], curvature[:, :filled])
+            peak = _channel_peak(block_score, curvature[:, :filled])
             if tables is not None:
                 keep_tables_in_range(filled, peak)
             if filled > chunk_rows and filled * peak > _BLOCK_SUM_LIMIT:
@@ -1224,7 +1431,7 @@ def assemble_chunked_geometry(
             # One add per contracted piece, over its contiguous channel rows.
             accumulator.add_block(
                 plans,
-                score[rows],
+                block_score[rows],
                 curvature[:, rows],
                 beside=formation_task(piece, end, curvature[:, rows].T),
             )
@@ -1264,7 +1471,10 @@ def assemble_chunked_geometry(
                     block_start = position
                 rows = slice(position - block_start, position + length - block_start)
                 position += length
-                score[rows] = chunk.score_eta
+                if joint is None:
+                    score[rows] = chunk.score_eta
+                else:
+                    score[:, rows] = chunk.score_eta.T
                 curvature[:, rows] = chunk.curvature_packed.T
             if _likelihood_sums is not None:
                 _likelihood_sums[0] += float(
@@ -1282,7 +1492,22 @@ def assemble_chunked_geometry(
         raise RuntimeError("likelihood chunks must cover every row exactly once")
     if block_start < position:
         contract(block_start, position)
-    return with_formation(accumulator.finish(), formation.finish())
+    return published()
+
+
+def _joint_predictor_rows(joint, values, row_block, read, *, offsets: bool) -> list:
+    """``[read(first, last, predictors), ...]`` per pool block: ``predictors`` is ``(K, rows)``."""
+    tables, constants = joint.predictor_tables(values)
+    predictors = len(joint.sides)
+
+    def task(first: int, last: int):
+        scratch = np.empty((predictors, last - first))
+        joint.fill_predictors(scratch, 0, last - first, first, tables, constants, offsets=offsets)
+        if not joint.predictors_finite(scratch, last - first):
+            raise ValueError("chunk predictor evaluation produced non-finite values")
+        return read(first, last, scratch)
+
+    return pooled_row_blocks(task, joint.index.shape[1], row_block)
 
 
 def maximum_chunked_predictor_change(
@@ -1290,13 +1515,31 @@ def maximum_chunked_predictor_change(
     coefficient_step: NDArray,
     *,
     chunk_size: ChunkSize,
+    pass_factors=None,
 ) -> float:
     """Return the largest absolute linear-predictor change without full rows."""
     step = _validated_coefficients(layout, coefficient_step)
+    n_observations = layout.predictors[0].design.n
+    chunk_rows = layout_chunk_size(layout, chunk_size)
+    joint = None if pass_factors is None else _joint_plan(layout, pass_factors)
+    if joint is not None:
+
+        def largest(_first, _last, change) -> float:
+            return float(np.max(np.abs(change), initial=0.0))
+
+        maximum = float(
+            np.max(
+                _joint_predictor_rows(
+                    joint, step, min(_COMPILED_ROW_BLOCK, chunk_rows), largest, offsets=False
+                )
+            )
+        )
+        if not math.isfinite(maximum):
+            raise ValueError("chunk predictor evaluation produced non-finite values")
+        return maximum
     maximum = 0.0
     support_predictions = _SupportPredictions()
-    n_observations = layout.predictors[0].design.n
-    for rows in iter_row_chunks(n_observations, layout_chunk_size(layout, chunk_size)):
+    for rows in iter_row_chunks(n_observations, chunk_rows):
         change = _predictor_values(
             layout,
             step,
@@ -1313,6 +1556,7 @@ def materialize_terminal_predictions(
     coefficients: NDArray,
     *,
     chunk_size: ChunkSize,
+    pass_factors=None,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Build required terminal ``n x K`` predictions in one final bounded pass."""
     coefficient_values = _validated_coefficients(layout, coefficients)
@@ -1320,21 +1564,75 @@ def materialize_terminal_predictions(
     k_parameters = len(layout.predictors)
     eta = np.empty((n_observations, k_parameters), dtype=np.float64)
     theta = np.empty_like(eta)
+    chunk_rows = layout_chunk_size(layout, chunk_size)
+    joint = None if pass_factors is None else _joint_plan(layout, pass_factors)
+    if joint is not None:
+
+        def place(first: int, last: int, predictors: NDArray) -> None:
+            eta[first:last] = predictors.T
+            theta[first:last] = _theta_chunk(layout, eta[first:last])
+
+        _joint_predictor_rows(
+            joint, coefficient_values, min(_COMPILED_ROW_BLOCK, chunk_rows), place, offsets=True
+        )
+    else:
+        support_predictions = _SupportPredictions()
+        for rows in iter_row_chunks(n_observations, chunk_rows):
+            eta_chunk = _predictor_values(
+                layout,
+                coefficient_values,
+                rows,
+                include_offsets=True,
+                support_predictions=support_predictions,
+            )
+            theta_chunk = _theta_chunk(layout, eta_chunk)
+            eta[rows.start : rows.stop] = eta_chunk
+            theta[rows.start : rows.stop] = theta_chunk
+    eta.setflags(write=False)
+    theta.setflags(write=False)
+    return eta, theta
+
+
+def predictions_are(
+    layout: StackedLayout,
+    coefficients: NDArray,
+    eta: NDArray,
+    theta: NDArray,
+    *,
+    chunk_size: ChunkSize,
+    pass_factors=None,
+) -> bool:
+    """Whether the coefficients' predictors and parameters are, bit for bit, ``eta`` and ``theta``."""
+    n_observations = layout.predictors[0].design.n
+    chunk_rows = layout_chunk_size(layout, chunk_size)
+    joint = None if pass_factors is None else _joint_plan(layout, pass_factors)
+    if joint is not None:
+
+        def same(first: int, last: int, predictors: NDArray) -> bool:
+            rows = predictors.T
+            return np.array_equal(rows, eta[first:last]) and np.array_equal(
+                _theta_chunk(layout, rows), theta[first:last]
+            )
+
+        return all(
+            _joint_predictor_rows(
+                joint, coefficients, min(_COMPILED_ROW_BLOCK, chunk_rows), same, offsets=True
+            )
+        )
     support_predictions = _SupportPredictions()
-    for rows in iter_row_chunks(n_observations, layout_chunk_size(layout, chunk_size)):
-        eta_chunk = _predictor_values(
+    for rows in iter_row_chunks(n_observations, chunk_rows):
+        values = _predictor_values(
             layout,
-            coefficient_values,
+            coefficients,
             rows,
             include_offsets=True,
             support_predictions=support_predictions,
         )
-        theta_chunk = _theta_chunk(layout, eta_chunk)
-        eta[rows.start : rows.stop] = eta_chunk
-        theta[rows.start : rows.stop] = theta_chunk
-    eta.setflags(write=False)
-    theta.setflags(write=False)
-    return eta, theta
+        if not np.array_equal(values, eta[rows.start : rows.stop]) or not np.array_equal(
+            _theta_chunk(layout, values), theta[rows.start : rows.stop]
+        ):
+            return False
+    return True
 
 
 __all__ = [

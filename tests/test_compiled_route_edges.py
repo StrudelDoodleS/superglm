@@ -27,6 +27,8 @@ REFERENCES = {
     "generalized_gamma_mean": 30,
     "tweedie_prior": 12,
     "tweedie_frequency": 12,
+    "tweedie_predictor_prior": 12,
+    "tweedie_predictor_frequency": 12,
 }
 MUTATED = 1.0 + 1e-7
 
@@ -113,6 +115,91 @@ def test_a_pareto_row_next_to_a_negative_shape_endpoint_keeps_its_scale_entries(
     assert row(1e-9).score[0, 0] == pytest.approx(-1.0 / scale, rel=1e-6)
 
 
+@pytest.mark.parametrize(
+    ("eta_mean", "eta_phi", "compiled"),
+    [
+        (100.0, -100.0, True),
+        (-100.0, 100.0, True),
+        (float(np.nextafter(100.0, 101.0)), 0.0, False),
+        (0.0, float(np.nextafter(-100.0, -101.0)), False),
+    ],
+)
+def test_a_tweedie_zero_row_past_its_window_is_the_natural_routes(eta_mean, eta_phi, compiled):
+    assert _served("tweedie_predictor_prior", 0.0, eta_mean, eta_phi, 0.0, 1.0) is compiled
+
+
+@pytest.mark.parametrize("order", (0, 2))
+@pytest.mark.parametrize(
+    ("eta_mean", "eta_phi"),
+    [
+        (0.5, -746.0),
+        (0.5, -740.0),
+        (0.5, 710.0),
+        (0.5, float("inf")),
+        (0.5, float("-inf")),
+        (0.5, float("nan")),
+        (-746.0, 0.5),
+        (-740.0, 0.5),
+        (710.0, 0.5),
+        (float("inf"), 0.5),
+        (float("-inf"), 0.5),
+        (float("nan"), 0.5),
+    ],
+)
+def test_a_tweedie_positive_row_past_the_normal_range_is_the_natural_routes(
+    eta_mean, eta_phi, order
+):
+    """Declined at both orders, where a value would hide the natural route's refusal and a
+    derivative would divide by a dispersion of zero. Mutation check: drop the test from the kernel."""
+    y, weight = np.array([2.0]), np.ones(1)
+    rows = edges.tweedie_kernel.tweedie_predictor_rows(y, weight, "prior", edges._POWER_LINK, False)
+    stack = np.empty((9, 1))
+    stack[:3, 0] = eta_mean, eta_phi, 0.0
+    assert rows.evaluate(0, 0, 1, stack, order) == (False, 0.0)
+
+
+@pytest.mark.parametrize(
+    "eta_power", [37.0, -38.0, 40.0, -40.0, float("inf"), float("-inf"), float("nan")]
+)
+@pytest.mark.parametrize("y", [0.0, 2.0], ids=("zero", "positive"))
+def test_a_tweedie_row_with_its_power_on_a_wall_is_the_natural_routes_to_refuse(y, eta_power):
+    """The family's power is strictly inside its walls: the natural route refuses this row, so a
+    trial reaching it is rejected, and a compiled number there would accept it."""
+    route = BY_NAME["tweedie_predictor_prior"]
+    columns = tuple(np.array([v]) for v in (y, 0.5, 0.2, eta_power, 1.0))
+    with np.errstate(all="ignore"):
+        assert not _served("tweedie_predictor_prior", y, 0.5, 0.2, eta_power, 1.0)
+        assert not edges.array_rows(route, columns, 3, 6)[1][0]
+
+
+def test_a_tweedie_row_whose_weighted_value_overflows_is_the_natural_routes_to_refuse():
+    """The series finishes at about ``-1e304``, and a frequency of ``2^53`` takes it past float64."""
+    row = (5e-324, 0.0, -700.0, -10.0)
+
+    def value_trial(weight):
+        y, weights = np.array([row[0]]), np.array([weight])
+        rows = edges.tweedie_kernel.tweedie_predictor_rows(
+            y, weights, "frequency", edges._POWER_LINK, False
+        )
+        stack = np.empty((9, 1))
+        stack[:3, 0] = row[1:]
+        return rows.evaluate(0, 0, 1, stack, 0)
+
+    finished, value = value_trial(1.0)
+    assert finished and -1e305 < value < -1e303
+    assert value_trial(2.0**53) == (False, 0.0)
+    with pytest.raises(edges.tweedie_kernel.TweedieNumericalRefusal):
+        edges.tweedie_kernel.evaluate_tweedie_rows(
+            np.array([row[0]]),
+            np.ones(1),
+            np.exp(np.array([row[2]])),
+            edges._POWER_LINK.inverse(np.array([row[3]])),
+            np.array([2.0**53]),
+            "frequency",
+            derivative_order=0,
+        )
+
+
 def test_positive_shape_rows_are_compiled_up_to_their_finite_limits():
     """The limit takes no row of the family's domain: a shape of zero or one, ties and far tails."""
     for shape in (0.0, 1e-50, 1e-8, 0.5, 1.0):
@@ -195,6 +282,19 @@ def _off_negative_binomial(original, edge_of):
     return compiled_rows
 
 
+def _off_predictor_rows(original, edge_of):
+    """The row kernel takes its rows through ``stack``, so the off entries are made there."""
+
+    def rows(y, weight, mode, row_start, first, last, stack, *args):
+        inside = edge_of(y[row_start + first], *stack[:3, first], weight[row_start + first])
+        result = original(y, weight, mode, row_start, first, last, stack, *args)
+        if inside:
+            stack[:6, first:last] *= MUTATED
+        return result
+
+    return rows
+
+
 def _column(index, test):
     return lambda columns: test(columns[index])
 
@@ -262,6 +362,24 @@ _EDGES = {
             "evaluate_tweedie_rows",
             _off_evaluation,
             lambda y, m, d, p, *_, **__: p <= 1.05 + 1e-9,
+        ),
+    ),
+    "tweedie_predictor_prior": (
+        _column(3, lambda eta_power: eta_power <= -10.0),
+        (
+            edges.tweedie_kernel._compiled,
+            "_tweedie_predictor_rows",
+            _off_predictor_rows,
+            lambda y, eta_mean, eta_phi, eta_power, w: eta_power <= -10.0,
+        ),
+    ),
+    "tweedie_predictor_frequency": (
+        _column(1, lambda eta_mean: np.abs(eta_mean) >= 50.0),
+        (
+            edges.tweedie_kernel._compiled,
+            "_tweedie_predictor_rows",
+            _off_predictor_rows,
+            lambda y, eta_mean, eta_phi, eta_power, w: abs(eta_mean) >= 50.0,
         ),
     ),
 }

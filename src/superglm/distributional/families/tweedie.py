@@ -36,12 +36,14 @@ from superglm.distributional.family import (
     _validated_derivative_order,
     _validated_parameter_matrix,
 )
+from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.kernels.tweedie import (
     TweedieNumericalRefusal,
     evaluate_tweedie_rows,
     initialize_tweedie,
     tweedie_hessian_direction,
     tweedie_natural_fourth,
+    tweedie_predictor_rows,
 )
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
@@ -141,13 +143,16 @@ class BoundedPowerLink:
         return (self.upper - self.lower) / ((values - self.lower) * (self.upper - values))
 
     def deriv_inverse(self, eta: NDArray) -> NDArray[np.float64]:
-        probability = expit(np.asarray(eta, dtype=np.float64))
-        return (self.upper - self.lower) * probability * (1.0 - probability)
+        """``span p q`` with ``q = 1 - p`` formed as ``expit(-eta)``, exact near the upper wall."""
+        values = np.asarray(eta, dtype=np.float64)
+        return (self.upper - self.lower) * expit(values) * expit(-values)
 
     def deriv2_inverse(self, eta: NDArray) -> NDArray[np.float64]:
-        probability = expit(np.asarray(eta, dtype=np.float64))
-        first = (self.upper - self.lower) * probability * (1.0 - probability)
-        return first * (1.0 - 2.0 * probability)
+        """``span p q (q - p)`` with ``q = expit(-eta)``."""
+        values = np.asarray(eta, dtype=np.float64)
+        probability = expit(values)
+        complement = expit(-values)
+        return (self.upper - self.lower) * probability * complement * (complement - probability)
 
     def deriv3_inverse(self, eta: NDArray) -> NDArray[np.float64]:
         """``span p q (1 - 6 p q)`` with ``q = 1 - p`` formed as ``expit(-eta)``."""
@@ -727,13 +732,39 @@ class TweedieLSS(TweediePredictors):
                 derivative_order=order,
             )
         except TweedieNumericalRefusal as exc:
-            raise ValueError(f"Tweedie numerical evaluation refused: {exc}") from exc
+            raise _NumericalEvaluationError(f"Tweedie numerical evaluation refused: {exc}") from exc
         return NaturalLikelihoodEvaluation(
             optimizing_log_likelihood=evaluated.log_likelihood,
             parameter_independent_carrier=np.zeros(len(response), dtype=np.float64),
             score=evaluated.score,
             hessian_packed=evaluated.hessian_packed,
             valid=evaluated.valid,
+        )
+
+    def predictor_rows(
+        self, y: NDArray, plan: FamilyLikelihoodPlan, links: Sequence[Link], shared_last: bool
+    ):
+        """Compiled rows in predictor coordinates, or None where these links or rows need
+        ``evaluate_natural``. ``shared_last`` says one power serves every row.
+
+        The rows decline a power at the link's walls and the family refuses one at its
+        own, so a link whose walls lie outside the family's keeps the natural route.
+        """
+        if (
+            len(links) != 3
+            or type(links[0]) is not LogLink
+            or type(links[1]) is not LogLink
+            or type(links[2]) is not BoundedPowerLink
+            or not (self.power_lower <= links[2].lower and links[2].upper <= self.power_upper)
+        ):
+            return None
+        tweedie_plan = _validated_plan(plan, n_observations=len(y))
+        return tweedie_predictor_rows(
+            y,
+            tweedie_plan.weights.values,
+            tweedie_plan.weights.provenance.contract.semantics,
+            links[2],
+            shared_last,
         )
 
     def predictor_curvature_directional_derivative(
@@ -950,4 +981,5 @@ _register_likelihood_reuse_contract(
     TweedieLikelihoodPlan,
     prepared_array_fields=(),
     link_types=(BoundedPowerLink,),
+    deterministic_chunk_replay=True,
 )

@@ -745,10 +745,9 @@ def test_public_tweedie_configured_frequency_contract_matches_literal_replicatio
     parameter_envelope = _roundoff_envelope(frequency_parameters, replicated_parameters)
     frequency_lambda = frequency.smoothing_parameters_["mean:x_mean#wiggle"]
     replicated_lambda = replicated.smoothing_parameters_["mean:x_mean#wiggle"]
-    lambda_envelope = _roundoff_envelope(
-        np.array([frequency_lambda]),
-        np.array([replicated_lambda]),
-    )
+    # A smoothing parameter comes out of an outer search whose steps divide nearly cancelling
+    # traces, so it carries more rounding than the coefficients and predictions compared above.
+    lambda_envelope = 2**10 * np.finfo(np.float64).eps * max(frequency_lambda, replicated_lambda)
 
     assert frequency.weight_semantics == "frequency"
     assert replicated.weight_semantics == "prior"
