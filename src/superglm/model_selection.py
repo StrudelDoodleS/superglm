@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import hashlib
 import logging
@@ -640,20 +641,27 @@ def _take_offset(offset, rows: NDArray):
 def _held_out_predictions(folds, est, frame, rows, offset, sample_weight) -> NDArray[np.float64]:
     """A fold's out-of-fold predictions, where a row its fit drops cannot fail the fold.
 
-    Such a row can hold a label nothing was fitted on. It reads NaN when it cannot be priced; a
-    row the fit keeps raises as ``predict`` does.
+    Such a row can hold a label nothing was fitted on. It reads NaN when it alone cannot be
+    priced, and the other rows it shares a fold with are unaffected; a row the fit keeps raises
+    as ``predict`` does.
     """
     try:
         return folds.predict(est, frame.take_rows(rows), _take_offset(offset, rows))
     except ValueError:
-        kept = None if sample_weight is None else np.flatnonzero(np.asarray(sample_weight) > 0.0)
-        if not folds.drops_zero_weight_rows or kept is None or kept.size == len(sample_weight):
+        kept = None if sample_weight is None else np.asarray(sample_weight) > 0.0
+        if not folds.drops_zero_weight_rows or kept is None or kept.all():
             raise
     predictions = np.full(len(rows), np.nan)
-    kept = rows[kept]
-    predictions[np.asarray(sample_weight) > 0.0] = folds.predict(
-        est, frame.take_rows(kept), _take_offset(offset, kept)
+    positions = rows[kept]
+    predictions[kept] = folds.predict(
+        est, frame.take_rows(positions), _take_offset(offset, positions)
     )
+    for local in np.flatnonzero(~kept):
+        row = rows[local : local + 1]
+        with contextlib.suppress(ValueError):
+            predictions[local] = folds.predict(
+                est, frame.take_rows(row), _take_offset(offset, row)
+            )[0]
     return predictions
 
 

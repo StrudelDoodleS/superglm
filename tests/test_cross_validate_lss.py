@@ -256,6 +256,33 @@ def test_a_label_on_a_dropped_row_cannot_fail_its_fold(label):
         np.testing.assert_array_equal(result.oof_predictions[kept], fold.predict(frame.iloc[kept]))
 
 
+def test_a_dropped_row_that_cannot_be_priced_leaves_a_priceable_one_in_its_fold_alone():
+    # Mutation check: leaving every dropped row of a failing fold NaN fails this.
+    X, y = _rows()
+    weights = np.random.default_rng(6).uniform(0.5, 2.0, N)
+    padding = pd.DataFrame(
+        {"age": [40.0] * 8, "region": ["a", "zzz"] * 4, "unread": [0.0] * 8},
+    )
+    frame = pd.concat([X, padding], ignore_index=True)
+    result = _fixed_cv(
+        frame,
+        np.r_[y, np.ones(8)],
+        sample_weight=np.r_[weights, np.zeros(8)],
+        return_oof=True,
+        return_estimators=True,
+    )
+    known, unseen = np.arange(N, N + 8, 2), np.arange(N + 1, N + 8, 2)
+    assert np.isnan(result.oof_predictions[unseen]).all()
+    shared = 0
+    for fold, (_train, test) in zip(result.estimators, result.fold_indices, strict=True):
+        priced = np.intersect1d(test, known)
+        shared += priced.size > 0 and np.intersect1d(test, unseen).size > 0
+        np.testing.assert_array_equal(
+            result.oof_predictions[priced], fold.predict(frame.iloc[priced])
+        )
+    assert shared  # some fold holds both, or the fallback was not reached
+
+
 def test_offsets_by_parameter_are_sliced_for_fits_and_scores():
     rng = np.random.default_rng(3)
     X, _ = _rows()

@@ -9,6 +9,7 @@ import sys
 import threading
 import types
 import weakref
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -260,6 +261,25 @@ def test_a_gram_pass_that_declines_costs_no_flops_and_one_that_serves_costs_a_pa
     assert ledger.errors == []
     assert (row.count, row.repeated) == (3, 2)  # a decline still counts as a call
     assert row.flops == design.n * design.p * (design.p + 1)  # the one that served
+
+
+def test_a_gram_pass_whose_raw_moments_were_rejected_is_charged_the_pass_it_made(monkeypatch):
+    # Mutation check: pricing every ``None`` at zero fails this.
+    import superglm._group_matrix._group_matrix_centered as centered
+
+    monkeypatch.setattr(
+        centered,
+        "packed_centered_gram_rhs",
+        lambda *, dm, W, z_centered, state=None, rejected=None: None,
+    )
+    design, W, z = _Design(), _spd(5, 37), _spd(5, 38)
+    with work_ledger() as ledger:
+        centered.packed_centered_gram_rhs(
+            dm=design, W=W, z_centered=z, rejected=SimpleNamespace(source="factored")
+        )
+    (row,) = ledger.find("packed_centered_gram_rhs")
+    assert ledger.errors == []
+    assert row.flops == design.n * design.p * (design.p + 1)
 
 
 def test_every_declared_carrier_is_an_argument_of_its_entry_point():

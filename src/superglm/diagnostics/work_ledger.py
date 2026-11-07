@@ -200,7 +200,10 @@ def _moments_pass(first, args, kwargs, result):
 def _gram_pass(first, args, kwargs, result):
     design = kwargs.get("dm")
     channels = len(kwargs["weights"]) if "weights" in kwargs else 1
-    if design is None or result is None:  # a pass that declines makes no pass over the rows
+    # A rung that declines before any pass costs nothing. One whose raw moments a certificate
+    # rejected made the pass first, and ``rejected.source`` names the rung that made it.
+    made_a_pass = result is not None or getattr(kwargs.get("rejected"), "source", None) is not None
+    if design is None or not made_a_pass:
         return 0.0
     return float(design.n) * design.p * (design.p + 1) * channels
 

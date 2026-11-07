@@ -53,9 +53,10 @@ likelihood and Gram passes of a `SuperLSS` fit.
 
 - The flop figure for a pass over the rows counts it as a dense product, so it
   overstates a binned pass. Read it for ranking, and read the seconds for cost.
-  A Gram pass that declines (returns `None`, and the caller tries the next one)
-  has no flops, so on a route that tries a pass first and falls through, the
-  report shows each pass that served and none that declined.
+  A Gram pass that declines before making a pass (returns `None`, and the caller
+  tries the next one) has no flops, so on a route that tries a pass first and
+  falls through, the report shows each pass that served and none of those. A
+  rung whose raw moments a certificate rejected did make the pass, and is charged it.
 - Eigensolver and SVD flops are order-of-magnitude constants.
 - Seconds are summed over threads, so a share can pass 100%.
 - The ledger hashes every input and keeps one copy of the last input at each
