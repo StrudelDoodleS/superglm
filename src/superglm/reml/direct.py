@@ -453,6 +453,15 @@ def optimize_direct_reml(
     # Owned by this optimizer: only a rejected raw-centering route crosses fits.
     raw_moment_policy = TabmatCenteringState()
     fisher_data_reuse = _FisherDataReuse()
+    # Owned by this optimizer, dropped with it: the initial systems of fits that start where
+    # another ended (``_InitialDataReuse``).
+    initial_data_reuse = (
+        _InitialDataReuse()
+        if not use_observed_geometry and debug_recorder is None and trace_run is None
+        else None
+    )
+    # The observed geometry's centred systems, for the same owner and lifetime.
+    geometry_data_reuse = _InitialDataReuse() if use_observed_geometry else None
     # Once a Gamma/log solve leaves Fisher scoring for Newton
     # (``fit_irls_direct``), later solves start on Newton.
     newton_latch = [False]
@@ -603,6 +612,7 @@ def optimize_direct_reml(
             trace_purpose="reml_bootstrap",
             _compensate_centred_intercept=False,
             weight_semantics=weight_semantics,
+            _initial_data_reuse=initial_data_reuse,
             _raw_moment_policy=raw_moment_policy,
             _fisher_data_reuse=fisher_data_reuse,
             _newton_latch=newton_latch,
@@ -766,6 +776,7 @@ def optimize_direct_reml(
             trace_purpose="reml_candidate",
             _compensate_centred_intercept=False,
             weight_semantics=weight_semantics,
+            _initial_data_reuse=initial_data_reuse,
             _raw_moment_policy=raw_moment_policy,
             _fisher_data_reuse=fisher_data_reuse,
             _newton_latch=newton_latch,
@@ -899,6 +910,7 @@ def optimize_direct_reml(
                     result=pirls_result,
                     penalty=S_cand,
                     tabmat_state=observed_tabmat_state,
+                    _data_reuse=geometry_data_reuse,
                     derivative_order=w_correction_order,
                     groups=groups if use_structured else None,
                     lambdas=cand_lambdas if use_structured else None,
@@ -1456,12 +1468,6 @@ def optimize_direct_reml(
         # allows
         full_step_rejected = False
         inconsistent_decrease: float | None = None
-        # Rejected trials may share initial data, never their penalties.
-        _initial_data_reuse = (
-            _InitialDataReuse()
-            if not use_observed_geometry and debug_recorder is None and trace_run is None
-            else None
-        )
         for _ls in range(max_ls):
             rho_trial = np.clip(rho_clipped + step * delta, log_lo, log_hi)
             if np.all(np.abs(rho_trial - rho_clipped) <= 1e-12):
@@ -1521,7 +1527,7 @@ def optimize_direct_reml(
                     trace_purpose="reml_line_search",
                     _compensate_centred_intercept=False,
                     weight_semantics=weight_semantics,
-                    _initial_data_reuse=_initial_data_reuse,
+                    _initial_data_reuse=initial_data_reuse,
                     _raw_moment_policy=raw_moment_policy,
                     _fisher_data_reuse=fisher_data_reuse,
                     _newton_latch=newton_latch,
@@ -1568,6 +1574,7 @@ def optimize_direct_reml(
                         result=trial_result,
                         penalty=S_trial,
                         tabmat_state=observed_tabmat_state,
+                        _data_reuse=geometry_data_reuse,
                         # the identified part rebuilds the structured factor returned here
                         compute_inverse=bool(identified),
                         groups=groups if use_structured else None,
@@ -1832,7 +1839,6 @@ def optimize_direct_reml(
                 )
             step *= 0.5
 
-        _initial_data_reuse = None
         if not accepted:
             rho = rho_clipped
             _t_linesearch += _time.perf_counter() - _t0

@@ -353,7 +353,7 @@ def _final_centred_system(fit: _IRLSDirectFit) -> tuple[CenteredSystem, NDArray,
         offset_mean_final = fit._last_working_offset_mean
     else:
         z_off = fit.z - fit.offset
-        centered_final = fit.get_centered_system(W, z_off)
+        centered_final = fit.get_centered_system(W, z_off, retain=True)
         offset_mean_final = (
             None
             if fit._state_center is None or cache_out is None

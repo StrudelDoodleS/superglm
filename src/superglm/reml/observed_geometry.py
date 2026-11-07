@@ -88,9 +88,12 @@ from superglm.solvers._structured.state import (
     centred_data_operator,
 )
 from superglm.solvers.centered_system import (
+    CenteredSystem,
     TabmatCenteringState,
+    _InitialDataReuse,
     build_centered_system,
     grouped_augmented_factor,
+    serves_initial_data,
 )
 from superglm.solvers.hessian_factor import HessianFactor
 from superglm.solvers.mode_score import (
@@ -968,6 +971,40 @@ def schur_curvature_is_negative(eigenvalues: NDArray, certificate) -> bool:
     return bool(np.any(values < -certificate.curvature_floor(norm)))
 
 
+def _observed_centered_system(
+    dm: DesignMatrix,
+    weights: NDArray,
+    penalty: NDArray,
+    tabmat_state: TabmatCenteringState | None,
+    reuse: _InitialDataReuse | None,
+) -> CenteredSystem:
+    """The centred system at the observed weights, its data served by ``reuse`` when it holds them.
+
+    The data of the last build serve a build at bit-identical weights under an equal centring
+    state (``_SystemData``): an accepted trial's geometry and the next iteration's candidate
+    geometry at the same coefficients read the same system.
+    """
+    zero = np.zeros(dm.n, dtype=np.float64)
+    keep = reuse is not None and tabmat_state is not None and serves_initial_data(dm)
+    key = (dm, dm.execution_plan)
+    if keep:
+        served = reuse.take(key, weights, zero, tabmat_state, penalty)
+        if served is not None:
+            return served
+        before = dataclasses.replace(tabmat_state)
+    system = build_centered_system(
+        dm=dm,
+        W=weights,
+        z_off=zero,
+        penalty=penalty,
+        tabmat_split=dm.tabmat_centering_split,
+        tabmat_state=tabmat_state,
+    )
+    if keep:
+        reuse.remember(key, weights, zero, before, tabmat_state, system)
+    return system
+
+
 def build_observed_reml_geometry(
     *,
     dm: DesignMatrix,
@@ -986,6 +1023,7 @@ def build_observed_reml_geometry(
     reml_penalties: list[PenaltyComponent] | None = None,
     structured_group_index: int | None = None,
     structured_chain_group_indices: tuple[int, ...] = (),
+    _data_reuse: _InitialDataReuse | None = None,
 ) -> ObservedREMLGeometry:
     """Build Wood's observed LAML Hessian without altering fit inference state.
 
@@ -1228,14 +1266,7 @@ def build_observed_reml_geometry(
         # The preamble has validated every caller input this call checks, so
         # what it can still refuse belongs to the iterate; retyping is safe.
         try:
-            centered = build_centered_system(
-                dm=dm,
-                W=observed_w,
-                z_off=np.zeros(dm.n, dtype=np.float64),
-                penalty=penalty,
-                tabmat_split=dm.tabmat_centering_split,
-                tabmat_state=tabmat_state,
-            )
+            centered = _observed_centered_system(dm, observed_w, penalty, tabmat_state, _data_reuse)
         except ValueError as error:
             raise ObservedGeometryInfeasibleError(
                 "observed working weights do not define a centered system at these coefficients"

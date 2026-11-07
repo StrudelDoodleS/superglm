@@ -43,6 +43,7 @@ from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
     SparseGroupMatrix,
     SparseSSPGroupMatrix,
+    SupportCompressedSplineCategoricalGroupMatrix,
     SupportCompressedSSPGroupMatrix,
 )
 from superglm.solvers.mode_score import (
@@ -111,6 +112,21 @@ class TabmatCenteringState:
     tensor_raw_eligible: bool | None = None
     _raw_moment_owners: tuple = ()
 
+    def routes_as(self, other: TabmatCenteringState) -> bool:
+        """Whether a build under ``other`` takes the routes a build under ``self`` would.
+
+        ``None`` and ``True`` of ``raw_moment_eligible`` both mean "try the rung" (only ``False``
+        skips it). ``eligible`` and ``raw_spline_eligible`` also decide whether a rung's preflight
+        runs, so ``None`` and ``True`` differ there, and ``tensor_raw_eligible`` is never ``True``.
+        """
+        return (
+            self.eligible == other.eligible
+            and self.raw_spline_eligible == other.raw_spline_eligible
+            and (self.raw_moment_eligible is False) == (other.raw_moment_eligible is False)
+            and self.tensor_raw_eligible == other.tensor_raw_eligible
+            and self._raw_moment_owners == other._raw_moment_owners
+        )
+
     def seed_raw_rejection(self, owners: tuple) -> bool | None:
         """Carry only a refusal within one fixed-coordinate optimizer owner."""
         if len(owners) != len(self._raw_moment_owners) or any(
@@ -122,11 +138,13 @@ class TabmatCenteringState:
 
 
 @dataclass
-class _InitialDataReuse:
-    """One initial data system, owned by a fixed-design synchronous line search.
+class _SystemData:
+    """The unpenalized data of one centred system, with what it was built from.
 
-    The owner must discard this entry before changing source coordinates or
-    invoking user callbacks. No penalty, Hessian, or fitted state is retained.
+    The data are a function of the design, the weights, the working response and the routes the
+    centring state selects, so an entry serves a build whose weights and response are bit for bit
+    these, whose state takes the same routes (``TabmatCenteringState.routes_as``) and whose design
+    is the one the key names.
     """
 
     key: tuple | None = None
@@ -137,7 +155,12 @@ class _InitialDataReuse:
     data: tuple | None = None
 
     def take(self, key, W, z_off, state, penalty):
-        if self.key != key or self.before != state or self.data is None:
+        if (
+            self.data is None
+            or len(self.key) != len(key)
+            or any(mine is not theirs for mine, theirs in zip(self.key, key))
+            or not self.before.routes_as(state)
+        ):
             return None
         for actual, saved in ((W, self.weights), (z_off, self.response)):
             if (
@@ -153,19 +176,75 @@ class _InitialDataReuse:
         *data, mean_hi, mean_lo = self.data
         return _attach_centered_penalty(*data, penalty, mean_hi=mean_hi, mean_lo=mean_lo)
 
-    def remember(self, key, W, z_off, before, after, system):
-        self.key = key
-        self.weights, self.response = _freeze(W), _freeze(z_off)
-        self.before, self.after = replace(before), replace(after)
-        self.data = (
-            system.sum_w,
-            system.mean_x,
-            system.mean_z,
-            system.data_gram,
-            system.rhs,
-            system.mean_hi,
-            system.mean_lo,
+    @classmethod
+    def of(cls, key, W, z_off, before, after, system):
+        return cls(
+            key=key,
+            weights=_freeze(W),
+            response=_freeze(z_off),
+            before=replace(before),
+            after=replace(after),
+            data=(
+                system.sum_w,
+                system.mean_x,
+                system.mean_z,
+                system.data_gram,
+                system.rhs,
+                system.mean_hi,
+                system.mean_lo,
+            ),
         )
+
+
+def serves_initial_data(dm: DesignMatrix) -> bool:
+    """Whether an owner may serve ``dm``: exactly a built-in design of groups whose data are their
+    arrays and the weights. A subclass can expose mutable coordinates or call back."""
+    return type(dm) is DesignMatrix and all(
+        type(gm)
+        in (
+            CategoricalGroupMatrix,
+            DenseGroupMatrix,
+            SparseSSPGroupMatrix,
+            SupportCompressedSSPGroupMatrix,
+            SupportCompressedSplineCategoricalGroupMatrix,
+        )
+        for gm in dm.group_matrices
+    )
+
+
+@dataclass
+class _InitialDataReuse:
+    """The initial data systems of the fits one synchronous, fixed-design optimizer runs.
+
+    ``base`` is the initial system of the fits that started from one point; ``latest`` is the
+    final system of the fit that ended last, whose final weights are the first weights of a fit
+    started from its end. A hit on ``latest`` becomes the ``base`` of the fits from that point.
+
+    Owner: the optimizer, for one call, and its entries drop with it. An entry serves only a
+    build with the same design objects (``key``), bit-identical weights and response, and a
+    centring state taking the same routes (``_SystemData``). No penalty, Hessian or fitted
+    state is retained. Nothing changes the design during the call, and no user code runs between
+    an entry's making and its use.
+    """
+
+    base: _SystemData | None = None
+    latest: _SystemData | None = None
+
+    def take(self, key, W, z_off, state, penalty):
+        for entry in (self.base, self.latest):
+            system = None if entry is None else entry.take(key, W, z_off, state, penalty)
+            if system is not None:
+                self.base = entry
+                return system
+        return None
+
+    def remember(self, key, W, z_off, before, after, system):
+        """A fit's initial system, for the fits that start from the same point."""
+        self.base = _SystemData.of(key, W, z_off, before, after, system)
+
+    def retain_final(self, key, W, z_off, before, after, system):
+        """A fit's final system, for the fit that starts from its end."""
+        self.latest = _SystemData.of(key, W, z_off, before, after, system)
 
 
 @dataclass

@@ -5,8 +5,10 @@ This file fails on what does not depend on the floating-point trajectory of a fi
 build's rounding changes the verdict:
 
 * a pass over the rows (the ledger's ``PASS`` targets: Gram builds, likelihood evaluations, design
-  products) that repeats outside ``ROW_PASS_REPEATS``, or whose Gram repeats exceed a fraction of the
-  centred systems built (a ceiling, so a count below it passes), or that the ledger cannot identify.
+  products) that repeats outside ``ROW_PASS_REPEATS`` (and ``QP_ROW_PASS_REPEATS`` for the
+  shape-constrained fit), or whose Gram repeats exceed a fraction of the centred systems built plus
+  the constrained refit's one first system (a ceiling, so a count below it passes), or that the
+  ledger cannot identify.
   A call that declines (the packed and anchor rungs on the exact routes) has no flops and makes no
   pass over the rows, so it is neither listed nor counted;
 * the number of passes: once-per-fit stages, one row pass per centred system built, and two moment
@@ -15,8 +17,8 @@ build's rounding changes the verdict:
 A call is a repeat when its arrays are bit for bit those of an earlier call and its objects the same
 objects; the ledger leaves out the arguments that only carry state or output (``carriers`` of each
 target in ``TARGETS``), so a call handed a new carrier at every solve still counts.  Each entry of
-``ROW_PASS_REPEATS`` must be repeated by some fit, so the entry of a repeat that is removed fails
-the file until it is deleted.
+``ROW_PASS_REPEATS`` must be repeated by some fit (``QP_ROW_PASS_REPEATS`` by the shape-constrained
+one), so the entry of a repeat that is removed fails the file until it is deleted.
 
 Every other repeat, such as a penalty decomposed again or a rank decision on a Gram matrix, takes an
 input that is itself the outcome of an iteration, so whether it appears can change with the kernel.
@@ -40,9 +42,14 @@ PENALTY = (
     "decomposes them again; the cost is the block size cubed, not the row count"
 )
 ITERATE = (
-    "the centred system, a score or a linear predictor is rebuilt at weights or coefficients an "
-    "earlier evaluation already visited (an accepted iterate re-entered by the next evaluation, "
-    "or the final one by the diagnostics); for the Gram pass this is repeated work over every row"
+    "a score or a linear predictor is recomputed at coefficients an earlier evaluation already "
+    "visited (an accepted iterate re-entered by the next evaluation, or the final one by the "
+    "diagnostics): one pass over the rows each"
+)
+QP = (
+    "the refit under linear constraints after the search builds its first system again at the "
+    "weights the last search fit ended at: it runs outside the optimizer, whose initial-data "
+    "owner (``_InitialDataReuse``) is gone"
 )
 RANK = "a rank decision on a Gram matrix or factor an earlier decision already saw"
 BLAS = "equal to an earlier input only under some BLAS kernels' rounding"
@@ -53,12 +60,17 @@ ROW_PASSES = frozenset(target.kind for target in TARGETS if target.role == PASS)
 #: entry must still match a repeated row in one of the four fits, so a repeat that is fixed takes its
 #: entry with it.
 ROW_PASS_REPEATS = {
-    ("centered_gram_rhs", "solvers.centered_system:build_centered_system"): ITERATE,
     ("DesignMatrix.rmatvec", "solvers.centered_system:build_centered_system"): ITERATE,
     ("centred_matvec", "solvers.irls_direct._fit:evaluate_state"): ITERATE,
     ("centred_matvec", "solvers.mode_score:linear_predictor"): ITERATE,
     ("DesignMatrix.rmatvec", "solvers.mode_score:"): ITERATE,
     ("DesignMatrix.rmatvec", "reml.identified:"): ITERATE,
+}
+
+#: What only the shape-constrained fit repeats: its first system, once per run.  No other fit may
+#: repeat these.
+QP_ROW_PASS_REPEATS = {
+    ("centered_gram_rhs", "solvers.centered_system:build_centered_system"): QP,
 }
 
 #: The other repeats the fits show, to label the report; ``"*"`` matches every operation.
@@ -68,8 +80,8 @@ OTHER_REPEATS = {
     ("numpy.linalg.eigh", "solvers.centered_system:_equilibrated_block_root"): PENALTY,
     ("numpy.linalg.eigvalsh", "reml.efs_update:"): PENALTY,
     ("numpy.linalg.eigvalsh", "features._spline_penalties:_interval_blocks"): PENALTY,
-    ("build_centered_system", "solvers.irls_direct._fit:get_centered_system"): ITERATE,
-    ("numpy.linalg.cholesky", "solvers.centered_system:_attach_centered_penalty"): ITERATE,
+    ("build_centered_system", "solvers.irls_direct._fit:get_centered_system"): QP,
+    ("numpy.linalg.cholesky", "solvers.centered_system:_attach_centered_penalty"): QP,
     ("*", "solvers.rank:_decompose_gram"): RANK,
     ("decompose_gram", "distributional.solver.solver:_initial_coefficients"): RANK,
     ("numpy.linalg.svd", "solvers.rank:_selection_amplification"): BLAS,
@@ -89,12 +101,16 @@ ROUTE_GRAM_PASSES = {
     "glm_shape_constrained": ("centered_gram_rhs",),
     "glm_discrete": ("packed_centered_gram_rhs",),
 }
-#: The exact routes repeat a quarter to a third of their Gram passes (the iterate an accepted
-#: step re-enters), the discrete route none on this data.  A ceiling is a fraction of the centred
-#: systems built, and a count below it passes.  A route that builds every system twice repeats
-#: half of its passes, so the discrete ceiling sits under a half; the exact routes already repeat
-#: a third, so doubling takes them past theirs.
-GRAM_REPEAT_CEILING = {"glm_exact": 0.5, "glm_shape_constrained": 0.5, "glm_discrete": 0.25}
+#: Every fit of an exact REML run starts where another ended, so its first system is the final
+#: system of that fit, which the optimizer's owner holds (``_InitialDataReuse``): the exact route
+#: repeats no Gram pass, on any BLAS kernel (the count of systems moves by one between kernels, the
+#: repeats do not).  The one fit the owner does not serve is the shape-constrained refit after the
+#: search, which builds its first system again: one pass per run, as ``GRAM_REPEAT_ALLOWANCE``.
+#: A ceiling is a fraction of the centred systems built plus that allowance, and a count below it
+#: passes.  The discrete route repeats none on this data; a route that builds every system twice
+#: repeats half its passes, so the discrete ceiling sits under a half.
+GRAM_REPEAT_CEILING = {"glm_exact": 0.0, "glm_shape_constrained": 0.0, "glm_discrete": 0.25}
+GRAM_REPEAT_ALLOWANCE = {"glm_shape_constrained": 1}
 
 PREDICTORS = 2  # location and scale of the binned SuperLSS fit
 #: Fellner-Schall updates alone from a far start to strict tolerances: many more smoothing iterations.
@@ -187,10 +203,11 @@ def _served(row) -> bool:
 @pytest.mark.parametrize("name", list(FITS))
 def test_a_fit_repeats_no_pass_over_the_rows_that_is_not_listed(ledgers, name):
     repeated = [row for row in ledgers[name].rows() if row.repeated]
+    listed = ROW_PASS_REPEATS | (QP_ROW_PASS_REPEATS if name == "glm_shape_constrained" else {})
     unlisted = [
         _repeat(row)
         for row in repeated
-        if row.operation in ROW_PASSES and _served(row) and _reason(row, ROW_PASS_REPEATS) is None
+        if row.operation in ROW_PASSES and _served(row) and _reason(row, listed) is None
     ]
     others = [
         f"{_repeat(row)} ({'known' if _reason(row, OTHER_REPEATS) else 'not listed'})"
@@ -213,17 +230,23 @@ def test_a_fit_repeats_no_pass_over_the_rows_that_is_not_listed(ledgers, name):
 
 @pytest.mark.pins_behaviour
 def test_every_listed_repeat_of_a_pass_over_the_rows_still_happens(ledgers):
-    repeated = [
-        row for ledger in ledgers.values() for row in ledger.rows() if row.repeated and _served(row)
-    ]
+    def repeated(names):
+        return [
+            row for name in names for row in ledgers[name].rows() if row.repeated and _served(row)
+        ]
+
     stale = [
         f"{operation} @ {prefix}"
-        for operation, prefix in ROW_PASS_REPEATS
-        if not any(row.operation == operation and row.caller.startswith(prefix) for row in repeated)
+        for table, rows in (
+            (ROW_PASS_REPEATS, repeated(ledgers)),
+            (QP_ROW_PASS_REPEATS, repeated(["glm_shape_constrained"])),
+        )
+        for operation, prefix in table
+        if not any(row.operation == operation and row.caller.startswith(prefix) for row in rows)
     ]
 
     assert stale == [], (
-        f"no fit repeats these any more; delete the entries from ROW_PASS_REPEATS: {stale}"
+        f"no fit repeats these any more; delete the entries from the tables: {stale}"
     )
 
 
@@ -249,9 +272,8 @@ def test_a_route_repeats_at_most_a_fraction_of_its_gram_passes(ledgers, name):
     assert systems > 0
     for passes in ROUTE_GRAM_PASSES[name]:
         repeated = sum(row.repeated for row in ledger.find(passes))
-        assert repeated <= GRAM_REPEAT_CEILING[name] * systems, (
-            f"{passes}: {repeated} of {systems} centred systems"
-        )
+        allowed = GRAM_REPEAT_CEILING[name] * systems + GRAM_REPEAT_ALLOWANCE.get(name, 0)
+        assert repeated <= allowed, f"{passes}: {repeated} of {systems} centred systems"
 
 
 @pytest.mark.pins_behaviour
