@@ -993,6 +993,7 @@ def test_predictors_that_cancel_sum_as_the_row_route_and_prediction_do():
     intercept cancels first, so the order decides the published mean. Mutation check: start each
     predictor from its intercept, and the last two rows publish a mean of 1."""
     family, layout, y, plan, coefficients = _cancelling_problem()
+    assert chunking._joint_plan(layout, PassFactors()) is not None
     eta, theta = chunking.materialize_terminal_predictions(
         layout, coefficients, chunk_size="auto", pass_factors=PassFactors()
     )
@@ -1016,10 +1017,12 @@ def test_predictors_that_cancel_sum_as_the_row_route_and_prediction_do():
     )
 
 
-def test_a_spline_predictor_multiplies_its_factors_as_the_row_route_and_prediction_do():
+def test_a_spline_predictor_multiplies_its_factors_as_the_row_route_and_prediction_do(monkeypatch):
     """``B @ (R_inv @ beta)`` and ``(B @ R_inv) @ beta`` differ when large slopes cancel against an
     offset, so the association decides the published mean and whether the objective read it.
-    Mutation check: read ``B @ R_inv`` here, and the means reach 32 where the row route's are 0."""
+    Mutation check: read ``B @ R_inv`` here, and the means reach 32 where the row route's are 0.
+    A basis residue can refuse a spline its plan on another platform's rounding, so that is forced."""
+    monkeypatch.setattr(_joint_tables, "_ssp_gram_needs_exact", lambda *_factors: False)
     x = np.repeat(np.random.default_rng(109).uniform(-1, 1, 80), 2)
     frame = as_eager_frame(pd.DataFrame({"x": x}))
     family = GaussianLS(scale_floor=0.0)
@@ -1045,6 +1048,7 @@ def test_a_spline_predictor_multiplies_its_factors_as_the_row_route_and_predicti
     slopes = 2.0**54 * np.arange(1.0, design.p + 1.0)
     layout = layout_with({"location": -design.matvec(slopes)})
     coefficients = np.concatenate(([0.0], slopes, [0.0]))
+    assert chunking._joint_plan(layout, PassFactors()) is not None
     eta, theta = chunking.materialize_terminal_predictions(
         layout, coefficients, chunk_size="auto", pass_factors=PassFactors()
     )
