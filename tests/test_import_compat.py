@@ -333,23 +333,154 @@ def test_a_thread_inside_an_import_never_waits_for_the_first_load_lock(tmp_path)
     assert result.startswith("('ok'"), completed
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is unavailable on this platform")
-def test_a_child_forked_while_another_thread_loads_a_name_is_not_stuck_on_the_lock():
-    """The lock a forking process held for another thread is released in the child.
+_FORK_DRIVER = """
+import os, signal, sys, threading, time, warnings
+warnings.simplefilter("ignore")
+signal.alarm(30)  # shorter than the fork's own wait: a parent stuck in a fork fails, it does not pass late
+sys.path.insert(0, sys.argv[1])
+sys.lazydemo_sync = sync = {{"body": threading.Event(), "forking": threading.Event()}}
+import lazydemo
+{driver}
+"""
 
-    Mutation check: removing ``os.register_at_fork`` in ``superglm/_lazy.py`` leaves the child
-    waiting for a lock whose owner does not exist there.
+
+def _fork_in_lazydemo(tmp_path, modules, driver, exports="{'lazydemo.slow': ('value',)}"):
+    """Run ``driver`` against a throwaway package; what it prints last, and the process."""
+    package = tmp_path / "lazydemo"
+    package.mkdir()
+    (package / "__init__.py").write_text(_DEMO_INIT.format(exports=exports), encoding="utf-8")
+    for name, text in modules.items():
+        (package / f"{name}.py").write_text(text, encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, "-c", _FORK_DRIVER.format(driver=driver), str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return completed.stdout.strip().splitlines()[-1:], completed
+
+
+_REAP_THE_CHILD = """
+if pid == 0:
+    signal.alarm(15)
+    try:
+        code = 0 if lazydemo.value == 1 else 3
+    finally:
+        os._exit(locals().get("code", 4))
+_, status = os.waitpid(pid, 0)
+print("finished" if status == 0 else f"child status {status}", flush=True)
+"""
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is unavailable on this platform")
+def test_a_child_forked_during_a_first_load_reads_that_name_and_the_parent_is_not_stuck(tmp_path):
+    """The fork waits for the load, so no module in the child is half run under a dead thread's lock.
+
+    The body being waited for calls ``logging.getLogger`` once the fork has begun: ``logging`` holds
+    its lock across a fork, and a fork waiting while it holds that lock would leave the body waiting
+    too. A hook of the test's own, registered last and so run first, marks the fork's start. The
+    parent has printed nothing on stderr: a hook registered during the wait would run its after-fork
+    half unbalanced. Mutation checks: no hold before the fork leaves the child waiting for the
+    module's import lock; hooks registered when ``_lazy`` is imported, before ``logging`` is loaded,
+    leave the parent stuck until its alarm.
+    """
+    result, completed = _fork_in_lazydemo(
+        tmp_path,
+        {
+            "slow": (
+                "import logging, sys, time\nsync = sys.lazydemo_sync\nsync['body'].set()\n"
+                "assert sync['forking'].wait(30)\ntime.sleep(0.2)\n"
+                "logging.getLogger('lazydemo.slow')\nvalue = 1\n"
+            )
+        },
+        """
+threading.Thread(target=lambda: lazydemo.value, daemon=True).start()
+assert sync["body"].wait(30)
+os.register_at_fork(before=sync["forking"].set)
+pid = os.fork()
+"""
+        + _REAP_THE_CHILD,
+    )
+    assert result == ["finished"], completed
+    assert "Exception ignored" not in completed.stderr, completed.stderr
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is unavailable on this platform")
+def test_a_thread_that_forks_inside_an_import_never_waits_for_the_first_load_lock(tmp_path):
+    """A module body forks while another thread's first load waits to import that module.
+
+    The forking thread holds the module's import lock and the other thread holds the first-load
+    lock and needs it: a fork that waited would wait for a thread that waits for it, and neither lock
+    manager could see that. Mutation check: holding the lock whatever the stack hangs the parent
+    until its alarm.
+    """
+    result, completed = _fork_in_lazydemo(
+        tmp_path,
+        {
+            "forks": (
+                "import os, sys, threading\nimport lazydemo\nsync = sys.lazydemo_sync\n"
+                "threading.Thread(target=lambda: lazydemo.value, daemon=True).start()\n"
+                "assert sync['body'].wait(30)\n"
+                "sync['child'] = os.fork()\n"
+                "if sync['child'] == 0:\n    os._exit(0)\n"
+            ),
+            "slow": (
+                "import sys\nsys.lazydemo_sync['body'].set()\nimport lazydemo.forks\nvalue = 1\n"
+            ),
+        },
+        """
+import lazydemo.forks
+_, status = os.waitpid(sync["child"], 0)
+print("finished" if status == 0 and lazydemo.value == 1 else status, flush=True)
+""",
+    )
+    assert result == ["finished"], completed
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is unavailable on this platform")
+def test_a_module_body_that_forks_during_its_first_load_leaves_a_child_that_can_finish_it(tmp_path):
+    """The forking thread itself holds the first-load lock, and in the child it still leaves it.
+
+    Mutation check: reinitialising the lock in every child makes the child's ``with`` exit raise
+    ``RuntimeError: cannot release un-acquired lock``.
+    """
+    result, completed = _fork_in_lazydemo(
+        tmp_path,
+        {"slow": "import os, sys\nsys.lazydemo_sync['child'] = os.fork()\nvalue = 1\n"},
+        """
+try:
+    value = lazydemo.value
+except BaseException:
+    value = None
+if sync["child"] == 0:
+    os._exit(0 if value == 1 else 3)
+_, status = os.waitpid(sync["child"], 0)
+print("finished" if status == 0 and value == 1 else status, flush=True)
+""",
+    )
+    assert result == ["finished"], completed
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is unavailable on this platform")
+def test_a_fork_outlasting_its_wait_goes_ahead_and_the_child_is_not_stuck_on_the_lock():
+    """A load stuck past the wait does not stop the fork, and the lock is free in the child.
+
+    Mutation checks: an unbounded wait leaves the parent stuck until its alarm; no reinitialisation
+    in the child leaves it waiting for a lock whose owner does not exist there.
     """
     code = """
-import os, sys, threading, time, warnings
+import os, signal, sys, threading, time, warnings
 warnings.simplefilter("ignore")
+signal.alarm(45)
 import superglm
 from superglm import _lazy
+_lazy._FORK_WAIT_SECONDS = 0.05
+_lazy._register_fork_hooks()
 held, release = threading.Event(), threading.Event()
 def hold():
     with _lazy._FIRST_LOAD:
         held.set()
-        release.wait(30)
+        release.wait(90)
 holder = threading.Thread(target=hold)
 holder.start()
 held.wait(30)
@@ -358,7 +489,7 @@ if pid == 0:
     superglm.warmup  # a name defined in the package itself needs no load
     getattr(superglm, "Numeric")
     os._exit(0)
-deadline = time.monotonic() + 60
+deadline = time.monotonic() + 30
 while time.monotonic() < deadline:
     done, status = os.waitpid(pid, os.WNOHANG)
     if done:
@@ -1008,8 +1139,9 @@ def test_inference_term_old_path_still_resolves_and_warns():
     import superglm.inference.term as old
     from superglm.inference import _term_ops, _term_types
 
-    with pytest.warns(FutureWarning, match=r"use superglm\.inference\.TermInference\."):
+    with pytest.warns(FutureWarning, match=r"use superglm\.inference\.TermInference\.") as caught:
         assert old.TermInference is _term_types.TermInference
+    assert caught[0].filename == __file__  # the caller's line, as from ``superglm.inference``
     with pytest.warns(FutureWarning, match=r"use SuperGLM\.term_inference\."):
         assert old.term_inference is _term_ops.term_inference
     with pytest.raises(AttributeError):
@@ -1026,9 +1158,10 @@ def test_inference_moved_name_resolves_and_warns_with_its_replacement(name):
 
     owner, replacement = package._MOVED[name]
     match = f"use {replacement}." if replacement is not None else f"its code is in {owner}."
-    with pytest.warns(FutureWarning, match=re.escape(match)):
+    with pytest.warns(FutureWarning, match=re.escape(match)) as caught:
         resolved = getattr(package, name)
     assert resolved is getattr(importlib.import_module(owner), name)
+    assert caught[0].filename == __file__  # the caller's line, not a line of superglm's
 
 
 # The public names each module's ``__all__`` listed before its helpers moved out.

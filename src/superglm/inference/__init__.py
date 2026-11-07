@@ -63,7 +63,7 @@ _MOVED: dict[str, tuple[str, str | None]] = {
 
 def _moved_attribute(module: str, name: str, moved: dict[str, tuple[str, str | None]]):
     """Resolve a re-export this module no longer carries, warning what replaces it."""
-    import warnings
+    from superglm.profiling._scalar import warn_caller
 
     if name not in moved:
         raise AttributeError(f"module {module!r} has no attribute {name!r}")
@@ -73,11 +73,7 @@ def _moved_attribute(module: str, name: str, moved: dict[str, tuple[str, str | N
         if replacement is not None
         else f"it has no public replacement; its code is in {owner}"
     )
-    warnings.warn(
-        f"{module}.{name} is deprecated and will be removed; {advice}.",
-        FutureWarning,
-        stacklevel=3,
-    )
+    warn_caller(f"{module}.{name} is deprecated and will be removed; {advice}.", FutureWarning)
     return getattr(import_module(owner), name)
 
 

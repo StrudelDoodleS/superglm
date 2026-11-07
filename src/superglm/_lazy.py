@@ -26,6 +26,15 @@ import never waits for it (``_inside_an_import``), because that thread holds imp
 the holder of this one may need, and neither lock could see the cycle. A thread that waits
 holds no import lock, so no cycle runs through it. Two threads that import superglm's modules by
 name (``import superglm.model``) are not serialised and rely on CPython's import locks alone.
+
+Forks. A child forked while another thread runs a first load inherits that module's import lock
+held by a thread that does not exist there, and the module half run, so reading its name would wait
+forever. A fork therefore holds ``_FIRST_LOAD`` (``os.register_at_fork``), which makes it wait for a
+first load to finish. A forking thread that is inside an import does not wait, by the leaf rule above.
+Hooks run last registered first, and ``logging`` and ``concurrent.futures.thread`` hold their own
+locks across a fork, so these hooks are registered after both are loaded, or the fork would wait
+holding a lock the load needs. A wait that outlasts ``_FORK_WAIT_SECONDS``, a load stuck on a lock
+this cannot see, lets the fork go ahead, which leaves the child as it was without the hold.
 """
 
 from __future__ import annotations
@@ -39,9 +48,9 @@ from typing import Any
 
 #: Held while a name's defining module is imported by a thread that is not already importing.
 _FIRST_LOAD = RLock()
-if hasattr(os, "register_at_fork"):
-    # A child forked while another thread held the lock would wait for it forever.
-    os.register_at_fork(after_in_child=_FIRST_LOAD._at_fork_reinit)
+#: Longest a fork waits for a first load on another thread: far beyond any real load.
+_FORK_WAIT_SECONDS = 60.0
+_fork_hooks_registered = False
 
 
 def _inside_an_import() -> bool:
@@ -57,6 +66,40 @@ def _inside_an_import() -> bool:
             return True
         frame = frame.f_back
     return False
+
+
+def _hold_for_fork() -> None:
+    if not _inside_an_import():
+        _FIRST_LOAD.acquire(timeout=_FORK_WAIT_SECONDS)
+
+
+def _release_after_fork() -> None:
+    """Release what ``_hold_for_fork`` took: the stack it asked about is the same one, in either process."""
+    if _FIRST_LOAD._is_owned() and not _inside_an_import():
+        _FIRST_LOAD.release()
+
+
+def _after_fork_in_child() -> None:
+    if _FIRST_LOAD._is_owned():
+        _release_after_fork()
+    else:  # held, if at all, by a thread that does not exist here
+        _FIRST_LOAD._at_fork_reinit()
+
+
+def _register_fork_hooks() -> None:
+    """Make forks hold the first-load lock, where the platform can fork; once, on a first load."""
+    global _fork_hooks_registered
+    if _fork_hooks_registered or not hasattr(os, "register_at_fork"):
+        return
+    _fork_hooks_registered = True
+    import concurrent.futures.thread  # noqa: F401
+    import logging  # noqa: F401
+
+    os.register_at_fork(
+        before=_hold_for_fork,
+        after_in_parent=_release_after_fork,
+        after_in_child=_after_fork_in_child,
+    )
 
 
 def attach(
@@ -97,6 +140,7 @@ def attach(
         if _inside_an_import():
             return load(name)
         with _FIRST_LOAD:
+            _register_fork_hooks()
             return load(name)
 
     def module_dir() -> list[str]:
