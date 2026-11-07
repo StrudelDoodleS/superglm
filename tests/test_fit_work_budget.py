@@ -5,9 +5,16 @@ This file fails on what does not depend on the floating-point trajectory of a fi
 build's rounding changes the verdict:
 
 * a pass over the rows (the ledger's ``PASS`` targets: Gram builds, likelihood evaluations, design
-  products) that repeats outside ``ROW_PASS_REPEATS``, or whose listed repeats exceed their ceiling;
+  products) that repeats outside ``ROW_PASS_REPEATS``, or whose Gram repeats exceed a fraction of the
+  centred systems built (a ceiling, so a count below it passes), or that the ledger cannot identify;
 * the number of passes: once-per-fit stages, one row pass per centred system built, and two moment
   passes per predictor however many smoothing iterations the fit takes.
+
+A call is a repeat when its arrays are bit for bit those of an earlier call and its objects the same
+objects; the ledger leaves out the arguments that only carry state or output (``carriers`` of each
+target in ``TARGETS``), so a call handed a new carrier at every solve still counts.  Each entry of
+``ROW_PASS_REPEATS`` must be repeated by some fit, so the entry of a repeat that is removed fails
+the file until it is deleted.
 
 Every other repeat, such as a penalty decomposed again or a rank decision on a Gram matrix, takes an
 input that is itself the outcome of an iteration, so whether it appears can change with the kernel.
@@ -25,8 +32,6 @@ import pytest
 from superglm import Categorical, GaussianLS, PSpline, SuperGLM, SuperLSS, cat, s
 from superglm.diagnostics.work_ledger import PASS, TARGETS, work_ledger
 from superglm.features.constraint import Constraint
-
-pytestmark = pytest.mark.pins_behaviour  # these guards pin behaviour that already held
 
 PENALTY = (
     "the penalty matrices are fixed for the fit, yet each smoothing-parameter evaluation "
@@ -47,6 +52,7 @@ ROW_PASSES = frozenset(target.kind for target in TARGETS if target.role == PASS)
 #: entry with it.
 ROW_PASS_REPEATS = {
     ("centered_gram_rhs", "solvers.centered_system:build_centered_system"): ITERATE,
+    ("packed_centered_gram_rhs", "solvers.centered_system:_raw_rung_system"): ITERATE,
     ("anchor_support_centered_gram_rhs", "solvers.centered_system:_raw_rung_system"): ITERATE,
     ("DesignMatrix.rmatvec", "solvers.centered_system:build_centered_system"): ITERATE,
     ("centred_matvec", "solvers.irls_direct._fit:evaluate_state"): ITERATE,
@@ -62,6 +68,7 @@ OTHER_REPEATS = {
     ("numpy.linalg.eigh", "solvers.centered_system:_equilibrated_block_root"): PENALTY,
     ("numpy.linalg.eigvalsh", "reml.efs_update:"): PENALTY,
     ("numpy.linalg.eigvalsh", "features._spline_penalties:_interval_blocks"): PENALTY,
+    ("build_centered_system", "solvers.irls_direct._fit:get_centered_system"): ITERATE,
     ("numpy.linalg.cholesky", "solvers.centered_system:_attach_centered_penalty"): ITERATE,
     ("*", "solvers.rank:_decompose_gram"): RANK,
     ("decompose_gram", "distributional.solver.solver:_initial_coefficients"): RANK,
@@ -72,10 +79,18 @@ OTHER_REPEATS = {
     ("numpy.linalg.cholesky", "distributional.smoothing.newton:newton_direction"): BLAS,
 }
 
-#: The exact route repeats about a quarter to a third of its Gram passes (the discrete route none);
-#: a ceiling of half of the centred systems built catches a repeat that doubles.
+#: The exact routes repeat a quarter to a third of their Gram passes (the iterate an accepted
+#: step re-enters), the discrete route none on this data.  A ceiling is a fraction of the centred
+#: systems built, and a count below it passes.  A route that builds every system twice repeats
+#: half of its passes, so the discrete ceiling sits under a half; the exact routes already repeat
+#: a third, so doubling takes them past theirs.
 GRAM_PASSES = ("packed_centered_gram_rhs", "anchor_support_centered_gram_rhs", "centered_gram_rhs")
-GRAM_REPEAT_CEILING = 0.5
+GRAM_REPEAT_CEILING = {"glm_exact": 0.5, "glm_shape_constrained": 0.5, "glm_discrete": 0.25}
+ROUTE_GRAM_PASSES = {
+    "glm_exact": GRAM_PASSES,
+    "glm_shape_constrained": GRAM_PASSES,
+    "glm_discrete": ("packed_centered_gram_rhs",),
+}
 
 PREDICTORS = 2  # location and scale of the binned SuperLSS fit
 #: Fellner-Schall updates alone from a far start to strict tolerances: many more smoothing iterations.
@@ -159,6 +174,7 @@ def _repeat(row) -> str:
     return f"{row.operation} @ {row.caller}: {row.repeated} of {row.count} calls repeat"
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("name", list(FITS))
 def test_a_fit_repeats_no_pass_over_the_rows_that_is_not_listed(ledgers, name):
     repeated = [row for row in ledgers[name].rows() if row.repeated]
@@ -174,10 +190,19 @@ def test_a_fit_repeats_no_pass_over_the_rows_that_is_not_listed(ledgers, name):
     ]
     if others:
         warnings.warn(f"{name}: repeats outside the row passes, not failed:\n" + "\n".join(others))
+    unidentified = [
+        f"{row.operation} @ {row.caller}: {row.uncounted} of {row.count} calls"
+        for row in ledgers[name].rows()
+        if row.operation in ROW_PASSES and row.uncounted
+    ]
 
     assert unlisted == []
+    # such a call is never a repeat, so a pass handed one could repeat without this file seeing it:
+    # declare the argument a carrier of its target (TARGETS) if it carries no input
+    assert unidentified == []
 
 
+@pytest.mark.pins_behaviour
 def test_every_listed_repeat_of_a_pass_over_the_rows_still_happens(ledgers):
     repeated = [row for ledger in ledgers.values() for row in ledger.rows() if row.repeated]
     stale = [
@@ -186,9 +211,12 @@ def test_every_listed_repeat_of_a_pass_over_the_rows_still_happens(ledgers):
         if not any(row.operation == operation and row.caller.startswith(prefix) for row in repeated)
     ]
 
-    assert stale == [], "no fit repeats these now; remove the entries"
+    assert stale == [], (
+        f"no fit repeats these any more; delete the entries from ROW_PASS_REPEATS: {stale}"
+    )
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("name", ["glm_exact", "glm_shape_constrained"])
 def test_the_exact_route_builds_one_system_and_one_gram_pass_per_iteration(ledgers, name):
     ledger = ledgers[name]
@@ -200,29 +228,32 @@ def test_the_exact_route_builds_one_system_and_one_gram_pass_per_iteration(ledge
     assert ledger.count("build_design_matrix") == ledger.count("finalize_reml_fit") == 1
 
 
-@pytest.mark.parametrize("name", ["glm_exact", "glm_shape_constrained"])
-def test_the_exact_route_repeats_at_most_half_its_gram_passes(ledgers, name):
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("name", list(GRAM_REPEAT_CEILING))
+def test_a_route_repeats_at_most_a_fraction_of_its_gram_passes(ledgers, name):
     ledger = ledgers[name]
     systems = ledger.count("build_centered_system")
 
-    for passes in GRAM_PASSES:
+    assert systems > 0
+    for passes in ROUTE_GRAM_PASSES[name]:
         repeated = sum(row.repeated for row in ledger.find(passes))
-        assert repeated <= GRAM_REPEAT_CEILING * systems, (
+        assert repeated <= GRAM_REPEAT_CEILING[name] * systems, (
             f"{passes}: {repeated} of {systems} centred systems"
         )
 
 
-def test_the_discrete_route_passes_over_the_bins_once_per_system_and_repeats_none(ledgers):
+@pytest.mark.pins_behaviour
+def test_the_discrete_route_passes_over_the_bins_once_per_system(ledgers):
     ledger = ledgers["glm_discrete"]
     systems = ledger.count("build_centered_system")
 
     assert systems > 0
     assert ledger.count("packed_centered_gram_rhs") == systems
     assert ledger.count("centered_gram_rhs") == 0  # no pass over the rows themselves
-    assert sum(row.repeated for row in ledger.find("packed_centered_gram_rhs")) == 0
     assert ledger.count("build_design_matrix") == ledger.count("finalize_reml_fit") == 1
 
 
+@pytest.mark.pins_behaviour
 def test_a_binned_superlss_fit_builds_each_stage_once_and_makes_two_moment_passes_per_predictor(
     ledgers, forced_lss_ledger
 ):
@@ -238,6 +269,7 @@ def test_a_binned_superlss_fit_builds_each_stage_once_and_makes_two_moment_passe
         assert each.count("MatrixExecutionPlan.moments") == 2 * PREDICTORS
 
 
+@pytest.mark.pins_behaviour
 def test_a_binned_superlss_fit_evaluates_the_whole_likelihood_at_most_every_other_solve(ledgers):
     # The first trial of a solve is fused and not counted, so what remains is the initial and
     # terminal state: two for a whole default fit, however many solves it makes (6 to 52 over 27
