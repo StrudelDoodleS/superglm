@@ -573,15 +573,24 @@ def test_level_columns_are_coded_once_per_frame_and_a_quiet_entry_never_silences
     assert len([w for w in caught if "unseen at fit" in str(w.message)]) == 1
 
 
+def _assert_rows_agree_to_rounding(rows, reference, degree):
+    """Each entry within a few ``u`` of its row's largest entry, which grows past the knots.
+
+    SciPy's own build may fuse a multiply and an add where the platform's compiler does, so
+    against SciPy the rows agree to rounding and their bits differ by platform.
+    """
+    scale = np.max(np.abs(reference), axis=1, keepdims=True)
+    assert np.all(np.abs(rows - reference) <= 8 * (degree + 1) * U * scale)
+
+
 @pytest.mark.parametrize("degree", [1, 2, 3, 4])
 @pytest.mark.parametrize("repeated_interior", [False, True])
-def test_the_bspline_kernel_gives_scipys_design_bits_inside_and_outside_the_knots(
+def test_the_bspline_kernel_matches_scipys_design_inside_and_outside_the_knots(
     degree, repeated_interior
 ):
-    """A row is the same bits as ``BSpline.design_matrix``'s, so a saved model predicts as it did.
+    """A row agrees with ``BSpline.design_matrix``'s to rounding, so a saved model predicts as it did.
 
-    Mutation check: Piegl and Tiller's ordering of the same recurrence differs from SciPy's by
-    an ulp in a share of the entries and fails this.
+    Mutation check: clamping ``x`` to the knots' range, which stops a row extrapolating, fails this.
     """
     rng = np.random.default_rng(degree)
     interior = np.sort(rng.uniform(0.0, 1.0, 7))
@@ -590,7 +599,9 @@ def test_the_bspline_kernel_gives_scipys_design_bits_inside_and_outside_the_knot
     knots = np.r_[[0.0] * (degree + 1), interior, [1.0] * (degree + 1)]
     x = np.r_[rng.uniform(-0.5, 1.5, 300), knots, 0.0, 1.0]
     reference = BSpline.design_matrix(x, knots, degree, extrapolate=True).toarray()
-    np.testing.assert_array_equal(_basis_kernels.bspline_dense(x, knots, degree), reference)
+    _assert_rows_agree_to_rounding(
+        _basis_kernels.bspline_dense(x, knots, degree), reference, degree
+    )
 
 
 @pytest.mark.parametrize("degree", [1, 2, 3, 4])
@@ -600,10 +611,8 @@ def test_the_python_bspline_rows_are_the_kernels_rows_and_scipys_to_rounding(
 ):
     """A quote's rows are the kernel's bits (both run the same unfused operations in one order).
 
-    SciPy's own build may fuse a multiply and an add where the platform's compiler does, so
-    against SciPy the rows agree to a few ``u`` rather than in bits. Mutation check: dividing
-    through a reciprocal, ``step = p * (1 / (xb - xa))``, changes a share of the rows by an ulp
-    from the kernel's and fails the first assertion.
+    Mutation check: dividing through a reciprocal, ``step = p * (1 / (xb - xa))``, changes a
+    share of the rows by an ulp from the kernel's and fails the first assertion.
     """
     rng = np.random.default_rng(degree + 10)
     interior = np.sort(rng.uniform(0.0, 1.0, 7))
@@ -614,7 +623,7 @@ def test_the_python_bspline_rows_are_the_kernels_rows_and_scipys_to_rounding(
     rows = _basis_kernels.bspline_dense_python(x, knots, degree)
     np.testing.assert_array_equal(rows, _basis_kernels.bspline_dense(x, knots, degree))
     reference = BSpline.design_matrix(x, knots, degree, extrapolate=True).toarray()
-    np.testing.assert_allclose(rows, reference, rtol=0.0, atol=8 * (degree + 1) * U)
+    _assert_rows_agree_to_rounding(rows, reference, degree)
 
 
 def test_the_python_cardinal_rows_are_the_kernels_rows_and_the_numpy_evaluation_to_rounding():
