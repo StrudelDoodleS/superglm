@@ -28,11 +28,15 @@ For each operation and the place that called it:
 - the seconds the operation took itself, with the operations it called inside
   it taken out;
 - **repeat**: calls whose input is one that operation has already had: the same
-  arrays bit for bit, the same numbers and strings, and the same objects (a
-  design or a context; the ledger tells objects apart without their memory
-  addresses, so a count does not depend on where Python places an object). A
-  call that is handed a new settings object each time is never a repeat, and a
-  `dict` is compared by its type alone, so a repeat count is a floor;
+  arrays bit for bit, the same numbers, strings and NumPy scalars, and the same
+  objects (a design or a context; the ledger tells objects apart without their
+  memory addresses, so a count does not depend on where Python places an
+  object). An argument that only carries state or output, such as a per-solve
+  settings record or a counter dictionary, is left out of the input where the
+  entry in `TARGETS` says so, so a call handed a new one each time is still a
+  repeat. A call with an argument that can be neither compared by value nor
+  weakly referenced (a `dict`, say) is never a repeat: it is counted in the
+  `uncounted` field of its row, so a repeat count is a floor;
 - **update**: calls whose input differs from the previous call at the same place
   by one row or column (a row and its column, for a symmetric matrix), or by
   one bordering row and column. An update of the earlier result costs about
