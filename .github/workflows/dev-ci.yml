@@ -247,9 +247,10 @@ jobs:
       - name: Run the tests this pull request adds or changes against the base commit's src/
         run: |
           # The checkout is the pull request's merge commit, whose first parent is the base.
-          # The script pins every thread pool the repository's own test runner pins. The output
-          # streams to the log and to fix-tests.txt, and `timeout` ends a hang on base well
-          # inside the job's limit, so the summary below is written whatever happened.
+          # The script pins every thread pool the repository's own test runner pins. Its run on
+          # base stops at its own limit (20 minutes), reports what it collected and exits 2; the
+          # output streams to the log and to fix-tests.txt, and `timeout` is the backstop inside
+          # the job's limit, so the summary below is written whatever happened.
           set -o pipefail
           status=0
           timeout --kill-after=60s 30m \

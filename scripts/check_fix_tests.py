@@ -34,20 +34,26 @@ read from the test's own decorators, its enclosing classes' decorators and ``pyt
 ``pytest.param`` pins no test, so mark the whole test. A pull request with no ``src/``
 change has nothing to check, and exits 0.
 
+The run on base stops after ``--timeout`` seconds (default 1200, inside the workflow's
+``timeout`` wrapper) with its process tree killed. The check then prints what it collected,
+none of it judged, and exits 2.
+
 Exit status: 0 nothing to check or nothing flagged (or ``--report-only``), 1 a test is
-flagged, 2 the check itself could not run.
+flagged, 2 the check itself could not run (a timeout included).
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import fnmatch
 import io
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -61,10 +67,17 @@ ROOT = Path(__file__).resolve().parents[1]
 TEST_FILES = ("test_*.py", "*_test.py")
 PYTEST_ERRORS = {2, 3, 4}  # interrupted, internal error, usage error; 5 is "nothing collected"
 SHOWN = 20
+RUN_TIMEOUT = 1200  # seconds for the run on base; the workflow's `timeout` wrapper is 30 minutes
+COLLECT_TIMEOUT = 300  # seconds for collecting on base
+TIMED_OUT = 124  # the status coreutils' `timeout` returns; pytest's own are 0 to 5
 
 
 class CheckError(Exception):
     """The check could not run; the message says why."""
+
+
+class RunTimeoutError(CheckError):
+    """The run on base outlived its limit."""
 
 
 @dataclass(frozen=True)
@@ -207,10 +220,37 @@ def base_tree(root: Path, merge_base: str, head: str, where: Path, package: str)
     return env
 
 
-def pytest_run(where: Path, env, *args: str) -> subprocess.CompletedProcess:
+def _own_group() -> dict:
+    """``Popen`` options that put the child at the root of a process group it can be killed by."""
+    return {} if sys.platform == "win32" else {"start_new_session": True}
+
+
+def _kill_tree(child: subprocess.Popen) -> None:
+    """Kill ``child`` and every process it started, then reap it."""
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(child.pid)], capture_output=True, check=False
+        )
+    else:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(child.pid, signal.SIGKILL)
+    if child.poll() is None:
+        child.kill()
+    child.wait()
+
+
+def pytest_run(where: Path, env, *args: str, timeout: float) -> subprocess.CompletedProcess:
+    """Run pytest in ``where``; ``returncode`` is ``TIMED_OUT`` when it outlived ``timeout`` seconds.
+
+    The output goes to files, not pipes: a pipe stays open while any process the run started
+    holds it (an xdist worker, a test's own subprocess), so reading it after a kill would wait
+    for them. The whole process tree is killed, so none outlives the check, and the run is
+    unbuffered, so what it printed before the kill is not lost.
+    """
     # The repository's addopts carry -v, which turns -q's one id per line into a tree.
     command = [
         sys.executable,
+        "-u",
         "-m",
         "pytest",
         "-p",
@@ -220,7 +260,23 @@ def pytest_run(where: Path, env, *args: str) -> subprocess.CompletedProcess:
         "-q",
         *args,
     ]
-    return subprocess.run(command, cwd=where, env=env, capture_output=True, text=True, check=False)
+    with (
+        tempfile.TemporaryFile("w+", errors="replace") as out,
+        tempfile.TemporaryFile("w+", errors="replace") as err,
+    ):
+        child = subprocess.Popen(
+            command, cwd=where, env=env, stdout=out, stderr=err, **_own_group()
+        )
+        try:
+            status = child.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            status = TIMED_OUT
+        finally:
+            if child.poll() is None:  # a timeout or an interrupt: nothing it started outlives it
+                _kill_tree(child)
+        out.seek(0)
+        err.seek(0)
+        return subprocess.CompletedProcess(command, status, out.read(), err.read())
 
 
 def _output(done: subprocess.CompletedProcess) -> str:
@@ -228,21 +284,48 @@ def _output(done: subprocess.CompletedProcess) -> str:
     return "\n".join(part[-2000:] for part in (done.stdout, done.stderr) if part.strip())
 
 
-def _error_lines(text: str) -> list[str]:
-    return [line[1:].strip() for line in text.splitlines() if line.startswith("E ")]
+def _error_head(text: str) -> str:
+    """The line of a report that names its exception: ``Type: message``, else ``assert ...``.
+
+    Pytest marks every line of the exception text with ``E``, a message that spans lines
+    included, so the last ``E`` line may be the tail of a message. The final exception is the
+    last unbroken run of ``E`` lines, and the first of its lines that starts ``Type:`` is its
+    header (a ``SyntaxError`` prints its source line before it); a plain ``assert`` has none.
+    """
+    runs: list[list[str]] = []
+    follows = False
+    for line in text.splitlines():
+        marked = re.match(r"E(\s|$)", line) is not None
+        if marked:
+            if not follows:
+                runs.append([])
+            runs[-1].append(line[1:].strip())
+        follows = marked
+    if not runs:
+        return ""
+    return next((line for line in runs[-1] if _names_exception(line)), runs[-1][0])
 
 
-def _last_error_line(text: str) -> str:
-    lines = _error_lines(text)
-    return lines[-1] if lines else "collection failed"
+def _names_exception(line: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z_][\w.]*", line.split(":", 1)[0].strip()))
 
 
 def collect_on_base(where, env, paths):
     """The function ids pytest finds per module, the modules that fail to import, and the
     modules that skip themselves at collection (with the reason)."""
     done = pytest_run(
-        where, env, "--collect-only", "--continue-on-collection-errors", "-rs", *paths
+        where,
+        env,
+        "--collect-only",
+        "--continue-on-collection-errors",
+        "-rs",
+        *paths,
+        timeout=COLLECT_TIMEOUT,
     )
+    if done.returncode == TIMED_OUT:
+        raise CheckError(
+            f"collection on base timed out after {COLLECT_TIMEOUT} s:\n{_output(done)}"
+        )
     if done.returncode in PYTEST_ERRORS:
         raise CheckError(f"collection on base exited {done.returncode}:\n{_output(done)}")
     ids = {
@@ -251,9 +334,13 @@ def collect_on_base(where, env, paths):
         if re.match(r"\S+\.py::", line)
     }
     parts = re.split(r"_+ ERROR collecting (\S+) _+\n", done.stdout)
-    broken = {path: _last_error_line(text) for path, text in zip(parts[1::2], parts[2::2])}
+    broken = {
+        path: _error_head(text) or "collection failed"
+        for path, text in zip(parts[1::2], parts[2::2])
+    }
     skipped = {
-        match[1]: match[2]
+        # a node id always has "/", but the location of a skip is a path, and a Windows one has "\"
+        match[1].replace("\\", "/"): match[2]
         for match in re.finditer(r"^SKIPPED \[\d+\] (\S+?\.py):\d+: (.*)$", done.stdout, re.M)
     }
     if not ids and not set(paths) <= broken.keys() | skipped.keys():
@@ -270,16 +357,15 @@ def _kind(message: str) -> str:
 
 
 def _failure_kind(outcome: ET.Element) -> str:
-    """The kind of a failing or erroring case, from the last ``E`` line of its report: that line
+    """The kind of a failing or erroring case, from the exception text of its report: that text
     names the exception of a setup error and ends a custom assertion message, which pytest's
     one-line ``message`` attribute does not do for either."""
-    lines = _error_lines(outcome.text or "")
-    return _kind(lines[-1] if lines else outcome.get("message", ""))
+    return _kind(_error_head(outcome.text or "") or outcome.get("message", ""))
 
 
-def run_on_base(where, env, ids, pytest_args):
+def run_on_base(where, env, ids, pytest_args, timeout):
     """``{(path, id): (status, kind)}`` for ``ids`` from one junit report; status is
-    ``fails``, ``passes`` or ``skipped``."""
+    ``fails``, ``passes`` or ``skipped``. Raises ``RunTimeoutError`` after ``timeout`` seconds."""
     report = where / "base-junit.xml"
     modules = {path[:-3].replace("/", "."): path for path, _ in ids}
     nodes = sorted(f"{path}::{name}" for path, name in ids)
@@ -291,7 +377,10 @@ def run_on_base(where, env, ids, pytest_args):
         "not docs and not browser and not threads",
         *pytest_args,
         *nodes,
+        timeout=timeout,
     )
+    if done.returncode == TIMED_OUT:
+        raise RunTimeoutError(f"the run on base timed out after {timeout:g} s:\n{_output(done)}")
     if done.returncode in PYTEST_ERRORS or not report.exists():
         raise CheckError(f"pytest on base exited {done.returncode}:\n{_output(done)}")
     cases: dict[tuple[str, str], list[tuple[str, str]]] = {}
@@ -319,8 +408,10 @@ def run_on_base(where, env, ids, pytest_args):
     return found
 
 
-def judge(selected, pinned, collected, broken, ran):
-    """``{(path, id): {"how": ..., "status": ..., "kind": ...}}`` for every selected test."""
+def judge(selected, pinned, collected, broken, ran, unfinished=frozenset()):
+    """``{(path, id): {"how": ..., "status": ..., "kind": ...}}`` for every selected test.
+
+    ``unfinished`` holds the tests a run that timed out was sent, which it did not judge."""
     verdicts = {}
     for key, how in selected.items():
         path = key[0]
@@ -328,6 +419,8 @@ def judge(selected, pinned, collected, broken, ran):
             status, kind = "fails", _kind(broken[path])
         elif key not in collected:
             status, kind = "not_collected", ""
+        elif key in unfinished:
+            status, kind = "timed_out", ""
         elif key not in ran:
             status, kind = "not_run", ""
         else:
@@ -361,8 +454,7 @@ def render(verdicts, notes, merge_base, head) -> str:
         f"  pass on base, pins_behaviour .. {sum(verdicts[k]['pinned'] and verdicts[k]['status'] == 'passes' for k in verdicts)}",
         f"  pass on base, unmarked ........ {len(flagged)}",
         f"  skipped on base ............... {len(by_status.get('skipped', []))}",
-        f"  not run or not collected ...... "
-        f"{len(by_status.get('not_run', [])) + len(by_status.get('not_collected', []))}",
+        f"  not run, not collected, timed out {sum(len(by_status.get(s, [])) for s in ('not_run', 'not_collected', 'timed_out'))}",
         *notes,
     ]
     if kinds:
@@ -381,6 +473,7 @@ def render(verdicts, notes, merge_base, head) -> str:
     for status, title in (
         ("skipped", "skipped on base"),
         ("not_run", "not run (docs, browser, threads)"),
+        ("timed_out", "collected, not judged: the run on base timed out"),
     ):
         for key in by_status.get(status, [])[:SHOWN]:
             lines.append(f"  {title}: {label(key)}")
@@ -409,6 +502,7 @@ def check(args) -> int:
     if not selected:
         print("no test added or changed: nothing to check")
         return 0
+    timed_out = None
     with tempfile.TemporaryDirectory(prefix="fix-tests-") as scratch:
         where = Path(scratch) / "tree"
         try:
@@ -420,17 +514,27 @@ def check(args) -> int:
                 for path, reason in sorted(skipped.items())
             ]
             good = {key for key in selected if key in collected and key[0] not in broken}
-            ran = run_on_base(where, env, good, args.pytest_args) if good else {}
+            ran = {}
+            if good:
+                try:
+                    ran = run_on_base(where, env, good, args.pytest_args, args.timeout)
+                except RunTimeoutError as error:
+                    timed_out = error
+                    notes.append(
+                        f"the run on base timed out after {args.timeout:g} s: no test was judged"
+                    )
         finally:
             if where.exists():
                 git(root, "worktree", "remove", "--force", str(where))
-    verdicts = judge(selected, pinned, collected, broken, ran)
+    verdicts = judge(selected, pinned, collected, broken, ran, good if timed_out else frozenset())
     print(render(verdicts, notes, merge_base, head))
     if args.json:
         rows = [{"test": f"{p}::{n}", **v} for (p, n), v in sorted(verdicts.items())]
         Path(args.json).write_text(
             json.dumps({"head": head, "merge_base": merge_base, "tests": rows}, indent=1)
         )
+    if timed_out:
+        raise timed_out  # after the report: the check ends as one that could not run
     flagged = any(verdict["flagged"] for verdict in verdicts.values())
     return 1 if flagged and not args.report_only else 0
 
@@ -443,6 +547,13 @@ def main(argv=None) -> int:
     parser.add_argument("--package", default="superglm", help="the package under src/")
     parser.add_argument("--report-only", action="store_true", help="print the flags, exit 0")
     parser.add_argument("--json", help="write every verdict to this file")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=RUN_TIMEOUT,
+        help="seconds the run of the selected tests on base may take (default: %(default)s); "
+        "the check then reports what it collected and exits 2",
+    )
     parser.add_argument("pytest_args", nargs="*", help="after `--`: extra arguments for pytest")
     try:
         return check(parser.parse_args(argv))

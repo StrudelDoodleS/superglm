@@ -1,20 +1,26 @@
-"""scripts/check_fix_tests.py: which tests it selects, and what it says about each one."""
+"""scripts/check_fix_tests.py: which tests it selects, and what it says about each one.
+
+The script is not under ``src/``, so the base run cannot fail these tests: each carries
+``pins_behaviour`` itself, and a test added here later must say so too.
+"""
 
 from __future__ import annotations
 
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
+import yaml
 
-pytestmark = pytest.mark.pins_behaviour  # the script is not under src/, so base cannot fail them
-
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "check_fix_tests.py"
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts" / "check_fix_tests.py"
 _spec = importlib.util.spec_from_file_location("check_fix_tests", SCRIPT)
 check_fix_tests = importlib.util.module_from_spec(_spec)
 sys.modules["check_fix_tests"] = check_fix_tests  # dataclasses resolve their module by name
@@ -25,6 +31,7 @@ def _tests(source: str):
     return check_fix_tests.collect_tests(textwrap.dedent(source))
 
 
+@pytest.mark.pins_behaviour
 def test_a_test_is_selected_only_when_its_own_source_changes():
     before = _tests(
         '''
@@ -78,6 +85,7 @@ def test_a_test_is_selected_only_when_its_own_source_changes():
     assert {name for name in before if before[name].digest != changed[name].digest} == set(before)
 
 
+@pytest.mark.pins_behaviour
 def test_the_marker_counts_on_a_test_a_class_or_the_module():
     on_test = _tests("@pytest.mark.pins_behaviour\ndef test_a(): pass\ndef test_b(): pass")
     on_class = _tests("@pytest.mark.pins_behaviour\nclass TestC:\n    def test_a(self): pass")
@@ -91,6 +99,7 @@ def test_the_marker_counts_on_a_test_a_class_or_the_module():
     assert not other_mark["test_a"].pinned
 
 
+@pytest.mark.pins_behaviour
 def test_the_marker_is_read_from_the_marks_a_test_has_not_from_what_a_decorator_mentions():
     tests = _tests(
         """
@@ -226,6 +235,7 @@ def _run(repo: Path, base: str, *extra: str, env=None):
     )
 
 
+@pytest.mark.pins_behaviour
 def test_a_vacuous_test_is_flagged_and_every_other_outcome_is_told_apart(tmp_path):
     repo, base = _repo(
         tmp_path,
@@ -262,6 +272,7 @@ def test_a_vacuous_test_is_flagged_and_every_other_outcome_is_told_apart(tmp_pat
     assert report_only.returncode == 0 and "FLAGGED: 2 test(s)" in report_only.stdout
 
 
+@pytest.mark.pins_behaviour
 def test_a_pull_request_with_nothing_to_check_passes(tmp_path):
     no_tests, base = _repo(tmp_path / "a", {"src/tiny/__init__.py": _FIXED_SRC})
     no_src, base_two = _repo(tmp_path / "b", {"tests/test_new.py": _NEW_TESTS})
@@ -277,6 +288,7 @@ def test_a_pull_request_with_nothing_to_check_passes(tmp_path):
     assert _run(unchanged, base_three).returncode == 0
 
 
+@pytest.mark.pins_behaviour
 def test_the_base_run_imports_the_merge_bases_src_and_refuses_any_other(tmp_path):
     repo, base = _repo(
         tmp_path,
@@ -295,6 +307,7 @@ def test_the_base_run_imports_the_merge_bases_src_and_refuses_any_other(tmp_path
     assert refused.returncode == 2 and "resolves to" in refused.stderr
 
 
+@pytest.mark.pins_behaviour
 def test_the_repositorys_own_pytest_options_do_not_change_what_the_check_reads(tmp_path):
     """``addopts = -v`` turns ``--collect-only -q`` into a tree of modules, not one id per line."""
     repo, base = _repo(
@@ -311,6 +324,7 @@ def test_the_repositorys_own_pytest_options_do_not_change_what_the_check_reads(t
     assert done.returncode == 0
 
 
+@pytest.mark.pins_behaviour
 def test_a_module_that_skips_itself_at_collection_is_reported_and_never_counted(tmp_path):
     repo, base = _repo(
         tmp_path,
@@ -329,6 +343,7 @@ def test_a_module_that_skips_itself_at_collection_is_reported_and_never_counted(
     assert "tests/test_optional.py::test_needs_it (added)" in done.stdout
 
 
+@pytest.mark.pins_behaviour
 def test_a_setup_error_is_filed_under_its_exception_and_not_as_an_assertion(tmp_path):
     repo, base = _repo(
         tmp_path,
@@ -338,7 +353,8 @@ def test_a_setup_error_is_filed_under_its_exception_and_not_as_an_assertion(tmp_
                 "import pytest\n\n\n@pytest.fixture\ndef triple():\n"
                 "    from tiny import triple\n\n    return triple\n\n\n"
                 "def test_setup_error(triple):\n    assert triple(1) == 3\n\n\n"
-                'def test_custom_message():\n    ok = False\n    assert ok, "coefficients: drifted"\n'
+                'def test_custom_message():\n    ok = False\n    assert ok, "coefficients: drifted"\n\n\n'
+                'def test_multiline_message():\n    raise ValueError("no fit\\nreason: singular")\n'
             ),
         },
     )
@@ -348,9 +364,14 @@ def test_a_setup_error_is_filed_under_its_exception_and_not_as_an_assertion(tmp_
         row["test"].split("::")[1]: row["kind"] for row in json.loads(report.read_text())["tests"]
     }
 
-    assert kinds == {"test_setup_error": "ImportError", "test_custom_message": "AssertionError"}
+    assert kinds == {
+        "test_setup_error": "ImportError",
+        "test_custom_message": "AssertionError",
+        "test_multiline_message": "ValueError",  # not "reason", the tail of the message
+    }
 
 
+@pytest.mark.pins_behaviour
 def test_threads_tests_are_not_run_and_the_pools_are_pinned(tmp_path):
     pools = "OMP_NUM_THREADS OPENBLAS_NUM_THREADS MKL_NUM_THREADS NUMBA_NUM_THREADS".split()
     pools += "VECLIB_MAXIMUM_THREADS BLIS_NUM_THREADS NUMEXPR_NUM_THREADS SUPERGLM_N_JOBS".split()
@@ -386,6 +407,7 @@ def test_threads_tests_are_not_run_and_the_pools_are_pinned(tmp_path):
     }
 
 
+@pytest.mark.pins_behaviour
 def test_a_collection_that_fails_on_base_says_why_on_stderr(tmp_path):
     repo, base = _repo(
         tmp_path,
@@ -401,3 +423,118 @@ def test_a_collection_that_fails_on_base_says_why_on_stderr(tmp_path):
     assert (
         "collection on base exited" in done.stderr and "cannot import name 'triple'" in done.stderr
     )
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("separator", ["/", "\\"], ids=["posix", "windows"])
+def test_a_skip_at_collection_is_matched_to_gits_path_whichever_slash_pytest_writes(
+    monkeypatch, separator
+):
+    """Pytest prints the location of a skip as a path, so a Windows run writes ``tests\\sub\\x.py``."""
+    location = separator.join(["tests", "sub", "test_optional.py"])
+    output = f"SKIPPED [1] {location}:3: could not import 'nothing': No module named 'nothing'\n"
+    monkeypatch.setattr(
+        check_fix_tests,
+        "pytest_run",
+        lambda *args, **kwargs: subprocess.CompletedProcess([], 0, output, ""),
+    )
+
+    ids, broken, skipped = check_fix_tests.collect_on_base(
+        Path("."), {}, ["tests/sub/test_optional.py"]
+    )
+
+    assert (ids, broken) == (set(), {})
+    assert skipped == {
+        "tests/sub/test_optional.py": "could not import 'nothing': No module named 'nothing'"
+    }
+
+
+@pytest.mark.pins_behaviour
+def test_a_collection_that_outlives_its_limit_is_a_check_that_could_not_run(monkeypatch):
+    timed_out = subprocess.CompletedProcess([], check_fix_tests.TIMED_OUT, "", "")
+    monkeypatch.setattr(check_fix_tests, "pytest_run", lambda *args, **kwargs: timed_out)
+
+    with pytest.raises(check_fix_tests.CheckError, match="collection on base timed out"):
+        check_fix_tests.collect_on_base(Path("."), {}, ["tests/test_x.py"])
+
+
+@pytest.mark.pins_behaviour
+def test_the_exception_is_named_by_the_header_of_the_last_block_of_error_lines():
+    head = check_fix_tests._error_head
+    context = 'E     File "m.py", line 1\nE       x = (\nE           ^\nE   SyntaxError: invalid'
+
+    assert head("E   ValueError: no fit\nE   reason: singular") == "ValueError: no fit"
+    assert (
+        head("E   KeyError: 'a'\n\nDuring handling\n> raise\nE   ValueError: b") == "ValueError: b"
+    )
+    assert head(context) == "SyntaxError: invalid"  # its source lines come first
+    assert head("E   assert 1 == 2\nE    +  where 1 = f()") == "assert 1 == 2"
+    assert head("E   AssertionError: drifted\nE   assert False") == "AssertionError: drifted"
+    assert (
+        head("E   ValueError: a\nE\nE   tail: b") == "ValueError: a"
+    )  # a blank line of the message
+    assert head("nothing marked") == ""
+
+
+def _is_running(pid: int) -> bool:
+    if sys.platform == "win32":
+        listing = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True, check=False
+        ).stdout
+        return str(pid) in listing.split()
+    state = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    return bool(state) and not state.startswith("Z")  # a zombie has already died
+
+
+_HANGS = """
+import os
+import pathlib
+import subprocess
+import sys
+import time
+
+
+def test_never_finishes():
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    pathlib.Path(os.environ["FIX_TESTS_PIDFILE"]).write_text(str(sleeper.pid))
+    time.sleep(600)
+"""
+
+
+@pytest.mark.pins_behaviour
+def test_a_run_that_outlives_its_timeout_is_reported_and_leaves_no_process_behind(tmp_path):
+    """The test sleeps and starts a process of its own that sleeps too: both hold the run's
+    output, and both must be gone when the check returns."""
+    repo, base = _repo(
+        tmp_path, {"src/tiny/__init__.py": _FIXED_SRC, "tests/test_hangs.py": _HANGS}
+    )
+    pidfile, report = tmp_path / "sleeper.pid", tmp_path / "out.json"
+    environment = {**os.environ, "FIX_TESTS_PIDFILE": str(pidfile)}
+
+    done = _run(repo, base, "--timeout", "10", "--json", str(report), env=environment)
+    verdict = json.loads(report.read_text())["tests"][0]
+    sleeper = int(pidfile.read_text())
+    for _ in range(50):  # a killed process takes a moment to leave the process table
+        if not _is_running(sleeper):
+            break
+        time.sleep(0.1)
+
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert "the run on base timed out after 10 s" in done.stdout  # the report is printed first
+    assert "tests/test_hangs.py::test_never_finishes (added)" in done.stdout
+    assert "fix-test check could not run: the run on base timed out" in done.stderr
+    assert verdict["status"] == "timed_out" and not verdict["flagged"]
+    assert not _is_running(sleeper)
+
+
+@pytest.mark.pins_behaviour
+def test_the_scripts_own_limits_end_inside_the_workflows_timeout_wrapper():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/dev-ci.yml").read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["fix-tests"]["steps"]
+    run = next(step["run"] for step in steps if "check_fix_tests" in step.get("run", ""))
+    wrapper = 60 * int(re.search(r"timeout --kill-after=\d+s (\d+)m", run).group(1))
+
+    assert "--timeout" not in run  # the script's default applies
+    assert check_fix_tests.COLLECT_TIMEOUT + check_fix_tests.RUN_TIMEOUT < wrapper
