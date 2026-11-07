@@ -22,10 +22,21 @@ Each wrapped call is recorded under ``(operation, caller)``: its count, the
 largest input shape, a flop estimate, its own seconds (children subtracted)
 and two flags:
 
-* **repeated**: the input is one that operation has seen before: arrays equal
-  bit for bit, numbers and strings equal under the same argument name, other
-  objects the same object (CPython can reuse the address of a freed object, so
-  such an argument can make a repeat appear that is not one);
+* **repeated**: the input is one that operation has seen before.  A call's input is
+  its arrays, bit for bit (shape and dtype included), its numbers, strings and NumPy
+  scalars by value (also inside lists and tuples), and its other arguments by identity;
+  each is compared under the argument it was passed as.  Two calls are one input when every
+  argument matches.  Identity means the same live object: the ledger numbers each object
+  when it first sees it, and a number is never reused, so a new object is a different input
+  wherever CPython happens to place it and a count never depends on an address.  A target
+  may name ``carriers`` (``TARGETS`` says which and why): arguments that only steer how the
+  call computes or receive its output, such as a per-solve state or a counter dictionary.
+  They are left out of the input, so a call handed a new one each time is still a repeat.
+  An argument that can be neither compared by value nor weakly referenced (a ``dict``, a
+  slotted object) tells nothing apart, so a call that has one is never a repeat or an update
+  and is counted in the row's ``uncounted``.  The ledger does not read an object's state, so
+  a mutated object is the same input as before: a repeat count is a floor only as long as no
+  argument is mutated between calls;
 * **update candidate**: the input differs from the previous input at the same
   call site (file and line) by one row or column (a row and its column, for a symmetric
   matrix), or by one bordering row and column.  Such a result could have been
@@ -48,6 +59,7 @@ import inspect
 import sys
 import threading
 import time
+import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -188,7 +200,10 @@ def _moments_pass(first, args, kwargs, result):
 def _gram_pass(first, args, kwargs, result):
     design = kwargs.get("dm")
     channels = len(kwargs["weights"]) if "weights" in kwargs else 1
-    if design is None:
+    # A rung that declines before any pass costs nothing. One whose raw moments a certificate
+    # rejected made the pass first, and ``rejected.source`` names the rung that made it.
+    made_a_pass = result is not None or getattr(kwargs.get("rejected"), "source", None) is not None
+    if design is None or not made_a_pass:
         return 0.0
     return float(design.n) * design.p * (design.p + 1) * channels
 
@@ -234,6 +249,7 @@ class _Target:
     role: str = LIBRARY
     also: tuple[str, ...] = ()  # compiled twins of a scipy.linalg module, by short name
     input: str | None = None  # keyword whose array is hashed; default: the first array argument
+    carriers: tuple[str, ...] = ()  # arguments left out of a call's identity (see TARGETS)
 
     @property
     def kind(self) -> str:
@@ -302,7 +318,6 @@ PHASES = (
     ("superglm.reml.direct", "optimize_direct_reml"),
     ("superglm.reml.w_derivatives", "reml_w_correction"),
     ("superglm.solvers.irls_direct._fit", "fit_irls_direct"),
-    ("superglm.solvers.centered_system", "build_centered_system"),
     ("superglm.solvers.mode_score", "penalized_mode_residual"),
     ("superglm.model.reml_finalize", "finalize_reml_fit"),
     ("superglm.distributional.predictor", "compile_predictors"),
@@ -318,6 +333,22 @@ _LSS_ASSEMBLY = "superglm.distributional.solver.assembly"
 
 #: Entry points the ledger wraps.  A fit that reaches a new expensive routine
 #: gets it added here; ``test_work_ledger`` checks that every entry resolves.
+#:
+#: ``carriers`` names the arguments of a target that stay out of a call's identity: an object
+#: that steers *how* a call computes (which accurate route serves it, a cache of what does not
+#: depend on the weights) or receives something from it (counters, rejected moments), and so
+#: differs from one call to the next while the call computes the same thing.  An object that can
+#: change *what* is computed (a design, a context, a layout, a state handed in to be reused)
+#: is not a carrier.  Decided per target from the code:
+#:
+#: * ``packed_centered_gram_rhs``: ``rejected`` is written, never read; ``state`` latches which
+#:   rung served an earlier build, and every rung forms the same centred Gram.
+#: * ``build_centered_system``: ``tabmat_state`` as above, ``profile`` is a counter dict.
+#: * ``MatrixExecutionPlan.moments``: ``profile`` as above; ``_factors`` holds weight-free
+#:   products of fixed design factors.
+#: * ``_signed_moments_channels``: ``owner`` is a cache; its channels equal the no-owner ones bit
+#:   for bit.
+#: * No other pass has a carrier: ``dm``, contexts, layouts and ``prepared`` decide what is read.
 TARGETS: tuple[_Target, ...] = (
     *_library("numpy.linalg", _NUMPY),
     *_library("scipy.linalg", _SCIPY),
@@ -333,14 +364,15 @@ TARGETS: tuple[_Target, ...] = (
         "moments",
         _moments_pass,
         PASS,
+        carriers=("profile", "_factors"),
     ),
     *(
-        _Target(_CENTERED, name, _gram_pass, PASS, input=key)
-        for name, key in (
-            ("centered_gram_rhs", "W"),
-            ("packed_centered_gram_rhs", "W"),
-            ("anchor_support_centered_gram_rhs", "W"),
-            ("centered_signed_grams", "weights"),
+        _Target(_CENTERED, name, _gram_pass, PASS, input=key, carriers=carriers)
+        for name, key, carriers in (
+            ("centered_gram_rhs", "W", ()),
+            ("packed_centered_gram_rhs", "W", ("state", "rejected")),
+            ("anchor_support_centered_gram_rhs", "W", ()),
+            ("centered_signed_grams", "weights", ()),
         )
     ),
     _Target(_LSS_SOLVER, "_evaluate_state_unmeasured", _lss_evaluation, PASS),
@@ -351,10 +383,18 @@ TARGETS: tuple[_Target, ...] = (
         "_signed_moments_channels",
         _signed_channels_pass,
         PASS,
+        carriers=("owner",),
     ),
     _Target(_MODE_SCORE, "column_sums", _column_sums_pass, PASS, input="magnitudes"),
     _Target(_MODE_SCORE, "centred_matvec", _matvec_pass, PASS),
     *(_Target(module, name, _no_flops, COMPOSITE) for module, name in PHASES),
+    _Target(
+        "superglm.solvers.centered_system",
+        "build_centered_system",
+        _no_flops,
+        COMPOSITE,
+        carriers=("tabmat_state", "profile"),
+    ),
     _Target("superglm.group_matrix:DesignMatrix", "matvec", _matvec_pass, PASS),
     _Target("superglm.group_matrix:DesignMatrix", "rmatvec", _matvec_pass, PASS),
 )
@@ -374,6 +414,7 @@ class LedgerRow:
     flops: float = 0.0
     largest_shape: tuple[int, ...] = ()
     untracked: int = 0
+    uncounted: int = 0  # calls with an argument that cannot be identified: never a repeat
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -387,7 +428,50 @@ class LedgerRow:
             "flops": self.flops,
             "largest_shape": list(self.largest_shape),
             "untracked": self.untracked,
+            "uncounted": self.uncounted,
         }
+
+
+class _Objects:
+    """Numbers the objects a recorded call receives, in order of first sight, without their addresses.
+
+    A number belongs to one live object and is never issued twice: the weak reference
+    forgets the entry when the object dies, so a later object gets a new number whatever
+    address it lands on.  ``id`` only picks a bucket; objects are told apart with ``is``,
+    so buckets that collide change no number.
+    """
+
+    def __init__(self) -> None:
+        self._buckets: dict[int, list[tuple[weakref.ref, int]]] = {}
+        self._issued = 0
+        self._lock = threading.RLock()  # a weakref callback can run inside ``number``
+
+    def number(self, obj: object) -> int | None:
+        """The object's number, or ``None`` if it cannot be weakly referenced."""
+        key = id(obj)
+        with self._lock:
+            for ref, number in tuple(self._buckets.get(key, ())):
+                if ref() is obj:
+                    return number
+            try:
+                ref = weakref.ref(obj, functools.partial(self._forget, key))
+            except TypeError:
+                return None
+            self._issued += 1
+            self._buckets.setdefault(key, []).append((ref, self._issued))
+            return self._issued
+
+    def _forget(self, key: int, dead: weakref.ref) -> None:
+        with self._lock:
+            bucket = [entry for entry in self._buckets.get(key, ()) if entry[0] is not dead]
+            if bucket:
+                self._buckets[key] = bucket
+            else:
+                self._buckets.pop(key, None)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._buckets.clear()
 
 
 @dataclass
@@ -408,6 +492,7 @@ class WorkLedger:
     _seen: dict[str, dict[bytes, None]] = field(default_factory=dict, repr=False)
     _last: dict[tuple, np.ndarray] = field(default_factory=dict, repr=False)
     _last_bytes: int = field(default=0, repr=False)
+    _objects: _Objects = field(default_factory=_Objects, repr=False)
     _owner: int = field(default=0, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -490,7 +575,7 @@ class WorkLedger:
     # -- recording ---------------------------------------------------------
 
     def _record(self, target, prepared, result, seconds):
-        first, cost_input, tag, caller, via, where = prepared
+        first, cost_input, tag, caller, via, where, uncounted = prepared
         shape = tuple(first.shape) if first is not None else ()
         flops = target.cost(first, *cost_input, result)
         digest, snapshot, oversize = tag
@@ -503,6 +588,7 @@ class WorkLedger:
             row.count += 1
             row.seconds += seconds
             row.flops += flops
+            row.uncounted += uncounted
             if np.prod(shape, dtype=float) >= np.prod(row.largest_shape, dtype=float):
                 row.largest_shape = shape
             if digest is None:
@@ -524,6 +610,7 @@ class WorkLedger:
         self._last.clear()
         self._last_bytes = 0
         self._seen.clear()
+        self._objects.clear()
 
     def _keep(self, site, snapshot) -> None:
         old = self._last.pop(site, None)
@@ -648,48 +735,71 @@ _ACTIVE: WorkLedger | None = None
 _STATE = _State()
 
 
-def _inputs(pairs, named: Any = None):
-    """``(arrays, tokens, first)`` from ``(label, value)`` pairs: labelled arrays, a token per other value.
+_BY_VALUE = (bool, int, float, complex, str, bytes, type(None), slice, range, type(Ellipsis))
+_NESTING = 3  # levels of lists and tuples read; a container deeper than that is not identified
 
-    A list or tuple contributes its arrays.  The label (a position or a keyword) is part of
-    the digest, so the same value under another keyword is another input.  Numbers and
-    strings enter by value (``mode="r"`` is a different operation) and other objects by
-    identity.  ``first`` is the array update detection compares: ``named`` when given, else
-    the first array.
+
+def _inputs(pairs, named: Any = None, objects: _Objects | None = None, carriers=()):
+    """``(arrays, tokens, first, identified)`` from ``(label, value)`` pairs.
+
+    Arrays are labelled; every other value gives a token.  A list or tuple contributes its items,
+    to ``_NESTING`` levels.  The label (a position or a keyword) is part of the digest, so the same
+    value under another keyword is another input; an argument named in ``carriers`` is left out.
+    Numbers, strings and the other plain values (``mode="r"`` is a different operation), and NumPy
+    scalars (by dtype and value), enter by value; any other object by its number in ``objects``.
+    ``identified`` is false when a value is none of these (a ``dict``, a ``set``, a slotted object
+    that cannot be weakly referenced): no token tells it from another, so the call cannot be
+    compared.  ``first`` is the array update detection compares: ``named`` when given, else the
+    first array.
     """
+    objects = objects if objects is not None else _Objects()
     arrays: list[tuple[str, np.ndarray]] = []
     tokens: list[str] = []
+    identified = True
+
+    def read(tag: str, item: Any, depth: int) -> None:
+        nonlocal identified
+        if isinstance(item, np.ndarray):
+            arrays.append((tag, item))
+        elif isinstance(item, (list, tuple)) and depth < _NESTING:
+            for j, part in enumerate(item):
+                read(f"{tag}[{j}]", part, depth + 1)
+        elif isinstance(item, np.generic):
+            tokens.append(f"{tag}={item.dtype.str}:{item.item()!r}")
+        elif isinstance(item, _BY_VALUE):
+            tokens.append(f"{tag}={item!r}")
+        elif (number := objects.number(item)) is not None:
+            tokens.append(f"{tag}={type(item).__name__}#{number}")
+        else:
+            identified = False
+
     for label, value in pairs:
-        many = isinstance(value, (list, tuple))
-        for j, item in enumerate(value if many else (value,)):
-            tag = f"{label}[{j}]" if many else str(label)
-            if isinstance(item, np.ndarray):
-                arrays.append((tag, item))
-            elif isinstance(item, (bool, int, float, str, type(None))):
-                tokens.append(f"{tag}={item!r}")
-            else:
-                tokens.append(f"{tag}={type(item).__name__}@{id(item)}")
+        if label not in carriers:
+            read(str(label), value, 0)
     if isinstance(named, (list, tuple)) and named:
         named = named[0]
     first = named if isinstance(named, np.ndarray) else (arrays[0][1] if arrays else None)
-    return arrays, tokens, first
+    return arrays, tokens, first, identified
 
 
-def _prepare(target: _Target, signature, args, kwargs):
+def _prepare(ledger: WorkLedger, target: _Target, signature, args, kwargs):
     """What one call needs recorded, read before the call (which may overwrite its inputs)."""
     if signature is None:
         cost_input = (args, kwargs)
-        arrays, tokens, first = _inputs([*enumerate(args), *kwargs.items()])
+        pairs, named = [*enumerate(args), *kwargs.items()], None
     else:
         bound = signature.bind_partial(*args, **kwargs).arguments
         cost_input = ((), bound)
-        arrays, tokens, first = _inputs(bound.items(), bound.get(target.input))
+        pairs, named = bound.items(), bound.get(target.input)
+    arrays, tokens, first, identified = _inputs(pairs, named, ledger._objects, target.carriers)
+    # An input that cannot be identified is never compared, so it is never a repeat or an update.
+    tag = _fingerprint(arrays, tokens, first) if identified else (None, None, 0)
     caller, via, where = _callers()
-    return first, cost_input, _fingerprint(arrays, tokens, first), caller, via, where
+    return first, cost_input, tag, caller, via, where, bool(arrays) and not identified
 
 
 def _wrap(target: _Target, original):
-    signature = inspect.signature(original) if target.input is not None else None
+    signature = inspect.signature(original) if target.input or target.carriers else None
     hides = target.role != COMPOSITE
 
     @functools.wraps(original)
@@ -699,7 +809,7 @@ def _wrap(target: _Target, original):
             return original(*args, **kwargs)
         began = time.perf_counter()
         try:
-            prepared = _prepare(target, signature, args, kwargs)
+            prepared = _prepare(ledger, target, signature, args, kwargs)
         except Exception as error:  # a ledger fault must never change the fit
             ledger.errors.append(f"{target.kind}: {error!r}")
             return original(*args, **kwargs)

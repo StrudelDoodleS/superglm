@@ -27,8 +27,18 @@ For each operation and the place that called it:
   operations (flops);
 - the seconds the operation took itself, with the operations it called inside
   it taken out;
-- **repeat**: calls whose input is bit-for-bit one that operation has already
-  had;
+- **repeat**: calls whose input is one that operation has already had: the same
+  arrays bit for bit, the same numbers, strings and NumPy scalars, and the same
+  objects (a design or a context; the ledger tells objects apart without their
+  memory addresses, so a count does not depend on where Python places an
+  object). An argument that only carries state or output, such as a per-solve
+  settings record or a counter dictionary, is left out of the input where the
+  entry in `TARGETS` says so, so a call handed a new one each time is still a
+  repeat. A call with an argument that can be neither compared by value nor
+  weakly referenced (a `dict`, say) is never a repeat: it is counted in the
+  `uncounted` field of its row, so a repeat count is a floor, as long as no
+  argument is mutated between calls: the ledger does not read an object's
+  state, so a mutated object is the same input as before;
 - **update**: calls whose input differs from the previous call at the same place
   by one row or column (a row and its column, for a symmetric matrix), or by
   one bordering row and column. An update of the earlier result costs about
@@ -43,6 +53,10 @@ likelihood and Gram passes of a `SuperLSS` fit.
 
 - The flop figure for a pass over the rows counts it as a dense product, so it
   overstates a binned pass. Read it for ranking, and read the seconds for cost.
+  A Gram pass that declines before making a pass (returns `None`, and the caller
+  tries the next one) has no flops, so on a route that tries a pass first and
+  falls through, the report shows each pass that served and none of those. A
+  rung whose raw moments a certificate rejected did make the pass, and is charged it.
 - Eigensolver and SVD flops are order-of-magnitude constants.
 - Seconds are summed over threads, so a share can pass 100%.
 - The ledger hashes every input and keeps one copy of the last input at each

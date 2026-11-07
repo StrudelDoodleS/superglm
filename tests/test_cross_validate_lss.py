@@ -201,6 +201,91 @@ def test_a_level_only_in_a_held_out_fold_is_scored_and_the_model_is_left_alone()
         assert ("rare" in spec._pinned_levels) == (7 not in train)
 
 
+def _fold_levels(result):
+    """Each fold's level universe and base for ``region``, as its fit was bound to them."""
+    specs = (
+        fold._require_fitted().compiled_predictors[0].compiled.specs["region"]
+        for fold in result.estimators
+    )
+    return [
+        (None if spec._declared_levels is None else list(spec._declared_levels), spec._pinned_base)
+        for spec in specs
+    ]
+
+
+@pytest.mark.parametrize("label", [None, "zzz"], ids=["a missing label", "a label seen only there"])
+def test_levels_are_bound_on_the_rows_the_fit_keeps(label):
+    # A fit drops a row of weight zero before it reads anything, so a missing label on one must
+    # not switch the shared binding off (each fold would take its own levels and base), and a
+    # label seen only on one must not join the universe.
+    X, y = _rows()
+    weights = np.random.default_rng(6).uniform(0.5, 2.0, N)
+    padding = pd.DataFrame({"age": [40.0, 50.0], "region": [label, label], "unread": [0.0, 0.0]})
+    padded = _fixed_cv(
+        pd.concat([X, padding], ignore_index=True),
+        np.r_[y, 1.0, 1.0],
+        sample_weight=np.r_[weights, 0.0, 0.0],
+        return_estimators=True,
+    )
+    clean = _fixed_cv(X, y, sample_weight=weights, return_estimators=True)
+
+    base = X["region"].value_counts().idxmax()
+    assert _fold_levels(clean) == [(["a", "b", "c"], base)] * 3
+    assert _fold_levels(padded) == _fold_levels(clean)
+
+
+@pytest.mark.parametrize("label", [None, "zzz"], ids=["a missing label", "a label seen only there"])
+def test_a_label_on_a_dropped_row_cannot_fail_its_fold(label):
+    # Mutation check: calling ``folds.predict`` directly fails this, under ``error_score="raise"``
+    # here and with the fold's scores NaN under the default.
+    X, y = _rows()
+    weights = np.random.default_rng(6).uniform(0.5, 2.0, N)
+    padding = pd.DataFrame({"age": [40.0, 50.0], "region": [label, label], "unread": [0.0, 0.0]})
+    frame = pd.concat([X, padding], ignore_index=True)
+    with pytest.warns(UserWarning, match="could not be priced"):
+        result = _fixed_cv(
+            frame,
+            np.r_[y, 1.0, 1.0],
+            sample_weight=np.r_[weights, 0.0, 0.0],
+            return_oof=True,
+            return_estimators=True,
+        )
+    assert np.isnan(result.oof_predictions[N:]).all()
+    assert result.fold_scores["nll"].notna().all()
+    for fold, (_train, test) in zip(result.estimators, result.fold_indices, strict=True):
+        kept = test[test < N]
+        np.testing.assert_allclose(
+            result.oof_predictions[kept], fold.predict(frame.iloc[kept]), rtol=1e-12
+        )
+
+
+def test_a_dropped_row_that_cannot_be_priced_leaves_a_priceable_one_in_its_fold_alone():
+    # Mutation check: leaving every dropped row of a failing fold NaN fails this.
+    X, y = _rows()
+    weights = np.random.default_rng(6).uniform(0.5, 2.0, N)
+    padding = pd.DataFrame(
+        {"age": [40.0] * 8, "region": ["a", "zzz"] * 4, "unread": [0.0] * 8},
+    )
+    frame = pd.concat([X, padding], ignore_index=True)
+    result = _fixed_cv(
+        frame,
+        np.r_[y, np.ones(8)],
+        sample_weight=np.r_[weights, np.zeros(8)],
+        return_oof=True,
+        return_estimators=True,
+    )
+    known, unseen = np.arange(N, N + 8, 2), np.arange(N + 1, N + 8, 2)
+    assert np.isnan(result.oof_predictions[unseen]).all()
+    shared = 0
+    for fold, (_train, test) in zip(result.estimators, result.fold_indices, strict=True):
+        priced = np.intersect1d(test, known)
+        shared += priced.size > 0 and np.intersect1d(test, unseen).size > 0
+        np.testing.assert_allclose(
+            result.oof_predictions[priced], fold.predict(frame.iloc[priced]), rtol=1e-12
+        )
+    assert shared  # some fold holds both, or the fallback was not reached
+
+
 def test_offsets_by_parameter_are_sliced_for_fits_and_scores():
     rng = np.random.default_rng(3)
     X, _ = _rows()

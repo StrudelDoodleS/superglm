@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import hashlib
 import logging
 import time
+import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -69,7 +71,8 @@ class CrossValidationResult:
         ``superglm.editor.edit(model, cv=result)`` draws.
     oof_predictions : ndarray or None
         Out-of-fold predictions (response scale; a SuperLSS's conditional
-        mean), same length as *y*. ``None`` unless ``return_oof=True``.
+        mean), same length as *y*. ``None`` unless ``return_oof=True``. A SuperLSS's
+        held-out row of weight zero that cannot be priced reads NaN.
     estimators : list or None
         Fitted model per fold. ``None`` unless ``return_estimators=True``.
     n_rows : int or None
@@ -543,6 +546,7 @@ class _GLMFolds:
     offset_argument = "offset"
     warm_argument = "lambda2_init"
     default_warm_start = True
+    drops_zero_weight_rows = False
 
     @staticmethod
     def default_fit_mode(fit_kwargs: Mapping[str, Any]) -> str:
@@ -634,6 +638,41 @@ def _take_offset(offset, rows: NDArray):
     if isinstance(offset, Mapping):
         return {name: values[rows] for name, values in offset.items()}
     return offset[rows]
+
+
+def _held_out_predictions(folds, est, frame, rows, offset, sample_weight) -> NDArray[np.float64]:
+    """A fold's out-of-fold predictions, where a row its fit drops cannot fail the fold.
+
+    Such a row can hold a label nothing was fitted on. It reads NaN when it alone cannot be
+    priced, and the other rows it shares a fold with are unaffected; a row the fit keeps raises
+    as ``predict`` does.
+    """
+    try:
+        return folds.predict(est, frame.take_rows(rows), _take_offset(offset, rows))
+    except ValueError:
+        kept = None if sample_weight is None else np.asarray(sample_weight) > 0.0
+        if not folds.drops_zero_weight_rows or kept is None or kept.all():
+            raise
+    predictions = np.full(len(rows), np.nan)
+    positions = rows[kept]
+    predictions[kept] = folds.predict(
+        est, frame.take_rows(positions), _take_offset(offset, positions)
+    )
+    for local in np.flatnonzero(~kept):
+        row = rows[local : local + 1]
+        with contextlib.suppress(ValueError):
+            predictions[local] = folds.predict(
+                est, frame.take_rows(row), _take_offset(offset, row)
+            )[0]
+    unpriced = int(np.isnan(predictions[~kept]).sum())
+    if unpriced:
+        warnings.warn(
+            f"{unpriced} held-out rows of weight zero could not be priced, so their out-of-fold "
+            "predictions are NaN. They hold a value no row the fold fitted has; give them a level "
+            "the fit saw, or leave them out of the frame.",
+            stacklevel=3,
+        )
+    return predictions
 
 
 def _resolve_scorers(
@@ -745,7 +784,8 @@ def cross_validate(
     return_estimators : bool
         If True, keep the fitted model from each fold.
     return_oof : bool
-        If True, collect out-of-fold predictions.
+        If True, collect out-of-fold predictions. For a SuperLSS, a held-out row of weight
+        zero that cannot be priced reads NaN, with a warning, and does not fail its fold.
     error_score : float or "raise"
         Value to assign when a fold fails. ``"raise"`` propagates the error.
     fit_kwargs : mapping, optional
@@ -970,7 +1010,7 @@ def cross_validate(
 
             # OOF predictions
             if oof is not None:
-                oof[test_idx] = folds.predict(est, X_test, off_test)
+                oof[test_idx] = _held_out_predictions(folds, est, frame, test_idx, offset, sw_test)
 
             # Only a fold that scored completely joins the pooled totals.
             for sname, (numerator, denominator) in fold_parts.items():

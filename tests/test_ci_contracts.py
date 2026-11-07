@@ -299,6 +299,7 @@ def test_python_floor_contract_rejects_extras_installed_only_where_no_tests_run(
         test_required_workflow_runs_for_pull_requests_and_python_floor()
 
 
+@pytest.mark.pins_behaviour
 def test_type_check_enforces_and_validates_the_accepted_backlog() -> None:
     workflow = (_ROOT / ".github/workflows/dev-ci.yml").read_text(encoding="utf-8")
     type_job = workflow.split("  type-check:", maxsplit=1)[1].split("  quality:", maxsplit=1)[0]
@@ -313,6 +314,20 @@ def test_type_check_enforces_and_validates_the_accepted_backlog() -> None:
     assert "ty did not emit a diagnostic count" in type_job
     assert "ty reported diagnostics with a successful exit status" in type_job
     assert "ty failed despite reporting zero diagnostics" in type_job
+    assert "fix-tests:" not in type_job  # the slice is the type-check job and nothing else
+
+
+@pytest.mark.pins_behaviour
+def test_fix_tests_job_only_reports_and_writes_its_summary_inside_its_limit() -> None:
+    workflow = (_ROOT / ".github/workflows/dev-ci.yml").read_text(encoding="utf-8")
+    job = yaml.safe_load(workflow)["jobs"]["fix-tests"]
+    run = next(step["run"] for step in job["steps"] if "check_fix_tests" in step.get("run", ""))
+    limit = int(re.search(r"timeout --kill-after=\d+s (\d+)m", run).group(1))
+
+    assert job["continue-on-error"] is True  # neither a flag nor a failed check blocks
+    assert "set -o pipefail" in run and "| tee fix-tests.txt" in run and "--report-only" in run
+    assert limit < job["timeout-minutes"]  # the summary is written before the job's own limit
+    assert run.index("timeout") < run.index("GITHUB_STEP_SUMMARY")
 
 
 def test_frontend_check_names_are_unambiguous() -> None:

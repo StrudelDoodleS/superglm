@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._frame import as_eager_frame
 from superglm.distributional.checks.scores import (
     _retained_crps,
     _retained_log_score,
@@ -162,6 +163,8 @@ class LSSFolds:
 
     row_cost_label = "Log score"
 
+    drops_zero_weight_rows = True
+
     def __init__(self, model) -> None:
         self.model = model
 
@@ -215,20 +218,21 @@ class LSSFolds:
         return arrays
 
     def level_bindings(self, frame, sample_weight) -> dict[str, dict[Any, Any]]:
-        """Each predictor's level universes and bases on the full frame.
+        """Each predictor's level universes and bases on the rows the fit keeps.
 
-        The weights are the ones a SuperLSS fit reads its terms' levels under:
-        physical rows under prior weights, the counts under frequency weights,
-        and zero for a row the fit drops.
+        A SuperLSS fit drops a row of weight zero before it reads anything, so the
+        levels are read from the retained rows alone, under the weights the fit
+        reads them under: physical rows under prior weights, the counts under
+        frequency weights.
         """
         resolved = resolve_likelihood_weights(
             sample_weight, n_observations=len(frame), contract=self.model._weight_contract
         )
-        geometry = np.zeros(len(frame), dtype=np.float64)
-        geometry[resolved.input_positions] = resolved.geometry_values
+        if resolved.provenance.dropped_count:
+            frame = as_eager_frame(frame.take_rows(resolved.input_positions))
         return {
             predictor.name: bind_feature_templates(
-                tuple(predictor.features.items()), frame, geometry
+                tuple(predictor.features.items()), frame, resolved.geometry_values
             )
             for predictor in self.model._predictors
         }

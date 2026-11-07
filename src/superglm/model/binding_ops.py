@@ -131,7 +131,7 @@ def bind_feature_templates(
     *,
     strict: bool = False,
 ) -> dict[Any, Any]:
-    """Bind each of ``templates``, ``(column, spec)`` pairs, on the full frame.
+    """Bind each of ``templates``, ``(column, spec)`` pairs, on the frame the caller passes.
 
     See :func:`resolve_level_bindings`, which reads a SuperGLM's templates; a
     SuperLSS passes each predictor's.

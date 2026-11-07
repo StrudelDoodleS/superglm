@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import subprocess
 import sys
 import threading
 import types
+import weakref
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -84,6 +87,231 @@ def test_mode_and_other_arguments_make_inputs_distinct():
         np.linalg.qr(matrix, mode="r")
 
     assert ledger.find("numpy.linalg.qr")[0].repeated == 0
+
+
+class _Setting:
+    """An object argument: a design or a settings record, whose state the ledger does not read."""
+
+
+def _repeats_of_calls_with_objects(monkeypatch, collide):
+    import superglm.solvers.rank as rank
+
+    monkeypatch.setattr(rank, "decompose_gram", lambda matrix, setting: None)
+    if collide:  # every setting object lands on one address: the strongest case of address reuse
+        monkeypatch.setattr(
+            work_ledger_module,
+            "id",
+            lambda obj: 0 if isinstance(obj, _Setting) else id(obj),
+            raising=False,
+        )
+    matrix = _spd(5, 27)
+    kept, other = _Setting(), _Setting()
+    with work_ledger() as ledger:
+        rank.decompose_gram(matrix, kept)
+        rank.decompose_gram(matrix.copy(), kept)  # equal arrays, the same object: a repeat
+        rank.decompose_gram(matrix, other)  # equal arrays, another live object
+        rank.decompose_gram(_spd(5, 28), kept)  # another array
+        gone = _Setting()
+        rank.decompose_gram(matrix, gone)
+        del gone
+        rank.decompose_gram(matrix, _Setting())  # a new object where the last one was freed
+    return ledger.count("decompose_gram"), sum(
+        row.repeated for row in ledger.find("decompose_gram")
+    )
+
+
+@pytest.mark.parametrize("collide", [False, True], ids=["real ids", "one id for every object"])
+def test_a_repeat_is_equal_arrays_and_the_same_objects_whatever_address_they_have(
+    monkeypatch, collide
+):
+    # Only the second call repeats: a freed object's successor is a new object.
+    assert _repeats_of_calls_with_objects(monkeypatch, collide) == (6, 1)
+
+
+def _repeats_of_calls(
+    monkeypatch, make_calls, module="superglm.solvers.rank", name="decompose_gram"
+):
+    """``(count, repeated, uncounted)`` of ``make_calls(function)`` on a target replaced by a stub."""
+    holder = importlib.import_module(module)
+    monkeypatch.setattr(holder, name, lambda matrix, setting: None)
+    with work_ledger() as ledger:
+        make_calls(getattr(holder, name))
+    (row,) = ledger.find(name)
+    return row.count, row.repeated, row.uncounted
+
+
+@pytest.mark.parametrize(
+    "first, second, equal",
+    [
+        (np.int64(0), np.int64(1), np.int64(0)),
+        (np.uint8(1), np.uint8(2), np.uint8(1)),
+        (np.bool_(True), np.bool_(False), np.bool_(True)),
+        (np.float32(0.5), np.float32(0.25), np.float32(0.5)),
+        (1j, 2j, complex(0, 1)),
+        (b"a", b"b", bytes([97])),
+        (slice(0, 3), slice(0, 4), slice(0, 3)),
+    ],
+    ids=["int64", "uint8", "bool", "float32", "complex", "bytes", "slice"],
+)
+def test_a_scalar_is_compared_by_value_whatever_its_type(monkeypatch, first, second, equal):
+    matrix = _spd(5, 31)
+
+    def calls(function):
+        for setting in (first, second, first, equal):
+            function(matrix, setting)
+
+    # first, second, first (a repeat), a new instance equal to first (a repeat)
+    assert _repeats_of_calls(monkeypatch, calls) == (4, 2, 0)
+
+
+def test_two_tolerances_that_decide_a_rank_differently_are_two_inputs():
+    matrix = np.diag([1.0, 0.1])
+    tolerances = [np.int64(t) for t in (0, 1, 0)]  # three live objects: no address is reused
+    with work_ledger() as ledger:
+        ranks = [np.linalg.matrix_rank(matrix, tol=tol) for tol in tolerances]
+
+    assert ranks == [2, 0, 2]
+    assert ledger.find("numpy.linalg.matrix_rank")[0].repeated == 1  # only the third call
+
+
+class _Design:
+    """What the Gram pass's cost reads of a design."""
+
+    n = p = 5
+
+
+class _Slotted:
+    """An object a weak reference cannot name."""
+
+    __slots__ = ("value",)
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [{"order": 1}, bytearray(b"x"), _Slotted(), [[[[1, 2]]]]],
+    ids=["dict", "bytearray", "slotted object", "nesting beyond the depth read"],
+)
+def test_a_call_with_an_argument_that_cannot_be_identified_is_never_counted_as_a_repeat(
+    monkeypatch, setting
+):
+    matrix = _spd(5, 32)
+
+    def calls(function):
+        function(matrix, setting)
+        function(matrix, setting)  # the very same argument: still no way to tell it from another
+        function(matrix, 1)  # an argument that can be identified, once
+        function(matrix, 1)  # and its repeat
+
+    assert _repeats_of_calls(monkeypatch, calls) == (4, 1, 2)
+
+
+def test_nested_lists_and_tuples_are_read_to_the_arrays_inside_them(monkeypatch):
+    matrix = _spd(5, 33)
+    other = _spd(5, 34)
+
+    def calls(function):
+        function(matrix, [(slice(0, 2), matrix, 1.0)])
+        function(matrix, [(slice(0, 2), matrix.copy(), 1.0)])  # equal: a repeat
+        function(matrix, [(slice(0, 2), other, 1.0)])  # another array inside
+        function(matrix, [(slice(0, 3), matrix, 1.0)])  # another slice inside
+
+    assert _repeats_of_calls(monkeypatch, calls) == (4, 1, 0)
+
+
+def test_a_carrier_that_is_new_at_every_call_does_not_hide_a_repeat(monkeypatch):
+    """The exact route hands every Gram pass a new ``rejected`` and a new centring state."""
+    import superglm._group_matrix._group_matrix_centered as centered
+
+    monkeypatch.setattr(
+        centered,
+        "packed_centered_gram_rhs",
+        lambda *, dm, W, z_centered, state=None, rejected=None: None,
+    )
+    design, other_design = _Design(), _Design()
+    W, z = _spd(5, 35), _spd(5, 36)
+    with work_ledger() as ledger:
+        pass_ = centered.packed_centered_gram_rhs
+        pass_(dm=design, W=W, z_centered=z, state=_Setting(), rejected=_Setting())
+        pass_(dm=design, W=W.copy(), z_centered=z, state=_Setting(), rejected=_Setting())
+        pass_(dm=other_design, W=W, z_centered=z, state=_Setting(), rejected=_Setting())
+        pass_(dm=design, W=z, z_centered=z, state=_Setting(), rejected=_Setting())
+        pass_(dm=design, W=W, z_centered=z, state=None, rejected=None)
+
+    (row,) = ledger.find("packed_centered_gram_rhs")
+    assert ledger.errors == []
+    # The second and fifth calls repeat the first; another design or other weights do not.
+    assert (row.count, row.repeated, row.uncounted) == (5, 2, 0)
+
+
+def test_a_gram_pass_that_declines_costs_no_flops_and_one_that_serves_costs_a_pass(monkeypatch):
+    import superglm._group_matrix._group_matrix_centered as centered
+
+    answers = iter([None, "a result", None])
+    monkeypatch.setattr(
+        centered,
+        "packed_centered_gram_rhs",
+        lambda *, dm, W, z_centered, state=None, rejected=None: next(answers),
+    )
+    design, W, z = _Design(), _spd(5, 37), _spd(5, 38)
+    with work_ledger() as ledger:
+        for _ in range(3):
+            centered.packed_centered_gram_rhs(dm=design, W=W, z_centered=z)
+
+    (row,) = ledger.find("packed_centered_gram_rhs")
+    assert ledger.errors == []
+    assert (row.count, row.repeated) == (3, 2)  # a decline still counts as a call
+    assert row.flops == design.n * design.p * (design.p + 1)  # the one that served
+
+
+@pytest.mark.pins_behaviour
+def test_a_gram_pass_whose_raw_moments_were_rejected_is_charged_the_pass_it_made(monkeypatch):
+    # Mutation check: pricing every ``None`` at zero fails this.
+    import superglm._group_matrix._group_matrix_centered as centered
+
+    monkeypatch.setattr(
+        centered,
+        "packed_centered_gram_rhs",
+        lambda *, dm, W, z_centered, state=None, rejected=None: None,
+    )
+    design, W, z = _Design(), _spd(5, 37), _spd(5, 38)
+    with work_ledger() as ledger:
+        centered.packed_centered_gram_rhs(
+            dm=design, W=W, z_centered=z, rejected=SimpleNamespace(source="factored")
+        )
+    (row,) = ledger.find("packed_centered_gram_rhs")
+    assert ledger.errors == []
+    assert row.flops == design.n * design.p * (design.p + 1)
+
+
+def test_every_declared_carrier_is_an_argument_of_its_entry_point():
+    carrying = [target for target in TARGETS if target.carriers]
+    for target in carrying:
+        holder = work_ledger_module._resolve(target.owner)
+        function = (
+            holder.__dict__[target.name]
+            if isinstance(holder, type)
+            else getattr(holder, target.name)
+        )
+        parameters = inspect.signature(function).parameters
+        assert set(target.carriers) <= set(parameters), (target.kind, target.carriers)
+        assert target.input not in target.carriers
+    assert {target.kind for target in carrying} >= {
+        "packed_centered_gram_rhs",
+        "build_centered_system",
+    }
+
+
+@pytest.mark.pins_behaviour
+def test_the_ledger_does_not_keep_the_objects_it_numbers_alive(monkeypatch):
+    import superglm.solvers.rank as rank
+
+    monkeypatch.setattr(rank, "decompose_gram", lambda matrix, setting: None)
+    setting = _Setting()
+    watcher = weakref.ref(setting)
+    with work_ledger():
+        rank.decompose_gram(_spd(5, 29), setting)
+        del setting
+        assert watcher() is None
 
 
 def test_a_one_row_or_one_border_change_is_an_update_candidate_and_a_rebuild_is_not():
