@@ -985,7 +985,7 @@ def _observed_centered_system(
     """
     zero = np.zeros(dm.n, dtype=np.float64)
     keep = reuse is not None and tabmat_state is not None
-    key = (id(dm), id(dm.execution_plan))
+    key = (dm, dm.execution_plan)
     if keep:
         served = reuse.take(key, weights, zero, tabmat_state, penalty)
         if served is not None:

@@ -1374,11 +1374,11 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             and self.debug_recorder is None
             and self.trace_run is None
         )
-        # These objects stay live throughout the owner's run. A new design
-        # cannot consume an entry from the previous coordinates; the weights and
-        # response an entry serves are compared bit for bit (``_SystemData``).
+        # An entry compares these objects by identity, and holds them for the owner's run. A new
+        # design cannot consume an entry from the previous coordinates; the weights and response
+        # an entry serves are compared bit for bit (``_SystemData``).
         self._initial_data_key = (
-            (id(dm), id(dm.execution_plan), id(family), id(link)) if _initial_data_pending else None
+            (dm, dm.execution_plan, family, link) if _initial_data_pending else None
         )
         self._tabmat_split = _tabmat_split
         self._tabmat_centering_state = _tabmat_centering_state

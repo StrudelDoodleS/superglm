@@ -156,7 +156,7 @@ def _seed_entry():
 
 
 @pytest.mark.parametrize(
-    "change", ["weights", "rhs", "signed_zero", "shape", "dtype", "centering", "key"]
+    "change", ["weights", "rhs", "signed_zero", "shape", "dtype", "centering", "key", "equal_key"]
 )
 def test_changed_initial_contract_must_miss(change):
     # Bypassing either the context/state or actual binary64 operand guard is unsafe.
@@ -174,6 +174,9 @@ def test_changed_initial_contract_must_miss(change):
         z = z.astype(np.float32)
     elif change == "centering":
         state.raw_moment_eligible = False
+    elif change == "equal_key":  # an entry asks for the same objects, not equal ones
+        key = ("".join(["warm and ", "coordinates"]),)
+        assert key == entry.base.key
     else:
         key = ("changed warm state or coordinates",)
     assert entry.take(key, W, z, state, np.ones((1, 1))) is None
@@ -205,6 +208,38 @@ def test_an_entry_serves_a_build_that_takes_the_routes_it_was_built_by(
     taken = entry.take(entry.base.key, W, z, state, np.ones((1, 1)))
 
     assert (taken is not None) is served
+
+
+@pytest.mark.parametrize("field", ["raw_moment_eligible", "tensor_raw_eligible"])
+def test_none_and_true_of_a_rung_flag_build_the_same_system_by_the_same_route(monkeypatch, field):
+    # ``routes_as`` serves one from the other, which is sound only while the rungs read them alike.
+    # Mutation check: a raw-moment rung that runs only for ``None`` takes another route here.
+    tried = []
+    try_rung = centered_system.try_raw_moment_centering
+
+    def counted(**kwargs):
+        result = try_rung(**kwargs)
+        tried.append(result is not None)
+        return result
+
+    monkeypatch.setattr(centered_system, "try_raw_moment_centering", counted)
+    column = sparse.csr_matrix(np.array([[-1.0], [0.0], [1.0]]))
+    dm = DesignMatrix([SparseSSPGroupMatrix(column, np.ones((1, 1)))], n=3, p=1)
+    W, z = np.array([1.0, 2.0, 1.0]), np.array([-1.0, 0.0, 1.0])
+    states = [
+        centered_system.TabmatCenteringState(),
+        centered_system.TabmatCenteringState(**{field: True}),
+    ]
+    first, second = (
+        centered_system.build_centered_system(
+            dm=dm, W=W, z_off=z, penalty=np.ones((1, 1)), tabmat_state=state
+        )
+        for state in states
+    )
+    assert len(tried) == 2 and tried[0] == tried[1]
+    for name in ("data_gram", "rhs", "mean_x"):
+        np.testing.assert_array_equal(getattr(first, name), getattr(second, name))
+    assert states[0].routes_as(states[1])
 
 
 @pytest.mark.parametrize("penalty, expected_hessian", [(3.0, 5.0), (-3.0, 0.0)])

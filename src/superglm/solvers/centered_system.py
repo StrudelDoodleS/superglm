@@ -154,7 +154,12 @@ class _SystemData:
     data: tuple | None = None
 
     def take(self, key, W, z_off, state, penalty):
-        if self.data is None or self.key != key or not self.before.routes_as(state):
+        if (
+            self.data is None
+            or len(self.key) != len(key)
+            or any(mine is not theirs for mine, theirs in zip(self.key, key))
+            or not self.before.routes_as(state)
+        ):
             return None
         for actual, saved in ((W, self.weights), (z_off, self.response)):
             if (
@@ -201,8 +206,8 @@ class _InitialDataReuse:
     Owner: the optimizer, for one call, and its entries drop with it. An entry serves only a
     build with the same design objects (``key``), bit-identical weights and response, and a
     centring state taking the same routes (``_SystemData``). No penalty, Hessian or fitted
-    state is retained. The owner discards its entries before changing source coordinates or
-    invoking user callbacks.
+    state is retained. Nothing changes the design during the call, and no user code runs between
+    an entry's making and its use.
     """
 
     base: _SystemData | None = None
