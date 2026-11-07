@@ -8,10 +8,13 @@ with ``RuntimeError: cannot cache function ...: no locator available`` when none
 written, which is every process on a read-only file system whose only writable place is the
 temporary directory (AWS Lambda, a read-only container root).
 
-``ensure_cache_location`` runs when superglm is imported, before anything imports Numba, and in
-that one case points Numba at a directory made by ``tempfile.mkdtemp``: new for this process,
+``ensure_cache_location`` runs when superglm is imported, usually before anything imports Numba,
+and in that one case points Numba at a directory made by ``tempfile.mkdtemp``: new for this process,
 readable by its owner alone (mode 0o700), removed when the process exits. Numba loads its cache
-with ``pickle``, so a directory another user could create or write into is never used. On Linux and
+with ``pickle``, so a directory another user could create or write into is never used. A Numba that
+is already loaded is told through ``numba.config.CACHE_DIR`` alone: its compiler re-reads every
+setting from the environment once a ``NUMBA_*`` variable has changed, which would undo what the
+program set in code, so the environment stays as it was and a new process makes its own. On Linux and
 macOS the directory is made inside a directory of the user's own in the temporary directory
 (``superglm-numba-cache-u<uid>``, kept, mode 0o700, checked to be a real directory owned by the
 caller before it is used), so a child that outlives the process and makes Numba create the path
@@ -116,12 +119,24 @@ def _private_parent() -> str | None:
 
 
 def _yaml_names_a_cache_directory() -> bool:
-    """Whether the working directory's ``.numba_config.yaml`` sets ``cache_dir``, which Numba reads."""
+    """Whether Numba would read a cache directory from the working directory's ``.numba_config.yaml``.
+
+    Read as Numba reads it: with PyYAML, whose absence makes Numba ignore the file, and each top-level
+    key upper-cased, so any spelling of ``cache_dir`` counts. A file that does not parse is Numba's to
+    report when it is imported.
+    """
+    if not os.path.isfile(".numba_config.yaml"):
+        return False
+    try:
+        import yaml
+    except ImportError:
+        return False
     try:
         with open(".numba_config.yaml", encoding="utf-8") as file:
-            return any(line.split(":")[0].strip() == "cache_dir" for line in file)
-    except (OSError, ValueError):
+            settings = yaml.safe_load(file)
+    except (OSError, ValueError, yaml.YAMLError):
         return False
+    return isinstance(settings, dict) and any(str(key).upper() == "CACHE_DIR" for key in settings)
 
 
 def _set_in_code_or_yaml() -> bool:
@@ -161,9 +176,10 @@ def ensure_cache_location() -> str | None:
         directory = tempfile.mkdtemp(prefix=_PREFIX, dir=_private_parent())
     except OSError:
         return None
-    os.environ["NUMBA_CACHE_DIR"] = directory
     atexit.register(_remove, directory, os.getpid())
     numba = sys.modules.get("numba")
-    if numba is not None:  # imported first: it read its environment then
+    if numba is None:
+        os.environ["NUMBA_CACHE_DIR"] = directory
+    else:
         numba.config.CACHE_DIR = directory
     return directory
