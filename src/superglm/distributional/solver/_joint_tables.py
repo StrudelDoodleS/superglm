@@ -302,14 +302,17 @@ def _warmup_joint_tables() -> None:
 class _Side:
     """One group: its index column, its matrix over the levels, its coefficients.
 
-    ``support`` is ``B_unique @ R_inv``; ``None`` is a categorical's one-hot
-    levels, whose matrix is the identity without its sink level.
+    ``support`` is ``B_unique @ R_inv``, which the tables contract; ``None`` is a
+    categorical's one-hot levels, whose matrix is the identity without its sink level.
+    ``factors`` are the group's own two arrays. A predictor multiplies them as every other
+    route does, ``B_unique @ (R_inv @ beta)``, since the other association can cancel apart.
     """
 
     column: int
     support: NDArray[np.float64] | None
     width: int
     columns: slice
+    factors: tuple[NDArray[np.float64], NDArray[np.float64]] | None
 
 
 @dataclass(frozen=True)
@@ -523,10 +526,11 @@ class JointTablePlan:
         tables = np.zeros((len(sides), max((self.levels[s.column] for s in sides), default=0)))
         for position, side in enumerate(sides):
             beta = coefficients[side.columns]
-            if side.support is None:
+            if side.factors is None:
                 tables[position, : side.width] = beta
             else:
-                tables[position, : side.support.shape[0]] = side.support @ beta
+                basis, transform = side.factors
+                tables[position, : basis.shape[0]] = basis @ (transform @ beta)
         constants = np.array(
             [0.0 if at is None else coefficients[at] for at in self.intercepts], dtype=np.float64
         )
@@ -598,6 +602,7 @@ def joint_table_plan(layout: StackedLayout, budget: int) -> JointTablePlan | Non
                     return None
                 index, count, support = group.bin_idx, int(group.n_bins), factors[0] @ factors[1]
             elif kind in _LEVELS:
+                factors = None
                 index, count, support = group.codes, int(group.n_levels) + 1, None
             else:
                 return None
@@ -605,7 +610,7 @@ def joint_table_plan(layout: StackedLayout, budget: int) -> JointTablePlan | Non
             if index.size and not (0 <= index.min() and index.max() < count):
                 return None
             column = column_of(index, count, support is None)
-            row.append(_Side(column, support, width, slice(cursor, cursor + width)))
+            row.append(_Side(column, support, width, slice(cursor, cursor + width), factors))
             cursor += width
         sides.append(tuple(row))
     if max(levels, default=0) > 1 << 16:
