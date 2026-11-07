@@ -36,7 +36,9 @@ For each operation and the place that called it:
   entry in `TARGETS` says so, so a call handed a new one each time is still a
   repeat. A call with an argument that can be neither compared by value nor
   weakly referenced (a `dict`, say) is never a repeat: it is counted in the
-  `uncounted` field of its row, so a repeat count is a floor;
+  `uncounted` field of its row, so a repeat count is a floor, as long as no
+  argument is mutated between calls: the ledger does not read an object's
+  state, so a mutated object is the same input as before;
 - **update**: calls whose input differs from the previous call at the same place
   by one row or column (a row and its column, for a symmetric matrix), or by
   one bordering row and column. An update of the earlier result costs about
@@ -51,6 +53,9 @@ likelihood and Gram passes of a `SuperLSS` fit.
 
 - The flop figure for a pass over the rows counts it as a dense product, so it
   overstates a binned pass. Read it for ranking, and read the seconds for cost.
+  A Gram pass that declines (returns `None`, and the caller tries the next one)
+  has no flops, so on a route that tries a pass first and falls through, the
+  report shows each pass that served and none that declined.
 - Eigensolver and SVD flops are order-of-magnitude constants.
 - Seconds are summed over threads, so a share can pass 100%.
 - The ledger hashes every input and keeps one copy of the last input at each

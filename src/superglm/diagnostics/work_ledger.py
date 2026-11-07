@@ -35,7 +35,8 @@ and two flags:
   An argument that can be neither compared by value nor weakly referenced (a ``dict``, a
   slotted object) tells nothing apart, so a call that has one is never a repeat or an update
   and is counted in the row's ``uncounted``.  The ledger does not read an object's state, so
-  a mutated object is the same input as before;
+  a mutated object is the same input as before: a repeat count is a floor only as long as no
+  argument is mutated between calls;
 * **update candidate**: the input differs from the previous input at the same
   call site (file and line) by one row or column (a row and its column, for a symmetric
   matrix), or by one bordering row and column.  Such a result could have been
@@ -199,7 +200,7 @@ def _moments_pass(first, args, kwargs, result):
 def _gram_pass(first, args, kwargs, result):
     design = kwargs.get("dm")
     channels = len(kwargs["weights"]) if "weights" in kwargs else 1
-    if design is None:
+    if design is None or result is None:  # a pass that declines makes no pass over the rows
         return 0.0
     return float(design.n) * design.p * (design.p + 1) * channels
 

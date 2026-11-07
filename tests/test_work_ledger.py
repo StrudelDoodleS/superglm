@@ -242,6 +242,26 @@ def test_a_carrier_that_is_new_at_every_call_does_not_hide_a_repeat(monkeypatch)
     assert (row.count, row.repeated, row.uncounted) == (5, 2, 0)
 
 
+def test_a_gram_pass_that_declines_costs_no_flops_and_one_that_serves_costs_a_pass(monkeypatch):
+    import superglm._group_matrix._group_matrix_centered as centered
+
+    answers = iter([None, "a result", None])
+    monkeypatch.setattr(
+        centered,
+        "packed_centered_gram_rhs",
+        lambda *, dm, W, z_centered, state=None, rejected=None: next(answers),
+    )
+    design, W, z = _Design(), _spd(5, 37), _spd(5, 38)
+    with work_ledger() as ledger:
+        for _ in range(3):
+            centered.packed_centered_gram_rhs(dm=design, W=W, z_centered=z)
+
+    (row,) = ledger.find("packed_centered_gram_rhs")
+    assert ledger.errors == []
+    assert (row.count, row.repeated) == (3, 2)  # a decline still counts as a call
+    assert row.flops == design.n * design.p * (design.p + 1)  # the one that served
+
+
 def test_every_declared_carrier_is_an_argument_of_its_entry_point():
     carrying = [target for target in TARGETS if target.carriers]
     for target in carrying:

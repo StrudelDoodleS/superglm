@@ -6,7 +6,9 @@ build's rounding changes the verdict:
 
 * a pass over the rows (the ledger's ``PASS`` targets: Gram builds, likelihood evaluations, design
   products) that repeats outside ``ROW_PASS_REPEATS``, or whose Gram repeats exceed a fraction of the
-  centred systems built (a ceiling, so a count below it passes), or that the ledger cannot identify;
+  centred systems built (a ceiling, so a count below it passes), or that the ledger cannot identify.
+  A call that declines (the packed and anchor rungs on the exact routes) has no flops and makes no
+  pass over the rows, so it is neither listed nor counted;
 * the number of passes: once-per-fit stages, one row pass per centred system built, and two moment
   passes per predictor however many smoothing iterations the fit takes.
 
@@ -52,8 +54,6 @@ ROW_PASSES = frozenset(target.kind for target in TARGETS if target.role == PASS)
 #: entry with it.
 ROW_PASS_REPEATS = {
     ("centered_gram_rhs", "solvers.centered_system:build_centered_system"): ITERATE,
-    ("packed_centered_gram_rhs", "solvers.centered_system:_raw_rung_system"): ITERATE,
-    ("anchor_support_centered_gram_rhs", "solvers.centered_system:_raw_rung_system"): ITERATE,
     ("DesignMatrix.rmatvec", "solvers.centered_system:build_centered_system"): ITERATE,
     ("centred_matvec", "solvers.irls_direct._fit:evaluate_state"): ITERATE,
     ("centred_matvec", "solvers.mode_score:linear_predictor"): ITERATE,
@@ -79,18 +79,22 @@ OTHER_REPEATS = {
     ("numpy.linalg.cholesky", "distributional.smoothing.newton:newton_direction"): BLAS,
 }
 
+#: Each centred system tries the packed rung, then the anchor rung, then the pass over the rows
+#: (``centered_gram_rhs``).  The exact routes are served by the last: the first two decline on them,
+#: sharing its weights and design, so only ``centered_gram_rhs`` is a pass there.  The discrete
+#: route is served by the packed rung and never reaches the others.
+DECLINING_RUNGS = ("packed_centered_gram_rhs", "anchor_support_centered_gram_rhs")
+ROUTE_GRAM_PASSES = {
+    "glm_exact": ("centered_gram_rhs",),
+    "glm_shape_constrained": ("centered_gram_rhs",),
+    "glm_discrete": ("packed_centered_gram_rhs",),
+}
 #: The exact routes repeat a quarter to a third of their Gram passes (the iterate an accepted
 #: step re-enters), the discrete route none on this data.  A ceiling is a fraction of the centred
 #: systems built, and a count below it passes.  A route that builds every system twice repeats
 #: half of its passes, so the discrete ceiling sits under a half; the exact routes already repeat
 #: a third, so doubling takes them past theirs.
-GRAM_PASSES = ("packed_centered_gram_rhs", "anchor_support_centered_gram_rhs", "centered_gram_rhs")
 GRAM_REPEAT_CEILING = {"glm_exact": 0.5, "glm_shape_constrained": 0.5, "glm_discrete": 0.25}
-ROUTE_GRAM_PASSES = {
-    "glm_exact": GRAM_PASSES,
-    "glm_shape_constrained": GRAM_PASSES,
-    "glm_discrete": ("packed_centered_gram_rhs",),
-}
 
 PREDICTORS = 2  # location and scale of the binned SuperLSS fit
 #: Fellner-Schall updates alone from a far start to strict tolerances: many more smoothing iterations.
@@ -174,6 +178,11 @@ def _repeat(row) -> str:
     return f"{row.operation} @ {row.caller}: {row.repeated} of {row.count} calls repeat"
 
 
+def _served(row) -> bool:
+    """A call that declines has no flops; a row with some is a pass over the rows."""
+    return row.flops > 0
+
+
 @pytest.mark.pins_behaviour
 @pytest.mark.parametrize("name", list(FITS))
 def test_a_fit_repeats_no_pass_over_the_rows_that_is_not_listed(ledgers, name):
@@ -181,7 +190,7 @@ def test_a_fit_repeats_no_pass_over_the_rows_that_is_not_listed(ledgers, name):
     unlisted = [
         _repeat(row)
         for row in repeated
-        if row.operation in ROW_PASSES and _reason(row, ROW_PASS_REPEATS) is None
+        if row.operation in ROW_PASSES and _served(row) and _reason(row, ROW_PASS_REPEATS) is None
     ]
     others = [
         f"{_repeat(row)} ({'known' if _reason(row, OTHER_REPEATS) else 'not listed'})"
@@ -204,7 +213,9 @@ def test_a_fit_repeats_no_pass_over_the_rows_that_is_not_listed(ledgers, name):
 
 @pytest.mark.pins_behaviour
 def test_every_listed_repeat_of_a_pass_over_the_rows_still_happens(ledgers):
-    repeated = [row for ledger in ledgers.values() for row in ledger.rows() if row.repeated]
+    repeated = [
+        row for ledger in ledgers.values() for row in ledger.rows() if row.repeated and _served(row)
+    ]
     stale = [
         f"{operation} @ {prefix}"
         for operation, prefix in ROW_PASS_REPEATS
@@ -223,8 +234,9 @@ def test_the_exact_route_builds_one_system_and_one_gram_pass_per_iteration(ledge
     systems = ledger.count("build_centered_system")
 
     assert systems > 0
-    for passes in GRAM_PASSES:
-        assert ledger.count(passes) == systems, passes
+    assert ledger.count("centered_gram_rhs") == systems
+    for rung in DECLINING_RUNGS:
+        assert sum(row.flops for row in ledger.find(rung)) == 0, rung  # none served
     assert ledger.count("build_design_matrix") == ledger.count("finalize_reml_fit") == 1
 
 
@@ -249,6 +261,7 @@ def test_the_discrete_route_passes_over_the_bins_once_per_system(ledgers):
 
     assert systems > 0
     assert ledger.count("packed_centered_gram_rhs") == systems
+    assert sum(row.flops for row in ledger.find("packed_centered_gram_rhs")) > 0  # it served
     assert ledger.count("centered_gram_rhs") == 0  # no pass over the rows themselves
     assert ledger.count("build_design_matrix") == ledger.count("finalize_reml_fit") == 1
 
