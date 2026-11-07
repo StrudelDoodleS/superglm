@@ -93,6 +93,7 @@ from superglm.solvers.centered_system import (
     _InitialDataReuse,
     build_centered_system,
     grouped_augmented_factor,
+    serves_initial_data,
 )
 from superglm.solvers.hessian_factor import HessianFactor
 from superglm.solvers.mode_score import (
@@ -984,7 +985,7 @@ def _observed_centered_system(
     geometry at the same coefficients read the same system.
     """
     zero = np.zeros(dm.n, dtype=np.float64)
-    keep = reuse is not None and tabmat_state is not None
+    keep = reuse is not None and tabmat_state is not None and serves_initial_data(dm)
     key = (dm, dm.execution_plan)
     if keep:
         served = reuse.take(key, weights, zero, tabmat_state, penalty)

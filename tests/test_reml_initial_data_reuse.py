@@ -21,7 +21,7 @@ from superglm.group_matrix import (
     SupportCompressedSSPGroupMatrix,
 )
 from superglm.links import LogLink
-from superglm.reml import direct
+from superglm.reml import direct, observed_geometry
 from superglm.solvers import centered_system
 from superglm.solvers.irls_direct import _fit as irls_direct
 from superglm.types import GroupSlice
@@ -187,9 +187,10 @@ def test_changed_initial_contract_must_miss(change):
     [
         # "try the rung" is None or True; only False skips it
         ("raw_moment_eligible", True, None, True),
-        ("tensor_raw_eligible", True, None, True),
         ("raw_moment_eligible", None, False, False),
         ("tensor_raw_eligible", False, None, False),
+        # no build leaves it True, so nothing is served across that value
+        ("tensor_raw_eligible", True, None, False),
         # a preflight runs for None and not for True: another build
         ("eligible", True, None, False),
         ("raw_spline_eligible", True, None, False),
@@ -210,8 +211,7 @@ def test_an_entry_serves_a_build_that_takes_the_routes_it_was_built_by(
     assert (taken is not None) is served
 
 
-@pytest.mark.parametrize("field", ["raw_moment_eligible", "tensor_raw_eligible"])
-def test_none_and_true_of_a_rung_flag_build_the_same_system_by_the_same_route(monkeypatch, field):
+def test_none_and_true_of_the_raw_moment_flag_build_the_same_system_by_the_same_route(monkeypatch):
     # ``routes_as`` serves one from the other, which is sound only while the rungs read them alike.
     # Mutation check: a raw-moment rung that runs only for ``None`` takes another route here.
     tried = []
@@ -228,7 +228,7 @@ def test_none_and_true_of_a_rung_flag_build_the_same_system_by_the_same_route(mo
     W, z = np.array([1.0, 2.0, 1.0]), np.array([-1.0, 0.0, 1.0])
     states = [
         centered_system.TabmatCenteringState(),
-        centered_system.TabmatCenteringState(**{field: True}),
+        centered_system.TabmatCenteringState(raw_moment_eligible=True),
     ]
     first, second = (
         centered_system.build_centered_system(
@@ -240,6 +240,35 @@ def test_none_and_true_of_a_rung_flag_build_the_same_system_by_the_same_route(mo
     for name in ("data_gram", "rhs", "mean_x"):
         np.testing.assert_array_equal(getattr(first, name), getattr(second, name))
     assert states[0].routes_as(states[1])
+
+
+@pytest.mark.parametrize("subclass", [False, True])
+def test_the_geometry_owner_serves_exactly_the_built_in_designs(monkeypatch, subclass):
+    # A subclass can expose mutable coordinates or call back between an entry's making and its use.
+    # Mutation check: a geometry owner with no check on the design serves the subclass.
+    class Custom(DesignMatrix):
+        pass
+
+    kind = Custom if subclass else DesignMatrix
+    dm = kind([DenseGroupMatrix(np.array([[-1.0], [0.0], [1.0]]))], n=3, p=1)
+    builds = []
+    build = observed_geometry.build_centered_system
+
+    def counted(**kwargs):
+        builds.append(kwargs["W"])
+        return build(**kwargs)
+
+    monkeypatch.setattr(observed_geometry, "build_centered_system", counted)
+    owner = centered_system._InitialDataReuse()
+    for _ in range(2):
+        observed_geometry._observed_centered_system(
+            dm,
+            np.array([1.0, 2.0, 1.0]),
+            np.ones((1, 1)),
+            centered_system.TabmatCenteringState(),
+            owner,
+        )
+    assert len(builds) == (2 if subclass else 1)
 
 
 @pytest.mark.parametrize("penalty, expected_hessian", [(3.0, 5.0), (-3.0, 0.0)])
@@ -488,9 +517,11 @@ def test_an_exact_reml_fit_builds_no_centred_system_twice_at_the_same_weights(
         model.fit_reml(frame, y)
 
     kinds = {type(group).__name__ for group in model._dm.group_matrices}
-    assert ("SupportCompressedSplineCategoricalGroupMatrix" in kinds) == (
-        design == "spline_by_category_tables"
-    )
+    assert {
+        "sparse_ssp": "SparseSSPGroupMatrix",
+        "support_compressed": "SupportCompressedSSPGroupMatrix",
+        "spline_by_category_tables": "SupportCompressedSplineCategoricalGroupMatrix",
+    }[design] in kinds
     systems = [(W.tobytes(), z.tobytes()) for W, z in zip(recorded_builds, responses, strict=True)]
     assert len(systems) > 5
     assert len(set(systems)) == len(systems)

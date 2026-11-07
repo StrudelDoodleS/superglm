@@ -39,7 +39,6 @@ from superglm.group_matrix import (
     DesignMatrix,
     GroupMatrix,
     SparseSSPGroupMatrix,
-    SupportCompressedSplineCategoricalGroupMatrix,
     SupportCompressedSSPGroupMatrix,
 )
 from superglm.links import IdentityLink, Link, LogitLink, LogLink, stabilize_eta
@@ -55,6 +54,7 @@ from superglm.solvers.centered_system import (
     grouped_augmented_factor,
     grouped_augmented_factor_rhs,
     refresh_centered_rhs,
+    serves_initial_data,
 )
 from superglm.solvers.constrained_qp import _feasibility_slack
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
@@ -1358,18 +1358,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             self._initial_data_reuse is not None
             and type(family) is Poisson
             and type(link) is LogLink
-            and type(dm) is DesignMatrix
-            and all(
-                type(gm)
-                in (
-                    CategoricalGroupMatrix,
-                    DenseGroupMatrix,
-                    SparseSSPGroupMatrix,
-                    SupportCompressedSSPGroupMatrix,
-                    SupportCompressedSplineCategoricalGroupMatrix,
-                )
-                for gm in gms
-            )
+            and serves_initial_data(dm)
             and not (_use_qr or _use_structured or has_constraints)
             and self.debug_recorder is None
             and self.trace_run is None

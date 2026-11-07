@@ -43,6 +43,7 @@ from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
     SparseGroupMatrix,
     SparseSSPGroupMatrix,
+    SupportCompressedSplineCategoricalGroupMatrix,
     SupportCompressedSSPGroupMatrix,
 )
 from superglm.solvers.mode_score import (
@@ -114,15 +115,15 @@ class TabmatCenteringState:
     def routes_as(self, other: TabmatCenteringState) -> bool:
         """Whether a build under ``other`` takes the routes a build under ``self`` would.
 
-        ``None`` and ``True`` of ``raw_moment_eligible`` and ``tensor_raw_eligible`` both mean
-        "try the rung" (only ``False`` skips it); ``eligible`` and ``raw_spline_eligible`` also
-        decide whether a rung's preflight runs, so ``None`` and ``True`` differ there.
+        ``None`` and ``True`` of ``raw_moment_eligible`` both mean "try the rung" (only ``False``
+        skips it). ``eligible`` and ``raw_spline_eligible`` also decide whether a rung's preflight
+        runs, so ``None`` and ``True`` differ there, and ``tensor_raw_eligible`` is never ``True``.
         """
         return (
             self.eligible == other.eligible
             and self.raw_spline_eligible == other.raw_spline_eligible
             and (self.raw_moment_eligible is False) == (other.raw_moment_eligible is False)
-            and (self.tensor_raw_eligible is False) == (other.tensor_raw_eligible is False)
+            and self.tensor_raw_eligible == other.tensor_raw_eligible
             and self._raw_moment_owners == other._raw_moment_owners
         )
 
@@ -193,6 +194,22 @@ class _SystemData:
                 system.mean_lo,
             ),
         )
+
+
+def serves_initial_data(dm: DesignMatrix) -> bool:
+    """Whether an owner may serve ``dm``: exactly a built-in design of groups whose data are their
+    arrays and the weights. A subclass can expose mutable coordinates or call back."""
+    return type(dm) is DesignMatrix and all(
+        type(gm)
+        in (
+            CategoricalGroupMatrix,
+            DenseGroupMatrix,
+            SparseSSPGroupMatrix,
+            SupportCompressedSSPGroupMatrix,
+            SupportCompressedSplineCategoricalGroupMatrix,
+        )
+        for gm in dm.group_matrices
+    )
 
 
 @dataclass
