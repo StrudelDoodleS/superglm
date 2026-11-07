@@ -16,8 +16,10 @@ revisions; uncommitted changes are not seen. Each selected test is judged:
 * passes on base: the test does not need the change. It is flagged unless it
   carries ``@pytest.mark.pins_behaviour`` on the test, its class or the module
   (``pytestmark``), which says "this deliberately pins behaviour that already worked".
-* skipped on base, deselected (``docs``) or not collected: reported, never counted
-  as failing.
+* skipped on base, deselected (``docs``, ``browser`` and ``threads``: the last needs
+  the default thread pools, which this run pins) or not collected (a module that skips
+  itself at collection, say for a missing optional package, is one): reported, never
+  counted as failing.
 
 A parametrized test counts as passing on base only if every case that ran passes.
 
@@ -27,9 +29,10 @@ module, so comments, docstrings and formatting do not count; a renamed file is
 compared with its old self). A changed fixture, helper, module constant or
 ``conftest.py`` selects nothing, and neither does a changed ``src/`` helper that
 tests import: a test that only reads a changed helper is not re-run. The marker is
-read from decorators, ``pytestmark`` and enclosing classes, not from
-``pytest.param(marks=...)``. A pull request with no ``src/`` change has nothing to
-check, and exits 0.
+read from the test's own decorators, its enclosing classes' decorators and ``pytestmark``
+(in a class body or at module level), and not from inside ``parametrize``: a mark on one
+``pytest.param`` pins no test, so mark the whole test. A pull request with no ``src/``
+change has nothing to check, and exits 0.
 
 Exit status: 0 nothing to check or nothing flagged (or ``--report-only``), 1 a test is
 flagged, 2 the check itself could not run.
@@ -70,10 +73,25 @@ class Test:
     pinned: bool
 
 
-def _mentions_marker(*nodes: ast.AST) -> bool:
-    return any(
-        isinstance(n, ast.Attribute) and n.attr == MARKER for node in nodes for n in ast.walk(node)
-    )
+def _names_marker(expression: ast.AST) -> bool:
+    """Whether ``expression`` is the marker itself, bare or called: not one named inside its arguments."""
+    if isinstance(expression, ast.Call):
+        expression = expression.func
+    return isinstance(expression, ast.Attribute) and expression.attr == MARKER
+
+
+def _pytestmark_pins(statement: ast.AST) -> bool:
+    """Whether ``statement`` assigns ``pytestmark`` a mark or a list of marks that includes the marker."""
+    if isinstance(statement, ast.Assign):
+        targets, value = statement.targets, statement.value
+    elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+        targets, value = [statement.target], statement.value
+    else:
+        return False
+    if not any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in targets):
+        return False
+    marks = value.elts if isinstance(value, (ast.List, ast.Tuple)) else [value]
+    return any(_names_marker(mark) for mark in marks)
 
 
 def _digest(node: ast.FunctionDef | ast.AsyncFunctionDef, context: str) -> str:
@@ -91,12 +109,7 @@ def _digest(node: ast.FunctionDef | ast.AsyncFunctionDef, context: str) -> str:
 def collect_tests(source: str) -> dict[str, Test]:
     """The test functions of a module by pytest id (``name`` or ``Class::name``)."""
     tree = ast.parse(source)
-    module_pinned = any(
-        isinstance(node, ast.Assign)
-        and any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets)
-        and _mentions_marker(node.value)
-        for node in tree.body
-    )
+    module_pinned = any(_pytestmark_pins(node) for node in tree.body)
     found: dict[str, Test] = {}
 
     def visit(body, classes, context, pinned):
@@ -107,13 +120,15 @@ def collect_tests(source: str) -> dict[str, Test]:
                     node.body,
                     (*classes, node.name),
                     context + "".join(ast.dump(part) for part in header),
-                    pinned or _mentions_marker(*header),
+                    pinned
+                    or any(_names_marker(d) for d in node.decorator_list)
+                    or any(_pytestmark_pins(statement) for statement in node.body),
                 )
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(
                 "test"
             ):
                 found["::".join((*classes, node.name))] = Test(
-                    _digest(node, context), pinned or _mentions_marker(*node.decorator_list)
+                    _digest(node, context), pinned or any(map(_names_marker, node.decorator_list))
                 )
 
     visit(tree.body, (), "", module_pinned)
@@ -158,6 +173,17 @@ def _tests_at(root: Path, rev: str, path: str) -> dict[str, Test]:
     return collect_tests(git(root, "show", f"{rev}:{path}"))
 
 
+def pinned_pools(base) -> dict[str, str]:
+    """``base`` with every thread pool pinned to one as ``run_test_suite`` pins them, so that
+    each xdist worker runs serially and starts no pool of its own."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        from run_test_suite import stage_environment
+    finally:
+        sys.path.pop(0)
+    return stage_environment(True, base)
+
+
 def base_tree(root: Path, merge_base: str, head: str, where: Path, package: str) -> dict[str, str]:
     """A worktree of ``head`` whose ``src/`` is the merge base's, and the environment to run it in."""
     git(root, "worktree", "add", "--detach", str(where), head)
@@ -166,7 +192,7 @@ def base_tree(root: Path, merge_base: str, head: str, where: Path, package: str)
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
         tar.extractall(where, filter="data")
     path = os.pathsep.join(filter(None, [str(where / "src"), os.environ.get("PYTHONPATH", "")]))
-    env = {**os.environ, "PYTHONPATH": path}
+    env = {**pinned_pools(os.environ), "PYTHONPATH": path}
     probe = "import importlib.util as u; print(u.find_spec(sys.argv[1]).origin)"
     origin = subprocess.run(
         [sys.executable, "-c", "import sys;" + probe, package],
@@ -197,16 +223,28 @@ def pytest_run(where: Path, env, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(command, cwd=where, env=env, capture_output=True, text=True, check=False)
 
 
+def _output(done: subprocess.CompletedProcess) -> str:
+    """The tail of what pytest printed on each stream; a conftest import error is on stderr."""
+    return "\n".join(part[-2000:] for part in (done.stdout, done.stderr) if part.strip())
+
+
+def _error_lines(text: str) -> list[str]:
+    return [line[1:].strip() for line in text.splitlines() if line.startswith("E ")]
+
+
 def _last_error_line(text: str) -> str:
-    lines = [line[1:].strip() for line in text.splitlines() if line.startswith("E ")]
+    lines = _error_lines(text)
     return lines[-1] if lines else "collection failed"
 
 
 def collect_on_base(where, env, paths):
-    """The function ids pytest finds per module, and the modules that fail to import."""
-    done = pytest_run(where, env, "--collect-only", "--continue-on-collection-errors", *paths)
+    """The function ids pytest finds per module, the modules that fail to import, and the
+    modules that skip themselves at collection (with the reason)."""
+    done = pytest_run(
+        where, env, "--collect-only", "--continue-on-collection-errors", "-rs", *paths
+    )
     if done.returncode in PYTEST_ERRORS:
-        raise CheckError(f"collection on base exited {done.returncode}:\n{done.stdout[-2000:]}")
+        raise CheckError(f"collection on base exited {done.returncode}:\n{_output(done)}")
     ids = {
         tuple(re.sub(r"\[.*", "", line, flags=re.S).split("::", 1))
         for line in done.stdout.splitlines()
@@ -214,16 +252,29 @@ def collect_on_base(where, env, paths):
     }
     parts = re.split(r"_+ ERROR collecting (\S+) _+\n", done.stdout)
     broken = {path: _last_error_line(text) for path, text in zip(parts[1::2], parts[2::2])}
-    if not ids and len(broken) < len(
-        paths
-    ):  # a changed output format would otherwise pass everything
-        raise CheckError(f"pytest listed no tests on base:\n{done.stdout[-2000:]}")
-    return ids, broken
+    skipped = {
+        match[1]: match[2]
+        for match in re.finditer(r"^SKIPPED \[\d+\] (\S+?\.py):\d+: (.*)$", done.stdout, re.M)
+    }
+    if not ids and not set(paths) <= broken.keys() | skipped.keys():
+        # a changed output format would otherwise pass everything
+        raise CheckError(f"pytest listed no tests on base:\n{_output(done)}")
+    return ids, broken, skipped
 
 
 def _kind(message: str) -> str:
-    head = message.split(":", 1)[0].strip()
+    """The exception type a report line starts with, else ``AssertionError``: a plain assert
+    reports ``assert x == y``, which no type precedes."""
+    head = re.sub(r'^failed on (?:setup|teardown) with "', "", message).split(":", 1)[0].strip()
     return head if re.fullmatch(r"[A-Za-z_][\w.]*", head) else "AssertionError"
+
+
+def _failure_kind(outcome: ET.Element) -> str:
+    """The kind of a failing or erroring case, from the last ``E`` line of its report: that line
+    names the exception of a setup error and ends a custom assertion message, which pytest's
+    one-line ``message`` attribute does not do for either."""
+    lines = _error_lines(outcome.text or "")
+    return _kind(lines[-1] if lines else outcome.get("message", ""))
 
 
 def run_on_base(where, env, ids, pytest_args):
@@ -233,10 +284,16 @@ def run_on_base(where, env, ids, pytest_args):
     modules = {path[:-3].replace("/", "."): path for path, _ in ids}
     nodes = sorted(f"{path}::{name}" for path, name in ids)
     done = pytest_run(
-        where, env, f"--junitxml={report}", "-m", "not docs and not browser", *pytest_args, *nodes
+        where,
+        env,
+        f"--junitxml={report}",
+        "-m",
+        "not docs and not browser and not threads",
+        *pytest_args,
+        *nodes,
     )
     if done.returncode in PYTEST_ERRORS or not report.exists():
-        raise CheckError(f"pytest on base exited {done.returncode}:\n{done.stdout[-2000:]}")
+        raise CheckError(f"pytest on base exited {done.returncode}:\n{_output(done)}")
     cases: dict[tuple[str, str], list[tuple[str, str]]] = {}
     for case in ET.parse(report).iter("testcase"):
         owner = case.get("classname", "")
@@ -250,7 +307,7 @@ def run_on_base(where, env, ids, pytest_args):
                     if outcome is None
                     else {"skipped": "skipped"}.get(outcome.tag, "fails")
                 )
-                kind = _kind(outcome.get("message", "")) if status == "fails" else ""
+                kind = _failure_kind(outcome) if status == "fails" else ""
                 cases.setdefault((path, "::".join([*classes, name])), []).append((status, kind))
     found = {}
     for key, outcomes in cases.items():
@@ -321,7 +378,10 @@ def render(verdicts, notes, merge_base, head) -> str:
                 where = (key[0], verdicts[key]["kind"])
                 wrong[where] = wrong.get(where, 0) + 1
         lines += [f"    {path}: {kind} x {n}" for (path, kind), n in sorted(wrong.items())[:SHOWN]]
-    for status, title in (("skipped", "skipped on base"), ("not_run", "not run (docs/browser)")):
+    for status, title in (
+        ("skipped", "skipped on base"),
+        ("not_run", "not run (docs, browser, threads)"),
+    ):
         for key in by_status.get(status, [])[:SHOWN]:
             lines.append(f"  {title}: {label(key)}")
     for key in by_status.get("not_collected", [])[:SHOWN]:
@@ -354,7 +414,11 @@ def check(args) -> int:
         try:
             env = base_tree(root, merge_base, head, where, args.package)
             paths = sorted({path for path, _ in selected})
-            collected, broken = collect_on_base(where, env, paths)
+            collected, broken, skipped = collect_on_base(where, env, paths)
+            notes += [
+                f"{path}: skipped at collection on base ({reason}); its tests were not run"
+                for path, reason in sorted(skipped.items())
+            ]
             good = {key for key in selected if key in collected and key[0] not in broken}
             ran = run_on_base(where, env, good, args.pytest_args) if good else {}
         finally:

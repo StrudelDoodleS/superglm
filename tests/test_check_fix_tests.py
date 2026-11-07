@@ -87,6 +87,42 @@ def test_the_marker_counts_on_a_test_a_class_or_the_module():
     assert not other_mark["test_a"].pinned
 
 
+def test_the_marker_is_read_from_the_marks_a_test_has_not_from_what_a_decorator_mentions():
+    tests = _tests(
+        """
+        import pytest
+
+        class TestBody:
+            pytestmark = [pytest.mark.slow, pytest.mark.pins_behaviour]
+            def test_a(self): pass
+
+        class TestAnnotated:
+            pytestmark: pytest.MarkDecorator = pytest.mark.pins_behaviour
+            def test_a(self): pass
+
+        class TestOther:
+            pytestmark = pytest.mark.slow
+            def test_a(self): pass
+
+        @pytest.mark.parametrize("n", [pytest.param(0, marks=pytest.mark.pins_behaviour), 1])
+        def test_one_case_marked(n): pass
+
+        @pytest.mark.pins_behaviour("a reason")
+        def test_called_marker(): pass
+        """
+    )
+    annotated_module = _tests("pytestmark: list = [pytest.mark.pins_behaviour]\ndef test_a(): pass")
+
+    assert {name: test.pinned for name, test in tests.items()} == {
+        "TestBody::test_a": True,
+        "TestAnnotated::test_a": True,
+        "TestOther::test_a": False,
+        "test_one_case_marked": False,  # a mark on one pytest.param pins no test
+        "test_called_marker": True,
+    }
+    assert annotated_module["test_a"].pinned
+
+
 _BASE_SRC = "def double(x):\n    return x + x + 1  # the bug\n"
 _FIXED_SRC = "def double(x):\n    return x + x\n\n\ndef triple(x):\n    return 3 * x\n"
 _OLD_TEST = "from tiny import double\n\n\ndef test_old():\n    assert double(0) == 1\n"
@@ -170,7 +206,7 @@ def _repo(tmp_path: Path, head_files: dict[str, str]) -> tuple[Path, str]:
     return repo, base
 
 
-def _run(repo: Path, base: str, *extra: str):
+def _run(repo: Path, base: str, *extra: str, env=None):
     command = [
         sys.executable,
         str(SCRIPT),
@@ -182,7 +218,7 @@ def _run(repo: Path, base: str, *extra: str):
         "tiny",
     ]
     return subprocess.run(
-        [*command, *extra], capture_output=True, text=True, check=False, timeout=240
+        [*command, *extra], capture_output=True, text=True, check=False, timeout=240, env=env
     )
 
 
@@ -269,3 +305,95 @@ def test_the_repositorys_own_pytest_options_do_not_change_what_the_check_reads(t
 
     assert json.loads((tmp_path / "out.json").read_text())["tests"][0]["status"] == "fails"
     assert done.returncode == 0
+
+
+def test_a_module_that_skips_itself_at_collection_is_reported_and_never_counted(tmp_path):
+    repo, base = _repo(
+        tmp_path,
+        {
+            "src/tiny/__init__.py": _FIXED_SRC,
+            "tests/test_optional.py": (
+                'import pytest\n\npytest.importorskip("a_package_nobody_installs")\n\n\n'
+                "def test_needs_it():\n    assert True\n"
+            ),
+        },
+    )
+    done = _run(repo, base)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "tests/test_optional.py: skipped at collection on base" in done.stdout
+    assert "tests/test_optional.py::test_needs_it (added)" in done.stdout
+
+
+def test_a_setup_error_is_filed_under_its_exception_and_not_as_an_assertion(tmp_path):
+    repo, base = _repo(
+        tmp_path,
+        {
+            "src/tiny/__init__.py": _FIXED_SRC,
+            "tests/test_kinds.py": (
+                "import pytest\n\n\n@pytest.fixture\ndef triple():\n"
+                "    from tiny import triple\n\n    return triple\n\n\n"
+                "def test_setup_error(triple):\n    assert triple(1) == 3\n\n\n"
+                'def test_custom_message():\n    ok = False\n    assert ok, "coefficients: drifted"\n'
+            ),
+        },
+    )
+    report = tmp_path / "out.json"
+    _run(repo, base, "--json", str(report))
+    kinds = {
+        row["test"].split("::")[1]: row["kind"] for row in json.loads(report.read_text())["tests"]
+    }
+
+    assert kinds == {"test_setup_error": "ImportError", "test_custom_message": "AssertionError"}
+
+
+def test_threads_tests_are_not_run_and_the_pools_are_pinned(tmp_path):
+    pools = "OMP_NUM_THREADS OPENBLAS_NUM_THREADS MKL_NUM_THREADS NUMBA_NUM_THREADS".split()
+    pools += "VECLIB_MAXIMUM_THREADS BLIS_NUM_THREADS NUMEXPR_NUM_THREADS SUPERGLM_N_JOBS".split()
+    repo, base = _repo(
+        tmp_path,
+        {
+            "src/tiny/__init__.py": _FIXED_SRC,
+            "pytest.ini": "[pytest]\nmarkers = threads: needs the default pools\n",
+            "tests/test_pools.py": (
+                "import os\n\nimport pytest\n\n\n@pytest.mark.threads\n"
+                'def test_needs_the_default_pools():\n    assert os.environ["OMP_NUM_THREADS"] != "1"\n\n\n'
+                f"@pytest.mark.pins_behaviour\ndef test_every_pool_is_pinned():\n"
+                f"    assert [os.environ.get(name) for name in {pools!r}] == ['1'] * {len(pools)}\n"
+            ),
+        },
+    )
+    report = tmp_path / "out.json"
+    unpinned = {
+        **os.environ,
+        "SUPERGLM_N_JOBS": "8",
+        "BLIS_NUM_THREADS": "8",
+        "OMP_NUM_THREADS": "8",
+    }
+    done = _run(repo, base, "--json", str(report), env=unpinned)
+    status = {
+        row["test"].split("::")[1]: row["status"] for row in json.loads(report.read_text())["tests"]
+    }
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert status == {
+        "test_needs_the_default_pools": "not_run",
+        "test_every_pool_is_pinned": "passes",
+    }
+
+
+def test_a_collection_that_fails_on_base_says_why_on_stderr(tmp_path):
+    repo, base = _repo(
+        tmp_path,
+        {
+            "src/tiny/__init__.py": _FIXED_SRC,
+            "tests/conftest.py": "from tiny import triple  # absent on base\n",
+            "tests/test_new.py": "def test_x():\n    assert True\n",
+        },
+    )
+    done = _run(repo, base)
+
+    assert done.returncode == 2
+    assert (
+        "collection on base exited" in done.stderr and "cannot import name 'triple'" in done.stderr
+    )

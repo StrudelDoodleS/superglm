@@ -101,46 +101,6 @@ jobs:
             exit "$ty_status"
           fi
 
-  fix-tests:
-    # Reports; it does not block. Run over the last fourteen merged pull requests the check
-    # flagged tests in ten of them (77 of 887 tests), and most that were read pin behaviour
-    # that already worked, so a blocking job would teach authors to add the marker. Drop
-    # --report-only to make a flag fail the job.
-    name: new tests against the base commit's src
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
-
-      - name: Set up Python
-        run: uv python install 3.13
-
-      - name: Install dependencies
-        run: >-
-          uv sync --locked --python 3.13
-          --extra dev --extra bench --extra plotting
-
-      - name: Run the tests this pull request adds or changes against the base commit's src/
-        env:
-          OPENBLAS_NUM_THREADS: "1"
-          OMP_NUM_THREADS: "1"
-          NUMBA_NUM_THREADS: "1"
-          MKL_NUM_THREADS: "1"
-        run: |
-          # The checkout is the pull request's merge commit, whose first parent is the base.
-          status=0
-          uv run --no-sync python scripts/check_fix_tests.py --base HEAD^1 --report-only \
-            -- -n logical --dist worksteal > fix-tests.txt 2>&1 || status=$?
-          cat fix-tests.txt
-          { echo '```text'; cat fix-tests.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          exit "$status"
-
   quality:
     runs-on: ubuntu-latest
 
@@ -255,3 +215,45 @@ jobs:
 
       - name: Workspace browser tests
         run: uv run pytest tests/editor/ -m browser --run-browser -q
+
+  fix-tests:
+    # Reports; neither a flag nor a failure of the check itself blocks (continue-on-error). Run
+    # over the last fourteen merged pull requests the check flagged tests in ten of them (77 of
+    # 887 tests), and most that were read pin behaviour that already worked, so a blocking job
+    # would teach authors to add the marker. The job is not a required context in the ruleset:
+    # making a flag block takes dropping --report-only here and adding the job to the ruleset.
+    # It sits last because the contract tests read the workflow between two job names.
+    name: new tests against the base commit's src
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: >-
+          uv sync --locked --python 3.13
+          --extra dev --extra bench --extra plotting
+
+      - name: Run the tests this pull request adds or changes against the base commit's src/
+        run: |
+          # The checkout is the pull request's merge commit, whose first parent is the base.
+          # The script pins every thread pool as scripts/run_test_suite.py does. The output
+          # streams to the log and to fix-tests.txt, and `timeout` ends a hang on base well
+          # inside the job's limit, so the summary below is written whatever happened.
+          set -o pipefail
+          status=0
+          timeout --kill-after=60s 30m \
+            uv run --no-sync python scripts/check_fix_tests.py --base HEAD^1 --report-only \
+            -- -n logical --dist worksteal 2>&1 | tee fix-tests.txt || status=$?
+          { echo '```text'; cat fix-tests.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
