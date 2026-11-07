@@ -234,6 +234,28 @@ def test_levels_are_bound_on_the_rows_the_fit_keeps(label):
     assert _fold_levels(padded) == _fold_levels(clean)
 
 
+@pytest.mark.parametrize("label", [None, "zzz"], ids=["a missing label", "a label seen only there"])
+def test_a_label_on_a_dropped_row_cannot_fail_its_fold(label):
+    # Mutation check: calling ``folds.predict`` directly fails this, under ``error_score="raise"``
+    # here and with the fold's scores NaN under the default.
+    X, y = _rows()
+    weights = np.random.default_rng(6).uniform(0.5, 2.0, N)
+    padding = pd.DataFrame({"age": [40.0, 50.0], "region": [label, label], "unread": [0.0, 0.0]})
+    frame = pd.concat([X, padding], ignore_index=True)
+    result = _fixed_cv(
+        frame,
+        np.r_[y, 1.0, 1.0],
+        sample_weight=np.r_[weights, 0.0, 0.0],
+        return_oof=True,
+        return_estimators=True,
+    )
+    assert np.isnan(result.oof_predictions[N:]).all()
+    assert result.fold_scores["nll"].notna().all()
+    for fold, (_train, test) in zip(result.estimators, result.fold_indices, strict=True):
+        kept = test[test < N]
+        np.testing.assert_array_equal(result.oof_predictions[kept], fold.predict(frame.iloc[kept]))
+
+
 def test_offsets_by_parameter_are_sliced_for_fits_and_scores():
     rng = np.random.default_rng(3)
     X, _ = _rows()

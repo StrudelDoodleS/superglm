@@ -2213,6 +2213,8 @@
     "tests/test_cross_validate.py::TestWeightContractScoring::test_frequency_weighted_scores_match_literal_rows[distribution1-y1-mu1-1.0]": 0.001,
     "tests/test_cross_validate.py::TestWeightContractScoring::test_tweedie_scores_use_physical_observation_count": 0.011,
     "tests/test_cross_validate.py::test_fit_reml_without_smoothing_selection_warns_when_the_coefficient_fit_stops_early": 0.038,
+    "tests/test_cross_validate_lss.py::test_a_label_on_a_dropped_row_cannot_fail_its_fold[a label seen only there]": 0.1796626311261207,
+    "tests/test_cross_validate_lss.py::test_a_label_on_a_dropped_row_cannot_fail_its_fold[a missing label]": 0.23919448908418417,
     "tests/test_cross_validate_lss.py::test_levels_are_bound_on_the_rows_the_fit_keeps[a label seen only there]": 0.268,
     "tests/test_cross_validate_lss.py::test_levels_are_bound_on_the_rows_the_fit_keeps[a missing label]": 0.312,
     "tests/test_curvature_boundary_knot_contracts.py::test_curvature_operator_accepts_a_clamped_knot_repeated_onto_the_boundary": 0.001,

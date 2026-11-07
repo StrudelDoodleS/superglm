@@ -163,6 +163,8 @@ class LSSFolds:
 
     row_cost_label = "Log score"
 
+    drops_zero_weight_rows = True
+
     def __init__(self, model) -> None:
         self.model = model
 

@@ -543,6 +543,7 @@ class _GLMFolds:
     offset_argument = "offset"
     warm_argument = "lambda2_init"
     default_warm_start = True
+    drops_zero_weight_rows = False
 
     @staticmethod
     def default_fit_mode(fit_kwargs: Mapping[str, Any]) -> str:
@@ -634,6 +635,26 @@ def _take_offset(offset, rows: NDArray):
     if isinstance(offset, Mapping):
         return {name: values[rows] for name, values in offset.items()}
     return offset[rows]
+
+
+def _held_out_predictions(folds, est, frame, rows, offset, sample_weight) -> NDArray[np.float64]:
+    """A fold's out-of-fold predictions, where a row its fit drops cannot fail the fold.
+
+    Such a row can hold a label nothing was fitted on. It reads NaN when it cannot be priced; a
+    row the fit keeps raises as ``predict`` does.
+    """
+    try:
+        return folds.predict(est, frame.take_rows(rows), _take_offset(offset, rows))
+    except ValueError:
+        kept = None if sample_weight is None else np.flatnonzero(np.asarray(sample_weight) > 0.0)
+        if not folds.drops_zero_weight_rows or kept is None or kept.size == len(sample_weight):
+            raise
+    predictions = np.full(len(rows), np.nan)
+    kept = rows[kept]
+    predictions[np.asarray(sample_weight) > 0.0] = folds.predict(
+        est, frame.take_rows(kept), _take_offset(offset, kept)
+    )
+    return predictions
 
 
 def _resolve_scorers(
@@ -970,7 +991,7 @@ def cross_validate(
 
             # OOF predictions
             if oof is not None:
-                oof[test_idx] = folds.predict(est, X_test, off_test)
+                oof[test_idx] = _held_out_predictions(folds, est, frame, test_idx, offset, sw_test)
 
             # Only a fold that scored completely joins the pooled totals.
             for sname, (numerator, denominator) in fold_parts.items():
