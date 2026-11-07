@@ -386,8 +386,6 @@ def _predict_eta_pooled(
         ]
         for p in predictors
     ]
-    # Each of these reads its term over the whole frame, in one task.
-    task_bytes = max(n, DESIGN_BLOCK_ROWS) * 8 * 16
     keys = [
         (i, k)
         for i, terms in enumerate(grouped)
@@ -398,7 +396,12 @@ def _predict_eta_pooled(
         dict(
             zip(
                 keys,
-                pooled_for(lambda key: grouped[key[0]][key[1]][0].run(), keys, task_bytes),
+                # Each of these reads its term over the whole frame, in one task.
+                pooled_for(
+                    lambda key: grouped[key[0]][key[1]][0].run(),
+                    keys,
+                    max(n, DESIGN_BLOCK_ROWS) * 8 * 16,
+                ),
                 strict=True,
             )
         )
@@ -430,8 +433,11 @@ def _predict_eta_pooled(
         out += offsets[predictors[i].name][rows]
         eta[rows, i] = out
 
+    # A job here holds one block of one term at a time, whatever the frame.
     pooled_for(
-        form, [(i, b) for i in range(len(predictors)) for b in range(len(spans))], task_bytes
+        form,
+        [(i, b) for i in range(len(predictors)) for b in range(len(spans))],
+        DESIGN_BLOCK_ROWS * 8 * 16,
     )
     return eta
 

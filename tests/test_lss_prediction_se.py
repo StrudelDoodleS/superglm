@@ -594,8 +594,10 @@ def test_a_book_is_scored_without_keeping_every_terms_contribution():
 
 
 def test_a_term_scored_over_the_whole_frame_is_charged_for_the_whole_frame(monkeypatch):
-    """Each such task holds the frame's rows, so ``max_memory`` must see them.
-    Mutation check: one block's charge per task lets every such term run at once."""
+    """Each such task holds the frame's rows, so ``max_memory`` must see them; a job of the block
+    map holds one block, whatever the frame. Mutation checks: one block's charge for the whole
+    frame's tasks lets every such term run at once, and the frame's charge for the block map
+    narrows the pool as the frame grows."""
     import superglm._parallel as parallel
     from superglm.distributional.prediction_design import DESIGN_BLOCK_ROWS
 
@@ -608,7 +610,7 @@ def test_a_term_scored_over_the_whole_frame_is_charged_for_the_whole_frame(monke
         parallel, "pooled_for", lambda *a, **k: (charges.append(a[2]), original(*a, **k))[1]
     )
     model.predict_link(frame)
-    assert charges and max(charges) >= 8 * rows * 16
+    assert charges == [8 * rows * 16, DESIGN_BLOCK_ROWS * 8 * 16]
 
 
 def test_a_quote_starts_no_pool_and_a_book_does(monkeypatch):
