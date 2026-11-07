@@ -290,7 +290,9 @@ def _error_head(text: str) -> str:
     Pytest marks every line of the exception text with ``E``, a message that spans lines
     included, so the last ``E`` line may be the tail of a message. The final exception is the
     last unbroken run of ``E`` lines, and the first of its lines that starts ``Type:`` is its
-    header (a ``SyntaxError`` prints its source line before it); a plain ``assert`` has none.
+    header (a ``SyntaxError`` prints its source line before it). A plain ``assert`` has none,
+    and its explanation can hold ``name: value`` lines (``pytest.approx`` prints
+    ``Obtained: 1.0``), so a run that opens with ``assert`` is read as that assert.
     """
     runs: list[list[str]] = []
     follows = False
@@ -303,7 +305,10 @@ def _error_head(text: str) -> str:
         follows = marked
     if not runs:
         return ""
-    return next((line for line in runs[-1] if _names_exception(line)), runs[-1][0])
+    last = runs[-1]
+    if re.match(r"assert\b", last[0]):
+        return last[0]
+    return next((line for line in last if _names_exception(line)), last[0])
 
 
 def _names_exception(line: str) -> bool:

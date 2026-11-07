@@ -350,11 +350,14 @@ def test_a_setup_error_is_filed_under_its_exception_and_not_as_an_assertion(tmp_
         {
             "src/tiny/__init__.py": _FIXED_SRC,
             "tests/test_kinds.py": (
-                "import pytest\n\n\n@pytest.fixture\ndef triple():\n"
+                "import dataclasses\n\nimport pytest\n\n\n@pytest.fixture\ndef triple():\n"
                 "    from tiny import triple\n\n    return triple\n\n\n"
                 "def test_setup_error(triple):\n    assert triple(1) == 3\n\n\n"
                 'def test_custom_message():\n    ok = False\n    assert ok, "coefficients: drifted"\n\n\n'
-                'def test_multiline_message():\n    raise ValueError("no fit\\nreason: singular")\n'
+                'def test_multiline_message():\n    raise ValueError("no fit\\nreason: singular")\n\n\n'
+                "def test_approx():\n    assert 1.0 == pytest.approx(2.0)\n\n\n"
+                "@dataclasses.dataclass\nclass Pair:\n    a: int\n\n\n"
+                "def test_dataclass():\n    assert Pair(1) == Pair(2)\n"
             ),
         },
     )
@@ -368,6 +371,8 @@ def test_a_setup_error_is_filed_under_its_exception_and_not_as_an_assertion(tmp_
         "test_setup_error": "ImportError",
         "test_custom_message": "AssertionError",
         "test_multiline_message": "ValueError",  # not "reason", the tail of the message
+        "test_approx": "AssertionError",  # not "Obtained", a line of the explanation
+        "test_dataclass": "AssertionError",  # not "a", a line of the drill-down
     }
 
 
@@ -469,6 +474,9 @@ def test_the_exception_is_named_by_the_header_of_the_last_block_of_error_lines()
     )
     assert head(context) == "SyntaxError: invalid"  # its source lines come first
     assert head("E   assert 1 == 2\nE    +  where 1 = f()") == "assert 1 == 2"
+    approx = "E   assert 1.0 == 2.0 ± 2e-06\nE     \nE     comparison failed\nE     Obtained: 1.0"
+    assert head(approx) == "assert 1.0 == 2.0 ± 2e-06"  # an explanation can hold "name: value"
+    assert head("E   assert_failed: a\nE   b: 1") == "assert_failed: a"  # not an assert
     assert head("E   AssertionError: drifted\nE   assert False") == "AssertionError: drifted"
     assert (
         head("E   ValueError: a\nE\nE   tail: b") == "ValueError: a"
