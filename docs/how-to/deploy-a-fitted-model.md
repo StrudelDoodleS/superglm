@@ -340,7 +340,9 @@ that start-up code, before it serves. superglm loads each of its own modules
 the first time a name needs it, and loads them one thread at a time. It cannot
 make Python's own import locks resolve two threads that import its modules by
 name at once (`import superglm.model` on one thread while another thread first
-reads a name) in a process that has not loaded them yet.
+reads a name) in a process that has not loaded them yet. A process that forks
+workers while another thread is in a first read waits for that read to finish,
+so the children do not start from a half-loaded module.
 
 ### Keep a warm floor with the platform's own setting
 
@@ -427,6 +429,13 @@ and makes its own. A child that never imports superglm and outlives the
 process can make Numba create the directory again, inside the directory that
 only your user can enter; set `NUMBA_CACHE_DIR` yourself for such children.
 
+If Numba was imported before superglm, superglm tells it through
+`numba.config.CACHE_DIR` and leaves the environment alone, because Numba
+re-reads all its settings when a `NUMBA_` variable changes, which would reset
+any you made in code. A forked child keeps the directory; a new process makes
+its own. If your program changes a `NUMBA_` variable after that, the re-read
+clears the directory too, so set `NUMBA_CACHE_DIR` yourself in that case.
+
 To keep the benefit of a shipped cache on such a platform, copy it into a new
 private directory before anything imports superglm, and point Numba at the
 copy:
@@ -438,6 +447,8 @@ import tempfile
 
 cache = tempfile.mkdtemp(prefix="numba-cache-")  # new, and readable by you alone
 shutil.copytree("/opt/numba-cache", cache, dirs_exist_ok=True)
+for directory, _, _ in os.walk(cache):  # copytree gives each its source's mode
+    os.chmod(directory, 0o700)
 os.environ["NUMBA_CACHE_DIR"] = cache
 
 import superglm  # noqa: E402
