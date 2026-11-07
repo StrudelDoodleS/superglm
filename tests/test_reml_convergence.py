@@ -644,7 +644,7 @@ def test_a_reversing_order_one_newton_step_takes_the_exact_hessian() -> None:
     # the wiring is tested on a forced escalation below.
     fit = _noise_spline_fit(52)._reml_result
     assert fit.converged
-    assert fit.termination_reason == "score_objective_tolerance"
+    assert fit.termination_reason in {"score_objective_tolerance", "newton_step_tolerance"}
     # Both stop at the same optimum: the objective agrees to the REML stop's own
     # resolution (reml_tol=1e-9 relative to a criterion of about 72).
     assert fit.objective == pytest.approx(reference.objective, rel=1e-9)

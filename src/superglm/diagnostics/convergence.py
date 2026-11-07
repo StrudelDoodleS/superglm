@@ -54,6 +54,7 @@ _REML_CONVERGED_REASONS = frozenset(
         "lambda_tolerance",
         "objective_plateau",
         "score_objective_tolerance",
+        "newton_step_tolerance",
         "active_set_stationary",
         "converged_at_precision",
         "fixed_lambdas",

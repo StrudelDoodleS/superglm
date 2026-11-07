@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
+
+from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR
 
 # The freeze bar never drops below this floor, whatever reml_tol: freezing
 # classifies geometry (is a direction informative at all), and a flat
@@ -35,6 +38,9 @@ DECREMENT_GRADIENT_CEILING = 10.0
 # (``concave_live_directions``).
 SHOULDER_CURVATURE_RATIO_LOW = 0.5
 SHOULDER_CURVATURE_RATIO_HIGH = 2.0
+
+NEWTON_STEP_STOP_BAR = 1e-3
+NEWTON_STEP_STOP_PER_TOLERANCE = 1e6
 
 
 def _score_scale(objective: float) -> float:
@@ -366,6 +372,58 @@ def mask_frozen_stop_gradient(
     projected = np.asarray(projected_gradient, dtype=np.float64)
     still_flat = np.abs(projected) < _freeze_gradient_bar(objective, tolerance)
     return np.where(np.asarray(previously_frozen, dtype=bool) & still_flat, 0.0, projected)
+
+
+def newton_step_stop_bar(tolerance: float) -> float:
+    """The largest Newton step in log lambda a stop accepts at this ``reml_tol``.
+
+    At fixed working weights a step of ``d`` keeps ``H`` within ``e**-d H`` and
+    ``e**d H`` in the Loewner order, so it moves a standard error by at most
+    ``d / 2`` in log. The default bar therefore bounds that move by 0.05%. A
+    caller's tighter tolerance tightens the bar in proportion.
+    """
+    return min(NEWTON_STEP_STOP_BAR, NEWTON_STEP_STOP_PER_TOLERANCE * float(tolerance))
+
+
+def newton_step_left(hessian: NDArray, gradient: NDArray) -> float:
+    """The largest entry of Newton's step on these directions, on an unmodified Hessian.
+
+    The step is curvature-scaled, as the Newton decrement is (Boyd & Vandenberghe
+    2004, sec. 9.5.1), so unlike a gradient bar scaled by the objective it does
+    not depend on the objective's size. A Hessian that is not positive definite
+    above the modified-Newton floor gives no such step, which reads as infinite.
+    """
+    if not np.all(np.isfinite(hessian)):
+        return math.inf
+    values, vectors = np.linalg.eigh(hessian)
+    floor = max(float(np.max(np.abs(values))), 1e-12) * NEWTON_EIGENVALUE_FLOOR
+    if not np.all(values >= floor):
+        return math.inf
+    step = vectors @ ((vectors.T @ gradient) / values)
+    return float(np.max(np.abs(step)))
+
+
+def newton_step_same_terms(previous: NDArray | None, current: NDArray) -> bool:
+    """Whether the preceding step was read on exactly these free directions."""
+    return previous is not None and np.array_equal(previous, current)
+
+
+def newton_step_settled(step_left: float, taken_step: float, *, bar: float) -> bool:
+    """Whether the distance left after a taken step is at most ``bar``.
+
+    A Hessian that omits the second-derivative weight terms contracts linearly,
+    at a rate ``r`` the two steps read for free. Steps that keep one sign then
+    leave a distance of about ``step_left / (1 - r)``, and a step that did not
+    contract says nothing about the distance.
+    """
+    if step_left >= taken_step:
+        return False
+    return step_left / (1.0 - step_left / taken_step) <= bar
+
+
+def newton_step_resolved(hessian: NDArray, gradient: NDArray, *, bar: float) -> bool:
+    """Whether Newton's step on these directions is at most ``bar``."""
+    return newton_step_left(hessian, gradient) <= bar
 
 
 def trial_counts_as_precision_evidence(converged: bool, objective: float) -> bool:

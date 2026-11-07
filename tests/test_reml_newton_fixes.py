@@ -280,7 +280,10 @@ class TestNoPostLoopRescue:
         )
         model.fit_reml(X[["x1"]], y, sample_weight=w)
         assert model._reml_result.converged
-        assert model._reml_result.termination_reason == "score_objective_tolerance"
+        assert model._reml_result.termination_reason in {
+            "score_objective_tolerance",
+            "newton_step_tolerance",
+        }
 
 
 class TestTerminationAuthority:

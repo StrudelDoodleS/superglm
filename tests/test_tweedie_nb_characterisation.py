@@ -106,6 +106,12 @@ def test_reml_phi_matches_master(row):
     tolerance = model._reml_profile["reml_tol_resolved"]
     objective = abs(model._reml_result.objective)
     resolved = 4.0 * tolerance * (1.0 + objective) / (len(y) - model.result.effective_df)
+    # A fit that stops on the Newton step is within its bar of the other fit in
+    # log lambda, and EDF moves at most its own size per unit log lambda.
+    stop = model._reml_profile.get("reml_newton_step_stop", {})
+    resolved += (
+        stop.get("bar", 0.0) * model.result.effective_df / (len(y) - model.result.effective_df)
+    )
     assert model.result.phi == pytest.approx(row["phi"], rel=1e-9 + resolved)
 
 
