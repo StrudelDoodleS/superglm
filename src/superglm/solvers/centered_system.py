@@ -194,17 +194,15 @@ class _SystemData:
 class _InitialDataReuse:
     """The initial data systems of the fits one synchronous, fixed-design optimizer runs.
 
-    ``base`` is the initial system of the fits that started from one point (the trials of a line
-    search that share it); ``latest`` is the final system of the fit that ended last, which is
-    the initial system of a fit started from its end (the next trial, or the next iteration's
-    candidate): the final iterate's weights are the next fit's first weights.  A hit on
-    ``latest`` becomes the ``base`` of the fits that start from the same point.
+    ``base`` is the initial system of the fits that started from one point; ``latest`` is the
+    final system of the fit that ended last, whose final weights are the first weights of a fit
+    started from its end. A hit on ``latest`` becomes the ``base`` of the fits from that point.
 
-    Owner: the optimizer, for one call.  Lifetime: that call; the entries are dropped with the
-    owner.  Invalidation: an entry serves only a build with the same design objects (``key``),
-    bit-identical weights and response, and a centring state taking the same routes (``_SystemData``); no
-    penalty, Hessian or fitted state is retained.  The owner must discard its entries before
-    changing source coordinates or invoking user callbacks.
+    Owner: the optimizer, for one call, and its entries drop with it. An entry serves only a
+    build with the same design objects (``key``), bit-identical weights and response, and a
+    centring state taking the same routes (``_SystemData``). No penalty, Hessian or fitted
+    state is retained. The owner discards its entries before changing source coordinates or
+    invoking user callbacks.
     """
 
     base: _SystemData | None = None
