@@ -3,11 +3,13 @@
 Every case fits a small model on clean data and on the same data with hostile rows appended at
 weight zero, then compares each public output on the padded frame with the clean one: numbers to
 ``PADDING_RTOL`` of their scale, text, flags and shapes exactly.  SuperLSS drops the rows of
-weight zero before it reads anything, so its two fits are bit-identical.  SuperGLM keeps them, so
-its sums run over more rows and agree with the clean fit to rounding, and only if both stop at the
-same REML iterate: that is asserted, so that a different stop reads as a different stop.  A
-frequency weight is compared with the replicated rows to ``FREQUENCY_RTOL``, the fits'
-convergence tolerance: the two take different rounding paths to the same optimum.
+weight zero before it reads anything, the level universes a cross-validation shares between its
+folds included, so its two fits agree to rounding and each fold makes the same iterations (the
+``cross_validation_path`` output).  SuperGLM keeps them, so its sums run over more rows and agree
+with the clean fit to rounding, and only if both stop at the same REML iterate: that is asserted,
+so that a different stop reads as a different stop.  A frequency weight is compared with the
+replicated rows to ``FREQUENCY_RTOL``, the fits' convergence tolerance: the two take different
+rounding paths to the same optimum.
 
 The differences that remain are real, each pinned where it is read:
 
@@ -466,7 +468,7 @@ def _glm_cv(model, data):
 
 def _cv_numbers(result):
     fold = result.fold_scores
-    counts = ("n_train", "n_test", "n_iter", "n_reml_iter")  # sizes and the path each fit took
+    counts = ("n_train", "n_test", "n_iter", "n_reml_iter")  # sizes; the path is its own output
     keep = [c for c in fold.columns if not c.endswith("_s") and c not in counts]
     return [result.mean_scores, result.pooled_scores, result.std_scores, fold[keep]]
 
@@ -508,18 +510,33 @@ GLM_OUTPUTS = {
 }
 
 
+_CROSS_VALIDATED = {}
+
+
+def _lss_cross_validated(model, data):
+    """One cross-validation per fitted model, shared by the outputs that read it."""
+    if id(model) not in _CROSS_VALIDATED:
+        X, y, weight, _ = data
+        result = cross_validate(
+            model,
+            X,
+            y,
+            cv=_FeatureFolds(),
+            sample_weight=weight,
+            fit_mode="fit_reml",
+            error_score="raise",
+        )
+        _CROSS_VALIDATED[id(model)] = (model, result)  # the model, so its id is never reused
+    return _CROSS_VALIDATED[id(model)][1]
+
+
 def _lss_cv(model, data):
-    X, y, weight, _ = data
-    result = cross_validate(
-        model,
-        X,
-        y,
-        cv=_FeatureFolds(),
-        sample_weight=weight,
-        fit_mode="fit_reml",
-        error_score="raise",
-    )
-    return _cv_numbers(result)
+    return _cv_numbers(_lss_cross_validated(model, data))
+
+
+def _lss_cv_path(model, data):
+    """The iterations each fold's fit made: a fold bound to other levels takes another path."""
+    return _lss_cross_validated(model, data).fold_scores[["n_iter", "n_reml_iter"]]
 
 
 def _lss_rows(call, data, *, flags):
@@ -580,10 +597,12 @@ LSS_OUTPUTS = {
     ).to_json(),
     "diagnose": lambda m, d: m.diagnose().to_dict(),
     "cross_validation": _lss_cv,
+    "cross_validation_path": _lss_cv_path,
     "editor_payload": _lss_editor,
 }
 # Outputs whose size is the number of rows handed in say nothing about replication.
 NOT_REPLICATED = {
+    "cross_validation_path",  # a weighted fit and a replicated one round differently to one optimum
     "metric_rows",
     "scores",
     "residuals",
@@ -617,11 +636,6 @@ def _cases(frequency):
             yield pytest.param(case, name, call, marks=marks, id=f"{case}-{name}")
 
 
-def _padding_rtol(case, name):
-    """A SuperLSS fold is a separate fit that stops on the tolerance, at its own iterate."""
-    return FREQUENCY_RTOL if name == "cross_validation" and case.startswith("lss") else PADDING_RTOL
-
-
 @pytest.mark.pins_behaviour
 @pytest.mark.parametrize(("case", "name", "call"), _output_cases(frequency=False))
 def test_rows_of_weight_zero_change_no_output(case, name, call):
@@ -630,7 +644,7 @@ def test_rows_of_weight_zero_change_no_output(case, name, call):
 
     got, want = call(padded, padded_data), call(clean, clean_data)
 
-    assert _differences(got, want, _padding_rtol(case, name)) == []
+    assert _differences(got, want, PADDING_RTOL) == []
 
 
 @pytest.mark.pins_behaviour

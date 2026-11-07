@@ -201,6 +201,39 @@ def test_a_level_only_in_a_held_out_fold_is_scored_and_the_model_is_left_alone()
         assert ("rare" in spec._pinned_levels) == (7 not in train)
 
 
+def _fold_levels(result):
+    """Each fold's level universe and base for ``region``, as its fit was bound to them."""
+    specs = (
+        fold._require_fitted().compiled_predictors[0].compiled.specs["region"]
+        for fold in result.estimators
+    )
+    return [
+        (None if spec._declared_levels is None else list(spec._declared_levels), spec._pinned_base)
+        for spec in specs
+    ]
+
+
+@pytest.mark.parametrize("label", [None, "zzz"], ids=["a missing label", "a label seen only there"])
+def test_levels_are_bound_on_the_rows_the_fit_keeps(label):
+    # A fit drops a row of weight zero before it reads anything, so a missing label on one must
+    # not switch the shared binding off (each fold would take its own levels and base), and a
+    # label seen only on one must not join the universe.
+    X, y = _rows()
+    weights = np.random.default_rng(6).uniform(0.5, 2.0, N)
+    padding = pd.DataFrame({"age": [40.0, 50.0], "region": [label, label], "unread": [0.0, 0.0]})
+    padded = _fixed_cv(
+        pd.concat([X, padding], ignore_index=True),
+        np.r_[y, 1.0, 1.0],
+        sample_weight=np.r_[weights, 0.0, 0.0],
+        return_estimators=True,
+    )
+    clean = _fixed_cv(X, y, sample_weight=weights, return_estimators=True)
+
+    base = X["region"].value_counts().idxmax()
+    assert _fold_levels(clean) == [(["a", "b", "c"], base)] * 3
+    assert _fold_levels(padded) == _fold_levels(clean)
+
+
 def test_offsets_by_parameter_are_sliced_for_fits_and_scores():
     rng = np.random.default_rng(3)
     X, _ = _rows()
