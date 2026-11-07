@@ -1142,8 +1142,11 @@ def link_standard_errors(
     ``x_i`` is the row of the predictor's local design, so this is the exact standard error of
     the link-scale prediction, with no draws. ``covariance`` is as in ``posterior_covariance``.
     The quadratic form is taken a block of rows at a time (one ``x V`` product and a row-wise
-    dot), in ``n p^2`` operations and the memory of one block. A variance a roundoff below zero
-    reads as zero.
+    dot), in ``n p^2`` operations and the memory of one block per worker. A variance a roundoff
+    below zero reads as zero. A row whose variance leaves the normal range (a covariate of
+    ``1e200`` squares to infinity, one of ``1e-200`` to zero, though the standard error is an
+    ordinary number) is taken again from its row scaled by a power of two, which is exact:
+    ``sqrt(x' V x) = 2^e sqrt(y' V y)`` with ``y = 2^-e x``.
     """
     matrix = posterior_covariance(fitted, kind=covariance)
     layout = fitted.layout
@@ -1158,10 +1161,31 @@ def link_standard_errors(
         for index, state in enumerate(layout.predictors):
             design = local[state.name]
             variance = np.einsum("ij,ij->i", design @ blocks[index], design)
-            errors[rows, index] = np.sqrt(np.maximum(variance, 0.0))
+            root = np.sqrt(np.maximum(variance, 0.0))
+            # one comparison of the extremes: the rows out of range are the rare case
+            if not (variance.min() >= _NORMAL_MIN and variance.max() <= _FLOAT_MAX):
+                outside = ~((variance >= _NORMAL_MIN) & (variance <= _FLOAT_MAX))
+                root[outside] = _scaled_roots(design[outside], blocks[index])
+            errors[rows, index] = root
 
-    map_design_blocks(frame, fitted.compiled_predictors, layout, standard_errors)
+    map_design_blocks(
+        frame, fitted.compiled_predictors, layout, standard_errors, blas_one_thread=True
+    )
     return errors
+
+
+#: The smallest normal float64 and the largest finite one: a variance outside them has lost its
+#: relative accuracy (or is infinite, or is NaN where an infinity met its opposite).
+_NORMAL_MIN = float(np.finfo(np.float64).tiny)
+_FLOAT_MAX = float(np.finfo(np.float64).max)
+
+
+def _scaled_roots(design: NDArray, block: NDArray) -> NDArray:
+    """``sqrt(x' V x)`` of each row, each row first scaled by the power of two of its largest entry."""
+    exponent = np.frexp(np.abs(design).max(axis=1))[1]
+    scaled = np.ldexp(design, -exponent[:, None])
+    variance = np.einsum("ij,ij->i", scaled @ block, scaled)
+    return np.ldexp(np.sqrt(np.maximum(variance, 0.0)), exponent)
 
 
 def _resolved_reduce(reduce: Any) -> Callable[[NDArray], NDArray] | None:

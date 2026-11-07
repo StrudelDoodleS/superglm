@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import re
-import warnings
-from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager, nullcontext
+from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
@@ -17,7 +15,7 @@ from numpy.typing import NDArray
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import CompiledPredictor
-from superglm.features.categorical import UNSEEN_ROUTING_WARNING, Categorical
+from superglm.features.categorical import Categorical, unseen_routing_quiet
 from superglm.features.factor_smooth import FactorSmooth, group_term_level_values
 from superglm.features.interaction import (
     CategoricalInteraction,
@@ -338,15 +336,6 @@ ROW_INDEPENDENT_TERMS = (
 )
 
 
-@contextmanager
-def _unseen_routing_silenced() -> Iterator[None]:
-    """Drop the unseen-level warning: one block's count is not the frame's, and the caller's
-    whole-frame prediction says it once."""
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=re.escape(UNSEEN_ROUTING_WARNING))
-        yield
-
-
 def _label_column(spec: Any, column: NDArray) -> NDArray[np.intp]:
     """The design column of each row's level (``-1`` for none), after the spec's own checks."""
     if type(spec) is Categorical:
@@ -397,7 +386,7 @@ def label_columns(
                 continue
             entry = memo.get(key)
             if entry is None or (entry[1] and not quiet):
-                with _unseen_routing_silenced() if quiet else nullcontext():
+                with unseen_routing_quiet() if quiet else nullcontext():
                     memo[key] = (_label_column(spec, frame.column_array(name)), quiet)
             found[(predictor.name, name)] = memo[key][0]
     return found
@@ -459,13 +448,15 @@ def _predictor_rows(
     predictor: CompiledPredictor,
     state: Any,
     columns: Mapping[Any, NDArray],
+    labels: Mapping[tuple[str, str], NDArray],
     rows: slice,
     named: list[str] | None,
 ) -> NDArray[np.float64]:
     """One predictor's local design for the frame rows ``rows``.
 
-    ``columns`` holds each covariate's column and, keyed ``(predictor, term)``, the level columns
-    of ``label_columns``."""
+    ``columns`` holds each covariate's column by its name, whatever the name is, and ``labels``
+    the level columns of ``label_columns`` by ``(predictor, term)``: two mappings, because a
+    tuple-valued column name could equal a ``(predictor, term)`` key."""
     n_rows = rows.stop - rows.start
     width = state.coefficient_slice.stop - state.coefficient_slice.start
     intercept_width = int(state.intercept_index is not None)
@@ -479,9 +470,9 @@ def _predictor_rows(
 
     for name in predictor.compiled.feature_order:
         slope_indices = _term_indices(predictor.compiled.groups, name)
-        labels = columns.get((predictor.name, name))
-        if labels is not None:
-            hot = labels[rows]
+        coded = labels.get((predictor.name, name))
+        if coded is not None:
+            hot = coded[rows]
             values = np.zeros((n_rows, len(slope_indices)), dtype=np.float64)
             present = np.flatnonzero(hot >= 0)
             values[present, hot[present]] = 1.0
@@ -549,50 +540,6 @@ def _validated_predictors(
     return predictors
 
 
-def iter_joint_prediction_design(
-    X: FrameLike | EagerFrame,
-    compiled_predictors: Sequence[CompiledPredictor],
-    layout: StackedLayout,
-    *,
-    start: int = 0,
-    stop: int | None = None,
-    block_rows: int | None = None,
-) -> Iterator[tuple[slice, dict[str, NDArray[np.float64]]]]:
-    """Yield ``(rows, {predictor: local design})`` for blocks of rows ``start:stop`` of ``X``.
-
-    Blocks hold ``block_rows`` rows, ``DESIGN_BLOCK_ROWS`` by default.
-
-    Every term is evaluated once per block, from its own compact form, and no matrix with a row
-    per observation is held: a book is priced in the memory of one block. A block's matrices are
-    its own; the same values as ``build_joint_prediction_design`` on those rows. The
-    unseen-level warning is not given, because a block counts only its own rows: predict the
-    frame once for it.
-    """
-    predictors = _validated_predictors(compiled_predictors, layout)
-    frame = as_eager_frame(X)
-    frame.require_columns(_required_columns(predictors))
-    columns: dict[Any, NDArray] = {
-        name: frame.column_array(name) for name in _required_columns(predictors)
-    }
-    columns.update(label_columns(frame, predictors, quiet=True))
-    first, last = int(start), len(frame) if stop is None else int(stop)
-    if not 0 <= first <= last <= len(frame):
-        raise ValueError("start and stop must select rows of X")
-    step = DESIGN_BLOCK_ROWS if block_rows is None else int(block_rows)
-    if step < 1:
-        raise ValueError("block_rows must be a positive number of rows")
-    for lo in range(first, last, step):
-        rows = slice(lo, min(lo + step, last))
-        with _unseen_routing_silenced():
-            yield (
-                rows,
-                {
-                    state.name: _predictor_rows(predictor, state, columns, rows, None)
-                    for predictor, state in zip(predictors, layout.predictors, strict=True)
-                },
-            )
-
-
 def map_design_blocks(
     X: FrameLike | EagerFrame,
     compiled_predictors: Sequence[CompiledPredictor],
@@ -602,17 +549,21 @@ def map_design_blocks(
     start: int = 0,
     stop: int | None = None,
     block_rows: int | None = None,
+    blas_one_thread: bool = False,
 ) -> list:
     """``[fn(rows, {predictor: local design}), ...]`` over blocks of rows, in row order.
 
     The blocks do not depend on the worker count, so the list is the same at any ``n_jobs``.
     More than one block runs on ``superglm``'s own pool (``_parallel.pooled_for``, BLAS held at
     one thread, the calling thread working beside its helpers); one block, which is every
-    quote-sized frame, runs inline and starts nothing, with BLAS at one thread from
-    ``BLAS_ONE_THREAD_ROWS`` rows. ``fn`` reads its block and returns what
-    it keeps; the unseen-level warning is dropped as in ``iter_joint_prediction_design``. The
-    filter is set once, on the calling thread, since ``warnings.catch_warnings`` is not safe to
-    enter from several threads.
+    quote-sized frame, runs inline and starts nothing. A frame holds one block's design, and
+    what ``fn`` makes of it, per worker, the workers capped by ``max_memory``, never a matrix
+    with a row per observation. ``fn`` reads its block and returns what it keeps. A block does
+    not give the unseen-level warning, because it counts only its own rows (the caller's
+    whole-frame prediction says it once); that is a context variable set here, so concurrent
+    calls share no warning state. ``blas_one_thread`` holds BLAS at one thread for a single
+    block of ``BLAS_ONE_THREAD_ROWS`` rows or more: for a caller whose ``fn`` is the ``x V``
+    product of the standard errors, where BLAS starts threads it cannot use.
     """
     predictors = _validated_predictors(compiled_predictors, layout)
     frame = as_eager_frame(X)
@@ -626,21 +577,21 @@ def map_design_blocks(
     if step < 1:
         raise ValueError("block_rows must be a positive number of rows")
     spans = [slice(lo, min(lo + step, last)) for lo in range(first, last, step)]
+    labels = label_columns(frame, predictors, quiet=True)
 
     def run(rows: slice) -> Any:
         local = {
-            state.name: _predictor_rows(predictor, state, columns, rows, None)
+            state.name: _predictor_rows(predictor, state, columns, labels, rows, None)
             for predictor, state in zip(predictors, layout.predictors, strict=True)
         }
         return fn(rows, local)
 
-    columns.update(label_columns(frame, predictors, quiet=True))
-    with _unseen_routing_silenced():
+    with unseen_routing_quiet():
         if len(spans) <= 1:
             from superglm._blas_threads import pooled_blas_threads
 
-            small = last - first < BLAS_ONE_THREAD_ROWS
-            with nullcontext() if small else pooled_blas_threads():
+            hold = blas_one_thread and last - first >= BLAS_ONE_THREAD_ROWS
+            with pooled_blas_threads() if hold else nullcontext():
                 return [run(rows) for rows in spans]
         from superglm._parallel import pooled_for
 
@@ -660,9 +611,9 @@ def build_joint_prediction_design(
 ) -> JointPredictionDesign:
     """Reconstruct local fitted coefficient designs without mutating term state.
 
-    The whole frame as one matrix per predictor; ``iter_joint_prediction_design`` streams large
-    frames. ``named``, when given, collects the ``sz`` levels the design predicts at
-    the population curve, as ``"<parameter> term '<term>' levels ..."``.
+    The whole frame as one matrix per predictor; ``map_design_blocks`` streams large frames.
+    ``named``, when given, collects the ``sz`` levels the design predicts at the population
+    curve, as ``"<parameter> term '<term>' levels ..."``.
     """
     predictors = _validated_predictors(compiled_predictors, layout)
     frame = as_eager_frame(X)
@@ -670,10 +621,10 @@ def build_joint_prediction_design(
     columns: dict[Any, NDArray] = {
         name: frame.column_array(name) for name in _required_columns(predictors)
     }
-    columns.update(label_columns(frame, predictors))
+    labels = label_columns(frame, predictors)
     rows = slice(0, len(frame))
     local = {
-        state.name: _predictor_rows(predictor, state, columns, rows, named)
+        state.name: _predictor_rows(predictor, state, columns, labels, rows, named)
         if len(frame)
         else np.zeros((0, state.coefficient_slice.stop - state.coefficient_slice.start))
         for predictor, state in zip(predictors, layout.predictors, strict=True)

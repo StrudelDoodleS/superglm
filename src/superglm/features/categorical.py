@@ -7,6 +7,9 @@ simultaneously), which is the correct variable selection behavior.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Literal, cast
 
 import numpy as np
@@ -198,15 +201,30 @@ def _codes_against(values: NDArray, levels: list) -> NDArray:
 #: Rows up to which a level is looked up in a dict instead of a pandas Index built for the call.
 _DICT_LOOKUP_ROWS = 64
 
-#: Opening of the warning for rows whose level was unseen at fit; a caller that scores a frame in
-#: row blocks filters on it, because each block would count only its own rows.
+#: Opening of the warning for rows whose level was unseen at fit.
 UNSEEN_ROUTING_WARNING = "Routing rows with categorical levels unseen at fit"
+
+#: Whether this context gives the unseen-level warning. A caller that scores a frame in row blocks
+#: sets it for the blocks, because each would count only its own rows, and gives the warning once
+#: from a whole-frame call. A context variable belongs to its thread and is inherited by the
+#: helpers a pooled section starts, so no process-wide warning filter is touched.
+_UNSEEN_ROUTING_QUIET: ContextVar[bool] = ContextVar("superglm_unseen_routing_quiet", default=False)
+
+
+@contextmanager
+def unseen_routing_quiet() -> Iterator[None]:
+    """Within this block the calling context does not warn of levels unseen at fit."""
+    token = _UNSEEN_ROUTING_QUIET.set(True)
+    try:
+        yield
+    finally:
+        _UNSEEN_ROUTING_QUIET.reset(token)
 
 
 def _warn_unseen_routed(x: NDArray, codes: NDArray, *, group: Any = None) -> None:
     """Warn once per call for rows with a negative code: routed to base, or to ``group``."""
     novel_rows = codes < 0
-    if not novel_rows.any():
+    if not novel_rows.any() or _UNSEEN_ROUTING_QUIET.get():
         return
     novel = sorted(set(np.asarray(x)[novel_rows].tolist()), key=str)
     if group is None:

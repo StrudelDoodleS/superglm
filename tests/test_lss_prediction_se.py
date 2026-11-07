@@ -7,6 +7,7 @@ dense matrix, so nothing here shares code with the design builder under test.
 
 from __future__ import annotations
 
+import threading
 import warnings
 
 import numpy as np
@@ -28,7 +29,7 @@ from superglm.distributional.posterior import (
 )
 from superglm.distributional.prediction_design import (
     build_joint_prediction_design,
-    iter_joint_prediction_design,
+    map_design_blocks,
 )
 from superglm.features import (
     Categorical,
@@ -249,17 +250,28 @@ def test_blocks_stitch_to_the_whole_frame_design():
     frame, _ = _frame(50, 5, wide=True)
     fitted = model._require_fitted()
     whole = build_joint_prediction_design(frame, fitted.compiled_predictors, fitted.layout)
-    seen = []
-    for rows, local in iter_joint_prediction_design(
-        frame, fitted.compiled_predictors, fitted.layout, block_rows=7
-    ):
-        seen.append(rows)
+    blocks = map_design_blocks(
+        frame,
+        fitted.compiled_predictors,
+        fitted.layout,
+        lambda rows, local: (rows, local),
+        block_rows=7,
+    )
+    for rows, local in blocks:
         for name, matrix in local.items():
             tolerance = 64 * U * max(1.0, float(np.abs(whole.local[name]).max()))
             np.testing.assert_allclose(matrix, whole.local[name][rows], rtol=0.0, atol=tolerance)
-    assert [(r.start, r.stop) for r in seen] == [(lo, min(lo + 7, 50)) for lo in range(0, 50, 7)]
-    (rows, _), *_ = iter_joint_prediction_design(
-        frame, fitted.compiled_predictors, fitted.layout, start=20, stop=31, block_rows=64
+    assert [(r.start, r.stop) for r, _ in blocks] == [
+        (lo, min(lo + 7, 50)) for lo in range(0, 50, 7)
+    ]
+    ((rows, _),) = map_design_blocks(
+        frame,
+        fitted.compiled_predictors,
+        fitted.layout,
+        lambda rows, local: (rows, local),
+        start=20,
+        stop=31,
+        block_rows=64,
     )
     assert (rows.start, rows.stop) == (20, 31)
 
@@ -286,9 +298,9 @@ def test_a_frame_is_priced_in_blocks_and_each_term_is_read_once_per_block(monkey
         monkeypatch.setattr(design_module, attribute, counted)
     original_rows = design_module._predictor_rows
 
-    def sized(predictor, state, columns, rows, named):
+    def sized(predictor, state, columns, labels, rows, named):
         calls["rows"].append(rows.stop - rows.start)
-        return original_rows(predictor, state, columns, rows, named)
+        return original_rows(predictor, state, columns, labels, rows, named)
 
     monkeypatch.setattr(design_module, "_predictor_rows", sized)
     link_standard_errors(fitted, frame)
@@ -511,6 +523,11 @@ def test_a_single_block_call_takes_its_products_on_one_blas_thread_from_a_few_do
     model.predict_link(_frame(rows - 1, 31)[0], se_fit=True)
     model.predict_link(_frame(1, 32)[0], se_fit=True)
     assert entered == []
+    # the scope was measured for the standard errors' product alone: a draw pushforward is a
+    # different product, and a single block of it keeps BLAS's own threads (mutation check:
+    # ``blas_one_thread=True`` made the default enters it here)
+    model.posterior_bounds(_frame(1000, 33)[0], ("parameter", "location"), n_draws=8)
+    assert entered == []
 
 
 def test_a_quote_starts_no_pool_and_a_book_does(monkeypatch):
@@ -542,6 +559,137 @@ def test_a_pooled_draw_pushforward_and_unseen_warning_match_the_inline_ones(monk
         pooled = model.posterior_bounds(test, ("parameter", "location"), n_draws=6, seed=1)
     np.testing.assert_allclose(pooled.to_numpy(), inline.to_numpy(), rtol=1e-12, atol=1e-13)
     assert len([w for w in caught if "unseen at fit" in str(w.message)]) == 1
+
+
+def _warning_action(message: str) -> str:
+    """What the process's own warning filters do with a ``UserWarning`` of this text."""
+    for action, pattern, category, _module, _lineno in warnings.filters:
+        if (pattern is None or pattern.match(message)) and issubclass(UserWarning, category):
+            return action
+    return warnings.defaultaction
+
+
+def test_concurrent_calls_leave_the_warning_filters_alone_and_the_warning_working():
+    """Two threads inside a block scan at once, the first leaving before the second.
+
+    ``warnings.catch_warnings`` saves and restores the process's filter list, so the thread that
+    enters second saves the first one's ignore filter and puts it back for good when it leaves
+    after it: the unseen-level warning, the only notice that rows were priced at the base level,
+    was lost for the life of the process (with four threads looping ``se_fit=True``, within
+    seconds). The order is forced here with events. The quiet flag is a context variable, so
+    the filters are the same afterwards and a later call warns. Mutation checks: the flag set
+    through ``warnings.catch_warnings`` and ``filterwarnings`` changes the filter list; a flag
+    that is never reset silences the later call.
+    """
+    model, test = _unseen_model()
+    fitted = model._require_fitted()
+    before = list(warnings.filters)
+    first_inside, second_inside, first_left = (threading.Event() for _ in range(3))
+
+    def scan(inside, wait_for):
+        def hold(rows, local):
+            inside.set()
+            assert wait_for.wait(60)
+
+        map_design_blocks(test, fitted.compiled_predictors, fitted.layout, hold)
+
+    def first():
+        scan(first_inside, second_inside)
+        first_left.set()
+
+    def second():
+        scan(second_inside, first_left)
+
+    threads = [threading.Thread(target=first)]
+    threads[0].start()
+    assert first_inside.wait(60)
+    threads.append(threading.Thread(target=second))
+    threads[1].start()
+    for thread in threads:
+        thread.join(120)
+    assert not any(thread.is_alive() for thread in threads)
+    assert warnings.filters == before
+    assert (
+        _warning_action("Routing rows with categorical levels unseen at fit to the base")
+        != "ignore"
+    )
+    with pytest.warns(UserWarning, match="unseen at fit") as caught:
+        model.predict_link(test)
+    assert len(caught) == 1
+
+
+def test_tuple_valued_column_names_are_covariates_and_never_level_codes():
+    """A covariate named ``("location", "g")`` beside a categorical ``g`` of the same predictor.
+
+    The prediction design kept covariate columns and each categorical's level codes, keyed
+    ``(predictor, term)``, in one mapping: the tuple-named column was replaced by the codes
+    ``[-1, 0]`` and the standard errors came out ``[0.031, 0.026]`` for ``[0.066, 0.097]``, the
+    posterior draws as far from the point predictions. Mutation check: one mapping again
+    (``_predictor_rows`` reading ``columns`` for both) fails all three assertions.
+    """
+    name = ("location", "g")
+    rng = np.random.default_rng(3)
+    frame = pd.DataFrame({"g": rng.choice(["a", "b"], 400), name: rng.uniform(1.0, 6.0, 400)})
+    y = 0.5 * frame[name].to_numpy() + 1.5 * (frame["g"] == "b") + 0.3 * rng.standard_normal(400)
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=(
+            Predictor("location", {"g": Categorical(base="a"), name: Numeric()}),
+            Predictor("scale", {}),
+        ),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+    test = pd.DataFrame({"g": ["a", "b", "b"], name: [3.0, 5.0, 2.0]})
+    fitted = model._require_fitted()
+    designs, variance, scale = _dense(model, test)
+    built = build_joint_prediction_design(test, fitted.compiled_predictors, fitted.layout)
+    for state, dense in zip(fitted.layout.predictors, designs, strict=True):
+        np.testing.assert_allclose(built.local[state.name], dense, rtol=0.0, atol=64 * U * 6.0)
+    link, se = model.predict_link(test, se_fit=True)
+    _assert_se_equals_dense(se, variance, scale, max(d.shape[1] for d in designs))
+    draws = posterior_draws(fitted, 50, seed=1)
+    ((_, block),) = posterior_parameters(fitted, test, draws)
+    eta = draws.coefficients[:, fitted.layout.predictors[0].coefficient_slice] @ designs[0].T
+    np.testing.assert_allclose(block[:, :, 0], eta, rtol=1e-11, atol=1e-12)
+
+
+def test_standard_errors_of_covariates_of_any_magnitude_equal_the_independent_formula():
+    """``|x| sqrt(V)`` for one coefficient, at covariates whose squares leave the float64 range.
+
+    At ``x = 1e200`` and ``1e-200`` the quadratic form ``x V x`` is infinite and zero, and the
+    standard errors came out ``[inf, 0.0]`` with no warning where they are about ``8.4e198`` and
+    ``8.4e-202``. A row is scaled by a power of two when its variance leaves the normal range, and
+    the reference is the one-coefficient formula that shares no code with the route. Mutation
+    check: the scaled branch taken out gives ``inf`` and ``0.0``.
+    """
+    rng = np.random.default_rng(5)
+    frame = pd.DataFrame({"x": rng.normal(size=300)})
+    y = 0.5 * frame["x"].to_numpy() + 0.3 * rng.standard_normal(300)
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=(
+            Predictor("location", {"x": Numeric()}, intercept=False),
+            Predictor("scale", {}),
+        ),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+    points = np.array([1e200, 1e-200, 3.0, 0.0, -1e154, 1e-170])
+    test = pd.DataFrame({"x": points})
+    designs, _, _ = _dense(model, test.iloc[[2, 3]].reset_index(drop=True))
+    slope = float(designs[0][0, 0]) / 3.0  # the design column is slope * x
+    block = model._require_fitted().layout.predictors[0].coefficient_slice
+    root = float(np.sqrt(np.asarray(model.covariance_)[block, block][0, 0]))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        link, se = model.predict_link(test, se_fit=True)
+    expected = np.abs(slope * points) * root
+    assert np.all(np.isfinite(se.to_numpy())) and expected[0] > 1e150 and expected[1] < 1e-150
+    np.testing.assert_allclose(se.to_numpy()[:, 0], expected, rtol=16 * U, atol=0.0)
+    assert se.to_numpy()[3, 0] == 0.0
 
 
 @pytest.mark.parametrize("n", [3, 64, 65, 400])
