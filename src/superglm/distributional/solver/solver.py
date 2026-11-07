@@ -603,7 +603,13 @@ def _fused_first_trial_eligible(context: _SolverContext) -> bool:
         context.chunk_size is not None
         and (
             _is_builtin_gaussian_gamma(context.family)
-            or getattr(context.family, "predictor_rows", None) is not None
+            or chunking.compiled_rows_serve(
+                context.family,
+                context.layout,
+                context.response,
+                context.likelihood_plan,
+                context.pass_factors,
+            )
         )
         and contract is not None
         and contract.deterministic_chunk_replay

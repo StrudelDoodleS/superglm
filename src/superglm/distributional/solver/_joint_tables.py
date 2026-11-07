@@ -24,6 +24,15 @@ run time and take through a whole pipeline are morsels (Leis et al., *SIGMOD*
 the shards merge in order; the partition depends on the rows and tables alone,
 so the bits do not depend on the workers.
 
+A shard's tables are one worker's own, so memory grows with the shards (thread-local
+aggregation, Xue and Marcus, arXiv:2505.04153, table 2), and a design whose tables leave
+too few shards cannot fill a pool that way. Its pass keeps one set of tables and
+splits the work the other way, as Schleich et al. (sec. 1.2) pair domain with task
+parallelism: morsels of rows form their channels on the pool in one bounded buffer,
+a pipeline breaker in Leis et al.'s terms, and then each table is one task over that
+buffer. Each table still sums its rows in row order, so again the bits do not depend
+on the workers.
+
 Owner of a :class:`JointTablePlan`: the fit session's ``PassFactors``. It holds
 each support projection and the index columns' identities, reads no weight,
 penalty or coefficient, and lives as long as the session's designs, so nothing
@@ -50,7 +59,7 @@ from superglm._group_matrix._group_matrix_discretized import (
     SupportCompressedSSPGroupMatrix,
 )
 from superglm._group_matrix._group_matrix_kernels import _native, _ssp_gram_needs_exact
-from superglm._parallel import pooled_for
+from superglm._parallel import pooled_for, pooled_row_blocks
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.solver.packing import packed_pairs
 from superglm.group_matrix import DesignMatrix
@@ -61,6 +70,15 @@ _LEVELS = (CategoricalGroupMatrix, RandomEffectGroupMatrix)
 _SHARD_ROWS = 2**15
 # Rows one shard task holds in its row stack at a time.
 STACK_BLOCK_ROWS = 2**14
+# Fewer shards than this cannot fill a pool's workers, so the pass keeps one set of tables.
+# Fixed, as the bits must not depend on the workers.
+_MIN_SHARDS = 8
+# One-set pass. A morsel is one pool item, small enough that a buffer gives a pool's workers
+# many, and its rows outweigh claiming it. A buffer holds the channels until the table tasks read
+# them: short enough to stay in a shared cache, long enough that a table's lines are worth
+# moving to the worker that next claims it.
+MORSEL_ROWS = 2**12
+TABLE_BLOCK_ROWS = 2**17
 
 
 # One kernel per table width, each channel's row vector its own operand, so a row reads its
@@ -173,21 +191,37 @@ def _channels_in_range(stack, channels, first, last) -> bool:
 
 
 @njit(cache=True, nogil=True)
-def _joint_rows(
-    flat, totals, starts, widths, lefts, rights, seconds, picks,
-    index, stack, first, last, row_start, checked,
-    diagonal, cross_channel, cross_left, cross_right, base,
-):  # fmt: skip
-    """Add columns ``first..last`` of ``stack`` to one shard's tables; False if they are not plain.
+def _rows_finite(stack, rows, first, last) -> bool:
+    """Whether the leading ``rows`` rows of columns ``first..last`` are finite: ``x - x`` is 0 then."""
+    total = 0.0
+    for row in range(rows):
+        values = stack[row, first:last]
+        for i in range(values.shape[0]):
+            total += values[i] - values[i]
+    return total == 0.0
 
-    Column ``i`` is row ``row_start + i``. The leading ``checked`` rows of ``stack``
-    are tested first, and rows that fail add nothing. Rows ``base + k`` then take
-    the majorant weights, and every stack row its total.
+
+@njit(cache=True, nogil=True)
+def _prepare_rows(
+    stack, first, last, checked, diagonal, cross_channel, cross_left, cross_right, base
+) -> bool:
+    """Test the leading ``checked`` rows of ``stack``, False if not plain; else form the weights.
+
+    Rows ``base + k`` of columns ``first..last`` take the majorant weights.
     """
     if not _channels_in_range(stack, checked, first, last):
         return False
     _majorant_weights(stack, first, last, diagonal, cross_channel, cross_left, cross_right, base)
-    for t in range(widths.shape[0]):
+    return True
+
+
+@njit(cache=True, nogil=True)
+def _add_tables(
+    flat, starts, widths, lefts, rights, seconds, picks,
+    index, stack, first, last, row_start, from_table, to_table,
+):  # fmt: skip
+    """Add columns ``first..last`` of ``stack``, column ``i`` being row ``row_start + i``, to tables."""
+    for t in range(from_table, to_table):
         left = index[lefts[t], row_start + first : row_start + last]
         right = index[rights[t], row_start + first : row_start + last]
         table = flat[starts[t] : starts[t + 1]]
@@ -206,12 +240,42 @@ def _joint_rows(
             _rows_3(table, left, right, second, a, b, c)
             continue
         _rows_4(table, left, right, second, a, b, c, stack[pick[3], first:last])
+
+
+@njit(cache=True, nogil=True)
+def _add_totals(totals, stack, first, last):
     for row in range(stack.shape[0]):
         totals[row] += np.sum(stack[row, first:last])
+
+
+@njit(cache=True, nogil=True)
+def _joint_rows(
+    flat, totals, starts, widths, lefts, rights, seconds, picks,
+    index, stack, first, last, row_start, checked,
+    diagonal, cross_channel, cross_left, cross_right, base,
+):  # fmt: skip
+    """Columns ``first..last`` of ``stack`` into one shard's tables; False, adding nothing, if not plain."""
+    if not _prepare_rows(
+        stack, first, last, checked, diagonal, cross_channel, cross_left, cross_right, base
+    ):
+        return False
+    _add_tables(
+        flat, starts, widths, lefts, rights, seconds, picks,
+        index, stack, first, last, row_start, 0, widths.shape[0],
+    )  # fmt: skip
+    _add_totals(totals, stack, first, last)
     return True
 
 
-_POOLED_ROW_KERNELS = (_predictor_rows, _channels_in_range, _joint_rows)
+_POOLED_ROW_KERNELS = (
+    _predictor_rows,
+    _channels_in_range,
+    _rows_finite,
+    _prepare_rows,
+    _add_tables,
+    _add_totals,
+    _joint_rows,
+)
 
 
 def _warmup_joint_tables() -> None:
@@ -220,9 +284,16 @@ def _warmup_joint_tables() -> None:
     stack = np.zeros((4, 1))
     position = np.zeros(1, dtype=np.intp)
     _predictor_rows(stack, 0, 1, 0, index, position, position, np.zeros((1, 1)), np.zeros(1))
-    _joint_rows(
-        np.zeros(1), np.zeros(4), np.array([0, 1], dtype=np.intp), np.ones(1, dtype=np.intp),
+    _rows_finite(stack, 1, 0, 1)
+    table_layout = (
+        np.array([0, 1], dtype=np.intp), np.ones(1, dtype=np.intp),
         position, position, position, np.zeros((1, 4), dtype=np.intp),
+    )  # fmt: skip
+    _prepare_rows(stack, 0, 1, 1, position, position, position, position, 3)
+    _add_tables(np.zeros(1), *table_layout, index, stack, 0, 1, 0, 0, 1)
+    _add_totals(np.zeros(4), stack, 0, 1)
+    _joint_rows(
+        np.zeros(1), np.zeros(4), *table_layout,
         index, stack, 0, 1, 0, 1, position, position, position, position, 3,
     )  # fmt: skip
 
@@ -299,6 +370,7 @@ class JointTablePlan:
     """Which tables a layout's assemblies form, which channels each holds, and what reads them."""
 
     __slots__ = (
+        "block_rows",
         "blocks",
         "cross",
         "diagonal",
@@ -311,6 +383,7 @@ class JointTablePlan:
         "n_inputs",
         "n_shards",
         "offsets",
+        "one_table_set",
         "shard_rows",
         "sides",
         "slot",
@@ -427,11 +500,17 @@ class JointTablePlan:
             picks,
         )
         self.table_bytes = 8 * int(starts[-1])
-        # The shards' tables take at most half the allowance; the rows' stacks share the rest.
+        # Several shards' tables take at most half the allowance, and the rows' stacks share
+        # the rest. One set of tables may take more, and its buffer what they leave.
         rows = self.index.shape[1]
         wanted = max(1, math.ceil(rows / _SHARD_ROWS))
         self.n_shards = min(wanted, max(1, budget // 2 // max(self.table_bytes, 1)))
+        self.one_table_set = self.n_shards < _MIN_SHARDS
+        if self.one_table_set:
+            self.n_shards = 1
         self.shard_rows = max(1, math.ceil(rows / self.n_shards))
+        left = (budget - self.table_bytes) // (8 * self.stack_rows)
+        self.block_rows = max(MORSEL_ROWS, min(TABLE_BLOCK_ROWS, left))
 
     @property
     def shard_bytes(self) -> int:
@@ -464,6 +543,10 @@ class JointTablePlan:
         if offsets:
             for k, offset in self.offsets:
                 stack[k, first:last] += offset[row_start + first : row_start + last]
+
+    def predictors_finite(self, stack, count: int) -> bool:
+        """Whether the predictors in the first ``count`` columns of ``stack`` are finite."""
+        return _rows_finite(stack, len(self.sides), 0, count)
 
     @property
     def shares_last_predictor(self) -> bool:
@@ -595,9 +678,41 @@ class JointTables:
             plan.diagonal, *plan.cross, plan.n_inputs,
         )  # fmt: skip
 
+    def prepare_rows(self, stack, first, last, checked) -> bool:
+        """Test and form one morsel for :meth:`add_by_table`; see :func:`_prepare_rows`."""
+        plan = self.plan
+        return _prepare_rows(stack, first, last, checked, plan.diagonal, *plan.cross, plan.n_inputs)
+
+    def add_by_table(self, stack, first, last, row_start) -> None:
+        """Columns ``first..last``, prepared, into the one set of tables, a task per table and totals."""
+        plan = self.plan
+        flat, totals = self._shards[0], self._shard_totals[0]
+        n_tables = len(plan.tables)
+
+        def task(at: int) -> None:
+            if at == n_tables:
+                _add_totals(totals, stack, first, last)
+                return
+            _add_tables(
+                flat, *plan.table_layout, plan.index, stack, first, last, row_start, at, at + 1
+            )
+
+        pooled_for(task, list(range(n_tables + 1)), 1 << 12)
+
     def add_rows(self, start: int, stop: int, stack: NDArray[np.float64]) -> None:
         """Rows ``[start, stop)``, already found plain, whose channels are ``stack``'s columns."""
         size = self.plan.shard_rows
+        if self.plan.one_table_set:
+            filled = stop - start
+            for first in range(0, filled, TABLE_BLOCK_ROWS):
+                last = min(first + TABLE_BLOCK_ROWS, filled)
+
+                def morsel(begin: int, end: int, first: int = first) -> None:
+                    self.prepare_rows(stack, first + begin, first + end, 0)
+
+                pooled_row_blocks(morsel, last - first, MORSEL_ROWS)
+                self.add_by_table(stack, first, last, start)
+            return
 
         def task(shard: int) -> None:
             first = max(start, shard * size) - start
@@ -610,6 +725,10 @@ class JointTables:
         """Add the shards in order; what the blocks read from here on."""
         self._merged = np.sum(self._shards, axis=0)
         self._totals = np.sum(self._shard_totals, axis=0)
+        self.release()
+
+    def release(self) -> None:
+        """Let the shards' tables go; a pass that declines holds none through its fallback."""
         self._shards = self._shard_totals = np.empty((0, 0))
 
     def _entries(self, table: int, slot: int) -> NDArray:

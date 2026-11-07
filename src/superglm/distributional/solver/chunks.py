@@ -43,6 +43,7 @@ from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.solver._formation import FormationAccumulator
 from superglm.distributional.solver._joint_tables import (
+    MORSEL_ROWS,
     STACK_BLOCK_ROWS,
     JointTablePlan,
     joint_table_plan,
@@ -782,13 +783,10 @@ def evaluate_chunked_log_likelihood(
         if compiled is not None:
             tables, constants = joint.predictor_tables(coefficient_values)
             row_block = min(_COMPILED_ROW_BLOCK, layout_chunk_size(layout, chunk_size))
-            try:
-                total = _compiled_likelihood(
-                    compiled, joint, tables, constants, len(response), row_block
-                )
-            except _DeclinedRowsError:
-                pass
-            else:
+            total = _compiled_likelihood(
+                compiled, joint, tables, constants, len(response), row_block
+            )
+            if total is not None:
                 return ChunkedLikelihoodSums(
                     optimizing_log_likelihood=total, parameter_independent_carrier=0.0
                 )
@@ -1144,10 +1142,6 @@ def _joint_plan(layout: StackedLayout, factors) -> JointTablePlan | None:
     return entry[1]
 
 
-class _DeclinedRowsError(Exception):
-    """A row needs the family's natural route: its refusal or its rescaled arithmetic."""
-
-
 # Rows one pool task evaluates. Fixed, so the partition and the summed likelihood's
 # rounding do not depend on the workers.
 _COMPILED_ROW_BLOCK = 2**15
@@ -1177,8 +1171,19 @@ def _compiled_rows(family, layout, y, likelihood_plan, joint, factors):
     return entry[1]
 
 
-def _compiled_likelihood(rows, joint, tables, constants, count, block_rows) -> float:
-    """Every row's likelihood through the compiled route, each task's total added in row order."""
+def compiled_rows_serve(family, layout, y, likelihood_plan, factors) -> bool:
+    """Whether this fit's passes take the family's compiled rows, row declines aside."""
+    if getattr(family, "predictor_rows", None) is None:
+        return False
+    joint = _joint_plan(layout, factors)
+    return _compiled_rows(family, layout, y, likelihood_plan, joint, factors) is not None
+
+
+def _compiled_likelihood(rows, joint, tables, constants, count, block_rows) -> float | None:
+    """Every row's likelihood through the compiled route, each task's total added in row order.
+
+    None where a row needs the family's natural route: its refusal or its rescaled arithmetic.
+    """
 
     def task(first: int, last: int):
         scratch = np.empty((len(joint.sides), last - first))
@@ -1188,38 +1193,66 @@ def _compiled_likelihood(rows, joint, tables, constants, count, block_rows) -> f
     total = 0.0
     for completed, value in pooled_row_blocks(task, count, block_rows):
         if not completed:
-            raise _DeclinedRowsError
+            return None
         total += value
     return total
 
 
-def _compiled_geometry(rows, joint, joint_tables, tables, constants) -> float:
-    """Every row through the compiled route into the shards' tables; the rows' likelihood.
+def _compiled_geometry(rows, joint, joint_tables, tables, constants) -> float | None:
+    """Every row through the compiled route into the tables; the rows' likelihood, or None.
 
-    One task per shard, its stack held to a block of rows, so memory and the
-    bits depend on the shards alone.
+    None where a row needs the natural route, and shards not yet started are skipped. One
+    task per shard, its stack held to a block of rows, so memory and the bits depend on
+    the shards alone.
     """
+    if joint.one_table_set:
+        return _compiled_one_table_set(rows, joint, joint_tables, tables, constants)
     n_rows = joint.index.shape[1]
     size = joint.shard_rows
+    declined = [False]
 
     def task(shard: int) -> float:
         begin, end = shard * size, min((shard + 1) * size, n_rows)
         stack = np.empty((joint.stack_rows, min(STACK_BLOCK_ROWS, end - begin)))
         total = 0.0
         for start in range(begin, end, STACK_BLOCK_ROWS):
+            if declined[0]:
+                break
             count = min(STACK_BLOCK_ROWS, end - start)
             joint.fill_predictors(stack, 0, count, start, tables, constants)
             completed, value = rows.evaluate(start, 0, count, stack, 2)
             if not completed or not joint_tables.add_block(
                 shard, stack, 0, count, start, joint.n_inputs
             ):
-                raise _DeclinedRowsError
+                declined[0] = True
+                break
             total += value
         return total
 
-    return sum(
-        pooled_for(task, list(range(joint.n_shards)), 8 * joint.stack_rows * STACK_BLOCK_ROWS)
-    )
+    totals = pooled_for(task, list(range(joint.n_shards)), 8 * joint.stack_rows * STACK_BLOCK_ROWS)
+    return None if declined[0] else sum(totals)
+
+
+def _compiled_one_table_set(rows, joint, joint_tables, tables, constants) -> float | None:
+    """:func:`_compiled_geometry` where the tables leave one set: morsels, then a task per table."""
+    n_rows = joint.index.shape[1]
+    stack = np.empty((joint.stack_rows, min(joint.block_rows, n_rows)))
+    total = 0.0
+    for start in range(0, n_rows, joint.block_rows):
+        count = min(joint.block_rows, n_rows - start)
+
+        def morsel(first: int, last: int, start: int = start) -> float | None:
+            joint.fill_predictors(stack, first, last, start, tables, constants)
+            completed, value = rows.evaluate(start, first, last, stack, 2)
+            ready = completed and joint_tables.prepare_rows(stack, first, last, joint.n_inputs)
+            return value if ready else None
+
+        values = pooled_row_blocks(morsel, count, MORSEL_ROWS)
+        if None in values:
+            return None
+        total += sum(values)
+        joint_tables.add_by_table(stack, 0, count, start)
+    return total
 
 
 def assemble_chunked_geometry(
@@ -1307,11 +1340,9 @@ def assemble_chunked_geometry(
     )
     if compiled is not None:
         tables_, constants = joint.predictor_tables(np.asarray(coefficients, dtype=np.float64))
-        try:
-            total = _compiled_geometry(
-                compiled, joint, accumulator.joint_tables, tables_, constants
-            )
-        except _DeclinedRowsError:
+        total = _compiled_geometry(compiled, joint, accumulator.joint_tables, tables_, constants)
+        if total is None:
+            accumulator.joint_tables.release()
             return assemble_chunked_geometry(
                 family, layout, y, likelihood_plan, coefficients, penalty=penalty,
                 chunk_size=chunk_size, curvature_source=curvature_source,
@@ -1472,6 +1503,8 @@ def _joint_predictor_rows(joint, values, row_block, read, *, offsets: bool) -> l
     def task(first: int, last: int):
         scratch = np.empty((predictors, last - first))
         joint.fill_predictors(scratch, 0, last - first, first, tables, constants, offsets=offsets)
+        if not joint.predictors_finite(scratch, last - first):
+            raise ValueError("chunk predictor evaluation produced non-finite values")
         return read(first, last, scratch)
 
     return pooled_row_blocks(task, joint.index.shape[1], row_block)

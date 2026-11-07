@@ -459,6 +459,103 @@ def test_the_bits_do_not_depend_on_the_workers(monkeypatch, make):
     np.testing.assert_array_equal(one.score_data, four.score_data)
 
 
+def test_the_shards_tables_take_at_most_half_the_allowance(monkeypatch):
+    """Mutation check: no floor on the shards, and a pool of workers shares two of them."""
+    monkeypatch.setattr(_joint_tables, "_SHARD_ROWS", 257)
+    layout = _problem(GaussianLS(scale_floor=0.02))[1]
+    roomy = joint_table_plan(layout, 1 << 26)
+    assert roomy.n_shards == np.ceil(N / 257)
+    assert not roomy.one_table_set
+    exact = joint_table_plan(layout, 16 * roomy.table_bytes)
+    assert not exact.one_table_set
+    assert (exact.n_shards, exact.shard_rows) == (8, np.ceil(N / 8))
+    for budget in (14 * roomy.table_bytes, roomy.table_bytes):
+        tight = joint_table_plan(layout, budget)
+        assert tight.one_table_set
+        assert (tight.n_shards, tight.shard_rows) == (1, N)
+
+
+def test_a_one_set_pass_buffers_what_its_tables_leave(monkeypatch):
+    """Mutation check: a buffer that fills the allowance whatever the tables hold."""
+    layout = _problem(GaussianLS(scale_floor=0.02))[1]
+    roomy = joint_table_plan(layout, 1 << 26)
+    assert roomy.block_rows == _joint_tables.TABLE_BLOCK_ROWS
+    bytes_per_row = 8 * roomy.stack_rows
+    left = _joint_tables.MORSEL_ROWS + 1000
+    tight = joint_table_plan(layout, roomy.table_bytes + left * bytes_per_row)
+    assert tight.block_rows == left
+    assert joint_table_plan(layout, roomy.table_bytes).block_rows == _joint_tables.MORSEL_ROWS
+
+
+@pytest.mark.parametrize("make", FAMILIES, ids=("gaussian", "gamma", "tweedie"))
+@pytest.mark.parametrize("compiled", (True, False), ids=("compiled", "stacked"))
+def test_one_set_of_tables_reads_what_the_group_routes_form(monkeypatch, make, compiled):
+    """Morsels that split a buffer and buffers that split a chunk, on and off the pool.
+
+    Mutation checks: a table's task left out, the totals left out, a buffer's rows read from
+    row 0, a morsel's rows read from its first column, and a morsel left without its weights.
+    """
+    problem = _problem(make())
+    groups = _geometry(problem, joint=False, monkeypatch=monkeypatch)
+    monkeypatch.setattr(chunking, "MORSEL_ROWS", 31)
+    monkeypatch.setattr(_joint_tables, "MORSEL_ROWS", 31)
+    monkeypatch.setattr(_joint_tables, "TABLE_BLOCK_ROWS", 257)
+    assert joint_table_plan(problem[1], 1 << 26).one_table_set
+    for n_jobs in (1, 4):
+        with parallel_config(n_jobs=n_jobs):
+            tables = _geometry(problem, compiled=compiled, chunk=1000)
+        _assert_same_geometry(groups, tables)
+        major = tables.formed().majorant
+        np.testing.assert_allclose(major, groups.formed().majorant, rtol=ROUND, atol=0.0)
+
+
+@pytest.mark.parametrize("make", FAMILIES, ids=("gaussian", "gamma", "tweedie"))
+def test_the_bits_of_one_set_of_tables_do_not_depend_on_the_workers(monkeypatch, make):
+    """Each table sums its rows in row order, whichever worker has its task, and the likelihood
+    adds its morsels in order. Mutation check: a morsel size read from the worker count."""
+    monkeypatch.setattr(chunking, "MORSEL_ROWS", 31)
+    monkeypatch.setattr(_joint_tables, "MORSEL_ROWS", 31)
+    monkeypatch.setattr(_joint_tables, "TABLE_BLOCK_ROWS", 257)
+    problem = _problem(make())
+    sums_one, sums_four = [0.0, 0.0], [0.0, 0.0]
+    with parallel_config(n_jobs=1):
+        one = _geometry(problem, sums=sums_one)
+    with parallel_config(n_jobs=4):
+        four = _geometry(problem, sums=sums_four)
+    np.testing.assert_array_equal(one.data_curvature, four.data_curvature)
+    np.testing.assert_array_equal(one.score_data, four.score_data)
+    np.testing.assert_array_equal(one.formed().majorant, four.formed().majorant)
+    assert sums_one == sums_four
+
+
+def test_a_one_set_pass_hands_the_pool_its_rows_and_its_tables(monkeypatch):
+    """A compiled pass whose tables leave too few shards: work, not wall time. Every morsel and every
+    table is its own pool item, so the row pass is not one task on one thread.
+    Mutation check: a row pass of one item per buffer, or one task for all the tables."""
+    monkeypatch.setattr(chunking, "MORSEL_ROWS", 512)
+    monkeypatch.setattr(_joint_tables, "MORSEL_ROWS", 512)
+    monkeypatch.setattr(_joint_tables, "TABLE_BLOCK_ROWS", 2048)
+    problem = _problem(TweedieLSS())
+    plan = joint_table_plan(problem[1], 1 << 26)
+    assert plan.one_table_set
+    sections = {"morsels": [], "tables": []}
+    pooled_row_blocks, pooled_for = chunking.pooled_row_blocks, _joint_tables.pooled_for
+
+    def blocks(fn, n_rows, block_rows):
+        sections["morsels"].append(int(np.ceil(n_rows / block_rows)))
+        return pooled_row_blocks(fn, n_rows, block_rows)
+
+    def tasks(fn, items, item_bytes, **kwargs):
+        sections["tables"].append(len(items))
+        return pooled_for(fn, items, item_bytes, **kwargs)
+
+    monkeypatch.setattr(chunking, "pooled_row_blocks", blocks)
+    monkeypatch.setattr(_joint_tables, "pooled_for", tasks)
+    _geometry(problem)
+    assert sections["morsels"] == [4, 4, 4]
+    assert sections["tables"] == [len(plan.tables) + 1] * 3
+
+
 def test_a_row_block_holds_what_the_shards_tables_leave(monkeypatch):
     """Mutation check: blocks that fill the allowance whatever the shards hold."""
     problem = _problem(GaussianLS(scale_floor=0.02))
@@ -622,6 +719,31 @@ def test_a_fit_keeps_one_plan_and_one_response_however_many_inner_fits_it_takes(
         assert len(session.joint_plans) == 2
 
 
+def test_a_declined_pass_holds_no_tables_through_its_fallback(monkeypatch):
+    """Two sets of shard tables are never alive together. Mutation check: a decline that keeps the
+    declined pass's tables while the natural pass allocates its own."""
+    problem = _problem(TweedieLSS())
+    family, layout, response, plan, coefficients = problem
+    coefficients = coefficients.copy()
+    coefficients[layout.predictors[0].intercept_index] = 101.0
+    created: list = []
+    live_at_creation: list[int] = []
+    init = _joint_tables.JointTables.__init__
+
+    def recorded(self, joint):
+        live_at_creation.append(sum(tables._shards.size for tables in created))
+        init(self, joint)
+        created.append(self)
+
+    monkeypatch.setattr(_joint_tables.JointTables, "__init__", recorded)
+    try:
+        _geometry((family, layout, response, plan, coefficients))
+    except ValueError:
+        pass
+    assert len(created) == 2
+    assert live_at_creation == [0, 0]
+
+
 def _intercepts(y, weights, family=None, power_link=None, *, kind="prior"):
     family = TweedieLSS() if family is None else family
     n = len(y)
@@ -767,6 +889,40 @@ def test_predictors_that_cancel_sum_as_the_row_route_and_prediction_do():
     )
 
 
+@pytest.mark.parametrize(
+    "read",
+    [
+        lambda layout, values, factors: chunking.materialize_terminal_predictions(
+            layout, values, chunk_size="auto", pass_factors=factors
+        ),
+        lambda layout, values, factors: chunking.predictions_are(
+            layout,
+            values,
+            np.zeros((N, len(layout.predictors))),
+            np.zeros((N, len(layout.predictors))),
+            chunk_size="auto",
+            pass_factors=factors,
+        ),
+        lambda layout, values, factors: chunking.maximum_chunked_predictor_change(
+            layout, values, chunk_size="auto", pass_factors=factors
+        ),
+    ],
+    ids=("terminal", "same", "change"),
+)
+@pytest.mark.parametrize("predictor", (0, 2), ids=("mean", "power"))
+def test_a_non_finite_predictor_is_refused_on_both_routes(read, predictor):
+    """Finite coefficients whose sum overflows, where a bounded link would turn the infinite power
+    predictor into a finite wall value that a user would read. A group's table overflows on the
+    mean, and the power's intercept and offset do on the power. Mutation check: drop the test
+    from the joint branch."""
+    _family, layout, _response, _plan, coefficients = _problem(TweedieLSS(), power="term")
+    coefficients = coefficients.copy()
+    coefficients[layout.predictors[predictor].coefficient_slice] = 1.7e308
+    for factors in (PassFactors(), None):
+        with pytest.raises(ValueError, match="non-finite"):
+            read(layout, coefficients, factors)
+
+
 def test_a_link_with_walls_past_the_familys_keeps_the_natural_route():
     """The compiled rows refuse a power at the link's walls and the family at its own, so a trial
     between them would get a number from one route and a refusal from the other. A narrower link
@@ -785,6 +941,42 @@ def test_a_link_with_walls_past_the_familys_keeps_the_natural_route():
     assert rows(1.35, 1.55) is not None
     assert rows(1.3 - 1e-10, 1.6) is None
     assert rows(1.3, 1.6 + 1e-10) is None
+
+
+def test_the_first_trial_owns_its_geometry_only_where_compiled_rows_serve():
+    """An unbinned Tweedie fit, and one whose weights the rows do not take, keep their value pass.
+    Mutation check: read whether the hook exists, not whether its rows serve this fit."""
+
+    def eligible(problem):
+        family, layout, response, plan, _coefficients = problem
+        context = solver_api._validated_context(
+            family, layout, response, plan, np.eye(layout.n_coefficients) * 0.1,
+            coefficient_curvature="observed", chunk_size="auto", coefficient_face=None,
+        )  # fmt: skip
+        return solver_api._fused_first_trial_eligible(context)
+
+    problem = _problem(TweedieLSS())
+    assert eligible(problem)
+    family, layout, response, _plan, coefficients = problem
+    weights = np.ones(N)
+    weights[::7] = 1e-50
+    past = family.bind_likelihood(response, resolved_prior(weights), COMPLETE_OBSERVATION)
+    assert not eligible((family, layout, response, past, coefficients))
+    frame, rng = _frame()
+    unbinned = build_stacked_layout(
+        compile_predictors(
+            frame,
+            resolved_prior(np.ones(N)),
+            family.parameters,
+            tuple(
+                Predictor(spec.name, {"x": Numeric()} if index == 0 else {})
+                for index, spec in enumerate(family.parameters)
+            ),
+            model_discrete=False,
+        )
+    )
+    plain = family.bind_likelihood(response, resolved_prior(np.ones(N)), COMPLETE_OBSERVATION)
+    assert not eligible((family, unbinned, response, plain, np.zeros(unbinned.n_coefficients)))
 
 
 def test_a_subclass_with_its_own_likelihood_reads_its_own_numbers():
