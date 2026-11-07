@@ -10,12 +10,15 @@ temporary directory, to Numba's own probe of a cache location and to superglm's.
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import stat
 import subprocess
 import sys
+import threading
 import time
+import types
 import warnings
 from pathlib import Path
 
@@ -310,6 +313,41 @@ def test_the_user_wide_location_is_the_platforms_cache_directory_plus_numba(
     monkeypatch.setattr(sys, "platform", platform)
     monkeypatch.setattr(os.path, "expanduser", lambda path: "home")
     assert _numba_cache._user_cache_directory() == os.path.join(*expected)
+
+
+def test_a_numba_another_thread_is_still_importing_is_waited_for(
+    numba_not_loaded, monkeypatch, tmp_path
+):
+    """A module is listed before its body runs, so being listed says nothing of ``numba.config``.
+
+    The other thread's import holds at a gate until this one has had time to reach it. Mutation
+    check: reading ``sys.modules`` alone raises ``AttributeError`` on the half-run module.
+    """
+    gate = types.SimpleNamespace(started=threading.Event(), release=threading.Event())
+    monkeypatch.setitem(sys.modules, "_numba_gate", gate)
+    package = tmp_path / "stand_in" / "numba"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        "import sys, types\n"
+        "gate = sys.modules['_numba_gate']\n"
+        "gate.started.set()\n"
+        "assert gate.release.wait(120)\n"
+        "config = types.SimpleNamespace(CACHE_DIR='')\n"
+    )
+    monkeypatch.syspath_prepend(str(package.parent))
+    importing = threading.Thread(target=importlib.import_module, args=("numba",))
+    importing.start()
+    assert gate.started.wait(120)
+    opening = threading.Timer(1.0, gate.release.set)
+    opening.start()
+    try:
+        directory = _numba_cache.ensure_cache_location()
+    finally:
+        gate.release.set()
+        opening.cancel()
+        importing.join(120)
+    assert sys.modules["numba"].config.CACHE_DIR == directory
+    assert directory is not None and "NUMBA_CACHE_DIR" not in os.environ
 
 
 def test_a_cache_directory_set_in_code_is_the_users(nothing_is_writable, monkeypatch):

@@ -593,6 +593,24 @@ def test_a_book_is_scored_without_keeping_every_terms_contribution():
     )
 
 
+def test_a_term_scored_over_the_whole_frame_is_charged_for_the_whole_frame(monkeypatch):
+    """Each such task holds the frame's rows, so ``max_memory`` must see them.
+    Mutation check: one block's charge per task lets every such term run at once."""
+    import superglm._parallel as parallel
+    from superglm.distributional.prediction_design import DESIGN_BLOCK_ROWS
+
+    model = _fit("spline by level", discrete=True)
+    rows = 2 * DESIGN_BLOCK_ROWS
+    frame, _ = _frame(rows, 16)
+    charges = []
+    original = parallel.pooled_for
+    monkeypatch.setattr(
+        parallel, "pooled_for", lambda *a, **k: (charges.append(a[2]), original(*a, **k))[1]
+    )
+    model.predict_link(frame)
+    assert charges and max(charges) >= 8 * rows * 16
+
+
 def test_a_quote_starts_no_pool_and_a_book_does(monkeypatch):
     import superglm._parallel as parallel
 
@@ -1224,6 +1242,28 @@ def test_error_extrapolation_gives_one_answer_at_every_call_size(rows):
         priced = model.predict_link(pd.DataFrame({"x": points})).to_numpy()
         reference = model.predict_link(pd.DataFrame({"x": points[-1:]})).to_numpy()
         np.testing.assert_allclose(priced[-1], reference[-1], rtol=0.0, atol=64 * U * 10.0)
+
+
+def test_a_tensor_margin_reads_the_kernels_only_for_the_stock_raw_basis(monkeypatch):
+    """A spline subclass may hand a tensor its own evaluation and inherit the stock basis, so the
+    question is which method came, at every call size. Mutation check: asking only whether the
+    spec's class overrides the stock method reads the stock rows for the custom one."""
+
+    class Doubled(PSpline):
+        def doubled(self, x):
+            return 2.0 * self._raw_basis_matrix(x)
+
+    spec = Doubled(n_knots=6)
+    spec.build(np.linspace(0.0, 1.0, 101))
+    points = np.linspace(0.1, 0.9, _basis_kernels.KERNEL_MIN_ROWS)
+    for rows in (1, _basis_kernels.SCALAR_MAX_ROWS, 1000, _basis_kernels.KERNEL_MIN_ROWS):
+        x = points[:rows]
+        np.testing.assert_array_equal(
+            _basis_kernels.dense_raw_basis(spec.doubled, x), spec.doubled(x)
+        )
+    marker = np.zeros((1, 9))
+    monkeypatch.setattr(_basis_kernels, "_evaluations", lambda _rows: (lambda *_: marker, None))
+    assert _basis_kernels.dense_raw_basis(spec._raw_basis_matrix, points[:1]) is marker
 
 
 def test_a_read_only_column_and_a_writable_one_share_each_kernels_one_signature():

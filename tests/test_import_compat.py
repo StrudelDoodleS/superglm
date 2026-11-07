@@ -110,6 +110,19 @@ def test_importing_superglm_imports_no_third_party_library():
     assert _loaded_after("import superglm", _LIBRARIES) == []
 
 
+def test_a_population_level_warning_loads_no_fitting_code():
+    """A quote at a held ``sz`` level warns on a request thread of a scoring service.
+
+    Mutation check: taking ``warn_caller`` from ``superglm.profiling`` loads ``superglm.model``.
+    """
+    code = (
+        "import warnings; warnings.simplefilter('ignore');"
+        "from superglm.distributional.prediction_design import warn_population_levels;"
+        "warn_population_levels(['a term'])"
+    )
+    assert _loaded_after(code, ("superglm.profiling", "superglm.model")) == []
+
+
 def test_the_module_a_fitted_model_loads_through_needs_no_plotting_or_fitting_code():
     """Unpickling a ``SuperLSS`` imports ``superglm.distributional.api`` and what it imports.
 
@@ -1199,6 +1212,30 @@ _LEGACY_STAR_NAMES = {
         "term_inference",
     ),
 }
+
+
+@pytest.mark.parametrize("package", _LAZY_PACKAGES)
+def test_a_star_import_in_a_cold_process_binds_the_packages_public_names(package):
+    """A star import reads only what a lazy package has loaded unless ``__all__`` names the rest,
+    so each has one, and the internal packages' hold every public name of their tables.
+
+    Mutation check: no ``__all__`` on ``superglm.solvers`` or ``superglm.reml`` binds only ``attach``.
+    """
+    import importlib
+
+    module = importlib.import_module(package)
+    if package in ("superglm.reml", "superglm.solvers"):
+        table = {name for names in module._LAZY_EXPORTS.values() for name in names}
+        assert set(module.__all__) == {name for name in table if not name.startswith("_")}
+    code = f"namespace = {{}}; exec('from {package} import *', namespace); print(*namespace)"
+    completed = subprocess.run(
+        [sys.executable, "-W", "ignore", "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    )
+    assert set(module.__all__) <= set(completed.stdout.split())
 
 
 @pytest.mark.parametrize("module_name", sorted(_LEGACY_STAR_NAMES))

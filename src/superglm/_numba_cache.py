@@ -139,6 +139,19 @@ def _yaml_names_a_cache_directory() -> bool:
     return isinstance(settings, dict) and any(str(key).upper() == "CACHE_DIR" for key in settings)
 
 
+def _started_numba():
+    """Numba once it has finished loading, if any thread has begun to import it; otherwise ``None``.
+
+    A module is in ``sys.modules`` before its body runs, and an ``import`` statement waits for
+    another thread's import of it to end.
+    """
+    if sys.modules.get("numba") is None:
+        return None
+    import numba
+
+    return numba
+
+
 def _set_in_code_or_yaml() -> bool:
     """Whether a cache directory is set where the environment does not show it.
 
@@ -146,7 +159,7 @@ def _set_in_code_or_yaml() -> bool:
     already loaded holds what was set in ``config.CACHE_DIR``, by the program or by that file; one
     that is not loaded will read the YAML file.
     """
-    numba = sys.modules.get("numba")
+    numba = _started_numba()
     if numba is not None:
         return bool(numba.config.CACHE_DIR)
     return _yaml_names_a_cache_directory()
@@ -177,7 +190,7 @@ def ensure_cache_location() -> str | None:
     except OSError:
         return None
     atexit.register(_remove, directory, os.getpid())
-    numba = sys.modules.get("numba")
+    numba = _started_numba()
     if numba is None:
         os.environ["NUMBA_CACHE_DIR"] = directory
     else:

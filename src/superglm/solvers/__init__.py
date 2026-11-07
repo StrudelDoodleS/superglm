@@ -19,3 +19,12 @@ _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
 }
 
 __getattr__, __dir__ = attach(__name__, __path__, _LAZY_EXPORTS)
+
+__all__ = [
+    "IterationDiagnostics",
+    "PIRLSResult",
+    "QPResult",
+    "fit_irls_direct",
+    "fit_pirls",
+    "solve_constrained_qp",
+]
