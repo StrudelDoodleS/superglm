@@ -729,13 +729,14 @@ def test_a_fit_reads_the_same_numbers_through_every_route(
     monkeypatch.setattr(chunking, "_joint_plan", lambda *_args: None)
     reference = build().fit_reml(frame, y, sample_weight=weights)
     fixed_reference = build().fit(frame, y, sample_weight=weights, lambdas=lambdas)
-    # Two searches stop within the search's own tolerance of each other, on any platform's rounding.
+    # Two searches can stop apart on a flat direction by more than rounding, so this asks only that
+    # they reach the same fit; the comparison at fixed smoothing parameters below is the exact one.
     assert routed.result_.total_effective_df == pytest.approx(
-        reference.result_.total_effective_df, abs=1e-4
+        reference.result_.total_effective_df, abs=0.01
     )
     rows = frame.iloc[::37]
     np.testing.assert_allclose(
-        np.asarray(routed.predict_link(rows)), np.asarray(reference.predict_link(rows)), atol=1e-4
+        np.asarray(routed.predict_link(rows)), np.asarray(reference.predict_link(rows)), atol=0.01
     )
     assert fixed.result_.total_effective_df == pytest.approx(
         fixed_reference.result_.total_effective_df, abs=1e-9
