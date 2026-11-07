@@ -2290,7 +2290,7 @@ class TestREMLWarmStart:
         assert cold_info["termination_reason"] in stops
         assert warm_info["termination_reason"] in stops
         steps = sum(
-            info["profile"].get("reml_newton_step_stop", {}).get("max_step", 0.0)
+            info["profile"].get("reml_newton_step_stop", {}).get("step_left", 0.0)
             for info in (cold_info, warm_info)
         )
         freeze = cold_info["profile"]["reml_freeze_decision"]
@@ -2299,6 +2299,57 @@ class TestREMLWarmStart:
             abs(np.log(warm_info["lambdas"]["x2"] / cold_info["lambdas"]["x2"]))
             <= bar / curvature + steps
         )
+
+    def test_a_tensor_shoulder_move_counts_as_the_step_before_a_stop(self, monkeypatch):
+        """A cached-weight stop needs two small steps running, and a shoulder's move is a step.
+
+        The tensor path's undamped Newton step leaves the shoulder out, so the
+        guard must read the step actually taken. The shoulder is forced on the
+        iteration before the stop an unforced search reaches, so the search
+        must go on past it (mutation check: reading the undamped step alone
+        stops there).
+        """
+        from dataclasses import replace
+
+        import superglm.reml.discrete as discrete_module
+        from superglm.reml import convergence
+
+        compound = convergence.evaluate_reml_candidate
+        monkeypatch.setattr(
+            discrete_module,
+            "evaluate_reml_candidate",
+            lambda **kwargs: replace(compound(**kwargs), converged=False),
+        )
+        # The contraction check also tends to refuse here, so isolate this guard.
+        monkeypatch.setattr(discrete_module, "newton_step_settled", lambda *_, **__: True)
+        rng = np.random.default_rng(3)
+        n = 4000
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.3 + 0.8 * np.sin(2 * np.pi * x1) + 0.4 * np.sin(3 * x1) * np.cos(4 * x2)
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+
+        def stop_iteration() -> int:
+            info = _two_smooth_model(True, interaction=True).fit_reml(X, y).reml_diagnostics()
+            return info["profile"]["reml_newton_step_stop"]["iter"]
+
+        plain = stop_iteration()
+        real = discrete_module.freeze_flat_directions
+        calls = []
+
+        def shoulder_before_the_stop(*args, **kwargs):
+            decision = real(*args, **kwargs)
+            calls.append(None)
+            if len(calls) != plain - 1:
+                return decision
+            mask = np.zeros_like(decision.frozen)
+            mask[-1] = True
+            return replace(decision, frozen=decision.frozen & ~mask, shoulder=mask)
+
+        monkeypatch.setattr(discrete_module, "freeze_flat_directions", shoulder_before_the_stop)
+
+        assert stop_iteration() > plain
 
     def test_a_tensor_shoulder_steps_inside_the_tensor_trust_region(self):
         """A shoulder on the discrete path's shared-tensor search keeps its box.

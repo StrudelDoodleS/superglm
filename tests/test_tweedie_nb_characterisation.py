@@ -110,7 +110,9 @@ def test_reml_phi_matches_master(row):
     # fit in log lambda, and EDF moves at most its own size per unit log lambda.
     stop = model._reml_profile.get("reml_newton_step_stop", {})
     resolved += (
-        stop.get("max_step", 0.0) * model.result.effective_df / (len(y) - model.result.effective_df)
+        stop.get("step_left", 0.0)
+        * model.result.effective_df
+        / (len(y) - model.result.effective_df)
     )
     assert model.result.phi == pytest.approx(row["phi"], rel=1e-9 + resolved)
 

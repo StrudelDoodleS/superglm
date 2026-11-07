@@ -1444,6 +1444,20 @@ class TestNewtonStepStop:
         assert newton_step_stop_bar(1e-12) == pytest.approx(1e-6)
 
     @pytest.mark.parametrize(
+        ("step_left", "taken_step", "settled"),
+        [
+            pytest.param(1e-6, 1e-3, True, id="fast-contraction"),
+            pytest.param(9e-4, 1e-3, False, id="slow-contraction-reads-the-distance"),
+            pytest.param(1e-3, 1e-3, False, id="no-contraction"),
+            pytest.param(2e-3, 1e-3, False, id="growing"),
+        ],
+    )
+    def test_the_distance_left_follows_the_contraction_rate(self, step_left, taken_step, settled):
+        from superglm.reml.convergence import newton_step_settled
+
+        assert newton_step_settled(step_left, taken_step, bar=1e-3) is settled
+
+    @pytest.mark.parametrize(
         ("hessian", "gradient", "resolved"),
         [
             pytest.param(np.diag([2.0, 4.0]), [1e-4, 1e-4], True, id="small-step"),
@@ -1474,9 +1488,10 @@ class TestNewtonStepStop:
         diagnostics = model.reml_diagnostics()
         assert diagnostics["converged"] is True
         assert diagnostics["termination_reason"] == "newton_step_tolerance"
-        assert model._reml_profile["reml_newton_step_stop"]["max_step"] <= 1e-3
+        assert model._reml_profile["reml_newton_step_stop"]["step_left"] <= 1e-3
         se, reference = _standard_errors(model), _standard_errors(tight)
-        assert np.max(np.abs(se - reference) / np.maximum(reference, 1e-300)) < 5e-3
+        worst = np.max(np.abs(se - reference) / np.maximum(reference, 1e-300))
+        assert worst < model._reml_profile["reml_newton_step_stop"]["bar"]
 
     def test_the_stop_takes_the_step_it_has_already_paid_for(self, monkeypatch):
         _compound_test_never_accepts(monkeypatch)
@@ -1485,6 +1500,9 @@ class TestNewtonStepStop:
         record = model._reml_profile["reml_newton_step_stop"]
         assert record["step_taken"] is True
         assert record["iter"] == model.reml_diagnostics()["n_reml_iter"]
+        # The step taken and the step left at the published point are separate readings.
+        assert record["taken_step"] <= record["bar"]
+        assert record["step_left"] < record["taken_step"]
 
     def test_a_gradient_that_did_not_settle_keeps_searching(self, monkeypatch):
         """The Hessian that called the step negligible must confirm it after the step."""
@@ -1492,14 +1510,14 @@ class TestNewtonStepStop:
 
         _compound_test_never_accepts(monkeypatch)
         plain = _fit_informative_fixture(discrete=False)._reml_profile["reml_newton_step_stop"]
-        real = direct.newton_step_resolved
+        real = direct.newton_step_left
         calls = []
 
-        def second_read_refuses(*args, **kwargs):
+        def first_read_refuses(*args, **kwargs):
             calls.append(None)
-            return False if len(calls) == 2 else real(*args, **kwargs)
+            return np.inf if len(calls) == 1 else real(*args, **kwargs)
 
-        monkeypatch.setattr(direct, "newton_step_resolved", second_read_refuses)
+        monkeypatch.setattr(direct, "newton_step_left", first_read_refuses)
         model = _fit_informative_fixture(discrete=False)
 
         assert model._reml_profile["reml_newton_step_stop"]["iter"] > plain["iter"]
@@ -1533,6 +1551,17 @@ class TestNewtonStepStop:
         assert frozen_seen
         assert model._reml_profile.get("reml_newton_step_stop", {}).get("step_taken") is not True
 
+    def test_a_slow_contraction_does_not_stop_on_the_taken_step(self, monkeypatch):
+        """The next gradient must show the distance is small, not only the step."""
+        from superglm.reml import direct
+
+        _compound_test_never_accepts(monkeypatch)
+        real = direct.newton_step_left
+        monkeypatch.setattr(direct, "newton_step_left", lambda *a: max(real(*a), 9.9e-4))
+        model = _fit_informative_fixture(discrete=False, max_reml_iter=14)
+
+        assert model._reml_profile.get("reml_newton_step_stop", {}).get("step_taken") is not True
+
     def test_a_step_no_trial_can_verify_stops_where_it_stands(self, monkeypatch):
         """At the noise floor every trial is rejected, which is no evidence against the point."""
         from dataclasses import replace
@@ -1553,10 +1582,18 @@ class TestNewtonStepStop:
 
         monkeypatch.setattr(direct, "newton_step_resolved", spy)
         monkeypatch.setattr(direct, "reml_laml_objective", objective)
+        # The certificate reads first, so force the verdict it cannot settle.
+        monkeypatch.setattr(
+            direct, "classify_dead_feasible_exit", lambda *_, **__: "line_search_failed"
+        )
         model = _fit_informative_fixture(discrete=False)
 
         assert model.reml_diagnostics()["converged"] is True
         assert model._reml_profile["reml_newton_step_stop"]["step_taken"] is False
+        assert model._reml_profile["reml_newton_step_stop"]["taken_step"] is None
+        # A dead search keeps its evidence record whichever way it ends.
+        dead = model._reml_profile["reml_dead_line_search"]
+        assert dead["termination_reason"] == "newton_step_tolerance"
 
     def test_a_tightened_tolerance_tightens_the_stop(self, monkeypatch):
         _compound_test_never_accepts(monkeypatch)
@@ -1564,7 +1601,7 @@ class TestNewtonStepStop:
 
         record = model._reml_profile["reml_newton_step_stop"]
         assert record["bar"] == pytest.approx(1e-4)
-        assert record["max_step"] <= 1e-4
+        assert record["step_left"] <= 1e-4
 
     def test_a_cached_weight_fit_waits_for_two_small_steps_running(self, monkeypatch):
         """One working-weight update per step, so one small step can precede a weight move."""
@@ -1573,6 +1610,7 @@ class TestNewtonStepStop:
 
         record = model._reml_profile["reml_newton_step_stop"]
         assert record["previous_step"] <= record["bar"]
+        assert record["step_taken"] is False
 
     def test_a_cached_weight_stop_waits_for_a_settled_working_mode(self):
         """Small steps at weights still moving prove nothing: a refit from there walks away."""
@@ -1595,8 +1633,8 @@ class TestNewtonStepStop:
             lambdas = cold.reml_diagnostics()["lambdas"]
             warm = fit(lambda2_init=lambdas)
 
-        moved = np.max(np.abs(cold.predict(frame) - warm.predict(frame)))
-        assert not cold.reml_diagnostics()["converged"] or moved < 1e-2
+        assert cold.reml_diagnostics()["converged"]
+        assert np.max(np.abs(cold.predict(frame) - warm.predict(frame))) < 1e-6
 
     def test_an_uncertified_mode_cannot_stop(self, monkeypatch):
         from superglm.reml import direct
@@ -1607,14 +1645,26 @@ class TestNewtonStepStop:
 
         assert model.reml_diagnostics()["termination_reason"] != "newton_step_tolerance"
 
-    @pytest.mark.parametrize("term", ["mains", "re"])
-    def test_nb2_fits_at_the_line_search_floor_converge(self, term):
+    @pytest.mark.parametrize("term", ["mains", "re", "splcat", "select"])
+    def test_nb2_fits_at_the_line_search_floor_converge_where_they_stood(self, monkeypatch, term):
         """Their gradient sits at the noise floor, so no trial can verify a decrease."""
         from benchmarks import release_differential
 
-        record = release_differential.run_glm("nb2auto", "log", "sparse", term, "exact", "fit_reml")
+        from superglm.reml import direct
+
+        def fit():
+            return release_differential.run_glm(
+                "nb2auto", "log", "sparse", term, "exact", "fit_reml"
+            )
+
+        record = fit()
+        monkeypatch.setattr(direct, "newton_step_resolved", lambda *_, **__: False)
+        reference = fit()
 
         assert record["converged"] is True
+        assert record["edf"] == pytest.approx(reference["edf"], rel=1e-3)
+        assert record["objective"] == pytest.approx(reference["objective"], rel=1e-6)
+        assert record["test_deviance"] == pytest.approx(reference["test_deviance"], rel=1e-3)
 
     def test_a_stopped_search_reads_as_converged_and_in_words(self):
         from superglm.diagnostics.convergence import _REML_CONVERGED_REASONS

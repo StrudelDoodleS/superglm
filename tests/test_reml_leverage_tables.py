@@ -886,9 +886,100 @@ def test_a_newton_step_stop_forms_the_cross_terms_the_tables_omit(monkeypatch):
         "evaluate_reml_candidate",
         lambda **kwargs: replace(compound(**kwargs), converged=False),
     )
+    monkeypatch.setattr(
+        direct, "classify_dead_feasible_exit", lambda *_, **__: "line_search_failed"
+    )
     counts = _count_row_passes(monkeypatch)
     model = _poisson_model(1.0e3)
 
     assert model.reml_diagnostics()["termination_reason"] == "newton_step_tolerance"
     assert model._reml_profile["reml_n_stop_cross_passes"] >= 1
     assert counts["passes"] == model._reml_profile["reml_n_stop_cross_passes"]
+
+
+def test_the_cross_terms_reach_the_hessian_the_stop_reads(monkeypatch):
+    """Cross terms that make the Hessian indefinite must refuse the stop."""
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
+    compound = direct.evaluate_reml_candidate
+    monkeypatch.setattr(
+        direct,
+        "evaluate_reml_candidate",
+        lambda **kwargs: replace(compound(**kwargs), converged=False),
+    )
+    monkeypatch.setattr(
+        direct, "classify_dead_feasible_exit", lambda *_, **__: "line_search_failed"
+    )
+    real = direct._usable_w_correction
+
+    def indefinite_at_the_stop(fn, args, kwargs, distribution):
+        correction = real(fn, args, kwargs, distribution)
+        if kwargs.get("lookup_tables", True):
+            return correction
+        return (*correction[:2], -1e6 * np.eye(correction[2].shape[0]), *correction[3:])
+
+    monkeypatch.setattr(direct, "_usable_w_correction", indefinite_at_the_stop)
+    model = _poisson_model(1.0e3)
+
+    assert model._reml_profile["reml_n_stop_cross_passes"] >= 1
+    assert "reml_newton_step_stop" not in model._reml_profile
+
+
+def test_a_switch_to_the_exact_hessian_drops_the_held_step(monkeypatch):
+    """A held table-route Hessian cannot be confirmed once the route has changed."""
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
+    compound = direct.evaluate_reml_candidate
+    monkeypatch.setattr(
+        direct,
+        "evaluate_reml_candidate",
+        lambda **kwargs: replace(compound(**kwargs), converged=False),
+    )
+    monkeypatch.setattr(
+        direct, "classify_dead_feasible_exit", lambda *_, **__: "line_search_failed"
+    )
+    plain = _poisson_model(1.0e3)._reml_profile["reml_newton_step_stop"]["iter"]
+    real_resolved = direct.newton_step_resolved
+    held = []
+
+    def spy(*args, **kwargs):
+        held.append(real_resolved(*args, **kwargs))
+        return held[-1]
+
+    monkeypatch.setattr(direct, "newton_step_resolved", spy)
+    monkeypatch.setattr(direct, "_escalates_to_exact_hessian", lambda *_: any(held))
+    model = _poisson_model(1.0e3)
+
+    assert model._reml_profile.get("reml_newton_step_stop", {}).get("iter", np.inf) > plain
+
+
+def test_a_dead_search_the_certificate_already_settles_makes_no_extra_pass(monkeypatch):
+    """The dead-search certificate reads first, so a fit it settles pays for no row pass."""
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
+    compound = direct.evaluate_reml_candidate
+    monkeypatch.setattr(
+        direct,
+        "evaluate_reml_candidate",
+        lambda **kwargs: replace(compound(**kwargs), converged=False),
+    )
+    real_resolved, real_objective = direct.newton_step_resolved, direct.reml_laml_objective
+    held = []
+
+    def spy(*args, **kwargs):
+        held.append(real_resolved(*args, **kwargs))
+        return held[-1]
+
+    def objective(*args, **kwargs):
+        evaluation = real_objective(*args, **kwargs)
+        return replace(evaluation, value=evaluation.value + 1.0) if any(held) else evaluation
+
+    monkeypatch.setattr(direct, "newton_step_resolved", spy)
+    monkeypatch.setattr(direct, "reml_laml_objective", objective)
+    monkeypatch.setattr(
+        direct, "classify_dead_feasible_exit", lambda *_, **__: "converged_at_precision"
+    )
+    counts = _count_row_passes(monkeypatch)
+    model = _poisson_model(1.0e3)
+
+    assert model.reml_diagnostics()["termination_reason"] == "converged_at_precision"
+    assert counts["passes"] == 0
+    assert "reml_newton_step_stop" not in model._reml_profile
+    assert model._reml_profile["reml_dead_line_search"]

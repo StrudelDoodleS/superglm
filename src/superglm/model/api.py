@@ -742,9 +742,11 @@ class SuperGLM:
             change both fall below ``reml_tol * (1 + |objective|)`` over the
             active directions, or when Newton's step on those directions is at
             most ``min(1e-3, 1e6 * reml_tol)`` in log lambda on an unmodified
-            positive definite Hessian and the gradient confirms it once that step
-            is taken, or no trial can verify it
-            (``termination_reason="newton_step_tolerance"``); a direction whose
+            positive definite Hessian
+            (``termination_reason="newton_step_tolerance"``). The exact engine
+            takes that step and confirms it on the next gradient, or stops where
+            it stands if no trial can verify it; the discrete engine needs two
+            such steps running at a settled working model. A direction whose
             gradient and relative row
             curvature are both negligible is frozen where it stands, as
             recorded in ``reml_diagnostics()`` under

@@ -45,6 +45,7 @@ from superglm.reml.convergence import (
     mask_frozen_stop_gradient,
     newton_predicted_decrease,
     newton_step_resolved,
+    newton_step_settled,
     newton_step_stop_bar,
     project_reml_gradient,
     revalidate_stop,
@@ -1330,23 +1331,25 @@ def optimize_discrete_reml_cached_w(
             and candidate_mode_stationary
             and active_idx_d.size
             and not shoulder_d.any()
-            and max(max_delta_raw, previous_step) <= step_bar
+            and previous_step <= step_bar
+            and newton_step_settled(max_delta_raw, previous_step, bar=step_bar)
             and newton_step_resolved(hess_sub_d, grad_sub_d, bar=step_bar)
         ):
             if profile is not None:
                 profile["reml_newton_step_stop"] = {
                     "iter": poi_iter + 1,
-                    "max_step": max_delta_raw,
+                    "step_left": max_delta_raw,
                     "previous_step": previous_step,
                     "bar": step_bar,
-                    "step_taken": True,
+                    "step_taken": False,
                 }
             rho = rho_clipped
             converged = True
             termination_reason = "newton_step_tolerance"
             _t_newton += _time.perf_counter() - _t0
             break
-        previous_step = max_delta_raw
+        # A shoulder's trust-region move shifts the working weights like any step.
+        previous_step = max(max_delta_raw, max_delta)
         _t_newton += _time.perf_counter() - _t0
         _n_newton_steps += 1
 

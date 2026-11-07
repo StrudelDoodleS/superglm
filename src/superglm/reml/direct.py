@@ -36,7 +36,9 @@ from superglm.reml.convergence import (
     freeze_record,
     mask_frozen_stop_gradient,
     newton_predicted_decrease,
+    newton_step_left,
     newton_step_resolved,
+    newton_step_settled,
     newton_step_stop_bar,
     project_reml_gradient,
     revalidate_stop,
@@ -864,6 +866,7 @@ def optimize_direct_reml(
                 rho_at_boundary,
             )
             rho = rho_clipped
+            held_newton_model = None
             restoration_step *= 2.0
             n_mean_space_restorations += 1
             cand_lambdas = lambdas.copy()
@@ -1258,18 +1261,19 @@ def optimize_direct_reml(
             _t_w_correction += _time.perf_counter() - started
             return cross
 
-        def held_step_resolved() -> bool:
-            """Whether this gradient's Newton step on the held Hessian is under the bar."""
+        def held_step_left() -> float:
+            """The Newton step this gradient leaves on the held Hessian."""
             hessian, index, _ = held_newton_model
             cross = stop_cross_terms() if table_route else None
             hessian = hessian if cross is None else hessian + cross[np.ix_(index, index)]
-            return newton_step_resolved(hessian, grad[index], bar=step_bar)
+            return newton_step_left(hessian, grad[index])
 
-        def record_step_stop(*, step_taken: bool) -> None:
+        def record_step_stop(step_left: float, *, step_taken: bool) -> None:
             if profile is not None:
                 profile["reml_newton_step_stop"] = {
                     "iter": int(n_iter),
-                    "max_step": held_newton_model[2],
+                    "step_left": step_left,
+                    "taken_step": held_newton_model[2] if step_taken else None,
                     "bar": step_bar,
                     "step_taken": step_taken,
                 }
@@ -1319,9 +1323,11 @@ def optimize_direct_reml(
             held_newton_model is not None
             and mode_certified
             and not np.any(stop_grad[stop_criterion_frozen])
-            and held_step_resolved()
+            and newton_step_settled(
+                step_left := held_step_left(), held_newton_model[2], bar=step_bar
+            )
         ):
-            record_step_stop(step_taken=True)
+            record_step_stop(step_left, step_taken=True)
             converged = True
             termination_reason = "newton_step_tolerance"
             break
@@ -1481,6 +1487,7 @@ def optimize_direct_reml(
             ):
                 w_correction_order = 2
                 exact_hessian_available = False
+                held_newton_model = None
         _t_hessian += _time.perf_counter() - _t0
         # What the dead-search exit below judges: the active set's gradient and
         # the decrease its Newton model predicts (half the squared decrement of
@@ -1889,12 +1896,6 @@ def optimize_direct_reml(
         if not accepted:
             rho = rho_clipped
             _t_linesearch += _time.perf_counter() - _t0
-            if held_newton_model is not None and held_step_resolved():
-                # No trial can verify a step this small: the point stands.
-                record_step_stop(step_taken=False)
-                converged = True
-                termination_reason = "newton_step_tolerance"
-                break
             if not had_feasible_trial:
                 # Every projected coordinate is at a bound: re-evaluate once so
                 # the compound criterion can confirm stability.
@@ -1915,6 +1916,14 @@ def optimize_direct_reml(
                 evaluated_trial=dead_evidence,
                 predicted_decrease=dead_predicted_decrease,
             )
+            if termination_reason == "line_search_failed" and held_newton_model is not None:
+                # The evidence is the candidate's own: a certified mode, a positive
+                # definite Hessian and a negligible step. Trials at this floor, refused
+                # or rejected, add none either way, so the point stands.
+                step_left = held_step_left()
+                if step_left <= step_bar:
+                    record_step_stop(step_left, step_taken=False)
+                    termination_reason = "newton_step_tolerance"
             if profile is not None:
                 # The dead-search exit's evidence, as the discrete engine
                 # records it.
@@ -1942,7 +1951,7 @@ def optimize_direct_reml(
             # score-test exit only: a shoulder here has its gradient under the
             # certified floor, and the rejected trials have just failed to show
             # the decrease its model promises.
-            converged = termination_reason == "converged_at_precision"
+            converged = termination_reason in ("converged_at_precision", "newton_step_tolerance")
             break
         _t_linesearch += _time.perf_counter() - _t0
 

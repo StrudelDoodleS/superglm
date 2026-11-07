@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -384,22 +385,40 @@ def newton_step_stop_bar(tolerance: float) -> float:
     return min(NEWTON_STEP_STOP_BAR, NEWTON_STEP_STOP_PER_TOLERANCE * float(tolerance))
 
 
-def newton_step_resolved(hessian: NDArray, gradient: NDArray, *, bar: float) -> bool:
-    """Whether Newton's step on these directions is below ``bar``, on an unmodified Hessian.
+def newton_step_left(hessian: NDArray, gradient: NDArray) -> float:
+    """The largest entry of Newton's step on these directions, on an unmodified Hessian.
 
-    The step is curvature-scaled and affine invariant, as the Newton decrement
-    is (Boyd & Vandenberghe 2004, sec. 9.5.1), so unlike a gradient bar scaled
-    by the objective it reads the same at any size of objective. A Hessian that
-    is not positive definite above the modified-Newton floor gives no such step.
+    The step is curvature-scaled, as the Newton decrement is (Boyd & Vandenberghe
+    2004, sec. 9.5.1), so unlike a gradient bar scaled by the objective it does
+    not depend on the objective's size. A Hessian that is not positive definite
+    above the modified-Newton floor gives no such step, which reads as infinite.
     """
     if not np.all(np.isfinite(hessian)):
-        return False
+        return math.inf
     values, vectors = np.linalg.eigh(hessian)
     floor = max(float(np.max(np.abs(values))), 1e-12) * NEWTON_EIGENVALUE_FLOOR
     if not np.all(values >= floor):
-        return False
+        return math.inf
     step = vectors @ ((vectors.T @ gradient) / values)
-    return bool(np.max(np.abs(step)) <= bar)
+    return float(np.max(np.abs(step)))
+
+
+def newton_step_settled(step_left: float, taken_step: float, *, bar: float) -> bool:
+    """Whether the distance left after a taken step is at most ``bar``.
+
+    A Hessian that omits the second-derivative weight terms contracts linearly,
+    at a rate ``r`` the two steps read for free. Steps that keep one sign then
+    leave a distance of about ``step_left / (1 - r)``, and a step that did not
+    contract says nothing about the distance.
+    """
+    if step_left >= taken_step:
+        return False
+    return step_left / (1.0 - step_left / taken_step) <= bar
+
+
+def newton_step_resolved(hessian: NDArray, gradient: NDArray, *, bar: float) -> bool:
+    """Whether Newton's step on these directions is at most ``bar``."""
+    return newton_step_left(hessian, gradient) <= bar
 
 
 def trial_counts_as_precision_evidence(converged: bool, objective: float) -> bool:
