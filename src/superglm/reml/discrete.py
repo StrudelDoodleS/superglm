@@ -45,6 +45,7 @@ from superglm.reml.convergence import (
     mask_frozen_stop_gradient,
     newton_predicted_decrease,
     newton_step_resolved,
+    newton_step_same_terms,
     newton_step_settled,
     newton_step_stop_bar,
     project_reml_gradient,
@@ -882,6 +883,7 @@ def optimize_discrete_reml_cached_w(
     # tiny gradient forever, and counting it would spin to max_reml_iter.
     stop_criterion_frozen_d = None
     previous_step = np.inf
+    previous_idx: NDArray | None = None
     for poi_iter in range(max_reml_iter):
         rho_clipped = np.clip(rho, log_lo, log_hi)
         # The shared-tensor trust region: coordinates within base_cap, shared
@@ -1331,6 +1333,7 @@ def optimize_discrete_reml_cached_w(
             and candidate_mode_stationary
             and active_idx_d.size
             and not shoulder_d.any()
+            and newton_step_same_terms(previous_idx, active_idx_d)
             and previous_step <= step_bar
             and newton_step_settled(max_delta_raw, previous_step, bar=step_bar)
             and newton_step_resolved(hess_sub_d, grad_sub_d, bar=step_bar)
@@ -1350,6 +1353,7 @@ def optimize_discrete_reml_cached_w(
             break
         # A shoulder's trust-region move shifts the working weights like any step.
         previous_step = max(max_delta_raw, max_delta)
+        previous_idx = active_idx_d.copy()
         _t_newton += _time.perf_counter() - _t0
         _n_newton_steps += 1
 

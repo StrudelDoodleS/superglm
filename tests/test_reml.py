@@ -2322,6 +2322,7 @@ class TestREMLWarmStart:
         )
         # The contraction check also tends to refuse here, so isolate this guard.
         monkeypatch.setattr(discrete_module, "newton_step_settled", lambda *_, **__: True)
+        monkeypatch.setattr(discrete_module, "newton_step_same_terms", lambda *_, **__: True)
         rng = np.random.default_rng(3)
         n = 4000
         x1 = rng.uniform(0, 1, n)

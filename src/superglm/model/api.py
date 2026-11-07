@@ -746,9 +746,10 @@ class SuperGLM:
             (``termination_reason="newton_step_tolerance"``), with the distance
             left, the step over one minus its contraction rate, within that bar.
             The exact engine takes the step and reads the rate from the next
-            gradient, or from the preceding Newton step when no trial verifies
-            this one. The discrete engine reads it from two successive steps at
-            a settled working model. A direction whose gradient and relative row
+            gradient, or from the preceding uncapped Newton step on the same
+            free terms when no trial verifies this one. The discrete engine reads
+            it from two successive steps on the same terms at a settled working
+            model. A direction whose gradient and relative row
             curvature are both negligible is frozen where it stands, as
             recorded in ``reml_diagnostics()`` under
             ``profile["reml_freeze_decision"]``. A tolerance tighter than the

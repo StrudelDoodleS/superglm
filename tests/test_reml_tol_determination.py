@@ -1604,21 +1604,24 @@ class TestNewtonStepStop:
         assert any(held)
         assert model.reml_diagnostics()["termination_reason"] == "line_search_failed"
 
-    @pytest.mark.parametrize("move", ["shoulder", "restoration"])
-    def test_a_dead_search_after_a_non_newton_move_stays_a_failure(self, monkeypatch, move):
-        """A shoulder or restoration cannot supply the preceding Newton contraction."""
+    @pytest.mark.parametrize(
+        "move", ["shoulder", "restoration", "capped", "freezes", "reactivates", "certificate"]
+    )
+    def test_dead_search_checks_the_certificate_and_a_valid_newton_predecessor(
+        self, monkeypatch, move
+    ):
+        """The certificate reads first; a remaining failure needs a matching predecessor."""
         from superglm.reml import direct
 
         _compound_test_never_accepts(monkeypatch)
         monkeypatch.setattr(
-            direct, "classify_dead_feasible_exit", lambda *_, **__: "line_search_failed"
+            direct,
+            "classify_dead_feasible_exit",
+            lambda *_, **__: (
+                "converged_at_precision" if move == "certificate" else "line_search_failed"
+            ),
         )
         real_hessian = direct.reml_direct_hessian
-        monkeypatch.setattr(
-            direct,
-            "reml_direct_hessian",
-            lambda *a, **k: 1e8 * np.eye(real_hessian(*a, **k).shape[0]),
-        )
         # Make the current Newton step negligible even after a non-Newton move;
         # the invalid preceding step must still withhold the convergence verdict.
         monkeypatch.setattr(direct, "newton_step_left", lambda *_: 0.0)
@@ -1627,18 +1630,32 @@ class TestNewtonStepStop:
         real_resolved = direct.newton_step_resolved
         holds = []
 
+        def hessian(*args, **kwargs):
+            result = 1e8 * np.eye(real_hessian(*args, **kwargs).shape[0])
+            if not freezes and move == "reactivates":
+                result[0, 0] = -1e8
+            return result
+
         def resolved(*args, **kwargs):
             result = real_resolved(*args, **kwargs)
+            if len(freezes) == 1 and move in {"freezes", "reactivates", "certificate"}:
+                # Reach the dead-exit check, rather than the main confirmation.
+                result = False
             holds.append((len(freezes), result))
             return result
 
         def freeze(*args, **kwargs):
             decision = real_freeze(*args, **kwargs)
             shoulder = np.zeros_like(decision.frozen)
+            frozen = np.zeros_like(decision.frozen)
             if not freezes and move == "shoulder":
                 shoulder[0] = True
+            if (len(freezes) == 1 and move in {"freezes", "shoulder"}) or (
+                not freezes and move == "reactivates"
+            ):
+                frozen[0] = True
             freezes.append(None)
-            return replace(decision, frozen=np.zeros_like(shoulder), shoulder=shoulder)
+            return replace(decision, frozen=frozen, shoulder=shoulder)
 
         def objective(*args, **kwargs):
             evaluation = real_objective(*args, **kwargs)
@@ -1647,6 +1664,14 @@ class TestNewtonStepStop:
             return replace(evaluation, value=evaluation.value + shift)
 
         real_fit = direct.fit_irls_direct
+        real_solve = np.linalg.solve
+        caps = []
+
+        def solve(matrix, rhs):
+            if move == "capped" and len(freezes) == 1 and matrix.shape == (2, 2):
+                caps.append(None)
+                return np.array([-10.0, -5.5e-4])
+            return real_solve(matrix, rhs)
 
         def fit(*args, **kwargs):
             result, inverse, gram = real_fit(*args, **kwargs)
@@ -1660,9 +1685,11 @@ class TestNewtonStepStop:
             return result, inverse, gram
 
         monkeypatch.setattr(direct, "freeze_flat_directions", freeze)
+        monkeypatch.setattr(direct, "reml_direct_hessian", hessian)
         monkeypatch.setattr(direct, "reml_laml_objective", objective)
         monkeypatch.setattr(direct, "fit_irls_direct", fit)
         monkeypatch.setattr(direct, "newton_step_resolved", resolved)
+        monkeypatch.setattr(np.linalg, "solve", solve)
         rng = np.random.default_rng(11)
         frame = pd.DataFrame({"x": rng.uniform(size=400), "z": rng.uniform(size=400)})
         y = rng.poisson(np.exp(0.3 + 0.8 * np.sin(6 * frame["x"]))).astype(float)
@@ -1671,13 +1698,20 @@ class TestNewtonStepStop:
         ).fit_reml(frame, y, max_reml_iter=2)
 
         assert len(freezes) == 2
+        assert (2, True) in holds
         if move == "restoration":
             assert (1, True) in holds
             assert model._reml_profile["reml_mean_space_restorations"] == 1
-        else:
+        elif move == "shoulder":
             assert len(model._reml_profile["reml_shoulder_reads"]) == 1
-        assert model.reml_diagnostics()["termination_reason"] == "line_search_failed"
-        assert not model.reml_diagnostics()["converged"]
+        elif move == "capped":
+            assert caps
+        if move == "certificate":
+            assert model.reml_diagnostics()["termination_reason"] == "converged_at_precision"
+            assert "reml_newton_step_stop" not in model._reml_profile
+        else:
+            assert model.reml_diagnostics()["termination_reason"] == "line_search_failed"
+            assert not model.reml_diagnostics()["converged"]
 
     def test_a_step_no_trial_can_verify_stops_where_it_stands(self, monkeypatch):
         """At the noise floor every trial is rejected, which is no evidence against the point."""
@@ -1731,6 +1765,50 @@ class TestNewtonStepStop:
         assert record["previous_step"] <= record["bar"]
         assert record["step_taken"] is False
 
+    def test_a_cached_weight_stop_needs_the_same_free_terms(self, monkeypatch):
+        """A newly active smooth has no preceding step on which to read a rate."""
+        from superglm.reml import discrete
+
+        _compound_test_never_accepts(monkeypatch)
+        monkeypatch.setattr(discrete, "newton_step_stop_bar", lambda *_: 1e9)
+        monkeypatch.setattr(discrete, "newton_step_resolved", lambda *_, **__: True)
+        monkeypatch.setattr(discrete, "newton_step_settled", lambda *_, **__: True)
+        monkeypatch.setattr(
+            discrete, "classify_dead_feasible_exit", lambda *_, **__: "line_search_failed"
+        )
+        real_fit = discrete.fit_irls_direct
+        real_freeze = discrete.freeze_flat_directions
+        freezes = []
+
+        def fit(*args, **kwargs):
+            result, *rest = real_fit(*args, **kwargs)
+            if (kwargs.get("debug_context") or {}).get("phase") == "candidate":
+                result = replace(result, converged=True)
+            return result, *rest
+
+        def freeze(*args, **kwargs):
+            decision = real_freeze(*args, **kwargs)
+            frozen = np.zeros_like(decision.frozen)
+            if not freezes:
+                frozen[0] = True
+            freezes.append(None)
+            return replace(decision, frozen=frozen, shoulder=np.zeros_like(frozen))
+
+        monkeypatch.setattr(discrete, "fit_irls_direct", fit)
+        monkeypatch.setattr(discrete, "freeze_flat_directions", freeze)
+        rng = np.random.default_rng(11)
+        frame = pd.DataFrame({"x": rng.uniform(size=400), "z": rng.uniform(size=400)})
+        y = rng.poisson(np.exp(0.3 + 0.8 * np.sin(6 * frame["x"]))).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            features={name: Spline(kind="cr", k=6) for name in frame.columns},
+            discrete=True,
+        ).fit_reml(frame, y, max_reml_iter=2)
+
+        assert len(freezes) == 2
+        assert "reml_newton_step_stop" not in model._reml_profile
+        assert not model.reml_diagnostics()["converged"]
+
     def test_a_cached_weight_stop_waits_for_a_settled_working_mode(self):
         """Small steps at weights still moving prove nothing: a refit from there walks away."""
         rng = np.random.default_rng(3)
@@ -1765,8 +1843,8 @@ class TestNewtonStepStop:
         assert model.reml_diagnostics()["termination_reason"] != "newton_step_tolerance"
 
     @pytest.mark.parametrize("term", ["mains", "re", "splcat", "select"])
-    def test_nb2_fits_at_the_line_search_floor_converge_where_they_stood(self, monkeypatch, term):
-        """Their gradient sits at the noise floor, so no trial can verify a decrease."""
+    def test_nb2_fits_at_the_line_search_floor_preserve_the_fitted_answer(self, monkeypatch, term):
+        """Three stops certify; select's changing free set supplies no contraction."""
         from benchmarks import release_differential
 
         from superglm.reml import direct
@@ -1780,7 +1858,8 @@ class TestNewtonStepStop:
         monkeypatch.setattr(direct, "newton_step_resolved", lambda *_, **__: False)
         reference = fit()
 
-        assert record["converged"] is True
+        if term != "select":
+            assert record["converged"] is True
         assert record["edf"] == pytest.approx(reference["edf"], rel=1e-3)
         assert record["objective"] == pytest.approx(reference["objective"], rel=1e-6)
         assert record["test_deviance"] == pytest.approx(reference["test_deviance"], rel=1e-3)

@@ -403,6 +403,11 @@ def newton_step_left(hessian: NDArray, gradient: NDArray) -> float:
     return float(np.max(np.abs(step)))
 
 
+def newton_step_same_terms(previous: NDArray | None, current: NDArray) -> bool:
+    """Whether the preceding step was read on exactly these free directions."""
+    return previous is not None and np.array_equal(previous, current)
+
+
 def newton_step_settled(step_left: float, taken_step: float, *, bar: float) -> bool:
     """Whether the distance left after a taken step is at most ``bar``.
 

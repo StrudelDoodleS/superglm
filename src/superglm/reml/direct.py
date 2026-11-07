@@ -38,6 +38,7 @@ from superglm.reml.convergence import (
     newton_predicted_decrease,
     newton_step_left,
     newton_step_resolved,
+    newton_step_same_terms,
     newton_step_settled,
     newton_step_stop_bar,
     project_reml_gradient,
@@ -822,6 +823,7 @@ def optimize_direct_reml(
     held_newton_model: tuple[NDArray, NDArray, float] | None = None
     held_cross: NDArray | None = None
     last_accepted_step = 0.0
+    last_accepted_idx: NDArray | None = None
     for outer in range(max_reml_iter):
         n_iter = outer + 1
         rho_clipped = np.clip(rho, log_lo, log_hi)
@@ -870,6 +872,7 @@ def optimize_direct_reml(
             rho = rho_clipped
             held_newton_model = None
             last_accepted_step = 0.0
+            last_accepted_idx = None
             restoration_step *= 2.0
             n_mean_space_restorations += 1
             cand_lambdas = lambdas.copy()
@@ -1879,10 +1882,17 @@ def optimize_direct_reml(
                         _accepted_observed_mode_residual_max,
                         trial_mode_residual,
                     )
-                # A shoulder's trust-region move gives no Newton contraction rate.
-                last_accepted_step = (
-                    0.0 if shoulder.any() else float(np.max(np.abs(rho_trial - rho_clipped)))
+                # A rate needs an uncapped Newton predecessor on
+                # the same free terms; trust moves and changed sets give none.
+                newton_predecessor = (
+                    newton_idx.size and not shoulder.any() and max_delta <= max_newton_step
                 )
+                last_accepted_step = (
+                    float(np.max(np.abs(rho_trial[newton_idx] - rho_clipped[newton_idx])))
+                    if newton_predecessor
+                    else 0.0
+                )
+                last_accepted_idx = newton_idx.copy() if newton_predecessor else None
                 rho = rho_trial
                 warm_beta = trial_result.beta.copy()
                 warm_intercept = float(trial_result.intercept)
@@ -1942,7 +1952,11 @@ def optimize_direct_reml(
                 evaluated_trial=dead_evidence,
                 predicted_decrease=dead_predicted_decrease,
             )
-            if termination_reason == "line_search_failed" and held_newton_model is not None:
+            if (
+                termination_reason == "line_search_failed"
+                and held_newton_model is not None
+                and newton_step_same_terms(last_accepted_idx, held_newton_model[1])
+            ):
                 # The evidence is the candidate's own: a certified mode, a positive
                 # definite Hessian and a negligible step. Trials at this floor, refused
                 # or rejected, add none either way, so the point stands.
