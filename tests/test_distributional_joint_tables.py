@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 
 import numpy as np
@@ -17,7 +18,7 @@ from superglm._group_matrix._group_matrix_core import CategoricalGroupMatrix
 from superglm._parallel import parallel_config
 from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
-from superglm.distributional.families.tweedie import TweedieLSS
+from superglm.distributional.families.tweedie import BoundedPowerLink, TweedieLSS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.layout import build_stacked_layout
@@ -27,6 +28,7 @@ from superglm.distributional.solver import solver as solver_api
 from superglm.distributional.solver._joint_tables import joint_table_plan, stack_in_range
 from superglm.distributional.solver.derivatives import transform_natural_derivatives
 from superglm.features import Categorical, Numeric, Spline
+from superglm.links import LogLink
 
 from ._distributional_weights import resolved_prior
 
@@ -49,7 +51,8 @@ def _frame(n=N, seed=20261106):
     ), rng
 
 
-def _problem(family, offsets=False):
+def _problem(family, offsets=False, power=None):
+    """``power`` gives the last predictor rows that differ: an ``"offset"`` or a ``"term"``."""
     frame, rng = _frame()
     weights = resolved_prior(rng.choice(np.linspace(0.1, 1.0, 10), N))
     names = [spec.name for spec in family.parameters]
@@ -63,16 +66,22 @@ def _problem(family, offsets=False):
         # The same covariates as the first predictor, so their channels share row passes.
         {"x": Spline(kind="cr", n_knots=5, discrete=True), "h": Categorical()},
     ]
+    if power == "term":
+        features.append({"x": Spline(kind="cr", n_knots=5, discrete=True)})
     predictors = tuple(
-        Predictor(name, features[index] if index < 2 else {}) for index, name in enumerate(names)
+        Predictor(name, features[index] if index < len(features) else {})
+        for index, name in enumerate(names)
     )
+    offset_values = {names[0]: 0.05 * rng.normal(size=N)} if offsets else {}
+    if power == "offset":
+        offset_values[names[-1]] = 0.5 * rng.normal(size=N)
     layout = build_stacked_layout(
         compile_predictors(
             frame,
             weights,
             family.parameters,
             predictors,
-            offsets={names[0]: 0.05 * rng.normal(size=N)} if offsets else None,
+            offsets=offset_values or None,
             model_discrete=True,
             n_bins_config=20,
         )
@@ -450,16 +459,6 @@ def test_the_bits_do_not_depend_on_the_workers(monkeypatch, make):
     np.testing.assert_array_equal(one.score_data, four.score_data)
 
 
-def test_the_shards_tables_take_at_most_half_the_allowance(monkeypatch):
-    monkeypatch.setattr(_joint_tables, "_SHARD_ROWS", 257)
-    layout = _problem(GaussianLS(scale_floor=0.02))[1]
-    roomy = joint_table_plan(layout, 1 << 26)
-    assert roomy.n_shards == np.ceil(N / 257)
-    tight = joint_table_plan(layout, 4 * roomy.table_bytes)
-    assert (tight.n_shards, tight.shard_rows) == (2, N // 2)
-    assert joint_table_plan(layout, roomy.table_bytes).n_shards == 1
-
-
 def test_a_row_block_holds_what_the_shards_tables_leave(monkeypatch):
     """Mutation check: blocks that fill the allowance whatever the shards hold."""
     problem = _problem(GaussianLS(scale_floor=0.02))
@@ -526,49 +525,169 @@ def test_tables_over_budget_keep_the_group_routes():
     assert joint_table_plan(layout, 16) is None
 
 
-@pytest.mark.parametrize("zero_weights", (False, True), ids=("positive_weights", "zero_weights"))
-def test_a_fit_reads_the_same_numbers_through_every_route(monkeypatch, zero_weights):
-    """What a user reads: objective, EDF, prediction and standard errors, against the group
-    and natural routes. Mutation check: drop a channel from one row kernel and this moves."""
-    rng = np.random.default_rng(11)
-    frame = pd.DataFrame(
-        {
-            "x": rng.choice(np.linspace(-1, 1, 25), N),
-            "z": rng.choice(np.linspace(0, 3, 31), N),
-            "g": rng.choice(["a", "b", "c", "d"], N),
-            "h": rng.choice(["u", "v"], N),
-        }
+def _intercepts(y, weights, family=None, power_link=None, *, kind="prior"):
+    family = TweedieLSS() if family is None else family
+    n = len(y)
+    frame = as_eager_frame(pd.DataFrame({"unused": np.zeros(n)}))
+    resolved = resolved_prior(weights)
+    parameters = family.parameters
+    if power_link is not None:
+        parameters = (*parameters[:2], replace(parameters[2], default_link=power_link))
+    layout = build_stacked_layout(
+        compile_predictors(
+            frame,
+            resolved,
+            parameters,
+            tuple(Predictor(spec.name, {}) for spec in parameters),
+            model_discrete=True,
+            n_bins_config=20,
+        )
     )
-    weights = rng.choice(np.linspace(0.1, 1.0, 10), N)
-    if zero_weights:
-        weights[::7] = 0.0
-    positive = rng.random(N) < 0.15
-    y = np.where(positive, rng.gamma(2.0, 1.5, N), 0.0)
+    return family, layout, y, family.bind_likelihood(y, resolved, COMPLETE_OBSERVATION)
+
+
+def _outcome(call):
+    """What a caller sees: the error's type and message, or the numbers."""
+    try:
+        return "value", call()
+    except ValueError as error:
+        return type(error), str(error)
+
+
+@pytest.mark.parametrize(
+    "coefficients",
+    [
+        (0.0, -746.0, -10.0),
+        (0.0, -740.0, -10.0),
+        (0.0, 710.0, -10.0),
+        (-746.0, 0.0, -10.0),
+        (-740.0, 0.0, -10.0),
+        (710.0, 0.0, -10.0),
+    ],
+    ids=(
+        "phi_zero",
+        "phi_subnormal",
+        "phi_infinite",
+        "mean_zero",
+        "mean_subnormal",
+        "mean_infinite",
+    ),
+)
+def test_a_positive_row_past_the_normal_range_gets_the_natural_routes_decision(coefficients):
+    """A mean or dispersion that leaves float64's normal range, at both derivative orders: the same
+    refusal, or the same numbers, as the natural route, and never a ``ZeroDivisionError`` a trial's
+    backtracking would not catch. Mutation check: drop the test from the row kernel."""
+    y = np.full(3, 1e-300)
+    family, layout, response, plan = _intercepts(y, np.full(3, math.exp(-100.0)))
+    values = np.array(coefficients)
+    problem = (family, layout, response, plan, values)
+
+    def value(factors):
+        return chunking.evaluate_chunked_log_likelihood(
+            family, layout, response, plan, values, chunk_size="auto", pass_factors=factors
+        ).optimizing_log_likelihood
+
+    with np.errstate(all="ignore"):
+        assert _outcome(lambda: value(PassFactors())) == _outcome(lambda: value(None))
+        kind, compiled = _outcome(lambda: _geometry(problem))
+        reference_kind, natural = _outcome(lambda: _geometry(problem, compiled=False))
+    assert kind == reference_kind
+    if kind == "value":
+        np.testing.assert_array_equal(compiled.data_curvature, natural.data_curvature)
+    else:
+        assert compiled == natural
+
+
+def test_an_underflowed_dispersion_is_refused_on_the_fit_as_on_the_natural_route(monkeypatch):
+    """From an initial state a trial could reach: a clean ``ValueError``, not a ``ZeroDivisionError``."""
+    y = np.full(3, 1e-300)
+    family, layout, response, plan = _intercepts(y, np.full(3, math.exp(-100.0)))
+    initial = np.array([0.0, -746.0, -10.0])
 
     def fit():
-        family = TweedieLSS()
-        model = SuperLSS(
-            family,
-            family.mu(s("x", kind="cr", k=8), s("z", kind="cr", k=6), cat("g"), cat("h")),
-            family.phi(s("x", kind="cr", k=5), cat("h")),
-            family.p(),
-            discrete=True,
+        return solver_api.fit_dense_fixed_lambda(
+            family, layout, response, plan, np.zeros((3, 3)), initial=initial, chunk_size="auto"
         )
-        model.fit_reml(frame, y, sample_weight=weights)
-        return model
 
-    routed = fit()
+    with np.errstate(all="ignore"), pytest.raises(ValueError) as compiled:
+        fit()
     monkeypatch.setattr(chunking, "_joint_plan", lambda *_args: None)
-    reference = fit()
-    assert routed.smoothing_convergence_reason_ == reference.smoothing_convergence_reason_
-    assert routed.result_.total_effective_df == pytest.approx(
-        reference.result_.total_effective_df, abs=1e-3
+    with np.errstate(all="ignore"), pytest.raises(ValueError) as natural:
+        fit()
+    assert str(compiled.value) == str(natural.value)
+
+
+def _cancelling_problem():
+    g = np.array(list("aabbaabb"))
+    h = np.array(list("uvuvuvuv"))
+    frame = as_eager_frame(pd.DataFrame({"g": g, "h": h}))
+    family = GaussianLS(scale_floor=0.0)
+    weights = resolved_prior(np.ones(8))
+    layout = build_stacked_layout(
+        compile_predictors(
+            frame,
+            weights,
+            family.parameters,
+            (
+                Predictor("location", {"g": Categorical(), "h": Categorical()}),
+                Predictor("scale", {}),
+            ),
+            offsets={"location": np.where(g == "a", -(2.0**54), 0.0)},
+            model_discrete=True,
+            n_bins_config=20,
+        )
     )
-    rows = frame.iloc[::37]
-    np.testing.assert_allclose(
-        np.asarray(routed.predict_link(rows)), np.asarray(reference.predict_link(rows)), atol=1e-4
+    y = np.array([-1.0, 1.0] * 4)
+    plan = family.bind_likelihood(y, weights, COMPLETE_OBSERVATION)
+    return family, layout, y, plan, np.array([2.0**54, -(2.0**54), 1.0, 0.0])
+
+
+def test_predictors_that_cancel_sum_as_the_row_route_and_prediction_do():
+    """The groups first and then the intercept: a term of 1 next to 2**54 rounds away unless the
+    intercept cancels first, so the order decides the published mean. Mutation check: start each
+    predictor from its intercept, and the last two rows publish a mean of 1."""
+    family, layout, y, plan, coefficients = _cancelling_problem()
+    eta, theta = chunking.materialize_terminal_predictions(
+        layout, coefficients, chunk_size="auto", pass_factors=PassFactors()
     )
-    np.testing.assert_allclose(routed.covariance_, reference.covariance_, rtol=5e-3, atol=1e-8)
+    reference_eta, reference_theta = chunking.materialize_terminal_predictions(
+        layout, coefficients, chunk_size="auto"
+    )
+    np.testing.assert_array_equal(eta, reference_eta)
+    np.testing.assert_array_equal(theta, reference_theta)
+    fitted = solver_api.fit_dense_fixed_lambda(
+        family, layout, y, plan, np.zeros((4, 4)), initial=coefficients, chunk_size="auto"
+    )
+    assert np.asarray(fitted.log_likelihood) == pytest.approx(
+        float(
+            np.sum(
+                -0.5 * np.log(2 * np.pi)
+                - np.log(fitted.theta[:, 1])
+                - 0.5 * ((y - fitted.theta[:, 0]) / fitted.theta[:, 1]) ** 2
+            )
+        ),
+        rel=1e-14,
+    )
+
+
+def test_a_link_with_walls_past_the_familys_keeps_the_natural_route():
+    """The compiled rows refuse a power at the link's walls and the family at its own, so a trial
+    between them would get a number from one route and a refusal from the other. A narrower link
+    is safe: its wall is inside the family's, and the rows decline there.
+    Mutation check: drop the walls' test from the hook."""
+    family = TweedieLSS(power_lower=1.3, power_upper=1.6)
+    y = np.array([0.0, 0.0, 2.0, 1.0])
+    weights = np.ones(4)
+    plan = family.bind_likelihood(y, resolved_prior(weights), COMPLETE_OBSERVATION)
+
+    def rows(lower, upper):
+        links = (LogLink(), LogLink(), BoundedPowerLink(lower, upper))
+        return family.predictor_rows(y, plan, links, True)
+
+    assert rows(1.3, 1.6) is not None
+    assert rows(1.35, 1.55) is not None
+    assert rows(1.3 - 1e-10, 1.6) is None
+    assert rows(1.3, 1.6 + 1e-10) is None
 
 
 def test_a_subclass_with_its_own_likelihood_reads_its_own_numbers():

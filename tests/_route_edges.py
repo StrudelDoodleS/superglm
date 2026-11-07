@@ -718,7 +718,12 @@ def _tweedie_predictor_grid(large: bool) -> tuple:
         rho = d - np.log(w)
         mode = np.exp((2.0 - _POWER_LINK.inverse(p)) * np.log(np.where(y > 0.0, y, 1.0)) - rho)
     keep = (y == 0.0) | (mode / (2.0 - _POWER_LINK.inverse(p)) <= 200.0)
-    return y[keep], m[keep], d[keep], p[keep], w[keep]
+    # Positive rows whose mean or dispersion underflows, is subnormal or overflows: declined.
+    out = (-746.0, -740.0, 710.0)
+    rim = _product((1e-300, 2.0), out, (0.0,), (-10.0, 0.0), (math.exp(-100.0), 1.0))
+    rim_phi = _product((1e-300, 2.0), (0.0,), out, (-10.0, 0.0), (math.exp(-100.0), 1.0))
+    kept = (y[keep], m[keep], d[keep], p[keep], w[keep])
+    return tuple(np.concatenate(parts) for parts in zip(kept, rim, rim_phi, strict=True))
 
 
 def _tweedie_predictor_call(semantics: str):
@@ -733,7 +738,11 @@ def _tweedie_predictor_call(semantics: str):
         stack[:3] = eta_mean, eta_phi, eta_power
         value = np.empty(len(y))
         for i in range(len(y)):
-            completed, value[i] = rows.evaluate(0, i, i + 1, stack, 2)
+            try:
+                completed, value[i] = rows.evaluate(0, i, i + 1, stack, 2)
+            except ZeroDivisionError as error:
+                # A trial's backtracking does not catch this, and the sweep reads it as a refusal.
+                raise AssertionError("a compiled row must decline, not divide by zero") from error
             if not completed:
                 raise _DeclinedError
         return SimpleNamespace(

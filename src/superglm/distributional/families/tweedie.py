@@ -745,12 +745,17 @@ class TweedieLSS(TweediePredictors):
         self, y: NDArray, plan: FamilyLikelihoodPlan, links: Sequence[Link], shared_last: bool
     ):
         """Compiled rows in predictor coordinates, or None where these links or rows need
-        :meth:`evaluate_natural`. ``shared_last`` says one power serves every row."""
+        ``evaluate_natural``. ``shared_last`` says one power serves every row.
+
+        The rows decline a power at the link's walls and the family refuses one at its
+        own, so a link whose walls lie outside the family's keeps the natural route.
+        """
         if (
             len(links) != 3
             or type(links[0]) is not LogLink
             or type(links[1]) is not LogLink
             or type(links[2]) is not BoundedPowerLink
+            or not (self.power_lower <= links[2].lower and links[2].upper <= self.power_upper)
         ):
             return None
         tweedie_plan = _validated_plan(plan, n_observations=len(y))

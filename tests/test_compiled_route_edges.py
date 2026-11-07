@@ -128,6 +128,36 @@ def test_a_tweedie_zero_row_past_its_window_is_the_natural_routes(eta_mean, eta_
     assert _served("tweedie_predictor_prior", 0.0, eta_mean, eta_phi, 0.0, 1.0) is compiled
 
 
+@pytest.mark.parametrize("order", (0, 2))
+@pytest.mark.parametrize(
+    ("eta_mean", "eta_phi"),
+    [
+        (0.5, -746.0),
+        (0.5, -740.0),
+        (0.5, 710.0),
+        (0.5, float("inf")),
+        (0.5, float("-inf")),
+        (0.5, float("nan")),
+        (-746.0, 0.5),
+        (-740.0, 0.5),
+        (710.0, 0.5),
+        (float("inf"), 0.5),
+        (float("-inf"), 0.5),
+        (float("nan"), 0.5),
+    ],
+)
+def test_a_tweedie_positive_row_past_the_normal_range_is_the_natural_routes(
+    eta_mean, eta_phi, order
+):
+    """Declined at both orders, where a value would hide the natural route's refusal and a
+    derivative would divide by a dispersion of zero. Mutation check: drop the test from the kernel."""
+    y, weight = np.array([2.0]), np.ones(1)
+    rows = edges.tweedie_kernel.tweedie_predictor_rows(y, weight, "prior", edges._POWER_LINK, False)
+    stack = np.empty((9, 1))
+    stack[:3, 0] = eta_mean, eta_phi, 0.0
+    assert rows.evaluate(0, 0, 1, stack, order) == (False, 0.0)
+
+
 @pytest.mark.parametrize(
     "eta_power", [37.0, -38.0, 40.0, -40.0, float("inf"), float("-inf"), float("nan")]
 )

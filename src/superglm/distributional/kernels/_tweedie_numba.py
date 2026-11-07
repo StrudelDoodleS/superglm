@@ -1075,8 +1075,9 @@ def _tweedie_predictor_rows(
     p-p), then the scores (mu, phi, p). ``row_start`` is the column ``0``'s
     row. ``power_mask`` is 0 when one power serves every row, else -1, each
     array then running from ``first``. A power not strictly between its walls,
-    a value that is not finite or a derivative the chain rule would rescale
-    leaves ``completed`` False: such a row is the natural route's to refuse.
+    a mean or dispersion that leaves float64's normal range, a value that is
+    not finite or a derivative the chain rule would rescale leaves ``completed``
+    False: such a row is the natural route's to refuse.
     """
     total = 0.0
     fold = 0.0
@@ -1119,6 +1120,8 @@ def _tweedie_predictor_rows(
         else:
             mean = math.exp(eta_mu)
             phi = math.exp(eta_phi)
+            if not (_CHAIN_TINY <= mean < math.inf and _CHAIN_TINY <= phi < math.inf):
+                return False, 0.0
             row_weight = weight[row]
             rho = eta_phi
             multiplier = 1.0

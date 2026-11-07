@@ -105,18 +105,21 @@ _MAX_TABLE_CHANNELS = 4
 def _predictor_rows(stack, first, last, row_start, index, columns, owners, tables, constants):
     """Columns ``first..last`` of ``stack`` become each predictor's value on its rows.
 
-    A predictor's intercept plus each of its groups' table at the row's level, the
-    group's coefficients read through its levels once per pass (Lang et al. 2014).
+    Each group's table at the row's level, the group's coefficients read through
+    its levels once per pass (Lang et al. 2014), summed in the design's order and
+    then the intercept, as the row route and prediction sum them.
     """
     count = last - first
     for k in range(constants.shape[0]):
-        stack[k, first:last] = constants[k]
+        stack[k, first:last] = 0.0
     for g in range(columns.shape[0]):
         column = index[columns[g], row_start + first : row_start + last]
         table = tables[g]
         target = stack[owners[g], first:last]
         for i in range(count):
             target[i] += table[column[i]]
+    for k in range(constants.shape[0]):
+        stack[k, first:last] += constants[k]
 
 
 @njit(cache=True, error_model="numpy")
