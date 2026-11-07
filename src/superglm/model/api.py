@@ -2097,3 +2097,6 @@ class SuperGLM:
             from superglm.export.rating_tables import build_rating_table_payload
 
             return build_rating_table_payload(self, X, y, sample_weight=sample_weight, **kwargs)
+
+
+SuperGLM.__module__ = "superglm.model"

@@ -75,6 +75,7 @@ _LAZY_PACKAGES = (
     "superglm.diagnostics",
     "superglm.inference",
     "superglm.features",
+    "superglm.model",
     "superglm.reml",
     "superglm.solvers",
     "superglm.solvers.irls_direct",
@@ -165,6 +166,216 @@ def test_a_lazy_package_resolves_every_name_to_the_object_its_module_defines(pac
         assert getattr(module, name) is getattr(importlib.import_module(owner), name)
         assert name in dir(module)
     assert not hasattr(module, "no_such_name")
+
+
+_FIRST_READ_RACE = """
+import sys, threading
+import superglm
+loaded = sorted(m for m in sys.modules if m.startswith("superglm.") and m != "superglm._lazy")
+assert loaded == ["superglm._numba_cache"], loaded  # a cold package: nothing it defines is loaded
+specs = sys.argv[1:]
+start, failures = threading.Barrier(len(specs)), []
+def read(spec):
+    start.wait()
+    try:
+        if spec.startswith("import:"):
+            __import__(spec[7:])
+        else:
+            getattr(superglm, spec)
+    except BaseException as error:
+        failures.append((spec, type(error).__name__, str(error)[:100]))
+threads = [threading.Thread(target=read, args=(spec,)) for spec in specs]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join(90)
+print("hung" if any(t.is_alive() for t in threads) else failures or "ok", flush=True)
+sys.stdout.flush()
+import os
+os._exit(0)
+"""
+
+
+@pytest.mark.parametrize(
+    "reads",
+    [
+        ("SuperGLM", "TweedieProfileResult"),
+        ("NBProfileResult", "TweedieProfileResult"),
+        ("PriorWeightLatticeWarning", "TweedieProfileResult"),
+        ("import:superglm.model", "TweedieProfileResult"),
+    ],
+    ids=lambda reads: "+".join(reads),
+)
+def test_threads_that_first_read_names_of_one_import_cycle_at_once_all_succeed(reads):
+    """Two threads that first read ``SuperGLM`` and ``TweedieProfileResult`` of a cold package.
+
+    ``superglm.model`` and ``superglm.profiling.tweedie`` import each other, so two loads at
+    once make CPython's import locks raise ``_DeadlockError`` in one thread and a half-built
+    module in the other (``ImportError: cannot import name ...``): all of the pairs below, in
+    every fresh process, on the package without the lock and with the ``superglm.model`` body
+    importing its modules. Each pair runs in two fresh interpreters at once, because a load
+    that has happened cannot race again, and ``tests/conftest.py`` imports every module in this
+    one. The pair of different subpackages ``SuperGLM`` + ``SuperLSS`` never fails and would
+    not catch it. Mutation check: ``superglm/model/__init__.py`` importing ``api`` and
+    ``fit_ops`` in its body again fails the last pair, a name against an import by name; the
+    lock is held to account by the forced overlap below.
+    """
+    children = [
+        subprocess.Popen(
+            [sys.executable, "-c", _FIRST_READ_RACE, *reads],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    results = [child.communicate(timeout=180) for child in children]
+    assert [out.strip() for out, _ in results] == ["ok", "ok"], results
+
+
+_DEMO_INIT = (
+    "from superglm._lazy import attach\n"
+    "__getattr__, __dir__ = attach(__name__, __path__, {exports})\n"
+)
+_DEMO_DRIVER = """
+import os, sys, threading, time
+sys.path.insert(0, sys.argv[1])
+sys.lazydemo_sync = sync = {{
+    "a_in": threading.Event(), "b_holds": threading.Event(), "inside": 0, "peak": 0,
+    "mutex": threading.Lock(),
+}}
+import lazydemo
+failures = []
+def run(action):
+    try:
+        action()
+    except BaseException as error:
+        failures.append(repr(error))
+threads = [threading.Thread(target=run, args=(action,)) for action in [{actions}]]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join(20)
+print("hung" if any(t.is_alive() for t in threads) else (failures or "ok", sync["peak"]), flush=True)
+os._exit(0)
+"""
+
+
+def _run_lazydemo(tmp_path, exports, modules, actions):
+    """Run ``actions`` on threads against a throwaway package ``lazydemo`` of ``modules``."""
+    package = tmp_path / "lazydemo"
+    package.mkdir()
+    (package / "__init__.py").write_text(_DEMO_INIT.format(exports=exports), encoding="utf-8")
+    for name, text in modules.items():
+        (package / f"{name}.py").write_text(text, encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, "-c", _DEMO_DRIVER.format(actions=actions), str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return completed.stdout.strip(), completed
+
+
+_BODY_THAT_STAYS = (
+    "import sys, time\nsync = sys.lazydemo_sync\n"
+    "with sync['mutex']:\n    sync['inside'] += 1\n    sync['peak'] = max(sync['peak'], sync['inside'])\n"
+    "time.sleep(0.6)\n"
+    "with sync['mutex']:\n    sync['inside'] -= 1\n{name} = 1\n"
+)
+
+
+def test_first_loads_on_different_threads_run_one_at_a_time(tmp_path):
+    """Two names' modules are never being imported at the same moment.
+
+    Each module's body stays for 0.6 s and counts the bodies running at once; two threads that
+    first read their names together would overlap. This is the serialisation that keeps
+    two loads from meeting inside one import cycle, which no import of superglm's own modules
+    can be made to do on demand. Mutation check: ``module_getattr`` calling ``load`` without
+    the lock gives a peak of 2.
+    """
+    result, completed = _run_lazydemo(
+        tmp_path,
+        "{'lazydemo.p': ('first',), 'lazydemo.q': ('second',)}",
+        {"p": _BODY_THAT_STAYS.format(name="first"), "q": _BODY_THAT_STAYS.format(name="second")},
+        "lambda: lazydemo.first, lambda: lazydemo.second",
+    )
+    assert result == "('ok', 1)", completed
+
+
+def test_a_thread_inside_an_import_never_waits_for_the_first_load_lock(tmp_path):
+    """The lock cannot deadlock against an import already running.
+
+    One thread's first read holds the lock while its module's body imports ``a`` by name; the
+    thread that is running ``a``'s body, holding ``a``'s import lock, reads a name that needs a
+    first load. If it waited for the lock, each thread would wait for the other and neither
+    lock manager could see it: the process hangs. It does not wait: it loads the name itself.
+    Mutation check: ``_inside_an_import`` returning ``False`` hangs this.
+    """
+    result, completed = _run_lazydemo(
+        tmp_path,
+        "{'lazydemo.b': ('held',), 'lazydemo.c': ('other',)}",
+        {
+            # ``a`` holds its import lock while it reads a name; it does so once ``b``'s body, which
+            # holds the first-load lock, is waiting to import ``a``.
+            "a": (
+                "import sys\nsync = sys.lazydemo_sync\nsync['a_in'].set()\n"
+                "assert sync['b_holds'].wait(30)\nimport lazydemo\nlazydemo.other\n"
+            ),
+            "b": (
+                "import sys\nsync = sys.lazydemo_sync\nheld = 1\nsync['b_holds'].set()\n"
+                "assert sync['a_in'].wait(30)\nimport lazydemo.a\n"
+            ),
+            "c": "other = 2\n",
+        },
+        "lambda: lazydemo.held, lambda: __import__('lazydemo.a')",
+    )
+    assert result.startswith("('ok'"), completed
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is unavailable on this platform")
+def test_a_child_forked_while_another_thread_loads_a_name_is_not_stuck_on_the_lock():
+    """The lock a forking process held for another thread is released in the child.
+
+    Mutation check: removing ``os.register_at_fork`` in ``superglm/_lazy.py`` leaves the child
+    waiting for a lock whose owner does not exist there.
+    """
+    code = """
+import os, sys, threading, time, warnings
+warnings.simplefilter("ignore")
+import superglm
+from superglm import _lazy
+held, release = threading.Event(), threading.Event()
+def hold():
+    with _lazy._FIRST_LOAD:
+        held.set()
+        release.wait(30)
+holder = threading.Thread(target=hold)
+holder.start()
+held.wait(30)
+pid = os.fork()
+if pid == 0:
+    superglm.warmup  # a name defined in the package itself needs no load
+    getattr(superglm, "Numeric")
+    os._exit(0)
+deadline = time.monotonic() + 60
+while time.monotonic() < deadline:
+    done, status = os.waitpid(pid, os.WNOHANG)
+    if done:
+        break
+    time.sleep(0.05)
+else:
+    os.kill(pid, 9)
+    os.waitpid(pid, 0)
+    status = -1
+release.set()
+print("ok" if status == 0 else "stuck", flush=True)
+os._exit(0)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
+    )
+    assert completed.stdout.strip() == "ok", completed
 
 
 def test_the_root_lists_everything_it_exports_and_every_submodule_resolves():
