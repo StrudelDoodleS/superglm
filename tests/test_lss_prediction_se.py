@@ -533,6 +533,64 @@ def test_a_single_block_call_takes_its_products_on_one_blas_thread_from_a_few_do
     assert entered == []
 
 
+def test_a_pooled_prediction_adds_each_predictors_offset_and_intercept(monkeypatch):
+    """Offsets move a pooled prediction by exactly themselves, and the intercept is added once.
+
+    Mutation check: the offset left out of the block's eta fails the first assertion; the intercept
+    left out fails the second.
+    """
+    model = _fit("spline cat re tensor", discrete=True)
+    frame, _ = _frame(300, 13, wide=True)
+    inline = model.predict_link(frame)
+    _on_the_pool(monkeypatch)
+    pooled = model.predict_link(frame)
+    shifts = {name: np.linspace(-0.3, 0.7, len(frame)) for name in model.parameter_names_}
+    shifted = model.predict_link(frame, offsets=shifts)
+    for name in model.parameter_names_:
+        np.testing.assert_allclose(shifted[name] - pooled[name], shifts[name], rtol=0.0, atol=1e-13)
+        np.testing.assert_allclose(pooled[name], inline[name], rtol=0.0, atol=1e-13)
+
+
+def test_a_book_is_scored_without_keeping_every_terms_contribution():
+    """The peak allocation of a pooled prediction does not grow with the number of terms.
+
+    The pooled route collected every term's contribution for every row before adding any:
+    ``8 * rows * terms`` bytes (49 MiB for 100,000 rows and 64 terms, 68 MiB for the 14 terms of a
+    638,007-row book, which is the 56 MiB its point-only peak was over master's). Each worker now
+    forms one block of eta and holds one term's block at a time. The values are the inline
+    route's. Mutation check: contributions kept until the end of the call give a peak of 54 MiB.
+    """
+    import tracemalloc
+
+    rng = np.random.default_rng(0)
+    names = [f"x{i}" for i in range(64)]
+    fit = pd.DataFrame(rng.normal(size=(500, 64)), columns=names)
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=(Predictor("location", {n: Numeric() for n in names}), Predictor("scale", {})),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(fit, fit["x0"].to_numpy() * 0.3 + rng.standard_normal(500))
+    rows = 100_000
+    book = pd.DataFrame(rng.normal(size=(rows, 64)), columns=names)
+    model.predict_link(book.iloc[:20_000])  # pools and imports, which are not the call's
+    tracemalloc.start()
+    try:
+        link = model.predict_link(book)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 16 * 2**20 < 8 * rows * len(names)
+    inline = model.predict_link(book.iloc[:5_000])
+    np.testing.assert_allclose(
+        link.to_numpy()[:5_000],
+        inline.to_numpy(),
+        rtol=0.0,
+        atol=64 * U * np.abs(inline.to_numpy()).max(),
+    )
+
+
 def test_a_quote_starts_no_pool_and_a_book_does(monkeypatch):
     import superglm._parallel as parallel
 

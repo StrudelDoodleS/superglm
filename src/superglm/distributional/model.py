@@ -6,6 +6,7 @@ import copy
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
+from itertools import groupby
 from types import MappingProxyType
 from typing import Any
 
@@ -208,8 +209,9 @@ def _eta_tasks(
 ) -> list[_EtaTask]:
     """The scoring tasks of one predictor, in the order its terms are added to eta.
 
-    ``spans`` splits each term made of numeric covariates alone (``ROW_INDEPENDENT_TERMS``) into
-    row ranges that can be scored on any thread; every other term is one task over the frame.
+    ``spans`` splits each term made of numeric covariates alone (``ROW_INDEPENDENT_TERMS``), and
+    each label term read from the frame's codes, into row ranges that can be scored on any thread;
+    every other term is one task over the frame.
     """
     state = layout.predictors[predictor.parameter_index]
     intercept_width = int(state.intercept_index is not None)
@@ -227,19 +229,22 @@ def _eta_tasks(
         column, beta = frame.column_array(name), slopes[indices]
         coded = None if labels is None else labels.get((predictor.name, name))
         if coded is not None:
-            # a label term's rows are its level effects, read from the frame's codes
-            tasks.append(
-                _EtaTask(
-                    name,
-                    whole,
-                    partial(
-                        _score_term,
+            # a label term's rows are its level effects, read from the frame's codes, which
+            # checked the levels and warned once for the frame when they were made
+            effects = np.append(beta, 0.0)
+            for rows in spans or (whole,):
+                tasks.append(
+                    _EtaTask(
                         name,
-                        len(frame),
-                        partial(_level_effects, np.append(beta, 0.0), coded),
-                    ),
+                        rows,
+                        partial(
+                            _score_term,
+                            name,
+                            rows.stop - rows.start,
+                            partial(_level_effects, effects, coded[rows]),
+                        ),
+                    )
                 )
-            )
             assigned[indices] = True
             continue
         for rows in ranges(spec):
@@ -359,36 +364,75 @@ def _predict_eta_pooled(
     offsets: Mapping[str, NDArray],
     named: list[str],
 ) -> NDArray[np.float64]:
-    """Every predictor's eta, its terms scored side by side on ``superglm``'s pool.
+    """Every predictor's eta, a block of rows at a time on ``superglm``'s pool.
 
-    Row-range tasks do not depend on the worker count and each row's terms are added in the order
-    ``_predict_one_eta`` adds them, so the result is the same at any ``n_jobs``; a label term is
-    one task over the frame, so it checks its levels and warns once for the frame.
+    A term that is one task over the frame (a label term that checks its levels, an ``sz`` term)
+    is scored first, so it checks and warns once for the frame. Each worker then forms one block
+    of one predictor's eta, adding its terms in the order ``_predict_one_eta`` adds them, so the
+    result is the same at any ``n_jobs``, and holds one term's block at a time: the only
+    contributions kept for the whole frame are those of the terms that are one task over it.
     """
     from superglm._parallel import pooled_for
 
     n = len(frame)
     spans = [slice(lo, min(lo + DESIGN_BLOCK_ROWS, n)) for lo in range(0, n, DESIGN_BLOCK_ROWS)]
     labels = label_columns(frame, predictors)
-    per_predictor = [_eta_tasks(frame, p, layout, coefficients, spans, labels) for p in predictors]
-    flat = [task for tasks in per_predictor for task in tasks]
-    results = pooled_for(lambda task: task.run(), flat, DESIGN_BLOCK_ROWS * 8 * 16)
-    columns, start = [], 0
-    for predictor, tasks in zip(predictors, per_predictor, strict=True):
-        columns.append(
-            _assemble_eta(
-                predictor,
-                layout,
-                coefficients,
-                offsets[predictor.name],
-                tasks,
-                results[start : start + len(tasks)],
-                n,
-                named,
+    grouped = [
+        [
+            list(tasks)
+            for _, tasks in groupby(
+                _eta_tasks(frame, p, layout, coefficients, spans, labels), key=lambda t: t.term
+            )
+        ]
+        for p in predictors
+    ]
+    task_bytes = DESIGN_BLOCK_ROWS * 8 * 16
+    keys = [
+        (i, k)
+        for i, terms in enumerate(grouped)
+        for k, tasks in enumerate(terms)
+        if len(tasks) == 1
+    ]
+    scored = (
+        dict(
+            zip(
+                keys,
+                pooled_for(lambda key: grouped[key[0]][key[1]][0].run(), keys, task_bytes),
+                strict=True,
             )
         )
-        start += len(tasks)
-    return np.column_stack(columns)
+        if keys
+        else {}
+    )
+    for (i, k), (_, levels) in scored.items():
+        if levels:
+            named.append(
+                f"{predictors[i].name} term {grouped[i][k][0].term!r} levels "
+                f"{', '.join(map(str, levels))}"
+            )
+    eta = np.empty((n, len(predictors)), dtype=np.float64)
+
+    def form(job: tuple[int, int]) -> None:
+        i, block = job
+        rows = spans[block]
+        state = layout.predictors[predictors[i].parameter_index]
+        local = coefficients[state.coefficient_slice]
+        out = np.zeros(rows.stop - rows.start, dtype=np.float64)
+        for k, tasks in enumerate(grouped[i]):
+            out += scored[(i, k)][0][rows] if len(tasks) == 1 else tasks[block].run()[0]
+        # as ``_assemble_eta``: the ordered slopes, then the intercept, then the offset
+        if state.intercept_index is not None:
+            if len(local) > 1:
+                out += local[0]
+            else:
+                out[:] = local[0]
+        out += offsets[predictors[i].name][rows]
+        eta[rows, i] = out
+
+    pooled_for(
+        form, [(i, b) for i in range(len(predictors)) for b in range(len(spans))], task_bytes
+    )
+    return eta
 
 
 @dataclass(frozen=True)

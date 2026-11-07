@@ -1013,8 +1013,9 @@ class SuperLSS:
         each column's linear predictor, ``sqrt(x' V x)`` for the row ``x`` of that
         predictor's design and its block ``V`` of the coefficient covariance:
         exact, with no draws, and an offset does not move it. It is formed a block
-        of rows at a time, so a book of any size is priced in the memory of one
-        block. ``covariance`` names ``V``, as in ``posterior_bounds``.
+        of rows at a time, one block's design and products per worker, so memory
+        grows with the number of workers (``n_jobs``, capped by ``max_memory``)
+        and not with the rows. ``covariance`` names ``V``, as in ``posterior_bounds``.
         """
         model = self._require_fitted()
         # One adapter for both passes, so the columns and the coded levels are read from X once.
