@@ -56,8 +56,6 @@ from superglm.editor import edit
 from superglm.editor.payloads import session_payload
 from superglm.model_selection import cross_validate
 
-pytestmark = pytest.mark.pins_behaviour  # these guards pin behaviour that already held
-
 PADDING_RTOL = 1e-8
 FREQUENCY_RTOL = 1e-6  # the default tol of SuperGLM and reml_tol of SuperLSS
 N = 240
@@ -118,10 +116,12 @@ LIFT_BINNING = (
 
 
 def _flatten(value, path=""):
-    """Every leaf of ``value`` as ``{path: leaf}``: numbers as float arrays, text, flags and None as themselves.
+    """Every leaf of ``value`` as ``{path: leaf}``: numbers as float arrays of their own shape, text, flags and None as themselves.
 
-    Timings, ids and hashes are left out by name.  A leaf of a type this does not know raises,
-    so that an output cannot drop out of the comparison because nobody taught it to read one.
+    An array of text or flags is read item by item and also gives a ``.shape`` leaf, so a
+    covariance that comes back as ``(169,)`` for ``(13, 13)`` is a difference.  Timings, ids and
+    hashes are left out by name.  A leaf of a type this does not know raises, so that an output
+    cannot drop out of the comparison because nobody taught it to read one.
     """
     found = {}
     if isinstance(value, Mapping):
@@ -141,14 +141,15 @@ def _flatten(value, path=""):
         for index, item in enumerate(value):
             found.update(_flatten(item, f"{path}[{index}]"))
     elif isinstance(value, np.ndarray) and value.dtype.kind in "fiu":
-        found[path] = value.astype(float).ravel()
+        found[path] = value.astype(float)
     elif isinstance(value, np.ndarray) and value.dtype.kind in "bOUS":
+        found[f"{path}.shape"] = str(value.shape)
         for index, item in enumerate(value.ravel().tolist()):
             found.update(_flatten(item, f"{path}[{index}]"))
     elif isinstance(value, bool | np.bool_ | str | type(None)):
         found[path] = value
     elif isinstance(value, Real):
-        found[path] = np.array([float(value)])
+        found[path] = np.array(float(value))
     else:
         raise TypeError(
             f"{path or '<output>'}: the comparison cannot read a {type(value).__name__}"
@@ -187,6 +188,7 @@ class _Report:
     value: float
 
 
+@pytest.mark.pins_behaviour
 def test_the_comparison_reads_text_flags_and_none_and_refuses_what_it_cannot_read():
     frame = pd.DataFrame({"level": ["a", "b"], "value": [1.0, 2.0]})
 
@@ -199,6 +201,33 @@ def test_the_comparison_reads_text_flags_and_none_and_refuses_what_it_cannot_rea
     assert _differences(_Report("a", 1.0), _Report("b", 1.0), PADDING_RTOL)
     with pytest.raises(TypeError, match="cannot read a object"):
         _flatten({"result": object()})
+
+
+@pytest.mark.pins_behaviour
+def test_the_comparison_reports_a_change_of_shape_that_keeps_every_value():
+    matrix = np.arange(12.0).reshape(3, 4)
+    words = np.array([["a", "b", "c"], ["d", "e", "f"]])
+    flags = np.array([[True, False], [False, True], [True, True]])
+
+    for same, other in (
+        (matrix, matrix.ravel()),  # a covariance flattened
+        (matrix, matrix.reshape(4, 3)),  # the same values in the same order
+        (matrix, matrix[:, :, None]),
+        (np.array(1.5), np.array([1.5])),  # a number against a vector of one
+        (words, words.reshape(3, 2)),  # text keeps its items and changes its shape
+        (flags, flags.reshape(2, 3)),
+    ):
+        assert _differences({"out": other}, {"out": same}, PADDING_RTOL), (same.shape, other.shape)
+        assert _differences({"out": same}, {"out": other}, PADDING_RTOL), (same.shape, other.shape)
+    for array in (matrix, words, flags, np.array(1.5)):
+        assert _differences({"out": array}, {"out": array.copy()}, PADDING_RTOL) == []
+    assert _differences({"a": 1.5}, {"a": np.array(1.5)}, PADDING_RTOL) == []  # a scalar is 0-d
+
+
+@pytest.mark.pins_behaviour
+def test_an_output_with_no_numbers_fails_the_comparison():
+    assert _differences({"a": {}}, {"a": {}}, PADDING_RTOL)  # nothing was compared
+    assert _differences([], [], PADDING_RTOL)
 
 
 class _FeatureFolds:
@@ -593,6 +622,7 @@ def _padding_rtol(case, name):
     return FREQUENCY_RTOL if name == "cross_validation" and case.startswith("lss") else PADDING_RTOL
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize(("case", "name", "call"), _output_cases(frequency=False))
 def test_rows_of_weight_zero_change_no_output(case, name, call):
     clean, clean_data = _fitted(case, "clean")
@@ -603,6 +633,7 @@ def test_rows_of_weight_zero_change_no_output(case, name, call):
     assert _differences(got, want, _padding_rtol(case, name)) == []
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize(("case", "name", "call"), _output_cases(frequency=True))
 def test_integer_frequency_weights_equal_replicated_rows(case, name, call):
     weighted, weighted_data = _fitted(case, "weighted")
@@ -616,6 +647,7 @@ def test_integer_frequency_weights_equal_replicated_rows(case, name, call):
 # ---- what SuperGLM refuses, and what it keeps -------------------------------------------------
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("case", ["glm_exact", "glm_discrete"])
 def test_a_padded_superglm_fit_makes_the_same_smoothing_iterations_as_the_clean_one(case):
     # SuperGLM sums over the zero-weight rows too, so the fits agree to rounding, and only when
@@ -626,6 +658,7 @@ def test_a_padded_superglm_fit_makes_the_same_smoothing_iterations_as_the_clean_
     assert padded.reml_diagnostics()["n_reml_iter"] == clean.reml_diagnostics()["n_reml_iter"]
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("case", ["glm_exact", "glm_discrete"])
 def test_the_rating_table_export_refuses_a_frame_whose_rows_saturate_the_prediction(case):
     # The padded fit's own frame holds rows (x and z of 1e300) at weight zero whose linear
@@ -645,6 +678,7 @@ REFUSED = {
 }
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("bad", REFUSED)
 def test_superglm_refuses_a_non_finite_input_even_at_weight_zero(bad):
     changes, message = REFUSED[bad]
@@ -662,6 +696,7 @@ def test_superglm_refuses_a_non_finite_input_even_at_weight_zero(bad):
         )
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("case", ["glm_exact", "glm_discrete"])
 def test_a_label_seen_only_at_weight_zero_is_a_known_level_pinned_at_one(case):
     clean, _ = _fitted(case, "clean")
