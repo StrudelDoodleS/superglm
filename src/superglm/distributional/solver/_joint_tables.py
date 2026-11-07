@@ -727,9 +727,12 @@ class JointTables:
         pooled_for(task, list(range(start // size, (stop - 1) // size + 1)), 1 << 12)
 
     def merge(self) -> None:
-        """Add the shards in order; what the blocks read from here on."""
-        self._merged = np.sum(self._shards, axis=0)
-        self._totals = np.sum(self._shard_totals, axis=0)
+        """Add the shards in order; what the blocks read from here on. One shard is the sum."""
+        if len(self._shards) == 1:
+            self._merged, self._totals = self._shards[0], self._shard_totals[0]
+        else:
+            self._merged = np.sum(self._shards, axis=0)
+            self._totals = np.sum(self._shard_totals, axis=0)
         self.release()
 
     def release(self) -> None:

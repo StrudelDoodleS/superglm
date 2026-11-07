@@ -465,6 +465,18 @@ def test_the_bits_do_not_depend_on_the_workers(monkeypatch, make):
     assert sums_one == sums_four
 
 
+def test_one_set_of_tables_merges_without_a_copy():
+    """A pass with one shard reads those tables, so its peak holds one set and not two.
+    Mutation check: add the shards up whatever their number."""
+    problem = _problem(GaussianLS(scale_floor=0.02))
+    plan = joint_table_plan(problem[1], 1 << 26)
+    assert plan.one_table_set
+    tables = _joint_tables.JointTables(plan)
+    shard = tables._shards[0]
+    tables.merge()
+    assert np.shares_memory(tables._merged, shard)
+
+
 def test_the_shards_tables_take_at_most_half_the_allowance(monkeypatch):
     """Mutation check: no floor on the shards, and a pool of workers shares two of them."""
     monkeypatch.setattr(_joint_tables, "_SHARD_ROWS", 257)
