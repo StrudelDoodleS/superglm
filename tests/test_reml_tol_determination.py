@@ -1604,6 +1604,81 @@ class TestNewtonStepStop:
         assert any(held)
         assert model.reml_diagnostics()["termination_reason"] == "line_search_failed"
 
+    @pytest.mark.parametrize("move", ["shoulder", "restoration"])
+    def test_a_dead_search_after_a_non_newton_move_stays_a_failure(self, monkeypatch, move):
+        """A shoulder or restoration cannot supply the preceding Newton contraction."""
+        from superglm.reml import direct
+
+        _compound_test_never_accepts(monkeypatch)
+        monkeypatch.setattr(
+            direct, "classify_dead_feasible_exit", lambda *_, **__: "line_search_failed"
+        )
+        real_hessian = direct.reml_direct_hessian
+        monkeypatch.setattr(
+            direct,
+            "reml_direct_hessian",
+            lambda *a, **k: 1e8 * np.eye(real_hessian(*a, **k).shape[0]),
+        )
+        # Make the current Newton step negligible even after a non-Newton move;
+        # the invalid preceding step must still withhold the convergence verdict.
+        monkeypatch.setattr(direct, "newton_step_left", lambda *_: 0.0)
+        real_freeze, real_objective = direct.freeze_flat_directions, direct.reml_laml_objective
+        freezes = []
+        real_resolved = direct.newton_step_resolved
+        holds = []
+
+        def resolved(*args, **kwargs):
+            result = real_resolved(*args, **kwargs)
+            holds.append((len(freezes), result))
+            return result
+
+        def freeze(*args, **kwargs):
+            decision = real_freeze(*args, **kwargs)
+            shoulder = np.zeros_like(decision.frozen)
+            if not freezes and move == "shoulder":
+                shoulder[0] = True
+            freezes.append(None)
+            return replace(decision, frozen=np.zeros_like(shoulder), shoulder=shoulder)
+
+        def objective(*args, **kwargs):
+            evaluation = real_objective(*args, **kwargs)
+            # Accept the first step, then force a dead search at candidate two.
+            shift = -1e6 if len(freezes) == 1 else 1e6 if len(freezes) > 1 else 0.0
+            return replace(evaluation, value=evaluation.value + shift)
+
+        real_fit = direct.fit_irls_direct
+
+        def fit(*args, **kwargs):
+            result, inverse, gram = real_fit(*args, **kwargs)
+            context = kwargs.get("debug_context") or {}
+            if (
+                move == "restoration"
+                and context.get("phase") == "line_search"
+                and context.get("reml_iteration") == 1
+            ):
+                result = replace(result, termination_reason="mean_space_boundary")
+            return result, inverse, gram
+
+        monkeypatch.setattr(direct, "freeze_flat_directions", freeze)
+        monkeypatch.setattr(direct, "reml_laml_objective", objective)
+        monkeypatch.setattr(direct, "fit_irls_direct", fit)
+        monkeypatch.setattr(direct, "newton_step_resolved", resolved)
+        rng = np.random.default_rng(11)
+        frame = pd.DataFrame({"x": rng.uniform(size=400), "z": rng.uniform(size=400)})
+        y = rng.poisson(np.exp(0.3 + 0.8 * np.sin(6 * frame["x"]))).astype(float)
+        model = SuperGLM(
+            family="poisson", features={name: Spline(kind="cr", k=6) for name in frame.columns}
+        ).fit_reml(frame, y, max_reml_iter=2)
+
+        assert len(freezes) == 2
+        if move == "restoration":
+            assert (1, True) in holds
+            assert model._reml_profile["reml_mean_space_restorations"] == 1
+        else:
+            assert len(model._reml_profile["reml_shoulder_reads"]) == 1
+        assert model.reml_diagnostics()["termination_reason"] == "line_search_failed"
+        assert not model.reml_diagnostics()["converged"]
+
     def test_a_step_no_trial_can_verify_stops_where_it_stands(self, monkeypatch):
         """At the noise floor every trial is rejected, which is no evidence against the point."""
         from superglm.reml import direct
@@ -1631,6 +1706,10 @@ class TestNewtonStepStop:
         assert model.reml_diagnostics()["converged"] is True
         assert model._reml_profile["reml_newton_step_stop"]["step_taken"] is False
         assert model._reml_profile["reml_newton_step_stop"]["taken_step"] is None
+        stop = model._reml_profile["reml_newton_step_stop"]
+        previous = stop["previous_step"]
+        assert 0.0 <= stop["step_left"] < previous
+        assert stop["step_left"] / (1.0 - stop["step_left"] / previous) <= stop["bar"]
         # A dead search keeps its evidence record whichever way it ends.
         dead = model._reml_profile["reml_dead_line_search"]
         assert dead["termination_reason"] == "newton_step_tolerance"

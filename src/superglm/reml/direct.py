@@ -869,6 +869,7 @@ def optimize_direct_reml(
             )
             rho = rho_clipped
             held_newton_model = None
+            last_accepted_step = 0.0
             restoration_step *= 2.0
             n_mean_space_restorations += 1
             cand_lambdas = lambdas.copy()
@@ -1253,15 +1254,17 @@ def optimize_direct_reml(
             """The W(rho) cross terms a table-route Newton model omits, by one solved-row pass."""
             nonlocal _n_stop_cross_passes, _t_w_correction
             started = _time.perf_counter()
-            cross = _usable_w_correction(
-                reml_w_correction,
-                w_correction_args,
-                {**w_correction_kwargs, "lookup_tables": False},
-                distribution,
-            )[2]
-            _n_stop_cross_passes += 1
-            _t_w_correction += _time.perf_counter() - started
-            return cross
+            try:
+                return _usable_w_correction(
+                    reml_w_correction,
+                    w_correction_args,
+                    {**w_correction_kwargs, "lookup_tables": False},
+                    distribution,
+                )[2]
+            finally:
+                # A failed confirmation still paid for its attempted pass.
+                _n_stop_cross_passes += 1
+                _t_w_correction += _time.perf_counter() - started
 
         def held_step_left() -> float:
             """The Newton step this gradient leaves on the held Hessian, infinite if unconfirmed.
@@ -1286,6 +1289,7 @@ def optimize_direct_reml(
                     "iter": int(n_iter),
                     "step_left": step_left,
                     "taken_step": held_newton_model[2] if step_taken else None,
+                    "previous_step": held_newton_model[2] if step_taken else last_accepted_step,
                     "bar": step_bar,
                     "step_taken": step_taken,
                 }
@@ -1875,7 +1879,10 @@ def optimize_direct_reml(
                         _accepted_observed_mode_residual_max,
                         trial_mode_residual,
                     )
-                last_accepted_step = float(np.max(np.abs(rho_trial - rho_clipped)))
+                # A shoulder's trust-region move gives no Newton contraction rate.
+                last_accepted_step = (
+                    0.0 if shoulder.any() else float(np.max(np.abs(rho_trial - rho_clipped)))
+                )
                 rho = rho_trial
                 warm_beta = trial_result.beta.copy()
                 warm_intercept = float(trial_result.intercept)

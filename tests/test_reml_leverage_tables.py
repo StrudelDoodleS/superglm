@@ -1011,6 +1011,7 @@ def test_a_pass_made_only_to_confirm_a_stop_cannot_abort_the_fit(monkeypatch):
     model = _poisson_model(1.0e3)
 
     assert raised
+    assert model._reml_profile["reml_n_stop_cross_passes"] == len(raised)
     assert "reml_newton_step_stop" not in model._reml_profile
 
 
