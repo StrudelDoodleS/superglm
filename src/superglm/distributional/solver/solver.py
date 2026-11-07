@@ -168,6 +168,21 @@ class _DenseObservedReuseSession:
             tuple[DistributionalFamily, FamilyLikelihoodPlan, _LikelihoodCache | None] | None
         ) = None
         self._pass_factors = PassFactors()
+        self._response: NDArray[np.float64] | None = None
+
+    def canonical_response(self, response: NDArray[np.float64]) -> NDArray[np.float64]:
+        """The session's one copy of a response equal to ``response``.
+
+        Each coefficient fit validates its own immutable copy. Compiled rows retained in
+        ``PassFactors`` key on the response's identity and hold it, so contexts share
+        one array and the session keeps one, not one per coefficient fit. Owner: this
+        session; a response that differs replaces it and takes its own entries.
+        """
+        held = self._response
+        if held is not None and np.array_equal(held, response):
+            return held
+        self._response = response
+        return response
 
     def pass_factors(self) -> PassFactors:
         """The weight-free design products every chunked assembly of this session shares.
@@ -405,7 +420,11 @@ def _validated_context(
     pass_factors = None
     if resolved_chunk_size is not None:
         dense_matrices = None
-        pass_factors = PassFactors() if _reuse_session is None else _reuse_session.pass_factors()
+        if _reuse_session is None:
+            pass_factors = PassFactors()
+        else:
+            pass_factors = _reuse_session.pass_factors()
+            response = _reuse_session.canonical_response(response)
         likelihood_cache = (
             build_likelihood_cache(family, root_likelihood_plan)
             if _reuse_session is None

@@ -1133,11 +1133,13 @@ def _joint_plan(layout: StackedLayout, factors) -> JointTablePlan | None:
     """The layout's joint-table plan, formed once per set of designs a ``PassFactors`` serves."""
     if factors is None:
         return joint_table_plan(layout, AUTO_CONTRACTION_MEMORY_BYTES)
-    designs = tuple(state.design for state in layout.predictors)
-    key = tuple(map(id, designs))
+    # What the plan reads of a layout beside its designs: the offsets and intercept positions.
+    held = tuple((state.design, state.offset) for state in layout.predictors)
+    key = tuple((id(design), id(offset)) for design, offset in held)
+    key += tuple(state.intercept_index for state in layout.predictors)
     entry = factors.joint_plans.get(key)
     if entry is None:
-        entry = (designs, joint_table_plan(layout, AUTO_CONTRACTION_MEMORY_BYTES))
+        entry = (held, joint_table_plan(layout, AUTO_CONTRACTION_MEMORY_BYTES))
         factors.joint_plans[key] = entry
     return entry[1]
 
@@ -1152,19 +1154,26 @@ _COMPILED_ROW_BLOCK = 2**15
 
 
 def _compiled_rows(family, layout, y, likelihood_plan, joint, factors):
-    """The family's compiled predictor rows for this fit, once per session; None without them."""
+    """The family's compiled predictor rows for this fit, once per session; None without them.
+
+    Owner: the session's ``PassFactors``; lifetime: the session's fit. The rows read the
+    response, the weights and the links, each fixed for an entry by its key; no weight,
+    penalty or coefficient of a pass reaches them, so nothing invalidates an entry.
+    """
     hook = getattr(family, "predictor_rows", None)
     # A subclass may override the likelihood the hook's rows evaluate.
     if hook is None or type(family) not in _BUILTIN_FAMILIES or joint is None or factors is None:
         return None
-    key = ("rows", id(family), id(y), id(likelihood_plan))
+    links = tuple(state.link for state in layout.predictors)
+    # ``joint`` answers whether one power serves every row. Every context of a session
+    # holds the session's one response (``canonical_response``), so one entry serves them.
+    key = ("rows", id(family), id(y), id(likelihood_plan), id(joint), *map(id, links))
     entry = factors.joint_plans.get(key)
     if entry is None:
-        links = tuple(state.link for state in layout.predictors)
         rows = hook(
             np.asarray(y, dtype=np.float64), likelihood_plan, links, joint.shares_last_predictor
         )
-        entry = factors.joint_plans[key] = ((family, y, likelihood_plan), rows)
+        entry = factors.joint_plans[key] = ((family, y, likelihood_plan, joint, links), rows)
     return entry[1]
 
 

@@ -525,6 +525,103 @@ def test_tables_over_budget_keep_the_group_routes():
     assert joint_table_plan(layout, 16) is None
 
 
+@pytest.mark.parametrize("power", ("offset", "term"))
+def test_rows_that_differ_in_their_power_read_their_own(power):
+    """An offset or a term on the power, against the natural route. Mutation checks: a plan that
+    calls the power shared with the offset clause dropped, or with no term test, reads every
+    row of a block at its first row's power."""
+    problem = _problem(TweedieLSS(), power=power)
+    family, layout, response, plan, coefficients = problem
+    factors = PassFactors()
+    assert not chunking._joint_plan(layout, factors).shares_last_predictor
+    sums = [0.0, 0.0]
+    compiled = _geometry(problem, factors=factors, sums=sums)
+    assert chunking._compiled_rows(
+        family, layout, response, plan, chunking._joint_plan(layout, factors), factors
+    )
+    natural_sums = [0.0, 0.0]
+    natural = _geometry(problem, compiled=False, sums=natural_sums)
+    _assert_same_geometry(natural, compiled)
+    assert abs(sums[0] - natural_sums[0]) <= ROUND * abs(natural_sums[0])
+    value = chunking.evaluate_chunked_log_likelihood(
+        family, layout, response, plan, coefficients, chunk_size="auto", pass_factors=factors
+    )
+    assert value.optimizing_log_likelihood == pytest.approx(natural_sums[0], rel=ROUND)
+
+
+def test_one_session_keeps_a_layouts_own_plan_and_rows():
+    """A second layout on the same designs, with an offset on the power, shares no plan or rows
+    with the first. Mutation checks: a plan key without the offsets, a rows key without the plan."""
+    problem = _problem(TweedieLSS())
+    family, layout, response, plan, coefficients = problem
+    factors = PassFactors()
+    _geometry(problem, factors=factors)
+    rng = np.random.default_rng(5)
+    moved = replace(
+        layout,
+        predictors=(
+            *layout.predictors[:2],
+            replace(layout.predictors[2], offset=0.5 * rng.normal(size=N)),
+        ),
+    )
+    shifted = (family, moved, response, plan, coefficients)
+    assert not chunking._joint_plan(moved, factors).shares_last_predictor
+    assert chunking._joint_plan(layout, factors).shares_last_predictor
+    _assert_same_geometry(_geometry(shifted, compiled=False), _geometry(shifted, factors=factors))
+
+
+def test_a_fit_keeps_one_plan_and_one_response_however_many_inner_fits_it_takes(monkeypatch):
+    """Counted over a search of several coefficient fits: each session holds one joint plan, one
+    set of compiled rows and one response. Mutation check: contexts that keep their own copy of
+    the response, so every coefficient fit adds a response and rows to the session."""
+    rng = np.random.default_rng(11)
+    frame = pd.DataFrame({"x": rng.uniform(-1, 1, N), "h": rng.choice(["u", "v"], N)})
+    y = np.where(rng.random(N) < 0.15, rng.gamma(2.0, 1.5, N), 0.0)
+    sessions: list[PassFactors] = []
+    contexts = [0]
+    built = [0]
+    init = PassFactors.__init__
+    validated = solver_api._validated_context
+    tweedie_rows = tweedie_kernels.tweedie_predictor_rows
+
+    def recorded_init(self):
+        init(self)
+        sessions.append(self)
+
+    def counted_context(*args, **kwargs):
+        contexts[0] += 1
+        return validated(*args, **kwargs)
+
+    def counted_rows(*args):
+        built[0] += 1
+        return tweedie_rows(*args)
+
+    monkeypatch.setattr(PassFactors, "__init__", recorded_init)
+    monkeypatch.setattr(solver_api, "_validated_context", counted_context)
+    monkeypatch.setattr(
+        "superglm.distributional.families.tweedie.tweedie_predictor_rows", counted_rows
+    )
+    family = TweedieLSS()
+    SuperLSS(
+        family,
+        family.mu(s("x", kind="cr", k=8), cat("h")),
+        family.phi(s("x", kind="cr", k=5)),
+        family.p(),
+        discrete=True,
+    ).fit_reml(frame, y)
+    serving = [
+        session
+        for session in sessions
+        if any(key and key[0] == "rows" for key in session.joint_plans)
+    ]
+    assert contexts[0] > len(serving) >= 1
+    assert built[0] == len(serving)
+    for session in serving:
+        rows_entries = [e for key, e in session.joint_plans.items() if key and key[0] == "rows"]
+        assert len(rows_entries) == 1
+        assert len(session.joint_plans) == 2
+
+
 def _intercepts(y, weights, family=None, power_link=None, *, kind="prior"):
     family = TweedieLSS() if family is None else family
     n = len(y)
