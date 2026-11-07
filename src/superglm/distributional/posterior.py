@@ -1181,8 +1181,13 @@ _FLOAT_MAX = float(np.finfo(np.float64).max)
 
 
 def _scaled_roots(design: NDArray, block: NDArray) -> NDArray:
-    """``sqrt(x' V x)`` of each row, each row first scaled by the power of two of its largest entry."""
-    exponent = np.frexp(np.abs(design).max(axis=1))[1]
+    """``sqrt(x' V x)`` of each row, each row first scaled by the power of two of its largest entry.
+
+    A column with no covariance (a dropped coefficient) is not in the form, so it sets no scale.
+    """
+    active = block.any(axis=0)
+    design, block = design[:, active], block[np.ix_(active, active)]
+    exponent = np.frexp(np.abs(design).max(axis=1, initial=0.0))[1]
     scaled = np.ldexp(design, -exponent[:, None])
     variance = np.einsum("ij,ij->i", scaled @ block, scaled)
     return np.ldexp(np.sqrt(np.maximum(variance, 0.0)), exponent)

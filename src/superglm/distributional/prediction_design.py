@@ -210,10 +210,34 @@ def _interaction_design(
     )
 
 
+def _group_term_constants(
+    predictors: Sequence[CompiledPredictor],
+) -> dict[tuple[str, str], list[NDArray[np.float64]]]:
+    """Each folding sz term's ``group_level_values`` per coefficient of its group's term.
+
+    They depend on the terms and their levels, not on the rows, and ``at_each_level`` reads them
+    inside ``warnings.catch_warnings``, which changes the process's filter list: they are read once
+    per call on the caller's thread, never on a pool's helper. Keyed by ``(predictor, term)``.
+    """
+    found: dict[tuple[str, str], list[NDArray[np.float64]]] = {}
+    for predictor in predictors:
+        for name in predictor.compiled.interaction_order:
+            interaction = predictor.compiled.interaction_specs[name]
+            if _folds_group_term(predictor, interaction):
+                indices = _term_indices(predictor.compiled.groups, interaction.group)
+                identity = np.eye(len(indices), dtype=np.float64)
+                found[(predictor.name, name)] = [
+                    group_level_values(predictor, interaction, identity[:, column])
+                    for column in range(len(indices))
+                ]
+    return found
+
+
 def _add_group_term_columns(
     matrix: NDArray[np.float64],
     predictor: CompiledPredictor,
     interaction: Any,
+    constants: Sequence[NDArray[np.float64]],
     left: NDArray,
     right: NDArray,
     *,
@@ -223,20 +247,15 @@ def _add_group_term_columns(
     """Add an sz term's dependence on a redundant group term's coefficients to that term's columns.
 
     The rule reads the group term's per-level values into each level's line
-    (``group_level_values``), so the sz contribution is linear in the group
+    (``constants``, ``_group_term_constants``), so the sz contribution is linear in the group
     term's coefficients too: one column of it per coefficient, at zero sz
     coefficients, added onto the group term's own design.
     """
-    if not _folds_group_term(predictor, interaction):
-        return
-    group = interaction.group
-    group_indices = _term_indices(predictor.compiled.groups, group)
+    group_indices = _term_indices(predictor.compiled.groups, interaction.group)
     zeros = np.zeros(width, dtype=np.float64)
-    identity = np.eye(len(group_indices), dtype=np.float64)
-    for column, index in enumerate(group_indices):
-        constants = group_level_values(predictor, interaction, identity[:, column])
+    for index, values in zip(group_indices, constants, strict=True):
         matrix[:, index + intercept_width] += _score_interaction(
-            interaction, left, right, zeros, level_constants=constants
+            interaction, left, right, zeros, level_constants=values
         )
 
 
@@ -361,7 +380,9 @@ def label_columns(
     ``(predictor, term)``; a term that groups levels, or routes unseen ones to a group, is not
     here and is read from its labels. The frame keeps what it coded: a second call over it, the
     standard errors after the point predictions, reads the columns back, and a quiet entry
-    never stands in for a call that is to warn.
+    never stands in for a call that is to warn. The key holds each level's type beside its value:
+    ``False == 0``, yet pandas matches a bool only against bool levels, so equal universes of
+    different types code a column differently.
     """
     found: dict[tuple[str, str], NDArray[np.intp]] = {}
     memo = frame._label_columns
@@ -378,10 +399,17 @@ def label_columns(
                     "label",
                     spec.unseen,
                     tuple(spec._levels),
+                    tuple(map(type, spec._levels)),
                     tuple(spec._non_base),
                 )
             elif type(spec) is RandomEffect:
-                key = (name, "random effect", spec.unseen, tuple(spec._levels))
+                key = (
+                    name,
+                    "random effect",
+                    spec.unseen,
+                    tuple(spec._levels),
+                    tuple(map(type, spec._levels)),
+                )
             else:
                 continue
             entry = memo.get(key)
@@ -449,6 +477,7 @@ def _predictor_rows(
     state: Any,
     columns: Mapping[Any, NDArray],
     labels: Mapping[tuple[str, str], NDArray],
+    folded: Mapping[tuple[str, str], Sequence[NDArray[np.float64]]],
     rows: slice,
     named: list[str] | None,
 ) -> NDArray[np.float64]:
@@ -456,7 +485,8 @@ def _predictor_rows(
 
     ``columns`` holds each covariate's column by its name, whatever the name is, and ``labels``
     the level columns of ``label_columns`` by ``(predictor, term)``: two mappings, because a
-    tuple-valued column name could equal a ``(predictor, term)`` key."""
+    tuple-valued column name could equal a ``(predictor, term)`` key. ``folded`` is
+    ``_group_term_constants``."""
     n_rows = rows.stop - rows.start
     width = state.coefficient_slice.stop - state.coefficient_slice.start
     intercept_width = int(state.intercept_index is not None)
@@ -504,15 +534,18 @@ def _predictor_rows(
             listed = ", ".join(dict.fromkeys(map(str, levels)))
             named.append(f"{predictor.name} term {name!r} levels {listed}")
         _assign_term(matrix, assigned, slope_indices + intercept_width, values, term_name=name)
-        _add_group_term_columns(
-            matrix,
-            predictor,
-            interaction,
-            left,
-            right,
-            width=len(slope_indices),
-            intercept_width=intercept_width,
-        )
+        constants = folded.get((predictor.name, name))
+        if constants is not None:
+            _add_group_term_columns(
+                matrix,
+                predictor,
+                interaction,
+                constants,
+                left,
+                right,
+                width=len(slope_indices),
+                intercept_width=intercept_width,
+            )
 
     if not np.all(assigned):
         missing = np.flatnonzero(~assigned).tolist()
@@ -578,10 +611,11 @@ def map_design_blocks(
         raise ValueError("block_rows must be a positive number of rows")
     spans = [slice(lo, min(lo + step, last)) for lo in range(first, last, step)]
     labels = label_columns(frame, predictors, quiet=True)
+    folded = _group_term_constants(predictors)
 
     def run(rows: slice) -> Any:
         local = {
-            state.name: _predictor_rows(predictor, state, columns, labels, rows, None)
+            state.name: _predictor_rows(predictor, state, columns, labels, folded, rows, None)
             for predictor, state in zip(predictors, layout.predictors, strict=True)
         }
         return fn(rows, local)
@@ -622,9 +656,10 @@ def build_joint_prediction_design(
         name: frame.column_array(name) for name in _required_columns(predictors)
     }
     labels = label_columns(frame, predictors)
+    folded = _group_term_constants(predictors)
     rows = slice(0, len(frame))
     local = {
-        state.name: _predictor_rows(predictor, state, columns, labels, rows, named)
+        state.name: _predictor_rows(predictor, state, columns, labels, folded, rows, named)
         if len(frame)
         else np.zeros((0, state.coefficient_slice.stop - state.coefficient_slice.start))
         for predictor, state in zip(predictors, layout.predictors, strict=True)

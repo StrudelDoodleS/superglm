@@ -21,6 +21,7 @@ from superglm import SuperLSS
 from superglm._frame import as_eager_frame
 from superglm.diagnostics.convergence import ConvergenceWarning
 from superglm.distributional import GaussianLS, Predictor
+from superglm.distributional import posterior as posterior_module
 from superglm.distributional import prediction_design as design_module
 from superglm.distributional.posterior import (
     link_standard_errors,
@@ -41,6 +42,7 @@ from superglm.features import (
     Spline,
     SplineCategorical,
     _basis_kernels,
+    factor_smooth,
 )
 from superglm.features._spline_cardinal import eval_cardinal_dense
 from superglm.features.interaction import (
@@ -301,9 +303,9 @@ def test_a_frame_is_priced_in_blocks_and_each_term_is_read_once_per_block(monkey
         monkeypatch.setattr(design_module, attribute, counted)
     original_rows = design_module._predictor_rows
 
-    def sized(predictor, state, columns, labels, rows, named):
+    def sized(predictor, state, columns, labels, folded, rows, named):
         calls["rows"].append(rows.stop - rows.start)
-        return original_rows(predictor, state, columns, labels, rows, named)
+        return original_rows(predictor, state, columns, labels, folded, rows, named)
 
     monkeypatch.setattr(design_module, "_predictor_rows", sized)
     link_standard_errors(fitted, frame)
@@ -679,6 +681,60 @@ def test_concurrent_calls_leave_the_warning_filters_alone_and_the_warning_workin
     assert len(caught) == 1
 
 
+def test_a_folded_sz_term_reads_its_group_term_once_on_the_callers_thread(monkeypatch):
+    """A term that folds its group's main term, priced in blocks on the pool.
+
+    Reading the group term at each level runs ``warnings.catch_warnings``, which on two helpers at
+    once left a filter that ignores everything for the life of the process. It is read once per
+    group coefficient, on the caller's thread, whatever the number of blocks; the standard errors
+    equal the dense form. Mutation check: reading it per block inside ``_predictor_rows`` fails the
+    count, and the thread where the pool has helpers.
+    """
+    from superglm._parallel import parallel_config
+
+    frame, y = _frame(600, 21)
+    frame.loc[frame.index[:3], ["g", "x"]] = ["thin", 0.25]  # one x: its line is unidentified
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=(
+            Predictor(
+                "location",
+                {"x": Spline("cr", k=6), "g": Categorical(base="a")},
+                interaction_specs={"x:g:sz": FactorSmooth("x", group="g", basis="sz", k=5)},
+            ),
+            Predictor("scale", {"x": Spline("cr", k=5)}),
+        ),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = model.fit_reml(frame, y)
+    fitted = model._require_fitted()
+    predictor = fitted.compiled_predictors[0]
+    assert design_module._folds_group_term(
+        predictor, predictor.compiled.interaction_specs["x:g:sz"]
+    )
+    group_width = len(design_module._term_indices(predictor.compiled.groups, "g"))
+    beta = np.asarray(fitted.prediction_coefficients)
+    _, variance, scale = _dense(model, frame)
+    reads = []
+    original = factor_smooth.at_each_level
+
+    def recorded(call, levels):
+        reads.append(threading.current_thread())
+        return original(call, levels)
+
+    monkeypatch.setattr(factor_smooth, "at_each_level", recorded)
+    monkeypatch.setattr(design_module, "DESIGN_BLOCK_ROWS", 40)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        filters = list(warnings.filters)
+        with parallel_config(n_jobs=4):
+            se = link_standard_errors(fitted, frame)
+        assert warnings.filters == filters
+    assert reads.count(threading.current_thread()) == len(reads) == group_width
+    assert np.all(np.abs(se**2 - variance) <= 4 * (len(beta) + 4) * U * scale)
+
+
 def test_tuple_valued_column_names_are_covariates_and_never_level_codes():
     """A covariate named ``("location", "g")`` beside a categorical ``g`` of the same predictor.
 
@@ -791,6 +847,49 @@ _TYPED_TARGETS = {
 }
 
 
+@pytest.mark.parametrize("covariance", ["fixed", "corrected"])
+def test_a_column_with_no_covariance_sets_no_scale_for_the_standard_error(covariance):
+    """A location term dropped from the fit, its covariate identically zero there, then huge at a quote.
+
+    The row's scale was taken from its largest entry, so an irrelevant ``x`` of ``1e100`` scaled the
+    real ``z`` of ``1e-200`` to underflow and the standard error read zero. The one coefficient with
+    a variance gives the independent formula ``abs(z) sqrt(Vzz)``. Mutation check: the exponent over
+    every column fails the rows with a large ``x``.
+    """
+    rng = np.random.default_rng(3)
+    frame = pd.DataFrame({"x": np.zeros(400), "z": rng.standard_normal(400)})
+    y = 1.0 + 0.5 * frame.z.to_numpy() + rng.standard_normal(400)
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=(
+            Predictor("location", {"x": Numeric(), "z": Numeric()}, intercept=False),
+            Predictor("scale", {"z": Numeric()}),
+        ),
+        discrete=False,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = model.fit_reml(frame, y)
+    fitted = model._require_fitted()
+    state = fitted.layout.predictors[0].coefficient_slice
+    block = posterior_covariance(fitted, kind=covariance)[state][:, state]
+    assert not block[0].any() and block[1, 1] > 0.0
+    x = np.array([0.0, 1e100, -1e100, 1e300, 1e-100, 1e100, 1e100, 1e100])
+    z = np.array([1e-200, 1e-200, 1e-200, 1e-200, 1e-200, 1e200, 0.0, 1.0])
+    _, se = model.predict_link(pd.DataFrame({"x": x, "z": z}), se_fit=True, covariance=covariance)
+    expected = np.abs(z) * np.sqrt(block[1, 1])
+    np.testing.assert_allclose(se["location"].to_numpy(), expected, rtol=8 * U, atol=0.0)
+
+
+def test_a_row_of_a_predictor_with_no_covariance_at_all_has_a_zero_standard_error():
+    """Nothing in the form leaves nothing to scale by: a zero, not a failed reduction.
+
+    Mutation check: taking the row's largest entry with no ``initial`` raises on no columns.
+    """
+    design = np.array([[1e100, 1e-200], [0.0, 3.0]])
+    assert posterior_module._scaled_roots(design, np.zeros((2, 2))).tolist() == [0.0, 0.0]
+
+
 def _answer(read):
     """The array a read gives, or the type of the exception it raises."""
     with warnings.catch_warnings():
@@ -832,6 +931,55 @@ def test_level_codes_are_what_pandas_decides_for_every_label_type(name, n):
             )
         else:
             assert actual is expected
+
+
+def test_a_bool_and_an_integer_universe_on_one_column_code_it_apart():
+    """Location levels ``[False, True]`` and scale levels ``[0, 1]`` read one boolean column.
+
+    The two universes compare equal as tuples, yet pandas matches a bool only against bool levels:
+    the location finds its level and the scale prices the base, as a one-row call and master both
+    do. The shared level columns took the location's codes for the scale, a wrong scale link from
+    one block up and a wrong scale standard error at every size. Mutation check: a key without the
+    levels' types fails both.
+    """
+    rng = np.random.default_rng(0)
+    n = 400
+    labels = rng.integers(0, 2, n)
+    frame = pd.DataFrame({"g": pd.Series(np.array([0, 1], dtype=object)[labels], dtype=object)})
+    y = 0.3 * labels + rng.standard_normal(n) * np.exp(-1.0 + 0.7 * labels)
+    model = model_from_templates(
+        family=GaussianLS(),
+        predictors=(
+            Predictor(
+                "location", {"g": Categorical(levels=[False, True], base="first", unseen="base")}
+            ),
+            Predictor("scale", {"g": Categorical(levels=[0, 1], base="first", unseen="base")}),
+        ),
+        discrete=False,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = model.fit_reml(frame, y)
+    fitted = model._require_fitted()
+    beta = np.asarray(fitted.prediction_coefficients)
+    location, scale = (state.coefficient_slice for state in fitted.layout.predictors)
+    variance = posterior_covariance(fitted)
+    location_block, scale_block = variance[location, location], variance[scale, scale]
+    # False: both intercepts. True: the location's level; the scale knows no bool, so its base.
+    expected_link = np.array(
+        [[beta[location][0], beta[scale][0]], [beta[location].sum(), beta[scale][0]]]
+    )
+    expected_se = np.sqrt(
+        [[location_block[0, 0], scale_block[0, 0]], [location_block.sum(), scale_block[0, 0]]]
+    )
+    for repeats in (1, 8192):
+        test = pd.DataFrame({"g": np.tile([False, True], repeats)})
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            link = model.predict_link(test).to_numpy()
+            _, se = model.predict_link(test, se_fit=True)
+        np.testing.assert_allclose(link[-2:], expected_link, rtol=64 * U, atol=0.0)
+        np.testing.assert_allclose(se.to_numpy()[-2:], expected_se, rtol=64 * U, atol=0.0)
 
 
 def test_bool_levels_are_not_found_by_the_numbers_they_equal():
