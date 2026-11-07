@@ -242,13 +242,14 @@ def test_a_label_on_a_dropped_row_cannot_fail_its_fold(label):
     weights = np.random.default_rng(6).uniform(0.5, 2.0, N)
     padding = pd.DataFrame({"age": [40.0, 50.0], "region": [label, label], "unread": [0.0, 0.0]})
     frame = pd.concat([X, padding], ignore_index=True)
-    result = _fixed_cv(
-        frame,
-        np.r_[y, 1.0, 1.0],
-        sample_weight=np.r_[weights, 0.0, 0.0],
-        return_oof=True,
-        return_estimators=True,
-    )
+    with pytest.warns(UserWarning, match="could not be priced"):
+        result = _fixed_cv(
+            frame,
+            np.r_[y, 1.0, 1.0],
+            sample_weight=np.r_[weights, 0.0, 0.0],
+            return_oof=True,
+            return_estimators=True,
+        )
     assert np.isnan(result.oof_predictions[N:]).all()
     assert result.fold_scores["nll"].notna().all()
     for fold, (_train, test) in zip(result.estimators, result.fold_indices, strict=True):

@@ -7,6 +7,7 @@ import datetime
 import hashlib
 import logging
 import time
+import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -70,7 +71,8 @@ class CrossValidationResult:
         ``superglm.editor.edit(model, cv=result)`` draws.
     oof_predictions : ndarray or None
         Out-of-fold predictions (response scale; a SuperLSS's conditional
-        mean), same length as *y*. ``None`` unless ``return_oof=True``.
+        mean), same length as *y*. ``None`` unless ``return_oof=True``. A SuperLSS's
+        held-out row of weight zero that cannot be priced reads NaN.
     estimators : list or None
         Fitted model per fold. ``None`` unless ``return_estimators=True``.
     n_rows : int or None
@@ -662,6 +664,14 @@ def _held_out_predictions(folds, est, frame, rows, offset, sample_weight) -> NDA
             predictions[local] = folds.predict(
                 est, frame.take_rows(row), _take_offset(offset, row)
             )[0]
+    unpriced = int(np.isnan(predictions[~kept]).sum())
+    if unpriced:
+        warnings.warn(
+            f"{unpriced} held-out rows of weight zero could not be priced, so their out-of-fold "
+            "predictions are NaN. They hold a value no row the fold fitted has; give them a level "
+            "the fit saw, or leave them out of the frame.",
+            stacklevel=3,
+        )
     return predictions
 
 
@@ -774,7 +784,8 @@ def cross_validate(
     return_estimators : bool
         If True, keep the fitted model from each fold.
     return_oof : bool
-        If True, collect out-of-fold predictions.
+        If True, collect out-of-fold predictions. For a SuperLSS, a held-out row of weight
+        zero that cannot be priced reads NaN, with a warning, and does not fail its fold.
     error_score : float or "raise"
         Value to assign when a fold fails. ``"raise"`` propagates the error.
     fit_kwargs : mapping, optional
