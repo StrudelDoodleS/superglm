@@ -48,6 +48,7 @@ _STOP_TEXT = {
     "gradient_unresolved": "the REML gradient could not be resolved",
     "derivative_unavailable": "a derivative was unavailable",
     "score_objective_tolerance": "the REML gradient reached its tolerance",
+    "newton_step_tolerance": "the REML Newton step reached its tolerance",
     "start_objective_tolerance": "the start was already optimal",
     "converged_at_precision": "REML reached working precision",
 }

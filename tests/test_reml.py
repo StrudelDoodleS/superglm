@@ -2285,12 +2285,19 @@ class TestREMLWarmStart:
         # two stops agree to bar / H_x2x2 (x2's own curvature, read from the
         # cold fit's freeze record; its coupling to x1 is left out).
         # Measured: 1.8e-7 exact, 9.0e-9 discrete, against a bound of 4.0e-6.
-        assert cold_info["termination_reason"] == "score_objective_tolerance"
-        assert warm_info["termination_reason"] == "score_objective_tolerance"
+        # A fit stopped on the Newton step sits within that step of the optimum.
+        stops = {"score_objective_tolerance", "newton_step_tolerance"}
+        assert cold_info["termination_reason"] in stops
+        assert warm_info["termination_reason"] in stops
+        steps = sum(
+            info["profile"].get("reml_newton_step_stop", {}).get("max_step", 0.0)
+            for info in (cold_info, warm_info)
+        )
         freeze = cold_info["profile"]["reml_freeze_decision"]
         curvature = freeze["hess_diag"][freeze["names"].index("x2")]
         assert (
-            abs(np.log(warm_info["lambdas"]["x2"] / cold_info["lambdas"]["x2"])) <= bar / curvature
+            abs(np.log(warm_info["lambdas"]["x2"] / cold_info["lambdas"]["x2"]))
+            <= bar / curvature + steps
         )
 
     def test_a_tensor_shoulder_steps_inside_the_tensor_trust_region(self):
@@ -2353,6 +2360,7 @@ class TestREMLWarmStart:
             return np.asarray(estimated, dtype=bool) if len(calls) == 1 else live
 
         monkeypatch.setattr(module, "concave_live_directions", first_refuses)
+        monkeypatch.setattr(module, "newton_step_resolved", lambda *_, **__: False)
         X, y = _two_smooth_poisson()
         info = _two_smooth_model(discrete).fit_reml(X, y).reml_diagnostics()
         profile = info["profile"]

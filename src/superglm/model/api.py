@@ -740,7 +740,12 @@ class SuperGLM:
             ``estimate_p``'s power-search candidates) use 1e-6. The engines
             stop when the projected log-lambda gradient and the objective
             change both fall below ``reml_tol * (1 + |objective|)`` over the
-            active directions; a direction whose gradient and relative row
+            active directions, or when Newton's step on those directions is at
+            most ``min(1e-3, 1e6 * reml_tol)`` in log lambda on an unmodified
+            positive definite Hessian and the gradient confirms it once that step
+            is taken, or no trial can verify it
+            (``termination_reason="newton_step_tolerance"``); a direction whose
+            gradient and relative row
             curvature are both negligible is frozen where it stands, as
             recorded in ``reml_diagnostics()`` under
             ``profile["reml_freeze_decision"]``. A tolerance tighter than the

@@ -44,6 +44,8 @@ from superglm.reml.convergence import (
     freeze_record,
     mask_frozen_stop_gradient,
     newton_predicted_decrease,
+    newton_step_resolved,
+    newton_step_stop_bar,
     project_reml_gradient,
     revalidate_stop,
     trial_counts_as_precision_evidence,
@@ -878,6 +880,7 @@ def optimize_discrete_reml_cached_w(
     # The stop judges the active set only: a flat frozen direction keeps a
     # tiny gradient forever, and counting it would spin to max_reml_iter.
     stop_criterion_frozen_d = None
+    previous_step = np.inf
     for poi_iter in range(max_reml_iter):
         rho_clipped = np.clip(rho, log_lo, log_hi)
         # The shared-tensor trust region: coordinates within base_cap, shared
@@ -1318,6 +1321,32 @@ def optimize_discrete_reml_cached_w(
         else:
             max_delta = float(np.max(np.abs(delta)))
             max_delta_raw = float(np.max(np.abs(delta_newton)))
+        # The stop on the Newton step left, at a settled working model: each step
+        # updates the working weights once, so a small step can precede a weight
+        # move. Two running, as a settled model can still move once more.
+        step_bar = newton_step_stop_bar(_tol)
+        if (
+            start_out is None
+            and candidate_mode_stationary
+            and active_idx_d.size
+            and not shoulder_d.any()
+            and max(max_delta_raw, previous_step) <= step_bar
+            and newton_step_resolved(hess_sub_d, grad_sub_d, bar=step_bar)
+        ):
+            if profile is not None:
+                profile["reml_newton_step_stop"] = {
+                    "iter": poi_iter + 1,
+                    "max_step": max_delta_raw,
+                    "previous_step": previous_step,
+                    "bar": step_bar,
+                    "step_taken": True,
+                }
+            rho = rho_clipped
+            converged = True
+            termination_reason = "newton_step_tolerance"
+            _t_newton += _time.perf_counter() - _t0
+            break
+        previous_step = max_delta_raw
         _t_newton += _time.perf_counter() - _t0
         _n_newton_steps += 1
 

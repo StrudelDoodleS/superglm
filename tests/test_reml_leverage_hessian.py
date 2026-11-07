@@ -643,6 +643,7 @@ def test_each_route_stops_where_the_other_route_is_stationary(monkeypatch):
 
         monkeypatch.setattr(direct, "reml_w_correction", recorded_correction)
         monkeypatch.setattr(direct, "reml_direct_gradient", recorded_partial)
+        monkeypatch.setattr(direct, "newton_step_resolved", lambda *_, **__: False)
         model = SuperGLM(
             family="poisson",
             features={

@@ -19,6 +19,7 @@ publication refit repays determination once.
 from __future__ import annotations
 
 import copy
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -1280,6 +1281,7 @@ class TestDeadSearchNewtonDecrement:
             return real_evidence(converged, value) and (full_step_evidence or state["alpha"] != 1.0)
 
         monkeypatch.setattr(direct, "fit_irls_direct", fit)
+        monkeypatch.setattr(direct, "newton_step_resolved", lambda *_, **__: False)
         monkeypatch.setattr(direct, "reml_laml_objective", objective)
         monkeypatch.setattr(direct, "newton_predicted_decrease", decrease)
         monkeypatch.setattr(direct, "trial_counts_as_precision_evidence", evidence)
@@ -1402,3 +1404,221 @@ class TestDeadSearchNewtonDecrement:
         assert model._reml_result.termination_reason == "line_search_failed"
         assert not model._reml_result.converged
         assert not model.reml_diagnostics()["converged"]
+
+
+def _compound_test_never_accepts(monkeypatch) -> None:
+    """Force the only stop left to be the Newton step, whatever path a BLAS takes."""
+    from dataclasses import replace
+
+    from superglm.reml import convergence, direct, discrete
+
+    real = convergence.evaluate_reml_candidate
+
+    def never(**kwargs):
+        return replace(real(**kwargs), converged=False)
+
+    monkeypatch.setattr(direct, "evaluate_reml_candidate", never)
+    monkeypatch.setattr(discrete, "evaluate_reml_candidate", never)
+
+
+def _fit_informative_fixture(*, discrete: bool, **fit_kwargs) -> SuperGLM:
+    frame, y, weights, offset, features = _flat_lambda_fixture(informative_smooths=True)
+    model = SuperGLM(family=families.tweedie(p=1.5), features=features, discrete=discrete)
+    model.fit_reml(frame, y, sample_weight=weights, offset=offset, **fit_kwargs)
+    return model
+
+
+class TestNewtonStepStop:
+    """A fit stops once the Newton step left on its free terms is negligible.
+
+    The step is curvature-scaled, so the test reads the same whatever the size
+    of the objective, and fixed-W ``e**-d H <= H' <= e**d H`` bounds what a step
+    of ``d`` in log lambda can do to a standard error by ``d / 2``.
+    """
+
+    def test_the_bar_is_a_thousandth_unless_the_caller_tightens_the_tolerance(self):
+        from superglm.reml.convergence import newton_step_stop_bar
+
+        assert newton_step_stop_bar(1e-9) == pytest.approx(1e-3)
+        assert newton_step_stop_bar(1e-6) == pytest.approx(1e-3)
+        assert newton_step_stop_bar(1e-12) == pytest.approx(1e-6)
+
+    @pytest.mark.parametrize(
+        ("hessian", "gradient", "resolved"),
+        [
+            pytest.param(np.diag([2.0, 4.0]), [1e-4, 1e-4], True, id="small-step"),
+            pytest.param(np.diag([2.0, 4.0]), [1e-2, 1e-4], False, id="step-above-bar"),
+            pytest.param(np.diag([2.0, -4.0]), [1e-4, 1e-4], False, id="indefinite"),
+            pytest.param(np.diag([1.0, 1e-14]), [0.0, 0.0], False, id="under-the-floor"),
+        ],
+    )
+    def test_the_step_resolves_only_on_an_unmodified_hessian(self, hessian, gradient, resolved):
+        from superglm.reml.convergence import newton_step_resolved
+
+        assert newton_step_resolved(hessian, np.array(gradient), bar=1e-3) is resolved
+
+    def test_a_non_finite_hessian_never_reaches_the_eigensolver(self, monkeypatch):
+        """Whether LAPACK raises or returns NaN on it depends on the build."""
+        from superglm.reml.convergence import newton_step_resolved
+
+        monkeypatch.setattr(np.linalg, "eigh", lambda *_: pytest.fail("eigh was called"))
+
+        assert newton_step_resolved(np.diag([np.inf, 4.0]), np.zeros(2), bar=1e-3) is False
+
+    @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
+    def test_the_stop_alone_publishes_determined_standard_errors(self, monkeypatch, discrete):
+        tight = _fit_informative_fixture(discrete=discrete, reml_tol=1e-11)
+        _compound_test_never_accepts(monkeypatch)
+        model = _fit_informative_fixture(discrete=discrete)
+
+        diagnostics = model.reml_diagnostics()
+        assert diagnostics["converged"] is True
+        assert diagnostics["termination_reason"] == "newton_step_tolerance"
+        assert model._reml_profile["reml_newton_step_stop"]["max_step"] <= 1e-3
+        se, reference = _standard_errors(model), _standard_errors(tight)
+        assert np.max(np.abs(se - reference) / np.maximum(reference, 1e-300)) < 5e-3
+
+    def test_the_stop_takes_the_step_it_has_already_paid_for(self, monkeypatch):
+        _compound_test_never_accepts(monkeypatch)
+        model = _fit_informative_fixture(discrete=False)
+
+        record = model._reml_profile["reml_newton_step_stop"]
+        assert record["step_taken"] is True
+        assert record["iter"] == model.reml_diagnostics()["n_reml_iter"]
+
+    def test_a_gradient_that_did_not_settle_keeps_searching(self, monkeypatch):
+        """The Hessian that called the step negligible must confirm it after the step."""
+        from superglm.reml import direct
+
+        _compound_test_never_accepts(monkeypatch)
+        plain = _fit_informative_fixture(discrete=False)._reml_profile["reml_newton_step_stop"]
+        real = direct.newton_step_resolved
+        calls = []
+
+        def second_read_refuses(*args, **kwargs):
+            calls.append(None)
+            return False if len(calls) == 2 else real(*args, **kwargs)
+
+        monkeypatch.setattr(direct, "newton_step_resolved", second_read_refuses)
+        model = _fit_informative_fixture(discrete=False)
+
+        assert model._reml_profile["reml_newton_step_stop"]["iter"] > plain["iter"]
+
+    def test_a_frozen_term_that_came_back_to_life_refuses_the_stop(self, monkeypatch):
+        """The step reads the free terms only, so a frozen term must still be flat."""
+        from superglm.reml import direct
+
+        _compound_test_never_accepts(monkeypatch)
+        real = direct.mask_frozen_stop_gradient
+        frozen_seen = []
+
+        def live(projected_gradient, previously_frozen, **kwargs):
+            stop = real(projected_gradient, previously_frozen, **kwargs)
+            if previously_frozen is None or not np.any(previously_frozen):
+                return stop
+            frozen_seen.append(True)
+            return np.where(previously_frozen, 1.0, stop)
+
+        monkeypatch.setattr(direct, "mask_frozen_stop_gradient", live)
+        rng = np.random.default_rng(11)
+        n = 4000
+        frame = pd.DataFrame({"signal": rng.uniform(size=n), "noise": rng.uniform(size=n)})
+        y = rng.poisson(np.exp(0.3 + 0.8 * np.sin(2.0 * np.pi * frame["signal"]))).astype(float)
+        features = {name: Spline(kind="cr", k=10) for name in frame.columns}
+        model = SuperGLM(family=families.poisson(), features=features)
+        model.fit_reml(frame, y, max_reml_iter=14)
+
+        # Only the stop after a taken step leans on an older freeze; a search that
+        # cannot verify its step read the freeze at this very candidate.
+        assert frozen_seen
+        assert model._reml_profile.get("reml_newton_step_stop", {}).get("step_taken") is not True
+
+    def test_a_step_no_trial_can_verify_stops_where_it_stands(self, monkeypatch):
+        """At the noise floor every trial is rejected, which is no evidence against the point."""
+        from dataclasses import replace
+
+        from superglm.reml import direct
+
+        _compound_test_never_accepts(monkeypatch)
+        real_resolved, real_objective = direct.newton_step_resolved, direct.reml_laml_objective
+        held = []
+
+        def spy(*args, **kwargs):
+            held.append(real_resolved(*args, **kwargs))
+            return held[-1]
+
+        def objective(*args, **kwargs):
+            evaluation = real_objective(*args, **kwargs)
+            return replace(evaluation, value=evaluation.value + 1.0) if any(held) else evaluation
+
+        monkeypatch.setattr(direct, "newton_step_resolved", spy)
+        monkeypatch.setattr(direct, "reml_laml_objective", objective)
+        model = _fit_informative_fixture(discrete=False)
+
+        assert model.reml_diagnostics()["converged"] is True
+        assert model._reml_profile["reml_newton_step_stop"]["step_taken"] is False
+
+    def test_a_tightened_tolerance_tightens_the_stop(self, monkeypatch):
+        _compound_test_never_accepts(monkeypatch)
+        model = _fit_informative_fixture(discrete=False, reml_tol=1e-10)
+
+        record = model._reml_profile["reml_newton_step_stop"]
+        assert record["bar"] == pytest.approx(1e-4)
+        assert record["max_step"] <= 1e-4
+
+    def test_a_cached_weight_fit_waits_for_two_small_steps_running(self, monkeypatch):
+        """One working-weight update per step, so one small step can precede a weight move."""
+        _compound_test_never_accepts(monkeypatch)
+        model = _fit_informative_fixture(discrete=True)
+
+        record = model._reml_profile["reml_newton_step_stop"]
+        assert record["previous_step"] <= record["bar"]
+
+    def test_a_cached_weight_stop_waits_for_a_settled_working_mode(self):
+        """Small steps at weights still moving prove nothing: a refit from there walks away."""
+        rng = np.random.default_rng(3)
+        frame = pd.DataFrame({"x": rng.uniform(size=500), "z": rng.uniform(size=500)})
+        y = rng.binomial(1, np.exp(-30.0 * (1.0 + 0.95 * np.sin(6.0 * frame["x"])))).astype(float)
+
+        def fit(**fit_kwargs):
+            return SuperGLM(
+                family=families.binomial(),
+                link="log",
+                discrete=True,
+                selection_penalty=0,
+                features={name: Spline(kind="cr", k=12) for name in frame.columns},
+            ).fit_reml(frame, y, max_reml_iter=100, **fit_kwargs)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            cold = fit()
+            lambdas = cold.reml_diagnostics()["lambdas"]
+            warm = fit(lambda2_init=lambdas)
+
+        moved = np.max(np.abs(cold.predict(frame) - warm.predict(frame)))
+        assert not cold.reml_diagnostics()["converged"] or moved < 1e-2
+
+    def test_an_uncertified_mode_cannot_stop(self, monkeypatch):
+        from superglm.reml import direct
+
+        _compound_test_never_accepts(monkeypatch)
+        monkeypatch.setattr(direct, "trial_counts_as_precision_evidence", lambda *_: False)
+        model = _fit_informative_fixture(discrete=False, max_reml_iter=12)
+
+        assert model.reml_diagnostics()["termination_reason"] != "newton_step_tolerance"
+
+    @pytest.mark.parametrize("term", ["mains", "re"])
+    def test_nb2_fits_at_the_line_search_floor_converge(self, term):
+        """Their gradient sits at the noise floor, so no trial can verify a decrease."""
+        from benchmarks import release_differential
+
+        record = release_differential.run_glm("nb2auto", "log", "sparse", term, "exact", "fit_reml")
+
+        assert record["converged"] is True
+
+    def test_a_stopped_search_reads_as_converged_and_in_words(self):
+        from superglm.diagnostics.convergence import _REML_CONVERGED_REASONS
+        from superglm.editor.diagnose import _stop_text
+
+        assert "newton_step_tolerance" in _REML_CONVERGED_REASONS
+        assert _stop_text("newton_step_tolerance") == "the REML Newton step reached its tolerance"

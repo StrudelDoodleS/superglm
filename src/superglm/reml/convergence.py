@@ -8,6 +8,8 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR
+
 # The freeze bar never drops below this floor, whatever reml_tol: freezing
 # classifies geometry (is a direction informative at all), and a flat
 # direction stays flat however tightly the informative lambdas are located.
@@ -35,6 +37,9 @@ DECREMENT_GRADIENT_CEILING = 10.0
 # (``concave_live_directions``).
 SHOULDER_CURVATURE_RATIO_LOW = 0.5
 SHOULDER_CURVATURE_RATIO_HIGH = 2.0
+
+NEWTON_STEP_STOP_BAR = 1e-3
+NEWTON_STEP_STOP_PER_TOLERANCE = 1e6
 
 
 def _score_scale(objective: float) -> float:
@@ -366,6 +371,35 @@ def mask_frozen_stop_gradient(
     projected = np.asarray(projected_gradient, dtype=np.float64)
     still_flat = np.abs(projected) < _freeze_gradient_bar(objective, tolerance)
     return np.where(np.asarray(previously_frozen, dtype=bool) & still_flat, 0.0, projected)
+
+
+def newton_step_stop_bar(tolerance: float) -> float:
+    """The largest Newton step in log lambda a stop accepts at this ``reml_tol``.
+
+    At fixed working weights a step of ``d`` keeps ``H`` within ``e**-d H`` and
+    ``e**d H`` in the Loewner order, so it moves a standard error by at most
+    ``d / 2`` in log. The default bar therefore bounds that move by 0.05%. A
+    caller's tighter tolerance tightens the bar in proportion.
+    """
+    return min(NEWTON_STEP_STOP_BAR, NEWTON_STEP_STOP_PER_TOLERANCE * float(tolerance))
+
+
+def newton_step_resolved(hessian: NDArray, gradient: NDArray, *, bar: float) -> bool:
+    """Whether Newton's step on these directions is below ``bar``, on an unmodified Hessian.
+
+    The step is curvature-scaled and affine invariant, as the Newton decrement
+    is (Boyd & Vandenberghe 2004, sec. 9.5.1), so unlike a gradient bar scaled
+    by the objective it reads the same at any size of objective. A Hessian that
+    is not positive definite above the modified-Newton floor gives no such step.
+    """
+    if not np.all(np.isfinite(hessian)):
+        return False
+    values, vectors = np.linalg.eigh(hessian)
+    floor = max(float(np.max(np.abs(values))), 1e-12) * NEWTON_EIGENVALUE_FLOOR
+    if not np.all(values >= floor):
+        return False
+    step = vectors @ ((vectors.T @ gradient) / values)
+    return bool(np.max(np.abs(step)) <= bar)
 
 
 def trial_counts_as_precision_evidence(converged: bool, objective: float) -> bool:

@@ -12,6 +12,8 @@ Hessian), and that a design of no lookups keeps the solved-row route.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -873,3 +875,20 @@ def test_the_design_table_budget_decides_the_route_and_always_forms_its_tables(m
     with parallel_config(max_memory=1):
         plan = _leverage_rows._support_plan(random_effect, np.eye(p), np.zeros(p), None)
     assert plan is not None
+
+
+def test_a_newton_step_stop_forms_the_cross_terms_the_tables_omit(monkeypatch):
+    """The tables' Newton model has no W(rho) cross terms, so the stop confirms its step with them."""
+    monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
+    compound = direct.evaluate_reml_candidate
+    monkeypatch.setattr(
+        direct,
+        "evaluate_reml_candidate",
+        lambda **kwargs: replace(compound(**kwargs), converged=False),
+    )
+    counts = _count_row_passes(monkeypatch)
+    model = _poisson_model(1.0e3)
+
+    assert model.reml_diagnostics()["termination_reason"] == "newton_step_tolerance"
+    assert model._reml_profile["reml_n_stop_cross_passes"] >= 1
+    assert counts["passes"] == model._reml_profile["reml_n_stop_cross_passes"]

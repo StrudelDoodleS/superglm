@@ -36,6 +36,8 @@ from superglm.reml.convergence import (
     freeze_record,
     mask_frozen_stop_gradient,
     newton_predicted_decrease,
+    newton_step_resolved,
+    newton_step_stop_bar,
     project_reml_gradient,
     revalidate_stop,
     trial_counts_as_precision_evidence,
@@ -814,6 +816,8 @@ def optimize_direct_reml(
         )
         print(f"  REML bootstrap: lambdas=[{boot_lam_str}]")
 
+    step_bar = newton_step_stop_bar(_tol)
+    held_newton_model: tuple[NDArray, NDArray, float] | None = None
     for outer in range(max_reml_iter):
         n_iter = outer + 1
         rho_clipped = np.clip(rho, log_lo, log_hi)
@@ -1240,6 +1244,36 @@ def optimize_direct_reml(
                 reml_penalties=penalties,
             )
 
+        def stop_cross_terms() -> NDArray | None:
+            """The W(rho) cross terms a table-route Newton model omits, by one solved-row pass."""
+            nonlocal _n_stop_cross_passes, _t_w_correction
+            started = _time.perf_counter()
+            cross = _usable_w_correction(
+                reml_w_correction,
+                w_correction_args,
+                {**w_correction_kwargs, "lookup_tables": False},
+                distribution,
+            )[2]
+            _n_stop_cross_passes += 1
+            _t_w_correction += _time.perf_counter() - started
+            return cross
+
+        def held_step_resolved() -> bool:
+            """Whether this gradient's Newton step on the held Hessian is under the bar."""
+            hessian, index, _ = held_newton_model
+            cross = stop_cross_terms() if table_route else None
+            hessian = hessian if cross is None else hessian + cross[np.ix_(index, index)]
+            return newton_step_resolved(hessian, grad[index], bar=step_bar)
+
+        def record_step_stop(*, step_taken: bool) -> None:
+            if profile is not None:
+                profile["reml_newton_step_stop"] = {
+                    "iter": int(n_iter),
+                    "max_step": held_newton_model[2],
+                    "bar": step_bar,
+                    "step_taken": step_taken,
+                }
+
         revalidated_hess = None
         # An uncertified candidate's objective and gradient prove nothing, so
         # the stop waits until the mode certifies (warm-started settles).
@@ -1250,17 +1284,7 @@ def optimize_direct_reml(
             # a Hessian with the cross terms, formed here by one solved-row pass.
             # A refused stop steps on that Hessian too, so its freeze keeps the
             # directions the check reactivated.
-            stop_cross = None
-            if table_route:
-                _t0 = _time.perf_counter()
-                stop_cross = _usable_w_correction(
-                    reml_w_correction,
-                    w_correction_args,
-                    {**w_correction_kwargs, "lookup_tables": False},
-                    distribution,
-                )[2]
-                _n_stop_cross_passes += 1
-                _t_w_correction += _time.perf_counter() - _t0
+            stop_cross = stop_cross_terms() if table_route else None
             _t0 = _time.perf_counter()
             revalidated_hess = outer_hessian()
             if stop_cross is not None:
@@ -1291,6 +1315,17 @@ def optimize_direct_reml(
             # Fall through into this iteration's Newton step, reusing the
             # Hessian just computed (with the stop's cross terms on the table
             # route).
+        elif (
+            held_newton_model is not None
+            and mode_certified
+            and not np.any(stop_grad[stop_criterion_frozen])
+            and held_step_resolved()
+        ):
+            record_step_stop(step_taken=True)
+            converged = True
+            termination_reason = "newton_step_tolerance"
+            break
+        held_newton_model = None
 
         _t0 = _time.perf_counter()
         hess = revalidated_hess if revalidated_hess is not None else outer_hessian()
@@ -1406,6 +1441,18 @@ def optimize_direct_reml(
         max_delta = float(np.max(np.abs(delta)))
         if max_delta > max_newton_step:
             delta *= max_newton_step / max_delta
+        # A negligible Newton step is still taken, since it is already paid for,
+        # and this Hessian then confirms it at the next candidate.
+        if (
+            newton_idx.size
+            and not shoulder.any()
+            and mode_certified
+            and revalidated_hess is None
+            and max_delta <= step_bar
+        ):
+            held_hessian = hess[np.ix_(newton_idx, newton_idx)]
+            if newton_step_resolved(held_hessian, grad[newton_idx], bar=step_bar):
+                held_newton_model = (held_hessian, newton_idx, max_delta)
         if exact_hessian_available:
             contraction = (
                 proj_grad_norm / previous_gradient_norm if previous_gradient_norm > 0.0 else np.inf
@@ -1842,6 +1889,12 @@ def optimize_direct_reml(
         if not accepted:
             rho = rho_clipped
             _t_linesearch += _time.perf_counter() - _t0
+            if held_newton_model is not None and held_step_resolved():
+                # No trial can verify a step this small: the point stands.
+                record_step_stop(step_taken=False)
+                converged = True
+                termination_reason = "newton_step_tolerance"
+                break
             if not had_feasible_trial:
                 # Every projected coordinate is at a bound: re-evaluate once so
                 # the compound criterion can confirm stability.
