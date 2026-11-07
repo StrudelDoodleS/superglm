@@ -622,6 +622,98 @@ def test_tables_over_budget_keep_the_group_routes():
     assert joint_table_plan(layout, 16) is None
 
 
+class _NaturalTweedie(TweedieLSS):
+    """The same law through the natural route: compiled rows serve only the exact family."""
+
+
+@pytest.mark.parametrize(
+    ("family_type", "zero_weights"),
+    ((TweedieLSS, False), (TweedieLSS, True), (_NaturalTweedie, False)),
+    ids=("compiled", "zero_weights", "natural_into_tables"),
+)
+def test_a_fit_reads_the_same_numbers_through_every_route(monkeypatch, family_type, zero_weights):
+    """What a user reads, against the group and natural routes, through the solver, the fused first
+    trial and the covariance passes. The search has the same stop and work; at one set of smoothing
+    parameters, which leaves no flat direction to drift along, EDF, predictions and covariance
+    agree to a generous multiple of rounding on the book's scale.
+
+    Mutation checks: every joint block scaled by 1.5, one row kernel's channel dropped, a block
+    off by 1e-7, and a route that stops being taken, which the dispatch counts catch.
+    """
+    rng = np.random.default_rng(11)
+    frame = pd.DataFrame(
+        {
+            "x": rng.uniform(-1, 1, N),
+            "z": rng.uniform(0, 3, N),
+            "g": rng.choice(["a", "b", "c", "d"], N),
+            "h": rng.choice(["u", "v"], N),
+        }
+    )
+    weights = rng.choice(np.linspace(0.1, 1.0, 10), N)
+    if zero_weights:
+        weights[::7] = 0.0
+    positive = rng.random(N) < 0.15
+    y = np.where(positive, rng.gamma(2.0, 1.5, N), 0.0)
+
+    def build():
+        family = family_type()
+        return SuperLSS(
+            family,
+            family.mu(s("x", kind="cr", k=8), s("z", kind="cr", k=6), cat("g"), cat("h")),
+            family.phi(s("x", kind="cr", k=5), cat("h")),
+            family.p(),
+            discrete=True,
+        )
+
+    counts = {"compiled": 0, "tables": 0}
+    compiled_geometry = chunking._compiled_geometry
+    add_rows = _joint_tables.JointTables.add_rows
+
+    def counted_compiled(*args):
+        counts["compiled"] += 1
+        return compiled_geometry(*args)
+
+    def counted_rows(self, *args):
+        counts["tables"] += 1
+        return add_rows(self, *args)
+
+    monkeypatch.setattr(chunking, "_compiled_geometry", counted_compiled)
+    monkeypatch.setattr(_joint_tables.JointTables, "add_rows", counted_rows)
+
+    routed = build().fit_reml(frame, y, sample_weight=weights)
+    lambdas = dict(routed._model.fit_state.smoothing.lambdas)
+    fixed = build().fit(frame, y, sample_weight=weights, lambdas=lambdas)
+    if family_type is TweedieLSS:
+        # A row of zero weight has left the fit before these routes.
+        assert counts["compiled"] > 0
+    else:
+        assert counts["compiled"] == 0 and counts["tables"] > 0
+    monkeypatch.undo()
+    monkeypatch.setattr(chunking, "_joint_plan", lambda *_args: None)
+    reference = build().fit_reml(frame, y, sample_weight=weights)
+    fixed_reference = build().fit(frame, y, sample_weight=weights, lambdas=lambdas)
+    assert routed.smoothing_convergence_reason_ == reference.smoothing_convergence_reason_
+    assert routed.result_.total_effective_df == pytest.approx(
+        reference.result_.total_effective_df, abs=1e-6
+    )
+    rows = frame.iloc[::37]
+    np.testing.assert_allclose(
+        np.asarray(routed.predict_link(rows)), np.asarray(reference.predict_link(rows)), atol=1e-6
+    )
+    assert fixed.result_.total_effective_df == pytest.approx(
+        fixed_reference.result_.total_effective_df, abs=1e-9
+    )
+    np.testing.assert_allclose(
+        np.asarray(fixed.predict_link(rows)),
+        np.asarray(fixed_reference.predict_link(rows)),
+        rtol=1e-9,
+        atol=1e-9,
+    )
+    variance = np.diag(fixed_reference.covariance_)
+    scale = np.sqrt(np.outer(variance, variance))
+    assert np.max(np.abs(fixed.covariance_ - fixed_reference.covariance_) / scale) <= 1e-9
+
+
 @pytest.mark.parametrize("power", ("offset", "term"))
 def test_rows_that_differ_in_their_power_read_their_own(power):
     """An offset or a term on the power, against the natural route. Mutation checks: a plan that
