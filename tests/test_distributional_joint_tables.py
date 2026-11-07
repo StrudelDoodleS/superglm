@@ -715,14 +715,16 @@ def test_a_fit_reads_the_same_numbers_through_every_route(
         monkeypatch.setattr(_joint_tables, "_SHARD_ROWS", shard_rows)
 
     routed = build().fit_reml(frame, y, sample_weight=weights)
+    searched = dict(counts)
     lambdas = dict(routed._model.fit_state.smoothing.lambdas)
     fixed = build().fit(frame, y, sample_weight=weights, lambdas=lambdas)
-    if family_type is TweedieLSS:
-        # A row of zero weight has left the fit before these routes.
-        assert counts["compiled"] > 0
-    else:
-        assert counts["compiled"] == 0 and counts["tables"] > 0
-    assert (counts["shards"] > 0) == (shard_rows is not None)
+    for seen in (searched, {key: counts[key] - searched[key] for key in counts}):
+        if family_type is TweedieLSS:
+            # A row of zero weight has left the fit before these routes.
+            assert seen["compiled"] > 0
+        else:
+            assert seen["compiled"] == 0 and seen["tables"] > 0
+        assert (seen["shards"] > 0) == (shard_rows is not None)
     monkeypatch.undo()
     monkeypatch.setattr(chunking, "_joint_plan", lambda *_args: None)
     reference = build().fit_reml(frame, y, sample_weight=weights)
