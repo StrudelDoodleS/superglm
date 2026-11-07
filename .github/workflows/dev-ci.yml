@@ -247,7 +247,7 @@ jobs:
       - name: Run the tests this pull request adds or changes against the base commit's src/
         run: |
           # The checkout is the pull request's merge commit, whose first parent is the base.
-          # The script pins every thread pool as scripts/run_test_suite.py does. The output
+          # The script pins every thread pool the repository's own test runner pins. The output
           # streams to the log and to fix-tests.txt, and `timeout` ends a hang on base well
           # inside the job's limit, so the summary below is written whatever happened.
           set -o pipefail
