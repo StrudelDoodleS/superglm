@@ -263,6 +263,7 @@ def test_a_gram_pass_that_declines_costs_no_flops_and_one_that_serves_costs_a_pa
     assert row.flops == design.n * design.p * (design.p + 1)  # the one that served
 
 
+@pytest.mark.pins_behaviour
 def test_a_gram_pass_whose_raw_moments_were_rejected_is_charged_the_pass_it_made(monkeypatch):
     # Mutation check: pricing every ``None`` at zero fails this.
     import superglm._group_matrix._group_matrix_centered as centered

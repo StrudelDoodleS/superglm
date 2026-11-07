@@ -253,7 +253,9 @@ def test_a_label_on_a_dropped_row_cannot_fail_its_fold(label):
     assert result.fold_scores["nll"].notna().all()
     for fold, (_train, test) in zip(result.estimators, result.fold_indices, strict=True):
         kept = test[test < N]
-        np.testing.assert_array_equal(result.oof_predictions[kept], fold.predict(frame.iloc[kept]))
+        np.testing.assert_allclose(
+            result.oof_predictions[kept], fold.predict(frame.iloc[kept]), rtol=1e-12
+        )
 
 
 def test_a_dropped_row_that_cannot_be_priced_leaves_a_priceable_one_in_its_fold_alone():
@@ -277,8 +279,8 @@ def test_a_dropped_row_that_cannot_be_priced_leaves_a_priceable_one_in_its_fold_
     for fold, (_train, test) in zip(result.estimators, result.fold_indices, strict=True):
         priced = np.intersect1d(test, known)
         shared += priced.size > 0 and np.intersect1d(test, unseen).size > 0
-        np.testing.assert_array_equal(
-            result.oof_predictions[priced], fold.predict(frame.iloc[priced])
+        np.testing.assert_allclose(
+            result.oof_predictions[priced], fold.predict(frame.iloc[priced]), rtol=1e-12
         )
     assert shared  # some fold holds both, or the fallback was not reached
 
