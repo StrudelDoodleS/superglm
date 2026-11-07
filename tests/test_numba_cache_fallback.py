@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -126,8 +128,9 @@ def test_a_process_with_no_writable_cache_location_loads_a_model_and_predicts(
 
     Mutation checks: without the call in ``superglm/__init__.py`` the child dies with Numba's
     ``no locator available``; a fixed name under the temporary directory fails the uniqueness and the
-    mode assertions; a directory left behind fails the last; without ``reload_config`` the
-    Numba-first run dies as the unfixed one does.
+    mode assertions; a directory left behind fails the last; without ``numba.config.CACHE_DIR =
+    directory`` the Numba-first run dies as the unfixed one does; a directory made in the
+    temporary directory itself, not in the user's own, fails the parent assertions.
     """
     temp = tmp_path / "tmp"
     caches = []
@@ -135,10 +138,14 @@ def test_a_process_with_no_writable_cache_location_loads_a_model_and_predicts(
         report, predictions = _run(saved_model, tmp_path, first)
         cache = Path(report["cache"])
         caches.append(cache)
-        assert cache.parent == temp and cache.name.startswith(PREFIX)
+        assert cache.name.startswith(PREFIX)
         assert report["index_files"] >= 1
-        if sys.platform != "win32":  # the directory is the owner's alone
+        if sys.platform != "win32":  # the directory is the owner's alone, in the owner's own
             assert report["mode"] == 0o700 and report["mine"]
+            assert cache.parent == temp / f"{PREFIX}u{os.getuid()}"
+            assert stat.S_IMODE(cache.parent.stat().st_mode) == 0o700
+        else:
+            assert cache.parent == temp
         _assert_predictions(saved_model, predictions)
         assert not cache.exists()
     assert caches[0] != caches[1]
@@ -156,17 +163,34 @@ def test_a_cache_directory_the_user_set_is_used_and_no_private_one_is_made(saved
 
 
 @pytest.fixture
-def nothing_is_writable(monkeypatch):
-    """No ``NUMBA_CACHE_DIR`` or locator list, and every location refuses writes."""
+def isolated(monkeypatch, tmp_path):
+    """No cache setting anywhere, and a fallback that cannot leave anything in the session.
+
+    A setting is recorded before it is deleted, so teardown removes it even when it was absent
+    and the code under test sets it; ``numba.config.CACHE_DIR`` is recorded and emptied; the
+    private directory is made under ``tmp_path`` and its removal at exit is not registered.
+    """
+    import numba
+
     for name in ("NUMBA_CACHE_DIR", "NUMBA_CACHE_LOCATOR_CLASSES"):
-        monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv(name, "")  # recorded, so teardown deletes whatever is there
+        monkeypatch.delenv(name)
+    monkeypatch.setattr(numba.config, "CACHE_DIR", "")
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr("atexit.register", lambda *args, **kwargs: None)
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+@pytest.fixture
+def nothing_is_writable(isolated, monkeypatch):
+    """Every location refuses writes."""
     monkeypatch.setattr(os, "access", lambda path, mode, **kwargs: False)
+    return isolated
 
 
-def test_nothing_changes_while_an_ordinary_location_is_writable(monkeypatch):
+def test_nothing_changes_while_an_ordinary_location_is_writable(isolated, monkeypatch):
     """Mutation check: a fallback made regardless of the writability test fails this."""
-    monkeypatch.delenv("NUMBA_CACHE_DIR", raising=False)
-    monkeypatch.delenv("NUMBA_CACHE_LOCATOR_CLASSES", raising=False)
     monkeypatch.setattr(os, "access", lambda path, mode, **kwargs: True)
     assert _numba_cache.ensure_cache_location() is None
     assert "NUMBA_CACHE_DIR" not in os.environ
@@ -189,13 +213,12 @@ def test_no_temporary_directory_leaves_numba_to_report_the_problem(
     assert "NUMBA_CACHE_DIR" not in os.environ
 
 
-def test_a_writable_user_cache_directory_is_an_ordinary_location(monkeypatch, tmp_path):
+def test_a_writable_user_cache_directory_is_an_ordinary_location(isolated, monkeypatch):
     """The install directory is read-only and the user's cache directory is not: nothing changes.
 
     Mutation check: leaving the user-wide location out of the search fails this.
     """
-    for name in ("NUMBA_CACHE_DIR", "NUMBA_CACHE_LOCATOR_CLASSES"):
-        monkeypatch.delenv(name, raising=False)
+    tmp_path = isolated
     (tmp_path / "cache").mkdir()
     monkeypatch.setattr(
         _numba_cache, "_user_cache_directory", lambda: str(tmp_path / "cache" / "numba")
@@ -227,3 +250,191 @@ def test_the_user_wide_location_is_the_platforms_cache_directory_plus_numba(
     monkeypatch.setattr(sys, "platform", platform)
     monkeypatch.setattr(os.path, "expanduser", lambda path: "home")
     assert _numba_cache._user_cache_directory() == os.path.join(*expected)
+
+
+def test_a_cache_directory_set_in_code_or_in_a_yaml_file_is_the_users(
+    nothing_is_writable, monkeypatch
+):
+    """``numba.config.CACHE_DIR``, set after Numba read its environment, or a ``cache_dir`` in
+    ``.numba_config.yaml`` before Numba is imported, is a setting of the user's: nothing changes.
+
+    Mutation checks: ignoring ``numba.config.CACHE_DIR`` replaces the first with a private
+    directory; ignoring the YAML file does so to the second.
+    """
+    import numba
+
+    monkeypatch.setattr(numba.config, "CACHE_DIR", str(nothing_is_writable / "mine"))
+    assert _numba_cache.ensure_cache_location() is None
+    assert numba.config.CACHE_DIR == str(nothing_is_writable / "mine")
+    assert "NUMBA_CACHE_DIR" not in os.environ
+    monkeypatch.setattr(numba.config, "CACHE_DIR", "")
+    (nothing_is_writable / ".numba_config.yaml").write_text("opt: 3\ncache_dir: /somewhere\n")
+    monkeypatch.delitem(sys.modules, "numba")  # Numba not yet imported: its YAML is still unread
+    assert _numba_cache.ensure_cache_location() is None
+    assert "NUMBA_CACHE_DIR" not in os.environ
+
+
+def test_the_fallback_never_re_reads_the_environment_of_a_loaded_numba(
+    nothing_is_writable, monkeypatch
+):
+    """A value the program set on ``numba.config`` is not reset to its environment default.
+
+    ``reload_config`` re-derives every option from the environment: it reset
+    ``numba.config.THREADING_LAYER`` and, with threads started, raised ``RuntimeError`` from
+    ``import superglm``. The fallback assigns the one attribute. Mutation check: calling
+    ``numba.config.reload_config()`` fails both assertions.
+    """
+    import numba
+
+    monkeypatch.setattr(numba.config, "THREADING_LAYER", "workqueue")
+    monkeypatch.setattr(
+        numba.config, "reload_config", lambda: pytest.fail("the environment was re-read")
+    )
+    directory = _numba_cache.ensure_cache_location()
+    assert directory is not None and numba.config.CACHE_DIR == directory
+    assert numba.config.THREADING_LAYER == "workqueue"
+
+
+@pytest.mark.parametrize("mode", [0o755, 0o770, 0o707])
+def test_the_inherited_directory_of_a_parent_is_used_only_while_it_is_private_to_the_caller(
+    nothing_is_writable, monkeypatch, mode
+):
+    """A child finds ``NUMBA_CACHE_DIR`` naming the private directory of a parent process.
+
+    Numba loads pickles from it, so it is used only while it is a real directory owned by the caller
+    and closed to group and others, and a directory that is gone, open to others, a link or someone
+    else's is replaced by a new private one. Mutation check: using any inherited directory fails
+    every assertion below it.
+    """
+    if sys.platform == "win32":
+        pytest.skip("Windows has no mode bits to check")
+    parent = nothing_is_writable / f"{PREFIX}u{os.getuid()}"
+    parent.mkdir(mode=0o700)
+    good = parent / f"{PREFIX}good"
+    good.mkdir(mode=0o700)
+    monkeypatch.setenv("NUMBA_CACHE_DIR", str(good))
+    assert _numba_cache.ensure_cache_location() is None
+    assert os.environ["NUMBA_CACHE_DIR"] == str(good)
+    gone = parent / f"{PREFIX}gone"
+    loose = parent / f"{PREFIX}loose"
+    loose.mkdir()
+    loose.chmod(mode)
+    link = parent / f"{PREFIX}link"
+    link.symlink_to(good)
+    for stale in (gone, loose, link):
+        monkeypatch.setenv("NUMBA_CACHE_DIR", str(stale))
+        replaced = _numba_cache.ensure_cache_location()
+        assert replaced is not None and Path(replaced) != stale and not gone.exists()
+        assert os.environ["NUMBA_CACHE_DIR"] == replaced
+        assert stat.S_IMODE(os.stat(replaced).st_mode) == 0o700
+    monkeypatch.setenv("NUMBA_CACHE_DIR", str(good))
+    monkeypatch.setattr(os, "getuid", lambda: os.stat(good).st_uid + 1)  # someone else's
+    assert _numba_cache.ensure_cache_location() not in (None, str(good))
+
+
+def test_the_directory_is_made_in_one_of_the_users_own_and_never_in_a_loose_one(
+    nothing_is_writable, monkeypatch
+):
+    """The per-user parent is kept, mode 0700; one that is not private to the caller is not used.
+
+    A child that outlives the process makes Numba create the path again, and only a directory no
+    other user can enter makes that harmless. Mutation check: ``mkdtemp`` in the temporary directory
+    itself fails the first assertion; trusting an existing parent whatever its mode, the second.
+    """
+    if sys.platform == "win32":
+        pytest.skip("the temporary directory of a Windows user is the user's own")
+    temp = nothing_is_writable
+    parent = temp / f"{PREFIX}u{os.getuid()}"
+    first = Path(_numba_cache.ensure_cache_location())
+    assert first.parent == parent and stat.S_IMODE(parent.stat().st_mode) == 0o700
+    parent.chmod(0o755)  # as another user, or an older version, might leave it
+    monkeypatch.delenv("NUMBA_CACHE_DIR")  # a new process: the first one's setting is not inherited
+    monkeypatch.setattr("numba.config.CACHE_DIR", "")
+    second = Path(_numba_cache.ensure_cache_location())
+    assert second.parent == temp and second.name.startswith(PREFIX)
+    assert stat.S_IMODE(second.stat().st_mode) == 0o700
+
+
+def test_a_child_that_outlives_the_process_recreates_the_path_only_inside_a_private_directory(
+    tmp_path,
+):
+    """The reproduction: the process ends, its directory is removed, a child it left compiles.
+
+    The child makes the directory again (Numba's ``os.makedirs``) after the parent is gone: the
+    path must be in a directory that only its owner can enter, since Numba loads pickles from it.
+    Mutation check: ``mkdtemp`` in the shared temporary directory leaves the recreated path
+    reachable by group and others.
+    """
+    if sys.platform == "win32":
+        pytest.skip("the temporary directory of a Windows user is the user's own")
+    temp = tmp_path / "tmp"
+    temp.mkdir()
+    go = tmp_path / "go"
+    report = tmp_path / "report.json"
+    child = (
+        "import json, os, stat, sys, time\n"
+        f"while not os.path.exists({str(go)!r}): time.sleep(0.05)\n"
+        "cache = os.environ['NUMBA_CACHE_DIR']\n"
+        "os.makedirs(cache, exist_ok=True)  # what Numba does for a cache=True kernel\n"
+        "mode = lambda p: stat.S_IMODE(os.stat(p).st_mode)\n"
+        f"json.dump({{'cache': cache, 'parent': mode(os.path.dirname(cache)), 'leaf': mode(cache)}},"
+        f" open({str(report)!r}, 'w'))\n"
+    )
+    parent = (
+        "import errno, os, subprocess, sys, tempfile\n"
+        "access = os.access\n"
+        "temp = os.path.realpath(tempfile.gettempdir())\n"
+        "os.access = lambda p, m, **k: access(p, m, **k) and (not m & os.W_OK or"
+        " os.path.realpath(p).startswith(temp))\n"
+        "import superglm\n"
+        "assert os.environ.get('NUMBA_CACHE_DIR'), 'no fallback'\n"
+        f"subprocess.Popen([sys.executable, '-c', {child!r}], stdin=subprocess.DEVNULL,"
+        " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "print(os.environ['NUMBA_CACHE_DIR'], flush=True)\n"
+    )
+    environment = {k: v for k, v in os.environ.items() if not k.startswith("NUMBA_CACHE")}
+    environment.update(TMPDIR=str(temp), TEMP=str(temp), TMP=str(temp))
+    done = subprocess.run(
+        [sys.executable, "-c", parent], env=environment, capture_output=True, text=True, timeout=120
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    cache = Path(done.stdout.strip().splitlines()[-1])
+    assert not cache.exists()  # the process that made it has gone and removed it
+    go.write_text("go")
+    for _ in range(600):
+        if report.exists():
+            break
+        time.sleep(0.1)
+    result = json.loads(report.read_text())
+    assert result["cache"] == str(cache)
+    assert result["parent"] & 0o077 == 0, result
+
+
+@pytest.mark.parametrize("probe_allows", [True, False])
+def test_windows_is_asked_by_making_a_file_because_os_access_says_yes_to_every_directory(
+    probe_allows, monkeypatch, tmp_path
+):
+    """CPython's Windows ``os.access`` returns true for any directory with ``W_OK``.
+
+    On Windows the writable test makes a file in the directory, as Numba does, so a read-only
+    install directory is seen; elsewhere it is the permission query, which creates nothing and
+    imports nothing. Mutation check: ``os.access`` alone on Windows says yes in the second case.
+    """
+    import tempfile
+
+    made = []
+
+    def temporary_file(*args, dir=None, **kwargs):
+        made.append(dir)
+        if not probe_allows:
+            raise PermissionError(13, "Access is denied", str(dir))
+        return tempfile.SpooledTemporaryFile()
+
+    monkeypatch.setattr(os, "access", lambda path, mode, **kwargs: True)
+    monkeypatch.setattr(tempfile, "TemporaryFile", temporary_file)
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert _numba_cache._can_write(str(tmp_path)) is probe_allows
+    assert made == [str(tmp_path)]
+    monkeypatch.setattr(sys, "platform", "linux")
+    made.clear()
+    assert _numba_cache._can_write(str(tmp_path)) is True and made == []

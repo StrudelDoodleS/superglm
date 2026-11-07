@@ -335,6 +335,13 @@ def handler(request):
     return {"link": link.to_dict("list"), "se": se.to_dict("list")}
 ```
 
+A server that answers on several threads should also make one prediction in
+that start-up code, before it serves. superglm loads each of its own modules
+the first time a name needs it, and loads them one thread at a time. It cannot
+make Python's own import locks resolve two threads that import its modules by
+name at once (`import superglm.model` on one thread while another thread first
+reads a name) in a process that has not loaded them yet.
+
 ### Keep a warm floor with the platform's own setting
 
 A minimum number of instances that the platform keeps running removes the cold
@@ -400,29 +407,44 @@ the temporary directory is an in-memory file system
 ([Cloud Run functions execution environment](https://cloud.google.com/functions/docs/concepts/execution-environment),
 [best practices](https://docs.cloud.google.com/run/docs/tips/functions-best-practices)).
 
-When `NUMBA_CACHE_DIR` is not set and neither the directory superglm is
-installed in nor your user cache directory can be written to, `import superglm`
-makes a new directory in the temporary directory, readable and writable by you
-alone, points Numba at it, and removes it when the process exits. Loading the
-model works with no setting from you. Nothing Numba compiles outlives the
-process, so the first prediction of 8,192 rows or more compiles its two kernels
-(0.65 s), and a function that scores single quotes or small batches is not
-affected. superglm never changes a `NUMBA_CACHE_DIR` you set, and a directory
-you name there has to be one you can write to.
+When no cache location is set (no `NUMBA_CACHE_DIR`, no
+`NUMBA_CACHE_LOCATOR_CLASSES`, and none in `numba.config` or
+`.numba_config.yaml`) and neither the directory superglm is installed in nor
+your user cache directory can be written to, `import superglm` makes a new
+directory for the process inside a directory of its own in the temporary
+directory (`superglm-numba-cache-u<your user id>`, made for you alone, mode
+0700, on Linux and macOS), points Numba at it, and removes the new directory
+when the process exits. Loading the model works with no setting from you.
+Nothing Numba compiles outlives the process, so the first prediction of 8,192
+rows or more compiles its two kernels (0.65 s), and a function that scores
+single quotes or small batches is not affected. superglm never changes a cache
+location you set, and a directory you name has to be one you can write to.
 
-To keep the benefit of a shipped cache on such a platform, copy it into the
-writable directory before anything imports superglm, and point Numba at the
+Child processes inherit the setting and share the cache while the process that
+made it runs. A child that imports superglm after that process has ended finds
+the directory gone, does not trust a directory that is not private to its user,
+and makes its own. A child that never imports superglm and outlives the
+process can make Numba create the directory again, inside the directory that
+only your user can enter; set `NUMBA_CACHE_DIR` yourself for such children.
+
+To keep the benefit of a shipped cache on such a platform, copy it into a new
+private directory before anything imports superglm, and point Numba at the
 copy:
 
 ```py
 import os
 import shutil
+import tempfile
 
-shutil.copytree("/opt/numba-cache", "/tmp/numba-cache", dirs_exist_ok=True)
-os.environ["NUMBA_CACHE_DIR"] = "/tmp/numba-cache"
+cache = tempfile.mkdtemp(prefix="numba-cache-")  # new, and readable by you alone
+shutil.copytree("/opt/numba-cache", cache, dirs_exist_ok=True)
+os.environ["NUMBA_CACHE_DIR"] = cache
 
 import superglm  # noqa: E402
 ```
+
+Numba reads this cache with `pickle`, so use a directory that no other user
+can create or write to: not a fixed name such as `/tmp/numba-cache`.
 
 Measured on a read-only file system with the cache copied to the temporary
 directory this way, the first prediction of 8,192 rows took 0.14 s, against
