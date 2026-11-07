@@ -26,6 +26,8 @@ from superglm import Categorical, GaussianLS, PSpline, SuperGLM, SuperLSS, cat, 
 from superglm.diagnostics.work_ledger import PASS, TARGETS, work_ledger
 from superglm.features.constraint import Constraint
 
+pytestmark = pytest.mark.pins_behaviour  # these guards pin behaviour that already held
+
 PENALTY = (
     "the penalty matrices are fixed for the fit, yet each smoothing-parameter evaluation "
     "decomposes them again; the cost is the block size cubed, not the row count"

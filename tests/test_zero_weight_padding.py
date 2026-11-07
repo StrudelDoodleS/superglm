@@ -56,6 +56,8 @@ from superglm.editor import edit
 from superglm.editor.payloads import session_payload
 from superglm.model_selection import cross_validate
 
+pytestmark = pytest.mark.pins_behaviour  # these guards pin behaviour that already held
+
 PADDING_RTOL = 1e-8
 FREQUENCY_RTOL = 1e-6  # the default tol of SuperGLM and reml_tol of SuperLSS
 N = 240

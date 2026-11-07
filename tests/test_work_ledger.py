@@ -128,6 +128,7 @@ def test_a_repeat_is_equal_arrays_and_the_same_objects_whatever_address_they_hav
     assert _repeats_of_calls_with_objects(monkeypatch, collide) == (8, 2)
 
 
+@pytest.mark.pins_behaviour
 def test_the_ledger_does_not_keep_the_objects_it_numbers_alive(monkeypatch):
     import superglm.solvers.rank as rank
 

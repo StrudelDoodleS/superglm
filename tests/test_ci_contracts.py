@@ -299,6 +299,7 @@ def test_python_floor_contract_rejects_extras_installed_only_where_no_tests_run(
         test_required_workflow_runs_for_pull_requests_and_python_floor()
 
 
+@pytest.mark.pins_behaviour
 def test_type_check_enforces_and_validates_the_accepted_backlog() -> None:
     workflow = (_ROOT / ".github/workflows/dev-ci.yml").read_text(encoding="utf-8")
     type_job = workflow.split("  type-check:", maxsplit=1)[1].split("  quality:", maxsplit=1)[0]
@@ -316,6 +317,7 @@ def test_type_check_enforces_and_validates_the_accepted_backlog() -> None:
     assert "fix-tests:" not in type_job  # the slice is the type-check job and nothing else
 
 
+@pytest.mark.pins_behaviour
 def test_fix_tests_job_only_reports_and_writes_its_summary_inside_its_limit() -> None:
     workflow = (_ROOT / ".github/workflows/dev-ci.yml").read_text(encoding="utf-8")
     job = yaml.safe_load(workflow)["jobs"]["fix-tests"]

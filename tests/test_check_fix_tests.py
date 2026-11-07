@@ -10,6 +10,10 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.pins_behaviour  # the script is not under src/, so base cannot fail them
+
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "check_fix_tests.py"
 _spec = importlib.util.spec_from_file_location("check_fix_tests", SCRIPT)
 check_fix_tests = importlib.util.module_from_spec(_spec)
