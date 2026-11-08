@@ -51,6 +51,7 @@ from superglm.distributional.family import (
     _validated_parameter_matrix,
 )
 from superglm.distributional.kernels._two_piece_windows import (
+    mean_coordinate_jets,
     two_piece_narrow_rows,
     two_piece_normalized_jets,
     two_piece_window_jets,
@@ -445,18 +446,33 @@ def _bounded_evaluation(response, theta, plan, order, transform, parametrisation
         t = theta[exact]
         y = response[exact]
         if parametrisation == "mean":
-            evaluated = mean_rows(y, *t.T, np.ones(len(exact)), derivative_order=order)
+            loading = log_mean_loading(t[:, 1], t[:, 2])
+            evaluated = location_rows(
+                np.log(y),
+                np.log(t[:, 0]) - loading[0],
+                *t[:, 1:].T,
+                np.ones(len(exact)),
+                derivative_order=order,
+            )
+            jet = (evaluated.optimizing_log_likelihood,)
+            if order >= 1:
+                jet += (evaluated.score,)
+            if order == 2:
+                jet += (evaluated.hessian_packed,)
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore", under="ignore"):
+                jet = mean_coordinate_jets(jet, t, loading)
         else:
             variate = np.log(y) if transform == "log" else y
             evaluated = location_rows(variate, *t.T, np.ones(len(exact)), derivative_order=order)
-        full = evaluated.optimizing_log_likelihood - _HALF_LOG_TWO_PI
+            jet = (evaluated.optimizing_log_likelihood, evaluated.score, evaluated.hessian_packed)
+        full = jet[0] - _HALF_LOG_TWO_PI
         if transform == "log":
             full = full - np.log(y)
         optimizing[exact] = plan.multiplier[exact] * full
         if score is not None:
-            score[exact] = plan.multiplier[exact, None] * evaluated.score
+            score[exact] = plan.multiplier[exact, None] * jet[1]
         if hessian is not None:
-            hessian[exact] = plan.multiplier[exact, None] * evaluated.hessian_packed
+            hessian[exact] = plan.multiplier[exact, None] * jet[2]
         valid[exact] = evaluated.valid
 
     subtraction_scale = np.abs(optimizing)
