@@ -28,6 +28,7 @@ from superglm.distributional.family import (
     _likelihood_reuse_contract,
     _prepared_field_modes,
 )
+from superglm.distributional.response import response_spec
 from superglm.distributional.solver.derivatives import transform_natural_derivatives
 from superglm.distributional.weights import UnsupportedLikelihoodContractError
 from superglm.links import Link
@@ -97,7 +98,7 @@ def _curvature_packed(
             eta.ndim != 2
             or eta.shape[1] != len(links)
             or len(eta) == 0
-            or response.shape != (len(eta),)
+            or response.shape != (len(eta), *response_spec(family).shape)
             or plan.weights.values.shape != (len(eta),)
         ):
             raise ValueError("response, predictor and likelihood rows must agree")

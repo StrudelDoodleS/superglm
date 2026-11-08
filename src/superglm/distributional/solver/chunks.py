@@ -41,6 +41,7 @@ from superglm.distributional.family import (
 from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
+from superglm.distributional.response import response_spec, validated_response_array
 from superglm.distributional.solver._formation import FormationAccumulator
 from superglm.distributional.solver._joint_tables import (
     MORSEL_ROWS,
@@ -182,16 +183,15 @@ def _validate_bound_likelihood(
             "a fixed fit requires the complete prepared likelihood, not a row subset"
         )
     try:
-        supplied = np.asarray(response, dtype=np.float64)
-        if supplied.shape != (n_rows,) or not np.all(np.isfinite(supplied)):
-            raise UnsupportedLikelihoodContractError(
-                "the fitted response and family likelihood must contain the same finite rows"
+        if isinstance(family, LikelihoodPlanValidatingFamily):
+            canonical = family.validate_likelihood_plan(response, plan)
+            # Preserve the generic input guard after the family has seen raw
+            # values; returning a canonical array cannot hide bad supplied data.
+            validated_response_array(response, family=family, n_rows=n_rows)
+        else:
+            canonical = _immutable_response(
+                validated_response_array(response, family=family, n_rows=n_rows)
             )
-        canonical = (
-            family.validate_likelihood_plan(supplied, plan)
-            if isinstance(family, LikelihoodPlanValidatingFamily)
-            else _immutable_response(supplied)
-        )
     except UnsupportedLikelihoodContractError:
         raise
     except (AttributeError, TypeError, ValueError, OverflowError) as exc:
@@ -200,7 +200,7 @@ def _validate_bound_likelihood(
         ) from exc
     if (
         not isinstance(canonical, np.ndarray)
-        or canonical.shape != (n_rows,)
+        or canonical.shape != (n_rows, *response_spec(family).shape)
         or canonical.dtype != np.float64
         or canonical.flags.writeable
         or not np.all(np.isfinite(canonical))
@@ -527,10 +527,10 @@ def _validate_chunk_inputs(
         raise TypeError("layout must be a non-empty StackedLayout")
     n_observations = layout.predictors[0].design.n
     try:
-        response = np.asarray(y, dtype=np.float64)
+        response = validated_response_array(y, family=family, n_rows=n_observations)
     except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError("response must be a finite row vector") from exc
-    if response.shape != (n_observations,) or not np.all(np.isfinite(response)):
+    if response.shape != (n_observations, *response_spec(family).shape):
         raise UnsupportedLikelihoodContractError(
             "response and likelihood plan must match the layout rows"
         )

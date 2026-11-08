@@ -41,6 +41,7 @@ from superglm.distributional.predictor import (
     Predictor,
     PredictorExecutionPlan,
 )
+from superglm.distributional.response import ResponseSpec, response_spec
 from superglm.distributional.results.endpoint_evidence import ConvergenceReason
 from superglm.distributional.results.fit import DistributionalFitResult
 from superglm.distributional.results.smoothing import DistributionalEFSResult
@@ -102,6 +103,7 @@ class DistributionalRowState:
     null_parameters: NDArray[np.float64]
     # The class default reads a pickle from before response bounds as complete.
     observation: ObservationContract = COMPLETE_OBSERVATION
+    response_spec: ResponseSpec = ResponseSpec()
 
     def __post_init__(self) -> None:
         response = readonly_finite(self.response, name="response")
@@ -113,7 +115,12 @@ class DistributionalRowState:
         null_eta = readonly_finite(self.null_eta, name="null_eta")
         null_parameters = readonly_finite(self.null_parameters, name="null_parameters")
         n_observations = len(response)
-        if response.ndim != 1 or weights.shape != (n_observations,) or np.any(weights <= 0.0):
+        if (
+            not isinstance(self.response_spec, ResponseSpec)
+            or response.shape != (n_observations, *self.response_spec.shape)
+            or weights.shape != (n_observations,)
+            or np.any(weights <= 0.0)
+        ):
             raise ValueError(
                 "response and likelihood weights must be matching positive row vectors"
             )
@@ -671,11 +678,15 @@ def _curvature_disclosures(
         messages.append(lss_semidefinite_curvature_message(type(family).__name__))
     elif used_to_refuse and telemetry.actual_source == "fisher":
         messages.append(lss_fisher_curvature_message(type(family).__name__))
-    diagnosed = projected or used_to_refuse
+    # A failed coefficient fit also benefits from the family's existing
+    # diagnosis (e.g. an unbounded concentration), even before a fallback.
+    diagnosed = projected or used_to_refuse or not solver_result.converged
     if diagnosed and isinstance(family, FitFailureDiagnosingFamily):
         weights = likelihood_plan.weights
         # The diagnosis reads the supplied rows at their input positions.
-        supplied = np.zeros(weights.provenance.original_count, dtype=np.float64)
+        supplied = np.zeros(
+            (weights.provenance.original_count, *response_spec(family).shape), dtype=np.float64
+        )
         supplied[weights.input_positions] = response
         try:
             diagnosis = family.diagnose_repeated_curvature_failure(supplied, weights)
@@ -825,6 +836,7 @@ def prepare_distributional_fit_state(
             null_eta=null.result.eta,
             null_parameters=null.result.theta,
             observation=plan_observation(likelihood_plan),
+            response_spec=response_spec(family),
         )
     bounds = plan_observation(likelihood_plan).bounds
     return DistributionalFitState(

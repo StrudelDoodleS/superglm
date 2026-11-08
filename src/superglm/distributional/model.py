@@ -57,6 +57,11 @@ from superglm.distributional.predictor import (
     compile_predictors,
     resolve_predictor_links,
 )
+from superglm.distributional.response import (
+    response_spec,
+    unvalidated_response,
+    validated_response_array,
+)
 from superglm.distributional.results.fit import DistributionalFitResult
 from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.results.smoothing import DistributionalEFSResult
@@ -101,7 +106,7 @@ def _readonly_default_prediction(values: NDArray) -> NDArray[np.float64]:
 
 
 def _unvalidated_response_shape(y: NDArray, n_observations: int) -> NDArray:
-    """Check only the original positional shape before zero-row selection."""
+    """Legacy scalar-only boundary for scalar diagnostics and row operations."""
     try:
         response = np.asarray(y)
     except (TypeError, ValueError, OverflowError) as exc:
@@ -788,8 +793,14 @@ def _fit_candidate(
         raise TypeError("weight_contract must be a WeightContract")
     separation_policy = validate_separation_policy(separation)
     original_n = len(frame)
-    original_y = _unvalidated_response_shape(y, original_n)
+    original_y = unvalidated_response(
+        y, family=family, n_rows=original_n, input_index=getattr(frame.native, "index", None)
+    )
     original_offsets = _unvalidated_offset_shapes(offsets, original_n)
+    if response_spec(family).shape and (truncation is not None or censored is not None):
+        raise UnsupportedLikelihoodContractError(
+            "scalar truncation and censoring bounds do not apply to vector responses"
+        )
     original_bounds = unvalidated_bound_arrays(truncation, censored, original_n)
     resolved_weights = resolve_likelihood_weights(
         sample_weight,
@@ -830,6 +841,9 @@ def _fit_candidate(
         else family.bind_likelihood
     )
     likelihood_plan = bind(retained_y, resolved_weights, observation)
+    # The family receives retained raw values first; generic float conversion
+    # must not hide nullable integers, bools or invalid composition inputs.
+    retained_y = validated_response_array(retained_y, family=family, n_rows=len(positions))
     if not isinstance(likelihood_plan, FamilyLikelihoodPlan):
         raise UnsupportedLikelihoodContractError(
             "family.bind_likelihood() must return a FamilyLikelihoodPlan"

@@ -24,6 +24,7 @@ from superglm.distributional.family import (
 from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
+from superglm.distributional.response import unvalidated_response
 from superglm.distributional.results.endpoint_evidence import (
     CHUNKED_EXECUTION_BACKEND_IDENTIFIER,
     DENSE_EXECUTION_BACKEND_IDENTIFIER,
@@ -391,15 +392,8 @@ def _validated_context(
         raise ValueError(
             f"layout predictor order {actual_names} does not match family order {expected_names}"
         )
-    try:
-        response = np.asarray(y, dtype=np.float64)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("response must be a finite vector") from exc
     n_observations = layout.predictors[0].design.n
-    if response.shape != (n_observations,) or not np.all(np.isfinite(response)):
-        raise UnsupportedLikelihoodContractError(
-            "response and likelihood plan must match the layout rows"
-        )
+    response = unvalidated_response(y, family=family, n_rows=n_observations)
     root_likelihood_plan, response = chunking._validate_bound_likelihood(
         family,
         likelihood_plan,

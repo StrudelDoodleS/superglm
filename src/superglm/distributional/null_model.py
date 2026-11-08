@@ -15,6 +15,7 @@ from numpy.typing import NDArray
 from superglm.distributional._common import readonly_finite
 from superglm.distributional.family import DistributionalFamily, FamilyLikelihoodPlan
 from superglm.distributional.layout import PredictorState, StackedLayout
+from superglm.distributional.response import unvalidated_response
 from superglm.distributional.results.endpoint_evidence import ConvergenceReason
 from superglm.distributional.results.solver import DenseSolverConfig, DenseSolverResult
 from superglm.distributional.solver.chunks import ChunkSize
@@ -237,18 +238,13 @@ def fit_joint_null_model(
     source_names = tuple(state.name for state in source_layout.predictors)
     if source_names != family_names:
         raise ValueError("source layout predictor order must match family parameters")
-    try:
-        response = np.asarray(y, dtype=np.float64)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("y must be a non-empty finite vector") from exc
-    if response.ndim != 1 or len(response) == 0 or not np.all(np.isfinite(response)):
-        raise ValueError("y must be a non-empty finite vector")
+    response = unvalidated_response(y, family=family, n_rows=source_layout.predictors[0].design.n)
     if not isinstance(likelihood_plan, FamilyLikelihoodPlan):
         raise UnsupportedLikelihoodContractError(
             "likelihood_plan must implement FamilyLikelihoodPlan"
         )
     weights = likelihood_plan.weights.values
-    if weights.shape != response.shape:
+    if weights.shape != (len(response),):
         raise UnsupportedLikelihoodContractError("likelihood plan must match the response rows")
     solver_config = DenseSolverConfig() if config is None else config
     if not isinstance(solver_config, DenseSolverConfig):
