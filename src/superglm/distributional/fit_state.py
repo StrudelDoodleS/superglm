@@ -681,7 +681,11 @@ def _curvature_disclosures(
     # A failed coefficient fit also benefits from the family's existing
     # diagnosis (e.g. an unbounded concentration), even before a fallback.
     diagnosed = projected or used_to_refuse or not solver_result.converged
-    if diagnosed and isinstance(family, FitFailureDiagnosingFamily):
+    if (
+        diagnosed
+        and plan_observation(likelihood_plan).is_complete
+        and isinstance(family, FitFailureDiagnosingFamily)
+    ):
         weights = likelihood_plan.weights
         # The diagnosis reads the supplied rows at their input positions.
         supplied = np.zeros(

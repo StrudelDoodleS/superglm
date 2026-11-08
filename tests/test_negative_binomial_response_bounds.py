@@ -2,6 +2,7 @@
 
 import importlib
 import pickle
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -42,6 +43,52 @@ def _plan(y, lo, hi, side, weights=None, semantics="frequency"):
         np.broadcast_to(side, (n,)),
     )
     return NegativeBinomialLS().bind_likelihood(y, resolved, bounded_observation(bounds))
+
+
+@pytest.mark.parametrize("observation", ["complete", "left", "right", "truncated"])
+def test_curvature_disclosure_does_not_diagnose_censor_limits_as_exact_counts(
+    observation, monkeypatch
+):
+    from superglm.distributional.fit_state import _curvature_disclosures
+
+    family = NegativeBinomialLS()
+    y = np.array([1.0, 2.0]) if observation in ("complete", "truncated") else np.array([1.8, 2.7])
+    if observation == "complete":
+        plan = family.bind_likelihood(
+            y,
+            resolve_likelihood_weights(
+                None, n_observations=len(y), contract=WeightContract("frequency")
+            ),
+            COMPLETE_OBSERVATION,
+        )
+    else:
+        lo, hi = (-0.5, 4.0) if observation == "truncated" else (-np.inf, np.inf)
+        side = {"left": -1, "right": 1, "truncated": 0}[observation]
+        plan = _plan(y, lo, hi, side)
+    diagnosed = []
+
+    def complete_diagnosis(self, supplied, weights):
+        diagnosed.append(supplied.copy())
+        return ValueError("complete-count diagnosis sentinel")
+
+    monkeypatch.setattr(
+        NegativeBinomialLS, "diagnose_repeated_curvature_failure", complete_diagnosis
+    )
+    result = SimpleNamespace(
+        terminal_curvature=SimpleNamespace(actual_source="nearest_semidefinite", fallback_count=1),
+        converged=False,
+        theta=None,
+    )
+    messages = _curvature_disclosures(family, result, y, plan)
+    # Keep the generic curvature disclosure for every law, but invoke a
+    # complete-response diagnostic only when that law was actually observed.
+    assert "nearest positive semidefinite" in messages[0]
+    if observation == "complete":
+        np.testing.assert_array_equal(diagnosed, [y])
+        assert messages[-1] == "complete-count diagnosis sentinel"
+    else:
+        assert not diagnosed
+        assert len(messages) == 1
 
 
 @pytest.mark.parametrize(

@@ -7,6 +7,7 @@ import pytest
 from superglm.distributional.family import COMPLETE_OBSERVATION, VarianceFamily
 from superglm.distributional.solver.derivatives import transform_natural_derivatives
 from superglm.distributional.weights import (
+    LikelihoodWeightError,
     UnsupportedLikelihoodContractError,
     WeightContract,
     resolve_likelihood_weights,
@@ -64,15 +65,16 @@ def test_component_order_plan_identity_and_takes(k):
     assert list(fam.component_parameters.values()) == [f"alpha_{j}" for j in range(k)]
 
 
-def test_duplicate_take_preserves_row_provenance():
+def test_duplicate_take_preserves_shared_nonoverlap_contract():
     fam = family()
     y = np.array([[0.2, 0.3, 0.5], [0.6, 0.25, 0.15]])
     plan = bind(fam, y)
     indices = np.array([1, 0, 1])
-    child = plan.take(indices)
-    np.testing.assert_array_equal(child.weights.input_positions, indices)
-    np.testing.assert_array_equal(child.weights.root_take_map, indices)
-    np.testing.assert_array_equal(fam.validate_likelihood_plan(y[indices], child), y[indices])
+    identity = plan.plan_identifier
+    with pytest.raises(LikelihoodWeightError, match="duplicates"):
+        plan.take(indices)
+    assert plan.plan_identifier == identity
+    np.testing.assert_array_equal(fam.validate_likelihood_plan(y, plan), y)
 
 
 @pytest.mark.parametrize("identity", [False, True])

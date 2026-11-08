@@ -927,6 +927,8 @@ _CALLEE_LINE = re.compile(r'^_CALLEE_DIGEST = "[^"]*"$', re.MULTILINE)
 # file: each carries the digest of those it imports, so editing one recompiles it.
 PRIMITIVE_CALLERS = (
     "_incomplete_gamma",
+    "_incomplete_beta",
+    "_negative_binomial_windows",
     "_tweedie_numba",
     "_gg_log_tail",
     "_generalized_gamma_numba",

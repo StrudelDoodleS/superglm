@@ -632,10 +632,12 @@ class AtomFamily(Protocol):
 
 @runtime_checkable
 class FitFailureDiagnosingFamily(Protocol):
-    """Optional family diagnosis of a final-curvature fallback.
+    """Optional diagnosis of a complete-response fit's failure or curvature fallback.
 
-    A fit whose terminal curvature fell back finishes and warns; a returned
-    exception's text is appended to ``result_.warnings``, never raised.
+    An unconverged fit or a fit whose terminal curvature fell back finishes
+    and warns; a returned exception's text is appended to ``result_.warnings``,
+    never raised. This hook receives no observation law, so it is called only
+    for complete observations. Censoring limits must not be read as exact data.
     """
 
     def diagnose_repeated_curvature_failure(
