@@ -204,7 +204,8 @@ def test_plan_is_minimal_frozen_and_deterministically_identified() -> None:
     second = family.bind_likelihood(response.copy(), resolved, COMPLETE_OBSERVATION)
 
     assert isinstance(first, FamilyLikelihoodPlan)
-    assert tuple(field.name for field in fields(first)) == ("weights",)
+    assert tuple(field.name for field in fields(first)) == ("weights", "observation")
+    assert first.observation == COMPLETE_OBSERVATION
     assert first.weights is resolved
     assert first.plan_identifier == second.plan_identifier
     assert first.plan_identifier.startswith("TweedieLSS/v1:")
