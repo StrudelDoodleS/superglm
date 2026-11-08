@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 import numpy as np
@@ -13,7 +13,9 @@ from scipy import special
 from scipy.special import expit
 
 from superglm.distributional.families._base import (
+    array_digest,
     composed_second_direction,
+    immutable,
     link_derivative_columns,
     link_inner_derivatives,
     natural_curvature_direction,
@@ -566,8 +568,11 @@ class TweedieLikelihoodPlan:
 
     weights: ResolvedLikelihoodWeights
     observation: ObservationContract = COMPLETE_OBSERVATION
+    response: NDArray[np.float64] | None = field(default=None, repr=False, compare=False)
+    _response_digest: str = field(default="", init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "_response_digest", "")
         if not isinstance(self.weights, ResolvedLikelihoodWeights):
             raise UnsupportedLikelihoodContractError(
                 "Tweedie likelihood plan requires resolved likelihood weights"
@@ -582,16 +587,32 @@ class TweedieLikelihoodPlan:
             raise UnsupportedLikelihoodContractError(
                 "Tweedie likelihood plan has invalid observation rows"
             )
+        if not self.observation.is_complete:
+            if self.response is None:
+                raise UnsupportedLikelihoodContractError(
+                    "bounded Tweedie plans require original response thresholds"
+                )
+            response = immutable(self.response)
+            if response.shape != self.weights.values.shape or not np.isfinite(response).all():
+                raise UnsupportedLikelihoodContractError(
+                    "bounded Tweedie response rows must be finite and match weights"
+                )
+            object.__setattr__(self, "response", response)
+            object.__setattr__(
+                self, "_response_digest", array_digest(b"TweedieLSS/bounded-response/v1", response)
+            )
 
     @property
     def plan_identifier(self) -> str:
         if not self.observation.is_complete:
-            return f"TweedieLSS/v2:{self.weights.digest}:{self.observation.bounds.digest}"
+            return f"TweedieLSS/v2:{self.weights.digest}:{self.observation.bounds.digest}:{self._response_digest}"
         return f"TweedieLSS/v1:{self.weights.digest}"
 
     def take(self, indices: NDArray[np.integer]) -> TweedieLikelihoodPlan:
         return type(self)(
-            weights=self.weights.take(indices), observation=self.observation.take(indices)
+            weights=self.weights.take(indices),
+            observation=self.observation.take(indices),
+            response=None if self.response is None else self.response[indices],
         )
 
 
@@ -733,11 +754,21 @@ class TweedieLSS(TweediePredictors):
             atom_at_lower=True,
             family_name="TweedieLSS",
         )
-        return TweedieLikelihoodPlan(weights=weights, observation=observation)
+        return TweedieLikelihoodPlan(
+            weights=weights,
+            observation=observation,
+            response=None if observation.is_complete else response,
+        )
 
     def initialize(self, y: NDArray, plan: FamilyLikelihoodPlan) -> InitialParameterState:
         tweedie_plan = _validated_plan(plan, n_observations=scalar_response_row_count(y))
         response = _observation_response(y, tweedie_plan.observation, tweedie_plan.weights)
+        if tweedie_plan.response is not None and not np.array_equal(
+            response, tweedie_plan.response
+        ):
+            raise UnsupportedLikelihoodContractError(
+                "Tweedie response does not match its bounded likelihood plan"
+            )
         if not tweedie_plan.observation.is_complete:
             bounds = tweedie_plan.observation.bounds
             response = response.copy()
@@ -775,6 +806,12 @@ class TweedieLSS(TweediePredictors):
         order = _validated_derivative_order(derivative_order)
         tweedie_plan = _validated_plan(plan, n_observations=scalar_response_row_count(y))
         response = _observation_response(y, tweedie_plan.observation, tweedie_plan.weights)
+        if tweedie_plan.response is not None and not np.array_equal(
+            response, tweedie_plan.response
+        ):
+            raise UnsupportedLikelihoodContractError(
+                "Tweedie response does not match its bounded likelihood plan"
+            )
         parameters = _validated_parameter_matrix(
             theta,
             n_observations=len(response),
@@ -1205,6 +1242,8 @@ __all__ = ["BoundedPowerLink", "TweedieLikelihoodPlan", "TweedieLSS"]
 _register_likelihood_reuse_contract(
     TweedieLSS,
     TweedieLikelihoodPlan,
+    # The optional response buffer is identity evidence, not a precomputed
+    # numerical channel. The cache snapshots all dataclass fields already.
     prepared_array_fields=(),
     link_types=(BoundedPowerLink,),
     deterministic_chunk_replay=True,
