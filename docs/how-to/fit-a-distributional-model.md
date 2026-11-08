@@ -131,6 +131,8 @@ also identify parameters in offsets and penalty keys.
 | `NegativeBinomialLS` | `mean`, `theta` | `mean`, `theta` | Response mean and NB2 size |
 | `TweedieLSS` | `mu`, `phi`, `p` | `mean`, `dispersion`, `power` | Response mean, dispersion and variance power |
 | `GeneralizedParetoLSS` | `scale`, `shape` | `scale`, `shape` | Excess scale and tail shape xi |
+| `LomaxLSS` | `scale`, `shape` | `scale`, `shape` | Monetary scale and positive tail exponent |
+| `LogLogisticLSS` | `scale`, `shape` | `scale`, `shape` | Median and positive tail exponent |
 | `LogNormalLS` | `mean`, `scale` | `mean`, `scale` | Response mean and standard deviation of the log response |
 | `GeneralizedGammaLSS` | `mean`, `scale`, `shape` | `mean`, `scale`, `shape` | Response mean, Prentice's sigma and Q |
 | `TwoPieceNormalLSS` | `location`, `scale`, `skew` | `location`, `scale`, `skew` | Two-piece location, scale and epsilon asymmetry |
@@ -220,12 +222,12 @@ import numpy as np
 
 from superglm import NegativeBinomialLS, SuperLSS
 
-def nb2_model():
+def nb2_model(*, mean_offset=None, theta_offset=None):
     family = NegativeBinomialLS()
     return SuperLSS(
         family,
-        family.mean("DrivAge", "VehAge"),
-        family.theta("DrivAge", "VehAge"),
+        family.mean("DrivAge", "VehAge", offset=mean_offset),
+        family.theta("DrivAge", "VehAge", offset=theta_offset),
     )
 
 
@@ -251,24 +253,15 @@ The exactly equivalent raw-count fit uses unit likelihood weights and adds
 
 ```python
 log_exposure = np.log(exposure)
-raw_equivalent = nb2_model().fit(
-    train_df,
-    claim_count,
-    offsets={
-        "mean": log_exposure,
-        "theta": log_exposure,
-    },
-)
+raw_equivalent = nb2_model(
+    mean_offset=log_exposure, theta_offset=log_exposure
+).fit(train_df, claim_count)
 ```
 
 Adding exposure only to the mean is supported, but it is a different model:
 
 ```python
-persistent_frailty = nb2_model().fit(
-    train_df,
-    claim_count,
-    offsets={"mean": log_exposure},
-)
+persistent_frailty = nb2_model(mean_offset=log_exposure).fit(train_df, claim_count)
 ```
 
 This specifies $\operatorname{NB2}(e\lambda,\theta)$: heterogeneity persists
@@ -333,7 +326,7 @@ factor smooth) is reported whenever any row is at the limit; remove the alias
 before acting on the suggested remedy.
 
 Fixed-smoothing and EFS fits support dense or grouped discrete execution with
-observed curvature. `NegativeBinomialLS` supplies Fisher information (Lawless,
+observed curvature. For complete observations, `NegativeBinomialLS` supplies Fisher information (Lawless,
 1987): the solver falls back to it when the observed curvature at the end of a
 fit is not a proper maximum, and says so with a `ConvergenceWarning` kept in
 `result_.warnings`; `coefficient_curvature="fisher"` can request it. Its
@@ -612,7 +605,7 @@ claims between them. Both fit the same tail; they differ in what the body
 sees.
 
 *Layer method.* Cap every claim at `u`. The body sees every claim, and a claim
-above `u` is recorded at `u` and marked censored: it was at least `u`. The
+above `u` is recorded at `u` and marked censored: it was greater than `u`. The
 tail sees the excess `y - u` of the claims above `u`.
 
 ```python
@@ -805,22 +798,24 @@ errors and default Murphy thresholds. Zero-weight rows are omitted. Candidates
 with different declarations may be compared only when every retained weight is
 exactly one.
 
-Offsets are explicit and predictor-keyed:
+Declare offsets on the predictor to which they belong. Column names are read
+from the fitting frame; numeric arrays align with its original rows. A list of
+columns or a list of numeric arrays adds its contributions on the link scale:
 
 ```python
-model.fit(
-    X_train,
-    y_train,
-    sample_weight=case_weights,
-    offsets={
-        "location": location_offset,
-        "scale": scale_offset,
-    },
-)
+family = GaussianLS()
+model = SuperLSS(
+    family,
+    family.location("age", offset=["baseline_location", "location_adjustment"]),
+    family.scale(offset=[scale_offset, scale_adjustment]),
+).fit(X_train, y_train, sample_weight=case_weights)
 ```
 
-Offsets enter their named linear predictors. An ambiguous scalar `offset=` keyword
-is deliberately unavailable.
+Offsets are fixed contributions, with coefficient one; they are not fitted
+terms or weights. `SuperLSS.fit` and `fit_reml` have no `offsets` argument.
+Prediction-time `offsets={parameter: new_row_values}` remains available for
+new rows. See [predictor offsets](specify-distributional-offsets.md) for alignment,
+replay and prediction details. `SuperGLM` keeps its separate API.
 
 ## Truncated and censored rows
 
@@ -831,7 +826,7 @@ where policy limits cap claims. `fit` and `fit_reml` take two optional
 arguments:
 
 - `censored=`: the row's recorded response is a bound, not the claim itself.
-  `True` (or `"right"`) means the claim was at least the recorded value: a
+  `True` (or `"right"`) means the claim was strictly greater than the recorded value: a
   claim capped at the threshold, or settled at its policy limit. `"left"`
   means it was at most the recorded value. Pass one entry per row; `False` or
   `"none"` marks a complete row, and a missing entry (`None`, NaN or `pd.NA`)
@@ -839,7 +834,7 @@ arguments:
   for example `np.minimum(loss, u)` with `censored=loss > u`. A censored row
   contributes the probability beyond its recorded value.
 - `truncation=(lower, upper)`: the row could only have been recorded inside
-  this window. Each side is `None`, one number, or one number per row. The
+  `lower < Y <= upper`. Each side is `None`, one number, or one number per row. The
   split method's body is `truncation=(None, u)`. A deductible is
   `truncation=(d, None)` only when claims under it never reach the data; if
   they are recorded at their ground-up amount, no bound is needed. A
@@ -865,7 +860,7 @@ response outside its truncation window is refused, as is a censored row whose
 window leaves nothing beyond its recorded value; the error names the first
 such row. Bounds that touch no row leave the fit an ordinary complete one.
 
-The diagnostics read the same bounds. `residual_set`, `residuals`, `check`,
+For continuous families with CDF/quantile support, diagnostics read the same bounds. `residual_set`, `residuals`, `check`,
 `check_2d`, `scores` and the diagnostic plots take `truncation=` and
 `censored=`: a truncated row's PIT is read inside its window, and a censored
 row's is drawn at random beyond its bound, so a well-fitted model's PIT is
@@ -875,12 +870,31 @@ are for complete rows and refuse bounded ones, so ask for
 read every row as complete. Each of these warns when the model was fitted with
 bounds and is called without them.
 
-`GaussianLS`, `LogNormalLS`, `GammaLS`, `GeneralizedGammaLSS` and
-`GeneralizedParetoLSS` take these bounds; the other families refuse them. When
-the Newton endgame of smoothing selection runs, it uses
-closed-form third and fourth derivatives of these rows for `GammaLS` and
-`GeneralizedGammaLSS`, as it does for complete rows; for the other three it
-differences the curvature instead. `outer="efs"` needs neither.
+All eleven scalar families take these bounds, including `NegativeBinomialLS`,
+`TweedieLSS`, both two-piece families, `LomaxLSS` and `LogLogisticLSS`. Each
+supplies core likelihood, score and Hessian channels, including the combined
+censoring numerator and truncation denominator. General interval censoring is
+not supported. Dirichlet compositions accept complete observations only.
+
+The [family capability table](../api/distributional/families.md#observation-and-weight-support)
+lists optional bounded directions. NB, Tweedie and both two-piece families
+explicitly decline analytic bounded third/fourth directions; the smoothing
+endgame uses its existing numerical fallback. `outer="efs"` needs neither.
+Bounded Fisher information is unavailable for every scalar family.
+
+Atoms and count endpoints matter: a zero lower bound excludes the NB/Tweedie
+zero atom, left censoring at zero includes it, and right censoring at zero
+excludes it. Prior NB rates use represented binary64 `k/w` endpoints; censor
+limits need not themselves be lattice points. Positive continuous laws accept
+right-censor limits at or below zero, while exact responses retain their own
+support validation. Bounds are validated before clipping to support.
+
+NB still has no CDF/quantile protocol, and bounded Tweedie atom residuals
+explicitly refuse. Their bounded log scores are available; a probability
+window capability alone does not promise PIT, QQ, worm or CRPS diagnostics.
+Numerically unresolved finite-probability trials may exhaust a range or work
+limit and be declined. This is different from a data-impossible empty event;
+public window queries report numerical refusal instead of returning zero.
 
 A window that keeps only a small share of the law, such as a body truncated
 above at its own 5% point, says little about the law beyond the bound: the fit
@@ -908,8 +922,10 @@ Censoring has the same failure. A level whose rows are all censored on the
 same side, such as a policy type whose every claim was paid at its limit, has
 only a bound on its response, so its effect walks to infinity along any
 predictor that moves every such bound probability one way: the location or
-mean of `GaussianLS`, `LogNormalLS`, `GammaLS` and `GeneralizedGammaLSS`, and
-both predictors of `GeneralizedParetoLSS`. A fit with censored rows scans every `Categorical`
+mean of `GaussianLS`, `LogNormalLS`, `GammaLS`, `GeneralizedGammaLSS` and
+the two-piece families, the scale of `LomaxLSS` and `LogLogisticLSS`, and
+both predictors of `GeneralizedParetoLSS`. NB and Tweedie do not currently
+declare a censored-recession scan. A fit with censored rows scans every `Categorical`
 term and `CategoricalInteraction` on those predictors for such levels and
 cells, under the same `separation` policy. When every row is censored on the
 same side, as with `censored=True` for all rows, the predictor's intercept has
@@ -1223,10 +1239,10 @@ declared response support. Tweedie's CDF instead includes its atom at zero.
 
 Expected shortfall is owned by `ExpectedShortfallFamily`, not synthesised by
 generic quantile quadrature. The certified unit-law implementations are
-`GaussianLS`, `GammaLS`, `LogNormalLS`, `GeneralizedGammaLSS` and
-`GeneralizedParetoLSS`. Only Gaussian and gamma also certify non-unit
-prior-weighted expected shortfall. `TweedieLSS`, both two-piece families and
-`NegativeBinomialLS` refuse it. Structural support does not promise that every
+`GaussianLS`, `GammaLS`, `LogNormalLS`, `GeneralizedGammaLSS`,
+`GeneralizedParetoLSS` and `LomaxLSS`. Only Gaussian and gamma also certify non-unit
+prior-weighted expected shortfall. `TweedieLSS`, both two-piece families,
+`NegativeBinomialLS` and `LogLogisticLSS` refuse it. Structural support does not promise that every
 float64 tail is resolvable: Gamma, log-normal and generalized-gamma rows refuse
 when their numerical tail certificate fails. Generalized-gamma location form
 returns `+∞` when the first moment does not exist, while mean form rejects that
@@ -1463,7 +1479,8 @@ meaning on both execution routes.
 The coefficient solve is Newton's method on the observed Hessian for
 every family. `coefficient_curvature="fisher"` on `SuperLSS` asks for Fisher
 scoring instead and is accepted only for a family that supplies expected
-information. Every current built-in except `TweedieLSS` supplies it; a family
+information. For complete rows, the built-ins except `TweedieLSS` and
+`LogLogisticLSS` supply it; bounded scalar plans refuse it. A family
 implementing that capability does not change the default solve. Under either
 policy the accepted terminal point is re-examined with the penalized observed
 Hessian `A + S`, restricted to the active coefficient subspace when needed. If
@@ -1523,11 +1540,15 @@ derivative of the packed curvature along a predictor direction); when a family
 does not implement it the endgame differences the packed rows with a
 four-point stencil per axis and carries a certificate. Order 4 is optional in
 the same way (`PredictorCurvatureSecondDirectionalFamily`, the curvature's
-second directional derivative from the row's fourth derivatives); every
-built-in family supplies it, so the endgame's Hessian evaluates no packed rows
-beyond the gradient's. A family without it, a link without a fourth inverse
+second directional derivative from the row's fourth derivatives). Complete
+built-in laws offer it within their numerical and regularity restrictions.
+A family or observation plan without it, a link without a fourth inverse
 derivative, or a two-piece row on its join falls back to second differences of
 the packed rows.
+
+The following table describes complete scalar observations. Bounded-plan
+refusals and the log-logistic small-shape restriction are listed in the
+[family reference](../api/distributional/families.md).
 
 | Family | Row log-likelihood | Fused order-2 kernel | Analytic order 3 | Order 4 |
 |---|---|---|---|---|
@@ -1538,6 +1559,7 @@ the packed rows.
 | `LogNormalLS` | smooth to every order | yes | yes (built-in links only) | yes (built-in links only) |
 | `GeneralizedGammaLSS` | smooth to every order; `Q = 0` is removable and the kernel's series cover it | yes | yes | yes |
 | `GeneralizedParetoLSS` | smooth to every order on `0 < ξ < 1` | yes | yes | yes |
+| `LomaxLSS`, `LogLogisticLSS` | smooth on the interior of their density support | yes | within numerical admission | within numerical admission |
 | `TwoPieceNormalLSS`, `TwoPieceLogNormalLSS` | `C¹` only: the curvature jumps at the mode `w = 0` | yes, away from the kink | yes away from the kink; a path through the kink is refused and differenced, because there the third derivative is a point mass | yes away from the kink, with a certificate near it; refused and differenced on it |
 
 For the two-piece families a path through the kink takes the differenced
@@ -1649,17 +1671,18 @@ order you are likely to meet them.
   Constrained smooths here are planned, with their own design.
 - **Each predictor is penalised on its own.** A penalty cannot tie a term in
   the mean predictor to a term in the scale predictor.
-- **Offsets are per row.** An offset is an array with one value per row,
-  given per predictor. A single constant is refused.
+- **Offsets belong to predictors.** Use `offset=` on a family helper or
+  `bind_predictor`, with columns or row-aligned numeric arrays (including lists
+  of either); prediction-time replacements remain predictor-keyed.
 - **`predict()` returns the mean on the scale you fitted.** `LogNormalLS`
   fits `y` itself and returns the mean of `y`. A Gaussian model fitted to a
   response you logged by hand returns the mean of the logged response;
   turning that into a mean of `y` is your modelling decision, and
   `LogNormalLS` is the supported way to make it.
-- **Truncation and censoring cover five families.** `GaussianLS`,
-  `LogNormalLS`, `GammaLS`, `GeneralizedGammaLSS` and `GeneralizedParetoLSS`
-  take `truncation=` and `censored=`; the two-piece, negative binomial and
-  Tweedie families refuse them.
+- **All eleven scalar families support truncation and left/right censoring.**
+  General interval censoring and bounded Dirichlet compositions are unsupported.
+  Optional higher derivatives and diagnostics have narrower capabilities than
+  the core likelihood.
 - **Bounded rows have no CRPS.** The log score covers truncated and censored
   rows; the CRPS scores, `actual_expected`, `calibration` and `compare` do not.
 - **Negative binomial has no zero-inflated variant**, and its size parameter

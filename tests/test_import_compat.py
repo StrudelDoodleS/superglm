@@ -539,6 +539,62 @@ _GROUP = "superglm._group_matrix._group_matrix_kernels."
 _TWEEDIE = "superglm.distributional.kernels._tweedie_numba."
 _NB = "superglm.distributional.kernels._negative_binomial_numba."
 _DECLARED = "superglm.distributional.kernels._declared."
+
+
+def test_scalar_observation_warmup_covers_core_dispatchers_and_operands(tmp_path):
+    """A bounded first fit must reuse the warm core, including readonly inputs.
+
+    This short subprocess exercises just the new warmup stage. The full census
+    below still owns every package dispatcher, import laziness and cold starts.
+    """
+    code = r"""
+import importlib
+import numpy as np
+from numba.core.dispatcher import Dispatcher
+import superglm
+
+superglm._warmup_scalar_observations()
+modules = [importlib.import_module("superglm.distributional.kernels." + name)
+           for name in ("_incomplete_beta", "_negative_binomial_windows", "_incomplete_gamma")]
+dispatchers = {f"{m.__name__}.{name}": obj for m in modules
+               for name, obj in vars(m).items() if isinstance(obj, Dispatcher)}
+for m in modules[:2]:
+    for name, obj in vars(m).items():
+        if isinstance(obj, Dispatcher) and obj.py_func.__module__ == m.__name__:
+            assert obj.signatures, (m.__name__, name)
+before = {name: tuple(obj.signatures) for name, obj in dispatchers.items()}
+superglm._warmup_scalar_observations()
+from superglm.distributional.families.negative_binomial import NegativeBinomialLS
+from superglm.distributional.families.tweedie import TweedieLSS
+from superglm.distributional.family import bounded_observation
+from superglm.distributional.observation import ResponseBounds
+from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
+for family, theta in ((NegativeBinomialLS(), [2., .7]), (TweedieLSS(), [2., 1.2, 1.5])):
+    y = np.array([1., 2., 3.])
+    bounds = ResponseBounds.from_arrays(np.zeros(3), np.full(3, 5.), np.array([-1, 0, 1]))
+    for semantics in ("prior", "frequency"):
+        w = resolve_likelihood_weights(np.full(3, 2.), n_observations=3, contract=WeightContract(semantics=semantics))
+        plan = family.bind_likelihood(y, w, bounded_observation(bounds))
+        matrix = np.tile(theta, (3, 1))
+        matrix.setflags(write=False)
+        for order in (0, 1, 2):
+            result = family.evaluate_natural(y, matrix, plan, derivative_order=order)
+            assert result.valid.all()
+after = {name: tuple(obj.signatures) for name, obj in dispatchers.items()}
+assert before == after, {name: after[name] for name in before if before[name] != after[name]}
+print("ok")
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=210,
+        env={**os.environ, "NUMBA_CACHE_DIR": str(tmp_path / "scalar-core-cache")},
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "ok"
+
+
 _FIRST_USE: dict[str, str] = {
     # Measured over cold first fits on the freMTPL2 book: 71 on 2026-10-20
     # (every family and link, SuperGLM and SuperLSS, exact and binned,
@@ -677,6 +733,10 @@ dispatchers, problems = package_dispatchers()
 at_import = signatures(dispatchers)
 superglm.warmup()
 warmed = signatures(dispatchers)
+
+# These core observation routes have Python callers with scalar/readonly
+# operands distinct from the complete-row kernels. Census them after warmup.
+superglm._warmup_scalar_observations()
 
 
 def readonly(*arrays):

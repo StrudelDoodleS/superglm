@@ -19,6 +19,7 @@ from superglm.distributional.families._base import (
     second_direction_arrays,
     typed_plan,
     validated_float_response,
+    validated_observation_response,
 )
 from superglm.distributional.families._predictors import (
     LocationPredictor,
@@ -105,7 +106,24 @@ _CAPABILITIES = FamilyCapabilities(
 )
 
 
-def _validated_response(y: NDArray) -> NDArray[np.float64]:
+def _density_response(response, observation):
+    """Harmless internal density/start values, never the observed thresholds."""
+    bounds = observation.bounds
+    if bounds is None:
+        return response
+    replace = (bounds.side != 0) & (response <= 0.0)
+    return np.where(replace, 1.0, response) if np.any(replace) else response
+
+
+def _validated_response(y: NDArray, observation=None, weights=None) -> NDArray[np.float64]:
+    bounds = getattr(observation, "bounds", None)
+    if bounds is not None:
+        return validated_observation_response(
+            y,
+            censored=bounds.side != 0,
+            exact_validator=_validated_response,
+            input_positions=getattr(weights, "input_positions", None),
+        )
     return validated_float_response(
         y,
         message="y must be a non-empty finite strictly positive vector",
@@ -323,7 +341,7 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
         weights: ResolvedLikelihoodWeights,
         observation: ObservationContract,
     ) -> LogNormalLikelihoodPlan:
-        response = _validated_response(y)
+        response = _validated_response(y, observation, weights)
         observation = bind_observation(
             observation, response, weights, support_lower=0.0, family_name=_FAMILY_NAME
         )
@@ -354,7 +372,8 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
             )
         with np.errstate(over="ignore", invalid="ignore"):
             carrier = censored_carrier(
-                -multiplier * (np.log(response) + _HALF_LOG_TWO_PI), observation.bounds
+                -multiplier * (np.log(_density_response(response, observation)) + _HALF_LOG_TWO_PI),
+                observation.bounds,
             )
         if not np.all(np.isfinite(carrier)):
             raise UnsupportedLikelihoodContractError(
@@ -382,7 +401,9 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
     def validate_likelihood_plan(
         self, y: NDArray, plan: FamilyLikelihoodPlan
     ) -> NDArray[np.float64]:
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         candidate = self._plan(plan, len(response))
         observation = candidate.observation
         if observation != COMPLETE_OBSERVATION and (
@@ -397,7 +418,6 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
             or bound.shape != response.shape
             or bound.flags.writeable
             or not np.all(np.isfinite(bound))
-            or np.any(bound <= 0.0)
         ):
             raise UnsupportedLikelihoodContractError(
                 "LogNormalLS likelihood owns an invalid bound response"
@@ -409,10 +429,12 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
         return bound
 
     def initialize(self, y: NDArray, plan: FamilyLikelihoodPlan) -> InitialParameterState:
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         bound = self._plan(plan, len(response))
         theta = initialize_log_normal(
-            response,
+            _density_response(response, bound.observation),
             bound.multiplier,
             parametrisation=self.parametrisation,
             scale_floor=self.scale_floor,
@@ -436,13 +458,19 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
         derivative_order: int = 2,
     ) -> NaturalLikelihoodEvaluation:
         order = _validated_derivative_order(derivative_order)
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         values = self._theta(theta, len(response))
         bound = self._plan(plan, len(response))
         mean_form = self.parametrisation == "mean"
         rows = mean_rows if mean_form else location_rows
         evaluated = rows(
-            response, values[:, 0], values[:, 1], bound.multiplier, derivative_order=order
+            _density_response(response, bound.observation),
+            values[:, 0],
+            values[:, 1],
+            bound.multiplier,
+            derivative_order=order,
         )
         optimizing, score, hessian, valid = (
             evaluated.optimizing_log_likelihood,
@@ -498,7 +526,9 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
     ) -> NDArray[np.float64]:
         """Differentiate observed predictor curvature along one predictor path."""
 
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         first_link = LogLink if self.parametrisation == "mean" else IdentityLink
         link_tuple = tuple(links)
         if (
@@ -517,7 +547,11 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
             else location_curvature_directional
         )
         complete = directional(
-            response, eta, eta_direction, bound.multiplier, scale_floor=self.scale_floor
+            _density_response(response, bound.observation),
+            eta,
+            eta_direction,
+            bound.multiplier,
+            scale_floor=self.scale_floor,
         )
         if bound.observation.bounds is None:
             return complete
@@ -538,7 +572,9 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
     ) -> NDArray[np.float64]:
         """Differentiate observed predictor curvature twice, along ``a`` then ``b``."""
 
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         first_link = LogLink if self.parametrisation == "mean" else IdentityLink
         link_tuple = tuple(links)
         if (
@@ -556,7 +592,7 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
             response, eta, direction_a, direction_b, 2
         )
         fourth = predictor_fourth_derivatives(
-            response,
+            _density_response(response, bound.observation),
             predictors,
             bound.multiplier,
             parametrisation=self.parametrisation,

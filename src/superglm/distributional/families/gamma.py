@@ -19,6 +19,7 @@ from superglm.distributional.families._base import (
     second_direction_arrays,
     typed_plan,
     validated_float_response,
+    validated_observation_response,
 )
 from superglm.distributional.families._predictors import (
     MeanPredictor,
@@ -106,7 +107,24 @@ def _carrier_digest(values: NDArray[np.float64]) -> str:
     return array_digest(b"GammaLS/carrier/v1\0", values)
 
 
-def _validated_response(y: NDArray) -> NDArray[np.float64]:
+def _density_response(response, observation):
+    """Harmless internal density/start values, never the observed thresholds."""
+    bounds = observation.bounds
+    if bounds is None:
+        return response
+    replace = (bounds.side != 0) & (response <= 0.0)
+    return np.where(replace, 1.0, response) if np.any(replace) else response
+
+
+def _validated_response(y: NDArray, observation=None, weights=None) -> NDArray[np.float64]:
+    bounds = getattr(observation, "bounds", None)
+    if bounds is not None:
+        return validated_observation_response(
+            y,
+            censored=bounds.side != 0,
+            exact_validator=_validated_response,
+            input_positions=getattr(weights, "input_positions", None),
+        )
     return validated_float_response(
         y,
         message="y must be a non-empty finite strictly positive vector",
@@ -291,7 +309,7 @@ class GammaLS(MeanPredictor, ScalePredictor):
         weights: ResolvedLikelihoodWeights,
         observation: ObservationContract,
     ) -> GammaLikelihoodPlan:
-        response = _validated_response(y)
+        response = _validated_response(y, observation, weights)
         observation = bind_observation(
             observation, response, weights, support_lower=0.0, family_name="GammaLS"
         )
@@ -303,7 +321,7 @@ class GammaLS(MeanPredictor, ScalePredictor):
             )
         semantics = weights.provenance.contract.semantics
         with np.errstate(over="ignore", invalid="ignore"):
-            carrier = -np.log(response)
+            carrier = -np.log(_density_response(response, observation))
             if semantics == "frequency":
                 carrier = weights.values * carrier
         carrier = censored_carrier(carrier, observation.bounds)
@@ -336,7 +354,9 @@ class GammaLS(MeanPredictor, ScalePredictor):
         y: NDArray,
         plan: FamilyLikelihoodPlan,
     ) -> NDArray[np.float64]:
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         candidate = _validated_plan(plan, n_observations=len(response))
         semantics = candidate.weights.provenance.contract.semantics
         expected_law = (
@@ -366,7 +386,6 @@ class GammaLS(MeanPredictor, ScalePredictor):
             or bound_response.shape != response.shape
             or bound_response.flags.writeable
             or not np.all(np.isfinite(bound_response))
-            or np.any(bound_response <= 0.0)
         ):
             raise UnsupportedLikelihoodContractError(
                 "GammaLS likelihood owns an invalid bound response"
@@ -378,10 +397,12 @@ class GammaLS(MeanPredictor, ScalePredictor):
         return bound_response
 
     def initialize(self, y: NDArray, plan: FamilyLikelihoodPlan) -> InitialParameterState:
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         gamma_plan = _validated_plan(plan, n_observations=len(response))
         theta = initialize_gamma(
-            response,
+            _density_response(response, gamma_plan.observation),
             gamma_plan.weights.values,
             gamma_plan.weights.provenance.contract.semantics,
         )
@@ -396,7 +417,9 @@ class GammaLS(MeanPredictor, ScalePredictor):
         derivative_order: int = 2,
     ) -> NaturalLikelihoodEvaluation:
         order = _validated_derivative_order(derivative_order)
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         parameters = _validated_parameter_matrix(
             theta,
             n_observations=len(response),
@@ -405,7 +428,7 @@ class GammaLS(MeanPredictor, ScalePredictor):
         )
         gamma_plan = _validated_plan(plan, n_observations=len(response))
         evaluated = evaluate_gamma_rows(
-            response,
+            _density_response(response, gamma_plan.observation),
             parameters[:, 0],
             parameters[:, 1],
             gamma_plan.weights.values,
@@ -475,7 +498,9 @@ class GammaLS(MeanPredictor, ScalePredictor):
     ) -> NDArray[np.float64]:
         """Differentiate observed predictor curvature along one predictor path."""
 
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         link_tuple = tuple(links)
         if len(link_tuple) != 2 or any(type(link) is not LogLink for link in link_tuple):
             raise UnsupportedLikelihoodContractError(
@@ -483,7 +508,7 @@ class GammaLS(MeanPredictor, ScalePredictor):
             )
         gamma_plan = _validated_plan(plan, n_observations=len(response))
         complete = gamma_predictor_curvature_directional(
-            gamma_plan.exact_response,
+            _density_response(gamma_plan.exact_response, gamma_plan.observation),
             eta,
             eta_direction,
             gamma_plan.weights.values,
@@ -508,7 +533,9 @@ class GammaLS(MeanPredictor, ScalePredictor):
     ) -> NDArray[np.float64]:
         """Differentiate observed predictor curvature twice, along ``a`` then ``b``."""
 
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         link_tuple = tuple(links)
         if len(link_tuple) != 2 or any(type(link) is not LogLink for link in link_tuple):
             raise UnsupportedLikelihoodContractError(
@@ -520,7 +547,7 @@ class GammaLS(MeanPredictor, ScalePredictor):
             response, eta, direction_a, direction_b, 2
         )
         fourth = gamma_predictor_fourth_derivatives(
-            gamma_plan.exact_response,
+            _density_response(gamma_plan.exact_response, gamma_plan.observation),
             predictors,
             gamma_plan.weights.values,
             gamma_plan.weights.provenance.contract.semantics,

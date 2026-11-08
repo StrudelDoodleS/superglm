@@ -13,7 +13,19 @@ tuple is the executable contract. The built-ins currently expose:
 - two parameters: `GaussianLS`, `GammaLS`, `LogNormalLS`,
   `NegativeBinomialLS`, `GeneralizedParetoLSS`, `LomaxLSS`, and `LogLogisticLSS`;
 - three parameters: `TweedieLSS`, `GeneralizedGammaLSS`,
-  `TwoPieceLogNormalLSS`, and `TwoPieceNormalLSS`.
+  `TwoPieceLogNormalLSS`, and `TwoPieceNormalLSS`;
+- one per named response component: `DirichletLSS`, with canonical parameters
+  `alpha_0`, `alpha_1`, and so on, and positive log links.
+
+Scalar response shape is the default. A vector family declares a frozen
+`ResponseSpec(shape=(K,), component_names=(...))`; shape metadata grants no
+observation or diagnostic capability by itself. Validate original shape,
+labels and index before positive-weight selection; validate retained raw values
+in the family before generic float64 conversion. This preserves exact counts,
+composition policy and original-row provenance. A vector default prediction
+declares its component columns explicitly. Dirichlet's joint density has a
+zero carrier and supplied-share identity, with normalized log shares prepared
+once per immutable plan. Runtime arithmetic remains portable float64.
 
 ## Responsibility map
 
@@ -235,10 +247,10 @@ unit and prior-weighted distribution-function and variance protocols.
 
 Expected-shortfall support is narrower and always family-owned through
 `ExpectedShortfallFamily`. Its certified unit-law implementations are
-`GaussianLS`, `GammaLS`, `LogNormalLS`, `GeneralizedGammaLSS` and
-`GeneralizedParetoLSS`; only Gaussian and gamma also implement
-`PriorWeightedExpectedShortfallFamily`. `TweedieLSS`, both two-piece families
-and `NegativeBinomialLS` refuse expected shortfall. Protocol membership states
+`GaussianLS`, `GammaLS`, `LogNormalLS`, `GeneralizedGammaLSS`,
+`GeneralizedParetoLSS` and `LomaxLSS`; only Gaussian and gamma also implement
+`PriorWeightedExpectedShortfallFamily`. `TweedieLSS`, both two-piece families,
+`NegativeBinomialLS` and `LogLogisticLSS` refuse expected shortfall. Protocol membership states
 structural availability, not that every representable tail can be resolved:
 Gamma, log-normal and generalized-gamma rows refuse when their float64 tail
 certificate fails. Generalized-gamma location form returns `+∞` when the upper
@@ -262,12 +274,13 @@ threshold-weighted CRPS, Murphy curves, paired standard errors and default
 thresholds as well as log score. Zero-weight rows are omitted, and a comparison
 with mixed semantics refuses whenever any retained weight is not exactly one.
 
-`GammaLS` and `NegativeBinomialLS` own an exact response and a
-response-dependent carrier in their plans. They therefore implement
-`LikelihoodPlanValidatingFamily` and return the plan's canonical read-only
-response after checking it against the supplied response. Gaussian and Tweedie
-plans own no exact response requiring such a hook, so `GaussianLS` and
-`TweedieLSS` rely on the generic response snapshot. Plan admission is
+Families with response-owning plans implement `LikelihoodPlanValidatingFamily`
+and return the plan's canonical read-only response after checking the supplied
+response. This includes Gamma, NB, the positive continuous adapters, the
+two-piece families and Dirichlet. Tweedie's bounded plan also owns its original
+response; its complete plan and Gaussian retain their generic response snapshot.
+Never replace a censored limit in stored response identity with an internal
+density placeholder. Plan admission is
 structural rather than exact-lineage based: subclasses of every plan are
 admitted when their field invariants hold.
 
@@ -338,19 +351,37 @@ rows does the following; `GaussianLS` is the reference.
 
 - It declares `FamilyCapabilities(censored_response=True)` and binds the
   `"censored_truncated"` contract, whose `bounds` are `ResponseBounds`.
-- It reads lower bounds at or below the start of its response support as
-  absent. A contract left with no bounded row binds as the complete one, so
-  `truncation=(0, None)` on a positive response is an ordinary fit.
+- It validates every original window before clipping it to support. For a
+  continuous law, lower bounds at or below support are ineffective; an atom
+  requires `bind_observation(..., atom_at_lower=True)`, so equality excludes
+  the atom and only strictly lower endpoints are ineffective. NB additionally
+  owns its count-lattice intersection and preserves an explicitly supplied
+  bounded plan's finite-NB policy in its identity. The other scalar adapters
+  reduce contracts with no effective bounded row to complete. Thus
+  `truncation=(0, None)` is ineffective for a positive continuous law but
+  excludes zero for NB and Tweedie.
+- It separates finite censor thresholds from exact-density support using
+  `validated_observation_response`, passing the boolean `bounds.side != 0`
+  and original input positions. Exact values reach the family's original
+  validator before conversion. Density evaluation and initialization may use
+  harmless private representatives; observation windows, carriers and plan
+  identity retain the original thresholds. Right limits at/below continuous
+  support can be valid; impossible left events still fail.
 - Its plan exposes the bound contract as `plan.observation`, and its plan
   identifier includes the bounds. The diagnostics, the corrected covariance
   and the solver's curvature choice read `plan.observation`, and a fit with
   bounds refuses a plan without it.
-- It refuses expected information and analytic third and fourth derivatives
-  for a bounded plan with `UnsupportedLikelihoodContractError`.
+- It refuses complete-row expected information on a bounded plan with
+  `UnsupportedLikelihoodContractError`. Analytic third/fourth directions need
+  separate bounded-law evidence; NB, Tweedie and both two-piece adapters
+  explicitly refuse them. The older continuous adapters supply admitted
+  directions, with the numerical restrictions described above. A refusal
+  preserves the existing finite-difference smoothing fallback.
 - It supplies `log_window_probability(lower, upper, theta, weights=None)`
   (`ResponseWindowFamily`), built from log tails rather than a difference of
-  CDF values. The residuals, the checks and the plots read bounded rows
-  through it, and refuse them from a family without it.
+  CDF values. Window capability is distinct from CDF/quantile capability:
+  bounded NB fitting/log scoring does not enable quantile diagnostics, and
+  bounded Tweedie atom residuals remain unsupported.
 - It may declare `censored_recession(bounds)` (`CensoredSeparationFamily`):
   one flag per row and predictor, true where that censored row's bound
   probability nears its supremum only as the predictor walks off one way. A
@@ -366,6 +397,32 @@ rows does the following; `GaussianLS` is the reference.
   parameter names; its flags are then read only on the parameter's default
   link, since a bounded link such as a logit can stop short of the limit and
   leave the level a finite estimate.
+
+Every built-in scalar adapter now supplies actual core orders 0–2 for these
+observations. `tests/test_all_scalar_observations.py` tests each family and
+both log-normal/two-piece-log-normal forms against independent normalized
+laws, including linked Hessians, literal frequency replication, prior-law
+weights, atoms, count-rate endpoints and plan takes. A capability flag or a
+numerical refusal does not satisfy an ordinary-domain matrix cell.
+
+New bounded NB/Tweedie/two-piece plans store complete normalized values with
+zero carriers. For stable normalized overrides, `bounded_channels` requires
+an explicit zero carrier and excludes selected rows from its ordinary
+numerator/denominator route. The callback supplies unit-frequency jets;
+the helper multiplies once. Identical events are algebraic zero, and
+strongly conditioned laws may need shared anchors to avoid subtracting large
+common density/carrier terms. Shared weight takes require unique indices;
+replication uses frequency weights or a newly bound replicated sample.
+
+Unresolved requested channels become invalid trial rows with finite
+placeholders, allowing ordinary backtracking and convergence disclosure.
+Public probability queries raise a useful numerical error. Keep numerical
+work/range restrictions separate from mathematical support and from empty
+events. No high-precision or symbolic dependency belongs on the runtime path.
+Register new compiled primitive callers with the generator; classify every
+dispatcher in the warmup census. NB/beta core entry points and the Python-called
+gamma operand routes used by Tweedie are warmed at orders 0–2, while optional
+third/fourth and uncommon endpoint fallbacks retain first-use compilation.
 
 ```python
 from dataclasses import dataclass
