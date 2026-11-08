@@ -848,3 +848,33 @@ def test_public_prediction_underflow_is_not_a_structural_zero(fitted):
     assert (plain.predict_parameters(X.iloc[:1], offsets=offsets) > 0).all().all()
     with pytest.raises(ValueError, match="underflow|range|positive"):
         plain.predict(X.iloc[:1], offsets=offsets)
+
+
+@pytest.mark.parametrize("consumer", ["scores", "compare"])
+def test_unresolved_joint_density_cannot_publish_zero_log_scores(fitted, consumer):
+    _, X, y = fitted
+    family = DirichletLSS(tuple(y.columns))
+    model = SuperLSS(
+        family, *(family.alpha(c) for c in family.components), weight_semantics="frequency"
+    ).fit(X, y)
+    frame, response = X.iloc[:3], y.iloc[:3]
+    eta = model.predict_link(frame).to_numpy()
+    offsets = {
+        name: np.array([0.0, np.log(1e308) - eta[1, j], np.log(1e308) - eta[2, j]])
+        for j, name in enumerate(model.parameter_names_)
+    }
+    assert np.isfinite(model.predict_parameters(frame, offsets=offsets)).all().all()
+    with pytest.raises(ValueError, match="concentration.*range"):
+        model.predict(frame, offsets=offsets)
+    weights = np.array([1.0, 0.0, 2.0])
+    with pytest.raises(ValueError, match=r"log score.*original rows \[2\]"):
+        if consumer == "scores":
+            model.scores(frame, response, which=("log",), offsets=offsets, sample_weight=weights)
+        else:
+            model.compare(model, frame, response, offsets=offsets, sample_weight=weights)
+    # The numerical range of omitted rows must not affect the retained score.
+    retained = model.scores(
+        frame, response, which=("log",), offsets=offsets, sample_weight=np.array([1.0, 0.0, 0.0])
+    )
+    assert np.isfinite(retained.log.iloc[0])
+    assert retained.log.iloc[1:].isna().all()
