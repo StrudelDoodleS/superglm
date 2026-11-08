@@ -847,8 +847,8 @@ def _fit_candidate(
         getattr(family, "capabilities", None), "censored_response", False
     ):
         raise UnsupportedLikelihoodContractError(
-            f"{type(family).__name__} does not fit truncated or censored rows; GaussianLS, "
-            "LogNormalLS, GammaLS, GeneralizedGammaLSS and GeneralizedParetoLSS do, or drop "
+            f"{type(family).__name__} does not fit truncated or censored rows. "
+            "All built-in scalar families support these observations; use a compatible family or drop "
             "truncation= and censored= to read every row as complete"
         )
     # Inherited capability must not bypass a custom family's ordinary binder.

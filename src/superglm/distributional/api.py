@@ -663,15 +663,15 @@ class SuperLSS:
             a splice body kept at or below a threshold, ``(None, u)``, or
             losses reported above a deductible, ``(d, None)``. Each side is
             ``None``, one number, or one number per row. A truncated row
-            contributes its density divided by the probability of its window.
+            contributes its density divided by ``P(lower < Y <= upper)``.
         censored : bool, label, or array-like of shape (n_observations,), optional
             Which rows were censored, and on which side; the response of a
             censored row is the limit it was censored at. ``True`` or
-            ``"right"`` reads a row as "at least this", such as a claim paid
+            ``"right"`` reads a row as "strictly greater than this", such as a claim paid
             at its policy limit, and ``"left"`` as "at most this"; ``False``
             and ``"none"`` leave a row complete. A missing entry (``None``,
             NaN or ``pd.NA``) is refused rather than read as complete. Pass
-            one flag per row, for example ``censored=loss >= limit`` with
+            one flag per row, for example ``censored=loss > limit`` with
             ``y=np.minimum(loss, limit)``, or one value for every row. A row
             is censored only when flagged, never because its response equals
             a limit.
@@ -689,9 +689,9 @@ class SuperLSS:
 
         With ``truncation`` or ``censored`` the fit estimates the parent law
         of the uncut response, so ``predict`` and the distribution functions
-        describe that law, not the law within the bounds. ``GaussianLS``,
-        ``LogNormalLS``, ``GammaLS``, ``GeneralizedGammaLSS`` and
-        ``GeneralizedParetoLSS`` support them.
+        describe that law, not the law within the bounds. All eleven built-in
+        scalar families support these observations; ``DirichletLSS`` accepts
+        complete compositions only.
 
         See Also
         --------

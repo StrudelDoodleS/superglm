@@ -92,7 +92,11 @@ model = SuperLSS(
 )
 ```
 
-Each helper accepts `intercept` and `link`. For interactions, declare the
+Each helper accepts `intercept`, `link` and `offset`. Offsets belong to the
+predictor declaration, for example `family.location("age", offset="baseline")`.
+Lists of column names or numeric vectors add multiple offsets with coefficient
+one. The public `fit` and `fit_reml` methods no longer take `offsets`.
+For interactions, declare the
 parent terms in the same predictor and include `ti("left", "right")` for a
 two-spline tensor, or `interaction(existing_spec)` for another supported
 interaction. `ti` supplies the interaction only; the parent smooths must be
@@ -101,9 +105,13 @@ declared separately.
 ## Keep parameter names in results and offsets
 
 Tweedie's construction helpers are `mu`, `phi` and `p`. Their names in
-prediction tables, offsets, penalty keys and saved models remain `mean`,
-`dispersion` and `power`. For example, a known addition to the mean's log
-predictor belongs under `offsets={"mean": values}`.
+prediction tables, prediction replacements, penalty keys and saved models
+remain `mean`, `dispersion` and `power`. Declare a known mean addition with
+`family.mu(..., offset=values)`. New-row replacements for array declarations
+use `offsets={"mean": values}` at prediction. A mixed declaration resolves its
+columns from the new frame and replaces only the sum of array sources; a
+column-only declaration refuses a redundant replacement mapping. See
+[predictor offsets](../../how-to/specify-distributional-offsets.md).
 
 Models saved with joblib keep loading with `joblib.load`. The constructor
 migration does not change their parameter ordering.

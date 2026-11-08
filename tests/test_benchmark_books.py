@@ -122,6 +122,45 @@ def test_nb2_deviance_is_twice_the_log_likelihood_gap_to_the_saturated_model():
     assert books._nb2_deviance(y, mu, theta) == pytest.approx(expected, rel=1e-10)
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_lss_offset_benchmark_fits_declarations_and_prices_new_rows(reverse):
+    import numpy as np
+    import pandas as pd
+    from scipy import stats
+
+    rng = np.random.default_rng(439)
+    exposure = rng.uniform(0.3, 1.4, 192)
+    mean, size = 3.0 * exposure, 1.2 * np.exp(exposure)
+    frame = pd.DataFrame(
+        {
+            "Exposure": exposure,
+            "ClaimNb": rng.negative_binomial(size, size / (size + mean)).astype(float),
+        }
+    )
+    train, test = frame.iloc[:160], frame.iloc[160:]
+    spec = copy.deepcopy(books.CASES["lss_nb"])
+    spec["predictors"] = [["mean", []], ["theta", []]][:: (-1 if reverse else 1)]
+    spec["offsets"] = {"mean": "log_exposure", "theta": "exposure"}
+    offsets = books._lss_inputs(spec, train)[3]
+    model = books._lss_model(spec, offsets=offsets)
+    books._fit(spec, model, train)
+    X, y, _, replacements = books._lss_inputs(spec, test)
+    parameters = model.predict_parameters(X, offsets=replacements)
+    unit = model.predict_parameters(
+        test.iloc[:1], offsets={name: np.zeros(1) for name in ("mean", "theta")}
+    ).iloc[0]
+    np.testing.assert_allclose(parameters["mean"], unit["mean"] * test["Exposure"], rtol=2e-14)
+    np.testing.assert_allclose(
+        parameters["theta"], unit["theta"] * np.exp(test["Exposure"]), rtol=2e-14
+    )
+    expected_nll = -stats.nbinom.logpmf(
+        y, parameters["theta"], parameters["theta"] / (parameters["theta"] + parameters["mean"])
+    ).sum()
+    assert books.lss_results(spec, model, test)["test_nll"] == pytest.approx(
+        expected_nll, rel=2e-12
+    )
+
+
 def test_offset_exposure_count_metrics_rank_by_rate_and_cut_deciles_by_exposure():
     import numpy as np
     import pandas as pd

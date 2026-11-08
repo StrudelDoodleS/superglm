@@ -706,13 +706,18 @@ def _glm_model(spec):
     )
 
 
-def _lss_model(spec):
+def _lss_model(spec, *, offsets=None):
     import superglm
+    from superglm.distributional.binding import _helper_names
 
     family = getattr(superglm, spec["family"][0])(**spec["family"][1])
     terms = {"s": superglm.s, "cat": superglm.cat, "re": superglm.re}
+    parameters = {helper: name for name, helper in _helper_names(family).items()}
     predictors = [
-        getattr(family, name)(*(terms[k](col, **o) for k, col, o in tl))
+        getattr(family, name)(
+            *(terms[k](col, **o) for k, col, o in tl),
+            offset=(offsets or {}).get(parameters.get(name, name)),
+        )
         for name, tl in spec["predictors"]
     ]
     return superglm.SuperLSS(family, *predictors, **spec["model_options"])
@@ -729,10 +734,14 @@ def _glm_inputs(spec, frame, rows=None):
     )
 
 
-def _lss_inputs(spec, frame, rows=None):
+def _lss_inputs(spec, frame, rows=None, *, include_offsets=True):
     sl = slice(None) if rows is None else slice(0, rows)
     w = _column(frame, spec["weights"])
-    offsets = {k: _column(frame, v)[sl] for k, v in (spec["offsets"] or {}).items()} or None
+    offsets = (
+        ({k: _column(frame, v)[sl] for k, v in (spec["offsets"] or {}).items()} or None)
+        if include_offsets
+        else None
+    )
     return (
         frame.iloc[sl],
         _response(frame, spec["response"])[sl],
@@ -756,7 +765,7 @@ def _warm_up(spec):
             else:
                 X, y, w, offsets = _lss_inputs(spec, train, rows)
                 kw = {} if w is None else {"sample_weight": w}
-                _lss_model(spec).fit_reml(X, y, offsets=offsets, max_reml_iter=iters, **kw)
+                _lss_model(spec, offsets=offsets).fit_reml(X, y, max_reml_iter=iters, **kw)
     except Exception as exc:  # noqa: BLE001 - compilation is done even when a tiny warm-up fit refuses
         return f"{type(exc).__name__}: {exc}"[:300]
     return None
@@ -768,8 +777,8 @@ def _fit(spec, model, train) -> dict:
         method, opts = spec["fit"]
         result = getattr(model, method)(X, y, sample_weight=w, offset=off, **opts)
         return {"p_hat": float(result.p_hat)} if method == "estimate_p" else {}
-    X, y, w, offsets = _lss_inputs(spec, train)
-    model.fit_reml(X, y, offsets=offsets, **({} if w is None else {"sample_weight": w}))
+    X, y, w, _ = _lss_inputs(spec, train, include_offsets=False)
+    model.fit_reml(X, y, **({} if w is None else {"sample_weight": w}))
     return {}
 
 
@@ -1032,7 +1041,11 @@ def _run_case(case: str, threads: str, *, counts_only: bool) -> tuple[dict, dict
     warmup_error = _warm_up(spec)
     counters = Counters()
     counters.install()
-    model = _glm_model(spec) if spec["kind"] == "glm" else _lss_model(spec)
+    model = (
+        _glm_model(spec)
+        if spec["kind"] == "glm"
+        else _lss_model(spec, offsets=_lss_inputs(spec, train)[3])
+    )
     status, extra = "ok", {}
     rss_before = _peak_rss_bytes()
     with warnings.catch_warnings(record=True) as caught:

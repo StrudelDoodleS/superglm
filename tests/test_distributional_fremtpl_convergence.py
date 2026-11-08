@@ -204,7 +204,7 @@ def _book_location_terms():
     )
 
 
-def _fit_disclosing(model, sample, response, **options):
+def _fit_disclosing(model, sample, response, *, prediction_offsets=None, **options):
     """Fit, then check the result is usable and any non-convergence was warned."""
     import warnings
 
@@ -214,8 +214,7 @@ def _fit_disclosing(model, sample, response, **options):
         warnings.simplefilter("always")
         model.fit_reml(sample, response, **options)
     assert np.all(np.isfinite(model.covariance_))
-    offsets = options.get("offsets")
-    assert np.all(np.isfinite(np.asarray(model.predict(sample, offsets=offsets))))
+    assert np.all(np.isfinite(np.asarray(model.predict(sample, offsets=prediction_offsets))))
     if not model.result_.converged:
         assert any(issubclass(item.category, ConvergenceWarning) for item in caught)
     # Every final-curvature fallback of these families used to refuse (NB2 had
@@ -248,15 +247,15 @@ def test_negative_binomial_book_sample_finishes_instead_of_refusing(frequency_bo
     family = NegativeBinomialLS()
     model = SuperLSS(
         family,
-        family.mean(*_book_location_terms()),
-        family.theta(s("DrivAge", kind="cr", k=5), cat("VehGas"), cat("Area")),
+        family.mean(*_book_location_terms(), offset=log_exposure),
+        family.theta(s("DrivAge", kind="cr", k=5), cat("VehGas"), cat("Area"), offset=log_exposure),
         discrete=discrete,
     )
     _fit_disclosing(
         model,
         sample,
         sample["ClaimNb"].to_numpy(dtype=np.float64),
-        offsets={"mean": log_exposure, "theta": log_exposure},
+        prediction_offsets={"mean": log_exposure, "theta": log_exposure},
     )
 
 

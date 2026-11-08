@@ -133,20 +133,24 @@ def lss_fit(frame):
 
     family = NegativeBinomialLS()
     columns = ["DrivAge", "VehAge", "BonusMalus"]
+    offset = np.log(frame["Exposure"].to_numpy(np.float64))
     model = SuperLSS(
         family,
         *(
             _bind_predictor_template(
-                family, Predictor(p.name, {c: Spline(n_knots=8) for c in columns})
+                family,
+                Predictor(
+                    p.name,
+                    {c: Spline(n_knots=8) for c in columns},
+                    offset=offset if p.name == family.parameters[0].name else None,
+                ),
             )
             for p in family.parameters
         ),
     )
-    offset = np.log(frame["Exposure"].to_numpy(np.float64))
     model.fit_reml(
         frame[columns],
         frame["ClaimNb"].to_numpy(np.float64),
-        offsets={family.parameters[0].name: offset},
     )
 
 

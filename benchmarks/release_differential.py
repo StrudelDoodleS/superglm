@@ -448,15 +448,19 @@ def run_lss(family_name, spec, size, route, outer) -> dict:
     if spec == "rich":
         first += [s("x2", kind="cr", k=6), re("c2"), ti("x1", "x2")]
         second = [s("x2", kind="cr", k=5)]
-    declarations = [getattr(family, helpers[0])(*first), getattr(family, helpers[1])(*second)]
-    declarations += [getattr(family, name)() for name in helpers[2:]]
+    train_offsets = None if offsets is None else {k: v[:n] for k, v in offsets.items()}
+    test_offsets = None if offsets is None else {k: v[n:] for k, v in offsets.items()}
+    declarations = [
+        getattr(family, helper)(*terms, offset=(train_offsets or {}).get(parameter.name))
+        for parameter, helper, terms in zip(
+            family.parameters, helpers, [first, second, *([] for _ in helpers[2:])], strict=True
+        )
+    ]
     model = SuperLSS(family, *declarations, discrete=route == "binned")
     kwargs = {"outer": outer}
     if weights is not None:
         kwargs["sample_weight"] = weights[:n]
-    train_offsets = None if offsets is None else {k: v[:n] for k, v in offsets.items()}
-    test_offsets = None if offsets is None else {k: v[n:] for k, v in offsets.items()}
-    model.fit_reml(frame.iloc[:n], y[:n], offsets=train_offsets, **kwargs)
+    model.fit_reml(frame.iloc[:n], y[:n], **kwargs)
     smoothing = model._model.fit_state.smoothing
     out = {
         "converged": bool(smoothing.converged),
