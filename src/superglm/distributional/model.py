@@ -40,6 +40,11 @@ from superglm.distributional.observation import (
     resolve_response_bounds,
     unvalidated_bound_arrays,
 )
+from superglm.distributional.offsets import (
+    prediction_offsets,
+    shape_fit_offsets,
+    sum_offset_sources,
+)
 from superglm.distributional.prediction_design import (
     DESIGN_BLOCK_ROWS,
     ROW_INDEPENDENT_TERMS,
@@ -568,6 +573,18 @@ class DenseDistributionalModel:
     ) -> NDArray[np.float64]:
         """Evaluate every predictor at a full coefficient vector in the fit's layout."""
         frame = as_eager_frame(X)
+        resolved_offsets = prediction_offsets(self.fit_state.predictor_templates, frame, offsets)
+        return self._predict_eta_resolved(coefficients, frame, resolved_offsets)
+
+    def _predict_parameters_resolved(self, X, offsets) -> NDArray[np.float64]:
+        """Internal prediction with a complete, already-resolved link-scale sum."""
+        return self.parameters_from_eta(
+            self._predict_eta_resolved(self.prediction_coefficients, X, offsets)
+        )
+
+    def _predict_eta_resolved(self, coefficients, X, offsets) -> NDArray[np.float64]:
+        """Internal path for retained rows and scoring; never resolve declarations twice."""
+        frame = as_eager_frame(X)
         predictor_names = tuple(predictor.name for predictor in self.compiled_predictors)
         resolved_offsets = _prediction_offsets(offsets, predictor_names, len(frame))
         required_columns = tuple(
@@ -696,6 +713,7 @@ def _clone_predictor_templates(predictors: Sequence[Predictor]) -> tuple[Predict
                 interactions=tuple(predictor.interactions),
                 interaction_specs=copy.deepcopy(dict(predictor.interaction_specs)),
                 interaction_order=tuple(predictor.interaction_order),
+                offset=getattr(predictor, "offset", None),
             )
         )
     if not templates:
@@ -797,6 +815,7 @@ def _fit_candidate(
         y, family=family, n_rows=original_n, input_index=getattr(frame.native, "index", None)
     )
     original_offsets = _unvalidated_offset_shapes(offsets, original_n)
+    declared_offsets = shape_fit_offsets(predictor_templates, frame) if offsets is None else None
     if response_spec(family).shape and (truncation is not None or censored is not None):
         raise UnsupportedLikelihoodContractError(
             "scalar truncation and censoring bounds do not apply to vector responses"
@@ -812,7 +831,11 @@ def _fit_candidate(
         _input_positions.append(positions)
     retained_frame = as_eager_frame(frame.take_rows(positions))
     retained_y = np.array(original_y[positions], copy=True)
-    retained_offsets = _take_unvalidated_offsets(original_offsets, positions)
+    retained_offsets = (
+        sum_offset_sources(declared_offsets, positions)
+        if declared_offsets is not None
+        else _take_unvalidated_offsets(original_offsets, positions)
+    )
     observation = bounded_observation(
         resolve_response_bounds(
             retained_y,

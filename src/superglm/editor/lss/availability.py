@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 
+from superglm.distributional.offsets import sources_of
 from superglm.distributional.weights import LikelihoodWeightError, resolve_likelihood_weights
 from superglm.editor.errors import EditorValueError
 from superglm.editor.lss.view import LSSModelView, is_lss
@@ -125,10 +126,17 @@ def refit_reason(model: Any, sample_weight: Any, offsets: Any, y: Any = None) ->
     if lss._fit_settings is None:
         return NO_FIT_SETTINGS
     state = lss._model.fit_state
+    column_only = {
+        p.name
+        for p in state.predictor_templates
+        if sources_of(p) and all(isinstance(s, str) for s in sources_of(p))
+    }
     missing = [
         name
         for name, semantics in state.null_model.offset_semantics.items()
-        if semantics != "zero_offset" and (offsets is None or name not in offsets)
+        if semantics != "zero_offset"
+        and name not in column_only
+        and (offsets is None or name not in offsets)
     ]
     if missing:
         names = ", ".join(repr(name) for name in missing)

@@ -27,14 +27,7 @@ from scipy import special
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.distributional._common import json_floats, readonly_float
 from superglm.distributional.family import AtomFamily, DistributionFunctionFamily
-
-# ``_unvalidated_offset_shapes`` and ``_take_unvalidated_offsets`` are the fit's
-# own offset rules, and the residual payload was built through them; restating
-# them here is how an offset contract drifts between two entry points.
-from superglm.distributional.model import (
-    _take_unvalidated_offsets,
-    _unvalidated_offset_shapes,
-)
+from superglm.distributional.offsets import take_prediction_replacements
 from superglm.distributional.posterior import posterior_predictive
 from superglm.distributional.residuals import (
     ResidualSet,
@@ -129,8 +122,8 @@ def _simulated_envelope(
         as_eager_frame(frame.take_rows(envelope_rows)),
         n_sim,
         parameter_uncertainty=parameter_uncertainty,
-        offsets=_take_unvalidated_offsets(
-            _unvalidated_offset_shapes(offsets, residuals.n_rows), envelope_rows
+        offsets=take_prediction_replacements(
+            fitted.fit_state.predictor_templates, frame, offsets, envelope_rows
         ),
         seed=seed,
         weights=row_weights,

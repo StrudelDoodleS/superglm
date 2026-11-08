@@ -24,7 +24,7 @@ from superglm.distributional.weights import (
     resolve_likelihood_weights,
 )
 from superglm.features import Categorical, Numeric
-from tests.bound_predictor_fixtures import model_from_templates
+from tests.bound_predictor_fixtures import model_from_templates, with_offset_declarations
 
 from . import _gaussian_lss_oracles as gaussian_oracles
 from ._gaussian_lss_oracles import (
@@ -86,25 +86,29 @@ def test_zero_weight_row_is_removed_before_response_covariate_level_and_offset_v
     frame, response, weights, offsets = _boundary_fixture()
     retained = weights > 0.0
 
-    fitted = _boundary_model().fit(
+    fitted = with_offset_declarations(_boundary_model(), offsets).fit(
         frame,
         response,
         sample_weight=weights,
-        offsets=offsets,
         inner_tol=1.0e-9,
     )
-    reference = _boundary_model().fit(
+    reference = with_offset_declarations(
+        _boundary_model(), {name: values[retained] for name, values in offsets.items()}
+    ).fit(
         frame.loc[retained].reset_index(drop=True),
         response[retained],
         sample_weight=weights[retained],
-        offsets={name: values[retained] for name, values in offsets.items()},
         inner_tol=1.0e-9,
     )
 
     scoring_frame = frame.loc[retained].reset_index(drop=True)
     np.testing.assert_allclose(
-        fitted.predict_parameters(scoring_frame),
-        reference.predict_parameters(scoring_frame),
+        fitted.predict_parameters(
+            scoring_frame, offsets={name: np.zeros(len(scoring_frame)) for name in offsets}
+        ),
+        reference.predict_parameters(
+            scoring_frame, offsets={name: np.zeros(len(scoring_frame)) for name in offsets}
+        ),
         rtol=0.0,
         atol=2.0e-12,
     )

@@ -10,7 +10,7 @@ import pandas as pd
 from superglm import SuperLSS
 from superglm.distributional import NegativeBinomialLS, Predictor
 from superglm.features import Numeric
-from tests.bound_predictor_fixtures import model_from_templates
+from tests.bound_predictor_fixtures import model_from_templates, with_offset_declarations
 
 _INNER_TOLERANCE = 1.0e-8
 
@@ -55,11 +55,10 @@ def test_public_fixed_fit_predicts_and_round_trips_complete_state() -> None:
     model = _model()
 
     assert (
-        model.fit(
+        with_offset_declarations(model, offsets).fit(
             frame,
             response,
             sample_weight=exposure,
-            offsets=offsets,
             inner_tol=_INNER_TOLERANCE,
         )
         is model
@@ -124,11 +123,10 @@ def _fit_exposure_formulations():
         "theta_only": (count, unit, {"theta": log_exposure}),
     }
     models = {
-        name: _model().fit(
+        name: with_offset_declarations(_model(), offsets).fit(
             frame,
             response,
             sample_weight=weights,
-            offsets=offsets,
             inner_tol=_INNER_TOLERANCE,
             retain_rows=False,
         )

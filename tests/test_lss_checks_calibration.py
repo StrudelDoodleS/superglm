@@ -490,14 +490,25 @@ class _NoPredictionFamily:
 
 
 class _StubFitted:
-    """The three attributes ``actual_expected_check`` reads off a fitted model."""
+    """The fitted-model interface used by calibration and residual checks."""
 
     def __init__(self, family: Any, semantics: str = "prior") -> None:
         self.family = family
-        self.fit_state = SimpleNamespace(weight_contract=WeightContract(semantics))
         self.layout = SimpleNamespace(
             predictors=(SimpleNamespace(name="mu"), SimpleNamespace(name="var"))
         )
+        self.fit_state = SimpleNamespace(
+            weight_contract=WeightContract(semantics),
+            predictor_templates=self.layout.predictors,
+        )
+        self.prediction_coefficients = None
+
+    def _predict_eta_resolved(self, coefficients, X, offsets):
+        return self.predict_parameters(X, offsets=offsets)
+
+    @staticmethod
+    def parameters_from_eta(eta):
+        return eta
 
     def predict_parameters(self, X: Any, offsets: Any = None) -> NDArray:
         frame = as_eager_frame(X)
@@ -905,9 +916,15 @@ def test_calibration_reuse_accepts_equivalent_seed_and_refuses_weight_and_law_ch
     fitted, X, y = gaussian_case
     frequency = SimpleNamespace(
         family=fitted.family,
-        fit_state=SimpleNamespace(weight_contract=WeightContract("frequency")),
+        fit_state=SimpleNamespace(
+            weight_contract=WeightContract("frequency"),
+            predictor_templates=fitted.fit_state.predictor_templates,
+        ),
         predict_eta=fitted.predict_eta,
         predict_parameters=fitted.predict_parameters,
+        prediction_coefficients=fitted.prediction_coefficients,
+        _predict_eta_resolved=fitted._predict_eta_resolved,
+        parameters_from_eta=fitted.parameters_from_eta,
     )
     counts = np.full(len(y), 2.0)
     residuals = compute_residuals(frequency, X, y, sample_weight=counts, seed=7)

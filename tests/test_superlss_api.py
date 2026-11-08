@@ -40,7 +40,7 @@ from superglm.distributional.weights import (
 )
 from superglm.features import Numeric, RandomEffect, Spline
 from superglm.types import LambdaPolicy
-from tests.bound_predictor_fixtures import model_from_templates
+from tests.bound_predictor_fixtures import model_from_templates, with_offset_declarations
 
 
 def _fixture(
@@ -383,11 +383,10 @@ def test_public_imports_and_fixed_fit_publish_named_immutable_views() -> None:
     frame, response, weights, offsets = _fixture()
     model = _linear_model()
 
-    returned = model.fit(
+    returned = with_offset_declarations(model, offsets).fit(
         frame,
         response,
         sample_weight=weights,
-        offsets=offsets,
     )
 
     assert returned is model
@@ -435,11 +434,14 @@ def test_public_imports_and_fixed_fit_publish_named_immutable_views() -> None:
 
 def test_public_superlss_discrete_fitting_selects_automatic_chunks() -> None:
     frame, response, weights, offsets = _fixture()
-    model = model_from_templates(
-        family=GaussianLS(),
-        predictors=(Predictor("location", {}), Predictor("scale", {})),
-        discrete=True,
-    ).fit(frame, response, sample_weight=weights, offsets=offsets)
+    model = with_offset_declarations(
+        model_from_templates(
+            family=GaussianLS(),
+            predictors=(Predictor("location", {}), Predictor("scale", {})),
+            discrete=True,
+        ),
+        offsets,
+    ).fit(frame, response, sample_weight=weights)
     fitted = model._require_fitted()
     assert fitted.fit_state.requested_discrete is True
     assert fitted.fit_state.requested_chunk_size == "auto"
@@ -1114,19 +1116,21 @@ def test_published_arrays_cannot_rearm_writes_and_isolate_constructor_inputs() -
 
 def test_public_artifact_round_trip_preserves_fitted_state_and_execution_config() -> None:
     frame, response, weights, offsets = _fixture()
-    model = model_from_templates(
-        family=GaussianLS(scale_floor=0.025),
-        predictors=(
-            Predictor("location", {"x": Numeric()}),
-            Predictor("scale", {"z": Numeric()}),
+    model = with_offset_declarations(
+        model_from_templates(
+            family=GaussianLS(scale_floor=0.025),
+            predictors=(
+                Predictor("location", {"x": Numeric()}),
+                Predictor("scale", {"z": Numeric()}),
+            ),
+            n_bins={"x": 128, "z": 96},
+            separation="error",
         ),
-        n_bins={"x": 128, "z": 96},
-        separation="error",
+        offsets,
     ).fit(
         frame,
         response,
         sample_weight=weights,
-        offsets=offsets,
         retain_rows=False,
     )
 
@@ -1159,11 +1163,14 @@ def test_frequency_facade_round_trip_and_refit_keep_the_canonical_contract() -> 
         Predictor("location", {"x": Numeric()}),
         Predictor("scale", {"z": Numeric()}),
     )
-    model = model_from_templates(
-        family=GaussianLS(scale_floor=0.02),
-        predictors=predictors,
-        weight_semantics="frequency",
-    ).fit(frame, response, sample_weight=counts, offsets=offsets, retain_rows=False)
+    model = with_offset_declarations(
+        model_from_templates(
+            family=GaussianLS(scale_floor=0.02),
+            predictors=predictors,
+            weight_semantics="frequency",
+        ),
+        offsets,
+    ).fit(frame, response, sample_weight=counts, retain_rows=False)
     restored = pickle.loads(pickle.dumps(model))
     state = restored._require_fitted().fit_state
 
@@ -1189,24 +1196,28 @@ def test_frequency_facade_round_trip_and_refit_keep_the_canonical_contract() -> 
         sample_weight=new_counts,
         offsets=new_offsets,
     )
-    fresh = model_from_templates(
-        family=GaussianLS(scale_floor=0.02),
-        predictors=predictors,
-        weight_semantics="frequency",
+    fresh = with_offset_declarations(
+        model_from_templates(
+            family=GaussianLS(scale_floor=0.02),
+            predictors=predictors,
+            weight_semantics="frequency",
+        ),
+        new_offsets,
     ).fit(
         new_frame,
         new_response,
         sample_weight=new_counts,
-        offsets=new_offsets,
     )
     positions = np.repeat(np.arange(len(new_frame)), new_counts)
-    expanded = model_from_templates(
-        family=GaussianLS(scale_floor=0.02),
-        predictors=predictors,
+    expanded = with_offset_declarations(
+        model_from_templates(
+            family=GaussianLS(scale_floor=0.02),
+            predictors=predictors,
+        ),
+        {name: values[positions] for name, values in new_offsets.items()},
     ).fit(
         new_frame.iloc[positions].reset_index(drop=True),
         new_response[positions],
-        offsets={name: values[positions] for name, values in new_offsets.items()},
     )
 
     assert restored.weight_semantics == "frequency"

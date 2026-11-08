@@ -351,7 +351,7 @@ def _quantile_family(fitted: Any) -> Any:
 def _level_quantiles(fitted: Any, rows: _ScoringRows, level: float) -> NDArray[np.float64]:
     family = _row_law(fitted, rows)
     theta = np.asarray(
-        fitted.predict_parameters(rows.frame, offsets=rows.offsets), dtype=np.float64
+        fitted._predict_parameters_resolved(rows.frame, rows.offsets), dtype=np.float64
     )
     levels = np.full(len(theta), float(level), dtype=np.float64)
     return np.asarray(family.quantile(levels, theta), dtype=np.float64)

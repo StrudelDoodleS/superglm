@@ -53,10 +53,9 @@ from superglm.distributional.family import (
 # The response and offset shapes are checked before zero-weight rows are
 # selected away, exactly as the fit and the residuals check them.
 from superglm.distributional.model import (
-    _take_unvalidated_offsets,
-    _unvalidated_offset_shapes,
     _unvalidated_response_shape,
 )
+from superglm.distributional.offsets import take_prediction_replacements
 from superglm.distributional.posterior import posterior_predictive
 from superglm.distributional.residuals import (
     ResidualSet,
@@ -367,13 +366,12 @@ def _retained_rows(
         sample_weight, n_observations=n_observations, contract=contract
     )
     positions = np.asarray(resolved.input_positions, dtype=np.intp)
-    resolved_offsets = offsets
+    resolved_offsets = take_prediction_replacements(
+        fitted.fit_state.predictor_templates, frame, offsets, positions
+    )
     if len(positions) != n_observations:
         frame = as_eager_frame(frame.take_rows(positions))
         response = response[positions]
-        resolved_offsets = _take_unvalidated_offsets(
-            _unvalidated_offset_shapes(offsets, n_observations), positions
-        )
     weights = np.asarray(resolved.values, dtype=np.float64)
     if not np.all(np.isfinite(response)):
         raise ValueError("retained diagnostic responses must be finite")

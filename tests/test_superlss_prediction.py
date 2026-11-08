@@ -6,7 +6,7 @@ import pytest
 
 from superglm.distributional import GaussianLS, Predictor
 from superglm.features import Numeric
-from tests.bound_predictor_fixtures import model_from_templates
+from tests.bound_predictor_fixtures import model_from_templates, with_offset_declarations
 
 
 @pytest.mark.parametrize("shift", [-1000.0, 1000.0])
@@ -99,10 +99,13 @@ def _predictors() -> tuple[Predictor, Predictor]:
 
 def test_prediction_exposes_both_parameter_and_link_columns_with_input_index() -> None:
     frame, response, offsets = _fixture()
-    model = model_from_templates(
-        family=GaussianLS(scale_floor=0.03),
-        predictors=_predictors(),
-    ).fit(frame, response, offsets=offsets)
+    model = with_offset_declarations(
+        model_from_templates(
+            family=GaussianLS(scale_floor=0.03),
+            predictors=_predictors(),
+        ),
+        offsets,
+    ).fit(frame, response)
 
     link = model.predict_link(frame, offsets=offsets)
     parameters = model.predict_parameters(frame, offsets=offsets)

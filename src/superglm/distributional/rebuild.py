@@ -18,7 +18,9 @@ from typing import Any
 
 import numpy as np
 
+from superglm._frame import as_eager_frame
 from superglm.distributional.binding import _bind_predictor_template
+from superglm.distributional.offsets import shape_prediction_offsets, sources_of
 from superglm.distributional.predictor import Predictor
 from superglm.terms import normalize_terms
 from superglm.types import FeatureSpec
@@ -162,5 +164,17 @@ def replay_fit(model: Any, X: Any, y: Any, sample_weight: Any, offsets: Any) -> 
             "Fit it with fit() or fit_reml() first."
         )
     kwargs = {k: v for k, v in settings.items() if k != "method"}
+    if offsets is not None:
+        # The editor supplies new-row replacements. Bind them to the private
+        # clone's declarations before calling the ordinary public fitting API.
+        shape_prediction_offsets(model._predictors, as_eager_frame(X), offsets)
+        model._predictors = tuple(
+            dataclasses.replace(
+                p, offset=(*tuple(s for s in sources_of(p) if isinstance(s, str)), offsets[p.name])
+            )
+            if p.name in offsets
+            else p
+            for p in model._predictors
+        )
     fit = getattr(model, settings["method"])
-    return fit(X, y, sample_weight, offsets, **kwargs)
+    return fit(X, y, sample_weight, **kwargs)

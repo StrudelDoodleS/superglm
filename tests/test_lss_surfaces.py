@@ -170,7 +170,10 @@ def _spread_stub(semantics="frequency"):
 
     return SimpleNamespace(
         family=_SpreadLaw(),
-        fit_state=SimpleNamespace(weight_contract=WeightContract(semantics)),
+        fit_state=SimpleNamespace(
+            weight_contract=WeightContract(semantics),
+            predictor_templates=(SimpleNamespace(name="mean"), SimpleNamespace(name="tail")),
+        ),
         predict_parameters=predict,
     )
 
@@ -302,6 +305,7 @@ def test_review_density_refuses_unresolvable_grid(gaussian_case, edge):
 
     stub = SimpleNamespace(
         family=DegenerateCDF(),
+        fit_state=fitted.fit_state,
         compiled_predictors=fitted.compiled_predictors,
         predict_parameters=fitted.predict_parameters,
     )
@@ -315,6 +319,7 @@ def test_review_density_refuses_atoms_and_nonfinite_density(gaussian_case):
     fitted, X, _ = gaussian_case
     stub = SimpleNamespace(
         family=TweedieLSS(),
+        fit_state=fitted.fit_state,
         compiled_predictors=fitted.compiled_predictors,
         predict_parameters=lambda X, offsets=None: np.tile([1.0, 0.5, 1.5], (len(X), 1)),
     )
@@ -334,6 +339,7 @@ def test_review_density_grid_loses_distinct_float_points(gaussian_case):
 
     stub = SimpleNamespace(
         family=NarrowCDF(),
+        fit_state=fitted.fit_state,
         compiled_predictors=fitted.compiled_predictors,
         predict_parameters=fitted.predict_parameters,
     )
@@ -349,6 +355,7 @@ def test_review_density_unit_weights_and_unsupported_prior_law(gaussian_case):
     np.testing.assert_array_equal(plain.quantiles, unit.quantiles)
     stub = SimpleNamespace(
         family=_MeanlessFamily(fitted.family),
+        fit_state=fitted.fit_state,
         compiled_predictors=fitted.compiled_predictors,
         predict_parameters=fitted.predict_parameters,
     )

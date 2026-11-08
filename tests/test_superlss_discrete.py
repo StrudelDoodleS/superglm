@@ -27,7 +27,7 @@ from superglm.distributional.solver.assembly import dense_predictor_matrices
 from superglm.features import Categorical, Spline, SplineCategorical
 from superglm.features.interaction import TensorInteraction
 from superglm.types import LambdaPolicy
-from tests.bound_predictor_fixtures import model_from_templates
+from tests.bound_predictor_fixtures import model_from_templates, with_offset_declarations
 
 
 def _fixture(kind: str, semantics: str):
@@ -121,17 +121,19 @@ def test_public_discrete_observed_fixed_fit_parity(kind: str, semantics: str, mo
     monkeypatch.setattr(chunking, "AUTO_STREAM_MAX_ROWS", 1)
     frame, y, weights, offsets, family, predictors = _fixture(kind, semantics)
     models = [
-        model_from_templates(
-            family=family,
-            predictors=predictors,
-            weight_semantics=semantics,
-            discrete=discrete,
-            n_bins=32,
+        with_offset_declarations(
+            model_from_templates(
+                family=family,
+                predictors=predictors,
+                weight_semantics=semantics,
+                discrete=discrete,
+                n_bins=32,
+            ),
+            offsets,
         ).fit(
             frame,
             y,
             sample_weight=weights,
-            offsets=offsets,
             lambdas={f"{predictors[0].name}:x#wiggle": 1.0},
         )
         for discrete in (False, True)
@@ -148,17 +150,19 @@ def test_public_discrete_complete_smoothing_and_roundtrip(
     monkeypatch.setattr(chunking, "AUTO_STREAM_MAX_ROWS", 1)
     frame, y, weights, offsets, family, predictors = _fixture(kind, semantics)
     models = [
-        model_from_templates(
-            family=family,
-            predictors=predictors,
-            discrete=discrete,
-            n_bins=32,
-            weight_semantics=semantics,
+        with_offset_declarations(
+            model_from_templates(
+                family=family,
+                predictors=predictors,
+                discrete=discrete,
+                n_bins=32,
+                weight_semantics=semantics,
+            ),
+            offsets,
         ).fit_reml(
             frame,
             y,
             sample_weight=weights,
-            offsets=offsets,
             outer="efs+newton",
         )
         for discrete in (False, True)
@@ -189,12 +193,13 @@ def test_public_discrete_complete_smoothing_and_roundtrip(
         weight_semantics=semantics,
     )
     fixed = dict(grouped.smoothing_parameters_)
-    clone.fit(frame, y, sample_weight=weights, offsets=offsets, lambdas=fixed)
-    restored.fit(frame, y, sample_weight=weights, offsets=offsets, lambdas=fixed)
+    with_offset_declarations(clone, offsets).fit(frame, y, sample_weight=weights, lambdas=fixed)
+    with_offset_declarations(restored, offsets).fit(frame, y, sample_weight=weights, lambdas=fixed)
     assert restored.training_telemetry().execution_backend_identifier == "distributional-chunked-v1"
     assert restored.training_telemetry().resolved_chunk_size is not None
     np.testing.assert_array_equal(
-        clone.predict_parameters(frame), restored.predict_parameters(frame)
+        clone.predict_parameters(frame, offsets=offsets),
+        restored.predict_parameters(frame, offsets=offsets),
     )
 
 
@@ -285,17 +290,19 @@ def test_public_discrete_tensor_and_categorical_interaction_parity() -> None:
         ),
     )
     models = [
-        model_from_templates(
-            family=family,
-            predictors=predictors,
-            discrete=discrete,
-            n_bins=32,
-            weight_semantics="frequency",
+        with_offset_declarations(
+            model_from_templates(
+                family=family,
+                predictors=predictors,
+                discrete=discrete,
+                n_bins=32,
+                weight_semantics="frequency",
+            ),
+            offsets,
         ).fit(
             frame,
             y,
             sample_weight=weights,
-            offsets=offsets,
             lambdas=dict.fromkeys(
                 (
                     "location:x#wiggle",
@@ -380,7 +387,9 @@ def test_chunked_discrete_curvature_pools_its_gram_blocks_bitwise(monkeypatch) -
             block_queue_config(min_cost=0),
             parallel.parallel_config(n_jobs=n_jobs, max_memory="1G"),
         ):
-            model.fit(frame, y, sample_weight=weights, offsets=offsets, lambdas=lambdas)
+            with_offset_declarations(model, offsets).fit(
+                frame, y, sample_weight=weights, lambdas=lambdas
+            )
         assert model.training_telemetry().resolved_chunk_size is not None
         assert (max(workers) > 1) if n_jobs > 1 else not workers
         fits.append(model)
@@ -427,15 +436,16 @@ def test_public_discrete_remaining_builtin_families(family) -> None:
     )
     offsets = {name: 0.005 * np.sin(np.arange(n) + i) for i, name in enumerate(names)}
     models = [
-        model_from_templates(
-            family=family,
-            predictors=predictors,
-            discrete=discrete,
-            n_bins=32,
-            weight_semantics="frequency",
-        ).fit(
-            frame, y, sample_weight=weights, offsets=offsets, lambdas={f"{names[0]}:x#wiggle": 1.0}
-        )
+        with_offset_declarations(
+            model_from_templates(
+                family=family,
+                predictors=predictors,
+                discrete=discrete,
+                n_bins=32,
+                weight_semantics="frequency",
+            ),
+            offsets,
+        ).fit(frame, y, sample_weight=weights, lambdas={f"{names[0]}:x#wiggle": 1.0})
         for discrete in (False, True)
     ]
     _assert_parity(*models, frame, offsets)
@@ -479,13 +489,13 @@ def test_public_discrete_dispatches_compressed_signed_chunks(monkeypatch) -> Non
     monkeypatch.setattr(MatrixExecutionPlan, "signed_moment_tasks", moments)
     monkeypatch.setattr(CrossMatrixExecutionPlan, "cross_tasks", cross)
     monkeypatch.setattr(chunking, "assemble_chunked_geometry", geometry)
-    model = model_from_templates(
-        family=family, predictors=predictors, discrete=True, n_bins=32
+    model = with_offset_declarations(
+        model_from_templates(family=family, predictors=predictors, discrete=True, n_bins=32),
+        offsets,
     ).fit_reml(
         frame,
         y,
         sample_weight=weights,
-        offsets=offsets,
         outer="efs+newton",
     )
     telemetry = model.training_telemetry()
@@ -498,14 +508,17 @@ def test_public_discrete_dispatches_compressed_signed_chunks(monkeypatch) -> Non
 
 def test_per_term_discrete_preserves_explicit_dense_execution_policy() -> None:
     frame, y, weights, offsets, family, _ = _fixture("gaussian", "prior")
-    model = model_from_templates(
-        family=family,
-        predictors=(
-            Predictor("location", {"x": Spline(kind="cr", n_knots=4, discrete=True)}),
-            Predictor("scale", {}),
+    model = with_offset_declarations(
+        model_from_templates(
+            family=family,
+            predictors=(
+                Predictor("location", {"x": Spline(kind="cr", n_knots=4, discrete=True)}),
+                Predictor("scale", {}),
+            ),
+            discrete=False,
         ),
-        discrete=False,
-    ).fit(frame, y, sample_weight=weights, offsets=offsets, lambdas={"location:x#wiggle": 1.0})
+        offsets,
+    ).fit(frame, y, sample_weight=weights, lambdas={"location:x#wiggle": 1.0})
     telemetry = model.training_telemetry()
     assert not telemetry.discrete
     assert telemetry.execution_backend_identifier == "distributional-dense-v1"
@@ -550,17 +563,19 @@ def test_public_discrete_tensors_in_two_predictors_parity(scale_knots) -> None:
         "scale:u:v#margin_v",
     )
     models = [
-        model_from_templates(
-            family=family,
-            predictors=predictors,
-            discrete=discrete,
-            n_bins=32,
-            weight_semantics="frequency",
+        with_offset_declarations(
+            model_from_templates(
+                family=family,
+                predictors=predictors,
+                discrete=discrete,
+                n_bins=32,
+                weight_semantics="frequency",
+            ),
+            offsets,
         ).fit(
             frame,
             y,
             sample_weight=weights,
-            offsets=offsets,
             lambdas=dict.fromkeys(names, 1.0),
         )
         for discrete in (False, True)

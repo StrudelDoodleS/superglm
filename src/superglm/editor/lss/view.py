@@ -21,6 +21,7 @@ from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
 from superglm.distributional.api import SuperLSS
+from superglm.distributional.offsets import offset_columns, sources_of
 from superglm.distributional.prediction_design import _required_columns
 from superglm.distributional.terms import (
     _coefficient_columns,
@@ -226,8 +227,15 @@ class LSSModelView:
         return copy.deepcopy(self._term_inferences[key])
 
     def data_columns(self) -> tuple[str, ...]:
-        """The data columns the model reads: every predictor's features and interaction parents."""
-        return _required_columns(self._fitted.compiled_predictors)
+        """The model's feature, interaction-parent and offset columns."""
+        return tuple(
+            dict.fromkeys(
+                (
+                    *_required_columns(self._fitted.compiled_predictors),
+                    *offset_columns(self._fitted.fit_state.predictor_templates),
+                )
+            )
+        )
 
     def reference_row(self) -> pd.DataFrame:
         """One row with every column the model reads at its training centre.
@@ -253,6 +261,8 @@ class LSSModelView:
         were zero there: adding the term's effect at any value of its column
         gives the parameter at the reference row with that column changed. The
         other edits of the parameter add ``lss.apply.reference_shift``.
+        Array offsets are zero at this reference; offset columns are held at
+        their training centre, like the other named columns.
         """
         if key not in self._reference_etas:
             parameter, term = split_key(key)
@@ -263,7 +273,12 @@ class LSSModelView:
             design = _term_design(self._fitted, row, state, *blocks) - self.reference_design(key)
             beta = np.asarray(self._fitted.coefficients, dtype=np.float64)
             own = float((design @ beta[_coefficient_columns(*blocks)])[0])
-            eta = float(self.lss.predict_link(row)[parameter].iloc[0])
+            offsets = {
+                p.name: np.zeros(1)
+                for p in self._fitted.fit_state.predictor_templates
+                if any(not isinstance(s, str) for s in sources_of(p))
+            }
+            eta = float(self.lss.predict_link(row, offsets=offsets)[parameter].iloc[0])
             self._reference_etas[key] = eta - own
         return self._reference_etas[key]
 

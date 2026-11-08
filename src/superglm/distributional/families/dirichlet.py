@@ -163,8 +163,15 @@ class DirichletLSS:
         component: str,
         *terms: TermInput,
         intercept: bool = True,
+        offset: Any = None,
         link: str | Link | None = None,
     ) -> BoundPredictor:
+        """Declare a component's concentration, including fixed link-scale offsets.
+
+        ``offset`` accepts columns, row arrays, or lists of these sources.
+        New-row mappings use ``component_parameters[component]`` and replace
+        only the array-source sum; column contributions come from the new frame.
+        """
         from superglm.distributional.binding import bind_predictor
 
         if not isinstance(component, str) or component not in self.component_parameters:
@@ -172,7 +179,12 @@ class DirichletLSS:
                 f"unknown Dirichlet component {component!r}; expected one of {self.components}"
             )
         return bind_predictor(
-            self, self.component_parameters[component], *terms, intercept=intercept, link=link
+            self,
+            self.component_parameters[component],
+            *terms,
+            intercept=intercept,
+            link=link,
+            offset=offset,
         )
 
     def to_config(self) -> dict[str, Any]:

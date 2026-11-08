@@ -62,8 +62,6 @@ from superglm.distributional.fit_diagnostics import diagnose_distributional_fit
 from superglm.distributional.model import (
     DenseDistributionalModel,
     _clone_predictor_templates,
-    _take_unvalidated_offsets,
-    _unvalidated_offset_shapes,
     fit_dense_distributional,
 )
 from superglm.distributional.observation import BoundPair, CensoredRows
@@ -564,7 +562,6 @@ class SuperLSS:
         y: NDArray,
         *,
         sample_weight: NDArray | None,
-        offsets: Mapping[str, NDArray] | None,
         lambdas: Mapping[str, float] | None,
         solver_config: DenseSolverConfig,
         efs_config: DistributionalEFSConfig | None,
@@ -586,7 +583,6 @@ class SuperLSS:
                 predictors=self._predictors,
                 sample_weight=sample_weight,
                 weight_contract=self._weight_contract,
-                offsets=offsets,
                 lambdas={} if lambdas is None and efs_config is None else lambdas,
                 config=solver_config,
                 efs_config=efs_config,
@@ -634,7 +630,6 @@ class SuperLSS:
         X: FrameLike | EagerFrame,
         y: NDArray,
         sample_weight: NDArray | None = None,
-        offsets: Mapping[str, NDArray] | None = None,
         *,
         lambdas: Mapping[str, float] | None = None,
         max_inner_iter: int = 100,
@@ -654,9 +649,6 @@ class SuperLSS:
             as ``X``.
         sample_weight : array-like, optional
             One weight per row, interpreted using ``weight_semantics``.
-        offsets : mapping of str to array-like, optional
-            Known additions to predictors on their link scales. Keys are
-            family parameter names, such as ``"mean"`` for Tweedie.
         lambdas : mapping of str to float, optional
             Smoothing strengths keyed by fully qualified penalty names, such
             as ``"location:age#wiggle"`` for a Gaussian smooth.
@@ -691,6 +683,10 @@ class SuperLSS:
 
         Notes
         -----
+        Declare fixed link-scale additions with ``offset=`` on each family
+        predictor helper. Sources are resolved on these input rows, before
+        zero-weight rows are omitted and retained values are validated.
+
         With ``truncation`` or ``censored`` the fit estimates the parent law
         of the uncut response, so ``predict`` and the distribution functions
         describe that law, not the law within the bounds. ``GaussianLS``,
@@ -707,7 +703,6 @@ class SuperLSS:
                 X,
                 y,
                 sample_weight=sample_weight,
-                offsets=offsets,
                 lambdas=lambdas,
                 solver_config=DenseSolverConfig(
                     max_iterations=max_inner_iter,
@@ -727,7 +722,6 @@ class SuperLSS:
         X: FrameLike | EagerFrame,
         y: NDArray,
         sample_weight: NDArray | None = None,
-        offsets: Mapping[str, NDArray] | None = None,
         *,
         method: str = "efs",
         max_reml_iter: int = 100,
@@ -755,8 +749,8 @@ class SuperLSS:
 
         ``X`` supplies the declared columns and ``y`` supplies the response
         in the same row order. ``sample_weight`` follows the model's
-        ``weight_semantics``. ``offsets`` maps family parameter names to
-        known additions on the link scale. ``truncation`` and ``censored``
+        ``weight_semantics``. Declare fixed link-scale additions with
+        ``offset=`` on the family predictor helpers. ``truncation`` and ``censored``
         are as in :meth:`fit`. This method updates the model and returns it.
 
         ``outer`` selects the smoothing optimiser. ``"efs"`` runs generalised
@@ -817,7 +811,6 @@ class SuperLSS:
                 X,
                 y,
                 sample_weight=sample_weight,
-                offsets=offsets,
                 lambdas=lambdas,
                 solver_config=DenseSolverConfig(
                     max_iterations=max_inner_iter,
@@ -1046,8 +1039,11 @@ class SuperLSS:
         ``"location"`` and ``"scale"``; Tweedie columns are ``"mean"``,
         ``"dispersion"`` and ``"power"``. Frame indices are preserved.
 
-        Supply prediction offsets by family parameter name when the model
-        uses them. Their values are additions on the link scale.
+        Column offsets resolve from ``X``. Array sources require
+        ``offsets={parameter: new_array_sum}``; a mixed declaration adds its
+        columns to that replacement once. Column-only declarations refuse a
+        second offset. Predictors without declarations retain the optional
+        prediction mapping and its zero default. Values are on the link scale.
         """
         values = self._require_fitted().predict_parameters(X, offsets=offsets)
         return pd.DataFrame(
@@ -1166,9 +1162,11 @@ class SuperLSS:
         positions = self._retained_positions(len(frame), sample_weight)
         if positions is None:
             return frame, offsets
+        from superglm.distributional.offsets import take_prediction_replacements
+
         return (
             as_eager_frame(frame.take_rows(positions)),
-            _take_unvalidated_offsets(_unvalidated_offset_shapes(offsets, len(frame)), positions),
+            take_prediction_replacements(self._predictors, frame, offsets, positions),
         )
 
     def _covariate_values(

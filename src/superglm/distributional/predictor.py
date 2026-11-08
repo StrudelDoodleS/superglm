@@ -16,6 +16,7 @@ from numpy.typing import NDArray
 from superglm._frame import EagerFrame
 from superglm._predictor_compiler import CompiledPredictorDesign, compile_predictor_design
 from superglm.distributional.family import ParameterSpec
+from superglm.distributional.offsets import normalize_offset, shape_fit_offsets, sum_offset_sources
 from superglm.distributional.weights import ResolvedLikelihoodWeights
 from superglm.features._spline_config import clear_shape_rules
 from superglm.features.categorical import Categorical
@@ -87,6 +88,10 @@ class Predictor:
     Feature specifications remain caller-owned configuration objects here.
     ``compile_predictor_design`` deep-clones their complete graph before any
     build-time mutation occurs.
+
+    ``offset`` normalizes to a tuple of column names and independently owned,
+    read-only row arrays (indexed Series retain their labels). These are fixed
+    link-scale additions with coefficient one, separate from estimated terms.
     """
 
     name: str
@@ -96,6 +101,7 @@ class Predictor:
     interactions: tuple[tuple[str, str], ...] = ()
     interaction_specs: Mapping[str, Any] = field(default_factory=dict)
     interaction_order: tuple[str, ...] = ()
+    offset: Any = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
@@ -174,6 +180,11 @@ class Predictor:
             MappingProxyType(owned_interaction_specs),
         )
         object.__setattr__(self, "interaction_order", interaction_order)
+        object.__setattr__(self, "offset", normalize_offset(self.offset))
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        object.__setattr__(self, "offset", normalize_offset(state.get("offset")))
 
 
 @dataclass(frozen=True)
@@ -591,7 +602,9 @@ def compile_predictors(
     geometry_weight = resolved.geometry_values
     physical_rows = resolved.provenance.contract.semantics == "prior"
     resolved_offsets = _resolve_offsets(
-        offsets,
+        sum_offset_sources(shape_fit_offsets(predictor_tuple, X), np.arange(n_observations))
+        if offsets is None
+        else offsets,
         tuple(parameter.name for parameter in parameter_tuple),
         n_observations,
     )
