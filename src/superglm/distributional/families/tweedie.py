@@ -782,12 +782,17 @@ class TweedieLSS(TweediePredictors):
             )
             representative = np.where(high == 0, 0.0, representative)
             response[rows] = representative
-            if not np.any(response > 0):
+            if not np.any(response > 0) or np.all(response == response[0]):
                 # A boundary optimum is disclosed by the ordinary fit controller.
-                # Choose parameters directly: replacing atom-only observations
-                # by positive pseudo-data would violate their observed windows.
+                # Choose parameters directly: atom-only or identical threshold
+                # representatives cannot identify a dispersion from moments.
+                # They are not substituted for the original observation law.
                 theta = np.tile(
-                    [1.0, 1.0, (self.power_lower + self.power_upper) / 2.0],
+                    [
+                        response[0] if response[0] > 0 else 1.0,
+                        1.0,
+                        (self.power_lower + self.power_upper) / 2.0,
+                    ],
                     (len(response), 1),
                 )
                 return InitialParameterState(theta=theta)
