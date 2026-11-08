@@ -1760,23 +1760,22 @@ def _cross_gram_tensor_shared_level(gm_tensor, gm_spline_cat, W, cache, profile)
     For margin 2, G[(i,j),k] = sum_ab H[a,b] A[a,i] B[b,j] C[b,k];
     for margin 1 replace C[b,k] by C[a,k]. H sums W in each cell's row
     order. No N-by-p products or channel histograms are formed or retained.
-
-    With u=2**-53, each scalar cell has error <= gamma_(m-1) sum_cell W.
-    A subsequent marginal dot contributes gamma_b: m_max+b_occupied-1
-    <= number of level rows in that marginal bin. Thus grouping and the
-    basis multiply retain the usual gamma_(N+support widths+transform widths)
-    absolute-product envelope of the raw channel route (Higham, sec. 3.1),
-    including signed bases/cancellation. This is NOT bit-identical arithmetic.
-    Centering, rank and publication checks are unchanged and consume the
-    resulting raw moments normally. Signed weights keep the existing route.
-
-    Six original factors: W,A,B,C,R_tensor,R_level. Each nonzero input has
-    exponent >= -96, hence is an integer multiple of 2**-148. Every partial
-    product/sum (including cancellation) lies on a lattice no finer than
-    2**-888. Upper exponents include all operand dimension/reduction factors
-    and total at most 6*128=768. Intermediates therefore stay normal or zero;
-    exceptional factors keep the original association, before any histogram.
     """
+    # With u=2**-53, each scalar cell has error <= gamma_(m-1) sum_cell W.
+    # A subsequent marginal dot contributes gamma_b: m_max+b_occupied-1
+    # <= number of level rows in that marginal bin. Thus grouping and the
+    # basis multiply retain the usual gamma_(N+support widths+transform widths)
+    # absolute-product envelope of the raw channel route (Higham, sec. 3.1),
+    # including signed bases/cancellation. This is not bit-identical arithmetic.
+    # Centering, rank and publication checks consume the raw moments normally.
+    # Signed weights keep the existing route.
+    #
+    # Six original factors: W,A,B,C,R_tensor,R_level. Each nonzero input has
+    # exponent >= -96, hence is an integer multiple of 2**-148. Every partial
+    # product/sum (including cancellation) lies on a lattice no finer than
+    # 2**-888. Upper exponents include all operand dimension/reduction factors
+    # and total at most 6*128=768. Intermediates therefore stay normal or zero;
+    # exceptional factors keep the original association, before any histogram.
     from ._binned_codes import shared_level_margin
 
     margin = shared_level_margin(gm_tensor, gm_spline_cat)
@@ -1784,7 +1783,10 @@ def _cross_gram_tensor_shared_level(gm_tensor, gm_spline_cat, W, cache, profile)
         return None
     B1, B2, C = gm_tensor.B1_unique_t, gm_tensor.B2_unique_t, gm_spline_cat.B_unique
     factors = (B1, B2, C, gm_tensor.R_inv, gm_spline_cat.R_inv)
-    if any(type(a) is not np.ndarray or a.dtype.type is not np.float64 for a in (W, *factors)):
+    if any(
+        type(a) is not np.ndarray or a.dtype.type is not np.float64 or not a.dtype.isnative
+        for a in (W, *factors)
+    ):
         return None
     n1, n2 = gm_tensor.n_bins1, gm_tensor.n_bins2
     k1, k2, kc = B1.shape[1], B2.shape[1], C.shape[1]

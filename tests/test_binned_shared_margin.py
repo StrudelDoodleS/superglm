@@ -212,6 +212,38 @@ def test_signed_and_exceptional_weights_preserve_original_channel_association(mo
     np.testing.assert_array_equal(actual, reference)
 
 
+@pytest.mark.parametrize("margin", [1, 2])
+@pytest.mark.parametrize("factor", ["first", "second", "level", "tensor_map", "level_map"])
+def test_byte_swapped_factors_preserve_the_native_channel_fallback(monkeypatch, margin, factor):
+    tensor, category, weights = _pair(margin)
+    swapped = np.dtype(np.float64).newbyteorder("S")
+    # Working weights arrive normalized; the existing channel path also
+    # supports non-native basis and transform factors without copying them here.
+    owner, attribute = {
+        "first": (tensor, "B1_unique_t"),
+        "second": (tensor, "B2_unique_t"),
+        "level": (category, "B_unique"),
+        "tensor_map": (tensor, "R_inv"),
+        "level_map": (category, "R_inv"),
+    }[factor]
+    setattr(owner, attribute, getattr(owner, attribute).astype(swapped))
+    calls = []
+    original = algebra._level_tensor_channels
+
+    def counted(*args):
+        calls.append(len(args[0]))
+        return original(*args)
+
+    monkeypatch.setattr(algebra, "_level_tensor_channels", counted)
+    actual = algebra._cross_gram_tensor_spline_categorical(tensor, category, weights)
+    assert calls == [len(category.row_idx)]
+    tensor_rows, level_rows = tensor.toarray(), category.toarray()
+    expected = tensor_rows.T @ (weights[:, None] * level_rows)
+    envelope = np.abs(tensor_rows).T @ (np.abs(weights[:, None]) * np.abs(level_rows))
+    u = np.finfo(np.float64).eps / 2
+    assert np.all(np.abs(actual - expected) <= 32 * len(weights) * u * envelope)
+
+
 def test_scalar_histogram_and_canonical_full_codes_do_not_outlive_weights_or_basis(monkeypatch):
     from superglm._group_matrix._binned_codes import certify_binned_codes
 
