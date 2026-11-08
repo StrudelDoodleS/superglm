@@ -30,6 +30,7 @@ from superglm._frame import as_eager_frame
 from superglm.diagnostics.separation import SeparationError
 from superglm.distributional.api import SuperLSS
 from superglm.distributional.cross_validation import parts_ratio
+from superglm.distributional.rebuild import bind_replay_offsets
 from superglm.distributions import NegativeBinomial
 from superglm.editor.carry import model_with_edited_curves, weighted_mean
 from superglm.editor.diagnose import (
@@ -419,6 +420,8 @@ def _unstackable_reason(datasets: Sequence[EvaluationDataset]) -> str | None:
     """
     for column, values, neutral in _stacked_parts(datasets):
         lack = [dataset.name for dataset, value in zip(datasets, values) if value is None]
+        if not lack:
+            continue
         have = [
             dataset.name
             for dataset, value in zip(datasets, values)
@@ -441,7 +444,14 @@ def _stacked_parts(datasets: Sequence[EvaluationDataset]):
         if not keys:
             yield column, values, neutral
         for key in keys:
-            parts = [value.get(key) if isinstance(value, Mapping) else None for value in values]
+            parts = []
+            for dataset, value in zip(datasets, values, strict=True):
+                part = value.get(key) if isinstance(value, Mapping) else None
+                if part is not None and name == "offset" and dataset.sample_weight is not None:
+                    # Missing-source compatibility concerns the rows a fit
+                    # keeps; dropped raw offsets need no numeric conversion.
+                    part = np.asarray(part)[np.asarray(dataset.sample_weight) > 0.0]
+                parts.append(part)
             yield f"{key} {column}", parts, neutral
 
 
@@ -1204,6 +1214,9 @@ def run_cv(plan: CVRunPlan, context) -> CVRun:
         template = (
             plan.model.lss._clone_with_replaced_terms(covering) if covering else plan.template
         )
+        if plan.rows.offset is not None:
+            template = template._clone_with_replaced_terms({})
+            bind_replay_offsets(template, plan.rows.X, plan.rows.offset)
     else:
         template = _covering_template(plan.template, frame.take_rows(fitted), "Run CV")
     recorder = _FoldRecorder(plan, context)
@@ -1214,7 +1227,7 @@ def run_cv(plan: CVRunPlan, context) -> CVRun:
             plan.rows.y,
             cv=StoredFolds(plan.folds, before_fold=recorder.before_fold),
             sample_weight=plan.rows.sample_weight,
-            offset=plan.rows.offset,
+            **({} if lss else {"offset": plan.rows.offset}),
             fit_mode=plan.fit_mode,
             scoring=recorder.score,
             error_score="raise",

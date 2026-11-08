@@ -107,7 +107,7 @@ def coerce_dataset(
         weight_semantics=weight_semantics,
     )
     if offset_parameters is not None:
-        offset = parameter_offsets(name, offset, offset_parameters, n_obs)
+        offset = parameter_offsets(name, offset, offset_parameters, frame)
     elif offset is not None and len(offset) != n_obs:
         raise ValueError(f"{name}_data offset length differs from y.")
     return EvaluationDataset(

@@ -125,7 +125,7 @@ def offset_departs(column: Any, neutral: float) -> bool:
     return any(bool(np.any(np.asarray(a, dtype=np.float64) != neutral)) for a in arrays)
 
 
-def stack_offsets(datasets: Sequence[Any]) -> dict[str, NDArray[np.float64]] | None:
+def stack_offsets(datasets: Sequence[Any]) -> dict[str, NDArray] | None:
     """The splits' per-parameter offsets stacked in order, zero where a split lacks one."""
     columns = [dataset.offset for dataset in datasets]
     parameters = dict.fromkeys(key for column in columns if column for key in column)
@@ -134,9 +134,7 @@ def stack_offsets(datasets: Sequence[Any]) -> dict[str, NDArray[np.float64]] | N
     return {
         key: np.concatenate(
             [
-                np.asarray(column[key], dtype=np.float64)
-                if column and key in column
-                else np.zeros(dataset.n_obs)
+                np.asarray(column[key]) if column and key in column else np.zeros(dataset.n_obs)
                 for dataset, column in zip(datasets, columns, strict=True)
             ]
         )

@@ -57,7 +57,6 @@ def _supplied(case, **kw):
         case.X,
         case.y,
         cv=FOLDS,
-        offset=case.offsets,
         fit_mode="fit_reml",
         return_estimators=True,
         error_score="raise",

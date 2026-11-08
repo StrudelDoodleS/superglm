@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from superglm._frame import as_eager_frame
+from superglm._frame import EagerFrame, as_eager_frame
 from superglm.distributional.api import SuperLSS
 from superglm.distributional.offsets import offset_columns, sources_of
 from superglm.distributional.prediction_design import _required_columns
@@ -85,8 +85,8 @@ def interaction_users(model: object, term: str) -> list[str]:
 
 
 def parameter_offsets(
-    name: str, offset: Any, parameters: Sequence[str], n_obs: int
-) -> dict[str, NDArray[np.float64]] | None:
+    name: str, offset: Any, parameters: Sequence[str], frame: EagerFrame
+) -> dict[str, NDArray] | None:
     """A split's per-parameter link-scale offsets, keyed by family parameter name."""
     if offset is None:
         return None
@@ -101,10 +101,20 @@ def parameter_offsets(
         raise EditorValueError(
             f"Unknown offset parameter {unknown!r}; this model's parameters are {names}."
         )
-    owned: dict[str, NDArray[np.float64]] = {}
+    owned: dict[str, NDArray] = {}
     for key, values in offset.items():
-        array = np.asarray(values, dtype=np.float64)
-        if array.shape != (n_obs,):
+        # Verify labels before taking positional ownership. Keep raw values:
+        # only the downstream retained-row resolver may validate numeric data.
+        if isinstance(values, pd.Series):
+            index = getattr(frame.native, "index", None)
+            if index is not None and not values.index.equals(index):
+                raise EditorValueError(
+                    f"offset for {key!r} index must match X on the original rows"
+                )
+        array = np.array(
+            values, dtype=object if isinstance(values, (list, tuple)) else None, copy=True
+        )
+        if array.shape != (len(frame),):
             raise EditorValueError(
                 f"{name}_data offset for parameter {key!r} must have one value per row of y."
             )
