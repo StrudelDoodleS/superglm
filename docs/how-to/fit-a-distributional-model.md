@@ -18,6 +18,11 @@ for a runnable example with sample data. This page explains the families and
 modelling options. Method signatures are in the
 [SuperLSS API reference](../api/distributional.md).
 
+For strictly positive proportions summing to one, see
+[Fit a Dirichlet distributional model](fit-a-dirichlet-distributional-model.md).
+It explains component predictors, labeled composition predictions and joint
+log scoring, with the operations supported for vector responses.
+
 ## First Gaussian model
 
 Create a family, then declare every parameter with helpers on that same instance.
