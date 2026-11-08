@@ -17,10 +17,16 @@ from superglm.distributional.families._base import (
     immutable,
     scalar_response_row_count,
     typed_plan,
+    validated_observation_response,
 )
 from superglm.distributional.families._predictors import (
     MeanPredictor,
     ThetaPredictor,
+)
+from superglm.distributional.families._response_bounds import (
+    bind_observation,
+    bounded_channels,
+    refuse_bounded,
 )
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
@@ -34,6 +40,12 @@ from superglm.distributional.family import (
     _register_likelihood_reuse_contract,
     _validated_derivative_order,
     _validated_parameter_matrix,
+)
+from superglm.distributional.kernels._negative_binomial_windows import (
+    CountWindowRepresentationError,
+    count_window_endpoints,
+    negative_binomial_normalized_jets,
+    negative_binomial_window_jets,
 )
 from superglm.distributional.kernels.negative_binomial import (
     NegativeBinomialDerivativeRepresentationError,
@@ -65,7 +77,7 @@ _MAX_EXACT_COUNT = 2**53
 _FAMILY_CONFIGURATION = ("NegativeBinomialLS/v1", "nb2-mean-theta/v1")
 
 
-def _plan_identifier(weights, response, count) -> str:
+def _plan_identifier(weights, response, count, observation=COMPLETE_OBSERVATION) -> str:
     law = (
         ("nb2-mean-theta-prior-scaled-count/v1", "conditional-mean")
         if weights.provenance.contract.semantics == "prior"
@@ -77,6 +89,11 @@ def _plan_identifier(weights, response, count) -> str:
         for name, values in zip(("response", "count"), (response, count))
     )
     payload = "\0".join((*identity, weights.digest, *digests)).encode()
+    if observation.bounds is not None:
+        # Preserve the complete plan's historical identity byte-for-byte.
+        # Original thresholds remain authoritative even for equal count sets.
+        payload += b"\0finite-nb-bounded/v1\0" + observation.bounds.digest.encode()
+        return f"NegativeBinomialLS/v3:{hashlib.sha256(payload).hexdigest()}"
     return f"NegativeBinomialLS/v2:{hashlib.sha256(payload).hexdigest()}"
 
 
@@ -91,12 +108,21 @@ class NegativeBinomialLikelihoodPlan:
     exact_count: NDArray[np.float64]
     parameter_independent_carrier: NDArray[np.float64]
     _plan_identifier: str
+    observation: ObservationContract = COMPLETE_OBSERVATION
 
     @classmethod
-    def _from_prepared(cls, weights, response, count, carrier) -> NegativeBinomialLikelihoodPlan:
+    def _from_prepared(
+        cls, weights, response, count, carrier, observation=COMPLETE_OBSERVATION
+    ) -> NegativeBinomialLikelihoodPlan:
         exact_response, exact_count, exact_carrier = map(immutable, (response, count, carrier))
-        identifier = _plan_identifier(weights, exact_response, exact_count)
-        return cls(weights, exact_response, exact_count, exact_carrier, identifier)
+        identifier = _plan_identifier(weights, exact_response, exact_count, observation)
+        return cls(weights, exact_response, exact_count, exact_carrier, identifier, observation)
+
+    @property
+    def exact_row_mask(self) -> NDArray[np.bool_]:
+        bounds = self.observation.bounds
+        mask = np.ones(len(self.exact_response), dtype=bool) if bounds is None else bounds.side == 0
+        return np.frombuffer(mask.tobytes(), dtype=np.bool_)
 
     @property
     def plan_identifier(self) -> str:
@@ -119,6 +145,7 @@ class NegativeBinomialLikelihoodPlan:
             self.exact_response[indices],
             self.exact_count[indices],
             self.parameter_independent_carrier[indices],
+            self.observation.take(indices),
         )
 
 
@@ -215,7 +242,20 @@ def _factorial_carrier(count, weights, semantics) -> NDArray[np.float64]:
     return np.asarray(carrier, dtype=_FLOAT)
 
 
-_CAPABILITIES = FamilyCapabilities(2, True, False, False, False, True)
+def _count_sets(response, count, observation, prior):
+    bounds = observation.bounds
+    assert bounds is not None
+    L, U, empty = count_window_endpoints(bounds.lower, bounds.upper, prior)
+    lower = np.where(bounds.side == 1, response, bounds.lower)
+    upper = np.where(bounds.side == -1, response, bounds.upper)
+    OL, OU, observed_empty = count_window_endpoints(lower, upper, prior)
+    exact = bounds.side == 0
+    OL[exact], OU[exact] = count[exact], count[exact]
+    observed_empty[exact] = (count[exact] < L[exact]) | (count[exact] > U[exact])
+    return L, U, OL, OU, empty | observed_empty
+
+
+_CAPABILITIES = FamilyCapabilities(2, True, False, False, False, True, censored_response=True)
 
 
 @dataclass(frozen=True)
@@ -277,27 +317,75 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
         weights: ResolvedLikelihoodWeights,
         observation: ObservationContract,
     ) -> NegativeBinomialLikelihoodPlan:
-        response = _validated_response(y)
-        if observation != COMPLETE_OBSERVATION:
-            raise UnsupportedLikelihoodContractError("NegativeBinomialLS requires complete rows")
         if not isinstance(weights, ResolvedLikelihoodWeights):
             raise UnsupportedLikelihoodContractError(
                 "NegativeBinomialLS requires resolved likelihood weights"
             )
-        if len(weights.values) != len(response):
+        n = scalar_response_row_count(y)
+        if len(weights.values) != n:
             raise UnsupportedLikelihoodContractError("NB2 response and weights differ in length")
+        bounds = observation.bounds if isinstance(observation, ObservationContract) else None
+        response = validated_observation_response(
+            y,
+            censored=None if bounds is None else bounds.side != 0,
+            exact_validator=_validated_response,
+            input_positions=weights.input_positions,
+        )
+        # Validate the original windows before support/count conversion. Keep
+        # their original digest in the plan even when support clipping is inert.
+        bind_observation(
+            observation,
+            response,
+            weights,
+            support_lower=0.0,
+            family_name="NegativeBinomialLS",
+            atom_at_lower=True,
+        )
         semantics = weights.provenance.contract.semantics
-        count = _certified_count_mapping(response, weights.values, semantics)
-        carrier = _factorial_carrier(count, weights.values, semantics)
-        return NegativeBinomialLikelihoodPlan._from_prepared(weights, response, count, carrier)
+        exact = np.ones(n, dtype=bool) if bounds is None else bounds.side == 0
+        count = np.zeros(n)
+        count[exact] = _certified_count_mapping(response[exact], weights.values[exact], semantics)
+        if bounds is None:
+            carrier = _factorial_carrier(count, weights.values, semantics)
+        else:
+            prior = weights.values if semantics == "prior" else np.ones(n)
+            try:
+                *_, empty = _count_sets(response, count, observation, prior)
+            except CountWindowRepresentationError as exc:
+                # Failure-only per-row replay attaches input provenance.
+                for row in range(n):
+                    try:
+                        take = np.array([row])
+                        _count_sets(
+                            response[take], count[take], observation.take(take), prior[take]
+                        )
+                    except CountWindowRepresentationError as row_exc:
+                        raise UnsupportedLikelihoodContractError(
+                            f"{row_exc} (input row {weights.input_positions[row]})"
+                        ) from exc
+                raise
+            if np.any(empty):
+                row = int(weights.input_positions[np.flatnonzero(empty)[0]])
+                raise ValueError(
+                    f"NB2 observation has zero probability: empty count set (input row {row})"
+                )
+            carrier = np.zeros(n)
+        return NegativeBinomialLikelihoodPlan._from_prepared(
+            weights, response, count, carrier, observation
+        )
 
     def validate_likelihood_plan(
         self,
         y: NDArray,
         plan: FamilyLikelihoodPlan,
     ) -> NDArray[np.float64]:
-        response = _validated_response(y)
-        candidate = _typed_plan(plan, len(response))
+        candidate = _typed_plan(plan, scalar_response_row_count(y))
+        response = validated_observation_response(
+            y,
+            censored=~candidate.exact_row_mask,
+            exact_validator=_validated_response,
+            input_positions=candidate.weights.input_positions,
+        )
         if response.tobytes(order="C") != candidate.exact_response.tobytes(order="C"):
             raise UnsupportedLikelihoodContractError(
                 "NegativeBinomialLS likelihood response does not match the fitted response"
@@ -306,6 +394,22 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
 
     def initialize(self, y: NDArray, plan: FamilyLikelihoodPlan) -> InitialParameterState:
         candidate = _typed_plan(plan, scalar_response_row_count(y))
+        if not candidate.observation.is_complete:
+            prior = (
+                candidate.weights.values
+                if candidate.weights.provenance.contract.semantics == "prior"
+                else np.ones(len(candidate.exact_count))
+            )
+            _, _, OL, OU, _ = _count_sets(
+                candidate.exact_response, candidate.exact_count, candidate.observation, prior
+            )
+            representative = np.where(
+                np.isfinite(OU), np.floor(0.5 * OL + 0.5 * OU), np.maximum(OL, 1.0)
+            )
+            mean = max(
+                float(np.average(representative / prior, weights=candidate.weights.values)), 0.1
+            )
+            return InitialParameterState(theta=np.tile([mean, max(mean, 1.0)], (len(prior), 1)))
         theta = initialize_negative_binomial(
             candidate.exact_response,
             candidate.exact_count,
@@ -352,6 +456,8 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
         if type(self) is not NegativeBinomialLS:
             return 1, 0
         candidate = _typed_plan(plan, len(theta))
+        if not candidate.observation.is_complete:
+            return 1, 0
         semantics = candidate.weights.provenance.contract.semantics
         n = poisson_limit_row_count(
             theta[:, 0], theta[:, 1], candidate.weights.values, semantics, candidate.exact_count
@@ -400,6 +506,7 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
             family_name="NegativeBinomialLS",
         )
         candidate = _typed_plan(plan, len(parameters))
+        refuse_bounded(candidate.observation, "NegativeBinomialLS expected information")
         return negative_binomial_expected_information(
             parameters[:, 0],
             parameters[:, 1],
@@ -424,6 +531,64 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
             family_name="NegativeBinomialLS",
         )
         candidate = _typed_plan(plan, n_observations)
+        if candidate.observation.bounds is not None:
+            prior = (
+                candidate.weights.values
+                if candidate.weights.provenance.contract.semantics == "prior"
+                else np.ones(n_observations)
+            )
+            mass = (
+                np.ones(n_observations)
+                if candidate.weights.provenance.contract.semantics == "prior"
+                else candidate.weights.values
+            )
+            L, U, OL, OU, _ = _count_sets(
+                candidate.exact_response, candidate.exact_count, candidate.observation, prior
+            )
+
+            def normalized(rows, requested_order):
+                jet = negative_binomial_normalized_jets(
+                    L[rows],
+                    U[rows],
+                    OL[rows],
+                    OU[rows],
+                    parameters[rows],
+                    prior[rows],
+                    order=requested_order,
+                )
+                return (
+                    jet[0],
+                    jet[1] if requested_order >= 1 else None,
+                    jet[2] if requested_order == 2 else None,
+                )
+
+            def window(lo, hi, rows):
+                jet = negative_binomial_window_jets(
+                    lo, hi, parameters[rows], prior[rows], order=order
+                )
+                return jet[0], jet[1] if order >= 1 else None, jet[2] if order == 2 else None
+
+            value, score, hessian, valid = bounded_channels(
+                np.zeros(n_observations),
+                np.zeros((n_observations, 2)) if order >= 1 else None,
+                np.zeros((n_observations, 3)) if order == 2 else None,
+                np.ones(n_observations, dtype=bool),
+                response=candidate.exact_response,
+                bounds=candidate.observation.bounds,
+                multiplier=mass,
+                window=window,
+                derivative_order=order,
+                normalized_rows=np.arange(n_observations),
+                normalized=normalized,
+                carrier=candidate.parameter_independent_carrier,
+            )
+            return NaturalLikelihoodEvaluation(
+                optimizing_log_likelihood=value,
+                parameter_independent_carrier=candidate.parameter_independent_carrier,
+                score=score,
+                hessian_packed=hessian,
+                valid=valid,
+            )
         evaluated = evaluate_negative_binomial_rows(
             candidate.exact_count,
             parameters[:, 0],
@@ -471,6 +636,7 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
                 "NB2 endpoint curvature derivatives require the built-in log links"
             )
         candidate = _typed_plan(plan, scalar_response_row_count(y))
+        refuse_bounded(candidate.observation, "NegativeBinomialLS curvature direction")
         return negative_binomial_certified_predictor_curvature_directional(
             candidate.exact_count,
             eta,
@@ -518,6 +684,7 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
                 "NB2 endpoint curvature derivatives require the built-in log links"
             )
         candidate = _typed_plan(plan, scalar_response_row_count(y))
+        refuse_bounded(candidate.observation, "NegativeBinomialLS second curvature direction")
         return negative_binomial_certified_predictor_curvature_second_directional(
             candidate.exact_count,
             eta,
@@ -526,6 +693,17 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
             candidate.weights.values,
             candidate.weights.provenance.contract.semantics,
         )
+
+    def log_window_probability(self, lower, upper, theta, weights=None) -> NDArray[np.float64]:
+        """``log P(lower < N/w <= upper)``; omitted weights mean unit exposure."""
+        parameters = _validated_parameter_matrix(
+            theta,
+            n_observations=None,
+            parameters=self.parameters,
+            family_name="NegativeBinomialLS",
+        )
+        prior = np.ones(len(parameters)) if weights is None else weights
+        return immutable(negative_binomial_window_jets(lower, upper, parameters, prior, order=0)[0])
 
     def default_prediction(self, theta: NDArray) -> NDArray[np.float64]:
         parameters = _validated_parameter_matrix(
