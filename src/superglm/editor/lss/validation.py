@@ -131,12 +131,14 @@ def stack_offsets(datasets: Sequence[Any]) -> dict[str, NDArray] | None:
     parameters = dict.fromkeys(key for column in columns if column for key in column)
     if not parameters:
         return None
-    return {
-        key: np.concatenate(
-            [
-                np.asarray(column[key]) if column and key in column else np.zeros(dataset.n_obs)
-                for dataset, column in zip(datasets, columns, strict=True)
-            ]
-        )
-        for key in parameters
-    }
+    stacked = {}
+    for key in parameters:
+        parts = [
+            np.asarray(column[key]) if column and key in column else np.zeros(dataset.n_obs)
+            for dataset, column in zip(datasets, columns, strict=True)
+        ]
+        # Keep ordinary numeric splits fast. Any other raw type must survive
+        # concatenation: bool beside float must not become accepted 0/1.
+        dtype = None if all(part.dtype.kind in "iuf" for part in parts) else object
+        stacked[key] = np.concatenate(parts, dtype=dtype)
+    return stacked
