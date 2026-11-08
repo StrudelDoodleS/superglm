@@ -57,6 +57,47 @@ def test_atom_only_bounded_start_does_not_fabricate_positive_data(monkeypatch):
     assert family.evaluate_natural(response, start.theta, plan).valid.all()
 
 
+@pytest.mark.parametrize("semantics", ["prior", "frequency"])
+@pytest.mark.parametrize("side", [-1, 1])
+def test_identical_all_censored_thresholds_have_valid_starts_and_disclosed_fits(
+    semantics, side, monkeypatch
+):
+    import pandas as pd
+
+    from superglm import ConvergenceWarning, SuperLSS
+    from superglm.distributional import api
+    from superglm.distributional.results.solver import DenseSolverConfig
+
+    family = TweedieLSS()
+    response = np.ones(4)
+    mass = np.array([1.0, 2.0, 3.0, 1.0])
+    plan = _plan(response, -np.inf, np.inf, side, mass, semantics)
+    original = plan.response.copy()
+    start = family.initialize(response, plan)
+    assert np.isfinite(start.theta).all()
+    assert family.evaluate_natural(response, start.theta, plan).valid.all()
+    np.testing.assert_array_equal(plan.response, original)
+    frame = pd.DataFrame({"x": np.arange(4)})
+    model = SuperLSS(family, family.mu(), family.phi(), family.p(), weight_semantics=semantics)
+
+    # Force an iteration stop rather than relying on a platform's route to a
+    # nonfinite optimum. The accepted state must survive and disclose its stop.
+    def one_step_budget(**kwargs):
+        return DenseSolverConfig(terminal_retry_iterations=1, max_predictor_step=0.1, **kwargs)
+
+    monkeypatch.setattr(api, "DenseSolverConfig", one_step_budget)
+    with pytest.warns(ConvergenceWarning):
+        model.fit(
+            frame,
+            response,
+            sample_weight=mass,
+            censored="left" if side < 0 else "right",
+            max_inner_iter=1,
+        )
+    assert not model.result_.coefficient_converged
+    assert np.isfinite(model.predict_parameters(frame)).all().all()
+
+
 @pytest.mark.parametrize(
     "shape,x,upper", [(0.003, 0.1, True), (2.3, 3.9, False), (80.0, 90.0, True)]
 )

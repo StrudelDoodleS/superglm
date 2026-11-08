@@ -703,7 +703,14 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
             family_name="NegativeBinomialLS",
         )
         prior = np.ones(len(parameters)) if weights is None else weights
-        return immutable(negative_binomial_window_jets(lower, upper, parameters, prior, order=0)[0])
+        values = negative_binomial_window_jets(lower, upper, parameters, prior, order=0)[0]
+        unresolved = np.isnan(values) | np.isposinf(values)
+        if np.any(unresolved):
+            raise UnsupportedLikelihoodContractError(
+                "NegativeBinomialLS window probability is numerically unresolved at rows "
+                f"{np.flatnonzero(unresolved).tolist()} (parameter range or work/convergence limit)"
+            )
+        return immutable(values)
 
     def default_prediction(self, theta: NDArray) -> NDArray[np.float64]:
         parameters = _validated_parameter_matrix(

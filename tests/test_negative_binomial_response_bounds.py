@@ -91,6 +91,68 @@ def test_curvature_disclosure_does_not_diagnose_censor_limits_as_exact_counts(
         assert len(messages) == 1
 
 
+@pytest.mark.parametrize("semantics", ["frequency", "prior"])
+@pytest.mark.parametrize("side", [0, 1])
+@pytest.mark.parametrize("count", [2**40, 2**50])
+def test_broad_remote_conditioning_preserves_offset_count_law(semantics, side, count):
+    import mpmath as mp
+
+    prior, multiplier = (3.0, 1.0) if semantics == "prior" else (1.0, 3.0)
+    response = np.array([count / prior])
+    point = np.array([1.0, 1.0]) / prior
+    plan = _plan(
+        response,
+        (count - 1) / prior,
+        np.inf,
+        side,
+        weights=[3.0],
+        semantics=semantics,
+    )
+
+    def conditional(mean, size):
+        # Independently sum the excess-count law. At the reference point its
+        # adjacent ratio is exactly1/2; 200 terms leave <2**-199 omitted mass.
+        mean, size = prior * mean, prior * size
+        terms = [mp.mpf(1)]
+        for j in range(200):
+            terms.append(terms[-1] * (count + j + size) / (count + j + 1) * mean / (mean + size))
+        numerator = terms[:1] if side == 0 else terms[1:]
+        return multiplier * (mp.log(mp.fsum(numerator)) - mp.log(mp.fsum(terms)))
+
+    expected = derivatives(conditional, point)
+    np.testing.assert_allclose(expected[0], [-multiplier * np.log(2.0)], atol=2e-14, rtol=0)
+    family = NegativeBinomialLS()
+    for order in (0, 1, 2):
+        result = family.evaluate_natural(response, point[None], plan, derivative_order=order)
+        assert result.valid[0]
+        actual = (result.reported_log_likelihood, result.score, result.hessian_packed)[: order + 1]
+        for got, want in zip(actual, expected[: order + 1], strict=True):
+            np.testing.assert_allclose(got, want, atol=2e-12, rtol=2e-12)
+
+
+@pytest.mark.parametrize("reason", ["domain", "work"])
+def test_public_window_query_discloses_unresolved_numerics(reason, monkeypatch):
+    windows = _windows()
+    if reason == "work":
+        monkeypatch.setattr(windows, "_MAX_RECURRENCE_CELLS", 0)
+    theta = [[1e136, 1.0]] if reason == "domain" else [[2.0, 1.0]]
+    with pytest.raises(UnsupportedLikelihoodContractError, match="unresolved.*row"):
+        NegativeBinomialLS().log_window_probability(2.0, np.inf, theta)
+    assert np.isneginf(NegativeBinomialLS().log_window_probability(0.0, 0.0, [[1.0, 1.0]])[0])
+
+
+def test_public_window_query_cannot_drop_extra_endpoint_rows():
+    family = NegativeBinomialLS()
+    with pytest.raises(ValueError, match="broadcast|shape|rows|length"):
+        family.log_window_probability(-np.inf, [0.0, 1.0], [[1.0, 1.0]])
+    np.testing.assert_allclose(
+        family.log_window_probability(-np.inf, [0.0, 1.0], [[1.0, 1.0], [1.0, 1.0]]),
+        np.log([0.5, 0.75]),
+        atol=2e-14,
+        rtol=0,
+    )
+
+
 @pytest.mark.parametrize(
     "lo,hi,L,U,empty",
     [

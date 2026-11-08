@@ -440,7 +440,25 @@ def _normalized_log_row(L, U, OL, OU, mean, size, order, budget, max_terms):
         return num - den, work
     numerator, work, _ = _window_log_row(OL, OU, mean, size, order, budget, max_terms)
     denominator, cells, _ = _window_log_row(L, U, mean, size, order, budget - work, max_terms)
-    return numerator - denominator, work + cells
+    work += cells
+    normalized = numerator - denominator
+    n = 1 if order == 0 else (3 if order == 1 else 6)
+    # A broad interval can still be a tightly conditioned rare tail. Separate
+    # completed jets may erase its conditional law even when they stay finite.
+    # Compare the source rounding scale (in u) with the core admission scale;
+    # unresolved subtraction uses one common PMF anchor before taking logs.
+    resolved = True
+    for col in range(n):
+        magnitude = abs(numerator[col]) + abs(denominator[col])
+        if not np.isfinite(normalized[col]) or (
+            64 * _U * magnitude > 2e-12 * max(1.0, abs(normalized[col]))
+        ):
+            resolved = False
+            break
+    if resolved:
+        return normalized, work
+    den, num, _, cells = _relative_sums(L, U, OL, OU, mean, size, order, budget - work)
+    return num - den, work + cells
 
 
 def _inputs(theta, prior_weights, order):
@@ -486,6 +504,8 @@ def negative_binomial_window_jets(lower, upper, theta, prior_weights, *, order: 
     tails are evaluated by beta or a derivative-admitted sum, never clipped.
     """
     parameters, weights, effective, valid, order = _inputs(theta, prior_weights, order)
+    lower = np.broadcast_to(np.asarray(lower, dtype=float), (len(parameters),))
+    upper = np.broadcast_to(np.asarray(upper, dtype=float), (len(parameters),))
     L, U, empty = count_window_endpoints(lower, upper, weights)
     out = np.full((len(parameters), 6), np.nan)
     budget = _MAX_RECURRENCE_CELLS
