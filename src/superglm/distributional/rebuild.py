@@ -155,15 +155,8 @@ def clone_with_replaced_terms(source: Any, replacements: Mapping[str, Any]) -> A
     return clone
 
 
-def replay_fit(model: Any, X: Any, y: Any, sample_weight: Any, offsets: Any) -> Any:
-    """Fit ``model`` the way its source was fitted and return it."""
-    settings = model._fit_settings
-    if settings is None:
-        raise RuntimeError(
-            "This model has no recorded fit settings, so its fit cannot be replayed. "
-            "Fit it with fit() or fit_reml() first."
-        )
-    kwargs = {k: v for k, v in settings.items() if k != "method"}
+def bind_replay_offsets(model: Any, X: Any, offsets: Any) -> None:
+    """Bind new-row replacements to an editor-owned unfitted clone's sources."""
     if offsets is not None:
         # The editor supplies new-row replacements. Bind them to the private
         # clone's declarations before calling the ordinary public fitting API.
@@ -176,5 +169,17 @@ def replay_fit(model: Any, X: Any, y: Any, sample_weight: Any, offsets: Any) -> 
             else p
             for p in model._predictors
         )
+
+
+def replay_fit(model: Any, X: Any, y: Any, sample_weight: Any, offsets: Any) -> Any:
+    """Fit ``model`` the way its source was fitted and return it."""
+    settings = model._fit_settings
+    if settings is None:
+        raise RuntimeError(
+            "This model has no recorded fit settings, so its fit cannot be replayed. "
+            "Fit it with fit() or fit_reml() first."
+        )
+    kwargs = {k: v for k, v in settings.items() if k != "method"}
+    bind_replay_offsets(model, X, offsets)
     fit = getattr(model, settings["method"])
     return fit(X, y, sample_weight, **kwargs)

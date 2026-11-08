@@ -217,10 +217,12 @@ def take_prediction_replacements(
 ) -> dict[str, NDArray] | None:
     """Take only explicit replacements; downstream prediction resolves columns.
 
-    Validate the original labels and preserve raw values until retained-row
-    validation. The replacement, when supplied, is the last shaped source.
+    Validate labels and retained values against the original rows before
+    slicing, including column sources. The replacement, when supplied, is
+    the last shaped source; it never includes the columns' contributions.
     """
     shaped = shape_prediction_offsets(predictors, frame, offsets)
+    sum_offset_sources(shaped, positions)
     return None if offsets is None else {name: shaped[name][-1][positions] for name in offsets}
 
 

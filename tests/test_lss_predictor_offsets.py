@@ -355,6 +355,128 @@ def test_column_declarations_do_not_block_editor_refit_without_replacement_data(
     assert refit_reason(model, None, None, y) is None
 
 
+def _editor_offset_dataset(model, X, y, values, weights=None):
+    from superglm.editor.evaluation import coerce_dataset
+
+    return coerce_dataset(
+        "validation",
+        (X, y, weights, {"location": values}),
+        family=model.family,
+        weight_semantics="prior",
+        offset_parameters=model.parameter_names_,
+    )
+
+
+def test_editor_replacements_check_original_series_index_before_normalizing():
+    from superglm.editor.lss.validation import lss_dataset_metrics
+
+    X, y = _data()
+    X.index = np.arange(100, 100 + len(X))
+    model = _model(X.a.to_numpy(), scale=None).fit(X, y)
+    values = pd.Series(X.a.to_numpy(), index=X.index)
+    dataset = _editor_offset_dataset(model, X, y, values)
+    metrics = lss_dataset_metrics(model, dataset)
+    direct = model.scores(X, y, which=("log", "crps"), offsets={"location": values})
+    assert metrics["log_score"] == pytest.approx(direct["log"].mean())
+    assert metrics["crps"] == pytest.approx(direct["crps"].mean())
+    with pytest.raises(ValueError, match="index.*original"):
+        _editor_offset_dataset(model, X, y, values.iloc[::-1])
+
+
+@pytest.mark.parametrize("consumer", ["metrics", "export", "refit"])
+def test_editor_offsets_preserve_raw_values_until_zero_weight_selection(consumer):
+    from superglm.editor.lss.persistence import lss_prediction_rows
+    from superglm.editor.lss.validation import lss_dataset_metrics, stack_offsets
+
+    X, y = _data()
+    X.index = np.arange(100, 100 + len(X))
+    model = _model(X.a.to_numpy(), scale=None).fit(X, y)
+    weights = np.ones(len(X))
+    weights[2] = 0
+    values = pd.Series(X.a.to_numpy(), index=X.index, dtype=object)
+    values.iloc[2] = "dropped"
+    dataset = _editor_offset_dataset(model, X, y, values, weights)
+    positions = np.flatnonzero(weights)
+    if consumer == "metrics":
+        got = lss_dataset_metrics(model, dataset)
+        expected = model.scores(
+            X, y, which=("log",), sample_weight=weights, offsets={"location": values}
+        )
+        assert got["log_score"] == pytest.approx(expected["log"].sum() / len(positions))
+    elif consumer == "export":
+        got = lss_prediction_rows(model, dataset, max_rows=len(X))
+        expected = model.predict_parameters(
+            X.iloc[positions], offsets={"location": X.a.iloc[positions]}
+        )
+        np.testing.assert_allclose(got, expected)
+    else:
+        stacked = stack_offsets([dataset, dataset])
+        refit = model._clone_with_replaced_terms({})._replay_fit(
+            pd.concat([X, X], ignore_index=True),
+            np.tile(y, 2),
+            np.tile(weights, 2),
+            stacked,
+        )
+        control = _model(X.a.to_numpy(), scale=None).fit(X, y, sample_weight=weights)
+        np.testing.assert_allclose(list(refit.coef_.values()), list(control.coef_.values()))
+
+
+@pytest.mark.parametrize("source", ["array", "column"])
+def test_taken_diagnostic_offsets_report_invalid_original_position(source):
+    X, y = _data()
+    model = _model(X.a.to_numpy() if source == "array" else "a", scale=None).fit(X, y)
+    weights = np.ones(len(X))
+    weights[2] = 0
+    X.loc[6, "a"] = np.nan
+    offsets = {"location": X.a} if source == "array" else None
+    with pytest.raises(ValueError, match=r"original rows \[6\]"):
+        model.actual_expected(X, y, "x", sample_weight=weights, offsets=offsets)
+
+
+def test_editor_final_fit_keeps_dropped_raw_offsets_out_of_value_checks():
+    from types import SimpleNamespace
+
+    from superglm import GammaLS
+    from superglm.editor import edit
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+
+    X, y = _data()
+    X.index = np.arange(100, 100 + len(X))
+    y = np.abs(y) + 0.5
+    family = GammaLS()
+
+    def build():
+        return SuperLSS(family, family.mean("x", offset=X.a.to_numpy()), family.scale())
+
+    weights = np.ones(len(X))
+    weights[2] = 0
+    model = build().fit(X, y, sample_weight=weights)
+    values = pd.Series(X.a.to_numpy(), index=X.index, dtype=object)
+    values.iloc[2] = "dropped"
+    split = (X, y, weights, {"mean": values})
+    session = edit(model, train_data=split, validation_data=split)
+    context = SimpleNamespace(check=lambda: None, progress=lambda *args, **kwargs: None)
+    final = run_final_fit(capture_final_fit(session), context)
+    control = build().fit(X, y, sample_weight=weights)
+    np.testing.assert_allclose(list(final.model.coef_.values()), list(control.coef_.values()))
+
+
+def test_editor_missing_split_offsets_compare_retained_values_only():
+    import dataclasses
+
+    from superglm.editor.cv import _unstackable_reason
+
+    X, y = _data()
+    model = _model(np.zeros(len(X)), scale=None).fit(X, y)
+    weights = np.ones(len(X))
+    weights[2] = 0
+    values = np.zeros(len(X), dtype=object)
+    values[2] = "dropped"
+    dataset = _editor_offset_dataset(model, X, y, values, weights)
+    missing = dataclasses.replace(dataset, name="test", offset=None)
+    assert _unstackable_reason([dataset, missing]) is None
+
+
 @pytest.mark.parametrize("kind", ["spread", "portfolio", "qq"])
 def test_retained_surfaces_and_qq_preserve_raw_replacement_values_and_labels(kind):
     X, y = _data()

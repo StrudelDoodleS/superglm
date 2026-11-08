@@ -476,7 +476,10 @@ def test_display_transform_reads_the_spread_at_the_reference_row(make, kind):
     picks = np.arange(0, term.x.size, 40)
     frame = pd.concat([session.model.reference_row()] * picks.size, ignore_index=True)
     frame["age"] = term.x[picks]
-    natural = case.model.predict_parameters(frame)[second].to_numpy()
+    # The editor's reference has zero array offsets; a new frame needs these
+    # replacements explicitly, even when only its spread is read here.
+    offsets = None if case.offsets is None else dict.fromkeys(case.offsets, np.zeros(len(frame)))
+    natural = case.model.predict_parameters(frame, offsets=offsets)[second].to_numpy()
     shown = transform.to_display(term.original_log_effect[picks])
     # eta is a sum of a handful of terms of size up to ~10; exp keeps that relative error.
     np.testing.assert_allclose(shown, _spread(kind, natural), rtol=64 * EPS, atol=0)
