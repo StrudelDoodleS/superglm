@@ -13,6 +13,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributional.observation import ResponseBounds
+from superglm.distributional.response import ResponseSpec
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
@@ -491,6 +492,22 @@ class ConfigurableDistributionalFamily(Protocol):
     """Optional complete-fit configuration metadata."""
 
     def to_config(self) -> Mapping[str, object]: ...
+
+
+@runtime_checkable
+class ResponseSpecFamily(Protocol):
+    """Optional structural permission for a non-scalar response."""
+
+    @property
+    def response_spec(self) -> ResponseSpec: ...
+
+
+@runtime_checkable
+class VectorDefaultPredictionFamily(Protocol):
+    """Optional ordered labels for a row-first vector default prediction."""
+
+    @property
+    def default_prediction_columns(self) -> tuple[str, ...]: ...
 
 
 @runtime_checkable

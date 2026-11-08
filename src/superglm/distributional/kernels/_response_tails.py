@@ -40,6 +40,189 @@ TailChannels = tuple[NDArray[np.float64], NDArray[np.float64] | None, NDArray[np
 Jet = tuple[NDArray[np.float64], ...]
 
 
+def _checked_core_order(order: int) -> int:
+    if (
+        isinstance(order, bool | np.bool_)
+        or not isinstance(order, int | np.integer)
+        or order not in (0, 1, 2)
+    ):
+        raise ValueError("core mixture order must be an integer from 0 through 2")
+    return int(order)
+
+
+class CoreLogMixtureAccumulator:
+    """Streaming positive log-sum jets, with O(n * (K + K(K+1)/2)) state.
+
+    Each ``add`` consumes one component's row-first log jet. Scaled positive
+    masses determine the shares; centered score moments give
+    ``H = E[H_component] + Cov(score_component)``. Score means are stored
+    relative to a per-row anchor, so a large common score cannot erase a small
+    variance; a newly dominant component becomes the anchor. Only this
+    accumulator owns the temporary state; it is never
+    cached or reused across parameter states except by explicitly adding terms.
+
+    A ``-inf`` log value declares an *identically absent* component: its
+    derivatives are ignored. It must not denote a moving split piece with
+    boundary derivatives. NaN/+inf values or nonfinite requested derivatives
+    of any finite component poison that row, even if its scaled mass underflows.
+    ``finish`` returns NaNs for unresolved rows; all-absent rows have value
+    ``-inf`` and undefined (NaN) log derivatives. Finishing before any add
+    raises, since no row count has been established. Returned arrays are copies.
+    """
+
+    def __init__(self, k_parameters: int, order: int):
+        self.order = _checked_core_order(order)
+        if (
+            isinstance(k_parameters, bool | np.bool_)
+            or not isinstance(k_parameters, int | np.integer)
+            or k_parameters < 1
+        ):
+            raise ValueError("k_parameters must be a positive integer")
+        self.k_parameters = int(k_parameters)
+        self._top: NDArray | None = None
+
+    def add(self, jet: Jet) -> None:
+        """Add one component; channels use the existing ``packed_tuples`` order."""
+        if len(jet) < self.order + 1:
+            raise ValueError("component jet is missing a requested derivative order")
+        channels = tuple(np.asarray(j, dtype=FLOAT) for j in jet[: self.order + 1])
+        value = channels[0]
+        if value.ndim != 1:
+            raise ValueError("component values must have shape (n,)")
+        n = len(value)
+        for degree in range(1, self.order + 1):
+            expected = (n, len(packed_tuples(self.k_parameters, degree)))
+            if channels[degree].shape != expected:
+                raise ValueError(f"component order-{degree} shape must be {expected}")
+        if self._top is None:
+            self._top = np.full(n, -np.inf)
+            self._mass = np.zeros(n)
+            self._invalid = np.zeros(n, dtype=bool)
+            if self.order >= 1:
+                self._anchor = np.zeros((n, self.k_parameters))
+                self._mean = np.zeros_like(self._anchor)
+            if self.order == 2:
+                self._hessian = np.zeros((n, len(packed_tuples(self.k_parameters, 2))))
+        elif value.shape != self._top.shape:
+            raise ValueError("component row shape must match previous components")
+
+        absent = value == -np.inf
+        finite = np.isfinite(value)
+        for channel in channels[1:]:
+            finite &= np.all(np.isfinite(channel), axis=1)
+        self._invalid |= ~absent & ~finite
+        present = ~absent & ~self._invalid
+        fresh = present & (self._mass == 0.0)
+        combined = np.flatnonzero(present & ~fresh)
+        self._top[fresh], self._mass[fresh] = value[fresh], 1.0
+        if self.order >= 1:
+            self._anchor[fresh] = channels[1][fresh]
+        if self.order == 2:
+            self._hessian[fresh] = channels[2][fresh]
+        if len(combined) == 0:
+            return
+
+        with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+            top = np.maximum(self._top[combined], value[combined])
+            log_left = np.log(self._mass[combined]) + (self._top[combined] - top)
+            log_right = value[combined] - top
+            left = self._mass[combined] * np.exp(self._top[combined] - top)
+            right = np.exp(log_right)
+            mass = left + right
+            self._top[combined], self._mass[combined] = top, mass
+            if self.order == 0:
+                return
+
+            log_p, log_q = log_left - np.log(mass), log_right - np.log(mass)
+            root_p, root_q = np.exp(0.5 * log_p)[:, None], np.exp(0.5 * log_q)[:, None]
+            centered = channels[1][combined] - self._anchor[combined]
+            delta = centered - self._mean[combined]
+            left_centered = self._mean[combined].copy()
+            promote = log_right > log_left
+            left_centered[promote] = -delta[promote]
+            centered[promote] = 0.0
+            self._anchor[combined[promote]] = channels[1][combined[promote]]
+            # Form p*x as (sqrt(p)*x)*sqrt(p): p may underflow while p*x
+            # is still representable. Reanchoring also avoids canceling a
+            # huge old anchor when its remaining weighted score is tiny.
+            self._mean[combined] = (left_centered * root_p) * root_p + (centered * root_q) * root_q
+            if self.order == 2:
+                # Split sqrt(p*q) into two fourth roots before scaling delta.
+                # Even sqrt(p*q) may underflow although p*q*delta**2 does not.
+                fourth_root = np.exp(0.25 * log_p + 0.25 * log_q)[:, None]
+                scaled = (delta * fourth_root) * fourth_root
+                covariance = np.column_stack(
+                    [scaled[:, i] * scaled[:, j] for i, j in packed_tuples(self.k_parameters, 2)]
+                )
+                self._hessian[combined] = (
+                    (self._hessian[combined] * root_p) * root_p
+                    + (channels[2][combined] * root_q) * root_q
+                    + covariance
+                )
+
+    def finish(self) -> Jet:
+        """Return the accumulated core jet without changing the accumulator."""
+        if self._top is None:
+            raise ValueError("an empty accumulator needs a component to establish its rows")
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            value = self._top + np.log(self._mass)
+            result = [value]
+            if self.order >= 1:
+                result.append(self._anchor + self._mean)
+            if self.order == 2:
+                result.append(self._hessian.copy())
+        empty = self._mass == 0.0
+        invalid = self._invalid | (~empty & ~np.isfinite(value))
+        for channel in result[1:]:
+            invalid |= ~empty & ~np.all(np.isfinite(channel), axis=1)
+            channel[empty] = np.nan
+        for channel in result:
+            channel[invalid] = np.nan
+        return tuple(result)
+
+
+def log_mixture_jets(
+    log_terms: NDArray,
+    term_score: NDArray | None = None,
+    term_hessian: NDArray | None = None,
+    *,
+    order: int,
+) -> Jet:
+    """Positive-sum jets for a small batch in row-first ``(n, terms)`` layout.
+
+    Scores are ``(n, terms, K)`` and Hessians ``(n, terms, K(K+1)/2)`` in
+    ``packed_tuples(K, 2)`` order. Only requested channels are read. Empty sums
+    and absent/unresolved components follow :class:`CoreLogMixtureAccumulator`;
+    the batch uses that same centered-moment implementation, one term at a time.
+    """
+    order = _checked_core_order(order)
+    logs = np.asarray(log_terms, dtype=FLOAT)
+    if logs.ndim != 2:
+        raise ValueError("log_terms must have two-dimensional shape (n, terms)")
+    channels = [logs]
+    k_parameters = 1
+    if order >= 1:
+        score = np.asarray(term_score, dtype=FLOAT)
+        if score.ndim != 3 or score.shape[:2] != logs.shape or score.shape[2] < 1:
+            raise ValueError("term_score must have shape (n, terms, K), with K positive")
+        k_parameters = score.shape[2]
+        channels.append(score)
+    if order == 2:
+        hessian = np.asarray(term_hessian, dtype=FLOAT)
+        if hessian.shape != (*logs.shape, k_parameters * (k_parameters + 1) // 2):
+            raise ValueError("term_hessian must have shape (n, terms, K*(K+1)//2)")
+        channels.append(hessian)
+    accumulator = CoreLogMixtureAccumulator(k_parameters, order)
+    if logs.shape[1] == 0:
+        accumulator.add(
+            (np.full(logs.shape[0], -np.inf),)
+            + tuple(np.zeros((logs.shape[0], c.shape[2])) for c in channels[1:])
+        )
+    for term in range(logs.shape[1]):
+        accumulator.add(tuple(c[:, term] for c in channels))
+    return accumulator.finish()
+
+
 def _window_log_derivatives(kappa: NDArray, order: int) -> dict[int, NDArray[np.float64]]:
     """``phi^(m)(Delta)``, ``m = 1..order``, for ``phi(Delta) = log(-expm1(Delta))``.
 

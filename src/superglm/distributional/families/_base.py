@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -38,6 +39,19 @@ def array_digest(domain: bytes, values: NDArray[np.float64]) -> str:
 
 
 def response_row_count(y: NDArray) -> int:
+    """Count axis zero of an already shape-validated, row-first response."""
+    shape = np.shape(y)
+    if len(shape) == 0 or shape[0] == 0:
+        raise ValueError("y must be a non-empty row-first array")
+    return shape[0]
+
+
+def scalar_response_row_count(y: NDArray) -> int:
+    """Shape-only scalar guard for adapters whose prepared plan owns the values.
+
+    Scalar plan operations that previously relied on ``response_row_count``
+    for validation must use this companion when adopting the row-first helper.
+    """
     shape = np.shape(y)
     if len(shape) != 1 or shape[0] == 0:
         raise ValueError("y must be a non-empty row vector")
@@ -66,6 +80,71 @@ def validated_float_response(
         if np.any(below):
             raise ValueError(message)
     return response
+
+
+def validated_observation_response(
+    y: NDArray,
+    *,
+    censored: NDArray[np.bool_] | None,
+    exact_validator: Callable[[NDArray], NDArray[np.float64]],
+    input_positions: NDArray[np.integer] | None = None,
+) -> NDArray[np.float64]:
+    """Validate exact scalar realizations separately from finite censoring limits.
+
+    ``censored`` is a boolean row mask (or ``None`` for all exact). The family
+    receives the original exact values/dtype, before float conversion; its
+    support and lossless-count checks remain authoritative. Censored values
+    need only be finite real numbers here; the binder checks whether their
+    observed windows intersect support. No density placeholder replaces them.
+    Refusals use ``input_positions``, including after a permuted row take.
+    """
+    source = np.asarray(y, dtype=object if isinstance(y, list | tuple) else None)
+    if source.ndim != 1 or len(source) == 0:
+        raise ValueError("y must be a non-empty scalar response vector")
+    n_rows = len(source)
+    positions = np.arange(n_rows) if input_positions is None else np.asarray(input_positions)
+    if positions.shape != (n_rows,) or positions.dtype.kind not in "iu":
+        raise ValueError("input_positions must contain one integer per response row")
+    mask = np.zeros(n_rows, dtype=bool) if censored is None else np.asarray(censored)
+    if mask.shape != (n_rows,) or mask.dtype != np.bool_:
+        raise ValueError("censored must be a boolean mask with one entry per response row")
+    result = np.empty(n_rows, dtype=FLOAT)
+
+    def validate_subset(rows, validator):
+        if len(rows) == 0:
+            return
+        try:
+            values = validator(source[rows])
+        except (ValueError, TypeError, OverflowError, FloatingPointError) as exc:
+            # Only on failure: recover the first offending source position
+            # without adding per-row work to successful validation.
+            for row in rows:
+                try:
+                    validator(source[row : row + 1])
+                except (ValueError, TypeError, OverflowError, FloatingPointError) as row_exc:
+                    raise ValueError(f"{row_exc} (first at input row {positions[row]})") from exc
+            raise ValueError(f"{exc} (input rows {positions[rows].tolist()})") from exc
+        values = np.asarray(values, dtype=FLOAT)
+        if values.shape != (len(rows),) or not np.all(np.isfinite(values)):
+            raise ValueError("response validator must return one finite value per selected row")
+        result[rows] = values
+
+    def validate_limits(limits):
+        message = "censoring limits must be finite real numbers (not bool or complex)"
+        if limits.dtype.kind not in "fiuO":
+            raise ValueError(message)
+        if limits.dtype.kind == "O" and any(
+            isinstance(v, bool | np.bool_ | complex | np.complexfloating)
+            or not isinstance(v, int | float | np.integer | np.floating)
+            for v in limits
+        ):
+            raise ValueError(message)
+        with np.errstate(over="raise", invalid="raise"):
+            return validated_float_response(limits, message=message)
+
+    validate_subset(np.flatnonzero(~mask), exact_validator)
+    validate_subset(np.flatnonzero(mask), validate_limits)
+    return result
 
 
 def typed_plan[PlanT](
