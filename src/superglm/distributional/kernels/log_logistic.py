@@ -46,15 +46,15 @@ def _finite_window_jets(lo, hi, theta, order):
     of the two endpoint logits, including when the responses are adjacent.
     No interior response-valued quadrature nodes are formed.
 
-    Endpoint logistic derivatives are v=p(1-p), D=v*(1-2p), E=v*(1-6v).
-    For G=log(1-exp(-a*w)), set g=d/expm1(d). Its first four derivatives
-    are g/a, -g(g+d)/a², g(g+d)(2g+d)/a³, and
-    -g(g+d)[6g(g+d)+d²]/a⁴. This scaled form avoids overflow of 1/expm1(d).
-    The log-scale derivative's difference of sigmoids is a sum of tanh's
-    near zero, preserving the small score of a concentrated median window.
-    Finally d/ds=s^-1 d/d(log s); the falling-factorial operators below
-    perform every pure and mixed natural-coordinate transformation.
+    Endpoint logistic derivatives use v=p(1-p), D=v*(1-2p), E=v*(1-6v).
+    Shape-gap derivatives and coordinate conversion are documented below.
     """
+    # For G=log(1-exp(-a*w)), put g=d/expm1(d). Its first four derivatives
+    # are g/a, -g(g+d)/a², g(g+d)(2g+d)/a³, and
+    # -g(g+d)[6g(g+d)+d²]/a⁴, avoiding overflow of 1/expm1(d).
+    # A centered tanh sum preserves the small log-scale score near a median.
+    # With d/ds=s^-1 d/d(log s), falling-factorial operators below transform
+    # every pure and mixed derivative into natural coordinates.
     s, a = theta.T
     ell, h, w = log_response_ratio(lo, s), log_response_ratio(hi, s), log_response_ratio(hi, lo)
     zl, zh, d = a * ell, a * h, a * w
