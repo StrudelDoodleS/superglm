@@ -755,7 +755,7 @@ class Categorical:
     def _predict_codes(self, x: NDArray) -> NDArray:
         """Codes against the fitted universe; -1 for levels the policy admits."""
         codes = _codes_against(x, self._levels)
-        if self.unseen == "error":
+        if self.unseen == "error" and np.any(codes < 0):
             _refuse_unseen_categorical_levels(set(x[codes < 0].tolist()), set(self._levels))
         if self.unseen == "base" and self._grouping is None:
             # A group policy, or base under a grouping, has already routed and

@@ -659,15 +659,17 @@ def _take_offset(offset, rows: NDArray):
     return offset[rows]
 
 
-def _held_out_predictions(folds, est, frame, rows, offset, sample_weight) -> NDArray[np.float64]:
+def _held_out_predictions(
+    folds, est, frame, rows, offset, sample_weight
+) -> tuple[NDArray[np.float64], int]:
     """A fold's out-of-fold predictions, where a row its fit drops cannot fail the fold.
 
     Such a row can hold a label nothing was fitted on. It reads NaN when it alone cannot be
     priced, and the other rows it shares a fold with are unaffected; a row the fit keeps raises
-    as ``predict`` does.
+    as ``predict`` does. Return the predictions and the number of unpriceable dropped rows.
     """
     try:
-        return folds.predict(est, frame.take_rows(rows), _take_offset(offset, rows))
+        return folds.predict(est, frame.take_rows(rows), _take_offset(offset, rows)), 0
     except ValueError:
         kept = None if sample_weight is None else np.asarray(sample_weight) > 0.0
         if not folds.drops_zero_weight_rows or kept is None or kept.all():
@@ -686,14 +688,7 @@ def _held_out_predictions(folds, est, frame, rows, offset, sample_weight) -> NDA
     unpriced = int(
         np.isnan(predictions[~kept]).reshape(np.count_nonzero(~kept), -1).any(axis=1).sum()
     )
-    if unpriced:
-        warnings.warn(
-            f"{unpriced} held-out rows of weight zero could not be priced, so their out-of-fold "
-            "predictions are NaN. They hold a value no row the fold fitted has; give them a level "
-            "the fit saw, or leave them out of the frame.",
-            stacklevel=3,
-        )
-    return predictions
+    return predictions, unpriced
 
 
 def _resolve_scorers(
@@ -924,6 +919,7 @@ def cross_validate(
     fold_indices_list: list[tuple[NDArray, NDArray]] = []
     estimators_list: list | None = [] if return_estimators else None
     oof: NDArray | None = np.full((n, *folds.prediction_shape), np.nan) if return_oof else None
+    unpriced_oof = 0
     pooled_numerators: dict[str, float] = {
         name: 0.0 for name in score_names if name in folds.pooled_parts
     }
@@ -958,6 +954,7 @@ def cross_validate(
         off_test = _take_offset(offset, test_idx)
 
         try:
+            fold_unpriced = 0
             # Clone and fit
             est = folds.estimator(level_bindings, rows=train_idx)
             t0 = time.perf_counter()
@@ -1036,7 +1033,10 @@ def cross_validate(
 
             # OOF predictions
             if oof is not None:
-                oof[test_idx] = _held_out_predictions(folds, est, frame, test_idx, offset, sw_test)
+                predictions, fold_unpriced = _held_out_predictions(
+                    folds, est, frame, test_idx, offset, sw_test
+                )
+                oof[test_idx] = predictions
 
             # Only a fold that scored completely joins the pooled totals.
             for sname, (numerator, denominator) in fold_parts.items():
@@ -1048,6 +1048,7 @@ def cross_validate(
             not_built_in.update(
                 name for name, built_in in written_by_builtin.items() if not built_in
             )
+            unpriced_oof += fold_unpriced
 
         except Exception as exc:
             if error_score == "raise":
@@ -1067,6 +1068,14 @@ def cross_validate(
                 estimators_list.append(None)
 
         fold_records.append(record)
+
+    if unpriced_oof:
+        warnings.warn(
+            f"{unpriced_oof} held-out rows of weight zero could not be priced, so their out-of-fold "
+            "predictions are NaN. They hold a value no row the fold fitted has; give them a level "
+            "the fit saw, or leave them out of the frame.",
+            stacklevel=2,
+        )
 
     # ── Assemble result ───────────────────────────────────────────
     fold_scores = pd.DataFrame(fold_records)
