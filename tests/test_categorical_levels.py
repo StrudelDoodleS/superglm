@@ -6,12 +6,66 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from superglm import SuperGLM
 from superglm.features.categorical import Categorical
 from superglm.features.grouping import collapse_levels
 
 
 def _build(spec, x, w=None):
     return spec.build(np.asarray(x, dtype=object), sample_weight=w)
+
+
+@pytest.mark.parametrize("boolean_levels", [False, True])
+@pytest.mark.parametrize("operation", ["score", "transform"])
+def test_bool_numeric_lookalikes_are_refused_by_the_error_policy(boolean_levels, operation):
+    levels = np.array([False, True]) if boolean_levels else np.array([0, 1])
+    lookalikes = np.array([0, 1]) if boolean_levels else np.array([False, True])
+    spec = Categorical(base="first", unseen="error")
+    spec.build(np.tile(levels, 4))
+
+    with pytest.raises(ValueError, match="unseen categorical levels"):
+        if operation == "score":
+            spec.score(lookalikes, np.array([0.7]))
+        else:
+            spec.transform(lookalikes)
+
+    np.testing.assert_array_equal(spec.transform(levels), [[0.0], [1.0]])
+    np.testing.assert_array_equal(spec.score(levels, np.array([0.7])), [0.0, 0.7])
+
+
+@pytest.mark.parametrize("boolean_levels", [False, True])
+def test_bool_numeric_lookalikes_take_the_base_on_both_prediction_routes(boolean_levels):
+    levels = np.array([False, True]) if boolean_levels else np.array([0, 1])
+    lookalikes = np.array([0, 1]) if boolean_levels else np.array([False, True])
+    spec = Categorical(base="first", unseen="base")
+    spec.build(np.tile(levels, 4))
+
+    with pytest.warns(UserWarning, match="unseen at fit"):
+        scored = spec.score(lookalikes, np.array([0.7]))
+    with pytest.warns(UserWarning, match="unseen at fit"):
+        transformed = spec.transform(lookalikes) @ np.array([0.7])
+    np.testing.assert_array_equal(scored, [0.0, 0.0])
+    np.testing.assert_array_equal(transformed, [0.0, 0.0])
+
+
+@pytest.mark.parametrize("boolean_levels", [False, True])
+@pytest.mark.parametrize("kind", ["glm", "lss"])
+def test_public_prediction_refuses_bool_numeric_lookalikes(boolean_levels, kind):
+    from superglm import GaussianLS, SuperLSS, cat
+
+    levels = np.array([False, True]) if boolean_levels else np.array([0, 1])
+    lookalikes = np.array([0, 1]) if boolean_levels else np.array([False, True])
+    frame = pd.DataFrame({"g": np.tile(levels, 20)})
+    y = np.tile([0.8, 1.8, 1.2, 2.2], 10)
+    if kind == "glm":
+        model = SuperGLM(family="gaussian", selection_penalty=0, features={"g": Categorical()})
+    else:
+        family = GaussianLS()
+        model = SuperLSS(family, family.location(cat("g")), family.scale())
+    model.fit(frame, y)
+
+    with pytest.raises(ValueError, match="unseen categorical levels"):
+        model.predict(pd.DataFrame({"g": lookalikes}))
 
 
 class TestDeclaredUniverse:

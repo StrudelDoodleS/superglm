@@ -38,7 +38,9 @@ def prepare_eval_points(spec: Any, x: NDArray) -> tuple[NDArray, bool]:
             f"Spline received values outside training range "
             f"[{spec._lo:.6g}, {spec._hi:.6g}] with extrapolation='error'."
         )
-    return x, False
+    # A tolerated point must also lie in the basis evaluator's domain. In
+    # particular, an unpadded CR knot vector ends exactly at these boundaries.
+    return np.clip(x, spec._lo, spec._hi), False
 
 
 def basis_matrix(spec: Any, x: NDArray):
