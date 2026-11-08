@@ -2161,6 +2161,10 @@ def _cross_gram_spline_categorical_spline_categorical(
     W: NDArray,
 ) -> NDArray:
     """Cross-gram between compact spline-category level groups."""
+    from ._level_partition import certified_disjoint
+
+    if certified_disjoint(gm_i, gm_j):
+        return np.zeros((gm_i.shape[1], gm_j.shape[1]))
     same_cat_parent = getattr(gm_i, "spline_cat_feature", None) is not None and getattr(
         gm_i, "spline_cat_feature", None
     ) == getattr(gm_j, "spline_cat_feature", None)

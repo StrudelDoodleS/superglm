@@ -17,6 +17,7 @@ import scipy.sparse as sp
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame
+from superglm._group_matrix._level_partition import carry_level_support, certify_level_partitions
 from superglm._predictor_compiler import (
     CompiledPredictorDesign,
     compile_predictor_design,
@@ -1168,6 +1169,7 @@ def build_design_matrix(
         emit_curve_separation(curves, separation)
         emit_level_curve_separation(level_curves)
 
+    certify_level_partitions(compiled.design.group_matrices, compiled.design.n)
     return BuildResult(
         dm=compiled.design,
         groups=list(compiled.groups),
@@ -1274,6 +1276,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.lambda_policies = gm.lambda_policies
             new_gm.spline_cat_level = gm.spline_cat_level
             new_gm.spline_cat_feature = gm.spline_cat_feature
+            carry_level_support(gm, new_gm)
             new_gms.append(new_gm)
         elif isinstance(gm, DiscretizedSplineCategoricalGroupMatrix) and _group_has_lambda(
             gm, g, lambdas
@@ -1318,6 +1321,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.lambda_policies = gm.lambda_policies
             new_gm.spline_cat_level = gm.spline_cat_level
             new_gm.spline_cat_feature = gm.spline_cat_feature
+            carry_level_support(gm, new_gm)
             new_gms.append(new_gm)
         elif isinstance(gm, DiscretizedTensorGroupMatrix) and _group_has_lambda(gm, g, lambdas):
             if gm.omega is None:

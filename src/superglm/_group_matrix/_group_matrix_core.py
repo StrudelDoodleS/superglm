@@ -979,6 +979,7 @@ class SplineCategoricalGroupMatrix:
         "lambda_policies",
         "spline_cat_level",
         "spline_cat_feature",
+        "_level_support",
     )
 
     def __init__(self, B_csr: sp.spmatrix, R_inv: NDArray, mask_or_idx: NDArray):
@@ -1021,6 +1022,7 @@ class SplineCategoricalGroupMatrix:
         self.lambda_policies = None
         self.spline_cat_level = None
         self.spline_cat_feature = None
+        self._level_support = None
 
     def __getstate__(self):
         dict_state, slot_state = cast(
@@ -1028,6 +1030,7 @@ class SplineCategoricalGroupMatrix:
         )
         slot_state.pop("_sorted_rows", None)
         slot_state.pop("_row_lookup_certificate", None)
+        slot_state.pop("_level_support", None)
         return dict_state, slot_state
 
     def __setstate__(self, state):
@@ -1042,6 +1045,7 @@ class SplineCategoricalGroupMatrix:
         self.row_idx.flags.writeable = False
         self._sorted_rows = None
         self._row_lookup_certificate = None
+        self._level_support = None
         if "_dense_level" not in slot_state:
             # Saved before the deferred dense copy (0.18): undecided, as built.
             self._dense_level = False

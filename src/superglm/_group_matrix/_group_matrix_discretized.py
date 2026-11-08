@@ -303,6 +303,7 @@ class DiscretizedSplineCategoricalGroupMatrix:
         "lambda_policies",
         "spline_cat_level",
         "spline_cat_feature",
+        "_level_support",
     )
 
     def __init__(
@@ -345,6 +346,7 @@ class DiscretizedSplineCategoricalGroupMatrix:
         self.lambda_policies = None
         self.spline_cat_level = None
         self.spline_cat_feature = None
+        self._level_support = None
 
     def __getstate__(self):
         dict_state, slot_state = cast(
@@ -353,6 +355,7 @@ class DiscretizedSplineCategoricalGroupMatrix:
         slot_state.pop("_row_order", None)
         slot_state.pop("_sorted_rows", None)
         slot_state.pop("_row_lookup_certificate", None)
+        slot_state.pop("_level_support", None)
         return dict_state, slot_state
 
     def __setstate__(self, state):
@@ -367,6 +370,7 @@ class DiscretizedSplineCategoricalGroupMatrix:
         self._row_order = None
         self._sorted_rows = None
         self._row_lookup_certificate = None
+        self._level_support = None
 
     def matvec(self, v: NDArray) -> NDArray:
         out = np.zeros(self.n_rows, dtype=np.float64)
