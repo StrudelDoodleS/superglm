@@ -15,7 +15,7 @@ from superglm._count_lattice import _not_a_whole_number
 from superglm.distributional.families._base import (
     array_digest,
     immutable,
-    response_row_count,
+    scalar_response_row_count,
     typed_plan,
 )
 from superglm.distributional.families._predictors import (
@@ -305,7 +305,7 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
         return candidate.exact_response
 
     def initialize(self, y: NDArray, plan: FamilyLikelihoodPlan) -> InitialParameterState:
-        candidate = _typed_plan(plan, response_row_count(y))
+        candidate = _typed_plan(plan, scalar_response_row_count(y))
         theta = initialize_negative_binomial(
             candidate.exact_response,
             candidate.exact_count,
@@ -416,7 +416,7 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
         derivative_order: int = 2,
     ) -> NaturalLikelihoodEvaluation:
         order = _validated_derivative_order(derivative_order)
-        n_observations = response_row_count(y)
+        n_observations = scalar_response_row_count(y)
         parameters = _validated_parameter_matrix(
             theta,
             n_observations=n_observations,
@@ -470,7 +470,7 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
             raise UnsupportedLikelihoodContractError(
                 "NB2 endpoint curvature derivatives require the built-in log links"
             )
-        candidate = _typed_plan(plan, response_row_count(y))
+        candidate = _typed_plan(plan, scalar_response_row_count(y))
         return negative_binomial_certified_predictor_curvature_directional(
             candidate.exact_count,
             eta,
@@ -517,7 +517,7 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
             raise UnsupportedLikelihoodContractError(
                 "NB2 endpoint curvature derivatives require the built-in log links"
             )
-        candidate = _typed_plan(plan, response_row_count(y))
+        candidate = _typed_plan(plan, scalar_response_row_count(y))
         return negative_binomial_certified_predictor_curvature_second_directional(
             candidate.exact_count,
             eta,

@@ -127,6 +127,60 @@ def test_noncanonical_count_lattice_encodings_are_refused(
         _plan(np.array([response]), np.array([weight]), semantics)
 
 
+@pytest.mark.parametrize("columns", [1, 2])
+@pytest.mark.parametrize(
+    "method",
+    [
+        "initialize",
+        "evaluate_natural",
+        "predictor_curvature_directional_derivative",
+        "certified_predictor_curvature_directional_derivative",
+        "predictor_curvature_second_directional_derivative",
+        "certified_predictor_curvature_second_directional_derivative",
+    ],
+)
+def test_prepared_plan_methods_reject_matrix_response(method: str, columns: int) -> None:
+    family = NegativeBinomialLS()
+    response = np.array([1.0, 2.0])
+    plan = _plan(response, np.ones(2), "frequency")
+    matrix = np.repeat(response[:, None], columns, axis=1)
+    theta = np.array([[2.0, 1.5], [2.0, 1.5]])
+    eta = np.log(theta)
+    direction = np.full_like(eta, 0.125)
+    links = (LogLink(), LogLink())
+    calls = {
+        "initialize": (matrix, plan),
+        "evaluate_natural": (matrix, theta, plan),
+        "predictor_curvature_directional_derivative": (matrix, eta, direction, links, plan),
+        "certified_predictor_curvature_directional_derivative": (
+            matrix,
+            eta,
+            direction,
+            links,
+            plan,
+        ),
+        "predictor_curvature_second_directional_derivative": (
+            matrix,
+            eta,
+            direction,
+            direction,
+            links,
+            plan,
+        ),
+        "certified_predictor_curvature_second_directional_derivative": (
+            matrix,
+            eta,
+            direction,
+            direction,
+            links,
+            plan,
+        ),
+    }
+
+    with pytest.raises(ValueError, match="row vector|one-dimensional"):
+        getattr(family, method)(*calls[method])
+
+
 def test_integer_response_is_checked_before_lossy_float64_coercion() -> None:
     with pytest.raises(ValueError, match="lossless|float64|exact"):
         _plan(np.array([2**53 + 1], dtype=np.int64), np.ones(1), "frequency")
