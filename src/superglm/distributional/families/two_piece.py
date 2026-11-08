@@ -18,9 +18,11 @@ from superglm.distributional.families._base import (
     natural_curvature_direction,
     natural_curvature_second_direction,
     readonly,
+    scalar_response_row_count,
     second_direction_arrays,
     typed_plan,
     validated_float_response,
+    validated_observation_response,
 )
 from superglm.distributional.families._links import BoundedLogitLink
 from superglm.distributional.families._predictors import (
@@ -29,9 +31,14 @@ from superglm.distributional.families._predictors import (
     ScalePredictor,
     SkewPredictor,
 )
+from superglm.distributional.families._response_bounds import (
+    bind_observation,
+    bounded_channels,
+    log_window_values,
+    refuse_bounded,
+)
 from superglm.distributional.families.gaussian import LowerBoundedLogLink
 from superglm.distributional.family import (
-    COMPLETE_OBSERVATION,
     FamilyCapabilities,
     FamilyLikelihoodPlan,
     InitialParameterState,
@@ -42,6 +49,11 @@ from superglm.distributional.family import (
     _register_likelihood_reuse_contract,
     _validated_derivative_order,
     _validated_parameter_matrix,
+)
+from superglm.distributional.kernels._two_piece_windows import (
+    two_piece_narrow_rows,
+    two_piece_normalized_jets,
+    two_piece_window_jets,
 )
 from superglm.distributional.kernels.two_piece import (
     JOIN_REACH,
@@ -195,6 +207,7 @@ _CAPABILITIES = FamilyCapabilities(
     quantile=True,
     random=False,
     response_mean=True,
+    censored_response=True,
     continuous_curvature=False,
 )
 
@@ -223,7 +236,7 @@ def _validated_skew_bound(value: object) -> float:
 
 @dataclass(frozen=True)
 class TwoPieceLikelihoodPlan:
-    """One exact-response two-piece law and immutable carriers, for either family."""
+    """One two-piece observation law and immutable response/carriers, for either family."""
 
     weights: ResolvedLikelihoodWeights
     row_law: TwoPieceRowLaw
@@ -265,18 +278,21 @@ class TwoPieceLikelihoodPlan:
 
     @property
     def plan_identifier(self) -> str:
+        version = "v2" if self.observation.is_complete else "bounded/v1"
+        bounds = self.observation.bounds
         payload = "\0".join(
             (
-                f"{self.family_name}/v2",
+                f"{self.family_name}/{version}",
                 self.row_law,
                 *self.family_config,
                 self.observation.kind,
                 str(self.observation.schema_version),
                 self.weights.digest,
                 self.response_digest,
+                *((bounds.digest,) if bounds is not None else ()),
             )
         ).encode("utf-8")
-        return f"{self.family_name}/v2:{hashlib.sha256(payload).hexdigest()}"
+        return f"{self.family_name}/{version}:{hashlib.sha256(payload).hexdigest()}"
 
     @property
     def legacy_identifier_tag(self) -> str:
@@ -285,6 +301,8 @@ class TwoPieceLikelihoodPlan:
     def carrier_rounding(self) -> CarrierRounding:
         """The carrier ``-m (log y + 0.5 log 2 pi)``, or ``-m 0.5 log 2 pi``, varies by platform."""
         carrier = self.parameter_independent_carrier
+        if not self.observation.is_complete:
+            return CarrierRounding(carrier, np.zeros_like(carrier), 0)
         multiplier = (
             self.weights.values
             if self.weights.provenance.contract.semantics == "frequency"
@@ -299,7 +317,7 @@ class TwoPieceLikelihoodPlan:
             row_law=self.row_law,
             family_name=self.family_name,
             family_config=self.family_config,
-            observation=self.observation,
+            observation=self.observation.take(indices),
             exact_response=self.exact_response[indices],
             carrier=self.parameter_independent_carrier[indices],
         )
@@ -338,6 +356,210 @@ def _resolved_multiplier(
         return "two-piece-epsilon-skew-literal-replication/v1", weights.values
     raise UnsupportedLikelihoodContractError(  # pragma: no cover - resolution owns this branch
         f"{family_name} does not support the resolved likelihood-weight contract"
+    )
+
+
+def _observation_response(family, y, observation, positions=None):
+    bounds = getattr(observation, "bounds", None)
+    return validated_observation_response(
+        y,
+        censored=None if bounds is None else bounds.side != 0,
+        exact_validator=family._validated_response,
+        input_positions=positions,
+    )
+
+
+def _censored_recession(bounds):
+    """The log-concave location law has monotone likelihood ratios.
+
+    A shift moves every conditional window probability toward its limiting
+    supremum on the censoring side, even under truncation. In mean coordinates
+    log(mean) is that shift at fixed scale/skew. No scale/skew direction is
+    asserted here; their behavior also depends on the parameterization.
+    """
+    return np.column_stack((bounds.side != 0, np.zeros((bounds.n_rows, 2), dtype=bool)))
+
+
+def _bounded_start(family, response, plan, transform, parametrisation):
+    """Exact-row moments where informative; otherwise finite threshold representatives.
+
+    Representatives enter only the initializer. The likelihood always retains
+    the original thresholds and evaluates their probability windows.
+    """
+    bounds = plan.observation.bounds
+    exact = bounds.side == 0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        variate = np.log(response) if transform == "log" else response.copy()
+        lo = np.log(np.maximum(bounds.lower, 0)) if transform == "log" else bounds.lower
+        hi = np.log(bounds.upper) if transform == "log" else bounds.upper
+    if np.count_nonzero(exact) >= 3 and np.ptp(variate[exact]) > 0:
+        selected, mass = variate[exact], plan.multiplier[exact]
+    else:
+        finite = np.isfinite(variate)
+        center = float(np.median(variate[finite])) if finite.any() else 0.0
+        spread = max(float(np.std(variate[finite])) if finite.any() else 1.0, 1.0)
+        representative = np.where(finite, variate, center)
+        right, left = bounds.side > 0, bounds.side < 0
+        representative = np.where(
+            right,
+            np.where(np.isfinite(hi), 0.5 * representative + 0.5 * hi, representative + spread),
+            representative,
+        )
+        representative = np.where(
+            left,
+            np.where(np.isfinite(lo), 0.5 * representative + 0.5 * lo, representative - spread),
+            representative,
+        )
+        selected, mass = representative, plan.multiplier
+    theta = initialize_two_piece(
+        selected,
+        mass,
+        parametrisation=parametrisation,
+        scale_floor=family.scale_floor,
+        skew_bound=family.skew_bound,
+    )
+    return InitialParameterState(theta=np.broadcast_to(theta[0], (len(response), 3)))
+
+
+def _bounded_evaluation(response, theta, plan, order, transform, parametrisation):
+    n = len(response)
+    optimizing = np.zeros(n)
+    score = np.zeros((n, 3)) if order >= 1 else None
+    hessian = np.zeros((n, 6)) if order == 2 else None
+    valid = np.ones(n, dtype=bool)
+    bounds = plan.observation.bounds
+    narrow = two_piece_narrow_rows(
+        bounds.lower,
+        bounds.upper,
+        theta,
+        response_transform=transform,
+        parametrisation=parametrisation,
+    )
+    support = 0.0 if transform == "log" else -np.inf
+    same_event = (
+        (bounds.side > 0) & (np.maximum(response, support) == np.maximum(bounds.lower, support))
+    ) | ((bounds.side < 0) & (response == bounds.upper))
+    normalized_rows = narrow | same_event
+    exact = np.flatnonzero((bounds.side == 0) & ~normalized_rows)
+    if len(exact):
+        t = theta[exact]
+        y = response[exact]
+        if parametrisation == "mean":
+            evaluated = mean_rows(y, *t.T, np.ones(len(exact)), derivative_order=order)
+        else:
+            variate = np.log(y) if transform == "log" else y
+            evaluated = location_rows(variate, *t.T, np.ones(len(exact)), derivative_order=order)
+        full = evaluated.optimizing_log_likelihood - _HALF_LOG_TWO_PI
+        if transform == "log":
+            full = full - np.log(y)
+        optimizing[exact] = plan.multiplier[exact] * full
+        if score is not None:
+            score[exact] = plan.multiplier[exact, None] * evaluated.score
+        if hessian is not None:
+            hessian[exact] = plan.multiplier[exact, None] * evaluated.hessian_packed
+        valid[exact] = evaluated.valid
+
+    subtraction_scale = np.abs(optimizing)
+
+    def window(lo, hi, rows):
+        jet = two_piece_window_jets(
+            lo,
+            hi,
+            theta[rows],
+            order=order,
+            response_transform=transform,
+            parametrisation=parametrisation,
+        )
+        subtraction_scale[rows] += plan.multiplier[rows] * np.abs(jet[0])
+        return jet[0], jet[1] if order >= 1 else None, jet[2] if order == 2 else None
+
+    def normalized(rows, requested_order):
+        jet = (np.zeros(len(rows)),) + tuple(
+            np.zeros((len(rows), k)) for k in (3, 6)[:requested_order]
+        )
+        selected = ~same_event[rows]
+        sub = rows[selected]
+        if len(sub):
+            result = two_piece_normalized_jets(
+                response[sub],
+                bounds.lower[sub],
+                bounds.upper[sub],
+                bounds.side[sub],
+                theta[sub],
+                order=requested_order,
+                response_transform=transform,
+                parametrisation=parametrisation,
+            )
+            for target, source in zip(jet, result, strict=True):
+                target[selected] = source
+        return (
+            jet[0],
+            jet[1] if requested_order >= 1 else None,
+            jet[2] if requested_order == 2 else None,
+        )
+
+    optimizing, score, hessian, valid = bounded_channels(
+        optimizing,
+        score,
+        hessian,
+        valid,
+        response=response,
+        bounds=bounds,
+        multiplier=plan.multiplier,
+        window=window,
+        derivative_order=order,
+        normalized_rows=normalized_rows,
+        normalized=normalized,
+        carrier=plan.parameter_independent_carrier,
+    )
+    # Beyond the centered short-window route, two individually rounded log
+    # tails/densities may not resolve a conditional remainder. Decline that
+    # trial instead of publishing a finite but wrong full contribution. The
+    # test is row-relative in log-likelihood units, not a parameter cutoff.
+    u = np.finfo(np.float64).eps / 2.0
+    resolved = 16.0 * u * subtraction_scale <= np.sqrt(u) * np.maximum(
+        plan.multiplier, np.abs(optimizing)
+    )
+    invalid = ~normalized_rows & ~resolved
+    valid[invalid] = False
+    for channel in (optimizing, score, hessian):
+        if channel is not None:
+            channel[invalid] = 0.0
+    return NaturalLikelihoodEvaluation(
+        optimizing_log_likelihood=optimizing,
+        parameter_independent_carrier=plan.parameter_independent_carrier,
+        score=score,
+        hessian_packed=hessian,
+        valid=valid,
+    )
+
+
+def _window_probability(family, lower, upper, theta, weights, transform, parametrisation):
+    if weights is not None and not np.all(np.asarray(weights, dtype=np.float64) == 1.0):
+        raise UnsupportedLikelihoodContractError(
+            "two-piece windows have no non-unit prior-weighted law"
+        )
+    values = family._theta(theta, None)
+
+    def window(lo, hi, rows):
+        jet = two_piece_window_jets(
+            lo,
+            hi,
+            values[rows],
+            order=0,
+            response_transform=transform,
+            parametrisation=parametrisation,
+        )
+        if not np.all(np.isfinite(jet[0])):
+            raise TwoPieceDomainError(
+                "two-piece window probability is not resolved in float64 at this state"
+            )
+        return jet[0], None, None
+
+    return readonly(
+        log_window_values(
+            lower, upper, len(values), window, support_lower=0.0 if transform == "log" else -np.inf
+        )
     )
 
 
@@ -422,6 +644,10 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
     def capabilities(self) -> FamilyCapabilities:
         return _CAPABILITIES
 
+    def censored_recession(self, bounds) -> NDArray[np.bool_]:
+        """Disclose one-sided nonfinite location/mean estimates to the existing scan."""
+        return _censored_recession(bounds)
+
     def to_config(self) -> dict[str, Any]:
         return {
             "type": "TwoPieceLogNormalLSS",
@@ -450,14 +676,17 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
     def bind_likelihood(
         self, y: NDArray, weights: ResolvedLikelihoodWeights, observation: ObservationContract
     ) -> TwoPieceLikelihoodPlan:
-        response = self._validated_response(y)
-        if observation != COMPLETE_OBSERVATION:
-            raise UnsupportedLikelihoodContractError(
-                "TwoPieceLogNormalLSS supports only the complete-observation contract"
-            )
+        response = _observation_response(
+            self, y, observation, getattr(weights, "input_positions", None)
+        )
         row_law, multiplier = _resolved_multiplier("TwoPieceLogNormalLSS", weights, len(response))
-        with np.errstate(over="ignore", invalid="ignore"):
-            carrier = -multiplier * (np.log(response) + _HALF_LOG_TWO_PI)
+        observation = bind_observation(
+            observation, response, weights, support_lower=0.0, family_name="TwoPieceLogNormalLSS"
+        )
+        carrier = np.zeros(len(response))
+        if observation.is_complete:
+            with np.errstate(over="ignore", invalid="ignore"):
+                carrier = -multiplier * (np.log(response) + _HALF_LOG_TWO_PI)
         if not np.all(np.isfinite(carrier)):
             raise UnsupportedLikelihoodContractError(
                 "two-piece log-normal response carrier is not finite and representable"
@@ -485,19 +714,23 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
     def validate_likelihood_plan(
         self, y: NDArray, plan: FamilyLikelihoodPlan
     ) -> NDArray[np.float64]:
-        response = self._validated_response(y)
-        candidate = self._plan(plan, len(response))
-        if candidate.observation != COMPLETE_OBSERVATION:
-            raise UnsupportedLikelihoodContractError(
-                "TwoPieceLogNormalLSS likelihood has an unsupported observation contract"
-            )
+        candidate = self._plan(plan, scalar_response_row_count(y))
+        response = _observation_response(
+            self, y, candidate.observation, candidate.weights.input_positions
+        )
+        bind_observation(
+            candidate.observation,
+            response,
+            candidate.weights,
+            support_lower=0.0,
+            family_name="TwoPieceLogNormalLSS",
+        )
         bound = candidate.exact_response
         if (
             bound.dtype != np.float64
             or bound.shape != response.shape
             or bound.flags.writeable
             or not np.all(np.isfinite(bound))
-            or np.any(bound <= 0.0)
         ):
             raise UnsupportedLikelihoodContractError(
                 "TwoPieceLogNormalLSS likelihood owns an invalid bound response"
@@ -509,8 +742,10 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
         return bound
 
     def initialize(self, y: NDArray, plan: FamilyLikelihoodPlan) -> InitialParameterState:
-        response = self._validated_response(y)
-        bound = self._plan(plan, len(response))
+        bound = self._plan(plan, scalar_response_row_count(y))
+        response = _observation_response(self, y, bound.observation)
+        if not bound.observation.is_complete:
+            return _bounded_start(self, response, bound, "log", self.parametrisation)
         theta = initialize_two_piece(
             np.log(response),  # the location parameter lives on the log scale
             bound.multiplier,
@@ -537,9 +772,11 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
         derivative_order: int = 2,
     ) -> NaturalLikelihoodEvaluation:
         order = _validated_derivative_order(derivative_order)
-        response = self._validated_response(y)
+        bound = self._plan(plan, scalar_response_row_count(y))
+        response = _observation_response(self, y, bound.observation)
         values = self._theta(theta, len(response))
-        bound = self._plan(plan, len(response))
+        if not bound.observation.is_complete:
+            return _bounded_evaluation(response, values, bound, order, "log", self.parametrisation)
         if self.parametrisation == "mean":
             evaluated = mean_rows(
                 response,
@@ -576,6 +813,10 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
     ) -> NDArray[np.float64]:
         """Differentiate observed predictor curvature along one predictor path."""
 
+        refuse_bounded(
+            self._plan(plan, scalar_response_row_count(y)).observation,
+            "two-piece analytic curvature direction",
+        )
         response = self._validated_response(y)
         bound = self._plan(plan, len(response))
 
@@ -623,6 +864,10 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
         Refused, as the first direction is, on a join row the pair can move.
         """
 
+        refuse_bounded(
+            self._plan(plan, scalar_response_row_count(y)).observation,
+            "two-piece analytic second curvature direction",
+        )
         response = self._validated_response(y)
         bound = self._plan(plan, len(response))
 
@@ -667,6 +912,10 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         """The second curvature direction and its certificate on rows within ``step`` of the join."""
 
+        refuse_bounded(
+            self._plan(plan, scalar_response_row_count(y)).observation,
+            "two-piece certified curvature direction",
+        )
         response = self._validated_response(y)
         bound = self._plan(plan, len(response))
         return _certified_second_direction(
@@ -688,6 +937,7 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
     ) -> NDArray[np.float64]:
         values = self._theta(theta, None)
         bound = self._plan(plan, len(values))
+        refuse_bounded(bound.observation, "two-piece expected information")
         if self.parametrisation == "mean":
             return mean_expected_information(
                 values[:, 0], values[:, 1], values[:, 2], bound.multiplier
@@ -721,6 +971,12 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
                 inside_values[:, 2],
             )
         return readonly(out)
+
+    def log_window_probability(
+        self, lower: NDArray, upper: NDArray, theta: NDArray, weights: NDArray | None = None
+    ) -> NDArray[np.float64]:
+        """Unit-mass window probability under the parent, untruncated law."""
+        return _window_probability(self, lower, upper, theta, weights, "log", self.parametrisation)
 
     def quantile(self, p: NDArray, theta: NDArray) -> NDArray[np.float64]:
         values = self._theta(theta, None)
@@ -787,6 +1043,10 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
     def capabilities(self) -> FamilyCapabilities:
         return _CAPABILITIES
 
+    def censored_recession(self, bounds) -> NDArray[np.bool_]:
+        """Disclose one-sided nonfinite location estimates to the existing scan."""
+        return _censored_recession(bounds)
+
     def to_config(self) -> dict[str, Any]:
         return {
             "type": "TwoPieceNormalLSS",
@@ -809,13 +1069,16 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
     def bind_likelihood(
         self, y: NDArray, weights: ResolvedLikelihoodWeights, observation: ObservationContract
     ) -> TwoPieceLikelihoodPlan:
-        response = self._validated_response(y)
-        if observation != COMPLETE_OBSERVATION:
-            raise UnsupportedLikelihoodContractError(
-                "TwoPieceNormalLSS supports only the complete-observation contract"
-            )
+        response = _observation_response(
+            self, y, observation, getattr(weights, "input_positions", None)
+        )
         row_law, multiplier = _resolved_multiplier("TwoPieceNormalLSS", weights, len(response))
-        carrier = -multiplier * _HALF_LOG_TWO_PI
+        observation = bind_observation(
+            observation, response, weights, support_lower=-np.inf, family_name="TwoPieceNormalLSS"
+        )
+        carrier = (
+            -multiplier * _HALF_LOG_TWO_PI if observation.is_complete else np.zeros(len(response))
+        )
         return TwoPieceLikelihoodPlan._from_prepared(
             weights=weights,
             row_law=row_law,
@@ -839,12 +1102,17 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
     def validate_likelihood_plan(
         self, y: NDArray, plan: FamilyLikelihoodPlan
     ) -> NDArray[np.float64]:
-        response = self._validated_response(y)
-        candidate = self._plan(plan, len(response))
-        if candidate.observation != COMPLETE_OBSERVATION:
-            raise UnsupportedLikelihoodContractError(
-                "TwoPieceNormalLSS likelihood has an unsupported observation contract"
-            )
+        candidate = self._plan(plan, scalar_response_row_count(y))
+        response = _observation_response(
+            self, y, candidate.observation, candidate.weights.input_positions
+        )
+        bind_observation(
+            candidate.observation,
+            response,
+            candidate.weights,
+            support_lower=-np.inf,
+            family_name="TwoPieceNormalLSS",
+        )
         bound = candidate.exact_response
         if (
             bound.dtype != np.float64
@@ -862,8 +1130,10 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
         return bound
 
     def initialize(self, y: NDArray, plan: FamilyLikelihoodPlan) -> InitialParameterState:
-        response = self._validated_response(y)
-        bound = self._plan(plan, len(response))
+        bound = self._plan(plan, scalar_response_row_count(y))
+        response = _observation_response(self, y, bound.observation)
+        if not bound.observation.is_complete:
+            return _bounded_start(self, response, bound, "identity", "location")
         theta = initialize_two_piece(
             response,
             bound.multiplier,
@@ -890,9 +1160,11 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
         derivative_order: int = 2,
     ) -> NaturalLikelihoodEvaluation:
         order = _validated_derivative_order(derivative_order)
-        response = self._validated_response(y)
+        bound = self._plan(plan, scalar_response_row_count(y))
+        response = _observation_response(self, y, bound.observation)
         values = self._theta(theta, len(response))
-        bound = self._plan(plan, len(response))
+        if not bound.observation.is_complete:
+            return _bounded_evaluation(response, values, bound, order, "identity", "location")
         evaluated = location_rows(
             response,
             values[:, 0],
@@ -919,6 +1191,10 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
     ) -> NDArray[np.float64]:
         """Differentiate observed predictor curvature along one predictor path."""
 
+        refuse_bounded(
+            self._plan(plan, scalar_response_row_count(y)).observation,
+            "two-piece analytic curvature direction",
+        )
         response = self._validated_response(y)
         bound = self._plan(plan, len(response))
 
@@ -945,6 +1221,10 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
     ) -> NDArray[np.float64]:
         """Differentiate observed predictor curvature twice, along ``a`` then ``b``."""
 
+        refuse_bounded(
+            self._plan(plan, scalar_response_row_count(y)).observation,
+            "two-piece analytic second curvature direction",
+        )
         response = self._validated_response(y)
         bound = self._plan(plan, len(response))
 
@@ -977,6 +1257,10 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         """The second curvature direction and its certificate on rows within ``step`` of the join."""
 
+        refuse_bounded(
+            self._plan(plan, scalar_response_row_count(y)).observation,
+            "two-piece certified curvature direction",
+        )
         response = self._validated_response(y)
         bound = self._plan(plan, len(response))
         return _certified_second_direction(
@@ -998,6 +1282,7 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
     ) -> NDArray[np.float64]:
         values = self._theta(theta, None)
         bound = self._plan(plan, len(values))
+        refuse_bounded(bound.observation, "two-piece expected information")
         return location_expected_information(values[:, 1], values[:, 2], bound.multiplier)
 
     def default_prediction(self, theta: NDArray) -> NDArray[np.float64]:
@@ -1008,6 +1293,12 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
         values = self._theta(theta, None)
         response = np.broadcast_to(np.asarray(y, dtype=np.float64), (len(values),))
         return two_piece_cdf(response, values[:, 0], values[:, 1], values[:, 2])
+
+    def log_window_probability(
+        self, lower: NDArray, upper: NDArray, theta: NDArray, weights: NDArray | None = None
+    ) -> NDArray[np.float64]:
+        """Unit-mass window probability under the parent, untruncated law."""
+        return _window_probability(self, lower, upper, theta, weights, "identity", "location")
 
     def quantile(self, p: NDArray, theta: NDArray) -> NDArray[np.float64]:
         values = self._theta(theta, None)
