@@ -67,14 +67,28 @@ def _unresolved_log_join(lo, hi, width, mu, theta, loading):
         return np.isfinite(width) & near & (jump * uncertainty / width > 64.0 * np.sqrt(_U))
 
 
-def _mean_map(jet: Jet, theta: NDArray, loading: tuple[NDArray, ...]) -> Jet:
-    """Chain ``mu=log(mean)-log K(scale,skew)``, including its mixed partial."""
+def mean_coordinate_jets(jet: Jet, theta: NDArray, loading: tuple[NDArray, ...]) -> Jet:
+    """Chain ``mu=log(mean)-log K(scale,skew)``, admitting natural storage.
+
+    A finite natural channel can lose all information to underflow and then
+    become meaningful again after the mean's link derivative scales it. Check
+    the scaled round trip against the pre-map channels, allowing ordinary
+    binary64 rounding (in unit roundoff u). This is a representation guard,
+    not a bound on the mathematical mean. Unresolved requested orders retain
+    NaNs for the bounded trial controller; lower orders stay available.
+    """
     if len(jet) == 1:
         return jet
     _, k_s, k_e, k_ss, k_se, k_ee = loading
     m = theta[:, 0]
     g_m, g_s, g_e = jet[1].T
     score = np.column_stack((g_m / m, g_s - g_m * k_s, g_e - g_m * k_e))
+    with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+        score_restored = score[:, 0] * m
+        lost_score = (~np.isfinite(score_restored)) | (
+            np.abs(score_restored - g_m) > 8.0 * _U * np.abs(g_m)
+        )
+    score[lost_score] = np.nan
     if len(jet) == 2:
         return jet[0], score
     h_mm, h_ms, h_me, h_ss, h_se, h_ee = jet[2].T
@@ -88,6 +102,20 @@ def _mean_map(jet: Jet, theta: NDArray, loading: tuple[NDArray, ...]) -> Jet:
             h_ee - 2 * h_me * k_e + h_mm * k_e**2 - g_m * k_ee,
         )
     )
+    with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+        restored = np.column_stack(((hessian[:, 0] * m) * m, hessian[:, 1] * m, hessian[:, 2] * m))
+        expected = np.column_stack((h_mm - g_m, h_ms - h_mm * k_s, h_me - h_mm * k_e))
+        scale = np.column_stack(
+            (
+                np.abs(h_mm) + np.abs(g_m),
+                np.abs(h_ms) + np.abs(h_mm * k_s),
+                np.abs(h_me) + np.abs(h_mm * k_e),
+            )
+        )
+        lost_hessian = np.any(
+            ~np.isfinite(restored) | (np.abs(restored - expected) > 64.0 * _U * scale), axis=1
+        )
+    hessian[lost_hessian] = np.nan
     return jet[0], score, hessian
 
 
@@ -239,7 +267,7 @@ def two_piece_window_jets(
             )
             for target, source in zip(result, jet, strict=True):
                 target[rows] = source
-        result = result if loading is None else _mean_map(result, theta, loading)
+        result = result if loading is None else mean_coordinate_jets(result, theta, loading)
         if order == 2 and response_transform == "log":
             result[2][_unresolved_log_join(lo, hi, width, mu, theta, loading)] = np.nan
         return result
@@ -354,5 +382,5 @@ def two_piece_normalized_jets(
         if response_transform == "log":
             result[0][exact] -= np.log(response[exact])
         if loading is not None:
-            result = _mean_map(result, theta, loading)
+            result = mean_coordinate_jets(result, theta, loading)
     return result

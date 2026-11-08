@@ -207,7 +207,9 @@ def test_strongly_conditioned_narrow_rows_keep_full_contributions(transform, par
     theta = np.tile([-1e8 if parametrisation == "location" else 1.0, 0.8, 0.4], (2, 1))
     if parametrisation == "mean":
         # A large log mean, still finite, gives a strongly conditioned log law.
-        theta[:, 0], theta[:, 1] = 1e200, 0.02
+        # Keep natural Hessian storage resolvable. The linked-consumer
+        # regression below separately covers loss beyond this range.
+        theta[:, 0], theta[:, 1] = 1e100, 0.02
     plan = bind(family, y, lo, hi, side)
     actual = family.evaluate_natural(y, theta, plan)
     assert np.all(actual.valid)
@@ -533,6 +535,63 @@ def test_unresolved_remote_conditional_subtraction_is_a_trial_failure():
     result = family.evaluate_natural(y, np.array([[-1e8, 1.0, 0.3]]), plan)
     assert not result.valid[0]
     assert np.all(np.isfinite(result.reported_log_likelihood))
+
+
+@pytest.mark.parametrize(
+    ("lower", "upper", "response", "side", "scale"),
+    [
+        (0.5, 2.0, 1.5, -1, 0.8),
+        (0.5, 2.0, 1.5, 0, 0.8),
+        (1.0, 1.0 + 1e-7, 1.0 + 0.5e-7, -1, 0.8),
+        (1.0, np.nextafter(1.0, np.inf), np.nextafter(1.0, np.inf), 0, 0.02),
+    ],
+)
+@pytest.mark.parametrize("mean", [1e100, 1e200])
+def test_mean_mapping_preserves_link_curvature_or_declines_storage_loss(
+    lower, upper, response, side, scale, mean
+):
+    from superglm.distributional.kernels.two_piece import location_of_mean
+    from superglm.distributional.solver.derivatives import transform_natural_derivatives
+
+    family = TwoPieceLogNormalLSS(parametrisation="mean")
+    y, theta = np.array([response]), np.array([[mean, scale, 0.3]])
+    plan = bind(family, y, [lower], [upper], [side])
+    location_family = TwoPieceLogNormalLSS(parametrisation="location")
+    location_theta = theta.copy()
+    location_theta[:, 0] = location_of_mean(*theta.T)
+    location = location_family.evaluate_natural(
+        y, location_theta, bind(location_family, y, [lower], [upper], [side])
+    )
+    assert location.valid[0]
+    for order in (0, 1):
+        result = family.evaluate_natural(y, theta, plan, derivative_order=order)
+        assert result.valid[0]
+        np.testing.assert_allclose(
+            result.reported_log_likelihood, location.reported_log_likelihood, atol=1e-10, rtol=0
+        )
+        if order == 1:
+            np.testing.assert_allclose(
+                result.score[:, 0] * mean, location.score[:, 0], atol=1e-10, rtol=0
+            )
+    result = family.evaluate_natural(y, theta, plan)
+    links = tuple(parameter.default_link for parameter in family.parameters)
+    eta = np.column_stack([link.link(theta[:, k]) for k, link in enumerate(links)])
+    linked = transform_natural_derivatives(result, eta, links)
+    if mean == 1e200:
+        # The needed natural H_mm is below binary64 range, while its linked
+        # contribution is meaningful. Zero must not authorize wrong curvature.
+        assert not result.valid[0]
+        assert not linked.valid[0]
+        assert np.all(np.isfinite(result.hessian_packed))
+    else:
+        assert result.valid[0]
+        assert linked.valid[0]
+        np.testing.assert_allclose(
+            linked.hessian_eta_packed[:, 0],
+            location.hessian_packed[:, 0],
+            atol=1e-10,
+            rtol=0,
+        )
 
 
 def test_adjacent_log_window_with_unresolved_join_fraction_refuses_curvature():
