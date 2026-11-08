@@ -112,3 +112,27 @@ def test_concentrated_cdf_retains_near_median_resolution(kernel):
     with mp.workdps(80):
         expected = [float(1 / (1 + (mp.mpf(scale) / mp.mpf(float(x))) ** mp.mpf(a))) for x in y]
     np.testing.assert_allclose(kernel.cdf(y, theta), expected, rtol=128 * 2.0**-53)
+
+
+@pytest.mark.parametrize("scale", [1e-6, 1.0, 1e6])
+@pytest.mark.parametrize("shape", [1e13, 1e16])
+def test_concentrated_quantiles_preserve_order_and_scale(kernel, scale, shape):
+    p = np.array([0.01, 0.1, np.nextafter(0.5, 0.0), 0.5, np.nextafter(0.5, 1.0), 0.9, 0.99])
+    theta = np.tile([scale, shape], (len(p), 1))
+    actual = kernel.quantile(p, theta)
+    with mp.workdps(100):
+        expected = np.array(
+            [
+                float(
+                    mp.mpf(scale)
+                    * mp.exp(mp.log(mp.mpf(float(q)) / (1 - mp.mpf(float(q)))) / mp.mpf(shape))
+                )
+                for q in p
+            ]
+        )
+    assert np.all(np.diff(actual) >= 0)
+    assert np.all(actual[p < 0.5] <= scale)
+    assert np.all(actual[p > 0.5] >= scale)
+    # Each exact high-precision quantile is rounded once to binary64.
+    # There is no demand for unattainable CDF inversion between adjacent floats.
+    np.testing.assert_array_equal(actual, expected)
