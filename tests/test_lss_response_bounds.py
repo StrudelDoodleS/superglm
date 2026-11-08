@@ -815,7 +815,7 @@ def _bounds(lower, upper, side):
 
 def test_bounded_plans_hash_their_bounds_and_slice_them():
     family = LogNormalLS()
-    y = np.array([1.0, 2.0, 3.0, 4.0])
+    y = np.array([1.0, 2.0, 2.5, 4.0])
     weights = resolve_likelihood_weights(None, n_observations=4, contract=WeightContract("prior"))
     bounds = _bounds([-np.inf] * 4, [5.0, 5.0, 3.0, 6.0], [0, 0, 1, 0])
     plan = family.bind_likelihood(y, weights, bounded_observation(bounds))

@@ -76,7 +76,7 @@ def bind_observation(
     positions = getattr(weights, "input_positions", None)
     if positions is None or len(positions) != n_rows:
         positions = np.arange(n_rows)
-    validate_response_bounds(response, observation.bounds, positions, exact_only=not atom_at_lower)
+    validate_response_bounds(response, observation.bounds, positions)
     bounds = observation.bounds.on_support(support_lower, atom_at_lower=atom_at_lower)
     values = np.asarray(response)
     if atom_at_lower:

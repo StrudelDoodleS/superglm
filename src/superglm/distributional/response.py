@@ -50,6 +50,15 @@ def response_spec(family: object) -> ResponseSpec:
     return spec
 
 
+def _uncoerced_values(values: object) -> NDArray:
+    """Preserve nullable pandas integers before NumPy can promote them to float."""
+    if isinstance(values, pd.Series | pd.Index | pd.api.extensions.ExtensionArray) and isinstance(
+        values.dtype, pd.api.extensions.ExtensionDtype
+    ):
+        return values.to_numpy(dtype=object)
+    return np.asarray(values, dtype=object if isinstance(values, list | tuple) else None)
+
+
 def unvalidated_response(
     y: object, *, family: object, n_rows: int, input_index: object = None
 ) -> NDArray:
@@ -78,7 +87,7 @@ def unvalidated_response(
             or set(labels) != set(spec.component_names)
         ):
             raise ValueError("response columns must contain each declared component exactly once")
-        parts = [np.asarray(y[name]) for name in spec.component_names]
+        parts = [_uncoerced_values(y[name]) for name in spec.component_names]
         if all(part.dtype == parts[0].dtype for part in parts):
             array = np.column_stack(parts)
         else:
@@ -87,7 +96,7 @@ def unvalidated_response(
                 array[:, column] = part
     else:
         try:
-            array = np.asarray(y, dtype=object if isinstance(y, list | tuple) else None)
+            array = _uncoerced_values(y)
         except (TypeError, ValueError) as exc:
             raise ValueError(
                 "response must have row-first shape (n, *response_spec.shape)"
