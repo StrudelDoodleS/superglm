@@ -32,6 +32,7 @@ from superglm.features._spline_select import _certified_range, _null_mask
 from superglm.features.categorical import (
     _UNSEEN_POLICIES,
     _codes_against,
+    _refuse_unseen_categorical_levels,
     _resolve_categorical_labels,
     _route_unseen_to_group,
     _validate_missing_only,
@@ -90,11 +91,23 @@ def _categorical_predict_labels(
         known_levels=set(universe) if unseen == "error" else None,
         context=context,
     )
-    if unseen != "error":
+    codes = _codes_against(x, universe)
+    if unseen == "error":
+        if np.any(codes < 0):
+            _refuse_unseen_categorical_levels(
+                set(x[codes < 0].tolist()), set(universe), context=context
+            )
+    else:
         # The policy governs unknown LEVELS only. A NaN is still a broken
         # column and still says so.
         _validate_missing_only(x, context=context)
-        _warn_unseen_routed(x, _codes_against(x, universe))
+        _warn_unseen_routed(x, codes)
+        if np.any(codes < 0):
+            # As on the grouped base route, use an unmatched marker after
+            # validating the raw labels. Equality masks must not find a bool
+            # or numeric look-alike the typed lookup rejected.
+            x = np.array(x, dtype=object, copy=True)
+            x[codes < 0] = np.nan
     return x
 
 

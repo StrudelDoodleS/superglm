@@ -24,6 +24,90 @@ _OTHER = np.repeat(np.array(["u", "v", "w"], dtype=object), 8)
 _X = np.linspace(-0.9, 1.1, _RAW.size)
 
 
+@pytest.mark.parametrize("kind", _KINDS)
+@pytest.mark.parametrize("boolean_levels", [False, True])
+@pytest.mark.parametrize("unseen", ["error", "base"])
+def test_categorical_interactions_follow_typed_parent_matching(kind, boolean_levels, unseen):
+    levels = np.array([False, True]) if boolean_levels else np.array([0, 1])
+    lookalikes = np.array([0, 1]) if boolean_levels else np.array([False, True])
+    labels = np.tile(levels, 16)
+    categorical = Categorical(base="first", unseen=unseen)
+    categorical.build(labels)
+    term = _new_interaction(kind)
+    parents = {"g": categorical}
+    if kind == "categorical":
+        parent_values = np.repeat(["u", "v"], 16)
+        parent = Categorical(base="first")
+        parent.build(parent_values)
+        parents["h"] = parent
+        built = term.build(labels, parent_values, parents)
+        args = (lookalikes, np.array(["v", "v"]))
+    else:
+        parent_values = np.linspace(-0.9, 1.1, 32)
+        parent = (
+            Spline(n_knots=5)
+            if kind == "spline"
+            else Polynomial(degree=2)
+            if kind == "polynomial"
+            else Numeric()
+        )
+        parent.build(parent_values)
+        parents["x"] = parent
+        built = term.build(parent_values, labels, parents)
+        args = (np.array([0.4, 0.9]), lookalikes)
+    beta = np.arange(1, _width(built) + 1, dtype=np.float64)
+    known_args = (levels, args[1]) if kind == "categorical" else (args[0], levels)
+    assert np.any(term.transform(*known_args))
+    for method in ("transform", "score"):
+        call_args = args if method == "transform" else (*args, beta)
+        if unseen == "error":
+            with pytest.raises(ValueError, match="unseen categorical levels"):
+                getattr(term, method)(*call_args)
+        else:
+            with pytest.warns(UserWarning, match="unseen at fit"):
+                actual = getattr(term, method)(*call_args)
+            expected = np.zeros((2, len(beta))) if method == "transform" else np.zeros(2)
+            np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("boolean_levels", [False, True])
+@pytest.mark.parametrize("kind", ["glm", "lss"])
+def test_unseen_bool_numeric_rows_keep_the_base_price_with_a_numeric_interaction(
+    boolean_levels, kind
+):
+    from superglm import GaussianLS
+    from superglm.distributional import Predictor
+    from tests.bound_predictor_fixtures import model_from_templates
+
+    levels = np.array([False, True]) if boolean_levels else np.array([0, 1])
+    lookalikes = np.array([0, 1]) if boolean_levels else np.array([False, True])
+    labels = np.tile(levels, 40)
+    x = np.linspace(-1.0, 1.0, len(labels))
+    y = 2.0 + 0.3 * x + 0.6 * labels + 0.9 * x * labels + 0.03 * np.sin(7.0 * x)
+    frame = pd.DataFrame({"x": x, "g": labels})
+    features = {"x": Numeric(), "g": Categorical(base="first", unseen="base")}
+    if kind == "glm":
+        model = SuperGLM(
+            family="gaussian", selection_penalty=0, features=features, interactions=[("x", "g")]
+        )
+    else:
+        model = model_from_templates(
+            family=GaussianLS(),
+            predictors=(
+                Predictor(
+                    "location", features, interaction_specs={"x:g": NumericCategorical("x", "g")}
+                ),
+                Predictor("scale", {}),
+            ),
+        )
+    model.fit(frame, y)
+    probe = pd.DataFrame({"x": [1.0, 1.0], "g": lookalikes})
+    expected = model.predict(probe.assign(g=np.repeat(levels[0], 2)))
+    with pytest.warns(UserWarning, match="unseen at fit"):
+        actual = model.predict(probe)
+    np.testing.assert_array_equal(actual, expected)
+
+
 def _grouping():
     return collapse_levels(_RAW, groups={"AB": ["a", "b"]})
 
