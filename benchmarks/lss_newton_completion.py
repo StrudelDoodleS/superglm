@@ -117,8 +117,9 @@ def gaussian_fixture(crossed):
             s("x", n_knots=4),
             s("z", n_knots=4),
             ti("x", "z", n_knots=(4, 4)),
+            offset=offsets["location"],
         ),
-        family.scale("z"),
+        family.scale("z", offset=offsets["scale"]),
         discrete=True,
         n_bins=32,
     )
@@ -262,7 +263,6 @@ def main():
                         frame,
                         y,
                         sample_weight=weights,
-                        offsets=offsets,
                         phase_recorder=phases,
                         **report["options"],
                     )

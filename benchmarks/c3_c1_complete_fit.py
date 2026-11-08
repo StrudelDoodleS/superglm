@@ -357,7 +357,15 @@ def data_fixture(args):
     bound_family = model.family
     model = SuperLSS(
         bound_family,
-        *(_bind_predictor_template(bound_family, predictor) for predictor in model.predictors),
+        *(
+            _bind_predictor_template(
+                bound_family,
+                dataclasses.replace(
+                    predictor, offset=(offsets or {}).get(predictor.name, predictor.offset)
+                ),
+            )
+            for predictor in model.predictors
+        ),
         discrete=args.discrete,
         n_bins=args.n_bins,
     )
@@ -576,7 +584,6 @@ def worker(args):
                     frame,
                     y,
                     sample_weight=weight,
-                    offsets=offsets,
                     outer=args.outer,
                     initial_lambda=args.initial_lambda,
                     practical_reml=args.practical_reml,
