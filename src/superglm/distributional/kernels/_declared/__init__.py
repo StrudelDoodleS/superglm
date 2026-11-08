@@ -154,11 +154,13 @@ def density_rows(
 
 
 # The laws whose density kernel serves a family's ordinary rows (``kernels.gamma``,
-# ``log_normal``, ``generalized_pareto`` and ``two_piece``).
+# ``log_normal``, ``generalized_pareto``, ``two_piece`` and the scalar pilots).
 _ROW_LAWS = (
     "gamma",
     "generalized_pareto",
     "log_normal_mean",
+    "lomax",
+    "log_logistic",
     "two_piece_location",
     "two_piece_mean",
 )

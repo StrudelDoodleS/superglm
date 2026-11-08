@@ -49,7 +49,9 @@ if _typing.TYPE_CHECKING:
     from superglm.distributional.families.gaussian import GaussianLS
     from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
     from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
+    from superglm.distributional.families.log_logistic import LogLogisticLSS
     from superglm.distributional.families.log_normal import LogNormalLS
+    from superglm.distributional.families.lomax import LomaxLSS
     from superglm.distributional.families.negative_binomial import NegativeBinomialLS
     from superglm.distributional.families.tweedie import TweedieLSS
     from superglm.distributional.families.two_piece import (
@@ -208,6 +210,8 @@ _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
     "superglm.distributional.families.generalized_gamma": ("GeneralizedGammaLSS",),
     "superglm.distributional.families.generalized_pareto": ("GeneralizedParetoLSS",),
     "superglm.distributional.families.log_normal": ("LogNormalLS",),
+    "superglm.distributional.families.lomax": ("LomaxLSS",),
+    "superglm.distributional.families.log_logistic": ("LogLogisticLSS",),
     "superglm.distributional.families.negative_binomial": ("NegativeBinomialLS",),
     "superglm.distributional.families.tweedie": ("TweedieLSS",),
     "superglm.distributional.families.two_piece": ("TwoPieceLogNormalLSS", "TwoPieceNormalLSS"),
@@ -428,6 +432,8 @@ __all__ = [
     "GeneralizedGammaLSS",
     "GeneralizedParetoLSS",
     "LogNormalLS",
+    "LomaxLSS",
+    "LogLogisticLSS",
     "NegativeBinomialLS",
     "TweedieLSS",
     "TwoPieceLogNormalLSS",

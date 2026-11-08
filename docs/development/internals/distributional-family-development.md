@@ -11,11 +11,69 @@ and `LSS` follow established model names, while the ordered `family.parameters`
 tuple is the executable contract. The built-ins currently expose:
 
 - two parameters: `GaussianLS`, `GammaLS`, `LogNormalLS`,
-  `NegativeBinomialLS`, and `GeneralizedParetoLSS`;
+  `NegativeBinomialLS`, `GeneralizedParetoLSS`, `LomaxLSS`, and `LogLogisticLSS`;
 - three parameters: `TweedieLSS`, `GeneralizedGammaLSS`,
   `TwoPieceLogNormalLSS`, and `TwoPieceNormalLSS`.
 
 ## Responsibility map
+
+### Internal declared scalar families
+
+Lomax and log-logistic share `families/_declared.py`; existing families need
+not migrate. To add an internal law:
+
+1. Add a natural-coordinate `Declaration` to
+   `tools/generate_severity_families.py`, reusing its stable primitives. Run
+   `uv run python tools/generate_severity_families.py` and commit the generated
+   module. `--check` must then pass. Weibull and Burr declarations remain test
+   fixtures, not public families.
+2. Put support/limit paths, window admission and prediction numerics in a small
+   `kernels/<law>.py` wrapper. It exposes `PARAMETERS`, `COORDINATES`,
+   `density_jets`, a separately multiplied `carrier`, and the operations the
+   family actually offers. Generated jets are natural derivatives; core orders
+   are exactly integer 0–2, higher packed jets are separate. Unrequested levels
+   must not be allocated or evaluated.
+3. Define a frozen `DeclaredScalarSpec` constant with a versioned law key,
+   kernel module string, parameter metadata, response support and capabilities.
+   A named top-level dataclass selects explicit mixins and its own initializer.
+   The adapter validates coordinates, parameter order and core capabilities.
+   It freezes response/carrier/observation identity and weights, including
+   after slicing and pickle restoration. No dynamic registry or pickled closure
+   defines the law. Audited reuse registration is for the exact concrete class;
+   subclasses and arbitrary custom links do not inherit it.
+   Carriers are stored with a diagnostic digest. If the spec supplies justified
+   `carrier_rounding_parameters=(error_units, beta)`, replay uses the existing
+   `CarrierRounding` sum bound instead of hashing transcendental results into
+   semantic identity. Lomax's carrier is exactly zero; log-logistic's is
+   `-mass*log(y)`. Without an explicit certificate, exact carrier identity is
+   retained. No legacy identifier tag is needed for these new plans.
+4. Prove row laws and packed mixed derivatives with independently written
+   high-precision references; prove carrier/window frequency accounting, domain
+   refusals, complete fits and fresh-process serialization. Runtime imports may
+   not require SymPy, mpmath, the generator or research modules. Register exact
+   import edges in the architecture test and generated kernels in warmup.
+
+The first pilots admit derivative parameters in `[2^-200, 2^200]`, keeping
+fourth powers and reciprocals normal. This is a numerical evaluation envelope,
+not a fitted shape wall. Range-invalid evaluations remain distinguishable from
+mathematically divergent moments. Ordinary positive-response jets use generated
+Numba kernels; no unimplemented array fallback is advertised.
+
+Window probabilities reuse log-tail differences and the existing narrow-window
+quadrature. Lomax additionally integrates small windows in the original response
+coordinate to retain its finite zero limit and avoid the known extreme fourth
+log-CDF instability. These paths have independent numerical tests. Higher
+directional methods decline quadrature windows with
+`UnsupportedLikelihoodContractError`, leaving the existing finite-difference
+route and its evidence authoritative; they do not supply a zero-error analytic
+certificate for quadrature. Ordinary closed-form directions compose through
+the existing link helpers. Convergence and derivative authority disclosures are
+unchanged.
+
+The laws follow the [SciPy Lomax definition](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.lomax.html)
+and [Fisk definition](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.fisk.html),
+with location fixed at zero. SciPy is an independent test reference, not a
+runtime fitting wrapper. The runtime dependency floor remains SciPy 1.15.
 
 | Location | Responsibility |
 | --- | --- |

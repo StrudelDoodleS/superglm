@@ -13,6 +13,8 @@ _EXPORTS = {
         "GeneralizedParetoLSS",
     ),
     "LogNormalLS": ("superglm.distributional.families.log_normal", "LogNormalLS"),
+    "LomaxLSS": ("superglm.distributional.families.lomax", "LomaxLSS"),
+    "LogLogisticLSS": ("superglm.distributional.families.log_logistic", "LogLogisticLSS"),
     "LowerBoundedLogLink": (
         "superglm.distributional.families.gaussian",
         "LowerBoundedLogLink",

@@ -100,6 +100,13 @@ def test_kernels_import_no_distributional_module_or_contract() -> None:
     # ``_common``: they import no distributional module themselves.
     chain = {"kernels._curvature_direction", "kernels._fourth_generated"}
     allowed = {
+        "_declared_adapter.py": {
+            "kernels._declared",
+            "kernels._declared_bounds",
+            "kernels._response_tails",
+            "kernels._common",
+        },
+        "lomax.py": {"kernels._declared", "kernels._declared_adapter", "kernels._common"},
         "_weighted.py": {"kernels.gamma"},
         "_response_tails.py": {"kernels._common", "kernels._curvature_direction"},
         "_declared_bounds.py": {
@@ -132,6 +139,7 @@ def test_kernels_import_no_distributional_module_or_contract() -> None:
             *chain,
         },
         "log_normal.py": {"kernels._common", "kernels._declared", "kernels.gaussian", *chain},
+        "log_logistic.py": {"kernels._common", "kernels._declared", "kernels._declared_adapter"},
         "negative_binomial.py": {"kernels._common", "kernels._negative_binomial_numba", *chain},
         "two_piece.py": {"kernels._common", "kernels._declared", "kernels._weighted", *chain},
         "tweedie.py": {"kernels._tweedie_numba", "kernels._common"},
@@ -177,6 +185,20 @@ def test_kernels_share_their_primitive_helpers() -> None:
 def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
     allowed = {
         ROOT / "family.py": {"weights", "observation"},
+        ADAPTERS / "_declared.py": {
+            "families._base",
+            "families._response_bounds",
+            "family",
+            "weights",
+            "likelihood_identity",
+        },
+        ADAPTERS / "lomax.py": {"families._declared", "families._predictors", "family"},
+        ADAPTERS / "log_logistic.py": {
+            "families._declared",
+            "families._predictors",
+            "family",
+            "likelihood_identity",
+        },
         ROOT / "observation.py": set(),
         ROOT / "weights.py": set(),
         ROOT / "likelihood_identity.py": set(),

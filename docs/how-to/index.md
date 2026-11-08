@@ -16,6 +16,7 @@ read-a-summary-and-plot-effects
 deploy-a-fitted-model
 screen-interactions
 fit-a-distributional-model
+fit-a-lomax-distributional-model
 check-a-distributional-fit
 start-fast-on-ephemeral-clusters
 ```

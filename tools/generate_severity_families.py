@@ -553,6 +553,29 @@ TWO_PIECE_MEAN = Declaration(
     ),
 )
 
+LOMAX = Declaration(
+    name="lomax",
+    parameters=("scale", "shape"),
+    log_density=lambda y, s, a: sp.log(a) - sp.log(s) - (a + 1) * softplus(logratio(y, s)),
+    log_survival=lambda y, s, a: -a * softplus(logratio(y, s)),
+    log_cdf=lambda y, s, a: log1mexp(a * softplus(logratio(y, s))),
+    doc=(
+        "Lomax in monetary scale and positive tail exponent. The numerical wrapper owns\n"
+        "the exact-zero limit and admission of tail derivatives; positive responses here."
+    ),
+)
+
+LOG_LOGISTIC = Declaration(
+    name="log_logistic",
+    parameters=("scale", "shape"),
+    log_density=lambda y, s, a: (
+        sp.log(a) - sp.log(y) + a * logratio(y, s) - 2 * softplus(a * logratio(y, s))
+    ),
+    log_survival=lambda y, s, a: -softplus(a * logratio(y, s)),
+    log_cdf=lambda y, s, a: -softplus(-a * logratio(y, s)),
+    doc="Log-logistic (Fisk), natural scale/median and positive tail exponent; carrier -log(y).",
+)
+
 DECLARATIONS = (
     GAMMA,
     GAMMA_LOG,
@@ -561,6 +584,8 @@ DECLARATIONS = (
     LOG_NORMAL_MEAN,
     TWO_PIECE_LOCATION,
     TWO_PIECE_MEAN,
+    LOMAX,
+    LOG_LOGISTIC,
 )
 
 
