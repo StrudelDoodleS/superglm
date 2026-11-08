@@ -44,14 +44,26 @@ All paths below are repository-relative. `D/` abbreviates `src/superglm/distribu
 | Vector/Dirichlet, Tasks 5–6 | New `D/families/dirichlet.py`, `D/kernels/dirichlet.py`; `D/model.py`, `D/api.py`, `D/fit_state.py`, `D/null_model.py`, `D/solver/solver.py`, `D/solver/chunks.py`, `D/smoothing/endpoint_direction.py`, `D/checks/scores.py`, `D/checks/compare.py`, `D/cross_validation.py`, `D/posterior.py`, `D/separation.py`, `src/superglm/model_selection.py`; guarded changes in `D/residuals.py`, `D/surfaces.py`, `D/checks/calibration.py`, `src/superglm/editor/lss/view.py`, `src/superglm/editor/session.py` | New `tests/_dirichlet_oracle.py`, `tests/test_dirichlet_lss_kernel.py`, `test_dirichlet_lss_family.py`, `test_dirichlet_lss_vertical_slice.py`, `test_distributional_vector_response.py` |
 | Parent, Tasks 7–8, after all children | Public exports; seven existing bounded adapters/declared adapter for audited endpoint-validation repairs; shared interfaces only after children stop; docs, `src/superglm/__init__.py` warmup/architecture allowlists, `tools/generate_severity_families.py` and any regenerated files, CI and benchmark harness | New all-eleven audit, lifecycle/operation tests and complete-fit harness/receipt; final full checks and independent review |
 
-`Task 1 -> {Task 2, Tasks 3–4, Task 5 -> Task 9 -> Task 6} -> Task 7 -> Task 8`.
+`Task 1 -> {Task 2, Tasks 3–4, Task 5}; reviewed scalar/core stages -> {Task 7A, Task 9 -> Task 6} -> final Task 7 integration -> Task 8`.
 
 Task9 was added by the user's subsequent request: declare LSS offsets as a
 predictor keyword, including a list of multiple offsets. It follows the
 Dirichlet core stage so it can update every family helper without competing
 API/model writers, and precedes the lifecycle stage that consumes it.
+The user explicitly accepted both column-name lists and numeric-array lists,
+then required removal of offsets from fitting methods in this same change.
+Prediction still receives new-row values. Public fit-time mapping compatibility
+is therefore superseded by the user's instruction.
 
-After Task 1 is integrated, the three family stages have disjoint ownership and may run in parallel. Tasks 3 and 4 share one owner and execute sequentially; Tasks 5 and 6 likewise. Parents supply Task 1's commit and Interfaces blocks to fresh stages. Do not concurrently edit a shared helper because an algorithm needs a change: agree the interface and have the owner/parent make it at a synchronization boundary. The parent keeps working on independent review/benchmark preparation while family stages run.
+After Task1, family stages have disjoint ownership; the recorded assignment
+ruling split NB and Tweedie into separate Astra stages. Task5 core is followed
+by Task9 then Task6 lifecycle. After core/scalar review, Task7A's all-eleven
+audit, existing scalar adapter repairs, public exports, warmup/census and scalar
+docs can proceed in parallel with Task9/6. Task9 owns the new offset guide;
+Task6 owns the new Dirichlet guide. Task7A does not edit their API/model/helper/
+scoring files; parent adds final cross-links and wiring after integration.
+Do not concurrently edit a shared helper: record the interface and make the
+small change at a synchronization boundary.
 
 ## Task 1: shared observation and response contracts
 
@@ -153,13 +165,16 @@ and reviews. No parallel writers own these files during this stage.
 - [ ] Resolve source shapes on original input rows and values after zero-weight
   row removal; preserve input positions. Resolve column sources on the current
   prediction frame. Numeric training vectors need new offset data at prediction;
-  never silently reuse them. Keep legacy fit/predict mappings compatible.
-  Reject duplicate fit specifications and define new-data replacement clearly,
-  including mixed sources. Internal resolved offsets must not apply twice.
+  never silently reuse them. Remove offsets from public fit and fit_reml as
+  explicitly requested; migrate refit/replay/CV callers to declarations.
+  Preserve prediction-time values and define replacement clearly, including
+  mixed sources. Internal resolved offsets must not apply twice; no hidden
+  fit-time compatibility alias replaces the removed argument.
 - [ ] Test fixed/REML fits, null fits, retained/compact state, dense/chunked
   prediction, scalar and Dirichlet component ordering, scoring/CV, posterior
-  inference, replay/refit and pickle/joblib. Compare with equivalent legacy
-  arrays on synthetic data for likelihood, predictions, covariance/EDF, work
+  inference, replay/refit and pickle/joblib. Compare equivalent declarations
+  and an independent or source-bound prechange fit oracle on synthetic data
+  for likelihood, predictions, covariance/EDF, work
   and dispatched backend. Test multiple offsets, new-row lengths, invalid and
   missing sources, source ownership, zero-weight rows and template-copy mutation.
 - [ ] Run focused regressions and short complete-fit controls, record RED/GREEN
