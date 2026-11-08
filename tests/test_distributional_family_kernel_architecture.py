@@ -184,7 +184,8 @@ def test_kernels_share_their_primitive_helpers() -> None:
 
 def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
     allowed = {
-        ROOT / "family.py": {"weights", "observation"},
+        ROOT / "family.py": {"weights", "observation", "response"},
+        ROOT / "response.py": set(),
         ADAPTERS / "_declared.py": {
             "families._base",
             "families._response_bounds",
