@@ -1,6 +1,7 @@
 """Built-in distributional families."""
 
 _EXPORTS = {
+    "DirichletLSS": ("superglm.distributional.families.dirichlet", "DirichletLSS"),
     "BoundedLogitLink": ("superglm.distributional.families._links", "BoundedLogitLink"),
     "GammaLS": ("superglm.distributional.families.gamma", "GammaLS"),
     "GaussianLS": ("superglm.distributional.families.gaussian", "GaussianLS"),

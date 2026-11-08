@@ -23,6 +23,7 @@ from tests.bound_predictor_fixtures import model_from_templates
     "name",
     [
         "GaussianLS",
+        "DirichletLSS",
         "GammaLS",
         "GeneralizedGammaLSS",
         "GeneralizedParetoLSS",
@@ -45,6 +46,31 @@ def test_negative_binomial_lss_is_exported_from_both_public_family_namespaces() 
     """Kills omitting either supported public import path for the NB2 family."""
     assert distributional.NegativeBinomialLS is NegativeBinomialLS
     assert distributional_families.NegativeBinomialLS is NegativeBinomialLS
+
+
+def test_public_dirichlet_constructor_preserves_the_joint_composition_contract():
+    """Public exports resolve the real vector law, without inventing scalar APIs."""
+    import superglm
+    from superglm.distributional.family import COMPLETE_OBSERVATION
+    from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
+
+    family_type = superglm.DirichletLSS
+    assert distributional.DirichletLSS is distributional_families.DirichletLSS is family_type
+    family = family_type(components=("first", "second", "third"))
+    response = np.array([[0.2, 0.3, 0.5]])
+    weights = resolve_likelihood_weights(
+        None, n_observations=1, contract=WeightContract(semantics="frequency")
+    )
+    plan = family.bind_likelihood(response, weights, COMPLETE_OBSERVATION)
+    evaluation = family.evaluate_natural(response, np.ones((1, 3)), plan)
+    assert np.all(evaluation.valid)
+    np.testing.assert_allclose(evaluation.reported_log_likelihood, np.log(2.0), atol=1e-14)
+    assert family.response_spec.shape == (3,)
+    assert family.default_prediction_columns == family.components
+    assert family.default_prediction_name == "mean_composition"
+    np.testing.assert_allclose(family.default_prediction(np.array([[2.0, 3.0, 5.0]])), response)
+    for name in ("cdf", "quantile", "variance"):
+        assert not hasattr(family, name)
 
 
 def test_a_non_converged_fit_warns_and_its_summary_says_so(monkeypatch) -> None:

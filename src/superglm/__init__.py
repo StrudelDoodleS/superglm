@@ -45,6 +45,7 @@ if _typing.TYPE_CHECKING:
     from superglm.diagnostics.spline_checks import SplineRedundancyReport
     from superglm.distributional.api import SuperLSS
     from superglm.distributional.binding import BoundPredictor, bind_predictor
+    from superglm.distributional.families.dirichlet import DirichletLSS
     from superglm.distributional.families.gamma import GammaLS
     from superglm.distributional.families.gaussian import GaussianLS
     from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
@@ -205,6 +206,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
     "superglm.diagnostics.spline_checks": ("SplineRedundancyReport",),
     "superglm.distributional.api": ("SuperLSS",),
     "superglm.distributional.binding": ("BoundPredictor", "bind_predictor"),
+    "superglm.distributional.families.dirichlet": ("DirichletLSS",),
     "superglm.distributional.families.gamma": ("GammaLS",),
     "superglm.distributional.families.gaussian": ("GaussianLS",),
     "superglm.distributional.families.generalized_gamma": ("GeneralizedGammaLSS",),
@@ -343,6 +345,46 @@ _numba_cache.ensure_cache_location()
 __getattr__, __dir__ = _attach(__name__, __path__, _LAZY_EXPORTS)
 
 
+def _warmup_scalar_observations() -> None:
+    """Warm bounded NB/beta and compound-gamma core operands (orders 0–2).
+
+    The window modules for gamma and Tweedie are Python compositions; their
+    compiled incomplete-gamma operand route is reached here. NB's normalized
+    recurrence and beta fraction are separate from its complete-density route.
+    Optional third/fourth derivatives and endpoint fallbacks remain first-use.
+    """
+    import numpy as np
+
+    from superglm.distributional.families.negative_binomial import NegativeBinomialLS
+    from superglm.distributional.families.tweedie import TweedieLSS
+    from superglm.distributional.family import bounded_observation
+    from superglm.distributional.observation import ResponseBounds
+    from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
+
+    response = np.array([1.0, 2.0, 3.0])
+    bounds = ResponseBounds.from_arrays(np.zeros(3), np.full(3, 5.0), np.array([-1, 0, 1]))
+    for family, parameters in (
+        (NegativeBinomialLS(), [2.0, 0.7]),
+        (TweedieLSS(), [2.0, 1.2, 1.5]),
+    ):
+        theta = np.tile(parameters, (3, 1))
+        theta.setflags(write=False)
+        for semantics in ("prior", "frequency"):
+            weights = resolve_likelihood_weights(
+                np.full(3, 2.0), n_observations=3, contract=WeightContract(semantics=semantics)
+            )
+            plan = family.bind_likelihood(response, weights, bounded_observation(bounds))
+            for order in (0, 1, 2):
+                family.evaluate_natural(response, theta, plan, derivative_order=order)
+        # Public window calls add the non-normalized NB dispatcher; infinite
+        # and narrow compound windows exercise the gamma tail/quadrature route.
+        family.log_window_probability(
+            np.array([-np.inf, 0.0, 1.0]),
+            np.array([0.0, np.inf, 1.0 + 1e-6]),
+            theta,
+        )
+
+
 def warmup() -> None:
     """Compile superglm's model-fitting kernels ahead of the first fit.
 
@@ -401,6 +443,7 @@ def warmup() -> None:
     _warmup_declared_bounds()
     _warmup_declared_rows()
     _warmup_negative_binomial()
+    _warmup_scalar_observations()
     _warmup_generalized_gamma()
     _warmup_leaf_kernels()
     _warmup_factor_smooth()
@@ -428,6 +471,7 @@ __all__ = [
     "ti",
     "interaction",
     "GaussianLS",
+    "DirichletLSS",
     "GammaLS",
     "GeneralizedGammaLSS",
     "GeneralizedParetoLSS",

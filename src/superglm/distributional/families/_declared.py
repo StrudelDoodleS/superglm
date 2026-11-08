@@ -24,6 +24,7 @@ from superglm.distributional.families._base import (
     readonly,
     typed_plan,
     validated_float_response,
+    validated_observation_response,
 )
 from superglm.distributional.families._response_bounds import (
     bind_observation,
@@ -300,22 +301,43 @@ class DeclaredScalarFamily:
         }
         return json.dumps((self.to_config(), static), sort_keys=True)
 
-    def _response(self, y, observation=None):
-        response = validated_float_response(
-            y,
-            message=f"{type(self).__name__} requires a non-empty finite response vector in its support",
-            lower=self.spec.response_lower,
-            lower_inclusive=True,
-        )
-        if not self.spec.response_lower_inclusive:
-            at_boundary = response == self.spec.response_lower
-            bounds = getattr(observation, "bounds", None)
-            exact = np.ones(len(response), bool) if bounds is None else bounds.side == 0
-            if np.any(at_boundary & exact):
+    def _response(self, y, observation=None, weights=None):
+        def exact_response(values):
+            response = validated_float_response(
+                values,
+                message=f"{type(self).__name__} requires a non-empty finite response vector in its support",
+                lower=self.spec.response_lower,
+                lower_inclusive=True,
+            )
+            if not self.spec.response_lower_inclusive and np.any(
+                response == self.spec.response_lower
+            ):
                 raise ValueError(
                     f"{type(self).__name__} exact response is outside its open support"
                 )
-        return response
+            return response
+
+        bounds = getattr(observation, "bounds", None)
+        if bounds is None:
+            return exact_response(y)
+        return validated_observation_response(
+            y,
+            censored=bounds.side != 0,
+            exact_validator=exact_response,
+            input_positions=getattr(weights, "input_positions", None),
+        )
+
+    def _density_response(self, response, observation):
+        """Protect density kernels from censored limits outside their support."""
+        bounds = observation.bounds
+        if bounds is None:
+            return response
+        replace = (bounds.side != 0) & (response <= self.spec.response_lower)
+        return (
+            np.where(replace, self.spec.response_lower + 1.0, response)
+            if np.any(replace)
+            else response
+        )
 
     def _theta(self, theta, n_observations=None):
         return validated_parameter_matrix(
@@ -326,7 +348,7 @@ class DeclaredScalarFamily:
         )
 
     def bind_likelihood(self, y, weights, observation):
-        response = self._response(y, observation)
+        response = self._response(y, observation, weights)
         if (
             not isinstance(weights, ResolvedLikelihoodWeights)
             or weights.values.shape != response.shape
@@ -355,7 +377,8 @@ class DeclaredScalarFamily:
             family_name=type(self).__name__,
         )
         carrier = censored_carrier(
-            self._kernel.carrier(response, weights.values), observation.bounds
+            self._kernel.carrier(self._density_response(response, observation), weights.values),
+            observation.bounds,
         )
         return DeclaredScalarPlan._from_prepared(
             weights=weights,
@@ -385,7 +408,9 @@ class DeclaredScalarFamily:
         return candidate
 
     def validate_likelihood_plan(self, y, plan):
-        response = self._response(y, getattr(plan, "observation", None))
+        response = self._response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         bound = self._plan(plan, len(response))
         owned = bound.exact_response
         if owned.flags.writeable or owned.shape != response.shape or owned.dtype != np.float64:
@@ -403,7 +428,12 @@ class DeclaredScalarFamily:
         response = self.validate_likelihood_plan(y, plan)
         theta = self._theta(theta, len(response))
         bound = self._plan(plan, len(response))
-        result = self._kernel.density_jets(response, theta, bound.multiplier, order=order)
+        result = self._kernel.density_jets(
+            self._density_response(response, bound.observation),
+            theta,
+            bound.multiplier,
+            order=order,
+        )
         channels = [*result.jets, None, None][:3]
         valid = result.valid
         if bound.observation.bounds is not None:
@@ -494,7 +524,9 @@ class DeclaredDirectionsMixin:
 
     def _higher(self, y, theta, plan, order):
         response = self.validate_likelihood_plan(y, plan)
-        result = self._kernel.density_jets(response, theta, plan.multiplier, order=order)
+        result = self._kernel.density_jets(
+            self._density_response(response, plan.observation), theta, plan.multiplier, order=order
+        )
         third, fourth = result.jets[3], result.jets[4] if order == 4 else None
         valid = result.valid
         if plan.observation.bounds is not None:

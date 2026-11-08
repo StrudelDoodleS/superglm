@@ -25,6 +25,7 @@ from superglm.distributional.families._base import (
     readonly,
     typed_plan,
     validated_float_response,
+    validated_observation_response,
 )
 from superglm.distributional.families._links import BoundedLogitLink
 from superglm.distributional.families._predictors import (
@@ -100,7 +101,24 @@ def _validated_wall(value: object, *, name: str) -> float:
     return wall
 
 
-def _validated_response(y: NDArray) -> NDArray[np.float64]:
+def _density_response(response, observation):
+    """Harmless internal density/start values, never the observed thresholds."""
+    bounds = observation.bounds
+    if bounds is None:
+        return response
+    replace = (bounds.side != 0) & (response <= 0.0)
+    return np.where(replace, 1.0, response) if np.any(replace) else response
+
+
+def _validated_response(y: NDArray, observation=None, weights=None) -> NDArray[np.float64]:
+    bounds = getattr(observation, "bounds", None)
+    if bounds is not None:
+        return validated_observation_response(
+            y,
+            censored=bounds.side != 0,
+            exact_validator=_validated_response,
+            input_positions=getattr(weights, "input_positions", None),
+        )
     return validated_float_response(
         y,
         message="y must be a non-empty finite non-negative vector of threshold excesses",
@@ -288,7 +306,7 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         )
 
     def bind_likelihood(self, y, weights, observation) -> GeneralizedParetoLikelihoodPlan:
-        response = _validated_response(y)
+        response = _validated_response(y, observation, weights)
         observation = bind_observation(
             observation, response, weights, support_lower=0.0, family_name="GeneralizedParetoLSS"
         )
@@ -340,7 +358,9 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         return candidate
 
     def validate_likelihood_plan(self, y, plan) -> NDArray[np.float64]:
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         candidate = self._plan(plan, len(response))
         observation = candidate.observation
         if observation != COMPLETE_OBSERVATION and (
@@ -355,7 +375,6 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
             or bound.shape != response.shape
             or bound.flags.writeable
             or not np.all(np.isfinite(bound))
-            or np.any(bound < 0.0)
         ):
             raise UnsupportedLikelihoodContractError(
                 "GeneralizedParetoLSS likelihood owns an invalid bound response"
@@ -367,7 +386,9 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         return bound
 
     def initialize(self, y, plan) -> InitialParameterState:
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         bound = self._plan(plan, len(response))
         with warnings.catch_warnings():
             if not bound.observation.is_complete:
@@ -375,7 +396,7 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
                 # start outside the shape walls is expected and not a finding.
                 warnings.simplefilter("ignore", GeneralizedParetoInitializationWarning)
             theta = initialize_generalized_pareto(
-                response,
+                _density_response(response, bound.observation),
                 bound.multiplier,
                 shape_lower=self.shape_lower,
                 shape_upper=self.shape_upper,
@@ -394,11 +415,17 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         self, y, theta, plan, *, derivative_order: int = 2
     ) -> NaturalLikelihoodEvaluation:
         order = _validated_derivative_order(derivative_order)
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         values = self._theta(theta, len(response))
         bound = self._plan(plan, len(response))
         evaluated = scale_rows(
-            response, values[:, 0], values[:, 1], bound.multiplier, derivative_order=order
+            _density_response(response, bound.observation),
+            values[:, 0],
+            values[:, 1],
+            bound.multiplier,
+            derivative_order=order,
         )
         optimizing, score, hessian, valid = (
             evaluated.optimizing_log_likelihood,
@@ -439,14 +466,20 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     ) -> NDArray[np.float64]:
         """Differentiate observed predictor curvature along one predictor path."""
 
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         bound = self._plan(plan, len(response))
         bounds = bound.observation.bounds
         windows_valid = np.ones(len(response), dtype=bool)
 
         def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
             complete = scale_hessian_direction(
-                response, theta[:, 0], theta[:, 1], natural, bound.multiplier
+                _density_response(response, bound.observation),
+                theta[:, 0],
+                theta[:, 1],
+                natural,
+                bound.multiplier,
             )
             if bounds is None:
                 return complete
@@ -475,21 +508,24 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     ) -> NDArray[np.float64]:
         """Differentiate observed predictor curvature twice, along ``a`` then ``b``."""
 
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         bound = self._plan(plan, len(response))
         bounds = bound.observation.bounds
         windows_valid = np.ones(len(response), dtype=bool)
 
         def natural_derivatives(theta: NDArray, natural_a: NDArray, natural_b: NDArray):
             multiplier = bound.multiplier
+            density_response = _density_response(response, bound.observation)
             third = natural_third_from_direction(
                 lambda v, rows: scale_hessian_direction(
-                    response[rows], theta[rows, 0], theta[rows, 1], v, multiplier[rows]
+                    density_response[rows], theta[rows, 0], theta[rows, 1], v, multiplier[rows]
                 ),
                 len(response),
                 2,
             )
-            fourth = scale_fourth(response, theta[:, 0], theta[:, 1], bound.multiplier)
+            fourth = scale_fourth(density_response, theta[:, 0], theta[:, 1], bound.multiplier)
             if bounds is None:
                 return third, fourth
             third, fourth, valid = bounded_higher_derivatives(

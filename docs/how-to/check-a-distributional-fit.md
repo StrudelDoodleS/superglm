@@ -418,10 +418,10 @@ new machinery.
 
 Expected shortfall is nevertheless a family-owned capability, not generic
 quantile quadrature. `GaussianLS`, `GammaLS`, `LogNormalLS`,
-`GeneralizedGammaLSS` and `GeneralizedParetoLSS` implement the certified unit
+`GeneralizedGammaLSS`, `GeneralizedParetoLSS` and `LomaxLSS` implement the certified unit
 law through `ExpectedShortfallFamily`; only Gaussian and gamma also implement
-the non-unit prior-weighted law. `TweedieLSS`, both two-piece families and
-`NegativeBinomialLS` refuse the named quantity. Structural support does not
+the non-unit prior-weighted law. `TweedieLSS`, both two-piece families,
+`NegativeBinomialLS` and `LogLogisticLSS` refuse the named quantity. Structural support does not
 promise that every float64 tail is resolvable: Gamma, log-normal and
 generalized-gamma rows refuse when their numerical tail certificate fails.
 Generalized-gamma location form returns `+∞` when the first moment does not
@@ -593,11 +593,31 @@ A model fitted with `truncation=` or `censored=` (see
 [Truncated and censored rows](fit-a-distributional-model.md#truncated-and-censored-rows))
 needs the same bounds when its training rows are checked. Pass them to
 `residual_set`, `residuals`, `check`, `check_2d`, `scores` and the diagnostic
-plots. A truncated row's PIT is then read inside its window and a censored
+plots when the family supplies the required distribution functions. All eleven
+scalar families support bounded joint log likelihood and log scoring. This
+does not grant a scalar CDF or quantile protocol to `NegativeBinomialLS`;
+its PIT, quantile residuals and the checks depending on them remain unavailable.
+Bounded `TweedieLSS` atom residuals also explicitly refuse. For supported
+continuous families, a truncated row's PIT is read inside its window and a censored
 row's is drawn at random beyond its bound, so the PIT of a well-fitted model is
 uniform. Without them every row reads as complete and the PIT is not uniform
 even for the right family; each method warns when that happens. For bounded
 rows `scores` gives the log score only, so ask for `which=("log",)`.
+
+The same endpoint convention applies to fitting and scoring:
+`lower < Y <= upper`, right-censored `Y > c`, left-censored `Y <= c`. In
+particular, a lower bound of zero excludes a zero atom. A nonunit prior weight
+changes the predictive row law only for Gaussian, Gamma, NB and Tweedie;
+frequency mass repeats the complete normalized score once per represented row.
+
+One-sided censored data can have no finite optimum. A small optimization
+residual does not establish that an effect is identified: read separation
+warnings as well as `result_.coefficient_converged`, summary notes and
+`diagnose()`. The separation scan runs for families that declare the relevant
+recession; NB and Tweedie do not currently provide that family-specific scan.
+If a coefficient fit stops early, its accepted iterate and convergence
+disclosure are returned. Numerical range/work refusals during trial evaluation
+are distinct from impossible observed events and from successful convergence.
 
 ## Payloads without figures
 

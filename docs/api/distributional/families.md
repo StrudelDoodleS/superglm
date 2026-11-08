@@ -26,6 +26,8 @@ the predictor for that parameter.
   skew of a two-piece log-normal.
 - {py:class}`~superglm.TwoPieceNormalLSS`: location, scale and skew of a
   two-piece normal on the real line.
+- {py:class}`~superglm.DirichletLSS`: one positive concentration parameter
+  per named component of a strictly positive continuous composition.
 
 `GammaLS` and `LogNormalLS` are special cases of `GeneralizedGammaLSS`, and
 `GaussianLS` of `TwoPieceNormalLSS`. [Why nested families have their own
@@ -48,7 +50,88 @@ a class and gives the evidence.
    superglm.TweedieLSS
    superglm.TwoPieceLogNormalLSS
    superglm.TwoPieceNormalLSS
+   superglm.DirichletLSS
 ```
+
+## Observation and weight support
+
+All eleven scalar families bind exact observations, left/right censoring,
+one-sided or two-sided truncation, and their combination. Each evaluates the
+normalized likelihood, score and every Hessian cross term (orders 0–2).
+This does not add general interval censoring.
+
+| Scalar family | Nonunit prior row law | CDF and quantile | Bounded analytic curvature directions |
+| --- | --- | --- | --- |
+| `GaussianLS` | Variance divided by weight | yes | built-in links |
+| `GammaLS` | CV squared divided by weight | yes | built-in log links |
+| `NegativeBinomialLS` | Counts `wY ~ NB2(w mean, w theta)` | no | refused |
+| `TweedieLSS` | Dispersion divided by weight | yes | refused |
+| `LogNormalLS` | refused | yes | built-in links |
+| `GeneralizedGammaLSS` | refused | yes | within numerical admission |
+| `GeneralizedParetoLSS` | refused | yes | within numerical admission |
+| `LomaxLSS` | refused | yes | admitted analytic windows only |
+| `LogLogisticLSS` | refused | yes | restricted at small shape, below |
+| `TwoPieceNormalLSS` | refused | yes | refused |
+| `TwoPieceLogNormalLSS` | refused | yes | refused |
+
+Integer frequency weights multiply the entire normalized row contribution
+once, including its truncation denominator. Unit prior and unit frequency
+weights give the same likelihood. A bounded plan refuses complete-row Fisher
+information. Missing analytic curvature directions use the existing numerical
+fallback; `outer="efs"` uses only core order-two channels. Both log-normal and
+two-piece log-normal parametrisations have the same observation support.
+
+Windows mean `lower < Y <= upper`; right censoring means `Y > c`, left censoring
+means `Y <= c`. Thus a zero lower truncation bound excludes an NB or Tweedie
+zero atom. For positive continuous laws, right censoring at or below zero is
+a probability-one event, while left censoring there is impossible. Exact
+responses still obey each family's density support. Original windows are
+validated before support clipping, with errors naming original input rows.
+
+For prior NB rates, censoring endpoints compare against the represented
+binary64 values `k/w`. A threshold equal to a represented rate includes that
+count on the closed upper side. Finite count-boundary encodings must be below
+`2**53`; this is a numerical restriction, not a truncation of the infinite NB
+law. Bounded NB uses the finite NB law, including near the Poisson limit.
+
+Mathematical support is broader than numerical admission. NB fractions and
+count sums, and Tweedie's compound Poisson–gamma sum, have explicit convergence,
+range and work limits. An unresolved trial is rejected by the solver; an
+unresolved public window query raises a numerical-range/convergence error.
+Neither substitutes a tiny probability or interprets work exhaustion as a
+zero-probability event. Two-piece curvature remains non-smooth at the join;
+censoring does not grant unrestricted third/fourth derivatives.
+
+See [observation guidance](../../how-to/fit-a-distributional-model.md#truncated-and-censored-rows)
+and [diagnostic limits](../../how-to/check-a-distributional-fit.md#truncated-and-censored-rows).
+
+## Dirichlet core contract
+
+`DirichletLSS(components=("first", "second", "third"))` is available from
+`superglm`, `superglm.distributional` and `superglm.distributional.families`.
+Use `family.alpha("first", ...)` to declare that component's log-alpha
+predictor. The component-to-parameter mapping is `family.component_parameters`;
+the canonical natural parameters are `alpha_0`, `alpha_1`, and so on.
+
+The response is a row-by-component matrix of known positive continuous shares
+summing to one, with at least two distinct named components. Zeros, negative
+shares, counts, percentages and materially nonunit sums are rejected; no
+pseudocount is added. Within `8*gamma_(K+1)` times row magnitude of unit sum,
+where `u=2**-53` and `gamma_n=n*u/(1-n*u)`, the supplied shares denote their
+mathematical normalization. The plan retains the supplied values and the
+normalization policy as identity evidence.
+
+The family supplies joint likelihood derivatives, complete-row Fisher
+information, mean composition `alpha/sum(alpha)`, and the response covariance
+via `family.response_covariance(theta)`. Response covariance describes random
+compositions; it is distinct from coefficient covariance and uncertainty in
+an estimated mean composition. Log-alpha effects change both mean shares and
+total concentration. Identical compositions can send concentration to infinity;
+the fit discloses this rather than claiming an identified finite concentration.
+Only complete observations, integer frequency weights and unit prior weights
+are supported. No scalar CDF, quantile or variance API is supplied. This
+reference describes the family/core contract. Scalar diagnostic methods in
+the table above do not apply to this vector response.
 
 ## Power-tail severity families
 

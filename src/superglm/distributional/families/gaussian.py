@@ -20,6 +20,7 @@ from superglm.distributional.families._base import (
     second_direction_arrays,
     typed_plan,
     validated_float_response,
+    validated_observation_response,
 )
 from superglm.distributional.families._predictors import (
     LocationPredictor,
@@ -412,7 +413,15 @@ def _validated_plan(
     return gaussian_plan
 
 
-def _validated_response(y: NDArray) -> NDArray[np.float64]:
+def _validated_response(y: NDArray, observation=None, weights=None) -> NDArray[np.float64]:
+    bounds = getattr(observation, "bounds", None)
+    if bounds is not None:
+        return validated_observation_response(
+            y,
+            censored=bounds.side != 0,
+            exact_validator=_validated_response,
+            input_positions=getattr(weights, "input_positions", None),
+        )
     return validated_float_response(y, message="y must be a non-empty finite vector")
 
 
@@ -524,7 +533,7 @@ class GaussianLS(LocationPredictor, ScalePredictor):
         *,
         chunked: bool,
     ) -> GaussianLikelihoodPlan:
-        response = _validated_response(y)
+        response = _validated_response(y, observation, weights)
         observation = bind_observation(
             observation, response, weights, support_lower=-np.inf, family_name="GaussianLS"
         )
@@ -558,7 +567,9 @@ class GaussianLS(LocationPredictor, ScalePredictor):
         )
 
     def initialize(self, y: NDArray, plan: FamilyLikelihoodPlan) -> InitialParameterState:
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         gaussian_plan = _validated_plan(plan, len(response), self.scale_floor)
         theta = initialize_gaussian(
             response,
@@ -577,7 +588,9 @@ class GaussianLS(LocationPredictor, ScalePredictor):
         derivative_order: int = 2,
     ) -> NaturalLikelihoodEvaluation:
         order = _validated_derivative_order(derivative_order)
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         parameters = _validated_parameter_matrix(
             theta,
             n_observations=len(response),
@@ -668,7 +681,9 @@ class GaussianLS(LocationPredictor, ScalePredictor):
     ) -> NDArray[np.float64]:
         """Differentiate observed predictor curvature along one predictor path."""
 
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         link_tuple = tuple(links)
         if (
             len(link_tuple) != 2
@@ -710,7 +725,9 @@ class GaussianLS(LocationPredictor, ScalePredictor):
     ) -> NDArray[np.float64]:
         """Differentiate observed predictor curvature twice, along ``a`` then ``b``."""
 
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         self._require_builtin_links(links)
         gaussian_plan = _validated_plan(plan, len(response), self.scale_floor)
         single = np.ndim(direction_a) == 2

@@ -19,6 +19,7 @@ from superglm.distributional.families._base import (
     readonly,
     typed_plan,
     validated_float_response,
+    validated_observation_response,
 )
 from superglm.distributional.families._predictors import (
     LocationPredictor,
@@ -103,7 +104,24 @@ _CAPABILITIES = FamilyCapabilities(
 )
 
 
-def _validated_response(y: NDArray) -> NDArray[np.float64]:
+def _density_response(response, observation):
+    """Harmless internal density/start values, never the observed thresholds."""
+    bounds = observation.bounds
+    if bounds is None:
+        return response
+    replace = (bounds.side != 0) & (response <= 0.0)
+    return np.where(replace, 1.0, response) if np.any(replace) else response
+
+
+def _validated_response(y: NDArray, observation=None, weights=None) -> NDArray[np.float64]:
+    bounds = getattr(observation, "bounds", None)
+    if bounds is not None:
+        return validated_observation_response(
+            y,
+            censored=bounds.side != 0,
+            exact_validator=_validated_response,
+            input_positions=getattr(weights, "input_positions", None),
+        )
     return validated_float_response(
         y,
         message="y must be a non-empty finite strictly positive vector",
@@ -315,7 +333,7 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
         weights: ResolvedLikelihoodWeights,
         observation: ObservationContract,
     ) -> GeneralizedGammaLikelihoodPlan:
-        response = _validated_response(y)
+        response = _validated_response(y, observation, weights)
         observation = bind_observation(
             observation, response, weights, support_lower=0.0, family_name=_FAMILY_NAME
         )
@@ -346,7 +364,9 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
                 "GeneralizedGammaLSS does not support the resolved likelihood-weight contract"
             )
         with np.errstate(over="ignore", invalid="ignore"):
-            carrier = -multiplier * (np.log(response) + _HALF_LOG_TWO_PI)
+            carrier = -multiplier * (
+                np.log(_density_response(response, observation)) + _HALF_LOG_TWO_PI
+            )
         carrier = censored_carrier(carrier, observation.bounds)
         if not np.all(np.isfinite(carrier)):
             raise UnsupportedLikelihoodContractError(
@@ -378,7 +398,9 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
         y: NDArray,
         plan: FamilyLikelihoodPlan,
     ) -> NDArray[np.float64]:
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         candidate = self._plan(plan, len(response))
         observation = candidate.observation
         if observation != COMPLETE_OBSERVATION and (
@@ -393,7 +415,6 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
             or bound.shape != response.shape
             or bound.flags.writeable
             or not np.all(np.isfinite(bound))
-            or np.any(bound <= 0.0)
         ):
             raise UnsupportedLikelihoodContractError(
                 "GeneralizedGammaLSS likelihood owns an invalid bound response"
@@ -405,10 +426,12 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
         return bound
 
     def initialize(self, y: NDArray, plan: FamilyLikelihoodPlan) -> InitialParameterState:
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         bound = self._plan(plan, len(response))
         theta = initialize_generalized_gamma(
-            response,
+            _density_response(response, bound.observation),
             bound.multiplier,
             parametrisation=self.parametrisation,
             scale_floor=self.scale_floor,
@@ -432,12 +455,14 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
         derivative_order: int = 2,
     ) -> NaturalLikelihoodEvaluation:
         order = _validated_derivative_order(derivative_order)
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         values = self._theta(theta, len(response))
         bound = self._plan(plan, len(response))
         rows = mean_rows if self.parametrisation == "mean" else location_rows
         evaluated = rows(
-            response,
+            _density_response(response, bound.observation),
             values[:, 0],
             values[:, 1],
             values[:, 2],
@@ -476,9 +501,28 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
         )
 
     def _window_jets(self, lower: NDArray, upper: NDArray, theta: NDArray, order: int):
-        return gg_window_jets(
-            lower, upper, theta, order=order, mean_form=self.parametrisation == "mean"
+        # The tail primitive expects at least one effective endpoint. A right
+        # censor at/below zero observes the whole positive support exactly.
+        lower = np.maximum(lower, 0.0)
+        whole = (lower == 0.0) & np.isposinf(upper)
+        mean_form = self.parametrisation == "mean"
+        if not np.any(whole):
+            return gg_window_jets(lower, upper, theta, order=order, mean_form=mean_form)
+        jets = (np.zeros(len(theta)),) + tuple(
+            np.zeros((len(theta), math.comb(2 + level, level))) for level in range(1, order + 1)
         )
+        rows = np.flatnonzero(~whole)
+        if len(rows):
+            partial = gg_window_jets(
+                lower[rows], np.asarray(upper)[rows], theta[rows], order=order, mean_form=mean_form
+            )
+            for target, source in zip(jets, partial, strict=True):
+                target[rows] = source
+        if mean_form:
+            invalid = ~mean_exists(theta[:, 1], theta[:, 2])
+            for channel in jets:
+                channel[invalid] = np.nan
+        return jets
 
     def _bounded_higher(
         self,
@@ -515,7 +559,9 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
     ) -> NDArray[np.float64]:
         """Differentiate observed predictor curvature along one predictor path."""
 
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         bound = self._plan(plan, len(response))
         rows = (
             mean_hessian_direction if self.parametrisation == "mean" else location_hessian_direction
@@ -525,7 +571,12 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
 
         def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
             complete = rows(
-                response, theta[:, 0], theta[:, 1], theta[:, 2], natural, bound.multiplier
+                _density_response(response, bound.observation),
+                theta[:, 0],
+                theta[:, 1],
+                theta[:, 2],
+                natural,
+                bound.multiplier,
             )
             if bound.observation.bounds is None:
                 return complete
@@ -556,14 +607,22 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
     ) -> NDArray[np.float64]:
         """Differentiate observed predictor curvature twice, along ``a`` then ``b``."""
 
-        response = _validated_response(y)
+        response = _validated_response(
+            y, getattr(plan, "observation", None), getattr(plan, "weights", None)
+        )
         bound = self._plan(plan, len(response))
         rows = mean_third_fourth if self.parametrisation == "mean" else location_third_fourth
 
         windows_valid = np.ones(len(response), dtype=bool)
 
         def natural_derivatives(theta: NDArray, natural_a: NDArray, natural_b: NDArray):
-            third, fourth = rows(response, theta[:, 0], theta[:, 1], theta[:, 2], bound.multiplier)
+            third, fourth = rows(
+                _density_response(response, bound.observation),
+                theta[:, 0],
+                theta[:, 1],
+                theta[:, 2],
+                bound.multiplier,
+            )
             if bound.observation.bounds is None:
                 return third, fourth
             third, fourth, valid = self._bounded_higher(bound, response, theta, third, fourth)
