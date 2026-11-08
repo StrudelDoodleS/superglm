@@ -142,6 +142,15 @@ certificates. Untimed backend-equivalence checks permit backend differences
 and never produce time ratios. Continuous-grid and multiple-start differences
 are sensitivity results, never filtered endpoints.
 
+Equivalence jobs also record `backend_coverage`: expected chunked/dense and
+observed identifiers. Missing either route requires attention, including in a
+continuous-grid sensitivity job. Dirichlet public checks record the mean's
+maximum absolute difference from independently normalized alpha and a tolerance
+of 64u, where u = eps/2; a mismatch retains those deltas and fails public validation.
+Small references retain `mathematical_match` separately from public validation.
+An unresolved nested `production.public_status` requires attention even in a
+reference-only run with a mathematically matched likelihood endpoint.
+
 `runner_status=executed` means the selected runner work executed without an
 unresolved check. Exit 1 and `attention_required` preserve failures for action.
 `validation_complete` is always false: final acceptance belongs to the parent.
