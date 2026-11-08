@@ -27,7 +27,9 @@ the predictor for that parameter.
 - {py:class}`~superglm.TwoPieceNormalLSS`: location, scale and skew of a
   two-piece normal on the real line.
 - {py:class}`~superglm.DirichletLSS`: one positive concentration parameter
-  per named component of a strictly positive continuous composition.
+  per named component of a strictly positive continuous composition. See
+  [Fit a Dirichlet distributional model](../../how-to/fit-a-dirichlet-distributional-model.md)
+  for fitting, labeled mean predictions, joint scoring and scalar share inference.
 
 `GammaLS` and `LogNormalLS` are special cases of `GeneralizedGammaLSS`, and
 `GaussianLS` of `TwoPieceNormalLSS`. [Why nested families have their own
