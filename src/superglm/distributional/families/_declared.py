@@ -504,7 +504,7 @@ class DeclaredDirectionsMixin:
             def windows(lo, hi, rows, order):
                 if not np.all(self._kernel.analytic_window_admitted(lo, hi, theta[rows])):
                     raise UnsupportedLikelihoodContractError(
-                        "quadrature window has no certified analytic higher direction; difference the order-two likelihood"
+                        "window has no admitted analytic higher direction (quadrature or cancellation); difference the order-two likelihood"
                     )
                 jets, admitted = self._kernel.window_jets(lo, hi, theta[rows], order=order)
                 if not np.all(admitted):

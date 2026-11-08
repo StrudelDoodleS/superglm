@@ -70,6 +70,20 @@ family supplies a random-sampling protocol. Exact Lomax responses may equal
 zero; exact log-logistic responses must be positive. Censoring and probability
 windows may touch zero; no epsilon is added to observations.
 
+One-sided censored intercepts and categorical levels are checked for scale
+separation, including with truncation, using the existing `separation` policy.
+The default warns that no finite scale estimate exists; `"error"` raises and
+`"ignore"` suppresses the separation warning. Other convergence disclosures remain.
+
+Numerical derivative admission is narrower than the mathematical shape domain.
+For log-logistic finite windows with positive endpoints, derivatives are declined
+when `shape*max(1, abs(log(lo/scale)), abs(log(hi/scale))) < 2^-8`.
+This prevents cancellation between density and truncation derivatives at very
+small shape. Probability and likelihood values remain available. Analytic higher
+directions require the same expression to be at least `1/8`; otherwise the
+existing derivative fallback applies. See the
+[numerical extension notes](../../development/internals/distributional-family-development.md).
+
 Lomax is the GPD row law under `xi=1/shape`, `sigma=scale/shape`. Its full shape
 domain reaches infinite-mean laws unavailable in the current GPD adapter.
 Different links and penalties mean their regression models need not coincide.

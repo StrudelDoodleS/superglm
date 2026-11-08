@@ -208,10 +208,14 @@ def test_generated_carrier_keeps_the_warmed_operand_signature():
     script = """
 import numpy as np
 from superglm.distributional.kernels import lomax, log_logistic
+from superglm.distributional.kernels._declared_bounds import declared_window_jets
 for kernel in (lomax, log_logistic):
     module=kernel.generated
     y=np.array([.5,2.]); mass=np.ones(2); theta=np.tile([2.,1.5],(2,1))
-    kernel.window_jets(y,y+1e-6,theta,order=4)  # same narrow path as warmup
+    # Warm the actual shared path used by _warmup_declared_bounds. The
+    # log-logistic wrapper's closed-form intervals no longer use a carrier.
+    declared_window_jets(module,y,y+1e-6,theta,(),order=4,
+                         from_lower=np.zeros(2,bool),rate=np.full(2,12.))
     warmed=tuple(module.carrier.signatures)
     assert len(warmed)==1
     y.setflags(write=False); mass.setflags(write=False)

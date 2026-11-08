@@ -31,6 +31,7 @@ def test_frequency_intercept_fit_matches_literal_replication(family):  # noqa: F
         evaluate,
         np.log(fit.predict_parameters(frame).to_numpy()[0]),
         np.log(repeated.predict_parameters(frame).to_numpy()[0]),
+        tolerance=1e-8,  # both fits requested the default inner tolerance
     )
 
 
@@ -153,7 +154,7 @@ def test_weighted_bounded_predictor_directions_and_honest_fallback(family):  # n
         ),
     )
     assert family.evaluate_natural(tiny, theta[:1], bounded).valid.all()
-    with pytest.raises(UnsupportedLikelihoodContractError, match="quadrature.*certified"):
+    with pytest.raises(UnsupportedLikelihoodContractError, match="analytic higher.*quadrature"):
         family.predictor_curvature_second_directional_derivative(
             tiny, eta[:1], a[:1], b[:1], links, bounded
         )
