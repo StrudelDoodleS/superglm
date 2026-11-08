@@ -23,6 +23,7 @@ from superglm._frame import EagerFrame, as_eager_frame
 from superglm.distributional.api import SuperLSS
 from superglm.distributional.offsets import offset_columns, sources_of
 from superglm.distributional.prediction_design import _required_columns
+from superglm.distributional.response import require_scalar_response
 from superglm.distributional.terms import (
     _coefficient_columns,
     _compiled_predictor,
@@ -137,6 +138,7 @@ class LSSModelView:
         amount_unit: str | None = None,
     ) -> None:
         fitted = lss._require_fitted()
+        require_scalar_response(lss.family, "editor")
         self.lss = lss
         self.X_train = X_train
         self.amount_unit = amount_unit

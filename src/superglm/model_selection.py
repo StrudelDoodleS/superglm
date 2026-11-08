@@ -73,6 +73,8 @@ class CrossValidationResult:
         Out-of-fold predictions (response scale; a SuperLSS's conditional
         mean), same length as *y*. ``None`` unless ``return_oof=True``. A SuperLSS's
         held-out row of weight zero that cannot be priced reads NaN.
+        Vector means have shape ``(n, K)`` in the family's component order;
+        an unpriced vector row has NaN in all its components.
     estimators : list or None
         Fitted model per fold. ``None`` unless ``return_estimators=True``.
     n_rows : int or None
@@ -281,8 +283,8 @@ def _data_fingerprint(X, y, sample_weight=None, offset=None, columns=None) -> st
     name order, leaving out any that are all zero, as no offset is.
     """
     frame = as_eager_frame(X)
-    response = np.asarray(y, dtype=np.float64).ravel()
-    n = response.size
+    response = np.asarray(y, dtype=np.float64)
+    n = len(response)
     weights = np.ones(n) if sample_weight is None else sample_weight
     by_parameter = offset if isinstance(offset, Mapping) else {}
     offsets = np.zeros(n) if offset is None or isinstance(offset, Mapping) else offset
@@ -295,6 +297,8 @@ def _data_fingerprint(X, y, sample_weight=None, offset=None, columns=None) -> st
     for name in names:
         digest.update(_framed(repr(name).encode("utf-8")))
         digest.update(_column_bytes(frame, name))
+    if response.ndim > 1:
+        digest.update(_framed(repr(response.shape[1:]).encode("utf-8")))
     for column in (response, weights, offsets):
         digest.update(np.ascontiguousarray(column, dtype="<f8").ravel().tobytes())
     for name in sorted(by_parameter):
@@ -547,6 +551,15 @@ class _GLMFolds:
     warm_argument = "lambda2_init"
     default_warm_start = True
     drops_zero_weight_rows = False
+    prediction_shape = ()
+
+    @staticmethod
+    def canonicalize_response(y, frame):
+        return np.asarray(y, dtype=np.float64)
+
+    @staticmethod
+    def validate_scorers(scorers):
+        pass
 
     @staticmethod
     def default_fit_mode(fit_kwargs: Mapping[str, Any]) -> str:
@@ -659,7 +672,7 @@ def _held_out_predictions(folds, est, frame, rows, offset, sample_weight) -> NDA
         kept = None if sample_weight is None else np.asarray(sample_weight) > 0.0
         if not folds.drops_zero_weight_rows or kept is None or kept.all():
             raise
-    predictions = np.full(len(rows), np.nan)
+    predictions = np.full((len(rows), *folds.prediction_shape), np.nan)
     positions = rows[kept]
     predictions[kept] = folds.predict(
         est, frame.take_rows(positions), _take_offset(offset, positions)
@@ -670,7 +683,9 @@ def _held_out_predictions(folds, est, frame, rows, offset, sample_weight) -> NDA
             predictions[local] = folds.predict(
                 est, frame.take_rows(row), _take_offset(offset, row)
             )[0]
-    unpriced = int(np.isnan(predictions[~kept]).sum())
+    unpriced = int(
+        np.isnan(predictions[~kept]).reshape(np.count_nonzero(~kept), -1).any(axis=1).sum()
+    )
     if unpriced:
         warnings.warn(
             f"{unpriced} held-out rows of weight zero could not be priced, so their out-of-fold "
@@ -778,7 +793,10 @@ def cross_validate(
         ``"gini"``; ``"deviance"`` by default. Built-in for a SuperLSS:
         ``"nll"``, ``"crps"``, ``"gini"``, ``"actual_expected"``, all of them by
         default. A family with no distribution function has no ``"crps"``, so it
-        is left out by default and NaN if asked for. A SuperLSS has no single
+        is left out by default and NaN if asked for. Vector families default
+        to joint ``"nll"`` only and explicitly refuse scalar built-in scores;
+        custom scalar callables receive the response in canonical component order.
+        A SuperLSS has no single
         mean predictor to take a deviance of. Built-in
         deviance, NLL and CRPS divide their weighted totals by the likelihood
         size the declared contract implies: ``sum(sample_weight)`` under
@@ -857,9 +875,9 @@ def cross_validate(
     )
     warm_lambdas: dict[str, float] | None = None
 
-    y = np.asarray(y, dtype=np.float64)
-    n = len(y)
     frame = as_eager_frame(X)
+    y = folds.canonicalize_response(y, frame)
+    n = len(y)
 
     if sample_weight is not None:
         try:
@@ -892,6 +910,7 @@ def cross_validate(
             raise ValueError(f"groups length {len(groups)} != y length {n}")
 
     scorers = _resolve_scorers(folds.default_scoring if scoring is None else scoring, folds.scorers)
+    folds.validate_scorers(scorers)
     score_names = list(scorers.keys())
 
     # One level vocabulary for every fold, resolved before the split, so a level
@@ -904,7 +923,7 @@ def cross_validate(
     fold_records: list[dict[str, Any]] = []
     fold_indices_list: list[tuple[NDArray, NDArray]] = []
     estimators_list: list | None = [] if return_estimators else None
-    oof: NDArray | None = np.full(n, np.nan) if return_oof else None
+    oof: NDArray | None = np.full((n, *folds.prediction_shape), np.nan) if return_oof else None
     pooled_numerators: dict[str, float] = {
         name: 0.0 for name in score_names if name in folds.pooled_parts
     }
@@ -1005,7 +1024,7 @@ def cross_validate(
                     record[sname] = float(result)
                     written_by_builtin[sname] = sfn is folds.scorers.get(sname)
                     pooled_fn = folds.pooled_parts.get(sname)
-                    if pooled_fn is not None:
+                    if pooled_fn is not None and written_by_builtin[sname]:
                         fold_parts[sname] = pooled_fn(
                             est,
                             X_test,

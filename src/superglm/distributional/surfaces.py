@@ -42,6 +42,7 @@ from superglm.distributional.posterior import (
 # needs; a sweep frame that restated the rule would drift from the design it is
 # built to feed.
 from superglm.distributional.prediction_design import _required_columns
+from superglm.distributional.response import require_scalar_response
 from superglm.distributional.terms import (
     _column_levels,
     _fitted_level_specs,
@@ -403,6 +404,7 @@ def risk_curves(
     rows, or one per level); without ``weights`` the curve is a reference
     policy at full exposure.
     """
+    require_scalar_response(fitted.family, "risk_curves")
     asked = _asked_quantiles(quantiles, what="risk curves")
     sweep, levels, positions, resolved = _sweep(fitted, X_train, reference, covariate, n_points)
 
@@ -480,6 +482,7 @@ def density_fan(
     the unit law. Families with atoms are unsupported by this density payload.
     """
     family = fitted.family
+    require_scalar_response(family, "density_fan")
     if isinstance(family, AtomFamily):
         raise NotImplementedError(
             "density fans support continuous families only; this family has atoms"
@@ -626,6 +629,7 @@ def parameter_spread(
     are omitted. ``offsets`` belong to ``X``. ``weights`` are prior weights:
     tail quantities read each row's prior-weighted law; the mean does not move.
     """
+    require_scalar_response(fitted.family, "parameter_spread")
     if by != "mean":
         raise NotImplementedError(
             f"parameter_spread bins by the predicted mean; pass by='mean', not {by!r}"
@@ -886,6 +890,7 @@ def portfolio(
     ``sum_i w_i y_i``. Zero-weight rows are omitted; ``offsets`` give one
     predictor-keyed offset per input row.
     """
+    require_scalar_response(fitted.family, "portfolio")
     asked = _asked_quantiles(quantiles, what="a portfolio payload")
     columns = [f"q{value:g}" for value in asked]
     if len(set(columns)) != len(columns):

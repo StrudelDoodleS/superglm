@@ -34,6 +34,13 @@ def test_fixed_and_null_fit_against_independent_stationary_likelihood(k, regress
     assert np.linalg.norm(objective(fitted)[1], ord=np.inf) / weights.sum() < 2e-7
     want = np.exp(design @ beta.reshape(k, -1).T)
     actual = model.predict_parameters(X).to_numpy()
+    public_mean = model.predict(X)
+    assert isinstance(public_mean, pd.DataFrame)
+    assert tuple(public_mean.columns) == fam.components
+    pd.testing.assert_index_equal(public_mean.index, X.index)
+    np.testing.assert_allclose(
+        public_mean, want / want.sum(axis=1, keepdims=True), rtol=2e-7, atol=2e-8
+    )
     np.testing.assert_allclose(
         actual / actual.sum(axis=1, keepdims=True),
         want / want.sum(axis=1, keepdims=True),

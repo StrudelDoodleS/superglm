@@ -31,6 +31,11 @@ from superglm.distributional.offsets import (
     sum_offset_sources,
     take_offset,
 )
+from superglm.distributional.response import (
+    require_scalar_response,
+    response_spec,
+    unvalidated_response,
+)
 from superglm.distributional.weights import (
     UnsupportedLikelihoodContractError,
     resolve_likelihood_weights,
@@ -56,6 +61,7 @@ def _crps_parts(model, X, y, *, sample_weight=None, offset=None) -> tuple[float,
     then leaves that fold out, so the reason is logged. A prediction that fails is
     not one of these: it fails the fold.
     """
+    require_scalar_response(model.family, "crps")
     fitted = model._require_fitted()
     rows = _scoring_rows(fitted, X, y, sample_weight=sample_weight, offsets=offset)
     mass = rows.aggregation_mass
@@ -89,6 +95,7 @@ def _scored_means(
 
 def _actual_expected_parts(model, X, y, *, sample_weight=None, offset=None) -> tuple[float, float]:
     """Weighted actual and weighted expected totals."""
+    require_scalar_response(model.family, "actual_expected")
     response, mean, weights = _scored_means(model, X, y, sample_weight, offset)
     if weights is None:
         return float(np.sum(response)), float(np.sum(mean))
@@ -102,6 +109,7 @@ def _gini(model, X, y, *, sample_weight=None, offset=None) -> float:
     there is no such share to order, on a response that can be negative or a
     fold with no claims.
     """
+    require_scalar_response(model.family, "gini")
     response, mean, weights = _scored_means(model, X, y, sample_weight, offset)
     total = np.sum(response) if weights is None else np.sum(weights * response)
     if total > 0.0:
@@ -184,11 +192,31 @@ class LSSFolds:
     @property
     def default_scoring(self) -> tuple[str, ...]:
         """Every built-in score the family has: a CRPS needs its distribution function."""
+        if self.prediction_shape:
+            return ("nll",)
         return tuple(
             name
             for name in _SCORERS
             if name != "crps" or isinstance(self.model.family, DistributionFunctionFamily)
         )
+
+    @property
+    def prediction_shape(self) -> tuple[int, ...]:
+        return response_spec(self.model.family).shape
+
+    def canonicalize_response(self, y, frame):
+        """Validate labels on the original rows, keeping values raw until each fold selects."""
+        return unvalidated_response(
+            y,
+            family=self.model.family,
+            n_rows=len(frame),
+            input_index=getattr(frame.native, "index", None),
+        )
+
+    def validate_scorers(self, scorers):
+        for name, scorer in scorers.items():
+            if name != "nll" and scorer is self.scorers.get(name):
+                require_scalar_response(self.model.family, name)
 
     def read_columns(self) -> tuple[str, ...]:
         """The columns the predictors read: their terms and their interactions' parents."""
@@ -311,7 +339,7 @@ class LSSFolds:
         return costs
 
     def predict(self, estimator, X, offset) -> NDArray[np.float64]:
-        return estimator.predict(X, offsets=offset)
+        return np.asarray(estimator.predict(X, offsets=offset), dtype=np.float64)
 
     def curve_similarity(self, estimators, X, sample_weight) -> None:
         """None: the editor's Cross-validation tab draws a SuperLSS's fold curves."""

@@ -63,6 +63,7 @@ from superglm.distributional.predictor import (
     resolve_predictor_links,
 )
 from superglm.distributional.response import (
+    require_scalar_response,
     response_spec,
     unvalidated_response,
     validated_response_array,
@@ -680,6 +681,7 @@ class DenseDistributionalModel:
         offsets: Mapping[str, NDArray] | None = None,
     ) -> NDArray[np.float64]:
         """Return ``P(Y <= y)`` per row from the fitted natural parameters."""
+        require_scalar_response(self.family, "CDF")
         family = self._distribution_function_family()
         theta = self.predict_parameters(X, offsets=offsets)
         values = np.broadcast_to(np.asarray(y, dtype=np.float64), (len(theta),))
@@ -693,6 +695,7 @@ class DenseDistributionalModel:
         offsets: Mapping[str, NDArray] | None = None,
     ) -> NDArray[np.float64]:
         """Return the ``p``-quantile per row from the fitted natural parameters."""
+        require_scalar_response(self.family, "quantile")
         family = self._distribution_function_family()
         theta = self.predict_parameters(X, offsets=offsets)
         probabilities = np.broadcast_to(np.asarray(p, dtype=np.float64), (len(theta),))

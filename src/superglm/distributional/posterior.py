@@ -47,6 +47,7 @@ from superglm.distributional.likelihood_identity import rebound_plan_mismatch
 # an offset contract drifts between two entry points that must agree.
 from superglm.distributional.offsets import prediction_offsets
 from superglm.distributional.prediction_design import map_design_blocks
+from superglm.distributional.response import require_scalar_response
 from superglm.distributional.revision import CORRECTED_COVARIANCE_NEEDS_THE_FIT
 from superglm.distributional.smoothing.derivatives import LamlDerivatives, laml_derivatives
 from superglm.distributional.solver.assembly import dense_predictor_matrices
@@ -1010,6 +1011,7 @@ def resolve_quantity(
         raise ValueError(f"unsupported posterior quantity {quantity!r}")
 
     if name == "mean" and not arguments:
+        require_scalar_response(family, "posterior mean")
         if not isinstance(family, DefaultPredictionFamily):
             raise NotImplementedError(
                 "this family has no default prediction; name a parameter or pass a callable"
@@ -1024,6 +1026,7 @@ def resolve_quantity(
         return lambda theta: np.asarray(theta, dtype=np.float64)[:, index]
 
     if name in ("quantile", "cdf", "exceedance", "expected_shortfall") and len(arguments) == 1:
+        require_scalar_response(family, name)
         return _distribution_quantity(
             family, name, _scalar_argument(name, arguments[0]), _prior_weight_law(weights)
         )
@@ -1061,6 +1064,11 @@ def posterior_bounds(
     coverage = float(level)
     if not 0.0 < coverage < 1.0:
         raise ValueError("level must lie strictly inside (0, 1)")
+    frame = as_eager_frame(X)
+    n_observations = len(frame)
+    row_weights = _prior_weight_law(weights, n_observations)
+    # Named scalar quantities refuse before constructing coefficient draws.
+    evaluate = resolve_quantity(fitted.family, quantity, weights=row_weights)
     if draws is None:
         draws = posterior_draws(fitted, n_draws, covariance=covariance, seed=seed)
     if not isinstance(draws, PosteriorDraws):
@@ -1068,10 +1076,6 @@ def posterior_bounds(
     if draws.n_draws < 2:
         raise ValueError("posterior bounds need at least 2 draws to estimate variance")
 
-    frame = as_eager_frame(X)
-    n_observations = len(frame)
-    row_weights = _prior_weight_law(weights, n_observations)
-    evaluate = resolve_quantity(fitted.family, quantity, weights=row_weights)
     estimate = np.asarray(
         evaluate(fitted.predict_parameters(frame, offsets=offsets)), dtype=np.float64
     )
@@ -1251,6 +1255,7 @@ def posterior_predictive(
     one, responses are drawn through ``quantile_prior_weighted``, and a family
     without that law refuses.
     """
+    require_scalar_response(fitted.family, "posterior_predictive")
     frame = as_eager_frame(X)
     row_weights = _prior_weight_law(weights, len(frame))
     family = fitted.family
