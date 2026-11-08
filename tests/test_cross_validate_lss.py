@@ -267,13 +267,17 @@ def test_a_dropped_row_that_cannot_be_priced_leaves_a_priceable_one_in_its_fold_
         {"age": [40.0] * 8, "region": ["a", "zzz"] * 4, "unread": [0.0] * 8},
     )
     frame = pd.concat([X, padding], ignore_index=True)
-    result = _fixed_cv(
-        frame,
-        np.r_[y, np.ones(8)],
-        sample_weight=np.r_[weights, np.zeros(8)],
-        return_oof=True,
-        return_estimators=True,
-    )
+    with pytest.warns(UserWarning, match="could not be priced") as caught:
+        result = _fixed_cv(
+            frame,
+            np.r_[y, np.ones(8)],
+            sample_weight=np.r_[weights, np.zeros(8)],
+            return_oof=True,
+            return_estimators=True,
+        )
+    reports = [str(item.message) for item in caught if "could not be priced" in str(item.message)]
+    assert len(reports) == 1
+    assert reports[0].startswith("4 held-out rows of weight zero could not be priced")
     known, unseen = np.arange(N, N + 8, 2), np.arange(N + 1, N + 8, 2)
     assert np.isnan(result.oof_predictions[unseen]).all()
     shared = 0
@@ -284,6 +288,25 @@ def test_a_dropped_row_that_cannot_be_priced_leaves_a_priceable_one_in_its_fold_
             result.oof_predictions[priced], fold.predict(frame.iloc[priced]), rtol=1e-12
         )
     assert shared  # some fold holds both, or the fallback was not reached
+
+
+def test_an_oof_warning_as_error_does_not_turn_successful_folds_into_failed_folds(caplog):
+    X, y = _rows(n=90)
+    padding = pd.DataFrame({"age": [40.0] * 4, "region": ["a", "zzz"] * 2, "unread": [0.0] * 4})
+    frame = pd.concat([X, padding], ignore_index=True)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message=r"\d+ held-out rows.*could not be priced")
+        with pytest.raises(UserWarning, match="2 held-out rows.*could not be priced"):
+            cross_validate(
+                _gamma(),
+                frame,
+                np.r_[y, np.ones(4)],
+                sample_weight=np.r_[np.ones(90), np.zeros(4)],
+                cv=FOLDS,
+                fit_kwargs={"lambdas": LAMBDAS},
+                return_oof=True,
+            )
+    assert not any("failed" in item.message for item in caplog.records)
 
 
 def test_offsets_by_parameter_are_sliced_for_fits_and_scores():
