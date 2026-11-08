@@ -120,13 +120,7 @@ LOG_LOGISTIC = G.Declaration(
     log_cdf=lambda y, s, k: -softplus_(-_scale_z(y, s, k)),
 )
 # Lomax is Burr XII at c = 1: softplus(log(y/scale)) is log1p(y/scale) with bounded derivatives.
-LOMAX = G.Declaration(
-    name="lomax",
-    parameters=("scale", "shape"),
-    log_density=lambda y, s, k: log(k) - log(y) + log(y / s) - (k + 1) * softplus_(log(y / s)),
-    log_survival=lambda y, s, k: -k * softplus_(log(y / s)),
-    log_cdf=lambda y, s, k: log1mexp_(k * softplus_(log(y / s))),
-)
+LOMAX = G.LOMAX
 # The textbook form of the gamma: the oracle must reject it.
 NAIVE_GAMMA = G.Declaration(
     name="naive_gamma",

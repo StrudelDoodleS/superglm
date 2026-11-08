@@ -33,6 +33,8 @@ from superglm.distributional.kernels._declared import (
     gamma_log,
     generalized_pareto,
     law_jets,
+    log_logistic,
+    lomax,
     normal,
 )
 from superglm.distributional.kernels._gg_log_tail import gg_log_tail_jets
@@ -632,6 +634,17 @@ def _warmup_declared_bounds() -> None:
         order=4,
     )
     gpd_window_jets(lower, upper, ones, np.array([0.0, 0.5, 0.2]), order=4)
+    for module in (lomax, log_logistic):
+        declared_window_jets(
+            module,
+            lower,
+            upper,
+            np.ones((3, 2)),
+            (),
+            order=4,
+            from_lower=np.zeros(3, bool),
+            rate=np.full(3, 12.0),
+        )
 
 
 __all__ = [

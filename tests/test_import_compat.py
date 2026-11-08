@@ -539,7 +539,6 @@ _GROUP = "superglm._group_matrix._group_matrix_kernels."
 _TWEEDIE = "superglm.distributional.kernels._tweedie_numba."
 _NB = "superglm.distributional.kernels._negative_binomial_numba."
 _DECLARED = "superglm.distributional.kernels._declared."
-_PRIMITIVES = "superglm.distributional.kernels._severity_primitives."
 _FIRST_USE: dict[str, str] = {
     # Measured over cold first fits on the freMTPL2 book: 71 on 2026-10-20
     # (every family and link, SuperGLM and SuperLSS, exact and binned,
@@ -606,11 +605,6 @@ _FIRST_USE: dict[str, str] = {
         "GammaLS reads a bounded row's tail by the uniform expansion only above shape 1e4 "
         "(cv below 0.01 at unit weight), a response nearly constant in its cell: no census fit "
         "reaches it",
-    ),
-    **dict.fromkeys(
-        (_PRIMITIVES + name for name in ("log1mexp", "invexpm1")),
-        "primitives of the declared test laws (Weibull, Burr XII, log-logistic, Lomax); no "
-        "public family calls them",
     ),
     _STRUCTURED + "block_leaves._moment_segments": (
         "the signed moment segments of a binned FactorSmooth term: no census fit reaches "
@@ -814,6 +808,16 @@ model = superglm.SuperLSS(
     negative_binomial, negative_binomial.mean(*terms), negative_binomial.theta(), discrete=True
 )
 model.fit_reml(frame, counts)
+
+# Both declared pilots reuse the warmed generated rows, including their
+# carriers on immutable prepared responses and their bounded windows.
+for family in (superglm.LomaxLSS(), superglm.LogLogisticLSS()):
+    pilot_frame=frame.iloc[:200]
+    severity=family.quantile((np.arange(200)+.5)/200, np.tile([2.,2.5],(200,1)))
+    for bounded in (False,True):
+        options={"truncation":(0.,np.inf),"censored":severity>3.} if bounded else {}
+        y=np.minimum(severity,3.) if bounded else severity
+        superglm.SuperLSS(family,family.scale(),family.shape()).fit(pilot_frame,y,**options)
 
 # An exact ordinary spline: the sparse-SSP Gram's direct kernel call.
 superglm.SuperGLM(

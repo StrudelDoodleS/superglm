@@ -16,6 +16,10 @@ the predictor for that parameter.
   shape of a generalized gamma, which nests the log-normal, Weibull and gamma.
 - {py:class}`~superglm.GeneralizedParetoLSS`: scale and shape of threshold
   excesses.
+- {py:class}`~superglm.LomaxLSS`: monetary scale and positive tail exponent
+  of a nonnegative severity. Both parameters have log links.
+- {py:class}`~superglm.LogLogisticLSS`: scale (the median) and positive tail
+  exponent of a strictly positive severity, also known as Fisk.
 - {py:class}`~superglm.TweedieLSS`: mean, dispersion and variance power of a
   nonnegative response with a point mass at zero.
 - {py:class}`~superglm.TwoPieceLogNormalLSS`: mean (or location), scale and
@@ -39,7 +43,34 @@ a class and gives the evidence.
    superglm.NegativeBinomialLS
    superglm.GeneralizedGammaLSS
    superglm.GeneralizedParetoLSS
+   superglm.LomaxLSS
+   superglm.LogLogisticLSS
    superglm.TweedieLSS
    superglm.TwoPieceLogNormalLSS
    superglm.TwoPieceNormalLSS
 ```
+
+## Power-tail severity families
+
+`LomaxLSS()` and `LogLogisticLSS()` use natural parameter order `(scale, shape)`
+and admit every positive shape. `predict()` returns the conditional mean,
+including `+inf` at shape at or below one. Variance is infinite at shape at
+or below two. Finite mathematical results outside float64 range raise a
+numerical-range error; the law is never clipped to impose a finite moment.
+Parameters, CDFs and interior quantiles remain useful without finite moments.
+Lomax also supplies complete-row Fisher information and independently checked
+expected shortfall (infinite at shape at or below one). Log-logistic supplies
+neither optional operation. Named posterior summaries refuse non-finite draws.
+
+Both support exact observations, left/right censoring and lower, upper or
+two-sided per-row truncation, including their combined normalization. They do
+not add general interval-censored observations. Unit prior weights and integer
+frequency weights are supported; non-unit prior weights are refused. Neither
+family supplies a random-sampling protocol. Exact Lomax responses may equal
+zero; exact log-logistic responses must be positive. Censoring and probability
+windows may touch zero; no epsilon is added to observations.
+
+Lomax is the GPD row law under `xi=1/shape`, `sigma=scale/shape`. Its full shape
+domain reaches infinite-mean laws unavailable in the current GPD adapter.
+Different links and penalties mean their regression models need not coincide.
+See [the Lomax recipe](../../how-to/fit-a-lomax-distributional-model.md).
