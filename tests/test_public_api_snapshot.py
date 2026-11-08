@@ -32,6 +32,7 @@ PUBLIC_API = [
     "ConvergenceWarning",
     "CrossValidationResult",
     "CubicRegressionSpline",
+    "DirichletLSS",
     "DiscretizationResult",
     "DispersionTestResult",
     "DoubleLiftChartResult",
