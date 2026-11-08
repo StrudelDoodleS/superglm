@@ -165,6 +165,24 @@ def test_public_atomic_windows_and_plan_take():
             getattr(family, name)(*args)
 
 
+def test_bounded_plan_identity_retains_original_thresholds_and_take():
+    y = np.array([0.0, 1.0, 2.0])
+    first = _plan(y, -np.inf, np.inf, [-1, 1, 0])
+    different = _plan([0.0, 1.1, 2.0], -np.inf, np.inf, [-1, 1, 0])
+    assert first.plan_identifier != different.plan_identifier
+    child = first.take(np.array([1, 0]))
+    np.testing.assert_array_equal(child.response, [1.0, 0.0])
+    y[0] = 7.0
+    np.testing.assert_array_equal(first.response, [0.0, 1.0, 2.0])
+    assert not first.response.flags.writeable
+    with pytest.raises(ValueError):
+        first.response.setflags(write=True)
+    from superglm.distributional.weights import UnsupportedLikelihoodContractError
+
+    with pytest.raises(UnsupportedLikelihoodContractError, match="match"):
+        TweedieLSS().evaluate_natural([0.0, 1.1, 2.0], np.tile([1.0, 1.0, 1.5], (3, 1)), first)
+
+
 @pytest.mark.parametrize("semantics", ["prior", "frequency"])
 def test_small_intercept_fit_has_independent_stationary_normalized_endpoint(semantics):
     import pandas as pd
