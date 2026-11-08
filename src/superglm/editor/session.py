@@ -12,6 +12,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
+from superglm.distributional.response import require_scalar_response
 from superglm.editor import apply, persistence, staging, unseen
 from superglm.editor._types import (
     EditableTerm,
@@ -256,6 +257,7 @@ class EditorSession:
         response.
         """
         if is_lss(model):
+            require_scalar_response(model.family, "editor")
             return open_lss(
                 cls,
                 model,

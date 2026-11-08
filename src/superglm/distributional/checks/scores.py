@@ -54,6 +54,11 @@ from superglm.distributional.observation import (
 # These helpers preserve the model boundary's shape-only-then-slice rule, so a
 # row omitted by zero likelihood weight never reaches offset value validation.
 from superglm.distributional.offsets import prediction_offsets
+from superglm.distributional.response import (
+    require_scalar_response,
+    response_spec,
+    unvalidated_response,
+)
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
@@ -560,11 +565,24 @@ def _scoring_rows(
     """
     frame = as_eager_frame(X)
     n_observations = len(frame)
-    response = np.asarray(y, dtype=np.float64)
-    if response.ndim == 0:
-        response = np.full(n_observations, float(response), dtype=np.float64)
-    if response.shape != (n_observations,):
-        raise ValueError("a score needs one response value per row of X")
+    vector = bool(response_spec(fitted.family).shape)
+    if vector:
+        response = unvalidated_response(
+            y,
+            family=fitted.family,
+            n_rows=n_observations,
+            input_index=getattr(frame.native, "index", None),
+        )
+        if truncation is not None or censored is not None:
+            raise UnsupportedLikelihoodContractError(
+                "vector responses do not support scalar censoring or truncation"
+            )
+    else:
+        response = np.asarray(y, dtype=np.float64)
+        if response.ndim == 0:
+            response = np.full(n_observations, float(response), dtype=np.float64)
+        if response.shape != (n_observations,):
+            raise ValueError("a score needs one response value per row of X")
 
     retained_offset_templates = fitted.fit_state.predictor_templates
     shaped_bounds = unvalidated_bound_arrays(truncation, censored, n_observations)
@@ -576,7 +594,7 @@ def _scoring_rows(
     positions = np.asarray(resolved.input_positions, dtype=np.intp)
     retained_frame = as_eager_frame(frame.take_rows(positions))
     retained_response = np.array(response[positions], copy=True)
-    if not np.all(np.isfinite(retained_response)):
+    if not vector and not np.all(np.isfinite(retained_response)):
         raise ValueError("scoring responses must be finite")
     bounds = resolve_response_bounds(
         retained_response,
@@ -796,6 +814,7 @@ def crps(
     the row law; frequency weights multiply the unit-law score by their literal
     replication count.  Zero-weight rows are returned as ``nan``.
     """
+    require_scalar_response(fitted.family, "CRPS")
     if method not in ("auto", "closed", "numeric"):
         raise ValueError("method must be 'auto', 'closed' or 'numeric'")
     rows = _scoring_rows(
@@ -828,6 +847,7 @@ def threshold_weighted_crps(
     Prior weights select the prior-weighted predictive law, while frequency
     weights compress the repeated unit-law score into its source row.
     """
+    require_scalar_response(fitted.family, "threshold-weighted CRPS")
     rows = _scoring_rows(
         fitted,
         X,
@@ -876,6 +896,11 @@ def score_table(
     unknown = tuple(name for name in names if name not in ("log", "crps"))
     if unknown:
         raise ValueError(f"unknown score name: {', '.join(unknown)}")
+    if "crps" in names:
+        require_scalar_response(fitted.family, "CRPS")
+    thresholds = tuple(thresholds)
+    if thresholds:
+        require_scalar_response(fitted.family, "threshold-weighted CRPS")
     thresholds = tuple(float(value) for value in thresholds)
     threshold_names = [f"twcrps_{value:g}" for value in thresholds]
     if len(threshold_names) != len(set(threshold_names)):

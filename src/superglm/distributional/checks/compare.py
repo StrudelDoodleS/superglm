@@ -32,6 +32,7 @@ from superglm.distributional.checks.scores import (
     _ScoringRows,
 )
 from superglm.distributional.family import DistributionFunctionFamily
+from superglm.distributional.response import require_scalar_response, response_spec
 from superglm.distributional.weights import (
     LikelihoodWeightError,
     UnsupportedLikelihoodContractError,
@@ -427,11 +428,25 @@ def compare_models(
     candidate_offsets = (offsets, offsets) if offsets is not None else (a_offsets, b_offsets)
     frame = as_eager_frame(X)
     n_observations = len(frame)
-    response = np.asarray(y, dtype=np.float64)
+    specs = tuple(response_spec(fitted.family) for fitted in (a_fitted, b_fitted))
+    if any(spec.shape for spec in specs):
+        if specs[0].shape != specs[1].shape or set(specs[0].component_names) != set(
+            specs[1].component_names
+        ):
+            raise ValueError("joint log comparison requires the same component set")
+        if (
+            getattr(y, "columns", None) is None
+            and specs[0].component_names != specs[1].component_names
+        ):
+            raise ValueError("positional comparison requires matching component order")
+    if which == "crps":
+        for fitted in (a_fitted, b_fitted):
+            require_scalar_response(fitted.family, "CRPS comparison")
     if murphy_quantile is not None:
         # Refuse a Murphy diagram before scoring rather than after: the scores
         # are the expensive half and a missing quantile function is known now.
         for fitted in (a_fitted, b_fitted):
+            require_scalar_response(fitted.family, "Murphy diagram")
             _quantile_family(fitted)
 
     declared_semantics = tuple(
@@ -459,7 +474,7 @@ def compare_models(
         _scoring_rows(
             fitted,
             frame,
-            response,
+            y,
             sample_weight=sample_weight,
             offsets=fitted_offsets,
         )

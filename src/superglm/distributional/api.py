@@ -55,6 +55,7 @@ from superglm.distributional.family import (
     DistributionalFamily,
     ExpectedInformationFamily,
     ParameterSpec,
+    VectorDefaultPredictionFamily,
     _validated_complete_fit_configuration,
     validate_family,
 )
@@ -78,6 +79,7 @@ from superglm.distributional.posterior import (
 from superglm.distributional.predictor import Predictor
 from superglm.distributional.rebuild import clone_with_replaced_terms, fit_settings, replay_fit
 from superglm.distributional.residuals import ResidualKind, ResidualSet, compute_residuals
+from superglm.distributional.response import require_scalar_response
 from superglm.distributional.results.endpoint_evidence import EFSConvergenceReason
 from superglm.distributional.results.fit import DistributionalFitResult
 from superglm.distributional.results.iteration import DistributionalEFSConfig
@@ -1057,7 +1059,7 @@ class SuperLSS:
         X: FrameLike | EagerFrame,
         *,
         offsets: Mapping[str, NDArray] | None = None,
-    ) -> NDArray[np.float64]:
+    ) -> NDArray[np.float64] | pd.DataFrame:
         """Return the conditional mean for each row with a built-in family.
 
         Predictions use the response scale supplied to fitting. For example,
@@ -1065,11 +1067,23 @@ class SuperLSS:
         scale. A Gaussian model fitted to a manually logged response returns
         a mean of that logged response.
 
+        Vector families return a DataFrame with their component columns and
+        ``X``'s index. Dirichlet columns are the mean shares ``alpha / sum(alpha)``.
+        Scalar families return their existing one-dimensional arrays.
+
         Custom families define their own default prediction quantity. Use
         ``predict_parameters`` for the complete parameter table and
         ``predict_quantile`` for a chosen conditional quantile.
         """
-        return self._require_fitted().predict(X, offsets=offsets)
+        model = self._require_fitted()
+        values = model.predict(X, offsets=offsets)
+        if isinstance(model.family, VectorDefaultPredictionFamily):
+            return pd.DataFrame(
+                values,
+                columns=model.family.default_prediction_columns,
+                index=row_index(X, len(values)),
+            )
+        return values
 
     def predict_cdf(
         self,
@@ -1297,6 +1311,7 @@ class SuperLSS:
         censored: CensoredRows,
     ) -> ResidualSet:
         """The residual payload for ``method``, which warns once if bounds go unread."""
+        require_scalar_response(self.family, method)
         self._warn_bounds_unread(method, truncation, censored, stacklevel=4)
         return compute_residuals(
             self._require_fitted(),
@@ -1403,6 +1418,7 @@ class SuperLSS:
         ``censored`` are the bounds the model was fitted with, read as in
         :meth:`fit`; pass them for rows recorded under them.
         """
+        require_scalar_response(self.family, "check")
         values, label = self._covariate_values(X, covariate, name=name)
         positions = self._retained_positions(len(as_eager_frame(X)), sample_weight)
         residuals = self._residual_set(
@@ -1447,6 +1463,7 @@ class SuperLSS:
         model was fitted with, read as in :meth:`fit`; pass them for rows
         recorded under them.
         """
+        require_scalar_response(self.family, "check_2d")
         first, first_name = self._covariate_values(
             X, covariate, name=None if names is None else names[0]
         )
@@ -1488,6 +1505,7 @@ class SuperLSS:
         also fixes the standard error's law: prior weights put the weight
         inside each row's distribution, frequency weights replicate the row.
         """
+        require_scalar_response(self.family, "actual_expected")
         self._warn_bounds_unread("actual_expected", None, None, takes_bounds=False)
         values, label = self._covariate_values(X, covariate, name=name)
         return actual_expected_check(
@@ -1521,6 +1539,7 @@ class SuperLSS:
         aggregation weight; ``levels``, ``thresholds`` and ``quantile_grid``
         reach the builder.
         """
+        require_scalar_response(self.family, "calibration")
         self._warn_bounds_unread("calibration", None, None, takes_bounds=False)
         return calibration_payload(
             self._require_fitted(),
@@ -1776,6 +1795,7 @@ class SuperLSS:
         row's prior weight, and under frequency semantics the call is refused
         rather than simulating a law the weight does not describe.
         """
+        require_scalar_response(self.family, "posterior_predictive")
         self._refuse_frequency_row_law(sample_weight)
         simulated = posterior_predictive(
             self._require_fitted(),
@@ -1806,6 +1826,7 @@ class SuperLSS:
         coherent with one another.  ``weights`` here are per swept point, not
         per training row: they state the exposure the curve is priced at.
         """
+        require_scalar_response(self.family, "risk_curves")
         curves = risk_curves(
             self._require_fitted(),
             self._term_training_frame(X_train),
@@ -1834,6 +1855,7 @@ class SuperLSS:
         refuse. ``weights`` gives positive prior-law weights per swept point,
         with the unit law as the default, as in :meth:`risk_curves`.
         """
+        require_scalar_response(self.family, "density_fan")
         return density_fan(
             self._require_fitted(),
             self._term_training_frame(X_train),
@@ -1864,6 +1886,7 @@ class SuperLSS:
         Frequency weights replicate bins, percentiles and histogram counts.
         Zero-weight rows and their offsets are omitted before prediction.
         """
+        require_scalar_response(self.family, "parameter_spread")
         return parameter_spread(
             self._require_fitted(),
             X,
@@ -1891,6 +1914,7 @@ class SuperLSS:
         prior-weighted law and what the book pays is ``sum w y`` -- and is
         refused under frequency semantics, which has no row-law slot.
         """
+        require_scalar_response(self.family, "portfolio")
         self._refuse_frequency_row_law(sample_weight)
         book = portfolio(
             self._require_fitted(),
@@ -1930,6 +1954,7 @@ class SuperLSS:
         ``censored`` are the bounds the model was fitted with, read as in
         :meth:`fit`; pass them for rows recorded under them.
         """
+        require_scalar_response(self.family, "plot_diagnostics")
         render = _renderer(engine, "diagnostics")
         fitted = self._require_fitted()
         residuals = self._residual_set(
@@ -2067,6 +2092,8 @@ class SuperLSS:
         """
         if kind not in _PLOT_DATA_KINDS:
             raise ValueError(f"kind must be one of {_PLOT_DATA_KINDS}, not {kind!r}")
+        if kind not in ("scores", "comparison", "term"):
+            require_scalar_response(self.family, kind)
         if kind == "scores":
             return [
                 {name: json_number(value) for name, value in row.items()}

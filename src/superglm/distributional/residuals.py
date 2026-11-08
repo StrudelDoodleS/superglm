@@ -49,6 +49,7 @@ from superglm.distributional.observation import (
     unvalidated_bound_arrays,
 )
 from superglm.distributional.offsets import prediction_offsets
+from superglm.distributional.response import require_scalar_response
 from superglm.distributional.weights import resolve_likelihood_weights
 
 #: A residual is the transform itself or its normal inverse.
@@ -195,6 +196,7 @@ def compute_residuals(
     ``censored`` are read as ``SuperLSS.fit`` reads them, and a censored row
     is randomised.
     """
+    require_scalar_response(fitted.family, "residuals/PIT")
     _validated_kind(kind)
     evaluation = _evaluate_residuals(
         fitted,

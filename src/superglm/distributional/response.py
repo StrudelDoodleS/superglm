@@ -50,6 +50,15 @@ def response_spec(family: object) -> ResponseSpec:
     return spec
 
 
+def require_scalar_response(family: object, operation: str) -> None:
+    """Refuse a scalar-only consumer before it converts or allocates response rows."""
+    if response_spec(family).shape:
+        raise NotImplementedError(
+            f"{operation} is not supported for vector responses by {type(family).__name__}; "
+            "use joint log scores or a scalar share callable for posterior quantities"
+        )
+
+
 def _uncoerced_values(values: object) -> NDArray:
     """Preserve nullable pandas integers before NumPy can promote them to float."""
     if isinstance(values, pd.Series | pd.Index | pd.api.extensions.ExtensionArray) and isinstance(

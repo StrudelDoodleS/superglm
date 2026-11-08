@@ -64,6 +64,7 @@ from superglm.distributional.residuals import (
     _validate_residual_evaluation,
     compute_residuals,
 )
+from superglm.distributional.response import require_scalar_response
 
 # ``_equal_count_bins`` splits by rank, so a decile table stays ten rows wide
 # even for a constant parameter.
@@ -500,6 +501,7 @@ def actual_expected_check(
     ``|ratio - 1| <= 3 ratio_se`` means within three standard deviations.
     """
     family = fitted.family
+    require_scalar_response(family, "actual_expected")
     if not isinstance(family, DefaultPredictionFamily):
         raise NotImplementedError(
             "an actual-versus-expected table needs a family that names a default prediction; "
@@ -615,6 +617,7 @@ def calibration_payload(
     asked_grid = tuple(_validated_probability("p", value) for value in quantile_grid)
     asked_thresholds = tuple(float(value) for value in thresholds)
 
+    require_scalar_response(fitted.family, "calibration")
     rows = _retained_rows(fitted, X, y, sample_weight=sample_weight, offsets=offsets)
     family = fitted.family
     cdf, quantile = _row_law(family, rows.prior_law)
