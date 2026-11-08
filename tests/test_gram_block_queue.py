@@ -199,6 +199,9 @@ def _kernel_calls():
         "_level_tensor_channels": lambda: kernels._level_tensor_channels(
             level_rows, idx1, idx2, idx2[level_rows], W, table2, n1, n2
         ),
+        "_level_disc_disc_hist": lambda: kernels._level_disc_disc_hist(
+            level_rows, idx1, idx2, W, n1, n2
+        ),
         "_tensor_operand_in_reassociation_range": lambda: (
             kernels._tensor_operand_in_reassociation_range(dense)
         ),
@@ -1119,6 +1122,11 @@ def test_binned_spline_by_category_blocks_are_the_per_channel_blocks_bitwise(mon
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model._build_design_matrix(X, y, None, None)
+    # Exercise the fused fallback specifically. Shared-margin contraction has
+    # its own oracle tests; it deliberately changes the summation association.
+    for group in model._dm.group_matrices:
+        if hasattr(group, "_bin_code_source"):
+            group._bin_code_source = None
     plan = model._dm.execution_plan
     W = rng.uniform(0.05, 3.0, plan.n)
     z = rng.normal(size=plan.n)

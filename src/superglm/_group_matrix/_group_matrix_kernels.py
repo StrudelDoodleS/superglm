@@ -730,6 +730,16 @@ def _sorted_intersection(a, b):  # pragma: no cover - compiled
 
 
 @njit(cache=True, nogil=True)
+def _level_disc_disc_hist(rows, idx1, idx2, W, n1, n2):  # pragma: no cover - compiled
+    """One scalar weight per level row, in its original summation order."""
+    result = np.zeros((n1, n2))
+    for k in range(len(rows)):
+        r = rows[k]
+        result[idx1[r], idx2[r]] += W[r]
+    return result
+
+
+@njit(cache=True, nogil=True)
 def _level_tensor_channels(rows, idx1, idx2, bin_cat, W, B2, n_bins1, n_cat):  # pragma: no cover
     """``H[c][idx1_r, bin_k] += W_r B2[idx2_r, c]`` over one level's rows ``r = rows[k]``.
 
@@ -1318,6 +1328,7 @@ _POOLED_LEAF_KERNELS = (_weighted_centred_rows, _weighted_centred_one_hot)
 _POOLED_BLOCK_KERNELS = (
     _sorted_intersection,
     _level_tensor_channels,
+    _level_disc_disc_hist,
     _tensor_operand_in_reassociation_range,
     _float64_operand_exponent_bounds,
     _operand_exponent_bounds,
@@ -1405,6 +1416,7 @@ def _warmup_group_matrix_kernels() -> None:
     # channels: every group freezes its level rows (``row_idx``) when built.
     _sorted_intersection(frozen_codes, frozen_codes)
     _level_tensor_channels(frozen_codes, codes, codes, codes, values, matrix, 2, 2)
+    _level_disc_disc_hist(frozen_codes, codes, codes, values, 2, 2)
     _csr_weighted_gram(values, csr_indices, csr_indptr, frozen_values, 2, False)
     _csr_weighted_cross(
         values, csr_indices, csr_indptr, values, csr_indices, csr_indptr, values, 2, 2

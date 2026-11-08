@@ -303,6 +303,8 @@ class DiscretizedSplineCategoricalGroupMatrix:
         "lambda_policies",
         "spline_cat_level",
         "spline_cat_feature",
+        "_level_support",
+        "_bin_code_source",
     )
 
     def __init__(
@@ -345,6 +347,8 @@ class DiscretizedSplineCategoricalGroupMatrix:
         self.lambda_policies = None
         self.spline_cat_level = None
         self.spline_cat_feature = None
+        self._level_support = None
+        self._bin_code_source = None
 
     def __getstate__(self):
         dict_state, slot_state = cast(
@@ -353,6 +357,8 @@ class DiscretizedSplineCategoricalGroupMatrix:
         slot_state.pop("_row_order", None)
         slot_state.pop("_sorted_rows", None)
         slot_state.pop("_row_lookup_certificate", None)
+        slot_state.pop("_level_support", None)
+        slot_state.pop("_bin_code_source", None)
         return dict_state, slot_state
 
     def __setstate__(self, state):
@@ -367,6 +373,8 @@ class DiscretizedSplineCategoricalGroupMatrix:
         self._row_order = None
         self._sorted_rows = None
         self._row_lookup_certificate = None
+        self._level_support = None
+        self._bin_code_source = None
 
     def matvec(self, v: NDArray) -> NDArray:
         out = np.zeros(self.n_rows, dtype=np.float64)
@@ -490,6 +498,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         "_raw_channel_state",
         "_own_margin_cache",
         "_cell_csr",
+        "_margin_codes",
     )
 
     def __init__(
@@ -520,6 +529,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         )
         self._own_margin_cache: dict[tuple[int, int, int], int | None] = {}
         self._cell_csr: tuple[NDArray, NDArray] | None = None
+        self._margin_codes = None
 
     def __getstate__(self):
         # The cell-CSR is eight bytes a row of derivable state: rebuilt on use.
@@ -527,6 +537,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
             tuple[dict[str, object] | None, dict[str, object]], object.__getstate__(self)
         )
         slot_state.pop("_cell_csr", None)
+        slot_state.pop("_margin_codes", None)
         return dict_state, slot_state
 
     def __setstate__(self, state):
@@ -538,6 +549,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         self.raw_channels = None
         self._raw_channel_state = None
         self._cell_csr = None
+        self._margin_codes = None
         for name, value in slot_state.items():
             setattr(self, name, value)
 

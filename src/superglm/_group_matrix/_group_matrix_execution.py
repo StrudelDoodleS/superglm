@@ -30,6 +30,7 @@ from ._group_matrix_algebra import (
 from ._group_matrix_discretized import DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix
 from ._group_matrix_kernels import _ssp_gram_needs_exact
 from ._group_matrix_tabmat import _build_tabmat_split, _tabmat_vector
+from ._level_partition import certified_disjoint
 
 _MIN_AUTO_TABMAT_MOMENT_ROWS = 50_000
 
@@ -164,7 +165,20 @@ class MatrixExecutionPlan:
         self._categorical_mask = tuple(
             type(group) is runtime_types[0] for group in self.group_matrices
         )
+        self._raw_zero_pairs = frozenset(
+            (i, j)
+            for i, left in enumerate(self.group_matrices)
+            for j in range(i + 1, self._n_groups)
+            if certified_disjoint(left, self.group_matrices[j])
+        )
         self._layout_frozen = True
+
+    def _raw_zero(self, left: int, right: int) -> bool:
+        # Public/custom groups can replace their row arrays after compilation.
+        # Validate the immutable operands in O(1), never by rescanning rows.
+        return (left, right) in self._raw_zero_pairs and certified_disjoint(
+            self.group_matrices[left], self.group_matrices[right]
+        )
 
     def _ordinary_partition_decision(self) -> OrdinaryPartitionDecision:
         from ..group_matrix import (
@@ -270,6 +284,8 @@ class MatrixExecutionPlan:
                 )
             )
             for right_index in range(left_index + 1, self._n_groups):
+                if self._raw_zero(left_index, right_index):
+                    continue
                 tasks.append(
                     self._cross_task(len(tasks), left_index, right_index, weights, gram, channel)
                 )
@@ -728,6 +744,9 @@ class MatrixExecutionPlan:
                 )
             for right_index in range(left_index + 1, self._n_groups):
                 if left_is_ordinary and self._ordinary_mask[right_index]:
+                    continue
+                if self._raw_zero(left_index, right_index):
+                    _profile_count(profile, "block_structural_zeros")
                     continue
                 tasks.append(
                     self._cross_task(len(tasks), left_index, right_index, W, gram, channel)

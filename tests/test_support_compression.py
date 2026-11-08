@@ -2632,9 +2632,18 @@ def _distinct_build_case(seed=31, n=6000):
     return frame, y, weight, offset, model
 
 
-def _assert_same_state(a, b, path="", depth=0):
+def _assert_same_state(a, b, path="", depth=0, _partitions=None):
     """Equal types, and arrays equal in dtype, shape and bits, all the way down."""
     assert type(a) is type(b), path
+    if _partitions is None:
+        _partitions = ({}, {})
+    if path.endswith("['_level_support']['partition']"):
+        # An ownership token is unique to a compiled design. Compare the
+        # sharing relation across its groups, preserving all support data below.
+        assert type(a) is object, path
+        left, right = _partitions
+        assert left.setdefault(a, len(left)) == right.setdefault(b, len(right)), path
+        return
     if isinstance(a, np.ndarray):
         assert (a.dtype, a.shape) == (b.dtype, b.shape), path
         if a.dtype == object:
@@ -2644,21 +2653,23 @@ def _assert_same_state(a, b, path="", depth=0):
     elif sp.issparse(a):
         assert (a.format, a.shape) == (b.format, b.shape), path
         for part in ("data", "indices", "indptr"):
-            _assert_same_state(getattr(a, part), getattr(b, part), f"{path}.{part}", depth)
+            _assert_same_state(
+                getattr(a, part), getattr(b, part), f"{path}.{part}", depth, _partitions
+            )
     elif isinstance(a, float):
         assert a.hex() == b.hex(), path
     elif isinstance(a, dict):
         assert a.keys() == b.keys(), path
         for key in a:
-            _assert_same_state(a[key], b[key], f"{path}[{key!r}]", depth + 1)
+            _assert_same_state(a[key], b[key], f"{path}[{key!r}]", depth + 1, _partitions)
     elif isinstance(a, list | tuple):
         assert len(a) == len(b), path
         for i, (x, z) in enumerate(zip(a, b, strict=True)):
-            _assert_same_state(x, z, f"{path}[{i}]", depth + 1)
+            _assert_same_state(x, z, f"{path}[{i}]", depth + 1, _partitions)
     elif callable(a):
         return
     elif depth < 6 and (state := _object_state(a)) is not None:
-        _assert_same_state(state, _object_state(b), path, depth + 1)
+        _assert_same_state(state, _object_state(b), path, depth + 1, _partitions)
     else:
         assert a == b, path
 
