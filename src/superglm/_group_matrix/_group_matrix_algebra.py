@@ -29,6 +29,7 @@ from ._group_matrix_kernels import (
     _float64_operand_exponent_bounds,
     _fused_2d_bincount_2,
     _gather_cell_order,
+    _level_disc_disc_hist,
     _level_tensor_channels,
     _level_weighted_bincount_2d,
     _native,
@@ -589,6 +590,7 @@ class _BlockWeightCache:
         "_supports",
         "_sparse_grams",
         "_weight_ranges",
+        "_nonnegative_weights",
         "_support_ranges",
         "_cell_orders",
         "_shared",
@@ -614,6 +616,7 @@ class _BlockWeightCache:
         self._supports: dict[DiscretizedSSPGroupMatrix, NDArray] = {}
         self._sparse_grams: dict[tuple[SparseSSPGroupMatrix, int], tuple] = {}
         self._weight_ranges: dict[int, tuple[NDArray, bool, tuple[int, int]]] = {}
+        self._nonnegative_weights: dict[int, tuple[NDArray, bool]] = {}
         self._support_ranges: dict[int, tuple[NDArray, tuple[int, int]]] = (
             {} if factors is None else factors.ranges
         )
@@ -640,6 +643,7 @@ class _BlockWeightCache:
             "_supports",
             "_sparse_grams",
             "_weight_ranges",
+            "_nonnegative_weights",
             "_support_ranges",
             "_cell_orders",
             "_factors",
@@ -725,6 +729,11 @@ class _BlockWeightCache:
             ),
         )
         return entry[1], entry[2]
+
+    def nonnegative_weights(self, W: NDArray) -> bool:
+        """One sign check per assembly; the retained operand prevents identity reuse."""
+        entry, _ = self._once(self._nonnegative_weights, id(W), lambda: (W, bool(np.all(W >= 0))))
+        return entry[1]
 
     def support_range(self, factor: NDArray) -> tuple[int, int]:
         """Cache a fixed factor's complete cross-bound contributions.
@@ -1745,12 +1754,78 @@ def _cross_gram_tensor_own_margin(
     return (result_raw if R_main is None else R_main.T @ result_raw) @ gm_tensor.R_inv
 
 
+def _cross_gram_tensor_shared_level(gm_tensor, gm_spline_cat, W, cache, profile):
+    """Contract a certified shared margin after one scalar level histogram.
+
+    For margin 2, G[(i,j),k] = sum_ab H[a,b] A[a,i] B[b,j] C[b,k];
+    for margin 1 replace C[b,k] by C[a,k]. H sums W in each cell's row
+    order. No N-by-p products or channel histograms are formed or retained.
+
+    With u=2**-53, each scalar cell has error <= gamma_(m-1) sum_cell W.
+    A subsequent marginal dot contributes gamma_b: m_max+b_occupied-1
+    <= number of level rows in that marginal bin. Thus grouping and the
+    basis multiply retain the usual gamma_(N+support widths+transform widths)
+    absolute-product envelope of the raw channel route (Higham, sec. 3.1),
+    including signed bases/cancellation. This is NOT bit-identical arithmetic.
+    Centering, rank and publication checks are unchanged and consume the
+    resulting raw moments normally. Signed weights keep the existing route.
+
+    Six original factors: W,A,B,C,R_tensor,R_level. Each nonzero input has
+    exponent >= -96, hence is an integer multiple of 2**-148. Every partial
+    product/sum (including cancellation) lies on a lattice no finer than
+    2**-888. Upper exponents include all operand dimension/reduction factors
+    and total at most 6*128=768. Intermediates therefore stay normal or zero;
+    exceptional factors keep the original association, before any histogram.
+    """
+    from ._binned_codes import shared_level_margin
+
+    margin = shared_level_margin(gm_tensor, gm_spline_cat)
+    if margin is None:
+        return None
+    B1, B2, C = gm_tensor.B1_unique_t, gm_tensor.B2_unique_t, gm_spline_cat.B_unique
+    factors = (B1, B2, C, gm_tensor.R_inv, gm_spline_cat.R_inv)
+    if any(type(a) is not np.ndarray or a.dtype.type is not np.float64 for a in (W, *factors)):
+        return None
+    n1, n2 = gm_tensor.n_bins1, gm_tensor.n_bins2
+    k1, k2, kc = B1.shape[1], B2.shape[1], C.shape[1]
+    # Include the scalar grid, marginal contraction and the largest weighted
+    # support. The inevitable output block is governed by the block queue.
+    scratch = n1 * n2 + max(n1 * k2, n2 * k1) + max(n1, n2) * kc
+    if n1 * n2 > _MAX_DISC_DISC_HIST_CELLS or 8 * scratch > _MAX_CROSS_EXPANSION_BYTES:
+        return None
+    cache = _BlockWeightCache() if cache is None else cache
+    ordinary_weights, weight_bounds = cache.weight_range(W)
+    if not ordinary_weights or not cache.nonnegative_weights(W):
+        return None
+    bounds = (weight_bounds, *(cache.support_range(factor) for factor in factors))
+    if any(lo < -96 or hi > 128 for lo, hi in bounds):
+        return None
+    H = _level_disc_disc_hist(gm_spline_cat.row_idx, gm_tensor.idx1, gm_tensor.idx2, W, n1, n2)
+    raw = np.empty((k1 * k2, kc))
+    if margin == 1:
+        weighted = H @ B2
+        for j in range(k2):
+            raw[j::k2] = B1.T @ (C * weighted[:, j, None])
+    else:
+        weighted = H.T @ B1
+        for i in range(k1):
+            raw[i * k2 : (i + 1) * k2] = B2.T @ (C * weighted[:, i, None])
+    _profile_count(profile, "block_cross_tensor_shared_level_calls")
+    _profile_count(profile, "block_cross_tensor_shared_level_rows", len(gm_spline_cat.row_idx))
+    return gm_tensor.R_inv.T @ raw @ gm_spline_cat.R_inv
+
+
 def _cross_gram_tensor_spline_categorical(
     gm_tensor: DiscretizedTensorGroupMatrix,
     gm_spline_cat: GroupMatrix,
     W: NDArray,
+    cache: _BlockWeightCache | None = None,
+    profile: dict | None = None,
 ) -> NDArray:
     """Cross-gram X_tensor.T W X_spline_cat without materialising joint support."""
+    shared = _cross_gram_tensor_shared_level(gm_tensor, gm_spline_cat, W, cache, profile)
+    if shared is not None:
+        return shared
     B1 = gm_tensor.B1_unique_t
     B2 = gm_tensor.B2_unique_t
     K1, K2 = B1.shape[1], B2.shape[1]
@@ -2727,12 +2802,12 @@ def _cross_gram(
 
     if isinstance(gm_i, DiscretizedTensorGroupMatrix) and isinstance(gm_j, SplineCatTypes):
         t0 = perf_counter() if profile is not None else 0.0
-        result = _cross_gram_tensor_spline_categorical(gm_i, gm_j, W)
+        result = _cross_gram_tensor_spline_categorical(gm_i, gm_j, W, cache, profile)
         _profile_elapsed(profile, "block_cross_tensor_spline_cat_s", t0)
         return result
     if isinstance(gm_j, DiscretizedTensorGroupMatrix) and isinstance(gm_i, SplineCatTypes):
         t0 = perf_counter() if profile is not None else 0.0
-        result = _cross_gram_tensor_spline_categorical(gm_j, gm_i, W).T
+        result = _cross_gram_tensor_spline_categorical(gm_j, gm_i, W, cache, profile).T
         _profile_elapsed(profile, "block_cross_tensor_spline_cat_s", t0)
         return result
 
