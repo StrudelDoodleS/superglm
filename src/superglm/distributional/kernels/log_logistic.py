@@ -64,10 +64,17 @@ def cdf(y, theta):
 def quantile(p, theta):
     theta = positive_parameters(theta)
     p = probabilities(p, len(theta))
-    with np.errstate(over="ignore", divide="ignore"):
-        log_value = np.log(theta[:, 0]) + (np.log(p) - np.log1p(-p)) / theta[:, 1]
-    value = finite_positive_exp(log_value, "quantile").copy()
-    value[p == 0.5] = theta[p == 0.5, 0]
+    scale, shape = theta.T
+    with np.errstate(over="ignore", divide="ignore", under="ignore", invalid="ignore"):
+        shift = (np.log(p) - np.log1p(-p)) / shape
+        near = np.abs(shift) <= 0.5
+        value = np.empty(len(theta))
+        # Preserve the scale and its small displacement independently; exp(log(s))
+        # can already lie below s and destroy quantile ordering around the median.
+        value[near] = scale[near] + scale[near] * np.expm1(shift[near])
+        value[~near] = finite_positive_exp(np.log(scale[~near]) + shift[~near], "quantile")
+    if np.any(~np.isfinite(value) | (value <= 0)):
+        raise ValueError("finite quantile is unresolved in the numerical range")
     return readonly(value)
 
 
