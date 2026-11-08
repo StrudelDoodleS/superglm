@@ -11,6 +11,7 @@ import functools
 import math
 import pickle
 import warnings
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -24,7 +25,6 @@ from superglm import (
     SeparationError,
     SeparationWarning,
     SuperLSS,
-    TwoPieceLogNormalLSS,
     cat,
     distributional,
     s,
@@ -833,9 +833,21 @@ def test_bounded_plans_hash_their_bounds_and_slice_them():
         family.expected_information_natural(np.ones((4, 2)), plan)
 
 
-def test_families_without_bounds_refuse_them_plainly():
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"truncation": (None, 5.0)},
+        {"censored": [False, True, False, False]},
+    ],
+)
+def test_families_without_bounds_refuse_them_plainly(kwargs):
+    class CompleteOnlyGaussian(GaussianLS):
+        @property
+        def capabilities(self):
+            return replace(super().capabilities, censored_response=False)
+
     with pytest.raises(UnsupportedLikelihoodContractError, match="does not fit truncated"):
-        _fit(TwoPieceLogNormalLSS(), np.array([1.0, 2.0, 3.0, 4.0]), truncation=(None, 5.0))
+        _fit(CompleteOnlyGaussian(), np.array([1.0, 2.0, 3.0, 4.0]), **kwargs)
 
 
 def test_fisher_coefficient_curvature_is_refused_for_bounded_rows():
