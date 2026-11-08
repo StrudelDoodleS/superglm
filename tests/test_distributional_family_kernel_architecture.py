@@ -142,6 +142,12 @@ def test_kernels_import_no_distributional_module_or_contract() -> None:
         "log_logistic.py": {"kernels._common", "kernels._declared", "kernels._declared_adapter"},
         "negative_binomial.py": {"kernels._common", "kernels._negative_binomial_numba", *chain},
         "two_piece.py": {"kernels._common", "kernels._declared", "kernels._weighted", *chain},
+        "_two_piece_windows.py": {
+            "kernels._common",
+            "kernels._declared_bounds",
+            "kernels._response_tails",
+            "kernels.two_piece",
+        },
         "tweedie.py": {"kernels._tweedie_numba", "kernels._common"},
     }
     offenders = {
@@ -279,7 +285,9 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
             "weights",
             "likelihood_identity",
             "kernels.two_piece",
+            "kernels._two_piece_windows",
             "families._base",
+            "families._response_bounds",
             "families._predictors",
             "families._links",
             "families.gaussian",
