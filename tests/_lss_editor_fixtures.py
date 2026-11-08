@@ -119,9 +119,9 @@ def nb_case() -> FitCase:
     family = NegativeBinomialLS()
     model = SuperLSS(
         family,
-        family.mean(s("age", k=8), cat("region"), s("power", k=6)),
+        family.mean(s("age", k=8), cat("region"), s("power", k=6), offset=offsets["mean"]),
         family.theta(s("age", k=6), cat("region")),
-    ).fit_reml(X, y, offsets=offsets, outer="efs+newton")
+    ).fit_reml(X, y, outer="efs+newton")
     return FitCase(model, X, y, None, offsets)
 
 

@@ -28,7 +28,7 @@ from superglm.distributional.family import (
     DefaultPredictionFamily,
     DistributionFunctionFamily,
 )
-from superglm.distributional.model import _take_unvalidated_offsets, _unvalidated_offset_shapes
+from superglm.distributional.offsets import offset_columns, take_prediction_replacements
 from superglm.distributional.posterior import (
     CovarianceKind,
     _prior_weight_law,
@@ -261,7 +261,14 @@ class Portfolio:
 
 
 def _model_columns(fitted: Any) -> tuple[str, ...]:
-    return _required_columns(tuple(fitted.compiled_predictors))
+    return tuple(
+        dict.fromkeys(
+            (
+                *_required_columns(tuple(fitted.compiled_predictors)),
+                *offset_columns(fitted.fit_state.predictor_templates),
+            )
+        )
+    )
 
 
 def _covariate_grid(
@@ -640,7 +647,6 @@ def parameter_spread(
         raise ValueError("tail_p must lie strictly inside (0, 1)")
 
     frame = as_eager_frame(X)
-    shaped_offsets = _unvalidated_offset_shapes(offsets, len(frame))
     resolved = _resolved_weights(
         sample_weight, len(frame), contract=fitted.fit_state.weight_contract
     )
@@ -651,8 +657,10 @@ def parameter_spread(
         if supplied.shape != (len(frame),):
             raise ValueError("weights must give one weight per row of X")
         prior = _prior_weight_law(supplied[positions], len(positions))
+    offsets = take_prediction_replacements(
+        fitted.fit_state.predictor_templates, frame, offsets, positions
+    )
     frame = as_eager_frame(frame.take_rows(positions))
-    offsets = _take_unvalidated_offsets(shaped_offsets, positions)
     theta = np.asarray(fitted.predict_parameters(frame, offsets=offsets), dtype=np.float64)
     rows = len(theta)
     frequency = resolved.provenance.contract.semantics == "frequency"
@@ -887,7 +895,6 @@ def portfolio(
         raise ValueError("n_draws must be at least two to summarise a total")
 
     frame = as_eager_frame(X)
-    shaped_offsets = _unvalidated_offset_shapes(offsets, len(frame))
     resolved = _resolved_weights(
         weights, len(frame), contract=WeightContract("prior"), name="weights"
     )
@@ -897,8 +904,10 @@ def portfolio(
         if labels.shape != (len(frame),):
             raise ValueError("by must give one segment label per row of X")
         by = labels[positions]
+    offsets = take_prediction_replacements(
+        fitted.fit_state.predictor_templates, frame, offsets, positions
+    )
     frame = as_eager_frame(frame.take_rows(positions))
-    offsets = _take_unvalidated_offsets(shaped_offsets, positions)
     segmentation = _resolved_segments(frame, by, len(frame))
     exposure = None if weights is None else resolved.values
     segment_totals = None if segmentation is None else _SegmentTotals(segmentation, draws, exposure)

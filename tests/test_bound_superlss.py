@@ -302,8 +302,13 @@ def test_bound_smooth_interaction_compilation_and_fit_forwarding(discrete, reml,
     family = GaussianLS(scale_floor=0.02)
     model = SuperLSS(
         family,
-        family.scale("z"),
-        family.location(ti("x", "z", n_knots=(4, 4)), s("x", n_knots=4), s("z", n_knots=4)),
+        family.scale("z", offset=offsets["scale"]),
+        family.location(
+            ti("x", "z", n_knots=(4, 4)),
+            s("x", n_knots=4),
+            s("z", n_knots=4),
+            offset=offsets["location"],
+        ),
         discrete=discrete,
         n_bins=32,
     )
@@ -342,9 +347,10 @@ def test_bound_smooth_interaction_compilation_and_fit_forwarding(discrete, reml,
         pd.testing.assert_frame_equal(fit_frame, frame)
         np.testing.assert_array_equal(fit_response, response)
         np.testing.assert_array_equal(kwargs["sample_weight"], weights)
-        assert tuple(kwargs["offsets"]) == tuple(offsets)
+        declared = {p.name: p.offset[0] for p in kwargs["predictors"]}
+        assert tuple(declared) == tuple(offsets)
         for name, offset in offsets.items():
-            np.testing.assert_array_equal(kwargs["offsets"][name], offset)
+            np.testing.assert_array_equal(declared[name], offset)
         assert kwargs["family"].to_config() == GaussianLS(scale_floor=0.02).to_config()
         assert kwargs["weight_contract"] == WeightContract("prior")
         assert kwargs["config"] == DenseSolverConfig(max_iterations=100, tolerance=1.0e-7)
@@ -385,7 +391,7 @@ def test_bound_smooth_interaction_compilation_and_fit_forwarding(discrete, reml,
     monkeypatch.setattr(distributional_api, "fit_dense_distributional", record_fit)
     fit = model.fit_reml if reml else model.fit
     outer_options = {"max_reml_iter": 3} if reml else {}
-    fit(frame, response, sample_weight=weights, offsets=offsets, lambdas=lambdas, **outer_options)
+    fit(frame, response, sample_weight=weights, lambdas=lambdas, **outer_options)
     fitted = model._require_fitted()
     assert len(snapshots) == 1
     snapshot = snapshots[0]

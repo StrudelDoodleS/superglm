@@ -43,14 +43,6 @@ from superglm.distributional.kernels.generalized_gamma import (
     location_of_mean as generalized_gamma_location_of_mean,
 )
 from superglm.distributional.kernels.log_normal import location_of_mean
-
-# These helpers preserve the model boundary's shape-only-then-slice rule, so a
-# row omitted by zero likelihood weight never reaches offset value validation.
-from superglm.distributional.model import (
-    _prediction_offsets,
-    _take_unvalidated_offsets,
-    _unvalidated_offset_shapes,
-)
 from superglm.distributional.observation import (
     BoundPair,
     CensoredRows,
@@ -58,6 +50,10 @@ from superglm.distributional.observation import (
     resolve_response_bounds,
     unvalidated_bound_arrays,
 )
+
+# These helpers preserve the model boundary's shape-only-then-slice rule, so a
+# row omitted by zero likelihood weight never reaches offset value validation.
+from superglm.distributional.offsets import prediction_offsets
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
@@ -570,7 +566,7 @@ def _scoring_rows(
     if response.shape != (n_observations,):
         raise ValueError("a score needs one response value per row of X")
 
-    shaped_offsets = _unvalidated_offset_shapes(offsets, n_observations)
+    retained_offset_templates = fitted.fit_state.predictor_templates
     shaped_bounds = unvalidated_bound_arrays(truncation, censored, n_observations)
     resolved = resolve_likelihood_weights(
         sample_weight,
@@ -593,11 +589,11 @@ def _scoring_rows(
         bounds = plan_observation(
             fitted.family.bind_likelihood(retained_response, resolved, bounded_observation(bounds))
         ).bounds
-    predictor_names = tuple(state.name for state in fitted.layout.predictors)
-    retained_offsets = _prediction_offsets(
-        _take_unvalidated_offsets(shaped_offsets, positions),
-        predictor_names,
-        len(positions),
+    retained_offsets = prediction_offsets(
+        retained_offset_templates,
+        frame,
+        offsets,
+        positions=positions,
     )
     semantics = resolved.provenance.contract.semantics
     aggregation_mass = (
@@ -667,7 +663,7 @@ def _retained_log_score(fitted: Any, rows: _ScoringRows) -> NDArray[np.float64]:
     observation = bounded_observation(rows.bounds)
     plan = fitted.family.bind_likelihood(rows.response, rows.resolved, observation)
     theta = np.asarray(
-        fitted.predict_parameters(rows.frame, offsets=rows.offsets), dtype=np.float64
+        fitted._predict_parameters_resolved(rows.frame, rows.offsets), dtype=np.float64
     )
     evaluation = fitted.family.evaluate_natural(rows.response, theta, plan, derivative_order=0)
     scores = -np.asarray(evaluation.reported_log_likelihood, dtype=np.float64)
@@ -699,7 +695,7 @@ def _retained_crps(
         )
     if theta is None:
         theta = np.asarray(
-            fitted.predict_parameters(rows.frame, offsets=rows.offsets), dtype=np.float64
+            fitted._predict_parameters_resolved(rows.frame, rows.offsets), dtype=np.float64
         )
     row_law = _row_law(fitted, rows)
     if threshold is not None:

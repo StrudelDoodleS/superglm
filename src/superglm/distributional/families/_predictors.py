@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     from superglm.distributional.binding import BoundPredictor
@@ -20,6 +20,7 @@ class TweediePredictors:
         self,
         *terms: TermInput,
         intercept: bool = True,
+        offset: Any = None,
         link: Literal[
             "log",
             "identity",
@@ -45,6 +46,10 @@ class TweediePredictors:
         a link supported by the family. Pass the declaration to ``SuperLSS``
         with this same family instance, plus ``phi(...)`` and ``p(...)``.
 
+        ``offset=`` accepts a column, row array, or list of sources, added
+        on the link scale with fixed coefficient one. Arrays are copied;
+        new-row predictions need replacements for their summed contribution.
+
         A ``{column: spec}`` mapping among the terms adds ``term(column, spec)``
         for each entry, in order, so a ``features`` dict written for
         ``SuperGLM`` can be passed as it is.
@@ -52,13 +57,19 @@ class TweediePredictors:
         from superglm.distributional.binding import bind_predictor
 
         return bind_predictor(
-            cast("DistributionalFamily", self), "mean", *terms, intercept=intercept, link=link
+            cast("DistributionalFamily", self),
+            "mean",
+            *terms,
+            intercept=intercept,
+            link=link,
+            offset=offset,
         )
 
     def phi(
         self,
         *terms: TermInput,
         intercept: bool = True,
+        offset: Any = None,
         link: Literal[
             "log",
             "identity",
@@ -84,6 +95,10 @@ class TweediePredictors:
         where supported. This declaration is required alongside ``mu`` and
         ``p`` when constructing ``SuperLSS``.
 
+        ``offset=`` accepts a column, row array, or list of sources, added
+        on the link scale with fixed coefficient one. Arrays are copied;
+        new-row predictions need replacements for their summed contribution.
+
         A ``{column: spec}`` mapping among the terms adds ``term(column, spec)``
         for each entry, in order, so a ``features`` dict written for
         ``SuperGLM`` can be passed as it is.
@@ -91,13 +106,19 @@ class TweediePredictors:
         from superglm.distributional.binding import bind_predictor
 
         return bind_predictor(
-            cast("DistributionalFamily", self), "dispersion", *terms, intercept=intercept, link=link
+            cast("DistributionalFamily", self),
+            "dispersion",
+            *terms,
+            intercept=intercept,
+            link=link,
+            offset=offset,
         )
 
     def p(
         self,
         *terms: TermInput,
         intercept: bool = True,
+        offset: Any = None,
         link: Literal[
             "log",
             "identity",
@@ -123,6 +144,10 @@ class TweediePredictors:
         ``mu`` and ``phi``. ``intercept=False`` omits its intercept; a custom
         ``link`` must preserve the family's permitted power range.
 
+        ``offset=`` accepts a column, row array, or list of sources, added
+        on the link scale with fixed coefficient one. Arrays are copied;
+        new-row predictions need replacements for their summed contribution.
+
         A ``{column: spec}`` mapping among the terms adds ``term(column, spec)``
         for each entry, in order, so a ``features`` dict written for
         ``SuperGLM`` can be passed as it is.
@@ -130,7 +155,12 @@ class TweediePredictors:
         from superglm.distributional.binding import bind_predictor
 
         return bind_predictor(
-            cast("DistributionalFamily", self), "power", *terms, intercept=intercept, link=link
+            cast("DistributionalFamily", self),
+            "power",
+            *terms,
+            intercept=intercept,
+            link=link,
+            offset=offset,
         )
 
 
@@ -143,6 +173,7 @@ class MeanPredictor:
         self,
         *terms: TermInput,
         intercept: bool = True,
+        offset: Any = None,
         link: Literal[
             "log",
             "identity",
@@ -168,6 +199,10 @@ class MeanPredictor:
         family parametrization. Pass its result to ``SuperLSS`` with the
         same family instance and a declaration for every other parameter.
 
+        ``offset=`` accepts a column, row array, or list of sources, added
+        on the link scale with fixed coefficient one. Arrays are copied;
+        new-row predictions need replacements for their summed contribution.
+
         A ``{column: spec}`` mapping among the terms adds ``term(column, spec)``
         for each entry, in order, so a ``features`` dict written for
         ``SuperGLM`` can be passed as it is.
@@ -175,7 +210,12 @@ class MeanPredictor:
         from superglm.distributional.binding import bind_predictor
 
         return bind_predictor(
-            cast("DistributionalFamily", self), "mean", *terms, intercept=intercept, link=link
+            cast("DistributionalFamily", self),
+            "mean",
+            *terms,
+            intercept=intercept,
+            link=link,
+            offset=offset,
         )
 
 
@@ -188,6 +228,7 @@ class LocationPredictor:
         self,
         *terms: TermInput,
         intercept: bool = True,
+        offset: Any = None,
         link: Literal[
             "log",
             "identity",
@@ -215,6 +256,10 @@ class LocationPredictor:
         with a ``parametrisation`` option require its ``"location"`` form
         for this helper.
 
+        ``offset=`` accepts a column, row array, or list of sources, added
+        on the link scale with fixed coefficient one. Arrays are copied;
+        new-row predictions need replacements for their summed contribution.
+
         A ``{column: spec}`` mapping among the terms adds ``term(column, spec)``
         for each entry, in order, so a ``features`` dict written for
         ``SuperGLM`` can be passed as it is.
@@ -222,7 +267,12 @@ class LocationPredictor:
         from superglm.distributional.binding import bind_predictor
 
         return bind_predictor(
-            cast("DistributionalFamily", self), "location", *terms, intercept=intercept, link=link
+            cast("DistributionalFamily", self),
+            "location",
+            *terms,
+            intercept=intercept,
+            link=link,
+            offset=offset,
         )
 
 
@@ -235,6 +285,7 @@ class ScalePredictor:
         self,
         *terms: TermInput,
         intercept: bool = True,
+        offset: Any = None,
         link: Literal[
             "log",
             "identity",
@@ -261,6 +312,10 @@ class ScalePredictor:
         ``link=`` overrides the default where supported. The family's link
         and support determine the permitted scale values.
 
+        ``offset=`` accepts a column, row array, or list of sources, added
+        on the link scale with fixed coefficient one. Arrays are copied;
+        new-row predictions need replacements for their summed contribution.
+
         A ``{column: spec}`` mapping among the terms adds ``term(column, spec)``
         for each entry, in order, so a ``features`` dict written for
         ``SuperGLM`` can be passed as it is.
@@ -268,7 +323,12 @@ class ScalePredictor:
         from superglm.distributional.binding import bind_predictor
 
         return bind_predictor(
-            cast("DistributionalFamily", self), "scale", *terms, intercept=intercept, link=link
+            cast("DistributionalFamily", self),
+            "scale",
+            *terms,
+            intercept=intercept,
+            link=link,
+            offset=offset,
         )
 
 
@@ -281,6 +341,7 @@ class ThetaPredictor:
         self,
         *terms: TermInput,
         intercept: bool = True,
+        offset: Any = None,
         link: Literal[
             "log",
             "identity",
@@ -305,6 +366,10 @@ class ThetaPredictor:
         an intercept-only size predictor. ``intercept=False`` omits its
         intercept; ``link=`` overrides the default where supported.
 
+        ``offset=`` accepts a column, row array, or list of sources, added
+        on the link scale with fixed coefficient one. Arrays are copied;
+        new-row predictions need replacements for their summed contribution.
+
         A ``{column: spec}`` mapping among the terms adds ``term(column, spec)``
         for each entry, in order, so a ``features`` dict written for
         ``SuperGLM`` can be passed as it is.
@@ -312,7 +377,12 @@ class ThetaPredictor:
         from superglm.distributional.binding import bind_predictor
 
         return bind_predictor(
-            cast("DistributionalFamily", self), "theta", *terms, intercept=intercept, link=link
+            cast("DistributionalFamily", self),
+            "theta",
+            *terms,
+            intercept=intercept,
+            link=link,
+            offset=offset,
         )
 
 
@@ -325,6 +395,7 @@ class ShapePredictor:
         self,
         *terms: TermInput,
         intercept: bool = True,
+        offset: Any = None,
         link: Literal[
             "log",
             "identity",
@@ -349,6 +420,10 @@ class ShapePredictor:
         an intercept-only predictor. ``intercept=False`` omits its intercept;
         a custom ``link`` must respect the family's parameter support.
 
+        ``offset=`` accepts a column, row array, or list of sources, added
+        on the link scale with fixed coefficient one. Arrays are copied;
+        new-row predictions need replacements for their summed contribution.
+
         A ``{column: spec}`` mapping among the terms adds ``term(column, spec)``
         for each entry, in order, so a ``features`` dict written for
         ``SuperGLM`` can be passed as it is.
@@ -356,7 +431,12 @@ class ShapePredictor:
         from superglm.distributional.binding import bind_predictor
 
         return bind_predictor(
-            cast("DistributionalFamily", self), "shape", *terms, intercept=intercept, link=link
+            cast("DistributionalFamily", self),
+            "shape",
+            *terms,
+            intercept=intercept,
+            link=link,
+            offset=offset,
         )
 
 
@@ -369,6 +449,7 @@ class SkewPredictor:
         self,
         *terms: TermInput,
         intercept: bool = True,
+        offset: Any = None,
         link: Literal[
             "log",
             "identity",
@@ -396,6 +477,10 @@ class SkewPredictor:
         The default link keeps values within the family's skew bounds;
         a custom ``link`` must respect that support.
 
+        ``offset=`` accepts a column, row array, or list of sources, added
+        on the link scale with fixed coefficient one. Arrays are copied;
+        new-row predictions need replacements for their summed contribution.
+
         A ``{column: spec}`` mapping among the terms adds ``term(column, spec)``
         for each entry, in order, so a ``features`` dict written for
         ``SuperGLM`` can be passed as it is.
@@ -403,5 +488,10 @@ class SkewPredictor:
         from superglm.distributional.binding import bind_predictor
 
         return bind_predictor(
-            cast("DistributionalFamily", self), "skew", *terms, intercept=intercept, link=link
+            cast("DistributionalFamily", self),
+            "skew",
+            *terms,
+            intercept=intercept,
+            link=link,
+            offset=offset,
         )

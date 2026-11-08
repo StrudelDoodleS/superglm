@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -23,6 +24,13 @@ from superglm.distributional.checks.scores import (
     _scoring_rows,
 )
 from superglm.distributional.family import DistributionFunctionFamily
+from superglm.distributional.offsets import (
+    offset_columns,
+    shape_fit_offsets,
+    sources_of,
+    sum_offset_sources,
+    take_offset,
+)
 from superglm.distributional.weights import (
     UnsupportedLikelihoodContractError,
     resolve_likelihood_weights,
@@ -52,7 +60,7 @@ def _crps_parts(model, X, y, *, sample_weight=None, offset=None) -> tuple[float,
     rows = _scoring_rows(fitted, X, y, sample_weight=sample_weight, offsets=offset)
     mass = rows.aggregation_mass
     theta = np.asarray(
-        fitted.predict_parameters(rows.frame, offsets=rows.offsets), dtype=np.float64
+        fitted._predict_parameters_resolved(rows.frame, rows.offsets), dtype=np.float64
     )
     try:
         scores = _retained_crps(fitted, rows, method="auto", n_nodes=64, theta=theta)
@@ -70,7 +78,12 @@ def _scored_means(
     weights = (
         None if sample_weight is None else np.asarray(sample_weight, np.float64)[rows.positions]
     )
-    mean = np.asarray(model.predict(rows.frame, offsets=rows.offsets), dtype=np.float64)
+    mean = np.asarray(
+        model._require_fitted().family.default_prediction(
+            model._require_fitted()._predict_parameters_resolved(rows.frame, rows.offsets)
+        ),
+        dtype=np.float64,
+    )
     return rows.response, mean, weights
 
 
@@ -184,6 +197,7 @@ class LSSFolds:
             for predictor in self.model._predictors
             for name in (
                 *predictor.features,
+                *offset_columns((predictor,)),
                 *(
                     parent
                     for spec in predictor.interaction_specs.values()
@@ -197,25 +211,35 @@ class LSSFolds:
         """The fit resolves zero weights itself, by dropping those rows."""
         return False
 
-    def coerce_offset(self, offset, n: int) -> dict[str, NDArray[np.float64]]:
-        """Offsets by parameter as arrays, one value per row."""
-        names = tuple(predictor.name for predictor in self.model._predictors)
-        if not isinstance(offset, Mapping):
+    def prepare_offset(self, offset, frame, sample_weight):
+        """Held-out replacements for declared arrays; fit sources stay on templates."""
+        if offset is not None:
             raise ValueError(
-                "A SuperLSS offset is a dict keyed by parameter name "
-                f"({', '.join(names)}); got an array."
+                "Declare SuperLSS offsets on predictor helpers with offset=, not cross_validate"
             )
-        unknown = sorted(str(key) for key in offset if key not in names)
-        if unknown:
-            raise ValueError(
-                f"Unknown offset parameter {unknown[0]!r}; this model's parameters are "
-                f"{', '.join(names)}."
+        shaped = shape_fit_offsets(self.model._predictors, frame)
+        arrays = {
+            p.name: tuple(
+                v
+                for s, v in zip(sources_of(p), shaped[p.name], strict=True)
+                if not isinstance(s, str)
             )
-        arrays = {key: np.asarray(values, dtype=np.float64) for key, values in offset.items()}
-        for key, values in arrays.items():
-            if len(values) != n:
-                raise ValueError(f"offset {key!r} length {len(values)} != y length {n}")
-        return arrays
+            for p in self.model._predictors
+            if any(not isinstance(s, str) for s in sources_of(p))
+        }
+        resolved = resolve_likelihood_weights(
+            sample_weight, n_observations=len(frame), contract=self.model._weight_contract
+        )
+        kept = sum_offset_sources(arrays, resolved.input_positions)
+        replacements = {}
+        for name, values in kept.items():
+            replacements[name] = np.zeros(len(frame), dtype=np.float64)
+            replacements[name][resolved.input_positions] = values
+        return replacements or None
+
+    def fit_offset_kwargs(self, offset) -> dict:
+        """The public fit receives no offsets; its declarations have been sliced."""
+        return {}
 
     def level_bindings(self, frame, sample_weight) -> dict[str, dict[Any, Any]]:
         """Each predictor's level universes and bases on the rows the fit keeps.
@@ -237,9 +261,14 @@ class LSSFolds:
             for predictor in self.model._predictors
         }
 
-    def estimator(self, bindings: Mapping[str, Mapping[Any, Any]]):
+    def estimator(self, bindings: Mapping[str, Mapping[Any, Any]], *, rows=None):
         """A fresh unfitted copy with the shared level universes; the model is not changed."""
         clone = self.model._clone_with_replaced_terms({})
+        if rows is not None:
+            clone._predictors = tuple(
+                replace(p, offset=take_offset(getattr(p, "offset", None), rows))
+                for p in clone._predictors
+            )
         for predictor in clone._predictors:
             for name, binding in bindings[predictor.name].items():
                 predictor.features[name].apply_level_binding(binding)

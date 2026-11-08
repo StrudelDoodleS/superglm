@@ -139,6 +139,9 @@ def _shim(fitted, family) -> SimpleNamespace:
     return SimpleNamespace(
         family=family,
         fit_state=fitted.fit_state,
+        prediction_coefficients=fitted.prediction_coefficients,
+        _predict_eta_resolved=fitted._predict_eta_resolved,
+        parameters_from_eta=fitted.parameters_from_eta,
         predict_eta=fitted.predict_eta,
         predict_parameters=fitted.predict_parameters,
     )
@@ -319,8 +322,8 @@ def test_intervals_are_owned_physical_arrays():
 def test_frequency_below_support_response_remains_a_scoring_input(frequency_case):
     fitted, X, *_ = frequency_case
     stub = _shim(fitted, GammaLS())
-    stub.predict_eta = lambda frame, offsets=None: np.zeros((len(frame), 2))
-    stub.predict_parameters = lambda frame, offsets=None: np.ones((len(frame), 2))
+    stub._predict_eta_resolved = lambda coefficients, frame, offsets: np.zeros((len(frame), 2))
+    stub.parameters_from_eta = lambda eta: np.ones_like(eta)
     residuals = compute_residuals(stub, X.iloc[:1], np.array([-1.0]))
     assert residuals.pit[0] == 1e-12
     assert residuals.clipped_rows == 1

@@ -26,7 +26,7 @@ from superglm.distributional.weights import WeightContract, resolve_likelihood_w
 from superglm.features import Numeric, RandomEffect
 from tests._distributional_weights import resolved_prior
 from tests._generalized_pareto_lss_oracles import fit_scale_regression, profile_shape
-from tests.bound_predictor_fixtures import model_from_templates
+from tests.bound_predictor_fixtures import model_from_templates, with_offset_declarations
 
 _TRUE_SHAPE = 0.3
 
@@ -257,7 +257,7 @@ def test_rows_no_shape_coefficient_moves_do_not_hide_a_pressed_group():
         ),
     )
     with pytest.warns(ConvergenceWarning, match="at the upper wall 1"):
-        model.fit(frame, y, offsets={"shape": offset}, inner_tol=1.0e-10)
+        with_offset_declarations(model, {"shape": offset}).fit(frame, y, inner_tol=1.0e-10)
     (message,) = _wall_messages(model)
     assert "1000 of 2000 rows" in message
 
@@ -283,10 +283,13 @@ def test_row_varying_offsets_at_an_interior_optimum_are_not_disclosed():
     # the two rows' shape scores cancel through their link slopes, not in the natural scale
     y = np.tile([0.36839766102977684, 4.428502209460899], 100)
     offset = np.tile(np.log([1.0e-5 / (1.0 - 1.0e-5), 0.99995 / 0.00005]), 100)
-    model = model_from_templates(
-        family=GeneralizedParetoLSS(),
-        predictors=(Predictor("scale", {}), Predictor("shape", {})),
-    ).fit(pd.DataFrame({"x": np.zeros(200)}), y, offsets={"shape": offset}, inner_tol=1.0e-12)
+    model = with_offset_declarations(
+        model_from_templates(
+            family=GeneralizedParetoLSS(),
+            predictors=(Predictor("scale", {}), Predictor("shape", {})),
+        ),
+        {"shape": offset},
+    ).fit(pd.DataFrame({"x": np.zeros(200)}), y, inner_tol=1.0e-12)
     assert not _wall_messages(model)
 
 
@@ -306,16 +309,18 @@ def test_a_diverging_linear_shape_is_disclosed_at_both_walls():
 def test_a_shape_held_on_a_reml_face_by_its_offset_is_not_disclosed():
     # REML removes the group effect on an exact face, so only the offset sets the shape near one
     y = np.expm1(-1.5 * np.log(np.random.default_rng(8).random(1_000))) / 1.5
-    model = model_from_templates(
-        family=GeneralizedParetoLSS(),
-        predictors=(
-            Predictor("scale", {}),
-            Predictor("shape", {"group": RandomEffect()}, intercept=False),
+    model = with_offset_declarations(
+        model_from_templates(
+            family=GeneralizedParetoLSS(),
+            predictors=(
+                Predictor("scale", {}),
+                Predictor("shape", {"group": RandomEffect()}, intercept=False),
+            ),
         ),
+        {"shape": np.full(1_000, np.log(0.99995 / 0.00005))},
     ).fit_reml(
         pd.DataFrame({"group": np.repeat(["a", "b"], 500)}),
         y,
-        offsets={"shape": np.full(1_000, np.log(0.99995 / 0.00005))},
         lambdas={"shape:group#wiggle": 1.0e10},
     )
     assert model.exact_face_components_ == ("shape:group#wiggle",)
@@ -338,7 +343,7 @@ def test_rows_clipped_at_the_last_float_below_one_get_the_float64_statement(shif
         predictors=(Predictor("scale", {}), Predictor("shape", {"g": Numeric()})),
     )
     with pytest.warns(ConvergenceWarning, match="float64 can represent"):
-        model.fit(frame, np.concatenate([interior, heavy]), offsets=offsets)
+        with_offset_declarations(model, offsets).fit(frame, np.concatenate([interior, heavy]))
     (message,) = _wall_messages(model)
     assert "1000 of 3000 rows have a tail shape at the upper wall 1: the data put" in message
     assert "1000 of 3000 rows have a tail shape at the last value below the upper wall 1" in message
@@ -358,7 +363,7 @@ def test_rows_an_offset_clips_get_the_float64_statement_and_no_data_claim():
         ),
     )
     with pytest.warns(ConvergenceWarning, match="float64 can represent"):
-        model.fit(frame, y, offsets={"shape": np.repeat([0.0, 40.0], 1_000)})
+        with_offset_declarations(model, {"shape": np.repeat([0.0, 40.0], 1_000)}).fit(frame, y)
     (message,) = _wall_messages(model)
     assert "1000 of 2000 rows" in message and "the data put the shape" not in message
     assert "not reliable" not in message

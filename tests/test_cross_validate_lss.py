@@ -293,24 +293,25 @@ def test_offsets_by_parameter_are_sliced_for_fits_and_scores():
     mean = exposure * np.exp(1.0 + 0.01 * (X["age"].to_numpy() - 50.0))
     y = rng.negative_binomial(2.0, 2.0 / (2.0 + mean)).astype(np.float64)
     family = NegativeBinomialLS()
-    model = SuperLSS(family, family.mean(s("age", kind="cr", k=5)), family.theta())
     offsets = {"mean": np.log(exposure)}
+    model = SuperLSS(
+        family, family.mean(s("age", kind="cr", k=5), offset=offsets["mean"]), family.theta()
+    )
     lambdas = {"mean:age#wiggle": 1.0}
     result = cross_validate(
         model,
         X,
         y,
         cv=FOLDS,
-        offset=offsets,
         fit_kwargs={"lambdas": lambdas},
         scoring=("nll", "actual_expected"),
         return_oof=True,
         error_score="raise",
     )
     train, test = result.fold_indices[0]
-    by_hand = SuperLSS(family, family.mean(s("age", kind="cr", k=5)), family.theta()).fit(
-        X.iloc[train], y[train], offsets={"mean": offsets["mean"][train]}, lambdas=lambdas
-    )
+    by_hand = SuperLSS(
+        family, family.mean(s("age", kind="cr", k=5), offset=offsets["mean"][train]), family.theta()
+    ).fit(X.iloc[train], y[train], lambdas=lambdas)
     held = {"mean": offsets["mean"][test]}
     log = by_hand.scores(X.iloc[test], y[test], which=("log",), offsets=held)["log"]
     assert result.fold_scores.loc[0, "nll"] == pytest.approx(log.mean(), rel=1e-9)
@@ -341,9 +342,9 @@ def test_the_fingerprint_reads_the_model_columns_and_the_offsets():
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
-        ({"offset": np.zeros(N)}, "dict keyed by parameter name"),
-        ({"offset": {"nope": np.zeros(N)}}, "Unknown offset parameter 'nope'"),
-        ({"offset": {"mean": np.zeros(3)}}, "offset 'mean' length 3"),
+        ({"offset": np.zeros(N)}, "Declare SuperLSS offsets"),
+        ({"offset": {"nope": np.zeros(N)}}, "Declare SuperLSS offsets"),
+        ({"offset": {"mean": np.zeros(3)}}, "Declare SuperLSS offsets"),
         ({"scoring": ("deviance",)}, "Built-in scorers"),
         ({"fit_kwargs": {"offsets": {}}}, "fit_kwargs cannot set"),
         ({"fit_kwargs": {"truncation": (None, 1.0)}}, "fits and scores complete rows"),
@@ -566,7 +567,7 @@ def test_a_prediction_that_fails_is_not_read_as_an_unresolved_crps(monkeypatch):
     def refuses(*args, **kwargs):
         raise ValueError("this level cannot be read")
 
-    monkeypatch.setattr(type(model._require_fitted()), "predict_parameters", refuses)
+    monkeypatch.setattr(type(model._require_fitted()), "_predict_parameters_resolved", refuses)
     with pytest.raises(ValueError, match="cannot be read"):
         _POOLED_PARTS["crps"](model, X, y)
 

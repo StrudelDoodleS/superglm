@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from types import MethodType
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from superglm.distributional.family import DistributionalFamily, validate_family
 from superglm.distributional.predictor import Predictor
@@ -28,6 +28,7 @@ def _copy_template(template: Predictor) -> Predictor:
         interactions=template.interactions,
         interaction_specs=interactions,
         interaction_order=template.interaction_order,
+        offset=getattr(template, "offset", None),
     )
 
 
@@ -73,6 +74,7 @@ def bind_predictor(
     name: str,
     *terms: TermInput,
     intercept: bool = True,
+    offset: Any = None,
     link: Literal[
         "log",
         "identity",
@@ -110,6 +112,11 @@ def bind_predictor(
     link : str or Link, optional
         Override the family's default link. The model checks compatibility
         with the parameter's support.
+    offset : column name, array-like, or list of sources, optional
+        Fixed additions on the link scale, with coefficient one. Multiple
+        sources sum; no logarithm is applied. Arrays are copied and frozen.
+        New-row predictions need replacements for array sources; columns are
+        read from the prediction frame. Offsets add no coefficients or EDF.
 
     Returns
     -------
@@ -156,6 +163,7 @@ def bind_predictor(
             link=link,
             interaction_specs=normalized.interaction_specs,
             interaction_order=normalized.interaction_order,
+            offset=offset,
         ),
     )
     # Checked after the name and controls, so their errors come first.

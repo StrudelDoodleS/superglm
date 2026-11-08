@@ -21,7 +21,7 @@ from superglm.distributional.weights import (
     resolve_likelihood_weights,
 )
 from superglm.features import Numeric, Spline
-from tests.bound_predictor_fixtures import model_from_templates
+from tests.bound_predictor_fixtures import model_from_templates, with_offset_declarations
 
 
 @pytest.mark.parametrize("semantics", ["prior", "frequency"])
@@ -344,11 +344,10 @@ def test_public_derived_fit_matches_eager_binding_and_serialization(
             weight_semantics=semantics,
             discrete=True,
         )
-        model.fit_reml(
+        with_offset_declarations(model, offsets).fit_reml(
             frame,
             response,
             sample_weight=weights,
-            offsets=offsets,
             max_reml_iter=2,
             retain_history_rows=retain_history_rows,
         )

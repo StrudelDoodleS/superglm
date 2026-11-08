@@ -18,7 +18,7 @@ from superglm.distributional import NegativeBinomialLS, Predictor
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.features import Spline
 from superglm.types import LambdaPolicy
-from tests.bound_predictor_fixtures import model_from_templates
+from tests.bound_predictor_fixtures import model_from_templates, with_offset_declarations
 
 _INITIAL_LAMBDAS = {
     "mean:x_mean#wiggle": 0.8,
@@ -332,7 +332,9 @@ def test_claims_book_shaped_fit_finishes_instead_of_refusing() -> None:
     model = _claims_book_model()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        model.fit_reml(frame, counts, offsets={"mean": log_exposure, "theta": log_exposure})
+        with_offset_declarations(model, {"mean": log_exposure, "theta": log_exposure}).fit_reml(
+            frame, counts
+        )
 
     assert np.all(np.isfinite(model.covariance_))
     offsets = {"mean": log_exposure, "theta": log_exposure}
@@ -369,9 +371,9 @@ def test_offset_start_is_projected_with_the_starting_penalty(monkeypatch) -> Non
     frame, counts, log_exposure = _claims_book_fixture(seed=3, n_rows=4000)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        _claims_book_model().fit_reml(
-            frame, counts, offsets={"mean": log_exposure, "theta": log_exposure}, max_reml_iter=1
-        )
+        with_offset_declarations(
+            _claims_book_model(), {"mean": log_exposure, "theta": log_exposure}
+        ).fit_reml(frame, counts, max_reml_iter=1)
 
     context, coefficients = starts[0]
     initial = context.family.initialize(context.response, context.likelihood_plan).theta
@@ -421,7 +423,7 @@ def test_size_reaching_its_poisson_limit_during_selection_still_converges() -> N
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit_reml(frame, response, offsets={"mean": log_exposure})
+        with_offset_declarations(model, {"mean": log_exposure}).fit_reml(frame, response)
 
     smoothing = model._require_fitted().fit_state.smoothing
     ranks = {fit.terminal_rank.rank for fit in smoothing.coefficient_fits}
@@ -448,7 +450,9 @@ def test_size_reaching_its_poisson_limit_under_the_endgame_is_disclosed() -> Non
     )
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        model.fit_reml(frame, response, offsets={"mean": log_exposure}, outer="efs+newton")
+        with_offset_declarations(model, {"mean": log_exposure}).fit_reml(
+            frame, response, outer="efs+newton"
+        )
 
     fitted = model._require_fitted()
     smoothing = fitted.fit_state.smoothing
@@ -602,9 +606,9 @@ def _gate_fit(
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit_reml(
-            frame, response, offsets=None if size_offset is None else {"theta": size_offset}
-        )
+        with_offset_declarations(
+            model, None if size_offset is None else {"theta": size_offset}
+        ).fit_reml(frame, response)
     return frame, model._require_fitted().fit_state
 
 
@@ -664,6 +668,7 @@ def _forced_entries(
         rank = face.lift_rank_decomposition(reduced)
     forced = rank is not None
     result = SimpleNamespace(
+        converged=solved.converged,
         terminal_curvature=solved.terminal_curvature,
         coefficient_face=face if forced else solved.coefficient_face,
         terminal_reduced_rank=reduced if forced else solved.terminal_reduced_rank,
@@ -707,8 +712,8 @@ def test_negligible_mean_rows_leave_a_real_constant_size_fit_silent() -> None:
     model = SuperLSS(family, family.mean(), family.theta())
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit_reml(
-            pd.DataFrame({"x": np.arange(n, dtype=np.float64)}), response, offsets={"mean": offset}
+        with_offset_declarations(model, {"mean": offset}).fit_reml(
+            pd.DataFrame({"x": np.arange(n, dtype=np.float64)}), response
         )
     solved = model._require_fitted().fit_state.solver_result
     _, count = family.limit_row_count(solved.theta, _forced_plan(n))
@@ -742,7 +747,9 @@ def test_a_size_random_effect_removed_through_a_face_is_not_unidentified() -> No
     model = SuperLSS(family, family.mean(), family.theta(re("g")))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit_reml(frame, response, offsets={"mean": offset}, lambdas={"theta:g#wiggle": 1e10})
+        with_offset_declarations(model, {"mean": offset}).fit_reml(
+            frame, response, lambdas={"theta:g#wiggle": 1e10}
+        )
     solved = model._require_fitted().fit_state.solver_result
     # Preconditions: rows at the limit, a face, a full-rank reduced decomposition, and a
     # lifted decomposition that lists the fixed coefficients as not estimable.
@@ -1041,7 +1048,7 @@ def test_size_at_the_poisson_limit_is_disclosed_with_its_row_count() -> None:
     )
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        model.fit_reml(frame, response, offsets={"mean": log_exposure})
+        with_offset_declarations(model, {"mean": log_exposure}).fit_reml(frame, response)
 
     fitted = model._require_fitted().fit_state.solver_result.theta
     reach = np.maximum(fitted[:, 0], np.maximum(response - 1.0, 0.0))

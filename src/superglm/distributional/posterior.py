@@ -42,10 +42,10 @@ from superglm.distributional.family import (
 )
 from superglm.distributional.likelihood_identity import rebound_plan_mismatch
 
-# ``_prediction_offsets`` is the one validator of predictor-keyed offsets the
+# ``prediction_offsets`` is the one resolver of predictor-declared offsets the
 # fit and every prediction path already share; restating its rules here is how
 # an offset contract drifts between two entry points that must agree.
-from superglm.distributional.model import _prediction_offsets
+from superglm.distributional.offsets import prediction_offsets
 from superglm.distributional.prediction_design import map_design_blocks
 from superglm.distributional.revision import CORRECTED_COVARIANCE_NEEDS_THE_FIT
 from superglm.distributional.smoothing.derivatives import LamlDerivatives, laml_derivatives
@@ -872,13 +872,11 @@ def posterior_parameters(
     rows_per_chunk = _resolved_chunk_rows(
         chunk_rows, n_draws=draws.n_draws, n_parameters=n_parameters
     )
-    resolved_offsets = _prediction_offsets(
-        offsets, tuple(state.name for state in layout.predictors), n_observations
-    )
+    resolved_offsets = prediction_offsets(fitted.fit_state.predictor_templates, frame, offsets)
     if name_levels:
         # Design blocks leave out the unseen-level and population-level notices, since each would
         # count only its own rows; one whole-frame prediction gives them as a prediction would.
-        fitted.predict_eta(frame)
+        fitted._predict_eta_resolved(fitted.prediction_coefficients, frame, resolved_offsets)
     coefficients = draws.coefficients
     parameters = fitted.family.parameters
 

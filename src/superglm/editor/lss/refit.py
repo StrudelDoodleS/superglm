@@ -131,6 +131,7 @@ def lss_probe_build(view: LSSModelView, key: str, replacement, X, sample_weight)
         interactions=(),
         interaction_specs={},
         interaction_order=(),
+        offset=None,
     )
     spec = next(p for p in lss.family.parameters if p.name == parameter)
     with warnings.catch_warnings():

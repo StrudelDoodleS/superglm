@@ -576,12 +576,18 @@ class _GLMFolds:
             raise ValueError(f"offset length {len(offset)} != y length {n}")
         return offset
 
+    def prepare_offset(self, offset, frame, sample_weight):
+        return None if offset is None else self.coerce_offset(offset, len(frame))
+
+    def fit_offset_kwargs(self, offset) -> dict:
+        return {"offset": offset}
+
     def level_bindings(self, frame, sample_weight) -> dict[Any, Any]:
         """One level vocabulary for every fold; a ``bind_levels`` binding on a wider frame outranks it."""
         existing = dict(getattr(getattr(self.model, "_config", None), "level_bindings", None) or ())
         return {**_resolve_level_bindings(self.model, frame, sample_weight), **existing}
 
-    def estimator(self, bindings: Mapping[Any, Any]):
+    def estimator(self, bindings: Mapping[Any, Any], *, rows=None):
         est = _clone_model(self.model)
         if bindings:
             est._config = est._config.with_value(level_bindings=tuple(bindings.items()))
@@ -752,9 +758,11 @@ def cross_validate(
         Under ``"prior"`` they state a precision,
         ``Var(Y_i) = phi * V(mu_i) / w_i``; a Tweedie fit additionally
         requires them finite and strictly positive.
-    offset : array-like, or mapping of str to array-like for a SuperLSS, optional
-        Offset term, sliced per fold. A SuperLSS takes one array per family
-        parameter, keyed by parameter name as in its ``offsets`` argument.
+    offset : array-like, optional
+        SuperGLM offset term, sliced per fold. For SuperLSS, declare
+        ``offset=`` on its predictor helpers. The clones slice declared
+        arrays for training and replace them with held-out values for scoring;
+        column sources resolve from each fold's frame.
     groups : array-like, optional
         Group labels forwarded to ``cv.split()``.
     fit_mode : {"fit", "fit_reml"}, optional
@@ -876,8 +884,7 @@ def cross_validate(
         elif np.any(sample_weight < 0.0):
             raise ValueError("sample_weight must be nonnegative")
 
-    if offset is not None:
-        offset = folds.coerce_offset(offset, n)
+    offset = folds.prepare_offset(offset, frame, sample_weight)
 
     if groups is not None:
         groups = np.asarray(groups)
@@ -933,7 +940,7 @@ def cross_validate(
 
         try:
             # Clone and fit
-            est = folds.estimator(level_bindings)
+            est = folds.estimator(level_bindings, rows=train_idx)
             t0 = time.perf_counter()
             fit_fn = getattr(est, fit_mode)
             fold_kwargs = {**folds.fold_fit_kwargs, **fit_kwargs}
@@ -947,7 +954,7 @@ def cross_validate(
                 X_train,
                 y_train,
                 sample_weight=sw_train,
-                **{folds.offset_argument: off_train},
+                **folds.fit_offset_kwargs(off_train),
                 **fold_kwargs,
             )
             record["fit_time_s"] = time.perf_counter() - t0

@@ -98,7 +98,12 @@ def lss_dataset_metrics(model: Any, dataset) -> dict[str, float]:
         scores = lss.scores(dataset.X, y, which=("log",), **kwargs)
         crps_score = float("nan")
     log = scores["log"]
-    mean = np.asarray(lss.predict(rows.frame.native, offsets=rows.offsets), dtype=np.float64)
+    mean = np.asarray(
+        lss._require_fitted().family.default_prediction(
+            lss._require_fitted()._predict_parameters_resolved(rows.frame, rows.offsets)
+        ),
+        dtype=np.float64,
+    )
     kept = w[rows.positions]
     return {
         "log_score": float(np.nansum(log) / mass),

@@ -119,10 +119,10 @@ def _recomputed_rows(
     """
     if X_train is None:
         raise ValueError(NO_TRAINING_FRAME)
-    eta = model.predict_eta_at(
+    eta = model._predict_eta_resolved(
         edit.coefficients,
         _rows_of_the_fit(as_eager_frame(X_train), rows),
-        offsets=rows.offsets,
+        rows.offsets,
     )
     return replace(rows, fitted_eta=eta, fitted_parameters=model.parameters_from_eta(eta))
 

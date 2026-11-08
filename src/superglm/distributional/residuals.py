@@ -37,8 +37,6 @@ from superglm.distributional.family import (
 # selected away, exactly as the fit checks them; restating those rules here is
 # how a contract drifts between two entry points that have to agree.
 from superglm.distributional.model import (
-    _take_unvalidated_offsets,
-    _unvalidated_offset_shapes,
     _unvalidated_response_shape,
 )
 from superglm.distributional.observation import (
@@ -50,6 +48,7 @@ from superglm.distributional.observation import (
     resolve_response_bounds,
     unvalidated_bound_arrays,
 )
+from superglm.distributional.offsets import prediction_offsets
 from superglm.distributional.weights import resolve_likelihood_weights
 
 #: A residual is the transform itself or its normal inverse.
@@ -294,14 +293,12 @@ def _evaluate_residuals(
         contract=contract,
     )
     positions = resolved.input_positions
-    resolved_offsets = offsets
+    resolved_offsets = prediction_offsets(
+        fitted.fit_state.predictor_templates, frame, offsets, positions=positions
+    )
     if len(positions) != n_observations:
         frame = as_eager_frame(frame.take_rows(positions))
         response = response[positions]
-        resolved_offsets = _take_unvalidated_offsets(
-            _unvalidated_offset_shapes(offsets, n_observations),
-            positions,
-        )
     values = np.asarray(response, dtype=np.float64)
     if not np.all(np.isfinite(values)):
         raise ValueError("retained residual responses must be finite")
@@ -326,9 +323,12 @@ def _evaluate_residuals(
     else:
         weights, prior_weights = resolved_weights, unit
 
-    eta = np.asarray(fitted.predict_eta(frame, offsets=resolved_offsets), dtype=np.float64)
+    eta = np.asarray(
+        fitted._predict_eta_resolved(fitted.prediction_coefficients, frame, resolved_offsets),
+        dtype=np.float64,
+    )
     theta = np.asarray(
-        fitted.predict_parameters(frame, offsets=resolved_offsets),
+        fitted.parameters_from_eta(eta),
         dtype=np.float64,
     )
 
