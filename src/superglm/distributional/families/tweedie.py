@@ -784,8 +784,13 @@ class TweedieLSS(TweediePredictors):
             response[rows] = representative
             if not np.any(response > 0):
                 # A boundary optimum is disclosed by the ordinary fit controller.
-                # The density initializer needs a finite positive starting mean.
-                response = np.ones_like(response)
+                # Choose parameters directly: replacing atom-only observations
+                # by positive pseudo-data would violate their observed windows.
+                theta = np.tile(
+                    [1.0, 1.0, (self.power_lower + self.power_upper) / 2.0],
+                    (len(response), 1),
+                )
+                return InitialParameterState(theta=theta)
         theta = initialize_tweedie(
             response,
             tweedie_plan.weights.values,
