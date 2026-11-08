@@ -2,15 +2,25 @@
 
 Choose what the response means before fitting: ground-up severity, recorded
 payment, or excess above a fixed threshold are different observation laws.
-Start with a constant tail exponent and a modest scale predictor:
+Start with a constant tail exponent and a linear scale predictor. This complete
+example generates synthetic claim amounts; replace them with your observed
+severity and its observation flags for an actual fit:
 
 ```python
-from superglm import LomaxLSS, SuperLSS, s
+import numpy as np
+import pandas as pd
+
+from superglm import LomaxLSS, SuperLSS
+
+rng = np.random.default_rng(7)
+X = pd.DataFrame({"age": rng.uniform(18.0, 80.0, 200)})
+severity = 2_000.0 * rng.pareto(2.5, len(X))
+X_new = X.iloc[:5].copy()
 
 family = LomaxLSS()
 model = SuperLSS(
     family,
-    family.scale(s("age", k=8)),
+    family.scale("age"),
     family.shape(),
 ).fit(X, severity)
 
