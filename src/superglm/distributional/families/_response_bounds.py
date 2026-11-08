@@ -29,13 +29,18 @@ from superglm.distributional.family import (
 )
 from superglm.distributional.kernels._curvature_direction import packed_tuples
 from superglm.distributional.kernels._response_tails import Jet, TailChannels
-from superglm.distributional.observation import LEFT_CENSORED, ResponseBounds
+from superglm.distributional.observation import (
+    LEFT_CENSORED,
+    ResponseBounds,
+    validate_response_bounds,
+)
 from superglm.distributional.weights import UnsupportedLikelihoodContractError
 
 WindowFunction = Callable[[NDArray, NDArray, NDArray[np.intp]], TailChannels]
 #: ``window_jets(lower, upper, rows, order)``: the unit-mass log window
 #: probability's packed jet to ``order`` at those rows' parameters.
 WindowJetFunction = Callable[[NDArray, NDArray, NDArray[np.intp], int], Jet]
+NormalizedFunction = Callable[[NDArray[np.intp], int], TailChannels]
 
 
 def bind_observation(
@@ -45,6 +50,7 @@ def bind_observation(
     *,
     support_lower: float,
     family_name: str,
+    atom_at_lower: bool = False,
 ) -> ObservationContract:
     """The contract a bounds-aware family stores: complete, or bounds on its support.
 
@@ -67,15 +73,22 @@ def bind_observation(
         raise UnsupportedLikelihoodContractError(
             f"{family_name} response rows do not match the response-bound rows"
         )
-    bounds = observation.bounds.on_support(support_lower)
-    impossible = (bounds.upper <= support_lower) | (
-        (bounds.side == LEFT_CENSORED) & (response <= support_lower)
-    )
+    positions = getattr(weights, "input_positions", None)
+    if positions is None or len(positions) != n_rows:
+        positions = np.arange(n_rows)
+    validate_response_bounds(response, observation.bounds, positions, exact_only=not atom_at_lower)
+    bounds = observation.bounds.on_support(support_lower, atom_at_lower=atom_at_lower)
+    values = np.asarray(response)
+    if atom_at_lower:
+        impossible = (bounds.upper < support_lower) | (
+            (bounds.side == LEFT_CENSORED) & (values < support_lower)
+        )
+    else:
+        impossible = (bounds.upper <= support_lower) | (
+            (bounds.side == LEFT_CENSORED) & (values <= support_lower)
+        )
     if np.any(impossible):
-        positions = getattr(weights, "input_positions", None)
-        first = int(np.flatnonzero(impossible)[0])
-        if positions is not None and len(positions) == n_rows:
-            first = int(positions[first])
+        first = int(positions[np.flatnonzero(impossible)[0]])
         raise ValueError(
             f"{int(np.count_nonzero(impossible))} row(s) are censored or truncated at or below "
             f"the start of the {family_name} response support, so they have zero probability "
@@ -102,21 +115,29 @@ def log_window_values(
     window: WindowFunction,
     *,
     support_lower: float,
+    atom_at_lower: bool = False,
 ) -> NDArray[np.float64]:
     """``log P(lower < Y <= upper)`` per row; zero where the window holds the whole support.
 
-    Each end is a number or one number per row, with ``lower <= upper``.  A
-    lower end below the support's start reads as that start, and a window
-    left empty, at or below the support, has log probability ``-inf``.
+    Each end is a number or one number per row, with ``lower <= upper``.
+    For continuous support, a lower end below its start reads as that start.
+    With an atom there, strictly lower ends read as ``-inf`` and equality is
+    retained to exclude the atom. Empty windows have log probability ``-inf``.
     """
     lo = _window_side(lower, n_rows, "lower")
     hi = _window_side(upper, n_rows, "upper")
     if np.any(lo > hi):
         raise ValueError("each window must have lower <= upper")
-    lo = np.maximum(lo, support_lower)
-    empty = lo >= hi
+    if atom_at_lower:
+        lo = np.where(lo < support_lower, -np.inf, lo)
+        empty = (lo >= hi) | (hi < support_lower)
+        partial = (lo >= support_lower) | (hi < np.inf)
+    else:
+        lo = np.maximum(lo, support_lower)
+        empty = lo >= hi
+        partial = (lo > support_lower) | (hi < np.inf)
     values = np.where(empty, -np.inf, 0.0)
-    rows = np.flatnonzero(~empty & ((lo > support_lower) | (hi < np.inf)))
+    rows = np.flatnonzero(~empty & partial)
     if len(rows):
         values[rows] = window(lo[rows], hi[rows], rows)[0]
     return values
@@ -153,15 +174,61 @@ def bounded_channels(
     multiplier: NDArray,
     window: WindowFunction,
     derivative_order: int,
+    normalized_rows: NDArray | None = None,
+    normalized: NormalizedFunction | None = None,
+    carrier: NDArray | None = None,
 ) -> tuple[NDArray[np.float64], NDArray | None, NDArray | None, NDArray[np.bool_]]:
-    """Complete-row channels adjusted for the plan's censored and truncated rows."""
+    """Adjust complete-row channels, optionally replacing selected normalized rows.
+
+    ``normalized_rows`` is a boolean mask or unique integer indices. Its
+    callback ``normalized(rows, order)`` supplies the complete *unit-mass*
+    normalized log contribution, score and packed Hessian. These rows never
+    enter either ordinary window call; their values and requested derivatives
+    are multiplied once by ``multiplier``. The callback owns parameter validity:
+    finite requested channels replace even an invalid complete-density seed.
+    Unresolved channels give finite placeholders and ``valid=False``.
+
+    Overrides require an explicitly supplied row-shaped ``carrier`` exactly
+    zero on selected rows. No carrier is subtracted or added to the callback's
+    complete contribution. Defaults preserve the existing continuous path.
+    """
     optimizing = np.array(optimizing, dtype=np.float64, copy=True)
     score = None if score is None else np.array(score, dtype=np.float64, copy=True)
     hessian = None if hessian is None else np.array(hessian, dtype=np.float64, copy=True)
     valid = np.array(valid, dtype=bool, copy=True)
     mass = np.asarray(multiplier, dtype=np.float64)
+    override = None
+    selected = np.empty(0, dtype=np.intp)
+    if normalized_rows is not None or normalized is not None:
+        if normalized_rows is None or normalized is None:
+            raise ValueError("normalized_rows and normalized must be supplied together")
+        if (
+            isinstance(derivative_order, bool | np.bool_)
+            or not isinstance(derivative_order, int | np.integer)
+            or derivative_order not in (0, 1, 2)
+        ):
+            raise ValueError("normalized derivative order must be an integer from 0 through 2")
+        rows = np.asarray(normalized_rows)
+        if rows.dtype == np.bool_ and rows.shape == valid.shape:
+            selected = np.flatnonzero(rows)
+        elif rows.ndim == 1 and rows.dtype.kind in "iu":
+            if np.any(rows < 0) or np.any(rows >= len(valid)) or len(np.unique(rows)) != len(rows):
+                raise ValueError("normalized_rows must select unique in-range rows")
+            selected = rows.astype(np.intp, copy=False)
+        else:
+            raise ValueError("normalized_rows must be a row-shaped boolean mask or integer indices")
+        if len(selected):
+            if carrier is None:
+                raise ValueError("normalized rows require an explicit zero carrier")
+            fixed = np.asarray(carrier)
+            if fixed.shape != valid.shape or np.any(fixed[selected] != 0.0):
+                raise ValueError("carrier must be row-shaped and exactly zero on normalized rows")
+            override = np.zeros(len(valid), dtype=bool)
+            override[selected] = True
 
     censored = bounds.censored_rows()
+    if override is not None:
+        censored = censored[~override[censored]]
     if len(censored):
         low, high = bounds.observed_window(response, censored)
         value, row_score, row_hessian = window(low, high, censored)
@@ -174,6 +241,8 @@ def bounded_channels(
         valid[censored] = np.isfinite(value)
 
     truncated = bounds.truncated_rows()
+    if override is not None:
+        truncated = truncated[~override[truncated]]
     if len(truncated):
         value, row_score, row_hessian = window(
             bounds.lower[truncated], bounds.upper[truncated], truncated
@@ -185,6 +254,29 @@ def bounded_channels(
         if hessian is not None and row_hessian is not None:
             hessian[truncated] -= m[:, None] * row_hessian
         valid[truncated] &= np.isfinite(value)
+
+    if len(selected):
+        assert normalized is not None
+        value, row_score, row_hessian = normalized(selected, derivative_order)
+        value = np.asarray(value, dtype=np.float64)
+        if value.shape != (len(selected),):
+            raise ValueError("normalized values must have one entry per selected row")
+        with np.errstate(over="ignore", invalid="ignore"):
+            optimizing[selected] = mass[selected] * value
+            for degree, target, channel in ((1, score, row_score), (2, hessian, row_hessian)):
+                if derivative_order < degree:
+                    if target is not None:
+                        target[selected] = 0.0
+                    continue
+                if target is None or channel is None:
+                    raise ValueError(
+                        f"normalized callback and density seed need order-{degree} channels"
+                    )
+                channel = np.asarray(channel, dtype=np.float64)
+                if channel.shape != target[selected].shape:
+                    raise ValueError(f"normalized order-{degree} channels have the wrong shape")
+                target[selected] = mass[selected, None] * channel
+        valid[selected] = np.isfinite(value)
 
     # Invalid rows still carry finite placeholders, as the evaluation requires.
     finite = np.isfinite(optimizing)
@@ -306,6 +398,7 @@ def contract_third(third: NDArray, direction: NDArray) -> NDArray[np.float64]:
 __all__ = [
     "LEFT_CENSORED",
     "Jet",
+    "NormalizedFunction",
     "ResponseBounds",
     "TailChannels",
     "WindowFunction",

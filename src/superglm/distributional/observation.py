@@ -100,9 +100,14 @@ class ResponseBounds:
             self.lower[indices], self.upper[indices], self.side[indices]
         )
 
-    def on_support(self, support_lower: float) -> ResponseBounds:
-        """Read lower bounds at or below the family's support as absent."""
-        below = self.lower <= support_lower
+    def on_support(self, support_lower: float, *, atom_at_lower: bool = False) -> ResponseBounds:
+        """Remove ineffective lower bounds, preserving exclusion of a support atom.
+
+        Under the open-lower contract a bound equal to support excludes its
+        atom. Continuous integration can erase equality; atomic integration
+        erases only strict inequality. No numerical tolerance moves an atom.
+        """
+        below = self.lower < support_lower if atom_at_lower else self.lower <= support_lower
         if not np.any(below & (self.lower > -np.inf)):
             return self
         return ResponseBounds.from_arrays(
@@ -260,6 +265,52 @@ def _refuse_rows(mask: NDArray[np.bool_], positions: NDArray, message: str) -> N
         raise ValueError(f"{count} row(s) {message} (first at input row {first})")
 
 
+def validate_response_bounds(
+    response: NDArray, bounds: ResponseBounds, positions: NDArray, *, exact_only: bool = False
+) -> None:
+    """Check exact values and censoring limits against the *original* windows.
+
+    Call before support clipping: exact values satisfy ``lower < y <= upper``;
+    right limits may equal the lower bound and left limits the upper bound.
+    ``positions`` names the original input rows, not the selected row numbers.
+    This does not replace family support validation of exact realizations.
+    ``exact_only`` preserves existing continuous binders' threshold handling:
+    their limits are checked in public resolution, not rechecked in direct
+    binding. Atomic binders and public resolution check all rows.
+    """
+    values = np.asarray(response, dtype=np.float64)
+    positions = np.asarray(positions)
+    if values.shape != (bounds.n_rows,) or positions.shape != values.shape:
+        raise ValueError(
+            "response, bounds and input positions must have matching scalar row shapes"
+        )
+    t_lower, t_upper, side = bounds.lower, bounds.upper, bounds.side
+    outside = (values < t_lower) | (values > t_upper) | ((side == 0) & (values == t_lower))
+    _refuse_rows(
+        outside & (side == 0) if exact_only else outside,
+        positions,
+        "have a response outside the truncation bounds; an exact response must satisfy "
+        "lower < y <= upper",
+    )
+    if exact_only:
+        return
+    _refuse_rows(
+        (side != 0) & ~np.isfinite(values),
+        positions,
+        "are censored but have no finite response; record a censored row's limit as its response",
+    )
+    _refuse_rows(
+        (side == RIGHT_CENSORED) & (values >= t_upper),
+        positions,
+        "are right-censored at or above their truncation upper bound, so nothing was observed",
+    )
+    _refuse_rows(
+        (side == LEFT_CENSORED) & (values <= t_lower),
+        positions,
+        "are left-censored at or below their truncation lower bound, so nothing was observed",
+    )
+
+
 def resolve_response_bounds(
     response: NDArray,
     arrays: tuple[NDArray, NDArray, NDArray] | None,
@@ -285,28 +336,8 @@ def resolve_response_bounds(
     _refuse_rows(
         ~(t_lower < t_upper), positions, "have a truncation lower bound at or above the upper one"
     )
-    _refuse_rows(
-        (values < t_lower) | (values > t_upper),
-        positions,
-        "have a response outside the truncation bounds; a truncated row's response must lie "
-        "within them",
-    )
-    _refuse_rows(
-        (side != 0) & ~np.isfinite(values),
-        positions,
-        "are censored but have no finite response; record a censored row's limit as its response",
-    )
-    _refuse_rows(
-        (side == RIGHT_CENSORED) & (values >= t_upper),
-        positions,
-        "are right-censored at or above their truncation upper bound, so nothing was observed",
-    )
-    _refuse_rows(
-        (side == LEFT_CENSORED) & (values <= t_lower),
-        positions,
-        "are left-censored at or below their truncation lower bound, so nothing was observed",
-    )
     bounds = ResponseBounds.from_arrays(t_lower, t_upper, side)
+    validate_response_bounds(values, bounds, positions)
     if len(bounds.truncated_rows()) == 0 and len(bounds.censored_rows()) == 0:
         return None
     return bounds
@@ -319,4 +350,5 @@ __all__ = [
     "ResponseBounds",
     "resolve_response_bounds",
     "unvalidated_bound_arrays",
+    "validate_response_bounds",
 ]
