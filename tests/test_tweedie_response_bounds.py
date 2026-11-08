@@ -39,6 +39,24 @@ def test_left_zero_and_right_zero_read_different_events():
     )
 
 
+def test_atom_only_bounded_start_does_not_fabricate_positive_data(monkeypatch):
+    from superglm.distributional.families import tweedie as adapter
+
+    family = TweedieLSS()
+    response = np.zeros(3)
+    plan = _plan(response, -np.inf, np.inf, -1)
+    original = adapter.initialize_tweedie
+
+    def unchanged_data(y, *args, **kwargs):
+        np.testing.assert_array_equal(y, response)
+        return original(y, *args, **kwargs)
+
+    monkeypatch.setattr(adapter, "initialize_tweedie", unchanged_data)
+    start = family.initialize(response, plan)
+    assert np.isfinite(start.theta).all()
+    assert family.evaluate_natural(response, start.theta, plan).valid.all()
+
+
 @pytest.mark.parametrize(
     "shape,x,upper", [(0.003, 0.1, True), (2.3, 3.9, False), (80.0, 90.0, True)]
 )
